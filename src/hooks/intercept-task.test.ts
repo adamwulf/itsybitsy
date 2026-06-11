@@ -209,6 +209,30 @@ describe("intercept-task", () => {
     expect(result.action).toBe("skip");
   });
 
+  test("forwards Claude's reported cwd as _cwd so newAgent's dirty-worktree gate inspects the right worktree", async () => {
+    // Claude's hook payload includes a `cwd` field — the spawning agent's
+    // current working directory inside its worktree. The intercept must
+    // forward that as _cwd so newAgent's spawner-clean check inspects the
+    // agent's worktree rather than the hook process's own cwd (which is
+    // normally inherited but not guaranteed to match).
+    let capturedOpts: Record<string, unknown> = {};
+    const claudeReportedCwd = "/Users/test/.ittybitty/agents/agent-deadbeef99/repo/src";
+    await processTaskIntercept(
+      {
+        tool_name: "Task",
+        tool_input: { prompt: "do stuff" },
+        cwd: claudeReportedCwd,
+      },
+      {
+        spawnAgent: async (_repoPath, _prompt, spawnOpts) => {
+          capturedOpts = spawnOpts;
+          return { ok: true, stdout: "Created agent-aabbccdd11", stderr: "" };
+        },
+      }
+    );
+    expect(capturedOpts._cwd).toBe(claudeReportedCwd);
+  });
+
   test("invalid model sanitized", async () => {
     let capturedOpts: Record<string, unknown> = {};
     await processTaskIntercept(

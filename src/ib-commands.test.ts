@@ -3556,6 +3556,31 @@ describe("newAgent (native)", () => {
     expect(result.stderr).toContain(tempDir);
   });
 
+  test("error message preserves porcelain XY columns (leading space not stripped)", async () => {
+    // git status --porcelain uses a 2-column XY prefix where the leading
+    // space is meaningful ("X Y filename"): " M file" = unstaged
+    // modification, "M  file" = staged modification. The check must drain
+    // the porcelain output raw — runCmd's stdout.trim() would otherwise
+    // destroy the leading space on the first line, making the displayed
+    // status code ambiguous.
+    setNewAgentSpawnRunner(dirtyWorktreeRunner(" M src/foo.ts\nMM src/bar.ts\n"));
+    const result = await callNewAgent("do work");
+    expect(result.ok).toBe(false);
+    // First line's leading space must survive (would be stripped by .trim()).
+    expect(result.stderr).toContain(" M src/foo.ts");
+    expect(result.stderr).toContain("MM src/bar.ts");
+  });
+
+  test("error message names untracked files as a remediation option (not just commit)", async () => {
+    // Porcelain "??" means untracked. The remediation hint should not say
+    // only "commit" — untracked files often want .gitignore or removal.
+    setNewAgentSpawnRunner(dirtyWorktreeRunner("?? scratch.txt\n"));
+    const result = await callNewAgent("do work");
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("untracked");
+    expect(result.stderr).toContain(".gitignore");
+  });
+
   test("dirty-worktree spawn does not create the agent directory", async () => {
     setNewAgentSpawnRunner(dirtyWorktreeRunner());
     const result = await callNewAgent("do work", { name: "dirty-spawn" });

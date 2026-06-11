@@ -575,6 +575,534 @@ describe("coordinator Bash restrictions", () => {
       await fs.rm(td, { recursive: true, force: true });
     }
   });
+
+  // Quote- and heredoc-aware guard (SPEC §12.2.4). The tests below pin
+  // both directions: shell-active constructs stay blocked, and literal
+  // metacharacters inside quotes or quoted-delimiter heredoc bodies are
+  // now allowed.
+
+  test("still blocks unquoted pipe between two commands", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib list | tee /tmp/out" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("still blocks $() command substitution inside double quotes", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: 'ib send agent "hello $(whoami)"' },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("still blocks backtick command substitution inside double quotes", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: 'ib send agent "hello `whoami`"' },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("still blocks subshell parentheses outside quotes", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "(ib list)" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("still blocks background ampersand outside quotes", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib list & echo done" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("still blocks unquoted-delimiter heredoc whose body expands $()", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send agent <<EOF\n$(whoami)\nEOF",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("still blocks a pipe AFTER a quoted-string argument", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib send agent 'safe text' | tee /tmp/out" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("still blocks a pipe AFTER a heredoc opener (rest of opener line)", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send agent <<'EOF' | tee /tmp/out\nliteral body\nEOF",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("allows literal backtick inside single quotes", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send agent-abcd1234 'run the `whoami` command literally'",
+        },
+        cwd: coordCwd,
+      });
+      // Bash is not Task/Agent, so processTaskIntercept skips after the
+      // guard allows it (not "intercept").
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("allows literal angle brackets inside single quotes (NAME placeholder)", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send agent-abcd1234 'replace <NAME> with the user name'",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("allows literal pipe inside single quotes", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send agent-abcd1234 'use the | character literally'",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("allows literal semicolon and ampersand inside single quotes", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send agent-abcd1234 'separators ; and & are fine in prose'",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("allows literal angle brackets and pipe inside double quotes", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: 'ib send agent-abcd1234 "use <PLACEHOLDER> | as a separator"',
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("allows quoted-delimiter heredoc with metacharacters in the body", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command:
+            "ib send agent-abcd1234 <<'EOF'\nrun the `whoami` command and pipe | the output > somewhere; also $(do_thing)\nEOF",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("allows backslash-quoted heredoc delimiter (\\EOF) with metacharacters in body", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command:
+            "ib send agent-abcd1234 <<\\EOF\nliteral $(stuff) and `things`\nEOF",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("allows literal newlines inside single quotes", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send agent-abcd1234 'line one\nline two'",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("allows ${VAR} parameter expansion (no command substitution)", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib send agent-abcd1234 ${MSG}" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("still blocks $' ANSI-C quoting even when the rest looks safe", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib send agent $'\\x0a' literal" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("still blocks <<<word here-string redirect", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib send agent <<<malicious" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("still blocks process substitution <(...) and >(...)", async () => {
+    await setupCoordinatorDir();
+    try {
+      const a = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib diff <(cat /etc/passwd)" },
+        cwd: coordCwd,
+      });
+      expect(a.action).toBe("intercept");
+      expect(
+        (a.output as { hookSpecificOutput: { permissionDecision: string } })
+          .hookSpecificOutput.permissionDecision
+      ).toBe("deny");
+
+      const b = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib status >(tee /tmp/sink)" },
+        cwd: coordCwd,
+      });
+      expect(b.action).toBe("intercept");
+      expect(
+        (b.output as { hookSpecificOutput: { permissionDecision: string } })
+          .hookSpecificOutput.permissionDecision
+      ).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("still blocks $( nested inside ${VAR:-…} parameter expansion", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send agent-abcd1234 ${MSG:-$(whoami)}",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  // Heredoc state-machine regression guards: post-terminator command
+  // separator, `<<-` tab-only stripping, opener-tail defense-in-depth.
+
+  test("blocks a second command on the line AFTER a heredoc terminator", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send a <<'EOF'\nbody\nEOF\nrm -rf /tmp/x",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+      expect(hookOutput.permissionDecisionReason).toContain("heredoc terminator");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("blocks a second command after EOF even when the second command has no scanned metachars", async () => {
+    await setupCoordinatorDir();
+    try {
+      // No `;|&` etc. in the second command — only the post-terminator
+      // command-separator rule can catch this shape.
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send a <<'EOF'\nbody\nEOF\nib kill agent-x",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("allows a heredoc terminated by EOF at end-of-command (no trailing content)", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send a <<'EOF'\nbody line\nEOF",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("allows a heredoc whose terminator line is followed only by whitespace", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send a <<'EOF'\nbody line\nEOF\n  \t\n",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("blocks `<<EOF` opener with no following newline but a `;` in the opener tail (defense-in-depth)", async () => {
+    await setupCoordinatorDir();
+    try {
+      // Bash would error on the malformed opener, but the guard scans
+      // the opener tail itself rather than relying on bash to refuse it.
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib send a <<EOF garbage ; rm -rf /tmp/x" },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("`<<-` strips leading TABS only — leading SPACES on terminator do NOT terminate", async () => {
+    await setupCoordinatorDir();
+    try {
+      // Asserting allow here pins down "do not misidentify a space-
+      // prefixed line as the terminator." If we did, the trailing `; rm
+      // -rf /tmp/x` would be exposed as a normal-shell command and
+      // blocked — flipping this assertion to "intercept" would mask the
+      // regression we're guarding against.
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send a <<-EOF\n  EOF\n; rm -rf /tmp/x",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("allows a heredoc whose body contains a line `EOF ` (trailing space, NOT a bash terminator)", async () => {
+    await setupCoordinatorDir();
+    try {
+      // Bash terminator match is exact; the lexer must not strip trailing
+      // whitespace. If it did, the real `EOF` line below would look like
+      // a "second command" under the post-terminator rule and trigger a
+      // false reject of a valid heredoc.
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send a <<'EOF'\nEOF \nEOF",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("`<<-` with leading TABS on the terminator does terminate (then second command is blocked)", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send a <<-EOF\n\tbody\n\tEOF\nrm -rf /tmp/x",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
 });
 
 describe("agent types", () => {

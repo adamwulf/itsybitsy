@@ -3179,6 +3179,48 @@ async function buildAgentSettings(
  * 22. Auto-accept workspace trust (if not yolo)
  * 23. Auto-spawn watchdog
  */
+/**
+ * Block spawning a subagent when the spawner's worktree has uncommitted
+ * changes or untracked files. Two rationales depending on spawn mode:
+ *   - Worktree spawns (default): the sub-agent's worktree forks from HEAD,
+ *     so any uncommitted edits in the spawner silently fail to propagate;
+ *     committing first keeps the sub-agent's git context aligned.
+ *   - --no-worktree spawns: the sub-agent runs in the spawner's own cwd,
+ *     so its edits would interleave with the spawner's pending edits,
+ *     producing incoherent diffs/rollback. Committing first establishes
+ *     a clean baseline for the sub-agent's changes.
+ * Skipped when cwd isn't a git working tree (e.g. system coordinator home,
+ * raw temp dir) — neither rationale applies.
+ *
+ * Drains the porcelain output directly rather than through SpawnContext.run
+ * because runCmd .trim()s stdout, which would strip the meaningful leading
+ * space in porcelain's XY column (e.g. " M file" → "M file" — visually
+ * indistinguishable from a staged modification "M  file"). The two streams
+ * are drained concurrently via Promise.all so a large git stderr can't
+ * deadlock the process by filling its pipe buffer before stdout reaches
+ * EOF — same reason runCmd uses Promise.all.
+ */
+async function checkSpawnerWorktreeClean(cwd: string): Promise<string | null> {
+  const insideResult = await newAgentSpawnCtx.run([
+    "git", "-C", cwd, "rev-parse", "--is-inside-work-tree",
+  ]);
+  if (insideResult.exitCode !== 0 || insideResult.stdout.trim() !== "true") {
+    return null;
+  }
+  const proc = newAgentSpawnCtx.fn(
+    ["git", "-C", cwd, "status", "--porcelain"],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const [stdout] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) return null;
+  if (stdout.trim() === "") return null;
+  return stdout;
+}
+
 export async function newAgent(
   repoPath: string,
   prompt: string,
@@ -3187,6 +3229,22 @@ export async function newAgent(
   // 1. Validate prompt
   if (!prompt || !prompt.trim()) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Error: prompt required" };
+  }
+
+  // 1a. See checkSpawnerWorktreeClean for the WHY.
+  const spawnerCwd = opts?._cwd ?? process.cwd();
+  const dirty = await checkSpawnerWorktreeClean(spawnerCwd);
+  if (dirty !== null) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr:
+        `Error: cannot spawn a sub-agent while the current worktree has uncommitted changes or untracked files — ` +
+        `commit (or .gitignore / remove untracked files) first so the sub-agent inherits the same state.\n` +
+        `\n` +
+        `git status --porcelain in ${spawnerCwd}:\n${dirty}`,
+    };
   }
 
   // Resolve the root repo path (handles worktrees)

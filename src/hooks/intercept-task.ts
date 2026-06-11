@@ -542,11 +542,15 @@ export async function processTaskIntercept(
   // 10. Spawn agent
   // Only set type+manager when called from an agent context (callingAgentId present).
   // From primary Claude, spawn managers (not workers).
+  // _cwd forwards Claude's reported cwd so newAgent's dirty-worktree gate
+  // inspects the spawning agent's worktree, not the hook process's own cwd
+  // (which is normally inherited but isn't guaranteed to match).
   let result: { ok: boolean; stdout: string; stderr: string };
   const spawnOpts: Record<string, unknown> = {
     type: callingAgentId ? "worker" : undefined,
     manager: callingAgentId,
     model: model || undefined,
+    _cwd: input.cwd,
   };
 
   if (opts?.spawnAgent) {

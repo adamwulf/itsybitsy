@@ -587,9 +587,14 @@ describe("CLI arg parsing", () => {
     cliArgs: string[],
     stdinBody: string,
     env?: Record<string, string>,
+    cwd?: string,
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    const proc = Bun.spawn(["bun", "run", "src/index.ts", ...cliArgs], {
-      cwd: import.meta.dir.replace(/\/src$/, ""),
+    // bun's spawn needs an absolute path for the script, since `cwd` is set
+    // per-test to a clean fixture dir to avoid newAgent's spawner-clean check
+    // tripping on this repo's own uncommitted changes.
+    const repoRoot = import.meta.dir.replace(/\/src$/, "");
+    const proc = Bun.spawn(["bun", "run", `${repoRoot}/src/index.ts`, ...cliArgs], {
+      cwd: cwd ?? repoRoot,
       stdin: new TextEncoder().encode(stdinBody),
       stdout: "pipe",
       stderr: "pipe",
@@ -658,6 +663,7 @@ describe("CLI arg parsing", () => {
         ["new-agent", "--repo", "stdinrepo", "--type", "bogus-nonexistent-type"],
         "fix $(whoami) and `date` for $USER literally\n",
         { HOME: fakeHome },
+        repoDir,
       );
       expect(stderr).not.toContain("prompt required");
       expect(stderr).toContain("unknown agent type 'bogus-nonexistent-type'");
@@ -714,6 +720,7 @@ describe("CLI arg parsing", () => {
         ["new-agent", "--repo", "precrepo", "--type", "bogus-nonexistent-type", "inline prompt"],
         "stdin prompt that should be ignored\n",
         { HOME: fakeHome },
+        repoDir,
       );
       expect(stderr).not.toContain("prompt required");
       expect(stderr).toContain("unknown agent type 'bogus-nonexistent-type'");
@@ -781,6 +788,7 @@ describe("CLI arg parsing", () => {
         ["new-agent", "--repo", "fwinsrepo", "--type", "bogus-nonexistent-type", "-f", promptFile],
         "stdin body that should be ignored\n",
         { HOME: fakeHome },
+        repoDir,
       );
       expect(stderr).not.toContain("prompt required");
       expect(stderr).toContain("unknown agent type 'bogus-nonexistent-type'");

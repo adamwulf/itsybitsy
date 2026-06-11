@@ -3181,17 +3181,24 @@ async function buildAgentSettings(
  */
 /**
  * Block spawning a subagent when the spawner's worktree has uncommitted
- * changes or untracked files. Worktrees branch from HEAD, so a sub-agent
- * spawned from a dirty cwd would silently miss the spawner's pending work;
- * forcing a commit first keeps the sub-agent's git context aligned with
- * the spawner's. Skipped when cwd isn't a git working tree (e.g. system
- * coordinator home, raw temp dir) — there's nothing for a subagent to
- * inherit from.
+ * changes or untracked files. Two rationales depending on spawn mode:
+ *   - Worktree spawns (default): the sub-agent's worktree forks from HEAD,
+ *     so any uncommitted edits in the spawner silently fail to propagate;
+ *     committing first keeps the sub-agent's git context aligned.
+ *   - --no-worktree spawns: the sub-agent runs in the spawner's own cwd,
+ *     so its edits would interleave with the spawner's pending edits,
+ *     producing incoherent diffs/rollback. Committing first establishes
+ *     a clean baseline for the sub-agent's changes.
+ * Skipped when cwd isn't a git working tree (e.g. system coordinator home,
+ * raw temp dir) — neither rationale applies.
  *
  * Drains the porcelain output directly rather than through SpawnContext.run
  * because runCmd .trim()s stdout, which would strip the meaningful leading
  * space in porcelain's XY column (e.g. " M file" → "M file" — visually
- * indistinguishable from a staged modification "M  file").
+ * indistinguishable from a staged modification "M  file"). The two streams
+ * are drained concurrently via Promise.all so a large git stderr can't
+ * deadlock the process by filling its pipe buffer before stdout reaches
+ * EOF — same reason runCmd uses Promise.all.
  */
 async function checkSpawnerWorktreeClean(cwd: string): Promise<string | null> {
   const insideResult = await newAgentSpawnCtx.run([
@@ -3204,8 +3211,10 @@ async function checkSpawnerWorktreeClean(cwd: string): Promise<string | null> {
     ["git", "-C", cwd, "status", "--porcelain"],
     { stdout: "pipe", stderr: "pipe" },
   );
-  const stdout = await new Response(proc.stdout).text();
-  await new Response(proc.stderr).text();
+  const [stdout] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
   const exitCode = await proc.exited;
   if (exitCode !== 0) return null;
   if (stdout.trim() === "") return null;

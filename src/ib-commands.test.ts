@@ -3598,12 +3598,34 @@ describe("newAgent (native)", () => {
     expect(result.stdout).toBe("clean-spawn");
   });
 
-  test("allows spawn when spawner cwd is not a git worktree", async () => {
-    // is-inside-work-tree exits non-zero outside a repo — the default mock
-    // returns exit 0 + empty stdout for unrecognized commands, which the
-    // check treats as "not inside a worktree" and proceeds.
-    setNewAgentSpawnRunner(mockSpawnRunner());
-    const result = await callNewAgent("do something");
+  test("allows spawn when is-inside-work-tree exits non-zero (real 'outside any repo' case)", async () => {
+    // Real git exits 128 with stderr 'fatal: not a git repository' when the
+    // cwd is outside any work tree. The check must skip on the exitCode !==
+    // 0 branch, NOT just on stdout !== "true". This test exercises that
+    // branch explicitly rather than relying on the default mock fallthrough.
+    setNewAgentSpawnRunner((cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("rev-parse --is-inside-work-tree")) {
+        return makeSpawnResult("", 128);
+      }
+      return mockSpawnRunner()(cmd, opts);
+    });
+    const result = await callNewAgent("do something", { name: "outside-repo" });
+    expect(result.ok).toBe(true);
+  });
+
+  test("allows spawn when is-inside-work-tree exits 0 but reports false (bare repo / .git dir)", async () => {
+    // Inside a bare repo or the .git/ directory itself, git rev-parse
+    // --is-inside-work-tree prints 'false' and exits 0. Covers the
+    // stdout !== "true" branch independently of the exit-code branch.
+    setNewAgentSpawnRunner((cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("rev-parse --is-inside-work-tree")) {
+        return makeSpawnResult("false", 0);
+      }
+      return mockSpawnRunner()(cmd, opts);
+    });
+    const result = await callNewAgent("do something", { name: "bare-repo" });
     expect(result.ok).toBe(true);
   });
 

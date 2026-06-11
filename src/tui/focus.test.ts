@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { FocusManager, buildFocusSeparator, buildTabbedFocusSeparator } from "./focus";
-import { RESET, BOLD, DIM, DIM_GRAY, REVERSE } from "./colors";
+import { RESET, BOLD, DIM, DIM_GRAY, REVERSE, BG_DIM_GRAY } from "./colors";
 
 describe("FocusManager", () => {
   test("defaults to agent-tree on startup", () => {
@@ -383,10 +383,11 @@ describe("buildFocusSeparator", () => {
 });
 
 describe("buildTabbedFocusSeparator", () => {
-  test("focused tab A applies REVERSE+BOLD to its label, not the other", () => {
+  test("focused tab A + pane focused applies REVERSE+BOLD to its label, not the other", () => {
     const sep = buildTabbedFocusSeparator(
       [{ label: "Agents", focused: true }, { label: "Teams", focused: false }],
       40,
+      true,
     );
     expect(sep).toContain("Agents");
     expect(sep).toContain("Teams");
@@ -404,10 +405,11 @@ describe("buildTabbedFocusSeparator", () => {
     expect(afterReset).toContain(DIM);
   });
 
-  test("focused tab B applies REVERSE+BOLD to its label, not the other", () => {
+  test("focused tab B + pane focused applies REVERSE+BOLD to its label, not the other", () => {
     const sep = buildTabbedFocusSeparator(
       [{ label: "Agents", focused: false }, { label: "Teams", focused: true }],
       40,
+      true,
     );
     expect(sep).toContain("Agents");
     expect(sep).toContain("Teams");
@@ -423,23 +425,39 @@ describe("buildTabbedFocusSeparator", () => {
     expect(beforeAgents).toContain(DIM);
   });
 
-  test("neither focused: the whole line is wrapped in DIM", () => {
+  test("active tab + pane unfocused uses muted BG_DIM_GRAY (no REVERSE)", () => {
     const sep = buildTabbedFocusSeparator(
-      [{ label: "Agents", focused: false }, { label: "Teams", focused: false }],
+      [{ label: "Agents", focused: true }, { label: "Teams", focused: false }],
       40,
+      false,
     );
     expect(sep).toContain("Agents");
     expect(sep).toContain("Teams");
-    // The wrap is applied at the outermost layer — sep starts with DIM and
-    // contains no REVERSE anywhere.
+    // The whole line is wrapped in DIM (matching the unfocused look of
+    // buildFocusSeparator) and contains NO REVERSE.
     expect(sep.startsWith(DIM)).toBe(true);
     expect(sep).not.toContain(REVERSE);
+    // The active tab's label uses the muted grey background.
+    const beforeAgents = sep.slice(0, sep.indexOf("Agents"));
+    const lastReset = beforeAgents.lastIndexOf(RESET);
+    const afterReset = beforeAgents.slice(lastReset);
+    expect(afterReset).toContain(BG_DIM_GRAY);
+  });
+
+  test("paneFocused defaults to true (preserves prior behavior)", () => {
+    const sep = buildTabbedFocusSeparator(
+      [{ label: "Agents", focused: true }, { label: "Teams", focused: false }],
+      40,
+    );
+    expect(sep).toContain(REVERSE);
+    expect(sep).toContain(BOLD);
   });
 
   test("contains 4-dash left pad like buildFocusSeparator", () => {
     const sep = buildTabbedFocusSeparator(
       [{ label: "Agents", focused: true }, { label: "Teams", focused: false }],
       60,
+      true,
     );
     expect(sep).toContain("────");
   });
@@ -448,6 +466,7 @@ describe("buildTabbedFocusSeparator", () => {
     const sep = buildTabbedFocusSeparator(
       [{ label: "Agents", focused: true }, { label: "Teams", focused: false }],
       50,
+      true,
     );
     expect(sep).toContain("─");
   });
@@ -456,6 +475,7 @@ describe("buildTabbedFocusSeparator", () => {
     const sep = buildTabbedFocusSeparator(
       [{ label: "Agents", focused: true }, { label: "Teams", focused: false }],
       40,
+      true,
     );
     expect(sep).toContain(DIM_GRAY);
   });
@@ -464,6 +484,7 @@ describe("buildTabbedFocusSeparator", () => {
     const sep = buildTabbedFocusSeparator(
       [{ label: "Agents", focused: true }, { label: "Teams", focused: false }],
       5,
+      true,
     );
     expect(typeof sep).toBe("string");
   });

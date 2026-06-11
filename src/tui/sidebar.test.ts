@@ -7,7 +7,7 @@ import { TmuxPaneComponent } from "./dashboard";
 import { makeAgent, makeFlatAgent, makeFlatRepoHeader } from "../test-utils";
 import { stripAnsi } from "../parse-state";
 import type { FlatEntry } from "../agents";
-import { REVERSE, DIM } from "./colors";
+import { REVERSE, DIM, BG_DIM_GRAY } from "./colors";
 
 function makeSidebar(): SidebarComponent {
   const tree = new AgentTreeComponent();
@@ -163,18 +163,21 @@ describe("SidebarComponent", () => {
     expect(lines[0]).toContain(REVERSE);
   });
 
-  test("Agents tab stays highlighted when focus is on active-agent (sidebarMode=agents)", () => {
+  test("Agents tab uses muted highlight when focus moves off the tree pane (sidebarMode=agents)", () => {
     // Phase 1: changing focus away from the sidebar must NOT de-highlight the
-    // Agents tab — the tab header reflects which tree is visible, not which
-    // panel has focus.
+    // Agents tab entirely — the tab header still reflects which tree is
+    // visible. But the dark high-contrast REVERSE highlight follows focus, so
+    // when focus is on `active-agent` the active tab uses a muted grey
+    // background instead.
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
     sidebar.focusTarget = "active-agent";
     sidebar.agentTree.setFlatList([]);
 
     const lines = sidebar.render(SIDEBAR_WIDTH);
-    // Agents tab is still highlighted (sidebarMode defaults to "agents").
-    expect(lines[0]).toContain(REVERSE);
+    // Active tab is still distinguishable (muted), but no REVERSE on the header.
+    expect(lines[0]).toContain(BG_DIM_GRAY);
+    expect(lines[0]).not.toContain(REVERSE);
   });
 
   test("Info separator is never focused regardless of focusTarget", () => {
@@ -382,6 +385,31 @@ describe("SidebarComponent — §17 Teams panel rendering", () => {
     const betweenAgentsAndTeams = header.slice(agentsIdx + "Agents".length, teamsIdx);
     expect(betweenAgentsAndTeams).toContain(REVERSE);
     expect(beforeAgents).not.toContain(REVERSE);
+  });
+
+  test("Teams tab uses muted highlight when sidebarMode=teams and focus moves off the tree pane", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.sidebarMode = "teams";
+    sidebar.focusTarget = "info";
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    // Tree pane not focused → header has no REVERSE; the active tab is still
+    // distinguished via the muted grey background.
+    expect(lines[0]).toContain(BG_DIM_GRAY);
+    expect(lines[0]).not.toContain(REVERSE);
+  });
+
+  test("teams-tree focus still uses REVERSE on the Teams tab", () => {
+    // Symmetric to the agent-tree case: focusing the teams-tree pane gives the
+    // active tab the dark high-contrast highlight.
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.sidebarMode = "teams";
+    sidebar.focusTarget = "teams-tree";
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    expect(lines[0]).toContain(REVERSE);
   });
 
   test("switching sidebarMode swaps tree content (Phase 1: independent of focus)", () => {

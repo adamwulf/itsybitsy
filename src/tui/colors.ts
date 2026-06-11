@@ -22,3 +22,6 @@ export const WHITE = "\x1b[37m";
 export const DIM_GRAY = "\x1b[90m";
 export const BRIGHT_BLUE = "\x1b[94m";
 export const BRIGHT_MAGENTA = "\x1b[95m";
+
+// Background colors
+export const BG_DIM_GRAY = "\x1b[100m";

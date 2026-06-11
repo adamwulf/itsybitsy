@@ -169,8 +169,8 @@ export class SidebarComponent implements Component {
     // tree is currently VISIBLE (i.e., `sidebarMode`), not which panel has
     // focus. After Phase 1 (§17.1) focus and sidebar visibility are
     // independent axes. The `paneFocused` flag drives the active tab's
-    // contrast: REVERSE+BOLD when the tree pane holds keyboard focus, muted
-    // grey background otherwise — so the dark high-contrast highlight follows
+    // contrast: REVERSE+BOLD when the tree pane holds keyboard focus,
+    // underline otherwise — so the dark high-contrast highlight follows
     // the focus, while the Agents/Teams selection stays visible.
     const treePaneFocused =
       this.focusTarget === "agent-tree" || this.focusTarget === "teams-tree";

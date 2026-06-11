@@ -29,7 +29,6 @@ export const CONFIG_KEYS: ConfigKeyDef[] = [
   { key: "hooks.injectStatus", type: "boolean", default: true },
   { key: "hooks.statusVisible", type: "boolean", default: true },
   { key: "hooks.injectTimestamp", type: "boolean", default: false },
-  { key: "coordinator.model", type: "string", default: "claude:opus" },
   { key: "coordinator.imessage", type: "boolean", default: false },
   { key: "channels.telegram.bot_token", type: "string", default: "" },
   { key: "notifications.sayOnQuestion", type: "boolean", default: true },

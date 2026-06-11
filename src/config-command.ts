@@ -5,7 +5,7 @@ import { parseModel } from "./agent-cli";
 
 const ARRAY_KEYS = CONFIG_KEYS.filter((k) => k.type === "string[]").map((k) => k.key);
 // Keys whose values are model strings: must be the qualified `<cli>:<model>` form (D1/D5).
-const MODEL_KEYS = new Set(["model", "coordinator.model"]);
+const MODEL_KEYS = new Set(["model"]);
 
 function findKey(key: string): ConfigKeyDef | undefined {
   return CONFIG_KEYS.find((k) => k.key === key);

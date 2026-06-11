@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { FocusManager, buildFocusSeparator, buildTabbedFocusSeparator } from "./focus";
-import { RESET, BOLD, DIM, DIM_GRAY, REVERSE, BG_DIM_GRAY } from "./colors";
+import { RESET, BOLD, DIM, DIM_GRAY, REVERSE, UNDERLINE } from "./colors";
 
 describe("FocusManager", () => {
   test("defaults to agent-tree on startup", () => {
@@ -425,7 +425,7 @@ describe("buildTabbedFocusSeparator", () => {
     expect(beforeAgents).toContain(DIM);
   });
 
-  test("active tab + pane unfocused uses muted BG_DIM_GRAY (no REVERSE)", () => {
+  test("active tab + pane unfocused uses UNDERLINE at normal intensity (no REVERSE, no DIM on label)", () => {
     const sep = buildTabbedFocusSeparator(
       [{ label: "Agents", focused: true }, { label: "Teams", focused: false }],
       40,
@@ -433,15 +433,22 @@ describe("buildTabbedFocusSeparator", () => {
     );
     expect(sep).toContain("Agents");
     expect(sep).toContain("Teams");
-    // The whole line is wrapped in DIM (matching the unfocused look of
-    // buildFocusSeparator) and contains NO REVERSE.
+    // Dashes are DIM (matching the unfocused look of buildFocusSeparator)
+    // and the line contains NO REVERSE.
     expect(sep.startsWith(DIM)).toBe(true);
     expect(sep).not.toContain(REVERSE);
-    // The active tab's label uses the muted grey background.
+    // The active tab's label is underlined and NOT dimmed — it must stay
+    // readable on any theme (no background colors: \x1b[100m rendered as an
+    // unreadable dark block on light themes).
     const beforeAgents = sep.slice(0, sep.indexOf("Agents"));
     const lastReset = beforeAgents.lastIndexOf(RESET);
     const afterReset = beforeAgents.slice(lastReset);
-    expect(afterReset).toContain(BG_DIM_GRAY);
+    expect(afterReset).toContain(UNDERLINE);
+    expect(afterReset).not.toContain(DIM);
+    // The inactive tab's label is DIM.
+    const beforeTeams = sep.slice(0, sep.indexOf("Teams"));
+    const afterTeamsReset = beforeTeams.slice(beforeTeams.lastIndexOf(RESET));
+    expect(afterTeamsReset).toContain(DIM);
   });
 
   test("paneFocused defaults to true (preserves prior behavior)", () => {

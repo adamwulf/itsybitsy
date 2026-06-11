@@ -7,7 +7,7 @@ import { TmuxPaneComponent } from "./dashboard";
 import { makeAgent, makeFlatAgent, makeFlatRepoHeader } from "../test-utils";
 import { stripAnsi } from "../parse-state";
 import type { FlatEntry } from "../agents";
-import { REVERSE, DIM, BG_DIM_GRAY } from "./colors";
+import { REVERSE, DIM, UNDERLINE } from "./colors";
 
 function makeSidebar(): SidebarComponent {
   const tree = new AgentTreeComponent();
@@ -163,20 +163,20 @@ describe("SidebarComponent", () => {
     expect(lines[0]).toContain(REVERSE);
   });
 
-  test("Agents tab uses muted highlight when focus moves off the tree pane (sidebarMode=agents)", () => {
+  test("Agents tab uses underline when focus moves off the tree pane (sidebarMode=agents)", () => {
     // Phase 1: changing focus away from the sidebar must NOT de-highlight the
     // Agents tab entirely — the tab header still reflects which tree is
     // visible. But the dark high-contrast REVERSE highlight follows focus, so
-    // when focus is on `active-agent` the active tab uses a muted grey
-    // background instead.
+    // when focus is on `active-agent` the active tab is marked with an
+    // underline instead (theme-safe: no background colors).
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
     sidebar.focusTarget = "active-agent";
     sidebar.agentTree.setFlatList([]);
 
     const lines = sidebar.render(SIDEBAR_WIDTH);
-    // Active tab is still distinguishable (muted), but no REVERSE on the header.
-    expect(lines[0]).toContain(BG_DIM_GRAY);
+    // Active tab is still distinguishable (underlined), but no REVERSE on the header.
+    expect(lines[0]).toContain(UNDERLINE);
     expect(lines[0]).not.toContain(REVERSE);
   });
 
@@ -387,7 +387,7 @@ describe("SidebarComponent — §17 Teams panel rendering", () => {
     expect(beforeAgents).not.toContain(REVERSE);
   });
 
-  test("Teams tab uses muted highlight when sidebarMode=teams and focus moves off the tree pane", () => {
+  test("Teams tab uses underline when sidebarMode=teams and focus moves off the tree pane", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
     sidebar.sidebarMode = "teams";
@@ -395,8 +395,8 @@ describe("SidebarComponent — §17 Teams panel rendering", () => {
 
     const lines = sidebar.render(SIDEBAR_WIDTH);
     // Tree pane not focused → header has no REVERSE; the active tab is still
-    // distinguished via the muted grey background.
-    expect(lines[0]).toContain(BG_DIM_GRAY);
+    // distinguished via the underline.
+    expect(lines[0]).toContain(UNDERLINE);
     expect(lines[0]).not.toContain(REVERSE);
   });
 

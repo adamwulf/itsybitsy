@@ -2978,20 +2978,10 @@ export async function launchDashboard(): Promise<void> {
     // Ignore
   }
 
-  // Acquire coordinator ref synchronously (fast file write).
   await acquireSystemCoordinator();
-
-  // Ensure agent types directory is initialized BEFORE spawning the system
-  // coordinator. ensureSystemCoordinator() calls loadAgentType("coordinator")
-  // to resolve its model (see src/coordinator.ts) — on first run, that file
-  // does not exist until ensureAgentTypesDir() writes the embedded templates.
-  // Without this ordering, the first-run system coordinator would silently
-  // fall back to claude:opus instead of honoring the embedded model: field.
+  // agent-types dir must exist before ensureSystemCoordinator() — it reads coordinator.md to resolve its model.
   await ensureAgentTypesDir();
-
-  // Now spawn the coordinator session in the background so the TUI isn't delayed.
   ensureSystemCoordinator().catch((err) => {
-    // Surface coordinator startup errors to the dashboard once it exists
     console.error("System coordinator startup failed:", err);
   });
 

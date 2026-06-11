@@ -15,6 +15,7 @@ import { SpawnContext } from "./types";
 import { getTmuxWidthForAgent } from "./tui/widths";
 import { isValidSessionId, isValidModel, tmuxSessionTarget } from "./validation";
 import { parseModel } from "./agent-cli";
+import { loadAgentType } from "./agent-types";
 import {
   buildHooksBlock,
   buildLayeredPermissions,
@@ -418,7 +419,29 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   await coordinatorSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION), "window-size", "manual"]);
 
   const config = await readConfig();
-  const rawModel = (config["coordinator.model"]?.value as string) ?? "claude:opus";
+  // Model precedence (most-specific wins, first non-empty value wins):
+  //   coordinator.md > _all.md > "claude:opus"
+  // config.model is intentionally skipped — it would let a user's global
+  // setting clobber the coordinator agent-type. _non_coordinator.md is by
+  // definition not consulted. Errors are routed through logToWatchLog rather
+  // than console.error (unlike ib-commands.ts) to avoid corrupting the TUI.
+  let coordLayer: { model?: string } | undefined;
+  let allLayer: { model?: string } | undefined;
+  try {
+    coordLayer = await loadAgentType("coordinator");
+  } catch (err) {
+    logToWatchLog(`[coordinator] failed to load coordinator agent type: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  try {
+    allLayer = await loadAgentType("_all");
+  } catch (err) {
+    logToWatchLog(`[coordinator] failed to load _all agent type layer: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  let agentTypeModel: string | undefined;
+  for (const layerModel of [coordLayer?.model, allLayer?.model]) {
+    if (layerModel) { agentTypeModel = layerModel; break; }
+  }
+  const rawModel = agentTypeModel ?? "claude:opus";
   // Reject malformed model names — they would otherwise be interpolated into
   // the shell command below. Fall back to the qualified default if shell-unsafe.
   const safeModel = isValidModel(rawModel) ? rawModel : "claude:opus";
@@ -429,7 +452,7 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   const parsed = parseModel(safeModel);
   if (parsed.cli !== "claude") {
     throw new Error(
-      `codex coordinators not yet implemented; use claude:<model> for coordinator.model (got '${safeModel}')`,
+      `codex coordinators not yet implemented; set 'model: claude:<model>' in ~/.itsybitsy/agent-types/coordinator.md (got '${safeModel}')`,
     );
   }
   const model = parsed.model;

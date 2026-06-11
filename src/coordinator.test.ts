@@ -600,16 +600,102 @@ describe("ensureSystemCoordinator", () => {
     await expect(ensureSystemCoordinator()).rejects.toThrow("Failed to create system coordinator tmux session");
   });
 
-  test("uses coordinator.model from config", async () => {
-    // Write a config file with a custom model
-    const { mkdir } = await import("fs/promises");
+  test("reads model from the coordinator agent-type file", async () => {
+    // The system coordinator's model is now sourced from the `coordinator`
+    // agent-type file (~/.itsybitsy/agent-types/coordinator.md), NOT from
+    // any config.json key. Seed a coordinator agent-type with a custom model
+    // and confirm the spawn line picks it up.
+    const coordTypePath = join(typesHome, ".itsybitsy", "agent-types", "coordinator.md");
+    await mkdir(join(typesHome, ".itsybitsy", "agent-types"), { recursive: true });
+    await Bun.write(
+      coordTypePath,
+      [
+        "---",
+        "name: coordinator",
+        "description: test coordinator",
+        "canSpawnChildren: true",
+        "instructionStyle: coordinator",
+        "model: claude:sonnet",
+        "---",
+        "",
+        "body",
+        "",
+      ].join("\n"),
+    );
+
+    const commands: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      commands.push([...cmd]);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    await ensureSystemCoordinator();
+
+    const cmdStrs = commands.map((c) => c.join(" "));
+    const claudeCmd = cmdStrs.find((c) => c.includes("claude --model"));
+    expect(claudeCmd).toContain("claude --model sonnet");
+    // The prompt is delivered via the SessionStart hook now — no positional
+    // arg and no cat substitution.
+    expect(claudeCmd).not.toContain("$(cat");
+    expect(claudeCmd).not.toContain("coordinator-prompt.txt");
+  });
+
+  test("falls back to _all.md model when coordinator.md declares no model", async () => {
+    // Precedence chain for the system coordinator is:
+    //   coordinator.md model > _all.md model > "claude:opus"
+    // Must match the per-repo coordinator path in src/ib-commands.ts. Seed
+    // _all.md with a model and leave coordinator.md's model: blank — the
+    // _all.md value must win.
+    const typesDir = join(typesHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+    await Bun.write(
+      join(typesDir, "coordinator.md"),
+      "---\nname: coordinator\ndescription: test coordinator\ncanSpawnChildren: true\nmodel:\n---\n\nbody\n",
+    );
+    await Bun.write(
+      join(typesDir, "_all.md"),
+      "---\nname: _all\ndescription: test all layer\nspawnable: false\nmodel: claude:sonnet\n---\n\nbody\n",
+    );
+
+    const commands: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      commands.push([...cmd]);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    await ensureSystemCoordinator();
+
+    const claudeCmd = commands.map((c) => c.join(" ")).find((c) => c.includes("claude --model"));
+    expect(claudeCmd).toContain("claude --model sonnet");
+  });
+
+  test("ignores config.model on the coordinator path (final fallback is claude:opus)", async () => {
+    // config.model is intentionally NOT consulted for coordinators — the
+    // coordinator agent-type file is authoritative. Set a config.model
+    // distractor, leave both coordinator.md and _all.md with no model:,
+    // and assert the spawn line uses the literal claude:opus fallback
+    // rather than the config.model value.
     await mkdir(tmpDir, { recursive: true });
     const configPath = join(tmpDir, "config.json");
-    await Bun.write(configPath, JSON.stringify({ coordinator: { model: "claude:sonnet" } }));
-
-    // Override config path
+    await Bun.write(configPath, JSON.stringify({ model: "claude:sonnet" }));
     const { setUserConfigPath, resetUserConfigPath } = await import("./config");
     setUserConfigPath(configPath);
+
+    const typesDir = join(typesHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+    await Bun.write(
+      join(typesDir, "coordinator.md"),
+      "---\nname: coordinator\ndescription: test coordinator\ncanSpawnChildren: true\nmodel:\n---\n\nbody\n",
+    );
+    // _all.md absent — chain terminates at the hardcoded claude:opus default.
 
     const commands: string[][] = [];
     coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
@@ -624,13 +710,9 @@ describe("ensureSystemCoordinator", () => {
     try {
       await ensureSystemCoordinator();
 
-      const cmdStrs = commands.map((c) => c.join(" "));
-      const claudeCmd = cmdStrs.find((c) => c.includes("claude --model"));
-      expect(claudeCmd).toContain("claude --model sonnet");
-      // The prompt is delivered via the SessionStart hook now — no positional
-      // arg and no cat substitution.
-      expect(claudeCmd).not.toContain("$(cat");
-      expect(claudeCmd).not.toContain("coordinator-prompt.txt");
+      const claudeCmd = commands.map((c) => c.join(" ")).find((c) => c.includes("claude --model"));
+      expect(claudeCmd).toContain("claude --model opus");
+      expect(claudeCmd).not.toContain("claude --model sonnet");
     } finally {
       resetUserConfigPath();
     }

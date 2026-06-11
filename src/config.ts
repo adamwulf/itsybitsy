@@ -29,7 +29,6 @@ export const CONFIG_KEYS: ConfigKeyDef[] = [
   { key: "hooks.injectStatus", type: "boolean", default: true },
   { key: "hooks.statusVisible", type: "boolean", default: true },
   { key: "hooks.injectTimestamp", type: "boolean", default: false },
-  { key: "coordinator.model", type: "string", default: "claude:opus" },
   { key: "coordinator.imessage", type: "boolean", default: false },
   { key: "channels.telegram.bot_token", type: "string", default: "" },
   { key: "notifications.sayOnQuestion", type: "boolean", default: true },
@@ -125,6 +124,7 @@ interface DeprecatedConfigKey {
 }
 
 const DEPRECATED_CONFIG_KEYS: DeprecatedConfigKey[] = [
+  { key: "coordinator.model", message: "Config key 'coordinator.model' is deprecated. Coordinator model now lives in ~/.itsybitsy/agent-types/coordinator.md frontmatter as 'model: <cli>:<model>'. Migrate the value there and remove this key from ~/.itsybitsy/config.json." },
   { key: "permissions.manager.allow", message: "Config key 'permissions.manager.allow' is deprecated. Permissions now live in agent type files (~/.itsybitsy/agent-types/). Remove this key from ~/.itsybitsy/config.json." },
   { key: "permissions.manager.deny", message: "Config key 'permissions.manager.deny' is deprecated. Permissions now live in agent type files (~/.itsybitsy/agent-types/). Remove this key from ~/.itsybitsy/config.json." },
   { key: "permissions.worker.allow", message: "Config key 'permissions.worker.allow' is deprecated. Permissions now live in agent type files (~/.itsybitsy/agent-types/). Remove this key from ~/.itsybitsy/config.json." },

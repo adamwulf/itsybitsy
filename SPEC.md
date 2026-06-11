@@ -21,7 +21,7 @@ When a new agent is created (`ib new-agent "prompt"`):
 
 3. **Yolo escalation prevention**: A `--yolo` child cannot be spawned by a non-yolo parent. This prevents permission escalation where a constrained agent spawns an unconstrained one. The parent's yolo status is checked via `meta.json` or `start.sh`.
 
-4. **Configuration**: Config is loaded from `~/.itsybitsy/config.json` (user-wide). The agent type is resolved by: `--type` flag > default `"manager"`. The type definition is loaded from `~/.itsybitsy/agent-types/<name>.md` — the `.md` file on disk is the sole source of truth (no hardcoded fallback). On first run, `~/.itsybitsy/agent-types/` is auto-populated with embedded default templates (see §2.7). The model is determined by a most-specific-wins precedence chain across the agent-type layer files (same layer set and gating as the permissions merge, §2.3): `--model` flag > `<type>.md` `model` > `_non_coordinator.md` `model` (non-coordinator agents only) > `_all.md` `model` > config `model` (or `coordinator.model` for coordinators) > `"opus"` (default). The agent-type layers all override the user's config `model`; config `model` is the final fallback before `"opus"`. A blank `model:` value in any layer (parsed to `undefined`) is skipped, so a more-specific file declaring `model:` with no value does NOT clobber a real model set by a less-specific file.
+4. **Configuration**: Config is loaded from `~/.itsybitsy/config.json` (user-wide). The agent type is resolved by: `--type` flag > default `"manager"`. The type definition is loaded from `~/.itsybitsy/agent-types/<name>.md` — the `.md` file on disk is the sole source of truth (no hardcoded fallback). On first run, `~/.itsybitsy/agent-types/` is auto-populated with embedded default templates (see §2.7). The model is determined by a most-specific-wins precedence chain across the agent-type layer files (same layer set and gating as the permissions merge, §2.3): `--model` flag > `<type>.md` `model` > `_non_coordinator.md` `model` (non-coordinator agents only) > `_all.md` `model` > config `model` (non-coordinator agents only) > `"opus"` (default). The agent-type layers all override the user's config `model`; config `model` is the final fallback before `"opus"` for non-coordinator agents only. Coordinators deliberately skip config `model` — the coordinator agent-type file is authoritative for coordinators, since otherwise the user's global `model` setting would clobber the coordinator agent-type. A blank `model:` value in any layer (parsed to `undefined`) is skipped, so a more-specific file declaring `model:` with no value does NOT clobber a real model set by a less-specific file.
 
 5. **Max agents check**: The number of active agents (directories with `meta.json` in `.ittybitty/agents/`) must not exceed the `maxAgents` config value (default: 10).
 
@@ -859,7 +859,7 @@ All keys are read from `~/.itsybitsy/config.json`. If a key is absent or has an 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `maxAgents` | number | `10` | Maximum number of concurrently active agents. Checked at spawn time in `newAgent()` — the count of agent directories that contain a `meta.json` must not exceed this value. |
-| `model` | string | `"opus"` | Default Claude model for new agents — the final fallback before `"opus"`. Full resolution order at spawn time (most-specific wins): `--model` CLI flag → `<type>.md` `model` → `_non_coordinator.md` `model` (non-coordinator agents only) → `_all.md` `model` → config `model` → `"opus"`. The agent-type layer files all override this config key; a blank `model:` in a layer is skipped (see §2 item 4). |
+| `model` | string | `"opus"` | Default Claude model for new agents — the final fallback before `"opus"` for non-coordinator agents. Full resolution order at spawn time (most-specific wins): `--model` CLI flag → `<type>.md` `model` → `_non_coordinator.md` `model` (non-coordinator agents only) → `_all.md` `model` → config `model` (non-coordinator agents only) → `"opus"`. The agent-type layer files all override this config key; a blank `model:` in a layer is skipped (see §2 item 4). Coordinators deliberately skip this fallback — the coordinator agent-type file is authoritative for coordinators. |
 | `fps` | number | `10` | TUI screen refresh rate (frames per second) for `ib watch`. |
 | `createPullRequests` | boolean | `false` | When `true`, agents are instructed (via their prompt) to create a pull request upon completing their work. |
 | `allowAgentQuestions` | boolean | `true` | When `false`, the `askQuestion` (`ib ask`) command returns an error, blocking top-level manager agents from posing questions to the user. (`acknowledgeQuestion` is the user-facing command to mark a question answered and does not check this flag.) |
@@ -868,12 +868,12 @@ All keys are read from `~/.itsybitsy/config.json`. If a key is absent or has an 
 | `hooks.injectStatus` | boolean | `true` | When `false`, the `inject-status` UserPromptSubmit/PostToolUse hook exits immediately without injecting agent status into the Claude context. |
 | `hooks.statusVisible` | boolean | `true` | When `true` (and `hooks.injectStatus` is also `true`), the status injection hook also emits a `systemMessage` field so the injected summary appears visibly to the user in the Claude UI. When `false`, status is injected as silent `additionalContext` only. |
 | `hooks.injectTimestamp` | boolean | `false` | When `true`, the `inject-timestamp` PostToolUse hook (installed in regular agents only) injects the current wall-clock time into the agent's context after every tool call. When `false` (the default), the hook exits immediately without injecting. See §6.6.1. |
-| `coordinator.model` | string | `"opus"` | Default model for coordinator agents — the final fallback before `"opus"` on the coordinator path. Resolution (most-specific wins): `--model` > `<type>.md` `model` (i.e. `coordinator.md`) > `_all.md` `model` > `coordinator.model` > `"opus"`. The `_non_coordinator.md` layer is NOT consulted for coordinators. |
 
-**Deprecated keys**: All permission list keys have been moved out of `config.json` into agent type layer files:
+**Deprecated keys**: All permission list keys (and the former `coordinator.model`) have been moved out of `config.json` into agent type layer files:
 
 | Deprecated key | New location |
 |---|---|
+| `coordinator.model` | `~/.itsybitsy/agent-types/coordinator.md` frontmatter (`model:` field) |
 | `permissions.all.allow/deny` | `~/.itsybitsy/agent-types/_all.md` frontmatter |
 | `permissions.repo.allow/deny` | `~/.itsybitsy/agent-types/_non_coordinator.md` frontmatter |
 | `permissions.coordinator.allow/deny` | `~/.itsybitsy/agent-types/coordinator.md` frontmatter |
@@ -931,7 +931,7 @@ Lists all known config keys with their current values and sources.
 
 1. Each line shows the key, its effective value, and a source label: `(user)` or `(default)`.
 2. **Unset keys**: Keys with no value and no default display as `(unset)`.
-3. **All known keys are listed**, including those not present in the config file. The full key list matches `CONFIG_KEYS` in `config.ts`: `maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, `hooks.injectStatus`, `hooks.statusVisible`, `coordinator.model`. (Permission list keys have moved out of `config.json` into agent type layer files — see §2.3.)
+3. **All known keys are listed**, including those not present in the config file. The full key list matches `CONFIG_KEYS` in `config.ts`: `maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, `hooks.injectStatus`, `hooks.statusVisible`, `coordinator.imessage`. (Permission list keys have moved out of `config.json` into agent type layer files — see §2.3. The former `coordinator.model` key now lives in `~/.itsybitsy/agent-types/coordinator.md` as `model:`.)
 4. A legend line is printed after the list explaining the source labels.
 5. Aliases: `ib config ls` is accepted as an alias for `list`.
 
@@ -1371,7 +1371,7 @@ The system coordinator is a Claude Code session that runs from `~/.itsybitsy/` w
 1. Ensure `~/.itsybitsy/` exists and is a git repository (`git init` — a standard repo, not `git init --bare`). This is required because Claude Code only loads `<cwd>/.claude/settings.local.json` when the CWD is inside a git repo. Add a `.gitignore` with `*` to prevent accidental commits of coordinator data files.
 2. Write `~/.itsybitsy/.claude/settings.local.json` with system coordinator permissions (§12.1.3)
 3. Create a tmux session named `ib-coordinator` with working directory `~/.itsybitsy/`
-4. Start Claude Code inside the session in interactive mode (`claude --model <coordinator.model>` on fresh, `claude --resume <id> --model <coordinator.model>` on resume). The tmux session is launched with `bash` as its command (i.e. `tmux new-session -d -s ib-coordinator -c <home> bash`) so the pane always runs bash regardless of the user's default `$SHELL`. The single `tmux send-keys` call carries the full launch line, run via `Bun.spawn(["tmux", "send-keys", "-t", "ib-coordinator", "<launch-line>", "Enter"])`. All tmux interactions use `Bun.spawn` with array arguments — never shell strings. **Note**: The `-p` flag is NOT used because it runs Claude in non-interactive print mode (exits after one response). The system coordinator must run as an interactive session to accept ongoing input. No positional prompt arg is passed — the prompt body is delivered by the SessionStart hook (§12.1.5).
+4. Start Claude Code inside the session in interactive mode (`claude --model <model>` on fresh, `claude --resume <id> --model <model>` on resume — where `<model>` is resolved by walking the precedence chain `~/.itsybitsy/agent-types/coordinator.md` `model:` > `~/.itsybitsy/agent-types/_all.md` `model:` > `claude:opus` (see §12.5)). The tmux session is launched with `bash` as its command (i.e. `tmux new-session -d -s ib-coordinator -c <home> bash`) so the pane always runs bash regardless of the user's default `$SHELL`. The single `tmux send-keys` call carries the full launch line, run via `Bun.spawn(["tmux", "send-keys", "-t", "ib-coordinator", "<launch-line>", "Enter"])`. All tmux interactions use `Bun.spawn` with array arguments — never shell strings. **Note**: The `-p` flag is NOT used because it runs Claude in non-interactive print mode (exits after one response). The system coordinator must run as an interactive session to accept ongoing input. No positional prompt arg is passed — the prompt body is delivered by the SessionStart hook (§12.1.5).
 
 **Shared across instances**: Multiple `ib watch` instances share the same `ib-coordinator` tmux session. On startup, check if the session already exists (`tmux has-session -t ib-coordinator`). If it does, just display its output — do not create a new one. **TOCTOU note**: There is a race window between the `has-session` check and `new-session` creation. If two `ib watch` instances start simultaneously, both may see no session and attempt to create. Mitigation: `tmux new-session` fails if the session already exists — catch the error and fall through to the "session already exists" path.
 
@@ -1542,7 +1542,7 @@ Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, bu
 4. Uses coordinator-specific session start context (§12.2.6)
 5. Does NOT set a `--manager` — coordinators are top-level agents
 6. Coordinators work directly in the repo directory (no git worktree) — they are read-only agents that do not need branch isolation
-7. Defaults to `coordinator.model` config (§12.5) when no explicit `--model` is provided — overridable with `--model <model>` on `ib new-agent --type coordinator`
+7. Defaults to the model resolved by walking `~/.itsybitsy/agent-types/coordinator.md` `model:` > `~/.itsybitsy/agent-types/_all.md` `model:` > `claude:opus` when no explicit `--model` is provided — overridable with `--model <model>` on `ib new-agent --type coordinator`. The user's global `model` config key is NOT consulted on the coordinator path (see §12.5).
 8. Otherwise follows the standard agent creation flow (§1.1)
 
 **One-per-repo constraint**: `checkCoordinatorExists(repoPath)` scans all agent directories in `.ittybitty/agents/` for any agent with `coordinator: true` in meta.json. If a coordinator already exists, `ib new-agent --type coordinator` prints `"Coordinator already exists for <repo-name>"` and exits 0 (idempotent no-op). If a non-coordinator agent already has the repo basename as its ID (collision), a random 4-char hex suffix is appended to the coordinator's ID. There is exactly one coordinator per repo, never more. Archived coordinators (in `.ittybitty/archive/`) do not block creation — "active" means a directory in `.ittybitty/agents/` (not `.ittybitty/archive/`). A stopped or paused coordinator whose directory is still in `agents/` DOES block creation — only archiving removes the block.
@@ -1737,21 +1737,21 @@ Per-repo coordinators bypass the `maxAgents` check during creation (`ib new-agen
 
 ### 12.5 Coordinator-Specific Config
 
-Coordinator model selection lives in `~/.itsybitsy/config.json`:
+Coordinator model selection lives in `~/.itsybitsy/agent-types/coordinator.md` frontmatter (the `model:` field), e.g.:
 
-```json
-{
-  "coordinator": {
-    "model": "opus"
-  }
-}
+```yaml
+---
+name: coordinator
+description: Read-only coordinator that manages agents without writing code
+model: claude:opus
+---
 ```
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `coordinator.model` | string | `"opus"` | Model for both system and per-repo coordinators. A single key is used because both tiers perform the same kind of work (orchestration via `ib` commands). If different models are needed, per-repo coordinators can be spawned with `--model <model>` to override. Changing the system coordinator's model requires restarting it (`R` key in TUI when selected, or kill + re-launch `ib watch`) — the config is read at spawn time. |
+The system coordinator and per-repo coordinator walk the same precedence chain (most-specific wins): `coordinator.md` `model` > `_all.md` `model` > `"claude:opus"`. `_non_coordinator.md` is by definition not consulted for coordinators, `system.md`'s `model:` field is deliberately not consulted on the system-coordinator path (`system.md` carries permissions and prompt body only — the system coordinator's model is sourced from `coordinator.md`, the same file the per-repo coordinator uses), and the user's global `model` config key is intentionally NOT consulted on the coordinator path — the coordinator agent-type file is authoritative, since otherwise a global `model` setting would clobber the coordinator agent-type. A blank `model:` in any layer parses to `undefined` and is skipped, so a more-specific layer with no value does not clobber a real value set by a less-specific layer. Per-repo coordinators can additionally be spawned with `--model <model>` to override. Changing the system coordinator's model requires restarting it (`R` key in TUI when selected, or kill + re-launch `ib watch`) — the agent-type files are read at spawn time.
 
-Coordinator permissions (allow/deny lists) live in `~/.itsybitsy/agent-types/coordinator.md` frontmatter, not in the config file. The former `permissions.coordinator.allow` / `permissions.coordinator.deny` config keys have been removed; if present, a deprecation warning is shown at `ib watch` startup.
+The former `coordinator.model` config key has been removed; if present in `~/.itsybitsy/config.json`, a deprecation warning is shown at `ib watch` startup pointing to the new location.
+
+Coordinator permissions (allow/deny lists) also live in `~/.itsybitsy/agent-types/coordinator.md` frontmatter, not in the config file. The former `permissions.coordinator.allow` / `permissions.coordinator.deny` config keys have been removed; if present, a deprecation warning is shown at `ib watch` startup.
 
 ### 12.6 Affected Files and Modules
 
@@ -1761,12 +1761,12 @@ The coordinator system touches many modules. This section catalogs the current i
 |--------|--------|-------------|
 | `src/coordinator.ts` | **Implemented** | System coordinator lifecycle (`ensureSystemCoordinator()`, `releaseSystemCoordinator()`, `restartSystemCoordinator()`), PID-based reference counting, system coordinator permissions/prompt, `sanitizeTmuxInput()`, per-repo coordinator permissions (`buildPerRepoCoordinatorSettings()`), per-repo coordinator prompt (`perRepoCoordinatorPrompt()`), coordinator existence check (`checkCoordinatorExists()`), agent ID generation (`getCoordinatorAgentId()` — returns repo basename). No separate `coordinator-settings.ts` — per-repo settings are in this file. |
 | `src/agents.ts` | **Implemented** | `coordinator?: boolean` in `AgentMeta`. `{ kind: "system-coordinator" }` in `FlatEntry`. `flattenAgentTree()` prepends system coordinator entry and filters out per-repo coordinators (`!a.meta.coordinator`) so they do not appear as tree rows under their repo header. |
-| `src/ib-commands.ts` | **Implemented** | `newAgent()` extended with `--type coordinator`: uses repo basename as ID (via `getCoordinatorAgentId()`), sets `coordinator: true` in meta.json, one-per-repo validation via `checkCoordinatorExists()`, `coordinator.model` default, max-agents bypass, coordinator-specific `settings.local.json` with hooks. No special `ib send` routing — standard agent ID resolution handles everything. |
+| `src/ib-commands.ts` | **Implemented** | `newAgent()` extended with `--type coordinator`: uses repo basename as ID (via `getCoordinatorAgentId()`), sets `coordinator: true` in meta.json, one-per-repo validation via `checkCoordinatorExists()`, model sourced from `coordinator.md` agent-type frontmatter, max-agents bypass, coordinator-specific `settings.local.json` with hooks. No special `ib send` routing — standard agent ID resolution handles everything. |
 | `src/hooks/session-start.ts` | **Implemented** | Detects `coordinator: true` in meta.json. `generateCoordinatorInstructions()` injects coordinator-specific prompt. Worker instructions correctly use manager's agent ID (repo basename) for `ib send`. |
 | `src/hooks/intercept-task.ts` | **Implemented** | `checkCoordinatorBashRestrictions()` blocks shell metacharacters and `--output` in git commands for coordinator sessions. Detects coordinators via `coordinator: true` in meta.json. |
 | `src/hooks/agent-path.ts` | **No changes needed** | Per-repo coordinators use standard path isolation. |
 | `src/hooks/agent-status.ts` | **No changes needed** | Stop hook writes state normally. |
-| `src/config.ts` | **Implemented** | Config keys: `coordinator.model`. (`permissions.coordinator.*` removed — coordinator permissions live in `~/.itsybitsy/agent-types/coordinator.md` frontmatter.) |
+| `src/config.ts` | **Implemented** | Config keys: `coordinator.imessage`. (`coordinator.model` removed — coordinator model lives in `~/.itsybitsy/agent-types/coordinator.md` frontmatter. `permissions.coordinator.*` removed — coordinator permissions live in `~/.itsybitsy/agent-types/coordinator.md` frontmatter.) |
 | `src/watchdog.ts` | **Not yet modified** | Does NOT have coordinator-specific behavior. Treats coordinators identically to regular agents. See §12.2.7. |
 | `src/tui/dashboard.ts` | **Implemented** | System coordinator full-width view with TMUX/DASHBOARD toggle, coordinator lifecycle on startup/shutdown, coordinator restart on `R`, input field routing, per-repo coordinator pausing on exit. |
 | `src/tui/agent-tree.ts` | **Implemented** | System coordinator as first entry with `◆` icon. Per-repo coordinators are not rendered as tree rows — they are surfaced via the repo header (REPO mode, §8.11, §12.2.5). |

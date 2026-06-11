@@ -341,6 +341,17 @@ describe("checkDeprecatedConfigKeys", () => {
     expect(warnings[0]).toContain("coordinator.md");
   });
 
+  test("warns when coordinator.model is set and points to coordinator.md", async () => {
+    await Bun.write(
+      userCfgPath,
+      JSON.stringify({ coordinator: { model: "claude:sonnet" } })
+    );
+    const warnings = await checkDeprecatedConfigKeys();
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain("coordinator.model");
+    expect(warnings[0]).toContain("coordinator.md");
+  });
+
   test("warns for both coordinator and legacy manager/worker keys", async () => {
     await Bun.write(
       userCfgPath,

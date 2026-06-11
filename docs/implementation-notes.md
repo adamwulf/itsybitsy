@@ -140,7 +140,7 @@ The actual `/compact` send is **hard-disabled** via the `AUTO_COMPACT_DISABLED =
 
 User-wide configuration; reads from `~/.itsybitsy/config.json`, merges with typed defaults. No per-repo config.
 
-Config keys: `maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, `hooks.injectStatus`, `hooks.statusVisible`, `coordinator.model`, `coordinator.imessage`, `channels.telegram.bot_token`.
+Config keys: `maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, `hooks.injectStatus`, `hooks.statusVisible`, `coordinator.imessage`, `channels.telegram.bot_token`. (Coordinator model lives in `~/.itsybitsy/agent-types/coordinator.md` frontmatter; the former `coordinator.model` config key has been removed.)
 
 Permission lists have migrated out of `config.json` into agent-type layer files (`~/.itsybitsy/agent-types/_all.md`, `_non_coordinator.md`, `<type>.md`) — see SPEC.md §2.3. Deprecated keys (`permissions.*`) trigger a warning at `ib watch` startup pointing to the correct `.md` replacement.
 

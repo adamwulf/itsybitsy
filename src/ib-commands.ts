@@ -3484,14 +3484,18 @@ export async function newAgent(
   //        > <type>.md model
   //        > _non_coordinator.md model (non-coordinator agents only)
   //        > _all.md model
-  //        > config.model (or coordinator.model for coordinators)
+  //        > config.model (non-coordinator agents only)
   //        > 'claude:opus'
   //    The agent-type layers (least→most specific: _all < _non_coordinator <
   //    <type>) all override the user's config.model; config.model is the final
-  //    fallback before 'claude:opus'. A blank `model:` in a more-specific layer
-  //    is `undefined` after parsing and so does NOT clobber a real value set by
-  //    a less-specific layer. All model strings are the qualified
-  //    `<cli>:<model>` form (D1/D5); parseModel below rejects bare names + unknown CLI.
+  //    fallback before 'claude:opus' for non-coordinator agents. Coordinators
+  //    deliberately skip config.model — the coordinator agent-type file is
+  //    authoritative for coordinators, since otherwise the user's global model
+  //    setting would clobber the coordinator agent-type. A blank `model:` in a
+  //    more-specific layer is `undefined` after parsing and so does NOT clobber
+  //    a real value set by a less-specific layer. All model strings are the
+  //    qualified `<cli>:<model>` form (D1/D5); parseModel below rejects bare
+  //    names + unknown CLI.
   let model = opts?.model ?? "";
   if (!model) {
     // Walk layers from most-specific to least; first non-empty wins.
@@ -3504,14 +3508,9 @@ export async function newAgent(
       if (layerModel) { model = layerModel; break; }
     }
   }
-  if (!model) {
-    if (coordinatorMode) {
-      const coordModel = config["coordinator.model"]?.value as string | undefined;
-      if (coordModel) model = coordModel;
-    } else {
-      const configModel = config.model?.value as string | undefined;
-      if (configModel) model = configModel;
-    }
+  if (!model && !coordinatorMode) {
+    const configModel = config.model?.value as string | undefined;
+    if (configModel) model = configModel;
   }
   if (!model) model = "claude:opus";
 
@@ -3558,7 +3557,7 @@ export async function newAgent(
         ok: false,
         exitCode: 1,
         stdout: "",
-        stderr: `codex coordinators not yet implemented (per SPEC D9 stub); coordinator.model must use a claude:<model> form. Pending Phase 9 coordinator support.`,
+        stderr: `codex coordinators not yet implemented (per SPEC D9 stub); the coordinator agent-type file must declare a claude:<model> form. Pending Phase 9 coordinator support.`,
       };
     }
     // Reject codex models not in our static allow-list before the codex CLI

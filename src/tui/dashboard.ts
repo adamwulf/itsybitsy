@@ -2978,16 +2978,12 @@ export async function launchDashboard(): Promise<void> {
     // Ignore
   }
 
-  // Acquire coordinator ref synchronously (fast file write), then ensure
-  // the coordinator session in the background so the TUI isn't delayed.
   await acquireSystemCoordinator();
+  // agent-types dir must exist before ensureSystemCoordinator() — it reads coordinator.md to resolve its model.
+  await ensureAgentTypesDir();
   ensureSystemCoordinator().catch((err) => {
-    // Surface coordinator startup errors to the dashboard once it exists
     console.error("System coordinator startup failed:", err);
   });
-
-  // Ensure agent types directory is initialized
-  await ensureAgentTypesDir();
 
   // Validate all agent type files before starting
   const typeErrors = await validateAllAgentTypes();

@@ -39,52 +39,19 @@ function isAcceptableTaskModel(value: string): boolean {
 }
 
 /**
- * Shell metacharacters blocked for coordinator Bash commands (SPEC §12.2.4).
- * These prevent chained commands that bypass Bash(ib:*) prefix matching.
- *
- * The guard is a small lexical pass that tracks quoting state so literal
- * metacharacters inside single quotes, double quotes, or a quoted-delimiter
- * heredoc body are allowed (those characters are shell-inert in that
- * context), while metacharacters that are still shell-active in their
- * context — unquoted separators/redirects, command substitution, ANSI-C
- * quoting, command-separator newlines — remain blocked.
- *
- * Blocked constructs (when shell-active in their context):
- *   - Command separators / chaining:  ;  &  &&  ||  newline / carriage return
- *   - Pipes:                          |  ||
- *   - Redirection:                    >  >>  <   (but `<<` heredoc openers
- *                                                 are handled specially —
- *                                                 quoted-delimiter heredocs
- *                                                 are allowed)
- *   - Subshells:                      ( … )
- *   - Command substitution:           `…`   $(…)
- *   - Parameter expansion that can run code: $(…)  $'…'   ${…} when it
- *                                            contains `$(` or backtick
- *   - ANSI-C quoting:                 $'…'   (can encode literal newlines
- *                                             that bypass other checks)
- *
- * Explicitly ALLOWED (literal text in a quoted context):
- *   - Anything between matched single quotes:        '… ; | & ` > < $( …'
- *   - Inside double quotes, the redirect/separator
- *     characters are inert literals:                 "… ; | & > < …"
- *     but `…` and $(…) and $'…' inside double quotes are still command
- *     substitution and remain blocked.
- *   - The body of a quoted-delimiter heredoc:
- *           ib send agent <<'EOF'
- *           anything ; | & ` $(...) goes here
- *           EOF
- *     The body of an *unquoted* delimiter heredoc still undergoes $/`
- *     expansion, so $( and backticks remain blocked there.
+ * Walk `command` and return a description of the first shell-active
+ * metacharacter found, or null if it is safe to allow as a coordinator Bash
+ * command (SPEC §12.2.4). "Shell-active" depends on context: a `|` inside
+ * `'…'` is literal data, but the same `|` unquoted chains commands. The
+ * full enumeration of what is blocked and what is allowed (and why each)
+ * lives in SPEC §12.2.4.
  */
 function findShellMetachar(command: string): string | null {
   let i = 0;
   const n = command.length;
 
-  // Heredoc state, populated when we consume a `<<` opener.
-  // `delimiter` is the terminator word; `expand` indicates whether the body
-  // is still subject to $ / backtick expansion (unquoted delimiter); `dash`
-  // records whether the opener was `<<-` (which strips leading TABS — not
-  // arbitrary whitespace — from body lines and the terminator).
+  // `dash` records whether the opener was `<<-`, which strips leading TABS
+  // (not arbitrary whitespace) from body lines and the terminator.
   let heredoc: { delimiter: string; expand: boolean; dash: boolean } | null = null;
 
   while (i < n) {
@@ -92,53 +59,41 @@ function findShellMetachar(command: string): string | null {
 
     // ---- Inside an active heredoc body ----
     //
-    // The heredoc body is processed line-by-line, not character-by-
-    // character: the terminator is matched against a whole line, and the
-    // expand=true check for ` and $( scans the line's content but never
-    // re-applies the terminator check to a partial-line suffix (which
-    // would cause `\nxxEOF\n` to spuriously terminate after two char
-    // steps).
+    // Whole-line iteration is load-bearing: a char-by-char loop that
+    // recomputed `line = substring(i, lineEnd)` each step would shrink
+    // the candidate by one char per iteration, so a body line `xxEOF`
+    // would spuriously match `EOF` after two steps.
     if (heredoc) {
       let lineEnd = command.indexOf("\n", i);
       const hasNewline = lineEnd !== -1;
       if (!hasNewline) lineEnd = n;
       const line = command.substring(i, lineEnd);
 
-      // Match the terminator. Bash strips leading TABS only when the
-      // opener was `<<-`, and the line must equal the delimiter exactly
-      // — no trailing whitespace either. Matching bash precisely matters
-      // now that we block any non-whitespace content AFTER the terminator
-      // (HOLE-1 fix below): if we terminated too eagerly on `EOF<space>`
-      // when bash would treat it as body data, the real `EOF` line that
-      // follows would look like a "second command" and we'd reject a
+      // Exact match against the delimiter (bash semantics — even trailing
+      // whitespace fails to terminate). The exact match is also load-
+      // bearing for the post-terminator command-separator check below:
+      // terminating eagerly on `EOF<space>` would expose the real `EOF`
+      // line that follows as a spurious "second command" and reject a
       // valid heredoc.
       const leadingStripped = heredoc.dash
         ? line.replace(/^\t+/, "")
         : line;
       if (leadingStripped === heredoc.delimiter) {
-        // End of heredoc body. The `\n` that ended the terminator line is
-        // itself a command separator in bash — if anything non-whitespace
-        // follows that newline, it's a second command and must be blocked.
-        // This closes the bypass:
-        //     ib send a <<'EOF'
-        //     body
-        //     EOF
-        //     rm -rf /
-        // where the second command itself contains no scanned metachars.
+        // The `\n` ending the terminator line is itself a command separator
+        // in bash — reject any non-whitespace content after it. This closes
+        // the bypass where a heredoc body would be followed by a second
+        // command containing no scanned metachars.
         if (hasNewline) {
           const after = command.substring(lineEnd + 1);
           if (/\S/.test(after)) {
             return "newline command separator after heredoc terminator";
           }
         }
-        // Nothing meaningful follows the terminator. Jump to end-of-string.
         i = n;
         heredoc = null;
         continue;
       }
 
-      // Not the terminator. Scan the line for body-active metachars when
-      // the delimiter was unquoted (body still undergoes $/` expansion).
       if (heredoc.expand) {
         for (let k = i; k < lineEnd; k++) {
           const d = command[k]!;
@@ -147,12 +102,11 @@ function findShellMetachar(command: string): string | null {
             const next = command[k + 1];
             if (next === "(") return "$( command substitution";
             if (next === "'") return "$' ANSI-C quoting";
-            // ${…} alone doesn't run code. Any nested $( or ` would be
+            // ${…} alone doesn't run code; any nested $( or ` would be
             // caught on its own character.
           }
         }
       }
-      // Move past this line and its terminating newline (if any).
       i = hasNewline ? lineEnd + 1 : n;
       continue;
     }
@@ -160,12 +114,9 @@ function findShellMetachar(command: string): string | null {
     // ---- Single-quoted: literally everything until the next ' ----
     if (c === "'") {
       const close = command.indexOf("'", i + 1);
-      if (close === -1) {
-        // Unterminated single quote — treat the rest as literal. Either the
-        // user made a typo (the shell would also error) or the command was
-        // truncated; in neither case can the unread tail run anything.
-        return null;
-      }
+      // Unterminated single quote — bash would error at parse, so the
+      // tail can't execute. Treat as safely literal.
+      if (close === -1) return null;
       i = close + 1;
       continue;
     }
@@ -176,10 +127,9 @@ function findShellMetachar(command: string): string | null {
       while (i < n) {
         const d = command[i]!;
         if (d === "\\") {
-          // Inside "...", backslash only escapes $, `, ", \, newline. For
-          // our purposes we just skip the next character — even if bash
-          // would treat the backslash as literal, the following character
-          // can't be a shell-active metachar that we'd misclassify.
+          // Bash's rule for backslash inside "…" is narrower than this,
+          // but unconditionally skipping the next char can't cause us to
+          // miss a shell-active metachar — only over-block at worst.
           i += 2;
           continue;
         }
@@ -199,9 +149,8 @@ function findShellMetachar(command: string): string | null {
     }
 
     // ---- Unquoted backslash escapes the next character ----
+    // Also handles line-continuation `\\\n` — bash treats it as whitespace.
     if (c === "\\") {
-      // An escaped newline is line-continuation, which is harmless (bash
-      // treats it as whitespace). An escaped metachar becomes literal.
       i += 2;
       continue;
     }
@@ -211,9 +160,9 @@ function findShellMetachar(command: string): string | null {
       const next = command[i + 1];
       if (next === "(") return "$( command substitution";
       if (next === "'") return "$' ANSI-C quoting";
-      // $VAR and ${VAR} alone don't run code. The original guard blocked
-      // ${…} too out of caution, but plain parameter expansion is safe and
-      // commonly appears (e.g., `ib send agent ${MSG}`). Allow it.
+      // Bare $VAR / ${VAR} are intentionally allowed — plain parameter
+      // expansion cannot run code, and prompts often contain it. Any
+      // nested $( or ` is caught on its own character.
       i++;
       continue;
     }
@@ -234,10 +183,7 @@ function findShellMetachar(command: string): string | null {
     // ---- Redirection ----
     if (c === ">") return "> redirect";
     if (c === "<") {
-      // `<<` opens a heredoc. Inspect the delimiter to decide whether the
-      // body is literal (quoted delimiter) or expandable (unquoted).
       if (command[i + 1] === "<") {
-        // Skip `<<`, optional `-`, and any whitespace.
         let j = i + 2;
         let dash = false;
         if (command[j] === "-") {
@@ -246,20 +192,19 @@ function findShellMetachar(command: string): string | null {
         }
         while (j < n && (command[j] === " " || command[j] === "\t")) j++;
 
-        // Read the delimiter. Bash supports 'EOF', "EOF", \EOF, or bare EOF.
+        // Bash heredoc delimiter forms: 'EOF', "EOF", \EOF, or bare EOF.
+        // The first three suppress $/` expansion in the body; bare does not.
         let quoted = false;
         let delim = "";
         const dc = command[j];
         if (dc === "'") {
           quoted = true;
           const end = command.indexOf("'", j + 1);
-          if (end === -1) return "< redirect"; // malformed; treat as redirect
+          if (end === -1) return "< redirect";
           delim = command.substring(j + 1, end);
           j = end + 1;
         } else if (dc === '"') {
           quoted = true;
-          // Parse a double-quoted delimiter, honoring backslash escapes the
-          // same way bash does for the delimiter word.
           let k = j + 1;
           let buf = "";
           while (k < n && command[k] !== '"') {
@@ -271,11 +216,10 @@ function findShellMetachar(command: string): string | null {
               k++;
             }
           }
-          if (k >= n) return "< redirect"; // malformed
+          if (k >= n) return "< redirect";
           delim = buf;
           j = k + 1;
         } else if (dc === "\\") {
-          // \EOF — backslash quotes the delimiter (no expansion in body).
           quoted = true;
           let k = j + 1;
           let buf = "";
@@ -286,43 +230,34 @@ function findShellMetachar(command: string): string | null {
           delim = buf;
           j = k;
         } else {
-          // Bare delimiter — unquoted, body undergoes $/` expansion.
           let k = j;
           let buf = "";
           while (k < n && /[A-Za-z0-9_]/.test(command[k]!)) {
             buf += command[k];
             k++;
           }
-          if (buf === "") {
-            // No delimiter word found — treat as plain `<<` redirect.
-            return "< redirect";
-          }
+          // Empty bare delim catches `<<<word` here-string and `<<` at
+          // end-of-input; both are redirects, not heredocs.
+          if (buf === "") return "< redirect";
           delim = buf;
           j = k;
         }
 
-        // The rest of the command line (up to the next newline) is still
-        // normal shell syntax — only the heredoc *body* (after the next
-        // newline) is in heredoc mode. Scan the opener tail BEFORE deciding
-        // whether to enter heredoc mode, so that hazards in the opener
-        // (` | tee log`, `&& cmd2`, etc.) are caught even when the body
-        // never opens (no following newline). The pre-fix shape of this
-        // branch returned null on `nl === -1` without scanning the tail,
-        // which trusted bash's own parser to refuse the malformed input.
-        // Scan it ourselves for defense-in-depth.
+        // Defense-in-depth: scan the opener tail (anything between the
+        // delimiter and the next newline) for hazards like ` | tee log`
+        // or `&& cmd2`. Done before the body opens so we catch the
+        // no-newline malformed-opener case too, rather than trusting
+        // bash's own parser to refuse it.
         const nl = command.indexOf("\n", j);
         const tailEnd = nl === -1 ? n : nl;
         const tail = command.substring(j, tailEnd);
         const tailHit = findShellMetachar(tail);
         if (tailHit) return tailHit;
 
-        if (nl === -1) {
-          // No following newline — there is no body to enter. The opener
-          // is malformed (bash would error at parse time) but inert.
-          return null;
-        }
+        // No newline → no body → opener is malformed (bash would error)
+        // but inert.
+        if (nl === -1) return null;
 
-        // Enter heredoc body.
         heredoc = { delimiter: delim, expand: !quoted, dash };
         i = nl + 1;
         continue;

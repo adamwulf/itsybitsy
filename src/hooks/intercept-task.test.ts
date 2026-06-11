@@ -576,18 +576,10 @@ describe("coordinator Bash restrictions", () => {
     }
   });
 
-  // ------------------------------------------------------------------
-  // Quote- and heredoc-aware guard (SPEC §12.2.4 / refinement).
-  //
-  // The original guard was a naive substring scan that false-positived on
-  // metacharacters appearing as literal text inside a quoted argument or a
-  // quoted-delimiter heredoc body. These tests pin down both directions:
-  //   - The genuinely-dangerous constructs must STILL be blocked.
-  //   - Literal text inside single quotes, double quotes, or a quoted
-  //     heredoc body must now be ALLOWED.
-  // ------------------------------------------------------------------
-
-  // --- Cases that must remain blocked ---
+  // Quote- and heredoc-aware guard (SPEC §12.2.4). The tests below pin
+  // both directions: shell-active constructs stay blocked, and literal
+  // metacharacters inside quotes or quoted-delimiter heredoc bodies are
+  // now allowed.
 
   test("still blocks unquoted pipe between two commands", async () => {
     await setupCoordinatorDir();
@@ -729,8 +721,6 @@ describe("coordinator Bash restrictions", () => {
     }
   });
 
-  // --- Cases that must now be allowed ---
-
   test("allows literal backtick inside single quotes", async () => {
     await setupCoordinatorDir();
     try {
@@ -741,7 +731,8 @@ describe("coordinator Bash restrictions", () => {
         },
         cwd: coordCwd,
       });
-      // Bash is not Task/Agent, so it should skip after passing the guard.
+      // Bash is not Task/Agent, so processTaskIntercept skips after the
+      // guard allows it (not "intercept").
       expect(result.action).toBe("skip");
     } finally {
       await cleanup();
@@ -865,9 +856,6 @@ describe("coordinator Bash restrictions", () => {
   test("allows ${VAR} parameter expansion (no command substitution)", async () => {
     await setupCoordinatorDir();
     try {
-      // ${VAR} alone doesn't run a command. The original guard rejected it
-      // out of caution; the refined guard allows plain parameter expansion
-      // because the coordinator's environment is controlled.
       const result = await processTaskIntercept({
         tool_name: "Bash",
         tool_input: { command: "ib send agent-abcd1234 ${MSG}" },
@@ -895,11 +883,6 @@ describe("coordinator Bash restrictions", () => {
       await cleanup();
     }
   });
-
-  // Lock-in tests for adversarial shapes flagged by review — these shapes are
-  // already caught by the lexer (the `<` / `>` redirect rules and the inner
-  // walk into `${…}` bodies handle them), but pinning them down prevents a
-  // future refactor from quietly relaxing the wrong knob.
 
   test("still blocks <<<word here-string redirect", async () => {
     await setupCoordinatorDir();
@@ -966,17 +949,8 @@ describe("coordinator Bash restrictions", () => {
     }
   });
 
-  // ------------------------------------------------------------------
-  // Heredoc state-machine adversarial round (round 2 of review)
-  //
-  // Reviewer #2 surfaced HOLE-1: the newline that ended the terminator
-  // line was being silently consumed, so a second command on the line
-  // after `EOF` was approved as long as the second command itself had
-  // no scanned metachars. Reviewer #1 surfaced two related concerns:
-  // the "no following newline" path used to return null without
-  // scanning the opener tail, and the `<<-` tab-stripping was too
-  // permissive (stripped spaces too).
-  // ------------------------------------------------------------------
+  // Heredoc state-machine regression guards: post-terminator command
+  // separator, `<<-` tab-only stripping, opener-tail defense-in-depth.
 
   test("blocks a second command on the line AFTER a heredoc terminator", async () => {
     await setupCoordinatorDir();
@@ -1001,9 +975,8 @@ describe("coordinator Bash restrictions", () => {
   test("blocks a second command after EOF even when the second command has no scanned metachars", async () => {
     await setupCoordinatorDir();
     try {
-      // The original HOLE-1 shape: second command is a plain word, so
-      // none of the per-char metachar rules fire; only the newline-
-      // after-terminator check can catch it.
+      // No `;|&` etc. in the second command — only the post-terminator
+      // command-separator rule can catch this shape.
       const result = await processTaskIntercept({
         tool_name: "Bash",
         tool_input: {
@@ -1023,9 +996,6 @@ describe("coordinator Bash restrictions", () => {
   test("allows a heredoc terminated by EOF at end-of-command (no trailing content)", async () => {
     await setupCoordinatorDir();
     try {
-      // The new "block on trailing content" rule must NOT regress the
-      // common case of a single heredoc whose terminator is the last
-      // thing in the command.
       const result = await processTaskIntercept({
         tool_name: "Bash",
         tool_input: {
@@ -1058,9 +1028,8 @@ describe("coordinator Bash restrictions", () => {
   test("blocks `<<EOF` opener with no following newline but a `;` in the opener tail (defense-in-depth)", async () => {
     await setupCoordinatorDir();
     try {
-      // No newlines anywhere — bash would error, but the guard must not
-      // rely on bash to refuse it. The `;` in the opener tail must be
-      // caught even though the heredoc body never opens.
+      // Bash would error on the malformed opener, but the guard scans
+      // the opener tail itself rather than relying on bash to refuse it.
       const result = await processTaskIntercept({
         tool_name: "Bash",
         tool_input: { command: "ib send a <<EOF garbage ; rm -rf /tmp/x" },
@@ -1078,16 +1047,11 @@ describe("coordinator Bash restrictions", () => {
   test("`<<-` strips leading TABS only — leading SPACES on terminator do NOT terminate", async () => {
     await setupCoordinatorDir();
     try {
-      // With `<<-`, bash strips leading tabs from the terminator. A
-      // terminator line indented with spaces does NOT terminate in bash;
-      // the body continues. Our lexer must match this so it doesn't
-      // approve a heredoc that bash would reject as never-terminated.
-      //
-      // Note: even when the lexer's terminator detection misses, the
-      // overall scan reaches end-of-string still in heredoc mode and
-      // returns null (an "allow"). That's fine when there's no following
-      // content. We pair this with the next test where there IS a
-      // post-body second command to make the requirement crisp.
+      // Asserting allow here pins down "do not misidentify a space-
+      // prefixed line as the terminator." If we did, the trailing `; rm
+      // -rf /tmp/x` would be exposed as a normal-shell command and
+      // blocked — flipping this assertion to "intercept" would mask the
+      // regression we're guarding against.
       const result = await processTaskIntercept({
         tool_name: "Bash",
         tool_input: {
@@ -1095,16 +1059,6 @@ describe("coordinator Bash restrictions", () => {
         },
         cwd: coordCwd,
       });
-      // With proper tab-only stripping, the `  EOF` line is body data,
-      // not a terminator. The body continues through `; rm -rf /tmp/x`.
-      // Body is `expand=true` (bare delim), so `;` is harmless literal
-      // and `rm -rf /tmp/x` has no flagged char. We end in heredoc state
-      // at end-of-string → return null → ALLOW. (Bash would also error
-      // out at parse time, so nothing executes.)
-      //
-      // This test pins down that we DON'T misidentify the spaces-prefix
-      // line as a terminator, which would otherwise expose the trailing
-      // `; rm -rf /tmp/x` as a normal-shell command. We assert ALLOW.
       expect(result.action).toBe("skip");
     } finally {
       await cleanup();
@@ -1114,12 +1068,10 @@ describe("coordinator Bash restrictions", () => {
   test("allows a heredoc whose body contains a line `EOF ` (trailing space, NOT a bash terminator)", async () => {
     await setupCoordinatorDir();
     try {
-      // Reviewer #2 over-block: bash's terminator match is exact — a body
-      // line of `EOF` followed by a space is data, not a terminator. The
-      // lexer must NOT terminate on that line, otherwise the real `EOF`
-      // line that follows would look like a "second command" under the
-      // HOLE-1 rule and get rejected. This pins down the exact-match
-      // (no trailing-whitespace tolerance) on the terminator line.
+      // Bash terminator match is exact; the lexer must not strip trailing
+      // whitespace. If it did, the real `EOF` line below would look like
+      // a "second command" under the post-terminator rule and trigger a
+      // false reject of a valid heredoc.
       const result = await processTaskIntercept({
         tool_name: "Bash",
         tool_input: {
@@ -1136,10 +1088,6 @@ describe("coordinator Bash restrictions", () => {
   test("`<<-` with leading TABS on the terminator does terminate (then second command is blocked)", async () => {
     await setupCoordinatorDir();
     try {
-      // With `<<-`, leading TABS on the terminator are stripped. The
-      // tabbed line terminates the body and the post-body `\nrm -rf …`
-      // must be blocked by the new "newline after heredoc terminator"
-      // rule.
       const result = await processTaskIntercept({
         tool_name: "Bash",
         tool_input: {

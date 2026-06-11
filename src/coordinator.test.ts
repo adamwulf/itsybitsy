@@ -600,16 +600,28 @@ describe("ensureSystemCoordinator", () => {
     await expect(ensureSystemCoordinator()).rejects.toThrow("Failed to create system coordinator tmux session");
   });
 
-  test("uses coordinator.model from config", async () => {
-    // Write a config file with a custom model
-    const { mkdir } = await import("fs/promises");
-    await mkdir(tmpDir, { recursive: true });
-    const configPath = join(tmpDir, "config.json");
-    await Bun.write(configPath, JSON.stringify({ coordinator: { model: "claude:sonnet" } }));
-
-    // Override config path
-    const { setUserConfigPath, resetUserConfigPath } = await import("./config");
-    setUserConfigPath(configPath);
+  test("reads model from the coordinator agent-type file", async () => {
+    // The system coordinator's model is now sourced from the `coordinator`
+    // agent-type file (~/.itsybitsy/agent-types/coordinator.md), NOT from
+    // any config.json key. Seed a coordinator agent-type with a custom model
+    // and confirm the spawn line picks it up.
+    const coordTypePath = join(typesHome, ".itsybitsy", "agent-types", "coordinator.md");
+    await mkdir(join(typesHome, ".itsybitsy", "agent-types"), { recursive: true });
+    await Bun.write(
+      coordTypePath,
+      [
+        "---",
+        "name: coordinator",
+        "description: test coordinator",
+        "canSpawnChildren: true",
+        "instructionStyle: coordinator",
+        "model: claude:sonnet",
+        "---",
+        "",
+        "body",
+        "",
+      ].join("\n"),
+    );
 
     const commands: string[][] = [];
     coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
@@ -621,19 +633,15 @@ describe("ensureSystemCoordinator", () => {
       return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
     });
 
-    try {
-      await ensureSystemCoordinator();
+    await ensureSystemCoordinator();
 
-      const cmdStrs = commands.map((c) => c.join(" "));
-      const claudeCmd = cmdStrs.find((c) => c.includes("claude --model"));
-      expect(claudeCmd).toContain("claude --model sonnet");
-      // The prompt is delivered via the SessionStart hook now — no positional
-      // arg and no cat substitution.
-      expect(claudeCmd).not.toContain("$(cat");
-      expect(claudeCmd).not.toContain("coordinator-prompt.txt");
-    } finally {
-      resetUserConfigPath();
-    }
+    const cmdStrs = commands.map((c) => c.join(" "));
+    const claudeCmd = cmdStrs.find((c) => c.includes("claude --model"));
+    expect(claudeCmd).toContain("claude --model sonnet");
+    // The prompt is delivered via the SessionStart hook now — no positional
+    // arg and no cat substitution.
+    expect(claudeCmd).not.toContain("$(cat");
+    expect(claudeCmd).not.toContain("coordinator-prompt.txt");
   });
 
   test("fresh launch with --channels does not append `--` (no positional prompt to terminate)", async () => {

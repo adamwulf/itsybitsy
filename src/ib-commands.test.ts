@@ -3969,11 +3969,16 @@ describe("newAgent (native)", () => {
 
     const userConfigPath = join(coordRepo, "config.json");
     setUserConfigPath(userConfigPath);
-    // No coordinator.model in config so _all.md is the deciding layer.
+    // Coordinator path never consults config.model and there is no
+    // coordinator-specific fallback, so _all.md is the deciding layer.
     await Bun.write(userConfigPath, JSON.stringify({}, null, 2));
 
     await writeLayerModel("_all", "model: claude:claude-opus-4-7", { spawnable: false });
     await writeLayerModel("_non_coordinator", "model: claude:claude-sonnet-4-6", { spawnable: false });
+    // Override the embedded coordinator.md (which declares `model: claude:opus`)
+    // with a blank model so the precedence chain falls through to _all.md.
+    // canSpawnChildren: true preserves coordinator semantics.
+    await writeLayerModel("coordinator", "model:", { canSpawnChildren: true });
 
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       const cmdStr = cmd.join(" ");

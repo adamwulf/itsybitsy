@@ -418,17 +418,13 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   // it back when other clients attach/detach.
   await coordinatorSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION), "window-size", "manual"]);
 
-  // `config` is still needed for `coordinator.imessage` below; the model is
-  // sourced entirely from the agent-type layer chain.
   const config = await readConfig();
-  // Model precedence for the system coordinator must match the per-repo
-  // coordinator path in src/ib-commands.ts (most-specific wins):
-  //   coordinator.md model > _all.md model > "claude:opus"
-  // _non_coordinator.md and config.model are intentionally NOT consulted —
-  // _non_coordinator.md is by definition not for coordinators, and config.model
-  // would let a user's global setting clobber the coordinator agent-type. Each
-  // layer is loaded defensively: a missing/broken layer warns but does not
-  // abort the spawn (matching ib-commands.ts:3465-3479).
+  // Model precedence (most-specific wins, first non-empty value wins):
+  //   coordinator.md > _all.md > "claude:opus"
+  // config.model is intentionally skipped — it would let a user's global
+  // setting clobber the coordinator agent-type. _non_coordinator.md is by
+  // definition not consulted. Errors are routed through logToWatchLog rather
+  // than console.error (unlike ib-commands.ts) to avoid corrupting the TUI.
   let coordLayer: { model?: string } | undefined;
   let allLayer: { model?: string } | undefined;
   try {
@@ -441,10 +437,6 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   } catch (err) {
     logToWatchLog(`[coordinator] failed to load _all agent type layer: ${err instanceof Error ? err.message : String(err)}`);
   }
-  // Walk layers from most-specific to least; first non-empty wins. A blank
-  // `model:` in any layer parses to undefined and is skipped, so a more-specific
-  // layer declaring `model:` with no value does NOT clobber a real value set by
-  // a less-specific layer.
   let agentTypeModel: string | undefined;
   for (const layerModel of [coordLayer?.model, allLayer?.model]) {
     if (layerModel) { agentTypeModel = layerModel; break; }

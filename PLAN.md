@@ -1063,8 +1063,8 @@ Define the system coordinator's configuration, prompt, and permissions templates
 
 - [ ] Initial prompt text (see SPEC.md §12.1.5)
 - [ ] Settings template: permissions allow `Bash(ib:*)`, deny `Bash`, Read, Write, Edit, MultiEdit, Glob, Grep, LS, NotebookEdit, WebFetch, WebSearch, Task, TaskOutput, Agent, KillShell, EnterPlanMode, ExitPlanMode (note: unqualified `Bash` must be denied to prevent sandbox bypass; deny list is a superset of the per-repo coordinator deny list — adds Read/Glob/Grep/LS since the system coordinator has no codebase to inspect)
-- [ ] Model: configurable via `coordinator.model` config key, default `opus`
-- [ ] New config keys in `src/config.ts`: `coordinator.model` (string). Coordinator permission lists live in `~/.itsybitsy/agent-types/coordinator.md` frontmatter, not in config.
+- [ ] Model: configurable via the `model:` field in `~/.itsybitsy/agent-types/coordinator.md` frontmatter, default `claude:opus`
+- [ ] Coordinator model and permission lists live in `~/.itsybitsy/agent-types/coordinator.md` frontmatter, not in config. (Historic: the now-removed `coordinator.model` config key.)
 - [ ] Session name constant: `IB_COORDINATOR_SESSION = "ib-coordinator"`
 - [ ] Tests for settings generation, prompt text
 

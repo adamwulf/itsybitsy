@@ -6,7 +6,7 @@
  */
 
 import { truncateToWidth } from "@mariozechner/pi-tui";
-import { RESET, BOLD, DIM, DIM_GRAY, REVERSE } from "./colors";
+import { RESET, BOLD, DIM, DIM_GRAY, REVERSE, BG_DIM_GRAY } from "./colors";
 
 /** The focusable panels in the dashboard. */
 export type FocusTarget =
@@ -168,19 +168,25 @@ export function buildFocusSeparator(
  * Layout: 4-dash left pad, then each tab as ` label ` separated by a single
  * dash, with remaining dashes filling to `width`.
  *
- * - Focused tab: ` label ` in REVERSE+BOLD (mirrors buildFocusSeparator's
- *   focused branch).
- * - Unfocused tab: ` label ` in DIM.
+ * The `focused` flag on each tab marks which tab is currently SELECTED (the
+ * tree being shown). The `paneFocused` argument indicates whether the
+ * containing pane currently holds keyboard focus.
+ *
+ * - Active tab + pane has focus: ` label ` in REVERSE+BOLD (high-contrast).
+ * - Active tab + pane unfocused: ` label ` in BG_DIM_GRAY (muted grey
+ *   background) so the active tab is still distinguishable from the inactive
+ *   one without competing with the dark focus highlight elsewhere.
+ * - Inactive tab: ` label ` in DIM.
  * - Dashes (both pads and separators): DIM_GRAY.
- * - When NO tab is focused: the entire line is wrapped in DIM to match the
+ * - When the pane is unfocused: the entire line is wrapped in DIM to match the
  *   unfocused look of buildFocusSeparator (so the header doesn't visually
  *   dominate when focus is elsewhere).
  */
 export function buildTabbedFocusSeparator(
   tabs: ReadonlyArray<{ label: string; focused: boolean }>,
   width: number,
+  paneFocused: boolean = true,
 ): string {
-  const anyFocused = tabs.some((t) => t.focused);
   const leftPad = 4;
   // Each tab string takes ` label `. Between tabs we render a single dash.
   // Compute consumed width: leftPad + sum(tab widths) + (tabs.length-1) separators.
@@ -192,7 +198,7 @@ export function buildTabbedFocusSeparator(
   const rightPad = Math.max(1, width - consumed);
 
   // Build dashes. Dashes are DIM_GRAY in both modes; the outer DIM wrap (when
-  // no tab is focused) is applied to the entire line for parity with the
+  // the pane is unfocused) is applied to the entire line for parity with the
   // unfocused buildFocusSeparator look.
   const dashSegment = (n: number) => `${DIM_GRAY}${"─".repeat(n)}${RESET}`;
 
@@ -202,7 +208,14 @@ export function buildTabbedFocusSeparator(
     const tab = tabs[i]!;
     const labelStr = ` ${tab.label} `;
     if (tab.focused) {
-      parts.push(`${REVERSE}${BOLD}${labelStr}${RESET}`);
+      // Active tab: high-contrast when the pane has focus, muted grey
+      // background when it does not — so the selected tab is still
+      // distinguishable without claiming keyboard-focus styling.
+      if (paneFocused) {
+        parts.push(`${REVERSE}${BOLD}${labelStr}${RESET}`);
+      } else {
+        parts.push(`${BG_DIM_GRAY}${labelStr}${RESET}`);
+      }
     } else {
       parts.push(`${DIM}${labelStr}${RESET}`);
     }
@@ -213,7 +226,7 @@ export function buildTabbedFocusSeparator(
   parts.push(dashSegment(rightPad));
 
   const line = parts.join("");
-  if (!anyFocused) {
+  if (!paneFocused) {
     return truncateToWidth(`${DIM}${line}${RESET}`, width, "");
   }
   return truncateToWidth(line, width, "");

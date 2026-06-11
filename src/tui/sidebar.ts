@@ -164,17 +164,21 @@ export class SidebarComponent implements Component {
     }
 
     // Tree section header: a side-by-side Agents/Teams tab line. The active
-    // tab is highlighted (REVERSE+BOLD); the inactive tab is DIM. Only ONE
-    // tree (the active one) renders below — the header reflects which tree
-    // is currently VISIBLE (i.e., `sidebarMode`), not which panel has focus.
-    // After Phase 1 (§17.1) focus and sidebar visibility are independent axes;
-    // the tab header tracks visibility so the user always sees the correct
-    // label highlighted for the tree below.
+    // tab (matching `sidebarMode`) is always marked; the inactive tab is DIM.
+    // Only ONE tree (the active one) renders below — the header reflects which
+    // tree is currently VISIBLE (i.e., `sidebarMode`), not which panel has
+    // focus. After Phase 1 (§17.1) focus and sidebar visibility are
+    // independent axes. The `paneFocused` flag drives the active tab's
+    // contrast: REVERSE+BOLD when the tree pane holds keyboard focus, muted
+    // grey background otherwise — so the dark high-contrast highlight follows
+    // the focus, while the Agents/Teams selection stays visible.
+    const treePaneFocused =
+      this.focusTarget === "agent-tree" || this.focusTarget === "teams-tree";
     const tabs = [
       { label: "Agents", focused: this.sidebarMode === "agents" },
       { label: "Teams", focused: this.sidebarMode === "teams" },
     ];
-    lines.push(buildTabbedFocusSeparator(tabs, w));
+    lines.push(buildTabbedFocusSeparator(tabs, w, treePaneFocused));
     if (showTeams) {
       this.teamsTree.maxHeight = treeHeight;
       const treeLines = this.teamsTree.render(w);

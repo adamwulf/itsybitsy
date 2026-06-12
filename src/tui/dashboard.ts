@@ -3161,7 +3161,7 @@ export async function launchDashboard(): Promise<void> {
       watcher.stop();
       tui.stop();
       dashboard.setTerminalTitle("");
-      process.stdout.write("\x1b[2J\x1b[H");
+      process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[2J\x1b[H");
       // Unsubscribe the state-change listener before stopping so a stop()
       // transition doesn't fire one final logToWatchLog call after we've
       // already torn down the TUI write paths.
@@ -3247,6 +3247,17 @@ export async function launchDashboard(): Promise<void> {
       });
     }
     tui.requestRender();
+  });
+
+  // Disable terminal mouse reporting so the emulator handles clicks natively
+  // (drag-select, double-click word, ⌘C) and we never see mouse bytes on stdin.
+  // Without this, a previously-running program can leave Ghostty in a legacy
+  // mouse mode that streams \x1b[D (left-arrow) floods on every click.
+  // Sequences: ?1000 (X10), ?1002 (button-event), ?1003 (any-event), ?1006 (SGR).
+  process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
+  // Re-assert on exit in case anything inside the session re-enabled mouse mode.
+  process.on("exit", () => {
+    process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
   });
 
   tui.start();

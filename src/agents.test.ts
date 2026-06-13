@@ -18,6 +18,7 @@ import {
   isCompacting,
   isRateLimited,
   isApiError,
+  isApiErrorRateLimited,
   hasBackgroundTasks,
   isDeadPane,
   anyChildActive,
@@ -1400,6 +1401,44 @@ describe("isApiError", () => {
 
   test("returns false on empty input", () => {
     expect(isApiError("")).toBe(false);
+  });
+});
+
+describe("isApiErrorRateLimited", () => {
+  test("detects the server-side rate-limit variant", () => {
+    const output = "  ⎿  API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited";
+    expect(isApiErrorRateLimited(output)).toBe(true);
+  });
+
+  test("returns false for Stream idle timeout (non-rate-limited variant)", () => {
+    const output = "  ⎿  API Error: Stream idle timeout - partial response received";
+    expect(isApiErrorRateLimited(output)).toBe(false);
+  });
+
+  test("returns false for 5xx api_error variants", () => {
+    expect(isApiErrorRateLimited("  ⎿  API Error: 500 Internal Server Error")).toBe(false);
+    expect(isApiErrorRateLimited("  ⎿  API Error: 502 Bad Gateway")).toBe(false);
+    expect(isApiErrorRateLimited("  ⎿  API Error: 503 Service Unavailable")).toBe(false);
+  });
+
+  test("returns false for plain text without API Error marker", () => {
+    const output = "running some task — temporarily limiting requests is just a string here";
+    expect(isApiErrorRateLimited(output)).toBe(false);
+  });
+
+  test("returns false when 'API Error' lacks ⎿ marker (avoids quoting false-positive)", () => {
+    // A watchdog nudge quoting the phrase should not retrigger detection.
+    const output = "[watchdog] previous tick saw API Error: Server is temporarily limiting requests — see log";
+    expect(isApiErrorRateLimited(output)).toBe(false);
+  });
+
+  test("returns false on empty input", () => {
+    expect(isApiErrorRateLimited("")).toBe(false);
+  });
+
+  test("strips ANSI before checking", () => {
+    const output = "\x1b[31m  ⎿  API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited\x1b[0m";
+    expect(isApiErrorRateLimited(output)).toBe(true);
   });
 });
 

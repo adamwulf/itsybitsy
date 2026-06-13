@@ -51,6 +51,7 @@ import {
   resetWatchdogReadConfig,
   clearAllAgentsCache,
   getTracker,
+  API_ERROR_BACKOFF_MS,
 } from "./watchdog";
 import {
   setSendSpawnRunner,
@@ -231,9 +232,16 @@ describe("Phase 6 — handler-level cli gating", () => {
     });
 
     test("claude:opus agent: still sends 'please retry' (regression)", async () => {
-      setWatchdogNow(() => 1_000_000);
+      // First tick captures the variant + sets the anchor; the second tick
+      // after API_ERROR_BACKOFF_MS[0] (1s) fires the first nudge. We don't
+      // stage a tmux output here — the handler will fall back to "not the
+      // rate-limited variant" and use the default 1s schedule entry.
+      let now = 1_000_000;
+      setWatchdogNow(() => now);
 
       const a1 = agentWithModel("a1", "api_error", "claude:opus");
+      await tick([a1]);
+      now += (API_ERROR_BACKOFF_MS[0] as number);
       await tick([a1]);
 
       expect(countRetryCalls(spawnMock)).toBe(1);
@@ -241,9 +249,12 @@ describe("Phase 6 — handler-level cli gating", () => {
     });
 
     test("legacy bare 'opus' model: parseModel throws, falls back to claude (still sends retry)", async () => {
-      setWatchdogNow(() => 1_000_000);
+      let now = 1_000_000;
+      setWatchdogNow(() => now);
 
       const a1 = agentWithModel("a1", "api_error", "opus");
+      await tick([a1]);
+      now += (API_ERROR_BACKOFF_MS[0] as number);
       await tick([a1]);
 
       expect(countRetryCalls(spawnMock)).toBe(1);

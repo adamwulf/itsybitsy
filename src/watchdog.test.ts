@@ -54,7 +54,8 @@ import {
   RATE_LIMIT_MAX_RETRIES,
   RATE_LIMIT_RETRY_DELAY_MS,
   API_ERROR_MAX_RETRIES,
-  API_ERROR_RETRY_INTERVAL_MS,
+  API_ERROR_BACKOFF_MS,
+  API_ERROR_RATE_LIMITED_START_INDEX,
   WATCHDOG_SENTINEL,
   type AgentTracker,
 } from "./watchdog";
@@ -1502,102 +1503,329 @@ describe("watchdog", () => {
       }).length;
     }
 
-    test("first detection sends 'please retry' once", async () => {
+    /** Stage a transient-error tmux output so the first-tick variant capture
+     *  classifies the episode as a non-rate-limited api_error. */
+    function stageTransientErrorOutput(): void {
+      setWatchdogCaptureTmux(async () => "  ⎿  API Error: Stream idle timeout");
+    }
+
+    /** Stage the server-side rate-limited variant output. */
+    function stageRateLimitedOutput(): void {
+      setWatchdogCaptureTmux(async () =>
+        "  ⎿  API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited"
+      );
+    }
+
+    /** Indexed read from the readonly backoff schedule. The schedule is a
+     *  fixed-length literal at the source, so any in-range index returns a
+     *  defined value — the `as number` just sheds noUncheckedIndexedAccess
+     *  noise in the tests. */
+    function backoff(i: number): number {
+      return API_ERROR_BACKOFF_MS[i] as number;
+    }
+
+    test("first detection is a no-op (deferred by backoff schedule)", async () => {
+      stageTransientErrorOutput();
       setWatchdogNow(() => 1_000_000);
       const a1 = agent("a1", "api_error");
 
       await tick([a1]);
 
-      expect(countRetryCalls()).toBe(1);
+      expect(countRetryCalls()).toBe(0);
       const tracker = getTracker("a1");
-      expect(tracker.apiErrorRetries).toBe(1);
+      expect(tracker.apiErrorRetries).toBe(0);
       expect(tracker.apiErrorLastAtMs).toBe(1_000_000);
+      expect(tracker.apiErrorRateLimited).toBe(false);
     });
 
-    test("second tick within retry interval is a no-op", async () => {
+    test("non-rate-limited variant: first nudge fires after 1s", async () => {
+      stageTransientErrorOutput();
       let now = 1_000_000;
       setWatchdogNow(() => now);
       const a1 = agent("a1", "api_error");
 
       await tick([a1]);
+      expect(countRetryCalls()).toBe(0);
+
+      // 999ms in — still no nudge
+      now += backoff(0) - 1;
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(0);
+
+      // Reach 1s — first nudge fires
+      now += 1;
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(1);
+      expect(getTracker("a1").apiErrorRetries).toBe(1);
+    });
+
+    test("second tick within retry interval is a no-op", async () => {
+      stageTransientErrorOutput();
+      let now = 1_000_000;
+      setWatchdogNow(() => now);
+      const a1 = agent("a1", "api_error");
+
+      // First tick: variant capture, no nudge.
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(0);
+
+      // Advance past index-0 (1s) — first nudge fires.
+      now += backoff(0);
+      await tick([a1]);
       expect(countRetryCalls()).toBe(1);
 
-      // Advance less than the retry interval
-      now += API_ERROR_RETRY_INTERVAL_MS - 1;
+      // Advance less than the next backoff step (index 1 = 2s) — no-op.
+      now += backoff(1) - 1;
       await tick([a1]);
       expect(countRetryCalls()).toBe(1);
       expect(getTracker("a1").apiErrorRetries).toBe(1);
     });
 
     test("tick after retry interval sends another 'please retry'", async () => {
+      stageTransientErrorOutput();
       let now = 1_000_000;
       setWatchdogNow(() => now);
       const a1 = agent("a1", "api_error");
 
+      // First tick: variant capture, no nudge.
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(0);
+
+      // After 1s: first nudge.
+      now += backoff(0);
       await tick([a1]);
       expect(countRetryCalls()).toBe(1);
 
-      now += API_ERROR_RETRY_INTERVAL_MS;
+      // After 2s more: second nudge.
+      now += backoff(1);
       await tick([a1]);
       expect(countRetryCalls()).toBe(2);
       expect(getTracker("a1").apiErrorRetries).toBe(2);
     });
 
-    test("MAX_RETRIES caps further sends", async () => {
+    test("schedule walks 1s -> 2s -> 5s -> 10s -> 20s -> 40s -> 80s -> 160s -> 300s", async () => {
+      stageTransientErrorOutput();
       let now = 1_000_000;
       setWatchdogNow(() => now);
       const a1 = agent("a1", "api_error");
 
-      // Fire MAX_RETRIES times by advancing the clock past the interval.
-      for (let i = 0; i < API_ERROR_MAX_RETRIES; i++) {
+      // First tick: variant capture, no nudge.
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(0);
+
+      // Walk each backoff step in the schedule.
+      for (let i = 0; i < API_ERROR_BACKOFF_MS.length; i++) {
+        const delay = backoff(i);
+        // One short of the required delay: still no new nudge.
+        now += delay - 1;
         await tick([a1]);
-        now += API_ERROR_RETRY_INTERVAL_MS;
+        expect(countRetryCalls()).toBe(i);
+        // Cross the threshold: next nudge fires.
+        now += 1;
+        await tick([a1]);
+        expect(countRetryCalls()).toBe(i + 1);
+      }
+
+      expect(getTracker("a1").apiErrorRetries).toBe(API_ERROR_BACKOFF_MS.length);
+    });
+
+    test("schedule caps at 300s for retries beyond the last index", async () => {
+      stageTransientErrorOutput();
+      let now = 1_000_000;
+      setWatchdogNow(() => now);
+      const a1 = agent("a1", "api_error");
+
+      // First tick: variant capture, no nudge.
+      await tick([a1]);
+
+      // Walk through the full schedule.
+      for (let i = 0; i < API_ERROR_BACKOFF_MS.length; i++) {
+        now += backoff(i);
+        await tick([a1]);
+      }
+      expect(countRetryCalls()).toBe(API_ERROR_BACKOFF_MS.length);
+
+      // Beyond the last index, the cap (300s) should still gate.
+      const cap = backoff(API_ERROR_BACKOFF_MS.length - 1);
+      now += cap - 1;
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(API_ERROR_BACKOFF_MS.length);
+      now += 1;
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(API_ERROR_BACKOFF_MS.length + 1);
+    });
+
+    test("MAX_RETRIES caps further sends", async () => {
+      stageTransientErrorOutput();
+      let now = 1_000_000;
+      setWatchdogNow(() => now);
+      const a1 = agent("a1", "api_error");
+
+      // First tick: variant capture, no nudge.
+      await tick([a1]);
+
+      // Walk the schedule (with cap) to fire MAX_RETRIES nudges.
+      for (let i = 0; i < API_ERROR_MAX_RETRIES; i++) {
+        const delayIndex = Math.min(i, API_ERROR_BACKOFF_MS.length - 1);
+        now += backoff(delayIndex);
+        await tick([a1]);
       }
       expect(countRetryCalls()).toBe(API_ERROR_MAX_RETRIES);
 
       // Further ticks should NOT send any more "please retry"s.
+      const cap = backoff(API_ERROR_BACKOFF_MS.length - 1);
       for (let i = 0; i < 3; i++) {
+        now += cap;
         await tick([a1]);
-        now += API_ERROR_RETRY_INTERVAL_MS;
       }
       expect(countRetryCalls()).toBe(API_ERROR_MAX_RETRIES);
       expect(getTracker("a1").apiErrorRetries).toBe(API_ERROR_MAX_RETRIES);
     });
 
     test("transitioning to running resets the counter", async () => {
+      stageTransientErrorOutput();
       let now = 1_000_000;
       setWatchdogNow(() => now);
       const a1 = agent("a1", "api_error");
 
+      // First tick: variant capture, no nudge.
+      await tick([a1]);
+      // Advance past 1s, fire first nudge.
+      now += backoff(0);
       await tick([a1]);
       expect(getTracker("a1").apiErrorRetries).toBe(1);
 
       // Move to running — counter resets.
-      now += API_ERROR_RETRY_INTERVAL_MS;
+      now += backoff(1);
       await tick([agent("a1", "running")]);
       expect(getTracker("a1").apiErrorRetries).toBe(0);
       expect(getTracker("a1").apiErrorLastAtMs).toBe(0);
+      expect(getTracker("a1").apiErrorRateLimited).toBe(false);
 
-      // Back into api_error — fresh episode, fires immediately.
-      now += API_ERROR_RETRY_INTERVAL_MS;
+      // Back into api_error — fresh episode: first tick is a no-op
+      // (variant capture), and the first nudge waits a full 1s again.
+      now += backoff(0);
+      await tick([a1]);
+      expect(getTracker("a1").apiErrorRetries).toBe(0);
+      expect(countRetryCalls()).toBe(1);
+      now += backoff(0);
       await tick([a1]);
       expect(getTracker("a1").apiErrorRetries).toBe(1);
       expect(countRetryCalls()).toBe(2);
     });
 
     test("transitioning to waiting also resets the counter", async () => {
+      stageTransientErrorOutput();
       let now = 1_000_000;
       setWatchdogNow(() => now);
       const a1 = agent("a1", "api_error");
 
+      // First tick: variant capture, no nudge.
+      await tick([a1]);
+      // Fire first nudge so we have non-zero counters to reset.
+      now += backoff(0);
       await tick([a1]);
       expect(getTracker("a1").apiErrorRetries).toBe(1);
 
       // Any non-api_error state (here: waiting) should clear the slate.
-      now += API_ERROR_RETRY_INTERVAL_MS;
+      now += backoff(1);
       await tick([agent("a1", "waiting")]);
       expect(getTracker("a1").apiErrorRetries).toBe(0);
       expect(getTracker("a1").apiErrorLastAtMs).toBe(0);
+      expect(getTracker("a1").apiErrorRateLimited).toBe(false);
+    });
+
+    test("rate-limited variant: first tick records apiErrorRateLimited=true", async () => {
+      stageRateLimitedOutput();
+      setWatchdogNow(() => 1_000_000);
+      const a1 = agent("a1", "api_error");
+
+      await tick([a1]);
+
+      expect(countRetryCalls()).toBe(0);
+      const tracker = getTracker("a1");
+      expect(tracker.apiErrorRateLimited).toBe(true);
+      expect(tracker.apiErrorLastAtMs).toBe(1_000_000);
+    });
+
+    test("rate-limited variant: first nudge waits 5s (skips 1s and 2s)", async () => {
+      stageRateLimitedOutput();
+      let now = 1_000_000;
+      setWatchdogNow(() => now);
+      const a1 = agent("a1", "api_error");
+
+      // First tick: variant capture, no nudge.
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(0);
+
+      // 4999ms in — still no nudge.
+      now += backoff(API_ERROR_RATE_LIMITED_START_INDEX) - 1;
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(0);
+
+      // Reach 5000ms total — first nudge fires.
+      now += 1;
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(1);
+    });
+
+    test("rate-limited variant: subsequent retries continue from index 3 (10s) onward", async () => {
+      stageRateLimitedOutput();
+      let now = 1_000_000;
+      setWatchdogNow(() => now);
+      const a1 = agent("a1", "api_error");
+
+      // First tick: variant capture.
+      await tick([a1]);
+
+      // First nudge after 5s (index 2).
+      now += backoff(API_ERROR_RATE_LIMITED_START_INDEX);
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(1);
+
+      // Next nudge should require index 3 = 10s.
+      now += backoff(API_ERROR_RATE_LIMITED_START_INDEX + 1) - 1;
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(1);
+      now += 1;
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(2);
+
+      // Next nudge should require index 4 = 20s.
+      now += backoff(API_ERROR_RATE_LIMITED_START_INDEX + 2) - 1;
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(2);
+      now += 1;
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(3);
+    });
+
+    test("first-tick capture returning null falls back to non-rate-limited schedule (1s)", async () => {
+      // If the variant-capture tmux read fails (returns null) on the first
+      // tick of an episode, the handler must default `apiErrorRateLimited`
+      // to false — the safe fallback that keeps the schedule aggressive
+      // (1s start) rather than wrongly assuming an upstream throttle.
+      setWatchdogCaptureTmux(async () => null);
+      let now = 1_000_000;
+      setWatchdogNow(() => now);
+      const a1 = agent("a1", "api_error");
+
+      // First tick: variant capture fails, no nudge.
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(0);
+      const tracker = getTracker("a1");
+      expect(tracker.apiErrorRateLimited).toBe(false);
+      expect(tracker.apiErrorLastAtMs).toBe(1_000_000);
+
+      // 999ms later: still no nudge — confirms the 1s gate is active.
+      now += backoff(0) - 1;
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(0);
+
+      // Reach 1s — first nudge fires on the non-rate-limited schedule.
+      now += 1;
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(1);
     });
   });
 
@@ -1633,8 +1861,15 @@ describe("watchdog", () => {
     });
 
     test("api_error 'please retry' nudge carries [sent by watchdog]: prefix", async () => {
-      setWatchdogNow(() => 1_000_000);
+      // The api_error handler now defers the first nudge by API_ERROR_BACKOFF_MS[0]
+      // (the variant capture happens on the first tick), so advance the clock
+      // past that step before the second tick fires the nudge.
+      setWatchdogCaptureTmux(async () => "  ⎿  API Error: Stream idle timeout");
+      let now = 1_000_000;
+      setWatchdogNow(() => now);
       const a1 = agent("a1", "api_error");
+      await tick([a1]);
+      now += (API_ERROR_BACKOFF_MS[0] as number);
       await tick([a1]);
 
       const matching = spawnMock.calls.filter((c) =>

@@ -1750,6 +1750,7 @@ export function handleHelp(ctx: ActionCtx) {
       row("x / D", "remove repo (on header)"),
       row("r", "rename repo (on header)"),
       row("f", "fix resolvable health warnings"),
+      row("V", "cycle filter: all / non-empty / running-only"),
       "",
       header("Open"),
       row("w", "worktree"),

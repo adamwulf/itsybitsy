@@ -4,8 +4,7 @@
 
 import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import { resolveAgentIcon } from "../agents";
-import type { Agent, FlatEntry } from "../agents";
+import { resolveAgentIcon, isRunningState, type Agent, type FlatEntry } from "../agents";
 import type { RepoHealthReport } from "../health-check";
 import type { Selection } from "./selection";
 import { getStateColors } from "./color-scheme";
@@ -14,6 +13,22 @@ import { RESET, BOLD, DIM, REVERSE, RED } from "./colors";
 export const MAX_TREE_HEIGHT = 7;
 const MIN_STATE_COL_WIDTH = 8; // minimum: length of "complete"
 export const AGE_COL_WIDTH = 3; // max age length: e.g. "27m"
+
+/**
+ * Tri-state filter for the agent tree, cycled by the V key:
+ *  - "all"          — every repo header is shown
+ *  - "non-empty"    — only repos that have at least one agent
+ *  - "running-only" — only repos with at least one running agent, and within
+ *                     those repos only the running agents themselves
+ */
+export type RepoFilter = "all" | "non-empty" | "running-only";
+
+/** Next state in the V-key cycle. */
+export function nextRepoFilter(current: RepoFilter): RepoFilter {
+  if (current === "all") return "non-empty";
+  if (current === "non-empty") return "running-only";
+  return "all";
+}
 
 /** Map agent state for display: 'unknown' shows as 'running' */
 export function displayState(state: string): string {
@@ -151,18 +166,30 @@ export class AgentTreeComponent implements Component {
   questionAgentIds: Set<string> = new Set();
   healthReports: Map<string, RepoHealthReport> = new Map();
   suppressSelection = false;
-  /** When true, hide empty repo headers from visibleList unless their repo
-   * contains the current selection. Toggled by the dashboard's V key.
-   * System-coordinator entries are a separate FlatEntry kind and unaffected. */
-  hideEmptyRepos = false;
   /**
-   * Repo path that is force-kept visible even though its header is empty —
-   * the "the user is sitting on an empty repo, so don't yank it out from under
-   * them" carve-out. Explicitly set by selection-changing methods (NOT derived
-   * from selectedId on every getter call) so visibleList stays stable across
-   * intra-action selectedId mutations. Cleared when selection moves to a
-   * non-empty repo, the coordinator, or no-selection. Only meaningful while
-   * hideEmptyRepos is true.
+   * Tri-state view filter cycled by the dashboard's V key:
+   *  - "all"          — show every repo header (current default)
+   *  - "non-empty"    — hide repo headers whose repo has no agents
+   *  - "running-only" — hide repo headers whose repo has no running agents,
+   *                     AND hide individual non-running agents within visible
+   *                     repos. ("Running" includes creating/compacting; see
+   *                     `isRunningState`.)
+   * The currently-selected row's repo (and the selected agent itself, if not
+   * running-ish) are always force-kept visible via `_stickyRevealedRepoPath`
+   * so a stricter filter never yanks the selection out from under the user.
+   * System-coordinator entries are a separate FlatEntry kind and unaffected. */
+  repoFilter: RepoFilter = "all";
+  /**
+   * Repo path that is force-kept visible even though it would otherwise be
+   * filtered out — the "the user is sitting on this row, so don't yank it
+   * out from under them" carve-out. Set when the selection lands on an
+   * empty repo header ("non-empty"/"running-only") or on a non-running
+   * agent inside an otherwise-no-running-agents repo ("running-only").
+   * Explicitly set by selection-changing methods (NOT derived from selectedId
+   * on every getter call) so visibleList stays stable across intra-action
+   * selectedId mutations. Cleared when selection moves to a non-filtered
+   * row, the coordinator, or no-selection. Only meaningful when
+   * repoFilter !== "all".
    */
   private _stickyRevealedRepoPath: string | null = null;
 
@@ -198,23 +225,35 @@ export class AgentTreeComponent implements Component {
     const base = this.flatList.filter((f) =>
       f.kind === "repo-header" || f.kind === "system-coordinator" || !f.agent.archived
     );
-    if (!this.hideEmptyRepos) return base;
+    if (this.repoFilter === "all") return base;
     const sticky = this._stickyRevealedRepoPath;
+    const selectedAgentId = this.hasSelection && this.selectedId !== null && !this.selectedId.startsWith("repopath:") && this.selectedId !== SYSTEM_COORDINATOR_ID
+      ? this.selectedId
+      : null;
     return base.filter((f) => {
-      if (f.kind !== "repo-header") return true;
-      if (f.hasAgents) return true;
-      return sticky !== null && f.repoPath === sticky;
+      if (f.kind === "system-coordinator") return true;
+      if (f.kind === "repo-header") {
+        const passes = this.repoFilter === "non-empty" ? f.hasAgents : f.hasRunningAgents;
+        if (passes) return true;
+        return sticky !== null && f.repoPath === sticky;
+      }
+      // f.kind === "agent": only hide individual agents in running-only mode.
+      if (this.repoFilter !== "running-only") return true;
+      if (isRunningState(f.agent.state)) return true;
+      // Keep the currently-selected agent visible even if it isn't running,
+      // so a filter flip doesn't yank the selection out from under the user.
+      return selectedAgentId !== null && f.agent.id === selectedAgentId;
     });
   }
 
   /**
    * Recompute _stickyRevealedRepoPath from the current selectedId. Called after
    * every selection mutation so the filter has a stable input across the rest
-   * of the operation. No-op when hideEmptyRepos is false (filter ignores sticky
+   * of the operation. No-op when repoFilter === "all" (filter ignores sticky
    * anyway), but we still null it out so a later toggle starts clean.
    */
   private updateStickyReveal(): void {
-    if (!this.hideEmptyRepos || !this.hasSelection || this.selectedId === null) {
+    if (this.repoFilter === "all" || !this.hasSelection || this.selectedId === null) {
       this._stickyRevealedRepoPath = null;
       return;
     }
@@ -231,27 +270,31 @@ export class AgentTreeComponent implements Component {
       this._stickyRevealedRepoPath = null;
       return;
     }
-    // Only stick if the matching repo-header is empty — otherwise it's already
-    // visible on its own merits and sticky would just hide stale state on toggle.
+    // Only stick if the matching repo-header would otherwise be filtered
+    // out by the active filter — otherwise it's already visible on its own
+    // merits and sticky would just hide stale state on the next toggle.
     const header = this._flatList.find(
       (f) => f.kind === "repo-header" && f.repoPath === repoPath
     );
-    if (header && header.kind === "repo-header" && !header.hasAgents) {
-      this._stickyRevealedRepoPath = repoPath;
-    } else {
+    if (!header || header.kind !== "repo-header") {
       this._stickyRevealedRepoPath = null;
+      return;
     }
+    const wouldBeHidden = this.repoFilter === "non-empty"
+      ? !header.hasAgents
+      : !header.hasRunningAgents;
+    this._stickyRevealedRepoPath = wouldBeHidden ? repoPath : null;
   }
 
   /**
-   * Toggle the hide-empty-repos flag. Updates sticky-reveal based on the
-   * current selection, then re-resolves selectedIndex so it stays consistent
-   * with the (now possibly shorter) visibleList — without this, hidden rows
-   * above the selection would leave selectedIndex pointing past the new end.
+   * Change the repo-filter mode. Updates sticky-reveal based on the current
+   * selection, then re-resolves selectedIndex so it stays consistent with
+   * the (now possibly shorter) visibleList — without this, hidden rows above
+   * the selection would leave selectedIndex pointing past the new end.
    */
-  setHideEmptyRepos(value: boolean): void {
-    if (this.hideEmptyRepos === value) return;
-    this.hideEmptyRepos = value;
+  setRepoFilter(value: RepoFilter): void {
+    if (this.repoFilter === value) return;
+    this.repoFilter = value;
     this.updateStickyReveal();
     if (this.hasSelection) {
       this.resolveSelection();
@@ -319,9 +362,9 @@ export class AgentTreeComponent implements Component {
 
   /** Select repo header by repoPath. Returns true if found. Force-selects (§17.1). */
   selectByRepoPath(repoPath: string): boolean {
-    // Repo headers may be empty (hidden by hideEmptyRepos); set selectedId
-    // first so updateStickyReveal can decide whether to keep the header
-    // visible, then re-find selectedIndex in the post-sticky visibleList.
+    // Repo headers may be filtered out by repoFilter; set selectedId first
+    // so updateStickyReveal can decide whether to keep the header visible,
+    // then re-find selectedIndex in the post-sticky visibleList.
     const headerExists = this._flatList.some(
       (f) => f.kind === "repo-header" && f.repoPath === repoPath
     );

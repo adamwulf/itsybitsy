@@ -222,6 +222,13 @@ function recomputeConnectorsForVisible(entries: FlatEntry[], allAgents: Map<stri
     groupStart = i + 1;
   }
 
+  // Count visible roots once — used by the single-repo no-header carve-out
+  // below (a sole visible root gets an empty connector, matching
+  // flattenAgentTree's `multiRoot ? [isLast] : []`). Hoisted out of the
+  // per-agent loop to keep this O(N) instead of O(N²).
+  let visibleRootCount = 0;
+  for (const p of effectiveParentId.values()) if (p === null) visibleRootCount++;
+
   // Build connector strings from the ancestor chain + per-node last-sibling
   // bits. Matches flattenAgentTree's connector format exactly.
   const result: FlatEntry[] = [];
@@ -236,12 +243,9 @@ function recomputeConnectorsForVisible(entries: FlatEntry[], allAgents: Map<stri
     ancestorIsLast.push(isLastSibling.get(e.agent.id) ?? true);
     // Roots: when there's no repo header (single-repo mode), a sole visible
     // root gets no connector — matches flattenAgentTree's `multiRoot ? [isLast] : []`.
-    if (chain.length === 0 && !hasRepoHeaders) {
-      const visibleRootCount = [...effectiveParentId.values()].filter((p) => p === null).length;
-      if (visibleRootCount <= 1) {
-        result.push({ ...e, connector: "" });
-        continue;
-      }
+    if (chain.length === 0 && !hasRepoHeaders && visibleRootCount <= 1) {
+      result.push({ ...e, connector: "" });
+      continue;
     }
     let connector = "";
     for (let k = 0; k < ancestorIsLast.length - 1; k++) {

@@ -423,4 +423,95 @@ describe("ChannelPaneComponent", () => {
       expect(text).not.toContain("── agent-legacy");
     });
   });
+
+  // -------------------------------------------------------------------------
+  // 2-space hanging indent for wrapped continuation lines: the FIRST wrapped
+  // line of each message stays flush-left (so a reader can spot where each
+  // message starts); SUBSEQUENT wrapped lines are prefixed with two spaces.
+  // Short messages that don't wrap render unchanged. The blank visual
+  // separator between messages stays empty (not "  ").
+  // -------------------------------------------------------------------------
+  describe("hanging indent for wrapped continuation lines", () => {
+    test("long chat message: first line flush-left, continuations 2-space indented", async () => {
+      // A long message that will need to wrap at a narrow width.
+      const longMsg = "the quick brown fox jumps over the lazy dog and then keeps running across the field";
+      await appendChannelMessage("backend", {
+        ts: 100,
+        fromAgent: "agent-x",
+        message: longMsg,
+      });
+      const pane = new ChannelPaneComponent();
+      pane.displayHeight = 20;
+      pane.teamName = "backend";
+      await pane.load();
+      const lines = pane.render(30).map(stripAnsi);
+      // Find the message lines (the ones with content, skipping pad/empty rows).
+      const contentLines = lines.filter((l) => l.trim().length > 0);
+      // We expect more than one line of content (the message wrapped).
+      expect(contentLines.length).toBeGreaterThan(1);
+      // First wrapped line MUST be flush-left (starts with the clock-time digit).
+      expect(contentLines[0]!.startsWith(" ")).toBe(false);
+      // All subsequent wrapped lines MUST start with exactly two spaces.
+      for (let i = 1; i < contentLines.length; i++) {
+        expect(contentLines[i]!.startsWith("  ")).toBe(true);
+      }
+    });
+
+    test("short chat message that does NOT wrap renders as a single flush-left line", async () => {
+      await appendChannelMessage("backend", {
+        ts: 100,
+        fromAgent: "agent-x",
+        message: "hi",
+      });
+      const pane = new ChannelPaneComponent();
+      pane.displayHeight = 20;
+      pane.teamName = "backend";
+      await pane.load();
+      const lines = pane.render(80).map(stripAnsi);
+      const contentLines = lines.filter((l) => l.trim().length > 0);
+      expect(contentLines.length).toBe(1);
+      // The single line must not start with whitespace — no indent applied.
+      expect(contentLines[0]!.startsWith(" ")).toBe(false);
+    });
+
+    test("blank separator between messages stays empty (not two spaces)", async () => {
+      await appendChannelMessage("backend", { ts: 100, fromAgent: "agent-a", message: "first" });
+      await appendChannelMessage("backend", { ts: 200, fromAgent: "agent-b", message: "second" });
+      const pane = new ChannelPaneComponent();
+      pane.displayHeight = 20;
+      pane.teamName = "backend";
+      await pane.load();
+      const lines = pane.render(80).map(stripAnsi);
+      const firstIdx = lines.findIndex((l) => l.includes("first"));
+      const secondIdx = lines.findIndex((l) => l.includes("second"));
+      expect(firstIdx).toBeGreaterThanOrEqual(0);
+      expect(secondIdx).toBeGreaterThan(firstIdx);
+      // The line between the two messages should be the blank separator —
+      // exactly empty (or all-whitespace would be wrong here: we explicitly
+      // pushed "" not "  ").
+      const between = lines[firstIdx + 1]!;
+      expect(between).toBe("");
+    });
+
+    test("long system message wraps with the same 2-space hanging indent", async () => {
+      const longMsg = "joined the team after a very long initialization sequence that should definitely wrap at narrow widths";
+      await appendChannelMessage("backend", {
+        ts: 100,
+        fromAgent: "agent-sysactor",
+        message: longMsg,
+        kind: "system",
+      });
+      const pane = new ChannelPaneComponent();
+      pane.displayHeight = 20;
+      pane.teamName = "backend";
+      await pane.load();
+      const lines = pane.render(30).map(stripAnsi);
+      const contentLines = lines.filter((l) => l.trim().length > 0);
+      expect(contentLines.length).toBeGreaterThan(1);
+      expect(contentLines[0]!.startsWith(" ")).toBe(false);
+      for (let i = 1; i < contentLines.length; i++) {
+        expect(contentLines[i]!.startsWith("  ")).toBe(true);
+      }
+    });
+  });
 });

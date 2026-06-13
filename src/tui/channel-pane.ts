@@ -244,7 +244,15 @@ export class ChannelPaneComponent implements Component {
         rec.kind === "system"
           ? formatChannelSystemLine(rec)
           : formatChannelLine(rec, this.teamName, this.userName, this.agentRepoById);
-      wrapped.push(...wrapLines(gutter + body, width));
+      // 2-space hanging indent: the FIRST wrapped line stays flush-left so a
+      // reader can easily spot where each message starts; SUBSEQUENT wrapped
+      // lines are prefixed with two spaces. We wrap to (width - 2) so the
+      // indented continuations don't overflow the pane and get truncated by
+      // truncateToWidth below.
+      const segments = wrapLines(gutter + body, Math.max(1, width - 2));
+      for (let s = 0; s < segments.length; s++) {
+        wrapped.push(s === 0 ? segments[s]! : `  ${segments[s]!}`);
+      }
       // Insert a blank visual separator BETWEEN messages (not after the
       // newest) so chat reads less like a wall of text. The blank line counts
       // toward the scrollback window like any other rendered row.

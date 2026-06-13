@@ -1799,6 +1799,34 @@ describe("watchdog", () => {
       await tick([a1]);
       expect(countRetryCalls()).toBe(3);
     });
+
+    test("first-tick capture returning null falls back to non-rate-limited schedule (1s)", async () => {
+      // If the variant-capture tmux read fails (returns null) on the first
+      // tick of an episode, the handler must default `apiErrorRateLimited`
+      // to false — the safe fallback that keeps the schedule aggressive
+      // (1s start) rather than wrongly assuming an upstream throttle.
+      setWatchdogCaptureTmux(async () => null);
+      let now = 1_000_000;
+      setWatchdogNow(() => now);
+      const a1 = agent("a1", "api_error");
+
+      // First tick: variant capture fails, no nudge.
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(0);
+      const tracker = getTracker("a1");
+      expect(tracker.apiErrorRateLimited).toBe(false);
+      expect(tracker.apiErrorLastAtMs).toBe(1_000_000);
+
+      // 999ms later: still no nudge — confirms the 1s gate is active.
+      now += backoff(0) - 1;
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(0);
+
+      // Reach 1s — first nudge fires on the non-rate-limited schedule.
+      now += 1;
+      await tick([a1]);
+      expect(countRetryCalls()).toBe(1);
+    });
   });
 
   // =========================================================================

@@ -42,7 +42,7 @@ import { wrapLines, wordWrapLines, padLines, findLastTwoSeparators } from "./wra
 import { fetchCodexUsage, fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
-import { AgentTreeComponent } from "./agent-tree";
+import { AgentTreeComponent, nextRepoFilter } from "./agent-tree";
 import { TeamsTreeComponent, flattenTeamsTree } from "./teams-tree";
 import { ChannelPaneComponent } from "./channel-pane";
 import { TeamLogPaneComponent } from "./team-log-pane";
@@ -2409,11 +2409,15 @@ export class DashboardComponent implements Component {
       this.setNotice("Re-checking repo health...");
       this.watcher?.recheckHealth();
     }
-    // V — toggle hide-empty-repos
+    // V — cycle repo filter: all → non-empty → running-only → all
     else if (data === "V") {
-      const next = !this.agentTree.hideEmptyRepos;
-      this.agentTree.setHideEmptyRepos(next);
-      this.setNotice(next ? "Hiding empty repos" : "Showing all repos");
+      const next = nextRepoFilter(this.agentTree.repoFilter);
+      this.agentTree.setRepoFilter(next);
+      const notice =
+        next === "all" ? "Showing all repos"
+        : next === "non-empty" ? "Hiding empty repos"
+        : "Showing only running agents";
+      this.setNotice(notice);
       this.tui?.requestRender();
     }
     // Fix resolvable health warnings (REPO mode only)

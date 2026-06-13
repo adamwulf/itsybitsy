@@ -1073,8 +1073,29 @@ export function buildAgentTree(agents: Agent[]): Agent[] {
 
 export type FlatEntry =
   | { kind: "agent"; agent: Agent; depth: number; connector: string }
-  | { kind: "repo-header"; repoName: string; repoPath: string; hasAgents: boolean }
+  | { kind: "repo-header"; repoName: string; repoPath: string; hasAgents: boolean; hasRunningAgents: boolean }
   | { kind: "system-coordinator"; state: string; age: string };
+
+/**
+ * Whether an agent's render state should count as "actively working" for the
+ * V-cycle "running-only" filter. Includes literal `running` plus the transient
+ * pre-running states `creating` (session not yet emitting markers) and
+ * `compacting` (mid-context-summarization). All other states (waiting,
+ * complete, stopped, error/rate-limit variants) are NOT considered running.
+ */
+export function isRunningState(state: string): boolean {
+  return state === "running" || state === "creating" || state === "compacting";
+}
+
+/** True if `agent` or any non-archived descendant has a running-ish state. */
+function subtreeHasRunning(agent: Agent): boolean {
+  if (agent.archived) return false;
+  if (isRunningState(agent.state)) return true;
+  for (const child of agent.children) {
+    if (subtreeHasRunning(child)) return true;
+  }
+  return false;
+}
 
 /**
  * Flatten agent tree into display order (depth-first), with indentation level.
@@ -1148,15 +1169,16 @@ export function flattenAgentTree(
       if (agents && agents.length > 0) {
         // Filter out per-repo coordinators — they don't appear in the agent tree
         const nonCoordinators = agents.filter(a => a.meta.agentType !== "coordinator");
+        const hasRunningAgents = nonCoordinators.some(subtreeHasRunning);
         // Repo with agents — emit repo header then walk agents
-        result.push({ kind: "repo-header", repoName, repoPath: repoPathByName.get(repoName) ?? "", hasAgents: nonCoordinators.length > 0 });
+        result.push({ kind: "repo-header", repoName, repoPath: repoPathByName.get(repoName) ?? "", hasAgents: nonCoordinators.length > 0, hasRunningAgents });
         for (let i = 0; i < nonCoordinators.length; i++) {
           const isLast = i === nonCoordinators.length - 1;
           walk(nonCoordinators[i]!, 0, [isLast]);
         }
       } else {
         // Empty repo — just a header
-        result.push({ kind: "repo-header", repoName, repoPath: repoPathByName.get(repoName) ?? "", hasAgents: false });
+        result.push({ kind: "repo-header", repoName, repoPath: repoPathByName.get(repoName) ?? "", hasAgents: false, hasRunningAgents: false });
       }
     }
   } else {

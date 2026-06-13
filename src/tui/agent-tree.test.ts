@@ -7,7 +7,7 @@ import {
   MAX_TREE_HEIGHT,
   nextRepoFilter,
 } from "./agent-tree";
-import type { Agent, FlatEntry } from "../agents";
+import { isRunningState, type Agent, type FlatEntry } from "../agents";
 
 function makeAgent(id: string, state: string = "running", overrides: Partial<Agent> = {}): Agent {
   return {
@@ -49,7 +49,7 @@ function makeFlat(agents: Agent[]): FlatEntry[] {
 function makeFlatWithHeaders(groups: Array<{ repoName: string; repoPath: string; agents: Agent[] }>): FlatEntry[] {
   const result: FlatEntry[] = [];
   for (const g of groups) {
-    const hasRunningAgents = g.agents.some((a) => a.state === "running" || a.state === "creating" || a.state === "compacting");
+    const hasRunningAgents = g.agents.some((a) => isRunningState(a.state));
     result.push({ kind: "repo-header", repoName: g.repoName, repoPath: g.repoPath, hasAgents: g.agents.length > 0, hasRunningAgents });
     for (const agent of g.agents) {
       result.push({ kind: "agent", agent, depth: 1, connector: "" });

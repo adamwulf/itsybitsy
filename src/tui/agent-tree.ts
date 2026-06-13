@@ -166,16 +166,28 @@ function recomputeConnectorsForVisible(entries: FlatEntry[], allAgents: Map<stri
 
   // For each visible agent, compute its effective parent id (nearest visible
   // ancestor in its meta.manager chain) and its visible-ancestor chain (root
-  // → A's parent), preserving the original meta.manager order.
+  // → A's parent), preserving the original meta.manager order. The chain is
+  // constrained to the same repoName as the agent (ib supports cross-repo
+  // spawn, but the agent tree groups agents by repo — a cross-repo manager
+  // would point at a parent that isn't in the same group's sibling pool, so
+  // we treat the agent as an effective root of its own repo). A visited set
+  // guards against meta.manager cycles (self-reference, A→B→A); without it
+  // the loop would hang the TUI on every render.
   const effectiveParentId = new Map<string, string | null>();
   const ancestorChain = new Map<string, string[]>();
   for (const e of entries) {
     if (e.kind !== "agent") continue;
     const chain: string[] = [];
+    const visited = new Set<string>([e.agent.id]);
     let mgr = e.agent.meta.manager;
     while (mgr) {
-      if (visibleIds.has(mgr)) chain.push(mgr);
+      if (visited.has(mgr)) break;
+      visited.add(mgr);
       const parentAgent = allAgents.get(mgr);
+      // Only include managers that are visible AND in the same repo.
+      if (parentAgent && parentAgent.repoName === e.agent.repoName && visibleIds.has(mgr)) {
+        chain.push(mgr);
+      }
       if (!parentAgent) break;
       mgr = parentAgent.meta.manager;
     }

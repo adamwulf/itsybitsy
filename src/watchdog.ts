@@ -12,7 +12,7 @@
 import { join } from "path";
 import { mkdirSync } from "fs";
 import { watch, type FSWatcher } from "node:fs";
-import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, isApiError, readAgentState, hasBackgroundTasks, anyChildActive, updateAgentTransient } from "./agents";
+import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, isApiError, isApiErrorRateLimited, readAgentState, hasBackgroundTasks, anyChildActive, updateAgentTransient } from "./agents";
 import type { Agent } from "./agents";
 import { captureTmuxOutput } from "./tmux-poller";
 import { logAgent } from "./agent-lifecycle";
@@ -61,6 +61,9 @@ export interface AgentTracker {
   apiErrorRetries: number;
   /** Wall-clock ms of the last "please retry" nudge (0 = never sent) */
   apiErrorLastAtMs: number;
+  /** True if the current api_error episode was first observed as the
+   *  server-side rate-limit variant. Reset when the agent leaves api_error. */
+  apiErrorRateLimited: boolean;
 }
 
 /**
@@ -198,6 +201,7 @@ export function createTracker(): AgentTracker {
     lastCompactCheckMs: nowFn(),
     apiErrorRetries: 0,
     apiErrorLastAtMs: 0,
+    apiErrorRateLimited: false,
   };
 }
 
@@ -666,10 +670,28 @@ async function handleStopped(_agent: Agent, _tracker: AgentTracker, _getAllAgent
 }
 
 /** Maximum number of "please retry" nudges per api_error episode */
-export const API_ERROR_MAX_RETRIES = 5;
+export const API_ERROR_MAX_RETRIES = 20;
 
-/** Minimum wall-clock interval between "please retry" nudges, in milliseconds */
-export const API_ERROR_RETRY_INTERVAL_MS = 10_000;
+/**
+ * Exponential backoff schedule in milliseconds between consecutive
+ * "please retry" nudges within a single api_error episode. The Nth
+ * retry (1-indexed) uses delay BACKOFF_MS[min(N-1, len-1)].
+ * Sequence: 1s, 2s, 5s, 10s, 20s, 40s, 80s, 160s, 300s (cap).
+ * Index 0 is the gap BEFORE the first retry (so a fresh episode now
+ * waits 1s before the first nudge instead of firing on the detection tick).
+ */
+export const API_ERROR_BACKOFF_MS: readonly number[] = [
+  1_000, 2_000, 5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 300_000,
+];
+
+/**
+ * Index into API_ERROR_BACKOFF_MS used for the FIRST retry of an
+ * episode whose api_error variant is "server is temporarily limiting
+ * requests" (a server-side throttle, not the usage limit). Skips the
+ * 1s and 2s steps and starts at 5s because the upstream service is
+ * already explicitly asking us to back off.
+ */
+export const API_ERROR_RATE_LIMITED_START_INDEX = 2;
 
 /**
  * Handler for "api_error" state.
@@ -677,8 +699,12 @@ export const API_ERROR_RETRY_INTERVAL_MS = 10_000;
  * Claude has displayed a transient API error (e.g. "Stream idle timeout",
  * 5xx, connection error) and is idling waiting for the user to type
  * "please retry". We do that automatically, capped at API_ERROR_MAX_RETRIES
- * per episode and rate-limited to one nudge per API_ERROR_RETRY_INTERVAL_MS
- * so we don't loop hot on a persistent outage.
+ * per episode and rate-limited by an exponential backoff schedule
+ * (API_ERROR_BACKOFF_MS) so we don't loop hot on a persistent outage.
+ *
+ * The server-side "temporarily limiting requests" variant starts the schedule
+ * at a longer initial delay (API_ERROR_RATE_LIMITED_START_INDEX) since the
+ * upstream service is explicitly asking us to slow down.
  *
  * Counter reset for this state happens in processAgents: when any non-api_error
  * state is observed, we clear the retry counters so a successful recovery
@@ -691,6 +717,25 @@ async function handleApiError(agent: Agent, tracker: AgentTracker, _getAllAgents
   // skip for codex agents. Phase 5 will add codex-specific handling if needed.
   if (classifyAgentCli(agent.meta.model) !== "claude") return;
 
+  const now = nowFn();
+
+  // First tick of a new episode: capture the variant, set the "due" anchor to
+  // `now`, and return WITHOUT sending a nudge. The first nudge will fire on a
+  // subsequent tick once the appropriate backoff delay has elapsed. We defer
+  // even non-rate-limited episodes by API_ERROR_BACKOFF_MS[0] (1s) so every
+  // episode begins with the 1s -> 2s -> 5s -> ... schedule.
+  if (tracker.apiErrorLastAtMs === 0 && tracker.apiErrorRetries === 0) {
+    const tmuxSession = agent.meta.tmux_session;
+    if (tmuxSession && isValidTmuxSession(tmuxSession)) {
+      const output = await watchdogCaptureTmuxFn(tmuxSession);
+      tracker.apiErrorRateLimited = output !== null && isApiErrorRateLimited(output);
+    } else {
+      tracker.apiErrorRateLimited = false;
+    }
+    tracker.apiErrorLastAtMs = now;
+    return;
+  }
+
   if (tracker.apiErrorRetries >= API_ERROR_MAX_RETRIES) {
     // One-shot log on the tick we hit the cap so user knows we backed off.
     if (tracker.previousState !== "api_error") {
@@ -702,9 +747,16 @@ async function handleApiError(agent: Agent, tracker: AgentTracker, _getAllAgents
     return;
   }
 
-  const now = nowFn();
-  if (tracker.apiErrorLastAtMs > 0 && now - tracker.apiErrorLastAtMs < API_ERROR_RETRY_INTERVAL_MS) {
-    // Too soon since last retry — skip this tick.
+  // The schedule index for the NEXT nudge is startIndex + apiErrorRetries,
+  // capped at the last index of the table. startIndex accounts for the
+  // rate-limited variant skipping the early shorter delays.
+  const startIndex = tracker.apiErrorRateLimited ? API_ERROR_RATE_LIMITED_START_INDEX : 0;
+  const scheduleIndex = Math.min(startIndex + tracker.apiErrorRetries, API_ERROR_BACKOFF_MS.length - 1);
+  // scheduleIndex is clamped above to a valid index, so the lookup is safe.
+  const requiredDelay = API_ERROR_BACKOFF_MS[scheduleIndex] as number;
+
+  if (now - tracker.apiErrorLastAtMs < requiredDelay) {
+    // Too soon since last anchor — skip this tick.
     return;
   }
 
@@ -761,6 +813,7 @@ async function processAgents(agents: Agent[], allAgents: Agent[]): Promise<void>
     if (agent.state !== "api_error") {
       tracker.apiErrorRetries = 0;
       tracker.apiErrorLastAtMs = 0;
+      tracker.apiErrorRateLimited = false;
     }
 
     // Update previous state after handler runs
@@ -1299,6 +1352,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       if (resolvedState !== "api_error") {
         tracker.apiErrorRetries = 0;
         tracker.apiErrorLastAtMs = 0;
+        tracker.apiErrorRateLimited = false;
       }
 
       tracker.previousState = resolvedState;

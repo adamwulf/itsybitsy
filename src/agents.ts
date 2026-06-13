@@ -657,6 +657,24 @@ export function isApiError(tmuxOutput: string): boolean {
 }
 
 /**
+ * Subset of isApiError: true ONLY when the api_error variant is Claude's
+ * server-side throttle message
+ *   "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited"
+ * which means the upstream service is explicitly asking us to slow down.
+ * Used by the watchdog to start the api_error backoff schedule at a longer
+ * initial delay than transient timeouts/5xx. Requires `⎿  API Error:` so
+ * watchdog nudges that quote the phrase do not false-positive (matches
+ * the existing isApiError anchor).
+ */
+export function isApiErrorRateLimited(tmuxOutput: string): boolean {
+  const stripped = stripAnsi(tmuxOutput);
+  const lines = stripped.split("\n");
+  const last15 = lines.slice(-15).join("\n");
+  if (!/⎿\s*API Error:/.test(last15)) return false;
+  return /temporarily limiting requests/i.test(last15);
+}
+
+/**
  * Check if tmux output indicates background tasks are running.
  * Checks for ⏵⏵ pattern in last 15 lines.
  */

@@ -27,13 +27,13 @@ export function getStateColors(): Record<string, string> {
   if (colorScheme === "light") {
     return {
       creating: YELLOW, running: GREEN, waiting: YELLOW, complete: BLUE,
-      compacting: MAGENTA, rate_limited: RED, api_error: RED, stopped: DIM_GRAY,
+      compacting: MAGENTA, rate_limited: RED, api_error: RED, api_terms: RED, stopped: DIM_GRAY,
       merging: YELLOW, restarting: YELLOW, op_stuck: RED, unknown: WHITE,
     };
   }
   return {
     creating: YELLOW, running: GREEN, waiting: YELLOW, complete: BRIGHT_BLUE,
-    compacting: BRIGHT_MAGENTA, rate_limited: RED, api_error: RED, stopped: DIM_GRAY,
+    compacting: BRIGHT_MAGENTA, rate_limited: RED, api_error: RED, api_terms: RED, stopped: DIM_GRAY,
     merging: YELLOW, restarting: YELLOW, op_stuck: RED, unknown: WHITE,
   };
 }

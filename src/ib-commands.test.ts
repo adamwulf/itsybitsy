@@ -3641,27 +3641,70 @@ describe("newAgent (native)", () => {
     expect(result.stderr).toContain("uncommitted changes");
   });
 
-  test("dirty-worktree check uses _cwd, not process.cwd()", async () => {
-    // The check must read the spawner-supplied cwd, not the test runner's
-    // process.cwd(). We point _cwd at a directory the mock treats as a
-    // dirty git worktree; if the check were using process.cwd() instead,
-    // it would not see the dirty marker and the spawn would proceed.
-    const otherCwd = join(tempDir, "elsewhere");
+  test("dirty-worktree check uses target repoPath, not the caller's _cwd", async () => {
+    // The check must read the *target* repo's state — the repo the sub-agent
+    // will fork from — not the caller's cwd. Repro: coordinator at a dirty
+    // ~/.itsybitsy spawning into a clean tinytext repo must NOT be blocked.
+    //
+    // Here _cwd points at a directory the mock treats as dirty, while the
+    // target repo (tempDir) is clean. The spawn should succeed because the
+    // sub-agent inherits from tempDir's HEAD, not from _cwd.
+    const dirtyCallerCwd = join(tempDir, "elsewhere");
     setNewAgentSpawnRunner((cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => {
       const cmdStr = cmd.join(" ");
-      // Only return dirty status when git is run against the otherCwd.
-      if (cmdStr.includes(`-C ${otherCwd} rev-parse --is-inside-work-tree`)) {
+      // Mark the caller's cwd as dirty…
+      if (cmdStr.includes(`-C ${dirtyCallerCwd} rev-parse --is-inside-work-tree`)) {
         return makeSpawnResult("true", 0);
       }
-      if (cmdStr.includes(`-C ${otherCwd} status --porcelain`)) {
+      if (cmdStr.includes(`-C ${dirtyCallerCwd} status --porcelain`)) {
         return makeSpawnResult(" M foo\n", 0);
+      }
+      // …and leave the target repo (tempDir) clean.
+      if (cmdStr.includes(`-C ${tempDir} rev-parse --is-inside-work-tree`)) {
+        return makeSpawnResult("true", 0);
+      }
+      if (cmdStr.includes(`-C ${tempDir} status --porcelain`)) {
+        return makeSpawnResult("", 0);
       }
       return mockSpawnRunner()(cmd, opts);
     });
-    const result = await newAgent(tempDir, "do work", { _cwd: otherCwd });
+    const result = await newAgent(tempDir, "do work", {
+      _cwd: dirtyCallerCwd,
+      name: "cross-repo-spawn",
+    });
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("cross-repo-spawn");
+  });
+
+  test("dirty-worktree check blocks when target repo is dirty even if caller's cwd is clean", async () => {
+    // Inverse of the cross-repo case: caller has a clean ~/.itsybitsy, but the
+    // target repo has uncommitted changes. The sub-agent would inherit from
+    // the dirty target's HEAD, so the spawn must be rejected — and the error
+    // message must name the *target* repo so the user knows where to commit.
+    const cleanCallerCwd = join(tempDir, "elsewhere-clean");
+    setNewAgentSpawnRunner((cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes(`-C ${cleanCallerCwd} rev-parse --is-inside-work-tree`)) {
+        return makeSpawnResult("true", 0);
+      }
+      if (cmdStr.includes(`-C ${cleanCallerCwd} status --porcelain`)) {
+        return makeSpawnResult("", 0);
+      }
+      if (cmdStr.includes(`-C ${tempDir} rev-parse --is-inside-work-tree`)) {
+        return makeSpawnResult("true", 0);
+      }
+      if (cmdStr.includes(`-C ${tempDir} status --porcelain`)) {
+        return makeSpawnResult(" M target.ts\n", 0);
+      }
+      return mockSpawnRunner()(cmd, opts);
+    });
+    const result = await newAgent(tempDir, "do work", { _cwd: cleanCallerCwd });
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("uncommitted changes");
-    expect(result.stderr).toContain(otherCwd);
+    expect(result.stderr).toContain("target.ts");
+    // Error names the target repo, not the caller's cwd.
+    expect(result.stderr).toContain(tempDir);
+    expect(result.stderr).not.toContain(cleanCallerCwd);
   });
 
   test("dirty check tolerates `git status` exit failure (silent skip)", async () => {

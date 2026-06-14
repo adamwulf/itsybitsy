@@ -3014,11 +3014,16 @@ export async function launchDashboard(): Promise<void> {
   // dashboard from appearing.
   const tgTokenEntry = config["channels.telegram.bot_token"];
   const tgToken = typeof tgTokenEntry?.value === "string" ? tgTokenEntry.value : "";
-  const { TelegramClient } = await import("../channels/telegram-client");
-  const { TelegramDispatcher } = await import("../channels/dispatcher");
+  const { TelegramClient, logCtx: telegramClientLogCtx } = await import("../channels/telegram-client");
+  const { TelegramDispatcher, logCtx: telegramDispatcherLogCtx } = await import("../channels/dispatcher");
   const { TelegramOutbox, defaultOutboxDir } = await import("../channels/outbox");
   const { readAccess } = await import("../channels/access");
   const { bootTelegramSubsystem } = await import("../channels/boot");
+  // Redirect telegram-client and dispatcher logs (which default to stderr)
+  // into watch.log so they don't corrupt the TUI rendering. Must run BEFORE
+  // the telegram boot IIFE so no `getUpdates` retry line can leak in between.
+  telegramClientLogCtx.set(logToWatchLog);
+  telegramDispatcherLogCtx.set(logToWatchLog);
   const access = await readAccess();
   // One-time cleanup of the Phase A chat-id state file. Phase B holds the
   // chat id in memory only; the on-disk artifact is no longer used. Best

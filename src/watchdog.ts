@@ -12,7 +12,7 @@
 import { join } from "path";
 import { mkdirSync } from "fs";
 import { watch, type FSWatcher } from "node:fs";
-import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, isApiError, isApiErrorRateLimited, readAgentState, hasBackgroundTasks, anyChildActive, updateAgentTransient } from "./agents";
+import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, isApiError, isApiErrorRateLimited, isApiTerms, readAgentState, hasBackgroundTasks, anyChildActive, updateAgentTransient } from "./agents";
 import type { Agent } from "./agents";
 import { captureTmuxOutput } from "./tmux-poller";
 import { logAgent } from "./agent-lifecycle";
@@ -669,6 +669,18 @@ async function handleStopped(_agent: Agent, _tracker: AgentTracker, _getAllAgent
   // No-op
 }
 
+/**
+ * Handler for "api_terms" state.
+ *
+ * Claude refused the request because it appears to violate Anthropic's Usage
+ * Policy. This is terminal: retrying with the same prompt will not recover,
+ * and the user must edit the prompt or start a new session. No-op handler —
+ * the agent stays in api_terms until the user intervenes.
+ */
+async function handleApiTerms(_agent: Agent, _tracker: AgentTracker, _getAllAgents: GetAllAgents): Promise<void> {
+  // No-op — surface to the user, do not retry.
+}
+
 /** Maximum number of "please retry" nudges per api_error episode */
 export const API_ERROR_MAX_RETRIES = 20;
 
@@ -774,6 +786,7 @@ registerStateHandler("creating", handleCreating);
 registerStateHandler("compacting", handleCompacting);
 registerStateHandler("rate_limited", handleRateLimited);
 registerStateHandler("api_error", handleApiError);
+registerStateHandler("api_terms", handleApiTerms);
 registerStateHandler("stopped", handleStopped);
 
 /** States that use the wait counter / backoff system */
@@ -1078,6 +1091,9 @@ export function resolveWatchdogState(tmuxOutput: string, metaState: MetaState | 
   // most narrowly scoped (last 5 lines) and the cheapest signal to validate.
   if (isCompacting(tmuxOutput)) return "compacting";
   if (isRateLimited(tmuxOutput)) return "rate_limited";
+  // Usage Policy violation is terminal — checked before isApiError so a
+  // refused-by-policy episode isn't misclassified as a recoverable transient.
+  if (isApiTerms(tmuxOutput)) return "api_terms";
   if (isApiError(tmuxOutput)) return "api_error";
   // Background-shell override: waiting agents with a live background shell
   // are actually still doing work. Scoped strictly to meta.state === "waiting" —
@@ -1313,6 +1329,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
         tmux_compacting: isCompacting(output),
         tmux_rate_limited: isRateLimited(output),
         tmux_api_error: isApiError(output),
+        tmux_api_terms: isApiTerms(output),
         has_background_tasks: hasBackgroundTasks(output),
         updated_at_ms: nowFn(),
         watchdog_pid: process.pid,

@@ -62,7 +62,7 @@ async function plantLiveWatchdog(agentDir: string): Promise<void> {
   await writeAgentTransient(agentDir, {
     tmux_compacting: false,
     tmux_rate_limited: false,
-    tmux_api_error: false,
+    tmux_api_error: false, tmux_api_terms: false,
     has_background_tasks: false,
     updated_at_ms: Date.now(),
     watchdog_pid: 4242,

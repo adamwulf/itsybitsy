@@ -361,6 +361,7 @@ export interface TransientState {
   tmux_compacting: boolean;
   tmux_rate_limited: boolean;
   tmux_api_error: boolean;
+  tmux_api_terms: boolean;
   has_background_tasks: boolean;
   updated_at_ms: number;
   watchdog_pid: number;
@@ -420,6 +421,8 @@ export async function readAgentTransient(agentDir: string): Promise<TransientSta
       tmux_rate_limited: data.tmux_rate_limited,
       // Field added later — older transient files default to false on read.
       tmux_api_error: typeof data.tmux_api_error === "boolean" ? data.tmux_api_error : false,
+      // Field added later — older transient files default to false on read.
+      tmux_api_terms: typeof data.tmux_api_terms === "boolean" ? data.tmux_api_terms : false,
       has_background_tasks: data.has_background_tasks,
       updated_at_ms: data.updated_at_ms,
       watchdog_pid: data.watchdog_pid,
@@ -454,6 +457,7 @@ function emptyTransient(): TransientState {
     tmux_compacting: false,
     tmux_rate_limited: false,
     tmux_api_error: false,
+    tmux_api_terms: false,
     has_background_tasks: false,
     updated_at_ms: 0,
     watchdog_pid: 0,
@@ -672,6 +676,27 @@ export function isApiErrorRateLimited(tmuxOutput: string): boolean {
   const last15 = lines.slice(-15).join("\n");
   if (!/⎿\s*API Error:/.test(last15)) return false;
   return /temporarily limiting requests/i.test(last15);
+}
+
+/**
+ * Check if tmux output indicates Claude refused the request because it appears
+ * to violate Anthropic's Usage Policy (AUP). Claude renders this as a top-level
+ * "API Error:" message (no ⎿ tool-result connector) and the session is dead in
+ * the sense that retrying with the same prompt will not recover. We detect this
+ * as a distinct terminal state (`api_terms`) so the watchdog stops trying to
+ * recover and the user sees a clear signal.
+ *
+ * The leading `⎿` connector is deliberately NOT required: this variant is
+ * rendered as a standalone "API Error:" block, not as a tool-result line. We
+ * anchor on the full phrase ("Claude Code is unable to respond") + a Usage
+ * Policy reference so quoted occurrences in a watchdog nudge don't match.
+ */
+export function isApiTerms(tmuxOutput: string): boolean {
+  const stripped = stripAnsi(tmuxOutput);
+  const lines = stripped.split("\n");
+  const last15 = lines.slice(-15).join("\n");
+  if (!/API Error:.*Claude Code is unable to respond/i.test(last15)) return false;
+  return /usage policy/i.test(last15) || /\/legal\/aup/i.test(last15);
 }
 
 /**
@@ -1826,6 +1851,12 @@ export async function detectAgentStates(
           agent.state = "rate_limited";
           return;
         }
+        // Usage Policy violation is terminal — checked before tmux_api_error so
+        // it can't be misclassified as a recoverable transient.
+        if (transient.tmux_api_terms) {
+          agent.state = "api_terms";
+          return;
+        }
         if (transient.tmux_api_error) {
           agent.state = "api_error";
           return;
@@ -1870,6 +1901,12 @@ export async function detectAgentStates(
       }
       if (isRateLimited(output)) {
         agent.state = "rate_limited";
+        return;
+      }
+      // Usage Policy violation is terminal — checked before isApiError so
+      // it can't be misclassified as a recoverable transient.
+      if (isApiTerms(output)) {
+        agent.state = "api_terms";
         return;
       }
       if (isApiError(output)) {

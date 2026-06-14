@@ -1106,7 +1106,7 @@ export function isRunningState(state: string): boolean {
 }
 
 /** True if `agent` or any non-archived descendant has a running-ish state. */
-function subtreeHasRunning(agent: Agent): boolean {
+export function subtreeHasRunning(agent: Agent): boolean {
   if (agent.archived) return false;
   if (isRunningState(agent.state)) return true;
   for (const child of agent.children) {

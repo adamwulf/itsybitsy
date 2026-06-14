@@ -4,7 +4,7 @@
 
 import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import { resolveAgentIcon, isRunningState, type Agent, type FlatEntry } from "../agents";
+import { resolveAgentIcon, isRunningState, subtreeHasRunning, type Agent, type FlatEntry } from "../agents";
 import type { RepoHealthReport } from "../health-check";
 import type { Selection } from "./selection";
 import { getStateColors } from "./color-scheme";
@@ -146,6 +146,117 @@ export function formatCoordinatorRow(
 /** Sentinel ID used to persist selection on the system coordinator */
 const SYSTEM_COORDINATOR_ID = "__system-coordinator__";
 
+/**
+ * Rebuild box-drawing connectors (├──, └──, │) for the visible agents in
+ * `entries`. Used when a filter hides intermediate agents — the connectors
+ * computed at flatten time reference now-hidden ancestors, so each visible
+ * agent's effective parent is the nearest visible ancestor in its
+ * meta.manager chain, and "is last sibling" is recomputed against the
+ * visible siblings only. Repo headers and the system coordinator pass
+ * through untouched; order of entries is preserved. `allAgents` provides
+ * the full agent lookup so the chain can walk past hidden ancestors.
+ */
+function recomputeConnectorsForVisible(entries: FlatEntry[], allAgents: Map<string, Agent>): FlatEntry[] {
+  const hasRepoHeaders = entries.some((e) => e.kind === "repo-header");
+  // Visible agent ids — to decide which managers in the chain are kept.
+  const visibleIds = new Set<string>();
+  for (const e of entries) {
+    if (e.kind === "agent") visibleIds.add(e.agent.id);
+  }
+
+  // For each visible agent, compute its effective parent id (nearest visible
+  // ancestor in its meta.manager chain) and its visible-ancestor chain (root
+  // → A's parent), preserving the original meta.manager order. The chain is
+  // constrained to the same repoName as the agent (ib supports cross-repo
+  // spawn, but the agent tree groups agents by repo — a cross-repo manager
+  // would point at a parent that isn't in the same group's sibling pool, so
+  // we treat the agent as an effective root of its own repo). A visited set
+  // guards against meta.manager cycles (self-reference, A→B→A); without it
+  // the loop would hang the TUI on every render.
+  const effectiveParentId = new Map<string, string | null>();
+  const ancestorChain = new Map<string, string[]>();
+  for (const e of entries) {
+    if (e.kind !== "agent") continue;
+    const chain: string[] = [];
+    const visited = new Set<string>([e.agent.id]);
+    let mgr = e.agent.meta.manager;
+    while (mgr) {
+      if (visited.has(mgr)) break;
+      visited.add(mgr);
+      const parentAgent = allAgents.get(mgr);
+      // Only include managers that are visible AND in the same repo.
+      if (parentAgent && parentAgent.repoName === e.agent.repoName && visibleIds.has(mgr)) {
+        chain.push(mgr);
+      }
+      if (!parentAgent) break;
+      mgr = parentAgent.meta.manager;
+    }
+    chain.reverse();
+    ancestorChain.set(e.agent.id, chain);
+    effectiveParentId.set(e.agent.id, chain.length > 0 ? chain[chain.length - 1]! : null);
+  }
+
+  // Per repo group, determine each visible agent's "is last visible sibling"
+  // bit. Siblings share an effective parent id (null for visible roots).
+  // Repo group boundaries: each repo-header starts a new group; absent any
+  // repo headers, the whole `entries` list is one group.
+  const isLastSibling = new Map<string, boolean>();
+  let groupStart = 0;
+  for (let i = 0; i <= entries.length; i++) {
+    const atBoundary = i === entries.length || entries[i]!.kind === "repo-header";
+    if (!atBoundary) continue;
+    // Process the previous group [groupStart, i).
+    const lastByParent = new Map<string | null, string>();
+    for (let j = groupStart; j < i; j++) {
+      const e = entries[j]!;
+      if (e.kind !== "agent") continue;
+      const parent = effectiveParentId.get(e.agent.id) ?? null;
+      lastByParent.set(parent, e.agent.id);
+    }
+    for (let j = groupStart; j < i; j++) {
+      const e = entries[j]!;
+      if (e.kind !== "agent") continue;
+      const parent = effectiveParentId.get(e.agent.id) ?? null;
+      isLastSibling.set(e.agent.id, lastByParent.get(parent) === e.agent.id);
+    }
+    groupStart = i + 1;
+  }
+
+  // Count visible roots once — used by the single-repo no-header carve-out
+  // below (a sole visible root gets an empty connector, matching
+  // flattenAgentTree's `multiRoot ? [isLast] : []`). Hoisted out of the
+  // per-agent loop to keep this O(N) instead of O(N²).
+  let visibleRootCount = 0;
+  for (const p of effectiveParentId.values()) if (p === null) visibleRootCount++;
+
+  // Build connector strings from the ancestor chain + per-node last-sibling
+  // bits. Matches flattenAgentTree's connector format exactly.
+  const result: FlatEntry[] = [];
+  for (const e of entries) {
+    if (e.kind !== "agent") {
+      result.push(e);
+      continue;
+    }
+    const chain = ancestorChain.get(e.agent.id) ?? [];
+    const ancestorIsLast: boolean[] = [];
+    for (const ancestorId of chain) ancestorIsLast.push(isLastSibling.get(ancestorId) ?? true);
+    ancestorIsLast.push(isLastSibling.get(e.agent.id) ?? true);
+    // Roots: when there's no repo header (single-repo mode), a sole visible
+    // root gets no connector — matches flattenAgentTree's `multiRoot ? [isLast] : []`.
+    if (chain.length === 0 && !hasRepoHeaders && visibleRootCount <= 1) {
+      result.push({ ...e, connector: "" });
+      continue;
+    }
+    let connector = "";
+    for (let k = 0; k < ancestorIsLast.length - 1; k++) {
+      connector += ancestorIsLast[k] ? "    " : "│   ";
+    }
+    connector += ancestorIsLast[ancestorIsLast.length - 1] ? "└── " : "├── ";
+    result.push({ ...e, connector });
+  }
+  return result;
+}
+
 /** Agent tree component with height constraint and scrolling */
 export class AgentTreeComponent implements Component {
   private _flatList: FlatEntry[] = [];
@@ -230,7 +341,7 @@ export class AgentTreeComponent implements Component {
     const selectedAgentId = this.hasSelection && this.selectedId !== null && !this.selectedId.startsWith("repopath:") && this.selectedId !== SYSTEM_COORDINATOR_ID
       ? this.selectedId
       : null;
-    return base.filter((f) => {
+    const filtered = base.filter((f) => {
       if (f.kind === "system-coordinator") return true;
       if (f.kind === "repo-header") {
         const passes = this.repoFilter === "non-empty" ? f.hasAgents : f.hasRunningAgents;
@@ -240,10 +351,23 @@ export class AgentTreeComponent implements Component {
       // f.kind === "agent": only hide individual agents in running-only mode.
       if (this.repoFilter !== "running-only") return true;
       if (isRunningState(f.agent.state)) return true;
+      // Keep an agent visible if any descendant in its subtree is running, so
+      // managers retain their hierarchical context instead of having their
+      // running children orphaned under a hidden parent.
+      if (subtreeHasRunning(f.agent)) return true;
       // Keep the currently-selected agent visible even if it isn't running,
       // so a filter flip doesn't yank the selection out from under the user.
       return selectedAgentId !== null && f.agent.id === selectedAgentId;
     });
+    if (this.repoFilter !== "running-only") return filtered;
+    // In running-only mode, intermediate agents in the original tree may now be
+    // hidden. The precomputed connectors reference those hidden ancestors, so
+    // rebuild them against only the visible subset.
+    const allAgents = new Map<string, Agent>();
+    for (const e of this._flatList) {
+      if (e.kind === "agent") allAgents.set(e.agent.id, e.agent);
+    }
+    return recomputeConnectorsForVisible(filtered, allAgents);
   }
 
   /**

@@ -382,6 +382,279 @@ describe("AgentTreeComponent", () => {
     expect(agentIds).toEqual(["a1"]);
   });
 
+  // running-only must show the ancestors of a running agent — a 'waiting'
+  // manager with a 'running' child stays visible so the child isn't orphaned
+  // under a hidden parent.
+  test("running-only keeps a waiting manager whose child is running visible", () => {
+    const tree = new AgentTreeComponent();
+    const child = makeAgent("child-1", "running", {
+      repoName: "alpha",
+      repoPath: "/repos/alpha",
+      meta: {
+        ...makeAgent("child-1").meta,
+        manager: "mgr-1",
+      },
+    });
+    const mgr = makeAgent("mgr-1", "waiting", {
+      repoName: "alpha",
+      repoPath: "/repos/alpha",
+      children: [child],
+    });
+    const flat: FlatEntry[] = [
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "agent", agent: mgr, depth: 0, connector: "└── " },
+      { kind: "agent", agent: child, depth: 1, connector: "    └── " },
+    ];
+    tree.setFlatList(flat);
+    tree.setRepoFilter("running-only");
+    const visible = tree.visibleList;
+    const agentIds = visible.filter((f) => f.kind === "agent").map((f) => (f as Extract<FlatEntry, { kind: "agent" }>).agent.id);
+    expect(agentIds).toEqual(["mgr-1", "child-1"]);
+  });
+
+  // After filtering, connectors must reflect ONLY the visible subset: a single
+  // visible child of a single visible parent gets a '└── ' connector under its
+  // parent, not '├── ' pointing at hidden siblings.
+  test("running-only recomputes connectors for the visible subset", () => {
+    const tree = new AgentTreeComponent();
+    // Tree: mgr (waiting)
+    //   ├── child-a (running)
+    //   ├── child-b (waiting)   <-- hidden by filter
+    //   └── child-c (waiting)   <-- hidden by filter
+    const childA = makeAgent("child-a", "running", {
+      repoName: "alpha",
+      repoPath: "/repos/alpha",
+      meta: { ...makeAgent("child-a").meta, manager: "mgr-1" },
+    });
+    const childB = makeAgent("child-b", "waiting", {
+      repoName: "alpha",
+      repoPath: "/repos/alpha",
+      meta: { ...makeAgent("child-b").meta, manager: "mgr-1" },
+    });
+    const childC = makeAgent("child-c", "waiting", {
+      repoName: "alpha",
+      repoPath: "/repos/alpha",
+      meta: { ...makeAgent("child-c").meta, manager: "mgr-1" },
+    });
+    const mgr = makeAgent("mgr-1", "waiting", {
+      repoName: "alpha",
+      repoPath: "/repos/alpha",
+      children: [childA, childB, childC],
+    });
+    const flat: FlatEntry[] = [
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "agent", agent: mgr, depth: 0, connector: "└── " },
+      { kind: "agent", agent: childA, depth: 1, connector: "    ├── " },
+      { kind: "agent", agent: childB, depth: 1, connector: "    ├── " },
+      { kind: "agent", agent: childC, depth: 1, connector: "    └── " },
+    ];
+    tree.setFlatList(flat);
+    tree.setRepoFilter("running-only");
+    const visible = tree.visibleList;
+    const agentEntries = visible.filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent");
+    expect(agentEntries.map((e) => e.agent.id)).toEqual(["mgr-1", "child-a"]);
+    // mgr is the sole visible root in its repo group → its connector starts with the root marker.
+    expect(agentEntries[0]!.connector).toBe("└── ");
+    // child-a is the sole visible child of mgr → '└── ' under mgr (which itself was last),
+    // so the prefix for mgr's level is 4 spaces, then '└── ' for child-a.
+    expect(agentEntries[1]!.connector).toBe("    └── ");
+  });
+
+  // The 'non-empty' and 'all' modes must NOT recompute connectors — they use
+  // the precomputed values from flattenAgentTree as-is.
+  test("non-empty and all modes preserve precomputed connectors", () => {
+    const tree = new AgentTreeComponent();
+    const childA = makeAgent("child-a", "waiting", {
+      repoName: "alpha",
+      repoPath: "/repos/alpha",
+      meta: { ...makeAgent("child-a").meta, manager: "mgr-1" },
+    });
+    const childB = makeAgent("child-b", "waiting", {
+      repoName: "alpha",
+      repoPath: "/repos/alpha",
+      meta: { ...makeAgent("child-b").meta, manager: "mgr-1" },
+    });
+    const mgr = makeAgent("mgr-1", "running", {
+      repoName: "alpha",
+      repoPath: "/repos/alpha",
+      children: [childA, childB],
+    });
+    // Use deliberately-distinctive sentinel connectors so a recomputation
+    // would replace them with the canonical box-drawing strings and fail.
+    const flat: FlatEntry[] = [
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "agent", agent: mgr, depth: 0, connector: "SENTINEL-MGR" },
+      { kind: "agent", agent: childA, depth: 1, connector: "SENTINEL-A" },
+      { kind: "agent", agent: childB, depth: 1, connector: "SENTINEL-B" },
+    ];
+    tree.setFlatList(flat);
+    for (const mode of ["all", "non-empty"] as const) {
+      tree.setRepoFilter(mode);
+      const visible = tree.visibleList;
+      const agentEntries = visible.filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent");
+      expect(agentEntries.map((e) => e.connector)).toEqual(["SENTINEL-MGR", "SENTINEL-A", "SENTINEL-B"]);
+    }
+  });
+
+  // Defensive: a cycle in meta.manager (self-reference or A→B→A) must NOT
+  // hang the connector walk. visibleList is called every render — an infinite
+  // loop here would freeze the TUI. The chief guarantee is termination with a
+  // valid connector for every visible agent; the specific shape under a
+  // degenerate cycle is whatever the chain walk happens to produce.
+  test("running-only handles meta.manager cycles without hanging", () => {
+    const tree = new AgentTreeComponent();
+    // Self-cycle: agent's manager is itself. The walk drops the self-edge
+    // immediately, so this agent has no effective ancestors (a root).
+    const selfCycle = makeAgent("self-cycle", "running", {
+      repoName: "alpha",
+      repoPath: "/repos/alpha",
+      meta: { ...makeAgent("self-cycle").meta, manager: "self-cycle" },
+    });
+    // Two-cycle: A.manager=B, B.manager=A. Each walk takes one step into the
+    // other before the visited-set guard breaks the loop.
+    const cycleA = makeAgent("cycle-a", "running", {
+      repoName: "alpha",
+      repoPath: "/repos/alpha",
+      meta: { ...makeAgent("cycle-a").meta, manager: "cycle-b" },
+    });
+    const cycleB = makeAgent("cycle-b", "running", {
+      repoName: "alpha",
+      repoPath: "/repos/alpha",
+      meta: { ...makeAgent("cycle-b").meta, manager: "cycle-a" },
+    });
+    const flat: FlatEntry[] = [
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "agent", agent: selfCycle, depth: 0, connector: "├── " },
+      { kind: "agent", agent: cycleA, depth: 0, connector: "├── " },
+      { kind: "agent", agent: cycleB, depth: 0, connector: "└── " },
+    ];
+    tree.setFlatList(flat);
+    // The real assertion is that the call returns (i.e. does not hang).
+    const visible = tree.visibleList;
+    tree.setRepoFilter("running-only");
+    const filtered = tree.visibleList;
+    expect(visible.length).toBeGreaterThan(0);
+    const agentEntries = filtered.filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent");
+    expect(agentEntries.map((e) => e.agent.id)).toEqual(["self-cycle", "cycle-a", "cycle-b"]);
+    // Every visible agent must have a non-empty, well-formed connector
+    // (ending in '└── ' or '├── '); we don't pin the exact shape under a
+    // pathological cycle.
+    for (const entry of agentEntries) {
+      expect(entry.connector.endsWith("└── ") || entry.connector.endsWith("├── ")).toBe(true);
+    }
+  });
+
+  // Orphaned manager: meta.manager points at a non-existent id. The chain
+  // walker must drop it and treat the agent as a visible root.
+  test("running-only treats an orphaned manager id as a root", () => {
+    const tree = new AgentTreeComponent();
+    const orphan = makeAgent("orphan", "running", {
+      repoName: "alpha",
+      repoPath: "/repos/alpha",
+      meta: { ...makeAgent("orphan").meta, manager: "ghost-id-does-not-exist" },
+    });
+    const flat: FlatEntry[] = [
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "agent", agent: orphan, depth: 0, connector: "└── " },
+    ];
+    tree.setFlatList(flat);
+    tree.setRepoFilter("running-only");
+    const visible = tree.visibleList;
+    const agentEntries = visible.filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent");
+    expect(agentEntries.map((e) => e.agent.id)).toEqual(["orphan"]);
+    // Sole visible root in a repo group → '└── '.
+    expect(agentEntries[0]!.connector).toBe("└── ");
+  });
+
+  // Cross-repo meta.manager: an agent in repo alpha whose meta.manager points
+  // at an agent in repo beta must be treated as a root inside repo alpha. The
+  // beta agent must NOT be admitted to alpha's ancestor chain (which would
+  // produce a phantom indent referencing a parent that isn't in the group).
+  test("running-only does not connect agents across repo boundaries", () => {
+    const tree = new AgentTreeComponent();
+    const betaMgr = makeAgent("beta-mgr", "running", {
+      repoName: "beta",
+      repoPath: "/repos/beta",
+    });
+    const alphaChild = makeAgent("alpha-child", "running", {
+      repoName: "alpha",
+      repoPath: "/repos/alpha",
+      meta: { ...makeAgent("alpha-child").meta, manager: "beta-mgr" },
+    });
+    const flat: FlatEntry[] = [
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "agent", agent: alphaChild, depth: 0, connector: "└── " },
+      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: true },
+      { kind: "agent", agent: betaMgr, depth: 0, connector: "└── " },
+    ];
+    tree.setFlatList(flat);
+    tree.setRepoFilter("running-only");
+    const visible = tree.visibleList;
+    const agentEntries = visible.filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent");
+    expect(agentEntries.map((e) => e.agent.id)).toEqual(["alpha-child", "beta-mgr"]);
+    // Both should be effective roots in their own repo group → '└── '.
+    expect(agentEntries[0]!.connector).toBe("└── ");
+    expect(agentEntries[1]!.connector).toBe("└── ");
+  });
+
+  // Multi-root single-repo (no repo headers): two visible running roots must
+  // both get depth-0 ├── / └── connectors — exercises the visibleRootCount > 1
+  // path, which is the branch that must NOT fall into the empty-connector
+  // carve-out.
+  test("running-only single-repo multi-root produces ├── / └──", () => {
+    const tree = new AgentTreeComponent();
+    const rootA = makeAgent("root-a", "running", {
+      repoName: "myrepo",
+      repoPath: "/repos/myrepo",
+    });
+    const rootB = makeAgent("root-b", "running", {
+      repoName: "myrepo",
+      repoPath: "/repos/myrepo",
+    });
+    const flat: FlatEntry[] = [
+      { kind: "agent", agent: rootA, depth: 0, connector: "├── " },
+      { kind: "agent", agent: rootB, depth: 0, connector: "└── " },
+    ];
+    tree.setFlatList(flat);
+    tree.setRepoFilter("running-only");
+    const visible = tree.visibleList;
+    const agentEntries = visible.filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent");
+    expect(agentEntries.map((e) => e.agent.id)).toEqual(["root-a", "root-b"]);
+    expect(agentEntries[0]!.connector).toBe("├── ");
+    expect(agentEntries[1]!.connector).toBe("└── ");
+  });
+
+  // Multi-repo: sibling state must reset at each group boundary. Two agents
+  // share the same effective parent (null) in their own repo, and each is the
+  // sole / last sibling in its repo group — neither should bleed lastByParent
+  // from the other repo.
+  test("running-only resets sibling state across repo groups", () => {
+    const tree = new AgentTreeComponent();
+    const alphaChild = makeAgent("child-a", "running", {
+      repoName: "alpha",
+      repoPath: "/repos/alpha",
+    });
+    const betaChild = makeAgent("child-X", "running", {
+      repoName: "beta",
+      repoPath: "/repos/beta",
+    });
+    const flat: FlatEntry[] = [
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "agent", agent: alphaChild, depth: 0, connector: "└── " },
+      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: true },
+      { kind: "agent", agent: betaChild, depth: 0, connector: "└── " },
+    ];
+    tree.setFlatList(flat);
+    tree.setRepoFilter("running-only");
+    const visible = tree.visibleList;
+    const agentEntries = visible.filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent");
+    expect(agentEntries.map((e) => e.agent.id)).toEqual(["child-a", "child-X"]);
+    // Each is the sole visible root within its own repo group → '└── '. If
+    // group state bled across, child-a would become non-last ('├── ').
+    expect(agentEntries[0]!.connector).toBe("└── ");
+    expect(agentEntries[1]!.connector).toBe("└── ");
+  });
+
   test("nextRepoFilter cycles all → non-empty → running-only → all", () => {
     expect(nextRepoFilter("all")).toBe("non-empty");
     expect(nextRepoFilter("non-empty")).toBe("running-only");

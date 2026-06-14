@@ -3180,17 +3180,22 @@ async function buildAgentSettings(
  * 23. Auto-spawn watchdog
  */
 /**
- * Block spawning a subagent when the spawner's worktree has uncommitted
+ * Block spawning a subagent when the *target repo's* worktree has uncommitted
  * changes or untracked files. Two rationales depending on spawn mode:
- *   - Worktree spawns (default): the sub-agent's worktree forks from HEAD,
- *     so any uncommitted edits in the spawner silently fail to propagate;
- *     committing first keeps the sub-agent's git context aligned.
- *   - --no-worktree spawns: the sub-agent runs in the spawner's own cwd,
- *     so its edits would interleave with the spawner's pending edits,
+ *   - Worktree spawns (default): the sub-agent's worktree forks from the
+ *     target repo's HEAD, so any uncommitted edits there silently fail to
+ *     propagate; committing first keeps the sub-agent's git context aligned.
+ *   - --no-worktree spawns: the sub-agent runs in the target repo's main
+ *     worktree, so its edits would interleave with any pending edits there,
  *     producing incoherent diffs/rollback. Committing first establishes
  *     a clean baseline for the sub-agent's changes.
- * Skipped when cwd isn't a git working tree (e.g. system coordinator home,
- * raw temp dir) — neither rationale applies.
+ * The check runs against the *target* repo, not the caller's cwd: a
+ * coordinator spawning via `ib new-agent --repo <other>` only cares about
+ * the cleanliness of `<other>`, not its own (possibly dirty) coordinator
+ * home, since the sub-agent inherits from `<other>`'s HEAD.
+ *
+ * Skipped when the resolved path isn't a git working tree (e.g. system
+ * coordinator home, raw temp dir) — neither rationale applies.
  *
  * Drains the porcelain output directly rather than through SpawnContext.run
  * because runCmd .trim()s stdout, which would strip the meaningful leading
@@ -3200,7 +3205,7 @@ async function buildAgentSettings(
  * deadlock the process by filling its pipe buffer before stdout reaches
  * EOF — same reason runCmd uses Promise.all.
  */
-async function checkSpawnerWorktreeClean(cwd: string): Promise<string | null> {
+async function checkTargetWorktreeClean(cwd: string): Promise<string | null> {
   const insideResult = await newAgentSpawnCtx.run([
     "git", "-C", cwd, "rev-parse", "--is-inside-work-tree",
   ]);
@@ -3231,9 +3236,14 @@ export async function newAgent(
     return { ok: false, exitCode: 1, stdout: "", stderr: "Error: prompt required" };
   }
 
-  // 1a. See checkSpawnerWorktreeClean for the WHY.
-  const spawnerCwd = opts?._cwd ?? process.cwd();
-  const dirty = await checkSpawnerWorktreeClean(spawnerCwd);
+  // Resolve the root repo path (handles worktrees)
+  const rootRepoPath = (await resolveGitRoot(repoPath)) || repoPath;
+
+  // 1a. See checkTargetWorktreeClean for the WHY. The check runs against the
+  // *target* repo (rootRepoPath) — not the caller's cwd — because the sub-agent
+  // inherits state from the target repo's HEAD. A coordinator at a dirty
+  // ~/.itsybitsy spawning into a clean tinytext repo must not be blocked.
+  const dirty = await checkTargetWorktreeClean(rootRepoPath);
   if (dirty !== null) {
     return {
       ok: false,
@@ -3243,12 +3253,9 @@ export async function newAgent(
         `Error: cannot spawn a sub-agent while the current worktree has uncommitted changes or untracked files — ` +
         `commit (or .gitignore / remove untracked files) first so the sub-agent inherits the same state.\n` +
         `\n` +
-        `git status --porcelain in ${spawnerCwd}:\n${dirty}`,
+        `git status --porcelain in ${rootRepoPath}:\n${dirty}`,
     };
   }
-
-  // Resolve the root repo path (handles worktrees)
-  const rootRepoPath = (await resolveGitRoot(repoPath)) || repoPath;
 
   // Validate path for shell script interpolation
   if (!isValidShellPath(rootRepoPath)) {

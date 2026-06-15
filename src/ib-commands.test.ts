@@ -3707,6 +3707,90 @@ describe("newAgent (native)", () => {
     expect(result.stderr).not.toContain(cleanCallerCwd);
   });
 
+  test("dirty check inspects parent worktree (not host repo) when manager is set", async () => {
+    // When spawning with a manager, the child worktree forks from
+    // `agent/<manager>` — not host HEAD. The dirty gate must inspect the parent
+    // agent's worktree at <root>/.ittybitty/agents/<manager>/repo, mirroring
+    // baseRef.  Repro: host repo dirty, parent worktree clean → spawn succeeds.
+    const mgrDir = join(agentsDir, "agent-mgr");
+    await mkdir(mgrDir, { recursive: true });
+    await Bun.write(join(mgrDir, "meta.json"), JSON.stringify({ id: "agent-mgr", worker: false }));
+    const parentWorktree = join(mgrDir, "repo");
+    await mkdir(parentWorktree, { recursive: true });
+
+    setNewAgentSpawnRunner((cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => {
+      const cmdStr = cmd.join(" ");
+      // Host repo (tempDir) is dirty…
+      if (cmdStr.includes(`-C ${tempDir} rev-parse --is-inside-work-tree`)) {
+        return makeSpawnResult("true", 0);
+      }
+      if (cmdStr.includes(`-C ${tempDir} status --porcelain`)) {
+        return makeSpawnResult(" M host.ts\n", 0);
+      }
+      // …but the parent worktree is clean.
+      if (cmdStr.includes(`-C ${parentWorktree} rev-parse --is-inside-work-tree`)) {
+        return makeSpawnResult("true", 0);
+      }
+      if (cmdStr.includes(`-C ${parentWorktree} status --porcelain`)) {
+        return makeSpawnResult("", 0);
+      }
+      return mockSpawnRunner()(cmd, opts);
+    });
+    const result = await callNewAgent("sub-task", { name: "mgr-spawn", manager: "agent-mgr" });
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("mgr-spawn");
+  });
+
+  test("dirty check blocks spawn when parent worktree is dirty (manager set)", async () => {
+    // Inverse: host repo clean, parent worktree dirty → spawn rejected, and
+    // the error message names the parent worktree path so the user knows
+    // where to go commit.
+    const mgrDir = join(agentsDir, "agent-mgr-dirty");
+    await mkdir(mgrDir, { recursive: true });
+    await Bun.write(join(mgrDir, "meta.json"), JSON.stringify({ id: "agent-mgr-dirty", worker: false }));
+    const parentWorktree = join(mgrDir, "repo");
+    await mkdir(parentWorktree, { recursive: true });
+
+    setNewAgentSpawnRunner((cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes(`-C ${tempDir} rev-parse --is-inside-work-tree`)) {
+        return makeSpawnResult("true", 0);
+      }
+      if (cmdStr.includes(`-C ${tempDir} status --porcelain`)) {
+        return makeSpawnResult("", 0);
+      }
+      if (cmdStr.includes(`-C ${parentWorktree} rev-parse --is-inside-work-tree`)) {
+        return makeSpawnResult("true", 0);
+      }
+      if (cmdStr.includes(`-C ${parentWorktree} status --porcelain`)) {
+        return makeSpawnResult(" M parent.ts\n", 0);
+      }
+      return mockSpawnRunner()(cmd, opts);
+    });
+    const result = await callNewAgent("sub-task", { manager: "agent-mgr-dirty" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("uncommitted changes");
+    expect(result.stderr).toContain("parent.ts");
+    // Error message names the parent worktree path (the fork source).
+    expect(result.stderr).toContain(parentWorktree);
+  });
+
+  test("dirty check falls back to rootRepoPath when parent worktree path is missing", async () => {
+    // Edge case: the manager validation lets the agent through (meta.json
+    // exists) but the actual `<id>/repo` directory is gone (manually deleted,
+    // crashed mid-spawn, etc). Rather than crashing, the dirty check falls
+    // back to inspecting rootRepoPath. If rootRepoPath is clean, spawn proceeds.
+    const mgrDir = join(agentsDir, "agent-mgr-norepo");
+    await mkdir(mgrDir, { recursive: true });
+    await Bun.write(join(mgrDir, "meta.json"), JSON.stringify({ id: "agent-mgr-norepo", worker: false }));
+    // NOTE: intentionally NOT creating <mgrDir>/repo
+
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await callNewAgent("sub-task", { name: "fallback-spawn", manager: "agent-mgr-norepo" });
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("fallback-spawn");
+  });
+
   test("dirty check tolerates `git status` exit failure (silent skip)", async () => {
     // If `git status` somehow exits non-zero (e.g. corrupt index), the check
     // should not block the spawn — falling open is preferable to producing

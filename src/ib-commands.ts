@@ -3226,6 +3226,33 @@ async function checkTargetWorktreeClean(cwd: string): Promise<string | null> {
   return stdout;
 }
 
+/**
+ * Auto-detect a manager agent ID from a cwd that lies inside an agent worktree
+ * within `rootRepoPath`. Returns the manager ID if cwd matches the
+ * `<rootRepoPath>/.ittybitty/agents/<id>/repo/...` pattern and that agent's
+ * meta.json declares an `id`. Returns "" otherwise.
+ *
+ * Used both for resolving an unspecified `opts.manager` AND for picking the
+ * right path to dirty-check against (parent worktree vs. host repo root).
+ * Keeping the two call sites on the same helper keeps the dirty check and the
+ * `baseRef` derivation reading from the same source of truth.
+ */
+async function detectManagerFromCwd(cwd: string, rootRepoPath: string): Promise<string> {
+  const agentPattern = /\/.ittybitty\/agents\/([^/]+)\/repo/;
+  const match = cwd.match(agentPattern);
+  if (!match) return "";
+  if (cwd !== rootRepoPath && !cwd.startsWith(rootRepoPath + "/")) return "";
+  const agentDirPath = cwd.replace(/(\/.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
+  try {
+    const metaFile = Bun.file(join(agentDirPath, "meta.json"));
+    if (await metaFile.exists()) {
+      const meta = await metaFile.json();
+      if (meta.id) return meta.id as string;
+    }
+  } catch { /* ignore */ }
+  return "";
+}
+
 export async function newAgent(
   repoPath: string,
   prompt: string,
@@ -3239,23 +3266,10 @@ export async function newAgent(
   // Resolve the root repo path (handles worktrees)
   const rootRepoPath = (await resolveGitRoot(repoPath)) || repoPath;
 
-  // 1a. See checkTargetWorktreeClean for the WHY. The check runs against the
-  // *target* repo (rootRepoPath) — not the caller's cwd — because the sub-agent
-  // inherits state from the target repo's HEAD. A coordinator at a dirty
-  // ~/.itsybitsy spawning into a clean tinytext repo must not be blocked.
-  const dirty = await checkTargetWorktreeClean(rootRepoPath);
-  if (dirty !== null) {
-    return {
-      ok: false,
-      exitCode: 1,
-      stdout: "",
-      stderr:
-        `Error: cannot spawn a sub-agent while the current worktree has uncommitted changes or untracked files — ` +
-        `commit (or .gitignore / remove untracked files) first so the sub-agent inherits the same state.\n` +
-        `\n` +
-        `git status --porcelain in ${rootRepoPath}:\n${dirty}`,
-    };
-  }
+  // NOTE: the dirty-worktree gate runs *after* manager resolution — it has to
+  // inspect the actual fork source (parent agent's worktree when a manager is
+  // set, otherwise rootRepoPath), which mirrors `baseRef` below. See the block
+  // immediately after step 4 (manager validation).
 
   // Validate path for shell script interpolation
   if (!isValidShellPath(rootRepoPath)) {
@@ -3362,18 +3376,7 @@ export async function newAgent(
   //    Coordinators are top-level agents — never auto-detect a manager (SPEC §12.2.3)
   if (!manager && !coordinatorMode) {
     const cwd = opts?._cwd ?? process.cwd();
-    const agentPattern = /\/.ittybitty\/agents\/([^/]+)\/repo/;
-    const match = cwd.match(agentPattern);
-    if (match && (cwd === rootRepoPath || cwd.startsWith(rootRepoPath + "/"))) {
-      const agentDirPath = cwd.replace(/(\/.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
-      try {
-        const metaFile = Bun.file(join(agentDirPath, "meta.json"));
-        if (await metaFile.exists()) {
-          const meta = await metaFile.json();
-          if (meta.id) manager = meta.id;
-        }
-      } catch { /* ignore */ }
-    }
+    manager = await detectManagerFromCwd(cwd, rootRepoPath);
   }
 
   // 3.5. Auto-detect spawned_by from CWD (works cross-repo, unlike manager auto-detect)
@@ -3482,6 +3485,35 @@ export async function newAgent(
         return { ok: false, exitCode: 1, stdout: "", stderr: `Error: '${manager}' is a worker agent and cannot manage sub-agents` };
       }
     } catch { /* ignore */ }
+  }
+
+  // 4a. Dirty-worktree gate. The check must inspect the repo the new worktree
+  // is forked from — see baseRef computation in the worktree-add step:
+  //   baseRef = manager ? `agent/${manager}` : "HEAD"
+  // - manager set → parent agent's worktree at
+  //   `<rootRepoPath>/.ittybitty/agents/<manager>/repo`
+  // - no manager → `rootRepoPath`
+  // If the parent worktree path doesn't exist (e.g. agent was killed), fall
+  // back to rootRepoPath rather than crashing — better to surface stale
+  // host-repo dirt than to break the spawn entirely.
+  let dirtyCheckPath = rootRepoPath;
+  if (manager) {
+    const parentWorktree = join(rootRepoPath, ".ittybitty", "agents", manager, "repo");
+    const parentExists = await stat(parentWorktree).then(() => true).catch(() => false);
+    if (parentExists) dirtyCheckPath = parentWorktree;
+  }
+  const dirty = await checkTargetWorktreeClean(dirtyCheckPath);
+  if (dirty !== null) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr:
+        `Error: cannot spawn a sub-agent while the current worktree has uncommitted changes or untracked files — ` +
+        `commit (or .gitignore / remove untracked files) first so the sub-agent inherits the same state.\n` +
+        `\n` +
+        `git status --porcelain in ${dirtyCheckPath}:\n${dirty}`,
+    };
   }
 
   // 5. Yolo escalation check (only if cwd is in the same repo)

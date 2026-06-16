@@ -194,7 +194,7 @@ function makeMockCtx(overrides?: {
     pendingSelectNewestInRepo: null,
     showDialog: (d: NonNullable<DialogState>) => { dialogs.push(d); },
     closeDialog: () => {},
-    setNotice: (text: string) => { notices.push(text); },
+    setNotice: (text: string, _kind: "info" | "error") => { notices.push(text); },
     executeAndRefresh: (fn: () => Promise<void>) => {
       // Capture the in-flight action so tests can await it deterministically
       // (flushActions) instead of racing a fixed sleep against the inline

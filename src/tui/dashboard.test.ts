@@ -653,7 +653,7 @@ describe("RightPaneComponent scroll logic", () => {
 
 describe("DashboardComponent dialog and action handlers", () => {
   let dashboard: DashboardComponent;
-  let lastIbCall: { args: string[]; cwd: string } | null;
+  let lastIbCall: { args: string[]; cwd: string } | null = null;
   /** Tracks messages sent via native sendMessage (tmux send-keys) */
   let sentMessages: { target: string; message: string }[] = [];
 
@@ -1646,6 +1646,68 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(lastIbCall).toBeNull();
     // Dialog should still be open
     expect(dashboard.dialog).not.toBeNull();
+  });
+
+  test("new-agent form: stays open and shows notice when spawn fails", async () => {
+    const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-fail-"));
+    await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
+    await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "deadbeef\n");
+    setUserConfigPath(join(newAgentTempDir, "config.json"));
+    await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "claude:sonnet" }));
+
+    const tempHome = await mkdtemp(join(tmpdir(), "ib-na-fail-home-"));
+    const originalHome = process.env.HOME;
+    process.env.HOME = tempHome;
+    await (await import("../agent-types")).ensureAgentTypesDir();
+
+    // Mock spawn so the dirty-worktree gate fires: porcelain returns a dirty
+    // status line, which makes newAgent() return ok: false. checkTargetWorktreeClean
+    // drains stdout/stderr concurrently via Promise.all, so we must enqueue real
+    // streams (the default makeSpawnResult only fakes exited/stdout).
+    const mockSpawn = (cmd: string[]): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      const makeResult = (s: string, c: number) => ({
+        stdout: new ReadableStream({ start(ctrl) { ctrl.enqueue(new TextEncoder().encode(s)); ctrl.close(); } }),
+        stderr: new ReadableStream({ start(ctrl) { ctrl.close(); } }),
+        exited: Promise.resolve(c),
+      });
+      if (cmdStr.includes("is-inside-work-tree")) return makeResult("true\n", 0);
+      if (cmdStr.includes("status --porcelain")) return makeResult(" M dirty-file.ts\n", 0);
+      if (cmdStr.includes("--git-common-dir")) return makeResult(".git", 0);
+      if (cmdStr.includes("--show-toplevel")) return makeResult(newAgentTempDir, 0);
+      if (cmdStr.includes("--git-dir")) return makeResult(".git", 0);
+      if (cmdStr.includes("worktree add")) return makeResult("fatal: simulated failure\n", 1);
+      return makeResult("", 0);
+    };
+    setNewAgentSpawnRunner(mockSpawn);
+    lifecycleSpawnCtx.set(mockSpawn);
+
+    dashboard = makeDashboard();
+    dashboard.setRepos([{ path: newAgentTempDir, name: "only-repo" }]);
+
+    dashboard.handleInput("a");
+    // Tab through name→agentType→prompt, type something, tab to cancel→create, press enter
+    dashboard.handleInput("\t"); // name → agentType
+    dashboard.handleInput("\t"); // agentType → prompt
+    for (const ch of "do stuff") dashboard.handleInput(ch);
+    dashboard.handleInput("\t"); // prompt → cancel
+    dashboard.handleInput("\t"); // cancel → create
+    dashboard.handleInput("\r"); // submit
+
+    await dashboard.flushPendingActions();
+
+    // Dialog must stay open so the user doesn't lose their prompt
+    expect(dashboard.dialog).not.toBeNull();
+    const d = assertDialog(dashboard.dialog, 'new-agent-form');
+    expect(d.buffer.getText()).toBe("do stuff");
+    expect(dashboard.notice).toContain("New agent failed");
+
+    resetNewAgentSpawnRunner();
+    lifecycleSpawnCtx.reset();
+    resetUserConfigPath();
+    process.env.HOME = originalHome;
+    await rm(newAgentTempDir, { recursive: true, force: true });
+    await rm(tempHome, { recursive: true, force: true });
   });
 
   test("new-agent form: Cancel button closes dialog", () => {

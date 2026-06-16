@@ -625,6 +625,7 @@ export class DashboardComponent implements Component {
     return repoPath && this.watcher ? this.watcher.healthReports.get(repoPath) : undefined;
   }
   private lastSentNotice: string | null = null;
+  private lastSentNoticeKind: "info" | "error" = "info";
   private usageTimer: ReturnType<typeof setInterval> | null = null;
   /**
    * Periodic channel-pane refresh timer (§17.4). Mirrors the TmuxPoller cadence
@@ -816,7 +817,8 @@ export class DashboardComponent implements Component {
       if (!agent || !text.trim()) return;
       this.executeAndRefresh(async () => {
         const result = await sendMessage(agent, text.trim(), { cwd: "/" });
-        this.setNotice(result.ok ? `Sent to ${agent.id}` : `Send failed: ${result.stderr || result.stdout}`);
+        if (result.ok) this.setNotice(`Sent to ${agent.id}`, "info");
+        else this.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
       });
     };
     this.inputField.onCancel = () => {
@@ -842,7 +844,8 @@ export class DashboardComponent implements Component {
         // the sender isn't auto-stamped.
         const { sendToSystemCoordinator } = await import("../index");
         const sendResult = await sendToSystemCoordinator(sanitized, { raw: true, cwd: "/" });
-        this.setNotice(sendResult.ok ? "Sent to coordinator" : "Failed to send to coordinator");
+        if (sendResult.ok) this.setNotice("Sent to coordinator", "info");
+        else this.setNotice("Failed to send to coordinator", "error");
       });
     };
     this.coordinatorInputField.onCancel = () => {
@@ -860,7 +863,8 @@ export class DashboardComponent implements Component {
       if (!agent || !text.trim()) return;
       this.executeAndRefresh(async () => {
         const result = await sendMessage(agent, text.trim(), { cwd: "/" });
-        this.setNotice(result.ok ? `Sent to ${agent.id}` : `Send failed: ${result.stderr || result.stdout}`);
+        if (result.ok) this.setNotice(`Sent to ${agent.id}`, "info");
+        else this.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
       });
     };
     this.repoCoordinatorInputField.onCancel = () => {
@@ -1155,14 +1159,16 @@ export class DashboardComponent implements Component {
     this.tui?.requestRender();
   }
 
-  setNotice(text: string) {
+  setNotice(text: string, kind: "info" | "error") {
     const id = ++this.noticeCounter;
     this.lastSentNotice = text;
+    this.lastSentNoticeKind = kind;
     this.invalidate();
     this.tui?.requestRender();
     setTimeout(() => {
       if (this.noticeCounter === id) {
         this.lastSentNotice = null;
+        this.lastSentNoticeKind = "info";
         this.tui?.requestRender();
       }
     }, 3000);
@@ -1173,7 +1179,7 @@ export class DashboardComponent implements Component {
       try {
         await fn();
       } catch (err) {
-        this.setNotice(`Error: ${err}`);
+        this.setNotice(`Error: ${err}`, "error");
       }
       this.watcher?.refresh();
     })();
@@ -1846,7 +1852,7 @@ export class DashboardComponent implements Component {
     if (!repo) return;
     const result = await setRepoDefaultAgentType(repoPath, newType);
     if (!result.ok) {
-      this.setNotice(result.message);
+      this.setNotice(result.message, "error");
       return;
     }
     if (newType && newType.trim()) {
@@ -1864,7 +1870,7 @@ export class DashboardComponent implements Component {
     if (!repo) return;
     const result = await setRepoNotes(repoPath, notes);
     if (!result.ok) {
-      this.setNotice(result.message);
+      this.setNotice(result.message, "error");
       return;
     }
     if (notes.length > 0) {
@@ -1896,7 +1902,7 @@ export class DashboardComponent implements Component {
   private handleInfoCycleAgentType(): void {
     const next = this.infoPanel.computeNextAgentType();
     if (next === null) {
-      this.setNotice("No agent types available");
+      this.setNotice("No agent types available", "error");
       return;
     }
     void this.persistDefaultAgentType(next);
@@ -2415,7 +2421,7 @@ export class DashboardComponent implements Component {
     else if (data === "h") { agentActions.handleSetup(this); }
     // Re-check repo health
     else if (data === "H") {
-      this.setNotice("Re-checking repo health...");
+      this.setNotice("Re-checking repo health...", "info");
       this.watcher?.recheckHealth();
     }
     // V — cycle repo filter: all → non-empty → running-only → all
@@ -2426,7 +2432,7 @@ export class DashboardComponent implements Component {
         next === "all" ? "Showing all repos"
         : next === "non-empty" ? "Hiding empty repos"
         : "Showing only running agents";
-      this.setNotice(notice);
+      this.setNotice(notice, "info");
       this.tui?.requestRender();
     }
     // Fix resolvable health warnings (REPO mode only)
@@ -2551,8 +2557,9 @@ export class DashboardComponent implements Component {
     const isFullWidth = isCoordinatorView || FULL_WIDTH_MODES.has(this.rightPane.mode);
 
     // Header
+    const noticeColor = this.lastSentNoticeKind === "error" ? RED : YELLOW;
     const subtitle = this.lastSentNotice
-      ? `${DIM}—${RESET} ${YELLOW}${this.lastSentNotice}${RESET}`
+      ? `${DIM}—${RESET} ${noticeColor}${this.lastSentNotice}${RESET}`
       : `${DIM}— agent dashboard${RESET}`;
     const left = `${BOLD}ib${RESET} ${subtitle}`;
     if (this.telegramStatus) {

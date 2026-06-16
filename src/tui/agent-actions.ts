@@ -1437,13 +1437,13 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
     buffer: new TextBuffer(),
     focused: "name",
     onSubmit: (name: string, agentType: string, prompt: string) => {
-      ctx.closeDialog();
       const opts: NewAgentOptions = {};
       if (name.trim()) opts.name = name.trim();
       if (agentType) opts.type = agentType;
       ctx.executeAndRefresh(async () => {
         const result = await newAgent(repo.path, prompt, opts);
         if (result.ok) {
+          ctx.closeDialog();
           ctx.pendingSelectNewestInRepo = repo.path;
           ctx.setNotice(`Created new agent in ${repoDisplayName(repo)}`);
         } else {

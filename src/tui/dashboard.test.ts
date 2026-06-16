@@ -6,7 +6,7 @@ import { readAgentLog, readAgentLogWindow, readAgentPrompt, parseDenials } from 
 import type { Agent, AgentMeta, FlatEntry, PendingQuestion } from "../agents";
 import { stripAnsi } from "../parse-state";
 import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult } from "../test-utils";
-import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow, expandTabs } from "./dashboard";
+import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner } from "../ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
@@ -580,63 +580,6 @@ describe("TmuxPaneComponent scroll logic", () => {
     pane.clientAttached = true;
     pane.resetForAgent();
     expect(pane.clientAttached).toBe(false);
-  });
-});
-
-describe("expandTabs (tmux pane tab handling)", () => {
-  test("replaces literal tab with 3 spaces", () => {
-    expect(expandTabs("a\tb")).toBe("a   b");
-  });
-
-  test("replaces every tab in a multi-tab line", () => {
-    expect(expandTabs("\tA\t\tB\t")).toBe("   A      B   ");
-  });
-
-  test("leaves tab-free strings untouched (same reference)", () => {
-    const s = "plain ascii line with no tabs";
-    expect(expandTabs(s)).toBe(s);
-  });
-
-  test("preserves newlines and only expands tabs", () => {
-    expect(expandTabs("line1\twith\ttab\nline2\twith\ttab")).toBe(
-      "line1   with   tab\nline2   with   tab",
-    );
-  });
-
-  test("pi-tui visibleWidth agrees after expansion", () => {
-    // pi-tui's visibleWidth expands \t to 3 spaces internally, so the
-    // post-expansion string and the original should report the same width.
-    // After expansion, slicing helpers (which measure \t as 1 col) will also
-    // agree, eliminating the overflow that crashes the TUI.
-    const raw = "X\tY\tZ"; // 3 visible cols + 2 tabs
-    const expanded = expandTabs(raw);
-    expect(expanded).toBe("X   Y   Z");
-    expect(visibleWidth(expanded)).toBe(9);
-    // pi-tui already reports the original at width 9 (tab → 3 spaces),
-    // but slicing treats \t as 1, so we want both measurements to match
-    // the expanded form.
-    expect(visibleWidth(raw)).toBe(visibleWidth(expanded));
-  });
-
-  test("tab-containing tmux output renders without overflowing pane width", () => {
-    // Simulate a codex agent editing a .pbxproj line with tabs.
-    const pane = new TmuxPaneComponent();
-    pane.agent = makeAgent("agent-tabs", "/tmp/test");
-    pane.hasPolled = true;
-    pane.displayHeight = 5;
-    // Emulate the boundary expansion that onOutput performs.
-    pane.rawOutput = expandTabs("C589242A207A\t\tC58B0000\t\t/* identifier */");
-
-    const width = 80;
-    const rendered = pane.render(width);
-    // Every rendered line must fit within `width` — this is the invariant
-    // that, when violated, crashes the TUI.
-    for (const line of rendered) {
-      expect(visibleWidth(line)).toBeLessThanOrEqual(width);
-    }
-    // And the expanded content should be present (no raw \t survived).
-    const joined = rendered.join("\n");
-    expect(joined).not.toContain("\t");
   });
 });
 

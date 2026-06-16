@@ -97,16 +97,6 @@ export type { Selection } from "./selection";
 const DIALOG_WIDTH = 80;
 const LEFT_WIDTH_STEP = 5;
 
-// pi-tui v0.72.1's visibleWidth() expands \t to 3 spaces but its slicing
-// helpers (sliceWithWidth/sliceByColumn/extractSegments) measure \t as 1
-// column. The mismatch causes lines to exceed terminal width and crash the
-// TUI when tmux capture-pane output contains literal tabs (e.g. codex agents
-// editing .pbxproj). Pre-expand tabs to 3 spaces at the boundary so all
-// pi-tui width measurements stay consistent.
-export function expandTabs(s: string): string {
-  return s.includes("\t") ? s.replace(/\t/g, "   ") : s;
-}
-
 // findLastTwoSeparators moved to wrap.ts — re-exported for external consumers
 export { findLastTwoSeparators } from "./wrap";
 
@@ -886,7 +876,7 @@ export class DashboardComponent implements Component {
 
     this.tmuxPoller = new TmuxPoller({
       onOutput: (raw, _stripped) => {
-        this.tmuxPane.rawOutput = expandTabs(raw);
+        this.tmuxPane.rawOutput = raw;
         this.tmuxPane.hasPolled = true;
         this.tui?.requestRender();
       },
@@ -916,7 +906,7 @@ export class DashboardComponent implements Component {
     // System coordinator poller — continuously polls the ib-coordinator tmux session
     this.coordinatorPoller = new TmuxPoller({
       onOutput: (raw, _stripped) => {
-        this.coordinatorPane.rawOutput = expandTabs(raw);
+        this.coordinatorPane.rawOutput = raw;
         this.coordinatorPane.hasPolled = true;
         this.tui?.requestRender();
       },
@@ -928,7 +918,7 @@ export class DashboardComponent implements Component {
     // at full main width, same as the system coordinator (not right-pane-only).
     this.repoCoordinatorPoller = new TmuxPoller({
       onOutput: (raw, _stripped) => {
-        this.rightPane.repoCoordinatorOutput = expandTabs(raw);
+        this.rightPane.repoCoordinatorOutput = raw;
         this.rightPane.repoCoordinatorHasPolled = true;
         this.tui?.requestRender();
       },

@@ -255,7 +255,7 @@ export interface ActionCtx {
   pendingSelectNewestInRepo: string | null;
   showDialog(dialog: NonNullable<DialogState>): void;
   closeDialog(): void;
-  setNotice(text: string): void;
+  setNotice(text: string, kind: "info" | "error"): void;
   executeAndRefresh(fn: () => Promise<void>): Promise<void>;
   syncSelectedAgent(): void;
   jumpToMode(mode: PaneMode, forceRefresh?: boolean): void;
@@ -283,7 +283,8 @@ export function handleKill(ctx: ActionCtx) {
       ctx.closeDialog();
       ctx.executeAndRefresh(async () => {
         const result = await killAgent(agent);
-        ctx.setNotice(result.ok ? `Killed ${agent.id}` : `Kill failed: ${result.stderr || result.stdout}`);
+        if (result.ok) ctx.setNotice(`Killed ${agent.id}`, "info");
+        else ctx.setNotice(`Kill failed: ${result.stderr || result.stdout}`, "error");
       });
     },
   });
@@ -305,7 +306,7 @@ export function handleKillSystemCoordinator(ctx: ActionCtx) {
       ctx.closeDialog();
       ctx.executeAndRefresh(async () => {
         await discardSystemCoordinator();
-        ctx.setNotice("System coordinator killed (next launch will be fresh)");
+        ctx.setNotice("System coordinator killed (next launch will be fresh)", "info");
       });
     },
   });
@@ -332,7 +333,7 @@ export function handleRestartSystemCoordinator(ctx: ActionCtx) {
   // narrow `coordinatorSpawnsInFlight` guard because two presses there race to
   // newAgent() into the same deterministic dir.) The immediate notice gives
   // feedback.
-  ctx.setNotice("Restarting system coordinator…");
+  ctx.setNotice("Restarting system coordinator…", "info");
   ctx.executeAndRefresh(async () => {
     await restartSystemCoordinator();
     ctx.coordinatorPane.resetForAgent();
@@ -341,6 +342,7 @@ export function handleRestartSystemCoordinator(ctx: ActionCtx) {
       mode === "resumed"
         ? "System coordinator resumed"
         : "System coordinator restarted (fresh)",
+      "info",
     );
   });
 }
@@ -362,14 +364,15 @@ export function handleNuke(ctx: ActionCtx) {
       ctx.closeDialog();
       ctx.executeAndRefresh(async () => {
         const result = await nukeAgent(agent);
-        ctx.setNotice(result.ok ? `Nuked ${agent.id}` : `Nuke failed: ${result.stderr || result.stdout}`);
+        if (result.ok) ctx.setNotice(`Nuked ${agent.id}`, "info");
+        else ctx.setNotice(`Nuke failed: ${result.stderr || result.stdout}`, "error");
       });
     },
   });
 }
 
 export function handleNukeAll(ctx: ActionCtx) {
-  if (ctx.repos.length === 0) { ctx.setNotice("No repos registered"); return; }
+  if (ctx.repos.length === 0) { ctx.setNotice("No repos registered", "error"); return; }
   if (ctx.repos.length === 1) {
     const repo = ctx.repos[0]!;
     ctx.showDialog({
@@ -382,7 +385,8 @@ export function handleNukeAll(ctx: ActionCtx) {
         ctx.closeDialog();
         ctx.executeAndRefresh(async () => {
           const result = await nukeAllAgents(repo.path);
-          ctx.setNotice(result.ok ? `Nuked all agents in ${repoDisplayName(repo)}` : `Nuke-all failed: ${result.stderr || result.stdout}`);
+          if (result.ok) ctx.setNotice(`Nuked all agents in ${repoDisplayName(repo)}`, "info");
+          else ctx.setNotice(`Nuke-all failed: ${result.stderr || result.stdout}`, "error");
         });
       },
     });
@@ -406,7 +410,8 @@ export function handleNukeAll(ctx: ActionCtx) {
           ctx.closeDialog();
           ctx.executeAndRefresh(async () => {
             const result = await nukeAllAgents(repo.path);
-            ctx.setNotice(result.ok ? `Nuked all agents in ${repoDisplayName(repo)}` : `Nuke-all failed: ${result.stderr || result.stdout}`);
+            if (result.ok) ctx.setNotice(`Nuked all agents in ${repoDisplayName(repo)}`, "info");
+            else ctx.setNotice(`Nuke-all failed: ${result.stderr || result.stdout}`, "error");
           });
         },
       });
@@ -434,12 +439,12 @@ export function handleResume(ctx: ActionCtx) {
     // Keyed per-repo and released in the finally below; intentionally narrow.
     const spawnKey = `repo:${repo.path}`;
     if (coordinatorSpawnsInFlight.has(spawnKey)) {
-      ctx.setNotice(`Coordinator action already in progress for ${repoDisplayName(repo)}…`);
+      ctx.setNotice(`Coordinator action already in progress for ${repoDisplayName(repo)}…`, "error");
       return;
     }
     coordinatorSpawnsInFlight.add(spawnKey);
 
-    ctx.setNotice(`Resetting coordinator for ${repoDisplayName(repo)}…`);
+    ctx.setNotice(`Resetting coordinator for ${repoDisplayName(repo)}…`, "info");
     ctx.executeAndRefresh(async () => {
       try {
         const coordStatus = await checkCoordinatorExists(repo.path);
@@ -454,14 +459,16 @@ export function handleResume(ctx: ActionCtx) {
             .find(a => a.id === coordStatus.agentId);
           if (agent) {
             const result = await resumeAgent(agent);
-            ctx.setNotice(result.ok ? `Reset coordinator ${agent.id}` : `Reset failed: ${result.stderr || result.stdout}`);
+            if (result.ok) ctx.setNotice(`Reset coordinator ${agent.id}`, "info");
+            else ctx.setNotice(`Reset failed: ${result.stderr || result.stdout}`, "error");
           } else {
-            ctx.setNotice(`Coordinator ${coordStatus.agentId} not found in agent tree`);
+            ctx.setNotice(`Coordinator ${coordStatus.agentId} not found in agent tree`, "error");
           }
         } else {
           // No coordinator — spawn one
           const result = await newAgent(repo.path, "You are the per-repo coordinator. Await instructions.", { type: "coordinator" });
-          ctx.setNotice(result.ok ? `Spawned coordinator ${result.stdout}` : `Spawn failed: ${result.stderr || result.stdout}`);
+          if (result.ok) ctx.setNotice(`Spawned coordinator ${result.stdout}`, "info");
+          else ctx.setNotice(`Spawn failed: ${result.stderr || result.stdout}`, "error");
         }
       } finally {
         coordinatorSpawnsInFlight.delete(spawnKey);
@@ -486,10 +493,11 @@ export function handleResume(ctx: ActionCtx) {
   // whose stderr ("Agent is currently restarting…") we surface verbatim below.
 
   // Immediate feedback — resumeAgent() can block for several seconds.
-  ctx.setNotice(`Resuming ${agent.id}…`);
+  ctx.setNotice(`Resuming ${agent.id}…`, "info");
   ctx.executeAndRefresh(async () => {
     const result = await resumeAgent(agent);
-    ctx.setNotice(result.ok ? `Resumed ${agent.id}` : `Resume failed: ${result.stderr || result.stdout}`);
+    if (result.ok) ctx.setNotice(`Resumed ${agent.id}`, "info");
+    else ctx.setNotice(`Resume failed: ${result.stderr || result.stdout}`, "error");
   });
 }
 
@@ -497,7 +505,7 @@ export function handlePause(ctx: ActionCtx) {
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
   if (agent.state === "stopped" || agent.archived) {
-    ctx.setNotice("Can only pause running, waiting, or complete agents");
+    ctx.setNotice("Can only pause running, waiting, or complete agents", "error");
     return;
   }
   ctx.showDialog({
@@ -509,7 +517,8 @@ export function handlePause(ctx: ActionCtx) {
       ctx.closeDialog();
       ctx.executeAndRefresh(async () => {
         const result = await pauseAgent(agent);
-        ctx.setNotice(result.ok ? `Paused ${agent.id}` : `Pause failed: ${result.stderr || result.stdout}`);
+        if (result.ok) ctx.setNotice(`Paused ${agent.id}`, "info");
+        else ctx.setNotice(`Pause failed: ${result.stderr || result.stdout}`, "error");
       });
     },
   });
@@ -571,7 +580,8 @@ export function handleReassign(ctx: ActionCtx) {
       const desc = newManager ?? "root";
       ctx.executeAndRefresh(async () => {
         const result = await reassignAgent(agent, newManager);
-        ctx.setNotice(result.ok ? `Reassigned ${agent.id} → ${desc}` : `Reassign failed: ${result.stderr || result.stdout}`);
+        if (result.ok) ctx.setNotice(`Reassigned ${agent.id} → ${desc}`, "info");
+        else ctx.setNotice(`Reassign failed: ${result.stderr || result.stdout}`, "error");
       });
     },
   });
@@ -605,9 +615,9 @@ export function handleRename(ctx: ActionCtx) {
       ctx.executeAndRefresh(async () => {
         const result = await renameAgent(agent, nickname);
         if (result.ok) {
-          ctx.setNotice(nickname === null ? `Cleared nickname for ${agent.id}` : `Nicknamed ${agent.id} "${nickname}"`);
+          ctx.setNotice(nickname === null ? `Cleared nickname for ${agent.id}` : `Nicknamed ${agent.id} "${nickname}"`, "info");
         } else {
-          ctx.setNotice(`Nickname failed: ${result.stderr || result.stdout}`);
+          ctx.setNotice(`Nickname failed: ${result.stderr || result.stdout}`, "error");
         }
       });
     },
@@ -650,7 +660,7 @@ export function handleAddAgentToTeam(ctx: ActionCtx) {
     }
     showTeamPicker(ctx, agent, teams.map((t) => t.name));
   }).catch((err) => {
-    ctx.setNotice(`Failed to list teams: ${(err as Error).message}`);
+    ctx.setNotice(`Failed to list teams: ${(err as Error).message}`, "error");
   });
 }
 
@@ -730,7 +740,7 @@ function runCreateTeam(ctx: ActionCtx, initialValue: string, alsoAddSelectedAgen
         if (!createResult.ok) {
           // teamCreate already produced a user-readable message (invalid name,
           // reserved-word collision, or already-exists). Surface it verbatim.
-          ctx.setNotice(createResult.stderr || createResult.stdout || "Create team failed");
+          ctx.setNotice(createResult.stderr || createResult.stdout || "Create team failed", "error");
           return;
         }
         // Hand off to step 2 (member picker). The picker takes ownership of
@@ -782,9 +792,9 @@ function openMemberPicker(ctx: ActionCtx, teamName: string, preCheckAgent: Agent
       ctx.executeAndRefresh(async () => {
         const delResult = await teamDelete(teamName);
         if (delResult.ok) {
-          ctx.setNotice(`Cancelled — team @${teamName} rolled back`);
+          ctx.setNotice(`Cancelled — team @${teamName} rolled back`, "info");
         } else {
-          ctx.setNotice(`Cancelled; rollback failed: ${delResult.stderr || delResult.stdout}`);
+          ctx.setNotice(`Cancelled; rollback failed: ${delResult.stderr || delResult.stdout}`, "error");
         }
       });
     },
@@ -841,14 +851,14 @@ function openFirstMessagePrompt(ctx: ActionCtx, teamName: string, addedCount: nu
     // dialog and the user sees no confirmation that the team + members were
     // actually saved.
     onCancel: () => {
-      ctx.setNotice(withFailures());
+      ctx.setNotice(withFailures(), addFailures > 0 ? "error" : "info");
     },
     onSubmit: (message: string) => {
       ctx.closeDialog();
       const trimmed = message.trim();
       if (!trimmed) {
         // Empty submit — treat like skip; team stays, no send.
-        ctx.setNotice(withFailures());
+        ctx.setNotice(withFailures(), addFailures > 0 ? "error" : "info");
         return;
       }
       // Fan-out via teamSend to every live member of the team. The snapshot
@@ -865,9 +875,9 @@ function openFirstMessagePrompt(ctx: ActionCtx, teamName: string, addedCount: nu
           const recipients = match?.[1] ?? String(addedCount);
           // Numeric compare so a leading-zero match (e.g. "01") still pluralizes.
           const recipientPlural = Number(recipients) === 1 ? "recipient" : "recipients";
-          ctx.setNotice(`${withFailures("")}, sent first message to ${recipients} ${recipientPlural}`);
+          ctx.setNotice(`${withFailures("")}, sent first message to ${recipients} ${recipientPlural}`, "info");
         } else {
-          ctx.setNotice(`${withFailures("")} (send failed: ${sendResult.stderr || sendResult.stdout})`);
+          ctx.setNotice(`${withFailures("")} (send failed: ${sendResult.stderr || sendResult.stdout})`, "error");
         }
       });
     },
@@ -884,7 +894,7 @@ function runAddMember(ctx: ActionCtx, agent: Agent, teamName: string) {
     const result = await teamAdd(teamName, agent.id, ctx.repos);
     ctx.setNotice(result.ok
       ? (result.stdout || `Added ${agent.id} to @${teamName}`)
-      : (result.stderr || result.stdout || `Add to team failed`));
+      : (result.stderr || result.stdout || `Add to team failed`), "error");
   });
 }
 
@@ -913,12 +923,12 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
   ctx.executeAndRefresh(async () => {
     const team = await getTeam(teamName);
     if (!team) {
-      ctx.setNotice(`team @${teamName} no longer exists`);
+      ctx.setNotice(`team @${teamName} no longer exists`, "error");
       return;
     }
     const liveAgents = ctx.watcher?.lastAgents ?? [];
     if (liveAgents.length === 0) {
-      ctx.setNotice("No agents to manage");
+      ctx.setNotice("No agents to manage", "error");
       return;
     }
     const memberSet = new Set(team.members);
@@ -952,7 +962,7 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
           if (liveIds.has(id) && !nextMemberIds.has(id)) toRemove.push(id);
         }
         if (toAdd.length === 0 && toRemove.length === 0) {
-          ctx.setNotice(`Roster unchanged for @${teamName}`);
+          ctx.setNotice(`Roster unchanged for @${teamName}`, "info");
           return;
         }
         ctx.executeAndRefresh(async () => {
@@ -981,7 +991,7 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
             }
           }
           if (teamGone) {
-            ctx.setNotice(`team @${teamName} no longer exists`);
+            ctx.setNotice(`team @${teamName} no longer exists`, "error");
             return;
           }
           const parts: string[] = [];
@@ -989,7 +999,7 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
           if (removed > 0) parts.push(`-${removed}`);
           const summary = parts.length > 0 ? parts.join(" ") : "no changes";
           const failSuffix = failures > 0 ? ` (${failures} failure${failures === 1 ? "" : "s"})` : "";
-          ctx.setNotice(`Updated @${teamName}: ${summary}${failSuffix}`);
+          ctx.setNotice(`Updated @${teamName}: ${summary}${failSuffix}`, failures > 0 ? "error" : "info");
         });
       },
     });
@@ -1020,7 +1030,7 @@ export function handleManageTeam(ctx: ActionCtx, teamName: string) {
   ctx.executeAndRefresh(async () => {
     const team = await getTeam(teamName);
     if (!team) {
-      ctx.setNotice(`team @${teamName} no longer exists`);
+      ctx.setNotice(`team @${teamName} no longer exists`, "error");
       return;
     }
     const live = ctx.watcher?.lastAgents ?? [];
@@ -1056,11 +1066,8 @@ export function handleManageTeam(ctx: ActionCtx, teamName: string) {
             ctx.closeDialog();
             ctx.executeAndRefresh(async () => {
               const result = await teamRemove(teamName, member.memberId, ctx.repos);
-              ctx.setNotice(
-                result.ok
-                  ? (result.stdout || `Removed ${member.label} from @${teamName}`)
-                  : (result.stderr || result.stdout || `Remove failed`),
-              );
+              if (result.ok) ctx.setNotice(result.stdout || `Removed ${member.label} from @${teamName}`, "info");
+              else ctx.setNotice(result.stderr || result.stdout || `Remove failed`, "error");
             });
           },
         });
@@ -1099,7 +1106,7 @@ export function handleDisbandTeam(ctx: ActionCtx, teamName: string) {
       ctx.executeAndRefresh(async () => {
         const team = await getTeam(teamName);
         if (!team) {
-          ctx.setNotice(`team @${teamName} no longer exists`);
+          ctx.setNotice(`team @${teamName} no longer exists`, "error");
           return;
         }
         const members = team.members;
@@ -1118,12 +1125,12 @@ export function handleDisbandTeam(ctx: ActionCtx, teamName: string) {
           // Team vanished between getTeam and teamDelete — race with another
           // mutator. The fan-out already ran against the live roster, so just
           // surface the unusual state.
-          ctx.setNotice(`team @${teamName} no longer exists`);
+          ctx.setNotice(`team @${teamName} no longer exists`, "error");
           return;
         }
         const sendOk = sendResult.ok;
         const sendNote = sendOk ? "" : ` (notify failed: ${sendResult.stderr || sendResult.stdout})`;
-        ctx.setNotice(`disbanded team @${teamName} (${members.length} members notified)${sendNote}`);
+        ctx.setNotice(`disbanded team @${teamName} (${members.length} members notified)${sendNote}`, "info");
       });
     },
   });
@@ -1133,18 +1140,18 @@ export function handleMerge(ctx: ActionCtx) {
   if (ctx.agentTree.isSystemCoordinatorSelected) return;
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
-  ctx.setNotice(`Running merge-check for ${agent.id}...`);
+  ctx.setNotice(`Running merge-check for ${agent.id}...`, "info");
   ctx.executeAndRefresh(async () => {
     let checkResult;
     try {
       checkResult = await mergeCheckAgent(agent);
     } catch (err) {
-      ctx.setNotice(`Merge-check error: ${err}`);
+      ctx.setNotice(`Merge-check error: ${err}`, "error");
       return;
     }
     const checkOutput = checkResult.stdout || checkResult.stderr || "(no output)";
     if (!checkResult.ok) {
-      ctx.setNotice(`Merge-check failed for ${agent.id}: ${checkOutput}`);
+      ctx.setNotice(`Merge-check failed for ${agent.id}: ${checkOutput}`, "error");
       return;
     }
     ctx.showDialog({
@@ -1156,7 +1163,8 @@ export function handleMerge(ctx: ActionCtx) {
         ctx.closeDialog();
         ctx.executeAndRefresh(async () => {
           const result = await mergeAgent(agent, agent.repoPath);
-          ctx.setNotice(result.ok ? `Merged ${agent.id}` : `Merge failed: ${result.stderr || result.stdout}`);
+          if (result.ok) ctx.setNotice(`Merged ${agent.id}`, "info");
+          else ctx.setNotice(`Merge failed: ${result.stderr || result.stdout}`, "error");
         });
       },
     });
@@ -1187,7 +1195,7 @@ export function handleSend(ctx: ActionCtx) {
   const repoCoord = ctx.rightPane.repoCoordinatorAgent;
   if (ctx.agentTree.selectedRepoHeader && repoCoord) {
     if (repoCoord.state === "stopped") {
-      ctx.setNotice(`Coordinator ${repoCoord.id} is not running`);
+      ctx.setNotice(`Coordinator ${repoCoord.id} is not running`, "error");
       return;
     }
     handleSendToRepoCoordinator(ctx, repoCoord);
@@ -1212,22 +1220,23 @@ export function handleSend(ctx: ActionCtx) {
     onSendEsc: () => {
       ctx.closeDialog();
       const session = agent.meta.tmux_session;
-      if (!session) { ctx.setNotice("No active tmux session"); return; }
+      if (!session) { ctx.setNotice("No active tmux session", "error"); return; }
       ctx.executeAndRefresh(async () => {
         const ok = await sendTmuxEscape(session);
-        ctx.setNotice(ok ? `Sent Esc to ${agent.id}` : `Failed to send Esc to ${agent.id}`);
+        if (ok) ctx.setNotice(`Sent Esc to ${agent.id}`, "info");
+        else ctx.setNotice(`Failed to send Esc to ${agent.id}`, "error");
       });
     },
     onSubmit: (message: string) => {
       ctx.closeDialog();
-      if (!message.trim()) { ctx.setNotice("Send cancelled"); return; }
+      if (!message.trim()) { ctx.setNotice("Send cancelled", "info"); return; }
       const trimmed = message.trim();
       if (dialog.sendAll) {
         // Send to all non-archived agents with active tmux sessions
         const targets = ctx.agentTree.flatList.filter(
           (f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent" && !f.agent.archived && !!f.agent.meta.tmux_session
         );
-        if (targets.length === 0) { ctx.setNotice("No active agents to send to"); return; }
+        if (targets.length === 0) { ctx.setNotice("No active agents to send to", "error"); return; }
         ctx.executeAndRefresh(async () => {
           let sent = 0;
           let failed = 0;
@@ -1238,12 +1247,13 @@ export function handleSend(ctx: ActionCtx) {
           const notice = failed > 0
             ? `Sent to ${sent} agents, ${failed} failed`
             : `Sent to ${sent} agents`;
-          ctx.setNotice(notice);
+          ctx.setNotice(notice, failed > 0 ? "error" : "info");
         });
       } else {
         ctx.executeAndRefresh(async () => {
           const result = await sendMessage(agent, trimmed, { cwd: "/" });
-          ctx.setNotice(result.ok ? `Sent to ${agent.id}` : `Send failed: ${result.stderr || result.stdout}`);
+          if (result.ok) ctx.setNotice(`Sent to ${agent.id}`, "info");
+          else ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
         });
       }
     },
@@ -1271,7 +1281,7 @@ function handleSendToTeam(ctx: ActionCtx, teamName: string) {
     onSubmit: (message: string) => {
       ctx.closeDialog();
       const trimmed = message.trim();
-      if (!trimmed) { ctx.setNotice("Send cancelled"); return; }
+      if (!trimmed) { ctx.setNotice("Send cancelled", "info"); return; }
       // Resolve member ids → live Agent records from the watcher's last batch
       // (the same source that fed flattenTeamsTree, so the set is consistent
       // with what the user just saw in the Teams panel). `teamSend` re-prunes
@@ -1279,7 +1289,8 @@ function handleSendToTeam(ctx: ActionCtx, teamName: string) {
       const live = ctx.watcher?.lastAgents ?? [];
       ctx.executeAndRefresh(async () => {
         const result = await ctx.teamSend(teamName, live, trimmed, undefined);
-        ctx.setNotice(result.ok ? (result.stdout || `Sent to @${teamName}`) : `Send failed: ${result.stderr || result.stdout}`);
+        if (result.ok) ctx.setNotice((result.stdout || `Sent to @${teamName}`), "info");
+        else ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
       });
     },
   });
@@ -1295,12 +1306,13 @@ function handleSendToCoordinator(ctx: ActionCtx) {
       ctx.closeDialog();
       ctx.executeAndRefresh(async () => {
         const ok = await sendTmuxEscape(IB_COORDINATOR_SESSION);
-        ctx.setNotice(ok ? "Sent Esc to coordinator" : "Failed to send Esc to coordinator");
+        if (ok) ctx.setNotice("Sent Esc to coordinator", "info");
+        else ctx.setNotice("Failed to send Esc to coordinator", "error");
       });
     },
     onSubmit: (message: string) => {
       ctx.closeDialog();
-      if (!message.trim()) { ctx.setNotice("Send cancelled"); return; }
+      if (!message.trim()) { ctx.setNotice("Send cancelled", "info"); return; }
       const sanitized = sanitizeTmuxInput(message.trim());
       ctx.executeAndRefresh(async () => {
         // Route through sendToSystemCoordinator so this send shares the
@@ -1311,7 +1323,8 @@ function handleSendToCoordinator(ctx: ActionCtx) {
         // prefix). cwd:"/" so the sender isn't auto-stamped.
         const { sendToSystemCoordinator } = await import("../index");
         const sendResult = await sendToSystemCoordinator(sanitized, { raw: true, cwd: "/" });
-        ctx.setNotice(sendResult.ok ? "Sent to coordinator" : "Failed to send to coordinator");
+        if (sendResult.ok) ctx.setNotice("Sent to coordinator", "info");
+        else ctx.setNotice("Failed to send to coordinator", "error");
       });
     },
   });
@@ -1326,18 +1339,20 @@ function handleSendToRepoCoordinator(ctx: ActionCtx, agent: Agent) {
     onSendEsc: () => {
       ctx.closeDialog();
       const session = agent.meta.tmux_session;
-      if (!session) { ctx.setNotice("No active tmux session"); return; }
+      if (!session) { ctx.setNotice("No active tmux session", "error"); return; }
       ctx.executeAndRefresh(async () => {
         const ok = await sendTmuxEscape(session);
-        ctx.setNotice(ok ? `Sent Esc to ${agent.id}` : `Failed to send Esc to ${agent.id}`);
+        if (ok) ctx.setNotice(`Sent Esc to ${agent.id}`, "info");
+        else ctx.setNotice(`Failed to send Esc to ${agent.id}`, "error");
       });
     },
     onSubmit: (message: string) => {
       ctx.closeDialog();
-      if (!message.trim()) { ctx.setNotice("Send cancelled"); return; }
+      if (!message.trim()) { ctx.setNotice("Send cancelled", "info"); return; }
       ctx.executeAndRefresh(async () => {
         const result = await sendMessage(agent, message.trim(), { cwd: "/" });
-        ctx.setNotice(result.ok ? `Sent to ${agent.id}` : `Send failed: ${result.stderr || result.stdout}`);
+        if (result.ok) ctx.setNotice(`Sent to ${agent.id}`, "info");
+        else ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
       });
     },
   });
@@ -1354,7 +1369,7 @@ export function handleAddPermission(ctx: ActionCtx) {
     if (ctx.rightPane.repoCoordinatorAgent) {
       target = ctx.rightPane.repoCoordinatorAgent;
     } else {
-      ctx.setNotice("No coordinator for this repo");
+      ctx.setNotice("No coordinator for this repo", "error");
       return;
     }
   } else {
@@ -1362,7 +1377,7 @@ export function handleAddPermission(ctx: ActionCtx) {
   }
   if (!target) return;
   if (target.archived) {
-    ctx.setNotice("Cannot modify archived agent");
+    ctx.setNotice("Cannot modify archived agent", "error");
     return;
   }
   const agent = target;
@@ -1374,30 +1389,30 @@ export function handleAddPermission(ctx: ActionCtx) {
     onSubmit: (value: string) => {
       ctx.closeDialog();
       const entry = value.trim();
-      if (!entry) { ctx.setNotice("Permission add cancelled"); return; }
+      if (!entry) { ctx.setNotice("Permission add cancelled", "info"); return; }
       if (!isValidToolList(entry)) {
-        ctx.setNotice("Invalid permission entry — disallowed characters");
+        ctx.setNotice("Invalid permission entry — disallowed characters", "error");
         return;
       }
       const settingsPath = agentSettingsLocalPath(agent);
       addPermissionToSettings(settingsPath, entry).then(async (result) => {
         if (result.added) {
-          ctx.setNotice(`Added ${entry} to ${agent.id} allow list`);
+          ctx.setNotice(`Added ${entry} to ${agent.id} allow list`, "info");
           const sendResult = await sendMessage(
             agent,
             `[watchdog]: Permission to '${entry}' has been granted. You may retry the action that was previously denied.`,
             { cwd: "/" },
           );
           if (!sendResult.ok) {
-            ctx.setNotice(`Added ${entry}, but notify failed: ${sendResult.stderr || sendResult.stdout}`);
+            ctx.setNotice(`Added ${entry}, but notify failed: ${sendResult.stderr || sendResult.stdout}`, "error");
           }
         } else if (result.reason === "duplicate") {
-          ctx.setNotice("Already in allow list");
+          ctx.setNotice("Already in allow list", "error");
         } else {
-          ctx.setNotice(`Failed: ${result.message}`);
+          ctx.setNotice(`Failed: ${result.message}`, "error");
         }
       }).catch((err) => {
-        ctx.setNotice(`Failed: ${(err as Error).message}`);
+        ctx.setNotice(`Failed: ${(err as Error).message}`, "error");
       });
     },
   });
@@ -1405,7 +1420,7 @@ export function handleAddPermission(ctx: ActionCtx) {
 
 /** 'a' — infer repo from current selection, fallback to first repo */
 export function handleNewAgent(ctx: ActionCtx) {
-  if (ctx.repos.length === 0) { ctx.setNotice("No repos registered"); return; }
+  if (ctx.repos.length === 0) { ctx.setNotice("No repos registered", "error"); return; }
   if (ctx.repos.length === 1) { showNewAgentFormDialog(ctx, ctx.repos[0]!); return; }
   const selectedAgent = ctx.agentTree.selectedAgent;
   const selectedRepoHeader = ctx.agentTree.selectedRepoHeader;
@@ -1445,9 +1460,9 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
         if (result.ok) {
           ctx.closeDialog();
           ctx.pendingSelectNewestInRepo = repo.path;
-          ctx.setNotice(`Created new agent in ${repoDisplayName(repo)}`);
+          ctx.setNotice(`Created new agent in ${repoDisplayName(repo)}`, "info");
         } else {
-          ctx.setNotice(`New agent failed: ${result.stderr || result.stdout}`);
+          ctx.setNotice(`New agent failed: ${result.stderr || result.stdout}`, "error");
         }
       });
     },
@@ -1460,7 +1475,7 @@ export function handleAnswerQuestion(ctx: ActionCtx) {
   if (idx < 0 || idx >= questions.length) return;
   const q = questions[idx]!;
   const agentEntry = ctx.agentTree.flatList.find((f) => f.kind === "agent" && f.agent.id === q.agent);
-  if (!agentEntry || agentEntry.kind !== "agent") { ctx.setNotice(`Agent ${q.agent} not found`); return; }
+  if (!agentEntry || agentEntry.kind !== "agent") { ctx.setNotice(`Agent ${q.agent} not found`, "error"); return; }
   ctx.showDialog({
     type: "textarea",
     prompt: `Answer ${q.agent}'s question:`,
@@ -1468,12 +1483,13 @@ export function handleAnswerQuestion(ctx: ActionCtx) {
     focusedButton: "text",
     onSubmit: (answer: string) => {
       ctx.closeDialog();
-      if (!answer.trim()) { ctx.setNotice("Answer cancelled"); return; }
+      if (!answer.trim()) { ctx.setNotice("Answer cancelled", "info"); return; }
       ctx.executeAndRefresh(async () => {
         const ackResult = await acknowledgeQuestion(agentEntry.agent.repoPath, q.id);
-        if (!ackResult.ok) { ctx.setNotice(`Acknowledge failed: ${ackResult.stderr || ackResult.stdout}`); return; }
+        if (!ackResult.ok) { ctx.setNotice(`Acknowledge failed: ${ackResult.stderr || ackResult.stdout}`, "error"); return; }
         const sendResult = await sendMessage(agentEntry.agent, answer.trim(), { cwd: "/" });
-        ctx.setNotice(sendResult.ok ? `Answered ${q.agent}` : `Send failed: ${sendResult.stderr || sendResult.stdout}`);
+        if (sendResult.ok) ctx.setNotice(`Answered ${q.agent}`, "info");
+        else ctx.setNotice(`Send failed: ${sendResult.stderr || sendResult.stdout}`, "error");
       });
     },
   });
@@ -1485,10 +1501,11 @@ export function handleAcknowledgeQuestion(ctx: ActionCtx) {
   if (idx < 0 || idx >= questions.length) return;
   const q = questions[idx]!;
   const agentEntry = ctx.agentTree.flatList.find((f) => f.kind === "agent" && f.agent.id === q.agent);
-  if (!agentEntry || agentEntry.kind !== "agent") { ctx.setNotice(`Agent ${q.agent} not found`); return; }
+  if (!agentEntry || agentEntry.kind !== "agent") { ctx.setNotice(`Agent ${q.agent} not found`, "error"); return; }
   ctx.executeAndRefresh(async () => {
     const result = await acknowledgeQuestion(agentEntry.agent.repoPath, q.id);
-    ctx.setNotice(result.ok ? `Acknowledged ${q.id}` : `Acknowledge failed: ${result.stderr || result.stdout}`);
+    if (result.ok) ctx.setNotice(`Acknowledged ${q.id}`, "info");
+    else ctx.setNotice(`Acknowledge failed: ${result.stderr || result.stdout}`, "error");
   });
 }
 
@@ -1507,7 +1524,7 @@ export function handleGoToQuestionAgent(ctx: ActionCtx) {
     ctx.jumpToMode("AGENT LOG");
     ctx.tui?.requestRender();
   } else {
-    ctx.setNotice(`Agent ${q.agent} not found in tree`);
+    ctx.setNotice(`Agent ${q.agent} not found in tree`, "error");
   }
 }
 
@@ -1515,7 +1532,7 @@ export function handleFuzzyAgent(ctx: ActionCtx) {
   const visible = ctx.agentTree.visibleList;
   const agentEntries = visible.filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent");
   const repoEntries = visible.filter((f): f is Extract<FlatEntry, { kind: "repo-header" }> => f.kind === "repo-header");
-  if (agentEntries.length === 0 && repoEntries.length === 0) { ctx.setNotice("No agents to search"); return; }
+  if (agentEntries.length === 0 && repoEntries.length === 0) { ctx.setNotice("No agents to search", "error"); return; }
   const fuzzyStateColWidth = computeStateColWidth(agentEntries);
   // Build a mixed list: repo headers first, then agents
   type FuzzyEntry = { kind: "agent"; entry: Extract<FlatEntry, { kind: "agent" }> } | { kind: "repo"; entry: Extract<FlatEntry, { kind: "repo-header" }> };
@@ -1625,13 +1642,13 @@ export function handleOpenWorktree(ctx: ActionCtx) {
       (async () => {
         try {
           await Bun.$`open ${repo.path}`.quiet();
-          ctx.setNotice(`Opened ${repo.path}`);
+          ctx.setNotice(`Opened ${repo.path}`, "info");
         } catch (err) {
-          ctx.setNotice(`Failed to open repo: ${err}`);
+          ctx.setNotice(`Failed to open repo: ${err}`, "error");
         }
       })();
     } else {
-      ctx.setNotice("No agent selected");
+      ctx.setNotice("No agent selected", "error");
     }
     return;
   }
@@ -1639,9 +1656,9 @@ export function handleOpenWorktree(ctx: ActionCtx) {
     const pathToOpen = await resolveAgentDirPath(agent);
     try {
       await Bun.$`open ${pathToOpen}`.quiet();
-      ctx.setNotice(`Opened ${pathToOpen}`);
+      ctx.setNotice(`Opened ${pathToOpen}`, "info");
     } catch (err) {
-      ctx.setNotice(`Failed to open worktree: ${err}`);
+      ctx.setNotice(`Failed to open worktree: ${err}`, "error");
     }
   })();
 }
@@ -1653,17 +1670,17 @@ export async function handleOpenDiffTool(ctx: ActionCtx) {
     activeDiffProc = null;
   }
 
-  if (diffToolLaunching) { ctx.setNotice("Diff tool is already launching"); return; }
+  if (diffToolLaunching) { ctx.setNotice("Diff tool is already launching", "error"); return; }
 
   const agent = ctx.agentTree.selectedAgent;
-  if (!agent) { ctx.setNotice("No agent selected"); return; }
-  if (!ctx.diffTool) { ctx.setNotice("No diff tool configured — set externalDiffTool in ~/.itsybitsy/config.json"); return; }
+  if (!agent) { ctx.setNotice("No agent selected", "error"); return; }
+  if (!ctx.diffTool) { ctx.setNotice("No diff tool configured — set externalDiffTool in ~/.itsybitsy/config.json", "error"); return; }
   const tool = ctx.diffTool;
 
   const cwd = agentWorktreePath(agent);
 
   if (!existsSync(cwd)) {
-    ctx.setNotice("Worktree no longer exists — agent may have been merged");
+    ctx.setNotice("Worktree no longer exists — agent may have been merged", "error");
     return;
   }
 
@@ -1672,11 +1689,11 @@ export async function handleOpenDiffTool(ctx: ActionCtx) {
   // Check for empty diff before launching tool
   const mergeBaseProc = Bun.spawn(["git", "merge-base", "HEAD", "main"], { cwd, stdout: "pipe", stderr: "ignore" });
   const mergeBase = (await new Response(mergeBaseProc.stdout).text()).trim();
-  if (!mergeBase) { diffToolLaunching = false; ctx.setNotice("Could not determine merge-base with main"); return; }
+  if (!mergeBase) { diffToolLaunching = false; ctx.setNotice("Could not determine merge-base with main", "error"); return; }
 
   const checkProc = Bun.spawn(["git", "diff", "--quiet", mergeBase], { cwd, stdout: "ignore", stderr: "ignore" });
   const checkCode = await checkProc.exited;
-  if (checkCode === 0) { diffToolLaunching = false; ctx.setNotice("No changes to show — diff is empty"); return; }
+  if (checkCode === 0) { diffToolLaunching = false; ctx.setNotice("No changes to show — diff is empty", "error"); return; }
 
   // Run diff tool in the worktree, showing changes since merge-base with main.
   // 'exec' replaces bash so kill signals reach the actual process tree.
@@ -1688,7 +1705,7 @@ export async function handleOpenDiffTool(ctx: ActionCtx) {
   );
   activeDiffProc = { proc, agentId: agent.id };
   diffToolLaunching = false;
-  ctx.setNotice(`Opened diff in ${tool}`);
+  ctx.setNotice(`Opened diff in ${tool}`, "info");
 
   // Report errors asynchronously, stripping newlines for single-line status bar display
   (async () => {
@@ -1698,12 +1715,12 @@ export async function handleOpenDiffTool(ctx: ActionCtx) {
       if (exitCode !== 0) {
         const stderr = await new Response(proc.stderr).text();
         const msg = (stderr || `exit code ${exitCode}`).split("\n")[0]!.trim();
-        ctx.setNotice(`Diff tool error: ${msg}`);
+        ctx.setNotice(`Diff tool error: ${msg}`, "error");
       }
     } catch (err) {
       if (activeDiffProc?.proc === proc) activeDiffProc = null;
       const msg = String(err).split("\n")[0]!.trim();
-      ctx.setNotice(`Diff tool error: ${msg}`);
+      ctx.setNotice(`Diff tool error: ${msg}`, "error");
     }
   })();
 }
@@ -1770,7 +1787,7 @@ export function handleHelp(ctx: ActionCtx) {
 }
 
 export function handleSetup(ctx: ActionCtx) {
-  loadSetupDialog(ctx).catch((err) => ctx.setNotice(`Setup error: ${err}`));
+  loadSetupDialog(ctx).catch((err) => ctx.setNotice(`Setup error: ${err}`, "error"));
 }
 
 async function loadSetupDialog(ctx: ActionCtx, initialTab = 0) {
@@ -1856,9 +1873,9 @@ function toggleHook(
   fn(repoPath).then((res) => {
     if (res.ok) {
       item.value = shouldInstall ? "installed" : "not installed";
-      ctx.setNotice(`${shouldInstall ? "Installed" : "Uninstalled"} ${label}`);
+      ctx.setNotice(`${shouldInstall ? "Installed" : "Uninstalled"} ${label}`, "info");
     } else {
-      ctx.setNotice(`Failed: ${res.stderr || res.stdout}`);
+      ctx.setNotice(`Failed: ${res.stderr || res.stdout}`, "error");
     }
     ctx.tui?.requestRender();
   });
@@ -1881,9 +1898,9 @@ function handleSetupItemAction(ctx: ActionCtx, repoPath: string) {
           const newTool = value.trim() || undefined;
           ctx.diffTool = newTool;
           writeConfig(defaultUserConfigPath(), "externalDiffTool", newTool).then(() => {
-            ctx.setNotice(newTool ? `Diff tool set to: ${newTool}` : "Diff tool cleared");
+            ctx.setNotice(newTool ? `Diff tool set to: ${newTool}` : "Diff tool cleared", "info");
           }).catch((err) => {
-            ctx.setNotice(`Failed to save: ${err}`);
+            ctx.setNotice(`Failed to save: ${err}`, "error");
           });
         },
       });
@@ -1907,9 +1924,9 @@ function handleConfigItemAction(
         // Update in-memory config and refresh dialog
         config[item.key] = { value: newValue, source: "user" };
         showSetupDialogForTab(tab);
-        ctx.setNotice(`${item.key} = ${newValue}`);
+        ctx.setNotice(`${item.key} = ${newValue}`, "info");
       }).catch((err) => {
-        ctx.setNotice(`Failed to save: ${err}`);
+        ctx.setNotice(`Failed to save: ${err}`, "error");
       });
     } else if (item.type === "string[]" && item.key.startsWith("permissions.")) {
       // Open permissions editor for allow/deny lists
@@ -1942,10 +1959,10 @@ function handleConfigItemAction(
           ).then(() => {
             config[allowKey] = { value: newAllow, source: "user" };
             config[denyKey] = { value: newDeny, source: "user" };
-            ctx.setNotice(`${roleKey} permissions updated`);
-            loadSetupDialog(ctx, tab).catch((err) => ctx.setNotice(`Setup error: ${err}`));
+            ctx.setNotice(`${roleKey} permissions updated`, "info");
+            loadSetupDialog(ctx, tab).catch((err) => ctx.setNotice(`Setup error: ${err}`, "error"));
           }).catch((err) => {
-            ctx.setNotice(`Failed to save: ${err}`);
+            ctx.setNotice(`Failed to save: ${err}`, "error");
           });
         },
       });
@@ -1965,7 +1982,7 @@ function handleConfigItemAction(
           if (item.type === "number") {
             const num = Number(value);
             if (value.trim() === "" || isNaN(num)) {
-              ctx.setNotice("Invalid number");
+              ctx.setNotice("Invalid number", "error");
               return;
             }
             parsed = num;
@@ -1979,11 +1996,11 @@ function handleConfigItemAction(
             if (item.key === "externalDiffTool") {
               ctx.diffTool = typeof parsed === "string" && parsed ? parsed : undefined;
             }
-            ctx.setNotice(`${item.key} updated`);
+            ctx.setNotice(`${item.key} updated`, "info");
             // Re-open setup dialog on the same tab
-            loadSetupDialog(ctx, tab).catch((err) => ctx.setNotice(`Setup error: ${err}`));
+            loadSetupDialog(ctx, tab).catch((err) => ctx.setNotice(`Setup error: ${err}`, "error"));
           }).catch((err) => {
-            ctx.setNotice(`Failed to save: ${err}`);
+            ctx.setNotice(`Failed to save: ${err}`, "error");
           });
         },
       });
@@ -2014,9 +2031,9 @@ export function handleResizeLeft(ctx: ActionCtx, delta: number) {
 // "open repo" and "open Claude tmux" both attach to the coordinator's tmux.
 function openSystemCoordinatorInGhostty(ctx: ActionCtx) {
   openInGhostty(IB_COORDINATOR_SESSION).then((result) => {
-    ctx.setNotice(result.message);
+    ctx.setNotice(result.message, result.ok ? "info" : "error");
   }).catch((err) => {
-    ctx.setNotice(`Ghostty error: ${err}`);
+    ctx.setNotice(`Ghostty error: ${err}`, "error");
   });
 }
 
@@ -2030,9 +2047,9 @@ export function handleOpenGhostty(ctx: ActionCtx) {
     (async () => {
       const pathToOpen = await resolveAgentDirPath(agent);
       openPathInGhostty(pathToOpen).then((result) => {
-        ctx.setNotice(result.message);
+        ctx.setNotice(result.message, result.ok ? "info" : "error");
       }).catch((err) => {
-        ctx.setNotice(`Ghostty error: ${err}`);
+        ctx.setNotice(`Ghostty error: ${err}`, "error");
       });
     })();
     return;
@@ -2045,14 +2062,14 @@ export function handleOpenGhostty(ctx: ActionCtx) {
     );
     if (headerEntry) {
       openPathInGhostty(headerEntry.repoPath).then((result) => {
-        ctx.setNotice(result.message);
+        ctx.setNotice(result.message, result.ok ? "info" : "error");
       }).catch((err) => {
-        ctx.setNotice(`Ghostty error: ${err}`);
+        ctx.setNotice(`Ghostty error: ${err}`, "error");
       });
       return;
     }
   }
-  ctx.setNotice("No agent or repo selected");
+  ctx.setNotice("No agent or repo selected", "error");
 }
 
 export function handleOpenGhosttyTmux(ctx: ActionCtx) {
@@ -2062,11 +2079,11 @@ export function handleOpenGhosttyTmux(ctx: ActionCtx) {
   }
   const agent = ctx.agentTree.selectedAgent;
   if (agent) {
-    if (!agent.meta.tmux_session) { ctx.setNotice("No active tmux session"); return; }
+    if (!agent.meta.tmux_session) { ctx.setNotice("No active tmux session", "error"); return; }
     openInGhostty(agent.meta.tmux_session).then((result) => {
-      ctx.setNotice(result.message);
+      ctx.setNotice(result.message, result.ok ? "info" : "error");
     }).catch((err) => {
-      ctx.setNotice(`Ghostty error: ${err}`);
+      ctx.setNotice(`Ghostty error: ${err}`, "error");
     });
     return;
   }
@@ -2075,25 +2092,25 @@ export function handleOpenGhosttyTmux(ctx: ActionCtx) {
   const coordAgent = ctx.rightPane.repoCoordinatorAgent;
   if (coordAgent && coordAgent.meta.tmux_session) {
     openInGhostty(coordAgent.meta.tmux_session).then((result) => {
-      ctx.setNotice(result.message);
+      ctx.setNotice(result.message, result.ok ? "info" : "error");
     }).catch((err) => {
-      ctx.setNotice(`Ghostty error: ${err}`);
+      ctx.setNotice(`Ghostty error: ${err}`, "error");
     });
     return;
   }
   if (ctx.agentTree.selectedRepoHeader) {
-    ctx.setNotice("No coordinator tmux for this repo");
+    ctx.setNotice("No coordinator tmux for this repo", "error");
     return;
   }
-  ctx.setNotice("No agent selected");
+  ctx.setNotice("No agent selected", "error");
 }
 
 export function handleSnapshot(ctx: ActionCtx) {
   const agent = ctx.agentTree.selectedAgent;
-  if (!agent) { ctx.setNotice("No agent selected"); return; }
+  if (!agent) { ctx.setNotice("No agent selected", "error"); return; }
   captureTmuxOutput(agent.meta.tmux_session).then(async (strippedOutput) => {
     try {
-      if (!strippedOutput) { ctx.setNotice("No tmux output captured"); return; }
+      if (!strippedOutput) { ctx.setNotice("No tmux output captured", "error"); return; }
       const result = parseStateForCli(strippedOutput, classifyAgentCli(agent.meta.model));
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
       const filename = `snapshot-${timestamp}-${result.state}.txt`;
@@ -2116,7 +2133,7 @@ export function handleSnapshot(ctx: ActionCtx) {
         mirrorSnapshotPath,
         `State: ${result.state}\nReason: ${result.reason}\n\n${strippedOutput}`
       );
-      ctx.setNotice(`Snapshot saved: ${filename} (state: ${result.state})`);
+      ctx.setNotice(`Snapshot saved: ${filename} (state: ${result.state})`, "info");
       ctx.showDialog({
         type: "textarea",
         prompt: `Note for ${filename} (empty to skip):`,
@@ -2125,23 +2142,23 @@ export function handleSnapshot(ctx: ActionCtx) {
         onSubmit: (note: string) => {
           ctx.closeDialog();
           const trimmed = note.trim();
-          if (!trimmed) { ctx.setNotice(`Snapshot saved: ${filename} (no note)`); return; }
+          if (!trimmed) { ctx.setNotice(`Snapshot saved: ${filename} (no note)`, "info"); return; }
           ctx.executeAndRefresh(async () => {
             try {
               await Bun.write(notePath, `${trimmed}\n`);
               await Bun.write(mirrorNotePath, `${trimmed}\n`);
-              ctx.setNotice(`Snapshot + note saved: ${filename}`);
+              ctx.setNotice(`Snapshot + note saved: ${filename}`, "info");
             } catch (err) {
-              ctx.setNotice(`Note save error: ${err}`);
+              ctx.setNotice(`Note save error: ${err}`, "error");
             }
           });
         },
       });
     } catch (err) {
-      ctx.setNotice(`Snapshot error: ${err}`);
+      ctx.setNotice(`Snapshot error: ${err}`, "error");
     }
   }).catch((err) => {
-    ctx.setNotice(`Snapshot error: ${err}`);
+    ctx.setNotice(`Snapshot error: ${err}`, "error");
   });
 }
 
@@ -2174,7 +2191,8 @@ export function handleKillOrphanedSession(ctx: ActionCtx, session: string) {
       ctx.closeDialog();
       ctx.executeAndRefresh(async () => {
         const ok = await killTmuxSession(session);
-        ctx.setNotice(ok ? `Killed session: ${session}` : `Failed to kill session: ${session}`);
+        if (ok) ctx.setNotice(`Killed session: ${session}`, "info");
+        else ctx.setNotice(`Failed to kill session: ${session}`, "error");
       });
     },
   });
@@ -2190,7 +2208,7 @@ export function handleCrossRepoSend(ctx: ActionCtx) {
 
   // Need at least 2 repos with agents for cross-repo to make sense
   if (reposWithAgents.length < 2) {
-    ctx.setNotice("Cross-repo send requires 2+ repos with active agents");
+    ctx.setNotice("Cross-repo send requires 2+ repos with active agents", "error");
     return;
   }
 
@@ -2207,7 +2225,7 @@ export function handleCrossRepoSend(ctx: ActionCtx) {
         f.kind === "agent" && f.agent.repoPath === repo.path && !f.agent.archived
       )
       .map((f) => f.agent);
-    if (agents.length === 0) { ctx.setNotice("No active agents in that repo"); return; }
+    if (agents.length === 0) { ctx.setNotice("No active agents in that repo", "error"); return; }
     const items = agents.map((a) => `${a.id}  (${a.state})`);
     ctx.showDialog({
       type: "select",
@@ -2244,10 +2262,11 @@ function showMessageInput(ctx: ActionCtx, repo: RepoEntry, destAgent: Agent) {
     value: "",
     onSubmit: (message: string) => {
       ctx.closeDialog();
-      if (!message.trim()) { ctx.setNotice("Send cancelled"); return; }
+      if (!message.trim()) { ctx.setNotice("Send cancelled", "info"); return; }
       ctx.executeAndRefresh(async () => {
         const result = await sendMessage(destAgent, message.trim(), { cwd: "/" });
-        ctx.setNotice(result.ok ? `Sent to ${destAgent.id} in ${repoDisplayName(repo)}` : `Send failed: ${result.stderr || result.stdout}`);
+        if (result.ok) ctx.setNotice(`Sent to ${destAgent.id} in ${repoDisplayName(repo)}`, "info");
+        else ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
       });
     },
   });
@@ -2262,7 +2281,7 @@ function findRepoByHeader(ctx: ActionCtx): RepoEntry | null {
 
 export function handleRenameRepo(ctx: ActionCtx) {
   const repo = findRepoByHeader(ctx);
-  if (!repo) { ctx.setNotice("No repo selected"); return; }
+  if (!repo) { ctx.setNotice("No repo selected", "error"); return; }
   ctx.showDialog({
     type: "input",
     prompt: `Rename ${repoDisplayName(repo)}:`,
@@ -2270,7 +2289,7 @@ export function handleRenameRepo(ctx: ActionCtx) {
     onSubmit: (value: string) => {
       ctx.closeDialog();
       renameRepo(repo.path, value).then((result) => {
-        ctx.setNotice(result.message);
+        ctx.setNotice(result.message, result.ok ? "info" : "error");
         if (result.ok) {
           // Update in-memory state so the UI reflects the change immediately
           const trimmed = value.trim();
@@ -2278,7 +2297,7 @@ export function handleRenameRepo(ctx: ActionCtx) {
           ctx.watcher?.refresh();
         }
       }).catch((err) => {
-        ctx.setNotice(`Error renaming: ${err}`);
+        ctx.setNotice(`Error renaming: ${err}`, "error");
       });
     },
   });
@@ -2286,7 +2305,7 @@ export function handleRenameRepo(ctx: ActionCtx) {
 
 function handleRemoveRepo(ctx: ActionCtx, repo?: RepoEntry) {
   const resolved = repo ?? findRepoByHeader(ctx);
-  if (!resolved) { ctx.setNotice("No repo selected"); return; }
+  if (!resolved) { ctx.setNotice("No repo selected", "error"); return; }
   ctx.showDialog({
     type: "confirm",
     prompt: `Remove ${repoDisplayName(resolved)} from registry?\n(${resolved.path})`,
@@ -2296,7 +2315,7 @@ function handleRemoveRepo(ctx: ActionCtx, repo?: RepoEntry) {
     onYes: () => {
       ctx.closeDialog();
       removeRepo(resolved.path).then((result) => {
-        ctx.setNotice(result.message);
+        ctx.setNotice(result.message, result.ok ? "info" : "error");
         if (result.ok) {
           // Remove from in-memory repos so the UI reflects the change immediately
           const idx = ctx.repos.findIndex((r) => r.path === resolved.path);
@@ -2305,7 +2324,7 @@ function handleRemoveRepo(ctx: ActionCtx, repo?: RepoEntry) {
           ctx.watcher?.refresh();
         }
       }).catch((err) => {
-        ctx.setNotice(`Error removing: ${err}`);
+        ctx.setNotice(`Error removing: ${err}`, "error");
       });
     },
   });
@@ -2333,12 +2352,12 @@ async function countAgentDirs(repoPath: string): Promise<{ count: number; error?
 /** 'D' / 'x' on repo header — remove repo with safety check: must have zero agent directories */
 export async function handleRemoveRepoSafe(ctx: ActionCtx) {
   const repo = findRepoByHeader(ctx);
-  if (!repo) { ctx.setNotice("No repo selected"); return; }
+  if (!repo) { ctx.setNotice("No repo selected", "error"); return; }
 
   const { count, error } = await countAgentDirs(repo.path);
-  if (error) { ctx.setNotice(error); return; }
+  if (error) { ctx.setNotice(error, "error"); return; }
   if (count > 0) {
-    ctx.setNotice(`Cannot remove: ${count} agent dir${count > 1 ? "s" : ""} still exist in ${repoDisplayName(repo)}`);
+    ctx.setNotice(`Cannot remove: ${count} agent dir${count > 1 ? "s" : ""} still exist in ${repoDisplayName(repo)}`, "error");
     return;
   }
 
@@ -2360,11 +2379,11 @@ export async function handleFolderBrowser(ctx: ActionCtx) {
       const raw = basename(path);
       const sanitized = raw.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9_-]/g, "");
       if (!sanitized) {
-        ctx.setNotice(`Cannot derive a valid name from ${raw}`);
+        ctx.setNotice(`Cannot derive a valid name from ${raw}`, "error");
         return;
       }
       addRepo(path, sanitized).then(async (result) => {
-        ctx.setNotice(result.message);
+        ctx.setNotice(result.message, result.ok ? "info" : "error");
         if (result.ok) {
           const freshRepos = await listRepos();
           ctx.repos.length = 0;
@@ -2373,7 +2392,7 @@ export async function handleFolderBrowser(ctx: ActionCtx) {
           ctx.watcher?.refresh();
         }
       }).catch((err) => {
-        ctx.setNotice(`Error adding repo: ${err}`);
+        ctx.setNotice(`Error adding repo: ${err}`, "error");
       });
     },
   });
@@ -2381,17 +2400,17 @@ export async function handleFolderBrowser(ctx: ActionCtx) {
 
 export function handleResolveHealth(ctx: ActionCtx) {
   if (ctx.rightPane.mode !== "REPO" || !ctx.agentTree.selectedRepoHeader) {
-    ctx.setNotice("Fix is only available in REPO mode");
+    ctx.setNotice("Fix is only available in REPO mode", "error");
     return;
   }
   const report = ctx.healthReport;
   if (!report || report.warnings.length === 0) {
-    ctx.setNotice("No health issues to fix");
+    ctx.setNotice("No health issues to fix", "info");
     return;
   }
   const resolvable = getResolvableWarnings(report.warnings);
   if (resolvable.length === 0) {
-    ctx.setNotice("No auto-resolvable issues");
+    ctx.setNotice("No auto-resolvable issues", "info");
     return;
   }
 
@@ -2413,7 +2432,7 @@ export function handleResolveHealth(ctx: ActionCtx) {
         const msg = result.failed > 0
           ? `Fixed ${result.resolved}, failed ${result.failed}`
           : `Fixed ${result.resolved} issue(s)`;
-        ctx.setNotice(msg);
+        ctx.setNotice(msg, result.failed > 0 ? "error" : "info");
         ctx.watcher?.recheckHealth();
       });
     },

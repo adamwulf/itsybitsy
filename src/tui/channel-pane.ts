@@ -49,6 +49,7 @@ import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import { readChannel, type ChannelMessage } from "../team-channel";
 import { readConfig } from "../config";
+import { expandTabs } from "../tmux-poller";
 import { wrapLines, padLines } from "./wrap";
 import { RESET, BOLD, DIM, CYAN, BRIGHT_BLUE, BRIGHT_MAGENTA } from "./colors";
 
@@ -244,12 +245,16 @@ export class ChannelPaneComponent implements Component {
         rec.kind === "system"
           ? formatChannelSystemLine(rec)
           : formatChannelLine(rec, this.teamName, this.userName, this.agentRepoById);
+      // Expand tabs before wrap/truncate — pi-tui v0.56.0's slice helpers
+      // measure \t as 0 cols while visibleWidth measures it as 3, so a chat
+      // message containing literal tabs would otherwise overflow the pane.
+      // See expandTabs() in ../tmux-poller for the full asymmetry note.
       // 2-space hanging indent: the FIRST wrapped line stays flush-left so a
       // reader can easily spot where each message starts; SUBSEQUENT wrapped
       // lines are prefixed with two spaces. We wrap to (width - 2) so the
       // indented continuations don't overflow the pane and get truncated by
       // truncateToWidth below.
-      const segments = wrapLines(gutter + body, Math.max(1, width - 2));
+      const segments = wrapLines(expandTabs(gutter + body), Math.max(1, width - 2));
       for (let s = 0; s < segments.length; s++) {
         wrapped.push(s === 0 ? segments[s]! : `  ${segments[s]!}`);
       }

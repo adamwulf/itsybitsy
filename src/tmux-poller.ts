@@ -12,10 +12,22 @@ import { tmuxSessionTarget } from "./validation";
 export const spawnCtx = new SpawnContext();
 
 export interface TmuxPollerEvents {
-  /** Raw tmux output (with ANSI) for display */
+  /** Raw tmux output (with ANSI, tabs expanded) for display */
   onOutput: (raw: string, stripped: string) => void;
   onWidth?: (width: number) => void;
   onError?: (error: Error) => void;
+}
+
+// pi-tui v0.56.0's visibleWidth() expands \t to 3 spaces but its slicing
+// helpers (sliceWithWidth/sliceByColumn/extractSegments) measure \t as 0
+// columns via graphemeWidth (its leadingNonPrintingRegex strips control
+// chars). The mismatch causes lines to exceed terminal width and crash the
+// TUI when tmux capture-pane output contains literal tabs (e.g. codex agents
+// editing .pbxproj). Pre-expand tabs to 3 spaces here so every TmuxPoller
+// consumer gets tab-safe output without having to remember to expand at the
+// callback site.
+export function expandTabs(s: string): string {
+  return s.includes("\t") ? s.replace(/\t/g, "   ") : s;
 }
 
 export class TmuxPoller {
@@ -127,8 +139,9 @@ export class TmuxPoller {
         return;
       }
 
-      const stripped = stripAnsi(raw);
-      this.events.onOutput(raw, stripped);
+      const expanded = expandTabs(raw);
+      const stripped = stripAnsi(expanded);
+      this.events.onOutput(expanded, stripped);
       // Note: window width is queried once in setAgent() rather than on every
       // poll tick — it only changes on terminal resize or resizeTmuxWindow()
       // calls, so per-tick polling wasted ~1 posix_spawn/sec.

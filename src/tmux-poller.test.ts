@@ -1,5 +1,5 @@
 import { test, expect, describe, afterEach } from "bun:test";
-import { TmuxPoller, captureTmuxOutput, hasAttachedClient, spawnCtx } from "./tmux-poller";
+import { TmuxPoller, captureTmuxOutput, hasAttachedClient, spawnCtx, expandTabs } from "./tmux-poller";
 
 function mockSpawn(stdout: string, exitCode: number, delay = 0) {
   spawnCtx.set((_cmd: string[], _opts?: any) => {
@@ -615,5 +615,82 @@ describe("hasAttachedClient", () => {
     spawnCtx.set(() => { throw new Error("tmux not found"); });
     const result = await hasAttachedClient("my-session");
     expect(result).toBe(false);
+  });
+});
+
+// -------------------------------------------------------------------
+// expandTabs (tab → 3 spaces) helper + TmuxPoller boundary
+// -------------------------------------------------------------------
+describe("expandTabs", () => {
+  test("replaces a single tab with 3 spaces", () => {
+    expect(expandTabs("a\tb")).toBe("a   b");
+  });
+
+  test("replaces every tab in a multi-tab line", () => {
+    expect(expandTabs("\tA\t\tB\t")).toBe("   A      B   ");
+  });
+
+  test("leaves tab-free strings untouched", () => {
+    const s = "plain ascii line with no tabs";
+    expect(expandTabs(s)).toBe(s);
+  });
+
+  test("preserves newlines and only expands tabs", () => {
+    expect(expandTabs("line1\twith\ttab\nline2\twith\ttab")).toBe(
+      "line1   with   tab\nline2   with   tab",
+    );
+  });
+});
+
+describe("TmuxPoller tab handling at the boundary", () => {
+  let poller: TmuxPoller;
+
+  afterEach(() => {
+    poller?.stop();
+  });
+
+  // This is the regression guard for the ib watch crash: a future change
+  // that removes expandTabs() from poll() will cause this test to fail
+  // because the raw \t will reach onOutput verbatim.
+  test("onOutput receives tab-expanded output (regression guard for ib watch crash)", async () => {
+    // Simulate a codex agent editing a .pbxproj line containing literal
+    // tabs — exactly the input that crashed the TUI.
+    mockSpawn("C589242A207A\t\tC58B0000\t\t/* identifier */\n", 0);
+
+    let receivedRaw: string | undefined;
+    let receivedStripped: string | undefined;
+    poller = new TmuxPoller({
+      onOutput(raw, stripped) {
+        receivedRaw = raw;
+        receivedStripped = stripped;
+      },
+    });
+    poller.start();
+    poller.setAgent("tabby-session");
+    await Bun.sleep(50);
+
+    expect(receivedRaw).toBeDefined();
+    expect(receivedStripped).toBeDefined();
+    // Boundary invariant: no literal tab characters reach the consumer.
+    expect(receivedRaw).not.toContain("\t");
+    expect(receivedStripped).not.toContain("\t");
+    // And the expanded content is what we expect.
+    expect(receivedRaw).toBe(
+      "C589242A207A      C58B0000      /* identifier */\n",
+    );
+  });
+
+  test("tab-free output passes through onOutput unchanged", async () => {
+    mockSpawn("plain output line\n", 0);
+    let receivedRaw: string | undefined;
+    poller = new TmuxPoller({
+      onOutput(raw, _stripped) {
+        receivedRaw = raw;
+      },
+    });
+    poller.start();
+    poller.setAgent("plain-session");
+    await Bun.sleep(50);
+    expect(receivedRaw).toBe("plain output line\n");
   });
 });

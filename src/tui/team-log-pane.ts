@@ -17,6 +17,7 @@ import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import { readFile } from "fs/promises";
 import { teamLogPath } from "../team-channel";
+import { expandTabs } from "../tmux-poller";
 import { wrapLines, padLines } from "./wrap";
 import { RESET, DIM } from "./colors";
 
@@ -75,7 +76,10 @@ export class TeamLogPaneComponent implements Component {
       return;
     }
     if (this.teamName !== t) return;
-    const split = content.split("\n");
+    // Expand tabs at the boundary so downstream pi-tui slicing/wrapping
+    // doesn't crash on files containing literal \t — same pi-tui v0.56.0
+    // asymmetry handled by TmuxPoller; see expandTabs() docstring.
+    const split = expandTabs(content).split("\n");
     // Drop a trailing empty string from the final newline.
     if (split.length > 0 && split[split.length - 1] === "") split.pop();
     this.lines = split;

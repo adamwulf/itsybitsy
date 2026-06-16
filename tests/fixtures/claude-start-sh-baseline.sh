@@ -1,6 +1,8 @@
 #!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
+# Suppress the "How is Claude doing?" feedback survey for spawned agents
+export CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
 
 AGENT_LOG='<AGENTSDIR>/claude-snapshot/agent.log'
 STDERR_LOG='<AGENTSDIR>/claude-snapshot/claude.stderr.log'

@@ -982,6 +982,8 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
       const resumeContent = `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
+# Suppress the "How is Claude doing?" feedback survey for spawned agents
+export CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
 
 AGENT_LOG=${qAgentLog}
 STDERR_LOG=${qResumeStderrLog}
@@ -4361,6 +4363,8 @@ echo ""
     startContent = `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
+# Suppress the "How is Claude doing?" feedback survey for spawned agents
+export CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
 
 AGENT_LOG=${qStartAgentLog}
 STDERR_LOG=${qStartStderrLog}

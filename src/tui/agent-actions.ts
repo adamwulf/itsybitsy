@@ -892,9 +892,8 @@ function openFirstMessagePrompt(ctx: ActionCtx, teamName: string, addedCount: nu
 function runAddMember(ctx: ActionCtx, agent: Agent, teamName: string) {
   ctx.executeAndRefresh(async () => {
     const result = await teamAdd(teamName, agent.id, ctx.repos);
-    ctx.setNotice(result.ok
-      ? (result.stdout || `Added ${agent.id} to @${teamName}`)
-      : (result.stderr || result.stdout || `Add to team failed`), "error");
+    if (result.ok) ctx.setNotice(result.stdout || `Added ${agent.id} to @${teamName}`, "info");
+    else ctx.setNotice(result.stderr || result.stdout || `Add to team failed`, "error");
   });
 }
 

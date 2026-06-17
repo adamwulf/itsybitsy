@@ -12,7 +12,7 @@
 import { join } from "path";
 import { mkdirSync } from "fs";
 import { watch, type FSWatcher } from "node:fs";
-import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, isApiError, isApiErrorRateLimited, isApiTerms, readAgentState, hasBackgroundTasks, anyChildActive, updateAgentTransient } from "./agents";
+import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, isApiError, isApiErrorRateLimited, isApiTerms, readAgentState, hasBackgroundTasks, anyChildActive, readAgentTransient, updateAgentTransient } from "./agents";
 import type { Agent } from "./agents";
 import { captureTmuxOutput } from "./tmux-poller";
 import { logAgent } from "./agent-lifecycle";
@@ -88,6 +88,9 @@ export const POLL_INTERVAL_MS = 5_000;
 
 /** Minimum interval between auto-compact checks per agent, in milliseconds (60s) */
 export const COMPACT_CHECK_COOLDOWN_MS = 60_000;
+
+/** Window after restart where a detected Claude compaction is treated as restart-triggered. */
+export const RESTART_COMPACT_CANCEL_WINDOW_MS = 10_000;
 
 /** Initial notification threshold in ticks (6 ticks * 5s = 30s) */
 export const INITIAL_NOTIFY_TICKS = 6;
@@ -371,6 +374,24 @@ async function sendTmuxEnter(tmuxSession: string): Promise<boolean> {
   }
 }
 
+/** Send three Escape keys to cancel a just-started compaction and clear `/compact`. */
+async function sendTmuxCompactCancel(tmuxSession: string): Promise<boolean> {
+  if (!isValidTmuxSession(tmuxSession)) {
+    console.error(`[watchdog] Invalid tmux session name: ${tmuxSession}`);
+    return false;
+  }
+  try {
+    const proc = spawnCtx.runner(
+      ["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "Escape", "Escape", "Escape"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const exitCode = await proc.exited;
+    return exitCode === 0;
+  } catch { /* expected: tmux not running or session gone */
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Built-in state handlers
 // ---------------------------------------------------------------------------
@@ -591,8 +612,26 @@ async function handleCreating(_agent: Agent, tracker: AgentTracker, _getAllAgent
  * Agent is compacting context — normal operation, just reset rate limit bypass flag.
  * Does NOT clear completionNotified (matches ib bash).
  */
-async function handleCompacting(_agent: Agent, tracker: AgentTracker, _getAllAgents: GetAllAgents): Promise<void> {
+async function handleCompacting(agent: Agent, tracker: AgentTracker, _getAllAgents: GetAllAgents): Promise<void> {
   tracker.rateLimitBypassed = false;
+
+  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const transient = await readAgentTransient(agentDir);
+  const restartedAt = transient?.last_restarted_at_ms ?? null;
+  if (!restartedAt || nowFn() - restartedAt > RESTART_COMPACT_CANCEL_WINDOW_MS) return;
+  if ((transient?.restart_compact_escape_sent_at_ms ?? 0) >= restartedAt) return;
+
+  const tmuxSession = agent.meta.tmux_session;
+  if (!tmuxSession) return;
+
+  const sent = await runSessionExclusive(agent.id, () => sendTmuxCompactCancel(tmuxSession));
+  if (sent) {
+    await updateAgentTransient(agentDir, (cur) => ({
+      ...cur,
+      restart_compact_escape_sent_at_ms: nowFn(),
+    }));
+    await logAgent(agentDir, "[watchdog] Detected compaction within 10s of restart — sent Escape Escape Escape");
+  }
 }
 
 /** Maximum number of retry attempts for rate limit bypass */
@@ -1474,4 +1513,3 @@ export function makeLazyAllAgents(): GetAllAgents {
     return cached;
   };
 }
-

@@ -17,6 +17,7 @@ import {
   nowMsCtx,
   OP_STUCK_TIMEOUT_MS,
   readAgentTransient,
+  updateAgentTransient,
   setAgentOperation,
   clearAgentOperation,
   TRANSIENT_FRESH_MS,
@@ -1140,6 +1141,11 @@ ${qAbsExitScript}
 
     // Write state: "running" to meta.json
     await writeAgentState(agentDir, "running");
+    await updateAgentTransient(agentDir, (cur) => ({
+      ...cur,
+      last_restarted_at_ms: Date.now(),
+      restart_compact_escape_sent_at_ms: null,
+    }));
 
     // Note: a freshly-resumed agent whose prior transcript already exceeds
     // `autoCompactThreshold` won't receive `/compact` on the per-agent watchdog's

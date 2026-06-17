@@ -2892,9 +2892,14 @@ describe("readAgentTransient / writeAgentTransient", () => {
     };
     await writeAgentTransient(tempDir, data);
     const result = await readAgentTransient(tempDir);
-    // A transient written without `operation` reads back with operation: null
-    // (the back-compat default), so compare against the data plus that field.
-    expect(result).toEqual({ ...data, operation: null });
+    // Fields added after the original transient shape read back with null
+    // back-compat defaults when absent.
+    expect(result).toEqual({
+      ...data,
+      last_restarted_at_ms: null,
+      restart_compact_escape_sent_at_ms: null,
+      operation: null,
+    });
   });
 
   test("returns null when file is malformed", async () => {
@@ -2917,7 +2922,12 @@ describe("readAgentTransient / writeAgentTransient", () => {
     const second: TransientState = { tmux_compacting: false, tmux_rate_limited: true, tmux_api_error: false, tmux_api_terms: false, has_background_tasks: false, updated_at_ms: 2, watchdog_pid: 200 };
     await writeAgentTransient(tempDir, first);
     await writeAgentTransient(tempDir, second);
-    expect(await readAgentTransient(tempDir)).toEqual({ ...second, operation: null });
+    expect(await readAgentTransient(tempDir)).toEqual({
+      ...second,
+      last_restarted_at_ms: null,
+      restart_compact_escape_sent_at_ms: null,
+      operation: null,
+    });
   });
 
   test("deleteAgentTransient removes the file", async () => {
@@ -2956,6 +2966,8 @@ describe("updateAgentTransient / setAgentOperation / clearAgentOperation", () =>
       has_background_tasks: false,
       updated_at_ms: 0,
       watchdog_pid: 777,
+      last_restarted_at_ms: null,
+      restart_compact_escape_sent_at_ms: null,
       operation: null,
     });
   });

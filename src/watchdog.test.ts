@@ -1335,6 +1335,61 @@ describe("watchdog", () => {
 
       expect(tracker.rateLimitBypassed).toBe(false);
     });
+
+    test("sends three Escape keys when compacting is detected within 10s of restart", async () => {
+      const now = 1_000_000;
+      setWatchdogNow(() => now);
+      const tempRepo = join(tmpdir(), `watchdog-restart-compact-${process.pid}-${Date.now()}`);
+      const agentDir = join(tempRepo, ".ittybitty", "agents", "a1");
+      mkdirSync(agentDir, { recursive: true });
+      await Bun.write(join(agentDir, "meta.transient.json"), JSON.stringify({
+        tmux_compacting: true,
+        tmux_rate_limited: false,
+        tmux_api_error: false,
+        tmux_api_terms: false,
+        has_background_tasks: false,
+        updated_at_ms: now,
+        watchdog_pid: process.pid,
+        last_restarted_at_ms: now - 9_000,
+        restart_compact_escape_sent_at_ms: null,
+      }));
+
+      const a1 = { ...agent("a1", "compacting"), repoPath: tempRepo };
+      await tick([a1]);
+
+      expect(spawnMock.calls.some((c) =>
+        c.args[0] === "tmux" &&
+        c.args[1] === "send-keys" &&
+        c.args.includes("Escape") &&
+        c.args.filter((arg) => arg === "Escape").length === 3
+      )).toBe(true);
+      const transient = await Bun.file(join(agentDir, "meta.transient.json")).json();
+      expect(transient.restart_compact_escape_sent_at_ms).toBe(now);
+    });
+
+    test("does not send Escape keys when compacting is detected after restart window", async () => {
+      const now = 1_000_000;
+      setWatchdogNow(() => now);
+      const tempRepo = join(tmpdir(), `watchdog-late-compact-${process.pid}-${Date.now()}`);
+      const agentDir = join(tempRepo, ".ittybitty", "agents", "a1");
+      mkdirSync(agentDir, { recursive: true });
+      await Bun.write(join(agentDir, "meta.transient.json"), JSON.stringify({
+        tmux_compacting: true,
+        tmux_rate_limited: false,
+        tmux_api_error: false,
+        tmux_api_terms: false,
+        has_background_tasks: false,
+        updated_at_ms: now,
+        watchdog_pid: process.pid,
+        last_restarted_at_ms: now - 10_001,
+        restart_compact_escape_sent_at_ms: null,
+      }));
+
+      const a1 = { ...agent("a1", "compacting"), repoPath: tempRepo };
+      await tick([a1]);
+
+      expect(spawnMock.calls.some((c) => c.args.includes("Escape"))).toBe(false);
+    });
   });
 
   describe("rate_limited handler", () => {

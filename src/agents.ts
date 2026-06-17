@@ -365,6 +365,13 @@ export interface TransientState {
   has_background_tasks: boolean;
   updated_at_ms: number;
   watchdog_pid: number;
+  // Wall-clock ms when the agent was most recently restarted/resumed. Used by
+  // the watchdog to identify Claude CLI auto-compaction immediately after a
+  // restart, without changing durable meta.json shape.
+  last_restarted_at_ms?: number | null;
+  // Wall-clock ms when the watchdog sent the post-restart compact-cancel
+  // Escape sequence. Prevents repeated Escape bursts for the same restart.
+  restart_compact_escape_sent_at_ms?: number | null;
   // Present only while a long-running op (merge-check/merge/restart) is in
   // flight. Absent on older files; a malformed value is treated as absent.
   operation?: AgentOperation | null;
@@ -426,6 +433,10 @@ export async function readAgentTransient(agentDir: string): Promise<TransientSta
       has_background_tasks: data.has_background_tasks,
       updated_at_ms: data.updated_at_ms,
       watchdog_pid: data.watchdog_pid,
+      last_restarted_at_ms: typeof data.last_restarted_at_ms === "number" ? data.last_restarted_at_ms : null,
+      restart_compact_escape_sent_at_ms: typeof data.restart_compact_escape_sent_at_ms === "number"
+        ? data.restart_compact_escape_sent_at_ms
+        : null,
       // Field added later — absent on older files; a malformed value is
       // ignored (treated as absent) rather than rejecting the whole read.
       operation: parseAgentOperation(data.operation) ?? null,
@@ -461,6 +472,8 @@ function emptyTransient(): TransientState {
     has_background_tasks: false,
     updated_at_ms: 0,
     watchdog_pid: 0,
+    last_restarted_at_ms: null,
+    restart_compact_escape_sent_at_ms: null,
     operation: null,
   };
 }

@@ -447,13 +447,13 @@ async function handleWaiting(agent: Agent, tracker: AgentTracker, getAllAgents: 
     if (agent.meta.manager) {
       notified = await notifyManager(
         agent,
-        `[watchdog]: Your subtask ${agent.id} recently started waiting for input`,
+        `Your subtask ${agent.id} recently started waiting for input`,
         allAgents,
       );
     } else if (agent.meta.spawned_by) {
       notified = await notifySpawner(
         agent,
-        `[watchdog]: Agent ${agent.id} you spawned recently started waiting for input`,
+        `Agent ${agent.id} you spawned recently started waiting for input`,
         allAgents,
       );
     } else {
@@ -498,13 +498,13 @@ async function handleUnknown(agent: Agent, tracker: AgentTracker, getAllAgents: 
     if (agent.meta.manager) {
       notified = await notifyManager(
         agent,
-        `[watchdog]: Your subtask ${agent.id} state is unknown - may need attention`,
+        `Your subtask ${agent.id} state is unknown - may need attention`,
         allAgents,
       );
     } else if (agent.meta.spawned_by) {
       notified = await notifySpawner(
         agent,
-        `[watchdog]: Agent ${agent.id} you spawned has an unknown state - may need attention`,
+        `Agent ${agent.id} you spawned has an unknown state - may need attention`,
         allAgents,
       );
     } else {
@@ -564,13 +564,13 @@ async function handleComplete(agent: Agent, tracker: AgentTracker, getAllAgents:
     if (agent.meta.manager) {
       notified = await notifyManager(
         agent,
-        `[watchdog]: Your subtask ${agent.id} recently completed`,
+        `Your subtask ${agent.id} recently completed`,
         allAgents,
       );
     } else if (agent.meta.spawned_by) {
       notified = await notifySpawner(
         agent,
-        `[watchdog]: Agent ${agent.id} you spawned recently completed`,
+        `Agent ${agent.id} you spawned recently completed`,
         allAgents,
       );
     } else {
@@ -692,7 +692,7 @@ async function handleRateLimited(agent: Agent, tracker: AgentTracker, _getAllAge
   if (usage && usage.sessionPct !== null && usage.sessionPct < RATE_LIMIT_RECOVERY_THRESHOLD) {
     await sendMessage(
       agent,
-      `[watchdog]: Usage has refreshed (${usage.sessionPct}%). Please continue your task.`,
+      `Usage has refreshed (${usage.sessionPct}%). Please continue your task.`,
       { fromAgent: WATCHDOG_SENTINEL },
     );
     // Reset bypass flag so next rate-limit episode will re-bypass

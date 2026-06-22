@@ -87,6 +87,7 @@ import {
   deleteChannelFiles,
 } from "./team-channel";
 import { timed } from "./perf";
+import { WATCHDOG_SENTINEL } from "./watchdog";
 
 export interface IbCommandResult {
   ok: boolean;
@@ -1557,22 +1558,22 @@ export async function reassignAgent(agent: Agent, newManager: string | null): Pr
         archived: false,
         children: [],
       };
-      await sendMessage(targetAgent, msg, { fromAgent: agent.id });
+      await sendMessage(targetAgent, msg, { fromAgent: WATCHDOG_SENTINEL });
     } catch { /* skip notification errors */ }
   };
 
   // Notify old parent
   if (oldManager) {
     const toLabel = newManager ? `to manager '${newManager}'` : "to top-level";
-    await notifyAgent(oldManager, `[watchdog for ${agent.id}]: Agent reassigned ${toLabel}`);
+    await notifyAgent(oldManager, `Agent ${agent.id} reassigned ${toLabel}`);
   }
   // Notify new parent
   if (newManager) {
     const fromLabel = oldManager ? `was under ${oldManager}` : "was top-level";
-    await notifyAgent(newManager, `[watchdog for ${agent.id}]: Agent reassigned to you (${fromLabel})`);
+    await notifyAgent(newManager, `Agent ${agent.id} reassigned to you (${fromLabel})`);
   }
   // Notify the agent itself
-  await notifyAgent(agent.id, `[watchdog]: You've been reassigned from ${oldLabel} to ${newLabel}`);
+  await notifyAgent(agent.id, `You've been reassigned from ${oldLabel} to ${newLabel}`);
 
   return {
     ok: true,

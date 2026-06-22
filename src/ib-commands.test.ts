@@ -6045,19 +6045,20 @@ describe("reassignAgent (native)", () => {
     // Old manager notification
     const oldMgrMsg = messages.find(m => m.includes("to manager"));
     expect(oldMgrMsg).toBeDefined();
-    expect(oldMgrMsg!).toContain("[watchdog for agent-abc]");
-    expect(oldMgrMsg!).toContain("Agent reassigned to manager 'agent-new'");
+    expect(oldMgrMsg!).toContain("[sent by watchdog]:");
+    expect(oldMgrMsg!).toContain("Agent agent-abc reassigned to manager 'agent-new'");
 
     // New manager notification
     const newMgrMsg = messages.find(m => m.includes("reassigned to you"));
     expect(newMgrMsg).toBeDefined();
-    expect(newMgrMsg!).toContain("[watchdog for agent-abc]");
+    expect(newMgrMsg!).toContain("[sent by watchdog]:");
+    expect(newMgrMsg!).toContain("Agent agent-abc reassigned to you");
     expect(newMgrMsg!).toContain("was under agent-old");
 
     // Agent self-notification
     const selfMsg = messages.find(m => m.includes("You've been reassigned"));
     expect(selfMsg).toBeDefined();
-    expect(selfMsg!).toContain("[watchdog]");
+    expect(selfMsg!).toContain("[sent by watchdog]:");
     expect(selfMsg!).toContain("from agent-old to agent-new");
   });
 

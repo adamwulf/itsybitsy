@@ -701,7 +701,7 @@ describe("watchdog", () => {
       const mgr = agent("mgr", "running");
       const worker = agent("w1", "waiting", "mgr");
 
-      await notifyManager(worker, "[watchdog]: test message", [mgr, worker]);
+      await notifyManager(worker, "test message", [mgr, worker]);
 
       // Should have calls to tmux (has-session check + send-keys)
       const hasSessionCalls = spawnMock.calls.filter((c) =>
@@ -892,7 +892,7 @@ describe("watchdog", () => {
       a1.meta.spawned_by = { agent_id: "@system", repo_path: null };
 
       const { notifySpawner } = await import("./watchdog");
-      const ok = await notifySpawner(a1, "[watchdog]: hello system", []);
+      const ok = await notifySpawner(a1, "hello system", []);
 
       expect(ok).toBe(true);
       // sendMessage delivers via `tmux send-keys -t <session> -l <chunk>` —
@@ -960,7 +960,7 @@ describe("watchdog", () => {
         a1.meta.spawned_by = { agent_id: `@${repoBasename}`, repo_path: repoDir };
 
         const { notifySpawner } = await import("./watchdog");
-        const ok = await notifySpawner(a1, "[watchdog]: hello @myrepo", [coord]);
+        const ok = await notifySpawner(a1, "hello @myrepo", [coord]);
 
         expect(ok).toBe(true);
         const sendKeysCalls = spawnMock.calls.filter((c) =>
@@ -1904,7 +1904,7 @@ describe("watchdog", () => {
       const mgr = agent("mgr", "running");
       const worker = agent("w1", "waiting", "mgr");
 
-      await notifyManager(worker, "[watchdog]: hi", [mgr, worker]);
+      await notifyManager(worker, "hi", [mgr, worker]);
 
       const matching = spawnMock.calls.filter((c) =>
         c.args.includes("send-keys") &&
@@ -1963,7 +1963,7 @@ describe("watchdog", () => {
       const mgr = agent("mgr2", "running");
       const worker = agent("w2", "waiting", "mgr2");
 
-      await notifyManager(worker, "[watchdog]: hi", [mgr, worker]);
+      await notifyManager(worker, "hi", [mgr, worker]);
 
       const atPrefixed = spawnMock.calls.filter((c) =>
         c.args.includes("send-keys") &&

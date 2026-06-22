@@ -622,12 +622,15 @@ export function isRateLimited(tmuxOutput: string): boolean {
 /**
  * Check if tmux output indicates a transient API error from Claude Code.
  *
- * Claude renders these errors as a tool-result line beginning with `⎿  API Error: …`
+ * Claude renders these errors with one of two leading markers:
+ *   - `⎿  API Error: …` — tool-result connector (most common variant)
+ *   - `⏺  API Error: …` — response-message marker (e.g. "Connection closed mid-response")
  * and then idles waiting for the user to type "please retry". We detect a small,
  * conservative family of patterns in the last 15 lines (ANSI-stripped).
  *
- * The leading `⎿` (tool-result connector) is required so we don't false-positive
- * on a watchdog nudge that quotes the phrase "API Error:" inside a sentence.
+ * One of the two markers (⎿ or ⏺) is required so we don't false-positive on a
+ * watchdog nudge that quotes the phrase "API Error:" inside a sentence — both
+ * variants stay anchored to a real Claude-rendered prefix.
  *
  * TODO: codex-equivalent detection — see SPEC-CODEX-MODEL.md §5.6. Codex's api-error
  * UI strings haven't been captured yet; a codex agent that hits a transient API error
@@ -649,9 +652,10 @@ export function isApiError(tmuxOutput: string): boolean {
   // waiting/running). Treat the countdown as a continuation of the episode.
   if (/⎿\s+Retrying in \d+s\s*·\s*attempt \d+\/\d+/.test(last15)) return true;
 
-  // Require the tool-result connector ⎿ followed by "API Error:" — anchor strictly
-  // so quoted occurrences in a watchdog nudge ("…the message 'API Error:'…") don't match.
-  if (!/⎿\s*API Error:/.test(last15)) return false;
+  // Require either the tool-result connector ⎿ or the response-message marker ⏺
+  // followed by "API Error:" — anchor strictly so quoted occurrences in a watchdog
+  // nudge ("…the message 'API Error:'…") don't match.
+  if (!/[⎿⏺]\s*API Error:/.test(last15)) return false;
 
   // Conservative family of recovery-eligible variants. Easier to add patterns
   // later than debug false positives.
@@ -664,6 +668,7 @@ export function isApiError(tmuxOutput: string): boolean {
   if (/ETIMEDOUT/.test(last15)) return true;
   if (/ECONNRESET/.test(last15)) return true;
   if (/socket connection was closed/i.test(last15)) return true;
+  if (/Connection closed mid-response/i.test(last15)) return true;
   // Server-side transient throttle (NOT the usage limit) — Claude renders
   // "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited".
   // This is recovery-eligible via "please retry"; isRateLimited deliberately
@@ -687,6 +692,9 @@ export function isApiErrorRateLimited(tmuxOutput: string): boolean {
   const stripped = stripAnsi(tmuxOutput);
   const lines = stripped.split("\n");
   const last15 = lines.slice(-15).join("\n");
+  // Intentional divergence from isApiError: this predicate is ⎿-only. The
+  // "temporarily limiting requests" variant has only ever been observed with
+  // the tool-result connector; no evidence of a ⏺-prefixed rate-limit line yet.
   if (!/⎿\s*API Error:/.test(last15)) return false;
   return /temporarily limiting requests/i.test(last15);
 }

@@ -81,7 +81,7 @@ import { InputFieldComponent } from "./input-field";
 import { sendMessage, pauseAgent, teamSend as ibTeamSend } from "../ib-commands";
 import type { IbCommandResult } from "../ib-commands";
 import { getResolvableWarnings } from "../health-check";
-import { logToWatchLog } from "../watch-log";
+import { logToWatchLog, logWarning, setWatchRunning } from "../watch-log";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
@@ -2991,7 +2991,9 @@ export async function launchDashboard(): Promise<void> {
   // agent-types dir must exist before ensureSystemCoordinator() — it reads coordinator.md to resolve its model.
   await ensureAgentTypesDir();
   ensureSystemCoordinator().catch((err) => {
-    console.error("System coordinator startup failed:", err);
+    // Fires asynchronously — may resolve after the TUI has mounted, so
+    // route through logWarning to avoid corrupting the dashboard.
+    logWarning(`System coordinator startup failed: ${err instanceof Error ? err.message : String(err)}`);
   });
 
   // Validate all agent type files before starting
@@ -3184,6 +3186,8 @@ export async function launchDashboard(): Promise<void> {
 
   tui.addInputListener((data) => {
     if (matchesKey(data, Key.ctrl("c"))) {
+      // Re-enable stderr-bound warnings — TUI is going down.
+      setWatchRunning(false);
       agentActions.killActiveDiffProc();
       colorDetection.cleanup();
       dashboard.stopPolling();
@@ -3286,9 +3290,13 @@ export async function launchDashboard(): Promise<void> {
   process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
   // Re-assert on exit in case anything inside the session re-enabled mouse mode.
   process.on("exit", () => {
+    setWatchRunning(false);
     process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
   });
 
+  // From here on, any stderr/console.error write would corrupt the TUI.
+  // logWarning() consults this flag to route warnings to watch.log instead.
+  setWatchRunning(true);
   tui.start();
   colorDetection.queryColorScheme();
   dashboard.startPolling();

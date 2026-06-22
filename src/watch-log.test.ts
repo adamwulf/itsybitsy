@@ -8,6 +8,8 @@ import {
   setWatchLogPath,
   resetWatchLogPath,
   getWatchLogPath,
+  logWarning,
+  setWatchRunning,
 } from "./watch-log";
 
 const ONE_MB = 1_048_576;
@@ -162,6 +164,63 @@ describe("watch-log", () => {
     test("resetWatchLogPath restores the default", () => {
       resetWatchLogPath();
       expect(getWatchLogPath()).toMatch(/\.itsybitsy\/watch\.log$/);
+    });
+  });
+
+  describe("logWarning", () => {
+    afterEach(() => {
+      setWatchRunning(false);
+    });
+
+    test("watchRunning=true routes to the watch log instead of stderr", async () => {
+      const originalStderrWrite = process.stderr.write.bind(process.stderr);
+      let stderrCalls = 0;
+      process.stderr.write = ((_chunk: unknown) => {
+        stderrCalls++;
+        return true;
+      }) as typeof process.stderr.write;
+      try {
+        setWatchRunning(true);
+        logWarning("EINTR: interrupted system call");
+      } finally {
+        process.stderr.write = originalStderrWrite;
+      }
+      expect(stderrCalls).toBe(0);
+      const content = await readFile(logPath, "utf8");
+      expect(content).toMatch(/EINTR: interrupted system call\n$/);
+    });
+
+    test("watchRunning=false writes to stderr and not the watch log", () => {
+      const originalStderrWrite = process.stderr.write.bind(process.stderr);
+      const captured: string[] = [];
+      process.stderr.write = ((chunk: unknown) => {
+        captured.push(typeof chunk === "string" ? chunk : String(chunk));
+        return true;
+      }) as typeof process.stderr.write;
+      try {
+        setWatchRunning(false);
+        logWarning("hello stderr");
+      } finally {
+        process.stderr.write = originalStderrWrite;
+      }
+      expect(captured.join("")).toBe("hello stderr\n");
+      expect(existsSync(logPath)).toBe(false);
+    });
+
+    test("watchRunning=false preserves an already-trailing newline", () => {
+      const originalStderrWrite = process.stderr.write.bind(process.stderr);
+      const captured: string[] = [];
+      process.stderr.write = ((chunk: unknown) => {
+        captured.push(typeof chunk === "string" ? chunk : String(chunk));
+        return true;
+      }) as typeof process.stderr.write;
+      try {
+        setWatchRunning(false);
+        logWarning("already terminated\n");
+      } finally {
+        process.stderr.write = originalStderrWrite;
+      }
+      expect(captured.join("")).toBe("already terminated\n");
     });
   });
 });

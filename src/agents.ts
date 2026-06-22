@@ -10,7 +10,7 @@ import type { AgentState } from "./parse-state";
 import { parseState, stripAnsi, STARTUP_MARKERS } from "./parse-state";
 import { captureTmuxOutput, killTmuxSession, listTmuxSessions } from "./tmux-poller";
 import { InjectionContext } from "./types";
-import { logToWatchLog } from "./watch-log";
+import { logToWatchLog, logWarning } from "./watch-log";
 
 /** States that can be written to meta.json */
 export type MetaState = "creating" | "running" | "waiting" | "complete" | "stopped";
@@ -1053,7 +1053,7 @@ async function readQuestionsInternal(repoPath: string, pendingOnly: boolean): Pr
     } catch (err: unknown) {
       // ENOENT expected when agents/ dir doesn't exist; other errors are unexpected
       if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code !== "ENOENT") {
-        process.stderr.write(`Warning: failed to read agents directory: ${(err as Error).message}\n`);
+        logWarning(`Warning: failed to read agents directory: ${(err as Error).message}`);
       }
       activeAgentIds = new Set();
     }
@@ -1064,7 +1064,7 @@ async function readQuestionsInternal(repoPath: string, pendingOnly: boolean): Pr
   } catch (err: unknown) {
     // Expected: file missing (ENOENT), malformed JSON, etc. — silently return empty
     if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code !== "ENOENT") {
-      process.stderr.write(`Warning: failed to read questions: ${(err as Error).message}\n`);
+      logWarning(`Warning: failed to read questions: ${(err as Error).message}`);
     }
     return [];
   }

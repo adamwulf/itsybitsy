@@ -21,6 +21,33 @@ const MAX_BYTES = 1_048_576; // 1 MB
 const DEFAULT_LOG_PATH = join(homedir(), ".itsybitsy", "watch.log");
 
 let logPath = DEFAULT_LOG_PATH;
+let watchRunning = false;
+
+/**
+ * Flip the "watch is rendering" flag. While set, logWarning() routes its
+ * output through logToWatchLog so warnings can't corrupt the dashboard;
+ * while clear, logWarning() falls back to stderr for CLI ergonomics.
+ */
+export function setWatchRunning(v: boolean): void {
+  watchRunning = v;
+}
+
+/**
+ * Emit a warning line. If `ib watch` is currently running its TUI, the line
+ * is appended to ~/.itsybitsy/watch.log. Otherwise it is written to stderr.
+ * Never throws.
+ */
+export function logWarning(line: string): void {
+  if (watchRunning) {
+    logToWatchLog(line);
+  } else {
+    try {
+      process.stderr.write(line.endsWith("\n") ? line : line + "\n");
+    } catch {
+      /* swallow — logging must never crash callers */
+    }
+  }
+}
 
 /** Test override — point the logger at a temp file. */
 export function setWatchLogPath(path: string): void {

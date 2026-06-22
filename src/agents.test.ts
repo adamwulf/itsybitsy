@@ -1403,6 +1403,29 @@ describe("isApiError", () => {
   test("returns false on empty input", () => {
     expect(isApiError("")).toBe(false);
   });
+
+  test('detects "Connection closed mid-response" with ⏺ prefix (response message)', () => {
+    const output = "⏺ API Error: Connection closed mid-response. The response above may be incomplete.";
+    expect(isApiError(output)).toBe(true);
+  });
+
+  test('detects "Connection closed mid-response" with ⎿ prefix (defensive)', () => {
+    // Defensive in case Claude ever renders this variant as a tool-result.
+    const output = "  ⎿  API Error: Connection closed mid-response. The response above may be incomplete.";
+    expect(isApiError(output)).toBe(true);
+  });
+
+  test('still rejects quoted "API Error" with neither ⏺ nor ⎿ marker', () => {
+    // Preserve the false-positive guard: a watchdog nudge that quotes the
+    // phrase without a real Claude-rendered prefix must not retrigger detection.
+    const output = "[watchdog] previous tick observed an API Error: Connection closed mid-response — see log";
+    expect(isApiError(output)).toBe(false);
+  });
+
+  test("strips ANSI before checking (⏺ variant)", () => {
+    const output = "line1\n\x1b[31m⏺ API Error: Connection closed mid-response. The response above may be incomplete.\x1b[0m\nline3";
+    expect(isApiError(output)).toBe(true);
+  });
 });
 
 describe("isApiErrorRateLimited", () => {
@@ -1440,6 +1463,15 @@ describe("isApiErrorRateLimited", () => {
   test("strips ANSI before checking", () => {
     const output = "\x1b[31m  ⎿  API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited\x1b[0m";
     expect(isApiErrorRateLimited(output)).toBe(true);
+  });
+
+  test("returns false for ⏺-prefixed 'Connection closed mid-response' (intentional ⎿-only divergence from isApiError)", () => {
+    // isApiError accepts both ⎿ and ⏺ markers, but isApiErrorRateLimited stays
+    // ⎿-only because the "temporarily limiting requests" variant has never been
+    // observed with ⏺. Lock in that divergence so a future reader doesn't
+    // "fix" the inconsistency without evidence.
+    const output = "⏺ API Error: Connection closed mid-response. The response above may be incomplete.";
+    expect(isApiErrorRateLimited(output)).toBe(false);
   });
 });
 

@@ -1399,7 +1399,7 @@ export function handleAddPermission(ctx: ActionCtx) {
           ctx.setNotice(`Added ${entry} to ${agent.id} allow list`, "info");
           const sendResult = await sendMessage(
             agent,
-            `[watchdog]: Permission to '${entry}' has been granted. You may retry the action that was previously denied.`,
+            `Permission to '${entry}' has been granted. You may retry the action that was previously denied.`,
             { cwd: "/" },
           );
           if (!sendResult.ok) {

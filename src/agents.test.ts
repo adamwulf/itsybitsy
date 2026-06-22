@@ -1421,6 +1421,11 @@ describe("isApiError", () => {
     const output = "[watchdog] previous tick observed an API Error: Connection closed mid-response — see log";
     expect(isApiError(output)).toBe(false);
   });
+
+  test("strips ANSI before checking (⏺ variant)", () => {
+    const output = "line1\n\x1b[31m⏺ API Error: Connection closed mid-response. The response above may be incomplete.\x1b[0m\nline3";
+    expect(isApiError(output)).toBe(true);
+  });
 });
 
 describe("isApiErrorRateLimited", () => {

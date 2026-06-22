@@ -5557,3 +5557,65 @@ export async function telegramSend(text: string): Promise<{ ok: boolean; message
     message: "queued (ib watch may not be running, or Telegram is not configured)",
   };
 }
+
+/** Spawn context for `ib push` — defaults to Bun.spawn, overridable for tests. */
+export const pushSpawnCtx = new SpawnContext();
+
+export function setPushSpawnRunner(runner: SpawnFn): void {
+  pushSpawnCtx.set(runner);
+}
+
+export function resetPushSpawnRunner(): void {
+  pushSpawnCtx.reset();
+}
+
+/**
+ * Push the repo's main branch to every remote it has. A remote is "writable"
+ * iff `git push` succeeds against it; we attempt every remote independently
+ * and report per-remote success/failure rather than aborting on the first
+ * read-only origin.
+ */
+export async function pushRepo(repoPath: string): Promise<IbCommandResult> {
+  // Detect the local main-branch ref (prefer "main", fall back to "master").
+  const mainRef = await pushSpawnCtx.run(["git", "-C", repoPath, "show-ref", "--verify", "refs/heads/main"]);
+  let branch = "main";
+  if (mainRef.exitCode !== 0) {
+    const masterRef = await pushSpawnCtx.run(["git", "-C", repoPath, "show-ref", "--verify", "refs/heads/master"]);
+    if (masterRef.exitCode !== 0) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `No 'main' or 'master' branch in ${repoPath}` };
+    }
+    branch = "master";
+  }
+
+  const remotesResult = await pushSpawnCtx.run(["git", "-C", repoPath, "remote"]);
+  if (remotesResult.exitCode !== 0) {
+    return { ok: false, exitCode: remotesResult.exitCode, stdout: "", stderr: `Failed to list remotes: ${remotesResult.stderr}` };
+  }
+  const remotes = remotesResult.stdout.split("\n").map((r) => r.trim()).filter(Boolean);
+  if (remotes.length === 0) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `No remotes configured in ${repoPath}` };
+  }
+
+  const lines: string[] = [];
+  let anyFailed = false;
+  let anySucceeded = false;
+  for (const remote of remotes) {
+    const push = await pushSpawnCtx.run(["git", "-C", repoPath, "push", remote, branch]);
+    if (push.exitCode === 0) {
+      anySucceeded = true;
+      const detail = push.stderr || push.stdout;
+      lines.push(`✓ ${remote}: pushed ${branch}${detail ? `\n  ${detail.replace(/\n/g, "\n  ")}` : ""}`);
+    } else {
+      anyFailed = true;
+      const err = push.stderr || push.stdout || `exit ${push.exitCode}`;
+      lines.push(`✗ ${remote}: ${err.replace(/\n/g, "\n  ")}`);
+    }
+  }
+
+  return {
+    ok: anySucceeded && !anyFailed,
+    exitCode: anyFailed ? 1 : 0,
+    stdout: lines.join("\n"),
+    stderr: "",
+  };
+}

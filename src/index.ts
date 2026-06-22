@@ -729,6 +729,12 @@ const COMMAND_HELP: Record<string, string> = {
   roster:
     "Usage: ib roster <name>\n" +
     "  List a team's members with their repo and current state.",
+  push:
+    "Usage: ib push <repo-id>\n" +
+    "  Push the repo's main (or master) branch to every configured remote.\n" +
+    "  Each remote is attempted independently — read-only remotes are\n" +
+    "  reported but do not stop pushes to the others.\n" +
+    "  <repo-id>       Registered repo name, nickname, or absolute path",
   tgallow:
     "Usage: ib tgallow <chat_id>\n" +
     "  Allow a Telegram chat id to interact with itsybitsy.",
@@ -784,6 +790,7 @@ function printUsage(): void {
   console.log("  remove <path>       Unregister a repo");
   console.log("  list, ls            List repos and their agents (--manager <id>, --json)");
   console.log("  state               List agents with PID/liveness diagnostics + orphan detection (--manager <id>, --json, --cleanup, --dry-run)");
+  console.log("  push <repo-id>      Push the repo's main branch to every configured remote");
   console.log("");
   console.log("Monitoring:");
   console.log("  watch               Launch TUI dashboard");
@@ -905,6 +912,24 @@ async function main() {
       const result = await removeRepo(target);
       console.log(result.message);
       process.exit(result.ok ? 0 : 1);
+      break;
+    }
+    case "push": {
+      const repoId = args[1];
+      if (!repoId) {
+        console.error("Usage: ib push <repo-id>");
+        process.exit(1);
+      }
+      const repos = await listRepos();
+      const match = repos.find(
+        (r) => r.path === repoId || r.name === repoId || r.nickname === repoId,
+      );
+      if (!match) {
+        console.error(`Repo not found: ${repoId}`);
+        process.exit(1);
+      }
+      const { pushRepo } = await import("./ib-commands");
+      await printAndExit(await pushRepo(match.path));
       break;
     }
     case "list":

@@ -11,6 +11,7 @@ import { isValidTmuxSession, tmuxSessionTarget } from "./validation";
 import { deleteAgentTransient, terminateProcess } from "./agents";
 import { deleteAgentOutbox, agentOutboxDir } from "./outbox";
 import { pruneAgentFromAllTeams } from "./teams";
+import { logWarning } from "./watch-log";
 
 /** Spawn context for agent lifecycle operations */
 export const spawnCtx = new SpawnContext();
@@ -123,7 +124,7 @@ export async function killAgentProcess(
   logCtx: KillAgentLogContext = {}
 ): Promise<boolean> {
   if (!isValidTmuxSession(tmuxSession)) {
-    console.error(`[agent-lifecycle] Invalid tmux session name: ${tmuxSession}`);
+    logWarning(`[agent-lifecycle] Invalid tmux session name: ${tmuxSession}`);
     return false;
   }
 
@@ -177,7 +178,7 @@ export async function captureTmuxOutputToFile(
   outputPath: string
 ): Promise<boolean> {
   if (!isValidTmuxSession(tmuxSession)) {
-    console.error(`[agent-lifecycle] Invalid tmux session name: ${tmuxSession}`);
+    logWarning(`[agent-lifecycle] Invalid tmux session name: ${tmuxSession}`);
     return false;
   }
   try {
@@ -347,7 +348,7 @@ export async function teardownAgent(
     // here directly — otherwise an agent with a corrupt tmux_session would be
     // silently left in its teams until a later lazy prune self-healed it.
     const prunedTeams = await pruneAgentFromAllTeams(agentId);
-    console.error(`[agent-lifecycle] Invalid tmux session name in meta for agent ${agentId}: ${tmuxSession}`);
+    logWarning(`[agent-lifecycle] Invalid tmux session name in meta for agent ${agentId}: ${tmuxSession}`);
     return { ok: false, prunedTeams };
   }
 

@@ -49,7 +49,7 @@ import {
 } from "./agent-lifecycle";
 import { readConfig } from "./config";
 import { listTmuxSessions } from "./tmux-poller";
-import { logToWatchLog } from "./watch-log";
+import { logToWatchLog, logWarning } from "./watch-log";
 import { SpawnContext, InjectionContext } from "./types";
 import type { SpawnFn } from "./types";
 import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, isValidAgentId, shellQuote, tmuxSessionTarget } from "./validation";
@@ -3571,7 +3571,7 @@ export async function newAgent(
   try {
     allLayer = await loadAgentType("_all");
   } catch (err) {
-    console.error(`Warning: failed to load _all agent type layer: ${err instanceof Error ? err.message : String(err)}`);
+    logWarning(`Warning: failed to load _all agent type layer: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   let nonCoordLayer: AgentType | undefined;
@@ -3579,7 +3579,7 @@ export async function newAgent(
     try {
       nonCoordLayer = await loadAgentType("_non_coordinator");
     } catch (err) {
-      console.error(`Warning: failed to load _non_coordinator agent type layer: ${err instanceof Error ? err.message : String(err)}`);
+      logWarning(`Warning: failed to load _non_coordinator agent type layer: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

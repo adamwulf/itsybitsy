@@ -144,7 +144,7 @@ export function buildHooksBlock(opts: {
     postToolUseHooks.push({ matcher: "*", hooks: [{ type: "command", command: "ib hooks inject-timestamp" }] });
   }
   if (postToolUseHooks && opts.includeTelegramTyping) {
-    postToolUseHooks.push({ hooks: [{ type: "command", command: "ib tgtyping" }] });
+    postToolUseHooks.push({ matcher: "*", hooks: [{ type: "command", command: "ib tgtyping" }] });
   }
 
   const sessionStartCmd = opts.sessionStartIncludesAgentId

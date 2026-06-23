@@ -239,10 +239,17 @@ describe("buildHooksBlock — Telegram tgtyping hook (@system coordinator only)"
     const commands = userPromptSubmit.flatMap((entry) => entry.hooks.map((h) => h.command));
     expect(commands).toContain("ib tgtyping");
 
-    const postToolUse = result.PostToolUse as Array<{ hooks: Array<{ command: string }> }>;
+    const postToolUse = result.PostToolUse as Array<{ matcher?: string; hooks: Array<{ command: string }> }>;
     expect(postToolUse).toBeDefined();
     const postCommands = postToolUse.flatMap((entry) => entry.hooks.map((h) => h.command));
     expect(postCommands).toContain("ib tgtyping");
+
+    // The tgtyping PostToolUse entry must pin matcher: "*" — symmetric with the
+    // sibling inject-timestamp entry, so the emitted JSON is uniform.
+    const tgEntry = postToolUse.find((entry) =>
+      entry.hooks.some((h) => h.command === "ib tgtyping"),
+    );
+    expect(tgEntry?.matcher).toBe("*");
   });
 
   test("includeTelegramTyping: true does NOT add the hook to Stop", () => {

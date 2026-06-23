@@ -5566,7 +5566,6 @@ export async function telegramSend(text: string): Promise<{ ok: boolean; message
  *
  * Used by:
  *   - `ib tgtyping` (UserPromptSubmit / PostToolUse hooks for `@system`)
- *   - the post-`tgsend` re-arm in the `tgsend` case
  */
 export async function telegramFireTypingAction(): Promise<void> {
   try {

@@ -2632,13 +2632,9 @@ async function main() {
         console.error("Usage: ib tgsend <text>");
         process.exit(1);
       }
-      const { telegramSend, telegramFireTypingAction } = await import("./ib-commands");
+      const { telegramSend } = await import("./ib-commands");
       const result = await telegramSend(text);
       if (result.ok) {
-        // The coordinator just emitted an intermediate reply, so it is almost
-        // certainly still working. Re-arm the typing indicator for another
-        // ~5s of work. Best-effort and silent.
-        await telegramFireTypingAction();
         console.log(result.message);
       } else {
         console.error(result.message);

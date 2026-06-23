@@ -224,3 +224,117 @@ describe("buildHooksBlock — inject-timestamp PostToolUse hook", () => {
     expect(postToolUse[0]!.hooks[0]!.command).toBe("ib hooks inject-timestamp");
   });
 });
+
+describe("buildHooksBlock — Telegram tgtyping hook (@system coordinator only)", () => {
+  test("includeTelegramTyping: true appends `ib tgtyping` to UserPromptSubmit AND PostToolUse", () => {
+    const result = buildHooksBlock({
+      agentId: "@system",
+      includeStop: false,
+      interceptMatcher: COORDINATOR_INTERCEPT_MATCHER,
+      sessionStartIncludesAgentId: true,
+      includeTelegramTyping: true,
+    });
+
+    const userPromptSubmit = result.UserPromptSubmit as Array<{ hooks: Array<{ command: string }> }>;
+    const commands = userPromptSubmit.flatMap((entry) => entry.hooks.map((h) => h.command));
+    expect(commands).toContain("ib tgtyping");
+
+    const postToolUse = result.PostToolUse as Array<{ matcher?: string; hooks: Array<{ command: string }> }>;
+    expect(postToolUse).toBeDefined();
+    const postCommands = postToolUse.flatMap((entry) => entry.hooks.map((h) => h.command));
+    expect(postCommands).toContain("ib tgtyping");
+
+    // The tgtyping PostToolUse entry must pin matcher: "*" — symmetric with the
+    // sibling inject-timestamp entry, so the emitted JSON is uniform.
+    const tgEntry = postToolUse.find((entry) =>
+      entry.hooks.some((h) => h.command === "ib tgtyping"),
+    );
+    expect(tgEntry?.matcher).toBe("*");
+  });
+
+  test("includeTelegramTyping: true does NOT add the hook to Stop", () => {
+    // Stop is not present for @system at all (includeStop: false); this test
+    // pins the documented decision so the indicator decays naturally on idle.
+    const result = buildHooksBlock({
+      agentId: "@system",
+      includeStop: false,
+      interceptMatcher: COORDINATOR_INTERCEPT_MATCHER,
+      sessionStartIncludesAgentId: true,
+      includeTelegramTyping: true,
+    });
+    expect(result.Stop).toBeUndefined();
+  });
+
+  test("UserPromptSubmit tgtyping entry comes AFTER hook-mark-running", () => {
+    const result = buildHooksBlock({
+      agentId: "@system",
+      includeStop: false,
+      interceptMatcher: COORDINATOR_INTERCEPT_MATCHER,
+      sessionStartIncludesAgentId: true,
+      includeTelegramTyping: true,
+    });
+    const userPromptSubmit = result.UserPromptSubmit as Array<{ hooks: Array<{ command: string }> }>;
+    const commands = userPromptSubmit.flatMap((entry) => entry.hooks.map((h) => h.command));
+    const markIdx = commands.indexOf("ib hook-mark-running @system");
+    const typingIdx = commands.indexOf("ib tgtyping");
+    expect(markIdx).toBeGreaterThanOrEqual(0);
+    expect(typingIdx).toBeGreaterThan(markIdx);
+  });
+
+  test("regular agents do NOT include `ib tgtyping` in any hook array", () => {
+    const result = buildHooksBlock({
+      agentId: "agent-abc12345",
+      includeStop: true,
+      interceptMatcher: REGULAR_AGENT_INTERCEPT_MATCHER,
+      sessionStartIncludesAgentId: false,
+    });
+
+    const allCommands = Object.values(result).flatMap((arr: unknown) =>
+      (arr as Array<{ hooks: Array<{ command: string }> }>).flatMap((entry) =>
+        entry.hooks.map((h) => h.command),
+      ),
+    );
+    expect(allCommands).not.toContain("ib tgtyping");
+  });
+
+  test("per-repo coordinators do NOT include `ib tgtyping` (only @system does)", () => {
+    // Per-repo coordinators don't get the tgtyping hook either — only the
+    // @system coordinator handles Telegram routing.
+    const result = buildHooksBlock({
+      agentId: "my-repo",
+      includeStop: true,
+      interceptMatcher: COORDINATOR_INTERCEPT_MATCHER,
+      sessionStartIncludesAgentId: true,
+    });
+    const allCommands = Object.values(result).flatMap((arr: unknown) =>
+      (arr as Array<{ hooks: Array<{ command: string }> }>).flatMap((entry) =>
+        entry.hooks.map((h) => h.command),
+      ),
+    );
+    expect(allCommands).not.toContain("ib tgtyping");
+  });
+
+  test("includeTelegramTyping omitted → no PostToolUse key (backward compatible)", () => {
+    const result = buildHooksBlock({
+      agentId: "@system",
+      includeStop: false,
+      interceptMatcher: COORDINATOR_INTERCEPT_MATCHER,
+      sessionStartIncludesAgentId: true,
+    });
+    expect("PostToolUse" in result).toBe(false);
+  });
+
+  test("includeTimestamp + includeTelegramTyping coexist — inject-timestamp first, tgtyping second in PostToolUse", () => {
+    const result = buildHooksBlock({
+      agentId: "@system",
+      includeStop: false,
+      interceptMatcher: COORDINATOR_INTERCEPT_MATCHER,
+      sessionStartIncludesAgentId: true,
+      includeTimestamp: true,
+      includeTelegramTyping: true,
+    });
+    const postToolUse = result.PostToolUse as Array<{ hooks: Array<{ command: string }> }>;
+    const commands = postToolUse.flatMap((entry) => entry.hooks.map((h) => h.command));
+    expect(commands).toEqual(["ib hooks inject-timestamp", "ib tgtyping"]);
+  });
+});

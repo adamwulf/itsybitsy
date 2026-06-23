@@ -47,6 +47,9 @@ const BACKOFF_MAX_MS = 30_000;
 const GETUPDATES_TIMEOUT_BUFFER_MS = 10_000;
 const PROBE_TIMEOUT_MS = 10_000;
 const SENDMESSAGE_TIMEOUT_MS = 15_000;
+// The typing indicator only lasts ~5s server-side; a longer timeout adds no
+// value because the indicator would expire before the response mattered.
+const SENDCHATACTION_TIMEOUT_MS = 5_000;
 
 /** Injectable fetch — defaults to globalThis.fetch. */
 export const fetchCtx = new InjectionContext<FetchLike>(globalThis.fetch);
@@ -133,6 +136,12 @@ export interface GetUpdatesOptions {
 export interface SendMessageOptions {
   chat_id: number | string;
   text: string;
+}
+
+export interface SendChatActionOptions {
+  chat_id: number | string;
+  /** Telegram chat action — `"typing"` for the indicator we use. */
+  action: string;
 }
 
 /** Result of a single `sendMessage` POST. The failure variant exposes
@@ -341,6 +350,28 @@ export class TelegramClient {
       description: raw.body?.description ?? `HTTP ${raw.status}`,
       retryAfterSec: raw.retryAfterSec,
     };
+  }
+
+  /** POST `sendChatAction`. Best-effort and silent: never throws, never logs.
+   *
+   *  The typing indicator is cosmetic — re-armed by hooks on prompt submit and
+   *  after every tool use — so a flaky network or misconfigured token must not
+   *  spam the agent log. We swallow every error class (network throw, non-2xx,
+   *  malformed body) and return void. */
+  async sendChatAction(opts: SendChatActionOptions): Promise<void> {
+    try {
+      const body = JSON.stringify({ chat_id: opts.chat_id, action: opts.action });
+      const url = this.urlFor("sendChatAction");
+      const composedSignal = composeAbortSignal(undefined, SENDCHATACTION_TIMEOUT_MS);
+      await fetchCtx.fn(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+        signal: composedSignal,
+      });
+    } catch {
+      // Cosmetic indicator — never surface failures.
+    }
   }
 
   /** Single attempt at a Bot API method. Maps HTTP / parse outcomes onto the

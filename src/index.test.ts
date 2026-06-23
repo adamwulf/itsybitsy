@@ -1543,4 +1543,14 @@ describe("Telegram admin subcommands", () => {
     expect(r.stdout).toContain("added: -1001234567890");
     expect(r.stdout.toLowerCase()).toContain("group");
   });
+
+  test("tgtyping no-ops cleanly (exit 0, silent) when Telegram is unconfigured", async () => {
+    // Fresh HOME → no config.json, no chat-id cache. The hook is best-effort
+    // and must exit 0 without writing anything to stderr/stdout so that
+    // misconfigured systems don't spam the agent log on every prompt.
+    const { stdout, stderr, exitCode } = await runCli(["tgtyping"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toBe("");
+    expect(stderr).toBe("");
+  });
 });

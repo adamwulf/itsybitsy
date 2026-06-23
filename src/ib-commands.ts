@@ -5558,6 +5558,34 @@ export async function telegramSend(text: string): Promise<{ ok: boolean; message
   };
 }
 
+/**
+ * Best-effort fire of the Telegram `typing` chat action. Loads the bot token
+ * from config and the chat id from the on-disk cache; no-ops silently if
+ * either is missing (the indicator is cosmetic — never fail the caller).
+ * Never throws, never logs.
+ *
+ * Used by:
+ *   - `ib tgtyping` (UserPromptSubmit / PostToolUse hooks for `@system`)
+ *   - the post-`tgsend` re-arm in the `tgsend` case
+ */
+export async function telegramFireTypingAction(): Promise<void> {
+  try {
+    const { readConfig } = await import("./config");
+    const { readCachedChatId } = await import("./channels/chat-id-cache");
+    const cfg = await readConfig();
+    const tokenEntry = cfg["channels.telegram.bot_token"];
+    const token = typeof tokenEntry?.value === "string" ? tokenEntry.value : "";
+    if (token === "") return;
+    const chatId = await readCachedChatId();
+    if (chatId === null || chatId === "") return;
+    const { TelegramClient } = await import("./channels/telegram-client");
+    const client = new TelegramClient({ token });
+    await client.sendChatAction({ chat_id: chatId, action: "typing" });
+  } catch {
+    // Cosmetic indicator — never surface failures.
+  }
+}
+
 /** Spawn context for `ib push` — defaults to Bun.spawn, overridable for tests. */
 export const pushSpawnCtx = new SpawnContext();
 

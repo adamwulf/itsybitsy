@@ -8060,6 +8060,90 @@ describe("telegramSend (native, file-drop client)", () => {
   });
 });
 
+describe("telegramFireTypingAction (native)", () => {
+  let homeDir: string;
+
+  beforeEach(async () => {
+    homeDir = await mkdtemp(join(tmpdir(), "tgtyping-test-"));
+    setUserConfigPath(join(homeDir, "config.json"));
+    const { setStateDir } = await import("./channels/chat-id-cache");
+    setStateDir(join(homeDir, "channels", "telegram"));
+  });
+
+  afterEach(async () => {
+    resetUserConfigPath();
+    const { resetStateDir } = await import("./channels/chat-id-cache");
+    resetStateDir();
+    const { fetchCtx } = await import("./channels/telegram-client");
+    fetchCtx.reset();
+    await rm(homeDir, { recursive: true, force: true });
+  });
+
+  test("no-ops silently when bot_token is unset (no fetch call)", async () => {
+    const { fetchCtx } = await import("./channels/telegram-client");
+    let called = false;
+    fetchCtx.set(async () => { called = true; return new Response("{}"); });
+    // No config written → bot_token defaults to "".
+    const { telegramFireTypingAction } = await import("./ib-commands");
+    await telegramFireTypingAction();
+    expect(called).toBe(false);
+  });
+
+  test("no-ops silently when chat-id cache is missing (no fetch call)", async () => {
+    await Bun.write(
+      join(homeDir, "config.json"),
+      JSON.stringify({ channels: { telegram: { bot_token: "TESTTOKEN" } } }),
+    );
+    const { fetchCtx } = await import("./channels/telegram-client");
+    let called = false;
+    fetchCtx.set(async () => { called = true; return new Response("{}"); });
+    const { telegramFireTypingAction } = await import("./ib-commands");
+    await telegramFireTypingAction();
+    expect(called).toBe(false);
+  });
+
+  test("fires sendChatAction with chat_id + typing action when fully configured", async () => {
+    await Bun.write(
+      join(homeDir, "config.json"),
+      JSON.stringify({ channels: { telegram: { bot_token: "TESTTOKEN" } } }),
+    );
+    const { writeCachedChatId } = await import("./channels/chat-id-cache");
+    await writeCachedChatId("12345");
+
+    const { fetchCtx } = await import("./channels/telegram-client");
+    let capturedUrl: string | undefined;
+    let capturedBody: string | undefined;
+    fetchCtx.set(async (input, init) => {
+      capturedUrl = typeof input === "string" ? input : (input as URL).toString();
+      capturedBody = init?.body as string;
+      return new Response(JSON.stringify({ ok: true, result: true }), {
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const { telegramFireTypingAction } = await import("./ib-commands");
+    await telegramFireTypingAction();
+
+    expect(capturedUrl).toContain("/botTESTTOKEN/sendChatAction");
+    const body = JSON.parse(capturedBody ?? "{}");
+    expect(body.chat_id).toBe("12345");
+    expect(body.action).toBe("typing");
+  });
+
+  test("never throws even when fetch rejects", async () => {
+    await Bun.write(
+      join(homeDir, "config.json"),
+      JSON.stringify({ channels: { telegram: { bot_token: "T" } } }),
+    );
+    const { writeCachedChatId } = await import("./channels/chat-id-cache");
+    await writeCachedChatId("99");
+    const { fetchCtx } = await import("./channels/telegram-client");
+    fetchCtx.set(async () => { throw new Error("boom"); });
+    const { telegramFireTypingAction } = await import("./ib-commands");
+    await expect(telegramFireTypingAction()).resolves.toBeUndefined();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // respawn / respawn-self
 // ---------------------------------------------------------------------------

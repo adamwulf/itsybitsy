@@ -494,6 +494,22 @@ describe("ensureSystemCoordinator", () => {
       entry.hooks.map((h: any) => h.command),
     );
     expect(ssCommands).toContain("ib hooks session-start @system");
+
+    // Telegram typing indicator: present in both UserPromptSubmit and
+    // PostToolUse so the chat shows "typing..." while the coordinator works.
+    const userPromptSubmit = settings.hooks.UserPromptSubmit;
+    expect(Array.isArray(userPromptSubmit)).toBe(true);
+    const upsCommands = userPromptSubmit.flatMap((entry: any) =>
+      entry.hooks.map((h: any) => h.command),
+    );
+    expect(upsCommands).toContain("ib tgtyping");
+
+    const postToolUse = settings.hooks.PostToolUse;
+    expect(Array.isArray(postToolUse)).toBe(true);
+    const ptuCommands = postToolUse.flatMap((entry: any) =>
+      entry.hooks.map((h: any) => h.command),
+    );
+    expect(ptuCommands).toContain("ib tgtyping");
   });
 
   test("does NOT write coordinator-prompt.txt during creation", async () => {

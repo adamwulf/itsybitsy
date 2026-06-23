@@ -122,6 +122,11 @@ export function buildHooksBlock(opts: {
   interceptMatcher: string | null;
   sessionStartIncludesAgentId: boolean;
   includeTimestamp?: boolean;
+  /** When true (system coordinator only), append `ib tgtyping` to both the
+   *  UserPromptSubmit and PostToolUse hook arrays so the Telegram chat shows
+   *  a "typing..." indicator while the coordinator is working. The indicator
+   *  decays naturally on idle (no Stop hook). */
+  includeTelegramTyping?: boolean;
 }): Record<string, unknown> {
   const preToolUseHooks: unknown[] = [
     { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${opts.agentId}` }] },
@@ -133,9 +138,14 @@ export function buildHooksBlock(opts: {
     });
   }
 
-  const postToolUseHooks: unknown[] | null = opts.includeTimestamp
-    ? [{ matcher: "*", hooks: [{ type: "command", command: "ib hooks inject-timestamp" }] }]
-    : null;
+  const postToolUseHooks: unknown[] | null =
+    opts.includeTimestamp || opts.includeTelegramTyping ? [] : null;
+  if (postToolUseHooks && opts.includeTimestamp) {
+    postToolUseHooks.push({ matcher: "*", hooks: [{ type: "command", command: "ib hooks inject-timestamp" }] });
+  }
+  if (postToolUseHooks && opts.includeTelegramTyping) {
+    postToolUseHooks.push({ hooks: [{ type: "command", command: "ib tgtyping" }] });
+  }
 
   const sessionStartCmd = opts.sessionStartIncludesAgentId
     ? `ib hooks session-start ${opts.agentId}`
@@ -149,6 +159,9 @@ export function buildHooksBlock(opts: {
   ];
   if (opts.includeTimestamp) {
     userPromptSubmitHooks.push({ hooks: [{ type: "command", command: "ib hooks inject-timestamp" }] });
+  }
+  if (opts.includeTelegramTyping) {
+    userPromptSubmitHooks.push({ hooks: [{ type: "command", command: "ib tgtyping" }] });
   }
 
   const hooks: Record<string, unknown> = {};

@@ -488,6 +488,64 @@ describe("sendMessage", () => {
   });
 });
 
+describe("sendChatAction", () => {
+  let mock: MockFetch;
+  let logs: string[];
+
+  beforeEach(() => {
+    mock = makeMockFetch();
+    fetchCtx.set(mock.fn);
+    logs = [];
+    logCtx.set((line) => logs.push(line));
+  });
+
+  afterEach(() => {
+    fetchCtx.reset();
+    logCtx.reset();
+  });
+
+  test("posts JSON body to /sendChatAction with chat_id + action", async () => {
+    mock.enqueueResponse({ ok: true, result: true });
+    const client = new TelegramClient({ token: "TEST" });
+
+    await client.sendChatAction({ chat_id: 99, action: "typing" });
+
+    const url = mock.allUrls()[0];
+    expect(url).toContain("/botTEST/sendChatAction");
+
+    const init = mock.lastInit();
+    expect(init?.method).toBe("POST");
+    const body = JSON.parse(init?.body as string);
+    expect(body).toEqual({ chat_id: 99, action: "typing" });
+  });
+
+  test("swallows network errors silently — does not throw, does not log", async () => {
+    mock.enqueueError(new Error("network boom"));
+    const client = new TelegramClient({ token: "T" });
+
+    await expect(client.sendChatAction({ chat_id: 1, action: "typing" })).resolves.toBeUndefined();
+    expect(logs).toEqual([]);
+  });
+
+  test("swallows non-2xx responses silently — does not throw, does not log", async () => {
+    mock.enqueueResponse({ ok: false, error_code: 401, description: "Unauthorized" }, 401);
+    const client = new TelegramClient({ token: "T" });
+
+    await expect(client.sendChatAction({ chat_id: 1, action: "typing" })).resolves.toBeUndefined();
+    expect(logs).toEqual([]);
+  });
+
+  test("accepts string chat_id (sentinel/group form)", async () => {
+    mock.enqueueResponse({ ok: true, result: true });
+    const client = new TelegramClient({ token: "T" });
+
+    await client.sendChatAction({ chat_id: "-1001234567890", action: "typing" });
+
+    const body = JSON.parse(mock.lastInit()?.body as string);
+    expect(body.chat_id).toBe("-1001234567890");
+  });
+});
+
 describe("getUpdates per-request timeout & onPollOutcome", () => {
   let mock: MockFetch;
   let sleeps: number[];

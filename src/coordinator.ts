@@ -340,6 +340,10 @@ async function writeCoordinatorFiles(): Promise<void> {
       includeStop: false,
       interceptMatcher: COORDINATOR_INTERCEPT_MATCHER,
       sessionStartIncludesAgentId: true,
+      // Telegram "typing..." indicator: fires on every user prompt and after
+      // every tool use so the chat shows the coordinator is still working.
+      // Re-arms ~5s of indicator visibility; decays naturally on idle (no Stop).
+      includeTelegramTyping: true,
     }),
   };
   await Bun.write(settingsPath, JSON.stringify(settings, null, 2) + "\n");

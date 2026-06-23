@@ -744,6 +744,9 @@ const COMMAND_HELP: Record<string, string> = {
   tgsend:
     "Usage: ib tgsend <text>\n" +
     "  Send a one-shot message to the configured Telegram chat.",
+  tgtyping:
+    "Usage: ib tgtyping\n" +
+    "  Send Telegram typing indicator (for hook use). Best-effort and silent.",
   "generate-summary":
     "Usage: ib generate-summary <agentDir>\n" +
     "  Internal: regenerate an agent's summary file. Fire-and-forget.",
@@ -851,6 +854,7 @@ function printUsage(): void {
   console.log("  tgallow <chat_id>   Allow a Telegram chat_id");
   console.log("  tgdeny <chat_id>    Remove a Telegram chat_id from the allowlist");
   console.log("  tgsend <text>       Send a message to the configured Telegram chat");
+  console.log("  tgtyping            Send Telegram typing indicator (for hook use)");
 }
 
 async function main() {
@@ -2628,14 +2632,23 @@ async function main() {
         console.error("Usage: ib tgsend <text>");
         process.exit(1);
       }
-      const { telegramSend } = await import("./ib-commands");
+      const { telegramSend, telegramFireTypingAction } = await import("./ib-commands");
       const result = await telegramSend(text);
       if (result.ok) {
+        // The coordinator just emitted an intermediate reply, so it is almost
+        // certainly still working. Re-arm the typing indicator for another
+        // ~5s of work. Best-effort and silent.
+        await telegramFireTypingAction();
         console.log(result.message);
       } else {
         console.error(result.message);
         process.exit(1);
       }
+      break;
+    }
+    case "tgtyping": {
+      const { telegramFireTypingAction } = await import("./ib-commands");
+      await telegramFireTypingAction();
       break;
     }
     default: {

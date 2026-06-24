@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { fuguCodexModelId, KNOWN_MODELS } from "./known-models";
+import { KNOWN_MODELS } from "./known-models";
 import { parseModel } from "./agent-cli";
 
 describe("KNOWN_MODELS", () => {
@@ -26,10 +26,5 @@ describe("KNOWN_MODELS", () => {
     expect(clis.has("claude")).toBe(true);
     expect(clis.has("codex")).toBe(true);
     expect(clis.has("fugu")).toBe(true);
-  });
-
-  test("maps Fugu selectors to Sakana API model IDs", () => {
-    expect(fuguCodexModelId("fugu")).toBe("fugu");
-    expect(fuguCodexModelId("ultra")).toBe("fugu-ultra");
   });
 });

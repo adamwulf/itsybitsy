@@ -113,6 +113,7 @@ export type ConfigDialogItem = {
   value: unknown;
   source: "user" | "default";
   default: unknown;
+  sensitive?: boolean;
 };
 
 /** Wrap logical textarea lines into visual lines using ANSI-aware wrapping.
@@ -1034,7 +1035,9 @@ function buildConfigTabContent(
     const isSelected = i === selectedIdx;
 
     let valueStr: string;
-    if (item.value === undefined || item.value === null) {
+    if (item.sensitive) {
+      valueStr = item.value ? `${DIM}(configured)${RESET}` : `${DIM}(not set)${RESET}`;
+    } else if (item.value === undefined || item.value === null) {
       valueStr = `${DIM}(not set)${RESET}`;
     } else if (item.type === "boolean") {
       valueStr = item.value ? `${GREEN}true${RESET}` : "false";

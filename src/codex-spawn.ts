@@ -25,7 +25,7 @@ import { join } from "path";
 import { homedir } from "os";
 import { mkdir, readdir } from "fs/promises";
 import { shellQuote } from "./validation";
-import { buildCodexLaunchArgs, isCodexSafeBinaryPath } from "./codex-config";
+import { buildCodexLaunchArgs, FUGU_CODEX_CONFIG_OVERRIDES, isCodexSafeBinaryPath } from "./codex-config";
 import type { SessionContext } from "./hooks/session-start";
 import { generateInstructions } from "./hooks/session-start";
 
@@ -77,6 +77,8 @@ export interface BuildCodexStartContentInput {
   absStderrLog: string;
   /** Extra directories Codex should treat as writable under workspace-write. */
   extraWritableRoots?: string[];
+  /** Configure Codex to use Sakana Fugu and load its key at launch. */
+  fugu?: boolean;
 }
 
 /**
@@ -113,7 +115,10 @@ export function buildCodexStartContent(input: BuildCodexStartContentInput): stri
   // hookFlags array already alternates `-c` then the payload; quote both
   // halves uniformly.
   const qModel = shellQuote(input.codexModel);
-  const qFlagArgs = hookFlags.map(shellQuote).join(" ");
+  const providerFlags = input.fugu
+    ? FUGU_CODEX_CONFIG_OVERRIDES.flatMap((override) => ["-c", override])
+    : [];
+  const qFlagArgs = [...providerFlags, ...hookFlags].map(shellQuote).join(" ");
   const qAbsPromptFile = shellQuote(input.absPromptFile);
   const qStartMetaJson = shellQuote(input.absMetaJson);
   const qStartExitScript = shellQuote(input.absExitScript);
@@ -135,6 +140,17 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }
 
 log "Starting codex -m ${input.codexModel} -a never -s workspace-write (codex agent id=${input.agentId})"
 log "PWD=$(pwd) which_codex=$(which codex 2>&1)"
+
+${input.fugu ? `# Read the Fugu key only at launch time. It stays in the owner-only
+# ~/.itsybitsy/config.json file and this shell environment; it is never written
+# into the agent directory, logs, or Codex argv.
+SAKANA_API_KEY="$( ${shellQuote(input.ibBinaryPath)} config get providers.fugu.api_key )"
+if [[ -z "$SAKANA_API_KEY" ]]; then
+    log "Fugu launch refused: providers.fugu.api_key is not configured"
+    exit 1
+fi
+export SAKANA_API_KEY
+` : ""}
 
 # Ignore SIGHUP for the lifetime of this script. When spawn is triggered from
 # inside another tmux pane (the ib-coordinator, another agent, or a watchdog
@@ -239,6 +255,8 @@ export interface BuildCodexResumeContentInput {
   absStderrLog: string;
   /** Extra directories Codex should treat as writable under workspace-write. */
   extraWritableRoots?: string[];
+  /** Reconfigure Sakana Fugu for the resumed Codex session. */
+  fugu?: boolean;
 }
 
 /**
@@ -280,7 +298,10 @@ export function buildCodexResumeContent(input: BuildCodexResumeContentInput): st
   });
 
   const qSessionId = shellQuote(input.codexSessionId);
-  const qFlagArgs = hookFlags.map(shellQuote).join(" ");
+  const providerFlags = input.fugu
+    ? FUGU_CODEX_CONFIG_OVERRIDES.flatMap((override) => ["-c", override])
+    : [];
+  const qFlagArgs = [...providerFlags, ...hookFlags].map(shellQuote).join(" ");
   const qResumeMetaJson = shellQuote(input.absMetaJson);
   const qResumeExitScript = shellQuote(input.absExitScript);
   const qResumeAgentLog = shellQuote(input.absAgentLog);
@@ -296,6 +317,16 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [resume.sh] $1" >> "$AGENT_LOG"; }
 
 log "Resuming codex resume ${input.codexSessionId} (codex agent id=${input.agentId})"
 log "PWD=$(pwd) which_codex=$(which codex 2>&1)"
+
+${input.fugu ? `# Read the Fugu key only at resume time. It is not persisted in the
+# agent's files, logs, or command arguments.
+SAKANA_API_KEY="$( ${shellQuote(input.ibBinaryPath)} config get providers.fugu.api_key )"
+if [[ -z "$SAKANA_API_KEY" ]]; then
+    log "Fugu resume refused: providers.fugu.api_key is not configured"
+    exit 1
+fi
+export SAKANA_API_KEY
+` : ""}
 
 # Ignore SIGHUP for the lifetime of this script. When resume is triggered from
 # inside another tmux pane (the ib-coordinator, another agent, or a watchdog

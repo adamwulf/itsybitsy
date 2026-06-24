@@ -51,7 +51,21 @@ export const KNOWN_MODELS: KnownModel[] = [
   { cli: "codex", model: "gpt-5.4-mini", description: "Fast/efficient mini — responsive coding + subagents" },
   { cli: "codex", model: "gpt-5.3-codex-spark", description: "Preview — near-instant real-time iteration (text-only)" },
   { cli: "codex", model: "gpt-5.2", description: "Legacy — previous general-purpose coding/agentic model" },
+  // Sakana Fugu — launched by Codex with Sakana's OpenAI-compatible Responses
+  // API. These are intentionally short selector aliases; `fugu:ultra` maps to
+  // Sakana's API model id `fugu-ultra` in fuguCodexModelId().
+  { cli: "fugu", model: "fugu", description: "Sakana Fugu — routed multi-agent model" },
+  { cli: "fugu", model: "ultra", description: "Sakana Fugu Ultra — higher-capability routed model" },
 ];
+
+/** Map an itsybitsy Fugu selector to Sakana's API model ID. */
+export function fuguCodexModelId(model: string): string {
+  switch (model) {
+    case "fugu": return "fugu";
+    case "ultra": return "fugu-ultra";
+    default: throw new Error(`Unknown Fugu model selector: ${model}`);
+  }
+}
 
 /**
  * Returns true iff `<cli>:<model>` matches an entry in KNOWN_MODELS.

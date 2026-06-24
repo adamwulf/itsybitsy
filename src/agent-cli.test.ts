@@ -21,6 +21,10 @@ describe("parseModel", () => {
       });
     });
 
+    test("Fugu selector", () => {
+      expect(parseModel("fugu:ultra")).toEqual({ cli: "fugu", model: "ultra" });
+    });
+
     test("codex prefix variants", () => {
       expect(parseModel("codex:gpt-5-codex")).toEqual({
         cli: "codex",
@@ -153,12 +157,13 @@ describe("parseModel", () => {
   });
 
   describe("KNOWN_CLIS membership", () => {
-    test("contains claude and codex", () => {
+    test("contains claude, codex, and fugu", () => {
       expect(KNOWN_CLIS.has("claude")).toBe(true);
       expect(KNOWN_CLIS.has("codex")).toBe(true);
+      expect(KNOWN_CLIS.has("fugu")).toBe(true);
     });
-    test("has size 2 (only claude + codex)", () => {
-      expect(KNOWN_CLIS.size).toBe(2);
+    test("has size 3 (claude + codex + fugu)", () => {
+      expect(KNOWN_CLIS.size).toBe(3);
     });
   });
 });

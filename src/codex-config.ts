@@ -76,6 +76,22 @@ export interface CodexLaunchArgs {
 }
 
 /**
+ * Inline configuration for Sakana's OpenAI-compatible Responses API. The API
+ * key is deliberately excluded: the start/resume wrapper exports it from the
+ * owner-only itsybitsy settings file immediately before launching Codex.
+ */
+export const FUGU_CODEX_CONFIG_OVERRIDES: readonly string[] = [
+  'model_provider="sakana"',
+  'model_providers.sakana.name="Sakana API"',
+  'model_providers.sakana.base_url="https://api.sakana.ai/v1"',
+  'model_providers.sakana.env_key="SAKANA_API_KEY"',
+  'model_providers.sakana.wire_api="responses"',
+  "model_providers.sakana.stream_idle_timeout_ms=7200000",
+  "model_providers.sakana.stream_max_retries=5",
+  "model_providers.sakana.request_max_retries=4",
+];
+
+/**
  * Reject ib-binary paths that would break the TOML-in-shell quoting in the
  * inline `-c` payload. The path lives inside a TOML double-quoted string,
  * which itself sits inside a shell single-quoted argument. A `'` would close

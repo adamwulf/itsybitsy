@@ -57,8 +57,8 @@ import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome } from "./coordinator";
 import { loadAgentType, agentTypeExists } from "./agent-types";
 import type { AgentType } from "./agent-types";
-import { parseModel } from "./agent-cli";
-import { isKnownModel, listKnownSelectorsForCli } from "./known-models";
+import { isCodexBackedCli, parseModel } from "./agent-cli";
+import { fuguCodexModelId, isKnownModel, listKnownSelectorsForCli } from "./known-models";
 import {
   buildHooksBlock,
   COORDINATOR_INTERCEPT_MATCHER,
@@ -818,7 +818,7 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
     const resumeScript = join(agentDir, "resume.sh");
 
     let yoloMode = false;
-    if (resumeCli === "codex") {
+    if (isCodexBackedCli(resumeCli)) {
       // ── Codex resume branch (SPEC §5.8 + §6 Phase 7) ─────────────────────────
       // Read codex's rollout/session id (NOT the claude session_id UUID).
       // Captured by SessionStart/PreToolUse hooks on first launch.
@@ -828,7 +828,7 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
           ok: false,
           exitCode: 1,
           stdout: "",
-          stderr: `Cannot resume codex agent '${agent.id}': codex_session_id not yet captured (SessionStart hook never fired). Try nuking + respawning instead.`,
+          stderr: `Cannot resume Codex-backed agent '${agent.id}': codex_session_id not yet captured (SessionStart hook never fired). Try nuking + respawning instead.`,
         };
       }
       if (!isValidSessionId(codexSessionId)) {
@@ -936,6 +936,7 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
         absAgentLog: join(agentDir, "agent.log"),
         absStderrLog: join(agentDir, "claude.stderr.log"),
         extraWritableRoots: codexExtraWritableRoots,
+        fugu: resumeCli === "fugu",
       });
       await Bun.write(resumeScript, codexResumeContent);
       await chmod(resumeScript, 0o755);
@@ -3657,7 +3658,7 @@ export async function newAgent(
   // would skip the useWorktree branch (AGENTS.md, .gitignore, precheck)
   // and produce a broken half-codex coordinator.
   let codexIbBinaryPath: string | null = null;
-  if (agentCli === "codex") {
+  if (isCodexBackedCli(agentCli)) {
     if (coordinatorMode) {
       return {
         ok: false,
@@ -3674,13 +3675,13 @@ export async function newAgent(
     // truth — update it when codex adds new models that are reachable on
     // the typical ChatGPT-plan account. See src/known-models.ts.
     if (!isKnownModel(parsed)) {
-      const valid = listKnownSelectorsForCli("codex");
+      const valid = listKnownSelectorsForCli(agentCli);
       return {
         ok: false,
         exitCode: 1,
         stdout: "",
         stderr:
-          `Codex model '${modelFlagValue}' is not supported. Valid models: ${valid.join(", ")}. ` +
+          `${agentCli === "fugu" ? "Fugu" : "Codex"} model '${modelFlagValue}' is not supported. Valid models: ${valid.join(", ")}. ` +
           `Note: ChatGPT-plan and API-key codex accounts expose different model sets; ` +
           `if the model you want is missing here, it may not be reachable on a ChatGPT plan. ` +
           `Run 'ib list-models' for the full list.`,
@@ -4022,7 +4023,7 @@ export async function newAgent(
     }
     workPath = join(agentDir, "repo");
 
-    if (agentCli === "codex") {
+    if (isCodexBackedCli(agentCli)) {
       // Codex agents do not launch with Claude settings; their hook
       // registration is inline via `-c` flags built in `buildCodexLaunchArgs`
       // (SPEC §3.3 + §5.4). The codex PreToolUse hook itself reads the shared
@@ -4345,7 +4346,7 @@ echo ""
   const qStartStderrLog = shellQuote(join(agentDir, "claude.stderr.log"));
 
   let startContent: string;
-  if (agentCli === "codex") {
+  if (isCodexBackedCli(agentCli)) {
     // Codex spawn branch — SPEC §6 Phase 4. The launch line is the canonical
     // §3.3 form: `codex -m <model> -a never -s workspace-write
     // --dangerously-bypass-hook-trust <inline -c flags> "<prompt>"`. The
@@ -4358,7 +4359,8 @@ echo ""
       agentId: id,
       ibBinaryPath: codexIbBinaryPath!,
       agentDir,
-      codexModel: modelFlagValue,
+      codexModel: agentCli === "fugu" ? fuguCodexModelId(modelFlagValue) : modelFlagValue,
+      fugu: agentCli === "fugu",
       absPromptFile,
       absMetaJson: join(agentDir, "meta.json"),
       absExitScript,

@@ -3,7 +3,7 @@
  * Pure string matching — no side effects.
  */
 
-import type { AgentCli } from "./agent-cli";
+import { isCodexBackedCli, type AgentCli } from "./agent-cli";
 
 /** Claude startup markers that indicate the session has progressed past initial creation */
 export const STARTUP_MARKERS = ["Claude Code v", "[USER TASK]", "╭─ Claude Code", "[AGENT CONTEXT]"];
@@ -174,7 +174,7 @@ export function parseStateForCli(input: string, cli: AgentCli): ParseStateResult
   if (!input || input.trim() === "") {
     return { state: "unknown", reason: "empty input" };
   }
-  return cli === "codex" ? parseCodexState(input) : parseClaudeState(input);
+  return isCodexBackedCli(cli) ? parseCodexState(input) : parseClaudeState(input);
 }
 
 /**

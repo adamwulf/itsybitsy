@@ -24,7 +24,7 @@ Companion docs (supporting evidence, do not duplicate here):
 
 A user selects an agent's CLI/provider explicitly via a **`<cli>:<model>`** model string
 (e.g. `claude:opus`, `claude:claude-opus-4-7`, `codex:gpt-5.1-codex`,
-`codex:o3-mini`, `fugu:fugu`, `fugu:ultra`). itsybitsy parses the prefix to choose the underlying CLI —
+`codex:o3-mini`, `fugu:fugu`, `fugu:fugu-ultra`). itsybitsy parses the prefix to choose the underlying CLI —
 **no inference**, no hidden model→CLI guessing table. A codex agent launches the
 **interactive `codex` TUI inside tmux** — exactly the way `claude` agents are
 launched today — instead of `claude`. The agent's permissions are enforced by a

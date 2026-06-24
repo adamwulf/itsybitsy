@@ -22,7 +22,7 @@ describe("parseModel", () => {
     });
 
     test("Fugu selector", () => {
-      expect(parseModel("fugu:ultra")).toEqual({ cli: "fugu", model: "ultra" });
+      expect(parseModel("fugu:fugu-ultra")).toEqual({ cli: "fugu", model: "fugu-ultra" });
     });
 
     test("codex prefix variants", () => {

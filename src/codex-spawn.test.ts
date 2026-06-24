@@ -786,6 +786,57 @@ describe("buildSkillsSection — skills catalog", () => {
     expect(section).not.toContain("key: value");
   });
 
+  test("frontmatter containing a ``` run is wrapped in a >=4-backtick fence and not corrupted", async () => {
+    const skillsDir = join(tempDir, "skills");
+    // A description whose value embeds a literal triple-backtick fenced example.
+    // With a naive 3-backtick wrapper this inner ``` would close the fence
+    // early and leak everything after it into the rendered AGENTS.md.
+    const fmDescription =
+      'description: "Use ```code``` blocks in your output"';
+    await writeSkill(
+      skillsDir,
+      "fenced",
+      "---\nname: fenced\n" + fmDescription + "\n---\n\n# body\n",
+    );
+    // A second skill AFTER it alphabetically — if the fence leaked, this skill's
+    // header would be swallowed into the previous code block.
+    await writeSkill(
+      skillsDir,
+      "later",
+      "---\nname: later\ndescription: Later skill\n---\n",
+    );
+
+    const section = await buildSkillsSection(skillsDir);
+
+    // The opening fence for the fenced skill must be >= 4 backticks (the inner
+    // run is 3, so fenceFor returns 4). Assert the >=4 fence appears.
+    expect(section).toContain("````");
+    // The inner triple-backtick frontmatter is reproduced verbatim.
+    expect(section).toContain(fmDescription);
+    // The block after it is NOT corrupted: the later skill's header survives.
+    expect(section).toContain("### later");
+    expect(section).toContain("description: Later skill");
+    // Sanity: alphabetical order preserved (fenced before later).
+    expect(section.indexOf("### fenced")).toBeLessThan(
+      section.indexOf("### later"),
+    );
+  });
+
+  test("CRLF-line-ended SKILL.md does not leak \\r into the emitted frontmatter", async () => {
+    const skillsDir = join(tempDir, "skills");
+    // Author the file with Windows CRLF line endings throughout.
+    const crlf =
+      "---\r\nname: crlfskill\r\ndescription: CRLF skill\r\n---\r\n\r\n# body\r\n";
+    await writeSkill(skillsDir, "crlfskill", crlf);
+
+    const section = await buildSkillsSection(skillsDir);
+    expect(section).toContain("### crlfskill");
+    expect(section).toContain("name: crlfskill");
+    expect(section).toContain("description: CRLF skill");
+    // No carriage return must survive into the rendered output.
+    expect(section).not.toContain("\r");
+  });
+
   test("returns '' when the skills dir does not exist", async () => {
     const section = await buildSkillsSection(join(tempDir, "does-not-exist"));
     expect(section).toBe("");

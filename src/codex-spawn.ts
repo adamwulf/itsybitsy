@@ -527,11 +527,15 @@ export async function buildSkillsSection(
       continue;
     }
     const frontmatter = extractFrontmatter(contents);
-    // Emit the raw frontmatter verbatim inside a fenced block. An empty
-    // frontmatter still lists the skill by name so the agent knows it exists.
+    // Emit the raw frontmatter verbatim inside a fenced block. The fence length
+    // is computed dynamically (see fenceFor) so a frontmatter that itself
+    // contains a ``` run can't terminate the fence early and corrupt this block
+    // — and everything after it — in AGENTS.md. An empty frontmatter still
+    // lists the skill by name so the agent knows it exists.
+    const fence = fenceFor(frontmatter);
     const fenced = frontmatter.length > 0
-      ? "```\n" + frontmatter + "\n```"
-      : "```\n```";
+      ? fence + "\n" + frontmatter + "\n" + fence
+      : fence + "\n" + fence;
     blocks.push(`### ${name}\nPath: ${skillMdPath}\nFrontmatter:\n${fenced}`);
   }
 
@@ -551,6 +555,28 @@ export async function buildSkillsSection(
 }
 
 /**
+ * Compute a markdown code-fence (run of backticks) long enough to safely wrap
+ * `text` verbatim. A fence must be strictly longer than the longest run of
+ * consecutive backticks anywhere inside the content, otherwise that inner run
+ * would close the fence early. We return `max(3, longestRun + 1)` backticks so
+ * the common case stays a normal ```-fence while user-authored frontmatter that
+ * embeds a fenced example can't corrupt the surrounding AGENTS.md.
+ */
+function fenceFor(text: string): string {
+  let longest = 0;
+  let run = 0;
+  for (const ch of text) {
+    if (ch === "`") {
+      run += 1;
+      if (run > longest) longest = run;
+    } else {
+      run = 0;
+    }
+  }
+  return "`".repeat(Math.max(3, longest + 1));
+}
+
+/**
  * Extract the raw text BETWEEN the first two `---` delimiter lines of a
  * `SKILL.md` (the YAML frontmatter region), returned verbatim and trimmed of
  * surrounding blank lines. We deliberately do NOT parse the YAML into a struct
@@ -561,7 +587,10 @@ export async function buildSkillsSection(
  * when there's no closing `---`, so the caller lists the skill name-only.
  */
 function extractFrontmatter(contents: string): string {
-  const lines = contents.split("\n");
+  // Split on /\r?\n/ (matching the sibling appendCodexGitignoreEntry) so a
+  // CRLF-line-ended SKILL.md doesn't leave a trailing \r on each interior line
+  // of the verbatim frontmatter we emit.
+  const lines = contents.split(/\r?\n/);
   // Frontmatter must be the very first line (allowing a leading BOM/whitespace
   // is unnecessary — skill files start with a bare `---`).
   if (lines[0]?.trim() !== "---") return "";

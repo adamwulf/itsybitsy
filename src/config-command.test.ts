@@ -110,6 +110,13 @@ describe("config list", () => {
     expect(output).toContain("createPullRequests = false (default)");
   });
 
+  test("masks configured Fugu API keys", async () => {
+    await Bun.write(cfgPath, JSON.stringify({ providers: { fugu: { api_key: "fish_secret" } } }));
+    await runConfigCommand(["list"]);
+    expect(logged()).toContain("providers.fugu.api_key = (configured) (user)");
+    expect(logged()).not.toContain("fish_secret");
+  });
+
   test("lists all CONFIG_KEYS entries", async () => {
     await runConfigCommand(["list"]);
     const output = logged();

@@ -26,7 +26,7 @@ import { validateAllAgentTypes, ensureAgentTypesDir, listSpawnableTypeNamesSync 
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient, resizeTmuxWindow } from "../tmux-poller";
-import { parseModel } from "../agent-cli";
+import { isCodexBackedCli, parseModel } from "../agent-cli";
 import {
   IB_COORDINATOR_SESSION,
   acquireSystemCoordinator,
@@ -301,7 +301,7 @@ export class TmuxPaneComponent implements Component {
 function isCodexAgent(agent: Agent | null): boolean {
   if (!agent) return false;
   try {
-    return parseModel(agent.meta.model).cli === "codex";
+    return isCodexBackedCli(parseModel(agent.meta.model).cli);
   } catch {
     return false;
   }

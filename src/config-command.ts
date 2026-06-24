@@ -133,7 +133,11 @@ export async function runConfigCommand(args: string[]): Promise<void> {
       const config = await readConfig();
       for (const def of CONFIG_KEYS) {
         const entry = config[def.key]!;
-        const valueStr = entry.value === undefined ? "" : (Array.isArray(entry.value) ? JSON.stringify(entry.value) : String(entry.value));
+        const valueStr = def.sensitive && entry.value
+          ? "(configured)"
+          : entry.value === undefined
+            ? ""
+            : (Array.isArray(entry.value) ? JSON.stringify(entry.value) : String(entry.value));
         if (entry.value === undefined && entry.source === "default") {
           console.log(`${def.key} = (unset)`);
         } else {

@@ -1835,6 +1835,7 @@ async function loadSetupDialog(ctx: ActionCtx, initialTab = 0) {
         value: entry.value,
         source: entry.source,
         default: def.default,
+        sensitive: def.sensitive,
       };
     });
   };
@@ -1967,16 +1968,24 @@ function handleConfigItemAction(
       });
     } else {
       // Open input dialog for number, string, or non-permission string[]
-      const currentStr = item.type === "string[]"
+      const currentStr = item.sensitive
+        ? ""
+        : item.type === "string[]"
         ? (item.value as string[] ?? []).join(", ")
         : String(item.value ?? "");
       ctx.closeDialog();
       ctx.showDialog({
         type: "input",
-        prompt: `${item.key} (${item.type}):`,
+        prompt: item.sensitive
+          ? `${item.key} (${item.type}; leave blank to keep current value):`
+          : `${item.key} (${item.type}):`,
         value: currentStr,
         onSubmit: (value: string) => {
           ctx.closeDialog();
+          if (item.sensitive && value === "") {
+            loadSetupDialog(ctx, tab).catch((err) => ctx.setNotice(`Setup error: ${err}`, "error"));
+            return;
+          }
           let parsed: unknown;
           if (item.type === "number") {
             const num = Number(value);

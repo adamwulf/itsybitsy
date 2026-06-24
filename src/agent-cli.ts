@@ -14,10 +14,20 @@
  * `claude`.
  */
 
-export type AgentCli = "claude" | "codex";
+/**
+ * The selector prefix in an agent model string. `fugu` is Codex-backed, but
+ * remains a distinct selector so agent-type files can express the provider
+ * explicitly (`fugu:fugu`, `fugu:ultra`).
+ */
+export type AgentCli = "claude" | "codex" | "fugu";
 
 /** The set of CLIs itsybitsy knows how to launch. */
-export const KNOWN_CLIS: ReadonlySet<AgentCli> = new Set<AgentCli>(["claude", "codex"]);
+export const KNOWN_CLIS: ReadonlySet<AgentCli> = new Set<AgentCli>(["claude", "codex", "fugu"]);
+
+/** True when the selector is launched by the Codex CLI rather than Claude. */
+export function isCodexBackedCli(cli: AgentCli): boolean {
+  return cli === "codex" || cli === "fugu";
+}
 
 /** A parsed `<cli>:<model>` string: the resolved CLI and the verbatim model half. */
 export interface ParsedModel {
@@ -53,7 +63,7 @@ export function parseModel(input: string): ParsedModel {
   const colon = input.indexOf(":");
   if (colon < 0) {
     throw new Error(
-      `Invalid model '${input}': expected '<cli>:<model>' (e.g. 'claude:opus'); known CLIs: claude, codex`,
+      `Invalid model '${input}': expected '<cli>:<model>' (e.g. 'claude:opus'); known CLIs: claude, codex, fugu`,
     );
   }
 
@@ -70,7 +80,7 @@ export function parseModel(input: string): ParsedModel {
 
   const cli = rawCli.toLowerCase();
   if (!KNOWN_CLIS.has(cli as AgentCli)) {
-    throw new Error(`Unknown CLI '${cli}' in model '${input}'; known: claude, codex`);
+    throw new Error(`Unknown CLI '${cli}' in model '${input}'; known: claude, codex, fugu`);
   }
 
   return { cli: cli as AgentCli, model };
@@ -90,5 +100,5 @@ export function resolveCli(model: string): AgentCli {
  * `parseModel`; throws on an invalid / unknown model string.
  */
 export function isCodexModel(model: string): boolean {
-  return parseModel(model).cli === "codex";
+  return isCodexBackedCli(parseModel(model).cli);
 }

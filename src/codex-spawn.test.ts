@@ -44,6 +44,16 @@ describe("buildCodexStartContent — launch line", () => {
     expect(content).toContain("--dangerously-bypass-hook-trust");
   });
 
+  test("adds the Sakana Responses provider and loads its key only into the child environment for Fugu", () => {
+    const content = buildCodexStartContent({ ...baseInput(), codexModel: "fugu-ultra", fugu: true });
+    expect(content).toContain("'model_provider=\"sakana\"'");
+    expect(content).toContain("'model_providers.sakana.base_url=\"https://api.sakana.ai/v1\"'");
+    expect(content).toContain("'model_providers.sakana.wire_api=\"responses\"'");
+    expect(content).toContain("config get providers.fugu.api_key");
+    expect(content).toContain("export SAKANA_API_KEY");
+    expect(content).not.toContain("fish_");
+  });
+
   test("passes extra writable roots through as --add-dir flags", () => {
     const content = buildCodexStartContent({
       ...baseInput(),

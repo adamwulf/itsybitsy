@@ -89,6 +89,33 @@ export const FUGU_CODEX_CONFIG_OVERRIDES: readonly string[] = [
   "model_providers.sakana.stream_idle_timeout_ms=7200000",
   "model_providers.sakana.stream_max_retries=5",
   "model_providers.sakana.request_max_retries=4",
+  // Disable Codex's built-in non-function tools for the Sakana/Fugu provider.
+  // Sakana's OpenAI-compatible Responses API ONLY accepts tool types `function`
+  // and `custom`; any other type aborts the WHOLE request before the model runs:
+  //   {"error":{"message":"Invalid value: 'image_generation'. Supported values
+  //    are: 'function' and 'custom'.","type":"invalid_request_error",
+  //    "param":"tools","code":null}}
+  // By default (codex-cli 0.141.0) Codex emits two such API-typed tools in the
+  // Responses `tools` array: `image_generation` (gated by features.image_generation)
+  // and `web_search` (gated by the top-level `web_search` enum). Both are turned
+  // off here. The third API-typed tool, the `namespace` multi-agent group
+  // (`multi_agent_v1`), is already suppressed by `features.multi_agent=false`,
+  // which buildCodexLaunchArgs() pushes for every codex agent — so it needs no
+  // entry here. Codex's `view_image` tool is emitted as a plain `function` (it
+  // just reads a local image file), so Sakana accepts it and it is left enabled.
+  //
+  // Keys verified against codex-cli 0.141.0:
+  //   - `codex --help` documents `--disable <FEATURE>` ≡ `-c features.<name>=false`.
+  //   - `codex features list` lists `image_generation` (stable, default-on).
+  //   - `web_search` is a string enum: codex rejected `web_search=false` with
+  //     "expected string only" and `web_search="off"` with
+  //     "unknown variant `off`, expected one of `disabled`, `cached`, `live`".
+  //   - All three keys load cleanly under `codex --strict-config ... doctor`.
+  //   - Empirically captured Responses payload: removing these drops the
+  //     `image_generation` and `web_search` entries, leaving an all-`function`
+  //     tools array that Sakana accepts.
+  "features.image_generation=false",
+  'web_search="disabled"',
 ];
 
 /**

@@ -54,6 +54,31 @@ describe("buildCodexStartContent — launch line", () => {
     expect(content).not.toContain("fish_");
   });
 
+  test("disables Codex's API-typed built-in tools for Fugu (Sakana accepts only function/custom)", () => {
+    // Sakana's Responses API rejects any tool whose `type` is not `function`
+    // or `custom`. Codex's default `image_generation` and `web_search` tools
+    // use such API types and abort the whole request, so the Fugu provider
+    // overrides must turn both off. Each `-c` payload is shell-quoted, so it
+    // appears single-quoted in the launch line.
+    const content = buildCodexStartContent({ ...baseInput(), codexModel: "fugu-ultra", fugu: true });
+    expect(content).toContain("'features.image_generation=false'");
+    expect(content).toContain("'web_search=\"disabled\"'");
+    // multi_agent (the `namespace` tool group) is already disabled for every
+    // codex agent via buildCodexLaunchArgs(), so it appears on the Fugu line too.
+    expect(content).toContain("'features.multi_agent=false'");
+  });
+
+  test("does NOT emit the Fugu tool-disabling overrides for a regular codex (OpenAI) agent", () => {
+    // The image_generation / web_search overrides are scoped strictly to the
+    // Fugu/Sakana path. A plain `codex:` agent (no `fugu` flag) must keep
+    // Codex's default built-in tools, so neither override may appear, and the
+    // Sakana provider block must be absent entirely.
+    const content = buildCodexStartContent(baseInput());
+    expect(content).not.toContain("features.image_generation=false");
+    expect(content).not.toContain('web_search="disabled"');
+    expect(content).not.toContain("model_provider=\"sakana\"");
+  });
+
   test("passes extra writable roots through as --add-dir flags", () => {
     const content = buildCodexStartContent({
       ...baseInput(),
@@ -361,6 +386,23 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     // regain access to the codex native multi-agent tools.
     const content = buildCodexResumeContent(baseInput());
     expect(content).toContain("'features.multi_agent=false'");
+  });
+
+  test("re-passes the Fugu tool-disabling overrides on resume", () => {
+    // resume.sh is the resurrection path: a resumed Fugu agent must keep the
+    // image_generation / web_search tools disabled or it would re-trip Sakana's
+    // "Supported values are: 'function' and 'custom'" rejection on its first turn.
+    const content = buildCodexResumeContent({ ...baseInput(), fugu: true });
+    expect(content).toContain("'features.image_generation=false'");
+    expect(content).toContain("'web_search=\"disabled\"'");
+  });
+
+  test("does NOT emit the Fugu tool-disabling overrides on resume for a regular codex agent", () => {
+    // Scope guard: the overrides ride on FUGU_CODEX_CONFIG_OVERRIDES, gated on
+    // `fugu === true`. A plain `codex:` resume must keep Codex's defaults.
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).not.toContain("features.image_generation=false");
+    expect(content).not.toContain('web_search="disabled"');
   });
 
   test("re-passes commit_attribution=\"\" on resume", () => {

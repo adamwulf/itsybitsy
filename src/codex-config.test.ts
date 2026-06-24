@@ -6,6 +6,7 @@ import {
   renderCodexHookFlagPayload,
   CODEX_REGISTERED_EVENTS,
   DEFAULT_CODEX_HOOK_TIMEOUT_SECS,
+  FUGU_CODEX_CONFIG_OVERRIDES,
 } from "./codex-config";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 
@@ -48,6 +49,25 @@ afterEach(() => {
   if (ORIGINAL_HOME === undefined) delete process.env.HOME;
   else process.env.HOME = ORIGINAL_HOME;
   setPlatform(originalPlatform);
+});
+
+describe("FUGU_CODEX_CONFIG_OVERRIDES — Sakana tool-type guard", () => {
+  test("keeps the Sakana provider block", () => {
+    expect(FUGU_CODEX_CONFIG_OVERRIDES).toContain('model_provider="sakana"');
+    expect(FUGU_CODEX_CONFIG_OVERRIDES).toContain(
+      'model_providers.sakana.base_url="https://api.sakana.ai/v1"',
+    );
+    expect(FUGU_CODEX_CONFIG_OVERRIDES).toContain('model_providers.sakana.wire_api="responses"');
+  });
+
+  test("disables Codex's API-typed built-in tools (image_generation + web_search)", () => {
+    // Sakana's Responses API only accepts tool types `function` and `custom`;
+    // Codex's default `image_generation` and `web_search` tools use other API
+    // types and abort the whole request. These exact `-c` payloads (verified
+    // against codex-cli 0.141.0) turn both off. See the comment in codex-config.ts.
+    expect(FUGU_CODEX_CONFIG_OVERRIDES).toContain("features.image_generation=false");
+    expect(FUGU_CODEX_CONFIG_OVERRIDES).toContain('web_search="disabled"');
+  });
 });
 
 describe("isCodexSafeBinaryPath", () => {

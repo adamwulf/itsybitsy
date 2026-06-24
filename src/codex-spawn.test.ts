@@ -18,6 +18,7 @@ import {
   appendCodexGitignoreEntry,
   stripIttybittyWrapper,
   resolveIbBinaryPath,
+  buildSkillsSection,
 } from "./codex-spawn";
 import { CODEX_REGISTERED_EVENTS } from "./codex-config";
 
@@ -688,5 +689,183 @@ describe("buildCodexAgentsMd / writeCodexAgentsMd", () => {
     expect(body).not.toContain("## Project CLAUDE.md");
     expect(body).not.toContain("## User-global CLAUDE.md");
     expect(body).not.toContain("@./CLAUDE.md");
+  });
+});
+
+describe("buildSkillsSection — skills catalog", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "codex-skills-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  // Helper: write a skill <name>/SKILL.md with the given file contents.
+  async function writeSkill(
+    skillsDir: string,
+    name: string,
+    contents: string,
+  ): Promise<string> {
+    const dir = join(skillsDir, name);
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, "SKILL.md");
+    await Bun.write(path, contents);
+    return path;
+  }
+
+  test("lists 2+ skills alphabetically, each with absolute SKILL.md path + raw frontmatter", async () => {
+    const skillsDir = join(tempDir, "skills");
+    // Write out of alphabetical order to prove the function sorts.
+    const zebraPath = await writeSkill(
+      skillsDir,
+      "zebra",
+      "---\nname: zebra\ndescription: Zebra skill\n---\n\n# Zebra body\nkey: not-frontmatter\n",
+    );
+    const alphaPath = await writeSkill(
+      skillsDir,
+      "alpha",
+      "---\nname: alpha\ndescription: Alpha skill\n---\n\n# Alpha body\n",
+    );
+
+    const section = await buildSkillsSection(skillsDir);
+
+    expect(section).toContain("## Skills (read-on-demand workflow guides)");
+    // Both skills listed.
+    expect(section).toContain("### alpha");
+    expect(section).toContain("### zebra");
+    // Absolute SKILL.md paths present.
+    expect(section).toContain(`Path: ${alphaPath}`);
+    expect(section).toContain(`Path: ${zebraPath}`);
+    // Raw frontmatter reproduced verbatim.
+    expect(section).toContain("name: alpha");
+    expect(section).toContain("description: Alpha skill");
+    expect(section).toContain("name: zebra");
+    expect(section).toContain("description: Zebra skill");
+    // Skill BODY is NOT inlined — only the frontmatter region is shown.
+    expect(section).not.toContain("# Alpha body");
+    expect(section).not.toContain("# Zebra body");
+    // The body's `key:`-looking line must NOT leak into the frontmatter (it is
+    // after the closing `---`, so the first-block parse never sees it).
+    expect(section).not.toContain("key: not-frontmatter");
+    // Alphabetical order: alpha's header appears before zebra's.
+    expect(section.indexOf("### alpha")).toBeLessThan(
+      section.indexOf("### zebra"),
+    );
+  });
+
+  test("skips a subdirectory that has no SKILL.md", async () => {
+    const skillsDir = join(tempDir, "skills");
+    await writeSkill(
+      skillsDir,
+      "real",
+      "---\nname: real\ndescription: Real skill\n---\n",
+    );
+    // A subdir with no SKILL.md inside.
+    await mkdir(join(skillsDir, "empty"), { recursive: true });
+
+    const section = await buildSkillsSection(skillsDir);
+    expect(section).toContain("### real");
+    expect(section).not.toContain("### empty");
+  });
+
+  test("still lists a SKILL.md that has no frontmatter (name only, empty block, no throw)", async () => {
+    const skillsDir = join(tempDir, "skills");
+    await writeSkill(
+      skillsDir,
+      "noheader",
+      "# Just a body\nThere is no frontmatter here.\nkey: value\n",
+    );
+
+    const section = await buildSkillsSection(skillsDir);
+    expect(section).toContain("### noheader");
+    // The body content must not be inlined as frontmatter.
+    expect(section).not.toContain("Just a body");
+    expect(section).not.toContain("key: value");
+  });
+
+  test("returns '' when the skills dir does not exist", async () => {
+    const section = await buildSkillsSection(join(tempDir, "does-not-exist"));
+    expect(section).toBe("");
+  });
+
+  test("returns '' when the skills dir exists but contains no skills", async () => {
+    const skillsDir = join(tempDir, "skills");
+    await mkdir(skillsDir, { recursive: true });
+    const section = await buildSkillsSection(skillsDir);
+    expect(section).toBe("");
+  });
+
+  test("buildCodexAgentsMd integration: output contains the Skills header when a skills dir exists", async () => {
+    const { buildCodexAgentsMd } = await import("./codex-spawn");
+    // buildCodexAgentsMd reads ~/.claude/skills via the default param, so point
+    // HOME at a temp dir holding a single skill. generateInstructions() also
+    // resolves agent-types from HOME, so build the full fake-home layout.
+    const originalHome = process.env.HOME;
+    try {
+      const fakeHome = join(tempDir, "home");
+      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
+      process.env.HOME = fakeHome;
+      await (await import("./agent-types")).ensureAgentTypesDir();
+      await writeSkill(
+        join(fakeHome, ".claude", "skills"),
+        "demo",
+        "---\nname: demo\ndescription: Demo skill\n---\n",
+      );
+
+      const ctx = {
+        role: "worker" as const,
+        agentId: "agent-skilltest",
+        agentManager: "agent-mgr",
+        parentBranch: "main",
+        branchName: "agent/agent-skilltest",
+        worktreePath: join(tempDir, "wt"),
+        rootRepoPath: tempDir,
+        agentType: "worker",
+      };
+      const body = await buildCodexAgentsMd(ctx);
+      expect(body).toContain("## Skills (read-on-demand workflow guides)");
+      expect(body).toContain("### demo");
+      expect(body).toContain("description: Demo skill");
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+    }
+  });
+
+  test("buildCodexAgentsMd integration: no Skills header when the skills dir is absent", async () => {
+    const { buildCodexAgentsMd } = await import("./codex-spawn");
+    const originalHome = process.env.HOME;
+    try {
+      // Fake home WITHOUT a .claude/skills dir.
+      const fakeHome = join(tempDir, "home-noskills");
+      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
+      process.env.HOME = fakeHome;
+      await (await import("./agent-types")).ensureAgentTypesDir();
+
+      const ctx = {
+        role: "worker" as const,
+        agentId: "agent-noskill",
+        agentManager: "agent-mgr",
+        parentBranch: "main",
+        branchName: "agent/agent-noskill",
+        worktreePath: join(tempDir, "wt"),
+        rootRepoPath: tempDir,
+        agentType: "worker",
+      };
+      const body = await buildCodexAgentsMd(ctx);
+      expect(body).not.toContain("## Skills (read-on-demand workflow guides)");
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+    }
   });
 });

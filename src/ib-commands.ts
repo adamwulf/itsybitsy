@@ -58,7 +58,7 @@ import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinator
 import { loadAgentType, agentTypeExists } from "./agent-types";
 import type { AgentType } from "./agent-types";
 import { isCodexBackedCli, parseModel } from "./agent-cli";
-import { fuguCodexModelId, isKnownModel, listKnownSelectorsForCli } from "./known-models";
+import { isKnownModel, listKnownSelectorsForCli } from "./known-models";
 import {
   buildHooksBlock,
   COORDINATOR_INTERCEPT_MATCHER,
@@ -4359,7 +4359,7 @@ echo ""
       agentId: id,
       ibBinaryPath: codexIbBinaryPath!,
       agentDir,
-      codexModel: agentCli === "fugu" ? fuguCodexModelId(modelFlagValue) : modelFlagValue,
+      codexModel: modelFlagValue,
       fugu: agentCli === "fugu",
       absPromptFile,
       absMetaJson: join(agentDir, "meta.json"),

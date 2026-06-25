@@ -17,7 +17,7 @@
 /**
  * The selector prefix in an agent model string. `fugu` is Codex-backed, but
  * remains a distinct selector so agent-type files can express the provider
- * explicitly (`fugu:fugu`, `fugu:ultra`).
+ * explicitly (`fugu:fugu`, `fugu:fugu-ultra`).
  */
 export type AgentCli = "claude" | "codex" | "fugu";
 

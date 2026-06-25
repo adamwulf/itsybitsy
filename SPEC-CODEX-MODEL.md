@@ -24,7 +24,7 @@ Companion docs (supporting evidence, do not duplicate here):
 
 A user selects an agent's CLI/provider explicitly via a **`<cli>:<model>`** model string
 (e.g. `claude:opus`, `claude:claude-opus-4-7`, `codex:gpt-5.1-codex`,
-`codex:o3-mini`, `fugu:fugu`, `fugu:ultra`). itsybitsy parses the prefix to choose the underlying CLI —
+`codex:o3-mini`, `fugu:fugu`, `fugu:fugu-ultra`). itsybitsy parses the prefix to choose the underlying CLI —
 **no inference**, no hidden model→CLI guessing table. A codex agent launches the
 **interactive `codex` TUI inside tmux** — exactly the way `claude` agents are
 launched today — instead of `claude`. The agent's permissions are enforced by a
@@ -42,7 +42,7 @@ agents' core launch behavior (other than the `<cli>:<model>` parse).
 
 | # | Decision | Status |
 |---|---|---|
-| D1 | **`<cli>:<model>`** is the model string. The CLI/provider is NAMED, not inferred. `claude:`, `codex:`, and Codex-backed Sakana `fugu:` prefixes are supported. Bare names (`opus`, `o3`) are **rejected** as invalid. `fugu:fugu` maps to Sakana model `fugu`; `fugu:ultra` maps to `fugu-ultra`. | Updated (2026-06-24). |
+| D1 | **`<cli>:<model>`** is the model string. The CLI/provider is NAMED, not inferred. `claude:`, `codex:`, and Codex-backed Sakana `fugu:` prefixes are supported. Bare names (`opus`, `o3`) are **rejected** as invalid. `fugu:fugu` and `fugu:fugu-ultra` map directly to Sakana models `fugu` and `fugu-ultra` (no remapping; the model half is passed verbatim to `codex -m`, like `codex:`). | Updated (2026-06-24). |
 | D2 | Codex agents launch **headed/interactive in tmux**, like Claude — NOT `codex exec`. Preserves `C` (open-in-Ghostty → live interactive session). | Unchanged. |
 | D3 | **Reuse the same agent-type permission lists** (`_all.md` / `_non_coordinator.md` / `<type>.md`). Translate `allow`/`deny` into a generated PreToolUse hook script on the codex side (no `permissions.allow/deny` array equivalent in codex). | Refined (was "translate to Codex hook rules"; the research confirmed the only path is a generated script). |
 | D4 | **Auto-deny anything not granted by a hook; never prompt.** Codex runs unattended in tmux and must never surface an approval modal. | Unchanged. |
@@ -165,7 +165,7 @@ export function resolveCli(model: string): AgentCli;
 **Validation order at spawn:**
 1. `isValidModel(input)` — shell-safety syntactic check (widened to allow `:`).
 2. `parseModel(input)` — throws on missing/wrong colon, malformed cli, or unknown cli (D6: hard-reject).
-3. Pass `parseModel(input).model` (the model half) to the CLI flag; branch the launch on `parseModel(input).cli`. `fugu:fugu` and `fugu:ultra` launch Codex with Sakana provider `-c` overrides and API IDs `fugu` and `fugu-ultra` respectively.
+3. Pass `parseModel(input).model` (the model half) to the CLI flag; branch the launch on `parseModel(input).cli`. `fugu:fugu` and `fugu:fugu-ultra` launch Codex with Sakana provider `-c` overrides; the model half is passed verbatim to `-m` (no remap).
 
 **What Phase 0's code becomes:**
 - `CODEX_MODELS`, `CODEX_MODEL_PREFIXES`, boundary-aware prefix matching → **DELETED**. No more inference.

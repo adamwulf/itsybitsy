@@ -1943,6 +1943,10 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
     }
     const targetBranch = preflight.targetBranch;
 
+    // Captured after a successful merge (commitCount > 0). Stays null when no
+    // merge happens so the success message can omit the SHA in that case.
+    let mergedSha: string | null = null;
+
     // 7. Pre-rebase conflict check
     const conflictResult = await timed("merge", "conflict-check", () =>
       checkRebaseConflicts(agent.repoPath, targetBranch, branchName)
@@ -2004,6 +2008,14 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
       });
       if (!mergeOk.ok) {
         return { ok: false, exitCode: 1, stdout: "", stderr: mergeOk.stderr };
+      }
+
+      // Capture the target branch's new HEAD (the merge commit) for the success
+      // message. Best-effort: the merge already succeeded, so a failed rev-parse
+      // must not fail the whole operation — leave mergedSha null in that case.
+      const headResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "rev-parse", "HEAD"]);
+      if (headResult.exitCode === 0 && headResult.stdout.trim()) {
+        mergedSha = headResult.stdout.trim();
       }
     }
 
@@ -2081,7 +2093,10 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
     // teammates, `fromAgent` = the departed id (§16.5). Best-effort.
     await emitPerAgentLeaveNotice(prunedTeams, await listRepos());
 
-    return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
+    const successStdout = mergedSha
+      ? `Closed agent: ${agent.id} (merged to ${targetBranch} at ${mergedSha})`
+      : `Closed agent: ${agent.id}`;
+    return { ok: true, exitCode: 0, stdout: successStdout, stderr: "" };
   } finally {
     // Clear the op marker on every return path. On the SUCCESS path the agent
     // dir was already removed at step 17-19, so this writes into a now-gone

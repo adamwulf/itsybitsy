@@ -2511,6 +2511,9 @@ describe("mergeAgent (native)", () => {
   let tempDir: string;
   let spawnCalls: string[][];
 
+  // Fake 40-char SHA returned by the mocked `git rev-parse HEAD` after a merge.
+  const MERGE_HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
+
   /**
    * Create a smart mock that handles git commands needed for merge.
    * - git status --porcelain → empty (no uncommitted changes)
@@ -2597,6 +2600,11 @@ describe("mergeAgent (native)", () => {
       // git merge (but not merge in "merge-check")
       if (cmd.includes("merge") && (cmd.includes("--ff-only") || cmd.includes("--no-ff"))) {
         return makeSpawnResult(opts.mergeFails ? 1 : 0, opts.mergeFails ? "Merge conflict" : "");
+      }
+
+      // git rev-parse HEAD → fake 40-char SHA (the new merge commit)
+      if (cmd.includes("rev-parse") && cmd.includes("HEAD")) {
+        return makeSpawnResult(0, `${MERGE_HEAD_SHA}\n`);
       }
 
       // tmux has-session → failure (no active session)
@@ -2746,7 +2754,7 @@ describe("mergeAgent (native)", () => {
     expect(result.stderr).toContain("Rebase failed");
   });
 
-  test("succeeds with full merge sequence and returns 'Closed agent: <id>'", async () => {
+  test("succeeds with full merge sequence and includes merge commit SHA in stdout", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
@@ -2761,7 +2769,9 @@ describe("mergeAgent (native)", () => {
     const result = await mergeAgent(agent, tempDir);
 
     expect(result.ok).toBe(true);
-    expect(result.stdout).toBe("Closed agent: agent-abc");
+    // A merge with commits reports the target branch + full 40-char merge SHA.
+    expect(result.stdout).toBe(`Closed agent: agent-abc (merged to main at ${MERGE_HEAD_SHA})`);
+    expect(MERGE_HEAD_SHA).toHaveLength(40);
   });
 
   test("performs git rebase, checkout, and merge in correct order", async () => {
@@ -2864,6 +2874,8 @@ describe("mergeAgent (native)", () => {
     const result = await mergeAgent(agent, tempDir);
 
     expect(result.ok).toBe(true);
+    // No merge happened → no new SHA → plain message (no "(merged to ...)").
+    expect(result.stdout).toBe("Closed agent: agent-abc");
 
     // Should NOT have actual rebase/checkout/merge calls
     const rebaseCall = spawnCalls.find(
@@ -3166,9 +3178,10 @@ describe("mergeAgent (native)", () => {
     const agent = makeAgent("agent-abc", tempDir);
     const result = await mergeAgent(agent, tempDir);
 
-    // Should still succeed — rm -rf fallback handles cleanup
+    // Should still succeed — rm -rf fallback handles cleanup. The merge itself
+    // succeeded earlier, so stdout still reports the merge commit SHA.
     expect(result.ok).toBe(true);
-    expect(result.stdout).toBe("Closed agent: agent-abc");
+    expect(result.stdout).toBe(`Closed agent: agent-abc (merged to main at ${MERGE_HEAD_SHA})`);
   });
 
   test("logs conflict check failure to agent.log", async () => {

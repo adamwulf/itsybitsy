@@ -72,8 +72,9 @@
 import { InjectionContext } from "../types";
 import { TelegramClient, classifyError } from "./telegram-client";
 import type { PollOutcome } from "./telegram-client";
-import type { TelegramMessage, TelegramUpdate } from "./types";
+import type { TelegramMessage, TelegramUpdate, MessageReactionUpdated, ReactionType } from "./types";
 import { clearCachedChatId } from "./chat-id-cache";
+import { writeLastMessage } from "./last-message-cache";
 
 /** Delivery hook the dispatcher calls per coalesced batch. Defaults to
  *  the real `sendToSystemCoordinator` from src/index.ts; tests inject a
@@ -242,8 +243,13 @@ export interface DispatcherOptions {
 }
 
 /** What we extract from one TelegramMessage for the channel-reminder body. */
-interface NormalizedMessage {
+export interface NormalizedMessage {
   chatId: string;
+  /** Per-chat message identifier. Retained so the agent can target this exact
+   *  message with a reaction (`ib tgreact --message-id <id>`), and so the
+   *  dispatcher can persist the latest inbound id for `ib tgreact`'s default
+   *  "react to the most recent message" path. */
+  messageId: number;
   userId: string | null;
   username: string;
   ts: string;
@@ -251,6 +257,22 @@ interface NormalizedMessage {
   /** Set when the original message had no text/caption — used to drive the
    *  attachment-fallback Telegram reply. */
   attachmentType: string | null;
+}
+
+/** What we extract from one `message_reaction` update for delivery to the
+ *  coordinator. The reaction is summarized as added/removed emoji so the
+ *  coordinator sees a human-readable event rather than raw reaction arrays. */
+export interface NormalizedReaction {
+  chatId: string;
+  /** The message the reaction was applied to. */
+  messageId: number;
+  userId: string | null;
+  username: string;
+  ts: string;
+  /** Emoji added in this update (present in new_reaction but not old). */
+  added: string[];
+  /** Emoji removed in this update (present in old_reaction but not new). */
+  removed: string[];
 }
 
 /** TelegramDispatcher — owns the long-poll loop. Construction does not start
@@ -511,7 +533,7 @@ export class TelegramDispatcher {
       try {
         updates = await this.client.getUpdates({
           offset: this.nextOffset,
-          allowed_updates: ["message"],
+          allowed_updates: ["message", "message_reaction"],
           signal,
           onPollOutcome: (outcome) => this.handlePollOutcome(outcome),
         });
@@ -563,7 +585,27 @@ export class TelegramDispatcher {
      *  appeared — preserving roughly the user's submission order. */
     const byChat = new Map<string, NormalizedMessage[]>();
 
+    /** Reaction events surviving the allowlist, in arrival order. Delivered
+     *  after the message batches so that a message + its reaction arriving in
+     *  the same poll deliver message-then-reaction. */
+    const reactions: NormalizedReaction[] = [];
+
     for (const update of updates) {
+      // message_reaction updates carry no `message` field — handle them on
+      // their own path, then continue. A single update has at most one of
+      // `message` / `message_reaction`.
+      let reactionUpdate: MessageReactionUpdated | undefined;
+      try {
+        reactionUpdate = update.message_reaction;
+      } catch {
+        reactionUpdate = undefined;
+      }
+      if (reactionUpdate) {
+        const normalizedReaction = this.normalizeReaction(reactionUpdate);
+        if (normalizedReaction) reactions.push(normalizedReaction);
+        continue;
+      }
+
       let msg: TelegramMessage | undefined;
       try {
         msg = update.message;
@@ -648,6 +690,18 @@ export class TelegramDispatcher {
           await this.deliver(chatId, normals);
         });
       }
+    }
+
+    // Deliver reaction events last, each through the same coordinator mutex.
+    // Reactions are NOT coalesced with text — they're a distinct event class —
+    // and they do not enter the offline-prompt y/n flow: a reaction is never a
+    // "y"/"n" answer. If the coordinator is offline we drop the reaction
+    // notice silently (it's informational; re-prompting the user about a
+    // reaction would be noise).
+    for (const reaction of reactions) {
+      await this.withMutex(SYSTEM_COORDINATOR_MUTEX_KEY, async () => {
+        await this.deliverReaction(reaction);
+      });
     }
   }
 
@@ -743,6 +797,7 @@ export class TelegramDispatcher {
     if (followupBody !== null) {
       const note: NormalizedMessage = {
         chatId: message.chatId,
+        messageId: message.messageId,
         userId: message.userId,
         username: message.username,
         ts: message.ts,
@@ -797,6 +852,24 @@ export class TelegramDispatcher {
         );
         // Original message is dropped — do not buffer it.
         return;
+      }
+    }
+
+    // Persist the latest inbound message id so `ib tgreact` (a separate
+    // process with no in-memory dispatcher state) can default to reacting to
+    // the most recent message. Best-effort: a cache write failure must not
+    // affect delivery. Only the most recent message in the batch matters —
+    // `messages` is in arrival order, so the last element is newest.
+    if (delivered) {
+      const newest = messages[messages.length - 1]!;
+      if (newest.messageId > 0) {
+        try {
+          await writeLastMessage(chatId, newest.messageId);
+        } catch (err) {
+          logCtx.fn(
+            `Telegram dispatcher: last-message cache write failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
     }
 
@@ -900,6 +973,7 @@ export class TelegramDispatcher {
   private normalize(msg: TelegramMessage): NormalizedMessage | null {
     const chatId = String(msg.chat?.id ?? "");
     if (!chatId) return null;
+    const messageId = typeof msg.message_id === "number" ? msg.message_id : 0;
     const userId = msg.from?.id !== undefined ? String(msg.from.id) : null;
     const username = msg.from?.username ?? msg.from?.first_name ?? "unknown";
     const tsEpoch = msg.date !== undefined ? msg.date * 1000 : nowCtx.fn();
@@ -932,8 +1006,83 @@ export class TelegramDispatcher {
       body = "[user sent message with no text]";
     }
 
-    return { chatId, userId, username, ts, body, attachmentType };
+    return { chatId, messageId, userId, username, ts, body, attachmentType };
   }
+
+  /** Extract the fields we deliver from one `message_reaction` update.
+   *  Applies the same allowlist filter as inbound messages. Returns null on
+   *  malformed input (no chat_id), a non-allowlisted sender, or a no-op update
+   *  (neither added nor removed emoji — e.g. a custom_emoji-only change we
+   *  don't surface). */
+  private normalizeReaction(r: MessageReactionUpdated): NormalizedReaction | null {
+    const chatId = String(r.chat?.id ?? "");
+    if (!chatId) return null;
+    // The actor is `user` in private chats; `actor_chat` covers anonymous
+    // group reactions (we don't route groups, but keep the id correct for the
+    // allowlist check so a group reaction isn't accidentally allowed via an
+    // undefined user).
+    const userId =
+      r.user?.id !== undefined
+        ? String(r.user.id)
+        : r.actor_chat?.id !== undefined
+          ? String(r.actor_chat.id)
+          : undefined;
+
+    if (!this.isAllowed(chatId, userId)) {
+      this.logDrop(chatId, userId);
+      return null;
+    }
+
+    const username = r.user?.username ?? r.user?.first_name ?? "unknown";
+    const tsEpoch = r.date !== undefined ? r.date * 1000 : nowCtx.fn();
+    const ts = new Date(tsEpoch).toISOString();
+
+    const oldEmojis = emojiSet(r.old_reaction);
+    const newEmojis = emojiSet(r.new_reaction);
+    const added = [...newEmojis].filter((e) => !oldEmojis.has(e));
+    const removed = [...oldEmojis].filter((e) => !newEmojis.has(e));
+
+    // Nothing emoji-shaped changed (e.g. a custom-emoji-only update). Skip —
+    // surfacing "reacted with (custom emoji)" adds noise without signal.
+    if (added.length === 0 && removed.length === 0) return null;
+
+    const messageId = typeof r.message_id === "number" ? r.message_id : 0;
+    return { chatId, messageId, userId: userId ?? null, username, ts, added, removed };
+  }
+
+  /** Wrap a reaction event in a channel-reminder block and deliver it to the
+   *  coordinator. No retry / offline-prompt: a reaction is informational, so a
+   *  send failure is logged and the notice is dropped rather than re-prompting
+   *  the user or buffering. */
+  private async deliverReaction(reaction: NormalizedReaction): Promise<void> {
+    const wrapped = wrapReactionReminder(reaction);
+    try {
+      const result = await sendCtx.fn(wrapped, { fromAgent: TELEGRAM_SENTINEL });
+      if (!result.ok) {
+        logCtx.fn(
+          `Telegram dispatcher: reaction notice not delivered (coordinator offline?): ${result.stderr || "send returned ok=false"}`,
+        );
+      }
+    } catch (err) {
+      logCtx.fn(
+        `Telegram dispatcher: deliverReaction threw: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+}
+
+/** Collect the `emoji` strings from a reaction-type array, ignoring
+ *  custom-emoji and paid reactions (we only surface documented emoji). */
+function emojiSet(reactions: ReactionType[] | undefined): Set<string> {
+  const out = new Set<string>();
+  if (!Array.isArray(reactions)) return out;
+  for (const r of reactions) {
+    if (r && typeof r === "object" && (r as { type?: string }).type === "emoji") {
+      const emoji = (r as { emoji?: unknown }).emoji;
+      if (typeof emoji === "string" && emoji !== "") out.add(emoji);
+    }
+  }
+  return out;
 }
 
 /** Partition a per-chat batch into slash commands (raw passthrough) and
@@ -972,18 +1121,19 @@ export function wrapChannelReminder(chatId: string, messages: NormalizedMessage[
   if (messages.length === 1) {
     const m = messages[0]!;
     return [
-      `<channel source="telegram" user="${escapeAttr(m.username)}" ts="${escapeAttr(m.ts)}">`,
+      `<channel source="telegram" user="${escapeAttr(m.username)}" ts="${escapeAttr(m.ts)}" message_id="${m.messageId}">`,
       m.body,
       `</channel>`,
       ``,
-      `To reply on Telegram, run \`ib tgsend "<your message>"\`.`,
+      REPLY_HINT,
     ].join("\n");
   }
 
   const first = messages[0]!;
+  const last = messages[messages.length - 1]!;
   const lines: string[] = [];
   lines.push(
-    `<channel source="telegram" chat_id="${escapeAttr(safeChatId)}" user="${escapeAttr(first.username)}" first_ts="${escapeAttr(first.ts)}" count="${messages.length}">`,
+    `<channel source="telegram" chat_id="${escapeAttr(safeChatId)}" user="${escapeAttr(first.username)}" first_ts="${escapeAttr(first.ts)}" count="${messages.length}" last_message_id="${last.messageId}">`,
   );
   for (let i = 0; i < messages.length; i++) {
     if (i > 0) lines.push("---");
@@ -991,8 +1141,46 @@ export function wrapChannelReminder(chatId: string, messages: NormalizedMessage[
   }
   lines.push(`</channel>`);
   lines.push(``);
-  lines.push(`To reply on Telegram, run \`ib tgsend "<your message>"\`.`);
+  lines.push(REPLY_HINT);
   return lines.join("\n");
+}
+
+/** Hint appended to every wrapped channel block telling the coordinator how to
+ *  reply and react on Telegram. Centralized so the two `wrapChannelReminder`
+ *  branches (single + coalesced) and any future caller stay in sync. */
+const REPLY_HINT =
+  'To reply on Telegram, run `ib tgsend "<your message>"`. ' +
+  "To react to the latest message, run `ib tgreact <emoji>` " +
+  "(e.g. `ib tgreact 👍`), or target a specific one with " +
+  "`ib tgreact <emoji> --message-id <id>`.";
+
+/** Wrap a reaction event in a channel-reminder block. The body is a
+ *  human-readable summary, e.g. `Reacted 👍 to message 123` or
+ *  `Removed reaction 👍 from message 123`. Distinct `kind="reaction"`
+ *  attribute so the coordinator can tell a reaction event apart from a text
+ *  message. The reacted-to `message_id` is surfaced so the coordinator can
+ *  reply or react back to that exact message. */
+export function wrapReactionReminder(reaction: NormalizedReaction): string {
+  const parts: string[] = [];
+  // Each emoji is stripped of </channel> defensively (emoji never contain it,
+  // but the body is user-influenced data, so we stay consistent). Each clause
+  // carries its own preposition so the grammar reads correctly whether the
+  // update added, removed, or changed a reaction.
+  const msgRef = `message ${reaction.messageId}`;
+  if (reaction.added.length > 0) {
+    parts.push(`Reacted ${reaction.added.map(stripChannelClose).join(" ")} to ${msgRef}`);
+  }
+  if (reaction.removed.length > 0) {
+    parts.push(`Removed reaction ${reaction.removed.map(stripChannelClose).join(" ")} from ${msgRef}`);
+  }
+  const body = parts.join("; ");
+  return [
+    `<channel source="telegram" kind="reaction" user="${escapeAttr(reaction.username)}" ts="${escapeAttr(reaction.ts)}" message_id="${reaction.messageId}">`,
+    body,
+    `</channel>`,
+    ``,
+    REPLY_HINT,
+  ].join("\n");
 }
 
 /** Strip every `</channel>` substring from inbound text. Defense against a

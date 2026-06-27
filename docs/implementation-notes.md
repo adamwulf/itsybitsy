@@ -108,6 +108,17 @@ Codex-side equivalents of the claude `start.sh` / `resume.sh` assembly. See SPEC
 - `loadMergedAgentTypePermissions(agentType)` — reads merged `_all.md` + `_non_coordinator.md` + `<type>.md` allow/deny lists. Same source as `buildAgentSettings` for claude.
 - `buildCodexDenyOutput(reason)` / `buildCodexAllowOutput(originalToolInput)` — JSON contract emitters. Allow MUST pair `permissionDecision: "allow"` with `updatedInput` echoing original `tool_input` (standalone allow triggers a codex "unsupported permissionDecision" error and fails open).
 
+## Telegram channel subsystem (`src/channels/`)
+
+The Telegram bridge lives entirely here (NOT in the sibling bash `ittybitty`). Hand-rolled Bot API client — no grammy. Boot (`boot.ts`) runs at `ib watch` start: probe → resolve private chat id → construct `TelegramDispatcher` (inbound long-poll) + `TelegramOutbox` (outbound queue).
+
+- **Inbound**: `dispatcher.ts` long-polls `getUpdates` with `allowed_updates: ["message", "message_reaction"]`, allowlist-filters, coalesces per-chat text into a `<channel source="telegram">` block, and delivers to the system coordinator via `sendToSystemCoordinator(..., {fromAgent: "@telegram"})`. `normalize()` → `NormalizedMessage` (now carries `messageId`). `wrapChannelReminder` surfaces `message_id` (single) / `last_message_id` (burst).
+- **Reactions (inbound)**: `message_reaction` updates → `normalizeReaction()` (same allowlist, diffs `old_reaction`/`new_reaction`) → `wrapReactionReminder` → delivered as a distinct `kind="reaction"` event. Not coalesced with text; never enters the offline y/n flow (informational — dropped if coordinator offline).
+- **Reactions (outbound)**: `ib tgreact <emoji> [--message-id <id>] [--clear]` → `telegramReact()` (ib-commands.ts) validates the emoji (`reactions.ts`, Telegram's documented set), drops a `<stem>.react.json` `{message_id, emoji}` descriptor into the outbox, polls ≤1s for the result. `TelegramOutbox.processReaction` → `client.setMessageReaction` (one 429-retry). Default target = the last-message cache.
+- **Last-message cache** (`last-message-cache.ts`, modeled on `chat-id-cache.ts`): `deliver()` persists the newest inbound `{chat_id, message_id}` to `~/.itsybitsy/channels/telegram/last-message.json` so the separate `ib tgreact` process can react to "the latest message".
+- **Outbox** (`outbox.ts`): file-drop queue under `~/.itsybitsy/channels/telegram/outbox/`. Queue unit is the full dropped filename (`<stem>.txt` text or `<stem>.react.json` reaction); result = `<base>.result`. Serialized send chain, fs.watch + 0.5s safety rescan, 5s result retention. `ib tgsend`/`ib tgreact` are the per-shell clients (telegramSend/telegramReact in ib-commands.ts).
+- **Token safety**: the bot-token URL must never be logged. `classifyError()` (telegram-client.ts) exists for this; all new code reuses it.
+
 ## ib-commands (`src/ib-commands.ts`)
 
 All mutations are native (no more `runIb()` / `IbRunner`). `hooksStatus`, `installSafetyHooks`, `uninstallSafetyHooks`, `installInterceptHook`, `uninstallInterceptHook`, `interceptHooksStatus` read/write `~/.claude/settings.json` directly.

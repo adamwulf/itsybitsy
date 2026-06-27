@@ -10,9 +10,18 @@
  *
  * Layout under `~/.itsybitsy/channels/telegram/outbox/`:
  *
- *   - `<unix-ms>-<6-hex-rand>.txt`         — message text (UTF-8)
- *   - `<unix-ms>-<6-hex-rand>.txt.tmp`     — partial write (cleaned on sweep)
- *   - `<unix-ms>-<6-hex-rand>.txt.result`  — JSON `{ok, message}` written by us
+ *   - `<unix-ms>-<6-hex-rand>.txt`              — message text (UTF-8)
+ *   - `<unix-ms>-<6-hex-rand>.txt.tmp`          — partial write (cleaned on sweep)
+ *   - `<unix-ms>-<6-hex-rand>.txt.result`       — JSON `{ok, message}` written by us
+ *   - `<unix-ms>-<6-hex-rand>.react.json`       — reaction descriptor (see below)
+ *   - `<unix-ms>-<6-hex-rand>.react.json.tmp`   — partial write (cleaned on sweep)
+ *   - `<unix-ms>-<6-hex-rand>.react.json.result`— JSON `{ok, message}` written by us
+ *
+ * A reaction descriptor is JSON `{ message_id: number, emoji: string | null }`
+ * dropped by `ib tgreact`; we call `client.setMessageReaction` for it (a null
+ * emoji clears the bot's reaction). It flows through the same serialized send
+ * chain, fs.watch, sweep, and 5s-retained-result machinery as text messages —
+ * only the per-file processing differs (`processReaction` vs `process`).
  *
  * Atomic writes use `<path>.tmp` + `rename`. Result files are kept for ~5s
  * after writing so the sender process can read them, then both files are
@@ -181,8 +190,9 @@ export class TelegramOutbox {
   }
 
   /** Sweep the outbox dir at startup. Drops any leftover `.tmp` / `.result`
-   *  files and enqueues every `.txt` we find. Alphabetical order is chronological
-   *  because filenames start with `<unix-ms>`. */
+   *  files and enqueues every queued message (`.txt`) and reaction
+   *  (`.react.json`) we find. Alphabetical order is chronological because
+   *  filenames start with `<unix-ms>`. */
   private async sweep(): Promise<void> {
     let entries: string[];
     try {
@@ -191,22 +201,22 @@ export class TelegramOutbox {
       return;
     }
     entries.sort();
-    const orphanTxt: string[] = [];
+    const orphans: string[] = [];
     for (const entry of entries) {
       if (entry.endsWith(".tmp") || entry.endsWith(".result")) {
         await unlinkSafe(join(this.dir, entry));
         continue;
       }
-      if (entry.endsWith(".txt")) {
-        orphanTxt.push(entry);
+      if (isQueuedFile(entry)) {
+        orphans.push(entry);
       }
     }
-    for (const entry of orphanTxt) {
+    for (const entry of orphans) {
       this.enqueue(entry);
     }
   }
 
-  /** Re-scan the dir on a rename event. Skips already-enqueued stems so a
+  /** Re-scan the dir on a rename event. Skips already-enqueued files so a
    *  stray rename burst doesn't double-process. Sorted alphabetically so a
    *  burst of drops processes in chronological order (filenames start with
    *  unix-ms). */
@@ -219,38 +229,43 @@ export class TelegramOutbox {
     }
     entries.sort();
     for (const entry of entries) {
-      if (!entry.endsWith(".txt")) continue;
-      const stem = entry.slice(0, -".txt".length);
-      if (this.inFlight.has(stem)) continue;
+      if (!isQueuedFile(entry)) continue;
+      if (this.inFlight.has(entry)) continue;
       this.enqueue(entry);
     }
   }
 
-  /** Append a send for one queued .txt file to the serialized chain. */
-  private enqueue(filename: string): void {
-    const stem = filename.slice(0, -".txt".length);
-    if (this.inFlight.has(stem)) return;
-    this.inFlight.add(stem);
-    this.sendChain = this.sendChain.then(() => this.process(stem));
+  /** Append a send for one queued file to the serialized chain. The queue key
+   *  is the full dropped filename (`<stem>.txt` or `<stem>.react.json`); the
+   *  result/cleanup paths append `.result` to it. Dispatches by extension. */
+  private enqueue(base: string): void {
+    if (this.inFlight.has(base)) return;
+    this.inFlight.add(base);
+    if (base.endsWith(".react.json")) {
+      this.sendChain = this.sendChain.then(() => this.processReaction(base));
+    } else {
+      this.sendChain = this.sendChain.then(() => this.process(base));
+    }
   }
 
-  /** Read, send, write result, schedule cleanup. Never throws — all errors
-   *  are logged and surfaced as a `{ok:false}` result file. */
-  private async process(stem: string): Promise<void> {
-    const txtPath = join(this.dir, `${stem}.txt`);
+  /** Read, send, write result, schedule cleanup for a text message. Never
+   *  throws — all errors are logged and surfaced as a `{ok:false}` result
+   *  file. `base` is the full dropped filename, e.g. `123-abc.txt`. */
+  private async process(base: string): Promise<void> {
+    const txtPath = join(this.dir, base);
     let text: string;
     try {
       text = await readFile(txtPath, "utf8");
     } catch (err) {
-      this.log(`telegram outbox: failed to read ${stem}.txt: ${describeErr(err)}`);
-      this.inFlight.delete(stem);
+      this.log(`telegram outbox: failed to read ${base}: ${describeErr(err)}`);
+      this.inFlight.delete(base);
       return;
     }
 
     const trimmed = text.trim();
     if (trimmed === "") {
-      await this.writeResult(stem, { ok: false, message: "empty message" });
-      this.scheduleCleanup(stem);
+      await this.writeResult(base, { ok: false, message: "empty message" });
+      this.scheduleCleanup(base);
       this.log(`telegram outbox: 0 chars -> chat ${this.chatId}: failed (empty message)`);
       return;
     }
@@ -262,10 +277,10 @@ export class TelegramOutbox {
 
     if (sendOutcome.ok) {
       const message = chunks.length === 1 ? "ok" : `ok (${chunks.length} parts)`;
-      await this.writeResult(stem, { ok: true, message });
+      await this.writeResult(base, { ok: true, message });
       this.log(`telegram outbox: ${text.length} chars -> chat ${this.chatId}: ok`);
     } else {
-      await this.writeResult(stem, { ok: false, message: sendOutcome.message });
+      await this.writeResult(base, { ok: false, message: sendOutcome.message });
       this.log(
         `telegram outbox: ${text.length} chars -> chat ${this.chatId}: failed (${sendOutcome.message})`,
       );
@@ -275,7 +290,88 @@ export class TelegramOutbox {
     // success. Per-message logs are above; this layer is the network-state
     // signal, not the per-message audit.
     this.recordSendOutcome(sendOutcome);
-    this.scheduleCleanup(stem);
+    this.scheduleCleanup(base);
+  }
+
+  /** Read, react, write result, schedule cleanup for a reaction descriptor.
+   *  Never throws. `base` is the full dropped filename, e.g.
+   *  `123-abc.react.json`, holding JSON `{ message_id, emoji }`. */
+  private async processReaction(base: string): Promise<void> {
+    const path = join(this.dir, base);
+    let raw: string;
+    try {
+      raw = await readFile(path, "utf8");
+    } catch (err) {
+      this.log(`telegram outbox: failed to read ${base}: ${describeErr(err)}`);
+      this.inFlight.delete(base);
+      return;
+    }
+
+    let descriptor: { message_id: number; emoji: string | null };
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const messageId = parsed.message_id;
+      const emoji = parsed.emoji;
+      if (typeof messageId !== "number" || !Number.isFinite(messageId)) {
+        throw new Error("missing or invalid message_id");
+      }
+      if (emoji !== null && typeof emoji !== "string") {
+        throw new Error("emoji must be a string or null");
+      }
+      descriptor = { message_id: messageId, emoji };
+    } catch (err) {
+      await this.writeResult(base, { ok: false, message: `bad reaction descriptor: ${describeErr(err)}` });
+      this.scheduleCleanup(base);
+      this.log(`telegram outbox: bad reaction descriptor in ${base}: ${describeErr(err)}`);
+      return;
+    }
+
+    const outcome = await this.sendReaction(descriptor.message_id, descriptor.emoji);
+    const target = descriptor.emoji === null ? "(cleared)" : descriptor.emoji;
+    if (outcome.ok) {
+      await this.writeResult(base, { ok: true, message: "ok" });
+      this.log(`telegram outbox: react ${target} -> msg ${descriptor.message_id} chat ${this.chatId}: ok`);
+    } else {
+      await this.writeResult(base, { ok: false, message: outcome.message });
+      this.log(
+        `telegram outbox: react ${target} -> msg ${descriptor.message_id} chat ${this.chatId}: failed (${outcome.message})`,
+      );
+    }
+    this.recordSendOutcome(outcome);
+    this.scheduleCleanup(base);
+  }
+
+  /** Call `setMessageReaction` with a single 429-retry, mirroring `sendChunks`'
+   *  failure-mode strings. */
+  private async sendReaction(
+    messageId: number,
+    emoji: string | null,
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
+    const { sleepCtx } = await import("./telegram-client");
+    let resp;
+    try {
+      resp = await this.client.setMessageReaction({ chat_id: this.chatId, message_id: messageId, emoji });
+    } catch (err) {
+      return { ok: false, message: `setMessageReaction failed: ${classifyError(err)}` };
+    }
+    if (resp.ok) return { ok: true };
+
+    if (resp.error_code === 429 || resp.status === 429) {
+      const retryAfterSec = resp.retryAfterSec ?? 1;
+      await sleepCtx.fn(retryAfterSec * 1000);
+      let retryResp;
+      try {
+        retryResp = await this.client.setMessageReaction({ chat_id: this.chatId, message_id: messageId, emoji });
+      } catch (err) {
+        return { ok: false, message: `setMessageReaction failed after 429 retry: ${classifyError(err)}` };
+      }
+      if (retryResp.ok) return { ok: true };
+      const desc = retryResp.description ?? `HTTP ${retryResp.error_code ?? "unknown"}`;
+      return { ok: false, message: `setMessageReaction failed after 429 retry: ${desc}` };
+    }
+
+    const desc = resp.description ?? `HTTP ${resp.error_code ?? "unknown"}`;
+    return { ok: false, message: `setMessageReaction failed: ${desc}` };
   }
 
   /** Track success/failure transitions and log on edge changes only. The
@@ -337,9 +433,10 @@ export class TelegramOutbox {
     return { ok: true };
   }
 
-  /** Atomic-write `<stem>.txt.result`. */
-  private async writeResult(stem: string, body: { ok: boolean; message: string }): Promise<void> {
-    const finalPath = join(this.dir, `${stem}.txt.result`);
+  /** Atomic-write `<base>.result`, where `base` is the full dropped filename
+   *  (`<stem>.txt` or `<stem>.react.json`). */
+  private async writeResult(base: string, body: { ok: boolean; message: string }): Promise<void> {
+    const finalPath = join(this.dir, `${base}.result`);
     const tmpPath = `${finalPath}.tmp`;
     const json = JSON.stringify(body);
     try {
@@ -347,30 +444,40 @@ export class TelegramOutbox {
       await rename(tmpPath, finalPath);
     } catch (err) {
       // Best-effort cleanup of the .tmp; we still log so the operator sees
-      // why the result never appeared from `tgsend`'s perspective.
+      // why the result never appeared from the sender's perspective.
       await unlinkSafe(tmpPath);
-      this.log(`telegram outbox: failed to write result for ${stem}: ${describeErr(err)}`);
+      this.log(`telegram outbox: failed to write result for ${base}: ${describeErr(err)}`);
     }
   }
 
-  /** Schedule the .txt + .result pair for deletion ~5s out. The retention
-   *  window gives `tgsend` time to read the result before it disappears. */
-  private scheduleCleanup(stem: string): void {
+  /** Schedule the dropped file + its `.result` for deletion ~5s out. The
+   *  retention window gives the sender (`tgsend`/`tgreact`) time to read the
+   *  result before it disappears. */
+  private scheduleCleanup(base: string): void {
     const timer = setTimeout(() => {
-      this.cleanupTimers.delete(stem);
-      this.inFlight.delete(stem);
-      void this.cleanupPair(stem);
+      this.cleanupTimers.delete(base);
+      this.inFlight.delete(base);
+      void this.cleanupPair(base);
     }, RESULT_RETENTION_MS);
-    this.cleanupTimers.set(stem, timer);
+    this.cleanupTimers.set(base, timer);
   }
 
-  /** Unlink both halves of the message pair. Ignores ENOENT — shutdown can
-   *  race us, and we just want them gone. */
-  private async cleanupPair(stem: string): Promise<void> {
-    await unlinkSafe(join(this.dir, `${stem}.txt`));
-    await unlinkSafe(join(this.dir, `${stem}.txt.result`));
-    this.inFlight.delete(stem);
+  /** Unlink both halves of the pair (the dropped file + its `.result`). Ignores
+   *  ENOENT — shutdown can race us, and we just want them gone. */
+  private async cleanupPair(base: string): Promise<void> {
+    await unlinkSafe(join(this.dir, base));
+    await unlinkSafe(join(this.dir, `${base}.result`));
+    this.inFlight.delete(base);
   }
+}
+
+/** True for a dropped file the outbox should process: a `.txt` message or a
+ *  `.react.json` reaction descriptor. Excludes `.tmp` / `.result` sidecars
+ *  (note `.react.json.result` ends with `.result`, so the caller's `.result`
+ *  check must run first — `sweep` does). */
+function isQueuedFile(name: string): boolean {
+  if (name.endsWith(".tmp") || name.endsWith(".result")) return false;
+  return name.endsWith(".txt") || name.endsWith(".react.json");
 }
 
 async function unlinkSafe(path: string): Promise<void> {

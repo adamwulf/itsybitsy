@@ -8073,6 +8073,135 @@ describe("telegramSend (native, file-drop client)", () => {
   });
 });
 
+describe("telegramReact (native, file-drop client)", () => {
+  let tempDir: string;
+  let outboxDir: string;
+  let stateDir: string;
+
+  async function loadDeps() {
+    const ibCmds = await import("./ib-commands");
+    const outbox = await import("./channels/outbox");
+    const lastMsg = await import("./channels/last-message-cache");
+    const access = await import("./channels/access");
+    return { ibCmds, outbox, lastMsg, access };
+  }
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "tgreact-test-"));
+    outboxDir = join(tempDir, "outbox");
+    stateDir = join(tempDir, "state");
+    const { outbox, lastMsg, access } = await loadDeps();
+    outbox.setOutboxDir(outboxDir);
+    access.setStateDir(stateDir);
+    lastMsg.setStateDir(stateDir);
+  });
+
+  afterEach(async () => {
+    const { outbox, lastMsg, access } = await loadDeps();
+    outbox.resetOutboxDir();
+    access.resetStateDir();
+    lastMsg.resetStateDir();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("rejects an unsupported emoji before dropping anything", async () => {
+    const { ibCmds, lastMsg } = await loadDeps();
+    await lastMsg.writeLastMessage("100", 5);
+    const result = await ibCmds.telegramReact("🦖");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("unsupported");
+    // Nothing dropped in the outbox.
+    let entries: string[] = [];
+    try {
+      entries = await readdir(outboxDir);
+    } catch { /* dir may not exist */ }
+    expect(entries.filter((e) => e.endsWith(".react.json")).length).toBe(0);
+  });
+
+  test("no cached message and no --message-id → ok:false with guidance", async () => {
+    const { ibCmds } = await loadDeps();
+    const result = await ibCmds.telegramReact("👍");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("no recent Telegram message");
+  });
+
+  test("drops a .react.json descriptor targeting the cached message", async () => {
+    const { ibCmds, lastMsg } = await loadDeps();
+    await lastMsg.writeLastMessage("100", 4321);
+    // No `ib watch` running → times out as queued, but the descriptor lands.
+    const result = await ibCmds.telegramReact("👍");
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("queued");
+
+    const entries = await readdir(outboxDir);
+    const reactFiles = entries.filter((e) => e.endsWith(".react.json"));
+    expect(reactFiles.length).toBe(1);
+    const json = JSON.parse(await Bun.file(join(outboxDir, reactFiles[0]!)).text());
+    expect(json.message_id).toBe(4321);
+    expect(json.emoji).toBe("👍");
+  });
+
+  test("explicit --message-id overrides the cache", async () => {
+    const { ibCmds, lastMsg } = await loadDeps();
+    await lastMsg.writeLastMessage("100", 1);
+    await ibCmds.telegramReact("🔥", { messageId: 999 });
+    const entries = await readdir(outboxDir);
+    const reactFiles = entries.filter((e) => e.endsWith(".react.json"));
+    const json = JSON.parse(await Bun.file(join(outboxDir, reactFiles[0]!)).text());
+    expect(json.message_id).toBe(999);
+    expect(json.emoji).toBe("🔥");
+  });
+
+  test("clearing (emoji=null) drops a descriptor with emoji:null", async () => {
+    const { ibCmds, lastMsg } = await loadDeps();
+    await lastMsg.writeLastMessage("100", 7);
+    await ibCmds.telegramReact(null);
+    const entries = await readdir(outboxDir);
+    const reactFiles = entries.filter((e) => e.endsWith(".react.json"));
+    const json = JSON.parse(await Bun.file(join(outboxDir, reactFiles[0]!)).text());
+    expect(json.message_id).toBe(7);
+    expect(json.emoji).toBeNull();
+  });
+
+  test("canonicalizes heart-with-VS16 to the documented form in the descriptor", async () => {
+    const { ibCmds, lastMsg } = await loadDeps();
+    await lastMsg.writeLastMessage("100", 8);
+    await ibCmds.telegramReact("❤️");
+    const entries = await readdir(outboxDir);
+    const reactFiles = entries.filter((e) => e.endsWith(".react.json"));
+    const json = JSON.parse(await Bun.file(join(outboxDir, reactFiles[0]!)).text());
+    expect(json.emoji).toBe("❤");
+  });
+
+  test("a result file appearing within the timeout is returned to the caller", async () => {
+    const { ibCmds, lastMsg } = await loadDeps();
+    await lastMsg.writeLastMessage("100", 3);
+    const fs = await import("fs/promises");
+    const { mkdir: mkdirP } = fs;
+    await mkdirP(outboxDir, { recursive: true });
+    const watcher = setInterval(async () => {
+      try {
+        const entries = await readdir(outboxDir);
+        for (const entry of entries) {
+          if (entry.endsWith(".react.json") && !entries.includes(`${entry}.result`)) {
+            await fs.writeFile(
+              join(outboxDir, `${entry}.result`),
+              JSON.stringify({ ok: true, message: "ok" }),
+            );
+          }
+        }
+      } catch { /* ignore */ }
+    }, 25);
+    try {
+      const result = await ibCmds.telegramReact("🎉");
+      expect(result.ok).toBe(true);
+      expect(result.message).toBe("ok");
+    } finally {
+      clearInterval(watcher);
+    }
+  });
+});
+
 describe("telegramFireTypingAction (native)", () => {
   let homeDir: string;
 

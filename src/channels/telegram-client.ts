@@ -122,8 +122,12 @@ export interface GetUpdatesOptions {
   limit?: number;
   /** Long-poll seconds the server holds the request. Default 25. */
   timeout?: number;
-  /** Update kinds to receive. Defaults to `["message"]` to cut payload noise
-   *  (no edited_message, no callback_query, etc.). */
+  /** Update kinds to receive. Defaults to `["message", "message_reaction"]` —
+   *  `message` for inbound text/attachments and `message_reaction` so the
+   *  dispatcher learns when the user reacts to a message. Other kinds
+   *  (edited_message, callback_query, etc.) are still excluded to cut payload
+   *  noise. NOTE: `message_reaction` is NOT delivered by default by Telegram;
+   *  it is only sent when explicitly listed here. */
   allowed_updates?: string[];
   /** AbortSignal from the caller — used by Phase 5 dispatcher to cancel
    *  in-flight long-poll on TUI exit. */
@@ -143,6 +147,31 @@ export interface SendChatActionOptions {
   /** Telegram chat action — `"typing"` for the indicator we use. */
   action: string;
 }
+
+export interface SetMessageReactionOptions {
+  chat_id: number | string;
+  /** The message to react to. Per-chat identifier. */
+  message_id: number;
+  /** Reaction emoji to set. Must be from Telegram's documented reaction set
+   *  (validated by the caller via {@link validateReactionEmoji}). An empty
+   *  array clears the bot's reaction on the message. v1 only sends a single
+   *  emoji or clears. */
+  emoji: string | null;
+}
+
+/** Result of a single `setMessageReaction` POST. Mirrors {@link SendMessageResult}
+ *  so callers honoring 429 backoff get the same `retryAfterSec` shape. The
+ *  success result has no useful body (the API returns `true`), so we don't
+ *  surface one. */
+export type SetMessageReactionResult =
+  | { ok: true }
+  | {
+      ok: false;
+      status: number;
+      error_code?: number;
+      description?: string;
+      retryAfterSec: number | null;
+    };
 
 /** Result of a single `sendMessage` POST. The failure variant exposes
  *  `retryAfterSec` parsed from BOTH the `Retry-After` HTTP header and the
@@ -213,7 +242,7 @@ export class TelegramClient {
    *  long-poll timed out with no updates). Throws only if the AbortSignal
    *  fires before any successful response. */
   async getUpdates(opts: GetUpdatesOptions = {}): Promise<TelegramUpdate[]> {
-    const allowed = opts.allowed_updates ?? ["message"];
+    const allowed = opts.allowed_updates ?? ["message", "message_reaction"];
     const longPollSec = opts.timeout ?? 25;
     const params: Record<string, unknown> = {
       timeout: longPollSec,
@@ -372,6 +401,48 @@ export class TelegramClient {
     } catch {
       // Cosmetic indicator — never surface failures.
     }
+  }
+
+  /** POST `setMessageReaction`. No retry loop — outbound is one-shot from the
+   *  caller's perspective, same contract as {@link sendMessage}. The outbox
+   *  wraps this with a single 429-retry of its own.
+   *
+   *  `emoji` is sent as a one-element `reaction` array `[{type:"emoji",emoji}]`;
+   *  passing `null` sends an empty `reaction` array, which clears the bot's
+   *  reaction. The caller is responsible for validating the emoji against
+   *  Telegram's documented set (see `validateReactionEmoji`) — this method
+   *  sends whatever it is handed.
+   *
+   *  Goes through `readRaw` so `Retry-After` is read from both the HTTP header
+   *  and `parameters.retry_after`. */
+  async setMessageReaction(opts: SetMessageReactionOptions): Promise<SetMessageReactionResult> {
+    const reaction =
+      opts.emoji === null ? [] : [{ type: "emoji", emoji: opts.emoji }];
+    const body = JSON.stringify({
+      chat_id: opts.chat_id,
+      message_id: opts.message_id,
+      reaction,
+    });
+    const url = this.urlFor("setMessageReaction");
+    const composedSignal = composeAbortSignal(undefined, SENDMESSAGE_TIMEOUT_MS);
+    const resp = await fetchCtx.fn(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+      signal: composedSignal,
+    });
+    const raw = await readRaw<boolean>(resp);
+    if (raw.status >= 200 && raw.status < 300 && raw.body?.ok === true) {
+      return { ok: true };
+    }
+    logCtx.fn(`telegram setMessageReaction: status=${raw.status}`);
+    return {
+      ok: false,
+      status: raw.status,
+      error_code: raw.body?.error_code ?? raw.status,
+      description: raw.body?.description ?? `HTTP ${raw.status}`,
+      retryAfterSec: raw.retryAfterSec,
+    };
   }
 
   /** Single attempt at a Bot API method. Maps HTTP / parse outcomes onto the

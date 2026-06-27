@@ -152,7 +152,7 @@ describe("getUpdates", () => {
     expect(mock.callCount()).toBe(1);
   });
 
-  test("uses POST with JSON body and default allowed_updates=['message']", async () => {
+  test("uses POST with JSON body and default allowed_updates=['message','message_reaction']", async () => {
     mock.enqueueResponse({ ok: true, result: [] });
     const client = new TelegramClient({ token: "T" });
 
@@ -165,6 +165,18 @@ describe("getUpdates", () => {
     expect(body.offset).toBe(5);
     expect(body.timeout).toBe(30);
     expect(body.limit).toBe(50);
+    // Default now includes message_reaction so the dispatcher learns about
+    // inbound reactions (Telegram only delivers them when explicitly listed).
+    expect(body.allowed_updates).toEqual(["message", "message_reaction"]);
+  });
+
+  test("caller can still override allowed_updates", async () => {
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+
+    await client.getUpdates({ offset: 1, allowed_updates: ["message"] });
+
+    const body = JSON.parse(mock.lastInit()?.body as string);
     expect(body.allowed_updates).toEqual(["message"]);
   });
 
@@ -543,6 +555,94 @@ describe("sendChatAction", () => {
 
     const body = JSON.parse(mock.lastInit()?.body as string);
     expect(body.chat_id).toBe("-1001234567890");
+  });
+});
+
+describe("setMessageReaction", () => {
+  let mock: MockFetch;
+  let logs: string[];
+
+  beforeEach(() => {
+    mock = makeMockFetch();
+    fetchCtx.set(mock.fn);
+    logs = [];
+    logCtx.set((line) => logs.push(line));
+  });
+
+  afterEach(() => {
+    fetchCtx.reset();
+    logCtx.reset();
+  });
+
+  test("posts a one-element emoji reaction array to /setMessageReaction", async () => {
+    mock.enqueueResponse({ ok: true, result: true });
+    const client = new TelegramClient({ token: "TEST" });
+
+    const result = await client.setMessageReaction({ chat_id: 99, message_id: 7, emoji: "👍" });
+
+    expect(result.ok).toBe(true);
+    const url = mock.allUrls()[0];
+    expect(url).toContain("/botTEST/setMessageReaction");
+
+    const init = mock.lastInit();
+    expect(init?.method).toBe("POST");
+    const body = JSON.parse(init?.body as string);
+    expect(body).toEqual({
+      chat_id: 99,
+      message_id: 7,
+      reaction: [{ type: "emoji", emoji: "👍" }],
+    });
+  });
+
+  test("null emoji sends an empty reaction array (clears the reaction)", async () => {
+    mock.enqueueResponse({ ok: true, result: true });
+    const client = new TelegramClient({ token: "T" });
+
+    await client.setMessageReaction({ chat_id: 1, message_id: 2, emoji: null });
+
+    const body = JSON.parse(mock.lastInit()?.body as string);
+    expect(body.reaction).toEqual([]);
+  });
+
+  test("non-2xx returns the parsed body instead of throwing", async () => {
+    mock.enqueueResponse(
+      { ok: false, error_code: 400, description: "REACTION_INVALID" },
+      400,
+    );
+    const client = new TelegramClient({ token: "T" });
+
+    const result = await client.setMessageReaction({ chat_id: 1, message_id: 2, emoji: "👍" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error_code).toBe(400);
+      expect(result.description).toBe("REACTION_INVALID");
+    }
+  });
+
+  test("logs status only — never the URL with the token", async () => {
+    mock.enqueueResponse({ ok: false, error_code: 500, description: "boom" }, 500);
+    const client = new TelegramClient({ token: "VERYSECRET" });
+
+    await client.setMessageReaction({ chat_id: 1, message_id: 2, emoji: "👍" });
+
+    expect(logs.some((l) => l.includes("VERYSECRET"))).toBe(false);
+    expect(logs.some((l) => l.includes("status=500"))).toBe(true);
+  });
+
+  test("surfaces retryAfterSec from a 429 for the outbox 429-retry", async () => {
+    mock.enqueueResponse(
+      { ok: false, error_code: 429, description: "Too Many Requests" },
+      429,
+      { "retry-after": "3" },
+    );
+    const client = new TelegramClient({ token: "T" });
+
+    const result = await client.setMessageReaction({ chat_id: 1, message_id: 2, emoji: "👍" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.status).toBe(429);
+      expect(result.retryAfterSec).toBe(3);
+    }
   });
 });
 

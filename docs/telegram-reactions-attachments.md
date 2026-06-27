@@ -1,7 +1,7 @@
 # Telegram: Reaction Emojis & Attachments — Scoping Report
 
 **Date:** 2026-06-27
-**Status:** Scoping / design + effort estimate (no implementation in this report)
+**Status:** Reactions (both directions) IMPLEMENTED 2026-06-27 (see §7). Attachments still scoped, not yet built.
 **Author:** investigation agent `agent-d5e9eeb8`
 
 ## TL;DR
@@ -193,3 +193,82 @@ A1+A2 and B1 are independent and could be done in parallel by two workers. B2 sh
 - `ib tgsend` client (`telegramSend`): `src/ib-commands.ts:5531`
 - CLI command wiring: `src/index.ts:2629` (tgsend), `:2600` (tgallow), `:2618` (tgdeny)
 - Token read from config: `src/ib-commands.ts:5593` (`channels.telegram.bot_token`)
+
+---
+
+## 7. IMPLEMENTED — Reactions, both directions (2026-06-27)
+
+Reactions were implemented on branch `agent/agent-d5e9eeb8`. Attachments remain
+scoped-only (§3) — not built. This section is the behavioral source-of-truth for
+the reaction feature.
+
+### 7.1 Outbound — the agent/bot reacts (`ib tgreact`)
+
+New CLI verb:
+
+```
+ib tgreact <emoji> [--message-id <id>]    # react to a message
+ib tgreact --clear  [--message-id <id>]   # remove the bot's reaction
+```
+
+- Without `--message-id`, it reacts to the **most recent inbound message** (see
+  the last-message cache, §7.3).
+- The emoji is validated locally against Telegram's documented reaction set
+  before anything is sent — a typo/unsupported emoji fails with a clear message
+  (`src/channels/reactions.ts`), not an opaque `REACTION_INVALID` from the API.
+  A heart typed with a variation selector (`❤️`) is canonicalized to the
+  documented bare form (`❤`).
+- Routing mirrors `ib tgsend`: `tgreact` does NOT talk to Telegram directly. It
+  drops a `<stem>.react.json` descriptor `{ message_id, emoji }` into the outbox
+  and polls ≤1s for the result. `ib watch`'s `TelegramOutbox` picks it up and
+  calls `client.setMessageReaction` (one 429-retry, same as text sends). If
+  `ib watch` isn't running, the descriptor waits on disk and is processed on the
+  next start (`tgreact` returns ok-but-queued, exit 0).
+- `setMessageReaction(chat_id, message_id, [{type:"emoji",emoji}])`; an empty
+  `reaction` array clears the reaction (`emoji: null`).
+
+### 7.2 Inbound — the system receives the user's reactions
+
+- `message_reaction` is added to `allowed_updates` (client default AND the
+  dispatcher's `getUpdates` call). Telegram only delivers reaction updates when
+  this is explicitly listed. The bot's chat with Adam is a private 1:1, so the
+  group-admin requirement does NOT apply.
+- The dispatcher parses `message_reaction` updates (`normalizeReaction`),
+  applies the **same allowlist** as text, diffs `old_reaction` vs `new_reaction`
+  into added/removed emoji, and delivers a distinct channel-reminder event to
+  the coordinator — e.g.:
+  `<channel source="telegram" kind="reaction" ... message_id="50">Reacted 👍 to message 50</channel>`.
+  Removals read `Removed reaction 👍 from message 50`.
+- Reactions are NOT coalesced with text and never enter the coordinator-offline
+  y/n flow (a reaction is informational; if the coordinator is offline the
+  notice is logged and dropped). Custom-emoji-only changes are skipped (no
+  documented emoji to surface).
+
+### 7.3 message_id retention + last-message cache
+
+- `NormalizedMessage` now carries `messageId`; `wrapChannelReminder` surfaces
+  `message_id="…"` (single) / `last_message_id="…"` (coalesced burst) so the
+  agent can target a specific message.
+- On every successful delivery, `deliver()` persists the newest inbound
+  `{chat_id, message_id}` to `~/.itsybitsy/channels/telegram/last-message.json`
+  (`src/channels/last-message-cache.ts`, modeled on `chat-id-cache.ts`). This is
+  how `ib tgreact` (a separate short-lived process) finds "the latest message".
+
+### 7.4 Files touched
+
+- `src/channels/reactions.ts` (new) — emoji allowlist + validation.
+- `src/channels/last-message-cache.ts` (new) — latest inbound message persistence.
+- `src/channels/types.ts` — `ReactionType`, `MessageReactionUpdated`, `TelegramUpdate.message_reaction`.
+- `src/channels/telegram-client.ts` — `setMessageReaction`; default `allowed_updates` now `["message","message_reaction"]`.
+- `src/channels/dispatcher.ts` — `messageId` in `NormalizedMessage`; inbound reaction parse/deliver; `wrapReactionReminder`; last-message cache write; richer reply hint.
+- `src/channels/outbox.ts` — `.react.json` descriptor processing (`processReaction`/`sendReaction`); queue keyed on the full dropped filename.
+- `src/ib-commands.ts` — `telegramReact()` file-drop client.
+- `src/index.ts` — `tgreact` CLI verb + usage.
+- Tests: `reactions.test.ts`, `last-message-cache.test.ts` (new); additions to `telegram-client.test.ts`, `dispatcher.test.ts`, `outbox.test.ts`, `ib-commands.test.ts`.
+
+### 7.5 Cross-cutting review (per CLAUDE.md checklist)
+
+- **General agent functionality:** new `ib tgreact` verb; richer channel-reminder format. No meta.json/lifecycle change.
+- **Hooks:** none changed. The coordinator learns `tgreact` via the channel-reminder reply hint (same mechanism as the `ib tgsend` hint).
+- **Watchdog:** unaffected — health state machine is content-agnostic; new `allowed_updates` kinds don't change it.
+- **`ib watch` / dashboard:** unaffected — no new display; dispatcher health (`getHealth()`) untouched.

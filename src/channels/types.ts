@@ -46,10 +46,40 @@ export interface TelegramMessage {
   sticker?: unknown;
 }
 
+/** A single reaction. v1 only emits/consumes `type: "emoji"`; custom-emoji
+ *  reactions (`type: "custom_emoji"`) and paid reactions are tolerated on the
+ *  inbound side but never produced on the outbound side. */
+export interface ReactionTypeEmoji {
+  type: "emoji";
+  emoji: string;
+}
+
+export interface ReactionTypeCustomEmoji {
+  type: "custom_emoji";
+  custom_emoji_id: string;
+}
+
+export type ReactionType = ReactionTypeEmoji | ReactionTypeCustomEmoji | { type: string };
+
+/** `message_reaction` update payload — fires when a user adds/removes a
+ *  reaction on a message the bot can see. In a private chat the actor is in
+ *  `user`; in anonymous group contexts the actor is in `actor_chat` and `user`
+ *  is absent (we don't route groups, but the shape is kept correct). */
+export interface MessageReactionUpdated {
+  chat: TelegramChat;
+  message_id: number;
+  user?: TelegramUser;
+  actor_chat?: TelegramChat;
+  date?: number;
+  old_reaction: ReactionType[];
+  new_reaction: ReactionType[];
+}
+
 export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
   edited_message?: TelegramMessage;
+  message_reaction?: MessageReactionUpdated;
 }
 
 /** Bot API response envelope. */

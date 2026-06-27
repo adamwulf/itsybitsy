@@ -489,3 +489,171 @@ describe("outbox edge-transition logging for send failures", () => {
     await outbox.stop();
   });
 });
+
+describe("reaction descriptors (.react.json)", () => {
+  /** Stub fetch that returns 200 ok=true for setMessageReaction and captures
+   *  the request bodies + URLs. */
+  function makeReactionFetch(captured: Array<{ url: string; body: unknown }>): void {
+    clientFetchCtx.set(async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const body = init?.body ? JSON.parse(init.body as string) : null;
+      captured.push({ url, body });
+      return new Response(JSON.stringify({ ok: true, result: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+  }
+
+  test("drops a reaction → calls setMessageReaction with the emoji array", async () => {
+    const { mkdir, rename } = await import("fs/promises");
+    await mkdir(outboxDir, { recursive: true });
+
+    const captured: Array<{ url: string; body: unknown }> = [];
+    makeReactionFetch(captured);
+
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    await outbox.start();
+
+    // Atomic drop: .tmp then rename to .react.json.
+    const stem = `${Date.now()}-bbbbbb`;
+    const finalPath = join(outboxDir, `${stem}.react.json`);
+    await writeFile(`${finalPath}.tmp`, JSON.stringify({ message_id: 77, emoji: "👍" }));
+    await rename(`${finalPath}.tmp`, finalPath);
+
+    await waitFor(() => captured.length >= 1, 2_000);
+    expect(captured[0]!.url).toContain("/setMessageReaction");
+    const body = captured[0]!.body as { chat_id: string; message_id: number; reaction: unknown };
+    expect(body.chat_id).toBe("555");
+    expect(body.message_id).toBe(77);
+    expect(body.reaction).toEqual([{ type: "emoji", emoji: "👍" }]);
+
+    await outbox.stop();
+  });
+
+  test("emoji null clears the reaction (empty array)", async () => {
+    const { mkdir, rename } = await import("fs/promises");
+    await mkdir(outboxDir, { recursive: true });
+
+    const captured: Array<{ url: string; body: unknown }> = [];
+    makeReactionFetch(captured);
+
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    await outbox.start();
+
+    const stem = `${Date.now()}-cccccc`;
+    const finalPath = join(outboxDir, `${stem}.react.json`);
+    await writeFile(`${finalPath}.tmp`, JSON.stringify({ message_id: 5, emoji: null }));
+    await rename(`${finalPath}.tmp`, finalPath);
+
+    await waitFor(() => captured.length >= 1, 2_000);
+    const body = captured[0]!.body as { reaction: unknown };
+    expect(body.reaction).toEqual([]);
+
+    await outbox.stop();
+  });
+
+  test("writes an ok result file the sender can read", async () => {
+    const { mkdir, rename } = await import("fs/promises");
+    await mkdir(outboxDir, { recursive: true });
+
+    const captured: Array<{ url: string; body: unknown }> = [];
+    makeReactionFetch(captured);
+
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    await outbox.start();
+
+    const stem = `${Date.now()}-dddddd`;
+    const finalPath = join(outboxDir, `${stem}.react.json`);
+    await writeFile(`${finalPath}.tmp`, JSON.stringify({ message_id: 9, emoji: "🔥" }));
+    await rename(`${finalPath}.tmp`, finalPath);
+
+    let resultText = "";
+    await waitFor(async () => {
+      try {
+        resultText = await readFile(`${finalPath}.result`, "utf8");
+        return true;
+      } catch {
+        return false;
+      }
+    }, 2_000);
+    const parsed = JSON.parse(resultText) as { ok: boolean };
+    expect(parsed.ok).toBe(true);
+
+    await outbox.stop();
+  });
+
+  test("a malformed descriptor yields an ok=false result, no API call", async () => {
+    const { mkdir, rename } = await import("fs/promises");
+    await mkdir(outboxDir, { recursive: true });
+
+    const captured: Array<{ url: string; body: unknown }> = [];
+    makeReactionFetch(captured);
+
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    await outbox.start();
+
+    const stem = `${Date.now()}-eeeeee`;
+    const finalPath = join(outboxDir, `${stem}.react.json`);
+    await writeFile(`${finalPath}.tmp`, "{not valid json");
+    await rename(`${finalPath}.tmp`, finalPath);
+
+    let resultText = "";
+    await waitFor(async () => {
+      try {
+        resultText = await readFile(`${finalPath}.result`, "utf8");
+        return true;
+      } catch {
+        return false;
+      }
+    }, 2_000);
+    const parsed = JSON.parse(resultText) as { ok: boolean; message: string };
+    expect(parsed.ok).toBe(false);
+    expect(parsed.message).toContain("bad reaction descriptor");
+    // No setMessageReaction call should have been made.
+    expect(captured.length).toBe(0);
+
+    await outbox.stop();
+  });
+
+  test("a text message and a reaction can both flow through the outbox", async () => {
+    const { mkdir, rename } = await import("fs/promises");
+    await mkdir(outboxDir, { recursive: true });
+
+    const captured: Array<{ url: string; body: unknown }> = [];
+    clientFetchCtx.set(async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const body = init?.body ? JSON.parse(init.body as string) : null;
+      captured.push({ url, body });
+      return new Response(JSON.stringify({ ok: true, result: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    await outbox.start();
+
+    const base = `${Date.now()}`;
+    const txtPath = join(outboxDir, `${base}-ffffff.txt`);
+    await writeFile(`${txtPath}.tmp`, "hello");
+    await rename(`${txtPath}.tmp`, txtPath);
+
+    const reactPath = join(outboxDir, `${base}-gggggg.react.json`);
+    await writeFile(`${reactPath}.tmp`, JSON.stringify({ message_id: 3, emoji: "🎉" }));
+    await rename(`${reactPath}.tmp`, reactPath);
+
+    await waitFor(() => captured.length >= 2, 2_000);
+    expect(captured.some((c) => c.url.includes("/sendMessage"))).toBe(true);
+    expect(captured.some((c) => c.url.includes("/setMessageReaction"))).toBe(true);
+
+    await outbox.stop();
+  });
+});

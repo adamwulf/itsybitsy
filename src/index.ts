@@ -750,6 +750,12 @@ const COMMAND_HELP: Record<string, string> = {
     "  React to a Telegram message with an emoji from Telegram's documented\n" +
     "  reaction set (e.g. 👍 👎 ❤ 🔥 🎉 😁). Without --message-id, reacts to the\n" +
     "  most recent inbound message. --clear removes the bot's reaction.",
+  tgsendfile:
+    "Usage: ib tgsendfile <path> [caption] [--photo | --document]\n" +
+    "  Send a local file to the configured Telegram chat. Defaults to sending\n" +
+    "  as a DOCUMENT (exact bytes preserved). Pass --photo to send as an inline\n" +
+    "  photo (Telegram recompresses photos, so use --document for diffs/PNGs you\n" +
+    "  need byte-for-byte). Limits: ~10 MB photo, ~50 MB document.",
   tgtyping:
     "Usage: ib tgtyping\n" +
     "  Send Telegram typing indicator (for hook use). Best-effort and silent.",
@@ -861,6 +867,7 @@ function printUsage(): void {
   console.log("  tgdeny <chat_id>    Remove a Telegram chat_id from the allowlist");
   console.log("  tgsend <text>       Send a message to the configured Telegram chat");
   console.log("  tgreact <emoji>     React to the latest Telegram message (--message-id <id>, --clear)");
+  console.log("  tgsendfile <path>   Send a local file to Telegram (--photo | --document, default document)");
   console.log("  tgtyping            Send Telegram typing indicator (for hook use)");
 }
 
@@ -2682,6 +2689,37 @@ async function main() {
       }
       const { telegramReact } = await import("./ib-commands");
       const result = await telegramReact(clear ? null : (emojiArg as string), { messageId });
+      if (result.ok) {
+        console.log(result.message);
+      } else {
+        console.error(result.message);
+        process.exit(1);
+      }
+      break;
+    }
+    case "tgsendfile": {
+      // Usage: ib tgsendfile <path> [caption] [--photo | --document]
+      let filePath: string | undefined;
+      let caption: string | undefined;
+      let kind: "photo" | "document" = "document"; // default preserves exact bytes
+      for (let i = 1; i < args.length; i++) {
+        const a = args[i]!;
+        if (a === "--photo") {
+          kind = "photo";
+        } else if (a === "--document") {
+          kind = "document";
+        } else if (filePath === undefined) {
+          filePath = a;
+        } else if (caption === undefined) {
+          caption = a;
+        }
+      }
+      if (filePath === undefined || filePath === "") {
+        console.error("Usage: ib tgsendfile <path> [caption] [--photo | --document]");
+        process.exit(1);
+      }
+      const { telegramSendFile } = await import("./ib-commands");
+      const result = await telegramSendFile(filePath, { caption, kind });
       if (result.ok) {
         console.log(result.message);
       } else {

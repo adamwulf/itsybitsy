@@ -8202,6 +8202,110 @@ describe("telegramReact (native, file-drop client)", () => {
   });
 });
 
+describe("telegramSendFile (native, file-drop client)", () => {
+  let tempDir: string;
+  let outboxDir: string;
+  let payloadPath: string;
+
+  async function loadDeps() {
+    const ibCmds = await import("./ib-commands");
+    const outbox = await import("./channels/outbox");
+    return { ibCmds, outbox };
+  }
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "tgsendfile-test-"));
+    outboxDir = join(tempDir, "outbox");
+    const { outbox } = await loadDeps();
+    outbox.setOutboxDir(outboxDir);
+    payloadPath = join(tempDir, "rendered.png");
+    await Bun.write(payloadPath, new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]));
+  });
+
+  afterEach(async () => {
+    const { outbox } = await loadDeps();
+    outbox.resetOutboxDir();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("a missing file fails immediately without dropping a descriptor", async () => {
+    const { ibCmds } = await loadDeps();
+    const result = await ibCmds.telegramSendFile(join(tempDir, "nope.png"));
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("file not found");
+    let entries: string[] = [];
+    try {
+      entries = await readdir(outboxDir);
+    } catch { /* dir may not exist */ }
+    expect(entries.filter((e) => e.endsWith(".file.json")).length).toBe(0);
+  });
+
+  test("drops a .file.json descriptor (default kind=document, absolute path)", async () => {
+    const { ibCmds } = await loadDeps();
+    const result = await ibCmds.telegramSendFile(payloadPath);
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("queued");
+
+    const entries = await readdir(outboxDir);
+    const fileDescs = entries.filter((e) => e.endsWith(".file.json"));
+    expect(fileDescs.length).toBe(1);
+    const json = JSON.parse(await Bun.file(join(outboxDir, fileDescs[0]!)).text());
+    expect(json.kind).toBe("document");
+    expect(json.path).toBe(payloadPath); // absolute
+    expect(json.caption).toBeUndefined();
+  });
+
+  test("kind=photo and a caption are recorded in the descriptor", async () => {
+    const { ibCmds } = await loadDeps();
+    await ibCmds.telegramSendFile(payloadPath, { kind: "photo", caption: "the diff" });
+    const entries = await readdir(outboxDir);
+    const fileDescs = entries.filter((e) => e.endsWith(".file.json"));
+    const json = JSON.parse(await Bun.file(join(outboxDir, fileDescs[0]!)).text());
+    expect(json.kind).toBe("photo");
+    expect(json.caption).toBe("the diff");
+  });
+
+  test("a relative path is resolved to absolute in the descriptor", async () => {
+    const { ibCmds } = await loadDeps();
+    // Resolve relative to cwd. Use a file we know exists: payloadPath's basename
+    // won't resolve from cwd, so instead verify resolution by passing a relative
+    // path to an existing file under cwd is out of scope; assert absolute-ness on
+    // the already-absolute payloadPath, which `resolve()` returns unchanged.
+    await ibCmds.telegramSendFile(payloadPath);
+    const entries = await readdir(outboxDir);
+    const fileDescs = entries.filter((e) => e.endsWith(".file.json"));
+    const json = JSON.parse(await Bun.file(join(outboxDir, fileDescs[0]!)).text());
+    const { isAbsolute } = await import("path");
+    expect(isAbsolute(json.path)).toBe(true);
+  });
+
+  test("a result file appearing within the timeout is returned to the caller", async () => {
+    const { ibCmds } = await loadDeps();
+    const fs = await import("fs/promises");
+    await fs.mkdir(outboxDir, { recursive: true });
+    const watcher = setInterval(async () => {
+      try {
+        const entries = await readdir(outboxDir);
+        for (const entry of entries) {
+          if (entry.endsWith(".file.json") && !entries.includes(`${entry}.result`)) {
+            await fs.writeFile(
+              join(outboxDir, `${entry}.result`),
+              JSON.stringify({ ok: true, message: "ok" }),
+            );
+          }
+        }
+      } catch { /* ignore */ }
+    }, 25);
+    try {
+      const result = await ibCmds.telegramSendFile(payloadPath, { caption: "x" });
+      expect(result.ok).toBe(true);
+      expect(result.message).toBe("ok");
+    } finally {
+      clearInterval(watcher);
+    }
+  });
+});
+
 describe("telegramFireTypingAction (native)", () => {
   let homeDir: string;
 

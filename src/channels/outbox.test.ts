@@ -657,3 +657,252 @@ describe("reaction descriptors (.react.json)", () => {
     await outbox.stop();
   });
 });
+
+describe("file descriptors (.file.json)", () => {
+  /** Stub fetch that returns 200 ok=true for sendPhoto/sendDocument and
+   *  captures the request URLs + (multipart) bodies. */
+  function makeFileFetch(captured: Array<{ url: string; form: FormData | null }>): void {
+    clientFetchCtx.set(async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const form = init?.body instanceof FormData ? init.body : null;
+      captured.push({ url, form });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: 0 } } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+  }
+
+  /** Write a small temp file the outbox can upload, return its absolute path. */
+  async function makeTempFile(bytes: Uint8Array): Promise<string> {
+    const { join } = await import("path");
+    const p = join(tmpRoot, `payload-${Math.round(bytes.byteLength)}.bin`);
+    await Bun.write(p, bytes);
+    return p;
+  }
+
+  test("drops a document descriptor → calls sendDocument with the file + caption", async () => {
+    const { mkdir, rename } = await import("fs/promises");
+    await mkdir(outboxDir, { recursive: true });
+    const filePath = await makeTempFile(new Uint8Array([1, 2, 3, 4]));
+
+    const captured: Array<{ url: string; form: FormData | null }> = [];
+    makeFileFetch(captured);
+
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    await outbox.start();
+
+    const stem = `${Date.now()}-hhhhhh`;
+    const finalPath = join(outboxDir, `${stem}.file.json`);
+    await writeFile(`${finalPath}.tmp`, JSON.stringify({ path: filePath, kind: "document", caption: "a diff" }));
+    await rename(`${finalPath}.tmp`, finalPath);
+
+    await waitFor(() => captured.length >= 1, 2_000);
+    expect(captured[0]!.url).toContain("/sendDocument");
+    const form = captured[0]!.form!;
+    expect(form.get("chat_id")).toBe("555");
+    expect(form.get("caption")).toBe("a diff");
+    expect(form.get("document")).toBeInstanceOf(Blob);
+
+    await outbox.stop();
+  });
+
+  test("kind=photo calls sendPhoto", async () => {
+    const { mkdir, rename } = await import("fs/promises");
+    await mkdir(outboxDir, { recursive: true });
+    const filePath = await makeTempFile(new Uint8Array([5, 6, 7]));
+
+    const captured: Array<{ url: string; form: FormData | null }> = [];
+    makeFileFetch(captured);
+
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    await outbox.start();
+
+    const stem = `${Date.now()}-iiiiii`;
+    const finalPath = join(outboxDir, `${stem}.file.json`);
+    await writeFile(`${finalPath}.tmp`, JSON.stringify({ path: filePath, kind: "photo" }));
+    await rename(`${finalPath}.tmp`, finalPath);
+
+    await waitFor(() => captured.length >= 1, 2_000);
+    expect(captured[0]!.url).toContain("/sendPhoto");
+    expect(captured[0]!.form!.get("photo")).toBeInstanceOf(Blob);
+
+    await outbox.stop();
+  });
+
+  test("writes an ok result file the sender can read", async () => {
+    const { mkdir, rename } = await import("fs/promises");
+    await mkdir(outboxDir, { recursive: true });
+    const filePath = await makeTempFile(new Uint8Array([1]));
+
+    const captured: Array<{ url: string; form: FormData | null }> = [];
+    makeFileFetch(captured);
+
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    await outbox.start();
+
+    const stem = `${Date.now()}-jjjjjj`;
+    const finalPath = join(outboxDir, `${stem}.file.json`);
+    await writeFile(`${finalPath}.tmp`, JSON.stringify({ path: filePath, kind: "document" }));
+    await rename(`${finalPath}.tmp`, finalPath);
+
+    let resultText = "";
+    await waitFor(async () => {
+      try {
+        resultText = await readFile(`${finalPath}.result`, "utf8");
+        return true;
+      } catch {
+        return false;
+      }
+    }, 2_000);
+    expect((JSON.parse(resultText) as { ok: boolean }).ok).toBe(true);
+
+    await outbox.stop();
+  });
+
+  test("a missing file yields ok=false with a clear message, no API call", async () => {
+    const { mkdir, rename } = await import("fs/promises");
+    await mkdir(outboxDir, { recursive: true });
+
+    const captured: Array<{ url: string; form: FormData | null }> = [];
+    makeFileFetch(captured);
+
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    await outbox.start();
+
+    const stem = `${Date.now()}-kkkkkk`;
+    const finalPath = join(outboxDir, `${stem}.file.json`);
+    await writeFile(`${finalPath}.tmp`, JSON.stringify({ path: "/no/such/file.png", kind: "document" }));
+    await rename(`${finalPath}.tmp`, finalPath);
+
+    let resultText = "";
+    await waitFor(async () => {
+      try {
+        resultText = await readFile(`${finalPath}.result`, "utf8");
+        return true;
+      } catch {
+        return false;
+      }
+    }, 2_000);
+    const parsed = JSON.parse(resultText) as { ok: boolean; message: string };
+    expect(parsed.ok).toBe(false);
+    expect(parsed.message).toContain("file not found");
+    expect(captured.length).toBe(0); // never hit the API
+
+    await outbox.stop();
+  });
+
+  test("a malformed descriptor yields ok=false, no API call", async () => {
+    const { mkdir, rename } = await import("fs/promises");
+    await mkdir(outboxDir, { recursive: true });
+
+    const captured: Array<{ url: string; form: FormData | null }> = [];
+    makeFileFetch(captured);
+
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    await outbox.start();
+
+    const stem = `${Date.now()}-llllll`;
+    const finalPath = join(outboxDir, `${stem}.file.json`);
+    await writeFile(`${finalPath}.tmp`, "{not json");
+    await rename(`${finalPath}.tmp`, finalPath);
+
+    let resultText = "";
+    await waitFor(async () => {
+      try {
+        resultText = await readFile(`${finalPath}.result`, "utf8");
+        return true;
+      } catch {
+        return false;
+      }
+    }, 2_000);
+    const parsed = JSON.parse(resultText) as { ok: boolean; message: string };
+    expect(parsed.ok).toBe(false);
+    expect(parsed.message).toContain("bad file descriptor");
+    expect(captured.length).toBe(0);
+
+    await outbox.stop();
+  });
+
+  test("an oversized photo is rejected locally before any API call", async () => {
+    const { mkdir, rename } = await import("fs/promises");
+    await mkdir(outboxDir, { recursive: true });
+    // 11 MB > the ~10 MB sendPhoto cap.
+    const filePath = await makeTempFile(new Uint8Array(11 * 1024 * 1024));
+
+    const captured: Array<{ url: string; form: FormData | null }> = [];
+    makeFileFetch(captured);
+
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    await outbox.start();
+
+    const stem = `${Date.now()}-mmmmmm`;
+    const finalPath = join(outboxDir, `${stem}.file.json`);
+    await writeFile(`${finalPath}.tmp`, JSON.stringify({ path: filePath, kind: "photo" }));
+    await rename(`${finalPath}.tmp`, finalPath);
+
+    let resultText = "";
+    await waitFor(async () => {
+      try {
+        resultText = await readFile(`${finalPath}.result`, "utf8");
+        return true;
+      } catch {
+        return false;
+      }
+    }, 2_000);
+    const parsed = JSON.parse(resultText) as { ok: boolean; message: string };
+    expect(parsed.ok).toBe(false);
+    expect(parsed.message).toContain("too large for photo");
+    expect(captured.length).toBe(0);
+
+    await outbox.stop();
+  });
+
+  test("text, reaction, and file descriptors all flow through the one outbox", async () => {
+    const { mkdir, rename } = await import("fs/promises");
+    await mkdir(outboxDir, { recursive: true });
+    const filePath = await makeTempFile(new Uint8Array([1, 2]));
+
+    const captured: Array<{ url: string }> = [];
+    clientFetchCtx.set(async (input) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      captured.push({ url });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: 0 } } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    await outbox.start();
+
+    const base = `${Date.now()}`;
+    const txtPath = join(outboxDir, `${base}-aaa111.txt`);
+    await writeFile(`${txtPath}.tmp`, "hi");
+    await rename(`${txtPath}.tmp`, txtPath);
+
+    const reactPath = join(outboxDir, `${base}-bbb222.react.json`);
+    await writeFile(`${reactPath}.tmp`, JSON.stringify({ message_id: 3, emoji: "🎉" }));
+    await rename(`${reactPath}.tmp`, reactPath);
+
+    const filePathDesc = join(outboxDir, `${base}-ccc333.file.json`);
+    await writeFile(`${filePathDesc}.tmp`, JSON.stringify({ path: filePath, kind: "document" }));
+    await rename(`${filePathDesc}.tmp`, filePathDesc);
+
+    await waitFor(() => captured.length >= 3, 2_000);
+    expect(captured.some((c) => c.url.includes("/sendMessage"))).toBe(true);
+    expect(captured.some((c) => c.url.includes("/setMessageReaction"))).toBe(true);
+    expect(captured.some((c) => c.url.includes("/sendDocument"))).toBe(true);
+
+    await outbox.stop();
+  });
+});

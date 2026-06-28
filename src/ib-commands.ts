@@ -5665,6 +5665,91 @@ export async function telegramReact(
 }
 
 /**
+ * Outbound `ib tgsendfile` — file-drop client for the `ib watch` outbox.
+ *
+ * Shares a rendered image/file with the user over Telegram. Like `tgsend` /
+ * `tgreact`, this does NOT talk to Telegram directly — it drops a
+ * `<stem>.file.json` descriptor `{ path, caption?, kind }` into the outbox and
+ * polls up to 1s for the `<stem>.file.json.result` written by `ib watch`. The
+ * outbox uploads the local file via `sendPhoto` / `sendDocument` (multipart).
+ *
+ * `kind` defaults to `"document"` to preserve exact bytes — Telegram
+ * recompresses photos sent via `sendPhoto`, which would corrupt e.g. a PNG diff.
+ * Pass `kind: "photo"` to send as an inline photo (recompressed).
+ *
+ * The path is validated for existence/readability/size by the outbox processor
+ * (so the same checks apply whether `ib watch` is up now or picks the descriptor
+ * up later); we do a fast local existence check here too so an obvious typo
+ * fails immediately rather than queueing silently.
+ */
+export async function telegramSendFile(
+  filePath: string,
+  opts: { caption?: string; kind?: "photo" | "document" } = {},
+): Promise<{ ok: boolean; message: string }> {
+  const { resolve } = await import("path");
+  const kind = opts.kind ?? "document";
+
+  // Resolve to an absolute path so the (potentially later-running) outbox
+  // process — which may have a different cwd — reads the right file.
+  const absPath = resolve(filePath);
+
+  // Fast local existence check: fail an obvious typo immediately instead of
+  // queueing a descriptor that will only fail once ib watch reads it. The
+  // outbox repeats the full validation (regular file, readable, size) at send
+  // time, which is the authoritative gate.
+  const file = Bun.file(absPath);
+  if (!(await file.exists())) {
+    return { ok: false, message: `file not found: ${absPath}` };
+  }
+
+  const { defaultOutboxDir } = await import("./channels/outbox");
+  const { mkdir, rename, readFile, unlink } = await import("fs/promises");
+  const { randomBytes } = await import("crypto");
+  const { join } = await import("path");
+
+  const dir = defaultOutboxDir();
+  const stem = `${Date.now()}-${randomBytes(3).toString("hex")}`;
+  const descPath = join(dir, `${stem}.file.json`);
+  const tmpPath = `${descPath}.tmp`;
+  const resultPath = `${descPath}.result`;
+
+  await mkdir(dir, { recursive: true });
+  const descriptor: { path: string; caption?: string; kind: "photo" | "document" } = {
+    path: absPath,
+    kind,
+  };
+  if (opts.caption !== undefined && opts.caption !== "") descriptor.caption = opts.caption;
+  await Bun.write(tmpPath, JSON.stringify(descriptor));
+  await rename(tmpPath, descPath);
+
+  // Poll up to 1s for the result file — same cadence as `tgsend`/`tgreact`.
+  const POLL_INTERVAL_MS = 100;
+  const POLL_ATTEMPTS = 10;
+  for (let i = 0; i < POLL_ATTEMPTS; i++) {
+    await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    let resultText: string;
+    try {
+      resultText = await readFile(resultPath, "utf8");
+    } catch {
+      continue;
+    }
+    let parsed: { ok: boolean; message: string };
+    try {
+      parsed = JSON.parse(resultText) as { ok: boolean; message: string };
+    } catch {
+      continue;
+    }
+    await unlink(resultPath).catch(() => { /* ignore */ });
+    return { ok: !!parsed.ok, message: String(parsed.message ?? "") };
+  }
+
+  return {
+    ok: true,
+    message: "queued (ib watch may not be running, or Telegram is not configured)",
+  };
+}
+
+/**
  * Best-effort fire of the Telegram `typing` chat action. Loads the bot token
  * from config and the chat id from the on-disk cache; no-ops silently if
  * either is missing (the indicator is cosmetic — never fail the caller).

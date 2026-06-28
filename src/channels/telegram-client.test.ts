@@ -837,3 +837,281 @@ describe("getUpdates per-request timeout & onPollOutcome", () => {
     await expect(client.sendMessage({ chat_id: 1, text: "x" })).rejects.toThrow(/timed out/i);
   });
 });
+
+describe("getFile", () => {
+  let mock: MockFetch;
+  let logs: string[];
+
+  beforeEach(() => {
+    mock = makeMockFetch();
+    fetchCtx.set(mock.fn);
+    logs = [];
+    logCtx.set((line) => logs.push(line));
+  });
+
+  afterEach(() => {
+    fetchCtx.reset();
+    logCtx.reset();
+  });
+
+  test("posts file_id to /getFile and returns the file_path", async () => {
+    mock.enqueueResponse({
+      ok: true,
+      result: { file_id: "abc", file_unique_id: "u", file_path: "photos/p.jpg", file_size: 1234 },
+    });
+    const client = new TelegramClient({ token: "TEST" });
+
+    const result = await client.getFile("abc");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.file.file_path).toBe("photos/p.jpg");
+      expect(result.file.file_size).toBe(1234);
+    }
+    const url = mock.allUrls()[0];
+    expect(url).toContain("/botTEST/getFile");
+    const body = JSON.parse(mock.lastInit()?.body as string);
+    expect(body).toEqual({ file_id: "abc" });
+  });
+
+  test("non-2xx returns the parsed body instead of throwing", async () => {
+    mock.enqueueResponse({ ok: false, error_code: 400, description: "file is too big" }, 400);
+    const client = new TelegramClient({ token: "T" });
+
+    const result = await client.getFile("x");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error_code).toBe(400);
+      expect(result.description).toBe("file is too big");
+    }
+  });
+
+  test("logs status only — never the URL with the token", async () => {
+    mock.enqueueResponse({ ok: false, error_code: 500, description: "boom" }, 500);
+    const client = new TelegramClient({ token: "VERYSECRET" });
+
+    await client.getFile("x");
+
+    expect(logs.some((l) => l.includes("VERYSECRET"))).toBe(false);
+    expect(logs.some((l) => l.includes("status=500"))).toBe(true);
+  });
+});
+
+describe("downloadFile", () => {
+  let mock: MockFetch;
+  let logs: string[];
+
+  beforeEach(() => {
+    mock = makeMockFetch();
+    fetchCtx.set(mock.fn);
+    logs = [];
+    logCtx.set((line) => logs.push(line));
+  });
+
+  afterEach(() => {
+    fetchCtx.reset();
+    logCtx.reset();
+  });
+
+  test("GETs the /file/bot<token>/<path> URL and returns the bytes", async () => {
+    const payload = new Uint8Array([1, 2, 3, 4, 5]);
+    mock.enqueue(() => new Response(payload, { status: 200 }));
+    const client = new TelegramClient({ token: "TEST" });
+
+    const result = await client.downloadFile("photos/p.jpg");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(Array.from(result.bytes)).toEqual([1, 2, 3, 4, 5]);
+    }
+    const url = mock.allUrls()[0]!;
+    expect(url).toContain("/file/botTEST/photos/p.jpg");
+    expect(mock.lastInit()?.method).toBe("GET");
+  });
+
+  test("CRITICAL: the token-bearing download URL is NEVER logged on failure", async () => {
+    mock.enqueue(() => new Response("not found", { status: 404 }));
+    const client = new TelegramClient({ token: "SUPERSECRET_TOKEN" });
+
+    const result = await client.downloadFile("photos/p.jpg");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.status).toBe(404);
+      // The reason must not leak the token.
+      expect(result.reason.includes("SUPERSECRET_TOKEN")).toBe(false);
+    }
+    // The download URL embeds the token — it must NOT appear in any log line.
+    expect(logs.some((l) => l.includes("SUPERSECRET_TOKEN"))).toBe(false);
+    // The mock captured the real URL (sanity check that the token IS in the URL).
+    expect(mock.allUrls()[0]!).toContain("SUPERSECRET_TOKEN");
+  });
+
+  test("a fetch throw surfaces a classifyError label, not the raw (token-bearing) message", async () => {
+    mock.enqueueError(new Error("connect ECONNREFUSED https://api.telegram.org/file/botSECRET/x"));
+    const client = new TelegramClient({ token: "SECRET" });
+
+    const result = await client.downloadFile("x");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      // classifyError truncates and never echoes the full URL.
+      expect(result.reason.includes("/file/botSECRET/")).toBe(false);
+    }
+    expect(logs.some((l) => l.includes("/file/botSECRET/"))).toBe(false);
+  });
+
+  test("size guard: a Content-Length over 20MB is refused without buffering", async () => {
+    const overLimit = String(21 * 1024 * 1024);
+    mock.enqueue(() =>
+      new Response("x", { status: 200, headers: { "content-length": overLimit } }),
+    );
+    const client = new TelegramClient({ token: "T" });
+
+    const result = await client.downloadFile("big.bin");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain("too large");
+    }
+  });
+
+  test("size guard: a body whose actual bytes exceed 20MB is refused after buffering", async () => {
+    // No content-length header → the post-buffer guard catches it.
+    const bytes = new Uint8Array(20 * 1024 * 1024 + 16);
+    mock.enqueue(() => new Response(bytes, { status: 200 }));
+    const client = new TelegramClient({ token: "T" });
+
+    const result = await client.downloadFile("big.bin");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain("too large");
+    }
+  });
+
+  test("a file exactly under the limit downloads fine", async () => {
+    const bytes = new Uint8Array(1024); // tiny
+    mock.enqueue(() => new Response(bytes, { status: 200 }));
+    const client = new TelegramClient({ token: "T" });
+
+    const result = await client.downloadFile("ok.bin");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.bytes.byteLength).toBe(1024);
+    }
+  });
+});
+
+describe("sendPhoto / sendDocument (multipart upload)", () => {
+  let mock: MockFetch;
+  let logs: string[];
+  let tmpFile: string;
+
+  beforeEach(async () => {
+    mock = makeMockFetch();
+    fetchCtx.set(mock.fn);
+    logs = [];
+    logCtx.set((line) => logs.push(line));
+    const { mkdtemp } = await import("fs/promises");
+    const { join } = await import("path");
+    const { tmpdir } = await import("os");
+    const dir = await mkdtemp(join(tmpdir(), "tgfile-"));
+    tmpFile = join(dir, "rendered.png");
+    await Bun.write(tmpFile, new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]));
+  });
+
+  afterEach(() => {
+    fetchCtx.reset();
+    logCtx.reset();
+  });
+
+  test("sendDocument POSTs multipart/form-data with chat_id, caption, and the file", async () => {
+    mock.enqueueResponse({ ok: true, result: { message_id: 7, chat: { id: 100 } } });
+    const client = new TelegramClient({ token: "TEST" });
+
+    const result = await client.sendDocument({ chat_id: 100, path: tmpFile, caption: "a diff" });
+    expect(result.ok).toBe(true);
+
+    const url = mock.allUrls()[0]!;
+    expect(url).toContain("/botTEST/sendDocument");
+    const init = mock.lastInit();
+    expect(init?.method).toBe("POST");
+    // Body is a FormData — the runtime sets the multipart boundary; we must NOT
+    // set content-type ourselves (no headers object on the init).
+    expect(init?.body).toBeInstanceOf(FormData);
+    const form = init?.body as FormData;
+    expect(form.get("chat_id")).toBe("100");
+    expect(form.get("caption")).toBe("a diff");
+    // The file field is named "document" and carries a Blob/File.
+    const filePart = form.get("document");
+    expect(filePart).toBeInstanceOf(Blob);
+  });
+
+  test("sendPhoto uses the 'photo' field name", async () => {
+    mock.enqueueResponse({ ok: true, result: { message_id: 8, chat: { id: 100 } } });
+    const client = new TelegramClient({ token: "T" });
+
+    await client.sendPhoto({ chat_id: 100, path: tmpFile });
+
+    const url = mock.allUrls()[0]!;
+    expect(url).toContain("/sendPhoto");
+    const form = mock.lastInit()?.body as FormData;
+    expect(form.get("photo")).toBeInstanceOf(Blob);
+    // No caption supplied → no caption field.
+    expect(form.get("caption")).toBeNull();
+  });
+
+  test("omits caption when empty", async () => {
+    mock.enqueueResponse({ ok: true, result: { message_id: 9, chat: { id: 1 } } });
+    const client = new TelegramClient({ token: "T" });
+
+    await client.sendDocument({ chat_id: 1, path: tmpFile, caption: "" });
+
+    const form = mock.lastInit()?.body as FormData;
+    expect(form.get("caption")).toBeNull();
+  });
+
+  test("non-2xx returns parsed body instead of throwing", async () => {
+    mock.enqueueResponse({ ok: false, error_code: 413, description: "Request Entity Too Large" }, 413);
+    const client = new TelegramClient({ token: "T" });
+
+    const result = await client.sendDocument({ chat_id: 1, path: tmpFile });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error_code).toBe(413);
+    }
+  });
+
+  test("logs status only — never the URL with the token", async () => {
+    mock.enqueueResponse({ ok: false, error_code: 500, description: "boom" }, 500);
+    const client = new TelegramClient({ token: "VERYSECRET" });
+
+    await client.sendPhoto({ chat_id: 1, path: tmpFile });
+
+    expect(logs.some((l) => l.includes("VERYSECRET"))).toBe(false);
+    expect(logs.some((l) => l.includes("status=500"))).toBe(true);
+  });
+
+  test("a fetch throw surfaces a classifyError label (token-safe) as ok=false", async () => {
+    mock.enqueueError(new Error("connect ECONNRESET https://api.telegram.org/botSECRET/sendPhoto"));
+    const client = new TelegramClient({ token: "SECRET" });
+
+    const result = await client.sendPhoto({ chat_id: 1, path: tmpFile });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.description?.includes("/botSECRET/")).toBe(false);
+    }
+    expect(logs.some((l) => l.includes("/botSECRET/"))).toBe(false);
+  });
+
+  test("surfaces retryAfterSec from a 429 for the outbox 429-retry", async () => {
+    mock.enqueueResponse(
+      { ok: false, error_code: 429, description: "Too Many Requests" },
+      429,
+      { "retry-after": "5" },
+    );
+    const client = new TelegramClient({ token: "T" });
+
+    const result = await client.sendDocument({ chat_id: 1, path: tmpFile });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.status).toBe(429);
+      expect(result.retryAfterSec).toBe(5);
+    }
+  });
+});

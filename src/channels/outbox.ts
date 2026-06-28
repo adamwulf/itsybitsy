@@ -16,12 +16,21 @@
  *   - `<unix-ms>-<6-hex-rand>.react.json`       — reaction descriptor (see below)
  *   - `<unix-ms>-<6-hex-rand>.react.json.tmp`   — partial write (cleaned on sweep)
  *   - `<unix-ms>-<6-hex-rand>.react.json.result`— JSON `{ok, message}` written by us
+ *   - `<unix-ms>-<6-hex-rand>.file.json`        — file-send descriptor (see below)
+ *   - `<unix-ms>-<6-hex-rand>.file.json.tmp`    — partial write (cleaned on sweep)
+ *   - `<unix-ms>-<6-hex-rand>.file.json.result` — JSON `{ok, message}` written by us
  *
  * A reaction descriptor is JSON `{ message_id: number, emoji: string | null }`
  * dropped by `ib tgreact`; we call `client.setMessageReaction` for it (a null
- * emoji clears the bot's reaction). It flows through the same serialized send
- * chain, fs.watch, sweep, and 5s-retained-result machinery as text messages —
- * only the per-file processing differs (`processReaction` vs `process`).
+ * emoji clears the bot's reaction).
+ *
+ * A file descriptor is JSON `{ path: string, caption?: string, kind: "photo" |
+ * "document" }` dropped by `ib tgsendfile`; we call `client.sendPhoto` /
+ * `client.sendDocument` for it (multipart upload of the local file at `path`).
+ *
+ * Both descriptors flow through the same serialized send chain, fs.watch, sweep,
+ * and 5s-retained-result machinery as text messages — only the per-file
+ * processing differs (`processReaction` / `processFile` vs `process`).
  *
  * Atomic writes use `<path>.tmp` + `rename`. Result files are kept for ~5s
  * after writing so the sender process can read them, then both files are
@@ -237,13 +246,16 @@ export class TelegramOutbox {
   }
 
   /** Append a send for one queued file to the serialized chain. The queue key
-   *  is the full dropped filename (`<stem>.txt` or `<stem>.react.json`); the
-   *  result/cleanup paths append `.result` to it. Dispatches by extension. */
+   *  is the full dropped filename (`<stem>.txt`, `<stem>.react.json`, or
+   *  `<stem>.file.json`); the result/cleanup paths append `.result` to it.
+   *  Dispatches by extension. */
   private enqueue(base: string): void {
     if (this.inFlight.has(base)) return;
     this.inFlight.add(base);
     if (base.endsWith(".react.json")) {
       this.sendChain = this.sendChain.then(() => this.processReaction(base));
+    } else if (base.endsWith(".file.json")) {
+      this.sendChain = this.sendChain.then(() => this.processFile(base));
     } else {
       this.sendChain = this.sendChain.then(() => this.process(base));
     }
@@ -375,6 +387,160 @@ export class TelegramOutbox {
     return { ok: false, message: `setMessageReaction failed: ${desc}` };
   }
 
+  /** Read, validate, send, write result, schedule cleanup for a file
+   *  descriptor. Never throws. `base` is the full dropped filename, e.g.
+   *  `123-abc.file.json`, holding JSON
+   *  `{ path: string, caption?: string, kind: "photo" | "document" }`.
+   *
+   *  Validates the descriptor shape, then that the local `path` exists, is a
+   *  regular file, is readable, and is within the per-kind send limit BEFORE
+   *  attempting the upload — a clear `ok:false` result is far friendlier than a
+   *  cryptic API failure. The upload itself runs through `sendFile` with the
+   *  same single 429-retry as text/reactions. */
+  private async processFile(base: string): Promise<void> {
+    const path = join(this.dir, base);
+    let raw: string;
+    try {
+      raw = await readFile(path, "utf8");
+    } catch (err) {
+      this.log(`telegram outbox: failed to read ${base}: ${describeErr(err)}`);
+      this.inFlight.delete(base);
+      return;
+    }
+
+    let descriptor: { path: string; caption?: string; kind: "photo" | "document" };
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const filePath = parsed.path;
+      const kind = parsed.kind;
+      const caption = parsed.caption;
+      if (typeof filePath !== "string" || filePath === "") {
+        throw new Error("missing or invalid path");
+      }
+      if (kind !== "photo" && kind !== "document") {
+        throw new Error('kind must be "photo" or "document"');
+      }
+      if (caption !== undefined && typeof caption !== "string") {
+        throw new Error("caption must be a string when present");
+      }
+      descriptor = { path: filePath, kind, caption: caption as string | undefined };
+    } catch (err) {
+      await this.writeResult(base, { ok: false, message: `bad file descriptor: ${describeErr(err)}` });
+      this.scheduleCleanup(base);
+      this.log(`telegram outbox: bad file descriptor in ${base}: ${describeErr(err)}`);
+      return;
+    }
+
+    // Validate the local file BEFORE uploading — exists, regular file,
+    // readable, and within the per-kind size limit.
+    const validation = await this.validateOutgoingFile(descriptor.path, descriptor.kind);
+    if (!validation.ok) {
+      await this.writeResult(base, { ok: false, message: validation.message });
+      this.scheduleCleanup(base);
+      this.log(`telegram outbox: file ${descriptor.path} -> chat ${this.chatId}: failed (${validation.message})`);
+      this.recordSendOutcome({ ok: false, message: validation.message });
+      return;
+    }
+
+    const outcome = await this.sendFile(descriptor.path, descriptor.kind, descriptor.caption);
+    if (outcome.ok) {
+      await this.writeResult(base, { ok: true, message: "ok" });
+      this.log(`telegram outbox: ${descriptor.kind} ${descriptor.path} -> chat ${this.chatId}: ok`);
+    } else {
+      await this.writeResult(base, { ok: false, message: outcome.message });
+      this.log(
+        `telegram outbox: ${descriptor.kind} ${descriptor.path} -> chat ${this.chatId}: failed (${outcome.message})`,
+      );
+    }
+    this.recordSendOutcome(outcome);
+    this.scheduleCleanup(base);
+  }
+
+  /** Validate an outgoing local file before upload. Checks existence, that it's
+   *  a regular file, readability, and the per-kind size ceiling
+   *  (~10 MB photo / ~50 MB document for bots). Returns a clear message on
+   *  failure so the sender sees why rather than a cryptic API error. */
+  private async validateOutgoingFile(
+    filePath: string,
+    kind: "photo" | "document",
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
+    const { stat, access } = await import("fs/promises");
+    const { constants } = await import("fs");
+    const { TELEGRAM_SENDPHOTO_LIMIT_BYTES, TELEGRAM_SENDDOCUMENT_LIMIT_BYTES } = await import(
+      "./telegram-client"
+    );
+    let st;
+    try {
+      st = await stat(filePath);
+    } catch {
+      return { ok: false, message: `file not found: ${filePath}` };
+    }
+    if (!st.isFile()) {
+      return { ok: false, message: `not a regular file: ${filePath}` };
+    }
+    try {
+      await access(filePath, constants.R_OK);
+    } catch {
+      return { ok: false, message: `file is not readable: ${filePath}` };
+    }
+    const limit =
+      kind === "photo" ? TELEGRAM_SENDPHOTO_LIMIT_BYTES : TELEGRAM_SENDDOCUMENT_LIMIT_BYTES;
+    if (st.size > limit) {
+      const limitMb = Math.round(limit / (1024 * 1024));
+      const sizeMb = (st.size / (1024 * 1024)).toFixed(1);
+      const hint =
+        kind === "photo"
+          ? " (try --document for larger files; sendPhoto is capped lower)"
+          : "";
+      return {
+        ok: false,
+        message: `file too large for ${kind}: ${sizeMb} MB exceeds the ~${limitMb} MB limit${hint}`,
+      };
+    }
+    return { ok: true };
+  }
+
+  /** Call `sendPhoto` / `sendDocument` with a single 429-retry, mirroring
+   *  `sendChunks` / `sendReaction` failure-mode strings. */
+  private async sendFile(
+    filePath: string,
+    kind: "photo" | "document",
+    caption: string | undefined,
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
+    const { sleepCtx } = await import("./telegram-client");
+    const method = kind === "photo" ? "sendPhoto" : "sendDocument";
+    const call = () =>
+      kind === "photo"
+        ? this.client.sendPhoto({ chat_id: this.chatId, path: filePath, caption })
+        : this.client.sendDocument({ chat_id: this.chatId, path: filePath, caption });
+
+    let resp;
+    try {
+      resp = await call();
+    } catch (err) {
+      // classifyError, not describeErr: fetch errors can embed the bot-token URL.
+      return { ok: false, message: `${method} failed: ${classifyError(err)}` };
+    }
+    if (resp.ok) return { ok: true };
+
+    if (resp.error_code === 429 || resp.status === 429) {
+      const retryAfterSec = resp.retryAfterSec ?? 1;
+      await sleepCtx.fn(retryAfterSec * 1000);
+      let retryResp;
+      try {
+        retryResp = await call();
+      } catch (err) {
+        return { ok: false, message: `${method} failed after 429 retry: ${classifyError(err)}` };
+      }
+      if (retryResp.ok) return { ok: true };
+      const desc = retryResp.description ?? `HTTP ${retryResp.error_code ?? "unknown"}`;
+      return { ok: false, message: `${method} failed after 429 retry: ${desc}` };
+    }
+
+    const desc = resp.description ?? `HTTP ${resp.error_code ?? "unknown"}`;
+    return { ok: false, message: `${method} failed: ${desc}` };
+  }
+
   /** Track success/failure transitions and log on edge changes only. The
    *  first attempt sets `lastSendOk` without logging — only subsequent
    *  flips log. (Initial failures aren't surprising during boot; the
@@ -472,13 +638,14 @@ export class TelegramOutbox {
   }
 }
 
-/** True for a dropped file the outbox should process: a `.txt` message or a
- *  `.react.json` reaction descriptor. Excludes `.tmp` / `.result` sidecars
- *  (note `.react.json.result` ends with `.result`, so the caller's `.result`
- *  check must run first — `sweep` does). */
+/** True for a dropped file the outbox should process: a `.txt` message, a
+ *  `.react.json` reaction descriptor, or a `.file.json` file-send descriptor.
+ *  Excludes `.tmp` / `.result` sidecars (note `.react.json.result` /
+ *  `.file.json.result` end with `.result`, so the caller's `.result` check must
+ *  run first — `sweep` does). */
 function isQueuedFile(name: string): boolean {
   if (name.endsWith(".tmp") || name.endsWith(".result")) return false;
-  return name.endsWith(".txt") || name.endsWith(".react.json");
+  return name.endsWith(".txt") || name.endsWith(".react.json") || name.endsWith(".file.json");
 }
 
 async function unlinkSafe(path: string): Promise<void> {

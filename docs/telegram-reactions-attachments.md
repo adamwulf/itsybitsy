@@ -1,7 +1,7 @@
 # Telegram: Reaction Emojis & Attachments — Scoping Report
 
 **Date:** 2026-06-27
-**Status:** Reactions (both directions) IMPLEMENTED 2026-06-27 (see §7). Attachments still scoped, not yet built.
+**Status:** Reactions (both directions) IMPLEMENTED 2026-06-27 (see §7). Attachments (both directions) IMPLEMENTED 2026-06-27 (see §8).
 **Author:** investigation agent `agent-d5e9eeb8`
 
 ## TL;DR
@@ -279,3 +279,125 @@ ib tgreact --clear  [--message-id <id>]   # remove the bot's reaction
 - **Hooks:** none changed. The coordinator learns `tgreact` via the channel-reminder reply hint (same mechanism as the `ib tgsend` hint).
 - **Watchdog:** unaffected — health state machine is content-agnostic; new `allowed_updates` kinds don't change it.
 - **`ib watch` / dashboard:** unaffected — no new display; dispatcher health (`getHealth()`) untouched.
+
+---
+
+## 8. IMPLEMENTED — Attachments, both directions (2026-06-27)
+
+Attachments were implemented on branch `agent/agent-d7d2d546`, on top of the
+reactions feature (§7). This section is the behavioral source-of-truth for the
+attachment feature. It builds on the §7 outbox descriptor pattern (full-filename
+keying, `<base>.result`, 5s retention, one 429-retry) and the dispatcher's
+`getUpdates`/`normalize` flow.
+
+### 8.1 Inbound — Adam sends a photo/file, the agent gets a local path
+
+This fixes the bug §3 called out: a bare attachment used to come through as a
+`[user sent photo]` placeholder + a "Received attachment — text only supported"
+reply, with NO download. Now the file is downloaded and a real local path is
+surfaced.
+
+- **Typed attachments** (`types.ts`): `PhotoSize[]`, `Document`, `Voice`,
+  `Audio`, `Video`, `VideoNote`, `Sticker` (each with `file_id`,
+  `file_unique_id`, and where applicable `file_size`, `mime_type`, `file_name`),
+  plus `TelegramFile` for the `getFile` result. Replaces the old `photo?: unknown`
+  stubs.
+- **Client** (`telegram-client.ts`): `getFile(file_id)` (JSON POST → `file_path`)
+  and `downloadFile(file_path)` (GET `https://api.telegram.org/file/bot<token>/<file_path>`).
+  **The download URL embeds the bot token and is NEVER logged** — failures
+  surface only an HTTP status or a `classifyError()` label, never `err.message`
+  (which could contain the URL). `downloadFile` guards the 20 MB ceiling twice:
+  on the advertised `Content-Length` (refuses before buffering) and on the actual
+  byte count after buffering (chunked responses omit the header).
+- **Dispatcher** (`dispatcher.ts`): `describeAttachment(msg)` extracts a
+  descriptor (kind, file_id, advertised size, sanitized display name). For photos
+  it picks the **LARGEST `PhotoSize`** (by area, defaulting to the last element
+  per Telegram convention). `resolveAttachment()` runs inside `processBatch`
+  BEFORE grouping/wrapping so the wrapped body carries the resolved path:
+  1. **Pre-download size guard** — if the advertised `file_size` already exceeds
+     20 MB, skip the download, reply "too large" on Telegram, and surface a
+     coordinator note (no path). Re-guarded with the authoritative `getFile`
+     size when the message omitted it.
+  2. `getFile` → `file_path`; on failure, a note (no path).
+  3. `downloadFile` (re-guards size on the wire); too-big → reply + note,
+     other failure → note.
+  4. `storeInboundFile()` writes to
+     `~/.itsybitsy/channels/telegram/inbound/<chat>/<unix-ms>-<safeName>` and the
+     body becomes `[user sent photo: /abs/path/file.jpg (123 KB)]`. A **caption,
+     if present, is prepended** to the body (own line), so the coordinator sees
+     both the user's words and the file.
+- **Path safety**: the on-disk name is ALWAYS a generated `<unix-ms>-<safeName>`
+  stem. Telegram's `file_name` is never trusted for the path — it's run through
+  the dispatcher's `safeName()` for display, and `storeInboundFile` applies a
+  final path-traversal guard (strips separators, NUL, `..`) regardless of caller.
+  The chat segment is likewise sanitized.
+- **The "text only supported" reply is GONE** — real handling replaced it.
+- **Retention** (`inbound-store.ts`): inbound files are kept **INDEFINITELY** by
+  default (unlike the outbox's 5s result retention) because the agent may still
+  need a file long after the message that delivered it. A best-effort, opt-in
+  `pruneInboundOlderThan(ttl, now)` is provided for an operator/housekeeping pass
+  (suggested `INBOUND_DEFAULT_TTL_MS` = 30 days), but nothing calls it on the hot
+  path — we never auto-delete a file the agent might need.
+
+### 8.2 Outbound — the agent shares a rendered image/file with Adam
+
+New CLI verb:
+
+```
+ib tgsendfile <path> [caption]               # send a local file (default: document)
+ib tgsendfile <path> [caption] --photo       # send as an inline photo (recompressed)
+ib tgsendfile <path> [caption] --document    # send as a document (exact bytes; default)
+```
+
+- **Default is DOCUMENT** to preserve exact bytes — `sendPhoto` recompresses
+  (the §3 gotcha), which would corrupt e.g. a PNG diff. `--photo` opts into the
+  recompressed inline form.
+- **Client** (`telegram-client.ts`): `sendPhoto()` / `sendDocument()` upload a
+  LOCAL file via **`multipart/form-data`** using Bun's `FormData` + `Bun.file()`
+  (no new dependency; the runtime sets the multipart boundary, so we must NOT set
+  `Content-Type` ourselves). Optional caption. Same token-safety discipline as
+  the JSON methods. Size limits: `TELEGRAM_SENDPHOTO_LIMIT_BYTES` (~10 MB),
+  `TELEGRAM_SENDDOCUMENT_LIMIT_BYTES` (~50 MB).
+- **Routing mirrors `ib tgsend`/`ib tgreact`**: `tgsendfile` does NOT talk to
+  Telegram directly. `telegramSendFile()` (ib-commands.ts) resolves the path to
+  absolute, does a fast local existence check, then drops a `<stem>.file.json`
+  descriptor `{ path, caption?, kind: "photo" | "document" }` into the outbox and
+  polls ≤1s for the `<base>.result`. If `ib watch` isn't running, the descriptor
+  waits on disk (ok-but-queued, exit 0).
+- **Outbox** (`outbox.ts`): `isQueuedFile` recognizes `.file.json`; `enqueue`
+  dispatches it to `processFile` (full-filename keying, same as `.txt` /
+  `.react.json`). `processFile` validates the descriptor shape, then that the
+  local file **exists, is a regular file, is readable, and is within the per-kind
+  size limit BEFORE uploading** — a clear `ok:false` result beats a cryptic API
+  failure. `sendFile` calls `sendPhoto`/`sendDocument` with one 429-retry (same
+  failure-mode strings as text/reactions). 5s result retention.
+
+### 8.3 Files touched
+
+- `src/channels/types.ts` — typed attachment interfaces + `TelegramFile`.
+- `src/channels/telegram-client.ts` — `getFile`, `downloadFile`, `sendPhoto`,
+  `sendDocument`, `sendMultipartFile`, `fileUrlFor`, size-limit constants.
+- `src/channels/inbound-store.ts` (new) — inbound file storage + retention.
+- `src/channels/dispatcher.ts` — `describeAttachment`, `resolveAttachment`,
+  `AttachmentDescriptor`, `humanSize`; download wired into `processBatch`;
+  "text only supported" reply removed.
+- `src/channels/outbox.ts` — `.file.json` processing (`processFile`/`sendFile`/
+  `validateOutgoingFile`), `isQueuedFile` recognizes `.file.json`.
+- `src/ib-commands.ts` — `telegramSendFile()` file-drop client.
+- `src/index.ts` — `tgsendfile` CLI verb + usage.
+- Tests: `inbound-store.test.ts` (new); additions to `telegram-client.test.ts`,
+  `dispatcher.test.ts`, `outbox.test.ts`, `ib-commands.test.ts`.
+
+### 8.4 Cross-cutting review (per CLAUDE.md checklist)
+
+- **General agent functionality:** new `ib tgsendfile` verb; inbound attachment
+  bodies now carry real local paths (and captions). No meta.json/lifecycle change.
+- **Hooks:** none changed. The coordinator learns `tgsendfile` via the usage text
+  / docs; the channel-reminder reply hint (`ib tgsend`/`ib tgreact`) is unchanged.
+- **Watchdog:** unaffected — the dispatcher health state machine is
+  content-agnostic; downloading an attachment doesn't change poll outcomes or
+  health semantics.
+- **`ib watch` / dashboard:** unaffected — no new display. The outbox/dispatcher
+  it hosts gained file paths internally, but `getHealth()` and the TUI are
+  untouched. (A future enhancement could surface an "inbound media downloaded"
+  indicator, as §5 noted; not built here.)

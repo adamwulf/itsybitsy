@@ -99,14 +99,15 @@ export class TelegramOutbox {
    *  outbox has a single chat target. */
   private sendChain: Promise<void> = Promise.resolve();
 
-  /** Stems already enqueued, so the macOS no-filename rename event can
-   *  re-scan the dir without double-processing. Cleared once the send
-   *  completes (and the `.result` file is written). */
+  /** Dropped filenames (`<stem>.txt` / `<stem>.react.json`) already enqueued,
+   *  so the macOS no-filename rename event can re-scan the dir without
+   *  double-processing. Cleared once the send completes (and the `.result`
+   *  file is written). */
   private readonly inFlight: Set<string> = new Set();
 
-  /** Active cleanup timeouts, keyed by stem. `stop()` clears these and
-   *  unlinks immediately rather than leaving stale files for the next
-   *  startup sweep — we wrote them, we know exactly what to clean. */
+  /** Active cleanup timeouts, keyed by the dropped filename. `stop()` clears
+   *  these and unlinks immediately rather than leaving stale files for the
+   *  next startup sweep — we wrote them, we know exactly what to clean. */
   private readonly cleanupTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
   /** fs.watch handle. Created in `start()`, closed in `stop()`. */
@@ -179,13 +180,13 @@ export class TelegramOutbox {
       /* swallow — chain errors are logged inline */
     }
     // Cancel pending cleanup timeouts and unlink immediately. We wrote
-    // these `.txt` + `.result` pairs ourselves; the `tgsend` process either
-    // already read the result or has given up by now.
+    // these dropped-file + `.result` pairs ourselves; the sender process
+    // (`tgsend`/`tgreact`) either already read the result or has given up by now.
     const timers = Array.from(this.cleanupTimers.entries());
     this.cleanupTimers.clear();
-    for (const [stem, timer] of timers) {
+    for (const [base, timer] of timers) {
       clearTimeout(timer);
-      await this.cleanupPair(stem);
+      await this.cleanupPair(base);
     }
   }
 

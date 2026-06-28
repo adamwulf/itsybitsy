@@ -265,6 +265,15 @@ describe("wrapChannelReminder", () => {
   test("throws on empty messages", () => {
     expect(() => wrapChannelReminder("99", [])).toThrow();
   });
+
+  test("omits message_id when it is 0 (missing/non-numeric upstream)", () => {
+    const out = wrapChannelReminder("12345", [
+      { chatId: "12345", messageId: 0, userId: "1", username: "alice", ts: "t", body: "hi", attachmentType: null },
+    ]);
+    // No un-reactable message_id="0" handed to the agent.
+    expect(out).not.toContain('message_id="0"');
+    expect(out).not.toContain("message_id=");
+  });
 });
 
 describe("wrapReactionReminder", () => {

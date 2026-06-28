@@ -253,6 +253,13 @@ ib tgreact --clear  [--message-id <id>]   # remove the bot's reaction
   `{chat_id, message_id}` to `~/.itsybitsy/channels/telegram/last-message.json`
   (`src/channels/last-message-cache.ts`, modeled on `chat-id-cache.ts`). This is
   how `ib tgreact` (a separate short-lived process) finds "the latest message".
+- **The cache tracks the latest inbound text/attachment message, NOT reactions.**
+  An inbound `message_reaction` event does not update the cache. So if the
+  coordinator runs bare `ib tgreact 👍` in response to a reaction event, it
+  targets the last *message*, not the message that was reacted to. That's
+  intentional: `wrapReactionReminder` surfaces the exact `message_id="…"` and
+  the reply hint shows `--message-id <id>`, so the coordinator can always target
+  the precise message when reacting to a reaction.
 
 ### 7.4 Files touched
 

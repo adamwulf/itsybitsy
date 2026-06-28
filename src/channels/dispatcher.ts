@@ -1121,7 +1121,7 @@ export function wrapChannelReminder(chatId: string, messages: NormalizedMessage[
   if (messages.length === 1) {
     const m = messages[0]!;
     return [
-      `<channel source="telegram" user="${escapeAttr(m.username)}" ts="${escapeAttr(m.ts)}" message_id="${m.messageId}">`,
+      `<channel source="telegram" user="${escapeAttr(m.username)}" ts="${escapeAttr(m.ts)}"${messageIdAttr("message_id", m.messageId)}>`,
       m.body,
       `</channel>`,
       ``,
@@ -1133,7 +1133,7 @@ export function wrapChannelReminder(chatId: string, messages: NormalizedMessage[
   const last = messages[messages.length - 1]!;
   const lines: string[] = [];
   lines.push(
-    `<channel source="telegram" chat_id="${escapeAttr(safeChatId)}" user="${escapeAttr(first.username)}" first_ts="${escapeAttr(first.ts)}" count="${messages.length}" last_message_id="${last.messageId}">`,
+    `<channel source="telegram" chat_id="${escapeAttr(safeChatId)}" user="${escapeAttr(first.username)}" first_ts="${escapeAttr(first.ts)}" count="${messages.length}"${messageIdAttr("last_message_id", last.messageId)}>`,
   );
   for (let i = 0; i < messages.length; i++) {
     if (i > 0) lines.push("---");
@@ -1175,12 +1175,21 @@ export function wrapReactionReminder(reaction: NormalizedReaction): string {
   }
   const body = parts.join("; ");
   return [
-    `<channel source="telegram" kind="reaction" user="${escapeAttr(reaction.username)}" ts="${escapeAttr(reaction.ts)}" message_id="${reaction.messageId}">`,
+    `<channel source="telegram" kind="reaction" user="${escapeAttr(reaction.username)}" ts="${escapeAttr(reaction.ts)}"${messageIdAttr("message_id", reaction.messageId)}>`,
     body,
     `</channel>`,
     ``,
     REPLY_HINT,
   ].join("\n");
+}
+
+/** Render a ` name="id"` channel attribute, or the empty string when the id is
+ *  not a usable target (0 — emitted by `normalize()` when a message_id was
+ *  missing/non-numeric). Omitting it keeps the agent from being handed an
+ *  un-reactable `message_id="0"` (which `ib tgreact --message-id 0` rejects). */
+function messageIdAttr(name: string, messageId: number): string {
+  if (messageId <= 0) return "";
+  return ` ${name}="${messageId}"`;
 }
 
 /** Strip every `</channel>` substring from inbound text. Defense against a

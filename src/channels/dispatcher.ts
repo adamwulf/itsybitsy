@@ -22,9 +22,17 @@
  *   - Per-coordinator-session mutex (in-process Promise chain) serializes
  *     `sendToSystemCoordinator` calls so two batches arriving rapidly never
  *     interleave on the coordinator tmux pipe.
- *   - Attachment fallback: messages without text/caption produce both a
- *     "Received attachment" Telegram reply AND a `[user sent <type>]`
- *     channel-reminder so the coordinator sees the event.
+ *   - Attachments are DOWNLOADED: a message carrying a photo/document/voice/
+ *     etc. is fetched via `getFile` + `downloadFile` into
+ *     `~/.itsybitsy/channels/telegram/inbound/<chat>/<unix-ms>-<safeName>` and
+ *     surfaced to the coordinator as a local path,
+ *     e.g. `[user sent photo: /abs/path/file.jpg (123 KB)]`. A caption, if
+ *     present, is surfaced alongside the path. Files over the Bot API's 20 MB
+ *     `getFile` ceiling are NOT downloaded — the user gets a "file too big"
+ *     Telegram reply and the coordinator sees a clear note instead of a path.
+ *     A download failure (network, API) likewise surfaces a note, not a path.
+ *     (Historically a bare attachment produced a "text only supported" reply
+ *     and no download — that reply is gone now that real handling landed.)
  *   - Coordinator-offline: one retry after 2s; on failure the batch is
  *     dropped, the chat is marked "awaiting confirmation", and the user
  *     is prompted via Telegram: "The coordinator is offline. Start the
@@ -70,10 +78,18 @@
  */
 
 import { InjectionContext } from "../types";
-import { TelegramClient, classifyError } from "./telegram-client";
+import { TelegramClient, classifyError, TELEGRAM_GETFILE_LIMIT_BYTES } from "./telegram-client";
 import type { PollOutcome } from "./telegram-client";
-import type { TelegramMessage, TelegramUpdate } from "./types";
+import type {
+  TelegramMessage,
+  TelegramUpdate,
+  MessageReactionUpdated,
+  ReactionType,
+  PhotoSize,
+} from "./types";
 import { clearCachedChatId } from "./chat-id-cache";
+import { writeLastMessage } from "./last-message-cache";
+import { storeInboundFile } from "./inbound-store";
 
 /** Delivery hook the dispatcher calls per coalesced batch. Defaults to
  *  the real `sendToSystemCoordinator` from src/index.ts; tests inject a
@@ -241,16 +257,62 @@ export interface DispatcherOptions {
   initialOffset?: number;
 }
 
+/** A downloadable attachment extracted from a TelegramMessage. The dispatcher
+ *  uses this to call `getFile` + `downloadFile` and surface a local path to the
+ *  coordinator. `displayName` is a sanitized, human-readable hint for the
+ *  on-disk filename (NEVER trusted for the actual path — `storeInboundFile`
+ *  generates the path) and the surfaced `[user sent ...]` note. `fileSize` is
+ *  the advertised size (may be undefined; some PhotoSize entries omit it) used
+ *  for the 20 MB guard BEFORE downloading where available. */
+export interface AttachmentDescriptor {
+  kind: string;
+  fileId: string;
+  fileSize?: number;
+  displayName: string;
+}
+
 /** What we extract from one TelegramMessage for the channel-reminder body. */
-interface NormalizedMessage {
+export interface NormalizedMessage {
   chatId: string;
+  /** Per-chat message identifier. Retained so the agent can target this exact
+   *  message with a reaction (`ib tgreact --message-id <id>`), and so the
+   *  dispatcher can persist the latest inbound id for `ib tgreact`'s default
+   *  "react to the most recent message" path. */
+  messageId: number;
   userId: string | null;
   username: string;
   ts: string;
   body: string;
-  /** Set when the original message had no text/caption — used to drive the
-   *  attachment-fallback Telegram reply. */
+  /** The kind of attachment this message carried (photo/document/voice/etc.),
+   *  or null for a plain text message. Set for BOTH captioned and bare
+   *  attachments — the dispatcher downloads either way. (Historically this was
+   *  only set for bare attachments to drive a "text only supported" reply;
+   *  that reply is gone now that we download.) */
   attachmentType: string | null;
+  /** Present when the message carried a downloadable attachment. `resolveAttachment`
+   *  consumes this to fetch the file and rewrite `body` with the local path (or
+   *  a too-big / failed note). Undefined for plain text. */
+  attachment?: AttachmentDescriptor;
+  /** The user's caption, if any, surfaced alongside the downloaded file path.
+   *  Kept separate from `body` because `body` is provisional until the download
+   *  resolves. Undefined when there was no caption. */
+  caption?: string;
+}
+
+/** What we extract from one `message_reaction` update for delivery to the
+ *  coordinator. The reaction is summarized as added/removed emoji so the
+ *  coordinator sees a human-readable event rather than raw reaction arrays. */
+export interface NormalizedReaction {
+  chatId: string;
+  /** The message the reaction was applied to. */
+  messageId: number;
+  userId: string | null;
+  username: string;
+  ts: string;
+  /** Emoji added in this update (present in new_reaction but not old). */
+  added: string[];
+  /** Emoji removed in this update (present in old_reaction but not new). */
+  removed: string[];
 }
 
 /** TelegramDispatcher — owns the long-poll loop. Construction does not start
@@ -511,7 +573,7 @@ export class TelegramDispatcher {
       try {
         updates = await this.client.getUpdates({
           offset: this.nextOffset,
-          allowed_updates: ["message"],
+          allowed_updates: ["message", "message_reaction"],
           signal,
           onPollOutcome: (outcome) => this.handlePollOutcome(outcome),
         });
@@ -563,7 +625,27 @@ export class TelegramDispatcher {
      *  appeared — preserving roughly the user's submission order. */
     const byChat = new Map<string, NormalizedMessage[]>();
 
+    /** Reaction events surviving the allowlist, in arrival order. Delivered
+     *  after the message batches so that a message + its reaction arriving in
+     *  the same poll deliver message-then-reaction. */
+    const reactions: NormalizedReaction[] = [];
+
     for (const update of updates) {
+      // message_reaction updates carry no `message` field — handle them on
+      // their own path, then continue. A single update has at most one of
+      // `message` / `message_reaction`.
+      let reactionUpdate: MessageReactionUpdated | undefined;
+      try {
+        reactionUpdate = update.message_reaction;
+      } catch {
+        reactionUpdate = undefined;
+      }
+      if (reactionUpdate) {
+        const normalizedReaction = this.normalizeReaction(reactionUpdate);
+        if (normalizedReaction) reactions.push(normalizedReaction);
+        continue;
+      }
+
       let msg: TelegramMessage | undefined;
       try {
         msg = update.message;
@@ -591,6 +673,13 @@ export class TelegramDispatcher {
 
       const normalized = this.normalize(msg);
       if (!normalized) continue;
+      // Download any attachment NOW (before grouping/wrapping) so the wrapped
+      // body carries the resolved local path instead of the provisional
+      // placeholder. resolveAttachment never throws — a failure leaves a clear
+      // note in the body. Plain-text messages skip this (no `attachment`).
+      if (normalized.attachment) {
+        await this.resolveAttachment(normalized);
+      }
       const existing = byChat.get(normalized.chatId);
       if (existing) {
         existing.push(normalized);
@@ -648,6 +737,18 @@ export class TelegramDispatcher {
           await this.deliver(chatId, normals);
         });
       }
+    }
+
+    // Deliver reaction events last, each through the same coordinator mutex.
+    // Reactions are NOT coalesced with text — they're a distinct event class —
+    // and they do not enter the offline-prompt y/n flow: a reaction is never a
+    // "y"/"n" answer. If the coordinator is offline we drop the reaction
+    // notice silently (it's informational; re-prompting the user about a
+    // reaction would be noise).
+    for (const reaction of reactions) {
+      await this.withMutex(SYSTEM_COORDINATOR_MUTEX_KEY, async () => {
+        await this.deliverReaction(reaction);
+      });
     }
   }
 
@@ -743,6 +844,7 @@ export class TelegramDispatcher {
     if (followupBody !== null) {
       const note: NormalizedMessage = {
         chatId: message.chatId,
+        messageId: message.messageId,
         userId: message.userId,
         username: message.username,
         ts: message.ts,
@@ -800,14 +902,29 @@ export class TelegramDispatcher {
       }
     }
 
-    // Attachment-fallback Telegram reply: fires only when the batch contained
-    // at least one bare attachment (no text and no caption). When a caption
-    // was present we already surfaced it as the body, so no notice is needed.
-    // `normalize()` sets `attachmentType` to non-null only for bare attachments;
-    // captioned messages have it cleared back to null.
-    if (delivered && messages.some((m) => m.attachmentType !== null)) {
-      await this.replyOnTelegram("Received attachment — text only supported");
+    // Persist the latest inbound message id so `ib tgreact` (a separate
+    // process with no in-memory dispatcher state) can default to reacting to
+    // the most recent message. Best-effort: a cache write failure must not
+    // affect delivery. Only the most recent message in the batch matters —
+    // `messages` is in arrival order, so the last element is newest.
+    if (delivered) {
+      const newest = messages[messages.length - 1]!;
+      if (newest.messageId > 0) {
+        try {
+          await writeLastMessage(chatId, newest.messageId);
+        } catch (err) {
+          logCtx.fn(
+            `Telegram dispatcher: last-message cache write failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
     }
+
+    // No attachment-fallback reply here anymore: attachments are downloaded in
+    // `processBatch` (via `resolveAttachment`), which already rewrote the body
+    // with the local path and sent any too-big / failed Telegram reply itself.
+    // The old "Received attachment — text only supported" notice is gone now
+    // that real handling landed.
   }
 
   /** Handle a batch arriving on a chat that's in awaiting-confirmation state.
@@ -896,10 +1013,19 @@ export class TelegramDispatcher {
   }
 
   /** Extract the channel-reminder body fields from a TelegramMessage.
-   *  Returns null on malformed input (no chat_id). */
+   *  Returns null on malformed input (no chat_id).
+   *
+   *  Attachments are NOT downloaded here — `normalize()` stays synchronous.
+   *  When the message carries a downloadable attachment we record an
+   *  {@link AttachmentDescriptor} on the result and set a PROVISIONAL body
+   *  (`[user sent <kind>]`); the async `resolveAttachment()` step (run by
+   *  `processBatch`) downloads the file and rewrites the body with the local
+   *  path (or a too-big / failed note). A caption, if present, is stored
+   *  separately on `caption` so it survives that rewrite. */
   private normalize(msg: TelegramMessage): NormalizedMessage | null {
     const chatId = String(msg.chat?.id ?? "");
     if (!chatId) return null;
+    const messageId = typeof msg.message_id === "number" ? msg.message_id : 0;
     const userId = msg.from?.id !== undefined ? String(msg.from.id) : null;
     const username = msg.from?.username ?? msg.from?.first_name ?? "unknown";
     const tsEpoch = msg.date !== undefined ? msg.date * 1000 : nowCtx.fn();
@@ -910,30 +1036,217 @@ export class TelegramDispatcher {
     const rawText = msg.text ?? msg.caption ?? "";
     const safeText = stripChannelClose(rawText);
 
+    const attachment = describeAttachment(msg) ?? undefined;
+    const attachmentType = attachment ? attachment.kind : null;
+    // A caption only makes sense paired with an attachment; preserve it for
+    // resolveAttachment to surface alongside the file path. (`msg.caption` is
+    // set on captioned media; `msg.text` is set on plain text — they never
+    // coexist on one message.)
+    const caption =
+      attachment && typeof msg.caption === "string" && msg.caption !== ""
+        ? stripChannelClose(msg.caption)
+        : undefined;
+
     let body: string;
-    let attachmentType: string | null = attachmentTypeOf(msg);
-    if (safeText !== "") {
+    if (attachment) {
+      // Provisional — resolveAttachment() overwrites this once the download
+      // resolves. If the download path is never run (it always is for
+      // attachments), the coordinator still sees a sensible placeholder.
+      body = `[user sent ${attachment.kind}]`;
+    } else if (safeText !== "") {
       body = safeText;
-      // attachmentType still set if the message had both an attachment AND
-      // a caption — caller doesn't need to send the "received attachment"
-      // reply in that case (we surface the caption as content), so clear it.
-      if (attachmentType !== null) {
-        attachmentType = null;
-      }
-    } else if (attachmentType !== null) {
-      body = `[user sent ${attachmentType}]`;
     } else {
-      // Defensive only — upstream normalize() guarantees text/caption/
-      // attachment-notice via the rawText fallback (`text ?? caption ?? ""`)
-      // plus attachmentTypeOf(), so reaching this branch requires a future
-      // refactor that changes normalize()'s contract. Kept as a paranoia
-      // fallback so the coordinator at least sees something arrived rather
-      // than silently dropping the update.
+      // Defensive only — a message with neither text nor a recognized
+      // attachment. Kept so the coordinator at least sees something arrived
+      // rather than silently dropping the update.
       body = "[user sent message with no text]";
     }
 
-    return { chatId, userId, username, ts, body, attachmentType };
+    return { chatId, messageId, userId, username, ts, body, attachmentType, attachment, caption };
   }
+
+  /** Download a message's attachment and rewrite its body with the resolved
+   *  local path. Mutates `msg.body` in place (and clears the size note on
+   *  failure). Best-effort Telegram replies for too-big / failed cases. Never
+   *  throws — a failure leaves a clear coordinator note rather than a path.
+   *
+   *  Flow:
+   *   1. Size guard: if the advertised `fileSize` already exceeds the 20 MB
+   *      `getFile` ceiling, skip the download, reply "too big", surface a note.
+   *   2. `getFile(file_id)` → `file_path`. Failure → note + return.
+   *   3. `downloadFile(file_path)` (which re-guards the size on the wire).
+   *      Too-big-on-download → reply + note; other failure → note.
+   *   4. Store under `inbound/<chat>/<unix-ms>-<safeName>`, rewrite body to
+   *      `[user sent <kind>: <path> (<size>)]` with the caption prepended. */
+  private async resolveAttachment(msg: NormalizedMessage): Promise<void> {
+    const att = msg.attachment;
+    if (!att) return;
+
+    const captionPrefix =
+      msg.caption !== undefined && msg.caption !== "" ? `${msg.caption}\n` : "";
+
+    // 1. Pre-download size guard (where the size is advertised).
+    if (att.fileSize !== undefined && att.fileSize > TELEGRAM_GETFILE_LIMIT_BYTES) {
+      const human = humanSize(att.fileSize);
+      await this.replyOnTelegram(
+        `That ${att.kind} is too large to download (${human}; the bot can only fetch files up to 20 MB).`,
+      );
+      msg.body = `${captionPrefix}[user sent ${att.kind} (${human}) — too large to download (over the 20 MB Bot API limit), not saved]`;
+      return;
+    }
+
+    // 2. Resolve the file_id to a file_path.
+    let filePath: string;
+    let resolvedSize = att.fileSize;
+    try {
+      const got = await this.client.getFile(att.fileId);
+      if (!got.ok) {
+        logCtx.fn(`Telegram dispatcher: getFile failed (status=${got.status})`);
+        msg.body = `${captionPrefix}[user sent ${att.kind} — could not retrieve it from Telegram (getFile failed), not saved]`;
+        return;
+      }
+      if (got.file.file_path === undefined || got.file.file_path === "") {
+        msg.body = `${captionPrefix}[user sent ${att.kind} — Telegram returned no downloadable path, not saved]`;
+        return;
+      }
+      filePath = got.file.file_path;
+      if (resolvedSize === undefined) resolvedSize = got.file.file_size;
+      // Re-guard with the authoritative size from getFile if the message
+      // omitted it.
+      if (resolvedSize !== undefined && resolvedSize > TELEGRAM_GETFILE_LIMIT_BYTES) {
+        const human = humanSize(resolvedSize);
+        await this.replyOnTelegram(
+          `That ${att.kind} is too large to download (${human}; the bot can only fetch files up to 20 MB).`,
+        );
+        msg.body = `${captionPrefix}[user sent ${att.kind} (${human}) — too large to download (over the 20 MB Bot API limit), not saved]`;
+        return;
+      }
+    } catch (err) {
+      // classifyError, never err.message (token-bearing URL safety).
+      logCtx.fn(`Telegram dispatcher: getFile threw: ${classifyError(err)}`);
+      msg.body = `${captionPrefix}[user sent ${att.kind} — could not retrieve it from Telegram, not saved]`;
+      return;
+    }
+
+    // 3. Download the bytes (re-guards the size on the wire).
+    let bytes: Uint8Array;
+    try {
+      const dl = await this.client.downloadFile(filePath);
+      if (!dl.ok) {
+        if (dl.reason.startsWith("file too large")) {
+          const human = resolvedSize !== undefined ? humanSize(resolvedSize) : "over 20 MB";
+          await this.replyOnTelegram(
+            `That ${att.kind} is too large to download (${human}; the bot can only fetch files up to 20 MB).`,
+          );
+          msg.body = `${captionPrefix}[user sent ${att.kind} — too large to download (over the 20 MB Bot API limit), not saved]`;
+          return;
+        }
+        // reason is already a bounded, token-free label from downloadFile.
+        logCtx.fn(`Telegram dispatcher: downloadFile failed: ${dl.reason}`);
+        msg.body = `${captionPrefix}[user sent ${att.kind} — download failed, not saved]`;
+        return;
+      }
+      bytes = dl.bytes;
+    } catch (err) {
+      logCtx.fn(`Telegram dispatcher: downloadFile threw: ${classifyError(err)}`);
+      msg.body = `${captionPrefix}[user sent ${att.kind} — download failed, not saved]`;
+      return;
+    }
+
+    // 4. Store and rewrite the body with the local path.
+    try {
+      // Derive a sanitized display leaf. Prefer the attachment's displayName
+      // (already safeName()-d in describeAttachment); fall back to the file_path
+      // basename. NEVER use the raw Telegram file_name for the path — storeInboundFile
+      // applies a final path-traversal guard regardless.
+      const leaf = att.displayName || basenameOf(filePath) || `${att.kind}.bin`;
+      const ts = msg.ts ? Date.parse(msg.ts) : nowCtx.fn();
+      const unixMs = Number.isFinite(ts) ? ts : nowCtx.fn();
+      const stored = await storeInboundFile(msg.chatId, unixMs, leaf, bytes);
+      const human = humanSize(bytes.byteLength);
+      msg.body = `${captionPrefix}[user sent ${att.kind}: ${stored} (${human})]`;
+    } catch (err) {
+      logCtx.fn(
+        `Telegram dispatcher: failed to store inbound ${att.kind}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      msg.body = `${captionPrefix}[user sent ${att.kind} — downloaded but failed to save locally]`;
+    }
+  }
+
+  /** Extract the fields we deliver from one `message_reaction` update.
+   *  Applies the same allowlist filter as inbound messages. Returns null on
+   *  malformed input (no chat_id), a non-allowlisted sender, or a no-op update
+   *  (neither added nor removed emoji — e.g. a custom_emoji-only change we
+   *  don't surface). */
+  private normalizeReaction(r: MessageReactionUpdated): NormalizedReaction | null {
+    const chatId = String(r.chat?.id ?? "");
+    if (!chatId) return null;
+    // The actor is `user` in private chats; `actor_chat` covers anonymous
+    // group reactions (we don't route groups, but keep the id correct for the
+    // allowlist check so a group reaction isn't accidentally allowed via an
+    // undefined user).
+    const userId =
+      r.user?.id !== undefined
+        ? String(r.user.id)
+        : r.actor_chat?.id !== undefined
+          ? String(r.actor_chat.id)
+          : undefined;
+
+    if (!this.isAllowed(chatId, userId)) {
+      this.logDrop(chatId, userId);
+      return null;
+    }
+
+    const username = r.user?.username ?? r.user?.first_name ?? "unknown";
+    const tsEpoch = r.date !== undefined ? r.date * 1000 : nowCtx.fn();
+    const ts = new Date(tsEpoch).toISOString();
+
+    const oldEmojis = emojiSet(r.old_reaction);
+    const newEmojis = emojiSet(r.new_reaction);
+    const added = [...newEmojis].filter((e) => !oldEmojis.has(e));
+    const removed = [...oldEmojis].filter((e) => !newEmojis.has(e));
+
+    // Nothing emoji-shaped changed (e.g. a custom-emoji-only update). Skip —
+    // surfacing "reacted with (custom emoji)" adds noise without signal.
+    if (added.length === 0 && removed.length === 0) return null;
+
+    const messageId = typeof r.message_id === "number" ? r.message_id : 0;
+    return { chatId, messageId, userId: userId ?? null, username, ts, added, removed };
+  }
+
+  /** Wrap a reaction event in a channel-reminder block and deliver it to the
+   *  coordinator. No retry / offline-prompt: a reaction is informational, so a
+   *  send failure is logged and the notice is dropped rather than re-prompting
+   *  the user or buffering. */
+  private async deliverReaction(reaction: NormalizedReaction): Promise<void> {
+    const wrapped = wrapReactionReminder(reaction);
+    try {
+      const result = await sendCtx.fn(wrapped, { fromAgent: TELEGRAM_SENTINEL });
+      if (!result.ok) {
+        logCtx.fn(
+          `Telegram dispatcher: reaction notice not delivered (coordinator offline?): ${result.stderr || "send returned ok=false"}`,
+        );
+      }
+    } catch (err) {
+      logCtx.fn(
+        `Telegram dispatcher: deliverReaction threw: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+}
+
+/** Collect the `emoji` strings from a reaction-type array, ignoring
+ *  custom-emoji and paid reactions (we only surface documented emoji). */
+function emojiSet(reactions: ReactionType[] | undefined): Set<string> {
+  const out = new Set<string>();
+  if (!Array.isArray(reactions)) return out;
+  for (const r of reactions) {
+    if (r && typeof r === "object" && (r as { type?: string }).type === "emoji") {
+      const emoji = (r as { emoji?: unknown }).emoji;
+      if (typeof emoji === "string" && emoji !== "") out.add(emoji);
+    }
+  }
+  return out;
 }
 
 /** Partition a per-chat batch into slash commands (raw passthrough) and
@@ -972,18 +1285,19 @@ export function wrapChannelReminder(chatId: string, messages: NormalizedMessage[
   if (messages.length === 1) {
     const m = messages[0]!;
     return [
-      `<channel source="telegram" user="${escapeAttr(m.username)}" ts="${escapeAttr(m.ts)}">`,
+      `<channel source="telegram" user="${escapeAttr(m.username)}" ts="${escapeAttr(m.ts)}"${messageIdAttr("message_id", m.messageId)}>`,
       m.body,
       `</channel>`,
       ``,
-      `To reply on Telegram, run \`ib tgsend "<your message>"\`.`,
+      REPLY_HINT,
     ].join("\n");
   }
 
   const first = messages[0]!;
+  const last = messages[messages.length - 1]!;
   const lines: string[] = [];
   lines.push(
-    `<channel source="telegram" chat_id="${escapeAttr(safeChatId)}" user="${escapeAttr(first.username)}" first_ts="${escapeAttr(first.ts)}" count="${messages.length}">`,
+    `<channel source="telegram" chat_id="${escapeAttr(safeChatId)}" user="${escapeAttr(first.username)}" first_ts="${escapeAttr(first.ts)}" count="${messages.length}"${messageIdAttr("last_message_id", last.messageId)}>`,
   );
   for (let i = 0; i < messages.length; i++) {
     if (i > 0) lines.push("---");
@@ -991,8 +1305,55 @@ export function wrapChannelReminder(chatId: string, messages: NormalizedMessage[
   }
   lines.push(`</channel>`);
   lines.push(``);
-  lines.push(`To reply on Telegram, run \`ib tgsend "<your message>"\`.`);
+  lines.push(REPLY_HINT);
   return lines.join("\n");
+}
+
+/** Hint appended to every wrapped channel block telling the coordinator how to
+ *  reply and react on Telegram. Centralized so the two `wrapChannelReminder`
+ *  branches (single + coalesced) and any future caller stay in sync. */
+const REPLY_HINT =
+  'To reply on Telegram, run `ib tgsend "<your message>"`. ' +
+  "To react to the latest message, run `ib tgreact <emoji>` " +
+  "(e.g. `ib tgreact 👍`), or target a specific one with " +
+  "`ib tgreact <emoji> --message-id <id>`.";
+
+/** Wrap a reaction event in a channel-reminder block. The body is a
+ *  human-readable summary, e.g. `Reacted 👍 to message 123` or
+ *  `Removed reaction 👍 from message 123`. Distinct `kind="reaction"`
+ *  attribute so the coordinator can tell a reaction event apart from a text
+ *  message. The reacted-to `message_id` is surfaced so the coordinator can
+ *  reply or react back to that exact message. */
+export function wrapReactionReminder(reaction: NormalizedReaction): string {
+  const parts: string[] = [];
+  // Each emoji is stripped of </channel> defensively (emoji never contain it,
+  // but the body is user-influenced data, so we stay consistent). Each clause
+  // carries its own preposition so the grammar reads correctly whether the
+  // update added, removed, or changed a reaction.
+  const msgRef = `message ${reaction.messageId}`;
+  if (reaction.added.length > 0) {
+    parts.push(`Reacted ${reaction.added.map(stripChannelClose).join(" ")} to ${msgRef}`);
+  }
+  if (reaction.removed.length > 0) {
+    parts.push(`Removed reaction ${reaction.removed.map(stripChannelClose).join(" ")} from ${msgRef}`);
+  }
+  const body = parts.join("; ");
+  return [
+    `<channel source="telegram" kind="reaction" user="${escapeAttr(reaction.username)}" ts="${escapeAttr(reaction.ts)}"${messageIdAttr("message_id", reaction.messageId)}>`,
+    body,
+    `</channel>`,
+    ``,
+    REPLY_HINT,
+  ].join("\n");
+}
+
+/** Render a ` name="id"` channel attribute, or the empty string when the id is
+ *  not a usable target (0 — emitted by `normalize()` when a message_id was
+ *  missing/non-numeric). Omitting it keeps the agent from being handed an
+ *  un-reactable `message_id="0"` (which `ib tgreact --message-id 0` rejects). */
+function messageIdAttr(name: string, messageId: number): string {
+  if (messageId <= 0) return "";
+  return ` ${name}="${messageId}"`;
 }
 
 /** Strip every `</channel>` substring from inbound text. Defense against a
@@ -1018,15 +1379,147 @@ export function safeName(name: string): string {
   return String(name).replace(/[<>\[\]\r\n;]/g, "");
 }
 
-/** Identify which attachment kind a message carries (photo, document, etc.).
- *  Returns null if the message has no recognized attachment field. */
-function attachmentTypeOf(msg: TelegramMessage): string | null {
-  if (msg.photo !== undefined && msg.photo !== null) return "photo";
-  if (msg.document !== undefined && msg.document !== null) return "document";
-  if (msg.voice !== undefined && msg.voice !== null) return "voice";
-  if (msg.audio !== undefined && msg.audio !== null) return "audio";
-  if (msg.video !== undefined && msg.video !== null) return "video";
-  if (msg.video_note !== undefined && msg.video_note !== null) return "video_note";
-  if (msg.sticker !== undefined && msg.sticker !== null) return "sticker";
+/** Inspect a message for a downloadable attachment and return a descriptor
+ *  (kind + file_id + advertised size + a sanitized display name), or null if it
+ *  carries no recognized attachment field.
+ *
+ *  For photos, the LARGEST `PhotoSize` (last element) is chosen for full
+ *  resolution. `displayName` is run through `safeName()` so a malicious
+ *  `file_name` can't inject channel-block or shell metacharacters; the on-disk
+ *  path is generated by `storeInboundFile`, which never trusts this name. */
+export function describeAttachment(msg: TelegramMessage): AttachmentDescriptor | null {
+  if (msg.photo !== undefined && msg.photo !== null) {
+    const sizes = msg.photo as PhotoSize[];
+    if (Array.isArray(sizes) && sizes.length > 0) {
+      const largest = pickLargestPhoto(sizes);
+      if (largest && typeof largest.file_id === "string" && largest.file_id !== "") {
+        return {
+          kind: "photo",
+          fileId: largest.file_id,
+          fileSize: typeof largest.file_size === "number" ? largest.file_size : undefined,
+          // Photos have no file_name; synthesize a stable .jpg leaf.
+          displayName: safeName(`${largest.file_unique_id ?? "photo"}.jpg`),
+        };
+      }
+    }
+    // Photo field present but unusable (empty array, missing file_id) — fall
+    // through to the other kinds in case a future field coexists; otherwise null.
+  }
+  if (msg.document !== undefined && msg.document !== null) {
+    const doc = msg.document;
+    if (typeof doc.file_id === "string" && doc.file_id !== "") {
+      const name =
+        typeof doc.file_name === "string" && doc.file_name !== ""
+          ? doc.file_name
+          : `${doc.file_unique_id ?? "document"}.bin`;
+      return {
+        kind: "document",
+        fileId: doc.file_id,
+        fileSize: typeof doc.file_size === "number" ? doc.file_size : undefined,
+        displayName: safeName(name),
+      };
+    }
+  }
+  if (msg.voice !== undefined && msg.voice !== null) {
+    const v = msg.voice;
+    if (typeof v.file_id === "string" && v.file_id !== "") {
+      return {
+        kind: "voice",
+        fileId: v.file_id,
+        fileSize: typeof v.file_size === "number" ? v.file_size : undefined,
+        displayName: safeName(`${v.file_unique_id ?? "voice"}.ogg`),
+      };
+    }
+  }
+  if (msg.audio !== undefined && msg.audio !== null) {
+    const a = msg.audio;
+    if (typeof a.file_id === "string" && a.file_id !== "") {
+      const name =
+        typeof a.file_name === "string" && a.file_name !== ""
+          ? a.file_name
+          : `${a.file_unique_id ?? "audio"}.mp3`;
+      return {
+        kind: "audio",
+        fileId: a.file_id,
+        fileSize: typeof a.file_size === "number" ? a.file_size : undefined,
+        displayName: safeName(name),
+      };
+    }
+  }
+  if (msg.video !== undefined && msg.video !== null) {
+    const v = msg.video;
+    if (typeof v.file_id === "string" && v.file_id !== "") {
+      const name =
+        typeof v.file_name === "string" && v.file_name !== ""
+          ? v.file_name
+          : `${v.file_unique_id ?? "video"}.mp4`;
+      return {
+        kind: "video",
+        fileId: v.file_id,
+        fileSize: typeof v.file_size === "number" ? v.file_size : undefined,
+        displayName: safeName(name),
+      };
+    }
+  }
+  if (msg.video_note !== undefined && msg.video_note !== null) {
+    const v = msg.video_note;
+    if (typeof v.file_id === "string" && v.file_id !== "") {
+      return {
+        kind: "video_note",
+        fileId: v.file_id,
+        fileSize: typeof v.file_size === "number" ? v.file_size : undefined,
+        displayName: safeName(`${v.file_unique_id ?? "video_note"}.mp4`),
+      };
+    }
+  }
+  if (msg.sticker !== undefined && msg.sticker !== null) {
+    const s = msg.sticker;
+    if (typeof s.file_id === "string" && s.file_id !== "") {
+      // Stickers are .webp (static) / .webm (video) / .tgs (animated). We can't
+      // always tell from the type flags, so default to .webp — the bytes are
+      // correct regardless; only the extension is a hint.
+      const ext = s.is_video ? "webm" : s.is_animated ? "tgs" : "webp";
+      return {
+        kind: "sticker",
+        fileId: s.file_id,
+        fileSize: typeof s.file_size === "number" ? s.file_size : undefined,
+        displayName: safeName(`${s.file_unique_id ?? "sticker"}.${ext}`),
+      };
+    }
+  }
   return null;
+}
+
+/** Pick the largest photo size by area (width*height), falling back to
+ *  file_size, then to the last array element (Telegram orders smallest→largest,
+ *  so the last element is the safe default per the design doc). */
+function pickLargestPhoto(sizes: PhotoSize[]): PhotoSize | undefined {
+  if (sizes.length === 0) return undefined;
+  let best = sizes[sizes.length - 1]!; // last = largest per Telegram convention
+  let bestArea = (best.width ?? 0) * (best.height ?? 0);
+  for (const s of sizes) {
+    const area = (s.width ?? 0) * (s.height ?? 0);
+    if (area > bestArea) {
+      best = s;
+      bestArea = area;
+    }
+  }
+  return best;
+}
+
+/** Human-readable byte size. KB/MB with one decimal where it helps. */
+export function humanSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "unknown size";
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)} KB`;
+  const mb = kb / 1024;
+  return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
+}
+
+/** Last path segment of a Telegram `file_path` (which uses `/` separators).
+ *  Used only as a display fallback; never as an on-disk path component. */
+function basenameOf(filePath: string): string {
+  const parts = String(filePath).split("/");
+  return parts[parts.length - 1] ?? "";
 }

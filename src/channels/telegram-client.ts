@@ -26,7 +26,7 @@
 
 import { InjectionContext } from "../types";
 import type { FetchLike } from "../types";
-import type { TelegramUpdate, TelegramMessage, TelegramApiResponse } from "./types";
+import type { TelegramUpdate, TelegramMessage, TelegramApiResponse, TelegramFile } from "./types";
 
 /** Hardcoded Bot API base URL. No env override (Phase 0 decision). */
 export const TELEGRAM_API_BASE = "https://api.telegram.org";
@@ -50,6 +50,29 @@ const SENDMESSAGE_TIMEOUT_MS = 15_000;
 // The typing indicator only lasts ~5s server-side; a longer timeout adds no
 // value because the indicator would expire before the response mattered.
 const SENDCHATACTION_TIMEOUT_MS = 5_000;
+// getFile is a small JSON POST — same one-shot ceiling as sendMessage.
+const GETFILE_TIMEOUT_MS = 15_000;
+// Downloads and uploads can be megabytes over a slow link, so they need a
+// far more generous deadline than the small JSON methods. 120s is well above
+// what the 20 MB download / 50 MB upload caps need on a normal connection
+// while still surfacing a dead socket eventually.
+const DOWNLOAD_TIMEOUT_MS = 120_000;
+const SENDFILE_TIMEOUT_MS = 120_000;
+
+/** Bot API `getFile` download ceiling. The standard Bot API refuses to serve
+ *  files larger than 20 MB via `getFile` (a local Bot API server would be
+ *  required for larger files). The dispatcher guards on this BEFORE attempting
+ *  a download where the size is known, and again on the downloaded byte count. */
+export const TELEGRAM_GETFILE_LIMIT_BYTES = 20 * 1024 * 1024;
+
+/** Outbound `sendPhoto` size ceiling for bots (~10 MB). Photos above this are
+ *  rejected locally with a clear message rather than an opaque API failure.
+ *  (Telegram recompresses photos anyway — large originals should be sent as a
+ *  document to preserve bytes.) */
+export const TELEGRAM_SENDPHOTO_LIMIT_BYTES = 10 * 1024 * 1024;
+
+/** Outbound `sendDocument` size ceiling for bots (~50 MB). */
+export const TELEGRAM_SENDDOCUMENT_LIMIT_BYTES = 50 * 1024 * 1024;
 
 /** Injectable fetch — defaults to globalThis.fetch. */
 export const fetchCtx = new InjectionContext<FetchLike>(globalThis.fetch);
@@ -122,8 +145,12 @@ export interface GetUpdatesOptions {
   limit?: number;
   /** Long-poll seconds the server holds the request. Default 25. */
   timeout?: number;
-  /** Update kinds to receive. Defaults to `["message"]` to cut payload noise
-   *  (no edited_message, no callback_query, etc.). */
+  /** Update kinds to receive. Defaults to `["message", "message_reaction"]` —
+   *  `message` for inbound text/attachments and `message_reaction` so the
+   *  dispatcher learns when the user reacts to a message. Other kinds
+   *  (edited_message, callback_query, etc.) are still excluded to cut payload
+   *  noise. NOTE: `message_reaction` is NOT delivered by default by Telegram;
+   *  it is only sent when explicitly listed here. */
   allowed_updates?: string[];
   /** AbortSignal from the caller — used by Phase 5 dispatcher to cancel
    *  in-flight long-poll on TUI exit. */
@@ -144,11 +171,84 @@ export interface SendChatActionOptions {
   action: string;
 }
 
+export interface SetMessageReactionOptions {
+  chat_id: number | string;
+  /** The message to react to. Per-chat identifier. */
+  message_id: number;
+  /** Reaction emoji to set. Must be from Telegram's documented reaction set
+   *  (validated by the caller via {@link validateReactionEmoji}). An empty
+   *  array clears the bot's reaction on the message. v1 only sends a single
+   *  emoji or clears. */
+  emoji: string | null;
+}
+
+/** Result of a single `setMessageReaction` POST. Mirrors {@link SendMessageResult}
+ *  so callers honoring 429 backoff get the same `retryAfterSec` shape. The
+ *  success result has no useful body (the API returns `true`), so we don't
+ *  surface one. */
+export type SetMessageReactionResult =
+  | { ok: true }
+  | {
+      ok: false;
+      status: number;
+      error_code?: number;
+      description?: string;
+      retryAfterSec: number | null;
+    };
+
 /** Result of a single `sendMessage` POST. The failure variant exposes
  *  `retryAfterSec` parsed from BOTH the `Retry-After` HTTP header and the
  *  `parameters.retry_after` body field (header wins, body is the fallback)
  *  so callers can honor the server's actual backoff hint instead of guessing. */
 export type SendMessageResult =
+  | { ok: true; result: TelegramMessage }
+  | {
+      ok: false;
+      status: number;
+      error_code?: number;
+      description?: string;
+      retryAfterSec: number | null;
+    };
+
+/** Result of a `getFile` POST. The success variant carries the `file_path`
+ *  needed to build the download URL; the failure variant mirrors
+ *  {@link SendMessageResult} so callers can read status/description. */
+export type GetFileResult =
+  | { ok: true; file: TelegramFile }
+  | {
+      ok: false;
+      status: number;
+      error_code?: number;
+      description?: string;
+      retryAfterSec: number | null;
+    };
+
+/** Result of a `downloadFile` GET. On success the bytes are returned as a
+ *  Uint8Array. The failure variant never includes the download URL (it embeds
+ *  the token) — only a bounded status/reason. */
+export type DownloadFileResult =
+  | { ok: true; bytes: Uint8Array }
+  | { ok: false; status: number; reason: string };
+
+export interface SendPhotoOptions {
+  chat_id: number | string;
+  /** Absolute path to a local file to upload as a photo (multipart). */
+  path: string;
+  /** Optional caption shown under the photo. */
+  caption?: string;
+}
+
+export interface SendDocumentOptions {
+  chat_id: number | string;
+  /** Absolute path to a local file to upload as a document (multipart). */
+  path: string;
+  /** Optional caption shown under the document. */
+  caption?: string;
+}
+
+/** Result of `sendPhoto` / `sendDocument`. Mirrors {@link SendMessageResult}
+ *  so the outbox's 429-retry logic reads the same shape. */
+export type SendFileResult =
   | { ok: true; result: TelegramMessage }
   | {
       ok: false;
@@ -213,7 +313,7 @@ export class TelegramClient {
    *  long-poll timed out with no updates). Throws only if the AbortSignal
    *  fires before any successful response. */
   async getUpdates(opts: GetUpdatesOptions = {}): Promise<TelegramUpdate[]> {
-    const allowed = opts.allowed_updates ?? ["message"];
+    const allowed = opts.allowed_updates ?? ["message", "message_reaction"];
     const longPollSec = opts.timeout ?? 25;
     const params: Record<string, unknown> = {
       timeout: longPollSec,
@@ -374,6 +474,211 @@ export class TelegramClient {
     }
   }
 
+  /** POST `setMessageReaction`. No retry loop — outbound is one-shot from the
+   *  caller's perspective, same contract as {@link sendMessage}. The outbox
+   *  wraps this with a single 429-retry of its own.
+   *
+   *  `emoji` is sent as a one-element `reaction` array `[{type:"emoji",emoji}]`;
+   *  passing `null` sends an empty `reaction` array, which clears the bot's
+   *  reaction. The caller is responsible for validating the emoji against
+   *  Telegram's documented set (see `validateReactionEmoji`) — this method
+   *  sends whatever it is handed.
+   *
+   *  Goes through `readRaw` so `Retry-After` is read from both the HTTP header
+   *  and `parameters.retry_after`. */
+  async setMessageReaction(opts: SetMessageReactionOptions): Promise<SetMessageReactionResult> {
+    const reaction =
+      opts.emoji === null ? [] : [{ type: "emoji", emoji: opts.emoji }];
+    const body = JSON.stringify({
+      chat_id: opts.chat_id,
+      message_id: opts.message_id,
+      reaction,
+    });
+    const url = this.urlFor("setMessageReaction");
+    const composedSignal = composeAbortSignal(undefined, SENDMESSAGE_TIMEOUT_MS);
+    const resp = await fetchCtx.fn(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+      signal: composedSignal,
+    });
+    const raw = await readRaw<boolean>(resp);
+    if (raw.status >= 200 && raw.status < 300 && raw.body?.ok === true) {
+      return { ok: true };
+    }
+    logCtx.fn(`telegram setMessageReaction: status=${raw.status}`);
+    return {
+      ok: false,
+      status: raw.status,
+      error_code: raw.body?.error_code ?? raw.status,
+      description: raw.body?.description ?? `HTTP ${raw.status}`,
+      retryAfterSec: raw.retryAfterSec,
+    };
+  }
+
+  /** POST `getFile`. Resolves a `file_id` to a {@link TelegramFile} carrying the
+   *  `file_path` needed for {@link downloadFile}. No retry loop — the dispatcher
+   *  treats a failure as "skip this attachment" rather than retrying.
+   *
+   *  Goes through `readRaw`, so `Retry-After` is available on a 429 (though the
+   *  inbound path doesn't currently retry it). Never logs the URL. */
+  async getFile(fileId: string): Promise<GetFileResult> {
+    const body = JSON.stringify({ file_id: fileId });
+    const url = this.urlFor("getFile");
+    const composedSignal = composeAbortSignal(undefined, GETFILE_TIMEOUT_MS);
+    let resp: Response;
+    try {
+      resp = await fetchCtx.fn(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+        signal: composedSignal,
+      });
+    } catch (err) {
+      // Consistent with downloadFile / sendMultipartFile: surface a stable,
+      // token-safe label rather than letting a network throw (whose message
+      // could embed the bot-token URL) propagate to the dispatcher.
+      return { ok: false, status: 0, error_code: 0, description: classifyError(err), retryAfterSec: null };
+    }
+    const raw = await readRaw<TelegramFile>(resp);
+    if (raw.status >= 200 && raw.status < 300 && raw.body?.ok === true) {
+      return { ok: true, file: (raw.body.result ?? {}) as TelegramFile };
+    }
+    logCtx.fn(`telegram getFile: status=${raw.status}`);
+    return {
+      ok: false,
+      status: raw.status,
+      error_code: raw.body?.error_code ?? raw.status,
+      description: raw.body?.description ?? `HTTP ${raw.status}`,
+      retryAfterSec: raw.retryAfterSec,
+    };
+  }
+
+  /** GET the file bytes from `https://api.telegram.org/file/bot<token>/<file_path>`.
+   *
+   *  CRITICAL: the download URL embeds the bot token. It is NEVER logged — on
+   *  any failure we surface only an HTTP status or a `classifyError()` label,
+   *  never the URL or a raw `err.message` (which could contain the URL). The
+   *  caller (dispatcher) is responsible for the 20 MB size guard; this method
+   *  also refuses to buffer a body whose `Content-Length` already exceeds the
+   *  limit so a malicious/oversized response can't blow up memory.
+   *
+   *  Returns the bytes as a Uint8Array on success. */
+  async downloadFile(filePath: string): Promise<DownloadFileResult> {
+    const url = this.fileUrlFor(filePath);
+    const composedSignal = composeAbortSignal(undefined, DOWNLOAD_TIMEOUT_MS);
+    let resp: Response;
+    try {
+      resp = await fetchCtx.fn(url, { method: "GET", signal: composedSignal });
+    } catch (err) {
+      // classifyError, never err.message — the latter could embed the
+      // token-bearing URL.
+      return { ok: false, status: 0, reason: classifyError(err) };
+    }
+    if (resp.status < 200 || resp.status >= 300) {
+      logCtx.fn(`telegram downloadFile: status=${resp.status}`);
+      return { ok: false, status: resp.status, reason: `HTTP ${resp.status}` };
+    }
+    // Guard on the advertised length before buffering — refuse oversized bodies
+    // up front so a 20 MB+ file never lands in memory.
+    const lenHeader = resp.headers.get("content-length");
+    if (lenHeader !== null) {
+      const len = Number.parseInt(lenHeader, 10);
+      if (Number.isFinite(len) && len > TELEGRAM_GETFILE_LIMIT_BYTES) {
+        return {
+          ok: false,
+          status: resp.status,
+          reason: `file too large (${len} bytes > ${TELEGRAM_GETFILE_LIMIT_BYTES} limit)`,
+        };
+      }
+    }
+    let buf: ArrayBuffer;
+    try {
+      buf = await resp.arrayBuffer();
+    } catch (err) {
+      return { ok: false, status: resp.status, reason: classifyError(err) };
+    }
+    // Second guard on the actual byte count — a chunked response may omit
+    // Content-Length, so we re-check after buffering.
+    if (buf.byteLength > TELEGRAM_GETFILE_LIMIT_BYTES) {
+      return {
+        ok: false,
+        status: resp.status,
+        reason: `file too large (${buf.byteLength} bytes > ${TELEGRAM_GETFILE_LIMIT_BYTES} limit)`,
+      };
+    }
+    return { ok: true, bytes: new Uint8Array(buf) };
+  }
+
+  /** POST `sendPhoto` with a LOCAL file uploaded as multipart/form-data.
+   *
+   *  Telegram recompresses photos sent this way — callers wanting exact bytes
+   *  (e.g. a PNG diff) should use {@link sendDocument} instead. No retry loop;
+   *  the outbox wraps this with a single 429-retry. Never logs the URL. */
+  async sendPhoto(opts: SendPhotoOptions): Promise<SendFileResult> {
+    return this.sendMultipartFile("sendPhoto", "photo", opts.chat_id, opts.path, opts.caption);
+  }
+
+  /** POST `sendDocument` with a LOCAL file uploaded as multipart/form-data.
+   *  Preserves the exact bytes (no recompression). Same contract as
+   *  {@link sendPhoto}. */
+  async sendDocument(opts: SendDocumentOptions): Promise<SendFileResult> {
+    return this.sendMultipartFile("sendDocument", "document", opts.chat_id, opts.path, opts.caption);
+  }
+
+  /** Shared multipart upload for sendPhoto / sendDocument. Builds a `FormData`
+   *  with `Bun.file(path)` (no new dependency, no manual boundary handling) and
+   *  POSTs it. The `Content-Type: multipart/form-data` boundary header is set
+   *  by the runtime from the FormData body — we must NOT set it ourselves.
+   *
+   *  Never logs the URL. On a fetch throw we surface `classifyError()` so a
+   *  token-bearing URL can't leak via `err.message`. */
+  private async sendMultipartFile(
+    method: string,
+    field: "photo" | "document",
+    chatId: number | string,
+    path: string,
+    caption: string | undefined,
+  ): Promise<SendFileResult> {
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    if (caption !== undefined && caption !== "") form.append("caption", caption);
+    // Bun.file is lazy — the bytes stream from disk into the request body.
+    form.append(field, Bun.file(path));
+
+    const url = this.urlFor(method);
+    const composedSignal = composeAbortSignal(undefined, SENDFILE_TIMEOUT_MS);
+    let resp: Response;
+    try {
+      // No explicit content-type header: the runtime derives the multipart
+      // boundary from the FormData body. Setting it manually breaks parsing.
+      resp = await fetchCtx.fn(url, { method: "POST", body: form, signal: composedSignal });
+    } catch (err) {
+      // Surface as a non-2xx-shaped failure so the outbox formats it uniformly.
+      // classifyError, never err.message (token-bearing URL safety).
+      logCtx.fn(`telegram ${method}: ${classifyError(err)}`);
+      return {
+        ok: false,
+        status: 0,
+        error_code: 0,
+        description: classifyError(err),
+        retryAfterSec: null,
+      };
+    }
+    const raw = await readRaw<TelegramMessage>(resp);
+    if (raw.status >= 200 && raw.status < 300 && raw.body?.ok === true) {
+      return { ok: true, result: (raw.body.result ?? {}) as TelegramMessage };
+    }
+    logCtx.fn(`telegram ${method}: status=${raw.status}`);
+    return {
+      ok: false,
+      status: raw.status,
+      error_code: raw.body?.error_code ?? raw.status,
+      description: raw.body?.description ?? `HTTP ${raw.status}`,
+      retryAfterSec: raw.retryAfterSec,
+    };
+  }
+
   /** Single attempt at a Bot API method. Maps HTTP / parse outcomes onto the
    *  `AttemptOutcome` discriminated union the retry loop reads.
    *
@@ -446,6 +751,13 @@ export class TelegramClient {
   /** Build the per-method URL. Never logged verbatim — it embeds the token. */
   private urlFor(method: string): string {
     return `${this.baseUrl}/bot${this.token}/${method}`;
+  }
+
+  /** Build the file-download URL. The download endpoint is `/file/bot<token>/...`
+   *  (note the `/file/` prefix, distinct from the method URL). Like `urlFor`,
+   *  it embeds the token and must NEVER be logged. */
+  private fileUrlFor(filePath: string): string {
+    return `${this.baseUrl}/file/bot${this.token}/${filePath}`;
   }
 }
 

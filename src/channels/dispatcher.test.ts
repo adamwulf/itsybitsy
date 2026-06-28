@@ -6,8 +6,11 @@ import {
   TelegramDispatcher,
   TELEGRAM_SENTINEL,
   wrapChannelReminder,
+  wrapReactionReminder,
   stripChannelClose,
   safeName,
+  describeAttachment,
+  humanSize,
   sendCtx,
   sleepCtx,
   nowCtx,
@@ -15,6 +18,15 @@ import {
   ensureCoordinatorCtx,
   restartCoordinatorCtx,
 } from "./dispatcher";
+import {
+  setStateDir as setAccessStateDir,
+  resetStateDir as resetAccessStateDir,
+} from "./access";
+import {
+  setStateDir as setLastMsgStateDir,
+  resetStateDir as resetLastMsgStateDir,
+  readLastMessage,
+} from "./last-message-cache";
 import type { SendToCoordinatorFn } from "./dispatcher";
 import {
   TelegramClient,
@@ -28,6 +40,11 @@ import {
   writeCachedChatId,
   readCachedChatId,
 } from "./chat-id-cache";
+import {
+  setInboundDir,
+  resetInboundDir,
+  defaultInboundDir,
+} from "./inbound-store";
 import type { FetchLike } from "../types";
 import type { TelegramUpdate, TelegramMessage } from "./types";
 
@@ -143,6 +160,42 @@ function update(
   return { update_id, message: m };
 }
 
+/** Build a message_reaction TelegramUpdate. `added`/`removed` are emoji
+ *  strings; they're translated into old_reaction/new_reaction arrays such that
+ *  the dispatcher's diff produces exactly the requested added/removed sets. */
+function reactionUpdate(
+  update_id: number,
+  opts: {
+    chatId: number | string;
+    messageId: number;
+    userId?: number | string;
+    username?: string;
+    added?: string[];
+    removed?: string[];
+    date?: number;
+  },
+): TelegramUpdate {
+  const added = opts.added ?? [];
+  const removed = opts.removed ?? [];
+  // old_reaction = removed (present before, gone after).
+  // new_reaction = added (absent before, present after).
+  const toArr = (emojis: string[]) => emojis.map((e) => ({ type: "emoji" as const, emoji: e }));
+  return {
+    update_id,
+    message_reaction: {
+      chat: { id: typeof opts.chatId === "string" ? Number(opts.chatId) : opts.chatId },
+      message_id: opts.messageId,
+      user:
+        opts.userId !== undefined
+          ? { id: typeof opts.userId === "string" ? Number(opts.userId) : opts.userId, username: opts.username }
+          : undefined,
+      date: opts.date ?? 1_700_000_000,
+      old_reaction: toArr(removed),
+      new_reaction: toArr(added),
+    },
+  };
+}
+
 /* ------------------------------------------------------------------ */
 /*  Pure helpers: stripChannelClose, safeName, wrapChannelReminder     */
 /* ------------------------------------------------------------------ */
@@ -179,28 +232,109 @@ describe("safeName", () => {
   });
 });
 
+describe("describeAttachment", () => {
+  function msg(fields: Partial<TelegramMessage>): TelegramMessage {
+    return { message_id: 1, chat: { id: 100 }, ...fields };
+  }
+
+  test("returns null for a plain text message", () => {
+    expect(describeAttachment(msg({ text: "hi" }))).toBeNull();
+  });
+
+  test("photo: picks the LARGEST PhotoSize by area", () => {
+    const d = describeAttachment(
+      msg({
+        photo: [
+          { file_id: "s", file_unique_id: "us", width: 90, height: 90, file_size: 100 },
+          { file_id: "m", file_unique_id: "um", width: 320, height: 320, file_size: 1000 },
+          { file_id: "l", file_unique_id: "ul", width: 1280, height: 1280, file_size: 9000 },
+        ],
+      }),
+    );
+    expect(d).not.toBeNull();
+    expect(d!.kind).toBe("photo");
+    expect(d!.fileId).toBe("l");
+    expect(d!.fileSize).toBe(9000);
+    expect(d!.displayName.endsWith(".jpg")).toBe(true);
+  });
+
+  test("photo: empty array yields null", () => {
+    expect(describeAttachment(msg({ photo: [] }))).toBeNull();
+  });
+
+  test("document: carries file_id, size, and the file_name", () => {
+    const d = describeAttachment(
+      msg({ document: { file_id: "d1", file_unique_id: "ud", file_name: "report.pdf", file_size: 2048 } }),
+    );
+    expect(d!.kind).toBe("document");
+    expect(d!.fileId).toBe("d1");
+    expect(d!.fileSize).toBe(2048);
+    expect(d!.displayName).toBe("report.pdf");
+  });
+
+  test("document: a malicious file_name is sanitized via safeName", () => {
+    const d = describeAttachment(
+      msg({ document: { file_id: "d", file_unique_id: "u", file_name: "evil<>;\r\nname.bin" } }),
+    );
+    expect(d!.displayName).toBe("evilname.bin");
+  });
+
+  test("voice / audio / video / video_note / sticker are recognized", () => {
+    expect(describeAttachment(msg({ voice: { file_id: "v", file_unique_id: "u" } }))!.kind).toBe("voice");
+    expect(describeAttachment(msg({ audio: { file_id: "a", file_unique_id: "u" } }))!.kind).toBe("audio");
+    expect(describeAttachment(msg({ video: { file_id: "vi", file_unique_id: "u" } }))!.kind).toBe("video");
+    expect(describeAttachment(msg({ video_note: { file_id: "vn", file_unique_id: "u" } }))!.kind).toBe("video_note");
+    expect(describeAttachment(msg({ sticker: { file_id: "st", file_unique_id: "u" } }))!.kind).toBe("sticker");
+  });
+
+  test("sticker extension reflects the type flags", () => {
+    expect(describeAttachment(msg({ sticker: { file_id: "s", file_unique_id: "u", is_video: true } }))!.displayName).toContain(".webm");
+    expect(describeAttachment(msg({ sticker: { file_id: "s", file_unique_id: "u", is_animated: true } }))!.displayName).toContain(".tgs");
+    expect(describeAttachment(msg({ sticker: { file_id: "s", file_unique_id: "u" } }))!.displayName).toContain(".webp");
+  });
+
+  test("missing file_id yields null even if the field is present", () => {
+    // A document object with no usable file_id is unusable.
+    expect(describeAttachment(msg({ document: { file_id: "", file_unique_id: "u" } }))).toBeNull();
+  });
+});
+
+describe("humanSize", () => {
+  test("bytes", () => expect(humanSize(512)).toBe("512 B"));
+  test("kilobytes with one decimal under 10", () => expect(humanSize(1536)).toBe("1.5 KB"));
+  test("kilobytes rounded over 10", () => expect(humanSize(50 * 1024)).toBe("50 KB"));
+  test("megabytes", () => expect(humanSize(5 * 1024 * 1024)).toBe("5.0 MB"));
+  test("negative / NaN → unknown", () => {
+    expect(humanSize(-1)).toBe("unknown size");
+    expect(humanSize(NaN)).toBe("unknown size");
+  });
+});
+
 describe("wrapChannelReminder", () => {
-  test("single message: no count, no separators, inline reply hint", () => {
+  test("single message: no count, no separators, inline reply hint, message_id", () => {
     const out = wrapChannelReminder("12345", [
-      { chatId: "12345", userId: "1", username: "alice", ts: "2026-05-02T00:00:00.000Z", body: "hello", attachmentType: null },
+      { chatId: "12345", messageId: 42, userId: "1", username: "alice", ts: "2026-05-02T00:00:00.000Z", body: "hello", attachmentType: null },
     ]);
-    expect(out).toContain('<channel source="telegram" user="alice" ts="2026-05-02T00:00:00.000Z">');
+    expect(out).toContain('<channel source="telegram" user="alice" ts="2026-05-02T00:00:00.000Z" message_id="42">');
     expect(out).toContain("hello");
     expect(out).toContain("</channel>");
     expect(out).toContain("To reply on Telegram, run `ib tgsend");
+    expect(out).toContain("ib tgreact");
     expect(out).not.toContain("count=");
     expect(out).not.toContain("---");
   });
 
-  test("burst of 3: one block with count=3 and --- separators", () => {
+  test("burst of 3: one block with count=3, --- separators, last_message_id", () => {
     const out = wrapChannelReminder("12345", [
-      { chatId: "12345", userId: "1", username: "alice", ts: "2026-05-02T00:00:00.000Z", body: "one", attachmentType: null },
-      { chatId: "12345", userId: "1", username: "alice", ts: "2026-05-02T00:00:01.000Z", body: "two", attachmentType: null },
-      { chatId: "12345", userId: "1", username: "alice", ts: "2026-05-02T00:00:02.000Z", body: "three", attachmentType: null },
+      { chatId: "12345", messageId: 10, userId: "1", username: "alice", ts: "2026-05-02T00:00:00.000Z", body: "one", attachmentType: null },
+      { chatId: "12345", messageId: 11, userId: "1", username: "alice", ts: "2026-05-02T00:00:01.000Z", body: "two", attachmentType: null },
+      { chatId: "12345", messageId: 12, userId: "1", username: "alice", ts: "2026-05-02T00:00:02.000Z", body: "three", attachmentType: null },
     ]);
     expect(out).toContain('count="3"');
     expect(out).toContain('chat_id="12345"');
     expect(out).toContain('first_ts="2026-05-02T00:00:00.000Z"');
+    // last_message_id reflects the most recent message — the default tgreact target.
+    expect(out).toContain('last_message_id="12"');
     expect(out).toContain("one\n---\ntwo\n---\nthree");
     // Exactly 2 separators (between 3 messages).
     expect(out.split("\n---\n").length).toBe(3);
@@ -208,13 +342,70 @@ describe("wrapChannelReminder", () => {
 
   test("escapes attribute special chars", () => {
     const out = wrapChannelReminder("99", [
-      { chatId: "99", userId: "1", username: 'alice "the" bot', ts: "t", body: "x", attachmentType: null },
+      { chatId: "99", messageId: 1, userId: "1", username: 'alice "the" bot', ts: "t", body: "x", attachmentType: null },
     ]);
     expect(out).toContain('user="alice &quot;the&quot; bot"');
   });
 
   test("throws on empty messages", () => {
     expect(() => wrapChannelReminder("99", [])).toThrow();
+  });
+
+  test("omits message_id when it is 0 (missing/non-numeric upstream)", () => {
+    const out = wrapChannelReminder("12345", [
+      { chatId: "12345", messageId: 0, userId: "1", username: "alice", ts: "t", body: "hi", attachmentType: null },
+    ]);
+    // No un-reactable message_id="0" handed to the agent.
+    expect(out).not.toContain('message_id="0"');
+    expect(out).not.toContain("message_id=");
+  });
+});
+
+describe("wrapReactionReminder", () => {
+  test("added reaction: kind=reaction, message_id, human-readable body", () => {
+    const out = wrapReactionReminder({
+      chatId: "100",
+      messageId: 55,
+      userId: "7",
+      username: "adam",
+      ts: "2026-06-27T00:00:00.000Z",
+      added: ["👍"],
+      removed: [],
+    });
+    expect(out).toContain('source="telegram" kind="reaction"');
+    expect(out).toContain('user="adam"');
+    expect(out).toContain('message_id="55"');
+    expect(out).toContain("Reacted 👍 to message 55");
+    expect(out).toContain("</channel>");
+    // The reply hint mentions tgreact so the coordinator can react back.
+    expect(out).toContain("ib tgreact");
+  });
+
+  test("removed reaction reads as 'Removed reaction'", () => {
+    const out = wrapReactionReminder({
+      chatId: "100",
+      messageId: 9,
+      userId: "7",
+      username: "adam",
+      ts: "t",
+      added: [],
+      removed: ["🔥"],
+    });
+    expect(out).toContain("Removed reaction 🔥 from message 9");
+  });
+
+  test("changed reaction shows both added and removed", () => {
+    const out = wrapReactionReminder({
+      chatId: "100",
+      messageId: 3,
+      userId: "7",
+      username: "adam",
+      ts: "t",
+      added: ["🎉"],
+      removed: ["👍"],
+    });
+    expect(out).toContain("Reacted 🎉");
+    expect(out).toContain("Removed reaction 👍");
   });
 });
 
@@ -227,8 +418,9 @@ describe("TelegramDispatcher", () => {
   let send: SendSpy;
   let logs: string[];
   let dispSleeps: number[];
+  let stateRoot: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     mock = makeMockFetch();
     clientFetchCtx.set(mock.fn);
     clientSleepCtx.set(async () => { /* fast forward */ });
@@ -242,6 +434,15 @@ describe("TelegramDispatcher", () => {
     nowCtx.set(() => 1_700_000_000_000);
     logs = [];
     logCtx.set((line) => logs.push(line));
+
+    // Point the last-message cache at a tmp dir so `deliver()`'s cache write
+    // (added for `ib tgreact`) never touches the real ~/.itsybitsy state.
+    stateRoot = await mkdtemp(join(tmpdir(), "dispatcher-state-"));
+    setAccessStateDir(join(stateRoot, "channels", "telegram"));
+    setLastMsgStateDir(join(stateRoot, "channels", "telegram"));
+    // Point the inbound-download dir at a tmp dir so attachment downloads never
+    // touch the real ~/.itsybitsy state.
+    setInboundDir(join(stateRoot, "channels", "telegram", "inbound"));
   });
 
   afterEach(async () => {
@@ -254,6 +455,10 @@ describe("TelegramDispatcher", () => {
     logCtx.reset();
     ensureCoordinatorCtx.reset();
     restartCoordinatorCtx.reset();
+    resetAccessStateDir();
+    resetLastMsgStateDir();
+    resetInboundDir();
+    if (stateRoot) await rm(stateRoot, { recursive: true, force: true });
   });
 
   /** Build a dispatcher pre-wired with a TelegramClient and our mock fetch. */
@@ -294,6 +499,81 @@ describe("TelegramDispatcher", () => {
     expect(call.message).toContain("hello world");
     expect(call.message).toContain("</channel>");
     expect(call.message).toContain('ib tgsend');
+  });
+
+  test("inbound text persists the latest message_id to the last-message cache", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { chat: { id: 100 }, message_id: 4321, from: { id: 7, username: "alice" }, text: "hi" })],
+    });
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => send.calls.length >= 1, 1_000);
+    await d.stop();
+
+    const cached = await readLastMessage();
+    expect(cached).not.toBeNull();
+    expect(cached!.chat_id).toBe("100");
+    expect(cached!.message_id).toBe(4321);
+  });
+
+  test("inbound message_reaction: delivers a reaction event, not a text block", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [reactionUpdate(1, { chatId: 100, messageId: 50, userId: 7, username: "adam", added: ["👍"] })],
+    });
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => send.calls.length >= 1, 1_000);
+    await d.stop();
+
+    expect(send.calls.length).toBe(1);
+    const call = send.calls[0]!;
+    expect(call.opts?.fromAgent).toBe(TELEGRAM_SENTINEL);
+    expect(call.message).toContain('kind="reaction"');
+    expect(call.message).toContain("Reacted 👍 to message 50");
+    expect(call.message).toContain('message_id="50"');
+  });
+
+  test("inbound reaction from a non-allowlisted chat is dropped", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [reactionUpdate(1, { chatId: 999, messageId: 1, userId: 8, username: "mallory", added: ["👍"] })],
+    });
+
+    const d = makeDispatcher({ allowedChatIds: ["100"], chatId: "100" });
+    await d.start();
+    // Give the loop a moment; nothing should be delivered.
+    await new Promise((r) => setTimeout(r, 50));
+    await d.stop();
+
+    expect(send.calls.length).toBe(0);
+  });
+
+  test("a message and a reaction in the same batch deliver message-then-reaction", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [
+        update(1, { chat: { id: 100 }, message_id: 60, from: { id: 7, username: "adam" }, text: "ping" }),
+        reactionUpdate(2, { chatId: 100, messageId: 60, userId: 7, username: "adam", added: ["🔥"] }),
+      ],
+    });
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => send.calls.length >= 2, 1_000);
+    await d.stop();
+
+    expect(send.calls.length).toBe(2);
+    expect(send.calls[0]!.message).toContain("ping");
+    expect(send.calls[1]!.message).toContain('kind="reaction"');
+    expect(send.calls[1]!.message).toContain("🔥");
   });
 
   test("burst coalesce: 3 updates from same chat → one wrapped block with count=3", async () => {
@@ -505,16 +785,22 @@ describe("TelegramDispatcher", () => {
     expect(dropLogs.length).toBe(2);
   });
 
-  test("attachment with caption: caption becomes channel-reminder body, no attachment notice", async () => {
+  test("captioned attachment: downloads, surfaces caption + local path, no text-only reply", async () => {
     mock.enqueueResponse({ ok: true, result: [] }); // probe
     mock.enqueueResponse({
       ok: true,
       result: [update(1, {
         chat: { id: 100 }, from: { id: 7, username: "alice" },
-        photo: [{ file_id: "x" }],
+        photo: [
+          { file_id: "small", file_unique_id: "us", width: 90, height: 90, file_size: 100 },
+          { file_id: "big", file_unique_id: "ub", width: 1280, height: 1280, file_size: 5000 },
+        ],
         caption: "look at this",
       })],
     });
+    // resolveAttachment: getFile (POST) → then downloadFile (GET bytes).
+    mock.enqueueResponse({ ok: true, result: { file_id: "big", file_unique_id: "ub", file_path: "photos/file_1.jpg" } });
+    mock.enqueue(() => new Response(new Uint8Array([1, 2, 3, 4, 5]), { status: 200 }));
 
     const d = makeDispatcher();
     await d.start();
@@ -526,22 +812,83 @@ describe("TelegramDispatcher", () => {
     expect(send.calls.length).toBe(1);
     const m = send.calls[0]!.message;
     expect(m).toContain("look at this");
-    expect(m).not.toContain("[user sent");
+    expect(m).toContain("[user sent photo:");
+    // The largest PhotoSize was chosen → getFile asked for file_id "big".
+    const getFileInit = mock.allInits().find((_, i) => mock.allUrls()[i]!.includes("/getFile"));
+    expect(JSON.parse(getFileInit?.body as string).file_id).toBe("big");
+    // No "text only supported" reply anymore.
     const sendMessageUrls = mock.allUrls().filter((u) => u.includes("/sendMessage"));
     expect(sendMessageUrls.length).toBe(0);
+    // File actually landed under the inbound dir.
+    const { readdir } = await import("fs/promises");
+    const chatDir = join(defaultInboundDir(), "100");
+    const files = await readdir(chatDir);
+    expect(files.length).toBe(1);
+    expect(files[0]!).toContain(".jpg");
   });
 
-  test("bare attachment: 'Received attachment' reply + [user sent photo] coordinator block", async () => {
+  test("bare attachment: downloads + surfaces local path (no text-only reply)", async () => {
     mock.enqueueResponse({ ok: true, result: [] }); // probe
     mock.enqueueResponse({
       ok: true,
       result: [update(1, {
         chat: { id: 100 }, from: { id: 7, username: "alice" },
-        photo: [{ file_id: "x" }],
+        photo: [{ file_id: "x", file_unique_id: "ux", width: 800, height: 600, file_size: 3000 }],
       })],
     });
-    // Reply sendMessage gets a 200.
-    mock.enqueueResponse({ ok: true, result: { message_id: 99, chat: { id: 100 } } });
+    mock.enqueueResponse({ ok: true, result: { file_id: "x", file_unique_id: "ux", file_path: "photos/p.jpg" } });
+    mock.enqueue(() => new Response(new Uint8Array([9, 9, 9]), { status: 200 }));
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => send.calls.length >= 1, 1_000);
+    await d.stop();
+
+    expect(send.calls.length).toBe(1);
+    const m = send.calls[0]!.message;
+    expect(m).toContain("[user sent photo:");
+    expect(m).toMatch(/\(\d+ B\)/); // size annotation
+    // No "Received attachment — text only supported" reply.
+    expect(mock.allUrls().some((u) => u.includes("/sendMessage"))).toBe(false);
+  });
+
+  test("document download: surfaces a local path with the sanitized name", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [
+        update(1, {
+          chat: { id: 100 }, from: { id: 7, username: "a" },
+          document: { file_id: "d1", file_unique_id: "ud", file_name: "report.pdf", file_size: 2048 },
+        }),
+      ],
+    });
+    mock.enqueueResponse({ ok: true, result: { file_id: "d1", file_unique_id: "ud", file_path: "documents/report.pdf" } });
+    mock.enqueue(() => new Response(new Uint8Array(2048), { status: 200 }));
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => send.calls.length >= 1, 1_000);
+    await d.stop();
+
+    const m = send.calls[0]!.message;
+    expect(m).toContain("[user sent document:");
+    expect(m).toContain("report.pdf");
+  });
+
+  test("oversized attachment (advertised > 20MB): skips download, replies too big, note to coordinator", async () => {
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [
+        update(1, {
+          chat: { id: 100 }, from: { id: 7, username: "a" },
+          document: { file_id: "huge", file_unique_id: "uh", file_name: "big.zip", file_size: 25 * 1024 * 1024 },
+        }),
+      ],
+    });
+    // The "too big" Telegram reply sendMessage gets a 200.
+    mock.enqueueResponse({ ok: true, result: { message_id: 1, chat: { id: 100 } } });
 
     const d = makeDispatcher();
     await d.start();
@@ -549,32 +896,39 @@ describe("TelegramDispatcher", () => {
     await waitFor(() => mock.allUrls().some((u) => u.includes("/sendMessage")), 1_000);
     await d.stop();
 
-    expect(send.calls.length).toBe(1);
-    expect(send.calls[0]!.message).toContain("[user sent photo]");
-    const sendMessageInit = mock.allInits().find(
-      (_, i) => mock.allUrls()[i]!.includes("/sendMessage"),
-    );
-    const body = JSON.parse(sendMessageInit?.body as string);
-    expect(body.text).toBe("Received attachment — text only supported");
+    const m = send.calls[0]!.message;
+    expect(m).toContain("too large to download");
+    // No getFile / download attempt was made.
+    expect(mock.allUrls().some((u) => u.includes("/getFile"))).toBe(false);
+    // A "too big" reply went to the user.
+    const replyInit = mock.allInits().find((_, i) => mock.allUrls()[i]!.includes("/sendMessage"));
+    const body = JSON.parse(replyInit?.body as string);
+    expect(body.text).toContain("too large to download");
     expect(body.chat_id).toBe("100");
   });
 
-  test("various attachment kinds are recognized", async () => {
+  test("download failure (getFile non-2xx): surfaces a note, not a path", async () => {
     mock.enqueueResponse({ ok: true, result: [] }); // probe
     mock.enqueueResponse({
       ok: true,
       result: [
-        update(1, { chat: { id: 100 }, from: { id: 7, username: "a" }, document: { file_id: "x" } }),
+        update(1, {
+          chat: { id: 100 }, from: { id: 7, username: "a" },
+          document: { file_id: "d", file_unique_id: "u", file_name: "x.bin", file_size: 100 },
+        }),
       ],
     });
-    mock.enqueueResponse({ ok: true, result: { message_id: 1, chat: { id: 100 } } });
+    // getFile fails (e.g. file expired).
+    mock.enqueueResponse({ ok: false, error_code: 400, description: "Bad Request" }, 400);
 
     const d = makeDispatcher();
     await d.start();
     await waitFor(() => send.calls.length >= 1, 1_000);
     await d.stop();
 
-    expect(send.calls[0]!.message).toContain("[user sent document]");
+    const m = send.calls[0]!.message;
+    expect(m).toContain("could not retrieve it from Telegram");
+    expect(m).not.toContain("[user sent document:"); // no path surfaced
   });
 
   test("</channel> in user text is stripped before wrapping", async () => {

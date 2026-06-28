@@ -894,6 +894,21 @@ describe("getFile", () => {
     expect(logs.some((l) => l.includes("VERYSECRET"))).toBe(false);
     expect(logs.some((l) => l.includes("status=500"))).toBe(true);
   });
+
+  test("a network throw is surfaced as a token-safe failure, not propagated", async () => {
+    // The thrown error carries the token-bearing URL in its message; getFile
+    // must catch it and return classifyError() rather than letting it escape.
+    mock.enqueueError(new Error("connect ECONNREFUSED https://api.telegram.org/botVERYSECRET/getFile"));
+    const client = new TelegramClient({ token: "VERYSECRET" });
+
+    const result = await client.getFile("x");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.status).toBe(0);
+      expect(result.description).not.toContain("VERYSECRET");
+    }
+    expect(logs.some((l) => l.includes("VERYSECRET"))).toBe(false);
+  });
 });
 
 describe("downloadFile", () => {

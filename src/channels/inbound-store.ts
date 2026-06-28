@@ -33,6 +33,14 @@ import { mkdir, readdir, stat, rename, unlink } from "fs/promises";
 
 let overrideInboundDir: string | undefined;
 
+// Naming note: this module follows the OUTBOX convention
+// (`setOutboxDir`/`resetOutboxDir`/`defaultOutboxDir`), not the
+// `setStateDir` convention used by access.ts / chat-id-cache.ts /
+// last-message-cache.ts. Those caches all share ONE json-state directory
+// (`access.defaultStateDir()`); the inbound store is a distinct *file* store
+// under `telegram/inbound/`, exactly analogous to the outbox's file store —
+// so it mirrors the outbox's dir-override naming, which is the right analog.
+
 /** Override the inbound root directory. Tests point this at a tmpdir so they
  *  never touch the real ~/.itsybitsy state. */
 export function setInboundDir(dir: string): void {

@@ -526,12 +526,20 @@ export class TelegramClient {
     const body = JSON.stringify({ file_id: fileId });
     const url = this.urlFor("getFile");
     const composedSignal = composeAbortSignal(undefined, GETFILE_TIMEOUT_MS);
-    const resp = await fetchCtx.fn(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body,
-      signal: composedSignal,
-    });
+    let resp: Response;
+    try {
+      resp = await fetchCtx.fn(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+        signal: composedSignal,
+      });
+    } catch (err) {
+      // Consistent with downloadFile / sendMultipartFile: surface a stable,
+      // token-safe label rather than letting a network throw (whose message
+      // could embed the bot-token URL) propagate to the dispatcher.
+      return { ok: false, status: 0, error_code: 0, description: classifyError(err), retryAfterSec: null };
+    }
     const raw = await readRaw<TelegramFile>(resp);
     if (raw.status >= 200 && raw.status < 300 && raw.body?.ok === true) {
       return { ok: true, file: (raw.body.result ?? {}) as TelegramFile };

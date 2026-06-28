@@ -1,11 +1,11 @@
 /**
- * Minimal hand-rolled subset of Telegram Bot API types.
+ * Hand-rolled subset of Telegram Bot API types used by the channel subsystem.
  *
- * Phase 4 stub: just enough for `getUpdates` and `sendMessage` shapes.
- * Phase 2 owns the full version of this file (with TelegramChat etc.).
- * If Phase 2 lands first, the merge of Phase 4 onto Phase 2 should keep
- * Phase 2's superset and drop these stubs. If Phase 4 lands first, Phase 5
- * (which depends on both) will reconcile any conflicts.
+ * Covers the shapes we actually consume/produce: chat/user/message, the
+ * attachment kinds we download (`PhotoSize`/`Document`/`Voice`/`Audio`/
+ * `Video`/`VideoNote`/`Sticker` + `TelegramFile` for `getFile`), reactions
+ * (`ReactionType`/`MessageReactionUpdated`), the update envelope, and the API
+ * response wrapper. Intentionally a subset — only fields the code reads/writes.
  *
  * No grammy. No external types.
  */

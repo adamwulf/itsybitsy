@@ -1435,6 +1435,23 @@ describe("busy-wait Bash interception", () => {
     expectDeniedWaitHint(result);
   });
 
+  // Regression guard for ISSUE 4: the deny reason must not overstate the
+  // watchdog. Per SPEC §8.5 / §8.5.1 the watchdog only notifies on
+  // child->complete and child->waiting, NOT arbitrary state changes — so the
+  // message must say "completes or needs input" and must not claim it fires
+  // on "state changes". Pinned here so the dropped overpromise can't creep back.
+  test("deny reason does not overstate the watchdog (ISSUE 4 regression guard)", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "sleep 45" },
+      cwd,
+    });
+    const hookOutput = (result.output as Record<string, unknown>).hookSpecificOutput as Record<string, unknown>;
+    const reason = hookOutput.permissionDecisionReason as string;
+    expect(reason).toContain("completes or needs input");
+    expect(reason).not.toContain("state changes");
+  });
+
   test("denies `sleep 45; ib look x`", async () => {
     const result = await processTaskIntercept({
       tool_name: "Bash",

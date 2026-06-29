@@ -1555,9 +1555,13 @@ describe("busy-wait Bash interception", () => {
     expect(result.action).toBe("skip");
   });
 
-  // The detector must fire for ALL agent types, not just coordinators. Verify
-  // a worker agent (canSpawnChildren=false) and a manager agent both get the
-  // busy-wait deny — proving the check runs before the agent-type branching.
+  // The DETECTOR itself is identity-independent — it runs before the
+  // agent-type branching in processTaskIntercept, so it denies busy-wait for
+  // any agent type. (Whether the hook is actually *installed* for a given role
+  // is a separate spawn-path concern — see settings-builder.test.ts for the
+  // matcher coverage, and buildAgentSettings for which roles get the hook.)
+  // These tests verify the function-level behavior for a worker- and a
+  // manager-shaped meta.json.
   async function setupAgentDir(agentType: string, agentId: string) {
     const fs = await import("fs/promises");
     const { tmpdir } = await import("os");
@@ -1595,6 +1599,39 @@ describe("busy-wait Bash interception", () => {
         cwd: managerCwd,
       });
       expectDeniedWaitHint(result);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // Now that Bash is in the regular-agent intercept matcher (so the busy-wait
+  // detector can fire), an ORDINARY Bash command from a regular agent must
+  // still be allowed (action "skip") — adding Bash to the matcher must NOT
+  // start denying normal Bash. Exercises the full processTaskIntercept path:
+  // not a coordinator -> null, not busy-wait -> null, tool_name !== Task -> skip.
+  test("allows an ordinary (non-busy-wait) Bash command from a regular worker agent", async () => {
+    const { tmpDir, cwd: workerCwd, fs } = await setupAgentDir("worker", "agent-worker02");
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "git status" },
+        cwd: workerCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("allows an ordinary (non-busy-wait) Bash command from a regular manager agent", async () => {
+    const { tmpDir, cwd: managerCwd, fs } = await setupAgentDir("manager", "agent-manager02");
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib look agent-child" },
+        cwd: managerCwd,
+      });
+      expect(result.action).toBe("skip");
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

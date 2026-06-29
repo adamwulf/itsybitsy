@@ -363,8 +363,8 @@ async function checkCoordinatorBashRestrictions(
  * polling loop (e.g. `sleep 45; ib look x`, `until …; do sleep 5; done`).
  * These waste tokens and are blocked by Claude Code's built-ins anyway. The
  * correct behavior is to emit WAITING and let the per-agent watchdog notify
- * the agent when the sub-agent's state changes. Denying here (as a PreToolUse
- * hook) pre-empts the built-in deny so the agent sees OUR actionable message.
+ * the agent when the sub-agent completes or needs input. Denying here (as a
+ * PreToolUse hook) pre-empts the built-in deny so the agent sees OUR message.
  *
  * Applies to ALL agent types (worker, manager, coordinator) — any of them
  * might try to sleep-wait — so this is independent of agent identity.
@@ -399,7 +399,7 @@ function checkBusyWaitBash(
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
         permissionDecisionReason:
-          "Don't sleep or busy-loop to wait for sub-agents — it spins tokens and these wait commands are blocked anyway. To wait, make 'WAITING' the LAST line of your message and stop. A per-agent watchdog will notify you when a sub-agent completes, needs input, or its state changes — you don't need to poll. When you're notified, resume with 'ib look <id>' / 'ib diff <id>'.",
+          "Don't sleep or busy-loop to wait for sub-agents — it spins tokens and these wait commands are blocked anyway. To wait, make 'WAITING' the LAST line of your message and stop. A per-agent watchdog will notify you when a sub-agent completes or needs input — you don't need to poll. When you're notified, resume with 'ib look <id>' / 'ib diff <id>'.",
       },
     },
   };

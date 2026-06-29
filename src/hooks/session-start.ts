@@ -554,7 +554,7 @@ Whenever you stop working and are idle, end your message with one of:
 
 These phrases MUST be the LAST thing you output. Put summaries or status updates BEFORE them.
 
-To wait for a sub-agent, just emit \`WAITING\` — do NOT \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop. Those are blocked and waste tokens; the watchdog notifies you when there's something to do.
+To wait for a sub-agent, just emit \`WAITING\` and stop — don't \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop to wait; they waste tokens, and the watchdog notifies you when there's something to do.
 
 ### Tool Interception
 
@@ -659,7 +659,7 @@ Whenever you stop working and are idle, end your message with one of:
 
 These phrases MUST be the LAST thing you output. Put summaries or status updates BEFORE them.
 
-To wait, just emit \`WAITING\` — do NOT \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop. Those are blocked and waste tokens; the watchdog notifies you when there's something to do.
+To wait, just emit \`WAITING\` and stop — don't \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop to wait; they waste tokens, and your manager will message you when there's something to do.
 
 ### Communication
 
@@ -724,7 +724,7 @@ Whenever you stop working and are idle, end your message with one of:
 
 These phrases MUST be the LAST thing you output. Put summaries or status updates BEFORE them.
 
-To wait for a sub-agent, just emit \`WAITING\` — do NOT \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop. Those are blocked and waste tokens; the watchdog notifies you when there's something to do.
+To wait for a sub-agent, just emit \`WAITING\` and stop — don't \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop to wait; they waste tokens, and the watchdog notifies you when there's something to do.
 
 ### Workflow
 

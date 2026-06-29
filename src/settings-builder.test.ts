@@ -65,7 +65,7 @@ describe("buildHooksBlock — byte-identical with prior inline literals", () => 
     expect(JSON.stringify(result, null, 2)).toBe(JSON.stringify(expected, null, 2));
   });
 
-  test("regular agent w/ intercept (Stop, intercept w/o Bash, sessionStart w/o agentId)", () => {
+  test("regular agent w/ intercept (Stop, intercept w/ Bash, sessionStart w/o agentId)", () => {
     const id = "agent-abc12345";
     const result = buildHooksBlock({
       agentId: id,
@@ -74,12 +74,14 @@ describe("buildHooksBlock — byte-identical with prior inline literals", () => 
       sessionStartIncludesAgentId: false,
     });
     // Reconstruct what buildAgentSettings used to produce inline (intercept on, manager).
+    // Bash is now part of the regular-agent matcher so the busy-wait detector
+    // runs for managers/workers (not only coordinators).
     const expected = {
       Stop: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-status ${id}` }] }],
       PermissionRequest: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-permission-denied ${id}` }] }],
       PreToolUse: [
         { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${id}` }] },
-        { matcher: "Task|Agent|TaskCreate|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
+        { matcher: "Task|Agent|TaskCreate|Bash|AskUserQuestion", hooks: [{ type: "command", command: "ib hooks intercept-task" }] },
       ],
       UserPromptSubmit: [{ hooks: [{ type: "command", command: `ib hook-mark-running ${id}` }] }],
       SessionStart: [{ hooks: [{ type: "command", command: "ib hooks session-start" }] }],
@@ -89,7 +91,27 @@ describe("buildHooksBlock — byte-identical with prior inline literals", () => 
 
   test("intercept matcher constants match the original literals", () => {
     expect(COORDINATOR_INTERCEPT_MATCHER).toBe("Task|Agent|TaskCreate|Bash|AskUserQuestion");
-    expect(REGULAR_AGENT_INTERCEPT_MATCHER).toBe("Task|Agent|TaskCreate|AskUserQuestion");
+    expect(REGULAR_AGENT_INTERCEPT_MATCHER).toBe("Task|Agent|TaskCreate|Bash|AskUserQuestion");
+  });
+
+  test("regular-agent matcher includes Bash so busy-wait interception fires for managers/workers (BLOCKER fix)", () => {
+    // The end-to-end guarantee: production registers REGULAR_AGENT_INTERCEPT_MATCHER
+    // for managers and workers. If Bash is missing here, Claude Code never routes
+    // their Bash calls through `ib hooks intercept-task` and checkBusyWaitBash
+    // never runs for them — exactly the defect this fix addresses.
+    expect(REGULAR_AGENT_INTERCEPT_MATCHER.split("|")).toContain("Bash");
+
+    // And the installed PreToolUse intercept entry carries that matcher verbatim.
+    const result = buildHooksBlock({
+      agentId: "agent-abc12345",
+      includeStop: true,
+      interceptMatcher: REGULAR_AGENT_INTERCEPT_MATCHER,
+      sessionStartIncludesAgentId: false,
+    });
+    const preToolUse = result.PreToolUse as Array<{ matcher: string; hooks: Array<{ command: string }> }>;
+    const interceptEntry = preToolUse.find((e) => e.hooks.some((h) => h.command === "ib hooks intercept-task"));
+    expect(interceptEntry).toBeDefined();
+    expect(interceptEntry!.matcher.split("|")).toContain("Bash");
   });
 });
 

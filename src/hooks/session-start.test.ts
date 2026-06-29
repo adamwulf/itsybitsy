@@ -210,7 +210,10 @@ describe("session-start", () => {
     });
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("Manager Agent");
-    expect(instructions).toContain("do NOT \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop");
+    expect(instructions).toContain("don't \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop to wait");
+    // Manager has sub-agents → watchdog framing. Advisory, not "blocked".
+    expect(instructions).toContain("the watchdog notifies you when there's something to do");
+    expect(instructions).not.toContain("Those are blocked");
   });
 
   test("worker State Management warns against sleep/Monitor/poll loops (SPEC §8.5)", async () => {
@@ -222,7 +225,11 @@ describe("session-start", () => {
     });
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("Worker Agent");
-    expect(instructions).toContain("do NOT \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop");
+    expect(instructions).toContain("don't \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop to wait");
+    // A worker has no sub-agents — it's resumed by its manager's `ib send`,
+    // not its own watchdog. Framing must reference the manager (ISSUE 5).
+    expect(instructions).toContain("your manager will message you when there's something to do");
+    expect(instructions).not.toContain("Those are blocked");
   });
 
   test("coordinator State Management warns against sleep/Monitor/poll loops (SPEC §8.5)", async () => {
@@ -237,7 +244,10 @@ describe("session-start", () => {
     };
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("Per-Repo Coordinator");
-    expect(instructions).toContain("do NOT \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop");
+    expect(instructions).toContain("don't \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop to wait");
+    // Coordinator has sub-agents → watchdog framing. Advisory, not "blocked".
+    expect(instructions).toContain("the watchdog notifies you when there's something to do");
+    expect(instructions).not.toContain("Those are blocked");
   });
 
   test("worker under coordinator uses repo basename for messaging (SPEC §12.2.6)", async () => {

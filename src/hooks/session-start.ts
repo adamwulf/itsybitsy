@@ -554,6 +554,8 @@ Whenever you stop working and are idle, end your message with one of:
 
 These phrases MUST be the LAST thing you output. Put summaries or status updates BEFORE them.
 
+To wait for a sub-agent, just emit \`WAITING\` — do NOT \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop. Those are blocked and waste tokens; the watchdog notifies you when there's something to do.
+
 ### Tool Interception
 
 Your Task, Agent, and TaskCreate tool calls are **automatically intercepted** and redirected to spawn ib agents instead. When this happens, you will see a "deny" response — this is **expected and means SUCCESS**. The deny message will include the spawned agent ID. Do NOT retry the tool call — the agent is already running. Use \`ib look <id>\` to monitor it.
@@ -657,6 +659,8 @@ Whenever you stop working and are idle, end your message with one of:
 
 These phrases MUST be the LAST thing you output. Put summaries or status updates BEFORE them.
 
+To wait, just emit \`WAITING\` — do NOT \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop. Those are blocked and waste tokens; the watchdog notifies you when there's something to do.
+
 ### Communication
 
 - Report progress or completion to your manager: \`ib send ${managerSendTarget} "message"\`
@@ -719,6 +723,8 @@ Whenever you stop working and are idle, end your message with one of:
 - \`I HAVE COMPLETED THE GOAL\` - if you have completed your primary goal
 
 These phrases MUST be the LAST thing you output. Put summaries or status updates BEFORE them.
+
+To wait for a sub-agent, just emit \`WAITING\` — do NOT \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop. Those are blocked and waste tokens; the watchdog notifies you when there's something to do.
 
 ### Workflow
 

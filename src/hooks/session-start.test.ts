@@ -201,6 +201,45 @@ describe("session-start", () => {
     expect(instructions).toContain("LS");
   });
 
+  test("manager State Management warns against sleep/Monitor/poll loops (SPEC §8.5)", async () => {
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
+    const ctx = detectRole(cwd, {
+      id: "agent-abc12345",
+      manager: null,
+      worker: false,
+    });
+    const instructions = await generateInstructions(ctx);
+    expect(instructions).toContain("Manager Agent");
+    expect(instructions).toContain("do NOT \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop");
+  });
+
+  test("worker State Management warns against sleep/Monitor/poll loops (SPEC §8.5)", async () => {
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-def67890/repo";
+    const ctx = detectRole(cwd, {
+      id: "agent-def67890",
+      manager: "agent-abc12345",
+      worker: true,
+    });
+    const instructions = await generateInstructions(ctx);
+    expect(instructions).toContain("Worker Agent");
+    expect(instructions).toContain("do NOT \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop");
+  });
+
+  test("coordinator State Management warns against sleep/Monitor/poll loops (SPEC §8.5)", async () => {
+    const ctx: SessionContext = {
+      role: "coordinator",
+      agentId: "coordinator",
+      agentManager: "",
+      parentBranch: "main",
+      branchName: "agent/coordinator",
+      worktreePath: "/Users/me/project/.ittybitty/agents/coordinator/repo",
+      rootRepoPath: "/Users/me/project",
+    };
+    const instructions = await generateInstructions(ctx);
+    expect(instructions).toContain("Per-Repo Coordinator");
+    expect(instructions).toContain("do NOT \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop");
+  });
+
   test("worker under coordinator uses repo basename for messaging (SPEC §12.2.6)", async () => {
     const cwd = "/Users/me/muse-ios/.ittybitty/agents/agent-abc12345/repo";
     // After the rename, per-repo coordinators are named by repo basename,

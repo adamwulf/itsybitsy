@@ -1409,3 +1409,194 @@ describe("@system caller", () => {
     expect(hookOutput.permissionDecisionReason).toContain("ib new-agent --repo");
   });
 });
+
+describe("busy-wait Bash interception", () => {
+  // The detector operates purely on the command string and is independent of
+  // agent identity (it applies to workers, managers, AND coordinators). For
+  // most cases a plain cwd that resolves to no agent suffices — the detector
+  // still fires (and a non-agent cwd cleanly skips for the negative cases).
+  const cwd = "/some/repo";
+
+  function expectDeniedWaitHint(result: Awaited<ReturnType<typeof processTaskIntercept>>) {
+    expect(result.action).toBe("intercept");
+    const output = result.output as Record<string, unknown>;
+    const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+    expect(hookOutput.hookEventName).toBe("PreToolUse");
+    expect(hookOutput.permissionDecision).toBe("deny");
+    expect(hookOutput.permissionDecisionReason as string).toContain("WAITING");
+  }
+
+  test("denies bare `sleep 45`", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "sleep 45" },
+      cwd,
+    });
+    expectDeniedWaitHint(result);
+  });
+
+  test("denies `sleep 45; ib look x`", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "sleep 45; ib look agent-bdeab09e" },
+      cwd,
+    });
+    expectDeniedWaitHint(result);
+  });
+
+  test("denies `sleep 5 && ib list`", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "sleep 5 && ib list" },
+      cwd,
+    });
+    expectDeniedWaitHint(result);
+  });
+
+  test("denies `sleep 30 ; ib status x`", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "sleep 30 ; ib status agent-x" },
+      cwd,
+    });
+    expectDeniedWaitHint(result);
+  });
+
+  test("denies leading-whitespace `   sleep 10`", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "   sleep 10" },
+      cwd,
+    });
+    expectDeniedWaitHint(result);
+  });
+
+  test("denies fractional `sleep 0.5`", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "sleep 0.5" },
+      cwd,
+    });
+    expectDeniedWaitHint(result);
+  });
+
+  test("denies `until …; do sleep 5; done` polling loop", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: {
+        command: "until ib list | grep -q done; do sleep 5; done; echo done",
+      },
+      cwd,
+    });
+    expectDeniedWaitHint(result);
+  });
+
+  test("denies `while …; do sleep 2; done` polling loop", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "while true; do sleep 2; done" },
+      cwd,
+    });
+    expectDeniedWaitHint(result);
+  });
+
+  // Negative cases — must NOT be denied as busy-wait.
+  test("allows `ib look x`", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "ib look agent-x" },
+      cwd,
+    });
+    expect(result.action).toBe("skip");
+  });
+
+  test("allows `ib list`", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "ib list" },
+      cwd,
+    });
+    expect(result.action).toBe("skip");
+  });
+
+  test("allows `grep sleep file.txt` (sleep is data, not a wait)", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "grep sleep file.txt" },
+      cwd,
+    });
+    expect(result.action).toBe("skip");
+  });
+
+  test("allows `git status`", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "git status" },
+      cwd,
+    });
+    expect(result.action).toBe("skip");
+  });
+
+  test("allows `echo sleeping` (sleep is a substring, not a command)", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "echo sleeping" },
+      cwd,
+    });
+    expect(result.action).toBe("skip");
+  });
+
+  test("allows a while loop with no sleep in its body", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "while read line; do echo $line; done < file" },
+      cwd,
+    });
+    expect(result.action).toBe("skip");
+  });
+
+  // The detector must fire for ALL agent types, not just coordinators. Verify
+  // a worker agent (canSpawnChildren=false) and a manager agent both get the
+  // busy-wait deny — proving the check runs before the agent-type branching.
+  async function setupAgentDir(agentType: string, agentId: string) {
+    const fs = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), `ib-busywait-${agentType}-`));
+    const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+    await fs.mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify({ id: agentId, manager: "agent-parent", worker: agentType === "worker", agentType })
+    );
+    return { tmpDir, cwd: join(agentDir, "repo"), fs };
+  }
+
+  test("denies busy-wait from a worker agent (all agent types covered)", async () => {
+    const { tmpDir, cwd: workerCwd, fs } = await setupAgentDir("worker", "agent-worker01");
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "sleep 45; ib look agent-child" },
+        cwd: workerCwd,
+      });
+      expectDeniedWaitHint(result);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("denies busy-wait from a manager agent (all agent types covered)", async () => {
+    const { tmpDir, cwd: managerCwd, fs } = await setupAgentDir("manager", "agent-manager01");
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "until ib list | grep -q done; do sleep 5; done" },
+        cwd: managerCwd,
+      });
+      expectDeniedWaitHint(result);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+});

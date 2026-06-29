@@ -777,22 +777,23 @@ Instructions are generated based on the agent's type definition:
 ### 6.4 Intercept Task Hook (PreToolUse)
 
 **Command**: `ib hooks intercept-task`
-**Matcher**: `Task|Agent|TaskCreate|AskUserQuestion`
+**Matcher**: `Task|Agent|TaskCreate|Bash|AskUserQuestion`
 **Hook type**: PreToolUse
 
-Intercepts Claude Code's Task, Agent, TaskCreate, and AskUserQuestion tools and redirects them to the ib system instead:
+Intercepts Claude Code's Task, Agent, TaskCreate, AskUserQuestion, and Bash tools and redirects/restricts them in the ib system instead:
 
 1. **AskUserQuestion denial**: Always denied. Managers (and primary Claude) are told to use `ib ask "question"` — which routes through the dashboard's QUESTIONS pane and the question-acknowledgement flow — instead of Claude Code's built-in multi-choice prompt. Leaf agents are told to report to their manager instead of asking the user directly.
 2. **Leaf agent denial**: If Task/Agent/TaskCreate is called from a leaf agent (an agent whose type has `canSpawnChildren: false`, detected via CWD + `meta.json`), denies with "Workers cannot create tasks or spawn sub-agents"
-3. **Only intercepts `Task`, `Agent`, `TaskCreate`, and `AskUserQuestion`** — all other tools pass through
-4. **Skip for certain subagent_types**: `Bash`, `statusline-setup`, `claude-code-guide`, `meta-agent`, `ib-merge` pass through unintercepted
-5. **Model validation**: Only `sonnet`, `opus`, `haiku`, or empty string are allowed
-6. **Spawn behavior**:
+3. **Busy-wait denial**: Bash commands whose purpose is to busy-wait/poll for a sub-agent are denied by the detector wherever this hook runs. The detector itself is identity-independent (it does not branch on agent type), but the SHIPPED coverage is whatever roles actually get the hook installed — in production that is managers and coordinators (spawned workers do not get the intercept hook; see install scope below). Matched conservatively: a command that is or starts with `sleep <number>`, or a `while`/`until` loop whose body contains `sleep`. The agent is told to emit `WAITING` and let the watchdog notify it when a sub-agent completes or needs input (§8.5 / §8.5.1) rather than spinning tokens. Ordinary Bash (and commands that merely mention "sleep", e.g. `grep sleep file`) passes through. This is why `Bash` is in the matcher for regular agents, not just coordinators.
+4. **Only redirects `Task`, `Agent`, `TaskCreate`, and `AskUserQuestion`** (and busy-wait Bash, above) — all other tools, including ordinary Bash, pass through
+5. **Skip for certain subagent_types**: `Bash`, `statusline-setup`, `claude-code-guide`, `meta-agent`, `ib-merge` pass through unintercepted
+6. **Model validation**: Only `sonnet`, `opus`, `haiku`, or empty string are allowed
+7. **Spawn behavior**:
    - When called from an agent context: spawns a `--type worker` with the calling agent as `--manager`
    - When called from primary Claude: spawns a manager (no `--type worker`)
-7. **Output**: Rewrites the Task invocation to a `claude-code-guide` subagent that simply reports the spawned agent ID
+8. **Output**: Rewrites the Task invocation to a `claude-code-guide` subagent that simply reports the spawned agent ID
 
-This hook is installed for agents with `canSpawnChildren: true` (not leaf agents), and only when the main repo's settings already have the intercept hook installed. The hook intercepts `Task`, `Agent`, `TaskCreate`, and `AskUserQuestion` tool calls. For spawning agents, Task/Agent/TaskCreate are intercepted and spawn ib workers. For leaf agents, those three are denied with "Workers cannot create tasks or spawn sub-agents." `AskUserQuestion` is denied for all callers regardless of role. The hook matcher includes `TaskCreate` so it fires for that tool in addition to `Task` and `Agent` (see §2.2).
+This hook is installed for spawning agents (managers, when the main repo's settings already have the intercept hook installed) and for coordinators (system + per-repo). The hook redirects `Task`, `Agent`, `TaskCreate`, and `AskUserQuestion` tool calls, and additionally denies busy-wait Bash for every agent type that has the hook (which is why `Bash` is in the matcher for regular agents, not only coordinators). For spawning agents, Task/Agent/TaskCreate are intercepted and spawn ib workers. If a leaf agent reaches this hook, those three are denied with "Workers cannot create tasks or spawn sub-agents." `AskUserQuestion` is denied for all callers regardless of role. The hook matcher includes `TaskCreate` so it fires for that tool in addition to `Task` and `Agent` (see §2.2).
 
 ### 6.5 Permission Denied Hook (PermissionRequest)
 
@@ -831,7 +832,7 @@ Injects the current wall-clock time into the agent's context after each tool cal
 These are optional hooks that the user installs globally:
 
 - **Main-path hook** (`ib hooks main-path`): PreToolUse hook on `Bash` matcher that prevents the primary Claude from `cd`-ing into agent worktrees. Only checks Bash `cd` commands — allows Read/Write/Edit to worktree paths. Resolves relative paths via `cwd` from stdin JSON. Exits 0 (allow) or 2 (deny with JSON written to stdout).
-- **Intercept-task hook** (`ib hooks intercept-task`): PreToolUse hook on `Task|Agent|TaskCreate|AskUserQuestion` matcher (global version, enables task/agent/TaskCreate interception and AskUserQuestion denial for all repos)
+- **Intercept-task hook** (`ib hooks intercept-task`): PreToolUse hook on `Task|Agent|TaskCreate|Bash|AskUserQuestion` matcher (global version, enables task/agent/TaskCreate interception, AskUserQuestion denial, and busy-wait Bash denial for all repos). `Bash` is in the matcher so the busy-wait detector fires; ordinary Bash still passes through.
 - **Status injection hooks** (`ib hooks inject-status`): Two hooks — a UserPromptSubmit hook (no matcher, `--full --visible`) and a PostToolUse hook (`Bash|Task` matcher, `--if-changed --visible`). Skips injection when CWD is inside an agent worktree. Supports modes: `--full` (complete agent tree), `--brief` (one-liner summary), `--if-changed` (hash-compared, outputs brief only when changed). `--visible` adds a `systemMessage` field for user-visible status line.
 - **Session-start hook** (`ib hooks session-start`): SessionStart hook that injects ittybitty context
 
@@ -1964,7 +1965,7 @@ Each check produces zero or more **warnings**. Warnings have a severity level an
 
 **Detection**: Read `~/.claude/settings.json` and check for the presence of:
 - **Safety hooks** (checked as a group): `ib hooks main-path` (PreToolUse), `ib hooks session-start` (SessionStart), and at least one `ib hooks inject-status` hook (UserPromptSubmit or PostToolUse). If ANY of these are missing, warn.
-- **Intercept-task hook**: `ib hooks intercept-task` in PreToolUse with `Task|Agent|TaskCreate|AskUserQuestion` matcher. Checked separately since it's an optional but recommended hook.
+- **Intercept-task hook**: `ib hooks intercept-task` in PreToolUse (installed with the `Task|Agent|TaskCreate|Bash|AskUserQuestion` matcher). Detection matches on the command only, not the matcher string, so older Bash-less installs still register as installed. Checked separately since it's an optional but recommended hook.
 
 **Message**: `"Missing global safety hooks in ~/.claude/settings.json — run setup (h) to install"` or `"Missing intercept-task hook in ~/.claude/settings.json — run setup (h) to install"`
 

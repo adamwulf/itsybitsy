@@ -7348,7 +7348,9 @@ describe("installInterceptHook", () => {
 
     const settings = await Bun.file(settingsFile).json();
     expect(settings.hooks.PreToolUse).toHaveLength(1);
-    expect(settings.hooks.PreToolUse[0].matcher).toBe("Task|Agent|TaskCreate|AskUserQuestion");
+    // Includes Bash so the busy-wait detector fires for any session this
+    // global install covers (managers/workers included).
+    expect(settings.hooks.PreToolUse[0].matcher).toBe("Task|Agent|TaskCreate|Bash|AskUserQuestion");
     expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe("ib hooks intercept-task");
   });
 

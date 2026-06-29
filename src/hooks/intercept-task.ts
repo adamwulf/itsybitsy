@@ -355,6 +355,56 @@ async function checkCoordinatorBashRestrictions(
   return null;
 }
 
+/**
+ * Detect Bash commands whose purpose is to busy-wait / poll for a sub-agent,
+ * and deny them with a pointer to the WAITING workflow (SPEC §8.5 / §8.5.1).
+ *
+ * Agents sometimes try to "wait" for a sub-agent by sleeping or spinning a
+ * polling loop (e.g. `sleep 45; ib look x`, `until …; do sleep 5; done`).
+ * These waste tokens and are blocked by Claude Code's built-ins anyway. The
+ * correct behavior is to emit WAITING and let the per-agent watchdog notify
+ * the agent when the sub-agent completes or needs input. Denying here (as a
+ * PreToolUse hook) pre-empts the built-in deny so the agent sees OUR message.
+ *
+ * Applies to ALL agent types (worker, manager, coordinator) — any of them
+ * might try to sleep-wait — so this is independent of agent identity.
+ *
+ * Conservative matching (avoid false positives on commands that merely
+ * mention "sleep"):
+ *  - The command IS or STARTS WITH `sleep <number>` (anchored at start).
+ *  - A `while`/`until` loop (anchored at start) whose body contains `sleep`.
+ */
+function checkBusyWaitBash(
+  input: { tool_name: string; tool_input: Record<string, unknown> }
+): InterceptResult | null {
+  if (input.tool_name !== "Bash") return null;
+
+  const command = (input.tool_input.command as string) ?? "";
+
+  // A command that is, or starts with, `sleep <number>` — covers
+  // `sleep 45`, `sleep 5 && ib list`, `sleep 30 ; ib status x`.
+  const startsWithSleep = /^\s*sleep\s+[0-9.]+/i.test(command);
+
+  // A `while`/`until` loop whose body contains a `sleep` call — covers
+  // `until …; do sleep 5; done`, `while …; do sleep 2; done`.
+  const isPollingLoop =
+    /^\s*(while|until)\b/i.test(command) && /\bsleep\b/i.test(command);
+
+  if (!startsWithSleep && !isPollingLoop) return null;
+
+  return {
+    action: "intercept",
+    output: {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason:
+          "Don't sleep or busy-loop to wait for sub-agents — it spins tokens and these wait commands are blocked anyway. To wait, make 'WAITING' the LAST line of your message and stop. A per-agent watchdog will notify you when a sub-agent completes or needs input — you don't need to poll. When you're notified, resume with 'ib look <id>' / 'ib diff <id>'.",
+      },
+    },
+  };
+}
+
 export async function processTaskIntercept(
   input: {
     tool_name: string;
@@ -372,6 +422,12 @@ export async function processTaskIntercept(
   // 0. Check coordinator Bash restrictions (SPEC §12.2.4)
   const coordBlock = await checkCoordinatorBashRestrictions(input);
   if (coordBlock) return coordBlock;
+
+  // 0.5. Deny busy-wait / poll Bash commands for ALL agent types (SPEC §8.5).
+  // Runs before the `tool_name !== 'Task'…` early-return so it applies to
+  // workers, managers, and coordinators alike.
+  const busyWaitBlock = checkBusyWaitBash(input);
+  if (busyWaitBlock) return busyWaitBlock;
 
   // 1. Deny AskUserQuestion — agents must use `ib ask` instead
   if (input.tool_name === "AskUserQuestion") {

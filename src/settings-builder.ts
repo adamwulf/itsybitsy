@@ -101,7 +101,9 @@ export async function buildLayeredPermissions(opts: {
  *   - whether the Stop hook is included (system coordinator omits it; it
  *     has its own state detection)
  *   - whether intercept-task is enabled and what its matcher should be
- *     (coordinators include `Bash` in the matcher; regular agents don't)
+ *     (both coordinators and regular agents include `Bash` in the matcher —
+ *     coordinators for their Bash restrictions, regular agents so the
+ *     busy-wait detector can catch managers/workers spinning on `sleep`)
  *   - whether the session-start hook command takes the agent ID as an
  *     argument (coordinators do; regular agents don't because the hook
  *     derives identity from cwd)
@@ -186,5 +188,10 @@ export function buildHooksBlock(opts: {
  * because coordinators have additional Bash restrictions enforced in the hook. */
 export const COORDINATOR_INTERCEPT_MATCHER = "Task|Agent|TaskCreate|Bash|AskUserQuestion";
 
-/** Intercept-task matcher for regular agents (managers) — Bash is NOT included. */
-export const REGULAR_AGENT_INTERCEPT_MATCHER = "Task|Agent|TaskCreate|AskUserQuestion";
+/** Intercept-task matcher for regular agents (managers + workers) — Bash IS
+ * included so the busy-wait detector (checkBusyWaitBash) runs for them. Without
+ * Bash here, Claude Code would never route a regular agent's Bash calls through
+ * `ib hooks intercept-task`, and a manager spinning on `sleep` would not be
+ * caught. The hook returns "skip" for ordinary (non-busy-wait) Bash, so the
+ * only added cost is one hook-process spawn per Bash call (same as coordinators). */
+export const REGULAR_AGENT_INTERCEPT_MATCHER = "Task|Agent|TaskCreate|Bash|AskUserQuestion";

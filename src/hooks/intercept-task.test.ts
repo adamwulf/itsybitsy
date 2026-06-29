@@ -1409,3 +1409,248 @@ describe("@system caller", () => {
     expect(hookOutput.permissionDecisionReason).toContain("ib new-agent --repo");
   });
 });
+
+describe("busy-wait Bash interception", () => {
+  // The detector operates purely on the command string and is independent of
+  // agent identity (it applies to workers, managers, AND coordinators). For
+  // most cases a plain cwd that resolves to no agent suffices — the detector
+  // still fires (and a non-agent cwd cleanly skips for the negative cases).
+  const cwd = "/some/repo";
+
+  function expectDeniedWaitHint(result: Awaited<ReturnType<typeof processTaskIntercept>>) {
+    expect(result.action).toBe("intercept");
+    const output = result.output as Record<string, unknown>;
+    const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+    expect(hookOutput.hookEventName).toBe("PreToolUse");
+    expect(hookOutput.permissionDecision).toBe("deny");
+    expect(hookOutput.permissionDecisionReason as string).toContain("WAITING");
+  }
+
+  test("denies bare `sleep 45`", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "sleep 45" },
+      cwd,
+    });
+    expectDeniedWaitHint(result);
+  });
+
+  // Regression guard for ISSUE 4: the deny reason must not overstate the
+  // watchdog. Per SPEC §8.5 / §8.5.1 the watchdog only notifies on
+  // child->complete and child->waiting, NOT arbitrary state changes — so the
+  // message must say "completes or needs input" and must not claim it fires
+  // on "state changes". Pinned here so the dropped overpromise can't creep back.
+  test("deny reason does not overstate the watchdog (ISSUE 4 regression guard)", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "sleep 45" },
+      cwd,
+    });
+    const hookOutput = (result.output as Record<string, unknown>).hookSpecificOutput as Record<string, unknown>;
+    const reason = hookOutput.permissionDecisionReason as string;
+    expect(reason).toContain("completes or needs input");
+    expect(reason).not.toContain("state changes");
+  });
+
+  test("denies `sleep 45; ib look x`", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "sleep 45; ib look agent-bdeab09e" },
+      cwd,
+    });
+    expectDeniedWaitHint(result);
+  });
+
+  test("denies `sleep 5 && ib list`", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "sleep 5 && ib list" },
+      cwd,
+    });
+    expectDeniedWaitHint(result);
+  });
+
+  test("denies `sleep 30 ; ib status x`", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "sleep 30 ; ib status agent-x" },
+      cwd,
+    });
+    expectDeniedWaitHint(result);
+  });
+
+  test("denies leading-whitespace `   sleep 10`", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "   sleep 10" },
+      cwd,
+    });
+    expectDeniedWaitHint(result);
+  });
+
+  test("denies fractional `sleep 0.5`", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "sleep 0.5" },
+      cwd,
+    });
+    expectDeniedWaitHint(result);
+  });
+
+  test("denies `until …; do sleep 5; done` polling loop", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: {
+        command: "until ib list | grep -q done; do sleep 5; done; echo done",
+      },
+      cwd,
+    });
+    expectDeniedWaitHint(result);
+  });
+
+  test("denies `while …; do sleep 2; done` polling loop", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "while true; do sleep 2; done" },
+      cwd,
+    });
+    expectDeniedWaitHint(result);
+  });
+
+  // Negative cases — must NOT be denied as busy-wait.
+  test("allows `ib look x`", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "ib look agent-x" },
+      cwd,
+    });
+    expect(result.action).toBe("skip");
+  });
+
+  test("allows `ib list`", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "ib list" },
+      cwd,
+    });
+    expect(result.action).toBe("skip");
+  });
+
+  test("allows `grep sleep file.txt` (sleep is data, not a wait)", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "grep sleep file.txt" },
+      cwd,
+    });
+    expect(result.action).toBe("skip");
+  });
+
+  test("allows `git status`", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "git status" },
+      cwd,
+    });
+    expect(result.action).toBe("skip");
+  });
+
+  test("allows `echo sleeping` (sleep is a substring, not a command)", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "echo sleeping" },
+      cwd,
+    });
+    expect(result.action).toBe("skip");
+  });
+
+  test("allows a while loop with no sleep in its body", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "while read line; do echo $line; done < file" },
+      cwd,
+    });
+    expect(result.action).toBe("skip");
+  });
+
+  // The DETECTOR itself is identity-independent — it runs before the
+  // agent-type branching in processTaskIntercept, so it denies busy-wait for
+  // any agent type. (Whether the hook is actually *installed* for a given role
+  // is a separate spawn-path concern — see settings-builder.test.ts for the
+  // matcher coverage, and buildAgentSettings for which roles get the hook.)
+  // These tests verify the function-level behavior for a worker- and a
+  // manager-shaped meta.json.
+  async function setupAgentDir(agentType: string, agentId: string) {
+    const fs = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), `ib-busywait-${agentType}-`));
+    const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+    await fs.mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify({ id: agentId, manager: "agent-parent", worker: agentType === "worker", agentType })
+    );
+    return { tmpDir, cwd: join(agentDir, "repo"), fs };
+  }
+
+  test("denies busy-wait from a worker agent (all agent types covered)", async () => {
+    const { tmpDir, cwd: workerCwd, fs } = await setupAgentDir("worker", "agent-worker01");
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "sleep 45; ib look agent-child" },
+        cwd: workerCwd,
+      });
+      expectDeniedWaitHint(result);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("denies busy-wait from a manager agent (all agent types covered)", async () => {
+    const { tmpDir, cwd: managerCwd, fs } = await setupAgentDir("manager", "agent-manager01");
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "until ib list | grep -q done; do sleep 5; done" },
+        cwd: managerCwd,
+      });
+      expectDeniedWaitHint(result);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // Now that Bash is in the regular-agent intercept matcher (so the busy-wait
+  // detector can fire), an ORDINARY Bash command from a regular agent must
+  // still be allowed (action "skip") — adding Bash to the matcher must NOT
+  // start denying normal Bash. Exercises the full processTaskIntercept path:
+  // not a coordinator -> null, not busy-wait -> null, tool_name !== Task -> skip.
+  test("allows an ordinary (non-busy-wait) Bash command from a regular worker agent", async () => {
+    const { tmpDir, cwd: workerCwd, fs } = await setupAgentDir("worker", "agent-worker02");
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "git status" },
+        cwd: workerCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("allows an ordinary (non-busy-wait) Bash command from a regular manager agent", async () => {
+    const { tmpDir, cwd: managerCwd, fs } = await setupAgentDir("manager", "agent-manager02");
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib look agent-child" },
+        cwd: managerCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+});

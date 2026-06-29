@@ -201,6 +201,55 @@ describe("session-start", () => {
     expect(instructions).toContain("LS");
   });
 
+  test("manager State Management warns against sleep/Monitor/poll loops (SPEC §8.5)", async () => {
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
+    const ctx = detectRole(cwd, {
+      id: "agent-abc12345",
+      manager: null,
+      worker: false,
+    });
+    const instructions = await generateInstructions(ctx);
+    expect(instructions).toContain("Manager Agent");
+    expect(instructions).toContain("don't \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop to wait");
+    // Manager has sub-agents → watchdog framing. Advisory, not "blocked".
+    expect(instructions).toContain("the watchdog notifies you when there's something to do");
+    expect(instructions).not.toContain("Those are blocked");
+  });
+
+  test("worker State Management warns against sleep/Monitor/poll loops (SPEC §8.5)", async () => {
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-def67890/repo";
+    const ctx = detectRole(cwd, {
+      id: "agent-def67890",
+      manager: "agent-abc12345",
+      worker: true,
+    });
+    const instructions = await generateInstructions(ctx);
+    expect(instructions).toContain("Worker Agent");
+    expect(instructions).toContain("don't \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop to wait");
+    // A worker has no sub-agents — it's resumed by its manager's `ib send`,
+    // not its own watchdog. Framing must reference the manager (ISSUE 5).
+    expect(instructions).toContain("your manager will message you when there's something to do");
+    expect(instructions).not.toContain("Those are blocked");
+  });
+
+  test("coordinator State Management warns against sleep/Monitor/poll loops (SPEC §8.5)", async () => {
+    const ctx: SessionContext = {
+      role: "coordinator",
+      agentId: "coordinator",
+      agentManager: "",
+      parentBranch: "main",
+      branchName: "agent/coordinator",
+      worktreePath: "/Users/me/project/.ittybitty/agents/coordinator/repo",
+      rootRepoPath: "/Users/me/project",
+    };
+    const instructions = await generateInstructions(ctx);
+    expect(instructions).toContain("Per-Repo Coordinator");
+    expect(instructions).toContain("don't \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop to wait");
+    // Coordinator has sub-agents → watchdog framing. Advisory, not "blocked".
+    expect(instructions).toContain("the watchdog notifies you when there's something to do");
+    expect(instructions).not.toContain("Those are blocked");
+  });
+
   test("worker under coordinator uses repo basename for messaging (SPEC §12.2.6)", async () => {
     const cwd = "/Users/me/muse-ios/.ittybitty/agents/agent-abc12345/repo";
     // After the rename, per-repo coordinators are named by repo basename,

@@ -5478,8 +5478,12 @@ export async function installInterceptHook(_repoPath: string, settingsPath?: str
   const hooks = ((settings.hooks as Record<string, unknown>) ?? {}) as Record<string, unknown>;
   settings.hooks = hooks;
   if (!Array.isArray(hooks.PreToolUse)) hooks.PreToolUse = [];
+  // Includes `Bash` so the busy-wait detector (checkBusyWaitBash) fires for
+  // any session this global install covers — without it, a manager/worker
+  // spinning on `sleep` would never route through the hook. The hook returns
+  // "skip" for ordinary Bash, so this only adds a hook spawn per Bash call.
   (hooks.PreToolUse as unknown[]).push({
-    matcher: "Task|Agent|TaskCreate|AskUserQuestion",
+    matcher: COORDINATOR_INTERCEPT_MATCHER,
     hooks: [{ type: "command", command: "ib hooks intercept-task" }],
   });
 

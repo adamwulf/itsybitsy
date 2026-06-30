@@ -12,6 +12,7 @@ import { captureTmuxOutput } from "../tmux-poller";
 import { isValidAgentId, isValidTmuxSession } from "../validation";
 import { writeAgentState, hasBackgroundTasks, isRecentlyCreated } from "../agents";
 import type { MetaState } from "../agents";
+import { WATCHDOG_SENTINEL } from "../watchdog";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -540,14 +541,19 @@ export async function executeResultActions(
   ) {
     if (tmuxSession) {
       // Route the self-nudge through the per-agent outbox queue so it can't
-      // collide with a concurrent `ib send` to this same agent. raw=true keeps
-      // the message verbatim (no `[sent by ...]` prefix) — it already reads as
-      // a system nudge. `sendMessage` writes state:"running" for the recipient
-      // on success, but we also retain the explicit write below to preserve the
+      // collide with a concurrent `ib send` to this same agent. Attribute the
+      // nudge to the watchdog sentinel so it is delivered as
+      // `[sent by watchdog]: <message>` — the same prefix every genuine
+      // watchdog send already carries. This lets the recipient tell a system
+      // nudge apart from a human console send: without the prefix, an agent
+      // that had just asked the user a question could misread the unprefixed
+      // `Resume your work...` nudge as the answer to its own question and act
+      // on it. `sendMessage` writes state:"running" for the recipient on
+      // success, but we also retain the explicit write below to preserve the
       // historical unconditional state-write behavior of this hook.
       const recipient = buildHookAgent(agentId, repoPath, tmuxSession, meta);
       const { sendMessage } = await import("../ib-commands");
-      await sendMessage(recipient, result.message, { raw: true, cwd: "/" });
+      await sendMessage(recipient, result.message, { fromAgent: WATCHDOG_SENTINEL, cwd: "/" });
       // Mark the recipient as running — the message has been delivered and the
       // agent is about to start working again. Without this, meta.state stays
       // stale ('waiting'/'complete') until the next Stop hook fires.
@@ -575,12 +581,13 @@ export async function executeResultActions(
           return `invalid_manager_session`;
         }
         // Route the manager notification through the manager's per-agent outbox
-        // queue (raw=true matches today's behavior — the hook types
-        // `result.message` verbatim). Serializes against any concurrent
-        // `ib send` to the manager.
+        // queue, attributed to the watchdog sentinel so it is delivered as
+        // `[sent by watchdog]: <message>`. Like the self-nudge above, this lets
+        // the manager distinguish a system notification from a human console
+        // send. Serializes against any concurrent `ib send` to the manager.
         const managerAgent = buildHookAgent(managerId, repoPath, managerSession, managerMeta);
         const { sendMessage } = await import("../ib-commands");
-        await sendMessage(managerAgent, result.message, { raw: true, cwd: "/" });
+        await sendMessage(managerAgent, result.message, { fromAgent: WATCHDOG_SENTINEL, cwd: "/" });
         // Mark the manager as running — it just received a notification and is
         // about to work on it. Without this, the manager's meta.state stays
         // stale until its next Stop hook fires.

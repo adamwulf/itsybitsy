@@ -1455,6 +1455,18 @@ describe("resumeAgent (native)", () => {
     const runner = makeDefaultResumeRunner(spawnCalls);
     lifecycleSpawnCtx.set(runner);
     setNukeResumeSpawnRunner(runner);
+    // The resume nudge now routes through `sendMessage`, whose delivery uses
+    // `sendSpawnCtx` (not `nukeResumeSpawnCtx`) and enqueues to the central
+    // outbox under the coordinator home. Capture both into the SAME `spawnCalls`
+    // and sandbox the coordinator home so the inline drain neither escapes to
+    // the real `~/.itsybitsy/` nor sleeps for real (setSendSpawnRunner zeroes
+    // the send delay).
+    setSendSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      return makeSpawnResult();
+    });
+    const { setCoordinatorHome } = await import("./coordinator");
+    setCoordinatorHome(join(tempDir, "coord-home"));
     // Default codex dry-run runner: capture (cmd, cwd) + succeed.
     setCodexDryRunSpawnRunner((cmd, cwd) => {
       codexDryRunCalls.push({ cmd, cwd });
@@ -1465,6 +1477,9 @@ describe("resumeAgent (native)", () => {
   afterEach(async () => {
     lifecycleSpawnCtx.reset();
     resetNukeResumeSpawnRunner();
+    resetSendSpawnRunner();
+    const { resetCoordinatorHome } = await import("./coordinator");
+    resetCoordinatorHome();
     resetCodexDryRunSpawnRunner();
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -1572,6 +1587,12 @@ describe("resumeAgent (native)", () => {
     );
     expect(nudgeCall).toBeDefined();
     expect(nudgeCall).toContain("-l");
+    // The resume nudge routes through `sendMessage` attributed to the watchdog,
+    // so the delivered payload carries the `[sent by watchdog]:` prefix (matches
+    // the Stop-hook nudge attribution) — it must not look like a human send.
+    const nudgePayload = nudgeCall!.find((a) => a.includes("Resume your work"))!;
+    expect(nudgePayload).toContain("[sent by watchdog]:");
+    expect(nudgePayload.startsWith("Resume your work")).toBe(false);
   });
 
   test("resume.sh captures stderr and annotates exit codes; resume sets pane-died hook", async () => {

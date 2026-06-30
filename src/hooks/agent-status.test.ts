@@ -9,6 +9,9 @@ import {
   findUnfinishedChildren,
   hasActiveChildren,
 } from "./agent-status";
+import { setSendSpawnRunner, resetSendSpawnRunner } from "../ib-commands";
+import { makeSpawnResult } from "../test-utils";
+import { WATCHDOG_SENTINEL } from "../watchdog";
 
 // ── Helper to create temp agent dirs ─────────────────────────────────────────
 
@@ -180,6 +183,7 @@ describe("manager notification", () => {
     expect(result.state).toBe("complete");
     expect(result.action).toBe("notify_manager");
     expect(result.message).toContain("just completed");
+    expect(result.message).not.toContain("[hook]");
   });
 
   test("worker waiting → notify_manager", async () => {
@@ -201,6 +205,7 @@ describe("manager notification", () => {
     expect(result.state).toBe("waiting");
     expect(result.action).toBe("notify_manager");
     expect(result.message).toContain("waiting for input");
+    expect(result.message).not.toContain("[hook]");
   });
 
   test("worker complete with archived manager → skips notify, returns none", async () => {
@@ -960,7 +965,7 @@ describe("executeResultActions — recipient state propagation", () => {
       {
         state: "complete",
         action: "notify_manager",
-        message: "[hook]: Your subtask just completed",
+        message: "Your subtask just completed",
       },
       ctx.agentDir,
       ctx.agentsDir,
@@ -1000,7 +1005,7 @@ describe("executeResultActions — recipient state propagation", () => {
       {
         state: "complete",
         action: "notify_manager",
-        message: "[hook]: Your subtask just completed",
+        message: "Your subtask just completed",
       },
       ctx.agentDir,
       ctx.agentsDir,
@@ -1049,6 +1054,112 @@ describe("executeResultActions — recipient state propagation", () => {
 
     const meta = JSON.parse(await readFile(join(ctx.agentDir, "meta.json"), "utf-8"));
     expect(meta.state).toBe("waiting");
+  });
+});
+
+// ── executeResultActions: watchdog attribution on delivery ──────────────────
+//
+// Regression for the bug where the Stop-hook self-nudge / manager notification
+// were delivered with `raw: true`, i.e. with NO `[sent by ...]` prefix, so they
+// looked exactly like a human console send. An agent that had just asked the
+// user a question could misread the unprefixed `Resume your work...` nudge as
+// the answer to its own question. These messages originate from the ib system
+// (personified as the watchdog), so they must carry the `[sent by watchdog]:`
+// prefix — the same one every genuine watchdog send already uses.
+describe("executeResultActions — watchdog attribution on delivery", () => {
+  let ctx: Awaited<ReturnType<typeof createTempAgentDir>>;
+  let coordHome: string;
+  let spawnCalls: string[][];
+
+  beforeEach(async () => {
+    ctx = await createTempAgentDir();
+    // Point the coordinator home (where agentOutboxDir resolves) at a sandbox so
+    // the inline outbox drain never touches the real ~/.itsybitsy/.
+    coordHome = await mkdtemp(join(tmpdir(), "agent-status-coord-"));
+    const { setCoordinatorHome } = await import("../coordinator");
+    setCoordinatorHome(coordHome);
+    spawnCalls = [];
+    // Capture every tmux command deliverMessage issues. No transient file exists
+    // in the temp agent dir → hasLiveWatchdog() is false → sendMessage drains
+    // inline through this runner.
+    setSendSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      return makeSpawnResult();
+    });
+  });
+
+  afterEach(async () => {
+    resetSendSpawnRunner();
+    const { resetCoordinatorHome } = await import("../coordinator");
+    resetCoordinatorHome();
+    await rm(coordHome, { recursive: true, force: true });
+    await ctx.cleanup();
+  });
+
+  // Pull the literal `send-keys -l` payload(s) out of the captured tmux calls.
+  function deliveredPayloads(): string[] {
+    return spawnCalls
+      .filter((c) => c[0] === "tmux" && c[1] === "send-keys" && c.includes("-l"))
+      .map((c) => c[c.length - 1]!);
+  }
+
+  test("self-nudge is delivered with the [sent by watchdog]: prefix (not raw)", async () => {
+    await writeMeta(ctx.agentDir, { id: ctx.agentId, tmux_session: "ib-test", state: "waiting" });
+
+    const ret = await executeResultActions(
+      {
+        state: "running",
+        action: "nudge",
+        message: "Resume your work, or end with 'WAITING' as your final line.",
+      },
+      ctx.agentDir,
+      ctx.agentsDir,
+    );
+    expect(ret).toBe("ok");
+
+    const payloads = deliveredPayloads();
+    const nudge = payloads.find((p) => p.includes("Resume your work"));
+    expect(nudge).toBeDefined();
+    // The watchdog sentinel renders WITHOUT the leading `@` (BARE_RENDERED_SENTINELS).
+    expect(nudge!).toContain("[sent by watchdog]:");
+    expect(nudge!).toContain("Resume your work, or end with 'WAITING' as your final line.");
+    // It must NOT have been delivered raw (verbatim, no prefix).
+    expect(nudge!.startsWith("Resume your work")).toBe(false);
+  });
+
+  test("notify_manager send is delivered with the [sent by watchdog]: prefix (not raw)", async () => {
+    await writeMeta(ctx.agentDir, {
+      id: ctx.agentId,
+      tmux_session: "ib-test",
+      manager: "manager-001",
+      state: "complete",
+    });
+    const managerDir = join(ctx.agentsDir, "manager-001");
+    await mkdir(managerDir, { recursive: true });
+    await writeMeta(managerDir, { id: "manager-001", tmux_session: "ib-manager-001", state: "waiting" });
+
+    const ret = await executeResultActions(
+      {
+        state: "complete",
+        action: "notify_manager",
+        message: "Your subtask just completed.",
+      },
+      ctx.agentDir,
+      ctx.agentsDir,
+    );
+    expect(ret).toBe("ok");
+
+    const payloads = deliveredPayloads();
+    const note = payloads.find((p) => p.includes("Your subtask just completed"));
+    expect(note).toBeDefined();
+    expect(note!).toContain("[sent by watchdog]:");
+    expect(note!.startsWith("Your subtask")).toBe(false);
+  });
+
+  test("WATCHDOG_SENTINEL constant is the @watchdog sentinel used for attribution", () => {
+    // Guards against the constant drifting away from the value the
+    // BARE_RENDERED_SENTINELS allow-list in ib-commands keys on.
+    expect(WATCHDOG_SENTINEL).toBe("@watchdog");
   });
 });
 

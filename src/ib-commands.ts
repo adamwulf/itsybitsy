@@ -1128,15 +1128,20 @@ ${qAbsExitScript}
     const nudgeDelayMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 100;
     if (nudgeDelayMs > 0) await Bun.sleep(nudgeDelayMs);
 
+    // Route the nudge through `sendMessage` (attributed to the watchdog) rather
+    // than typing into tmux directly, so the agent receives the same
+    // `[sent by watchdog]: <message>` attribution every other system nudge
+    // carries — otherwise a freshly-resumed agent could misread "Resume your
+    // work…" as a human console send. `sendMessage` owns the chunked `-l` send,
+    // the length-scaled delay, the `Enter`, prefix rendering, and the recipient
+    // `writeAgentState("running")`. At resume time the per-agent watchdog isn't
+    // spawned yet, so `sendMessage` drains the outbox inline (synchronous
+    // delivery, same ordering as the old direct send).
     const nudgePrompt = "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line.";
-    // `--` stops tmux flag parsing so a payload that begins with `-` (e.g. YAML
-    // frontmatter `---`) isn't mistaken for an option.
-    await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "-l", "--", nudgePrompt]);
-
-    const nudgeSleepMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 100;
-    if (nudgeSleepMs > 0) await Bun.sleep(nudgeSleepMs);
-
-    await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "Enter"]);
+    const nudgeResult = await sendMessage(agent, nudgePrompt, { fromAgent: WATCHDOG_SENTINEL });
+    if (!nudgeResult.ok) {
+      await logAgent(agentDir, `[resume] nudge delivery failed: ${nudgeResult.stderr}`);
+    }
 
     // Log
     await logAgent(agentDir, "[resume] Agent resumed, nudge sent");

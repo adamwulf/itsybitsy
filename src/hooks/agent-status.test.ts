@@ -183,6 +183,7 @@ describe("manager notification", () => {
     expect(result.state).toBe("complete");
     expect(result.action).toBe("notify_manager");
     expect(result.message).toContain("just completed");
+    expect(result.message).not.toContain("[hook]");
   });
 
   test("worker waiting → notify_manager", async () => {
@@ -204,6 +205,7 @@ describe("manager notification", () => {
     expect(result.state).toBe("waiting");
     expect(result.action).toBe("notify_manager");
     expect(result.message).toContain("waiting for input");
+    expect(result.message).not.toContain("[hook]");
   });
 
   test("worker complete with archived manager → skips notify, returns none", async () => {
@@ -963,7 +965,7 @@ describe("executeResultActions — recipient state propagation", () => {
       {
         state: "complete",
         action: "notify_manager",
-        message: "[hook]: Your subtask just completed",
+        message: "Your subtask just completed",
       },
       ctx.agentDir,
       ctx.agentsDir,
@@ -1003,7 +1005,7 @@ describe("executeResultActions — recipient state propagation", () => {
       {
         state: "complete",
         action: "notify_manager",
-        message: "[hook]: Your subtask just completed",
+        message: "Your subtask just completed",
       },
       ctx.agentDir,
       ctx.agentsDir,

@@ -166,7 +166,7 @@ export async function processStopHook(
       return {
         state,
         action: "notify_manager",
-        message: `[hook]: Your subtask ${agentId} just completed`,
+        message: `Your subtask ${agentId} just completed`,
       };
     }
 
@@ -220,7 +220,7 @@ export async function processStopHook(
       return {
         state,
         action: "notify_manager",
-        message: `[hook]: Your subtask ${agentId} is now waiting for input`,
+        message: `Your subtask ${agentId} is now waiting for input`,
       };
     }
 

@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { isValidModel, isValidToolList, isValidAgentId, isValidTmuxSession, isValidSessionId, isValidShellPath, shellQuote } from "./validation";
+import { isValidModel, isValidEffort, isValidToolList, isValidAgentId, isValidTmuxSession, isValidSessionId, isValidShellPath, shellQuote } from "./validation";
 
 describe("isValidModel", () => {
   test("accepts typical model names", () => {
@@ -19,6 +19,31 @@ describe("isValidModel", () => {
     expect(isValidModel("")).toBe(false);
     expect(isValidModel("model name")).toBe(false);
     expect(isValidModel("opus|cat /etc/passwd")).toBe(false);
+  });
+});
+
+describe("isValidEffort", () => {
+  test("accepts the five known effort levels", () => {
+    expect(isValidEffort("low")).toBe(true);
+    expect(isValidEffort("medium")).toBe(true);
+    expect(isValidEffort("high")).toBe(true);
+    expect(isValidEffort("xhigh")).toBe(true);
+    expect(isValidEffort("max")).toBe(true);
+  });
+
+  test("rejects unknown levels, wrong case, empty, and shell injection", () => {
+    expect(isValidEffort("")).toBe(false);
+    expect(isValidEffort("XHIGH")).toBe(false);
+    expect(isValidEffort("High")).toBe(false);
+    expect(isValidEffort("extreme")).toBe(false);
+    expect(isValidEffort("ultra")).toBe(false);
+    expect(isValidEffort("high$(whoami)")).toBe(false);
+    expect(isValidEffort("high`id`")).toBe(false);
+    expect(isValidEffort('high"; rm -rf /')).toBe(false);
+    expect(isValidEffort("high && echo pwned")).toBe(false);
+    expect(isValidEffort("high|cat /etc/passwd")).toBe(false);
+    expect(isValidEffort("high medium")).toBe(false);
+    expect(isValidEffort(" high")).toBe(false);
   });
 });
 

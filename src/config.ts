@@ -24,6 +24,7 @@ export const CONFIG_KEYS: ConfigKeyDef[] = [
   { key: "user.name", type: "string", default: "" },
   { key: "maxAgents", type: "number", default: 10 },
   { key: "model", type: "string", default: "claude:opus" },
+  { key: "effort", type: "string", default: "xhigh" },
   { key: "createPullRequests", type: "boolean", default: false },
   { key: "allowAgentQuestions", type: "boolean", default: true },
   { key: "autoCompactThreshold", type: "number", default: undefined },

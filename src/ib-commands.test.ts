@@ -1595,6 +1595,65 @@ describe("resumeAgent (native)", () => {
     expect(nudgePayload.startsWith("Resume your work")).toBe(false);
   });
 
+  test("resume.sh re-applies --effort from persisted meta.effort", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-effort");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-effort",
+      tmux_session: "tmux-agent-effort",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      model: "claude:opus",
+      effort: "high",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-effort",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        tmux_session: "tmux-agent-effort",
+        model: "claude:opus",
+        effort: "high",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+    expect(result.ok).toBe(true);
+
+    const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
+    expect(resumeScript).toContain("--model opus");
+    expect(resumeScript).toContain("--effort high");
+  });
+
+  test("resume.sh omits --effort for a legacy agent with no meta.effort", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-legacy-effort");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-legacy-effort",
+      tmux_session: "tmux-agent-legacy-effort",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      model: "claude:opus",
+    }));
+
+    const agent = _makeAgent({
+      id: "agent-legacy-effort",
+      repoPath: tempDir,
+      repoName: "test",
+      state: "stopped",
+      meta: {
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        tmux_session: "tmux-agent-legacy-effort",
+        model: "claude:opus",
+      } as any,
+    });
+    const result = await resumeAgent(agent);
+    expect(result.ok).toBe(true);
+
+    const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
+    expect(resumeScript).not.toContain("--effort");
+  });
+
   test("resume.sh captures stderr and annotates exit codes; resume sets pane-died hook", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-resume");
     await mkdir(join(agentDir, "repo"), { recursive: true });
@@ -3537,6 +3596,27 @@ describe("newAgent (native)", () => {
     await Bun.write(path, body);
   }
 
+  /**
+   * Write a minimal agent-type layer/type file with an optional `effort:` field
+   * (and optional `model:`). `effortLine` is inserted verbatim into the
+   * frontmatter, so callers can pass "effort: high" (real value), "effort:"
+   * (blank → inherit), or "" (omit the key). Mirrors writeLayerModel; `spawnable`
+   * defaults to true; layer files must pass `spawnable: false`.
+   */
+  async function writeLayerEffort(
+    name: string,
+    effortLine: string,
+    opts?: { spawnable?: boolean; canSpawnChildren?: boolean; modelLine?: string },
+  ) {
+    const path = join(process.env.HOME!, ".itsybitsy", "agent-types", `${name}.md`);
+    const spawnableLine = opts?.spawnable === false ? "spawnable: false\n" : "";
+    const canSpawnLine = opts?.canSpawnChildren ? "canSpawnChildren: true\n" : "";
+    const fmModel = opts?.modelLine ? `${opts.modelLine}\n` : "";
+    const fmEffort = effortLine ? `${effortLine}\n` : "";
+    const body = `---\nname: ${name}\ndescription: Test ${name} layer\n${spawnableLine}${canSpawnLine}${fmModel}${fmEffort}---\n`;
+    await Bun.write(path, body);
+  }
+
   /** Wrapper that always passes _cwd to prevent auto-detect manager from our own worktree */
   async function callNewAgent(prompt: string, opts?: import("./ib-commands").NewAgentOptions) {
     return newAgent(tempDir, prompt, { ...opts, _cwd: tempDir });
@@ -4374,6 +4454,108 @@ describe("newAgent (native)", () => {
 
     const meta = await Bun.file(join(agentsDir, "test-fallback-opus", "meta.json")).json();
     expect(meta.model).toBe("claude:opus");
+  });
+
+  // ── effort precedence across agent-type layer files ─────────────────────────
+  // Precedence (most-specific wins), mirroring the model chain:
+  //   --effort > <type>.md > _non_coordinator.md > _all.md > config.effort > 'xhigh'
+
+  test("effort E0: --effort flag persists to meta.json and appears in start.sh", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-effort-flag", effort: "high" });
+
+    const meta = await Bun.file(join(agentsDir, "test-effort-flag", "meta.json")).json();
+    expect(meta.effort).toBe("high");
+
+    const startSh = await Bun.file(join(agentsDir, "test-effort-flag", "start.sh")).text();
+    expect(startSh).toContain("--effort high");
+  });
+
+  test("effort E1: effort in _all.md is used when nothing more specific declares one", async () => {
+    await writeLayerEffort("_all", "effort: medium", { spawnable: false });
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-all-effort" });
+
+    const meta = await Bun.file(join(agentsDir, "test-all-effort", "meta.json")).json();
+    expect(meta.effort).toBe("medium");
+
+    const startSh = await Bun.file(join(agentsDir, "test-all-effort", "start.sh")).text();
+    expect(startSh).toContain("--effort medium");
+  });
+
+  test("effort E2: <type>.md effort overrides _all.md effort", async () => {
+    await writeLayerEffort("_all", "effort: low", { spawnable: false });
+    await writeLayerEffort("worker", "effort: max");
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-type-overrides-all-effort", type: "worker" });
+
+    const meta = await Bun.file(join(agentsDir, "test-type-overrides-all-effort", "meta.json")).json();
+    expect(meta.effort).toBe("max");
+  });
+
+  test("effort E3: _non_coordinator.md effort overrides _all.md for a non-coordinator agent", async () => {
+    await writeLayerEffort("_all", "effort: low", { spawnable: false });
+    await writeLayerEffort("_non_coordinator", "effort: high", { spawnable: false });
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-noncoord-overrides-all-effort", type: "worker" });
+
+    const meta = await Bun.file(join(agentsDir, "test-noncoord-overrides-all-effort", "meta.json")).json();
+    expect(meta.effort).toBe("high");
+  });
+
+  test("effort E4: blank effort in a more-specific file does NOT clobber a real effort in a less-specific file", async () => {
+    await writeLayerEffort("_all", "effort: high", { spawnable: false });
+    await writeLayerEffort("worker", "effort:");
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-blank-inherits-effort", type: "worker" });
+
+    const meta = await Bun.file(join(agentsDir, "test-blank-inherits-effort", "meta.json")).json();
+    expect(meta.effort).toBe("high");
+  });
+
+  test("effort E5: --effort flag wins over all layer files", async () => {
+    await writeLayerEffort("_all", "effort: low", { spawnable: false });
+    await writeLayerEffort("worker", "effort: medium");
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-effort-flag-wins", type: "worker", effort: "max" });
+
+    const meta = await Bun.file(join(agentsDir, "test-effort-flag-wins", "meta.json")).json();
+    expect(meta.effort).toBe("max");
+  });
+
+  test("effort E6: defaults to 'xhigh' when no flag, layer, or config effort is set", async () => {
+    // config.json has no effort key, so config.effort resolves to its default
+    // ("xhigh"); every layer is blank, so the chain lands on the xhigh default.
+    await writeLayerEffort("_all", "effort:", { spawnable: false });
+    await writeLayerEffort("_non_coordinator", "effort:", { spawnable: false });
+    await writeLayerEffort("worker", "effort:");
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-default-effort", type: "worker" });
+
+    const meta = await Bun.file(join(agentsDir, "test-default-effort", "meta.json")).json();
+    expect(meta.effort).toBe("xhigh");
+
+    const startSh = await Bun.file(join(agentsDir, "test-default-effort", "start.sh")).text();
+    expect(startSh).toContain("--effort xhigh");
+  });
+
+  test("effort E7: config.effort is used when no layer declares an effort", async () => {
+    await Bun.write(join(tempDir, "config.json"), JSON.stringify({ model: "claude:sonnet", effort: "low" }));
+    await writeLayerEffort("_all", "effort:", { spawnable: false });
+    await writeLayerEffort("_non_coordinator", "effort:", { spawnable: false });
+    await writeLayerEffort("worker", "effort:");
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-config-effort", type: "worker" });
+
+    const meta = await Bun.file(join(agentsDir, "test-config-effort", "meta.json")).json();
+    expect(meta.effort).toBe("low");
+  });
+
+  test("effort E8: rejects an invalid --effort value", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "test-bad-effort", effort: "extreme" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Invalid effort level: extreme");
   });
 
   test("type: worker sets meta.worker and start.sh doesn't have yolo flags", async () => {
@@ -5640,6 +5822,78 @@ body`,
       expect(startSh).not.toMatch(/setsid claude/);
       expect(startSh).not.toContain("--session-id");
       expect(startSh).not.toContain("--model");
+    });
+
+    test("codex start.sh includes -c model_reasoning_effort with the mapped effort", async () => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      // xhigh has no codex equivalent → maps down to codex 'high'.
+      const result = await callNewAgent("task", {
+        name: "codex-effort-xhigh",
+        model: "codex:gpt-5.4-mini",
+        effort: "xhigh",
+      });
+      expect(result.ok).toBe(true);
+
+      const startSh = await Bun.file(join(agentsDir, "codex-effort-xhigh", "start.sh")).text();
+      // The -c flag pair is shell-quoted in the launch line; the mapped value
+      // is 'high'. claude's --effort flag must never appear on a codex line.
+      expect(startSh).toContain("model_reasoning_effort=");
+      expect(startSh).toContain("high");
+      expect(startSh).not.toContain("--effort");
+      expect(startSh).not.toContain('model_reasoning_effort="xhigh"');
+
+      // meta.json persists the raw (unmapped) itsybitsy value.
+      const meta = await Bun.file(join(agentsDir, "codex-effort-xhigh", "meta.json")).json();
+      expect(meta.effort).toBe("xhigh");
+    });
+
+    test("codex start.sh maps effort 'low' through to model_reasoning_effort=\"low\"", async () => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", {
+        name: "codex-effort-low",
+        model: "codex:gpt-5.4-mini",
+        effort: "low",
+      });
+      expect(result.ok).toBe(true);
+      const startSh = await Bun.file(join(agentsDir, "codex-effort-low", "start.sh")).text();
+      expect(startSh).toContain('model_reasoning_effort="low"');
+    });
+
+    test("codex start.sh maps effort 'medium' through to model_reasoning_effort=\"medium\"", async () => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", {
+        name: "codex-effort-medium",
+        model: "codex:gpt-5.4-mini",
+        effort: "medium",
+      });
+      expect(result.ok).toBe(true);
+      const startSh = await Bun.file(join(agentsDir, "codex-effort-medium", "start.sh")).text();
+      expect(startSh).toContain('model_reasoning_effort="medium"');
+    });
+
+    test("codex start.sh maps effort 'high' through to model_reasoning_effort=\"high\"", async () => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", {
+        name: "codex-effort-high",
+        model: "codex:gpt-5.4-mini",
+        effort: "high",
+      });
+      expect(result.ok).toBe(true);
+      const startSh = await Bun.file(join(agentsDir, "codex-effort-high", "start.sh")).text();
+      expect(startSh).toContain('model_reasoning_effort="high"');
+    });
+
+    test("codex start.sh maps effort 'max' down to codex 'high'", async () => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", {
+        name: "codex-effort-max",
+        model: "codex:gpt-5.4-mini",
+        effort: "max",
+      });
+      expect(result.ok).toBe(true);
+      const startSh = await Bun.file(join(agentsDir, "codex-effort-max", "start.sh")).text();
+      expect(startSh).toContain('model_reasoning_effort="high"');
+      expect(startSh).not.toContain('model_reasoning_effort="max"');
     });
 
     test("does NOT write <worktree>/.claude/settings.local.json for codex", async () => {

@@ -44,6 +44,17 @@ describe("buildCodexStartContent — launch line", () => {
     expect(content).toContain("--dangerously-bypass-hook-trust");
   });
 
+  test("threads codexEffort into the -c model_reasoning_effort override", () => {
+    const content = buildCodexStartContent({ ...baseInput(), codexEffort: "high" });
+    // Each `-c` payload is shell-quoted, so it appears single-quoted.
+    expect(content).toContain(`'model_reasoning_effort="high"'`);
+  });
+
+  test("omits model_reasoning_effort when codexEffort is absent", () => {
+    const content = buildCodexStartContent(baseInput());
+    expect(content).not.toContain("model_reasoning_effort");
+  });
+
   test("adds the Sakana Responses provider and loads its key only into the child environment for Fugu", () => {
     const content = buildCodexStartContent({ ...baseInput(), codexModel: "fugu-ultra", fugu: true });
     expect(content).toContain("'model_provider=\"sakana\"'");
@@ -280,6 +291,18 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
       extraWritableRoots: ["/repo/.git"],
     });
     expect(content).toContain("'--add-dir' '/repo/.git'");
+  });
+
+  test("re-applies the -c model_reasoning_effort override on resume (a -c config override, unlike rollout-bound -m)", () => {
+    const content = buildCodexResumeContent({ ...baseInput(), codexEffort: "medium" });
+    expect(content).toContain(`'model_reasoning_effort="medium"'`);
+    // The model flag is NOT re-passed on resume (bound to the rollout).
+    expect(content).not.toContain("-m ");
+  });
+
+  test("omits model_reasoning_effort on resume when codexEffort is absent (legacy agents)", () => {
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).not.toContain("model_reasoning_effort");
   });
 
   test("re-passes one inline `-c` flag per registered hook event on resume (Phase 7 Q1)", () => {

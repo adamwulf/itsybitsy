@@ -64,6 +64,13 @@ export interface AgentMeta {
   worker: boolean;
   yolo: boolean;
   model: string;
+  /**
+   * Reasoning-effort level resolved at spawn time (`low|medium|high|xhigh|max`).
+   * Persisted so `resumeAgent` can re-derive the CLI effort flag on resume,
+   * mirroring how `model` is persisted and re-read. Absent (or `null`) for
+   * legacy agents spawned before effort existed — treated as "no override".
+   */
+  effort?: string;
   claude_pid: string;
   summary?: string;
   watchdog_pid?: number;

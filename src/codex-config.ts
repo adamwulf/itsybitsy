@@ -63,6 +63,15 @@ export interface BuildCodexLaunchArgsInput {
   /** Optional override for the per-hook timeout in seconds. */
   timeoutSecs?: number;
   /**
+   * Already-mapped codex reasoning-effort value — one of `low`/`medium`/`high`
+   * (codex has no `xhigh`/`max`). The itsybitsy 5-level scale is mapped down by
+   * `mapEffortForCodex` (agent-cli.ts) BEFORE it reaches here, so this file
+   * stays a thin `-c` pusher. When set, pushed as `-c model_reasoning_effort="…"`.
+   * Absent → no override (codex uses its own default). Re-validated defensively
+   * against the codex subset before interpolation into the TOML string literal.
+   */
+  effort?: string;
+  /**
    * Extra directories Codex should treat as writable while in workspace-write
    * mode. Used for git worktrees: the working tree lives under the agent dir,
    * but git metadata writes go through the resolved common git dir.
@@ -74,6 +83,14 @@ export interface CodexLaunchArgs {
   /** Final flat argv suffix (already includes the `-c flag` pairs). */
   args: string[];
 }
+
+/**
+ * The codex `model_reasoning_effort` value set. Codex has no `xhigh`/`max` — the
+ * itsybitsy 5-level scale is collapsed to this subset by `mapEffortForCodex`
+ * (agent-cli.ts). Used as a defensive allowlist before interpolating the value
+ * into the `-c model_reasoning_effort="…"` TOML string literal.
+ */
+const CODEX_EFFORT_LEVELS: ReadonlySet<string> = new Set(["low", "medium", "high"]);
 
 /**
  * Inline configuration for Sakana's OpenAI-compatible Responses API. The API
@@ -266,6 +283,22 @@ export function buildCodexLaunchArgs(input: BuildCodexLaunchArgsInput): CodexLau
   // appending the trailer entirely. User preference: commits made by codex
   // agents should look like normal local commits.
   args.push("-c", 'commit_attribution=""');
+  // Reasoning effort: push `-c model_reasoning_effort="<level>"` following the
+  // same TOML-string-literal convention as commit_attribution / log_dir. The
+  // value is the already-mapped codex subset (low/medium/high) from
+  // mapEffortForCodex. Re-validate defensively here — this file is paranoid
+  // about anything it interpolates into a TOML-in-shell string, and the codex
+  // subset is narrower than the itsybitsy 5-level set, so an unmapped value
+  // slipping through would be a bug we want to catch, not quote away.
+  if (input.effort) {
+    if (!CODEX_EFFORT_LEVELS.has(input.effort)) {
+      throw new Error(
+        `Invalid codex reasoning effort ${JSON.stringify(input.effort)}: expected one of ${[...CODEX_EFFORT_LEVELS].join(", ")}. ` +
+          `The itsybitsy effort level must be mapped via mapEffortForCodex() before reaching buildCodexLaunchArgs.`,
+      );
+    }
+    args.push("-c", `model_reasoning_effort="${input.effort}"`);
+  }
   // Redirect codex's log dir into <agentDir>/codex so the plaintext TUI log
   // (codex-tui.log, opt-in only when log_dir is set explicitly) lives next
   // to the other per-agent diagnostics. archiveAgent() moves <agentDir>

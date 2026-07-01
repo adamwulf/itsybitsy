@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { resolveCli, isCodexModel, parseModel, KNOWN_CLIS, type AgentCli } from "./agent-cli";
+import { resolveCli, isCodexModel, parseModel, mapEffortForCodex, KNOWN_CLIS, type AgentCli } from "./agent-cli";
 
 describe("parseModel", () => {
   describe("split on first colon, model is greedy-to-end (SPEC §5.1)", () => {
@@ -293,4 +293,30 @@ describe("isCodexModel and resolveCli agree on qualified inputs", () => {
       expect(resolveCli(model)).toBe(expected);
     });
   }
+});
+
+describe("mapEffortForCodex — collapse the itsybitsy 5-level scale to codex's low/medium/high", () => {
+  test("low and medium pass through unchanged", () => {
+    expect(mapEffortForCodex("low")).toBe("low");
+    expect(mapEffortForCodex("medium")).toBe("medium");
+  });
+
+  test("high, xhigh, and max all map to codex 'high' (codex has no xhigh/max)", () => {
+    expect(mapEffortForCodex("high")).toBe("high");
+    expect(mapEffortForCodex("xhigh")).toBe("high");
+    expect(mapEffortForCodex("max")).toBe("high");
+  });
+
+  test("the default effort ('xhigh') lands on codex 'high'", () => {
+    // Belt-and-suspenders: the shared default is xhigh, so a codex agent with
+    // no explicit override must resolve to codex 'high'.
+    expect(mapEffortForCodex("xhigh")).toBe("high");
+  });
+
+  test("unrecognized input falls back to 'high'", () => {
+    // Never expected to fire (callers validate with isValidEffort first), but
+    // the mapping must be total — an unmapped value must not become undefined.
+    expect(mapEffortForCodex("")).toBe("high");
+    expect(mapEffortForCodex("bogus")).toBe("high");
+  });
 });

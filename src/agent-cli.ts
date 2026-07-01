@@ -102,3 +102,36 @@ export function resolveCli(model: string): AgentCli {
 export function isCodexModel(model: string): boolean {
   return isCodexBackedCli(parseModel(model).cli);
 }
+
+/**
+ * Map itsybitsy's 5-level effort scale down to codex's `model_reasoning_effort`
+ * value set. Codex only understands `low` / `medium` / `high` — it has no
+ * `xhigh` / `max` — so the two highest itsybitsy levels collapse onto codex's
+ * `high`:
+ *
+ *   low    -> low
+ *   medium -> medium
+ *   high   -> high
+ *   xhigh  -> high
+ *   max    -> high
+ *
+ * Any unrecognized input (should never happen — the caller validates against
+ * `isValidEffort` first) also falls back to `high`, matching the default effort
+ * (`xhigh`, which maps to `high`). Keeping the mapping here — next to
+ * `parseModel` — means the codex arg-builder (`buildCodexLaunchArgs`) stays a
+ * thin `-c` pusher and only ever sees an already-mapped codex value.
+ */
+export function mapEffortForCodex(effort: string): string {
+  switch (effort) {
+    case "low":
+      return "low";
+    case "medium":
+      return "medium";
+    case "high":
+    case "xhigh":
+    case "max":
+      return "high";
+    default:
+      return "high";
+  }
+}

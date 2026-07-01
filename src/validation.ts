@@ -14,6 +14,27 @@ export function isValidModel(value: string): boolean {
   return /^[a-zA-Z0-9._:-]+$/.test(value);
 }
 
+/**
+ * The finite set of reasoning-effort levels the Claude CLI accepts via
+ * `--effort <level>` (verbatim from `claude --help`). Codex's
+ * `model_reasoning_effort` is a narrower subset (`low`/`medium`/`high`); the
+ * itsybitsy-side value is validated against this full set and mapped down for
+ * codex by `mapEffortForCodex` in agent-cli.ts.
+ */
+const VALID_EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
+
+/**
+ * Validate an effort level for shell interpolation. Unlike `isValidModel`'s
+ * broad character allowlist, effort is a closed enum — so we validate against
+ * the known finite set. This is both a semantic check (only real levels) and a
+ * shell-safety check (an enum member can't contain a metacharacter). Rejects
+ * the empty string, wrong case (`"XHIGH"`), unknown levels (`"extreme"`), and
+ * any injection payload (`"high$(whoami)"`).
+ */
+export function isValidEffort(value: string): boolean {
+  return VALID_EFFORT_LEVELS.has(value);
+}
+
 /** Validate a comma-separated tool list for --allowedTools / --disallowedTools. */
 export function isValidToolList(value: string): boolean {
   // Each token: alphanumeric, underscores, hyphens, asterisks, parens, colons, dots, spaces, slashes, tildes

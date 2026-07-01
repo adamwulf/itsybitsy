@@ -13,6 +13,7 @@ import systemLayerMd from '../docs/agent-types/system.md' with { type: 'text' };
 import allLayerMd from '../docs/agent-types/_all.md' with { type: 'text' };
 import nonCoordinatorLayerMd from '../docs/agent-types/_non_coordinator.md' with { type: 'text' };
 import { parseModel } from './agent-cli';
+import { isValidEffort } from './validation';
 
 const EMBEDDED_TYPES: Record<string, string> = {
   'manager': managerMd,
@@ -35,6 +36,14 @@ export interface AgentType {
    */
   spawnable?: boolean;
   model?: string;
+  /**
+   * Reasoning-effort level threaded to the underlying CLI (Claude's
+   * `--effort <level>`, codex's `model_reasoning_effort`). One of
+   * `low|medium|high|xhigh|max`. Inheritable the same way `model` is (child
+   * replaces when present and non-empty — an empty string means inherit).
+   * Absent → the spawn falls through to the `"xhigh"` default (see §2 item 4).
+   */
+  effort?: string;
   permissions?: {
     allow?: string[];
     deny?: string[];
@@ -408,6 +417,7 @@ function mergeRawFrontmatters(
     "canSpawnChildren",
     "icon",
     "model",
+    "effort",
     "instructionStyle",
     "allowedPaths",
     "repos",
@@ -416,10 +426,12 @@ function mergeRawFrontmatters(
   // Keys that treat an explicit empty string as "inherit / no override" —
   // matching PLAN-INHERITS.md's rules table (icon must be present *and
   // non-empty*; model's empty string collapses to the inherit convention).
-  // Without this, a child that declares `icon:` or `model:` with no value
-  // silently wipes the parent's value to undefined. description and
-  // instructionStyle keep the strict "present → replace" rule.
-  const EMPTY_STRING_INHERITS = new Set(["icon", "model"]);
+  // Without this, a child that declares `icon:`, `model:`, or `effort:` with no
+  // value silently wipes the parent's value to undefined. `effort` follows
+  // `model`'s convention so a child declaring a blank `effort:` inherits the
+  // parent's value. description and instructionStyle keep the strict
+  // "present → replace" rule.
+  const EMPTY_STRING_INHERITS = new Set(["icon", "model", "effort"]);
 
   // Accumulated permission lists (unioned across the chain, deduped below).
   const allAllow: string[] = [];
@@ -537,6 +549,7 @@ function buildAgentTypeFromFrontmatter(
     spawnable: leafSpawnable,
     icon: iconChar,
     model: getString(frontmatter.model, "") || undefined,
+    effort: getString(frontmatter.effort, "") || undefined,
     permissions: permissions
       ? {
           allow: Array.isArray(permissions.allow) ? (permissions.allow as string[]) : undefined,
@@ -786,6 +799,15 @@ export async function validateAllAgentTypes(): Promise<string[]> {
           } catch (err) {
             errors.push(`${file}: invalid model — ${err instanceof Error ? err.message : String(err)}`);
           }
+        }
+
+        // Validate effort if present. Must be one of low|medium|high|xhigh|max.
+        // Empty string is the "inherit" convention (see EMPTY_STRING_INHERITS),
+        // mirroring model above.
+        if (frontmatter.effort !== undefined && typeof frontmatter.effort !== "string") {
+          errors.push(`${file}: effort must be a string`);
+        } else if (typeof frontmatter.effort === "string" && frontmatter.effort !== "" && !isValidEffort(frontmatter.effort)) {
+          errors.push(`${file}: invalid effort '${frontmatter.effort}' — must be one of low, medium, high, xhigh, max`);
         }
 
         // Validate allowedPaths if present

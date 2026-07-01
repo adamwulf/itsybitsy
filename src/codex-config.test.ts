@@ -460,6 +460,53 @@ describe("buildCodexLaunchArgs — disables codex's native multi-agent feature",
   });
 });
 
+describe("buildCodexLaunchArgs — model_reasoning_effort override", () => {
+  test("appends `-c model_reasoning_effort=\"<level>\"` for each mapped codex level", () => {
+    for (const level of ["low", "medium", "high"]) {
+      const { args } = buildCodexLaunchArgs({
+        ibBinaryPath: "/usr/local/bin/ib",
+        agentId: "agent-abc123",
+        agentDir: "/var/agents/agent-abc123",
+        effort: level,
+      });
+      // The flag pair must appear as two adjacent entries: the `-c` token, then
+      // the TOML string-literal payload.
+      let foundAt = -1;
+      for (let i = 0; i < args.length - 1; i++) {
+        if (args[i] === "-c" && args[i + 1] === `model_reasoning_effort="${level}"`) {
+          foundAt = i;
+          break;
+        }
+      }
+      expect(foundAt).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  test("emits no model_reasoning_effort flag when effort is absent", () => {
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/usr/local/bin/ib",
+      agentId: "agent-abc123",
+      agentDir: "/var/agents/agent-abc123",
+    });
+    expect(args.some((a) => a.startsWith("model_reasoning_effort="))).toBe(false);
+  });
+
+  test("rejects an unmapped itsybitsy level (must be mapped to the codex subset first)", () => {
+    // xhigh / max are itsybitsy levels codex doesn't understand — buildCodexLaunchArgs
+    // is a defensive gate: the caller must map via mapEffortForCodex() beforehand.
+    for (const bad of ["xhigh", "max", "extreme", 'high"; rm -rf /']) {
+      expect(() =>
+        buildCodexLaunchArgs({
+          ibBinaryPath: "/usr/local/bin/ib",
+          agentId: "agent-abc123",
+          agentDir: "/var/agents/agent-abc123",
+          effort: bad,
+        }),
+      ).toThrow(/Invalid codex reasoning effort/);
+    }
+  });
+});
+
 describe("buildCodexLaunchArgs — log_dir and tui.show_tooltips flags", () => {
   test("appends `-c log_dir=\"<agentDir>/codex\"` so codex logs land in the agent dir", () => {
     const { args } = buildCodexLaunchArgs({

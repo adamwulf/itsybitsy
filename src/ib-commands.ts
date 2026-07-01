@@ -52,12 +52,12 @@ import { listTmuxSessions } from "./tmux-poller";
 import { logToWatchLog, logWarning } from "./watch-log";
 import { SpawnContext, InjectionContext } from "./types";
 import type { SpawnFn } from "./types";
-import { isValidModel, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, isValidAgentId, shellQuote, tmuxSessionTarget } from "./validation";
+import { isValidModel, isValidEffort, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, isValidAgentId, shellQuote, tmuxSessionTarget } from "./validation";
 import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome } from "./coordinator";
 import { loadAgentType, agentTypeExists } from "./agent-types";
 import type { AgentType } from "./agent-types";
-import { isCodexBackedCli, parseModel } from "./agent-cli";
+import { isCodexBackedCli, parseModel, mapEffortForCodex } from "./agent-cli";
 import { isKnownModel, listKnownSelectorsForCli } from "./known-models";
 import {
   buildHooksBlock,
@@ -774,6 +774,18 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
       }
     }
 
+    // Re-derive the reasoning-effort level from the persisted meta value, the
+    // exact twin of the model re-derivation above. Without this a resumed
+    // agent silently loses its `--effort` setting. Legacy agents (spawned
+    // before effort existed) have no meta.effort (or the literal "null"), which
+    // collapses to "" → no flag appended, matching the pre-effort behavior.
+    // Validate defensively — a corrupted meta.json shouldn't reach shell
+    // interpolation with an out-of-set value.
+    const resumeEffort = agent.meta.effort && agent.meta.effort !== "null" ? agent.meta.effort : "";
+    if (resumeEffort && !isValidEffort(resumeEffort)) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid effort level: ${resumeEffort}` };
+    }
+
     // Resume is allowed when no live tmux session exists for the agent. We don't
     // trust meta.state here because legacy paused agents (pre-Phase 42) may have a
     // stale state like "complete" or "waiting" that pause never overwrote. Checking
@@ -931,6 +943,12 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
         ibBinaryPath: codexIbBinaryPath,
         agentDir,
         codexSessionId,
+        // Re-apply the persisted effort as a `-c model_reasoning_effort` override.
+        // Unlike `-m <model>` (which codex resume drops because the model is
+        // bound to the rollout), `-c` config overrides ARE re-applied on codex
+        // resume via the shared buildCodexLaunchArgs, so effort carries over.
+        // Empty for legacy agents → no override pushed.
+        codexEffort: resumeEffort ? mapEffortForCodex(resumeEffort) : undefined,
         absMetaJson: join(agentDir, "meta.json"),
         absExitScript,
         absAgentLog: join(agentDir, "agent.log"),
@@ -968,6 +986,14 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
       }
       if (modelFlagValue) {
         claudeArgs = claudeArgs ? `${claudeArgs} --model ${modelFlagValue}` : `--model ${modelFlagValue}`;
+      }
+      // Re-apply the persisted reasoning effort so a resumed claude agent keeps
+      // its --effort setting (twin of the --model re-application above). Empty
+      // for legacy agents with no meta.effort → no flag, matching pre-effort
+      // behavior. This branch is claude-only (codex resume is the sibling
+      // `if` above), so no CLI gate is needed here.
+      if (resumeEffort) {
+        claudeArgs = claudeArgs ? `${claudeArgs} --effort ${resumeEffort}` : `--effort ${resumeEffort}`;
       }
 
       // Note: per-repo coordinators never reach this point — the early branch at
@@ -2943,6 +2969,7 @@ export interface NewAgentOptions {
   type?: string;
   yolo?: boolean;
   model?: string;
+  effort?: string;
   manager?: string;
   noWorktree?: boolean;
   allowTools?: string;
@@ -3646,6 +3673,42 @@ export async function newAgent(
     return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${model}` };
   }
 
+  // 7b. Effort precedence — the exact structural twin of the model chain above,
+  //     reusing the same already-loaded layer objects (agentTypeDef,
+  //     nonCoordLayer, allLayer) with the same gating:
+  //       --effort (CLI flag)
+  //         > <type>.md effort
+  //         > _non_coordinator.md effort (non-coordinator agents only)
+  //         > _all.md effort
+  //         > config.effort (non-coordinator agents only)
+  //         > 'xhigh' (default)
+  //     A blank `effort:` in a more-specific layer is `undefined` after parsing
+  //     and so does NOT clobber a real value set by a less-specific layer
+  //     (same EMPTY_STRING_INHERITS convention as model). The resolved value is
+  //     validated against the finite Claude level set; codex maps it down to
+  //     its narrower low/medium/high set at launch (mapEffortForCodex).
+  let effort = opts?.effort ?? "";
+  if (!effort) {
+    const effortLayerChain: Array<string | undefined> = [
+      agentTypeDef.effort,
+      coordinatorMode ? undefined : nonCoordLayer?.effort,
+      allLayer?.effort,
+    ];
+    for (const layerEffort of effortLayerChain) {
+      if (layerEffort) { effort = layerEffort; break; }
+    }
+  }
+  if (!effort && !coordinatorMode) {
+    const configEffort = config.effort?.value as string | undefined;
+    if (configEffort) effort = configEffort;
+  }
+  if (!effort) effort = "xhigh";
+
+  // Validate effort level (finite enum — semantic + shell-safety in one).
+  if (!isValidEffort(effort)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid effort level: ${effort}` };
+  }
+
   // Parse the qualified `<cli>:<model>` form (SPEC-CODEX-MODEL.md §5.1, D1).
   // parseModel throws on a missing/malformed/unknown cli — the spawn is rejected
   // with the D6 message ("Unknown CLI '<x>' in model '<x>:<...>'; known: claude, codex").
@@ -3941,6 +4004,7 @@ export async function newAgent(
     agentIcon: agentTypeDef.icon || undefined,
     yolo: yoloMode,
     model: model || null,
+    effort: effort || null,
     spawned_by: spawnedBy ?? null,
     state: "creating",
     state_updated_at: Math.floor(createdAt.getTime() / 1000),
@@ -4297,6 +4361,16 @@ When your task is complete:
   if (modelFlagValue) {
     claudeArgs = claudeArgs ? `${claudeArgs} --model ${modelFlagValue}` : `--model ${modelFlagValue}`;
   }
+  // Claude-only: append `--effort <level>`. `claudeArgs` is consumed only by the
+  // claude branch of `startContent` below, but gate on the CLI anyway so the
+  // intent is explicit and a future refactor can't leak `--effort` (a
+  // claude-specific flag) into the codex launch line, which threads effort via
+  // the `-c model_reasoning_effort` override instead. `effort` is already
+  // validated + always non-empty (default 'xhigh'), so this always fires on the
+  // claude path.
+  if (!isCodexBackedCli(agentCli) && effort) {
+    claudeArgs = claudeArgs ? `${claudeArgs} --effort ${effort}` : `--effort ${effort}`;
+  }
   if (coordinatorMode) {
     // Load permissions + hooks from the coordinator's isolated settings file
     // so they don't pollute the repo's .claude/settings.local.json.
@@ -4380,6 +4454,9 @@ echo ""
       ibBinaryPath: codexIbBinaryPath!,
       agentDir,
       codexModel: modelFlagValue,
+      // Map itsybitsy's 5-level scale down to codex's low/medium/high set.
+      // `effort` is validated + always non-empty (default 'xhigh' → 'high').
+      codexEffort: mapEffortForCodex(effort),
       fugu: agentCli === "fugu",
       absPromptFile,
       absMetaJson: join(agentDir, "meta.json"),

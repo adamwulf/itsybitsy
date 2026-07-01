@@ -65,6 +65,12 @@ export interface BuildCodexStartContentInput {
   agentDir: string;
   /** Model half from `parseModel(model).model` — e.g. `gpt-5.4-mini`. */
   codexModel: string;
+  /**
+   * Already-mapped codex reasoning-effort value (`low`/`medium`/`high`) from
+   * `mapEffortForCodex`. Threaded into `buildCodexLaunchArgs` so codex launches
+   * with `-c model_reasoning_effort="…"`. Optional — absent means no override.
+   */
+  codexEffort?: string;
   /** Absolute path to prompt.txt — passed as `"$(cat <quoted>)"`. */
   absPromptFile: string;
   /** Absolute path to meta.json — pid is written here. */
@@ -107,6 +113,7 @@ export function buildCodexStartContent(input: BuildCodexStartContentInput): stri
     ibBinaryPath: input.ibBinaryPath,
     agentId: input.agentId,
     agentDir: input.agentDir,
+    effort: input.codexEffort,
     extraWritableRoots: input.extraWritableRoots,
   });
 
@@ -245,6 +252,15 @@ export interface BuildCodexResumeContentInput {
   agentDir: string;
   /** Codex rollout/session UUID from meta.codex_session_id. Already validated upstream by isValidSessionId. */
   codexSessionId: string;
+  /**
+   * Already-mapped codex reasoning-effort value (`low`/`medium`/`high`) from
+   * `mapEffortForCodex`, re-derived from the persisted meta.effort. Threaded
+   * into `buildCodexLaunchArgs` so a resumed codex session re-applies the
+   * `-c model_reasoning_effort="…"` override (unlike `-m <model>`, which is
+   * bound to the rollout and deliberately dropped). Optional — absent (legacy
+   * agents) means no override.
+   */
+  codexEffort?: string;
   /** Absolute path to meta.json — pid is written here. */
   absMetaJson: string;
   /** Absolute path to exit-check.sh. */
@@ -294,6 +310,7 @@ export function buildCodexResumeContent(input: BuildCodexResumeContentInput): st
     ibBinaryPath: input.ibBinaryPath,
     agentId: input.agentId,
     agentDir: input.agentDir,
+    effort: input.codexEffort,
     extraWritableRoots: input.extraWritableRoots,
   });
 

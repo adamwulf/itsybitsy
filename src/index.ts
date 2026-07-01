@@ -566,7 +566,7 @@ const COMMAND_HELP: Record<string, string> = {
     "  from the current working directory (backs the /respawn slash command).\n" +
     "  Pass @system to restart the system coordinator.",
   "new-agent":
-    "Usage: ib new-agent [--type <type>] [--model <model>] [--manager <id>] [--name <name>]\n" +
+    "Usage: ib new-agent [--type <type>] [--model <model>] [--effort <level>] [--manager <id>] [--name <name>]\n" +
     "                    [--repo <name|path>] [--spawned-by <id> [--spawned-by-repo <path>]]\n" +
     '                    [--allow <tools>] [--deny <tools>] [--no-worktree] [--yolo]\n' +
     '                    [-f|--file|--prompt-file <path>] ["prompt..."]\n' +
@@ -575,6 +575,7 @@ const COMMAND_HELP: Record<string, string> = {
     "  or piped on stdin.\n" +
     "  --type <type>          Agent type (see `ib list-types`)\n" +
     "  --model <m>            Model selector, e.g. claude:opus or codex:gpt-5-codex\n" +
+    "  --effort <level>       Reasoning effort: low|medium|high|xhigh|max (default: xhigh)\n" +
     "  --manager <id>         Parent manager agent id\n" +
     "  --name <n>             Optional human-readable agent name\n" +
     "  --repo <name|path>     Target repo (defaults to cwd-matched repo)\n" +
@@ -1924,6 +1925,10 @@ async function main() {
         else if (arg === "--model") {
           if (!ibArgs[i + 1]) { console.error("Error: --model requires a value"); process.exit(1); }
           opts.model = ibArgs[++i];
+        }
+        else if (arg === "--effort") {
+          if (!ibArgs[i + 1]) { console.error("Error: --effort requires a value"); process.exit(1); }
+          opts.effort = ibArgs[++i];
         }
         else if (arg === "--manager") {
           if (!ibArgs[i + 1]) { console.error("Error: --manager requires an agent ID"); process.exit(1); }

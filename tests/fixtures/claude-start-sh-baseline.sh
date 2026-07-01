@@ -8,7 +8,7 @@ AGENT_LOG='<AGENTSDIR>/claude-snapshot/agent.log'
 STDERR_LOG='<AGENTSDIR>/claude-snapshot/claude.stderr.log'
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }
 
-log "Starting claude --session-id <SESSION-UUID> --model sonnet"
+log "Starting claude --session-id <SESSION-UUID> --model sonnet --effort xhigh"
 log "PWD=$(pwd) which_claude=$(which claude 2>&1)"
 
 # Ignore SIGHUP for the lifetime of this script. When spawn is triggered from
@@ -39,9 +39,9 @@ else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid claude --session-id "<SESSION-UUID>" --model sonnet "$(cat '<AGENTSDIR>/claude-snapshot/prompt.txt')" 2> "$STDERR_LOG" &
+    setsid claude --session-id "<SESSION-UUID>" --model sonnet --effort xhigh "$(cat '<AGENTSDIR>/claude-snapshot/prompt.txt')" 2> "$STDERR_LOG" &
 else
-    claude --session-id "<SESSION-UUID>" --model sonnet "$(cat '<AGENTSDIR>/claude-snapshot/prompt.txt')" 2> "$STDERR_LOG" &
+    claude --session-id "<SESSION-UUID>" --model sonnet --effort xhigh "$(cat '<AGENTSDIR>/claude-snapshot/prompt.txt')" 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
 log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"

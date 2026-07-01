@@ -559,6 +559,57 @@ body`);
     expect(type.model).toBe("opus");
   });
 
+  test("effort: parsed from frontmatter and inheritable like model", async () => {
+    await writeType("parent", `---
+name: parent
+effort: high
+---
+body`);
+    await writeType("child", `---
+inherits: parent
+---
+body`);
+
+    const parent = await loadAgentType("parent");
+    expect(parent.effort).toBe("high");
+    // Child omits effort → inherits parent's value.
+    const child = await loadAgentType("child");
+    expect(child.effort).toBe("high");
+  });
+
+  test("effort: child overrides parent's effort when present and non-empty", async () => {
+    await writeType("parent", `---
+name: parent
+effort: low
+---
+body`);
+    await writeType("child", `---
+inherits: parent
+effort: max
+---
+body`);
+
+    const type = await loadAgentType("child");
+    expect(type.effort).toBe("max");
+  });
+
+  test("effort: empty string in child inherits parent's effort (not wipes to undefined)", async () => {
+    // Mirrors the model empty-string-inherits convention.
+    await writeType("parent", `---
+name: parent
+effort: high
+---
+body`);
+    await writeType("child", `---
+inherits: parent
+effort: ""
+---
+body`);
+
+    const type = await loadAgentType("child");
+    expect(type.effort).toBe("high");
+  });
+
   test("icon: empty string in child inherits parent's icon (not wipes to undefined)", async () => {
     // PLAN-INHERITS.md rules table: `icon` — Child replaces if key is
     // **present** and non-empty. An empty child icon means "inherit".
@@ -1126,6 +1177,36 @@ repos:
       (e) => e.startsWith("bad.md") && (e.includes("repos must be a list of strings") || e.includes("repos must be a YAML list of strings") || e.includes("repos entries must be strings")),
     );
     expect(err).toBeDefined();
+  });
+
+  test("flags an invalid effort level", async () => {
+    await writeType("badeffort", `---
+name: badeffort
+description: bad effort
+effort: extreme
+---
+`);
+
+    const errors = await validateAllAgentTypes();
+    const err = errors.find(
+      (e) => e.startsWith("badeffort.md") && e.includes("invalid effort"),
+    );
+    expect(err).toBeDefined();
+  });
+
+  test("accepts every valid effort level", async () => {
+    for (const level of ["low", "medium", "high", "xhigh", "max"]) {
+      await writeType(`eff-${level}`, `---
+name: eff-${level}
+description: good effort
+effort: ${level}
+---
+`);
+    }
+
+    const errors = await validateAllAgentTypes();
+    const effortErr = errors.find((e) => e.includes("effort"));
+    expect(effortErr).toBeUndefined();
   });
 });
 

@@ -158,6 +158,7 @@ describe("watchdog", () => {
       expect(tracker.waitCounter).toBe(0);
       expect(tracker.notifyInterval).toBe(INITIAL_NOTIFY_TICKS);
       expect(tracker.completionNotified).toBe(false);
+      expect(tracker.completeCounter).toBe(0);
       expect(tracker.rateLimitBypassed).toBe(false);
     });
   });
@@ -833,7 +834,11 @@ describe("watchdog", () => {
       const a1 = agent("a1", "complete", "mgr");
       a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
 
-      await tick([mgr, spawner, a1]);
+      // The watchdog "recently completed" is a delayed fallback — it only fires
+      // after the agent has been continuously complete for INITIAL_NOTIFY_TICKS.
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([mgr, spawner, a1]);
+      }
       expect(countSendKeysWithText(spawnMock, "Your subtask a1 recently completed")).toBeGreaterThan(0);
       expect(countSendKeysWithText(spawnMock, "you spawned recently completed")).toBe(0);
     });
@@ -843,7 +848,9 @@ describe("watchdog", () => {
       const a1 = agent("a1", "complete", null);
       a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
 
-      await tick([spawner, a1]);
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([spawner, a1]);
+      }
       expect(countSendKeysWithText(spawnMock, "you spawned recently completed")).toBeGreaterThan(0);
     });
 
@@ -1058,8 +1065,12 @@ describe("watchdog", () => {
       try {
         const mgr = agent("mgr", "running");
         const a1 = agent("a1", "complete", "mgr");
-        await tick([mgr, a1]);
-        // First tick: notification attempted, failed → flag must NOT be set
+        // The fallback only attempts delivery once the delay threshold is
+        // reached; advance to it so the (failing) delivery is actually tried.
+        for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+          await tick([mgr, a1]);
+        }
+        // Threshold reached, notification attempted, failed → flag must NOT be set
         expect(getTracker("a1").completionNotified).toBe(false);
 
         // Recover: subsequent tick with working sendMessage delivers, then sets the flag
@@ -1080,7 +1091,10 @@ describe("watchdog", () => {
       try {
         const a1 = agent("a1", "complete", null);
         a1.meta.spawned_by = { agent_id: "@system", repo_path: null };
-        await tick([a1]);
+        // Advance past the fallback delay so delivery is attempted (and fails).
+        for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+          await tick([a1]);
+        }
         expect(getTracker("a1").completionNotified).toBe(false);
       } finally {
         resetSystemCoordinatorHasSessionFn();
@@ -1207,39 +1221,81 @@ describe("watchdog", () => {
   // =========================================================================
 
   describe("complete handler", () => {
-    test("sends one-time notification to manager via tick", async () => {
+    /** Count watchdog "recently completed" send-keys calls in the spawn mock. */
+    function countRecentlyCompleted(): number {
+      return spawnMock.calls.filter((c) => {
+        const joined = c.args.join(" ");
+        return joined.includes("send-keys") && joined.includes("recently completed");
+      }).length;
+    }
+
+    test("sends delayed fallback notification to manager after INITIAL_NOTIFY_TICKS", async () => {
       const mgr = agent("mgr", "running");
       const w1 = agent("w1", "complete", "mgr");
 
-      await tick([mgr, w1]);
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([mgr, w1]);
+      }
 
       expect(getTracker("w1").completionNotified).toBe(true);
-      const sendKeysCalls = spawnMock.calls.filter((c) => {
-        const joined = c.args.join(" ");
-        return joined.includes("send-keys") && joined.includes("recently completed");
-      });
-      expect(sendKeysCalls.length).toBeGreaterThan(0);
+      expect(countRecentlyCompleted()).toBeGreaterThan(0);
+    });
+
+    test("does NOT notify within the first ticks of complete (anti-duplicate delay)", async () => {
+      const mgr = agent("mgr", "running");
+      const w1 = agent("w1", "complete", "mgr");
+
+      // Any tick strictly before the threshold must NOT send — the hook's
+      // immediate "just completed" owns this window, and an active manager
+      // reacts within it. This is the anti-duplicate guarantee.
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS - 1; i++) {
+        await tick([mgr, w1]);
+        expect(countRecentlyCompleted()).toBe(0);
+        expect(getTracker("w1").completionNotified).toBe(false);
+        expect(getTracker("w1").completeCounter).toBe(i + 1);
+      }
+
+      // The threshold tick fires the fallback.
+      await tick([mgr, w1]);
+      expect(countRecentlyCompleted()).toBe(1);
+      expect(getTracker("w1").completionNotified).toBe(true);
+    });
+
+    test("resets completeCounter and does not notify if it leaves complete before threshold", async () => {
+      const mgr = agent("mgr", "running");
+      const w1 = agent("w1", "complete", "mgr");
+
+      // A few complete ticks, but fewer than the threshold.
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS - 2; i++) {
+        await tick([mgr, w1]);
+      }
+      expect(countRecentlyCompleted()).toBe(0);
+      expect(getTracker("w1").completeCounter).toBe(INITIAL_NOTIFY_TICKS - 2);
+
+      // Manager reacts — agent goes back to running before the fallback fires.
+      await tick([mgr, agent("w1", "running", "mgr")]);
+      expect(countRecentlyCompleted()).toBe(0);
+      expect(getTracker("w1").completeCounter).toBe(0);
+      expect(getTracker("w1").completionNotified).toBe(false);
     });
 
     test("does not re-notify on subsequent ticks", async () => {
       const mgr = agent("mgr", "running");
       const w1 = agent("w1", "complete", "mgr");
 
-      await tick([mgr, w1]);
-      await tick([mgr, w1]);
-      await tick([mgr, w1]);
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS + 3; i++) {
+        await tick([mgr, w1]);
+      }
 
-      const completedCalls = spawnMock.calls.filter((c) => {
-        const joined = c.args.join(" ");
-        return joined.includes("send-keys") && joined.includes("recently completed");
-      });
-      expect(completedCalls.length).toBe(1);
+      expect(countRecentlyCompleted()).toBe(1);
     });
 
     test("skips notification when no manager", async () => {
       const w1 = agent("w1", "complete", null);
 
-      await tick([w1]);
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([w1]);
+      }
 
       expect(getTracker("w1").completionNotified).toBe(true);
       const sendKeysCalls = spawnMock.calls.filter((c) =>
@@ -1250,36 +1306,45 @@ describe("watchdog", () => {
   });
 
   describe("running handler (completionNotified clearing)", () => {
-    test("clears completionNotified when transitioning from complete to running", async () => {
+    test("clears completionNotified and completeCounter when transitioning from complete to running", async () => {
       const mgr = agent("mgr", "running");
       const w1 = agent("w1", "complete", "mgr");
 
-      await tick([mgr, w1]);
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([mgr, w1]);
+      }
       expect(getTracker("w1").completionNotified).toBe(true);
 
       const w1Running = agent("w1", "running", "mgr");
       await tick([mgr, w1Running]);
       expect(getTracker("w1").completionNotified).toBe(false);
+      expect(getTracker("w1").completeCounter).toBe(0);
     });
 
     test("complete -> running -> complete sends two notifications", async () => {
       const mgr = agent("mgr", "running");
 
-      await tick([mgr, agent("w1", "complete", "mgr")]);
-      const firstCalls = spawnMock.calls.filter((c) => {
-        const joined = c.args.join(" ");
-        return joined.includes("send-keys") && joined.includes("recently completed");
-      }).length;
-      expect(firstCalls).toBe(1);
+      const countCompleted = () =>
+        spawnMock.calls.filter((c) => {
+          const joined = c.args.join(" ");
+          return joined.includes("send-keys") && joined.includes("recently completed");
+        }).length;
 
+      // First completion episode — needs the full delay to fire once.
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([mgr, agent("w1", "complete", "mgr")]);
+      }
+      expect(countCompleted()).toBe(1);
+
+      // Back to running clears the flag + counter.
       await tick([mgr, agent("w1", "running", "mgr")]);
 
-      await tick([mgr, agent("w1", "complete", "mgr")]);
-      const totalCalls = spawnMock.calls.filter((c) => {
-        const joined = c.args.join(" ");
-        return joined.includes("send-keys") && joined.includes("recently completed");
-      }).length;
-      expect(totalCalls).toBe(2);
+      // Second completion episode — the reset counter means it must again wait
+      // the full delay before the second fallback fires.
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        await tick([mgr, agent("w1", "complete", "mgr")]);
+      }
+      expect(countCompleted()).toBe(2);
     });
 
     test("clears rateLimitBypassed flag on running", async () => {

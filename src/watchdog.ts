@@ -62,8 +62,8 @@ export interface AgentTracker {
    * complete tick and cannot be used to time the fallback. This dedicated
    * counter is only advanced while `completionNotified` is false, and gates the
    * watchdog's "recently completed" notification: it fires only once the agent
-   * has been continuously complete for `INITIAL_NOTIFY_TICKS`. In the happy
-   * path an active manager reacts to the hook's immediate "just completed"
+   * has been continuously complete for `COMPLETE_FALLBACK_DELAY_TICKS`. In the
+   * happy path an active manager reacts to the hook's immediate "just completed"
    * (merge/kill/send) within that window — moving the child off `complete` —
    * so the redundant fallback never fires. Reset to 0 on entry to `running`
    * (alongside `completionNotified`) and on a fresh entry into `complete`.
@@ -109,6 +109,12 @@ export const RESTART_COMPACT_CANCEL_WINDOW_MS = 10_000;
 
 /** Initial notification threshold in ticks (6 ticks * 5s = 30s) */
 export const INITIAL_NOTIFY_TICKS = 6;
+
+/** Ticks the watchdog waits in `complete` state before sending its
+ *  "recently completed" fallback (see handleComplete). Aliased to
+ *  INITIAL_NOTIFY_TICKS today, but named separately so tuning the
+ *  waiting-backoff base does not silently change this delay. */
+export const COMPLETE_FALLBACK_DELAY_TICKS = INITIAL_NOTIFY_TICKS;
 
 /** Maximum notification interval in ticks (768 ticks * 5s = 3840s = 64 minutes) */
 export const MAX_NOTIFY_TICKS = 768;
@@ -576,8 +582,8 @@ async function saveUnknownDebugLog(agent: Agent): Promise<void> {
  * notification the instant a completing agent's Stop hook observes state=complete
  * and an active recipient (src/hooks/agent-status.ts). This watchdog handler is a
  * safety-net for the case where that hook notification did not fire or deliver —
- * so it deliberately WAITS `INITIAL_NOTIFY_TICKS` (30s) of continuous complete
- * state before sending its own "recently completed". In the common case an active
+ * so it deliberately WAITS `COMPLETE_FALLBACK_DELAY_TICKS` (30s) of continuous
+ * complete state before sending its own "recently completed". In the common case an active
  * manager reacts to the hook's "just completed" (ib merge / ib kill / ib send)
  * within that window, moving the child off `complete` and resetting the counter,
  * so this redundant fallback never fires.
@@ -597,11 +603,11 @@ async function handleComplete(agent: Agent, tracker: AgentTracker, getAllAgents:
 
   if (!tracker.completionNotified) {
     // Advance the countdown while still un-notified. Only fire the fallback
-    // once the agent has been continuously complete for INITIAL_NOTIFY_TICKS —
-    // long enough for an active manager to react to the hook's "just completed"
-    // and move the child off complete first.
+    // once the agent has been continuously complete for
+    // COMPLETE_FALLBACK_DELAY_TICKS — long enough for an active manager to react
+    // to the hook's "just completed" and move the child off complete first.
     tracker.completeCounter += 1;
-    if (tracker.completeCounter < INITIAL_NOTIFY_TICKS) {
+    if (tracker.completeCounter < COMPLETE_FALLBACK_DELAY_TICKS) {
       return;
     }
 

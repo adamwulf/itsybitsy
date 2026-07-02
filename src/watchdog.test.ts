@@ -15,6 +15,7 @@ import {
   getAllTrackers,
   resolveWatchdogState,
   INITIAL_NOTIFY_TICKS,
+  COMPLETE_FALLBACK_DELAY_TICKS,
   MAX_NOTIFY_TICKS,
   POLL_INTERVAL_MS,
   COMPACT_CHECK_COOLDOWN_MS,
@@ -835,8 +836,9 @@ describe("watchdog", () => {
       a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
 
       // The watchdog "recently completed" is a delayed fallback — it only fires
-      // after the agent has been continuously complete for INITIAL_NOTIFY_TICKS.
-      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+      // after the agent has been continuously complete for
+      // COMPLETE_FALLBACK_DELAY_TICKS.
+      for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS; i++) {
         await tick([mgr, spawner, a1]);
       }
       expect(countSendKeysWithText(spawnMock, "Your subtask a1 recently completed")).toBeGreaterThan(0);
@@ -848,7 +850,7 @@ describe("watchdog", () => {
       const a1 = agent("a1", "complete", null);
       a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
 
-      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+      for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS; i++) {
         await tick([spawner, a1]);
       }
       expect(countSendKeysWithText(spawnMock, "you spawned recently completed")).toBeGreaterThan(0);
@@ -1067,7 +1069,7 @@ describe("watchdog", () => {
         const a1 = agent("a1", "complete", "mgr");
         // The fallback only attempts delivery once the delay threshold is
         // reached; advance to it so the (failing) delivery is actually tried.
-        for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS; i++) {
           await tick([mgr, a1]);
         }
         // Threshold reached, notification attempted, failed → flag must NOT be set
@@ -1092,7 +1094,7 @@ describe("watchdog", () => {
         const a1 = agent("a1", "complete", null);
         a1.meta.spawned_by = { agent_id: "@system", repo_path: null };
         // Advance past the fallback delay so delivery is attempted (and fails).
-        for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+        for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS; i++) {
           await tick([a1]);
         }
         expect(getTracker("a1").completionNotified).toBe(false);
@@ -1229,11 +1231,11 @@ describe("watchdog", () => {
       }).length;
     }
 
-    test("sends delayed fallback notification to manager after INITIAL_NOTIFY_TICKS", async () => {
+    test("sends delayed fallback notification to manager after COMPLETE_FALLBACK_DELAY_TICKS", async () => {
       const mgr = agent("mgr", "running");
       const w1 = agent("w1", "complete", "mgr");
 
-      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+      for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS; i++) {
         await tick([mgr, w1]);
       }
 
@@ -1248,7 +1250,7 @@ describe("watchdog", () => {
       // Any tick strictly before the threshold must NOT send — the hook's
       // immediate "just completed" owns this window, and an active manager
       // reacts within it. This is the anti-duplicate guarantee.
-      for (let i = 0; i < INITIAL_NOTIFY_TICKS - 1; i++) {
+      for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS - 1; i++) {
         await tick([mgr, w1]);
         expect(countRecentlyCompleted()).toBe(0);
         expect(getTracker("w1").completionNotified).toBe(false);
@@ -1266,11 +1268,11 @@ describe("watchdog", () => {
       const w1 = agent("w1", "complete", "mgr");
 
       // A few complete ticks, but fewer than the threshold.
-      for (let i = 0; i < INITIAL_NOTIFY_TICKS - 2; i++) {
+      for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS - 2; i++) {
         await tick([mgr, w1]);
       }
       expect(countRecentlyCompleted()).toBe(0);
-      expect(getTracker("w1").completeCounter).toBe(INITIAL_NOTIFY_TICKS - 2);
+      expect(getTracker("w1").completeCounter).toBe(COMPLETE_FALLBACK_DELAY_TICKS - 2);
 
       // Manager reacts — agent goes back to running before the fallback fires.
       await tick([mgr, agent("w1", "running", "mgr")]);
@@ -1283,7 +1285,7 @@ describe("watchdog", () => {
       const mgr = agent("mgr", "running");
       const w1 = agent("w1", "complete", "mgr");
 
-      for (let i = 0; i < INITIAL_NOTIFY_TICKS + 3; i++) {
+      for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS + 3; i++) {
         await tick([mgr, w1]);
       }
 
@@ -1293,7 +1295,7 @@ describe("watchdog", () => {
     test("skips notification when no manager", async () => {
       const w1 = agent("w1", "complete", null);
 
-      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+      for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS; i++) {
         await tick([w1]);
       }
 
@@ -1310,7 +1312,7 @@ describe("watchdog", () => {
       const mgr = agent("mgr", "running");
       const w1 = agent("w1", "complete", "mgr");
 
-      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+      for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS; i++) {
         await tick([mgr, w1]);
       }
       expect(getTracker("w1").completionNotified).toBe(true);
@@ -1331,7 +1333,7 @@ describe("watchdog", () => {
         }).length;
 
       // First completion episode — needs the full delay to fire once.
-      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+      for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS; i++) {
         await tick([mgr, agent("w1", "complete", "mgr")]);
       }
       expect(countCompleted()).toBe(1);
@@ -1341,7 +1343,7 @@ describe("watchdog", () => {
 
       // Second completion episode — the reset counter means it must again wait
       // the full delay before the second fallback fires.
-      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
+      for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS; i++) {
         await tick([mgr, agent("w1", "complete", "mgr")]);
       }
       expect(countCompleted()).toBe(2);

@@ -878,6 +878,28 @@ describe("checkIbCommandAccess", () => {
     expect(result).toBeNull();
   });
 
+  test("allows a manager to reach the precise CLI error for a legacy archive", async () => {
+    const id = "agent-legacy1";
+    await writeRetiredMeta(id, { manager: "agent-manager1" });
+    await rm(
+      join(
+        tmpDir,
+        ".ittybitty",
+        "archive",
+        `20260703-120000-${id}`,
+        "retirement.json",
+      ),
+    );
+
+    const result = await checkIbCommandAccess(
+      `ib rehire ${id}`,
+      "agent-manager1",
+      agentsDir,
+    );
+
+    expect(result).toBeNull();
+  });
+
   test("denies rehire when caller is not the archived target's manager", async () => {
     await writeRetiredMeta("agent-target1", { manager: "agent-manager1" });
     const result = await checkIbCommandAccess(

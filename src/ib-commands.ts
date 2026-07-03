@@ -498,7 +498,6 @@ async function copyRehiredEntry(
     const target = await readlink(source);
     const resolvedTarget = resolve(dirname(destination), target);
     if (
-      target.startsWith("/") ||
       (resolvedTarget !== allowedRoot &&
         !resolvedTarget.startsWith(allowedRoot + "/"))
     ) {
@@ -579,15 +578,17 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
       stderr: `Agent '${agentId}' is already active`,
     };
   }
-  const nicknameCollision = activeAgents.find((agent) => agent.meta.nickname === agentId);
-  if (nicknameCollision) {
+  const idNicknameCollision = activeAgents.find(
+    (agent) => agent.meta.nickname === agentId,
+  );
+  if (idNicknameCollision) {
     return {
       ok: false,
       exitCode: 1,
       stdout: "",
       stderr:
         `Agent id '${agentId}' collides with active nickname on ` +
-        `'${nicknameCollision.id}'`,
+        `'${idNicknameCollision.id}'`,
     };
   }
 
@@ -607,6 +608,22 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
 
   const archived = selected.archive;
   const manifest = archived.manifest!;
+  const warnings: string[] = [];
+  const archivedNickname = archived.meta.nickname;
+  const archivedNicknameCollision =
+    archivedNickname
+      ? activeAgents.find(
+        (agent) =>
+          agent.id === archivedNickname ||
+          agent.meta.nickname === archivedNickname,
+      )
+      : undefined;
+  if (archivedNicknameCollision) {
+    warnings.push(
+      `Nickname '${archivedNickname}' is already used by ` +
+      `'${archivedNicknameCollision.id}'; restored agent has no nickname`,
+    );
+  }
   const repoPath = archived.repoPath;
   const agentsDir = join(repoPath, ".ittybitty", "agents");
   const agentDir = join(agentsDir, agentId);
@@ -833,6 +850,7 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
       state_updated_at: Math.floor(Date.now() / 1000),
     };
     delete restoredMeta.watchdog_pid;
+    if (archivedNicknameCollision) delete restoredMeta.nickname;
     await writeMetaJsonAtomic(agentDir, restoredMeta as unknown as Record<string, unknown>);
     await logAgent(agentDir, `[rehire] Reconstructed from ${archived.archiveKey}`);
   } catch (err) {
@@ -858,7 +876,6 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
     archived: false,
     children: [],
   };
-  const warnings: string[] = [];
   for (const { team } of manifest.prunedTeams) {
     const result = await addMember(team, agentId).catch(() => null);
     if (!result?.team) warnings.push(`Team @${team} no longer exists`);
@@ -1074,27 +1091,16 @@ async function nukeAgentList(
  * Native nuke implementation — replaces `ib nuke <id> --force`.
  *
  * Sequence (mirrors do_nuke in ib bash):
- * 1. Check if target is a worker with no children → error
- * 2. Get all descendants via getDescendantsRecursive()
- * 3. For each: removeAgentQuestions() then teardownAgent()
- * 4. Clean up orphaned tmux sessions
- * 5. scanAndKillOrphans()
+ * 1. Get all descendants via getDescendantsRecursive()
+ * 2. For each: removeAgentQuestions() then teardownAgent()
+ * 3. Clean up orphaned tmux sessions
+ * 4. scanAndKillOrphans()
  */
 export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
   const agentsDir = join(agent.repoPath, ".ittybitty", "agents");
 
   // Get all descendants (includes the agent itself)
   const descendants = await getDescendantsRecursive(agentsDir, agent.id);
-
-  // Check if this is a worker with no children — reject
-  if (agent.meta.worker && descendants.length <= 1) {
-    return {
-      ok: false,
-      exitCode: 1,
-      stdout: "",
-      stderr: `Error: '${agent.id}' is a worker agent with no descendants. Use 'ib retire ${agent.id}' instead.`,
-    };
-  }
 
   const { killed, failed, orphansKilled } = await nukeAgentList(agent.repoPath, agentsDir, descendants);
 

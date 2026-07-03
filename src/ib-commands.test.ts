@@ -1,6 +1,13 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join, basename } from "path";
-import { mkdtemp, rm, mkdir, readdir } from "fs/promises";
+import {
+  mkdtemp,
+  rm,
+  mkdir,
+  readdir,
+  readlink,
+  symlink,
+} from "fs/promises";
 import { tmpdir } from "os";
 import type { Agent, AgentMeta } from "./agents";
 import {
@@ -1025,7 +1032,14 @@ describe("retire → rehire recovery", () => {
     await git("-C", tempDir, "config", "user.email", "test@example.com");
     await git("-C", tempDir, "config", "user.name", "Test User");
     await Bun.write(join(tempDir, "tracked.txt"), "base\n");
-    await git("-C", tempDir, "add", "tracked.txt");
+    await Bun.write(
+      join(tempDir, "latin1.txt"),
+      new Uint8Array([
+        0x70, 0x72, 0x65, 0x66, 0x69, 0x78, 0x20, 0xe9, 0x20, 0x73, 0x75,
+        0x66, 0x66, 0x69, 0x78, 0x0a, 0x6c, 0x69, 0x6e, 0x65, 0x32, 0x0a,
+      ]),
+    );
+    await git("-C", tempDir, "add", "tracked.txt", "latin1.txt");
     await git("-C", tempDir, "commit", "-m", "base");
     await mkdir(join(tempDir, ".ittybitty"), { recursive: true });
     await Bun.write(join(tempDir, ".ittybitty", "repo-id"), "1a2b3c4d\n");
@@ -1054,8 +1068,16 @@ describe("retire → rehire recovery", () => {
     );
 
     await Bun.write(join(worktreePath, "tracked.txt"), "modified\n");
+    const modifiedLatin1 = new Uint8Array([
+      0x70, 0x72, 0x65, 0x66, 0x69, 0x78, 0x20, 0xe9, 0x20, 0x73, 0x75,
+      0x66, 0x66, 0x69, 0x78, 0x0a, 0x6c, 0x69, 0x6e, 0x65, 0x32, 0x0a,
+      0x63, 0x68, 0x61, 0x6e, 0x67, 0x65, 0x64, 0x0a,
+    ]);
+    await Bun.write(join(worktreePath, "latin1.txt"), modifiedLatin1);
     await mkdir(join(worktreePath, "nested"), { recursive: true });
     await Bun.write(join(worktreePath, "nested", "untracked.txt"), "untracked\n");
+    const absoluteLinkTarget = join(worktreePath, "tracked.txt");
+    await symlink(absoluteLinkTarget, join(worktreePath, "absolute-link"));
     await Bun.write(join(agentDir, "prompt.txt"), "continue the task");
     await Bun.write(join(agentDir, "start.sh"), "#!/bin/bash\n");
     await Bun.write(join(agentDir, "exit-check.sh"), "#!/bin/bash\n");
@@ -1100,10 +1122,16 @@ describe("retire → rehire recovery", () => {
     const manifest = await Bun.file(join(archiveDir, "retirement.json")).json();
     expect(manifest.agentId).toBe(agentId);
     expect(manifest.gitHead).toMatch(/^[0-9a-f]{40,64}$/);
-    expect(manifest.untrackedFiles).toEqual(["nested/untracked.txt"]);
+    expect(manifest.untrackedFiles).toEqual([
+      "absolute-link",
+      "nested/untracked.txt",
+    ]);
     expect(manifest.prunedTeams).toEqual([
       { team: "rehire-test", id: agentId },
     ]);
+    expect(await Bun.file(join(archiveDir, "agent.log")).text()).toContain(
+      "Agent retired",
+    );
 
     // Simulate teardown's rm -rf fallback leaving an orphan branch after Git's
     // worktree metadata becomes stale. Rehire should prune and replace it when
@@ -1123,6 +1151,14 @@ describe("retire → rehire recovery", () => {
     expect(
       await Bun.file(join(worktreePath, "nested", "untracked.txt")).text(),
     ).toBe("untracked\n");
+    expect(
+      new Uint8Array(
+        await Bun.file(join(worktreePath, "latin1.txt")).arrayBuffer(),
+      ),
+    ).toEqual(modifiedLatin1);
+    expect(await readlink(join(worktreePath, "absolute-link"))).toBe(
+      absoluteLinkTarget,
+    );
     const restoredMeta = await Bun.file(join(agentDir, "meta.json")).json();
     expect(restoredMeta.state).toBe("stopped");
     expect(restoredMeta.tmux_session).toBe(`ittybitty-1a2b3c4d-${agentId}`);
@@ -1245,6 +1281,7 @@ describe("retire → rehire recovery", () => {
       model: "claude:sonnet",
       claude_pid: "",
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      nickname: "shared-name",
     }).meta;
     await Bun.write(
       join(archiveDir, "meta.json"),
@@ -1266,6 +1303,22 @@ describe("retire → rehire recovery", () => {
         prunedTeams: [],
       }),
     );
+    const activeOwnerDir = join(
+      tempDir,
+      ".ittybitty",
+      "agents",
+      "agent-owner",
+    );
+    await mkdir(activeOwnerDir, { recursive: true });
+    await Bun.write(
+      join(activeOwnerDir, "meta.json"),
+      JSON.stringify(
+        makeAgent("agent-owner", tempDir, "running", {
+          worktree: false,
+          nickname: "shared-name",
+        }).meta,
+      ),
+    );
 
     let newSessionSeen = false;
     const runner: SpawnFn = (cmd) => {
@@ -1286,12 +1339,20 @@ describe("retire → rehire recovery", () => {
 
     expect(result.ok).toBe(true);
     expect(result.stdout).toContain(`Rehired agent: ${agentId}`);
+    expect(result.stderr).toContain(
+      "Nickname 'shared-name' is already used",
+    );
     expect(newSessionSeen).toBe(true);
     expect(
       await Bun.file(
         join(tempDir, ".ittybitty", "agents", agentId, "resume.sh"),
       ).exists(),
     ).toBe(true);
+    expect(
+      (await Bun.file(
+        join(tempDir, ".ittybitty", "agents", agentId, "meta.json"),
+      ).json()).nickname,
+    ).toBeUndefined();
   });
 });
 
@@ -1563,7 +1624,7 @@ describe("nukeAgent (native)", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test("returns error when target is a worker with no children", async () => {
+  test("destructively removes a worker with no children", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-worker");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
@@ -1580,9 +1641,9 @@ describe("nukeAgent (native)", () => {
     });
     const result = await nukeAgent(agent);
 
-    expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("worker agent");
-    expect(result.stderr).toContain("ib retire");
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("Nuked 1 agent");
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
 
   test("tears down the agent and its descendants", async () => {

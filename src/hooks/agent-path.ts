@@ -617,8 +617,9 @@ export async function checkIbCommandAccess(
   if (parsed.subcommand === "rehire") {
     try {
       const { findRetiredAgentArchives } = await import("../agent-lifecycle");
-      const archived = (await findRetiredAgentArchives(callerRepoRoot, targetId))
-        .find((entry) => entry.manifest !== null);
+      const archives = await findRetiredAgentArchives(callerRepoRoot, targetId);
+      const archived =
+        archives.find((entry) => entry.manifest !== null) ?? archives[0];
       if (archived) {
         const meta = archived.meta as unknown as Record<string, unknown>;
         if (await hasCoordinatorBypass(meta)) return null;
@@ -660,8 +661,9 @@ export async function checkIbCommandAccess(
 
       if (parsed.subcommand === "rehire") {
         const { findRetiredAgentArchives } = await import("../agent-lifecycle");
-        const archived = (await findRetiredAgentArchives(repo.path, targetId))
-          .find((entry) => entry.manifest !== null);
+        const archives = await findRetiredAgentArchives(repo.path, targetId);
+        const archived =
+          archives.find((entry) => entry.manifest !== null) ?? archives[0];
         if (archived) {
           if (await hasAccess(archived.meta as unknown as Record<string, unknown>)) {
             return null;

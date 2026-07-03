@@ -60,6 +60,7 @@ const RETIREMENT_MANIFEST_FILE = "retirement.json";
 const WORKTREE_PATCH_FILE = "worktree.patch";
 const UNTRACKED_DIR = "untracked";
 const RUNTIME_DIR = "runtime";
+const PREPARED_RETIREMENT_FILE = "prepared-retirement.json";
 
 export interface RetirementManifestV1 {
   version: 1;
@@ -147,12 +148,12 @@ export function parseRetirementManifest(
   return raw as unknown as RetirementManifestV1;
 }
 
-async function runRaw(
+async function runRawBytes(
   cmd: string[],
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+): Promise<{ stdout: Uint8Array; stderr: string; exitCode: number }> {
   const proc = spawnCtx.runner(cmd, { stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
+    new Response(proc.stdout).bytes(),
     new Response(proc.stderr).text(),
   ]);
   return { stdout, stderr, exitCode: await proc.exited };
@@ -201,8 +202,17 @@ export async function prepareAgentRetirement(
 
   const payloadDir = join(agentDir, RETIREMENT_PAYLOAD_DIR);
   if (await lstat(payloadDir).then(() => true).catch(() => false)) {
+    const pending = await Bun.file(
+      join(payloadDir, PREPARED_RETIREMENT_FILE),
+    ).json().catch(() => null) as Record<string, unknown> | null;
+    const retainedRef =
+      typeof pending?.headRef === "string"
+        ? ` and retained ref ${pending.headRef}`
+        : "";
     throw new Error(
-      `unfinished retirement payload already exists: ${payloadDir}`,
+      `unfinished retirement payload already exists: ${payloadDir}${retainedRef}. ` +
+      `Preserve or remove that recovery state before retrying, or use ` +
+      `'ib nuke ${agentId}' to discard the agent`,
     );
   }
   await mkdir(payloadDir, { recursive: true });
@@ -263,7 +273,7 @@ export async function prepareAgentRetirement(
       }
       gitHead = headResult.stdout;
 
-      const patchResult = await runRaw([
+      const patchResult = await runRawBytes([
         "git", "-C", worktreePath, "diff", "--binary", "--full-index", "HEAD", "--",
       ]);
       if (patchResult.exitCode !== 0) {
@@ -271,13 +281,23 @@ export async function prepareAgentRetirement(
       }
       await Bun.write(join(payloadDir, WORKTREE_PATCH_FILE), patchResult.stdout);
 
-      const untrackedResult = await runRaw([
+      const untrackedResult = await runRawBytes([
         "git", "-C", worktreePath, "ls-files", "--others", "--exclude-standard", "-z",
       ]);
       if (untrackedResult.exitCode !== 0) {
         throw new Error(untrackedResult.stderr.trim() || "could not enumerate untracked files");
       }
-      for (const relativePath of untrackedResult.stdout.split("\0")) {
+      let untrackedOutput: string;
+      try {
+        untrackedOutput = new TextDecoder("utf-8", { fatal: true }).decode(
+          untrackedResult.stdout,
+        );
+      } catch {
+        throw new Error(
+          "untracked filenames must be valid UTF-8 to create a recoverable retirement",
+        );
+      }
+      for (const relativePath of untrackedOutput.split("\0")) {
         if (!relativePath) continue;
         if (!isSafeRetirementRelativePath(relativePath)) {
           throw new Error(`unsafe untracked path reported by git: ${JSON.stringify(relativePath)}`);
@@ -291,7 +311,6 @@ export async function prepareAgentRetirement(
           const target = await readlink(source);
           const resolvedTarget = resolve(dirname(source), target);
           if (
-            target.startsWith("/") ||
             (resolvedTarget !== worktreePath &&
               !resolvedTarget.startsWith(worktreePath + "/"))
           ) {
@@ -314,20 +333,25 @@ export async function prepareAgentRetirement(
       }
     }
 
+    const manifest = {
+      version: 1 as const,
+      agentId,
+      retiredAt: new Date().toISOString(),
+      repoPath,
+      archiveKey,
+      worktree,
+      gitHead,
+      headRef,
+      untrackedFiles,
+    };
+    await Bun.write(
+      join(payloadDir, PREPARED_RETIREMENT_FILE),
+      JSON.stringify(manifest, null, 2) + "\n",
+    );
     return {
       archiveKey,
       payloadDir,
-      manifest: {
-        version: 1,
-        agentId,
-        retiredAt: new Date().toISOString(),
-        repoPath,
-        archiveKey,
-        worktree,
-        gitHead,
-        headRef,
-        untrackedFiles,
-      },
+      manifest,
     };
   } catch (err) {
     if (headRef) {
@@ -590,6 +614,27 @@ export async function archiveAgent(
   const hasLog = await Bun.file(join(agentDir, "agent.log")).exists().catch(() => false);
   const hasMeta = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
 
+  // A destructive merge/nuke after a previously interrupted retirement also
+  // discards the retained hidden ref recorded with that unfinished payload.
+  // Explicit retire passes preparedRetirement and keeps the ref as recovery
+  // state, so it never enters this cleanup path.
+  if (!preparedRetirement) {
+    const pending = await Bun.file(
+      join(agentDir, RETIREMENT_PAYLOAD_DIR, PREPARED_RETIREMENT_FILE),
+    ).json().catch(() => null) as Record<string, unknown> | null;
+    const pendingArchiveKey = pending?.archiveKey;
+    const pendingHeadRef = pending?.headRef;
+    if (
+      isSafeArchiveKey(pendingArchiveKey, agentId) &&
+      pendingHeadRef ===
+        `refs/ittybitty/retired/${pendingArchiveKey}/head`
+    ) {
+      await spawnCtx.run([
+        "git", "-C", repoPath, "update-ref", "-d", pendingHeadRef,
+      ]).catch(() => {});
+    }
+  }
+
   if (!hasOutput && !hasLog && !hasMeta && !preparedRetirement) {
     return { archivePath: null, prunedTeams };
   }
@@ -669,17 +714,26 @@ export async function archiveAgent(
       "settings.local.json",
     ]) {
       const source = join(runtimeDir, fileName);
-      if (await Bun.file(source).exists().catch(() => false)) {
-        await cp(source, join(archiveFolder, fileName));
+      const destination = join(archiveFolder, fileName);
+      if (
+        !(await Bun.file(destination).exists().catch(() => false)) &&
+        await Bun.file(source).exists().catch(() => false)
+      ) {
+        await cp(source, destination);
       }
     }
     const coordinatorSettings = join(runtimeDir, ".claude", "settings.local.json");
-    if (await Bun.file(coordinatorSettings).exists().catch(() => false)) {
+    const archivedCoordinatorSettings = join(
+      archiveFolder,
+      ".claude",
+      "settings.local.json",
+    );
+    if (
+      !(await Bun.file(archivedCoordinatorSettings).exists().catch(() => false)) &&
+      await Bun.file(coordinatorSettings).exists().catch(() => false)
+    ) {
       await mkdir(join(archiveFolder, ".claude"), { recursive: true });
-      await cp(
-        coordinatorSettings,
-        join(archiveFolder, ".claude", "settings.local.json"),
-      );
+      await cp(coordinatorSettings, archivedCoordinatorSettings);
     }
 
     const patchSource = join(preparedRetirement.payloadDir, WORKTREE_PATCH_FILE);

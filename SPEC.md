@@ -225,17 +225,20 @@ Merge and nuke continue to create historical archives without
 1. Scan timestamped `archive/*` folders across registered repositories and
    match `meta.json.id`. If an ID is retired more than once in one repository,
    use the newest valid retirement manifest; reject cross-repository ambiguity.
-2. Reject an active ID/nickname collision, live tmux session, existing
+2. Reject an active ID/nickname collision, live tmux session, conflicting
    `agent/<id>` branch, missing recovery manifest/ref, or malformed archive.
+   Stale worktree metadata is pruned; an unclaimed orphan branch is replaced
+   only when it still points at the retained retirement HEAD.
 3. Recreate `.ittybitty/agents/<id>/` and sanitize stale runtime fields:
    clear `claude_pid`/`watchdog_pid`, discard transient state, and set
    `state: "stopped"` while preserving session IDs, deterministic tmux name,
    model/effort, type, hierarchy, nickname, and worktree mode.
 4. Recreate a worktree and `agent/<id>` from the retained HEAD, apply the
    binary patch, restore safe untracked paths, and restore local settings.
-5. Delegate session startup to the existing resume pipeline, including tmux,
+5. Best-effort restore memberships for teams that still exist, so membership
+   remains durable even if session startup must be retried.
+6. Delegate session startup to the existing resume pipeline, including tmux,
    state, nudge, and watchdog behavior.
-6. Best-effort restore memberships for teams that still exist.
 
 Reconstruction failures roll back the partial directory/worktree/branch.
 Session-resume failures leave a valid stopped agent so `ib resume` can be

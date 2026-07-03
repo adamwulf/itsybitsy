@@ -648,6 +648,18 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
   }
 
   if (manifest.worktree) {
+    const prune = await rehireSpawnCtx.run([
+      "git", "-C", repoPath, "worktree", "prune",
+    ]);
+    if (prune.exitCode !== 0) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: prune.stderr || "Could not prune stale worktree metadata",
+      };
+    }
+
     const branch = await rehireSpawnCtx.run([
       "git", "-C", repoPath, "branch", "--list", branchName,
     ]);
@@ -660,12 +672,42 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
       };
     }
     if (branch.stdout.trim()) {
-      return {
-        ok: false,
-        exitCode: 1,
-        stdout: "",
-        stderr: `Branch already exists: ${branchName}`,
-      };
+      const worktrees = await rehireSpawnCtx.run([
+        "git", "-C", repoPath, "worktree", "list", "--porcelain",
+      ]);
+      const branchNeedle = `branch refs/heads/${branchName}`;
+      const branchIsCheckedOut =
+        worktrees.exitCode !== 0 ||
+        worktrees.stdout.includes(branchNeedle + "\n") ||
+        worktrees.stdout.endsWith(branchNeedle);
+      const existingHead = await rehireSpawnCtx.run([
+        "git", "-C", repoPath, "rev-parse", branchName,
+      ]);
+      if (
+        branchIsCheckedOut ||
+        existingHead.exitCode !== 0 ||
+        existingHead.stdout.trim() !== manifest.gitHead
+      ) {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Branch already exists: ${branchName}`,
+        };
+      }
+      const deleted = await rehireSpawnCtx.run([
+        "git", "-C", repoPath, "branch", "-D", branchName,
+      ]);
+      if (deleted.exitCode !== 0) {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr:
+            deleted.stderr ||
+            `Could not remove stale retired branch: ${branchName}`,
+        };
+      }
     }
 
     const retainedHead = await rehireSpawnCtx.run([
@@ -816,6 +858,12 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
     archived: false,
     children: [],
   };
+  const warnings: string[] = [];
+  for (const { team } of manifest.prunedTeams) {
+    const result = await addMember(team, agentId).catch(() => null);
+    if (!result?.team) warnings.push(`Team @${team} no longer exists`);
+  }
+
   let resumed: IbCommandResult;
   try {
     resumed = await resumeAgent(restoredAgent, { resetCoordinator: false });
@@ -832,15 +880,13 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
       ok: false,
       exitCode: 1,
       stdout: `Reconstructed stopped agent '${agentId}' from ${archived.archiveKey}`,
-      stderr: `Resume failed: ${resumed.stderr || resumed.stdout}`,
+      stderr: [
+        `Resume failed: ${resumed.stderr || resumed.stdout}`,
+        ...warnings,
+      ].join("\n"),
     };
   }
 
-  const warnings: string[] = [];
-  for (const { team } of manifest.prunedTeams) {
-    const result = await addMember(team, agentId).catch(() => null);
-    if (!result?.team) warnings.push(`Team @${team} no longer exists`);
-  }
   await logAgent(agentDir, `[rehire] Agent resumed from ${archived.archiveKey}`);
   return {
     ok: true,

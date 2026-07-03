@@ -1070,6 +1070,9 @@ describe("retire → rehire recovery", () => {
       join(agentDir, "meta.json"),
       JSON.stringify(agent.meta, null, 2),
     );
+    const { createTeam, addMember, getTeam } = await import("./teams");
+    await createTeam("rehire-test", "", 1000);
+    await addMember("rehire-test", agentId);
 
     const hybridRunner: SpawnFn = (cmd) => {
       if (cmd[0] === "git") {
@@ -1098,6 +1101,16 @@ describe("retire → rehire recovery", () => {
     expect(manifest.agentId).toBe(agentId);
     expect(manifest.gitHead).toMatch(/^[0-9a-f]{40,64}$/);
     expect(manifest.untrackedFiles).toEqual(["nested/untracked.txt"]);
+    expect(manifest.prunedTeams).toEqual([
+      { team: "rehire-test", id: agentId },
+    ]);
+
+    // Simulate teardown's rm -rf fallback leaving an orphan branch after Git's
+    // worktree metadata becomes stale. Rehire should prune and replace it when
+    // it still points at the immutable retained HEAD.
+    await git(
+      "-C", tempDir, "branch", `agent/${agentId}`, manifest.gitHead,
+    );
 
     setRehireSpawnRunner(hybridRunner);
     setNukeResumeSpawnRunner(hybridRunner);
@@ -1115,9 +1128,170 @@ describe("retire → rehire recovery", () => {
     expect(restoredMeta.tmux_session).toBe(`ittybitty-1a2b3c4d-${agentId}`);
     expect(restoredMeta.claude_pid).toBe("");
     expect(restoredMeta.watchdog_pid).toBeUndefined();
+    expect((await getTeam("rehire-test"))!.members).toContain(agentId);
     expect(await Bun.file(join(archiveDir, "retirement.json")).exists()).toBe(true);
     expect(await git("-C", tempDir, "rev-parse", manifest.headRef)).toBe(manifest.gitHead);
     expect(await git("-C", worktreePath, "rev-parse", "HEAD")).toBe(manifest.gitHead);
+  });
+
+  test("rejects an archive without a supported retirement manifest", async () => {
+    const archiveDir = join(
+      tempDir,
+      ".ittybitty",
+      "archive",
+      "20260703-120000-agent-legacy",
+    );
+    await mkdir(archiveDir, { recursive: true });
+    await Bun.write(
+      join(archiveDir, "meta.json"),
+      JSON.stringify({
+        id: "agent-legacy",
+        tmux_session: "ittybitty-1a2b3c4d-agent-legacy",
+      }),
+    );
+
+    const result = await rehireAgent("agent-legacy");
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toBe(
+      "Matching archive is not rehirable (no supported retirement manifest)",
+    );
+  });
+
+  test("rolls back the reconstructed directory and branch when a patch is corrupt", async () => {
+    const agentId = "agent-corrupt";
+    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const worktreePath = join(agentDir, "repo");
+    await mkdir(agentDir, { recursive: true });
+    await git(
+      "-C", tempDir, "worktree", "add", worktreePath,
+      "-b", `agent/${agentId}`, "HEAD",
+    );
+    await Bun.write(join(worktreePath, "tracked.txt"), "modified\n");
+    await Bun.write(join(agentDir, "exit-check.sh"), "#!/bin/bash\n");
+
+    const agent = makeAgent(agentId, tempDir, "running", {
+      tmux_session: `ittybitty-1a2b3c4d-${agentId}`,
+      worktree: true,
+      model: "codex:gpt-5.5",
+      claude_pid: "",
+    });
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify(agent.meta, null, 2),
+    );
+
+    const hybridRunner: SpawnFn = (cmd) => {
+      if (cmd[0] === "git") {
+        return Bun.spawn(cmd, {
+          stdout: "pipe",
+          stderr: "pipe",
+        }) as SpawnResult;
+      }
+      if (cmd[0] === "tmux" && cmd.includes("has-session")) {
+        return makeSpawnResult(1);
+      }
+      if (cmd[0] === "pgrep") return makeSpawnResult(1);
+      return makeSpawnResult();
+    };
+    lifecycleSpawnCtx.set(hybridRunner);
+    setKillPauseSpawnRunner(hybridRunner);
+    expect((await retireAgent(agent)).ok).toBe(true);
+
+    const [archiveKey] = await readdir(
+      join(tempDir, ".ittybitty", "archive"),
+    );
+    const archiveDir = join(
+      tempDir,
+      ".ittybitty",
+      "archive",
+      archiveKey!,
+    );
+    const manifest = await Bun.file(
+      join(archiveDir, "retirement.json"),
+    ).json();
+    await Bun.write(join(archiveDir, "worktree.patch"), "not a git patch\n");
+
+    setRehireSpawnRunner(hybridRunner);
+    const result = await rehireAgent(agentId);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain(
+      `Could not reconstruct agent '${agentId}'`,
+    );
+    expect(result.stderr).toContain("No valid patches");
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
+    expect(
+      await git("-C", tempDir, "branch", "--list", `agent/${agentId}`),
+    ).toBe("");
+    expect(await git("-C", tempDir, "rev-parse", manifest.headRef)).toBe(
+      manifest.gitHead,
+    );
+  });
+
+  test("successfully resumes a retired no-worktree Claude agent", async () => {
+    const agentId = "agent-return";
+    const archiveKey = `20260703-120000-${agentId}`;
+    const archiveDir = join(
+      tempDir,
+      ".ittybitty",
+      "archive",
+      archiveKey,
+    );
+    await mkdir(archiveDir, { recursive: true });
+    const meta = makeAgent(agentId, tempDir, "stopped", {
+      tmux_session: `ittybitty-1a2b3c4d-${agentId}`,
+      worktree: false,
+      model: "claude:sonnet",
+      claude_pid: "",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    }).meta;
+    await Bun.write(
+      join(archiveDir, "meta.json"),
+      JSON.stringify(meta, null, 2),
+    );
+    await Bun.write(join(archiveDir, "exit-check.sh"), "#!/bin/bash\n");
+    await Bun.write(
+      join(archiveDir, "retirement.json"),
+      JSON.stringify({
+        version: 1,
+        agentId,
+        retiredAt: "2026-07-03T12:00:00.000Z",
+        repoPath: tempDir,
+        archiveKey,
+        worktree: false,
+        gitHead: null,
+        headRef: null,
+        untrackedFiles: [],
+        prunedTeams: [],
+      }),
+    );
+
+    let newSessionSeen = false;
+    const runner: SpawnFn = (cmd) => {
+      if (cmd[0] === "tmux" && cmd[1] === "new-session") {
+        newSessionSeen = true;
+        return makeSpawnResult();
+      }
+      if (cmd[0] === "tmux" && cmd.includes("has-session")) {
+        return makeSpawnResult(newSessionSeen ? 0 : 1);
+      }
+      if (cmd[0] === "pgrep") return makeSpawnResult(1);
+      return makeSpawnResult();
+    };
+    setRehireSpawnRunner(runner);
+    setNukeResumeSpawnRunner(runner);
+
+    const result = await rehireAgent(agentId);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain(`Rehired agent: ${agentId}`);
+    expect(newSessionSeen).toBe(true);
+    expect(
+      await Bun.file(
+        join(tempDir, ".ittybitty", "agents", agentId, "resume.sh"),
+      ).exists(),
+    ).toBe(true);
   });
 });
 

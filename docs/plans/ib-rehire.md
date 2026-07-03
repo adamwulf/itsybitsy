@@ -115,8 +115,10 @@ rewrite the root worktree.
    manifest wins; exact-ID matches in multiple repositories are ambiguous and
    rejected.
 2. Rejects ambiguity across repositories, an already-active ID or nickname,
-   a live tmux session, an existing `agent/<id>` branch, malformed metadata,
-   or an unsupported snapshot version.
+   a live tmux session, a conflicting `agent/<id>` branch, malformed metadata,
+   or an unsupported snapshot version. It first prunes stale worktree metadata
+   and may replace an unclaimed orphan branch only when it still points at the
+   retained retirement HEAD.
 3. Rejects any archive without a recovery manifest with a generic explanation
    that the archive is not rehirable. This covers legacy retirements as well as
    intentionally destructive merge/nuke archives without misidentifying which
@@ -136,10 +138,11 @@ rewrite the root worktree.
    - restores `.claude/settings.local.json`.
 6. For a no-worktree agent, restores agent-local coordinator settings when
    present and continues to use the root repository.
-7. Calls the existing `resumeAgent()` implementation to resume the original
+7. Best-effort re-adds the agent to teams that still exist before session
+   startup, so membership remains durable if resume must be retried.
+   Missing/deleted teams become warnings, not a rollback.
+8. Calls the existing `resumeAgent()` implementation to resume the original
    Claude/Codex session and recreate tmux/watchdog state.
-8. Best-effort re-adds the agent to teams that still exist. Missing/deleted
-   teams become warnings, not a rollback.
 9. Keeps the archive and hidden ref immutable so retirement history remains
    auditable. A second rehire is blocked while the agent is active.
 

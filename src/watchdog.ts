@@ -64,7 +64,7 @@ export interface AgentTracker {
    * watchdog's "recently completed" notification: it fires only once the agent
    * has been continuously complete for `COMPLETE_FALLBACK_DELAY_TICKS`. In the
    * happy path an active manager reacts to the hook's immediate "just completed"
-   * (merge/kill/send) within that window — moving the child off `complete` —
+   * (merge/retire/send) within that window — moving the child off `complete` —
    * so the redundant fallback never fires. Reset to 0 on entry to `running`
    * (alongside `completionNotified`) and on a fresh entry into `complete`.
    */
@@ -584,7 +584,7 @@ async function saveUnknownDebugLog(agent: Agent): Promise<void> {
  * safety-net for the case where that hook notification did not fire or deliver —
  * so it deliberately WAITS `COMPLETE_FALLBACK_DELAY_TICKS` (30s) of continuous
  * complete state before sending its own "recently completed". In the common case an active
- * manager reacts to the hook's "just completed" (ib merge / ib kill / ib send)
+ * manager reacts to the hook's "just completed" (ib merge / ib retire / ib send)
  * within that window, moving the child off `complete` and resetting the counter,
  * so this redundant fallback never fires.
  *
@@ -1363,7 +1363,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
 
   // Poll loop
   while (true) {
-    // Exit condition (a): worktree directory removed (kill/merge/nuke)
+    // Exit condition (a): worktree directory removed (retire/merge/nuke)
     if (!existsSyncFn(worktreeDir)) {
       stopWatching();
       break;

@@ -446,7 +446,8 @@ function checkFilePath(
  * need to run it as a preflight before asking their manager to merge.
  */
 const IB_MANAGER_ONLY_COMMANDS = new Set([
-  "kill",
+  "retire",
+  "rehire",
   "nuke",
   "merge",
   "resume",
@@ -460,7 +461,7 @@ const IB_MANAGER_ONLY_COMMANDS = new Set([
  * that targets a specific agent.
  *
  * NOTE: This only matches commands starting with exactly "ib ". Alternate
- * invocations like `./ib kill` or `/usr/local/bin/ib kill` are not matched.
+ * invocations like `./ib retire` or `/usr/local/bin/ib retire` are not matched.
  * This is safe because agents are expected to have only `Bash(ib:*)` in their
  * allowList (not broader `Bash(*)`), so alternate paths are already blocked
  * by the allowList check before this function is called.
@@ -484,7 +485,7 @@ export function parseIbCommand(command: string): { subcommand: string; targetId:
 
 /**
  * Check whether a Bash `ib <cmd> <target>` call is permitted for the calling
- * agent. Manager-only commands (kill, merge, nuke, etc.) require that the
+ * agent. Manager-only commands (retire, merge, nuke, etc.) require that the
  * calling agent is listed as the target's manager in meta.json.
  *
  * Returns a deny decision if the check fails, or null to continue normally.
@@ -506,6 +507,7 @@ export async function checkIbCommandAccess(
   if (!IB_MANAGER_ONLY_COMMANDS.has(parsed.subcommand)) return null;
 
   const targetId = parsed.targetId;
+  const requestedSubcommand = parsed.subcommand;
   const targetMetaPath = join(agentsDir, targetId, "meta.json");
   const callerRepoRoot = resolve(agentsDir, "..", "..");
 
@@ -564,6 +566,21 @@ export async function checkIbCommandAccess(
     return false;
   }
 
+  async function hasCoordinatorBypass(meta: Record<string, unknown>): Promise<boolean> {
+    if (
+      !["retire", "rehire", "reassign"].includes(requestedSubcommand) ||
+      meta.agentType === "coordinator"
+    ) return false;
+    try {
+      const callerMetaFile = Bun.file(join(agentsDir, callingAgentId, "meta.json"));
+      if (!(await callerMetaFile.exists())) return false;
+      const callerMeta = await callerMetaFile.json();
+      return callerMeta?.agentType === "coordinator";
+    } catch {
+      return false;
+    }
+  }
+
   // Same-repo check: target exists in calling agent's repo
   try {
     const metaFile = Bun.file(targetMetaPath);
@@ -580,24 +597,11 @@ export async function checkIbCommandAccess(
         };
       }
 
-      // Per-repo coordinator bypass: a per-repo coordinator may run 'kill' or
+      // Per-repo coordinator bypass: a per-repo coordinator may run 'retire' or
       // 'reassign' on any non-coordinator agent within its own repo, even when
       // it is not the target's manager or spawner. Only applies same-repo and
       // never to other coordinators. (SPEC §12.2)
-      if (
-        (parsed.subcommand === "kill" || parsed.subcommand === "reassign") &&
-        meta.agentType !== "coordinator"
-      ) {
-        try {
-          const callerMetaFile = Bun.file(join(agentsDir, callingAgentId, "meta.json"));
-          if (await callerMetaFile.exists()) {
-            const callerMeta = await callerMetaFile.json();
-            if (callerMeta && callerMeta.agentType === "coordinator") {
-              return null; // allow
-            }
-          }
-        } catch { /* fall through to standard check */ }
-      }
+      if (await hasCoordinatorBypass(meta)) return null;
 
       if (await hasAccess(meta)) return null; // allow
       return {
@@ -606,6 +610,27 @@ export async function checkIbCommandAccess(
       };
     }
   } catch { /* exists() failed — fall through to cross-repo check */ }
+
+  // Rehire targets live under timestamped archive folders, not agents/<id>.
+  // Resolve the newest recoverable same-repo archive and authorize against its
+  // immutable metadata using the same manager/spawner rules as active agents.
+  if (parsed.subcommand === "rehire") {
+    try {
+      const { findRetiredAgentArchives } = await import("../agent-lifecycle");
+      const archives = await findRetiredAgentArchives(callerRepoRoot, targetId);
+      const archived =
+        archives.find((entry) => entry.manifest !== null) ?? archives[0];
+      if (archived) {
+        const meta = archived.meta as unknown as Record<string, unknown>;
+        if (await hasCoordinatorBypass(meta)) return null;
+        if (await hasAccess(meta)) return null;
+        return {
+          decision: "deny",
+          reason: `Access denied: only the manager or spawner of '${targetId}' can run 'ib rehire'`,
+        };
+      }
+    } catch { /* fall through to cross-repo archive search */ }
+  }
 
   // Cross-repo check: target not in this repo — search other repos
   try {
@@ -632,6 +657,22 @@ export async function checkIbCommandAccess(
           decision: "deny",
           reason: `Access denied: only the spawner or manager of '${targetId}' can run 'ib ${parsed.subcommand}'`,
         };
+      }
+
+      if (parsed.subcommand === "rehire") {
+        const { findRetiredAgentArchives } = await import("../agent-lifecycle");
+        const archives = await findRetiredAgentArchives(repo.path, targetId);
+        const archived =
+          archives.find((entry) => entry.manifest !== null) ?? archives[0];
+        if (archived) {
+          if (await hasAccess(archived.meta as unknown as Record<string, unknown>)) {
+            return null;
+          }
+          return {
+            decision: "deny",
+            reason: `Access denied: only the spawner or manager of '${targetId}' can run 'ib rehire'`,
+          };
+        }
       }
     }
   } catch { /* ignore — deny below */ }

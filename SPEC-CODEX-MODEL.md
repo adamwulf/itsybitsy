@@ -379,7 +379,7 @@ Status: complete on `agent/codex-agent`. Five commits:
 - `0cd1d02` test(codex): Phase 7 — codex resume unit + integration tests
 - `8c5a395` test(codex): Phase 7 — claude resume.sh byte-snapshot regression guard
 
-What landed: `resumeAgent()` in `src/ib-commands.ts` branches on `parseModel(meta.model).cli`. The codex path validates `meta.codex_session_id` (populated by the SessionStart hook on first spawn), runs the same spawn-time dispatcher precheck as `newAgent()`, then generates a codex-shaped `resume.sh` via `buildCodexResumeContent` invoking `codex resume "<UUID>"` with re-passed inline `-c` hook flags + sandbox/approval/trust flags. Same SIGHUP-ignore insulation + `ib write-pid` PID capture as `start.sh`. The claude path is unchanged — byte-snapshot-guarded at `tests/fixtures/claude-resume-sh-baseline.sh` so any drift fails CI. kill/merge/diff/nuke are git+tmux-level and unaffected.
+What landed: `resumeAgent()` in `src/ib-commands.ts` branches on `parseModel(meta.model).cli`. The codex path validates `meta.codex_session_id` (populated by the SessionStart hook on first spawn), runs the same spawn-time dispatcher precheck as `newAgent()`, then generates a codex-shaped `resume.sh` via `buildCodexResumeContent` invoking `codex resume "<UUID>"` with re-passed inline `-c` hook flags + sandbox/approval/trust flags. Same SIGHUP-ignore insulation + `ib write-pid` PID capture as `start.sh`. The claude path is unchanged — byte-snapshot-guarded at `tests/fixtures/claude-resume-sh-baseline.sh` so any drift fails CI. retire/merge/diff/nuke are git+tmux-level and unaffected.
 
 ### Phase 8 — Docs, SPEC.md, tests ✅ MERGED
 Merged on `agent/codex-agent` (3 commits, +297/-13 LOC across SPEC.md / CLAUDE.md / SPEC-CODEX-MODEL.md):

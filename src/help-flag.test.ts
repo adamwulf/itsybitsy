@@ -106,9 +106,16 @@ describe("CLI --help end-to-end", () => {
     expect(exitCode).toBe(0);
   });
 
-  test("kill --help exits 0 and does not actually try to kill", async () => {
-    const { stdout, exitCode } = await runCli(["kill", "--help"]);
-    expect(stdout).toContain("Usage: ib kill");
+  test("retire --help exits 0 and does not actually try to retire", async () => {
+    const { stdout, exitCode } = await runCli(["retire", "--help"]);
+    expect(stdout).toContain("Usage: ib retire");
+    expect(exitCode).toBe(0);
+  });
+
+  test("rehire --help prints exact-id recovery usage", async () => {
+    const { stdout, exitCode } = await runCli(["rehire", "--help"]);
+    expect(stdout).toContain("Usage: ib rehire");
+    expect(stdout).toContain("exact agent ID");
     expect(exitCode).toBe(0);
   });
 

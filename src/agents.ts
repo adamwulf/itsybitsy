@@ -120,6 +120,8 @@ export interface Agent {
   state: AgentState;
   age: string;
   archived: boolean;
+  /** Actual agents/<id> or timestamped archive directory backing this record. */
+  storageDir?: string;
   orphaned?: boolean;
   children: Agent[];
 }
@@ -759,7 +761,7 @@ export function isDeadPane(tmuxOutput: string): boolean {
  *
  * Deliberately excludes children in `waiting` (would create transitive-waiting
  * deadlock — the top of a parked chain must still be notified) and `complete`
- * (the user needs to merge/kill those). `compacting` and `rate_limited` are
+ * (the user needs to merge/retire those). `compacting` and `rate_limited` are
  * transient tmux overrides; the child's stored `meta.state` remains `"running"`
  * in those cases, so they are counted as active without per-child tmux calls.
  *
@@ -776,8 +778,13 @@ export function anyChildActive(parentId: string, allAgents: Agent[]): boolean {
 /** Get the worktree path for an agent, or the repo root if worktree is false. */
 export function agentWorktreePath(agent: Agent): string {
   if (agent.meta.worktree === false) return agent.repoPath;
+  return join(agentStorageDir(agent), "repo");
+}
+
+export function agentStorageDir(agent: Agent): string {
+  if (agent.storageDir) return agent.storageDir;
   const dir = agent.archived ? "archive" : "agents";
-  return join(agent.repoPath, ".ittybitty", dir, agent.id, "repo");
+  return join(agent.repoPath, ".ittybitty", dir, agent.id);
 }
 
 /** Compute human-readable age from epoch timestamp */
@@ -1003,6 +1010,7 @@ async function readAgentsFromDir(
         state: "unknown", // Updated by watcher via parseState()
         age: computeAge(meta.created_epoch),
         archived,
+        storageDir: agentDir,
         children: [],
       });
     }
@@ -1968,8 +1976,7 @@ export async function detectAgentStates(
  * Falls back to meta.prompt if prompt.txt doesn't exist.
  */
 export async function readAgentPrompt(agent: Agent): Promise<string[]> {
-  const dir = agent.archived ? "archive" : "agents";
-  const promptPath = join(agent.repoPath, ".ittybitty", dir, agent.id, "prompt.txt");
+  const promptPath = join(agentStorageDir(agent), "prompt.txt");
   try {
     const file = Bun.file(promptPath);
     if (!(await file.exists())) {
@@ -2012,8 +2019,7 @@ export function parseDenials(logLines: string[]): DenialEntry[] {
  * Returns the log content as an array of lines, or a placeholder message.
  */
 export async function readAgentLog(agent: Agent): Promise<string[]> {
-  const dir = agent.archived ? "archive" : "agents";
-  const logPath = join(agent.repoPath, ".ittybitty", dir, agent.id, "agent.log");
+  const logPath = join(agentStorageDir(agent), "agent.log");
   try {
     const file = Bun.file(logPath);
     if (!(await file.exists())) {
@@ -2035,8 +2041,7 @@ export async function readAgentLog(agent: Agent): Promise<string[]> {
  * has grown since the last tail read.
  */
 export async function statAgentLogSize(agent: Agent): Promise<number | null> {
-  const dir = agent.archived ? "archive" : "agents";
-  const logPath = join(agent.repoPath, ".ittybitty", dir, agent.id, "agent.log");
+  const logPath = join(agentStorageDir(agent), "agent.log");
   try {
     const file = Bun.file(logPath);
     if (!(await file.exists())) return null;
@@ -2086,8 +2091,7 @@ export async function readAgentLogWindow(
   agent: Agent,
   opts: ReadLogWindowOpts,
 ): Promise<LogWindow> {
-  const dir = agent.archived ? "archive" : "agents";
-  const logPath = join(agent.repoPath, ".ittybitty", dir, agent.id, "agent.log");
+  const logPath = join(agentStorageDir(agent), "agent.log");
   try {
     const file = Bun.file(logPath);
     if (!(await file.exists())) {

@@ -198,7 +198,7 @@ export async function rewriteOutboxRemoving(dir: string, deliveredIds: Set<strin
 
 /**
  * Delete the outbox queue and its lock. Called from agent teardown
- * (archive/kill/nuke) alongside `deleteAgentTransient`. Best-effort:
+ * (archive/retire/nuke) alongside `deleteAgentTransient`. Best-effort:
  * any error (including ENOENT) is ignored.
  *
  * Also attempts to rmdir `dir` itself afterwards — when this is called against

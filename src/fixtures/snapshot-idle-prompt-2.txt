@@ -352,7 +352,7 @@ using git add && git commit before completing.
 
 ❯ You have 1 unfinished sub-agent(s) that need attention:
 agent-b5067cab. Before you can complete, you must merge or
-kill each sub-agent using 'ib merge <id>' or 'ib kill
+retire each sub-agent using 'ib merge <id>' or 'ib retire
 <id>'. Use 'ib list' to check their status, 'ib look <id>'
 to see their output, 'ib status <id>' for their commits,
 and 'ib diff <id>' to review their changes.

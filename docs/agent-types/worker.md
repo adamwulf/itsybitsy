@@ -78,4 +78,4 @@ These phrases MUST be the LAST thing you output. Put summaries or status updates
 2. Verify your work with `ib diff` and `ib status`
 3. Write a summary of what you accomplished
 4. Say "I HAVE COMPLETED THE GOAL" as the final line
-5. Wait for your manager to merge or kill your session
+5. Wait for your manager to merge or retire your session

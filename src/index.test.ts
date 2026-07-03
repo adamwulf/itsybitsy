@@ -399,19 +399,38 @@ describe("CLI arg parsing", () => {
     expect(exitCode).toBe(1);
   });
 
-  test("kill strips --force from args (agent lookup fails first)", async () => {
-    // kill filters out --force before checking for unknown args.
+  test("retire strips --force from args (agent lookup fails first)", async () => {
+    // retire filters out --force before checking for unknown args.
     // Without a valid agent, requireAgent exits before the unknown-args check.
-    // This documents that kill at least requires an agent-id.
-    const { stderr, exitCode } = await runCli(["kill"]);
+    // This documents that retire at least requires an agent-id.
+    const { stderr, exitCode } = await runCli(["retire"]);
     expect(stderr).toContain("Usage:");
     expect(exitCode).toBe(1);
   });
 
-  test("kill with nonexistent agent shows not-found", async () => {
-    const { stderr, exitCode } = await runCli(["kill", "nonexistent-id", "--force"]);
+  test("retire with nonexistent agent shows not-found", async () => {
+    const { stderr, exitCode } = await runCli(["retire", "nonexistent-id", "--force"]);
     expect(stderr).toContain("Agent not found: nonexistent-id");
     expect(exitCode).toBe(1);
+  });
+
+  test("rehire requires an exact agent id", async () => {
+    const { stderr, exitCode } = await runCli(["rehire"]);
+    expect(stderr).toContain("Usage: ib rehire <agent-id>");
+    expect(exitCode).toBe(1);
+  });
+
+  test("rehire reports a missing retired agent", async () => {
+    const { stderr, exitCode } = await runCli(["rehire", "nonexistent-id"]);
+    expect(stderr).toContain("Retired agent not found");
+    expect(exitCode).toBe(1);
+  });
+
+  test("kill is no longer a supported subcommand", async () => {
+    const { stdout, stderr, exitCode } = await runCli(["kill", "nonexistent-id", "--force"]);
+    expect(stdout).toContain("ib — Cross-repo agent dashboard");
+    expect(stderr).not.toContain("Agent not found");
+    expect(exitCode).toBe(0);
   });
 
   test("merge strips --force from args", async () => {

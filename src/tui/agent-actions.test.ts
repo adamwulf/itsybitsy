@@ -10,7 +10,7 @@ import type { DialogState } from "./dialog-handler";
 import type { PaneMode } from "./pane-manager";
 import { assertDialog } from "./test-helpers";
 import {
-  handleKill, handleNuke, handleNukeAll, handleResume, handlePause,
+  handleRetire, handleNuke, handleNukeAll, handleResume, handlePause,
   handleSend, handleNewAgent, handleScrollUp, handleScrollDown,
   handleHelp, handleResizeLeft, handleFuzzyAgent, handleRename,
   handleSnapshot,
@@ -306,29 +306,29 @@ describe("handleSnapshot", () => {
   });
 });
 
-describe("handleKill", () => {
+describe("handleRetire", () => {
   test("does nothing when no agent selected", () => {
     const { ctx, dialogs } = makeMockCtx({ agent: null });
-    handleKill(ctx);
+    handleRetire(ctx);
     expect(dialogs).toHaveLength(0);
   });
 
   test("shows confirm dialog", () => {
     const agent = makeAgent({ id: "agent-1" });
     const { ctx, dialogs } = makeMockCtx({ agent });
-    handleKill(ctx);
+    handleRetire(ctx);
     expect(dialogs).toHaveLength(1);
     const d = assertDialog(dialogs[0]!, "confirm");
     expect(d.prompt).toContain("agent-1");
-    expect(d.confirmLabel).toBe("Kill");
+    expect(d.confirmLabel).toBe("Retire");
   });
 
-  test("onYes calls executeAndRefresh with killAgent", async () => {
+  test("onYes calls executeAndRefresh with retireAgent", async () => {
     const agent = makeAgent({ id: "agent-1" });
     let executeCalled = false;
     const { ctx, dialogs } = makeMockCtx({ agent });
     ctx.executeAndRefresh = async (fn) => { executeCalled = true; };
-    handleKill(ctx);
+    handleRetire(ctx);
     const d = assertDialog(dialogs[0]!, "confirm");
     d.onYes();
     await Bun.sleep(1);

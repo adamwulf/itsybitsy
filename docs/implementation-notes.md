@@ -34,7 +34,7 @@ Deterministic model. See SPEC.md §1.3.
 - **Line wrapping (`src/tui/wrap.ts`)**: `wrapSingleLine(line, width)` and `wrapLines(text, width)` — ANSI-aware hard wrapping. Walks characters, skips ANSI escape sequences for width calculation. ANSI codes at wrap boundaries stay in the current chunk.
 - **Pane widths**: single source of truth in `src/tui/widths.ts`. Spawn/resume code uses the async `getSaved*` helpers; dashboard render uses the sync `getLive*` wrappers (or `DashboardComponent.getMainWidth()`). Per-repo coordinators render at `mainWidth`, same as the system coordinator. **Never compute pane widths inline.** Formula: `mainWidth = terminalWidth - sidebarWidth - 1`.
 - **Layout persistence**: panel sizes saved to `~/.itsybitsy/layout.json` via debounced write (500ms). Restored on startup with validation (rejects NaN/Infinity, clamps to valid ranges).
-- **Dashboard (`src/tui/dashboard.ts`)**: three-column layout (resizable sidebar with agent tree + info panel | resizable tmux pane | cycling right pane). 5 focus targets in normal mode (`FOCUS_ORDER`): agent-tree, info, active-agent, right-pane, repo-coordinator. Tab/Shift+Tab cycles. `[`/`]` resize width (focus-aware), `{`/`}` resize sidebar panel height. Right pane modes: AGENT LOG, INITIAL PROMPT, DENIALS, TREE, ERRORS, DIFF, QUESTIONS, STATUS, REPO. Right pane mode is global state — persists across agent selection changes. `p`/`n` cycle pane modes (p=forward, n=backward). Agent actions: `x` kill, `!` nuke, `R` resume, `r` reassign, `m` merge, `s` send, `a` new-agent. `;`/`l` scroll both panes simultaneously. See SPEC.md §11–13.
+- **Dashboard (`src/tui/dashboard.ts`)**: three-column layout (resizable sidebar with agent tree + info panel | resizable tmux pane | cycling right pane). 5 focus targets in normal mode (`FOCUS_ORDER`): agent-tree, info, active-agent, right-pane, repo-coordinator. Tab/Shift+Tab cycles. `[`/`]` resize width (focus-aware), `{`/`}` resize sidebar panel height. Right pane modes: AGENT LOG, INITIAL PROMPT, DENIALS, TREE, ERRORS, DIFF, QUESTIONS, STATUS, REPO. Right pane mode is global state — persists across agent selection changes. `p`/`n` cycle pane modes (p=forward, n=backward). Agent actions: `x` retire, `!` nuke, `R` resume, `r` reassign, `m` merge, `s` send, `a` new-agent. `;`/`l` scroll both panes simultaneously. See SPEC.md §11–13.
 - **Coordinator mode**: when coordinator is selected, sidebar shows only tree + info, main area shows coordinator tmux at full width. `n`/`p` toggles between TMUX view and DASHBOARD view (agent overview). Focus order: agent-tree → info → coordinator. See SPEC.md §12.
 - **Dialog system**: 10 types — `confirm`, `input`, `select`, `fuzzy`, `help`, `textarea`, `folder-browser`, `new-agent-form`, `setup`, `permissions-editor`. Renders in status bar area, variable height. Separate from dialogs: status-bar timed notices via `showMessage()` (auto-dismiss after 3s, gated by `noticeCounter` to prevent stale timeouts).
 - **`executeAndRefresh(fn)`**: wraps simple mutations (try/catch + watcher refresh). Multi-step flows (merge, diff-tool, snapshot) use `.then().catch()` instead because they need intermediate UI or skip refresh.
@@ -126,7 +126,7 @@ The Telegram bridge lives entirely here (NOT in the sibling bash `ittybitty`). H
 
 All mutations are native (no more `runIb()` / `IbRunner`). `hooksStatus`, `installSafetyHooks`, `uninstallSafetyHooks`, `installInterceptHook`, `uninstallInterceptHook`, `interceptHooksStatus` read/write `~/.claude/settings.json` directly.
 
-Commands: `killAgent`, `nukeAgent`, `nukeAllAgents`, `pauseAgent`, `resumeAgent`, `reassignAgent`, `mergeCheckAgent`, `mergeAgent`, `sendMessage`, `newAgent`, `diffAgent`, `statusAgent`, `acknowledgeQuestion`.
+Commands: `retireAgent`, `rehireAgent`, `nukeAgent`, `nukeAllAgents`, `pauseAgent`, `resumeAgent`, `reassignAgent`, `mergeCheckAgent`, `mergeAgent`, `sendMessage`, `newAgent`, `diffAgent`, `statusAgent`, `acknowledgeQuestion`.
 
 - Git operations target the agent's repo via `git -C <repoPath>` rather than process-wide `cwd`. Tests inject fake spawn runners via per-command `SpawnContext` instances.
 - `newAgent()` calls `ensureAgentTypesDir()` then validates `--type` exists on disk, rejects layer-only types (`spawnable: false`), and stores `agentType` + `agentIcon` in meta.json. Permission lookup: every agent merges `_all.md` `permissions.allow/deny`; non-coordinators additionally merge `_non_coordinator.md`; all merge their type file's own lists. Deduped before writing `settings.local.json`.
@@ -138,6 +138,14 @@ Commands: `killAgent`, `nukeAgent`, `nukeAllAgents`, `pauseAgent`, `resumeAgent`
 ## Agent lifecycle (`src/agent-lifecycle.ts`)
 
 Shared helpers used by multiple ib commands. Mirrors the bash ib teardown / archive / kill / utility functions. All subprocess calls go through `spawnCtx` (a `SpawnContext` from `types.ts`); tests inject a fake runner with `spawnCtx.set(fn)` and reset it with `spawnCtx.reset()`.
+
+Explicit retirement first creates a versioned recovery payload: a hidden Git
+ref retains HEAD, `worktree.patch` stores tracked changes, and safe non-ignored
+untracked files are copied. `archiveAgent()` writes `retirement.json` only for
+that path; merge/nuke archives remain historical and non-rehirable.
+`rehireAgent()` scans timestamped archive directories by `meta.id`, rebuilds
+the active directory/worktree, then delegates session startup to
+`resumeAgent()`.
 
 ## parse-state.ts priority order (legacy)
 

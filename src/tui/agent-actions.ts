@@ -11,7 +11,7 @@ import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
 import { addRepo, listRepos, renameRepo, removeRepo, repoDisplayName } from "../registry";
 import {
-  killAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent, renameAgent,
+  retireAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent, renameAgent,
   mergeCheckAgent, mergeAgent, sendMessage, newAgent,
   acknowledgeQuestion, hooksStatus, interceptHooksStatus,
   installSafetyHooks, uninstallSafetyHooks,
@@ -269,22 +269,22 @@ export interface ActionCtx {
   healthReport: RepoHealthReport | undefined;
 }
 
-export function handleKill(ctx: ActionCtx) {
+export function handleRetire(ctx: ActionCtx) {
   if (ctx.agentTree.isSystemCoordinatorSelected) return;
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
   ctx.showDialog({
     type: "confirm",
-    prompt: `Kill agent ${agent.id}?`,
-    confirmLabel: "Kill",
+    prompt: `Retire agent ${agent.id}?`,
+    confirmLabel: "Retire",
     focusedButton: "cancel",
     confirmColor: RED,
     onYes: () => {
       ctx.closeDialog();
       ctx.executeAndRefresh(async () => {
-        const result = await killAgent(agent);
-        if (result.ok) ctx.setNotice(`Killed ${agent.id}`, "info");
-        else ctx.setNotice(`Kill failed: ${result.stderr || result.stdout}`, "error");
+        const result = await retireAgent(agent);
+        if (result.ok) ctx.setNotice(`Retired ${agent.id}`, "info");
+        else ctx.setNotice(`Retire failed: ${result.stderr || result.stdout}`, "error");
       });
     },
   });
@@ -1022,8 +1022,8 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
  *
  * Note on `x` on a team MEMBER row in the Teams tree: that path is NOT routed
  * here. The dashboard's selection-sync makes a team-member look just like an
- * Agents-panel agent selection, so it falls through to `handleKill` (kill the
- * agent), matching `x` behavior in the Agents tree exactly.
+ * Agents-panel agent selection, so it falls through to `handleRetire` (retire
+ * the agent), matching `x` behavior in the Agents tree exactly.
  */
 export function handleManageTeam(ctx: ActionCtx, teamName: string) {
   ctx.executeAndRefresh(async () => {
@@ -1754,7 +1754,7 @@ export function handleHelp(ctx: ActionCtx) {
       row("t", "add agent to team"),
       row("b", "add permission"),
       row("m", "merge"),
-      row("x / !", "kill / nuke (all if none selected)"),
+      row("x / !", "retire / nuke (all if none selected)"),
       row("R", "resume"),
       row("P", "pause"),
       row("r", "reassign"),

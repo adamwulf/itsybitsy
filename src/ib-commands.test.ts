@@ -1,6 +1,13 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join, basename } from "path";
-import { mkdtemp, rm, mkdir, readdir } from "fs/promises";
+import {
+  mkdtemp,
+  rm,
+  mkdir,
+  readdir,
+  readlink,
+  symlink,
+} from "fs/promises";
 import { tmpdir } from "os";
 import type { Agent, AgentMeta } from "./agents";
 import {
@@ -18,7 +25,8 @@ import { matchAgentById } from "./index";
 import { saveRegistry } from "./registry";
 import { makeAgent as _makeAgent, makeSpawnResult } from "./test-utils";
 import {
-  killAgent,
+  retireAgent,
+  rehireAgent,
   nukeAgent,
   nukeAllAgents,
   resumeAgent,
@@ -43,6 +51,8 @@ import {
   resetSendSpawnRunner,
   setKillPauseSpawnRunner,
   resetKillPauseSpawnRunner,
+  setRehireSpawnRunner,
+  resetRehireSpawnRunner,
   setNukeResumeSpawnRunner,
   resetNukeResumeSpawnRunner,
   setMergeSpawnRunner,
@@ -69,10 +79,21 @@ import {
 import { spawnCtx as lifecycleSpawnCtx } from "./agent-lifecycle";
 import { setUserConfigPath, resetUserConfigPath } from "./config";
 import type { AgentState } from "./parse-state";
-import type { SpawnResult } from "./types";
+import type { SpawnFn, SpawnResult } from "./types";
 
-function makeAgent(id: string, repoPath: string, state: string = "running"): Agent {
-  return _makeAgent({ id, repoPath, repoName: "test-repo", state: state as AgentState });
+function makeAgent(
+  id: string,
+  repoPath: string,
+  state: string = "running",
+  meta?: Partial<AgentMeta>,
+): Agent {
+  const agent = _makeAgent({
+    id,
+    repoPath,
+    repoName: "test-repo",
+    state: state as AgentState,
+  });
+  return meta ? { ...agent, meta: { ...agent.meta, ...meta } } : agent;
 }
 
 describe("ib-commands", () => {
@@ -823,7 +844,7 @@ function mockSpawnFnWithFailures(
   };
 }
 
-describe("killAgent (native)", () => {
+describe("retireAgent (native)", () => {
   let tempDir: string;
   let spawnCalls: string[][];
 
@@ -848,8 +869,8 @@ describe("killAgent (native)", () => {
     lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
-    const agent = makeAgent("agent-abc", tempDir);
-    const result = await killAgent(agent);
+    const agent = makeAgent("agent-abc", tempDir, "running", { worktree: false });
+    const result = await retireAgent(agent);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("not found");
@@ -872,8 +893,8 @@ describe("killAgent (native)", () => {
     lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
-    const agent = makeAgent("agent-abc", tempDir);
-    const result = await killAgent(agent);
+    const agent = makeAgent("agent-abc", tempDir, "running", { worktree: false });
+    const result = await retireAgent(agent);
 
     expect(result.ok).toBe(true);
     expect(result.stdout).toBe("Closed agent: agent-abc");
@@ -893,8 +914,8 @@ describe("killAgent (native)", () => {
     lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
-    const agent = makeAgent("agent-abc", tempDir);
-    await killAgent(agent);
+    const agent = makeAgent("agent-abc", tempDir, "running", { worktree: false });
+    await retireAgent(agent);
 
     // Agent directory should be removed after teardown
     const exists = await Bun.file(join(agentDir, "meta.json")).exists();
@@ -924,8 +945,8 @@ describe("killAgent (native)", () => {
     lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
-    const agent = makeAgent("agent-abc", tempDir);
-    await killAgent(agent);
+    const agent = makeAgent("agent-abc", tempDir, "running", { worktree: false });
+    await retireAgent(agent);
 
     // Questions for agent-abc should be removed, agent-xyz kept
     const updated = await Bun.file(questionsPath).json();
@@ -941,13 +962,13 @@ describe("killAgent (native)", () => {
     setKillPauseSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    const result = await killAgent(agent);
+    const result = await retireAgent(agent);
 
     expect(result.ok).toBe(true);
     expect(result.stdout).toBe("Closed agent: agent-abc");
   });
 
-  test("appends a [kill] line to the system watch log on success", async () => {
+  test("appends a [retire] line to the system watch log on success", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-loggy");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
@@ -966,13 +987,13 @@ describe("killAgent (native)", () => {
     const { setWatchLogPath, resetWatchLogPath } = await import("./watch-log");
     setWatchLogPath(logPath);
     try {
-      const agent = makeAgent("agent-loggy", tempDir);
-      const result = await killAgent(agent);
+      const agent = makeAgent("agent-loggy", tempDir, "running", { worktree: false });
+      const result = await retireAgent(agent);
       expect(result.ok).toBe(true);
 
       const { readFile } = await import("fs/promises");
       const log = await readFile(logPath, "utf8");
-      expect(log).toContain("[kill]");
+      expect(log).toContain("[retire]");
       expect(log).toContain("agent-loggy");
       // makeAgent's default claude_pid is "12345"; assert the prefix so we
       // verify pid= is included without coupling to the helper's literal.
@@ -980,6 +1001,358 @@ describe("killAgent (native)", () => {
     } finally {
       resetWatchLogPath();
     }
+  });
+});
+
+describe("retire → rehire recovery", () => {
+  let tempDir: string;
+  let originalHome: string | undefined;
+
+  async function git(...args: string[]): Promise<string> {
+    const proc = Bun.spawn(["git", ...args], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) {
+      throw new Error(`git ${args.join(" ")} failed: ${stderr}`);
+    }
+    return stdout.trim();
+  }
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "rehire-integration-"));
+    originalHome = process.env.HOME;
+    process.env.HOME = tempDir;
+    await git("init", tempDir);
+    await git("-C", tempDir, "config", "user.email", "test@example.com");
+    await git("-C", tempDir, "config", "user.name", "Test User");
+    await Bun.write(join(tempDir, "tracked.txt"), "base\n");
+    await Bun.write(
+      join(tempDir, "latin1.txt"),
+      new Uint8Array([
+        0x70, 0x72, 0x65, 0x66, 0x69, 0x78, 0x20, 0xe9, 0x20, 0x73, 0x75,
+        0x66, 0x66, 0x69, 0x78, 0x0a, 0x6c, 0x69, 0x6e, 0x65, 0x32, 0x0a,
+      ]),
+    );
+    await git("-C", tempDir, "add", "tracked.txt", "latin1.txt");
+    await git("-C", tempDir, "commit", "-m", "base");
+    await mkdir(join(tempDir, ".ittybitty"), { recursive: true });
+    await Bun.write(join(tempDir, ".ittybitty", "repo-id"), "1a2b3c4d\n");
+    await saveRegistry({
+      repos: [{ path: tempDir, name: basename(tempDir) }],
+    });
+  });
+
+  afterEach(async () => {
+    lifecycleSpawnCtx.reset();
+    resetKillPauseSpawnRunner();
+    resetRehireSpawnRunner();
+    resetNukeResumeSpawnRunner();
+    process.env.HOME = originalHome;
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("round-trips committed HEAD, tracked changes, and untracked files; resume failure leaves stopped agent", async () => {
+    const agentId = "agent-rehire";
+    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const worktreePath = join(agentDir, "repo");
+    await mkdir(agentDir, { recursive: true });
+    await git(
+      "-C", tempDir, "worktree", "add", worktreePath,
+      "-b", `agent/${agentId}`, "HEAD",
+    );
+
+    await Bun.write(join(worktreePath, "tracked.txt"), "modified\n");
+    const modifiedLatin1 = new Uint8Array([
+      0x70, 0x72, 0x65, 0x66, 0x69, 0x78, 0x20, 0xe9, 0x20, 0x73, 0x75,
+      0x66, 0x66, 0x69, 0x78, 0x0a, 0x6c, 0x69, 0x6e, 0x65, 0x32, 0x0a,
+      0x63, 0x68, 0x61, 0x6e, 0x67, 0x65, 0x64, 0x0a,
+    ]);
+    await Bun.write(join(worktreePath, "latin1.txt"), modifiedLatin1);
+    await mkdir(join(worktreePath, "nested"), { recursive: true });
+    await Bun.write(join(worktreePath, "nested", "untracked.txt"), "untracked\n");
+    const absoluteLinkTarget = join(worktreePath, "tracked.txt");
+    await symlink(absoluteLinkTarget, join(worktreePath, "absolute-link"));
+    await Bun.write(join(agentDir, "prompt.txt"), "continue the task");
+    await Bun.write(join(agentDir, "start.sh"), "#!/bin/bash\n");
+    await Bun.write(join(agentDir, "exit-check.sh"), "#!/bin/bash\n");
+
+    const agent = makeAgent(agentId, tempDir, "running", {
+      tmux_session: `ittybitty-1a2b3c4d-${agentId}`,
+      worktree: true,
+      model: "codex:gpt-5.5",
+      claude_pid: "",
+    });
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify(agent.meta, null, 2),
+    );
+    const { createTeam, addMember, getTeam } = await import("./teams");
+    await createTeam("rehire-test", "", 1000);
+    await addMember("rehire-test", agentId);
+
+    const hybridRunner: SpawnFn = (cmd) => {
+      if (cmd[0] === "git") {
+        return Bun.spawn(cmd, {
+          stdout: "pipe",
+          stderr: "pipe",
+        }) as SpawnResult;
+      }
+      if (cmd[0] === "tmux" && cmd.includes("has-session")) {
+        return makeSpawnResult(1);
+      }
+      if (cmd[0] === "pgrep") return makeSpawnResult(1);
+      return makeSpawnResult();
+    };
+    lifecycleSpawnCtx.set(hybridRunner);
+    setKillPauseSpawnRunner(hybridRunner);
+
+    const retired = await retireAgent(agent);
+    expect(retired.ok).toBe(true);
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
+
+    const archives = await readdir(join(tempDir, ".ittybitty", "archive"));
+    expect(archives).toHaveLength(1);
+    const archiveDir = join(tempDir, ".ittybitty", "archive", archives[0]!);
+    const manifest = await Bun.file(join(archiveDir, "retirement.json")).json();
+    expect(manifest.agentId).toBe(agentId);
+    expect(manifest.gitHead).toMatch(/^[0-9a-f]{40,64}$/);
+    expect(manifest.untrackedFiles).toEqual([
+      "absolute-link",
+      "nested/untracked.txt",
+    ]);
+    expect(manifest.prunedTeams).toEqual([
+      { team: "rehire-test", id: agentId },
+    ]);
+    expect(await Bun.file(join(archiveDir, "agent.log")).text()).toContain(
+      "Agent retired",
+    );
+
+    // Simulate teardown's rm -rf fallback leaving an orphan branch after Git's
+    // worktree metadata becomes stale. Rehire should prune and replace it when
+    // it still points at the immutable retained HEAD.
+    await git(
+      "-C", tempDir, "branch", `agent/${agentId}`, manifest.gitHead,
+    );
+
+    setRehireSpawnRunner(hybridRunner);
+    setNukeResumeSpawnRunner(hybridRunner);
+    const rehired = await rehireAgent(agentId);
+
+    expect(rehired.ok).toBe(false);
+    expect(rehired.stdout).toContain("Reconstructed stopped agent");
+    expect(rehired.stderr).toContain("codex_session_id");
+    expect(await Bun.file(join(worktreePath, "tracked.txt")).text()).toBe("modified\n");
+    expect(
+      await Bun.file(join(worktreePath, "nested", "untracked.txt")).text(),
+    ).toBe("untracked\n");
+    expect(
+      new Uint8Array(
+        await Bun.file(join(worktreePath, "latin1.txt")).arrayBuffer(),
+      ),
+    ).toEqual(modifiedLatin1);
+    expect(await readlink(join(worktreePath, "absolute-link"))).toBe(
+      absoluteLinkTarget,
+    );
+    const restoredMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(restoredMeta.state).toBe("stopped");
+    expect(restoredMeta.tmux_session).toBe(`ittybitty-1a2b3c4d-${agentId}`);
+    expect(restoredMeta.claude_pid).toBe("");
+    expect(restoredMeta.watchdog_pid).toBeUndefined();
+    expect((await getTeam("rehire-test"))!.members).toContain(agentId);
+    expect(await Bun.file(join(archiveDir, "retirement.json")).exists()).toBe(true);
+    expect(await git("-C", tempDir, "rev-parse", manifest.headRef)).toBe(manifest.gitHead);
+    expect(await git("-C", worktreePath, "rev-parse", "HEAD")).toBe(manifest.gitHead);
+  });
+
+  test("rejects an archive without a supported retirement manifest", async () => {
+    const archiveDir = join(
+      tempDir,
+      ".ittybitty",
+      "archive",
+      "20260703-120000-agent-legacy",
+    );
+    await mkdir(archiveDir, { recursive: true });
+    await Bun.write(
+      join(archiveDir, "meta.json"),
+      JSON.stringify({
+        id: "agent-legacy",
+        tmux_session: "ittybitty-1a2b3c4d-agent-legacy",
+      }),
+    );
+
+    const result = await rehireAgent("agent-legacy");
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toBe(
+      "Matching archive is not rehirable (no supported retirement manifest)",
+    );
+  });
+
+  test("rolls back the reconstructed directory and branch when a patch is corrupt", async () => {
+    const agentId = "agent-corrupt";
+    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const worktreePath = join(agentDir, "repo");
+    await mkdir(agentDir, { recursive: true });
+    await git(
+      "-C", tempDir, "worktree", "add", worktreePath,
+      "-b", `agent/${agentId}`, "HEAD",
+    );
+    await Bun.write(join(worktreePath, "tracked.txt"), "modified\n");
+    await Bun.write(join(agentDir, "exit-check.sh"), "#!/bin/bash\n");
+
+    const agent = makeAgent(agentId, tempDir, "running", {
+      tmux_session: `ittybitty-1a2b3c4d-${agentId}`,
+      worktree: true,
+      model: "codex:gpt-5.5",
+      claude_pid: "",
+    });
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify(agent.meta, null, 2),
+    );
+
+    const hybridRunner: SpawnFn = (cmd) => {
+      if (cmd[0] === "git") {
+        return Bun.spawn(cmd, {
+          stdout: "pipe",
+          stderr: "pipe",
+        }) as SpawnResult;
+      }
+      if (cmd[0] === "tmux" && cmd.includes("has-session")) {
+        return makeSpawnResult(1);
+      }
+      if (cmd[0] === "pgrep") return makeSpawnResult(1);
+      return makeSpawnResult();
+    };
+    lifecycleSpawnCtx.set(hybridRunner);
+    setKillPauseSpawnRunner(hybridRunner);
+    expect((await retireAgent(agent)).ok).toBe(true);
+
+    const [archiveKey] = await readdir(
+      join(tempDir, ".ittybitty", "archive"),
+    );
+    const archiveDir = join(
+      tempDir,
+      ".ittybitty",
+      "archive",
+      archiveKey!,
+    );
+    const manifest = await Bun.file(
+      join(archiveDir, "retirement.json"),
+    ).json();
+    await Bun.write(join(archiveDir, "worktree.patch"), "not a git patch\n");
+
+    setRehireSpawnRunner(hybridRunner);
+    const result = await rehireAgent(agentId);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain(
+      `Could not reconstruct agent '${agentId}'`,
+    );
+    expect(result.stderr).toContain("No valid patches");
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
+    expect(
+      await git("-C", tempDir, "branch", "--list", `agent/${agentId}`),
+    ).toBe("");
+    expect(await git("-C", tempDir, "rev-parse", manifest.headRef)).toBe(
+      manifest.gitHead,
+    );
+  });
+
+  test("successfully resumes a retired no-worktree Claude agent", async () => {
+    const agentId = "agent-return";
+    const archiveKey = `20260703-120000-${agentId}`;
+    const archiveDir = join(
+      tempDir,
+      ".ittybitty",
+      "archive",
+      archiveKey,
+    );
+    await mkdir(archiveDir, { recursive: true });
+    const meta = makeAgent(agentId, tempDir, "stopped", {
+      tmux_session: `ittybitty-1a2b3c4d-${agentId}`,
+      worktree: false,
+      model: "claude:sonnet",
+      claude_pid: "",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      nickname: "shared-name",
+    }).meta;
+    await Bun.write(
+      join(archiveDir, "meta.json"),
+      JSON.stringify(meta, null, 2),
+    );
+    await Bun.write(join(archiveDir, "exit-check.sh"), "#!/bin/bash\n");
+    await Bun.write(
+      join(archiveDir, "retirement.json"),
+      JSON.stringify({
+        version: 1,
+        agentId,
+        retiredAt: "2026-07-03T12:00:00.000Z",
+        repoPath: tempDir,
+        archiveKey,
+        worktree: false,
+        gitHead: null,
+        headRef: null,
+        untrackedFiles: [],
+        prunedTeams: [],
+      }),
+    );
+    const activeOwnerDir = join(
+      tempDir,
+      ".ittybitty",
+      "agents",
+      "agent-owner",
+    );
+    await mkdir(activeOwnerDir, { recursive: true });
+    await Bun.write(
+      join(activeOwnerDir, "meta.json"),
+      JSON.stringify(
+        makeAgent("agent-owner", tempDir, "running", {
+          worktree: false,
+          nickname: "shared-name",
+        }).meta,
+      ),
+    );
+
+    let newSessionSeen = false;
+    const runner: SpawnFn = (cmd) => {
+      if (cmd[0] === "tmux" && cmd[1] === "new-session") {
+        newSessionSeen = true;
+        return makeSpawnResult();
+      }
+      if (cmd[0] === "tmux" && cmd.includes("has-session")) {
+        return makeSpawnResult(newSessionSeen ? 0 : 1);
+      }
+      if (cmd[0] === "pgrep") return makeSpawnResult(1);
+      return makeSpawnResult();
+    };
+    setRehireSpawnRunner(runner);
+    setNukeResumeSpawnRunner(runner);
+
+    const result = await rehireAgent(agentId);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain(`Rehired agent: ${agentId}`);
+    expect(result.stderr).toContain(
+      "Nickname 'shared-name' is already used",
+    );
+    expect(newSessionSeen).toBe(true);
+    expect(
+      await Bun.file(
+        join(tempDir, ".ittybitty", "agents", agentId, "resume.sh"),
+      ).exists(),
+    ).toBe(true);
+    expect(
+      (await Bun.file(
+        join(tempDir, ".ittybitty", "agents", agentId, "meta.json"),
+      ).json()).nickname,
+    ).toBeUndefined();
   });
 });
 
@@ -1251,7 +1624,7 @@ describe("nukeAgent (native)", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test("returns error when target is a worker with no children", async () => {
+  test("destructively removes a worker with no children", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-worker");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
@@ -1268,9 +1641,9 @@ describe("nukeAgent (native)", () => {
     });
     const result = await nukeAgent(agent);
 
-    expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("worker agent");
-    expect(result.stderr).toContain("ib kill");
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("Nuked 1 agent");
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
 
   test("tears down the agent and its descendants", async () => {
@@ -1756,7 +2129,7 @@ describe("resumeAgent (native)", () => {
     // (setsid absent, e.g. macOS) keeps the protection.
     expect(hupIdx).toBeLessThan(setsidGuardIdx);
 
-    // TERM and INT traps are unchanged — clean teardown on ib kill / pause still
+    // TERM and INT traps are unchanged — clean teardown on ib retire / pause still
     // forwards the signal to claude.
     expect(resumeScript).toMatch(/trap '[^']*kill \$CLAUDE_PID[^']*' TERM/);
     expect(resumeScript).toMatch(/trap '[^']*kill -INT \$CLAUDE_PID[^']*' INT/);
@@ -8981,7 +9354,7 @@ describe("respawnSelf (native)", () => {
 //
 // The durable op-guard refuses a conflicting long-running op (merge-check /
 // merge / restart) while one is in flight with a LIVE holder, and reclaims
-// when the holder is dead. kill/nuke/pause/reassign are the recovery path and
+// when the holder is dead. retire/nuke/pause/reassign are the recovery path and
 // must NOT be guarded. Uses the injectable isPidAliveCtx to stub liveness.
 
 describe("long-running-op guard", () => {
@@ -9294,10 +9667,10 @@ describe("long-running-op guard", () => {
     expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true);
   });
 
-  // ── kill / nuke bypass the guard ────────────────────────────────────────────
+  // ── retire / nuke bypass the guard ──────────────────────────────────────────
 
-  test("killAgent is NOT blocked by an in-flight op (live holder)", async () => {
-    const agentDir = await makeBackedAgentDir("agent-kill");
+  test("retireAgent is NOT blocked by an in-flight op (live holder)", async () => {
+    const agentDir = await makeBackedAgentDir("agent-retire");
     isPidAliveCtx.set(() => true); // op holder very much alive
     await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: 1 });
 
@@ -9310,12 +9683,12 @@ describe("long-running-op guard", () => {
     lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
-    const agent = makeAgent("agent-kill", tempDir);
-    const result = await killAgent(agent);
+    const agent = makeAgent("agent-retire", tempDir, "running", { worktree: false });
+    const result = await retireAgent(agent);
 
-    // Kill is the recovery path for a wedged op — it must succeed regardless.
+    // Retire is the recovery path for a wedged op — it must succeed regardless.
     expect(result.ok).toBe(true);
-    expect(result.stdout).toBe("Closed agent: agent-kill");
+    expect(result.stdout).toBe("Closed agent: agent-retire");
     // Dir removed → marker gone for free.
     expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
@@ -9343,7 +9716,7 @@ describe("long-running-op guard", () => {
 });
 
 // ===========================================================================
-// Teardown leave-notices (SPEC §16.4.2 / §16.5). kill/merge fire a PER-AGENT
+// Teardown leave-notices (SPEC §16.4.2 / §16.5). retire/merge fire a PER-AGENT
 // `left the team` notice stamped to the departed id; ANY nuke fires ONE
 // COALESCED `N member(s) left @team` notice per team, system-sender. Both
 // snapshot SURVIVING members from the post-prune roster and are best-effort.
@@ -9354,7 +9727,7 @@ describe("long-running-op guard", () => {
 // SURVIVOR defers its notice into the outbox so we can assert it. The DEPARTED
 // agent's dir is removed by teardown, so we only inspect SURVIVOR outboxes.
 // ===========================================================================
-describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
+describe("teams: teardown leave-notices (retire / merge / nuke)", () => {
   let baseDir: string;
   let homeDir: string;
   let repoDir: string;
@@ -9401,7 +9774,13 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
 
   // makeAgent bound to the temp repo.
   function agentOf(id: string): Agent {
-    return _makeAgent({ id, repoPath: repoDir, repoName: basename(repoDir), state: "running" as AgentState });
+    const agent = _makeAgent({
+      id,
+      repoPath: repoDir,
+      repoName: basename(repoDir),
+      state: "running" as AgentState,
+    });
+    return { ...agent, meta: { ...agent.meta, worktree: false } };
   }
 
   beforeEach(async () => {
@@ -9454,9 +9833,9 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
     await rm(baseDir, { recursive: true, force: true });
   });
 
-  // --- killAgent -----------------------------------------------------------
+  // --- retireAgent ---------------------------------------------------------
 
-  test("killAgent fires a per-agent leave notice to survivors, stamped to the departed id", async () => {
+  test("retireAgent fires a per-agent leave notice to survivors, stamped to the departed id", async () => {
     const { createTeam, addMember, getTeam } = await import("./teams");
     const { readOutbox } = await import("./outbox");
     const { readChannel } = await import("./team-channel");
@@ -9467,7 +9846,7 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
     await addMember("backend", "agent-leaver");
     resetReadAgentMetaCache();
 
-    const res = await killAgent(agentOf("agent-leaver"));
+    const res = await retireAgent(agentOf("agent-leaver"));
     expect(res.ok).toBe(true);
 
     // The departed id is pruned from the roster.
@@ -9489,7 +9868,7 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
     expect(leaves[0]!.fromAgent).toBe("agent-leaver");
   });
 
-  test("killAgent of an agent in no team enqueues no leave notice", async () => {
+  test("retireAgent of an agent in no team enqueues no leave notice", async () => {
     const { createTeam, addMember } = await import("./teams");
     const { readOutbox } = await import("./outbox");
     // A team exists with only the survivor; the departing agent is NOT a member.
@@ -9499,21 +9878,21 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
     await addMember("backend", "agent-survivor");
     resetReadAgentMetaCache();
 
-    const res = await killAgent(agentOf("agent-loner"));
+    const res = await retireAgent(agentOf("agent-loner"));
     expect(res.ok).toBe(true);
 
     // No notice — the departing agent shared no team with the survivor.
     expect(await readOutbox(queueDirOf("agent-survivor"))).toEqual([]);
   });
 
-  test("killAgent of the LAST member sends no notice (empty-survivor carve-out)", async () => {
+  test("retireAgent of the LAST member sends no notice (empty-survivor carve-out)", async () => {
     const { createTeam, addMember, getTeam } = await import("./teams");
     await createTeam("solo", "", 1000);
     await plantDeparting("agent-last");
     await addMember("solo", "agent-last");
     resetReadAgentMetaCache();
 
-    const res = await killAgent(agentOf("agent-last"));
+    const res = await retireAgent(agentOf("agent-last"));
     expect(res.ok).toBe(true);
 
     // Roster emptied; team persists empty; nobody was notified (no recipients).

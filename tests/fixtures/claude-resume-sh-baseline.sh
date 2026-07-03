@@ -71,7 +71,7 @@ case $EXIT_CODE in
     130) log "exit=130 → SIGINT (Ctrl-C)" ;;
     137) log "exit=137 → SIGKILL (likely OOM kill or 'kill -9'; check Console.app for 'low memory')" ;;
     139) log "exit=139 → SIGSEGV (claude segfault)" ;;
-    143) log "exit=143 → SIGTERM (graceful kill, e.g. ib kill / pause)" ;;
+    143) log "exit=143 → SIGTERM (graceful kill, e.g. ib retire / pause)" ;;
     *)   log "exit=$EXIT_CODE → unrecognized; SIGNAL=$SIGNAL" ;;
 esac
 

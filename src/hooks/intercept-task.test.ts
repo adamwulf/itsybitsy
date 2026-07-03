@@ -1036,7 +1036,7 @@ describe("coordinator Bash restrictions", () => {
       const result = await processTaskIntercept({
         tool_name: "Bash",
         tool_input: {
-          command: "ib send a <<'EOF'\nbody\nEOF\nib kill agent-x",
+          command: "ib send a <<'EOF'\nbody\nEOF\nib retire agent-x",
         },
         cwd: coordCwd,
       });

@@ -1,5 +1,9 @@
 import { test, expect, describe } from "bun:test";
-import { wrapSingleLine, wrapLines, wordWrapSingleLine, wordWrapLines } from "./wrap";
+import {
+  wrapSingleLine, wrapLines, wordWrapSingleLine, wordWrapLines,
+  computeChromeSlice, findCodexInputChromeLogical, findLastTwoSeparators,
+} from "./wrap";
+import { stripAnsi } from "../parse-state";
 import { visibleWidth } from "@mariozechner/pi-tui";
 
 describe("wrapSingleLine", () => {
@@ -309,6 +313,65 @@ describe("wordWrapSingleLine", () => {
   });
 });
 
+describe("separator collapse (─ divider truncation, pinned-width fix)", () => {
+  // truncateToWidth preserves/closes ANSI styling, so a collapsed separator row
+  // can carry a trailing reset — strip ANSI before matching the ─ run.
+  const isSepRow = (r: string) => /^─+$/.test(stripAnsi(r).trim());
+
+  test("a 1000-col ─ separator truncates to exactly ONE row at a narrow width", () => {
+    const sep = "─".repeat(1000);
+    const rows = wordWrapSingleLine(sep, 80);
+    expect(rows.length).toBe(1);
+    expect(visibleWidth(rows[0]!)).toBe(80);
+    expect(isSepRow(rows[0]!)).toBe(true);
+  });
+
+  test("wordWrapLines collapses each of several logical separators to one row", () => {
+    const sep = "─".repeat(1000);
+    const text = ["content above", sep, "content between", sep, "content below"].join("\n");
+    const rows = wordWrapLines(text, 40);
+    // 3 content rows (each fits) + 2 collapsed separators = 5 rows total.
+    expect(rows.length).toBe(5);
+    expect(rows.filter(isSepRow).length).toBe(2);
+    for (const r of rows) expect(visibleWidth(r)).toBeLessThanOrEqual(40);
+  });
+
+  test("a separator already within width is returned unchanged (single row)", () => {
+    const sep = "─".repeat(20);
+    expect(wordWrapSingleLine(sep, 80)).toEqual([sep]);
+  });
+
+  test("ANSI-styled separator collapses to one row and stays within width", () => {
+    // Dim-styled 1000-col separator (ANSI must not count toward width, and the
+    // styling must be preserved through truncation).
+    const styledSep = `\x1b[2m${"─".repeat(1000)}\x1b[0m`;
+    const rows = wordWrapSingleLine(styledSep, 60);
+    expect(rows.length).toBe(1);
+    expect(visibleWidth(rows[0]!)).toBeLessThanOrEqual(60);
+    expect(stripAnsi(rows[0]!).trim()).toMatch(/^─+$/);
+  });
+
+  test("prose around a separator is unaffected (only the ─ line collapses)", () => {
+    const sep = "─".repeat(1000);
+    const prose = "this is a normal long prose line that should still word-wrap across several rows as usual";
+    const text = [prose, sep, prose].join("\n");
+    const rows = wordWrapLines(text, 30);
+    // Exactly one collapsed separator; the prose wrapped to multiple rows on both sides.
+    expect(rows.filter(isSepRow).length).toBe(1);
+    for (const r of rows) expect(visibleWidth(r)).toBeLessThanOrEqual(30);
+    // The prose words survive in order (joining all non-separator rows).
+    const proseRows = rows.filter((r) => !isSepRow(r));
+    expect(proseRows.join(" ").replace(/\s+/g, " ").trim()).toBe(`${prose} ${prose}`);
+  });
+
+  test("a line that is MOSTLY ─ but contains other chars is NOT treated as a separator (still wraps)", () => {
+    // Guard: only pure ─ runs collapse. A label with dashes must word-wrap.
+    const notSep = "── Section: a long heading that keeps going well past the pane width ──";
+    const rows = wordWrapSingleLine(notSep, 20);
+    expect(rows.length).toBeGreaterThan(1);
+  });
+});
+
 describe("wordWrapLines", () => {
   test("splits on newlines then word-wraps", () => {
     const text = "short line\nthis is a longer line that should wrap";
@@ -378,6 +441,128 @@ describe("wordWrapLines", () => {
       for (const row of result) {
         expect(visibleWidth(row)).toBeLessThanOrEqual(width);
       }
+    });
+  });
+});
+
+describe("computeChromeSlice — chrome detection on UNWRAPPED logical lines", () => {
+  const PIN = 1000; // pinned tmux width — separators are single ~PIN-col logical lines
+  const sep = "─".repeat(PIN); // one Claude input-box separator as ONE logical line
+
+  describe("Claude input chrome", () => {
+    // A realistic Claude capture at the pinned width: transcript, then the
+    // input box (separator, prompt line, separator), then the status bar.
+    const claudeRaw = [
+      "assistant: here is a reply line",
+      "assistant: and a second reply line",
+      sep,
+      "> ",
+      sep,
+      "  ? for shortcuts",
+    ].join("\n");
+
+    test("slices the transcript at the upper separator (logical), status bar below the lower", () => {
+      const slice = computeChromeSlice(claudeRaw, false);
+      expect(slice.transcriptRaw).toBe(
+        "assistant: here is a reply line\nassistant: and a second reply line"
+      );
+      expect(slice.statusLines).toEqual(["  ? for shortcuts"]);
+    });
+
+    test("a PIN-width separator does NOT leak into the wrapped transcript at a narrow pane", () => {
+      // The bug this design fixes: detecting chrome AFTER wrapping would explode
+      // the single 1000-col separator into ~13 rows at width 80 and mis-slice.
+      // Detecting on logical lines first means the transcript never contains it.
+      const slice = computeChromeSlice(claudeRaw, false);
+      const wrapped = wordWrapLines(slice.transcriptRaw, 80);
+      for (const row of wrapped) {
+        expect(/^─+$/.test(row.trim())).toBe(false);
+        expect(visibleWidth(row)).toBeLessThanOrEqual(80);
+      }
+    });
+
+    test("finds the last two separators among many logical separators (input box, not content dividers)", () => {
+      // Claude output can contain ─ dividers higher up; the input box is always
+      // the LAST two, so the transcript keeps the earlier divider + its content.
+      const raw = [
+        "intro",
+        sep,          // a content divider higher up
+        "middle content",
+        sep,          // input-box upper
+        "> type here",
+        sep,          // input-box lower
+        "  status bar line",
+      ].join("\n");
+      const slice = computeChromeSlice(raw, false);
+      expect(slice.transcriptRaw).toBe("intro\n" + sep + "\nmiddle content");
+      expect(slice.statusLines).toEqual(["  status bar line"]);
+    });
+
+    test("strips trailing blank padding tmux appends below the status bar", () => {
+      const raw = ["reply", sep, "> ", sep, "  status", "", "   ", ""].join("\n");
+      const slice = computeChromeSlice(raw, false);
+      expect(slice.statusLines).toEqual(["  status"]);
+    });
+
+    test("no separators found → whole capture is transcript, no status lines", () => {
+      const raw = "just some output\nwith no input box at all";
+      const slice = computeChromeSlice(raw, false);
+      expect(slice.transcriptRaw).toBe(raw);
+      expect(slice.statusLines).toEqual([]);
+    });
+
+    test("findLastTwoSeparators matches a PIN-width single logical separator", () => {
+      const { upperIndex, lowerIndex } = findLastTwoSeparators([
+        "content", sep, "prompt", sep,
+      ]);
+      expect(upperIndex).toBe(1);
+      expect(lowerIndex).toBe(3);
+    });
+  });
+
+  describe("Codex input chrome", () => {
+    // Codex status bar (matches isCodexStatusLine) + the › prompt, at pin width.
+    const codexStatus = "gpt-5-codex · ~/proj · Context 42% · 3h left";
+    const codexRaw = [
+      "codex: some transcript output",
+      "codex: more output",
+      "─".repeat(PIN), // codex content divider (must NOT be mistaken for input box)
+      "› ",
+      codexStatus,
+    ].join("\n");
+
+    test("anchors on the › prompt + status bar; transcript above the prompt", () => {
+      const slice = computeChromeSlice(codexRaw, true);
+      // Transcript is everything ABOVE the › prompt (including the content
+      // divider, which is not the input box). The prompt line itself is dropped;
+      // statusLines run from the status bar to the end — matching the historical
+      // codex chrome slice (statusIndex..endIndex).
+      expect(slice.transcriptRaw).toBe(
+        "codex: some transcript output\ncodex: more output\n" + "─".repeat(PIN)
+      );
+      expect(slice.statusLines).toEqual([codexStatus]);
+    });
+
+    test("codex chrome status lines don't reintroduce a divider when wrapped at a narrow pane", () => {
+      const slice = computeChromeSlice(codexRaw, true);
+      const wrapped = wordWrapLines(slice.transcriptRaw, 60);
+      // The content divider stays IN the transcript (it's above the prompt), so
+      // it wraps — that's fine; what matters is the status/prompt are sliced off.
+      expect(slice.statusLines).toContain(codexStatus);
+      // Every transcript row is bounded to the pane width.
+      for (const row of wrapped) expect(visibleWidth(row)).toBeLessThanOrEqual(60);
+    });
+
+    test("findCodexInputChromeLogical returns null when no › prompt is present", () => {
+      const noPrompt = ["output", "more output", codexStatus].join("\n");
+      expect(findCodexInputChromeLogical(noPrompt.split("\n"))).toBeNull();
+    });
+
+    test("no codex chrome found → whole capture is transcript", () => {
+      const raw = "codex output with no prompt or status bar";
+      const slice = computeChromeSlice(raw, true);
+      expect(slice.transcriptRaw).toBe(raw);
+      expect(slice.statusLines).toEqual([]);
     });
   });
 });

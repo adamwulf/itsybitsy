@@ -1957,21 +1957,31 @@ Panel sizes are persisted across `ib watch` sessions via `~/.itsybitsy/layout.js
 - **Restore**: On startup, the saved layout is loaded and applied with validation: NaN and Infinity values are rejected, and all values are clamped to valid ranges (sidebar width [30, 120], etc.).
 - **Missing file**: If `layout.json` doesn't exist or is invalid, defaults are used (sidebar 60 cols, default split-pane position, zero height offsets).
 
-### 13.8 Tmux Width Model
+### 13.8 Tmux Width Model — PINNED WIDE
 
-Each tmux session type uses a separately-tracked width. The three widths have well-defined dependency relationships:
+**Every TUI tmux window (regular agent, per-repo coordinator, and system coordinator) is PINNED to a single very-wide width, `PINNED_TMUX_WIDTH` (1000 cols, `src/tui/widths.ts`), and is NEVER resized to follow a display pane.** This is a deliberate departure from the earlier "follow-the-pane" model.
 
-| Component | Width formula | Persisted in | Used when |
-|-----------|--------------|--------------|-----------|
-| **Agent tmux** (middle pane) | `splitPaneLeftWidth` | `layout.json` → `splitPaneLeftWidth` | Creating new agents, resuming agents, selecting an agent, `[`/`]` with active-agent focus, layout restore |
-| **System coordinator tmux** | `mainWidth` = `terminal_cols - sidebarWidth - 1` | Computed dynamically (not persisted directly) | Creating coordinator session, `[`/`]` with sidebar or coordinator focus, terminal resize (SIGWINCH), layout restore |
-| **Per-repo coordinator tmux** | `mainWidth` = `terminal_cols - sidebarWidth - 1` (same as the system coordinator) | Computed dynamically | Selecting a repo header, `[`/`]` with sidebar/coordinator focus (via `sidebarWidth` change → `mainWidth` change), terminal resize (SIGWINCH), layout restore. Independent of `splitPaneLeftWidth`. |
+**Why the pin.** Claude Code and codex are full-screen TUIs that hard-wrap their transcript at the tmux *window* width with real `\n`. `tmux capture-pane -J` rejoins only tmux's *own* soft-wraps — it cannot un-wrap a program's hard `\n`. So every tmux-window resize forces the TUI to repaint its entire transcript at the new width, baking duplicate + wrong-width frames into scrollback permanently. The old model resized agent windows to `splitPaneLeftWidth` (and coordinators to `mainWidth`) on selection, layout restore, sidebar/divider drags, and terminal resize; a poller `onWidth` callback additionally wrote the tmux-reported width back into `splitPaneLeftWidth` + `layout.json`, racing the selection resize. The width flapped constantly and every flap repainted.
 
-**Key invariant**: `splitPaneLeftWidth` and `sidebarWidth` are the two independent inputs; `mainWidth` and `rightPaneWidth` are derived. A sidebar resize changes `sidebarWidth`, which changes `mainWidth` (affecting both the system coordinator and per-repo coordinators — both follow `mainWidth`) but does not change `splitPaneLeftWidth` (agents). A split-pane resize changes `splitPaneLeftWidth` (agents) and `rightPaneWidth` but does NOT change `mainWidth`, so neither the system coordinator nor per-repo coordinators are affected by split-pane resizes — they only react to sidebar resizes and terminal resizes.
+`PINNED_TMUX_WIDTH` = 1000 was verified safe: claude renders its TUI at 1000 without capping (a ~700-char single-line prompt stays a single physical row; the input-box separator chrome spans the full 1000 cols). At this width the TUIs almost never wrap their own prose. (Residual: a single logical line *longer* than 1000 is still hard-wrapped by the CLI at ≤1000 with real `\n` and stays ragged after our reflow — an accepted trade-off.)
 
-**Tmux width feedback**: The tmux poller reports the polled session's window width back to the dashboard via `onWidth`. This feedback is used to sync `splitPaneLeftWidth` when an external client (e.g., Ghostty) resizes an agent's tmux session. However, the main tmux poller is repointed to the system coordinator's tmux session when the coordinator is selected (to show coordinator output in the middle pane). Since the coordinator runs at `mainWidth` (much wider than `splitPaneLeftWidth`), the `onWidth` callback must be suppressed when the system coordinator is selected — otherwise the coordinator's width would overwrite `splitPaneLeftWidth` and corrupt all agent widths.
+**Display reflow is the only width that varies.** The dashboard word-wraps the captured `-J` logical lines to the on-screen pane width at render time (`src/tui/wrap.ts` / `WordWrapCache`): the center agent pane reflows to `leftPaneWidth`; both coordinator panes reflow to `mainWidth`. `splitPaneLeftWidth` and `sidebarWidth`/`mainWidth` are now **display-only** — they govern reflow and the divider position, never the tmux window.
 
-**New agent width**: When spawning a new agent (`ib new-agent`) or resuming an agent (`ib resume`), the tmux session is created/resized to `getSavedTmuxWidth()`, which reads `splitPaneLeftWidth` from `layout.json`. This ensures new agents match the dashboard's current split-pane width even when launched outside the TUI.
+| Input | What it controls now |
+|-------|----------------------|
+| `splitPaneLeftWidth` (in `layout.json`) | The DISPLAY split position (middle vs. right pane) and the width the center pane reflows to. Divider drag (`[`/`]` with active-agent/right-pane focus) changes it; it is NOT written to any tmux window. |
+| `sidebarWidth` → `mainWidth` | Sidebar width and the width the coordinator panes reflow to. No tmux window follows it. |
+| `PINNED_TMUX_WIDTH` | The fixed width of every agent + coordinator tmux window. |
+
+**No tmux width feedback.** The tmux poller no longer has an `onWidth` callback (and therefore no longer queries `window_width` on every agent switch). A tmux-reported width can never mutate `splitPaneLeftWidth` or `layout.json`. The old `layoutRestored` / `skipWidthReports` race plumbing is gone with it.
+
+**Spawn / resume / coordinator width.** `ib new-agent` (spawn), `ib resume`, and coordinator creation all size their tmux session via `getTmuxWidthForAgent()` → `tmuxWidthForAgent()`, which now returns `PINNED_TMUX_WIDTH` for both agents and coordinators. So sessions start pinned even when launched outside the TUI.
+
+**One-time re-pin migration.** On the first populated `onUpdate` after `ib watch` boots (`pendingTmuxResize`, armed unconditionally via `requestTmuxRepin()`), every existing agent (from `flatList`), every per-repo coordinator (from `watcher.lastAgents`), and the system `ib-coordinator` session is resized once to `PINNED_TMUX_WIDTH`. This brings sessions that were spawned by a pre-pin binary up to the pin. New spawns already start pinned.
+
+**External clients (Ghostty).** `openInGhostty` attaches with `tmux set-option window-size latest` (`src/ghostty.ts`), so tmux re-fits the window to Ghostty's terminal dimensions while attached. On the attached→detached transition the window must be re-pinned or it would stay at the client's (typically narrower) width and the dashboard would reflow a too-narrow capture. For a regular agent, `checkClientAttached` resizes the window back to `PINNED_TMUX_WIDTH`. Coordinators (the system `ib-coordinator` and the per-repo coordinator) can also be opened in Ghostty (`handleOpenGhosttyTmux`), and the agent path does not cover them, so `checkCoordinatorClients` (driven by a 3s timer that runs while a coordinator pane is displayed, started/stopped from `updatePollerVisibility`) applies the same detach re-pin to whichever coordinator session is visible.
+
+**Input-box chrome is detected on UNWRAPPED logical lines.** Because a pinned-width separator is a single ~1000-col logical line, the center/coordinator pane detects and slices the CLI's input-box chrome on the *logical* lines (`computeChromeSlice` in `src/tui/wrap.ts`) BEFORE word-wrapping the transcript to the pane width. Detecting after wrapping would explode one separator into ~13 full-width separator rows and mis-slice. Status lines (chrome below the input separator) are truncated to width, never wrapped. See §11 / `docs/implementation-notes.md`.
 
 ---
 

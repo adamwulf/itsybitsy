@@ -32,13 +32,12 @@ import {
   acquireSystemCoordinator,
   ensureSystemCoordinator,
   releaseSystemCoordinator,
-  resizeCoordinatorTmux,
   sanitizeTmuxInput,
 } from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
-import { isCodexStatusLine, stripAnsi } from "../parse-state";
 import { SplitPane } from "./split-pane";
-import { wordWrapLines, padLines, findLastTwoSeparators, WordWrapCache } from "./wrap";
+import { wordWrapLines, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
+import type { ChromeSlice } from "./wrap";
 import { fetchCodexUsage, fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
@@ -71,9 +70,9 @@ import type { FocusTarget, SubFocus } from "./focus";
 import { SystemDashboardComponent } from "./system-dashboard";
 import { loadLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave } from "./layout";
 import {
-  DEFAULT_TMUX_WIDTH,
+  DEFAULT_TMUX_WIDTH, PINNED_TMUX_WIDTH,
   getLiveMainWidth, getLiveLeftPaneWidth, getLiveRightPaneWidth,
-  clampLeftWidth, clampLeftWidthAbsolute, clampSidebarWidth,
+  clampLeftWidthAbsolute, clampSidebarWidth,
 } from "./widths";
 import { cancelPaste } from "./clipboard";
 import type { LayoutState } from "./layout";
@@ -122,24 +121,53 @@ export class TmuxPaneComponent implements Component {
   /** When true, render output without requiring an agent (used for coordinator) */
   agentless = false;
   /**
-   * Memoized word-wrap of rawOutput (the UNWRAPPED logical -J capture) keyed on
-   * (raw identity, width). Both render() and parseStatusLines() run several
-   * times between polls (input-field height, status-line count, then the actual
+   * Memoized word-wrap keyed on (raw identity, width). The raw we wrap is the
+   * chrome-SLICED transcript (input-box chrome removed on the UNWRAPPED logical
+   * lines first — see chromeSlice), not the full capture, so wrapping never sees
+   * the input separators. Both render() and parseStatusLines() run several times
+   * between polls (input-field height, status-line count, then the actual
    * render), so caching keeps repeated renders O(1). onOutput assigns a fresh
-   * string every poll, so an identity check on rawOutput invalidates correctly.
+   * string every poll, so an identity check invalidates correctly.
    */
   private wrapCache = new WordWrapCache();
+  /**
+   * Memoized chrome slice of rawOutput. Chrome detection now runs on the
+   * UNWRAPPED logical lines (rawOutput.split("\n")), NOT on wrapped rows: at the
+   * pinned tmux width an input-box separator is a single ~1000-col logical line,
+   * but after word-wrapping to a narrow pane it becomes many consecutive
+   * full-width separator rows, which made findLastTwoSeparators / findCodexInput-
+   * Chrome mis-slice. Detecting on logical lines is width-independent, so this
+   * memo keys on rawOutput identity alone.
+   */
+  private chromeCache: { raw: string; slice: ChromeSlice } | null = null;
 
   invalidate(): void {}
 
   /**
-   * Word-wrap rawOutput to `width`, reusing the memoized result when neither the
-   * raw output nor the width changed since the last call. Uses word-wrap (break
-   * at spaces, hard-wrap over-width tokens) so the whole -J logical buffer
-   * renders at one consistent width.
+   * Split rawOutput into logical lines, detect the CLI's input-box chrome there,
+   * and return the transcript (everything above the chrome) plus the status
+   * lines (chrome below the input separator). Width-independent — memoized on
+   * rawOutput identity. See ChromeSlice / computeChromeSlice.
+   */
+  private chromeSlice(): ChromeSlice {
+    const cached = this.chromeCache;
+    if (cached && cached.raw === this.rawOutput) return cached.slice;
+    const slice = computeChromeSlice(this.rawOutput, isCodexAgent(this.agent));
+    this.chromeCache = { raw: this.rawOutput, slice };
+    return slice;
+  }
+
+  /**
+   * Word-wrap the transcript to `width`. When trimInputSeparator is set we wrap
+   * the chrome-sliced transcript (input box removed on the logical lines first);
+   * otherwise we wrap the full capture. Reuses the memoized result when neither
+   * the (sliced) raw nor the width changed. Word-wrap (break at spaces,
+   * hard-wrap over-width tokens) renders the whole buffer at one consistent
+   * width.
    */
   getWrapped(width: number): string[] {
-    return this.wrapCache.get(this.rawOutput, width);
+    const raw = this.trimInputSeparator ? this.chromeSlice().transcriptRaw : this.rawOutput;
+    return this.wrapCache.get(raw, width);
   }
 
   /** Reset state when switching agents */
@@ -149,6 +177,7 @@ export class TmuxPaneComponent implements Component {
     this.scrollBack = 0;
     this.clientAttached = false;
     this.wrapCache.reset();
+    this.chromeCache = null;
   }
 
   scrollUp(amount = 1) {
@@ -168,34 +197,15 @@ export class TmuxPaneComponent implements Component {
     this.statusLines = [];
     if (!this.trimInputSeparator || !this.rawOutput) return;
 
-    const wrapped = this.getWrapped(width);
-
-    // Codex emits full-width ─ section dividers between output blocks, so
-    // findLastTwoSeparators (designed for Claude's input chrome) routinely
-    // matches content dividers instead of the input box. For codex agents,
-    // prefer the codex-specific detector — it anchors on the status bar and
-    // the › prompt, which together unambiguously identify the input chrome.
-    if (isCodexAgent(this.agent)) {
-      const codexChrome = findCodexInputChrome(wrapped);
-      if (codexChrome) {
-        this.statusLines = wrapped.slice(codexChrome.statusIndex, codexChrome.endIndex + 1).map(
-          (line) => truncateToWidth(line, width, "")
-        );
-      }
-      return;
-    }
-
-    const { lowerIndex } = findLastTwoSeparators(wrapped);
-    // Extract lines after the lower separator
-    if (lowerIndex >= 0 && lowerIndex < wrapped.length - 1) {
-      this.statusLines = wrapped.slice(lowerIndex + 1).map(
-        (line) => truncateToWidth(line, width, "")
-      );
-      // Trim trailing blank lines — tmux capture-pane pads output to fill the pane height
-      while (this.statusLines.length > 0 && this.statusLines[this.statusLines.length - 1]!.trim() === "") {
-        this.statusLines.pop();
-      }
-    }
+    // Status lines are the CLI's chrome below the input separator (Claude's
+    // status bar, or codex's status bar + prompt). They are detected on the
+    // UNWRAPPED logical lines (chromeSlice) so a pinned-width separator doesn't
+    // wrap into many rows and mis-slice. Status lines are chrome: TRUNCATE each
+    // logical line to width — never word-wrap them (a wrapped status bar would
+    // spill onto extra rows the overlay didn't reserve).
+    this.statusLines = this.chromeSlice().statusLines.map(
+      (line) => truncateToWidth(line, width, "")
+    );
   }
 
   render(width: number): string[] {
@@ -267,30 +277,14 @@ export class TmuxPaneComponent implements Component {
       ], this.displayHeight);
     }
 
-    // Word-wrap logical lines to pane width (memoized). rawOutput is tmux -J
-    // output — soft-wrapped continuation lines already rejoined — so this is the
-    // single place the whole buffer gets wrapped to the current width.
-    let wrapped = this.getWrapped(width);
-
-    // When showing our own input field, trim the CLI's native input area.
-    // Claude's input area has two separator lines made of ─ characters, so we
-    // find the last two ─ separators and slice at the upper one. Codex doesn't
-    // use that double-separator chrome — it emits full-width ─ section
-    // dividers between output blocks, so the Claude detector would mis-match
-    // there. For codex, anchor on the › prompt + status bar instead.
-    if (this.trimInputSeparator) {
-      if (isCodexAgent(this.agent)) {
-        const codexChrome = findCodexInputChrome(wrapped);
-        if (codexChrome) {
-          wrapped = wrapped.slice(0, codexChrome.promptIndex);
-        }
-      } else {
-        const { upperIndex } = findLastTwoSeparators(wrapped);
-        if (upperIndex >= 0 && upperIndex < wrapped.length) {
-          wrapped = wrapped.slice(0, upperIndex);
-        }
-      }
-    }
+    // Word-wrap the transcript to pane width (memoized). getWrapped already
+    // returns the chrome-SLICED transcript when trimInputSeparator is set — the
+    // CLI's input box is removed on the UNWRAPPED logical lines first
+    // (chromeSlice), so wrapping never sees the input separators and there is no
+    // per-width re-slice to do here. rawOutput is tmux -J output (soft-wrapped
+    // continuation rows already rejoined), so this is the single place the whole
+    // transcript gets word-wrapped to the current width.
+    const wrapped = this.getWrapped(width);
 
     // Clamp scrollBack to valid range
     const maxScrollBack = Math.max(0, wrapped.length - this.displayHeight);
@@ -327,35 +321,8 @@ function isCodexAgent(agent: Agent | null): boolean {
     return false;
   }
 }
-
-function findCodexInputChrome(wrapped: string[]): { promptIndex: number; statusIndex: number; endIndex: number } | null {
-  let endIndex = wrapped.length - 1;
-  while (endIndex >= 0 && stripAnsi(wrapped[endIndex]!).trim() === "") {
-    endIndex--;
-  }
-  if (endIndex < 0) return null;
-
-  let promptIndex = -1;
-  for (let i = endIndex; i >= 0; i--) {
-    const line = stripAnsi(wrapped[i]!).trimStart();
-    if (/^›(?:\s|$)/.test(line)) {
-      promptIndex = i;
-      break;
-    }
-  }
-  if (promptIndex < 0) return null;
-
-  let statusIndex = -1;
-  for (let i = endIndex; i > promptIndex; i--) {
-    if (isCodexStatusLine(stripAnsi(wrapped[i]!))) {
-      statusIndex = i;
-      break;
-    }
-  }
-  if (statusIndex < 0) return null;
-
-  return { promptIndex, statusIndex, endIndex };
-}
+// Codex input-chrome detection moved to wrap.ts (findCodexInputChromeLogical,
+// used by computeChromeSlice) — it now runs on UNWRAPPED logical lines.
 
 /** Merge sidebar lines and main area lines side by side with a separator */
 function mergeSidebarAndMain(
@@ -703,12 +670,24 @@ export class DashboardComponent implements Component {
    * the user navigates the visible tree.
    */
   activeSelectionSource: SidebarMode = "agents";
-  /** When true, saved layout was applied — suppress onWidth overrides from tmux poller */
-  private layoutRestored = false;
-  /** Skip the next N tmux width reports to handle round-trip latency after resize */
-  private skipWidthReports = 0;
-  /** When true, resize all agent tmux sessions on next onUpdate (after layout restore) */
+  /**
+   * When true, run the one-time re-pin migration on the next populated onUpdate:
+   * resize every existing agent + coordinator tmux window to PINNED_TMUX_WIDTH.
+   * Live agents spawned before the pin (or by an older binary) may still be at an
+   * old narrow width; this brings them up to the pin once. New spawns/resumes
+   * already start at PINNED_TMUX_WIDTH via tmuxWidthForAgent.
+   */
   private pendingTmuxResize = false;
+
+  /**
+   * Arm the one-time re-pin migration so the next populated onUpdate resizes
+   * every existing agent + coordinator tmux window to PINNED_TMUX_WIDTH. Called
+   * from the boot path (and implicitly by applyLayout) so pre-pin sessions are
+   * brought up to the pin regardless of whether a saved layout was restored.
+   */
+  requestTmuxRepin(): void {
+    this.pendingTmuxResize = true;
+  }
   /**
    * One-time guard for the startup auto-select (§17.1, user-confirmed startup
    * behavior). On the FIRST populate where the flat list is non-empty, the
@@ -723,6 +702,15 @@ export class DashboardComponent implements Component {
   /** Cache of which agents have an attached tmux client */
   private _clientAttached: Map<string, boolean> = new Map();
   private clientCheckTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Coordinator-session attach cache (session name → attached), separate from the
+   * agent cache. Coordinators (system + per-repo) can be opened in Ghostty too;
+   * on the attached→detached transition we re-pin their window to
+   * PINNED_TMUX_WIDTH, mirroring the agent mechanism. Coordinator panes render
+   * agentless, so this drives no display state — only the re-pin side-effect.
+   */
+  private _coordClientAttached: Map<string, boolean> = new Map();
+  private coordClientCheckTimer: ReturnType<typeof setInterval> | null = null;
 
   /** Read-only access to current focus target (for testing) */
   get focus(): FocusTarget {
@@ -774,14 +762,6 @@ export class DashboardComponent implements Component {
    */
   getSnapshotPaneWidth(): number {
     return getLiveLeftPaneWidth(this.liveLayout());
-  }
-
-  /**
-   * Width at which a per-repo coordinator should render and be sized — the full
-   * main area, matching the system coordinator's behavior.
-   */
-  getRepoCoordinatorWidth(): number {
-    return this.getMainWidth();
   }
 
   setQuestionsFocused(value: boolean) {
@@ -908,32 +888,16 @@ export class DashboardComponent implements Component {
       this.tui?.requestRender();
     };
 
+    // No onWidth handler: tmux windows are pinned to PINNED_TMUX_WIDTH and never
+    // follow the display pane, so a tmux-reported width must never mutate
+    // splitPaneLeftWidth or layout.json. splitPaneLeftWidth is purely the DISPLAY
+    // split position now (divider drag + persistence). Omitting onWidth also
+    // stops the poller from querying window width every agent switch.
     this.tmuxPoller = new TmuxPoller({
       onOutput: (raw, _stripped) => {
         this.tmuxPane.rawOutput = raw;
         this.tmuxPane.hasPolled = true;
         this.tui?.requestRender();
-      },
-      onWidth: (width) => {
-        // When the system coordinator is selected, the tmux poller polls the
-        // coordinator session which runs at full mainWidth. Ignore its width
-        // reports — they would corrupt the agent splitPaneLeftWidth.
-        if (this.agentTree.isSystemCoordinatorSelected) return;
-        // Skip stale width reports during tmux resize round-trip
-        if (this.skipWidthReports > 0) {
-          this.skipWidthReports--;
-          return;
-        }
-        // When a saved layout was restored, the dashboard width is authoritative.
-        // Skip tmux-reported width to avoid overriding the saved value during the
-        // race window before resizeTmuxWindow takes effect on the agent's session.
-        if (this.layoutRestored) return;
-        const clamped = clampLeftWidthAbsolute(width);
-        if (clamped !== this.splitPane.getLeftWidth()) {
-          this.splitPane.setLeftWidth(clamped);
-          this.tui?.requestRender();
-          this.persistLayout();
-        }
       },
     });
 
@@ -966,7 +930,10 @@ export class DashboardComponent implements Component {
   /** Apply a saved layout state to restore panel sizes, clamping to valid ranges. */
   applyLayout(layout: LayoutState) {
     this.sidebarWidth = clampSidebarWidth(layout.sidebarWidth);
-    resizeCoordinatorTmux(this.getMainWidth());
+    // No coordinator tmux resize here: the system coordinator's window is pinned
+    // to PINNED_TMUX_WIDTH and never follows mainWidth. Its pane reflows to
+    // mainWidth at display time via WordWrapCache. The one-time re-pin migration
+    // (pendingTmuxResize below) brings any pre-pin coordinator window up to the pin.
     this.splitPane.setLeftWidth(clampLeftWidthAbsolute(layout.splitPaneLeftWidth));
     this.sidebar.heightOffsets = { ...layout.heightOffsets };
     if (layout.repoCoordinatorHeightOffset !== undefined) {
@@ -979,7 +946,6 @@ export class DashboardComponent implements Component {
     const approxHeight = process.stdout.rows ?? 24;
     const approxBase = computeSidebarHeights(approxHeight, 1);
     clampSidebarOffsets(approxBase, this.sidebar.heightOffsets);
-    this.layoutRestored = true;
     this.pendingTmuxResize = true;
   }
 
@@ -1034,6 +1000,10 @@ export class DashboardComponent implements Component {
       clearInterval(this.clientCheckTimer);
       this.clientCheckTimer = null;
     }
+    if (this.coordClientCheckTimer) {
+      clearInterval(this.coordClientCheckTimer);
+      this.coordClientCheckTimer = null;
+    }
     if (this.telegramStatusTimer) {
       clearInterval(this.telegramStatusTimer);
       this.telegramStatusTimer = null;
@@ -1079,6 +1049,88 @@ export class DashboardComponent implements Component {
       this.repoCoordinatorPoller.resume();
     } else if (this.repoCoordinatorPoller.isRunning()) {
       this.repoCoordinatorPoller.stop();
+    }
+
+    // Coordinator windows can be opened in Ghostty (handleOpenGhosttyTmux covers
+    // IB_COORDINATOR_SESSION + the per-repo coordinator). Run a client-attach
+    // check for whichever coordinator session is currently displayed so we re-pin
+    // it to PINNED_TMUX_WIDTH on the attached→detached transition — the agent
+    // checkClientAttached path never covers coordinators.
+    this.updateCoordinatorClientCheck(coordinatorVisible, repoCoordinatorVisible);
+  }
+
+  /**
+   * Sessions of the coordinator panes currently displayed in the main area
+   * (system coordinator and/or per-repo coordinator). These are the only
+   * coordinator windows a Ghostty attach/detach can affect while visible.
+   */
+  private visibleCoordinatorSessions(coordinatorVisible: boolean, repoCoordinatorVisible: boolean): string[] {
+    const sessions: string[] = [];
+    if (coordinatorVisible) sessions.push(IB_COORDINATOR_SESSION);
+    if (repoCoordinatorVisible && this.repoCoordinatorSession) {
+      sessions.push(this.repoCoordinatorSession);
+    }
+    return sessions;
+  }
+
+  /**
+   * Start/stop a 3s client-attach check for the visible coordinator session(s),
+   * mirroring the agent clientCheckTimer. On the attached→detached transition,
+   * re-pin the window to PINNED_TMUX_WIDTH (attaching in Ghostty dropped the pin
+   * so the window followed the client). Stops the timer when no coordinator pane
+   * is visible.
+   */
+  private updateCoordinatorClientCheck(coordinatorVisible: boolean, repoCoordinatorVisible: boolean): void {
+    const anyVisible = coordinatorVisible || repoCoordinatorVisible;
+    if (!anyVisible) {
+      if (this.coordClientCheckTimer) {
+        clearInterval(this.coordClientCheckTimer);
+        this.coordClientCheckTimer = null;
+      }
+      return;
+    }
+    if (!this.coordClientCheckTimer) {
+      this.coordClientCheckTimer = setInterval(() => this.checkCoordinatorClients(), 3000);
+      // Fire one check immediately when a coordinator pane becomes visible
+      // (mirrors checkClientAttached on agent re-selection). If the user
+      // navigated away, detached Ghostty, and came back, this re-pins on return
+      // instead of waiting up to 3s for the first interval tick.
+      void this.checkCoordinatorClients();
+    }
+  }
+
+  /**
+   * One tick of the coordinator client-attach check: for each currently-visible
+   * coordinator session, re-pin to PINNED_TMUX_WIDTH on the attached→detached
+   * transition. Recomputes the visible set each tick so a selection change
+   * between ticks is handled. Public for testing (drive one tick directly).
+   */
+  async checkCoordinatorClients(): Promise<void> {
+    const coordinatorVisible =
+      this.activeSelectionSource === "agents"
+      && this.agentTree.isSystemCoordinatorSelected
+      && this.coordinatorViewMode === "TMUX";
+    const repoCoordinatorVisible =
+      this.rightPane.mode === "REPO" && this.rightPane.repoCoordinatorAgent != null;
+    const sessions = this.visibleCoordinatorSessions(coordinatorVisible, repoCoordinatorVisible);
+    // Do NOT drop attach state for sessions that are momentarily not visible.
+    // The last-observed state must persist across visibility changes, exactly
+    // like the agent path (_clientAttached is never deleted on switch-away).
+    // Otherwise: open a coordinator in Ghostty (observed attached) → navigate
+    // away (delete + timer stop) → detach Ghostty while away → navigate back →
+    // wasAttached would read false and the attached→detached transition is never
+    // observed, leaving the window stuck at the Ghostty width forever (window-size
+    // latest persists after detach). Preserving the state means the next live
+    // check on return sees wasAttached=true, attached=false → one re-pin. The
+    // guard is safe: `attached` is from the LIVE check, so a still-attached
+    // session can't spuriously re-pin, and re-pin is idempotent.
+    for (const session of sessions) {
+      const attached = await hasAttachedClient(session);
+      const wasAttached = this._coordClientAttached.get(session) ?? false;
+      this._coordClientAttached.set(session, attached);
+      if (wasAttached && !attached) {
+        resizeTmuxWindow(session, PINNED_TMUX_WIDTH);
+      }
     }
   }
 
@@ -1356,25 +1408,31 @@ export class DashboardComponent implements Component {
       }
     }
 
-    // After layout restore, resize all agent tmux sessions to match the restored splitPaneLeftWidth
-    if (this.pendingTmuxResize && flatList.length > 0) {
+    // One-time re-pin migration: bring every existing agent + coordinator tmux
+    // window up to PINNED_TMUX_WIDTH. New spawns/resumes already start pinned via
+    // tmuxWidthForAgent, but agents/coordinators that were running before the pin
+    // (or spawned by an older binary) may still sit at an old narrow width —
+    // resize them once so their reflow matches the pinned world. Runs on the
+    // FIRST onUpdate regardless of whether any agents exist: an upgrade with a
+    // running coordinator but ZERO agents must still re-pin the coordinator
+    // windows. Idempotent: resizing an already-pinned (or dead) window is a
+    // caught+ignored no-op.
+    if (this.pendingTmuxResize) {
       this.pendingTmuxResize = false;
-      // Re-validate splitPaneLeftWidth against current terminal width via the
-      // widths module so a too-large saved value can't push the right pane off-screen.
-      const validWidth = clampLeftWidth(this.getMainWidth(), this.splitPane.getLeftWidth());
-      if (validWidth !== this.splitPane.getLeftWidth()) {
-        this.splitPane.setLeftWidth(validWidth);
-      }
-      const width = validWidth;
       for (const entry of flatList) {
         if (entry.kind === "agent" && entry.agent.meta.tmux_session) {
-          resizeTmuxWindow(entry.agent.meta.tmux_session, width);
+          resizeTmuxWindow(entry.agent.meta.tmux_session, PINNED_TMUX_WIDTH);
         }
       }
-      // Clear layoutRestored after resize is issued. Skip the next 2 width reports to handle
-      // round-trip latency: one may catch the pre-resize width, the next catches post-resize.
-      this.layoutRestored = false;
-      this.skipWidthReports = 2;
+      // flatList filters out coordinators — re-pin per-repo coordinators from the
+      // full agent list, plus the system coordinator's fixed session. These run
+      // even when flatList is empty (no agents yet).
+      for (const a of this.watcher?.lastAgents ?? []) {
+        if (a.meta.agentType === "coordinator" && a.meta.tmux_session) {
+          resizeTmuxWindow(a.meta.tmux_session, PINNED_TMUX_WIDTH);
+        }
+      }
+      resizeTmuxWindow(IB_COORDINATOR_SESSION, PINNED_TMUX_WIDTH);
     }
 
     this.syncSelectedAgent();
@@ -1429,13 +1487,10 @@ export class DashboardComponent implements Component {
       if (focus !== "agent-tree" && focus !== "info" && focus !== "coordinator") {
         this.focusManager.setFocus("agent-tree");
       }
-      // Reassert coordinator tmux width on selection (mirrors the agent path
-      // at the bottom of this method). tmux can drift the window size when
-      // clients with different terminal sizes attach/detach; agents get
-      // re-resized on every selection change, so without this the system
-      // coordinator was the only session whose drift wasn't corrected on
-      // selection.
-      resizeCoordinatorTmux(this.getMainWidth());
+      // No resize on coordinator selection: the ib-coordinator tmux window is
+      // pinned to PINNED_TMUX_WIDTH and never follows mainWidth. The startup
+      // re-pin migration corrects any pre-pin drift once; there is no display
+      // width for it to chase, so selection no longer repaints its TUI.
     }
 
     this.rightPane.agent = selected;
@@ -1529,12 +1584,11 @@ export class DashboardComponent implements Component {
         this.repoCoordinatorSession = tmuxSession;
         this.rightPane.resetRepoCoordinator();
         this.repoCoordinatorPoller.setAgent(tmuxSession);
-        // Resize repo coordinator tmux to mainWidth — per-repo coordinators render
-        // full-pane (same behavior as the system coordinator), not right-pane-only.
-        if (tmuxSession) {
-          const w = this.getRepoCoordinatorWidth();
-          if (w > 0) resizeTmuxWindow(tmuxSession, w);
-        }
+        // No resize: the per-repo coordinator's tmux window is pinned to
+        // PINNED_TMUX_WIDTH like every other TUI session. REPO mode reflows its
+        // captured logical lines to mainWidth at display time via WordWrapCache,
+        // so selecting a repo header never repaints the coordinator TUI at a new
+        // width.
       }
     } else {
       // Not a repo header — clear coordinator state
@@ -1618,8 +1672,11 @@ export class DashboardComponent implements Component {
       }
       if (selected?.meta.tmux_session) {
         this.checkClientAttached(selected);
-        // Resize the newly selected agent's tmux to match the current middle pane.
-        resizeTmuxWindow(selected.meta.tmux_session, getLiveLeftPaneWidth(this.liveLayout()));
+        // No resize on selection: the agent's tmux window stays pinned to
+        // PINNED_TMUX_WIDTH regardless of which agent is selected or how wide the
+        // middle pane is. The center pane reflows the captured logical lines to
+        // its display width via WordWrapCache, so selection never repaints the
+        // TUI at a new width.
       }
     }
 
@@ -1854,6 +1911,16 @@ export class DashboardComponent implements Component {
 
       if (attached !== wasAttached) {
         this.tmuxPane.clientAttached = attached;
+        // When an external client (e.g. Ghostty) DETACHES, re-pin the window to
+        // PINNED_TMUX_WIDTH. openInGhostty attaches with `tmux set-option
+        // window-size latest` (src/ghostty.ts), so tmux re-fit the window to the
+        // client's terminal size while attached; on detach we must restore the
+        // pin, otherwise the window would stay at the client's width and the
+        // dashboard's reflow (which assumes a wide pinned window) would see a
+        // too-narrow capture.
+        if (wasAttached && !attached) {
+          resizeTmuxWindow(session, PINNED_TMUX_WIDTH);
+        }
         this.tui?.requestRender();
       }
     };
@@ -2471,13 +2538,10 @@ export class DashboardComponent implements Component {
         // teams-tree shares the sidebar region with agent-tree (§17.3), so width
         // changes apply to the sidebar exactly as they do when agent-tree is focused.
         this.sidebarWidth = clampSidebarWidth(this.sidebarWidth + delta);
-        resizeCoordinatorTmux(this.getMainWidth());
-        // Per-repo coordinator renders full-pane like the system coordinator,
-        // so resize its tmux to the new mainWidth.
-        if (this.repoCoordinatorSession) {
-          const w = this.getRepoCoordinatorWidth();
-          if (w > 0) resizeTmuxWindow(this.repoCoordinatorSession, w);
-        }
+        // No tmux resize on sidebar-width change: both the system coordinator and
+        // per-repo coordinator windows stay pinned to PINNED_TMUX_WIDTH. Their
+        // panes reflow to the new mainWidth at display time via WordWrapCache, so
+        // resizing the sidebar never repaints a coordinator TUI at a new width.
         this.tui?.requestRender();
       } else if (focus === "right-pane") {
         // Right pane focused: ] grows right (shrinks middle) = negative delta to handleResizeLeft
@@ -3075,11 +3139,13 @@ export async function launchDashboard(): Promise<void> {
   const savedLayout = await loadLayout();
   if (savedLayout) {
     dashboard.applyLayout(savedLayout);
-  } else {
-    // Resize coordinator tmux to match mainWidth when no saved layout exists
-    // (applyLayout handles this internally when a layout is restored)
-    resizeCoordinatorTmux(dashboard.getMainWidth());
   }
+  // Always run the one-time re-pin migration on the first populated onUpdate,
+  // whether or not a saved layout existed. applyLayout sets pendingTmuxResize
+  // when a layout is restored; set it here too so a first-run user (no saved
+  // layout) still gets pre-pin agent + coordinator windows re-pinned to
+  // PINNED_TMUX_WIDTH. New spawns already start pinned via tmuxWidthForAgent.
+  dashboard.requestTmuxRepin();
   dashboard.setTui(tui);
   dashboard.setRepos(repos);
   const diffToolValue = config["externalDiffTool"]?.value;
@@ -3259,15 +3325,11 @@ export async function launchDashboard(): Promise<void> {
     return undefined;
   });
 
-  // Handle terminal resize to update coordinator tmux width
+  // Handle terminal resize. No tmux resize here: every agent + coordinator tmux
+  // window is pinned to PINNED_TMUX_WIDTH and never follows the terminal. The
+  // display panes reflow to the new terminal/pane width at render time via
+  // WordWrapCache, so a SIGWINCH only needs a re-render (+ a log-cache refresh).
   process.stdout.on("resize", () => {
-    resizeCoordinatorTmux(dashboard.getMainWidth());
-    // Per-repo coordinator renders full-pane like the system coordinator,
-    // so its tmux width tracks the same mainWidth.
-    if (dashboard.repoCoordinatorSession) {
-      const w = dashboard.getRepoCoordinatorWidth();
-      if (w > 0) resizeTmuxWindow(dashboard.repoCoordinatorSession, w);
-    }
     // displayHeight is recomputed inside render() — at the moment the resize
     // event fires it still holds the pre-resize value, so a cache check now
     // would falsely hit. Drop the cached window so loadAgentLogIfNeeded is

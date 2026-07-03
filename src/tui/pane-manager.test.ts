@@ -388,6 +388,45 @@ describe("REPO mode with coordinator", () => {
     expect(text).toContain("coordinator output line 2");
   });
 
+  test("renderRepoCoordinatorSection with trimChrome trims the coordinator input box + surfaces status lines (Claude)", () => {
+    // Fix 1: when our input overlay is shown (trimChrome=true), the coordinator's
+    // own input box is trimmed on the logical lines and its status bar is surfaced
+    // via repoCoordinatorStatusLines — mirroring the system coordinator.
+    const rp = new RightPaneComponent();
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    rp.repoCoordinatorHasPolled = true;
+    rp.repoCoordinatorOutput = [
+      "⏺ coordinator finished a task",
+      "────────────────────",
+      "❯ ",
+      "────────────────────",
+      "  ⏵⏵ accept edits on",
+    ].join("\n");
+    const lines = rp.renderRepoCoordinatorSection(60, 10, true, /* trimChrome */ true);
+    const text = lines.map(stripAnsi).join("\n");
+    // Transcript kept; the coordinator's own input box is gone from the pane body.
+    expect(text).toContain("coordinator finished a task");
+    expect(text).not.toContain("accept edits on");
+    // Status bar surfaced for the caller to render below our input field.
+    expect(rp.repoCoordinatorStatusLines.map(stripAnsi).join("\n")).toContain("accept edits on");
+  });
+
+  test("renderRepoCoordinatorSection collapses a PINNED-width ─ separator to one row (untrimmed/unfocused)", () => {
+    // Even without chrome trimming (unfocused pane), an over-width ─ separator
+    // from the coordinator's TUI must NOT explode into ~N/width rows that swallow
+    // the pane — the wrap-path separator-collapse rule handles it.
+    const sep = "─".repeat(1000);
+    const rp = new RightPaneComponent();
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    rp.repoCoordinatorHasPolled = true;
+    rp.repoCoordinatorOutput = ["coord line above", sep, "coord line below"].join("\n");
+    const width = 50;
+    const rows = rp.renderRepoCoordinatorSection(width, 12, false).map(stripAnsi);
+    // Exactly one ─ row (collapsed), and no row exceeds the pane width.
+    expect(rows.filter((r) => /^─+$/.test(r.trim())).length).toBe(1);
+    for (const r of rows) expect(visibleWidth(r)).toBeLessThanOrEqual(width);
+  });
+
   test("renderRepoCoordinatorSection WORD-wraps an over-width -J logical line (no mid-word break)", () => {
     // F3: the coordinator poller delivers -J logical lines. An over-width line
     // must break at spaces (word-wrap), matching the center pane — not char-wrap

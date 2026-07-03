@@ -20,7 +20,7 @@ import {
 } from "../ib-commands";
 import { sanitizeAgentNameInput } from "../validation";
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
-import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession, sendTmuxEscape, expandTabs } from "../tmux-poller";
+import { captureTmuxOutput, killTmuxSession, sendTmuxEscape, expandTabs } from "../tmux-poller";
 import { parseStateForCli } from "../parse-state";
 import { parseModel } from "../agent-cli";
 import type { AgentCli } from "../agent-cli";
@@ -2031,15 +2031,13 @@ export function handleResizeLeft(ctx: ActionCtx, delta: number) {
   // render path re-clamps via `clampLeftWidth(mainWidth, …)`.
   const newWidth = clampLeftWidthAbsolute(current + delta);
   if (newWidth === current) return;
+  // splitPaneLeftWidth is purely the DISPLAY split position. Dragging the middle
+  // divider must NOT touch any tmux window — every agent + coordinator window is
+  // pinned to PINNED_TMUX_WIDTH and the center pane reflows the captured logical
+  // lines to newWidth at render time via WordWrapCache. Resizing the tmux window
+  // on every divider drag is exactly what baked duplicate/wrong-width repaint
+  // frames into scrollback; it's gone.
   ctx.splitPane.setLeftWidth(newWidth);
-  // Resize ALL agents' tmux sessions so the width is consistent across agents.
-  for (const entry of ctx.agentTree.flatList) {
-    if (entry.kind === "agent" && entry.agent.meta.tmux_session) {
-      resizeTmuxWindow(entry.agent.meta.tmux_session, newWidth);
-    }
-  }
-  // Per-repo coordinators are full-pane (sized by sidebar+terminal, not by the
-  // middle/right split), so the inner split-pane resize doesn't change their width.
   ctx.tui?.requestRender();
 }
 

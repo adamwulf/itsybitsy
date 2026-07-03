@@ -28,6 +28,30 @@ import { loadLayout } from "./layout";
 /** Default tmux (split-pane left / middle pane) width when no layout has been saved. */
 export const DEFAULT_TMUX_WIDTH = 80;
 
+/**
+ * Pinned tmux window width for every agent and coordinator session.
+ *
+ * Claude Code and codex are full-screen TUIs that hard-wrap their transcript at
+ * the tmux WINDOW width with real newlines. `tmux capture-pane -J` can only
+ * rejoin tmux's own soft-wraps — it cannot un-wrap a program's hard `\n`. So
+ * every time the tmux window width changes, the TUI repaints its whole
+ * transcript at the new width, baking duplicate + wrong-width frames into
+ * scrollback forever.
+ *
+ * We break the cycle by pinning the tmux window VERY WIDE and NEVER resizing it
+ * to follow the display pane. At this width the TUIs almost never wrap their own
+ * prose, so our word-wrap (`src/tui/wrap.ts`) is the single thing that reflows
+ * the logical lines to the on-screen pane width at display time. Dragging the
+ * middle-pane divider changes only `splitPaneLeftWidth` (the DISPLAY split
+ * position); it never touches the tmux window.
+ *
+ * 1000 was verified as a width claude renders its TUI at without capping (the
+ * echoed prompt + reply lines stay single physical rows and the input-box
+ * separator chrome spans the full width). If a future CLI is found to cap its
+ * render width below this, lower the constant to the measured cap.
+ */
+export const PINNED_TMUX_WIDTH = 1000;
+
 /** Inputs needed for every layout calculation. */
 export interface LayoutWidths {
   /** Full terminal width in columns. */
@@ -96,19 +120,19 @@ export function clampLeftWidthAbsolute(width: number): number {
 }
 
 /**
- * Tmux spawn width for a newly spawned (or resumed) agent.
- * Coordinators (system + per-repo) span middle+right (mainWidth, terminal-aware).
+ * Tmux WINDOW width for a spawned/resumed agent OR coordinator.
  *
- * Non-coordinators clamp ONLY to [MIN_LEFT_WIDTH, MAX_LEFT_WIDTH] — not to
- * `maxLeftPaneWidth(mainWidth)` — so the saved tmux width is preserved across
- * sessions even when the user spawns from a too-narrow terminal. The dashboard
- * render path re-clamps against the live mainWidth via `clampLeftWidth` and
- * issues `resizeTmuxWindow` if needed; the post-layout-restore handler at
- * `dashboard.ts` (`pendingTmuxResize` branch) is the one that owns that contract.
+ * Always `PINNED_TMUX_WIDTH` — every TUI session (regular agent, per-repo
+ * coordinator, system coordinator) is pinned to the same very-wide window and is
+ * NEVER resized to follow a display pane. See `PINNED_TMUX_WIDTH` for the full
+ * rationale. The display split (`splitPaneLeftWidth`) and `mainWidth` govern only
+ * how our word-wrap reflows the captured logical lines on screen — they no longer
+ * drive the tmux window at all, so the `layout` argument is unused for the width
+ * value. It is retained so both saved (`getTmuxWidthForAgent`) and live callers
+ * dispatch through one signature.
  */
-export function tmuxWidthForAgent(layout: LayoutWidths, isCoordinator: boolean): number {
-  if (isCoordinator) return mainWidth(layout.terminalWidth, layout.sidebarWidth);
-  return clampLeftWidthAbsolute(layout.splitPaneLeftWidth);
+export function tmuxWidthForAgent(_layout: LayoutWidths, _isCoordinator: boolean): number {
+  return PINNED_TMUX_WIDTH;
 }
 
 // ---------- saved (disk-backed) wrappers ----------
@@ -134,15 +158,10 @@ export async function getSavedSidebarWidth(): Promise<number> {
   return l.sidebarWidth;
 }
 
-/**
- * Read the saved split-pane left (middle) width, clamped to
- * [MIN_LEFT_WIDTH, MAX_LEFT_WIDTH]. Used at spawn time before mainWidth is known —
- * dashboard render later re-clamps against mainWidth via `clampLeftWidth`.
- */
-export async function getSavedTmuxWidth(): Promise<number> {
-  const l = await getSavedLayout();
-  return clampLeftWidthAbsolute(l.splitPaneLeftWidth);
-}
+// getSavedTmuxWidth was removed with the pinned-tmux-width change: spawn/resume
+// no longer read splitPaneLeftWidth for the tmux window (they use
+// getTmuxWidthForAgent → PINNED_TMUX_WIDTH). It only lingered as a misleading
+// accessor that returned the old clamped split-pane width, not the pin.
 
 /** Read the saved main area width (middle+right combined). */
 export async function getSavedMainWidth(): Promise<number> {

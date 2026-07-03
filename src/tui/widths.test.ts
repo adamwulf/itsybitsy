@@ -6,8 +6,8 @@ import {
   mainWidth, leftPaneWidth, rightPaneWidth, maxLeftPaneWidth,
   clampLeftWidth, clampSidebarWidth, tmuxWidthForAgent,
   getLiveMainWidth, getLiveLeftPaneWidth, getLiveRightPaneWidth,
-  getSavedTmuxWidth, getSavedSidebarWidth, getSavedMainWidth, getTmuxWidthForAgent,
-  DEFAULT_TMUX_WIDTH,
+  getSavedSidebarWidth, getSavedMainWidth, getTmuxWidthForAgent,
+  DEFAULT_TMUX_WIDTH, PINNED_TMUX_WIDTH,
 } from "./widths";
 import { saveLayout, setLayoutPath, resetLayoutPath, cancelPendingSave } from "./layout";
 import type { LayoutState } from "./layout";
@@ -65,21 +65,22 @@ describe("widths — pure math", () => {
     expect(clampSidebarWidth(9999)).toBe(MAX_SIDEBAR);
   });
 
-  test("tmuxWidthForAgent returns left pane for non-coordinator", () => {
+  test("tmuxWidthForAgent returns PINNED_TMUX_WIDTH for a non-coordinator (never follows the pane)", () => {
     const layout = { terminalWidth: 200, sidebarWidth: 60, splitPaneLeftWidth: 90 };
-    expect(tmuxWidthForAgent(layout, false)).toBe(90);
+    expect(tmuxWidthForAgent(layout, false)).toBe(PINNED_TMUX_WIDTH);
   });
 
-  test("tmuxWidthForAgent returns mainWidth for coordinator", () => {
+  test("tmuxWidthForAgent returns PINNED_TMUX_WIDTH for a coordinator too", () => {
     const layout = { terminalWidth: 200, sidebarWidth: 60, splitPaneLeftWidth: 90 };
-    expect(tmuxWidthForAgent(layout, true)).toBe(139);
+    expect(tmuxWidthForAgent(layout, true)).toBe(PINNED_TMUX_WIDTH);
   });
 
-  test("tmuxWidthForAgent for non-coordinator clamps to [MIN_LEFT_WIDTH, MAX_LEFT_WIDTH] only", () => {
-    const layout = { terminalWidth: 200, sidebarWidth: 60, splitPaneLeftWidth: 9999 };
-    expect(tmuxWidthForAgent(layout, false)).toBe(MAX_LEFT_WIDTH);
-    const layoutSmall = { terminalWidth: 200, sidebarWidth: 60, splitPaneLeftWidth: 1 };
-    expect(tmuxWidthForAgent(layoutSmall, false)).toBe(MIN_LEFT_WIDTH);
+  test("tmuxWidthForAgent ignores splitPaneLeftWidth entirely (pin is independent of layout)", () => {
+    const wide = { terminalWidth: 200, sidebarWidth: 60, splitPaneLeftWidth: 9999 };
+    const narrow = { terminalWidth: 200, sidebarWidth: 60, splitPaneLeftWidth: 1 };
+    expect(tmuxWidthForAgent(wide, false)).toBe(PINNED_TMUX_WIDTH);
+    expect(tmuxWidthForAgent(narrow, false)).toBe(PINNED_TMUX_WIDTH);
+    expect(tmuxWidthForAgent(wide, true)).toBe(PINNED_TMUX_WIDTH);
   });
 });
 
@@ -131,34 +132,33 @@ describe("widths — saved (disk-backed) wrappers", () => {
     expect(await getSavedSidebarWidth()).toBe(MIN_SIDEBAR);
   });
 
-  test("getSavedTmuxWidth returns DEFAULT_TMUX_WIDTH when no layout saved", async () => {
-    expect(await getSavedTmuxWidth()).toBe(80);
-  });
-
-  test("getSavedTmuxWidth clamps extreme saved values", async () => {
-    await saveLayout({ ...sample, splitPaneLeftWidth: 99999 });
-    expect(await getSavedTmuxWidth()).toBe(MAX_LEFT_WIDTH);
-    await saveLayout({ ...sample, splitPaneLeftWidth: 1 });
-    expect(await getSavedTmuxWidth()).toBe(MIN_LEFT_WIDTH);
-  });
-
   test("getSavedMainWidth = terminalWidth - savedSidebar - 1", async () => {
     await saveLayout({ ...sample, sidebarWidth: 70 });
     const expected = (process.stdout.columns ?? 80) - 70 - 1;
     expect(await getSavedMainWidth()).toBe(Math.max(1, expected));
   });
 
-  test("getTmuxWidthForAgent: non-coordinator returns saved tmux width", async () => {
+  test("getTmuxWidthForAgent: non-coordinator returns PINNED_TMUX_WIDTH", async () => {
     await saveLayout(sample);
-    expect(await getTmuxWidthForAgent(false)).toBe(await getSavedTmuxWidth());
+    expect(await getTmuxWidthForAgent(false)).toBe(PINNED_TMUX_WIDTH);
   });
 
-  test("getTmuxWidthForAgent: coordinator returns saved main width", async () => {
+  test("getTmuxWidthForAgent: coordinator also returns PINNED_TMUX_WIDTH", async () => {
     await saveLayout(sample);
-    expect(await getTmuxWidthForAgent(true)).toBe(await getSavedMainWidth());
+    expect(await getTmuxWidthForAgent(true)).toBe(PINNED_TMUX_WIDTH);
+  });
+
+  test("getTmuxWidthForAgent ignores saved layout — pin is layout-independent", async () => {
+    await saveLayout({ ...sample, splitPaneLeftWidth: 40, sidebarWidth: 100 });
+    expect(await getTmuxWidthForAgent(false)).toBe(PINNED_TMUX_WIDTH);
+    expect(await getTmuxWidthForAgent(true)).toBe(PINNED_TMUX_WIDTH);
   });
 
   test("DEFAULT_TMUX_WIDTH is 80", () => {
     expect(DEFAULT_TMUX_WIDTH).toBe(80);
+  });
+
+  test("PINNED_TMUX_WIDTH is 1000 (verified safe: claude renders its TUI at 1000 without capping)", () => {
+    expect(PINNED_TMUX_WIDTH).toBe(1000);
   });
 });

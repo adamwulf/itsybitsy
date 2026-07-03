@@ -10,6 +10,8 @@ import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeCom
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner } from "../ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
+import { spawnCtx as tmuxPollerSpawnCtx } from "../tmux-poller";
+import { IB_COORDINATOR_SESSION } from "../coordinator";
 import { setUserConfigPath, resetUserConfigPath } from "../config";
 import type { SpawnResult } from "../types";
 import { PANE_MODES } from "./pane-manager";
@@ -687,6 +689,79 @@ describe("TmuxPaneComponent word-wrap + memoization", () => {
     // The Claude input chrome (separators + prompt + status bar) is trimmed.
     expect(rendered).toContain("Done with the task.");
     expect(rendered).not.toContain("accept edits on");
+  });
+
+  test("PINNED-width Claude chrome: a 1000-col separator is detected on logical lines, never leaks into the narrow-pane render", () => {
+    // The pinned-tmux-width scenario this whole feature targets: at width 1000
+    // the input-box separators are SINGLE ~1000-col logical lines. Rendering the
+    // pane at a narrow display width (80) must still (a) trim the input chrome
+    // and (b) never show a row of ─ separators — which is exactly what happened
+    // when chrome was detected AFTER word-wrapping (the 1000-col separator
+    // exploded into ~13 rows and mis-sliced).
+    const sep = "─".repeat(1000);
+    const pane = new TmuxPaneComponent();
+    pane.agent = makeAgent("agent-claude", "/tmp/test");
+    pane.hasPolled = true;
+    pane.displayHeight = 20;
+    pane.trimInputSeparator = true;
+    pane.rawOutput = [
+      "⏺ Finished a long reply that itself stays well under the pinned width.",
+      "",
+      sep,
+      "❯ ",
+      sep,
+      "  ⏵⏵ accept edits on · 2 background tasks",
+      "",
+    ].join("\n");
+
+    const width = 80;
+    pane.parseStatusLines(width);
+    // Status line surfaced (chrome), truncated to width — never wrapped.
+    expect(pane.statusLines.every((l) => stripAnsi(l).length <= width)).toBe(true);
+    expect(pane.statusLines.map((l) => stripAnsi(l)).join("\n")).toContain("accept edits on");
+
+    const renderedLines = pane.render(width).map((l) => stripAnsi(l));
+    const rendered = renderedLines.join("\n");
+    expect(rendered).toContain("Finished a long reply");
+    expect(rendered).not.toContain("accept edits on");
+    // No rendered row is an all-─ separator row, and every row is within width.
+    for (const line of renderedLines) {
+      expect(/^─+$/.test(line.trim())).toBe(false);
+      expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+    }
+  });
+
+  test("PINNED-width codex chrome: › prompt + status bar detected on logical lines at a narrow pane", () => {
+    const bigDivider = "─".repeat(1000); // codex content divider, NOT the input box
+    const codexStatus = "gpt-5-codex · ~/proj · Context 42% · 3h left";
+    const pane = new TmuxPaneComponent();
+    // makeAgent defaults to a claude model; force a codex model so isCodexAgent()
+    // routes through the codex chrome detector.
+    const agent = makeAgent("agent-codex", "/tmp/test");
+    agent.meta.model = "codex:gpt-5-codex";
+    pane.agent = agent;
+    pane.hasPolled = true;
+    pane.displayHeight = 20;
+    pane.trimInputSeparator = true;
+    pane.rawOutput = [
+      "codex: produced some transcript output above the input box",
+      bigDivider,
+      "› ",
+      codexStatus,
+    ].join("\n");
+
+    const width = 70;
+    pane.parseStatusLines(width);
+    expect(pane.statusLines.map((l) => stripAnsi(l)).join("\n")).toContain("Context 42%");
+    expect(pane.statusLines.every((l) => stripAnsi(l).length <= width)).toBe(true);
+
+    const renderedLines = pane.render(width).map((l) => stripAnsi(l));
+    expect(renderedLines.join("\n")).toContain("transcript output above the input box");
+    // The status bar (chrome) is trimmed from the transcript render.
+    expect(renderedLines.join("\n")).not.toContain("Context 42%");
+    for (const line of renderedLines) {
+      expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+    }
   });
 });
 
@@ -5607,5 +5682,151 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
         expect(dlg.prompt).not.toContain("Manage roster:");
       }
     });
+  });
+});
+
+describe("pinned-width resize side-effects", () => {
+  // Recorded `tmux resize-window -t <target> -x <width>` calls and the current
+  // list-clients response, driven through the tmux-poller spawnCtx seam (the
+  // same context resizeTmuxWindow + hasAttachedClient use).
+  let resizes: { session: string; width: number }[] = [];
+  let clientsAttached = false;
+
+  function installMockRunner() {
+    tmuxPollerSpawnCtx.set((cmd: string[]) => {
+      if (cmd[1] === "resize-window") {
+        const tIdx = cmd.indexOf("-t");
+        const xIdx = cmd.indexOf("-x");
+        // tmuxSessionTarget wraps the name as "=<session>:" — unwrap it.
+        const target = (cmd[tIdx + 1] ?? "").replace(/^=/, "").replace(/:$/, "");
+        resizes.push({ session: target, width: Number(cmd[xIdx + 1]) });
+        return makeSpawnResult(0);
+      }
+      if (cmd[1] === "list-clients") {
+        return makeSpawnResult(0, clientsAttached ? "client-0\n" : "");
+      }
+      // has-session / capture-pane / anything else: succeed with empty output.
+      return makeSpawnResult(0);
+    });
+  }
+
+  beforeEach(() => {
+    resizes = [];
+    clientsAttached = false;
+    installMockRunner();
+  });
+
+  afterEach(() => {
+    tmuxPollerSpawnCtx.reset();
+  });
+
+  test("re-pin migration resizes every live agent + the system coordinator once, to 1000", async () => {
+    const dashboard = makeDashboard();
+    const agentA = makeAgent("agent-a", "/repos/test");
+    const agentB = makeAgent("agent-b", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agentA), makeFlatAgent(agentB)];
+
+    // Arm the one-time migration (boot path calls this) and fire the first update.
+    dashboard.requestTmuxRepin();
+    dashboard.onUpdate([agentA, agentB], flatList, []);
+    // Let any async resize()/hasAttachedClient() promises settle.
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Every live agent session + the system coordinator pinned to 1000.
+    expect(resizes.filter((r) => r.session === agentA.meta.tmux_session)).toEqual([
+      { session: agentA.meta.tmux_session!, width: 1000 },
+    ]);
+    expect(resizes.filter((r) => r.session === agentB.meta.tmux_session)).toEqual([
+      { session: agentB.meta.tmux_session!, width: 1000 },
+    ]);
+    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION)).toEqual([
+      { session: IB_COORDINATOR_SESSION, width: 1000 },
+    ]);
+    // Every recorded resize is the pin width — nothing follows a display pane.
+    expect(resizes.every((r) => r.width === 1000)).toBe(true);
+
+    // Idempotent: a SECOND update does NOT re-run the migration.
+    const before = resizes.length;
+    dashboard.onUpdate([agentA, agentB], flatList, []);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(resizes.length).toBe(before);
+  });
+
+  test("migration re-pins the system coordinator even when there are ZERO agents", async () => {
+    const dashboard = makeDashboard();
+    dashboard.requestTmuxRepin();
+    dashboard.onUpdate([], [], []); // empty flatList
+    await new Promise((r) => setTimeout(r, 0));
+    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION)).toEqual([
+      { session: IB_COORDINATOR_SESSION, width: 1000 },
+    ]);
+  });
+
+  test("coordinator detach transition re-pins the displayed coordinator once, to 1000", async () => {
+    const dashboard = makeDashboard();
+    // Make the system coordinator the displayed pane so checkCoordinatorClients
+    // considers IB_COORDINATOR_SESSION (onUpdate auto-selects it).
+    dashboard.onUpdate([], [makeFlatSystemCoordinator()], []);
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    // Ignore any resizes from selection wiring (there should be none — the pin
+    // means nothing follows the pane) so the assertions below measure only the
+    // detach transition.
+    resizes = [];
+
+    // Tick 1: a client is attached — record the attached state, no re-pin.
+    clientsAttached = true;
+    await dashboard.checkCoordinatorClients();
+    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION)).toEqual([]);
+
+    // Tick 2: the client detached — exactly one re-pin to 1000.
+    clientsAttached = false;
+    await dashboard.checkCoordinatorClients();
+    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION)).toEqual([
+      { session: IB_COORDINATOR_SESSION, width: 1000 },
+    ]);
+
+    // Tick 3: still detached — no duplicate re-pin (transition already consumed).
+    await dashboard.checkCoordinatorClients();
+    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION).length).toBe(1);
+  });
+
+  test("detach that happens WHILE the coordinator is off-screen still re-pins on return (state preserved across visibility)", async () => {
+    // The missed-detach scenario: attach observed while visible → navigate away
+    // (pane hidden, timer stops) → Ghostty detaches while away → navigate back.
+    // The last-observed attach state must survive the away period so the return
+    // check sees the attached→detached transition and re-pins. If _coordClient-
+    // Attached were dropped on hide, wasAttached would read false on return and
+    // the window would stay stuck at the Ghostty width forever.
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+
+    // Visible + attached: observe the attached state (no re-pin yet).
+    dashboard.onUpdate([], [makeFlatSystemCoordinator()], []);
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    clientsAttached = true;
+    await dashboard.checkCoordinatorClients();
+    resizes = [];
+
+    // Navigate AWAY (select a regular agent): the coordinator is no longer
+    // visible, so a check now computes no visible coordinator sessions and does
+    // not touch its preserved attach state.
+    dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(false);
+    // Ghostty detaches while we're away.
+    clientsAttached = false;
+    await dashboard.checkCoordinatorClients(); // no visible coord → no-op, state kept
+    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION)).toEqual([]);
+
+    // Navigate BACK to the coordinator, then run the check: the preserved
+    // wasAttached=true meets the now-detached live state → exactly one re-pin.
+    dashboard.onUpdate([], [makeFlatSystemCoordinator()], []);
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    await dashboard.checkCoordinatorClients();
+    // Exactly one re-pin total across return (immediate check + explicit tick are
+    // idempotent — the transition is consumed once).
+    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION)).toEqual([
+      { session: IB_COORDINATOR_SESSION, width: 1000 },
+    ]);
   });
 });

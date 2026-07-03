@@ -11,7 +11,9 @@ import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings } from "../health-check";
 import { readAgentLog, readAgentLogWindow, statAgentLogSize, readAgentPrompt, parseDenials, resolveAgentIcon } from "../agents";
 import { diffAgent, statusAgent } from "../ib-commands";
-import { wrapLines, WordWrapCache } from "./wrap";
+import { wrapLines, WordWrapCache, computeChromeSlice } from "./wrap";
+import type { ChromeSlice } from "./wrap";
+import { isCodexBackedCli, parseModel } from "../agent-cli";
 import { getStateColors } from "./color-scheme";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
 import { buildFocusSeparator } from "./focus";
@@ -158,6 +160,20 @@ export class RightPaneComponent implements Component {
    * memo keeps repeated renders between polls O(1).
    */
   private repoCoordinatorWrapCache = new WordWrapCache();
+  /**
+   * Memoized chrome slice of repoCoordinatorOutput (width-independent), mirroring
+   * TmuxPaneComponent.chromeSlice. Used when our input overlay is shown to trim
+   * the coordinator's own input box and surface its status bar below our input —
+   * matching the system coordinator's behavior. Keyed on raw identity.
+   */
+  private repoCoordinatorChromeCache: { raw: string; slice: ChromeSlice } | null = null;
+  /**
+   * Status lines (the coordinator's chrome below its input separator) surfaced
+   * when our input overlay is shown; the caller (renderRepoWithCoordinator)
+   * appends these below the input field, exactly like the system coordinator.
+   * Empty when the input overlay isn't shown.
+   */
+  repoCoordinatorStatusLines: string[] = [];
   /** Whether the per-repo coordinator poller has completed at least one poll */
   repoCoordinatorHasPolled = false;
   /** Height offset for the coordinator split in REPO mode (positive = more coordinator). Splits the full main area vertically between repo info and coordinator tmux. */
@@ -188,6 +204,34 @@ export class RightPaneComponent implements Component {
     this.repoCoordinatorHasPolled = false;
     this.repoCoordinatorScrollBack = 0;
     this.repoCoordinatorWrapCache.reset();
+    this.repoCoordinatorChromeCache = null;
+    this.repoCoordinatorStatusLines = [];
+  }
+
+  /**
+   * Split the per-repo coordinator capture into transcript + input-box chrome,
+   * detecting on the UNWRAPPED logical lines (see wrap.ts computeChromeSlice).
+   * Width-independent; memoized on raw identity. Mirrors
+   * TmuxPaneComponent.chromeSlice.
+   */
+  private repoCoordinatorChromeSlice(raw: string): ChromeSlice {
+    const cached = this.repoCoordinatorChromeCache;
+    if (cached && cached.raw === raw) return cached.slice;
+    const isCodex = this.isRepoCoordinatorCodex();
+    const slice = computeChromeSlice(raw, isCodex);
+    this.repoCoordinatorChromeCache = { raw, slice };
+    return slice;
+  }
+
+  /** Whether the per-repo coordinator agent is codex-backed (for chrome detection). */
+  private isRepoCoordinatorCodex(): boolean {
+    const agent = this.repoCoordinatorAgent;
+    if (!agent) return false;
+    try {
+      return isCodexBackedCli(parseModel(agent.meta.model).cli);
+    } catch {
+      return false;
+    }
   }
 
   invalidate(): void {}
@@ -389,7 +433,13 @@ export class RightPaneComponent implements Component {
    * (coordinator tmux) portion of that full-width view.
    * Returns lines for the coordinator portion.
    */
-  renderRepoCoordinatorSection(width: number, height: number, coordinatorFocused: boolean): string[] {
+  renderRepoCoordinatorSection(width: number, height: number, coordinatorFocused: boolean, trimChrome = false): string[] {
+    // When our input overlay is shown (trimChrome), trim the coordinator's own
+    // input box and surface its status bar below our input — same as the system
+    // coordinator. repoCoordinatorStatusLines is consumed by the caller
+    // (renderRepoWithCoordinator). Recompute every render so a stale value can't
+    // linger once the overlay is hidden.
+    this.repoCoordinatorStatusLines = [];
     const lines: string[] = [];
     // Separator
     lines.push(buildFocusSeparator("Coordinator", width, coordinatorFocused));
@@ -429,15 +479,23 @@ export class RightPaneComponent implements Component {
     }
 
     // Render coordinator tmux output (bottom-pinned, with optional scrollback).
-    // The poller now delivers -J logical lines; word-wrap them (same path as the
-    // center TmuxPaneComponent) so long lines break at spaces rather than
-    // mid-word, memoized on (raw, width) so re-renders between polls are O(1).
-    // WordWrapCache.get() hands back the SAME array it memoizes, so copy it
-    // before trimming — the trailing-blank pop() below must not mutate the
-    // cached array (a later render at the same width would then see a
-    // truncated buffer). The center TmuxPaneComponent copies via slice() for
-    // the same reason; keep both consumers non-mutating.
-    const wrapped = this.repoCoordinatorWrapCache.get(this.repoCoordinatorOutput!, width).slice();
+    // The poller delivers -J logical lines. When our input overlay is shown, wrap
+    // the chrome-SLICED transcript (coordinator input box trimmed on the logical
+    // lines first) and surface its status bar via repoCoordinatorStatusLines;
+    // otherwise wrap the full capture (over-width ─ separators/dividers collapse
+    // to one row in the wrap path either way). Word-wrap (same path as the center
+    // TmuxPaneComponent) breaks at spaces, memoized on (raw, width) so re-renders
+    // between polls are O(1). WordWrapCache.get() hands back the SAME array it
+    // memoizes, so copy it before trimming — the trailing-blank pop() below must
+    // not mutate the cached array. The center TmuxPaneComponent copies via
+    // slice() for the same reason; keep both consumers non-mutating.
+    let rawForWrap = this.repoCoordinatorOutput!;
+    if (trimChrome) {
+      const slice = this.repoCoordinatorChromeSlice(this.repoCoordinatorOutput!);
+      rawForWrap = slice.transcriptRaw;
+      this.repoCoordinatorStatusLines = slice.statusLines.map((line) => truncateToWidth(line, width, ""));
+    }
+    const wrapped = this.repoCoordinatorWrapCache.get(rawForWrap, width).slice();
     // Trim trailing blank lines (operates on the copy, not the cached array)
     while (wrapped.length > 0 && wrapped[wrapped.length - 1]!.trim() === "") {
       wrapped.pop();
@@ -558,16 +616,27 @@ export class RightPaneComponent implements Component {
     }
     while (lines.length < repoHeight) { lines.push(" "); }
 
-    // Bottom section: coordinator tmux output + optional input field
+    // Bottom section: coordinator tmux output + optional input field + status.
+    // When our input overlay is shown we trim the coordinator's own input box
+    // and surface its status bar below our input — mirroring the system
+    // coordinator (dashboard.ts). Pre-compute the status-line count up front so
+    // the coordinator content height leaves room for both our input field and
+    // the surfaced status lines (the chrome slice is memoized, so the section's
+    // recompute is a cache hit).
     if (coordinatorHeight > 0) {
       const showInputField = this.repoCoordinatorFocused && this.repoCoordinatorInputField?.active === true;
-      const inputFieldHeight = showInputField ? this.repoCoordinatorInputField!.getHeight(width) : 0;
+      const statusLineCount = showInputField && this.repoCoordinatorOutput
+        ? this.repoCoordinatorChromeSlice(this.repoCoordinatorOutput).statusLines.length
+        : 0;
+      const inputFieldHeight = showInputField
+        ? this.repoCoordinatorInputField!.getHeight(width) + statusLineCount
+        : 0;
       const coordContentHeight = coordinatorHeight - inputFieldHeight;
-      const coordLines = this.renderRepoCoordinatorSection(width, coordContentHeight, this.repoCoordinatorFocused);
+      const coordLines = this.renderRepoCoordinatorSection(width, coordContentHeight, this.repoCoordinatorFocused, showInputField);
       lines.push(...coordLines);
       if (showInputField) {
         const inputLines = this.repoCoordinatorInputField!.render(width);
-        lines.push(...inputLines);
+        lines.push(...inputLines, ...this.repoCoordinatorStatusLines);
       }
     }
 

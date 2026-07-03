@@ -5790,4 +5790,43 @@ describe("pinned-width resize side-effects", () => {
     await dashboard.checkCoordinatorClients();
     expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION).length).toBe(1);
   });
+
+  test("detach that happens WHILE the coordinator is off-screen still re-pins on return (state preserved across visibility)", async () => {
+    // The missed-detach scenario: attach observed while visible → navigate away
+    // (pane hidden, timer stops) → Ghostty detaches while away → navigate back.
+    // The last-observed attach state must survive the away period so the return
+    // check sees the attached→detached transition and re-pins. If _coordClient-
+    // Attached were dropped on hide, wasAttached would read false on return and
+    // the window would stay stuck at the Ghostty width forever.
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-a", "/repos/test");
+
+    // Visible + attached: observe the attached state (no re-pin yet).
+    dashboard.onUpdate([], [makeFlatSystemCoordinator()], []);
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    clientsAttached = true;
+    await dashboard.checkCoordinatorClients();
+    resizes = [];
+
+    // Navigate AWAY (select a regular agent): the coordinator is no longer
+    // visible, so a check now computes no visible coordinator sessions and does
+    // not touch its preserved attach state.
+    dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(false);
+    // Ghostty detaches while we're away.
+    clientsAttached = false;
+    await dashboard.checkCoordinatorClients(); // no visible coord → no-op, state kept
+    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION)).toEqual([]);
+
+    // Navigate BACK to the coordinator, then run the check: the preserved
+    // wasAttached=true meets the now-detached live state → exactly one re-pin.
+    dashboard.onUpdate([], [makeFlatSystemCoordinator()], []);
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    await dashboard.checkCoordinatorClients();
+    // Exactly one re-pin total across return (immediate check + explicit tick are
+    // idempotent — the transition is consumed once).
+    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION)).toEqual([
+      { session: IB_COORDINATOR_SESSION, width: 1000 },
+    ]);
+  });
 });

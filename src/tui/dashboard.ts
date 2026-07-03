@@ -1091,6 +1091,11 @@ export class DashboardComponent implements Component {
     }
     if (!this.coordClientCheckTimer) {
       this.coordClientCheckTimer = setInterval(() => this.checkCoordinatorClients(), 3000);
+      // Fire one check immediately when a coordinator pane becomes visible
+      // (mirrors checkClientAttached on agent re-selection). If the user
+      // navigated away, detached Ghostty, and came back, this re-pins on return
+      // instead of waiting up to 3s for the first interval tick.
+      void this.checkCoordinatorClients();
     }
   }
 
@@ -1108,11 +1113,17 @@ export class DashboardComponent implements Component {
     const repoCoordinatorVisible =
       this.rightPane.mode === "REPO" && this.rightPane.repoCoordinatorAgent != null;
     const sessions = this.visibleCoordinatorSessions(coordinatorVisible, repoCoordinatorVisible);
-    // Drop attach state for sessions no longer visible so a later re-display
-    // starts fresh (and can't fire a spurious detach transition).
-    for (const key of [...this._coordClientAttached.keys()]) {
-      if (!sessions.includes(key)) this._coordClientAttached.delete(key);
-    }
+    // Do NOT drop attach state for sessions that are momentarily not visible.
+    // The last-observed state must persist across visibility changes, exactly
+    // like the agent path (_clientAttached is never deleted on switch-away).
+    // Otherwise: open a coordinator in Ghostty (observed attached) → navigate
+    // away (delete + timer stop) → detach Ghostty while away → navigate back →
+    // wasAttached would read false and the attached→detached transition is never
+    // observed, leaving the window stuck at the Ghostty width forever (window-size
+    // latest persists after detach). Preserving the state means the next live
+    // check on return sees wasAttached=true, attached=false → one re-pin. The
+    // guard is safe: `attached` is from the LIVE check, so a still-attached
+    // session can't spuriously re-pin, and re-pin is idempotent.
     for (const session of sessions) {
       const attached = await hasAttachedClient(session);
       const wasAttached = this._coordClientAttached.get(session) ?? false;

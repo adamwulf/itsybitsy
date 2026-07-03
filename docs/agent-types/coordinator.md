@@ -58,7 +58,7 @@ You are in a git worktree, which shares the same repository as the main checkout
 | `ib status <id>` | Show agent's commits/changes |
 | `ib diff <id>` | Review agent's changes |
 | `ib merge <id>` | Merge agent's work and close it |
-| `ib kill <id>` | Stop an agent without merging |
+| `ib retire <id>` | Stop and archive an agent without merging |
 
 {{availableTypes}}
 

@@ -182,7 +182,7 @@ export async function processStopHook(
       return {
         state,
         action: "remind_children",
-        message: `You have ${childCount} unfinished sub-agent(s) that need attention: ${childList}. Before you can complete, you must merge or kill each sub-agent using 'ib merge <id>' or 'ib kill <id>'. Use 'ib list' to check their status, 'ib look <id>' to see their output, 'ib status <id>' for their commits, and 'ib diff <id>' to review their changes.`,
+        message: `You have ${childCount} unfinished sub-agent(s) that need attention: ${childList}. Before you can complete, you must merge or retire each sub-agent using 'ib merge <id>' or 'ib retire <id>'. Use 'ib list' to check their status, 'ib look <id>' to see their output, 'ib status <id>' for their commits, and 'ib diff <id>' to review their changes.`,
       };
     }
 
@@ -322,7 +322,7 @@ export interface HasActiveChildrenOpts {
  * Children in `waiting`, `complete`, or `stopped` do NOT count as active.
  * `waiting` is excluded to prevent transitive-waiting deadlocks where every
  * node in a chain is parked; `complete` is excluded because the user still
- * needs to merge/kill those children. `compacting` / `rate_limited` are
+ * needs to merge/retire those children. `compacting` / `rate_limited` are
  * transient tmux overrides — the stored `meta.state` is still `"running"`
  * for those, so they are counted as active without a per-child tmux call.
  *

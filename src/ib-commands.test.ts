@@ -18,7 +18,7 @@ import { matchAgentById } from "./index";
 import { saveRegistry } from "./registry";
 import { makeAgent as _makeAgent, makeSpawnResult } from "./test-utils";
 import {
-  killAgent,
+  retireAgent,
   nukeAgent,
   nukeAllAgents,
   resumeAgent,
@@ -823,7 +823,7 @@ function mockSpawnFnWithFailures(
   };
 }
 
-describe("killAgent (native)", () => {
+describe("retireAgent (native)", () => {
   let tempDir: string;
   let spawnCalls: string[][];
 
@@ -849,7 +849,7 @@ describe("killAgent (native)", () => {
     setKillPauseSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    const result = await killAgent(agent);
+    const result = await retireAgent(agent);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("not found");
@@ -873,7 +873,7 @@ describe("killAgent (native)", () => {
     setKillPauseSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    const result = await killAgent(agent);
+    const result = await retireAgent(agent);
 
     expect(result.ok).toBe(true);
     expect(result.stdout).toBe("Closed agent: agent-abc");
@@ -894,7 +894,7 @@ describe("killAgent (native)", () => {
     setKillPauseSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    await killAgent(agent);
+    await retireAgent(agent);
 
     // Agent directory should be removed after teardown
     const exists = await Bun.file(join(agentDir, "meta.json")).exists();
@@ -925,7 +925,7 @@ describe("killAgent (native)", () => {
     setKillPauseSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    await killAgent(agent);
+    await retireAgent(agent);
 
     // Questions for agent-abc should be removed, agent-xyz kept
     const updated = await Bun.file(questionsPath).json();
@@ -941,13 +941,13 @@ describe("killAgent (native)", () => {
     setKillPauseSpawnRunner(runner);
 
     const agent = makeAgent("agent-abc", tempDir);
-    const result = await killAgent(agent);
+    const result = await retireAgent(agent);
 
     expect(result.ok).toBe(true);
     expect(result.stdout).toBe("Closed agent: agent-abc");
   });
 
-  test("appends a [kill] line to the system watch log on success", async () => {
+  test("appends a [retire] line to the system watch log on success", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-loggy");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
@@ -967,12 +967,12 @@ describe("killAgent (native)", () => {
     setWatchLogPath(logPath);
     try {
       const agent = makeAgent("agent-loggy", tempDir);
-      const result = await killAgent(agent);
+      const result = await retireAgent(agent);
       expect(result.ok).toBe(true);
 
       const { readFile } = await import("fs/promises");
       const log = await readFile(logPath, "utf8");
-      expect(log).toContain("[kill]");
+      expect(log).toContain("[retire]");
       expect(log).toContain("agent-loggy");
       // makeAgent's default claude_pid is "12345"; assert the prefix so we
       // verify pid= is included without coupling to the helper's literal.
@@ -1270,7 +1270,7 @@ describe("nukeAgent (native)", () => {
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("worker agent");
-    expect(result.stderr).toContain("ib kill");
+    expect(result.stderr).toContain("ib retire");
   });
 
   test("tears down the agent and its descendants", async () => {
@@ -1756,7 +1756,7 @@ describe("resumeAgent (native)", () => {
     // (setsid absent, e.g. macOS) keeps the protection.
     expect(hupIdx).toBeLessThan(setsidGuardIdx);
 
-    // TERM and INT traps are unchanged — clean teardown on ib kill / pause still
+    // TERM and INT traps are unchanged — clean teardown on ib retire / pause still
     // forwards the signal to claude.
     expect(resumeScript).toMatch(/trap '[^']*kill \$CLAUDE_PID[^']*' TERM/);
     expect(resumeScript).toMatch(/trap '[^']*kill -INT \$CLAUDE_PID[^']*' INT/);
@@ -8981,7 +8981,7 @@ describe("respawnSelf (native)", () => {
 //
 // The durable op-guard refuses a conflicting long-running op (merge-check /
 // merge / restart) while one is in flight with a LIVE holder, and reclaims
-// when the holder is dead. kill/nuke/pause/reassign are the recovery path and
+// when the holder is dead. retire/nuke/pause/reassign are the recovery path and
 // must NOT be guarded. Uses the injectable isPidAliveCtx to stub liveness.
 
 describe("long-running-op guard", () => {
@@ -9294,9 +9294,9 @@ describe("long-running-op guard", () => {
     expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true);
   });
 
-  // ── kill / nuke bypass the guard ────────────────────────────────────────────
+  // ── retire / nuke bypass the guard ──────────────────────────────────────────
 
-  test("killAgent is NOT blocked by an in-flight op (live holder)", async () => {
+  test("retireAgent is NOT blocked by an in-flight op (live holder)", async () => {
     const agentDir = await makeBackedAgentDir("agent-kill");
     isPidAliveCtx.set(() => true); // op holder very much alive
     await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: 1 });
@@ -9311,9 +9311,9 @@ describe("long-running-op guard", () => {
     setKillPauseSpawnRunner(runner);
 
     const agent = makeAgent("agent-kill", tempDir);
-    const result = await killAgent(agent);
+    const result = await retireAgent(agent);
 
-    // Kill is the recovery path for a wedged op — it must succeed regardless.
+    // Retire is the recovery path for a wedged op — it must succeed regardless.
     expect(result.ok).toBe(true);
     expect(result.stdout).toBe("Closed agent: agent-kill");
     // Dir removed → marker gone for free.
@@ -9343,7 +9343,7 @@ describe("long-running-op guard", () => {
 });
 
 // ===========================================================================
-// Teardown leave-notices (SPEC §16.4.2 / §16.5). kill/merge fire a PER-AGENT
+// Teardown leave-notices (SPEC §16.4.2 / §16.5). retire/merge fire a PER-AGENT
 // `left the team` notice stamped to the departed id; ANY nuke fires ONE
 // COALESCED `N member(s) left @team` notice per team, system-sender. Both
 // snapshot SURVIVING members from the post-prune roster and are best-effort.
@@ -9454,9 +9454,9 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
     await rm(baseDir, { recursive: true, force: true });
   });
 
-  // --- killAgent -----------------------------------------------------------
+  // --- retireAgent ---------------------------------------------------------
 
-  test("killAgent fires a per-agent leave notice to survivors, stamped to the departed id", async () => {
+  test("retireAgent fires a per-agent leave notice to survivors, stamped to the departed id", async () => {
     const { createTeam, addMember, getTeam } = await import("./teams");
     const { readOutbox } = await import("./outbox");
     const { readChannel } = await import("./team-channel");
@@ -9467,7 +9467,7 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
     await addMember("backend", "agent-leaver");
     resetReadAgentMetaCache();
 
-    const res = await killAgent(agentOf("agent-leaver"));
+    const res = await retireAgent(agentOf("agent-leaver"));
     expect(res.ok).toBe(true);
 
     // The departed id is pruned from the roster.
@@ -9489,7 +9489,7 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
     expect(leaves[0]!.fromAgent).toBe("agent-leaver");
   });
 
-  test("killAgent of an agent in no team enqueues no leave notice", async () => {
+  test("retireAgent of an agent in no team enqueues no leave notice", async () => {
     const { createTeam, addMember } = await import("./teams");
     const { readOutbox } = await import("./outbox");
     // A team exists with only the survivor; the departing agent is NOT a member.
@@ -9499,21 +9499,21 @@ describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
     await addMember("backend", "agent-survivor");
     resetReadAgentMetaCache();
 
-    const res = await killAgent(agentOf("agent-loner"));
+    const res = await retireAgent(agentOf("agent-loner"));
     expect(res.ok).toBe(true);
 
     // No notice — the departing agent shared no team with the survivor.
     expect(await readOutbox(queueDirOf("agent-survivor"))).toEqual([]);
   });
 
-  test("killAgent of the LAST member sends no notice (empty-survivor carve-out)", async () => {
+  test("retireAgent of the LAST member sends no notice (empty-survivor carve-out)", async () => {
     const { createTeam, addMember, getTeam } = await import("./teams");
     await createTeam("solo", "", 1000);
     await plantDeparting("agent-last");
     await addMember("solo", "agent-last");
     resetReadAgentMetaCache();
 
-    const res = await killAgent(agentOf("agent-last"));
+    const res = await retireAgent(agentOf("agent-last"));
     expect(res.ok).toBe(true);
 
     // Roster emptied; team persists empty; nobody was notified (no recipients).

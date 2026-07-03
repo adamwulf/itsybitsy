@@ -84,7 +84,7 @@ When a manager spawns sub-agents, the manager's job is to **review and integrate
 
 - Work is correct → merge with `ib merge <id> --force`
 - Work has fixable issues → send feedback with `ib send <id> "..."` and let the agent fix it
-- Work is unsalvageable or no longer needed → kill with `ib kill <id> --force`
+- Work is unsalvageable or no longer needed → retire with `ib retire <id> --force`
 
 Trust the sub-agent's output, review it, and act accordingly. Never duplicate a sub-agent's work by re-implementing it directly.
 

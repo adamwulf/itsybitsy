@@ -6,7 +6,7 @@
  *   agent-tree.ts     — AgentTreeComponent + formatAgentRow
  *   color-scheme.ts   — terminal color scheme detection + getStateColors
  *   dialog-handler.ts — DialogState type + dialog input routing
- *   agent-actions.ts  — agent action handlers (kill, merge, send, etc.)
+ *   agent-actions.ts  — agent action handlers (retire, merge, send, etc.)
  *   pane-manager.ts   — RightPaneComponent + pane mode cycling + async loading
  */
 
@@ -399,7 +399,7 @@ class StatusBarComponent implements Component {
       row2Left = `${DIM}${timeStr}  @: jump    /: commands    a: new agent    ?: help    h: setup    A: add repo${fixHint}${RESET}`;
     } else {
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}    s: send    m: merge${errBadge}${RESET}`;
-      row2Left = `${DIM}${timeStr}  @: jump    /: commands    a: new agent    ?: help    h: setup    x: kill${RESET}`;
+      row2Left = `${DIM}${timeStr}  @: jump    /: commands    a: new agent    ?: help    h: setup    x: retire${RESET}`;
     }
 
     const row1 = this.composeLine(row1Left, claudeUsageStr, width);
@@ -1234,7 +1234,7 @@ export class DashboardComponent implements Component {
       { label: "QUESTIONS — show pending questions", action: () => this.jumpToMode("QUESTIONS") },
       { label: "send message — s", action: () => agentActions.handleSend(this) },
       { label: "merge agent — m", action: () => agentActions.handleMerge(this) },
-      { label: "kill agent — x", action: () => agentActions.handleKill(this) },
+      { label: "retire agent — x", action: () => agentActions.handleRetire(this) },
       { label: "force kill agent — !", action: () => agentActions.handleNuke(this) },
       { label: "resume agent — R", action: () => agentActions.handleResume(this) },
       { label: "pause agent — P", action: () => agentActions.handlePause(this) },
@@ -2355,9 +2355,9 @@ export class DashboardComponent implements Component {
       // §17.3 manage-team: when a team ANCHOR is the GLOBAL selection
       // (active source = teams), `x` opens the manage-team picker (disband or
       // remove a single member, each gated by a second confirm dialog). A
-      // team MEMBER selection (kind:"agent") falls through to the agent-kill
-      // path so killing a team member from the Teams tree behaves identically
-      // to killing from the Agents tree (child-agent-indistinguishable).
+      // team MEMBER selection (kind:"agent") falls through to the agent-retire
+      // path so retiring a team member from the Teams tree behaves identically
+      // to retiring from the Agents tree (child-agent-indistinguishable).
       // Phase 2 (§17.1) keys this off `activeSelectionSource` — the same
       // source of truth as syncSelectedAgent — so the effective selection
       // stays consistent.
@@ -2370,7 +2370,7 @@ export class DashboardComponent implements Component {
       } else if (!this.agentTree.selectedAgent && this.agentTree.selectedRepoHeader) {
         this.executeAndRefresh(() => agentActions.handleRemoveRepoSafe(this));
       } else {
-        agentActions.handleKill(this);
+        agentActions.handleRetire(this);
       }
     }
     else if (data === "!") { agentActions.handleNuke(this); }

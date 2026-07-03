@@ -210,11 +210,11 @@ describe("checkIbCommandAccess spawned_by", () => {
         repo_path: tmpDir,
       },
     });
-    const result = await checkIbCommandAccess("ib kill agent-target1", "agent-spawner1", agentsDir);
+    const result = await checkIbCommandAccess("ib retire agent-target1", "agent-spawner1", agentsDir);
     expect(result).toBeNull(); // allowed
   });
 
-  test("denies kill when caller is spawned_by.agent_id but repo_path doesn't match", async () => {
+  test("denies retire when caller is spawned_by.agent_id but repo_path doesn't match", async () => {
     await writeAgentMeta("agent-target2", {
       id: "agent-target2",
       manager: null,
@@ -223,12 +223,12 @@ describe("checkIbCommandAccess spawned_by", () => {
         repo_path: "/some/other/repo",
       },
     });
-    const result = await checkIbCommandAccess("ib kill agent-target2", "agent-spawner2", agentsDir);
+    const result = await checkIbCommandAccess("ib retire agent-target2", "agent-spawner2", agentsDir);
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");
   });
 
-  test("allows kill when caller is manager even with different spawned_by", async () => {
+  test("allows retire when caller is manager even with different spawned_by", async () => {
     await writeAgentMeta("agent-target3", {
       id: "agent-target3",
       manager: "agent-manager3",
@@ -237,7 +237,7 @@ describe("checkIbCommandAccess spawned_by", () => {
         repo_path: "/other/repo",
       },
     });
-    const result = await checkIbCommandAccess("ib kill agent-target3", "agent-manager3", agentsDir);
+    const result = await checkIbCommandAccess("ib retire agent-target3", "agent-manager3", agentsDir);
     expect(result).toBeNull(); // allowed via manager path
   });
 
@@ -276,7 +276,7 @@ describe("checkIbCommandAccess spawned_by", () => {
         repo_path: "/some/repo",
       },
     });
-    const result = await checkIbCommandAccess("ib kill agent-target6", "agent-intruder", agentsDir);
+    const result = await checkIbCommandAccess("ib retire agent-target6", "agent-intruder", agentsDir);
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");
   });
@@ -286,9 +286,9 @@ describe("checkIbCommandAccess spawned_by", () => {
   // hasAccess path must grant the actual coordinator (whose ID is the
   // basename and meta.agentType==="coordinator") and deny everyone else.
 
-  // We use `ib merge` for these tests instead of `ib kill` because the
+  // We use `ib merge` for these tests instead of `ib retire` because the
   // per-repo coordinator bypass (SPEC §12.2) lets any same-repo coordinator
-  // kill/reassign any non-coordinator agent — which would mask whether the
+  // retire/reassign any non-coordinator agent — which would mask whether the
   // @<repo-name> hasAccess branch is doing the work. `merge` exercises only
   // the manager/spawner paths.
 

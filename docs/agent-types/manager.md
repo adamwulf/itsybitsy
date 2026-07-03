@@ -46,7 +46,7 @@ You are in a git worktree, which shares the same repository as the main checkout
 | `ib status <id>` | Show agent's commits/changes |
 | `ib diff <id>` | Review agent's changes |
 | `ib merge <id>` | Merge agent's work and close it |
-| `ib kill <id>` | Stop an agent without merging |
+| `ib retire <id>` | Stop and archive an agent without merging |
 {{#if isTopLevel}}
 | `ib ask "question"` | Ask the user a question (top-level managers only) |
 {{/if}}
@@ -91,10 +91,10 @@ Your Task, Agent, and TaskCreate tool calls are **automatically intercepted** an
 4. **WHEN NOTIFIED** - Review against your criteria:
    - `ib look <id>` - what the agent reports
    - `ib status <id>` / `ib diff <id>` - verify actual changes
-   - Criteria met: `ib merge <id>` or `ib kill <id>` (if no changes needed)
+   - Criteria met: `ib merge <id>` or `ib retire <id>` (if no changes needed)
    - Criteria NOT met: `ib send <id> "feedback"`
    - If `stopped`: STOP and notify the user immediately
-5. **BEFORE COMPLETING**: Merge or kill ALL sub-agents (`ib list` to verify none remain)
+5. **BEFORE COMPLETING**: Merge or retire ALL sub-agents (`ib list` to verify none remain)
 
 ### Merging Worker Results
 

@@ -150,13 +150,13 @@ The legacy parseState priority order is documented here for reference:
    | 13 | Last 15 lines | "running stop hook" without ⏺ (race condition) | `creating` |
    | 14 | — | No patterns matched | `unknown` |
 
-### 1.4 Killing an Agent
+### 1.4 Retiring an Agent
 
-Kill (`ib kill <id>`) permanently destroys an agent:
+Retire (`ib retire <id>`) permanently destroys an agent (archival teardown):
 
 1. Remove the agent's questions from `user-questions.json`
 2. **Teardown sequence**:
-   a. Log "Agent killed" to `agent.log`
+   a. Log "Agent retired" to `agent.log`
    b. Capture tmux pane output to `output.log`
    c. Kill Claude process (SIGTERM → wait 2s → SIGKILL if still alive)
    d. Kill tmux session
@@ -206,8 +206,8 @@ Archive moves agent artifacts to `.ittybitty/archive/<YYYYMMDD-HHMMSS>-<agent-id
 Nuke (`ib nuke <id>`) recursively kills a manager and all its descendants:
 
 1. Collect all descendant agent IDs via depth-first traversal of manager relationships
-2. Worker agents with no descendants cannot be nuked (use `kill` instead) — but workers that have spawned sub-agents can be nuked
-3. For each descendant: remove questions, teardown (same sequence as kill)
+2. Worker agents with no descendants cannot be nuked (use `retire` instead) — but workers that have spawned sub-agents can be nuked
+3. For each descendant: remove questions, teardown (same sequence as retire)
 4. Clean up orphaned tmux sessions (sessions with `ittybitty-<repo-id>-` prefix that don't match any remaining agent in the same repository) [^callout]: The bash reference checks only sessions matching the current repo's prefix (`ittybitty-<repo-id>-`). The TypeScript `cleanupOrphanedTmuxSessions` checks all sessions starting with `ittybitty-`, which may clean up sessions from other repos. The agent ID extraction logic (stripping the prefix) still works correctly cross-repo.
 5. Scan and kill orphaned Claude processes
 
@@ -297,7 +297,7 @@ Agents with `canSpawnChildren: true` spawn sub-agents either explicitly with `ib
 
 When a top-level agent (no manager of its own) with `canSpawnChildren: true` signals completion, the stop hook checks for unfinished children. Both bash and TS determine "unfinished" by checking actual tmux state (creating, running, waiting, or complete — but NOT stopped/unknown).
 
-Specifically, it looks for children — agents in `.ittybitty/agents/` whose `meta.json` `manager` field matches the completing agent's ID. If any exist, the agent receives a nudge message listing them and instructing it to merge or kill each one before completing.
+Specifically, it looks for children — agents in `.ittybitty/agents/` whose `meta.json` `manager` field matches the completing agent's ID. If any exist, the agent receives a nudge message listing them and instructing it to merge or retire each one before completing.
 
 ### 2.6 Agent Type File Format
 
@@ -418,7 +418,7 @@ After successful merge:
 1. Capture tmux output to `output.log`
 2. Kill Claude process
 3. Kill tmux session
-4. Copy `settings.local.json` from worktree to agent dir [^callout: bash `do_merge` does NOT do this step — it only exists in `teardown_agent` (kill/nuke path). The TS `mergeAgent` added this to preserve hook/permission config in archives.]
+4. Copy `settings.local.json` from worktree to agent dir [^callout: bash `do_merge` does NOT do this step — it only exists in `teardown_agent` (retire/nuke path). The TS `mergeAgent` added this to preserve hook/permission config in archives.]
 5. Remove git worktree
 6. Delete git branch
 7. Archive artifacts
@@ -463,7 +463,7 @@ After successful merge:
 `ib ask "question"` allows top-level managers to ask the user questions. Both bash and TypeScript implement this command.
 
 1. **Auto-detect agent ID** from CWD if in an agent worktree (or specify `--id <agent-id>` explicitly)
-2. **Top-level check**: Only agents with no manager (or whose manager has been merged/killed) can ask. Others are told to use `ib send` to communicate with their manager.
+2. **Top-level check**: Only agents with no manager (or whose manager has been merged/retired) can ask. Others are told to use `ib send` to communicate with their manager.
 3. **Config check**: `allowAgentQuestions` must be `true` (default)
 4. **Question storage**: Stale questions from agents whose directories no longer exist are cleaned up. New questions are appended to `.ittybitty/user-questions.json`
 5. **Question ID format**: `q-<unix-epoch>-<6-char-hash>` where the hash is the first 6 hex characters of `md5("$AGENT_ID-$QUESTION\n")` (note: bash `echo` appends a trailing newline to the hash input)
@@ -521,8 +521,8 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
         start.sh                     # Tmux startup script
         exit-check.sh                # Post-session interactive check
         resume.sh                    # Resume startup script (created on resume)
-        settings.local.json          # Copied from worktree on kill/nuke; bash skips this during merge but TS copies it (see §3.5 callout)
-        output.log                   # Captured tmux output (on kill/merge)
+        settings.local.json          # Copied from worktree on retire/nuke; bash skips this during merge but TS copies it (see §3.5 callout)
+        output.log                   # Captured tmux output (on retire/merge)
         last-nudge                   # Unix timestamp of last nudge (stop hook debounce)
         nudge-recheck                # Marker file for delayed recheck scheduling
         watchdog.log                 # Watchdog process output
@@ -605,7 +605,7 @@ Each agent's worktree is linked to a git branch named `agent/<agent-id>`:
 - Sub-agents (any agent with `--manager`) branch from `agent/<manager-id>` regardless of worker/manager role
 - All branches are local (no remote tracking)
 - The worktree is at `.ittybitty/agents/<id>/repo`
-- On merge or kill, both the worktree and branch are removed
+- On merge or retire, both the worktree and branch are removed
 
 ### 5.4 Diff and Status — Parent Branch Resolution
 
@@ -636,11 +636,11 @@ itsybitsy hooks operate across three distinct execution contexts. Each context h
 | **Spawning agent** (`canSpawnChildren: true`) | `<repo>/.ittybitsy/agents/<id>/repo` | Agent's `settings.local.json` (5 hooks: path-check, stop, session-start, permission-denied, intercept-task) | Built per §2.3 with `_all.md` (always) + `_non_coordinator.md` (non-coordinators only) + type-defined permissions | CWD matches pattern AND agent type has `canSpawnChildren: true` |
 | **Leaf agent** (`canSpawnChildren: false`) | `<repo>/.ittybitty/agents/<id>/repo` | Agent's `settings.local.json` (4 hooks: path-check, stop, session-start, permission-denied — NO intercept-task) | Built per §2.3 with `_all.md` + `_non_coordinator.md` + type-defined permissions | CWD matches pattern AND agent type has `canSpawnChildren: false` |
 
-**Key distinction**: Primary Claude uses ONLY the global hooks from `~/.claude/settings.json` (§6.7). Per-agent hooks (§6.1–6.6) are installed ONLY in agent worktree `settings.local.json` files and must never leak into the user's repo-level `settings.local.json`. If agent hooks are left in a repo's `settings.local.json` after an agent is killed or merged, they will incorrectly restrict the user's direct Claude sessions in that repo.
+**Key distinction**: Primary Claude uses ONLY the global hooks from `~/.claude/settings.json` (§6.7). Per-agent hooks (§6.1–6.6) are installed ONLY in agent worktree `settings.local.json` files and must never leak into the user's repo-level `settings.local.json`. If agent hooks are left in a repo's `settings.local.json` after an agent is retired or merged, they will incorrectly restrict the user's direct Claude sessions in that repo.
 
-**Hook isolation invariant**: `ib kill`, `ib nuke`, and `ib merge` must ensure agent-specific hooks are cleaned from the repo's `settings.local.json` if they were ever written there. The intended flow is:
+**Hook isolation invariant**: `ib retire`, `ib nuke`, and `ib merge` must ensure agent-specific hooks are cleaned from the repo's `settings.local.json` if they were ever written there. The intended flow is:
 1. Agent creation writes hooks to `<agent-dir>/repo/.claude/settings.local.json` (inside the worktree)
-2. The worktree is removed on kill/merge/nuke
+2. The worktree is removed on retire/merge/nuke
 3. The repo's own `.claude/settings.local.json` is never modified by agent lifecycle operations
 
 **Detection pattern**: The `AGENT_CWD_PATTERN` regex (`/.ittybitty/agents/([^/]+)/repo(/|$)`) is used by all hooks to distinguish agent contexts from primary Claude. If CWD does not match this pattern, the session is treated as primary Claude and per-agent restrictions do not apply.
@@ -715,7 +715,7 @@ The stop hook does **not** parse tmux output for state detection. It relies sole
 | `running` | No background tasks | **Nudge** — debounced (5s), sends "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL'" via tmux |
 | `complete` | Uncommitted changes | **Remind commit** — sends message telling agent to commit |
 | `complete` | Has manager | **Notify manager** — sends "[hook]: Your subtask <id> just completed" to manager's tmux [^notify-mechanism] |
-| `complete` | No manager, unfinished children | **Remind children** — tells agent to merge/kill all sub-agents |
+| `complete` | No manager, unfinished children | **Remind children** — tells agent to merge/retire all sub-agents |
 | `complete` | No manager, no children | No action |
 | `waiting` | Has manager, background tasks active (`⏵⏵.*·\s\d+\s` in last 15 lines of tmux) | No action (agent is working via background tasks — see §8.5.1) |
 | `waiting` | Has manager, no background tasks, at least one direct child with `meta.state === "running"` OR `isRecentlyCreated(created_epoch)` | No action (child still working — see §8.5.1) |
@@ -1034,7 +1034,7 @@ In bash, `log_agent()` also echoes the message to stdout unless called with `--q
 
 ### 8.3 Orphan Detection and Cleanup
 
-After kills/nukes, the system scans for orphaned Claude processes:
+After retires/nukes, the system scans for orphaned Claude processes:
 
 1. Find all processes matching "claude" via `pgrep`
 2. For each, determine its CWD (macOS: `lsof -d cwd`, Linux: `/proc/<pid>/cwd`)
@@ -1053,7 +1053,7 @@ Reads Claude transcript JSONL files to determine context window usage percentage
 
 **State source**: The watchdog reads `state` from `meta.json` (written by the stop hook — see §1.3.1 and §6.2). It does **not** use tmux for primary state detection. For `rate_limited` and `compacting`, the watchdog checks tmux output for those specific patterns only (same minimal tmux parsing that state consumers use — see §1.3 step 3). The rate limit handler also uses tmux to verify dialog dismissal after sending Enter.
 
-**Exit conditions**: The watchdog exits when: (a) the agent's worktree directory is removed (`while [[ -d "$AGENT_DIR/repo" ]]`), which happens on kill/merge/nuke, or (b) in TS, the agent's tmux session has been missing for >10 consecutive seconds (grace period). Bash does **not** check tmux session existence, so it survives pause and must be exited by worktree removal only. On resume, a new watchdog is spawned (§1.6 step 7).
+**Exit conditions**: The watchdog exits when: (a) the agent's worktree directory is removed (`while [[ -d "$AGENT_DIR/repo" ]]`), which happens on retire/merge/nuke, or (b) in TS, the agent's tmux session has been missing for >10 consecutive seconds (grace period). Bash does **not** check tmux session existence, so it survives pause and must be exited by worktree removal only. On resume, a new watchdog is spawned (§1.6 step 7).
 
 Per-agent watchdogs do not use a watchdog lock file for state detection, and there is no global watchdog. (The watchdog does acquire the per-session **message-delivery** lock — `.outbox.lock` — while draining that agent's outbox; see below and §4.1.1. That lock is unrelated to state monitoring.)
 
@@ -1071,7 +1071,7 @@ Per-agent watchdogs do not use a watchdog lock file for state detection, and the
 | State | Action |
 |-------|--------|
 | `waiting` | Increment waiting counter unless (a) tmux shows background shells OR (b) the agent has at least one direct child with `meta.state === "running"` OR `isRecentlyCreated(created_epoch)` — in which case suppress BOTH `notifyManager` AND `notifySpawner` and pause the counter (neither increment nor reset; `notifyInterval` is preserved). Otherwise, when counter reaches the notification threshold, notify manager: "[watchdog]: Your subtask <id> recently started waiting for input". Uses exponential backoff: initial threshold 30s (6 polls), doubles after each notification, capped at 64 minutes. See §8.5.1. |
-| `complete` | Reset waiting counter and notification interval. The watchdog notifies the manager (or spawner) "[watchdog]: Your subtask <id> recently completed" as a **delayed fallback**: only after the agent has been continuously in `complete` state for `COMPLETE_FALLBACK_DELAY_TICKS` (30s; aliased to `INITIAL_NOTIFY_TICKS`). This is a safety-net for a missed or undelivered agent-status Stop-hook "just completed" — which fires immediately on completion (see the §8 Stop-hook "Actions by state" table / hooks) — rather than a duplicate of it. In the common case an active manager reacts to the hook's "just completed" (merge/kill/send) within that window, moving the child off `complete`, so the redundant watchdog notification never fires. A dedicated per-agent `completeCounter` times the delay (the waiting counter can't be reused — `complete` is not a backoff state, so that counter is reset every complete tick). The one-shot `completionNotified` flag then prevents duplicate notifications; both the flag and `completeCounter` reset if the agent returns to `running`, and `completeCounter` also resets on a fresh entry into `complete`. |
+| `complete` | Reset waiting counter and notification interval. The watchdog notifies the manager (or spawner) "[watchdog]: Your subtask <id> recently completed" as a **delayed fallback**: only after the agent has been continuously in `complete` state for `COMPLETE_FALLBACK_DELAY_TICKS` (30s; aliased to `INITIAL_NOTIFY_TICKS`). This is a safety-net for a missed or undelivered agent-status Stop-hook "just completed" — which fires immediately on completion (see the §8 Stop-hook "Actions by state" table / hooks) — rather than a duplicate of it. In the common case an active manager reacts to the hook's "just completed" (merge/retire/send) within that window, moving the child off `complete`, so the redundant watchdog notification never fires. A dedicated per-agent `completeCounter` times the delay (the waiting counter can't be reused — `complete` is not a backoff state, so that counter is reset every complete tick). The one-shot `completionNotified` flag then prevents duplicate notifications; both the flag and `completeCounter` reset if the agent returns to `running`, and `completeCounter` also resets on a fresh entry into `complete`. |
 | `rate_limited` | Attempt to bypass the rate limit dialog (3-attempt retry loop with 2s sleeps between attempts; checks tmux output for rate limit patterns after each Enter to verify dismissal). Then poll Claude's usage API; when session usage drops below 5%, send nudge: "[watchdog]: Usage has refreshed (<pct>%). Please continue your task." Reset waiting counter and notification interval. |
 | `running` | Reset waiting counter, notification interval, and `rateLimitBypassed` flag. Clear the completion flag (`completionNotified`) and the complete-state fallback counter (`completeCounter`) if previously set, so a later completion re-arms the 30s delay from scratch. |
 | `creating` | Treat as running — reset waiting counter, notification interval, and `rateLimitBypassed` flag. |
@@ -1094,7 +1094,7 @@ We suppress upward notification of a waiting agent when that agent has work in f
 1. **Direct background shell** — the agent's own tmux footer shows `⏵⏵.*·\s\d+\s` (e.g., `⏵⏵ accept edits on · 1 shell`), OR
 2. **Direct active child** — the agent has at least one immediate child (`meta.manager === parentId`) whose `meta.state === "running"` OR which is within the `isRecentlyCreated` grace period (i.e., still `creating`).
 
-"Transitive" suppression is bounded to this one-level walk. We do NOT recurse into grandchildren to determine a parent's suppression status; the `running`/`creating` check on direct children is sufficient because each layer's watchdog independently applies this guard. If a grandchild is running, the child-manager will have its own direct active child and suppress its own notification; that upward silence propagates naturally without the parent ever needing to look past its immediate children. Critically, `waiting` and `complete` children are **not** "work in flight" — the top of a parked chain must still be told, and `complete` children need user merge/kill.
+"Transitive" suppression is bounded to this one-level walk. We do NOT recurse into grandchildren to determine a parent's suppression status; the `running`/`creating` check on direct children is sufficient because each layer's watchdog independently applies this guard. If a grandchild is running, the child-manager will have its own direct active child and suppress its own notification; that upward silence propagates naturally without the parent ever needing to look past its immediate children. Critically, `waiting` and `complete` children are **not** "work in flight" — the top of a parked chain must still be told, and `complete` children need user merge/retire.
 
 ### 8.6 Root Repo Resolution
 
@@ -1400,7 +1400,7 @@ The system coordinator runs from `~/.itsybitsy/`, which is not initially a git r
 
 **Note**: Claude Code requires a project directory context to load `settings.local.json`. Since `~/.itsybitsy/` is not initially a git repo, the coordinator startup must run `git init` there (a standard repo, not `--bare`). This matches the existing settings pattern and is simpler than passing permissions via `--allowedTools` CLI flags.
 
-This ensures the system coordinator can only run `ib` commands (e.g., `ib list`, `ib send`, `ib merge`, `ib new-agent`, `ib kill`, `ib status`, `ib diff`) and use `ToolSearch` to discover available deferred tools. It cannot access files, browse the web, or spawn sub-agents directly.
+This ensures the system coordinator can only run `ib` commands (e.g., `ib list`, `ib send`, `ib merge`, `ib new-agent`, `ib retire`, `ib status`, `ib diff`) and use `ToolSearch` to discover available deferred tools. It cannot access files, browse the web, or spawn sub-agents directly.
 
 #### 12.1.4 Display
 
@@ -1492,7 +1492,7 @@ Users can customize the prompt by editing `~/.itsybitsy/agent-types/system.md`. 
 
 The default prompt content (from `docs/agent-types/system.md`):
 
-> You are the itsybitsy system coordinator. You manage agents across all registered repos using `ib` commands. You can list agents (`ib list`), send messages to agents (`ib send <agent-id> "message"`), merge (`ib merge`), kill (`ib kill`), create agents (`ib new-agent`), and check status (`ib status`, `ib diff`). You do NOT have access to Read, Write, Edit, or any file tools — only `ib` Bash commands. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators. To send messages to per-repo coordinators, use `ib send @<repo-name> "message"` (e.g., `ib send @itsybitsy "review the latest PR"`). Do NOT use `ib send @system` — that routes back to you.
+> You are the itsybitsy system coordinator. You manage agents across all registered repos using `ib` commands. You can list agents (`ib list`), send messages to agents (`ib send <agent-id> "message"`), merge (`ib merge`), retire (`ib retire`), create agents (`ib new-agent`), and check status (`ib status`, `ib diff`). You do NOT have access to Read, Write, Edit, or any file tools — only `ib` Bash commands. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators. To send messages to per-repo coordinators, use `ib send @<repo-name> "message"` (e.g., `ib send @itsybitsy "review the latest PR"`). Do NOT use `ib send @system` — that routes back to you.
 
 #### 12.1.6 Watchdog Behavior
 
@@ -1561,9 +1561,9 @@ Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, bu
 
 **Children**: Agents spawned by a per-repo coordinator (via `ib new-agent --type worker` from within the coordinator's session) will have `manager: "<repo-basename>"` in their meta.json (where `<repo-basename>` is the coordinator's agent ID). This means `buildAgentTree()` will correctly parent them under the coordinator, and `ib nuke <repo-basename>` will recursively kill them.
 
-**Killing/Archiving**: Per-repo coordinators follow the standard kill/archive flow (§1.4, §1.7). `ib kill <repo-basename>` kills only the coordinator itself (standard §1.4 behavior). To recursively kill a coordinator and all its children, use `ib nuke <repo-basename>` (§1.8). The `manager: "<repo-basename>"` field in children's meta.json links them to the coordinator for the nuke traversal.
+**Retiring/Archiving**: Per-repo coordinators follow the standard retire/archive flow (§1.4, §1.7). `ib retire <repo-basename>` retires only the coordinator itself (standard §1.4 behavior). To recursively tear down a coordinator and all its children, use `ib nuke <repo-basename>` (§1.8). The `manager: "<repo-basename>"` field in children's meta.json links them to the coordinator for the nuke traversal.
 
-**Expanded same-repo authority**: Per-repo coordinators may run `ib kill` and `ib reassign` on ANY non-coordinator agent within their own repo, regardless of the target's `manager` field. This is enforced in `checkIbCommandAccess` (src/hooks/agent-path.ts) by checking the caller's `coordinator: true` flag in its own meta.json before falling back to the standard manager/spawner check. Other manager-only operations (`nuke`, `merge`, `resume`, `pause`) still require the standard manager/spawner relationship. Cross-repo `kill`/`reassign` is not permitted — a coordinator in repo A cannot act on agents in repo B. Coordinators cannot kill or reassign other coordinators via this bypass (the target's `coordinator: true` flag disqualifies it from the bypass and falls through to the standard check).
+**Expanded same-repo authority**: Per-repo coordinators may run `ib retire` and `ib reassign` on ANY non-coordinator agent within their own repo, regardless of the target's `manager` field. This is enforced in `checkIbCommandAccess` (src/hooks/agent-path.ts) by checking the caller's `coordinator: true` flag in its own meta.json before falling back to the standard manager/spawner check. Other manager-only operations (`nuke`, `merge`, `resume`, `pause`) still require the standard manager/spawner relationship. Cross-repo `retire`/`reassign` is not permitted — a coordinator in repo A cannot act on agents in repo B. Coordinators cannot retire or reassign other coordinators via this bypass (the target's `coordinator: true` flag disqualifies it from the bypass and falls through to the standard check).
 
 **Resuming**: Standard resume flow (§1.6). Per-repo coordinators can be paused and resumed like any agent.
 
@@ -1628,7 +1628,7 @@ Per-repo coordinators use a custom session-start context (injected via the sessi
 - Bash rules (single-command enforcement)
 - Path isolation (worktree boundaries)
 - Git worktree context (branch name, parent branch)
-- Command table (`ib new-agent --type worker`, `ib list --manager`, `ib look`, `ib send`, `ib send @system "msg"`, `ib send @coordinator "msg"`, `ib status`, `ib diff`, `ib merge`, `ib kill`)
+- Command table (`ib new-agent --type worker`, `ib list --manager`, `ib look`, `ib send`, `ib send @system "msg"`, `ib send @coordinator "msg"`, `ib status`, `ib diff`, `ib merge`, `ib retire`)
 - State management (`WAITING` / `I HAVE COMPLETED THE GOAL`)
 - Workflow steps (understand codebase → break down tasks → spawn workers → monitor → merge → coordinate)
 - Agent state reference table
@@ -1675,11 +1675,11 @@ Resolution rules for bare agent IDs (no `@` prefix):
 4. **Global prefix match**: Search all repos for a unique prefix match
 5. **Error**: If no match found, or if prefix match is ambiguous (matches agents in multiple repos), print an error with the ambiguous matches
 
-Other commands (`ib kill`, `ib nuke`, `ib status`, `ib diff`, `ib merge`, etc.) continue to use standard agent ID resolution (bare IDs only) — `@`-based addressing is specific to `ib send`:
+Other commands (`ib retire`, `ib nuke`, `ib status`, `ib diff`, `ib merge`, etc.) continue to use standard agent ID resolution (bare IDs only) — `@`-based addressing is specific to `ib send`:
 
 | Command | Resolution | Notes |
 |---------|-----------|-------|
-| `ib kill itsybitsy` | Standard: exact match on agent ID | Kills per-repo coordinator |
+| `ib retire itsybitsy` | Standard: exact match on agent ID | Retires per-repo coordinator |
 | `ib nuke itsybitsy` | Standard: exact match on agent ID | Kills coordinator + children (§1.8) |
 | `ib status itsybitsy` | Standard: exact match on agent ID | Shows coordinator's commits |
 
@@ -1687,7 +1687,7 @@ The system coordinator has no agent ID and cannot be targeted by any standard CL
 
 **Reserved name `coordinator`**: The name `coordinator` is reserved and cannot be used as an agent ID. `newAgent()` rejects any attempt to create an agent with the ID `coordinator` — whether via `--name coordinator`, or because a repo's basename happens to be `coordinator` (in coordinator mode). This prevents confusion: if someone types `ib send coordinator` (without the `@`), they get "Agent not found" rather than silently messaging the wrong target. The old `ib send coordinator` special routing is removed — use `ib send @system` instead.
 
-**Prefix matching caveat**: If a repo is named `agent` and there's also an `agent-a1b2c3d4`, `ib send agent "msg"` is an exact match on the coordinator's ID (exact matches take priority over prefix). But `ib kill agent` also exact-matches the coordinator — there's no separate resolution for management commands vs messaging commands.
+**Prefix matching caveat**: If a repo is named `agent` and there's also an `agent-a1b2c3d4`, `ib send agent "msg"` is an exact match on the coordinator's ID (exact matches take priority over prefix). But `ib retire agent` also exact-matches the coordinator — there's no separate resolution for management commands vs messaging commands.
 
 #### 12.3.2 TUI Addressing
 
@@ -1926,9 +1926,9 @@ Each tmux session type uses a separately-tracked width. The three widths have we
 
 ### 14.1 Purpose
 
-itsybitsy manages complex configuration across multiple locations: global hooks in `~/.claude/settings.json`, per-repo base settings in `<repo>/.claude/settings.local.json`, per-agent settings in agent worktrees, and `meta.json` files for each agent. Configuration can become inconsistent through crashes, partial cleanup, or bugs in the kill/merge/nuke lifecycle. The health check detects these inconsistencies and surfaces them in the TUI so the user can fix them before they cause hard-to-diagnose failures.
+itsybitsy manages complex configuration across multiple locations: global hooks in `~/.claude/settings.json`, per-repo base settings in `<repo>/.claude/settings.local.json`, per-agent settings in agent worktrees, and `meta.json` files for each agent. Configuration can become inconsistent through crashes, partial cleanup, or bugs in the retire/merge/nuke lifecycle. The health check detects these inconsistencies and surfaces them in the TUI so the user can fix them before they cause hard-to-diagnose failures.
 
-**Motivating example**: An agent's `hook-check-path` hook was left in a repo's `.claude/settings.local.json` after the agent was killed. This caused the hook to fire in the user's direct Claude session, blocking all tool calls because the agent ID referenced a non-existent agent. The health check catches this class of issue proactively.
+**Motivating example**: An agent's `hook-check-path` hook was left in a repo's `.claude/settings.local.json` after the agent was retired. This caused the hook to fire in the user's direct Claude session, blocking all tool calls because the agent ID referenced a non-existent agent. The health check catches this class of issue proactively.
 
 ### 14.2 When Health Checks Run
 
@@ -1976,7 +1976,7 @@ Each check produces zero or more **warnings**. Warnings have a severity level an
 
 **What**: An agent directory exists in `.ittybitty/agents/<id>/` but has no corresponding tmux session AND no valid `meta.json`, or has a `meta.json` that references a tmux session that doesn't exist and the agent is older than 30 seconds (past the creating grace period).
 
-**Why it's a problem**: Orphaned directories consume the `maxAgents` count and clutter the agent tree. They may indicate a failed kill/nuke that left artifacts behind.
+**Why it's a problem**: Orphaned directories consume the `maxAgents` count and clutter the agent tree. They may indicate a failed retire/nuke that left artifacts behind.
 
 **Detection**: For each agent directory in `.ittybitty/agents/`:
 1. Check if `meta.json` exists and is valid JSON with required fields (`id`, `tmux_session`)
@@ -2281,7 +2281,7 @@ Remote Control does not change the system coordinator's permissions. The coordin
 
 - List agents (`ib list`)
 - Send messages to agents (`ib send`)
-- Merge/kill/create agents
+- Merge/retire/create agents
 - Check status and diffs
 
 The deny list (Read, Write, Edit, etc.) is enforced by Claude Code's `settings.local.json` regardless of whether input comes from tmux, the TUI, or a remote client. Remote Control is just another input surface — it does not bypass permission enforcement.
@@ -2467,29 +2467,29 @@ When an agent is added to a team (`ib team add`), the **existing** members each 
 
 #### 16.4.2 Leave Notice
 
-When a member leaves a team — whether via explicit `ib team remove`, single-agent teardown (`ib kill`/`ib merge`), or bulk teardown (any `ib nuke`) — the remaining members receive a leave notice. There are **two notice shapes**, chosen by *which command* drives the departure (§16.5), not by a runtime flag:
+When a member leaves a team — whether via explicit `ib team remove`, single-agent teardown (`ib retire`/`ib merge`), or bulk teardown (any `ib nuke`) — the remaining members receive a leave notice. There are **two notice shapes**, chosen by *which command* drives the departure (§16.5), not by a runtime flag:
 
-- **Per-agent leave notice** (`ib kill`, `ib merge`, `ib team remove`): `[sent by <agent-id> in @<team>]: left the team` (or system-phrased), with `fromAgent` stamped **explicitly** to the departed id (§16.5 sender-attribution rule — never cwd-auto-detected).
+- **Per-agent leave notice** (`ib retire`, `ib merge`, `ib team remove`): `[sent by <agent-id> in @<team>]: left the team` (or system-phrased), with `fromAgent` stamped **explicitly** to the departed id (§16.5 sender-attribution rule — never cwd-auto-detected).
 - **Coalesced leave notice** (any `ib nuke` — they all route through `nukeAgentList`): **one** notice per affected team summarizing all departures from that team, e.g. `3 members left @<team>` (and `1 member left @<team>` for a single-agent nuke), stamped as a **system send** (`@system` or the no-`fromAgent` user form), not any single departed id.
 
 **Why two shapes — notice-storm avoidance.** A bulk operation (`nukeAllAgents`, `ib nuke <manager>` over many descendants) would otherwise produce an O(N²) storm: N departures from a shared team firing N notices, each to up to N−1 recipients. `nukeAgentList` prevents this by **accumulating** the pruned `(team, id)` pairs (returned up from `archiveAgent`, §16.5) across its whole loop and emitting **one** coalesced notice per affected team afterward, to that team's *surviving* members only. If a team has no survivors (all members torn down), no notice is sent (empty recipient set, §16.5 empty-survivor carve-out). The rule that **bulk teardown must not emit per-agent notices is not optional**; because every `ib nuke` flows through `nukeAgentList`, this is automatic — `nukeAgentList` is *always* the coalesced path, even for a single-agent nuke. [^needs review] The exact coalesced-summary wording is open.
 
 ### 16.5 Lifecycle and Membership Pruning
 
-Membership is stored by agent ID, and agent IDs are **ephemeral** — they retire when an agent is merged, killed, or nuked (§1, §3). The roster must therefore be self-healing. The mechanism is two-tier: an **eager** prune at teardown (the primary path, fires the leave notice) and a **lazy** prune on read (a safety net for departures that skipped teardown).
+Membership is stored by agent ID, and agent IDs are **ephemeral** — they retire when an agent is merged, retired, or nuked (§1, §3). The roster must therefore be self-healing. The mechanism is two-tier: an **eager** prune at teardown (the primary path, fires the leave notice) and a **lazy** prune on read (a safety net for departures that skipped teardown).
 
-**Eager prune — the membership *write* and the notice *fan-out* live at two different layers, and the fan-out belongs in the `ib-commands.ts` *command* functions, not in `agent-lifecycle.ts`.** This is the subtle part. `archiveAgent` *and* `teardownAgent` (`agent-lifecycle.ts`) are **repo-local**: `archiveAgent` is pure filesystem archival, and `teardownAgent(repoPath, …)` takes a single `repoPath` and has no `listRepos()` / `RepoEntry` access. The notice fan-out needs the **cross-repo `repos` list** (a team's surviving members may live in other repos), which is only reachable from the **`ib-commands.ts` command layer** (`killAgent`, `mergeAgent`, `nukeAgentList`) — these can reach `listRepos()` (it is already imported in `ib-commands.ts`; these three functions don't call it *today* but trivially can). So:
+**Eager prune — the membership *write* and the notice *fan-out* live at two different layers, and the fan-out belongs in the `ib-commands.ts` *command* functions, not in `agent-lifecycle.ts`.** This is the subtle part. `archiveAgent` *and* `teardownAgent` (`agent-lifecycle.ts`) are **repo-local**: `archiveAgent` is pure filesystem archival, and `teardownAgent(repoPath, …)` takes a single `repoPath` and has no `listRepos()` / `RepoEntry` access. The notice fan-out needs the **cross-repo `repos` list** (a team's surviving members may live in other repos), which is only reachable from the **`ib-commands.ts` command layer** (`retireAgent`, `mergeAgent`, `nukeAgentList`) — these can reach `listRepos()` (it is already imported in `ib-commands.ts`; these three functions don't call it *today* but trivially can). So:
 
 - **Membership write → in `archiveAgent` (per agent, unconditional, no notice).** `archiveAgent` removes this agent's id from every team it belongs to, under the `.teams.lock` (§16.2), beside the existing `deleteAgentOutbox()` call. It emits **no** notice and needs no `repos` data — pruning by agent id only reads/writes `teams.json`. It **also reports the set of `(team, removed-agent-id)` pairs** it pruned: `archiveAgent` currently returns `string | null` (the archive folder path), so this is a **return-type widening** (e.g. to an object/tuple carrying both the existing archive path and the pruned pairs), **not** a replacement — existing callers that read the archive path must keep working. `teardownAgent` **threads the pruned pairs up** to its caller (its `boolean` return likewise widens to carry them).
 - **Notice fan-out → in the `ib-commands.ts` command function that drove the teardown**, after `teardownAgent`/`archiveAgent` return the pruned pairs. Each command has `listRepos()` and knows whether it tore down one agent or many:
-  - **`killAgent`** (`ib kill`) — calls `teardownAgent` directly for exactly one agent → fans out **one per-agent leave notice** per affected team, `fromAgent: <departed-id>`.
+  - **`retireAgent`** (`ib retire`) — calls `teardownAgent` directly for exactly one agent → fans out **one per-agent leave notice** per affected team, `fromAgent: <departed-id>`.
   - **`mergeAgent`** (`ib merge`) — calls `archiveAgent` directly (it does **not** go through `teardownAgent`) for exactly one agent → fans out **one per-agent leave notice** per affected team, `fromAgent: <departed-id>`. (This path must be specified separately precisely because it bypasses `teardownAgent`.)
   - **`nukeAgentList`** (`ib nuke` and `nukeAllAgents`) — **always the coalesced path.** `ib nuke <id>` (even a single leaf), `ib nuke <manager>` (manager + descendants via `getDescendantsRecursive`), and `nukeAllAgents` ALL flow through `nukeAgentList`, which cannot distinguish a 1-agent nuke from an N-agent nuke. It therefore **accumulates** the pruned pairs across its whole loop and emits **one coalesced notice per affected team** afterward — even for a single-agent nuke (which simply yields a `1 member left @<team>` coalesced notice). It never emits a per-agent `fromAgent: <departed-id>` notice.
-- **Sender attribution — stamp explicitly, do not auto-detect.** A **per-agent** leave notice (kill, merge) MUST set `fromAgent` explicitly to the **departed agent's id** (the explicit-sender path, like `--from` in §4.1; `resolveSenderId` cwd auto-detection is unusable — the departed worktree is gone and the emitter is the teardown process). A **coalesced** notice (any nuke) is stamped as a system send (the `@system` sentinel, or the no-`fromAgent` user form, §4.1), not any one departed id, and its body names the count, e.g. `3 members left @<team>`.
+- **Sender attribution — stamp explicitly, do not auto-detect.** A **per-agent** leave notice (retire, merge) MUST set `fromAgent` explicitly to the **departed agent's id** (the explicit-sender path, like `--from` in §4.1; `resolveSenderId` cwd auto-detection is unusable — the departed worktree is gone and the emitter is the teardown process). A **coalesced** notice (any nuke) is stamped as a system send (the `@system` sentinel, or the no-`fromAgent` user form, §4.1), not any one departed id, and its body names the count, e.g. `3 members left @<team>`.
 
 | Departure path | Membership prune (`archiveAgent`) | Notice (emitting `ib-commands.ts` function) |
 |---|---|---|
-| `ib kill` (one agent) | prune + return pruned pairs (via `teardownAgent`) | `killAgent` → one per-agent leave notice, `fromAgent: <departed-id>` |
+| `ib retire` (one agent) | prune + return pruned pairs (via `teardownAgent`) | `retireAgent` → one per-agent leave notice, `fromAgent: <departed-id>` |
 | `ib merge` (one agent) | prune + return pruned pairs (`archiveAgent` direct — no `teardownAgent`) | `mergeAgent` → one per-agent leave notice, `fromAgent: <departed-id>` |
 | `ib nuke <id>` (single leaf) | prune + return pairs (via `nukeAgentList`→`teardownAgent`) | `nukeAgentList` → **coalesced** per-team notice (`1 member left`), system sender |
 | `ib nuke <manager>` (manager **+ descendants** via `getDescendantsRecursive`) | prune + return pairs per agent | `nukeAgentList` accumulates → **one coalesced** per-team notice, system sender |
@@ -2505,7 +2505,7 @@ Membership is stored by agent ID, and agent IDs are **ephemeral** — they retir
 
 **Pruning never errors a send:** a fan-out that encounters dead members prunes them (under the lock, §16.2) and delivers to the rest.
 
-**The watchdog has no team role.** [^callout] An earlier draft claimed the watchdog fans out leave notices "via the same `@`-sentinel notify path." That is **incorrect** and has been removed: the watchdog never tears down agents — it only *notifies* a manager/spawner that an agent finished (`notifyManager`/`notifySpawner` in `watchdog.ts`), and the actual teardown is performed later by whoever runs `ib merge`/`ib kill`, which routes through `archiveAgent` (where the eager prune lives). Moreover `notifySpawner` is a single-destination switch, not a reusable N-recipient fan-out primitive. Team leave-notices therefore belong entirely to the `archiveAgent`/CLI path, and the watchdog requires **no** team-specific changes.
+**The watchdog has no team role.** [^callout] An earlier draft claimed the watchdog fans out leave notices "via the same `@`-sentinel notify path." That is **incorrect** and has been removed: the watchdog never tears down agents — it only *notifies* a manager/spawner that an agent finished (`notifyManager`/`notifySpawner` in `watchdog.ts`), and the actual teardown is performed later by whoever runs `ib merge`/`ib retire`, which routes through `archiveAgent` (where the eager prune lives). Moreover `notifySpawner` is a single-destination switch, not a reusable N-recipient fan-out primitive. Team leave-notices therefore belong entirely to the `archiveAgent`/CLI path, and the watchdog requires **no** team-specific changes.
 
 ### 16.6 Session-Start Awareness (Hook Integration)
 
@@ -2535,7 +2535,7 @@ Per the project's required review checklist, teams touch each perspective as fol
 |--------|---------------|
 | `src/teams.ts` (new) | Registry read/write (`~/.itsybitsy/teams.json`) with **`.teams.lock`** read-modify-write serialization (§16.2, mirrors `acquireOutboxLock`), roster, name allowlist validation (§16.1, mirrors `validation.ts`), collision check (reserved-set **union** of `SYSTEM_AGENT_ID` + literal `coordinator` + `BARE_RENDERED_SENTINELS` members, plus repo basename **and nickname**, all **case-SENSITIVE** `===` to match the resolver), name normalization (strip leading `@`), eager + lazy prune helpers. |
 | `src/index.ts` (`resolveTarget` + `ib send` call site) | **Add a team branch** to the send-target resolver, ordered `@system` → `@coordinator`/`@<repo>` → team, reached **before** the unknown-`@name` hard-error; return a shape that expresses multiple recipients (or route team sends down a dedicated per-member `sendMessage` loop). **Also bypass the call-site `if (!resolvedAgent) process.exit(1)` single-recipient guard for team targets** — a known team with an empty recipient set is success, not exit-1 (§16.4 item 3). This is the change that makes `ib send @<team>` actually fan out — it does **not** work for free. |
-| `src/ib-commands.ts` | Team-send fan-out (per-member `sendMessage`, excluding sender, empty-set → "no recipients in @<team>" success). `deliverMessage` prefix extension (`in @<team>`, drains the new `team` field at §4.1.1's drain-time). New commands: `teamCreate`, `teamAdd`, `teamRemove`, `teamList`, `teamDelete`, `roster` (nonexistent-team errors per §16.3). **Leave-notice fan-out lives here (this layer has `listRepos()`):** `killAgent` and `mergeAgent` each emit a per-agent leave notice with **explicit `fromAgent: <departed-id>`** after their teardown returns the pruned pairs; `nukeAgentList` accumulates pairs across its loop and emits the **coalesced** per-team notice (system sender). Plus join-notice + `ib team remove` per-agent leave-notice (persist-then-notify, §16.4.1/.2). |
+| `src/ib-commands.ts` | Team-send fan-out (per-member `sendMessage`, excluding sender, empty-set → "no recipients in @<team>" success). `deliverMessage` prefix extension (`in @<team>`, drains the new `team` field at §4.1.1's drain-time). New commands: `teamCreate`, `teamAdd`, `teamRemove`, `teamList`, `teamDelete`, `roster` (nonexistent-team errors per §16.3). **Leave-notice fan-out lives here (this layer has `listRepos()`):** `retireAgent` and `mergeAgent` each emit a per-agent leave notice with **explicit `fromAgent: <departed-id>`** after their teardown returns the pruned pairs; `nukeAgentList` accumulates pairs across its loop and emits the **coalesced** per-team notice (system sender). Plus join-notice + `ib team remove` per-agent leave-notice (persist-then-notify, §16.4.1/.2). |
 | `src/outbox.ts` | `OutboxMessage` gains optional `team` field — **and BOTH field-by-field reconstruction sites must carry it through**: `enqueueOutbox` (drops `team` at WRITE time) AND `readOutbox` + its line type-guard (drops `team` at READ time). Each rebuilds an explicit `{id, message, fromAgent, raw, enqueuedAtMs}` literal rather than spreading, so a new field is silently lost at *both* ends unless both are patched (§16.4 trap). Add a regression test that enqueues a team message and asserts `team` survives the full enqueue→read round-trip. |
 | `src/agent-lifecycle.ts` | **`archiveAgent`** prunes the torn-down agent from all teams (under `.teams.lock`), beside `deleteAgentOutbox` — and **widens its return** (currently `string \| null`, the archive path) to ALSO carry the pruned `(team, removed-id)` pairs (widen, don't replace — existing archive-path callers must keep working); it emits NO notice and needs no `repos` data (it lacks it). **`teardownAgent`** likewise widens its `boolean` return to **thread the pruned pairs up** to its `ib-commands.ts` caller; it does NOT emit notices (it has only a single `repoPath`, no `listRepos()`). No `suppressLeaveNotice` flag — single-vs-bulk is decided by *which command* fans out (see `ib-commands.ts` row), not by a lifecycle-layer parameter. `ib pause` does NOT prune. |
 | `src/hooks/session-start.ts` | Inject team-awareness block — **net-new dynamic code** in `generateInstructions` (not a static-template edit), scanning `teams.json` for the agent's ID; imperative reply rule naming `ib send @<team>` (§16.6). |

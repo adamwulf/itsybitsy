@@ -151,9 +151,9 @@ renders via the separate `CoordinatorState` union (`src/coordinator.ts:575`), wh
 won't paint a special color on the coordinator row). Call this out so it's a conscious cut, not
 an oversight.
 
-**kill/nuke bypass the guard (must-state):** `killAgent`/`nukeAgent` are the recovery path for
+**retire/nuke bypass the guard (must-state):** `retireAgent`/`nukeAgent` are the recovery path for
 a wedged op — they must NOT acquire or be blocked by the op-guard. A stuck merge is exactly when
-the user needs to kill. They already remove the agent dir, which clears any marker for free.
+the user needs to retire. They already remove the agent dir, which clears any marker for free.
 `pauseAgent` and `reassignAgent` stay unguarded too (out of scope — pause already kills the
 process; reassign only touches the meta.json manager field and doesn't race the slow git ops).
 Do not expand the guarded set beyond merge-check / merge / restart.
@@ -282,7 +282,7 @@ finishing, in case a new render site has been added since this plan was written.
 - `src/ib-commands.ts` — `acquireAgentOperation` shared preflight (imports `isPidAliveCtx` from
   agents.ts); wire into `mergeCheckAgent`, `mergeAgent`, and **the very top of `resumeAgent`
   above the coordinator early-return at line 399**, each with one try/finally wrapping the whole
-  body. Do NOT touch `killAgent`/`nukeAgent`/`pauseAgent`/`reassignAgent` (unguarded by design).
+  body. Do NOT touch `retireAgent`/`nukeAgent`/`pauseAgent`/`reassignAgent` (unguarded by design).
 - `src/parse-state.ts` — extend `AgentState` union (`merging`, `restarting`, `op_stuck`).
 - `src/watchdog.ts` — route the transient write at line 1030-1038 through `updateAgentTransient`
   so it preserves an existing `operation` field (read-merge, not fresh-literal-omit).
@@ -317,9 +317,9 @@ is removed outright when the agent dir is killed/nuked. Optionally `ib state` co
 stuck op for visibility, but that is a nice-to-have, not required for this change.
 
 **Recovery from a stuck op (Reviewer A):** the user-visible answer to "what do I DO about an
-`op_stuck` agent" is **kill or nuke it** — those bypass the guard (§2) and remove the dir, which
+`op_stuck` agent" is **retire or nuke it** — those bypass the guard (§2) and remove the dir, which
 clears the marker. A dedicated "force-clear op" keybind is gold-plating and out of scope; the
-kill/nuke escape hatch is sufficient and mostly already works. The plan must verify kill/nuke
+retire/nuke escape hatch is sufficient and mostly already works. The plan must verify retire/nuke
 are not themselves blocked by the guard.
 
 ## Testing
@@ -333,7 +333,7 @@ are not themselves blocked by the guard.
 - **Clear on success & failure:** op marker is gone after a successful merge (dir removed) and
   after a *failed* merge (op cleared via `finally`, agent still present). `clearAgentOperation`
   on a removed dir does not throw (ENOENT swallowed).
-- **kill/nuke bypass:** `killAgent`/`nukeAgent` succeed on an agent with an `operation` marker
+- **retire/nuke bypass:** `retireAgent`/`nukeAgent` succeed on an agent with an `operation` marker
   set (live or dead holder) — they are not refused by the guard.
 - **Stuck detection — ordering regression guard (the showstopper):** `detectAgentStates`
   returns `op_stuck` (not `stopped`) when `operation` is set with a **dead `claude_pid`** — this
@@ -372,7 +372,7 @@ are not themselves blocked by the guard.
   Testing note. — §4 + Testing.
 - **Coordinator gap (both):** guard pinned above the `resetCoordinator` early-return; coordinator
   row stuck-rendering explicitly out of scope (separate `CoordinatorState` union). — §2.
-- **kill/nuke bypass (Reviewer A):** stated explicitly as the recovery path; guarded set held to
+- **retire/nuke bypass (Reviewer A):** stated explicitly as the recovery path; guarded set held to
   merge-check / merge / restart. — §2 + Cross-cutting.
 - **`ib state --cleanup` (Reviewer A):** op-holder PID ruled out of the cleanup kill set; no new
   cleanup machinery needed. — Cross-cutting.

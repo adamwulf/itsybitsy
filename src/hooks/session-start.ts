@@ -425,7 +425,7 @@ Always spawn **manager** agents (not \`--type worker\`). Managers assess the tas
 | \`ib status <id>\` | Show commits/changes |
 | \`ib diff <id>\` | Review agent's changes |
 | \`ib merge <id> --force\` | Merge and close agent (\`--force\` skips confirmation) |
-| \`ib kill <id> --force\` | Close without merging (\`--force\` skips confirmation) |
+| \`ib retire <id> --force\` | Stop and archive without merging (\`--force\` skips confirmation) |
 | \`ib resume <id>\` | Restart stopped agent |
 | \`ib questions\` | Check agent questions |
 | \`ib acknowledge <qid>\` | Mark question handled |
@@ -448,7 +448,7 @@ ${SEND_LITERAL_STRINGS_SECTION}
 | \`rate_limited\` | Hit API rate limits |
 | \`merging\` | Being merged or merge-checked (a long-running op is in flight) |
 | \`restarting\` | Being restarted/resumed |
-| \`op_stuck\` | A long-running op (merge/restart) appears stuck; may need kill/nuke |
+| \`op_stuck\` | A long-running op (merge/restart) appears stuck; may need retire/nuke |
 | \`stopped\` | Session ended |
 | \`unknown\` | State unclear |
 
@@ -541,7 +541,7 @@ You are in a git worktree, which shares the same repository as the main checkout
 | \`ib status <id>\` | Show agent's commits/changes |
 | \`ib diff <id>\` | Review agent's changes |
 | \`ib merge <id>\` | Merge agent's work and close it |
-| \`ib kill <id>\` | Stop an agent without merging |
+| \`ib retire <id>\` | Stop and archive an agent without merging |
 ${askLine}
 
 ${SEND_LITERAL_STRINGS_SECTION}
@@ -570,10 +570,10 @@ Your Task, Agent, and TaskCreate tool calls are **automatically intercepted** an
 4. **WHEN NOTIFIED** - Review against your criteria:
    - \`ib look <id>\` - what the agent reports
    - \`ib status <id>\` / \`ib diff <id>\` - verify actual changes
-   - Criteria met: \`ib merge <id>\` or \`ib kill <id>\` (if no changes needed)
+   - Criteria met: \`ib merge <id>\` or \`ib retire <id>\` (if no changes needed)
    - Criteria NOT met: \`ib send <id> "feedback"\`
    - If \`stopped\`: STOP and notify the user immediately
-5. **BEFORE COMPLETING**: Merge or kill ALL sub-agents (\`ib list\` to verify none remain)
+5. **BEFORE COMPLETING**: Merge or retire ALL sub-agents (\`ib list\` to verify none remain)
 
 ### Merging Worker Results
 
@@ -596,7 +596,7 @@ ${askSection}
 | \`rate_limited\` | Hit API rate limits |
 | \`merging\` | Being merged or merge-checked (a long-running op is in flight) |
 | \`restarting\` | Being restarted/resumed |
-| \`op_stuck\` | A long-running op (merge/restart) appears stuck; may need kill/nuke |
+| \`op_stuck\` | A long-running op (merge/restart) appears stuck; may need retire/nuke |
 | \`stopped\` | Session ended |
 | \`unknown\` | State unclear |
 
@@ -674,7 +674,7 @@ To wait, just emit \`WAITING\` and stop — don't \`sleep\`, run \`Monitor\`, or
 2. Verify your work with \`ib diff\` and \`ib status\`
 3. Write a summary of what you accomplished
 4. Say "I HAVE COMPLETED THE GOAL" as the final line
-5. Wait for your manager to merge or kill your session
+5. Wait for your manager to merge or retire your session
 
 </ittybitty>`;
 }
@@ -712,7 +712,7 @@ ${buildPathIsolationSection(ctx)}
 | \`ib status <id>\` | Show agent's commits/changes |
 | \`ib diff <id>\` | Review agent's changes |
 | \`ib merge <id>\` | Merge agent's work and close it |
-| \`ib kill <id>\` | Stop an agent without merging |
+| \`ib retire <id>\` | Stop and archive an agent without merging |
 
 ${SEND_LITERAL_STRINGS_SECTION}
 
@@ -747,7 +747,7 @@ To wait for a sub-agent, just emit \`WAITING\` and stop — don't \`sleep\`, run
 | \`rate_limited\` | Hit API rate limits |
 | \`merging\` | Being merged or merge-checked (a long-running op is in flight) |
 | \`restarting\` | Being restarted/resumed |
-| \`op_stuck\` | A long-running op (merge/restart) appears stuck; may need kill/nuke |
+| \`op_stuck\` | A long-running op (merge/restart) appears stuck; may need retire/nuke |
 | \`stopped\` | Session ended |
 
 </ittybitty>`;

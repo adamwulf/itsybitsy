@@ -539,9 +539,10 @@ const COMMAND_HELP: Record<string, string> = {
     "  Set, clear, or show an agent's nickname. With no third arg, prints the\n" +
     "  current nickname.\n" +
     "  --clear         Remove the existing nickname",
-  kill:
-    "Usage: ib kill <agent-id> [--force]\n" +
-    "  Stop an agent without archiving its worktree.\n" +
+  retire:
+    "Usage: ib retire <agent-id> [--force]\n" +
+    "  Retire an agent: stop it and archive its directory. Removes the tmux\n" +
+    "  session and git worktree.\n" +
     "  --force         Skip confirmation prompts",
   nuke:
     "Usage: ib nuke <agent-id>\n" +
@@ -835,7 +836,7 @@ function printUsage(): void {
   console.log("");
   console.log("Agent Lifecycle:");
   console.log("  new-agent, new      Spawn a new agent");
-  console.log("  kill <id>           Stop an agent without merging");
+  console.log("  retire <id>         Stop and archive an agent without merging");
   console.log("  nuke <id>           Kill and archive an agent");
   console.log("  merge <id>          Merge agent's work and close it");
   console.log("  merge-check <id>    Check if agent is ready to merge");
@@ -1758,15 +1759,15 @@ async function main() {
       await printAndExit(await renameAgent(agent, clear ? null : nickname!));  // null = clear
       break;
     }
-    case "kill": {
+    case "retire": {
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
       const extraArgs = args.slice(2).filter((a) => a !== "--force");
       if (extraArgs.length > 0) {
         console.error(`Warning: unknown arguments ignored: ${extraArgs.join(" ")}`);
       }
-      const { killAgent } = await import("./ib-commands");
-      await printAndExit(await killAgent(agent));
+      const { retireAgent } = await import("./ib-commands");
+      await printAndExit(await retireAgent(agent));
       break;
     }
     case "nuke": {

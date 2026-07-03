@@ -196,7 +196,7 @@ type AcquireOpResult = { ok: true } | { ok: false; stderr: string };
  * can paint `op_stuck`. Uses the injectable isPidAliveCtx/nowMsCtx so tests can
  * stub liveness and time.
  *
- * kill/nuke/pause/reassign deliberately do NOT call this — they are the
+ * retire/nuke/pause/reassign deliberately do NOT call this — they are the
  * recovery path for a wedged op and must never be blocked by the guard.
  */
 async function acquireAgentOperation(
@@ -239,7 +239,7 @@ export function resetKillPauseSpawnRunner(): void {
 // membership write and threads the pruned `(team, id)` pairs up. There are TWO
 // notice shapes, chosen by WHICH COMMAND drove the departure (not a runtime
 // flag):
-//   - PER-AGENT  (ib kill, ib merge): `left the team`, `fromAgent` = departed id.
+//   - PER-AGENT  (ib retire, ib merge): `left the team`, `fromAgent` = departed id.
 //   - COALESCED  (any ib nuke): one `N member(s) left @team` per team, system
 //                sender — avoids an O(N²) notice storm on bulk teardown.
 // Both snapshot the SURVIVING members from the POST-prune roster (the departed
@@ -249,7 +249,7 @@ export function resetKillPauseSpawnRunner(): void {
 // ===========================================================================
 
 /**
- * PER-AGENT leave notice (§16.4.2) for `ib kill` / `ib merge`. For each pruned
+ * PER-AGENT leave notice (§16.4.2) for `ib retire` / `ib merge`. For each pruned
  * `(team, departedId)` pair, snapshot the team's SURVIVING members (post-prune
  * via `getTeam`, so the departed id is already gone), resolve each to an Agent,
  * and send `left the team` with `fromAgent` stamped EXPLICITLY to the departed
@@ -266,7 +266,7 @@ async function emitPerAgentLeaveNotice(
     const byId = new Map(agents.map((a) => [a.id, a]));
     for (const { team: teamName, id: departedId } of prunedTeams) {
       // Audit the departure in the team's <team>.log (§17.4). Best-effort.
-      await appendTeamLog(teamName, `agent ${departedId} left (kill/merge)`).catch(() => {});
+      await appendTeamLog(teamName, `agent ${departedId} left (retire/merge)`).catch(() => {});
       // Mirror the leave into the team's channel.jsonl as a SYSTEM record so
       // the chat box renders it inline with chat, dimmed (§17.4 design update).
       // Additive to the audit log above — both paths fire on every departure.
@@ -341,7 +341,7 @@ async function emitCoalescedLeaveNotice(
 }
 
 /**
- * Native kill implementation — replaces `ib kill <id> --force`.
+ * Native retire implementation — backs `ib retire <id> --force`.
  *
  * Sequence (mirrors do_kill in ib bash):
  * 1. Verify agent exists (directory or tmux session)
@@ -350,7 +350,7 @@ async function emitCoalescedLeaveNotice(
  *    remove worktree, delete branch, archive, remove dir
  * 4. scanAndKillOrphans()
  */
-export async function killAgent(agent: Agent): Promise<IbCommandResult> {
+export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
   const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
   const agentsDir = join(agent.repoPath, ".ittybitty", "agents");
   const tmuxSession = agent.meta.tmux_session;
@@ -382,17 +382,17 @@ export async function killAgent(agent: Agent): Promise<IbCommandResult> {
   const { prunedTeams } = await teardownAgent(agent.repoPath, agent.id, agentDir, {
     tmux_session: tmuxSession,
     claude_pid: agent.meta.claude_pid,
-  }, "Agent killed");
+  }, "Agent retired");
 
   // Scan for orphaned Claude processes
   await scanAndKillOrphans(agentsDir);
 
-  // kill = single-agent departure → per-agent leave notice to surviving
+  // retire = single-agent departure → per-agent leave notice to surviving
   // teammates, `fromAgent` = the departed id (§16.5). Best-effort.
   await emitPerAgentLeaveNotice(prunedTeams, await listRepos());
 
   logToWatchLog(
-    `[kill] agent=${agent.repoName ? `${agent.repoName}/` : ""}${agent.id} ` +
+    `[retire] agent=${agent.repoName ? `${agent.repoName}/` : ""}${agent.id} ` +
     `tmux=${tmuxSession || "<none>"} pid=${agent.meta.claude_pid || "<none>"}`
   );
 
@@ -595,7 +595,7 @@ export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
       ok: false,
       exitCode: 1,
       stdout: "",
-      stderr: `Error: '${agent.id}' is a worker agent with no descendants. Use 'ib kill ${agent.id}' instead.`,
+      stderr: `Error: '${agent.id}' is a worker agent with no descendants. Use 'ib retire ${agent.id}' instead.`,
     };
   }
 
@@ -1081,7 +1081,7 @@ case $EXIT_CODE in
     130) log "exit=130 → SIGINT (Ctrl-C)" ;;
     137) log "exit=137 → SIGKILL (likely OOM kill or 'kill -9'; check Console.app for 'low memory')" ;;
     139) log "exit=139 → SIGSEGV (claude segfault)" ;;
-    143) log "exit=143 → SIGTERM (graceful kill, e.g. ib kill / pause)" ;;
+    143) log "exit=143 → SIGTERM (graceful kill, e.g. ib retire / pause)" ;;
     *)   log "exit=$EXIT_CODE → unrecognized; SIGNAL=$SIGNAL" ;;
 esac
 
@@ -2741,7 +2741,7 @@ async function fireJoinNoticeFanOut(
  * `ib team remove` (persist-then-notify). The post-write members (the departed
  * id is already absent) each receive a `left the team` fan-out, with `fromAgent`
  * stamped EXPLICITLY to the departed id (§16.5 — never cwd-auto-detected).
- * Best-effort. (Leave notices for `ib kill`/`ib merge`/`ib nuke` belong to the
+ * Best-effort. (Leave notices for `ib retire`/`ib merge`/`ib nuke` belong to the
  * teardown path, owned by another module — NOT here.)
  */
 async function fireRemoveLeaveNotice(
@@ -4543,7 +4543,7 @@ case $EXIT_CODE in
     130) log "exit=130 → SIGINT (Ctrl-C)" ;;
     137) log "exit=137 → SIGKILL (likely OOM kill or 'kill -9'; check Console.app for 'low memory')" ;;
     139) log "exit=139 → SIGSEGV (claude segfault)" ;;
-    143) log "exit=143 → SIGTERM (graceful kill, e.g. ib kill / pause)" ;;
+    143) log "exit=143 → SIGTERM (graceful kill, e.g. ib retire / pause)" ;;
     *)   log "exit=$EXIT_CODE → unrecognized; SIGNAL=$SIGNAL" ;;
 esac
 

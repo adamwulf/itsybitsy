@@ -399,17 +399,17 @@ describe("CLI arg parsing", () => {
     expect(exitCode).toBe(1);
   });
 
-  test("kill strips --force from args (agent lookup fails first)", async () => {
-    // kill filters out --force before checking for unknown args.
+  test("retire strips --force from args (agent lookup fails first)", async () => {
+    // retire filters out --force before checking for unknown args.
     // Without a valid agent, requireAgent exits before the unknown-args check.
-    // This documents that kill at least requires an agent-id.
-    const { stderr, exitCode } = await runCli(["kill"]);
+    // This documents that retire at least requires an agent-id.
+    const { stderr, exitCode } = await runCli(["retire"]);
     expect(stderr).toContain("Usage:");
     expect(exitCode).toBe(1);
   });
 
-  test("kill with nonexistent agent shows not-found", async () => {
-    const { stderr, exitCode } = await runCli(["kill", "nonexistent-id", "--force"]);
+  test("retire with nonexistent agent shows not-found", async () => {
+    const { stderr, exitCode } = await runCli(["retire", "nonexistent-id", "--force"]);
     expect(stderr).toContain("Agent not found: nonexistent-id");
     expect(exitCode).toBe(1);
   });

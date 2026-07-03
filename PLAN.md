@@ -41,7 +41,7 @@ This is a **full daily-driver replacement for `ib watch`**, extended to span mul
 ### Read vs. Write split
 
 - **Read agent state:** read `.ittybitty/` files directly — faster than shelling to `ib list`
-- **Mutations:** shell out to `ib` commands (`ib kill`, `ib resume`, `ib merge`, `ib merge-check`, `ib send`, `ib new-agent`, `ib diff`, `ib status`, `ib acknowledge`)
+- **Mutations:** shell out to `ib` commands (`ib retire`, `ib resume`, `ib merge`, `ib merge-check`, `ib send`, `ib new-agent`, `ib diff`, `ib status`, `ib acknowledge`)
 - **Never** reimplement tmux/git/worktree mutation logic from `ib`
 - **Critical:** every `ib` command must be run with `cwd` set to the target repo root — `ib` requires being run from the root of a git repository
 
@@ -1165,7 +1165,7 @@ Wire system coordinator lifecycle into the dashboard:
 
 #### 48a: Agent creation — `--coordinator` flag
 
-**Files:** `src/ib-commands.ts`, `src/agent-lifecycle.ts` (coordinator-specific teardown — ensure `archiveAgent()` and `killAgent()` handle coordinator directories correctly; no `newAgent()` changes here since that lives in `ib-commands.ts`), `src/index.ts`
+**Files:** `src/ib-commands.ts`, `src/agent-lifecycle.ts` (coordinator-specific teardown — ensure `archiveAgent()` and `retireAgent()` handle coordinator directories correctly; no `newAgent()` changes here since that lives in `ib-commands.ts`), `src/index.ts`
 
 Extend `newAgent()` to support the `--coordinator` flag:
 
@@ -1181,7 +1181,7 @@ Extend `newAgent()` to support the `--coordinator` flag:
 - [ ] **Reserved name validation**: Reject `--name` values that are reserved: `coordinator`, `watchdog`, `manual`, and any registered repo basenames. Error: `"'<name>' is a reserved name"`
 - [ ] Per-repo coordinators bypass the `maxAgents` check (coordinators are infrastructure, not user tasks — see SPEC §12.4.3). Add bypass logic in `newAgent()` when `--coordinator` flag is set.
 - [ ] Modify the `maxAgents` check for ALL agent creation: exclude coordinators (`coordinator: true` in meta.json) from the active agent count. This ensures coordinators don't consume regular agent slots (SPEC §12.4.3: "excluded from the agent count when checking maxAgents for regular agent creation").
-- [ ] **Parenting behavior**: Agents spawned by a coordinator have `manager: "coordinator"` in meta.json. Verify `buildAgentTree()` correctly parents them under the coordinator. `ib nuke coordinator` recursively kills children via §1.8 traversal. `ib kill coordinator` kills only the coordinator (standard §1.4).
+- [ ] **Parenting behavior**: Agents spawned by a coordinator have `manager: "coordinator"` in meta.json. Verify `buildAgentTree()` correctly parents them under the coordinator. `ib nuke coordinator` recursively kills children via §1.8 traversal. `ib retire coordinator` retires only the coordinator (standard §1.4).
 - [ ] CLI flag parsing in `src/index.ts`
 - [ ] Tests for coordinator creation, one-per-repo constraint, mutual exclusivity, reserved names, parenting
 
@@ -1648,7 +1648,7 @@ Note: `isValidAgentId()` IS imported and used in agent-status.ts (line 384), but
 
 **Status:** Not started — spec written in SPEC.md §14.
 
-**Problem:** Configuration can become inconsistent through crashes, partial cleanup, or bugs in the kill/merge/nuke lifecycle. The most severe case: agent-specific hooks (e.g., `ib hook-check-path agent-xxx`) leaked into a repo's `.claude/settings.local.json` after an agent was killed, blocking all tool calls in the user's direct Claude session. There is currently no way to detect these issues until they cause failures.
+**Problem:** Configuration can become inconsistent through crashes, partial cleanup, or bugs in the retire/merge/nuke lifecycle. The most severe case: agent-specific hooks (e.g., `ib hook-check-path agent-xxx`) leaked into a repo's `.claude/settings.local.json` after an agent was retired, blocking all tool calls in the user's direct Claude session. There is currently no way to detect these issues until they cause failures.
 
 **Goal:** A startup/add-repo health check that runs automatically and surfaces ⚠️/🔴 warning indicators next to repo names in the TUI when issues are detected.
 

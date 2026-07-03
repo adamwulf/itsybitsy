@@ -759,7 +759,7 @@ export function isDeadPane(tmuxOutput: string): boolean {
  *
  * Deliberately excludes children in `waiting` (would create transitive-waiting
  * deadlock — the top of a parked chain must still be notified) and `complete`
- * (the user needs to merge/kill those). `compacting` and `rate_limited` are
+ * (the user needs to merge/retire those). `compacting` and `rate_limited` are
  * transient tmux overrides; the child's stored `meta.state` remains `"running"`
  * in those cases, so they are counted as active without per-child tmux calls.
  *

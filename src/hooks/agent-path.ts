@@ -446,7 +446,7 @@ function checkFilePath(
  * need to run it as a preflight before asking their manager to merge.
  */
 const IB_MANAGER_ONLY_COMMANDS = new Set([
-  "kill",
+  "retire",
   "nuke",
   "merge",
   "resume",
@@ -460,7 +460,7 @@ const IB_MANAGER_ONLY_COMMANDS = new Set([
  * that targets a specific agent.
  *
  * NOTE: This only matches commands starting with exactly "ib ". Alternate
- * invocations like `./ib kill` or `/usr/local/bin/ib kill` are not matched.
+ * invocations like `./ib retire` or `/usr/local/bin/ib retire` are not matched.
  * This is safe because agents are expected to have only `Bash(ib:*)` in their
  * allowList (not broader `Bash(*)`), so alternate paths are already blocked
  * by the allowList check before this function is called.
@@ -484,7 +484,7 @@ export function parseIbCommand(command: string): { subcommand: string; targetId:
 
 /**
  * Check whether a Bash `ib <cmd> <target>` call is permitted for the calling
- * agent. Manager-only commands (kill, merge, nuke, etc.) require that the
+ * agent. Manager-only commands (retire, merge, nuke, etc.) require that the
  * calling agent is listed as the target's manager in meta.json.
  *
  * Returns a deny decision if the check fails, or null to continue normally.
@@ -580,12 +580,12 @@ export async function checkIbCommandAccess(
         };
       }
 
-      // Per-repo coordinator bypass: a per-repo coordinator may run 'kill' or
+      // Per-repo coordinator bypass: a per-repo coordinator may run 'retire' or
       // 'reassign' on any non-coordinator agent within its own repo, even when
       // it is not the target's manager or spawner. Only applies same-repo and
       // never to other coordinators. (SPEC §12.2)
       if (
-        (parsed.subcommand === "kill" || parsed.subcommand === "reassign") &&
+        (parsed.subcommand === "retire" || parsed.subcommand === "reassign") &&
         meta.agentType !== "coordinator"
       ) {
         try {

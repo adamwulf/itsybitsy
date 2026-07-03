@@ -388,7 +388,7 @@ describe("remind children", () => {
     expect(result.message).toContain("child-001");
     expect(result.message).toContain("1 unfinished sub-agent(s)");
     expect(result.message).toContain("ib merge <id>");
-    expect(result.message).toContain("ib kill <id>");
+    expect(result.message).toContain("ib retire <id>");
     expect(result.message).toContain("ib list");
     expect(result.message).toContain("ib diff <id>");
   });
@@ -1324,7 +1324,7 @@ describe("processStopHook — waiting-branch suppression", () => {
     expect(result.action).toBe("notify_manager");
   });
 
-  test("waiting + only complete children → action 'notify_manager' (user needs to merge/kill)", async () => {
+  test("waiting + only complete children → action 'notify_manager' (user needs to merge/retire)", async () => {
     const childDir = join(ctx.agentsDir, "child-done");
     await mkdir(childDir, { recursive: true });
     await writeMeta(childDir, { manager: ctx.agentId, state: "complete", created_epoch: oldEpoch });

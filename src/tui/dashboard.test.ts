@@ -768,33 +768,33 @@ describe("DashboardComponent dialog and action handlers", () => {
     await rm(sendRepoDir, { recursive: true, force: true });
   });
 
-  test("x key opens kill confirm dialog with button UI", async () => {
+  test("x key opens retire confirm dialog with button UI", async () => {
     await setupDashboardWithAgent();
     dashboard.handleInput("x");
     expect(dashboard.dialog).not.toBeNull();
     const d = assertDialog(dashboard.dialog, 'confirm');
-    expect(d.prompt).toContain("Kill agent");
+    expect(d.prompt).toContain("Retire agent");
     expect(d.prompt).toContain("agent-test");
-    expect(d.confirmLabel).toBe("Kill");
+    expect(d.confirmLabel).toBe("Retire");
     expect(d.focusedButton).toBe("cancel");
   });
 
-  test("kill confirm dialog: Enter on Kill button executes kill", async () => {
+  test("retire confirm dialog: Enter on Retire button executes retire", async () => {
     await setupDashboardWithAgent();
     dashboard.handleInput("x");
-    // focusedButton defaults to "cancel", Tab to Kill, then press Enter
+    // focusedButton defaults to "cancel", Tab to Retire, then press Enter
     dashboard.handleInput("\t");
     expect(assertDialog(dashboard.dialog, 'confirm').focusedButton).toBe("confirm");
     dashboard.handleInput("\r");
     await dashboard.flushPendingActions();
-    // Dialog should be dismissed after native kill executes
+    // Dialog should be dismissed after native retire executes
     expect(dashboard.dialog).toBeNull();
     // Agent directory should be removed by teardown
     const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
     expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
 
-  test("kill confirm dialog: Enter on default Cancel dismisses", async () => {
+  test("retire confirm dialog: Enter on default Cancel dismisses", async () => {
     await setupDashboardWithAgent();
     dashboard.handleInput("x");
     expect(assertDialog(dashboard.dialog, 'confirm').focusedButton).toBe("cancel");
@@ -803,7 +803,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(lastIbCall).toBeNull();
   });
 
-  test("kill confirm dialog: Tab cycles between buttons", async () => {
+  test("retire confirm dialog: Tab cycles between buttons", async () => {
     await setupDashboardWithAgent();
     dashboard.handleInput("x");
     const d = assertDialog(dashboard.dialog, 'confirm');
@@ -814,7 +814,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.focusedButton).toBe("cancel");
   });
 
-  test("kill confirm dialog: Escape cancels", async () => {
+  test("retire confirm dialog: Escape cancels", async () => {
     await setupDashboardWithAgent();
     dashboard.handleInput("x");
     dashboard.handleInput("\x1b");
@@ -3422,7 +3422,7 @@ describe("Context-sensitive footer (repo header vs agent)", () => {
     const allText = lines.map(stripAnsi).join("\n");
     expect(allText).toContain("s: send");
     expect(allText).toContain("m: merge");
-    expect(allText).toContain("x: kill");
+    expect(allText).toContain("x: retire");
     // Should NOT show repo actions
     expect(allText).not.toContain("A: add repo");
   });
@@ -3444,7 +3444,7 @@ describe("Context-sensitive footer (repo header vs agent)", () => {
     expect(assertDialog(dashboard.dialog, 'fuzzy').prompt).toContain("Reassign");
   });
 
-  test("x key on repo header opens remove dialog instead of kill", async () => {
+  test("x key on repo header opens remove dialog instead of retire", async () => {
     setupMultiRepoWithRepoHeader();
     expect(dashboard.agentTree.selectedRepoHeader).toBe("alpha");
     dashboard.handleInput("x");
@@ -3455,13 +3455,13 @@ describe("Context-sensitive footer (repo header vs agent)", () => {
     expect(d.prompt).toContain("alpha");
   });
 
-  test("x key on agent opens kill dialog", () => {
+  test("x key on agent opens retire dialog", () => {
     setupMultiRepoWithRepoHeader();
     dashboard.handleInput("j");
     expect(dashboard.selectedAgent).not.toBeNull();
     dashboard.handleInput("x");
     expect(dashboard.dialog).not.toBeNull();
-    expect(assertDialog(dashboard.dialog, 'confirm').prompt).toContain("Kill");
+    expect(assertDialog(dashboard.dialog, 'confirm').prompt).toContain("Retire");
   });
 });
 

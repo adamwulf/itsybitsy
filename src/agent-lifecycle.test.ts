@@ -557,7 +557,7 @@ describe("agent-lifecycle", () => {
   //
   // Regression for the EPERM-as-dead bug: previously killAgentProcess called
   // process.kill(pid, 0) directly and treated EPERM as "already dead", so a
-  // codex-sandboxed `ib kill` was a silent no-op. After the structural fix,
+  // codex-sandboxed `ib retire` was a silent no-op. After the structural fix,
   // liveness goes through isPidAliveCtx (EPERM-aware) and the kill itself
   // routes through terminateProcess. These tests stub the canonical contexts
   // and verify the kill sequence actually fires + a `[terminate]` watch.log

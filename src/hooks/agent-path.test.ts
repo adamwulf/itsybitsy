@@ -772,9 +772,9 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
 // ── parseIbCommand ───────────────────────────────────────────────────────────
 
 describe("parseIbCommand", () => {
-  test("parses ib kill <id>", () => {
-    const result = parseIbCommand("ib kill agent-abc12345");
-    expect(result).toEqual({ subcommand: "kill", targetId: "agent-abc12345" });
+  test("parses ib retire <id>", () => {
+    const result = parseIbCommand("ib retire agent-abc12345");
+    expect(result).toEqual({ subcommand: "retire", targetId: "agent-abc12345" });
   });
 
   test("parses ib merge <id> with flags", () => {
@@ -793,8 +793,8 @@ describe("parseIbCommand", () => {
   });
 
   test("skips flags before agent id", () => {
-    const result = parseIbCommand("ib kill --force agent-abc12345");
-    expect(result).toEqual({ subcommand: "kill", targetId: "agent-abc12345" });
+    const result = parseIbCommand("ib retire --force agent-abc12345");
+    expect(result).toEqual({ subcommand: "retire", targetId: "agent-abc12345" });
   });
 
   test("parses ib send (send is parsed but unrestricted in access check)", () => {
@@ -813,12 +813,12 @@ describe("parseIbCommand", () => {
   });
 
   test("returns null for ib without target id", () => {
-    const result = parseIbCommand("ib kill");
+    const result = parseIbCommand("ib retire");
     expect(result).toBeNull();
   });
 
   test("returns null for invalid agent id (contains special chars)", () => {
-    const result = parseIbCommand("ib kill not/an/agent");
+    const result = parseIbCommand("ib retire not/an/agent");
     expect(result).toBeNull();
   });
 });
@@ -844,29 +844,29 @@ describe("checkIbCommandAccess", () => {
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
   }
 
-  test("allows kill when calling agent is the manager", async () => {
+  test("allows retire when calling agent is the manager", async () => {
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
-    const result = await checkIbCommandAccess("ib kill agent-target1", "agent-manager1", agentsDir);
+    const result = await checkIbCommandAccess("ib retire agent-target1", "agent-manager1", agentsDir);
     expect(result).toBeNull();
   });
 
-  test("denies kill when calling agent is NOT the manager", async () => {
+  test("denies retire when calling agent is NOT the manager", async () => {
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
-    const result = await checkIbCommandAccess("ib kill agent-target1", "agent-other111", agentsDir);
+    const result = await checkIbCommandAccess("ib retire agent-target1", "agent-other111", agentsDir);
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");
     expect(result!.reason).toContain("only the manager");
   });
 
-  test("denies kill when agent has no manager set", async () => {
+  test("denies retire when agent has no manager set", async () => {
     await writeAgentMeta("agent-target1", { id: "agent-target1" });
-    const result = await checkIbCommandAccess("ib kill agent-target1", "agent-manager1", agentsDir);
+    const result = await checkIbCommandAccess("ib retire agent-target1", "agent-manager1", agentsDir);
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");
   });
 
-  test("denies kill when target agent not found in any repo", async () => {
-    const result = await checkIbCommandAccess("ib kill agent-target1", "agent-manager1", agentsDir);
+  test("denies retire when target agent not found in any repo", async () => {
+    const result = await checkIbCommandAccess("ib retire agent-target1", "agent-manager1", agentsDir);
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");
     expect(result!.reason).toContain("not found in any registered repo");
@@ -913,9 +913,9 @@ describe("checkIbCommandAccess", () => {
     expect(result).toBeNull();
   });
 
-  test("denies cross-repo kill: target in different repo not found in agentsDir", async () => {
+  test("denies cross-repo retire: target in different repo not found in agentsDir", async () => {
     // Target only exists in a different agentsDir, not the caller's
-    const result = await checkIbCommandAccess("ib kill agent-target1", "agent-manager1", agentsDir);
+    const result = await checkIbCommandAccess("ib retire agent-target1", "agent-manager1", agentsDir);
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");
   });
@@ -929,10 +929,10 @@ describe("checkIbCommandAccess", () => {
 
   // ── Per-repo coordinator bypass (SPEC §12.2) ──────────────────────────────
 
-  test("per-repo coordinator CAN kill a non-child regular agent in its own repo", async () => {
+  test("per-repo coordinator CAN retire a non-child regular agent in its own repo", async () => {
     await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-someone" });
-    const result = await checkIbCommandAccess("ib kill agent-target1", "itsybitsy", agentsDir);
+    const result = await checkIbCommandAccess("ib retire agent-target1", "itsybitsy", agentsDir);
     expect(result).toBeNull();
   });
 
@@ -959,19 +959,19 @@ describe("checkIbCommandAccess", () => {
     expect(result!.decision).toBe("deny");
   });
 
-  test("per-repo coordinator CANNOT kill another coordinator", async () => {
+  test("per-repo coordinator CANNOT retire another coordinator", async () => {
     await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
     await writeAgentMeta("other-repo", { id: "other-repo", agentType: "coordinator" });
-    const result = await checkIbCommandAccess("ib kill other-repo", "itsybitsy", agentsDir);
+    const result = await checkIbCommandAccess("ib retire other-repo", "itsybitsy", agentsDir);
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");
   });
 
-  test("regular (non-coordinator) caller still cannot kill a non-child", async () => {
+  test("regular (non-coordinator) caller still cannot retire a non-child", async () => {
     // Caller has meta.json but coordinator is not true
     await writeAgentMeta("agent-caller1", { id: "agent-caller1" });
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-someone" });
-    const result = await checkIbCommandAccess("ib kill agent-target1", "agent-caller1", agentsDir);
+    const result = await checkIbCommandAccess("ib retire agent-target1", "agent-caller1", agentsDir);
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");
   });
@@ -979,16 +979,16 @@ describe("checkIbCommandAccess", () => {
   test("missing caller meta.json falls through to existing manager check (denies non-manager)", async () => {
     // No caller meta written — only target
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
-    const result = await checkIbCommandAccess("ib kill agent-target1", "agent-nometa1", agentsDir);
+    const result = await checkIbCommandAccess("ib retire agent-target1", "agent-nometa1", agentsDir);
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");
   });
 
   // ── @system bypass ─────────────────────────────────────────────────────────
 
-  test("@system can run kill on any agent regardless of manager/spawner", async () => {
+  test("@system can run retire on any agent regardless of manager/spawner", async () => {
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
-    const result = await checkIbCommandAccess("ib kill agent-target1", "@system", agentsDir);
+    const result = await checkIbCommandAccess("ib retire agent-target1", "@system", agentsDir);
     expect(result).toBeNull();
   });
 
@@ -1004,9 +1004,9 @@ describe("checkIbCommandAccess", () => {
     expect(result).toBeNull();
   });
 
-  test("@system can run kill on a target that doesn't exist (no found-in-repo check)", async () => {
+  test("@system can run retire on a target that doesn't exist (no found-in-repo check)", async () => {
     // No target meta written — @system bypass returns null before existence check
-    const result = await checkIbCommandAccess("ib kill agent-target1", "@system", agentsDir);
+    const result = await checkIbCommandAccess("ib retire agent-target1", "@system", agentsDir);
     expect(result).toBeNull();
   });
 });
@@ -1391,14 +1391,14 @@ describe("hookCheckPath with @system", () => {
     expect(logged.length).toBe(1);
   });
 
-  test("allows manager-only ib command (kill) targeting another agent", async () => {
-    // Integration check: `ib kill` is a manager-only command that would normally
+  test("allows manager-only ib command (retire) targeting another agent", async () => {
+    // Integration check: `ib retire` is a manager-only command that would normally
     // be denied for a non-manager caller. The @system bypass in
     // checkIbCommandAccess should let it through end-to-end via hookCheckPath.
     const home = join(tempHome, ".itsybitsy");
     const stdin = JSON.stringify({
       tool_name: "Bash",
-      tool_input: { command: "ib kill agent-foo" },
+      tool_input: { command: "ib retire agent-foo" },
       cwd: home,
     });
     await hookCheckPath("@system", stdin);

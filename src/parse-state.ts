@@ -160,16 +160,6 @@ export function parseCodexState(input: string): ParseStateResult {
     return { state: "running", reason: "codex Working interrupt marker in last 15 lines" };
   }
 
-  // Out-of-usage — codex renders "■ You've hit your usage limit. …" (real
-  // captured sample). Checked before the idle-prompt fallback below: codex keeps
-  // its "›" input prompt + status bar visible even while out of usage, so
-  // without this the agent would be misread as `waiting`. Anchor on
-  // "hit your usage limit" (apostrophe-agnostic; distinct from claude's
-  // "hit your limit"). Mirrors agents.ts isRateLimited.
-  if (last15.toLowerCase().includes("hit your usage limit")) {
-    return { state: "rate_limited", reason: "codex usage-limit message in last 15 lines" };
-  }
-
   // Completion signal — exclude quoted occurrences (in watchdog nudge prompts)
   const unquoted15 = last15.replace(/'I HAVE COMPLETED THE GOAL'/g, "");
   if (unquoted15.includes("I HAVE COMPLETED THE GOAL")) {
@@ -181,6 +171,28 @@ export function parseCodexState(input: string): ParseStateResult {
   const waitingRegex = /(^|\n)\s*WAITING\s*($|\n)/;
   if (waitingRegex.test(last15)) {
     return { state: "waiting", reason: "WAITING in last 15 lines (codex)" };
+  }
+
+  // Out-of-usage — codex renders "■ You've hit your usage limit. …" (real
+  // captured samples across tiers: "Upgrade to Pro … purchase more credits" and
+  // "Upgrade to Plus …" — both carry the stable stem "hit your usage limit").
+  // Anchor on that stem (apostrophe-agnostic; distinct from claude's
+  // "hit your limit"). Mirrors agents.ts isRateLimited.
+  //
+  // Ordered as a FALLBACK — after Working/complete/WAITING but BEFORE the
+  // idle-at-prompt block. Two reasons for this exact slot:
+  //  - It MUST beat idle-at-prompt: codex keeps its "›" input prompt + status
+  //    bar visible even while out of usage, so idle-at-prompt would otherwise
+  //    misread it as `waiting`.
+  //  - It must NOT beat a more-recent Working/complete/WAITING signal: the
+  //    usage-limit line is a scrollback transcript line (not a dismissable
+  //    modal), so a recovered agent can still have a stale copy inside the
+  //    last-15 window after it has moved on. Checking those fresher signals
+  //    first prevents a recovered/completed agent from flickering to
+  //    rate_limited. (The primary path in agents.ts guards the completed case
+  //    via its own complete fast-path before isRateLimited runs.)
+  if (last15.toLowerCase().includes("hit your usage limit")) {
+    return { state: "rate_limited", reason: "codex usage-limit message in last 15 lines" };
   }
 
   // Idle at codex input prompt — walk from the bottom to the last "›" prompt,

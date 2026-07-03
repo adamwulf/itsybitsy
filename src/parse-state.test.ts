@@ -249,6 +249,39 @@ describe("parseState", () => {
       ].join("\n");
       expect(parseState(output).state).toBe("rate_limited");
     });
+    test("codex out-of-usage — Plus tier variant (cross-tier stem)", () => {
+      // A different tier renders a different upsell ("Upgrade to Plus", no
+      // "purchase more credits") but the same stem "hit your usage limit". Locks
+      // in that the anchor is the stable cross-tier stem, not over-fit to Pro.
+      const output = [
+        "› do the thing",
+        "",
+        "■ You've hit your usage limit. Upgrade to Plus to continue using Codex",
+        "(https://chatgpt.com/explore/plus), or try again at Jun 6th, 2026 6:01 PM.",
+        "",
+        "  gpt-5.5 default · ~/Developer/bun/itsybitsy",
+      ].join("\n");
+      expect(parseState(output).state).toBe("rate_limited");
+    });
+    test("codex out-of-usage is a FALLBACK — a fresher WAITING below it wins", () => {
+      // The usage-limit line is a scrollback transcript line, not a dismissable
+      // modal, so a recovered agent can still have a stale copy inside the
+      // last-15 window after it moved on. A fresher WAITING (or complete) must
+      // win so the agent doesn't flicker to rate_limited after recovering.
+      const output = [
+        "■ You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit",
+        "https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 4:29 AM.",
+        "",
+        "› [sent by user Adam]: try again",
+        "",
+        "• Recovered and finished the task.",
+        "",
+        "WAITING",
+        "",
+        "  gpt-5.5 default · ~/Developer/bun/itsybitsy",
+      ].join("\n");
+      expect(parseState(output).state).toBe("waiting");
+    });
   });
 
   describe("complete", () => {

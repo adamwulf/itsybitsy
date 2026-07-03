@@ -32,7 +32,6 @@ import {
   acquireSystemCoordinator,
   ensureSystemCoordinator,
   releaseSystemCoordinator,
-  resizeCoordinatorTmux,
   sanitizeTmuxInput,
 } from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
@@ -71,9 +70,9 @@ import type { FocusTarget, SubFocus } from "./focus";
 import { SystemDashboardComponent } from "./system-dashboard";
 import { loadLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave } from "./layout";
 import {
-  DEFAULT_TMUX_WIDTH,
+  DEFAULT_TMUX_WIDTH, PINNED_TMUX_WIDTH,
   getLiveMainWidth, getLiveLeftPaneWidth, getLiveRightPaneWidth,
-  clampLeftWidth, clampLeftWidthAbsolute, clampSidebarWidth,
+  clampLeftWidthAbsolute, clampSidebarWidth,
 } from "./widths";
 import { cancelPaste } from "./clipboard";
 import type { LayoutState } from "./layout";
@@ -703,12 +702,24 @@ export class DashboardComponent implements Component {
    * the user navigates the visible tree.
    */
   activeSelectionSource: SidebarMode = "agents";
-  /** When true, saved layout was applied — suppress onWidth overrides from tmux poller */
-  private layoutRestored = false;
-  /** Skip the next N tmux width reports to handle round-trip latency after resize */
-  private skipWidthReports = 0;
-  /** When true, resize all agent tmux sessions on next onUpdate (after layout restore) */
+  /**
+   * When true, run the one-time re-pin migration on the next populated onUpdate:
+   * resize every existing agent + coordinator tmux window to PINNED_TMUX_WIDTH.
+   * Live agents spawned before the pin (or by an older binary) may still be at an
+   * old narrow width; this brings them up to the pin once. New spawns/resumes
+   * already start at PINNED_TMUX_WIDTH via tmuxWidthForAgent.
+   */
   private pendingTmuxResize = false;
+
+  /**
+   * Arm the one-time re-pin migration so the next populated onUpdate resizes
+   * every existing agent + coordinator tmux window to PINNED_TMUX_WIDTH. Called
+   * from the boot path (and implicitly by applyLayout) so pre-pin sessions are
+   * brought up to the pin regardless of whether a saved layout was restored.
+   */
+  requestTmuxRepin(): void {
+    this.pendingTmuxResize = true;
+  }
   /**
    * One-time guard for the startup auto-select (§17.1, user-confirmed startup
    * behavior). On the FIRST populate where the flat list is non-empty, the
@@ -774,14 +785,6 @@ export class DashboardComponent implements Component {
    */
   getSnapshotPaneWidth(): number {
     return getLiveLeftPaneWidth(this.liveLayout());
-  }
-
-  /**
-   * Width at which a per-repo coordinator should render and be sized — the full
-   * main area, matching the system coordinator's behavior.
-   */
-  getRepoCoordinatorWidth(): number {
-    return this.getMainWidth();
   }
 
   setQuestionsFocused(value: boolean) {
@@ -908,32 +911,16 @@ export class DashboardComponent implements Component {
       this.tui?.requestRender();
     };
 
+    // No onWidth handler: tmux windows are pinned to PINNED_TMUX_WIDTH and never
+    // follow the display pane, so a tmux-reported width must never mutate
+    // splitPaneLeftWidth or layout.json. splitPaneLeftWidth is purely the DISPLAY
+    // split position now (divider drag + persistence). Omitting onWidth also
+    // stops the poller from querying window width every agent switch.
     this.tmuxPoller = new TmuxPoller({
       onOutput: (raw, _stripped) => {
         this.tmuxPane.rawOutput = raw;
         this.tmuxPane.hasPolled = true;
         this.tui?.requestRender();
-      },
-      onWidth: (width) => {
-        // When the system coordinator is selected, the tmux poller polls the
-        // coordinator session which runs at full mainWidth. Ignore its width
-        // reports — they would corrupt the agent splitPaneLeftWidth.
-        if (this.agentTree.isSystemCoordinatorSelected) return;
-        // Skip stale width reports during tmux resize round-trip
-        if (this.skipWidthReports > 0) {
-          this.skipWidthReports--;
-          return;
-        }
-        // When a saved layout was restored, the dashboard width is authoritative.
-        // Skip tmux-reported width to avoid overriding the saved value during the
-        // race window before resizeTmuxWindow takes effect on the agent's session.
-        if (this.layoutRestored) return;
-        const clamped = clampLeftWidthAbsolute(width);
-        if (clamped !== this.splitPane.getLeftWidth()) {
-          this.splitPane.setLeftWidth(clamped);
-          this.tui?.requestRender();
-          this.persistLayout();
-        }
       },
     });
 
@@ -966,7 +953,11 @@ export class DashboardComponent implements Component {
   /** Apply a saved layout state to restore panel sizes, clamping to valid ranges. */
   applyLayout(layout: LayoutState) {
     this.sidebarWidth = clampSidebarWidth(layout.sidebarWidth);
-    resizeCoordinatorTmux(this.getMainWidth());
+    // No resizeCoordinatorTmux here: the system coordinator's tmux window is
+    // pinned to PINNED_TMUX_WIDTH and never follows mainWidth. Its pane reflows
+    // to mainWidth at display time via WordWrapCache. The one-time re-pin
+    // migration (pendingTmuxResize below) brings any pre-pin coordinator window
+    // up to the pin.
     this.splitPane.setLeftWidth(clampLeftWidthAbsolute(layout.splitPaneLeftWidth));
     this.sidebar.heightOffsets = { ...layout.heightOffsets };
     if (layout.repoCoordinatorHeightOffset !== undefined) {
@@ -979,7 +970,6 @@ export class DashboardComponent implements Component {
     const approxHeight = process.stdout.rows ?? 24;
     const approxBase = computeSidebarHeights(approxHeight, 1);
     clampSidebarOffsets(approxBase, this.sidebar.heightOffsets);
-    this.layoutRestored = true;
     this.pendingTmuxResize = true;
   }
 
@@ -1356,25 +1346,28 @@ export class DashboardComponent implements Component {
       }
     }
 
-    // After layout restore, resize all agent tmux sessions to match the restored splitPaneLeftWidth
+    // One-time re-pin migration: bring every existing agent + coordinator tmux
+    // window up to PINNED_TMUX_WIDTH. New spawns/resumes already start pinned via
+    // tmuxWidthForAgent, but agents that were running before the pin (or spawned
+    // by an older binary) may still sit at an old narrow width — resize them once
+    // so their reflow matches the pinned world. Runs on the first populated
+    // onUpdate (flatList non-empty). Idempotent: resizing an already-pinned
+    // window is a no-op in practice.
     if (this.pendingTmuxResize && flatList.length > 0) {
       this.pendingTmuxResize = false;
-      // Re-validate splitPaneLeftWidth against current terminal width via the
-      // widths module so a too-large saved value can't push the right pane off-screen.
-      const validWidth = clampLeftWidth(this.getMainWidth(), this.splitPane.getLeftWidth());
-      if (validWidth !== this.splitPane.getLeftWidth()) {
-        this.splitPane.setLeftWidth(validWidth);
-      }
-      const width = validWidth;
       for (const entry of flatList) {
         if (entry.kind === "agent" && entry.agent.meta.tmux_session) {
-          resizeTmuxWindow(entry.agent.meta.tmux_session, width);
+          resizeTmuxWindow(entry.agent.meta.tmux_session, PINNED_TMUX_WIDTH);
         }
       }
-      // Clear layoutRestored after resize is issued. Skip the next 2 width reports to handle
-      // round-trip latency: one may catch the pre-resize width, the next catches post-resize.
-      this.layoutRestored = false;
-      this.skipWidthReports = 2;
+      // flatList filters out coordinators — re-pin per-repo coordinators from the
+      // full agent list, plus the system coordinator's fixed session.
+      for (const a of this.watcher?.lastAgents ?? []) {
+        if (a.meta.agentType === "coordinator" && a.meta.tmux_session) {
+          resizeTmuxWindow(a.meta.tmux_session, PINNED_TMUX_WIDTH);
+        }
+      }
+      resizeTmuxWindow(IB_COORDINATOR_SESSION, PINNED_TMUX_WIDTH);
     }
 
     this.syncSelectedAgent();
@@ -1429,13 +1422,10 @@ export class DashboardComponent implements Component {
       if (focus !== "agent-tree" && focus !== "info" && focus !== "coordinator") {
         this.focusManager.setFocus("agent-tree");
       }
-      // Reassert coordinator tmux width on selection (mirrors the agent path
-      // at the bottom of this method). tmux can drift the window size when
-      // clients with different terminal sizes attach/detach; agents get
-      // re-resized on every selection change, so without this the system
-      // coordinator was the only session whose drift wasn't corrected on
-      // selection.
-      resizeCoordinatorTmux(this.getMainWidth());
+      // No resize on coordinator selection: the ib-coordinator tmux window is
+      // pinned to PINNED_TMUX_WIDTH and never follows mainWidth. The startup
+      // re-pin migration corrects any pre-pin drift once; there is no display
+      // width for it to chase, so selection no longer repaints its TUI.
     }
 
     this.rightPane.agent = selected;
@@ -1529,12 +1519,11 @@ export class DashboardComponent implements Component {
         this.repoCoordinatorSession = tmuxSession;
         this.rightPane.resetRepoCoordinator();
         this.repoCoordinatorPoller.setAgent(tmuxSession);
-        // Resize repo coordinator tmux to mainWidth — per-repo coordinators render
-        // full-pane (same behavior as the system coordinator), not right-pane-only.
-        if (tmuxSession) {
-          const w = this.getRepoCoordinatorWidth();
-          if (w > 0) resizeTmuxWindow(tmuxSession, w);
-        }
+        // No resize: the per-repo coordinator's tmux window is pinned to
+        // PINNED_TMUX_WIDTH like every other TUI session. REPO mode reflows its
+        // captured logical lines to mainWidth at display time via WordWrapCache,
+        // so selecting a repo header never repaints the coordinator TUI at a new
+        // width.
       }
     } else {
       // Not a repo header — clear coordinator state
@@ -1618,8 +1607,11 @@ export class DashboardComponent implements Component {
       }
       if (selected?.meta.tmux_session) {
         this.checkClientAttached(selected);
-        // Resize the newly selected agent's tmux to match the current middle pane.
-        resizeTmuxWindow(selected.meta.tmux_session, getLiveLeftPaneWidth(this.liveLayout()));
+        // No resize on selection: the agent's tmux window stays pinned to
+        // PINNED_TMUX_WIDTH regardless of which agent is selected or how wide the
+        // middle pane is. The center pane reflows the captured logical lines to
+        // its display width via WordWrapCache, so selection never repaints the
+        // TUI at a new width.
       }
     }
 
@@ -2471,13 +2463,10 @@ export class DashboardComponent implements Component {
         // teams-tree shares the sidebar region with agent-tree (§17.3), so width
         // changes apply to the sidebar exactly as they do when agent-tree is focused.
         this.sidebarWidth = clampSidebarWidth(this.sidebarWidth + delta);
-        resizeCoordinatorTmux(this.getMainWidth());
-        // Per-repo coordinator renders full-pane like the system coordinator,
-        // so resize its tmux to the new mainWidth.
-        if (this.repoCoordinatorSession) {
-          const w = this.getRepoCoordinatorWidth();
-          if (w > 0) resizeTmuxWindow(this.repoCoordinatorSession, w);
-        }
+        // No tmux resize on sidebar-width change: both the system coordinator and
+        // per-repo coordinator windows stay pinned to PINNED_TMUX_WIDTH. Their
+        // panes reflow to the new mainWidth at display time via WordWrapCache, so
+        // resizing the sidebar never repaints a coordinator TUI at a new width.
         this.tui?.requestRender();
       } else if (focus === "right-pane") {
         // Right pane focused: ] grows right (shrinks middle) = negative delta to handleResizeLeft
@@ -3075,11 +3064,13 @@ export async function launchDashboard(): Promise<void> {
   const savedLayout = await loadLayout();
   if (savedLayout) {
     dashboard.applyLayout(savedLayout);
-  } else {
-    // Resize coordinator tmux to match mainWidth when no saved layout exists
-    // (applyLayout handles this internally when a layout is restored)
-    resizeCoordinatorTmux(dashboard.getMainWidth());
   }
+  // Always run the one-time re-pin migration on the first populated onUpdate,
+  // whether or not a saved layout existed. applyLayout sets pendingTmuxResize
+  // when a layout is restored; set it here too so a first-run user (no saved
+  // layout) still gets pre-pin agent + coordinator windows re-pinned to
+  // PINNED_TMUX_WIDTH. New spawns already start pinned via tmuxWidthForAgent.
+  dashboard.requestTmuxRepin();
   dashboard.setTui(tui);
   dashboard.setRepos(repos);
   const diffToolValue = config["externalDiffTool"]?.value;
@@ -3259,15 +3250,11 @@ export async function launchDashboard(): Promise<void> {
     return undefined;
   });
 
-  // Handle terminal resize to update coordinator tmux width
+  // Handle terminal resize. No tmux resize here: every agent + coordinator tmux
+  // window is pinned to PINNED_TMUX_WIDTH and never follows the terminal. The
+  // display panes reflow to the new terminal/pane width at render time via
+  // WordWrapCache, so a SIGWINCH only needs a re-render (+ a log-cache refresh).
   process.stdout.on("resize", () => {
-    resizeCoordinatorTmux(dashboard.getMainWidth());
-    // Per-repo coordinator renders full-pane like the system coordinator,
-    // so its tmux width tracks the same mainWidth.
-    if (dashboard.repoCoordinatorSession) {
-      const w = dashboard.getRepoCoordinatorWidth();
-      if (w > 0) resizeTmuxWindow(dashboard.repoCoordinatorSession, w);
-    }
     // displayHeight is recomputed inside render() — at the moment the resize
     // event fires it still holds the pre-resize value, so a cache check now
     // would falsely hit. Drop the cached window so loadAgentLogIfNeeded is

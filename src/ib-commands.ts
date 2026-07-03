@@ -905,6 +905,31 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
   }
 
   await logAgent(agentDir, `[rehire] Agent resumed from ${archived.archiveKey}`);
+
+  // Best-effort: notify the rehired agent's manager (if any) that its
+  // sub-agent is back. The manager is preserved in restoredMeta via the
+  // `...archived.meta` spread. We only notify when the manager still exists
+  // as a live (non-archived) agent in the SAME repo; if it has no manager or
+  // the manager is archived/gone, skip silently. A delivery failure MUST NOT
+  // fail the rehire — surface it as a warning instead (joined into stderr).
+  const managerId = archived.meta.manager;
+  const managerAgent = managerId
+    ? activeAgents.find(
+      (a) => a.id === managerId && resolve(a.repoPath) === resolve(repoPath),
+    )
+    : undefined;
+  if (managerAgent) {
+    try {
+      await sendMessage(
+        managerAgent,
+        `your sub agent ${agentId} has been rehired`,
+        { fromAgent: agentId },
+      );
+    } catch (err) {
+      warnings.push(`Could not notify manager ${managerId}: ${err}`);
+    }
+  }
+
   return {
     ok: true,
     exitCode: 0,

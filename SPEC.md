@@ -239,6 +239,8 @@ Merge and nuke continue to create historical archives without
    remains durable even if session startup must be retried.
 6. Delegate session startup to the existing resume pipeline, including tmux,
    state, nudge, and watchdog behavior.
+7. Notify the surviving manager (if any) that the sub-agent was rehired,
+   best-effort; a delivery failure does not fail the rehire.
 
 Reconstruction failures roll back the partial directory/worktree/branch.
 Session-resume failures leave a valid stopped agent so `ib resume` can be

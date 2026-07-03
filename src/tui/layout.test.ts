@@ -1,10 +1,10 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm } from "fs/promises";
-import { tmpdir } from "os";
+import { tmpdir, homedir } from "os";
 import {
   loadLayout, saveLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave,
-  setLayoutPath, resetLayoutPath,
+  setLayoutPath, resetLayoutPath, getLayoutPath,
   MIN_SIDEBAR, MAX_SIDEBAR,
 } from "./layout";
 import type { LayoutState } from "./layout";
@@ -36,6 +36,15 @@ describe("layout persistence", () => {
 
   test("loadLayout returns null when file does not exist", async () => {
     expect(await loadLayout()).toBeNull();
+  });
+
+  test("default layout path under bun test is NOT the real ~/.itsybitsy/layout.json", () => {
+    // Regression: dashboard tests fire persistLayout() via simulated resize
+    // keystrokes; before the NODE_ENV=test guard in layout.ts, those debounced
+    // saves overwrote the user's real layout preferences on every `bun test`
+    // run. The default (reset) path must point somewhere disposable.
+    resetLayoutPath();
+    expect(getLayoutPath()).not.toBe(join(homedir(), ".itsybitsy", "layout.json"));
   });
 
   test("saveLayout then loadLayout round-trips", async () => {

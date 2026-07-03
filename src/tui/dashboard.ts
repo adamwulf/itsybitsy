@@ -985,15 +985,6 @@ export class DashboardComponent implements Component {
 
   /** Persist current layout via debounced write. */
   persistLayout() {
-    // [layout-debug] temporary instrumentation — revert after diagnosing
-    try {
-      const { appendFileSync } = require("fs");
-      const { join } = require("path");
-      const { homedir } = require("os");
-      const debugPath = join(homedir(), ".itsybitsy", "layout-debug.log");
-      const stack = (new Error("trace")).stack?.split("\n").slice(2, 5).join(" | ") ?? "";
-      appendFileSync(debugPath, `[${new Date().toISOString()}] persistLayout: sidebar=${this.sidebarWidth} splitLeft=${this.splitPane.getLeftWidth()} offsets=${JSON.stringify(this.sidebar.heightOffsets)} | ${stack}\n`);
-    } catch { /* best effort */ }
     saveLayoutDebounced({
       sidebarWidth: this.sidebarWidth,
       splitPaneLeftWidth: this.splitPane.getLeftWidth(),
@@ -3082,23 +3073,8 @@ export async function launchDashboard(): Promise<void> {
 
   const dashboard = new DashboardComponent();
   const savedLayout = await loadLayout();
-  // [layout-debug] temporary instrumentation — revert after diagnosing
-  try {
-    const { appendFileSync } = await import("fs");
-    const { join } = await import("path");
-    const { homedir } = await import("os");
-    const debugPath = join(homedir(), ".itsybitsy", "layout-debug.log");
-    appendFileSync(debugPath, `[${new Date().toISOString()}] boot: loaded=${JSON.stringify(savedLayout)}\n`);
-  } catch { /* best effort */ }
   if (savedLayout) {
     dashboard.applyLayout(savedLayout);
-    try {
-      const { appendFileSync } = await import("fs");
-      const { join } = await import("path");
-      const { homedir } = await import("os");
-      const debugPath = join(homedir(), ".itsybitsy", "layout-debug.log");
-      appendFileSync(debugPath, `[${new Date().toISOString()}] after applyLayout: sidebar=${dashboard.sidebarWidth} splitLeft=${dashboard.splitPane.getLeftWidth()} offsets=${JSON.stringify(dashboard.sidebar.heightOffsets)}\n`);
-    } catch { /* best effort */ }
   } else {
     // Resize coordinator tmux to match mainWidth when no saved layout exists
     // (applyLayout handles this internally when a layout is restored)

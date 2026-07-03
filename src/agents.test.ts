@@ -1288,6 +1288,39 @@ describe("isRateLimited", () => {
     expect(isRateLimited(output)).toBe(true);
   });
 
+  test("detects codex out-of-usage (real captured sample, wrapped across two lines)", () => {
+    // Real codex out-of-usage message — wraps in the terminal so the ■ glyph +
+    // "You've hit your usage limit" sit on line 1 and "try again at …" on line 2.
+    // The status bar still shows "5h 0% left" etc, so the message text is the
+    // only reliable signal.
+    const output = [
+      "› Improve documentation in @filename",
+      "",
+      "■ You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit",
+      "https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 4:29 AM.",
+      "",
+      "  gpt-5.5 high · Context 88% left · 5h 0% left · weekly 78% left",
+    ].join("\n");
+    expect(isRateLimited(output)).toBe(true);
+  });
+
+  test("codex out-of-usage — apostrophe-agnostic (curly ’ still matches)", () => {
+    // Anchor drops the apostrophe-bearing word ("you've") so a straight vs. curly
+    // apostrophe rendering can't break detection.
+    const output = "■ You’ve hit your usage limit. try again at 4:29 AM.";
+    expect(isRateLimited(output)).toBe(true);
+  });
+
+  test("codex out-of-usage — Plus tier variant (cross-tier stem)", () => {
+    // A different plan tier renders a different upsell ("Upgrade to Plus", no
+    // "purchase more credits") but keeps the stem "hit your usage limit". Locks
+    // in that the anchor is the stable cross-tier stem, not over-fit to the Pro
+    // wording of the original sample. (This variant lives in the repo fixtures:
+    // src/fixtures/codex-snapshot-input-fail-*.txt.)
+    const output = "■ You've hit your usage limit. Upgrade to Plus to continue using Codex\n(https://chatgpt.com/explore/plus), or try again at Jun 6th, 2026 6:01 PM.";
+    expect(isRateLimited(output)).toBe(true);
+  });
+
   test("returns false when no rate limit patterns", () => {
     const output = "line1\nline2\nline3";
     expect(isRateLimited(output)).toBe(false);

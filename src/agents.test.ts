@@ -48,6 +48,7 @@ import {
   sleepMsCtx,
 } from "./agents";
 import type { TransientState, AgentOperation } from "./agents";
+import { stripAnsi } from "./parse-state";
 import { spawnCtx as tmuxPollerSpawnCtx } from "./tmux-poller";
 import type { Agent, AgentMeta, FlatEntry, SpawnedBy } from "./agents";
 import { makeAgent } from "./test-utils";
@@ -1256,8 +1257,10 @@ describe("isCompacting", () => {
     expect(isCompacting(output)).toBe(true);
   });
 
-  test("does not detect compacting beyond last 5 lines", () => {
-    const lines = Array.from({ length: 10 }, (_, i) => `line${i}`);
+  test("does not detect compacting beyond the compacting window", () => {
+    // The window is 10 (sized to clear the TUI chrome below a current banner).
+    // Put the banner at the top of a 12-line buffer → 12th-from-last → out of range.
+    const lines = Array.from({ length: 12 }, (_, i) => `line${i}`);
     lines[0] = "Compacting conversation";
     expect(isCompacting(lines.join("\n"))).toBe(false);
   });
@@ -1561,6 +1564,243 @@ describe("isDeadPane", () => {
   });
   test("returns false for empty input", () => {
     expect(isDeadPane("")).toBe(false);
+  });
+});
+
+// ── is* detectors on tmux -J logical-line captures ──────────────────────────
+// captureTmuxOutput now passes -J, so these detectors receive UNWRAPPED logical
+// lines. A banner that used to soft-wrap across several physical rows is now one
+// long line; the last-N-line windows therefore measure real content. These
+// tests feed realistic -J-shaped (wide, single-line) markers.
+describe("is* detectors on -J logical-line captures", () => {
+  test("isRateLimited detects a wide single-line usage-limit banner", () => {
+    const lines = Array.from({ length: 12 }, () =>
+      "prior agent output that would have wrapped in a physical capture but is one logical line under -J ".repeat(2),
+    );
+    lines.push(
+      "You've hit your limit for the 5-hour window; your limit will reset at 3pm — run /upgrade to increase your usage limit if you need to keep going",
+    );
+    expect(isRateLimited(lines.join("\n"))).toBe(true);
+  });
+
+  test("isApiError detects a wide single-line API Error banner", () => {
+    const lines = Array.from({ length: 12 }, () => "narration ".repeat(20));
+    lines.push(
+      "  ⎿  API Error: Stream idle timeout - partial response received after a very long wait; the connection was closed mid-response and the request will be retried",
+    );
+    expect(isApiError(lines.join("\n"))).toBe(true);
+  });
+
+  test("isApiTerms detects a wide single-line usage-policy refusal", () => {
+    const lines = Array.from({ length: 10 }, () => "narration ".repeat(15));
+    lines.push(
+      "API Error: Claude Code is unable to respond to this request because it appears to violate Anthropic's Usage Policy; see https://www.anthropic.com/legal/aup for details",
+    );
+    expect(isApiTerms(lines.join("\n"))).toBe(true);
+  });
+
+  test("isCompacting requires the marker within the last 10 logical lines (F1 window, chrome-sized)", () => {
+    // F1 tightened the compacting window from the historical 5; the follow-up
+    // fix re-sized it to 10 so it clears the input-box + status-bar chrome below
+    // a CURRENT banner (7 non-blank lines) while still aging out a finished
+    // banner sooner than the old 15. A marker 11+ logical lines back is out of
+    // range; within 10 it matches.
+    const recent = [
+      "Compacting conversation ".repeat(6),
+      ...Array.from({ length: 10 }, (_, i) => `later output line ${i} follows the compaction banner`),
+    ];
+    // Compacting is the 11th-from-last line → out of the last-10 window.
+    expect(isCompacting(recent.join("\n"))).toBe(false);
+
+    // Boundary: a marker exactly 11 logical lines back is OUT under window=10.
+    const justOutside = [
+      "Compacting conversation on a wide logical line under -J",
+      ...Array.from({ length: 10 }, (_, i) => `line ${i}`),
+    ];
+    expect(isCompacting(justOutside.join("\n"))).toBe(false);
+
+    // But when it is within the last 10, it matches on a wide logical line.
+    const recent2 = [
+      "line a",
+      "line b",
+      "Compacting conversation across a very large context window that under -J stays on one logical line",
+      ...Array.from({ length: 7 }, (_, i) => `line ${i}`),
+    ];
+    // Compacting is the 8th-from-last line → inside the last-10 window.
+    expect(isCompacting(recent2.join("\n"))).toBe(true);
+  });
+
+  test("hasBackgroundTasks detects the status bar on a wide logical status line", () => {
+    const lines = Array.from({ length: 12 }, () => "output ".repeat(20));
+    lines.push(
+      "⏵⏵ accept edits on (shift+tab to cycle) · 3 background tasks running in the current session right now",
+    );
+    expect(hasBackgroundTasks(lines.join("\n"))).toBe(true);
+  });
+
+  // ── F1: recovered-agent (false-positive) direction ──────────────────────
+  // The failure F1 identified: under -J one logical line carries more content,
+  // so a finished banner lingered in the old wide windows and could re-classify
+  // (and, for rate_limited, re-nudge) an agent that has already resumed working.
+  // After the F1 tightening the banner ages out of range once enough fresh
+  // logical output has arrived. These tests pin the recovery direction.
+  describe("F1 recovered-agent no longer re-classified once fresh output arrives", () => {
+    test("rate_limited: a usage-limit banner followed by 12 fresh logical lines is NOT rate_limited", () => {
+      // Banner, then 12 logical lines of ordinary work output. The banner is now
+      // the 13th-from-last line → outside the 12-line rate-limit window. The
+      // window widened from F1's original 8 to clear the chrome below a current
+      // banner, so a recovered agent needs a few more fresh lines to age out —
+      // a deliberate trade (a re-nudge is acceptable; a missed rate limit is not).
+      const lines = [
+        "Claude Usage Limit Reached — your limit will reset at 3pm; run /upgrade to increase your usage limit",
+        ...Array.from({ length: 12 }, (_, i) => `fresh work output line ${i} produced after the agent resumed`),
+      ];
+      expect(isRateLimited(lines.join("\n"))).toBe(false);
+    });
+
+    test("rate_limited: a still-current banner within 12 logical lines IS rate_limited", () => {
+      // 11 fresh lines only → banner is the 12th-from-last → still inside the
+      // window, so a genuinely current banner is not missed.
+      const lines = [
+        "Claude Usage Limit Reached — your limit will reset at 3pm; run /upgrade to increase your usage limit",
+        ...Array.from({ length: 11 }, (_, i) => `output line ${i}`),
+      ];
+      expect(isRateLimited(lines.join("\n"))).toBe(true);
+    });
+
+    test("compacting: a compaction banner followed by 10 fresh logical lines is NOT compacting", () => {
+      // Banner is the 11th-from-last → outside the 10-line window.
+      const lines = [
+        "Compacting conversation across a large context window",
+        ...Array.from({ length: 10 }, (_, i) => `fresh output line ${i} after compaction finished`),
+      ];
+      expect(isCompacting(lines.join("\n"))).toBe(false);
+    });
+
+    test("hasBackgroundTasks: a status bar 9 logical lines back is NOT reported", () => {
+      // Under -J a stale ⏵⏵ status bar lingered in the old 15-line window; the
+      // tightened 8-line window drops it once 8 fresh lines have scrolled past.
+      const lines = [
+        "⏵⏵ accept edits on (shift+tab to cycle) · 2 bashes",
+        ...Array.from({ length: 8 }, (_, i) => `later output line ${i}`),
+      ];
+      expect(hasBackgroundTasks(lines.join("\n"))).toBe(false);
+    });
+  });
+
+  // ── F1 follow-up: CURRENT banner behind the live TUI chrome must be caught ──
+  // The false-NEGATIVE the reviewer found: `tmux capture-pane -J -E -` includes
+  // the live TUI chrome (input box + status bar) PLUS trailing blank padding
+  // rows. A CURRENT rate-limit / compacting banner renders ABOVE that chrome,
+  // so it sits ~8 logical lines from the (blank-stripped) tail. The detectors
+  // must (a) strip trailing blanks before slicing and (b) use a window wide
+  // enough to clear the chrome, or a genuinely-current banner is MISSED — worse
+  // than the stale re-nudge F1 set out to avoid. These pin both properties.
+  describe("F1 follow-up: current banner behind TUI chrome is detected", () => {
+    // Realistic chrome shape, taken from src/fixtures/snapshot-idle-prompt-*.txt:
+    // an interior blank separator + input box (top border, ❯ prompt, bottom
+    // border) + three status-bar lines = 7 non-blank lines below any banner.
+    const chrome = [
+      "", // blank separator between the banner and the input box (interior, not stripped)
+      "────────────────────────────────────────────────────────────", // input box top border
+      "❯ ", // input prompt (empty)
+      "────────────────────────────────────────────────────────────", // input box bottom border
+      "  repo | Model: Sonnet 4.6", // status bar line 1
+      "  agent/agent-ac7b5633", // status bar line 2
+      "  ⏵⏵ accept edits on (shift+tab to cycle)", // status bar line 3
+    ];
+    // tmux -E - pads the capture with blank rows below the status bar.
+    const trailingBlanks = ["", "", ""];
+
+    test("isRateLimited: a current usage-limit banner above the chrome IS detected", () => {
+      const capture = [
+        ...Array.from({ length: 20 }, (_, i) => `earlier conversation line ${i}`),
+        "Claude Usage Limit Reached — your limit will reset at 3pm; run /upgrade to increase your usage limit",
+        ...chrome,
+        ...trailingBlanks,
+      ].join("\n");
+      // Banner sits at [-8] after trailing-blank strip; window must clear the chrome.
+      expect(isRateLimited(capture)).toBe(true);
+    });
+
+    test("isRateLimited: a two-line usage-limit banner box above the chrome IS detected", () => {
+      // Some renderings split the banner across a heading + a reset-detail line,
+      // pushing the matched phrase up to [-9]. The window must still catch it.
+      const capture = [
+        ...Array.from({ length: 20 }, (_, i) => `earlier conversation line ${i}`),
+        "Claude Usage Limit Reached",
+        "Your limit will reset at 3pm — run /upgrade to increase your usage limit if you need to keep going",
+        ...chrome,
+        ...trailingBlanks,
+      ].join("\n");
+      expect(isRateLimited(capture)).toBe(true);
+    });
+
+    test("isCompacting: a current compaction banner above the chrome IS detected", () => {
+      const capture = [
+        ...Array.from({ length: 20 }, (_, i) => `earlier conversation line ${i}`),
+        "Compacting conversation",
+        ...chrome,
+        ...trailingBlanks,
+      ].join("\n");
+      // Banner at [-8] after the blank strip → inside the 10-line window.
+      expect(isCompacting(capture)).toBe(true);
+    });
+
+    test("hasBackgroundTasks: a current ⏵⏵ status line survives trailing blank padding", () => {
+      // The ⏵⏵ marker is IN the status bar at the very tail; trailing blank
+      // padding below it must be stripped so the status bar returns to [-1].
+      const capture = [
+        ...Array.from({ length: 20 }, (_, i) => `earlier line ${i}`),
+        "────────────────────────────────────────────────────────────",
+        "❯ ",
+        "────────────────────────────────────────────────────────────",
+        "  repo | Model: Sonnet 4.6",
+        "  agent/agent-ac7b5633",
+        "  ⏵⏵ accept edits on (shift+tab to cycle) · 2 bashes running",
+        ...trailingBlanks,
+      ].join("\n");
+      expect(hasBackgroundTasks(capture)).toBe(true);
+    });
+
+    // Strongest form: splice a current banner into the REAL idle fixture's chrome.
+    test("isRateLimited/isCompacting: current banner spliced into the real idle fixture IS detected", async () => {
+      const fixture = await Bun.file(new URL("fixtures/snapshot-idle-prompt-1.txt", import.meta.url)).text();
+      const fixtureLines = fixture.split("\n");
+
+      // Locate the input-box top border just above the bare "❯ " prompt near the tail.
+      let boxTopIdx = -1;
+      for (let i = fixtureLines.length - 1; i >= 0; i--) {
+        const s = stripAnsi(fixtureLines[i] ?? "").trim();
+        if (/^─+$/.test(s) && stripAnsi(fixtureLines[i + 1] ?? "").trim() === "❯") {
+          boxTopIdx = i;
+          break;
+        }
+      }
+      expect(boxTopIdx).toBeGreaterThan(0); // sanity: found the chrome
+
+      const spliceBanner = (banner: string): string => {
+        const copy = [...fixtureLines];
+        // Insert the banner + a blank separator just above the input-box chrome,
+        // exactly where a live capture would render a current banner.
+        copy.splice(boxTopIdx, 0, banner, "");
+        return copy.join("\n");
+      };
+
+      expect(
+        isRateLimited(
+          spliceBanner("Claude Usage Limit Reached — your limit will reset at 3pm; run /upgrade to increase your usage limit"),
+        ),
+      ).toBe(true);
+      expect(isCompacting(spliceBanner("Compacting conversation"))).toBe(true);
+    });
+
+    // Sanity: the unmodified idle fixture (no banner) must NOT trip either detector.
+    test("isRateLimited/isCompacting: the plain idle fixture is NOT a false positive", async () => {
+      const fixture = await Bun.file(new URL("fixtures/snapshot-idle-prompt-1.txt", import.meta.url)).text();
+      expect(isRateLimited(fixture)).toBe(false);
+      expect(isCompacting(fixture)).toBe(false);
+    });
   });
 });
 

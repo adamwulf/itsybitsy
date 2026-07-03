@@ -583,6 +583,106 @@ describe("TmuxPaneComponent scroll logic", () => {
   });
 });
 
+describe("TmuxPaneComponent word-wrap + memoization", () => {
+  test("getWrapped word-wraps -J logical lines to the pane width", () => {
+    const pane = new TmuxPaneComponent();
+    pane.agent = makeAgent("agent-wrap", "/tmp/test");
+    // A single long logical line (as tmux -J returns it) with spaces — word-wrap
+    // must break at spaces, and every output row must be within width.
+    pane.rawOutput =
+      "the quick brown fox jumps over the lazy dog and then keeps running down the road for a while";
+    const width = 20;
+    const wrapped = pane.getWrapped(width);
+    expect(wrapped.length).toBeGreaterThan(1);
+    for (const row of wrapped) {
+      expect(visibleWidth(row)).toBeLessThanOrEqual(width);
+    }
+    // Word-wrap (not char-wrap): no word straddles a row boundary.
+    expect(wrapped.join(" ").replace(/\s+/g, " ").trim()).toBe(pane.rawOutput);
+  });
+
+  test("getWrapped returns the SAME array on a cache hit (same raw + width)", () => {
+    const pane = new TmuxPaneComponent();
+    pane.agent = makeAgent("agent-memo", "/tmp/test");
+    pane.rawOutput = "some output line that is long enough to wrap at a narrow width here";
+    const first = pane.getWrapped(20);
+    const second = pane.getWrapped(20);
+    // Identity check: a cache hit must not recompute (returns the memoized array).
+    expect(second).toBe(first);
+  });
+
+  test("getWrapped recomputes on a width change (cache miss)", () => {
+    const pane = new TmuxPaneComponent();
+    pane.agent = makeAgent("agent-memo", "/tmp/test");
+    pane.rawOutput = "some output line that is long enough to wrap at a narrow width here";
+    const atTwenty = pane.getWrapped(20);
+    const atForty = pane.getWrapped(40);
+    expect(atForty).not.toBe(atTwenty);
+    // And re-requesting width 20 recomputes (the memo only holds the latest).
+    const atTwentyAgain = pane.getWrapped(20);
+    expect(atTwentyAgain).not.toBe(atTwenty);
+  });
+
+  test("getWrapped recomputes when rawOutput content changes (cache miss)", () => {
+    const pane = new TmuxPaneComponent();
+    pane.agent = makeAgent("agent-memo", "/tmp/test");
+    pane.rawOutput = "first output";
+    const first = pane.getWrapped(20);
+    // Each poll assigns fresh content; `raw === this.rawOutput` (string value
+    // equality) busts the cache when the captured text differs.
+    pane.rawOutput = "second output entirely different";
+    const second = pane.getWrapped(20);
+    expect(second).not.toBe(first);
+    expect(second).not.toEqual(first);
+  });
+
+  test("resetForAgent clears the wrap cache", () => {
+    const pane = new TmuxPaneComponent();
+    pane.agent = makeAgent("agent-memo", "/tmp/test");
+    const raw = "some output line that is long enough to wrap at a narrow width here";
+    pane.rawOutput = raw;
+    const before = pane.getWrapped(20);
+    pane.resetForAgent();
+    // rawOutput is now "" — restore the SAME string object; the cache was
+    // cleared so this must recompute rather than return the stale array.
+    pane.rawOutput = raw;
+    const after = pane.getWrapped(20);
+    expect(after).not.toBe(before);
+    expect(after).toEqual(before);
+  });
+
+  test("render and parseStatusLines share the same memoized wrap (Claude chrome)", () => {
+    // Claude input chrome: two ─ separator lines with a status bar below. Both
+    // render() and parseStatusLines() must wrap identically so the status-line
+    // detection lines up with the rendered output.
+    const pane = new TmuxPaneComponent();
+    pane.agent = makeAgent("agent-claude", "/tmp/test");
+    pane.hasPolled = true;
+    pane.displayHeight = 20;
+    pane.trimInputSeparator = true;
+    pane.rawOutput = [
+      "⏺ Done with the task.",
+      "",
+      "────────────────────",
+      "❯ ",
+      "────────────────────",
+      "  ⏵⏵ accept edits on · 2 background tasks",
+      "",
+    ].join("\n");
+
+    const width = 60;
+    pane.parseStatusLines(width);
+    // Status line (below the lower separator) is surfaced for our input overlay.
+    const statusJoined = pane.statusLines.map((l) => stripAnsi(l)).join("\n");
+    expect(statusJoined).toContain("accept edits on");
+
+    const rendered = pane.render(width).map((l) => stripAnsi(l)).join("\n");
+    // The Claude input chrome (separators + prompt + status bar) is trimmed.
+    expect(rendered).toContain("Done with the task.");
+    expect(rendered).not.toContain("accept edits on");
+  });
+});
+
 describe("RightPaneComponent scroll logic", () => {
   function makeRightPane(contentLines: number, displayHeight: number): RightPaneComponent {
     const pane = new RightPaneComponent();

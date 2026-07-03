@@ -426,4 +426,139 @@ describe("parseState", () => {
       expect(parseState(lines.join("\n")).state).toBe("running");
     });
   });
+
+  // With tmux -J, captures are LOGICAL lines: soft-wrapped continuation rows are
+  // rejoined into one long line. State detection now consumes these unwrapped
+  // buffers. A marker that used to span 2+ physical rows is now a single logical
+  // line, so the last-N-line windows measure real content (not the old wrap
+  // width). These tests feed realistic -J-shaped (long, unwrapped) lines.
+  describe("-J logical-line captures", () => {
+    test("rate-limit banner on one long logical line still classifies rate_limited", () => {
+      // At a narrow width this banner would have wrapped across 2-3 physical
+      // rows; -J keeps it on one logical line at the tail.
+      const lines = Array(10).fill(
+        "some earlier agent output that in physical captures would have soft-wrapped into several rows but is one logical line under -J",
+      );
+      lines.push(
+        "Claude Usage Limit Reached — your limit will reset at 3pm; run /upgrade to increase your usage limit and continue working right now",
+      );
+      expect(parseState(lines.join("\n")).state).toBe("rate_limited");
+    });
+
+    test("completion sentinel on a wide logical line classifies complete", () => {
+      const lines = Array(8).fill(
+        "a wide logical line of agent narration that would previously have wrapped across the pane but is now unwrapped by -J",
+      );
+      lines.push(
+        "Everything is finished and verified end to end — I HAVE COMPLETED THE GOAL",
+      );
+      expect(parseState(lines.join("\n")).state).toBe("complete");
+    });
+
+    test("running interrupt marker on a wide logical line classifies running", () => {
+      const lines = Array(6).fill("narration that is quite wide and unwrapped under -J ".repeat(3));
+      lines.push(
+        "Editing the project file across many modules and rebuilding the whole workspace (Esc to interrupt)",
+      );
+      expect(parseState(lines.join("\n")).state).toBe("running");
+    });
+
+    test("standalone WAITING survives when preceding lines are wide logical lines", () => {
+      // The wide preceding lines don't consume extra window slots the way
+      // physical wrapping did — WAITING stays comfortably inside last-15.
+      const lines = Array(12).fill(
+        "a very wide logical line ".repeat(6),
+      );
+      lines.push("WAITING");
+      expect(parseState(lines.join("\n")).state).toBe("waiting");
+    });
+
+    test("codex idle-at-prompt detected from a -J capture with a wide queued prompt", () => {
+      // Codex can wrap a long typed prompt across many rows; -J rejoins it into
+      // one line. The trailing › prompt + status bar must still read as waiting.
+      const input = [
+        "• Standing by for the next instruction.",
+        "",
+        "› " + "this is a long queued prompt that tmux would have soft-wrapped ".repeat(4),
+        "",
+        "  gpt-5.5 default · /repo",
+      ].join("\n");
+      expect(parseState(input).state).toBe("waiting");
+    });
+
+    // F1 (false-positive direction): a recovered agent whose stale banner has
+    // scrolled far enough back must NOT keep classifying as rate_limited /
+    // compacting. The stale windows are tighter than the historical 15 so a
+    // recovered banner ages out of range sooner under -J. The F1 follow-up
+    // re-sized them (rate-limit → 12, compacting → 10) so they also clear the
+    // input-box + status-bar chrome below a CURRENT banner — a missed current
+    // rate limit / compaction is far worse than a stale re-nudge.
+    test("recovered agent: usage-limit banner past the 12-line window is NOT rate_limited", () => {
+      // Banner, then 12 fresh logical lines of ordinary output → banner is the
+      // 13th-from-last line, outside the rate-limit window.
+      const lines = [
+        "Claude Usage Limit Reached — your limit will reset at 3pm; run /upgrade to increase your usage limit",
+        ...Array.from({ length: 12 }, (_, i) => `fresh work output line ${i} after the agent resumed`),
+      ];
+      expect(parseState(lines.join("\n")).state).not.toBe("rate_limited");
+    });
+
+    test("recovered agent: usage-limit banner still inside the 12-line window IS rate_limited", () => {
+      // Only 11 fresh lines → banner is the 12th-from-last → still current.
+      const lines = [
+        "Claude Usage Limit Reached — your limit will reset at 3pm; run /upgrade to increase your usage limit",
+        ...Array.from({ length: 11 }, (_, i) => `output line ${i}`),
+      ];
+      expect(parseState(lines.join("\n")).state).toBe("rate_limited");
+    });
+
+    test("recovered agent: compaction banner past the 10-line window is NOT compacting", () => {
+      // Banner, then 10 fresh logical lines → banner is 11th-from-last, outside
+      // the compacting window.
+      const lines = [
+        "Compacting conversation across a large context window",
+        ...Array.from({ length: 10 }, (_, i) => `fresh output line ${i} after compaction finished`),
+      ];
+      expect(parseState(lines.join("\n")).state).not.toBe("compacting");
+    });
+
+    // F1 follow-up (false-NEGATIVE direction): a CURRENT banner rendered above
+    // the live TUI chrome must still be caught by the deprecated parseState path
+    // (used by the watchdog's rate-limit bypass retry loop). parseState already
+    // strips trailing blanks via lastNLines, but the stale windows must be wide
+    // enough to clear the ~7 non-blank chrome lines below a current banner.
+    test("current banner behind TUI chrome: parseState → rate_limited", () => {
+      const input = [
+        "╭─ Claude Code ─╮", // startup marker so it is not classified as 'creating'
+        ...Array.from({ length: 20 }, (_, i) => `earlier line ${i}`),
+        "Claude Usage Limit Reached — your limit will reset at 3pm; run /upgrade to increase your usage limit",
+        "", // blank separator
+        "────────────────────────────────────────────────────────────",
+        "❯ ",
+        "────────────────────────────────────────────────────────────",
+        "  repo | Model: Sonnet 4.6",
+        "  agent/agent-ac7b5633",
+        "  ⏵⏵ accept edits on (shift+tab to cycle)",
+        "", "", // trailing padding
+      ].join("\n");
+      expect(parseState(input).state).toBe("rate_limited");
+    });
+
+    test("current banner behind TUI chrome: parseState → compacting", () => {
+      const input = [
+        "╭─ Claude Code ─╮",
+        ...Array.from({ length: 20 }, (_, i) => `earlier line ${i}`),
+        "Compacting conversation",
+        "",
+        "────────────────────────────────────────────────────────────",
+        "❯ ",
+        "────────────────────────────────────────────────────────────",
+        "  repo | Model: Sonnet 4.6",
+        "  agent/agent-ac7b5633",
+        "  ⏵⏵ accept edits on (shift+tab to cycle)",
+        "", "",
+      ].join("\n");
+      expect(parseState(input).state).toBe("compacting");
+    });
+  });
 });

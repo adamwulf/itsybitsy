@@ -38,7 +38,7 @@ import {
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { isCodexStatusLine, stripAnsi } from "../parse-state";
 import { SplitPane } from "./split-pane";
-import { wrapLines, wordWrapLines, padLines, findLastTwoSeparators } from "./wrap";
+import { wordWrapLines, padLines, findLastTwoSeparators, WordWrapCache } from "./wrap";
 import { fetchCodexUsage, fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
@@ -121,8 +121,26 @@ export class TmuxPaneComponent implements Component {
   statusLines: string[] = [];
   /** When true, render output without requiring an agent (used for coordinator) */
   agentless = false;
+  /**
+   * Memoized word-wrap of rawOutput (the UNWRAPPED logical -J capture) keyed on
+   * (raw identity, width). Both render() and parseStatusLines() run several
+   * times between polls (input-field height, status-line count, then the actual
+   * render), so caching keeps repeated renders O(1). onOutput assigns a fresh
+   * string every poll, so an identity check on rawOutput invalidates correctly.
+   */
+  private wrapCache = new WordWrapCache();
 
   invalidate(): void {}
+
+  /**
+   * Word-wrap rawOutput to `width`, reusing the memoized result when neither the
+   * raw output nor the width changed since the last call. Uses word-wrap (break
+   * at spaces, hard-wrap over-width tokens) so the whole -J logical buffer
+   * renders at one consistent width.
+   */
+  getWrapped(width: number): string[] {
+    return this.wrapCache.get(this.rawOutput, width);
+  }
 
   /** Reset state when switching agents */
   resetForAgent() {
@@ -130,6 +148,7 @@ export class TmuxPaneComponent implements Component {
     this.hasPolled = false;
     this.scrollBack = 0;
     this.clientAttached = false;
+    this.wrapCache.reset();
   }
 
   scrollUp(amount = 1) {
@@ -149,7 +168,7 @@ export class TmuxPaneComponent implements Component {
     this.statusLines = [];
     if (!this.trimInputSeparator || !this.rawOutput) return;
 
-    const wrapped = wrapLines(this.rawOutput, width);
+    const wrapped = this.getWrapped(width);
 
     // Codex emits full-width ─ section dividers between output blocks, so
     // findLastTwoSeparators (designed for Claude's input chrome) routinely
@@ -248,8 +267,10 @@ export class TmuxPaneComponent implements Component {
       ], this.displayHeight);
     }
 
-    // Wrap lines to pane width
-    let wrapped = wrapLines(this.rawOutput, width);
+    // Word-wrap logical lines to pane width (memoized). rawOutput is tmux -J
+    // output — soft-wrapped continuation lines already rejoined — so this is the
+    // single place the whole buffer gets wrapped to the current width.
+    let wrapped = this.getWrapped(width);
 
     // When showing our own input field, trim the CLI's native input area.
     // Claude's input area has two separator lines made of ─ characters, so we
@@ -744,6 +765,15 @@ export class DashboardComponent implements Component {
   /** Width of the main area (middle + inner-separator + right). */
   getMainWidth(): number {
     return getLiveMainWidth(this.liveLayout());
+  }
+
+  /**
+   * Width the center tmux pane renders at — the split's left-pane width. The `S`
+   * snapshot (agentActions.handleSnapshot) uses this to word-wrap the captured
+   * output to the same width the user sees on screen.
+   */
+  getSnapshotPaneWidth(): number {
+    return getLiveLeftPaneWidth(this.liveLayout());
   }
 
   /**
@@ -1506,9 +1536,7 @@ export class DashboardComponent implements Component {
       const tmuxSession = coordAgent?.meta.tmux_session ?? null;
       if (tmuxSession !== this.repoCoordinatorSession) {
         this.repoCoordinatorSession = tmuxSession;
-        this.rightPane.repoCoordinatorOutput = null;
-        this.rightPane.repoCoordinatorHasPolled = false;
-        this.rightPane.repoCoordinatorScrollBack = 0;
+        this.rightPane.resetRepoCoordinator();
         this.repoCoordinatorPoller.setAgent(tmuxSession);
         // Resize repo coordinator tmux to mainWidth — per-repo coordinators render
         // full-pane (same behavior as the system coordinator), not right-pane-only.
@@ -1523,9 +1551,7 @@ export class DashboardComponent implements Component {
       this.infoPanel.repoCoordinatorAgent = null;
       if (this.repoCoordinatorSession) {
         this.repoCoordinatorSession = null;
-        this.rightPane.repoCoordinatorOutput = null;
-        this.rightPane.repoCoordinatorHasPolled = false;
-        this.rightPane.repoCoordinatorScrollBack = 0;
+        this.rightPane.resetRepoCoordinator();
         this.repoCoordinatorPoller.setAgent(null);
       }
     }

@@ -111,8 +111,18 @@ export function wordWrapSingleLine(line: string, width: number): string[] {
   for (const token of tokens) {
     const tokenW = visibleWidth(token);
 
-    // Skip spaces at the start of a new line
-    if (token === " " && lineWidth === 0) continue;
+    // Skip spaces at the start of a CONTINUATION line (after a wrap point).
+    // On the FIRST physical row (chunks.length === 0) we do NOT skip leading
+    // spaces, so row 1 preserves its original leading indent WHEN the indent
+    // plus the first word fit the width. (Dropping the indent would strip the
+    // left margin off indented code and Claude's "  ⎿ " tool-result lines — the
+    // panes this reflow set out to fix; those short-prefix lines always fit.)
+    // This is not an absolute guarantee: if the indent plus a first token wider
+    // than the width overflows row 1, that token still hard-wraps from the left
+    // (below) and the indent is not carried onto its wrapped rows — the same
+    // behavior as the pre-reflow code. An all-spaces line, or an indent >= width,
+    // falls out the same way.
+    if (token === " " && lineWidth === 0 && chunks.length > 0) continue;
 
     // If adding this token would exceed width
     if (lineWidth + tokenW > width) {
@@ -152,6 +162,40 @@ export function wordWrapLines(text: string, width: number): string[] {
     result.push(...wordWrapSingleLine(line, width));
   }
   return result;
+}
+
+/**
+ * Small memoized word-wrap cache shared by the tmux panes (the center
+ * TmuxPaneComponent and the per-repo coordinator pane). rawOutput is the
+ * UNWRAPPED logical capture (tmux -J); word-wrapping it to the pane width is
+ * the per-poll cost. Render passes run several times between polls, so we
+ * cache the wrapped form keyed on (raw identity, width). Each poll assigns a
+ * fresh string to the source, so an identity check on `raw` is a correct
+ * cache-invalidation key.
+ */
+export class WordWrapCache {
+  private cache: { raw: string; width: number; wrapped: string[] } | null = null;
+
+  /**
+   * Word-wrap `raw` to `width`, reusing the memoized result when neither the
+   * raw output nor the width changed since the last call. Uses word-wrap (break
+   * at spaces, hard-wrap over-width tokens) so the whole -J logical buffer
+   * renders at one consistent width — the same path as the center pane.
+   */
+  get(raw: string, width: number): string[] {
+    const cache = this.cache;
+    if (cache && cache.raw === raw && cache.width === width) {
+      return cache.wrapped;
+    }
+    const wrapped = wordWrapLines(raw, width);
+    this.cache = { raw, width, wrapped };
+    return wrapped;
+  }
+
+  /** Drop the memoized result (call when the source is reset/cleared). */
+  reset(): void {
+    this.cache = null;
+  }
 }
 
 /**

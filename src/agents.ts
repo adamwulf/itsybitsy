@@ -7,7 +7,7 @@ import { join } from "path";
 import { readdir, rename, stat, unlink, open } from "fs/promises";
 import { randomUUID } from "crypto";
 import type { AgentState } from "./parse-state";
-import { parseState, stripAnsi, STARTUP_MARKERS } from "./parse-state";
+import { parseState, stripAnsi, stripTrailingBlanks, STARTUP_MARKERS } from "./parse-state";
 import { captureTmuxOutput, killTmuxSession, listTmuxSessions } from "./tmux-poller";
 import { InjectionContext } from "./types";
 import { logToWatchLog, logWarning } from "./watch-log";
@@ -595,13 +595,36 @@ export async function readAgentState(agentDir: string): Promise<MetaState | unde
 // A banner that has finished (rate-limit / compacting / background tasks) thus
 // lingered in the old fixed windows (5 / 15 / 15) for longer wall-clock and
 // could re-classify an already-recovered agent — for rate_limited that means
-// the watchdog re-nudges a working agent. We halve these stale-sensitive
-// windows so a recovered banner ages out of range sooner. Each of these
-// banners renders on a single line, so the tighter windows still MATCH a
-// current banner. These are deliberately NOT shared with the running / waiting
-// detectors, whose windows stay wide to avoid false negatives.
-const COMPACTING_WINDOW = 3; // was 5
-const RATE_LIMIT_WINDOW = 8; // was 15
+// the watchdog re-nudges a working agent. We tighten these stale-sensitive
+// windows so a recovered banner ages out of range sooner. These are
+// deliberately NOT shared with the running / waiting detectors, whose windows
+// stay wide to avoid false negatives.
+//
+// CHROME SIZING (F1 follow-up — the crux of this fix): a CURRENT banner does
+// NOT sit at the very tail. Captures use `tmux capture-pane -J -E -`, whose
+// tail is the live TUI chrome + trailing blank padding rows. `stripTrailingBlanks`
+// (below) removes the padding, but the chrome remains BELOW a current banner.
+// Counting the real chrome from `src/fixtures/snapshot-idle-prompt-*.txt`, an
+// idle Claude pane has SEVEN non-blank logical lines under a banner:
+//   [-7] interior blank separator (NOT trailing → not stripped)
+//   [-6] input box top border
+//   [-5] `❯ ` prompt line
+//   [-4] input box bottom border
+//   [-3] status bar line 1 (repo | Model …)
+//   [-2] status bar line 2 (branch)
+//   [-1] status bar line 3 (⏵⏵ accept edits …)
+// so a single-line banner lands at [-8] and a two-line banner box at [-9]. The
+// original F1 windows (3 / 8) were sized as if a banner rendered at the tail;
+// with the chrome between banner and tail they MISS a genuinely-current banner
+// — a false NEGATIVE (a missed active rate limit / compaction), which is worse
+// than the false-positive F1 set out to reduce. We therefore size each window
+// to clear (chrome + separator + banner) with a small margin for banner boxes
+// or an extra chrome line, while staying tighter than the historical 15.
+const COMPACTING_WINDOW = 10; // was 5/3; 7 chrome + 1-line "Compacting conversation" + margin
+const RATE_LIMIT_WINDOW = 12; // was 15/8; 7 chrome + multi-line usage-limit box + margin
+// Background tasks keep 8: the ⏵⏵ marker lives IN the status bar at [-1] (part
+// of the chrome, not above it), so any window catches it once trailing blanks
+// are stripped. 8 is retained only to match the pre-fix value and stay tight.
 const BACKGROUND_TASKS_WINDOW = 8; // was 15
 
 /**
@@ -615,11 +638,13 @@ const BACKGROUND_TASKS_WINDOW = 8; // was 15
  */
 export function isCompacting(tmuxOutput: string): boolean {
   const stripped = stripAnsi(tmuxOutput);
-  const lines = stripped.split("\n");
-  // F1: tighter window (3, was 5). Under -J each line carries more content, so
-  // a finished "Compacting conversation" banner lingered in the old 5-line
-  // window longer and could keep re-classifying a resumed agent as compacting.
-  // Compacting renders as a single line, so 3 still catches a current banner.
+  // Strip trailing blank padding rows BEFORE slicing so the window measures real
+  // content, not the blank rows tmux -E - appends below the TUI chrome. Without
+  // this, the window is consumed by blanks + chrome and a current "Compacting
+  // conversation" banner (which renders above the chrome) falls out of range.
+  const lines = stripTrailingBlanks(stripped.split("\n"));
+  // Window sized to clear the input-box + status-bar chrome below a current
+  // banner — see the COMPACTING_WINDOW sizing note above.
   const tail = lines.slice(-COMPACTING_WINDOW).join("\n");
   return tail.includes("Compacting conversation");
 }
@@ -635,12 +660,14 @@ export function isCompacting(tmuxOutput: string): boolean {
  */
 export function isRateLimited(tmuxOutput: string): boolean {
   const stripped = stripAnsi(tmuxOutput);
-  const lines = stripped.split("\n");
-  // F1: tighter window (8, was 15). A usage-limit banner is a single logical
-  // line under -J, so 8 still matches a current banner while letting a
-  // recovered one age out of range sooner — this predicate directly drives
-  // the watchdog's rate_limited classification and re-nudge, so a stale banner
-  // lingering in a too-wide window could re-nudge an already-resumed agent.
+  // Strip trailing blank padding rows BEFORE slicing (see isCompacting) so the
+  // window isn't spent on blanks + chrome and a current usage-limit banner that
+  // renders above the chrome stays in range. This predicate directly drives the
+  // watchdog's rate_limited classification, so a MISSED current banner is the
+  // worst outcome — the window is sized to always clear the chrome below one.
+  const lines = stripTrailingBlanks(stripped.split("\n"));
+  // Window sized to clear the input-box + status-bar chrome below a current
+  // banner — see the RATE_LIMIT_WINDOW sizing note above.
   const tail = lines.slice(-RATE_LIMIT_WINDOW).join("\n");
 
   if (tail.includes("rate_limit_error")) return true;
@@ -675,7 +702,11 @@ export function isRateLimited(tmuxOutput: string): boolean {
  */
 export function isApiError(tmuxOutput: string): boolean {
   const stripped = stripAnsi(tmuxOutput);
-  const lines = stripped.split("\n");
+  // Strip trailing blank padding rows before slicing (see isCompacting) so the
+  // 15-line window measures real content, not the blanks + chrome tmux -E -
+  // appends. Both the retry-countdown continuation branch and the main
+  // API-Error match below share this blank-stripped `last15`. Window stays 15.
+  const lines = stripTrailingBlanks(stripped.split("\n"));
   const last15 = lines.slice(-15).join("\n");
 
   // Claude's retry-countdown line after a "please retry" nudge:
@@ -724,7 +755,8 @@ export function isApiError(tmuxOutput: string): boolean {
  */
 export function isApiErrorRateLimited(tmuxOutput: string): boolean {
   const stripped = stripAnsi(tmuxOutput);
-  const lines = stripped.split("\n");
+  // Strip trailing blank padding rows before slicing (see isCompacting). Window stays 15.
+  const lines = stripTrailingBlanks(stripped.split("\n"));
   const last15 = lines.slice(-15).join("\n");
   // Intentional divergence from isApiError: this predicate is ⎿-only. The
   // "temporarily limiting requests" variant has only ever been observed with
@@ -748,7 +780,8 @@ export function isApiErrorRateLimited(tmuxOutput: string): boolean {
  */
 export function isApiTerms(tmuxOutput: string): boolean {
   const stripped = stripAnsi(tmuxOutput);
-  const lines = stripped.split("\n");
+  // Strip trailing blank padding rows before slicing (see isCompacting). Window stays 15.
+  const lines = stripTrailingBlanks(stripped.split("\n"));
   const last15 = lines.slice(-15).join("\n");
   if (!/API Error:.*Claude Code is unable to respond/i.test(last15)) return false;
   return /usage policy/i.test(last15) || /\/legal\/aup/i.test(last15);
@@ -760,10 +793,13 @@ export function isApiTerms(tmuxOutput: string): boolean {
  */
 export function hasBackgroundTasks(tmuxOutput: string): boolean {
   const stripped = stripAnsi(tmuxOutput);
-  const lines = stripped.split("\n");
-  // F1: tighter window (8, was 15). The ⏵⏵ background-task indicator lives in
-  // the status bar at the very tail; under -J a stale one lingered longer in a
-  // 15-line window. The status bar is a single line, so 8 still catches it.
+  // Strip trailing blank padding rows before slicing (see isCompacting). This is
+  // ESSENTIAL here, not just consistent: the ⏵⏵ status line is the LAST non-blank
+  // line, so tmux -E - blank padding below it would otherwise push it toward the
+  // top of an un-stripped window (or out of it). Stripping trailing blanks brings
+  // the status bar back to [-1]; the strip removes only blanks below the bar, never
+  // the bar itself (the bar is non-blank). Window stays 8.
+  const lines = stripTrailingBlanks(stripped.split("\n"));
   const tail = lines.slice(-BACKGROUND_TASKS_WINDOW).join("\n");
   return /⏵⏵.*·\s\d+\s/.test(tail);
 }

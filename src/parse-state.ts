@@ -45,13 +45,22 @@ const BROAD_WINDOW = 20;
 // once a banner is on screen it lingers as the agent scrolls past it. Under
 // -J each logical line holds more than an old physical row, so the same
 // last-N-line window now spans MORE content and a recovered banner lingers
-// in range longer, which can re-nudge an already-resumed agent. These two
-// checks therefore use tighter, dedicated windows so a recovered banner
-// leaves the window sooner. They must still be wide enough to MATCH a banner
-// that is current (a usage-limit banner is a single logical line under -J;
-// compacting is one line), so we keep a small margin rather than 1.
-const COMPACTING_STALE_WINDOW = 3; // was RECENT_WINDOW (5)
-const RATE_LIMIT_STALE_WINDOW = 8; // was STANDARD_WINDOW (15)
+// in range longer, which can re-nudge an already-resumed agent. These checks
+// therefore use tighter, dedicated windows than the historical 15 so a
+// recovered banner leaves the window sooner.
+//
+// CRUCIAL SIZING CONSTRAINT (F1 follow-up): a CURRENT banner does not render at
+// the very tail — it renders ABOVE the live TUI chrome. In a `-J -E -` capture
+// the tail below a current banner is, after `lastNLines`/`stripTrailingBlanks`
+// removes the padding rows, SEVEN non-blank logical lines: an interior blank
+// separator + the input box (top border, `❯` prompt, bottom border) + the
+// three status-bar lines. A single-line banner therefore sits at [-8] and a
+// two-line banner box at [-9]. The window must clear (chrome + separator +
+// banner) so a current banner is NEVER missed — a MISSED rate limit / compaction
+// is far worse than re-nudging a recovered agent. We size with a small margin
+// for banner boxes / an extra chrome line, staying comfortably under the old 15.
+const COMPACTING_STALE_WINDOW = 10; // was RECENT_WINDOW (5); 7 chrome + 1-line banner + margin
+const RATE_LIMIT_STALE_WINDOW = 12; // was STANDARD_WINDOW (15); 7 chrome + multi-line banner box + margin
 
 /** Strip ANSI escape sequences from text */
 export function stripAnsi(text: string): string {
@@ -59,8 +68,18 @@ export function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?(\x07|\x1b\\)|\x1b_.*?\x07|\x1b[()][AB012]/g, "");
 }
 
-/** Strip trailing blank/whitespace-only lines from an array of lines */
-function stripTrailingBlanks(lines: string[]): string[] {
+/**
+ * Strip trailing blank/whitespace-only lines from an array of lines.
+ *
+ * Exported so `src/agents.ts`'s sticky-banner detectors share this ONE
+ * implementation rather than each re-deriving a trailing-blank strip. tmux
+ * `capture-pane -J -E -` appends blank padding rows below the live TUI chrome
+ * (input box + status bar), so a last-N-line slice taken WITHOUT this strip
+ * spends its window on trailing blanks and can miss a current banner that
+ * renders above the chrome. Keep this the single source of truth for both
+ * files so the two paths can't drift.
+ */
+export function stripTrailingBlanks(lines: string[]): string[] {
   let end = lines.length;
   while (end > 0 && (lines[end - 1] ?? "").trim() === "") {
     end--;
@@ -205,8 +224,9 @@ export function parseStateForCli(input: string, cli: AgentCli): ParseStateResult
  * capture-pane -J`, so the input is LOGICAL lines (soft-wrapped rows rejoined,
  * trailing spaces preserved) rather than physical terminal rows, and the
  * stale-sensitive windows were tightened accordingly (compacting via
- * COMPACTING_STALE_WINDOW=3, rate-limit via RATE_LIMIT_STALE_WINDOW=8; the
- * generic running/waiting/complete windows stay at RECENT/STANDARD/BROAD).
+ * COMPACTING_STALE_WINDOW=10, rate-limit via RATE_LIMIT_STALE_WINDOW=12 — both
+ * still wide enough to clear the TUI chrome below a current banner; the generic
+ * running/waiting/complete windows stay at RECENT/STANDARD/BROAD).
  * See SPEC.md §1.3 "Capture unit — logical lines (-J)".
  *
  * @deprecated Legacy — no longer used for primary state detection. State is now determined
@@ -257,10 +277,12 @@ export function parseClaudeState(input: string): ParseStateResult {
   // Checked before running since compacting also shows "(esc to interrupt)"
   // Uses the tighter COMPACTING_STALE_WINDOW (F1) so a finished "Compacting
   // conversation" banner leaves the window quickly and doesn't keep the agent
-  // pinned to compacting after it has resumed.
+  // pinned to compacting after it has resumed — but the window is still wide
+  // enough to clear the input-box + status-bar chrome below a CURRENT banner
+  // (see the COMPACTING_STALE_WINDOW sizing note).
   const compactingWindow = lastNLines(input, COMPACTING_STALE_WINDOW);
   if (compactingWindow.includes("Compacting conversation")) {
-    return { state: "compacting", reason: "Compacting conversation in last 3 lines" };
+    return { state: "compacting", reason: "Compacting conversation in compacting window" };
   }
 
   // Active running indicators in last 5 lines — checked BEFORE tool waiting
@@ -275,10 +297,11 @@ export function parseClaudeState(input: string): ParseStateResult {
     return { state: "waiting", reason: "tool waiting (⎿ Waiting)" };
   }
 
-  // Rate limit checks — uses the tighter RATE_LIMIT_STALE_WINDOW (F1). A
-  // usage-limit banner is a single logical line under -J, so a window of 8
-  // still catches a current banner while letting a recovered one age out of
-  // range faster than the old 15-line window did.
+  // Rate limit checks — uses the tighter RATE_LIMIT_STALE_WINDOW (F1). The
+  // window still clears the input-box + status-bar chrome below a CURRENT
+  // usage-limit banner (single- or multi-line box) so a current banner is
+  // never missed, while letting a recovered one age out of range faster than
+  // the old 15-line window did (see the RATE_LIMIT_STALE_WINDOW sizing note).
   const rateLimitWindow = lastNLines(input, RATE_LIMIT_STALE_WINDOW);
   if (rateLimitWindow.includes("rate_limit_error")) {
     return { state: "rate_limited", reason: "rate_limit_error in output" };

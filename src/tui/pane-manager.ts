@@ -432,8 +432,13 @@ export class RightPaneComponent implements Component {
     // The poller now delivers -J logical lines; word-wrap them (same path as the
     // center TmuxPaneComponent) so long lines break at spaces rather than
     // mid-word, memoized on (raw, width) so re-renders between polls are O(1).
-    const wrapped = this.repoCoordinatorWrapCache.get(this.repoCoordinatorOutput!, width);
-    // Trim trailing blank lines
+    // WordWrapCache.get() hands back the SAME array it memoizes, so copy it
+    // before trimming — the trailing-blank pop() below must not mutate the
+    // cached array (a later render at the same width would then see a
+    // truncated buffer). The center TmuxPaneComponent copies via slice() for
+    // the same reason; keep both consumers non-mutating.
+    const wrapped = this.repoCoordinatorWrapCache.get(this.repoCoordinatorOutput!, width).slice();
+    // Trim trailing blank lines (operates on the copy, not the cached array)
     while (wrapped.length > 0 && wrapped[wrapped.length - 1]!.trim() === "") {
       wrapped.pop();
     }

@@ -425,6 +425,35 @@ describe("REPO mode with coordinator", () => {
     expect(rp.repoCoordinatorOutput).toBeNull();
   });
 
+  test("renderRepoCoordinatorSection does NOT mutate the cached wrap array (trailing-blank trim copies first)", () => {
+    // CLEANUP 2: the coordinator pane trims trailing blank lines with pop(). It
+    // must copy the array WordWrapCache hands back before popping — otherwise it
+    // truncates the cached buffer in place, and a later render at the same width
+    // sees a buffer that is already missing its trailing rows.
+    const rp = new RightPaneComponent();
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    rp.repoCoordinatorHasPolled = true;
+    // Output with trailing blank rows (as tmux -E - pads the capture).
+    rp.repoCoordinatorOutput = "coordinator line one\ncoordinator line two\n\n\n";
+    const width = 30;
+
+    // Reach into the shared cache (private) to observe the memoized array length.
+    const cache = (rp as any).repoCoordinatorWrapCache as { get(raw: string, w: number): string[] };
+
+    rp.renderRepoCoordinatorSection(width, 12, false);
+    const cachedAfterFirst = cache.get(rp.repoCoordinatorOutput!, width);
+    const lenAfterFirst = cachedAfterFirst.length;
+
+    // Render again at the same width — if the first render popped the cached
+    // array in place, this would keep shrinking it.
+    rp.renderRepoCoordinatorSection(width, 12, false);
+    const cachedAfterSecond = cache.get(rp.repoCoordinatorOutput!, width);
+
+    // The cached array must still carry its trailing blank rows (not popped).
+    expect(cachedAfterSecond.length).toBe(lenAfterFirst);
+    expect(cachedAfterSecond[cachedAfterSecond.length - 1]!.trim()).toBe("");
+  });
+
   test("REPO mode renders split view when coordinator exists", () => {
     const rp = new RightPaneComponent();
     rp.displayHeight = 20;

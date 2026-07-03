@@ -112,10 +112,16 @@ export function wordWrapSingleLine(line: string, width: number): string[] {
     const tokenW = visibleWidth(token);
 
     // Skip spaces at the start of a CONTINUATION line (after a wrap point).
-    // The FIRST physical row (chunks.length === 0) must keep its original
-    // leading indentation — dropping it here would strip the left margin off
-    // over-width indented code and Claude's "  ⎿ " tool-result continuation
-    // lines, the exact panes this reflow set out to fix.
+    // On the FIRST physical row (chunks.length === 0) we do NOT skip leading
+    // spaces, so row 1 preserves its original leading indent WHEN the indent
+    // plus the first word fit the width. (Dropping the indent would strip the
+    // left margin off indented code and Claude's "  ⎿ " tool-result lines — the
+    // panes this reflow set out to fix; those short-prefix lines always fit.)
+    // This is not an absolute guarantee: if the indent plus a first token wider
+    // than the width overflows row 1, that token still hard-wraps from the left
+    // (below) and the indent is not carried onto its wrapped rows — the same
+    // behavior as the pre-reflow code. An all-spaces line, or an indent >= width,
+    // falls out the same way.
     if (token === " " && lineWidth === 0 && chunks.length > 0) continue;
 
     // If adding this token would exceed width

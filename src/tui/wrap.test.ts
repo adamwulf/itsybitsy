@@ -252,11 +252,15 @@ describe("wordWrapSingleLine", () => {
     expect(result.join(" ")).toBe(line);
   });
 
-  // F2: leading indentation on the FIRST physical row must survive the wrap.
-  // Continuation rows keep the old behavior (leading spaces after a wrap point
-  // are still consumed), but dropping the indent off row 1 was a visible
-  // regression for indented code and "  ⎿ " tool-result continuation lines.
-  describe("preserves leading indentation on the first row", () => {
+  // F2: leading indentation on the FIRST physical row survives the wrap WHEN
+  // the indent plus the first word fit the width. Continuation rows keep the old
+  // behavior (leading spaces after a wrap point are still consumed). This is not
+  // an absolute guarantee: if the indent plus a first token wider than the width
+  // overflows row 1, the token hard-wraps from the left and the indent is not
+  // carried — same as the pre-reflow code. The panes this reflow targeted
+  // (indented code, "  ⎿ " tool-result lines) always have a short-enough prefix
+  // to fit, so they preserve their indent; the exception is covered below.
+  describe("preserves leading indentation on the first row when the indent+first word fit", () => {
     test("over-width indented code keeps its 4-space indent on row 1", () => {
       const line = "    const foo = bar + baz + qux + longer;";
       const result = wordWrapSingleLine(line, 20);
@@ -288,6 +292,19 @@ describe("wordWrapSingleLine", () => {
       const line = "    short indented line";
       const result = wordWrapSingleLine(line, 40);
       expect(result).toEqual([line]);
+    });
+
+    test("indent is NOT preserved when indent + an over-width first token overflows row 1", () => {
+      // Documents the boundary of the row-1 guarantee (CLEANUP 3): when the
+      // leading indent plus a first token wider than the width overflows, that
+      // token hard-wraps from the left and the indent is dropped — the same
+      // behavior as the pre-reflow code, not a regression. The targeted panes
+      // ("  ⎿ ", indented code) never hit this because their prefix fits.
+      const line = "      supercalifragilisticexpialidocious tail";
+      const result = wordWrapSingleLine(line, 12);
+      expect(result.length).toBeGreaterThan(1);
+      // Row 1 does NOT keep the 6-space indent — the over-width token wraps left.
+      expect(result[0]!.startsWith("      ")).toBe(false);
     });
   });
 });

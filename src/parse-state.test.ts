@@ -488,35 +488,77 @@ describe("parseState", () => {
 
     // F1 (false-positive direction): a recovered agent whose stale banner has
     // scrolled far enough back must NOT keep classifying as rate_limited /
-    // compacting. The windows were tightened (rate-limit 15→8, compacting 5→3)
-    // so a recovered banner ages out of range sooner under -J.
-    test("recovered agent: usage-limit banner past the 8-line window is NOT rate_limited", () => {
-      // Banner, then 8 fresh logical lines of ordinary output → banner is the
-      // 9th-from-last line, outside the tightened rate-limit window.
+    // compacting. The stale windows are tighter than the historical 15 so a
+    // recovered banner ages out of range sooner under -J. The F1 follow-up
+    // re-sized them (rate-limit → 12, compacting → 10) so they also clear the
+    // input-box + status-bar chrome below a CURRENT banner — a missed current
+    // rate limit / compaction is far worse than a stale re-nudge.
+    test("recovered agent: usage-limit banner past the 12-line window is NOT rate_limited", () => {
+      // Banner, then 12 fresh logical lines of ordinary output → banner is the
+      // 13th-from-last line, outside the rate-limit window.
       const lines = [
         "Claude Usage Limit Reached — your limit will reset at 3pm; run /upgrade to increase your usage limit",
-        ...Array.from({ length: 8 }, (_, i) => `fresh work output line ${i} after the agent resumed`),
+        ...Array.from({ length: 12 }, (_, i) => `fresh work output line ${i} after the agent resumed`),
       ];
       expect(parseState(lines.join("\n")).state).not.toBe("rate_limited");
     });
 
-    test("recovered agent: usage-limit banner still inside the 8-line window IS rate_limited", () => {
-      // Only 7 fresh lines → banner is the 8th-from-last → still current.
+    test("recovered agent: usage-limit banner still inside the 12-line window IS rate_limited", () => {
+      // Only 11 fresh lines → banner is the 12th-from-last → still current.
       const lines = [
         "Claude Usage Limit Reached — your limit will reset at 3pm; run /upgrade to increase your usage limit",
-        ...Array.from({ length: 7 }, (_, i) => `output line ${i}`),
+        ...Array.from({ length: 11 }, (_, i) => `output line ${i}`),
       ];
       expect(parseState(lines.join("\n")).state).toBe("rate_limited");
     });
 
-    test("recovered agent: compaction banner past the 3-line window is NOT compacting", () => {
-      // Banner, then 3 fresh logical lines → banner is 4th-from-last, outside
-      // the tightened compacting window.
+    test("recovered agent: compaction banner past the 10-line window is NOT compacting", () => {
+      // Banner, then 10 fresh logical lines → banner is 11th-from-last, outside
+      // the compacting window.
       const lines = [
         "Compacting conversation across a large context window",
-        ...Array.from({ length: 3 }, (_, i) => `fresh output line ${i} after compaction finished`),
+        ...Array.from({ length: 10 }, (_, i) => `fresh output line ${i} after compaction finished`),
       ];
       expect(parseState(lines.join("\n")).state).not.toBe("compacting");
+    });
+
+    // F1 follow-up (false-NEGATIVE direction): a CURRENT banner rendered above
+    // the live TUI chrome must still be caught by the deprecated parseState path
+    // (used by the watchdog's rate-limit bypass retry loop). parseState already
+    // strips trailing blanks via lastNLines, but the stale windows must be wide
+    // enough to clear the ~7 non-blank chrome lines below a current banner.
+    test("current banner behind TUI chrome: parseState → rate_limited", () => {
+      const input = [
+        "╭─ Claude Code ─╮", // startup marker so it is not classified as 'creating'
+        ...Array.from({ length: 20 }, (_, i) => `earlier line ${i}`),
+        "Claude Usage Limit Reached — your limit will reset at 3pm; run /upgrade to increase your usage limit",
+        "", // blank separator
+        "────────────────────────────────────────────────────────────",
+        "❯ ",
+        "────────────────────────────────────────────────────────────",
+        "  repo | Model: Sonnet 4.6",
+        "  agent/agent-ac7b5633",
+        "  ⏵⏵ accept edits on (shift+tab to cycle)",
+        "", "", // trailing padding
+      ].join("\n");
+      expect(parseState(input).state).toBe("rate_limited");
+    });
+
+    test("current banner behind TUI chrome: parseState → compacting", () => {
+      const input = [
+        "╭─ Claude Code ─╮",
+        ...Array.from({ length: 20 }, (_, i) => `earlier line ${i}`),
+        "Compacting conversation",
+        "",
+        "────────────────────────────────────────────────────────────",
+        "❯ ",
+        "────────────────────────────────────────────────────────────",
+        "  repo | Model: Sonnet 4.6",
+        "  agent/agent-ac7b5633",
+        "  ⏵⏵ accept edits on (shift+tab to cycle)",
+        "", "",
+      ].join("\n");
+      expect(parseState(input).state).toBe("compacting");
     });
   });
 });

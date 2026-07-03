@@ -95,15 +95,17 @@ State detection is deterministic — the stop hook writes authoritative state to
 2. **No tmux session** → `stopped`, unless `created_epoch` is less than 6 seconds ago → `creating`. The 6-second grace period (`CREATING_GRACE_PERIOD_MS`) is purely time-derived from `created_epoch` in meta.json — not written as a state value.
 
 3. **Tmux session exists — check transient overrides** (tmux output parsing, minimal):
-   - If "Compacting conversation" appears in the last 3 logical lines of tmux output → `compacting`
-   - If `rate_limit_error`, "usage limit reached", "hit your limit", or "/upgrade to increase your usage limit" appears in the last 8 logical lines → `rate_limited`
-   - If stored `meta.state === "waiting"` AND tmux shows `⏵⏵.*·\s\d+\s` (background shells, e.g. `⏵⏵ accept edits on · 1 shell`) in the last 8 logical lines → `running`. Scoped strictly to `waiting` — we do NOT override `complete` (intentional sign-off) or `running` (already correct). See §8.5.1.
+   - If "Compacting conversation" appears in the last 10 logical lines of tmux output (after trailing blanks are stripped) → `compacting`
+   - If `rate_limit_error`, "usage limit reached", "hit your limit", or "/upgrade to increase your usage limit" appears in the last 12 logical lines (after trailing blanks are stripped) → `rate_limited`
+   - If stored `meta.state === "waiting"` AND tmux shows `⏵⏵.*·\s\d+\s` (background shells, e.g. `⏵⏵ accept edits on · 1 shell`) in the last 8 logical lines (after trailing blanks are stripped) → `running`. Scoped strictly to `waiting` — we do NOT override `complete` (intentional sign-off) or `running` (already correct). See §8.5.1.
 
 4. **Read `state` from meta.json** → return the stored value (`running`, `waiting`, or `complete`). If `state` field is absent (legacy agent or freshly created agent before first stop hook fires): if `created_epoch` is less than 6 seconds ago → `creating`; otherwise → `running`.
 
 **ANSI stripping**: Tmux output used for compacting/rate_limited checks must have ANSI escape sequences stripped before pattern matching.
 
-**Capture unit — logical lines (`-J`)**: `captureTmuxOutput` passes `tmux capture-pane -J`, so captures are **logical lines** — tmux's soft-wrapped continuation rows are rejoined into one line (program-emitted `\n` are preserved) and trailing spaces are preserved rather than truncated. All the last-N-line windows above therefore count **logical lines, not physical terminal rows**. Because one logical line now carries the content of several old physical rows, a finished "sticky" banner (rate-limit / compacting / background-tasks) lingered in the old fixed windows for longer wall-clock and could re-classify — and, for `rate_limited`, re-nudge — an already-recovered agent. The stale-sensitive windows were therefore tightened: **compacting 5 → 3**, **rate-limit 15 → 8**, **background-tasks 15 → 8** logical lines (`RATE_LIMIT_WINDOW` / `COMPACTING_WINDOW` / `BACKGROUND_TASKS_WINDOW` in `src/agents.ts`; the mirror stale windows in `src/parse-state.ts` are `RATE_LIMIT_STALE_WINDOW` / `COMPACTING_STALE_WINDOW`). Each banner renders on a single logical line, so the tighter windows still match a *current* banner. The generic running / waiting / complete / tool-waiting windows are deliberately left wide (5 / 15 / 20) to avoid false negatives.
+**Trailing-blank strip before the window**: `captureTmuxOutput` uses `tmux capture-pane -J -E -`, which appends blank padding rows below the live TUI chrome. Every last-N-line detector therefore strips trailing blank/whitespace-only lines BEFORE taking its slice (via the shared `stripTrailingBlanks` in `src/parse-state.ts`, used by both `src/agents.ts` and `src/parse-state.ts`). Without the strip, the window is spent on blank padding and a current banner (which renders above the chrome) falls outside it — a false NEGATIVE.
+
+**Capture unit — logical lines (`-J`)**: `captureTmuxOutput` passes `tmux capture-pane -J`, so captures are **logical lines** — tmux's soft-wrapped continuation rows are rejoined into one line (program-emitted `\n` are preserved) and trailing spaces are preserved rather than truncated. All the last-N-line windows above therefore count **logical lines, not physical terminal rows**. Because one logical line now carries the content of several old physical rows, a finished "sticky" banner (rate-limit / compacting / background-tasks) lingered in the old fixed windows for longer wall-clock and could re-classify — and, for `rate_limited`, re-nudge — an already-recovered agent. The stale-sensitive windows were therefore tightened below the historical 15. **Window sizing accounts for the TUI chrome**: a *current* banner does not render at the very tail — it renders ABOVE the input box + status bar. After the trailing-blank strip, an idle Claude pane still has ~7 non-blank chrome lines (interior blank separator + input box's 3 lines + 3 status-bar lines) below a banner, so a single-line banner sits at `[-8]` and a two-line banner box at `[-9]`. The windows must clear (chrome + banner) or a genuinely-current banner is MISSED — a false negative that is worse than the stale re-nudge the tightening set out to reduce. Final sizes: **compacting 5 → 10**, **rate-limit 15 → 12**, **background-tasks 15 → 8** logical lines (`RATE_LIMIT_WINDOW` / `COMPACTING_WINDOW` / `BACKGROUND_TASKS_WINDOW` in `src/agents.ts`; the mirror stale windows in `src/parse-state.ts` are `RATE_LIMIT_STALE_WINDOW` = 12 / `COMPACTING_STALE_WINDOW` = 10). Background-tasks stays at 8 because its `⏵⏵` marker lives IN the status bar at `[-1]` — it is caught by any window once trailing blanks are stripped. The generic running / waiting / complete / tool-waiting windows are deliberately left wide (5 / 15 / 20) to avoid false negatives.
 
 ### 1.3.1 State Writes
 
@@ -129,8 +131,8 @@ The stop hook does NOT parse tmux output for state detection. Tmux parsing for `
 ### 1.3.2 Legacy State Detection (parseState)
 
 The legacy `parseState()` function and its 14-priority tmux pattern matching system remain in the codebase but are no longer used for primary state detection. They are retained for:
-- **Compacting detection**: Checking "Compacting conversation" in the last 3 logical lines of tmux output (see §1.3 "Capture unit — logical lines")
-- **Rate limit detection**: Checking rate limit patterns in the last 8 logical lines of tmux output
+- **Compacting detection**: Checking "Compacting conversation" in the last 10 logical lines of tmux output (see §1.3 "Capture unit — logical lines")
+- **Rate limit detection**: Checking rate limit patterns in the last 12 logical lines of tmux output
 - **Backward compatibility**: The bash `ib` reference implementation still uses tmux-based state detection (note: the `-J` logical-line capture and the tightened stale windows are intentional divergences from bash — see §1.3)
 
 The legacy parseState priority order is documented here for reference:
@@ -138,10 +140,10 @@ The legacy parseState priority order is documented here for reference:
    | Priority | Window | Pattern | State |
    |----------|--------|---------|-------|
    | 1 | Full input | Workspace trust/import prompts AND no startup markers | `creating` |
-   | 2 | Last 3 logical lines | "Compacting conversation" (tightened stale window, was 5 — see §1.3) | `compacting` |
+   | 2 | Last 10 logical lines | "Compacting conversation" (stale window, was 5; sized to clear the TUI chrome below a current banner — see §1.3) | `compacting` |
    | 3 | Last 5 logical lines | `(Esc to interrupt`, `(ctrl+c to interrupt`, `⎿  Running` | `running` |
    | 4 | Last 15 logical lines | `⎿  Waiting` (tool waiting) | `waiting` |
-   | 5 | Last 8 logical lines | `rate_limit_error` or usage limit phrases (case-insensitive; tightened stale window, was 15 — see §1.3) | `rate_limited` |
+   | 5 | Last 12 logical lines | `rate_limit_error` or usage limit phrases (case-insensitive; stale window, was 15; sized to clear the TUI chrome below a current banner — see §1.3) | `rate_limited` |
    | 6 | Last 15 lines | `I HAVE COMPLETED THE GOAL` (excluding single-quoted instances) | `complete` |
    | 7 | Last 15 lines | Standalone `WAITING` on its own line (unless ⏺ appears after it = stale) | `waiting` |
    | 8 | Last 15 lines | `ctrl+b ctrl+b` or `thinking)` | `running` |
@@ -1112,8 +1114,8 @@ Per-agent watchdogs do not use a watchdog lock file for state detection, and the
 
 **State resolution per tick**: The watchdog resolves the agent's effective state on each 5-second tick using the same resolution order as consumers (§1.3):
 1. No tmux session → `stopped` (or `creating` if within grace period)
-2. Tmux "Compacting conversation" in the last 3 logical lines → `compacting`
-3. Tmux rate limit patterns in the last 8 logical lines → `rate_limited`
+2. Tmux "Compacting conversation" in the last 10 logical lines → `compacting`
+3. Tmux rate limit patterns in the last 12 logical lines → `rate_limited`
 4. Stored `meta.state === "waiting"` AND tmux shows background shells (`⏵⏵.*·\s\d+\s` in the last 8 logical lines) → `running` (see §8.5.1). Scoped strictly to `waiting` — not applied to `complete` or `running`.
 5. Read `state` from meta.json → `running`, `waiting`, or `complete`
 
@@ -1553,8 +1555,8 @@ The system coordinator does **not** have a standard watchdog or stop hook. It is
 - No stop hook is installed — the system coordinator's state is detected purely from tmux session existence and output parsing (similar to how `compacting` and `rate_limited` are detected for regular agents)
 - **State detection** (checked in order):
   1. Tmux session `ib-coordinator` does not exist → `stopped`
-  2. "Compacting conversation" in the last 3 logical lines of tmux output → `compacting`
-  3. Rate limit patterns in the last 8 logical lines of tmux output → `rate_limited`
+  2. "Compacting conversation" in the last 10 logical lines of tmux output → `compacting`
+  3. Rate limit patterns in the last 12 logical lines of tmux output → `rate_limited`
   4. Otherwise → `running`
 - The system coordinator has no `waiting` or `complete` states — it runs indefinitely. There is no meta.json to store state, so tmux is the sole source of truth.
 - If the system coordinator session dies unexpectedly, the main area TMUX view shows "Session stopped — press R to restart". The `R` key (same as agent resume) triggers `restartSystemCoordinator()` when the system coordinator is selected.

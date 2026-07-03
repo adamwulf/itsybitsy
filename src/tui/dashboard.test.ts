@@ -15,6 +15,13 @@ import type { SpawnResult } from "../types";
 import { PANE_MODES } from "./pane-manager";
 import { computeSidebarHeights } from "./sidebar";
 import { assertDialog } from "./test-helpers";
+import { setLayoutPath } from "./layout";
+
+// Many tests below simulate resize keystrokes, which call persistLayout() and
+// schedule debounced layout saves. Route them to a temp file so a test run can
+// never clobber the user's real ~/.itsybitsy/layout.json. This backstops the
+// NODE_ENV=test default in layout.ts in case NODE_ENV is overridden.
+setLayoutPath(join(tmpdir(), `itsybitsy-layout-dashboard-test-${process.pid}.json`));
 
 /** Helper: create a mock send spawn runner that records calls as {args, cwd}-style entries */
 function mockSendSpawnRunner(calls: { args: string[]; cwd: string }[]) {

@@ -4,7 +4,7 @@
  */
 
 import { join, dirname } from "path";
-import { homedir } from "os";
+import { homedir, tmpdir } from "os";
 import { mkdir, rename } from "fs/promises";
 import { MIN_SIDEBAR, MAX_SIDEBAR } from "./sidebar";
 
@@ -28,7 +28,16 @@ export interface LayoutState {
   repoCoordinatorHeightOffset?: number;
 }
 
-const LAYOUT_PATH = join(homedir(), ".itsybitsy", "layout.json");
+// Under `bun test` (which sets NODE_ENV=test), the default path must NOT be
+// the real ~/.itsybitsy/layout.json: dashboard tests drive handleInput(),
+// which calls persistLayout(), and those debounced saves were silently
+// overwriting the user's real layout preferences on every test run — in this
+// repo and in every agent worktree. Route test-run saves to a per-process
+// temp file instead. Tests that care about the path still override it via
+// setLayoutPath().
+const LAYOUT_PATH = process.env.NODE_ENV === "test"
+  ? join(tmpdir(), `itsybitsy-layout-test-${process.pid}.json`)
+  : join(homedir(), ".itsybitsy", "layout.json");
 
 /** Overridable path for testing */
 let layoutPath = LAYOUT_PATH;

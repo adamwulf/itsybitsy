@@ -160,6 +160,16 @@ export function parseCodexState(input: string): ParseStateResult {
     return { state: "running", reason: "codex Working interrupt marker in last 15 lines" };
   }
 
+  // Out-of-usage — codex renders "■ You've hit your usage limit. …" (real
+  // captured sample). Checked before the idle-prompt fallback below: codex keeps
+  // its "›" input prompt + status bar visible even while out of usage, so
+  // without this the agent would be misread as `waiting`. Anchor on
+  // "hit your usage limit" (apostrophe-agnostic; distinct from claude's
+  // "hit your limit"). Mirrors agents.ts isRateLimited.
+  if (last15.toLowerCase().includes("hit your usage limit")) {
+    return { state: "rate_limited", reason: "codex usage-limit message in last 15 lines" };
+  }
+
   // Completion signal — exclude quoted occurrences (in watchdog nudge prompts)
   const unquoted15 = last15.replace(/'I HAVE COMPLETED THE GOAL'/g, "");
   if (unquoted15.includes("I HAVE COMPLETED THE GOAL")) {

@@ -233,6 +233,22 @@ describe("parseState", () => {
       lines.push("You've hit your limit · resets 1am");
       expect(parseState(lines.join("\n")).state).toBe("rate_limited");
     });
+    test("codex out-of-usage — wins over idle-at-prompt (real captured sample)", () => {
+      // Real codex out-of-usage capture: the "■ You've hit your usage limit …"
+      // message sits ABOVE a still-visible "›" input prompt + status bar. The
+      // trailing status bar routes this through parseCodexState; the usage-limit
+      // check must beat the idle-at-prompt fallback so the agent isn't misread
+      // as `waiting`.
+      const output = [
+        "› Improve documentation in @filename",
+        "",
+        "■ You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit",
+        "https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 4:29 AM.",
+        "",
+        "  gpt-5.5 high · Context 88% left · 5h 0% left · weekly 78% left",
+      ].join("\n");
+      expect(parseState(output).state).toBe("rate_limited");
+    });
   });
 
   describe("complete", () => {

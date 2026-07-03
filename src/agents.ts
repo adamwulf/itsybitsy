@@ -653,10 +653,21 @@ export function isCompacting(tmuxOutput: string): boolean {
  * Check if tmux output indicates rate limiting.
  * Checks for rate limit patterns in last 15 lines.
  *
- * TODO: codex-equivalent detection — see SPEC-CODEX-MODEL.md §5.6. Codex's rate-limit
- * UI strings haven't been captured yet; a codex agent that hits a rate limit will
- * currently fall through this check (claude-shaped patterns don't match codex output).
- * Avoid guessing patterns without samples — false positives here are worse than false negatives.
+ * Covers both claude and codex out-of-usage strings (CLI-agnostic; the
+ * state-detection caller runs this for every agent regardless of cli). The
+ * watchdog's *recovery* handler still gates on cli — codex has no Anthropic
+ * usage-API / bare-Enter recovery — but the `rate_limited` state is still worth
+ * surfacing in the dashboard for both.
+ *
+ * Codex ("■ You've hit your usage limit …") — real captured sample, wraps
+ * across two terminal lines:
+ *   ■ You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit
+ *   https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 4:29 AM.
+ * We anchor on "hit your usage limit" (apostrophe-agnostic — the word "you've"
+ * is dropped so a straight vs. curly apostrophe rendering can't break the match)
+ * and it stays on the first wrapped line alongside the ■ glyph, so a single-line
+ * substring test is sufficient. Distinct from claude's "hit your limit" — the
+ * intervening word "usage" means the two phrases don't collide.
  */
 export function isRateLimited(tmuxOutput: string): boolean {
   const stripped = stripAnsi(tmuxOutput);
@@ -676,6 +687,7 @@ export function isRateLimited(tmuxOutput: string): boolean {
     lower.includes("usage limit reached") ||
     lower.includes("limit will reset at") ||
     lower.includes("hit your limit") ||
+    lower.includes("hit your usage limit") || // codex out-of-usage
     lower.includes("/upgrade to increase your usage limit")
   );
 }

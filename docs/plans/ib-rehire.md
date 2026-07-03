@@ -33,8 +33,17 @@ The existing archive is useful history, but is not a recovery image.
   Pending questions and queued messages are stale runtime state and should stay
   removed. Team memberships are durable collaboration state and should be
   recorded for best-effort restoration.
+- Archive directories are named `<timestamp>-<id>`, not `<id>`. Discovery must
+  scan `archive/*`, parse each `meta.json`, and match its `meta.id`; joining
+  `archive/<id>` is incorrect. Some existing archived-agent readers in
+  `src/agents.ts` make that incorrect assumption and should be corrected to use
+  the resolved archive descriptor while this path is being made authoritative.
 - The command authorization hook only searches active `agents/` metadata.
-  A manager-only `rehire` command must authorize against archived metadata.
+  A manager-only `rehire` command must authorize against archived metadata in
+  both its same-repo and cross-repo passes.
+- The hook parser validates target tokens as agent IDs and does not safely
+  resolve nicknames. To keep authorization fail-closed, `rehire` accepts the
+  immutable exact agent ID only; nickname-based rehire is not supported.
 - The dashboard intentionally skips archive scans on refresh. Rehire should
   not add archive polling or a new dashboard state.
 
@@ -99,18 +108,26 @@ rewrite the root worktree.
 
 `ib rehire <agent-id>`:
 
-1. Searches registered repositories for retirement archives whose `meta.json`
-   has the exact ID (or exact nickname when unambiguous), newest first.
+1. Scans every registered repository's timestamp-named `archive/*`
+   directories, parses each `meta.json`, and matches the immutable exact
+   `meta.id`. It never derives an archive path by joining the agent ID. For
+   repeated retirements in one repository, the newest valid retirement
+   manifest wins; exact-ID matches in multiple repositories are ambiguous and
+   rejected.
 2. Rejects ambiguity across repositories, an already-active ID or nickname,
    a live tmux session, an existing `agent/<id>` branch, malformed metadata,
    or an unsupported snapshot version.
-3. Rejects legacy worktree archives without a recovery manifest. They cannot
-   be restored safely because their deleted HEAD and worktree changes were not
-   retained. The error explains that only agents retired after rehire support
-   was installed are recoverable.
+3. Rejects any archive without a recovery manifest with a generic explanation
+   that the archive is not rehirable. This covers legacy retirements as well as
+   intentionally destructive merge/nuke archives without misidentifying which
+   operation produced the archive.
 4. Recreates `.ittybitty/agents/<id>/`, copies archived agent-local files, and
-   writes sanitized metadata with stale process/watchdog fields removed and
-   state set to `stopped`.
+   writes sanitized metadata. It clears `claude_pid`, `watchdog_pid`, transient
+   operation state, and replaces state with `stopped`; it preserves
+   `tmux_session`, `session_id`, `codex_session_id`, `model`, `effort`,
+   `agentType`, `manager`, `spawned_by`, `nickname`, and `worktree`.
+   `tmux_session` must equal the deterministic
+   `ittybitty-<repo-id>-<agent-id>` value for this repository.
 5. For a worktree agent:
    - creates `agent/<id>` and its worktree from the manifest's hidden HEAD ref;
    - applies `worktree.patch`;
@@ -131,6 +148,15 @@ the partial worktree, branch, and agent directory. If session resume fails
 after reconstruction, it leaves a valid stopped agent in place so the user can
 inspect it and retry with `ib resume`.
 
+For Codex/Fugu archives where `codex_session_id` was never captured before
+retirement, reconstruction still succeeds and leaves a valid stopped agent;
+the existing `resumeAgent()` error is surfaced without rolling reconstruction
+back.
+
+Every retirement uses its timestamped archive folder name as the archive key,
+so retire → rehire → retire creates distinct folders and hidden HEAD refs.
+Earlier archives and `refs/ittybitty/retired/*/head` refs remain immutable.
+
 ## Implementation structure
 
 ### 1. Recovery snapshot primitives
@@ -138,8 +164,9 @@ inspect it and retry with `ib resume`.
 In `src/agent-lifecycle.ts`:
 
 - Define and validate a `RetirementManifestV1` schema.
-- Add archive discovery that returns an explicit descriptor containing the
-  repository, archive directory, metadata, and manifest.
+- Add archive discovery that enumerates timestamped archive directories, reads
+  their metadata, and returns an explicit descriptor containing the
+  repository, actual archive directory, metadata, and manifest.
 - Add a preparation helper that snapshots git state and agent-local recovery
   files before teardown.
 - Extend `archiveAgent()` to move/copy the prepared recovery payload and write
@@ -185,9 +212,17 @@ with recovery semantics.
 
 - Add command parsing, usage, help, and dispatch in `src/index.ts`.
 - Add `rehire` to manager-only hook authorization.
-- Teach the hook access check to find the same archived target descriptor used
-  by command dispatch. Per-repo coordinator authority should mirror `retire`
-  for non-coordinator targets in that repository.
+- Teach both the same-repo and cross-repo hook passes to find the same archived
+  target descriptor used by command dispatch, then call the existing
+  `hasAccess()` relationship check with archived metadata. Per-repo coordinator
+  authority should mirror `retire` for non-coordinator targets in that
+  repository.
+- Keep rehire targets exact-ID-only in both CLI dispatch and hook parsing.
+  Nicknames are deliberately rejected so an unparsed nickname cannot bypass
+  the manager-only authorization check.
+- Correct existing archived-agent path readers in `src/agents.ts` that assume
+  `archive/<id>` when they are exercised by the new descriptor, or route them
+  through the descriptor so timestamped directories are always used.
 - Update `SPEC.md`, `docs/implementation-notes.md`, embedded session-start
   instructions, agent-type docs, and relevant help snapshots.
 - Do not add an `ib watch` key binding in this change. Once rehire creates the
@@ -225,14 +260,23 @@ with recovery semantics.
 - Existing teams are restored; deleted teams produce warnings.
 - Outbox, pending questions, stale PIDs, and transient operation state are not
   restored.
+- Two retirements of one ID select the newest manifest and leave both archive
+  folders/hidden refs intact.
+- Reconstructed metadata preserves and validates the deterministic
+  `tmux_session` while clearing only stale process/transient fields.
+- A Codex/Fugu archive without `codex_session_id` reconstructs successfully,
+  surfaces the resume error, and remains stopped.
 
 ### Hook/CLI tests
 
 - `ib rehire <id>` help and dispatch.
-- Exact ID/nickname archive resolution and ambiguity behavior.
+- Timestamped-folder scan, exact-ID resolution, newest-retirement selection,
+  and cross-repository ambiguity behavior.
 - Manager, spawner, per-repo coordinator, cross-repo, and system coordinator
   authorization against archived metadata.
 - Non-manager callers are denied.
+- A nickname target is rejected by both command dispatch and the hook; it
+  cannot fall through as an unparsed unrestricted command.
 
 ### Full verification
 
@@ -265,6 +309,9 @@ until approved, as requested.
 - Recovering ignored build products, central outbox messages, pending user
   questions, or transient locks.
 - Preserving the distinction between staged and unstaged tracked changes.
+- Snapshotting nested repositories or submodule working-tree changes beyond
+  the superproject's recorded gitlink.
+- Nickname-based rehire; immutable exact agent IDs are required.
 - Guaranteeing that an externally deleted Claude/Codex transcript can resume.
   Rehire validates local structure; the underlying CLI remains authoritative
   about session availability.

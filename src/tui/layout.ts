@@ -149,7 +149,7 @@ export async function flushPendingSave(): Promise<void> {
   }
 }
 
-// Width math (DEFAULT_TMUX_WIDTH, getSavedTmuxWidth, getSavedSidebarWidth,
+// Width math (DEFAULT_TMUX_WIDTH, PINNED_TMUX_WIDTH, getSavedSidebarWidth,
 // getSavedMainWidth, getTmuxWidthForAgent) lives in ./widths.ts. All pane
 // width derivations must go through that module — never inline.
 

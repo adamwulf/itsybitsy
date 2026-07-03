@@ -10,6 +10,8 @@ import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeCom
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner } from "../ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
+import { spawnCtx as tmuxPollerSpawnCtx } from "../tmux-poller";
+import { IB_COORDINATOR_SESSION } from "../coordinator";
 import { setUserConfigPath, resetUserConfigPath } from "../config";
 import type { SpawnResult } from "../types";
 import { PANE_MODES } from "./pane-manager";
@@ -5680,5 +5682,112 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
         expect(dlg.prompt).not.toContain("Manage roster:");
       }
     });
+  });
+});
+
+describe("pinned-width resize side-effects", () => {
+  // Recorded `tmux resize-window -t <target> -x <width>` calls and the current
+  // list-clients response, driven through the tmux-poller spawnCtx seam (the
+  // same context resizeTmuxWindow + hasAttachedClient use).
+  let resizes: { session: string; width: number }[] = [];
+  let clientsAttached = false;
+
+  function installMockRunner() {
+    tmuxPollerSpawnCtx.set((cmd: string[]) => {
+      if (cmd[1] === "resize-window") {
+        const tIdx = cmd.indexOf("-t");
+        const xIdx = cmd.indexOf("-x");
+        // tmuxSessionTarget wraps the name as "=<session>:" — unwrap it.
+        const target = (cmd[tIdx + 1] ?? "").replace(/^=/, "").replace(/:$/, "");
+        resizes.push({ session: target, width: Number(cmd[xIdx + 1]) });
+        return makeSpawnResult(0);
+      }
+      if (cmd[1] === "list-clients") {
+        return makeSpawnResult(0, clientsAttached ? "client-0\n" : "");
+      }
+      // has-session / capture-pane / anything else: succeed with empty output.
+      return makeSpawnResult(0);
+    });
+  }
+
+  beforeEach(() => {
+    resizes = [];
+    clientsAttached = false;
+    installMockRunner();
+  });
+
+  afterEach(() => {
+    tmuxPollerSpawnCtx.reset();
+  });
+
+  test("re-pin migration resizes every live agent + the system coordinator once, to 1000", async () => {
+    const dashboard = makeDashboard();
+    const agentA = makeAgent("agent-a", "/repos/test");
+    const agentB = makeAgent("agent-b", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatAgent(agentA), makeFlatAgent(agentB)];
+
+    // Arm the one-time migration (boot path calls this) and fire the first update.
+    dashboard.requestTmuxRepin();
+    dashboard.onUpdate([agentA, agentB], flatList, []);
+    // Let any async resize()/hasAttachedClient() promises settle.
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Every live agent session + the system coordinator pinned to 1000.
+    expect(resizes.filter((r) => r.session === agentA.meta.tmux_session)).toEqual([
+      { session: agentA.meta.tmux_session!, width: 1000 },
+    ]);
+    expect(resizes.filter((r) => r.session === agentB.meta.tmux_session)).toEqual([
+      { session: agentB.meta.tmux_session!, width: 1000 },
+    ]);
+    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION)).toEqual([
+      { session: IB_COORDINATOR_SESSION, width: 1000 },
+    ]);
+    // Every recorded resize is the pin width — nothing follows a display pane.
+    expect(resizes.every((r) => r.width === 1000)).toBe(true);
+
+    // Idempotent: a SECOND update does NOT re-run the migration.
+    const before = resizes.length;
+    dashboard.onUpdate([agentA, agentB], flatList, []);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(resizes.length).toBe(before);
+  });
+
+  test("migration re-pins the system coordinator even when there are ZERO agents", async () => {
+    const dashboard = makeDashboard();
+    dashboard.requestTmuxRepin();
+    dashboard.onUpdate([], [], []); // empty flatList
+    await new Promise((r) => setTimeout(r, 0));
+    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION)).toEqual([
+      { session: IB_COORDINATOR_SESSION, width: 1000 },
+    ]);
+  });
+
+  test("coordinator detach transition re-pins the displayed coordinator once, to 1000", async () => {
+    const dashboard = makeDashboard();
+    // Make the system coordinator the displayed pane so checkCoordinatorClients
+    // considers IB_COORDINATOR_SESSION (onUpdate auto-selects it).
+    dashboard.onUpdate([], [makeFlatSystemCoordinator()], []);
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    // Ignore any resizes from selection wiring (there should be none — the pin
+    // means nothing follows the pane) so the assertions below measure only the
+    // detach transition.
+    resizes = [];
+
+    // Tick 1: a client is attached — record the attached state, no re-pin.
+    clientsAttached = true;
+    await dashboard.checkCoordinatorClients();
+    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION)).toEqual([]);
+
+    // Tick 2: the client detached — exactly one re-pin to 1000.
+    clientsAttached = false;
+    await dashboard.checkCoordinatorClients();
+    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION)).toEqual([
+      { session: IB_COORDINATOR_SESSION, width: 1000 },
+    ]);
+
+    // Tick 3: still detached — no duplicate re-pin (transition already consumed).
+    await dashboard.checkCoordinatorClients();
+    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION).length).toBe(1);
   });
 });

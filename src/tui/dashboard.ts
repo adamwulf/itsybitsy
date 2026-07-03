@@ -702,6 +702,15 @@ export class DashboardComponent implements Component {
   /** Cache of which agents have an attached tmux client */
   private _clientAttached: Map<string, boolean> = new Map();
   private clientCheckTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Coordinator-session attach cache (session name → attached), separate from the
+   * agent cache. Coordinators (system + per-repo) can be opened in Ghostty too;
+   * on the attached→detached transition we re-pin their window to
+   * PINNED_TMUX_WIDTH, mirroring the agent mechanism. Coordinator panes render
+   * agentless, so this drives no display state — only the re-pin side-effect.
+   */
+  private _coordClientAttached: Map<string, boolean> = new Map();
+  private coordClientCheckTimer: ReturnType<typeof setInterval> | null = null;
 
   /** Read-only access to current focus target (for testing) */
   get focus(): FocusTarget {
@@ -991,6 +1000,10 @@ export class DashboardComponent implements Component {
       clearInterval(this.clientCheckTimer);
       this.clientCheckTimer = null;
     }
+    if (this.coordClientCheckTimer) {
+      clearInterval(this.coordClientCheckTimer);
+      this.coordClientCheckTimer = null;
+    }
     if (this.telegramStatusTimer) {
       clearInterval(this.telegramStatusTimer);
       this.telegramStatusTimer = null;
@@ -1036,6 +1049,77 @@ export class DashboardComponent implements Component {
       this.repoCoordinatorPoller.resume();
     } else if (this.repoCoordinatorPoller.isRunning()) {
       this.repoCoordinatorPoller.stop();
+    }
+
+    // Coordinator windows can be opened in Ghostty (handleOpenGhosttyTmux covers
+    // IB_COORDINATOR_SESSION + the per-repo coordinator). Run a client-attach
+    // check for whichever coordinator session is currently displayed so we re-pin
+    // it to PINNED_TMUX_WIDTH on the attached→detached transition — the agent
+    // checkClientAttached path never covers coordinators.
+    this.updateCoordinatorClientCheck(coordinatorVisible, repoCoordinatorVisible);
+  }
+
+  /**
+   * Sessions of the coordinator panes currently displayed in the main area
+   * (system coordinator and/or per-repo coordinator). These are the only
+   * coordinator windows a Ghostty attach/detach can affect while visible.
+   */
+  private visibleCoordinatorSessions(coordinatorVisible: boolean, repoCoordinatorVisible: boolean): string[] {
+    const sessions: string[] = [];
+    if (coordinatorVisible) sessions.push(IB_COORDINATOR_SESSION);
+    if (repoCoordinatorVisible && this.repoCoordinatorSession) {
+      sessions.push(this.repoCoordinatorSession);
+    }
+    return sessions;
+  }
+
+  /**
+   * Start/stop a 3s client-attach check for the visible coordinator session(s),
+   * mirroring the agent clientCheckTimer. On the attached→detached transition,
+   * re-pin the window to PINNED_TMUX_WIDTH (attaching in Ghostty dropped the pin
+   * so the window followed the client). Stops the timer when no coordinator pane
+   * is visible.
+   */
+  private updateCoordinatorClientCheck(coordinatorVisible: boolean, repoCoordinatorVisible: boolean): void {
+    const anyVisible = coordinatorVisible || repoCoordinatorVisible;
+    if (!anyVisible) {
+      if (this.coordClientCheckTimer) {
+        clearInterval(this.coordClientCheckTimer);
+        this.coordClientCheckTimer = null;
+      }
+      return;
+    }
+    if (!this.coordClientCheckTimer) {
+      this.coordClientCheckTimer = setInterval(() => this.checkCoordinatorClients(), 3000);
+    }
+  }
+
+  /**
+   * One tick of the coordinator client-attach check: for each currently-visible
+   * coordinator session, re-pin to PINNED_TMUX_WIDTH on the attached→detached
+   * transition. Recomputes the visible set each tick so a selection change
+   * between ticks is handled. Public for testing (drive one tick directly).
+   */
+  async checkCoordinatorClients(): Promise<void> {
+    const coordinatorVisible =
+      this.activeSelectionSource === "agents"
+      && this.agentTree.isSystemCoordinatorSelected
+      && this.coordinatorViewMode === "TMUX";
+    const repoCoordinatorVisible =
+      this.rightPane.mode === "REPO" && this.rightPane.repoCoordinatorAgent != null;
+    const sessions = this.visibleCoordinatorSessions(coordinatorVisible, repoCoordinatorVisible);
+    // Drop attach state for sessions no longer visible so a later re-display
+    // starts fresh (and can't fire a spurious detach transition).
+    for (const key of [...this._coordClientAttached.keys()]) {
+      if (!sessions.includes(key)) this._coordClientAttached.delete(key);
+    }
+    for (const session of sessions) {
+      const attached = await hasAttachedClient(session);
+      const wasAttached = this._coordClientAttached.get(session) ?? false;
+      this._coordClientAttached.set(session, attached);
+      if (wasAttached && !attached) {
+        resizeTmuxWindow(session, PINNED_TMUX_WIDTH);
+      }
     }
   }
 
@@ -1817,11 +1901,12 @@ export class DashboardComponent implements Component {
       if (attached !== wasAttached) {
         this.tmuxPane.clientAttached = attached;
         // When an external client (e.g. Ghostty) DETACHES, re-pin the window to
-        // PINNED_TMUX_WIDTH. Attaching cleared the manual size override
-        // (clearTmuxWindowSizeOverride) so the window followed the client's
-        // terminal size; on detach we must restore the pin, otherwise the
-        // window would stay at the client's width and the dashboard's reflow
-        // (which assumes a wide pinned window) would see a too-narrow capture.
+        // PINNED_TMUX_WIDTH. openInGhostty attaches with `tmux set-option
+        // window-size latest` (src/ghostty.ts), so tmux re-fit the window to the
+        // client's terminal size while attached; on detach we must restore the
+        // pin, otherwise the window would stay at the client's width and the
+        // dashboard's reflow (which assumes a wide pinned window) would see a
+        // too-narrow capture.
         if (wasAttached && !attached) {
           resizeTmuxWindow(session, PINNED_TMUX_WIDTH);
         }

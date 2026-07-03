@@ -6,7 +6,7 @@ import {
   mainWidth, leftPaneWidth, rightPaneWidth, maxLeftPaneWidth,
   clampLeftWidth, clampSidebarWidth, tmuxWidthForAgent,
   getLiveMainWidth, getLiveLeftPaneWidth, getLiveRightPaneWidth,
-  getSavedTmuxWidth, getSavedSidebarWidth, getSavedMainWidth, getTmuxWidthForAgent,
+  getSavedSidebarWidth, getSavedMainWidth, getTmuxWidthForAgent,
   DEFAULT_TMUX_WIDTH, PINNED_TMUX_WIDTH,
 } from "./widths";
 import { saveLayout, setLayoutPath, resetLayoutPath, cancelPendingSave } from "./layout";
@@ -130,17 +130,6 @@ describe("widths — saved (disk-backed) wrappers", () => {
     expect(await getSavedSidebarWidth()).toBe(MAX_SIDEBAR);
     await saveLayout({ ...sample, sidebarWidth: 1 });
     expect(await getSavedSidebarWidth()).toBe(MIN_SIDEBAR);
-  });
-
-  test("getSavedTmuxWidth returns DEFAULT_TMUX_WIDTH when no layout saved", async () => {
-    expect(await getSavedTmuxWidth()).toBe(80);
-  });
-
-  test("getSavedTmuxWidth clamps extreme saved values", async () => {
-    await saveLayout({ ...sample, splitPaneLeftWidth: 99999 });
-    expect(await getSavedTmuxWidth()).toBe(MAX_LEFT_WIDTH);
-    await saveLayout({ ...sample, splitPaneLeftWidth: 1 });
-    expect(await getSavedTmuxWidth()).toBe(MIN_LEFT_WIDTH);
   });
 
   test("getSavedMainWidth = terminalWidth - savedSidebar - 1", async () => {

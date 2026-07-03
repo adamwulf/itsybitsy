@@ -9,9 +9,8 @@ import {
 } from "./layout";
 import type { LayoutState } from "./layout";
 import {
-  getSavedTmuxWidth, getSavedSidebarWidth, getTmuxWidthForAgent, PINNED_TMUX_WIDTH,
+  getSavedSidebarWidth, getTmuxWidthForAgent, PINNED_TMUX_WIDTH,
 } from "./widths";
-import { MIN_LEFT_WIDTH, MAX_LEFT_WIDTH } from "./split-pane";
 
 const sampleLayout: LayoutState = {
   sidebarWidth: 70,
@@ -174,18 +173,6 @@ describe("layout persistence", () => {
     expect(loaded!.heightOffsets.info).toBe(-1);
     expect(loaded!.heightOffsets.coordinator).toBe(1);
     expect(loaded!.repoCoordinatorHeightOffset).toBe(2);
-  });
-
-  test("getSavedTmuxWidth returns DEFAULT_TMUX_WIDTH when no layout saved", async () => {
-    const width = await getSavedTmuxWidth();
-    expect(width).toBe(80);
-  });
-
-  test("getSavedTmuxWidth clamps extreme saved values", async () => {
-    await saveLayout({ ...sampleLayout, splitPaneLeftWidth: 99999 });
-    expect(await getSavedTmuxWidth()).toBe(MAX_LEFT_WIDTH);
-    await saveLayout({ ...sampleLayout, splitPaneLeftWidth: 1 });
-    expect(await getSavedTmuxWidth()).toBe(MIN_LEFT_WIDTH);
   });
 
   test("getSavedSidebarWidth returns default when no layout saved", async () => {

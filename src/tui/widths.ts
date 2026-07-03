@@ -158,15 +158,10 @@ export async function getSavedSidebarWidth(): Promise<number> {
   return l.sidebarWidth;
 }
 
-/**
- * Read the saved split-pane left (middle) width, clamped to
- * [MIN_LEFT_WIDTH, MAX_LEFT_WIDTH]. Used at spawn time before mainWidth is known —
- * dashboard render later re-clamps against mainWidth via `clampLeftWidth`.
- */
-export async function getSavedTmuxWidth(): Promise<number> {
-  const l = await getSavedLayout();
-  return clampLeftWidthAbsolute(l.splitPaneLeftWidth);
-}
+// getSavedTmuxWidth was removed with the pinned-tmux-width change: spawn/resume
+// no longer read splitPaneLeftWidth for the tmux window (they use
+// getTmuxWidthForAgent → PINNED_TMUX_WIDTH). It only lingered as a misleading
+// accessor that returned the old clamped split-pane width, not the pin.
 
 /** Read the saved main area width (middle+right combined). */
 export async function getSavedMainWidth(): Promise<number> {

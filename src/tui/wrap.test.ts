@@ -3,6 +3,7 @@ import {
   wrapSingleLine, wrapLines, wordWrapSingleLine, wordWrapLines,
   computeChromeSlice, findCodexInputChromeLogical, findLastTwoSeparators,
 } from "./wrap";
+import { stripAnsi } from "../parse-state";
 import { visibleWidth } from "@mariozechner/pi-tui";
 
 describe("wrapSingleLine", () => {
@@ -309,6 +310,65 @@ describe("wordWrapSingleLine", () => {
       // Row 1 does NOT keep the 6-space indent — the over-width token wraps left.
       expect(result[0]!.startsWith("      ")).toBe(false);
     });
+  });
+});
+
+describe("separator collapse (─ divider truncation, pinned-width fix)", () => {
+  // truncateToWidth preserves/closes ANSI styling, so a collapsed separator row
+  // can carry a trailing reset — strip ANSI before matching the ─ run.
+  const isSepRow = (r: string) => /^─+$/.test(stripAnsi(r).trim());
+
+  test("a 1000-col ─ separator truncates to exactly ONE row at a narrow width", () => {
+    const sep = "─".repeat(1000);
+    const rows = wordWrapSingleLine(sep, 80);
+    expect(rows.length).toBe(1);
+    expect(visibleWidth(rows[0]!)).toBe(80);
+    expect(isSepRow(rows[0]!)).toBe(true);
+  });
+
+  test("wordWrapLines collapses each of several logical separators to one row", () => {
+    const sep = "─".repeat(1000);
+    const text = ["content above", sep, "content between", sep, "content below"].join("\n");
+    const rows = wordWrapLines(text, 40);
+    // 3 content rows (each fits) + 2 collapsed separators = 5 rows total.
+    expect(rows.length).toBe(5);
+    expect(rows.filter(isSepRow).length).toBe(2);
+    for (const r of rows) expect(visibleWidth(r)).toBeLessThanOrEqual(40);
+  });
+
+  test("a separator already within width is returned unchanged (single row)", () => {
+    const sep = "─".repeat(20);
+    expect(wordWrapSingleLine(sep, 80)).toEqual([sep]);
+  });
+
+  test("ANSI-styled separator collapses to one row and stays within width", () => {
+    // Dim-styled 1000-col separator (ANSI must not count toward width, and the
+    // styling must be preserved through truncation).
+    const styledSep = `\x1b[2m${"─".repeat(1000)}\x1b[0m`;
+    const rows = wordWrapSingleLine(styledSep, 60);
+    expect(rows.length).toBe(1);
+    expect(visibleWidth(rows[0]!)).toBeLessThanOrEqual(60);
+    expect(stripAnsi(rows[0]!).trim()).toMatch(/^─+$/);
+  });
+
+  test("prose around a separator is unaffected (only the ─ line collapses)", () => {
+    const sep = "─".repeat(1000);
+    const prose = "this is a normal long prose line that should still word-wrap across several rows as usual";
+    const text = [prose, sep, prose].join("\n");
+    const rows = wordWrapLines(text, 30);
+    // Exactly one collapsed separator; the prose wrapped to multiple rows on both sides.
+    expect(rows.filter(isSepRow).length).toBe(1);
+    for (const r of rows) expect(visibleWidth(r)).toBeLessThanOrEqual(30);
+    // The prose words survive in order (joining all non-separator rows).
+    const proseRows = rows.filter((r) => !isSepRow(r));
+    expect(proseRows.join(" ").replace(/\s+/g, " ").trim()).toBe(`${prose} ${prose}`);
+  });
+
+  test("a line that is MOSTLY ─ but contains other chars is NOT treated as a separator (still wraps)", () => {
+    // Guard: only pure ─ runs collapse. A label with dashes must word-wrap.
+    const notSep = "── Section: a long heading that keeps going well past the pane width ──";
+    const rows = wordWrapSingleLine(notSep, 20);
+    expect(rows.length).toBeGreaterThan(1);
   });
 });
 

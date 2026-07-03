@@ -3,8 +3,23 @@
  * Wraps long lines at a given visible width, preserving ANSI escape codes.
  */
 
-import { visibleWidth } from "@mariozechner/pi-tui";
+import { visibleWidth, truncateToWidth } from "@mariozechner/pi-tui";
 import { stripAnsi, isCodexStatusLine } from "../parse-state";
+
+/**
+ * A "separator" line is one whose entire visible content (after stripping ANSI)
+ * is a run of ─ box-drawing chars — a full-width visual divider, not prose:
+ * Claude's input-box separators and codex's content dividers between output
+ * blocks. At the pinned tmux width these are single ~1000-col logical lines, and
+ * word-wrapping one would explode it into ~N/width full-width separator rows that
+ * swallow the pane. Truncating a divider to the pane width is semantically
+ * correct at any width, so the word-wrap path special-cases them (see
+ * wordWrapSingleLine).
+ */
+function isSeparatorLine(line: string): boolean {
+  const stripped = stripAnsi(line).trim();
+  return stripped.length > 0 && /^─+$/.test(stripped);
+}
 
 /**
  * Check if a byte is a CSI sequence terminator (0x40-0x7E per ECMA-48).
@@ -90,6 +105,13 @@ export function wrapLines(text: string, width: number): string[] {
 export function wordWrapSingleLine(line: string, width: number): string[] {
   if (width <= 0) return [line];
   if (visibleWidth(line) <= width) return [line];
+
+  // A full-width ─ separator/divider is a visual element, not prose — truncate
+  // it to the pane width (one row) instead of word-wrapping it into many rows.
+  // This one rule collapses every over-width separator on every display surface:
+  // untrimmed system/repo coordinator panes, the center agent pane's native
+  // chrome, and codex's content dividers inside the (trimmed) main transcript.
+  if (isSeparatorLine(line)) return [truncateToWidth(line, width, "")];
 
   const chunks: string[] = [];
   // Split into tokens: sequences of non-space chars and individual spaces

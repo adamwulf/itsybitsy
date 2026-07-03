@@ -1315,12 +1315,14 @@ export class DashboardComponent implements Component {
 
     // One-time re-pin migration: bring every existing agent + coordinator tmux
     // window up to PINNED_TMUX_WIDTH. New spawns/resumes already start pinned via
-    // tmuxWidthForAgent, but agents that were running before the pin (or spawned
-    // by an older binary) may still sit at an old narrow width — resize them once
-    // so their reflow matches the pinned world. Runs on the first populated
-    // onUpdate (flatList non-empty). Idempotent: resizing an already-pinned
-    // window is a no-op in practice.
-    if (this.pendingTmuxResize && flatList.length > 0) {
+    // tmuxWidthForAgent, but agents/coordinators that were running before the pin
+    // (or spawned by an older binary) may still sit at an old narrow width —
+    // resize them once so their reflow matches the pinned world. Runs on the
+    // FIRST onUpdate regardless of whether any agents exist: an upgrade with a
+    // running coordinator but ZERO agents must still re-pin the coordinator
+    // windows. Idempotent: resizing an already-pinned (or dead) window is a
+    // caught+ignored no-op.
+    if (this.pendingTmuxResize) {
       this.pendingTmuxResize = false;
       for (const entry of flatList) {
         if (entry.kind === "agent" && entry.agent.meta.tmux_session) {
@@ -1328,7 +1330,8 @@ export class DashboardComponent implements Component {
         }
       }
       // flatList filters out coordinators — re-pin per-repo coordinators from the
-      // full agent list, plus the system coordinator's fixed session.
+      // full agent list, plus the system coordinator's fixed session. These run
+      // even when flatList is empty (no agents yet).
       for (const a of this.watcher?.lastAgents ?? []) {
         if (a.meta.agentType === "coordinator" && a.meta.tmux_session) {
           resizeTmuxWindow(a.meta.tmux_session, PINNED_TMUX_WIDTH);

@@ -1053,8 +1053,162 @@ describe("retire → rehire recovery", () => {
     resetKillPauseSpawnRunner();
     resetRehireSpawnRunner();
     resetNukeResumeSpawnRunner();
+    isPidAliveCtx.reset();
     process.env.HOME = originalHome;
     await rm(tempDir, { recursive: true, force: true });
+  });
+
+  // Build a rehirable no-worktree Claude archive for `agentId` with an optional
+  // `manager`, plus the matching resume/spawn runners. Returns the archiveKey
+  // and archiveDir so tests can assert on the archive if needed. Modeled on the
+  // "successfully resumes a retired no-worktree Claude agent" test above.
+  async function plantRehirableArchive(
+    agentId: string,
+    opts: { manager?: string | null } = {},
+  ): Promise<{ archiveKey: string; archiveDir: string }> {
+    const archiveKey = `20260703-120000-${agentId}`;
+    const archiveDir = join(tempDir, ".ittybitty", "archive", archiveKey);
+    await mkdir(archiveDir, { recursive: true });
+    const meta = makeAgent(agentId, tempDir, "stopped", {
+      tmux_session: `ittybitty-1a2b3c4d-${agentId}`,
+      worktree: false,
+      model: "claude:sonnet",
+      claude_pid: "",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      manager: opts.manager ?? null,
+    }).meta;
+    await Bun.write(join(archiveDir, "meta.json"), JSON.stringify(meta, null, 2));
+    await Bun.write(join(archiveDir, "exit-check.sh"), "#!/bin/bash\n");
+    await Bun.write(
+      join(archiveDir, "retirement.json"),
+      JSON.stringify({
+        version: 1,
+        agentId,
+        retiredAt: "2026-07-03T12:00:00.000Z",
+        repoPath: tempDir,
+        archiveKey,
+        worktree: false,
+        gitHead: null,
+        headRef: null,
+        untrackedFiles: [],
+        prunedTeams: [],
+      }),
+    );
+    return { archiveKey, archiveDir };
+  }
+
+  // Plant a live (non-archived) manager agent in the same repo. A fresh
+  // watchdog transient + `isPidAliveCtx → true` makes `sendMessage` DEFER the
+  // rehire notice into the manager's CENTRAL outbox queue (asserted via
+  // `readOutbox`) rather than draining it inline through tmux.
+  async function plantLiveManager(managerId: string): Promise<void> {
+    const managerDir = join(tempDir, ".ittybitty", "agents", managerId);
+    await mkdir(managerDir, { recursive: true });
+    await Bun.write(
+      join(managerDir, "meta.json"),
+      JSON.stringify(
+        makeAgent(managerId, tempDir, "running", {
+          worktree: false,
+          tmux_session: `ittybitty-1a2b3c4d-${managerId}`,
+        }).meta,
+      ),
+    );
+    const { writeAgentTransient } = await import("./agents");
+    await writeAgentTransient(managerDir, {
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      tmux_api_error: false,
+      tmux_api_terms: false,
+      has_background_tasks: false,
+      updated_at_ms: Date.now(),
+      watchdog_pid: 4242,
+    });
+  }
+
+  // The manager's CENTRAL outbox queue dir (getCoordinatorHome()/agents/<id>).
+  // With HOME=tempDir and no setCoordinatorHome override, this resolves under
+  // tempDir/.itsybitsy.
+  function managerQueueDir(managerId: string): string {
+    return join(tempDir, ".itsybitsy", "agents", managerId);
+  }
+
+  // Spawn runner matching the existing no-worktree success test: tmux
+  // new-session succeeds, has-session flips to alive once created, pgrep misses.
+  function successRunner(): SpawnFn {
+    let newSessionSeen = false;
+    return (cmd) => {
+      if (cmd[0] === "tmux" && cmd[1] === "new-session") {
+        newSessionSeen = true;
+        return makeSpawnResult();
+      }
+      if (cmd[0] === "tmux" && cmd.includes("has-session")) {
+        return makeSpawnResult(newSessionSeen ? 0 : 1);
+      }
+      if (cmd[0] === "pgrep") return makeSpawnResult(1);
+      return makeSpawnResult();
+    };
+  }
+
+  test("notifies a surviving live manager exactly once when a sub-agent is rehired", async () => {
+    const agentId = "agent-sub";
+    const managerId = "agent-mgr";
+    await plantRehirableArchive(agentId, { manager: managerId });
+    await plantLiveManager(managerId);
+    // Live-watchdog transient → sendMessage defers into the manager outbox.
+    isPidAliveCtx.set(() => true);
+
+    const runner = successRunner();
+    setRehireSpawnRunner(runner);
+    setNukeResumeSpawnRunner(runner);
+
+    const result = await rehireAgent(agentId);
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain(`Rehired agent: ${agentId}`);
+
+    const { readOutbox } = await import("./outbox");
+    const queue = await readOutbox(managerQueueDir(managerId));
+    expect(queue.length).toBe(1);
+    expect(queue[0]!.message).toBe(`your sub agent ${agentId} has been rehired`);
+    expect(queue[0]!.fromAgent).toBe(agentId);
+  });
+
+  test("sends no rehire notice when the rehired agent has no manager", async () => {
+    const agentId = "agent-orphan";
+    await plantRehirableArchive(agentId, { manager: null });
+    // Plant a live agent that is NOT the manager to prove no stray notice lands.
+    await plantLiveManager("agent-bystander");
+    isPidAliveCtx.set(() => true);
+
+    const runner = successRunner();
+    setRehireSpawnRunner(runner);
+    setNukeResumeSpawnRunner(runner);
+
+    const result = await rehireAgent(agentId);
+
+    expect(result.ok).toBe(true);
+
+    const { readOutbox } = await import("./outbox");
+    expect(await readOutbox(managerQueueDir("agent-bystander"))).toEqual([]);
+  });
+
+  test("sends no rehire notice when the manager is archived/gone", async () => {
+    const agentId = "agent-sub-gone";
+    const managerId = "agent-mgr-gone";
+    // The archive records a manager, but no live agent by that id exists.
+    await plantRehirableArchive(agentId, { manager: managerId });
+    isPidAliveCtx.set(() => true);
+
+    const runner = successRunner();
+    setRehireSpawnRunner(runner);
+    setNukeResumeSpawnRunner(runner);
+
+    const result = await rehireAgent(agentId);
+
+    expect(result.ok).toBe(true);
+
+    const { readOutbox } = await import("./outbox");
+    expect(await readOutbox(managerQueueDir(managerId))).toEqual([]);
   });
 
   test("round-trips committed HEAD, tracked changes, and untracked files; resume failure leaves stopped agent", async () => {

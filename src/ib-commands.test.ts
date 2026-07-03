@@ -9297,7 +9297,7 @@ describe("long-running-op guard", () => {
   // ── retire / nuke bypass the guard ──────────────────────────────────────────
 
   test("retireAgent is NOT blocked by an in-flight op (live holder)", async () => {
-    const agentDir = await makeBackedAgentDir("agent-kill");
+    const agentDir = await makeBackedAgentDir("agent-retire");
     isPidAliveCtx.set(() => true); // op holder very much alive
     await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: 1 });
 
@@ -9310,12 +9310,12 @@ describe("long-running-op guard", () => {
     lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
-    const agent = makeAgent("agent-kill", tempDir);
+    const agent = makeAgent("agent-retire", tempDir);
     const result = await retireAgent(agent);
 
     // Retire is the recovery path for a wedged op — it must succeed regardless.
     expect(result.ok).toBe(true);
-    expect(result.stdout).toBe("Closed agent: agent-kill");
+    expect(result.stdout).toBe("Closed agent: agent-retire");
     // Dir removed → marker gone for free.
     expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
@@ -9354,7 +9354,7 @@ describe("long-running-op guard", () => {
 // SURVIVOR defers its notice into the outbox so we can assert it. The DEPARTED
 // agent's dir is removed by teardown, so we only inspect SURVIVOR outboxes.
 // ===========================================================================
-describe("teams: teardown leave-notices (kill / merge / nuke)", () => {
+describe("teams: teardown leave-notices (retire / merge / nuke)", () => {
   let baseDir: string;
   let homeDir: string;
   let repoDir: string;

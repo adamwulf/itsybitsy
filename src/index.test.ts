@@ -414,6 +414,13 @@ describe("CLI arg parsing", () => {
     expect(exitCode).toBe(1);
   });
 
+  test("kill is no longer a supported subcommand", async () => {
+    const { stdout, stderr, exitCode } = await runCli(["kill", "nonexistent-id", "--force"]);
+    expect(stdout).toContain("ib — Cross-repo agent dashboard");
+    expect(stderr).not.toContain("Agent not found");
+    expect(exitCode).toBe(0);
+  });
+
   test("merge strips --force from args", async () => {
     const { stderr, exitCode } = await runCli(["merge"]);
     expect(stderr).toContain("Usage:");

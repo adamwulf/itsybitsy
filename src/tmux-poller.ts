@@ -123,8 +123,14 @@ export class TmuxPoller {
     if (!targetSession) return;
 
     try {
+      // -J joins tmux's soft-wrapped continuation lines back into one logical
+      // line (it preserves program-emitted \n, only rejoining lines tmux itself
+      // wrapped). We reflow ourselves in the display path (wordWrapLines) so the
+      // whole scrollback renders at ONE width — capture-pane -p alone returns
+      // older lines hard-wrapped at the width the session had when they scrolled
+      // in, which mixes wrap widths within a single buffer after resizeTmuxWindow.
       const proc = spawnCtx.runner(
-        ["tmux", "capture-pane", "-t", tmuxSessionTarget(targetSession), "-p", `-S`, `-${this.lines}`, "-E", "-"],
+        ["tmux", "capture-pane", "-t", tmuxSessionTarget(targetSession), "-p", "-J", `-S`, `-${this.lines}`, "-E", "-"],
         { stdout: "pipe", stderr: "pipe" }
       );
       const raw = await new Response(proc.stdout).text();
@@ -262,8 +268,13 @@ export async function hasAttachedClient(tmuxSession: string): Promise<boolean> {
  */
 export async function captureTmuxOutput(tmuxSession: string, lines = 5000): Promise<string | null> {
   try {
+    // -J joins tmux's soft-wrapped continuation lines back into single logical
+    // lines (program-emitted \n are preserved). State detection consumes these
+    // UNWRAPPED logical lines so a marker never straddles a physical wrap
+    // boundary and the last-N-line windows measure real content, not the pane's
+    // former wrap width. See parse-state.ts windows (RECENT/STANDARD/BROAD).
     const proc = spawnCtx.runner(
-      ["tmux", "capture-pane", "-t", tmuxSessionTarget(tmuxSession), "-p", `-S`, `-${lines}`, "-E", "-"],
+      ["tmux", "capture-pane", "-t", tmuxSessionTarget(tmuxSession), "-p", "-J", `-S`, `-${lines}`, "-E", "-"],
       { stdout: "pipe", stderr: "pipe" }
     );
     const raw = await new Response(proc.stdout).text();

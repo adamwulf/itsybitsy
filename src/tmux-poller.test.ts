@@ -60,6 +60,39 @@ describe("captureTmuxOutput", () => {
     await captureTmuxOutput("sess", 50);
     expect(capturedCmd).toContain("-50");
   });
+
+  test("uses -J so tmux joins soft-wrapped continuation lines (logical lines)", async () => {
+    let capturedCmd: string[] = [];
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      capturedCmd = cmd;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+    await captureTmuxOutput("sess", 50);
+    // -J rejoins tmux-wrapped lines; state detection consumes UNWRAPPED logical
+    // lines. Regression guard: removing -J reverts to physical-line captures.
+    expect(capturedCmd).toContain("-J");
+  });
+
+  test("preserves program-emitted newlines from a -J capture (join correctness)", async () => {
+    // Simulate a -J capture: tmux has already rejoined its own soft-wrapped
+    // continuation lines into single logical lines, but program-emitted \n
+    // between short lines are preserved. captureTmuxOutput must pass these
+    // through verbatim (only stripping ANSI), so the newline structure the
+    // state matchers see is exactly tmux's logical-line structure.
+    const joined =
+      "this is one very long logical line that tmux -J rejoined from several soft-wrapped physical rows into a single line\n" +
+      "short line A\n" +
+      "short line B\n";
+    mockSpawn(joined, 0);
+    const result = await captureTmuxOutput("sess", 50);
+    expect(result).toBe(joined);
+    // Three logical lines (+ trailing empty from the final \n).
+    expect(result!.split("\n").filter((l) => l.length > 0)).toHaveLength(3);
+  });
 });
 
 // -------------------------------------------------------------------
@@ -364,6 +397,27 @@ describe("TmuxPoller", () => {
 
     expect(capturedCmd).toContain("-200");
     expect(capturedCmd).not.toContain("-5000");
+  });
+
+  test("display poll capture-pane includes -J (reflow logical lines ourselves)", async () => {
+    let capturedCmd: string[] = [];
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd.includes("capture-pane")) capturedCmd = cmd;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    poller = new TmuxPoller({ onOutput() {} });
+    poller.start();
+    poller.setAgent("session-A");
+    await Bun.sleep(50);
+
+    // -J makes the poll return logical lines; the dashboard word-wraps them to
+    // the pane width so the whole scrollback renders at one consistent width.
+    expect(capturedCmd).toContain("-J");
   });
 
   test("setLines updates the next capture command's -S argument", async () => {

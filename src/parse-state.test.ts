@@ -426,4 +426,64 @@ describe("parseState", () => {
       expect(parseState(lines.join("\n")).state).toBe("running");
     });
   });
+
+  // With tmux -J, captures are LOGICAL lines: soft-wrapped continuation rows are
+  // rejoined into one long line. State detection now consumes these unwrapped
+  // buffers. A marker that used to span 2+ physical rows is now a single logical
+  // line, so the last-N-line windows measure real content (not the old wrap
+  // width). These tests feed realistic -J-shaped (long, unwrapped) lines.
+  describe("-J logical-line captures", () => {
+    test("rate-limit banner on one long logical line still classifies rate_limited", () => {
+      // At a narrow width this banner would have wrapped across 2-3 physical
+      // rows; -J keeps it on one logical line at the tail.
+      const lines = Array(10).fill(
+        "some earlier agent output that in physical captures would have soft-wrapped into several rows but is one logical line under -J",
+      );
+      lines.push(
+        "Claude Usage Limit Reached — your limit will reset at 3pm; run /upgrade to increase your usage limit and continue working right now",
+      );
+      expect(parseState(lines.join("\n")).state).toBe("rate_limited");
+    });
+
+    test("completion sentinel on a wide logical line classifies complete", () => {
+      const lines = Array(8).fill(
+        "a wide logical line of agent narration that would previously have wrapped across the pane but is now unwrapped by -J",
+      );
+      lines.push(
+        "Everything is finished and verified end to end — I HAVE COMPLETED THE GOAL",
+      );
+      expect(parseState(lines.join("\n")).state).toBe("complete");
+    });
+
+    test("running interrupt marker on a wide logical line classifies running", () => {
+      const lines = Array(6).fill("narration that is quite wide and unwrapped under -J ".repeat(3));
+      lines.push(
+        "Editing the project file across many modules and rebuilding the whole workspace (Esc to interrupt)",
+      );
+      expect(parseState(lines.join("\n")).state).toBe("running");
+    });
+
+    test("standalone WAITING survives when preceding lines are wide logical lines", () => {
+      // The wide preceding lines don't consume extra window slots the way
+      // physical wrapping did — WAITING stays comfortably inside last-15.
+      const lines = Array(12).fill(
+        "a very wide logical line ".repeat(6),
+      );
+      lines.push("WAITING");
+      expect(parseState(lines.join("\n")).state).toBe("waiting");
+    });
+
+    test("codex idle-at-prompt detected from a -J capture with a wide queued prompt", () => {
+      // Codex can wrap a long typed prompt across many rows; -J rejoins it into
+      // one line. The trailing › prompt + status bar must still read as waiting.
+      const input = [
+        "• Standing by for the next instruction.",
+        "",
+        "› " + "this is a long queued prompt that tmux would have soft-wrapped ".repeat(4),
+        "",
+        "  gpt-5.5 default · /repo",
+      ].join("\n");
+      expect(parseState(input).state).toBe("waiting");
+    });
+  });
 });

@@ -266,4 +266,92 @@ describe("wordWrapLines", () => {
     const result = wordWrapLines(text, 20);
     expect(result).toEqual(["hello", "", "world"]);
   });
+
+  // The tmux display path now feeds -J logical lines (long, unwrapped) into
+  // wordWrapLines. These tests assert the reflow is correct for that shape.
+  describe("-J logical-line reflow (tmux display path)", () => {
+    test("re-wraps a long logical line to the target width, every output row bounded", () => {
+      // A single logical line as tmux -J would return it — far wider than the
+      // pane. We reflow it to width 40; nothing scrolls past that width.
+      const logical =
+        "The agent is currently editing the project file and has produced a very long status line that would previously have been hard-wrapped by tmux at the old window width and then displayed verbatim at the new width.";
+      const width = 40;
+      const result = wordWrapLines(logical, width);
+      expect(result.length).toBeGreaterThan(1);
+      for (const row of result) {
+        expect(visibleWidth(row)).toBeLessThanOrEqual(width);
+      }
+      // No word is split when it fits — joining rows back with spaces recovers
+      // the original words in order (word-wrap, not char-wrap).
+      expect(result.join(" ").replace(/\s+/g, " ").trim()).toBe(logical);
+    });
+
+    test("short newline-separated logical lines stay on their own rows (no rejoin)", () => {
+      // -J keeps program-emitted newlines separate. Short lines under the width
+      // must NOT be merged by the wrapper.
+      const text = "line one\nline two\nline three";
+      const result = wordWrapLines(text, 80);
+      expect(result).toEqual(["line one", "line two", "line three"]);
+    });
+
+    test("an over-width unbroken token still hard-wraps and stays bounded", () => {
+      // A path/URL with no spaces (worst case) must fall back to char-wrapping
+      // so no output row exceeds the width.
+      const token = "/Users/agent/very/deep/path/without/any/spaces/that/exceeds/the/pane/width/segment";
+      const width = 20;
+      const result = wordWrapLines(token, width);
+      expect(result.length).toBeGreaterThan(1);
+      for (const row of result) {
+        expect(visibleWidth(row)).toBeLessThanOrEqual(width);
+      }
+      // All the characters survive (no data lost during hard-wrap).
+      expect(result.join("")).toBe(token);
+    });
+
+    test("wraps a realistic 200-logical-line buffer with every row within width", () => {
+      const lines: string[] = [];
+      for (let i = 0; i < 200; i++) {
+        lines.push(
+          `logical line ${i}: ` +
+          "some moderately long content that will need to reflow ".repeat(3),
+        );
+      }
+      const width = 100;
+      const result = wordWrapLines(lines.join("\n"), width);
+      expect(result.length).toBeGreaterThan(200);
+      for (const row of result) {
+        expect(visibleWidth(row)).toBeLessThanOrEqual(width);
+      }
+    });
+  });
+});
+
+describe("wordWrapLines performance", () => {
+  test("word-wraps a 5000-logical-line buffer at width 120 under threshold", () => {
+    // 5000 logical lines each ~1.7x the target width — representative of a full
+    // scrollback of moderately-wrapped agent output. The memo in
+    // TmuxPaneComponent keeps per-render cost O(1) between polls, but the first
+    // wrap after each poll must still be fast enough for a ~1s cadence.
+    const lines: string[] = [];
+    for (let i = 0; i < 5000; i++) {
+      lines.push(
+        `row ${i} ` +
+        "word ".repeat(40), // ~200 chars, ~1.7x width 120
+      );
+    }
+    const text = lines.join("\n");
+    const width = 120;
+
+    const start = performance.now();
+    const result = wordWrapLines(text, width);
+    const elapsed = performance.now() - start;
+
+    // Sanity: every output row is bounded.
+    for (const row of result) {
+      expect(visibleWidth(row)).toBeLessThanOrEqual(width);
+    }
+    // Target is ~20ms; assert 80ms to stay meaningful while tolerating shared-CI
+    // jitter. A regression that makes wrapping super-linear blows well past this.
+    expect(elapsed).toBeLessThan(80);
+  });
 });

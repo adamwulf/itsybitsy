@@ -1612,6 +1612,35 @@ describe("watchdog", () => {
       expect(tracker.waitCounter).toBe(0);
       expect(tracker.notifyInterval).toBe(INITIAL_NOTIFY_TICKS);
     });
+
+    // captureTmuxOutput now passes tmux -J, so the bypass loop's parseState()
+    // sees UNWRAPPED logical lines. The classify path must behave identically
+    // whether a marker is a wide single line or physically wrapped.
+    test("bypass loop classifies -J logical-line captures correctly", async () => {
+      setWatchdogFetchUsage(async () => ({ data: { sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }, error: false }));
+      setWatchdogSleep(async () => {});
+      let captureCount = 0;
+      // Both banners are single wide logical lines (as -J returns them). The
+      // first is still rate-limited → retry; the second is a running interrupt
+      // marker → the loop breaks.
+      setWatchdogCaptureTmux(async () => {
+        captureCount++;
+        if (captureCount === 1) {
+          return "You've hit your limit for the 5-hour window; your limit will reset at 3pm — run /upgrade to increase your usage limit and keep going";
+        }
+        return "Editing the project file across many modules and rebuilding the whole workspace right now (Esc to interrupt)";
+      });
+
+      const a1 = agent("a1", "rate_limited");
+      await tick([a1]);
+
+      const enterCalls = spawnMock.calls.filter((c) =>
+        c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("=tmux-a1:")
+      );
+      // First wide banner still rate-limited, second wide line resolves → 2 Enters.
+      expect(enterCalls.length).toBe(2);
+      expect(getTracker("a1").rateLimitBypassed).toBe(true);
+    });
   });
 
   describe("api_error handler", () => {

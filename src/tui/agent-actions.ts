@@ -46,6 +46,7 @@ function classifyAgentCli(model: string | undefined | null): AgentCli {
   }
 }
 import { clampLeftWidthAbsolute } from "./widths";
+import { wordWrapLines } from "./wrap";
 import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
 import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, checkCoordinatorExists, getLastCoordinatorSpawnMode, discardSystemCoordinator } from "../coordinator";
@@ -267,6 +268,13 @@ export interface ActionCtx {
   loadAgentLogIfNeeded(): void;
   setQuestionsFocused(value: boolean): void;
   healthReport: RepoHealthReport | undefined;
+  /**
+   * The width the center tmux pane currently renders at (its left-pane width in
+   * the split). Used by the `S` snapshot to word-wrap the captured output to the
+   * same width the user sees on screen. Implemented on the dashboard as
+   * getLiveLeftPaneWidth(liveLayout()).
+   */
+  getSnapshotPaneWidth(): number;
 }
 
 export function handleRetire(ctx: ActionCtx) {
@@ -2116,46 +2124,57 @@ export function handleOpenGhosttyTmux(ctx: ActionCtx) {
 export function handleSnapshot(ctx: ActionCtx) {
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) { ctx.setNotice("No agent selected", "error"); return; }
+  // Capture the pane width up front (synchronously, before the async capture)
+  // so the wrapped snapshot matches exactly what the center pane renders now.
+  const paneWidth = Math.max(1, ctx.getSnapshotPaneWidth());
   captureTmuxOutput(agent.meta.tmux_session).then(async (strippedOutput) => {
     try {
       if (!strippedOutput) { ctx.setNotice("No tmux output captured", "error"); return; }
       const result = parseStateForCli(strippedOutput, classifyAgentCli(agent.meta.model));
+      // strippedOutput is the UNWRAPPED logical capture (tmux -J, ANSI-stripped).
+      // The wrapped form is that same buffer word-wrapped to the current center-
+      // pane width — matching what the user sees on screen. We persist both so
+      // the snapshot preserves the logical lines (state detection input) AND the
+      // on-screen wrapping (display debugging).
+      const wrappedOutput = wordWrapLines(strippedOutput, paneWidth).join("\n");
+      const header = `State: ${result.state}\nReason: ${result.reason}\n`;
+      const unwrappedBody = `${header}\n${strippedOutput}`;
+      const wrappedBody = `${header}Pane width: ${paneWidth}\n\n${wrappedOutput}`;
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const filename = `snapshot-${timestamp}-${result.state}.txt`;
+      const baseName = `snapshot-${timestamp}-${result.state}`;
+      const unwrappedFile = `${baseName}-unwrapped.txt`;
+      const wrappedFile = `${baseName}-wrapped.txt`;
       const dir = agent.archived ? "archive" : "agents";
       const debugDir = `${agent.repoPath}/.ittybitty/${dir}/${agent.id}/debug-logs`;
-      const snapshotPath = `${debugDir}/${filename}`;
-      const baseName = filename.replace(/\.txt$/, "");
+      const unwrappedPath = `${debugDir}/${unwrappedFile}`;
+      const wrappedPath = `${debugDir}/${wrappedFile}`;
       const notePath = `${debugDir}/${baseName}-note.txt`;
       const snapshotsDir = join(dirname(defaultUserConfigPath()), "snapshots");
       const mirrorBaseName = `${agent.id}-${baseName}`;
-      const mirrorSnapshotPath = join(snapshotsDir, `${mirrorBaseName}.txt`);
+      const mirrorUnwrappedPath = join(snapshotsDir, `${mirrorBaseName}-unwrapped.txt`);
+      const mirrorWrappedPath = join(snapshotsDir, `${mirrorBaseName}-wrapped.txt`);
       const mirrorNotePath = join(snapshotsDir, `${mirrorBaseName}-note.txt`);
       await Bun.$`mkdir -p ${debugDir}`.quiet();
       await Bun.$`mkdir -p ${snapshotsDir}`.quiet();
-      await Bun.write(
-        snapshotPath,
-        `State: ${result.state}\nReason: ${result.reason}\n\n${strippedOutput}`
-      );
-      await Bun.write(
-        mirrorSnapshotPath,
-        `State: ${result.state}\nReason: ${result.reason}\n\n${strippedOutput}`
-      );
-      ctx.setNotice(`Snapshot saved: ${filename} (state: ${result.state})`, "info");
+      await Bun.write(unwrappedPath, unwrappedBody);
+      await Bun.write(wrappedPath, wrappedBody);
+      await Bun.write(mirrorUnwrappedPath, unwrappedBody);
+      await Bun.write(mirrorWrappedPath, wrappedBody);
+      ctx.setNotice(`Snapshot saved: ${baseName} (state: ${result.state})`, "info");
       ctx.showDialog({
         type: "textarea",
-        prompt: `Note for ${filename} (empty to skip):`,
+        prompt: `Note for ${baseName} (empty to skip):`,
         buffer: new TextBuffer(),
         focusedButton: "text",
         onSubmit: (note: string) => {
           ctx.closeDialog();
           const trimmed = note.trim();
-          if (!trimmed) { ctx.setNotice(`Snapshot saved: ${filename} (no note)`, "info"); return; }
+          if (!trimmed) { ctx.setNotice(`Snapshot saved: ${baseName} (no note)`, "info"); return; }
           ctx.executeAndRefresh(async () => {
             try {
               await Bun.write(notePath, `${trimmed}\n`);
               await Bun.write(mirrorNotePath, `${trimmed}\n`);
-              ctx.setNotice(`Snapshot + note saved: ${filename}`, "info");
+              ctx.setNotice(`Snapshot + note saved: ${baseName}`, "info");
             } catch (err) {
               ctx.setNotice(`Note save error: ${err}`, "error");
             }

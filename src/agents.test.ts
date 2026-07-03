@@ -1564,6 +1564,71 @@ describe("isDeadPane", () => {
   });
 });
 
+// ── is* detectors on tmux -J logical-line captures ──────────────────────────
+// captureTmuxOutput now passes -J, so these detectors receive UNWRAPPED logical
+// lines. A banner that used to soft-wrap across several physical rows is now one
+// long line; the last-N-line windows therefore measure real content. These
+// tests feed realistic -J-shaped (wide, single-line) markers.
+describe("is* detectors on -J logical-line captures", () => {
+  test("isRateLimited detects a wide single-line usage-limit banner", () => {
+    const lines = Array.from({ length: 12 }, () =>
+      "prior agent output that would have wrapped in a physical capture but is one logical line under -J ".repeat(2),
+    );
+    lines.push(
+      "You've hit your limit for the 5-hour window; your limit will reset at 3pm — run /upgrade to increase your usage limit if you need to keep going",
+    );
+    expect(isRateLimited(lines.join("\n"))).toBe(true);
+  });
+
+  test("isApiError detects a wide single-line API Error banner", () => {
+    const lines = Array.from({ length: 12 }, () => "narration ".repeat(20));
+    lines.push(
+      "  ⎿  API Error: Stream idle timeout - partial response received after a very long wait; the connection was closed mid-response and the request will be retried",
+    );
+    expect(isApiError(lines.join("\n"))).toBe(true);
+  });
+
+  test("isApiTerms detects a wide single-line usage-policy refusal", () => {
+    const lines = Array.from({ length: 10 }, () => "narration ".repeat(15));
+    lines.push(
+      "API Error: Claude Code is unable to respond to this request because it appears to violate Anthropic's Usage Policy; see https://www.anthropic.com/legal/aup for details",
+    );
+    expect(isApiTerms(lines.join("\n"))).toBe(true);
+  });
+
+  test("isCompacting still requires the marker within the last 5 logical lines", () => {
+    // -J does not change the 5-line budget semantics: a marker 6+ logical lines
+    // back is still out of range.
+    const recent = [
+      "Compacting conversation ".repeat(6),
+      "then five more logical lines of output follow the compaction banner here",
+      "line b that is reasonably wide and unwrapped under -J for realism only",
+      "line c",
+      "line d",
+      "line e",
+    ];
+    // Compacting is now the 6th-from-last line → out of the last-5 window.
+    expect(isCompacting(recent.join("\n"))).toBe(false);
+    // But when it is within the last 5, it matches on a wide logical line.
+    const recent2 = [
+      "line a",
+      "line b",
+      "Compacting conversation across a very large context window that under -J stays on one logical line",
+      "line d",
+      "line e",
+    ];
+    expect(isCompacting(recent2.join("\n"))).toBe(true);
+  });
+
+  test("hasBackgroundTasks detects the status bar on a wide logical status line", () => {
+    const lines = Array.from({ length: 12 }, () => "output ".repeat(20));
+    lines.push(
+      "⏵⏵ accept edits on (shift+tab to cycle) · 3 background tasks running in the current session right now",
+    );
+    expect(hasBackgroundTasks(lines.join("\n"))).toBe(true);
+  });
+});
+
 // ── anyChildActive ─────────────────────────────────────────────────────────
 
 describe("anyChildActive", () => {

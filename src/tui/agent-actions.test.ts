@@ -211,6 +211,7 @@ function makeMockCtx(overrides?: {
     },
     setQuestionsFocused: () => {},
     healthReport: undefined,
+    getSnapshotPaneWidth: () => leftWidth,
   };
   const flushActions = async () => { await Promise.all(pendingActions); };
   return { ctx, dialogs, notices, refreshCalls, scrollUpCalls, scrollDownCalls, loadAgentLogIfNeededCalls, setFocusCalls, teamSendCalls, setActiveSelectionSourceCalls, setSidebarModeCalls, flushActions };
@@ -251,7 +252,7 @@ afterEach(async () => {
 });
 
 describe("handleSnapshot", () => {
-  test("saves snapshot and note to per-agent debug logs and ~/.itsybitsy/snapshots", async () => {
+  test("saves unwrapped + wrapped snapshots and note to per-agent debug logs and ~/.itsybitsy/snapshots", async () => {
     const baseDir = await mkdtemp(join(tmpdir(), "agent-actions-snapshot-"));
     const repoDir = join(baseDir, "repo");
     const homeDir = join(baseDir, "home");
@@ -267,7 +268,9 @@ describe("handleSnapshot", () => {
       const agent = makeAgent({ id: "agent-snap", repoPath: repoDir });
       agent.meta.model = "codex:gpt-5.5";
       agent.meta.tmux_session = "tmux-agent-snap";
-      const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent });
+      // leftWidth=40 → getSnapshotPaneWidth() returns 40, so the wrapped file
+      // uses that width in its header.
+      const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent, leftWidth: 40 });
 
       handleSnapshot(ctx);
       await Bun.sleep(20);
@@ -277,26 +280,45 @@ describe("handleSnapshot", () => {
 
       const debugDir = join(repoDir, ".ittybitty", "agents", "agent-snap", "debug-logs");
       const debugFiles = await readdir(debugDir);
-      const snapshotName = debugFiles.find((name) => /^snapshot-.*-waiting\.txt$/.test(name));
-      expect(snapshotName).toBeDefined();
+      const unwrappedName = debugFiles.find((name) => /^snapshot-.*-waiting-unwrapped\.txt$/.test(name));
+      const wrappedName = debugFiles.find((name) => /^snapshot-.*-waiting-wrapped\.txt$/.test(name));
+      expect(unwrappedName).toBeDefined();
+      expect(wrappedName).toBeDefined();
 
       const snapshotsDir = join(homeDir, ".itsybitsy", "snapshots");
       const mirrorFiles = await readdir(snapshotsDir);
-      const mirrorName = mirrorFiles.find((name) => /^agent-snap-snapshot-.*-waiting\.txt$/.test(name));
-      expect(mirrorName).toBeDefined();
+      const mirrorUnwrappedName = mirrorFiles.find((name) => /^agent-snap-snapshot-.*-waiting-unwrapped\.txt$/.test(name));
+      const mirrorWrappedName = mirrorFiles.find((name) => /^agent-snap-snapshot-.*-waiting-wrapped\.txt$/.test(name));
+      expect(mirrorUnwrappedName).toBeDefined();
+      expect(mirrorWrappedName).toBeDefined();
 
-      const debugText = await Bun.file(join(debugDir, snapshotName!)).text();
-      const mirrorText = await Bun.file(join(snapshotsDir, mirrorName!)).text();
-      expect(mirrorText).toBe(debugText);
-      expect(mirrorText).toContain("State: waiting");
-      expect(mirrorText).toContain("check snapshot mirror");
+      const unwrappedText = await Bun.file(join(debugDir, unwrappedName!)).text();
+      const wrappedText = await Bun.file(join(debugDir, wrappedName!)).text();
+      const mirrorUnwrappedText = await Bun.file(join(snapshotsDir, mirrorUnwrappedName!)).text();
+      const mirrorWrappedText = await Bun.file(join(snapshotsDir, mirrorWrappedName!)).text();
+
+      // Debug + mirror copies are byte-identical.
+      expect(mirrorUnwrappedText).toBe(unwrappedText);
+      expect(mirrorWrappedText).toBe(wrappedText);
+
+      // Both carry the State/Reason header; the wrapped copy notes the pane width.
+      expect(unwrappedText).toContain("State: waiting");
+      expect(unwrappedText).toContain("check snapshot mirror");
+      expect(wrappedText).toContain("State: waiting");
+      expect(wrappedText).toContain("Pane width: 40");
+      expect(wrappedText).toContain("check snapshot mirror");
+      // The unwrapped copy must NOT carry the "Pane width:" line — it's the
+      // logical (state-detection) view, not the on-screen view.
+      expect(unwrappedText).not.toContain("Pane width:");
 
       const dialog = assertDialog(dialogs[0]!, "textarea");
       dialog.onSubmit("remember this capture");
       await flushActions();
 
-      const noteText = await Bun.file(join(debugDir, snapshotName!.replace(/\.txt$/, "-note.txt"))).text();
-      const mirrorNoteText = await Bun.file(join(snapshotsDir, mirrorName!.replace(/\.txt$/, "-note.txt"))).text();
+      // The note base name is the shared prefix (no -unwrapped/-wrapped suffix).
+      const baseName = unwrappedName!.replace(/-unwrapped\.txt$/, "");
+      const noteText = await Bun.file(join(debugDir, `${baseName}-note.txt`)).text();
+      const mirrorNoteText = await Bun.file(join(snapshotsDir, `agent-snap-${baseName}-note.txt`)).text();
       expect(noteText).toBe("remember this capture\n");
       expect(mirrorNoteText).toBe(noteText);
     } finally {

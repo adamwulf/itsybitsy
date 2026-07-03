@@ -62,7 +62,7 @@ The behavioral specification lives in [SPEC.md](./SPEC.md). It documents the def
 
 ## Architecture
 
-itsybitsy reads agent data natively from disk for speed, but delegates all mutations to the `ib` CLI to avoid reimplementing write-side logic (retire, merge, send, new-agent, etc.). The data flow:
+itsybitsy reads agent data natively from disk for speed, but delegates all mutations to the `ib` CLI to avoid reimplementing write-side logic (retire/rehire, merge, send, new-agent, etc.). The data flow:
 
 ```
 registry.ts        — Stores which repo paths to monitor (~/.itsybitsy/repos.json)

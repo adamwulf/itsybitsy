@@ -777,6 +777,11 @@ describe("parseIbCommand", () => {
     expect(result).toEqual({ subcommand: "retire", targetId: "agent-abc12345" });
   });
 
+  test("parses ib rehire <id>", () => {
+    const result = parseIbCommand("ib rehire agent-abc12345");
+    expect(result).toEqual({ subcommand: "rehire", targetId: "agent-abc12345" });
+  });
+
   test("parses ib merge <id> with flags", () => {
     const result = parseIbCommand("ib merge agent-abc12345 --force");
     expect(result).toEqual({ subcommand: "merge", targetId: "agent-abc12345" });
@@ -843,6 +848,65 @@ describe("checkIbCommandAccess", () => {
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
   }
+
+  async function writeRetiredMeta(id: string, meta: object): Promise<void> {
+    const archiveKey = `20260703-120000-${id}`;
+    const archiveDir = join(tmpDir, ".ittybitty", "archive", archiveKey);
+    await mkdir(archiveDir, { recursive: true });
+    await Bun.write(join(archiveDir, "meta.json"), JSON.stringify({ id, ...meta }));
+    await Bun.write(join(archiveDir, "retirement.json"), JSON.stringify({
+      version: 1,
+      agentId: id,
+      retiredAt: "2026-07-03T12:00:00.000Z",
+      repoPath: tmpDir,
+      archiveKey,
+      worktree: false,
+      gitHead: null,
+      headRef: null,
+      untrackedFiles: [],
+      prunedTeams: [],
+    }));
+  }
+
+  test("allows rehire when calling agent is the archived target's manager", async () => {
+    await writeRetiredMeta("agent-target1", { manager: "agent-manager1" });
+    const result = await checkIbCommandAccess(
+      "ib rehire agent-target1",
+      "agent-manager1",
+      agentsDir,
+    );
+    expect(result).toBeNull();
+  });
+
+  test("denies rehire when caller is not the archived target's manager", async () => {
+    await writeRetiredMeta("agent-target1", { manager: "agent-manager1" });
+    const result = await checkIbCommandAccess(
+      "ib rehire agent-target1",
+      "agent-other111",
+      agentsDir,
+    );
+    expect(result?.decision).toBe("deny");
+    expect(result?.reason).toContain("only the manager");
+  });
+
+  test("rehire is exact-id-only and denies an archived nickname target", async () => {
+    const originalHome = process.env.HOME;
+    process.env.HOME = tmpDir;
+    try {
+      await writeRetiredMeta("agent-target1", {
+        manager: "agent-manager1",
+        nickname: "old-name",
+      });
+      const result = await checkIbCommandAccess(
+        "ib rehire old-name",
+        "agent-manager1",
+        agentsDir,
+      );
+      expect(result?.decision).toBe("deny");
+    } finally {
+      process.env.HOME = originalHome;
+    }
+  });
 
   test("allows retire when calling agent is the manager", async () => {
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
@@ -933,6 +997,17 @@ describe("checkIbCommandAccess", () => {
     await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-someone" });
     const result = await checkIbCommandAccess("ib retire agent-target1", "itsybitsy", agentsDir);
+    expect(result).toBeNull();
+  });
+
+  test("per-repo coordinator CAN rehire a retired non-child in its own repo", async () => {
+    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
+    await writeRetiredMeta("agent-target1", { manager: "agent-someone" });
+    const result = await checkIbCommandAccess(
+      "ib rehire agent-target1",
+      "itsybitsy",
+      agentsDir,
+    );
     expect(result).toBeNull();
   });
 

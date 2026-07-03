@@ -5,10 +5,29 @@
  */
 
 import { join, dirname, resolve } from "path";
-import { readdir, mkdir, cp, rm, rename, appendFile } from "fs/promises";
+import {
+  readdir,
+  mkdir,
+  cp,
+  rm,
+  rename,
+  appendFile,
+  lstat,
+  readlink,
+  symlink,
+} from "fs/promises";
 import { SpawnContext } from "./types";
-import { isValidTmuxSession, tmuxSessionTarget } from "./validation";
-import { deleteAgentTransient, terminateProcess } from "./agents";
+import {
+  isValidAgentId,
+  isValidTmuxSession,
+  tmuxSessionTarget,
+} from "./validation";
+import {
+  deleteAgentTransient,
+  readAgentMeta,
+  terminateProcess,
+  type AgentMeta,
+} from "./agents";
 import { deleteAgentOutbox, agentOutboxDir } from "./outbox";
 import { pruneAgentFromAllTeams } from "./teams";
 import { logWarning } from "./watch-log";
@@ -34,6 +53,331 @@ function formatArchiveTimestamp(date: Date = new Date()): string {
     `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-` +
     `${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
   );
+}
+
+const RETIREMENT_PAYLOAD_DIR = ".retirement";
+const RETIREMENT_MANIFEST_FILE = "retirement.json";
+const WORKTREE_PATCH_FILE = "worktree.patch";
+const UNTRACKED_DIR = "untracked";
+const RUNTIME_DIR = "runtime";
+
+export interface RetirementManifestV1 {
+  version: 1;
+  agentId: string;
+  retiredAt: string;
+  repoPath: string;
+  archiveKey: string;
+  worktree: boolean;
+  gitHead: string | null;
+  headRef: string | null;
+  untrackedFiles: string[];
+  prunedTeams: Array<{ team: string; id: string }>;
+}
+
+export interface PreparedRetirement {
+  archiveKey: string;
+  payloadDir: string;
+  manifest: Omit<RetirementManifestV1, "prunedTeams">;
+}
+
+export interface RetiredAgentArchive {
+  repoPath: string;
+  archiveDir: string;
+  archiveKey: string;
+  meta: AgentMeta;
+  manifest: RetirementManifestV1 | null;
+}
+
+function isGitObjectId(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{40,64}$/.test(value);
+}
+
+function isSafeArchiveKey(value: unknown, agentId: string): value is string {
+  return (
+    typeof value === "string" &&
+    value.endsWith(`-${agentId}`) &&
+    /^\d{8}-\d{6}-[a-zA-Z0-9_-]+$/.test(value)
+  );
+}
+
+/** Validate a path stored in a retirement manifest before filesystem use. */
+export function isSafeRetirementRelativePath(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.includes("\0")) return false;
+  if (value.startsWith("/") || value.startsWith("\\")) return false;
+  const parts = value.split(/[\\/]/);
+  return parts.every((part) => part !== "" && part !== "." && part !== "..");
+}
+
+export function parseRetirementManifest(
+  value: unknown,
+  expectedAgentId?: string,
+): RetirementManifestV1 | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  if (raw.version !== 1) return null;
+  if (typeof raw.agentId !== "string" || !isValidAgentId(raw.agentId)) return null;
+  if (expectedAgentId !== undefined && raw.agentId !== expectedAgentId) return null;
+  if (typeof raw.retiredAt !== "string" || Number.isNaN(Date.parse(raw.retiredAt))) return null;
+  if (typeof raw.repoPath !== "string" || raw.repoPath.length === 0) return null;
+  if (!isSafeArchiveKey(raw.archiveKey, raw.agentId)) return null;
+  if (typeof raw.worktree !== "boolean") return null;
+  if (raw.worktree) {
+    if (!isGitObjectId(raw.gitHead)) return null;
+    if (
+      typeof raw.headRef !== "string" ||
+      raw.headRef !== `refs/ittybitty/retired/${raw.archiveKey}/head`
+    ) return null;
+  } else if (raw.gitHead !== null || raw.headRef !== null) {
+    return null;
+  }
+  if (
+    !Array.isArray(raw.untrackedFiles) ||
+    !raw.untrackedFiles.every(isSafeRetirementRelativePath)
+  ) return null;
+  if (
+    !Array.isArray(raw.prunedTeams) ||
+    !raw.prunedTeams.every((entry) => (
+      entry &&
+      typeof entry === "object" &&
+      !Array.isArray(entry) &&
+      typeof (entry as { team?: unknown }).team === "string" &&
+      (entry as { id?: unknown }).id === raw.agentId
+    ))
+  ) return null;
+  return raw as unknown as RetirementManifestV1;
+}
+
+async function runRaw(
+  cmd: string[],
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const proc = spawnCtx.runner(cmd, { stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  return { stdout, stderr, exitCode: await proc.exited };
+}
+
+async function copySnapshotEntry(source: string, destination: string): Promise<void> {
+  const sourceStat = await lstat(source);
+  await mkdir(dirname(destination), { recursive: true });
+  if (sourceStat.isSymbolicLink()) {
+    const target = await readlink(source);
+    await symlink(target, destination);
+    return;
+  }
+  if (!sourceStat.isFile()) {
+    throw new Error(`unsupported untracked file type: ${source}`);
+  }
+  await cp(source, destination, {
+    dereference: false,
+    preserveTimestamps: true,
+  });
+}
+
+/**
+ * Capture every recoverable bit of an agent before teardown mutates it.
+ *
+ * Worktree agents retain their exact HEAD through a hidden ref, a binary patch
+ * for tracked changes, and copies of non-ignored untracked files. The payload
+ * stays under the agent directory until archiveAgent moves it into the final
+ * timestamped archive.
+ */
+export async function prepareAgentRetirement(
+  repoPath: string,
+  agentId: string,
+  agentDir: string,
+  worktree: boolean,
+): Promise<PreparedRetirement> {
+  if (!isValidAgentId(agentId)) {
+    throw new Error(`invalid agent id: ${agentId}`);
+  }
+
+  const archiveKey = `${formatArchiveTimestamp()}-${agentId}`;
+  const archivePath = join(repoPath, ".ittybitty", "archive", archiveKey);
+  if (await lstat(archivePath).then(() => true).catch(() => false)) {
+    throw new Error(`retirement archive already exists: ${archiveKey}`);
+  }
+
+  const payloadDir = join(agentDir, RETIREMENT_PAYLOAD_DIR);
+  if (await lstat(payloadDir).then(() => true).catch(() => false)) {
+    throw new Error(
+      `unfinished retirement payload already exists: ${payloadDir}`,
+    );
+  }
+  await mkdir(payloadDir, { recursive: true });
+
+  let headRef: string | null = null;
+  try {
+    const runtimeDir = join(payloadDir, RUNTIME_DIR);
+    await mkdir(runtimeDir, { recursive: true });
+    const metaSource = join(agentDir, "meta.json");
+    if (!(await lstat(metaSource)).isFile()) {
+      throw new Error("agent meta.json is not a regular file");
+    }
+    await cp(metaSource, join(runtimeDir, "meta.json"));
+    for (const fileName of ["agent.log", "prompt.txt", "start.sh", "exit-check.sh"]) {
+      const source = join(agentDir, fileName);
+      if (await Bun.file(source).exists().catch(() => false)) {
+        if (!(await lstat(source)).isFile()) {
+          throw new Error(`${fileName} is not a regular file`);
+        }
+        await cp(source, join(runtimeDir, fileName));
+      }
+    }
+    const coordinatorSettings = join(agentDir, ".claude", "settings.local.json");
+    if (await Bun.file(coordinatorSettings).exists().catch(() => false)) {
+      if (!(await lstat(coordinatorSettings)).isFile()) {
+        throw new Error("coordinator settings.local.json is not a regular file");
+      }
+      await mkdir(join(runtimeDir, ".claude"), { recursive: true });
+      await cp(
+        coordinatorSettings,
+        join(runtimeDir, ".claude", "settings.local.json"),
+      );
+    }
+
+    let gitHead: string | null = null;
+    const untrackedFiles: string[] = [];
+
+    if (worktree) {
+      const worktreePath = join(agentDir, "repo");
+      const worktreeExists = await lstat(worktreePath)
+        .then((value) => value.isDirectory())
+        .catch(() => false);
+      if (!worktreeExists) {
+        throw new Error(`agent worktree is missing: ${worktreePath}`);
+      }
+
+      const worktreeSettings = join(worktreePath, ".claude", "settings.local.json");
+      if (await Bun.file(worktreeSettings).exists().catch(() => false)) {
+        if (!(await lstat(worktreeSettings)).isFile()) {
+          throw new Error("worktree settings.local.json is not a regular file");
+        }
+        await cp(worktreeSettings, join(runtimeDir, "settings.local.json"));
+      }
+
+      const headResult = await spawnCtx.run(["git", "-C", worktreePath, "rev-parse", "HEAD"]);
+      if (headResult.exitCode !== 0 || !isGitObjectId(headResult.stdout)) {
+        throw new Error(headResult.stderr || "could not resolve agent worktree HEAD");
+      }
+      gitHead = headResult.stdout;
+
+      const patchResult = await runRaw([
+        "git", "-C", worktreePath, "diff", "--binary", "--full-index", "HEAD", "--",
+      ]);
+      if (patchResult.exitCode !== 0) {
+        throw new Error(patchResult.stderr.trim() || "could not snapshot tracked worktree changes");
+      }
+      await Bun.write(join(payloadDir, WORKTREE_PATCH_FILE), patchResult.stdout);
+
+      const untrackedResult = await runRaw([
+        "git", "-C", worktreePath, "ls-files", "--others", "--exclude-standard", "-z",
+      ]);
+      if (untrackedResult.exitCode !== 0) {
+        throw new Error(untrackedResult.stderr.trim() || "could not enumerate untracked files");
+      }
+      for (const relativePath of untrackedResult.stdout.split("\0")) {
+        if (!relativePath) continue;
+        if (!isSafeRetirementRelativePath(relativePath)) {
+          throw new Error(`unsafe untracked path reported by git: ${JSON.stringify(relativePath)}`);
+        }
+        const source = resolve(worktreePath, relativePath);
+        if (source !== worktreePath && !source.startsWith(worktreePath + "/")) {
+          throw new Error(`untracked path escapes worktree: ${relativePath}`);
+        }
+        const sourceStat = await lstat(source);
+        if (sourceStat.isSymbolicLink()) {
+          const target = await readlink(source);
+          const resolvedTarget = resolve(dirname(source), target);
+          if (
+            target.startsWith("/") ||
+            (resolvedTarget !== worktreePath &&
+              !resolvedTarget.startsWith(worktreePath + "/"))
+          ) {
+            throw new Error(`untracked symlink escapes worktree: ${relativePath}`);
+          }
+        }
+        await copySnapshotEntry(
+          source,
+          join(payloadDir, UNTRACKED_DIR, relativePath),
+        );
+        untrackedFiles.push(relativePath);
+      }
+
+      headRef = `refs/ittybitty/retired/${archiveKey}/head`;
+      const refResult = await spawnCtx.run([
+        "git", "-C", repoPath, "update-ref", headRef, gitHead,
+      ]);
+      if (refResult.exitCode !== 0) {
+        throw new Error(refResult.stderr || `could not retain agent HEAD at ${headRef}`);
+      }
+    }
+
+    return {
+      archiveKey,
+      payloadDir,
+      manifest: {
+        version: 1,
+        agentId,
+        retiredAt: new Date().toISOString(),
+        repoPath,
+        archiveKey,
+        worktree,
+        gitHead,
+        headRef,
+        untrackedFiles,
+      },
+    };
+  } catch (err) {
+    if (headRef) {
+      await spawnCtx.run(["git", "-C", repoPath, "update-ref", "-d", headRef]).catch(() => {});
+    }
+    await rm(payloadDir, { recursive: true, force: true }).catch(() => {});
+    throw err;
+  }
+}
+
+export async function cleanupPreparedRetirement(
+  repoPath: string,
+  prepared: PreparedRetirement,
+): Promise<void> {
+  if (prepared.manifest.headRef) {
+    await spawnCtx.run([
+      "git", "-C", repoPath, "update-ref", "-d", prepared.manifest.headRef,
+    ]).catch(() => {});
+  }
+  await rm(prepared.payloadDir, { recursive: true, force: true }).catch(() => {});
+}
+
+/** Scan timestamped archive folders and resolve immutable exact agent IDs. */
+export async function findRetiredAgentArchives(
+  repoPath: string,
+  agentId: string,
+): Promise<RetiredAgentArchive[]> {
+  if (!isValidAgentId(agentId)) return [];
+  const archiveRoot = join(repoPath, ".ittybitty", "archive");
+  const entries = await readdir(archiveRoot, { withFileTypes: true }).catch(() => []);
+  const matches: RetiredAgentArchive[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const archiveDir = join(archiveRoot, entry.name);
+    const { meta } = await readAgentMeta(archiveDir);
+    if (!meta || meta.id !== agentId) continue;
+    const rawManifest = await Bun.file(join(archiveDir, RETIREMENT_MANIFEST_FILE))
+      .json()
+      .catch(() => null);
+    const parsedManifest = parseRetirementManifest(rawManifest, agentId);
+    matches.push({
+      repoPath,
+      archiveDir,
+      archiveKey: entry.name,
+      meta,
+      manifest:
+        parsedManifest?.archiveKey === entry.name ? parsedManifest : null,
+    });
+  }
+  return matches.sort((a, b) => b.archiveKey.localeCompare(a.archiveKey));
 }
 
 // ── logAgent ─────────────────────────────────────────────────────────────────
@@ -228,7 +572,8 @@ export interface ArchiveAgentResult {
 export async function archiveAgent(
   repoPath: string,
   agentId: string,
-  agentDir: string
+  agentDir: string,
+  preparedRetirement?: PreparedRetirement,
 ): Promise<ArchiveAgentResult> {
   // Eager teardown prune FIRST, unconditionally (§16.5): a torn-down agent must
   // be removed from every team it belonged to even when there are no artifacts
@@ -236,15 +581,18 @@ export async function archiveAgent(
   const prunedTeams = await pruneAgentFromAllTeams(agentId);
 
   const archiveDir = join(repoPath, ".ittybitty", "archive");
-  const timestamp = formatArchiveTimestamp();
-  const archiveFolder = join(archiveDir, `${timestamp}-${agentId}`);
+  const archiveKey =
+    preparedRetirement?.archiveKey ?? `${formatArchiveTimestamp()}-${agentId}`;
+  const archiveFolder = join(archiveDir, archiveKey);
 
   // Check if there's anything to archive
   const hasOutput = await Bun.file(join(agentDir, "output.log")).exists().catch(() => false);
   const hasLog = await Bun.file(join(agentDir, "agent.log")).exists().catch(() => false);
   const hasMeta = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
 
-  if (!hasOutput && !hasLog && !hasMeta) return { archivePath: null, prunedTeams };
+  if (!hasOutput && !hasLog && !hasMeta && !preparedRetirement) {
+    return { archivePath: null, prunedTeams };
+  }
 
   await mkdir(archiveFolder, { recursive: true });
 
@@ -275,6 +623,21 @@ export async function archiveAgent(
     } catch { /* ignore */ }
   }
 
+  for (const fileName of ["prompt.txt", "start.sh", "exit-check.sh"]) {
+    const source = join(agentDir, fileName);
+    if (await Bun.file(source).exists().catch(() => false)) {
+      await cp(source, join(archiveFolder, fileName));
+    }
+  }
+
+  // Coordinators keep isolated settings in the agent directory.
+  try {
+    await readdir(join(agentDir, ".claude"));
+    await cp(join(agentDir, ".claude"), join(archiveFolder, ".claude"), {
+      recursive: true,
+    });
+  } catch { /* absent for ordinary agents */ }
+
   // settings.local.json — move
   const hasSettings = await Bun.file(join(agentDir, "settings.local.json")).exists().catch(() => false);
   if (hasSettings) {
@@ -294,6 +657,53 @@ export async function archiveAgent(
     await readdir(debugLogsDir);
     await cp(debugLogsDir, join(archiveFolder, "debug-logs"), { recursive: true });
   } catch { /* dir doesn't exist or copy failed */ }
+
+  if (preparedRetirement) {
+    const runtimeDir = join(preparedRetirement.payloadDir, RUNTIME_DIR);
+    for (const fileName of [
+      "meta.json",
+      "agent.log",
+      "prompt.txt",
+      "start.sh",
+      "exit-check.sh",
+      "settings.local.json",
+    ]) {
+      const source = join(runtimeDir, fileName);
+      if (await Bun.file(source).exists().catch(() => false)) {
+        await cp(source, join(archiveFolder, fileName));
+      }
+    }
+    const coordinatorSettings = join(runtimeDir, ".claude", "settings.local.json");
+    if (await Bun.file(coordinatorSettings).exists().catch(() => false)) {
+      await mkdir(join(archiveFolder, ".claude"), { recursive: true });
+      await cp(
+        coordinatorSettings,
+        join(archiveFolder, ".claude", "settings.local.json"),
+      );
+    }
+
+    const patchSource = join(preparedRetirement.payloadDir, WORKTREE_PATCH_FILE);
+    if (await Bun.file(patchSource).exists().catch(() => false)) {
+      await rename(patchSource, join(archiveFolder, WORKTREE_PATCH_FILE));
+    }
+    try {
+      await readdir(join(preparedRetirement.payloadDir, UNTRACKED_DIR));
+      await rename(
+        join(preparedRetirement.payloadDir, UNTRACKED_DIR),
+        join(archiveFolder, UNTRACKED_DIR),
+      );
+    } catch { /* no untracked files */ }
+
+    const manifest: RetirementManifestV1 = {
+      ...preparedRetirement.manifest,
+      prunedTeams,
+    };
+    await Bun.write(
+      join(archiveFolder, RETIREMENT_MANIFEST_FILE),
+      JSON.stringify(manifest, null, 2) + "\n",
+    );
+    await rm(preparedRetirement.payloadDir, { recursive: true, force: true });
+  }
 
   // meta.transient.json has no historical value — explicitly delete it
   // (rather than copying) so any future archive flow that doesn't rm-rf
@@ -338,7 +748,8 @@ export async function teardownAgent(
   agentId: string,
   agentDir: string,
   meta: TeardownMeta,
-  logMsg: string = "Agent killed"
+  logMsg: string = "Agent killed",
+  preparedRetirement?: PreparedRetirement,
 ): Promise<{ ok: boolean; prunedTeams: Array<{ team: string; id: string }> }> {
   const tmuxSession = meta.tmux_session;
 
@@ -405,7 +816,12 @@ export async function teardownAgent(
   // 8. Archive — also performs the eager team-membership prune (§16.5) and
   // returns the pruned (team, id) pairs, which we thread up to the command
   // layer so it can fan out the leave notice.
-  const { prunedTeams } = await archiveAgent(repoPath, agentId, agentDir);
+  const { prunedTeams } = await archiveAgent(
+    repoPath,
+    agentId,
+    agentDir,
+    preparedRetirement,
+  );
 
   // 9. Remove agent directory
   try {

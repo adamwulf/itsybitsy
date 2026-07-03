@@ -426,6 +426,7 @@ Always spawn **manager** agents (not \`--type worker\`). Managers assess the tas
 | \`ib diff <id>\` | Review agent's changes |
 | \`ib merge <id> --force\` | Merge and close agent (\`--force\` skips confirmation) |
 | \`ib retire <id> --force\` | Stop and archive without merging (\`--force\` skips confirmation) |
+| \`ib rehire <id>\` | Reconstruct and resume an explicitly retired agent |
 | \`ib resume <id>\` | Restart stopped agent |
 | \`ib questions\` | Check agent questions |
 | \`ib acknowledge <qid>\` | Mark question handled |
@@ -542,6 +543,7 @@ You are in a git worktree, which shares the same repository as the main checkout
 | \`ib diff <id>\` | Review agent's changes |
 | \`ib merge <id>\` | Merge agent's work and close it |
 | \`ib retire <id>\` | Stop and archive an agent without merging |
+| \`ib rehire <id>\` | Reconstruct and resume an explicitly retired agent |
 ${askLine}
 
 ${SEND_LITERAL_STRINGS_SECTION}
@@ -713,6 +715,7 @@ ${buildPathIsolationSection(ctx)}
 | \`ib diff <id>\` | Review agent's changes |
 | \`ib merge <id>\` | Merge agent's work and close it |
 | \`ib retire <id>\` | Stop and archive an agent without merging |
+| \`ib rehire <id>\` | Reconstruct and resume an explicitly retired agent |
 
 ${SEND_LITERAL_STRINGS_SECTION}
 

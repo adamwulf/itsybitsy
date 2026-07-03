@@ -152,10 +152,17 @@ The legacy parseState priority order is documented here for reference:
 
 ### 1.4 Retiring an Agent
 
-Retire (`ib retire <id>`) permanently destroys an agent (archival teardown):
+Retire (`ib retire <id>`) stops an agent and creates a rehirable archival
+snapshot:
 
-1. Remove the agent's questions from `user-questions.json`
-2. **Teardown sequence**:
+1. **Prepare recovery state before destructive teardown**:
+   a. Retain the exact worktree HEAD at
+      `refs/ittybitty/retired/<archive-key>/head`
+   b. Save `git diff --binary HEAD` as `worktree.patch`
+   c. Copy non-ignored untracked files without following unsafe symlinks
+   d. Abort without stopping the agent if any required snapshot step fails
+2. Remove the agent's questions from `user-questions.json`
+3. **Teardown sequence**:
    a. Log "Agent retired" to `agent.log`
    b. Capture tmux pane output to `output.log`
    c. Kill Claude process (SIGTERM → wait 2s → SIGKILL if still alive)
@@ -163,9 +170,12 @@ Retire (`ib retire <id>`) permanently destroys an agent (archival teardown):
    e. Copy `settings.local.json` from worktree to agent dir
    f. Remove git worktree (`git worktree remove --force`, fallback to `rm -rf`)
    g. Delete git branch (`git branch -D agent/<id>`)
-   h. Archive artifacts (output.log, agent.log, meta.json, settings.local.json, debug-logs/)
+   h. Archive artifacts and the versioned `retirement.json` recovery manifest
    i. Remove agent directory
-3. Scan and kill orphaned Claude processes
+4. Scan and kill orphaned Claude processes
+
+Ignored files, pending questions, transient operation metadata, process IDs,
+and queued outbox messages are not recovery state.
 
 ### 1.5 Pausing an Agent
 
@@ -200,6 +210,38 @@ Archive moves agent artifacts to `.ittybitty/archive/<YYYYMMDD-HHMMSS>-<agent-id
 | `meta.json` | Copy |
 | `settings.local.json` | Move |
 | `debug-logs/` | Copy (recursive) |
+| `prompt.txt`, `start.sh`, `exit-check.sh` | Copy |
+| `.claude/` | Copy for no-worktree coordinators |
+| `retirement.json` | Write for explicit `ib retire` only |
+| `worktree.patch`, `untracked/` | Move from the prepared recovery payload |
+
+Merge and nuke continue to create historical archives without
+`retirement.json`; those archives are intentionally not rehirable.
+
+### 1.7.1 Rehiring
+
+`ib rehire <agent-id>` accepts an immutable exact agent ID (not a nickname):
+
+1. Scan timestamped `archive/*` folders across registered repositories and
+   match `meta.json.id`. If an ID is retired more than once in one repository,
+   use the newest valid retirement manifest; reject cross-repository ambiguity.
+2. Reject an active ID/nickname collision, live tmux session, existing
+   `agent/<id>` branch, missing recovery manifest/ref, or malformed archive.
+3. Recreate `.ittybitty/agents/<id>/` and sanitize stale runtime fields:
+   clear `claude_pid`/`watchdog_pid`, discard transient state, and set
+   `state: "stopped"` while preserving session IDs, deterministic tmux name,
+   model/effort, type, hierarchy, nickname, and worktree mode.
+4. Recreate a worktree and `agent/<id>` from the retained HEAD, apply the
+   binary patch, restore safe untracked paths, and restore local settings.
+5. Delegate session startup to the existing resume pipeline, including tmux,
+   state, nudge, and watchdog behavior.
+6. Best-effort restore memberships for teams that still exist.
+
+Reconstruction failures roll back the partial directory/worktree/branch.
+Session-resume failures leave a valid stopped agent so `ib resume` can be
+retried. Archives and retained refs remain immutable. Legacy archives and
+merge/nuke archives without a supported manifest produce a non-destructive
+"not rehirable" error.
 
 ### 1.8 Nuking
 
@@ -1400,7 +1442,7 @@ The system coordinator runs from `~/.itsybitsy/`, which is not initially a git r
 
 **Note**: Claude Code requires a project directory context to load `settings.local.json`. Since `~/.itsybitsy/` is not initially a git repo, the coordinator startup must run `git init` there (a standard repo, not `--bare`). This matches the existing settings pattern and is simpler than passing permissions via `--allowedTools` CLI flags.
 
-This ensures the system coordinator can only run `ib` commands (e.g., `ib list`, `ib send`, `ib merge`, `ib new-agent`, `ib retire`, `ib status`, `ib diff`) and use `ToolSearch` to discover available deferred tools. It cannot access files, browse the web, or spawn sub-agents directly.
+This ensures the system coordinator can only run `ib` commands (e.g., `ib list`, `ib send`, `ib merge`, `ib new-agent`, `ib retire`, `ib rehire`, `ib status`, `ib diff`) and use `ToolSearch` to discover available deferred tools. It cannot access files, browse the web, or spawn sub-agents directly.
 
 #### 12.1.4 Display
 
@@ -1492,7 +1534,7 @@ Users can customize the prompt by editing `~/.itsybitsy/agent-types/system.md`. 
 
 The default prompt content (from `docs/agent-types/system.md`):
 
-> You are the itsybitsy system coordinator. You manage agents across all registered repos using `ib` commands. You can list agents (`ib list`), send messages to agents (`ib send <agent-id> "message"`), merge (`ib merge`), retire (`ib retire`), create agents (`ib new-agent`), and check status (`ib status`, `ib diff`). You do NOT have access to Read, Write, Edit, or any file tools — only `ib` Bash commands. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators. To send messages to per-repo coordinators, use `ib send @<repo-name> "message"` (e.g., `ib send @itsybitsy "review the latest PR"`). Do NOT use `ib send @system` — that routes back to you.
+> You are the itsybitsy system coordinator. You manage agents across all registered repos using `ib` commands. You can list agents (`ib list`), send messages to agents (`ib send <agent-id> "message"`), merge (`ib merge`), retire and rehire (`ib retire`, `ib rehire`), create agents (`ib new-agent`), and check status (`ib status`, `ib diff`). You do NOT have access to Read, Write, Edit, or any file tools — only `ib` Bash commands. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators. To send messages to per-repo coordinators, use `ib send @<repo-name> "message"` (e.g., `ib send @itsybitsy "review the latest PR"`). Do NOT use `ib send @system` — that routes back to you.
 
 #### 12.1.6 Watchdog Behavior
 
@@ -1563,7 +1605,7 @@ Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, bu
 
 **Retiring/Archiving**: Per-repo coordinators follow the standard retire/archive flow (§1.4, §1.7). `ib retire <repo-basename>` retires only the coordinator itself (standard §1.4 behavior). To recursively tear down a coordinator and all its children, use `ib nuke <repo-basename>` (§1.8). The `manager: "<repo-basename>"` field in children's meta.json links them to the coordinator for the nuke traversal.
 
-**Expanded same-repo authority**: Per-repo coordinators may run `ib retire` and `ib reassign` on ANY non-coordinator agent within their own repo, regardless of the target's `manager` field. This is enforced in `checkIbCommandAccess` (src/hooks/agent-path.ts) by checking the caller's `coordinator: true` flag in its own meta.json before falling back to the standard manager/spawner check. Other manager-only operations (`nuke`, `merge`, `resume`, `pause`) still require the standard manager/spawner relationship. Cross-repo `retire`/`reassign` is not permitted — a coordinator in repo A cannot act on agents in repo B. Coordinators cannot retire or reassign other coordinators via this bypass (the target's `coordinator: true` flag disqualifies it from the bypass and falls through to the standard check).
+**Expanded same-repo authority**: Per-repo coordinators may run `ib retire`, `ib rehire`, and `ib reassign` on ANY non-coordinator agent within their own repo, regardless of the target's `manager` field. This is enforced in `checkIbCommandAccess` (src/hooks/agent-path.ts) by checking the caller's `coordinator: true` flag in its own meta.json before falling back to the standard manager/spawner check. Other manager-only operations (`nuke`, `merge`, `resume`, `pause`) still require the standard manager/spawner relationship. Cross-repo `retire`/`rehire`/`reassign` is not permitted through this coordinator bypass. Coordinators cannot retire, rehire, or reassign other coordinators via the bypass.
 
 **Resuming**: Standard resume flow (§1.6). Per-repo coordinators can be paused and resumed like any agent.
 
@@ -1628,7 +1670,7 @@ Per-repo coordinators use a custom session-start context (injected via the sessi
 - Bash rules (single-command enforcement)
 - Path isolation (worktree boundaries)
 - Git worktree context (branch name, parent branch)
-- Command table (`ib new-agent --type worker`, `ib list --manager`, `ib look`, `ib send`, `ib send @system "msg"`, `ib send @coordinator "msg"`, `ib status`, `ib diff`, `ib merge`, `ib retire`)
+- Command table (`ib new-agent --type worker`, `ib list --manager`, `ib look`, `ib send`, `ib send @system "msg"`, `ib send @coordinator "msg"`, `ib status`, `ib diff`, `ib merge`, `ib retire`, `ib rehire`)
 - State management (`WAITING` / `I HAVE COMPLETED THE GOAL`)
 - Workflow steps (understand codebase → break down tasks → spawn workers → monitor → merge → coordinate)
 - Agent state reference table

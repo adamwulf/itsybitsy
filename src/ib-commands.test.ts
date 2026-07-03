@@ -19,6 +19,7 @@ import { saveRegistry } from "./registry";
 import { makeAgent as _makeAgent, makeSpawnResult } from "./test-utils";
 import {
   retireAgent,
+  rehireAgent,
   nukeAgent,
   nukeAllAgents,
   resumeAgent,
@@ -43,6 +44,8 @@ import {
   resetSendSpawnRunner,
   setKillPauseSpawnRunner,
   resetKillPauseSpawnRunner,
+  setRehireSpawnRunner,
+  resetRehireSpawnRunner,
   setNukeResumeSpawnRunner,
   resetNukeResumeSpawnRunner,
   setMergeSpawnRunner,
@@ -69,10 +72,21 @@ import {
 import { spawnCtx as lifecycleSpawnCtx } from "./agent-lifecycle";
 import { setUserConfigPath, resetUserConfigPath } from "./config";
 import type { AgentState } from "./parse-state";
-import type { SpawnResult } from "./types";
+import type { SpawnFn, SpawnResult } from "./types";
 
-function makeAgent(id: string, repoPath: string, state: string = "running"): Agent {
-  return _makeAgent({ id, repoPath, repoName: "test-repo", state: state as AgentState });
+function makeAgent(
+  id: string,
+  repoPath: string,
+  state: string = "running",
+  meta?: Partial<AgentMeta>,
+): Agent {
+  const agent = _makeAgent({
+    id,
+    repoPath,
+    repoName: "test-repo",
+    state: state as AgentState,
+  });
+  return meta ? { ...agent, meta: { ...agent.meta, ...meta } } : agent;
 }
 
 describe("ib-commands", () => {
@@ -848,7 +862,7 @@ describe("retireAgent (native)", () => {
     lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
-    const agent = makeAgent("agent-abc", tempDir);
+    const agent = makeAgent("agent-abc", tempDir, "running", { worktree: false });
     const result = await retireAgent(agent);
 
     expect(result.ok).toBe(false);
@@ -872,7 +886,7 @@ describe("retireAgent (native)", () => {
     lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
-    const agent = makeAgent("agent-abc", tempDir);
+    const agent = makeAgent("agent-abc", tempDir, "running", { worktree: false });
     const result = await retireAgent(agent);
 
     expect(result.ok).toBe(true);
@@ -893,7 +907,7 @@ describe("retireAgent (native)", () => {
     lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
-    const agent = makeAgent("agent-abc", tempDir);
+    const agent = makeAgent("agent-abc", tempDir, "running", { worktree: false });
     await retireAgent(agent);
 
     // Agent directory should be removed after teardown
@@ -924,7 +938,7 @@ describe("retireAgent (native)", () => {
     lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
-    const agent = makeAgent("agent-abc", tempDir);
+    const agent = makeAgent("agent-abc", tempDir, "running", { worktree: false });
     await retireAgent(agent);
 
     // Questions for agent-abc should be removed, agent-xyz kept
@@ -966,7 +980,7 @@ describe("retireAgent (native)", () => {
     const { setWatchLogPath, resetWatchLogPath } = await import("./watch-log");
     setWatchLogPath(logPath);
     try {
-      const agent = makeAgent("agent-loggy", tempDir);
+      const agent = makeAgent("agent-loggy", tempDir, "running", { worktree: false });
       const result = await retireAgent(agent);
       expect(result.ok).toBe(true);
 
@@ -980,6 +994,130 @@ describe("retireAgent (native)", () => {
     } finally {
       resetWatchLogPath();
     }
+  });
+});
+
+describe("retire → rehire recovery", () => {
+  let tempDir: string;
+  let originalHome: string | undefined;
+
+  async function git(...args: string[]): Promise<string> {
+    const proc = Bun.spawn(["git", ...args], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) {
+      throw new Error(`git ${args.join(" ")} failed: ${stderr}`);
+    }
+    return stdout.trim();
+  }
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "rehire-integration-"));
+    originalHome = process.env.HOME;
+    process.env.HOME = tempDir;
+    await git("init", tempDir);
+    await git("-C", tempDir, "config", "user.email", "test@example.com");
+    await git("-C", tempDir, "config", "user.name", "Test User");
+    await Bun.write(join(tempDir, "tracked.txt"), "base\n");
+    await git("-C", tempDir, "add", "tracked.txt");
+    await git("-C", tempDir, "commit", "-m", "base");
+    await mkdir(join(tempDir, ".ittybitty"), { recursive: true });
+    await Bun.write(join(tempDir, ".ittybitty", "repo-id"), "1a2b3c4d\n");
+    await saveRegistry({
+      repos: [{ path: tempDir, name: basename(tempDir) }],
+    });
+  });
+
+  afterEach(async () => {
+    lifecycleSpawnCtx.reset();
+    resetKillPauseSpawnRunner();
+    resetRehireSpawnRunner();
+    resetNukeResumeSpawnRunner();
+    process.env.HOME = originalHome;
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("round-trips committed HEAD, tracked changes, and untracked files; resume failure leaves stopped agent", async () => {
+    const agentId = "agent-rehire";
+    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const worktreePath = join(agentDir, "repo");
+    await mkdir(agentDir, { recursive: true });
+    await git(
+      "-C", tempDir, "worktree", "add", worktreePath,
+      "-b", `agent/${agentId}`, "HEAD",
+    );
+
+    await Bun.write(join(worktreePath, "tracked.txt"), "modified\n");
+    await mkdir(join(worktreePath, "nested"), { recursive: true });
+    await Bun.write(join(worktreePath, "nested", "untracked.txt"), "untracked\n");
+    await Bun.write(join(agentDir, "prompt.txt"), "continue the task");
+    await Bun.write(join(agentDir, "start.sh"), "#!/bin/bash\n");
+    await Bun.write(join(agentDir, "exit-check.sh"), "#!/bin/bash\n");
+
+    const agent = makeAgent(agentId, tempDir, "running", {
+      tmux_session: `ittybitty-1a2b3c4d-${agentId}`,
+      worktree: true,
+      model: "codex:gpt-5.5",
+      claude_pid: "",
+    });
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify(agent.meta, null, 2),
+    );
+
+    const hybridRunner: SpawnFn = (cmd) => {
+      if (cmd[0] === "git") {
+        return Bun.spawn(cmd, {
+          stdout: "pipe",
+          stderr: "pipe",
+        }) as SpawnResult;
+      }
+      if (cmd[0] === "tmux" && cmd.includes("has-session")) {
+        return makeSpawnResult(1);
+      }
+      if (cmd[0] === "pgrep") return makeSpawnResult(1);
+      return makeSpawnResult();
+    };
+    lifecycleSpawnCtx.set(hybridRunner);
+    setKillPauseSpawnRunner(hybridRunner);
+
+    const retired = await retireAgent(agent);
+    expect(retired.ok).toBe(true);
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
+
+    const archives = await readdir(join(tempDir, ".ittybitty", "archive"));
+    expect(archives).toHaveLength(1);
+    const archiveDir = join(tempDir, ".ittybitty", "archive", archives[0]!);
+    const manifest = await Bun.file(join(archiveDir, "retirement.json")).json();
+    expect(manifest.agentId).toBe(agentId);
+    expect(manifest.gitHead).toMatch(/^[0-9a-f]{40,64}$/);
+    expect(manifest.untrackedFiles).toEqual(["nested/untracked.txt"]);
+
+    setRehireSpawnRunner(hybridRunner);
+    setNukeResumeSpawnRunner(hybridRunner);
+    const rehired = await rehireAgent(agentId);
+
+    expect(rehired.ok).toBe(false);
+    expect(rehired.stdout).toContain("Reconstructed stopped agent");
+    expect(rehired.stderr).toContain("codex_session_id");
+    expect(await Bun.file(join(worktreePath, "tracked.txt")).text()).toBe("modified\n");
+    expect(
+      await Bun.file(join(worktreePath, "nested", "untracked.txt")).text(),
+    ).toBe("untracked\n");
+    const restoredMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(restoredMeta.state).toBe("stopped");
+    expect(restoredMeta.tmux_session).toBe(`ittybitty-1a2b3c4d-${agentId}`);
+    expect(restoredMeta.claude_pid).toBe("");
+    expect(restoredMeta.watchdog_pid).toBeUndefined();
+    expect(await Bun.file(join(archiveDir, "retirement.json")).exists()).toBe(true);
+    expect(await git("-C", tempDir, "rev-parse", manifest.headRef)).toBe(manifest.gitHead);
+    expect(await git("-C", worktreePath, "rev-parse", "HEAD")).toBe(manifest.gitHead);
   });
 });
 
@@ -9310,7 +9448,7 @@ describe("long-running-op guard", () => {
     lifecycleSpawnCtx.set(runner);
     setKillPauseSpawnRunner(runner);
 
-    const agent = makeAgent("agent-retire", tempDir);
+    const agent = makeAgent("agent-retire", tempDir, "running", { worktree: false });
     const result = await retireAgent(agent);
 
     // Retire is the recovery path for a wedged op — it must succeed regardless.
@@ -9401,7 +9539,13 @@ describe("teams: teardown leave-notices (retire / merge / nuke)", () => {
 
   // makeAgent bound to the temp repo.
   function agentOf(id: string): Agent {
-    return _makeAgent({ id, repoPath: repoDir, repoName: basename(repoDir), state: "running" as AgentState });
+    const agent = _makeAgent({
+      id,
+      repoPath: repoDir,
+      repoName: basename(repoDir),
+      state: "running" as AgentState,
+    });
+    return { ...agent, meta: { ...agent.meta, worktree: false } };
   }
 
   beforeEach(async () => {

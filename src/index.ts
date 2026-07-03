@@ -544,6 +544,10 @@ const COMMAND_HELP: Record<string, string> = {
     "  Retire an agent: stop it and archive its directory. Removes the tmux\n" +
     "  session and git worktree.\n" +
     "  --force         Skip confirmation prompts",
+  rehire:
+    "Usage: ib rehire <agent-id>\n" +
+    "  Reconstruct a retired agent and resume its original session.\n" +
+    "  Requires the immutable exact agent ID; nicknames are not accepted.",
   nuke:
     "Usage: ib nuke <agent-id>\n" +
     "  Kill an agent AND archive its directory. Removes the tmux session and\n" +
@@ -837,6 +841,7 @@ function printUsage(): void {
   console.log("Agent Lifecycle:");
   console.log("  new-agent, new      Spawn a new agent");
   console.log("  retire <id>         Stop and archive an agent without merging");
+  console.log("  rehire <id>         Reconstruct and resume a retired agent");
   console.log("  nuke <id>           Kill and archive an agent");
   console.log("  merge <id>          Merge agent's work and close it");
   console.log("  merge-check <id>    Check if agent is ready to merge");
@@ -1768,6 +1773,19 @@ async function main() {
       }
       const { retireAgent } = await import("./ib-commands");
       await printAndExit(await retireAgent(agent));
+      break;
+    }
+    case "rehire": {
+      const agentId = args[1];
+      if (!agentId) {
+        console.error("Usage: ib rehire <agent-id>");
+        process.exit(1);
+      }
+      if (args.length > 2) {
+        console.error(`Warning: unknown arguments ignored: ${args.slice(2).join(" ")}`);
+      }
+      const { rehireAgent } = await import("./ib-commands");
+      await printAndExit(await rehireAgent(agentId));
       break;
     }
     case "nuke": {

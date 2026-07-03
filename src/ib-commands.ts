@@ -6,10 +6,21 @@
  */
 
 import { join, dirname, resolve, basename } from "path";
-import { readdir, chmod, rm, mkdir, rename, stat } from "fs/promises";
+import {
+  readdir,
+  chmod,
+  rm,
+  mkdir,
+  rename,
+  stat,
+  cp,
+  lstat,
+  readlink,
+  symlink,
+} from "fs/promises";
 import { realpathSync } from "fs";
 import { homedir } from "node:os";
-import type { Agent, SpawnedBy, AgentOperationKind } from "./agents";
+import type { Agent, AgentMeta, SpawnedBy, AgentOperationKind } from "./agents";
 import {
   writeAgentState,
   isRecentlyCreated,
@@ -46,6 +57,11 @@ import {
   archiveAgent,
   captureTmuxOutputToFile,
   isRunningAsAgent,
+  prepareAgentRetirement,
+  cleanupPreparedRetirement,
+  findRetiredAgentArchives,
+  isSafeRetirementRelativePath,
+  type RetiredAgentArchive,
 } from "./agent-lifecycle";
 import { readConfig } from "./config";
 import { listTmuxSessions } from "./tmux-poller";
@@ -345,10 +361,11 @@ async function emitCoalescedLeaveNotice(
  *
  * Sequence (mirrors do_kill in ib bash):
  * 1. Verify agent exists (directory or tmux session)
- * 2. Remove questions from user-questions.json
- * 3. teardownAgent() — log, capture tmux, kill claude, kill tmux, copy settings,
+ * 2. Prepare a rehirable Git/filesystem snapshot (when the agent dir exists)
+ * 3. Remove questions from user-questions.json
+ * 4. teardownAgent() — log, capture tmux, kill claude, kill tmux, copy settings,
  *    remove worktree, delete branch, archive, remove dir
- * 4. scanAndKillOrphans()
+ * 5. scanAndKillOrphans()
  */
 export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
   const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
@@ -373,16 +390,76 @@ export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
   }
 
+  if (!isValidTmuxSession(tmuxSession)) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Invalid tmux session name: ${tmuxSession}`,
+    };
+  }
+
+  let preparedRetirement:
+    Awaited<ReturnType<typeof prepareAgentRetirement>> | undefined;
+  if (dirExists) {
+    try {
+      preparedRetirement = await prepareAgentRetirement(
+        agent.repoPath,
+        agent.id,
+        agentDir,
+        agent.meta.worktree,
+      );
+    } catch (err) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: `Could not prepare retirement: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
   // Remove questions
   await removeAgentQuestions(agent.repoPath, agent.id);
 
   // Teardown (log, capture, kill process, kill tmux, worktree, branch, archive,
   // remove). The teardown prunes this agent from every team and returns the
   // pruned (team, id) pairs so we can fan out the leave notice (§16.5).
-  const { prunedTeams } = await teardownAgent(agent.repoPath, agent.id, agentDir, {
-    tmux_session: tmuxSession,
-    claude_pid: agent.meta.claude_pid,
-  }, "Agent retired");
+  let teardown: Awaited<ReturnType<typeof teardownAgent>>;
+  try {
+    teardown = await teardownAgent(agent.repoPath, agent.id, agentDir, {
+      tmux_session: tmuxSession,
+      claude_pid: agent.meta.claude_pid,
+    }, "Agent retired", preparedRetirement);
+  } catch (err) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr:
+        `Retirement teardown failed; recovery payload was preserved: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  if (!teardown.ok) {
+    // If teardown failed before consuming the prepared payload, discard its
+    // hidden ref so a failed retirement does not leak recovery state.
+    if (preparedRetirement) {
+      const payloadStillExists = await lstat(preparedRetirement.payloadDir)
+        .then(() => true)
+        .catch(() => false);
+      if (payloadStillExists) {
+        await cleanupPreparedRetirement(agent.repoPath, preparedRetirement);
+      }
+    }
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Could not retire agent '${agent.id}'`,
+    };
+  }
+  const { prunedTeams } = teardown;
 
   // Scan for orphaned Claude processes
   await scanAndKillOrphans(agentsDir);
@@ -397,6 +474,380 @@ export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
   );
 
   return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
+}
+
+/** Spawn context for git/tmux operations performed while reconstructing an agent. */
+export const rehireSpawnCtx = new SpawnContext();
+
+export function setRehireSpawnRunner(runner: SpawnFn): void {
+  rehireSpawnCtx.set(runner);
+}
+
+export function resetRehireSpawnRunner(): void {
+  rehireSpawnCtx.reset();
+}
+
+async function copyRehiredEntry(
+  source: string,
+  destination: string,
+  allowedRoot: string,
+): Promise<void> {
+  const sourceStat = await lstat(source);
+  await mkdir(dirname(destination), { recursive: true });
+  if (sourceStat.isSymbolicLink()) {
+    const target = await readlink(source);
+    const resolvedTarget = resolve(dirname(destination), target);
+    if (
+      target.startsWith("/") ||
+      (resolvedTarget !== allowedRoot &&
+        !resolvedTarget.startsWith(allowedRoot + "/"))
+    ) {
+      throw new Error(`archived symlink escapes worktree: ${source}`);
+    }
+    await symlink(target, destination);
+    return;
+  }
+  if (!sourceStat.isFile()) {
+    throw new Error(`unsupported archived file type: ${source}`);
+  }
+  await cp(source, destination, {
+    dereference: false,
+    preserveTimestamps: true,
+  });
+}
+
+async function copyIfPresent(source: string, destination: string): Promise<boolean> {
+  if (!(await Bun.file(source).exists().catch(() => false))) return false;
+  if (!(await lstat(source)).isFile()) {
+    throw new Error(`archived runtime file is not a regular file: ${source}`);
+  }
+  await cp(source, destination, {
+    preserveTimestamps: true,
+  });
+  return true;
+}
+
+function selectRetirementArchive(
+  allMatches: RetiredAgentArchive[],
+): { archive?: RetiredAgentArchive; error?: string } {
+  const recoverable = allMatches.filter((match) => match.manifest !== null);
+  if (recoverable.length === 0) {
+    return {
+      error: allMatches.length > 0
+        ? "Matching archive is not rehirable (no supported retirement manifest)"
+        : "Retired agent not found",
+    };
+  }
+  const repoPaths = new Set(recoverable.map((match) => resolve(match.repoPath)));
+  if (repoPaths.size > 1) {
+    return {
+      error:
+        `Retired agent id is ambiguous across repositories: ` +
+        [...repoPaths].sort().join(", "),
+    };
+  }
+  recoverable.sort((a, b) => b.archiveKey.localeCompare(a.archiveKey));
+  return { archive: recoverable[0] };
+}
+
+/**
+ * Reconstruct a retired agent from its immutable archive and resume the
+ * original Claude/Codex session.
+ */
+export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
+  if (!isValidAgentId(agentId)) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Invalid agent id: ${agentId}`,
+    };
+  }
+
+  const repos = await listRepos();
+  const repoInputs = repos.map((repo) => ({
+    path: repo.path,
+    name: repoDisplayName(repo),
+  }));
+  const { agents: activeAgents } = await readAllAgents(repoInputs, false);
+  const activeId = activeAgents.find((agent) => agent.id === agentId);
+  if (activeId) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Agent '${agentId}' is already active`,
+    };
+  }
+  const nicknameCollision = activeAgents.find((agent) => agent.meta.nickname === agentId);
+  if (nicknameCollision) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr:
+        `Agent id '${agentId}' collides with active nickname on ` +
+        `'${nicknameCollision.id}'`,
+    };
+  }
+
+  const archiveMatches: RetiredAgentArchive[] = [];
+  for (const repo of repos) {
+    archiveMatches.push(...await findRetiredAgentArchives(repo.path, agentId));
+  }
+  const selected = selectRetirementArchive(archiveMatches);
+  if (!selected.archive) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: selected.error ?? "Retired agent not found",
+    };
+  }
+
+  const archived = selected.archive;
+  const manifest = archived.manifest!;
+  const repoPath = archived.repoPath;
+  const agentsDir = join(repoPath, ".ittybitty", "agents");
+  const agentDir = join(agentsDir, agentId);
+  const worktreePath = join(agentDir, "repo");
+  const branchName = `agent/${agentId}`;
+  const expectedTmuxSession = `ittybitty-${await getRepoId(repoPath)}-${agentId}`;
+
+  if (archived.meta.tmux_session !== expectedTmuxSession) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr:
+        `Archived tmux session does not match this repository: ` +
+        `${archived.meta.tmux_session} (expected ${expectedTmuxSession})`,
+    };
+  }
+
+  const existingDir = await lstat(agentDir).then(() => true).catch(() => false);
+  if (existingDir) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Agent directory already exists: ${agentDir}`,
+    };
+  }
+
+  const liveTmux = await rehireSpawnCtx.run([
+    "tmux", "has-session", "-t", tmuxSessionTarget(expectedTmuxSession),
+  ]);
+  if (liveTmux.exitCode === 0) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Agent '${agentId}' still has a live tmux session`,
+    };
+  }
+
+  if (manifest.worktree) {
+    const branch = await rehireSpawnCtx.run([
+      "git", "-C", repoPath, "branch", "--list", branchName,
+    ]);
+    if (branch.exitCode !== 0) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: branch.stderr || `Could not inspect branch ${branchName}`,
+      };
+    }
+    if (branch.stdout.trim()) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: `Branch already exists: ${branchName}`,
+      };
+    }
+
+    const retainedHead = await rehireSpawnCtx.run([
+      "git", "-C", repoPath, "rev-parse", manifest.headRef!,
+    ]);
+    if (
+      retainedHead.exitCode !== 0 ||
+      retainedHead.stdout.trim() !== manifest.gitHead
+    ) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: `Retained HEAD is missing or corrupt: ${manifest.headRef}`,
+      };
+    }
+  }
+
+  let worktreeCreated = false;
+  const rollback = async () => {
+    if (manifest.worktree) {
+      if (worktreeCreated) {
+        await rehireSpawnCtx.run([
+          "git", "-C", repoPath, "worktree", "remove", worktreePath, "--force",
+        ]).catch(() => {});
+      }
+      await rehireSpawnCtx.run([
+        "git", "-C", repoPath, "branch", "-D", branchName,
+      ]).catch(() => {});
+    }
+    await rm(agentDir, { recursive: true, force: true }).catch(() => {});
+  };
+
+  try {
+    await mkdir(agentDir, { recursive: true });
+
+    if (manifest.worktree) {
+      const worktreeResult = await rehireSpawnCtx.run([
+        "git", "-C", repoPath, "worktree", "add", worktreePath,
+        "-b", branchName, manifest.headRef!,
+      ]);
+      if (worktreeResult.exitCode !== 0) {
+        throw new Error(worktreeResult.stderr || "could not recreate agent worktree");
+      }
+      worktreeCreated = true;
+
+      const patchPath = join(archived.archiveDir, "worktree.patch");
+      const patchFile = Bun.file(patchPath);
+      if (!(await patchFile.exists())) {
+        throw new Error("retirement archive is missing worktree.patch");
+      }
+      if (patchFile.size > 0) {
+        const applyResult = await rehireSpawnCtx.run([
+          "git", "-C", worktreePath, "apply", "--binary",
+          "--whitespace=nowarn", patchPath,
+        ]);
+        if (applyResult.exitCode !== 0) {
+          throw new Error(applyResult.stderr || "could not restore tracked worktree changes");
+        }
+      }
+
+      for (const relativePath of manifest.untrackedFiles) {
+        if (!isSafeRetirementRelativePath(relativePath)) {
+          throw new Error(`unsafe untracked path in manifest: ${relativePath}`);
+        }
+        const source = resolve(archived.archiveDir, "untracked", relativePath);
+        const destination = resolve(worktreePath, relativePath);
+        if (
+          !source.startsWith(join(archived.archiveDir, "untracked") + "/") ||
+          !destination.startsWith(worktreePath + "/")
+        ) {
+          throw new Error(`untracked path escapes recovery root: ${relativePath}`);
+        }
+        await copyRehiredEntry(source, destination, worktreePath);
+      }
+
+      const archivedSettings = join(archived.archiveDir, "settings.local.json");
+      if (await Bun.file(archivedSettings).exists().catch(() => false)) {
+        if (!(await lstat(archivedSettings)).isFile()) {
+          throw new Error("archived settings.local.json is not a regular file");
+        }
+        await mkdir(join(worktreePath, ".claude"), { recursive: true });
+        await cp(archivedSettings, join(worktreePath, ".claude", "settings.local.json"));
+      }
+    }
+
+    for (const fileName of ["agent.log", "prompt.txt", "start.sh", "exit-check.sh"]) {
+      await copyIfPresent(
+        join(archived.archiveDir, fileName),
+        join(agentDir, fileName),
+      );
+    }
+    if (!(await Bun.file(join(agentDir, "exit-check.sh")).exists().catch(() => false))) {
+      throw new Error("retirement archive is missing exit-check.sh");
+    }
+    await chmod(join(agentDir, "exit-check.sh"), 0o755);
+    if (await Bun.file(join(agentDir, "start.sh")).exists().catch(() => false)) {
+      await chmod(join(agentDir, "start.sh"), 0o755);
+    }
+
+    const coordinatorSettingsSource = join(
+      archived.archiveDir,
+      ".claude",
+      "settings.local.json",
+    );
+    if (await Bun.file(coordinatorSettingsSource).exists().catch(() => false)) {
+      if (!(await lstat(coordinatorSettingsSource)).isFile()) {
+        throw new Error("archived coordinator settings are not a regular file");
+      }
+      await mkdir(join(agentDir, ".claude"), { recursive: true });
+      await cp(
+        coordinatorSettingsSource,
+        join(agentDir, ".claude", "settings.local.json"),
+      );
+    }
+
+    const restoredMeta: AgentMeta = {
+      ...archived.meta,
+      id: agentId,
+      tmux_session: expectedTmuxSession,
+      claude_pid: "",
+      state: "stopped",
+      state_updated_at: Math.floor(Date.now() / 1000),
+    };
+    delete restoredMeta.watchdog_pid;
+    await writeMetaJsonAtomic(agentDir, restoredMeta as unknown as Record<string, unknown>);
+    await logAgent(agentDir, `[rehire] Reconstructed from ${archived.archiveKey}`);
+  } catch (err) {
+    await rollback();
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Could not reconstruct agent '${agentId}': ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  const restoredRepo = repos.find(
+    (repo) => resolve(repo.path) === resolve(repoPath),
+  );
+  const restoredAgent: Agent = {
+    id: agentId,
+    repoPath,
+    repoName: restoredRepo ? repoDisplayName(restoredRepo) : basename(repoPath),
+    meta: (await Bun.file(join(agentDir, "meta.json")).json()) as AgentMeta,
+    state: "stopped",
+    age: "",
+    archived: false,
+    children: [],
+  };
+  let resumed: IbCommandResult;
+  try {
+    resumed = await resumeAgent(restoredAgent, { resetCoordinator: false });
+  } catch (err) {
+    resumed = {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: err instanceof Error ? err.message : String(err),
+    };
+  }
+  if (!resumed.ok) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: `Reconstructed stopped agent '${agentId}' from ${archived.archiveKey}`,
+      stderr: `Resume failed: ${resumed.stderr || resumed.stdout}`,
+    };
+  }
+
+  const warnings: string[] = [];
+  for (const { team } of manifest.prunedTeams) {
+    const result = await addMember(team, agentId).catch(() => null);
+    if (!result?.team) warnings.push(`Team @${team} no longer exists`);
+  }
+  await logAgent(agentDir, `[rehire] Agent resumed from ${archived.archiveKey}`);
+  return {
+    ok: true,
+    exitCode: 0,
+    stdout: `Rehired agent: ${agentId}\n${resumed.stdout}`.trim(),
+    stderr: warnings.join("\n"),
+  };
 }
 
 /** Spawn context for nuke/resume operations */
@@ -715,7 +1166,10 @@ async function resetCoordinator(agent: Agent): Promise<IbCommandResult> {
  * 8. Log result
  * 9. Auto-spawn per-agent watchdog
  */
-export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
+export async function resumeAgent(
+  agent: Agent,
+  opts?: { resetCoordinator?: boolean },
+): Promise<IbCommandResult> {
   const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
 
   // Check agent directory exists
@@ -745,7 +1199,10 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
     // template is rebuilt then. Resuming the existing session would reuse stale
     // permissions and hooks, so we tear the coordinator down and respawn it
     // — fresher, simpler, and matches the user's mental model of "R to reset".
-    if (agent.meta.agentType === "coordinator") {
+    if (
+      agent.meta.agentType === "coordinator" &&
+      opts?.resetCoordinator !== false
+    ) {
       return await resetCoordinator(agent);
     }
 
@@ -996,10 +1453,23 @@ export async function resumeAgent(agent: Agent): Promise<IbCommandResult> {
         claudeArgs = claudeArgs ? `${claudeArgs} --effort ${resumeEffort}` : `--effort ${resumeEffort}`;
       }
 
-      // Note: per-repo coordinators never reach this point — the early branch at
-      // the top of resumeAgent routes them to resetCoordinator instead. So no
-      // need to re-thread --settings to the (no-longer-relevant) saved coordinator
-      // settings file here.
+      // Rehire resumes the archived coordinator session rather than using the
+      // ordinary dashboard reset behavior. Coordinator hooks/permissions live
+      // in the restored agent-local settings file.
+      if (agent.meta.agentType === "coordinator") {
+        const coordinatorSettings = join(agentDir, ".claude", "settings.local.json");
+        if (!(await Bun.file(coordinatorSettings).exists().catch(() => false))) {
+          return {
+            ok: false,
+            exitCode: 1,
+            stdout: "",
+            stderr: "Cannot resume rehired coordinator: archived settings are missing",
+          };
+        }
+        claudeArgs = claudeArgs
+          ? `${claudeArgs} --settings ${shellQuote(coordinatorSettings)}`
+          : `--settings ${shellQuote(coordinatorSettings)}`;
+      }
 
       // Shell-quote all paths for safe interpolation
       const qAbsExitScript = shellQuote(absExitScript);
@@ -1108,11 +1578,13 @@ ${qAbsExitScript}
 
     await logAgent(agentDir, `[resume] Creating tmux session '${tmuxSession}' in ${workPath}`);
 
-    // Start tmux session — use saved layout width so it matches the dashboard pane.
-    // Per-repo coordinators are routed to resetCoordinator earlier (see line 382),
-    // so only non-coordinator agents reach here — pass false for clarity. Route
-    // through getTmuxWidthForAgent so all agent-tmux sizing flows through one helper.
-    const resumeTmuxWidth = await getTmuxWidthForAgent(false);
+    // Start tmux session — use the coordinator layout width when rehire resumes
+    // an archived coordinator session, otherwise use the ordinary agent width.
+    // Route through getTmuxWidthForAgent so all agent-tmux sizing flows through
+    // one helper.
+    const resumeTmuxWidth = await getTmuxWidthForAgent(
+      agent.meta.agentType === "coordinator",
+    );
     const tmuxResult = await nukeResumeSpawnCtx.run([
       "tmux", "new-session", "-d", "-x", String(resumeTmuxWidth), "-s", tmuxSession, "-c", workPath, shellQuote(resumeScript),
     ]);

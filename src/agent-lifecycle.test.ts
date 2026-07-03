@@ -15,6 +15,9 @@ import {
   killAgentProcess,
   captureTmuxOutputToFile,
   teardownAgent,
+  parseRetirementManifest,
+  isSafeRetirementRelativePath,
+  findRetiredAgentArchives,
 } from "./agent-lifecycle";
 import type { SpawnFn, SpawnResult } from "./types";
 
@@ -217,6 +220,64 @@ describe("agent-lifecycle", () => {
         resetCoordinatorHome();
         await rm(dir, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe("retirement manifest and archive discovery", () => {
+    test("validates safe relative paths and rejects traversal", () => {
+      expect(isSafeRetirementRelativePath("nested/file.txt")).toBe(true);
+      expect(isSafeRetirementRelativePath("../escape")).toBe(false);
+      expect(isSafeRetirementRelativePath("/absolute")).toBe(false);
+      expect(isSafeRetirementRelativePath("nested//file")).toBe(false);
+    });
+
+    test("parses a version-1 no-worktree manifest", () => {
+      const manifest = parseRetirementManifest({
+        version: 1,
+        agentId: "agent-test",
+        retiredAt: "2026-07-03T12:00:00.000Z",
+        repoPath: "/tmp/repo",
+        archiveKey: "20260703-120000-agent-test",
+        worktree: false,
+        gitHead: null,
+        headRef: null,
+        untrackedFiles: [],
+        prunedTeams: [],
+      }, "agent-test");
+      expect(manifest?.version).toBe(1);
+      expect(manifest?.agentId).toBe("agent-test");
+    });
+
+    test("scans timestamped folders by meta.id and returns newest first", async () => {
+      const dir = await makeTempDir();
+      const archiveRoot = join(dir, ".ittybitty", "archive");
+      for (const stamp of ["20260703-110000", "20260703-120000"]) {
+        const archiveKey = `${stamp}-agent-test`;
+        const archiveDir = join(archiveRoot, archiveKey);
+        await mkdir(archiveDir, { recursive: true });
+        await Bun.write(join(archiveDir, "meta.json"), JSON.stringify({
+          id: "agent-test",
+          tmux_session: "tmux-agent-test",
+        }));
+        await Bun.write(join(archiveDir, "retirement.json"), JSON.stringify({
+          version: 1,
+          agentId: "agent-test",
+          retiredAt: "2026-07-03T12:00:00.000Z",
+          repoPath: dir,
+          archiveKey,
+          worktree: false,
+          gitHead: null,
+          headRef: null,
+          untrackedFiles: [],
+          prunedTeams: [],
+        }));
+      }
+
+      const matches = await findRetiredAgentArchives(dir, "agent-test");
+      expect(matches).toHaveLength(2);
+      expect(matches[0]!.archiveKey).toBe("20260703-120000-agent-test");
+      expect(matches[1]!.archiveKey).toBe("20260703-110000-agent-test");
+      await rm(dir, { recursive: true, force: true });
     });
   });
 

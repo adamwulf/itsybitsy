@@ -112,6 +112,13 @@ describe("CLI --help end-to-end", () => {
     expect(exitCode).toBe(0);
   });
 
+  test("rehire --help prints exact-id recovery usage", async () => {
+    const { stdout, exitCode } = await runCli(["rehire", "--help"]);
+    expect(stdout).toContain("Usage: ib rehire");
+    expect(stdout).toContain("exact agent ID");
+    expect(exitCode).toBe(0);
+  });
+
   test("team add --help prints sub-subcommand usage", async () => {
     const { stdout, exitCode } = await runCli(["team", "add", "--help"]);
     expect(stdout).toContain("Usage: ib team add");

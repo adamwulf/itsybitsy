@@ -709,6 +709,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-test",
       tmux_session: "tmux-agent-test",
+      worktree: false,
     }));
 
     setupSendMock();
@@ -745,6 +746,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     setMergeSpawnRunner(() => makeSpawnResult());
 
     const agent = makeAgent("agent-test", actionTempDir);
+    agent.meta.worktree = false;
     setAgentState(agent, state);
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);

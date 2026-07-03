@@ -414,6 +414,18 @@ describe("CLI arg parsing", () => {
     expect(exitCode).toBe(1);
   });
 
+  test("rehire requires an exact agent id", async () => {
+    const { stderr, exitCode } = await runCli(["rehire"]);
+    expect(stderr).toContain("Usage: ib rehire <agent-id>");
+    expect(exitCode).toBe(1);
+  });
+
+  test("rehire reports a missing retired agent", async () => {
+    const { stderr, exitCode } = await runCli(["rehire", "nonexistent-id"]);
+    expect(stderr).toContain("Retired agent not found");
+    expect(exitCode).toBe(1);
+  });
+
   test("kill is no longer a supported subcommand", async () => {
     const { stdout, stderr, exitCode } = await runCli(["kill", "nonexistent-id", "--force"]);
     expect(stdout).toContain("ib — Cross-repo agent dashboard");

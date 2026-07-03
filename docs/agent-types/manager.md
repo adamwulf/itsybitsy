@@ -47,6 +47,7 @@ You are in a git worktree, which shares the same repository as the main checkout
 | `ib diff <id>` | Review agent's changes |
 | `ib merge <id>` | Merge agent's work and close it |
 | `ib retire <id>` | Stop and archive an agent without merging |
+| `ib rehire <id>` | Reconstruct and resume an explicitly retired agent |
 {{#if isTopLevel}}
 | `ib ask "question"` | Ask the user a question (top-level managers only) |
 {{/if}}

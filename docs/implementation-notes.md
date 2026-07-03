@@ -126,7 +126,7 @@ The Telegram bridge lives entirely here (NOT in the sibling bash `ittybitty`). H
 
 All mutations are native (no more `runIb()` / `IbRunner`). `hooksStatus`, `installSafetyHooks`, `uninstallSafetyHooks`, `installInterceptHook`, `uninstallInterceptHook`, `interceptHooksStatus` read/write `~/.claude/settings.json` directly.
 
-Commands: `retireAgent`, `nukeAgent`, `nukeAllAgents`, `pauseAgent`, `resumeAgent`, `reassignAgent`, `mergeCheckAgent`, `mergeAgent`, `sendMessage`, `newAgent`, `diffAgent`, `statusAgent`, `acknowledgeQuestion`.
+Commands: `retireAgent`, `rehireAgent`, `nukeAgent`, `nukeAllAgents`, `pauseAgent`, `resumeAgent`, `reassignAgent`, `mergeCheckAgent`, `mergeAgent`, `sendMessage`, `newAgent`, `diffAgent`, `statusAgent`, `acknowledgeQuestion`.
 
 - Git operations target the agent's repo via `git -C <repoPath>` rather than process-wide `cwd`. Tests inject fake spawn runners via per-command `SpawnContext` instances.
 - `newAgent()` calls `ensureAgentTypesDir()` then validates `--type` exists on disk, rejects layer-only types (`spawnable: false`), and stores `agentType` + `agentIcon` in meta.json. Permission lookup: every agent merges `_all.md` `permissions.allow/deny`; non-coordinators additionally merge `_non_coordinator.md`; all merge their type file's own lists. Deduped before writing `settings.local.json`.
@@ -138,6 +138,14 @@ Commands: `retireAgent`, `nukeAgent`, `nukeAllAgents`, `pauseAgent`, `resumeAgen
 ## Agent lifecycle (`src/agent-lifecycle.ts`)
 
 Shared helpers used by multiple ib commands. Mirrors the bash ib teardown / archive / kill / utility functions. All subprocess calls go through `spawnCtx` (a `SpawnContext` from `types.ts`); tests inject a fake runner with `spawnCtx.set(fn)` and reset it with `spawnCtx.reset()`.
+
+Explicit retirement first creates a versioned recovery payload: a hidden Git
+ref retains HEAD, `worktree.patch` stores tracked changes, and safe non-ignored
+untracked files are copied. `archiveAgent()` writes `retirement.json` only for
+that path; merge/nuke archives remain historical and non-rehirable.
+`rehireAgent()` scans timestamped archive directories by `meta.id`, rebuilds
+the active directory/worktree, then delegates session startup to
+`resumeAgent()`.
 
 ## parse-state.ts priority order (legacy)
 

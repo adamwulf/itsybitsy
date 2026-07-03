@@ -8,7 +8,7 @@ import { join, basename } from "path";
 import { homedir } from "os";
 import { readFileSync, existsSync } from "node:fs";
 import { readConfig } from "./config";
-import { captureTmuxOutput, resizeTmuxWindow } from "./tmux-poller";
+import { captureTmuxOutput } from "./tmux-poller";
 import { isCompacting, isRateLimited, isPidAliveCtx } from "./agents";
 import { logToWatchLog } from "./watch-log";
 import { SpawnContext } from "./types";
@@ -662,14 +662,10 @@ export async function detectSystemCoordinatorState(): Promise<CoordinatorState> 
   return "running";
 }
 
-/**
- * Resize the system coordinator's tmux window to the given width.
- * Called when the sidebar width changes so the coordinator output
- * wraps at the correct column count.
- */
-export async function resizeCoordinatorTmux(width: number): Promise<void> {
-  await resizeTmuxWindow(IB_COORDINATOR_SESSION, width);
-}
+// resizeCoordinatorTmux was removed with the pinned-tmux-width change: the system
+// coordinator's window is pinned to PINNED_TMUX_WIDTH (via getTmuxWidthForAgent
+// at spawn + the one-time re-pin migration) and never follows mainWidth. Its
+// pane reflows to mainWidth at display time via WordWrapCache. See SPEC.md §13.8.
 
 // ---------------------------------------------------------------------------
 // Per-repo coordinator support (SPEC §12.2)

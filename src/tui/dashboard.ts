@@ -921,11 +921,10 @@ export class DashboardComponent implements Component {
   /** Apply a saved layout state to restore panel sizes, clamping to valid ranges. */
   applyLayout(layout: LayoutState) {
     this.sidebarWidth = clampSidebarWidth(layout.sidebarWidth);
-    // No resizeCoordinatorTmux here: the system coordinator's tmux window is
-    // pinned to PINNED_TMUX_WIDTH and never follows mainWidth. Its pane reflows
-    // to mainWidth at display time via WordWrapCache. The one-time re-pin
-    // migration (pendingTmuxResize below) brings any pre-pin coordinator window
-    // up to the pin.
+    // No coordinator tmux resize here: the system coordinator's window is pinned
+    // to PINNED_TMUX_WIDTH and never follows mainWidth. Its pane reflows to
+    // mainWidth at display time via WordWrapCache. The one-time re-pin migration
+    // (pendingTmuxResize below) brings any pre-pin coordinator window up to the pin.
     this.splitPane.setLeftWidth(clampLeftWidthAbsolute(layout.splitPaneLeftWidth));
     this.sidebar.heightOffsets = { ...layout.heightOffsets };
     if (layout.repoCoordinatorHeightOffset !== undefined) {

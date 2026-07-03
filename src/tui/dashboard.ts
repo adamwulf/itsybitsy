@@ -38,7 +38,7 @@ import {
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { isCodexStatusLine, stripAnsi } from "../parse-state";
 import { SplitPane } from "./split-pane";
-import { wordWrapLines, padLines, findLastTwoSeparators } from "./wrap";
+import { wordWrapLines, padLines, findLastTwoSeparators, WordWrapCache } from "./wrap";
 import { fetchCodexUsage, fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
@@ -122,31 +122,24 @@ export class TmuxPaneComponent implements Component {
   /** When true, render output without requiring an agent (used for coordinator) */
   agentless = false;
   /**
-   * Memoized word-wrap result. rawOutput is the UNWRAPPED logical capture (tmux
-   * -J), and word-wrapping it to the pane width is the per-poll cost. Both
-   * render() and parseStatusLines() run several times between polls (input-field
-   * height, status-line count, then the actual render), so we cache the wrapped
-   * form keyed on (raw identity, width). onOutput assigns a fresh string every
-   * poll, so an identity check on rawOutput is a correct cache-invalidation key.
+   * Memoized word-wrap of rawOutput (the UNWRAPPED logical -J capture) keyed on
+   * (raw identity, width). Both render() and parseStatusLines() run several
+   * times between polls (input-field height, status-line count, then the actual
+   * render), so caching keeps repeated renders O(1). onOutput assigns a fresh
+   * string every poll, so an identity check on rawOutput invalidates correctly.
    */
-  private wrapCache: { raw: string; width: number; wrapped: string[] } | null = null;
+  private wrapCache = new WordWrapCache();
 
   invalidate(): void {}
 
   /**
    * Word-wrap rawOutput to `width`, reusing the memoized result when neither the
-   * raw output nor the width changed since the last call. Keeps repeated renders
-   * between polls O(1). Uses word-wrap (break at spaces, hard-wrap over-width
-   * tokens) so the whole -J logical buffer renders at one consistent width.
+   * raw output nor the width changed since the last call. Uses word-wrap (break
+   * at spaces, hard-wrap over-width tokens) so the whole -J logical buffer
+   * renders at one consistent width.
    */
   getWrapped(width: number): string[] {
-    const cache = this.wrapCache;
-    if (cache && cache.raw === this.rawOutput && cache.width === width) {
-      return cache.wrapped;
-    }
-    const wrapped = wordWrapLines(this.rawOutput, width);
-    this.wrapCache = { raw: this.rawOutput, width, wrapped };
-    return wrapped;
+    return this.wrapCache.get(this.rawOutput, width);
   }
 
   /** Reset state when switching agents */
@@ -155,7 +148,7 @@ export class TmuxPaneComponent implements Component {
     this.hasPolled = false;
     this.scrollBack = 0;
     this.clientAttached = false;
-    this.wrapCache = null;
+    this.wrapCache.reset();
   }
 
   scrollUp(amount = 1) {
@@ -1543,9 +1536,7 @@ export class DashboardComponent implements Component {
       const tmuxSession = coordAgent?.meta.tmux_session ?? null;
       if (tmuxSession !== this.repoCoordinatorSession) {
         this.repoCoordinatorSession = tmuxSession;
-        this.rightPane.repoCoordinatorOutput = null;
-        this.rightPane.repoCoordinatorHasPolled = false;
-        this.rightPane.repoCoordinatorScrollBack = 0;
+        this.rightPane.resetRepoCoordinator();
         this.repoCoordinatorPoller.setAgent(tmuxSession);
         // Resize repo coordinator tmux to mainWidth — per-repo coordinators render
         // full-pane (same behavior as the system coordinator), not right-pane-only.
@@ -1560,9 +1551,7 @@ export class DashboardComponent implements Component {
       this.infoPanel.repoCoordinatorAgent = null;
       if (this.repoCoordinatorSession) {
         this.repoCoordinatorSession = null;
-        this.rightPane.repoCoordinatorOutput = null;
-        this.rightPane.repoCoordinatorHasPolled = false;
-        this.rightPane.repoCoordinatorScrollBack = 0;
+        this.rightPane.resetRepoCoordinator();
         this.repoCoordinatorPoller.setAgent(null);
       }
     }

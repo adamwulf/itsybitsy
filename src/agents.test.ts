@@ -1596,20 +1596,31 @@ describe("is* detectors on -J logical-line captures", () => {
     expect(isApiTerms(lines.join("\n"))).toBe(true);
   });
 
-  test("isCompacting still requires the marker within the last 5 logical lines", () => {
-    // -J does not change the 5-line budget semantics: a marker 6+ logical lines
-    // back is still out of range.
+  test("isCompacting requires the marker within the last 3 logical lines (F1 tightened window)", () => {
+    // F1 shrank the compacting window from 5 → 3 logical lines so a finished
+    // banner ages out of range sooner under -J. A marker 4+ logical lines back
+    // is now out of range (it was in range under the old 5-line window).
     const recent = [
       "Compacting conversation ".repeat(6),
-      "then five more logical lines of output follow the compaction banner here",
-      "line b that is reasonably wide and unwrapped under -J for realism only",
-      "line c",
+      "then four more logical lines of output follow the compaction banner here",
+      "line c that is reasonably wide and unwrapped under -J for realism only",
       "line d",
       "line e",
     ];
-    // Compacting is now the 6th-from-last line → out of the last-5 window.
+    // Compacting is the 5th-from-last line → out of the last-3 window.
     expect(isCompacting(recent.join("\n"))).toBe(false);
-    // But when it is within the last 5, it matches on a wide logical line.
+
+    // Boundary: a marker 4 logical lines back is OUT under the new window=3
+    // (it would have been IN under the old window=5). This pins F1's tightening.
+    const justOutside = [
+      "Compacting conversation on a wide logical line under -J",
+      "line b",
+      "line c",
+      "line d",
+    ];
+    expect(isCompacting(justOutside.join("\n"))).toBe(false);
+
+    // But when it is within the last 3, it matches on a wide logical line.
     const recent2 = [
       "line a",
       "line b",
@@ -1617,6 +1628,7 @@ describe("is* detectors on -J logical-line captures", () => {
       "line d",
       "line e",
     ];
+    // Compacting is the 3rd-from-last line → inside the last-3 window.
     expect(isCompacting(recent2.join("\n"))).toBe(true);
   });
 
@@ -1626,6 +1638,53 @@ describe("is* detectors on -J logical-line captures", () => {
       "⏵⏵ accept edits on (shift+tab to cycle) · 3 background tasks running in the current session right now",
     );
     expect(hasBackgroundTasks(lines.join("\n"))).toBe(true);
+  });
+
+  // ── F1: recovered-agent (false-positive) direction ──────────────────────
+  // The failure F1 identified: under -J one logical line carries more content,
+  // so a finished banner lingered in the old wide windows and could re-classify
+  // (and, for rate_limited, re-nudge) an agent that has already resumed working.
+  // After the F1 tightening the banner ages out of range once enough fresh
+  // logical output has arrived. These tests pin the recovery direction.
+  describe("F1 recovered-agent no longer re-classified once fresh output arrives", () => {
+    test("rate_limited: a usage-limit banner followed by 8 fresh logical lines is NOT rate_limited", () => {
+      // Banner, then 8 logical lines of ordinary work output. The banner is now
+      // the 9th-from-last line → outside the tightened 8-line rate-limit window.
+      const lines = [
+        "Claude Usage Limit Reached — your limit will reset at 3pm; run /upgrade to increase your usage limit",
+        ...Array.from({ length: 8 }, (_, i) => `fresh work output line ${i} produced after the agent resumed`),
+      ];
+      expect(isRateLimited(lines.join("\n"))).toBe(false);
+    });
+
+    test("rate_limited: a still-current banner within 8 logical lines IS rate_limited", () => {
+      // 7 fresh lines only → banner is the 8th-from-last → still inside the
+      // window, so a genuinely current banner is not missed.
+      const lines = [
+        "Claude Usage Limit Reached — your limit will reset at 3pm; run /upgrade to increase your usage limit",
+        ...Array.from({ length: 7 }, (_, i) => `output line ${i}`),
+      ];
+      expect(isRateLimited(lines.join("\n"))).toBe(true);
+    });
+
+    test("compacting: a compaction banner followed by 3 fresh logical lines is NOT compacting", () => {
+      // Banner is the 4th-from-last → outside the tightened 3-line window.
+      const lines = [
+        "Compacting conversation across a large context window",
+        ...Array.from({ length: 3 }, (_, i) => `fresh output line ${i} after compaction finished`),
+      ];
+      expect(isCompacting(lines.join("\n"))).toBe(false);
+    });
+
+    test("hasBackgroundTasks: a status bar 9 logical lines back is NOT reported", () => {
+      // Under -J a stale ⏵⏵ status bar lingered in the old 15-line window; the
+      // tightened 8-line window drops it once 8 fresh lines have scrolled past.
+      const lines = [
+        "⏵⏵ accept edits on (shift+tab to cycle) · 2 bashes",
+        ...Array.from({ length: 8 }, (_, i) => `later output line ${i}`),
+      ];
+      expect(hasBackgroundTasks(lines.join("\n"))).toBe(false);
+    });
   });
 });
 

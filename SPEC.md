@@ -95,13 +95,15 @@ State detection is deterministic — the stop hook writes authoritative state to
 2. **No tmux session** → `stopped`, unless `created_epoch` is less than 6 seconds ago → `creating`. The 6-second grace period (`CREATING_GRACE_PERIOD_MS`) is purely time-derived from `created_epoch` in meta.json — not written as a state value.
 
 3. **Tmux session exists — check transient overrides** (tmux output parsing, minimal):
-   - If "Compacting conversation" appears in last 5 lines of tmux output → `compacting`
-   - If `rate_limit_error`, "usage limit reached", "hit your limit", or "/upgrade to increase your usage limit" appears in last 15 lines → `rate_limited`
-   - If stored `meta.state === "waiting"` AND tmux shows `⏵⏵.*·\s\d+\s` (background shells, e.g. `⏵⏵ accept edits on · 1 shell`) in last 15 lines → `running`. Scoped strictly to `waiting` — we do NOT override `complete` (intentional sign-off) or `running` (already correct). See §8.5.1.
+   - If "Compacting conversation" appears in the last 3 logical lines of tmux output → `compacting`
+   - If `rate_limit_error`, "usage limit reached", "hit your limit", or "/upgrade to increase your usage limit" appears in the last 8 logical lines → `rate_limited`
+   - If stored `meta.state === "waiting"` AND tmux shows `⏵⏵.*·\s\d+\s` (background shells, e.g. `⏵⏵ accept edits on · 1 shell`) in the last 8 logical lines → `running`. Scoped strictly to `waiting` — we do NOT override `complete` (intentional sign-off) or `running` (already correct). See §8.5.1.
 
 4. **Read `state` from meta.json** → return the stored value (`running`, `waiting`, or `complete`). If `state` field is absent (legacy agent or freshly created agent before first stop hook fires): if `created_epoch` is less than 6 seconds ago → `creating`; otherwise → `running`.
 
 **ANSI stripping**: Tmux output used for compacting/rate_limited checks must have ANSI escape sequences stripped before pattern matching.
+
+**Capture unit — logical lines (`-J`)**: `captureTmuxOutput` passes `tmux capture-pane -J`, so captures are **logical lines** — tmux's soft-wrapped continuation rows are rejoined into one line (program-emitted `\n` are preserved) and trailing spaces are preserved rather than truncated. All the last-N-line windows above therefore count **logical lines, not physical terminal rows**. Because one logical line now carries the content of several old physical rows, a finished "sticky" banner (rate-limit / compacting / background-tasks) lingered in the old fixed windows for longer wall-clock and could re-classify — and, for `rate_limited`, re-nudge — an already-recovered agent. The stale-sensitive windows were therefore tightened: **compacting 5 → 3**, **rate-limit 15 → 8**, **background-tasks 15 → 8** logical lines (`RATE_LIMIT_WINDOW` / `COMPACTING_WINDOW` / `BACKGROUND_TASKS_WINDOW` in `src/agents.ts`; the mirror stale windows in `src/parse-state.ts` are `RATE_LIMIT_STALE_WINDOW` / `COMPACTING_STALE_WINDOW`). Each banner renders on a single logical line, so the tighter windows still match a *current* banner. The generic running / waiting / complete / tool-waiting windows are deliberately left wide (5 / 15 / 20) to avoid false negatives.
 
 ### 1.3.1 State Writes
 
@@ -127,19 +129,19 @@ The stop hook does NOT parse tmux output for state detection. Tmux parsing for `
 ### 1.3.2 Legacy State Detection (parseState)
 
 The legacy `parseState()` function and its 14-priority tmux pattern matching system remain in the codebase but are no longer used for primary state detection. They are retained for:
-- **Compacting detection**: Checking "Compacting conversation" in last 5 lines of tmux output
-- **Rate limit detection**: Checking rate limit patterns in last 15 lines of tmux output
-- **Backward compatibility**: The bash `ib` reference implementation still uses tmux-based state detection
+- **Compacting detection**: Checking "Compacting conversation" in the last 3 logical lines of tmux output (see §1.3 "Capture unit — logical lines")
+- **Rate limit detection**: Checking rate limit patterns in the last 8 logical lines of tmux output
+- **Backward compatibility**: The bash `ib` reference implementation still uses tmux-based state detection (note: the `-J` logical-line capture and the tightened stale windows are intentional divergences from bash — see §1.3)
 
 The legacy parseState priority order is documented here for reference:
 
    | Priority | Window | Pattern | State |
    |----------|--------|---------|-------|
    | 1 | Full input | Workspace trust/import prompts AND no startup markers | `creating` |
-   | 2 | Last 5 lines | "Compacting conversation" | `compacting` |
-   | 3 | Last 5 lines | `(Esc to interrupt`, `(ctrl+c to interrupt`, `⎿  Running` | `running` |
-   | 4 | Last 15 lines | `⎿  Waiting` (tool waiting) | `waiting` |
-   | 5 | Last 15 lines | `rate_limit_error` or usage limit phrases (case-insensitive) | `rate_limited` |
+   | 2 | Last 3 logical lines | "Compacting conversation" (tightened stale window, was 5 — see §1.3) | `compacting` |
+   | 3 | Last 5 logical lines | `(Esc to interrupt`, `(ctrl+c to interrupt`, `⎿  Running` | `running` |
+   | 4 | Last 15 logical lines | `⎿  Waiting` (tool waiting) | `waiting` |
+   | 5 | Last 8 logical lines | `rate_limit_error` or usage limit phrases (case-insensitive; tightened stale window, was 15 — see §1.3) | `rate_limited` |
    | 6 | Last 15 lines | `I HAVE COMPLETED THE GOAL` (excluding single-quoted instances) | `complete` |
    | 7 | Last 15 lines | Standalone `WAITING` on its own line (unless ⏺ appears after it = stale) | `waiting` |
    | 8 | Last 15 lines | `ctrl+b ctrl+b` or `thinking)` | `running` |
@@ -760,13 +762,13 @@ The stop hook does **not** parse tmux output for state detection. It relies sole
 
 | State written | Condition | Action |
 |---------------|-----------|--------|
-| `running` | Background tasks active (`⏵⏵.*·\s\d+\s` in last 15 lines of tmux) | No action (agent is working via background tasks) |
+| `running` | Background tasks active (`⏵⏵.*·\s\d+\s` in the last 8 logical lines of tmux) | No action (agent is working via background tasks) |
 | `running` | No background tasks | **Nudge** — debounced (5s), sends "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL'" via tmux |
 | `complete` | Uncommitted changes | **Remind commit** — sends message telling agent to commit |
 | `complete` | Has manager | **Notify manager** — sends "[hook]: Your subtask <id> just completed" to manager's tmux [^notify-mechanism] |
 | `complete` | No manager, unfinished children | **Remind children** — tells agent to merge/retire all sub-agents |
 | `complete` | No manager, no children | No action |
-| `waiting` | Has manager, background tasks active (`⏵⏵.*·\s\d+\s` in last 15 lines of tmux) | No action (agent is working via background tasks — see §8.5.1) |
+| `waiting` | Has manager, background tasks active (`⏵⏵.*·\s\d+\s` in the last 8 logical lines of tmux) | No action (agent is working via background tasks — see §8.5.1) |
 | `waiting` | Has manager, no background tasks, at least one direct child with `meta.state === "running"` OR `isRecentlyCreated(created_epoch)` | No action (child still working — see §8.5.1) |
 | `waiting` | Has manager, no background tasks, no active children | **Notify manager** — sends "[hook]: Your subtask <id> is now waiting for input" |
 | `waiting` | No manager | No action |
@@ -1110,9 +1112,9 @@ Per-agent watchdogs do not use a watchdog lock file for state detection, and the
 
 **State resolution per tick**: The watchdog resolves the agent's effective state on each 5-second tick using the same resolution order as consumers (§1.3):
 1. No tmux session → `stopped` (or `creating` if within grace period)
-2. Tmux "Compacting conversation" in last 5 lines → `compacting`
-3. Tmux rate limit patterns in last 15 lines → `rate_limited`
-4. Stored `meta.state === "waiting"` AND tmux shows background shells (`⏵⏵.*·\s\d+\s` in last 15 lines) → `running` (see §8.5.1). Scoped strictly to `waiting` — not applied to `complete` or `running`.
+2. Tmux "Compacting conversation" in the last 3 logical lines → `compacting`
+3. Tmux rate limit patterns in the last 8 logical lines → `rate_limited`
+4. Stored `meta.state === "waiting"` AND tmux shows background shells (`⏵⏵.*·\s\d+\s` in the last 8 logical lines) → `running` (see §8.5.1). Scoped strictly to `waiting` — not applied to `complete` or `running`.
 5. Read `state` from meta.json → `running`, `waiting`, or `complete`
 
 **Monitoring behaviors by state:**
@@ -1551,8 +1553,8 @@ The system coordinator does **not** have a standard watchdog or stop hook. It is
 - No stop hook is installed — the system coordinator's state is detected purely from tmux session existence and output parsing (similar to how `compacting` and `rate_limited` are detected for regular agents)
 - **State detection** (checked in order):
   1. Tmux session `ib-coordinator` does not exist → `stopped`
-  2. "Compacting conversation" in last 5 lines of tmux output → `compacting`
-  3. Rate limit patterns in last 15 lines of tmux output → `rate_limited`
+  2. "Compacting conversation" in the last 3 logical lines of tmux output → `compacting`
+  3. Rate limit patterns in the last 8 logical lines of tmux output → `rate_limited`
   4. Otherwise → `running`
 - The system coordinator has no `waiting` or `complete` states — it runs indefinitely. There is no meta.json to store state, so tmux is the sole source of truth.
 - If the system coordinator session dies unexpectedly, the main area TMUX view shows "Session stopped — press R to restart". The `R` key (same as agent resume) triggers `restartSystemCoordinator()` when the system coordinator is selected.

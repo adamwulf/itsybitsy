@@ -11,7 +11,7 @@ import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings } from "../health-check";
 import { readAgentLog, readAgentLogWindow, statAgentLogSize, readAgentPrompt, parseDenials, resolveAgentIcon } from "../agents";
 import { diffAgent, statusAgent } from "../ib-commands";
-import { wrapLines } from "./wrap";
+import { wrapLines, WordWrapCache } from "./wrap";
 import { getStateColors } from "./color-scheme";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
 import { buildFocusSeparator } from "./focus";
@@ -150,6 +150,14 @@ export class RightPaneComponent implements Component {
   // not because the coordinator is right-pane-scoped.
   /** Per-repo coordinator tmux output (raw) for REPO mode */
   repoCoordinatorOutput: string | null = null;
+  /**
+   * Memoized word-wrap of repoCoordinatorOutput, mirroring TmuxPaneComponent.
+   * The coordinator poller assigns a fresh string each poll, so the (raw, width)
+   * identity key invalidates correctly. Word-wrap (not char-wrap) keeps this
+   * pane consistent with the center tmux pane and avoids mid-word breaks; the
+   * memo keeps repeated renders between polls O(1).
+   */
+  private repoCoordinatorWrapCache = new WordWrapCache();
   /** Whether the per-repo coordinator poller has completed at least one poll */
   repoCoordinatorHasPolled = false;
   /** Height offset for the coordinator split in REPO mode (positive = more coordinator). Splits the full main area vertically between repo info and coordinator tmux. */
@@ -168,6 +176,18 @@ export class RightPaneComponent implements Component {
   get filteredQuestions(): PendingQuestion[] {
     if (!this.agent) return this.questions;
     return this.questions.filter((q) => q.agent === this.agent!.id);
+  }
+
+  /**
+   * Clear all per-repo coordinator display state (output, poll flag, scrollback,
+   * and the memoized word-wrap). Called when the selected repo/coordinator
+   * changes so a stale wrap can't survive into the next coordinator's pane.
+   */
+  resetRepoCoordinator(): void {
+    this.repoCoordinatorOutput = null;
+    this.repoCoordinatorHasPolled = false;
+    this.repoCoordinatorScrollBack = 0;
+    this.repoCoordinatorWrapCache.reset();
   }
 
   invalidate(): void {}
@@ -408,8 +428,11 @@ export class RightPaneComponent implements Component {
       return lines;
     }
 
-    // Render coordinator tmux output (bottom-pinned, with optional scrollback)
-    const wrapped = wrapLines(this.repoCoordinatorOutput!, width);
+    // Render coordinator tmux output (bottom-pinned, with optional scrollback).
+    // The poller now delivers -J logical lines; word-wrap them (same path as the
+    // center TmuxPaneComponent) so long lines break at spaces rather than
+    // mid-word, memoized on (raw, width) so re-renders between polls are O(1).
+    const wrapped = this.repoCoordinatorWrapCache.get(this.repoCoordinatorOutput!, width);
     // Trim trailing blank lines
     while (wrapped.length > 0 && wrapped[wrapped.length - 1]!.trim() === "") {
       wrapped.pop();

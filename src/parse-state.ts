@@ -28,10 +28,30 @@ export interface ParseStateResult {
   reason: string;
 }
 
-// Window sizes for line-based pattern matching
+// Window sizes for line-based pattern matching.
+//
+// NOTE ON UNITS (tmux -J): captures now pass `-J`, so these windows count
+// LOGICAL lines, not physical terminal rows. One logical line can carry the
+// content of several old physical rows. The generic windows below (RECENT /
+// STANDARD / BROAD) size the running / waiting / complete / tool-waiting
+// checks and are left at their historical values — shrinking them risks
+// FALSE NEGATIVES on those non-stale detectors (e.g. a spinner or WAITING
+// marker sitting a few lines up would drop out of range).
 const RECENT_WINDOW = 5;
 const STANDARD_WINDOW = 15;
 const BROAD_WINDOW = 20;
+
+// Stale-marker windows (F1): rate-limit and compacting banners are STICKY —
+// once a banner is on screen it lingers as the agent scrolls past it. Under
+// -J each logical line holds more than an old physical row, so the same
+// last-N-line window now spans MORE content and a recovered banner lingers
+// in range longer, which can re-nudge an already-resumed agent. These two
+// checks therefore use tighter, dedicated windows so a recovered banner
+// leaves the window sooner. They must still be wide enough to MATCH a banner
+// that is current (a usage-limit banner is a single logical line under -J;
+// compacting is one line), so we keep a small margin rather than 1.
+const COMPACTING_STALE_WINDOW = 3; // was RECENT_WINDOW (5)
+const RATE_LIMIT_STALE_WINDOW = 8; // was STANDARD_WINDOW (15)
 
 /** Strip ANSI escape sequences from text */
 export function stripAnsi(text: string): string {
@@ -179,7 +199,15 @@ export function parseStateForCli(input: string, cli: AgentCli): ParseStateResult
 
 /**
  * Parse agent state from tmux output text.
- * This is a direct port of ib's parse_state() bash function.
+ *
+ * Originally a direct port of ib's parse_state() bash function. It has since
+ * diverged materially from the bash reference: captures now use `tmux
+ * capture-pane -J`, so the input is LOGICAL lines (soft-wrapped rows rejoined,
+ * trailing spaces preserved) rather than physical terminal rows, and the
+ * stale-sensitive windows were tightened accordingly (compacting via
+ * COMPACTING_STALE_WINDOW=3, rate-limit via RATE_LIMIT_STALE_WINDOW=8; the
+ * generic running/waiting/complete windows stay at RECENT/STANDARD/BROAD).
+ * See SPEC.md §1.3 "Capture unit — logical lines (-J)".
  *
  * @deprecated Legacy — no longer used for primary state detection. State is now determined
  * deterministically by the stop hook writing to meta.json (Phase 42). This function is retained
@@ -227,8 +255,12 @@ export function parseClaudeState(input: string): ParseStateResult {
 
   // Compacting — highest priority among running states
   // Checked before running since compacting also shows "(esc to interrupt)"
-  if (last5.includes("Compacting conversation")) {
-    return { state: "compacting", reason: "Compacting conversation in last 5 lines" };
+  // Uses the tighter COMPACTING_STALE_WINDOW (F1) so a finished "Compacting
+  // conversation" banner leaves the window quickly and doesn't keep the agent
+  // pinned to compacting after it has resumed.
+  const compactingWindow = lastNLines(input, COMPACTING_STALE_WINDOW);
+  if (compactingWindow.includes("Compacting conversation")) {
+    return { state: "compacting", reason: "Compacting conversation in last 3 lines" };
   }
 
   // Active running indicators in last 5 lines — checked BEFORE tool waiting
@@ -243,16 +275,20 @@ export function parseClaudeState(input: string): ParseStateResult {
     return { state: "waiting", reason: "tool waiting (⎿ Waiting)" };
   }
 
-  // Rate limit checks in last 15 lines
-  if (last15.includes("rate_limit_error")) {
+  // Rate limit checks — uses the tighter RATE_LIMIT_STALE_WINDOW (F1). A
+  // usage-limit banner is a single logical line under -J, so a window of 8
+  // still catches a current banner while letting a recovered one age out of
+  // range faster than the old 15-line window did.
+  const rateLimitWindow = lastNLines(input, RATE_LIMIT_STALE_WINDOW);
+  if (rateLimitWindow.includes("rate_limit_error")) {
     return { state: "rate_limited", reason: "rate_limit_error in output" };
   }
-  const lower15 = last15.toLowerCase();
+  const lowerRate = rateLimitWindow.toLowerCase();
   if (
-    lower15.includes("usage limit reached") ||
-    lower15.includes("limit will reset at") ||
-    lower15.includes("hit your limit") ||
-    lower15.includes("/upgrade to increase your usage limit")
+    lowerRate.includes("usage limit reached") ||
+    lowerRate.includes("limit will reset at") ||
+    lowerRate.includes("hit your limit") ||
+    lowerRate.includes("/upgrade to increase your usage limit")
   ) {
     return { state: "rate_limited", reason: "usage limit pattern in output" };
   }

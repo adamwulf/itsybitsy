@@ -20,7 +20,7 @@ import {
 } from "../ib-commands";
 import { sanitizeAgentNameInput } from "../validation";
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
-import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession, sendTmuxEscape } from "../tmux-poller";
+import { captureTmuxOutput, resizeTmuxWindow, killTmuxSession, sendTmuxEscape, expandTabs } from "../tmux-poller";
 import { parseStateForCli } from "../parse-state";
 import { parseModel } from "../agent-cli";
 import type { AgentCli } from "../agent-cli";
@@ -2130,15 +2130,23 @@ export function handleSnapshot(ctx: ActionCtx) {
   captureTmuxOutput(agent.meta.tmux_session).then(async (strippedOutput) => {
     try {
       if (!strippedOutput) { ctx.setNotice("No tmux output captured", "error"); return; }
+      // Run state detection on the raw capture (NOT tab-expanded) so it matches
+      // the live detectAgentStates path exactly — captureTmuxOutput feeds both.
       const result = parseStateForCli(strippedOutput, classifyAgentCli(agent.meta.model));
-      // strippedOutput is the UNWRAPPED logical capture (tmux -J, ANSI-stripped).
-      // The wrapped form is that same buffer word-wrapped to the current center-
-      // pane width — matching what the user sees on screen. We persist both so
-      // the snapshot preserves the logical lines (state detection input) AND the
-      // on-screen wrapping (display debugging).
-      const wrappedOutput = wordWrapLines(strippedOutput, paneWidth).join("\n");
+      // The live display poller tab-expands its output (TmuxPoller.onOutput), but
+      // captureTmuxOutput does not. Expand tabs here so both saved bodies match
+      // what the pane actually renders — otherwise a capture containing literal
+      // tabs (e.g. codex editing a .pbxproj) would wrap differently on disk than
+      // on screen. Applied to BOTH the unwrapped body and the wrapped body.
+      const expandedOutput = expandTabs(strippedOutput);
+      // expandedOutput is the UNWRAPPED logical capture (tmux -J, ANSI-stripped,
+      // tabs expanded). The wrapped form is that same buffer word-wrapped to the
+      // current center-pane width — matching what the user sees on screen. We
+      // persist both so the snapshot preserves the logical lines (display-parity
+      // input) AND the on-screen wrapping (display debugging).
+      const wrappedOutput = wordWrapLines(expandedOutput, paneWidth).join("\n");
       const header = `State: ${result.state}\nReason: ${result.reason}\n`;
-      const unwrappedBody = `${header}\n${strippedOutput}`;
+      const unwrappedBody = `${header}\n${expandedOutput}`;
       const wrappedBody = `${header}Pane width: ${paneWidth}\n\n${wrappedOutput}`;
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
       const baseName = `snapshot-${timestamp}-${result.state}`;

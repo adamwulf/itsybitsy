@@ -326,6 +326,51 @@ describe("handleSnapshot", () => {
       await rm(baseDir, { recursive: true, force: true });
     }
   });
+
+  test("expands literal tabs (to 3 spaces) in BOTH snapshot bodies, matching the live pane", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "agent-actions-snapshot-tabs-"));
+    const repoDir = join(baseDir, "repo");
+    const homeDir = join(baseDir, "home");
+    await mkdir(repoDir, { recursive: true });
+    await mkdir(join(homeDir, ".itsybitsy"), { recursive: true });
+    setUserConfigPath(join(homeDir, ".itsybitsy", "config.json"));
+
+    try {
+      // Output containing a literal tab — as a codex agent editing a .pbxproj
+      // would produce. captureTmuxOutput strips ANSI but does NOT expand tabs;
+      // the live display poller does. The snapshot must expand them too.
+      tmuxSpawnCtx.set(() => makeSpawnResult(
+        0,
+        "indented\tvalue with a literal tab\n\n  gpt-5.5 default · /repo\n",
+      ));
+      const agent = makeAgent({ id: "agent-tab", repoPath: repoDir });
+      agent.meta.model = "codex:gpt-5.5";
+      agent.meta.tmux_session = "tmux-agent-tab";
+      const { ctx } = makeMockCtx({ agent, leftWidth: 60 });
+
+      handleSnapshot(ctx);
+      await Bun.sleep(20);
+
+      const debugDir = join(repoDir, ".ittybitty", "agents", "agent-tab", "debug-logs");
+      const debugFiles = await readdir(debugDir);
+      const unwrappedName = debugFiles.find((name) => /-unwrapped\.txt$/.test(name));
+      const wrappedName = debugFiles.find((name) => /-wrapped\.txt$/.test(name));
+      expect(unwrappedName).toBeDefined();
+      expect(wrappedName).toBeDefined();
+
+      const unwrappedText = await Bun.file(join(debugDir, unwrappedName!)).text();
+      const wrappedText = await Bun.file(join(debugDir, wrappedName!)).text();
+
+      // The literal tab is gone; it was expanded to 3 spaces in both bodies.
+      expect(unwrappedText).not.toContain("\t");
+      expect(wrappedText).not.toContain("\t");
+      expect(unwrappedText).toContain("indented   value with a literal tab");
+      expect(wrappedText).toContain("indented   value");
+    } finally {
+      resetUserConfigPath();
+      await rm(baseDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("handleRetire", () => {

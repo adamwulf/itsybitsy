@@ -588,9 +588,25 @@ export async function readAgentState(agentDir: string): Promise<MetaState | unde
   }
 }
 
+// Tail-window sizes (in LOGICAL lines) for the sticky-banner state detectors.
+//
+// F1: with tmux -J each captured line is a logical line (soft-wrapped rows are
+// rejoined), so one line now carries the content of several old physical rows.
+// A banner that has finished (rate-limit / compacting / background tasks) thus
+// lingered in the old fixed windows (5 / 15 / 15) for longer wall-clock and
+// could re-classify an already-recovered agent — for rate_limited that means
+// the watchdog re-nudges a working agent. We halve these stale-sensitive
+// windows so a recovered banner ages out of range sooner. Each of these
+// banners renders on a single line, so the tighter windows still MATCH a
+// current banner. These are deliberately NOT shared with the running / waiting
+// detectors, whose windows stay wide to avoid false negatives.
+const COMPACTING_WINDOW = 3; // was 5
+const RATE_LIMIT_WINDOW = 8; // was 15
+const BACKGROUND_TASKS_WINDOW = 8; // was 15
+
 /**
  * Check if tmux output indicates context compaction in progress.
- * Checks for "Compacting conversation" in last 5 lines.
+ * Checks for "Compacting conversation" in the last COMPACTING_WINDOW lines.
  *
  * TODO: codex-equivalent detection — see SPEC-CODEX-MODEL.md §5.6. Codex's compaction
  * UI strings haven't been captured yet; a codex agent that is compacting will currently
@@ -600,8 +616,12 @@ export async function readAgentState(agentDir: string): Promise<MetaState | unde
 export function isCompacting(tmuxOutput: string): boolean {
   const stripped = stripAnsi(tmuxOutput);
   const lines = stripped.split("\n");
-  const last5 = lines.slice(-5).join("\n");
-  return last5.includes("Compacting conversation");
+  // F1: tighter window (3, was 5). Under -J each line carries more content, so
+  // a finished "Compacting conversation" banner lingered in the old 5-line
+  // window longer and could keep re-classifying a resumed agent as compacting.
+  // Compacting renders as a single line, so 3 still catches a current banner.
+  const tail = lines.slice(-COMPACTING_WINDOW).join("\n");
+  return tail.includes("Compacting conversation");
 }
 
 /**
@@ -616,10 +636,15 @@ export function isCompacting(tmuxOutput: string): boolean {
 export function isRateLimited(tmuxOutput: string): boolean {
   const stripped = stripAnsi(tmuxOutput);
   const lines = stripped.split("\n");
-  const last15 = lines.slice(-15).join("\n");
+  // F1: tighter window (8, was 15). A usage-limit banner is a single logical
+  // line under -J, so 8 still matches a current banner while letting a
+  // recovered one age out of range sooner — this predicate directly drives
+  // the watchdog's rate_limited classification and re-nudge, so a stale banner
+  // lingering in a too-wide window could re-nudge an already-resumed agent.
+  const tail = lines.slice(-RATE_LIMIT_WINDOW).join("\n");
 
-  if (last15.includes("rate_limit_error")) return true;
-  const lower = last15.toLowerCase();
+  if (tail.includes("rate_limit_error")) return true;
+  const lower = tail.toLowerCase();
   return (
     lower.includes("usage limit reached") ||
     lower.includes("limit will reset at") ||
@@ -736,8 +761,11 @@ export function isApiTerms(tmuxOutput: string): boolean {
 export function hasBackgroundTasks(tmuxOutput: string): boolean {
   const stripped = stripAnsi(tmuxOutput);
   const lines = stripped.split("\n");
-  const last15 = lines.slice(-15).join("\n");
-  return /⏵⏵.*·\s\d+\s/.test(last15);
+  // F1: tighter window (8, was 15). The ⏵⏵ background-task indicator lives in
+  // the status bar at the very tail; under -J a stale one lingered longer in a
+  // 15-line window. The status bar is a single line, so 8 still catches it.
+  const tail = lines.slice(-BACKGROUND_TASKS_WINDOW).join("\n");
+  return /⏵⏵.*·\s\d+\s/.test(tail);
 }
 
 /**

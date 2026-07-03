@@ -485,5 +485,38 @@ describe("parseState", () => {
       ].join("\n");
       expect(parseState(input).state).toBe("waiting");
     });
+
+    // F1 (false-positive direction): a recovered agent whose stale banner has
+    // scrolled far enough back must NOT keep classifying as rate_limited /
+    // compacting. The windows were tightened (rate-limit 15→8, compacting 5→3)
+    // so a recovered banner ages out of range sooner under -J.
+    test("recovered agent: usage-limit banner past the 8-line window is NOT rate_limited", () => {
+      // Banner, then 8 fresh logical lines of ordinary output → banner is the
+      // 9th-from-last line, outside the tightened rate-limit window.
+      const lines = [
+        "Claude Usage Limit Reached — your limit will reset at 3pm; run /upgrade to increase your usage limit",
+        ...Array.from({ length: 8 }, (_, i) => `fresh work output line ${i} after the agent resumed`),
+      ];
+      expect(parseState(lines.join("\n")).state).not.toBe("rate_limited");
+    });
+
+    test("recovered agent: usage-limit banner still inside the 8-line window IS rate_limited", () => {
+      // Only 7 fresh lines → banner is the 8th-from-last → still current.
+      const lines = [
+        "Claude Usage Limit Reached — your limit will reset at 3pm; run /upgrade to increase your usage limit",
+        ...Array.from({ length: 7 }, (_, i) => `output line ${i}`),
+      ];
+      expect(parseState(lines.join("\n")).state).toBe("rate_limited");
+    });
+
+    test("recovered agent: compaction banner past the 3-line window is NOT compacting", () => {
+      // Banner, then 3 fresh logical lines → banner is 4th-from-last, outside
+      // the tightened compacting window.
+      const lines = [
+        "Compacting conversation across a large context window",
+        ...Array.from({ length: 3 }, (_, i) => `fresh output line ${i} after compaction finished`),
+      ];
+      expect(parseState(lines.join("\n")).state).not.toBe("compacting");
+    });
   });
 });

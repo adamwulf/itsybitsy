@@ -251,6 +251,45 @@ describe("wordWrapSingleLine", () => {
     // Lines should rejoin to original content (spaces consumed at break points)
     expect(result.join(" ")).toBe(line);
   });
+
+  // F2: leading indentation on the FIRST physical row must survive the wrap.
+  // Continuation rows keep the old behavior (leading spaces after a wrap point
+  // are still consumed), but dropping the indent off row 1 was a visible
+  // regression for indented code and "  ⎿ " tool-result continuation lines.
+  describe("preserves leading indentation on the first row", () => {
+    test("over-width indented code keeps its 4-space indent on row 1", () => {
+      const line = "    const foo = bar + baz + qux + longer;";
+      const result = wordWrapSingleLine(line, 20);
+      expect(result.length).toBeGreaterThan(1);
+      // Row 1 keeps the original 4-space indent.
+      expect(result[0]!.startsWith("    ")).toBe(true);
+      expect(result[0]).toBe("    const foo = bar");
+    });
+
+    test("over-width '  ⎿ '-style tool-result line keeps its indent on row 1", () => {
+      const line = "  ⎿  Read src/tui/wrap.ts and confirmed the leading indent is preserved on row one";
+      const result = wordWrapSingleLine(line, 30);
+      expect(result.length).toBeGreaterThan(1);
+      // The left margin ("  ⎿ ") is intact on the first row.
+      expect(result[0]!.startsWith("  ⎿")).toBe(true);
+    });
+
+    test("continuation rows do not accumulate stray leading spaces", () => {
+      const line = "    const foo = bar + baz + qux + longer;";
+      const result = wordWrapSingleLine(line, 20);
+      // Every row after the first was produced at a wrap point; none of them
+      // should start with a space (leading spaces consumed on continuations).
+      for (const row of result.slice(1)) {
+        expect(row.startsWith(" ")).toBe(false);
+      }
+    });
+
+    test("a fitting (short) indented line is returned verbatim", () => {
+      const line = "    short indented line";
+      const result = wordWrapSingleLine(line, 40);
+      expect(result).toEqual([line]);
+    });
+  });
 });
 
 describe("wordWrapLines", () => {

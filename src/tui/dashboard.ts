@@ -35,9 +35,9 @@ import {
   sanitizeTmuxInput,
 } from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
-import { isCodexStatusLine, stripAnsi } from "../parse-state";
 import { SplitPane } from "./split-pane";
-import { wordWrapLines, padLines, findLastTwoSeparators, WordWrapCache } from "./wrap";
+import { wordWrapLines, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
+import type { ChromeSlice } from "./wrap";
 import { fetchCodexUsage, fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
@@ -121,24 +121,53 @@ export class TmuxPaneComponent implements Component {
   /** When true, render output without requiring an agent (used for coordinator) */
   agentless = false;
   /**
-   * Memoized word-wrap of rawOutput (the UNWRAPPED logical -J capture) keyed on
-   * (raw identity, width). Both render() and parseStatusLines() run several
-   * times between polls (input-field height, status-line count, then the actual
+   * Memoized word-wrap keyed on (raw identity, width). The raw we wrap is the
+   * chrome-SLICED transcript (input-box chrome removed on the UNWRAPPED logical
+   * lines first — see chromeSlice), not the full capture, so wrapping never sees
+   * the input separators. Both render() and parseStatusLines() run several times
+   * between polls (input-field height, status-line count, then the actual
    * render), so caching keeps repeated renders O(1). onOutput assigns a fresh
-   * string every poll, so an identity check on rawOutput invalidates correctly.
+   * string every poll, so an identity check invalidates correctly.
    */
   private wrapCache = new WordWrapCache();
+  /**
+   * Memoized chrome slice of rawOutput. Chrome detection now runs on the
+   * UNWRAPPED logical lines (rawOutput.split("\n")), NOT on wrapped rows: at the
+   * pinned tmux width an input-box separator is a single ~1000-col logical line,
+   * but after word-wrapping to a narrow pane it becomes many consecutive
+   * full-width separator rows, which made findLastTwoSeparators / findCodexInput-
+   * Chrome mis-slice. Detecting on logical lines is width-independent, so this
+   * memo keys on rawOutput identity alone.
+   */
+  private chromeCache: { raw: string; slice: ChromeSlice } | null = null;
 
   invalidate(): void {}
 
   /**
-   * Word-wrap rawOutput to `width`, reusing the memoized result when neither the
-   * raw output nor the width changed since the last call. Uses word-wrap (break
-   * at spaces, hard-wrap over-width tokens) so the whole -J logical buffer
-   * renders at one consistent width.
+   * Split rawOutput into logical lines, detect the CLI's input-box chrome there,
+   * and return the transcript (everything above the chrome) plus the status
+   * lines (chrome below the input separator). Width-independent — memoized on
+   * rawOutput identity. See ChromeSlice / computeChromeSlice.
+   */
+  private chromeSlice(): ChromeSlice {
+    const cached = this.chromeCache;
+    if (cached && cached.raw === this.rawOutput) return cached.slice;
+    const slice = computeChromeSlice(this.rawOutput, isCodexAgent(this.agent));
+    this.chromeCache = { raw: this.rawOutput, slice };
+    return slice;
+  }
+
+  /**
+   * Word-wrap the transcript to `width`. When trimInputSeparator is set we wrap
+   * the chrome-sliced transcript (input box removed on the logical lines first);
+   * otherwise we wrap the full capture. Reuses the memoized result when neither
+   * the (sliced) raw nor the width changed. Word-wrap (break at spaces,
+   * hard-wrap over-width tokens) renders the whole buffer at one consistent
+   * width.
    */
   getWrapped(width: number): string[] {
-    return this.wrapCache.get(this.rawOutput, width);
+    const raw = this.trimInputSeparator ? this.chromeSlice().transcriptRaw : this.rawOutput;
+    return this.wrapCache.get(raw, width);
   }
 
   /** Reset state when switching agents */
@@ -148,6 +177,7 @@ export class TmuxPaneComponent implements Component {
     this.scrollBack = 0;
     this.clientAttached = false;
     this.wrapCache.reset();
+    this.chromeCache = null;
   }
 
   scrollUp(amount = 1) {
@@ -167,34 +197,15 @@ export class TmuxPaneComponent implements Component {
     this.statusLines = [];
     if (!this.trimInputSeparator || !this.rawOutput) return;
 
-    const wrapped = this.getWrapped(width);
-
-    // Codex emits full-width ─ section dividers between output blocks, so
-    // findLastTwoSeparators (designed for Claude's input chrome) routinely
-    // matches content dividers instead of the input box. For codex agents,
-    // prefer the codex-specific detector — it anchors on the status bar and
-    // the › prompt, which together unambiguously identify the input chrome.
-    if (isCodexAgent(this.agent)) {
-      const codexChrome = findCodexInputChrome(wrapped);
-      if (codexChrome) {
-        this.statusLines = wrapped.slice(codexChrome.statusIndex, codexChrome.endIndex + 1).map(
-          (line) => truncateToWidth(line, width, "")
-        );
-      }
-      return;
-    }
-
-    const { lowerIndex } = findLastTwoSeparators(wrapped);
-    // Extract lines after the lower separator
-    if (lowerIndex >= 0 && lowerIndex < wrapped.length - 1) {
-      this.statusLines = wrapped.slice(lowerIndex + 1).map(
-        (line) => truncateToWidth(line, width, "")
-      );
-      // Trim trailing blank lines — tmux capture-pane pads output to fill the pane height
-      while (this.statusLines.length > 0 && this.statusLines[this.statusLines.length - 1]!.trim() === "") {
-        this.statusLines.pop();
-      }
-    }
+    // Status lines are the CLI's chrome below the input separator (Claude's
+    // status bar, or codex's status bar + prompt). They are detected on the
+    // UNWRAPPED logical lines (chromeSlice) so a pinned-width separator doesn't
+    // wrap into many rows and mis-slice. Status lines are chrome: TRUNCATE each
+    // logical line to width — never word-wrap them (a wrapped status bar would
+    // spill onto extra rows the overlay didn't reserve).
+    this.statusLines = this.chromeSlice().statusLines.map(
+      (line) => truncateToWidth(line, width, "")
+    );
   }
 
   render(width: number): string[] {
@@ -266,30 +277,14 @@ export class TmuxPaneComponent implements Component {
       ], this.displayHeight);
     }
 
-    // Word-wrap logical lines to pane width (memoized). rawOutput is tmux -J
-    // output — soft-wrapped continuation lines already rejoined — so this is the
-    // single place the whole buffer gets wrapped to the current width.
-    let wrapped = this.getWrapped(width);
-
-    // When showing our own input field, trim the CLI's native input area.
-    // Claude's input area has two separator lines made of ─ characters, so we
-    // find the last two ─ separators and slice at the upper one. Codex doesn't
-    // use that double-separator chrome — it emits full-width ─ section
-    // dividers between output blocks, so the Claude detector would mis-match
-    // there. For codex, anchor on the › prompt + status bar instead.
-    if (this.trimInputSeparator) {
-      if (isCodexAgent(this.agent)) {
-        const codexChrome = findCodexInputChrome(wrapped);
-        if (codexChrome) {
-          wrapped = wrapped.slice(0, codexChrome.promptIndex);
-        }
-      } else {
-        const { upperIndex } = findLastTwoSeparators(wrapped);
-        if (upperIndex >= 0 && upperIndex < wrapped.length) {
-          wrapped = wrapped.slice(0, upperIndex);
-        }
-      }
-    }
+    // Word-wrap the transcript to pane width (memoized). getWrapped already
+    // returns the chrome-SLICED transcript when trimInputSeparator is set — the
+    // CLI's input box is removed on the UNWRAPPED logical lines first
+    // (chromeSlice), so wrapping never sees the input separators and there is no
+    // per-width re-slice to do here. rawOutput is tmux -J output (soft-wrapped
+    // continuation rows already rejoined), so this is the single place the whole
+    // transcript gets word-wrapped to the current width.
+    const wrapped = this.getWrapped(width);
 
     // Clamp scrollBack to valid range
     const maxScrollBack = Math.max(0, wrapped.length - this.displayHeight);
@@ -326,35 +321,8 @@ function isCodexAgent(agent: Agent | null): boolean {
     return false;
   }
 }
-
-function findCodexInputChrome(wrapped: string[]): { promptIndex: number; statusIndex: number; endIndex: number } | null {
-  let endIndex = wrapped.length - 1;
-  while (endIndex >= 0 && stripAnsi(wrapped[endIndex]!).trim() === "") {
-    endIndex--;
-  }
-  if (endIndex < 0) return null;
-
-  let promptIndex = -1;
-  for (let i = endIndex; i >= 0; i--) {
-    const line = stripAnsi(wrapped[i]!).trimStart();
-    if (/^›(?:\s|$)/.test(line)) {
-      promptIndex = i;
-      break;
-    }
-  }
-  if (promptIndex < 0) return null;
-
-  let statusIndex = -1;
-  for (let i = endIndex; i > promptIndex; i--) {
-    if (isCodexStatusLine(stripAnsi(wrapped[i]!))) {
-      statusIndex = i;
-      break;
-    }
-  }
-  if (statusIndex < 0) return null;
-
-  return { promptIndex, statusIndex, endIndex };
-}
+// Codex input-chrome detection moved to wrap.ts (findCodexInputChromeLogical,
+// used by computeChromeSlice) — it now runs on UNWRAPPED logical lines.
 
 /** Merge sidebar lines and main area lines side by side with a separator */
 function mergeSidebarAndMain(

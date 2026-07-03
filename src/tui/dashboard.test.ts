@@ -688,6 +688,79 @@ describe("TmuxPaneComponent word-wrap + memoization", () => {
     expect(rendered).toContain("Done with the task.");
     expect(rendered).not.toContain("accept edits on");
   });
+
+  test("PINNED-width Claude chrome: a 1000-col separator is detected on logical lines, never leaks into the narrow-pane render", () => {
+    // The pinned-tmux-width scenario this whole feature targets: at width 1000
+    // the input-box separators are SINGLE ~1000-col logical lines. Rendering the
+    // pane at a narrow display width (80) must still (a) trim the input chrome
+    // and (b) never show a row of ─ separators — which is exactly what happened
+    // when chrome was detected AFTER word-wrapping (the 1000-col separator
+    // exploded into ~13 rows and mis-sliced).
+    const sep = "─".repeat(1000);
+    const pane = new TmuxPaneComponent();
+    pane.agent = makeAgent("agent-claude", "/tmp/test");
+    pane.hasPolled = true;
+    pane.displayHeight = 20;
+    pane.trimInputSeparator = true;
+    pane.rawOutput = [
+      "⏺ Finished a long reply that itself stays well under the pinned width.",
+      "",
+      sep,
+      "❯ ",
+      sep,
+      "  ⏵⏵ accept edits on · 2 background tasks",
+      "",
+    ].join("\n");
+
+    const width = 80;
+    pane.parseStatusLines(width);
+    // Status line surfaced (chrome), truncated to width — never wrapped.
+    expect(pane.statusLines.every((l) => stripAnsi(l).length <= width)).toBe(true);
+    expect(pane.statusLines.map((l) => stripAnsi(l)).join("\n")).toContain("accept edits on");
+
+    const renderedLines = pane.render(width).map((l) => stripAnsi(l));
+    const rendered = renderedLines.join("\n");
+    expect(rendered).toContain("Finished a long reply");
+    expect(rendered).not.toContain("accept edits on");
+    // No rendered row is an all-─ separator row, and every row is within width.
+    for (const line of renderedLines) {
+      expect(/^─+$/.test(line.trim())).toBe(false);
+      expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+    }
+  });
+
+  test("PINNED-width codex chrome: › prompt + status bar detected on logical lines at a narrow pane", () => {
+    const bigDivider = "─".repeat(1000); // codex content divider, NOT the input box
+    const codexStatus = "gpt-5-codex · ~/proj · Context 42% · 3h left";
+    const pane = new TmuxPaneComponent();
+    // makeAgent defaults to a claude model; force a codex model so isCodexAgent()
+    // routes through the codex chrome detector.
+    const agent = makeAgent("agent-codex", "/tmp/test");
+    agent.meta.model = "codex:gpt-5-codex";
+    pane.agent = agent;
+    pane.hasPolled = true;
+    pane.displayHeight = 20;
+    pane.trimInputSeparator = true;
+    pane.rawOutput = [
+      "codex: produced some transcript output above the input box",
+      bigDivider,
+      "› ",
+      codexStatus,
+    ].join("\n");
+
+    const width = 70;
+    pane.parseStatusLines(width);
+    expect(pane.statusLines.map((l) => stripAnsi(l)).join("\n")).toContain("Context 42%");
+    expect(pane.statusLines.every((l) => stripAnsi(l).length <= width)).toBe(true);
+
+    const renderedLines = pane.render(width).map((l) => stripAnsi(l));
+    expect(renderedLines.join("\n")).toContain("transcript output above the input box");
+    // The status bar (chrome) is trimmed from the transcript render.
+    expect(renderedLines.join("\n")).not.toContain("Context 42%");
+    for (const line of renderedLines) {
+      expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+    }
+  });
 });
 
 describe("RightPaneComponent scroll logic", () => {

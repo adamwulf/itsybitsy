@@ -4,7 +4,7 @@
  */
 
 import { visibleWidth } from "@mariozechner/pi-tui";
-import { stripAnsi } from "../parse-state";
+import { stripAnsi, isCodexStatusLine } from "../parse-state";
 
 /**
  * Check if a byte is a CSI sequence terminator (0x40-0x7E per ECMA-48).
@@ -228,4 +228,103 @@ export function padLines(lines: string[], height: number): string[] {
     lines.push("");
   }
   return lines.slice(0, height);
+}
+
+/**
+ * Result of slicing a CLI's input-box chrome off a tmux capture.
+ *
+ * `transcriptRaw` is the transcript above the input box, re-joined with `\n` so
+ * it can be word-wrapped to the display width. `statusLines` are the CLI's chrome
+ * BELOW the input separator (Claude's status bar, or codex's status bar + prompt
+ * block) as UNWRAPPED logical lines — the caller truncates them to width, never
+ * word-wraps them (a wrapped status bar would overflow the reserved overlay
+ * rows).
+ */
+export interface ChromeSlice {
+  transcriptRaw: string;
+  statusLines: string[];
+}
+
+/**
+ * Locate codex's input-box chrome within UNWRAPPED logical lines.
+ * Anchors on the `›` prompt and the status bar (which together unambiguously
+ * identify the interactive input area), returning the prompt line index plus the
+ * status-bar..end span. Mirrors the previous wrapped-line detector, but operates
+ * on logical lines so a pinned-width status bar / divider doesn't wrap into many
+ * rows and confuse the anchors. Returns null when the chrome isn't present.
+ */
+export function findCodexInputChromeLogical(
+  lines: string[],
+): { promptIndex: number; statusIndex: number; endIndex: number } | null {
+  let endIndex = lines.length - 1;
+  while (endIndex >= 0 && stripAnsi(lines[endIndex]!).trim() === "") {
+    endIndex--;
+  }
+  if (endIndex < 0) return null;
+
+  let promptIndex = -1;
+  for (let i = endIndex; i >= 0; i--) {
+    if (/^›(?:\s|$)/.test(stripAnsi(lines[i]!).trimStart())) {
+      promptIndex = i;
+      break;
+    }
+  }
+  if (promptIndex < 0) return null;
+
+  let statusIndex = -1;
+  for (let i = endIndex; i > promptIndex; i--) {
+    if (isCodexStatusLine(stripAnsi(lines[i]!))) {
+      statusIndex = i;
+      break;
+    }
+  }
+  if (statusIndex < 0) return null;
+
+  return { promptIndex, statusIndex, endIndex };
+}
+
+/**
+ * Split a tmux capture into its transcript and the CLI's input-box chrome,
+ * detecting the chrome on the UNWRAPPED logical lines (NOT on wrapped rows).
+ *
+ * This is the crux of the pinned-width design: at the pinned tmux width an
+ * input-box separator is a single ~1000-col logical line, but word-wrapping it
+ * to a narrow display pane explodes it into many consecutive full-width
+ * separator rows. Detecting chrome AFTER wrapping therefore mis-counts
+ * separators (findLastTwoSeparators) or loses the `›`/status anchors
+ * (findCodexInputChrome). Detecting on logical lines is width-independent and
+ * exact.
+ *
+ * - Codex: anchor on the `›` prompt + status bar; transcript = everything above
+ *   the prompt, statusLines = status-bar..end.
+ * - Claude: find the last two `─` separators; transcript = everything above the
+ *   upper separator, statusLines = everything below the lower separator (trailing
+ *   blank padding stripped).
+ * - No chrome found: the whole capture is the transcript, no status lines.
+ */
+export function computeChromeSlice(raw: string, isCodex: boolean): ChromeSlice {
+  const lines = raw.split("\n");
+
+  if (isCodex) {
+    const chrome = findCodexInputChromeLogical(lines);
+    if (!chrome) return { transcriptRaw: raw, statusLines: [] };
+    return {
+      transcriptRaw: lines.slice(0, chrome.promptIndex).join("\n"),
+      statusLines: lines.slice(chrome.statusIndex, chrome.endIndex + 1),
+    };
+  }
+
+  const { upperIndex, lowerIndex } = findLastTwoSeparators(lines);
+  if (upperIndex < 0) return { transcriptRaw: raw, statusLines: [] };
+  const statusLines = lowerIndex >= 0 && lowerIndex < lines.length - 1
+    ? lines.slice(lowerIndex + 1)
+    : [];
+  // Strip trailing blank padding tmux appends below the live chrome.
+  while (statusLines.length > 0 && stripAnsi(statusLines[statusLines.length - 1]!).trim() === "") {
+    statusLines.pop();
+  }
+  return {
+    transcriptRaw: lines.slice(0, upperIndex).join("\n"),
+    statusLines,
+  };
 }

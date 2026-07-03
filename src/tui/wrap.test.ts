@@ -1,5 +1,8 @@
 import { test, expect, describe } from "bun:test";
-import { wrapSingleLine, wrapLines, wordWrapSingleLine, wordWrapLines } from "./wrap";
+import {
+  wrapSingleLine, wrapLines, wordWrapSingleLine, wordWrapLines,
+  computeChromeSlice, findCodexInputChromeLogical, findLastTwoSeparators,
+} from "./wrap";
 import { visibleWidth } from "@mariozechner/pi-tui";
 
 describe("wrapSingleLine", () => {
@@ -378,6 +381,128 @@ describe("wordWrapLines", () => {
       for (const row of result) {
         expect(visibleWidth(row)).toBeLessThanOrEqual(width);
       }
+    });
+  });
+});
+
+describe("computeChromeSlice — chrome detection on UNWRAPPED logical lines", () => {
+  const PIN = 1000; // pinned tmux width — separators are single ~PIN-col logical lines
+  const sep = "─".repeat(PIN); // one Claude input-box separator as ONE logical line
+
+  describe("Claude input chrome", () => {
+    // A realistic Claude capture at the pinned width: transcript, then the
+    // input box (separator, prompt line, separator), then the status bar.
+    const claudeRaw = [
+      "assistant: here is a reply line",
+      "assistant: and a second reply line",
+      sep,
+      "> ",
+      sep,
+      "  ? for shortcuts",
+    ].join("\n");
+
+    test("slices the transcript at the upper separator (logical), status bar below the lower", () => {
+      const slice = computeChromeSlice(claudeRaw, false);
+      expect(slice.transcriptRaw).toBe(
+        "assistant: here is a reply line\nassistant: and a second reply line"
+      );
+      expect(slice.statusLines).toEqual(["  ? for shortcuts"]);
+    });
+
+    test("a PIN-width separator does NOT leak into the wrapped transcript at a narrow pane", () => {
+      // The bug this design fixes: detecting chrome AFTER wrapping would explode
+      // the single 1000-col separator into ~13 rows at width 80 and mis-slice.
+      // Detecting on logical lines first means the transcript never contains it.
+      const slice = computeChromeSlice(claudeRaw, false);
+      const wrapped = wordWrapLines(slice.transcriptRaw, 80);
+      for (const row of wrapped) {
+        expect(/^─+$/.test(row.trim())).toBe(false);
+        expect(visibleWidth(row)).toBeLessThanOrEqual(80);
+      }
+    });
+
+    test("finds the last two separators among many logical separators (input box, not content dividers)", () => {
+      // Claude output can contain ─ dividers higher up; the input box is always
+      // the LAST two, so the transcript keeps the earlier divider + its content.
+      const raw = [
+        "intro",
+        sep,          // a content divider higher up
+        "middle content",
+        sep,          // input-box upper
+        "> type here",
+        sep,          // input-box lower
+        "  status bar line",
+      ].join("\n");
+      const slice = computeChromeSlice(raw, false);
+      expect(slice.transcriptRaw).toBe("intro\n" + sep + "\nmiddle content");
+      expect(slice.statusLines).toEqual(["  status bar line"]);
+    });
+
+    test("strips trailing blank padding tmux appends below the status bar", () => {
+      const raw = ["reply", sep, "> ", sep, "  status", "", "   ", ""].join("\n");
+      const slice = computeChromeSlice(raw, false);
+      expect(slice.statusLines).toEqual(["  status"]);
+    });
+
+    test("no separators found → whole capture is transcript, no status lines", () => {
+      const raw = "just some output\nwith no input box at all";
+      const slice = computeChromeSlice(raw, false);
+      expect(slice.transcriptRaw).toBe(raw);
+      expect(slice.statusLines).toEqual([]);
+    });
+
+    test("findLastTwoSeparators matches a PIN-width single logical separator", () => {
+      const { upperIndex, lowerIndex } = findLastTwoSeparators([
+        "content", sep, "prompt", sep,
+      ]);
+      expect(upperIndex).toBe(1);
+      expect(lowerIndex).toBe(3);
+    });
+  });
+
+  describe("Codex input chrome", () => {
+    // Codex status bar (matches isCodexStatusLine) + the › prompt, at pin width.
+    const codexStatus = "gpt-5-codex · ~/proj · Context 42% · 3h left";
+    const codexRaw = [
+      "codex: some transcript output",
+      "codex: more output",
+      "─".repeat(PIN), // codex content divider (must NOT be mistaken for input box)
+      "› ",
+      codexStatus,
+    ].join("\n");
+
+    test("anchors on the › prompt + status bar; transcript above the prompt", () => {
+      const slice = computeChromeSlice(codexRaw, true);
+      // Transcript is everything ABOVE the › prompt (including the content
+      // divider, which is not the input box). The prompt line itself is dropped;
+      // statusLines run from the status bar to the end — matching the historical
+      // codex chrome slice (statusIndex..endIndex).
+      expect(slice.transcriptRaw).toBe(
+        "codex: some transcript output\ncodex: more output\n" + "─".repeat(PIN)
+      );
+      expect(slice.statusLines).toEqual([codexStatus]);
+    });
+
+    test("codex chrome status lines don't reintroduce a divider when wrapped at a narrow pane", () => {
+      const slice = computeChromeSlice(codexRaw, true);
+      const wrapped = wordWrapLines(slice.transcriptRaw, 60);
+      // The content divider stays IN the transcript (it's above the prompt), so
+      // it wraps — that's fine; what matters is the status/prompt are sliced off.
+      expect(slice.statusLines).toContain(codexStatus);
+      // Every transcript row is bounded to the pane width.
+      for (const row of wrapped) expect(visibleWidth(row)).toBeLessThanOrEqual(60);
+    });
+
+    test("findCodexInputChromeLogical returns null when no › prompt is present", () => {
+      const noPrompt = ["output", "more output", codexStatus].join("\n");
+      expect(findCodexInputChromeLogical(noPrompt.split("\n"))).toBeNull();
+    });
+
+    test("no codex chrome found → whole capture is transcript", () => {
+      const raw = "codex output with no prompt or status bar";
+      const slice = computeChromeSlice(raw, true);
+      expect(slice.transcriptRaw).toBe(raw);
+      expect(slice.statusLines).toEqual([]);
     });
   });
 });

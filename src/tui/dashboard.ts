@@ -1814,6 +1814,15 @@ export class DashboardComponent implements Component {
 
       if (attached !== wasAttached) {
         this.tmuxPane.clientAttached = attached;
+        // When an external client (e.g. Ghostty) DETACHES, re-pin the window to
+        // PINNED_TMUX_WIDTH. Attaching cleared the manual size override
+        // (clearTmuxWindowSizeOverride) so the window followed the client's
+        // terminal size; on detach we must restore the pin, otherwise the
+        // window would stay at the client's width and the dashboard's reflow
+        // (which assumes a wide pinned window) would see a too-narrow capture.
+        if (wasAttached && !attached) {
+          resizeTmuxWindow(session, PINNED_TMUX_WIDTH);
+        }
         this.tui?.requestRender();
       }
     };

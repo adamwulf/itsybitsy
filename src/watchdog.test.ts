@@ -58,6 +58,7 @@ import {
   API_ERROR_BACKOFF_MS,
   API_ERROR_RATE_LIMITED_START_INDEX,
   WATCHDOG_SENTINEL,
+  COMPACT_CANCEL_ESCAPE_GAP_MS,
   type AgentTracker,
 } from "./watchdog";
 import {
@@ -1443,8 +1444,10 @@ describe("watchdog", () => {
         expect(spawnMock.calls.some((c) =>
           c.args.filter((arg) => arg === "Escape").length > 1
         )).toBe(false);
-        // A settle gap ran between the 2nd and 3rd Escape (2 gaps for 3 keys).
+        // A settle gap ran between the 2nd and 3rd Escape (2 gaps for 3 keys),
+        // each equal to the configured COMPACT_CANCEL_ESCAPE_GAP_MS.
         expect(sleepCalls.length).toBe(2);
+        expect(sleepCalls.every((ms) => ms === COMPACT_CANCEL_ESCAPE_GAP_MS)).toBe(true);
 
         const transient = await Bun.file(join(agentDir, "meta.transient.json")).json();
         expect(transient.restart_compact_escape_sent_at_ms).toBe(now);

@@ -58,6 +58,7 @@ import {
   API_ERROR_BACKOFF_MS,
   API_ERROR_RATE_LIMITED_START_INDEX,
   WATCHDOG_SENTINEL,
+  COMPACT_CANCEL_ESCAPE_GAP_MS,
   type AgentTracker,
 } from "./watchdog";
 import {
@@ -1403,9 +1404,16 @@ describe("watchdog", () => {
       expect(tracker.rateLimitBypassed).toBe(false);
     });
 
-    test("sends three Escape keys when compacting is detected within 10s of restart", async () => {
+    test("sends three Escape keys as separate send-keys calls when compacting is detected within 10s of restart", async () => {
       const now = 1_000_000;
       setWatchdogNow(() => now);
+      // Stub the per-agent sleep so the inter-Escape settle gaps don't slow the
+      // test. The compact-cancel sends each Escape as its OWN send-keys call
+      // with a gap between them (see COMPACT_CANCEL_ESCAPE_GAP_MS): bursting all
+      // three ESC bytes in one call gets them coalesced by the TUI's escape
+      // disambiguation timeout, leaving `/compact` in the input box.
+      const sleepCalls: number[] = [];
+      setPerAgentSleep(async (ms) => { sleepCalls.push(ms); });
       const tempRepo = join(tmpdir(), `watchdog-restart-compact-${process.pid}-${Date.now()}`);
       const agentDir = join(tempRepo, ".ittybitty", "agents", "a1");
       mkdirSync(agentDir, { recursive: true });
@@ -1422,16 +1430,30 @@ describe("watchdog", () => {
       }));
 
       const a1 = { ...agent("a1", "compacting"), repoPath: tempRepo };
-      await tick([a1]);
+      try {
+        await tick([a1]);
 
-      expect(spawnMock.calls.some((c) =>
-        c.args[0] === "tmux" &&
-        c.args[1] === "send-keys" &&
-        c.args.includes("Escape") &&
-        c.args.filter((arg) => arg === "Escape").length === 3
-      )).toBe(true);
-      const transient = await Bun.file(join(agentDir, "meta.transient.json")).json();
-      expect(transient.restart_compact_escape_sent_at_ms).toBe(now);
+        // Three DISTINCT send-keys calls, each carrying exactly one Escape.
+        const escapeCalls = spawnMock.calls.filter((c) =>
+          c.args[0] === "tmux" &&
+          c.args[1] === "send-keys" &&
+          c.args.filter((arg) => arg === "Escape").length === 1
+        );
+        expect(escapeCalls.length).toBe(3);
+        // No call should batch multiple Escapes together.
+        expect(spawnMock.calls.some((c) =>
+          c.args.filter((arg) => arg === "Escape").length > 1
+        )).toBe(false);
+        // A settle gap ran between the 2nd and 3rd Escape (2 gaps for 3 keys),
+        // each equal to the configured COMPACT_CANCEL_ESCAPE_GAP_MS.
+        expect(sleepCalls.length).toBe(2);
+        expect(sleepCalls.every((ms) => ms === COMPACT_CANCEL_ESCAPE_GAP_MS)).toBe(true);
+
+        const transient = await Bun.file(join(agentDir, "meta.transient.json")).json();
+        expect(transient.restart_compact_escape_sent_at_ms).toBe(now);
+      } finally {
+        resetPerAgentSleep();
+      }
     });
 
     test("does not send Escape keys when compacting is detected after restart window", async () => {

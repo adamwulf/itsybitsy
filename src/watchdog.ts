@@ -107,6 +107,22 @@ export const COMPACT_CHECK_COOLDOWN_MS = 60_000;
 /** Window after restart where a detected Claude compaction is treated as restart-triggered. */
 export const RESTART_COMPACT_CANCEL_WINDOW_MS = 10_000;
 
+/**
+ * Settle gap between the three compact-cancel Escape keystrokes, in ms.
+ *
+ * The three Escapes cancel a just-started compaction (1st) and clear the
+ * leftover `/compact` from the input box (2nd + 3rd). They MUST be sent as
+ * separate `send-keys` calls with a gap between them: Claude Code's TUI needs
+ * a short timeout after a bare ESC (\x1b) to disambiguate it from the start of
+ * an escape sequence (arrow keys are ESC [ A, etc.). Three ESC bytes fired in
+ * one `send-keys` arrive with zero inter-byte delay, fall inside each other's
+ * disambiguation window, and get coalesced — the 1st cancels compaction but
+ * the follow-ups are swallowed, leaving `/compact` in the box. A per-keystroke
+ * gap makes each ESC land as its own discrete key event. Mirrors the
+ * discrete-keystroke settle-gap idiom used by the outbox drainer.
+ */
+export const COMPACT_CANCEL_ESCAPE_GAP_MS = 250;
+
 /** Initial notification threshold in ticks (6 ticks * 5s = 30s) */
 export const INITIAL_NOTIFY_TICKS = 6;
 
@@ -396,19 +412,30 @@ async function sendTmuxEnter(tmuxSession: string): Promise<boolean> {
   }
 }
 
-/** Send three Escape keys to cancel a just-started compaction and clear `/compact`. */
+/**
+ * Send three Escape keys to cancel a just-started compaction and clear
+ * `/compact`. Each Escape is sent as its OWN `send-keys` call with a settle
+ * gap between them (see COMPACT_CANCEL_ESCAPE_GAP_MS): bursting three ESC bytes
+ * in one call gets them coalesced by the TUI's escape-sequence disambiguation
+ * timeout, so only the first (compaction-cancel) lands and `/compact` is left
+ * in the input box.
+ */
 async function sendTmuxCompactCancel(tmuxSession: string): Promise<boolean> {
   if (!isValidTmuxSession(tmuxSession)) {
     console.error(`[watchdog] Invalid tmux session name: ${tmuxSession}`);
     return false;
   }
   try {
-    const proc = spawnCtx.runner(
-      ["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "Escape", "Escape", "Escape"],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    const exitCode = await proc.exited;
-    return exitCode === 0;
+    for (let i = 0; i < 3; i++) {
+      if (i > 0 && COMPACT_CANCEL_ESCAPE_GAP_MS > 0) await sleepFn(COMPACT_CANCEL_ESCAPE_GAP_MS);
+      const proc = spawnCtx.runner(
+        ["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "Escape"],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      const exitCode = await proc.exited;
+      if (exitCode !== 0) return false;
+    }
+    return true;
   } catch { /* expected: tmux not running or session gone */
     return false;
   }

@@ -14,7 +14,7 @@ import {
   handleSend, handleNewAgent, handleScrollUp, handleScrollDown,
   handleHelp, handleResizeLeft, handleFuzzyAgent, handleRename,
   handleSnapshot,
-  handleOpenDiffTool, getActiveDiffProc, setActiveDiffProc, killActiveDiffProc,
+  handleOpenDiffTool, handleOpenDiffToolVsManager, getActiveDiffProc, setActiveDiffProc, killActiveDiffProc,
   getDiffToolLaunching, setDiffToolLaunching,
   handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
   getCoordinatorSpawnsInFlight, clearCoordinatorSpawnsInFlight,
@@ -981,6 +981,107 @@ describe("handleOpenDiffTool", () => {
     ctx.diffTool = undefined;
     await handleOpenDiffTool(ctx);
     expect(notices).toContain("No diff tool configured — set externalDiffTool in ~/.itsybitsy/config.json");
+  });
+});
+
+describe("handleOpenDiffToolVsManager", () => {
+  afterEach(() => {
+    setActiveDiffProc(null);
+    setDiffToolLaunching(false);
+  });
+
+  test("shows notice when no agent is selected", async () => {
+    const { ctx, notices } = makeMockCtx();
+    await handleOpenDiffToolVsManager(ctx);
+    expect(notices).toContain("No agent selected");
+  });
+
+  test("shows notice when no diff tool configured", async () => {
+    const agent = makeAgent({ id: "test-agent" });
+    const { ctx, notices } = makeMockCtx({ agent });
+    ctx.diffTool = undefined;
+    await handleOpenDiffToolVsManager(ctx);
+    expect(notices).toContain("No diff tool configured — set externalDiffTool in ~/.itsybitsy/config.json");
+  });
+
+  test("shows notice when agent has no manager", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "agent-actions-diff-mgr-"));
+    try {
+      const agent = makeAgent({ id: "agent-1", repoPath: baseDir });
+      await mkdir(join(baseDir, ".ittybitty", "agents", "agent-1", "repo"), { recursive: true });
+      const { ctx, notices } = makeMockCtx({ agent });
+      ctx.diffTool = "some-tool";
+      await handleOpenDiffToolVsManager(ctx);
+      expect(notices).toContain("Agent has no manager — use 'o' to diff against main");
+      expect(getDiffToolLaunching()).toBe(false);
+    } finally {
+      await rm(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  test("shows notice when manager branch does not exist", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "agent-actions-diff-mgr-"));
+    try {
+      const agent = makeAgent({ id: "agent-1", repoPath: baseDir });
+      agent.meta.manager = "mgr-1";
+      const worktree = join(baseDir, ".ittybitty", "agents", "agent-1", "repo");
+      await mkdir(worktree, { recursive: true });
+      await Bun.$`git init -q`.cwd(worktree).quiet();
+      const { ctx, notices } = makeMockCtx({ agent });
+      ctx.diffTool = "some-tool";
+      await handleOpenDiffToolVsManager(ctx);
+      expect(notices).toContain("Manager branch agent/mgr-1 not found — manager may have been merged or retired");
+      expect(getDiffToolLaunching()).toBe(false);
+    } finally {
+      await rm(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  test("shows empty-diff notice when worker matches manager branch", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "agent-actions-diff-mgr-"));
+    try {
+      const agent = makeAgent({ id: "agent-1", repoPath: baseDir });
+      agent.meta.manager = "mgr-1";
+      const worktree = join(baseDir, ".ittybitty", "agents", "agent-1", "repo");
+      await mkdir(worktree, { recursive: true });
+      await Bun.$`git init -q`.cwd(worktree).quiet();
+      await Bun.$`git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init`.cwd(worktree).quiet();
+      await Bun.$`git branch agent/mgr-1`.cwd(worktree).quiet();
+      const { ctx, notices } = makeMockCtx({ agent });
+      ctx.diffTool = "some-tool";
+      await handleOpenDiffToolVsManager(ctx);
+      expect(notices).toContain("No changes to show — diff is empty");
+      expect(getDiffToolLaunching()).toBe(false);
+    } finally {
+      await rm(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  test("launches the diff tool against the manager branch when the worker differs", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "agent-actions-diff-mgr-"));
+    try {
+      const agent = makeAgent({ id: "agent-1", repoPath: baseDir });
+      agent.meta.manager = "mgr-1";
+      const worktree = join(baseDir, ".ittybitty", "agents", "agent-1", "repo");
+      await mkdir(worktree, { recursive: true });
+      await Bun.$`git init -q`.cwd(worktree).quiet();
+      await Bun.write(join(worktree, "a.txt"), "manager\n");
+      await Bun.$`git add a.txt`.cwd(worktree).quiet();
+      await Bun.$`git -c user.email=t@t -c user.name=t commit -q -m init`.cwd(worktree).quiet();
+      await Bun.$`git branch agent/mgr-1`.cwd(worktree).quiet();
+      // Uncommitted worker-side change makes the diff vs the manager branch non-empty
+      await Bun.write(join(worktree, "a.txt"), "worker\n");
+      const { ctx, notices } = makeMockCtx({ agent });
+      ctx.diffTool = "true"; // /usr/bin/true — exits 0 without doing anything
+      await handleOpenDiffToolVsManager(ctx);
+      expect(notices).toContain("Opened diff vs agent/mgr-1 in true");
+      expect(getDiffToolLaunching()).toBe(false);
+      const active = getActiveDiffProc();
+      expect(active?.agentId).toBe("agent-1");
+      if (active) await active.proc.exited;
+    } finally {
+      await rm(baseDir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -669,7 +669,7 @@ Each agent's worktree is linked to a git branch named `agent/<agent-id>`:
 
 **Current limitation**: Top-level agents always diff against `main`, even if the agent was created from a non-main branch (e.g., `fix/my-feature`). This means the diff includes commits that are already on the source branch but not yet on `main`. The correct behavior would be to record the base branch at creation time in `meta.json` (e.g., `base_branch: "fix/my-feature"`) and diff against that instead. Until this is implemented, agents created from non-main branches will show inflated diffs.
 
-The external diff tool (launched via the `d` keybinding in the TUI) has the same limitation — it hardcodes `git merge-base HEAD main` regardless of the agent's actual base branch.
+The external diff tool (launched via the `o` keybinding in the TUI) has the same limitation — it hardcodes `git merge-base HEAD main` regardless of the agent's actual base branch. The `O` keybinding instead diffs the agent's worktree against its manager's branch tip (`agent/<manager-id>`), showing the worker's in-flight changes alongside the inverse of anything the manager's branch has accumulated since the worker was spawned; it errors with a notice for agents without a manager or when the manager branch no longer exists.
 
 ### 5.5 Archive Structure
 

@@ -1316,6 +1316,7 @@ export class DashboardComponent implements Component {
       { label: "new agent — a", action: () => agentActions.handleNewAgent(this) },
       { label: "open worktree — w", action: () => agentActions.handleOpenWorktree(this) },
       { label: "open diff in tool — o", action: () => agentActions.handleOpenDiffTool(this) },
+      { label: "open diff vs manager in tool — O", action: () => agentActions.handleOpenDiffToolVsManager(this) },
       { label: "open in Ghostty (repo/worktree) — G", action: () => agentActions.handleOpenGhostty(this) },
       { label: "open in Ghostty (Claude tmux) — C", action: () => agentActions.handleOpenGhosttyTmux(this) },
       { label: "debug snapshot — S", action: () => agentActions.handleSnapshot(this) },
@@ -2499,6 +2500,8 @@ export class DashboardComponent implements Component {
     else if (data === "w") { agentActions.handleOpenWorktree(this); }
     // Open diff in external tool
     else if (data === "o") { agentActions.handleOpenDiffTool(this); }
+    // Open diff vs manager's branch in external tool
+    else if (data === "O") { agentActions.handleOpenDiffToolVsManager(this); }
     // Help dialog
     else if (data === "?") { agentActions.handleHelp(this); }
     // Setup dialog

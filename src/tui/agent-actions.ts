@@ -1670,7 +1670,46 @@ export function handleOpenWorktree(ctx: ActionCtx) {
   })();
 }
 
+/** 'o' — diff the agent's worktree against its merge-base with main. */
 export async function handleOpenDiffTool(ctx: ActionCtx) {
+  await openDiffTool(ctx, async (cwd) => {
+    const mergeBaseProc = Bun.spawn(["git", "merge-base", "HEAD", "main"], { cwd, stdout: "pipe", stderr: "ignore" });
+    const mergeBase = (await new Response(mergeBaseProc.stdout).text()).trim();
+    if (!mergeBase) return { error: "Could not determine merge-base with main" };
+    return { ref: mergeBase, label: "merge-base with main" };
+  });
+}
+
+/**
+ * 'O' — diff the agent's worktree against its manager's branch TIP (not the
+ * merge-base). Shows the worker's changes alongside the inverse of whatever
+ * the manager's branch has accumulated since the worker was spawned, so you
+ * can compare the worker's in-flight work with the manager's current state.
+ */
+export async function handleOpenDiffToolVsManager(ctx: ActionCtx) {
+  await openDiffTool(ctx, async (cwd, agent) => {
+    const manager = agent.meta.manager;
+    if (!manager) return { error: "Agent has no manager — use 'o' to diff against main" };
+    const managerBranch = `agent/${manager}`;
+    const verifyProc = Bun.spawn(
+      ["git", "rev-parse", "--verify", "--quiet", managerBranch],
+      { cwd, stdout: "ignore", stderr: "ignore" },
+    );
+    if ((await verifyProc.exited) !== 0) {
+      return { error: `Manager branch ${managerBranch} not found — manager may have been merged or retired` };
+    }
+    return { ref: managerBranch };
+  });
+}
+
+/**
+ * Shared launcher for the external diff tool. `resolveBase` produces the git
+ * ref the worktree is diffed against (or an error message shown as a notice).
+ */
+async function openDiffTool(
+  ctx: ActionCtx,
+  resolveBase: (cwd: string, agent: Agent) => Promise<{ ref: string; label?: string } | { error: string }>,
+) {
   // Kill previous diff process before doing anything else
   if (activeDiffProc) {
     try { activeDiffProc.proc.kill(); } catch {}
@@ -1693,26 +1732,25 @@ export async function handleOpenDiffTool(ctx: ActionCtx) {
 
   diffToolLaunching = true;
 
-  // Check for empty diff before launching tool
-  const mergeBaseProc = Bun.spawn(["git", "merge-base", "HEAD", "main"], { cwd, stdout: "pipe", stderr: "ignore" });
-  const mergeBase = (await new Response(mergeBaseProc.stdout).text()).trim();
-  if (!mergeBase) { diffToolLaunching = false; ctx.setNotice("Could not determine merge-base with main", "error"); return; }
+  const base = await resolveBase(cwd, agent);
+  if ("error" in base) { diffToolLaunching = false; ctx.setNotice(base.error, "error"); return; }
 
-  const checkProc = Bun.spawn(["git", "diff", "--quiet", mergeBase], { cwd, stdout: "ignore", stderr: "ignore" });
+  // Check for empty diff before launching tool
+  const checkProc = Bun.spawn(["git", "diff", "--quiet", base.ref], { cwd, stdout: "ignore", stderr: "ignore" });
   const checkCode = await checkProc.exited;
   if (checkCode === 0) { diffToolLaunching = false; ctx.setNotice("No changes to show — diff is empty", "error"); return; }
 
-  // Run diff tool in the worktree, showing changes since merge-base with main.
+  // Run diff tool in the worktree against the resolved base ref.
   // 'exec' replaces bash so kill signals reach the actual process tree.
   // WEBDIFF_RUN_IN_PROCESS=1 prevents webdiff from forking/detaching, keeping
   // the HTTP server under ib's control (harmless for other diff tools).
   const proc = Bun.spawn(
-    ["/bin/bash", "-c", 'exec $1 $(git merge-base HEAD main)', "--", tool],
+    ["/bin/bash", "-c", 'exec $1 $2', "--", tool, base.ref],
     { cwd, stdout: "ignore", stderr: "pipe", env: { ...process.env, WEBDIFF_RUN_IN_PROCESS: "1" } },
   );
   activeDiffProc = { proc, agentId: agent.id };
   diffToolLaunching = false;
-  ctx.setNotice(`Opened diff in ${tool}`, "info");
+  ctx.setNotice(`Opened diff vs ${base.label ?? base.ref} in ${tool}`, "info");
 
   // Report errors asynchronously, stripping newlines for single-line status bar display
   (async () => {
@@ -1779,6 +1817,7 @@ export function handleHelp(ctx: ActionCtx) {
       header("Open"),
       row("w", "worktree"),
       row("o", "diff tool"),
+      row("O", "diff tool vs manager"),
       row("G", "Ghostty (repo/worktree)"),
       row("C", "Ghostty (Claude tmux)"),
       row("S", "snapshot"),

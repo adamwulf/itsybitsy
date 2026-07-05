@@ -655,6 +655,55 @@ describe("AgentTreeComponent", () => {
     expect(agentEntries[1]!.connector).toBe("└── ");
   });
 
+  // --- pinned repos --------------------------------------------------------
+
+  test("togglePinnedRepo flips membership true then false", () => {
+    const tree = new AgentTreeComponent();
+    expect(tree.pinnedRepoPaths.has("/repos/alpha")).toBe(false);
+    expect(tree.togglePinnedRepo("/repos/alpha")).toBe(true);
+    expect(tree.pinnedRepoPaths.has("/repos/alpha")).toBe(true);
+    expect(tree.togglePinnedRepo("/repos/alpha")).toBe(false);
+    expect(tree.pinnedRepoPaths.has("/repos/alpha")).toBe(false);
+  });
+
+  test("a pinned empty repo header stays visible under 'non-empty'", () => {
+    const tree = new AgentTreeComponent();
+    const flat: FlatEntry[] = [
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
+      // Empty repo — normally hidden under 'non-empty'.
+      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: false, hasRunningAgents: false },
+    ];
+    tree.setFlatList(flat);
+    tree.setRepoFilter("non-empty");
+    // beta is hidden before pinning.
+    expect(tree.visibleList.some((f) => f.kind === "repo-header" && f.repoPath === "/repos/beta")).toBe(false);
+    // Pin beta — its header now appears despite being empty.
+    tree.togglePinnedRepo("/repos/beta");
+    expect(tree.visibleList.some((f) => f.kind === "repo-header" && f.repoPath === "/repos/beta")).toBe(true);
+  });
+
+  test("a pinned repo's non-running children still filter out under 'running-only'", () => {
+    const tree = new AgentTreeComponent();
+    const flat: FlatEntry[] = [
+      // Repo with only waiting agents — no running.
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: false },
+      { kind: "agent", agent: makeAgent("a1", "waiting", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
+      { kind: "agent", agent: makeAgent("a2", "waiting", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
+    ];
+    tree.setFlatList(flat);
+    tree.setRepoFilter("running-only");
+    // Header is hidden before pinning (no running agents, nothing selected).
+    expect(tree.visibleList.some((f) => f.kind === "repo-header" && f.repoPath === "/repos/alpha")).toBe(false);
+    tree.togglePinnedRepo("/repos/alpha");
+    const visible = tree.visibleList;
+    // The pinned header is force-shown...
+    expect(visible.some((f) => f.kind === "repo-header" && f.repoPath === "/repos/alpha")).toBe(true);
+    // ...but its non-running children remain filtered out (children filter normally).
+    const agentIds = visible.filter((f) => f.kind === "agent").map((f) => (f as Extract<FlatEntry, { kind: "agent" }>).agent.id);
+    expect(agentIds).toEqual([]);
+  });
+
   test("nextRepoFilter cycles all → non-empty → running-only → all", () => {
     expect(nextRepoFilter("all")).toBe("non-empty");
     expect(nextRepoFilter("non-empty")).toBe("running-only");

@@ -304,6 +304,11 @@ export class AgentTreeComponent implements Component {
    */
   private _stickyRevealedRepoPath: string | null = null;
 
+  /** Repo paths the user has pinned via '.'. A pinned repo header is always
+   * kept visible regardless of repoFilter; its children still filter normally.
+   * Session-only (like repoFilter) — not persisted. */
+  pinnedRepoPaths: Set<string> = new Set();
+
   get flatList(): FlatEntry[] {
     return this._flatList;
   }
@@ -346,6 +351,7 @@ export class AgentTreeComponent implements Component {
       if (f.kind === "repo-header") {
         const passes = this.repoFilter === "non-empty" ? f.hasAgents : f.hasRunningAgents;
         if (passes) return true;
+        if (this.pinnedRepoPaths.has(f.repoPath)) return true;
         return sticky !== null && f.repoPath === sticky;
       }
       // f.kind === "agent": only hide individual agents in running-only mode.
@@ -429,6 +435,25 @@ export class AgentTreeComponent implements Component {
       this.selectedIndex = len > 0 ? Math.min(this.selectedIndex, len - 1) : 0;
       this.scrollOffset = len > 0 ? Math.min(this.scrollOffset, len - 1) : 0;
     }
+  }
+
+  /** Toggle whether the repo at repoPath is pinned (always-visible under V). */
+  togglePinnedRepo(repoPath: string): boolean {
+    const nowPinned = !this.pinnedRepoPaths.has(repoPath);
+    if (nowPinned) this.pinnedRepoPaths.add(repoPath);
+    else this.pinnedRepoPaths.delete(repoPath);
+    // Selection indices are computed against visibleList, which just changed
+    // for this repo; re-resolve so selectedIndex stays consistent.
+    if (this.hasSelection) {
+      this.resolveSelection();
+    } else {
+      // Clamp scrollOffset/index so the render math stays valid even with no
+      // active selection (regardless of whether visibleList is empty now).
+      const len = this.visibleList.length;
+      this.selectedIndex = len > 0 ? Math.min(this.selectedIndex, len - 1) : 0;
+      this.scrollOffset = len > 0 ? Math.min(this.scrollOffset, len - 1) : 0;
+    }
+    return nowPinned;
   }
 
   /** Discriminated union selection — the canonical way to query what is selected */
@@ -825,7 +850,7 @@ export class AgentTreeComponent implements Component {
         ));
       } else if (item.kind === "repo-header") {
         const selected = selectionActive && i === this.selectedIndex;
-        const triangle = item.hasAgents ? "▾" : "▸";
+        const triangle = this.pinnedRepoPaths.has(item.repoPath) ? "⚲" : item.hasAgents ? "▾" : "▸";
         // Append health indicator based on highest severity
         let healthIndicator = "";
         const report = this.healthReports.get(item.repoPath);

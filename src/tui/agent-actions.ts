@@ -1813,6 +1813,7 @@ export function handleHelp(ctx: ActionCtx) {
       row("r", "rename repo (on header)"),
       row("f", "fix resolvable health warnings"),
       row("V", "cycle filter: all / non-empty / running-only"),
+      row(".", "pin/unpin repo (stays visible under V)"),
       "",
       header("Open"),
       row("w", "worktree"),

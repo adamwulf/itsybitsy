@@ -2522,6 +2522,18 @@ export class DashboardComponent implements Component {
       this.setNotice(notice, "info");
       this.tui?.requestRender();
     }
+    // . — toggle pin on the selected repo (pinned repos stay visible under V)
+    else if (data === ".") {
+      const repoPath = this.agentTree.selectedRepoPath;
+      if (repoPath !== null) {
+        const nowPinned = this.agentTree.togglePinnedRepo(repoPath);
+        const name = this.agentTree.selectedRepoHeader ?? repoPath;
+        this.setNotice(nowPinned ? `Pinned ${name}` : `Unpinned ${name}`, "info");
+        this.tui?.requestRender();
+      } else {
+        this.setNotice("Select a repo header to pin", "info");
+      }
+    }
     // Fix resolvable health warnings (REPO mode only)
     else if (data === "f") { agentActions.handleResolveHealth(this); }
     // Ghostty — repo/worktree

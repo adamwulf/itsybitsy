@@ -364,11 +364,59 @@ describe("separator collapse (─ divider truncation, pinned-width fix)", () => 
     expect(proseRows.join(" ").replace(/\s+/g, " ").trim()).toBe(`${prose} ${prose}`);
   });
 
-  test("a line that is MOSTLY ─ but contains other chars is NOT treated as a separator (still wraps)", () => {
-    // Guard: only pure ─ runs collapse. A label with dashes must word-wrap.
+  test("a heading with only SHORT (<4) ─ bookends is NOT treated as a separator (still wraps)", () => {
+    // Guard on the titled-rule boundary: a bare ─ run collapses, and so does a
+    // TITLED rule whose dash runs are long (≥4) — codex's "─ Worked for … ────…"
+    // line. But a short-bookended heading like "── Section … ──" (2-dash ends, no
+    // 4+ run) is prose, not a full-width rule, so it must still word-wrap.
     const notSep = "── Section: a long heading that keeps going well past the pane width ──";
     const rows = wordWrapSingleLine(notSep, 20);
     expect(rows.length).toBeGreaterThan(1);
+  });
+
+  describe("titled rule (codex '─ Worked for … ────…' divider)", () => {
+    // Codex emits a horizontal rule with an inline title after each turn:
+    //   ─ Worked for 3m 50s ───────────────…  (a 1-dash prefix, the label, then a
+    // long dash run padding to the pinned tmux width). Because the label breaks
+    // the pure-─ run, the bare-rule test alone lets it word-wrap into many rows at
+    // a narrow display pane. It should collapse to one row like any other rule.
+    const titled = "─ Worked for 3m 50s " + "─".repeat(195);
+
+    test("collapses to exactly ONE row at a narrow width", () => {
+      const rows = wordWrapSingleLine(titled, 80);
+      expect(rows.length).toBe(1);
+      expect(visibleWidth(rows[0]!)).toBe(80);
+    });
+
+    test("the collapsed row starts and ends with ─ (still reads as a rule)", () => {
+      const rows = wordWrapSingleLine(titled, 80);
+      const s = stripAnsi(rows[0]!).trim();
+      expect(s.startsWith("─")).toBe(true);
+      expect(s.endsWith("─")).toBe(true);
+    });
+
+    test("a titled rule already within width is returned unchanged", () => {
+      const shortTitled = "─ done " + "─".repeat(10);
+      expect(wordWrapSingleLine(shortTitled, 80)).toEqual([shortTitled]);
+    });
+
+    test("prose that merely starts and ends with a dash (no 4+ run) is NOT collapsed", () => {
+      // Boundary: the 4+ ─-run requirement is what distinguishes a rule from a
+      // sentence. This line begins and ends with a single ─ but has no long run,
+      // so it wraps as normal prose rather than truncating.
+      const prose =
+        "─ this is a long sentence that happens to be bracketed by single dashes on each end ─";
+      const rows = wordWrapSingleLine(prose, 20);
+      expect(rows.length).toBeGreaterThan(1);
+    });
+
+    test("an ANSI-styled titled rule collapses and preserves styling", () => {
+      const styled = `\x1b[2m─ Worked for 1m 2s ${"─".repeat(300)}\x1b[0m`;
+      const rows = wordWrapSingleLine(styled, 60);
+      expect(rows.length).toBe(1);
+      expect(visibleWidth(rows[0]!)).toBeLessThanOrEqual(60);
+      expect(stripAnsi(rows[0]!).trim().startsWith("─")).toBe(true);
+    });
   });
 });
 

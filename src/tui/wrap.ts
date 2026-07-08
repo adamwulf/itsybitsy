@@ -7,18 +7,42 @@ import { visibleWidth, truncateToWidth } from "@mariozechner/pi-tui";
 import { stripAnsi, isCodexStatusLine } from "../parse-state";
 
 /**
- * A "separator" line is one whose entire visible content (after stripping ANSI)
- * is a run of ─ box-drawing chars — a full-width visual divider, not prose:
- * Claude's input-box separators and codex's content dividers between output
- * blocks. At the pinned tmux width these are single ~1000-col logical lines, and
+ * A "separator" line is a full-width visual divider, not prose — Claude's
+ * input-box separators and codex's content dividers between output blocks. At
+ * the pinned tmux width these are single ~1000-col logical lines, and
  * word-wrapping one would explode it into ~N/width full-width separator rows that
  * swallow the pane. Truncating a divider to the pane width is semantically
  * correct at any width, so the word-wrap path special-cases them (see
  * wordWrapSingleLine).
+ *
+ * Two shapes qualify:
+ *
+ *  1. A bare rule — the entire visible content is a run of ─ box-drawing chars
+ *     (`────…`).
+ *  2. A TITLED rule — a run of ─ on each side with a short inline label between
+ *     them (`─ Worked for 3m 50s ────…`). Codex emits these after each turn.
+ *     Because the label breaks the pure-─ run, the bare-rule test alone lets the
+ *     line fall through to word-wrapping and it explodes into many rows at narrow
+ *     display widths — the exact bug this branch handles.
+ *
+ * The titled-rule test requires the trimmed line to both start AND end with ─
+ * and to contain a run of at least four consecutive ─ (a length prose never
+ * produces). Those three structural signals together are what no ordinary
+ * sentence satisfies — prose does not simultaneously begin and end with a
+ * box-drawing char while also carrying a 4+ run of them — so the label between
+ * the runs may be any text (ASCII or not) without risking a false match.
  */
 function isSeparatorLine(line: string): boolean {
   const stripped = stripAnsi(line).trim();
-  return stripped.length > 0 && /^─+$/.test(stripped);
+  if (stripped.length === 0) return false;
+  // Bare rule: entirely ─.
+  if (/^─+$/.test(stripped)) return true;
+  // Titled rule: ─-run … short label … ─-run.
+  return (
+    stripped.startsWith("─") &&
+    stripped.endsWith("─") &&
+    /─{4,}/.test(stripped)
+  );
 }
 
 /**

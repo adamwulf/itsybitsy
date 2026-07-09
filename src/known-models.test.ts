@@ -27,4 +27,11 @@ describe("KNOWN_MODELS", () => {
     expect(clis.has("codex")).toBe(true);
     expect(clis.has("fugu")).toBe(true);
   });
+
+  test("includes current GPT-5.6 codex selectors", () => {
+    const selectors = new Set(KNOWN_MODELS.map((m) => `${m.cli}:${m.model}`));
+    expect(selectors.has("codex:gpt-5.6-sol")).toBe(true);
+    expect(selectors.has("codex:gpt-5.6-terra")).toBe(true);
+    expect(selectors.has("codex:gpt-5.6-luna")).toBe(true);
+  });
 });

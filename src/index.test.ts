@@ -272,6 +272,7 @@ describe("CLI arg parsing", () => {
     expect(stdout).toContain("CLAUDE");
     expect(stdout).toContain("CODEX");
     expect(stdout).toContain("claude:opus");
+    expect(stdout).toContain("codex:gpt-5.6-sol");
     expect(stdout).toContain("codex:gpt-5.5");
     expect(exitCode).toBe(0);
   });

@@ -6,16 +6,16 @@
 
 ## Goal (one line)
 
-Let a user pick a **Codex model name** as an agent's `model`, and itsybitsy will launch the **`codex` CLI** (interactive, in tmux) for that agent instead of `claude` — with permissions controlled by hooks the same way Claude agents are, and **deny-by-default, never prompting**.
+Let a user pick a **qualified Codex selector** (`codex:<model>`) as an agent's `model`, and itsybitsy will launch the **`codex` CLI** (interactive, in tmux) for that agent instead of `claude` — with permissions controlled by hooks the same way Claude agents are, and **deny-by-default, never prompting**.
 
 ---
 
 ## Decisions made so far (authoritative — these are the user's instructions)
 
-1. **Selector = the model name, not a separate `cli` field.**
+1. **Selector = qualified `<cli>:<model>`, not a separate `cli` field.**
    - Do NOT add a `cli: "codex"` field. Keep the single `model` string.
-   - Use **Codex's own model names as the `model` value** (e.g. `gpt-5-codex`, `o3`, etc.). itsybitsy infers "this is a Codex model ⇒ use the codex CLI" from the model name.
-   - ⇒ We need a **model → CLI resolver** (e.g. `resolveCli(model): "claude" | "codex"`) backed by a known/extensible set of Codex model names. Unknown/Claude model names ⇒ claude (default, unchanged).
+   - Use an explicit **qualified selector** (e.g. `claude:opus`, `codex:gpt-5.6-sol`, `fugu:fugu`) so itsybitsy selects the CLI from the prefix, not by guessing from the model name.
+   - ⇒ We need a **selector parser** (e.g. `parseModel(model): { cli, model }`) backed by a known CLI-prefix set. Unknown CLI prefixes are rejected; unknown Codex model names are passed through to Codex for server-side validation.
 
 2. **Headed / interactive in a tmux window — NOT headless.**
    - Do **not** use `codex exec` (headless) for the agent's main loop.
@@ -156,7 +156,7 @@ codex \
 
 | Slot | Value | Notes |
 |---|---|---|
-| `<MODEL>` | parsed model half of `codex:<model>` | Server-validated; under ChatGPT auth on this machine only `gpt-5.5`, `gpt-5.4-mini`, `codex-auto-review` work. `gpt-5-codex` returns HTTP 400 on ChatGPT plans. |
+| `<MODEL>` | parsed model half of `codex:<model>` | Server-validated by Codex. ib validates selector syntax only and does not maintain a spawn-time allow-list; ChatGPT-plan and API-key accounts can expose different model sets. |
 | `-a never` | fixed | "Never ask for user approval; execution failures are immediately returned to the model" — the load-bearing flag for D4. |
 | `-s workspace-write` | fixed | OS-level sandbox boundary (macOS Seatbelt). Real boundary for `apply_patch` since hooks don't fire on it (open issue #16732). |
 | `--dangerously-bypass-hook-trust` | always on | Hook trust is hash-pinned in codex. Our hook command changes hash on every spawn (agent-id is in the command line). Without this flag, every spawn would silently disable the hook. |
@@ -316,7 +316,7 @@ codex \
 **Deltas vs SPEC §3.3:**
 
 1. **`-C <worktree>` is OPTIONAL.** If you already cd'd to the worktree (or tmux was created with `-c <worktree>`), `-C` is unnecessary. Codex picks up cwd correctly. SPEC §3.3 should note this is optional, not mandatory.
-2. **Model name validation matters.** SPEC §3 vaguely references "Codex model names" — but reality: under a **ChatGPT-plan account** only the models in `~/.codex/models_cache.json` are available. On this machine: `gpt-5.5`, `gpt-5.4-mini`, `codex-auto-review`. The originally-tried `gpt-5-codex` returns: *"The 'gpt-5-codex' model is not supported when using Codex with a ChatGPT account."* — and codex's `-m` is server-validated, so itsybitsy can't pre-check this client-side. SPEC should list the realistic ChatGPT-account model set with a note that the API/Plus tiers may have different sets.
+2. **Model name validation is server-side.** SPEC §3 references "Codex model names", but the reachable set is account/server-defined. Codex's `-m` is server-validated, so itsybitsy should validate selector syntax only and pass the model through; `ib list-models` is discovery, not a spawn-time allow-list.
 3. **Hook registration moves from on-disk config → inline `-c`.** See Q2 above.
 
 **Other observations:**
@@ -434,7 +434,7 @@ Suggested diff in `SPEC-CODEX-MODEL.md`:
 -`~/.codex/config.toml` must have `[projects."<abs worktree path>"].trust_level = "trusted"` for the project layer to load. This is set once during the worktree setup.
 +**No `~/.codex/config.toml` modification required.** Because we register the hook via inline `-c`, codex's project-config-walk and trust gate are bypassed entirely. This avoids unbounded growth of `~/.codex/config.toml`'s trust list and resolves Risk #10.
 +
-+**Model availability:** under a ChatGPT-plan account, only models listed in `~/.codex/models_cache.json` work. As of v0.135.0 + ChatGPT auth: `gpt-5.5`, `gpt-5.4-mini`, `codex-auto-review`. API-key billing may expose others. `gpt-5-codex` is NOT available on ChatGPT auth (returns HTTP 400). itsybitsy cannot pre-validate model availability client-side — invalid model surfaces as an HTTP 400 in the TUI after first prompt.
++**Model availability:** Codex model availability is account/server-defined. itsybitsy validates only `<cli>:<model>` selector syntax, passes the model half through to Codex, and lets Codex report unsupported models in the TUI.
 ```
 
 **2. Update §5.4 "Permissions → generated PreToolUse hook script":**
@@ -485,7 +485,7 @@ Suggested diff in `SPEC-CODEX-MODEL.md`:
 -10. **`~/.codex/config.toml` trust list grows per worktree.** Each spawn adds one `[projects."<abs>"].trust_level = "trusted"`. This is user-global state; cleanup on agent archive is worth considering (low priority).
 +10. **RESOLVED (Phase 2 spike).** Inline `-c hooks.PreToolUse=...` registration bypasses the project-trust gate entirely. `~/.codex/config.toml` is never modified by itsybitsy. No per-worktree cleanup needed.
 +11. **NEW (Phase 2 spike).** Codex's PreToolUse contract supports `permissionDecision: "allow"` ONLY paired with `updatedInput` (a tool-input rewrite). Standalone `allow` triggers the "unsupported decision" path, which is FAIL-OPEN per the documented behavior at developers.openai.com/codex/hooks: "Codex marks the hook run as failed, reports the error, and continues the tool call." Same fail-open behavior applies to crashes, malformed JSON, or any non-`2` non-zero exit. Our handler must (a) emit an echo-back allow (`updatedInput` = original `tool_input`) for allow-listed commands, (b) wrap all logic in try/catch and emit deny on exception, (c) monitor hook-fail rate via PostToolUse or external telemetry.
-+12. **NEW (Phase 2 spike).** Under a ChatGPT-plan account, only the models in `~/.codex/models_cache.json` are reachable (currently `gpt-5.5`, `gpt-5.4-mini`, `codex-auto-review`). `gpt-5-codex` and other API-tier models return HTTP 400 *"not supported when using Codex with a ChatGPT account"*. itsybitsy cannot pre-validate this client-side; surface a clear error after first prompt if the model is rejected.
++12. **NEW (Phase 2 spike, updated).** Codex model availability is account/server-defined and changes independently of ib. itsybitsy cannot reliably pre-validate this client-side; validate selector syntax, pass the model through, and surface Codex's error after first prompt if the model is rejected.
 +13. **NEW (Phase 2 spike).** `CODEX_HOME` relocation breaks auth (no `auth.json` in the redirected home → first-time-login flow appears every spawn). Per-agent CODEX_HOME is NOT a usable isolation strategy without seeding `auth.json`. Stick with global `~/.codex/` + inline `-c` overrides.
 ```
 

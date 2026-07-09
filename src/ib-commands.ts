@@ -74,7 +74,6 @@ import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinator
 import { loadAgentType, agentTypeExists } from "./agent-types";
 import type { AgentType } from "./agent-types";
 import { isCodexBackedCli, parseModel, mapEffortForCodex } from "./agent-cli";
-import { isKnownModel, listKnownSelectorsForCli } from "./known-models";
 import {
   buildHooksBlock,
   COORDINATOR_INTERCEPT_MATCHER,
@@ -4299,26 +4298,10 @@ export async function newAgent(
         stderr: `codex coordinators not yet implemented (per SPEC D9 stub); the coordinator agent-type file must declare a claude:<model> form. Pending Phase 9 coordinator support.`,
       };
     }
-    // Reject codex models not in our static allow-list before the codex CLI
-    // is launched. Without this, an unsupported model (e.g. gpt-5.3-codex
-    // on a ChatGPT-plan account) starts the agent, hits an HTTP 400 after
-    // the first prompt, and leaves the user with a stuck "unknown"-state
-    // agent that has to be nuked manually. KNOWN_MODELS is the source of
-    // truth — update it when codex adds new models that are reachable on
-    // the typical ChatGPT-plan account. See src/known-models.ts.
-    if (!isKnownModel(parsed)) {
-      const valid = listKnownSelectorsForCli(agentCli);
-      return {
-        ok: false,
-        exitCode: 1,
-        stdout: "",
-        stderr:
-          `${agentCli === "fugu" ? "Fugu" : "Codex"} model '${modelFlagValue}' is not supported. Valid models: ${valid.join(", ")}. ` +
-          `Note: ChatGPT-plan and API-key codex accounts expose different model sets; ` +
-          `if the model you want is missing here, it may not be reachable on a ChatGPT plan. ` +
-          `Run 'ib list-models' for the full list.`,
-      };
-    }
+    // Model availability changes faster than ib releases, and ChatGPT-plan vs
+    // API-key codex accounts can expose different model sets. Validate only
+    // the selector syntax here, then pass the verbatim model half through to
+    // the codex CLI and let codex report any unsupported model.
     const { resolveIbBinaryPath } = await import("./codex-spawn");
     const { isCodexSafeBinaryPath } = await import("./codex-config");
     codexIbBinaryPath = resolveIbBinaryPath();

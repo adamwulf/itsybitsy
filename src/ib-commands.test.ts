@@ -6623,52 +6623,18 @@ body`,
       expect(cmdStrs.some((c) => c.includes("hooks codex-"))).toBe(false);
     });
 
-    // Bug 2026-05-31 (agent-26165de0, muse-ios): spawning a codex agent with
-    // a model name that is not in our KNOWN_MODELS allow-list previously
-    // succeeded, launched codex, then sat in 'unknown' state after codex
-    // returned HTTP 400. The fix rejects the spawn at the codex precondition
-    // block, before any worktree/tmux work — same shape as the
-    // coordinator-rejection test above.
-    test("rejects unsupported codex model BEFORE any side effects", async () => {
-      const spawnCalls: string[][] = [];
-      const trackedSpawn = (cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
-        spawnCalls.push(cmd);
-        return makeSpawnResult("", 0);
-      };
-      setNewAgentSpawnRunner(trackedSpawn);
-
-      const result = await callNewAgent("task", {
-        name: "codex-bad-model",
-        model: "codex:gpt-5.3-codex",
-      });
-
-      expect(result.ok).toBe(false);
-      expect(result.stderr).toContain("Codex model 'gpt-5.3-codex' is not supported");
-      // Error must list at least one valid alternative so the user can recover.
-      expect(result.stderr).toContain("codex:gpt-5.5");
-      // Hint about ChatGPT-plan vs API-key differences.
-      expect(result.stderr).toContain("ChatGPT-plan");
-      // No agent dir created — reject fires before mkdir.
-      const dirExists = await Bun.file(join(agentsDir, "codex-bad-model", "meta.json")).exists();
-      expect(dirExists).toBe(false);
-      // No tmux/worktree/codex CLI was touched.
-      const cmdStrs = spawnCalls.map((c) => c.join(" "));
-      expect(cmdStrs.some((c) => c.includes("tmux new-session"))).toBe(false);
-      expect(cmdStrs.some((c) => c.includes("git worktree add"))).toBe(false);
-      expect(cmdStrs.some((c) => c.includes("hooks codex-"))).toBe(false);
-    });
-
-    // Regression: a known-good codex model still spawns successfully — the
-    // allow-list must not be over-eager and break valid spawns.
-    test("accepts known-good codex model", async () => {
+    // Model availability changes faster than ib releases. After validating the
+    // `<cli>:<model>` selector syntax, ib passes the verbatim model half to the
+    // codex CLI instead of filtering against `KNOWN_MODELS`.
+    test("passes through unlisted codex model names", async () => {
       setNewAgentSpawnRunner(mockSpawnRunner());
       const result = await callNewAgent("task", {
-        name: "codex-good-model",
-        model: "codex:gpt-5.5",
+        name: "codex-new-model",
+        model: "codex:gpt-9-future",
       });
       expect(result.ok).toBe(true);
-      const startSh = await Bun.file(join(agentsDir, "codex-good-model", "start.sh")).text();
-      expect(startSh).toContain("setsid codex -m 'gpt-5.5'");
+      const startSh = await Bun.file(join(agentsDir, "codex-new-model", "start.sh")).text();
+      expect(startSh).toContain("setsid codex -m 'gpt-9-future'");
     });
 
     // Round-2 review HIGH: the codex `-s workspace-write` sandbox is granted

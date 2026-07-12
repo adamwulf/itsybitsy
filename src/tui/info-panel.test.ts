@@ -1,10 +1,30 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { InfoPanelComponent } from "./info-panel";
 import { makeAgent, makeFlatAgent, makeFlatRepoHeader, setAgentState } from "../test-utils";
 import { stripAnsi } from "../parse-state";
 import type { FlatEntry } from "../agents";
+import {
+  CLAUDE_PID_START_MARGIN_SECONDS,
+  isPidAliveCtx,
+  isPidAliveSinceCtx,
+  processStartEpochSecondsCtx,
+  resetProcessStartEpochSecondsCache,
+} from "../agents";
+import { RED } from "./colors";
 
 describe("InfoPanelComponent", () => {
+  beforeEach(() => {
+    resetProcessStartEpochSecondsCache();
+    processStartEpochSecondsCtx.set(() => 0);
+  });
+
+  afterEach(() => {
+    resetProcessStartEpochSecondsCache();
+    isPidAliveCtx.reset();
+    isPidAliveSinceCtx.reset();
+    processStartEpochSecondsCtx.reset();
+  });
+
   test("renders 'No selection' when nothing selected", () => {
     const panel = new InfoPanelComponent();
     panel.displayHeight = 5;
@@ -31,6 +51,21 @@ describe("InfoPanelComponent", () => {
     expect(text).toContain("opus");
     expect(text).toContain("Test summary text");
     expect(lines.length).toBe(10);
+  });
+
+  test("renders a red Claude dot when a live PID started after the agent", () => {
+    const panel = new InfoPanelComponent();
+    const agent = makeAgent({ id: "agent-recycled" });
+    agent.meta.claude_pid = "18825";
+    agent.meta.claude_pid_epoch = agent.meta.created_epoch;
+    isPidAliveCtx.set(() => true);
+    processStartEpochSecondsCtx.set(
+      () => agent.meta.created_epoch + CLAUDE_PID_START_MARGIN_SECONDS + 1
+    );
+    panel.agent = agent;
+
+    const claudeLine = panel.render(60)[0]!;
+    expect(claudeLine.startsWith(`${RED}●`)).toBe(true);
   });
 
   test("renders model name from agent meta", () => {

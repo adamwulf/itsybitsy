@@ -1380,8 +1380,10 @@ async function main() {
         process.exit(1);
       }
       const wpAgentDir = join(wpRepo.path, ".ittybitty", "agents", wpAgentId);
+      const wpPidEpoch = Math.floor(Date.now() / 1000);
       await mutateAgentMeta(wpAgentDir, (meta) => {
         meta.claude_pid = wpPidArg;
+        meta.claude_pid_epoch = wpPidEpoch;
       });
       break;
     }

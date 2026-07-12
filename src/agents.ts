@@ -1420,6 +1420,11 @@ export const liveTmuxSessionsCtx = new InjectionContext<() => Promise<Set<string
   async () => new Set(await getCachedTmuxSessions())
 );
 
+/** Injectable tmux capture for state-detection tests. */
+export const captureTmuxOutputCtx = new InjectionContext<typeof captureTmuxOutput>(
+  captureTmuxOutput
+);
+
 /**
  * Read all agents across multiple repos.
  * Also detects orphaned tmux sessions (sessions matching ittybitty-* pattern
@@ -1523,6 +1528,59 @@ function _isPidAlive(pid: number): boolean {
 
 /** Injectable isPidAlive for tests. */
 export const isPidAliveCtx = new InjectionContext<(pid: number) => boolean>(_isPidAlive);
+
+/**
+ * Maximum amount of time a Claude process may appear to start after its
+ * agent's created_epoch. meta.json is written before Claude is spawned, and
+ * both timestamps have only second-level relevance here, so one minute is a
+ * deliberately generous allowance for spawn delay and minor clock skew. PID
+ * reuse after an agent stops is normally minutes or days newer.
+ */
+export const CLAUDE_PID_START_MARGIN_SECONDS = 60;
+
+/** Read a process start time via portable ps lstart output. */
+function _processStartEpochSeconds(pid: number): number | null {
+  try {
+    const result = Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    if (result.exitCode !== 0) return null;
+    const raw = new TextDecoder().decode(result.stdout).trim();
+    if (!raw) return null;
+    const epochMs = Date.parse(raw);
+    return Number.isFinite(epochMs) ? Math.floor(epochMs / 1000) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Injectable process-start lookup for guarded Claude PID tests. */
+export const processStartEpochSecondsCtx = new InjectionContext<(pid: number) => number | null>(
+  _processStartEpochSeconds
+);
+
+/**
+ * Claude-specific PID liveness guard. A live PID is accepted only when the OS
+ * reports that its process started no later than the agent creation time plus
+ * the documented spawn/skew margin. Failure to read the process start time is
+ * treated as not alive, including the normal "pid not found" race.
+ */
+function _isPidAliveSince(pid: number, createdEpochSeconds: number): boolean {
+  if (!isPidAliveCtx.fn(pid)) return false;
+  // created_epoch is required by today's schema, but old/malformed metadata
+  // may not provide a usable reference. Preserve the prior PID-only behavior
+  // for those records rather than declaring a potentially live agent dead.
+  if (!Number.isFinite(createdEpochSeconds) || createdEpochSeconds <= 0) return true;
+  const processStartEpochSeconds = processStartEpochSecondsCtx.fn(pid);
+  return processStartEpochSeconds !== null &&
+    processStartEpochSeconds <= createdEpochSeconds + CLAUDE_PID_START_MARGIN_SECONDS;
+}
+
+/** Injectable guarded Claude PID liveness check for tests. */
+export const isPidAliveSinceCtx = new InjectionContext<
+  (pid: number, createdEpochSeconds: number) => boolean
+>(_isPidAliveSince);
 
 /** Test-only re-export of the default _isPidAlive — lets tests exercise the
  *  actual signal-0 + EPERM/ESRCH classification by stubbing process.kill. */
@@ -1814,17 +1872,16 @@ export async function detectAgentStates(
 
   const active = agents.filter((a) => !a.archived);
 
-  // Lazily resolve the live tmux session set — only fetch if at least one
-  // agent has meta.state === "complete" (that's the only fast-path that
-  // needs to verify tmux liveness; the running/waiting paths already do a
-  // captureTmuxOutput which fails on dead sessions). Reuses the
-  // listTmuxSessions TTL cache so back-to-back ticks don't respawn tmux.
-  const needsLiveTmuxCheck = active.some(
-    (a) => a.meta.state === "complete" && a.meta.tmux_session
-  );
-  const liveTmuxSessionsPromise: Promise<Set<string>> | null = needsLiveTmuxCheck
-    ? liveTmuxSessionsCtx.fn()
-    : null;
+  // Lazily resolve the live tmux session set. Complete agents need it for
+  // their fast-path, and capture-bound agents use it to reject stale session
+  // names before spawning capture-pane. The promise is shared across every
+  // agent in this pass, while the default implementation also reuses the
+  // listTmuxSessions TTL cache across passes.
+  let liveTmuxSessionsPromise: Promise<Set<string>> | null = null;
+  const getLiveTmuxSessions = (): Promise<Set<string>> => {
+    liveTmuxSessionsPromise ??= liveTmuxSessionsCtx.fn();
+    return liveTmuxSessionsPromise;
+  };
 
   await Promise.all(
     active.map(async (agent) => {
@@ -1892,7 +1949,7 @@ export async function detectAgentStates(
       const claudePid = parseInt(agent.meta.claude_pid, 10);
       if (
         claudePid > 0 &&
-        !isPidAliveCtx.fn(claudePid) &&
+        !isPidAliveSinceCtx.fn(claudePid, agent.meta.created_epoch) &&
         !isRecentlyCreated(agent.meta.created_epoch)
       ) {
         agent.state = "stopped";
@@ -1915,15 +1972,13 @@ export async function detectAgentStates(
       // list-sessions result (shared with readAllAgents). The claude_pid
       // liveness check happens above (applies to all states).
       if (agent.meta.state === "complete") {
-        if (liveTmuxSessionsPromise) {
-          const liveSessions = await liveTmuxSessionsPromise;
-          if (!liveSessions.has(tmuxSession)) {
-            agent.state = "stopped";
-            if (shouldReap) {
-              await reapOrphanedClaude(agent, agentDir, "stopped", "complete agent: tmux session gone");
-            }
-            return;
+        const liveSessions = await getLiveTmuxSessions();
+        if (!liveSessions.has(tmuxSession)) {
+          agent.state = "stopped";
+          if (shouldReap) {
+            await reapOrphanedClaude(agent, agentDir, "stopped", "complete agent: tmux session gone");
           }
+          return;
         }
         // Session confirmed live — re-arm husk teardown. See reapedTmuxSessions.
         clearReapedTmuxSession(tmuxSession);
@@ -1986,7 +2041,21 @@ export async function detectAgentStates(
         return;
       }
 
-      const output = await captureTmuxOutput(tmuxSession, 50);
+      // Defense in depth: a stale tmux_session must resolve without spawning
+      // capture-pane. This uses the same cached session set as the complete
+      // fast-path and preserves the creating grace + orphan reap behavior of
+      // the capture-null path below.
+      const liveSessions = await getLiveTmuxSessions();
+      if (!liveSessions.has(tmuxSession)) {
+        const resolved: AgentState = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
+        agent.state = resolved;
+        if (shouldReap) {
+          await reapOrphanedClaude(agent, agentDir, resolved, "tmux session not live");
+        }
+        return;
+      }
+
+      const output = await captureTmuxOutputCtx.fn(tmuxSession, 50);
       if (output === null || isDeadPane(output)) {
         const reason = output === null ? "tmux capture returned null" : "tmux pane is dead";
         const resolved: AgentState = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";

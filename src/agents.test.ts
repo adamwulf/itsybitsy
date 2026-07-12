@@ -37,8 +37,12 @@ import {
   setAgentOperation,
   clearAgentOperation,
   isPidAliveCtx,
+  isPidAliveSinceCtx,
+  processStartEpochSecondsCtx,
+  CLAUDE_PID_START_MARGIN_SECONDS,
   killPidCtx,
   liveTmuxSessionsCtx,
+  captureTmuxOutputCtx,
   nowMsCtx,
   resetReadAgentMetaCache,
   TRANSIENT_FRESH_MS,
@@ -52,6 +56,22 @@ import { stripAnsi } from "./parse-state";
 import { spawnCtx as tmuxPollerSpawnCtx } from "./tmux-poller";
 import type { Agent, AgentMeta, FlatEntry, SpawnedBy } from "./agents";
 import { makeAgent } from "./test-utils";
+
+// Most state-detection fixtures use synthetic PIDs. Give those processes an
+// old start time by default, then let the focused PID-reuse tests override it.
+beforeEach(() => {
+  processStartEpochSecondsCtx.set(() => 0);
+  // Existing fixtures intentionally use synthetic/incomplete AgentMeta. Keep
+  // them on their historical bare-PID seam; focused tests below reset this to
+  // exercise the real guarded implementation.
+  isPidAliveSinceCtx.set((pid) => isPidAliveCtx.fn(pid));
+});
+
+afterEach(() => {
+  processStartEpochSecondsCtx.reset();
+  isPidAliveSinceCtx.reset();
+  captureTmuxOutputCtx.reset();
+});
 
 /** Narrow a FlatEntry to kind==="agent" or fail */
 function asAgent(entry: FlatEntry) {
@@ -2102,11 +2122,11 @@ describe("detectAgentStates — 'complete' agents skip capture-pane", () => {
     expect(captureCalls).toBe(0);
   });
 
-  test("no complete agents — does not invoke listTmuxSessions", async () => {
+  test("capture-bound agent checks live tmux sessions once", async () => {
     let liveCalls = 0;
     liveTmuxSessionsCtx.set(async () => {
       liveCalls++;
-      return new Set();
+      return new Set(["ib-a1"]);
     });
     isPidAliveCtx.set(() => true);
     tmuxPollerSpawnCtx.set(((_args: any[]) => ({
@@ -2120,7 +2140,7 @@ describe("detectAgentStates — 'complete' agents skip capture-pane", () => {
       meta: { state: "running", tmux_session: "ib-a1", claude_pid: "12345" } as Partial<AgentMeta> as AgentMeta,
     });
     await detectAgentStates([a]);
-    expect(liveCalls).toBe(0);
+    expect(liveCalls).toBe(1);
   });
 
   test("complete agent with no tmux session resolves to 'stopped' (existing path)", async () => {
@@ -2163,6 +2183,7 @@ describe("detectAgentStates — 'complete' agents skip capture-pane", () => {
         exited: Promise.resolve(0),
       };
     }) as any);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
 
     const a = makeAgent({
       id: "a1",
@@ -2434,6 +2455,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
       };
     }) as any);
     isPidAliveCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
     const killCalls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
     killPidCtx.set((pid, signal) => {
       killCalls.push({ pid, signal });
@@ -2633,6 +2655,38 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("running");
     expect(killCalls).toBe(0);
+  });
+
+  test("recycled PID false-positive + missing live tmux session stops without capture", async () => {
+    let pidChecks = 0;
+    isPidAliveCtx.set(() => {
+      pidChecks++;
+      return true;
+    });
+    // Recreate the old bare-PID false-positive so this test independently
+    // exercises the live-session defense-in-depth path.
+    isPidAliveSinceCtx.set((pid) => isPidAliveCtx.fn(pid));
+    liveTmuxSessionsCtx.set(async () => new Set());
+    let captureCalls = 0;
+    captureTmuxOutputCtx.set(async () => {
+      captureCalls++;
+      return "unexpected capture";
+    });
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        state: "running",
+        tmux_session: "ib-stale",
+        claude_pid: "18825",
+        created_epoch: Math.floor(Date.now() / 1000) - 8 * 24 * 60 * 60,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    expect(pidChecks).toBe(1);
+    expect(captureCalls).toBe(0);
   });
 
   // Test 2: running + dead PID + not recently created → reaped to 'stopped'.
@@ -3618,11 +3672,18 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "itsybitsy-fastpath-"));
     captureCalls = 0;
+    liveTmuxSessionsCtx.set(async () => new Set([
+      "ib-agent-deadwd",
+      "ib-agent-stale",
+      "ib-agent-missing",
+      "ib-agent-seed",
+    ]));
   });
 
   afterEach(async () => {
     tmuxPollerSpawnCtx.reset();
     isPidAliveCtx.reset();
+    liveTmuxSessionsCtx.reset();
     nowMsCtx.reset();
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -4064,6 +4125,48 @@ describe("readAgentMeta mtime cache", () => {
     await rename(tmpPath, path);
     const b = await readAgentMeta(tempDir);
     expect(b.meta?.tmux_session).toBe("ib-v2");
+  });
+});
+
+describe("isPidAliveSinceCtx — recycled PID guard", () => {
+  const createdEpoch = 1_700_000_000;
+
+  beforeEach(() => {
+    isPidAliveSinceCtx.reset();
+  });
+
+  afterEach(() => {
+    isPidAliveCtx.reset();
+  });
+
+  test("live PID started after created_epoch plus margin is not alive", () => {
+    isPidAliveCtx.set(() => true);
+    processStartEpochSecondsCtx.set(
+      () => createdEpoch + CLAUDE_PID_START_MARGIN_SECONDS + 1
+    );
+
+    expect(isPidAliveSinceCtx.fn(18825, createdEpoch)).toBe(false);
+  });
+
+  test("live PID started at or before created_epoch plus margin is alive", () => {
+    isPidAliveCtx.set(() => true);
+    processStartEpochSecondsCtx.set(
+      () => createdEpoch + CLAUDE_PID_START_MARGIN_SECONDS
+    );
+
+    expect(isPidAliveSinceCtx.fn(18825, createdEpoch)).toBe(true);
+  });
+
+  test("dead PID is not alive and does not query its start time", () => {
+    let startTimeCalls = 0;
+    isPidAliveCtx.set(() => false);
+    processStartEpochSecondsCtx.set(() => {
+      startTimeCalls++;
+      return createdEpoch;
+    });
+
+    expect(isPidAliveSinceCtx.fn(18825, createdEpoch)).toBe(false);
+    expect(startTimeCalls).toBe(0);
   });
 });
 

@@ -7,7 +7,7 @@
 import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import type { Agent, FlatEntry } from "../agents";
-import { isPidAliveCtx } from "../agents";
+import { isPidAliveCtx, isPidAliveSinceCtx } from "../agents";
 import type { RepoHealthReport } from "../health-check";
 import { getStateColors } from "./color-scheme";
 import { displayState } from "./agent-tree";
@@ -91,7 +91,8 @@ export class InfoPanelComponent implements Component {
     const lines: string[] = [];
 
     const claudePid = agent.meta.claude_pid ? parseInt(agent.meta.claude_pid, 10) : NaN;
-    const claudeAlive = !isNaN(claudePid) && isPidAliveCtx.fn(claudePid);
+    const claudeAlive = !isNaN(claudePid) &&
+      isPidAliveSinceCtx.fn(claudePid, agent.meta.created_epoch);
     const claudeColor = claudeAlive ? GREEN : RED;
     lines.push(truncateToWidth(`${claudeColor}●${RESET} ${labelPrefix}Claude`, width, ""));
 
@@ -288,4 +289,3 @@ export class InfoPanelComponent implements Component {
     return padLines(lines, this.displayHeight);
   }
 }
-

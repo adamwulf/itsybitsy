@@ -618,7 +618,8 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
   "agentIcon": "◆",               // type icon character (see §2.6)
   "yolo": false,
   "model": "sonnet",              // bash defaults to "sonnet"; legacy agents may have null
-  "claude_pid": "12345",          // appended after Claude starts (not in initial write)
+  "claude_pid": "12345",          // written after Claude starts (not in initial write)
+  "claude_pid_epoch": 1704825010,  // epoch seconds when the current claude_pid was written
   "watchdog_pid": "12346",        // appended after watchdog spawns (see §8.5); not in initial write
   "state": "running",             // written by stop hook, ib send, ib resume (see §1.3.1)
   "state_updated_at": 1704825030, // epoch seconds when state was last written
@@ -643,7 +644,8 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 | `yolo` | boolean | Whether `--yolo` (skip permissions) was used |
 | `model` | string \| null | Claude model name (e.g., "sonnet", "opus", "haiku"), or `null` for legacy agents | [^callout]: Bash defaults `MODEL` to config value then `"sonnet"` before writing meta.json (the null branch in the template is unreachable dead code). TS normalizes null/missing to `"unknown"`. The `string \| null` type is retained because legacy agents may have null values, and display code (bash `ib list`) handles this defensively.
 | `effort` | string \| null | Resolved reasoning-effort level (`low\|medium\|high\|xhigh\|max`), or `null`/absent for legacy agents (treated as no override). Stores the **raw itsybitsy level** verbatim; the codex `model_reasoning_effort` mapping happens at launch-arg build time. Re-read by `ib resume` to re-apply the effort flag. See §2 item 4 / §18. |
-| `claude_pid` | string | PID of the Claude process (appended to meta.json via `sed` after start.sh launches Claude — not present in the initial write) |
+| `claude_pid` | string | PID of the Claude process (written by `ib write-pid` after start.sh launches Claude — not present in the initial write) |
+| `claude_pid_epoch` | number \| undefined | Unix epoch seconds when the current `claude_pid` was written by `ib write-pid`. Refreshed on spawn and resume; absent on legacy agents, which retain PID-only liveness checks. |
 | `watchdog_pid` | string | PID of the watchdog process (appended to meta.json after watchdog spawns — not present in the initial write; see §8.5) |
 | `state` | string \| undefined | Deterministic agent state written by the stop hook, `ib send`, or `ib resume`. Values: `"running"`, `"waiting"`, `"complete"`. Absent on legacy agents or before the first stop hook fires (treated as `"running"` if agent is older than 6s). See §1.3.1. |
 | `state_updated_at` | number \| undefined | Unix epoch seconds when `state` was last written. Used for debugging. |
@@ -1391,7 +1393,7 @@ The info panel displays details for the currently selected item. It is read-only
 **When an agent is selected**, the info panel shows:
 
 1. **Stoplight indicators** (one per line):
-   - `● Claude` — green if `claude_pid` from `meta.json` refers to a running process (check via `kill -0`), red otherwise
+   - `● Claude` — green if `claude_pid` refers to a running process and, when `claude_pid_epoch` is present, the process start time is no later than that PID-write timestamp plus the documented 60s allowance; red otherwise. Legacy agents without the timestamp retain the PID-only check.
    - `● Watchdog` — green if `watchdog_pid` from `meta.json` refers to a running process, red otherwise
 2. **Model**: The agent's model name (e.g., `opus`, `sonnet`)
 3. **Summary/Prompt**: The agent's summary (if available) or the first few lines of the prompt, wrapped to sidebar width

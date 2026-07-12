@@ -8,15 +8,18 @@ import {
   isPidAliveCtx,
   isPidAliveSinceCtx,
   processStartEpochSecondsCtx,
+  resetProcessStartEpochSecondsCache,
 } from "../agents";
 import { RED } from "./colors";
 
 describe("InfoPanelComponent", () => {
   beforeEach(() => {
+    resetProcessStartEpochSecondsCache();
     processStartEpochSecondsCtx.set(() => 0);
   });
 
   afterEach(() => {
+    resetProcessStartEpochSecondsCache();
     isPidAliveCtx.reset();
     isPidAliveSinceCtx.reset();
     processStartEpochSecondsCtx.reset();
@@ -54,6 +57,7 @@ describe("InfoPanelComponent", () => {
     const panel = new InfoPanelComponent();
     const agent = makeAgent({ id: "agent-recycled" });
     agent.meta.claude_pid = "18825";
+    agent.meta.claude_pid_epoch = agent.meta.created_epoch;
     isPidAliveCtx.set(() => true);
     processStartEpochSecondsCtx.set(
       () => agent.meta.created_epoch + CLAUDE_PID_START_MARGIN_SECONDS + 1

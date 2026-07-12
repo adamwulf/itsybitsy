@@ -39,6 +39,7 @@ import {
   isPidAliveCtx,
   isPidAliveSinceCtx,
   processStartEpochSecondsCtx,
+  resetProcessStartEpochSecondsCache,
   CLAUDE_PID_START_MARGIN_SECONDS,
   killPidCtx,
   liveTmuxSessionsCtx,
@@ -60,6 +61,7 @@ import { makeAgent } from "./test-utils";
 // Most state-detection fixtures use synthetic PIDs. Give those processes an
 // old start time by default, then let the focused PID-reuse tests override it.
 beforeEach(() => {
+  resetProcessStartEpochSecondsCache();
   processStartEpochSecondsCtx.set(() => 0);
   // Existing fixtures intentionally use synthetic/incomplete AgentMeta. Keep
   // them on their historical bare-PID seam; focused tests below reset this to
@@ -68,6 +70,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  resetProcessStartEpochSecondsCache();
   processStartEpochSecondsCtx.reset();
   isPidAliveSinceCtx.reset();
   captureTmuxOutputCtx.reset();
@@ -713,6 +716,7 @@ describe("readAgentMeta", () => {
         yolo: false,
         model: "sonnet",
         claude_pid: "999",
+        claude_pid_epoch: 1001,
       })
     );
 
@@ -731,6 +735,7 @@ describe("readAgentMeta", () => {
     expect(meta!.yolo).toBe(false);
     expect(meta!.model).toBe("sonnet");
     expect(meta!.claude_pid).toBe("999");
+    expect(meta!.claude_pid_epoch).toBe(1001);
   });
 
   test("meta.json with wrong-typed fields gets defaults applied", async () => {
@@ -749,6 +754,7 @@ describe("readAgentMeta", () => {
         yolo: 1,
         model: 777,
         claude_pid: 0,
+        claude_pid_epoch: "not-a-number",
       })
     );
 
@@ -767,6 +773,7 @@ describe("readAgentMeta", () => {
     expect(meta!.yolo).toBe(false);
     expect(meta!.model).toBe("unknown");
     expect(meta!.claude_pid).toBe("");
+    expect(meta!.claude_pid_epoch).toBeUndefined();
   });
 
   test("meta.json with missing fields gets defaults applied", async () => {
@@ -2657,6 +2664,30 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     expect(killCalls).toBe(0);
   });
 
+  test("resumed agent uses current claude_pid_epoch instead of original created_epoch", async () => {
+    const nowEpoch = Math.floor(Date.now() / 1000);
+    installTmuxRunner("⏵⏵ accept edits on (shift+tab to cycle)");
+    isPidAliveCtx.set(() => true);
+    isPidAliveSinceCtx.reset();
+    resetProcessStartEpochSecondsCache();
+    processStartEpochSecondsCtx.set(() => nowEpoch);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
+
+    const a = makeAgent({
+      id: "agent-1",
+      meta: {
+        state: "running",
+        tmux_session: "ib-a1",
+        claude_pid: "23456",
+        claude_pid_epoch: nowEpoch,
+        created_epoch: nowEpoch - 8 * 24 * 60 * 60,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a], { reap: true });
+    expect(a.state).toBe("running");
+  });
+
   test("recycled PID false-positive + missing live tmux session stops without capture", async () => {
     let pidChecks = 0;
     isPidAliveCtx.set(() => {
@@ -2686,6 +2717,31 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     await detectAgentStates([a]);
     expect(a.state).toBe("stopped");
     expect(pidChecks).toBe(1);
+    expect(captureCalls).toBe(0);
+  });
+
+  test("recent agent + missing live tmux session stays creating without capture", async () => {
+    isPidAliveCtx.set(() => true);
+    isPidAliveSinceCtx.set((pid) => isPidAliveCtx.fn(pid));
+    liveTmuxSessionsCtx.set(async () => new Set());
+    let captureCalls = 0;
+    captureTmuxOutputCtx.set(async () => {
+      captureCalls++;
+      return "unexpected capture";
+    });
+
+    const a = makeAgent({
+      id: "agent-new",
+      meta: {
+        state: "running",
+        tmux_session: "ib-starting",
+        claude_pid: "18825",
+        created_epoch: Math.floor(Date.now() / 1000) - 1,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("creating");
     expect(captureCalls).toBe(0);
   });
 
@@ -4129,7 +4185,7 @@ describe("readAgentMeta mtime cache", () => {
 });
 
 describe("isPidAliveSinceCtx — recycled PID guard", () => {
-  const createdEpoch = 1_700_000_000;
+  const pidWriteEpoch = 1_700_000_000;
 
   beforeEach(() => {
     isPidAliveSinceCtx.reset();
@@ -4139,22 +4195,47 @@ describe("isPidAliveSinceCtx — recycled PID guard", () => {
     isPidAliveCtx.reset();
   });
 
-  test("live PID started after created_epoch plus margin is not alive", () => {
+  test("recycled live PID started after claude_pid_epoch plus margin is not alive", () => {
     isPidAliveCtx.set(() => true);
     processStartEpochSecondsCtx.set(
-      () => createdEpoch + CLAUDE_PID_START_MARGIN_SECONDS + 1
+      () => pidWriteEpoch + CLAUDE_PID_START_MARGIN_SECONDS + 1
     );
 
-    expect(isPidAliveSinceCtx.fn(18825, createdEpoch)).toBe(false);
+    expect(isPidAliveSinceCtx.fn(18825, pidWriteEpoch)).toBe(false);
   });
 
-  test("live PID started at or before created_epoch plus margin is alive", () => {
+  test("live PID started at or before claude_pid_epoch plus margin is alive", () => {
     isPidAliveCtx.set(() => true);
     processStartEpochSecondsCtx.set(
-      () => createdEpoch + CLAUDE_PID_START_MARGIN_SECONDS
+      () => pidWriteEpoch + CLAUDE_PID_START_MARGIN_SECONDS
     );
 
-    expect(isPidAliveSinceCtx.fn(18825, createdEpoch)).toBe(true);
+    expect(isPidAliveSinceCtx.fn(18825, pidWriteEpoch)).toBe(true);
+  });
+
+  test("missing claude_pid_epoch preserves PID-only compatibility", () => {
+    let startTimeCalls = 0;
+    isPidAliveCtx.set(() => true);
+    processStartEpochSecondsCtx.set(() => {
+      startTimeCalls++;
+      return pidWriteEpoch;
+    });
+
+    expect(isPidAliveSinceCtx.fn(18825, undefined)).toBe(true);
+    expect(startTimeCalls).toBe(0);
+  });
+
+  test("repeated checks for one PID within the TTL read process start once", () => {
+    let startTimeCalls = 0;
+    isPidAliveCtx.set(() => true);
+    processStartEpochSecondsCtx.set(() => {
+      startTimeCalls++;
+      return pidWriteEpoch;
+    });
+
+    expect(isPidAliveSinceCtx.fn(18825, pidWriteEpoch)).toBe(true);
+    expect(isPidAliveSinceCtx.fn(18825, pidWriteEpoch)).toBe(true);
+    expect(startTimeCalls).toBe(1);
   });
 
   test("dead PID is not alive and does not query its start time", () => {
@@ -4162,10 +4243,10 @@ describe("isPidAliveSinceCtx — recycled PID guard", () => {
     isPidAliveCtx.set(() => false);
     processStartEpochSecondsCtx.set(() => {
       startTimeCalls++;
-      return createdEpoch;
+      return pidWriteEpoch;
     });
 
-    expect(isPidAliveSinceCtx.fn(18825, createdEpoch)).toBe(false);
+    expect(isPidAliveSinceCtx.fn(18825, pidWriteEpoch)).toBe(false);
     expect(startTimeCalls).toBe(0);
   });
 });

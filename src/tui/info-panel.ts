@@ -92,7 +92,7 @@ export class InfoPanelComponent implements Component {
 
     const claudePid = agent.meta.claude_pid ? parseInt(agent.meta.claude_pid, 10) : NaN;
     const claudeAlive = !isNaN(claudePid) &&
-      isPidAliveSinceCtx.fn(claudePid, agent.meta.created_epoch);
+      isPidAliveSinceCtx.fn(claudePid, agent.meta.claude_pid_epoch);
     const claudeColor = claudeAlive ? GREEN : RED;
     lines.push(truncateToWidth(`${claudeColor}●${RESET} ${labelPrefix}Claude`, width, ""));
 

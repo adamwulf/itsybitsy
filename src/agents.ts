@@ -1233,7 +1233,7 @@ export function buildAgentTree(agents: Agent[]): Agent[] {
 
 export type FlatEntry =
   | { kind: "agent"; agent: Agent; depth: number; connector: string }
-  | { kind: "repo-header"; repoName: string; repoPath: string; hasAgents: boolean; hasRunningAgents: boolean }
+  | { kind: "repo-header"; repoName: string; repoPath: string; hasAgents: boolean; hasRunningAgents: boolean; hasNonStoppedAgents: boolean }
   | { kind: "system-coordinator"; state: string; age: string };
 
 /**
@@ -1253,6 +1253,33 @@ export function subtreeHasRunning(agent: Agent): boolean {
   if (isRunningState(agent.state)) return true;
   for (const child of agent.children) {
     if (subtreeHasRunning(child)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether an agent should stay visible in the V-cycle "running-only" filter
+ * (the most restrictive mode). That mode hides ONLY fully-`stopped` agents; it
+ * keeps everything else — running/waiting/complete plus every transient state
+ * (creating, compacting, rate_limited, api_error, api_terms, merging,
+ * restarting, op_stuck, unknown). This is deliberately broader than
+ * `isRunningState` (which means "actively working"); do NOT conflate the two.
+ */
+export function isVisibleUnderRunningFilter(state: string): boolean {
+  return state !== "stopped";
+}
+
+/**
+ * True if `agent` or any non-archived descendant is NOT stopped — the subtree
+ * analogue of `isVisibleUnderRunningFilter`. Used by the "running-only" filter
+ * to keep a manager visible when any descendant survives the filter, so
+ * non-stopped children are never orphaned under a hidden parent.
+ */
+export function subtreeHasNonStopped(agent: Agent): boolean {
+  if (agent.archived) return false;
+  if (isVisibleUnderRunningFilter(agent.state)) return true;
+  for (const child of agent.children) {
+    if (subtreeHasNonStopped(child)) return true;
   }
   return false;
 }
@@ -1330,15 +1357,16 @@ export function flattenAgentTree(
         // Filter out per-repo coordinators — they don't appear in the agent tree
         const nonCoordinators = agents.filter(a => a.meta.agentType !== "coordinator");
         const hasRunningAgents = nonCoordinators.some(subtreeHasRunning);
+        const hasNonStoppedAgents = nonCoordinators.some(subtreeHasNonStopped);
         // Repo with agents — emit repo header then walk agents
-        result.push({ kind: "repo-header", repoName, repoPath: repoPathByName.get(repoName) ?? "", hasAgents: nonCoordinators.length > 0, hasRunningAgents });
+        result.push({ kind: "repo-header", repoName, repoPath: repoPathByName.get(repoName) ?? "", hasAgents: nonCoordinators.length > 0, hasRunningAgents, hasNonStoppedAgents });
         for (let i = 0; i < nonCoordinators.length; i++) {
           const isLast = i === nonCoordinators.length - 1;
           walk(nonCoordinators[i]!, 0, [isLast]);
         }
       } else {
         // Empty repo — just a header
-        result.push({ kind: "repo-header", repoName, repoPath: repoPathByName.get(repoName) ?? "", hasAgents: false, hasRunningAgents: false });
+        result.push({ kind: "repo-header", repoName, repoPath: repoPathByName.get(repoName) ?? "", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false });
       }
     }
   } else {

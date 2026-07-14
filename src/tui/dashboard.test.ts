@@ -17,7 +17,7 @@ import type { SpawnResult } from "../types";
 import { PANE_MODES } from "./pane-manager";
 import { computeSidebarHeights } from "./sidebar";
 import { assertDialog } from "./test-helpers";
-import { setLayoutPath } from "./layout";
+import { setLayoutPath, loadLayout, flushPendingSave, cancelPendingSave } from "./layout";
 
 // Many tests below simulate resize keystrokes, which call persistLayout() and
 // schedule debounced layout saves. Route them to a temp file so a test run can
@@ -3923,6 +3923,59 @@ describe("applyLayout", () => {
       heightOffsets: { tree: 0, info: 0, coordinator: 0 },
     });
     expect(dashboard.splitPane.getLeftWidth()).toBe(160); // MAX_LEFT_WIDTH
+  });
+
+  // BUG-1: pinned repos are persisted in layout.json and restored on startup.
+  test("applyLayout restores pinnedRepoPaths into the agent tree", () => {
+    const dashboard = makeDashboard();
+    dashboard.applyLayout({
+      sidebarWidth: 60,
+      splitPaneLeftWidth: 80,
+      heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+      pinnedRepoPaths: ["/repos/alpha", "/repos/beta"],
+    });
+    expect(dashboard.agentTree.pinnedRepoPaths.has("/repos/alpha")).toBe(true);
+    expect(dashboard.agentTree.pinnedRepoPaths.has("/repos/beta")).toBe(true);
+    expect(dashboard.agentTree.pinnedRepoPaths.size).toBe(2);
+  });
+
+  // BUG-1: applyLayout without pinnedRepoPaths (old layout.json) leaves the
+  // tree's existing pin set untouched rather than clobbering it.
+  test("applyLayout without pinnedRepoPaths does not disturb existing pins", () => {
+    const dashboard = makeDashboard();
+    dashboard.agentTree.togglePinnedRepo("/repos/existing");
+    dashboard.applyLayout({
+      sidebarWidth: 60,
+      splitPaneLeftWidth: 80,
+      heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+    });
+    expect(dashboard.agentTree.pinnedRepoPaths.has("/repos/existing")).toBe(true);
+  });
+
+  // BUG-1 end-to-end: pressing '.' on a selected repo header pins it AND
+  // persists the pin; a fresh dashboard restores it via applyLayout(loadLayout).
+  test("'.' pins a repo, persists it, and applyLayout(loadLayout()) restores it", async () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-pin", "/repos/test");
+    const flatList: FlatEntry[] = [makeFlatRepoHeader("test", "/repos/test", true, true, true), makeFlatAgent(agent)];
+    dashboard.onUpdate([agent], flatList, [], []);
+    // Select the repo header, then press '.' to pin it.
+    expect(dashboard.agentTree.selectByRepoPath("/repos/test")).toBe(true);
+    dashboard.handleInput(".");
+    expect(dashboard.agentTree.pinnedRepoPaths.has("/repos/test")).toBe(true);
+
+    // persistLayout() is debounced — flush it so the write lands, then read it.
+    await flushPendingSave();
+    const saved = await loadLayout();
+    expect(saved).not.toBeNull();
+    expect(saved!.pinnedRepoPaths).toContain("/repos/test");
+
+    // A fresh dashboard restores the pin from the saved layout.
+    const restored = makeDashboard();
+    restored.applyLayout(saved!);
+    expect(restored.agentTree.pinnedRepoPaths.has("/repos/test")).toBe(true);
+
+    cancelPendingSave();
   });
 });
 

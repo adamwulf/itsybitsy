@@ -939,6 +939,9 @@ export class DashboardComponent implements Component {
     if (layout.repoCoordinatorHeightOffset !== undefined) {
       this.rightPane.repoCoordinatorHeightOffset = layout.repoCoordinatorHeightOffset;
     }
+    if (layout.pinnedRepoPaths !== undefined) {
+      this.agentTree.pinnedRepoPaths = new Set(layout.pinnedRepoPaths);
+    }
     // §7.7 load-time safety net: use process.stdout.rows as a proxy for displayHeight to
     // reject grossly invalid offsets from corrupted or oversized-terminal layout files.
     // computeSidebarHeights needs actual displayHeight, but we don't have it yet, so use
@@ -956,6 +959,7 @@ export class DashboardComponent implements Component {
       splitPaneLeftWidth: this.splitPane.getLeftWidth(),
       heightOffsets: { ...this.sidebar.heightOffsets },
       repoCoordinatorHeightOffset: this.rightPane.repoCoordinatorHeightOffset,
+      pinnedRepoPaths: Array.from(this.agentTree.pinnedRepoPaths),
     });
   }
 
@@ -2518,7 +2522,7 @@ export class DashboardComponent implements Component {
       const notice =
         next === "all" ? "Showing all repos"
         : next === "non-empty" ? "Hiding empty repos"
-        : "Showing only running agents";
+        : "Hiding stopped agents";
       this.setNotice(notice, "info");
       this.tui?.requestRender();
     }
@@ -2529,6 +2533,8 @@ export class DashboardComponent implements Component {
         const nowPinned = this.agentTree.togglePinnedRepo(repoPath);
         const name = this.agentTree.selectedRepoHeader ?? repoPath;
         this.setNotice(nowPinned ? `Pinned ${name}` : `Unpinned ${name}`, "info");
+        // Persist the pin change so it survives an `ib watch` restart.
+        this.persistLayout();
         this.tui?.requestRender();
       } else {
         this.setNotice("Select a repo header to pin", "info");

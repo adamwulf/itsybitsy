@@ -4,7 +4,7 @@
 
 import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import { resolveAgentIcon, isRunningState, subtreeHasRunning, type Agent, type FlatEntry } from "../agents";
+import { resolveAgentIcon, isVisibleUnderRunningFilter, subtreeHasNonStopped, type Agent, type FlatEntry } from "../agents";
 import type { RepoHealthReport } from "../health-check";
 import type { Selection } from "./selection";
 import { getStateColors } from "./color-scheme";
@@ -18,8 +18,11 @@ export const AGE_COL_WIDTH = 3; // max age length: e.g. "27m"
  * Tri-state filter for the agent tree, cycled by the V key:
  *  - "all"          — every repo header is shown
  *  - "non-empty"    — only repos that have at least one agent
- *  - "running-only" — only repos with at least one running agent, and within
- *                     those repos only the running agents themselves
+ *  - "running-only" — only repos with at least one non-stopped agent, and
+ *                     within those repos only the non-stopped agents (i.e.
+ *                     hides 'stopped' agents and repos whose agents are all
+ *                     stopped). Selected-row and pinned-repo carve-outs still
+ *                     force-keep their rows visible.
  */
 export type RepoFilter = "all" | "non-empty" | "running-only";
 
@@ -281,13 +284,16 @@ export class AgentTreeComponent implements Component {
    * Tri-state view filter cycled by the dashboard's V key:
    *  - "all"          — show every repo header (current default)
    *  - "non-empty"    — hide repo headers whose repo has no agents
-   *  - "running-only" — hide repo headers whose repo has no running agents,
-   *                     AND hide individual non-running agents within visible
-   *                     repos. ("Running" includes creating/compacting; see
-   *                     `isRunningState`.)
-   * The currently-selected row's repo (and the selected agent itself, if not
-   * running-ish) are always force-kept visible via `_stickyRevealedRepoPath`
-   * so a stricter filter never yanks the selection out from under the user.
+   *  - "running-only" — hide ONLY `stopped` agents, and hide repo headers
+   *                     whose agents are ALL stopped. Every non-stopped state
+   *                     (running/waiting/complete plus every transient state:
+   *                     creating, compacting, rate_limited, api_error,
+   *                     api_terms, merging, restarting, op_stuck, unknown) is
+   *                     shown. See `isVisibleUnderRunningFilter`.
+   * The currently-selected row's repo (and the selected agent itself, even if
+   * stopped) are always force-kept visible via `_stickyRevealedRepoPath`, and
+   * pinned repos stay visible, so a stricter filter never yanks the selection
+   * or a pinned repo out from under the user.
    * System-coordinator entries are a separate FlatEntry kind and unaffected. */
   repoFilter: RepoFilter = "all";
   /**
@@ -306,7 +312,10 @@ export class AgentTreeComponent implements Component {
 
   /** Repo paths the user has pinned via '.'. A pinned repo header is always
    * kept visible regardless of repoFilter; its children still filter normally.
-   * Session-only (like repoFilter) — not persisted. */
+   * Persisted across sessions in ~/.itsybitsy/layout.json (LayoutState
+   * .pinnedRepoPaths) — the dashboard restores it in applyLayout() and writes
+   * it in persistLayout() after each toggle. (repoFilter itself stays
+   * session-only.) */
   pinnedRepoPaths: Set<string> = new Set();
 
   get flatList(): FlatEntry[] {
@@ -349,20 +358,23 @@ export class AgentTreeComponent implements Component {
     const filtered = base.filter((f) => {
       if (f.kind === "system-coordinator") return true;
       if (f.kind === "repo-header") {
-        const passes = this.repoFilter === "non-empty" ? f.hasAgents : f.hasRunningAgents;
+        // non-empty gates on any agents at all; running-only gates on any
+        // NON-STOPPED agent (a repo whose agents are all stopped is hidden).
+        const passes = this.repoFilter === "non-empty" ? f.hasAgents : f.hasNonStoppedAgents;
         if (passes) return true;
         if (this.pinnedRepoPaths.has(f.repoPath)) return true;
         return sticky !== null && f.repoPath === sticky;
       }
       // f.kind === "agent": only hide individual agents in running-only mode.
       if (this.repoFilter !== "running-only") return true;
-      if (isRunningState(f.agent.state)) return true;
-      // Keep an agent visible if any descendant in its subtree is running, so
-      // managers retain their hierarchical context instead of having their
-      // running children orphaned under a hidden parent.
-      if (subtreeHasRunning(f.agent)) return true;
-      // Keep the currently-selected agent visible even if it isn't running,
-      // so a filter flip doesn't yank the selection out from under the user.
+      // running-only hides ONLY stopped agents; every other state is shown.
+      if (isVisibleUnderRunningFilter(f.agent.state)) return true;
+      // Keep an agent visible if any descendant in its subtree is non-stopped,
+      // so managers retain their hierarchical context instead of having their
+      // surviving children orphaned under a hidden (stopped) parent.
+      if (subtreeHasNonStopped(f.agent)) return true;
+      // Keep the currently-selected agent visible even if it is stopped, so a
+      // filter flip doesn't yank the selection out from under the user.
       return selectedAgentId !== null && f.agent.id === selectedAgentId;
     });
     if (this.repoFilter !== "running-only") return filtered;
@@ -412,7 +424,7 @@ export class AgentTreeComponent implements Component {
     }
     const wouldBeHidden = this.repoFilter === "non-empty"
       ? !header.hasAgents
-      : !header.hasRunningAgents;
+      : !header.hasNonStoppedAgents;
     this._stickyRevealedRepoPath = wouldBeHidden ? repoPath : null;
   }
 

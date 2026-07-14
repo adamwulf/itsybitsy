@@ -175,6 +175,59 @@ describe("layout persistence", () => {
     expect(loaded!.repoCoordinatorHeightOffset).toBe(2);
   });
 
+  test("pinnedRepoPaths round-trips through save then load", async () => {
+    const withPins: LayoutState = {
+      ...sampleLayout,
+      pinnedRepoPaths: ["/repos/alpha", "/repos/beta"],
+    };
+    await saveLayout(withPins);
+    const loaded = await loadLayout();
+    expect(loaded).not.toBeNull();
+    expect(loaded!.pinnedRepoPaths).toEqual(["/repos/alpha", "/repos/beta"]);
+  });
+
+  test("loadLayout tolerates a MISSING pinnedRepoPaths (rest of layout preserved)", async () => {
+    // Simulates an old layout.json written before pins were persisted.
+    await Bun.write(join(tmpDir, "layout.json"), JSON.stringify({
+      sidebarWidth: 65,
+      splitPaneLeftWidth: 85,
+      heightOffsets: { tree: 1, info: 0, coordinator: 0 },
+    }));
+    const loaded = await loadLayout();
+    expect(loaded).not.toBeNull();
+    // The rest of the layout survives...
+    expect(loaded!.sidebarWidth).toBe(65);
+    expect(loaded!.splitPaneLeftWidth).toBe(85);
+    // ...and the optional field is simply absent (not [] , not a rejection).
+    expect(loaded!.pinnedRepoPaths).toBeUndefined();
+  });
+
+  test("loadLayout drops a MALFORMED pinnedRepoPaths without discarding the layout", async () => {
+    // Non-array and array-with-non-strings are both rejected for the field
+    // only — the valid rest of the layout must still load.
+    await Bun.write(join(tmpDir, "layout.json"), JSON.stringify({
+      sidebarWidth: 60,
+      splitPaneLeftWidth: 80,
+      heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+      pinnedRepoPaths: "not-an-array",
+    }));
+    const loadedA = await loadLayout();
+    expect(loadedA).not.toBeNull();
+    expect(loadedA!.sidebarWidth).toBe(60);
+    expect(loadedA!.pinnedRepoPaths).toBeUndefined();
+
+    await Bun.write(join(tmpDir, "layout.json"), JSON.stringify({
+      sidebarWidth: 60,
+      splitPaneLeftWidth: 80,
+      heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+      pinnedRepoPaths: ["/repos/ok", 42, { nope: true }],
+    }));
+    const loadedB = await loadLayout();
+    expect(loadedB).not.toBeNull();
+    expect(loadedB!.sidebarWidth).toBe(60);
+    expect(loadedB!.pinnedRepoPaths).toBeUndefined();
+  });
+
   test("getSavedSidebarWidth returns default when no layout saved", async () => {
     const width = await getSavedSidebarWidth();
     expect(width).toBe(60);

@@ -6,6 +6,10 @@ import {
   computeAge,
   buildAgentTree,
   flattenAgentTree,
+  isRunningState,
+  subtreeHasRunning,
+  isVisibleUnderRunningFilter,
+  subtreeHasNonStopped,
   readRepoAgents,
   readPendingQuestions,
   readAllAgents,
@@ -396,6 +400,67 @@ describe("flattenAgentTree", () => {
     expect(agentEntries.every(e => e.agent.meta.agentType !== "coordinator")).toBe(true);
     expect(agentEntries[0]!.agent.id).toBe("regular-2");
     expect(agentEntries[1]!.agent.id).toBe("regular-1");
+  });
+
+  // BUG-2: repo headers carry hasNonStoppedAgents (true iff any non-coordinator
+  // agent in the repo is not fully stopped) alongside hasRunningAgents.
+  test("multi-repo: repo header sets hasNonStoppedAgents from agent states", () => {
+    // waiting-only repo: not running, but non-stopped.
+    const waiting = makeAgent({ id: "w1", repoName: "waiting-repo", state: "waiting" });
+    // stopped-only repo: neither running nor non-stopped.
+    const stopped = makeAgent({ id: "s1", repoName: "stopped-repo", state: "stopped" });
+    const roots = buildAgentTree([waiting, stopped]);
+    const flat = flattenAgentTree(roots, ["waiting-repo", "stopped-repo"]);
+
+    const waitingHeader = flat.find((f) => f.kind === "repo-header" && f.repoName === "waiting-repo");
+    const stoppedHeader = flat.find((f) => f.kind === "repo-header" && f.repoName === "stopped-repo");
+    expect(waitingHeader && asRepoHeader(waitingHeader).hasRunningAgents).toBe(false);
+    expect(waitingHeader && asRepoHeader(waitingHeader).hasNonStoppedAgents).toBe(true);
+    expect(stoppedHeader && asRepoHeader(stoppedHeader).hasRunningAgents).toBe(false);
+    expect(stoppedHeader && asRepoHeader(stoppedHeader).hasNonStoppedAgents).toBe(false);
+  });
+});
+
+describe("V-filter state predicates", () => {
+  test("isVisibleUnderRunningFilter is true for every non-stopped state", () => {
+    const nonStopped = [
+      "running", "waiting", "complete", "creating", "compacting",
+      "rate_limited", "api_error", "api_terms", "merging", "restarting",
+      "op_stuck", "unknown",
+    ];
+    for (const s of nonStopped) expect(isVisibleUnderRunningFilter(s)).toBe(true);
+    expect(isVisibleUnderRunningFilter("stopped")).toBe(false);
+  });
+
+  test("isVisibleUnderRunningFilter is strictly broader than isRunningState", () => {
+    // Every state isRunningState accepts, the filter accepts too...
+    for (const s of ["running", "creating", "compacting"]) {
+      expect(isRunningState(s)).toBe(true);
+      expect(isVisibleUnderRunningFilter(s)).toBe(true);
+    }
+    // ...but the filter also keeps states isRunningState rejects (all but stopped).
+    for (const s of ["waiting", "complete", "merging", "rate_limited"]) {
+      expect(isRunningState(s)).toBe(false);
+      expect(isVisibleUnderRunningFilter(s)).toBe(true);
+    }
+  });
+
+  test("subtreeHasNonStopped mirrors subtreeHasRunning but on the non-stopped predicate", () => {
+    // A stopped parent with a waiting child: not running anywhere, but the
+    // subtree has a non-stopped node.
+    const child = makeAgent({ id: "c1", state: "waiting" });
+    const parent = makeAgent({ id: "p1", state: "stopped", children: [child] });
+    expect(subtreeHasRunning(parent)).toBe(false);
+    expect(subtreeHasNonStopped(parent)).toBe(true);
+
+    // Fully-stopped subtree: neither.
+    const allStopped = makeAgent({ id: "p2", state: "stopped", children: [makeAgent({ id: "c2", state: "stopped" })] });
+    expect(subtreeHasRunning(allStopped)).toBe(false);
+    expect(subtreeHasNonStopped(allStopped)).toBe(false);
+
+    // Archived subtrees never count, matching subtreeHasRunning.
+    const archived = makeAgent({ id: "p3", state: "waiting", archived: true });
+    expect(subtreeHasNonStopped(archived)).toBe(false);
   });
 });
 

@@ -26,6 +26,13 @@ export interface LayoutState {
    * between those two sections.
    */
   repoCoordinatorHeightOffset?: number;
+  /**
+   * Repo paths the user has pinned via '.' in the dashboard tree. Persisted so
+   * pins survive an `ib watch` restart. Optional — old layout.json files won't
+   * have it, and a malformed value is dropped without discarding the rest of
+   * the layout (see loadLayout).
+   */
+  pinnedRepoPaths?: string[];
 }
 
 // Under `bun test` (which sets NODE_ENV=test), the default path must NOT be
@@ -78,7 +85,7 @@ export async function loadLayout(): Promise<LayoutState | null> {
     }
     // Optional: repoCoordinatorHeightOffset (added later, may not be in saved file)
     const repoCoordOffset = isFiniteNum(data.repoCoordinatorHeightOffset) ? data.repoCoordinatorHeightOffset : 0;
-    return {
+    const result: LayoutState = {
       sidebarWidth: Math.round(data.sidebarWidth),
       splitPaneLeftWidth: Math.round(data.splitPaneLeftWidth),
       heightOffsets: {
@@ -88,6 +95,16 @@ export async function loadLayout(): Promise<LayoutState | null> {
       },
       repoCoordinatorHeightOffset: Math.round(repoCoordOffset),
     };
+    // Optional: pinnedRepoPaths (added later). Accept ONLY a string[]; a
+    // missing or malformed value is silently dropped — it must NOT reject the
+    // rest of the (valid) layout.
+    if (
+      Array.isArray(data.pinnedRepoPaths) &&
+      data.pinnedRepoPaths.every((p: unknown) => typeof p === "string")
+    ) {
+      result.pinnedRepoPaths = data.pinnedRepoPaths;
+    }
+    return result;
   } catch {
     return null;
   }

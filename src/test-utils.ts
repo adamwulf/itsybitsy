@@ -45,8 +45,8 @@ export function makeFlatAgent(agent: Agent, overrides?: { depth?: number; connec
 }
 
 /** Create a FlatEntry of kind "repo-header" for tests */
-export function makeFlatRepoHeader(repoName: string, repoPath: string = "", hasAgents: boolean = false, hasRunningAgents: boolean = false): Extract<FlatEntry, { kind: "repo-header" }> {
-  return { kind: "repo-header", repoName, repoPath, hasAgents, hasRunningAgents };
+export function makeFlatRepoHeader(repoName: string, repoPath: string = "", hasAgents: boolean = false, hasRunningAgents: boolean = false, hasNonStoppedAgents: boolean = false): Extract<FlatEntry, { kind: "repo-header" }> {
+  return { kind: "repo-header", repoName, repoPath, hasAgents, hasRunningAgents, hasNonStoppedAgents };
 }
 
 /** Create a FlatEntry of kind "system-coordinator" for tests */

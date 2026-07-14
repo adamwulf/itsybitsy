@@ -7,7 +7,7 @@ import {
   MAX_TREE_HEIGHT,
   nextRepoFilter,
 } from "./agent-tree";
-import { isRunningState, type Agent, type FlatEntry } from "../agents";
+import { isRunningState, isVisibleUnderRunningFilter, type Agent, type FlatEntry } from "../agents";
 
 function makeAgent(id: string, state: string = "running", overrides: Partial<Agent> = {}): Agent {
   return {
@@ -50,7 +50,8 @@ function makeFlatWithHeaders(groups: Array<{ repoName: string; repoPath: string;
   const result: FlatEntry[] = [];
   for (const g of groups) {
     const hasRunningAgents = g.agents.some((a) => isRunningState(a.state));
-    result.push({ kind: "repo-header", repoName: g.repoName, repoPath: g.repoPath, hasAgents: g.agents.length > 0, hasRunningAgents });
+    const hasNonStoppedAgents = g.agents.some((a) => isVisibleUnderRunningFilter(a.state));
+    result.push({ kind: "repo-header", repoName: g.repoName, repoPath: g.repoPath, hasAgents: g.agents.length > 0, hasRunningAgents, hasNonStoppedAgents });
     for (const agent of g.agents) {
       result.push({ kind: "agent", agent, depth: 1, connector: "" });
     }
@@ -233,12 +234,12 @@ describe("AgentTreeComponent", () => {
     const tree = new AgentTreeComponent();
     const flat: FlatEntry[] = [
       // Non-empty repo A with one agent
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
       // Empty repo X (this is the one we'll sit on)
-      { kind: "repo-header", repoName: "xerox", repoPath: "/repos/xerox", hasAgents: false, hasRunningAgents: false },
+      { kind: "repo-header", repoName: "xerox", repoPath: "/repos/xerox", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
       // Non-empty repo Z with one agent
-      { kind: "repo-header", repoName: "zulu", repoPath: "/repos/zulu", hasAgents: true, hasRunningAgents: true },
+      { kind: "repo-header", repoName: "zulu", repoPath: "/repos/zulu", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("z1", "running", { repoName: "zulu", repoPath: "/repos/zulu" }), depth: 1, connector: "" },
     ];
     tree.setFlatList(flat);
@@ -284,9 +285,9 @@ describe("AgentTreeComponent", () => {
   test("setRepoFilter('all') while on an empty header preserves selection", () => {
     const tree = new AgentTreeComponent();
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
-      { kind: "repo-header", repoName: "xerox", repoPath: "/repos/xerox", hasAgents: false, hasRunningAgents: false },
+      { kind: "repo-header", repoName: "xerox", repoPath: "/repos/xerox", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
     ];
     tree.setFlatList(flat);
     tree.setRepoFilter("non-empty");
@@ -306,8 +307,8 @@ describe("AgentTreeComponent", () => {
   test("selectAgentById on an agent in a non-empty repo leaves sticky null", () => {
     const tree = new AgentTreeComponent();
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: false, hasRunningAgents: false },
-      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("b1", "running", { repoName: "beta", repoPath: "/repos/beta" }), depth: 1, connector: "" },
     ];
     tree.setFlatList(flat);
@@ -323,58 +324,70 @@ describe("AgentTreeComponent", () => {
 
   // --- running-only filter -------------------------------------------------
 
-  test("running-only hides repos with no running agents", () => {
+  // running-only now hides ONLY stopped agents (and repos whose agents are
+  // ALL stopped). A repo with a waiting/complete agent is NON-stopped, so it
+  // stays visible; only the all-stopped repo (and the empty repo) drop out.
+  test("running-only hides repos whose agents are all stopped", () => {
     const tree = new AgentTreeComponent();
     const flat: FlatEntry[] = [
       // Repo with a running agent
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
-      // Repo with only waiting agents (no running)
-      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: false },
+      // Repo with only waiting agents (no running, but NON-stopped) — now shown.
+      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("b1", "waiting", { repoName: "beta", repoPath: "/repos/beta" }), depth: 1, connector: "" },
-      // Empty repo
-      { kind: "repo-header", repoName: "gamma", repoPath: "/repos/gamma", hasAgents: false, hasRunningAgents: false },
+      // Repo whose only agent is stopped — hidden (all agents stopped).
+      { kind: "repo-header", repoName: "delta", repoPath: "/repos/delta", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "agent", agent: makeAgent("d1", "stopped", { repoName: "delta", repoPath: "/repos/delta" }), depth: 1, connector: "" },
+      // Empty repo — hidden.
+      { kind: "repo-header", repoName: "gamma", repoPath: "/repos/gamma", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
     ];
     tree.setFlatList(flat);
     tree.setRepoFilter("running-only");
     const visible = tree.visibleList;
-    // Only alpha's header and a1 remain.
-    expect(visible.length).toBe(2);
-    expect(visible[0]!.kind).toBe("repo-header");
-    if (visible[0]!.kind === "repo-header") expect(visible[0]!.repoPath).toBe("/repos/alpha");
-    expect(visible[1]!.kind).toBe("agent");
+    // alpha (running) + a1, and beta (waiting) + b1 remain; delta and gamma drop.
+    const repoPaths = visible.filter((f) => f.kind === "repo-header").map((f) => (f as Extract<FlatEntry, { kind: "repo-header" }>).repoPath);
+    expect(repoPaths).toEqual(["/repos/alpha", "/repos/beta"]);
+    const agentIds = visible.filter((f) => f.kind === "agent").map((f) => (f as Extract<FlatEntry, { kind: "agent" }>).agent.id);
+    expect(agentIds).toEqual(["a1", "b1"]);
   });
 
-  test("running-only hides non-running agents within visible repos", () => {
+  // running-only hides ONLY stopped agents within a visible repo; every other
+  // state (running/waiting/complete/creating/compacting) stays shown.
+  test("running-only hides only stopped agents within visible repos", () => {
     const tree = new AgentTreeComponent();
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
       { kind: "agent", agent: makeAgent("a2", "waiting", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
       { kind: "agent", agent: makeAgent("a3", "creating", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
       { kind: "agent", agent: makeAgent("a4", "compacting", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
       { kind: "agent", agent: makeAgent("a5", "complete", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
+      { kind: "agent", agent: makeAgent("a6", "stopped", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
     ];
     tree.setFlatList(flat);
     tree.setRepoFilter("running-only");
     const visible = tree.visibleList;
-    // Header + a1 (running) + a3 (creating) + a4 (compacting); a2/a5 hidden.
+    // All non-stopped agents shown (a1..a5); only a6 (stopped) is hidden.
     const agentIds = visible.filter((f) => f.kind === "agent").map((f) => (f as Extract<FlatEntry, { kind: "agent" }>).agent.id);
-    expect(agentIds).toEqual(["a1", "a3", "a4"]);
+    expect(agentIds).toEqual(["a1", "a2", "a3", "a4", "a5"]);
   });
 
-  test("running-only keeps the selected non-running agent visible (sticky)", () => {
+  // A STOPPED agent (the only state running-only hides) that is SELECTED stays
+  // visible via the selection carve-out, along with its sticky-revealed header;
+  // the other, unselected stopped agent stays hidden.
+  test("running-only keeps the selected stopped agent visible (sticky)", () => {
     const tree = new AgentTreeComponent();
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: false },
-      { kind: "agent", agent: makeAgent("a1", "waiting", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
-      { kind: "agent", agent: makeAgent("a2", "waiting", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "agent", agent: makeAgent("a1", "stopped", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
+      { kind: "agent", agent: makeAgent("a2", "stopped", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
     ];
     tree.setFlatList(flat);
     expect(tree.selectAgentById("a1")).toBe(true);
     tree.setRepoFilter("running-only");
-    // Alpha's header has no running agents but is sticky-revealed because a1
-    // is selected. a1 itself stays visible; a2 (also waiting, not selected)
+    // Alpha's header has no non-stopped agents but is sticky-revealed because
+    // a1 is selected. a1 itself stays visible; a2 (also stopped, not selected)
     // is hidden.
     const visible = tree.visibleList;
     expect(visible.some((f) => f.kind === "repo-header" && f.repoPath === "/repos/alpha")).toBe(true);
@@ -401,7 +414,7 @@ describe("AgentTreeComponent", () => {
       children: [child],
     });
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: mgr, depth: 0, connector: "└── " },
       { kind: "agent", agent: child, depth: 1, connector: "    └── " },
     ];
@@ -419,19 +432,19 @@ describe("AgentTreeComponent", () => {
     const tree = new AgentTreeComponent();
     // Tree: mgr (waiting)
     //   ├── child-a (running)
-    //   ├── child-b (waiting)   <-- hidden by filter
-    //   └── child-c (waiting)   <-- hidden by filter
+    //   ├── child-b (stopped)   <-- hidden by filter
+    //   └── child-c (stopped)   <-- hidden by filter
     const childA = makeAgent("child-a", "running", {
       repoName: "alpha",
       repoPath: "/repos/alpha",
       meta: { ...makeAgent("child-a").meta, manager: "mgr-1" },
     });
-    const childB = makeAgent("child-b", "waiting", {
+    const childB = makeAgent("child-b", "stopped", {
       repoName: "alpha",
       repoPath: "/repos/alpha",
       meta: { ...makeAgent("child-b").meta, manager: "mgr-1" },
     });
-    const childC = makeAgent("child-c", "waiting", {
+    const childC = makeAgent("child-c", "stopped", {
       repoName: "alpha",
       repoPath: "/repos/alpha",
       meta: { ...makeAgent("child-c").meta, manager: "mgr-1" },
@@ -442,7 +455,7 @@ describe("AgentTreeComponent", () => {
       children: [childA, childB, childC],
     });
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: mgr, depth: 0, connector: "└── " },
       { kind: "agent", agent: childA, depth: 1, connector: "    ├── " },
       { kind: "agent", agent: childB, depth: 1, connector: "    ├── " },
@@ -482,7 +495,7 @@ describe("AgentTreeComponent", () => {
     // Use deliberately-distinctive sentinel connectors so a recomputation
     // would replace them with the canonical box-drawing strings and fail.
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: mgr, depth: 0, connector: "SENTINEL-MGR" },
       { kind: "agent", agent: childA, depth: 1, connector: "SENTINEL-A" },
       { kind: "agent", agent: childB, depth: 1, connector: "SENTINEL-B" },
@@ -523,7 +536,7 @@ describe("AgentTreeComponent", () => {
       meta: { ...makeAgent("cycle-b").meta, manager: "cycle-a" },
     });
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: selfCycle, depth: 0, connector: "├── " },
       { kind: "agent", agent: cycleA, depth: 0, connector: "├── " },
       { kind: "agent", agent: cycleB, depth: 0, connector: "└── " },
@@ -554,7 +567,7 @@ describe("AgentTreeComponent", () => {
       meta: { ...makeAgent("orphan").meta, manager: "ghost-id-does-not-exist" },
     });
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: orphan, depth: 0, connector: "└── " },
     ];
     tree.setFlatList(flat);
@@ -582,9 +595,9 @@ describe("AgentTreeComponent", () => {
       meta: { ...makeAgent("alpha-child").meta, manager: "beta-mgr" },
     });
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: alphaChild, depth: 0, connector: "└── " },
-      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: true },
+      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: betaMgr, depth: 0, connector: "└── " },
     ];
     tree.setFlatList(flat);
@@ -639,9 +652,9 @@ describe("AgentTreeComponent", () => {
       repoPath: "/repos/beta",
     });
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: alphaChild, depth: 0, connector: "└── " },
-      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: true },
+      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: betaChild, depth: 0, connector: "└── " },
     ];
     tree.setFlatList(flat);
@@ -669,10 +682,10 @@ describe("AgentTreeComponent", () => {
   test("a pinned empty repo header stays visible under 'non-empty'", () => {
     const tree = new AgentTreeComponent();
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
       // Empty repo — normally hidden under 'non-empty'.
-      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: false, hasRunningAgents: false },
+      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
     ];
     tree.setFlatList(flat);
     tree.setRepoFilter("non-empty");
@@ -683,25 +696,75 @@ describe("AgentTreeComponent", () => {
     expect(tree.visibleList.some((f) => f.kind === "repo-header" && f.repoPath === "/repos/beta")).toBe(true);
   });
 
-  test("a pinned repo's non-running children still filter out under 'running-only'", () => {
+  test("a pinned repo's stopped children still filter out under 'running-only'", () => {
     const tree = new AgentTreeComponent();
     const flat: FlatEntry[] = [
-      // Repo with only waiting agents — no running.
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: false },
-      { kind: "agent", agent: makeAgent("a1", "waiting", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
-      { kind: "agent", agent: makeAgent("a2", "waiting", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
+      // Repo with only stopped agents — the only state running-only hides.
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "agent", agent: makeAgent("a1", "stopped", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
+      { kind: "agent", agent: makeAgent("a2", "stopped", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
     ];
     tree.setFlatList(flat);
     tree.setRepoFilter("running-only");
-    // Header is hidden before pinning (no running agents, nothing selected).
+    // Header is hidden before pinning (all agents stopped, nothing selected).
     expect(tree.visibleList.some((f) => f.kind === "repo-header" && f.repoPath === "/repos/alpha")).toBe(false);
     tree.togglePinnedRepo("/repos/alpha");
     const visible = tree.visibleList;
     // The pinned header is force-shown...
     expect(visible.some((f) => f.kind === "repo-header" && f.repoPath === "/repos/alpha")).toBe(true);
-    // ...but its non-running children remain filtered out (children filter normally).
+    // ...but its stopped children remain filtered out (children filter normally).
     const agentIds = visible.filter((f) => f.kind === "agent").map((f) => (f as Extract<FlatEntry, { kind: "agent" }>).agent.id);
     expect(agentIds).toEqual([]);
+  });
+
+  // BUG-2 acceptance: running-only shows EVERY non-stopped state — running,
+  // waiting, complete, and the transient states (merging, rate_limited, …) —
+  // and hides ONLY stopped. Nothing but 'stopped' should ever drop out.
+  test("running-only shows all non-stopped states and hides only stopped", () => {
+    const tree = new AgentTreeComponent();
+    const states = [
+      "running", "waiting", "complete", "creating", "compacting",
+      "rate_limited", "api_error", "api_terms", "merging", "restarting",
+      "op_stuck", "unknown", "stopped",
+    ];
+    const flat: FlatEntry[] = [
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      ...states.map((s, i) => ({
+        kind: "agent" as const,
+        agent: makeAgent(`a-${s}`, s, { repoName: "alpha", repoPath: "/repos/alpha" }),
+        depth: 1,
+        connector: i === states.length - 1 ? "└── " : "├── ",
+      })),
+    ];
+    tree.setFlatList(flat);
+    tree.setRepoFilter("running-only");
+    const visibleIds = tree.visibleList
+      .filter((f) => f.kind === "agent")
+      .map((f) => (f as Extract<FlatEntry, { kind: "agent" }>).agent.id);
+    // Every state except 'stopped' is shown, in order.
+    expect(visibleIds).toEqual(states.filter((s) => s !== "stopped").map((s) => `a-${s}`));
+    expect(visibleIds).not.toContain("a-stopped");
+  });
+
+  // BUG-2 acceptance: a repo whose agents are ALL stopped is hidden under
+  // running-only, while a repo with a (non-running) waiting agent is shown.
+  test("running-only hides an all-stopped repo but shows a waiting-only repo", () => {
+    const tree = new AgentTreeComponent();
+    const flat: FlatEntry[] = [
+      // Repo whose only agents are stopped — must be HIDDEN.
+      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "agent", agent: makeAgent("a1", "stopped", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "└── " },
+      // Repo with a single waiting agent (non-running, non-stopped) — must be SHOWN.
+      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: true },
+      { kind: "agent", agent: makeAgent("b1", "waiting", { repoName: "beta", repoPath: "/repos/beta" }), depth: 1, connector: "└── " },
+    ];
+    tree.setFlatList(flat);
+    tree.setRepoFilter("running-only");
+    const visible = tree.visibleList;
+    const repoPaths = visible.filter((f) => f.kind === "repo-header").map((f) => (f as Extract<FlatEntry, { kind: "repo-header" }>).repoPath);
+    expect(repoPaths).toEqual(["/repos/beta"]);
+    const agentIds = visible.filter((f) => f.kind === "agent").map((f) => (f as Extract<FlatEntry, { kind: "agent" }>).agent.id);
+    expect(agentIds).toEqual(["b1"]);
   });
 
   test("nextRepoFilter cycles all → non-empty → running-only → all", () => {

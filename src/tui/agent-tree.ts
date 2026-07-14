@@ -18,8 +18,11 @@ export const AGE_COL_WIDTH = 3; // max age length: e.g. "27m"
  * Tri-state filter for the agent tree, cycled by the V key:
  *  - "all"          — every repo header is shown
  *  - "non-empty"    — only repos that have at least one agent
- *  - "running-only" — only repos with at least one running agent, and within
- *                     those repos only the running agents themselves
+ *  - "running-only" — only repos with at least one non-stopped agent, and
+ *                     within those repos only the non-stopped agents (i.e.
+ *                     hides 'stopped' agents and repos whose agents are all
+ *                     stopped). Selected-row and pinned-repo carve-outs still
+ *                     force-keep their rows visible.
  */
 export type RepoFilter = "all" | "non-empty" | "running-only";
 

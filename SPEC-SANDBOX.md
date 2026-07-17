@@ -186,11 +186,15 @@ Design decisions:
    params. Encoding the static list as an itsybitsy default constant is a later
    optimization. Type `.md`s ADD to the `_all.md` baseline; `deny` still carves
    holes.
-3. **`api.anthropic.com` (+ Claude's required control-plane hosts) are in the
-   network baseline** — auto-allowed, or a sandboxed agent can't reach the model
-   at all. Overridable constant, not something each `.md` must remember. Network
-   is allowlist-only (deny-by-default): kernel blocks all non-localhost egress,
-   the proxy permits only `domains` + the Anthropic baseline.
+3. **Domains ALSO all live in `_all.md` — no code constant (Adam's call).**
+   `api.anthropic.com` (+ Claude's required control-plane hosts) must be reachable
+   or a sandboxed agent can't reach the model at all — but rather than bake an
+   Anthropic host list into code, **list every required domain in `_all.md`'s
+   `sandbox.network.domains`** and build the list out empirically as we experiment
+   (same "don't optimize into a constant yet" stance as the filesystem baseline —
+   do NOT over-engineer this). Network is allowlist-only (deny-by-default): kernel
+   blocks all non-localhost egress, the proxy permits only the merged `domains`
+   (`_all.md` baseline ∪ the type's own).
 4. **Relationship to the existing `allowedPaths` hook.** `allowedPaths`
    (`agent-path.ts`) is already a deny-by-default *allowlist* at the hook layer —
    the same model, one layer up. `sandbox.filesystem.allowRead`/`allowWrite` are
@@ -198,20 +202,15 @@ Design decisions:
    `allowedPaths` is set, derive the kernel allowlist from `allowedPaths`. If both
    are set, `sandbox.filesystem` is authoritative for the kernel and `allowedPaths`
    stays the hook layer; keep them consistent (§4A.1). Document in SPEC §2.
-5. **Inheritance (deliberate, mixed rule).** ⚠️ A nested `sandbox:` object would,
-   if handled naively, merge like `permissions` — **union across the chain**
-   (`mergeRawFrontmatters` :459-467) — right for the **list** fields (`domains`,
-   `allowRead`, `allowWrite`, `deny`: union across `_all.md` → type) but **wrong
-   for the scalar** `enabled` (needs last-non-empty-wins, like `model`/`effort`
-   at :415-434). Implement the per-subfield mix explicitly at
-   `src/agent-types.ts:459-483`. ⚠️ **Security subtlety under deny-by-default:**
-   union-ing `allowRead`/`allowWrite` means a child can only ever **widen** access
-   inherited from `_all.md` — a child can grant itself more filesystem than its
-   base layer intended. If `_all.md` is meant to be a hard ceiling, allow-lists
-   must NOT union (child intersects or is capped), while `deny` SHOULD union
-   (deny is monotonic — more deny is always safer). **Decide the trust direction
-   deliberately: deny unions up (safer), allow probably should NOT.** This is the
-   inverse of the domains case and is easy to get backwards.
+5. **Inheritance → UNION of all `.md` layers (Adam's call).** Final permissions =
+   the sum of every layer: `_all.md` ∪ type ∪ any intermediate. **Both** the
+   list fields (`domains`, `allowRead`, `allowWrite`, `deny`) union across the
+   chain — a child can **add** access (union its allow) and/or **narrow** access
+   (union its deny). Because deny-wins (§4A.0), a child (or any layer) can never
+   re-open what another layer denied. Only the scalar `enabled` uses
+   last-non-empty-wins (like `model`/`effort` at :415-434). This matches the
+   existing `permissions` merge exactly (`mergeRawFrontmatters` :459-467), so the
+   list fields can reuse that machinery; only `enabled` needs the scalar rule.
 
 ## 4A. Path pattern format for allow/deny lists (AUTHORITATIVE)
 
@@ -396,11 +395,50 @@ Two guarantees:
 2. **`deny` still carves into the baseline.** `deny: ["**/.env"]` removes `.env`
    from the `_all.md`-allowed worktree; deny is evaluated last over the full union.
 
-**Implication for merge (§4 decision 5):** because the baseline lives in `_all.md`
-and children **union** their allow lists on top, allow-union (not allow-ceiling)
-is the natural fit here — `_all.md` sets the floor, each type adds what it needs.
-That argues for allow-union after all; still Adam's call (§7 q7), but the
-`_all.md`-baseline decision leans it toward union.
+**Merge (§4 decision 5, decided): UNION.** The baseline lives in `_all.md`,
+children union their allow lists on top — `_all.md` sets the floor, each type
+adds what it needs. `deny` unions too (deny-wins ensures a denied path stays
+denied regardless of layer).
+
+## 4B. Codex: disable its built-in sandbox, use ours (Adam's call)
+
+**Decision (Adam, 2026-07-17): a sandboxed codex agent runs codex in its own
+"yolo"/no-sandbox mode so codex does NOT double-sandbox, and OUR seatbelt +
+proxy is the single enforcement layer.** One mental model, one config surface
+(`_all.md` + frontmatter) for both claude and codex agents.
+
+Mechanism — codex's sandbox is set by two flags on its launch line
+(`codex-spawn.ts:189/191` spawn, `375/377` resume):
+- `-a never` — approval mode (unchanged; don't prompt).
+- `-s workspace-write` — codex's OS sandbox. **When `sandbox.enabled: true`,
+  change this to `-s danger-full-access`** (codex's no-sandbox mode) so codex
+  stops enforcing its own filesystem/network rules.
+
+Then wrap the whole `codex …` launch in `sandbox-exec -f sandbox.sb … env
+http(s)_proxy=… codex …`, exactly like the claude wrapper (§3.3). Result: our
+profile is the sole authority for both CLIs; no confusing intersection of two
+kernel sandboxes.
+
+Why not nest the two sandboxes: two OS sandboxes on one process enforce the
+**intersection** of their rules. A path our profile allows but codex's
+`workspace-write` forbids would fail with no signal as to which layer blocked it.
+`danger-full-access` removes codex's layer so ours is unambiguous.
+
+⚠️ **Spike items for codex (§6):**
+1. Confirm `-s danger-full-access` is the correct flag/value in the installed
+   codex version (verify against `codex --help`; the flag name may differ by
+   version).
+2. Confirm codex under `danger-full-access` **honors `http(s)_proxy` env vars**
+   so its traffic routes through our allowlist proxy. If it ignores them, the
+   kernel layer still blocks its direct egress (fails closed — safe), but codex
+   would then only reach allowlisted domains if it respects the proxy. Related:
+   the `network_access` wiring at `codex-config.ts:278-279` (the flagged TODO).
+3. `-a never` interaction: verify `danger-full-access` + `-a never` doesn't
+   re-introduce an approval prompt or change stdin/tty behavior (the `<&0`
+   handling at `codex-spawn.ts:189`).
+
+Only when `sandbox.enabled: false` does codex keep its current `-s
+workspace-write` behavior (no change from today).
 
 ## 5. Components to build
 
@@ -456,18 +494,17 @@ harvest the needed rules, then tighten.
 
 ### 5.2 Domain proxy — `src/sandbox-proxy.ts` + lifecycle
 
-- Adopt the reference's `proxy.py` model but **allowlist-aware** and reading a
-  **per-agent** domain file (e.g. `agentDir/sandbox-domains.txt`), or run one
-  shared proxy that maps the inbound connection → agent → its allowlist. **Open
-  question (§7): one shared proxy vs one-per-agent.** A shared proxy on a fixed
-  port is simpler to manage but must identify which agent a connection belongs
-  to (hard over plain HTTP CONNECT). One-proxy-per-agent on an allocated port is
-  cleaner isolation but adds N processes + port allocation. **Recommendation:
-  one proxy per agent, port recorded in meta.json**, lifecycle tied to the agent
-  (started by `start.sh`/`resume.sh`, killed in `teardownAgent`).
-- Prefer a Bun implementation (`Bun.serve` / raw TCP for CONNECT) over shipping a
-  Python dependency — the project is Bun-first (CLAUDE.md) and the `ib` binary is
-  self-contained; a Python `proxy.py` would break `bun build --compile`.
+- **Decided: one proxy PER AGENT** (Adam). Each agent gets its own proxy on an
+  allocated port; that port is baked into the agent's `http(s)_proxy` env and
+  recorded in `meta.json`. Attribution is trivial (the proxy enforces exactly one
+  agent's merged domain allowlist). Lifecycle tied to the agent: started by
+  `start.sh`/`resume.sh` before the CLI launch, killed in `teardownAgent`. The
+  allowlist is the merged `sandbox.network.domains` (`_all.md` ∪ type), read from
+  a per-agent file (e.g. `agentDir/sandbox-domains.txt`) so it's inspectable.
+- **Decided: Bun implementation** (`Bun.serve` / raw TCP for CONNECT), not a
+  vendored `proxy.py` — the `ib` binary is self-contained (`bun build --compile`)
+  and a Python dep would break that. Allowlist-based (deny unless the CONNECT host
+  matches a `domains` entry, with `*.`-subdomain support).
 - Proxy must be reachable at `localhost:PORT` from inside the sandbox (the
   seatbelt profile already allows `localhost:*` outbound, and the proxy binds
   localhost — inside the sandbox's allowed set).
@@ -507,6 +544,32 @@ harvest the needed rules, then tighten.
   denial can't be relaxed without a respawn (profile is fixed at exec).
 - `ib watch`/dashboard: optional — show a 🔒 indicator for sandboxed agents.
 
+### 5.5 Fail-hard when the sandbox can't be established (Adam's call)
+
+When `sandbox.enabled: true`, the agent **must not start** unless the sandbox is
+fully in place. There is no unsandboxed fallback. Preconditions checked at spawn
+(and resume), each of which aborts on failure:
+
+- `sandbox-exec` is present and the OS is macOS (else: platform can't sandbox).
+- The generated `sandbox.sb` compiles (dry-run / lint the profile before launch).
+- The per-agent proxy binds its port successfully.
+- (codex) the `-s danger-full-access` flip + proxy env are applied.
+
+On any failure, the spawn/resume path must:
+1. **Not exec claude/codex at all** — never a partial or unsandboxed launch.
+2. **Log a meaningful, specific error to the agent's `agent.log`** (which
+   precondition failed, e.g. "sandbox refused: sandbox.sb failed to compile at
+   line N" / "proxy could not bind port P" / "sandbox-exec not found (macOS
+   only)").
+3. **Surface a clear error to the user** — spawn returns non-zero with an
+   explanation; the agent shows as failed-to-start with the reason, not silently
+   missing. Mirror the existing spawn-failure surfacing (`newAgent` error paths).
+
+This is the whole point of the feature: an agent that believes it is sandboxed
+but isn't is the one outcome we refuse to permit. Wire the precondition checks
+into `newAgent` (spawn) and the resume path **before** `start.sh`/`resume.sh` are
+written/executed, so nothing launches on a failed precondition.
+
 ## 6. Build phases
 
 1. **Spike (blocking) — two things to prove:**
@@ -519,63 +582,67 @@ harvest the needed rules, then tighten.
      Start from the reference's `(allow default)` to prove plumbing, then invert
      to `(deny default)` + baseline and iteratively add the minimal allows until
      claude runs clean (harvest via a `(with report)`/trace profile). The output
-     of this spike **is** the §4A.7 baseline constant. If Claude Code can't be
-     made to boot under `(deny default)` with a tractable allowlist, fall back to
-     `(allow default)` + broad denies and tell Adam the model can't be as strict
-     as Model B wants. **Do not ship a baseline that wasn't empirically derived.**
-2. **Filesystem layer:** `src/sandbox.ts` generator + `sandbox.enabled` +
-   `sandbox.filesystem` frontmatter, wrap spawn+resume, no network yet
-   (kernel blocks egress, proxy allowlists nothing but Anthropic). Tests + tsc.
-3. **Network layer:** Bun proxy + allowlist + per-agent port + lifecycle.
-4. **Inheritance + validation + `_all.md` interaction**, SPEC.md §2/§7 updates,
-   `docs/agent-types/*.md` doc updates.
-5. **Codex parity** (optional): network layer for codex agents.
-6. **Dashboard indicator** (optional).
+     of this spike **is** the initial `_all.md` filesystem + domain baseline
+     (§4A.7). If Claude Code can't be made to boot under `(deny default)` with a
+     tractable allowlist, fall back to `(allow default)` + broad denies and tell
+     Adam the model can't be as strict as Model B wants. **Do not ship a baseline
+     that wasn't empirically derived.**
+2. **Filesystem layer + fail-hard:** `src/sandbox.ts` generator + `sandbox.enabled`
+   + `sandbox.filesystem` frontmatter, wrap spawn+resume, the §5.5 precondition
+   checks (no unsandboxed fallback), persist to meta.json. No network yet (kernel
+   blocks egress). Tests + tsc.
+3. **Network layer:** per-agent Bun proxy + domain allowlist + port in meta.json +
+   lifecycle (start/resume/teardown), `_all.md` domain baseline.
+4. **Inheritance (union) + validation + `_all.md` interaction**, SPEC.md §2/§7
+   updates, `docs/agent-types/*.md` doc updates.
+5. **Codex parity:** `-s danger-full-access` flip + same sandbox-exec/proxy wrap
+   for codex (§4B). Not optional — codex is a first-class sandboxed CLI.
+6. **Dashboard indicator** (optional): 🔒 for sandboxed agents.
 
 Each phase: `bun test` green + `bunx tsc --noEmit` clean (CLAUDE.md gate), then
 a review cycle (2 worker reviewers) before merge.
 
 ## 7. Open questions for Adam
 
-**RESOLVED:**
+**RESOLVED (Adam, 2026-07-17):**
 - ✅ **Enforcement model → Model B (deny-by-default allowlist).** Agent sees only
   what allow lists permit, minus anything a `deny` rule matches (§4A.0). Fully-open
   is explicit-only (`allowRead: ["/"]`).
-- ✅ **Baseline location → `_all.md` for draft 1** (§4A.7). Static OS/runtime
-  paths + Anthropic domains are listed explicitly in `_all.md` (inspectable,
-  tunable, rides existing merge); only worktree + git-common-dir are runtime-
-  injected as `-D` params. Encoding as an itsybitsy default constant deferred.
-  (Was §7 q8.)
+- ✅ **Baseline location → everything in `_all.md`** (§4A.7, §4 decision 3). Static
+  filesystem paths AND all required domains are listed explicitly in `_all.md`;
+  built out empirically as we experiment — **no code constant, do not
+  over-engineer**. Only worktree + git-common-dir are runtime-injected as `-D`
+  params.
+- ✅ **Proxy topology → one proxy PER AGENT** (§5.2). Port recorded in meta.json;
+  lifecycle tied to the agent (started by start.sh/resume.sh, killed in teardown).
+  Trivial attribution, worth the N small processes.
+- ✅ **Proxy implementation → Bun** (`Bun.serve`/raw TCP), not vendored `proxy.py`
+  — keeps the `ib` binary self-contained.
+- ✅ **Codex → disable its built-in sandbox, use ours** (§4B). `-s workspace-write`
+  → `-s danger-full-access` when `sandbox.enabled`, then wrap in our sandbox-exec
+  + proxy. Single enforcement layer for both CLIs. Network layer applies to codex
+  in v1 (not deferred).
+- ✅ **Failure mode → FAIL HARD, never start unsandboxed.** If `sandbox.enabled:
+  true` and the sandbox can't be established (`sandbox-exec` missing, profile
+  won't compile, proxy won't bind), **do NOT start the agent.** Fail hard: log a
+  meaningful error to the agent's `agent.log` and surface a clear error message to
+  the user (spawn returns non-zero with an explanation). An agent that believes it
+  is sandboxed but isn't is the exact case we refuse to allow. See §5.5.
+- ✅ **Inheritance → union (sum of all `.md` files).** Final permissions = the
+  union of every layer's lists (`_all.md` ∪ type ∪ …), for BOTH `allow*` and
+  `deny`. A child can **add** access (union its allow) or **narrow** access (union
+  its deny); because deny-wins (§4A.0), a child can never re-open what any layer
+  denied. Matches the existing `permissions` merge (`agent-types.ts:459-483`).
+  Only the scalar `enabled` uses last-non-empty-wins.
+- ✅ **`allowedPaths` relationship** (§4 decision 4): sandbox filesystem is the
+  kernel counterpart to the existing `allowedPaths` hook (both deny-by-default
+  allowlists), not a parallel conflicting list.
 
-**STILL OPEN:**
-1. **Proxy topology:** one shared proxy (simpler, harder to attribute
-   connections per-agent) vs one proxy per agent (cleaner, more processes).
-   Recommendation: per-agent.
-2. **Bun-native proxy vs vendoring `proxy.py`:** Bun keeps the binary
-   self-contained; recommend Bun.
-3. **Default-allowed domains:** confirm the exact Anthropic/Claude Code control-
-   plane host list to auto-allow (API, gateway, statsig, sentry) so sandboxed
-   agents can still run at all.
-4. **Codex scope:** filesystem is already sandboxed for codex; do we also want
-   the domain-allowlist network layer for codex agents in v1, or defer?
-5. **Failure mode:** if `sandbox-exec` is unavailable or a profile fails to
-   compile, do we **refuse to spawn** (fail-closed, safest) or **spawn
-   unsandboxed with a loud warning** (fail-open, more usable)? Recommend
-   fail-closed when `sandbox.enabled: true` — an agent that thinks it's
-   sandboxed but isn't is the dangerous case. (Model B makes fail-closed even
-   more clearly correct.)
-6. **Existing `allowedPaths` relationship:** confirm the §4 decision 4 plan
-   (sandbox filesystem is the kernel counterpart to the `allowedPaths` hook, both
-   deny-by-default allowlists) rather than a parallel, conflicting list.
-7. **Inheritance direction under deny-by-default (NEW, from §4 decision 5):** when
-   `_all.md` and a type both set `allowRead`/`allowWrite`, does the child **widen**
-   (union — child can grant itself more) or is `_all.md` a **hard ceiling** the
-   child can only narrow? `deny` should always union (more deny = safer).
-   **Leaning union now that the baseline lives in `_all.md`** (§4A.7): `_all.md`
-   sets the floor, each type adds what it needs — a ceiling model would fight that.
-   Still needs your explicit sign-off.
-8. **Feasibility of `(deny default)` for Claude Code (NEW, decided by spike 1b):**
-   if Claude Code can't boot under a tractable deny-by-default allowlist, do we
-   accept `(allow default)` + broad denies as a fallback, or hold the feature to
-   the strict model? This is answered empirically in §6 phase 1b, not now — flagged
-   so the fallback is a conscious decision, not a silent downgrade.
+**STILL OPEN (empirical — answered by the phase-1 spike, not by decision):**
+1. **Feasibility of `(deny default)` for Claude Code** (spike §6.1b): if Claude
+   Code can't boot under a tractable deny-by-default allowlist, do we accept
+   `(allow default)` + broad denies as a fallback, or hold to the strict model?
+   Conscious decision after the spike, not a silent downgrade. The spike's output
+   also **is** the initial `_all.md` filesystem + domain baseline.
+2. **Codex `danger-full-access` specifics** (spike §4B): exact flag/value in the
+   installed codex version, and whether codex honors `http(s)_proxy` under it.

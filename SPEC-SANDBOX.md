@@ -176,12 +176,16 @@ Design decisions:
    ships. When `true`, the model is deny-by-default: nothing is reachable but the
    baseline (§4A.7) + the explicit allow lists. There is no "sandbox but
    allow-everything" default — openness is opt-in via `allowRead: ["/"]`.
-2. **A required baseline allowlist is always merged in** (§4A.7) so a sandboxed
+2. **A required baseline allowlist is always present** (§4A.7) so a sandboxed
    agent can actually start. Deny-by-default is unusable without it: Claude Code
    needs `~/.claude`, `/tmp`, macOS `/private/var/folders/…` caches, system
-   dylibs, the DNS socket, plus the worktree + git-common-dir. The `.md` lists
-   ADD to this baseline; they never have to re-enumerate it. `deny` can still
-   carve into the baseline (e.g. deny a secret that lives under an allowed root).
+   dylibs, the DNS socket, plus the worktree + git-common-dir. **Adam's call
+   (draft 1): the static part of this baseline is written explicitly in `_all.md`**
+   (inspectable/tunable, rides the existing merge), and **only the runtime-derived
+   paths (worktree, git-common-dir) are injected by code** as Seatbelt `-D`
+   params. Encoding the static list as an itsybitsy default constant is a later
+   optimization. Type `.md`s ADD to the `_all.md` baseline; `deny` still carves
+   holes.
 3. **`api.anthropic.com` (+ Claude's required control-plane hosts) are in the
    network baseline** — auto-allowed, or a sandboxed agent can't reach the model
    at all. Overridable constant, not something each `.md` must remember. Network
@@ -347,41 +351,56 @@ backtracking, no accidental unanchored `.`). Internally the generator translates
 glob→SBPL-regex. If a power-user case ever needs raw regex, add an explicit
 `regex:` prefix later; do **not** expose Seatbelt regex directly in v1.
 
-### 4A.7 The required baseline allowlist (why deny-by-default is still bootable)
+### 4A.7 The required baseline allowlist — lives in `_all.md` (Adam's call, draft 1)
 
 Deny-by-default means an empty allow list = an agent that **can't even start**
 (Claude Code can't read its own binary's dylibs, config, or write its transcript).
-So the generator ALWAYS merges a baseline read/write allowlist in first, then adds
-the `.md`'s `allowRead`/`allowWrite`, then applies `deny` over the union.
+So a baseline read/write allowlist must always be present.
 
-The baseline is a **maintained constant** (`src/sandbox.ts`), not something any
-`.md` re-specifies. Candidate contents (finalize empirically in the phase-1
-spike — the exact set is OS/Claude-version-dependent and MUST be verified, not
-guessed):
+**Decision (Adam, 2026-07-17): for draft 1 the baseline is spelled out
+explicitly in `_all.md`, NOT a hidden constant in `src/sandbox.ts`.** Rationale:
+`_all.md` already merges into every spawned agent (`agent-types.ts` layer files),
+so listing the baseline there makes it **inspectable and tunable** with zero new
+mechanism — every type unions it in for free. Encoding it as an itsybitsy default
+constant is a **later** optimization, once the list is proven. So:
 
-- **Read+write:** the agent's **worktree**, the **git common dir**
-  (`resolveGitRevParsePath` — reuse codex's computation, `ib-commands.ts:4721`),
-  the agent dir (`agent.log`, `meta.json`, `prompt.txt`), the agent's Claude
-  project dir (`~/.claude/projects/<encoded-worktree>` — mirrors `agent-path.ts`
-  rule 9), `/tmp` + `/private/var/folders/**` (macOS per-user temp/caches).
-- **Read-only:** `~/.claude/**` (config/settings, minus anything you want to
-  deny), `/usr/lib`, `/usr/bin`, `/System/**`, `/bin`, `/private/etc` (system
-  libs, resolv.conf, terminfo), the `claude`/`node` binaries + their `node_modules`.
-- **Network baseline (§4):** the Anthropic control-plane domains.
+- The static OS/runtime paths go in `_all.md`'s `sandbox.filesystem.allowRead`
+  / `allowWrite` (and the Anthropic domains in `sandbox.network.domains`). Adam
+  edits one file to tune the floor; no code change.
+- **Only the truly per-agent, runtime-determined paths are injected by code at
+  spawn** — because they don't exist until the worktree is created and can't be
+  written in a static `.md`:
+  - the agent's **worktree** path,
+  - the **git common dir** (`resolveGitRevParsePath` — reuse codex's
+    computation, `ib-commands.ts:4721`),
+  - (candidate) the agent dir + its Claude project dir
+    (`~/.claude/projects/<encoded-worktree>`), if those aren't expressible as a
+    static parent in `_all.md`.
+  These are passed as Seatbelt `-D` params (`WORKTREE`, `GITDIR`, …) by the
+  spawn/resume script, exactly like the reference passes `SECRETS_DIR`.
+
+Candidate static `_all.md` contents (finalize empirically in the phase-1 spike —
+the exact set is OS/Claude-version-dependent and MUST be verified, not guessed):
+
+- **Read+write:** `/tmp`, `/private/var/folders/**` (macOS per-user temp/caches).
+- **Read-only:** `~/.claude/**` (config/settings), `/usr/lib`, `/usr/bin`,
+  `/System/**`, `/bin`, `/private/etc` (system libs, resolv.conf, terminfo), the
+  `claude`/`node` binaries + their `node_modules`.
+- **Network:** the Anthropic control-plane domains.
 
 Two guarantees:
-1. The baseline is applied identically on **spawn and resume** (comes from
-   `src/sandbox.ts`, invoked by both `start.sh` and `resume.sh` generation), so a
+1. Applied identically on **spawn and resume** — the static part rides in via
+   `_all.md` merge (both paths read the same merged type), and the runtime `-D`
+   params are recomputed by both `start.sh` and `resume.sh` generation, so a
    resumed agent isn't accidentally more/less sandboxed.
-2. **`deny` can still carve into the baseline.** `deny: ["~/.ssh"]` works even
-   though `~` isn't in the baseline (it wasn't allowed anyway — deny is
-   belt-and-suspenders); `deny: ["**/.env"]` removes `.env` from the
-   baseline-allowed worktree. Deny is always evaluated last, over the full union.
+2. **`deny` still carves into the baseline.** `deny: ["**/.env"]` removes `.env`
+   from the `_all.md`-allowed worktree; deny is evaluated last over the full union.
 
-**Open sub-question (→ §7):** should the baseline be silently-always-on, or
-visible/overridable in `_all.md` so Adam can inspect and tune the floor? Recommend
-silently-on for the OS paths (users shouldn't need to care) + a documented
-constant they can read, with `deny` as the tuning knob.
+**Implication for merge (§4 decision 5):** because the baseline lives in `_all.md`
+and children **union** their allow lists on top, allow-union (not allow-ceiling)
+is the natural fit here — `_all.md` sets the floor, each type adds what it needs.
+That argues for allow-union after all; still Adam's call (§7 q7), but the
+`_all.md`-baseline decision leans it toward union.
 
 ## 5. Components to build
 
@@ -522,6 +541,11 @@ a review cycle (2 worker reviewers) before merge.
 - ✅ **Enforcement model → Model B (deny-by-default allowlist).** Agent sees only
   what allow lists permit, minus anything a `deny` rule matches (§4A.0). Fully-open
   is explicit-only (`allowRead: ["/"]`).
+- ✅ **Baseline location → `_all.md` for draft 1** (§4A.7). Static OS/runtime
+  paths + Anthropic domains are listed explicitly in `_all.md` (inspectable,
+  tunable, rides existing merge); only worktree + git-common-dir are runtime-
+  injected as `-D` params. Encoding as an itsybitsy default constant deferred.
+  (Was §7 q8.)
 
 **STILL OPEN:**
 1. **Proxy topology:** one shared proxy (simpler, harder to attribute
@@ -546,13 +570,11 @@ a review cycle (2 worker reviewers) before merge.
 7. **Inheritance direction under deny-by-default (NEW, from §4 decision 5):** when
    `_all.md` and a type both set `allowRead`/`allowWrite`, does the child **widen**
    (union — child can grant itself more) or is `_all.md` a **hard ceiling** the
-   child can only narrow? `deny` should always union (more deny = safer). Recommend:
-   `deny` unions; decide allow-union vs allow-ceiling based on whether you trust
-   type authors to widen their own filesystem access.
-8. **Baseline visibility (NEW, from §4A.7):** keep the required OS/runtime baseline
-   as a silent internal constant, or surface it in `_all.md` so you can inspect/tune
-   the floor? Recommend silent constant + documented, with `deny` as the tuning knob.
-9. **Feasibility of `(deny default)` for Claude Code (NEW, decided by spike 1b):**
+   child can only narrow? `deny` should always union (more deny = safer).
+   **Leaning union now that the baseline lives in `_all.md`** (§4A.7): `_all.md`
+   sets the floor, each type adds what it needs — a ceiling model would fight that.
+   Still needs your explicit sign-off.
+8. **Feasibility of `(deny default)` for Claude Code (NEW, decided by spike 1b):**
    if Claude Code can't boot under a tractable deny-by-default allowlist, do we
    accept `(allow default)` + broad denies as a fallback, or hold the feature to
    the strict model? This is answered empirically in §6 phase 1b, not now — flagged

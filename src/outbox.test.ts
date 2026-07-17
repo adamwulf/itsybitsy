@@ -105,6 +105,72 @@ describe("outbox queue", () => {
     expect(await Bun.file(outboxPath(dir)).exists()).toBe(false);
     expect(await Bun.file(outboxLockPath(dir)).exists()).toBe(false);
   });
+
+  // Dedupe: a stuck sender that re-fires the SAME notification every tick must
+  // not grow the queue unbounded. enqueueOutbox caps at one PENDING copy per
+  // (fromAgent, message, raw, team).
+  test("enqueue skips an exact-duplicate (same fromAgent+message+raw+team)", async () => {
+    await enqueueOutbox(dir, { message: "dup", fromAgent: "agent-x", raw: false });
+    await enqueueOutbox(dir, { message: "dup", fromAgent: "agent-x", raw: false });
+    const msgs = await readOutbox(dir);
+    expect(msgs.length).toBe(1);
+  });
+
+  test("the skipped enqueue returns the SAME id as the first (the existing record)", async () => {
+    const first = await enqueueOutbox(dir, { message: "dup", fromAgent: "agent-x", raw: false });
+    const second = await enqueueOutbox(dir, { message: "dup", fromAgent: "agent-x", raw: false });
+    expect(second.id).toBe(first.id);
+  });
+
+  test("a DIFFERENT message from the same sender still appends (length 2)", async () => {
+    await enqueueOutbox(dir, { message: "one", fromAgent: "agent-x", raw: false });
+    await enqueueOutbox(dir, { message: "two", fromAgent: "agent-x", raw: false });
+    const msgs = await readOutbox(dir);
+    expect(msgs.length).toBe(2);
+  });
+
+  test("the SAME message from a DIFFERENT fromAgent still appends (length 2)", async () => {
+    await enqueueOutbox(dir, { message: "dup", fromAgent: "agent-x", raw: false });
+    await enqueueOutbox(dir, { message: "dup", fromAgent: "agent-y", raw: false });
+    const msgs = await readOutbox(dir);
+    expect(msgs.length).toBe(2);
+  });
+
+  test("the same message text with different raw still appends (length 2)", async () => {
+    await enqueueOutbox(dir, { message: "dup", fromAgent: "agent-x", raw: false });
+    await enqueueOutbox(dir, { message: "dup", fromAgent: "agent-x", raw: true });
+    const msgs = await readOutbox(dir);
+    expect(msgs.length).toBe(2);
+  });
+
+  test("the same message text with different team still appends; same team dedupes", async () => {
+    await enqueueOutbox(dir, { message: "dup", fromAgent: "agent-x", raw: false, team: "backend" });
+    // Different team → appends.
+    await enqueueOutbox(dir, { message: "dup", fromAgent: "agent-x", raw: false, team: "frontend" });
+    let msgs = await readOutbox(dir);
+    expect(msgs.length).toBe(2);
+    // Same team as the first → dedupes (still 2).
+    await enqueueOutbox(dir, { message: "dup", fromAgent: "agent-x", raw: false, team: "backend" });
+    msgs = await readOutbox(dir);
+    expect(msgs.length).toBe(2);
+  });
+
+  test("after the pending copy is drained, enqueuing the same message AGAIN appends (dedupe only suppresses while pending)", async () => {
+    const first = await enqueueOutbox(dir, { message: "dup", fromAgent: "agent-x", raw: false });
+    // Second is suppressed while the first is still pending.
+    await enqueueOutbox(dir, { message: "dup", fromAgent: "agent-x", raw: false });
+    expect((await readOutbox(dir)).length).toBe(1);
+
+    // Drain the pending copy.
+    await rewriteOutboxRemoving(dir, new Set([first.id]));
+    expect((await readOutbox(dir)).length).toBe(0);
+
+    // Same message enqueues fresh — dedupe does not permanently blacklist it.
+    const again = await enqueueOutbox(dir, { message: "dup", fromAgent: "agent-x", raw: false });
+    const msgs = await readOutbox(dir);
+    expect(msgs.length).toBe(1);
+    expect(again.id).not.toBe(first.id);
+  });
 });
 
 describe("outbox lock", () => {

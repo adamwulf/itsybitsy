@@ -97,12 +97,41 @@ export function outboxLockPath(dir: string): string {
  * whole file, parses complete lines, and rewrites only the not-yet-delivered
  * remainder. An append that lands mid-drain is simply picked up next drain.
  *
+ * Dedupe: before appending, we scan the current pending queue and skip the
+ * append if an identical message from the same sender is ALREADY queued (not
+ * yet drained) — matching on `(fromAgent, message, raw, team)`. This caps the
+ * queue at one pending copy per that tuple, so a stuck sender that re-fires the
+ * SAME notification every tick (e.g. a watchdog whose inline drain into a dead
+ * tmux keeps failing) can't grow the queue unbounded. On a skip we return the
+ * pre-existing matching record instead of creating a new one. This is
+ * best-effort: the read+append is intentionally NOT lock-guarded (the drain
+ * lock guards delivery, not enqueue), so a rare concurrent double from two
+ * separate processes is acceptable and harmless — the goal is bounding runaway
+ * growth from a single re-firing sender, not exactly-once delivery. Dedupe only
+ * suppresses while a copy is still PENDING: once the queued copy is drained, an
+ * identical message enqueues fresh (nothing is permanently blacklisted).
+ *
  * `id` and `enqueuedAtMs` are injectable for deterministic tests.
  */
 export async function enqueueOutbox(
   dir: string,
   msg: Omit<OutboxMessage, "id" | "enqueuedAtMs"> & { id?: string; enqueuedAtMs?: number },
 ): Promise<OutboxMessage> {
+  // Best-effort dedupe: if an identical pending message from the same sender is
+  // already queued, return it instead of appending a second copy. Matches on
+  // everything that makes two messages "the same" — sender, text, raw flag, and
+  // team — deliberately ignoring id/enqueuedAtMs (always unique/irrelevant).
+  // readOutbox returns [] on a missing file, so this is safe before mkdir.
+  const existing = await readOutbox(dir);
+  const dup = existing.find(
+    (m) =>
+      m.fromAgent === msg.fromAgent &&
+      m.message === msg.message &&
+      m.raw === msg.raw &&
+      m.team === msg.team,
+  );
+  if (dup) return dup;
+
   const record: OutboxMessage = {
     id: msg.id ?? crypto.randomUUID(),
     message: msg.message,

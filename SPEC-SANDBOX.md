@@ -22,8 +22,8 @@ the reference does not do.
 
 | Reference behavior | What we need instead |
 |---|---|
-| Single hardcoded `sandbox.sb`, allow-everything-except | **Generated per-agent** profile from frontmatter |
-| One `-D` param: `SECRETS_DIR` (deny one path) | Arbitrary allow/deny path lists |
+| Single hardcoded `sandbox.sb`, **`(allow default)`** (allow-everything-except) | **Generated per-agent**, **`(deny default)`** (Model B: allow only what's listed) |
+| One `-D` param: `SECRETS_DIR` (deny one path) | Per-agent allow lists (the primary knob) + deny lists that carve holes |
 | Network = **localhost-only** + Python proxy | Same shape, but proxy enforces a **per-agent allowlist** |
 | Domain filtering = **blocklist** (`blocked.txt`), global | **Allowlist** (Adam's ask), per-agent |
 | Two manual terminals (`start-proxy.sh`, `start-claude.sh`) | Proxy lifecycle owned by itsybitsy; agents wrapped automatically |
@@ -141,49 +141,247 @@ the spike:
 
 ## 4. Proposed frontmatter schema
 
+**Enforcement model: DENY-BY-DEFAULT ALLOWLIST (Model B, confirmed by Adam).**
+A sandboxed agent can see/reach **nothing** except what the `.md` file explicitly
+allows. The `deny` list carves holes *inside* the allowed set. A wide-open agent
+is possible — but only by an **explicit** `allowRead: ["/"]` in the `.md`, never
+by default. This is the opposite of the reference project's allow-by-default
+`(allow default)` skeleton; §5.1 flips it to `(deny default)`.
+
 ```yaml
 name: netletworker
 sandbox:
-  enabled: true              # default false → today's unsandboxed behavior
+  enabled: true              # default false → agent runs UNSANDBOXED (today's behavior)
+                             # true → deny-by-default; only what's listed below is reachable
   filesystem:
-    # reuse allowedPaths semantics; worktree + git-common-dir always allowed
+    # Baseline (worktree, git-common-dir, ~/.claude, OS/runtime paths, /tmp, DNS
+    # socket) is ALWAYS merged in so the agent can boot — see §4A.7. The lists
+    # below ADD to that baseline.
     allowRead:  ["~/.config/foo"]
     allowWrite: ["/tmp/agent-scratch"]
-    deny:       ["~/.ssh", "~/.aws"]   # deny wins over allow
+    deny:       ["**/.env", "~/.ssh"]   # carves holes inside the allowed set; deny always wins
+    # Fully-open escape hatch (must be explicit, per Adam):
+    #   allowRead: ["/"]
+    #   allowWrite: ["/"]
   network:
-    mode: allowlist          # allowlist | blocklist | off (kernel blocks all egress except proxy)
+    # deny-by-default too: kernel blocks ALL non-localhost egress; the proxy then
+    # permits ONLY these domains. No "blocklist" mode in v1 — allowlist is the model.
     domains: ["api.anthropic.com", "github.com", "*.githubusercontent.com"]
 ```
 
 Design decisions:
 
-1. **`sandbox.enabled` defaults to `false`.** Zero behavior change for every
-   existing agent type until a type opts in. This is mandatory — a sandbox that
-   breaks `git`, `claude`'s own telemetry, or MCP servers by default would make
-   the tool unusable.
-2. **`api.anthropic.com` (and Claude's required hosts) must be reachable** or the
-   agent can't talk to the model at all. When `sandbox.enabled` and network is
-   restrictive, **auto-inject the Claude/Anthropic control-plane domains** into
-   the allowlist (statsig, sentry, anthropic API, the model gateway). Make this
-   an overridable constant, not something each `.md` must remember.
-3. **Filesystem reuses `allowedPaths`**: if `sandbox.filesystem` is omitted but
-   `allowedPaths` is set, the seatbelt profile is derived from `allowedPaths`
-   (kernel-enforce what the hook already advises). If both are set,
-   `sandbox.filesystem` is the authoritative superset for the kernel layer while
-   `allowedPaths` remains the hook layer. Document the relationship in SPEC §2.
-4. **Inheritance (needs a deliberate, mixed rule).** ⚠️ A nested `sandbox:`
-   object would, if handled naively, merge like `permissions` — **union across
-   the chain** (`mergeRawFrontmatters` :459-467) — which is right for the
-   **list** fields (`domains`, path lists: union across `_all.md` → type) but
-   **wrong for the scalars** (`enabled`, `network.mode`: those need
-   last-non-empty-wins, like `model`/`effort` at :415-434). So `sandbox` is
-   neither a pure `permissions`-style nor a pure scalar merge — it's a
-   **per-subfield mix**. This must be implemented explicitly in the merge logic
-   (`src/agent-types.ts:459-483`), not by dropping the object into either
-   existing bucket. Security note: for a *sandbox*, union-on-`domains` means a
-   child can only ever **widen** the allowlist inherited from `_all.md`, never
-   narrow it — decide whether that's the intended trust model (it likely is:
-   `_all.md` sets a floor, types add to it).
+1. **`sandbox.enabled` defaults to `false` → the agent runs fully unsandboxed**
+   (exactly today's behavior). This is the ONLY unsandboxed path once the feature
+   ships. When `true`, the model is deny-by-default: nothing is reachable but the
+   baseline (§4A.7) + the explicit allow lists. There is no "sandbox but
+   allow-everything" default — openness is opt-in via `allowRead: ["/"]`.
+2. **A required baseline allowlist is always merged in** (§4A.7) so a sandboxed
+   agent can actually start. Deny-by-default is unusable without it: Claude Code
+   needs `~/.claude`, `/tmp`, macOS `/private/var/folders/…` caches, system
+   dylibs, the DNS socket, plus the worktree + git-common-dir. The `.md` lists
+   ADD to this baseline; they never have to re-enumerate it. `deny` can still
+   carve into the baseline (e.g. deny a secret that lives under an allowed root).
+3. **`api.anthropic.com` (+ Claude's required control-plane hosts) are in the
+   network baseline** — auto-allowed, or a sandboxed agent can't reach the model
+   at all. Overridable constant, not something each `.md` must remember. Network
+   is allowlist-only (deny-by-default): kernel blocks all non-localhost egress,
+   the proxy permits only `domains` + the Anthropic baseline.
+4. **Relationship to the existing `allowedPaths` hook.** `allowedPaths`
+   (`agent-path.ts`) is already a deny-by-default *allowlist* at the hook layer —
+   the same model, one layer up. `sandbox.filesystem.allowRead`/`allowWrite` are
+   the **kernel-enforced** counterpart. If `sandbox.filesystem` is omitted but
+   `allowedPaths` is set, derive the kernel allowlist from `allowedPaths`. If both
+   are set, `sandbox.filesystem` is authoritative for the kernel and `allowedPaths`
+   stays the hook layer; keep them consistent (§4A.1). Document in SPEC §2.
+5. **Inheritance (deliberate, mixed rule).** ⚠️ A nested `sandbox:` object would,
+   if handled naively, merge like `permissions` — **union across the chain**
+   (`mergeRawFrontmatters` :459-467) — right for the **list** fields (`domains`,
+   `allowRead`, `allowWrite`, `deny`: union across `_all.md` → type) but **wrong
+   for the scalar** `enabled` (needs last-non-empty-wins, like `model`/`effort`
+   at :415-434). Implement the per-subfield mix explicitly at
+   `src/agent-types.ts:459-483`. ⚠️ **Security subtlety under deny-by-default:**
+   union-ing `allowRead`/`allowWrite` means a child can only ever **widen** access
+   inherited from `_all.md` — a child can grant itself more filesystem than its
+   base layer intended. If `_all.md` is meant to be a hard ceiling, allow-lists
+   must NOT union (child intersects or is capped), while `deny` SHOULD union
+   (deny is monotonic — more deny is always safer). **Decide the trust direction
+   deliberately: deny unions up (safer), allow probably should NOT.** This is the
+   inverse of the domains case and is easy to get backwards.
+
+## 4A. Path pattern format for allow/deny lists (AUTHORITATIVE)
+
+This is the exact, user-facing contract for entries in `sandbox.filesystem`'s
+`allowRead` / `allowWrite` / `deny` lists. **We own the grammar and compile it to
+both enforcement layers**, so the rules below are what itsybitsy guarantees —
+independent of Seatbelt or hook internals.
+
+### 4A.0 The core rule (deny-by-default allowlist)
+
+For any absolute path `P` and operation `op ∈ {read, write}`:
+
+```
+visible(P, op)  ⟺  matches(P, allow_op)  AND  NOT matches(P, deny)
+```
+
+where `allow_read = baseline_read ∪ allowRead`, `allow_write = baseline_write ∪
+allowWrite`, and `baseline_*` is the always-merged required set (§4A.7). In
+words, and exactly as Adam stated it:
+
+> **The agent can only see what's in the allow lists, unless that file also
+> matches a deny rule.**
+
+- **Not in any allow list → invisible** (kernel `EPERM`). This is the default for
+  every path once `enabled: true`.
+- **In an allow list AND in a deny rule → denied.** `deny` always wins; it carves
+  holes *inside* the allowed set. There is no allow rule that can re-open a
+  denied path.
+- **`write` implies nothing about `read`** — they are separate allow lists.
+  Common case: `allowRead` a config dir, don't `allowWrite` it. (A path must be
+  read-allowed to be written in practice, but the profile expresses them
+  independently; document that writing also needs read where the tool reads
+  before writing.)
+- **Fully-open** is just `allowRead: ["/"]` (and/or `allowWrite: ["/"]`) — an
+  explicit `/` subtree allow. Even then, `deny` still carves holes (e.g.
+  `allowRead: ["/"]` + `deny: ["**/.env"]` = see everything except `.env` files).
+
+### 4A.1 The two layers a pattern compiles to
+
+Every pattern is enforced twice, and the generator emits BOTH from one entry:
+
+| Layer | Engine | What it matches | Where |
+|---|---|---|---|
+| **Kernel** (real enforcement) | Seatbelt SBPL | absolute paths | `sandbox.sb` — `subpath` / `literal` / `regex` |
+| **Hook** (advisory, better errors) | `agent-path.ts` | absolute paths | ordered rule cascade |
+
+Both operate on **fully-resolved absolute paths** (symlinks + `~` + `.`/`..`
+normalized). Patterns are never matched against relative paths.
+
+### 4A.2 The pattern grammar (exactly three anchor forms)
+
+An entry is classified by how it starts. **There is no other form** — anything
+else is a spec error the generator rejects at spawn (fail-closed).
+
+1. **Absolute path** — starts with `/`
+   `/Users/adam/.aws`
+   → matches that path **and everything under it** (directory subtree).
+   Compiles to Seatbelt `(subpath "/Users/adam/.aws")`.
+
+2. **Home-anchored path** — starts with `~/`
+   `~/.ssh`
+   → `~` expands to the agent's `$HOME`, then same subtree semantics as (1).
+
+3. **Glob pattern** — contains `*`, `**`, or `?`
+   `**/.env`, `/Users/adam/**/*.pem`, `~/secrets/*`
+   → compiled to a Seatbelt `(regex #"…")` via a fixed, documented glob→regex
+   translation (§4A.4). This is the ONLY form that can match by basename
+   anywhere on the filesystem.
+
+**Bare names are rejected.** `.env` (no `/`, no glob metachar) is a spec error —
+it is neither absolute, home-anchored, nor a glob, so its intent is ambiguous
+("relative to what?"). The generator refuses to spawn and tells you to write
+`**/.env` (anywhere) or `/abs/path/.env` (one file). This is deliberate: a
+silently-misinterpreted deny rule is a security footgun.
+
+### 4A.3 Glob semantics (what the metachars mean)
+
+Standard shell-glob meaning, matched against the absolute path:
+
+| Token | Matches |
+|---|---|
+| `*` | any run of chars **except `/`** (one path segment) |
+| `**` | any run of chars **including `/`** (spans directories, incl. zero) |
+| `?` | exactly one char except `/` |
+| everything else | literal (`.` is a literal dot, NOT regex "any char") |
+
+So:
+- `**/.env` → any path ending in `/.env`, at any depth → **every `.env` on the
+  filesystem** (this is the answer to "disallow all `.env` even in the worktree").
+- `~/*.pem` → `.pem` files directly in `$HOME`, but not in subdirs.
+- `~/**/*.pem` → `.pem` files anywhere under `$HOME`.
+- `/etc/ssh` → the whole `/etc/ssh` subtree (absolute form, not a glob).
+
+### 4A.4 Worked example — deny ALL `.env`, even inside the worktree
+
+```yaml
+sandbox:
+  enabled: true
+  filesystem:
+    deny: ["**/.env"]
+```
+
+This compiles to, and the generator guarantees, BOTH of:
+
+- **Kernel (`sandbox.sb`)** — appended *after* the worktree-allow rules so it
+  wins (SBPL = last matching rule decides):
+  ```
+  (deny file-read*  (regex #"/\.env$"))
+  (deny file-write* (regex #"/\.env$"))
+  ```
+- **Hook (`agent-path.ts`)** — a deny check inserted **before rule 7** (the
+  "path within worktree → allow" rule at `agent-path.ts:391`). ⚠️ This ordering
+  is the crux: today rule 7 allows anything in the worktree, so a `.env` deny
+  placed *after* it would never fire for the project's own `.env`. The
+  sandbox-deny list must be evaluated **ahead of** the worktree allow in the
+  cascade. (New rule slot, call it rule 6.5.)
+
+**Precedence rule (both layers): `deny` wins over any allow, always.** A path
+matched by both an `allowWrite` and a `deny` entry is denied. Document this as
+absolute — no "most-specific-match" subtlety.
+
+### 4A.5 The worktree-vs-deny tension (call this out to users)
+
+The worktree is readable/writable because it's in the **baseline allowlist**
+(§4A.7) — not because of any allow-by-default. A `deny: ["**/.env"]` **carves a
+hole through that baseline inside the worktree too** — the agent will get `EPERM`
+reading its own project `.env`. That is exactly what "even in the worktree" means
+and is the intended behavior for this rule, but it WILL surprise an agent that
+legitimately needs `.env`. The
+`session-start` hook (§5.4) should surface active deny patterns in the agent's
+prompt so it doesn't burn turns fighting an unfixable `EPERM`.
+
+### 4A.6 Regex is an escape hatch, not the interface
+
+Users write **globs**, never raw regex — globs are safer (no catastrophic
+backtracking, no accidental unanchored `.`). Internally the generator translates
+glob→SBPL-regex. If a power-user case ever needs raw regex, add an explicit
+`regex:` prefix later; do **not** expose Seatbelt regex directly in v1.
+
+### 4A.7 The required baseline allowlist (why deny-by-default is still bootable)
+
+Deny-by-default means an empty allow list = an agent that **can't even start**
+(Claude Code can't read its own binary's dylibs, config, or write its transcript).
+So the generator ALWAYS merges a baseline read/write allowlist in first, then adds
+the `.md`'s `allowRead`/`allowWrite`, then applies `deny` over the union.
+
+The baseline is a **maintained constant** (`src/sandbox.ts`), not something any
+`.md` re-specifies. Candidate contents (finalize empirically in the phase-1
+spike — the exact set is OS/Claude-version-dependent and MUST be verified, not
+guessed):
+
+- **Read+write:** the agent's **worktree**, the **git common dir**
+  (`resolveGitRevParsePath` — reuse codex's computation, `ib-commands.ts:4721`),
+  the agent dir (`agent.log`, `meta.json`, `prompt.txt`), the agent's Claude
+  project dir (`~/.claude/projects/<encoded-worktree>` — mirrors `agent-path.ts`
+  rule 9), `/tmp` + `/private/var/folders/**` (macOS per-user temp/caches).
+- **Read-only:** `~/.claude/**` (config/settings, minus anything you want to
+  deny), `/usr/lib`, `/usr/bin`, `/System/**`, `/bin`, `/private/etc` (system
+  libs, resolv.conf, terminfo), the `claude`/`node` binaries + their `node_modules`.
+- **Network baseline (§4):** the Anthropic control-plane domains.
+
+Two guarantees:
+1. The baseline is applied identically on **spawn and resume** (comes from
+   `src/sandbox.ts`, invoked by both `start.sh` and `resume.sh` generation), so a
+   resumed agent isn't accidentally more/less sandboxed.
+2. **`deny` can still carve into the baseline.** `deny: ["~/.ssh"]` works even
+   though `~` isn't in the baseline (it wasn't allowed anyway — deny is
+   belt-and-suspenders); `deny: ["**/.env"]` removes `.env` from the
+   baseline-allowed worktree. Deny is always evaluated last, over the full union.
+
+**Open sub-question (→ §7):** should the baseline be silently-always-on, or
+visible/overridable in `_all.md` so Adam can inspect and tune the floor? Recommend
+silently-on for the OS paths (users shouldn't need to care) + a documented
+constant they can read, with `deny` as the tuning knob.
 
 ## 5. Components to build
 
@@ -191,27 +389,51 @@ Design decisions:
 
 Pure function: `(SandboxConfig, worktreePath, gitCommonDir, agentDir) → string`
 producing the `.sb` text. Writes `sandbox.sb` into the agent dir next to
-`start.sh`/`meta.json`. Mirrors the reference `sandbox.sb` shape:
+`start.sh`/`meta.json`. **⚠️ Deny-by-default (Model B) — the profile skeleton is
+`(deny default)`, the INVERSE of the reference's `(allow default)`.** SBPL uses
+last-matching-rule-wins, so the structure is: deny everything → allow the
+baseline+config allowlist → re-deny the config `deny` holes last (so deny wins):
 
 ```
 (version 1)
-(allow default)
+(deny default)                                   ;; nothing is permitted unless re-allowed below
+
+;; ---- baseline + user allowRead/allowWrite (§4A.7) ----
+(allow process*)                                 ;; spawn children, exec (needed for git, node)
+(allow sysctl-read) (allow mach-lookup ...)      ;; minimal syscalls Claude/node need to boot
+(allow file-read*  (subpath (param "WORKTREE")))
+(allow file-write* (subpath (param "WORKTREE")))
+(allow file-read*  (subpath (param "GITDIR")))
+(allow file-write* (subpath (param "GITDIR")))
+(allow file-read*  (subpath (param "ALLOW_R_0")) ...)   ;; from allowRead + read baseline
+(allow file-write* (subpath (param "ALLOW_W_0")) ...)   ;; from allowWrite + write baseline
+;; glob-form allows compile to (regex #"…") instead of (subpath …)
+
+;; ---- network: deny-by-default egress, localhost hole for the proxy ----
 (deny network*)
-(allow network-outbound (literal "/private/var/run/mDNSResponder"))
+(allow network-outbound (literal "/private/var/run/mDNSResponder"))   ;; DNS
 (allow network-outbound (remote unix-socket))
-(allow network-outbound (remote ip "localhost:*"))
-(allow network-inbound (local ip "localhost:*"))
-;; filesystem denies from config (deny wins)
-(deny file-read*  (subpath (param "DENY_0")) ...)
-(deny file-write* (subpath (param "DENY_0")) ...)
+(allow network-outbound (remote ip "localhost:*"))                    ;; only exit = our proxy
+(allow network-inbound  (local ip "localhost:*"))
+
+;; ---- config deny list LAST so it wins over every allow above (§4A.0) ----
+(deny file-read*  (subpath (param "DENY_0")) (regex #"…") ...)
+(deny file-write* (subpath (param "DENY_0")) (regex #"…") ...)
 ```
 
 Uses `-D` params for paths (never string-interpolate paths into the profile —
 shell-injection surface; the codebase already `shellQuote`s everything). Unit-
-testable in isolation (`bun test`), no spawn required. Note: the reference
-profile is `(allow default)` then carve-outs; an allowlist-of-writable-paths
-model (deny-write-default, allow specific) is a bigger profile — start with the
-reference's allow-default-deny-secrets shape and iterate.
+testable in isolation (`bun test`), no spawn required.
+
+**⚠️ The hard part is the baseline, not the config.** `(deny default)` +
+enumerate-everything is exactly why the reference punted to `(allow default)`.
+Getting Claude Code to boot under `(deny default)` requires discovering the full
+set of syscalls/paths it touches — this is the bulk of the phase-1 spike (§6).
+The syscall allows above (`process*`, `mach-lookup`, `sysctl-read`, dylib reads)
+are illustrative, NOT verified. Expect iteration: launch, hit an `EPERM`/kill,
+add the minimal allow, repeat, until claude runs clean. Consider generating a
+permissive-but-logged profile first (Seatbelt `(trace …)` / `(with report)`) to
+harvest the needed rules, then tighten.
 
 ### 5.2 Domain proxy — `src/sandbox-proxy.ts` + lifecycle
 
@@ -268,11 +490,20 @@ reference's allow-default-deny-secrets shape and iterate.
 
 ## 6. Build phases
 
-1. **Spike (blocking):** Wrap one real claude spawn in `sandbox-exec -f` by hand
-   with the reference profile; confirm (a) claude still starts, (b) `$!`/`pgrep`
-   PID discovery + watchdog still work, (c) git operations in the worktree
-   succeed, (d) `api.anthropic.com` reachable only through the proxy. **If PID
-   discovery or watchdog breaks under sandbox-exec, the whole design changes.**
+1. **Spike (blocking) — two things to prove:**
+   - **(1a) Plumbing:** wrap one real claude spawn in `sandbox-exec -f` by hand;
+     confirm (a) claude starts, (b) `$!`/`pgrep` PID discovery + watchdog still
+     work (§3.3 hazard), (c) git ops in the worktree succeed, (d)
+     `api.anthropic.com` reachable only through the proxy. **If PID discovery or
+     watchdog breaks under sandbox-exec, the whole design changes.**
+   - **(1b) Boot Claude under `(deny default)`:** THE hard one for Model B.
+     Start from the reference's `(allow default)` to prove plumbing, then invert
+     to `(deny default)` + baseline and iteratively add the minimal allows until
+     claude runs clean (harvest via a `(with report)`/trace profile). The output
+     of this spike **is** the §4A.7 baseline constant. If Claude Code can't be
+     made to boot under `(deny default)` with a tractable allowlist, fall back to
+     `(allow default)` + broad denies and tell Adam the model can't be as strict
+     as Model B wants. **Do not ship a baseline that wasn't empirically derived.**
 2. **Filesystem layer:** `src/sandbox.ts` generator + `sandbox.enabled` +
    `sandbox.filesystem` frontmatter, wrap spawn+resume, no network yet
    (kernel blocks egress, proxy allowlists nothing but Anthropic). Tests + tsc.
@@ -287,6 +518,12 @@ a review cycle (2 worker reviewers) before merge.
 
 ## 7. Open questions for Adam
 
+**RESOLVED:**
+- ✅ **Enforcement model → Model B (deny-by-default allowlist).** Agent sees only
+  what allow lists permit, minus anything a `deny` rule matches (§4A.0). Fully-open
+  is explicit-only (`allowRead: ["/"]`).
+
+**STILL OPEN:**
 1. **Proxy topology:** one shared proxy (simpler, harder to attribute
    connections per-agent) vs one proxy per agent (cleaner, more processes).
    Recommendation: per-agent.
@@ -301,7 +538,22 @@ a review cycle (2 worker reviewers) before merge.
    compile, do we **refuse to spawn** (fail-closed, safest) or **spawn
    unsandboxed with a loud warning** (fail-open, more usable)? Recommend
    fail-closed when `sandbox.enabled: true` — an agent that thinks it's
-   sandboxed but isn't is the dangerous case.
-6. **Existing `allowedPaths` relationship:** confirm the §4.3 plan (sandbox
-   filesystem derives from / supersedes `allowedPaths`) rather than introducing a
-   parallel, conflicting list.
+   sandboxed but isn't is the dangerous case. (Model B makes fail-closed even
+   more clearly correct.)
+6. **Existing `allowedPaths` relationship:** confirm the §4 decision 4 plan
+   (sandbox filesystem is the kernel counterpart to the `allowedPaths` hook, both
+   deny-by-default allowlists) rather than a parallel, conflicting list.
+7. **Inheritance direction under deny-by-default (NEW, from §4 decision 5):** when
+   `_all.md` and a type both set `allowRead`/`allowWrite`, does the child **widen**
+   (union — child can grant itself more) or is `_all.md` a **hard ceiling** the
+   child can only narrow? `deny` should always union (more deny = safer). Recommend:
+   `deny` unions; decide allow-union vs allow-ceiling based on whether you trust
+   type authors to widen their own filesystem access.
+8. **Baseline visibility (NEW, from §4A.7):** keep the required OS/runtime baseline
+   as a silent internal constant, or surface it in `_all.md` so you can inspect/tune
+   the floor? Recommend silent constant + documented, with `deny` as the tuning knob.
+9. **Feasibility of `(deny default)` for Claude Code (NEW, decided by spike 1b):**
+   if Claude Code can't boot under a tractable deny-by-default allowlist, do we
+   accept `(allow default)` + broad denies as a fallback, or hold the feature to
+   the strict model? This is answered empirically in §6 phase 1b, not now — flagged
+   so the fallback is a conscious decision, not a silent downgrade.

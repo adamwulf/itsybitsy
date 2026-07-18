@@ -153,15 +153,22 @@ the `sandbox` object). So `sandbox:` is a single object whose children are the
 scalar `enabled` and the four lists directly — NO `filesystem:`/`network:`
 sub-objects:
 
+⚠️ **NO trailing inline `#` comments.** The parser strips only FULL-LINE comments
+(`agent-types.ts:102`); a trailing `# …` reaches the value unstripped, so
+`enabled: true  # note` parses to the truthy STRING `"true  # note"` (and
+`enabled: false # note` would ALSO be truthy!), and `deny: [...]  # note` loses
+its closing `]` and the whole list silently becomes one garbage string — the
+exact footgun §4A.2 warns about. Keep comments on their own lines only:
+
 ```yaml
 name: netletworker
 sandbox:
-  enabled: true              # default false → agent runs UNSANDBOXED (today's behavior)
-                             # true → deny-by-default; only what's listed below is reachable
-  # Filesystem (baseline in §4A.7 is always merged in; these ADD to it):
+  enabled: true
+  # Filesystem (the §4A.7 baseline is always merged in; these ADD to it):
   allowRead:  ["~/.config/foo"]
-  allowWrite: ["/tmp/agent-scratch"]
-  deny:       ["**/.env", "~/.ssh"]   # carves holes inside the allowed set; deny always wins
+  allowWrite: ["/private/tmp/agent-scratch"]
+  # deny carves holes inside the allowed set; deny always wins:
+  deny:       ["**/.env", "~/.ssh"]
   # Fully-open escape hatch (must be explicit, per Adam): allowRead: ["/"]
   # Network — deny-by-default; kernel blocks all non-localhost egress, proxy
   # permits ONLY these (allowlist only, no blocklist mode in v1):
@@ -169,10 +176,12 @@ sandbox:
 ```
 
 This is structurally identical to the existing `permissions: {allow, deny}` block,
-so it parses today with no parser changes. (Alternative considered and rejected:
-teaching the parser two-level nesting — more code, and the flat form reads fine.)
-The `AgentType.sandbox` TypeScript type still models these as grouped fields
-internally; only the `.md` surface is flat.
+so it parses today with no parser changes — **provided** the validator rejects a
+non-boolean `enabled` and non-array lists (§8 T-2), which also catches an
+accidental inline comment. (Alternative considered and rejected: teaching the
+parser two-level nesting or inline-comment stripping — more code, and the flat
+comment-free form reads fine.) The `AgentType.sandbox` TypeScript type still
+models these as grouped fields internally; only the `.md` surface is flat.
 
 Design decisions:
 
@@ -183,7 +192,7 @@ Design decisions:
    allow-everything" default — openness is opt-in via `allowRead: ["/"]`.
 2. **A required baseline allowlist is always present** (§4A.7) so a sandboxed
    agent can actually start. Deny-by-default is unusable without it: Claude Code
-   needs `~/.claude`, `/tmp`, macOS `/private/var/folders/…` caches, system
+   needs `~/.claude`, `/private/tmp`, macOS `/private/var/folders/…` caches, system
    dylibs, the DNS socket, plus the worktree + git-common-dir. **Adam's call
    (draft 1): the static part of this baseline is written explicitly in `_all.md`**
    (inspectable/tunable, rides the existing merge), and **only the runtime-derived
@@ -332,8 +341,7 @@ So:
 ```yaml
 sandbox:
   enabled: true
-  filesystem:
-    deny: ["**/.env"]
+  deny: ["**/.env"]
 ```
 
 This compiles to, and the generator guarantees, BOTH of:
@@ -404,7 +412,9 @@ constant is a **later** optimization, once the list is proven. So:
 Candidate static `_all.md` contents (finalize empirically in the phase-1 spike —
 the exact set is OS/Claude-version-dependent and MUST be verified, not guessed):
 
-- **Read+write:** `/tmp`, `/private/var/folders/**` (macOS per-user temp/caches).
+- **Read+write:** `/private/tmp`, `/private/var/folders/**` (macOS per-user
+  temp/caches). ⚠️ **`/private/tmp`, NOT `/tmp`** — see the canonical-path note
+  just below; the earlier `/tmp` wording was the bug this warning fixes.
   ⚠️ **NOT `/tmp`** — seatbelt matches CANONICAL paths, and `/tmp` canonicalizes
   to `/private/tmp`; a `subpath` rule on `/tmp` will not match. Use `/private/tmp`
   (consistent with `/private/etc`, `/private/var/folders` already listed).
@@ -721,9 +731,15 @@ written/executed, so nothing launches on a failed precondition.
 1. **Spike (blocking) — two things to prove:**
    - **(1a) Plumbing:** wrap one real claude spawn in `sandbox-exec -f` by hand;
      confirm (a) claude starts, (b) `$!`/`pgrep` PID discovery + watchdog still
-     work (§3.3 hazard), (c) git ops in the worktree succeed, (d)
-     `api.anthropic.com` reachable only through the proxy. **If PID discovery or
-     watchdog breaks under sandbox-exec, the whole design changes.**
+     work (§3.3), (c) git ops in the worktree succeed, (d) `api.anthropic.com`
+     reachable only through the proxy. ⚠️ **PID check must assert the discovered
+     pid's actual `comm`/argv0 is `claude` — not merely that `pgrep -f claude`
+     returns *a* pid** (G-4). `pgrep -P <panePid> -f claude` (`agent-lifecycle.ts:510`)
+     matches on the full cmdline, and the `sandbox-exec` wrapper's argv also
+     contains "claude"; so if sandbox-exec did NOT exec-in-place, discovery would
+     look green while `kill`/`wait` target the wrapper instead of claude. Verify
+     the pid *is* claude. **If PID discovery targets the wrong process, the design
+     changes.**
    - **(1b) Boot Claude under `(deny default)`:** THE hard one for Model B.
      Start from the reference's `(allow default)` to prove plumbing, then invert
      to `(deny default)` + baseline and iteratively add the minimal allows until
@@ -752,6 +768,19 @@ written/executed, so nothing launches on a failed precondition.
        `osxkeychain` credential helper (mach). Note SSH remotes CANNOT work (ssh
        ignores `http_proxy`; port-22 egress is kernel-blocked) — fine for local
        branches, but document it.
+     - **`~/.claude.json`** (G-1) — the top-level FILE, a *sibling* of `~/.claude/`,
+       NOT covered by `~/.claude/**`. Claude Code reads/writes it at startup
+       (oauth/account, project trust, onboarding) → likely boot-blocker. Baseline
+       must allow the file read+write.
+     - **Dev toolchain / repo gate** (G-2) — every agent's gate here is `bun test` +
+       `bunx tsc`. Needs `~/.bun` read+write (cache) and `registry.npmjs.org`
+       through the proxy (`bunx`/`bun install`). Spike must **run the repo's real
+       build/test loop under the profile**, not just boot claude.
+     - **`~/.itsybitsy/**` reads** (G-3) — running `ib` needs more than the
+       `agents/**` write: `agent-types/*.md` (new-agent re-parses types),
+       `config.json`, the repo registry, and the watch-log append inside
+       `newAgent` (`ib-commands.ts:5216`). Simplest baseline: read `~/.itsybitsy/**`
+       + write `~/.itsybitsy/agents/**` (+ the watch log).
      - **`ib` smoke test under the profile:** `ib send` / `ib list` / (for managers)
        `ib new-agent` must succeed — validates §4C.1 baseline paths.
      - **MCP server**: boot an agent with a real MCP server configured (§4C.4) —
@@ -812,8 +841,10 @@ a review cycle (2 worker reviewers) before merge.
   union of every layer's lists (`_all.md` ∪ type ∪ …), for BOTH `allow*` and
   `deny`. A child can **add** access (union its allow) or **narrow** access (union
   its deny); because deny-wins (§4A.0), a child can never re-open what any layer
-  denied. Matches the existing `permissions` merge (`agent-types.ts:459-483`).
-  Only the scalar `enabled` uses last-non-empty-wins.
+  denied. Modeled on (not free reuse of) the existing `permissions` merge
+  (`agent-types.ts:459-483`). The scalar `enabled` uses **OR-merge** (any layer
+  `true` wins) — NOT last-non-empty-wins — so a leaf type can't switch off a
+  sandbox a parent layer turned on (§4 decision 5, §8C).
 - ✅ **`allowedPaths` relationship** (§4 decision 4): sandbox filesystem is the
   kernel counterpart to the existing `allowedPaths` hook (both deny-by-default
   allowlists), not a parallel conflicting list.

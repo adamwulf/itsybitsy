@@ -195,17 +195,19 @@ Design decisions:
    `api.anthropic.com` (+ Claude's required control-plane hosts) must be reachable
    or a sandboxed agent can't reach the model at all — but rather than bake an
    Anthropic host list into code, **list every required domain in `_all.md`'s
-   `sandbox.network.domains`** and build the list out empirically as we experiment
+   `sandbox.domains`** and build the list out empirically as we experiment
    (same "don't optimize into a constant yet" stance as the filesystem baseline —
    do NOT over-engineer this). Network is allowlist-only (deny-by-default): kernel
    blocks all non-localhost egress, the proxy permits only the merged `domains`
    (`_all.md` baseline ∪ the type's own).
 4. **Relationship to the existing `allowedPaths` hook.** `allowedPaths`
-   (`agent-path.ts`) is already a deny-by-default *allowlist* at the hook layer —
-   the same model, one layer up. `sandbox.filesystem.allowRead`/`allowWrite` are
-   the **kernel-enforced** counterpart. If `sandbox.filesystem` is omitted but
+   (`agent-path.ts`) is a deny-by-default *allowlist* at the hook layer **only when
+   it is set** — when `allowedPaths` is unset, rule 13 (`agent-path.ts:435-436`)
+   is allow-everything, so the hook layer is NOT strict by default. Our sandbox is
+   the same allowlist model but kernel-enforced. `sandbox.allowRead`/`allowWrite`
+   are the kernel counterpart. If `sandbox` filesystem lists are omitted but
    `allowedPaths` is set, derive the kernel allowlist from `allowedPaths`. If both
-   are set, `sandbox.filesystem` is authoritative for the kernel and `allowedPaths`
+   are set, the `sandbox` filesystem lists are authoritative for the kernel and `allowedPaths`
    stays the hook layer; keep them consistent (§4A.1). Document in SPEC §2.
 5. **Inheritance → UNION of all `.md` layers (Adam's call).** Final permissions =
    the sum of every layer: `_all.md` ∪ type ∪ any intermediate. **Both** the
@@ -225,7 +227,7 @@ Design decisions:
 
 ## 4A. Path pattern format for allow/deny lists (AUTHORITATIVE)
 
-This is the exact, user-facing contract for entries in `sandbox.filesystem`'s
+This is the exact, user-facing contract for entries in `sandbox`'s
 `allowRead` / `allowWrite` / `deny` lists. **We own the grammar and compile it to
 both enforcement layers**, so the rules below are what itsybitsy guarantees —
 independent of Seatbelt or hook internals.
@@ -384,8 +386,8 @@ so listing the baseline there makes it **inspectable and tunable** with zero new
 mechanism — every type unions it in for free. Encoding it as an itsybitsy default
 constant is a **later** optimization, once the list is proven. So:
 
-- The static OS/runtime paths go in `_all.md`'s `sandbox.filesystem.allowRead`
-  / `allowWrite` (and the Anthropic domains in `sandbox.network.domains`). Adam
+- The static OS/runtime paths go in `_all.md`'s `sandbox.allowRead`
+  / `sandbox.allowWrite` (and the required domains in `sandbox.domains`). Adam
   edits one file to tune the floor; no code change.
 - **Only the truly per-agent, runtime-determined paths are injected by code at
   spawn** — because they don't exist until the worktree is created and can't be
@@ -610,9 +612,11 @@ Getting Claude Code to boot under `(deny default)` requires discovering the full
 set of syscalls/paths it touches — this is the bulk of the phase-1 spike (§6).
 The syscall allows above (`process*`, `mach-lookup`, `sysctl-read`, dylib reads)
 are illustrative, NOT verified. Expect iteration: launch, hit an `EPERM`/kill,
-add the minimal allow, repeat, until claude runs clean. Consider generating a
-permissive-but-logged profile first (Seatbelt `(trace …)` / `(with report)`) to
-harvest the needed rules, then tighten.
+add the minimal allow, repeat, until claude runs clean. To harvest the needed
+rules, do NOT rely on Seatbelt `(trace …)` / `(with report)` — that support is
+degraded/removed on modern macOS (R3). The reliable route is the **unified log**
+(`log stream` / `log show` filtered on the Sandbox sender/subsystem predicates)
+while running under a permissive profile, then tighten from the denials it records.
 
 ### 5.2 Domain proxy — `src/sandbox-proxy.ts` + lifecycle
 
@@ -621,7 +625,7 @@ harvest the needed rules, then tighten.
   recorded in `meta.json`. Attribution is trivial (the proxy enforces exactly one
   agent's merged domain allowlist). Lifecycle tied to the agent: started by
   `start.sh`/`resume.sh` before the CLI launch, killed in `teardownAgent`. The
-  allowlist is the merged `sandbox.network.domains` (`_all.md` ∪ type), read from
+  allowlist is the merged `sandbox.domains` (`_all.md` ∪ type), read from
   a per-agent file (e.g. `agentDir/sandbox-domains.txt`) so it's inspectable.
 - **Decided: Bun implementation** (`Bun.serve` / raw TCP for CONNECT), not a
   vendored `proxy.py` — the `ib` binary is self-contained (`bun build --compile`)
@@ -630,6 +634,26 @@ harvest the needed rules, then tighten.
 - Proxy must be reachable at `localhost:PORT` from inside the sandbox (the
   seatbelt profile already allows `localhost:*` outbound, and the proxy binds
   localhost — inside the sandbox's allowed set).
+- **Matching semantics (G7 — specify + test, don't leave implicit):**
+  - Apex vs subdomain: an entry `github.com` matches `github.com` **only**;
+    subdomains require an explicit `*.github.com` (or list both). Pick this rule
+    and test it — do not silently subtree-match.
+  - `*.x.com` = any number of labels under `x.com` or exactly one? Decide (recommend
+    "one or more labels", i.e. `a.x.com` and `a.b.x.com` both match) and test.
+  - CONNECT ports: allow 443/80 only by default (the proxy only needs to gate TLS
+    tunnels + plain HTTP); reject other ports.
+  - **IP-literal CONNECT → deny** (an IP bypasses domain semantics entirely).
+  - Case-insensitive host compare; handle punycode/IDN.
+- **Robustness / lifecycle (G6 — prior art: pane-child SIGHUPs, tmux spawn-storm):**
+  - Spawn the proxy **detached/unref'd** so pane churn can't SIGHUP it; if the
+    proxy dies while `claude` lives, the agent is fully offline (kernel blocks
+    direct egress) with no self-recovery — give the **watchdog a proxy
+    health-check + restart duty**.
+  - Natural exit: an agent whose `start.sh` simply ends (claude exits) does NOT go
+    through `teardownAgent`, so `start.sh` needs an **EXIT trap** to kill its proxy
+    (not only the `teardownAgent` path).
+  - Resume: do NOT trust the persisted port — **reallocate** a fresh port, rewrite
+    `meta.json`, regenerate the env. (Port is NOT stable across resume.)
 
 ### 5.3 Wiring
 
@@ -703,20 +727,54 @@ written/executed, so nothing launches on a failed precondition.
    - **(1b) Boot Claude under `(deny default)`:** THE hard one for Model B.
      Start from the reference's `(allow default)` to prove plumbing, then invert
      to `(deny default)` + baseline and iteratively add the minimal allows until
-     claude runs clean (harvest via a `(with report)`/trace profile). The output
-     of this spike **is** the initial `_all.md` filesystem + domain baseline
-     (§4A.7). If Claude Code can't be made to boot under `(deny default)` with a
-     tractable allowlist, fall back to `(allow default)` + broad denies and tell
+     claude runs clean (harvest via the **unified log**, NOT `(with report)` — R3,
+     §5.1). The output of this spike **is** the initial `_all.md` filesystem +
+     domain baseline (§4A.7). If Claude Code can't boot under `(deny default)` with
+     a tractable allowlist, fall back to `(allow default)` + broad denies and tell
      Adam the model can't be as strict as Model B wants. **Do not ship a baseline
      that wasn't empirically derived.**
-2. **Filesystem layer + fail-hard:** `src/sandbox.ts` generator + `sandbox.enabled`
-   + `sandbox.filesystem` frontmatter, wrap spawn+resume, the §5.5 precondition
-   checks (no unsandboxed fallback), persist to meta.json. No network yet (kernel
-   blocks egress). Tests + tsc.
+     **Aim the iteration — pre-warned likely boot-blockers (G5), test each:**
+     - **Keychain/creds** (likely THE blocker): macOS Claude Code stores OAuth in
+       the Keychain → needs `securityd` mach-lookup + `~/Library/Keychains` reads.
+     - **`~/.claude` must be WRITABLE** (transcripts/history/statsig/todos) — fixed
+       in §4A.7.
+     - **`/dev`**: `null`, `urandom`, `tty`, and the tmux pane pty (`/dev/ttysNNN`
+       — claude is a TUI; no pty file-read*/write* = instant death) + `/usr/share/terminfo`.
+     - **`/private/tmp` not `/tmp`** (canonical-path matching) — fixed in §4A.7.
+     - **`NODE_OPTIONS="--use-env-proxy"`**: only newer Node knows the flag; an
+       older bundled runtime ABORTS at startup. Verify support; else rely on claude
+       honoring `HTTPS_PROXY` natively. (Also: `NODE_OPTIONS` leaks into every node
+       child, incl. dev servers.)
+     - **Claude Code's OWN Bash sandbox mode** already wraps tool commands in
+       `sandbox-exec` — nested `sandbox_init` inside our deny-default profile is
+       untested; verify it doesn't fail/confusingly-intersect.
+     - **git**: `~/.gitconfig` read (commits fail without user.name/email), the
+       `osxkeychain` credential helper (mach). Note SSH remotes CANNOT work (ssh
+       ignores `http_proxy`; port-22 egress is kernel-blocked) — fine for local
+       branches, but document it.
+     - **`ib` smoke test under the profile:** `ib send` / `ib list` / (for managers)
+       `ib new-agent` must succeed — validates §4C.1 baseline paths.
+     - **MCP server**: boot an agent with a real MCP server configured (§4C.4) —
+       needs interpreter paths + its own allowlisted egress.
+     - **codex** (§4B): `~/.codex` (`auth.json`, `config.toml`) read+write.
+2. **Filesystem layer + fail-hard (⚠️ merge WITH phase 3 — see R2):** `src/sandbox.ts`
+   generator + `sandbox.enabled` + flat `sandbox` frontmatter (R1), wrap
+   spawn+resume, §5.5 precondition checks (no unsandboxed fallback), persist
+   resolved config to meta.json. **A sandbox-enabled agent has NO route to
+   `api.anthropic.com` until the proxy (phase 3) exists — the kernel can't do
+   domains, egress is binary-blocked. So `sandbox.enabled: true` must NOT be usable
+   on a live agent until phases 2+3 land together (R2).** Tests + tsc.
 3. **Network layer:** per-agent Bun proxy + domain allowlist + port in meta.json +
-   lifecycle (start/resume/teardown), `_all.md` domain baseline.
-4. **Inheritance (union) + validation + `_all.md` interaction**, SPEC.md §2/§7
-   updates, `docs/agent-types/*.md` doc updates.
+   lifecycle (start/resume/teardown + EXIT trap + watchdog health-check, §5.2),
+   `_all.md` domain baseline. Merge together with phase 2 (R2).
+   **⚠️ Design decision REQUIRED before this phase (§4C.2): watchdog spawn
+   inheritance** — a sandboxed manager's `Bun.spawn(["ib","watchdog",id])`
+   (`ib-commands.ts:5190`) makes the child's watchdog inherit the manager's
+   profile. Pick the fix (route via tmux `run-shell`, or an `ib` daemon owns
+   watchdog spawning) before wiring the wrap into a spawning agent.
+4. **Inheritance (union+OR-merge) + validation + `_all.md` interaction + §4C
+   baseline (ib paths, `~/.itsybitsy/agents/**` write, tmux-socket scoping)**,
+   SPEC.md §2/§7 updates, `docs/agent-types/*.md` doc updates.
 5. **Codex parity:** `-s danger-full-access` flip + same sandbox-exec/proxy wrap
    for codex (§4B). Not optional — codex is a first-class sandboxed CLI.
 6. **Dashboard indicator** (optional): 🔒 for sandboxed agents.
@@ -768,3 +826,68 @@ a review cycle (2 worker reviewers) before merge.
    also **is** the initial `_all.md` filesystem + domain baseline.
 2. **Codex `danger-full-access` specifics** (spike §4B): exact flag/value in the
    installed codex version, and whether codex honors `http(s)_proxy` under it.
+
+## 8. Test matrix (MANDATED phase gate — from design review)
+
+`bun test` green + `bunx tsc --noEmit` clean is the CLAUDE.md gate, but that
+gates nothing *specific*. Phases 2–4 must be held to the concrete matrix below —
+each bullet is at least one test. The profile generator, glob compiler, merge, and
+proxy are all pure/unit-testable with no spawn required.
+
+**A. Glob → regex translation (pure, table-driven):**
+- `*` never crosses `/`; `?` = exactly one non-`/` char; `**` crosses `/`
+  **including zero segments** — decide+test whether `**/.env` matches `/.env`.
+- Literal dot: `**/.env` must NOT match `/x/yenv` or `/x/aenv`. Regex metachars in
+  names escaped: `+ ( ) [ ] { } | ^ $` and SBPL string-context quotes.
+- Full both-end anchoring: `~/secrets/*` → `^…/secrets/[^/]*$`; an unanchored slip
+  turns an allow into a near-wildcard (regression test the anchors explicitly).
+- `~` expansion in glob AND non-glob forms; bare-name rejection (`.env` → spawn
+  refused with the §4A.2 error text); bare `~` legal (= `$HOME`).
+
+**B. Profile emission (string asserts on generated `.sb`):**
+- `(deny default)` emitted FIRST; ALL deny rules emitted AFTER every allow
+  (last-match-wins is the entire §4A.0 guarantee); network block present;
+  localhost-only exits.
+- Paths travel ONLY via `-D` params — assert NO user-controlled string is
+  interpolated into profile text. Injection test: a path containing
+  `")(allow default)(` must appear nowhere in the emitted `.sb`.
+- `allowRead:["/"]` full-open form; empty lists; glob-form allow compiles to
+  `(regex …)` under the correct op (`file-read*` vs `file-write*`).
+
+**C. Config resolution + merge:**
+- Union across `_all.md` + intermediate + type for all four lists, deduped;
+  deny-wins when the same path is in `allowWrite` AND `deny`; `enabled` OR-merge
+  (leaf `false` does NOT switch off a floor `true` — §4 decision 5).
+- `sandbox` omitted + `allowedPaths` set → derived config; both set → `sandbox`
+  authoritative. ⚠️ `allowedPaths` merges by REPLACE (`SCALAR_KEYS`,
+  `agent-types.ts:422`) while `sandbox` lists UNION — pin which semantics a
+  derived config inherits.
+- Frontmatter parse round-trip: flat `sandbox:` block (R1) — block lists, inline
+  arrays, comments; assert NO silent flattening.
+
+**D. Hook cascade (`agent-path.ts`):**
+- Sandbox-deny (new rule ~6.5) fires BEFORE the worktree allow (rule 7, :391) —
+  the §4A.4 worked example as a test: worktree `.env` is denied.
+- Non-matching denies leave rules 7/8/9 outcomes unchanged.
+- Glob deny at the hook layer needs a real glob matcher — `isInAllowedPaths` is
+  prefix-only (`:99`); use `Bun.Glob`. Test glob denies actually match.
+
+**E. Meta persistence + resume parity:**
+- Fully-resolved `sandbox` block round-trips `writeMetaJsonAtomic` → `readAgentMeta`
+  — **declare the field in `AgentMeta` and add coercion** (unlike `allowedPaths`,
+  which is written at `ib-commands.ts:4544` but undeclared in `agents.ts:50-92` —
+  don't repeat that gap).
+- Legacy meta with no `sandbox` → unsandboxed resume.
+- Same inputs at spawn and resume → **byte-identical `sandbox.sb`** (C2 freeze).
+
+**F. Fail-hard preconditions (§5.5), each a test:** `sandbox-exec` absent → refuse;
+profile lint failure → refuse; port occupied → refuse; non-macOS → refuse. In
+EVERY case assert: `claude`/`codex` was NOT exec'd, no tmux session left behind,
+spawn exits non-zero with the specific message, cleanup ran.
+
+**G. Proxy unit tests:** CONNECT allowed → tunnel / denied → refused; subdomain
+wildcard depth (`*.x.com` — one label or many? §5.2); apex-vs-subdomain
+(`github.com` vs `api.github.com` — per the §5.2 decision); absolute-URI plain
+HTTP GET; IP-literal CONNECT → denied (bypasses domain semantics); case-insensitive
+host compare; punycode; per-agent isolation (agent A's proxy NEVER consults agent
+B's list).

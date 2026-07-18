@@ -64,7 +64,7 @@ Key takeaways:
    hook. This is *advisory* — it inspects tool-call paths and allows/denies. The
    seatbelt profile is the *kernel-enforced* companion to this. **Design choice:
    reuse/extend `allowedPaths` as the filesystem source of truth** so we don't
-   have two competing path lists (see §4.3).
+   have two competing path lists (see §4 decision 4).
 
 2. **Codex `workspace-write` sandbox** (`src/codex-spawn.ts:189`,
    `src/ib-commands.ts:4721`): codex agents *already* run in an OS sandbox

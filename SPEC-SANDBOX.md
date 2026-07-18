@@ -18,6 +18,14 @@ HTTP/CONNECT proxy that filters outbound domains. We adopt its two-layer model
 but make both layers **per-agent configurable** and **allowlist-first**, which
 the reference does not do.
 
+**Honest scope of the isolation (don't oversell — see §4C.5).** Because Seatbelt
+is per-path, not per-binary, and a sandboxed agent's `ib`/hooks/watchdog all need
+shared write roots (`~/.itsybitsy/agents/**`, its own agent dir), the kernel layer
+gives **coarse walls + a real network deny/allowlist + kernel-blocked secrets** —
+a large win over today. It does NOT give fine-grained worker-vs-worker filesystem
+isolation; that remains the hook layer's (`agent-path.ts`) job. Set expectations
+accordingly.
+
 ## 2. What the reference project actually provides (and its gaps)
 
 | Reference behavior | What we need instead |
@@ -80,7 +88,7 @@ map to follow (all line refs current):
    scalar entry.
 3. Validation — `:807-811` (effort) / `:813-820` (allowedPaths); add a sandbox
    validator alongside.
-4. CLI-flag parse + options — `--effort` at `index.ts:1950-1952`;
+4. CLI-flag parse + options — `--effort` at `src/index.ts:1950-1952`;
    `NewAgentOptions` at `ib-commands.ts:3520`.
 5. Precedence chain — `ib-commands.ts:4224-4258` (effort, twin of model
    `:4183-4217`) → CLI flag: claude `:4903-4905`; codex
@@ -215,7 +223,9 @@ Design decisions:
    is allow-everything, so the hook layer is NOT strict by default. Our sandbox is
    the same allowlist model but kernel-enforced. `sandbox.allowRead`/`allowWrite`
    are the kernel counterpart. If `sandbox` filesystem lists are omitted but
-   `allowedPaths` is set, derive the kernel allowlist from `allowedPaths`. If both
+   `allowedPaths` is set, derive the kernel allowlist from `allowedPaths` — and
+   since `allowedPaths` is op-agnostic at the hook, the derived kernel config grants
+   **both read AND write** for each entry (G-6). If both
    are set, the `sandbox` filesystem lists are authoritative for the kernel and `allowedPaths`
    stays the hook layer; keep them consistent (§4A.1). Document in SPEC §2.
 5. **Inheritance → UNION of all `.md` layers (Adam's call).** Final permissions =
@@ -281,6 +291,15 @@ Every pattern is enforced twice, and the generator emits BOTH from one entry:
 
 Both operate on **fully-resolved absolute paths** (symlinks + `~` + `.`/`..`
 normalized). Patterns are never matched against relative paths.
+
+⚠️ **ENTRIES are canonicalized too, not just match targets (G-7).** A `/tmp/x`
+entry must compile as `/private/tmp/x`, or it will never match (Seatbelt matches
+canonical paths). This must work even for a path that **does not exist yet** (e.g.
+a scratch dir the agent will create) — `realpathSync` on a nonexistent path falls
+back to the unresolved input, which is the exact gap the existing `allowedPaths`
+normalization has (`ib-commands.ts:4511-4516`). The generator must resolve the
+longest existing prefix and append the rest, so `/tmp/not-created-yet` still
+becomes `/private/tmp/not-created-yet`.
 
 ### 4A.2 The pattern grammar (exactly three anchor forms)
 
@@ -436,11 +455,14 @@ Two guarantees:
 1. **Spawn resolves, meta.json freezes, resume replays from meta — resume does
    NOT re-read the `.md` files** (fixes C2, matches the model/effort convention).
    At spawn, the FULLY-RESOLVED merged sandbox config (unioned allow/deny/domains,
-   `enabled`, proxy port) is written to `meta.json`; both `start.sh` and
-   `resume.sh` build the profile from that frozen config + the recomputed runtime
-   `-D` params (worktree, gitdir). **Consequence, stated explicitly:** editing the
-   `_all.md` floor affects NEW spawns only; a live agent keeps its spawn-time
-   sandbox until respawned (consistent with §5.4 "profile is fixed at exec").
+   `enabled`) is written to `meta.json`; both `start.sh` and `resume.sh` build the
+   profile from that frozen config + the recomputed runtime `-D` params (worktree,
+   gitdir). **The proxy port is the ONE deliberately NON-frozen field** — §5.2
+   reallocates it on every resume (rewriting meta), so it's stored but not treated
+   as immutable like the allow/deny/domain lists (G-5). **Consequence, stated
+   explicitly:** editing the `_all.md` floor affects NEW spawns only; a live agent
+   keeps its spawn-time sandbox until respawned (consistent with §5.4 "profile is
+   fixed at exec").
 2. **`deny` still carves into the baseline.** `deny: ["**/.env"]` removes `.env`
    from the `_all.md`-allowed worktree; deny is evaluated last over the full union.
 
@@ -507,9 +529,11 @@ Required in the baseline:
   is `<agentDir>/repo`, so `meta.json`, `agent.log`, `debug-logs/`, and agent
   state live in `<agentDir>` — a **sibling of** `WORKTREE`, *outside* the
   `WORKTREE` subpath. The agent-status hook's `writeAgentState` writes `meta.json`;
-  hooks write `debug-logs/`. Inject `<agentDir>` (or its parent
-  `<repoPath>/.ittybitty/agents/<id>`) as a runtime `-D` writable root alongside
-  `WORKTREE`/`GITDIR`.
+  hooks write `debug-logs/`. Inject `<agentDir>` (which *is*
+  `<repoPath>/.ittybitty/agents/<id>`, cf. `ib-commands.ts:370`; the worktree is
+  `<agentDir>/repo`) as a runtime `-D` writable root. Since `<agentDir>` contains
+  the worktree, this single root subsumes `WORKTREE` — keep both `-D` params for
+  clarity or drop the redundant one, but comment the overlap.
 - **`~/.itsybitsy/agents/**` must be WRITE-allowed** in the `_all.md` baseline, or
   **`ib send` breaks for every sandboxed agent.** Outboxes deliberately live there
   (`outbox.ts:39-45`, verbatim: moved out of the per-worktree dir precisely so a
@@ -684,9 +708,9 @@ while running under a permissive profile, then tighten from the denials it recor
 - Codex branch (`codex-spawn.ts`): filesystem already covered by
   `workspace-write`; add the proxy env + domain layer there too if we extend
   network control to codex (phase 2). **The intended home already exists:**
-  `src/codex-config.ts:278` has a literal `TODO` "Revisit when we add
-  per-agent-type capability gating" directly above the `network_access = true`
-  line (`:279`) — that's where codex network gating slots in.
+  `src/codex-config.ts:278` has a comment "Revisit when we add per-agent-type
+  capability gating" directly above the `network_access = true` line (`:279`) —
+  that's where codex network gating slots in.
 
 ### 5.4 Hooks awareness
 
@@ -922,3 +946,21 @@ wildcard depth (`*.x.com` — one label or many? §5.2); apex-vs-subdomain
 HTTP GET; IP-literal CONNECT → denied (bypasses domain semantics); case-insensitive
 host compare; punycode; per-agent isolation (agent A's proxy NEVER consults agent
 B's list).
+
+**H. Codex (T-1 — phase 5 is not optional, so it needs tests):** `-s
+danger-full-access` emitted when `sandbox.enabled`, `-s workspace-write` when not,
+on BOTH the codex spawn AND resume scripts (`codex-spawn.ts:189/191`, `375/377`);
+proxy env exported in both; `-a never` preserved.
+
+**I. Proxy lifecycle (T-3/T-4, §5.2):** resume reallocates a fresh port (NOT the
+persisted one) + rewrites meta + regenerates env; `start.sh` EXIT trap kills the
+proxy on natural claude exit (not only via `teardownAgent`); watchdog
+health-check restarts a dead proxy while claude lives (testable in the watchdog
+tick harness).
+
+**J. Path-entry canonicalization (G-7):** ENTRIES are canonicalized like matches —
+a `/tmp/x` entry compiles as `/private/tmp/x`; assert an entry for a **not-yet-created**
+dir still canonicalizes (the existing `allowedPaths` normalization at
+`ib-commands.ts:4511-4516` has the gap to avoid: `realpathSync` on a nonexistent
+path falls back unresolved, leaving `/tmp` un-canonicalized). Validator/generator
+must resolve the symlink prefix that DOES exist.

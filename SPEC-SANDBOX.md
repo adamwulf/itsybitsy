@@ -41,9 +41,10 @@ Key takeaways:
   domain is not caught. And any tool that ignores `*_proxy` env vars simply
   fails closed (kernel blocks it) rather than escaping.
 - **macOS only.** `sandbox-exec` is macOS-specific (and Apple-deprecated but
-  functional). On Linux/other, sandbox config must **degrade to a no-op with a
-  warning**, never silently claim enforcement. (itsybitsy is already a
-  macOS/tmux-centric tool, so this matches the platform reality.)
+  functional). On non-macOS, `sandbox.enabled: true` **refuses to spawn** (§5.5
+  fail-hard) — it does NOT fall back to an unsandboxed run. (`sandbox.enabled`
+  absent/false is unaffected everywhere.) This supersedes the earlier
+  "degrade to a no-op" idea, which contradicted Adam's fail-hard call (C1).
 
 ## 3. How this fits the existing codebase
 
@@ -111,33 +112,28 @@ The wrapper transformation at each point:
 ```bash
 # before
 setsid claude --session-id "$UUID" $ARGS "$(cat $PROMPT)" &
-# after (sandbox enabled)
+# after (sandbox enabled) — export proxy vars in start.sh (NO `env` link; see below)
+export http_proxy=http://localhost:$PORT https_proxy=http://localhost:$PORT
+export HTTP_PROXY=$http_proxy HTTPS_PROXY=$https_proxy
+export no_proxy=localhost,127.0.0.1,::1 NO_PROXY=localhost,127.0.0.1,::1
+# NODE_OPTIONS="--use-env-proxy" only if the spike confirms the runtime supports it (G5)
 setsid sandbox-exec -f "$AGENT_DIR/sandbox.sb" \
   -D "WORKTREE=$WORKTREE" -D "GITDIR=$GITDIR" \
-  env http_proxy=http://localhost:$PORT https_proxy=http://localhost:$PORT \
-      HTTP_PROXY=... HTTPS_PROXY=... no_proxy=localhost,127.0.0.1,::1 \
-      NODE_OPTIONS="--use-env-proxy" \
   claude --session-id "$UUID" $ARGS "$(cat $PROMPT)" &
 ```
 
-**⚠️ PID / watchdog hazard (the #1 spike item).** Today `CLAUDE_PID=$!`
-(`:5046` spawn / `:1602` resume) captures the `claude` pid and feeds two
-consumers: the meta.json `claude_pid` write and the watchdog reaper
-`reapOrphanedClaude` (`src/agents.ts` ~:2013-2021). If we prefix `sandbox-exec`,
-`$!` becomes the **`sandbox-exec`** pid, not `claude`'s. Two things to verify in
-the spike:
-
-1. **Is `sandbox-exec`'s pid the one we want to kill/reap?** Killing
-   `sandbox-exec` should tear down its child `claude` (it's the process-group
-   parent), so this may be *fine* or even *better* (kills the whole sandbox). But
-   `reapOrphanedClaude` and the `pgrep … -f "claude"` discovery
-   (`src/agent-lifecycle.ts:510`) must be checked: does the watchdog match on the
-   process **named** claude (still present as a child under sandbox-exec) or on
-   the pid stored in meta? A mismatch = mis-detected state.
-2. If the stored pid must stay `claude`'s (not sandbox-exec's), capture it
-   differently (e.g. `pgrep -P $!` after launch) rather than `$!`.
-
-**This must be resolved before committing to the design.**
+**PID / watchdog — confirm exec-in-place (spike item, likely a non-issue).**
+`sandbox-exec`, like `setsid`, calls `sandbox_init` then **execs** the target
+in place (no fork), so after the exec chain `$!` is the single pid that *is*
+`claude` — `CLAUDE_PID=$!` (`:5046`/`:1602`), the meta write, `kill`, and
+`wait $CLAUDE_PID` should all keep working unchanged. And `pgrep -P <panePid> -f
+"claude"` (`agent-lifecycle.ts:510`) matches the full cmdline, which still
+contains `claude`. So this is **very likely fine** — but the spike must *confirm*
+exec-in-place rather than trust it. (Reframed from "the design may change": the
+review verified this reasoning; keep it as a checklist item, not a blocker.)
+**Simplification applied above:** drop the `env` wrapper link entirely — export
+the proxy vars in `start.sh` before the launch line. One fewer process in the
+chain and zero ambiguity about what `$!` refers to.
 
 ## 4. Proposed frontmatter schema
 
@@ -382,16 +378,32 @@ Candidate static `_all.md` contents (finalize empirically in the phase-1 spike �
 the exact set is OS/Claude-version-dependent and MUST be verified, not guessed):
 
 - **Read+write:** `/tmp`, `/private/var/folders/**` (macOS per-user temp/caches).
-- **Read-only:** `~/.claude/**` (config/settings), `/usr/lib`, `/usr/bin`,
-  `/System/**`, `/bin`, `/private/etc` (system libs, resolv.conf, terminfo), the
-  `claude`/`node` binaries + their `node_modules`.
-- **Network:** the Anthropic control-plane domains.
+  ⚠️ **NOT `/tmp`** — seatbelt matches CANONICAL paths, and `/tmp` canonicalizes
+  to `/private/tmp`; a `subpath` rule on `/tmp` will not match. Use `/private/tmp`
+  (consistent with `/private/etc`, `/private/var/folders` already listed).
+- **Read+write (correction — `~/.claude` is NOT read-only):** `~/.claude/**` —
+  Claude Code writes transcripts (`projects/`), `history.jsonl`, `statsig/`,
+  `todos/`, `shell-snapshots/`, and settings write-backs there. The earlier
+  "read-only ~/.claude" classification was an error (G5).
+- **Read-only:** `/usr/lib`, `/usr/bin`, **`/usr/local/bin`** (where `ib` is
+  installed — was missing), `/System/**`, `/bin`, `/private/etc` (system libs,
+  resolv.conf, terminfo), the `claude`/`node` binaries + their `node_modules`.
+- **Network:** the required domains (see §4 decision 3 — listed in `_all.md`,
+  derived empirically; do not hardcode).
+
+See **§4C** for the paths beyond the OS baseline that the sandbox must allow
+because the agent's descendants (`ib`, hooks, watchdog, MCP) run under the same
+profile — these were the largest gap the design review surfaced.
 
 Two guarantees:
-1. Applied identically on **spawn and resume** — the static part rides in via
-   `_all.md` merge (both paths read the same merged type), and the runtime `-D`
-   params are recomputed by both `start.sh` and `resume.sh` generation, so a
-   resumed agent isn't accidentally more/less sandboxed.
+1. **Spawn resolves, meta.json freezes, resume replays from meta — resume does
+   NOT re-read the `.md` files** (fixes C2, matches the model/effort convention).
+   At spawn, the FULLY-RESOLVED merged sandbox config (unioned allow/deny/domains,
+   `enabled`, proxy port) is written to `meta.json`; both `start.sh` and
+   `resume.sh` build the profile from that frozen config + the recomputed runtime
+   `-D` params (worktree, gitdir). **Consequence, stated explicitly:** editing the
+   `_all.md` floor affects NEW spawns only; a live agent keeps its spawn-time
+   sandbox until respawned (consistent with §5.4 "profile is fixed at exec").
 2. **`deny` still carves into the baseline.** `deny: ["**/.env"]` removes `.env`
    from the `_all.md`-allowed worktree; deny is evaluated last over the full union.
 

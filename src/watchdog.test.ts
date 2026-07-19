@@ -67,6 +67,8 @@ import {
   API_ERROR_RATE_LIMITED_START_INDEX,
   WATCHDOG_SENTINEL,
   COMPACT_CANCEL_ESCAPE_GAP_MS,
+  setWatchdogSandboxProxyFns,
+  resetWatchdogSandboxProxyFns,
   type AgentTracker,
 } from "./watchdog";
 import {
@@ -194,6 +196,7 @@ describe("watchdog", () => {
     clearTrackers();
     resetSendSpawnRunner();
     resetWatchdogSpawnRunner();
+    resetWatchdogSandboxProxyFns();
     tmuxPollerSpawnCtx.reset();
     resetWatchdogFetchUsage();
     resetWatchdogReadConfig();
@@ -3558,6 +3561,7 @@ describe("runPerAgentWatchdog — meta.transient.json persistence", () => {
     resetPerAgentReadMeta();
     resetPerAgentSleep();
     resetWatchdogNow();
+    resetWatchdogSandboxProxyFns();
     resetSendSpawnRunner();
     resetWatchdogReadConfig();
     resetWatchdogSpawnRunner();
@@ -3661,5 +3665,48 @@ describe("runPerAgentWatchdog — meta.transient.json persistence", () => {
     expect(written!.watchdog_pid).toBe(process.pid);
     // …AND the operation marker survived.
     expect(written!.operation).toEqual({ kind: "merging", pid: 4242, started_at_ms: 123 });
+  });
+
+  test("sandbox proxy health-check restarts a dead proxy while tmux is alive", async () => {
+    setPerAgentReadMeta(async () => ({
+      meta: {
+        id: "agent-test1",
+        session_id: "sid-123",
+        tmux_session: "tmux-test1",
+        prompt: "test",
+        manager: null,
+        created: "2026-03-05T00:00:00Z",
+        created_epoch: 1000,
+        worktree: true,
+        worker: false,
+        yolo: false,
+        model: "claude:sonnet",
+        claude_pid: "999",
+        sandbox: {
+          enabled: true,
+          allowRead: [],
+          allowWrite: [],
+          deny: [],
+          rawAllow: [],
+          domains: ["api.anthropic.com"],
+        },
+        sandbox_proxy_port: 43140,
+      },
+    }));
+    setPerAgentCaptureTmux(async () => "ordinary output\n");
+    let existsChecks = 0;
+    setPerAgentExistsSync(() => ++existsChecks <= 1);
+    const checked: number[] = [];
+    const restarted: Array<{ dir: string; port: number }> = [];
+    setWatchdogSandboxProxyFns(
+      async (port) => { checked.push(port); return false; },
+      async (dir, port) => { restarted.push({ dir, port }); return 54321; },
+    );
+
+    await runPerAgentWatchdog("agent-test1", tempDir);
+
+    expect(checked).toEqual([43140]);
+    expect(restarted).toEqual([{ dir: agentDir, port: 43140 }]);
+    expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("sandbox proxy restarted pid=54321");
   });
 });

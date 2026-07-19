@@ -1216,12 +1216,14 @@ describe("readAgentMeta", () => {
     };
     await Bun.write(
       join(tempDir, "meta.json"),
-      JSON.stringify({ id: "agent-sandboxed", sandbox }),
+      JSON.stringify({ id: "agent-sandboxed", sandbox, sandbox_proxy_port: 43123, sandbox_proxy_pid: 54321 }),
     );
 
     const { meta, error } = await readAgentMeta(tempDir);
     expect(error).toBeUndefined();
     expect(meta?.sandbox).toEqual(sandbox);
+    expect(meta?.sandbox_proxy_port).toBe(43123);
+    expect(meta?.sandbox_proxy_pid).toBe(54321);
   });
 
   test("legacy meta without sandbox remains unsandboxed", async () => {

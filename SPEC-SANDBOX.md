@@ -599,19 +599,24 @@ Required in the baseline:
   `deriveCodexParentRepoRoots` grants codex today (`ib-commands.ts:4708-4724`).
   Reuse that precedent in the baseline for `canSpawnChildren` types.
 
-### 4C.2 Watchdog spawn inheritance (design answer needed, not a spike note)
+### 4C.2 Watchdog spawn inheritance (resolved: tmux server owns the spawn)
 
-`ib new-agent` spawns the CHILD's watchdog via `Bun.spawn(["ib","watchdog",id])`
-**in the invoking process** (`ib-commands.ts:5190-5196`). If the invoker is a
-**sandboxed manager**, the child's watchdog inherits the **manager's** Seatbelt
-profile for its whole lifetime — the wrong profile, and the watchdog needs
-`tmux send-keys`, cross-agent-dir writes, and process kills that the manager's
-profile won't grant. (The child's `claude` itself is fine — it's spawned by the
-*unsandboxed* tmux server and then wrapped by its own `start.sh`.) Same inheritance
-hits `generatePromptSummary` and `autoAcceptWorkspaceTrust` fired from a sandboxed
-invoker. **Design options:** route watchdog spawning through the tmux server
-(`tmux run-shell`) so it launches unsandboxed, or have a small `ib` daemon /
-coordinator own watchdog spawning. Pick one before phase 3.
+The CHILD's watchdog is launched with asynchronous `tmux run-shell -b`, so the
+process is a descendant of the already-running, unsandboxed tmux server rather
+than of the process invoking `ib new-agent` / `ib resume`. This prevents a
+sandboxed manager's Seatbelt profile from being inherited for the watchdog's
+whole lifetime. The watchdog's own startup writes its PID to transient state;
+the existing injectable spawn override still returns a PID for deterministic
+tests and legacy `meta.json` compatibility.
+
+This is preferable to adding an `ib` daemon: tmux already owns agent process
+creation, already has the required unsandboxed lifetime, and adds no new
+coordinator or recovery protocol. The child's `claude` remains unchanged: tmux
+starts `start.sh`, which launches the unsandboxed per-agent proxy and wraps only
+Claude with that child's Seatbelt profile. Prompt-summary generation is routed
+through the same tmux-server helper. Workspace-trust automation issues tmux
+client commands rather than owning a long-lived child process, so it remains
+invoker-side.
 
 ### 4C.3 tmux socket = sandbox escape (needs its own decision)
 

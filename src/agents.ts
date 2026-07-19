@@ -115,6 +115,10 @@ export interface AgentMeta {
   agentIcon?: string;
   /** Fully-resolved sandbox policy frozen at spawn time for resume parity. */
   sandbox?: SandboxConfig;
+  /** Fresh per-launch localhost proxy port (reallocated on every resume). */
+  sandbox_proxy_port?: number;
+  /** PID of the detached per-agent allowlist proxy. */
+  sandbox_proxy_pid?: number;
   /**
    * Optional friendly alias the agent ALSO answers to in name resolution
    * (`ib send`, dashboard selection, etc). The immutable `id` remains the
@@ -1715,6 +1719,14 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
           domains: stringList(sandbox.domains),
         } satisfies SandboxConfig;
       }
+    }
+    if (data.sandbox_proxy_port !== undefined &&
+        (!Number.isInteger(data.sandbox_proxy_port) || data.sandbox_proxy_port < 1 || data.sandbox_proxy_port > 65535)) {
+      delete data.sandbox_proxy_port;
+    }
+    if (data.sandbox_proxy_pid !== undefined &&
+        (!Number.isInteger(data.sandbox_proxy_pid) || data.sandbox_proxy_pid < 1)) {
+      delete data.sandbox_proxy_pid;
     }
     // Drop a non-string OR empty-string nickname on read. "" should never exist
     // (renameAgent deletes the field instead of writing ""), but be defensive so

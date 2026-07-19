@@ -32,6 +32,7 @@ import {
   TRANSIENT_FRESH_MS,
   readAllAgents,
   detectAgentStates,
+  mutateAgentMeta,
 } from "./agents";
 import {
   enqueueOutbox,
@@ -101,6 +102,17 @@ import {
 } from "./team-channel";
 import { timed } from "./perf";
 import { WATCHDOG_SENTINEL } from "./watchdog";
+import {
+  generateProfile,
+  resolveSandboxConfig,
+  sandboxProfileParameterValues,
+  type SandboxConfig,
+  type SandboxProfileParams,
+} from "./sandbox";
+import {
+  allocateSandboxProxyPort,
+  assertSandboxProxyPortAvailable,
+} from "./sandbox-proxy";
 
 export interface IbCommandResult {
   ok: boolean;
@@ -969,6 +981,159 @@ function resolveGitRevParsePath(worktreePath: string, rawPath: string): string {
   }
 }
 
+interface SandboxCommandRunner {
+  run(cmd: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }>;
+}
+
+interface PreparedSandbox {
+  config: SandboxConfig;
+  profile: string;
+  profilePath: string;
+  domainsPath: string;
+  parameterValues: Record<string, string>;
+  proxyPort: number;
+}
+
+function mergeSandboxLayerConfigs(
+  layers: Array<AgentType | undefined>,
+  allowedPaths?: string[],
+): SandboxConfig {
+  const configs = layers.map((layer) => layer?.sandbox).filter((value): value is SandboxConfig => value !== undefined);
+  if (configs.length === 0) return resolveSandboxConfig({ allowedPaths });
+  return resolveSandboxConfig({
+    sandbox: {
+      enabled: configs.some((config) => config.enabled),
+      allowRead: [...new Set(configs.flatMap((config) => config.allowRead))],
+      allowWrite: [...new Set(configs.flatMap((config) => config.allowWrite))],
+      deny: [...new Set(configs.flatMap((config) => config.deny))],
+      rawAllow: [...new Set(configs.flatMap((config) => config.rawAllow))],
+      domains: [...new Set(configs.flatMap((config) => config.domains))],
+    },
+  });
+}
+
+function sandboxDefinitionArgs(parameterValues: Record<string, string>): string[] {
+  return Object.entries(parameterValues).flatMap(([key, value]) => ["-D", `${key}=${value}`]);
+}
+
+function sandboxExecShellPrefix(prepared: PreparedSandbox): string {
+  const definitions = Object.entries(prepared.parameterValues)
+    .map(([key, value]) => `-D ${shellQuote(`${key}=${value}`)}`)
+    .join(" ");
+  return `sandbox-exec -f ${shellQuote(prepared.profilePath)} ${definitions}`;
+}
+
+function sandboxProxyScriptPreamble(agentId: string, agentDir: string, port: number): string {
+  const domainsPath = shellQuote(join(agentDir, "sandbox-domains.txt"));
+  const proxyLogPath = shellQuote(join(agentDir, "sandbox-proxy.log"));
+  const pidPath = shellQuote(join(agentDir, "sandbox-proxy.pid"));
+  const readyPath = shellQuote(join(agentDir, "sandbox-proxy.ready"));
+  return `
+# Start the per-agent proxy outside Seatbelt. The launcher detaches/unrefs the
+# proxy before returning; Claude alone is wrapped below. Fail closed if the
+# actual bind loses the small race after the parent-process port preflight.
+PROXY_PORT=${port}
+PROXY_PID_FILE=${pidPath}
+PROXY_READY_FILE=${readyPath}
+rm -f "$PROXY_PID_FILE" "$PROXY_READY_FILE"
+if ! ib sandbox-proxy-launch --port "$PROXY_PORT" --domains ${domainsPath} --log ${proxyLogPath} --pid-file "$PROXY_PID_FILE" --ready-file "$PROXY_READY_FILE"; then
+    log "sandbox refused: proxy could not bind localhost:$PROXY_PORT"
+    exit 1
+fi
+cleanup_sandbox_proxy() {
+    local proxy_pid
+    proxy_pid=$(cat "$PROXY_PID_FILE" 2>/dev/null || true)
+    if [[ "$proxy_pid" =~ ^[1-9][0-9]*$ ]]; then kill "$proxy_pid" 2>/dev/null || true; fi
+    rm -f "$PROXY_PID_FILE" "$PROXY_READY_FILE"
+}
+trap cleanup_sandbox_proxy EXIT
+PROXY_PID=$(cat "$PROXY_PID_FILE")
+ib write-proxy-pid ${shellQuote(agentId)} "$PROXY_PID" "$PROXY_PORT" || log "write-proxy-pid failed (exit=$?)"
+export http_proxy="http://localhost:$PROXY_PORT"
+export https_proxy="$http_proxy"
+export HTTP_PROXY="$http_proxy"
+export HTTPS_PROXY="$http_proxy"
+export no_proxy="localhost,127.0.0.1,::1"
+export NO_PROXY="$no_proxy"
+`;
+}
+
+async function prepareSandbox(
+  runner: SandboxCommandRunner,
+  config: SandboxConfig,
+  agentDir: string,
+  workPath: string,
+  repoPath: string,
+): Promise<PreparedSandbox> {
+  const platform = sandboxPlatformOverride ?? process.platform;
+  if (platform !== "darwin") {
+    throw new Error(`sandbox refused: Seatbelt requires macOS (current platform: ${platform})`);
+  }
+
+  const whichResult = await runner.run(["which", "sandbox-exec"]);
+  if (whichResult.exitCode !== 0 || !whichResult.stdout.trim()) {
+    throw new Error("sandbox refused: sandbox-exec not found (macOS only)");
+  }
+  const sandboxExecPath = whichResult.stdout.trim().split(/\r?\n/)[0]!;
+
+  const gitCommonDirResult = await runner.run([
+    "git", "-C", workPath, "rev-parse", "--git-common-dir",
+  ]);
+  if (gitCommonDirResult.exitCode !== 0 || !gitCommonDirResult.stdout.trim()) {
+    const detail = gitCommonDirResult.stderr.trim() || `exit ${gitCommonDirResult.exitCode}`;
+    throw new Error(`sandbox refused: could not resolve git common dir: ${detail}`);
+  }
+
+  const params: SandboxProfileParams = {
+    AGENTDIR: agentDir,
+    WORKTREE: workPath,
+    GITDIR: resolveGitRevParsePath(workPath, gitCommonDirResult.stdout),
+    REPOAGENTS: join(repoPath, ".ittybitty", "agents"),
+    HOME: homedir(),
+  };
+  const profile = generateProfile(config, params);
+  const parameterValues = sandboxProfileParameterValues(config, params);
+  const profilePath = join(agentDir, "sandbox.sb");
+  const domainsPath = join(agentDir, "sandbox-domains.txt");
+  await Bun.write(profilePath, profile);
+  await Bun.write(domainsPath, config.domains.length > 0 ? `${config.domains.join("\n")}\n` : "");
+
+  const proxyPort = (sandboxPortAllocatorOverride ?? allocateSandboxProxyPort)();
+  try {
+    (sandboxPortCheckOverride ?? assertSandboxProxyPortAvailable)(proxyPort);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`sandbox refused: proxy could not bind localhost:${proxyPort}: ${detail}`);
+  }
+
+  const lintResult = await runner.run([
+    sandboxExecPath,
+    "-f", profilePath,
+    ...sandboxDefinitionArgs(parameterValues),
+    "/usr/bin/true",
+  ]);
+  if (lintResult.exitCode !== 0) {
+    const detail = lintResult.stderr.trim() || `exit ${lintResult.exitCode}`;
+    throw new Error(`sandbox refused: sandbox.sb failed to compile: ${detail}`);
+  }
+
+  return { config, profile, profilePath, domainsPath, parameterValues, proxyPort };
+}
+
+async function stopSandboxProxyForAgent(agentDir: string, meta: AgentMeta): Promise<void> {
+  const pidCandidates: number[] = [];
+  if (typeof meta.sandbox_proxy_pid === "number") pidCandidates.push(meta.sandbox_proxy_pid);
+  try {
+    const pidText = (await Bun.file(join(agentDir, "sandbox-proxy.pid")).text()).trim();
+    if (/^[1-9][0-9]*$/.test(pidText)) pidCandidates.push(Number(pidText));
+  } catch { /* no pid file */ }
+  for (const pid of new Set(pidCandidates)) {
+    try { process.kill(pid, "SIGTERM"); } catch { /* already stopped */ }
+  }
+  await rm(join(agentDir, "sandbox-proxy.pid"), { force: true });
+  await rm(join(agentDir, "sandbox-proxy.ready"), { force: true });
+}
+
 /**
  * Derive the narrow set of parent-repo subdirectories codex agents need
  * write access to under `-s workspace-write`. Returns absolute, canonicalised
@@ -1310,6 +1475,14 @@ export async function resumeAgent(
         };
       }
     }
+    if (agent.meta.sandbox?.enabled && isCodexBackedCli(resumeCli)) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: "Error: sandbox-enabled Codex agents require the phase-5 Codex parity wrapper; refusing to resume unsandboxed",
+      };
+    }
 
     // Re-derive the reasoning-effort level from the persisted meta value, the
     // exact twin of the model re-derivation above. Without this a resumed
@@ -1360,6 +1533,36 @@ export async function resumeAgent(
       await readdir(repoDir);
     } catch {
       workPath = agent.repoPath;
+    }
+
+    let preparedResumeSandbox: PreparedSandbox | null = null;
+    if (!isCodexBackedCli(resumeCli) && agent.meta.sandbox?.enabled) {
+      await stopSandboxProxyForAgent(agentDir, agent.meta);
+      try {
+        const frozenConfig = resolveSandboxConfig({ sandbox: agent.meta.sandbox });
+        preparedResumeSandbox = await prepareSandbox(
+          nukeResumeSpawnCtx,
+          frozenConfig,
+          agentDir,
+          workPath,
+          agent.repoPath,
+        );
+        await mutateAgentMeta(agentDir, (meta) => {
+          meta.sandbox = frozenConfig;
+          meta.sandbox_proxy_port = preparedResumeSandbox!.proxyPort;
+          delete meta.sandbox_proxy_pid;
+        });
+        agent.meta.sandbox_proxy_port = preparedResumeSandbox.proxyPort;
+        delete agent.meta.sandbox_proxy_pid;
+        await logAgent(
+          agentDir,
+          `[resume] sandbox preflight OK: profile=${preparedResumeSandbox.profilePath} proxy=localhost:${preparedResumeSandbox.proxyPort}`,
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        await logAgent(agentDir, `[resume] ${message}`);
+        return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${message}` };
+      }
     }
 
     // Build exit script path
@@ -1671,6 +1874,12 @@ export async function resumeAgent(
       const qMetaJson = shellQuote(join(agentDir, "meta.json"));
       const qAgentLog = shellQuote(join(agentDir, "agent.log"));
       const qResumeStderrLog = shellQuote(join(agentDir, "claude.stderr.log"));
+      const sandboxResumePreamble = preparedResumeSandbox
+        ? sandboxProxyScriptPreamble(agent.id, agentDir, preparedResumeSandbox.proxyPort)
+        : "";
+      const sandboxResumeLaunchPrefix = preparedResumeSandbox
+        ? `${sandboxExecShellPrefix(preparedResumeSandbox)} `
+        : "";
       const resumeContent = `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
@@ -1679,7 +1888,7 @@ export CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
 
 AGENT_LOG=${qAgentLog}
 STDERR_LOG=${qResumeStderrLog}
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [resume.sh] $1" >> "$AGENT_LOG"; }
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [resume.sh] $1" >> "$AGENT_LOG"; }${sandboxResumePreamble}
 
 log "Starting claude --resume ${sessionId} ${claudeArgs}"
 log "PWD=$(pwd) which_claude=$(which claude 2>&1)"
@@ -1712,9 +1921,9 @@ else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid claude --resume "${sessionId}" ${claudeArgs} 2> "$STDERR_LOG" &
+    setsid ${sandboxResumeLaunchPrefix}claude --resume "${sessionId}" ${claudeArgs} 2> "$STDERR_LOG" &
 else
-    claude --resume "${sessionId}" ${claudeArgs} 2> "$STDERR_LOG" &
+    ${sandboxResumeLaunchPrefix}claude --resume "${sessionId}" ${claudeArgs} 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
 log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
@@ -1858,13 +2067,15 @@ ${qAbsExitScript}
         const result = watchdogSpawnOverride(agent.id, agent.repoPath, watchdogLog);
         watchdogPid = result?.pid;
       } else {
-        const watchdogProc = Bun.spawn(["ib", "watchdog", agent.id], {
-          cwd: agent.repoPath,
-          stdout: Bun.file(watchdogLog),
-          stderr: Bun.file(watchdogLog),
-        });
-        watchdogProc.unref();
-        watchdogPid = watchdogProc.pid;
+        // The tmux server is unsandboxed. Routing through it prevents a
+        // sandboxed invoker from imposing the wrong inherited profile on this
+        // resumed agent's watchdog (SPEC-SANDBOX §4C.2).
+        await spawnHelperViaTmuxServer(
+          nukeResumeSpawnCtx,
+          agent.repoPath,
+          ["ib", "watchdog", agent.id],
+          watchdogLog,
+        );
       }
 
       if (watchdogPid !== undefined) {
@@ -3799,6 +4010,12 @@ export function resetDispatcherDryRunSpawnRunner(): void {
 type WatchdogSpawnFn = (id: string, repoPath: string, logPath: string) => { pid?: number } | null;
 let watchdogSpawnOverride: WatchdogSpawnFn | null = null;
 
+type SandboxPortAllocatorFn = () => number;
+type SandboxPortCheckFn = (port: number) => void;
+let sandboxPlatformOverride: NodeJS.Platform | null = null;
+let sandboxPortAllocatorOverride: SandboxPortAllocatorFn | null = null;
+let sandboxPortCheckOverride: SandboxPortCheckFn | null = null;
+
 /** Override watchdog spawn for testing */
 export function setWatchdogSpawnFn(fn: WatchdogSpawnFn): void {
   watchdogSpawnOverride = fn;
@@ -3807,6 +4024,44 @@ export function setWatchdogSpawnFn(fn: WatchdogSpawnFn): void {
 /** Reset watchdog spawn to default */
 export function resetWatchdogSpawnFn(): void {
   watchdogSpawnOverride = null;
+}
+
+/** Test seams for fail-hard sandbox platform and port preconditions. */
+export function setSandboxPlatformForTesting(platform: NodeJS.Platform): void {
+  sandboxPlatformOverride = platform;
+}
+
+export function setSandboxPortAllocatorForTesting(fn: SandboxPortAllocatorFn): void {
+  sandboxPortAllocatorOverride = fn;
+}
+
+export function setSandboxPortCheckForTesting(fn: SandboxPortCheckFn): void {
+  sandboxPortCheckOverride = fn;
+}
+
+export function resetSandboxWiringForTesting(): void {
+  sandboxPlatformOverride = null;
+  sandboxPortAllocatorOverride = null;
+  sandboxPortCheckOverride = null;
+}
+
+/**
+ * Launch a long-lived helper as a child of the unsandboxed tmux server. A
+ * sandboxed manager invoking `ib new-agent` must not lend its own Seatbelt
+ * profile to the child's watchdog or summary worker for their whole lifetime.
+ */
+async function spawnHelperViaTmuxServer(
+  runner: SandboxCommandRunner,
+  cwd: string,
+  command: string[],
+  logPath?: string,
+): Promise<void> {
+  const shellCommand = command.map(shellQuote).join(" ")
+    + (logPath ? ` >> ${shellQuote(logPath)} 2>&1` : " >/dev/null 2>&1");
+  const result = await runner.run(["tmux", "run-shell", "-b", "-c", cwd, `exec ${shellCommand}`]);
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr.trim() || `tmux run-shell failed with exit ${result.exitCode}`);
+  }
 }
 
 /**
@@ -4600,6 +4855,18 @@ export async function newAgent(
   const typeDeny = agentTypeDef.permissions?.deny ?? [];
   const configAllow = [...new Set([...allLayerAllow, ...nonCoordAllow, ...typeAllow])];
   const configDeny = [...new Set([...allLayerDeny, ...nonCoordDeny, ...typeDeny])];
+  const resolvedSandboxConfig = mergeSandboxLayerConfigs(
+    [allLayer, nonCoordLayer, agentTypeDef],
+    agentTypeDef.allowedPaths,
+  );
+  if (resolvedSandboxConfig.enabled && isCodexBackedCli(agentCli)) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: "Error: sandbox-enabled Codex agents require the phase-5 Codex parity wrapper; refusing to start unsandboxed",
+    };
+  }
 
   // 7. Max agents check — coordinators bypass this (SPEC §12.4.3)
   if (!coordinatorMode) {
@@ -4796,6 +5063,7 @@ export async function newAgent(
     agentIcon: agentTypeDef.icon || undefined,
     model: model || null,
     effort: effort || null,
+    sandbox: resolvedSandboxConfig,
     spawned_by: spawnedBy ?? null,
     state: "creating",
     state_updated_at: Math.floor(createdAt.getTime() / 1000),
@@ -5228,6 +5496,37 @@ export async function newAgent(
     } catch { /* ignore */ }
   }
 
+  // 12b. Sandbox preflight (profile + per-agent proxy) when the resolved
+  // agent-type config enables it. Fails hard: a broken sandbox must never
+  // silently spawn an unsandboxed agent.
+  let preparedSandbox: PreparedSandbox | null = null;
+  if (resolvedSandboxConfig.enabled) {
+    try {
+      preparedSandbox = await prepareSandbox(
+        newAgentSpawnCtx,
+        resolvedSandboxConfig,
+        agentDir,
+        workPath,
+        rootRepoPath,
+      );
+      initialMetaJson.sandbox_proxy_port = preparedSandbox.proxyPort;
+      await writeMetaJsonAtomic(agentDir, initialMetaJson);
+      await logSpawn(
+        agentDir,
+        spawnerAgentDir,
+        id,
+        `sandbox preflight OK: profile=${preparedSandbox.profilePath} proxy=localhost:${preparedSandbox.proxyPort}`,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      initialMetaJson.state = "stopped";
+      initialMetaJson.state_updated_at = Math.floor(Date.now() / 1000);
+      await writeMetaJsonAtomic(agentDir, initialMetaJson);
+      await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: ${message}`);
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${message}` };
+    }
+  }
+
   // 13. meta.json was written early (before mkdir worktree) so the dashboard
   // does not flag the in-progress agent dir as orphaned during a slow
   // git worktree add. See the "Compute fields needed for the early meta.json
@@ -5372,6 +5671,12 @@ echo ""
   const qStartExitScript = shellQuote(absExitScript);
   const qStartAgentLog = shellQuote(join(agentDir, "agent.log"));
   const qStartStderrLog = shellQuote(join(agentDir, "claude.stderr.log"));
+  const sandboxStartPreamble = preparedSandbox
+    ? sandboxProxyScriptPreamble(id, agentDir, preparedSandbox.proxyPort)
+    : "";
+  const sandboxLaunchPrefix = preparedSandbox
+    ? `${sandboxExecShellPrefix(preparedSandbox)} `
+    : "";
 
   let startContent: string;
   if (isCodexBackedCli(agentCli)) {
@@ -5434,7 +5739,7 @@ export CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
 
 AGENT_LOG=${qStartAgentLog}
 STDERR_LOG=${qStartStderrLog}
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }${sandboxStartPreamble}
 
 log "Starting claude --session-id ${sessionUuid} ${claudeArgs}"
 log "PWD=$(pwd) which_claude=$(which claude 2>&1)"
@@ -5467,9 +5772,9 @@ else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})" 2> "$STDERR_LOG" &
+    setsid ${sandboxLaunchPrefix}claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})" 2> "$STDERR_LOG" &
 else
-    claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})" 2> "$STDERR_LOG" &
+    ${sandboxLaunchPrefix}claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})" 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
 log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
@@ -5613,13 +5918,15 @@ ${qStartExitScript}
         const result = watchdogSpawnOverride(id, rootRepoPath, watchdogLog);
         watchdogPid = result?.pid;
       } else {
-        const watchdogProc = Bun.spawn(["ib", "watchdog", id], {
-          cwd: rootRepoPath,
-          stdout: Bun.file(watchdogLog),
-          stderr: Bun.file(watchdogLog),
-        });
-        watchdogProc.unref();
-        watchdogPid = watchdogProc.pid;
+        // tmux, not the invoking (possibly sandboxed) manager, owns this
+        // process so the watchdog starts unsandboxed with the authority its
+        // cross-agent lifecycle duties require (SPEC-SANDBOX §4C.2).
+        await spawnHelperViaTmuxServer(
+          newAgentSpawnCtx,
+          rootRepoPath,
+          ["ib", "watchdog", id],
+          watchdogLog,
+        );
       }
 
       if (watchdogPid !== undefined) {
@@ -5637,7 +5944,7 @@ ${qStartExitScript}
   });
 
   // 22. Generate prompt summary in background (fire-and-forget)
-  generatePromptSummary(agentDir).catch(() => {});
+  generatePromptSummary(agentDir, rootRepoPath).catch(() => {});
 
   logToWatchLog(
     `[spawn] agent=${id} type=${typeName} cli=${agentCli} model=${modelFlagValue ?? "<default>"} ` +
@@ -5655,19 +5962,21 @@ ${qStartExitScript}
  * In test mode, calls a test override directly so tests can verify behavior
  * without a real subprocess.
  */
-async function generatePromptSummary(agentDir: string): Promise<void> {
+async function generatePromptSummary(agentDir: string, repoPath: string): Promise<void> {
   // Test mode: call the override directly so tests can verify via mock
   if (summaryGeneratorOverride) {
     await summaryGeneratorOverride(agentDir);
     return;
   }
 
-  // Production: spawn detached subprocess (survives parent process.exit())
-  const proc = Bun.spawn(["ib", "generate-summary", agentDir], {
-    stdout: "ignore",
-    stderr: "ignore",
-  });
-  proc.unref();
+  // Production: route through the unsandboxed tmux server for the same
+  // inheritance reason as the watchdog. This worker may read/write the child
+  // agent directory, which is not necessarily granted by a manager's profile.
+  await spawnHelperViaTmuxServer(
+    newAgentSpawnCtx,
+    repoPath,
+    ["ib", "generate-summary", agentDir],
+  );
 }
 
 /** Override for testing — set via setNewAgentSummaryGenerator / resetNewAgentSummaryGenerator */

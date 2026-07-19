@@ -9,7 +9,7 @@ import { userHome } from "./home";
 import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from "./registry";
 import { resolveAgentIcon } from "./agents";
 import type { Agent, FlatEntry } from "./agents";
-import { isValidAgentId, tmuxSessionTarget } from "./validation";
+import { isValidAgentId, isValidShellPath, tmuxSessionTarget } from "./validation";
 import { SYSTEM_AGENT_ID } from "./hooks/shared";
 import { normalizeTeamName, getTeam } from "./teams";
 
@@ -783,6 +783,15 @@ const COMMAND_HELP: Record<string, string> = {
     "Usage: ib write-pid <agent-id> <pid>\n" +
     "  Internal: record an agent's spawned process PID into meta.json. Called\n" +
     "  by start.sh / resume.sh.",
+  "write-proxy-pid":
+    "Usage: ib write-proxy-pid <agent-id> <pid> <port>\n" +
+    "  Internal: record the detached sandbox proxy PID and port.",
+  "sandbox-proxy":
+    "Usage: ib sandbox-proxy --port <port> --domains <file> --pid-file <file> --ready-file <file>\n" +
+    "  Internal: run one per-agent allowlist proxy.",
+  "sandbox-proxy-launch":
+    "Usage: ib sandbox-proxy-launch --port <port> --domains <file> --log <file> --pid-file <file> --ready-file <file>\n" +
+    "  Internal: detach and health-check one per-agent allowlist proxy.",
   "respawn-self":
     "Usage: ib respawn-self <agent-id>\n" +
     "  Internal: the detached worker launched by `ib respawn` calls this to\n" +
@@ -1355,6 +1364,80 @@ export async function main() {
       try {
         await generateSummary(agentDir);
       } catch { /* ignore — fire-and-forget subprocess */ }
+      break;
+    }
+    case "sandbox-proxy":
+    case "sandbox-proxy-launch": {
+      const option = (name: string): string | undefined => {
+        const index = args.indexOf(name);
+        return index >= 0 ? args[index + 1] : undefined;
+      };
+      const portText = option("--port");
+      const domainsFile = option("--domains");
+      const pidFile = option("--pid-file");
+      const readyFile = option("--ready-file");
+      if (!portText || !domainsFile || !pidFile || !readyFile || !/^[1-9][0-9]*$/.test(portText)) {
+        console.error(COMMAND_HELP[command]);
+        process.exit(1);
+      }
+      const port = Number(portText);
+      if (port > 65535 || !isValidShellPath(domainsFile) || !isValidShellPath(pidFile) || !isValidShellPath(readyFile)) {
+        console.error("Invalid sandbox proxy port or file path");
+        process.exit(1);
+      }
+      const proxy = await import("./sandbox-proxy");
+      if (command === "sandbox-proxy") {
+        try {
+          await proxy.runSandboxProxy({ port, domainsFile, pidFile, readyFile });
+        } catch (err) {
+          console.error(err instanceof Error ? err.message : String(err));
+          process.exit(1);
+        }
+      } else {
+        const logFile = option("--log");
+        if (!logFile || !isValidShellPath(logFile)) {
+          console.error(COMMAND_HELP[command]);
+          process.exit(1);
+        }
+        try {
+          const pid = await proxy.launchSandboxProxyDetached({
+            port,
+            domainsFile,
+            logFile,
+            pidFile,
+            readyFile,
+          });
+          console.log(pid);
+        } catch (err) {
+          console.error(err instanceof Error ? err.message : String(err));
+          process.exit(1);
+        }
+      }
+      break;
+    }
+    case "write-proxy-pid": {
+      const agentId = args[1];
+      const pidArg = args[2];
+      const portArg = args[3];
+      if (!agentId || !pidArg || !portArg || !isValidAgentId(agentId) ||
+          !/^[1-9][0-9]*$/.test(pidArg) || !/^[1-9][0-9]*$/.test(portArg) || Number(portArg) > 65535) {
+        console.error("Usage: ib write-proxy-pid <agent-id> <pid> <port>");
+        process.exit(1);
+      }
+      const { mutateAgentMeta } = await import("./agents");
+      const repos = await listRepos();
+      const { existsSync } = await import("fs");
+      const repo = repos.find((entry) =>
+        existsSync(join(entry.path, ".ittybitty", "agents", agentId, "meta.json"))
+      );
+      if (!repo) {
+        console.error(`Agent ${agentId} not found in any registered repo.`);
+        process.exit(1);
+      }
+      await mutateAgentMeta(join(repo.path, ".ittybitty", "agents", agentId), (meta) => {
+        meta.sandbox_proxy_pid = Number(pidArg);
+        meta.sandbox_proxy_port = Number(portArg);
+      });
       break;
     }
     case "write-pid": {

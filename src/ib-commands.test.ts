@@ -79,6 +79,10 @@ import {
   resetNewAgentSummaryGenerator,
   setWatchdogSpawnFn,
   resetWatchdogSpawnFn,
+  setSandboxPlatformForTesting,
+  setSandboxPortAllocatorForTesting,
+  setSandboxPortCheckForTesting,
+  resetSandboxWiringForTesting,
   teamAdd,
   writeMetaJsonAtomic,
 } from "./ib-commands";
@@ -4159,6 +4163,8 @@ describe("newAgent (native)", () => {
     resetNewAgentSpawnRunner();
     resetDispatcherDryRunSpawnRunner();
     resetNewAgentSummaryGenerator();
+    resetWatchdogSpawnFn();
+    resetSandboxWiringForTesting();
     lifecycleSpawnCtx.reset();
     resetUserConfigPath();
     if (originalHome === undefined) {
@@ -4263,6 +4269,174 @@ describe("newAgent (native)", () => {
       return inner(cmd, opts);
     };
   }
+
+  async function writeSandboxType(name = "sandboxed") {
+    const path = join(process.env.HOME!, ".itsybitsy", "agent-types", `${name}.md`);
+    await Bun.write(path, `---
+name: ${name}
+description: Sandbox wiring test
+model: claude:sonnet
+sandbox:
+  enabled: true
+  allowRead: [${JSON.stringify(tempDir)}]
+  allowWrite: [${JSON.stringify(tempDir)}]
+  deny: ["**/.env"]
+  rawAllow: ["(allow process*)"]
+  domains: ["api.anthropic.com", "*.anthropic.com"]
+---
+`);
+  }
+
+  function sandboxSpawnRunner(options?: { missingExec?: boolean; lintFail?: boolean }) {
+    const inner = cleanWorktreeRunner();
+    return (cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      if (cmd[0] === "which" && cmd[1] === "sandbox-exec") {
+        return makeSpawnResult(options?.missingExec ? "" : "/usr/bin/sandbox-exec", options?.missingExec ? 1 : 0);
+      }
+      if (cmd[0] === "/usr/bin/sandbox-exec") {
+        return makeSpawnResult(options?.lintFail ? "profile syntax error" : "", options?.lintFail ? 1 : 0);
+      }
+      return inner(cmd, opts);
+    };
+  }
+
+  test("sandbox-enabled start.sh wraps both Claude branches and exports only proxy vars", async () => {
+    await writeSandboxType();
+    setSandboxPortAllocatorForTesting(() => 43123);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99991 }));
+
+    const result = await callNewAgent("sandbox me", { name: "sandbox-wiring", type: "sandboxed" });
+    expect(result.ok).toBe(true);
+    const agentDir = join(agentsDir, "sandbox-wiring");
+    const start = await Bun.file(join(agentDir, "start.sh")).text();
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    const domains = await Bun.file(join(agentDir, "sandbox-domains.txt")).text();
+
+    expect(start).toContain("export http_proxy=\"http://localhost:$PROXY_PORT\"");
+    expect(start).toContain("setsid sandbox-exec -f");
+    expect(start).toContain("    sandbox-exec -f");
+    expect(start).toContain("-D 'AGENTDIR=");
+    expect(start).not.toContain("NODE_OPTIONS");
+    expect(start).toContain("trap cleanup_sandbox_proxy EXIT");
+    expect(meta.sandbox.enabled).toBe(true);
+    expect(meta.sandbox_proxy_port).toBe(43123);
+    expect(domains).toBe("api.anthropic.com\n*.anthropic.com\n");
+  });
+
+  test("watchdog launch is routed through the unsandboxed tmux server", async () => {
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    const result = await callNewAgent("watchdog inheritance", { name: "watchdog-via-tmux" });
+    expect(result.ok).toBe(true);
+    const call = spawnCalls.find((args) => args[0] === "tmux" && args[1] === "run-shell" && args.at(-1)?.includes("watchdog"));
+    expect(call).toBeDefined();
+    expect(call?.slice(0, 5)).toEqual(["tmux", "run-shell", "-b", "-c", tempDir]);
+    expect(call?.at(-1)).toContain("'ib' 'watchdog' 'watchdog-via-tmux'");
+  });
+
+  test("sandbox fail-hard preconditions refuse before start.sh or tmux", async () => {
+    await writeSandboxType();
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99992 }));
+
+    const cases: Array<{
+      name: string;
+      configure(): void;
+      runner: ReturnType<typeof sandboxSpawnRunner>;
+      message: string;
+    }> = [
+      {
+        name: "sandbox-nonmac",
+        configure: () => setSandboxPlatformForTesting("linux"),
+        runner: sandboxSpawnRunner(),
+        message: "requires macOS",
+      },
+      {
+        name: "sandbox-no-exec",
+        configure: () => {},
+        runner: sandboxSpawnRunner({ missingExec: true }),
+        message: "sandbox-exec not found",
+      },
+      {
+        name: "sandbox-bad-profile",
+        configure: () => {},
+        runner: sandboxSpawnRunner({ lintFail: true }),
+        message: "failed to compile",
+      },
+      {
+        name: "sandbox-port-busy",
+        configure: () => setSandboxPortCheckForTesting(() => { throw new Error("address in use"); }),
+        runner: sandboxSpawnRunner(),
+        message: "proxy could not bind",
+      },
+    ];
+
+    for (const item of cases) {
+      resetSandboxWiringForTesting();
+      setSandboxPortAllocatorForTesting(() => 43124);
+      setSandboxPortCheckForTesting(() => {});
+      item.configure();
+      spawnCalls = [];
+      setNewAgentSpawnRunner(item.runner);
+      const result = await callNewAgent("must fail closed", { name: item.name, type: "sandboxed" });
+      expect(result.ok).toBe(false);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain(item.message);
+      expect(spawnCalls.some((call) => call.includes("new-session"))).toBe(false);
+      expect(await Bun.file(join(agentsDir, item.name, "start.sh")).exists()).toBe(false);
+      expect(await Bun.file(join(agentsDir, item.name, "agent.log")).text()).toContain(item.message);
+    }
+  });
+
+  test("sandbox resume replays frozen profile, reallocates proxy port, and wraps both branches", async () => {
+    await writeSandboxType();
+    const ports = [43130, 43131];
+    setSandboxPortAllocatorForTesting(() => ports.shift()!);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99993 }));
+    const spawned = await callNewAgent("resume parity", { name: "sandbox-resume", type: "sandboxed" });
+    expect(spawned.ok).toBe(true);
+
+    const agentDir = join(agentsDir, "sandbox-resume");
+    const spawnProfile = await Bun.file(join(agentDir, "sandbox.sb")).text();
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
+
+    let createdSession = false;
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      const cmdStr = cmd.join(" ");
+      if (cmd[0] === "which" && cmd[1] === "sandbox-exec") return makeSpawnResult("/usr/bin/sandbox-exec", 0);
+      if (cmd[0] === "/usr/bin/sandbox-exec") return makeSpawnResult("", 0);
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("tmux has-session")) return makeSpawnResult("", createdSession ? 0 : 1);
+      if (cmdStr.includes("tmux new-session")) { createdSession = true; return makeSpawnResult("", 0); }
+      if (cmdStr.includes("capture-pane")) return makeSpawnResult("Claude Code v1.0", 0);
+      return makeSpawnResult("", 0);
+    });
+    setSendSpawnRunner(() => makeSpawnResult("", 0));
+    try {
+      const resumed = await resumeAgent(makeAgent("sandbox-resume", tempDir, "stopped", meta));
+      expect(resumed.ok).toBe(true);
+    } finally {
+      resetSendSpawnRunner();
+    }
+
+    const resumeProfile = await Bun.file(join(agentDir, "sandbox.sb")).text();
+    const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
+    const resumedMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(resumeProfile).toBe(spawnProfile);
+    expect(resumedMeta.sandbox_proxy_port).toBe(43131);
+    expect(resumeScript).toContain("setsid sandbox-exec -f");
+    expect(resumeScript).toContain("    sandbox-exec -f");
+    expect(resumeScript).toContain("export HTTPS_PROXY=\"$http_proxy\"");
+    expect(resumeScript).toContain("trap cleanup_sandbox_proxy EXIT");
+  });
 
   test("rejects spawn when spawner worktree has uncommitted changes", async () => {
     setNewAgentSpawnRunner(dirtyWorktreeRunner());

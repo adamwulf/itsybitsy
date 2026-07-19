@@ -783,6 +783,17 @@ export async function archiveAgent(
 export interface TeardownMeta {
   tmux_session: string;
   claude_pid?: string;
+  sandbox_proxy_pid?: number;
+}
+
+let sandboxProxyKillFn = (pid: number): void => { process.kill(pid, "SIGTERM"); };
+
+export function setSandboxProxyKillForTesting(fn: (pid: number) => void): void {
+  sandboxProxyKillFn = fn;
+}
+
+export function resetSandboxProxyKillForTesting(): void {
+  sandboxProxyKillFn = (pid) => { process.kill(pid, "SIGTERM"); };
 }
 
 /**
@@ -831,6 +842,20 @@ export async function teardownAgent(
   if (killed) {
     await logAgent(agentDir, "Terminated Claude process");
   }
+
+  // The proxy is deliberately outside Claude's Seatbelt profile and process
+  // group. Tear it down explicitly; start.sh's EXIT trap is the natural-exit
+  // backstop, while this covers retire/pause/nuke and abrupt pane loss.
+  const proxyPids = new Set<number>();
+  if (typeof meta.sandbox_proxy_pid === "number") proxyPids.add(meta.sandbox_proxy_pid);
+  try {
+    const pidText = (await Bun.file(join(agentDir, "sandbox-proxy.pid")).text()).trim();
+    if (/^[1-9][0-9]*$/.test(pidText)) proxyPids.add(Number(pidText));
+  } catch { /* no proxy pid file */ }
+  for (const pid of proxyPids) {
+    try { sandboxProxyKillFn(pid); } catch { /* already exited */ }
+  }
+  if (proxyPids.size > 0) await logAgent(agentDir, "Terminated sandbox proxy");
 
   // 4. Kill tmux session
   const hasSession2 = await spawnCtx.run(["tmux", "has-session", "-t", tmuxSessionTarget(tmuxSession)]);

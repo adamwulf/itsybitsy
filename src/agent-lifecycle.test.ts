@@ -18,6 +18,8 @@ import {
   parseRetirementManifest,
   isSafeRetirementRelativePath,
   findRetiredAgentArchives,
+  setSandboxProxyKillForTesting,
+  resetSandboxProxyKillForTesting,
 } from "./agent-lifecycle";
 import type { SpawnFn, SpawnResult } from "./types";
 
@@ -29,6 +31,7 @@ async function makeTempDir(): Promise<string> {
 describe("agent-lifecycle", () => {
   afterEach(() => {
     spawnCtx.reset();
+    resetSandboxProxyKillForTesting();
   });
 
   // ── logAgent ───────────────────────────────────────────────────────────
@@ -415,6 +418,38 @@ describe("agent-lifecycle", () => {
         spawnCtx.reset();
         resetCoordinatorHome();
         await rm(home, { recursive: true, force: true });
+      }
+    });
+
+    test("teardownAgent terminates the detached sandbox proxy", async () => {
+      const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
+      const home = await mkdtemp(join(tmpdir(), "lc-proxy-home-"));
+      const dir = await makeTempDir();
+      const agentDir = join(dir, ".ittybitty", "agents", "agent-proxy");
+      await mkdir(agentDir, { recursive: true });
+      await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-proxy"}');
+      await Bun.write(join(agentDir, "sandbox-proxy.pid"), "54321\n");
+      setCoordinatorHome(home);
+      spawnCtx.set((cmd: string[]) => ({
+        stdout: new Response("").body!,
+        stderr: new Response("").body!,
+        exited: Promise.resolve(cmd.includes("has-session") || cmd[0] === "pgrep" ? 1 : 0),
+      }) as SpawnResult);
+      const killed: number[] = [];
+      setSandboxProxyKillForTesting((pid) => { killed.push(pid); });
+      try {
+        const result = await teardownAgent(
+          dir,
+          "agent-proxy",
+          agentDir,
+          { tmux_session: "t-agent-proxy", sandbox_proxy_pid: 54321 },
+        );
+        expect(result.ok).toBe(true);
+        expect(killed).toEqual([54321]);
+      } finally {
+        resetCoordinatorHome();
+        await rm(home, { recursive: true, force: true });
+        await rm(dir, { recursive: true, force: true });
       }
     });
   });

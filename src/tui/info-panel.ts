@@ -119,6 +119,12 @@ export class InfoPanelComponent implements Component {
 
     lines.push(...this.renderStoplights(agent, width));
 
+    // Keep the sandbox marker in the width-safe detail panel rather than the
+    // tightly packed sidebar row. Legacy and explicitly disabled agents omit it.
+    if (agent.meta.sandbox?.enabled === true) {
+      lines.push(truncateToWidth(`🔒 ${DIM}Sandboxed${RESET}`, width, ""));
+    }
+
     // Identity line — only shown when a nickname is set, so the canonical id
     // stays visible/copyable: `nickname (id: <id>)`. The sidebar tree shows the
     // nickname ALONE, so without this the real id would be hidden. When there's

@@ -1,6 +1,7 @@
 # SPEC-SANDBOX.md — Per-Agent Seatbelt Sandboxing
 
-**Status:** DESIGN / PLANNING (not yet implemented)
+**Status:** IMPLEMENTED — runtime phases merged; phase-4 spec sync and phase-6
+dashboard marker are in progress in the current change (2026-07-19)
 **Author:** planning session 2026-07-17
 **Related:** SPEC.md §2 (Agent Types), §6 (Hooks), §7 (Configuration), §18 (Codex CLI)
 
@@ -75,11 +76,16 @@ Key takeaways:
    must permit exactly this same root set** (the worktree + its shared `.git`
    common dir), or git operations break. Reuse that computation.
 
+✅ **Implemented:** the shared sandbox wiring is in `src/ib-commands.ts`; both
+Codex launch builders in `src/codex-spawn.ts` select `danger-full-access` only
+when the resolved, persisted sandbox is enabled and retain `workspace-write`
+otherwise.
+
 ### 3.2 The `--effort` feature is the threading template
 
 `effort` was threaded frontmatter → parsed `AgentType` → spawn flag, per memory
-[[project_effort_level_feature]]. Its **6 verified touch-points** are the exact
-map to follow (all line refs current):
+[[project_effort_level_feature]]. Its **6 verified touch-points** were the exact
+map followed (line refs are the planning snapshot):
 
 1. `AgentType` interface field — `src/agent-types.ts:46` (`effort?`); add
    `sandbox?` near :52.
@@ -98,6 +104,10 @@ map to follow (all line refs current):
    resume reads from meta `:1317`.
 
 Consume the resolved config when building `start.sh` / `resume.sh` (§3.3).
+
+✅ **Implemented in `src/agent-types.ts`, `src/agents.ts`, and
+`src/ib-commands.ts`.** The numbered line references above are the planning
+snapshot; the named symbols are authoritative after implementation drift.
 
 ### 3.3 The two injection points (exact lines)
 
@@ -136,20 +146,24 @@ setsid sandbox-exec -f "$AGENT_DIR/sandbox.sb" \
 in place — `$!` *is* `claude`, PID/watchdog unchanged; the `env`-link drop works
 (proxy vars propagate); claude honors `HTTPS_PROXY` natively (no `NODE_OPTIONS`).
 
-**PID / watchdog — confirm exec-in-place (spike item, likely a non-issue).**
+**PID / watchdog — exec-in-place confirmed by the spike.**
 `sandbox-exec`, like `setsid`, calls `sandbox_init` then **execs** the target
 in place (no fork), so after the exec chain `$!` is the single pid that *is*
 `claude` — `CLAUDE_PID=$!` (`:5046`/`:1602`), the meta write, `kill`, and
-`wait $CLAUDE_PID` should all keep working unchanged. And `pgrep -P <panePid> -f
+`wait $CLAUDE_PID` all keep working unchanged. And `pgrep -P <panePid> -f
 "claude"` (`agent-lifecycle.ts:510`) matches the full cmdline, which still
-contains `claude`. So this is **very likely fine** — but the spike must *confirm*
-exec-in-place rather than trust it. (Reframed from "the design may change": the
-review verified this reasoning; keep it as a checklist item, not a blocker.)
+contains `claude`. The spike confirmed the discovered PID's real command/argv is
+the target rather than a lingering wrapper, resolving the original checklist item.
 **Simplification applied above:** drop the `env` wrapper link entirely — export
 the proxy vars in `start.sh` before the launch line. One fewer process in the
 chain and zero ambiguity about what `$!` refers to.
 
-## 4. Proposed frontmatter schema
+✅ **Implemented:** `prepareSandbox`, `sandboxExecShellPrefix`, and
+`sandboxProxyScriptPreamble` in `src/ib-commands.ts` supply this wrap to the
+setsid and macOS fallback branches for spawn and resume; `src/codex-spawn.ts`
+uses the same preamble/prefix for Codex.
+
+## 4. Shipped frontmatter schema
 
 **Enforcement model: DENY-BY-DEFAULT ALLOWLIST (Model B, confirmed by Adam).**
 A sandboxed agent can see/reach **nothing** except what the `.md` file explicitly
@@ -215,6 +229,11 @@ parser two-level nesting or inline-comment stripping — more code, and the flat
 comment-free form reads fine.) The `AgentType.sandbox` TypeScript type still
 models these as grouped fields internally; only the `.md` surface is flat.
 
+✅ **Implemented in `src/agent-types.ts` and `src/sandbox.ts`:** the shipped
+schema is flat, all five list fields union and dedupe across layers,
+`enabled` OR-merges, and `validateSandboxFrontmatter` provides the T-2 rejection
+for non-boolean/non-list/unknown fields and malformed `rawAllow` expressions.
+
 Design decisions:
 
 1. **`sandbox.enabled` defaults to `false` → the agent runs fully unsandboxed**
@@ -268,12 +287,16 @@ Design decisions:
    needs analogous **new** merge code (union the five lists incl. `rawAllow`,
    OR-merge `enabled`), modeled on it, not a free reuse.
 
+   ✅ **Implemented in `src/agent-types.ts` (`mergeRawFrontmatters`).** Spawn also
+   unions resolved sandbox layers in `src/ib-commands.ts`, preserving the same
+   union/OR semantics across `_all.md` and the selected type.
+
 ## 4A. Path pattern format for allow/deny lists (AUTHORITATIVE)
 
 This is the exact, user-facing contract for entries in `sandbox`'s
 `allowRead` / `allowWrite` / `deny` lists. **We own the grammar and compile it to
-both enforcement layers**, so the rules below are what itsybitsy guarantees —
-independent of Seatbelt or hook internals.
+Seatbelt's kernel layer.** The original design also called for mirroring it into
+the advisory hook layer; the shipped-v1 note in §4A.1 records that drift.
 
 ### 4A.0 The core rule (deny-by-default allowlist)
 
@@ -306,7 +329,7 @@ words, and exactly as Adam stated it:
 
 ### 4A.1 The two layers a pattern compiles to
 
-Every pattern is enforced twice, and the generator emits BOTH from one entry:
+The original design called for every pattern to be enforced twice:
 
 | Layer | Engine | What it matches | Where |
 |---|---|---|---|
@@ -316,6 +339,13 @@ Every pattern is enforced twice, and the generator emits BOTH from one entry:
 Both operate on **fully-resolved absolute paths** (symlinks + `~` + `.`/`..`
 normalized). Patterns are never matched against relative paths.
 
+**Shipped-v1 note:** the original two-layer plan above is preserved as design
+history, but the shipped sandbox path lists are enforced by the kernel profile.
+The existing `allowedPaths` hook remains a separate advisory layer; sandbox
+`deny` patterns are not copied into `agent-path.ts`. When no explicit `sandbox:`
+block exists, `resolveSandboxConfig` can derive read+write paths from
+`allowedPaths`, but sandboxing remains disabled unless explicitly enabled.
+
 ⚠️ **ENTRIES are canonicalized too, not just match targets (G-7).** A `/tmp/x`
 entry must compile as `/private/tmp/x`, or it will never match (Seatbelt matches
 canonical paths). This must work even for a path that **does not exist yet** (e.g.
@@ -324,6 +354,9 @@ back to the unresolved input, which is the exact gap the existing `allowedPaths`
 normalization has (`ib-commands.ts:4511-4516`). The generator must resolve the
 longest existing prefix and append the rest, so `/tmp/not-created-yet` still
 becomes `/private/tmp/not-created-yet`.
+
+✅ **Implemented in `src/sandbox.ts` (`canonicalizeSandboxPath` and
+`canonicalizeGlobPrefix`).**
 
 ### 4A.2 The pattern grammar (exactly three anchor forms)
 
@@ -390,7 +423,7 @@ sandbox:
   deny: ["**/.env"]
 ```
 
-This compiles to, and the generator guarantees, BOTH of:
+The original design called for BOTH of the following:
 
 - **Kernel (`sandbox.sb`)** — appended *after* the worktree-allow rules so it
   wins (SBPL = last matching rule decides):
@@ -409,6 +442,11 @@ This compiles to, and the generator guarantees, BOTH of:
 matched by both an `allowWrite` and a `deny` entry is denied. Document this as
 absolute — no "most-specific-match" subtlety.
 
+**Shipped-v1 note:** `generateProfile` implements the kernel half and emits the
+filesystem denies last, preserving deny-wins in Seatbelt. The hook-half text is
+the original follow-up design and is not a claim about the shipped
+`agent-path.ts` cascade.
+
 ### 4A.5 The worktree-vs-deny tension (call this out to users)
 
 The worktree is readable/writable because it's in the **baseline allowlist**
@@ -420,6 +458,9 @@ legitimately needs `.env`. The
 `session-start` hook (§5.4) should surface active deny patterns in the agent's
 prompt so it doesn't burn turns fighting an unfixable `EPERM`.
 
+**Shipped-v1 note:** that session-start guidance was not added; kernel denial
+behavior is unchanged and policy changes still require a respawn.
+
 ### 4A.6 Regex is an escape hatch, not the interface
 
 Users write **globs**, never raw regex — globs are safer (no catastrophic
@@ -427,7 +468,7 @@ backtracking, no accidental unanchored `.`). Internally the generator translates
 glob→SBPL-regex. If a power-user case ever needs raw regex, add an explicit
 `regex:` prefix later; do **not** expose Seatbelt regex directly in v1.
 
-### 4A.7 The required baseline allowlist — lives in `_all.md` (Adam's call, draft 1)
+### 4A.7 The required baseline allowlist — shipped in `_all.md` (Adam's call)
 
 Deny-by-default means an empty allow list = an agent that **can't even start**
 (Claude Code can't read its own binary's dylibs, config, or write its transcript).
@@ -435,9 +476,10 @@ So a baseline read/write allowlist must always be present.
 
 **Decision (Adam, 2026-07-17, reaffirmed + hardened 2026-07-18): the baseline is
 spelled out explicitly in `_all.md`, and the generator bakes in NOTHING.** Not a
-"draft 1" convenience — a firm rule: **zero permissions are hardcoded in
-`src/sandbox.ts`.** The generator emits only `(deny default)` + exactly what the
-merged `.md` config declares. Every allow — including the `(literal "/")` root read
+"draft 1" convenience — a firm rule: **zero static baseline permissions are
+hardcoded in `src/sandbox.ts`.** The generator emits the fixed runtime-root
+parameter rules plus exactly what the merged `.md` config declares. Every static
+allow — including the `"/"` root entry (currently emitted as `(subpath "/")`)
 claude needs to boot, and the OS/dylib read paths — is a line in `_all.md` that the
 **user** owns and can inspect, tighten, or remove. Nothing is assumed baked-in and
 then discovered broken; the user adds permissions as testing shows they're needed.
@@ -445,6 +487,12 @@ then discovered broken; the user adds permissions as testing shows they're neede
 so this needs zero new mechanism — every type unions it in for free. There is no
 "encode the baseline as a code constant later" step; that would re-introduce baked-in
 permissions and is explicitly rejected. So:
+
+✅ **Implemented in `src/sandbox.ts` (`generateProfile`):** no static baseline
+permission or domain is baked into code. The fixed
+`AGENTDIR`/`WORKTREE`/`GITDIR`/`REPOAGENTS` rules are the runtime-derived
+exception described below; every other filesystem, syscall, and network hole
+comes from merged `.md` configuration.
 
 - The static OS/runtime paths go in `_all.md`'s `sandbox.allowRead`
   / `sandbox.allowWrite` (and the required domains in `sandbox.domains`). Adam
@@ -462,8 +510,8 @@ permissions and is explicitly rejected. So:
   - **`REPOAGENTS`** = `<repoPath>/.ittybitty/agents` (the parent-repo registry) —
     **read**-injected; `ib status` needs it to resolve the agent ("Agent not found"
     without it; `ib list` works without it). New finding, phase-1.5 verification.
-  - the agent's Claude project dir (`~/.claude/projects/<encoded-worktree>`), if
-    not expressible as a static parent in `_all.md`.
+  - Claude project data is covered by the static `~/.claude` baseline; the
+    shipped profile does not need a separate per-worktree Claude-project param.
   These are passed as Seatbelt `-D` params (`AGENTDIR`, `WORKTREE`, `GITDIR`,
   `REPOAGENTS`, …) by the spawn/resume script, exactly like the reference passes
   `SECRETS_DIR`. ⚠️ **`AGENTDIR` + `GITDIR` must be injected READ+WRITE, not
@@ -477,6 +525,14 @@ permissions and is explicitly rejected. So:
 `_all.md`; re-verify exact paths on the target install (they're install-layout- and
 Claude-version-dependent). The candidate list below is the earlier one-pass draft —
 superseded by that doc.
+
+**Shipped baseline sync (2026-07-19):** `docs/agent-types/_all.md` keeps
+`enabled: false`. Its domain floor is now `api.anthropic.com`,
+`*.anthropic.com`, `platform.claude.com` (required by Claude 2.1.215),
+`chatgpt.com`, and `api.openai.com` (Codex). It grants `~/.codex` read+write and
+adds `(allow file-ioctl)` for the Codex TUI. These are shipped additions beyond
+the earlier Claude-headless minimum; the two findings documents remain the
+historical spike record and are intentionally unchanged.
 
 Candidate static `_all.md` contents (SUPERSEDED by `docs/SANDBOX-BASELINE-MINIMAL.md`;
 kept for context):
@@ -520,6 +576,10 @@ children union their allow lists on top — `_all.md` sets the floor, each type
 adds what it needs. `deny` unions too (deny-wins ensures a denied path stays
 denied regardless of layer).
 
+✅ **Implemented:** `AgentMeta.sandbox` persists the fully resolved configuration
+in `src/agents.ts`; resume uses that frozen block, reallocates only the proxy
+port, rewrites meta, and regenerates the profile/scripts in `src/ib-commands.ts`.
+
 ## 4B. Codex: disable its built-in sandbox, use ours (Adam's call)
 
 **Decision (Adam, 2026-07-17): a sandboxed codex agent runs codex in its own
@@ -545,21 +605,23 @@ Why not nest the two sandboxes: two OS sandboxes on one process enforce the
 `workspace-write` forbids would fail with no signal as to which layer blocked it.
 `danger-full-access` removes codex's layer so ours is unambiguous.
 
-⚠️ **Spike items for codex (§6):**
-1. Confirm `-s danger-full-access` is the correct flag/value in the installed
-   codex version (verify against `codex --help`; the flag name may differ by
-   version).
-2. Confirm codex under `danger-full-access` **honors `http(s)_proxy` env vars**
-   so its traffic routes through our allowlist proxy. If it ignores them, the
-   kernel layer still blocks its direct egress (fails closed — safe), but codex
-   would then only reach allowlisted domains if it respects the proxy. Related:
-   the `network_access` wiring at `codex-config.ts:278-279` (the flagged TODO).
-3. `-a never` interaction: verify `danger-full-access` + `-a never` doesn't
-   re-introduce an approval prompt or change stdin/tty behavior (the `<&0`
-   handling at `codex-spawn.ts:189`).
+✅ **Implemented in `src/codex-spawn.ts`:** spawn and resume preserve `-a never`,
+select `-s danger-full-access` under our Seatbelt wrapper, export the same proxy
+environment, and retain `-s workspace-write` when the per-agent sandbox is off.
 
-Only when `sandbox.enabled: false` does codex keep its current `-s
-workspace-write` behavior (no change from today).
+✅ **Codex spike items resolved by the shipped phase-5 path (§6):**
+1. The installed Codex accepts `-s danger-full-access`; both generated launch
+   paths select it only under our wrapper.
+2. Codex honors the exported `http(s)_proxy` variables and reaches its allowed
+   endpoints through the per-agent proxy; direct egress still fails closed.
+3. `danger-full-access` + `-a never` retains non-interactive approval behavior
+   and the existing `<&0` TTY handling on spawn and resume.
+
+The installed CLI accepts `danger-full-access`, Codex runs through the per-agent
+proxy without reintroducing approvals, and `sandbox.enabled: false` keeps its
+existing `-s workspace-write` behavior. The shipped `_all.md` includes
+`chatgpt.com` and `api.openai.com`; because proxy apex entries are exact,
+subdomains remain denied unless explicitly added.
 
 ## 4C. What ELSE runs inside the sandbox (the big gap — from design review)
 
@@ -618,7 +680,14 @@ through the same tmux-server helper. Workspace-trust automation issues tmux
 client commands rather than owning a long-lived child process, so it remains
 invoker-side.
 
-### 4C.3 tmux socket = sandbox escape (needs its own decision)
+✅ **Implemented in `src/ib-commands.ts` (`spawnHelperViaTmuxServer`) for new
+and resumed watchdogs, and for prompt-summary generation.** The final command is
+`tmux run-shell -b 'cd <cwd> && exec …'`: cwd is set with a quoted `cd` prefix,
+not `run-shell -c`, to remain compatible with tmux releases predating that flag.
+The watchdog records its authoritative PID in transient state; test overrides
+retain the direct PID return used by deterministic tests and legacy meta.
+
+### 4C.3 tmux socket = sandbox escape (accepted shipped limitation)
 
 Anything that can write the tmux socket (`/private/tmp/tmux-<uid>/`) can
 `tmux run-shell '<anything>'`, which executes as a child of the **unsandboxed**
@@ -632,15 +701,19 @@ escape for manager types as an accepted limitation. Do NOT blanket-allow
 `/private/tmp` — scope it (e.g. allow the specific temp needs, deny the tmux
 socket subpath).
 
+**Shipped state:** `_all.md` still grants `/private/tmp` read+write, so the
+escape remains open to sandboxed agents. The scoping recommendation above is a
+future hardening item, not a claim about current isolation.
+
 ### 4C.4 MCP servers
 
 stdio MCP servers are `claude` children → sandboxed. They need their interpreters
 (`node`/`bun`/`uv` — `~/.bun`, `~/.nvm`, NOT in the candidate baseline), their
 config files, and their **own network** (an MCP server contacting a
 non-allowlisted host fails; HTTP/SSE MCP servers too — their traffic falls under
-the same domain allowlist). The spike MUST boot an agent with a real MCP server
-configured, and `_all.md` must include the interpreter paths. Document that MCP
-network egress is subject to the domain allowlist.
+the same domain allowlist). Compatibility testing should boot any configured MCP
+server and its type must add interpreter paths/domains not already in `_all.md`.
+MCP network egress is subject to the same domain allowlist.
 
 ### 4C.5 Realistic isolation story (set expectations in §1)
 
@@ -653,21 +726,22 @@ fine-grained cross-agent etiquette.** Still a big win over today (kernel-blocked
 secrets + a real domain allowlist), but §1 should not oversell worker-vs-worker
 filesystem isolation.
 
-## 5. Components to build
+## 5. Shipped components
 
-### 5.1 Profile generator — `src/sandbox.ts` (new)
+### 5.1 Profile generator — `src/sandbox.ts`
 
-Pure function: `(SandboxConfig, worktreePath, gitCommonDir, agentDir) → string`
+Pure function: `(SandboxConfig, SandboxProfileParams) → string`
 producing the `.sb` text. Writes `sandbox.sb` into the agent dir next to
 `start.sh`/`meta.json`. **⚠️ Deny-by-default (Model B) — the profile skeleton is
 `(deny default)`, the INVERSE of the reference's `(allow default)`.** SBPL uses
 last-matching-rule-wins, so the structure is: deny everything → allow the
 baseline+config allowlist → re-deny the config `deny` holes last (so deny wins):
 
-**⚠️ ZERO baked-in permissions (Adam's call, 2026-07-18).** The generator bakes in
-**NOTHING** — no allow rule of any kind lives in `src/sandbox.ts`. It is a pure
-translator: `(deny default)` + exactly the rules the merged `.md` config declares +
-the config `deny` list last. If claude needs `(allow file-read* (literal "/"))` to
+**⚠️ ZERO baked-in static permissions (Adam's call, 2026-07-18).** The generator
+contains no static baseline allow. It is a pure translator: `(deny default)` +
+fixed rules for the runtime-derived parameter roots + exactly the rules the
+merged `.md` config declares + the config `deny` list last. If claude needs the
+`allowRead: ["/"]` root entry to
 boot, **that line comes from `_all.md`, not from code** — visible and user-owned,
 like every other baseline entry (§4A.7). Nothing is assumed; everything is tested
 and then written into a `.md` by the user. This means the derived spike baseline
@@ -675,23 +749,26 @@ and then written into a `.md` by the user. This means the derived spike baseline
 
 ```
 (version 1)
-(deny default)                                   ;; the ONLY thing the generator emits unconditionally
+(deny default)                                   ;; unconditional deny floor
 
-;; ---- EVERYTHING below is emitted ONLY because the merged .md config declared it ----
+;; ---- fixed runtime-derived roots (the only non-.md allows) ----
 
 ;; runtime-injected roots — from the -D params the spawn path computes:
 (allow file-read*  (subpath (param "AGENTDIR")))  ;; contains WORKTREE
 (allow file-write* (subpath (param "AGENTDIR")))
 (allow file-read*  (subpath (param "GITDIR")))
 (allow file-write* (subpath (param "GITDIR")))
+(allow file-read*  (subpath (param "REPOAGENTS")))
+(allow file-write* (subpath (param "WORKTREE")))
 
 ;; filesystem allows — one per merged allowRead / allowWrite entry (incl. the
-;; `(literal "/")` line IF _all.md lists "/" in allowRead; NOT auto-added):
-(allow file-read*  (subpath (param "ALLOW_R_0")) ...)
-(allow file-write* (subpath (param "ALLOW_W_0")) ...)
+;; `(subpath "/")` line IF _all.md lists "/" in allowRead; NOT auto-added):
+(allow file-read*  (subpath "/safe/config/path") ...)
+(allow file-write* (subpath "/safe/config/path") ...)
 ;; glob-form allows compile to (regex #"…") instead of (subpath …)
+;; unsafe non-glob strings fall back to (param "ALLOW_R_0") / etc.
 
-;; syscall / network rules — see the OPEN QUESTION below on how the .md expresses these
+;; syscall / network rules — emitted verbatim from merged sandbox.rawAllow
 
 ;; config deny list LAST so it wins over every allow above (§4A.0):
 (deny file-read*  (subpath (param "DENY_0")) (regex #"…") ...)
@@ -718,13 +795,16 @@ sandbox:
     # …the full minimal set the phase-1.5 verification derives…
 ```
 
-The generator emits **only** `(version 1)` + `(deny default)` + the merged
+Beyond the fixed runtime-root rules, the generator emits **only** `(version 1)`
++ `(deny default)` + the merged
 `allowRead`/`allowWrite` (→ `file-read*`/`file-write*` rules) + the merged
-`rawAllow` lines verbatim + `domains` (→ proxy, not the profile) + the config `deny`
-list last. It contains **no allow rule of its own** — not even the network block.
-`(version 1)` + `(deny default)` are the only unconditional lines, and neither is a
-*hole* (they're the deny-everything floor — the opposite of a permission). Every
-**allow** — every actual hole in the sandbox — is a line the user can read in a `.md`.
+`rawAllow` lines verbatim + the config `deny` list last. `domains` is written
+separately to the per-agent proxy allowlist, not emitted into SBPL. The generator
+contains no static baseline allow of its own — not even the network block. Every
+non-runtime **allow** is a line the user can read in a `.md`.
+
+✅ **Implemented by `generateProfile`, `sandboxProfileParameterValues`, and
+`validateSandboxFrontmatter` in `src/sandbox.ts`.**
 
 Notes on `rawAllow`:
 - It **unions** across the `.md` chain like the other lists (§4 decision 5); a type
@@ -739,9 +819,12 @@ Notes on `rawAllow`:
   `(deny network*)`) is fine — SBPL last-match-wins handles the localhost re-allow
   that follows it, exactly as the reference profile does.
 
-Uses `-D` params for paths (never string-interpolate paths into the profile —
-shell-injection surface; the codebase already `shellQuote`s everything). Unit-
-testable in isolation (`bun test`), no spawn required.
+Runtime roots always use `-D` params. Configured subpaths that are safe SBPL
+string literals stay inspectable inline; any containing quotes, backslashes,
+newlines, or carriage returns falls back to a generated `-D` param, while NUL is
+rejected. Glob regexes are escaped and anchored. `sandboxExecShellPrefix`
+shell-quotes every definition.
+This is unit-testable in isolation (`bun test`), no spawn required.
 
 **⚠️ Spike gotchas (`docs/SANDBOX-SPIKE-FINDINGS.md §7`):**
 1. **`(allow file-read* (literal "/"))` is MANDATORY + path-irreducible (VERIFIED,
@@ -769,8 +852,8 @@ testable in isolation (`bun test`), no spawn required.
    narrow region-by-region (or start narrow, widen) — flip one region, re-run.
 4. **Binary paths are install-specific** — `claude`/`node`/`bun`/`ib`/`git` are NOT
    at `/usr/local/bin` on every box (spike box: `~/.local/bin`, `/opt/homebrew/bin`,
-   `~/.bun/bin`, dev checkout). The generator must resolve them via `which`/config,
-   never hardcode `/usr/local/bin`.
+   `~/.bun/bin`, dev checkout). The shipped zero-static-baseline design leaves
+   these roots in `_all.md`; the generator does not hardcode or discover them.
 
 The concrete `_all.md` read/write baseline the spike derived is in
 `docs/SANDBOX-SPIKE-FINDINGS.md §4.2` — use it as the starting `_all.md`, then
@@ -794,10 +877,10 @@ re-verify exact paths on the target install (Claude-version/layout-dependent).
   localhost — inside the sandbox's allowed set).
 - **Matching semantics (specify + test, don't leave implicit):**
   - Apex vs subdomain: an entry `github.com` matches `github.com` **only**;
-    subdomains require an explicit `*.github.com` (or list both). Pick this rule
-    and test it — do not silently subtree-match.
-  - `*.x.com` = any number of labels under `x.com` or exactly one? Decide (recommend
-    "one or more labels", i.e. `a.x.com` and `a.b.x.com` both match) and test.
+    subdomains require an explicit `*.github.com` (or list both). This exact-apex
+    behavior is implemented and tested — there is no implicit subtree match.
+  - `*.x.com` matches one or more labels (`a.x.com` and `a.b.x.com`) but not the
+    apex `x.com`; list the apex separately when both are required.
   - CONNECT ports: allow 443/80 only by default (the proxy only needs to gate TLS
     tunnels + plain HTTP); reject other ports.
   - **IP-literal CONNECT → deny** (an IP bypasses domain semantics entirely).
@@ -812,6 +895,14 @@ re-verify exact paths on the target install (Claude-version/layout-dependent).
     (not only the `teardownAgent` path).
   - Resume: do NOT trust the persisted port — **reallocate** a fresh port, rewrite
     `meta.json`, regenerate the env. (Port is NOT stable across resume.)
+
+✅ **Implemented in `src/sandbox-proxy.ts`, `src/ib-commands.ts`, and
+`src/watchdog.ts`:** the per-agent Bun raw-TCP proxy is detached, has an actual
+bind/ready health check, is cleaned up by both the script EXIT trap and agent
+teardown, gets a fresh port on resume, and is health-checked/restarted by the
+watchdog. `chatgpt.com` is intentionally an exact-apex entry; if Codex moves an
+endpoint to a subdomain it will fail closed until `_all.md` adds that apex or a
+matching wildcard. This is a baseline watch item, not implicit proxy behavior.
 
 ### 5.3 Wiring
 
@@ -837,6 +928,11 @@ re-verify exact paths on the target install (Claude-version/layout-dependent).
   comment "Revisit when we add per-agent-type capability gating" directly above the
   `network_access = true` line (`:279`).
 
+✅ **Implemented across `src/agent-types.ts`, `src/agents.ts`,
+`src/ib-commands.ts`, and `src/codex-spawn.ts`.** Resolved meta is frozen for
+resume parity; disabled/absent remains the legacy unsandboxed-Claude and
+workspace-write-Codex behavior.
+
 ### 5.4 Hooks awareness
 
 - `session-start.ts`: inject a note into the agent's system prompt telling it
@@ -847,7 +943,13 @@ re-verify exact paths on the target install (Claude-version/layout-dependent).
   agent's guidance distinguishes "ask your manager for permission" (hook) from
   "this is kernel-blocked, it can't be granted at runtime" (sandbox). A sandbox
   denial can't be relaxed without a respawn (profile is fixed at exec).
-- `ib watch`/dashboard: optional — show a 🔒 indicator for sandboxed agents.
+- `ib watch`/dashboard: ✅ phase 6 shows a 🔒 indicator for sandboxed agents in
+  the selected-agent info panel.
+
+**Shipped/current state:** the hook-awareness items above remain follow-up
+guidance; phases 2–5 did not change hook prompts or runtime permission guidance.
+Phase 6 adds the purely presentational lock to `src/tui/info-panel.ts`, where
+existing truncation makes it safe without changing sidebar width math.
 
 ### 5.5 Fail-hard when the sandbox can't be established (Adam's call)
 
@@ -874,6 +976,13 @@ This is the whole point of the feature: an agent that believes it is sandboxed
 but isn't is the one outcome we refuse to permit. Wire the precondition checks
 into `newAgent` (spawn) and the resume path **before** `start.sh`/`resume.sh` are
 written/executed, so nothing launches on a failed precondition.
+
+✅ **Implemented in `src/ib-commands.ts` (`prepareSandbox`):** macOS and
+`sandbox-exec` presence are checked, the generated profile is compile-dry-run
+with the real `sandbox-exec -f … /usr/bin/true`, and the proxy port is bind-tested
+before launch. The generated script performs a second bind/ready check to close
+the allocation race. Any failure aborts before Claude/Codex exec; Codex builders
+also fail if either shared sandbox prefix is missing.
 
 ## 6. Build phases
 
@@ -953,32 +1062,34 @@ written/executed, so nothing launches on a failed precondition.
    block (§(e)) is in the real `allowRead`/`allowWrite`/`deny`/`rawAllow`/`domains`
    schema. Honest non-minimized items (TUI/MCP/codex, dylib-exact reads, `/` op-class)
    → phase-2 backlog.
-2. **Filesystem layer + fail-hard (⚠️ merge WITH phase 3 — see R2):** `src/sandbox.ts`
-   generator + `sandbox.enabled` + flat `sandbox` frontmatter (R1), wrap
-   spawn+resume, §5.5 precondition checks (no unsandboxed fallback), persist
-   resolved config to meta.json. **A sandbox-enabled agent has NO route to
-   `api.anthropic.com` until the proxy (phase 3) exists — the kernel can't do
-   domains, egress is binary-blocked. So `sandbox.enabled: true` must NOT be usable
-   on a live agent until phases 2+3 land together (R2).** Tests + tsc.
-3. **Network layer:** per-agent Bun proxy + domain allowlist + port in meta.json +
-   lifecycle (start/resume/teardown + EXIT trap + watchdog health-check, §5.2),
-   `_all.md` domain baseline. Merge together with phase 2 (R2).
-   **⚠️ Design decision REQUIRED before this phase (§4C.2): watchdog spawn
-   inheritance** — a sandboxed manager's `Bun.spawn(["ib","watchdog",id])`
-   (`ib-commands.ts:5190`) makes the child's watchdog inherit the manager's
-   profile. Pick the fix (route via tmux `run-shell`, or an `ib` daemon owns
-   watchdog spawning) before wiring the wrap into a spawning agent.
-4. **Inheritance (union+OR-merge) + validation + `_all.md` interaction + §4C
-   baseline (ib paths, `~/.itsybitsy/agents/**` write, tmux-socket scoping)**,
-   SPEC.md §2/§7 updates, `docs/agent-types/*.md` doc updates.
-5. **Codex parity:** `-s danger-full-access` flip + same sandbox-exec/proxy wrap
-   for codex (§4B). Not optional — codex is a first-class sandboxed CLI.
-6. **Dashboard indicator** (optional): 🔒 for sandboxed agents.
+2. **Pure filesystem/config foundation + validation — ✅ MERGED (2026-07-19;
+   `51037bb`, `f902add`).** `src/sandbox.ts` generator, flat schema,
+   union+OR inheritance, glob/canonicalization/injection defenses, T-2 validator,
+   and pure tests. The original R2 constraint was honored: this foundation did
+   not enable a live sandbox before proxy wiring landed.
+2b+3. **Fail-hard spawn/resume wiring + per-agent network proxy — ✅ MERGED
+   (2026-07-19; `fff8803`, `e2cd1bb`, `2b8d619`, `6d63510`, `dc5746c`).** This
+   includes resolved-meta persistence, real `sandbox-exec` compile dry-run,
+   proxy start/resume/teardown/EXIT lifecycle, watchdog proxy recovery, the
+   disabled `_all.md` baseline, and the Claude 2.1.215 domain addition. The final
+   §4C.2 choice is tmux-server-owned `run-shell -b` with a quoted `cd` prefix,
+   not an `ib` daemon and not the newer tmux `-c` flag.
+4. **SPEC/docs sync — 🚧 IN PROGRESS (this change).** Reconcile the planning
+   language, shipped baseline/domain additions, watchdog decision, and phase
+   status without changing the historical rationale. The spike and minimal
+   baseline findings documents remain immutable context.
+5. **Codex parity — ✅ MERGED (2026-07-19; `b7ba36b`, `0eca1db`).** Both launch
+   paths use `-s danger-full-access` + the shared Seatbelt/proxy wrap when enabled,
+   preserve `-a never`, and use `workspace-write` when disabled.
+6. **Dashboard indicator — 🚧 IMPLEMENTED IN THIS CHANGE, AWAITING MERGE.** The
+   selected-agent info panel shows `🔒 Sandboxed` only when
+   `meta.sandbox?.enabled === true`; the width-sensitive sidebar is unchanged.
+   Focused true/false/absent render coverage is included.
 
 Each phase: `bun test` green + `bunx tsc --noEmit` clean (CLAUDE.md gate), then
 a review cycle (2 worker reviewers) before merge.
 
-## 7. Open questions for Adam
+## 7. Decisions and resolved questions
 
 **RESOLVED (Adam, 2026-07-17):**
 - ✅ **Enforcement model → Model B (deny-by-default allowlist).** Agent sees only
@@ -987,8 +1098,8 @@ a review cycle (2 worker reviewers) before merge.
 - ✅ **Baseline location → everything in `_all.md`** (§4A.7, §4 decision 3). Static
   filesystem paths AND all required domains are listed explicitly in `_all.md`;
   built out empirically as we experiment — **no code constant, do not
-  over-engineer**. Only worktree + git-common-dir are runtime-injected as `-D`
-  params.
+  over-engineer**. Only `AGENTDIR`, `WORKTREE`, `GITDIR`, and `REPOAGENTS` are
+  runtime-injected as `-D` params.
 - ✅ **Proxy topology → one proxy PER AGENT** (§5.2). Port recorded in meta.json;
   lifecycle tied to the agent (started by start.sh/resume.sh, killed in teardown).
   Trivial attribution, worth the N small processes.
@@ -1016,21 +1127,19 @@ a review cycle (2 worker reviewers) before merge.
   kernel counterpart to the existing `allowedPaths` hook (both deny-by-default
   allowlists), not a parallel conflicting list.
 
-**STILL OPEN (empirical — answered by the phase-1 spike, not by decision):**
-1. **Feasibility of `(deny default)` for Claude Code** (spike §6.1b): if Claude
-   Code can't boot under a tractable deny-by-default allowlist, do we accept
-   `(allow default)` + broad denies as a fallback, or hold to the strict model?
-   Conscious decision after the spike, not a silent downgrade. The spike's output
-   also **is** the initial `_all.md` filesystem + domain baseline.
-2. **Codex `danger-full-access` specifics** (spike §4B): exact flag/value in the
-   installed codex version, and whether codex honors `http(s)_proxy` under it.
+**RESOLVED EMPIRICALLY:**
+1. ✅ Claude Code boots under the tractable `(deny default)` baseline; no
+   `(allow default)` fallback was adopted.
+2. ✅ The installed Codex uses `danger-full-access` under our wrapper and honors
+   the per-agent proxy environment; spawn/resume parity is merged in phase 5.
 
 ## 8. Test matrix (MANDATED phase gate — from design review)
 
 `bun test` green + `bunx tsc --noEmit` clean is the CLAUDE.md gate, but that
-gates nothing *specific*. Phases 2–4 must be held to the concrete matrix below —
-each bullet is at least one test. The profile generator, glob compiler, merge, and
-proxy are all pure/unit-testable with no spawn required.
+gates nothing *specific*. The matrix below is retained as the shipped regression
+contract for phases 2–6, with the unshipped hook-layer follow-up called out in D.
+The profile generator, glob compiler, merge, and proxy are pure/unit-testable
+with no spawn required.
 
 **A. Glob → regex translation (pure, table-driven):**
 - `*` never crosses `/`; `?` = exactly one non-`/` char; `**` crosses `/`
@@ -1043,11 +1152,11 @@ proxy are all pure/unit-testable with no spawn required.
   refused with the §4A.2 error text); bare `~` legal (= `$HOME`).
 
 **B. Profile emission (string asserts on generated `.sb`):**
-- `(deny default)` emitted FIRST; ALL deny rules emitted AFTER every allow
-  (last-match-wins is the entire §4A.0 guarantee); network block present;
-  localhost-only exits.
-- Paths travel ONLY via `-D` params — assert NO user-controlled string is
-  interpolated into profile text. Injection test: a path containing
+- `(deny default)` emitted FIRST; ALL filesystem deny rules emitted AFTER every
+  allow (last-match-wins is the entire §4A.0 guarantee); when `rawAllow` declares
+  the network block/localhost exit, those lines are present in declared order.
+- Runtime and unsafe configured subpaths travel via `-D` params; safe subpaths
+  may be inspectable inline. Assert an injection path containing
   `")(allow default)(` must appear nowhere in the emitted `.sb`.
 - `allowRead:["/"]` full-open form; empty lists; glob-form allow compiles to
   `(regex …)` under the correct op (`file-read*` vs `file-write*`).
@@ -1077,7 +1186,7 @@ proxy are all pure/unit-testable with no spawn required.
   would defeat Model B. This is the guard §4 relies on to call the flat schema
   safe — assert each case refuses/warns with a specific message.
 
-**D. Hook cascade (`agent-path.ts`):**
+**D. Planned hook cascade follow-up (`agent-path.ts`) — not shipped in v1:**
 - Sandbox-deny (new rule ~6.5) fires BEFORE the worktree allow (rule 7, :391) —
   the §4A.4 worked example as a test: worktree `.env` is denied.
 - Non-matching denies leave rules 7/8/9 outcomes unchanged.
@@ -1121,3 +1230,7 @@ dir still canonicalizes (the existing `allowedPaths` normalization at
 `ib-commands.ts:4511-4516` has the gap to avoid: `realpathSync` on a nonexistent
 path falls back unresolved, leaving `/tmp` un-canonicalized). Validator/generator
 must resolve the symlink prefix that DOES exist.
+
+**K. Dashboard marker (phase 6):** selected-agent info includes `🔒 Sandboxed`
+when `meta.sandbox?.enabled === true` and excludes the marker when the value is
+false or absent; rendering continues through the existing width truncation path.

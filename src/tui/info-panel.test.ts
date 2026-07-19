@@ -102,6 +102,30 @@ describe("InfoPanelComponent", () => {
     expect(text).toContain("build a widget");
   });
 
+  test("renders the sandbox lock only when sandboxing is enabled", () => {
+    const renderAgent = (enabled: boolean | undefined): string => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 10;
+      const agent = makeAgent({ id: `agent-sandbox-${String(enabled)}` });
+      if (enabled !== undefined) {
+        agent.meta.sandbox = {
+          enabled,
+          allowRead: [],
+          allowWrite: [],
+          deny: [],
+          rawAllow: [],
+          domains: [],
+        };
+      }
+      panel.agent = agent;
+      return panel.render(60).map(stripAnsi).join("\n");
+    };
+
+    expect(renderAgent(true)).toContain("🔒 Sandboxed");
+    expect(renderAgent(false)).not.toContain("🔒");
+    expect(renderAgent(undefined)).not.toContain("🔒");
+  });
+
   test("shows BOTH nickname and id when a nickname is set", () => {
     const panel = new InfoPanelComponent();
     panel.displayHeight = 10;

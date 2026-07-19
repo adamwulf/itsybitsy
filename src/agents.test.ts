@@ -6,6 +6,7 @@ import {
   computeAge,
   buildAgentTree,
   flattenAgentTree,
+  buildParentDisplayNames,
   isRunningState,
   subtreeHasRunning,
   isVisibleUnderRunningFilter,
@@ -418,6 +419,223 @@ describe("flattenAgentTree", () => {
     expect(waitingHeader && asRepoHeader(waitingHeader).hasNonStoppedAgents).toBe(true);
     expect(stoppedHeader && asRepoHeader(stoppedHeader).hasRunningAgents).toBe(false);
     expect(stoppedHeader && asRepoHeader(stoppedHeader).hasNonStoppedAgents).toBe(false);
+  });
+});
+
+describe("flattenAgentTree groupByParent", () => {
+  /** Narrow a FlatEntry to kind==="parent-header" or fail */
+  function asParentHeader(entry: FlatEntry) {
+    if (entry.kind !== "parent-header") throw new Error(`Expected parent-header entry, got ${entry.kind}`);
+    return entry;
+  }
+
+  test("default arg (omitted) is byte-identical to today — no parent-header", () => {
+    const a = makeAgent({ id: "a1", repoName: "zeta-repo", repoPath: "/Users/x/Developer/zeta-repo" });
+    const b = makeAgent({ id: "b1", repoName: "alpha-repo", repoPath: "/Users/x/Developer/alpha-repo" });
+    const roots = buildAgentTree([a, b]);
+    const repos = [
+      { name: "zeta-repo", path: "/Users/x/Developer/zeta-repo" },
+      { name: "alpha-repo", path: "/Users/x/Developer/alpha-repo" },
+    ];
+    // Omitted 4th arg and explicit false must produce the same output, and that
+    // output must contain no parent-header rows.
+    const omitted = flattenAgentTree(roots, repos);
+    const explicitFalse = flattenAgentTree(roots, repos, undefined, false);
+    expect(omitted).toEqual(explicitFalse);
+    expect(omitted.some((f) => f.kind === "parent-header")).toBe(false);
+    expect(omitted.length).toBe(4); // 2 repo-headers + 2 agents
+    expect(asRepoHeader(omitted[0]!).repoName).toBe("alpha-repo");
+    expect(asAgent(omitted[1]!).agent.id).toBe("b1");
+    expect(asRepoHeader(omitted[2]!).repoName).toBe("zeta-repo");
+    expect(asAgent(omitted[3]!).agent.id).toBe("a1");
+  });
+
+  test("two repos sharing one parent: single parent-header, repos nested under it", () => {
+    const a = makeAgent({ id: "a1", repoName: "zeta-repo", repoPath: "/Users/x/Developer/zeta-repo" });
+    const b = makeAgent({ id: "b1", repoName: "alpha-repo", repoPath: "/Users/x/Developer/alpha-repo" });
+    const roots = buildAgentTree([a, b]);
+    const repos = [
+      { name: "zeta-repo", path: "/Users/x/Developer/zeta-repo" },
+      { name: "alpha-repo", path: "/Users/x/Developer/alpha-repo" },
+    ];
+    const flat = flattenAgentTree(roots, repos, undefined, true);
+
+    // parent-header, then repos sorted alphabetically within the group.
+    expect(flat.length).toBe(5); // 1 parent-header + 2 repo-headers + 2 agents
+    const parent = asParentHeader(flat[0]!);
+    expect(parent.parentDir).toBe("/Users/x/Developer");
+    expect(parent.displayName).toBe("Developer");
+    expect(asRepoHeader(flat[1]!).repoName).toBe("alpha-repo");
+    expect(asAgent(flat[2]!).agent.id).toBe("b1");
+    expect(asRepoHeader(flat[3]!).repoName).toBe("zeta-repo");
+    expect(asAgent(flat[4]!).agent.id).toBe("a1");
+  });
+
+  test("repos across two parents: one parent-header per group, sorted by parentDir", () => {
+    const a = makeAgent({ id: "a1", repoName: "dev-repo", repoPath: "/Users/x/Developer/dev-repo" });
+    const b = makeAgent({ id: "b1", repoName: "work-repo", repoPath: "/Users/x/Work/work-repo" });
+    const roots = buildAgentTree([a, b]);
+    const repos = [
+      { name: "dev-repo", path: "/Users/x/Developer/dev-repo" },
+      { name: "work-repo", path: "/Users/x/Work/work-repo" },
+    ];
+    const flat = flattenAgentTree(roots, repos, undefined, true);
+
+    // Parent groups sorted alphabetically by parentDir: Developer < Work.
+    expect(flat.length).toBe(6); // 2 parent-headers + 2 repo-headers + 2 agents
+    expect(asParentHeader(flat[0]!).parentDir).toBe("/Users/x/Developer");
+    expect(asParentHeader(flat[0]!).displayName).toBe("Developer");
+    expect(asRepoHeader(flat[1]!).repoName).toBe("dev-repo");
+    expect(asAgent(flat[2]!).agent.id).toBe("a1");
+    expect(asParentHeader(flat[3]!).parentDir).toBe("/Users/x/Work");
+    expect(asParentHeader(flat[3]!).displayName).toBe("Work");
+    expect(asRepoHeader(flat[4]!).repoName).toBe("work-repo");
+    expect(asAgent(flat[5]!).agent.id).toBe("b1");
+  });
+
+  test("single repo (repoNames length 1): no grouping, no parent-header even when true", () => {
+    const a = makeAgent({ id: "a1", repoName: "solo", repoPath: "/Users/x/Developer/solo" });
+    const roots = buildAgentTree([a]);
+    // Only one repo → the >1 branch never runs, so no headers of any kind.
+    const flat = flattenAgentTree(roots, [{ name: "solo", path: "/Users/x/Developer/solo" }], undefined, true);
+    expect(flat.length).toBe(1);
+    expect(flat[0]!.kind).toBe("agent");
+    expect(asAgent(flat[0]!).agent.id).toBe("a1");
+  });
+
+  test("empty-path repo: bucketed under sentinel, NO parent-header, renders flat first", () => {
+    // alpha has a known path; no-path has an empty path (unknown on disk).
+    const a = makeAgent({ id: "a1", repoName: "alpha", repoPath: "/Users/x/Developer/alpha" });
+    const b = makeAgent({ id: "b1", repoName: "no-path", repoPath: "" });
+    const roots = buildAgentTree([a, b]);
+    const repos = [
+      { name: "alpha", path: "/Users/x/Developer/alpha" },
+      { name: "no-path", path: "" },
+    ];
+    const flat = flattenAgentTree(roots, repos, undefined, true);
+
+    // The "" sentinel group sorts first and emits NO parent-header; the
+    // Developer group emits its parent-header. Total: 1 parent-header +
+    // 2 repo-headers + 2 agents = 5.
+    expect(flat.length).toBe(5);
+    // "" sentinel group first: no-path repo, flat (no parent-header above it).
+    expect(asRepoHeader(flat[0]!).repoName).toBe("no-path");
+    expect(asAgent(flat[1]!).agent.id).toBe("b1");
+    // Then the Developer parent group.
+    expect(asParentHeader(flat[2]!).parentDir).toBe("/Users/x/Developer");
+    expect(asRepoHeader(flat[3]!).repoName).toBe("alpha");
+    expect(asAgent(flat[4]!).agent.id).toBe("a1");
+    // Exactly one parent-header overall (the empty-path repo never got one).
+    expect(flat.filter((f) => f.kind === "parent-header").length).toBe(1);
+  });
+
+  test("all repos share one parent: still emits the single parent-header", () => {
+    const a = makeAgent({ id: "a1", repoName: "alpha", repoPath: "/Users/x/Developer/alpha" });
+    const b = makeAgent({ id: "b1", repoName: "bravo", repoPath: "/Users/x/Developer/bravo" });
+    const c = makeAgent({ id: "c1", repoName: "charlie", repoPath: "/Users/x/Developer/charlie" });
+    const roots = buildAgentTree([a, b, c]);
+    const repos = [
+      { name: "alpha", path: "/Users/x/Developer/alpha" },
+      { name: "bravo", path: "/Users/x/Developer/bravo" },
+      { name: "charlie", path: "/Users/x/Developer/charlie" },
+    ];
+    const flat = flattenAgentTree(roots, repos, undefined, true);
+    const parentHeaders = flat.filter((f) => f.kind === "parent-header");
+    expect(parentHeaders.length).toBe(1);
+    expect(asParentHeader(parentHeaders[0]!).displayName).toBe("Developer");
+    // The single parent-header is at the very top.
+    expect(flat[0]!.kind).toBe("parent-header");
+  });
+
+  test("empty repos participate in grouping by their path", () => {
+    // No agents; two empty repos share a parent, one is elsewhere.
+    const repos = [
+      { name: "alpha", path: "/Users/x/Developer/alpha" },
+      { name: "bravo", path: "/Users/x/Developer/bravo" },
+      { name: "solo", path: "/Users/x/Other/solo" },
+    ];
+    const flat = flattenAgentTree([], repos, undefined, true);
+    // Developer group (2 repos) then Other group (1 repo).
+    expect(asParentHeader(flat[0]!).displayName).toBe("Developer");
+    expect(asRepoHeader(flat[1]!).repoName).toBe("alpha");
+    expect(asRepoHeader(flat[2]!).repoName).toBe("bravo");
+    expect(asParentHeader(flat[3]!).displayName).toBe("Other");
+    expect(asRepoHeader(flat[4]!).repoName).toBe("solo");
+  });
+
+  // S4: two DIFFERENT parents that share a basename must stay SEPARATE groups
+  // (identity keys on full parentDir) AND render DISTINGUISHABLE labels.
+  test("same-basename parents stay separate and render distinguishable labels", () => {
+    const a = makeAgent({ id: "a1", repoName: "alpha", repoPath: "/Users/alice/Developer/alpha" });
+    const b = makeAgent({ id: "b1", repoName: "bravo", repoPath: "/Volumes/work/Developer/bravo" });
+    const roots = buildAgentTree([a, b]);
+    const repos = [
+      { name: "alpha", path: "/Users/alice/Developer/alpha" },
+      { name: "bravo", path: "/Volumes/work/Developer/bravo" },
+    ];
+    const flat = flattenAgentTree(roots, repos, undefined, true);
+
+    const parentHeaders = flat.filter((f) => f.kind === "parent-header").map((f) => asParentHeader(f));
+    // Two separate groups (grouping keyed on full parentDir).
+    expect(parentHeaders.length).toBe(2);
+    expect(parentHeaders.map((p) => p.parentDir).sort()).toEqual([
+      "/Users/alice/Developer",
+      "/Volumes/work/Developer",
+    ]);
+    // Labels are disambiguated (last-two segments), NOT two identical "Developer".
+    const labels = parentHeaders.map((p) => p.displayName);
+    expect(labels).toContain("alice/Developer");
+    expect(labels).toContain("work/Developer");
+    expect(new Set(labels).size).toBe(2); // distinguishable
+  });
+
+  // S5: a repo directly under root ("/foo") has parent "/" whose basename is
+  // "" — the header must NOT render blank.
+  test("top-level repo (parent is '/') gets a non-empty parent label", () => {
+    const a = makeAgent({ id: "a1", repoName: "rootrepo", repoPath: "/rootrepo" });
+    const b = makeAgent({ id: "b1", repoName: "devrepo", repoPath: "/Users/x/Developer/devrepo" });
+    const roots = buildAgentTree([a, b]);
+    const repos = [
+      { name: "rootrepo", path: "/rootrepo" },
+      { name: "devrepo", path: "/Users/x/Developer/devrepo" },
+    ];
+    const flat = flattenAgentTree(roots, repos, undefined, true);
+    const parentHeaders = flat.filter((f) => f.kind === "parent-header").map((f) => asParentHeader(f));
+    // The "/" parent gets a non-blank label (falls back to the raw parentDir).
+    const rootHeader = parentHeaders.find((p) => p.parentDir === "/");
+    expect(rootHeader).toBeDefined();
+    expect(rootHeader!.displayName.length).toBeGreaterThan(0);
+    expect(rootHeader!.displayName).toBe("/");
+  });
+});
+
+describe("buildParentDisplayNames", () => {
+  test("unique basenames render as the plain basename", () => {
+    const map = buildParentDisplayNames(["/Users/x/Developer", "/Users/x/Work"]);
+    expect(map.get("/Users/x/Developer")).toBe("Developer");
+    expect(map.get("/Users/x/Work")).toBe("Work");
+  });
+
+  test("colliding basenames fall back to last-two segments", () => {
+    const map = buildParentDisplayNames(["/Users/alice/Developer", "/Volumes/work/Developer"]);
+    expect(map.get("/Users/alice/Developer")).toBe("alice/Developer");
+    expect(map.get("/Volumes/work/Developer")).toBe("work/Developer");
+  });
+
+  test("mixed: only the colliding basename disambiguates, uniques stay plain", () => {
+    const map = buildParentDisplayNames([
+      "/Users/alice/Developer",
+      "/Volumes/work/Developer",
+      "/Users/x/Projects",
+    ]);
+    expect(map.get("/Users/alice/Developer")).toBe("alice/Developer");
+    expect(map.get("/Volumes/work/Developer")).toBe("work/Developer");
+    expect(map.get("/Users/x/Projects")).toBe("Projects"); // unique → plain
+  });
+
+  test("root parent '/' → non-empty label", () => {
+    const map = buildParentDisplayNames(["/"]);
+    expect(map.get("/")).toBe("/");
   });
 });
 

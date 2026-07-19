@@ -1182,6 +1182,79 @@ describe("AgentWatcher", () => {
     }, 10_000);
   });
 
+  describe("setGroupByParent (live grouping toggle)", () => {
+    // The mock's declared type only takes `roots`, but the watcher passes 4
+    // args at runtime — read the 4th positional arg off the recorded call.
+    const lastGroupByParentArg = (): unknown => {
+      const calls = mockFlattenAgentTree.mock.calls;
+      return calls.length ? (calls[calls.length - 1] as unknown[])[3] : undefined;
+    };
+
+    test("defaults to false — flattenAgentTree receives groupByParent=false", async () => {
+      setupDefaultMocks();
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "repo1" }],
+        { onUpdate: () => {} }
+      );
+      await watcher.start();
+      watcher.stop();
+      expect(lastGroupByParentArg()).toBe(false);
+    });
+
+    test("setGroupByParent(true) re-flattens with groupByParent=true (live, no restart)", async () => {
+      setupDefaultMocks();
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "repo1" }],
+        { onUpdate: () => {} }
+      );
+      await watcher.start();
+      const callsBefore = mockFlattenAgentTree.mock.calls.length;
+
+      watcher.setGroupByParent(true);
+      // setGroupByParent kicks a refresh(); let its async chain settle.
+      await new Promise((r) => setTimeout(r, 10));
+      watcher.stop();
+
+      // A fresh flatten happened and it carried groupByParent=true.
+      expect(mockFlattenAgentTree.mock.calls.length).toBeGreaterThan(callsBefore);
+      expect(lastGroupByParentArg()).toBe(true);
+    });
+
+    test("setGroupByParent to the same value is a no-op (no extra refresh)", async () => {
+      setupDefaultMocks();
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "repo1" }],
+        { onUpdate: () => {} }
+      );
+      await watcher.start();
+      const readCallsBefore = mockReadAllAgents.mock.calls.length;
+
+      // Already false → setting false again must not trigger refresh().
+      watcher.setGroupByParent(false);
+      await new Promise((r) => setTimeout(r, 10));
+      watcher.stop();
+
+      expect(mockReadAllAgents.mock.calls.length).toBe(readCallsBefore);
+    });
+
+    test("setGroupByParent before start() does not refresh (not running)", async () => {
+      setupDefaultMocks();
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "repo1" }],
+        { onUpdate: () => {} }
+      );
+      // Not started yet — flipping the flag must not spawn a refresh.
+      watcher.setGroupByParent(true);
+      await new Promise((r) => setTimeout(r, 10));
+      expect(mockReadAllAgents.mock.calls.length).toBe(0);
+
+      // But once started, the stored flag flows into the flatten call.
+      await watcher.start();
+      watcher.stop();
+      expect(lastGroupByParentArg()).toBe(true);
+    });
+  });
+
   describe("getCoordinatorInfo session_created cache (Change C)", () => {
     test("display-message is invoked only once across two refreshes when session is alive", async () => {
       setupDefaultMocks();

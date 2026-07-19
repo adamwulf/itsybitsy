@@ -57,6 +57,28 @@ describe("readConfig", () => {
     }
   });
 
+  test("tree.groupByParent defaults to false", async () => {
+    const result = await readConfig(opts());
+    expect(result["tree.groupByParent"]).toEqual({ value: false, source: "default" });
+  });
+
+  test("tree.groupByParent round-trips through write/read", async () => {
+    await writeConfig(userCfgPath, "tree.groupByParent", true);
+    const result = await readConfig(opts());
+    expect(result["tree.groupByParent"]).toEqual({ value: true, source: "user" });
+
+    // Toggle back off and confirm it round-trips again.
+    await writeConfig(userCfgPath, "tree.groupByParent", false);
+    const result2 = await readConfig(opts());
+    expect(result2["tree.groupByParent"]).toEqual({ value: false, source: "user" });
+  });
+
+  test("tree.groupByParent is written under a nested tree.* path", async () => {
+    await writeConfig(userCfgPath, "tree.groupByParent", true);
+    const raw = await Bun.file(userCfgPath).json();
+    expect(raw).toEqual({ tree: { groupByParent: true } });
+  });
+
   test("reads user config values", async () => {
     await Bun.write(userCfgPath, JSON.stringify({ model: "opus", maxAgents: 5 }));
 

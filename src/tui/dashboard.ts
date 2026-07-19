@@ -627,6 +627,12 @@ export class DashboardComponent implements Component {
   repos: RepoEntry[] = [];
   private noticeCounter = 0;
   diffTool: string | undefined;
+  /**
+   * Local copy of the `tree.groupByParent` display preference. The watcher owns
+   * the authoritative flag; this mirror lets setWatcher() re-apply the value if
+   * the startup config read happened before the watcher was wired.
+   */
+  private groupByParent = false;
   /** Health report for the currently selected repo — used by ActionCtx */
   get healthReport(): import("../health-check").RepoHealthReport | undefined {
     const repoPath = this.agentTree.selectedRepoPath ?? (this.agentTree.selectedAgent?.repoPath ?? null);
@@ -1184,6 +1190,11 @@ export class DashboardComponent implements Component {
 
   setWatcher(watcher: AgentWatcher) {
     this.watcher = watcher;
+    // Re-apply the parent-grouping preference in case the startup config read
+    // ran before the watcher was wired (setGroupByParent is a no-op on a null
+    // watcher). The watcher's own default is false, so this only matters when
+    // the persisted value is true.
+    watcher.setGroupByParent(this.groupByParent);
   }
 
   setRepos(repos: RepoEntry[]) {
@@ -1192,6 +1203,31 @@ export class DashboardComponent implements Component {
 
   setDiffTool(tool: string | undefined) {
     this.diffTool = tool;
+  }
+
+  /**
+   * Push the `tree.groupByParent` display preference down to the watcher, which
+   * owns the flag and re-flattens the tree on change (LIVE — no `ib watch`
+   * restart). Called once at startup with the persisted config value and again
+   * from the 'h' settings-menu toggle via onConfigChange(). Safe to call before
+   * the watcher exists (setWatcher runs after the startup read); the value is
+   * re-applied whenever the watcher is (re)wired below.
+   */
+  setGroupByParent(value: boolean): void {
+    this.groupByParent = value;
+    this.watcher?.setGroupByParent(value);
+  }
+
+  /**
+   * ActionCtx hook: the 'h' settings-menu boolean toggle calls this after a
+   * successful writeConfig so display-only config keys take effect live. Only
+   * `tree.groupByParent` currently needs live wiring; other keys are read at
+   * their own use sites.
+   */
+  onConfigChange(key: string, value: unknown): void {
+    if (key === "tree.groupByParent") {
+      this.setGroupByParent(value === true);
+    }
   }
 
   setVersion(version: string) {
@@ -3191,6 +3227,11 @@ export async function launchDashboard(): Promise<void> {
   dashboard.setRepos(repos);
   const diffToolValue = config["externalDiffTool"]?.value;
   dashboard.setDiffTool(typeof diffToolValue === "string" && diffToolValue ? diffToolValue : undefined);
+  // Parent-directory grouping preference (tree.groupByParent). The dashboard
+  // stores it and re-applies it to the watcher in setWatcher() below, so the
+  // ordering of this read vs. watcher construction doesn't matter.
+  const groupByParentValue = config["tree.groupByParent"]?.value;
+  dashboard.setGroupByParent(groupByParentValue === true);
   dashboard.setVersion(version);
   if (tgToken !== "") {
     // Start yellow ("boot in progress"). The background boot promise below

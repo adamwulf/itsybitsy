@@ -35,7 +35,7 @@ export interface WatcherAgentsApi {
   readAllAgents: (repos: Array<{ path: string; name: string }>, includeArchived: boolean) => Promise<ReadAgentsResult>;
   detectAgentStates: (agents: Agent[], opts?: { reap?: boolean }) => Promise<void>;
   buildAgentTree: (agents: Agent[]) => Agent[];
-  flattenAgentTree: (roots: Agent[], repos?: string[] | { name: string; path: string }[], coordinator?: { state: string; age: string }) => FlatEntry[];
+  flattenAgentTree: (roots: Agent[], repos?: string[] | { name: string; path: string }[], coordinator?: { state: string; age: string }, groupByParent?: boolean) => FlatEntry[];
   readPendingQuestions: (repoPath: string) => Promise<PendingQuestion[]>;
 }
 
@@ -70,6 +70,15 @@ export class AgentWatcher {
    * lifetime, so we query tmux display-message once and reuse. Cleared when
    * detectSystemCoordinatorState() reports 'stopped' (session ended). */
   private coordinatorSessionEpoch: number | null = null;
+
+  /**
+   * Whether flattenAgentTree groups repos under a shared parent-directory
+   * header (the `tree.groupByParent` display preference). Owned here so the
+   * flag flows into every flatten call (both refresh() and pollStates()); the
+   * dashboard flips it live via setGroupByParent(), which re-flattens on the
+   * next refresh with NO `ib watch` restart required.
+   */
+  private groupByParent = false;
 
   /** Health check results per repo path */
   healthReports: Map<string, RepoHealthReport> = new Map();
@@ -174,6 +183,18 @@ export class AgentWatcher {
     this.runHealthChecks(true);
   }
 
+  /**
+   * Set the parent-directory grouping preference. When the value actually
+   * changes, kick a refresh() so the tree re-flattens with (or without) the
+   * parent-header rows on the next tick — the live-toggle path used by the 'h'
+   * settings menu. A no-op change avoids a redundant refresh.
+   */
+  setGroupByParent(value: boolean): void {
+    if (this.groupByParent === value) return;
+    this.groupByParent = value;
+    if (this.running) this.refresh();
+  }
+
   /** Close all fs.watch watchers */
   private teardownWatchers(): void {
     for (const w of this.watchers) {
@@ -273,7 +294,7 @@ export class AgentWatcher {
       if (agents !== this._lastAgents) return;
       const roots = agentsApi.buildAgentTree(agents);
       const repoInfos = this.repos.map((r) => ({ name: repoDisplayName(r), path: r.path }));
-      const flatList = agentsApi.flattenAgentTree(roots, repoInfos, coordinatorInfo);
+      const flatList = agentsApi.flattenAgentTree(roots, repoInfos, coordinatorInfo, this.groupByParent);
       const questionResults = await Promise.all(
         this.repos.map((r) => agentsApi.readPendingQuestions(r.path))
       );
@@ -322,7 +343,7 @@ export class AgentWatcher {
 
       const roots = agentsApi.buildAgentTree(agents);
       const repoInfos = this.repos.map((r) => ({ name: repoDisplayName(r), path: r.path }));
-      const flatList = agentsApi.flattenAgentTree(roots, repoInfos, coordinatorInfo);
+      const flatList = agentsApi.flattenAgentTree(roots, repoInfos, coordinatorInfo, this.groupByParent);
 
       // Read pending questions from all repos
       const questionResults = await Promise.all(

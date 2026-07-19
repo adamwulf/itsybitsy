@@ -412,12 +412,18 @@ Deny-by-default means an empty allow list = an agent that **can't even start**
 (Claude Code can't read its own binary's dylibs, config, or write its transcript).
 So a baseline read/write allowlist must always be present.
 
-**Decision (Adam, 2026-07-17): for draft 1 the baseline is spelled out
-explicitly in `_all.md`, NOT a hidden constant in `src/sandbox.ts`.** Rationale:
+**Decision (Adam, 2026-07-17, reaffirmed + hardened 2026-07-18): the baseline is
+spelled out explicitly in `_all.md`, and the generator bakes in NOTHING.** Not a
+"draft 1" convenience — a firm rule: **zero permissions are hardcoded in
+`src/sandbox.ts`.** The generator emits only `(deny default)` + exactly what the
+merged `.md` config declares. Every allow — including the `(literal "/")` root read
+claude needs to boot, and the OS/dylib read paths — is a line in `_all.md` that the
+**user** owns and can inspect, tighten, or remove. Nothing is assumed baked-in and
+then discovered broken; the user adds permissions as testing shows they're needed.
 `_all.md` already merges into every spawned agent (`agent-types.ts` layer files),
-so listing the baseline there makes it **inspectable and tunable** with zero new
-mechanism — every type unions it in for free. Encoding it as an itsybitsy default
-constant is a **later** optimization, once the list is proven. So:
+so this needs zero new mechanism — every type unions it in for free. There is no
+"encode the baseline as a code constant later" step; that would re-introduce baked-in
+permissions and is explicitly rejected. So:
 
 - The static OS/runtime paths go in `_all.md`'s `sandbox.allowRead`
   / `sandbox.allowWrite` (and the required domains in `sandbox.domains`). Adam
@@ -618,56 +624,74 @@ producing the `.sb` text. Writes `sandbox.sb` into the agent dir next to
 last-matching-rule-wins, so the structure is: deny everything → allow the
 baseline+config allowlist → re-deny the config `deny` holes last (so deny wins):
 
-**✅ Spike-verified skeleton** (the shape below actually boots claude v2.1.214 +
-runs the gate + `ib` + git; see `docs/SANDBOX-SPIKE-FINDINGS.md §4`):
+**⚠️ ZERO baked-in permissions (Adam's call, 2026-07-18).** The generator bakes in
+**NOTHING** — no allow rule of any kind lives in `src/sandbox.ts`. It is a pure
+translator: `(deny default)` + exactly the rules the merged `.md` config declares +
+the config `deny` list last. If claude needs `(allow file-read* (literal "/"))` to
+boot, **that line comes from `_all.md`, not from code** — visible and user-owned,
+like every other baseline entry (§4A.7). Nothing is assumed; everything is tested
+and then written into a `.md` by the user. This means the derived spike baseline
+(findings §4.2) becomes the **initial `_all.md` content**, NOT a generator constant.
 
 ```
 (version 1)
-(deny default)                                   ;; nothing is permitted unless re-allowed below
+(deny default)                                   ;; the ONLY thing the generator emits unconditionally
 
-;; ---- syscalls / process (spike-confirmed set) ----
-(allow process*)                                 ;; spawn children, exec (broad; scope later)
-(allow sysctl-read)
-(allow signal (target self))
-(allow file-read-metadata)                       ;; stat/lstat/readlink traversal anywhere
-(allow file-ioctl)
-(allow mach-lookup)                              ;; wide for baseline-1; curated list also boots (spike §2.4)
+;; ---- EVERYTHING below is emitted ONLY because the merged .md config declared it ----
 
-;; ---- runtime-injected roots (read + write) ----
-(allow file-read*  (subpath (param "AGENTDIR")))  ;; contains WORKTREE (subsumes it)
+;; runtime-injected roots — from the -D params the spawn path computes:
+(allow file-read*  (subpath (param "AGENTDIR")))  ;; contains WORKTREE
 (allow file-write* (subpath (param "AGENTDIR")))
 (allow file-read*  (subpath (param "GITDIR")))
 (allow file-write* (subpath (param "GITDIR")))
 
-;; ---- READ baseline ----
-(allow file-read* (literal "/"))                 ;; ⚠️ MANDATORY — claude reads root dir at init
-(allow file-read* (subpath (param "ALLOW_R_0")) ...)  ;; from _all.md read baseline + user allowRead
-
-;; ---- WRITE baseline ----
-(allow file-write* (subpath (param "ALLOW_W_0")) ...) ;; from _all.md write baseline + user allowWrite
+;; filesystem allows — one per merged allowRead / allowWrite entry (incl. the
+;; `(literal "/")` line IF _all.md lists "/" in allowRead; NOT auto-added):
+(allow file-read*  (subpath (param "ALLOW_R_0")) ...)
+(allow file-write* (subpath (param "ALLOW_W_0")) ...)
 ;; glob-form allows compile to (regex #"…") instead of (subpath …)
 
-;; ---- network: deny-by-default egress, localhost hole for the proxy ----
-(deny network*)
-(allow network-outbound (literal "/private/var/run/mDNSResponder"))   ;; DNS
-(allow network-outbound (remote unix-socket))
-(allow network-outbound (remote ip "localhost:*"))                    ;; only exit = our proxy
-(allow network-inbound  (local ip "localhost:*"))
+;; syscall / network rules — see the OPEN QUESTION below on how the .md expresses these
 
-;; ---- config deny list LAST so it wins over every allow above (§4A.0) ----
+;; config deny list LAST so it wins over every allow above (§4A.0):
 (deny file-read*  (subpath (param "DENY_0")) (regex #"…") ...)
 (deny file-write* (subpath (param "DENY_0")) (regex #"…") ...)
 ```
+
+**⚠️ OPEN QUESTION this raises (needs Adam's input before phase 2).** The
+spike-working profile also needs **non-filesystem** rules: syscall grants
+(`process*`, `sysctl-read`, `file-read-metadata`, `file-ioctl`, `mach-lookup`,
+`signal`) and the network block (`(deny network*)` + the `localhost`/`mDNSResponder`
+holes that make the proxy the only exit). The current `.md` schema only expresses
+`allowRead`/`allowWrite`/`deny`/`domains` — **paths, not syscalls**. "Zero baked in"
+means these can't be hardcoded either, so one of:
+- **(A)** Extend the `.md` schema with a raw-SBPL escape hatch (e.g.
+  `sandbox.rawAllow: ["(allow mach-lookup)", …]`) so `_all.md` declares the syscall
+  + network rules verbatim. Most faithful to "everything from the `.md`"; lets the
+  user tune/tighten syscalls too. Risk: raw SBPL in a `.md` is powerful + unvalidated.
+- **(B)** Treat the `(deny default)` + network-proxy block as **structural** (part of
+  what "sandbox" *means*, like the version header), and only the syscall grants come
+  from the `.md`. Less pure but the network block is arguably not a "permission" —
+  it's the proxy plumbing.
+- **(C)** A dedicated typed `sandbox.syscalls: [...]` list mapping friendly names to
+  SBPL, keeping the `.md` free of raw profile text.
+Recommend **(A)** given Adam's "nothing baked in, user adds as needed" stance — it
+makes the syscall/network floor as visible and user-editable as the paths. Flag for
+decision; the phase-1.5 verification (below) can feed it the exact minimal set.
 
 Uses `-D` params for paths (never string-interpolate paths into the profile —
 shell-injection surface; the codebase already `shellQuote`s everything). Unit-
 testable in isolation (`bun test`), no spawn required.
 
-**⚠️ Spike gotchas the generator MUST honor (`docs/SANDBOX-SPIKE-FINDINGS.md §7`):**
-1. **`(allow file-read* (literal "/"))` is MANDATORY** — claude reads the root
-   directory at runtime init; without it, **SIGABRT with ZERO output** (aborts
-   before logger init — no stderr, no `--debug-file`). Least-obvious rule, easiest
-   to omit. Bake it into the generator, not just `_all.md`.
+**⚠️ Spike gotchas (`docs/SANDBOX-SPIKE-FINDINGS.md §7`):**
+1. **The spike found claude needs `(allow file-read* (literal "/"))` to boot** —
+   it reads the root directory at runtime init; without it, **SIGABRT with ZERO
+   output** (aborts before logger init — no stderr, no `--debug-file`). ⚠️ Per
+   Adam's zero-baked-in rule this line is **NOT** hardcoded in the generator — if
+   required, it lives in `_all.md`'s `allowRead` (as `"/"`), like every other
+   entry. AND: the phase-1.5 verification (§6.1.5) must **re-confirm `/` is truly
+   mandatory and cannot be narrowed** (e.g. to specific top-level entries) rather
+   than assume it — Adam: "test everything, don't assume."
 2. **A missing READ path → silent SIGABRT/exit-null.** Treat any such failure under
    a new profile as "a read path is missing," and **bisect** (see below).
 3. **Harvest by PROFILE BISECTION, not the unified log.** The spike proved the
@@ -850,6 +874,23 @@ written/executed, so nothing launches on a failed precondition.
      - **MCP server**: boot an agent with a real MCP server configured (§4C.4) —
        needs interpreter paths + its own allowlisted egress.
      - **codex** (§4B): `~/.codex` (`auth.json`, `config.toml`) read+write.
+1.5. **Verify the minimal baseline — NOTHING assumed (Adam's "test everything").**
+   Before writing any `_all.md` baseline, rigorously establish the *smallest* set
+   that actually boots + runs the gate/ib/git, by bisection:
+   - **Is `(literal "/")` truly mandatory, or can it be narrowed?** The spike
+     asserted `/` is required but derived it in one pass. Re-test: try replacing
+     `(literal "/")` with the specific top-level entries claude stats at init
+     (bisect the root read); confirm whether a narrower rule boots. If `/` is
+     genuinely irreducible, record *why* — don't just assert it.
+   - **Minimal syscall set:** individually remove `process*`, `sysctl-read`,
+     `file-read-metadata`, `file-ioctl`, `signal`, and narrow `mach-lookup` to the
+     curated list (spike §2.4) — keep only what's load-bearing.
+   - **Minimal read set:** narrow each `/usr /System /Library …` subpath toward the
+     actual dylib/framework set where practical.
+   - Output: the **exact** minimal `_all.md` (paths + syscalls + network + domains)
+     the user will own, AND the answer to the §5.1 OPEN QUESTION (how the `.md`
+     expresses syscall/network rules — A/B/C). Everything the user must add is
+     written down; nothing is baked into code.
 2. **Filesystem layer + fail-hard (⚠️ merge WITH phase 3 — see R2):** `src/sandbox.ts`
    generator + `sandbox.enabled` + flat `sandbox` frontmatter (R1), wrap
    spawn+resume, §5.5 precondition checks (no unsandboxed fallback), persist

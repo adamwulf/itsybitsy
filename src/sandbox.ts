@@ -141,6 +141,16 @@ function canonicalizeGlobPrefix(pattern: string): string {
  * globstar spans zero or more directories as required by the public grammar.
  */
 export function globToSandboxRegex(pattern: string, home?: string): string {
+  if (pattern.includes("\0")) {
+    throw new Error(`Invalid sandbox path entry: NUL bytes are not allowed`);
+  }
+  const isAnchoredGlob = pattern.startsWith("/") || pattern.startsWith("~/") || pattern.startsWith("**/");
+  if (!isAnchoredGlob) {
+    throw new Error(
+      `Invalid sandbox glob "${pattern}": relative globs are not allowed; start with "/", "~/", or "**/" for a basename-anywhere pattern`,
+    );
+  }
+
   const expanded = expandHome(pattern, sandboxHome(home));
   const canonical = canonicalizeGlobPrefix(expanded);
   let regex = "^";
@@ -201,6 +211,10 @@ function compilePath(entry: string, home?: string): CompiledPath {
     throw new Error(
       `Invalid sandbox path entry "${String(entry)}": use an absolute path, a home path, or a glob such as "**/.env"`,
     );
+  }
+
+  if (entry.includes("\0")) {
+    throw new Error(`Invalid sandbox path entry: NUL bytes are not allowed`);
   }
 
   // Glob detection intentionally precedes anchor classification.

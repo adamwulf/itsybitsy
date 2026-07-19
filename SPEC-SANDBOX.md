@@ -379,6 +379,9 @@ So:
 - `~/**/*.pem` → `.pem` files anywhere under `$HOME`.
 - `/etc/ssh` → the whole `/etc/ssh` subtree (absolute form, not a glob).
 
+A glob matches the exact path described by its pattern, not that path's subtree;
+for example, `**/foo` matches the `foo` node but not `foo/bar` by path match.
+
 ### 4A.4 Worked example — deny ALL `.env`, even inside the worktree
 
 ```yaml

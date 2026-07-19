@@ -99,6 +99,21 @@ describe("sandbox glob to regex", () => {
     expect(compileSandboxPath("/tmp/**/*.pem")).toStartWith('(regex #"^/private/tmp/');
   });
 
+  test("rejects ambiguous relative globs while preserving supported anchors", () => {
+    expect(() => compileSandboxPath("foo*")).toThrow("relative globs are not allowed");
+    expect(() => compileSandboxPath("a/b*")).toThrow("relative globs are not allowed");
+    expect(compileSandboxPath("/foo*")).toStartWith('(regex #"^/foo');
+    expect(compileSandboxPath("**/.env")).toStartWith('(regex #"^');
+    expect(compileSandboxPath("~/x*", "/Users/tester")).toStartWith(
+      '(regex #"^/Users/tester/x',
+    );
+  });
+
+  test("rejects NUL-bearing globs before profile emission", () => {
+    expect(() => compileSandboxPath("/tmp/*\0evil")).toThrow("NUL bytes are not allowed");
+    expect(() => globToSandboxRegex("/tmp/*\0evil")).toThrow("NUL bytes are not allowed");
+  });
+
   test("bare names are rejected with actionable guidance", () => {
     expect(() => compileSandboxPath(".env")).toThrow("bare names are not allowed");
     expect(() => compileSandboxPath(".env")).toThrow("**/.env");

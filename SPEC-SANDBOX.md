@@ -126,11 +126,15 @@ setsid claude --session-id "$UUID" $ARGS "$(cat $PROMPT)" &
 export http_proxy=http://localhost:$PORT https_proxy=http://localhost:$PORT
 export HTTP_PROXY=$http_proxy HTTPS_PROXY=$https_proxy
 export no_proxy=localhost,127.0.0.1,::1 NO_PROXY=localhost,127.0.0.1,::1
-# NODE_OPTIONS="--use-env-proxy" only if the spike confirms the runtime supports it (see §6.1b)
+# NO NODE_OPTIONS — the spike confirmed claude honors HTTPS_PROXY natively (dead item, removed).
 setsid sandbox-exec -f "$AGENT_DIR/sandbox.sb" \
-  -D "WORKTREE=$WORKTREE" -D "GITDIR=$GITDIR" \
+  -D "WORKTREE=$WORKTREE" -D "GITDIR=$GITDIR" -D "AGENTDIR=$AGENTDIR" \
   claude --session-id "$UUID" $ARGS "$(cat $PROMPT)" &
 ```
+
+✅ **Spike-confirmed (`docs/SANDBOX-SPIKE-FINDINGS.md`):** `sandbox-exec` execs
+in place — `$!` *is* `claude`, PID/watchdog unchanged; the `env`-link drop works
+(proxy vars propagate); claude honors `HTTPS_PROXY` natively (no `NODE_OPTIONS`).
 
 **PID / watchdog — confirm exec-in-place (spike item, likely a non-issue).**
 `sandbox-exec`, like `setsid`, calls `sandbox_init` then **execs** the target
@@ -614,19 +618,33 @@ producing the `.sb` text. Writes `sandbox.sb` into the agent dir next to
 last-matching-rule-wins, so the structure is: deny everything → allow the
 baseline+config allowlist → re-deny the config `deny` holes last (so deny wins):
 
+**✅ Spike-verified skeleton** (the shape below actually boots claude v2.1.214 +
+runs the gate + `ib` + git; see `docs/SANDBOX-SPIKE-FINDINGS.md §4`):
+
 ```
 (version 1)
 (deny default)                                   ;; nothing is permitted unless re-allowed below
 
-;; ---- baseline + user allowRead/allowWrite (§4A.7) ----
-(allow process*)                                 ;; spawn children, exec (needed for git, node)
-(allow sysctl-read) (allow mach-lookup ...)      ;; minimal syscalls Claude/node need to boot
-(allow file-read*  (subpath (param "WORKTREE")))
-(allow file-write* (subpath (param "WORKTREE")))
+;; ---- syscalls / process (spike-confirmed set) ----
+(allow process*)                                 ;; spawn children, exec (broad; scope later)
+(allow sysctl-read)
+(allow signal (target self))
+(allow file-read-metadata)                       ;; stat/lstat/readlink traversal anywhere
+(allow file-ioctl)
+(allow mach-lookup)                              ;; wide for baseline-1; curated list also boots (spike §2.4)
+
+;; ---- runtime-injected roots (read + write) ----
+(allow file-read*  (subpath (param "AGENTDIR")))  ;; contains WORKTREE (subsumes it)
+(allow file-write* (subpath (param "AGENTDIR")))
 (allow file-read*  (subpath (param "GITDIR")))
 (allow file-write* (subpath (param "GITDIR")))
-(allow file-read*  (subpath (param "ALLOW_R_0")) ...)   ;; from allowRead + read baseline
-(allow file-write* (subpath (param "ALLOW_W_0")) ...)   ;; from allowWrite + write baseline
+
+;; ---- READ baseline ----
+(allow file-read* (literal "/"))                 ;; ⚠️ MANDATORY — claude reads root dir at init
+(allow file-read* (subpath (param "ALLOW_R_0")) ...)  ;; from _all.md read baseline + user allowRead
+
+;; ---- WRITE baseline ----
+(allow file-write* (subpath (param "ALLOW_W_0")) ...) ;; from _all.md write baseline + user allowWrite
 ;; glob-form allows compile to (regex #"…") instead of (subpath …)
 
 ;; ---- network: deny-by-default egress, localhost hole for the proxy ----
@@ -645,17 +663,27 @@ Uses `-D` params for paths (never string-interpolate paths into the profile —
 shell-injection surface; the codebase already `shellQuote`s everything). Unit-
 testable in isolation (`bun test`), no spawn required.
 
-**⚠️ The hard part is the baseline, not the config.** `(deny default)` +
-enumerate-everything is exactly why the reference punted to `(allow default)`.
-Getting Claude Code to boot under `(deny default)` requires discovering the full
-set of syscalls/paths it touches — this is the bulk of the phase-1 spike (§6).
-The syscall allows above (`process*`, `mach-lookup`, `sysctl-read`, dylib reads)
-are illustrative, NOT verified. Expect iteration: launch, hit an `EPERM`/kill,
-add the minimal allow, repeat, until claude runs clean. To harvest the needed
-rules, do NOT rely on Seatbelt `(trace …)` / `(with report)` — that support is
-degraded/removed on modern macOS (R3). The reliable route is the **unified log**
-(`log stream` / `log show` filtered on the Sandbox sender/subsystem predicates)
-while running under a permissive profile, then tighten from the denials it records.
+**⚠️ Spike gotchas the generator MUST honor (`docs/SANDBOX-SPIKE-FINDINGS.md §7`):**
+1. **`(allow file-read* (literal "/"))` is MANDATORY** — claude reads the root
+   directory at runtime init; without it, **SIGABRT with ZERO output** (aborts
+   before logger init — no stderr, no `--debug-file`). Least-obvious rule, easiest
+   to omit. Bake it into the generator, not just `_all.md`.
+2. **A missing READ path → silent SIGABRT/exit-null.** Treat any such failure under
+   a new profile as "a read path is missing," and **bisect** (see below).
+3. **Harvest by PROFILE BISECTION, not the unified log.** The spike proved the
+   §6.1b unified-log method does NOT work for a `sandbox-exec` custom-profile
+   process on modern macOS: `(with report)` won't even compile ("report modifier
+   does not apply to deny action"), and our process's denials never appear in
+   `log show` (only App-Sandbox daemons do). Instead: start `(allow file-read*)`,
+   narrow region-by-region (or start narrow, widen) — flip one region, re-run.
+4. **Binary paths are install-specific** — `claude`/`node`/`bun`/`ib`/`git` are NOT
+   at `/usr/local/bin` on every box (spike box: `~/.local/bin`, `/opt/homebrew/bin`,
+   `~/.bun/bin`, dev checkout). The generator must resolve them via `which`/config,
+   never hardcode `/usr/local/bin`.
+
+The concrete `_all.md` read/write baseline the spike derived is in
+`docs/SANDBOX-SPIKE-FINDINGS.md §4.2` — use it as the starting `_all.md`, then
+re-verify exact paths on the target install (Claude-version/layout-dependent).
 
 ### 5.2 Domain proxy — `src/sandbox-proxy.ts` + lifecycle
 
@@ -758,7 +786,14 @@ written/executed, so nothing launches on a failed precondition.
 
 ## 6. Build phases
 
-1. **Spike (blocking) — two things to prove:**
+1. **Spike (blocking) — ✅ COMPLETE (2026-07-18), BOTH gates GO.** Full results in
+   `docs/SANDBOX-SPIKE-FINDINGS.md`. Headlines: exec-in-place confirmed (PID/watchdog
+   unchanged); Claude Code boots under `(deny default)` with a **tractable** allowlist
+   (no `(allow default)` fallback needed — Model B validated on real hardware);
+   claude honors `HTTPS_PROXY` natively (`NODE_OPTIONS` dropped); minimal domain
+   allowlist = `api.anthropic.com` + `*.anthropic.com`; the derived `_all.md`
+   baseline is in findings §4.2. The checklist below is preserved as the record;
+   the two ⚠️-corrected items reflect what the spike actually found.
    - **(1a) Plumbing:** wrap one real claude spawn in `sandbox-exec -f` by hand;
      confirm (a) claude starts, (b) `$!`/`pgrep` PID discovery + watchdog still
      work (§3.3), (c) git ops in the worktree succeed, (d) `api.anthropic.com`
@@ -773,12 +808,12 @@ written/executed, so nothing launches on a failed precondition.
    - **(1b) Boot Claude under `(deny default)`:** THE hard one for Model B.
      Start from the reference's `(allow default)` to prove plumbing, then invert
      to `(deny default)` + baseline and iteratively add the minimal allows until
-     claude runs clean (harvest via the **unified log**, NOT `(with report)` — R3,
-     §5.1). The output of this spike **is** the initial `_all.md` filesystem +
-     domain baseline (§4A.7). If Claude Code can't boot under `(deny default)` with
-     a tractable allowlist, fall back to `(allow default)` + broad denies and tell
-     Adam the model can't be as strict as Model B wants. **Do not ship a baseline
-     that wasn't empirically derived.**
+     claude runs clean. ⚠️ **CORRECTION from the spike:** harvest by **PROFILE
+     BISECTION**, NOT the unified log — the spike proved `(with report)` won't
+     compile and a `sandbox-exec` process's denials never appear in `log show` on
+     modern macOS (§5.1 gotcha 3). ✅ **RESULT: boots under `(deny default)` — no
+     fallback needed.** The output of this spike IS the initial `_all.md`
+     filesystem + domain baseline (§4A.7 / findings §4.2).
      **Aim the iteration — pre-warned likely boot-blockers, test each:**
      - **Keychain/creds** (likely THE blocker): macOS Claude Code stores OAuth in
        the Keychain → needs `securityd` mach-lookup + `~/Library/Keychains` reads.
@@ -787,10 +822,9 @@ written/executed, so nothing launches on a failed precondition.
      - **`/dev`**: `null`, `urandom`, `tty`, and the tmux pane pty (`/dev/ttysNNN`
        — claude is a TUI; no pty file-read*/write* = instant death) + `/usr/share/terminfo`.
      - **`/private/tmp` not `/tmp`** (canonical-path matching) — fixed in §4A.7.
-     - **`NODE_OPTIONS="--use-env-proxy"`**: only newer Node knows the flag; an
-       older bundled runtime ABORTS at startup. Verify support; else rely on claude
-       honoring `HTTPS_PROXY` natively. (Also: `NODE_OPTIONS` leaks into every node
-       child, incl. dev servers.)
+     - ✅ **`NODE_OPTIONS` — DEAD ITEM, do not add.** The spike confirmed claude
+       honors `HTTPS_PROXY` natively; `--use-env-proxy` is unnecessary and leaks
+       into node children. Removed from the plan.
      - **Claude Code's OWN Bash sandbox mode** already wraps tool commands in
        `sandbox-exec` — nested `sandbox_init` inside our deny-default profile is
        untested; verify it doesn't fail/confusingly-intersect.

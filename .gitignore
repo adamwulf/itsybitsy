@@ -45,3 +45,6 @@ AGENTS.md
 patch.diff
 rebase-editor.sh
 .codex/
+
+# Local Netlify folder
+.netlify

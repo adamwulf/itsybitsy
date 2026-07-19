@@ -380,7 +380,7 @@ export class AgentTreeComponent implements Component {
       // filter flip doesn't yank the selection out from under the user.
       return selectedAgentId !== null && f.agent.id === selectedAgentId;
     });
-    if (this.repoFilter !== "running-only") return filtered;
+    if (this.repoFilter !== "running-only") return this.pruneEmptyParentHeaders(filtered);
     // In running-only mode, intermediate agents in the original tree may now be
     // hidden. The precomputed connectors reference those hidden ancestors, so
     // rebuild them against only the visible subset.
@@ -388,7 +388,34 @@ export class AgentTreeComponent implements Component {
     for (const e of this._flatList) {
       if (e.kind === "agent") allAgents.set(e.agent.id, e.agent);
     }
-    return recomputeConnectorsForVisible(filtered, allAgents);
+    return recomputeConnectorsForVisible(this.pruneEmptyParentHeaders(filtered), allAgents);
+  }
+
+  /**
+   * Second pass over an already-filtered list: drop any parent-header that has
+   * no surviving repo-header beneath it. Parent-headers are a pure display
+   * grouping — in the flat list the repos belonging to a parent-header are
+   * emitted contiguously right after it, up to the next parent-header (or the
+   * end of the list). A parent-header is kept iff at least one repo-header in
+   * that span survived the first-pass filter. Entry order is preserved.
+   *
+   * The survival decision is delegated entirely to the first pass: any
+   * repo-header still present here already passed the hasAgents/
+   * hasNonStoppedAgents / pinned / sticky checks, so this pass agrees with that
+   * logic by construction (it never re-derives survival).
+   */
+  private pruneEmptyParentHeaders(entries: FlatEntry[]): FlatEntry[] {
+    return entries.filter((f, i) => {
+      if (f.kind !== "parent-header") return true;
+      // Scan forward until the next parent-header; keep this header iff a
+      // surviving repo-header appears in that span.
+      for (let j = i + 1; j < entries.length; j++) {
+        const next = entries[j];
+        if (next === undefined || next.kind === "parent-header") break;
+        if (next.kind === "repo-header") return true;
+      }
+      return false;
+    });
   }
 
   /**

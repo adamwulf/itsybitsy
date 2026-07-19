@@ -795,8 +795,8 @@ sandbox:
     # …the full minimal set the phase-1.5 verification derives…
 ```
 
-Beyond the fixed runtime-root rules, the generator emits **only** `(version 1)`
-+ `(deny default)` + the merged
+Beyond the fixed runtime-root rules, the generator emits **only** `(version 1)`,
+`(deny default)`, and the merged
 `allowRead`/`allowWrite` (→ `file-read*`/`file-write*` rules) + the merged
 `rawAllow` lines verbatim + the config `deny` list last. `domains` is written
 separately to the per-agent proxy allowlist, not emitted into SBPL. The generator

@@ -164,8 +164,8 @@ nesting (a parent object with scalar/list children — exactly how `permissions:
 works). A two-level `sandbox.filesystem.allowRead` would parse **silently into
 garbage** (the `filesystem:` key becomes an empty list; `allowRead:` flattens into
 the `sandbox` object). So `sandbox:` is a single object whose children are the
-scalar `enabled` and the four lists directly — NO `filesystem:`/`network:`
-sub-objects:
+scalar `enabled` and the five lists directly (`allowRead`, `allowWrite`, `deny`,
+`rawAllow`, `domains`) — NO `filesystem:`/`network:` sub-objects:
 
 ⚠️ **NO trailing inline `#` comments.** The parser strips only FULL-LINE comments
 (`agent-types.ts:102`); a trailing `# …` reaches the value unstripped, so
@@ -174,20 +174,38 @@ sub-objects:
 its closing `]` and the whole list silently becomes one garbage string — the
 exact footgun §4A.2 warns about. Keep comments on their own lines only:
 
+**Everything the sandbox permits — files, commands, and network — is configured
+in the `.md` (Adam, 2026-07-18). NOTHING is baked into code.** The complete
+surface is five lists under `sandbox:` (the `_all.md` baseline supplies the floor
+via union; a type ADDS what it needs):
+
 ```yaml
 name: netletworker
 sandbox:
   enabled: true
-  # Filesystem (the §4A.7 baseline is always merged in; these ADD to it):
+  # FILES — readable paths:
   allowRead:  ["~/.config/foo"]
+  # FILES — writable paths:
   allowWrite: ["/private/tmp/agent-scratch"]
-  # deny carves holes inside the allowed set; deny always wins:
+  # FILES — carve holes inside the allowed set; deny always wins:
   deny:       ["**/.env", "~/.ssh"]
-  # Fully-open escape hatch (must be explicit, per Adam): allowRead: ["/"]
-  # Network — deny-by-default; kernel blocks all non-localhost egress, proxy
-  # permits ONLY these (allowlist only, no blocklist mode in v1):
+  # COMMANDS / SYSCALLS / NETWORK-BLOCK — raw SBPL, so every non-path hole is
+  # visible in the .md too (process exec, mach-lookup, the (deny network*) +
+  # localhost proxy holes, etc.). The _all.md baseline carries the required set:
+  rawAllow:
+    - "(allow process*)"
+    - "(allow mach-lookup)"
+    - "(deny network*)"
+    - "(allow network-outbound (remote ip \"localhost:*\"))"
+  # NETWORK — domain allowlist enforced by the per-agent proxy (allowlist only):
   domains:    ["api.anthropic.com", "github.com", "*.githubusercontent.com"]
+  # Fully-open file escape hatch (must be explicit, per Adam): allowRead: ["/"]
 ```
+
+There is no dimension the sandbox controls that isn't a line here: **files** =
+`allowRead`/`allowWrite`/`deny`; **commands/exec + syscalls + the network floor** =
+`rawAllow`; **network egress** = `domains`. The user can read, tighten, or remove
+any hole.
 
 This is structurally identical to the existing `permissions: {allow, deny}` block,
 so it parses today with no parser changes — **provided** the validator rejects a
@@ -236,8 +254,8 @@ Design decisions:
    stays the hook layer; keep them consistent (§4A.1). Document in SPEC §2.
 5. **Inheritance → UNION of all `.md` layers (Adam's call).** Final permissions =
    the sum of every layer: `_all.md` ∪ type ∪ any intermediate. **Both** the
-   list fields (`domains`, `allowRead`, `allowWrite`, `deny`) union across the
-   chain — a child can **add** access (union its allow) and/or **narrow** access
+   list fields (`domains`, `allowRead`, `allowWrite`, `deny`, `rawAllow`) union
+   across the chain — a child can **add** access (union its allow) and/or **narrow** access
    (union its deny). Because deny-wins (§4A.0), a child (or any layer) can never
    re-open what another layer denied. The scalar `enabled` uses **OR-merge** (any
    layer setting `enabled: true` wins), NOT last-non-empty-wins — otherwise a leaf
@@ -247,8 +265,8 @@ Design decisions:
    OR-merge makes the "a layer can only tighten" invariant hold for `enabled` too.)
    ⚠️ Implementation note: the `permissions` union is a **hand-written special
    case** (`mergeRawFrontmatters` :459-467), not generic machinery — so `sandbox`
-   needs analogous **new** merge code (union the four lists, OR-merge `enabled`),
-   modeled on it, not a free reuse.
+   needs analogous **new** merge code (union the five lists incl. `rawAllow`,
+   OR-merge `enabled`), modeled on it, not a free reuse.
 
 ## 4A. Path pattern format for allow/deny lists (AUTHORITATIVE)
 
@@ -658,26 +676,46 @@ and then written into a `.md` by the user. This means the derived spike baseline
 (deny file-write* (subpath (param "DENY_0")) (regex #"…") ...)
 ```
 
-**⚠️ OPEN QUESTION this raises (needs Adam's input before phase 2).** The
-spike-working profile also needs **non-filesystem** rules: syscall grants
-(`process*`, `sysctl-read`, `file-read-metadata`, `file-ioctl`, `mach-lookup`,
+**✅ RESOLVED — option A (Adam, 2026-07-18): ALL holes live in the `.md`, raw-SBPL
+included.** The spike-working profile needs non-filesystem rules too — syscall
+grants (`process*`, `sysctl-read`, `file-read-metadata`, `file-ioctl`, `mach-lookup`,
 `signal`) and the network block (`(deny network*)` + the `localhost`/`mDNSResponder`
-holes that make the proxy the only exit). The current `.md` schema only expresses
-`allowRead`/`allowWrite`/`deny`/`domains` — **paths, not syscalls**. "Zero baked in"
-means these can't be hardcoded either, so one of:
-- **(A)** Extend the `.md` schema with a raw-SBPL escape hatch (e.g.
-  `sandbox.rawAllow: ["(allow mach-lookup)", …]`) so `_all.md` declares the syscall
-  + network rules verbatim. Most faithful to "everything from the `.md`"; lets the
-  user tune/tighten syscalls too. Risk: raw SBPL in a `.md` is powerful + unvalidated.
-- **(B)** Treat the `(deny default)` + network-proxy block as **structural** (part of
-  what "sandbox" *means*, like the version header), and only the syscall grants come
-  from the `.md`. Less pure but the network block is arguably not a "permission" —
-  it's the proxy plumbing.
-- **(C)** A dedicated typed `sandbox.syscalls: [...]` list mapping friendly names to
-  SBPL, keeping the `.md` free of raw profile text.
-Recommend **(A)** given Adam's "nothing baked in, user adds as needed" stance — it
-makes the syscall/network floor as visible and user-editable as the paths. Flag for
-decision; the phase-1.5 verification (below) can feed it the exact minimal set.
+holes that make the proxy the only exit). Adam's rule is **zero baked-in anything**
+and **every hole visible in the `.md`**, so these are NOT hardcoded — a new
+`sandbox.rawAllow` list carries them verbatim in `_all.md`:
+
+```yaml
+sandbox:
+  rawAllow:
+    - "(allow process*)"
+    - "(allow mach-lookup)"
+    - "(allow file-read-metadata)"
+    - "(deny network*)"
+    - "(allow network-outbound (remote ip \"localhost:*\"))"
+    - "(allow network-outbound (literal \"/private/var/run/mDNSResponder\"))"
+    # …the full minimal set the phase-1.5 verification derives…
+```
+
+The generator emits **only** `(version 1)` + `(deny default)` + the merged
+`allowRead`/`allowWrite` (→ `file-read*`/`file-write*` rules) + the merged
+`rawAllow` lines verbatim + `domains` (→ proxy, not the profile) + the config `deny`
+list last. It contains **no allow rule of its own** — not even the network block.
+`(version 1)` + `(deny default)` are the only unconditional lines, and neither is a
+*hole* (they're the deny-everything floor — the opposite of a permission). Every
+**allow** — every actual hole in the sandbox — is a line the user can read in a `.md`.
+
+Notes on `rawAllow`:
+- It **unions** across the `.md` chain like the other lists (§4 decision 5); a type
+  can add syscalls it needs, `_all.md` carries the shared floor.
+- Validation is limited (it's raw SBPL) — at minimum reject entries that don't
+  parse as a balanced `(...)` s-expression, and lint-warn on `(allow default)` /
+  `(allow file* )`-style catch-alls that would defeat Model B. Full SBPL validation
+  is out of scope; the profile-compile precondition (§5.5) catches malformed rules
+  by failing the spawn (fail-hard).
+- Ordering: `rawAllow` lines are emitted in the allow section (before the config
+  `deny` list) so config denies still win. A `rawAllow` `(deny …)` line (e.g.
+  `(deny network*)`) is fine — SBPL last-match-wins handles the localhost re-allow
+  that follows it, exactly as the reference profile does.
 
 Uses `-D` params for paths (never string-interpolate paths into the profile —
 shell-injection surface; the codebase already `shellQuote`s everything). Unit-
@@ -991,9 +1029,14 @@ proxy are all pure/unit-testable with no spawn required.
   `(regex …)` under the correct op (`file-read*` vs `file-write*`).
 
 **C. Config resolution + merge:**
-- Union across `_all.md` + intermediate + type for all four lists, deduped;
-  deny-wins when the same path is in `allowWrite` AND `deny`; `enabled` OR-merge
-  (leaf `false` does NOT switch off a floor `true` — §4 decision 5).
+- Union across `_all.md` + intermediate + type for all FIVE lists (`allowRead`,
+  `allowWrite`, `deny`, `rawAllow`, `domains`), deduped; deny-wins when the same
+  path is in `allowWrite` AND `deny`; `enabled` OR-merge (leaf `false` does NOT
+  switch off a floor `true` — §4 decision 5).
+- **`rawAllow` emission + ordering:** every merged `rawAllow` line appears verbatim
+  in the generated `.sb`, in the allow section BEFORE the config `deny` list (so
+  config denies still win); a `rawAllow` `(deny network*)` followed by a localhost
+  re-allow works via SBPL last-match-wins.
 - `sandbox` omitted + `allowedPaths` set → derived config; both set → `sandbox`
   authoritative. ⚠️ `allowedPaths` merges by REPLACE (`SCALAR_KEYS`,
   `agent-types.ts:422`) while `sandbox` lists UNION — pin which semantics a
@@ -1003,9 +1046,12 @@ proxy are all pure/unit-testable with no spawn required.
 - **T-2 — validator REJECTION (load-bearing; guards the §4 inline-comment footgun):**
   spawn is refused when `enabled` is non-boolean (crucially incl. a trailing-comment
   string like `"true  # note"`, which is truthy and would otherwise silently pass),
-  when any of `allowRead`/`allowWrite`/`deny`/`domains` is not an array, or when an
-  unknown key appears inside `sandbox:`. This is the guard §4 relies on to call the
-  flat schema safe — assert each case refuses with a specific message.
+  when any of `allowRead`/`allowWrite`/`deny`/`rawAllow`/`domains` is not an array,
+  or when an unknown key appears inside `sandbox:`. Also reject a `rawAllow` entry
+  that isn't a balanced `(...)` s-expression, and lint-warn on catch-all
+  `rawAllow` lines (`(allow default)`, `(allow file-read*)` with no filter) that
+  would defeat Model B. This is the guard §4 relies on to call the flat schema
+  safe — assert each case refuses/warns with a specific message.
 
 **D. Hook cascade (`agent-path.ts`):**
 - Sandbox-deny (new rule ~6.5) fires BEFORE the worktree allow (rule 7, :391) —

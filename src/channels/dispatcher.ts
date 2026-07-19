@@ -4,9 +4,19 @@
  * Long-polls Telegram via {@link TelegramClient.getUpdates}, filters each
  * batch through the allowlist, wraps the surviving messages in a
  * channel-reminder block, and delivers them to the system coordinator via
- * `sendToSystemCoordinator(..., { fromAgent: "@telegram" })`.
+ * `sendToSystemCoordinator(..., { fromAgent: "@telegram", raw: true })`.
  *
  * Key invariants:
+ *   - Wrapped `<channel>` sends use raw mode (`raw: true`), so `sendMessage`
+ *     does NOT prepend a `[sent by @telegram]:` line. The
+ *     `<channel source="telegram" user="...">` opening tag already carries the
+ *     sender attribution, so a prefix would be redundant double-attribution
+ *     (and would push the `<channel>` tag out of column 1). Every wrapped send
+ *     — normal batch delivery, the offline retry, the /context and /compact
+ *     follow-up notes, and reaction notices — passes `raw: true` for this
+ *     reason. (The slash-command passthrough at `/context` etc. also uses raw
+ *     mode, but for a different reason: its body is the bare command, not a
+ *     `<channel>` block, and must reach Claude Code verbatim.)
  *   - Startup probe (`probeOnce`) detects a 409 Conflict and returns without
  *     starting the loop. Any other probe outcome (network error, auth fail,
  *     2xx) lets the loop start; the loop's own retry handling absorbs further
@@ -94,8 +104,12 @@ import { storeInboundFile } from "./inbound-store";
 /** Delivery hook the dispatcher calls per coalesced batch. Defaults to
  *  the real `sendToSystemCoordinator` from src/index.ts; tests inject a
  *  mock to capture call order without booting tmux. `opts.raw` bypasses the
- *  `[sent by @telegram]:` prefix so slash commands like `/context` and
- *  `/clear` reach the coordinator verbatim. */
+ *  `[sent by @telegram]:` prefix. ALL wrapped `<channel>` sends pass
+ *  `raw: true` so the prefix is never stacked on top of the
+ *  `<channel source="telegram" user="...">` tag (which already carries the
+ *  sender attribution — the prefix would be redundant double-attribution).
+ *  Raw mode is also how slash commands like `/context` and `/clear` reach the
+ *  coordinator verbatim, without a `<channel>` wrapper. */
 export type SendToCoordinatorFn = (
   message: string,
   opts?: { fromAgent?: string; cwd?: string; raw?: boolean },
@@ -856,7 +870,7 @@ export class TelegramDispatcher {
       // transient failure here just means the coordinator missed a hint —
       // it does NOT block the user. Log and move on.
       try {
-        const followup = await sendCtx.fn(wrapped, { fromAgent: TELEGRAM_SENTINEL });
+        const followup = await sendCtx.fn(wrapped, { fromAgent: TELEGRAM_SENTINEL, raw: true });
         if (!followup.ok) {
           logCtx.fn(
             `Telegram dispatcher: ${commandName} follow-up failed: ${followup.stderr || "send returned ok=false"}`,
@@ -884,13 +898,13 @@ export class TelegramDispatcher {
     }
 
     const wrapped = wrapChannelReminder(chatId, messages);
-    const sendResult = await sendCtx.fn(wrapped, { fromAgent: TELEGRAM_SENTINEL });
+    const sendResult = await sendCtx.fn(wrapped, { fromAgent: TELEGRAM_SENTINEL, raw: true });
 
     let delivered = sendResult.ok;
     if (!sendResult.ok) {
       // Coordinator-offline retry: wait 2s and try once more.
       await sleepCtx.fn(COORDINATOR_OFFLINE_RETRY_MS);
-      const retry = await sendCtx.fn(wrapped, { fromAgent: TELEGRAM_SENTINEL });
+      const retry = await sendCtx.fn(wrapped, { fromAgent: TELEGRAM_SENTINEL, raw: true });
       delivered = retry.ok;
       if (!delivered) {
         this.awaitingCoordinatorStart.add(chatId);
@@ -1221,7 +1235,7 @@ export class TelegramDispatcher {
   private async deliverReaction(reaction: NormalizedReaction): Promise<void> {
     const wrapped = wrapReactionReminder(reaction);
     try {
-      const result = await sendCtx.fn(wrapped, { fromAgent: TELEGRAM_SENTINEL });
+      const result = await sendCtx.fn(wrapped, { fromAgent: TELEGRAM_SENTINEL, raw: true });
       if (!result.ok) {
         logCtx.fn(
           `Telegram dispatcher: reaction notice not delivered (coordinator offline?): ${result.stderr || "send returned ok=false"}`,

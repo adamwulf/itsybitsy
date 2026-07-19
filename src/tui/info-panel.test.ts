@@ -10,7 +10,7 @@ import {
   processStartEpochSecondsCtx,
   resetProcessStartEpochSecondsCache,
 } from "../agents";
-import { RED } from "./colors";
+import { GREEN, RED } from "./colors";
 
 describe("InfoPanelComponent", () => {
   beforeEach(() => {
@@ -66,6 +66,26 @@ describe("InfoPanelComponent", () => {
 
     const claudeLine = panel.render(60)[0]!;
     expect(claudeLine.startsWith(`${RED}●`)).toBe(true);
+  });
+
+  test("renders a live watchdog from transient state when durable meta has no pid", () => {
+    const panel = new InfoPanelComponent();
+    const agent = makeAgent({ id: "agent-transient-watchdog" });
+    delete agent.meta.watchdog_pid;
+    agent.transient = {
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      tmux_api_error: false,
+      tmux_api_terms: false,
+      has_background_tasks: false,
+      updated_at_ms: Date.now(),
+      watchdog_pid: 4242,
+    };
+    isPidAliveCtx.set((pid) => pid === 4242);
+    panel.agent = agent;
+
+    const watchdogLine = panel.render(60)[1]!;
+    expect(watchdogLine.startsWith(`${GREEN}●`)).toBe(true);
   });
 
   test("renders model name from agent meta", () => {

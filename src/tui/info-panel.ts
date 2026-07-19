@@ -96,7 +96,11 @@ export class InfoPanelComponent implements Component {
     const claudeColor = claudeAlive ? GREEN : RED;
     lines.push(truncateToWidth(`${claudeColor}●${RESET} ${labelPrefix}Claude`, width, ""));
 
-    const watchdogPid = agent.meta.watchdog_pid;
+    // Watchdogs launched through the unsandboxed tmux server do not expose an
+    // immediate child PID to the invoking process. Their self-written
+    // transient PID is authoritative for liveness everywhere else; retain the
+    // durable field only as a compatibility fallback for older agents/tests.
+    const watchdogPid = agent.meta.watchdog_pid ?? agent.transient?.watchdog_pid;
     const watchdogAlive = typeof watchdogPid === "number" && isPidAliveCtx.fn(watchdogPid);
     const watchdogColor = watchdogAlive ? GREEN : RED;
     lines.push(truncateToWidth(`${watchdogColor}●${RESET} ${labelPrefix}Watchdog`, width, ""));

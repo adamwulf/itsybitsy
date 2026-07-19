@@ -160,6 +160,8 @@ export interface Agent {
   repoPath: string;
   repoName: string;
   meta: AgentMeta;
+  /** Latest watchdog-owned transient state, when available. */
+  transient?: TransientState | null;
   state: AgentState;
   age: string;
   archived: boolean;
@@ -1779,7 +1781,10 @@ async function readAgentsFromDir(
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const agentDir = join(dir, entry.name);
-      const { meta, error } = await readAgentMeta(agentDir);
+      const [{ meta, error }, transient] = await Promise.all([
+        readAgentMeta(agentDir),
+        archived ? Promise.resolve(null) : readAgentTransient(agentDir),
+      ]);
       if (error) {
         // Defense-in-depth: when meta.json is missing on a non-archived dir,
         // check agent.log for an in-progress [spawn] start line. A slow
@@ -1835,6 +1840,7 @@ async function readAgentsFromDir(
         repoPath,
         repoName,
         meta,
+        transient,
         state: "unknown", // Updated by watcher via parseState()
         age: computeAge(meta.created_epoch),
         archived,

@@ -446,6 +446,7 @@ export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
     teardown = await teardownAgent(agent.repoPath, agent.id, agentDir, {
       tmux_session: tmuxSession,
       claude_pid: agent.meta.claude_pid,
+      sandbox_proxy_pid: agent.meta.sandbox_proxy_pid,
     }, "Agent retired", preparedRetirement);
   } catch (err) {
     return {
@@ -4058,7 +4059,14 @@ async function spawnHelperViaTmuxServer(
 ): Promise<void> {
   const shellCommand = command.map(shellQuote).join(" ")
     + (logPath ? ` >> ${shellQuote(logPath)} 2>&1` : " >/dev/null 2>&1");
-  const result = await runner.run(["tmux", "run-shell", "-b", "-c", cwd, `exec ${shellCommand}`]);
+  // Keep compatibility with tmux releases before run-shell gained `-c` by
+  // setting cwd inside the server-owned shell command itself.
+  const result = await runner.run([
+    "tmux",
+    "run-shell",
+    "-b",
+    `cd ${shellQuote(cwd)} && exec ${shellCommand}`,
+  ]);
   if (result.exitCode !== 0) {
     throw new Error(result.stderr.trim() || `tmux run-shell failed with exit ${result.exitCode}`);
   }

@@ -86,7 +86,11 @@ import {
   teamAdd,
   writeMetaJsonAtomic,
 } from "./ib-commands";
-import { spawnCtx as lifecycleSpawnCtx } from "./agent-lifecycle";
+import {
+  spawnCtx as lifecycleSpawnCtx,
+  setSandboxProxyKillForTesting,
+  resetSandboxProxyKillForTesting,
+} from "./agent-lifecycle";
 import { setUserConfigPath, resetUserConfigPath } from "./config";
 import type { AgentState } from "./parse-state";
 import type { SpawnFn, SpawnResult } from "./types";
@@ -883,6 +887,7 @@ describe("retireAgent (native)", () => {
   afterEach(async () => {
     lifecycleSpawnCtx.reset();
     resetKillPauseSpawnRunner();
+    resetSandboxProxyKillForTesting();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -943,6 +948,32 @@ describe("retireAgent (native)", () => {
     // Agent directory should be removed after teardown
     const exists = await Bun.file(join(agentDir, "meta.json")).exists();
     expect(exists).toBe(false);
+  });
+
+  test("retire kills the persisted sandbox proxy when its pidfile is missing", async () => {
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-proxy");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-proxy",
+      tmux_session: "tmux-agent-proxy",
+      sandbox_proxy_pid: 42424,
+    }));
+    const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
+      cmd.includes("has-session") || cmd.includes("pgrep")
+    );
+    lifecycleSpawnCtx.set(runner);
+    setKillPauseSpawnRunner(runner);
+    const killed: number[] = [];
+    setSandboxProxyKillForTesting((pid) => killed.push(pid));
+
+    const agent = makeAgent("agent-proxy", tempDir, "running", {
+      worktree: false,
+      sandbox_proxy_pid: 42424,
+    });
+    const result = await retireAgent(agent);
+
+    expect(result.ok).toBe(true);
+    expect(killed).toEqual([42424]);
   });
 
   test("removes user-questions.json entries for killed agent", async () => {
@@ -4164,6 +4195,7 @@ describe("newAgent (native)", () => {
     resetDispatcherDryRunSpawnRunner();
     resetNewAgentSummaryGenerator();
     resetWatchdogSpawnFn();
+    resetNukeResumeSpawnRunner();
     resetSandboxWiringForTesting();
     lifecycleSpawnCtx.reset();
     resetUserConfigPath();
@@ -4270,14 +4302,17 @@ describe("newAgent (native)", () => {
     };
   }
 
-  async function writeSandboxType(name = "sandboxed") {
+  async function writeSandboxType(
+    name = "sandboxed",
+    options?: { enabled?: boolean; model?: string },
+  ) {
     const path = join(process.env.HOME!, ".itsybitsy", "agent-types", `${name}.md`);
     await Bun.write(path, `---
 name: ${name}
 description: Sandbox wiring test
-model: claude:sonnet
+model: ${options?.model ?? "claude:sonnet"}
 sandbox:
-  enabled: true
+  enabled: ${options?.enabled ?? true}
   allowRead: [${JSON.stringify(tempDir)}]
   allowWrite: [${JSON.stringify(tempDir)}]
   deny: ["**/.env"]
@@ -4287,7 +4322,11 @@ sandbox:
 `);
   }
 
-  function sandboxSpawnRunner(options?: { missingExec?: boolean; lintFail?: boolean }) {
+  function sandboxSpawnRunner(options?: {
+    missingExec?: boolean;
+    lintFail?: boolean;
+    gitCommonDirFail?: boolean;
+  }) {
     const inner = cleanWorktreeRunner();
     return (cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       if (cmd[0] === "which" && cmd[1] === "sandbox-exec") {
@@ -4296,9 +4335,68 @@ sandbox:
       if (cmd[0] === "/usr/bin/sandbox-exec") {
         return makeSpawnResult(options?.lintFail ? "profile syntax error" : "", options?.lintFail ? 1 : 0);
       }
+      if (cmd.includes("--git-common-dir") && options?.gitCommonDirFail) {
+        return makeSpawnResult("", 1);
+      }
       return inner(cmd, opts);
     };
   }
+
+  test("sandbox-disabled start.sh has no Seatbelt wrapper or proxy preamble", async () => {
+    await writeSandboxType("sandbox-disabled", { enabled: false });
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99990 }));
+
+    const result = await callNewAgent("plain spawn", { name: "sandbox-disabled", type: "sandbox-disabled" });
+    expect(result.ok).toBe(true);
+    const start = await Bun.file(join(agentsDir, "sandbox-disabled", "start.sh")).text();
+    expect(start).not.toContain("sandbox-exec");
+    expect(start).not.toContain("sandbox-proxy-launch");
+    expect(start).not.toContain("export http_proxy=");
+  });
+
+  test("sandbox-enabled Codex spawn refuses before any Codex execution", async () => {
+    await writeSandboxType("sandbox-codex", { model: "codex:gpt-5.4-mini" });
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+
+    const result = await callNewAgent("must stay closed", { name: "sandbox-codex", type: "sandbox-codex" });
+    expect(result.ok).toBe(false);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("refusing to start unsandboxed");
+    expect(codexDryRunCalls).toHaveLength(0);
+    expect(spawnCalls.some((call) => call[0] === "codex")).toBe(false);
+  });
+
+  test("sandbox-enabled Codex resume refuses before any Codex execution", async () => {
+    const id = "sandbox-codex-resume";
+    const agentDir = join(agentsDir, id);
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), "{}\n");
+    const meta: Partial<AgentMeta> = {
+      model: "codex:gpt-5.4-mini",
+      state: "stopped",
+      sandbox: {
+        enabled: true,
+        allowRead: [],
+        allowWrite: [],
+        deny: [],
+        rawAllow: [],
+        domains: [],
+      },
+    };
+    const resumeCalls: string[][] = [];
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      resumeCalls.push(cmd);
+      return makeSpawnResult("", 0);
+    });
+
+    const result = await resumeAgent(makeAgent(id, tempDir, "stopped", meta));
+    expect(result.ok).toBe(false);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("refusing to resume unsandboxed");
+    expect(resumeCalls).toHaveLength(0);
+  });
 
   test("sandbox-enabled start.sh wraps both Claude branches and exports only proxy vars", async () => {
     await writeSandboxType();
@@ -4333,7 +4431,8 @@ sandbox:
     expect(result.ok).toBe(true);
     const call = spawnCalls.find((args) => args[0] === "tmux" && args[1] === "run-shell" && args.at(-1)?.includes("watchdog"));
     expect(call).toBeDefined();
-    expect(call?.slice(0, 5)).toEqual(["tmux", "run-shell", "-b", "-c", tempDir]);
+    expect(call?.slice(0, 3)).toEqual(["tmux", "run-shell", "-b"]);
+    expect(call?.at(-1)?.startsWith(`cd '${tempDir}' && exec `)).toBe(true);
     expect(call?.at(-1)).toContain("'ib' 'watchdog' 'watchdog-via-tmux'");
   });
 
@@ -4365,6 +4464,12 @@ sandbox:
         configure: () => {},
         runner: sandboxSpawnRunner({ lintFail: true }),
         message: "failed to compile",
+      },
+      {
+        name: "sandbox-no-git-common-dir",
+        configure: () => {},
+        runner: sandboxSpawnRunner({ gitCommonDirFail: true }),
+        message: "could not resolve git common dir",
       },
       {
         name: "sandbox-port-busy",
@@ -4436,6 +4541,37 @@ sandbox:
     expect(resumeScript).toContain("    sandbox-exec -f");
     expect(resumeScript).toContain("export HTTPS_PROXY=\"$http_proxy\"");
     expect(resumeScript).toContain("trap cleanup_sandbox_proxy EXIT");
+  });
+
+  test("sandbox resume fail-hard leaves no tmux session or resume script", async () => {
+    await writeSandboxType();
+    setSandboxPortAllocatorForTesting(() => 43132);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99994 }));
+    const spawned = await callNewAgent("resume refusal", { name: "sandbox-resume-refusal", type: "sandboxed" });
+    expect(spawned.ok).toBe(true);
+
+    const agentDir = join(agentsDir, "sandbox-resume-refusal");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
+    const resumeCalls: string[][] = [];
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      resumeCalls.push(cmd);
+      if (cmd[0] === "which" && cmd[1] === "sandbox-exec") return makeSpawnResult("", 1);
+      if (cmd.includes("has-session")) return makeSpawnResult("", 1);
+      return makeSpawnResult("", 0);
+    });
+
+    const resumed = await resumeAgent(makeAgent("sandbox-resume-refusal", tempDir, "stopped", meta));
+    expect(resumed.ok).toBe(false);
+    expect(resumed.exitCode).toBe(1);
+    expect(resumed.stderr).toContain("sandbox-exec not found");
+    expect(resumeCalls.some((call) => call.includes("new-session"))).toBe(false);
+    expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
+    expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("sandbox-exec not found");
   });
 
   test("rejects spawn when spawner worktree has uncommitted changes", async () => {

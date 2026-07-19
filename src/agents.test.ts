@@ -1205,6 +1205,58 @@ describe("readAgentMeta", () => {
     expect(meta!.claude_pid_epoch).toBe(1001);
   });
 
+  test("resolved sandbox config round-trips through meta.json coercion", async () => {
+    const sandbox = {
+      enabled: true,
+      allowRead: ["/usr", "~/.claude"],
+      allowWrite: ["/private/tmp"],
+      deny: ["**/.env"],
+      rawAllow: ["(allow process*)", "(deny network*)"],
+      domains: ["api.anthropic.com"],
+    };
+    await Bun.write(
+      join(tempDir, "meta.json"),
+      JSON.stringify({ id: "agent-sandboxed", sandbox }),
+    );
+
+    const { meta, error } = await readAgentMeta(tempDir);
+    expect(error).toBeUndefined();
+    expect(meta?.sandbox).toEqual(sandbox);
+  });
+
+  test("legacy meta without sandbox remains unsandboxed", async () => {
+    await Bun.write(join(tempDir, "meta.json"), JSON.stringify({ id: "agent-legacy" }));
+    const { meta } = await readAgentMeta(tempDir);
+    expect(meta?.sandbox).toBeUndefined();
+  });
+
+  test("malformed sandbox fields are safely coerced", async () => {
+    await Bun.write(
+      join(tempDir, "meta.json"),
+      JSON.stringify({
+        id: "agent-bad-sandbox",
+        sandbox: {
+          enabled: "true  # note",
+          allowRead: ["/usr", 42],
+          allowWrite: "bad",
+          deny: null,
+          rawAllow: ["(allow process*)"],
+          domains: [false, "example.com"],
+        },
+      }),
+    );
+
+    const { meta } = await readAgentMeta(tempDir);
+    expect(meta?.sandbox).toEqual({
+      enabled: false,
+      allowRead: ["/usr"],
+      allowWrite: [],
+      deny: [],
+      rawAllow: ["(allow process*)"],
+      domains: ["example.com"],
+    });
+  });
+
   test("meta.json with wrong-typed fields gets defaults applied", async () => {
     await Bun.write(
       join(tempDir, "meta.json"),
@@ -6628,6 +6680,7 @@ describe("readAgentMeta mtime cache", () => {
     // ("Property '<field>' is missing") — the type-level half of the guard.
     const REQUIRED_DEEP_COPY: Record<NestedMutableKeys<AgentMeta>, true> = {
       spawned_by: true,
+      sandbox: true,
     };
 
     // Construct a meta with every known nested mutable field populated.
@@ -6636,6 +6689,14 @@ describe("readAgentMeta mtime cache", () => {
       id: "agent-deepcopy",
       tmux_session: "ib-orig",
       spawned_by: spawnedBy,
+      sandbox: {
+        enabled: true,
+        allowRead: ["/original/read"],
+        allowWrite: ["/original/write"],
+        deny: ["**/.env"],
+        rawAllow: ["(allow process*)"],
+        domains: ["example.com"],
+      },
     }));
 
     // First read = cache miss (populates the canonical cache entry).
@@ -6660,11 +6721,26 @@ describe("readAgentMeta mtime cache", () => {
       first.meta.spawned_by.agent_id = "POLLUTED";
       first.meta.spawned_by.repo_path = "/polluted/path";
     }
+    if (first.meta?.sandbox) {
+      first.meta.sandbox.allowRead.push("/polluted/read");
+      first.meta.sandbox.allowWrite.push("/polluted/write");
+      first.meta.sandbox.deny.push("/polluted/deny");
+      first.meta.sandbox.rawAllow.push("(allow default)");
+      first.meta.sandbox.domains.push("evil.example");
+    }
 
     // A fresh read must see the original canonical values — no leak.
     const second = await readAgentMeta(tempDir);
     expect(second.meta?.spawned_by?.agent_id).toBe("spawner-1");
     expect(second.meta?.spawned_by?.repo_path).toBe("/orig/path");
+    expect(second.meta?.sandbox).toEqual({
+      enabled: true,
+      allowRead: ["/original/read"],
+      allowWrite: ["/original/write"],
+      deny: ["**/.env"],
+      rawAllow: ["(allow process*)"],
+      domains: ["example.com"],
+    });
   });
 
   test("invalidates cache after .tmp + rename write pattern", async () => {

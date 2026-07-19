@@ -14,6 +14,8 @@ import allLayerMd from '../docs/agent-types/_all.md' with { type: 'text' };
 import nonCoordinatorLayerMd from '../docs/agent-types/_non_coordinator.md' with { type: 'text' };
 import { parseModel } from './agent-cli';
 import { isValidEffort } from './validation';
+import type { SandboxConfig } from './sandbox';
+import { validateSandboxFrontmatter } from './sandbox';
 
 const EMBEDDED_TYPES: Record<string, string> = {
   'manager': managerMd,
@@ -23,6 +25,21 @@ const EMBEDDED_TYPES: Record<string, string> = {
   '_all': allLayerMd,
   '_non_coordinator': nonCoordinatorLayerMd,
 };
+
+const SANDBOX_LIST_KEYS = [
+  "allowRead",
+  "allowWrite",
+  "deny",
+  "rawAllow",
+  "domains",
+] as const;
+type SandboxListKey = (typeof SANDBOX_LIST_KEYS)[number];
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
+}
 
 export interface AgentType {
   name: string;
@@ -50,6 +67,8 @@ export interface AgentType {
   };
   icon?: string;
   allowedPaths?: string[];
+  /** Resolved, inheritance-merged Seatbelt sandbox configuration. */
+  sandbox?: SandboxConfig;
   /**
    * If defined, this type can only be spawned in repos whose name or nickname
    * matches an entry. Checked by `newAgent` before any worktree or tmux
@@ -399,8 +418,9 @@ async function resolveChain(
  * Merge a root-first chain of raw `{frontmatter, body}` records into a single
  * record. Scalar fields take the descendant's value when the key is **present**
  * in the descendant's frontmatter. `permissions.allow` / `permissions.deny`
- * are unioned (deduped via Set) across the entire chain. `allowedPaths` and
- * `repos` are replaced (not merged) when the descendant declares them.
+ * are unioned (deduped via Set) across the entire chain. Sandbox list fields
+ * are likewise unioned, while sandbox.enabled is OR-merged. `allowedPaths`
+ * and `repos` are replaced (not merged) when the descendant declares them.
  *
  * The `name` and `spawnable` keys are intentionally not set here — the caller
  * (`buildAgentTypeFromFrontmatter`) is responsible for the final `name` (from
@@ -437,6 +457,19 @@ function mergeRawFrontmatters(
   const allAllow: string[] = [];
   const allDeny: string[] = [];
 
+  // Sandbox is a separate hand-written union because it mixes five unioned
+  // lists with an OR-merged boolean. A descendant may add access or denials,
+  // but may never switch off a sandbox enabled by an ancestor.
+  let sawSandbox = false;
+  let sandboxEnabled = false;
+  const sandboxLists: Record<SandboxListKey, string[]> = {
+    allowRead: [],
+    allowWrite: [],
+    deny: [],
+    rawAllow: [],
+    domains: [],
+  };
+
   // Accumulated body parts — concatenated root-first with blank-line
   // separators in PLAN-BODY-APPEND.md. Each entry's body is already trimmed
   // by parseAgentTypeFile, so no re-trim here.
@@ -466,6 +499,20 @@ function mergeRawFrontmatters(
       }
     }
 
+    // Sandbox — union all five lists and OR-merge enabled across the chain.
+    if (typeof fm.sandbox === "object" && fm.sandbox !== null && !Array.isArray(fm.sandbox)) {
+      sawSandbox = true;
+      const sandbox = fm.sandbox as Record<string, unknown>;
+      if (sandbox.enabled === true) sandboxEnabled = true;
+      for (const key of SANDBOX_LIST_KEYS) {
+        const values = sandbox[key];
+        if (!Array.isArray(values)) continue;
+        for (const value of values) {
+          if (typeof value === "string") sandboxLists[key].push(value);
+        }
+      }
+    }
+
     // Body — root-first concatenation. Skip empties so missing-body
     // ancestors don't produce stray blank lines.
     if (entry.body.length > 0) {
@@ -481,6 +528,17 @@ function mergeRawFrontmatters(
     if (allAllow.length > 0) permsOut.allow = Array.from(new Set(allAllow));
     if (allDeny.length > 0) permsOut.deny = Array.from(new Set(allDeny));
     merged.permissions = permsOut;
+  }
+
+  if (sawSandbox) {
+    merged.sandbox = {
+      enabled: sandboxEnabled,
+      allowRead: Array.from(new Set(sandboxLists.allowRead)),
+      allowWrite: Array.from(new Set(sandboxLists.allowWrite)),
+      deny: Array.from(new Set(sandboxLists.deny)),
+      rawAllow: Array.from(new Set(sandboxLists.rawAllow)),
+      domains: Array.from(new Set(sandboxLists.domains)),
+    } satisfies SandboxConfig;
   }
 
   return { frontmatter: merged, body };
@@ -510,6 +568,10 @@ function buildAgentTypeFromFrontmatter(
 
   const permissions = typeof frontmatter.permissions === "object" && frontmatter.permissions !== null
     ? (frontmatter.permissions as Record<string, unknown>)
+    : undefined;
+
+  const sandbox = typeof frontmatter.sandbox === "object" && frontmatter.sandbox !== null
+    ? (frontmatter.sandbox as Record<string, unknown>)
     : undefined;
 
   // Extract icon: first non-whitespace character of the icon field.
@@ -557,6 +619,16 @@ function buildAgentTypeFromFrontmatter(
         }
       : undefined,
     allowedPaths,
+    sandbox: sandbox
+      ? {
+          enabled: sandbox.enabled === true,
+          allowRead: stringList(sandbox.allowRead),
+          allowWrite: stringList(sandbox.allowWrite),
+          deny: stringList(sandbox.deny),
+          rawAllow: stringList(sandbox.rawAllow),
+          domains: stringList(sandbox.domains),
+        }
+      : undefined,
     repos,
     instructionStyle: validateInstructionStyle(getString(frontmatter.instructionStyle, "")),
     markdownBody: body || undefined,
@@ -823,6 +895,19 @@ export async function validateAllAgentTypes(): Promise<string[]> {
             if (perms.deny !== undefined && !Array.isArray(perms.deny)) {
               errors.push(`${file}: permissions.deny must be a list`);
             }
+          }
+        }
+
+        // Validate the flat sandbox object. Warnings are deliberately emitted
+        // without joining the returned error list: catch-all raw SBPL is risky
+        // but remains an explicit user-owned escape hatch.
+        if (frontmatter.sandbox !== undefined) {
+          const sandboxValidation = validateSandboxFrontmatter(frontmatter.sandbox);
+          for (const message of sandboxValidation.errors) {
+            errors.push(`${file}: ${message}`);
+          }
+          for (const message of sandboxValidation.warnings) {
+            console.warn(`${file}: warning: ${message}`);
           }
         }
 

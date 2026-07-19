@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
 import { parseAgentTypeFile, loadAgentType, listAgentTypes, ensureAgentTypesDir, initAgentTypes, agentTypeExists, validateAllAgentTypes, listSpawnableAgentTypesSync, listSpawnableTypeNamesSync, metaCanSpawnChildren } from "./agent-types";
 import { buildAvailableTypesSection } from "./hooks/session-start";
 import { mkdtemp, rm, mkdir } from "fs/promises";
@@ -479,6 +479,34 @@ body`;
   expect((frontmatter.allowedPaths as unknown[]).length).toBe(0);
 });
 
+test("parseAgentTypeFile: parses the flat sandbox block with inline and block lists", () => {
+  const content = `---
+name: sandboxed
+sandbox:
+  enabled: true
+  # Full-line comments are ignored.
+  allowRead: ["/usr", "~/.claude"]
+  allowWrite:
+    - "/private/tmp"
+  deny: ["**/.env"]
+  rawAllow:
+    - "(allow process*)"
+    - "(deny network*)"
+  domains: ["api.anthropic.com"]
+---
+body`;
+
+  const { frontmatter } = parseAgentTypeFile(content);
+  expect(frontmatter.sandbox).toEqual({
+    enabled: true,
+    allowRead: ["/usr", "~/.claude"],
+    allowWrite: ["/private/tmp"],
+    deny: ["**/.env"],
+    rawAllow: ["(allow process*)", "(deny network*)"],
+    domains: ["api.anthropic.com"],
+  });
+});
+
 // ── inherits: / repos: inheritance tests (see PLAN-INHERITS.md) ──────────────
 
 describe("loadAgentType: inherits", () => {
@@ -714,6 +742,52 @@ body`);
 
     const type = await loadAgentType("child");
     expect(type.permissions?.deny?.sort()).toEqual(["Bash", "NotebookEdit", "Write"]);
+  });
+
+  test("sandbox unions all five lists and OR-merges enabled across a multi-level chain", async () => {
+    await writeType("floor", `---
+name: floor
+sandbox:
+  enabled: true
+  allowRead: ["/usr", "/shared"]
+  allowWrite: ["/tmp/floor"]
+  deny: ["**/.env"]
+  rawAllow: ["(allow process*)"]
+  domains: ["api.anthropic.com"]
+---
+floor`);
+    await writeType("middle", `---
+inherits: floor
+sandbox:
+  enabled: false
+  allowRead: ["/shared", "/middle"]
+  allowWrite: ["/tmp/middle"]
+  deny: ["~/.ssh"]
+  rawAllow: ["(allow process*)", "(deny network*)"]
+  domains: ["api.anthropic.com", "github.com"]
+---
+middle`);
+    await writeType("leaf", `---
+inherits: middle
+sandbox:
+  enabled: false
+  allowRead: ["/leaf"]
+  allowWrite: ["/tmp/floor", "/tmp/leaf"]
+  deny: ["**/.env", "~/.aws"]
+  rawAllow: ["(allow mach-lookup)"]
+  domains: ["*.githubusercontent.com"]
+---
+leaf`);
+
+    const type = await loadAgentType("leaf");
+    expect(type.sandbox).toEqual({
+      enabled: true,
+      allowRead: ["/usr", "/shared", "/middle", "/leaf"],
+      allowWrite: ["/tmp/floor", "/tmp/middle", "/tmp/leaf"],
+      deny: ["**/.env", "~/.ssh", "~/.aws"],
+      rawAllow: ["(allow process*)", "(deny network*)", "(allow mach-lookup)"],
+      domains: ["api.anthropic.com", "github.com", "*.githubusercontent.com"],
+    });
   });
 
   test("multi-level chain (A -> B -> C) merges and overrides correctly in order", async () => {
@@ -1525,5 +1599,78 @@ describe("metaCanSpawnChildren", () => {
 
   test("empty meta defaults to manager-like (can spawn)", async () => {
     expect(await metaCanSpawnChildren({})).toBe(true);
+  });
+});
+
+describe("validateAllAgentTypes: sandbox", () => {
+  const originalHome = process.env.HOME;
+  let tempHome: string;
+  let typesDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-sandbox-validation-"));
+    process.env.HOME = tempHome;
+    typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    process.env.HOME = originalHome;
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  async function writeType(name: string, sandboxBody: string): Promise<void> {
+    await Bun.write(join(typesDir, `${name}.md`), `---
+name: ${name}
+sandbox:
+${sandboxBody}
+---
+body`);
+  }
+
+  test("rejects enabled with an inline trailing comment as non-boolean", async () => {
+    await writeType("bad-enabled", "  enabled: true  # note");
+    const errors = await validateAllAgentTypes();
+    expect(errors).toContain(
+      'bad-enabled.md: sandbox.enabled must be true or false, got "true  # note"',
+    );
+  });
+
+  test("rejects a non-list value for every sandbox list field", async () => {
+    for (const key of ["allowRead", "allowWrite", "deny", "rawAllow", "domains"]) {
+      await writeType(`bad-${key}`, `  ${key}: not-a-list`);
+    }
+    const errors = await validateAllAgentTypes();
+    for (const key of ["allowRead", "allowWrite", "deny", "rawAllow", "domains"]) {
+      expect(errors).toContain(`bad-${key}.md: sandbox.${key} must be a list`);
+    }
+  });
+
+  test("rejects unknown nested sandbox keys", async () => {
+    await writeType("bad-key", "  filesystem: []");
+    const errors = await validateAllAgentTypes();
+    expect(errors).toContain('bad-key.md: sandbox contains unknown key "filesystem"');
+  });
+
+  test("rejects a rawAllow entry that is not a balanced s-expression", async () => {
+    await writeType("bad-raw", '  rawAllow: ["(allow process*"]');
+    const errors = await validateAllAgentTypes();
+    expect(errors).toContain(
+      "bad-raw.md: sandbox.rawAllow[0] must be a balanced parenthesized s-expression",
+    );
+  });
+
+  test("warns without rejecting a catch-all rawAllow rule", async () => {
+    await writeType("wide-raw", '  rawAllow: ["(allow default)"]');
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const errors = await validateAllAgentTypes();
+      expect(errors).toEqual([]);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("wide-raw.md: warning: sandbox.rawAllow[0] is a catch-all rule"),
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

@@ -36,6 +36,7 @@ export const CONFIG_KEYS: ConfigKeyDef[] = [
   { key: "channels.telegram.bot_token", type: "string", default: "" },
   { key: "providers.fugu.api_key", type: "string", default: "", sensitive: true },
   { key: "notifications.sayOnQuestion", type: "boolean", default: true },
+  { key: "tree.groupByParent", type: "boolean", default: false },
 ];
 
 function getNestedValue(obj: Record<string, unknown>, dotKey: string): unknown {

@@ -72,6 +72,11 @@ export function buildDashboardRows(flatList: FlatEntry[]): SystemDashboardRow[] 
       });
       continue;
     }
+    if (entry.kind === "parent-header") {
+      // Parent-directory group headers are a lefthand-tree display device only;
+      // the system dashboard table doesn't render them.
+      continue;
+    }
     // kind === "agent"
     const agent = entry.agent;
     const isCoordinator = agent.meta.agentType === "coordinator";

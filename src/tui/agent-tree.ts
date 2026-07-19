@@ -348,7 +348,7 @@ export class AgentTreeComponent implements Component {
 
   get visibleList(): FlatEntry[] {
     const base = this.flatList.filter((f) =>
-      f.kind === "repo-header" || f.kind === "system-coordinator" || !f.agent.archived
+      f.kind === "repo-header" || f.kind === "system-coordinator" || f.kind === "parent-header" || !f.agent.archived
     );
     if (this.repoFilter === "all") return base;
     const sticky = this._stickyRevealedRepoPath;
@@ -357,6 +357,9 @@ export class AgentTreeComponent implements Component {
       : null;
     const filtered = base.filter((f) => {
       if (f.kind === "system-coordinator") return true;
+      // Parent-directory group headers are a pure display device — they carry
+      // no running/stopped semantics and are never hidden by the V-filter.
+      if (f.kind === "parent-header") return true;
       if (f.kind === "repo-header") {
         // non-empty gates on any agents at all; running-only gates on any
         // NON-STOPPED agent (a repo whose agents are all stopped is hidden).
@@ -478,6 +481,9 @@ export class AgentTreeComponent implements Component {
       const item = visible[this.selectedIndex]!;
       if (item.kind === "system-coordinator") return { kind: "system-coordinator" };
       if (item.kind === "repo-header") return { kind: "repo-header", repoName: item.repoName, repoPath: item.repoPath };
+      // parent-header rows are inert (non-selectable) — nothing is "selected"
+      // when the index happens to land on one.
+      if (item.kind === "parent-header") return null;
       return { kind: "agent", agent: item.agent };
     }
     return null;
@@ -723,11 +729,28 @@ export class AgentTreeComponent implements Component {
   private updateSelectedId() {
     const visible = this.visibleList;
     if (this.selectedIndex < 0 || this.selectedIndex >= visible.length) return;
+    // parent-header rows are inert; if the index landed on one (via index-based
+    // navigation), skip forward to the next selectable row, then wrap back to
+    // the previous one — a parent-header always has a repo-header below it.
+    if (visible[this.selectedIndex]!.kind === "parent-header") {
+      // Skip forward to the next selectable row; if there is none below (the
+      // parent-header is the last row — shouldn't happen, a repo-header always
+      // follows), fall back to the nearest one above. Both -1 → nothing
+      // selectable at all; leave selectedId untouched rather than crash.
+      const forward = this.nextSelectableIndex(this.selectedIndex, 1);
+      const target = forward !== -1 ? forward : this.nextSelectableIndex(this.selectedIndex, -1);
+      if (target === -1) return;
+      this.selectedIndex = target;
+    }
     const item = visible[this.selectedIndex]!;
     if (item.kind === "system-coordinator") {
       this.selectedId = SYSTEM_COORDINATOR_ID;
     } else if (item.kind === "repo-header") {
       this.selectedId = `repopath:${item.repoPath}`;
+    } else if (item.kind === "parent-header") {
+      // Unreachable after the skip above, but keep selectedId sane rather than
+      // touching item.agent.
+      return;
     } else {
       this.selectedId = item.agent.id;
     }
@@ -739,9 +762,23 @@ export class AgentTreeComponent implements Component {
     const idx = updatedVisible.findIndex((f) => {
       if (f.kind === "system-coordinator") return this.selectedId === SYSTEM_COORDINATOR_ID;
       if (f.kind === "repo-header") return `repopath:${f.repoPath}` === this.selectedId;
+      if (f.kind === "parent-header") return false;
       return f.agent.id === this.selectedId;
     });
     if (idx !== -1) this.selectedIndex = idx;
+  }
+
+  /**
+   * First index at/after `from` (stepping by `delta`) whose row is selectable
+   * (anything except a `parent-header`). Returns -1 if none in that direction.
+   * Used to skip inert parent-header rows during index-based navigation.
+   */
+  private nextSelectableIndex(from: number, delta: 1 | -1): number {
+    const visible = this.visibleList;
+    for (let i = from + delta; i >= 0 && i < visible.length; i += delta) {
+      if (visible[i]!.kind !== "parent-header") return i;
+    }
+    return -1;
   }
 
   /** Re-resolve selectedIndex from selectedId after flatList changes */
@@ -765,6 +802,7 @@ export class AgentTreeComponent implements Component {
     const idx = visible.findIndex((f) => {
       if (f.kind === "system-coordinator") return this.selectedId === SYSTEM_COORDINATOR_ID;
       if (f.kind === "repo-header") return `repopath:${f.repoPath}` === this.selectedId;
+      if (f.kind === "parent-header") return false;
       return f.agent.id === this.selectedId;
     });
     if (idx !== -1) {
@@ -847,6 +885,13 @@ export class AgentTreeComponent implements Component {
     }
     const stateColWidth = computeStateColWidth(visible);
 
+    // Grouping is "active" when the flat list carries at least one
+    // parent-header (i.e. tree.groupByParent is ON and >1 repo shares a
+    // parent). When active, repo-headers are indented 2 spaces to show they
+    // nest under their parent-directory header.
+    const groupingActive = visible.some((item) => item.kind === "parent-header");
+    const repoIndent = groupingActive ? "  " : "";
+
     // Scroll indicator at top
     if (start > 0) {
       lines.push(truncateToWidth(`${DIM}  ▲ ${start} more${RESET}`, width, ""));
@@ -860,6 +905,11 @@ export class AgentTreeComponent implements Component {
           selectionActive && i === this.selectedIndex,
           width, maxNameWidth, stateColWidth,
         ));
+      } else if (item.kind === "parent-header") {
+        // Parent-directory group header: a dimmed/bold folder line that sits
+        // one visual level above the repo-headers nested beneath it. Inert —
+        // never rendered selected (it has no selectable identity of its own).
+        lines.push(truncateToWidth(`${DIM}${BOLD}▸▸ ${item.displayName}${RESET}`, width, ""));
       } else if (item.kind === "repo-header") {
         const selected = selectionActive && i === this.selectedIndex;
         const triangle = this.pinnedRepoPaths.has(item.repoPath) ? "⚲" : item.hasAgents ? "▾" : "▸";
@@ -870,7 +920,7 @@ export class AgentTreeComponent implements Component {
           const hasError = report.warnings.some((w) => w.severity === "error");
           healthIndicator = hasError ? " 🔴" : " ⚠️";
         }
-        const truncated = truncateToWidth(`${BOLD}${triangle} ${item.repoName}${healthIndicator}${RESET}`, width, "");
+        const truncated = truncateToWidth(`${repoIndent}${BOLD}${triangle} ${item.repoName}${healthIndicator}${RESET}`, width, "");
         if (selected) {
           const pad = Math.max(0, width - visibleWidth(truncated));
           const highlighted = truncated.replaceAll(RESET, RESET + REVERSE);

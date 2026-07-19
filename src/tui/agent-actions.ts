@@ -254,6 +254,13 @@ export interface ActionCtx {
   repos: RepoEntry[];
   watcher: { refresh(): void; updateRepos(repos: RepoEntry[]): void; recheckHealth(): void; lastAgents: Agent[] } | null;
   diffTool: string | undefined;
+  /**
+   * Notify the host that a config key changed via the 'h' settings menu, so
+   * display-only preferences (e.g. `tree.groupByParent`) can take effect LIVE
+   * without an `ib watch` restart. Called after a successful writeConfig. The
+   * dashboard implements it; tests may inject a recording stub or omit it.
+   */
+  onConfigChange?: (key: string, value: unknown) => void;
   pendingSelectNewestInRepo: string | null;
   showDialog(dialog: NonNullable<DialogState>): void;
   closeDialog(): void;
@@ -2051,6 +2058,9 @@ function handleConfigItemAction(
       writeConfig(configFilePath, item.key, newValue).then(() => {
         // Update in-memory config and refresh dialog
         config[item.key] = { value: newValue, source: "user" };
+        // Notify the host so display-only preferences take effect live
+        // (e.g. tree.groupByParent re-flattens the tree without a restart).
+        ctx.onConfigChange?.(item.key, newValue);
         showSetupDialogForTab(tab);
         ctx.setNotice(`${item.key} = ${newValue}`, "info");
       }).catch((err) => {

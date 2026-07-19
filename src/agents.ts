@@ -3,7 +3,7 @@
  * Also reads user-questions.json for pending questions.
  */
 
-import { join } from "path";
+import { join, dirname, basename } from "path";
 import { readdir, rename, stat, unlink, open } from "fs/promises";
 import { randomUUID } from "crypto";
 import type { AgentState } from "./parse-state";
@@ -1247,6 +1247,7 @@ export function buildAgentTree(agents: Agent[]): Agent[] {
 export type FlatEntry =
   | { kind: "agent"; agent: Agent; depth: number; connector: string }
   | { kind: "repo-header"; repoName: string; repoPath: string; hasAgents: boolean; hasRunningAgents: boolean; hasNonStoppedAgents: boolean }
+  | { kind: "parent-header"; parentDir: string; displayName: string }
   | { kind: "system-coordinator"; state: string; age: string };
 
 /**
@@ -1304,11 +1305,19 @@ export function subtreeHasNonStopped(agent: Agent): boolean {
  * Empty repos (in repos but with no agents) get a header with repoHasAgents=false.
  *
  * Accepts either string[] (display names, legacy) or {name, path}[] (with paths for selection persistence).
+ *
+ * When `groupByParent` is true AND there is more than one repo, repos that
+ * share an on-disk parent directory are grouped under a `parent-header` entry
+ * (labeled with the parent dir's basename) and emitted in parent-dir order,
+ * repos sorted within each group. When false (the default), the repo list is a
+ * flat alphabetical sequence — byte-identical to pre-feature behavior. Repos
+ * with an unknown path (empty string) are never given a parent-header.
  */
 export function flattenAgentTree(
   roots: Agent[],
   repos: string[] | { name: string; path: string }[] = [],
   coordinator?: { state: string; age: string },
+  groupByParent: boolean = false,
 ): FlatEntry[] {
   // Normalize to {name, path} format
   const repoInfos: { name: string; path: string }[] = repos.map((r) =>
@@ -1364,7 +1373,10 @@ export function flattenAgentTree(
     // Sort alphabetically
     const sortedNames = [...allNames].sort((a, b) => a.localeCompare(b));
 
-    for (const repoName of sortedNames) {
+    // Emit a single repo (header + walked agents, or an empty-repo header).
+    // Shared by the flat path and the group-by-parent path so the agent-walk
+    // is never duplicated.
+    const emitRepo = (repoName: string): void => {
       const agents = repoGroups.get(repoName);
       if (agents && agents.length > 0) {
         // Filter out per-repo coordinators — they don't appear in the agent tree
@@ -1381,6 +1393,36 @@ export function flattenAgentTree(
         // Empty repo — just a header
         result.push({ kind: "repo-header", repoName, repoPath: repoPathByName.get(repoName) ?? "", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false });
       }
+    };
+
+    if (groupByParent) {
+      // Group repos by the parent directory of their on-disk path. A repo with
+      // an unknown path (empty string) is bucketed under a "" sentinel and gets
+      // NO parent-header (dirname("") is meaningless — don't invent a group).
+      const parentOf = (repoName: string): string => {
+        const path = repoPathByName.get(repoName) ?? "";
+        return path === "" ? "" : dirname(path);
+      };
+      const parentGroups = new Map<string, string[]>();
+      for (const repoName of sortedNames) {
+        const parent = parentOf(repoName);
+        const group = parentGroups.get(parent) ?? [];
+        group.push(repoName);
+        parentGroups.set(parent, group);
+      }
+      // Sort parent groups alphabetically by parentDir; the "" sentinel sorts
+      // first (its repos render flat, with no parent-header).
+      const sortedParents = [...parentGroups.keys()].sort((a, b) => a.localeCompare(b));
+      for (const parentDir of sortedParents) {
+        const repoNamesInGroup = parentGroups.get(parentDir)!; // already sorted (built from sortedNames)
+        if (parentDir !== "") {
+          result.push({ kind: "parent-header", parentDir, displayName: basename(parentDir) });
+        }
+        for (const repoName of repoNamesInGroup) emitRepo(repoName);
+      }
+    } else {
+      // Flat alphabetical repo list — byte-identical to pre-feature behavior.
+      for (const repoName of sortedNames) emitRepo(repoName);
     }
   } else {
     // Filter out per-repo coordinators — they don't appear in the agent tree

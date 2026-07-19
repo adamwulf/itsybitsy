@@ -1459,6 +1459,7 @@ async function main() {
         let isFirst = true;
         for (const entry of flat) {
           if (entry.kind === "system-coordinator") continue; // CLI list doesn't show coordinator
+          if (entry.kind === "parent-header") continue; // CLI `ib list` never groups by parent
           if (entry.kind === "repo-header") {
             if (!isFirst) console.log(""); // blank line between repos
             isFirst = false;

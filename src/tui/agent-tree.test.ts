@@ -774,6 +774,96 @@ describe("AgentTreeComponent", () => {
   });
 });
 
+describe("AgentTreeComponent parent-header (groupByParent)", () => {
+  /** A flat list with a parent-header above two repo groups nested under it. */
+  function makeFlatWithParent(): FlatEntry[] {
+    return [
+      { kind: "parent-header", parentDir: "/Users/x/Developer", displayName: "Developer" },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/Users/x/Developer/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/Users/x/Developer/alpha" }), depth: 0, connector: "" },
+      { kind: "repo-header", repoName: "bravo", repoPath: "/Users/x/Developer/bravo", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "agent", agent: makeAgent("b1", "running", { repoName: "bravo", repoPath: "/Users/x/Developer/bravo" }), depth: 0, connector: "" },
+    ];
+  }
+
+  test("visibleList passes parent-header through under filter=all", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlatWithParent());
+    const kinds = tree.visibleList.map((f) => f.kind);
+    expect(kinds[0]).toBe("parent-header");
+    expect(tree.visibleList.some((f) => f.kind === "parent-header")).toBe(true);
+  });
+
+  test("visibleList passes parent-header through under running-only filter", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlatWithParent());
+    tree.setRepoFilter("running-only");
+    // Parent-header survives even the strictest filter (it's a pure display device).
+    expect(tree.visibleList.some((f) => f.kind === "parent-header")).toBe(true);
+    // ...and the running agents/repos are still there.
+    const agentIds = tree.visibleList.filter((f) => f.kind === "agent").map((f) => (f as Extract<FlatEntry, { kind: "agent" }>).agent.id);
+    expect(agentIds).toEqual(["a1", "b1"]);
+  });
+
+  test("running-only still hides a stopped repo but keeps the parent-header", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList([
+      { kind: "parent-header", parentDir: "/Users/x/Developer", displayName: "Developer" },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/Users/x/Developer/alpha", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "agent", agent: makeAgent("a1", "stopped", { repoName: "alpha", repoPath: "/Users/x/Developer/alpha" }), depth: 0, connector: "" },
+      { kind: "repo-header", repoName: "bravo", repoPath: "/Users/x/Developer/bravo", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "agent", agent: makeAgent("b1", "running", { repoName: "bravo", repoPath: "/Users/x/Developer/bravo" }), depth: 0, connector: "" },
+    ]);
+    tree.setRepoFilter("running-only");
+    const repoPaths = tree.visibleList.filter((f) => f.kind === "repo-header").map((f) => (f as Extract<FlatEntry, { kind: "repo-header" }>).repoPath);
+    // Stopped 'alpha' repo hidden; 'bravo' kept — the V-filter is unaffected by parent-headers.
+    expect(repoPaths).toEqual(["/Users/x/Developer/bravo"]);
+    expect(tree.visibleList.some((f) => f.kind === "parent-header")).toBe(true);
+  });
+
+  test("render does not crash and shows the parent displayName + indented repos", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlatWithParent());
+    const lines = tree.render(80);
+    const joined = lines.join("\n");
+    expect(joined).toContain("Developer");
+    // Repo-headers are indented 2 spaces under the parent when grouping is active.
+    const alphaLine = lines.find((l) => l.includes("alpha"));
+    expect(alphaLine).toBeDefined();
+    expect(alphaLine!).toContain("  ");
+  });
+
+  test("moveSelection skips the inert parent-header (never selects it)", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlatWithParent());
+    // j from no-selection selects the FIRST row; index 0 is a parent-header,
+    // which must be skipped — selection lands on the alpha repo-header instead.
+    tree.moveSelection(1);
+    expect(tree.selection).not.toBeNull();
+    expect(tree.selection?.kind).not.toBe("parent-header");
+    expect(tree.selection?.kind).toBe("repo-header");
+    expect((tree.selection as { repoPath: string }).repoPath).toBe("/Users/x/Developer/alpha");
+  });
+
+  test("cycling j all the way down never crashes on the parent-header", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlatWithParent());
+    // Press j through the whole list twice; must never throw or select the parent-header.
+    for (let i = 0; i < 12; i++) {
+      tree.moveSelection(1);
+      expect(tree.selection?.kind).not.toBe("parent-header");
+    }
+  });
+
+  test("selectByRepoPath works with a parent-header in the list", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlatWithParent());
+    const found = tree.selectByRepoPath("/Users/x/Developer/bravo");
+    expect(found).toBe(true);
+    expect(tree.selectedRepoPath).toBe("/Users/x/Developer/bravo");
+  });
+});
+
 describe("agent-tree helpers", () => {
   test("displayState maps unknown to running", () => {
     expect(displayState("unknown")).toBe("running");

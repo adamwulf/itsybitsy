@@ -456,13 +456,27 @@ permissions and is explicitly rejected. So:
     worktree at `/repo`) — **MANDATORY**, not a candidate: hooks write its
     `meta.json`/`agent.log`/`debug-logs/` (§4C.1). Injecting it subsumes
     `WORKTREE`.
+  - **`REPOAGENTS`** = `<repoPath>/.ittybitty/agents` (the parent-repo registry) —
+    **read**-injected; `ib status` needs it to resolve the agent ("Agent not found"
+    without it; `ib list` works without it). New finding, phase-1.5 verification.
   - the agent's Claude project dir (`~/.claude/projects/<encoded-worktree>`), if
     not expressible as a static parent in `_all.md`.
-  These are passed as Seatbelt `-D` params (`WORKTREE`/`AGENTDIR`, `GITDIR`, …) by
-  the spawn/resume script, exactly like the reference passes `SECRETS_DIR`.
+  These are passed as Seatbelt `-D` params (`AGENTDIR`, `WORKTREE`, `GITDIR`,
+  `REPOAGENTS`, …) by the spawn/resume script, exactly like the reference passes
+  `SECRETS_DIR`. ⚠️ **`AGENTDIR` + `GITDIR` must be injected READ+WRITE, not
+  write-only** — phase-1.5 proved this is what lets whole-home read collapse to 5
+  dotdirs (write-only forces claude to read the worktree's `~/Developer/…` ancestor
+  chain, dragging in broad-home read).
 
-Candidate static `_all.md` contents (finalize empirically in the phase-1 spike —
-the exact set is OS/Claude-version-dependent and MUST be verified, not guessed):
+**✅ The VERIFIED-minimal `_all.md` block is `docs/SANDBOX-BASELINE-MINIMAL.md §(e)`**
+— every rule bisection-minimized against real claude (phase-1.5), paste-ready in the
+`allowRead`/`allowWrite`/`deny`/`rawAllow`/`domains` schema. Use it as the starting
+`_all.md`; re-verify exact paths on the target install (they're install-layout- and
+Claude-version-dependent). The candidate list below is the earlier one-pass draft —
+superseded by that doc.
+
+Candidate static `_all.md` contents (SUPERSEDED by `docs/SANDBOX-BASELINE-MINIMAL.md`;
+kept for context):
 
 - **Read+write:** `/private/tmp`, `/private/var/folders/**` (macOS per-user
   temp/caches). ⚠️ **`/private/tmp`, NOT `/tmp`** — seatbelt matches CANONICAL
@@ -722,14 +736,21 @@ shell-injection surface; the codebase already `shellQuote`s everything). Unit-
 testable in isolation (`bun test`), no spawn required.
 
 **⚠️ Spike gotchas (`docs/SANDBOX-SPIKE-FINDINGS.md §7`):**
-1. **The spike found claude needs `(allow file-read* (literal "/"))` to boot** —
-   it reads the root directory at runtime init; without it, **SIGABRT with ZERO
-   output** (aborts before logger init — no stderr, no `--debug-file`). ⚠️ Per
-   Adam's zero-baked-in rule this line is **NOT** hardcoded in the generator — if
-   required, it lives in `_all.md`'s `allowRead` (as `"/"`), like every other
-   entry. AND: the phase-1.5 verification (§6.1.5) must **re-confirm `/` is truly
-   mandatory and cannot be narrowed** (e.g. to specific top-level entries) rather
-   than assume it — Adam: "test everything, don't assume."
+1. **`(allow file-read* (literal "/"))` is MANDATORY + path-irreducible (VERIFIED,
+   phase-1.5).** claude needs the root-dir node read to boot; without it, **SIGABRT
+   with ZERO output** (aborts before logger init). The verification proved *why*:
+   it's the **Bun/Node runtime** (plain `node` SIGABRTs identically), doing a
+   `readdir`/`opendir` of the `/` **node itself** — not claude logic, not a `stat`
+   (`file-read-metadata` is granted yet it still aborts), and **no set of top-level
+   child-allows substitutes** (granting every child but not `/` still aborts).
+   `(literal "/")` is already the narrowest PATH form. The ONLY tightening is the
+   **op-class**: `(allow file-read-data (literal "/"))` boots (root *listing* only,
+   not the whole tree) — a real isolation win, but it can't be expressed in the plain
+   path grammar, so it needs a **generator special-case for the `"/"` entry** (or a
+   `rawAllow` line). Per Adam's zero-baked-in rule the *permission* still lives in
+   `_all.md` (`allowRead: ["/"]`); only the op-class narrowing is a generator detail.
+   Left as `"/"` for correctness; the `file-read-data` tightening is a documented
+   optional refinement (§8 gap).
 2. **A missing READ path → silent SIGABRT/exit-null.** Treat any such failure under
    a new profile as "a read path is missing," and **bisect** (see below).
 3. **Harvest by PROFILE BISECTION, not the unified log.** The spike proved the
@@ -912,23 +933,18 @@ written/executed, so nothing launches on a failed precondition.
      - **MCP server**: boot an agent with a real MCP server configured (§4C.4) —
        needs interpreter paths + its own allowlisted egress.
      - **codex** (§4B): `~/.codex` (`auth.json`, `config.toml`) read+write.
-1.5. **Verify the minimal baseline — NOTHING assumed (Adam's "test everything").**
-   Before writing any `_all.md` baseline, rigorously establish the *smallest* set
-   that actually boots + runs the gate/ib/git, by bisection:
-   - **Is `(literal "/")` truly mandatory, or can it be narrowed?** The spike
-     asserted `/` is required but derived it in one pass. Re-test: try replacing
-     `(literal "/")` with the specific top-level entries claude stats at init
-     (bisect the root read); confirm whether a narrower rule boots. If `/` is
-     genuinely irreducible, record *why* — don't just assert it.
-   - **Minimal syscall set:** individually remove `process*`, `sysctl-read`,
-     `file-read-metadata`, `file-ioctl`, `signal`, and narrow `mach-lookup` to the
-     curated list (spike §2.4) — keep only what's load-bearing.
-   - **Minimal read set:** narrow each `/usr /System /Library …` subpath toward the
-     actual dylib/framework set where practical.
-   - Output: the **exact** minimal `_all.md` (paths + syscalls + network + domains)
-     the user will own, AND the answer to the §5.1 OPEN QUESTION (how the `.md`
-     expresses syscall/network rules — A/B/C). Everything the user must add is
-     written down; nothing is baked into code.
+1.5. **Verify the minimal baseline — ✅ COMPLETE (2026-07-18), NOTHING assumed.**
+   Result: `docs/SANDBOX-BASELINE-MINIMAL.md` — every rule bisection-minimized against
+   real claude; final block validated 5/5 (boot via proxy + `tsc` + `test` + `ib
+   list`/`status`). Verdicts: `/` is MANDATORY + path-irreducible (Bun/Node runtime
+   reads the root node; op-class narrowable to `file-read-data`); minimal syscalls =
+   `process*`/`sysctl-read`/`mach-lookup`/`file-read-metadata` (dropped `signal`+
+   `file-ioctl`); network floor = `(deny network*)` + `localhost:*` outbound (2 lines);
+   home read collapses to 5 dotdirs + 2 files once `AGENTDIR`/`GITDIR` are injected
+   READ+write; new `-D` param `REPOAGENTS` for `ib status`. The paste-ready `_all.md`
+   block (§(e)) is in the real `allowRead`/`allowWrite`/`deny`/`rawAllow`/`domains`
+   schema. Honest non-minimized items (TUI/MCP/codex, dylib-exact reads, `/` op-class)
+   → phase-2 backlog.
 2. **Filesystem layer + fail-hard (⚠️ merge WITH phase 3 — see R2):** `src/sandbox.ts`
    generator + `sandbox.enabled` + flat `sandbox` frontmatter (R1), wrap
    spawn+resume, §5.5 precondition checks (no unsandboxed fallback), persist

@@ -75,6 +75,7 @@ import {
   setWatchdogSpawnFn,
   resetWatchdogSpawnFn,
   teamAdd,
+  writeMetaJsonAtomic,
 } from "./ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "./agent-lifecycle";
 import { setUserConfigPath, resetUserConfigPath } from "./config";
@@ -10298,5 +10299,75 @@ describe("teamAdd suppressJoinNotice opt", () => {
     // Channel system record STILL fires.
     const recs = await readChannel("T");
     expect(recs.some((r) => r.kind === "system" && r.message === "joined the team")).toBe(true);
+  });
+});
+
+describe("writeMetaJsonAtomic — canSpawnChildren round-trip", () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "ib-meta-roundtrip-"));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("canSpawnChildren persists and does not clobber other fields", async () => {
+    const original = {
+      id: "agent-abc123",
+      session_id: "sess-1",
+      tmux_session: "tm-1",
+      prompt: "do work",
+      manager: "agent-parent",
+      created: "2026-07-19T00:00:00Z",
+      created_epoch: 1784490000,
+      worktree: true,
+      worker: true,
+      yolo: false,
+      model: "claude-opus-4-8",
+      claude_pid: "12345",
+      agentType: "worker",
+      nickname: "spot",
+    };
+    await writeMetaJsonAtomic(dir, original);
+
+    // Read back, flip canSpawnChildren on (the toggle-ON path), write, read again.
+    const meta1 = (await Bun.file(join(dir, "meta.json")).json()) as Record<string, unknown>;
+    meta1.canSpawnChildren = true;
+    await writeMetaJsonAtomic(dir, meta1);
+
+    const afterOn = (await Bun.file(join(dir, "meta.json")).json()) as Record<string, unknown>;
+    expect(afterOn.canSpawnChildren).toBe(true);
+    // Every other field is preserved byte-for-byte.
+    expect(afterOn.id).toBe("agent-abc123");
+    expect(afterOn.agentType).toBe("worker");
+    expect(afterOn.worker).toBe(true);
+    expect(afterOn.nickname).toBe("spot");
+    expect(afterOn.manager).toBe("agent-parent");
+    expect(afterOn.model).toBe("claude-opus-4-8");
+
+    // Flip it OFF (the toggle-OFF path) — override persists as false, not absent.
+    const meta2 = (await Bun.file(join(dir, "meta.json")).json()) as Record<string, unknown>;
+    meta2.canSpawnChildren = false;
+    await writeMetaJsonAtomic(dir, meta2);
+
+    const afterOff = (await Bun.file(join(dir, "meta.json")).json()) as Record<string, unknown>;
+    expect(afterOff.canSpawnChildren).toBe(false);
+    expect(afterOff.agentType).toBe("worker");
+    expect(afterOff.nickname).toBe("spot");
+  });
+
+  test("absent canSpawnChildren stays absent — no field introduced", async () => {
+    const original = {
+      id: "agent-def456",
+      worker: false,
+      manager: null,
+      agentType: "manager",
+    };
+    await writeMetaJsonAtomic(dir, original);
+    const readBack = (await Bun.file(join(dir, "meta.json")).json()) as Record<string, unknown>;
+    expect("canSpawnChildren" in readBack).toBe(false);
+    expect(readBack.agentType).toBe("manager");
   });
 });

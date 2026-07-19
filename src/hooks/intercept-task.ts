@@ -502,8 +502,27 @@ export async function processTaskIntercept(
       }
     }
     if (meta) {
-      // agentType takes precedence over legacy worker boolean when present
-      if (meta.agentType && typeof meta.agentType === "string") {
+      // Per-agent OVERRIDE takes precedence over EVERYTHING (agentType + worker).
+      // When `canSpawnChildren` is a boolean it was explicitly set (e.g. via the
+      // `ib watch` 'b' dialog toggle): true = allow spawning (skip the deny),
+      // false = deny. When undefined, fall through to the existing
+      // agentType/worker logic below unchanged.
+      if (typeof meta.canSpawnChildren === "boolean") {
+        if (!meta.canSpawnChildren) {
+          return {
+            action: "intercept",
+            output: {
+              hookSpecificOutput: {
+                hookEventName: "PreToolUse",
+                permissionDecision: "deny",
+                permissionDecisionReason: "Workers cannot create tasks or spawn sub-agents. Only manager agents can spawn workers.",
+              },
+            },
+          };
+        }
+        // canSpawnChildren=true — allow Task, fall through to spawn.
+      } else if (meta.agentType && typeof meta.agentType === "string") {
+        // agentType takes precedence over legacy worker boolean when present
         // The system coordinator spawns agents via `ib new-agent --repo <name>`,
         // never via Task/Agent/TaskCreate. Spawning here would resolve repoPath
         // to `~/.itsybitsy/` (not a registered repo) and produce confusing

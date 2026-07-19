@@ -152,6 +152,82 @@ describe("input dialog", () => {
   });
 });
 
+// ─── add-permission dialog ──────────────────────────────
+
+describe("add-permission dialog", () => {
+  function makeAddPermission(opts?: { focused?: "input" | "toggle"; canSpawn?: boolean }) {
+    let submitted: string | undefined;
+    let toggled = 0;
+    const dialog: NonNullable<DialogState> = {
+      type: "add-permission", prompt: "Add permission to agent-x:", value: "",
+      focused: opts?.focused ?? "input",
+      canSpawnChildren: opts?.canSpawn ?? false,
+      onSubmit: (v: string) => { submitted = v; },
+      onToggleSpawn: () => { toggled++; },
+    };
+    const ctx = makeDialogCtx(dialog);
+    return { ctx, dialog, get submitted() { return submitted; }, get toggled() { return toggled; } };
+  }
+
+  test("defaults to input focus and typing appends characters", () => {
+    const { ctx, dialog } = makeAddPermission();
+    expect((dialog as any).focused).toBe("input");
+    handleDialogInput(ctx, "B");
+    handleDialogInput(ctx, "a");
+    handleDialogInput(ctx, "s");
+    handleDialogInput(ctx, "h");
+    expect((dialog as any).value).toBe("Bash");
+  });
+
+  test("backspace removes last character while input focused", () => {
+    const { ctx, dialog } = makeAddPermission();
+    (dialog as any).value = "Bashx";
+    handleDialogInput(ctx, "\x7f");
+    expect((dialog as any).value).toBe("Bash");
+  });
+
+  test("Tab moves focus to toggle and back to input", () => {
+    const { ctx, dialog } = makeAddPermission();
+    handleDialogInput(ctx, "\t");
+    expect((dialog as any).focused).toBe("toggle");
+    handleDialogInput(ctx, "\t");
+    expect((dialog as any).focused).toBe("input");
+  });
+
+  test("Enter while input focused submits the permission (not the toggle)", () => {
+    const t = makeAddPermission();
+    (t.dialog as any).value = "Bash(ls:*)";
+    handleDialogInput(t.ctx, "\r");
+    expect(t.submitted).toBe("Bash(ls:*)");
+    expect(t.toggled).toBe(0);
+  });
+
+  test("Enter while toggle focused invokes onToggleSpawn (not submit)", () => {
+    const t = makeAddPermission({ focused: "toggle" });
+    handleDialogInput(t.ctx, "\r");
+    expect(t.toggled).toBe(1);
+    expect(t.submitted).toBeUndefined();
+  });
+
+  test("Space while toggle focused invokes onToggleSpawn", () => {
+    const t = makeAddPermission({ focused: "toggle" });
+    handleDialogInput(t.ctx, " ");
+    expect(t.toggled).toBe(1);
+  });
+
+  test("typing does not leak into value while toggle focused", () => {
+    const { ctx, dialog } = makeAddPermission({ focused: "toggle" });
+    handleDialogInput(ctx, "z");
+    expect((dialog as any).value).toBe("");
+  });
+
+  test("Escape closes the dialog", () => {
+    const { ctx } = makeAddPermission();
+    handleDialogInput(ctx, "\x1b");
+    expect(ctx.closed).toHaveLength(1);
+  });
+});
+
 // ─── select dialog ──────────────────────────────────────
 
 describe("select dialog", () => {

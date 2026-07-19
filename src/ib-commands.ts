@@ -166,7 +166,7 @@ export function validateAgentName(name: string, repos: RepoEntry[]): string | nu
  * before slow steps (worktree-add) so the dashboard does not flag the in-progress
  * agent dir as orphaned.
  */
-async function writeMetaJsonAtomic(agentDir: string, meta: Record<string, unknown>): Promise<void> {
+export async function writeMetaJsonAtomic(agentDir: string, meta: Record<string, unknown>): Promise<void> {
   const metaPath = join(agentDir, "meta.json");
   const tmpPath = metaPath + ".tmp";
   await Bun.write(tmpPath, JSON.stringify(meta, null, 2) + "\n");

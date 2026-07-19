@@ -80,6 +80,16 @@ export interface AgentMeta {
   summary?: string;
   watchdog_pid?: number;
   agentType?: string;
+  /**
+   * Per-agent OVERRIDE of the agent's ability to spawn sub-agents. When set to
+   * a boolean it takes precedence over the agent's type/worker logic in the
+   * intercept-task hook (true = allow spawning, false = deny). When absent
+   * (the default for every agent), the existing agentType/`worker` resolution
+   * applies unchanged. Toggled at runtime via the `ib watch` 'b' permission
+   * dialog. Distinct from `agentType` — the type stays intact so display and
+   * session-start instructions are unaffected.
+   */
+  canSpawnChildren?: boolean;
   agentIcon?: string;
   /**
    * Optional friendly alias the agent ALSO answers to in name resolution

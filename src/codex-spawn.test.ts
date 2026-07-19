@@ -47,6 +47,23 @@ describe("buildCodexStartContent — launch line", () => {
     expect(content).not.toContain("export http_proxy=");
   });
 
+  test("disabled sandbox start output is byte-identical for omitted, undefined, and explicit false", () => {
+    const omitted = buildCodexStartContent(baseInput());
+    const explicitUndefined = buildCodexStartContent({ ...baseInput(), sandboxEnabled: undefined });
+    const explicitFalse = buildCodexStartContent({
+      ...baseInput(),
+      sandboxEnabled: false,
+      sandboxScriptPreamble: "\nexport http_proxy=SHOULD_NOT_APPEAR\n",
+      sandboxExecPrefix: "sandbox-exec SHOULD_NOT_APPEAR",
+    });
+    expect(explicitUndefined).toBe(omitted);
+    expect(explicitFalse).toBe(omitted);
+    expect(omitted).toContain("-s workspace-write");
+    expect(omitted).not.toContain("sandbox-exec");
+    expect(omitted).not.toContain("danger-full-access");
+    expect(omitted).not.toContain("SHOULD_NOT_APPEAR");
+  });
+
   test("uses our sandbox wrapper, proxy exports, and danger-full-access on both launch arms when enabled", () => {
     const content = buildCodexStartContent({
       ...baseInput(),
@@ -308,6 +325,23 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     expect(content).toContain("--dangerously-bypass-hook-trust");
     expect(content).not.toContain("sandbox-exec");
     expect(content).not.toContain("export http_proxy=");
+  });
+
+  test("disabled sandbox resume output is byte-identical for omitted, undefined, and explicit false", () => {
+    const omitted = buildCodexResumeContent(baseInput());
+    const explicitUndefined = buildCodexResumeContent({ ...baseInput(), sandboxEnabled: undefined });
+    const explicitFalse = buildCodexResumeContent({
+      ...baseInput(),
+      sandboxEnabled: false,
+      sandboxScriptPreamble: "\nexport http_proxy=SHOULD_NOT_APPEAR\n",
+      sandboxExecPrefix: "sandbox-exec SHOULD_NOT_APPEAR",
+    });
+    expect(explicitUndefined).toBe(omitted);
+    expect(explicitFalse).toBe(omitted);
+    expect(omitted).toContain("-s workspace-write");
+    expect(omitted).not.toContain("sandbox-exec");
+    expect(omitted).not.toContain("danger-full-access");
+    expect(omitted).not.toContain("SHOULD_NOT_APPEAR");
   });
 
   test("uses our sandbox wrapper, proxy exports, and danger-full-access on both resume arms when enabled", () => {

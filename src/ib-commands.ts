@@ -1560,6 +1560,12 @@ export async function resumeAgent(
     // Build exit script path
     const absExitScript = join(agentDir, "exit-check.sh");
     const resumeScript = join(agentDir, "resume.sh");
+    const sandboxResumePreamble = preparedResumeSandbox
+      ? sandboxProxyScriptPreamble(agent.id, agentDir, preparedResumeSandbox.proxyPort)
+      : "";
+    const sandboxResumeLaunchPrefix = preparedResumeSandbox
+      ? `${sandboxExecShellPrefix(preparedResumeSandbox)} `
+      : "";
 
     if (isCodexBackedCli(resumeCli)) {
       // ── Codex resume branch (SPEC §5.8 + §6 Phase 7) ─────────────────────────
@@ -1687,12 +1693,8 @@ export async function resumeAgent(
         extraWritableRoots: codexExtraWritableRoots,
         fugu: resumeCli === "fugu",
         sandboxEnabled: preparedResumeSandbox !== null,
-        sandboxScriptPreamble: preparedResumeSandbox
-          ? sandboxProxyScriptPreamble(agent.id, agentDir, preparedResumeSandbox.proxyPort)
-          : undefined,
-        sandboxExecPrefix: preparedResumeSandbox
-          ? sandboxExecShellPrefix(preparedResumeSandbox)
-          : undefined,
+        sandboxScriptPreamble: preparedResumeSandbox ? sandboxResumePreamble : undefined,
+        sandboxExecPrefix: preparedResumeSandbox ? sandboxResumeLaunchPrefix.trimEnd() : undefined,
       });
       await Bun.write(resumeScript, codexResumeContent);
       await chmod(resumeScript, 0o755);
@@ -1873,12 +1875,6 @@ export async function resumeAgent(
       const qMetaJson = shellQuote(join(agentDir, "meta.json"));
       const qAgentLog = shellQuote(join(agentDir, "agent.log"));
       const qResumeStderrLog = shellQuote(join(agentDir, "claude.stderr.log"));
-      const sandboxResumePreamble = preparedResumeSandbox
-        ? sandboxProxyScriptPreamble(agent.id, agentDir, preparedResumeSandbox.proxyPort)
-        : "";
-      const sandboxResumeLaunchPrefix = preparedResumeSandbox
-        ? `${sandboxExecShellPrefix(preparedResumeSandbox)} `
-        : "";
       const resumeContent = `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
@@ -5701,12 +5697,8 @@ echo ""
       absStderrLog: join(agentDir, "claude.stderr.log"),
       extraWritableRoots: codexExtraWritableRoots,
       sandboxEnabled: preparedSandbox !== null,
-      sandboxScriptPreamble: preparedSandbox
-        ? sandboxProxyScriptPreamble(id, agentDir, preparedSandbox.proxyPort)
-        : undefined,
-      sandboxExecPrefix: preparedSandbox
-        ? sandboxExecShellPrefix(preparedSandbox)
-        : undefined,
+      sandboxScriptPreamble: preparedSandbox ? sandboxStartPreamble : undefined,
+      sandboxExecPrefix: preparedSandbox ? sandboxLaunchPrefix.trimEnd() : undefined,
     });
   } else if (agentCli === "agy") {
     // Antigravity CLI (`agy`) spawn branch (SPEC-ANTIGRAVITY-CLI.md §4.5). The

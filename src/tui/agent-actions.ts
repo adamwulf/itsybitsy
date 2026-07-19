@@ -17,6 +17,7 @@ import {
   installSafetyHooks, uninstallSafetyHooks,
   installInterceptHook, uninstallInterceptHook,
   teamCreate, teamAdd, teamDelete, teamRemove,
+  writeMetaJsonAtomic,
 } from "../ib-commands";
 import { sanitizeAgentNameInput } from "../validation";
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
@@ -26,7 +27,7 @@ import { parseModel } from "../agent-cli";
 import type { AgentCli } from "../agent-cli";
 import { openInGhostty, openPathInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
-import { listSpawnableTypeNamesSync } from "../agent-types";
+import { listSpawnableTypeNamesSync, loadAgentType } from "../agent-types";
 import { resolveDefaultAgentType } from "./default-agent-type";
 import type { DialogState, SetupItem, ConfigDialogItem } from "./dialog-handler";
 import { TextBuffer } from "./text-buffer";
@@ -1366,6 +1367,34 @@ function handleSendToRepoCoordinator(ctx: ActionCtx, agent: Agent) {
 }
 
 /** 'b' — add an entry to the selected agent's settings.local.json allow list. */
+/**
+ * Resolve an agent's CURRENT effective spawn capability, mirroring the
+ * precedence the intercept-task hook enforces:
+ *   1. `meta.canSpawnChildren` per-agent override (when a boolean).
+ *   2. otherwise the agent type's `canSpawnChildren`.
+ *   3. otherwise the legacy `!meta.worker` fallback.
+ * Kept in one place so the 'b' dialog's toggle label matches what the hook does.
+ */
+export async function effectiveSpawnCapability(agent: Agent): Promise<boolean> {
+  const meta = agent.meta;
+  if (typeof meta.canSpawnChildren === "boolean") return meta.canSpawnChildren;
+  if (meta.agentType) {
+    try {
+      const type = await loadAgentType(meta.agentType);
+      return type.canSpawnChildren;
+    } catch {
+      // Unknown type — fall through to the worker fallback.
+    }
+  }
+  return !meta.worker;
+}
+
+/** Physical agent dir backing an agent record (archived agents are blocked before this). */
+function agentDirFor(agent: Agent): string {
+  const dir = agent.archived ? "archive" : "agents";
+  return join(agent.repoPath, ".ittybitty", dir, agent.id);
+}
+
 export function handleAddPermission(ctx: ActionCtx) {
   if (ctx.agentTree.isSystemCoordinatorSelected) return;
 
@@ -1389,39 +1418,90 @@ export function handleAddPermission(ctx: ActionCtx) {
   }
   const agent = target;
 
-  ctx.showDialog({
-    type: "input",
-    prompt: `Add permission to ${agent.id}:`,
-    value: "",
-    onSubmit: (value: string) => {
-      ctx.closeDialog();
-      const entry = value.trim();
-      if (!entry) { ctx.setNotice("Permission add cancelled", "info"); return; }
-      if (!isValidToolList(entry)) {
-        ctx.setNotice("Invalid permission entry — disallowed characters", "error");
-        return;
+  const onSubmit = (value: string) => {
+    ctx.closeDialog();
+    const entry = value.trim();
+    if (!entry) { ctx.setNotice("Permission add cancelled", "info"); return; }
+    if (!isValidToolList(entry)) {
+      ctx.setNotice("Invalid permission entry — disallowed characters", "error");
+      return;
+    }
+    const settingsPath = agentSettingsLocalPath(agent);
+    addPermissionToSettings(settingsPath, entry).then(async (result) => {
+      if (result.added) {
+        ctx.setNotice(`Added ${entry} to ${agent.id} allow list`, "info");
+        const sendResult = await sendMessage(
+          agent,
+          `Permission to '${entry}' has been granted. You may retry the action that was previously denied.`,
+          { cwd: "/" },
+        );
+        if (!sendResult.ok) {
+          ctx.setNotice(`Added ${entry}, but notify failed: ${sendResult.stderr || sendResult.stdout}`, "error");
+        }
+      } else if (result.reason === "duplicate") {
+        ctx.setNotice("Already in allow list", "error");
+      } else {
+        ctx.setNotice(`Failed: ${result.message}`, "error");
       }
-      const settingsPath = agentSettingsLocalPath(agent);
-      addPermissionToSettings(settingsPath, entry).then(async (result) => {
-        if (result.added) {
-          ctx.setNotice(`Added ${entry} to ${agent.id} allow list`, "info");
+    }).catch((err) => {
+      ctx.setNotice(`Failed: ${(err as Error).message}`, "error");
+    });
+  };
+
+  // Compute the target's current effective spawn capability for the toggle label,
+  // then open the dialog with the text input focused by default.
+  effectiveSpawnCapability(agent).then((canSpawn) => {
+    const onToggleSpawn = () => {
+      // Flip the current effective capability and persist as a per-agent override.
+      const next = !canSpawn;
+      ctx.closeDialog();
+
+      const agentDir = agentDirFor(agent);
+      (async () => {
+        try {
+          const metaFile = Bun.file(join(agentDir, "meta.json"));
+          if (!(await metaFile.exists())) {
+            ctx.setNotice(`Failed: meta.json missing for ${agent.id}`, "error");
+            return;
+          }
+          const meta = (await metaFile.json()) as Record<string, unknown>;
+          meta.canSpawnChildren = next;
+          await writeMetaJsonAtomic(agentDir, meta);
+          // Reflect the change in the in-memory record so the dashboard is current.
+          agent.meta.canSpawnChildren = next;
+          ctx.setNotice(
+            next
+              ? `Enabled sub-agent spawning for ${agent.id}`
+              : `Disabled sub-agent spawning for ${agent.id}`,
+            "info",
+          );
           const sendResult = await sendMessage(
             agent,
-            `Permission to '${entry}' has been granted. You may retry the action that was previously denied.`,
+            next
+              ? "You can now spawn sub-agents (`ib new-agent --type worker \"task\"`)."
+              : "Your ability to spawn sub-agents has been revoked. Report back to your manager instead.",
             { cwd: "/" },
           );
           if (!sendResult.ok) {
-            ctx.setNotice(`Added ${entry}, but notify failed: ${sendResult.stderr || sendResult.stdout}`, "error");
+            ctx.setNotice(`Toggled spawn for ${agent.id}, but notify failed: ${sendResult.stderr || sendResult.stdout}`, "error");
           }
-        } else if (result.reason === "duplicate") {
-          ctx.setNotice("Already in allow list", "error");
-        } else {
-          ctx.setNotice(`Failed: ${result.message}`, "error");
+        } catch (err) {
+          ctx.setNotice(`Failed: ${(err as Error).message}`, "error");
         }
-      }).catch((err) => {
-        ctx.setNotice(`Failed: ${(err as Error).message}`, "error");
-      });
-    },
+      })();
+    };
+
+    ctx.showDialog({
+      type: "add-permission",
+      prompt: `Add permission to ${agent.id}:`,
+      value: "",
+      focused: "input",
+      canSpawnChildren: canSpawn,
+      onSubmit,
+      onToggleSpawn,
+    });
+  }).catch((err) => {
+    ctx.setNotice(`Failed: ${(err as Error).message}`, "error");
   });
 }
 
@@ -1798,7 +1878,7 @@ export function handleHelp(ctx: ActionCtx) {
       row("E", "cross-repo send"),
       row("T", "create team"),
       row("t", "add agent to team"),
-      row("b", "add permission"),
+      row("b", "add permission / toggle sub-agent spawning (Tab)"),
       row("m", "merge"),
       row("x / !", "retire / nuke (all if none selected)"),
       row("R", "resume"),

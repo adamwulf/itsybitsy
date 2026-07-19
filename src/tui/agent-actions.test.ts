@@ -17,6 +17,7 @@ import {
   handleOpenDiffTool, handleOpenDiffToolVsManager, getActiveDiffProc, setActiveDiffProc, killActiveDiffProc,
   getDiffToolLaunching, setDiffToolLaunching,
   handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
+  effectiveSpawnCapability,
   getCoordinatorSpawnsInFlight, clearCoordinatorSpawnsInFlight,
   handleCreateTeam, handleAddAgentToTeam, handleDisbandTeam, handleManageTeam,
   handleFolderBrowser,
@@ -1218,13 +1219,30 @@ describe("handleAddPermission", () => {
     expect(dialogs).toHaveLength(0);
   });
 
-  test("shows input dialog for selected agent", () => {
+  // The dialog opens after `effectiveSpawnCapability` resolves, so tests that
+  // inspect the dialog must yield a macrotask first.
+  const nextTick = () => new Promise<void>((r) => setTimeout(r, 0));
+
+  test("shows add-permission dialog for selected agent, input focused by default", async () => {
     const agent = makeAgent({ id: "agent-1" });
     const { ctx, dialogs } = makeMockCtx({ agent });
     handleAddPermission(ctx);
+    await nextTick();
     expect(dialogs).toHaveLength(1);
-    const d = assertDialog(dialogs[0]!, "input");
+    const d = assertDialog(dialogs[0]!, "add-permission");
     expect(d.prompt).toContain("agent-1");
+    expect(d.focused).toBe("input");
+    // Default makeAgent: worker=false, no agentType → effective spawn = true.
+    expect(d.canSpawnChildren).toBe(true);
+  });
+
+  test("worker override false reflects in the toggle label state", async () => {
+    const agent = makeAgent({ id: "agent-1", meta: { canSpawnChildren: false } as any });
+    const { ctx, dialogs } = makeMockCtx({ agent });
+    handleAddPermission(ctx);
+    await nextTick();
+    const d = assertDialog(dialogs[0]!, "add-permission");
+    expect(d.canSpawnChildren).toBe(false);
   });
 
   test("archived agent gets notice", () => {
@@ -1242,32 +1260,135 @@ describe("handleAddPermission", () => {
     expect(notices).toEqual(["No coordinator for this repo"]);
   });
 
-  test("repo header with coordinator routes to coordinator", () => {
+  test("repo header with coordinator routes to coordinator", async () => {
     const coordAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
     const { ctx, dialogs } = makeMockCtx({ repoHeader: "my-repo" });
     ctx.rightPane.repoCoordinatorAgent = coordAgent;
     handleAddPermission(ctx);
+    await nextTick();
     expect(dialogs).toHaveLength(1);
-    const d = assertDialog(dialogs[0]!, "input");
+    const d = assertDialog(dialogs[0]!, "add-permission");
     expect(d.prompt).toContain("coord-1");
   });
 
-  test("empty submit cancels", () => {
+  test("empty submit cancels", async () => {
     const agent = makeAgent({ id: "agent-1" });
     const { ctx, dialogs, notices } = makeMockCtx({ agent });
     handleAddPermission(ctx);
-    const d = assertDialog(dialogs[0]!, "input");
+    await nextTick();
+    const d = assertDialog(dialogs[0]!, "add-permission");
     d.onSubmit("   ");
     expect(notices).toEqual(["Permission add cancelled"]);
   });
 
-  test("invalid characters rejected", () => {
+  test("invalid characters rejected", async () => {
     const agent = makeAgent({ id: "agent-1" });
     const { ctx, dialogs, notices } = makeMockCtx({ agent });
     handleAddPermission(ctx);
-    const d = assertDialog(dialogs[0]!, "input");
+    await nextTick();
+    const d = assertDialog(dialogs[0]!, "add-permission");
     d.onSubmit("Bash(foo; rm -rf /)");
     expect(notices.some((n) => n.includes("Invalid permission"))).toBe(true);
+  });
+});
+
+describe("effectiveSpawnCapability", () => {
+  test("per-agent canSpawnChildren override wins over type/worker (true)", async () => {
+    const agent = makeAgent({ id: "agent-1", meta: { worker: true, agentType: "worker", canSpawnChildren: true } as any });
+    expect(await effectiveSpawnCapability(agent)).toBe(true);
+  });
+
+  test("per-agent canSpawnChildren override wins over type/worker (false)", async () => {
+    const agent = makeAgent({ id: "agent-1", meta: { worker: false, agentType: "manager", canSpawnChildren: false } as any });
+    expect(await effectiveSpawnCapability(agent)).toBe(false);
+  });
+
+  test("falls back to agentType when no override (worker type → false)", async () => {
+    const agent = makeAgent({ id: "agent-1", meta: { worker: false, agentType: "worker" } as any });
+    expect(await effectiveSpawnCapability(agent)).toBe(false);
+  });
+
+  test("falls back to agentType when no override (manager type → true)", async () => {
+    const agent = makeAgent({ id: "agent-1", meta: { worker: true, agentType: "manager" } as any });
+    expect(await effectiveSpawnCapability(agent)).toBe(true);
+  });
+
+  test("falls back to !worker when no override and no agentType", async () => {
+    const legacyWorker = makeAgent({ id: "agent-1", meta: { worker: true } as any });
+    const legacyManager = makeAgent({ id: "agent-2", meta: { worker: false } as any });
+    expect(await effectiveSpawnCapability(legacyWorker)).toBe(false);
+    expect(await effectiveSpawnCapability(legacyManager)).toBe(true);
+  });
+});
+
+describe("handleAddPermission — onToggleSpawn", () => {
+  const nextTick = () => new Promise<void>((r) => setTimeout(r, 0));
+
+  async function readMeta(repoPath: string, id: string): Promise<Record<string, unknown>> {
+    return (await Bun.file(join(repoPath, ".ittybitty", "agents", id, "meta.json")).json()) as Record<string, unknown>;
+  }
+
+  test("toggle ON writes canSpawnChildren=true, preserves other fields, notifies agent", async () => {
+    const id = "agent-toggle-on";
+    const agentDir = join(sendRepoDir, ".ittybitty", "agents", id);
+    await mkdir(agentDir, { recursive: true });
+    // A worker agent whose effective spawn = false (worker type).
+    const original = {
+      id, worker: true, manager: "agent-parent", agentType: "worker",
+      nickname: "spot", model: "claude:sonnet",
+    };
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(original, null, 2));
+
+    const agent = makeAgent({ id, repoPath: sendRepoDir, meta: original as any });
+    const { ctx, dialogs, notices } = makeMockCtx({ agent });
+    handleAddPermission(ctx);
+    await nextTick();
+    const d = assertDialog(dialogs[0]!, "add-permission");
+    expect(d.canSpawnChildren).toBe(false); // worker → cannot spawn
+    d.onToggleSpawn();
+
+    // Poll until the write lands (meta read + write + outbox write are async).
+    let meta: Record<string, unknown> = {};
+    for (let i = 0; i < 50 && meta.canSpawnChildren !== true; i++) {
+      await nextTick();
+      meta = await readMeta(sendRepoDir, id);
+    }
+    expect(meta.canSpawnChildren).toBe(true);
+    // Other fields preserved.
+    expect(meta.agentType).toBe("worker");
+    expect(meta.worker).toBe(true);
+    expect(meta.nickname).toBe("spot");
+    expect(meta.manager).toBe("agent-parent");
+    // In-memory record updated.
+    expect(agent.meta.canSpawnChildren).toBe(true);
+    // A success notice fired (either enabled or notify-failed, both mention the id).
+    expect(notices.some((n) => n.includes(id))).toBe(true);
+  });
+
+  test("toggle OFF writes canSpawnChildren=false for a spawn-capable agent", async () => {
+    const id = "agent-toggle-off";
+    const agentDir = join(sendRepoDir, ".ittybitty", "agents", id);
+    await mkdir(agentDir, { recursive: true });
+    // A manager agent whose effective spawn = true.
+    const original = { id, worker: false, manager: null, agentType: "manager" };
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(original, null, 2));
+
+    const agent = makeAgent({ id, repoPath: sendRepoDir, meta: original as any });
+    const { ctx, dialogs } = makeMockCtx({ agent });
+    handleAddPermission(ctx);
+    await nextTick();
+    const d = assertDialog(dialogs[0]!, "add-permission");
+    expect(d.canSpawnChildren).toBe(true); // manager → can spawn
+    d.onToggleSpawn();
+
+    let meta: Record<string, unknown> = { canSpawnChildren: true };
+    for (let i = 0; i < 50 && meta.canSpawnChildren !== false; i++) {
+      await nextTick();
+      meta = await readMeta(sendRepoDir, id);
+    }
+    expect(meta.canSpawnChildren).toBe(false);
+    expect(meta.agentType).toBe("manager");
+    expect(agent.meta.canSpawnChildren).toBe(false);
   });
 });
 

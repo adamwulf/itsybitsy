@@ -166,7 +166,7 @@ export function validateAgentName(name: string, repos: RepoEntry[]): string | nu
  * before slow steps (worktree-add) so the dashboard does not flag the in-progress
  * agent dir as orphaned.
  */
-async function writeMetaJsonAtomic(agentDir: string, meta: Record<string, unknown>): Promise<void> {
+export async function writeMetaJsonAtomic(agentDir: string, meta: Record<string, unknown>): Promise<void> {
   const metaPath = join(agentDir, "meta.json");
   const tmpPath = metaPath + ".tmp";
   await Bun.write(tmpPath, JSON.stringify(meta, null, 2) + "\n");
@@ -2091,8 +2091,10 @@ export async function reassignAgent(agent: Agent, newManager: string | null): Pr
         return { ok: false, exitCode: 1, stdout: "", stderr: `New manager '${newManager}' not found` };
       }
       const parentMeta = await file.json();
-      // Validate not a worker
-      if (parentMeta.worker) {
+      // Validate not a worker. A per-agent `canSpawnChildren: true` override
+      // lets a worker be a reassign target — mirror the intercept-task hook,
+      // which checks the override FIRST. Absent/false = today's behavior.
+      if (parentMeta.worker && parentMeta.canSpawnChildren !== true) {
         return { ok: false, exitCode: 1, stdout: "", stderr: `Cannot reassign to worker agent '${newManager}'` };
       }
     } catch {
@@ -4083,10 +4085,12 @@ export async function newAgent(
     }
     manager = resolveResult.resolved;
 
-    // Check manager is not a worker
+    // Check manager is not a worker. A per-agent `canSpawnChildren: true`
+    // override lets a worker manage sub-agents — mirror the intercept-task
+    // hook, which checks the override FIRST. Absent/false = today's behavior.
     try {
       const managerMeta = await Bun.file(join(agentsDir, manager, "meta.json")).json();
-      if (managerMeta.worker === true) {
+      if (managerMeta.worker === true && managerMeta.canSpawnChildren !== true) {
         return { ok: false, exitCode: 1, stdout: "", stderr: `Error: '${manager}' is a worker agent and cannot manage sub-agents` };
       }
     } catch { /* ignore */ }

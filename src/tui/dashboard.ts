@@ -480,6 +480,26 @@ class DialogOverlayComponent implements Component {
           contentLines: [truncateToWidth(`> ${dialog.value}█`, innerWidth, "")],
         };
       }
+      case "add-permission": {
+        const inputLine = dialog.focused === "input"
+          ? truncateToWidth(`> ${dialog.value}█`, innerWidth, "")
+          : truncateToWidth(`> ${dialog.value}`, innerWidth, "");
+        const toggleText = dialog.canSpawnChildren
+          ? "[ Turn OFF subagent spawning ]"
+          : "[ Turn ON subagent spawning ]";
+        const toggleBtn = dialog.focused === "toggle"
+          ? `${BOLD}${GREEN}${toggleText}${RESET}`
+          : toggleText;
+        return {
+          title: dialog.prompt,
+          contentLines: [
+            inputLine,
+            `${DIM}(Tab to toggle spawn permission)${RESET}`,
+            "",
+            `  ${toggleBtn}`,
+          ],
+        };
+      }
       case "select": {
         const lines: string[] = [`${DIM}(j/k, Enter, Esc)${RESET}`];
         for (let i = 0; i < dialog.items.length; i++) {

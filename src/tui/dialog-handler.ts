@@ -22,6 +22,20 @@ type DialogCommon = { width?: number };
 export type DialogState =
   | ({ type: "confirm"; prompt: string; confirmLabel: string; focusedButton: "confirm" | "cancel"; confirmColor?: string; onYes: () => void } & DialogCommon)
   | ({ type: "input"; prompt: string; value: string; onSubmit: (value: string) => void; sanitize?: (text: string) => string } & DialogCommon)
+  | ({
+      type: "add-permission";
+      prompt: string;
+      /** The permission-entry text being edited (same role as the plain input value). */
+      value: string;
+      /** Which control has focus. Defaults to "input" so typing works immediately. */
+      focused: "input" | "toggle";
+      /** Target agent's CURRENT effective spawn capability — drives the toggle button label. */
+      canSpawnChildren: boolean;
+      /** Enter while the input is focused: add the permission (mirrors the plain "input" dialog). */
+      onSubmit: (value: string) => void;
+      /** Enter/Space while the toggle button is focused: flip the agent's spawn capability. */
+      onToggleSpawn: () => void;
+    } & DialogCommon)
   | ({ type: "select"; prompt: string; items: string[]; selectedIndex: number; onSelect: (index: number) => void } & DialogCommon)
   | ({
       type: "multi-select";
@@ -224,6 +238,45 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
         pasteApply(pasteText);
       } else if (data.length === 1 && data >= " ") {
         dialog.value += sanitize ? sanitize(data) : data;
+        ctx.tui?.requestRender();
+      }
+    }
+    return true;
+  }
+
+  if (dialog.type === "add-permission") {
+    // Tab (or shift-Tab) moves focus between the text input and the toggle button.
+    if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab"))) {
+      dialog.focused = dialog.focused === "input" ? "toggle" : "input";
+      ctx.tui?.requestRender();
+      return true;
+    }
+    if (dialog.focused === "toggle") {
+      // Enter or Space activates the toggle button.
+      if (matchesKey(data, Key.enter) || data === " ") {
+        dialog.onToggleSpawn();
+      }
+      return true;
+    }
+    // focused === "input": behave exactly like the plain "input" dialog.
+    if (matchesKey(data, Key.enter)) {
+      dialog.onSubmit(dialog.value);
+    } else if (matchesKey(data, Key.alt("backspace"))) {
+      dialog.value = deleteWord(dialog.value);
+      ctx.tui?.requestRender();
+    } else if (matchesKey(data, Key.backspace) || data === "\x7f") {
+      dialog.value = dialog.value.slice(0, -1);
+      ctx.tui?.requestRender();
+    } else {
+      const pasteApply = (text: string) => {
+        dialog.value += sanitizePasteForSingleLine(text);
+        ctx.tui?.requestRender();
+      };
+      const pasteText = resolvePasteText(data, pasteApply);
+      if (pasteText !== null) {
+        pasteApply(pasteText);
+      } else if (data.length === 1 && data >= " ") {
+        dialog.value += data;
         ctx.tui?.requestRender();
       }
     }

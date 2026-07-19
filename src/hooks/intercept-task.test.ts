@@ -1312,6 +1312,160 @@ describe("agent types", () => {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });
+
+  test("per-agent canSpawnChildren=true override allows spawning even for a worker type", async () => {
+    // meta.canSpawnChildren=true must win over agentType "worker" (canSpawnChildren=false).
+    const fs = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-override-allow-"));
+    try {
+      const agentId = "agent-override-allow";
+      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      await fs.mkdir(join(agentDir, "repo"), { recursive: true });
+      await Bun.write(
+        join(agentDir, "meta.json"),
+        JSON.stringify({
+          id: agentId,
+          worker: true,               // legacy says worker
+          manager: null,
+          agentType: "worker",        // type says canSpawnChildren=false
+          canSpawnChildren: true,     // OVERRIDE says allow
+        })
+      );
+
+      const cwd = join(agentDir, "repo");
+      const result = await processTaskIntercept(
+        {
+          tool_name: "Task",
+          tool_input: { prompt: "do stuff", description: "stuff" },
+          cwd,
+        },
+        {
+          spawnAgent: async () => ({
+            ok: true,
+            stdout: "Created agent-ab12cd34",
+            stderr: "",
+          }),
+        }
+      );
+      // Override allow → hook takes over the spawn (intercept), not a deny.
+      expect(result.action).toBe("intercept");
+      expect(result.spawnedAgentId).toBe("agent-ab12cd34");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("per-agent canSpawnChildren=false override denies spawning even for a manager type", async () => {
+    // meta.canSpawnChildren=false must win over agentType "manager" (canSpawnChildren=true).
+    const fs = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-override-deny-"));
+    try {
+      const agentId = "agent-override-deny";
+      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      await fs.mkdir(join(agentDir, "repo"), { recursive: true });
+      await Bun.write(
+        join(agentDir, "meta.json"),
+        JSON.stringify({
+          id: agentId,
+          worker: false,              // legacy says non-worker
+          manager: null,
+          agentType: "manager",       // type says canSpawnChildren=true
+          canSpawnChildren: false,    // OVERRIDE says deny
+        })
+      );
+
+      const cwd = join(agentDir, "repo");
+      const result = await processTaskIntercept({
+        tool_name: "Task",
+        tool_input: { prompt: "do stuff", description: "stuff" },
+        cwd,
+      });
+      expect(result.action).toBe("intercept");
+      expect((result.output as any).hookSpecificOutput.permissionDecision).toBe("deny");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("absent canSpawnChildren override falls through to agentType (worker denied)", async () => {
+    // Undefined override must change nothing: worker type still denies.
+    const fs = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-override-absent-"));
+    try {
+      const agentId = "agent-override-absent";
+      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      await fs.mkdir(join(agentDir, "repo"), { recursive: true });
+      await Bun.write(
+        join(agentDir, "meta.json"),
+        JSON.stringify({
+          id: agentId,
+          worker: false,
+          manager: null,
+          agentType: "worker",        // canSpawnChildren=false, no override present
+        })
+      );
+
+      const cwd = join(agentDir, "repo");
+      const result = await processTaskIntercept({
+        tool_name: "Task",
+        tool_input: { prompt: "do stuff", description: "stuff" },
+        cwd,
+      });
+      // No override → agentType worker logic applies → deny (byte-for-byte prior behavior).
+      expect(result.action).toBe("intercept");
+      expect((result.output as any).hookSpecificOutput.permissionDecision).toBe("deny");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("per-agent override allows spawning for a legacy worker with no agentType", async () => {
+    // meta.canSpawnChildren=true must win over legacy meta.worker=true.
+    const fs = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-override-legacy-"));
+    try {
+      const agentId = "agent-override-legacy";
+      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      await fs.mkdir(join(agentDir, "repo"), { recursive: true });
+      await Bun.write(
+        join(agentDir, "meta.json"),
+        JSON.stringify({
+          id: agentId,
+          worker: true,               // legacy worker
+          manager: "agent-parent",
+          canSpawnChildren: true,     // OVERRIDE says allow (no agentType field)
+        })
+      );
+
+      const cwd = join(agentDir, "repo");
+      const result = await processTaskIntercept(
+        {
+          tool_name: "Task",
+          tool_input: { prompt: "do stuff", description: "stuff" },
+          cwd,
+        },
+        {
+          spawnAgent: async () => ({
+            ok: true,
+            stdout: "Created agent-ef56ab78",
+            stderr: "",
+          }),
+        }
+      );
+      expect(result.action).toBe("intercept");
+      expect(result.spawnedAgentId).toBe("agent-ef56ab78");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("@system caller", () => {

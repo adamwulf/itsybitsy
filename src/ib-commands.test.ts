@@ -75,6 +75,7 @@ import {
   setWatchdogSpawnFn,
   resetWatchdogSpawnFn,
   teamAdd,
+  writeMetaJsonAtomic,
 } from "./ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "./agent-lifecycle";
 import { setUserConfigPath, resetUserConfigPath } from "./config";
@@ -4450,6 +4451,58 @@ describe("newAgent (native)", () => {
     expect(result.ok).toBe(true);
   });
 
+  test("worker manager with canSpawnChildren:true override is NOT rejected (toggle-ON works end-to-end)", async () => {
+    // A worker toggled ON via the 'b' dialog (meta.canSpawnChildren=true) must
+    // pass manager-validation so it can actually spawn — the hook allows the
+    // Task, and this gate must agree with the override.
+    const mgrDir = join(agentsDir, "agent-worker-on");
+    await mkdir(mgrDir, { recursive: true });
+    await Bun.write(
+      join(mgrDir, "meta.json"),
+      JSON.stringify({ id: "agent-worker-on", worker: true, canSpawnChildren: true }),
+    );
+    // Clean parent worktree so the spawn proceeds past validation + dirty gate.
+    await mkdir(join(mgrDir, "repo"), { recursive: true });
+
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await callNewAgent("sub-task", { name: "worker-on-child", manager: "agent-worker-on" });
+    // The key assertion: NOT rejected with the worker-manager error.
+    expect(result.stderr).not.toContain("worker agent and cannot manage sub-agents");
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("worker-on-child");
+  });
+
+  test("worker manager WITHOUT override is still rejected (byte-for-byte prior behavior)", async () => {
+    const mgrDir = join(agentsDir, "agent-worker-off");
+    await mkdir(mgrDir, { recursive: true });
+    // No canSpawnChildren field — legacy worker.
+    await Bun.write(
+      join(mgrDir, "meta.json"),
+      JSON.stringify({ id: "agent-worker-off", worker: true }),
+    );
+    await mkdir(join(mgrDir, "repo"), { recursive: true });
+
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await callNewAgent("sub-task", { name: "worker-off-child", manager: "agent-worker-off" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("is a worker agent and cannot manage sub-agents");
+  });
+
+  test("worker manager with canSpawnChildren:false override is still rejected", async () => {
+    const mgrDir = join(agentsDir, "agent-worker-false");
+    await mkdir(mgrDir, { recursive: true });
+    await Bun.write(
+      join(mgrDir, "meta.json"),
+      JSON.stringify({ id: "agent-worker-false", worker: true, canSpawnChildren: false }),
+    );
+    await mkdir(join(mgrDir, "repo"), { recursive: true });
+
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await callNewAgent("sub-task", { name: "worker-false-child", manager: "agent-worker-false" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("is a worker agent and cannot manage sub-agents");
+  });
+
   test("creates agent with correct ID format when no name given", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     const result = await callNewAgent("do something");
@@ -6760,6 +6813,25 @@ describe("reassignAgent (native)", () => {
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("worker");
+  });
+
+  test("worker-as-parent with canSpawnChildren:true override is accepted", async () => {
+    // A worker toggled ON can also be a reassign target — the override wins
+    // over the worker check, mirroring newAgent's manager-validation.
+    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const agentDir = join(agentsDir, "agent-abc");
+    const workerDir = join(agentsDir, "agent-worker-on");
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(workerDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc", manager: "", tmux_session: "t1" }));
+    await Bun.write(join(workerDir, "meta.json"), JSON.stringify({ id: "agent-worker-on", worker: true, canSpawnChildren: true, tmux_session: "t2" }));
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await reassignAgent(agent, "agent-worker-on");
+
+    expect(result.ok).toBe(true);
+    const updatedMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(updatedMeta.manager).toBe("agent-worker-on");
   });
 
   test("new manager not found", async () => {
@@ -10298,5 +10370,75 @@ describe("teamAdd suppressJoinNotice opt", () => {
     // Channel system record STILL fires.
     const recs = await readChannel("T");
     expect(recs.some((r) => r.kind === "system" && r.message === "joined the team")).toBe(true);
+  });
+});
+
+describe("writeMetaJsonAtomic — canSpawnChildren round-trip", () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "ib-meta-roundtrip-"));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("canSpawnChildren persists and does not clobber other fields", async () => {
+    const original = {
+      id: "agent-abc123",
+      session_id: "sess-1",
+      tmux_session: "tm-1",
+      prompt: "do work",
+      manager: "agent-parent",
+      created: "2026-07-19T00:00:00Z",
+      created_epoch: 1784490000,
+      worktree: true,
+      worker: true,
+      yolo: false,
+      model: "claude-opus-4-8",
+      claude_pid: "12345",
+      agentType: "worker",
+      nickname: "spot",
+    };
+    await writeMetaJsonAtomic(dir, original);
+
+    // Read back, flip canSpawnChildren on (the toggle-ON path), write, read again.
+    const meta1 = (await Bun.file(join(dir, "meta.json")).json()) as Record<string, unknown>;
+    meta1.canSpawnChildren = true;
+    await writeMetaJsonAtomic(dir, meta1);
+
+    const afterOn = (await Bun.file(join(dir, "meta.json")).json()) as Record<string, unknown>;
+    expect(afterOn.canSpawnChildren).toBe(true);
+    // Every other field is preserved byte-for-byte.
+    expect(afterOn.id).toBe("agent-abc123");
+    expect(afterOn.agentType).toBe("worker");
+    expect(afterOn.worker).toBe(true);
+    expect(afterOn.nickname).toBe("spot");
+    expect(afterOn.manager).toBe("agent-parent");
+    expect(afterOn.model).toBe("claude-opus-4-8");
+
+    // Flip it OFF (the toggle-OFF path) — override persists as false, not absent.
+    const meta2 = (await Bun.file(join(dir, "meta.json")).json()) as Record<string, unknown>;
+    meta2.canSpawnChildren = false;
+    await writeMetaJsonAtomic(dir, meta2);
+
+    const afterOff = (await Bun.file(join(dir, "meta.json")).json()) as Record<string, unknown>;
+    expect(afterOff.canSpawnChildren).toBe(false);
+    expect(afterOff.agentType).toBe("worker");
+    expect(afterOff.nickname).toBe("spot");
+  });
+
+  test("absent canSpawnChildren stays absent — no field introduced", async () => {
+    const original = {
+      id: "agent-def456",
+      worker: false,
+      manager: null,
+      agentType: "manager",
+    };
+    await writeMetaJsonAtomic(dir, original);
+    const readBack = (await Bun.file(join(dir, "meta.json")).json()) as Record<string, unknown>;
+    expect("canSpawnChildren" in readBack).toBe(false);
+    expect(readBack.agentType).toBe("manager");
   });
 });

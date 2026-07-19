@@ -1031,7 +1031,7 @@ function sandboxProxyScriptPreamble(agentId: string, agentDir: string, port: num
   const readyPath = shellQuote(join(agentDir, "sandbox-proxy.ready"));
   return `
 # Start the per-agent proxy outside Seatbelt. The launcher detaches/unrefs the
-# proxy before returning; Claude alone is wrapped below. Fail closed if the
+# proxy before returning; the agent CLI alone is wrapped below. Fail closed if the
 # actual bind loses the small race after the parent-process port preflight.
 PROXY_PORT=${port}
 PROXY_PID_FILE=${pidPath}
@@ -1476,15 +1476,6 @@ export async function resumeAgent(
         };
       }
     }
-    if (agent.meta.sandbox?.enabled && isCodexBackedCli(resumeCli)) {
-      return {
-        ok: false,
-        exitCode: 1,
-        stdout: "",
-        stderr: "Error: sandbox-enabled Codex agents require the phase-5 Codex parity wrapper; refusing to resume unsandboxed",
-      };
-    }
-
     // Re-derive the reasoning-effort level from the persisted meta value, the
     // exact twin of the model re-derivation above. Without this a resumed
     // agent silently loses its `--effort` setting. Legacy agents (spawned
@@ -1537,7 +1528,7 @@ export async function resumeAgent(
     }
 
     let preparedResumeSandbox: PreparedSandbox | null = null;
-    if (!isCodexBackedCli(resumeCli) && agent.meta.sandbox?.enabled) {
+    if (agent.meta.sandbox?.enabled) {
       await stopSandboxProxyForAgent(agentDir, agent.meta);
       try {
         const frozenConfig = resolveSandboxConfig({ sandbox: agent.meta.sandbox });
@@ -1695,6 +1686,13 @@ export async function resumeAgent(
         absStderrLog: join(agentDir, "claude.stderr.log"),
         extraWritableRoots: codexExtraWritableRoots,
         fugu: resumeCli === "fugu",
+        sandboxEnabled: preparedResumeSandbox !== null,
+        sandboxScriptPreamble: preparedResumeSandbox
+          ? sandboxProxyScriptPreamble(agent.id, agentDir, preparedResumeSandbox.proxyPort)
+          : undefined,
+        sandboxExecPrefix: preparedResumeSandbox
+          ? sandboxExecShellPrefix(preparedResumeSandbox)
+          : undefined,
       });
       await Bun.write(resumeScript, codexResumeContent);
       await chmod(resumeScript, 0o755);
@@ -4867,15 +4865,6 @@ export async function newAgent(
     [allLayer, nonCoordLayer, agentTypeDef],
     agentTypeDef.allowedPaths,
   );
-  if (resolvedSandboxConfig.enabled && isCodexBackedCli(agentCli)) {
-    return {
-      ok: false,
-      exitCode: 1,
-      stdout: "",
-      stderr: "Error: sandbox-enabled Codex agents require the phase-5 Codex parity wrapper; refusing to start unsandboxed",
-    };
-  }
-
   // 7. Max agents check — coordinators bypass this (SPEC §12.4.3)
   if (!coordinatorMode) {
     const maxAgents = (config.maxAgents?.value as number | undefined) ?? 10;
@@ -5261,10 +5250,9 @@ export async function newAgent(
       // Parent repo subdirs — granted as writable roots so `ib new-agent`
       // from inside a codex agent can mkdir into <parentRepo>/.ittybitty/
       // (agents+archive subdirs) and write <parentRepo>/.claude/settings.local.json
-      // when spawning a claude sub-agent. Codex's `-s workspace-write`
-      // sandbox is kept as defense-in-depth (our PreToolUse hook is the
-      // primary path-isolation gate); without these entries the sandbox
-      // blocks the spawn mkdir even though the hook would allow it.
+      // when spawning a claude sub-agent. These remain necessary for the
+      // ordinary `-s workspace-write` path; under our Seatbelt wrapper they
+      // are redundant but harmless and preserve disabled-mode behavior.
       //
       // We grant the .ittybitty and .claude SUBDIRS rather than the bare
       // parent repo so a misbehaving agent cannot reach src/, CLAUDE.md,
@@ -5689,8 +5677,9 @@ echo ""
   let startContent: string;
   if (isCodexBackedCli(agentCli)) {
     // Codex spawn branch — SPEC §6 Phase 4. The launch line is the canonical
-    // §3.3 form: `codex -m <model> -a never -s workspace-write
-    // --dangerously-bypass-hook-trust <inline -c flags> "<prompt>"`. The
+    // §3.3 form: `codex -m <model> -a never -s <mode>
+    // --dangerously-bypass-hook-trust <inline -c flags> "<prompt>"`. The mode
+    // is workspace-write normally and danger-full-access under our wrapper. The
     // path-safety + dispatcher precheck guarantees ran above (we wouldn't
     // be here on failure). PID variable + meta-field stay `CLAUDE_PID` /
     // `claude_pid` so the watchdog and other readers don't break — renaming
@@ -5711,6 +5700,13 @@ echo ""
       absAgentLog: join(agentDir, "agent.log"),
       absStderrLog: join(agentDir, "claude.stderr.log"),
       extraWritableRoots: codexExtraWritableRoots,
+      sandboxEnabled: preparedSandbox !== null,
+      sandboxScriptPreamble: preparedSandbox
+        ? sandboxProxyScriptPreamble(id, agentDir, preparedSandbox.proxyPort)
+        : undefined,
+      sandboxExecPrefix: preparedSandbox
+        ? sandboxExecShellPrefix(preparedSandbox)
+        : undefined,
     });
   } else if (agentCli === "agy") {
     // Antigravity CLI (`agy`) spawn branch (SPEC-ANTIGRAVITY-CLI.md §4.5). The

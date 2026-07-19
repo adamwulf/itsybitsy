@@ -862,6 +862,92 @@ describe("AgentTreeComponent parent-header (groupByParent)", () => {
     expect(found).toBe(true);
     expect(tree.selectedRepoPath).toBe("/Users/x/Developer/bravo");
   });
+
+  // Reviewer's exact repro layout: TWO parent groups, each with one repo + one
+  // agent, so a parent-header sits BETWEEN two selectable regions. This is what
+  // exposes the up-navigation dead-end.
+  //   0 parent Developer / 1 repo alpha / 2 agent a1
+  //   3 parent Projects  / 4 repo charlie / 5 agent c1
+  function makeFlatTwoGroups(): FlatEntry[] {
+    return [
+      { kind: "parent-header", parentDir: "/Users/x/Developer", displayName: "Developer" },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/Users/x/Developer/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/Users/x/Developer/alpha" }), depth: 0, connector: "" },
+      { kind: "parent-header", parentDir: "/Users/x/Projects", displayName: "Projects" },
+      { kind: "repo-header", repoName: "charlie", repoPath: "/Users/x/Projects/charlie", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "agent", agent: makeAgent("c1", "running", { repoName: "charlie", repoPath: "/Users/x/Projects/charlie" }), depth: 0, connector: "" },
+    ];
+  }
+
+  // BLOCKER regression: moveSelection(-1) INTO a parent-header must continue
+  // UPWARD (skip past it) instead of bouncing back down.
+  test("k (up) into a parent-header lands on the previous group's last agent", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlatTwoGroups());
+    // Land on 'charlie' repo-header (idx 4), the first selectable row after the
+    // 'Projects' parent-header at idx 3.
+    tree.selectByRepoPath("/Users/x/Projects/charlie");
+    expect(tree.selectedRepoPath).toBe("/Users/x/Projects/charlie");
+    // Press k: idx 4 → 3 (parent-header) must be SKIPPED UPWARD to idx 2 (a1),
+    // NOT bounced back to charlie.
+    tree.moveSelection(-1);
+    expect(tree.selection?.kind).toBe("agent");
+    expect(tree.selectedAgent?.id).toBe("a1");
+  });
+
+  // BLOCKER regression: k from the FIRST selectable row (with a parent-header
+  // above it at idx 0) must WRAP to the last row, not dead-end.
+  test("k from the first selectable row wraps past the top parent-header to the last row", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlatTwoGroups());
+    // Select alpha (idx 1) — the first selectable row (idx 0 is a parent-header).
+    tree.selectByRepoPath("/Users/x/Developer/alpha");
+    expect(tree.selectedRepoPath).toBe("/Users/x/Developer/alpha");
+    // Press k: idx 1 → 0 (parent-header) → wrap to last selectable (idx 5, c1).
+    tree.moveSelection(-1);
+    expect(tree.selection?.kind).toBe("agent");
+    expect(tree.selectedAgent?.id).toBe("c1");
+  });
+
+  // Down-navigation still works (j across a parent-header boundary).
+  test("j (down) across a parent-header lands on the next group's repo-header", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlatTwoGroups());
+    // Select a1 (idx 2), the last row of the first group.
+    tree.selectAgentById("a1");
+    expect(tree.selectedAgent?.id).toBe("a1");
+    // Press j: idx 2 → 3 (Projects parent-header) skipped DOWN to idx 4 (charlie).
+    tree.moveSelection(1);
+    expect(tree.selection?.kind).toBe("repo-header");
+    expect(tree.selectedRepoPath).toBe("/Users/x/Projects/charlie");
+  });
+
+  // Full up-cycle never crashes and never lands on a parent-header.
+  test("cycling k all the way up never crashes on a parent-header", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlatTwoGroups());
+    tree.moveSelection(-1); // no-selection + k → last row (c1)
+    for (let i = 0; i < 12; i++) {
+      tree.moveSelection(-1);
+      expect(tree.selection?.kind).not.toBe("parent-header");
+      expect(tree.selection).not.toBeNull();
+    }
+  });
+
+  test("render: agent rows indent under their repo (agent not left of its repo-header)", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlatTwoGroups());
+    const lines = tree.render(80);
+    const parentLine = lines.find((l) => l.includes("Developer"))!;
+    const repoLine = lines.find((l) => l.includes("alpha"))!;
+    const agentLine = lines.find((l) => l.includes("a1"))!;
+    // Leading-space count: parent (0) < repo (2) <= agent (2). The agent must
+    // NOT sit left of its repo-header.
+    const lead = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "").match(/^ */)![0].length;
+    expect(lead(parentLine)).toBe(0);
+    expect(lead(repoLine)).toBe(2);
+    expect(lead(agentLine)).toBeGreaterThanOrEqual(2);
+  });
 });
 
 describe("agent-tree helpers", () => {

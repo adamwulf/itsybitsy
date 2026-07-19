@@ -6,6 +6,7 @@ import {
   computeAge,
   buildAgentTree,
   flattenAgentTree,
+  buildParentDisplayNames,
   isRunningState,
   subtreeHasRunning,
   isVisibleUnderRunningFilter,
@@ -560,6 +561,81 @@ describe("flattenAgentTree groupByParent", () => {
     expect(asRepoHeader(flat[2]!).repoName).toBe("bravo");
     expect(asParentHeader(flat[3]!).displayName).toBe("Other");
     expect(asRepoHeader(flat[4]!).repoName).toBe("solo");
+  });
+
+  // S4: two DIFFERENT parents that share a basename must stay SEPARATE groups
+  // (identity keys on full parentDir) AND render DISTINGUISHABLE labels.
+  test("same-basename parents stay separate and render distinguishable labels", () => {
+    const a = makeAgent({ id: "a1", repoName: "alpha", repoPath: "/Users/alice/Developer/alpha" });
+    const b = makeAgent({ id: "b1", repoName: "bravo", repoPath: "/Volumes/work/Developer/bravo" });
+    const roots = buildAgentTree([a, b]);
+    const repos = [
+      { name: "alpha", path: "/Users/alice/Developer/alpha" },
+      { name: "bravo", path: "/Volumes/work/Developer/bravo" },
+    ];
+    const flat = flattenAgentTree(roots, repos, undefined, true);
+
+    const parentHeaders = flat.filter((f) => f.kind === "parent-header").map((f) => asParentHeader(f));
+    // Two separate groups (grouping keyed on full parentDir).
+    expect(parentHeaders.length).toBe(2);
+    expect(parentHeaders.map((p) => p.parentDir).sort()).toEqual([
+      "/Users/alice/Developer",
+      "/Volumes/work/Developer",
+    ]);
+    // Labels are disambiguated (last-two segments), NOT two identical "Developer".
+    const labels = parentHeaders.map((p) => p.displayName);
+    expect(labels).toContain("alice/Developer");
+    expect(labels).toContain("work/Developer");
+    expect(new Set(labels).size).toBe(2); // distinguishable
+  });
+
+  // S5: a repo directly under root ("/foo") has parent "/" whose basename is
+  // "" — the header must NOT render blank.
+  test("top-level repo (parent is '/') gets a non-empty parent label", () => {
+    const a = makeAgent({ id: "a1", repoName: "rootrepo", repoPath: "/rootrepo" });
+    const b = makeAgent({ id: "b1", repoName: "devrepo", repoPath: "/Users/x/Developer/devrepo" });
+    const roots = buildAgentTree([a, b]);
+    const repos = [
+      { name: "rootrepo", path: "/rootrepo" },
+      { name: "devrepo", path: "/Users/x/Developer/devrepo" },
+    ];
+    const flat = flattenAgentTree(roots, repos, undefined, true);
+    const parentHeaders = flat.filter((f) => f.kind === "parent-header").map((f) => asParentHeader(f));
+    // The "/" parent gets a non-blank label (falls back to the raw parentDir).
+    const rootHeader = parentHeaders.find((p) => p.parentDir === "/");
+    expect(rootHeader).toBeDefined();
+    expect(rootHeader!.displayName.length).toBeGreaterThan(0);
+    expect(rootHeader!.displayName).toBe("/");
+  });
+});
+
+describe("buildParentDisplayNames", () => {
+  test("unique basenames render as the plain basename", () => {
+    const map = buildParentDisplayNames(["/Users/x/Developer", "/Users/x/Work"]);
+    expect(map.get("/Users/x/Developer")).toBe("Developer");
+    expect(map.get("/Users/x/Work")).toBe("Work");
+  });
+
+  test("colliding basenames fall back to last-two segments", () => {
+    const map = buildParentDisplayNames(["/Users/alice/Developer", "/Volumes/work/Developer"]);
+    expect(map.get("/Users/alice/Developer")).toBe("alice/Developer");
+    expect(map.get("/Volumes/work/Developer")).toBe("work/Developer");
+  });
+
+  test("mixed: only the colliding basename disambiguates, uniques stay plain", () => {
+    const map = buildParentDisplayNames([
+      "/Users/alice/Developer",
+      "/Volumes/work/Developer",
+      "/Users/x/Projects",
+    ]);
+    expect(map.get("/Users/alice/Developer")).toBe("alice/Developer");
+    expect(map.get("/Volumes/work/Developer")).toBe("work/Developer");
+    expect(map.get("/Users/x/Projects")).toBe("Projects"); // unique → plain
+  });
+
+  test("root parent '/' → non-empty label", () => {
+    const map = buildParentDisplayNames(["/"]);
+    expect(map.get("/")).toBe("/");
   });
 });
 

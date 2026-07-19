@@ -1299,6 +1299,59 @@ export function subtreeHasNonStopped(agent: Agent): boolean {
 }
 
 /**
+ * Human-friendly label for a parent-directory path (the `parent-header`
+ * displayName). Basename by default; two fallbacks keep it correct:
+ *   - S5: a top-level path like "/foo" has parent "/" whose basename is "" —
+ *     fall back to the raw parentDir ("/") so the header never renders blank.
+ *   - Empty parentDir (shouldn't reach here — the "" sentinel is excluded
+ *     before this) also falls back to itself.
+ * Pure string op; no env/homedir so it's deterministic under test.
+ */
+function parentDirBasenameLabel(parentDir: string): string {
+  const base = basename(parentDir);
+  return base === "" ? parentDir : base;
+}
+
+/**
+ * The last `count` path segments of an absolute-ish path, joined with "/"
+ * (e.g. last-2 of "/Users/a/Developer" → "a/Developer"). Used to disambiguate
+ * parent groups whose basenames collide. Pure; no env/homedir.
+ */
+function lastPathSegments(parentDir: string, count: number): string {
+  const segments = parentDir.split("/").filter((s) => s.length > 0);
+  if (segments.length === 0) return parentDir; // e.g. "/" → keep raw
+  return segments.slice(-count).join("/");
+}
+
+/**
+ * Build a parentDir → displayName map that is UNAMBIGUOUS across the given
+ * parents. Default label is the basename; when a basename is shared by more
+ * than one distinct parentDir, ALL groups with that basename fall back to their
+ * last-two-path-segments label so the user can tell them apart (S4). Grouping
+ * identity stays keyed on the full parentDir elsewhere — only the label
+ * changes. Deterministic (pure function of the input paths).
+ */
+export function buildParentDisplayNames(parentDirs: string[]): Map<string, string> {
+  // Count how many distinct parents share each basename label.
+  const basenameCounts = new Map<string, number>();
+  for (const p of parentDirs) {
+    const base = parentDirBasenameLabel(p);
+    basenameCounts.set(base, (basenameCounts.get(base) ?? 0) + 1);
+  }
+  const result = new Map<string, string>();
+  for (const p of parentDirs) {
+    const base = parentDirBasenameLabel(p);
+    if ((basenameCounts.get(base) ?? 0) > 1) {
+      // Collision — use a longer, distinguishing suffix.
+      result.set(p, lastPathSegments(p, 2));
+    } else {
+      result.set(p, base);
+    }
+  }
+  return result;
+}
+
+/**
  * Flatten agent tree into display order (depth-first), with indentation level.
  * Computes box-drawing connector strings (├──, └──, │) for tree display.
  * When repos has > 1 entry, inserts repo header rows and groups agents under them.
@@ -1308,10 +1361,12 @@ export function subtreeHasNonStopped(agent: Agent): boolean {
  *
  * When `groupByParent` is true AND there is more than one repo, repos that
  * share an on-disk parent directory are grouped under a `parent-header` entry
- * (labeled with the parent dir's basename) and emitted in parent-dir order,
- * repos sorted within each group. When false (the default), the repo list is a
- * flat alphabetical sequence — byte-identical to pre-feature behavior. Repos
- * with an unknown path (empty string) are never given a parent-header.
+ * and emitted in parent-dir order, repos sorted within each group. The header's
+ * displayName is the parent's basename, disambiguated to a longer suffix when
+ * two parents share a basename (see buildParentDisplayNames). When false (the
+ * default), the repo list is a flat alphabetical sequence — byte-identical to
+ * pre-feature behavior. Repos with an unknown path (empty string) are never
+ * given a parent-header.
  */
 export function flattenAgentTree(
   roots: Agent[],
@@ -1413,10 +1468,19 @@ export function flattenAgentTree(
       // Sort parent groups alphabetically by parentDir; the "" sentinel sorts
       // first (its repos render flat, with no parent-header).
       const sortedParents = [...parentGroups.keys()].sort((a, b) => a.localeCompare(b));
+      // Compute a human-friendly, UNAMBIGUOUS label for each parentDir. Grouping
+      // keys on the full parentDir (identity), but the label is basename by
+      // default — which collides when two different parents share a basename
+      // (e.g. /Users/a/Developer vs /Volumes/work/Developer). When a basename is
+      // shared by more than one parent group, those groups fall back to the last
+      // two path segments so the labels stay distinguishable. Pure function of
+      // the input paths (no homedir/env) so flattenAgentTree stays deterministic.
+      const realParents = sortedParents.filter((p) => p !== "");
+      const displayNameFor = buildParentDisplayNames(realParents);
       for (const parentDir of sortedParents) {
         const repoNamesInGroup = parentGroups.get(parentDir)!; // already sorted (built from sortedNames)
         if (parentDir !== "") {
-          result.push({ kind: "parent-header", parentDir, displayName: basename(parentDir) });
+          result.push({ kind: "parent-header", parentDir, displayName: displayNameFor.get(parentDir)! });
         }
         for (const repoName of repoNamesInGroup) emitRepo(repoName);
       }

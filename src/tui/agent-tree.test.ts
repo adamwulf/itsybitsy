@@ -816,9 +816,101 @@ describe("AgentTreeComponent parent-header (groupByParent)", () => {
     ]);
     tree.setRepoFilter("running-only");
     const repoPaths = tree.visibleList.filter((f) => f.kind === "repo-header").map((f) => (f as Extract<FlatEntry, { kind: "repo-header" }>).repoPath);
-    // Stopped 'alpha' repo hidden; 'bravo' kept — the V-filter is unaffected by parent-headers.
+    // Stopped 'alpha' repo hidden; 'bravo' kept. The parent-header stays because
+    // 'bravo' (one of its repos) survives.
     expect(repoPaths).toEqual(["/Users/x/Developer/bravo"]);
     expect(tree.visibleList.some((f) => f.kind === "parent-header")).toBe(true);
+  });
+
+  // BUG (2026-07-19): under 'running-only', a parent-header whose repos ALL get
+  // filtered out (empty or all-stopped) must NOT keep rendering an empty group.
+  // Repro from the screenshot: 'automerge'/'ruby' parent groups (no running
+  // agents) still appeared as bold-underlined headers with no rows beneath.
+  test("running-only hides a parent-header when ALL its repos are filtered out", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList([
+      // Group 1: 'Developer' — has a running repo, so it must survive.
+      { kind: "parent-header", parentDir: "/Users/x/Developer", displayName: "Developer" },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/Users/x/Developer/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/Users/x/Developer/alpha" }), depth: 0, connector: "" },
+      // Group 2: 'automerge' — a single repo with only stopped agents. Its lone
+      // repo-header is hidden, so the parent-header must be hidden too.
+      { kind: "parent-header", parentDir: "/Users/x/automerge", displayName: "automerge" },
+      { kind: "repo-header", repoName: "amr", repoPath: "/Users/x/automerge/amr", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "agent", agent: makeAgent("m1", "stopped", { repoName: "amr", repoPath: "/Users/x/automerge/amr" }), depth: 0, connector: "" },
+      // Group 3: 'ruby' — a single EMPTY repo (no agents at all). Under
+      // running-only its repo-header is hidden, so the parent-header must be too.
+      { kind: "parent-header", parentDir: "/Users/x/ruby", displayName: "ruby" },
+      { kind: "repo-header", repoName: "rb", repoPath: "/Users/x/ruby/rb", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
+    ]);
+    tree.setRepoFilter("running-only");
+    const parentNames = tree.visibleList
+      .filter((f) => f.kind === "parent-header")
+      .map((f) => (f as Extract<FlatEntry, { kind: "parent-header" }>).displayName);
+    // Only 'Developer' (with a surviving repo) remains; the two empty groups go.
+    expect(parentNames).toEqual(["Developer"]);
+    const repoPaths = tree.visibleList
+      .filter((f) => f.kind === "repo-header")
+      .map((f) => (f as Extract<FlatEntry, { kind: "repo-header" }>).repoPath);
+    expect(repoPaths).toEqual(["/Users/x/Developer/alpha"]);
+  });
+
+  // Same rule under the milder 'non-empty' filter: a parent-header whose repos
+  // are ALL empty (0 agents) must be hidden.
+  test("non-empty hides a parent-header when all its repos are empty", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList([
+      { kind: "parent-header", parentDir: "/Users/x/Developer", displayName: "Developer" },
+      { kind: "repo-header", repoName: "alpha", repoPath: "/Users/x/Developer/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/Users/x/Developer/alpha" }), depth: 0, connector: "" },
+      // 'empty' group: a single repo with no agents — hidden under non-empty.
+      { kind: "parent-header", parentDir: "/Users/x/empty", displayName: "empty" },
+      { kind: "repo-header", repoName: "e1", repoPath: "/Users/x/empty/e1", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
+    ]);
+    tree.setRepoFilter("non-empty");
+    const parentNames = tree.visibleList
+      .filter((f) => f.kind === "parent-header")
+      .map((f) => (f as Extract<FlatEntry, { kind: "parent-header" }>).displayName);
+    expect(parentNames).toEqual(["Developer"]);
+  });
+
+  // A parent-header with a SURVIVING repo but also a filtered-out repo must
+  // still render (survives because at least one child repo survives).
+  test("running-only keeps a parent-header when at least one of its repos survives", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList([
+      { kind: "parent-header", parentDir: "/Users/x/Developer", displayName: "Developer" },
+      // Stopped repo — hidden.
+      { kind: "repo-header", repoName: "alpha", repoPath: "/Users/x/Developer/alpha", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "agent", agent: makeAgent("a1", "stopped", { repoName: "alpha", repoPath: "/Users/x/Developer/alpha" }), depth: 0, connector: "" },
+      // Running repo — kept, so the parent-header must be kept.
+      { kind: "repo-header", repoName: "bravo", repoPath: "/Users/x/Developer/bravo", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "agent", agent: makeAgent("b1", "running", { repoName: "bravo", repoPath: "/Users/x/Developer/bravo" }), depth: 0, connector: "" },
+    ]);
+    tree.setRepoFilter("running-only");
+    const parentNames = tree.visibleList
+      .filter((f) => f.kind === "parent-header")
+      .map((f) => (f as Extract<FlatEntry, { kind: "parent-header" }>).displayName);
+    expect(parentNames).toEqual(["Developer"]);
+  });
+
+  // A pinned repo keeps its parent-header visible even under running-only, since
+  // the pinned repo-header itself survives the filter.
+  test("running-only keeps a parent-header whose only surviving repo is pinned", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList([
+      { kind: "parent-header", parentDir: "/Users/x/pinned", displayName: "pinned" },
+      { kind: "repo-header", repoName: "p1", repoPath: "/Users/x/pinned/p1", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "agent", agent: makeAgent("p1a", "stopped", { repoName: "p1", repoPath: "/Users/x/pinned/p1" }), depth: 0, connector: "" },
+    ]);
+    tree.pinnedRepoPaths.add("/Users/x/pinned/p1");
+    tree.setRepoFilter("running-only");
+    // The pinned repo survives → its parent-header must survive too.
+    expect(tree.visibleList.some((f) => f.kind === "parent-header")).toBe(true);
+    const repoPaths = tree.visibleList
+      .filter((f) => f.kind === "repo-header")
+      .map((f) => (f as Extract<FlatEntry, { kind: "repo-header" }>).repoPath);
+    expect(repoPaths).toEqual(["/Users/x/pinned/p1"]);
   });
 
   test("render does not crash and shows the parent displayName + indented repos", () => {

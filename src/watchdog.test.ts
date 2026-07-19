@@ -3691,6 +3691,7 @@ describe("runPerAgentWatchdog — meta.transient.json persistence", () => {
           domains: ["api.anthropic.com"],
         },
         sandbox_proxy_port: 43140,
+        sandbox_proxy_pid: 12345,
       },
     }));
     setPerAgentCaptureTmux(async () => "ordinary output\n");
@@ -3708,5 +3709,46 @@ describe("runPerAgentWatchdog — meta.transient.json persistence", () => {
     expect(checked).toEqual([43140]);
     expect(restarted).toEqual([{ dir: agentDir, port: 43140 }]);
     expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("sandbox proxy restarted pid=54321");
+  });
+
+  test("watchdog does not race start.sh before the initial proxy pid is recorded", async () => {
+    setPerAgentReadMeta(async () => ({
+      meta: {
+        id: "agent-test1",
+        session_id: "sid-123",
+        tmux_session: "tmux-test1",
+        prompt: "test",
+        manager: null,
+        created: "2026-03-05T00:00:00Z",
+        created_epoch: 1000,
+        worktree: true,
+        worker: false,
+        yolo: false,
+        model: "claude:sonnet",
+        claude_pid: "",
+        sandbox: {
+          enabled: true,
+          allowRead: [],
+          allowWrite: [],
+          deny: [],
+          rawAllow: [],
+          domains: ["api.anthropic.com"],
+        },
+        sandbox_proxy_port: 43140,
+      },
+    }));
+    setPerAgentCaptureTmux(async () => "starting\n");
+    let existsChecks = 0;
+    setPerAgentExistsSync(() => ++existsChecks <= 1);
+    let healthChecks = 0;
+    setWatchdogSandboxProxyFns(
+      async () => { healthChecks++; return false; },
+      async () => 54321,
+    );
+
+    await runPerAgentWatchdog("agent-test1", tempDir);
+
+    expect(healthChecks).toBe(0);
+    expect(await Bun.file(join(agentDir, "agent.log")).exists()).toBe(false);
   });
 });

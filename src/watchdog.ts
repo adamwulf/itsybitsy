@@ -1768,16 +1768,28 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       // Direct egress is kernel-blocked, so a dead proxy means a live Claude
       // agent is completely offline. The watchdog is deliberately launched
       // outside Seatbelt (§4C.2) and can safely restore this one network exit.
-      if (meta.sandbox?.enabled && typeof meta.sandbox_proxy_port === "number") {
+      // Re-read durable meta each tick: the watchdog is spawned immediately
+      // after tmux creation, while start.sh is still launching the initial
+      // proxy. Only begin health duty after start.sh has recorded that proxy's
+      // PID; otherwise the watchdog can race the initial bind and steal its
+      // port, making the sandboxed agent fail closed before Claude launches.
+      const { meta: currentMeta } = await readAgentMetaFn(agentDir);
+      if (
+        currentMeta?.sandbox?.enabled &&
+        typeof currentMeta.sandbox_proxy_port === "number" &&
+        typeof currentMeta.sandbox_proxy_pid === "number"
+      ) {
         try {
-          const healthy = await sandboxProxyHealthFn(meta.sandbox_proxy_port);
+          const proxyPort = currentMeta.sandbox_proxy_port;
+          const healthy = await sandboxProxyHealthFn(proxyPort);
           if (!healthy) {
-            await logAgent(agentDir, `[watchdog] sandbox proxy unhealthy on localhost:${meta.sandbox_proxy_port} — restarting`);
-            const pid = await sandboxProxyRestartFn(agentDir, meta.sandbox_proxy_port);
+            await logAgent(agentDir, `[watchdog] sandbox proxy unhealthy on localhost:${proxyPort} — restarting`);
+            const pid = await sandboxProxyRestartFn(agentDir, proxyPort);
             meta.sandbox_proxy_pid = pid;
+            meta.sandbox_proxy_port = proxyPort;
             await mutateAgentMeta(agentDir, (current) => {
               current.sandbox_proxy_pid = pid;
-              current.sandbox_proxy_port = meta.sandbox_proxy_port;
+              current.sandbox_proxy_port = proxyPort;
             });
             await logAgent(agentDir, `[watchdog] sandbox proxy restarted pid=${pid}`);
           }

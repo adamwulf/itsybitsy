@@ -494,11 +494,22 @@ describe("TelegramDispatcher", () => {
     expect(send.calls.length).toBe(1);
     const call = send.calls[0]!;
     expect(call.opts?.fromAgent).toBe(TELEGRAM_SENTINEL);
+    // Wrapped `<channel>` sends use raw mode so `sendMessage` does NOT prepend a
+    // `[sent by @telegram]:` line — the `<channel source="telegram" user="...">`
+    // tag already carries the attribution; a prefix would be redundant double-
+    // attribution and would push the opening tag out of column 1.
+    expect(call.opts?.raw).toBe(true);
     expect(call.message).toContain('<channel source="telegram"');
     expect(call.message).toContain('user="alice"');
     expect(call.message).toContain("hello world");
     expect(call.message).toContain("</channel>");
     expect(call.message).toContain('ib tgsend');
+    // The body handed to the coordinator must NOT already carry the prefix (that
+    // is `sendMessage`'s job, and raw mode suppresses it entirely).
+    expect(call.message).not.toContain("[sent by @telegram]:");
+    // The `<channel>` opening tag must be at column 1 (start of the message),
+    // not pushed right by a prefix.
+    expect(call.message.startsWith("<channel")).toBe(true);
   });
 
   test("inbound text persists the latest message_id to the last-message cache", async () => {
@@ -534,9 +545,14 @@ describe("TelegramDispatcher", () => {
     expect(send.calls.length).toBe(1);
     const call = send.calls[0]!;
     expect(call.opts?.fromAgent).toBe(TELEGRAM_SENTINEL);
+    // Reaction notices are wrapped `<channel>` sends too — raw so no
+    // `[sent by @telegram]:` prefix stacks on the tag.
+    expect(call.opts?.raw).toBe(true);
     expect(call.message).toContain('kind="reaction"');
     expect(call.message).toContain("Reacted 👍 to message 50");
     expect(call.message).toContain('message_id="50"');
+    expect(call.message).not.toContain("[sent by @telegram]:");
+    expect(call.message.startsWith("<channel")).toBe(true);
   });
 
   test("inbound reaction from a non-allowlisted chat is dropped", async () => {
@@ -1374,11 +1390,12 @@ describe("TelegramDispatcher", () => {
     expect(send.calls[0]!.message).toBe("/context");
     expect(send.calls[0]!.opts?.raw).toBe(true);
     expect(send.calls[0]!.opts?.fromAgent).toBe(TELEGRAM_SENTINEL);
-    // Second call: wrapped follow-up note, raw falsy.
+    // Second call: wrapped follow-up note. Wrapped sends use raw=true so no
+    // `[sent by @telegram]:` prefix stacks on the `<channel>` tag.
     expect(send.calls[1]!.message).toContain('<channel source="telegram"');
     expect(send.calls[1]!.message).toContain("[user on telegram requested /context");
     expect(send.calls[1]!.message).toContain("ib tgsend");
-    expect(send.calls[1]!.opts?.raw).toBeFalsy();
+    expect(send.calls[1]!.opts?.raw).toBe(true);
     expect(send.calls[1]!.opts?.fromAgent).toBe(TELEGRAM_SENTINEL);
   });
 
@@ -1589,10 +1606,12 @@ describe("TelegramDispatcher", () => {
     await d.stop();
 
     expect(send.calls.length).toBe(1);
-    // Wrapped, not raw.
+    // Wrapped send: raw=true suppresses the `[sent by @telegram]:` prefix (the
+    // `<channel>` tag already carries attribution), but the body is still the
+    // `<channel>` block, NOT the bare command.
     expect(send.calls[0]!.message).toContain('<channel source="telegram"');
     expect(send.calls[0]!.message).toContain("/usage");
-    expect(send.calls[0]!.opts?.raw).toBeFalsy();
+    expect(send.calls[0]!.opts?.raw).toBe(true);
   });
 
   test("'/context' with surrounding whitespace is still recognized as a slash command", async () => {
@@ -1628,10 +1647,11 @@ describe("TelegramDispatcher", () => {
     await d.stop();
 
     expect(send.calls.length).toBe(1);
-    // Wrapped, not raw.
+    // Wrapped send: raw=true suppresses the `[sent by @telegram]:` prefix, but
+    // the body is the `<channel>` block, not a bare slash-command passthrough.
     expect(send.calls[0]!.message).toContain('<channel source="telegram"');
     expect(send.calls[0]!.message).toContain("/context extra");
-    expect(send.calls[0]!.opts?.raw).toBeFalsy();
+    expect(send.calls[0]!.opts?.raw).toBe(true);
   });
 
   test("mixed batch: '/context' + normal text → 3 sends (raw, follow-up, normal), slashes first", async () => {
@@ -1650,14 +1670,18 @@ describe("TelegramDispatcher", () => {
     await d.stop();
 
     expect(send.calls.length).toBe(3);
-    // Slash and follow-up arrive before the normal wrapped block.
+    // Slash and follow-up arrive before the normal wrapped block. The bare
+    // slash command (call 0) is raw because it must reach Claude Code verbatim;
+    // the wrapped follow-up (call 1) and the wrapped normal block (call 2) are
+    // raw so the `[sent by @telegram]:` prefix never stacks on the `<channel>`
+    // tag.
     expect(send.calls[0]!.message).toBe("/context");
     expect(send.calls[0]!.opts?.raw).toBe(true);
     expect(send.calls[1]!.message).toContain("[user on telegram requested /context");
-    expect(send.calls[1]!.opts?.raw).toBeFalsy();
+    expect(send.calls[1]!.opts?.raw).toBe(true);
     expect(send.calls[2]!.message).toContain('<channel source="telegram"');
     expect(send.calls[2]!.message).toContain("btw hello");
-    expect(send.calls[2]!.opts?.raw).toBeFalsy();
+    expect(send.calls[2]!.opts?.raw).toBe(true);
     // The normal block must NOT contain the slash command.
     expect(send.calls[2]!.message).not.toContain("/context");
   });
@@ -1688,10 +1712,19 @@ describe("TelegramDispatcher", () => {
     await d.stop();
 
     // Only the original 2 failing forward attempts — /context was NOT routed
-    // through the raw passthrough.
+    // through the slash-command raw passthrough.
     expect(send.calls.length).toBe(2);
-    // No call ever had raw=true.
-    expect(send.calls.every((c) => !c.opts?.raw)).toBe(true);
+    // Both captured calls are the WRAPPED `<channel>` delivery attempts for the
+    // "hi" batch (the initial send + the offline retry). These are raw now (the
+    // `<channel>` tag carries attribution), but critically neither is the bare
+    // `/context` slash passthrough — the awaiting-confirmation interception
+    // swallowed batch 2 and re-prompted instead of forwarding it.
+    for (const c of send.calls) {
+      expect(c.message).toContain('<channel source="telegram"');
+      expect(c.message).toContain("hi");
+      expect(c.message).not.toBe("/context");
+      expect(c.message).not.toContain("[user on telegram requested /context");
+    }
 
     const sendMessageInits = mock.allInits().filter(
       (_, i) => mock.allUrls()[i]!.includes("/sendMessage"),
@@ -1755,11 +1788,12 @@ describe("TelegramDispatcher", () => {
     expect(send.calls[0]!.message).toBe("/compact");
     expect(send.calls[0]!.opts?.raw).toBe(true);
     expect(send.calls[0]!.opts?.fromAgent).toBe(TELEGRAM_SENTINEL);
-    // Follow-up: wrapped, mentions compaction + ib tgsend.
+    // Follow-up: wrapped, mentions compaction + ib tgsend. Wrapped sends use
+    // raw=true so no `[sent by @telegram]:` prefix stacks on the `<channel>` tag.
     expect(send.calls[1]!.message).toContain('<channel source="telegram"');
     expect(send.calls[1]!.message).toContain("your conversation just compacted");
     expect(send.calls[1]!.message).toContain("ib tgsend");
-    expect(send.calls[1]!.opts?.raw).toBeFalsy();
+    expect(send.calls[1]!.opts?.raw).toBe(true);
   });
 
   test("'/compact <args>' (prefix + instructions) → raw send + follow-up", async () => {
@@ -1819,9 +1853,11 @@ describe("TelegramDispatcher", () => {
     await d.stop();
 
     expect(send.calls.length).toBe(1);
+    // Wrapped send: raw=true suppresses the `[sent by @telegram]:` prefix; the
+    // body is still the `<channel>` block, not a bare slash-command passthrough.
     expect(send.calls[0]!.message).toContain('<channel source="telegram"');
     expect(send.calls[0]!.message).toContain("/compactfoo");
-    expect(send.calls[0]!.opts?.raw).toBeFalsy();
+    expect(send.calls[0]!.opts?.raw).toBe(true);
   });
 
   test("'/compact' when coordinator offline: retries twice, prompts, no follow-up fired", async () => {
@@ -2232,13 +2268,18 @@ describe("TelegramDispatcher health state machine", () => {
 /* ------------------------------------------------------------------ */
 
 describe("Sentinel labelling", () => {
-  test("@-prefixed fromAgent renders as '[sent by @telegram]: ...' (regression)", async () => {
-    // This regression test exercises the actual sendMessage formatter so the
-    // dispatcher's hardcoded "@telegram" sentinel can't silently desync from
-    // sendMessage's behavior. We don't hit tmux — sendMessage exits on
-    // has-session failure with a clear error, but only after building the
-    // formatted message internally. We rebuild the formatter expectation
-    // here from the public contract documented in src/ib-commands.ts:1290-1296.
+  test("@-prefixed fromAgent renders WITH the @ in a NON-raw send (formatter contract)", async () => {
+    // Formatter contract for the NON-raw path: when sendMessage is called with
+    // `fromAgent: "@telegram"` and no `raw`, the `@` is preserved in the
+    // `[sent by @telegram]:` prefix (it is NOT a BARE_RENDERED_SENTINEL). This
+    // guards the formatter's `@`-keeping behavior so it can't silently desync.
+    //
+    // NOTE: the dispatcher itself no longer takes this path for its wrapped
+    // `<channel>` sends — those pass `raw: true`, so the coordinator never sees
+    // a `[sent by @telegram]:` prefix stacked on the `<channel>` tag (that was
+    // the double-attribution bug). This test only pins the underlying formatter
+    // behavior for the non-raw case; see the dispatcher delivery tests above for
+    // the raw-wrapped behavior the dispatcher actually uses.
     const fromId = TELEGRAM_SENTINEL;
     const formatted = `[sent by ${fromId.startsWith("@") ? fromId : `agent ${fromId}`}]: hello`;
     expect(formatted).toBe("[sent by @telegram]: hello");

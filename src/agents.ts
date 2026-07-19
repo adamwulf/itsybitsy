@@ -25,9 +25,12 @@ export type MetaState = "creating" | "running" | "waiting" | "complete" | "stopp
  *     getCoordinatorAgentId)
  *   - `@telegram` — Phase 5 inbound dispatcher. Never appears as an actual
  *     spawner (the dispatcher does not own agents); it is used purely as
- *     `sendMessage`'s `fromAgent` label so coordinator-bound messages render
- *     as `[sent by @telegram]: ...`. Listed here so future readers don't
- *     wonder where it comes from.
+ *     `sendMessage`'s `fromAgent` label for coordinator-bound messages. The
+ *     dispatcher sends its `<channel>`-wrapped bodies with `raw: true`, so
+ *     these do NOT get a `[sent by @telegram]: ...` prefix — the
+ *     `<channel source="telegram" user="...">` tag already carries the
+ *     attribution. Listed here so future readers don't wonder where it comes
+ *     from.
  *
  * `repo_path` is the spawner's repo when the spawner is a real agent or a
  * per-repo coordinator. It is `null` for the `@system` sentinel because the

@@ -4451,6 +4451,58 @@ describe("newAgent (native)", () => {
     expect(result.ok).toBe(true);
   });
 
+  test("worker manager with canSpawnChildren:true override is NOT rejected (toggle-ON works end-to-end)", async () => {
+    // A worker toggled ON via the 'b' dialog (meta.canSpawnChildren=true) must
+    // pass manager-validation so it can actually spawn — the hook allows the
+    // Task, and this gate must agree with the override.
+    const mgrDir = join(agentsDir, "agent-worker-on");
+    await mkdir(mgrDir, { recursive: true });
+    await Bun.write(
+      join(mgrDir, "meta.json"),
+      JSON.stringify({ id: "agent-worker-on", worker: true, canSpawnChildren: true }),
+    );
+    // Clean parent worktree so the spawn proceeds past validation + dirty gate.
+    await mkdir(join(mgrDir, "repo"), { recursive: true });
+
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await callNewAgent("sub-task", { name: "worker-on-child", manager: "agent-worker-on" });
+    // The key assertion: NOT rejected with the worker-manager error.
+    expect(result.stderr).not.toContain("worker agent and cannot manage sub-agents");
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("worker-on-child");
+  });
+
+  test("worker manager WITHOUT override is still rejected (byte-for-byte prior behavior)", async () => {
+    const mgrDir = join(agentsDir, "agent-worker-off");
+    await mkdir(mgrDir, { recursive: true });
+    // No canSpawnChildren field — legacy worker.
+    await Bun.write(
+      join(mgrDir, "meta.json"),
+      JSON.stringify({ id: "agent-worker-off", worker: true }),
+    );
+    await mkdir(join(mgrDir, "repo"), { recursive: true });
+
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await callNewAgent("sub-task", { name: "worker-off-child", manager: "agent-worker-off" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("is a worker agent and cannot manage sub-agents");
+  });
+
+  test("worker manager with canSpawnChildren:false override is still rejected", async () => {
+    const mgrDir = join(agentsDir, "agent-worker-false");
+    await mkdir(mgrDir, { recursive: true });
+    await Bun.write(
+      join(mgrDir, "meta.json"),
+      JSON.stringify({ id: "agent-worker-false", worker: true, canSpawnChildren: false }),
+    );
+    await mkdir(join(mgrDir, "repo"), { recursive: true });
+
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await callNewAgent("sub-task", { name: "worker-false-child", manager: "agent-worker-false" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("is a worker agent and cannot manage sub-agents");
+  });
+
   test("creates agent with correct ID format when no name given", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     const result = await callNewAgent("do something");
@@ -6761,6 +6813,25 @@ describe("reassignAgent (native)", () => {
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("worker");
+  });
+
+  test("worker-as-parent with canSpawnChildren:true override is accepted", async () => {
+    // A worker toggled ON can also be a reassign target — the override wins
+    // over the worker check, mirroring newAgent's manager-validation.
+    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const agentDir = join(agentsDir, "agent-abc");
+    const workerDir = join(agentsDir, "agent-worker-on");
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(workerDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc", manager: "", tmux_session: "t1" }));
+    await Bun.write(join(workerDir, "meta.json"), JSON.stringify({ id: "agent-worker-on", worker: true, canSpawnChildren: true, tmux_session: "t2" }));
+
+    const agent = makeAgent("agent-abc", tempDir);
+    const result = await reassignAgent(agent, "agent-worker-on");
+
+    expect(result.ok).toBe(true);
+    const updatedMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(updatedMeta.manager).toBe("agent-worker-on");
   });
 
   test("new manager not found", async () => {

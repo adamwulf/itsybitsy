@@ -52,4 +52,5 @@ sandbox:
   domains:
     - "api.anthropic.com"
     - "*.anthropic.com"
+    - "platform.claude.com"
 ---

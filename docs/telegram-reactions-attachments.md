@@ -495,8 +495,35 @@ and has no other way to find it.
   handle through boot and two constructors. `resetMessageCache()` restores test
   isolation.
 - **Bounded**: `MAX_RECORDS = 200`, oldest-first eviction; text capped at
-  `MAX_TEXT_CHARS = 300` on insert. Re-recording an id moves it to the young end
-  rather than refreshing in place at its soon-to-be-evicted position.
+  `MAX_TEXT_CHARS = 300` CODE POINTS on insert. Re-recording an id moves it to
+  the young end rather than refreshing in place at its soon-to-be-evicted
+  position.
+- **The cap must COPY, and must count code points** — `truncateCodePoints`.
+  Both properties are load-bearing and were both wrong in the first cut:
+  - `String.prototype.slice` returns a **view that retains the parent buffer**.
+    A record count bound then bounds nothing: measured, 200 records sliced to
+    300 chars out of 1 MB parents pinned ~103 MB, and ~348 MB at 4 MB parents —
+    it tracks PARENT size. This bites hardest outbound, because `sendChunks`
+    slices each chunk out of the full `ib tgsend` payload and `tgsend` has no
+    size cap before chunking, so one piped diff pinned its whole payload for the
+    next 200 messages. `join()` is what releases it. `"" + s`, `s.repeat(1)` and
+    `s.slice()` look like copies and are engine-folded no-ops — do not
+    "simplify" to them.
+  - Cutting on code units severs surrogate pairs (U+FFFD in the coordinator's
+    transcript). The obvious fix is a trap:
+    `Array.from(s.slice(0, MAX)).join("")` repairs **nothing** — the pair is
+    already severed before `Array.from` runs, so the result is byte-identical to
+    doing nothing. The correct form pre-slices to `MAX * 2` units, THEN slices
+    to `MAX` code points, then joins. Right order fixes both defects in one
+    expression; wrong order fixes neither.
+  - The helper owns the length COMPARISON as well as the cut. A code-unit guard
+    with a code-point cut moves the bug: 160 emoji is 160 code points but 320
+    code units, so a unit guard appends `…` to a string it never truncated.
+  - **Applied at BOTH caps, storage and display.** Not redundant:
+    `formatReactionPreview` shrinks (drops all but 2 lines, collapses whitespace)
+    BEFORE it measures, so a 300-unit stored string can arrive there at ~51 units
+    and the display cap never fires — a storage-site severance would reach the
+    coordinator untouched.
 - **Total lookup**: unknown or malformed key → `null`, never a throw. Does no
   IO, so it can't fail on IO.
 
@@ -543,16 +570,31 @@ message): "…"` rather than repeating the preview per clause.
 
 ### 9.4 Degrading gracefully — the important part
 
-**If the id isn't in the cache, the block is byte-for-byte what it was before
-this feature.** No empty quotes, no `(unknown)`, no error. Reaction delivery
-must never break because of this.
+**If the id isn't in the cache, the reaction summary line and the `<channel>`
+block body are byte-identical to what they were before this feature.** No empty
+quotes, no `(unknown)`, no error. Reaction delivery must never break because of
+this.
+
+Precisely: the `<channel>…</channel>` payload is unchanged. The trailing
+`REPLY_HINT` is NOT — it gained a sentence (§9.5) and it is part of the same
+returned string, so "the whole output is byte-for-byte identical" would be
+false. The property that matters is that nothing about a cache miss leaks into
+what the coordinator reads as the event.
 
 A miss is the EXPECTED case, not an edge case: `ib watch` restarted (the common
 one — it goes down and outbound messages queue for a stretch), the record was
 evicted from the 200-entry ring, or the message predates this feature. That
-restart gap is exactly why Half A exists, and it is asserted byte for byte in
-`dispatcher.test.ts` ("degrades byte-for-byte when there is no preview") and
-end-to-end in `reaction-context.test.ts` ("RESTART GAP").
+restart gap is exactly why Half A exists.
+
+On what the tests actually prove, since this is easy to overstate:
+`dispatcher.test.ts` ("degrades byte-for-byte when there is no preview")
+compares the CURRENT implementation against ITSELF — no-arg vs `null` vs
+`undefined` preview — and pins the first three lines of the block explicitly. It
+does NOT diff against the pre-feature implementation; nothing in the suite can,
+since that code no longer exists. The pre/post equivalence of the block body was
+established by review, not by the suite. `reaction-context.test.ts`
+("RESTART GAP") covers the same property end-to-end by wiping the cache
+mid-test.
 
 ### 9.5 `REPLY_HINT`
 
@@ -572,7 +614,8 @@ echoed id is worth retaining and the durable half never actually happens.
 
 ### 9.7 Files touched
 
-- `src/channels/message-cache.ts` (new) — the in-memory bounded ring.
+- `src/channels/message-cache.ts` (new) — the in-memory bounded ring, plus
+  `truncateCodePoints` (shared by both caps).
 - `src/channels/outbox.ts` — `sendChunks` returns `messageIds`; `noteSentChunk`,
   `extractMessageId`, `formatSendOk`.
 - `src/channels/dispatcher.ts` — `ReactionPreview`, `resolveReactionPreview`,
@@ -618,5 +661,9 @@ echoed id is worth retaining and the durable half never actually happens.
   `getHealth()`, or nudge timing. The cache is not consulted by any state
   detection.
 - **`ib watch` / dashboard:** no display change. `ib watch` hosts the process
-  that now owns the cache, so its memory footprint grows by a bounded ~60 KB
-  worst case (200 × 300 chars). No new mode, focus, or layout behavior.
+  that now owns the cache, so its memory footprint grows by a bounded worst case
+  of ~240 KB of text (200 × 300 CODE POINTS, each up to 2 UTF-16 units when
+  astral) plus Map and record overhead — call it under ~300 KB. The 2x over the
+  naive 120 KB is the deliberate price of code-point-correct truncation. That
+  ceiling holds only because the cap COPIES rather than retaining a slice view;
+  see §9.2. No new mode, focus, or layout behavior.

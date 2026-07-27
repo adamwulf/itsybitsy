@@ -16,7 +16,15 @@ import {
   setOutboxDir,
   resetOutboxDir,
   defaultOutboxDir,
+  formatSendOk,
+  extractMessageId,
 } from "./outbox";
+import {
+  lookupMessage,
+  resetMessageCache,
+  messageCacheSize,
+  MAX_TEXT_CHARS,
+} from "./message-cache";
 import {
   TelegramClient,
   fetchCtx as clientFetchCtx,
@@ -33,10 +41,14 @@ beforeEach(async () => {
   setOutboxDir(outboxDir);
   clientSleepCtx.set(async () => { /* fast-forward */ });
   clientLogCtx.set(() => { /* silence */ });
+  // The message cache is a module-level singleton shared across the whole
+  // process, so one test's sent messages would otherwise be visible to the next.
+  resetMessageCache();
 });
 
 afterEach(async () => {
   resetOutboxDir();
+  resetMessageCache();
   clientFetchCtx.reset();
   clientSleepCtx.reset();
   clientLogCtx.reset();
@@ -166,8 +178,11 @@ describe("file-drop round trip via TelegramOutbox", () => {
         return false;
       }
     }, 2_000);
+    // The result echoes the Telegram message id (makeOkFetch returns 1) so
+    // `ib tgsend` can print it — the coordinator needs the id in its own
+    // history to correlate a later reaction.
     const resultText = await readFile(join(outboxDir, `${stem}.txt.result`), "utf8");
-    expect(JSON.parse(resultText)).toEqual({ ok: true, message: "ok" });
+    expect(JSON.parse(resultText)).toEqual({ ok: true, message: "ok (message_id 1)" });
 
     await outbox.stop();
   });
@@ -196,6 +211,209 @@ describe("file-drop round trip via TelegramOutbox", () => {
     const resultText = await readFile(join(outboxDir, `${stem}.txt.result`), "utf8");
     expect(JSON.parse(resultText)).toEqual({ ok: false, message: "empty message" });
     expect(captured).toEqual([]); // never hit the wire
+
+    await outbox.stop();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  Half A: the result echoes the Telegram message id(s)               */
+/* ------------------------------------------------------------------ */
+
+describe("formatSendOk", () => {
+  test("single part with an id", () => {
+    expect(formatSendOk(1, [1584])).toBe("ok (message_id 1584)");
+  });
+
+  test("multi part with all ids uses the plural label", () => {
+    expect(formatSendOk(3, [1584, 1585, 1586])).toBe("ok (3 parts, message_ids 1584, 1585, 1586)");
+  });
+
+  test("no ids degrades to exactly the pre-feature shapes", () => {
+    expect(formatSendOk(1, [])).toBe("ok");
+    expect(formatSendOk(3, [])).toBe("ok (3 parts)");
+  });
+
+  test("partial ids report honestly, with the label keyed on the id count", () => {
+    // A 3-part send where only one chunk's id came back: singular label, one id.
+    expect(formatSendOk(3, [1584])).toBe("ok (3 parts, message_id 1584)");
+    expect(formatSendOk(3, [1584, 1586])).toBe("ok (3 parts, message_ids 1584, 1586)");
+  });
+});
+
+describe("extractMessageId", () => {
+  test("pulls a positive integer message_id", () => {
+    expect(extractMessageId({ message_id: 1584 })).toBe(1584);
+  });
+
+  test("returns null for the shapes the client can actually hand us", () => {
+    // TelegramClient does `raw.body.result ?? {}`, so a 2xx {ok:true} body with
+    // no result yields {} despite the TelegramMessage static type.
+    expect(extractMessageId({})).toBeNull();
+    expect(extractMessageId(null)).toBeNull();
+    expect(extractMessageId(undefined)).toBeNull();
+    expect(extractMessageId("nope")).toBeNull();
+    expect(extractMessageId({ message_id: "1584" })).toBeNull();
+    expect(extractMessageId({ message_id: 0 })).toBeNull();
+    expect(extractMessageId({ message_id: -1 })).toBeNull();
+    expect(extractMessageId({ message_id: NaN })).toBeNull();
+  });
+});
+
+describe("outbound message ids reach the result and the cache", () => {
+  /** Fetch stub returning an incrementing message_id per sendMessage call. */
+  function makeIdFetch(startId: number, captured: Array<{ text: string }> = []): () => number {
+    let next = startId;
+    clientFetchCtx.set(async (_input, init) => {
+      const body = init?.body ? JSON.parse(init.body as string) : null;
+      captured.push({ text: (body as { text: string })?.text ?? "" });
+      const id = next++;
+      return new Response(
+        JSON.stringify({ ok: true, result: { message_id: id, chat: { id: 0 } } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    return () => next;
+  }
+
+  /** Drop a `.txt` the way `tgsend` does and return the parsed result body. */
+  async function dropAndRead(stem: string, text: string): Promise<{ ok: boolean; message: string }> {
+    const { rename } = await import("fs/promises");
+    await writeFile(join(outboxDir, `${stem}.txt.tmp`), text);
+    await rename(join(outboxDir, `${stem}.txt.tmp`), join(outboxDir, `${stem}.txt`));
+    await waitFor(async () => {
+      try {
+        return (await readdir(outboxDir)).some((e) => e === `${stem}.txt.result`);
+      } catch {
+        return false;
+      }
+    }, 3_000);
+    return JSON.parse(await readFile(join(outboxDir, `${stem}.txt.result`), "utf8"));
+  }
+
+  test("a single-chunk send echoes its id and caches its text", async () => {
+    makeIdFetch(1584);
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({ client, chatId: "900" });
+    await outbox.start();
+
+    const result = await dropAndRead(`${Date.now()}-aaa111`, "Ready to merge?");
+    expect(result).toEqual({ ok: true, message: "ok (message_id 1584)" });
+
+    const cached = lookupMessage("900", 1584);
+    expect(cached).not.toBeNull();
+    expect(cached!.text).toBe("Ready to merge?");
+    expect(cached!.direction).toBe("out");
+
+    await outbox.stop();
+  });
+
+  test("a chunked send echoes every id and caches EACH chunk's own text", async () => {
+    // Two chunks: the user reacts to a specific one, so the preview must be
+    // that chunk's text — not the whole message, not the first chunk.
+    const captured: Array<{ text: string }> = [];
+    makeIdFetch(200, captured);
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({ client, chatId: "900" });
+    await outbox.start();
+
+    const { TELEGRAM_CHUNK_LIMIT } = await import("./telegram-client");
+    const partA = "A".repeat(TELEGRAM_CHUNK_LIMIT);
+    const partB = "B".repeat(50);
+    const result = await dropAndRead(`${Date.now()}-bbb222`, partA + partB);
+
+    expect(captured.length).toBe(2);
+    expect(result.ok).toBe(true);
+    expect(result.message).toBe("ok (2 parts, message_ids 200, 201)");
+
+    expect(lookupMessage("900", 200)!.text).toBe(captured[0]!.text.slice(0, MAX_TEXT_CHARS));
+    expect(lookupMessage("900", 201)!.text).toBe(captured[1]!.text.slice(0, MAX_TEXT_CHARS));
+    // Distinct chunks really did produce distinct cached text.
+    expect(lookupMessage("900", 200)!.text.startsWith("A")).toBe(true);
+    expect(lookupMessage("900", 201)!.text.startsWith("B")).toBe(true);
+
+    await outbox.stop();
+  });
+
+  test("an id delivered only by the post-429 retry is still captured", async () => {
+    // The retry path is a separate call site and easy to miss — a chunk that
+    // needed a retry would otherwise vanish from both the echo and the cache.
+    let call = 0;
+    clientFetchCtx.set(async () => {
+      call++;
+      if (call === 1) {
+        return new Response(
+          JSON.stringify({ ok: false, error_code: 429, description: "Too Many Requests" }),
+          { status: 429, headers: { "content-type": "application/json", "retry-after": "1" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ ok: true, result: { message_id: 4242, chat: { id: 0 } } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({ client, chatId: "900" });
+    await outbox.start();
+
+    const result = await dropAndRead(`${Date.now()}-ccc333`, "retried text");
+    expect(call).toBe(2); // really did go through the retry
+    expect(result).toEqual({ ok: true, message: "ok (message_id 4242)" });
+    expect(lookupMessage("900", 4242)!.text).toBe("retried text");
+
+    await outbox.stop();
+  });
+
+  test("a 2xx body with no result still succeeds, with the pre-feature message", async () => {
+    // The client turns a missing `result` into {}, so message_id is absent at
+    // runtime. The send landed; we just can't name it. Never invent an id.
+    clientFetchCtx.set(async () =>
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({ client, chatId: "900" });
+    await outbox.start();
+
+    const result = await dropAndRead(`${Date.now()}-ddd444`, "no id available");
+    expect(result).toEqual({ ok: true, message: "ok" });
+    expect(messageCacheSize()).toBe(0);
+
+    await outbox.stop();
+  });
+
+  test("a failed send caches nothing and reports the failure unchanged", async () => {
+    clientFetchCtx.set(async () =>
+      new Response(JSON.stringify({ ok: false, error_code: 400, description: "Bad Request" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({ client, chatId: "900" });
+    await outbox.start();
+
+    const result = await dropAndRead(`${Date.now()}-eee555`, "doomed");
+    expect(result.ok).toBe(false);
+    expect(result.message).toBe("sendMessage failed: Bad Request");
+    expect(messageCacheSize()).toBe(0);
+
+    await outbox.stop();
+  });
+
+  test("the cached text is capped so a huge message cannot sit in memory", async () => {
+    makeIdFetch(7000);
+    const client = new TelegramClient({ token: "T" });
+    const outbox = new TelegramOutbox({ client, chatId: "900" });
+    await outbox.start();
+
+    await dropAndRead(`${Date.now()}-fff666`, "q".repeat(1_000));
+    expect(lookupMessage("900", 7000)!.text.length).toBe(MAX_TEXT_CHARS);
 
     await outbox.stop();
   });

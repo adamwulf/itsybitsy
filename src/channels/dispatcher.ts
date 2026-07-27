@@ -1413,7 +1413,12 @@ export function wrapReactionReminder(
   // That is the required fallback, not an incidental one: a cache miss is the
   // EXPECTED case after an `ib watch` restart.
   if (preview) {
-    const text = stripChannelClose(preview.text);
+    // Trim after stripping, not before: a preview of `" </channel> "` is
+    // blank once the tag is gone, and an empty pair of quotes is worse than no
+    // preview at all. `formatReactionPreview` already guarantees a trimmed
+    // non-empty string, but this function is exported and callable directly, so
+    // it enforces its own contract.
+    const text = stripChannelClose(preview.text).trim();
     if (text !== "") {
       body += ` (${whoseMessage(preview.direction)}): "${text}"`;
     }

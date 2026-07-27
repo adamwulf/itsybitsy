@@ -85,8 +85,15 @@ Make sure `ib watch` is running, then in a separate shell:
 ib tgsend "hello from ib"
 ```
 
-Expected: prints `ok`, the message arrives in your Telegram chat from the
-bot.
+Expected: prints `ok (message_id <N>)`, and the message arrives in your
+Telegram chat from the bot. `<N>` is the Telegram message id of what was just
+sent — echoed so the coordinator has the id in its own conversation history and
+can correlate a later reaction to it (see §4.9). A long message that gets split
+prints `ok (3 parts, message_ids 1584, 1585, 1586)` instead, one id per chunk.
+
+A bare `ok` (or `ok (3 parts)` with no ids) is still a SUCCESS — it means the
+send landed but the API response carried no usable `message_id`. Only the
+`queued`/error paths below mean the message did not go out.
 
 If you see `queued (ib watch may not be running, or Telegram is not configured)`,
 either `ib watch` is not running or its Telegram subsystem failed to boot
@@ -232,6 +239,54 @@ the bot. To clear a webhook:
 ```sh
 curl https://api.telegram.org/bot<TOKEN>/deleteWebhook
 ```
+
+### 4.9. Reaction context (the id echo + the text preview)
+
+This is the check that matters for reactions being *actionable* — it is also
+the one no automated test can cover, since it needs a real bot and a real
+finger on a real emoji.
+
+**Step 1 — outbound reaction.** With `ib watch` running, from the coordinator:
+
+```sh
+ib tgsend "Ready to merge — squash first, or keep the history as-is?"
+```
+
+Expected: prints `ok (message_id <N>)`. Note `<N>`.
+
+Now react 👍 to that message in Telegram. The coordinator should receive:
+
+```
+<channel source="telegram" kind="reaction" user="<you>" ts="..." message_id="<N>">
+Reacted 👍 to message <N> (your message): "Ready to merge — squash first, or keep the history as-is?"
+</channel>
+```
+
+The two things to confirm: the `message_id` matches the `<N>` that `tgsend`
+printed, and the quoted text is the message you actually reacted to.
+
+**Step 2 — inbound reaction.** Text your bot something, then react to your own
+message. Expected: the same shape, but reading
+`Reacted 👍 to message <M> (their own message): "<what you texted>"`.
+
+**Step 3 — the restart gap (the important negative case).** Restart `ib watch`,
+then react to a message sent BEFORE the restart. Expected: the block degrades
+to exactly the id-only form, with no preview:
+
+```
+Reacted 👍 to message <N>
+```
+
+This is correct, not a bug — the preview cache is memory-only and dies with the
+process. Empty quotes, `(unknown)`, an error, or a missing reaction notice
+would all be bugs. The coordinator can still resolve `<N>` from the
+`ok (message_id <N>)` it recorded in step 1, which is the whole reason that
+echo exists.
+
+**Step 4 — chunking.** Send a message long enough to split
+(>4000 chars); `tgsend` prints `ok (2 parts, message_ids <A>, <B>)`. React to
+the SECOND bubble. Expected: the preview quotes the second chunk's text, not
+the first.
 
 ## 5. Things to watch in early use
 

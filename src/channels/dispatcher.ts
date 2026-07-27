@@ -54,6 +54,15 @@
  *     awaiting state. The y/n message itself is never forwarded.
  *   - `</channel>` substrings are stripped from inbound text/caption before
  *     wrapping (defense against forged closing tags).
+ *   - Reaction notices carry a TEXT PREVIEW of the reacted-to message when we
+ *     can resolve it, plus whose message it was — `Reacted 👍 to message 1584
+ *     (your message): "..."`. Resolution goes through the in-memory
+ *     `message-cache` (see that module for why it is memory-only), seeded by
+ *     `deliver()` for inbound and by the outbox for outbound. A MISS IS
+ *     NORMAL — after an `ib watch` restart the cache is empty — and must
+ *     produce exactly the pre-feature id-only block, byte for byte. The
+ *     restart-proof complement is `ib tgsend` echoing the sent `message_id`
+ *     back to the coordinator, which puts the id in its own history.
  *   - Telegram slash-command passthrough: an inbound message whose trimmed
  *     body is exactly `/context`, `/clear`, or starts with `/compact`
  *     (optionally followed by arguments) is sent raw (no `<channel>`
@@ -99,6 +108,7 @@ import type {
 } from "./types";
 import { clearCachedChatId } from "./chat-id-cache";
 import { writeLastMessage } from "./last-message-cache";
+import { lookupMessage, recordInboundMessage, type MessageDirection } from "./message-cache";
 import { storeInboundFile } from "./inbound-store";
 
 /** Delivery hook the dispatcher calls per coalesced batch. Defaults to
@@ -932,6 +942,25 @@ export class TelegramDispatcher {
           );
         }
       }
+
+      // Also seed the in-memory message cache so a later reaction to any of
+      // these messages can carry a text preview. EVERY message in the batch is
+      // recorded, not just the newest: a coalesced batch delivers several
+      // messages and the user can react to any one of them. Best-effort, same
+      // treatment as the last-message write above — a cache failure must never
+      // affect delivery. (Distinct from the last-message cache in every way
+      // that matters: that one persists a single id to disk for `ib tgreact`;
+      // this one holds recent TEXT in memory only, and dies with the process.)
+      for (const m of messages) {
+        if (m.messageId <= 0) continue;
+        try {
+          recordInboundMessage(chatId, m.messageId, m.body);
+        } catch (err) {
+          logCtx.fn(
+            `Telegram dispatcher: message cache write failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
     }
 
     // No attachment-fallback reply here anymore: attachments are downloaded in
@@ -1233,7 +1262,7 @@ export class TelegramDispatcher {
    *  send failure is logged and the notice is dropped rather than re-prompting
    *  the user or buffering. */
   private async deliverReaction(reaction: NormalizedReaction): Promise<void> {
-    const wrapped = wrapReactionReminder(reaction);
+    const wrapped = wrapReactionReminder(reaction, resolveReactionPreview(reaction));
     try {
       const result = await sendCtx.fn(wrapped, { fromAgent: TELEGRAM_SENTINEL, raw: true });
       if (!result.ok) {
@@ -1325,20 +1354,43 @@ export function wrapChannelReminder(chatId: string, messages: NormalizedMessage[
 
 /** Hint appended to every wrapped channel block telling the coordinator how to
  *  reply and react on Telegram. Centralized so the two `wrapChannelReminder`
- *  branches (single + coalesced) and any future caller stay in sync. */
+ *  branches (single + coalesced) and any future caller stay in sync.
+ *
+ *  The closing sentence is deliberately terse. This hint rides along on EVERY
+ *  channel block, so context isn't free — but the coordinator has to know the
+ *  echoed id is worth retaining, otherwise the durable half of reaction
+ *  correlation (id in the coordinator's own history, next to the text it sent)
+ *  never actually happens. */
 const REPLY_HINT =
   'To reply on Telegram, run `ib tgsend "<your message>"`. ' +
   "To react to the latest message, run `ib tgreact <emoji>` " +
   "(e.g. `ib tgreact 👍`), or target a specific one with " +
-  "`ib tgreact <emoji> --message-id <id>`.";
+  "`ib tgreact <emoji> --message-id <id>`. " +
+  "`ib tgsend` echoes the sent `message_id` — keep it so you can match a later reaction.";
 
 /** Wrap a reaction event in a channel-reminder block. The body is a
  *  human-readable summary, e.g. `Reacted 👍 to message 123` or
  *  `Removed reaction 👍 from message 123`. Distinct `kind="reaction"`
  *  attribute so the coordinator can tell a reaction event apart from a text
  *  message. The reacted-to `message_id` is surfaced so the coordinator can
- *  reply or react back to that exact message. */
-export function wrapReactionReminder(reaction: NormalizedReaction): string {
+ *  reply or react back to that exact message.
+ *
+ *  When `preview` is supplied, the reacted-to message's text and whose it was
+ *  are appended:
+ *
+ *      Reacted 👍 to message 1584 (your message): "Ready to merge — squash?…"
+ *
+ *  which is the difference between an actionable reaction and an id the
+ *  coordinator has to guess at. Omit `preview` (or pass null) and the output is
+ *  byte-for-byte the id-only form — the required behavior on a cache miss.
+ *
+ *  SYNC AND PURE ON PURPOSE. The cache lookup lives in `resolveReactionPreview`
+ *  and the resolved preview is passed in, so this stays a formatter with no
+ *  state or IO — which is what makes it directly testable. */
+export function wrapReactionReminder(
+  reaction: NormalizedReaction,
+  preview?: ReactionPreview | null,
+): string {
   const parts: string[] = [];
   // Each emoji is stripped of </channel> defensively (emoji never contain it,
   // but the body is user-influenced data, so we stay consistent). Each clause
@@ -1351,7 +1403,21 @@ export function wrapReactionReminder(reaction: NormalizedReaction): string {
   if (reaction.removed.length > 0) {
     parts.push(`Removed reaction ${reaction.removed.map(stripChannelClose).join(" ")} from ${msgRef}`);
   }
-  const body = parts.join("; ");
+  let body = parts.join("; ");
+  // The suffix is appended ONCE to the joined body rather than per clause: both
+  // clauses of a changed reaction name the same message, so repeating the
+  // preview would be pure noise. `(whose): "text"` binds naturally to the
+  // trailing `message N` in every variant — added, removed, and changed.
+  //
+  // No preview → `body` is untouched, which is exactly the pre-feature output.
+  // That is the required fallback, not an incidental one: a cache miss is the
+  // EXPECTED case after an `ib watch` restart.
+  if (preview) {
+    const text = stripChannelClose(preview.text);
+    if (text !== "") {
+      body += ` (${whoseMessage(preview.direction)}): "${text}"`;
+    }
+  }
   return [
     `<channel source="telegram" kind="reaction" user="${escapeAttr(reaction.username)}" ts="${escapeAttr(reaction.ts)}"${messageIdAttr("message_id", reaction.messageId)}>`,
     body,
@@ -1359,6 +1425,78 @@ export function wrapReactionReminder(reaction: NormalizedReaction): string {
     ``,
     REPLY_HINT,
   ].join("\n");
+}
+
+/** A resolved text preview of the message a reaction targeted, ready to drop
+ *  into the reaction block. `text` is already single-line, truncated, and
+ *  `stripChannelClose`-d by {@link formatReactionPreview}. */
+export interface ReactionPreview {
+  text: string;
+  direction: MessageDirection;
+}
+
+/** Max rendered preview length, before the ellipsis. Long enough to carry a
+ *  coordinator's headline question (which is the case that actually failed:
+ *  a 👍 on an either/or is unreadable without seeing the branches), short
+ *  enough that a reaction notice stays one tidy line in the transcript. */
+const REACTION_PREVIEW_MAX_CHARS = 160;
+
+/** Look up the reacted-to message in the in-memory cache and format a preview,
+ *  or null when we can't. Null is a NORMAL outcome, not an error — the id is
+ *  absent after an `ib watch` restart, after ring eviction, or for any message
+ *  sent before this feature existed. Callers render the id-only form then.
+ *
+ *  Kept as a module function (not a method) so it stays trivially testable and
+ *  so `wrapReactionReminder` can remain sync and pure — the state lookup lives
+ *  here, the formatting lives there. */
+function resolveReactionPreview(reaction: NormalizedReaction): ReactionPreview | null {
+  let cached;
+  try {
+    cached = lookupMessage(reaction.chatId, reaction.messageId);
+  } catch {
+    // lookupMessage does no IO and is documented as total, but a reaction
+    // notice is not worth risking on that promise.
+    return null;
+  }
+  if (!cached) return null;
+  const text = formatReactionPreview(cached.text);
+  if (text === "") return null;
+  return { text, direction: cached.direction };
+}
+
+/** Squeeze a cached message down to a single short line.
+ *
+ *  Takes the first 1-2 non-empty lines — coordinator messages lead with the
+ *  headline, so lines 1-2 carry the signal and everything after is detail —
+ *  joins them with a space so the block stays on one line, collapses interior
+ *  whitespace runs, then truncates to {@link REACTION_PREVIEW_MAX_CHARS} with an
+ *  explicit `…` so truncation is visible rather than silently misleading.
+ *
+ *  `stripChannelClose` runs here because this is where untrusted text enters the
+ *  formatter: inbound previews are the user's own words, and this file already
+ *  applies that defense to every other user-influenced string. (Outbound
+ *  previews are the coordinator's own text, but they get the same treatment —
+ *  no reason to have two paths.) Returns "" when nothing survives. */
+export function formatReactionPreview(text: string): string {
+  const lines = stripChannelClose(String(text ?? ""))
+    // Lone \r and the Unicode line/paragraph separators would break out of the
+    // one-line shape just like \n does; normalize them all before splitting.
+    // Escapes, never literals \u2014 U+2028/U+2029 are invisible in an editor.
+    .replace(/[\r\u2028\u2029]/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  const head = lines.slice(0, 2).join(" ").replace(/\s+/g, " ").trim();
+  if (head === "") return "";
+  if (head.length <= REACTION_PREVIEW_MAX_CHARS) return head;
+  return head.slice(0, REACTION_PREVIEW_MAX_CHARS).trimEnd() + "…";
+}
+
+/** Label identifying whose message a reaction landed on. The distinction is the
+ *  point of surfacing direction at all: a 👍 on something the coordinator asked
+ *  is an answer, a 👍 on the user's own message is an acknowledgement. */
+function whoseMessage(direction: MessageDirection): string {
+  return direction === "out" ? "your message" : "their own message";
 }
 
 /** Render a ` name="id"` channel attribute, or the empty string when the id is

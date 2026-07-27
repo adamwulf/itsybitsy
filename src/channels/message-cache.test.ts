@@ -64,9 +64,18 @@ describe("record + lookup", () => {
     expect(lookupMessage("100", 7)!.text).toBe("chat one");
   });
 
-  test("numeric chat id looks up the same as its string form", () => {
-    recordOutboundMessage(String(100), 7, "x");
+  test("a numeric chat id is coerced, so it matches its string form", () => {
+    // The casts are the point — the signature says `string`, so only a cast
+    // reaches the runtime coercion. (Passing `String(100)` would just be
+    // another string round-trip, proving nothing beyond the test above.)
+    recordOutboundMessage(100 as unknown as string, 7, "x");
     expect(lookupMessage("100", 7)).not.toBeNull();
+    expect(lookupMessage(100 as unknown as string, 7)).not.toBeNull();
+    // The lookups alone would pass even without the explicit
+    // `String(chatId ?? "")`, because `keyFor` builds its key with a template
+    // literal and that coerces on its own. THIS is the assertion that pins the
+    // explicit coercion: the stored field must be a string, not the number.
+    expect(lookupMessage("100", 7)!.chatId).toBe("100");
   });
 
   test("re-recording the same id overwrites the text", () => {
@@ -166,16 +175,21 @@ describe("truncateCodePoints", () => {
     expect(cpLength(truncateCodePoints(EMOJI.repeat(161), 160).text)).toBe(160);
   });
 
-  /* The retention property this function exists for. A direct heap assertion
-   * would be timing- and GC-dependent, so it is NOT asserted here — measured
-   * out of band instead: 200 records sliced from 1 MB parents pinned ~103 MB
-   * with `.slice`, ~348 MB when the parents grew to 4 MB, and did not track
-   * parent size at all once the result was rebuilt via `join`.
+  /* NOTHING BELOW ASSERTS THE RETENTION PROPERTY, and nothing can.
    *
-   * What IS asserted is the observable proxy: the result must not be reference-
-   * equal to a same-valued input, since returning the input unchanged is the
-   * one way this function can leak a view. */
-  test("returns a fresh string even when nothing is truncated", () => {
+   * Whether a string is a view onto a parent buffer or a fresh copy is not
+   * observable from JS: primitives compare by VALUE, so `===`, `Object.is`, and
+   * `toBe` all report true for a view and a copy of the same characters.
+   * `p.slice(0,3) === Array.from(p.slice(0,6)).slice(0,3).join("")` is true.
+   * There is no assertion to write here — which is precisely why the heap probe
+   * had to exist.
+   *
+   * Measured out of band instead: 200 records sliced from 1 MB parents pinned
+   * ~103 MB with `.slice`, ~348 MB once the parents grew to 4 MB (i.e. tracking
+   * PARENT size), and stopped tracking parent size once the result was rebuilt
+   * via `join`. If you change `truncateCodePoints`, re-run that probe — the
+   * suite will stay green either way. */
+  test("preserves the value when nothing is truncated", () => {
     const source = "abc";
     const out = truncateCodePoints(source, 100);
     expect(out.text).toBe(source);
@@ -207,7 +221,11 @@ describe("bad input is ignored, never thrown", () => {
     expect(lookupMessage("100", NaN)).toBeNull();
   });
 
-  test("empty text records fine — an empty preview is the caller's problem", () => {
+  // Empty TEXT is recorded (unlike a bad chat id or message id, which are
+  // dropped) — rendering an empty preview is the caller's call, not the
+  // cache's. That downstream behavior is asserted in dispatcher.test.ts, not
+  // here; this only checks the record survives.
+  test("empty text is still recorded", () => {
     recordMessage("100", 1, "in", "");
     expect(lookupMessage("100", 1)!.text).toBe("");
   });

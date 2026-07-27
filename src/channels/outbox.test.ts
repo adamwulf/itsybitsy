@@ -246,9 +246,12 @@ describe("extractMessageId", () => {
     expect(extractMessageId({ message_id: 1584 })).toBe(1584);
   });
 
-  test("returns null for the shapes the client can actually hand us", () => {
-    // TelegramClient does `raw.body.result ?? {}`, so a 2xx {ok:true} body with
-    // no result yields {} despite the TelegramMessage static type.
+  test("returns null for an absent, non-numeric, or non-positive message_id", () => {
+    // `{}` is the shape the client can genuinely produce: it does
+    // `raw.body.result ?? {}`, so a 2xx {ok:true} body with no result yields an
+    // empty object despite the TelegramMessage static type. The rest are
+    // defensive — not reachable through TelegramClient today, asserted so a
+    // future caller can't reintroduce the crash.
     expect(extractMessageId({})).toBeNull();
     expect(extractMessageId(null)).toBeNull();
     expect(extractMessageId(undefined)).toBeNull();
@@ -409,7 +412,11 @@ describe("outbound message ids reach the result and the cache", () => {
     await outbox.stop();
   });
 
-  test("the cached text is capped so a huge message cannot sit in memory", async () => {
+  // Checks the CAP is applied on the outbound path. It does NOT check the
+  // retention property that motivates the cap — whether the stored string is a
+  // copy or a view onto the payload is not observable from JS. See the note in
+  // message-cache.test.ts.
+  test("the cached text is capped on the send path", async () => {
     makeIdFetch(7000);
     const client = new TelegramClient({ token: "T" });
     const outbox = new TelegramOutbox({ client, chatId: "900" });

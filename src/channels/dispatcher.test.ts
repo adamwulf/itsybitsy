@@ -494,7 +494,14 @@ describe("wrapReactionReminder with a text preview", () => {
   /* The hard requirement: an unresolvable id must reproduce today's output
    * EXACTLY. `ib watch` restarts are routine, so this is the common path, not
    * an edge case — a regression here breaks every reaction after a restart. */
-  describe("degrades byte-for-byte when there is no preview", () => {
+  /* NOTE ON WHAT THIS BLOCK CAN AND CANNOT PROVE. The three variant tests
+   * compare the CURRENT implementation against ITSELF — they show the three
+   * ways of saying "no preview" are interchangeable, NOT that the output
+   * matches the pre-feature code, which no longer exists to diff against. Only
+   * the last test has an independent oracle: hardcoded literals for the
+   * `<channel>` payload. Pre/post equivalence of that payload was established
+   * by review, not by this suite. */
+  describe("renders the id-only form when there is no preview", () => {
     const variants = [
       { name: "added", added: ["👍"], removed: [] as string[] },
       { name: "removed", added: [] as string[], removed: ["🔥"] },
@@ -509,7 +516,10 @@ describe("wrapReactionReminder with a text preview", () => {
       });
     }
 
-    test("added: the exact expected block, spelled out", () => {
+    // Pins the `<channel>` payload only — the trailing blank line and
+    // REPLY_HINT that follow are deliberately NOT asserted, since the hint
+    // changed with this feature.
+    test("added: the <channel> payload, spelled out line by line", () => {
       const out = wrapReactionReminder({ ...base, added: ["👍"], removed: [] }, null);
       const lines = out.split("\n");
       expect(lines[0]).toBe(

@@ -261,7 +261,7 @@ describe("reaction context: outbound send → id echo → reaction carries the t
     expect(block).not.toContain("HHHH");
   });
 
-  test("RESTART GAP: an unknown id degrades to exactly the id-only block", async () => {
+  test("RESTART GAP: an unknown id degrades to exactly the id-only summary line", async () => {
     // The common real-world case — `ib watch` went down, outbound messages
     // queued, and the cache came back empty. Simulate by sending, then wiping
     // the cache the way a process restart would.
@@ -276,8 +276,12 @@ describe("reaction context: outbound send → id echo → reaction carries the t
 
     const block = coordinatorBlocks[0]!;
     const bodyLine = block.split("\n")[1];
-    // Byte for byte the pre-feature body: no preview, no empty quotes, no
-    // "(unknown)", no error.
+    // The summary line, against a hardcoded literal of the pre-feature form —
+    // an independent oracle, unlike dispatcher.test.ts's degradation block,
+    // which can only compare the current code against itself. Scope: this
+    // asserts the SUMMARY LINE exactly plus two negative checks on the rest.
+    // It does not pin the whole block, and cannot pin the trailing reply hint,
+    // which deliberately changed.
     expect(bodyLine).toBe("Reacted 👍 to message 1584");
     expect(block).not.toContain('""');
     expect(block).not.toContain("unknown");

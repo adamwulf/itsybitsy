@@ -326,6 +326,9 @@ describe("outbound message ids reach the result and the cache", () => {
     expect(result.ok).toBe(true);
     expect(result.message).toBe("ok (2 parts, message_ids 200, 201)");
 
+    // `.slice` is a valid oracle here ONLY because these chunks are pure ASCII
+    // (one code unit per code point). It is not the cap's semantics — see the
+    // astral cases in message-cache.test.ts.
     expect(lookupMessage("900", 200)!.text).toBe(captured[0]!.text.slice(0, MAX_TEXT_CHARS));
     expect(lookupMessage("900", 201)!.text).toBe(captured[1]!.text.slice(0, MAX_TEXT_CHARS));
     // Distinct chunks really did produce distinct cached text.
@@ -413,7 +416,9 @@ describe("outbound message ids reach the result and the cache", () => {
     await outbox.start();
 
     await dropAndRead(`${Date.now()}-fff666`, "q".repeat(1_000));
-    expect(lookupMessage("900", 7000)!.text.length).toBe(MAX_TEXT_CHARS);
+    // Code points — the cap's actual unit. Equal to `.length` only because this
+    // payload is ASCII.
+    expect(Array.from(lookupMessage("900", 7000)!.text).length).toBe(MAX_TEXT_CHARS);
 
     await outbox.stop();
   });

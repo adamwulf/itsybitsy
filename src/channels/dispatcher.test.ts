@@ -46,6 +46,11 @@ import {
   resetInboundDir,
   defaultInboundDir,
 } from "./inbound-store";
+import {
+  resetMessageCache,
+  recordOutboundMessage,
+  lookupMessage,
+} from "./message-cache";
 import type { FetchLike } from "../types";
 import type { TelegramUpdate, TelegramMessage } from "./types";
 
@@ -518,6 +523,11 @@ describe("wrapReactionReminder with a text preview", () => {
 });
 
 describe("formatReactionPreview", () => {
+  // One test in here writes to the process-wide cache singleton; keep it from
+  // inheriting or leaking state.
+  beforeEach(() => resetMessageCache());
+  afterEach(() => resetMessageCache());
+
   test("passes a short single line through unchanged", () => {
     expect(formatReactionPreview("Ready to merge?")).toBe("Ready to merge?");
   });
@@ -550,16 +560,41 @@ describe("formatReactionPreview", () => {
     expect(formatReactionPreview("one\u2029two")).toBe("one two");
   });
 
-  test("truncates past 160 chars with an explicit ellipsis", () => {
+  test("truncates past 160 code points with an explicit ellipsis", () => {
     const long = "y".repeat(400);
     const out = formatReactionPreview(long);
     expect(out.endsWith("…")).toBe(true);
-    expect(out.length).toBe(161); // 160 chars + the ellipsis
+    // Code points: 160 kept + the ellipsis. (Equals `.length` here only because
+    // the input is ASCII.)
+    expect(Array.from(out).length).toBe(161);
   });
 
   test("does not add an ellipsis at exactly the limit", () => {
     const exact = "z".repeat(160);
     expect(formatReactionPreview(exact)).toBe(exact);
+  });
+
+  /* The false ellipsis. 160 emoji is 160 CODE POINTS but 320 CODE UNITS, so a
+   * unit-counting length guard would append "…" to a preview it never actually
+   * truncated — claiming loss that did not happen. CJK will NOT catch this
+   * (it's BMP, one unit per code point); only astral characters will. */
+  test("all-emoji at exactly the cap gets NO ellipsis", () => {
+    const exact = "\u{1F600}".repeat(160);
+    const out = formatReactionPreview(exact);
+    expect(out).toBe(exact);
+    expect(out.endsWith("…")).toBe(false);
+  });
+
+  test("all-emoji past the cap truncates on code points and stays well-formed", () => {
+    const out = formatReactionPreview("\u{1F600}".repeat(300));
+    expect(out.endsWith("…")).toBe(true);
+    expect(out.isWellFormed()).toBe(true);
+    expect(Array.from(out).length).toBe(161); // 160 code points + ellipsis
+  });
+
+  test("never severs a surrogate pair at the display cap", () => {
+    const out = formatReactionPreview("a".repeat(159) + "\u{1F600}" + "b".repeat(50));
+    expect(out.isWellFormed()).toBe(true);
   });
 
   test("strips </channel> from the preview text", () => {
@@ -569,6 +604,32 @@ describe("formatReactionPreview", () => {
   test("empty / whitespace-only input yields the empty string", () => {
     expect(formatReactionPreview("")).toBe("");
     expect(formatReactionPreview("   \n\n \t ")).toBe("");
+  });
+
+  /* Why the STORAGE cap must also truncate on code points, even though the
+   * display cap re-truncates.
+   *
+   * `formatReactionPreview` SHRINKS before it MEASURES — it drops all but the
+   * first two lines and collapses whitespace runs — so a string severed at 300
+   * units can arrive here far under 160 and the display cap NEVER FIRES. The
+   * damage was done at insert time and nothing downstream repairs it.
+   *
+   * Here: 250 spaces collapse to one, so a 300-unit stored string renders as
+   * ~51 units. Before the storage-site fix, the emoji straddled unit 300, the
+   * lone surrogate survived the collapse, and a U+FFFD reached the coordinator. */
+  test("a storage-cap severance cannot reach the rendered preview", () => {
+    const input = "a" + " ".repeat(250) + "b" + "c".repeat(47) + "\u{1F600}" + " trailing words";
+    recordOutboundMessage("777", 1, input);
+    const stored = lookupMessage("777", 1)!.text;
+    expect(stored.isWellFormed()).toBe(true);
+
+    const preview = formatReactionPreview(stored);
+    // Confirm the premise: the display cap genuinely does NOT fire here, so
+    // this test is exercising the storage cap and not the display one.
+    expect(Array.from(preview).length).toBeLessThan(160);
+    expect(preview.endsWith("…")).toBe(false);
+    expect(preview.isWellFormed()).toBe(true);
+    expect(preview.endsWith("\u{1F600}")).toBe(true);
   });
 
   test("preserves an attachment placeholder body verbatim", () => {
@@ -614,6 +675,12 @@ describe("TelegramDispatcher", () => {
     // Point the inbound-download dir at a tmp dir so attachment downloads never
     // touch the real ~/.itsybitsy state.
     setInboundDir(join(stateRoot, "channels", "telegram", "inbound"));
+    // The message cache is a process-wide singleton and this file exercises
+    // BOTH sides of it (deliver() writes, deliverReaction() reads), so without
+    // a reset these tests depend on whatever other files left behind — and on
+    // file ordering. Reset both ends: entering, so we don't inherit; leaving,
+    // so we don't leak.
+    resetMessageCache();
   });
 
   afterEach(async () => {
@@ -629,6 +696,7 @@ describe("TelegramDispatcher", () => {
     resetAccessStateDir();
     resetLastMsgStateDir();
     resetInboundDir();
+    resetMessageCache();
     if (stateRoot) await rm(stateRoot, { recursive: true, force: true });
   });
 

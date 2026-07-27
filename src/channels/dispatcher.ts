@@ -60,9 +60,12 @@
  *     `message-cache` (see that module for why it is memory-only), seeded by
  *     `deliver()` for inbound and by the outbox for outbound. A MISS IS
  *     NORMAL — after an `ib watch` restart the cache is empty — and must
- *     produce exactly the pre-feature id-only block, byte for byte. The
- *     restart-proof complement is `ib tgsend` echoing the sent `message_id`
- *     back to the coordinator, which puts the id in its own history.
+ *     produce the id-only form: the reaction summary line and the `<channel>`
+ *     block body are byte-identical to the pre-feature output. (The trailing
+ *     reply hint is not, and shares the same returned string — it gained one
+ *     sentence about the echoed id.) The restart-proof complement is
+ *     `ib tgsend` echoing the sent `message_id` back to the coordinator,
+ *     which puts the id in its own history.
  *   - Telegram slash-command passthrough: an inbound message whose trimmed
  *     body is exactly `/context`, `/clear`, or starts with `/compact`
  *     (optionally followed by arguments) is sent raw (no `<channel>`
@@ -108,7 +111,12 @@ import type {
 } from "./types";
 import { clearCachedChatId } from "./chat-id-cache";
 import { writeLastMessage } from "./last-message-cache";
-import { lookupMessage, recordInboundMessage, type MessageDirection } from "./message-cache";
+import {
+  lookupMessage,
+  recordInboundMessage,
+  truncateCodePoints,
+  type MessageDirection,
+} from "./message-cache";
 import { storeInboundFile } from "./inbound-store";
 
 /** Delivery hook the dispatcher calls per coalesced batch. Defaults to
@@ -1262,8 +1270,12 @@ export class TelegramDispatcher {
    *  send failure is logged and the notice is dropped rather than re-prompting
    *  the user or buffering. */
   private async deliverReaction(reaction: NormalizedReaction): Promise<void> {
-    const wrapped = wrapReactionReminder(reaction, resolveReactionPreview(reaction));
     try {
+      // Inside the try, not above it: "reaction delivery must never break" is a
+      // hard requirement, and this line now runs Array.from/join on
+      // user-influenced text via the preview path. Better true by construction
+      // than true by argument — a throw here would otherwise escape unlogged.
+      const wrapped = wrapReactionReminder(reaction, resolveReactionPreview(reaction));
       const result = await sendCtx.fn(wrapped, { fromAgent: TELEGRAM_SENTINEL, raw: true });
       if (!result.ok) {
         logCtx.fn(
@@ -1381,8 +1393,11 @@ const REPLY_HINT =
  *      Reacted 👍 to message 1584 (your message): "Ready to merge — squash?…"
  *
  *  which is the difference between an actionable reaction and an id the
- *  coordinator has to guess at. Omit `preview` (or pass null) and the output is
- *  byte-for-byte the id-only form — the required behavior on a cache miss.
+ *  coordinator has to guess at. Omit `preview` (or pass null) and you get the
+ *  id-only form — the required behavior on a cache miss. The summary line and
+ *  the `<channel>` body are then byte-identical to the pre-feature output; the
+ *  trailing `REPLY_HINT` is not (it gained a sentence), and it is part of the
+ *  same returned string.
  *
  *  SYNC AND PURE ON PURPOSE. The cache lookup lives in `resolveReactionPreview`
  *  and the resolved preview is passed in, so this stays a formatter with no
@@ -1440,10 +1455,13 @@ export interface ReactionPreview {
   direction: MessageDirection;
 }
 
-/** Max rendered preview length, before the ellipsis. Long enough to carry a
- *  coordinator's headline question (which is the case that actually failed:
- *  a 👍 on an either/or is unreadable without seeing the branches), short
- *  enough that a reaction notice stays one tidy line in the transcript. */
+/** Max rendered preview length in CODE POINTS, before the ellipsis. Long enough
+ *  to carry a coordinator's headline question (which is the case that actually
+ *  failed: a 👍 on an either/or is unreadable without seeing the branches),
+ *  short enough that a reaction notice stays one tidy line in the transcript.
+ *
+ *  Code points, so an all-emoji preview can be up to 2x this in UTF-16 units.
+ *  Tests asserting this cap must count `Array.from(text).length`. */
 const REACTION_PREVIEW_MAX_CHARS = 160;
 
 /** Look up the reacted-to message in the in-memory cache and format a preview,
@@ -1493,8 +1511,20 @@ export function formatReactionPreview(text: string): string {
     .filter((line) => line !== "");
   const head = lines.slice(0, 2).join(" ").replace(/\s+/g, " ").trim();
   if (head === "") return "";
-  if (head.length <= REACTION_PREVIEW_MAX_CHARS) return head;
-  return head.slice(0, REACTION_PREVIEW_MAX_CHARS).trimEnd() + "…";
+  // Code points, not code units, for BOTH the cut and the "did we cut?" test —
+  // `truncateCodePoints` owns both so they can't drift apart. A unit-counting
+  // guard would append "…" to strings it never truncated (160 emoji is 160 code
+  // points but 320 code units), and a unit-counting cut would sever pairs.
+  //
+  // This cap is applied on top of the storage cap rather than trusting it: the
+  // steps above SHRINK before this MEASURES (all but the first two lines are
+  // dropped, whitespace runs collapse), so a 300-unit cached string can arrive
+  // here well under the limit and this guard would never fire. Truncating
+  // correctly at BOTH sites is what keeps a severed pair from reaching the
+  // coordinator.
+  const { text: cut, truncated } = truncateCodePoints(head, REACTION_PREVIEW_MAX_CHARS);
+  if (!truncated) return cut;
+  return cut.trimEnd() + "…";
 }
 
 /** Label identifying whose message a reaction landed on. The distinction is the

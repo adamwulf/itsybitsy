@@ -17,8 +17,10 @@
  * on disk (backup surface, review surface, retention questions) is not. The
  * cache therefore dies with the `ib watch` process, and every consumer MUST
  * degrade cleanly to today's id-only output when a lookup misses. See
- * `wrapReactionReminder` in dispatcher.ts — a null preview reproduces the
- * pre-feature block byte for byte.
+ * `wrapReactionReminder` in dispatcher.ts — with a null preview the reaction
+ * summary line and the `<channel>` block body are byte-identical to the
+ * pre-feature output. (The trailing reply hint is not: it gained one sentence
+ * about the echoed message id, and it rides along in the same returned string.)
  *
  * The durable half of this feature lives elsewhere and on purpose: `ib tgsend`
  * echoes the Telegram `message_id` of what it just sent (see
@@ -35,10 +37,16 @@
  * {@link resetMessageCache} to get isolation back.
  *
  * Bounds: at most {@link MAX_RECORDS} records, oldest evicted first, with each
- * record's text capped at {@link MAX_TEXT_CHARS} on insert. The rendered
- * preview is shorter still (~160 chars) — the extra headroom is free and
- * leaves room to change the preview format without re-plumbing the cache. Worst
- * case the whole cache is a few tens of KB.
+ * record's text capped at {@link MAX_TEXT_CHARS} CODE POINTS on insert. The
+ * rendered preview is shorter still (~160) — the extra headroom is free and
+ * leaves room to change the preview format without re-plumbing the cache.
+ *
+ * Worst case: 200 x 300 code points, each of which can be 2 UTF-16 units when
+ * astral, so ~240 KB of text plus Map and record overhead — call it under
+ * ~300 KB. The 2x over the naive 120 KB is the deliberate cost of
+ * code-point-correct truncation. That ceiling only holds because the cap COPIES
+ * rather than slicing a view; see {@link truncateCodePoints}, which is the
+ * difference between this bound and hundreds of megabytes.
  *
  * This module does no IO, so it cannot fail on IO. Lookup is total anyway: an
  * unknown (or malformed) key returns null rather than throwing, because every
@@ -50,7 +58,13 @@
 export const MAX_RECORDS = 200;
 
 /** Per-record text cap applied at insert time, so one enormous message can't
- *  sit in memory. Comfortably above the rendered preview length. */
+ *  sit in memory. Comfortably above the rendered preview length.
+ *
+ *  Counted in CODE POINTS, not code units — so a record can occupy up to 2x
+ *  this many UTF-16 units in the all-astral worst case. That 2x is the
+ *  deliberate price of not severing surrogate pairs; see
+ *  {@link truncateCodePoints}. Tests asserting the cap must therefore compare
+ *  `Array.from(text).length`, never `text.length`. */
 export const MAX_TEXT_CHARS = 300;
 
 /** Which side of the conversation a cached message came from. `"out"` is a
@@ -64,11 +78,78 @@ export interface CachedMessage {
   chatId: string;
   messageId: number;
   direction: MessageDirection;
-  /** Message text, truncated to {@link MAX_TEXT_CHARS} at insert. */
+  /** Message text, truncated to {@link MAX_TEXT_CHARS} CODE POINTS at insert,
+   *  and always a fresh string that shares no storage with the caller's. */
   text: string;
   /** Wall-clock ms when the record was inserted. Diagnostic only — eviction is
    *  by insertion ORDER, not by age, so nothing reads this to make a decision. */
   cachedAt: number;
+}
+
+/**
+ * Truncate to at most `maxCodePoints` CODE POINTS, returning a string that
+ * shares no storage with `text`. Both properties are load-bearing and both are
+ * easy to get wrong in ways that still look right.
+ *
+ * **It must COPY.** `String.prototype.slice` returns a VIEW that retains the
+ * whole parent buffer — it does not copy. Bound the record COUNT with a view
+ * and you have bounded nothing: measured on Bun/JSC, 200 records sliced to 300
+ * chars out of 1 MB parents pinned ~103 MB, and ~348 MB once the parents grew
+ * to 4 MB — i.e. it tracks PARENT size, not record size. That is not
+ * hypothetical here: `sendChunks` slices each chunk out of the full `ib tgsend`
+ * payload and `tgsend` has no size cap before chunking, so one piped diff or
+ * log would pin its entire payload inside a process designed to run for weeks.
+ * `join()` builds a fresh string, which is what actually releases the parent.
+ * Idioms that LOOK like copies and are engine-folded no-ops: `"" + s`,
+ * `s.repeat(1)`, `s.slice()`. Do not "simplify" this to any of them.
+ *
+ * **It must count CODE POINTS.** Cutting on code units severs surrogate pairs,
+ * so a message ending mid-emoji renders as U+FFFD. Note the trap in the
+ * obvious fix:
+ *
+ *     Array.from(s.slice(0, MAX)).join("")                     // WRONG
+ *     Array.from(s.slice(0, MAX * 2)).slice(0, MAX).join("")   // right
+ *
+ * The first has ALREADY severed the pair before `Array.from` runs; iterating
+ * code points then faithfully re-emits the lone surrogate, so the result is
+ * byte-identical to doing nothing. Same tokens, opposite outcome — order is
+ * everything. Written in the right order it fixes retention AND severance in
+ * one expression; in the wrong order it fixes NEITHER.
+ *
+ * The `* 2` pre-slice keeps the intermediate array bounded for an arbitrarily
+ * long input while still being provably sufficient: a pair severed by the
+ * pre-slice sits at unit index `2*max - 1`, so at least `max` complete code
+ * points precede it and `.slice(0, max)` always drops it.
+ *
+ * Returns `truncated` so the CALLER decides what a cut means (the display site
+ * appends an ellipsis; the storage site doesn't care). The comparison lives
+ * here, with the cut, deliberately: a code-unit guard paired with a code-point
+ * cut MOVES the bug instead of removing it — 160 emoji is 160 code points but
+ * 320 code units, so a unit guard would append "…" to a string it never
+ * actually truncated. Guard and cut must count the same unit.
+ *
+ * Deliberately does NOT call `.toWellFormed()`. A lone surrogate already
+ * present in the INPUT survives any truncation strategy, and that is fine: the
+ * outbound path self-sanitizes (text round-trips through a UTF-8 file before
+ * being cached), the inbound path would need Telegram to emit an escaped
+ * unpaired surrogate in its JSON, and the blast radius is one U+FFFD glyph —
+ * not worth a second lossy transform on the user's own text.
+ */
+export function truncateCodePoints(
+  text: string,
+  maxCodePoints: number,
+): { text: string; truncated: boolean } {
+  const s = String(text ?? "");
+  const points = Array.from(s.slice(0, maxCodePoints * 2));
+  // Two ways to be over the cap. If the input exceeded the pre-slice budget it
+  // is over by definition (more than 2*max units means more than max code
+  // points, since a code point is at most 2 units). Otherwise `points` is the
+  // complete decomposition and its length is the exact answer.
+  const truncated = s.length > maxCodePoints * 2 || points.length > maxCodePoints;
+  const kept = truncated ? points.slice(0, maxCodePoints) : points;
+  // `join` unconditionally — including on the not-truncated path — so the
+  // return value never shares storage with the caller's string.
+  return { text: kept.join(""), truncated };
 }
 
 /**
@@ -109,7 +190,10 @@ export function recordMessage(
     chatId: chat,
     messageId,
     direction,
-    text: String(text ?? "").slice(0, MAX_TEXT_CHARS),
+    // Must be `truncateCodePoints`, not `.slice` — see that function for why a
+    // view would let one `ib tgsend` payload pin megabytes behind a 300-char
+    // record, and why the order of its operations is load-bearing.
+    text: truncateCodePoints(text, MAX_TEXT_CHARS).text,
     cachedAt: Date.now(),
   });
 

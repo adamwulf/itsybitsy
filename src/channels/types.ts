@@ -135,6 +135,21 @@ export interface TelegramMessage {
   video?: Video;
   video_note?: VideoNote;
   sticker?: Sticker;
+  /** The message this one replies to (Telegram's swipe-reply), present ONLY on
+   *  an explicit reply. Telegram embeds the FULL replied-to Message here —
+   *  including its `text` (or `caption` for media) — not merely an id. That is
+   *  what makes the reply path durable by construction: `extractReplyContext`
+   *  reads the text straight off the update, so it works after an `ib watch`
+   *  restart and for messages far older than the in-memory ring, which the
+   *  reaction path (given only a bare `message_id`) cannot do.
+   *
+   *  Typed as a full `TelegramMessage` because that is what the API returns.
+   *  The dispatcher never walks it recursively — Telegram does not nest
+   *  `reply_to_message` inside itself in practice, and a reply CHAIN is not
+   *  something we surface. Treat every field as optional at runtime no matter
+   *  what this type promises: `extractMessageId` was the lesson that a static
+   *  `number` is not a runtime guarantee. */
+  reply_to_message?: TelegramMessage;
 }
 
 /** A single reaction. v1 only emits/consumes `type: "emoji"`; custom-emoji

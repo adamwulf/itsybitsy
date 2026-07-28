@@ -288,6 +288,56 @@ echo exists.
 the SECOND bubble. Expected: the preview quotes the second chunk's text, not
 the first.
 
+### 4.10. Reply context (swipe-reply with actual text)
+
+Same purpose as 4.9 for typed replies, and the same reason it can't be
+automated: the suite's `reply_to_message` fixtures are hand-built from the
+documented shape, so only a real swipe on a real client proves Telegram
+populates the fields we read. **Three assumptions ride on this step**: that a
+real swipe-reply populates `reply_to_message` at all, that `from.is_bot` is
+`true` on the bot's own messages (this is what drives "your message" vs "their
+own message"), and that a reply to media carries `caption` rather than `text`.
+
+**Step 1 — reply to the coordinator.** From the coordinator:
+
+```sh
+ib tgsend "Ready to merge — squash first, or keep the history as-is?"
+```
+
+In Telegram, swipe-reply to that message and type `yes, squash it`. Expected:
+
+```
+<channel source="telegram" user="<you>" ts="..." message_id="<M>" in_reply_to="<N>">
+Replying to (your message): "Ready to merge — squash first, or keep the history as-is?"
+yes, squash it
+</channel>
+```
+
+Confirm three things: `in_reply_to` matches the `<N>` `tgsend` printed, the
+quote is the message you swiped on, and it says **(your message)** — if it says
+`(their own message)`, the `from.is_bot` assumption is wrong and that is a bug
+worth reporting.
+
+**Step 2 — reply to your own message.** Text your bot something, then
+swipe-reply to *your own* message. Expected: the same shape reading
+`Replying to (their own message): "<what you texted>"`.
+
+**Step 3 — restart, then reply (the case reactions FAIL and replies must not).**
+Restart `ib watch`, then swipe-reply to a message sent BEFORE the restart.
+Expected: the preview is **still there**, unlike the reaction case in 4.9 step 3
+— the replied-to text rides in the update, not the memory cache. A degraded
+`Replying to message <N>` here means the embedded text was not read; that is a
+bug, not the documented degradation.
+
+**Step 4 — reply to a photo.** Send yourself a photo with a caption, then
+swipe-reply to it. Expected: the caption appears as the preview. A photo with NO
+caption is expected to degrade to `Replying to message <N>` (nothing to quote) —
+that one is correct behavior.
+
+**Step 5 — ordinary message (the negative case).** Type a plain message, no
+swipe. Expected: NO `in_reply_to` attribute and NO `Replying to` line — exactly
+what you saw in 4.2. Anything extra on an ordinary message is a bug.
+
 ## 5. Things to watch in early use
 
 These aren't pre-merge blockers — they're things to keep an eye on as you

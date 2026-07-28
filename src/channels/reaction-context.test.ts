@@ -1,5 +1,10 @@
 /**
- * Integration test for reaction context — the loop the unit tests can't see.
+ * Integration test for message context — the loop the unit tests can't see.
+ * Covers both ways a coordinator learns WHICH message the user meant: a
+ * REACTION (an emoji plus a bare id, resolved through the in-memory cache) and
+ * a REPLY (Telegram embeds the whole replied-to Message, so no cache is
+ * involved). They share this harness because they share the delivery path; the
+ * reply tests live at the bottom.
  *
  * Unit tests cover each half in isolation. What actually has to work is the
  * whole round trip, across two objects that only meet through a module-level
@@ -53,7 +58,7 @@ import {
   resetStateDir as resetLastMsgStateDir,
 } from "./last-message-cache";
 import { setInboundDir, resetInboundDir } from "./inbound-store";
-import type { TelegramUpdate } from "./types";
+import type { TelegramUpdate, TelegramMessage } from "./types";
 
 const CHAT_ID = "100";
 
@@ -142,6 +147,19 @@ function textUpdate(updateId: number, messageId: number, text: string): Telegram
       text,
     },
   };
+}
+
+/** A swipe-reply: an ordinary inbound message that also carries the FULL
+ *  replied-to Message in `reply_to_message`, the way Telegram sends it. */
+function replyUpdate(
+  updateId: number,
+  messageId: number,
+  text: string,
+  replied: TelegramMessage,
+): TelegramUpdate {
+  const update = textUpdate(updateId, messageId, text);
+  update.message!.reply_to_message = replied;
+  return update;
 }
 
 describe("reaction context: outbound send → id echo → reaction carries the text", () => {
@@ -287,5 +305,74 @@ describe("reaction context: outbound send → id echo → reaction carries the t
     expect(block).not.toContain("unknown");
     // And the id echo — the half that survives a restart — still did its job
     // above, which is exactly why this degradation is acceptable.
+  });
+
+  /* ---------------------------------------------------------------- */
+  /*  Reply context — same loop, different update field                */
+  /* ---------------------------------------------------------------- */
+
+  test("the full loop: tgsend, then a swipe-reply quoting that message", async () => {
+    const { telegramSend } = await import("../ib-commands");
+    const sent = await telegramSend("Ready to merge — squash first, or keep the history?");
+    expect(sent.message).toBe("ok (message_id 1584)");
+
+    pendingUpdates.push(
+      replyUpdate(1, 1590, "yes, squash it", {
+        message_id: 1584,
+        chat: { id: Number(CHAT_ID) },
+        from: { id: 42, is_bot: true, username: "mybot" },
+        text: "Ready to merge — squash first, or keep the history?",
+      }),
+    );
+    await waitFor(() => coordinatorBlocks.length >= 1);
+
+    // Proves the wiring the unit tests cannot see: normalize() populated
+    // `replyTo` from the raw update and wrapChannelReminder rendered it.
+    const block = coordinatorBlocks[0]!;
+    const lines = block.split("\n");
+    expect(lines[0]).toContain('message_id="1590"');
+    expect(lines[0]).toContain('in_reply_to="1584"');
+    expect(lines[1]).toBe(
+      'Replying to (your message): "Ready to merge — squash first, or keep the history?"',
+    );
+    expect(lines[2]).toBe("yes, squash it");
+  });
+
+  /* The counterpart to RESTART GAP above, and the structural difference between
+   * the two features: a reaction carries only an id, so an empty cache costs it
+   * the preview. A reply carries the whole replied-to Message, so the SAME
+   * restart costs it nothing. */
+  test("RESTART GAP does not exist for replies — an empty cache changes nothing", async () => {
+    const { telegramSend } = await import("../ib-commands");
+    await telegramSend("Ready to merge — squash first, or keep the history?");
+
+    resetMessageCache(); // <- the restart that breaks the reaction path
+
+    pendingUpdates.push(
+      replyUpdate(1, 1590, "yes, squash it", {
+        message_id: 1584,
+        chat: { id: Number(CHAT_ID) },
+        from: { id: 42, is_bot: true, username: "mybot" },
+        text: "Ready to merge — squash first, or keep the history?",
+      }),
+    );
+    await waitFor(() => coordinatorBlocks.length >= 1);
+
+    const block = coordinatorBlocks[0]!;
+    expect(block).toContain('in_reply_to="1584"');
+    expect(block).toContain(
+      'Replying to (your message): "Ready to merge — squash first, or keep the history?"',
+    );
+  });
+
+  test("an ordinary inbound message gains nothing — no reply line, no attribute", async () => {
+    pendingUpdates.push(textUpdate(1, 900, "just talking, not replying"));
+    await waitFor(() => coordinatorBlocks.length >= 1);
+
+    const block = coordinatorBlocks[0]!;
+    expect(block).not.toContain("in_reply_to");
+    expect(block).not.toContain("Replying to");
+    // The body is still the second line — nothing was inserted above it.
+    expect(block.split("\n")[1]).toBe("just talking, not replying");
   });
 });

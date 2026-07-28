@@ -316,6 +316,28 @@ describe("humanSize", () => {
   });
 });
 
+/* The two reply-hint variants, as hardcoded literals — an oracle independent of
+ * the constants in dispatcher.ts, which is the point. The reaction variant is a
+ * strict SUPERSET of the base one, so `toContain` on any part of the base
+ * passes for both and cannot tell them apart; the tests below pin the hint as a
+ * whole trailing line instead. Ordinary message blocks must not carry the
+ * echoed-id sentence — it is a per-message context tax that only reaction
+ * blocks have a use for. */
+const BASE_REPLY_HINT =
+  'To reply on Telegram, run `ib tgsend "<your message>"`. ' +
+  "To react to the latest message, run `ib tgreact <emoji>` " +
+  "(e.g. `ib tgreact 👍`), or target a specific one with " +
+  "`ib tgreact <emoji> --message-id <id>`.";
+const ECHO_SENTENCE =
+  "`ib tgsend` echoes the sent `message_id`; keep it to match later reactions.";
+const REACTION_REPLY_HINT = `${BASE_REPLY_HINT} ${ECHO_SENTENCE}`;
+
+/** The hint is the last line of every wrapped block. */
+function hintLine(block: string): string {
+  const lines = block.split("\n");
+  return lines[lines.length - 1]!;
+}
+
 describe("wrapChannelReminder", () => {
   test("single message: no count, no separators, inline reply hint, message_id", () => {
     const out = wrapChannelReminder("12345", [
@@ -324,8 +346,8 @@ describe("wrapChannelReminder", () => {
     expect(out).toContain('<channel source="telegram" user="alice" ts="2026-05-02T00:00:00.000Z" message_id="42">');
     expect(out).toContain("hello");
     expect(out).toContain("</channel>");
-    expect(out).toContain("To reply on Telegram, run `ib tgsend");
-    expect(out).toContain("ib tgreact");
+    expect(hintLine(out)).toBe(BASE_REPLY_HINT);
+    expect(out).not.toContain(ECHO_SENTENCE);
     expect(out).not.toContain("count=");
     expect(out).not.toContain("---");
   });
@@ -344,6 +366,10 @@ describe("wrapChannelReminder", () => {
     expect(out).toContain("one\n---\ntwo\n---\nthree");
     // Exactly 2 separators (between 3 messages).
     expect(out.split("\n---\n").length).toBe(3);
+    // The coalesced branch builds its hint separately from the single-message
+    // branch, so it gets its own pin — same base hint, no echo sentence.
+    expect(hintLine(out)).toBe(BASE_REPLY_HINT);
+    expect(out).not.toContain(ECHO_SENTENCE);
   });
 
   test("escapes attribute special chars", () => {
@@ -419,7 +445,10 @@ describe("wrapReactionReminder", () => {
       chatId: "100", messageId: 1, userId: "7", username: "adam", ts: "t",
       added: ["👍"], removed: [],
     });
-    expect(out).toContain("echoes the sent `message_id`");
+    // Pinned whole: the base hint plus the echo sentence, in that order. This
+    // is the ONLY block type that carries the sentence — see the matching
+    // negative assertions in the `wrapChannelReminder` describe.
+    expect(hintLine(out)).toBe(REACTION_REPLY_HINT);
   });
 });
 
@@ -516,9 +545,9 @@ describe("wrapReactionReminder with a text preview", () => {
       });
     }
 
-    // Pins the `<channel>` payload only — the trailing blank line and
-    // REPLY_HINT that follow are deliberately NOT asserted, since the hint
-    // changed with this feature.
+    // Pins the `<channel>` payload only — the trailing blank line and the
+    // reaction hint that follow are deliberately NOT asserted, since that hint
+    // changed with this feature (it is pinned on its own above).
     test("added: the <channel> payload, spelled out line by line", () => {
       const out = wrapReactionReminder({ ...base, added: ["👍"], removed: [] }, null);
       const lines = out.split("\n");

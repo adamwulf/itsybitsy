@@ -1366,19 +1366,29 @@ export function wrapChannelReminder(chatId: string, messages: NormalizedMessage[
 
 /** Hint appended to every wrapped channel block telling the coordinator how to
  *  reply and react on Telegram. Centralized so the two `wrapChannelReminder`
- *  branches (single + coalesced) and any future caller stay in sync.
- *
- *  The closing sentence is deliberately terse. This hint rides along on EVERY
- *  channel block, so context isn't free — but the coordinator has to know the
- *  echoed id is worth retaining, otherwise the durable half of reaction
- *  correlation (id in the coordinator's own history, next to the text it sent)
- *  never actually happens. */
+ *  branches (single + coalesced) and any future caller stay in sync. */
 const REPLY_HINT =
   'To reply on Telegram, run `ib tgsend "<your message>"`. ' +
   "To react to the latest message, run `ib tgreact <emoji>` " +
   "(e.g. `ib tgreact 👍`), or target a specific one with " +
-  "`ib tgreact <emoji> --message-id <id>`. " +
-  "`ib tgsend` echoes the sent `message_id` — keep it so you can match a later reaction.";
+  "`ib tgreact <emoji> --message-id <id>`.";
+
+/** {@link REPLY_HINT} plus one sentence about the echoed id, used ONLY on
+ *  reaction blocks. Derived from `REPLY_HINT` rather than spelled out a second
+ *  time, so the two variants cannot drift.
+ *
+ *  Reaction-only on purpose. Every inbound Telegram message carries a hint, so
+ *  putting this sentence in the shared base would make it a permanent
+ *  ~75-character context tax on ordinary chatter, paid to serve the rare
+ *  reaction case.
+ *
+ *  The obvious objection: the coordinator now learns the id is worth keeping
+ *  only AFTER a reaction arrives, never before it sends. That's acceptable —
+ *  `ib tgsend` prints `ok (message_id 1584)` either way, so the id is already
+ *  in the coordinator's context. This sentence is a nudge to RETAIN the id, not
+ *  the mechanism that delivers it. */
+const REACTION_REPLY_HINT =
+  REPLY_HINT + " `ib tgsend` echoes the sent `message_id`; keep it to match later reactions.";
 
 /** Wrap a reaction event in a channel-reminder block. The body is a
  *  human-readable summary, e.g. `Reacted 👍 to message 123` or
@@ -1396,8 +1406,8 @@ const REPLY_HINT =
  *  coordinator has to guess at. Omit `preview` (or pass null) and you get the
  *  id-only form — the required behavior on a cache miss. The summary line and
  *  the `<channel>` body are then byte-identical to the pre-feature output; the
- *  trailing `REPLY_HINT` is not (it gained a sentence), and it is part of the
- *  same returned string.
+ *  trailing hint is not ({@link REACTION_REPLY_HINT} adds a sentence), and it
+ *  is part of the same returned string.
  *
  *  SYNC AND PURE ON PURPOSE. The cache lookup lives in `resolveReactionPreview`
  *  and the resolved preview is passed in, so this stays a formatter with no
@@ -1443,7 +1453,7 @@ export function wrapReactionReminder(
     body,
     `</channel>`,
     ``,
-    REPLY_HINT,
+    REACTION_REPLY_HINT,
   ].join("\n");
 }
 

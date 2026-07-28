@@ -575,11 +575,11 @@ block body are byte-identical to what they were before this feature.** No empty
 quotes, no `(unknown)`, no error. Reaction delivery must never break because of
 this.
 
-Precisely: the `<channel>…</channel>` payload is unchanged. The trailing
-`REPLY_HINT` is NOT — it gained a sentence (§9.5) and it is part of the same
-returned string, so "the whole output is byte-for-byte identical" would be
-false. The property that matters is that nothing about a cache miss leaks into
-what the coordinator reads as the event.
+Precisely: the `<channel>…</channel>` payload is unchanged. The trailing hint is
+NOT — a reaction block gets `REACTION_REPLY_HINT`, one sentence longer (§9.5),
+and it is part of the same returned string, so "the whole output is
+byte-for-byte identical" would be false. The property that matters is that
+nothing about a cache miss leaks into what the coordinator reads as the event.
 
 A miss is the EXPECTED case, not an edge case: `ib watch` restarted (the common
 one — it goes down and outbound messages queue for a stretch), the record was
@@ -596,12 +596,24 @@ established by review, not by the suite. `reaction-context.test.ts`
 ("RESTART GAP") covers the same property end-to-end by wiping the cache
 mid-test.
 
-### 9.5 `REPLY_HINT`
+### 9.5 `REPLY_HINT` / `REACTION_REPLY_HINT`
 
-Gains one sentence: ``` `ib tgsend` echoes the sent `message_id` — keep it so
-you can match a later reaction. ``` This hint rides along on every channel
-block so context isn't free, but without it the coordinator doesn't know the
-echoed id is worth retaining and the durable half never actually happens.
+`REPLY_HINT` is unchanged from pre-feature — ordinary message blocks are
+byte-identical to what they were. The extra sentence lives in
+`REACTION_REPLY_HINT`, which is `REPLY_HINT` plus:
+
+``` `ib tgsend` echoes the sent `message_id`; keep it to match later reactions. ```
+
+`REACTION_REPLY_HINT` is derived from `REPLY_HINT` in code, not spelled out
+again, so the two cannot drift. Reaction blocks are the only thing that uses
+it: on the shared base the sentence would be a permanent ~75-character context
+tax on every inbound Telegram message, paid to serve the rare reaction case.
+
+The trade this makes: the coordinator learns the id is worth keeping only AFTER
+a reaction arrives, never before it sends. Acceptable, because `ib tgsend`
+prints `ok (message_id 1584)` regardless (§9.1) — the id is already in the
+coordinator's context either way. The sentence is a nudge to RETAIN it, not the
+mechanism that delivers it.
 
 ### 9.6 Deliberately NOT built
 
@@ -620,7 +632,8 @@ echoed id is worth retaining and the durable half never actually happens.
   `extractMessageId`, `formatSendOk`.
 - `src/channels/dispatcher.ts` — `ReactionPreview`, `resolveReactionPreview`,
   `formatReactionPreview`, `whoseMessage`; `wrapReactionReminder` takes an
-  optional preview; `deliver()` seeds the cache; `REPLY_HINT`.
+  optional preview; `deliver()` seeds the cache; `REACTION_REPLY_HINT`
+  (`REPLY_HINT` itself is untouched).
 - Tests: `message-cache.test.ts`, `reaction-context.test.ts` (new); additions to
   `dispatcher.test.ts`, `outbox.test.ts`.
 - No change to `ib-commands.ts` or `index.ts` — `telegramSend` already returns

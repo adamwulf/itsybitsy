@@ -54,6 +54,18 @@
  *     awaiting state. The y/n message itself is never forwarded.
  *   - `</channel>` substrings are stripped from inbound text/caption before
  *     wrapping (defense against forged closing tags).
+ *   - Reaction notices carry a TEXT PREVIEW of the reacted-to message when we
+ *     can resolve it, plus whose message it was — `Reacted 👍 to message 1584
+ *     (your message): "..."`. Resolution goes through the in-memory
+ *     `message-cache` (see that module for why it is memory-only), seeded by
+ *     `deliver()` for inbound and by the outbox for outbound. A MISS IS
+ *     NORMAL — after an `ib watch` restart the cache is empty — and must
+ *     produce the id-only form: the reaction summary line and the `<channel>`
+ *     block body are byte-identical to the pre-feature output. (The trailing
+ *     reply hint is not, and shares the same returned string — it gained one
+ *     sentence about the echoed id.) The restart-proof complement is
+ *     `ib tgsend` echoing the sent `message_id` back to the coordinator,
+ *     which puts the id in its own history.
  *   - Telegram slash-command passthrough: an inbound message whose trimmed
  *     body is exactly `/context`, `/clear`, or starts with `/compact`
  *     (optionally followed by arguments) is sent raw (no `<channel>`
@@ -96,9 +108,17 @@ import type {
   MessageReactionUpdated,
   ReactionType,
   PhotoSize,
+  TelegramUser,
 } from "./types";
 import { clearCachedChatId } from "./chat-id-cache";
 import { writeLastMessage } from "./last-message-cache";
+import {
+  lookupMessage,
+  recordInboundMessage,
+  truncateCodePoints,
+  type CachedMessage,
+  type MessageDirection,
+} from "./message-cache";
 import { storeInboundFile } from "./inbound-store";
 
 /** Delivery hook the dispatcher calls per coalesced batch. Defaults to
@@ -311,6 +331,34 @@ export interface NormalizedMessage {
    *  Kept separate from `body` because `body` is provisional until the download
    *  resolves. Undefined when there was no caption. */
   caption?: string;
+  /** Present ONLY when this message explicitly replied to another one
+   *  (Telegram's swipe-reply). Undefined for ordinary typed messages — which is
+   *  precisely what keeps an ordinary block byte-identical to its pre-feature
+   *  output, since every reply-related rendering hangs off this field being
+   *  set. Built by {@link extractReplyContext}. */
+  replyTo?: ReplyContext;
+}
+
+/** What we surface about the message a reply targeted.
+ *
+ *  Resolved once at normalize time and rendered later, so `wrapChannelReminder`
+ *  stays a pure formatter (same split as {@link ReactionPreview} /
+ *  `resolveReactionPreview` on the reaction side).
+ *
+ *  `text` is `""` when nothing was resolvable — the id-only form, and the same
+ *  graceful degradation rule reactions follow: never throw, never render empty
+ *  quotes, never break delivery. `direction` is null when we genuinely cannot
+ *  tell whose message it was; the whose-message clause is then OMITTED rather
+ *  than guessed, because "(your message)" on the user's own message actively
+ *  misleads the coordinator, which is worse than saying nothing. */
+export interface ReplyContext {
+  /** The replied-to message's id, or 0 when Telegram gave no usable one.
+   *  Rendered through `messageIdAttr`, so 0 means no `in_reply_to` attribute. */
+  messageId: number;
+  /** Preview of the replied-to text, already single-lined, truncated and
+   *  `stripChannelClose`-d by {@link formatMessagePreview}. `""` = unresolvable. */
+  text: string;
+  direction: MessageDirection | null;
 }
 
 /** What we extract from one `message_reaction` update for delivery to the
@@ -932,6 +980,25 @@ export class TelegramDispatcher {
           );
         }
       }
+
+      // Also seed the in-memory message cache so a later reaction to any of
+      // these messages can carry a text preview. EVERY message in the batch is
+      // recorded, not just the newest: a coalesced batch delivers several
+      // messages and the user can react to any one of them. Best-effort, same
+      // treatment as the last-message write above — a cache failure must never
+      // affect delivery. (Distinct from the last-message cache in every way
+      // that matters: that one persists a single id to disk for `ib tgreact`;
+      // this one holds recent TEXT in memory only, and dies with the process.)
+      for (const m of messages) {
+        if (m.messageId <= 0) continue;
+        try {
+          recordInboundMessage(chatId, m.messageId, m.body);
+        } catch (err) {
+          logCtx.fn(
+            `Telegram dispatcher: message cache write failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
     }
 
     // No attachment-fallback reply here anymore: attachments are downloaded in
@@ -1076,7 +1143,13 @@ export class TelegramDispatcher {
       body = "[user sent message with no text]";
     }
 
-    return { chatId, messageId, userId, username, ts, body, attachmentType, attachment, caption };
+    // Undefined unless the user actually swipe-replied — an ordinary message
+    // must gain nothing at all from this feature. Resolved here rather than at
+    // wrap time so `wrapChannelReminder` stays pure (the cache probe inside
+    // `extractReplyContext` is the state it would otherwise have to touch).
+    const replyTo = extractReplyContext(msg, chatId) ?? undefined;
+
+    return { chatId, messageId, userId, username, ts, body, attachmentType, attachment, caption, replyTo };
   }
 
   /** Download a message's attachment and rewrite its body with the resolved
@@ -1233,8 +1306,12 @@ export class TelegramDispatcher {
    *  send failure is logged and the notice is dropped rather than re-prompting
    *  the user or buffering. */
   private async deliverReaction(reaction: NormalizedReaction): Promise<void> {
-    const wrapped = wrapReactionReminder(reaction);
     try {
+      // Inside the try, not above it: "reaction delivery must never break" is a
+      // hard requirement, and this line now runs Array.from/join on
+      // user-influenced text via the preview path. Better true by construction
+      // than true by argument — a throw here would otherwise escape unlogged.
+      const wrapped = wrapReactionReminder(reaction, resolveReactionPreview(reaction));
       const result = await sendCtx.fn(wrapped, { fromAgent: TELEGRAM_SENTINEL, raw: true });
       if (!result.ok) {
         logCtx.fn(
@@ -1289,7 +1366,14 @@ export function splitSlashCommands(messages: NormalizedMessage[]): {
 }
 
 /** Wrap a coalesced per-chat batch in the channel-reminder block format
- *  defined in Phase 0. */
+ *  defined in Phase 0.
+ *
+ *  A message that swipe-replied to another one gains an `in_reply_to` attribute
+ *  and a leading `Replying to …` line; see {@link formatReplyLine}. A message
+ *  that did not — i.e. ordinary typed chatter, the overwhelming majority — is
+ *  rendered EXACTLY as it was before replies were handled. That is a hard
+ *  requirement, not a nicety: `replyTo` is undefined for those and every
+ *  addition below is gated on it. */
 export function wrapChannelReminder(chatId: string, messages: NormalizedMessage[]): string {
   if (messages.length === 0) {
     throw new Error("wrapChannelReminder: messages is empty");
@@ -1298,13 +1382,15 @@ export function wrapChannelReminder(chatId: string, messages: NormalizedMessage[
 
   if (messages.length === 1) {
     const m = messages[0]!;
-    return [
-      `<channel source="telegram" user="${escapeAttr(m.username)}" ts="${escapeAttr(m.ts)}"${messageIdAttr("message_id", m.messageId)}>`,
-      m.body,
-      `</channel>`,
-      ``,
-      REPLY_HINT,
-    ].join("\n");
+    const lines: string[] = [
+      `<channel source="telegram" user="${escapeAttr(m.username)}" ts="${escapeAttr(m.ts)}"${messageIdAttr("message_id", m.messageId)}${replyToAttr(m.replyTo)}>`,
+    ];
+    // The id lives in the `in_reply_to` attribute here, so the body line omits
+    // it — the single-message block has an attribute slot to put it in.
+    const reply = formatReplyLine(m.replyTo, false);
+    if (reply !== "") lines.push(reply);
+    lines.push(m.body, `</channel>`, ``, REPLY_HINT);
+    return lines.join("\n");
   }
 
   const first = messages[0]!;
@@ -1315,12 +1401,57 @@ export function wrapChannelReminder(chatId: string, messages: NormalizedMessage[
   );
   for (let i = 0; i < messages.length; i++) {
     if (i > 0) lines.push("---");
-    lines.push(messages[i]!.body);
+    // A coalesced batch has ONE header for N messages, so there is no per-message
+    // attribute slot: a block-level `in_reply_to` would be ambiguous about which
+    // of the N it belonged to. The reply line therefore sits immediately above
+    // the body it belongs to (binding it to THAT message, not the block) and
+    // spells the id out inline, which is the only place left to carry it.
+    const m = messages[i]!;
+    const reply = formatReplyLine(m.replyTo, true);
+    if (reply !== "") lines.push(reply);
+    lines.push(m.body);
   }
   lines.push(`</channel>`);
   lines.push(``);
   lines.push(REPLY_HINT);
   return lines.join("\n");
+}
+
+/** The ` in_reply_to="<id>"` attribute, or "" when there is no reply or no
+ *  usable id. Same `messageIdAttr` convention as `message_id`: an unusable id
+ *  is omitted entirely rather than emitted as `="0"`, so anything the agent
+ *  sees here is a valid `ib tgreact --message-id` / reply target. */
+function replyToAttr(reply: ReplyContext | undefined): string {
+  if (!reply) return "";
+  return messageIdAttr("in_reply_to", reply.messageId);
+}
+
+/** Render the `Replying to …` line that precedes a replying message's body, or
+ *  "" when there is no reply (the ordinary case) or nothing to say about it.
+ *
+ *  Shapes, in the order they degrade:
+ *
+ *      Replying to (your message): "Ready to merge — squash first…"   ← ideal
+ *      Replying to: "Ready to merge — squash first…"                  ← whose unknown
+ *      Replying to message 1584 (your message)                        ← text unresolvable
+ *      Replying to message 1584                                       ← neither
+ *
+ *  `includeId` distinguishes the two call sites: false for a single-message
+ *  block, whose header already carries `in_reply_to`, and true inside a
+ *  coalesced batch, where there is no per-message attribute. The id is spelled
+ *  out inline whenever the TEXT is missing regardless, because "Replying to
+ *  (your message)" with no quote and no number identifies nothing.
+ *
+ *  Never renders empty quotes: no text means no `: "…"` clause at all. */
+function formatReplyLine(reply: ReplyContext | undefined, includeId: boolean): string {
+  if (!reply) return "";
+  const whose = reply.direction ? ` (${whoseMessage(reply.direction)})` : "";
+  if (reply.text !== "") {
+    const idPart = includeId && reply.messageId > 0 ? ` message ${reply.messageId}` : "";
+    return `Replying to${idPart}${whose}: "${reply.text}"`;
+  }
+  if (reply.messageId > 0) return `Replying to message ${reply.messageId}${whose}`;
+  return "";
 }
 
 /** Hint appended to every wrapped channel block telling the coordinator how to
@@ -1332,13 +1463,49 @@ const REPLY_HINT =
   "(e.g. `ib tgreact 👍`), or target a specific one with " +
   "`ib tgreact <emoji> --message-id <id>`.";
 
+/** {@link REPLY_HINT} plus one sentence about the echoed id, used ONLY on
+ *  reaction blocks. Derived from `REPLY_HINT` rather than spelled out a second
+ *  time, so the two variants cannot drift.
+ *
+ *  Reaction-only on purpose. Every inbound Telegram message carries a hint, so
+ *  putting this sentence in the shared base would make it a permanent
+ *  ~75-character context tax on ordinary chatter, paid to serve the rare
+ *  reaction case.
+ *
+ *  The obvious objection: the coordinator now learns the id is worth keeping
+ *  only AFTER a reaction arrives, never before it sends. That's acceptable —
+ *  `ib tgsend` prints `ok (message_id 1584)` either way, so the id is already
+ *  in the coordinator's context. This sentence is a nudge to RETAIN the id, not
+ *  the mechanism that delivers it. */
+const REACTION_REPLY_HINT =
+  REPLY_HINT + " `ib tgsend` echoes the sent `message_id`; keep it to match later reactions.";
+
 /** Wrap a reaction event in a channel-reminder block. The body is a
  *  human-readable summary, e.g. `Reacted 👍 to message 123` or
  *  `Removed reaction 👍 from message 123`. Distinct `kind="reaction"`
  *  attribute so the coordinator can tell a reaction event apart from a text
  *  message. The reacted-to `message_id` is surfaced so the coordinator can
- *  reply or react back to that exact message. */
-export function wrapReactionReminder(reaction: NormalizedReaction): string {
+ *  reply or react back to that exact message.
+ *
+ *  When `preview` is supplied, the reacted-to message's text and whose it was
+ *  are appended:
+ *
+ *      Reacted 👍 to message 1584 (your message): "Ready to merge — squash?…"
+ *
+ *  which is the difference between an actionable reaction and an id the
+ *  coordinator has to guess at. Omit `preview` (or pass null) and you get the
+ *  id-only form — the required behavior on a cache miss. The summary line and
+ *  the `<channel>` body are then byte-identical to the pre-feature output; the
+ *  trailing hint is not ({@link REACTION_REPLY_HINT} adds a sentence), and it
+ *  is part of the same returned string.
+ *
+ *  SYNC AND PURE ON PURPOSE. The cache lookup lives in `resolveReactionPreview`
+ *  and the resolved preview is passed in, so this stays a formatter with no
+ *  state or IO — which is what makes it directly testable. */
+export function wrapReactionReminder(
+  reaction: NormalizedReaction,
+  preview?: ReactionPreview | null,
+): string {
   const parts: string[] = [];
   // Each emoji is stripped of </channel> defensively (emoji never contain it,
   // but the body is user-influenced data, so we stay consistent). Each clause
@@ -1351,14 +1518,260 @@ export function wrapReactionReminder(reaction: NormalizedReaction): string {
   if (reaction.removed.length > 0) {
     parts.push(`Removed reaction ${reaction.removed.map(stripChannelClose).join(" ")} from ${msgRef}`);
   }
-  const body = parts.join("; ");
+  let body = parts.join("; ");
+  // The suffix is appended ONCE to the joined body rather than per clause: both
+  // clauses of a changed reaction name the same message, so repeating the
+  // preview would be pure noise. `(whose): "text"` binds naturally to the
+  // trailing `message N` in every variant — added, removed, and changed.
+  //
+  // No preview → `body` is untouched, which is exactly the pre-feature output.
+  // That is the required fallback, not an incidental one: a cache miss is the
+  // EXPECTED case after an `ib watch` restart.
+  if (preview) {
+    // Trim after stripping, not before: a preview of `" </channel> "` is
+    // blank once the tag is gone, and an empty pair of quotes is worse than no
+    // preview at all. `formatMessagePreview` already guarantees a trimmed
+    // non-empty string, but this function is exported and callable directly, so
+    // it enforces its own contract.
+    const text = stripChannelClose(preview.text).trim();
+    if (text !== "") {
+      body += ` (${whoseMessage(preview.direction)}): "${text}"`;
+    }
+  }
   return [
     `<channel source="telegram" kind="reaction" user="${escapeAttr(reaction.username)}" ts="${escapeAttr(reaction.ts)}"${messageIdAttr("message_id", reaction.messageId)}>`,
     body,
     `</channel>`,
     ``,
-    REPLY_HINT,
+    REACTION_REPLY_HINT,
   ].join("\n");
+}
+
+/** A resolved text preview of the message a reaction targeted, ready to drop
+ *  into the reaction block. `text` is already single-line, truncated, and
+ *  `stripChannelClose`-d by {@link formatMessagePreview}. */
+export interface ReactionPreview {
+  text: string;
+  direction: MessageDirection;
+}
+
+/** Max rendered preview length in CODE POINTS, before the ellipsis. Long enough
+ *  to carry a coordinator's headline question (which is the case that actually
+ *  failed: a 👍 on an either/or is unreadable without seeing the branches),
+ *  short enough that a reaction notice — or the `Replying to …` line that
+ *  precedes a reply's body — stays one tidy line in the transcript.
+ *
+ *  Code points, so an all-emoji preview can be up to 2x this in UTF-16 units.
+ *  Tests asserting this cap must count `Array.from(text).length`. */
+const MESSAGE_PREVIEW_MAX_CHARS = 160;
+
+/** Look up the reacted-to message in the in-memory cache and format a preview,
+ *  or null when we can't. Null is a NORMAL outcome, not an error — the id is
+ *  absent after an `ib watch` restart, after ring eviction, or for any message
+ *  sent before this feature existed. Callers render the id-only form then.
+ *
+ *  Kept as a module function (not a method) so it stays trivially testable and
+ *  so `wrapReactionReminder` can remain sync and pure — the state lookup lives
+ *  here, the formatting lives there. */
+function resolveReactionPreview(reaction: NormalizedReaction): ReactionPreview | null {
+  let cached;
+  try {
+    cached = lookupMessage(reaction.chatId, reaction.messageId);
+  } catch {
+    // lookupMessage does no IO and is documented as total, but a reaction
+    // notice is not worth risking on that promise.
+    return null;
+  }
+  if (!cached) return null;
+  const text = formatMessagePreview(cached.text);
+  if (text === "") return null;
+  return { text, direction: cached.direction };
+}
+
+/** Build the {@link ReplyContext} for a message that swipe-replied to another
+ *  one, or null when there is nothing worth surfacing (no `reply_to_message`,
+ *  or a `reply_to_message` with neither a usable id nor any resolvable text).
+ *  Null is what keeps ordinary messages untouched.
+ *
+ *  TEXT RESOLUTION ORDER — the embedded text wins, always:
+ *   1. `reply_to_message.text` — AUTHORITATIVE. Telegram embeds the whole
+ *      replied-to Message in the update, so this needs no cache, survives an
+ *      `ib watch` restart, and works for a message from months ago. That is the
+ *      structural difference from the reaction path, which gets only an id and
+ *      must hope the ring still holds it.
+ *   2. `reply_to_message.caption` — a reply to a photo/document carries a
+ *      caption instead of text.
+ *   3. The in-memory cache — LAST resort, for the case where Telegram hands us
+ *      an id but no usable text (a reply to a bare photo, a sticker, a poll).
+ *      Expected to miss often; that is fine, see 4.
+ *   4. Nothing resolvable → `text: ""`, rendered as the id-only form.
+ *
+ *  Defensive against every field it reads, and UNIFORMLY so — every property
+ *  read off the update is inside a guard, not just the ones that felt risky
+ *  while writing it. The static type promises a `number` message_id and a
+ *  `boolean` is_bot; `extractMessageId` is the standing lesson that Telegram
+ *  does not always deliver what the docs imply, and the type checker cannot
+ *  help with a value that arrives from `JSON.parse`. A malformed
+ *  `reply_to_message` degrades to null or to the id-only form — it never throws
+ *  on a delivery path. */
+export function extractReplyContext(msg: TelegramMessage, chatId: string): ReplyContext | null {
+  let replied: TelegramMessage | undefined;
+  try {
+    replied = msg?.reply_to_message;
+  } catch {
+    return null;
+  }
+  if (!replied || typeof replied !== "object") return null;
+
+  // EVERY property read off the untrusted object happens here, inside one
+  // guard; the rest of the function works from these locals. Reading them one
+  // at a time at their point of use is what left `replied.from` exposed at the
+  // call site of `resolveReplyDirection` while the read INSIDE that function
+  // was guarded — two of three reads defended, the one between them not, and no
+  // way for a reader to tell whether the gap was deliberate.
+  //
+  // A throwing getter is unreachable from real Telegram (updates come from
+  // `JSON.parse`, which never produces accessors), so this defends against
+  // nothing that can actually happen — but that is equally true of the other
+  // guards on this path, and a consistent posture is worth more than saving
+  // four lines. An object whose property access throws is not a Message, so
+  // null (no reply context) is the right answer for all of it.
+  let rawId: unknown;
+  let rawText: unknown;
+  let rawCaption: unknown;
+  let from: TelegramUser | undefined;
+  try {
+    rawId = (replied as { message_id?: unknown }).message_id;
+    rawText = (replied as { text?: unknown }).text;
+    rawCaption = (replied as { caption?: unknown }).caption;
+    from = replied.from;
+  } catch {
+    return null;
+  }
+
+  // `Number.isFinite` is load-bearing, not decoration: without it `Infinity`
+  // is `typeof "number"` and `> 0`, and would render as `in_reply_to="Infinity"`
+  // and `Replying to message Infinity`. Same for `NaN` via the `> 0` test.
+  const messageId =
+    typeof rawId === "number" && Number.isFinite(rawId) && rawId > 0 ? rawId : 0;
+
+  // Looked up at most once, and only if step 1/2 came up empty or the direction
+  // could not be read off `from` — a cache probe is cheap but pointless when
+  // the update already answered both questions.
+  let cached: CachedMessage | null | undefined;
+  const lookup = (): CachedMessage | null => {
+    if (cached === undefined) {
+      try {
+        cached = lookupMessage(chatId, messageId);
+      } catch {
+        // lookupMessage is documented total and does no IO, but a reply notice
+        // is not worth risking on that promise.
+        cached = null;
+      }
+    }
+    return cached;
+  };
+
+  const embedded = firstNonEmptyString(rawText, rawCaption);
+  const raw = embedded !== "" ? embedded : (lookup()?.text ?? "");
+  // One formatter for both paths, so a reply preview and a reaction preview of
+  // the same message render identically (and there is only one truncation site
+  // to get right).
+  const text = formatMessagePreview(raw);
+
+  const direction = resolveReplyDirection(from, lookup);
+
+  // Neither an id to target nor a word of text: there is no line to write and
+  // no attribute to emit, so say nothing at all rather than emit a stub.
+  if (messageId <= 0 && text === "") return null;
+  return { messageId, text, direction };
+}
+
+/** First of `values` that is a non-empty string, or `""`. Guards the runtime
+ *  type as well as presence — `text` is optional AND not guaranteed to be a
+ *  string once it exists. */
+function firstNonEmptyString(...values: unknown[]): string {
+  for (const v of values) {
+    if (typeof v === "string" && v !== "") return v;
+  }
+  return "";
+}
+
+/** Whose message the reply targeted, or null when undeterminable.
+ *
+ *  `from.is_bot` is authoritative: everything the coordinator sends goes out
+ *  through the bot, so a bot sender means "your message" and a human sender
+ *  means "their own message". The cache's recorded direction is the fallback
+ *  for updates that omit `from` entirely.
+ *
+ *  Returns null rather than guessing when both are unavailable — the caller
+ *  drops the clause. A confident wrong attribution reads as fact and would send
+ *  the coordinator down the wrong path; no clause merely says less. */
+function resolveReplyDirection(
+  from: TelegramUser | undefined,
+  lookup: () => CachedMessage | null,
+): MessageDirection | null {
+  let isBot: unknown;
+  try {
+    isBot = from?.is_bot;
+  } catch {
+    isBot = undefined;
+  }
+  if (typeof isBot === "boolean") return isBot ? "out" : "in";
+  return lookup()?.direction ?? null;
+}
+
+/** Squeeze a message down to a single short line. Shared by both context
+ *  paths: the preview of a REACTED-to message (text from the in-memory cache)
+ *  and the preview of a REPLIED-to message (text embedded in the update). One
+ *  formatter, so the two can never render the same text differently — and one
+ *  truncation path, since {@link truncateCodePoints} is delicate enough that a
+ *  second copy would be a liability.
+ *
+ *  Takes the first 1-2 non-empty lines — coordinator messages lead with the
+ *  headline, so lines 1-2 carry the signal and everything after is detail —
+ *  joins them with a space so the block stays on one line, collapses interior
+ *  whitespace runs, then truncates to {@link MESSAGE_PREVIEW_MAX_CHARS} with an
+ *  explicit `…` so truncation is visible rather than silently misleading.
+ *
+ *  `stripChannelClose` runs here because this is where untrusted text enters the
+ *  formatter: inbound previews are the user's own words, and this file already
+ *  applies that defense to every other user-influenced string. (Outbound
+ *  previews are the coordinator's own text, but they get the same treatment —
+ *  no reason to have two paths.) Returns "" when nothing survives. */
+export function formatMessagePreview(text: string): string {
+  const lines = stripChannelClose(String(text ?? ""))
+    // Lone \r and the Unicode line/paragraph separators would break out of the
+    // one-line shape just like \n does; normalize them all before splitting.
+    // Escapes, never literals \u2014 U+2028/U+2029 are invisible in an editor.
+    .replace(/[\r\u2028\u2029]/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  const head = lines.slice(0, 2).join(" ").replace(/\s+/g, " ").trim();
+  if (head === "") return "";
+  // Code points, not code units, for BOTH the cut and the "did we cut?" test —
+  // `truncateCodePoints` owns both so they can't drift apart. A unit-counting
+  // guard would append "…" to strings it never truncated (160 emoji is 160 code
+  // points but 320 code units), and a unit-counting cut would sever pairs.
+  //
+  // This cap is applied on top of the storage cap rather than trusting it: the
+  // steps above SHRINK before this MEASURES (all but the first two lines are
+  // dropped, whitespace runs collapse), so a 300-unit cached string can arrive
+  // here well under the limit and this guard would never fire. Truncating
+  // correctly at BOTH sites is what keeps a severed pair from reaching the
+  // coordinator.
+  const { text: cut, truncated } = truncateCodePoints(head, MESSAGE_PREVIEW_MAX_CHARS);
+  if (!truncated) return cut;
+  return cut.trimEnd() + "…";
+}
+
+/** Label identifying whose message a reaction landed on, or which message a
+ *  reply targeted. The distinction is the point of surfacing direction at all:
+ *  a 👍 on something the coordinator asked is an answer, a 👍 on the user's own
+ *  message is an acknowledgement — and the same asymmetry holds for a reply. */
+function whoseMessage(direction: MessageDirection): string {
+  return direction === "out" ? "your message" : "their own message";
 }
 
 /** Render a ` name="id"` channel attribute, or the empty string when the id is

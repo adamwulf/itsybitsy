@@ -401,3 +401,428 @@ ib tgsendfile <path> [caption] --document    # send as a document (exact bytes; 
   it hosts gained file paths internally, but `getHealth()` and the TUI are
   untouched. (A future enhancement could surface an "inbound media downloaded"
   indicator, as §5 noted; not built here.)
+
+---
+
+## 9. IMPLEMENTED — Reaction context (2026-07-27)
+
+### 9.0 The problem
+
+§7.2 shipped reaction delivery, but the block carries only an emoji and an id:
+
+```
+<channel source="telegram" kind="reaction" user="Adam" ts="..." message_id="1584">Reacted 👍 to message 1584</channel>
+```
+
+No message-text store existed anywhere — in memory or on disk — so the
+coordinator could not resolve that id to any text. It guessed which message was
+reacted to from sequence and timing: usually right, occasionally wrong, and
+silently degrading whenever messages cross or one queues and arrives late.
+
+The failure that motivated this: the coordinator asked Adam a direct either/or
+question, he replied 👍, and the coordinator had to ask again — because even a
+correctly-identified message doesn't say which branch a 👍 means. Seeing the
+text makes that recoverable.
+
+**Adam mostly reacts to messages the COORDINATOR sent**, so resolving OUTBOUND
+messages is the real feature; inbound is the easy half.
+
+Two complementary mechanisms shipped. They are not redundant: A is durable but
+thin, B is rich but dies with the process.
+
+### 9.1 Half A (durable) — `ib tgsend` echoes the sent message id
+
+**`ib tgsend`'s output contract changed.** It used to print `ok` / `ok (2 parts)`
+/ `queued …`. It now prints the Telegram message id when one is known:
+
+| Situation | Output |
+|---|---|
+| Single message | `ok (message_id 1584)` |
+| Chunked send | `ok (3 parts, message_ids 1584, 1585, 1586)` |
+| Sent, but no id determinable | `ok` |
+| Chunked, no ids determinable | `ok (3 parts)` |
+| `ib watch` not running / >1s | `queued (ib watch may not be running, or Telegram is not configured)` |
+
+The last two rows are the pre-existing strings verbatim — a send whose id we
+can't name degrades to the OLD contract rather than to something new.
+
+Why this is the more durable half: the coordinator then has the id **in its own
+conversation history, right next to the text it sent**, so it can correlate a
+reaction with no cache at all — surviving any `ib watch` restart.
+
+Mechanics: `TelegramClient.sendMessage` always returned
+`{ ok: true, result: TelegramMessage }`, but `TelegramOutbox.sendChunks` did
+`if (resp.ok) continue;` and threw `resp.result` away. It now collects each
+chunk's `message_id` — **including on the post-429 retry path**, which is a
+separate call site and easy to miss — and `formatSendOk` folds them into the
+existing `.result` `message` field. No new plumbing: the ids ride the channel
+`tgsend` already polls for.
+
+Two limits worth knowing:
+
+- **The `queued` path genuinely has no id to report.** `telegramSend` polls ≤1s
+  for the `.result`; if `ib watch` is down the message legitimately waits on
+  disk and no send has happened yet. We keep returning the existing `queued`
+  string — we do not invent an id and do not block longer waiting for one.
+- `extractMessageId` is defensive because the client does
+  `raw.body.result ?? {}` — a 2xx `{ok:true}` body with no `result` yields an
+  empty object, so `message_id` can be absent at runtime despite the static
+  type. Anything not a finite positive integer is treated as absent.
+
+`ib tgsendfile` was NOT changed — its result is still a bare `ok`. Sent
+photos/documents therefore have no echoed id and no cached preview. Deliberate
+scope call, not an oversight; see §9.6.
+
+### 9.2 Half B (rich) — in-memory id→text cache
+
+`src/channels/message-cache.ts` (new) maps `(chatId, messageId)` → recent
+message text, and the dispatcher uses it to add a text preview to reaction
+blocks.
+
+**NOTHING IS WRITTEN TO DISK.** This is a hard constraint, not an
+implementation detail. Chat transcripts are the user's private content, and a
+nicer reaction notice does not justify a durable transcript on disk (backup
+surface, review surface, retention questions). If a future change starts
+wanting persistence here, change the design instead. Note this is a *different*
+decision from `last-message-cache.ts`, which persists a single `{chat_id,
+message_id}` — an id, no text — because `ib tgreact` runs as a separate process
+and has no other way to find it.
+
+- **Module-level singleton**, not an injected dependency. The dispatcher
+  (inbound) and outbox (outbound) are separate objects constructed side by side
+  in `boot.ts` step 3, but they live in the SAME process and target the SAME
+  resolved chat id, so a singleton lets both reach one cache without threading a
+  handle through boot and two constructors. `resetMessageCache()` restores test
+  isolation.
+- **Bounded**: `MAX_RECORDS = 200`, oldest-first eviction; text capped at
+  `MAX_TEXT_CHARS = 300` CODE POINTS on insert. Re-recording an id moves it to
+  the young end rather than refreshing in place at its soon-to-be-evicted
+  position.
+- **The cap must COPY, and must count code points** — `truncateCodePoints`.
+  Both properties are load-bearing and were both wrong in the first cut:
+  - `String.prototype.slice` returns a **view that retains the parent buffer**.
+    A record count bound then bounds nothing: measured, 200 records sliced to
+    300 chars out of 1 MB parents pinned ~103 MB, and ~348 MB at 4 MB parents —
+    it tracks PARENT size. This bites hardest outbound, because `sendChunks`
+    slices each chunk out of the full `ib tgsend` payload and `tgsend` has no
+    size cap before chunking, so one piped diff pinned its whole payload for the
+    next 200 messages. `join()` is what releases it. `"" + s`, `s.repeat(1)` and
+    `s.slice()` look like copies and are engine-folded no-ops — do not
+    "simplify" to them.
+  - Cutting on code units severs surrogate pairs (U+FFFD in the coordinator's
+    transcript). The obvious fix is a trap:
+    `Array.from(s.slice(0, MAX)).join("")` repairs **nothing** — the pair is
+    already severed before `Array.from` runs, so the result is byte-identical to
+    doing nothing. The correct form pre-slices to `MAX * 2` units, THEN slices
+    to `MAX` code points, then joins. Right order fixes both defects in one
+    expression; wrong order fixes neither.
+  - The helper owns the length COMPARISON as well as the cut. A code-unit guard
+    with a code-point cut moves the bug: 160 emoji is 160 code points but 320
+    code units, so a unit guard appends `…` to a string it never truncated.
+  - **Applied at BOTH caps, storage and display.** Not redundant:
+    `formatMessagePreview` shrinks (drops all but 2 lines, collapses whitespace)
+    BEFORE it measures, so a 300-unit stored string can arrive there at ~51 units
+    and the display cap never fires — a storage-site severance would reach the
+    coordinator untouched.
+- **Total lookup**: unknown or malformed key → `null`, never a throw. Does no
+  IO, so it can't fail on IO.
+
+Seeding:
+
+- **Outbound** — `TelegramOutbox.noteSentChunk`, **per chunk**. Per-chunk is the
+  correct granularity: Telegram splits a long `tgsend` into several real
+  messages, the user reacts to one specific chunk, and that chunk's text is what
+  they actually saw.
+- **Inbound** — `deliver()`, right beside the existing `writeLastMessage` call
+  and with the same best-effort try/catch. **Every** message in a coalesced
+  batch is recorded (`messageId > 0`), not just the newest — the user can react
+  to any of them.
+
+Both writes are best-effort: a cache failure must never fail or alter a
+send/delivery.
+
+### 9.3 Rendering the preview
+
+`deliverReaction()` does the lookup and passes the result in;
+`wrapReactionReminder(reaction, preview?)` stays **sync and pure**, so it
+remains directly testable and IO/state stays out of the formatter.
+
+```
+<channel source="telegram" kind="reaction" user="Adam" ts="..." message_id="1584">Reacted 👍 to message 1584 (your message): "Ready to merge — want me to squash first, or keep the history as-is?"</channel>
+```
+
+`formatMessagePreview` takes the first 1-2 non-empty lines (coordinator
+messages lead with the headline), joins them with a space so the block stays on
+one line, collapses whitespace runs, normalizes `\r` / U+2028 / U+2029, runs
+`stripChannelClose` (inbound text is the user's — treat it as untrusted), and
+truncates to **160 chars with an explicit `…`** so truncation is visible rather
+than silently misleading.
+
+Whose message it was is surfaced because it changes the meaning entirely:
+
+- `(your message)` — outbound; a 👍 here is an **answer** to what the
+  coordinator asked.
+- `(their own message)` — inbound; a 👍 here is an **acknowledgement**.
+
+The suffix is appended once to the joined body, so the changed-reaction variant
+reads `Reacted 🎉 to message 3; Removed reaction 👍 from message 3 (your
+message): "…"` rather than repeating the preview per clause.
+
+### 9.4 Degrading gracefully — the important part
+
+**If the id isn't in the cache, the reaction summary line and the `<channel>`
+block body are byte-identical to what they were before this feature.** No empty
+quotes, no `(unknown)`, no error. Reaction delivery must never break because of
+this.
+
+Precisely: the `<channel>…</channel>` payload is unchanged. The trailing hint is
+NOT — a reaction block gets `REACTION_REPLY_HINT`, one sentence longer (§9.5),
+and it is part of the same returned string, so "the whole output is
+byte-for-byte identical" would be false. The property that matters is that
+nothing about a cache miss leaks into what the coordinator reads as the event.
+
+A miss is the EXPECTED case, not an edge case: `ib watch` restarted (the common
+one — it goes down and outbound messages queue for a stretch), the record was
+evicted from the 200-entry ring, or the message predates this feature. That
+restart gap is exactly why Half A exists.
+
+On what the tests actually prove, since this is easy to overstate:
+`dispatcher.test.ts` ("degrades byte-for-byte when there is no preview")
+compares the CURRENT implementation against ITSELF — no-arg vs `null` vs
+`undefined` preview — and pins the first three lines of the block explicitly. It
+does NOT diff against the pre-feature implementation; nothing in the suite can,
+since that code no longer exists. The pre/post equivalence of the block body was
+established by review, not by the suite. `reaction-context.test.ts`
+("RESTART GAP") covers the same property end-to-end by wiping the cache
+mid-test.
+
+### 9.5 `REPLY_HINT` / `REACTION_REPLY_HINT`
+
+`REPLY_HINT` is unchanged from pre-feature — ordinary message blocks are
+byte-identical to what they were. The extra sentence lives in
+`REACTION_REPLY_HINT`, which is `REPLY_HINT` plus:
+
+``` `ib tgsend` echoes the sent `message_id`; keep it to match later reactions. ```
+
+`REACTION_REPLY_HINT` is derived from `REPLY_HINT` in code, not spelled out
+again, so the two cannot drift. Reaction blocks are the only thing that uses
+it: on the shared base the sentence would be a permanent ~75-character context
+tax on every inbound Telegram message, paid to serve the rare reaction case.
+
+The trade this makes: the coordinator learns the id is worth keeping only AFTER
+a reaction arrives, never before it sends. Acceptable, because `ib tgsend`
+prints `ok (message_id 1584)` regardless (§9.1) — the id is already in the
+coordinator's context either way. The sentence is a nudge to RETAIN it, not the
+mechanism that delivers it.
+
+### 9.6 Deliberately NOT built
+
+- **`ib tgsendfile` id echo / caching.** `sendFile` still returns bare `{ok:true}`,
+  so a reaction to a sent photo or document gets no preview. Adding it means
+  changing `tgsendfile`'s result contract too, which was outside this change's
+  scope. Straightforward follow-up if reactions to sent files come up.
+- **Reactions to reactions.** Unchanged from §7.3 — a `message_reaction` event
+  does not update either cache.
+
+### 9.7 Files touched
+
+- `src/channels/message-cache.ts` (new) — the in-memory bounded ring, plus
+  `truncateCodePoints` (shared by both caps).
+- `src/channels/outbox.ts` — `sendChunks` returns `messageIds`; `noteSentChunk`,
+  `extractMessageId`, `formatSendOk`.
+- `src/channels/dispatcher.ts` — `ReactionPreview`, `resolveReactionPreview`,
+  `formatMessagePreview` (named `formatReactionPreview` until §10 gave it a
+  second caller), `whoseMessage`; `wrapReactionReminder` takes an
+  optional preview; `deliver()` seeds the cache; `REACTION_REPLY_HINT`
+  (`REPLY_HINT` itself is untouched).
+- Tests: `message-cache.test.ts`, `reaction-context.test.ts` (new); additions to
+  `dispatcher.test.ts`, `outbox.test.ts`.
+- No change to `ib-commands.ts` or `index.ts` — `telegramSend` already returns
+  the outbox's `message` verbatim and `index.ts` already prints it, which is why
+  the id needed no new plumbing.
+
+### 9.8 Verification status
+
+- `bun test`: 4500 pass / 0 fail. `bunx tsc --noEmit`: 0 errors.
+- `reaction-context.test.ts` drives the REAL `TelegramDispatcher` and
+  `TelegramOutbox`, wired as `boot.ts` step 3 wires them, through the full loop:
+  outbox sends → faked API returns `message_id: N` → `telegramSend`'s return
+  value carries N → a `message_reaction` for N arrives → the coordinator's block
+  quotes that message's text.
+- **NOT verified end-to-end against Telegram.** No bot token, no real chat, no
+  real HTTP round trip. The tests prove our components are wired correctly and
+  what we'd send has the right shape; they cannot prove Telegram returns
+  `message_id` where we expect, or that a real reaction update carries the
+  fields we read. Those two assumptions are inherited from the already-shipped
+  §7 code paths, but the *new* reliance on `sendMessage`'s response body is
+  unproven against the live API.
+
+### 9.9 Cross-cutting review (per CLAUDE.md checklist)
+
+- **General agent functionality:** `ib tgsend`'s stdout contract changed (see
+  the §9.1 table) and reaction blocks carry more text. No new CLI verb, no
+  meta.json/lifecycle change. Any consumer parsing `tgsend` output for an exact
+  `"ok"` would need updating — **none exists in this repo.** Audited all three
+  `telegramSend` callers: `index.ts` (the `tgsend` verb) branches on `.ok` and
+  prints `.message` verbatim; `ib-commands.ts` respawn-ack and
+  `askQuestionTelegramCtx` both discard the result entirely. External/human
+  consumers see a strictly more informative string.
+- **Hooks:** none changed. `ib tgtyping` is unaffected. The coordinator learns
+  about the echoed id through the channel-reminder reply hint — the same
+  mechanism that taught it `tgreact` and `tgsend`.
+- **Watchdog:** unaffected. The dispatcher health state machine is
+  content-agnostic; a richer reaction body doesn't change poll outcomes,
+  `getHealth()`, or nudge timing. The cache is not consulted by any state
+  detection.
+- **`ib watch` / dashboard:** no display change. `ib watch` hosts the process
+  that now owns the cache, so its memory footprint grows by a bounded worst case
+  of ~240 KB of text (200 × 300 CODE POINTS, each up to 2 UTF-16 units when
+  astral) plus Map and record overhead — call it under ~300 KB. The 2x over the
+  naive 120 KB is the deliberate price of code-point-correct truncation. That
+  ceiling holds only because the cap COPIES rather than retaining a slice view;
+  see §9.2. No new mode, focus, or layout behavior.
+
+## 10. IMPLEMENTED — Reply context (2026-07-27)
+
+### 10.0 The problem
+
+Same ambiguity as §9, with text instead of an emoji. When Adam swipe-replies to
+a specific message and types an actual reply, Telegram tells us exactly which
+message he meant — and until now we threw that away. `reply_to_message` appeared
+NOWHERE in the codebase, so the coordinator saw only the new text and had to
+infer the referent from sequence and timing. "yes, do that" three messages later
+is a guess.
+
+### 10.1 Why this one is durable and the reaction path is not
+
+`reply_to_message` is a **full Message object, including its `text`**, not a
+bare id. So the replied-to text arrives IN the update:
+
+- No cache lookup on the happy path.
+- Works after an `ib watch` restart (the §9.4 RESTART GAP simply does not apply).
+- Works for a message far older than the 200-record ring — months old, even.
+
+That is a structural difference, not a tuning difference. `reaction-context.test.ts`
+pins it from both sides: RESTART GAP shows a reaction losing its preview to an
+empty cache, and "RESTART GAP does not exist for replies" shows a reply keeping
+its preview across the identical wipe.
+
+### 10.2 Resolution order
+
+`extractReplyContext(msg, chatId)` in dispatcher.ts:
+
+1. `reply_to_message.text` — authoritative, always preferred.
+2. `reply_to_message.caption` — a reply to a photo/document carries a caption
+   instead of text.
+3. The in-memory `message-cache` (`lookupMessage`) — LAST resort, for a reply to
+   something with no text at all (bare photo, sticker, poll). Expected to miss
+   often; that is fine.
+4. Nothing resolvable → `text: ""` → the id-only form.
+
+The cache is probed at most once per reply, and only when steps 1-2 came up
+empty or the direction could not be read off `from`.
+
+Whose message it was comes from `reply_to_message.from.is_bot` (everything the
+coordinator sends goes out through the bot), falling back to the cache's
+recorded direction when `from` is absent. When neither can say, the
+whose-message clause is OMITTED — a confident wrong attribution reads as fact
+and would send the coordinator down the wrong path, while no clause merely says
+less.
+
+### 10.3 Output shape
+
+    <channel source="telegram" user="Adam" ts="..." message_id="1590" in_reply_to="1584">
+    Replying to (your message): "Ready to merge — squash first, or keep the history?…"
+    yes, squash it
+    </channel>
+
+The preview goes in the BODY, not an attribute: it can contain quotes and
+arbitrary user text, and the body is already the `stripChannelClose`-defended
+place for that. `in_reply_to` follows the existing `messageIdAttr` convention —
+omitted entirely when the id is not a usable target, exactly like `message_id`.
+
+Degradation ladder, in order:
+
+    Replying to (your message): "Ready to merge…"   ← ideal
+    Replying to: "Ready to merge…"                  ← whose unknown
+    Replying to message 1584 (your message)         ← text unresolvable
+    Replying to message 1584                        ← neither
+    (no line at all)                                ← no usable id AND no text
+
+Never empty quotes: no text means no `: "…"` clause.
+
+A reply to Adam's OWN earlier message is surfaced too, not suppressed —
+reactions surface both directions and replies match.
+
+### 10.4 The coalesced branch
+
+`wrapChannelReminder` has a multi-message path where a batch is joined with
+`---`. One header serves N messages there, so a block-level `in_reply_to` would
+be ambiguous about which of the N it described. Instead:
+
+- The reply line sits immediately ABOVE the body it belongs to, binding it to
+  that message rather than to the block.
+- It spells the id out inline (`Replying to message 1584 (your message): "…"`),
+  because that is the only place left to carry it.
+
+So the body line differs slightly between the two branches — the single-message
+form omits the id (its header already has the attribute), the coalesced form
+includes it. That is deliberate, and the single-message shape is the one Adam
+approved.
+
+### 10.5 An ordinary message gains NOTHING
+
+The hard constraint. `replyTo` is `undefined` for a message that did not reply,
+and every rendering addition is gated on it, so an ordinary block is
+byte-identical to its pre-feature output — no attribute, no line, not one byte.
+Pinned in `dispatcher.test.ts` against hardcoded literals of the WHOLE block
+(single and coalesced), and end-to-end in `reaction-context.test.ts`.
+
+### 10.6 Deliberately NOT built
+
+- **Reply chains.** `reply_to_message` is not nested by Telegram in practice and
+  we never walk it recursively. One hop is what the user pointed at.
+- **Outbound replies.** `ib tgsend` still sends a plain message; there is no
+  `--reply-to`. The coordinator answers in the chat, as before.
+- **`reply_to_story` / `external_reply` / quoted fragments.** Telegram's newer
+  reply variants are untouched; only `reply_to_message` is read.
+
+### 10.7 Files touched
+
+- `src/channels/types.ts` — `reply_to_message?: TelegramMessage` on
+  `TelegramMessage`.
+- `src/channels/dispatcher.ts` — `ReplyContext`, `extractReplyContext`,
+  `resolveReplyDirection`, `firstNonEmptyString`, `formatReplyLine`,
+  `replyToAttr`; `NormalizedMessage.replyTo`; `normalize()` populates it;
+  `wrapChannelReminder` renders it in both branches. `formatReactionPreview` →
+  `formatMessagePreview` and `REACTION_PREVIEW_MAX_CHARS` →
+  `MESSAGE_PREVIEW_MAX_CHARS`, since one formatter now serves both context
+  features (one truncation path, and the same text can never render two ways).
+- Tests: `dispatcher.test.ts` (`extractReplyContext`, `wrapChannelReminder with
+  a reply`), `reaction-context.test.ts` (three integration tests at the bottom;
+  its header comment now covers both features).
+- No change to the outbox, the message cache, `ib-commands.ts`, or `index.ts` —
+  the reply path reads the update and needs no new plumbing.
+
+### 10.8 Verification status
+
+- `bun test`: 4541 pass / 0 fail. `bunx tsc --noEmit`: 0 errors.
+- **NOT verified against real Telegram.** No bot token, no real chat, no real
+  HTTP. Every reply fixture in the suite is hand-built from the documented
+  shape, so the suite cannot prove that a real swipe-reply populates
+  `reply_to_message`, that `from.is_bot` is `true` on the bot's own messages, or
+  that a reply to media really carries `caption` rather than `text`. Those are
+  the three live-API assumptions this feature rests on; see the §4 sanity-check
+  step added for exercising them.
+
+### 10.9 Cross-cutting review (per CLAUDE.md checklist)
+
+- **General agent functionality:** unchanged. No new CLI verb, no meta.json or
+  lifecycle change. The coordinator sees a richer block on replies only.
+- **Hooks:** none changed. Nothing reads `reply_to_message` outside the
+  dispatcher.
+- **Watchdog:** unaffected. State detection is content-agnostic; the reply path
+  adds no timing, no IO, and no cache writes.
+- **`ib watch` / dashboard:** no display change and no new memory cost — the
+  reply text comes from the update and is never stored; the cache is only ever
+  READ by this path.

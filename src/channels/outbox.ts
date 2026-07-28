@@ -32,6 +32,19 @@
  * and 5s-retained-result machinery as text messages — only the per-file
  * processing differs (`processReaction` / `processFile` vs `process`).
  *
+ * The `.txt.result` `message` field echoes the Telegram message id(s) of what
+ * was sent — `ok (message_id 1584)`, or `ok (3 parts, message_ids 1584, 1585,
+ * 1586)` for a chunked send. `ib tgsend` prints that string verbatim, which is
+ * the whole point: the coordinator ends up with the id in its own conversation
+ * history right next to the text it sent, so it can correlate a later reaction
+ * with no cache and across an `ib watch` restart. When no id can be determined
+ * (a 2xx body with no `result`), the message degrades to the pre-id `ok` /
+ * `ok (N parts)` shape. See `formatSendOk`.
+ *
+ * Each sent chunk is also recorded in the in-memory `message-cache` so the
+ * dispatcher can render a text preview when the user reacts to it. That cache
+ * is memory-only and best-effort — nothing about it can fail or alter a send.
+ *
  * Atomic writes use `<path>.tmp` + `rename`. Result files are kept for ~5s
  * after writing so the sender process can read them, then both files are
  * unlinked.
@@ -50,6 +63,7 @@ import { mkdir, readdir, readFile, rename, unlink, writeFile } from "fs/promises
 import { watch, type FSWatcher } from "node:fs";
 import type { TelegramClient } from "./telegram-client";
 import { classifyError } from "./telegram-client";
+import { recordOutboundMessage } from "./message-cache";
 
 let overrideOutboxDir: string | undefined;
 
@@ -289,7 +303,7 @@ export class TelegramOutbox {
     const sendOutcome = await this.sendChunks(chunks);
 
     if (sendOutcome.ok) {
-      const message = chunks.length === 1 ? "ok" : `ok (${chunks.length} parts)`;
+      const message = formatSendOk(chunks.length, sendOutcome.messageIds);
       await this.writeResult(base, { ok: true, message });
       this.log(`telegram outbox: ${text.length} chars -> chat ${this.chatId}: ok`);
     } else {
@@ -563,9 +577,22 @@ export class TelegramOutbox {
 
   /** Loop the chunks, calling `client.sendMessage` once per chunk with a single
    *  429-retry. Mirrors the old `telegramSend` logic in ib-commands.ts so the
-   *  failure-mode strings stay identical. */
-  private async sendChunks(chunks: string[]): Promise<{ ok: true } | { ok: false; message: string }> {
+   *  failure-mode strings stay identical.
+   *
+   *  On success returns the Telegram `message_id` of every chunk we could
+   *  determine one for, in send order. Those ids serve two purposes: they are
+   *  echoed back to `ib tgsend`'s stdout (so the coordinator has the id in its
+   *  own conversation history, next to the text it sent — the restart-proof half
+   *  of reaction correlation), and they key the in-memory message cache that
+   *  renders a text preview on an inbound reaction.
+   *
+   *  `messageIds` is best-effort and may be SHORTER than `chunks` — see
+   *  `noteSentChunk`. A send is still `ok` when no id could be determined. */
+  private async sendChunks(
+    chunks: string[],
+  ): Promise<{ ok: true; messageIds: number[] } | { ok: false; message: string }> {
     const { sleepCtx } = await import("./telegram-client");
+    const messageIds: number[] = [];
     for (const piece of chunks) {
       let resp;
       try {
@@ -575,7 +602,10 @@ export class TelegramOutbox {
         // bot-token URL in err.message.
         return { ok: false, message: `sendMessage failed: ${classifyError(err)}` };
       }
-      if (resp.ok) continue;
+      if (resp.ok) {
+        this.noteSentChunk(resp.result, piece, messageIds);
+        continue;
+      }
 
       // 429: honor Retry-After (header preferred, body fallback) and try once
       // more. Past that, give up — same contract as the old in-process tgsend.
@@ -589,7 +619,13 @@ export class TelegramOutbox {
           // classifyError, not describeErr — same token-safety reason as above.
           return { ok: false, message: `sendMessage failed after 429 retry: ${classifyError(err)}` };
         }
-        if (retryResp.ok) continue;
+        if (retryResp.ok) {
+          // The retry is a real send too — its id counts exactly like a
+          // first-attempt id. Easy to miss; a chunk that needed a retry is
+          // otherwise invisible downstream.
+          this.noteSentChunk(retryResp.result, piece, messageIds);
+          continue;
+        }
         const desc = retryResp.description ?? `HTTP ${retryResp.error_code ?? "unknown"}`;
         return { ok: false, message: `sendMessage failed after 429 retry: ${desc}` };
       }
@@ -597,7 +633,31 @@ export class TelegramOutbox {
       const desc = resp.description ?? `HTTP ${resp.error_code ?? "unknown"}`;
       return { ok: false, message: `sendMessage failed: ${desc}` };
     }
-    return { ok: true };
+    return { ok: true, messageIds };
+  }
+
+  /** Record one successfully-sent chunk: collect its `message_id` and cache the
+   *  chunk's own text for reaction previews.
+   *
+   *  Per-CHUNK rather than per-message is the correct granularity: Telegram
+   *  splits a long `ib tgsend` into several real messages, the user reacts to
+   *  one specific chunk, and that chunk's text is what they actually saw.
+   *
+   *  Defensive on both halves. `result` is typed as a TelegramMessage but is
+   *  really `raw.body.result ?? {}` from the client — a 2xx `{ok:true}` body
+   *  with no `result` yields an empty object, so `message_id` can genuinely be
+   *  absent or non-numeric at runtime. And the cache write is best-effort: a
+   *  failure here must never fail or alter a send that already landed. */
+  private noteSentChunk(result: unknown, text: string, into: number[]): void {
+    const messageId = extractMessageId(result);
+    if (messageId === null) return;
+    into.push(messageId);
+    try {
+      recordOutboundMessage(this.chatId, messageId, text);
+    } catch (err) {
+      // Cache is a nicety; the message is already delivered. Log and move on.
+      this.log(`telegram outbox: message cache write failed: ${describeErr(err)}`);
+    }
   }
 
   /** Atomic-write `<base>.result`, where `base` is the full dropped filename
@@ -646,6 +706,47 @@ export class TelegramOutbox {
 function isQueuedFile(name: string): boolean {
   if (name.endsWith(".tmp") || name.endsWith(".result")) return false;
   return name.endsWith(".txt") || name.endsWith(".react.json") || name.endsWith(".file.json");
+}
+
+/** Pull a usable `message_id` out of a `sendMessage` success body, or null.
+ *
+ *  The client hands us `raw.body.result ?? {}` cast to a TelegramMessage, so
+ *  the static type promises a number the runtime does not. Anything that isn't
+ *  a finite positive integer is treated as absent — a `message_id` of 0 or NaN
+ *  is not a reactable target, and echoing one back would be worse than echoing
+ *  nothing. */
+export function extractMessageId(result: unknown): number | null {
+  if (result == null || typeof result !== "object") return null;
+  const raw = (result as { message_id?: unknown }).message_id;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return null;
+  return raw;
+}
+
+/** Render the `ok` result message for a successful text send, folding in the
+ *  Telegram message ids so they reach `ib tgsend`'s stdout.
+ *
+ *      ok                                          (1 part, no id determined)
+ *      ok (message_id 1584)                        (1 part)
+ *      ok (3 parts)                                (3 parts, no ids)
+ *      ok (3 parts, message_ids 1584, 1585, 1586)  (3 parts)
+ *
+ *  The bare `ok` / `ok (N parts)` shapes are exactly what we emitted before ids
+ *  existed, so a send whose id we couldn't determine degrades to the old
+ *  contract rather than to something new the coordinator has to parse.
+ *
+ *  The label is keyed on the ID count, not the part count, so the singular
+ *  `message_id` never introduces a lone plural. Ids are best-effort, so a
+ *  3-part send with 2 determined ids honestly reports the 2 it has. */
+export function formatSendOk(partCount: number, messageIds: number[]): string {
+  const partsLabel = partCount === 1 ? "" : `${partCount} parts`;
+  const idsLabel =
+    messageIds.length === 0
+      ? ""
+      : messageIds.length === 1
+        ? `message_id ${messageIds[0]}`
+        : `message_ids ${messageIds.join(", ")}`;
+  const inner = [partsLabel, idsLabel].filter((s) => s !== "").join(", ");
+  return inner === "" ? "ok" : `ok (${inner})`;
 }
 
 async function unlinkSafe(path: string): Promise<void> {

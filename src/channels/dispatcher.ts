@@ -1606,9 +1606,12 @@ function resolveReactionPreview(reaction: NormalizedReaction): ReactionPreview |
  *      Expected to miss often; that is fine, see 4.
  *   4. Nothing resolvable → `text: ""`, rendered as the id-only form.
  *
- *  Defensive against every field it reads. The static type promises a `number`
- *  message_id and a `boolean` is_bot; `extractMessageId` is the standing lesson
- *  that Telegram does not always deliver what the docs imply. A malformed
+ *  Defensive against every field it reads, and UNIFORMLY so — every property
+ *  read off the update is inside a guard, not just the ones that felt risky
+ *  while writing it. The static type promises a `number` message_id and a
+ *  `boolean` is_bot; `extractMessageId` is the standing lesson that Telegram
+ *  does not always deliver what the docs imply, and the type checker cannot
+ *  help with a value that arrives from `JSON.parse`. A malformed
  *  `reply_to_message` degrades to null or to the id-only form — it never throws
  *  on a delivery path. */
 export function extractReplyContext(msg: TelegramMessage, chatId: string): ReplyContext | null {
@@ -1620,7 +1623,35 @@ export function extractReplyContext(msg: TelegramMessage, chatId: string): Reply
   }
   if (!replied || typeof replied !== "object") return null;
 
-  const rawId = (replied as { message_id?: unknown }).message_id;
+  // EVERY property read off the untrusted object happens here, inside one
+  // guard; the rest of the function works from these locals. Reading them one
+  // at a time at their point of use is what left `replied.from` exposed at the
+  // call site of `resolveReplyDirection` while the read INSIDE that function
+  // was guarded — two of three reads defended, the one between them not, and no
+  // way for a reader to tell whether the gap was deliberate.
+  //
+  // A throwing getter is unreachable from real Telegram (updates come from
+  // `JSON.parse`, which never produces accessors), so this defends against
+  // nothing that can actually happen — but that is equally true of the other
+  // guards on this path, and a consistent posture is worth more than saving
+  // four lines. An object whose property access throws is not a Message, so
+  // null (no reply context) is the right answer for all of it.
+  let rawId: unknown;
+  let rawText: unknown;
+  let rawCaption: unknown;
+  let from: TelegramUser | undefined;
+  try {
+    rawId = (replied as { message_id?: unknown }).message_id;
+    rawText = (replied as { text?: unknown }).text;
+    rawCaption = (replied as { caption?: unknown }).caption;
+    from = replied.from;
+  } catch {
+    return null;
+  }
+
+  // `Number.isFinite` is load-bearing, not decoration: without it `Infinity`
+  // is `typeof "number"` and `> 0`, and would render as `in_reply_to="Infinity"`
+  // and `Replying to message Infinity`. Same for `NaN` via the `> 0` test.
   const messageId =
     typeof rawId === "number" && Number.isFinite(rawId) && rawId > 0 ? rawId : 0;
 
@@ -1641,14 +1672,14 @@ export function extractReplyContext(msg: TelegramMessage, chatId: string): Reply
     return cached;
   };
 
-  const embedded = firstNonEmptyString(replied.text, replied.caption);
+  const embedded = firstNonEmptyString(rawText, rawCaption);
   const raw = embedded !== "" ? embedded : (lookup()?.text ?? "");
   // One formatter for both paths, so a reply preview and a reaction preview of
   // the same message render identically (and there is only one truncation site
   // to get right).
   const text = formatMessagePreview(raw);
 
-  const direction = resolveReplyDirection(replied.from, lookup);
+  const direction = resolveReplyDirection(from, lookup);
 
   // Neither an id to target nor a word of text: there is no line to write and
   // no attribute to emit, so say nothing at all rather than emit a stub.

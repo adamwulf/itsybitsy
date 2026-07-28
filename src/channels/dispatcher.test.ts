@@ -659,13 +659,78 @@ describe("extractReplyContext", () => {
     expect(ctx?.direction).toBeNull();
   });
 
-  test("a non-numeric message_id degrades to 0 rather than propagating garbage", () => {
+  /* Each of these is a DIFFERENT guard in the same expression, and the non-finite
+   * pair had no oracle until now: `Infinity` is `typeof "number"` and passes
+   * `> 0`, so dropping `Number.isFinite` renders `in_reply_to="Infinity"` and
+   * `Replying to message Infinity` with the whole suite still green. `NaN` is
+   * caught by `> 0` instead. Kept as one test per input so a failure names the
+   * value that broke. */
+  test.each([
+    ["a string", "1584" as unknown as number],
+    ["Infinity", Infinity],
+    ["NaN", NaN],
+    ["negative", -5],
+    ["zero", 0],
+  ])("a message_id that is %s degrades to 0 rather than propagating garbage", (_label, id) => {
     const ctx = extractReplyContext(
-      replyMsg({ message_id: "1584" as unknown as number, text: "still readable" }),
+      replyMsg({ message_id: id, text: "still readable" }),
       "100",
     );
     expect(ctx).toEqual({ messageId: 0, text: "still readable", direction: null });
   });
+
+  test("a garbage id renders neither the attribute nor an id in the line", () => {
+    // The end of the pipeline, not just the extractor: whatever `Infinity` did
+    // to `messageId` must not reach the coordinator in either slot.
+    const ctx = extractReplyContext(
+      replyMsg({ message_id: Infinity, text: "still readable" }),
+      "100",
+    );
+    const out = wrapChannelReminder("100", [
+      {
+        chatId: "100", messageId: 1590, userId: "7", username: "adam",
+        ts: "t", body: "ok", attachmentType: null, replyTo: ctx!,
+      },
+    ]);
+    expect(out).not.toContain("Infinity");
+    expect(out).not.toContain("in_reply_to");
+    expect(out).toContain('Replying to: "still readable"');
+  });
+
+  /* Unreachable from real Telegram — updates come from `JSON.parse`, which
+   * never produces accessors. Tested anyway, for the same reason the non-finite
+   * id cases above are: the guards were correct and NOTHING held them there, so
+   * a later tidy-up could delete them with the suite still green. The original
+   * version of this code read `.from` at the call site, outside the try that
+   * was meant to protect it — review caught it, but only because a human went
+   * looking. One case per property, since each is read on a different line. */
+  test.each(["message_id", "text", "caption", "from"])(
+    "a throwing getter on reply_to_message.%s degrades instead of escaping",
+    (prop) => {
+      const replied: Record<string, unknown> = {
+        message_id: 1584,
+        chat: { id: 100 },
+        text: "readable",
+      };
+      Object.defineProperty(replied, prop, {
+        get() {
+          throw new Error(`boom: ${prop}`);
+        },
+        configurable: true,
+      });
+      const msg = {
+        message_id: 1590,
+        chat: { id: 100 },
+        from: { id: 7, is_bot: false },
+        text: "outer",
+        reply_to_message: replied,
+      } as unknown as TelegramMessage;
+
+      // The contract is "does not throw"; null is the documented degradation.
+      expect(() => extractReplyContext(msg, "100")).not.toThrow();
+      expect(extractReplyContext(msg, "100")).toBeNull();
+    },
+  );
 
   test("neither a usable id nor any text → null, so nothing is rendered at all", () => {
     const ctx = extractReplyContext(replyMsg({ message_id: 0 }), "100");
@@ -843,9 +908,11 @@ describe("wrapChannelReminder with a reply", () => {
     expect(out).toContain('Replying to message 2 (their own message): "second target"');
   });
 
-  test("the reply line survives an attachment body rewrite", () => {
-    // `resolveAttachment` overwrites `body` after normalize(); the reply line is
-    // rendered from `replyTo` at wrap time, so it is unaffected by that rewrite.
+  test("renders alongside an already-rewritten attachment body", () => {
+    // Scope: this hands `wrapChannelReminder` a body in its POST-rewrite form;
+    // it does not run `resolveAttachment`. The property it stands in for —
+    // `resolveAttachment` only ever assigns `msg.body` and never rebuilds the
+    // object, so `replyTo` survives it — is not what this test executes.
     const out = wrapChannelReminder("100", [
       {
         ...base,

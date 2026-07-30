@@ -8,7 +8,13 @@ import { readdir, rename, stat, unlink, open } from "fs/promises";
 import { randomUUID } from "crypto";
 import type { AgentState } from "./parse-state";
 import { parseState, stripAnsi, stripTrailingBlanks, STARTUP_MARKERS } from "./parse-state";
-import { captureTmuxOutput, killTmuxSession, listTmuxSessions } from "./tmux-poller";
+import {
+  captureTmuxOutput,
+  captureTmuxOutputResult,
+  killTmuxSession,
+  listTmuxSessions,
+  probeTmuxSession,
+} from "./tmux-poller";
 import { InjectionContext } from "./types";
 import { logToWatchLog, logWarning } from "./watch-log";
 
@@ -1534,6 +1540,18 @@ export function resetListTmuxSessionsCache(): void {
  */
 const reapedTmuxSessions = new Set<string>();
 
+/** A destructive watcher pass requires two consecutive, affirmative
+ * `tmux has-session` misses. Read-only one-shot callers may classify a
+ * confirmed miss immediately because they cannot reap anything. */
+export const TMUX_MISSING_CONFIRMATIONS_REQUIRED = 2;
+const tmuxMissingObservations = new Map<string, number>();
+
+/** Unknown-observation diagnostics are useful but state polling runs every
+ * ~2s. Rate-limit identical session/operation warnings so one broken probe
+ * cannot rotate away the lifecycle history needed for diagnosis. */
+export const TMUX_OBSERVATION_LOG_INTERVAL_MS = 60_000;
+const tmuxObservationLogEpochMs = new Map<string, number>();
+
 /**
  * Re-arm husk teardown for a session observed alive again. Called from the
  * "session is alive" resolution points in detectAgentStates (fresh transient
@@ -1542,12 +1560,98 @@ const reapedTmuxSessions = new Set<string>();
  * that is still dead, re-killing it every tick (the exact churn the memo
  * prevents). See reapedTmuxSessions for the invariant. */
 function clearReapedTmuxSession(tmuxSession: string): void {
-  if (tmuxSession) reapedTmuxSessions.delete(tmuxSession);
+  if (!tmuxSession) return;
+  reapedTmuxSessions.delete(tmuxSession);
+  clearTmuxMissingObservation(tmuxSession);
 }
 
 /** Reset the reaped-tmux-session memo. Exported for tests. */
 export function resetReapedTmuxSessions(): void {
   reapedTmuxSessions.clear();
+}
+
+/** Reset tmux observation state. Exported for deterministic tests. */
+export function resetTmuxObservationState(): void {
+  tmuxMissingObservations.clear();
+  tmuxObservationLogEpochMs.clear();
+}
+
+function clearTmuxMissingObservation(tmuxSession: string): void {
+  tmuxMissingObservations.delete(tmuxSession);
+}
+
+function recordTmuxMissingObservation(tmuxSession: string): number {
+  const count = (tmuxMissingObservations.get(tmuxSession) ?? 0) + 1;
+  tmuxMissingObservations.set(tmuxSession, count);
+  return count;
+}
+
+function logTmuxObservation(
+  agent: Agent,
+  status: "unknown" | "missing-pending",
+  operation: "has-session" | "capture-pane",
+  detail: string
+): void {
+  const tmuxSession = agent.meta.tmux_session || "<none>";
+  const key = `${tmuxSession}\0${status}\0${operation}`;
+  const now = Date.now();
+  const last = tmuxObservationLogEpochMs.get(key) ?? 0;
+  if (now - last < TMUX_OBSERVATION_LOG_INTERVAL_MS) return;
+  tmuxObservationLogEpochMs.set(key, now);
+  const normalized = detail.replace(/\s+/g, " ").trim().slice(0, 500) || "unknown error";
+  const repoTag = agent.repoName ? `${agent.repoName}/` : "";
+  logToWatchLog(
+    `[tmux-observation] status=${status} operation=${operation} ` +
+    `agent=${repoTag}${agent.id} tmux=${tmuxSession} detail=${normalized}`
+  );
+}
+
+function preserveStoredAgentState(agent: Agent): void {
+  const metaState = agent.meta.state;
+  if (metaState) {
+    agent.state = metaState;
+    return;
+  }
+  agent.state = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "running";
+}
+
+async function observeTmuxSession(
+  agent: Agent,
+  liveSessions: Set<string>,
+  shouldReap: boolean
+): Promise<"live" | "missing" | "unknown"> {
+  const tmuxSession = agent.meta.tmux_session;
+  if (liveSessions.has(tmuxSession)) {
+    clearReapedTmuxSession(tmuxSession);
+    return "live";
+  }
+
+  const probe = await probeTmuxSessionCtx.fn(tmuxSession);
+  if (probe.status === "live") {
+    clearReapedTmuxSession(tmuxSession);
+    return "live";
+  }
+  if (probe.status === "unknown") {
+    clearTmuxMissingObservation(tmuxSession);
+    logTmuxObservation(agent, "unknown", "has-session", probe.error);
+    return "unknown";
+  }
+
+  // Read-only commands may classify one affirmative exact-session miss
+  // immediately because they have no teardown side effects. A long-lived
+  // watcher must see the same affirmative miss twice before it may reap.
+  if (!shouldReap) return "missing";
+  const count = recordTmuxMissingObservation(tmuxSession);
+  if (count < TMUX_MISSING_CONFIRMATIONS_REQUIRED) {
+    logTmuxObservation(
+      agent,
+      "missing-pending",
+      "has-session",
+      `${probe.error}; confirmation ${count}/${TMUX_MISSING_CONFIRMATIONS_REQUIRED}`
+    );
+    return "unknown";
+  }
+  return "missing";
 }
 
 /** Fetch the live tmux session list, using the shared TTL cache.
@@ -1575,6 +1679,17 @@ export const liveTmuxSessionsCtx = new InjectionContext<() => Promise<Set<string
 /** Injectable tmux capture for state-detection tests. */
 export const captureTmuxOutputCtx = new InjectionContext<typeof captureTmuxOutput>(
   captureTmuxOutput
+);
+
+/** Detailed tmux capture used by lifecycle state detection. Unlike the legacy
+ * nullable capture, this preserves diagnostic details for unknown failures. */
+export const captureTmuxOutputResultCtx = new InjectionContext<typeof captureTmuxOutputResult>(
+  captureTmuxOutputResult
+);
+
+/** Exact-session probe used to confirm absence after a cached list miss. */
+export const probeTmuxSessionCtx = new InjectionContext<typeof probeTmuxSession>(
+  probeTmuxSession
 );
 
 /**
@@ -1742,8 +1857,11 @@ function getProcessStartEpochSeconds(pid: number): number | null {
 /**
  * Claude-specific PID liveness guard. A live PID is accepted only when the OS
  * reports that its process started no later than the current PID-write time
- * plus the documented writeback/skew margin. Failure to read the start time is
- * treated as not alive, including the normal "pid not found" race.
+ * plus the documented writeback/skew margin. Once signal-0 has affirmatively
+ * established that the PID exists, failure to read the start time is
+ * "unknown" and fails open as alive. This is required inside Codex sandboxes,
+ * where signal-0 may return EPERM (alive but unsignalable) and spawning `ps`
+ * is denied; treating that combination as dead reaps live agents.
  */
 function _isPidAliveSince(pid: number, pidWriteEpochSeconds: number | undefined): boolean {
   if (!isPidAliveCtx.fn(pid)) return false;
@@ -1756,7 +1874,7 @@ function _isPidAliveSince(pid: number, pidWriteEpochSeconds: number | undefined)
     pidWriteEpochSeconds <= 0
   ) return true;
   const processStartEpochSeconds = getProcessStartEpochSeconds(pid);
-  return processStartEpochSeconds !== null &&
+  return processStartEpochSeconds === null ||
     processStartEpochSeconds <= pidWriteEpochSeconds + CLAUDE_PID_START_MARGIN_SECONDS;
 }
 
@@ -2156,15 +2274,18 @@ export async function detectAgentStates(
       // liveness check happens above (applies to all states).
       if (agent.meta.state === "complete") {
         const liveSessions = await getLiveTmuxSessions();
-        if (!liveSessions.has(tmuxSession)) {
+        const tmuxObservation = await observeTmuxSession(agent, liveSessions, shouldReap);
+        if (tmuxObservation === "unknown") {
+          preserveStoredAgentState(agent);
+          return;
+        }
+        if (tmuxObservation === "missing") {
           agent.state = "stopped";
           if (shouldReap) {
             await reapOrphanedClaude(agent, agentDir, "stopped", "complete agent: tmux session gone");
           }
           return;
         }
-        // Session confirmed live — re-arm husk teardown. See reapedTmuxSessions.
-        clearReapedTmuxSession(tmuxSession);
         agent.state = "complete";
         return;
       }
@@ -2229,7 +2350,12 @@ export async function detectAgentStates(
       // fast-path and preserves the creating grace + orphan reap behavior of
       // the capture-null path below.
       const liveSessions = await getLiveTmuxSessions();
-      if (!liveSessions.has(tmuxSession)) {
+      const tmuxObservation = await observeTmuxSession(agent, liveSessions, shouldReap);
+      if (tmuxObservation === "unknown") {
+        preserveStoredAgentState(agent);
+        return;
+      }
+      if (tmuxObservation === "missing") {
         const resolved: AgentState = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
         agent.state = resolved;
         if (shouldReap) {
@@ -2238,9 +2364,14 @@ export async function detectAgentStates(
         return;
       }
 
-      const output = await captureTmuxOutputCtx.fn(tmuxSession, 50);
-      if (output === null || isDeadPane(output)) {
-        const reason = output === null ? "tmux capture returned null" : "tmux pane is dead";
+      const capture = await captureTmuxOutputResultCtx.fn(tmuxSession, 50);
+      if (capture.status === "error") {
+        logTmuxObservation(agent, "unknown", "capture-pane", capture.error);
+        preserveStoredAgentState(agent);
+        return;
+      }
+      const output = capture.output;
+      if (isDeadPane(output)) {
         const resolved: AgentState = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
         agent.state = resolved;
         // reapOrphanedClaude tears down the husk tmux session when
@@ -2248,7 +2379,7 @@ export async function detectAgentStates(
         // so a freshly-spawning agent that briefly shows a dead pane during
         // startup is not torn down.
         if (shouldReap) {
-          await reapOrphanedClaude(agent, agentDir, resolved, reason);
+          await reapOrphanedClaude(agent, agentDir, resolved, "tmux pane is dead");
         }
         return;
       }

@@ -101,6 +101,10 @@ State detection is deterministic — the stop hook writes authoritative state to
 
 4. **Read `state` from meta.json** → return the stored value (`running`, `waiting`, or `complete`). If `state` field is absent (legacy agent or freshly created agent before first stop hook fires): if `created_epoch` is less than 6 seconds ago → `creating`; otherwise → `running`.
 
+**Observation safety invariant**: Failure to observe tmux is `unknown`, never evidence of `stopped`. A non-zero or failed `capture-pane` preserves the authoritative stored state and writes a rate-limited `[tmux-observation]` diagnostic containing stderr or the spawn error. A cached session-list miss must be checked with an exact `tmux has-session` probe; permission errors and unexpected failures remain `unknown`. Destructive watcher passes require two consecutive affirmative missing-session probes before reaping, while read-only callers may classify the first affirmative miss because they have no teardown side effects. Any successful live observation resets the pending-miss count.
+
+**PID observation safety**: After signal 0 confirms that a PID exists (including `EPERM`, which means alive but unsignalable), inability to read its process start time is `unknown` and fails open as alive. A start time later than `claude_pid_epoch` plus the documented margin remains affirmative evidence of PID reuse.
+
 **ANSI stripping**: Tmux output used for compacting/rate_limited checks must have ANSI escape sequences stripped before pattern matching.
 
 **Trailing-blank strip before the window**: `captureTmuxOutput` uses `tmux capture-pane -J -E -`, which appends blank padding rows below the live TUI chrome. Every last-N-line detector therefore strips trailing blank/whitespace-only lines BEFORE taking its slice (via the shared `stripTrailingBlanks` in `src/parse-state.ts`, used by both `src/agents.ts` and `src/parse-state.ts`). Without the strip, the window is spent on blank padding and a current banner (which renders above the chrome) falls outside it — a false NEGATIVE.

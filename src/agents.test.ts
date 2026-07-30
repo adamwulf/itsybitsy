@@ -35,6 +35,7 @@ import {
   SPAWN_IN_PROGRESS_WINDOW_MS,
   resetListTmuxSessionsCache,
   resetReapedTmuxSessions,
+  resetTmuxObservationState,
   readAgentTransient,
   writeAgentTransient,
   deleteAgentTransient,
@@ -48,7 +49,8 @@ import {
   CLAUDE_PID_START_MARGIN_SECONDS,
   killPidCtx,
   liveTmuxSessionsCtx,
-  captureTmuxOutputCtx,
+  captureTmuxOutputResultCtx,
+  probeTmuxSessionCtx,
   nowMsCtx,
   resetReadAgentMetaCache,
   TRANSIENT_FRESH_MS,
@@ -78,7 +80,9 @@ afterEach(() => {
   resetProcessStartEpochSecondsCache();
   processStartEpochSecondsCtx.reset();
   isPidAliveSinceCtx.reset();
-  captureTmuxOutputCtx.reset();
+  captureTmuxOutputResultCtx.reset();
+  probeTmuxSessionCtx.reset();
+  resetTmuxObservationState();
 });
 
 /** Narrow a FlatEntry to kind==="agent" or fail */
@@ -2301,7 +2305,7 @@ describe("detectAgentStates — waiting + background shell override", () => {
     expect(a.state).toBe("running");
   });
 
-  test("waiting + no tmux session → stopped (existing precedence wins)", async () => {
+  test("waiting + unavailable tmux capture → preserves waiting", async () => {
     installTmuxRunner(null);
     const a = makeAgent({
       id: "a1",
@@ -2312,7 +2316,7 @@ describe("detectAgentStates — waiting + background shell override", () => {
       } as Partial<AgentMeta> as AgentMeta,
     });
     await detectAgentStates([a]);
-    expect(a.state).toBe("stopped");
+    expect(a.state).toBe("waiting");
   });
 });
 
@@ -2402,6 +2406,10 @@ describe("detectAgentStates — 'complete' agents skip capture-pane", () => {
     isPidAliveCtx.set(() => true);
     // tmux session list is empty — session "ib-a1" is gone
     liveTmuxSessionsCtx.set(async () => new Set([]));
+    probeTmuxSessionCtx.set(async () => ({
+      status: "missing",
+      error: "can't find session: ib-a1",
+    }));
 
     const a = makeAgent({
       id: "a1",
@@ -2706,6 +2714,10 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
   test("complete agent with live PID but dead tmux session → SIGTERMs and logs", async () => {
     isPidAliveCtx.set(() => true);
     liveTmuxSessionsCtx.set(async () => new Set([])); // tmux session "ib-a1" is gone
+    probeTmuxSessionCtx.set(async () => ({
+      status: "missing",
+      error: "can't find session: ib-a1",
+    }));
     const killCalls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
     killPidCtx.set((pid, signal) => {
       killCalls.push({ pid, signal });
@@ -2721,6 +2733,10 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
       } as Partial<AgentMeta> as AgentMeta,
     });
     await detectAgentStates([a], { reap: true });
+    expect(a.state).toBe("complete");
+    expect(killCalls).toEqual([]);
+
+    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killCalls).toEqual([{ pid: 12345, signal: "SIGTERM" }]);
 
@@ -2730,44 +2746,6 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
     expect(log).toContain("pid=12345");
     expect(log).toContain("tmux=ib-a1");
     expect(log).toContain("complete agent: tmux session gone");
-  });
-
-  test("running agent + tmux capture returns null + live PID → SIGTERMs and logs", async () => {
-    // Tmux capture returning null means the session disappeared mid-tick.
-    // Stub spawn so capture-pane fails.
-    tmuxPollerSpawnCtx.set(((args: any[]) => {
-      const isCapture = args[0] === "tmux" && args[1] === "capture-pane";
-      return {
-        stdout: new ReadableStream({ start(c) { c.close(); } }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
-        // capture-pane → exit 1 so captureTmuxOutput returns null
-        exited: Promise.resolve(isCapture ? 1 : 0),
-      };
-    }) as any);
-    isPidAliveCtx.set(() => true);
-    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
-    const killCalls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
-    killPidCtx.set((pid, signal) => {
-      killCalls.push({ pid, signal });
-      return true;
-    });
-
-    const a = makeAgent({
-      id: "agent-1",
-      meta: {
-        state: "running",
-        tmux_session: "ib-a1",
-        claude_pid: "12345",
-        created_epoch: Math.floor(Date.now() / 1000) - 3600,
-      } as Partial<AgentMeta> as AgentMeta,
-    });
-    await detectAgentStates([a], { reap: true });
-    expect(a.state).toBe("stopped");
-    expect(killCalls).toEqual([{ pid: 12345, signal: "SIGTERM" }]);
-
-    const { readFile } = await import("fs/promises");
-    const log = await readFile(logPath, "utf8");
-    expect(log).toContain("tmux capture returned null");
   });
 
   test("kills both Claude and watchdog when transient file exists", async () => {
@@ -2982,10 +2960,14 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     isPidAliveSinceCtx.set((pid) => isPidAliveCtx.fn(pid));
     liveTmuxSessionsCtx.set(async () => new Set());
     let captureCalls = 0;
-    captureTmuxOutputCtx.set(async () => {
+    captureTmuxOutputResultCtx.set(async () => {
       captureCalls++;
-      return "unexpected capture";
+      return { status: "ok", output: "unexpected capture" };
     });
+    probeTmuxSessionCtx.set(async () => ({
+      status: "missing",
+      error: "can't find session: ib-stale",
+    }));
 
     const a = makeAgent({
       id: "agent-1",
@@ -3008,10 +2990,14 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     isPidAliveSinceCtx.set((pid) => isPidAliveCtx.fn(pid));
     liveTmuxSessionsCtx.set(async () => new Set());
     let captureCalls = 0;
-    captureTmuxOutputCtx.set(async () => {
+    captureTmuxOutputResultCtx.set(async () => {
       captureCalls++;
-      return "unexpected capture";
+      return { status: "ok", output: "unexpected capture" };
     });
+    probeTmuxSessionCtx.set(async () => ({
+      status: "missing",
+      error: "can't find session: ib-starting",
+    }));
 
     const a = makeAgent({
       id: "agent-new",
@@ -3026,6 +3012,109 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     await detectAgentStates([a]);
     expect(a.state).toBe("creating");
     expect(captureCalls).toBe(0);
+  });
+
+  test("capture failure is unknown and never reaps a live agent", async () => {
+    isPidAliveCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-live"]));
+    captureTmuxOutputResultCtx.set(async () => ({
+      status: "error",
+      error: "capture-pane temporarily unavailable",
+      exitCode: 1,
+    }));
+    let killCalls = 0;
+    killPidCtx.set(() => {
+      killCalls++;
+      return true;
+    });
+
+    const a = makeAgent({
+      id: "agent-capture-failure",
+      meta: {
+        state: "running",
+        tmux_session: "ib-live",
+        claude_pid: "70544",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a], { reap: true });
+
+    expect(a.state).toBe("running");
+    expect(killCalls).toBe(0);
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("[tmux-observation] status=unknown operation=capture-pane");
+    expect(log).toContain("capture-pane temporarily unavailable");
+    expect(log).not.toContain("[orphan-kill]");
+  });
+
+  test("unknown exact-session probe preserves state and never reaps", async () => {
+    isPidAliveCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set());
+    probeTmuxSessionCtx.set(async () => ({
+      status: "unknown",
+      error: "posix_spawn tmux: EPERM",
+      exitCode: null,
+    }));
+    let killCalls = 0;
+    killPidCtx.set(() => {
+      killCalls++;
+      return true;
+    });
+
+    const a = makeAgent({
+      id: "agent-probe-unknown",
+      meta: {
+        state: "waiting",
+        tmux_session: "ib-unknown",
+        claude_pid: "70544",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a], { reap: true });
+
+    expect(a.state).toBe("waiting");
+    expect(killCalls).toBe(0);
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("[tmux-observation] status=unknown operation=has-session");
+    expect(log).toContain("posix_spawn tmux: EPERM");
+    expect(log).not.toContain("[orphan-kill]");
+  });
+
+  test("watcher requires two consecutive confirmed missing-session probes before reaping", async () => {
+    isPidAliveCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set());
+    probeTmuxSessionCtx.set(async () => ({
+      status: "missing",
+      error: "can't find session: ib-missing",
+    }));
+    let killCalls = 0;
+    killPidCtx.set(() => {
+      killCalls++;
+      return true;
+    });
+    installTmuxRunner("");
+
+    const a = makeAgent({
+      id: "agent-confirmed-missing",
+      meta: {
+        state: "running",
+        tmux_session: "ib-missing",
+        claude_pid: "70544",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a], { reap: true });
+    expect(a.state).toBe("running");
+    expect(killCalls).toBe(0);
+
+    await detectAgentStates([a], { reap: true });
+    expect(a.state).toBe("stopped");
+    expect(killCalls).toBe(1);
   });
 
   // Test 2: running + dead PID + not recently created → reaped to 'stopped'.
@@ -4496,6 +4585,13 @@ describe("isPidAliveSinceCtx — recycled PID guard", () => {
     expect(isPidAliveSinceCtx.fn(18825, pidWriteEpoch)).toBe(true);
   });
 
+  test("live PID with unavailable process start time fails open as alive", () => {
+    isPidAliveCtx.set(() => true);
+    processStartEpochSecondsCtx.set(() => null);
+
+    expect(isPidAliveSinceCtx.fn(18825, pidWriteEpoch)).toBe(true);
+  });
+
   test("missing claude_pid_epoch preserves PID-only compatibility", () => {
     let startTimeCalls = 0;
     isPidAliveCtx.set(() => true);
@@ -4661,6 +4757,10 @@ describe("detectAgentStates — reap option", () => {
   test("reap: false — does NOT tear down husk tmux for complete-with-dead-session", async () => {
     isPidAliveCtx.set(() => true);
     liveTmuxSessionsCtx.set(async () => new Set([])); // session is gone
+    probeTmuxSessionCtx.set(async () => ({
+      status: "missing",
+      error: "can't find session: ib-a3",
+    }));
     let killCalls = 0;
     killPidCtx.set(() => { killCalls++; return true; });
 

@@ -17,10 +17,12 @@ import type { Agent } from "./agents";
 import {
   captureTmuxOutput,
   captureTmuxOutputResult,
+  probeTmuxPane,
   probeTmuxSession,
 } from "./tmux-poller";
 import type {
   TmuxCaptureResult,
+  TmuxPaneProbeResult,
   TmuxSessionProbeResult,
 } from "./tmux-poller";
 import { logAgent } from "./agent-lifecycle";
@@ -1105,6 +1107,20 @@ export function resetPerAgentProbeTmuxSession(): void {
   probeTmuxSessionFn = probeTmuxSession;
 }
 
+/** Authoritative all-window pane-state probe for retained sessions. */
+let probeTmuxPaneFn: (session: string) => Promise<TmuxPaneProbeResult> =
+  probeTmuxPane;
+
+export function setPerAgentProbeTmuxPane(
+  fn: (session: string) => Promise<TmuxPaneProbeResult>
+): void {
+  probeTmuxPaneFn = fn;
+}
+
+export function resetPerAgentProbeTmuxPane(): void {
+  probeTmuxPaneFn = probeTmuxPane;
+}
+
 /** Injectable readAgentMeta for testing */
 let readAgentMetaFn: (agentDir: string) => Promise<{ meta: import("./agents").AgentMeta | null; error?: string }> = async (dir) => {
   const { readAgentMeta } = await import("./agents");
@@ -1344,7 +1360,10 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
 
   const tracker = createTracker();
   let tmuxGoneSince: number | null = null;
-  let lastTmuxObservationLogAtMs = 0;
+  let tmuxObservationUnavailable = false;
+  const watchdogPidEpoch = Math.floor(Date.now() / 1000);
+  const observationDetail = (value: unknown): string =>
+    String(value ?? "<none>").replace(/\s+/g, " ").slice(0, 500);
 
   // ── Outbox drain wiring ──────────────────────────────────────────────────
   // This watchdog is the single tmux writer for its agent, so it owns draining
@@ -1430,32 +1449,61 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     // pending nudge/notification is delivered promptly regardless of state.
     await drainNow();
 
-    // Check tmux session. A capture failure is unavailable evidence, not
-    // absence; only an exact has-session response may start the gone timer.
+    // Check tmux session. Capture and pane probes are independent evidence:
+    // capture failures require an exact has-session absence response, while a
+    // successful capture still needs authoritative pane metadata because a
+    // remain-on-exit pane can be readable after its process has ended.
     const capture = await captureTmuxResultFn(tmuxSession);
     let output: string | null;
+    let missingDetail = "";
     if (capture.status === "error") {
       const probe = await probeTmuxSessionFn(tmuxSession);
       if (probe.status !== "missing") {
         tmuxGoneSince = null;
-        const now = nowFn();
-        if (now - lastTmuxObservationLogAtMs >= 60_000) {
+        if (!tmuxObservationUnavailable) {
           const probeDetail = probe.status === "live"
             ? "exact session probe succeeded"
             : probe.error;
           await logAgent(
             agentDir,
             `[watchdog] tmux observation unavailable — preserving watchdog: ` +
-            `capture=${capture.error}; probe=${probeDetail}`
+            `capture=${observationDetail(capture.error)}; ` +
+            `probe=${observationDetail(probeDetail)}`
           );
-          lastTmuxObservationLogAtMs = now;
+          tmuxObservationUnavailable = true;
         }
         await sleepFn(POLL_INTERVAL_MS);
         continue;
       }
       output = null;
+      missingDetail =
+        `capture=${observationDetail(capture.error)}; ` +
+        `probe=${observationDetail(probe.error)}`;
     } else {
-      output = capture.output;
+      const pane = await probeTmuxPaneFn(tmuxSession);
+      if (pane.status === "unknown") {
+        tmuxGoneSince = null;
+        if (!tmuxObservationUnavailable) {
+          await logAgent(
+            agentDir,
+            `[watchdog] tmux pane observation unavailable — preserving watchdog: ` +
+            `probe=${observationDetail(pane.error)}`
+          );
+          tmuxObservationUnavailable = true;
+        }
+        await sleepFn(POLL_INTERVAL_MS);
+        continue;
+      }
+      if (pane.status === "dead") {
+        output = null;
+        missingDetail = "capture=succeeded; pane=all panes authoritatively dead";
+      } else {
+        output = capture.output;
+        if (tmuxObservationUnavailable) {
+          await logAgent(agentDir, "[watchdog] tmux observation recovered");
+          tmuxObservationUnavailable = false;
+        }
+      }
     }
 
     if (output === null) {
@@ -1463,7 +1511,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       if (tmuxGoneSince === null) {
         await logAgent(
           agentDir,
-          "[watchdog] tmux session confirmed missing — starting 10s grace period"
+          `[watchdog] tmux lifecycle ended — starting 10s grace period: ${missingDetail}`
         );
         await captureAndLogDeadPane(agentId, agentDir, tmuxSession);
         tmuxGoneSince = nowFn();
@@ -1515,6 +1563,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
         has_background_tasks: hasBackgroundTasks(output),
         updated_at_ms: nowFn(),
         watchdog_pid: process.pid,
+        watchdog_pid_epoch: watchdogPidEpoch,
       }));
 
       // Resolve state from meta.json with tmux overrides

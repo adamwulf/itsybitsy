@@ -42,9 +42,11 @@ import {
   deleteAgentTransient,
   updateAgentTransient,
   setAgentOperation,
+  claimAgentOperation,
   clearAgentOperation,
   isPidAliveCtx,
   isPidAliveSinceCtx,
+  isPidIdentityCurrentCtx,
   processStartEpochSecondsCtx,
   resetProcessStartEpochSecondsCache,
   CLAUDE_PID_START_MARGIN_SECONDS,
@@ -54,6 +56,7 @@ import {
   probeTmuxSessionCtx,
   probeTmuxPaneCtx,
   reapReadAgentMetaCtx,
+  acquireAgentLifecycleLockCtx,
   nowMsCtx,
   resetReadAgentMetaCache,
   TRANSIENT_FRESH_MS,
@@ -77,20 +80,25 @@ beforeEach(() => {
   // them on their historical bare-PID seam; focused tests below reset this to
   // exercise the real guarded implementation.
   isPidAliveSinceCtx.set((pid) => isPidAliveCtx.fn(pid));
+  isPidIdentityCurrentCtx.set((pid) => isPidAliveCtx.fn(pid));
   // Most lifecycle fixtures use synthetic repo paths. Preserve the observed
   // snapshot at the final-revalidation seam; focused race tests reset this to
   // exercise the real disk read.
   reapReadAgentMetaCtx.set(async (_agentDir, agent) => agent.meta);
+  acquireAgentLifecycleLockCtx.set(async () => ({ release: async () => {} }));
 });
 
 afterEach(() => {
   resetProcessStartEpochSecondsCache();
   processStartEpochSecondsCtx.reset();
   isPidAliveSinceCtx.reset();
+  isPidIdentityCurrentCtx.reset();
   captureTmuxOutputResultCtx.reset();
   probeTmuxSessionCtx.reset();
   probeTmuxPaneCtx.reset();
   reapReadAgentMetaCtx.reset();
+  acquireAgentLifecycleLockCtx.reset();
+  nowMsCtx.reset();
   resetTmuxObservationState();
 });
 
@@ -2720,6 +2728,91 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
     expect(killCalls).toBe(0);
   });
 
+  test("unavailable fresh process identity never authorizes SIGTERM", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidIdentityCurrentCtx.reset();
+    isPidAliveCtx.set(() => true);
+    processStartEpochSecondsCtx.set(() => null);
+    let killCalls = 0;
+    killPidCtx.set(() => {
+      killCalls++;
+      return true;
+    });
+    const a = makeAgent({
+      id: "agent-identity-unknown",
+      meta: {
+        tmux_session: "",
+        claude_pid: "12345",
+        claude_pid_epoch: 1_700_000_000,
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a], { reap: true });
+
+    expect(killCalls).toBe(0);
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("process identity unavailable or changed");
+  });
+
+  test("legacy PID without a write epoch never authorizes SIGTERM", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidIdentityCurrentCtx.reset();
+    isPidAliveCtx.set(() => true);
+    let startTimeCalls = 0;
+    processStartEpochSecondsCtx.set(() => {
+      startTimeCalls++;
+      return 1_700_000_000;
+    });
+    let killCalls = 0;
+    killPidCtx.set(() => {
+      killCalls++;
+      return true;
+    });
+    const a = makeAgent({
+      id: "agent-identity-legacy",
+      meta: {
+        tmux_session: "",
+        claude_pid: "12345",
+        claude_pid_epoch: undefined,
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a], { reap: true });
+
+    expect(killCalls).toBe(0);
+    expect(startTimeCalls).toBe(0);
+  });
+
+  test("fresh recycled PID observation never authorizes SIGTERM", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidIdentityCurrentCtx.reset();
+    isPidAliveCtx.set(() => true);
+    processStartEpochSecondsCtx.set(
+      () => 1_700_000_000 + CLAUDE_PID_START_MARGIN_SECONDS + 1,
+    );
+    let killCalls = 0;
+    killPidCtx.set(() => {
+      killCalls++;
+      return true;
+    });
+    const a = makeAgent({
+      id: "agent-identity-recycled",
+      meta: {
+        tmux_session: "",
+        claude_pid: "12345",
+        claude_pid_epoch: 1_700_000_000,
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a], { reap: true });
+
+    expect(killCalls).toBe(0);
+  });
+
   test("complete agent with live PID but dead tmux session → SIGTERMs and logs", async () => {
     isPidAliveCtx.set(() => true);
     liveTmuxSessionsCtx.set(async () => new Set([])); // tmux session "ib-a1" is gone
@@ -2805,6 +2898,94 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
     const { readFile } = await import("fs/promises");
     const log = await readFile(logPath, "utf8");
     expect(log).toContain("lifecycle metadata changed before teardown");
+    await rm(repoTmp, { recursive: true, force: true });
+  });
+
+  test("reap aborts when only the PID generation changes before teardown", async () => {
+    const a = makeAgent({
+      id: "agent-generation",
+      meta: {
+        state: "running",
+        tmux_session: "ib-generation",
+        claude_pid: "12345",
+        claude_pid_epoch: 1_700_000_000,
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    reapReadAgentMetaCtx.set(async () => ({
+      ...a.meta,
+      claude_pid_epoch: 1_700_000_001,
+    }));
+    isPidAliveCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set());
+    probeTmuxSessionCtx.set(async () => ({
+      status: "missing",
+      error: "can't find session: ib-generation",
+    }));
+    let killCalls = 0;
+    killPidCtx.set(() => {
+      killCalls++;
+      return true;
+    });
+
+    await detectAgentStates([a], { reap: true });
+
+    expect(killCalls).toBe(0);
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("lifecycle metadata changed before teardown");
+  });
+
+  test("lifecycle operation cannot start between final validation and teardown", async () => {
+    acquireAgentLifecycleLockCtx.reset();
+    const repoTmp = await mkdtemp(join(tmpdir(), "reap-lock-race-"));
+    const agentDir = join(repoTmp, ".ittybitty", "agents", "agent-lock-race");
+    await mkdir(agentDir, { recursive: true });
+    const a = makeAgent({
+      id: "agent-lock-race",
+      repoPath: repoTmp,
+      meta: {
+        id: "agent-lock-race",
+        state: "running",
+        tmux_session: "ib-lock-race",
+        claude_pid: "12345",
+        claude_pid_epoch: 1_700_000_000,
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    const events: string[] = [];
+    let claimPromise: Promise<ReturnType<typeof claimAgentOperation> extends Promise<infer T> ? T : never> | null = null;
+    reapReadAgentMetaCtx.set(async () => {
+      claimPromise = claimAgentOperation(agentDir, "restarting").then((result) => {
+        events.push("operation-claimed");
+        return result;
+      });
+      await Bun.sleep(75);
+      expect(events).not.toContain("operation-claimed");
+      return a.meta;
+    });
+    isPidAliveCtx.set(() => true);
+    isPidIdentityCurrentCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set());
+    probeTmuxSessionCtx.set(async () => ({
+      status: "missing",
+      error: "can't find session: ib-lock-race",
+    }));
+    killPidCtx.set(() => {
+      events.push("pid-signaled");
+      return true;
+    });
+    tmuxPollerSpawnCtx.set((() => ({
+      stdout: new ReadableStream({ start(c) { c.close(); } }),
+      stderr: new ReadableStream({ start(c) { c.close(); } }),
+      exited: Promise.resolve(0),
+    })) as any);
+
+    await detectAgentStates([a], { reap: true });
+    expect(claimPromise).not.toBeNull();
+    expect(await claimPromise!).toEqual({ ok: true });
+    expect(events.indexOf("pid-signaled")).toBeLessThan(events.indexOf("operation-claimed"));
+
     await rm(repoTmp, { recursive: true, force: true });
   });
 
@@ -4017,6 +4198,38 @@ describe("updateAgentTransient / setAgentOperation / clearAgentOperation", () =>
     expect(result?.watchdog_pid).toBe(200);
   });
 
+  test("concurrent transient writers are serialized without lost fields", async () => {
+    await Promise.all([
+      updateAgentTransient(tempDir, (cur) => ({
+        ...cur,
+        watchdog_pid: 200,
+        watchdog_pid_epoch: 1_700_000_000,
+      })),
+      updateAgentTransient(tempDir, (cur) => ({
+        ...cur,
+        tmux_compacting: true,
+      })),
+    ]);
+
+    const result = await readAgentTransient(tempDir);
+    expect(result?.watchdog_pid).toBe(200);
+    expect(result?.watchdog_pid_epoch).toBe(1_700_000_000);
+    expect(result?.tmux_compacting).toBe(true);
+  });
+
+  test("concurrent lifecycle claims admit exactly one operation", async () => {
+    isPidAliveCtx.set(() => true);
+
+    const results = await Promise.all([
+      claimAgentOperation(tempDir, "merging"),
+      claimAgentOperation(tempDir, "restarting"),
+    ]);
+
+    expect(results.filter((result) => result.ok)).toHaveLength(1);
+    const refused = results.find((result) => !result.ok);
+    expect(refused && !refused.ok ? refused.operation?.pid : undefined).toBe(process.pid);
+  });
+
   test("back-compat: transient without operation reads with operation: null", async () => {
     await Bun.write(
       join(tempDir, "meta.transient.json"),
@@ -4745,6 +4958,15 @@ describe("isPidAliveSinceCtx — recycled PID guard", () => {
     isPidAliveCtx.set(() => true);
     processStartEpochSecondsCtx.set(
       () => pidWriteEpoch + CLAUDE_PID_START_MARGIN_SECONDS + 1
+    );
+
+    expect(isPidAliveSinceCtx.fn(18825, pidWriteEpoch)).toBe(false);
+  });
+
+  test("unrelated live PID started before claude_pid_epoch minus margin is not alive", () => {
+    isPidAliveCtx.set(() => true);
+    processStartEpochSecondsCtx.set(
+      () => pidWriteEpoch - CLAUDE_PID_START_MARGIN_SECONDS - 1
     );
 
     expect(isPidAliveSinceCtx.fn(18825, pidWriteEpoch)).toBe(false);

@@ -244,17 +244,41 @@ export async function listTmuxSessions(): Promise<string[]> {
 /**
  * Kill a tmux session by name.
  */
-export async function killTmuxSession(sessionName: string): Promise<boolean> {
+export interface TmuxKillResult {
+  ok: boolean;
+  error?: string;
+  exitCode: number | null;
+}
+
+/** Kill a tmux session while preserving diagnostics for lifecycle audit logs. */
+export async function killTmuxSessionResult(sessionName: string): Promise<TmuxKillResult> {
   try {
     const proc = spawnCtx.runner(
       ["tmux", "kill-session", "-t", tmuxSessionTarget(sessionName)],
       { stdout: "pipe", stderr: "pipe" }
     );
-    const exitCode = await proc.exited;
-    return exitCode === 0;
-  } catch { /* expected: tmux not running or session already gone */
-    return false;
+    const [stderr, exitCode] = await Promise.all([
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (exitCode === 0) return { ok: true, exitCode };
+    return {
+      ok: false,
+      error: stderr.trim() || `tmux kill-session exited ${exitCode}`,
+      exitCode,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      exitCode: null,
+    };
   }
+}
+
+/** Backward-compatible boolean wrapper for non-diagnostic callers. */
+export async function killTmuxSession(sessionName: string): Promise<boolean> {
+  return (await killTmuxSessionResult(sessionName)).ok;
 }
 
 /**
@@ -373,7 +397,10 @@ export async function probeTmuxSession(tmuxSession: string): Promise<TmuxSession
 export async function probeTmuxPane(tmuxSession: string): Promise<TmuxPaneProbeResult> {
   try {
     const proc = spawnCtx.runner(
-      ["tmux", "list-panes", "-t", tmuxSessionTarget(tmuxSession), "-F", "#{pane_dead}"],
+      // -s covers every window in the session. Without it, list-panes only
+      // reports the selected window and can falsely call a multi-window
+      // session dead while another window still has a live pane.
+      ["tmux", "list-panes", "-s", "-t", tmuxSessionTarget(tmuxSession), "-F", "#{pane_dead}"],
       { stdout: "pipe", stderr: "pipe" }
     );
     const [stdout, stderr, exitCode] = await Promise.all([

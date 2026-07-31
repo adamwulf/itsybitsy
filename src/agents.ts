@@ -11,7 +11,7 @@ import { parseState, stripAnsi, stripTrailingBlanks, STARTUP_MARKERS } from "./p
 import {
   captureTmuxOutput,
   captureTmuxOutputResult,
-  killTmuxSession,
+  killTmuxSessionResult,
   listTmuxSessions,
   probeTmuxPane,
   probeTmuxSession,
@@ -396,6 +396,8 @@ export interface TransientState {
   has_background_tasks: boolean;
   updated_at_ms: number;
   watchdog_pid: number;
+  /** Unix epoch seconds when this watchdog process started. */
+  watchdog_pid_epoch?: number;
   // Wall-clock ms when the agent was most recently restarted/resumed. Used by
   // the watchdog to identify Claude CLI auto-compaction immediately after a
   // restart, without changing durable meta.json shape.
@@ -464,6 +466,12 @@ export async function readAgentTransient(agentDir: string): Promise<TransientSta
       has_background_tasks: data.has_background_tasks,
       updated_at_ms: data.updated_at_ms,
       watchdog_pid: data.watchdog_pid,
+      watchdog_pid_epoch:
+        typeof data.watchdog_pid_epoch === "number" &&
+        Number.isFinite(data.watchdog_pid_epoch) &&
+        data.watchdog_pid_epoch > 0
+          ? data.watchdog_pid_epoch
+          : undefined,
       last_restarted_at_ms: typeof data.last_restarted_at_ms === "number" ? data.last_restarted_at_ms : null,
       restart_compact_escape_sent_at_ms: typeof data.restart_compact_escape_sent_at_ms === "number"
         ? data.restart_compact_escape_sent_at_ms
@@ -503,32 +511,117 @@ function emptyTransient(): TransientState {
     has_background_tasks: false,
     updated_at_ms: 0,
     watchdog_pid: 0,
+    watchdog_pid_epoch: undefined,
     last_restarted_at_ms: null,
     restart_compact_escape_sent_at_ms: null,
     operation: null,
   };
 }
 
+const LIFECYCLE_LOCK_STALE_MS = 120_000;
+const LIFECYCLE_LOCK_RETRY_MS = 25;
+
+export interface AgentLifecycleLock {
+  release: () => Promise<void>;
+}
+
+/**
+ * Acquire the cross-process lock that separates lifecycle creation from
+ * destructive orphan cleanup. The lock lives beside the agent directory so
+ * merge/removal cannot make it disappear while held.
+ *
+ * Callers that cannot acquire within `waitMs` must fail safe: lifecycle
+ * cleanup is skipped and lifecycle operations report that the agent is busy.
+ */
+export async function acquireAgentLifecycleLock(
+  agentDir: string,
+  waitMs = 2_000,
+): Promise<AgentLifecycleLock | null> {
+  const lockPath = `${agentDir}.lifecycle.lock`;
+  const deadline = Date.now() + Math.max(0, waitMs);
+  const token = randomUUID();
+
+  while (true) {
+    try {
+      const handle = await open(lockPath, "wx");
+      try {
+        await handle.writeFile(JSON.stringify({
+          pid: process.pid,
+          created_at_ms: Date.now(),
+          token,
+        }));
+      } finally {
+        await handle.close();
+      }
+      return {
+        release: async () => {
+          try {
+            const current = await Bun.file(lockPath).json();
+            if (current?.token === token) await unlink(lockPath);
+          } catch {
+            // Best-effort. A missing/replaced lock is no longer ours.
+          }
+        },
+      };
+    } catch (error: any) {
+      if (error?.code !== "EEXIST") return null;
+
+      // Crash recovery for a lock whose owner is affirmatively gone. Re-read
+      // the token immediately before unlinking so a released-and-reacquired
+      // lock is not mistaken for the stale generation we inspected.
+      try {
+        const stale = await Bun.file(lockPath).json();
+        const staleAge = Date.now() - Number(stale?.created_at_ms);
+        const stalePid = Number(stale?.pid);
+        const staleToken = stale?.token;
+        if (
+          typeof staleToken === "string" &&
+          staleAge > LIFECYCLE_LOCK_STALE_MS &&
+          Number.isFinite(stalePid) &&
+          stalePid > 0 &&
+          !isPidAliveCtx.fn(stalePid)
+        ) {
+          const current = await Bun.file(lockPath).json();
+          if (current?.token === staleToken) {
+            await unlink(lockPath);
+            continue;
+          }
+        }
+      } catch {
+        // An unreadable lock is unavailable evidence, not permission to
+        // remove it. The bounded wait below will fail safe.
+      }
+
+      if (Date.now() >= deadline) return null;
+      await Bun.sleep(LIFECYCLE_LOCK_RETRY_MS);
+    }
+  }
+}
+
+/** Injectable lifecycle-lock acquisition for teardown race tests. */
+export const acquireAgentLifecycleLockCtx = new InjectionContext<
+  (agentDir: string, waitMs?: number) => Promise<AgentLifecycleLock | null>
+>(acquireAgentLifecycleLock);
+
 /**
  * Single read-modify-write primitive for meta.transient.json. Reads the
  * current transient (or a zeroed default when missing/malformed), applies
  * `fn`, and writes the result atomically (.tmp + rename).
  *
- * ALL transient writers route through this so that adding merge/resume as
- * writers (alongside the watchdog) doesn't clobber each other's fields via
- * last-write-wins on the whole file. The watchdog preserves an in-flight
- * `operation` it didn't set, and the op writers preserve the watchdog's tmux
- * snapshot. Worst case is a lost write that degrades to today's behavior
- * (guard didn't engage), never corruption.
+ * ALL transient writers route through this under the cross-process lifecycle
+ * lock so adding merge/resume as writers (alongside the watchdog) cannot
+ * clobber each other's fields via last-write-wins on the whole file. The
+ * watchdog preserves an in-flight `operation` it didn't set, and the op
+ * writers preserve the watchdog's tmux snapshot.
  *
  * Best-effort: silently swallows write errors (including a missing dir on the
  * post-merge clear path) so a failing write does not crash the caller — same
  * idiom as writeAgentTransient/deleteAgentTransient.
  */
-export async function updateAgentTransient(
+async function updateAgentTransientUnlocked(
   agentDir: string,
   fn: (cur: TransientState) => TransientState,
-): Promise<void> {
+): Promise<boolean> {
   const path = join(agentDir, "meta.transient.json");
   try {
     // Skip if the agent dir is gone. Bun.write auto-creates parent dirs, so
@@ -547,8 +640,64 @@ export async function updateAgentTransient(
     const tmpPath = `${path}.tmp.${process.pid}`;
     await Bun.write(tmpPath, JSON.stringify(next, null, 2));
     await rename(tmpPath, path);
+    return true;
   } catch {
     /* best-effort — ENOENT-safe, mirrors writeAgentTransient */
+    return false;
+  }
+}
+
+export async function updateAgentTransient(
+  agentDir: string,
+  fn: (cur: TransientState) => TransientState,
+): Promise<void> {
+  const lock = await acquireAgentLifecycleLock(agentDir);
+  if (!lock) return;
+  try {
+    await updateAgentTransientUnlocked(agentDir, fn);
+  } finally {
+    await lock.release();
+  }
+}
+
+export type ClaimAgentOperationResult =
+  | { ok: true }
+  | { ok: false; reason: "busy" | "missing"; operation?: AgentOperation };
+
+/**
+ * Atomically inspect and claim the lifecycle-operation marker under the same
+ * lock used by orphan teardown and watchdog transient writes.
+ */
+export async function claimAgentOperation(
+  agentDir: string,
+  kind: AgentOperationKind,
+): Promise<ClaimAgentOperationResult> {
+  try {
+    await stat(agentDir);
+  } catch {
+    return { ok: false, reason: "missing" };
+  }
+  const lock = await acquireAgentLifecycleLock(agentDir);
+  if (!lock) return { ok: false, reason: "busy" };
+  try {
+    const current = await readAgentTransient(agentDir);
+    const op = current?.operation;
+    if (op && op.pid > 0 && isPidAliveCtx.fn(op.pid)) {
+      const tooOld = nowMsCtx.fn() - op.started_at_ms > OP_STUCK_TIMEOUT_MS;
+      if (!tooOld) return { ok: false, reason: "busy", operation: op };
+    }
+    const next: AgentOperation = {
+      kind,
+      pid: process.pid,
+      started_at_ms: nowMsCtx.fn(),
+    };
+    const wrote = await updateAgentTransientUnlocked(
+      agentDir,
+      (cur) => ({ ...cur, operation: next }),
+    );
+    return wrote ? { ok: true } : { ok: false, reason: "busy" };
+  } finally {
+    await lock.release();
   }
 }
 
@@ -1579,6 +1728,10 @@ function clearReapedTmuxSession(tmuxSession: string): void {
   if (!tmuxSession) return;
   reapedTmuxSessions.delete(tmuxSession);
   clearTmuxMissingObservation(tmuxSession);
+  const prefix = `${tmuxSession}\0`;
+  for (const key of tmuxObservationLogEpochMs.keys()) {
+    if (key.startsWith(prefix)) tmuxObservationLogEpochMs.delete(key);
+  }
 }
 
 /** Reset the reaped-tmux-session memo. Exported for tests. */
@@ -1622,14 +1775,16 @@ function logTmuxObservation(
   detail: string
 ): void {
   const tmuxSession = agent.meta.tmux_session || "<none>";
-  const key = `${tmuxSession}\0${status}\0${operation}`;
+  const normalized = detail.replace(/\s+/g, " ").trim().slice(0, 500) || "unknown error";
+  // A different failure detail is a new diagnostic, while recovery clears all
+  // keys for the session so a later recurrence starts a fresh log episode.
+  const key = `${tmuxSession}\0${status}\0${operation}\0${normalized}`;
   const now = Date.now();
   const last = tmuxObservationLogEpochMs.get(key) ?? 0;
   if (now - last < TMUX_OBSERVATION_LOG_INTERVAL_MS) return;
   tmuxObservationLogEpochMs.delete(key);
   tmuxObservationLogEpochMs.set(key, now);
   trimOldestMapEntries(tmuxObservationLogEpochMs);
-  const normalized = detail.replace(/\s+/g, " ").trim().slice(0, 500) || "unknown error";
   const repoTag = agent.repoName ? `${agent.repoName}/` : "";
   logToWatchLog(
     `[tmux-observation] status=${status} operation=${operation} ` +
@@ -1897,10 +2052,18 @@ function getProcessStartEpochSeconds(pid: number): number | null {
   return value;
 }
 
+function isProcessStartCurrent(
+  processStartEpochSeconds: number,
+  pidWriteEpochSeconds: number,
+): boolean {
+  return Math.abs(processStartEpochSeconds - pidWriteEpochSeconds) <=
+    CLAUDE_PID_START_MARGIN_SECONDS;
+}
+
 /**
  * Claude-specific PID liveness guard. A live PID is accepted only when the OS
- * reports that its process started no later than the current PID-write time
- * plus the documented writeback/skew margin. Once signal-0 has affirmatively
+ * reports that its process start is within the documented writeback/skew
+ * margin of the current PID-write time. Once signal-0 has affirmatively
  * established that the PID exists, failure to read the start time is
  * "unknown" and fails open as alive. This is required inside Codex sandboxes,
  * where signal-0 may return EPERM (alive but unsignalable) and spawning `ps`
@@ -1918,13 +2081,41 @@ function _isPidAliveSince(pid: number, pidWriteEpochSeconds: number | undefined)
   ) return true;
   const processStartEpochSeconds = getProcessStartEpochSeconds(pid);
   return processStartEpochSeconds === null ||
-    processStartEpochSeconds <= pidWriteEpochSeconds + CLAUDE_PID_START_MARGIN_SECONDS;
+    isProcessStartCurrent(processStartEpochSeconds, pidWriteEpochSeconds);
 }
 
 /** Injectable guarded Claude PID liveness check for tests. */
 export const isPidAliveSinceCtx = new InjectionContext<
   (pid: number, pidWriteEpochSeconds: number | undefined) => boolean
 >(_isPidAliveSince);
+
+/**
+ * Destructive counterpart to isPidAliveSince. Signaling requires fresh,
+ * affirmative identity: a live numeric PID alone is insufficient, missing
+ * epochs are legacy/unknown, and an unavailable process-start observation
+ * must never authorize a signal.
+ */
+function _isPidIdentityCurrent(
+  pid: number,
+  pidWriteEpochSeconds: number | undefined,
+): boolean {
+  if (!isPidAliveCtx.fn(pid)) return false;
+  if (
+    typeof pidWriteEpochSeconds !== "number" ||
+    !Number.isFinite(pidWriteEpochSeconds) ||
+    pidWriteEpochSeconds <= 0
+  ) return false;
+  // Bypass the state-rendering cache immediately before destructive use.
+  processStartEpochSecondsCache.delete(pid);
+  const processStartEpochSeconds = processStartEpochSecondsCtx.fn(pid);
+  return processStartEpochSeconds !== null &&
+    isProcessStartCurrent(processStartEpochSeconds, pidWriteEpochSeconds);
+}
+
+/** Injectable fresh process-identity guard for orphan-reaper tests. */
+export const isPidIdentityCurrentCtx = new InjectionContext<
+  (pid: number, pidWriteEpochSeconds: number | undefined) => boolean
+>(_isPidIdentityCurrent);
 
 /** Test-only re-export of the default _isPidAlive — lets tests exercise the
  *  actual signal-0 + EPERM/ESRCH classification by stubbing process.kill. */
@@ -2146,7 +2337,16 @@ async function reapOrphanedClaude(
 
   const repoTag = agent.repoName ? `${agent.repoName}/` : "";
   const tmuxLabel = agent.meta.tmux_session || "<none>";
+  const lifecycleLock = await acquireAgentLifecycleLockCtx.fn(agentDir, 250);
+  if (!lifecycleLock) {
+    logToWatchLog(
+      `[orphan-kill] aborted agent=${repoTag}${agent.id} tmux=${tmuxLabel} ` +
+      `state=${resolvedState} reason=lifecycle lock unavailable before teardown`
+    );
+    return;
+  }
 
+  try {
   // Re-read mutable lifecycle metadata immediately before teardown. Resume
   // and respawn write an operation marker before replacing the session/PID;
   // an observation taken before that transition must never kill the new
@@ -2162,7 +2362,8 @@ async function reapOrphanedClaude(
   if (
     (
       latestMeta.tmux_session !== agent.meta.tmux_session ||
-      latestMeta.claude_pid !== agent.meta.claude_pid
+      latestMeta.claude_pid !== agent.meta.claude_pid ||
+      latestMeta.claude_pid_epoch !== agent.meta.claude_pid_epoch
     )
   ) {
     logToWatchLog(
@@ -2184,9 +2385,19 @@ async function reapOrphanedClaude(
     return;
   }
 
-  const reap = (kind: "claude" | "watchdog", pid: number): void => {
+  const reap = (
+    kind: "claude" | "watchdog",
+    pid: number,
+    pidEpoch: number | undefined,
+  ): void => {
     if (!Number.isFinite(pid) || pid <= 0) return;
-    if (!isPidAliveCtx.fn(pid)) return;
+    if (!isPidIdentityCurrentCtx.fn(pid, pidEpoch)) {
+      logToWatchLog(
+        `[orphan-kill] signal skipped kind=${kind} pid=${pid} agent=${repoTag}${agent.id} ` +
+        `tmux=${tmuxLabel} state=${resolvedState} reason=process identity unavailable or changed`
+      );
+      return;
+    }
     const ok = killPidCtx.fn(pid, "SIGTERM");
     const status = ok ? "SIGTERM sent" : "SIGTERM failed";
     logToWatchLog(
@@ -2196,11 +2407,13 @@ async function reapOrphanedClaude(
   };
 
   if (!opts.skipClaudePid) {
-    reap("claude", parseInt(agent.meta.claude_pid, 10));
+    reap("claude", parseInt(latestMeta.claude_pid, 10), latestMeta.claude_pid_epoch);
   }
 
   // Watchdog PID lives in meta.transient.json, not meta.json.
-  if (transient) reap("watchdog", transient.watchdog_pid);
+  if (transient) {
+    reap("watchdog", transient.watchdog_pid, transient.watchdog_pid_epoch);
+  }
 
   // Tear down the husk tmux session for stopped agents. Best-effort: a kill
   // against an already-gone session is a cheap no-op. Memoize on the session
@@ -2213,11 +2426,17 @@ async function reapOrphanedClaude(
     !reapedTmuxSessions.has(agent.meta.tmux_session)
   ) {
     reapedTmuxSessions.add(agent.meta.tmux_session);
-    const killed = await killTmuxSession(agent.meta.tmux_session);
+    const result = await killTmuxSessionResult(agent.meta.tmux_session);
+    const detail = result.error
+      ? ` error=${JSON.stringify(result.error.slice(0, 500))} exit=${result.exitCode ?? "spawn"}`
+      : "";
     logToWatchLog(
-      `[orphan-kill] tmux ${killed ? "kill-session sent" : "kill-session failed"} ` +
-      `agent=${repoTag}${agent.id} tmux=${tmuxLabel} state=${resolvedState} reason=${reason}`
+      `[orphan-kill] tmux ${result.ok ? "kill-session sent" : "kill-session failed"} ` +
+      `agent=${repoTag}${agent.id} tmux=${tmuxLabel} state=${resolvedState} reason=${reason}${detail}`
     );
+  }
+  } finally {
+    await lifecycleLock.release();
   }
 }
 

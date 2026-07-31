@@ -25,11 +25,9 @@ import {
   writeAgentState,
   isRecentlyCreated,
   isPidAliveCtx,
-  nowMsCtx,
-  OP_STUCK_TIMEOUT_MS,
   readAgentTransient,
   updateAgentTransient,
-  setAgentOperation,
+  claimAgentOperation,
   clearAgentOperation,
   TRANSIENT_FRESH_MS,
   readAllAgents,
@@ -218,20 +216,27 @@ async function acquireAgentOperation(
   agentDir: string,
   kind: AgentOperationKind,
 ): Promise<AcquireOpResult> {
-  const t = await readAgentTransient(agentDir);
-  const op = t?.operation;
-  if (op && op.pid > 0 && isPidAliveCtx.fn(op.pid)) {
-    const tooOld = nowMsCtx.fn() - op.started_at_ms > OP_STUCK_TIMEOUT_MS;
-    if (!tooOld) {
+  const claim = await claimAgentOperation(agentDir, kind);
+  if (!claim.ok) {
+    if (claim.reason === "missing") {
       return {
         ok: false,
-        stderr: `Agent is currently ${humanizeOpKind(op.kind)} (pid ${op.pid}) — try again when it finishes`,
+        stderr: `Agent directory not found: ${agentDir}`,
       };
     }
-    // live holder but op ran past the stuck timeout → age reclaim.
+    if (claim.operation) {
+      return {
+        ok: false,
+        stderr:
+          `Agent is currently ${humanizeOpKind(claim.operation.kind)} ` +
+          `(pid ${claim.operation.pid}) — try again when it finishes`,
+      };
+    }
+    return {
+      ok: false,
+      stderr: "Agent lifecycle state is busy — try again",
+    };
   }
-  // op absent, holder dead, or op too old → reclaim and proceed.
-  await setAgentOperation(agentDir, { kind, pid: process.pid, started_at_ms: nowMsCtx.fn() });
   return { ok: true };
 }
 

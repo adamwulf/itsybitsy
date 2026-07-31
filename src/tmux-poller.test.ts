@@ -5,6 +5,7 @@ import {
   captureTmuxOutputResult,
   probeTmuxSession,
   probeTmuxPane,
+  killTmuxSessionResult,
   hasAttachedClient,
   spawnCtx,
   expandTabs,
@@ -173,6 +174,28 @@ describe("probeTmuxSession", () => {
 });
 
 describe("probeTmuxPane", () => {
+  test("queries every window in the exact session", async () => {
+    let capturedCmd: string[] = [];
+    spawnCtx.set((cmd: string[]) => {
+      capturedCmd = cmd;
+      return {
+        stdout: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("0\n"));
+            controller.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(controller) { controller.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    await probeTmuxPane("my-session");
+
+    expect(capturedCmd).toContain("-s");
+    expect(capturedCmd).toContain("=my-session:");
+  });
+
   test("returns live from authoritative pane metadata", async () => {
     mockSpawn("0\n", 0);
     expect(await probeTmuxPane("my-session")).toEqual({ status: "live" });
@@ -199,6 +222,26 @@ describe("probeTmuxPane", () => {
     mockSpawn("Pane is dead\n", 0);
     const malformed = await probeTmuxPane("my-session");
     expect(malformed.status).toBe("unknown");
+  });
+});
+
+describe("killTmuxSessionResult", () => {
+  test("preserves stderr and exit code for failed teardown", async () => {
+    mockSpawn("", 1, 0, "session is attached");
+    expect(await killTmuxSessionResult("my-session")).toEqual({
+      ok: false,
+      error: "session is attached",
+      exitCode: 1,
+    });
+  });
+
+  test("preserves spawn exceptions", async () => {
+    spawnCtx.set(() => { throw new Error("spawn denied"); });
+    expect(await killTmuxSessionResult("my-session")).toEqual({
+      ok: false,
+      error: "spawn denied",
+      exitCode: null,
+    });
   });
 });
 

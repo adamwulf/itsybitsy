@@ -35,6 +35,8 @@ import {
   resetPerAgentCaptureTmux,
   setPerAgentProbeTmuxSession,
   resetPerAgentProbeTmuxSession,
+  setPerAgentProbeTmuxPane,
+  resetPerAgentProbeTmuxPane,
   setPerAgentReadMeta,
   resetPerAgentReadMeta,
   setPerAgentSleep,
@@ -2436,6 +2438,7 @@ describe("runPerAgentWatchdog", () => {
       pollCount++;
       return tmuxOutput;
     });
+    setPerAgentProbeTmuxPane(async () => ({ status: "live" }));
     setPerAgentReadMeta(async (_dir: string) => ({
       meta: {
         id: "agent-test1",
@@ -2472,6 +2475,7 @@ describe("runPerAgentWatchdog", () => {
     resetPerAgentExistsSync();
     resetPerAgentCaptureTmux();
     resetPerAgentProbeTmuxSession();
+    resetPerAgentProbeTmuxPane();
     resetPerAgentReadMeta();
     resetPerAgentSleep();
     resetWatchdogNow();
@@ -2731,6 +2735,40 @@ describe("runPerAgentWatchdog", () => {
     expect(captureCalls).toBeGreaterThanOrEqual(2);
   });
 
+  test("exits after grace when capture succeeds but every pane is authoritatively dead", async () => {
+    let captureCalls = 0;
+    setPerAgentCaptureTmux(async () => {
+      captureCalls++;
+      if (captureCalls >= 2) currentTime += TMUX_GONE_GRACE_MS + 1;
+      return "retained pane output";
+    });
+    setPerAgentProbeTmuxPane(async () => ({ status: "dead" }));
+    setPerAgentExistsSync(() => true);
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+
+    expect(captureCalls).toBeGreaterThanOrEqual(2);
+  });
+
+  test("successful capture with unavailable pane metadata preserves watchdog", async () => {
+    setPerAgentCaptureTmux(async () => "ordinary live output");
+    setPerAgentProbeTmuxPane(async () => ({
+      status: "unknown",
+      error: "tmux list-panes permission denied",
+      exitCode: 1,
+    }));
+
+    let existsChecks = 0;
+    setPerAgentExistsSync(() => {
+      existsChecks++;
+      return existsChecks <= 1;
+    });
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+
+    expect(existsChecks).toBe(2);
+  });
+
   test("resets tmux grace period when session reappears", async () => {
     setPerAgentProbeTmuxSession(async () => ({
       status: "missing",
@@ -2899,6 +2937,7 @@ describe("lazy allAgents loading via runPerAgentWatchdog", () => {
 
     setPerAgentExistsSync((_path: string) => worktreeExists);
     setPerAgentCaptureTmux(async (_session: string) => tmuxOutput);
+    setPerAgentProbeTmuxPane(async () => ({ status: "live" }));
     setPerAgentReadMeta(async (_dir: string) => ({
       meta: {
         id: "agent-test1",
@@ -2932,6 +2971,7 @@ describe("lazy allAgents loading via runPerAgentWatchdog", () => {
     resetPerAgentExistsSync();
     resetPerAgentCaptureTmux();
     resetPerAgentProbeTmuxSession();
+    resetPerAgentProbeTmuxPane();
     resetPerAgentReadMeta();
     resetPerAgentSleep();
     resetWatchdogNow();
@@ -3032,6 +3072,7 @@ describe("runPerAgentWatchdog — meta.transient.json persistence", () => {
     }));
     setPerAgentReadState(async () => "running");
     setPerAgentSleep(async () => {});
+    setPerAgentProbeTmuxPane(async () => ({ status: "live" }));
     setWatchdogReadConfig(async () => ({} as any));
     setSendSpawnRunner(() => ({ stdout: "", exitCode: 0 }) as any);
     clearAllAgentsCache();
@@ -3042,6 +3083,7 @@ describe("runPerAgentWatchdog — meta.transient.json persistence", () => {
     resetPerAgentExistsSync();
     resetPerAgentCaptureTmux();
     resetPerAgentProbeTmuxSession();
+    resetPerAgentProbeTmuxPane();
     resetPerAgentReadMeta();
     resetPerAgentSleep();
     resetWatchdogNow();

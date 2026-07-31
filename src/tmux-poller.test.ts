@@ -4,6 +4,7 @@ import {
   captureTmuxOutput,
   captureTmuxOutputResult,
   probeTmuxSession,
+  probeTmuxPane,
   hasAttachedClient,
   spawnCtx,
   expandTabs,
@@ -152,6 +153,15 @@ describe("probeTmuxSession", () => {
     });
   });
 
+  test("returns unknown when the tmux server is unavailable", async () => {
+    mockSpawn("", 1, 0, "no server running on /tmp/tmux-501/default");
+    expect(await probeTmuxSession("my-session")).toEqual({
+      status: "unknown",
+      error: "no server running on /tmp/tmux-501/default",
+      exitCode: 1,
+    });
+  });
+
   test("returns unknown when the probe cannot spawn", async () => {
     spawnCtx.set(() => { throw new Error("posix_spawn tmux: EPERM"); });
     expect(await probeTmuxSession("my-session")).toEqual({
@@ -159,6 +169,36 @@ describe("probeTmuxSession", () => {
       error: "posix_spawn tmux: EPERM",
       exitCode: null,
     });
+  });
+});
+
+describe("probeTmuxPane", () => {
+  test("returns live from authoritative pane metadata", async () => {
+    mockSpawn("0\n", 0);
+    expect(await probeTmuxPane("my-session")).toEqual({ status: "live" });
+  });
+
+  test("returns dead only when every pane is dead", async () => {
+    mockSpawn("1\n1\n", 0);
+    expect(await probeTmuxPane("my-session")).toEqual({ status: "dead" });
+  });
+
+  test("returns live when any pane remains live", async () => {
+    mockSpawn("1\n0\n", 0);
+    expect(await probeTmuxPane("my-session")).toEqual({ status: "live" });
+  });
+
+  test("returns unknown for unavailable or malformed metadata", async () => {
+    mockSpawn("", 1, 0, "permission denied");
+    expect(await probeTmuxPane("my-session")).toEqual({
+      status: "unknown",
+      error: "permission denied",
+      exitCode: 1,
+    });
+
+    mockSpawn("Pane is dead\n", 0);
+    const malformed = await probeTmuxPane("my-session");
+    expect(malformed.status).toBe("unknown");
   });
 });
 

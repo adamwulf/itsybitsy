@@ -27,6 +27,11 @@ export type TmuxSessionProbeResult =
   | { status: "missing"; error: string }
   | { status: "unknown"; error: string; exitCode: number | null };
 
+export type TmuxPaneProbeResult =
+  | { status: "live" }
+  | { status: "dead" }
+  | { status: "unknown"; error: string; exitCode: number | null };
+
 // pi-tui v0.56.0's visibleWidth() expands \t to 3 spaces but its slicing
 // helpers (sliceWithWidth/sliceByColumn/extractSegments) measure \t as 0
 // columns via graphemeWidth (its leadingNonPrintingRegex strips control
@@ -343,14 +348,56 @@ export async function probeTmuxSession(tmuxSession: string): Promise<TmuxSession
     if (exitCode === 0) return { status: "live" };
 
     const detail = stderr.trim() || `tmux has-session exited ${exitCode}`;
-    if (
-      /can't find session/i.test(detail) ||
-      /no server running/i.test(detail) ||
-      /failed to connect to server: No such file or directory/i.test(detail)
-    ) {
+    // Only a response from a reachable tmux server that names the exact
+    // missing session is affirmative absence. Socket/server visibility
+    // failures remain unknown: a sandbox may simply be unable to see the
+    // authoritative server.
+    if (/^can't find session:/i.test(detail)) {
       return { status: "missing", error: detail };
     }
     return { status: "unknown", error: detail, exitCode };
+  } catch (error) {
+    return {
+      status: "unknown",
+      error: error instanceof Error ? error.message : String(error),
+      exitCode: null,
+    };
+  }
+}
+
+/**
+ * Ask tmux for authoritative pane-dead metadata. Pane contents are not safe
+ * lifecycle evidence because an agent can quote tmux's "Pane is dead" banner
+ * while inspecting source or tests.
+ */
+export async function probeTmuxPane(tmuxSession: string): Promise<TmuxPaneProbeResult> {
+  try {
+    const proc = spawnCtx.runner(
+      ["tmux", "list-panes", "-t", tmuxSessionTarget(tmuxSession), "-F", "#{pane_dead}"],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (exitCode !== 0) {
+      return {
+        status: "unknown",
+        error: stderr.trim() || `tmux list-panes exited ${exitCode}`,
+        exitCode,
+      };
+    }
+
+    const states = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (states.length === 0 || states.some((state) => state !== "0" && state !== "1")) {
+      return {
+        status: "unknown",
+        error: `unexpected tmux pane_dead output: ${stdout.trim() || "<empty>"}`,
+        exitCode,
+      };
+    }
+    return states.every((state) => state === "1") ? { status: "dead" } : { status: "live" };
   } catch (error) {
     return {
       status: "unknown",

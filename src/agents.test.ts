@@ -36,6 +36,7 @@ import {
   resetListTmuxSessionsCache,
   resetReapedTmuxSessions,
   resetTmuxObservationState,
+  TMUX_MISSING_CONFIRMATION_MIN_INTERVAL_MS,
   readAgentTransient,
   writeAgentTransient,
   deleteAgentTransient,
@@ -51,6 +52,8 @@ import {
   liveTmuxSessionsCtx,
   captureTmuxOutputResultCtx,
   probeTmuxSessionCtx,
+  probeTmuxPaneCtx,
+  reapReadAgentMetaCtx,
   nowMsCtx,
   resetReadAgentMetaCache,
   TRANSIENT_FRESH_MS,
@@ -74,6 +77,10 @@ beforeEach(() => {
   // them on their historical bare-PID seam; focused tests below reset this to
   // exercise the real guarded implementation.
   isPidAliveSinceCtx.set((pid) => isPidAliveCtx.fn(pid));
+  // Most lifecycle fixtures use synthetic repo paths. Preserve the observed
+  // snapshot at the final-revalidation seam; focused race tests reset this to
+  // exercise the real disk read.
+  reapReadAgentMetaCtx.set(async (_agentDir, agent) => agent.meta);
 });
 
 afterEach(() => {
@@ -82,6 +89,8 @@ afterEach(() => {
   isPidAliveSinceCtx.reset();
   captureTmuxOutputResultCtx.reset();
   probeTmuxSessionCtx.reset();
+  probeTmuxPaneCtx.reset();
+  reapReadAgentMetaCtx.reset();
   resetTmuxObservationState();
 });
 
@@ -2733,10 +2742,6 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
       } as Partial<AgentMeta> as AgentMeta,
     });
     await detectAgentStates([a], { reap: true });
-    expect(a.state).toBe("complete");
-    expect(killCalls).toEqual([]);
-
-    await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killCalls).toEqual([{ pid: 12345, signal: "SIGTERM" }]);
 
@@ -2746,6 +2751,90 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
     expect(log).toContain("pid=12345");
     expect(log).toContain("tmux=ib-a1");
     expect(log).toContain("complete agent: tmux session gone");
+  });
+
+  test("reap aborts when lifecycle metadata changes after observation", async () => {
+    reapReadAgentMetaCtx.reset();
+    const repoTmp = await mkdtemp(join(tmpdir(), "reap-revalidation-"));
+    const agentDir = join(repoTmp, ".ittybitty", "agents", "agent-race");
+    await mkdir(agentDir, { recursive: true });
+
+    const a = makeAgent({
+      id: "agent-race",
+      repoPath: repoTmp,
+      meta: {
+        id: "agent-race",
+        state: "running",
+        tmux_session: "ib-race",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    const { writeFile } = await import("fs/promises");
+    await writeFile(
+      join(agentDir, "meta.json"),
+      JSON.stringify({ ...a.meta, claude_pid: "99999" })
+    );
+
+    isPidAliveCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set());
+    probeTmuxSessionCtx.set(async () => ({
+      status: "missing",
+      error: "can't find session: ib-race",
+    }));
+    let killPidCalls = 0;
+    let killSessionCalls = 0;
+    killPidCtx.set(() => {
+      killPidCalls++;
+      return true;
+    });
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      if (args[0] === "tmux" && args[1] === "kill-session") killSessionCalls++;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+
+    await detectAgentStates([a], { reap: true });
+
+    expect(a.state).toBe("stopped");
+    expect(killPidCalls).toBe(0);
+    expect(killSessionCalls).toBe(0);
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("lifecycle metadata changed before teardown");
+    await rm(repoTmp, { recursive: true, force: true });
+  });
+
+  test("reap aborts when final lifecycle metadata is unavailable", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => true);
+    reapReadAgentMetaCtx.set(async () => null);
+    let killPidCalls = 0;
+    killPidCtx.set(() => {
+      killPidCalls++;
+      return true;
+    });
+
+    const a = makeAgent({
+      id: "agent-unavailable",
+      meta: {
+        state: "running",
+        tmux_session: "",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a], { reap: true });
+
+    expect(a.state).toBe("stopped");
+    expect(killPidCalls).toBe(0);
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("lifecycle metadata unavailable before teardown");
   });
 
   test("kills both Claude and watchdog when transient file exists", async () => {
@@ -2985,6 +3074,41 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     expect(captureCalls).toBe(0);
   });
 
+  test("recycled claude_pid is never signaled during destructive cleanup", async () => {
+    const pidWriteEpoch = 1_700_000_000;
+    isPidAliveSinceCtx.reset();
+    isPidAliveCtx.set(() => true);
+    processStartEpochSecondsCtx.set(
+      () => pidWriteEpoch + CLAUDE_PID_START_MARGIN_SECONDS + 1
+    );
+    const killPidCalls: number[] = [];
+    killPidCtx.set((pid) => {
+      killPidCalls.push(pid);
+      return true;
+    });
+    tmuxPollerSpawnCtx.set((() => ({
+      stdout: new ReadableStream({ start(c) { c.close(); } }),
+      stderr: new ReadableStream({ start(c) { c.close(); } }),
+      exited: Promise.resolve(0),
+    })) as any);
+
+    const a = makeAgent({
+      id: "agent-recycled",
+      meta: {
+        state: "running",
+        tmux_session: "ib-recycled",
+        claude_pid: "18825",
+        claude_pid_epoch: pidWriteEpoch,
+        created_epoch: pidWriteEpoch - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a], { reap: true });
+
+    expect(a.state).toBe("stopped");
+    expect(killPidCalls).toEqual([]);
+  });
+
   test("recent agent + missing live tmux session stays creating without capture", async () => {
     isPidAliveCtx.set(() => true);
     isPidAliveSinceCtx.set((pid) => isPidAliveCtx.fn(pid));
@@ -3085,6 +3209,8 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
   });
 
   test("watcher requires two consecutive confirmed missing-session probes before reaping", async () => {
+    let observationNow = 10_000;
+    nowMsCtx.set(() => observationNow);
     isPidAliveCtx.set(() => true);
     liveTmuxSessionsCtx.set(async () => new Set());
     probeTmuxSessionCtx.set(async () => ({
@@ -3108,11 +3234,27 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
       } as Partial<AgentMeta> as AgentMeta,
     });
 
-    await detectAgentStates([a], { reap: true });
+    await detectAgentStates([a], {
+      reap: true,
+      confirmTmuxMissingAcrossPolls: true,
+    });
     expect(a.state).toBe("running");
     expect(killCalls).toBe(0);
 
-    await detectAgentStates([a], { reap: true });
+    // A concurrent/duplicate call in the same polling window cannot count as
+    // the second confirmation.
+    await detectAgentStates([a], {
+      reap: true,
+      confirmTmuxMissingAcrossPolls: true,
+    });
+    expect(a.state).toBe("running");
+    expect(killCalls).toBe(0);
+
+    observationNow += TMUX_MISSING_CONFIRMATION_MIN_INTERVAL_MS;
+    await detectAgentStates([a], {
+      reap: true,
+      confirmTmuxMissingAcrossPolls: true,
+    });
     expect(a.state).toBe("stopped");
     expect(killCalls).toBe(1);
   });
@@ -3497,6 +3639,7 @@ describe("detectAgentStates — dead-pane husk handling", () => {
 
   // Test 6: dead pane + alive PID + not recently created → stopped + kill-session called
   test("running + claude_pid alive + 'Pane is dead' output + NOT recently created → 'stopped', kill-session called", async () => {
+    probeTmuxPaneCtx.set(async () => ({ status: "dead" }));
     const killSessionCalls: string[] = [];
     tmuxPollerSpawnCtx.set(((args: any[]) => {
       const isCapture = args[0] === "tmux" && args[1] === "capture-pane";
@@ -3548,8 +3691,39 @@ describe("detectAgentStates — dead-pane husk handling", () => {
     expect(log).toContain("tmux pane is dead");
   });
 
+  test("quoted 'Pane is dead' text in a live pane never stops or reaps the agent", async () => {
+    isPidAliveCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-review"]));
+    captureTmuxOutputResultCtx.set(async () => ({
+      status: "ok",
+      output: "Reviewing isDeadPane: ordinary output may contain Pane is dead",
+    }));
+    probeTmuxPaneCtx.set(async () => ({ status: "live" }));
+    let killPidCalls = 0;
+    killPidCtx.set(() => {
+      killPidCalls++;
+      return true;
+    });
+
+    const a = makeAgent({
+      id: "agent-review",
+      meta: {
+        state: "running",
+        tmux_session: "ib-review",
+        claude_pid: "38743",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a], { reap: true });
+
+    expect(a.state).toBe("running");
+    expect(killPidCalls).toBe(0);
+  });
+
   // Test 7: dead pane + recently created → creating, kill-session NOT called
   test("running + 'Pane is dead' output + IS recently created → 'creating', kill-session NOT called", async () => {
+    probeTmuxPaneCtx.set(async () => ({ status: "dead" }));
     const killSessionCalls: string[] = [];
     tmuxPollerSpawnCtx.set(((args: any[]) => {
       const isCapture = args[0] === "tmux" && args[1] === "capture-pane";
@@ -4661,13 +4835,13 @@ describe("_isPidAlive — EPERM vs ESRCH classification", () => {
     expect(_isPidAliveForTests(99999)).toBe(false);
   });
 
-  test("returns false for any other error code (e.g. EINVAL)", () => {
+  test("unexpected process probe errors are unknown and fail open as alive", () => {
     process.kill = ((_pid: number, _sig?: any) => {
       const err: any = new Error("invalid signal");
       err.code = "EINVAL";
       throw err;
     }) as unknown as typeof process.kill;
-    expect(_isPidAliveForTests(99999)).toBe(false);
+    expect(_isPidAliveForTests(99999)).toBe(true);
   });
 
   test("returns true when process.kill succeeds (signal delivered, process alive)", () => {

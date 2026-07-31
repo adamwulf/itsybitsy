@@ -33,6 +33,8 @@ import {
   resetPerAgentExistsSync,
   setPerAgentCaptureTmux,
   resetPerAgentCaptureTmux,
+  setPerAgentProbeTmuxSession,
+  resetPerAgentProbeTmuxSession,
   setPerAgentReadMeta,
   resetPerAgentReadMeta,
   setPerAgentSleep,
@@ -2469,6 +2471,7 @@ describe("runPerAgentWatchdog", () => {
   afterEach(() => {
     resetPerAgentExistsSync();
     resetPerAgentCaptureTmux();
+    resetPerAgentProbeTmuxSession();
     resetPerAgentReadMeta();
     resetPerAgentSleep();
     resetWatchdogNow();
@@ -2702,6 +2705,10 @@ describe("runPerAgentWatchdog", () => {
   test("exits when tmux session missing for >10s grace period", async () => {
     // Tmux session is gone from the start
     tmuxOutput = null;
+    setPerAgentProbeTmuxSession(async () => ({
+      status: "missing",
+      error: "can't find session: tmux-test1",
+    }));
 
     let existsChecks = 0;
     setPerAgentExistsSync((_path: string) => {
@@ -2725,6 +2732,10 @@ describe("runPerAgentWatchdog", () => {
   });
 
   test("resets tmux grace period when session reappears", async () => {
+    setPerAgentProbeTmuxSession(async () => ({
+      status: "missing",
+      error: "can't find session: tmux-test1",
+    }));
     let captureCalls = 0;
     setPerAgentCaptureTmux(async (_session: string) => {
       captureCalls++;
@@ -2745,6 +2756,40 @@ describe("runPerAgentWatchdog", () => {
     await runPerAgentWatchdog("agent-test1", "/tmp/test");
     // Grace period was reset when session reappeared, so we need 4+ captures
     expect(captureCalls).toBeGreaterThanOrEqual(4);
+  });
+
+  test("capture failure with unknown exact-session probe preserves watchdog", async () => {
+    setPerAgentCaptureTmux(async () => null);
+    setPerAgentProbeTmuxSession(async () => ({
+      status: "unknown",
+      error: "posix_spawn tmux: EPERM",
+      exitCode: null,
+    }));
+
+    let existsChecks = 0;
+    setPerAgentExistsSync(() => {
+      existsChecks++;
+      return existsChecks <= 1;
+    });
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+
+    expect(existsChecks).toBe(2);
+  });
+
+  test("capture failure with live exact-session probe preserves watchdog", async () => {
+    setPerAgentCaptureTmux(async () => null);
+    setPerAgentProbeTmuxSession(async () => ({ status: "live" }));
+
+    let existsChecks = 0;
+    setPerAgentExistsSync(() => {
+      existsChecks++;
+      return existsChecks <= 1;
+    });
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+
+    expect(existsChecks).toBe(2);
   });
 
   test("exits immediately when meta cannot be read", async () => {
@@ -2886,6 +2931,7 @@ describe("lazy allAgents loading via runPerAgentWatchdog", () => {
   afterEach(() => {
     resetPerAgentExistsSync();
     resetPerAgentCaptureTmux();
+    resetPerAgentProbeTmuxSession();
     resetPerAgentReadMeta();
     resetPerAgentSleep();
     resetWatchdogNow();
@@ -2995,6 +3041,7 @@ describe("runPerAgentWatchdog — meta.transient.json persistence", () => {
   afterEach(async () => {
     resetPerAgentExistsSync();
     resetPerAgentCaptureTmux();
+    resetPerAgentProbeTmuxSession();
     resetPerAgentReadMeta();
     resetPerAgentSleep();
     resetWatchdogNow();

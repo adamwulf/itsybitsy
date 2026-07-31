@@ -13,6 +13,7 @@ import {
   captureTmuxOutputResult,
   killTmuxSession,
   listTmuxSessions,
+  probeTmuxPane,
   probeTmuxSession,
 } from "./tmux-poller";
 import { InjectionContext } from "./types";
@@ -842,8 +843,10 @@ export function hasBackgroundTasks(tmuxOutput: string): boolean {
  * configured with `remain-on-exit on` and its child process exits, tmux
  * renders a literal `Pane is dead (status N, ...)` banner inside the pane
  * — the session is still alive (so list-sessions/has-session pass) but
- * Claude is gone and no further work happens. We treat this case the same
- * as a dead session: the agent is stopped.
+ * Claude is gone and no further work happens. This text match is only a
+ * candidate signal: lifecycle detection must validate it with authoritative
+ * `#{pane_dead}` metadata before changing state or reaping, because ordinary
+ * agent output can quote the same phrase.
  */
 export function isDeadPane(tmuxOutput: string): boolean {
   return tmuxOutput.includes("Pane is dead");
@@ -1544,13 +1547,26 @@ const reapedTmuxSessions = new Set<string>();
  * `tmux has-session` misses. Read-only one-shot callers may classify a
  * confirmed miss immediately because they cannot reap anything. */
 export const TMUX_MISSING_CONFIRMATIONS_REQUIRED = 2;
-const tmuxMissingObservations = new Map<string, number>();
+export const TMUX_MISSING_CONFIRMATION_MIN_INTERVAL_MS = 1_000;
+export const TMUX_OBSERVATION_STATE_MAX_ENTRIES = 4_096;
+const tmuxMissingObservations = new Map<
+  string,
+  { count: number; lastObservedAtMs: number }
+>();
 
 /** Unknown-observation diagnostics are useful but state polling runs every
  * ~2s. Rate-limit identical session/operation warnings so one broken probe
  * cannot rotate away the lifecycle history needed for diagnosis. */
 export const TMUX_OBSERVATION_LOG_INTERVAL_MS = 60_000;
 const tmuxObservationLogEpochMs = new Map<string, number>();
+
+function trimOldestMapEntries<K, V>(map: Map<K, V>): void {
+  while (map.size > TMUX_OBSERVATION_STATE_MAX_ENTRIES) {
+    const oldest = map.keys().next();
+    if (oldest.done) return;
+    map.delete(oldest.value);
+  }
+}
 
 /**
  * Re-arm husk teardown for a session observed alive again. Called from the
@@ -1581,15 +1597,28 @@ function clearTmuxMissingObservation(tmuxSession: string): void {
 }
 
 function recordTmuxMissingObservation(tmuxSession: string): number {
-  const count = (tmuxMissingObservations.get(tmuxSession) ?? 0) + 1;
-  tmuxMissingObservations.set(tmuxSession, count);
+  const now = nowMsCtx.fn();
+  const previous = tmuxMissingObservations.get(tmuxSession);
+  if (
+    previous &&
+    now - previous.lastObservedAtMs < TMUX_MISSING_CONFIRMATION_MIN_INTERVAL_MS
+  ) {
+    return previous.count;
+  }
+  const count = Math.min(
+    (previous?.count ?? 0) + 1,
+    TMUX_MISSING_CONFIRMATIONS_REQUIRED
+  );
+  tmuxMissingObservations.delete(tmuxSession);
+  tmuxMissingObservations.set(tmuxSession, { count, lastObservedAtMs: now });
+  trimOldestMapEntries(tmuxMissingObservations);
   return count;
 }
 
 function logTmuxObservation(
   agent: Agent,
   status: "unknown" | "missing-pending",
-  operation: "has-session" | "capture-pane",
+  operation: "has-session" | "capture-pane" | "list-panes",
   detail: string
 ): void {
   const tmuxSession = agent.meta.tmux_session || "<none>";
@@ -1597,7 +1626,9 @@ function logTmuxObservation(
   const now = Date.now();
   const last = tmuxObservationLogEpochMs.get(key) ?? 0;
   if (now - last < TMUX_OBSERVATION_LOG_INTERVAL_MS) return;
+  tmuxObservationLogEpochMs.delete(key);
   tmuxObservationLogEpochMs.set(key, now);
+  trimOldestMapEntries(tmuxObservationLogEpochMs);
   const normalized = detail.replace(/\s+/g, " ").trim().slice(0, 500) || "unknown error";
   const repoTag = agent.repoName ? `${agent.repoName}/` : "";
   logToWatchLog(
@@ -1618,7 +1649,7 @@ function preserveStoredAgentState(agent: Agent): void {
 async function observeTmuxSession(
   agent: Agent,
   liveSessions: Set<string>,
-  shouldReap: boolean
+  requireConsecutiveConfirmation: boolean
 ): Promise<"live" | "missing" | "unknown"> {
   const tmuxSession = agent.meta.tmux_session;
   if (liveSessions.has(tmuxSession)) {
@@ -1637,10 +1668,11 @@ async function observeTmuxSession(
     return "unknown";
   }
 
-  // Read-only commands may classify one affirmative exact-session miss
-  // immediately because they have no teardown side effects. A long-lived
-  // watcher must see the same affirmative miss twice before it may reap.
-  if (!shouldReap) return "missing";
+  // Read-only and one-shot lifecycle commands classify one affirmative exact
+  // miss immediately. A long-lived watcher carries state across polling
+  // generations and must see the same affirmative miss twice before it may
+  // reap; calls inside one temporal window count only once.
+  if (!requireConsecutiveConfirmation) return "missing";
   const count = recordTmuxMissingObservation(tmuxSession);
   if (count < TMUX_MISSING_CONFIRMATIONS_REQUIRED) {
     logTmuxObservation(
@@ -1691,6 +1723,16 @@ export const captureTmuxOutputResultCtx = new InjectionContext<typeof captureTmu
 export const probeTmuxSessionCtx = new InjectionContext<typeof probeTmuxSession>(
   probeTmuxSession
 );
+
+/** Authoritative pane metadata probe used to validate a dead-pane banner. */
+export const probeTmuxPaneCtx = new InjectionContext<typeof probeTmuxPane>(
+  probeTmuxPane
+);
+
+/** Final metadata re-read before destructive orphan cleanup. */
+export const reapReadAgentMetaCtx = new InjectionContext<
+  (agentDir: string, observedAgent: Agent) => Promise<AgentMeta | null>
+>(async (agentDir) => (await readAgentMeta(agentDir)).meta);
 
 /**
  * Read all agents across multiple repos.
@@ -1779,8 +1821,9 @@ export const OP_STUCK_TIMEOUT_MS = 300_000;
 /** Default isPidAlive — checks if a process is alive via signal 0.
  *
  * EPERM means "the PID exists, you just can't signal it" (e.g. the process is
- * owned by another sandbox or another user) — treat as alive. ESRCH (and any
- * other error) means the process doesn't exist — dead. Inside a codex agent
+ * owned by another sandbox or another user) — treat as alive. Only ESRCH
+ * affirmatively means the process does not exist. Unexpected probe failures
+ * are unavailable observations and fail open as alive. Inside a codex agent
  * sandbox, signal 0 against PIDs owned by other sandboxes returns EPERM
  * empirically; without this distinction every external agent's PID would be
  * misclassified as dead and reapOrphanedClaude would tear down the world. */
@@ -1789,7 +1832,7 @@ function _isPidAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (e: any) {
-    return e?.code === "EPERM";
+    return e?.code !== "ESRCH";
   }
 }
 
@@ -2096,12 +2139,50 @@ async function reapOrphanedClaude(
   agent: Agent,
   agentDir: string,
   resolvedState: AgentState,
-  reason: string
+  reason: string,
+  opts: { skipClaudePid?: boolean } = {}
 ): Promise<void> {
   if (resolvedState === "creating") return;
 
   const repoTag = agent.repoName ? `${agent.repoName}/` : "";
   const tmuxLabel = agent.meta.tmux_session || "<none>";
+
+  // Re-read mutable lifecycle metadata immediately before teardown. Resume
+  // and respawn write an operation marker before replacing the session/PID;
+  // an observation taken before that transition must never kill the new
+  // lifecycle.
+  const latestMeta = await reapReadAgentMetaCtx.fn(agentDir, agent);
+  if (!latestMeta) {
+    logToWatchLog(
+      `[orphan-kill] aborted agent=${repoTag}${agent.id} tmux=${tmuxLabel} ` +
+      `state=${resolvedState} reason=lifecycle metadata unavailable before teardown`
+    );
+    return;
+  }
+  if (
+    (
+      latestMeta.tmux_session !== agent.meta.tmux_session ||
+      latestMeta.claude_pid !== agent.meta.claude_pid
+    )
+  ) {
+    logToWatchLog(
+      `[orphan-kill] aborted agent=${repoTag}${agent.id} tmux=${tmuxLabel} ` +
+      `state=${resolvedState} reason=lifecycle metadata changed before teardown`
+    );
+    return;
+  }
+
+  // Watchdog PID and the operation marker share meta.transient.json. Read
+  // once so the final operation revalidation and watchdog target are from
+  // the same snapshot.
+  const transient = await readAgentTransient(agentDir);
+  if (transient?.operation) {
+    logToWatchLog(
+      `[orphan-kill] aborted agent=${repoTag}${agent.id} tmux=${tmuxLabel} ` +
+      `state=${resolvedState} reason=operation began before teardown`
+    );
+    return;
+  }
 
   const reap = (kind: "claude" | "watchdog", pid: number): void => {
     if (!Number.isFinite(pid) || pid <= 0) return;
@@ -2114,10 +2195,11 @@ async function reapOrphanedClaude(
     );
   };
 
-  reap("claude", parseInt(agent.meta.claude_pid, 10));
+  if (!opts.skipClaudePid) {
+    reap("claude", parseInt(agent.meta.claude_pid, 10));
+  }
 
-  // Watchdog PID lives in meta.transient.json, not meta.json
-  const transient = await readAgentTransient(agentDir);
+  // Watchdog PID lives in meta.transient.json, not meta.json.
   if (transient) reap("watchdog", transient.watchdog_pid);
 
   // Tear down the husk tmux session for stopped agents. Best-effort: a kill
@@ -2131,7 +2213,11 @@ async function reapOrphanedClaude(
     !reapedTmuxSessions.has(agent.meta.tmux_session)
   ) {
     reapedTmuxSessions.add(agent.meta.tmux_session);
-    await killTmuxSession(agent.meta.tmux_session);
+    const killed = await killTmuxSession(agent.meta.tmux_session);
+    logToWatchLog(
+      `[orphan-kill] tmux ${killed ? "kill-session sent" : "kill-session failed"} ` +
+      `agent=${repoTag}${agent.id} tmux=${tmuxLabel} state=${resolvedState} reason=${reason}`
+    );
   }
 }
 
@@ -2154,7 +2240,7 @@ async function reapOrphanedClaude(
  */
 export async function detectAgentStates(
   agents: Agent[],
-  opts: { reap?: boolean } = {},
+  opts: { reap?: boolean; confirmTmuxMissingAcrossPolls?: boolean } = {},
 ): Promise<void> {
   // Reaping is OPT-IN: callers must pass {reap: true} to authorize SIGTERM +
   // tmux kill-session side-effects. Default is read-only so accidental reads
@@ -2163,6 +2249,11 @@ export async function detectAgentStates(
   // external agents. Lifecycle callers — watcher tick, ib resume, ib respawn —
   // explicitly opt in.
   const shouldReap = opts.reap === true;
+  // Only recurring watcher passes use process-local cross-poll confirmation.
+  // One-shot lifecycle commands already perform an exact-session probe but
+  // cannot carry an in-memory counter into a later process.
+  const requireConsecutiveTmuxConfirmation =
+    shouldReap && opts.confirmTmuxMissingAcrossPolls === true;
 
   // Step 1: archived agents
   for (const agent of agents) {
@@ -2255,7 +2346,17 @@ export async function detectAgentStates(
       ) {
         agent.state = "stopped";
         if (shouldReap) {
-          await reapOrphanedClaude(agent, agentDir, "stopped", "claude_pid not alive");
+          // The guard can reject a PID because it was recycled. Never signal
+          // that numeric PID from this branch; it may now belong to an
+          // unrelated process. The watchdog and stale tmux husk are still
+          // safe teardown targets after final lifecycle revalidation.
+          await reapOrphanedClaude(
+            agent,
+            agentDir,
+            "stopped",
+            "claude_pid not alive",
+            { skipClaudePid: true }
+          );
         }
         return;
       }
@@ -2274,7 +2375,11 @@ export async function detectAgentStates(
       // liveness check happens above (applies to all states).
       if (agent.meta.state === "complete") {
         const liveSessions = await getLiveTmuxSessions();
-        const tmuxObservation = await observeTmuxSession(agent, liveSessions, shouldReap);
+        const tmuxObservation = await observeTmuxSession(
+          agent,
+          liveSessions,
+          requireConsecutiveTmuxConfirmation
+        );
         if (tmuxObservation === "unknown") {
           preserveStoredAgentState(agent);
           return;
@@ -2350,7 +2455,11 @@ export async function detectAgentStates(
       // fast-path and preserves the creating grace + orphan reap behavior of
       // the capture-null path below.
       const liveSessions = await getLiveTmuxSessions();
-      const tmuxObservation = await observeTmuxSession(agent, liveSessions, shouldReap);
+      const tmuxObservation = await observeTmuxSession(
+        agent,
+        liveSessions,
+        requireConsecutiveTmuxConfirmation
+      );
       if (tmuxObservation === "unknown") {
         preserveStoredAgentState(agent);
         return;
@@ -2372,16 +2481,28 @@ export async function detectAgentStates(
       }
       const output = capture.output;
       if (isDeadPane(output)) {
-        const resolved: AgentState = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
-        agent.state = resolved;
-        // reapOrphanedClaude tears down the husk tmux session when
-        // resolved === "stopped". Skipped during the creating grace window
-        // so a freshly-spawning agent that briefly shows a dead pane during
-        // startup is not torn down.
-        if (shouldReap) {
-          await reapOrphanedClaude(agent, agentDir, resolved, "tmux pane is dead");
+        const pane = await probeTmuxPaneCtx.fn(tmuxSession);
+        if (pane.status === "unknown") {
+          logTmuxObservation(agent, "unknown", "list-panes", pane.error);
+          preserveStoredAgentState(agent);
+          return;
         }
-        return;
+        // The phrase can appear in ordinary source/test/review output. Only
+        // authoritative #{pane_dead} metadata may drive teardown.
+        if (pane.status === "dead") {
+          const resolved: AgentState = isRecentlyCreated(agent.meta.created_epoch)
+            ? "creating"
+            : "stopped";
+          agent.state = resolved;
+          // reapOrphanedClaude tears down the husk tmux session when
+          // resolved === "stopped". Skipped during the creating grace window
+          // so a freshly-spawning agent that briefly shows a dead pane during
+          // startup is not torn down.
+          if (shouldReap) {
+            await reapOrphanedClaude(agent, agentDir, resolved, "tmux pane is dead");
+          }
+          return;
+        }
       }
 
       // The pane is live (capture succeeded, not a dead pane). Re-arm husk

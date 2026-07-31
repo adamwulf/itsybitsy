@@ -501,7 +501,10 @@ describe("AgentWatcher", () => {
       // The state mutation by detectAgentStates should be visible in onUpdate
       expect(receivedAgents.length).toBe(1);
       expect(receivedAgents[0]!.state).toBe("running");
-      expect(mockDetectAgentStates).toHaveBeenCalledWith([agent1], { reap: true });
+      expect(mockDetectAgentStates).toHaveBeenCalledWith([agent1], {
+        reap: true,
+        confirmTmuxMissingAcrossPolls: true,
+      });
     });
 
     test("detectAgentStates changes state between refreshes", async () => {

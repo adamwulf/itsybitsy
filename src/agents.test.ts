@@ -2937,6 +2937,55 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
     expect(log).toContain("lifecycle metadata changed before teardown");
   });
 
+  test("reap aborts when only the lifecycle generation changes before teardown", async () => {
+    // Same session, same PID, same PID epoch — only created_epoch moved, which
+    // is how a recreated agent generation looks to an observation taken against
+    // the previous one.
+    const a = makeAgent({
+      id: "agent-lifecycle-generation",
+      meta: {
+        state: "running",
+        tmux_session: "ib-lifecycle-generation",
+        claude_pid: "12345",
+        claude_pid_epoch: 1_700_000_000,
+        created_epoch: 1_700_000_000,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    reapReadAgentMetaCtx.set(async () => ({
+      ...a.meta,
+      created_epoch: 1_700_000_500,
+    }));
+    isPidAliveCtx.set(() => true);
+    isPidIdentityCurrentCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set());
+    probeTmuxSessionCtx.set(async () => ({
+      status: "missing",
+      error: "can't find session: ib-lifecycle-generation",
+    }));
+    let killPidCalls = 0;
+    let killSessionCalls = 0;
+    killPidCtx.set(() => {
+      killPidCalls++;
+      return true;
+    });
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      if (args[0] === "tmux" && args[1] === "kill-session") killSessionCalls++;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+
+    await detectAgentStates([a], { reap: true });
+
+    expect(killPidCalls).toBe(0);
+    expect(killSessionCalls).toBe(0);
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("lifecycle metadata changed before teardown");
+  });
+
   test("lifecycle operation cannot start between final validation and teardown", async () => {
     acquireAgentLifecycleLockCtx.reset();
     const repoTmp = await mkdtemp(join(tmpdir(), "reap-lock-race-"));
@@ -4930,6 +4979,25 @@ describe("readAgentMeta mtime cache", () => {
     await Bun.write(path, JSON.stringify({ id: "agent-cache", tmux_session: "ib-new" }));
     const b = await readAgentMeta(agentDir);
     expect(b.meta?.tmux_session).toBe("ib-new");
+  });
+
+  test("final pre-teardown read bypasses the mtime cache", async () => {
+    const { stat, utimes } = await import("fs/promises");
+    const path = join(tempDir, "meta.json");
+    await Bun.write(path, JSON.stringify({ id: "agent-gen", created_epoch: 1_700_000_000 }));
+    const stamps = await stat(path);
+    expect((await readAgentMeta(tempDir)).meta?.created_epoch).toBe(1_700_000_000);
+
+    // A rewrite landing inside the filesystem's timestamp granularity is
+    // indistinguishable from no write at all to an mtime-keyed cache.
+    await Bun.write(path, JSON.stringify({ id: "agent-gen", created_epoch: 1_700_000_500 }));
+    await utimes(path, stamps.atime, stamps.mtime);
+    expect((await readAgentMeta(tempDir)).meta?.created_epoch).toBe(1_700_000_000);
+
+    // The destructive path must never revalidate against that copy.
+    reapReadAgentMetaCtx.reset();
+    const latest = await reapReadAgentMetaCtx.fn(tempDir, makeAgent({ id: "agent-gen" }));
+    expect(latest?.created_epoch).toBe(1_700_000_500);
   });
 
   test("returns 'Missing' error when meta.json absent", async () => {

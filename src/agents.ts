@@ -1253,6 +1253,12 @@ export function resetReadAgentMetaCache(): void {
   metaCache.clear();
 }
 
+/** Drop ONE agent's cached meta.json so the next read re-parses from disk.
+ *  Used immediately before destructive lifecycle revalidation. */
+function invalidateAgentMetaCache(agentDir: string): void {
+  metaCache.delete(join(agentDir, "meta.json"));
+}
+
 /** Read a single agent's meta.json. Returns meta or an error description.
  * Uses an mtime-keyed cache to avoid re-parsing on every refresh tick when
  * meta.json hasn't changed. */
@@ -2037,10 +2043,21 @@ export const probeTmuxPaneCtx = new InjectionContext<typeof probeTmuxPane>(
   probeTmuxPane
 );
 
-/** Final metadata re-read before destructive orphan cleanup. */
+/** Final metadata re-read before destructive orphan cleanup.
+ *
+ * Drops this agent's mtime-cache entry first, mirroring the process-start cache
+ * bypass in _isPidIdentityCurrent. readAgentMeta already re-parses whenever
+ * mtimeMs changed, so the cache is fresh for any ordinary rewrite; the bypass
+ * closes the one remaining exposure — a rewrite landing inside the filesystem's
+ * timestamp granularity — and does so HERE rather than in readAgentMeta so the
+ * read path every other caller shares keeps its cache. Teardown is rare, so the
+ * extra parse costs nothing measurable. */
 export const reapReadAgentMetaCtx = new InjectionContext<
   (agentDir: string, observedAgent: Agent) => Promise<AgentMeta | null>
->(async (agentDir) => (await readAgentMeta(agentDir)).meta);
+>(async (agentDir) => {
+  invalidateAgentMetaCache(agentDir);
+  return (await readAgentMeta(agentDir)).meta;
+});
 
 /**
  * Read all agents across multiple repos.
@@ -2516,7 +2533,12 @@ async function reapOrphanedClaude(
     (
       latestMeta.tmux_session !== agent.meta.tmux_session ||
       latestMeta.claude_pid !== agent.meta.claude_pid ||
-      latestMeta.claude_pid_epoch !== agent.meta.claude_pid_epoch
+      latestMeta.claude_pid_epoch !== agent.meta.claude_pid_epoch ||
+      // created_epoch is the lifecycle GENERATION. A recreated agent can land
+      // on the same session name and the same PID/PID-epoch pair, so without
+      // this an observation taken against the previous generation still tears
+      // down the new one.
+      latestMeta.created_epoch !== agent.meta.created_epoch
     )
   ) {
     logToWatchLog(

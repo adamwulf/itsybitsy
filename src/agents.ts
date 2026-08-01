@@ -2840,11 +2840,17 @@ export async function detectAgentStates(
       // threshold and fall back to live capture even when fresh data was on
       // disk. One stat + a small JSON parse is cheap vs. the tmux spawn we
       // avoid.
+      // The watchdog records its own PID epoch in the transient, so the same
+      // identity rule that guards destructive signalling applies here: a bare
+      // liveness check lets a RECYCLED PID authorize this snapshot for up to
+      // TRANSIENT_FRESH_MS. isPidAliveSince is the rendering-side counterpart —
+      // it preserves PID-only behavior for legacy transients that carry no
+      // epoch, and fails open as alive when the start time can't be read.
       if (
         transient &&
         transient.updated_at_ms > 0 &&
         nowMsCtx.fn() - transient.updated_at_ms < TRANSIENT_FRESH_MS &&
-        isPidAliveCtx.fn(transient.watchdog_pid)
+        isPidAliveSinceCtx.fn(transient.watchdog_pid, transient.watchdog_pid_epoch)
       ) {
         // The session is alive again (fresh, watchdog-backed). Re-arm husk
         // teardown so a future stop after a resume re-kills the session. See

@@ -4753,6 +4753,8 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
       "ib-agent-stale",
       "ib-agent-missing",
       "ib-agent-seed",
+      "ib-agent-wdrecycled",
+      "ib-agent-wdlegacy",
     ]));
   });
 
@@ -4874,6 +4876,62 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     // With dead watchdog, fast-path is bypassed; tmux capture sees plain output.
     expect(a.state).toBe("running");
     expect(captureCalls).toBe(1);
+  });
+
+  test("falls back when the watchdog PID was recycled", async () => {
+    installSpyCapture();
+    const a = await makeBackedAgent("agent-wdrecycled");
+    // Exercise the real guarded liveness check instead of the bare-PID seam.
+    isPidAliveSinceCtx.reset();
+    resetProcessStartEpochSecondsCache();
+    // Signal 0 says the numeric PID exists, but it started long after the
+    // watchdog wrote its epoch — a different process wearing the same number.
+    isPidAliveCtx.set(() => true);
+    processStartEpochSecondsCtx.set(() => 1_800_000_000);
+    const fakeNow = 5_000_000;
+    nowMsCtx.set(() => fakeNow);
+
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: true, // would say compacting via fast-path if trusted
+      tmux_rate_limited: false,
+      tmux_api_error: false, tmux_api_terms: false,
+      has_background_tasks: false,
+      updated_at_ms: fakeNow - 100,
+      watchdog_pid: 99999,
+      watchdog_pid_epoch: 1_700_000_000,
+    });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("running");
+    expect(captureCalls).toBe(1);
+  });
+
+  test("trusts a legacy transient that predates watchdog_pid_epoch", async () => {
+    installSpyCapture();
+    const a = await makeBackedAgent("agent-wdlegacy");
+    isPidAliveSinceCtx.reset();
+    resetProcessStartEpochSecondsCache();
+    isPidAliveCtx.set(() => true);
+    // Would fail an epoch comparison — but there is no epoch to compare, so the
+    // historical PID-only behavior must be preserved.
+    processStartEpochSecondsCtx.set(() => 1_800_000_000);
+    const fakeNow = 5_000_000;
+    nowMsCtx.set(() => fakeNow);
+
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: true,
+      tmux_rate_limited: false,
+      tmux_api_error: false, tmux_api_terms: false,
+      has_background_tasks: false,
+      updated_at_ms: fakeNow - 100,
+      watchdog_pid: 99999,
+    });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("compacting");
+    expect(captureCalls).toBe(0);
   });
 
   test("falls back when transient is older than TRANSIENT_FRESH_MS", async () => {

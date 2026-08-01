@@ -616,56 +616,85 @@ describe("computeChromeSlice — chrome detection on UNWRAPPED logical lines", (
 });
 
 describe("wordWrapLines performance", () => {
-  test("word-wraps a 5000-logical-line buffer at width 120 under threshold", () => {
+  // This test exists to catch a wordWrapLines that stops scaling linearly —
+  // "a regression that makes wrapping super-linear", as the original put it.
+  //
+  // It used to check that for a proxy: wrap 5000 lines, assert the elapsed
+  // wall-clock was under 80ms. A duration budget cannot express that property
+  // on a shared machine, because duration measures the machine as much as the
+  // code. Measured here on identical work:
+  //
+  //   wall-clock, machine busy   59 - 263 ms   (4.4x spread, same work)
+  //   CPU time,   machine busy   89 -  96 ms
+  //   CPU time,   machine quiet  29 -  33 ms
+  //
+  // CPU time is the better instrument — it excludes time the scheduler took
+  // the process away — but it is still not machine-invariant: the same wrap
+  // costs 3x more CPU under memory pressure (page faults, cache thrashing,
+  // frequency scaling). The old budget failed at 344ms of wall-clock in one
+  // loaded run, and a CPU-time version of it still failed at 96ms in another.
+  //
+  // The ratio between two sizes, however, IS invariant, because both halves
+  // are measured microseconds apart under whatever conditions currently hold.
+  // Across the same busy/quiet swing above it moved only 1.98 -> 2.07.
+  //
+  // So the shape of the assertion changed: it now measures the thing the test
+  // was always trying to protect (the growth rate) rather than a duration that
+  // happens to correlate with it on an idle machine. Linear is ~2.0, an O(n^2)
+  // regression is ~4.0, and the bound sits between them. bun's per-test
+  // timeout remains the backstop for a catastrophic constant-factor blow-up.
+  test("word-wraps a 5000-logical-line buffer at width 120 without super-linear growth", () => {
     // 5000 logical lines each ~1.7x the target width — representative of a full
     // scrollback of moderately-wrapped agent output. The memo in
     // TmuxPaneComponent keeps per-render cost O(1) between polls, but the first
     // wrap after each poll must still be fast enough for a ~1s cadence.
-    const lines: string[] = [];
-    for (let i = 0; i < 5000; i++) {
-      lines.push(
-        `row ${i} ` +
-        "word ".repeat(40), // ~200 chars, ~1.7x width 120
-      );
-    }
-    const text = lines.join("\n");
+    // Half that size is wrapped alongside it purely to establish the slope.
+    const build = (n: number): string => {
+      const lines: string[] = [];
+      for (let i = 0; i < n; i++) {
+        lines.push(
+          `row ${i} ` +
+          "word ".repeat(40), // ~200 chars, ~1.7x width 120
+        );
+      }
+      return lines.join("\n");
+    };
     const width = 120;
+    const halfText = build(2500);
+    const fullText = build(5000);
 
-    // Measure CPU time, not wall-clock. Wall-clock answers "how long did this
-    // take", which on a busy machine is dominated by how often the scheduler
-    // descheduled us — measured here at 59-263ms for identical work, a 4.4x
-    // spread, while the work itself never changed. CPU time answers "how much
-    // work did this do", which is the property under test; the same runs
-    // measured 30-36ms, a 1.2x spread. Wall-clock made this test fail under
-    // load for reasons that have nothing to do with the wrapping algorithm.
-    let lastRows: string[] = [];
-    const measureCpuMs = (): number => {
+    let fullRows: string[] = [];
+    const cpuMs = (text: string): number => {
       const before = process.cpuUsage();
-      lastRows = wordWrapLines(text, width);
+      const rows = wordWrapLines(text, width);
       const after = process.cpuUsage(before);
+      if (text === fullText) fullRows = rows;
       return (after.user + after.system) / 1000;
     };
 
-    // Warm up the JIT before measuring — the first few passes run interpreted
-    // and cost several times steady state, which is a property of the runtime
+    // Warm up the JIT before measuring — the first passes run interpreted and
+    // cost several times steady state, which is a property of the runtime
     // rather than of the algorithm.
-    for (let i = 0; i < 3; i++) measureCpuMs();
+    for (let i = 0; i < 2; i++) { cpuMs(halfText); cpuMs(fullText); }
 
-    // Sanity: every output row is bounded.
-    for (const row of lastRows) {
+    // Sanity: every output row of the full-size wrap is bounded.
+    for (const row of fullRows) {
       expect(visibleWidth(row)).toBeLessThanOrEqual(width);
     }
 
-    // Best of N: preemption and GC can only ever ADD cost to a sample, so the
-    // minimum is the closest estimate of the true cost. A genuine super-linear
-    // regression slows down every sample including the best one, so this keeps
-    // all of the assertion's power to catch what it was written to catch.
-    let elapsed = Infinity;
-    for (let i = 0; i < 5; i++) elapsed = Math.min(elapsed, measureCpuMs());
+    // Best of N at each size: preemption, GC and page faults can only ever ADD
+    // cost to a sample, so the minimum is the closest estimate of the true
+    // cost. A super-linear regression inflates the full-size samples far more
+    // than the half-size ones, so it survives this and trips the bound.
+    let half = Infinity;
+    let full = Infinity;
+    for (let i = 0; i < 3; i++) {
+      half = Math.min(half, cpuMs(halfText));
+      full = Math.min(full, cpuMs(fullText));
+    }
 
-    // Target is ~20ms of CPU; assert 80ms to stay meaningful while tolerating
-    // machine-to-machine variation. A regression that makes wrapping
-    // super-linear blows well past this.
-    expect(elapsed).toBeLessThan(80);
+    // Doubling the input should roughly double the work. Linear ~2.0,
+    // quadratic ~4.0 — fail in between.
+    expect(full / half).toBeLessThan(3);
   });
 });

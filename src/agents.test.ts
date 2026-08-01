@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, mkdir, readdir, unlink } from "fs/promises";
+import { mkdtemp, rm, mkdir, readdir, unlink, utimes, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import {
   computeAge,
@@ -4251,6 +4251,86 @@ describe("acquireAgentLifecycleLock — stale-lock reclamation", () => {
     await lock!.release();
     expect(await Bun.file(lockPath).exists()).toBe(false);
   });
+
+  // Regression: `open(lockPath, "wx")` published the lock at ZERO BYTES and
+  // wrote the JSON body on the next line. A process killed in that window left
+  // a bodyless lock that reclamation refused to parse — and nothing in the
+  // codebase ever deletes a *.lifecycle.lock — so the agent was wedged
+  // permanently: acquire returned null forever, `ib merge` reported it busy
+  // forever, and every watchdog transient write blocked the full wait and
+  // dropped. The lock is now linked into place fully formed, and an aged
+  // bodyless lock left by an older binary is still recoverable via mtime.
+  test("a bodyless lock left by the old create-then-write window is recoverable", async () => {
+    await writeFile(lockPath, "");
+    const aged = new Date(Date.now() - 10 * 60_000);
+    await utimes(lockPath, aged, aged);
+
+    const lock = await acquireAgentLifecycleLock(agentDir, 2_000);
+    expect(lock).not.toBeNull();
+    const held = await Bun.file(lockPath).json();
+    expect(held.pid).toBe(process.pid);
+    await lock!.release();
+    expect(await Bun.file(lockPath).exists()).toBe(false);
+    // Reclaiming a bodyless generation must not litter the agents directory.
+    expect(await readdir(tempDir)).toEqual(["agent-stale"]);
+  });
+
+  test("a freshly created bodyless lock is left alone until it goes stale", async () => {
+    // A publisher mid-flight is indistinguishable from a crashed one except by
+    // age, so the bodyless backstop waits out the full stale threshold.
+    await writeFile(lockPath, "");
+    expect(await acquireAgentLifecycleLock(agentDir, 0)).toBeNull();
+    expect(await Bun.file(lockPath).exists()).toBe(true);
+  });
+
+  test("an aged but truncated body is recoverable; an unreadable lock is not", async () => {
+    // Truncated JSON reads fine and is definitively not a record → recoverable.
+    await writeFile(lockPath, '{"pid":42,"created_at_ms"');
+    const aged = new Date(Date.now() - 10 * 60_000);
+    await utimes(lockPath, aged, aged);
+    const lock = await acquireAgentLifecycleLock(agentDir, 2_000);
+    expect(lock).not.toBeNull();
+    await lock!.release();
+
+    // A lock that cannot be read AT ALL stays unavailable evidence: a
+    // directory at the lock path fails every read, and must never be removed.
+    await mkdir(lockPath, { recursive: true });
+    expect(await acquireAgentLifecycleLock(agentDir, 0)).toBeNull();
+    expect((await readdir(tempDir)).sort()).toEqual(
+      ["agent-stale", "agent-stale.lifecycle.lock"]
+    );
+    await rm(lockPath, { recursive: true, force: true });
+  });
+
+  test("every published lock is observable only fully formed", async () => {
+    // Pre-fix, a concurrent reader could catch the zero-byte file between the
+    // exclusive create and the body write. Interleave a reader with many
+    // acquire/release cycles and require every observation to parse.
+    const halfWritten: string[] = [];
+    let running = true;
+    const reader = (async () => {
+      while (running) {
+        try {
+          const body = await Bun.file(lockPath).text();
+          if (body.length > 0) JSON.parse(body);
+          else halfWritten.push("zero-byte lock observed");
+        } catch {
+          /* absent or mid-rename — not an observation of a bad lock */
+        }
+        await Bun.sleep(0);
+      }
+    })();
+
+    for (let i = 0; i < 400; i++) {
+      const lock = await acquireAgentLifecycleLock(agentDir, 2_000);
+      expect(lock).not.toBeNull();
+      await lock!.release();
+    }
+    running = false;
+    await reader;
+
+    expect(halfWritten).toEqual([]);
+  }, 60_000);
 
   test("a live owner's lock is never reclaimed", async () => {
     await Bun.write(

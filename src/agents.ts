@@ -618,31 +618,102 @@ async function releaseStaleLifecycleClaims(
 }
 
 /**
+ * The lock generation currently published at a path.
+ *
+ * `owner` is null when the body was READ SUCCESSFULLY but is definitively not
+ * a lock record: a zero-byte file left by an older binary that created the
+ * lock with `open(wx)` and died before writing the body, or a body corrupted
+ * from outside this protocol. Those generations still get a `token` — derived
+ * from size and mtime, the only identity a bodyless file has — so the reclaim
+ * protocol can serialize on them exactly like a real generation.
+ */
+interface LifecycleLockGeneration {
+  /** Identity of this exact generation; keys the reclaim claim. */
+  token: string;
+  /** Parsed owner record, or null when the body is not one. */
+  owner: { pid: number; createdAtMs: number } | null;
+  /** Filesystem mtime — the only age signal a bodyless lock carries. */
+  mtimeMs: number;
+}
+
+/**
+ * Read the generation published at `path`, or null when the file cannot be
+ * OBSERVED at all (missing, or a stat/read failure). A failed observation is
+ * unavailable evidence and must never become permission to remove the lock;
+ * only a successful read of a definitively-invalid body downgrades to the
+ * bodyless (mtime-aged) generation.
+ */
+async function readLifecycleLockGeneration(
+  path: string,
+): Promise<LifecycleLockGeneration | null> {
+  let mtimeMs: number;
+  let size: number;
+  try {
+    const info = await stat(path);
+    mtimeMs = info.mtimeMs;
+    size = info.size;
+  } catch {
+    return null;
+  }
+  let body: string;
+  try {
+    body = await Bun.file(path).text();
+  } catch {
+    return null;
+  }
+  let parsed: any = null;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    /* definitively not a record — fall through to the bodyless generation */
+  }
+  const token = parsed?.token;
+  const pid = Number(parsed?.pid);
+  const createdAtMs = Number(parsed?.created_at_ms);
+  if (
+    typeof token === "string" &&
+    token.length > 0 &&
+    Number.isFinite(pid) &&
+    pid > 0 &&
+    Number.isFinite(createdAtMs)
+  ) {
+    return { token, owner: { pid, createdAtMs }, mtimeMs };
+  }
+  // Size and mtime are both preserved by rename, so this token survives the
+  // move-aside step of the steal and can be re-verified there.
+  return { token: `malformed.${size}.${Math.floor(mtimeMs)}`, owner: null, mtimeMs };
+}
+
+/**
  * Crash recovery for a lock whose owner is affirmatively gone. Returns true
  * only when this process removed the stale generation, meaning the caller
  * should immediately retry its exclusive create.
  */
 async function reclaimStaleLifecycleLock(lockPath: string): Promise<boolean> {
-  let staleToken: string;
-  try {
-    const stale = await Bun.file(lockPath).json();
-    const staleAge = Date.now() - Number(stale?.created_at_ms);
-    const stalePid = Number(stale?.pid);
+  const generation = await readLifecycleLockGeneration(lockPath);
+  // An unreadable lock is unavailable evidence, not permission to remove it.
+  if (!generation) return false;
+
+  const now = Date.now();
+  if (generation.owner) {
     if (
-      typeof stale?.token !== "string" ||
-      !(staleAge > LIFECYCLE_LOCK_STALE_MS) ||
-      !Number.isFinite(stalePid) ||
-      !(stalePid > 0) ||
-      isPidAliveCtx.fn(stalePid)
+      !(now - generation.owner.createdAtMs > LIFECYCLE_LOCK_STALE_MS) ||
+      isPidAliveCtx.fn(generation.owner.pid)
     ) {
       return false;
     }
-    staleToken = stale.token;
-  } catch {
-    // An unreadable lock is unavailable evidence, not permission to remove it.
+  } else if (!(now - generation.mtimeMs > LIFECYCLE_LOCK_STALE_MS)) {
+    // Bodyless backstop. A lock with no owner record names no process, so
+    // liveness cannot be checked at all and mtime age is the only evidence
+    // available. Every lock this binary publishes is complete before it is
+    // linked into place, so a bodyless lock can only come from an older
+    // binary's create-then-write window or from outside this protocol — and
+    // either way nothing is going to finish writing it. Requiring the full
+    // stale threshold keeps this from ever racing a live publisher.
     return false;
   }
 
+  const staleToken = generation.token;
   const slot = await claimStaleLifecycleLock(lockPath, staleToken);
   if (slot === null) return false;
 
@@ -650,12 +721,7 @@ async function reclaimStaleLifecycleLock(lockPath: string): Promise<boolean> {
     // Re-read under the claim. If the generation we validated is already gone,
     // an earlier reclaimer finished the job and a NEW owner may hold the lock —
     // touching it here is exactly the double-steal the claim exists to stop.
-    let current: any;
-    try {
-      current = await Bun.file(lockPath).json();
-    } catch {
-      return false;
-    }
+    const current = await readLifecycleLockGeneration(lockPath);
     if (current?.token !== staleToken) return false;
 
     // Nothing can change the lock path now, so move it aside atomically and
@@ -666,16 +732,13 @@ async function reclaimStaleLifecycleLock(lockPath: string): Promise<boolean> {
     } catch {
       return false;
     }
-    let stolenToken: unknown;
-    try {
-      stolenToken = (await Bun.file(stolenPath).json())?.token;
-    } catch {
-      stolenToken = undefined;
-    }
-    if (stolenToken !== staleToken) {
-      // Unreachable while every writer follows this protocol; reachable only if
-      // something outside it rewrote the lock. Put the file back with an atomic
-      // create-if-absent and fail safe rather than destroying a live lock.
+    const stolen = await readLifecycleLockGeneration(stolenPath);
+    if (stolen?.token !== staleToken) {
+      // Reachable: `rename` can fail after the re-read (and the re-read itself
+      // races anything outside this protocol), and the move-aside leaves
+      // lockPath briefly absent, so a contender can publish a NEW lock there
+      // in between. Put the file back with an atomic create-if-absent and fail
+      // safe rather than destroying whatever now holds the path.
       try {
         await link(stolenPath, lockPath);
       } catch {
@@ -716,17 +779,24 @@ export async function acquireAgentLifecycleLock(
   const token = randomUUID();
 
   while (true) {
+    // Publish via a fully-written staging file linked into place, exactly like
+    // claimStaleLifecycleLock publishes its claims. `open(wx)` + write creates
+    // the lock at ZERO BYTES and only then writes the body: a process killed
+    // in that window leaves a bodyless lock that names no owner, which no
+    // reclaimer could safely remove and which nothing else in the codebase
+    // ever deletes — a permanent wedge (acquire returns null forever, `ib
+    // merge` reports the agent busy forever, watchdog transient writes stall
+    // the full wait and silently drop). `link` has the same
+    // create-if-absent-or-EEXIST semantics, so the mutual exclusion is
+    // unchanged; only the half-written window is gone.
+    const stagingPath = `${lockPath}.staging.${process.pid}.${randomUUID()}`;
     try {
-      const handle = await open(lockPath, "wx");
-      try {
-        await handle.writeFile(JSON.stringify({
-          pid: process.pid,
-          created_at_ms: Date.now(),
-          token,
-        }));
-      } finally {
-        await handle.close();
-      }
+      await Bun.write(stagingPath, JSON.stringify({
+        pid: process.pid,
+        created_at_ms: Date.now(),
+        token,
+      }));
+      await link(stagingPath, lockPath);
       return {
         release: async () => {
           try {
@@ -747,6 +817,12 @@ export async function acquireAgentLifecycleLock(
 
       if (Date.now() >= deadline) return null;
       await Bun.sleep(LIFECYCLE_LOCK_RETRY_MS);
+    } finally {
+      try {
+        await unlink(stagingPath);
+      } catch {
+        // Never created, or already linked into place — the link is what counts.
+      }
     }
   }
 }

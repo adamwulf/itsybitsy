@@ -540,6 +540,28 @@ function lifecycleReclaimClaimPath(lockPath: string, staleToken: string, slot: n
 }
 
 /**
+ * Read the PID epoch out of a lifecycle lock or reclaim-claim record.
+ *
+ * Both records stamp `pid_epoch` with the writer's REAL process start time
+ * (selfProcessStartEpochSeconds), not the wall clock at write time. That is a
+ * deliberate difference from claude_pid_epoch / watchdog_pid_epoch, which are
+ * PID-WRITE stamps taken moments after their process starts: an `ib watch`
+ * that has been up for hours acquires locks long after it started, so a
+ * write-time stamp would sit way outside CLAUDE_PID_START_MARGIN_SECONDS and
+ * make every record it wrote look recycled. Recording the true start makes the
+ * comparison exact.
+ *
+ * `undefined` for a record written by an older binary (or by a process that
+ * could not read its own start time). Callers must treat that as "cannot
+ * confirm the holder is gone", never as permission to steal — which is exactly
+ * what isPidAliveSince does with an absent epoch.
+ */
+function lifecycleRecordPidEpoch(record: any): number | undefined {
+  const epoch = Number(record?.pid_epoch);
+  return Number.isFinite(epoch) && epoch > 0 ? epoch : undefined;
+}
+
+/**
  * Claim the exclusive right to reclaim ONE stale lock generation, returning the
  * slot index claimed or null when the claim is unavailable.
  *
@@ -566,7 +588,11 @@ async function claimStaleLifecycleLock(
     try {
       await Bun.write(
         stagingPath,
-        JSON.stringify({ pid: process.pid, created_at_ms: Date.now() }),
+        JSON.stringify({
+          pid: process.pid,
+          pid_epoch: selfProcessStartEpochSeconds(),
+          created_at_ms: Date.now(),
+        }),
       );
       await link(stagingPath, claimPath);
       return slot;
@@ -577,13 +603,20 @@ async function claimStaleLifecycleLock(
       // same two-owner bug one level down. Step to the next slot — itself an
       // exclusive create — only when the current claim's reclaimer is
       // affirmatively gone. An unreadable claim is unavailable evidence.
-      let claimPid: number;
+      let claim: any;
       try {
-        claimPid = Number((await Bun.file(claimPath).json())?.pid);
+        claim = await Bun.file(claimPath).json();
       } catch {
         return null;
       }
-      if (!Number.isFinite(claimPid) || claimPid <= 0 || isPidAliveCtx.fn(claimPid)) {
+      const claimPid = Number(claim?.pid);
+      if (
+        !Number.isFinite(claimPid) ||
+        claimPid <= 0 ||
+        // Identity, not bare liveness: one recycled PID would otherwise make a
+        // long-dead reclaimer look alive forever and wedge this generation.
+        isPidAliveSinceCtx.fn(claimPid, lifecycleRecordPidEpoch(claim))
+      ) {
         return null;
       }
     } finally {
@@ -631,7 +664,7 @@ interface LifecycleLockGeneration {
   /** Identity of this exact generation; keys the reclaim claim. */
   token: string;
   /** Parsed owner record, or null when the body is not one. */
-  owner: { pid: number; createdAtMs: number } | null;
+  owner: { pid: number; pidEpoch: number | undefined; createdAtMs: number } | null;
   /** Filesystem mtime — the only age signal a bodyless lock carries. */
   mtimeMs: number;
 }
@@ -677,7 +710,11 @@ async function readLifecycleLockGeneration(
     pid > 0 &&
     Number.isFinite(createdAtMs)
   ) {
-    return { token, owner: { pid, createdAtMs }, mtimeMs };
+    return {
+      token,
+      owner: { pid, pidEpoch: lifecycleRecordPidEpoch(parsed), createdAtMs },
+      mtimeMs,
+    };
   }
   // Size and mtime are both preserved by rename, so this token survives the
   // move-aside step of the steal and can be re-verified there.
@@ -698,7 +735,13 @@ async function reclaimStaleLifecycleLock(lockPath: string): Promise<boolean> {
   if (generation.owner) {
     if (
       !(now - generation.owner.createdAtMs > LIFECYCLE_LOCK_STALE_MS) ||
-      isPidAliveCtx.fn(generation.owner.pid)
+      // Identity, not bare liveness. A bare check on the recorded number lets
+      // ONE recycled PID make a long-dead owner look alive forever, wedging
+      // this generation permanently — the same PID-reuse hazard the epoch was
+      // introduced for on the reaping paths. An absent epoch (older binary) or
+      // an unreadable start time still reads as alive, so neither becomes
+      // permission to steal.
+      isPidAliveSinceCtx.fn(generation.owner.pid, generation.owner.pidEpoch)
     ) {
       return false;
     }
@@ -793,6 +836,7 @@ export async function acquireAgentLifecycleLock(
     try {
       await Bun.write(stagingPath, JSON.stringify({
         pid: process.pid,
+        pid_epoch: selfProcessStartEpochSeconds(),
         created_at_ms: Date.now(),
         token,
       }));
@@ -2317,9 +2361,33 @@ export const processStartEpochSecondsCtx = new InjectionContext<(pid: number) =>
   _processStartEpochSeconds
 );
 
-/** Reset the shared process-start cache. Exported for tests. */
+/**
+ * Our own process start time, resolved at most once per process. Unlike every
+ * other PID we probe, this one can never be recycled while we are running to
+ * ask about it, so there is nothing for a TTL to catch — and a permanent memo
+ * keeps stamping lifecycle-lock records off the process-spawn budget entirely.
+ * `undefined` means the start time was unavailable; callers must then omit the
+ * epoch rather than record a guess.
+ */
+let selfProcessStartEpochSecondsMemo: number | null = null;
+/** Separate flag so an unavailable (null) result is memoized too — inside a
+ *  codex sandbox `ps` is denied outright, and re-probing per call would spawn
+ *  on every lock acquisition forever. */
+let selfProcessStartEpochSecondsResolved = false;
+
+function selfProcessStartEpochSeconds(): number | undefined {
+  if (!selfProcessStartEpochSecondsResolved) {
+    selfProcessStartEpochSecondsMemo = processStartEpochSecondsCtx.fn(process.pid);
+    selfProcessStartEpochSecondsResolved = true;
+  }
+  return selfProcessStartEpochSecondsMemo ?? undefined;
+}
+
+/** Reset the shared process-start caches. Exported for tests. */
 export function resetProcessStartEpochSecondsCache(): void {
   processStartEpochSecondsCache.clear();
+  selfProcessStartEpochSecondsMemo = null;
+  selfProcessStartEpochSecondsResolved = false;
 }
 
 /** Return a cached process start timestamp, refreshing each PID every 5s. */

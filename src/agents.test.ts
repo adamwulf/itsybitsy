@@ -4302,6 +4302,136 @@ describe("acquireAgentLifecycleLock — stale-lock reclamation", () => {
     await rm(lockPath, { recursive: true, force: true });
   });
 
+  // ── PID identity, not bare liveness ───────────────────────────────────────
+  // Regression: the lock record and the reclaim-claim record carried a bare
+  // pid, checked with isPidAliveCtx. One recycled PID therefore made a
+  // long-dead holder look alive forever and wedged that generation
+  // permanently — far more reachable than exhausting the 16 claim slots.
+  describe("recycled-PID identity", () => {
+    /** Reported alive, but its process start disagrees with the record. */
+    const RECYCLED_PID = 515151;
+    const OWNER_START = 1_700_000_000;
+
+    beforeEach(() => {
+      // The suite-wide stub collapses isPidAliveSince onto bare liveness;
+      // these tests need the real identity rule.
+      isPidAliveSinceCtx.reset();
+      resetProcessStartEpochSecondsCache();
+      processStartEpochSecondsCtx.set((pid) =>
+        pid === RECYCLED_PID
+          ? OWNER_START + CLAUDE_PID_START_MARGIN_SECONDS + 1
+          : OWNER_START
+      );
+    });
+
+    /** A stale lock held by a PID that is alive but is no longer its owner. */
+    async function seedRecycledLock(token: string, pidEpoch?: number): Promise<void> {
+      await Bun.write(
+        lockPath,
+        JSON.stringify({
+          pid: RECYCLED_PID,
+          ...(pidEpoch === undefined ? {} : { pid_epoch: pidEpoch }),
+          created_at_ms: Date.now() - 10 * 60_000,
+          token,
+        })
+      );
+    }
+
+    test("a stale lock whose PID was recycled is reclaimed", async () => {
+      await seedRecycledLock("stale-recycled", OWNER_START);
+      const lock = await acquireAgentLifecycleLock(agentDir, 2_000);
+      expect(lock).not.toBeNull();
+      const held = await Bun.file(lockPath).json();
+      expect(held.token).not.toBe("stale-recycled");
+      expect(held.pid).toBe(process.pid);
+      await lock!.release();
+    });
+
+    test("a lock written by an older binary with no epoch is never stolen", async () => {
+      // An absent epoch is "cannot confirm the holder is gone", not permission.
+      await seedRecycledLock("stale-legacy");
+      expect(await acquireAgentLifecycleLock(agentDir, 0)).toBeNull();
+      expect((await Bun.file(lockPath).json()).token).toBe("stale-legacy");
+    });
+
+    test("a live owner whose start time is unavailable is never stolen", async () => {
+      processStartEpochSecondsCtx.set(() => null);
+      await seedRecycledLock("stale-unknown-start", OWNER_START);
+      expect(await acquireAgentLifecycleLock(agentDir, 0)).toBeNull();
+      expect((await Bun.file(lockPath).json()).token).toBe("stale-unknown-start");
+    });
+
+    test("a live owner whose start time still matches is never stolen", async () => {
+      processStartEpochSecondsCtx.set(() => OWNER_START);
+      await seedRecycledLock("stale-live-owner", OWNER_START);
+      expect(await acquireAgentLifecycleLock(agentDir, 0)).toBeNull();
+      expect((await Bun.file(lockPath).json()).token).toBe("stale-live-owner");
+    });
+
+    test("a claim whose reclaimer PID was recycled is stepped over", async () => {
+      await seedStaleLock("stale-claim-recycled");
+      // Left by a reclaimer that died; its PID now belongs to something else.
+      await Bun.write(
+        `${lockPath}.reclaim.stale-claim-recycled.0`,
+        JSON.stringify({
+          pid: RECYCLED_PID,
+          pid_epoch: OWNER_START,
+          created_at_ms: Date.now() - 60_000,
+        })
+      );
+
+      const lock = await acquireAgentLifecycleLock(agentDir, 2_000);
+      expect(lock).not.toBeNull();
+      expect((await Bun.file(lockPath).json()).token).not.toBe("stale-claim-recycled");
+      await lock!.release();
+    });
+
+    test("a claim written with no epoch still blocks every other reclaimer", async () => {
+      await seedStaleLock("stale-claim-legacy");
+      await Bun.write(
+        `${lockPath}.reclaim.stale-claim-legacy.0`,
+        JSON.stringify({ pid: RECYCLED_PID, created_at_ms: Date.now() - 60_000 })
+      );
+
+      expect(await acquireAgentLifecycleLock(agentDir, 0)).toBeNull();
+      expect((await Bun.file(lockPath).json()).token).toBe("stale-claim-legacy");
+    });
+
+    test("a published lock stamps this process's real start time", async () => {
+      // The stamp is the writer's process START, not the wall clock at write
+      // time: a long-running `ib watch` acquires locks hours after it started,
+      // and a write-time stamp would sit outside the margin and read as
+      // recycled on the very next pass.
+      const lock = await acquireAgentLifecycleLock(agentDir, 2_000);
+      expect(lock).not.toBeNull();
+      const held = await Bun.file(lockPath).json();
+      expect(held.pid).toBe(process.pid);
+      expect(held.pid_epoch).toBe(OWNER_START);
+      await lock!.release();
+    });
+
+    test("this process's start time is read once, not per acquisition", async () => {
+      let selfProbes = 0;
+      processStartEpochSecondsCtx.set((pid) => {
+        if (pid === process.pid) selfProbes++;
+        return OWNER_START;
+      });
+      for (let i = 0; i < 5; i++) {
+        const lock = await acquireAgentLifecycleLock(agentDir, 2_000);
+        await lock!.release();
+      }
+      expect(selfProbes).toBe(1);
+    });
+
+    test("an unreadable own start time omits the epoch rather than guessing", async () => {
+      processStartEpochSecondsCtx.set(() => null);
+      const lock = await acquireAgentLifecycleLock(agentDir, 2_000);
+      expect(lock).not.toBeNull();
+      expect((await Bun.file(lockPath).json()).pid_epoch).toBeUndefined();
+      await lock!.release();
+    });
+  });
+
   test("every published lock is observable only fully formed", async () => {
     // Pre-fix, a concurrent reader could catch the zero-byte file between the
     // exclusive create and the body write. Interleave a reader with many

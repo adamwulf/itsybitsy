@@ -4,7 +4,7 @@
  */
 
 import { join, dirname, basename } from "path";
-import { readdir, rename, stat, unlink, open } from "fs/promises";
+import { readdir, link, rename, stat, unlink, open } from "fs/promises";
 import { randomUUID } from "crypto";
 import type { AgentState } from "./parse-state";
 import { parseState, stripAnsi, stripTrailingBlanks, STARTUP_MARKERS } from "./parse-state";
@@ -521,8 +521,182 @@ function emptyTransient(): TransientState {
 const LIFECYCLE_LOCK_STALE_MS = 120_000;
 const LIFECYCLE_LOCK_RETRY_MS = 25;
 
+/**
+ * Upper bound on reclaim slots per stale lock generation. A slot is only
+ * stepped over when its recorded reclaimer is AFFIRMATIVELY gone, so the only
+ * way to consume slots is a reclaimer dying inside the microseconds between
+ * claiming one and finishing the steal. Exhausting the bound fails safe (the
+ * caller reports the agent busy) rather than unlinking another process's claim.
+ */
+const LIFECYCLE_LOCK_RECLAIM_SLOT_LIMIT = 16;
+
 export interface AgentLifecycleLock {
   release: () => Promise<void>;
+}
+
+/** Path of the Nth reclaim claim for one stale lock generation. */
+function lifecycleReclaimClaimPath(lockPath: string, staleToken: string, slot: number): string {
+  return `${lockPath}.reclaim.${staleToken}.${slot}`;
+}
+
+/**
+ * Claim the exclusive right to reclaim ONE stale lock generation, returning the
+ * slot index claimed or null when the claim is unavailable.
+ *
+ * The claim is what makes reclamation safe. Re-reading the token immediately
+ * before unlinking only narrows the window — two contenders can both pass that
+ * re-read, and the second unlink then removes the NEW lock the first just
+ * acquired, leaving both believing they hold it. Here the claim file is created
+ * with an atomic create-if-absent and is keyed on the stale generation's token,
+ * so at most one process may ever remove that generation. Combined with the
+ * caller's affirmative dead-owner check (the generation's own holder can never
+ * release it), a held claim means the lock file cannot change underneath us.
+ *
+ * The claim is published via `link` from a fully-written staging file rather
+ * than `open(wx)` + write, so a contender can never read a half-written claim
+ * and mistake a live reclaimer for a crashed one.
+ */
+async function claimStaleLifecycleLock(
+  lockPath: string,
+  staleToken: string,
+): Promise<number | null> {
+  for (let slot = 0; slot < LIFECYCLE_LOCK_RECLAIM_SLOT_LIMIT; slot++) {
+    const claimPath = lifecycleReclaimClaimPath(lockPath, staleToken, slot);
+    const stagingPath = `${lockPath}.reclaim.staging.${process.pid}.${randomUUID()}`;
+    try {
+      await Bun.write(
+        stagingPath,
+        JSON.stringify({ pid: process.pid, created_at_ms: Date.now() }),
+      );
+      await link(stagingPath, claimPath);
+      return slot;
+    } catch (error: any) {
+      if (error?.code !== "EEXIST") return null;
+      // A claim already exists. NEVER unlink it to take over: two contenders
+      // racing that unlink would both end up holding the claim, which is the
+      // same two-owner bug one level down. Step to the next slot — itself an
+      // exclusive create — only when the current claim's reclaimer is
+      // affirmatively gone. An unreadable claim is unavailable evidence.
+      let claimPid: number;
+      try {
+        claimPid = Number((await Bun.file(claimPath).json())?.pid);
+      } catch {
+        return null;
+      }
+      if (!Number.isFinite(claimPid) || claimPid <= 0 || isPidAliveCtx.fn(claimPid)) {
+        return null;
+      }
+    } finally {
+      try {
+        await unlink(stagingPath);
+      } catch {
+        // Never created, or already linked into place — the link is what counts.
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Drop reclaim claims for a generation, newest slot first. Safe once the steal
+ * has resolved: a reclaimed generation can never return to the lock path
+ * (tokens are unique), so any contender that later wins a freed slot aborts at
+ * its own re-read instead of touching the live lock.
+ */
+async function releaseStaleLifecycleClaims(
+  lockPath: string,
+  staleToken: string,
+  throughSlot: number,
+): Promise<void> {
+  for (let slot = throughSlot; slot >= 0; slot--) {
+    try {
+      await unlink(lifecycleReclaimClaimPath(lockPath, staleToken, slot));
+    } catch {
+      /* best-effort cleanup */
+    }
+  }
+}
+
+/**
+ * Crash recovery for a lock whose owner is affirmatively gone. Returns true
+ * only when this process removed the stale generation, meaning the caller
+ * should immediately retry its exclusive create.
+ */
+async function reclaimStaleLifecycleLock(lockPath: string): Promise<boolean> {
+  let staleToken: string;
+  try {
+    const stale = await Bun.file(lockPath).json();
+    const staleAge = Date.now() - Number(stale?.created_at_ms);
+    const stalePid = Number(stale?.pid);
+    if (
+      typeof stale?.token !== "string" ||
+      !(staleAge > LIFECYCLE_LOCK_STALE_MS) ||
+      !Number.isFinite(stalePid) ||
+      !(stalePid > 0) ||
+      isPidAliveCtx.fn(stalePid)
+    ) {
+      return false;
+    }
+    staleToken = stale.token;
+  } catch {
+    // An unreadable lock is unavailable evidence, not permission to remove it.
+    return false;
+  }
+
+  const slot = await claimStaleLifecycleLock(lockPath, staleToken);
+  if (slot === null) return false;
+
+  try {
+    // Re-read under the claim. If the generation we validated is already gone,
+    // an earlier reclaimer finished the job and a NEW owner may hold the lock —
+    // touching it here is exactly the double-steal the claim exists to stop.
+    let current: any;
+    try {
+      current = await Bun.file(lockPath).json();
+    } catch {
+      return false;
+    }
+    if (current?.token !== staleToken) return false;
+
+    // Nothing can change the lock path now, so move it aside atomically and
+    // verify what we actually took before treating the path as free.
+    const stolenPath = `${lockPath}.reclaimed.${staleToken}.${slot}`;
+    try {
+      await rename(lockPath, stolenPath);
+    } catch {
+      return false;
+    }
+    let stolenToken: unknown;
+    try {
+      stolenToken = (await Bun.file(stolenPath).json())?.token;
+    } catch {
+      stolenToken = undefined;
+    }
+    if (stolenToken !== staleToken) {
+      // Unreachable while every writer follows this protocol; reachable only if
+      // something outside it rewrote the lock. Put the file back with an atomic
+      // create-if-absent and fail safe rather than destroying a live lock.
+      try {
+        await link(stolenPath, lockPath);
+      } catch {
+        /* a newer lock already occupies the path */
+      }
+      try {
+        await unlink(stolenPath);
+      } catch {
+        /* best-effort */
+      }
+      return false;
+    }
+    try {
+      await unlink(stolenPath);
+    } catch {
+      /* best-effort — the stale generation is already off the lock path */
+    }
+    return true;
+  } finally {
+    await releaseStaleLifecycleClaims(lockPath, staleToken, slot);
+  }
 }
 
 /**
@@ -566,31 +740,10 @@ export async function acquireAgentLifecycleLock(
     } catch (error: any) {
       if (error?.code !== "EEXIST") return null;
 
-      // Crash recovery for a lock whose owner is affirmatively gone. Re-read
-      // the token immediately before unlinking so a released-and-reacquired
-      // lock is not mistaken for the stale generation we inspected.
-      try {
-        const stale = await Bun.file(lockPath).json();
-        const staleAge = Date.now() - Number(stale?.created_at_ms);
-        const stalePid = Number(stale?.pid);
-        const staleToken = stale?.token;
-        if (
-          typeof staleToken === "string" &&
-          staleAge > LIFECYCLE_LOCK_STALE_MS &&
-          Number.isFinite(stalePid) &&
-          stalePid > 0 &&
-          !isPidAliveCtx.fn(stalePid)
-        ) {
-          const current = await Bun.file(lockPath).json();
-          if (current?.token === staleToken) {
-            await unlink(lockPath);
-            continue;
-          }
-        }
-      } catch {
-        // An unreadable lock is unavailable evidence, not permission to
-        // remove it. The bounded wait below will fail safe.
-      }
+      // Crash recovery for a lock whose owner is affirmatively gone. The steal
+      // is serialized per stale generation so two contenders can never both
+      // remove it — see reclaimStaleLifecycleLock.
+      if (await reclaimStaleLifecycleLock(lockPath)) continue;
 
       if (Date.now() >= deadline) return null;
       await Bun.sleep(LIFECYCLE_LOCK_RETRY_MS);

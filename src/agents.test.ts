@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, mkdir } from "fs/promises";
+import { mkdtemp, rm, mkdir, readdir, unlink } from "fs/promises";
 import { tmpdir } from "os";
 import {
   computeAge,
@@ -56,6 +56,7 @@ import {
   probeTmuxSessionCtx,
   probeTmuxPaneCtx,
   reapReadAgentMetaCtx,
+  acquireAgentLifecycleLock,
   acquireAgentLifecycleLockCtx,
   nowMsCtx,
   resetReadAgentMetaCache,
@@ -4084,6 +4085,147 @@ describe("readAgentTransient / writeAgentTransient", () => {
     await deleteAgentTransient(tempDir);
     expect(await readAgentTransient(tempDir)).toBeNull();
   });
+});
+
+// ── lifecycle lock: stale-lock reclamation must never admit two owners ───────
+
+describe("acquireAgentLifecycleLock — stale-lock reclamation", () => {
+  let tempDir: string;
+  let agentDir: string;
+  let lockPath: string;
+
+  /** PID seeded into the stale lock; reported affirmatively dead below. */
+  const DEAD_OWNER_PID = 424242;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "itsybitsy-lifecycle-lock-"));
+    agentDir = join(tempDir, "agent-stale");
+    await mkdir(agentDir, { recursive: true });
+    lockPath = `${agentDir}.lifecycle.lock`;
+    isPidAliveCtx.set((pid) => pid !== DEAD_OWNER_PID);
+  });
+
+  afterEach(async () => {
+    isPidAliveCtx.reset();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  /** Write a lock file whose owner is long gone and whose age is past stale. */
+  async function seedStaleLock(token: string): Promise<void> {
+    await Bun.write(
+      lockPath,
+      JSON.stringify({
+        pid: DEAD_OWNER_PID,
+        created_at_ms: Date.now() - 10 * 60_000,
+        token,
+      })
+    );
+  }
+
+  test("a dead owner's lock is reclaimed by a single contender", async () => {
+    await seedStaleLock("stale-single");
+    const lock = await acquireAgentLifecycleLock(agentDir, 2_000);
+    expect(lock).not.toBeNull();
+    const held = await Bun.file(lockPath).json();
+    expect(held.token).not.toBe("stale-single");
+    expect(held.pid).toBe(process.pid);
+    await lock!.release();
+    expect(await Bun.file(lockPath).exists()).toBe(false);
+  });
+
+  test("a live owner's lock is never reclaimed", async () => {
+    await Bun.write(
+      lockPath,
+      JSON.stringify({
+        pid: process.pid,
+        created_at_ms: Date.now() - 10 * 60_000,
+        token: "live-owner",
+      })
+    );
+    // waitMs 0 → one pass, then fail safe.
+    expect(await acquireAgentLifecycleLock(agentDir, 0)).toBeNull();
+    expect((await Bun.file(lockPath).json()).token).toBe("live-owner");
+  });
+
+  test("a live reclaimer's claim blocks every other reclaimer", async () => {
+    await seedStaleLock("stale-claimed");
+    // A reclaimer that is still running owns this generation's steal.
+    await Bun.write(
+      `${lockPath}.reclaim.stale-claimed.0`,
+      JSON.stringify({ pid: process.pid, created_at_ms: Date.now() })
+    );
+
+    expect(await acquireAgentLifecycleLock(agentDir, 0)).toBeNull();
+    // The stale generation must be exactly where the live reclaimer left it.
+    expect((await Bun.file(lockPath).json()).token).toBe("stale-claimed");
+  });
+
+  test("a crashed reclaimer's claim does not wedge the lock", async () => {
+    await seedStaleLock("stale-crashed");
+    // Left behind by a reclaimer that died mid-steal. It is never unlinked to
+    // take over (that race is the bug); the next slot is claimed instead.
+    await Bun.write(
+      `${lockPath}.reclaim.stale-crashed.0`,
+      JSON.stringify({ pid: DEAD_OWNER_PID, created_at_ms: Date.now() - 60_000 })
+    );
+
+    const lock = await acquireAgentLifecycleLock(agentDir, 2_000);
+    expect(lock).not.toBeNull();
+    expect((await Bun.file(lockPath).json()).token).not.toBe("stale-crashed");
+    await lock!.release();
+  });
+
+  test("concurrent contenders racing one stale lock never overlap", async () => {
+    // Every contender starts each round already past the stale check, which is
+    // exactly the interleaving that let two of them reclaim the same lock: the
+    // first unlinked the stale file and reacquired, the second then unlinked
+    // the NEW lock and acquired its own. waitMs 0 keeps each contender to a
+    // single pass so the rounds stay cheap.
+    const CONTENDERS = 32;
+    const ROUNDS = 200;
+
+    let owners = 0;
+    let maxOwners = 0;
+    let reclaims = 0;
+    const overlaps: string[] = [];
+    const stolen: string[] = [];
+
+    for (let round = 0; round < ROUNDS; round++) {
+      await seedStaleLock(`stale-round-${round}`);
+      await Promise.all(
+        Array.from({ length: CONTENDERS }, async () => {
+          const lock = await acquireAgentLifecycleLock(agentDir, 0);
+          if (!lock) return;
+          reclaims++;
+          owners++;
+          maxOwners = Math.max(maxOwners, owners);
+          if (owners > 1) overlaps.push(`round ${round}: ${owners} simultaneous owners`);
+          const mine = await Bun.file(lockPath).json().catch(() => null);
+          // Yield so an overlapping owner is observed rather than missed.
+          await Bun.sleep(0);
+          // A second reclaimer shows up here even when the two critical
+          // sections don't overlap in wall-clock: it removes the file this
+          // owner holds. The lock must be untouched for a held generation.
+          const now = await Bun.file(lockPath).json().catch(() => null);
+          if (now?.token !== mine?.token) {
+            stolen.push(`round ${round}: held lock replaced (${mine?.token} -> ${now?.token})`);
+          }
+          owners--;
+          await lock.release();
+        })
+      );
+      // Every round must end with the lock free for the next seed.
+      if (await Bun.file(lockPath).exists()) await unlink(lockPath);
+    }
+
+    expect(overlaps).toEqual([]);
+    expect(stolen).toEqual([]);
+    expect(maxOwners).toBe(1);
+    // Sanity: reclamation really happened — exactly one contender per round.
+    expect(reclaims).toBeGreaterThanOrEqual(ROUNDS);
+    // Reclamation bookkeeping must not litter the agents directory.
+    expect(await readdir(tempDir)).toEqual(["agent-stale"]);
+  }, 120_000);
 });
 
 // ── operation marker: RMW helper, set/clear, back-compat ─────────────────────

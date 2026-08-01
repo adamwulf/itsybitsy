@@ -5595,8 +5595,18 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       savedHome = process.env.HOME;
       homeTmp = await mkdtemp(join(tmpdir(), "dash-roster-home-"));
       process.env.HOME = homeTmp;
+      // Stub the send spawn runner. These tests plant REAL agent dirs so the
+      // roster wrappers can resolve bare ids, which means teamAdd/teamRemove's
+      // join/leave fan-out reaches the real delivery path and spawns real tmux
+      // subprocesses (against sessions that do not exist) with the real
+      // inter-keystroke delays. That is seconds of unrelated work on a busy
+      // machine — enough to blow the 5s per-test timeout — and none of it is
+      // what these tests assert on. Stubbing keeps the roster assertions and
+      // drops the dependency on tmux.
+      setSendSpawnRunner(() => makeSpawnResult());
     });
     afterEach(async () => {
+      resetSendSpawnRunner();
       if (savedHome === undefined) delete process.env.HOME;
       else process.env.HOME = savedHome;
       await rm(homeTmp, { recursive: true, force: true });

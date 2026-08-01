@@ -36,6 +36,7 @@ import {
   resetListTmuxSessionsCache,
   resetReapedTmuxSessions,
   resetTmuxObservationState,
+  resetOrphanIdentityLogState,
   TMUX_MISSING_CONFIRMATION_MIN_INTERVAL_MS,
   readAgentTransient,
   writeAgentTransient,
@@ -101,6 +102,7 @@ afterEach(() => {
   acquireAgentLifecycleLockCtx.reset();
   nowMsCtx.reset();
   resetTmuxObservationState();
+  resetOrphanIdentityLogState();
 });
 
 /** Narrow a FlatEntry to kind==="agent" or fail */
@@ -2754,7 +2756,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
     expect(killCalls).toBe(0);
     const { readFile } = await import("fs/promises");
     const log = await readFile(logPath, "utf8");
-    expect(log).toContain("process identity unavailable or changed");
+    expect(log).toContain("pid alive but process start unavailable or changed");
   });
 
   test("legacy PID without a write epoch never authorizes SIGTERM", async () => {
@@ -2845,6 +2847,171 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
     expect(log).toContain("pid=12345");
     expect(log).toContain("tmux=ib-a1");
     expect(log).toContain("complete agent: tmux session gone");
+  });
+
+  // ── audit-log volume ──────────────────────────────────────────────────────
+  // Regression: the identity guard logged "signal skipped" whenever
+  // _isPidIdentityCurrent returned false — including for a merely DEAD pid,
+  // where the pre-guard code returned silently. reapOrphanedClaude runs on
+  // every watcher pass for every already-stopped agent (2s pollStates plus the
+  // 10s refresh) and only the kill-session is memoized, so ten stopped agents
+  // produced ~300 lines/min and rotated the whole 1 MB x 3 audit trail away in
+  // about 20 minutes — exactly the harm TMUX_OBSERVATION_LOG_INTERVAL_MS was
+  // added to prevent, reintroduced on the PID side.
+  test("repeated reaping passes over a stopped agent write no identity lines", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => false);
+    killPidCtx.set(() => true);
+
+    const a = makeAgent({
+      id: "agent-quiet",
+      meta: {
+        tmux_session: "",
+        claude_pid: "12345",
+        claude_pid_epoch: 1_700_000_000,
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    for (let pass = 0; pass < 25; pass++) {
+      await detectAgentStates([a], { reap: true });
+    }
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8").catch(() => "");
+    expect(log).not.toContain("[orphan-kill] signal skipped");
+    expect(log.split("\n").filter((l) => l.includes("[orphan-kill]"))).toEqual([]);
+  });
+
+  test("an unverifiable but LIVE pid logs once, not once per pass", async () => {
+    // The informative cases (no recorded epoch, unreadable or changed process
+    // start) are worth reporting, but they hold for many passes — so they are
+    // rate-limited rather than emitted per pass.
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => true);
+    isPidIdentityCurrentCtx.set(() => false);
+    killPidCtx.set(() => true);
+
+    const a = makeAgent({
+      id: "agent-recycled",
+      meta: {
+        tmux_session: "",
+        claude_pid: "12345",
+        claude_pid_epoch: 1_700_000_000,
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    for (let pass = 0; pass < 25; pass++) {
+      await detectAgentStates([a], { reap: true });
+    }
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    const skipped = log.split("\n").filter((l) => l.includes("[orphan-kill] signal skipped"));
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).toContain("reason=pid alive but process start unavailable or changed");
+  });
+
+  test("a live pid with no recorded epoch is reported as such", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => true);
+    isPidIdentityCurrentCtx.set(() => false);
+    killPidCtx.set(() => true);
+
+    const a = makeAgent({
+      id: "agent-legacy-epoch",
+      meta: {
+        tmux_session: "",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a], { reap: true });
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("reason=pid alive but no recorded pid epoch");
+  });
+
+  test("an already-absent tmux session is classified as already gone", async () => {
+    // The husk kill fires against sessions that are usually already dead.
+    // "can't find session" is the expected no-op — calling it failed in an
+    // audit trail is misleading.
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => false);
+    killPidCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set());
+    probeTmuxSessionCtx.set(async () => ({
+      status: "missing",
+      error: "can't find session: ib-gone",
+    }));
+    tmuxPollerSpawnCtx.set(((args: any[]) => ({
+      stdout: new ReadableStream({ start(c) { c.close(); } }),
+      stderr: new ReadableStream({
+        start(c) {
+          if (args[1] === "kill-session") {
+            c.enqueue(new TextEncoder().encode("can't find session: ib-gone"));
+          }
+          c.close();
+        },
+      }),
+      exited: Promise.resolve(args[1] === "kill-session" ? 1 : 0),
+    })) as any);
+
+    const a = makeAgent({
+      id: "agent-gone",
+      meta: {
+        state: "running",
+        tmux_session: "ib-gone",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a], { reap: true });
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("[orphan-kill] tmux kill-session already gone");
+    expect(log).not.toContain("kill-session failed");
+  });
+
+  test("a genuine tmux teardown failure is still reported as failed", async () => {
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => false);
+    killPidCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set());
+    probeTmuxSessionCtx.set(async () => ({
+      status: "missing",
+      error: "can't find session: ib-broken",
+    }));
+    tmuxPollerSpawnCtx.set(((args: any[]) => ({
+      stdout: new ReadableStream({ start(c) { c.close(); } }),
+      stderr: new ReadableStream({
+        start(c) {
+          if (args[1] === "kill-session") {
+            c.enqueue(new TextEncoder().encode("error connecting to /tmp/tmux-501/default"));
+          }
+          c.close();
+        },
+      }),
+      exited: Promise.resolve(args[1] === "kill-session" ? 1 : 0),
+    })) as any);
+
+    const a = makeAgent({
+      id: "agent-broken",
+      meta: {
+        state: "running",
+        tmux_session: "ib-broken",
+        claude_pid: "12345",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a], { reap: true });
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    expect(log).toContain("[orphan-kill] tmux kill-session failed");
   });
 
   test("reap aborts when lifecycle metadata changes after observation", async () => {

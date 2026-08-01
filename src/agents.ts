@@ -2650,6 +2650,46 @@ export async function terminateProcess(
 }
 
 /**
+ * Identity-skip diagnostics repeat for as long as the condition holds, and
+ * reapOrphanedClaude runs on every watcher pass for every already-stopped
+ * agent (2s pollStates plus the 10s refresh) — only the kill-session is
+ * memoized. Rate-limit identical lines on the same interval the tmux
+ * observation log uses, for the same reason: watch.log is 1 MB active across
+ * 3 files, so one repeating line rotates away the lifecycle history needed for
+ * diagnosis in minutes.
+ */
+export const ORPHAN_IDENTITY_LOG_INTERVAL_MS = 60_000;
+const orphanIdentityLogEpochMs = new Map<string, number>();
+
+/** Reset the orphan-kill identity log suppression. Exported for tests. */
+export function resetOrphanIdentityLogState(): void {
+  orphanIdentityLogEpochMs.clear();
+}
+
+function logOrphanIdentitySkip(key: string, line: string): void {
+  const now = Date.now();
+  const last = orphanIdentityLogEpochMs.get(key) ?? 0;
+  if (now - last < ORPHAN_IDENTITY_LOG_INTERVAL_MS) return;
+  orphanIdentityLogEpochMs.delete(key);
+  orphanIdentityLogEpochMs.set(key, now);
+  trimOldestMapEntries(orphanIdentityLogEpochMs);
+  logToWatchLog(line);
+}
+
+/**
+ * tmux stderr meaning the session was already gone. Husk teardown fires against
+ * sessions that are usually already dead, so this is the EXPECTED no-op, not a
+ * failure — calling it "failed" in an audit trail is misleading. Both spellings
+ * appear across tmux versions, and a dead server means every session is gone.
+ */
+function isMissingTmuxSessionError(error: string | undefined): boolean {
+  if (!error) return false;
+  const normalized = error.toLowerCase();
+  return /can(?:'t|\s?not) find session/.test(normalized) ||
+    normalized.includes("no server running");
+}
+
+/**
  * Reap an orphaned Claude process AND its watchdog: when an agent's tmux
  * session is gone, the Claude process and its per-agent watchdog are no
  * longer reachable from the dashboard and burn CPU/RAM until manually
@@ -2747,10 +2787,26 @@ async function reapOrphanedClaude(
     pidEpoch: number | undefined,
   ): void => {
     if (!Number.isFinite(pid) || pid <= 0) return;
+    // An affirmatively DEAD pid is the overwhelmingly common case here — every
+    // pass over an already-stopped agent hits it — and there is nothing to
+    // report: no signal was withheld from a live process. Return silently, as
+    // this branch did before the identity guard was added.
+    if (!isPidAliveCtx.fn(pid)) return;
     if (!isPidIdentityCurrentCtx.fn(pid, pidEpoch)) {
-      logToWatchLog(
+      // Alive, but the identity could not be affirmed. Three genuinely
+      // informative shapes: no recorded epoch (record written by an older
+      // binary), the process start could not be read, or it no longer matches
+      // (the PID was recycled). Each can hold for many passes, so the line is
+      // rate-limited rather than emitted per pass.
+      const hasEpoch =
+        typeof pidEpoch === "number" && Number.isFinite(pidEpoch) && pidEpoch > 0;
+      const detail = hasEpoch
+        ? "pid alive but process start unavailable or changed"
+        : "pid alive but no recorded pid epoch";
+      logOrphanIdentitySkip(
+        `${agent.id}\0${kind}\0${pid}\0${detail}`,
         `[orphan-kill] signal skipped kind=${kind} pid=${pid} agent=${repoTag}${agent.id} ` +
-        `tmux=${tmuxLabel} state=${resolvedState} reason=process identity unavailable or changed`
+        `tmux=${tmuxLabel} state=${resolvedState} reason=${detail}`
       );
       return;
     }
@@ -2783,11 +2839,17 @@ async function reapOrphanedClaude(
   ) {
     reapedTmuxSessions.add(agent.meta.tmux_session);
     const result = await killTmuxSessionResult(agent.meta.tmux_session);
+    const alreadyGone = !result.ok && isMissingTmuxSessionError(result.error);
+    const outcome = result.ok
+      ? "kill-session sent"
+      : alreadyGone
+        ? "kill-session already gone"
+        : "kill-session failed";
     const detail = result.error
       ? ` error=${JSON.stringify(result.error.slice(0, 500))} exit=${result.exitCode ?? "spawn"}`
       : "";
     logToWatchLog(
-      `[orphan-kill] tmux ${result.ok ? "kill-session sent" : "kill-session failed"} ` +
+      `[orphan-kill] tmux ${outcome} ` +
       `agent=${repoTag}${agent.id} tmux=${tmuxLabel} state=${resolvedState} reason=${reason}${detail}`
     );
   }

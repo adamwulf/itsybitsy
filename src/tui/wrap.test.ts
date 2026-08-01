@@ -631,16 +631,41 @@ describe("wordWrapLines performance", () => {
     const text = lines.join("\n");
     const width = 120;
 
-    const start = performance.now();
-    const result = wordWrapLines(text, width);
-    const elapsed = performance.now() - start;
+    // Measure CPU time, not wall-clock. Wall-clock answers "how long did this
+    // take", which on a busy machine is dominated by how often the scheduler
+    // descheduled us — measured here at 59-263ms for identical work, a 4.4x
+    // spread, while the work itself never changed. CPU time answers "how much
+    // work did this do", which is the property under test; the same runs
+    // measured 30-36ms, a 1.2x spread. Wall-clock made this test fail under
+    // load for reasons that have nothing to do with the wrapping algorithm.
+    let lastRows: string[] = [];
+    const measureCpuMs = (): number => {
+      const before = process.cpuUsage();
+      lastRows = wordWrapLines(text, width);
+      const after = process.cpuUsage(before);
+      return (after.user + after.system) / 1000;
+    };
+
+    // Warm up the JIT before measuring — the first few passes run interpreted
+    // and cost several times steady state, which is a property of the runtime
+    // rather than of the algorithm.
+    for (let i = 0; i < 3; i++) measureCpuMs();
 
     // Sanity: every output row is bounded.
-    for (const row of result) {
+    for (const row of lastRows) {
       expect(visibleWidth(row)).toBeLessThanOrEqual(width);
     }
-    // Target is ~20ms; assert 80ms to stay meaningful while tolerating shared-CI
-    // jitter. A regression that makes wrapping super-linear blows well past this.
+
+    // Best of N: preemption and GC can only ever ADD cost to a sample, so the
+    // minimum is the closest estimate of the true cost. A genuine super-linear
+    // regression slows down every sample including the best one, so this keeps
+    // all of the assertion's power to catch what it was written to catch.
+    let elapsed = Infinity;
+    for (let i = 0; i < 5; i++) elapsed = Math.min(elapsed, measureCpuMs());
+
+    // Target is ~20ms of CPU; assert 80ms to stay meaningful while tolerating
+    // machine-to-machine variation. A regression that makes wrapping
+    // super-linear blows well past this.
     expect(elapsed).toBeLessThan(80);
   });
 });

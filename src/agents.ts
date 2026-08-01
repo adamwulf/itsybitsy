@@ -1972,8 +1972,12 @@ export function resetListTmuxSessionsCache(): void {
 const reapedTmuxSessions = new Set<string>();
 
 /** A destructive watcher pass requires two consecutive, affirmative
- * `tmux has-session` misses. Read-only one-shot callers may classify a
- * confirmed miss immediately because they cannot reap anything. */
+ * `tmux has-session` misses. One-shot lifecycle commands classify a confirmed
+ * miss immediately even though they DO reap (src/index.ts passes reap: true at
+ * the resume/respawn seams): the counter is process-local, so it could never
+ * survive into another pass, and requiring two would simply never reap. Their
+ * safety comes from the exact-session probe plus the final revalidation under
+ * the lifecycle lock. */
 export const TMUX_MISSING_CONFIRMATIONS_REQUIRED = 2;
 export const TMUX_MISSING_CONFIRMATION_MIN_INTERVAL_MS = 1_000;
 export const TMUX_OBSERVATION_STATE_MAX_ENTRIES = 4_096;
@@ -2092,8 +2096,10 @@ function logTmuxObservation(
 ): void {
   const tmuxSession = agent.meta.tmux_session || "<none>";
   const normalized = detail.replace(/\s+/g, " ").trim().slice(0, 500) || "unknown error";
-  // A different failure detail is a new diagnostic, while recovery clears all
-  // keys for the session so a later recurrence starts a fresh log episode.
+  // A different failure detail is a new diagnostic. Recovery clears the keys
+  // for the operations that actually recovered — clearReapedTmuxSession drops
+  // the session-liveness ones, clearReadTmuxObservation drops the pane ones —
+  // so a later recurrence of a recovered operation starts a fresh episode.
   const key = `${tmuxSession}\0${status}\0${operation}\0${normalized}`;
   const now = Date.now();
   const last = tmuxObservationLogEpochMs.get(key) ?? 0;
@@ -2322,11 +2328,14 @@ function _isPidAlive(pid: number): boolean {
 export const isPidAliveCtx = new InjectionContext<(pid: number) => boolean>(_isPidAlive);
 
 /**
- * Maximum amount of time a Claude process may appear to start after its
- * current PID write. start.sh launches Claude before invoking `ib write-pid`,
- * and both timestamps have only second-level relevance here, so one minute is
- * a deliberately generous allowance for writeback delay and minor clock skew.
- * PID reuse after an agent stops is normally minutes or days newer.
+ * Maximum distance, in EITHER direction, between a process's start time and
+ * its current PID write — isProcessStartCurrent compares with Math.abs, so
+ * this bounds both sides. The practically relevant direction is a start time
+ * that precedes the write: start.sh launches Claude before invoking
+ * `ib write-pid`. Both timestamps have only second-level relevance here, so
+ * one minute is a deliberately generous allowance for that gap, writeback
+ * delay, and minor clock skew. PID reuse after an agent stops is normally
+ * minutes or days away on either side.
  */
 export const CLAUDE_PID_START_MARGIN_SECONDS = 60;
 
@@ -2696,15 +2705,22 @@ function isMissingTmuxSessionError(error: string | undefined): boolean {
  * killed. SIGTERM both (if alive) and write a line per kill to
  * ~/.itsybitsy/watch.log so the user has an audit trail.
  *
- * Sources:
- *  - claude_pid: agent.meta.claude_pid (meta.json)
- *  - watchdog_pid: meta.transient.json (read via readAgentTransient)
+ * Sources (both re-read here, NOT taken from the observation that got us
+ * here — see the final revalidation below):
+ *  - claude_pid / claude_pid_epoch: latestMeta, re-read from meta.json
+ *  - watchdog_pid / watchdog_pid_epoch: meta.transient.json (readAgentTransient)
  *
  * Skipped when:
- *  - the PID is missing/empty/non-numeric (legacy or not-yet-started agents)
- *  - the PID is already dead
  *  - we're about to render the agent as 'creating' (still spawning — Claude
  *    may not have a tmux session yet)
+ *  - the lifecycle lock cannot be acquired within 250ms
+ *  - the lifecycle metadata cannot be re-read, or changed since the
+ *    observation (session, PID, PID epoch, or created_epoch generation)
+ *  - a lifecycle operation (merge/resume/respawn) is in flight
+ *  - the PID is missing/empty/non-numeric (legacy or not-yet-started agents)
+ *  - the PID is already dead
+ *  - the PID is alive but its identity cannot be affirmed: no recorded epoch,
+ *    an unreadable process start, or a start that no longer matches
  *
  * Also tears down the husk tmux session when resolvedState === "stopped".
  * Once we've decided the agent is stopped, the session is by definition

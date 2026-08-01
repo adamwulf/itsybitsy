@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
 import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -19,6 +19,15 @@ import { setUserConfigPath, resetUserConfigPath } from "./config";
 import { IB_COORDINATOR_SESSION } from "./coordinator";
 import type { Agent } from "./agents";
 import type { RepoEntry } from "./registry";
+
+// Several describes below spawn a real `bun run src/index.ts` subprocess per
+// assertion, and some spawn two. Each spawn has to transpile the whole
+// index.ts import graph first, which is far more load-sensitive than an
+// in-process unit test — a single spawn was measured at 156s during a
+// pathologically loaded run. bun's 5s default leaves no headroom for that.
+// Raising the bound only changes how long a genuinely stuck spawn takes to
+// fail; it weakens no assertion, and passing tests are unaffected.
+setDefaultTimeout(60_000);
 
 // ─── collectAgents ───────────────────────────────────────────────────────────
 

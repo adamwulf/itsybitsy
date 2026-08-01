@@ -1,5 +1,12 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, setDefaultTimeout } from "bun:test";
 import { hasHelpFlag, printCommandHelp } from "./index";
+
+// The tests at the bottom of this file spawn a real `bun` subprocess, which
+// has to transpile the whole index.ts import graph first. That is far more
+// load-sensitive than an in-process unit test, and bun's 5s default leaves
+// little headroom on a busy machine. Raising the bound only changes how long
+// a genuinely stuck spawn takes to fail; it weakens no assertion.
+setDefaultTimeout(60_000);
 
 describe("hasHelpFlag", () => {
   test("detects --help anywhere after the command", () => {

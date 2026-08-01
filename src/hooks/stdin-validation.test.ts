@@ -3,10 +3,19 @@
  * Each hook should gracefully handle invalid JSON, non-object input,
  * and schema violations (wrong types for tool_name, tool_input).
  */
-import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, setDefaultTimeout } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
+
+// Every test here spawns a real `bun` subprocess, which has to transpile the
+// whole index.ts import graph before it does anything. That is far more
+// load-sensitive than an in-process unit test: normally a few hundred ms, but
+// measured at 156s for a single spawn during a pathologically loaded run,
+// which blew bun's 5s default and failed a test that was otherwise correct.
+// Raising the bound only changes how long a genuinely stuck spawn takes to
+// fail; it weakens no assertion, and passing tests are unaffected.
+setDefaultTimeout(60_000);
 
 const INDEX_PATH = join(import.meta.dir, "..", "index.ts");
 

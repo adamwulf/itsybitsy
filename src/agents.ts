@@ -631,6 +631,51 @@ async function claimStaleLifecycleLock(
 }
 
 /**
+ * Best-effort sweep of staging files abandoned by a process that died between
+ * writing one and linking it into place. Both publishers remove their staging
+ * file in a `finally`, so this only ever finds crash debris — but nothing else
+ * collects it, and it accumulates beside the agent directories forever.
+ *
+ * Scoped to one lock path rather than one generation: staging names carry the
+ * writer's pid, not the generation token (they are written BEFORE a generation
+ * is settled). Removal requires the writer to be affirmatively gone AND the
+ * file to be older than the stale threshold — in the normal path a staging
+ * file exists for microseconds, so neither a live contender's file nor a
+ * freshly abandoned one is ever touched.
+ *
+ * Never throws and never gates anything: a failed sweep must not block or
+ * authorize a reclaim.
+ */
+async function sweepAbandonedLifecycleStaging(lockPath: string): Promise<void> {
+  const dir = dirname(lockPath);
+  const base = basename(lockPath);
+  const prefixes = [`${base}.staging.`, `${base}.reclaim.staging.`];
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return;
+  }
+  const now = Date.now();
+  for (const entry of entries) {
+    const prefix = prefixes.find((p) => entry.startsWith(p));
+    if (!prefix) continue;
+    const writerPid = Number(entry.slice(prefix.length).split(".")[0]);
+    if (!Number.isFinite(writerPid) || writerPid <= 0 || isPidAliveCtx.fn(writerPid)) {
+      continue;
+    }
+    const path = join(dir, entry);
+    try {
+      const info = await stat(path);
+      if (now - info.mtimeMs <= LIFECYCLE_LOCK_STALE_MS) continue;
+      await unlink(path);
+    } catch {
+      /* already gone, or swept by someone else — nothing to do */
+    }
+  }
+}
+
+/**
  * Drop reclaim claims for a generation, newest slot first. Safe once the steal
  * has resolved: a reclaimed generation can never return to the lock path
  * (tokens are unique), so any contender that later wins a freed slot aborts at
@@ -761,6 +806,10 @@ async function reclaimStaleLifecycleLock(lockPath: string): Promise<boolean> {
   if (slot === null) return false;
 
   try {
+    // Opportunistic, under the claim so it runs at most once per generation.
+    // Purely janitorial — it can neither block nor authorize what follows.
+    await sweepAbandonedLifecycleStaging(lockPath);
+
     // Re-read under the claim. If the generation we validated is already gone,
     // an earlier reclaimer finished the job and a NEW owner may hold the lock —
     // touching it here is exactly the double-steal the claim exists to stop.
@@ -925,7 +974,20 @@ export async function updateAgentTransient(
   fn: (cur: TransientState) => TransientState,
 ): Promise<void> {
   const lock = await acquireAgentLifecycleLock(agentDir);
-  if (!lock) return;
+  if (!lock) {
+    // Dropping this write is not free: clearAgentOperation routes through
+    // here, so a lock timeout leaves a stale operation marker behind and the
+    // agent renders merging/restarting for up to OP_STUCK_TIMEOUT_MS. Silently
+    // is the worst way to do that — leave a trace. Rate-limited because the
+    // watchdog retries every 5s, and a flood would rotate away the very
+    // history this line exists to provide.
+    logRateLimitedLifecycleLine(
+      `transient-drop\0${agentDir}`,
+      `[lifecycle] transient write dropped agent=${basename(agentDir)} ` +
+      `reason=lifecycle lock unavailable`
+    );
+    return;
+  }
   try {
     await updateAgentTransientUnlocked(agentDir, fn);
   } finally {
@@ -2659,29 +2721,29 @@ export async function terminateProcess(
 }
 
 /**
- * Identity-skip diagnostics repeat for as long as the condition holds, and
- * reapOrphanedClaude runs on every watcher pass for every already-stopped
- * agent (2s pollStates plus the 10s refresh) — only the kill-session is
- * memoized. Rate-limit identical lines on the same interval the tmux
- * observation log uses, for the same reason: watch.log is 1 MB active across
- * 3 files, so one repeating line rotates away the lifecycle history needed for
- * diagnosis in minutes.
+ * Lifecycle diagnostics repeat for as long as their condition holds, and the
+ * paths that emit them run on every watcher pass for every agent (2s
+ * pollStates plus the 10s refresh) — only the kill-session is memoized.
+ * Rate-limit identical lines on the same interval the tmux observation log
+ * uses, for the same reason: watch.log is 1 MB active across 3 files, so one
+ * repeating line rotates away the lifecycle history needed for diagnosis in
+ * minutes.
  */
-export const ORPHAN_IDENTITY_LOG_INTERVAL_MS = 60_000;
-const orphanIdentityLogEpochMs = new Map<string, number>();
+export const LIFECYCLE_LOG_INTERVAL_MS = 60_000;
+const lifecycleLogEpochMs = new Map<string, number>();
 
-/** Reset the orphan-kill identity log suppression. Exported for tests. */
-export function resetOrphanIdentityLogState(): void {
-  orphanIdentityLogEpochMs.clear();
+/** Reset lifecycle log suppression. Exported for tests. */
+export function resetLifecycleLogState(): void {
+  lifecycleLogEpochMs.clear();
 }
 
-function logOrphanIdentitySkip(key: string, line: string): void {
+function logRateLimitedLifecycleLine(key: string, line: string): void {
   const now = Date.now();
-  const last = orphanIdentityLogEpochMs.get(key) ?? 0;
-  if (now - last < ORPHAN_IDENTITY_LOG_INTERVAL_MS) return;
-  orphanIdentityLogEpochMs.delete(key);
-  orphanIdentityLogEpochMs.set(key, now);
-  trimOldestMapEntries(orphanIdentityLogEpochMs);
+  const last = lifecycleLogEpochMs.get(key) ?? 0;
+  if (now - last < LIFECYCLE_LOG_INTERVAL_MS) return;
+  lifecycleLogEpochMs.delete(key);
+  lifecycleLogEpochMs.set(key, now);
+  trimOldestMapEntries(lifecycleLogEpochMs);
   logToWatchLog(line);
 }
 
@@ -2819,8 +2881,8 @@ async function reapOrphanedClaude(
       const detail = hasEpoch
         ? "pid alive but process start unavailable or changed"
         : "pid alive but no recorded pid epoch";
-      logOrphanIdentitySkip(
-        `${agent.id}\0${kind}\0${pid}\0${detail}`,
+      logRateLimitedLifecycleLine(
+        `orphan-kill\0${agent.id}\0${kind}\0${pid}\0${detail}`,
         `[orphan-kill] signal skipped kind=${kind} pid=${pid} agent=${repoTag}${agent.id} ` +
         `tmux=${tmuxLabel} state=${resolvedState} reason=${detail}`
       );

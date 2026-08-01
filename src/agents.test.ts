@@ -36,7 +36,7 @@ import {
   resetListTmuxSessionsCache,
   resetReapedTmuxSessions,
   resetTmuxObservationState,
-  resetOrphanIdentityLogState,
+  resetLifecycleLogState,
   TMUX_MISSING_CONFIRMATION_MIN_INTERVAL_MS,
   readAgentTransient,
   writeAgentTransient,
@@ -102,7 +102,7 @@ afterEach(() => {
   acquireAgentLifecycleLockCtx.reset();
   nowMsCtx.reset();
   resetTmuxObservationState();
-  resetOrphanIdentityLogState();
+  resetLifecycleLogState();
 });
 
 /** Narrow a FlatEntry to kind==="agent" or fail */
@@ -4671,6 +4671,39 @@ describe("acquireAgentLifecycleLock — stale-lock reclamation", () => {
     await lock!.release();
   });
 
+  test("the reclaim path collects staging files abandoned by a dead writer", async () => {
+    // Both publishers remove their staging file in a `finally`, so these only
+    // ever appear when the process died mid-call — and nothing else collects
+    // them. Removal requires a dead writer AND an aged file, so a live
+    // contender's in-flight staging file is never touched.
+    const aged = new Date(Date.now() - 10 * 60_000);
+    const abandoned = [
+      `${lockPath}.staging.${DEAD_OWNER_PID}.aaaa`,
+      `${lockPath}.reclaim.staging.${DEAD_OWNER_PID}.bbbb`,
+    ];
+    for (const path of abandoned) {
+      await Bun.write(path, "{}");
+      await utimes(path, aged, aged);
+    }
+    // Must survive: a live writer's file, and a dead writer's FRESH file.
+    const livePath = `${lockPath}.reclaim.staging.${process.pid}.cccc`;
+    const freshPath = `${lockPath}.reclaim.staging.${DEAD_OWNER_PID}.dddd`;
+    await Bun.write(livePath, "{}");
+    await utimes(livePath, aged, aged);
+    await Bun.write(freshPath, "{}");
+
+    await seedStaleLock("stale-with-debris");
+    const lock = await acquireAgentLifecycleLock(agentDir, 2_000);
+    expect(lock).not.toBeNull();
+    await lock!.release();
+
+    for (const path of abandoned) {
+      expect(await Bun.file(path).exists()).toBe(false);
+    }
+    expect(await Bun.file(livePath).exists()).toBe(true);
+    expect(await Bun.file(freshPath).exists()).toBe(true);
+  });
+
   test("concurrent contenders racing one stale lock never overlap", async () => {
     // Every contender starts each round already past the stale check, which is
     // exactly the interleaving that let two of them reclaim the same lock: the
@@ -4751,6 +4784,44 @@ describe("updateAgentTransient / setAgentOperation / clearAgentOperation", () =>
       operation: null,
     });
   });
+
+  test("a transient write dropped for want of the lock leaves a trace", async () => {
+    // Silently dropping is not free: clearAgentOperation routes through
+    // updateAgentTransient, so a lock timeout leaves a stale operation marker
+    // and the agent renders merging/restarting for up to OP_STUCK_TIMEOUT_MS
+    // with nothing in the audit trail to explain it.
+    const logDir = await mkdtemp(join(tmpdir(), "transient-drop-log-"));
+    const logPath = join(logDir, "watch.log");
+    const { setWatchLogPath, resetWatchLogPath } = await import("./watch-log");
+    setWatchLogPath(logPath);
+    // A live owner holding the lock: never reclaimable, so acquisition times out.
+    await Bun.write(
+      `${tempDir}.lifecycle.lock`,
+      JSON.stringify({ pid: process.pid, created_at_ms: Date.now(), token: "held" })
+    );
+    try {
+      await updateAgentTransient(tempDir, (cur) => ({ ...cur, watchdog_pid: 5 }));
+      expect(await readAgentTransient(tempDir)).toBeNull();
+
+      const { readFile } = await import("fs/promises");
+      const log = await readFile(logPath, "utf8");
+      expect(log).toContain("[lifecycle] transient write dropped");
+      expect(log).toContain("reason=lifecycle lock unavailable");
+
+      // Rate-limited: the watchdog retries every 5s, and a flood would rotate
+      // away the history this line exists to provide.
+      await updateAgentTransient(tempDir, (cur) => ({ ...cur, watchdog_pid: 6 }));
+      const after = await readFile(logPath, "utf8");
+      expect(
+        after.split("\n").filter((l) => l.includes("transient write dropped"))
+      ).toHaveLength(1);
+    } finally {
+      resetWatchLogPath();
+      resetLifecycleLogState();
+      await rm(`${tempDir}.lifecycle.lock`, { force: true });
+      await rm(logDir, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   test("updateAgentTransient is ENOENT-safe (missing dir does not throw)", async () => {
     const missing = join(tempDir, "does", "not", "exist");

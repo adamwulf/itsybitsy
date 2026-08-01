@@ -1204,6 +1204,22 @@ describe("addPermissionToSettings", () => {
   });
 });
 
+/**
+ * Wait for `handleAddPermission` to actually open its dialog.
+ *
+ * The dialog opens in a `.then` off `effectiveSpawnCapability`, which awaits
+ * `loadAgentType` — real disk I/O — whenever the target agent has an
+ * `agentType` and no explicit `canSpawnChildren` boolean. That takes more
+ * than the single macrotask a bare `nextTick()` yields, so under full-suite
+ * load the dialog is not there yet. Poll for the dialog itself rather than
+ * assuming a fixed number of ticks.
+ */
+async function waitForDialog(dialogs: NonNullable<DialogState>[]): Promise<void> {
+  for (let i = 0; i < 100 && dialogs.length === 0; i++) {
+    await new Promise<void>((r) => setTimeout(r, 0));
+  }
+}
+
 describe("handleAddPermission", () => {
   test("does nothing when no agent selected and no repo header", () => {
     const { ctx, dialogs, notices } = makeMockCtx({ agent: null });
@@ -1265,7 +1281,9 @@ describe("handleAddPermission", () => {
     const { ctx, dialogs } = makeMockCtx({ repoHeader: "my-repo" });
     ctx.rightPane.repoCoordinatorAgent = coordAgent;
     handleAddPermission(ctx);
-    await nextTick();
+    // agentType "coordinator" with no canSpawnChildren → the dialog waits on
+    // a disk-backed loadAgentType, so poll instead of yielding a single tick.
+    await waitForDialog(dialogs);
     expect(dialogs).toHaveLength(1);
     const d = assertDialog(dialogs[0]!, "add-permission");
     expect(d.prompt).toContain("coord-1");
@@ -1342,14 +1360,22 @@ describe("handleAddPermission — onToggleSpawn", () => {
     const agent = makeAgent({ id, repoPath: sendRepoDir, meta: original as any });
     const { ctx, dialogs, notices } = makeMockCtx({ agent });
     handleAddPermission(ctx);
-    await nextTick();
+    await waitForDialog(dialogs);
     const d = assertDialog(dialogs[0]!, "add-permission");
     expect(d.canSpawnChildren).toBe(false); // worker → cannot spawn
     d.onToggleSpawn();
 
-    // Poll until the write lands (meta read + write + outbox write are async).
+    // Poll until BOTH sides land. onToggleSpawn awaits the atomic disk write
+    // and only assigns the in-memory field on the next line, so polling the
+    // disk alone can exit while execution is still suspended in that await —
+    // the in-memory assertion below would then read undefined. Wait on the
+    // full condition this test actually asserts.
     let meta: Record<string, unknown> = {};
-    for (let i = 0; i < 50 && meta.canSpawnChildren !== true; i++) {
+    for (
+      let i = 0;
+      i < 100 && !(meta.canSpawnChildren === true && agent.meta.canSpawnChildren === true);
+      i++
+    ) {
       await nextTick();
       meta = await readMeta(sendRepoDir, id);
     }
@@ -1376,13 +1402,22 @@ describe("handleAddPermission — onToggleSpawn", () => {
     const agent = makeAgent({ id, repoPath: sendRepoDir, meta: original as any });
     const { ctx, dialogs } = makeMockCtx({ agent });
     handleAddPermission(ctx);
-    await nextTick();
+    await waitForDialog(dialogs);
     const d = assertDialog(dialogs[0]!, "add-permission");
     expect(d.canSpawnChildren).toBe(true); // manager → can spawn
     d.onToggleSpawn();
 
-    let meta: Record<string, unknown> = { canSpawnChildren: true };
-    for (let i = 0; i < 50 && meta.canSpawnChildren !== false; i++) {
+    // Same both-sides wait as the toggle-ON case. The target value here is
+    // `false`, so the loop must test for it explicitly rather than for
+    // "not true" — both fields start out absent (undefined), and a
+    // not-true condition would treat that as already-settled and exit
+    // immediately on iteration 0.
+    let meta: Record<string, unknown> = {};
+    for (
+      let i = 0;
+      i < 100 && !(meta.canSpawnChildren === false && agent.meta.canSpawnChildren === false);
+      i++
+    ) {
       await nextTick();
       meta = await readMeta(sendRepoDir, id);
     }

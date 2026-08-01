@@ -3404,6 +3404,76 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     expect(log).not.toContain("[orphan-kill]");
   });
 
+  test("a live-but-unreadable session logs one diagnostic per interval", async () => {
+    // The session is listed live on every poll while capture keeps failing
+    // identically. Re-arming the husk memo on that liveness must not also reset
+    // the capture diagnostic's rate limit, or every poll re-logs and rotates
+    // away the lifecycle history TMUX_OBSERVATION_LOG_INTERVAL_MS protects.
+    isPidAliveCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-unreadable"]));
+    captureTmuxOutputResultCtx.set(async () => ({
+      status: "error",
+      error: "capture-pane: no current client",
+      exitCode: 1,
+    }));
+
+    const a = makeAgent({
+      id: "agent-unreadable",
+      meta: {
+        state: "running",
+        tmux_session: "ib-unreadable",
+        claude_pid: "70544",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a], { reap: true });
+    await detectAgentStates([a], { reap: true });
+    await detectAgentStates([a], { reap: true });
+
+    expect(a.state).toBe("running");
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    const diagnostics = log
+      .split("\n")
+      .filter((line) => line.includes("[tmux-observation]") && line.includes("operation=capture-pane"));
+    expect(diagnostics).toHaveLength(1);
+  });
+
+  test("a recovered capture re-arms the diagnostic for the next failure", async () => {
+    isPidAliveCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-recovering"]));
+    let captureFails = true;
+    captureTmuxOutputResultCtx.set(async () =>
+      captureFails
+        ? { status: "error", error: "capture-pane: no current client", exitCode: 1 }
+        : { status: "ok", output: "ordinary output\n" }
+    );
+
+    const a = makeAgent({
+      id: "agent-recovering",
+      meta: {
+        state: "running",
+        tmux_session: "ib-recovering",
+        claude_pid: "70544",
+        created_epoch: Math.floor(Date.now() / 1000) - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a], { reap: true });
+    captureFails = false;
+    await detectAgentStates([a], { reap: true });
+    captureFails = true;
+    await detectAgentStates([a], { reap: true });
+
+    const { readFile } = await import("fs/promises");
+    const log = await readFile(logPath, "utf8");
+    const diagnostics = log
+      .split("\n")
+      .filter((line) => line.includes("[tmux-observation]") && line.includes("operation=capture-pane"));
+    expect(diagnostics).toHaveLength(2);
+  });
+
   test("unknown exact-session probe preserves state and never reaps", async () => {
     isPidAliveCtx.set(() => true);
     liveTmuxSessionsCtx.set(async () => new Set());

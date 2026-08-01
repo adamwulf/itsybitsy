@@ -1868,6 +1868,33 @@ const tmuxMissingObservations = new Map<
 export const TMUX_OBSERVATION_LOG_INTERVAL_MS = 60_000;
 const tmuxObservationLogEpochMs = new Map<string, number>();
 
+/** tmux operations whose diagnostics are re-armed by observing the SESSION
+ *  alive again — the probe that produced them succeeds once the session is
+ *  visible. */
+const SESSION_LIVENESS_OBSERVATION_OPERATIONS: ReadonlySet<string> = new Set(["has-session"]);
+
+/** tmux operations whose diagnostics are re-armed only by a SUCCESSFUL read of
+ *  the pane. A session can be listed live while capture/list-panes keep
+ *  failing, and re-arming those on liveness alone re-logs every poll. */
+const PANE_READ_OBSERVATION_OPERATIONS: ReadonlySet<string> = new Set([
+  "capture-pane",
+  "list-panes",
+]);
+
+/** Drop the log-suppression epochs for one session, limited to the operations
+ *  the observed recovery actually covers. Key layout must match the key built
+ *  in logTmuxObservation: `<session>\0<status>\0<operation>\0<detail>`. */
+function clearTmuxObservationLogs(
+  tmuxSession: string,
+  operations: ReadonlySet<string>
+): void {
+  for (const key of tmuxObservationLogEpochMs.keys()) {
+    const parts = key.split("\0");
+    if (parts[0] !== tmuxSession) continue;
+    if (operations.has(parts[2] ?? "")) tmuxObservationLogEpochMs.delete(key);
+  }
+}
+
 function trimOldestMapEntries<K, V>(map: Map<K, V>): void {
   while (map.size > TMUX_OBSERVATION_STATE_MAX_ENTRIES) {
     const oldest = map.keys().next();
@@ -1882,15 +1909,25 @@ function trimOldestMapEntries<K, V>(map: Map<K, V>): void {
  * fast-path and successful live tmux capture). MUST NOT be called from the
  * stopped/dead-pane paths — clearing there would re-arm a kill against a husk
  * that is still dead, re-killing it every tick (the exact churn the memo
- * prevents). See reapedTmuxSessions for the invariant. */
+ * prevents). See reapedTmuxSessions for the invariant.
+ *
+ * Session liveness re-arms only the session-liveness diagnostics. A session
+ * that is listed live but whose pane cannot be read is observed live on EVERY
+ * poll, so re-arming the capture/pane diagnostics here would defeat
+ * TMUX_OBSERVATION_LOG_INTERVAL_MS and re-log the identical failure every tick.
+ * Those are re-armed by clearReadTmuxObservation on a successful pane read. */
 function clearReapedTmuxSession(tmuxSession: string): void {
   if (!tmuxSession) return;
   reapedTmuxSessions.delete(tmuxSession);
   clearTmuxMissingObservation(tmuxSession);
-  const prefix = `${tmuxSession}\0`;
-  for (const key of tmuxObservationLogEpochMs.keys()) {
-    if (key.startsWith(prefix)) tmuxObservationLogEpochMs.delete(key);
-  }
+  clearTmuxObservationLogs(tmuxSession, SESSION_LIVENESS_OBSERVATION_OPERATIONS);
+}
+
+/** Re-arm the capture/pane diagnostics after the pane was actually read. A
+ *  later failure is then a new episode and logs independently. */
+function clearReadTmuxObservation(tmuxSession: string): void {
+  if (!tmuxSession) return;
+  clearTmuxObservationLogs(tmuxSession, PANE_READ_OBSERVATION_OPERATIONS);
 }
 
 /** Reset the reaped-tmux-session memo. Exported for tests. */
@@ -2901,8 +2938,10 @@ export async function detectAgentStates(
 
       // The pane is live (capture succeeded, not a dead pane). Re-arm husk
       // teardown so a future stop after a resume re-kills the session. See
-      // reapedTmuxSessions.
+      // reapedTmuxSessions. The pane was actually READ here, so this is also
+      // the recovery point that re-arms the capture/pane diagnostics.
       clearReapedTmuxSession(tmuxSession);
+      clearReadTmuxObservation(tmuxSession);
 
       // Step 3: tmux exists — check transient overrides
       if (isCompacting(output)) {

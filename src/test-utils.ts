@@ -85,3 +85,53 @@ export function mockFetch(data: unknown, ok = true, status = 200): FetchLike {
     json: async () => data,
   })) as unknown as FetchLike;
 }
+
+/**
+ * Poll `condition` until it returns true, then resolve. Throws if it never
+ * becomes true within `timeoutMs`.
+ *
+ * Use this instead of a fixed `Bun.sleep(n)` whenever a test needs to observe
+ * the result of fire-and-forget async work (a debounced write, a detached
+ * promise, a spawned subprocess). A fixed sleep encodes a guess about how long
+ * that work takes on an idle machine; when the machine is busy the work takes
+ * longer, the sleep expires early, and the test fails for reasons that have
+ * nothing to do with the behaviour under test.
+ *
+ * Waiting on the real condition is both more robust AND faster: it returns as
+ * soon as the condition holds rather than always burning the full sleep. The
+ * timeout only bounds the failure case, so it can be generous without slowing
+ * down the passing path.
+ */
+export async function waitFor(
+  condition: () => boolean | Promise<boolean>,
+  { timeoutMs = 5000, intervalMs = 5, message = "condition" }: { timeoutMs?: number; intervalMs?: number; message?: string } = {},
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await condition()) return;
+    if (Date.now() >= deadline) {
+      throw new Error(`waitFor timed out after ${timeoutMs}ms waiting for: ${message}`);
+    }
+    await Bun.sleep(intervalMs);
+  }
+}
+
+/**
+ * Poll `produce` until it returns a non-null/non-undefined value, then return
+ * it. Throws on timeout. The value-returning companion to {@link waitFor} —
+ * for "wait until this file parses / this record appears" style waits.
+ */
+export async function waitForValue<T>(
+  produce: () => T | null | undefined | Promise<T | null | undefined>,
+  { timeoutMs = 5000, intervalMs = 5, message = "value" }: { timeoutMs?: number; intervalMs?: number; message?: string } = {},
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await produce();
+    if (value !== null && value !== undefined) return value;
+    if (Date.now() >= deadline) {
+      throw new Error(`waitForValue timed out after ${timeoutMs}ms waiting for: ${message}`);
+    }
+    await Bun.sleep(intervalMs);
+  }
+}

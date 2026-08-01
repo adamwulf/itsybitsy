@@ -1,7 +1,9 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm } from "fs/promises";
+import { existsSync } from "fs";
 import { tmpdir, homedir } from "os";
+import { waitForValue } from "../test-utils";
 import {
   loadLayout, saveLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave,
   setLayoutPath, resetLayoutPath, getLayoutPath,
@@ -101,12 +103,16 @@ describe("layout persistence", () => {
     const path = join(tmpDir, "layout.json");
     setLayoutPath(path);
     saveLayoutDebounced(sampleLayout);
-    // Not written yet
-    const file = Bun.file(path);
-    expect(await file.exists()).toBe(false);
-    // Wait for debounce
-    await new Promise((r) => setTimeout(r, 600));
-    const loaded = await loadLayout();
+    // Not written yet. Checked SYNCHRONOUSLY: a debounce timer can only fire
+    // once control returns to the event loop, so a synchronous check proves
+    // "no write was scheduled inline" without racing the 500ms timer. The old
+    // `await file.exists()` yielded first, so on a loaded machine the timer
+    // could fire during that yield and the file could legitimately exist.
+    expect(existsSync(path)).toBe(false);
+    // Wait for the debounce timer AND the write it kicks off. The timer
+    // callback calls saveLayout() without awaiting it, so "500ms have passed"
+    // does not imply "the bytes are on disk" — wait for the real condition.
+    const loaded = await waitForValue(() => loadLayout(), { message: "debounced layout write" });
     expect(loaded).toEqual(sampleLayout);
   });
 
@@ -116,8 +122,7 @@ describe("layout persistence", () => {
     saveLayoutDebounced({ ...sampleLayout, sidebarWidth: 50 });
     saveLayoutDebounced({ ...sampleLayout, sidebarWidth: 55 });
     saveLayoutDebounced({ ...sampleLayout, sidebarWidth: 60 });
-    await new Promise((r) => setTimeout(r, 600));
-    const loaded = await loadLayout();
+    const loaded = await waitForValue(() => loadLayout(), { message: "coalesced layout write" });
     expect(loaded!.sidebarWidth).toBe(60);
   });
 
@@ -126,6 +131,9 @@ describe("layout persistence", () => {
     setLayoutPath(path);
     saveLayoutDebounced(sampleLayout);
     cancelPendingSave();
+    // Negative assertion — a fixed wait is correct here (there is no condition
+    // to wait for, only the absence of one). Waiting longer than the 500ms
+    // debounce can only make this stricter, so load cannot break it.
     await new Promise((r) => setTimeout(r, 600));
     expect(await Bun.file(path).exists()).toBe(false);
   });

@@ -100,11 +100,13 @@ export function mockFetch(data: unknown, ok = true, status = 200): FetchLike {
  * Waiting on the real condition is both more robust AND faster: it returns as
  * soon as the condition holds rather than always burning the full sleep. The
  * timeout only bounds the failure case, so it can be generous without slowing
- * down the passing path.
+ * down the passing path — but it sits just under bun's 5s default per-test
+ * timeout so that a stuck wait reports *what* it was waiting for rather than
+ * losing the race to a generic "test timed out".
  */
 export async function waitFor(
   condition: () => boolean | Promise<boolean>,
-  { timeoutMs = 5000, intervalMs = 5, message = "condition" }: { timeoutMs?: number; intervalMs?: number; message?: string } = {},
+  { timeoutMs = 4000, intervalMs = 5, message = "condition" }: { timeoutMs?: number; intervalMs?: number; message?: string } = {},
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -123,7 +125,7 @@ export async function waitFor(
  */
 export async function waitForValue<T>(
   produce: () => T | null | undefined | Promise<T | null | undefined>,
-  { timeoutMs = 5000, intervalMs = 5, message = "value" }: { timeoutMs?: number; intervalMs?: number; message?: string } = {},
+  { timeoutMs = 4000, intervalMs = 5, message = "value" }: { timeoutMs?: number; intervalMs?: number; message?: string } = {},
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {

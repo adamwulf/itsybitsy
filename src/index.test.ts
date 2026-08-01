@@ -1516,6 +1516,28 @@ describe("Telegram admin subcommands", () => {
     return { stdout, stderr, exitCode };
   }
 
+  /**
+   * Run the CLI as a SETUP step and require it to have succeeded.
+   *
+   * A setup command whose result is discarded turns any failure of that
+   * command into a confusing assertion failure on the *next* command — e.g. a
+   * `tgallow` that never seeded the allowlist shows up as `tgdeny` reporting
+   * "not present: 12345" instead of "removed: 12345", pointing the reader at
+   * the wrong command entirely. Checking the setup here attributes the failure
+   * to the step that actually broke, and includes the subprocess's own
+   * stdout/stderr so the reason is visible rather than swallowed.
+   */
+  async function runCliSetup(cliArgs: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const r = await runCli(cliArgs);
+    if (r.exitCode !== 0) {
+      throw new Error(
+        `setup command \`ib ${cliArgs.join(" ")}\` failed: exit=${r.exitCode}\n` +
+        `stdout: ${JSON.stringify(r.stdout)}\nstderr: ${JSON.stringify(r.stderr)}`,
+      );
+    }
+    return r;
+  }
+
   beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), "ib-tg-test-"));
   });
@@ -1547,7 +1569,8 @@ describe("Telegram admin subcommands", () => {
   });
 
   test("tgdeny removes and is idempotent", async () => {
-    await runCli(["tgallow", "12345"]);
+    const setup = await runCliSetup(["tgallow", "12345"]);
+    expect(setup.stdout).toContain("added: 12345");
     const r1 = await runCli(["tgdeny", "12345"]);
     expect(r1.exitCode).toBe(0);
     expect(r1.stdout).toContain("removed: 12345");

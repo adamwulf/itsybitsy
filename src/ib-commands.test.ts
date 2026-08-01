@@ -23,7 +23,7 @@ import {
 } from "./agents";
 import { matchAgentById } from "./index";
 import { saveRegistry } from "./registry";
-import { makeAgent as _makeAgent, makeSpawnResult } from "./test-utils";
+import { makeAgent as _makeAgent, makeSpawnResult, waitFor } from "./test-utils";
 import {
   retireAgent,
   rehireAgent,
@@ -5737,10 +5737,16 @@ describe("newAgent (native)", () => {
     const result = await callNewAgent("implement feature X with tests", { name: "test-summary" });
     expect(result.ok).toBe(true);
 
-    // Wait for the background summary generation to complete
-    await Bun.sleep(50);
-
+    // Wait for the background summary generation to complete. The generator is
+    // fire-and-forget, so there is nothing to await — but a fixed sleep is a
+    // guess at how long a read-modify-write of meta.json takes, and on a busy
+    // machine 50ms is not enough. Wait for the summary to actually land.
     const metaPath = join(agentsDir, "test-summary", "meta.json");
+    await waitFor(
+      async () => (await Bun.file(metaPath).json()).summary !== undefined,
+      { message: "background summary generation" },
+    );
+
     const meta = await Bun.file(metaPath).json();
     expect(meta.summary).toBe("A short summary of the task");
   });
@@ -8904,8 +8910,22 @@ describe("telegramSend (native, file-drop client)", () => {
     // Don't write a result, so tgsend times out — but we can still inspect
     // the file it dropped.
     const promise = ibCmds.telegramSend("exact-payload");
-    // Wait briefly for the file to appear on disk.
-    await new Promise<void>((r) => setTimeout(r, 200));
+    // Wait for the file to appear on disk. telegramSend drops it (mkdir +
+    // write + rename) before entering its poll loop, so the condition is
+    // "the .txt exists" — not "200ms have passed", which is a guess that gets
+    // it wrong exactly when the machine is busy.
+    await waitFor(
+      async () => {
+        // telegramSend creates the outbox dir itself, so until it has run
+        // readdir throws ENOENT — that is "not yet", not a failure.
+        try {
+          return (await readdir(outboxDir)).some((e) => e.endsWith(".txt"));
+        } catch {
+          return false;
+        }
+      },
+      { message: "dropped .txt to appear in the outbox" },
+    );
     const entries = await readdir(outboxDir);
     const txtFiles = entries.filter((e) => e.endsWith(".txt"));
     expect(txtFiles.length).toBe(1);

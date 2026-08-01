@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 import { readAgentLog, readAgentLogWindow, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, AgentMeta, FlatEntry, PendingQuestion } from "../agents";
 import { stripAnsi } from "../parse-state";
-import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult } from "../test-utils";
+import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult, waitFor } from "../test-utils";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner } from "../ib-commands";
@@ -2358,8 +2358,11 @@ describe("DashboardComponent right pane and navigation features", () => {
     // diffAgent will fail (no worktree at /repos/test) but mode still switches
     dashboard.handleInput("d");
     expect(dashboard.currentMode).toBe("DIFF");
-    await Bun.sleep(50);
-    // The diff content should contain error text about no worktree
+    // Wait for the load to actually finish rather than guessing at 50ms. The
+    // load runs git in a subprocess, so its duration tracks how busy the
+    // machine is; a fixed sleep asserts diffLoading===false while the load is
+    // still in flight the moment the box is loaded enough.
+    await waitFor(() => dashboard.rightPane.diffLoading === false, { message: "diff load to settle" });
     expect(dashboard.rightPane.diffLoading).toBe(false);
   });
 

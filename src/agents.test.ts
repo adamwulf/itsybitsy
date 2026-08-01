@@ -5799,6 +5799,28 @@ describe("isPidAliveSinceCtx — recycled PID guard", () => {
     expect(startTimeCalls).toBe(1);
   });
 
+  // The rendering-side cache is deliberately long-lived (PROCESS_START_CACHE_TTL_MS)
+  // because each miss costs a posix_spawn of `ps` on the watch loop's hot path,
+  // twice per agent per pass. That is only sound because destructive signalling
+  // never reads it — _isPidIdentityCurrent drops the entry and re-probes.
+  // Without that bypass, a longer TTL WOULD weaken teardown safety.
+  test("destructive identity check ignores the rendering cache, however stale", () => {
+    isPidIdentityCurrentCtx.reset();
+    isPidAliveCtx.set(() => true);
+    processStartEpochSecondsCtx.set(() => pidWriteEpoch);
+    // Warm the rendering cache with a matching start.
+    expect(isPidAliveSinceCtx.fn(18825, pidWriteEpoch)).toBe(true);
+
+    // The PID is recycled: same number, a process that started much later.
+    processStartEpochSecondsCtx.set(
+      () => pidWriteEpoch + CLAUDE_PID_START_MARGIN_SECONDS + 1
+    );
+    // Rendering still trusts the cached value — that is the whole point of it.
+    expect(isPidAliveSinceCtx.fn(18825, pidWriteEpoch)).toBe(true);
+    // Signalling must not. It re-probes and sees the recycled generation.
+    expect(isPidIdentityCurrentCtx.fn(18825, pidWriteEpoch)).toBe(false);
+  });
+
   test("dead PID is not alive and does not query its start time", () => {
     let startTimeCalls = 0;
     isPidAliveCtx.set(() => false);

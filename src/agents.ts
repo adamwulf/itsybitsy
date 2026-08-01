@@ -2401,8 +2401,34 @@ export const isPidAliveCtx = new InjectionContext<(pid: number) => boolean>(_isP
  */
 export const CLAUDE_PID_START_MARGIN_SECONDS = 60;
 
-/** Process start timestamps are immutable; refresh briefly to detect PID reuse. */
-export const PROCESS_START_CACHE_TTL_MS = 5_000;
+/**
+ * Process start timestamps are immutable, so this cache never goes "wrong" —
+ * it expires only so a PID that was recycled is eventually noticed.
+ *
+ * Only the RENDERING path reads it. Destructive signalling (_isPidIdentityCurrent)
+ * deletes the entry and probes fresh immediately before SIGTERM, so no teardown
+ * decision is ever made from a cached value and this TTL cannot affect
+ * signalling safety at all.
+ *
+ * It is deliberately long. Each miss costs a posix_spawn of `ps` (~5ms
+ * blocking), and detectAgentStates checks TWO pids per agent per pass — the
+ * claude_pid gate and the transient fast-path's watchdog identity. At the old
+ * 5s the watch loop spent ~500 `ps` spawns/min on 20 agents; this repo has a
+ * documented history of watch-loop spawn pressure SIGHUPing live agents into
+ * `stopped`, so that is a real hazard, not a theoretical one. At 60s the same
+ * 20 agents cost ~40/min.
+ *
+ * What a longer TTL actually delays, in both directions, is bounded and
+ * non-destructive:
+ *  - claude_pid gate: a recycled PID renders the agent `running` instead of
+ *    `stopped` for up to one extra window. Teardown still cannot follow,
+ *    because it re-probes uncached.
+ *  - transient fast-path: a recycled watchdog PID lets a stale snapshot be
+ *    trusted — but that snapshot must ALSO be within TRANSIENT_FRESH_MS, so
+ *    the staleness a recycled PID can buy is capped by the freshness window
+ *    (15s) no matter how long this TTL is.
+ */
+export const PROCESS_START_CACHE_TTL_MS = 60_000;
 
 const processStartEpochSecondsCache = new Map<
   number,
@@ -3130,6 +3156,14 @@ export async function detectAgentStates(
       // TRANSIENT_FRESH_MS. isPidAliveSince is the rendering-side counterpart —
       // it preserves PID-only behavior for legacy transients that carry no
       // epoch, and fails open as alive when the start time can't be read.
+      //
+      // This is the SECOND process-start consumer on this path (the claude_pid
+      // gate above is the first), which is why PROCESS_START_CACHE_TTL_MS is
+      // long: a short TTL turns "two identity checks per agent per pass" into
+      // hundreds of `ps` spawns per minute on the loop whose whole purpose is
+      // to avoid a posix_spawn per agent per tick. Measured at 20 agents: 404
+      // spawns/min and ~100ms of blocking per 2s tick at a 5s TTL, versus 53
+      // spawns/min and ~5ms at 60s.
       if (
         transient &&
         transient.updated_at_ms > 0 &&

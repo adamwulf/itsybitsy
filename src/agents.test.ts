@@ -4805,9 +4805,14 @@ describe("acquireAgentLifecycleLock — stale-lock reclamation", () => {
 
     test("a claim written with no epoch still blocks every other reclaimer", async () => {
       await seedStaleLock("stale-claim-legacy");
+      // Aged past LIFECYCLE_LOCK_STALE_MS so the AGE gate is open and the
+      // liveness term is the only thing holding this claim. A fixture inside
+      // the age window passes no matter what liveness says, which is how the
+      // trap this test exists for — a strict verdict making every legacy
+      // no-epoch claim instantly steppable — went uncaught.
       await Bun.write(
         `${lockPath}.reclaim.stale-claim-legacy.0`,
-        JSON.stringify({ pid: RECYCLED_PID, created_at_ms: Date.now() - 60_000 })
+        JSON.stringify({ pid: RECYCLED_PID, created_at_ms: Date.now() - 10 * 60_000 })
       );
 
       expect(await acquireAgentLifecycleLock(agentDir, 0)).toBeNull();
@@ -4906,10 +4911,14 @@ describe("acquireAgentLifecycleLock — stale-lock reclamation", () => {
 
   test("a live reclaimer's claim blocks every other reclaimer", async () => {
     await seedStaleLock("stale-claimed");
-    // A reclaimer that is still running owns this generation's steal.
+    // A reclaimer that is still running owns this generation's steal. Aged past
+    // LIFECYCLE_LOCK_STALE_MS on purpose: liveness must block this claim on its
+    // own. A fresh fixture is blocked by the age gate whatever liveness says, so
+    // it cannot witness the liveness term at all — the fresh-claim case has its
+    // own test below.
     await Bun.write(
       `${lockPath}.reclaim.stale-claimed.0`,
-      JSON.stringify({ pid: process.pid, created_at_ms: Date.now() })
+      JSON.stringify({ pid: process.pid, created_at_ms: Date.now() - 10 * 60_000 })
     );
 
     expect(await acquireAgentLifecycleLock(agentDir, 0)).toBeNull();

@@ -1663,8 +1663,6 @@ describe("CLI entry points", () => {
           cwd: repoRoot,
           stdout: "pipe",
           stderr: "pipe",
-          // argv[2] would be the command if the guard leaked. "list-types"
-          // prints a distinctive table we can assert the absence of.
           env: { ...process.env, HOME: "/tmp/ib-test-nonexistent-home" },
         },
       );
@@ -1675,10 +1673,15 @@ describe("CLI entry points", () => {
       const exitCode = await proc.exited;
       expect(exitCode).toBe(0);
       expect(stdout).toContain("IMPORT_OK");
-      // No usage block (the default branch) and no agent-type table.
-      expect(stdout).not.toContain("SPAWNABLE");
-      expect(stdout).not.toContain("Usage: ib");
-      expect(stderr).not.toContain("Usage: ib");
+      // Assert against the banner printUsage() actually emits. Under `bun -e`
+      // argv[2] is undefined, so a leaked dispatch lands on main()'s DEFAULT
+      // branch — it does NOT print "Usage: ib" (that string only appears in
+      // per-command help) and it does NOT print the list-types table. Asserting
+      // absence of those made this test pass under the very regression it
+      // exists to catch; these two strings are what a leak really prints.
+      expect(stdout).not.toContain("Cross-repo agent dashboard");
+      expect(stdout).not.toContain("Registry:");
+      expect(stderr).not.toContain("Cross-repo agent dashboard");
     },
   );
 });

@@ -5743,7 +5743,18 @@ describe("newAgent (native)", () => {
     // machine 50ms is not enough. Wait for the summary to actually land.
     const metaPath = join(agentsDir, "test-summary", "meta.json");
     await waitFor(
-      async () => (await Bun.file(metaPath).json()).summary !== undefined,
+      async () => {
+        // The generator rewrites meta.json with a plain Bun.write (truncate then
+        // write, NOT tmp+rename), so a poll landing mid-write sees a truncated
+        // file and .json() throws. That is "not yet", not a failure — without
+        // the catch the parse error escapes the predicate and fails the test,
+        // which is the same class of flake this file is trying to remove.
+        try {
+          return (await Bun.file(metaPath).json()).summary !== undefined;
+        } catch {
+          return false;
+        }
+      },
       { message: "background summary generation" },
     );
 

@@ -696,5 +696,33 @@ describe("wordWrapLines performance", () => {
     // Doubling the input should roughly double the work. Linear ~2.0,
     // quadratic ~4.0 — fail in between.
     expect(full / half).toBeLessThan(3);
+
+    // The ratio is blind to constant factors: a wordWrapLines that got 10x
+    // slower while staying perfectly linear still measures ~2.0 and sails
+    // through the check above. bun's per-test timeout is NOT a usable backstop
+    // for that — this file sets no setDefaultTimeout, so the bound is 5s, and a
+    // 10x regression costs ~2.5s of CPU across the whole test. It would take
+    // roughly a 20x regression before anything failed.
+    //
+    // So keep an absolute bound too, sized from measurement rather than from
+    // the nominal cost — sizing against the quiet number is exactly why the old
+    // 80ms bound flaked. Measured `full` on this machine:
+    //
+    //   quiet                         33 - 35 ms
+    //   14 CPU burners                32 - 36 ms   (CPU time excludes
+    //                                               descheduling, so pure CPU
+    //                                               contention barely moves it)
+    //   pathological run, per 4449ed0 89 - 96 ms   (memory pressure — page
+    //                                               faults and cache thrashing
+    //                                               are real work charged to us)
+    //
+    // 300ms is ~8.5x the nominal cost and ~3.1x the worst figure ever observed,
+    // so it has far more headroom than the 80ms bound that flaked (2.3x over
+    // that same 96ms). It still catches the case the ratio cannot: a 10x linear
+    // regression costs ~350ms even on a quiet machine, and ~960ms on a busy one.
+    // Constant-factor regressions below ~8x remain uncaught by design — that
+    // band cannot be distinguished from machine variance by any wall-clock or
+    // CPU budget, which is what the ratio check above is for.
+    expect(full).toBeLessThan(300);
   });
 });

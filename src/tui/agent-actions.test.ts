@@ -57,6 +57,20 @@ import type { SpawnResult } from "../types";
 // wait below polls a real condition and reports what it was waiting for.
 setDefaultTimeout(60_000);
 
+/**
+ * Bound for every condition wait in this file.
+ *
+ * `waitFor`'s own 4s default is sized to sit just under bun's 5s per-test
+ * timeout, so that a stuck wait reports WHAT it was waiting for instead of
+ * losing the race to a generic "test timed out". That reasoning has to be
+ * rescaled here: with the per-test bound raised to 60s above, a 4s wait would
+ * be the thing that fires first, and the headroom that timeout was added for
+ * would never be used. This keeps the same relationship — comfortably under
+ * the test timeout, far above any realistic completion time. It costs nothing
+ * on the passing path, where a wait returns the moment its condition holds.
+ */
+const WAIT_MS = 50_000;
+
 /** Noop spawn runner that always succeeds */
 function noopSpawnRunner(): SpawnResult {
   return {
@@ -390,7 +404,7 @@ describe("handleSnapshot", () => {
           if (!u.startsWith("State: ") || !w.startsWith("State: ")) return null;
           return { unwrappedName, wrappedName };
         },
-        { message: `both snapshot bodies to be written under ${debugDir}` },
+        { message: `both snapshot bodies to be written under ${debugDir}`, timeoutMs: WAIT_MS },
       );
       expect(unwrappedName).toBeDefined();
       expect(wrappedName).toBeDefined();
@@ -1170,7 +1184,7 @@ describe("handleOpenDiffToolVsManager", () => {
           const lines = (await file.text()).split("\n").filter((l) => l.length > 0);
           return lines.length >= 2 ? lines : null;
         },
-        { message: `the diff tool to record its cwd + argv in ${argsFile}` },
+        { message: `the diff tool to record its cwd + argv in ${argsFile}`, timeoutMs: WAIT_MS },
       );
       const [launchCwd, ...args] = recorded;
       // Compare by suffix: macOS resolves the temp dir through /private, so the
@@ -1330,7 +1344,7 @@ async function waitForDialog(
   dialogs: NonNullable<DialogState>[],
   message = "a dialog to open",
 ): Promise<void> {
-  await waitFor(() => dialogs.length > 0, { message });
+  await waitFor(() => dialogs.length > 0, { message, timeoutMs: WAIT_MS });
 }
 
 describe("handleAddPermission", () => {
@@ -2525,7 +2539,7 @@ describe("handleFolderBrowser", () => {
     dialog.onSelect(repoPath);
     const added = await waitForValue(
       async () => (await loadRegistry()).repos.find((r) => r.path === repoPath),
-      { message: `the registry to contain the added repo ${repoPath}` },
+      { message: `the registry to contain the added repo ${repoPath}`, timeoutMs: WAIT_MS },
     );
     expect(added).toBeDefined();
     expect(added.name).toBe("rice-teaching");

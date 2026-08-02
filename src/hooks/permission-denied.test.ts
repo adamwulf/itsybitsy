@@ -1,7 +1,39 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
 import { mkdir, mkdtemp, rm, readFile } from "fs/promises";
+import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
+import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
+
+/**
+ * Per-process itsybitsy home for the whole file.
+ *
+ * The `@system` block below already redirects HOME for its own tests, and does
+ * it correctly — it captures the previous value inside `beforeEach`, at runtime,
+ * so it restores whatever was actually installed rather than a value frozen at
+ * module load. The first block has no such override, and `logAgent` there is one
+ * changed path away from resolving HOME. This makes the whole file independent of
+ * the developer's real `~/.itsybitsy` rather than just the half that remembered.
+ *
+ * Because the `@system` block captures at runtime, it now saves and restores
+ * THIS home, so isolation survives that block instead of being reverted by it.
+ */
+let testHome: string;
+let realHome: string | undefined;
+
+beforeAll(() => {
+  testHome = mkdtempSync(join(tmpdir(), "ib-permission-denied-home-"));
+  realHome = process.env.HOME;
+  process.env.HOME = testHome;
+  setCoordinatorHome(join(testHome, ".itsybitsy"));
+});
+
+afterAll(() => {
+  resetCoordinatorHome();
+  if (realHome === undefined) delete process.env.HOME;
+  else process.env.HOME = realHome;
+  rmSync(testHome, { recursive: true, force: true });
+});
 
 describe("hookPermissionDenied", () => {
   let tempDir: string;

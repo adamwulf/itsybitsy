@@ -1,5 +1,43 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { processTaskIntercept } from "./intercept-task";
+import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
+import { ensureAgentTypesDir } from "../agent-types";
+
+/**
+ * Per-process itsybitsy home for the whole file.
+ *
+ * Most tests here build their own temp worktree, but the agent-type lookup
+ * behind `processTaskIntercept` does not read that temp dir — `loadAgentType`
+ * resolves `$HOME/.itsybitsy/agent-types/<name>.md`, and `ensureAgentTypesDir`
+ * CREATES that tree when it is missing. Running this file against a fresh home
+ * writes `agent-types/{_all,_non_coordinator,coordinator,manager,system,worker}.md`
+ * plus `agents/agent-9c1b4a42` — i.e. unisolated, it was writing agent-type
+ * files and an agent directory into the developer's real `~/.itsybitsy`.
+ *
+ * Seeding the isolated home with `ensureAgentTypesDir()` keeps every assertion
+ * running against the embedded stock types instead of whatever this machine's
+ * `~/.itsybitsy/agent-types/` happens to contain.
+ */
+let testHome: string;
+let realHome: string | undefined;
+
+beforeAll(async () => {
+  testHome = mkdtempSync(join(tmpdir(), "ib-intercept-task-home-"));
+  realHome = process.env.HOME;
+  process.env.HOME = testHome;
+  setCoordinatorHome(join(testHome, ".itsybitsy"));
+  await ensureAgentTypesDir();
+});
+
+afterAll(() => {
+  resetCoordinatorHome();
+  if (realHome === undefined) delete process.env.HOME;
+  else process.env.HOME = realHome;
+  rmSync(testHome, { recursive: true, force: true });
+});
 
 describe("intercept-task", () => {
   test("skip non-Task/Agent tool", async () => {

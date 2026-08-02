@@ -1,11 +1,11 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { readAgentLog, readAgentLogWindow, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, AgentMeta, FlatEntry, PendingQuestion } from "../agents";
 import { stripAnsi } from "../parse-state";
-import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult } from "../test-utils";
+import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult, waitFor } from "../test-utils";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner } from "../ib-commands";
@@ -23,9 +23,46 @@ import { setLayoutPath, loadLayout, flushPendingSave, cancelPendingSave } from "
 // schedule debounced layout saves. Route them to a temp file so a test run can
 // never clobber the user's real ~/.itsybitsy/layout.json. This backstops the
 // NODE_ENV=test default in layout.ts in case NODE_ENV is overridden.
+//
+// Deliberately never reset: layoutPath is module state in ./layout, and every
+// value it can hold from here is a tmpdir() path, so leaving the override in
+// place for the rest of the run is strictly safer than restoring the default.
+// bun runs test files sequentially in one process, so no concurrently-running
+// file can flip it back mid-file either. See also the cancelPendingSave() in
+// the file-scope afterEach below, which stops a debounced write from outliving
+// the test that scheduled it.
 setLayoutPath(join(tmpdir(), `itsybitsy-layout-dashboard-test-${process.pid}.json`));
 
-/** Helper: create a mock send spawn runner that records calls as {args, cwd}-style entries */
+// FAILURE BOUND, not a wait: this caps how long a *stuck* test takes to report,
+// and no test waits on it — every wait below polls a real condition and returns
+// the moment it holds. bun's 5s default was too tight even for this in-process
+// file: under load (measured with 20 CPU burners) a single `setTimeout(0)` turn
+// took seconds of wall-clock, and the 5s bound tripped in the middle of the
+// pinned-width migration test. Raising it changes no assertion and does not slow
+// a passing run. 30s matches the bound src/channels/outbox.test.ts uses and
+// leaves >5x headroom over the worst overrun observed (5.6s).
+setDefaultTimeout(30_000);
+
+/**
+ * Timeout for the condition waits in this file. Sits well under the 30s test
+ * bound so a wait that never comes true fails with a message naming *what* it
+ * was waiting for instead of losing the race to a generic "test timed out" —
+ * and well above the worst observed under-load latency so a busy machine can
+ * never expire it on a healthy run. Like the bound above, it only shapes the
+ * failure path: a satisfied condition returns immediately.
+ */
+const WAIT_TIMEOUT_MS = 20_000;
+
+/**
+ * Helper: create a mock send spawn runner that records calls as {args, cwd}-style entries.
+ *
+ * Note the shape: the runner closes over the ARRAY INSTANCE it was handed, so
+ * whatever it records lands in the array belonging to the test that installed
+ * it. A recorder that instead re-read a describe-scoped `let` at push time
+ * would append to whichever array is current *when the call happens* — which,
+ * for work that outlives its test, is the next test's freshly-emptied fixture.
+ * Every recorder in this file follows this instance-capturing shape.
+ */
 function mockSendSpawnRunner(calls: { args: string[]; cwd: string }[]) {
   setSendSpawnRunner((cmd: string[]) => {
     // Record "send" calls as ib-runner-style entries for test compatibility
@@ -41,12 +78,55 @@ function makeAgent(id: string, repoPath: string, archived = false): Agent {
   return _makeAgent({ id, repoPath, archived });
 }
 
+/**
+ * Every dashboard makeDashboard() built during the CURRENT test, so the
+ * file-scope afterEach can stop it. See that hook for why this exists.
+ */
+const dashboardsThisTest: DashboardComponent[] = [];
+
 /** Create a DashboardComponent with setTerminalTitle stubbed to prevent test output noise. */
 function makeDashboard(): DashboardComponent {
   const d = new DashboardComponent();
   d.setTerminalTitle = () => {};
+  dashboardsThisTest.push(d);
   return d;
 }
+
+/**
+ * Stop everything the finished test left running. Runs after EVERY test in this
+ * file — including one that failed or timed out, which is the case that matters.
+ *
+ * A dashboard starts interval timers on its own: selecting the system
+ * coordinator (a plain `onUpdate([], [makeFlatSystemCoordinator()], [])`, no
+ * startPolling() required) runs syncSelectedAgent → updatePollerVisibility,
+ * which resumes the 1s coordinator TmuxPoller and starts the 3s coordinator
+ * client-attach check. Nothing in a `const d = makeDashboard()` test ever
+ * stopped them, so those timers ran for the rest of the process. Two
+ * consequences, both real:
+ *
+ *  - Cross-test contamination. Every tick calls through the tmux spawn context.
+ *    A dashboard from an earlier test therefore records `list-clients` /
+ *    `resize-window` calls into a LATER test's mock — a fixture that test
+ *    believes only it can write to.
+ *  - Escaping the test process. Once the mock is reset the same ticks reach the
+ *    real Bun.spawn and run `tmux capture-pane` / `list-clients` against the
+ *    user's live `ib-coordinator` session, once a second, forever.
+ *
+ * Stopping the dashboards makes both structurally impossible rather than
+ * merely unlikely. stopPolling() only clears timers (it spawns nothing), so it
+ * is safe regardless of hook ordering relative to a describe's own afterEach,
+ * and it is a no-op on a dashboard that never started polling.
+ */
+afterEach(() => {
+  for (const d of dashboardsThisTest.splice(0)) {
+    d.stopPolling();
+  }
+  // persistLayout() debounces a 500ms write in ./layout module state. A test
+  // that pressed a resize key leaves that timer armed; cancel it so the write
+  // cannot land during an unrelated later test. Tests that need the write to
+  // happen await flushPendingSave() inside the test body, before this runs.
+  cancelPendingSave();
+});
 
 describe("readAgentLog", () => {
   let tmpDir: string;
@@ -839,15 +919,21 @@ describe("DashboardComponent dialog and action handlers", () => {
   /** Tracks messages sent via native sendMessage (tmux send-keys) */
   let sentMessages: { target: string; message: string }[] = [];
 
-  /** Set up the send spawn runner mock that tracks messages */
+  /**
+   * Set up the send spawn runner mock that tracks messages. The runner captures
+   * THIS test's array instead of re-reading `sentMessages` at push time, so a
+   * send that outlives its test can only append to its own recording — see
+   * mockSendSpawnRunner's note at the top of the file.
+   */
   function setupSendMock() {
-    sentMessages = [];
+    const recorded: { target: string; message: string }[] = [];
+    sentMessages = recorded;
     setSendSpawnRunner((cmd: string[]) => {
       // Track the actual message send-keys calls (not Enter or has-session)
       if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 7 && cmd[4] === "-l" && cmd[5] === "--") {
         // Extract target session and message
         const target = cmd[3]!;
-        sentMessages.push({ target, message: cmd[6]! });
+        recorded.push({ target, message: cmd[6]! });
       }
       return makeSpawnResult();
     });
@@ -1948,11 +2034,13 @@ describe("Cross-repo send (E key)", () => {
   // sandbox, not the developer's real ~/.itsybitsy/).
   let sendRepoDir: string;
 
+  /** Instance-capturing recorder — see mockSendSpawnRunner at the top of the file. */
   function setupSendMock() {
-    sentMessages = [];
+    const recorded: { target: string; message: string }[] = [];
+    sentMessages = recorded;
     setSendSpawnRunner((cmd: string[]) => {
       if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 7 && cmd[4] === "-l" && cmd[5] === "--") {
-        sentMessages.push({ target: cmd[3]!, message: cmd[6]! });
+        recorded.push({ target: cmd[3]!, message: cmd[6]! });
       }
       return makeSpawnResult();
     });
@@ -2261,11 +2349,13 @@ describe("DashboardComponent right pane and navigation features", () => {
   let sentMessages: { target: string; message: string }[] = [];
   let configTempDir: string;
 
+  /** Instance-capturing recorder — see mockSendSpawnRunner at the top of the file. */
   function setupSendMock() {
-    sentMessages = [];
+    const recorded: { target: string; message: string }[] = [];
+    sentMessages = recorded;
     setSendSpawnRunner((cmd: string[]) => {
       if (cmd[0] === "tmux" && cmd[1] === "send-keys" && cmd.length === 7 && cmd[4] === "-l" && cmd[5] === "--") {
-        sentMessages.push({ target: cmd[3]!, message: cmd[6]! });
+        recorded.push({ target: cmd[3]!, message: cmd[6]! });
       }
       return makeSpawnResult();
     });
@@ -2358,8 +2448,11 @@ describe("DashboardComponent right pane and navigation features", () => {
     // diffAgent will fail (no worktree at /repos/test) but mode still switches
     dashboard.handleInput("d");
     expect(dashboard.currentMode).toBe("DIFF");
-    await Bun.sleep(50);
-    // The diff content should contain error text about no worktree
+    // Wait for the load to actually finish rather than guessing at 50ms. The
+    // load runs git in a subprocess, so its duration tracks how busy the
+    // machine is; a fixed sleep asserts diffLoading===false while the load is
+    // still in flight the moment the box is loaded enough.
+    await waitFor(() => dashboard.rightPane.diffLoading === false, { message: "diff load to settle" });
     expect(dashboard.rightPane.diffLoading).toBe(false);
   });
 
@@ -5595,8 +5688,18 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       savedHome = process.env.HOME;
       homeTmp = await mkdtemp(join(tmpdir(), "dash-roster-home-"));
       process.env.HOME = homeTmp;
+      // Stub the send spawn runner. These tests plant REAL agent dirs so the
+      // roster wrappers can resolve bare ids, which means teamAdd/teamRemove's
+      // join/leave fan-out reaches the real delivery path and spawns real tmux
+      // subprocesses (against sessions that do not exist) with the real
+      // inter-keystroke delays. That is seconds of unrelated work on a busy
+      // machine — enough to blow the 5s per-test timeout — and none of it is
+      // what these tests assert on. Stubbing keeps the roster assertions and
+      // drops the dependency on tmux.
+      setSendSpawnRunner(() => makeSpawnResult());
     });
     afterEach(async () => {
+      resetSendSpawnRunner();
       if (savedHome === undefined) delete process.env.HOME;
       else process.env.HOME = savedHome;
       await rm(homeTmp, { recursive: true, force: true });
@@ -5719,10 +5822,16 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-sel");
 
       dashboard.handleInput("t");
-      // handleAddAgentToTeam uses fire-and-forget listTeams().then(...) —
-      // not executeAndRefresh — so flushPendingActions doesn't track it.
-      // Wait long enough for the file read + .then() to land.
-      await Bun.sleep(50);
+      // handleAddAgentToTeam uses fire-and-forget listTeams().then(...) — not
+      // executeAndRefresh — so flushPendingActions doesn't track it. Wait on
+      // the dialog the assertions below check, not on a fixed 50ms: the .then()
+      // is gated on a real file read, so how long it takes tracks how busy the
+      // machine is, and a fixed sleep asserts "no dialog opened" the moment the
+      // box is loaded enough to miss the deadline.
+      await waitFor(() => dashboard.dialog !== null, {
+        timeoutMs: WAIT_TIMEOUT_MS,
+        message: "the add-to-team picker dialog to open",
+      });
 
       // Positive assertion: the add-to-team picker opened (fuzzy picker
       // because at least one team exists). NOT a multi-select roster.
@@ -5739,13 +5848,32 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
 });
 
 describe("pinned-width resize side-effects", () => {
-  // Recorded `tmux resize-window -t <target> -x <width>` calls and the current
-  // list-clients response, driven through the tmux-poller spawnCtx seam (the
-  // same context resizeTmuxWindow + hasAttachedClient use).
-  let resizes: { session: string; width: number }[] = [];
-  let clientsAttached = false;
-
-  function installMockRunner() {
+  /**
+   * Install a tmux mock that records `tmux resize-window -t <target> -x <width>`
+   * calls and answers `list-clients`, driven through the tmux-poller spawnCtx
+   * seam (the same context resizeTmuxWindow + hasAttachedClient use). Returns
+   * the recorder, which the CALLING TEST owns.
+   *
+   * Per-test ownership is the point. These tests drive fire-and-forget async
+   * work (resizeTmuxWindow and hasAttachedClient are unawaited by the code
+   * under test), and bun does not cancel a test's continuation when it times
+   * out — it abandons it and starts the next test, so the orphan resumes
+   * later, in the middle of a DIFFERENT test. While the recording array was a
+   * describe-scoped `let` emptied in beforeEach, that orphan read and wrote the
+   * next test's fixture: the observed failure was this describe's first test
+   * timing out and then reporting "Expected: 3, Received: 1" as an "Unhandled
+   * error between tests", i.e. against the wrong test's data entirely. Because
+   * the runner closure below captures the array it created, an orphan can only
+   * ever touch its own recording, so a slow or timed-out test cannot corrupt a
+   * later one no matter when it resumes. (The file-scope afterEach separately
+   * stops the dashboards, which kills the repeating writers — the coordinator
+   * pollers and the 3s client-attach check.)
+   */
+  function installTmuxRecorder() {
+    const resizes: { session: string; width: number }[] = [];
+    // Held in an object, not a closed-over `let`, purely so the accessor below
+    // reads the same box the runner does.
+    const live = { clientsAttached: false };
     tmuxPollerSpawnCtx.set((cmd: string[]) => {
       if (cmd[1] === "resize-window") {
         const tIdx = cmd.indexOf("-t");
@@ -5756,92 +5884,131 @@ describe("pinned-width resize side-effects", () => {
         return makeSpawnResult(0);
       }
       if (cmd[1] === "list-clients") {
-        return makeSpawnResult(0, clientsAttached ? "client-0\n" : "");
+        return makeSpawnResult(0, live.clientsAttached ? "client-0\n" : "");
       }
       // has-session / capture-pane / anything else: succeed with empty output.
       return makeSpawnResult(0);
     });
+    return {
+      /** Every resize recorded so far, in order. */
+      all: resizes,
+      /** Resizes recorded for one session — the shape every assertion here checks. */
+      forSession: (session: string) => resizes.filter((r) => r.session === session),
+      /** What the next `tmux list-clients` should report. */
+      setClientsAttached(attached: boolean) { live.clientsAttached = attached; },
+      /** Drop everything recorded so far (this array, never a later test's). */
+      clear() { resizes.length = 0; },
+    };
   }
-
-  beforeEach(() => {
-    resizes = [];
-    clientsAttached = false;
-    installMockRunner();
-  });
 
   afterEach(() => {
     tmuxPollerSpawnCtx.reset();
   });
 
   test("re-pin migration resizes every live agent + the system coordinator once, to 1000", async () => {
+    const tmux = installTmuxRecorder();
     const dashboard = makeDashboard();
     const agentA = makeAgent("agent-a", "/repos/test");
     const agentB = makeAgent("agent-b", "/repos/test");
+    const sessionA = agentA.meta.tmux_session!;
+    const sessionB = agentB.meta.tmux_session!;
     const flatList: FlatEntry[] = [makeFlatAgent(agentA), makeFlatAgent(agentB)];
 
     // Arm the one-time migration (boot path calls this) and fire the first update.
     dashboard.requestTmuxRepin();
     dashboard.onUpdate([agentA, agentB], flatList, []);
-    // Let any async resize()/hasAttachedClient() promises settle.
-    await Promise.resolve();
-    await new Promise((r) => setTimeout(r, 0));
+
+    // Wait for the three re-pins the assertions below check — the real
+    // condition — not for a fixed number of event-loop turns. onUpdate fires
+    // resizeTmuxWindow() and hasAttachedClient() without awaiting them, and the
+    // turn count it takes those to reach the recorder is an implementation
+    // detail; the two-turn guess this replaces (`await Promise.resolve()` then
+    // `await setTimeout(0)`) held only on an idle machine. Under load a single
+    // setTimeout(0) turn was measured taking seconds, blowing the whole test's
+    // time budget before the assertions ran. This wait returns the instant the
+    // recorder holds what the test is about to assert, so it is both more
+    // robust and faster.
+    await waitFor(
+      () =>
+        tmux.forSession(sessionA).length === 1
+        && tmux.forSession(sessionB).length === 1
+        && tmux.forSession(IB_COORDINATOR_SESSION).length === 1,
+      {
+        timeoutMs: WAIT_TIMEOUT_MS,
+        message: "the re-pin migration to resize agent-a, agent-b and the system coordinator",
+      },
+    );
 
     // Every live agent session + the system coordinator pinned to 1000.
-    expect(resizes.filter((r) => r.session === agentA.meta.tmux_session)).toEqual([
-      { session: agentA.meta.tmux_session!, width: 1000 },
-    ]);
-    expect(resizes.filter((r) => r.session === agentB.meta.tmux_session)).toEqual([
-      { session: agentB.meta.tmux_session!, width: 1000 },
-    ]);
-    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION)).toEqual([
+    expect(tmux.forSession(sessionA)).toEqual([{ session: sessionA, width: 1000 }]);
+    expect(tmux.forSession(sessionB)).toEqual([{ session: sessionB, width: 1000 }]);
+    expect(tmux.forSession(IB_COORDINATOR_SESSION)).toEqual([
       { session: IB_COORDINATOR_SESSION, width: 1000 },
     ]);
     // Every recorded resize is the pin width — nothing follows a display pane.
-    expect(resizes.every((r) => r.width === 1000)).toBe(true);
+    expect(tmux.all.every((r) => r.width === 1000)).toBe(true);
 
-    // Idempotent: a SECOND update does NOT re-run the migration.
-    const before = resizes.length;
+    // Idempotent: a SECOND update does NOT re-run the migration. This is a
+    // NEGATIVE assertion — "no further resize is recorded" names no condition
+    // that can be polled for, so it gets the one legitimate fixed wait in this
+    // test: a single turn for anything the second onUpdate might have queued,
+    // then a count that must not have moved.
+    const before = tmux.all.length;
     dashboard.onUpdate([agentA, agentB], flatList, []);
-    await new Promise((r) => setTimeout(r, 0));
-    expect(resizes.length).toBe(before);
+    await Bun.sleep(0);
+    expect(tmux.all.length).toBe(before);
   });
 
   test("migration re-pins the system coordinator even when there are ZERO agents", async () => {
+    const tmux = installTmuxRecorder();
     const dashboard = makeDashboard();
     dashboard.requestTmuxRepin();
     dashboard.onUpdate([], [], []); // empty flatList
-    await new Promise((r) => setTimeout(r, 0));
-    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION)).toEqual([
+    // Wait on the coordinator re-pin itself — the assertion that follows.
+    await waitFor(() => tmux.forSession(IB_COORDINATOR_SESSION).length === 1, {
+      timeoutMs: WAIT_TIMEOUT_MS,
+      message: "the migration to re-pin the system coordinator with zero agents",
+    });
+    expect(tmux.forSession(IB_COORDINATOR_SESSION)).toEqual([
       { session: IB_COORDINATOR_SESSION, width: 1000 },
     ]);
   });
 
   test("coordinator detach transition re-pins the displayed coordinator once, to 1000", async () => {
+    const tmux = installTmuxRecorder();
     const dashboard = makeDashboard();
     // Make the system coordinator the displayed pane so checkCoordinatorClients
     // considers IB_COORDINATOR_SESSION (onUpdate auto-selects it).
+    //
+    // Selecting it also makes updateCoordinatorClientCheck start the 3s
+    // client-attach interval and fire one immediate, UNAWAITED check. That
+    // check entered hasAttachedClient before any tick below did, and every
+    // tick walks the identical await chain, so it completes first — JS
+    // microtask ordering, not timing, so load cannot reorder it. The interval
+    // it started is cancelled by the file-scope afterEach (stopPolling), which
+    // is what stops it ticking into a later test's recorder.
     dashboard.onUpdate([], [makeFlatSystemCoordinator()], []);
     expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
     // Ignore any resizes from selection wiring (there should be none — the pin
     // means nothing follows the pane) so the assertions below measure only the
     // detach transition.
-    resizes = [];
+    tmux.clear();
 
     // Tick 1: a client is attached — record the attached state, no re-pin.
-    clientsAttached = true;
+    tmux.setClientsAttached(true);
     await dashboard.checkCoordinatorClients();
-    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION)).toEqual([]);
+    expect(tmux.forSession(IB_COORDINATOR_SESSION)).toEqual([]);
 
     // Tick 2: the client detached — exactly one re-pin to 1000.
-    clientsAttached = false;
+    tmux.setClientsAttached(false);
     await dashboard.checkCoordinatorClients();
-    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION)).toEqual([
+    expect(tmux.forSession(IB_COORDINATOR_SESSION)).toEqual([
       { session: IB_COORDINATOR_SESSION, width: 1000 },
     ]);
 
     // Tick 3: still detached — no duplicate re-pin (transition already consumed).
     await dashboard.checkCoordinatorClients();
-    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION).length).toBe(1);
+    expect(tmux.forSession(IB_COORDINATOR_SESSION).length).toBe(1);
   });
 
   test("detach that happens WHILE the coordinator is off-screen still re-pins on return (state preserved across visibility)", async () => {
@@ -5851,15 +6018,16 @@ describe("pinned-width resize side-effects", () => {
     // check sees the attached→detached transition and re-pins. If _coordClient-
     // Attached were dropped on hide, wasAttached would read false on return and
     // the window would stay stuck at the Ghostty width forever.
+    const tmux = installTmuxRecorder();
     const dashboard = makeDashboard();
     const agent = makeAgent("agent-a", "/repos/test");
 
     // Visible + attached: observe the attached state (no re-pin yet).
     dashboard.onUpdate([], [makeFlatSystemCoordinator()], []);
     expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
-    clientsAttached = true;
+    tmux.setClientsAttached(true);
     await dashboard.checkCoordinatorClients();
-    resizes = [];
+    tmux.clear();
 
     // Navigate AWAY (select a regular agent): the coordinator is no longer
     // visible, so a check now computes no visible coordinator sessions and does
@@ -5867,18 +6035,26 @@ describe("pinned-width resize side-effects", () => {
     dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
     expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(false);
     // Ghostty detaches while we're away.
-    clientsAttached = false;
+    tmux.setClientsAttached(false);
     await dashboard.checkCoordinatorClients(); // no visible coord → no-op, state kept
-    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION)).toEqual([]);
+    expect(tmux.forSession(IB_COORDINATOR_SESSION)).toEqual([]);
 
     // Navigate BACK to the coordinator, then run the check: the preserved
     // wasAttached=true meets the now-detached live state → exactly one re-pin.
     dashboard.onUpdate([], [makeFlatSystemCoordinator()], []);
     expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
     await dashboard.checkCoordinatorClients();
-    // Exactly one re-pin total across return (immediate check + explicit tick are
-    // idempotent — the transition is consumed once).
-    expect(resizes.filter((r) => r.session === IB_COORDINATOR_SESSION)).toEqual([
+    // Exactly one re-pin total across return: the re-selection fires an
+    // immediate unawaited check and the line above fires an explicit one, but
+    // whichever lands first consumes the attached→detached transition (it
+    // rewrites the cached state before the other reads it), so the pair is
+    // idempotent in either order. Wait for that one re-pin rather than assuming
+    // the unawaited check has already landed.
+    await waitFor(() => tmux.forSession(IB_COORDINATOR_SESSION).length === 1, {
+      timeoutMs: WAIT_TIMEOUT_MS,
+      message: "the return-to-coordinator detach transition to re-pin exactly once",
+    });
+    expect(tmux.forSession(IB_COORDINATOR_SESSION)).toEqual([
       { session: IB_COORDINATOR_SESSION, width: 1000 },
     ]);
   });

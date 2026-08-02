@@ -1,8 +1,8 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, readdir, rm } from "fs/promises";
+import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
+import { chmod, mkdtemp, readdir, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import { makeAgent, makeFlatAgent, makeFlatRepoHeader, makeSpawnResult } from "../test-utils";
+import { makeAgent, makeFlatAgent, makeFlatRepoHeader, makeSpawnResult, waitFor, waitForValue } from "../test-utils";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
 import type { ActionCtx } from "./agent-actions";
@@ -45,6 +45,31 @@ import {
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxSpawnCtx } from "../tmux-poller";
 import type { SpawnResult } from "../types";
+
+// These tests do REAL subprocess work: `git init`/`commit`/`branch` in the
+// diff-tool fixtures, `mkdir -p` via Bun.$ inside handleSnapshot, and a real
+// spawn of the external diff tool. Bun's 5s default per-test timeout is a
+// measure of MACHINE LOAD, not of correctness — a single subprocess spawn has
+// been measured at 156s on a pathologically loaded machine (see commit
+// 5c8f254, which raised three other subprocess-spawning files to 60s for the
+// same reason). Raising the bound only changes how long a genuinely-stuck test
+// waits before failing; it does not weaken a single assertion, because every
+// wait below polls a real condition and reports what it was waiting for.
+setDefaultTimeout(60_000);
+
+/**
+ * Bound for every condition wait in this file.
+ *
+ * `waitFor`'s own 4s default is sized to sit just under bun's 5s per-test
+ * timeout, so that a stuck wait reports WHAT it was waiting for instead of
+ * losing the race to a generic "test timed out". That reasoning has to be
+ * rescaled here: with the per-test bound raised to 60s above, a 4s wait would
+ * be the thing that fires first, and the headroom that timeout was added for
+ * would never be used. This keeps the same relationship — comfortably under
+ * the test timeout, far above any realistic completion time. It costs nothing
+ * on the passing path, where a wait returns the moment its condition holds.
+ */
+const WAIT_MS = 50_000;
 
 /** Noop spawn runner that always succeeds */
 function noopSpawnRunner(): SpawnResult {
@@ -274,7 +299,12 @@ describe("handleSnapshot", () => {
       const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent, leftWidth: 40 });
 
       handleSnapshot(ctx);
-      await Bun.sleep(20);
+      // handleSnapshot is fire-and-forget: a tmux capture, then two `mkdir -p`
+      // subprocesses and four file writes, and only THEN the notice and the
+      // dialog. The dialog is the last step, so waiting for it also
+      // establishes everything asserted below it. A fixed sleep raced all of
+      // that work.
+      await waitForDialog(dialogs, "handleSnapshot to open its note dialog");
 
       expect(dialogs).toHaveLength(1);
       expect(notices.at(-1)).toContain("Snapshot saved:");
@@ -350,12 +380,32 @@ describe("handleSnapshot", () => {
       const { ctx } = makeMockCtx({ agent, leftWidth: 60 });
 
       handleSnapshot(ctx);
-      await Bun.sleep(20);
 
+      // Wait on exactly what this test asserts: both snapshot bodies present
+      // AND fully written. handleSnapshot is fire-and-forget (tmux capture →
+      // two `mkdir -p` subprocesses → four writes), which a fixed sleep raced.
+      // A dirent appears at open() time, before the contents are flushed, so
+      // requiring the header every snapshot body starts with is what makes
+      // this proof against a torn read — not just against an absent file.
       const debugDir = join(repoDir, ".ittybitty", "agents", "agent-tab", "debug-logs");
-      const debugFiles = await readdir(debugDir);
-      const unwrappedName = debugFiles.find((name) => /-unwrapped\.txt$/.test(name));
-      const wrappedName = debugFiles.find((name) => /-wrapped\.txt$/.test(name));
+      const { unwrappedName, wrappedName } = await waitForValue(
+        async () => {
+          let debugFiles: string[];
+          try {
+            debugFiles = await readdir(debugDir);
+          } catch {
+            return null; // dir not created yet
+          }
+          const unwrappedName = debugFiles.find((name) => /-unwrapped\.txt$/.test(name));
+          const wrappedName = debugFiles.find((name) => /-wrapped\.txt$/.test(name));
+          if (!unwrappedName || !wrappedName) return null;
+          const u = await Bun.file(join(debugDir, unwrappedName)).text();
+          const w = await Bun.file(join(debugDir, wrappedName)).text();
+          if (!u.startsWith("State: ") || !w.startsWith("State: ")) return null;
+          return { unwrappedName, wrappedName };
+        },
+        { message: `both snapshot bodies to be written under ${debugDir}`, timeoutMs: WAIT_MS },
+      );
       expect(unwrappedName).toBeDefined();
       expect(wrappedName).toBeDefined();
 
@@ -391,15 +441,17 @@ describe("handleRetire", () => {
     expect(d.confirmLabel).toBe("Retire");
   });
 
-  test("onYes calls executeAndRefresh with retireAgent", async () => {
+  test("onYes calls executeAndRefresh with retireAgent", () => {
     const agent = makeAgent({ id: "agent-1" });
     let executeCalled = false;
     const { ctx, dialogs } = makeMockCtx({ agent });
     ctx.executeAndRefresh = async (fn) => { executeCalled = true; };
     handleRetire(ctx);
     const d = assertDialog(dialogs[0]!, "confirm");
+    // onYes calls ctx.executeAndRefresh SYNCHRONOUSLY, and the stub above sets
+    // the flag before its first await — so there is nothing to wait for. The
+    // old Bun.sleep(1) implied a race that does not exist.
     d.onYes();
-    await Bun.sleep(1);
     expect(executeCalled).toBe(true);
   });
 });
@@ -463,35 +515,38 @@ describe("handleResume", () => {
   // so a running/waiting agent still goes through to a resume attempt.
   test("attempts resume for running agent (defers to liveness check)", async () => {
     const agent = makeAgent({ id: "agent-1", state: "running" });
-    const { ctx, notices } = makeMockCtx({ agent });
+    const { ctx, notices, flushActions } = makeMockCtx({ agent });
     handleResume(ctx);
-    await Bun.sleep(10);
+    // The result notice is set INSIDE the executeAndRefresh body, which the
+    // mock ctx captures — so awaiting it awaits exactly the work that produces
+    // the notice asserted below. The old fixed sleep raced resumeAgent().
+    await flushActions();
     expect(notices.some((n) => n.includes("Can only resume"))).toBe(false);
     expect(notices.some((n) => n.includes("Resuming") || n.includes("Resumed") || n.includes("Resume failed"))).toBe(true);
   });
 
   test("attempts resume for waiting agent (defers to liveness check)", async () => {
     const agent = makeAgent({ id: "agent-1", state: "waiting" });
-    const { ctx, notices } = makeMockCtx({ agent });
+    const { ctx, notices, flushActions } = makeMockCtx({ agent });
     handleResume(ctx);
-    await Bun.sleep(10);
+    await flushActions();
     expect(notices.some((n) => n.includes("Can only resume"))).toBe(false);
     expect(notices.some((n) => n.includes("Resuming") || n.includes("Resumed") || n.includes("Resume failed"))).toBe(true);
   });
 
   test("resumes stopped agent", async () => {
     const agent = makeAgent({ id: "agent-1", state: "stopped" });
-    const { ctx, notices } = makeMockCtx({ agent });
+    const { ctx, notices, flushActions } = makeMockCtx({ agent });
     handleResume(ctx);
-    await Bun.sleep(10);
+    await flushActions();
     expect(notices.some((n) => n.includes("Resumed") || n.includes("Resume failed"))).toBe(true);
   });
 
   test("resumes complete agent", async () => {
     const agent = makeAgent({ id: "agent-1", state: "complete" });
-    const { ctx, notices } = makeMockCtx({ agent });
+    const { ctx, notices, flushActions } = makeMockCtx({ agent });
     handleResume(ctx);
-    await Bun.sleep(10);
+    await flushActions();
     expect(notices.some((n) => n.includes("Resumed") || n.includes("Resume failed"))).toBe(true);
   });
 
@@ -514,16 +569,21 @@ describe("handleResume", () => {
   test("each press issues one resume and surfaces its result", async () => {
     const agent = makeAgent({ id: "agent-1", state: "stopped" });
     let resumeAttempts = 0;
+    const inFlight: Promise<void>[] = [];
     const { ctx, notices } = makeMockCtx({ agent });
     ctx.executeAndRefresh = (fn) => {
       resumeAttempts++;
-      void fn();
+      // Keep the body's promise so the test can await the real resume instead
+      // of guessing at a sleep. Nothing is asserted about it — this only stops
+      // the fire-and-forget work from outliving the test and landing in the
+      // next one.
+      inFlight.push(fn().catch(() => {}));
       return Promise.resolve();
     };
     handleResume(ctx);
     expect(resumeAttempts).toBe(1);
     expect(notices).toContain("Resuming agent-1…");
-    await Bun.sleep(10);
+    await Promise.all(inFlight);
   });
 
   // ── coordinator SPAWN double-press guard (UI-layer, FIX 2) ──────────────────
@@ -1072,15 +1132,76 @@ describe("handleOpenDiffToolVsManager", () => {
       await Bun.$`git branch agent/mgr-1`.cwd(worktree).quiet();
       // Uncommitted worker-side change makes the diff vs the manager branch non-empty
       await Bun.write(join(worktree, "a.txt"), "worker\n");
+
+      // A stand-in diff tool that RECORDS what it was launched with (its cwd
+      // and argv) and then BLOCKS until killed. Both halves are load-bearing.
+      //
+      // Recording turns the assertion into one about what was LAUNCHED — a
+      // durable artifact on disk that nothing can race away — rather than one
+      // about a field that only reflects the launch indirectly.
+      //
+      // Blocking removes the flake at its root. This test used to pass
+      // `true` (/usr/bin/true), which exits instantly, and then assert that
+      // `getActiveDiffProc()` was still populated. openDiffTool starts a
+      // DETACHED handler that awaits `proc.exited` and nulls the field
+      // (`if (activeDiffProc?.proc === proc) activeDiffProc = null`). That
+      // handler reaches its await BEFORE handleOpenDiffToolVsManager returns,
+      // so its continuation is queued AHEAD of this test's: whenever the child
+      // has already been reaped, the field is cleared before the test ever
+      // gets to read it. Measured directly: with an instantly-exiting tool,
+      // 1 in 3000 launches under 16 CPU burners observed the field already
+      // null (0 in 3000 on an idle machine) — matching the ~1-in-13
+      // full-suite failure rate. A wait cannot fix that: the value is set and
+      // cleared before the first poll, so polling for non-null is racing the
+      // same interleaving, just more slowly. A tool that CANNOT exit while the
+      // test is looking removes the race outright — the exit handler cannot
+      // run until the `finally` below kills the process.
+      const toolPath = join(baseDir, "fake-diff-tool.sh");
+      const argsFile = join(baseDir, "launch-args.txt");
+      await Bun.write(
+        toolPath,
+        `#!/bin/bash\nprintf '%s\\n' "$PWD" "$@" > ${JSON.stringify(argsFile)}\nexec sleep 300\n`,
+      );
+      await chmod(toolPath, 0o755);
+
       const { ctx, notices } = makeMockCtx({ agent });
-      ctx.diffTool = "true"; // /usr/bin/true — exits 0 without doing anything
+      ctx.diffTool = toolPath;
       await handleOpenDiffToolVsManager(ctx);
-      expect(notices).toContain("Opened diff vs agent/mgr-1 in true");
+      expect(notices).toContain(`Opened diff vs agent/mgr-1 in ${toolPath}`);
       expect(getDiffToolLaunching()).toBe(false);
+
+      // First, what was LAUNCHED: wait for the tool's own record of its cwd and
+      // argv. Require both lines so a half-written file is never read as a
+      // complete one. Reaching this point also means the tool has passed its
+      // `printf` and is parked in `exec sleep 300` — so it provably cannot exit
+      // (and the exit handler provably cannot fire) for the assertion below.
+      // Ordering it this way also turns a failed spawn into a named timeout
+      // ("waiting for: the diff tool to record…") rather than a bare undefined.
+      const recorded = await waitForValue(
+        async () => {
+          const file = Bun.file(argsFile);
+          if (!(await file.exists())) return null;
+          const lines = (await file.text()).split("\n").filter((l) => l.length > 0);
+          return lines.length >= 2 ? lines : null;
+        },
+        { message: `the diff tool to record its cwd + argv in ${argsFile}`, timeoutMs: WAIT_MS },
+      );
+      const [launchCwd, ...args] = recorded;
+      // Compare by suffix: macOS resolves the temp dir through /private, so the
+      // tool's $PWD is the physical path while `worktree` is the logical one.
+      expect(launchCwd).toContain(join(".ittybitty", "agents", "agent-1", "repo"));
+      expect(args).toEqual(["agent/mgr-1"]);
+
+      // …and the launch is attributed to the right agent. The tool is blocked
+      // in `sleep 300`, so this field cannot be cleared out from under us.
       const active = getActiveDiffProc();
       expect(active?.agentId).toBe("agent-1");
-      if (active) await active.proc.exited;
     } finally {
+      // The stand-in tool blocks forever by design — kill it, and await the
+      // exit so no `sleep` outlives the test.
+      const running = getActiveDiffProc();
+      killActiveDiffProc();
+      if (running) await running.proc.exited;
       await rm(baseDir, { recursive: true, force: true });
     }
   });
@@ -1205,19 +1326,25 @@ describe("addPermissionToSettings", () => {
 });
 
 /**
- * Wait for `handleAddPermission` to actually open its dialog.
+ * Wait for a fire-and-forget handler to actually open its dialog.
  *
- * The dialog opens in a `.then` off `effectiveSpawnCapability`, which awaits
- * `loadAgentType` — real disk I/O — whenever the target agent has an
- * `agentType` and no explicit `canSpawnChildren` boolean. That takes more
- * than the single macrotask a bare `nextTick()` yields, so under full-suite
- * load the dialog is not there yet. Poll for the dialog itself rather than
- * assuming a fixed number of ticks.
+ * Several handlers open their dialog inside a `.then` off real disk I/O —
+ * `handleAddPermission` off `effectiveSpawnCapability`/`loadAgentType`,
+ * `handleAddAgentToTeam` off `listTeams`, `handleSnapshot` off a tmux capture
+ * plus two `mkdir -p` subprocesses and four file writes. None of that lands in
+ * a fixed number of ticks, so under full-suite load the dialog is not there
+ * yet and `dialogs[0]!` is undefined by the time `assertDialog` reads it.
+ *
+ * Poll for the dialog itself. This is a deadline-based wait (via the shared
+ * `waitFor`) rather than a tick COUNT: the old 100-x-`setTimeout(0)` version
+ * gave up SILENTLY, so a genuine failure surfaced as a baffling "expected
+ * length 1, received 0" instead of naming what was awaited.
  */
-async function waitForDialog(dialogs: NonNullable<DialogState>[]): Promise<void> {
-  for (let i = 0; i < 100 && dialogs.length === 0; i++) {
-    await new Promise<void>((r) => setTimeout(r, 0));
-  }
+async function waitForDialog(
+  dialogs: NonNullable<DialogState>[],
+  message = "a dialog to open",
+): Promise<void> {
+  await waitFor(() => dialogs.length > 0, { message, timeoutMs: WAIT_MS });
 }
 
 describe("handleAddPermission", () => {
@@ -1235,15 +1362,19 @@ describe("handleAddPermission", () => {
     expect(dialogs).toHaveLength(0);
   });
 
-  // The dialog opens after `effectiveSpawnCapability` resolves, so tests that
-  // inspect the dialog must yield a macrotask first.
-  const nextTick = () => new Promise<void>((r) => setTimeout(r, 0));
+  // The dialog opens after `effectiveSpawnCapability` resolves. For the agents
+  // below that resolves without disk I/O (an explicit canSpawnChildren, or no
+  // agentType at all), so a single macrotask happens to be enough TODAY — but
+  // that is a guess about how many promise hops the handler takes, which is
+  // the same assumption that made the disk-backed sites flake. Waiting for the
+  // dialog itself costs nothing here (it is there on the first poll) and stops
+  // these from breaking confusingly if an await is ever added to that path.
 
   test("shows add-permission dialog for selected agent, input focused by default", async () => {
     const agent = makeAgent({ id: "agent-1" });
     const { ctx, dialogs } = makeMockCtx({ agent });
     handleAddPermission(ctx);
-    await nextTick();
+    await waitForDialog(dialogs, "handleAddPermission to open the add-permission dialog");
     expect(dialogs).toHaveLength(1);
     const d = assertDialog(dialogs[0]!, "add-permission");
     expect(d.prompt).toContain("agent-1");
@@ -1256,7 +1387,7 @@ describe("handleAddPermission", () => {
     const agent = makeAgent({ id: "agent-1", meta: { canSpawnChildren: false } as any });
     const { ctx, dialogs } = makeMockCtx({ agent });
     handleAddPermission(ctx);
-    await nextTick();
+    await waitForDialog(dialogs, "handleAddPermission to open the add-permission dialog");
     const d = assertDialog(dialogs[0]!, "add-permission");
     expect(d.canSpawnChildren).toBe(false);
   });
@@ -1293,7 +1424,7 @@ describe("handleAddPermission", () => {
     const agent = makeAgent({ id: "agent-1" });
     const { ctx, dialogs, notices } = makeMockCtx({ agent });
     handleAddPermission(ctx);
-    await nextTick();
+    await waitForDialog(dialogs, "handleAddPermission to open the add-permission dialog");
     const d = assertDialog(dialogs[0]!, "add-permission");
     d.onSubmit("   ");
     expect(notices).toEqual(["Permission add cancelled"]);
@@ -1303,7 +1434,7 @@ describe("handleAddPermission", () => {
     const agent = makeAgent({ id: "agent-1" });
     const { ctx, dialogs, notices } = makeMockCtx({ agent });
     handleAddPermission(ctx);
-    await nextTick();
+    await waitForDialog(dialogs, "handleAddPermission to open the add-permission dialog");
     const d = assertDialog(dialogs[0]!, "add-permission");
     d.onSubmit("Bash(foo; rm -rf /)");
     expect(notices.some((n) => n.includes("Invalid permission"))).toBe(true);
@@ -1340,8 +1471,6 @@ describe("effectiveSpawnCapability", () => {
 });
 
 describe("handleAddPermission — onToggleSpawn", () => {
-  const nextTick = () => new Promise<void>((r) => setTimeout(r, 0));
-
   async function readMeta(repoPath: string, id: string): Promise<Record<string, unknown>> {
     return (await Bun.file(join(repoPath, ".ittybitty", "agents", id, "meta.json")).json()) as Record<string, unknown>;
   }
@@ -1371,14 +1500,16 @@ describe("handleAddPermission — onToggleSpawn", () => {
     // the in-memory assertion below would then read undefined. Wait on the
     // full condition this test actually asserts.
     let meta: Record<string, unknown> = {};
-    for (
-      let i = 0;
-      i < 100 && !(meta.canSpawnChildren === true && agent.meta.canSpawnChildren === true);
-      i++
-    ) {
-      await nextTick();
-      meta = await readMeta(sendRepoDir, id);
-    }
+    await waitFor(
+      async () => {
+        meta = await readMeta(sendRepoDir, id);
+        return meta.canSpawnChildren === true && agent.meta.canSpawnChildren === true;
+      },
+      {
+        message: `meta.json AND the in-memory record to both show canSpawnChildren=true for ${id}`,
+        timeoutMs: WAIT_MS,
+      },
+    );
     expect(meta.canSpawnChildren).toBe(true);
     // Other fields preserved.
     expect(meta.agentType).toBe("worker");
@@ -1408,19 +1539,21 @@ describe("handleAddPermission — onToggleSpawn", () => {
     d.onToggleSpawn();
 
     // Same both-sides wait as the toggle-ON case. The target value here is
-    // `false`, so the loop must test for it explicitly rather than for
+    // `false`, so the predicate must test for it explicitly rather than for
     // "not true" — both fields start out absent (undefined), and a
-    // not-true condition would treat that as already-settled and exit
-    // immediately on iteration 0.
+    // not-true condition would treat that as already-settled and return on
+    // the very first poll.
     let meta: Record<string, unknown> = {};
-    for (
-      let i = 0;
-      i < 100 && !(meta.canSpawnChildren === false && agent.meta.canSpawnChildren === false);
-      i++
-    ) {
-      await nextTick();
-      meta = await readMeta(sendRepoDir, id);
-    }
+    await waitFor(
+      async () => {
+        meta = await readMeta(sendRepoDir, id);
+        return meta.canSpawnChildren === false && agent.meta.canSpawnChildren === false;
+      },
+      {
+        message: `meta.json AND the in-memory record to both show canSpawnChildren=false for ${id}`,
+        timeoutMs: WAIT_MS,
+      },
+    );
     expect(meta.canSpawnChildren).toBe(false);
     expect(meta.agentType).toBe("manager");
     expect(agent.meta.canSpawnChildren).toBe(false);
@@ -1853,7 +1986,7 @@ describe("handleCreateTeam", () => {
       lastAgents: [preChecked, other],
     });
     handleAddAgentToTeam(ctx);
-    await Bun.sleep(10);
+    await waitForDialog(dialogs, "handleAddAgentToTeam to open the create-team input");
     // Empty-teams → input dialog opens directly.
     const nameInput = assertDialog(dialogs[0]!, "input");
     nameInput.onSubmit("alpha");
@@ -1988,7 +2121,11 @@ describe("handleAddAgentToTeam", () => {
   test("no agent selected: does nothing (no dialog)", async () => {
     const { ctx, dialogs } = makeMockCtx({ agent: null, repos: [fx.repoEntry] });
     handleAddAgentToTeam(ctx);
-    // listTeams resolves on a microtask — wait a tick.
+    // Deliberately still a sleep: this asserts a NEGATIVE, so there is no
+    // condition to poll for — a "wait until dialogs.length === 0" would pass
+    // instantly and prove nothing. The handler bails at `if (!agent) return`
+    // before listTeams is ever called, so this is a grace period for a dialog
+    // that should never come, not a race. Load can only make it stricter.
     await Bun.sleep(5);
     expect(dialogs).toHaveLength(0);
   });
@@ -1999,7 +2136,9 @@ describe("handleAddAgentToTeam", () => {
     const agent = makeAgent({ id: "agent-aaa", repoPath: fx.repoDir });
     const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent, repos: [fx.repoEntry] });
     handleAddAgentToTeam(ctx);
-    await Bun.sleep(10);
+    // The dialog opens in a `.then` off listTeams() — real disk I/O, which a
+    // fixed sleep raced. Poll for the dialog this test then reads.
+    await waitForDialog(dialogs, "handleAddAgentToTeam to open the team picker");
     const d = assertDialog(dialogs[0]!, "fuzzy");
     // The "+ Create new team…" entry must be the last item.
     expect(d.allItems[d.allItems.length - 1]).toContain("Create new team");
@@ -2022,7 +2161,7 @@ describe("handleAddAgentToTeam", () => {
     const agent = makeAgent({ id: "agent-bbb", repoPath: fx.repoDir });
     const { ctx, dialogs } = makeMockCtx({ agent, repos: [fx.repoEntry] });
     handleAddAgentToTeam(ctx);
-    await Bun.sleep(10);
+    await waitForDialog(dialogs, "handleAddAgentToTeam to open the create-team input");
     // No fuzzy picker — went straight to the input.
     const d = assertDialog(dialogs[0]!, "input");
     expect(d.prompt).toBe("Team name:");
@@ -2038,7 +2177,7 @@ describe("handleAddAgentToTeam", () => {
       lastAgents: [agent],
     });
     handleAddAgentToTeam(ctx);
-    await Bun.sleep(10);
+    await waitForDialog(dialogs, "handleAddAgentToTeam to open the create-team input");
     const d = assertDialog(dialogs[0]!, "input");
     d.onSubmit("frontend");
     await flushActions();
@@ -2071,7 +2210,7 @@ describe("handleAddAgentToTeam", () => {
       lastAgents: [agent],
     });
     handleAddAgentToTeam(ctx);
-    await Bun.sleep(10);
+    await waitForDialog(dialogs, "handleAddAgentToTeam to open the team picker");
     const picker = assertDialog(dialogs[0]!, "fuzzy");
     // Select the LAST entry — "+ Create new team…"
     const createIdx = picker.allItems.length - 1;
@@ -2103,7 +2242,7 @@ describe("handleAddAgentToTeam", () => {
     const agent = makeAgent({ id: "agent-eee", repoPath: fx.repoDir });
     const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent, repos: [fx.repoEntry] });
     handleAddAgentToTeam(ctx);
-    await Bun.sleep(10);
+    await waitForDialog(dialogs, "handleAddAgentToTeam to open the team picker");
     const d = assertDialog(dialogs[0]!, "fuzzy");
     d.onSelect(0);
     await flushActions();
@@ -2404,15 +2543,11 @@ describe("handleFolderBrowser", () => {
     // fire-and-forget (addRepo runs inside a .then chain); poll the registry
     // until the new entry appears.
     dialog.onSelect(repoPath);
-    for (let i = 0; i < 50; i++) {
-      const reg = await loadRegistry();
-      if (reg.repos.some((r) => r.path === repoPath)) break;
-      await Bun.sleep(10);
-    }
-
-    const reg = await loadRegistry();
-    const added = reg.repos.find((r) => r.path === repoPath);
+    const added = await waitForValue(
+      async () => (await loadRegistry()).repos.find((r) => r.path === repoPath),
+      { message: `the registry to contain the added repo ${repoPath}`, timeoutMs: WAIT_MS },
+    );
     expect(added).toBeDefined();
-    expect(added!.name).toBe("rice-teaching");
+    expect(added.name).toBe("rice-teaching");
   });
 });

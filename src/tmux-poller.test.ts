@@ -1,4 +1,4 @@
-import { test, expect, describe, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import {
   TmuxPoller,
   captureTmuxOutput,
@@ -10,30 +10,110 @@ import {
   spawnCtx,
   expandTabs,
 } from "./tmux-poller";
+import { waitFor } from "./test-utils";
 
-function mockSpawn(stdout: string, exitCode: number, delay = 0, stderr = "") {
-  spawnCtx.set((_cmd: string[], _opts?: any) => {
-    const encoder = new TextEncoder();
-    const stdoutStream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(encoder.encode(stdout));
-        controller.close();
-      },
-    });
-    const stderrStream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(encoder.encode(stderr));
-        controller.close();
-      },
-    });
-    return {
-      stdout: stdoutStream,
-      stderr: stderrStream,
-      exited: delay > 0
-        ? new Promise<number>((r) => setTimeout(() => r(exitCode), delay))
-        : Promise.resolve(exitCode),
-    };
+function streamOf(text: string): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(c) {
+      c.enqueue(new TextEncoder().encode(text));
+      c.close();
+    },
   });
+}
+
+function emptyStream(): ReadableStream<Uint8Array> {
+  return new ReadableStream({ start(c) { c.close(); } });
+}
+
+// `delay` and `stderr` exist for the probe/capture-result tests, which assert on
+// tmux's stderr text and exit code. The TmuxPoller tests below pass neither: they
+// drive the poller's clock by hand (see installManualClock), so they have no use
+// for a timed exit. `delay` still runs on a real setTimeout — the manual clock
+// swaps setInterval only — so both styles coexist in one file.
+function mockSpawn(stdout: string, exitCode: number, delay = 0, stderr = "") {
+  spawnCtx.set((_cmd: string[], _opts?: any) => ({
+    stdout: streamOf(stdout),
+    stderr: streamOf(stderr),
+    exited: delay > 0
+      ? new Promise<number>((r) => setTimeout(() => r(exitCode), delay))
+      : Promise.resolve(exitCode),
+  }));
+}
+
+/**
+ * Hands the poller's interval timer to the test for the duration of one test.
+ *
+ * TmuxPoller.start() arms a 1s setInterval, so every count assertion in this
+ * file used to race that timer. `Bun.sleep(50); expect(calls).toBe(n)` can fail
+ * in BOTH directions — too slow and the in-flight poll hasn't landed yet (n-1),
+ * slow enough that a real tick fires and there is an extra poll (n+1) — and
+ * neither outcome says anything about the behaviour under test.
+ *
+ * Swapping setInterval/clearInterval means no tick EVER fires unless the test
+ * fires one, so counts are exact by construction, and a test that WANTS a tick
+ * gets it instantly instead of sleeping 1.1s for one. This stubs nothing inside
+ * the poller: `tick()` invokes the very callback start() registered, which is
+ * the same code a real timer would run. It also makes two properties directly
+ * observable that the old sleeps could only infer — whether stop() actually
+ * cleared the interval, and whether a second interval got armed.
+ */
+interface ManualClock {
+  /** Fire the poller's interval callback once — exactly what a 1s tick does. */
+  tick(): void;
+  /** How many intervals are currently armed (start() arms one, stop() clears it). */
+  readonly armedTimers: number;
+  restore(): void;
+}
+
+function installManualClock(): ManualClock {
+  // Typed view of the two globals we swap; avoids `any` and the read-only
+  // complaint from assigning to a `declare function` global.
+  const g = globalThis as unknown as {
+    setInterval: (fn: () => void, ms?: number) => unknown;
+    clearInterval: (handle?: unknown) => void;
+  };
+  const realSetInterval = g.setInterval;
+  const realClearInterval = g.clearInterval;
+  const armed = new Set<object>();
+  let callback: (() => void) | null = null;
+
+  g.setInterval = (fn: () => void) => {
+    callback = fn;
+    const handle = {};
+    armed.add(handle);
+    return handle;
+  };
+  g.clearInterval = (handle?: unknown) => {
+    if (typeof handle === "object" && handle !== null && armed.has(handle)) {
+      armed.delete(handle);
+      return;
+    }
+    // Not one of ours (e.g. a timer some other code armed before we swapped in).
+    realClearInterval(handle);
+  };
+
+  return {
+    tick() {
+      if (!callback) throw new Error("manual clock: no interval armed — did start() run?");
+      callback();
+    },
+    get armedTimers() { return armed.size; },
+    restore() {
+      g.setInterval = realSetInterval;
+      g.clearInterval = realClearInterval;
+    },
+  };
+}
+
+/**
+ * A short fixed sleep used ONLY before a NEGATIVE assertion ("no poll
+ * happened"). There is nothing to wait for when the code is correct, so this is
+ * not synchronisation — it exists so that a poll which should not have started
+ * has time to reach its callback and be caught. Lengthening it would not make
+ * any passing test more reliable; it would only slow the suite down.
+ */
+function giveASpuriousPollAChance(): Promise<void> {
+  return Bun.sleep(25);
 }
 
 afterEach(() => {
@@ -86,10 +166,9 @@ describe("captureTmuxOutput", () => {
     let capturedCmd: string[] = [];
     spawnCtx.set((cmd: string[], _opts?: any) => {
       capturedCmd = cmd;
-      const stream = new ReadableStream({ start(c) { c.close(); } });
       return {
-        stdout: stream,
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: emptyStream(),
+        stderr: emptyStream(),
         exited: Promise.resolve(0),
       };
     });
@@ -102,8 +181,8 @@ describe("captureTmuxOutput", () => {
     spawnCtx.set((cmd: string[], _opts?: any) => {
       capturedCmd = cmd;
       return {
-        stdout: new ReadableStream({ start(c) { c.close(); } }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: emptyStream(),
+        stderr: emptyStream(),
         exited: Promise.resolve(0),
       };
     });
@@ -250,37 +329,54 @@ describe("killTmuxSessionResult", () => {
 // -------------------------------------------------------------------
 describe("TmuxPoller", () => {
   let poller: TmuxPoller;
+  let clock: ManualClock;
+
+  beforeEach(() => {
+    clock = installManualClock();
+  });
 
   afterEach(() => {
+    // Order matters: stop() while the fake clearInterval is still installed, so
+    // the poller's handle is retired by the same clock that issued it.
     poller?.stop();
+    clock.restore();
   });
 
   test("setAgent triggers immediate poll when running", async () => {
     mockSpawn("line1\nline2\n", 0);
-    let outputCalled = false;
+    let stripped: string | undefined;
     poller = new TmuxPoller({
-      onOutput(_raw, stripped) {
-        outputCalled = true;
-        expect(stripped).toBe("line1\nline2\n");
-      },
+      onOutput(_raw, s) { stripped = s; },
     });
     poller.start();
     poller.setAgent("test-session");
-    // Wait for the async poll to complete
-    await Bun.sleep(50);
-    expect(outputCalled).toBe(true);
+    // Wait for the poll's output to arrive rather than guessing how long the
+    // async capture takes, and assert on the same value we waited for.
+    await waitFor(() => stripped !== undefined, { message: "onOutput from setAgent's immediate poll" });
+    expect(stripped).toBe("line1\nline2\n");
   });
 
   test("setAgent(null) pauses polling — no output emitted", async () => {
-    mockSpawn("data\n", 0);
+    let captureCalls = 0;
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd.includes("capture-pane")) captureCalls++;
+      return { stdout: streamOf("data\n"), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
     let callCount = 0;
     poller = new TmuxPoller({
       onOutput() { callCount++; },
     });
     poller.start();
     poller.setAgent(null);
-    // Wait past one interval
-    await Bun.sleep(1200);
+
+    // Three tick opportunities instead of the single one a 1.2s sleep bought,
+    // and instantly: a tick on a null session must not spawn anything.
+    clock.tick();
+    clock.tick();
+    clock.tick();
+    await giveASpuriousPollAChance();
+
+    expect(captureCalls).toBe(0);
     expect(callCount).toBe(0);
   });
 
@@ -294,11 +390,11 @@ describe("TmuxPoller", () => {
     });
     poller.start();
     poller.setAgent("session-A");
-    await Bun.sleep(50);
+    await waitFor(() => outputs.includes("agent-A output\n"), { message: "output from session-A" });
 
     mockSpawn("agent-B output\n", 0);
     poller.setAgent("session-B");
-    await Bun.sleep(50);
+    await waitFor(() => outputs.includes("agent-B output\n"), { message: "output from session-B" });
 
     expect(outputs).toContain("agent-A output\n");
     expect(outputs).toContain("agent-B output\n");
@@ -306,8 +402,17 @@ describe("TmuxPoller", () => {
 
   test("race condition: stale output discarded when agent changes mid-poll", async () => {
     const outputs: string[] = [];
-    // First spawn takes 200ms — simulates slow tmux
-    mockSpawn("stale-output\n", 0, 200);
+    // The first poll's tmux exit is released by hand, so the agent switch below
+    // is GUARANTEED to land while that poll is still in flight — rather than
+    // hoping a 50ms sleep falls inside a 200ms window on a loaded machine.
+    let releaseStale!: () => void;
+    const stalePending = new Promise<void>((resolve) => { releaseStale = resolve; });
+    let staleSettled = false;
+    spawnCtx.set((_cmd: string[], _opts?: any) => ({
+      stdout: streamOf("stale-output\n"),
+      stderr: emptyStream(),
+      exited: stalePending.then(() => { staleSettled = true; return 0; }),
+    }));
 
     poller = new TmuxPoller({
       onOutput(_raw, stripped) {
@@ -317,11 +422,21 @@ describe("TmuxPoller", () => {
     poller.start();
     poller.setAgent("session-old");
 
-    // Switch agent before the slow poll resolves
-    await Bun.sleep(50);
+    // Switch agents while the first poll is blocked on its exit.
     mockSpawn("fresh-output\n", 0);
     poller.setAgent("session-new");
-    await Bun.sleep(300);
+    await waitFor(() => outputs.includes("fresh-output\n"), { message: "output from the new session" });
+
+    // Now give the stale poll a full chance to deliver: let its exit settle,
+    // then drive one more poll all the way to its callback. Anything the stale
+    // poll was going to emit would have been emitted before that later output.
+    releaseStale();
+    await waitFor(() => staleSettled, { message: "the stale poll's tmux exit to settle" });
+    clock.tick();
+    await waitFor(
+      () => outputs.filter((o) => o === "fresh-output\n").length >= 2,
+      { message: "a later poll to complete after the stale one settled" },
+    );
 
     // The stale "stale-output" should have been discarded
     expect(outputs).not.toContain("stale-output\n");
@@ -340,7 +455,7 @@ describe("TmuxPoller", () => {
     });
     poller.start();
     poller.setAgent("dead-session");
-    await Bun.sleep(50);
+    await waitFor(() => receivedRaw !== undefined, { message: "onOutput for a dead session" });
     expect(receivedRaw).toBe("");
     expect(receivedStripped).toBe("");
   });
@@ -354,22 +469,35 @@ describe("TmuxPoller", () => {
     });
     poller.start();
     poller.setAgent("any-session");
-    await Bun.sleep(50);
+    await waitFor(() => errorMsg !== undefined, { message: "onError from the throwing spawn" });
     expect(errorMsg).toBe("tmux not found");
   });
 
   test("stop prevents further polling", async () => {
-    mockSpawn("data\n", 0);
+    let captureCalls = 0;
     let callCount = 0;
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd.includes("capture-pane")) captureCalls++;
+      return { stdout: streamOf("data\n"), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
     poller = new TmuxPoller({
       onOutput() { callCount++; },
     });
     poller.start();
     poller.setAgent("session");
-    await Bun.sleep(50);
+    await waitFor(() => callCount > 0, { message: "the first poll's output" });
     const countAfterFirst = callCount;
+    const capturesAfterFirst = captureCalls;
+
     poller.stop();
-    await Bun.sleep(1200);
+    // What the old 1.2s sleep could only infer, asserted directly: stop()
+    // really did clear the interval it armed, so no further tick exists.
+    expect(clock.armedTimers).toBe(0);
+    // And even if a tick were already in flight, the callback must be inert.
+    clock.tick();
+    await giveASpuriousPollAChance();
+
+    expect(captureCalls).toBe(capturesAfterFirst);
     expect(callCount).toBe(countAfterFirst);
   });
 
@@ -381,7 +509,7 @@ describe("TmuxPoller", () => {
     });
     // setAgent without start — should not trigger poll
     poller.setAgent("session");
-    await Bun.sleep(50);
+    await giveASpuriousPollAChance();
     expect(callCount).toBe(0);
   });
 
@@ -396,13 +524,8 @@ describe("TmuxPoller", () => {
       if (isDisplayMessage) displayMessageCalls++;
       const stdout = isDisplayMessage ? "120\n" : "pane content\n";
       return {
-        stdout: new ReadableStream({
-          start(c) {
-            c.enqueue(new TextEncoder().encode(stdout));
-            c.close();
-          },
-        }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: streamOf(stdout),
+        stderr: emptyStream(),
         exited: Promise.resolve(0),
       };
     });
@@ -414,8 +537,11 @@ describe("TmuxPoller", () => {
     });
     poller.start();
     poller.setAgent("session-A");
-    // Allow the immediate poll + width query to complete
-    await Bun.sleep(50);
+    // The width query is the last thing setAgent starts, so its callback
+    // firing means the poll it also started has already been counted. No tick
+    // can fire behind our back, so these counts are exact rather than "exact
+    // as long as the sleep landed inside the 1s interval".
+    await waitFor(() => widths.length > 0, { message: "onWidth from setAgent's width query" });
 
     expect(captureCalls).toBe(1);
     expect(displayMessageCalls).toBe(1);
@@ -432,13 +558,8 @@ describe("TmuxPoller", () => {
       if (isDisplayMessage) displayMessageCalls++;
       const stdout = isDisplayMessage ? "100\n" : "pane content\n";
       return {
-        stdout: new ReadableStream({
-          start(c) {
-            c.enqueue(new TextEncoder().encode(stdout));
-            c.close();
-          },
-        }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: streamOf(stdout),
+        stderr: emptyStream(),
         exited: Promise.resolve(0),
       };
     });
@@ -449,8 +570,11 @@ describe("TmuxPoller", () => {
     });
     poller.start();
     poller.setAgent("session-A");
-    // Wait long enough for at least 2 poll ticks (1s interval, immediate + 1)
-    await Bun.sleep(1200);
+    // Two ticks on top of setAgent's immediate poll — the same thing the old
+    // 1.2s sleep was buying (one tick), only more of it and instantly.
+    clock.tick();
+    clock.tick();
+    await waitFor(() => captureCalls >= 3, { message: "captures from setAgent plus two ticks" });
 
     // Multiple captures should have happened, but display-message only once (from setAgent)
     expect(captureCalls).toBeGreaterThan(1);
@@ -467,31 +591,27 @@ describe("TmuxPoller", () => {
       if (isDisplayMessage) displayMessageCalls++;
       const stdout = isDisplayMessage ? "100\n" : "pane content\n";
       return {
-        stdout: new ReadableStream({
-          start(c) {
-            c.enqueue(new TextEncoder().encode(stdout));
-            c.close();
-          },
-        }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: streamOf(stdout),
+        stderr: emptyStream(),
         exited: Promise.resolve(0),
       };
     });
 
+    let widths: number[] = [];
     poller = new TmuxPoller({
       onOutput() {},
-      onWidth() {},
+      onWidth(w) { widths.push(w); },
     });
     poller.start();
     poller.setAgent("session-A");
-    await Bun.sleep(50);
+    await waitFor(() => widths.length > 0, { message: "onWidth from the first setAgent" });
     const capturesAfterFirst = captureCalls;
     expect(displayMessageCalls).toBe(1);
 
     // Calling setAgent with the same session should be a no-op (short-circuit)
     poller.setAgent("session-A");
     poller.setAgent("session-A");
-    await Bun.sleep(50);
+    await giveASpuriousPollAChance();
 
     expect(captureCalls).toBe(capturesAfterFirst);
     expect(displayMessageCalls).toBe(1);
@@ -504,13 +624,8 @@ describe("TmuxPoller", () => {
       if (isDisplayMessage) displayMessageCalls++;
       const stdout = isDisplayMessage ? "80\n" : "pane content\n";
       return {
-        stdout: new ReadableStream({
-          start(c) {
-            c.enqueue(new TextEncoder().encode(stdout));
-            c.close();
-          },
-        }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: streamOf(stdout),
+        stderr: emptyStream(),
         exited: Promise.resolve(0),
       };
     });
@@ -521,11 +636,11 @@ describe("TmuxPoller", () => {
     });
     poller.start();
     poller.setAgent("session-A");
-    await Bun.sleep(50);
+    await waitFor(() => displayMessageCalls === 1, { message: "the width query for session-A" });
     expect(displayMessageCalls).toBe(1);
 
     poller.setAgent("session-B");
-    await Bun.sleep(50);
+    await waitFor(() => displayMessageCalls === 2, { message: "the width query for session-B" });
     expect(displayMessageCalls).toBe(2);
   });
 
@@ -534,8 +649,8 @@ describe("TmuxPoller", () => {
     spawnCtx.set((cmd: string[], _opts?: any) => {
       capturedCmd = cmd;
       return {
-        stdout: new ReadableStream({ start(c) { c.close(); } }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: emptyStream(),
+        stderr: emptyStream(),
         exited: Promise.resolve(0),
       };
     });
@@ -543,7 +658,7 @@ describe("TmuxPoller", () => {
     poller = new TmuxPoller({ onOutput() {} });
     poller.start();
     poller.setAgent("session-A");
-    await Bun.sleep(50);
+    await waitFor(() => capturedCmd.length > 0, { message: "a capture-pane command to be recorded" });
 
     expect(capturedCmd).toContain("-200");
     expect(capturedCmd).not.toContain("-5000");
@@ -554,8 +669,8 @@ describe("TmuxPoller", () => {
     spawnCtx.set((cmd: string[], _opts?: any) => {
       if (cmd.includes("capture-pane")) capturedCmd = cmd;
       return {
-        stdout: new ReadableStream({ start(c) { c.close(); } }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: emptyStream(),
+        stderr: emptyStream(),
         exited: Promise.resolve(0),
       };
     });
@@ -563,7 +678,7 @@ describe("TmuxPoller", () => {
     poller = new TmuxPoller({ onOutput() {} });
     poller.start();
     poller.setAgent("session-A");
-    await Bun.sleep(50);
+    await waitFor(() => capturedCmd.length > 0, { message: "a capture-pane command to be recorded" });
 
     // -J makes the poll return logical lines; the dashboard word-wraps them to
     // the pane width so the whole scrollback renders at one consistent width.
@@ -575,8 +690,8 @@ describe("TmuxPoller", () => {
     spawnCtx.set((cmd: string[], _opts?: any) => {
       lastCmd = cmd;
       return {
-        stdout: new ReadableStream({ start(c) { c.close(); } }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: emptyStream(),
+        stderr: emptyStream(),
         exited: Promise.resolve(0),
       };
     });
@@ -584,15 +699,15 @@ describe("TmuxPoller", () => {
     poller = new TmuxPoller({ onOutput() {} });
     poller.start();
     poller.setAgent("session-A");
-    await Bun.sleep(50);
+    await waitFor(() => lastCmd.includes("-200"), { message: "the default -200 capture" });
     expect(lastCmd).toContain("-200");
 
     poller.setLines(50);
-    await Bun.sleep(50);
+    await waitFor(() => lastCmd.includes("-50"), { message: "a capture using -50 after setLines(50)" });
     expect(lastCmd).toContain("-50");
 
     poller.setLines(1234);
-    await Bun.sleep(50);
+    await waitFor(() => lastCmd.includes("-1234"), { message: "a capture using -1234 after setLines(1234)" });
     expect(lastCmd).toContain("-1234");
   });
 
@@ -601,8 +716,8 @@ describe("TmuxPoller", () => {
     spawnCtx.set((cmd: string[], _opts?: any) => {
       if (cmd.includes("capture-pane")) captureCalls++;
       return {
-        stdout: new ReadableStream({ start(c) { c.close(); } }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: emptyStream(),
+        stderr: emptyStream(),
         exited: Promise.resolve(0),
       };
     });
@@ -610,12 +725,14 @@ describe("TmuxPoller", () => {
     poller = new TmuxPoller({ onOutput() {} });
     poller.start();
     poller.setAgent("session-A");
-    await Bun.sleep(50);
+    await waitFor(() => captureCalls > 0, { message: "the poll from setAgent" });
     const before = captureCalls;
 
-    // Changing the value should trigger an immediate extra poll
+    // Changing the value should trigger an immediate extra poll. "Immediate"
+    // means "without waiting for a tick", and no tick can fire here — the test
+    // owns the clock — so exactly one extra poll is what this must produce.
     poller.setLines(500);
-    await Bun.sleep(50);
+    await waitFor(() => captureCalls === before + 1, { message: "the extra poll from setLines(500)" });
     expect(captureCalls).toBe(before + 1);
   });
 
@@ -624,8 +741,8 @@ describe("TmuxPoller", () => {
     spawnCtx.set((cmd: string[], _opts?: any) => {
       if (cmd.includes("capture-pane")) captureCalls++;
       return {
-        stdout: new ReadableStream({ start(c) { c.close(); } }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: emptyStream(),
+        stderr: emptyStream(),
         exited: Promise.resolve(0),
       };
     });
@@ -633,11 +750,11 @@ describe("TmuxPoller", () => {
     poller = new TmuxPoller({ onOutput() {} });
     poller.start();
     poller.setAgent("session-A");
-    await Bun.sleep(50);
+    await waitFor(() => captureCalls > 0, { message: "the poll from setAgent" });
     const before = captureCalls;
 
     poller.setLines(200); // same as default
-    await Bun.sleep(50);
+    await giveASpuriousPollAChance();
     expect(captureCalls).toBe(before);
   });
 
@@ -646,15 +763,15 @@ describe("TmuxPoller", () => {
     spawnCtx.set((cmd: string[], _opts?: any) => {
       if (cmd.includes("capture-pane")) captureCalls++;
       return {
-        stdout: new ReadableStream({ start(c) { c.close(); } }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: emptyStream(),
+        stderr: emptyStream(),
         exited: Promise.resolve(0),
       };
     });
 
     poller = new TmuxPoller({ onOutput() {} });
     poller.setLines(100);
-    await Bun.sleep(50);
+    await giveASpuriousPollAChance();
     expect(captureCalls).toBe(0);
   });
 
@@ -663,8 +780,8 @@ describe("TmuxPoller", () => {
     spawnCtx.set((cmd: string[], _opts?: any) => {
       if (cmd.includes("display-message")) displayMessageCalls++;
       return {
-        stdout: new ReadableStream({ start(c) { c.close(); } }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: emptyStream(),
+        stderr: emptyStream(),
         exited: Promise.resolve(0),
       };
     });
@@ -675,7 +792,7 @@ describe("TmuxPoller", () => {
     });
     // setAgent without start — should not trigger width query
     poller.setAgent("session");
-    await Bun.sleep(50);
+    await giveASpuriousPollAChance();
     expect(displayMessageCalls).toBe(0);
   });
 
@@ -696,8 +813,8 @@ describe("TmuxPoller", () => {
     spawnCtx.set((cmd: string[], _opts?: any) => {
       if (cmd.includes("capture-pane")) captureCalls++;
       return {
-        stdout: new ReadableStream({ start(c) { c.close(); } }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: emptyStream(),
+        stderr: emptyStream(),
         exited: Promise.resolve(0),
       };
     });
@@ -705,13 +822,18 @@ describe("TmuxPoller", () => {
     poller = new TmuxPoller({ onOutput() {} });
     poller.start();
     poller.setAgent("session-A");
-    await Bun.sleep(50);
+    await waitFor(() => captureCalls > 0, { message: "the poll from setAgent" });
     expect(captureCalls).toBeGreaterThan(0);
 
     poller.stop();
     const countAfterStop = captureCalls;
-    // Wait past more than one interval — a stopped poller must not spawn.
-    await Bun.sleep(1200);
+    // The interval is really gone (not merely quiet for 1.2s)...
+    expect(clock.armedTimers).toBe(0);
+    // ...and the callback is inert if one fires anyway. Firing the tick is a
+    // more direct test of the name than waiting for a tick that cannot come.
+    clock.tick();
+    clock.tick();
+    await giveASpuriousPollAChance();
     expect(captureCalls).toBe(countAfterStop);
   });
 
@@ -720,13 +842,8 @@ describe("TmuxPoller", () => {
     spawnCtx.set((cmd: string[], _opts?: any) => {
       if (cmd.includes("capture-pane")) captureCalls++;
       return {
-        stdout: new ReadableStream({
-          start(c) {
-            c.enqueue(new TextEncoder().encode("data\n"));
-            c.close();
-          },
-        }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: streamOf("data\n"),
+        stderr: emptyStream(),
         exited: Promise.resolve(0),
       };
     });
@@ -734,19 +851,24 @@ describe("TmuxPoller", () => {
     poller = new TmuxPoller({ onOutput() {} });
     poller.start();
     poller.setAgent("session-A");
-    await Bun.sleep(50);
+    await waitFor(() => captureCalls > 0, { message: "the poll from setAgent" });
 
     // Pause — simulates the pane going off-screen
     poller.stop();
     const countWhilePaused = captureCalls;
-    await Bun.sleep(1100);
+    expect(clock.armedTimers).toBe(0);
+    clock.tick();
+    await giveASpuriousPollAChance();
     expect(captureCalls).toBe(countWhilePaused);
 
     // Resume — should immediately poll (no waiting up to 1s for the next tick)
     expect(poller.isRunning()).toBe(false);
     poller.resume();
     expect(poller.isRunning()).toBe(true);
-    await Bun.sleep(50);
+    expect(clock.armedTimers).toBe(1);
+    // Nothing but resume() can produce a poll here, so the count is exactly
+    // one higher — the old version had to hope no 1s tick landed in the gap.
+    await waitFor(() => captureCalls === countWhilePaused + 1, { message: "the immediate poll from resume()" });
     expect(captureCalls).toBe(countWhilePaused + 1);
   });
 
@@ -755,8 +877,8 @@ describe("TmuxPoller", () => {
     spawnCtx.set((cmd: string[], _opts?: any) => {
       if (cmd.includes("capture-pane")) captureCalls++;
       return {
-        stdout: new ReadableStream({ start(c) { c.close(); } }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: emptyStream(),
+        stderr: emptyStream(),
         exited: Promise.resolve(0),
       };
     });
@@ -764,13 +886,17 @@ describe("TmuxPoller", () => {
     poller = new TmuxPoller({ onOutput() {} });
     poller.start();
     poller.setAgent("session-A");
-    await Bun.sleep(50);
+    await waitFor(() => captureCalls > 0, { message: "the poll from setAgent" });
     const before = captureCalls;
+    expect(clock.armedTimers).toBe(1);
 
     // resume() while already running must not fire an extra poll
     poller.resume();
-    await Bun.sleep(50);
+    await giveASpuriousPollAChance();
     expect(captureCalls).toBe(before);
+    // ...and must not arm a second interval either, which is the other half of
+    // this test's name and was previously unchecked.
+    expect(clock.armedTimers).toBe(1);
   });
 
   test("resume() without a session set does not poll", async () => {
@@ -778,8 +904,8 @@ describe("TmuxPoller", () => {
     spawnCtx.set((cmd: string[], _opts?: any) => {
       if (cmd.includes("capture-pane")) captureCalls++;
       return {
-        stdout: new ReadableStream({ start(c) { c.close(); } }),
-        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        stdout: emptyStream(),
+        stderr: emptyStream(),
         exited: Promise.resolve(0),
       };
     });
@@ -788,7 +914,8 @@ describe("TmuxPoller", () => {
     // No setAgent — resume should start the timer but not poll a null session.
     poller.resume();
     expect(poller.isRunning()).toBe(true);
-    await Bun.sleep(50);
+    clock.tick();
+    await giveASpuriousPollAChance();
     expect(captureCalls).toBe(0);
   });
 });
@@ -848,9 +975,15 @@ describe("expandTabs", () => {
 
 describe("TmuxPoller tab handling at the boundary", () => {
   let poller: TmuxPoller;
+  let clock: ManualClock;
+
+  beforeEach(() => {
+    clock = installManualClock();
+  });
 
   afterEach(() => {
     poller?.stop();
+    clock.restore();
   });
 
   // This is the regression guard for the ib watch crash: a future change
@@ -871,7 +1004,7 @@ describe("TmuxPoller tab handling at the boundary", () => {
     });
     poller.start();
     poller.setAgent("tabby-session");
-    await Bun.sleep(50);
+    await waitFor(() => receivedRaw !== undefined, { message: "onOutput carrying the tabbed line" });
 
     expect(receivedRaw).toBeDefined();
     expect(receivedStripped).toBeDefined();
@@ -894,7 +1027,7 @@ describe("TmuxPoller tab handling at the boundary", () => {
     });
     poller.start();
     poller.setAgent("plain-session");
-    await Bun.sleep(50);
+    await waitFor(() => receivedRaw !== undefined, { message: "onOutput for the tab-free line" });
     expect(receivedRaw).toBe("plain output line\n");
   });
 });

@@ -1,6 +1,7 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir, writeFile, readFile } from "fs/promises";
+import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import {
   detectStateFromMessage,
@@ -9,9 +10,56 @@ import {
   findUnfinishedChildren,
   hasActiveChildren,
 } from "./agent-status";
+import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { setSendSpawnRunner, resetSendSpawnRunner } from "../ib-commands";
 import { makeSpawnResult } from "../test-utils";
 import { WATCHDOG_SENTINEL } from "../watchdog";
+
+/**
+ * Per-process itsybitsy home for the whole file.
+ *
+ * The temp dirs this file already creates cover the AGENT dir, but not the
+ * outbox: `executeResultActions` delivers through `agentOutboxDir`, which is
+ * `<itsybitsy home>/agents/<agent id>/` — a completely different tree. Left at
+ * its default that home is the developer's REAL `~/.itsybitsy`, so running this
+ * file wrote `agents/test-agent-001/outbox.jsonl` and
+ * `agents/manager-001/outbox.jsonl` straight into the user's live agent
+ * registry. Both of those directories exist on this machine right now, which is
+ * how this was found.
+ *
+ * That is also a cross-process flake, not just clutter. The queue is keyed by
+ * agent id, and the ids here are the fixed fixtures "test-agent-001" and
+ * "manager-001", so two `bun test` processes running at once share ONE queue
+ * per id. Enqueue is deliberately not lock-guarded (the lock guards delivery),
+ * so the other process's drain can read a batch containing THIS process's
+ * just-enqueued message, deliver it into ITS spawn mock, and rewrite the file
+ * without it — leaving the assertions here to find nothing delivered.
+ *
+ * Both halves of the override matter:
+ *  - `setCoordinatorHome` is what `getCoordinatorHome`/`agentOutboxDir` consult.
+ *  - `process.env.HOME` is what `hooks/shared.ts` resolves independently (it
+ *    deliberately does NOT honor the coordinator override), and it is also the
+ *    fallback `itsybitsyHome()` uses whenever the override is cleared — which
+ *    the "watchdog attribution on delivery" block below does in its `afterEach`.
+ *    Without the HOME half, every test after that block would silently fall
+ *    back to the real home again.
+ */
+let testHome: string;
+let realHome: string | undefined;
+
+beforeAll(() => {
+  testHome = mkdtempSync(join(tmpdir(), "ib-agent-status-home-"));
+  realHome = process.env.HOME;
+  process.env.HOME = testHome;
+  setCoordinatorHome(join(testHome, ".itsybitsy"));
+});
+
+afterAll(() => {
+  resetCoordinatorHome();
+  if (realHome === undefined) delete process.env.HOME;
+  else process.env.HOME = realHome;
+  rmSync(testHome, { recursive: true, force: true });
+});
 
 // ── Helper to create temp agent dirs ─────────────────────────────────────────
 
@@ -1074,9 +1122,10 @@ describe("executeResultActions — watchdog attribution on delivery", () => {
   beforeEach(async () => {
     ctx = await createTempAgentDir();
     // Point the coordinator home (where agentOutboxDir resolves) at a sandbox so
-    // the inline outbox drain never touches the real ~/.itsybitsy/.
+    // the inline outbox drain never touches the real ~/.itsybitsy/. The
+    // file-wide override already guarantees that; this per-test dir additionally
+    // gives each test in this block a fresh, empty queue.
     coordHome = await mkdtemp(join(tmpdir(), "agent-status-coord-"));
-    const { setCoordinatorHome } = await import("../coordinator");
     setCoordinatorHome(coordHome);
     spawnCalls = [];
     // Capture every tmux command deliverMessage issues. No transient file exists
@@ -1090,8 +1139,11 @@ describe("executeResultActions — watchdog attribution on delivery", () => {
 
   afterEach(async () => {
     resetSendSpawnRunner();
-    const { resetCoordinatorHome } = await import("../coordinator");
-    resetCoordinatorHome();
+    // Hand the override back to the file-wide isolated home rather than
+    // clearing it outright: a bare `resetCoordinatorHome()` here would drop
+    // every later test in this file back onto whatever `process.env.HOME`
+    // resolves to, which is exactly the leak this file is fixing.
+    setCoordinatorHome(join(testHome, ".itsybitsy"));
     await rm(coordHome, { recursive: true, force: true });
     await ctx.cleanup();
   });

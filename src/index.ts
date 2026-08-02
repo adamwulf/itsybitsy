@@ -878,7 +878,10 @@ function printUsage(): void {
   console.log("  tgtyping            Send Telegram typing indicator (for hook use)");
 }
 
-async function main() {
+// Exported so the root `index.ts` shim can dispatch it. That shim is the entry
+// point for CLAUDE.md's documented `bun build --compile ... index.ts`, where
+// `import.meta.main` is false *here* — see the guard at the bottom of this file.
+export async function main() {
   if (command === "--help" || command === "-h" || command === "help") {
     printUsage();
     return;
@@ -2767,7 +2770,28 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// Only dispatch when this module IS the entry point — true for
+// `bun run src/index.ts` and for a binary compiled from this file (package.json's
+// `build` script), false when a test imports a symbol from here.
+//
+// NOTE: this guard alone is NOT enough to keep the CLI working. CLAUDE.md builds
+// the binary from the ROOT `index.ts` shim, which merely re-exports this module;
+// through that entry `import.meta.main` is false here and the CLI would dispatch
+// nothing at all. The root shim therefore carries its own guarded `main()` call.
+// Both entry points are covered by tests in src/index.test.ts.
+//
+// Without the guard, `import { collectAgents } from "./index"` in a test runs
+// main() inside the test runner, with `command` bound to process.argv[2] —
+// which under `bun test` is whatever filter the developer typed. `bun test`
+// with no filter lands on the default branch and merely prints usage into the
+// test output, but `bun test watchdog` would start the real watchdog loop in
+// the test process, and `bun test state` / `list` / `status` / `diff` / `send`
+// / `merge` / `push` / `nuke` / `remove` would run those commands for real
+// against the developer's actual repos. main() is also async and can call
+// process.exit(), so it raced the tests it was running alongside.
+if (import.meta.main) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

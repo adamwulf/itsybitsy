@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
 import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -19,6 +19,15 @@ import { setUserConfigPath, resetUserConfigPath } from "./config";
 import { IB_COORDINATOR_SESSION } from "./coordinator";
 import type { Agent } from "./agents";
 import type { RepoEntry } from "./registry";
+
+// Several describes below spawn a real `bun run src/index.ts` subprocess per
+// assertion, and some spawn two. Each spawn has to transpile the whole
+// index.ts import graph first, which is far more load-sensitive than an
+// in-process unit test — a single spawn was measured at 156s during a
+// pathologically loaded run. bun's 5s default leaves no headroom for that.
+// Raising the bound only changes how long a genuinely stuck spawn takes to
+// fail; it weakens no assertion, and passing tests are unaffected.
+setDefaultTimeout(60_000);
 
 // ─── collectAgents ───────────────────────────────────────────────────────────
 
@@ -1516,6 +1525,28 @@ describe("Telegram admin subcommands", () => {
     return { stdout, stderr, exitCode };
   }
 
+  /**
+   * Run the CLI as a SETUP step and require it to have succeeded.
+   *
+   * A setup command whose result is discarded turns any failure of that
+   * command into a confusing assertion failure on the *next* command — e.g. a
+   * `tgallow` that never seeded the allowlist shows up as `tgdeny` reporting
+   * "not present: 12345" instead of "removed: 12345", pointing the reader at
+   * the wrong command entirely. Checking the setup here attributes the failure
+   * to the step that actually broke, and includes the subprocess's own
+   * stdout/stderr so the reason is visible rather than swallowed.
+   */
+  async function runCliSetup(cliArgs: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const r = await runCli(cliArgs);
+    if (r.exitCode !== 0) {
+      throw new Error(
+        `setup command \`ib ${cliArgs.join(" ")}\` failed: exit=${r.exitCode}\n` +
+        `stdout: ${JSON.stringify(r.stdout)}\nstderr: ${JSON.stringify(r.stderr)}`,
+      );
+    }
+    return r;
+  }
+
   beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), "ib-tg-test-"));
   });
@@ -1547,7 +1578,8 @@ describe("Telegram admin subcommands", () => {
   });
 
   test("tgdeny removes and is idempotent", async () => {
-    await runCli(["tgallow", "12345"]);
+    const setup = await runCliSetup(["tgallow", "12345"]);
+    expect(setup.stdout).toContain("added: 12345");
     const r1 = await runCli(["tgdeny", "12345"]);
     expect(r1.exitCode).toBe(0);
     expect(r1.stdout).toContain("removed: 12345");
@@ -1573,4 +1605,83 @@ describe("Telegram admin subcommands", () => {
     expect(stdout).toBe("");
     expect(stderr).toBe("");
   });
+});
+
+// ─── CLI entry points ────────────────────────────────────────────────────────
+
+describe("CLI entry points", () => {
+  const repoRoot = import.meta.dir.replace(/\/src$/, "");
+
+  async function runEntry(
+    entry: string,
+    cliArgs: string[],
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const proc = Bun.spawn(["bun", "run", `${repoRoot}/${entry}`, ...cliArgs], {
+      cwd: repoRoot,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, HOME: "/tmp/ib-test-nonexistent-home" },
+    });
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    const exitCode = await proc.exited;
+    return { stdout, stderr, exitCode };
+  }
+
+  // Both files are real entry points and the project builds the binary from
+  // BOTH depending on which instruction you follow: package.json's `build`
+  // script compiles src/index.ts, while CLAUDE.md documents
+  // `bun build --compile ... index.ts` (the root shim). Dispatch is guarded by
+  // `import.meta.main`, which is per-module — so a guard that only covers one
+  // file silently produces a binary that starts up and does nothing. That is
+  // not a theoretical worry: guarding only src/index.ts did exactly that, and
+  // no existing test caught it because every other CLI test spawns
+  // src/index.ts, the entry that still worked.
+  test.each([["index.ts"], ["src/index.ts"]])(
+    "%s dispatches commands when run as the entry point",
+    async (entry) => {
+      const { stdout, exitCode } = await runEntry(entry, ["list-types"]);
+      expect(exitCode).toBe(0);
+      // A known row from the agent-type table — proves the command actually ran
+      // rather than the process merely exiting 0 with no output.
+      expect(stdout).toContain("coordinator");
+    },
+  );
+
+  // The other half of the contract: importing must NOT dispatch. Without this,
+  // `bun test <filter>` runs main() inside the test runner with the filter bound
+  // to process.argv[2], so `bun test send` / `merge` / `nuke` would execute those
+  // commands for real against the developer's repos.
+  test.each([["index.ts"], ["src/index.ts"]])(
+    "importing %s runs no CLI dispatch",
+    async (entry) => {
+      const proc = Bun.spawn(
+        ["bun", "-e", `await import("${repoRoot}/${entry}"); console.log("IMPORT_OK");`],
+        {
+          cwd: repoRoot,
+          stdout: "pipe",
+          stderr: "pipe",
+          env: { ...process.env, HOME: "/tmp/ib-test-nonexistent-home" },
+        },
+      );
+      const [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      const exitCode = await proc.exited;
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("IMPORT_OK");
+      // Assert against the banner printUsage() actually emits. Under `bun -e`
+      // argv[2] is undefined, so a leaked dispatch lands on main()'s DEFAULT
+      // branch — it does NOT print "Usage: ib" (that string only appears in
+      // per-command help) and it does NOT print the list-types table. Asserting
+      // absence of those made this test pass under the very regression it
+      // exists to catch; these two strings are what a leak really prints.
+      expect(stdout).not.toContain("Cross-repo agent dashboard");
+      expect(stdout).not.toContain("Registry:");
+      expect(stderr).not.toContain("Cross-repo agent dashboard");
+    },
+  );
 });

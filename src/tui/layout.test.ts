@@ -1,7 +1,9 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm } from "fs/promises";
+import { existsSync } from "fs";
 import { tmpdir, homedir } from "os";
+import { waitForValue } from "../test-utils";
 import {
   loadLayout, saveLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave,
   setLayoutPath, resetLayoutPath, getLayoutPath,
@@ -11,6 +13,26 @@ import type { LayoutState } from "./layout";
 import {
   getSavedSidebarWidth, getTmuxWidthForAgent, PINNED_TMUX_WIDTH,
 } from "./widths";
+
+// Two tests here wait out a real 500ms debounce timer and then a real file
+// write. `waitForValue` defaults to a 4s bound, chosen in b54bd0f to fire just
+// under bun's 5s default so a stuck wait reports WHAT it awaited instead of
+// losing to a generic timeout — but that pairing leaves this file only 4s of
+// headroom over a 500ms debounce, and a loaded machine eats it. Both were
+// observed failing that way during this branch's load runs: once as
+// "waitForValue timed out after 4000ms waiting for: debounced layout write",
+// once as the whole test dying at 10.2s.
+//
+// Raising the per-test bound is only half the fix: at bun's 5s default the 4s
+// wait still fires FIRST, so the extra headroom would be unreachable. The two
+// waits below therefore carry an explicit DEBOUNCE_WAIT_MS that sits under this
+// bound. Both numbers are FAILURE bounds, not waits — a wait returns the
+// instant its value appears, so passing tests are unaffected and no assertion
+// changes; they only decide how long a genuinely stuck write is tolerated.
+setDefaultTimeout(30_000);
+
+/** Failure bound for the debounce waits. Under the 30s per-test bound above. */
+const DEBOUNCE_WAIT_MS = 20_000;
 
 const sampleLayout: LayoutState = {
   sidebarWidth: 70,
@@ -101,12 +123,19 @@ describe("layout persistence", () => {
     const path = join(tmpDir, "layout.json");
     setLayoutPath(path);
     saveLayoutDebounced(sampleLayout);
-    // Not written yet
-    const file = Bun.file(path);
-    expect(await file.exists()).toBe(false);
-    // Wait for debounce
-    await new Promise((r) => setTimeout(r, 600));
-    const loaded = await loadLayout();
+    // Not written yet. Checked SYNCHRONOUSLY: a debounce timer can only fire
+    // once control returns to the event loop, so a synchronous check proves
+    // "no write was scheduled inline" without racing the 500ms timer. The old
+    // `await file.exists()` yielded first, so on a loaded machine the timer
+    // could fire during that yield and the file could legitimately exist.
+    expect(existsSync(path)).toBe(false);
+    // Wait for the debounce timer AND the write it kicks off. The timer
+    // callback calls saveLayout() without awaiting it, so "500ms have passed"
+    // does not imply "the bytes are on disk" — wait for the real condition.
+    const loaded = await waitForValue(() => loadLayout(), {
+      timeoutMs: DEBOUNCE_WAIT_MS,
+      message: "debounced layout write",
+    });
     expect(loaded).toEqual(sampleLayout);
   });
 
@@ -116,8 +145,10 @@ describe("layout persistence", () => {
     saveLayoutDebounced({ ...sampleLayout, sidebarWidth: 50 });
     saveLayoutDebounced({ ...sampleLayout, sidebarWidth: 55 });
     saveLayoutDebounced({ ...sampleLayout, sidebarWidth: 60 });
-    await new Promise((r) => setTimeout(r, 600));
-    const loaded = await loadLayout();
+    const loaded = await waitForValue(() => loadLayout(), {
+      timeoutMs: DEBOUNCE_WAIT_MS,
+      message: "coalesced layout write",
+    });
     expect(loaded!.sidebarWidth).toBe(60);
   });
 
@@ -126,6 +157,9 @@ describe("layout persistence", () => {
     setLayoutPath(path);
     saveLayoutDebounced(sampleLayout);
     cancelPendingSave();
+    // Negative assertion — a fixed wait is correct here (there is no condition
+    // to wait for, only the absence of one). Waiting longer than the 500ms
+    // debounce can only make this stricter, so load cannot break it.
     await new Promise((r) => setTimeout(r, 600));
     expect(await Bun.file(path).exists()).toBe(false);
   });

@@ -1,11 +1,55 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import { detectRole, generateInstructions, teamAwarenessBlock, interpolateTemplate, buildPathIsolationSection, hookSessionStart, type SessionContext } from "./session-start";
 import { readAgentState } from "../agents";
 import { mkdtemp, rm, mkdir } from "fs/promises";
+import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
+import { ensureAgentTypesDir } from "../agent-types";
 import { createTeam, addMember } from "../teams";
+
+/**
+ * Per-process itsybitsy home for the whole file.
+ *
+ * This file was not merely writing into the developer's real `~/.itsybitsy` —
+ * several tests were READING it and depending on its contents. `generateInstructions`
+ * calls `loadAgentType`, which resolves `manager` / `worker` / `coordinator` from
+ * `$HOME/.itsybitsy/agent-types/<name>.md`. Four tests here therefore asserted
+ * against whatever type files this particular machine happens to have, including
+ * any local edits, and would fail outright on a machine that had never run
+ * `ib init-types`. Redirecting HOME alone proves it: 51 pass / 4 fail.
+ *
+ * So the isolated home is seeded with the EMBEDDED stock type files via
+ * `ensureAgentTypesDir()` — the same content `ib init-types` writes. That keeps
+ * all four tests running with no assertion changed, and makes them hermetic:
+ * they now exercise the types this repo ships rather than the ones this laptop
+ * has lying around.
+ *
+ * `process.env.HOME` is the half that matters most here, because both
+ * `agent-types.ts` and `hooks/shared.ts` read it directly and neither honors the
+ * `setCoordinatorHome` override. `setCoordinatorHome` is set alongside it so the
+ * outbox/teams paths resolve into the same tree instead of the real one.
+ */
+let testHome: string;
+let realHome: string | undefined;
+
+beforeAll(async () => {
+  testHome = mkdtempSync(join(tmpdir(), "ib-session-start-home-"));
+  realHome = process.env.HOME;
+  process.env.HOME = testHome;
+  setCoordinatorHome(join(testHome, ".itsybitsy"));
+  // Populate <testHome>/.itsybitsy/agent-types/ with the embedded defaults.
+  // Reads process.env.HOME at call time, so it lands in the isolated home.
+  await ensureAgentTypesDir();
+});
+
+afterAll(() => {
+  resetCoordinatorHome();
+  if (realHome === undefined) delete process.env.HOME;
+  else process.env.HOME = realHome;
+  rmSync(testHome, { recursive: true, force: true });
+});
 
 describe("session-start", () => {
   test("detectRole non-agent cwd → primary", () => {
@@ -413,7 +457,6 @@ describe("interpolateTemplate {{availableTypes}}", () => {
     rootRepoPath: "/repo",
   };
 
-  const originalHome = process.env.HOME;
   let tempHome: string;
   let typesDir: string;
 
@@ -425,7 +468,12 @@ describe("interpolateTemplate {{availableTypes}}", () => {
   });
 
   afterEach(async () => {
-    process.env.HOME = originalHome;
+    // Restore the file-wide isolated home, NOT a `const originalHome` captured
+    // in the describe body. That capture ran at module-load time, before
+    // `beforeAll` installed the override, so it held the developer's REAL home —
+    // restoring it here handed every later test in this file back to the real
+    // ~/.itsybitsy and quietly defeated the isolation.
+    process.env.HOME = testHome;
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -698,7 +746,6 @@ describe("hookSessionStart with @system", () => {
   let originalWrite: typeof process.stdout.write;
   let tempHome: string;
   let typesDir: string;
-  const originalHome = process.env.HOME;
 
   beforeEach(async () => {
     captured = "";
@@ -716,7 +763,9 @@ describe("hookSessionStart with @system", () => {
 
   afterEach(async () => {
     process.stdout.write = originalWrite;
-    process.env.HOME = originalHome;
+    // Restore the file-wide isolated home — see the note on the equivalent
+    // afterEach above for why a describe-body capture is the wrong target.
+    process.env.HOME = testHome;
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -767,7 +816,6 @@ describe("session-start team awareness (§16.6)", () => {
   let baseDir: string;
   let homeDir: string;
   let typesDir: string;
-  const originalHome = process.env.HOME;
 
   beforeEach(async () => {
     baseDir = await mkdtemp(join(tmpdir(), "ib-sessionstart-teams-" + crypto.randomUUID() + "-"));
@@ -779,8 +827,11 @@ describe("session-start team awareness (§16.6)", () => {
   });
 
   afterEach(async () => {
-    resetCoordinatorHome();
-    process.env.HOME = originalHome;
+    // Hand both halves back to the file-wide isolated home rather than clearing
+    // the override and restoring a module-load-time HOME capture — either one
+    // would drop the remaining tests back onto the real ~/.itsybitsy.
+    setCoordinatorHome(join(testHome, ".itsybitsy"));
+    process.env.HOME = testHome;
     await rm(baseDir, { recursive: true, force: true });
   });
 

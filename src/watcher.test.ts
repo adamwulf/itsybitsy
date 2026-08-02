@@ -3,7 +3,7 @@ import { join } from "path";
 import { mkdtemp, rm, mkdir, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import type { Agent, FlatEntry, PendingQuestion, ReadAgentsResult } from "./agents";
-import { makeAgent as _makeAgent, makeFlatAgent } from "./test-utils";
+import { makeAgent as _makeAgent, makeFlatAgent, waitFor } from "./test-utils";
 import type { RepoEntry } from "./registry";
 
 // --- Inject fake ./agents functions via the watcher's agentsCtx ---
@@ -1245,8 +1245,13 @@ describe("AgentWatcher", () => {
       const callsBefore = mockFlattenAgentTree.mock.calls.length;
 
       watcher.setGroupByParent(true);
-      // setGroupByParent kicks a refresh(); let its async chain settle.
-      await new Promise((r) => setTimeout(r, 10));
+      // setGroupByParent kicks a refresh(); wait for that refresh to land
+      // rather than for 10ms to pass. The assertions below are positive ("a
+      // fresh flatten happened"), so an early wake-up fails the test.
+      await waitFor(
+        () => mockFlattenAgentTree.mock.calls.length > callsBefore,
+        { message: "refresh triggered by setGroupByParent" },
+      );
       watcher.stop();
 
       // A fresh flatten happened and it carried groupByParent=true.

@@ -7,7 +7,7 @@
  * on a fake client we hand-roll inline rather than the real one.
  */
 
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, readdir, writeFile, readFile } from "fs/promises";
 import { tmpdir } from "os";
@@ -31,6 +31,13 @@ import {
   sleepCtx as clientSleepCtx,
   logCtx as clientLogCtx,
 } from "./telegram-client";
+
+// Raise the per-test timeout above MIN_WAIT_BOUND_MS below. bun's default is
+// 5s, which would kill a test before its own wait could report WHAT it was
+// waiting for — the informative failure has to win that race. This only
+// affects how long a hung test takes to fail; passing tests are unaffected,
+// since every wait here returns as soon as its predicate holds.
+setDefaultTimeout(30_000);
 
 let tmpRoot: string;
 let outboxDir: string;
@@ -69,14 +76,32 @@ function makeOkFetch(captured: Array<{ url: string; body: unknown }>): void {
   });
 }
 
-/** Wait until `pred()` returns true or `timeoutMs` elapses. Accepts sync or
- *  async predicates. Tight 5ms cadence so tests stay snappy without spinning. */
+/**
+ * Lower bound on how long any wait below is allowed to run before it gives up.
+ *
+ * The `timeoutMs` each caller passes is a FAILURE bound, not a wait: waitFor
+ * returns the instant `pred()` holds, so a generous bound costs nothing on the
+ * passing path — it only decides how long we tolerate before declaring a hang.
+ * The per-call values (1-3s) were tuned on an idle machine, and the work here
+ * goes through a real fs.watch plus the outbox's own poll cadence, which takes
+ * several times longer when the machine is busy. That failed the "text,
+ * reaction, and file descriptors all flow through the one outbox" test at its
+ * 2s bound during a loaded full-suite run, for machine-speed reasons rather
+ * than anything the test asserts. Flooring the bound fixes every wait in this
+ * file at once while still catching a genuine hang.
+ */
+const MIN_WAIT_BOUND_MS = 15_000;
+
+/** Wait until `pred()` returns true or the (floored) bound elapses. Accepts
+ *  sync or async predicates. Tight 5ms cadence so tests stay snappy without
+ *  spinning — a satisfied predicate still returns in ~5ms. */
 async function waitFor(pred: () => boolean | Promise<boolean>, timeoutMs = 1_000): Promise<void> {
+  const bound = Math.max(timeoutMs, MIN_WAIT_BOUND_MS);
   const start = Date.now();
   for (;;) {
     if (await pred()) return;
-    if (Date.now() - start > timeoutMs) {
-      throw new Error(`waitFor: timeout after ${timeoutMs}ms`);
+    if (Date.now() - start > bound) {
+      throw new Error(`waitFor: timeout after ${bound}ms`);
     }
     await new Promise<void>((r) => setTimeout(r, 5));
   }

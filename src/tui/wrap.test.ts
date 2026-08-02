@@ -616,31 +616,121 @@ describe("computeChromeSlice — chrome detection on UNWRAPPED logical lines", (
 });
 
 describe("wordWrapLines performance", () => {
-  test("word-wraps a 5000-logical-line buffer at width 120 under threshold", () => {
+  // This test exists to catch a wordWrapLines that stops scaling linearly —
+  // "a regression that makes wrapping super-linear", as the original put it.
+  //
+  // It used to check that for a proxy: wrap 5000 lines, assert the elapsed
+  // wall-clock was under 80ms. A duration budget cannot express that property
+  // on a shared machine, because duration measures the machine as much as the
+  // code. Measured here on identical work:
+  //
+  //   wall-clock, machine busy   59 - 263 ms   (4.4x spread, same work)
+  //   CPU time,   machine busy   89 -  96 ms
+  //   CPU time,   machine quiet  29 -  33 ms
+  //
+  // CPU time is the better instrument — it excludes time the scheduler took
+  // the process away — but it is still not machine-invariant: the same wrap
+  // costs 3x more CPU under memory pressure (page faults, cache thrashing,
+  // frequency scaling). The old budget failed at 344ms of wall-clock in one
+  // loaded run, and a CPU-time version of it still failed at 96ms in another.
+  //
+  // The ratio between two sizes, however, IS invariant, because both halves
+  // are measured microseconds apart under whatever conditions currently hold.
+  // Across the same busy/quiet swing above it moved only 1.98 -> 2.07.
+  //
+  // So the shape of the assertion changed: it now measures the thing the test
+  // was always trying to protect (the growth rate) rather than a duration that
+  // happens to correlate with it on an idle machine. Linear is ~2.0, an O(n^2)
+  // regression is ~4.0, and the bound sits between them. bun's per-test
+  // timeout remains the backstop for a catastrophic constant-factor blow-up.
+  test("word-wraps a 5000-logical-line buffer at width 120 without super-linear growth", () => {
     // 5000 logical lines each ~1.7x the target width — representative of a full
     // scrollback of moderately-wrapped agent output. The memo in
     // TmuxPaneComponent keeps per-render cost O(1) between polls, but the first
     // wrap after each poll must still be fast enough for a ~1s cadence.
-    const lines: string[] = [];
-    for (let i = 0; i < 5000; i++) {
-      lines.push(
-        `row ${i} ` +
-        "word ".repeat(40), // ~200 chars, ~1.7x width 120
-      );
-    }
-    const text = lines.join("\n");
+    // Half that size is wrapped alongside it purely to establish the slope.
+    const build = (n: number): string => {
+      const lines: string[] = [];
+      for (let i = 0; i < n; i++) {
+        lines.push(
+          `row ${i} ` +
+          "word ".repeat(40), // ~200 chars, ~1.7x width 120
+        );
+      }
+      return lines.join("\n");
+    };
     const width = 120;
+    const halfText = build(2500);
+    const fullText = build(5000);
 
-    const start = performance.now();
-    const result = wordWrapLines(text, width);
-    const elapsed = performance.now() - start;
+    let fullRows: string[] = [];
+    const cpuMs = (text: string): number => {
+      const before = process.cpuUsage();
+      const rows = wordWrapLines(text, width);
+      const after = process.cpuUsage(before);
+      if (text === fullText) fullRows = rows;
+      return (after.user + after.system) / 1000;
+    };
 
-    // Sanity: every output row is bounded.
-    for (const row of result) {
+    // Warm up the JIT before measuring — the first passes run interpreted and
+    // cost several times steady state, which is a property of the runtime
+    // rather than of the algorithm.
+    for (let i = 0; i < 2; i++) { cpuMs(halfText); cpuMs(fullText); }
+
+    // Sanity: every output row of the full-size wrap is bounded.
+    for (const row of fullRows) {
       expect(visibleWidth(row)).toBeLessThanOrEqual(width);
     }
-    // Target is ~20ms; assert 80ms to stay meaningful while tolerating shared-CI
-    // jitter. A regression that makes wrapping super-linear blows well past this.
-    expect(elapsed).toBeLessThan(80);
+
+    // Best of N at each size: preemption, GC and page faults can only ever ADD
+    // cost to a sample, so the minimum is the closest estimate of the true
+    // cost. A super-linear regression inflates the full-size samples far more
+    // than the half-size ones, so it survives this and trips the bound.
+    let half = Infinity;
+    let full = Infinity;
+    for (let i = 0; i < 3; i++) {
+      half = Math.min(half, cpuMs(halfText));
+      full = Math.min(full, cpuMs(fullText));
+    }
+
+    // Doubling the input should roughly double the work. Linear ~2.0,
+    // quadratic ~4.0 — fail in between.
+    expect(full / half).toBeLessThan(3);
+
+    // The ratio is blind to constant factors: a wordWrapLines that got 10x
+    // slower while staying perfectly linear still measures ~2.0 and sails
+    // through the check above. bun's per-test timeout is NOT a usable backstop
+    // for that — this file sets no setDefaultTimeout, so the bound is 5s, and a
+    // 10x regression costs ~2.5s of CPU across the whole test. It would take
+    // roughly a 20x regression before anything failed.
+    //
+    // So keep an absolute bound too, sized from measurement rather than from
+    // the nominal cost — sizing against the quiet number is exactly why the old
+    // 80ms bound flaked. Measured `full` on this machine:
+    //
+    //   quiet                         33 - 35 ms
+    //   14 CPU burners                32 - 36 ms   (CPU time excludes
+    //                                               descheduling, so pure CPU
+    //                                               contention barely moves it)
+    //   pathological run, per 4449ed0 89 - 96 ms   (memory pressure — page
+    //                                               faults and cache thrashing
+    //                                               are real work charged to us)
+    //
+    // 300ms is ~8.5x nominal and ~3.1x the worst figure ever observed. The old
+    // 80ms bound had only ~2.3x over nominal and did not clear the 96ms
+    // pathological case AT ALL — it sat below it, which is exactly how it
+    // failed a run that contained no regression.
+    //
+    // It still catches the case the ratio cannot: a 10x linear regression costs
+    // ~330-360ms even on a quiet machine, and far more on a busy one. Measured
+    // cutoff on this hardware is ~9x (8x lands at 285-310ms, right at the knee).
+    // Constant-factor regressions below that remain uncaught by design — that
+    // band cannot be distinguished from machine variance by any wall-clock or
+    // CPU budget, which is what the ratio check above is for.
+    //
+    // Unlike the ratio, this bound IS machine-dependent: nominal is ~33ms here,
+    // so on hardware ~3x slower nominal approaches 100ms and the margin is gone.
+    // Re-measure before trusting 300 anywhere but a developer machine.
+    expect(full).toBeLessThan(300);
   });
 });

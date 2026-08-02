@@ -2492,10 +2492,34 @@ export const CLAUDE_PID_START_MARGIN_SECONDS = 60;
  * Process start timestamps are immutable, so this cache never goes "wrong" —
  * it expires only so a PID that was recycled is eventually noticed.
  *
- * Only the RENDERING path reads it. Destructive signalling (_isPidIdentityCurrent)
- * deletes the entry and probes fresh immediately before SIGTERM, so no teardown
- * decision is ever made from a cached value and this TTL cannot affect
- * signalling safety at all.
+ * READ ME BEFORE RAISING THIS. An earlier version of this comment claimed
+ * "only the RENDERING path reads it", and that claim was wrong in two ways at
+ * once — the reap path and both lifecycle-lock gates read it as well. The
+ * claim is what made the 5s -> 60s raise look free, and it shipped a hole that
+ * killed a live agent's tmux session. So this list is exhaustive by
+ * construction, and anything added to it must state which side it is on.
+ *
+ * Reads the cache (via getProcessStartEpochSeconds ← isPidAliveSince), all
+ * of them RENDERING decisions that are wrong for at most one window:
+ *  - detectAgentStates, the claude_pid gate: labels a recycled PID `running`
+ *    for one extra window. It may not ACT on the opposite verdict from a
+ *    cached read — see the bypass list.
+ *  - detectAgentStates, the transient fast-path: a recycled watchdog PID lets
+ *    a stale snapshot be trusted, bounded independently by TRANSIENT_FRESH_MS.
+ *
+ * BYPASSES the cache — every decision that destroys something. Each deletes
+ * the entry and probes fresh at the moment of use, so no teardown, signal, or
+ * lock steal is ever decided from a cached value:
+ *  - isPidIdentityCurrent: before SIGTERM, and before tearing down the tmux
+ *    session on a PID-derived `stopped` verdict.
+ *  - isPidAliveSinceUncached: confirming a dead verdict in the claude_pid gate
+ *    before the reap, and both lifecycle-lock gates (stepping over a reclaim
+ *    claim, reclaiming an owner's lock).
+ *
+ * The rule the split encodes: a cached process-start read may RENDER a state,
+ * never AUTHORIZE a teardown. A new caller that only labels something belongs
+ * in the first list; a new caller that ends a process, a session, or another
+ * process's claim to a lock belongs in the second.
  *
  * It is deliberately long. Each miss costs a posix_spawn of `ps` (~5ms
  * blocking), and detectAgentStates checks TWO pids per agent per pass — the

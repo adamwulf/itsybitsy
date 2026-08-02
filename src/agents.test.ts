@@ -4879,6 +4879,17 @@ describe("acquireAgentLifecycleLock — stale-lock reclamation", () => {
     expect(halfWritten).toEqual([]);
   }, 60_000);
 
+  // Regression: publishing the lock via a staging file moved the create from
+  // `open(wx)` to Bun.write, which makes missing parent directories. Acquiring
+  // under a removed `.ittybitty/agents` tree therefore recreated it instead of
+  // failing with ENOENT.
+  test("acquiring under a deleted agents directory does not resurrect it", async () => {
+    const goneDir = join(tempDir, "gone", "agent-x");
+
+    expect(await acquireAgentLifecycleLock(goneDir, 0)).toBeNull();
+    expect(await readdir(tempDir)).toEqual(["agent-stale"]);
+  });
+
   test("a live owner's lock is never reclaimed", async () => {
     await Bun.write(
       lockPath,

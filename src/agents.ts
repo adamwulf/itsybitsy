@@ -571,6 +571,28 @@ function lifecycleRecordPidEpoch(record: any): number | undefined {
 }
 
 /**
+ * Write a lifecycle staging file, WITHOUT creating parent directories.
+ *
+ * `Bun.write` makes missing parents, so publishing via a staging file quietly
+ * gained the power to recreate a deleted `.ittybitty/agents` tree — where the
+ * `open(wx)` this replaced simply returned ENOENT and the caller failed safe.
+ * `open(wx)` here restores that, and the exclusivity is free: staging names
+ * carry a uuid, so a collision means something is badly wrong.
+ *
+ * Writing the body in two steps is safe for staging specifically, which is the
+ * whole reason staging exists: nothing reads this path, and it is linked into
+ * place only after the write has completed.
+ */
+async function writeLifecycleStagingFile(path: string, body: string): Promise<void> {
+  const handle = await open(path, "wx");
+  try {
+    await handle.write(body);
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
  * Whether a reclaim claim is old enough to be stepped over.
  *
  * `created_at_ms` was being stamped into every claim and never read by anything,
@@ -631,7 +653,7 @@ async function claimStaleLifecycleLock(
     const claimPath = lifecycleReclaimClaimPath(lockPath, staleToken, slot);
     const stagingPath = `${lockPath}.reclaim.staging.${process.pid}.${randomUUID()}`;
     try {
-      await Bun.write(
+      await writeLifecycleStagingFile(
         stagingPath,
         JSON.stringify({
           pid: process.pid,
@@ -948,7 +970,7 @@ export async function acquireAgentLifecycleLock(
     // unchanged; only the half-written window is gone.
     const stagingPath = `${lockPath}.staging.${process.pid}.${randomUUID()}`;
     try {
-      await Bun.write(stagingPath, JSON.stringify({
+      await writeLifecycleStagingFile(stagingPath, JSON.stringify({
         pid: process.pid,
         pid_epoch: selfProcessStartEpochSeconds(),
         created_at_ms: Date.now(),

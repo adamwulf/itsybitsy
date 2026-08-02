@@ -4690,12 +4690,14 @@ describe("acquireAgentLifecycleLock — stale-lock reclamation", () => {
     test("a claim whose reclaimer PID was recycled is stepped over", async () => {
       await seedStaleLock("stale-claim-recycled");
       // Left by a reclaimer that died; its PID now belongs to something else.
+      // Aged past LIFECYCLE_LOCK_STALE_MS: a claim must clear the age gate as
+      // well as the liveness one before anyone may step over it.
       await Bun.write(
         `${lockPath}.reclaim.stale-claim-recycled.0`,
         JSON.stringify({
           pid: RECYCLED_PID,
           pid_epoch: OWNER_START,
-          created_at_ms: Date.now() - 60_000,
+          created_at_ms: Date.now() - 10 * 60_000,
         })
       );
 
@@ -4703,6 +4705,64 @@ describe("acquireAgentLifecycleLock — stale-lock reclamation", () => {
       expect(lock).not.toBeNull();
       expect((await Bun.file(lockPath).json()).token).not.toBe("stale-claim-recycled");
       await lock!.release();
+    });
+
+    // Regression: 8a2f663 routed both lock gates through the CACHED liveness
+    // read. A cache entry left by a since-recycled PID therefore made a LIVE
+    // reclaimer look gone — so acquire stepped over that reclaimer's claim and
+    // then DELETED its claim file on the way out, breaking the invariant that
+    // at most one process may ever remove a given generation. The only
+    // difference from the control is one cache entry.
+    test("a stale cache entry must not let a LIVE reclaimer's claim be stepped over", async () => {
+      await seedStaleLock("stale-claim-live-cached");
+      const claimPath = `${lockPath}.reclaim.stale-claim-live-cached.0`;
+      // Aged well past the gate, so liveness is the only thing under test.
+      await Bun.write(
+        claimPath,
+        JSON.stringify({
+          pid: process.pid,
+          pid_epoch: OWNER_START,
+          created_at_ms: Date.now() - 10 * 60_000,
+        })
+      );
+
+      // Cache a start time observed while the PREVIOUS owner of this pid was
+      // alive, then let the pid be truthfully ours again.
+      resetProcessStartEpochSecondsCache();
+      processStartEpochSecondsCtx.set(
+        () => OWNER_START + CLAUDE_PID_START_MARGIN_SECONDS + 1
+      );
+      isPidAliveSinceCtx.fn(process.pid, OWNER_START);
+      processStartEpochSecondsCtx.set(() => OWNER_START);
+
+      expect(await acquireAgentLifecycleLock(agentDir, 0)).toBeNull();
+      expect((await Bun.file(lockPath).json()).token).toBe("stale-claim-live-cached");
+      expect(await Bun.file(claimPath).exists()).toBe(true);
+    });
+
+    // Same poisoning against the OWNER gate. Age cannot save this one: the
+    // owner of a long-stale lock can be alive and merely slow, which is
+    // exactly the publisher the round-1 protocol protects at 119s.
+    test("a stale cache entry must not let a LIVE owner's lock be reclaimed", async () => {
+      await Bun.write(
+        lockPath,
+        JSON.stringify({
+          pid: process.pid,
+          pid_epoch: OWNER_START,
+          created_at_ms: Date.now() - 10 * 60_000,
+          token: "stale-live-owner-cached",
+        })
+      );
+
+      resetProcessStartEpochSecondsCache();
+      processStartEpochSecondsCtx.set(
+        () => OWNER_START + CLAUDE_PID_START_MARGIN_SECONDS + 1
+      );
+      isPidAliveSinceCtx.fn(process.pid, OWNER_START);
+      processStartEpochSecondsCtx.set(() => OWNER_START);
+
+      expect(await acquireAgentLifecycleLock(agentDir, 0)).toBeNull();
+      expect((await Bun.file(lockPath).json()).token).toBe("stale-live-owner-cached");
     });
 
     test("a claim written with no epoch still blocks every other reclaimer", async () => {
@@ -4810,16 +4870,57 @@ describe("acquireAgentLifecycleLock — stale-lock reclamation", () => {
 
   test("a crashed reclaimer's claim does not wedge the lock", async () => {
     await seedStaleLock("stale-crashed");
-    // Left behind by a reclaimer that died mid-steal. It is never unlinked to
-    // take over (that race is the bug); the next slot is claimed instead.
+    // Left behind by a reclaimer that died mid-steal, and aged past
+    // LIFECYCLE_LOCK_STALE_MS. It is never unlinked to take over (that race is
+    // the bug); the next slot is claimed instead. The wait is the whole cost of
+    // the age gate — the lock is delayed, never wedged.
     await Bun.write(
       `${lockPath}.reclaim.stale-crashed.0`,
-      JSON.stringify({ pid: DEAD_OWNER_PID, created_at_ms: Date.now() - 60_000 })
+      JSON.stringify({ pid: DEAD_OWNER_PID, created_at_ms: Date.now() - 10 * 60_000 })
     );
 
     const lock = await acquireAgentLifecycleLock(agentDir, 2_000);
     expect(lock).not.toBeNull();
     expect((await Bun.file(lockPath).json()).token).not.toBe("stale-crashed");
+    await lock!.release();
+  });
+
+  // Regression: claims stamped created_at_ms and NOTHING ever read it, so a
+  // claim had no age gate at all — an incorrect liveness verdict was by itself
+  // enough to step over one. A claim is held for microseconds, so a fresh one
+  // is a live reclaimer, whatever a PID read says about it.
+  test("a fresh claim is not stepped over even when its reclaimer reads dead", async () => {
+    await seedStaleLock("stale-claim-fresh");
+    await Bun.write(
+      `${lockPath}.reclaim.stale-claim-fresh.0`,
+      JSON.stringify({ pid: DEAD_OWNER_PID, created_at_ms: Date.now() })
+    );
+
+    expect(await acquireAgentLifecycleLock(agentDir, 0)).toBeNull();
+    // Neither the generation nor the other process's claim may be touched.
+    expect((await Bun.file(lockPath).json()).token).toBe("stale-claim-fresh");
+    expect(await Bun.file(`${lockPath}.reclaim.stale-claim-fresh.0`).exists()).toBe(true);
+  });
+
+  // A claim written by an older binary carries no created_at_ms. `link`
+  // publishes it without changing the staging file's mtime, so the file itself
+  // dates the claim; without that fallback such a claim would block its
+  // generation forever.
+  test("a claim with no created_at_ms is aged by its file mtime", async () => {
+    await seedStaleLock("stale-claim-nostamp");
+    const claimPath = `${lockPath}.reclaim.stale-claim-nostamp.0`;
+    await Bun.write(claimPath, JSON.stringify({ pid: DEAD_OWNER_PID }));
+
+    // Fresh on disk → still someone else's live claim.
+    expect(await acquireAgentLifecycleLock(agentDir, 0)).toBeNull();
+    expect((await Bun.file(lockPath).json()).token).toBe("stale-claim-nostamp");
+
+    // Aged out → recoverable, so no permanent wedge.
+    const aged = new Date(Date.now() - 10 * 60_000);
+    await utimes(claimPath, aged, aged);
+    const lock = await acquireAgentLifecycleLock(agentDir, 2_000);
+    expect(lock).not.toBeNull();
+    expect((await Bun.file(lockPath).json()).token).not.toBe("stale-claim-nostamp");
     await lock!.release();
   });
 

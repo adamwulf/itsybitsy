@@ -562,6 +562,42 @@ function lifecycleRecordPidEpoch(record: any): number | undefined {
 }
 
 /**
+ * Whether a reclaim claim is old enough to be stepped over.
+ *
+ * `created_at_ms` was being stamped into every claim and never read by anything,
+ * so a claim had no age gate at all: an incorrect liveness verdict was, by
+ * itself, enough to take one. Age is the second, independent condition — a
+ * claim lives for microseconds between being linked into place and the steal
+ * resolving, so anything that survives the stale threshold is crash debris.
+ *
+ * Falls back to the file's mtime when the record carries no usable stamp
+ * (written by an older binary). `link` publishes the claim from a staging file
+ * without changing its mtime, so the file's own timestamp dates the claim just
+ * as well. With neither, the claim is unavailable evidence and stays untouched
+ * rather than becoming steppable by default.
+ *
+ * The cost of this gate is bounded and non-destructive: a reclaimer that is
+ * SIGKILLed inside that microsecond window makes its slot unavailable for the
+ * stale threshold. That is a delay, never a wedge — the claim becomes
+ * steppable once it ages out, and callers meanwhile fail safe by reporting the
+ * agent busy.
+ */
+async function isLifecycleClaimStale(claimPath: string, claim: any): Promise<boolean> {
+  const createdAtMs = Number(claim?.created_at_ms);
+  let ageBasisMs: number;
+  if (Number.isFinite(createdAtMs) && createdAtMs > 0) {
+    ageBasisMs = createdAtMs;
+  } else {
+    try {
+      ageBasisMs = (await stat(claimPath)).mtimeMs;
+    } catch {
+      return false;
+    }
+  }
+  return Date.now() - ageBasisMs > LIFECYCLE_LOCK_STALE_MS;
+}
+
+/**
  * Claim the exclusive right to reclaim ONE stale lock generation, returning the
  * slot index claimed or null when the claim is unavailable.
  *
@@ -615,7 +651,22 @@ async function claimStaleLifecycleLock(
         claimPid <= 0 ||
         // Identity, not bare liveness: one recycled PID would otherwise make a
         // long-dead reclaimer look alive forever and wedge this generation.
-        isPidAliveSinceCtx.fn(claimPid, lifecycleRecordPidEpoch(claim))
+        //
+        // UNCACHED. Stepping over a claim is destructive — it hands this
+        // generation to a second process, which is precisely what the claim
+        // exists to prevent — so it may not be decided from a cached
+        // process-start read. A cache entry left by a since-recycled PID makes
+        // a LIVE reclaimer look gone, and the step-over then deletes that live
+        // process's claim file. Not isPidIdentityCurrent: its strict verdict on
+        // absent evidence would make every legacy no-epoch claim instantly
+        // steppable, converting a wedge into a live steal.
+        isPidAliveSinceUncached(claimPid, lifecycleRecordPidEpoch(claim)) ||
+        // Age, independently of liveness. A claim is held for microseconds in
+        // the normal path, so anything worth stepping over is crash debris and
+        // is necessarily old. Requiring the same threshold a stale LOCK must
+        // clear means a wrong liveness verdict is not on its own sufficient to
+        // steal a claim — the two guards have to fail together.
+        !(await isLifecycleClaimStale(claimPath, claim))
       ) {
         return null;
       }
@@ -786,7 +837,12 @@ async function reclaimStaleLifecycleLock(lockPath: string): Promise<boolean> {
       // introduced for on the reaping paths. An absent epoch (older binary) or
       // an unreadable start time still reads as alive, so neither becomes
       // permission to steal.
-      isPidAliveSinceCtx.fn(generation.owner.pid, generation.owner.pidEpoch)
+      //
+      // UNCACHED, for the same reason the claim gate is: a cached process-start
+      // read can report a LIVE lock owner as gone, and this gate authorizes
+      // removing that owner's lock. Age alone does not cover it — the owner of
+      // a 200s-old lock can be alive and simply slow.
+      isPidAliveSinceUncached(generation.owner.pid, generation.owner.pidEpoch)
     ) {
       return false;
     }

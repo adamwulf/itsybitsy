@@ -582,11 +582,17 @@ function lifecycleRecordPidEpoch(record: any): number | undefined {
  * Writing the body in two steps is safe for staging specifically, which is the
  * whole reason staging exists: nothing reads this path, and it is linked into
  * place only after the write has completed.
+ *
+ * `writeFile`, not `write`. A bare `write` may take fewer bytes than it was
+ * handed and simply report how many — and this body is published verbatim by
+ * `link`, so a short write publishes a truncated record. That is precisely the
+ * half-written lock staging exists to make impossible. `writeFile` loops until
+ * the buffer is drained.
  */
 async function writeLifecycleStagingFile(path: string, body: string): Promise<void> {
   const handle = await open(path, "wx");
   try {
-    await handle.write(body);
+    await handle.writeFile(body);
   } finally {
     await handle.close();
   }

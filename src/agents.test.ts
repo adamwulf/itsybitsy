@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, mkdir, readdir, unlink, utimes, writeFile } from "fs/promises";
+import { mkdtemp, rm, mkdir, readdir, unlink, utimes, writeFile, open } from "fs/promises";
 import { tmpdir } from "os";
 import {
   computeAge,
@@ -4956,6 +4956,46 @@ describe("acquireAgentLifecycleLock — stale-lock reclamation", () => {
 
     expect(halfWritten).toEqual([]);
   }, 60_000);
+
+  // Regression: the staging write used `handle.write`, which is allowed to
+  // write FEWER bytes than it was handed and to report how many it took. A
+  // short write there publishes a TRUNCATED record — and the entire point of
+  // staging is that nothing is ever linked into place half-written, so a
+  // partial body defeats the fix it is part of. (The malformed-body path
+  // handles the result safely today, which is what keeps this a latent defect
+  // rather than a live one.)
+  //
+  // Forced at the only place a short write is deterministic:
+  // FileHandle.prototype.write. `writeFile` drains the whole buffer, so it
+  // survives the same patch that truncates a raw `write`.
+  test("a short write can never publish a truncated lock body", async () => {
+    const probe = await open(join(tempDir, "write-probe"), "wx");
+    const handleProto: any = Object.getPrototypeOf(probe);
+    await probe.close();
+    const realWrite = handleProto.write;
+    // One byte per call, and only for the lifecycle record bodies — this patch
+    // is process-wide for as long as it is installed.
+    handleProto.write = function (this: any, data: any, ...rest: any[]) {
+      if (typeof data === "string" && data.startsWith('{"pid":')) {
+        return realWrite.call(this, data.slice(0, 1), ...rest);
+      }
+      return realWrite.call(this, data, ...rest);
+    };
+
+    let lock: Awaited<ReturnType<typeof acquireAgentLifecycleLock>>;
+    try {
+      lock = await acquireAgentLifecycleLock(agentDir, 2_000);
+    } finally {
+      handleProto.write = realWrite;
+    }
+
+    expect(lock).not.toBeNull();
+    // Fully formed, not a prefix of itself.
+    const held = await Bun.file(lockPath).json();
+    expect(held.pid).toBe(process.pid);
+    expect(typeof held.token).toBe("string");
+    await lock!.release();
+  });
 
   // Regression: publishing the lock via a staging file moved the create from
   // `open(wx)` to Bun.write, which makes missing parent directories. Acquiring

@@ -1362,15 +1362,19 @@ describe("handleAddPermission", () => {
     expect(dialogs).toHaveLength(0);
   });
 
-  // The dialog opens after `effectiveSpawnCapability` resolves, so tests that
-  // inspect the dialog must yield a macrotask first.
-  const nextTick = () => new Promise<void>((r) => setTimeout(r, 0));
+  // The dialog opens after `effectiveSpawnCapability` resolves. For the agents
+  // below that resolves without disk I/O (an explicit canSpawnChildren, or no
+  // agentType at all), so a single macrotask happens to be enough TODAY — but
+  // that is a guess about how many promise hops the handler takes, which is
+  // the same assumption that made the disk-backed sites flake. Waiting for the
+  // dialog itself costs nothing here (it is there on the first poll) and stops
+  // these from breaking confusingly if an await is ever added to that path.
 
   test("shows add-permission dialog for selected agent, input focused by default", async () => {
     const agent = makeAgent({ id: "agent-1" });
     const { ctx, dialogs } = makeMockCtx({ agent });
     handleAddPermission(ctx);
-    await nextTick();
+    await waitForDialog(dialogs, "handleAddPermission to open the add-permission dialog");
     expect(dialogs).toHaveLength(1);
     const d = assertDialog(dialogs[0]!, "add-permission");
     expect(d.prompt).toContain("agent-1");
@@ -1383,7 +1387,7 @@ describe("handleAddPermission", () => {
     const agent = makeAgent({ id: "agent-1", meta: { canSpawnChildren: false } as any });
     const { ctx, dialogs } = makeMockCtx({ agent });
     handleAddPermission(ctx);
-    await nextTick();
+    await waitForDialog(dialogs, "handleAddPermission to open the add-permission dialog");
     const d = assertDialog(dialogs[0]!, "add-permission");
     expect(d.canSpawnChildren).toBe(false);
   });
@@ -1420,7 +1424,7 @@ describe("handleAddPermission", () => {
     const agent = makeAgent({ id: "agent-1" });
     const { ctx, dialogs, notices } = makeMockCtx({ agent });
     handleAddPermission(ctx);
-    await nextTick();
+    await waitForDialog(dialogs, "handleAddPermission to open the add-permission dialog");
     const d = assertDialog(dialogs[0]!, "add-permission");
     d.onSubmit("   ");
     expect(notices).toEqual(["Permission add cancelled"]);
@@ -1430,7 +1434,7 @@ describe("handleAddPermission", () => {
     const agent = makeAgent({ id: "agent-1" });
     const { ctx, dialogs, notices } = makeMockCtx({ agent });
     handleAddPermission(ctx);
-    await nextTick();
+    await waitForDialog(dialogs, "handleAddPermission to open the add-permission dialog");
     const d = assertDialog(dialogs[0]!, "add-permission");
     d.onSubmit("Bash(foo; rm -rf /)");
     expect(notices.some((n) => n.includes("Invalid permission"))).toBe(true);
@@ -1467,8 +1471,6 @@ describe("effectiveSpawnCapability", () => {
 });
 
 describe("handleAddPermission — onToggleSpawn", () => {
-  const nextTick = () => new Promise<void>((r) => setTimeout(r, 0));
-
   async function readMeta(repoPath: string, id: string): Promise<Record<string, unknown>> {
     return (await Bun.file(join(repoPath, ".ittybitty", "agents", id, "meta.json")).json()) as Record<string, unknown>;
   }
@@ -1498,14 +1500,16 @@ describe("handleAddPermission — onToggleSpawn", () => {
     // the in-memory assertion below would then read undefined. Wait on the
     // full condition this test actually asserts.
     let meta: Record<string, unknown> = {};
-    for (
-      let i = 0;
-      i < 100 && !(meta.canSpawnChildren === true && agent.meta.canSpawnChildren === true);
-      i++
-    ) {
-      await nextTick();
-      meta = await readMeta(sendRepoDir, id);
-    }
+    await waitFor(
+      async () => {
+        meta = await readMeta(sendRepoDir, id);
+        return meta.canSpawnChildren === true && agent.meta.canSpawnChildren === true;
+      },
+      {
+        message: `meta.json AND the in-memory record to both show canSpawnChildren=true for ${id}`,
+        timeoutMs: WAIT_MS,
+      },
+    );
     expect(meta.canSpawnChildren).toBe(true);
     // Other fields preserved.
     expect(meta.agentType).toBe("worker");
@@ -1535,19 +1539,21 @@ describe("handleAddPermission — onToggleSpawn", () => {
     d.onToggleSpawn();
 
     // Same both-sides wait as the toggle-ON case. The target value here is
-    // `false`, so the loop must test for it explicitly rather than for
+    // `false`, so the predicate must test for it explicitly rather than for
     // "not true" — both fields start out absent (undefined), and a
-    // not-true condition would treat that as already-settled and exit
-    // immediately on iteration 0.
+    // not-true condition would treat that as already-settled and return on
+    // the very first poll.
     let meta: Record<string, unknown> = {};
-    for (
-      let i = 0;
-      i < 100 && !(meta.canSpawnChildren === false && agent.meta.canSpawnChildren === false);
-      i++
-    ) {
-      await nextTick();
-      meta = await readMeta(sendRepoDir, id);
-    }
+    await waitFor(
+      async () => {
+        meta = await readMeta(sendRepoDir, id);
+        return meta.canSpawnChildren === false && agent.meta.canSpawnChildren === false;
+      },
+      {
+        message: `meta.json AND the in-memory record to both show canSpawnChildren=false for ${id}`,
+        timeoutMs: WAIT_MS,
+      },
+    );
     expect(meta.canSpawnChildren).toBe(false);
     expect(meta.agentType).toBe("manager");
     expect(agent.meta.canSpawnChildren).toBe(false);

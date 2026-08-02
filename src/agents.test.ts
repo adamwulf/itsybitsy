@@ -51,6 +51,9 @@ import {
   processStartEpochSecondsCtx,
   resetProcessStartEpochSecondsCache,
   CLAUDE_PID_START_MARGIN_SECONDS,
+  PROCESS_START_CACHE_TTL_MS,
+  LIFECYCLE_LOCK_STALE_MS,
+  assertLifecycleTimingInvariant,
   killPidCtx,
   liveTmuxSessionsCtx,
   captureTmuxOutputResultCtx,
@@ -4522,6 +4525,41 @@ describe("readAgentTransient / writeAgentTransient", () => {
   test("deleteAgentTransient is a no-op when file is missing", async () => {
     await deleteAgentTransient(tempDir);
     expect(await readAgentTransient(tempDir)).toBeNull();
+  });
+});
+
+// Regression: lock-owner reclaim was safe only because LIFECYCLE_LOCK_STALE_MS
+// happened to exceed PROCESS_START_CACHE_TTL_MS — a poisoned cache entry always
+// expired before the age gate opened. Nothing said so and nothing enforced it,
+// and the TTL had already been raised 12x (5s -> 60s) without anyone weighing
+// it. One more raise past 120s and LIVE locks become stealable. The ordering is
+// no longer load-bearing (both gates re-probe uncached) and must never quietly
+// become load-bearing again.
+describe("lifecycle timing invariant", () => {
+  test("the shipped constants satisfy the ordering", () => {
+    expect(LIFECYCLE_LOCK_STALE_MS).toBeGreaterThan(PROCESS_START_CACHE_TTL_MS);
+  });
+
+  test("the ordering is enforced, not merely documented", () => {
+    // Equal is not enough: the poisoned entry must expire STRICTLY before the
+    // age gate opens.
+    expect(() => assertLifecycleTimingInvariant(60_000, 60_000)).toThrow(
+      /timing invariant violated/
+    );
+    expect(() => assertLifecycleTimingInvariant(60_000, 120_000)).toThrow(
+      /timing invariant violated/
+    );
+    expect(() => assertLifecycleTimingInvariant(120_000, 60_000)).not.toThrow();
+  });
+
+  test("the assertion runs at module load, so a bad pair cannot ship", async () => {
+    // Importing this module already ran it against the real constants; this
+    // pins that the call site exists rather than only the helper.
+    const { readFile } = await import("fs/promises");
+    const source = await readFile(new URL("./agents.ts", import.meta.url), "utf8");
+    expect(source).toContain(
+      "assertLifecycleTimingInvariant(LIFECYCLE_LOCK_STALE_MS, PROCESS_START_CACHE_TTL_MS);"
+    );
   });
 });
 

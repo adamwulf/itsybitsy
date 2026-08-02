@@ -518,7 +518,16 @@ function emptyTransient(): TransientState {
   };
 }
 
-const LIFECYCLE_LOCK_STALE_MS = 120_000;
+/**
+ * How old a lock generation (or a reclaim claim) must be before anyone may
+ * step over it.
+ *
+ * ORDERING CONSTRAINT: this must stay strictly greater than
+ * PROCESS_START_CACHE_TTL_MS, and assertLifecycleTimingInvariant enforces it
+ * at module load — see the note there for why. Raising the cache TTL past this
+ * value would otherwise silently make LIVE locks stealable.
+ */
+export const LIFECYCLE_LOCK_STALE_MS = 120_000;
 const LIFECYCLE_LOCK_RETRY_MS = 25;
 
 /**
@@ -2485,6 +2494,40 @@ export const CLAUDE_PID_START_MARGIN_SECONDS = 60;
  *    (15s) no matter how long this TTL is.
  */
 export const PROCESS_START_CACHE_TTL_MS = 60_000;
+
+/**
+ * ORDERING CONSTRAINT: LIFECYCLE_LOCK_STALE_MS > PROCESS_START_CACHE_TTL_MS.
+ *
+ * Reclaiming a lock takes two independent judgments: the generation is old
+ * enough, and its holder is gone. If a cached process-start observation could
+ * outlive the age gate, both could be wrong at the same instant — the age gate
+ * would open while a poisoned entry still reported a LIVE holder as gone — and
+ * a live lock would be stealable with no syscall failure anywhere. At 120s vs
+ * 60s the poisoned entry always expires before the age gate opens.
+ *
+ * The lock gates now re-probe uncached, so this ordering is NOT what makes
+ * reclamation safe; it is a second line that must never quietly become the
+ * first one again. It went undocumented and unenforced through the TTL change
+ * that raised the cache from 5s to 60s — one more step and live locks would
+ * have been stealable, with nothing in the tree to say so.
+ *
+ * Enforced by construction rather than by comment: this runs at module load,
+ * so a violating pair cannot start the binary, let alone ship.
+ */
+export function assertLifecycleTimingInvariant(
+  lockStaleMs: number,
+  processStartCacheTtlMs: number,
+): void {
+  if (!(lockStaleMs > processStartCacheTtlMs)) {
+    throw new Error(
+      `lifecycle timing invariant violated: LIFECYCLE_LOCK_STALE_MS ` +
+      `(${lockStaleMs}ms) must be strictly greater than ` +
+      `PROCESS_START_CACHE_TTL_MS (${processStartCacheTtlMs}ms), or a cached ` +
+      `"holder is gone" verdict can outlive the age gate that authorizes a steal`
+    );
+  }
+}
+assertLifecycleTimingInvariant(LIFECYCLE_LOCK_STALE_MS, PROCESS_START_CACHE_TTL_MS);
 
 const processStartEpochSecondsCache = new Map<
   number,

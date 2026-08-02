@@ -3507,6 +3507,158 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     expect(killPidCalls).toEqual([]);
   });
 
+  // Regression (live-agent kill): the claude_pid gate does not only RENDER —
+  // it is the branch that calls reapOrphanedClaude, whose `tmux kill-session`
+  // is gated on the resolved state alone. So a CACHED process-start verdict is
+  // not merely a label that can lag: a stale entry (exactly what a since-
+  // recycled PID leaves behind, held for PROCESS_START_CACHE_TTL_MS) turns a
+  // live agent into `stopped` and takes its tmux session with it. Reproduced
+  // against a real tmux session; here the cache is poisoned directly.
+  //
+  // The fix must NOT be a shorter TTL: the hole is open at any TTL. The dead
+  // verdict has to be confirmed uncached before it is acted on.
+  test("stale process-start cache must not stop-and-reap a LIVE claude_pid", async () => {
+    const pidWriteEpoch = 1_700_000_000;
+    const killSessionCalls: string[] = [];
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      const isCapture = args[0] === "tmux" && args[1] === "capture-pane";
+      if (args[0] === "tmux" && args[1] === "kill-session") {
+        killSessionCalls.push(String(args[3]));
+      }
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(
+              isCapture ? "⏵⏵ accept edits on (shift+tab to cycle)" : ""
+            ));
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+    // Exercise the real guarded implementation, not the bare-PID seam.
+    isPidAliveSinceCtx.reset();
+    isPidAliveCtx.set(() => true); // the recorded pid is alive RIGHT NOW
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-live"]));
+    let killPidCalls = 0;
+    killPidCtx.set(() => { killPidCalls++; return true; });
+
+    // Poison the cache the way an ordinary rendering pass does while the
+    // PREVIOUS owner of this pid is still alive, then hand the pid to the
+    // truthful start time. Only the cache entry differs from the control.
+    resetProcessStartEpochSecondsCache();
+    processStartEpochSecondsCtx.set(() => pidWriteEpoch - 5_000);
+    isPidAliveSinceCtx.fn(18825, pidWriteEpoch);
+    processStartEpochSecondsCtx.set(() => pidWriteEpoch);
+
+    const a = makeAgent({
+      id: "agent-live",
+      meta: {
+        state: "running",
+        tmux_session: "ib-live",
+        claude_pid: "18825",
+        claude_pid_epoch: pidWriteEpoch,
+        created_epoch: pidWriteEpoch - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a], { reap: true });
+
+    expect(a.state).toBe("running");
+    expect(killSessionCalls).toEqual([]);
+    expect(killPidCalls).toBe(0);
+  });
+
+  // Regression (backstop at the site where the session actually dies): husk
+  // teardown had NO identity check of any kind — `skipClaudePid` and the
+  // identity guard protect the SIGTERM only. When the ONLY evidence that an
+  // agent is stopped is a claude_pid liveness read, that PID must be re-checked
+  // before its session is destroyed.
+  //
+  // Drives the liveness seam and the identity seam apart on purpose: the gate
+  // says dead, identity says live-and-current. That is what a regression in the
+  // gate would look like from here, and it must not cost the agent its session.
+  test("husk teardown is vetoed when a pid-derived verdict meets a provably live pid", async () => {
+    const killSessionCalls: string[] = [];
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      if (args[0] === "tmux" && args[1] === "kill-session") {
+        killSessionCalls.push(String(args[3]));
+      }
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+    isPidAliveSinceCtx.set(() => false); // the gate believes the pid is gone
+    isPidIdentityCurrentCtx.set(() => true); // the OS says otherwise
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-live-veto"]));
+    let killPidCalls = 0;
+    killPidCtx.set(() => { killPidCalls++; return true; });
+
+    const a = makeAgent({
+      id: "agent-live-veto",
+      meta: {
+        state: "running",
+        tmux_session: "ib-live-veto",
+        claude_pid: "18825",
+        claude_pid_epoch: 1_700_000_000,
+        created_epoch: 1_700_000_000 - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a], { reap: true });
+
+    expect(killSessionCalls).toEqual([]);
+    expect(killPidCalls).toBe(0); // skipClaudePid still holds on this branch
+    const { readFile } = await import("fs/promises");
+    expect(await readFile(logPath, "utf8")).toContain("kill-session skipped");
+  });
+
+  // Companion to the backstop: a genuinely dead agent must still lose its husk.
+  // The veto keys on AFFIRMATIVE proof of life, so absent or weak evidence has
+  // to keep tearing down exactly as before. (The dead-pane husk case — a LIVE
+  // pid with an authoritatively dead pane — is covered in the dead-pane
+  // describe block, and must also still tear down.)
+  test("husk teardown still fires for a dead claude_pid", async () => {
+    const killSessionCalls: string[] = [];
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      if (args[0] === "tmux" && args[1] === "kill-session") {
+        killSessionCalls.push(String(args[3]));
+      }
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+    isPidAliveSinceCtx.reset();
+    isPidIdentityCurrentCtx.reset();
+    resetProcessStartEpochSecondsCache();
+    processStartEpochSecondsCtx.set(() => 1_700_000_000);
+    isPidAliveCtx.set(() => false); // affirmatively gone
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-husk"]));
+    killPidCtx.set(() => true);
+
+    const a = makeAgent({
+      id: "agent-husk",
+      meta: {
+        state: "running",
+        tmux_session: "ib-husk",
+        claude_pid: "18825",
+        claude_pid_epoch: 1_700_000_000,
+        created_epoch: 1_700_000_000 - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a], { reap: true });
+
+    expect(a.state).toBe("stopped");
+    expect(killSessionCalls).toEqual(["=ib-husk:"]);
+  });
+
   test("recent agent + missing live tmux session stays creating without capture", async () => {
     isPidAliveCtx.set(() => true);
     isPidAliveSinceCtx.set((pid) => isPidAliveCtx.fn(pid));

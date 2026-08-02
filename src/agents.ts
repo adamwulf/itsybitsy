@@ -2538,6 +2538,35 @@ export const isPidAliveSinceCtx = new InjectionContext<
 >(_isPidAliveSince);
 
 /**
+ * isPidAliveSince with the process-start cache bypassed, for confirming a
+ * NOT-ALIVE verdict before ACTING on one.
+ *
+ * The cached read is fine for rendering: a stale entry costs at most one extra
+ * window of a wrong label. It is NOT fine as the last word before teardown,
+ * because a cached start time that no longer matches the recorded PID-write
+ * epoch produces a "dead" verdict for a process that is alive right now — and
+ * detectAgentStates both renders AND reaps, so that verdict reaches
+ * reapOrphanedClaude and takes the agent's tmux session with it.
+ *
+ * Deliberately a re-check, not a replacement: callers must consult the cached
+ * path FIRST and only reach this when it already said dead. Every genuinely
+ * stopped agent short-circuits at signal-0 without spawning `ps`, so the only
+ * case that pays a process spawn is a LIVE pid whose start time disagrees with
+ * the record — rare by construction, and precisely the case worth paying for.
+ * That keeps PROCESS_START_CACHE_TTL_MS doing its job on the hot path.
+ *
+ * Delegates through isPidAliveSinceCtx so a test that stubs the liveness seam
+ * still governs both reads; the only production difference is the eviction.
+ */
+function isPidAliveSinceUncached(
+  pid: number,
+  pidWriteEpochSeconds: number | undefined,
+): boolean {
+  processStartEpochSecondsCache.delete(pid);
+  return isPidAliveSinceCtx.fn(pid, pidWriteEpochSeconds);
+}
+
+/**
  * Destructive counterpart to isPidAliveSince. Signaling requires fresh,
  * affirmative identity: a live numeric PID alone is insufficient, missing
  * epochs are legacy/unknown, and an unavailable process-start observation
@@ -2818,6 +2847,13 @@ function isMissingTmuxSessionError(error: string | undefined): boolean {
  * branches uniformly (PID-liveness gate, dead-pane husk, complete-with-
  * missing-session).
  *
+ * That teardown is the one destructive act here that is NOT a signal, so the
+ * guards above do not cover it: killing the session kills the agent. When the
+ * caller's `stopped` verdict came from reading claude_pid
+ * (`verdictFromClaudePid`), teardown is withheld if that PID turns out to be
+ * affirmatively live and current. Verdicts from tmux evidence are not affected
+ * — see the veto for why the dead-pane husk must still be reaped.
+ *
  * Best-effort: failures are swallowed (logged to watch.log); state detection
  * must never block on a kill.
  */
@@ -2826,7 +2862,7 @@ async function reapOrphanedClaude(
   agentDir: string,
   resolvedState: AgentState,
   reason: string,
-  opts: { skipClaudePid?: boolean } = {}
+  opts: { skipClaudePid?: boolean; verdictFromClaudePid?: boolean } = {}
 ): Promise<void> {
   if (resolvedState === "creating") return;
 
@@ -2941,6 +2977,40 @@ async function reapOrphanedClaude(
     agent.meta.tmux_session &&
     !reapedTmuxSessions.has(agent.meta.tmux_session)
   ) {
+    // Backstop for a verdict that came from reading the PID. Killing the
+    // session kills the agent, and nothing on this path had checked PID
+    // identity at all: skipClaudePid and the identity guard protect only the
+    // SIGTERM. So when the ONLY reason we believe this agent is stopped is a
+    // claude_pid liveness read, refuse to destroy the session while that same
+    // PID is affirmatively live and current.
+    //
+    // Scoped deliberately. A `stopped` verdict from tmux evidence is not a PID
+    // verdict and must still tear down: the dead-pane husk case is a live
+    // claude_pid whose pane is authoritatively dead (#{pane_dead}), where the
+    // session IS garbage and this code SIGTERMs that live PID on purpose.
+    // Vetoing there would resurrect the husk leak that branch exists to fix.
+    //
+    // Strict identity (not the fail-open rendering guard) because this decides
+    // whether to WITHHOLD teardown: only affirmative proof of life may do that.
+    // A legacy record with no epoch, an unreadable start, or a recycled PID all
+    // read as "not proven live" and teardown proceeds exactly as before, so no
+    // husk becomes unreapable. Reaching here at all requires the caller's own
+    // uncached re-probe to have said dead, so the two can only disagree if that
+    // gate regresses — which is the point of a backstop.
+    const claudePid = parseInt(latestMeta.claude_pid, 10);
+    if (
+      opts.verdictFromClaudePid === true &&
+      Number.isFinite(claudePid) &&
+      claudePid > 0 &&
+      isPidIdentityCurrentCtx.fn(claudePid, latestMeta.claude_pid_epoch)
+    ) {
+      logRateLimitedLifecycleLine(
+        `orphan-kill-session\0${agent.id}\0${agent.meta.tmux_session}`,
+        `[orphan-kill] tmux kill-session skipped agent=${repoTag}${agent.id} ` +
+        `tmux=${tmuxLabel} state=${resolvedState} reason=claude pid ${claudePid} is live and current`
+      );
+      return;
+    }
     reapedTmuxSessions.add(agent.meta.tmux_session);
     const result = await killTmuxSessionResult(agent.meta.tmux_session);
     const alreadyGone = !result.ok && isMissingTmuxSessionError(result.error);
@@ -3079,11 +3149,19 @@ export async function detectAgentStates(
       // its log. Skip while the agent is recently created so we don't race a
       // still-spawning agent whose claude_pid hasn't been written yet (legacy
       // / empty claude_pid is also covered by the >0 guard).
+      //
+      // This gate does not only RENDER: it is the branch that calls
+      // reapOrphanedClaude, and that reap tears down the tmux session. So a
+      // cached "dead" verdict is confirmed against the OS before it is acted
+      // on — the same discipline isPidIdentityCurrent applies before SIGTERM.
+      // Ordered last so it runs only on the cold path (a verdict that already
+      // says dead), leaving the cache serving every ordinary pass.
       const claudePid = parseInt(agent.meta.claude_pid, 10);
       if (
         claudePid > 0 &&
         !isPidAliveSinceCtx.fn(claudePid, agent.meta.claude_pid_epoch) &&
-        !isRecentlyCreated(agent.meta.created_epoch)
+        !isRecentlyCreated(agent.meta.created_epoch) &&
+        !isPidAliveSinceUncached(claudePid, agent.meta.claude_pid_epoch)
       ) {
         agent.state = "stopped";
         if (shouldReap) {
@@ -3096,7 +3174,12 @@ export async function detectAgentStates(
             agentDir,
             "stopped",
             "claude_pid not alive",
-            { skipClaudePid: true }
+            // verdictFromClaudePid: this branch — and only this branch —
+            // concluded `stopped` by reading the PID, so the husk teardown
+            // must re-check that PID before destroying the session. Every
+            // other caller resolves from tmux evidence, which no PID cache can
+            // corrupt.
+            { skipClaudePid: true, verdictFromClaudePid: true }
           );
         }
         return;

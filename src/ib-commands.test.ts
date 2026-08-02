@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
 import { join, basename } from "path";
 import {
   mkdtemp,
@@ -81,6 +81,19 @@ import { spawnCtx as lifecycleSpawnCtx } from "./agent-lifecycle";
 import { setUserConfigPath, resetUserConfigPath } from "./config";
 import type { AgentState } from "./parse-state";
 import type { SpawnFn, SpawnResult } from "./types";
+
+// The "retire → rehire recovery" describes drive real `git` subprocesses — a
+// dozen call sites through the local git() helper, plus every git command
+// retireAgent/rehireAgent themselves run through the hybrid spawn runner
+// (init, worktree add, diff, apply, rev-parse, …). Subprocess spawns are far
+// more load-sensitive than in-process unit tests: a single spawn was measured
+// at 156s during a pathologically loaded run (see commit 5c8f254, which raised
+// the same bound in the three other files that spawn subprocesses), and bun's
+// 5s default leaves no headroom for that. This is a failure bound, not a wait:
+// no assertion changes, nothing is skipped, and passing tests run exactly as
+// fast as before — it only changes how long a genuinely stuck spawn takes to
+// be declared stuck.
+setDefaultTimeout(60_000);
 
 function makeAgent(
   id: string,
@@ -5764,12 +5777,18 @@ describe("newAgent (native)", () => {
 
   test("skips summary when claude -p fails", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
-    // Mock summary generator that simulates failed claude -p (does nothing)
-    setNewAgentSummaryGenerator(async () => {});
+    // Mock summary generator that simulates failed claude -p (does nothing).
+    // It also records that it ran: newAgent fires the generator without
+    // awaiting it, so "no summary was written" is only meaningful once the
+    // generator has actually been through. Waiting on that flag instead of
+    // sleeping 50ms both removes the guess and makes the assertion honest —
+    // the old sleep did not even establish that the generator had run.
+    let generatorRan = false;
+    setNewAgentSummaryGenerator(async () => { generatorRan = true; });
     const result = await callNewAgent("implement feature Y", { name: "test-summary-fail" });
     expect(result.ok).toBe(true);
 
-    await Bun.sleep(50);
+    await waitFor(() => generatorRan, { message: "the fire-and-forget summary generator to run" });
 
     const metaPath = join(agentsDir, "test-summary-fail", "meta.json");
     const meta = await Bun.file(metaPath).json();
@@ -5778,12 +5797,15 @@ describe("newAgent (native)", () => {
 
   test("skips summary when claude -p returns empty output", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
-    // Mock summary generator that simulates empty output (does nothing)
-    setNewAgentSummaryGenerator(async () => {});
+    // Mock summary generator that simulates empty output (does nothing), with
+    // the same ran-to-completion flag as the failure case above so the
+    // "no summary" assertion waits for the real event rather than 50ms.
+    let generatorRan = false;
+    setNewAgentSummaryGenerator(async () => { generatorRan = true; });
     const result = await callNewAgent("implement feature Z", { name: "test-summary-empty" });
     expect(result.ok).toBe(true);
 
-    await Bun.sleep(50);
+    await waitFor(() => generatorRan, { message: "the fire-and-forget summary generator to run" });
 
     const metaPath = join(agentsDir, "test-summary-empty", "meta.json");
     const meta = await Bun.file(metaPath).json();
@@ -8823,9 +8845,19 @@ describe("telegramSend (native, file-drop client)", () => {
     const start = Date.now();
     const result = await ibCmds.telegramSend("hello");
     const elapsed = Date.now() - start;
-    // Poll loop is 10×100ms = ~1s. Give it a generous upper bound for slow CI.
+    // The poll loop is 10×100ms, so a run that ends in "queued" must have sat
+    // through all ten waits. That lower bound is a property of the code, not of
+    // the machine — it proves the loop ran to exhaustion instead of returning
+    // early, and a busy machine can only push elapsed further above it.
     expect(elapsed).toBeGreaterThanOrEqual(1_000);
-    expect(elapsed).toBeLessThan(2_500);
+    // There is deliberately no upper bound. It used to be `< 2_500`, which is
+    // the instrument commit 4449ed0 removed from wrap.test.ts: a duration
+    // ceiling measures the machine as much as the code (identical work there
+    // ranged 59-263ms depending only on load), so no threshold makes it robust.
+    // It also had no teeth — POLL_ATTEMPTS could have doubled to 20 (~2s) and
+    // still slipped under 2500. What the ceiling was really guarding is "this
+    // returns instead of hanging", and the per-test timeout enforces that
+    // directly. The assertions below pin the outcome itself.
     expect(result.ok).toBe(true);
     expect(result.message).toContain("queued");
     expect(result.message).toContain("ib watch may not be running");

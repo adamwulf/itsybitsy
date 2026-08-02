@@ -2496,8 +2496,19 @@ export const CLAUDE_PID_START_MARGIN_SECONDS = 60;
  * "only the RENDERING path reads it", and that claim was wrong in two ways at
  * once — the reap path and both lifecycle-lock gates read it as well. The
  * claim is what made the 5s -> 60s raise look free, and it shipped a hole that
- * killed a live agent's tmux session. So this list is exhaustive by
- * construction, and anything added to it must state which side it is on.
+ * killed a live agent's tmux session. So this list is exhaustive, and anything
+ * added to it must state which side it is on.
+ *
+ * DERIVE IT, DO NOT REASON ABOUT IT. The list below is mechanical, and it has
+ * been wrong every time someone reconstructed it from memory instead. One read
+ * of the cache map exists (getProcessStartEpochSeconds), one caller of that
+ * (_isPidAliveSince, exposed as isPidAliveSinceCtx), so the readers are exactly
+ * the production `isPidAliveSinceCtx.fn(` sites minus the one inside
+ * isPidAliveSinceUncached, which evicts first:
+ *
+ *   grep -rn "processStartEpochSecondsCache" src --include=*.ts
+ *   grep -rn "getProcessStartEpochSeconds(" src --include=*.ts
+ *   grep -rn "isPidAliveSinceCtx" src --include=*.ts | grep -v "\.test\.ts"
  *
  * Reads the cache (via getProcessStartEpochSeconds ← isPidAliveSince), all
  * of them RENDERING decisions that are wrong for at most one window:
@@ -2506,12 +2517,17 @@ export const CLAUDE_PID_START_MARGIN_SECONDS = 60;
  *    cached read — see the bypass list.
  *  - detectAgentStates, the transient fast-path: a recycled watchdog PID lets
  *    a stale snapshot be trusted, bounded independently by TRANSIENT_FRESH_MS.
+ *  - tui/info-panel, the Claude stoplight: paints one dot green or red. It is
+ *    the only reader outside this module, and it decides nothing — which is
+ *    why a stale entry there costs a wrong-coloured dot for one window and
+ *    nothing else.
  *
  * BYPASSES the cache — every decision that destroys something. Each deletes
  * the entry and probes fresh at the moment of use, so no teardown, signal, or
  * lock steal is ever decided from a cached value:
- *  - isPidIdentityCurrent: before SIGTERM, and before tearing down the tmux
- *    session on a PID-derived `stopped` verdict.
+ *  - isPidIdentityCurrent: before SIGTERM, and before any teardown on a
+ *    PID-derived `stopped` verdict (the veto covers the watchdog signal and
+ *    the tmux session alike).
  *  - isPidAliveSinceUncached: confirming a dead verdict in the claude_pid gate
  *    before the reap, and both lifecycle-lock gates (stepping over a reclaim
  *    claim, reclaiming an owner's lock).

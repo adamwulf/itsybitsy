@@ -1606,3 +1606,79 @@ describe("Telegram admin subcommands", () => {
     expect(stderr).toBe("");
   });
 });
+
+// ─── CLI entry points ────────────────────────────────────────────────────────
+
+describe("CLI entry points", () => {
+  const repoRoot = import.meta.dir.replace(/\/src$/, "");
+
+  async function runEntry(
+    entry: string,
+    cliArgs: string[],
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const proc = Bun.spawn(["bun", "run", `${repoRoot}/${entry}`, ...cliArgs], {
+      cwd: repoRoot,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, HOME: "/tmp/ib-test-nonexistent-home" },
+    });
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    const exitCode = await proc.exited;
+    return { stdout, stderr, exitCode };
+  }
+
+  // Both files are real entry points and the project builds the binary from
+  // BOTH depending on which instruction you follow: package.json's `build`
+  // script compiles src/index.ts, while CLAUDE.md documents
+  // `bun build --compile ... index.ts` (the root shim). Dispatch is guarded by
+  // `import.meta.main`, which is per-module — so a guard that only covers one
+  // file silently produces a binary that starts up and does nothing. That is
+  // not a theoretical worry: guarding only src/index.ts did exactly that, and
+  // no existing test caught it because every other CLI test spawns
+  // src/index.ts, the entry that still worked.
+  test.each([["index.ts"], ["src/index.ts"]])(
+    "%s dispatches commands when run as the entry point",
+    async (entry) => {
+      const { stdout, exitCode } = await runEntry(entry, ["list-types"]);
+      expect(exitCode).toBe(0);
+      // A known row from the agent-type table — proves the command actually ran
+      // rather than the process merely exiting 0 with no output.
+      expect(stdout).toContain("coordinator");
+    },
+  );
+
+  // The other half of the contract: importing must NOT dispatch. Without this,
+  // `bun test <filter>` runs main() inside the test runner with the filter bound
+  // to process.argv[2], so `bun test send` / `merge` / `nuke` would execute those
+  // commands for real against the developer's repos.
+  test.each([["index.ts"], ["src/index.ts"]])(
+    "importing %s runs no CLI dispatch",
+    async (entry) => {
+      const proc = Bun.spawn(
+        ["bun", "-e", `await import("${repoRoot}/${entry}"); console.log("IMPORT_OK");`],
+        {
+          cwd: repoRoot,
+          stdout: "pipe",
+          stderr: "pipe",
+          // argv[2] would be the command if the guard leaked. "list-types"
+          // prints a distinctive table we can assert the absence of.
+          env: { ...process.env, HOME: "/tmp/ib-test-nonexistent-home" },
+        },
+      );
+      const [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      const exitCode = await proc.exited;
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("IMPORT_OK");
+      // No usage block (the default branch) and no agent-type table.
+      expect(stdout).not.toContain("SPAWNABLE");
+      expect(stdout).not.toContain("Usage: ib");
+      expect(stderr).not.toContain("Usage: ib");
+    },
+  );
+});

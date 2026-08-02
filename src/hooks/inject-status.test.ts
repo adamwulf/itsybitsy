@@ -11,6 +11,18 @@ import type { AgentDataSource } from "./inject-status";
 import type { RepoEntry } from "../registry";
 import type { Agent, AgentMeta } from "../agents";
 import { unlink } from "node:fs/promises";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
+
+/**
+ * Mirror of `safeRepoId` in inject-status.ts: every non-alphanumeric character
+ * becomes `-`. Used below to derive the hash-cache path for a cwd instead of
+ * hardcoding the transformed string, so the two cannot drift apart.
+ */
+function safeRepoIdForTest(cwd: string): string {
+  return cwd.replace(/[^a-zA-Z0-9]/g, "-");
+}
 
 // ── Helper to create mock agents ──────────────────────────────────────────
 
@@ -306,7 +318,15 @@ describe("briefSummary with questionCount", () => {
 // ── countPendingQuestions ─────────────────────────────────────────────────
 
 describe("countPendingQuestions", () => {
-  const tmpDir = "/tmp/ib-test-questions-" + Date.now();
+  // `mkdtemp`, not `"/tmp/ib-test-questions-" + Date.now()`. Date.now() has
+  // millisecond resolution, so four concurrently launched `bun test` processes
+  // can and do land on the same directory name — after which each one's
+  // `afterEach` deletes the fixture the others are mid-test on, and each one's
+  // writes are visible to the others. That showed up as "returns 0 when no
+  // questions file exists" counting another process's questions, and as the
+  // archived/unknown filter tests counting 0 because their file had just been
+  // removed underneath them. mkdtemp is unique by construction.
+  const tmpDir = mkdtempSync(joinPath(tmpdir(), "ib-test-questions-"));
 
   afterEach(async () => {
     try {
@@ -398,8 +418,18 @@ describe("countPendingQuestions", () => {
 // ── checkAndUpdateHash ────────────────────────────────────────────────────
 
 describe("checkAndUpdateHash", () => {
-  const testCwd = "/tmp/ib-test-hash-check";
-  const cachePath = `/tmp/ib-status-hash--tmp-ib-test-hash-check`;
+  // The cwd must be unique PER PROCESS. `checkAndUpdateHash` keys its cache on
+  // `/tmp/ib-status-hash-<safeRepoId(cwd)>`, which is process-global state
+  // outside any home or temp fixture. With a fixed cwd, two concurrent
+  // `bun test` processes shared one cache file: one would write the hash while
+  // the other's `afterEach` unlinked it, so "returns false on second identical
+  // call" saw no cache and returned true. Reproduced at roughly 1 failure per 2
+  // process-runs with four concurrent copies — it reads as a timing race but is
+  // plain shared state. `process.pid` is the thing that actually differs
+  // between the racing processes; a timestamp is not, since several can start
+  // within the same millisecond.
+  const testCwd = `/tmp/ib-test-hash-check-${process.pid}`;
+  const cachePath = `/tmp/ib-status-hash-${safeRepoIdForTest(testCwd)}`;
 
   afterEach(async () => {
     try {

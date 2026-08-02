@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm } from "fs/promises";
 import { existsSync } from "fs";
@@ -13,6 +13,26 @@ import type { LayoutState } from "./layout";
 import {
   getSavedSidebarWidth, getTmuxWidthForAgent, PINNED_TMUX_WIDTH,
 } from "./widths";
+
+// Two tests here wait out a real 500ms debounce timer and then a real file
+// write. `waitForValue` defaults to a 4s bound, chosen in b54bd0f to fire just
+// under bun's 5s default so a stuck wait reports WHAT it awaited instead of
+// losing to a generic timeout — but that pairing leaves this file only 4s of
+// headroom over a 500ms debounce, and a loaded machine eats it. Both were
+// observed failing that way during this branch's load runs: once as
+// "waitForValue timed out after 4000ms waiting for: debounced layout write",
+// once as the whole test dying at 10.2s.
+//
+// Raising the per-test bound is only half the fix: at bun's 5s default the 4s
+// wait still fires FIRST, so the extra headroom would be unreachable. The two
+// waits below therefore carry an explicit DEBOUNCE_WAIT_MS that sits under this
+// bound. Both numbers are FAILURE bounds, not waits — a wait returns the
+// instant its value appears, so passing tests are unaffected and no assertion
+// changes; they only decide how long a genuinely stuck write is tolerated.
+setDefaultTimeout(30_000);
+
+/** Failure bound for the debounce waits. Under the 30s per-test bound above. */
+const DEBOUNCE_WAIT_MS = 20_000;
 
 const sampleLayout: LayoutState = {
   sidebarWidth: 70,
@@ -112,7 +132,10 @@ describe("layout persistence", () => {
     // Wait for the debounce timer AND the write it kicks off. The timer
     // callback calls saveLayout() without awaiting it, so "500ms have passed"
     // does not imply "the bytes are on disk" — wait for the real condition.
-    const loaded = await waitForValue(() => loadLayout(), { message: "debounced layout write" });
+    const loaded = await waitForValue(() => loadLayout(), {
+      timeoutMs: DEBOUNCE_WAIT_MS,
+      message: "debounced layout write",
+    });
     expect(loaded).toEqual(sampleLayout);
   });
 
@@ -122,7 +145,10 @@ describe("layout persistence", () => {
     saveLayoutDebounced({ ...sampleLayout, sidebarWidth: 50 });
     saveLayoutDebounced({ ...sampleLayout, sidebarWidth: 55 });
     saveLayoutDebounced({ ...sampleLayout, sidebarWidth: 60 });
-    const loaded = await waitForValue(() => loadLayout(), { message: "coalesced layout write" });
+    const loaded = await waitForValue(() => loadLayout(), {
+      timeoutMs: DEBOUNCE_WAIT_MS,
+      message: "coalesced layout write",
+    });
     expect(loaded!.sidebarWidth).toBe(60);
   });
 

@@ -1,7 +1,8 @@
-import { test, expect, describe, beforeEach, afterEach, mock, spyOn } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, beforeAll, afterAll, mock, spyOn, setDefaultTimeout } from "bun:test";
 import { join } from "path";
-import { mkdirSync, writeFileSync, existsSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "fs";
 import { tmpdir } from "os";
+import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import { makeAgent } from "./test-utils";
 import type { Agent } from "./agents";
 import type { AgentState } from "./parse-state";
@@ -81,6 +82,55 @@ import {
 } from "./tmux-poller";
 import type { SpawnResult } from "./types";
 import type { ConfigResult } from "./config";
+
+// Several tests here spawn REAL subprocesses: `mktemp -d` and `rm -rf` in the
+// `@<repo-name>` sentinel test, plus the real `tmux capture-pane` that
+// `saveUnknownDebugLog` runs on every transition into `unknown`. A subprocess
+// spawn is far more load-sensitive than in-process work — one was measured at
+// 156s during a pathologically loaded run (see commit 5c8f254) — and bun's 5s
+// default per-test timeout leaves no headroom for that. This is a FAILURE bound
+// only: it weakens no assertion and passing tests are unaffected, it just
+// decides how long a genuinely stuck spawn takes to be declared stuck. It also
+// keeps the informative failure from `tickUntil` winning the race against a
+// generic "test timed out".
+setDefaultTimeout(60_000);
+
+/**
+ * Per-process itsybitsy home for the whole file.
+ *
+ * Every watchdog notification is delivered through the outbox, whose queue and
+ * lock live at `<itsybitsy home>/agents/<agent id>/` (`agentOutboxDir`). Left
+ * at its default that home is the developer's REAL `~/.itsybitsy`, which is
+ * shared with every other `bun test` process on the machine — and the agent ids
+ * here are generic ("a1", "mgr", "spawner"), so two suites running at once
+ * share ONE queue per id.
+ *
+ * That is a real, reproduced flake and not a theoretical one: with four
+ * concurrent runs of this file, 37 of 48 runs failed. The queue is not
+ * lock-guarded at enqueue time (the lock guards delivery), so the other
+ * process's drain reads a batch containing THIS process's just-enqueued
+ * message, delivers it into ITS OWN spawn mock, and rewrites the file without
+ * it. This process then acquires the lock, finds an empty queue, and
+ * `drainOutbox` returns its synthetic success — so the watchdog counts the
+ * notification as delivered while this process recorded no `send-keys` at all.
+ * The mirror image also happens: a drain here can deliver the OTHER process's
+ * message into our mock, which breaks the "and nobody else was notified"
+ * assertions.
+ *
+ * Pointing the home at a per-process temp dir gives each test process its own
+ * queue and lock. Nothing else in this file reads the real home.
+ */
+let outboxHome: string;
+
+beforeAll(() => {
+  outboxHome = mkdtempSync(join(tmpdir(), "ib-watchdog-home-"));
+  setCoordinatorHome(outboxHome);
+});
+
+afterAll(() => {
+  resetCoordinatorHome();
+  rmSync(outboxHome, { recursive: true, force: true });
+});
 
 /** Create a mock spawn runner that records calls and succeeds */
 function mockSpawnRunner() {
@@ -797,6 +847,52 @@ describe("watchdog", () => {
       ).length;
     }
 
+    /**
+     * Budget for {@link tickUntil}. Wide enough to cover several notify
+     * attempts, not just the first: `handleWaiting`/`handleUnknown` DOUBLE
+     * `notifyInterval` after every attempt they consider delivered, so the
+     * attempts land on ticks 6, 18, 42, 90 — a budget of 6 buys exactly one.
+     * Ticks are pure in-process work here (`setSendSpawnRunner` zeroes the
+     * delivery delays), so an unused budget costs nothing.
+     */
+    const MAX_NOTIFY_WAIT_TICKS = 100;
+
+    /**
+     * Drive ticks until `pred()` holds, then return; throw naming `what` if it
+     * never holds within `MAX_NOTIFY_WAIT_TICKS`.
+     *
+     * This is `waitFor` for a tick-driven engine: the watchdog's notify can
+     * only advance when we tick it, so the wait has to supply the ticks rather
+     * than sleep. The important half is the same — poll the EXACT condition the
+     * test then asserts, and return the instant it holds.
+     *
+     * What it replaces: `for (i < INITIAL_NOTIFY_TICKS) await tick(...)`
+     * followed by an assertion that the notification landed. That loop gives
+     * the test exactly ONE delivery attempt and asserts it succeeded, so any
+     * transient miss is a hard failure rather than a retry. It missed for a
+     * real reason: the outbox queue every notification flows through is keyed
+     * by agent id under the itsybitsy home, which used to be the developer's
+     * REAL ~/.itsybitsy — shared with every other `bun test` process on the
+     * machine. A concurrent suite's drain would deliver (and delete) THIS
+     * process's queued message; `drainOutbox` then found an empty queue,
+     * reported success, and the watchdog reset the counter and doubled the
+     * interval — with zero `send-keys` recorded here. The per-file home
+     * override at the top of this file removes that interference at the root;
+     * waiting on the real condition removes the single-attempt fragility that
+     * turned it into a failed assertion.
+     */
+    async function tickUntil(
+      agents: Agent[],
+      pred: () => boolean,
+      what: string,
+    ): Promise<void> {
+      for (let i = 0; i < MAX_NOTIFY_WAIT_TICKS; i++) {
+        await tick(agents);
+        if (pred()) return;
+      }
+      throw new Error(`tickUntil: ${what} did not happen within ${MAX_NOTIFY_WAIT_TICKS} ticks`);
+    }
+
     test("waiting: manager wins — spawner is NOT notified when both are set", async () => {
       setWatchdogCaptureTmux(async () => "no shells");
       const mgr = agent("mgr", "running");
@@ -804,9 +900,11 @@ describe("watchdog", () => {
       const a1 = agent("a1", "waiting", "mgr");
       a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
 
-      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
-        await tick([mgr, spawner, a1]);
-      }
+      await tickUntil(
+        [mgr, spawner, a1],
+        () => countSendKeysWithText(spawnMock, "Your subtask a1 recently started waiting") > 0,
+        "manager notified that a1 started waiting",
+      );
       // Manager (subtask wording) was notified; spawner (you spawned wording) was NOT.
       expect(countSendKeysWithText(spawnMock, "Your subtask a1 recently started waiting")).toBeGreaterThan(0);
       expect(countSendKeysWithText(spawnMock, "you spawned recently started waiting")).toBe(0);
@@ -818,9 +916,11 @@ describe("watchdog", () => {
       const a1 = agent("a1", "waiting", null);
       a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
 
-      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
-        await tick([spawner, a1]);
-      }
+      await tickUntil(
+        [spawner, a1],
+        () => countSendKeysWithText(spawnMock, "you spawned recently started waiting") > 0,
+        "spawner notified that a1 started waiting",
+      );
       expect(countSendKeysWithText(spawnMock, "you spawned recently started waiting")).toBeGreaterThan(0);
     });
 
@@ -828,6 +928,9 @@ describe("watchdog", () => {
       setWatchdogCaptureTmux(async () => "no shells");
       const a1 = agent("a1", "waiting", null);
 
+      // Fixed tick count on purpose: the assertion is NEGATIVE (nothing was
+      // ever sent), so there is no condition to wait for — ticking past the
+      // threshold is exactly what gives the notification its chance to fire.
       for (let i = 0; i < INITIAL_NOTIFY_TICKS + 5; i++) {
         await tick([a1]);
       }
@@ -842,10 +945,13 @@ describe("watchdog", () => {
 
       // The watchdog "recently completed" is a delayed fallback — it only fires
       // after the agent has been continuously complete for
-      // COMPLETE_FALLBACK_DELAY_TICKS.
-      for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS; i++) {
-        await tick([mgr, spawner, a1]);
-      }
+      // COMPLETE_FALLBACK_DELAY_TICKS, so the first COMPLETE_FALLBACK_DELAY_TICKS-1
+      // ticks of this wait can never satisfy it.
+      await tickUntil(
+        [mgr, spawner, a1],
+        () => countSendKeysWithText(spawnMock, "Your subtask a1 recently completed") > 0,
+        "manager notified that a1 completed",
+      );
       expect(countSendKeysWithText(spawnMock, "Your subtask a1 recently completed")).toBeGreaterThan(0);
       expect(countSendKeysWithText(spawnMock, "you spawned recently completed")).toBe(0);
     });
@@ -855,9 +961,11 @@ describe("watchdog", () => {
       const a1 = agent("a1", "complete", null);
       a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
 
-      for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS; i++) {
-        await tick([spawner, a1]);
-      }
+      await tickUntil(
+        [spawner, a1],
+        () => countSendKeysWithText(spawnMock, "you spawned recently completed") > 0,
+        "spawner notified that a1 completed",
+      );
       expect(countSendKeysWithText(spawnMock, "you spawned recently completed")).toBeGreaterThan(0);
     });
 
@@ -867,9 +975,11 @@ describe("watchdog", () => {
       const a1 = agent("a1", "unknown", "mgr");
       a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
 
-      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
-        await tick([mgr, spawner, a1]);
-      }
+      await tickUntil(
+        [mgr, spawner, a1],
+        () => countSendKeysWithText(spawnMock, "Your subtask a1 state is unknown") > 0,
+        "manager notified that a1's state is unknown",
+      );
       expect(countSendKeysWithText(spawnMock, "Your subtask a1 state is unknown")).toBeGreaterThan(0);
       expect(countSendKeysWithText(spawnMock, "you spawned has an unknown state")).toBe(0);
     });
@@ -879,9 +989,11 @@ describe("watchdog", () => {
       const a1 = agent("a1", "unknown", null);
       a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
 
-      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
-        await tick([spawner, a1]);
-      }
+      await tickUntil(
+        [spawner, a1],
+        () => countSendKeysWithText(spawnMock, "you spawned has an unknown state") > 0,
+        "spawner notified that a1's state is unknown",
+      );
       expect(countSendKeysWithText(spawnMock, "you spawned has an unknown state")).toBeGreaterThan(0);
     });
   });

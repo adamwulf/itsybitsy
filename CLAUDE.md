@@ -57,6 +57,17 @@ bun build --compile --minify --sourcemap index.ts --outfile ib
 
 Produces a single `ib` binary with no runtime dependencies. Install to PATH (`sudo cp ib /usr/local/bin/ib`) or add the project dir to PATH. Hook commands like `ib hooks main-path` reference the binary by its installed name.
 
+`bun run build` runs exactly this command — keep the two identical. The root
+`index.ts` is the authoritative entry point; it re-exports `src/index.ts` and
+carries its own `import.meta.main`-guarded `main()` call. Both files dispatch as
+entry points and both stay inert when imported, so building from either works,
+but they must be kept that way: an `import.meta.main` guard on only one of them
+produces a binary that starts up and silently dispatches nothing. `bun test` will
+not catch that on its own — see the "CLI entry points" tests in
+`src/index.test.ts`, which exist because a green suite once hid a dead binary.
+After any change to either entry point, rebuild and confirm `ib list-types`
+prints a table.
+
 ## Specifications
 
 - **SPEC.md** is the authoritative behavioral spec. Read it before changing agent lifecycle, hooks, or orchestration behavior. It documents intentional divergences from the bash reference implementation.

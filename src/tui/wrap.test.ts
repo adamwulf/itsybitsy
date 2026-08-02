@@ -716,13 +716,21 @@ describe("wordWrapLines performance", () => {
     //                                               faults and cache thrashing
     //                                               are real work charged to us)
     //
-    // 300ms is ~8.5x the nominal cost and ~3.1x the worst figure ever observed,
-    // so it has far more headroom than the 80ms bound that flaked (2.3x over
-    // that same 96ms). It still catches the case the ratio cannot: a 10x linear
-    // regression costs ~350ms even on a quiet machine, and ~960ms on a busy one.
-    // Constant-factor regressions below ~8x remain uncaught by design — that
+    // 300ms is ~8.5x nominal and ~3.1x the worst figure ever observed. The old
+    // 80ms bound had only ~2.3x over nominal and did not clear the 96ms
+    // pathological case AT ALL — it sat below it, which is exactly how it
+    // failed a run that contained no regression.
+    //
+    // It still catches the case the ratio cannot: a 10x linear regression costs
+    // ~330-360ms even on a quiet machine, and far more on a busy one. Measured
+    // cutoff on this hardware is ~9x (8x lands at 285-310ms, right at the knee).
+    // Constant-factor regressions below that remain uncaught by design — that
     // band cannot be distinguished from machine variance by any wall-clock or
     // CPU budget, which is what the ratio check above is for.
+    //
+    // Unlike the ratio, this bound IS machine-dependent: nominal is ~33ms here,
+    // so on hardware ~3x slower nominal approaches 100ms and the margin is gone.
+    // Re-measure before trusting 300 anywhere but a developer machine.
     expect(full).toBeLessThan(300);
   });
 });

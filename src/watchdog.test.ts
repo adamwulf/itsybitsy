@@ -2657,6 +2657,11 @@ describe("runPerAgentWatchdog", () => {
     const section = () => async () => {
       active++;
       maxActive = Math.max(maxActive, active);
+      // Not a wait for anything: this sleep IS the critical section being
+      // serialized, and holding it open is what lets the second section
+      // overlap. Both sections are awaited via Promise.all below, and a timer
+      // can never fire before the pending microtasks that start section two,
+      // so `maxActive` is deterministic rather than load-dependent.
       await new Promise((r) => setTimeout(r, 5));
       active--;
     };

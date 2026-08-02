@@ -33,7 +33,10 @@ import { tmuxSessionTarget } from "./validation";
  */
 export interface WatcherAgentsApi {
   readAllAgents: (repos: Array<{ path: string; name: string }>, includeArchived: boolean) => Promise<ReadAgentsResult>;
-  detectAgentStates: (agents: Agent[], opts?: { reap?: boolean }) => Promise<void>;
+  detectAgentStates: (
+    agents: Agent[],
+    opts?: { reap?: boolean; confirmTmuxMissingAcrossPolls?: boolean }
+  ) => Promise<void>;
   buildAgentTree: (agents: Agent[]) => Agent[];
   flattenAgentTree: (roots: Agent[], repos?: string[] | { name: string; path: string }[], coordinator?: { state: string; age: string }, groupByParent?: boolean) => FlatEntry[];
   readPendingQuestions: (repoPath: string) => Promise<PendingQuestion[]>;
@@ -287,7 +290,10 @@ export class AgentWatcher {
       // Lifecycle path: the watcher tick is authorized to reap orphan PIDs
       // and tear down husk tmux sessions for agents detected as stopped.
       const [, coordinatorInfo] = await Promise.all([
-        agentsApi.detectAgentStates(agents, { reap: true }),
+        agentsApi.detectAgentStates(agents, {
+          reap: true,
+          confirmTmuxMissingAcrossPolls: true,
+        }),
         this.getCoordinatorInfo(),
       ]);
       // If refresh() swapped lastAgents while we were awaiting, discard stale results
@@ -305,12 +311,19 @@ export class AgentWatcher {
       this.events.onError?.(err instanceof Error ? err : new Error(String(err)));
     } finally {
       this.polling = false;
+      if (this.refreshQueued && !this.refreshing) {
+        this.refreshQueued = false;
+        void this.refresh();
+      }
     }
   }
 
   /** Read all agents, detect states, and emit update */
   async refresh(): Promise<void> {
-    if (this.refreshing) {
+    // State detection has destructive authority in both paths. Serialize
+    // refresh with the lightweight polling pass so one temporal observation
+    // cannot be counted twice and a stale pass cannot race a refresh.
+    if (this.refreshing || this.polling) {
       this.refreshQueued = true;
       return;
     }
@@ -337,7 +350,10 @@ export class AgentWatcher {
       // Lifecycle path: the watcher refresh is authorized to reap orphan PIDs
       // and tear down husk tmux sessions for agents detected as stopped.
       const [, coordinatorInfo] = await Promise.all([
-        agentsApi.detectAgentStates(agents, { reap: true }),
+        agentsApi.detectAgentStates(agents, {
+          reap: true,
+          confirmTmuxMissingAcrossPolls: true,
+        }),
         this.getCoordinatorInfo(),
       ]);
 

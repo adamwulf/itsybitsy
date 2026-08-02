@@ -1,18 +1,34 @@
 import { test, expect, describe, afterEach } from "bun:test";
-import { TmuxPoller, captureTmuxOutput, hasAttachedClient, spawnCtx, expandTabs } from "./tmux-poller";
+import {
+  TmuxPoller,
+  captureTmuxOutput,
+  captureTmuxOutputResult,
+  probeTmuxSession,
+  probeTmuxPane,
+  killTmuxSessionResult,
+  hasAttachedClient,
+  spawnCtx,
+  expandTabs,
+} from "./tmux-poller";
 
-function mockSpawn(stdout: string, exitCode: number, delay = 0) {
+function mockSpawn(stdout: string, exitCode: number, delay = 0, stderr = "") {
   spawnCtx.set((_cmd: string[], _opts?: any) => {
     const encoder = new TextEncoder();
-    const stream = new ReadableStream({
+    const stdoutStream = new ReadableStream({
       start(controller) {
         controller.enqueue(encoder.encode(stdout));
         controller.close();
       },
     });
+    const stderrStream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(stderr));
+        controller.close();
+      },
+    });
     return {
-      stdout: stream,
-      stderr: new ReadableStream({ start(c) { c.close(); } }),
+      stdout: stdoutStream,
+      stderr: stderrStream,
       exited: delay > 0
         ? new Promise<number>((r) => setTimeout(() => r(exitCode), delay))
         : Promise.resolve(exitCode),
@@ -32,6 +48,26 @@ describe("captureTmuxOutput", () => {
     mockSpawn("", 1);
     const result = await captureTmuxOutput("nonexistent-session");
     expect(result).toBeNull();
+  });
+
+  test("detailed capture preserves tmux stderr and exit code", async () => {
+    mockSpawn("", 1, 0, "capture-pane temporarily unavailable");
+    const result = await captureTmuxOutputResult("my-session");
+    expect(result).toEqual({
+      status: "error",
+      error: "capture-pane temporarily unavailable",
+      exitCode: 1,
+    });
+  });
+
+  test("detailed capture preserves spawn exceptions", async () => {
+    spawnCtx.set(() => { throw new Error("operation not permitted"); });
+    const result = await captureTmuxOutputResult("my-session");
+    expect(result).toEqual({
+      status: "error",
+      error: "operation not permitted",
+      exitCode: null,
+    });
   });
 
   test("returns stripped string output on success", async () => {
@@ -92,6 +128,120 @@ describe("captureTmuxOutput", () => {
     expect(result).toBe(joined);
     // Three logical lines (+ trailing empty from the final \n).
     expect(result!.split("\n").filter((l) => l.length > 0)).toHaveLength(3);
+  });
+});
+
+describe("probeTmuxSession", () => {
+  test("returns live only for a successful exact-session probe", async () => {
+    mockSpawn("", 0);
+    expect(await probeTmuxSession("my-session")).toEqual({ status: "live" });
+  });
+
+  test("returns missing for tmux's affirmative missing-session response", async () => {
+    mockSpawn("", 1, 0, "can't find session: my-session");
+    expect(await probeTmuxSession("my-session")).toEqual({
+      status: "missing",
+      error: "can't find session: my-session",
+    });
+  });
+
+  test("returns unknown for permission errors", async () => {
+    mockSpawn("", 1, 0, "error connecting to /tmp/tmux/default (Permission denied)");
+    expect(await probeTmuxSession("my-session")).toEqual({
+      status: "unknown",
+      error: "error connecting to /tmp/tmux/default (Permission denied)",
+      exitCode: 1,
+    });
+  });
+
+  test("returns unknown when the tmux server is unavailable", async () => {
+    mockSpawn("", 1, 0, "no server running on /tmp/tmux-501/default");
+    expect(await probeTmuxSession("my-session")).toEqual({
+      status: "unknown",
+      error: "no server running on /tmp/tmux-501/default",
+      exitCode: 1,
+    });
+  });
+
+  test("returns unknown when the probe cannot spawn", async () => {
+    spawnCtx.set(() => { throw new Error("posix_spawn tmux: EPERM"); });
+    expect(await probeTmuxSession("my-session")).toEqual({
+      status: "unknown",
+      error: "posix_spawn tmux: EPERM",
+      exitCode: null,
+    });
+  });
+});
+
+describe("probeTmuxPane", () => {
+  test("queries every window in the exact session", async () => {
+    let capturedCmd: string[] = [];
+    spawnCtx.set((cmd: string[]) => {
+      capturedCmd = cmd;
+      return {
+        stdout: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("0\n"));
+            controller.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(controller) { controller.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    });
+
+    await probeTmuxPane("my-session");
+
+    expect(capturedCmd).toContain("-s");
+    expect(capturedCmd).toContain("=my-session:");
+  });
+
+  test("returns live from authoritative pane metadata", async () => {
+    mockSpawn("0\n", 0);
+    expect(await probeTmuxPane("my-session")).toEqual({ status: "live" });
+  });
+
+  test("returns dead only when every pane is dead", async () => {
+    mockSpawn("1\n1\n", 0);
+    expect(await probeTmuxPane("my-session")).toEqual({ status: "dead" });
+  });
+
+  test("returns live when any pane remains live", async () => {
+    mockSpawn("1\n0\n", 0);
+    expect(await probeTmuxPane("my-session")).toEqual({ status: "live" });
+  });
+
+  test("returns unknown for unavailable or malformed metadata", async () => {
+    mockSpawn("", 1, 0, "permission denied");
+    expect(await probeTmuxPane("my-session")).toEqual({
+      status: "unknown",
+      error: "permission denied",
+      exitCode: 1,
+    });
+
+    mockSpawn("Pane is dead\n", 0);
+    const malformed = await probeTmuxPane("my-session");
+    expect(malformed.status).toBe("unknown");
+  });
+});
+
+describe("killTmuxSessionResult", () => {
+  test("preserves stderr and exit code for failed teardown", async () => {
+    mockSpawn("", 1, 0, "session is attached");
+    expect(await killTmuxSessionResult("my-session")).toEqual({
+      ok: false,
+      error: "session is attached",
+      exitCode: 1,
+    });
+  });
+
+  test("preserves spawn exceptions", async () => {
+    spawnCtx.set(() => { throw new Error("spawn denied"); });
+    expect(await killTmuxSessionResult("my-session")).toEqual({
+      ok: false,
+      error: "spawn denied",
+      exitCode: null,
+    });
   });
 });
 

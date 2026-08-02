@@ -4,11 +4,18 @@
  */
 
 import { join, dirname, basename } from "path";
-import { readdir, rename, stat, unlink, open } from "fs/promises";
+import { readdir, link, rename, stat, unlink, open } from "fs/promises";
 import { randomUUID } from "crypto";
 import type { AgentState } from "./parse-state";
 import { parseState, stripAnsi, stripTrailingBlanks, STARTUP_MARKERS } from "./parse-state";
-import { captureTmuxOutput, killTmuxSession, listTmuxSessions } from "./tmux-poller";
+import {
+  captureTmuxOutput,
+  captureTmuxOutputResult,
+  killTmuxSessionResult,
+  listTmuxSessions,
+  probeTmuxPane,
+  probeTmuxSession,
+} from "./tmux-poller";
 import { InjectionContext } from "./types";
 import { logToWatchLog, logWarning } from "./watch-log";
 
@@ -389,6 +396,8 @@ export interface TransientState {
   has_background_tasks: boolean;
   updated_at_ms: number;
   watchdog_pid: number;
+  /** Unix epoch seconds when this watchdog process started. */
+  watchdog_pid_epoch?: number;
   // Wall-clock ms when the agent was most recently restarted/resumed. Used by
   // the watchdog to identify Claude CLI auto-compaction immediately after a
   // restart, without changing durable meta.json shape.
@@ -457,6 +466,12 @@ export async function readAgentTransient(agentDir: string): Promise<TransientSta
       has_background_tasks: data.has_background_tasks,
       updated_at_ms: data.updated_at_ms,
       watchdog_pid: data.watchdog_pid,
+      watchdog_pid_epoch:
+        typeof data.watchdog_pid_epoch === "number" &&
+        Number.isFinite(data.watchdog_pid_epoch) &&
+        data.watchdog_pid_epoch > 0
+          ? data.watchdog_pid_epoch
+          : undefined,
       last_restarted_at_ms: typeof data.last_restarted_at_ms === "number" ? data.last_restarted_at_ms : null,
       restart_compact_escape_sent_at_ms: typeof data.restart_compact_escape_sent_at_ms === "number"
         ? data.restart_compact_escape_sent_at_ms
@@ -496,6 +511,7 @@ function emptyTransient(): TransientState {
     has_background_tasks: false,
     updated_at_ms: 0,
     watchdog_pid: 0,
+    watchdog_pid_epoch: undefined,
     last_restarted_at_ms: null,
     restart_compact_escape_sent_at_ms: null,
     operation: null,
@@ -503,25 +519,524 @@ function emptyTransient(): TransientState {
 }
 
 /**
+ * How old a lock generation (or a reclaim claim) must be before anyone may
+ * step over it.
+ *
+ * ORDERING CONSTRAINT: this must stay strictly greater than
+ * PROCESS_START_CACHE_TTL_MS, and assertLifecycleTimingInvariant enforces it
+ * at module load — see the note there for why. Raising the cache TTL past this
+ * value would otherwise silently make LIVE locks stealable.
+ */
+export const LIFECYCLE_LOCK_STALE_MS = 120_000;
+const LIFECYCLE_LOCK_RETRY_MS = 25;
+
+/**
+ * Upper bound on reclaim slots per stale lock generation. A slot is only
+ * stepped over when its recorded reclaimer is AFFIRMATIVELY gone, so the only
+ * way to consume slots is a reclaimer dying inside the microseconds between
+ * claiming one and finishing the steal. Exhausting the bound fails safe (the
+ * caller reports the agent busy) rather than unlinking another process's claim.
+ */
+const LIFECYCLE_LOCK_RECLAIM_SLOT_LIMIT = 16;
+
+export interface AgentLifecycleLock {
+  release: () => Promise<void>;
+}
+
+/** Path of the Nth reclaim claim for one stale lock generation. */
+function lifecycleReclaimClaimPath(lockPath: string, staleToken: string, slot: number): string {
+  return `${lockPath}.reclaim.${staleToken}.${slot}`;
+}
+
+/**
+ * Read the PID epoch out of a lifecycle lock or reclaim-claim record.
+ *
+ * Both records stamp `pid_epoch` with the writer's REAL process start time
+ * (selfProcessStartEpochSeconds), not the wall clock at write time. That is a
+ * deliberate difference from claude_pid_epoch / watchdog_pid_epoch, which are
+ * PID-WRITE stamps taken moments after their process starts: an `ib watch`
+ * that has been up for hours acquires locks long after it started, so a
+ * write-time stamp would sit way outside CLAUDE_PID_START_MARGIN_SECONDS and
+ * make every record it wrote look recycled. Recording the true start makes the
+ * comparison exact.
+ *
+ * `undefined` for a record written by an older binary (or by a process that
+ * could not read its own start time). Callers must treat that as "cannot
+ * confirm the holder is gone", never as permission to steal — which is exactly
+ * what isPidAliveSince does with an absent epoch.
+ */
+function lifecycleRecordPidEpoch(record: any): number | undefined {
+  const epoch = Number(record?.pid_epoch);
+  return Number.isFinite(epoch) && epoch > 0 ? epoch : undefined;
+}
+
+/**
+ * Write a lifecycle staging file, WITHOUT creating parent directories.
+ *
+ * `Bun.write` makes missing parents, so publishing via a staging file quietly
+ * gained the power to recreate a deleted `.ittybitty/agents` tree — where the
+ * `open(wx)` this replaced simply returned ENOENT and the caller failed safe.
+ * `open(wx)` here restores that, and the exclusivity is free: staging names
+ * carry a uuid, so a collision means something is badly wrong.
+ *
+ * Writing the body in two steps is safe for staging specifically, which is the
+ * whole reason staging exists: nothing reads this path, and it is linked into
+ * place only after the write has completed.
+ *
+ * `writeFile`, not `write`. A bare `write` may take fewer bytes than it was
+ * handed and simply report how many — and this body is published verbatim by
+ * `link`, so a short write publishes a truncated record. That is precisely the
+ * half-written lock staging exists to make impossible. `writeFile` loops until
+ * the buffer is drained.
+ */
+async function writeLifecycleStagingFile(path: string, body: string): Promise<void> {
+  const handle = await open(path, "wx");
+  try {
+    await handle.writeFile(body);
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Whether a reclaim claim is old enough to be stepped over.
+ *
+ * `created_at_ms` was being stamped into every claim and never read by anything,
+ * so a claim had no age gate at all: an incorrect liveness verdict was, by
+ * itself, enough to take one. Age is the second, independent condition — a
+ * claim lives for microseconds between being linked into place and the steal
+ * resolving, so anything that survives the stale threshold is crash debris.
+ *
+ * Falls back to the file's mtime when the record carries no usable stamp
+ * (written by an older binary). `link` publishes the claim from a staging file
+ * without changing its mtime, so the file's own timestamp dates the claim just
+ * as well. With neither, the claim is unavailable evidence and stays untouched
+ * rather than becoming steppable by default.
+ *
+ * The cost of this gate is bounded and non-destructive: a reclaimer that is
+ * SIGKILLed inside that microsecond window makes its slot unavailable for the
+ * stale threshold. That is a delay, never a wedge — the claim becomes
+ * steppable once it ages out, and callers meanwhile fail safe by reporting the
+ * agent busy.
+ */
+async function isLifecycleClaimStale(claimPath: string, claim: any): Promise<boolean> {
+  const createdAtMs = Number(claim?.created_at_ms);
+  let ageBasisMs: number;
+  if (Number.isFinite(createdAtMs) && createdAtMs > 0) {
+    ageBasisMs = createdAtMs;
+  } else {
+    try {
+      ageBasisMs = (await stat(claimPath)).mtimeMs;
+    } catch {
+      return false;
+    }
+  }
+  return Date.now() - ageBasisMs > LIFECYCLE_LOCK_STALE_MS;
+}
+
+/**
+ * Claim the exclusive right to reclaim ONE stale lock generation, returning the
+ * slot index claimed or null when the claim is unavailable.
+ *
+ * The claim is what makes reclamation safe. Re-reading the token immediately
+ * before unlinking only narrows the window — two contenders can both pass that
+ * re-read, and the second unlink then removes the NEW lock the first just
+ * acquired, leaving both believing they hold it. Here the claim file is created
+ * with an atomic create-if-absent and is keyed on the stale generation's token,
+ * so at most one process may ever remove that generation. Combined with the
+ * caller's affirmative dead-owner check (the generation's own holder can never
+ * release it), a held claim means the lock file cannot change underneath us.
+ *
+ * The claim is published via `link` from a fully-written staging file rather
+ * than `open(wx)` + write, so a contender can never read a half-written claim
+ * and mistake a live reclaimer for a crashed one.
+ */
+async function claimStaleLifecycleLock(
+  lockPath: string,
+  staleToken: string,
+): Promise<number | null> {
+  for (let slot = 0; slot < LIFECYCLE_LOCK_RECLAIM_SLOT_LIMIT; slot++) {
+    const claimPath = lifecycleReclaimClaimPath(lockPath, staleToken, slot);
+    const stagingPath = `${lockPath}.reclaim.staging.${process.pid}.${randomUUID()}`;
+    try {
+      await writeLifecycleStagingFile(
+        stagingPath,
+        JSON.stringify({
+          pid: process.pid,
+          pid_epoch: selfProcessStartEpochSeconds(),
+          created_at_ms: Date.now(),
+        }),
+      );
+      await link(stagingPath, claimPath);
+      return slot;
+    } catch (error: any) {
+      if (error?.code !== "EEXIST") return null;
+      // A claim already exists. NEVER unlink it to take over: two contenders
+      // racing that unlink would both end up holding the claim, which is the
+      // same two-owner bug one level down. Step to the next slot — itself an
+      // exclusive create — only when the current claim's reclaimer is
+      // affirmatively gone. An unreadable claim is unavailable evidence.
+      let claim: any;
+      try {
+        claim = await Bun.file(claimPath).json();
+      } catch {
+        return null;
+      }
+      const claimPid = Number(claim?.pid);
+      if (
+        !Number.isFinite(claimPid) ||
+        claimPid <= 0 ||
+        // Identity, not bare liveness: one recycled PID would otherwise make a
+        // long-dead reclaimer look alive forever and wedge this generation.
+        //
+        // UNCACHED. Stepping over a claim is destructive — it hands this
+        // generation to a second process, which is precisely what the claim
+        // exists to prevent — so it may not be decided from a cached
+        // process-start read. A cache entry left by a since-recycled PID makes
+        // a LIVE reclaimer look gone, and the step-over then deletes that live
+        // process's claim file. Not isPidIdentityCurrent: its strict verdict on
+        // absent evidence would make every legacy no-epoch claim instantly
+        // steppable, converting a wedge into a live steal.
+        isPidAliveSinceUncached(claimPid, lifecycleRecordPidEpoch(claim)) ||
+        // Age, independently of liveness. A claim is held for microseconds in
+        // the normal path, so anything worth stepping over is crash debris and
+        // is necessarily old. Requiring the same threshold a stale LOCK must
+        // clear means a wrong liveness verdict is not on its own sufficient to
+        // steal a claim — the two guards have to fail together.
+        !(await isLifecycleClaimStale(claimPath, claim))
+      ) {
+        return null;
+      }
+    } finally {
+      try {
+        await unlink(stagingPath);
+      } catch {
+        // Never created, or already linked into place — the link is what counts.
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Best-effort sweep of staging files abandoned by a process that died between
+ * writing one and linking it into place. Both publishers remove their staging
+ * file in a `finally`, so this only ever finds crash debris — but nothing else
+ * collects it, and it accumulates beside the agent directories forever.
+ *
+ * Scoped to one lock path rather than one generation: staging names carry the
+ * writer's pid, not the generation token (they are written BEFORE a generation
+ * is settled). Removal requires the writer to be affirmatively gone AND the
+ * file to be older than the stale threshold — in the normal path a staging
+ * file exists for microseconds, so neither a live contender's file nor a
+ * freshly abandoned one is ever touched.
+ *
+ * Never throws and never gates anything: a failed sweep must not block or
+ * authorize a reclaim.
+ */
+async function sweepAbandonedLifecycleStaging(lockPath: string): Promise<void> {
+  const dir = dirname(lockPath);
+  const base = basename(lockPath);
+  const prefixes = [`${base}.staging.`, `${base}.reclaim.staging.`];
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return;
+  }
+  const now = Date.now();
+  for (const entry of entries) {
+    const prefix = prefixes.find((p) => entry.startsWith(p));
+    if (!prefix) continue;
+    const writerPid = Number(entry.slice(prefix.length).split(".")[0]);
+    if (!Number.isFinite(writerPid) || writerPid <= 0 || isPidAliveCtx.fn(writerPid)) {
+      continue;
+    }
+    const path = join(dir, entry);
+    try {
+      const info = await stat(path);
+      if (now - info.mtimeMs <= LIFECYCLE_LOCK_STALE_MS) continue;
+      await unlink(path);
+    } catch {
+      /* already gone, or swept by someone else — nothing to do */
+    }
+  }
+}
+
+/**
+ * Drop reclaim claims for a generation, newest slot first. Safe once the steal
+ * has resolved: a reclaimed generation can never return to the lock path
+ * (tokens are unique), so any contender that later wins a freed slot aborts at
+ * its own re-read instead of touching the live lock.
+ */
+async function releaseStaleLifecycleClaims(
+  lockPath: string,
+  staleToken: string,
+  throughSlot: number,
+): Promise<void> {
+  for (let slot = throughSlot; slot >= 0; slot--) {
+    try {
+      await unlink(lifecycleReclaimClaimPath(lockPath, staleToken, slot));
+    } catch {
+      /* best-effort cleanup */
+    }
+  }
+}
+
+/**
+ * The lock generation currently published at a path.
+ *
+ * `owner` is null when the body was READ SUCCESSFULLY but is definitively not
+ * a lock record: a zero-byte file left by an older binary that created the
+ * lock with `open(wx)` and died before writing the body, or a body corrupted
+ * from outside this protocol. Those generations still get a `token` — derived
+ * from size and mtime, the only identity a bodyless file has — so the reclaim
+ * protocol can serialize on them exactly like a real generation.
+ */
+interface LifecycleLockGeneration {
+  /** Identity of this exact generation; keys the reclaim claim. */
+  token: string;
+  /** Parsed owner record, or null when the body is not one. */
+  owner: { pid: number; pidEpoch: number | undefined; createdAtMs: number } | null;
+  /** Filesystem mtime — the only age signal a bodyless lock carries. */
+  mtimeMs: number;
+}
+
+/**
+ * Read the generation published at `path`, or null when the file cannot be
+ * OBSERVED at all (missing, or a stat/read failure). A failed observation is
+ * unavailable evidence and must never become permission to remove the lock;
+ * only a successful read of a definitively-invalid body downgrades to the
+ * bodyless (mtime-aged) generation.
+ */
+async function readLifecycleLockGeneration(
+  path: string,
+): Promise<LifecycleLockGeneration | null> {
+  let mtimeMs: number;
+  let size: number;
+  try {
+    const info = await stat(path);
+    mtimeMs = info.mtimeMs;
+    size = info.size;
+  } catch {
+    return null;
+  }
+  let body: string;
+  try {
+    body = await Bun.file(path).text();
+  } catch {
+    return null;
+  }
+  let parsed: any = null;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    /* definitively not a record — fall through to the bodyless generation */
+  }
+  const token = parsed?.token;
+  const pid = Number(parsed?.pid);
+  const createdAtMs = Number(parsed?.created_at_ms);
+  if (
+    typeof token === "string" &&
+    token.length > 0 &&
+    Number.isFinite(pid) &&
+    pid > 0 &&
+    Number.isFinite(createdAtMs)
+  ) {
+    return {
+      token,
+      owner: { pid, pidEpoch: lifecycleRecordPidEpoch(parsed), createdAtMs },
+      mtimeMs,
+    };
+  }
+  // Size and mtime are both preserved by rename, so this token survives the
+  // move-aside step of the steal and can be re-verified there.
+  return { token: `malformed.${size}.${Math.floor(mtimeMs)}`, owner: null, mtimeMs };
+}
+
+/**
+ * Crash recovery for a lock whose owner is affirmatively gone. Returns true
+ * only when this process removed the stale generation, meaning the caller
+ * should immediately retry its exclusive create.
+ */
+async function reclaimStaleLifecycleLock(lockPath: string): Promise<boolean> {
+  const generation = await readLifecycleLockGeneration(lockPath);
+  // An unreadable lock is unavailable evidence, not permission to remove it.
+  if (!generation) return false;
+
+  const now = Date.now();
+  if (generation.owner) {
+    if (
+      !(now - generation.owner.createdAtMs > LIFECYCLE_LOCK_STALE_MS) ||
+      // Identity, not bare liveness. A bare check on the recorded number lets
+      // ONE recycled PID make a long-dead owner look alive forever, wedging
+      // this generation permanently — the same PID-reuse hazard the epoch was
+      // introduced for on the reaping paths. An absent epoch (older binary) or
+      // an unreadable start time still reads as alive, so neither becomes
+      // permission to steal.
+      //
+      // UNCACHED, for the same reason the claim gate is: a cached process-start
+      // read can report a LIVE lock owner as gone, and this gate authorizes
+      // removing that owner's lock. Age alone does not cover it — the owner of
+      // a 200s-old lock can be alive and simply slow.
+      isPidAliveSinceUncached(generation.owner.pid, generation.owner.pidEpoch)
+    ) {
+      return false;
+    }
+  } else if (!(now - generation.mtimeMs > LIFECYCLE_LOCK_STALE_MS)) {
+    // Bodyless backstop. A lock with no owner record names no process, so
+    // liveness cannot be checked at all and mtime age is the only evidence
+    // available. Every lock this binary publishes is complete before it is
+    // linked into place, so a bodyless lock can only come from an older
+    // binary's create-then-write window or from outside this protocol — and
+    // either way nothing is going to finish writing it. Requiring the full
+    // stale threshold keeps this from ever racing a live publisher.
+    return false;
+  }
+
+  const staleToken = generation.token;
+  const slot = await claimStaleLifecycleLock(lockPath, staleToken);
+  if (slot === null) return false;
+
+  try {
+    // Opportunistic, under the claim so it runs at most once per generation.
+    // Purely janitorial — it can neither block nor authorize what follows.
+    await sweepAbandonedLifecycleStaging(lockPath);
+
+    // Re-read under the claim. If the generation we validated is already gone,
+    // an earlier reclaimer finished the job and a NEW owner may hold the lock —
+    // touching it here is exactly the double-steal the claim exists to stop.
+    const current = await readLifecycleLockGeneration(lockPath);
+    if (current?.token !== staleToken) return false;
+
+    // Nothing can change the lock path now, so move it aside atomically and
+    // verify what we actually took before treating the path as free.
+    const stolenPath = `${lockPath}.reclaimed.${staleToken}.${slot}`;
+    try {
+      await rename(lockPath, stolenPath);
+    } catch {
+      return false;
+    }
+    const stolen = await readLifecycleLockGeneration(stolenPath);
+    if (stolen?.token !== staleToken) {
+      // Reachable: `rename` can fail after the re-read (and the re-read itself
+      // races anything outside this protocol), and the move-aside leaves
+      // lockPath briefly absent, so a contender can publish a NEW lock there
+      // in between. Put the file back with an atomic create-if-absent and fail
+      // safe rather than destroying whatever now holds the path.
+      try {
+        await link(stolenPath, lockPath);
+      } catch {
+        /* a newer lock already occupies the path */
+      }
+      try {
+        await unlink(stolenPath);
+      } catch {
+        /* best-effort */
+      }
+      return false;
+    }
+    try {
+      await unlink(stolenPath);
+    } catch {
+      /* best-effort — the stale generation is already off the lock path */
+    }
+    return true;
+  } finally {
+    await releaseStaleLifecycleClaims(lockPath, staleToken, slot);
+  }
+}
+
+/**
+ * Acquire the cross-process lock that separates lifecycle creation from
+ * destructive orphan cleanup. The lock lives beside the agent directory so
+ * merge/removal cannot make it disappear while held.
+ *
+ * Callers that cannot acquire within `waitMs` must fail safe: lifecycle
+ * cleanup is skipped and lifecycle operations report that the agent is busy.
+ */
+export async function acquireAgentLifecycleLock(
+  agentDir: string,
+  waitMs = 2_000,
+): Promise<AgentLifecycleLock | null> {
+  const lockPath = `${agentDir}.lifecycle.lock`;
+  const deadline = Date.now() + Math.max(0, waitMs);
+  const token = randomUUID();
+
+  while (true) {
+    // Publish via a fully-written staging file linked into place, exactly like
+    // claimStaleLifecycleLock publishes its claims. `open(wx)` + write creates
+    // the lock at ZERO BYTES and only then writes the body: a process killed
+    // in that window leaves a bodyless lock that names no owner, which no
+    // reclaimer could safely remove and which nothing else in the codebase
+    // ever deletes — a permanent wedge (acquire returns null forever, `ib
+    // merge` reports the agent busy forever, watchdog transient writes stall
+    // the full wait and silently drop). `link` has the same
+    // create-if-absent-or-EEXIST semantics, so the mutual exclusion is
+    // unchanged; only the half-written window is gone.
+    const stagingPath = `${lockPath}.staging.${process.pid}.${randomUUID()}`;
+    try {
+      await writeLifecycleStagingFile(stagingPath, JSON.stringify({
+        pid: process.pid,
+        pid_epoch: selfProcessStartEpochSeconds(),
+        created_at_ms: Date.now(),
+        token,
+      }));
+      await link(stagingPath, lockPath);
+      return {
+        release: async () => {
+          try {
+            const current = await Bun.file(lockPath).json();
+            if (current?.token === token) await unlink(lockPath);
+          } catch {
+            // Best-effort. A missing/replaced lock is no longer ours.
+          }
+        },
+      };
+    } catch (error: any) {
+      if (error?.code !== "EEXIST") return null;
+
+      // Crash recovery for a lock whose owner is affirmatively gone. The steal
+      // is serialized per stale generation so two contenders can never both
+      // remove it — see reclaimStaleLifecycleLock.
+      if (await reclaimStaleLifecycleLock(lockPath)) continue;
+
+      if (Date.now() >= deadline) return null;
+      await Bun.sleep(LIFECYCLE_LOCK_RETRY_MS);
+    } finally {
+      try {
+        await unlink(stagingPath);
+      } catch {
+        // Never created, or already linked into place — the link is what counts.
+      }
+    }
+  }
+}
+
+/** Injectable lifecycle-lock acquisition for teardown race tests. */
+export const acquireAgentLifecycleLockCtx = new InjectionContext<
+  (agentDir: string, waitMs?: number) => Promise<AgentLifecycleLock | null>
+>(acquireAgentLifecycleLock);
+
+/**
  * Single read-modify-write primitive for meta.transient.json. Reads the
  * current transient (or a zeroed default when missing/malformed), applies
  * `fn`, and writes the result atomically (.tmp + rename).
  *
- * ALL transient writers route through this so that adding merge/resume as
- * writers (alongside the watchdog) doesn't clobber each other's fields via
- * last-write-wins on the whole file. The watchdog preserves an in-flight
- * `operation` it didn't set, and the op writers preserve the watchdog's tmux
- * snapshot. Worst case is a lost write that degrades to today's behavior
- * (guard didn't engage), never corruption.
+ * ALL transient writers route through this under the cross-process lifecycle
+ * lock so adding merge/resume as writers (alongside the watchdog) cannot
+ * clobber each other's fields via last-write-wins on the whole file. The
+ * watchdog preserves an in-flight `operation` it didn't set, and the op
+ * writers preserve the watchdog's tmux snapshot.
  *
  * Best-effort: silently swallows write errors (including a missing dir on the
  * post-merge clear path) so a failing write does not crash the caller — same
  * idiom as writeAgentTransient/deleteAgentTransient.
  */
-export async function updateAgentTransient(
+async function updateAgentTransientUnlocked(
   agentDir: string,
   fn: (cur: TransientState) => TransientState,
-): Promise<void> {
+): Promise<boolean> {
   const path = join(agentDir, "meta.transient.json");
   try {
     // Skip if the agent dir is gone. Bun.write auto-creates parent dirs, so
@@ -540,8 +1055,77 @@ export async function updateAgentTransient(
     const tmpPath = `${path}.tmp.${process.pid}`;
     await Bun.write(tmpPath, JSON.stringify(next, null, 2));
     await rename(tmpPath, path);
+    return true;
   } catch {
     /* best-effort — ENOENT-safe, mirrors writeAgentTransient */
+    return false;
+  }
+}
+
+export async function updateAgentTransient(
+  agentDir: string,
+  fn: (cur: TransientState) => TransientState,
+): Promise<void> {
+  const lock = await acquireAgentLifecycleLock(agentDir);
+  if (!lock) {
+    // Dropping this write is not free: clearAgentOperation routes through
+    // here, so a lock timeout leaves a stale operation marker behind and the
+    // agent renders merging/restarting for up to OP_STUCK_TIMEOUT_MS. Silently
+    // is the worst way to do that — leave a trace. Rate-limited because the
+    // watchdog retries every 5s, and a flood would rotate away the very
+    // history this line exists to provide.
+    logRateLimitedLifecycleLine(
+      `transient-drop\0${agentDir}`,
+      `[lifecycle] transient write dropped agent=${basename(agentDir)} ` +
+      `reason=lifecycle lock unavailable`
+    );
+    return;
+  }
+  try {
+    await updateAgentTransientUnlocked(agentDir, fn);
+  } finally {
+    await lock.release();
+  }
+}
+
+export type ClaimAgentOperationResult =
+  | { ok: true }
+  | { ok: false; reason: "busy" | "missing"; operation?: AgentOperation };
+
+/**
+ * Atomically inspect and claim the lifecycle-operation marker under the same
+ * lock used by orphan teardown and watchdog transient writes.
+ */
+export async function claimAgentOperation(
+  agentDir: string,
+  kind: AgentOperationKind,
+): Promise<ClaimAgentOperationResult> {
+  try {
+    await stat(agentDir);
+  } catch {
+    return { ok: false, reason: "missing" };
+  }
+  const lock = await acquireAgentLifecycleLock(agentDir);
+  if (!lock) return { ok: false, reason: "busy" };
+  try {
+    const current = await readAgentTransient(agentDir);
+    const op = current?.operation;
+    if (op && op.pid > 0 && isPidAliveCtx.fn(op.pid)) {
+      const tooOld = nowMsCtx.fn() - op.started_at_ms > OP_STUCK_TIMEOUT_MS;
+      if (!tooOld) return { ok: false, reason: "busy", operation: op };
+    }
+    const next: AgentOperation = {
+      kind,
+      pid: process.pid,
+      started_at_ms: nowMsCtx.fn(),
+    };
+    const wrote = await updateAgentTransientUnlocked(
+      agentDir,
+      (cur) => ({ ...cur, operation: next }),
+    );
+    return wrote ? { ok: true } : { ok: false, reason: "busy" };
+  } finally {
+    await lock.release();
   }
 }
 
@@ -836,8 +1420,10 @@ export function hasBackgroundTasks(tmuxOutput: string): boolean {
  * configured with `remain-on-exit on` and its child process exits, tmux
  * renders a literal `Pane is dead (status N, ...)` banner inside the pane
  * — the session is still alive (so list-sessions/has-session pass) but
- * Claude is gone and no further work happens. We treat this case the same
- * as a dead session: the agent is stopped.
+ * Claude is gone and no further work happens. This text match is only a
+ * candidate signal: lifecycle detection must validate it with authoritative
+ * `#{pane_dead}` metadata before changing state or reaping, because ordinary
+ * agent output can quote the same phrase.
  */
 export function isDeadPane(tmuxOutput: string): boolean {
   return tmuxOutput.includes("Pane is dead");
@@ -940,6 +1526,12 @@ function copyAgentMeta(meta: AgentMeta): AgentMeta {
 /** Reset the meta.json mtime cache. Exported for tests. */
 export function resetReadAgentMetaCache(): void {
   metaCache.clear();
+}
+
+/** Drop ONE agent's cached meta.json so the next read re-parses from disk.
+ *  Used immediately before destructive lifecycle revalidation. */
+function invalidateAgentMetaCache(agentDir: string): void {
+  metaCache.delete(join(agentDir, "meta.json"));
 }
 
 /** Read a single agent's meta.json. Returns meta or an error description.
@@ -1534,20 +2126,196 @@ export function resetListTmuxSessionsCache(): void {
  */
 const reapedTmuxSessions = new Set<string>();
 
+/** A destructive watcher pass requires two consecutive, affirmative
+ * `tmux has-session` misses. One-shot lifecycle commands classify a confirmed
+ * miss immediately even though they DO reap (src/index.ts passes reap: true at
+ * the resume/respawn seams): the counter is process-local, so it could never
+ * survive into another pass, and requiring two would simply never reap. Their
+ * safety comes from the exact-session probe plus the final revalidation under
+ * the lifecycle lock. */
+export const TMUX_MISSING_CONFIRMATIONS_REQUIRED = 2;
+export const TMUX_MISSING_CONFIRMATION_MIN_INTERVAL_MS = 1_000;
+export const TMUX_OBSERVATION_STATE_MAX_ENTRIES = 4_096;
+const tmuxMissingObservations = new Map<
+  string,
+  { count: number; lastObservedAtMs: number }
+>();
+
+/** Unknown-observation diagnostics are useful but state polling runs every
+ * ~2s. Rate-limit identical session/operation warnings so one broken probe
+ * cannot rotate away the lifecycle history needed for diagnosis. */
+export const TMUX_OBSERVATION_LOG_INTERVAL_MS = 60_000;
+const tmuxObservationLogEpochMs = new Map<string, number>();
+
+/** tmux operations whose diagnostics are re-armed by observing the SESSION
+ *  alive again — the probe that produced them succeeds once the session is
+ *  visible. */
+const SESSION_LIVENESS_OBSERVATION_OPERATIONS: ReadonlySet<string> = new Set(["has-session"]);
+
+/** tmux operations whose diagnostics are re-armed only by a SUCCESSFUL read of
+ *  the pane. A session can be listed live while capture/list-panes keep
+ *  failing, and re-arming those on liveness alone re-logs every poll. */
+const PANE_READ_OBSERVATION_OPERATIONS: ReadonlySet<string> = new Set([
+  "capture-pane",
+  "list-panes",
+]);
+
+/** Drop the log-suppression epochs for one session, limited to the operations
+ *  the observed recovery actually covers. Key layout must match the key built
+ *  in logTmuxObservation: `<session>\0<status>\0<operation>\0<detail>`. */
+function clearTmuxObservationLogs(
+  tmuxSession: string,
+  operations: ReadonlySet<string>
+): void {
+  for (const key of tmuxObservationLogEpochMs.keys()) {
+    const parts = key.split("\0");
+    if (parts[0] !== tmuxSession) continue;
+    if (operations.has(parts[2] ?? "")) tmuxObservationLogEpochMs.delete(key);
+  }
+}
+
+function trimOldestMapEntries<K, V>(map: Map<K, V>): void {
+  while (map.size > TMUX_OBSERVATION_STATE_MAX_ENTRIES) {
+    const oldest = map.keys().next();
+    if (oldest.done) return;
+    map.delete(oldest.value);
+  }
+}
+
 /**
  * Re-arm husk teardown for a session observed alive again. Called from the
  * "session is alive" resolution points in detectAgentStates (fresh transient
  * fast-path and successful live tmux capture). MUST NOT be called from the
  * stopped/dead-pane paths — clearing there would re-arm a kill against a husk
  * that is still dead, re-killing it every tick (the exact churn the memo
- * prevents). See reapedTmuxSessions for the invariant. */
+ * prevents). See reapedTmuxSessions for the invariant.
+ *
+ * Session liveness re-arms only the session-liveness diagnostics. A session
+ * that is listed live but whose pane cannot be read is observed live on EVERY
+ * poll, so re-arming the capture/pane diagnostics here would defeat
+ * TMUX_OBSERVATION_LOG_INTERVAL_MS and re-log the identical failure every tick.
+ * Those are re-armed by clearReadTmuxObservation on a successful pane read. */
 function clearReapedTmuxSession(tmuxSession: string): void {
-  if (tmuxSession) reapedTmuxSessions.delete(tmuxSession);
+  if (!tmuxSession) return;
+  reapedTmuxSessions.delete(tmuxSession);
+  clearTmuxMissingObservation(tmuxSession);
+  clearTmuxObservationLogs(tmuxSession, SESSION_LIVENESS_OBSERVATION_OPERATIONS);
+}
+
+/** Re-arm the capture/pane diagnostics after the pane was actually read. A
+ *  later failure is then a new episode and logs independently. */
+function clearReadTmuxObservation(tmuxSession: string): void {
+  if (!tmuxSession) return;
+  clearTmuxObservationLogs(tmuxSession, PANE_READ_OBSERVATION_OPERATIONS);
 }
 
 /** Reset the reaped-tmux-session memo. Exported for tests. */
 export function resetReapedTmuxSessions(): void {
   reapedTmuxSessions.clear();
+}
+
+/** Reset tmux observation state. Exported for deterministic tests. */
+export function resetTmuxObservationState(): void {
+  tmuxMissingObservations.clear();
+  tmuxObservationLogEpochMs.clear();
+}
+
+function clearTmuxMissingObservation(tmuxSession: string): void {
+  tmuxMissingObservations.delete(tmuxSession);
+}
+
+function recordTmuxMissingObservation(tmuxSession: string): number {
+  const now = nowMsCtx.fn();
+  const previous = tmuxMissingObservations.get(tmuxSession);
+  if (
+    previous &&
+    now - previous.lastObservedAtMs < TMUX_MISSING_CONFIRMATION_MIN_INTERVAL_MS
+  ) {
+    return previous.count;
+  }
+  const count = Math.min(
+    (previous?.count ?? 0) + 1,
+    TMUX_MISSING_CONFIRMATIONS_REQUIRED
+  );
+  tmuxMissingObservations.delete(tmuxSession);
+  tmuxMissingObservations.set(tmuxSession, { count, lastObservedAtMs: now });
+  trimOldestMapEntries(tmuxMissingObservations);
+  return count;
+}
+
+function logTmuxObservation(
+  agent: Agent,
+  status: "unknown" | "missing-pending",
+  operation: "has-session" | "capture-pane" | "list-panes",
+  detail: string
+): void {
+  const tmuxSession = agent.meta.tmux_session || "<none>";
+  const normalized = detail.replace(/\s+/g, " ").trim().slice(0, 500) || "unknown error";
+  // A different failure detail is a new diagnostic. Recovery clears the keys
+  // for the operations that actually recovered — clearReapedTmuxSession drops
+  // the session-liveness ones, clearReadTmuxObservation drops the pane ones —
+  // so a later recurrence of a recovered operation starts a fresh episode.
+  const key = `${tmuxSession}\0${status}\0${operation}\0${normalized}`;
+  const now = Date.now();
+  const last = tmuxObservationLogEpochMs.get(key) ?? 0;
+  if (now - last < TMUX_OBSERVATION_LOG_INTERVAL_MS) return;
+  tmuxObservationLogEpochMs.delete(key);
+  tmuxObservationLogEpochMs.set(key, now);
+  trimOldestMapEntries(tmuxObservationLogEpochMs);
+  const repoTag = agent.repoName ? `${agent.repoName}/` : "";
+  logToWatchLog(
+    `[tmux-observation] status=${status} operation=${operation} ` +
+    `agent=${repoTag}${agent.id} tmux=${tmuxSession} detail=${normalized}`
+  );
+}
+
+function preserveStoredAgentState(agent: Agent): void {
+  const metaState = agent.meta.state;
+  if (metaState) {
+    agent.state = metaState;
+    return;
+  }
+  agent.state = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "running";
+}
+
+async function observeTmuxSession(
+  agent: Agent,
+  liveSessions: Set<string>,
+  requireConsecutiveConfirmation: boolean
+): Promise<"live" | "missing" | "unknown"> {
+  const tmuxSession = agent.meta.tmux_session;
+  if (liveSessions.has(tmuxSession)) {
+    clearReapedTmuxSession(tmuxSession);
+    return "live";
+  }
+
+  const probe = await probeTmuxSessionCtx.fn(tmuxSession);
+  if (probe.status === "live") {
+    clearReapedTmuxSession(tmuxSession);
+    return "live";
+  }
+  if (probe.status === "unknown") {
+    clearTmuxMissingObservation(tmuxSession);
+    logTmuxObservation(agent, "unknown", "has-session", probe.error);
+    return "unknown";
+  }
+
+  // Read-only and one-shot lifecycle commands classify one affirmative exact
+  // miss immediately. A long-lived watcher carries state across polling
+  // generations and must see the same affirmative miss twice before it may
+  // reap; calls inside one temporal window count only once.
+  if (!requireConsecutiveConfirmation) return "missing";
+  const count = recordTmuxMissingObservation(tmuxSession);
+  if (count < TMUX_MISSING_CONFIRMATIONS_REQUIRED) {
+    logTmuxObservation(
+      agent,
+      "missing-pending",
+      "has-session",
+      `${probe.error}; confirmation ${count}/${TMUX_MISSING_CONFIRMATIONS_REQUIRED}`
+    );
+    return "unknown";
+  }
+  return "missing";
 }
 
 /** Fetch the live tmux session list, using the shared TTL cache.
@@ -1576,6 +2344,38 @@ export const liveTmuxSessionsCtx = new InjectionContext<() => Promise<Set<string
 export const captureTmuxOutputCtx = new InjectionContext<typeof captureTmuxOutput>(
   captureTmuxOutput
 );
+
+/** Detailed tmux capture used by lifecycle state detection. Unlike the legacy
+ * nullable capture, this preserves diagnostic details for unknown failures. */
+export const captureTmuxOutputResultCtx = new InjectionContext<typeof captureTmuxOutputResult>(
+  captureTmuxOutputResult
+);
+
+/** Exact-session probe used to confirm absence after a cached list miss. */
+export const probeTmuxSessionCtx = new InjectionContext<typeof probeTmuxSession>(
+  probeTmuxSession
+);
+
+/** Authoritative pane metadata probe used to validate a dead-pane banner. */
+export const probeTmuxPaneCtx = new InjectionContext<typeof probeTmuxPane>(
+  probeTmuxPane
+);
+
+/** Final metadata re-read before destructive orphan cleanup.
+ *
+ * Drops this agent's mtime-cache entry first, mirroring the process-start cache
+ * bypass in _isPidIdentityCurrent. readAgentMeta already re-parses whenever
+ * mtimeMs changed, so the cache is fresh for any ordinary rewrite; the bypass
+ * closes the one remaining exposure — a rewrite landing inside the filesystem's
+ * timestamp granularity — and does so HERE rather than in readAgentMeta so the
+ * read path every other caller shares keeps its cache. Teardown is rare, so the
+ * extra parse costs nothing measurable. */
+export const reapReadAgentMetaCtx = new InjectionContext<
+  (agentDir: string, observedAgent: Agent) => Promise<AgentMeta | null>
+>(async (agentDir) => {
+  invalidateAgentMetaCache(agentDir);
+  return (await readAgentMeta(agentDir)).meta;
+});
 
 /**
  * Read all agents across multiple repos.
@@ -1664,8 +2464,9 @@ export const OP_STUCK_TIMEOUT_MS = 300_000;
 /** Default isPidAlive — checks if a process is alive via signal 0.
  *
  * EPERM means "the PID exists, you just can't signal it" (e.g. the process is
- * owned by another sandbox or another user) — treat as alive. ESRCH (and any
- * other error) means the process doesn't exist — dead. Inside a codex agent
+ * owned by another sandbox or another user) — treat as alive. Only ESRCH
+ * affirmatively means the process does not exist. Unexpected probe failures
+ * are unavailable observations and fail open as alive. Inside a codex agent
  * sandbox, signal 0 against PIDs owned by other sandboxes returns EPERM
  * empirically; without this distinction every external agent's PID would be
  * misclassified as dead and reapOrphanedClaude would tear down the world. */
@@ -1674,7 +2475,7 @@ function _isPidAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (e: any) {
-    return e?.code === "EPERM";
+    return e?.code !== "ESRCH";
   }
 }
 
@@ -1682,16 +2483,119 @@ function _isPidAlive(pid: number): boolean {
 export const isPidAliveCtx = new InjectionContext<(pid: number) => boolean>(_isPidAlive);
 
 /**
- * Maximum amount of time a Claude process may appear to start after its
- * current PID write. start.sh launches Claude before invoking `ib write-pid`,
- * and both timestamps have only second-level relevance here, so one minute is
- * a deliberately generous allowance for writeback delay and minor clock skew.
- * PID reuse after an agent stops is normally minutes or days newer.
+ * Maximum distance, in EITHER direction, between a process's start time and
+ * its current PID write — isProcessStartCurrent compares with Math.abs, so
+ * this bounds both sides. The practically relevant direction is a start time
+ * that precedes the write: start.sh launches Claude before invoking
+ * `ib write-pid`. Both timestamps have only second-level relevance here, so
+ * one minute is a deliberately generous allowance for that gap, writeback
+ * delay, and minor clock skew. PID reuse after an agent stops is normally
+ * minutes or days away on either side.
  */
 export const CLAUDE_PID_START_MARGIN_SECONDS = 60;
 
-/** Process start timestamps are immutable; refresh briefly to detect PID reuse. */
-export const PROCESS_START_CACHE_TTL_MS = 5_000;
+/**
+ * Process start timestamps are immutable, so this cache never goes "wrong" —
+ * it expires only so a PID that was recycled is eventually noticed.
+ *
+ * READ ME BEFORE RAISING THIS. An earlier version of this comment claimed
+ * "only the RENDERING path reads it", and that claim was wrong in two ways at
+ * once — the reap path and both lifecycle-lock gates read it as well. The
+ * claim is what made the 5s -> 60s raise look free, and it shipped a hole that
+ * killed a live agent's tmux session. So this list is exhaustive, and anything
+ * added to it must state which side it is on.
+ *
+ * DERIVE IT, DO NOT REASON ABOUT IT. The list below is mechanical, and it has
+ * been wrong every time someone reconstructed it from memory instead. One read
+ * of the cache map exists (getProcessStartEpochSeconds), one caller of that
+ * (_isPidAliveSince, exposed as isPidAliveSinceCtx), so the readers are exactly
+ * the production `isPidAliveSinceCtx.fn(` sites minus the one inside
+ * isPidAliveSinceUncached, which evicts first:
+ *
+ *   grep -rn "processStartEpochSecondsCache" src --include=*.ts
+ *   grep -rn "getProcessStartEpochSeconds(" src --include=*.ts
+ *   grep -rn "isPidAliveSinceCtx" src --include=*.ts | grep -v "\.test\.ts"
+ *
+ * Reads the cache (via getProcessStartEpochSeconds ← isPidAliveSince), all
+ * of them RENDERING decisions that are wrong for at most one window:
+ *  - detectAgentStates, the claude_pid gate: labels a recycled PID `running`
+ *    for one extra window. It may not ACT on the opposite verdict from a
+ *    cached read — see the bypass list.
+ *  - detectAgentStates, the transient fast-path: a recycled watchdog PID lets
+ *    a stale snapshot be trusted, bounded independently by TRANSIENT_FRESH_MS.
+ *  - tui/info-panel, the Claude stoplight: paints one dot green or red. It is
+ *    the only reader outside this module, and it decides nothing — which is
+ *    why a stale entry there costs a wrong-coloured dot for one window and
+ *    nothing else.
+ *
+ * BYPASSES the cache — every decision that destroys something. Each deletes
+ * the entry and probes fresh at the moment of use, so no teardown, signal, or
+ * lock steal is ever decided from a cached value:
+ *  - isPidIdentityCurrent: before SIGTERM, and before any teardown on a
+ *    PID-derived `stopped` verdict (the veto covers the watchdog signal and
+ *    the tmux session alike).
+ *  - isPidAliveSinceUncached: confirming a dead verdict in the claude_pid gate
+ *    before the reap, and both lifecycle-lock gates (stepping over a reclaim
+ *    claim, reclaiming an owner's lock).
+ *
+ * The rule the split encodes: a cached process-start read may RENDER a state,
+ * never AUTHORIZE a teardown. A new caller that only labels something belongs
+ * in the first list; a new caller that ends a process, a session, or another
+ * process's claim to a lock belongs in the second.
+ *
+ * It is deliberately long. Each miss costs a posix_spawn of `ps` (~5ms
+ * blocking), and detectAgentStates checks TWO pids per agent per pass — the
+ * claude_pid gate and the transient fast-path's watchdog identity. At the old
+ * 5s the watch loop spent ~500 `ps` spawns/min on 20 agents; this repo has a
+ * documented history of watch-loop spawn pressure SIGHUPing live agents into
+ * `stopped`, so that is a real hazard, not a theoretical one. At 60s the same
+ * 20 agents cost ~40/min.
+ *
+ * What a longer TTL actually delays, in both directions, is bounded and
+ * non-destructive:
+ *  - claude_pid gate: a recycled PID renders the agent `running` instead of
+ *    `stopped` for up to one extra window. Teardown still cannot follow,
+ *    because it re-probes uncached.
+ *  - transient fast-path: a recycled watchdog PID lets a stale snapshot be
+ *    trusted — but that snapshot must ALSO be within TRANSIENT_FRESH_MS, so
+ *    the staleness a recycled PID can buy is capped by the freshness window
+ *    (15s) no matter how long this TTL is.
+ */
+export const PROCESS_START_CACHE_TTL_MS = 60_000;
+
+/**
+ * ORDERING CONSTRAINT: LIFECYCLE_LOCK_STALE_MS > PROCESS_START_CACHE_TTL_MS.
+ *
+ * Reclaiming a lock takes two independent judgments: the generation is old
+ * enough, and its holder is gone. If a cached process-start observation could
+ * outlive the age gate, both could be wrong at the same instant — the age gate
+ * would open while a poisoned entry still reported a LIVE holder as gone — and
+ * a live lock would be stealable with no syscall failure anywhere. At 120s vs
+ * 60s the poisoned entry always expires before the age gate opens.
+ *
+ * The lock gates now re-probe uncached, so this ordering is NOT what makes
+ * reclamation safe; it is a second line that must never quietly become the
+ * first one again. It went undocumented and unenforced through the TTL change
+ * that raised the cache from 5s to 60s — one more step and live locks would
+ * have been stealable, with nothing in the tree to say so.
+ *
+ * Enforced by construction rather than by comment: this runs at module load,
+ * so a violating pair cannot start the binary, let alone ship.
+ */
+export function assertLifecycleTimingInvariant(
+  lockStaleMs: number,
+  processStartCacheTtlMs: number,
+): void {
+  if (!(lockStaleMs > processStartCacheTtlMs)) {
+    throw new Error(
+      `lifecycle timing invariant violated: LIFECYCLE_LOCK_STALE_MS ` +
+      `(${lockStaleMs}ms) must be strictly greater than ` +
+      `PROCESS_START_CACHE_TTL_MS (${processStartCacheTtlMs}ms), or a cached ` +
+      `"holder is gone" verdict can outlive the age gate that authorizes a steal`
+    );
+  }
+}
+assertLifecycleTimingInvariant(LIFECYCLE_LOCK_STALE_MS, PROCESS_START_CACHE_TTL_MS);
 
 const processStartEpochSecondsCache = new Map<
   number,
@@ -1721,9 +2625,33 @@ export const processStartEpochSecondsCtx = new InjectionContext<(pid: number) =>
   _processStartEpochSeconds
 );
 
-/** Reset the shared process-start cache. Exported for tests. */
+/**
+ * Our own process start time, resolved at most once per process. Unlike every
+ * other PID we probe, this one can never be recycled while we are running to
+ * ask about it, so there is nothing for a TTL to catch — and a permanent memo
+ * keeps stamping lifecycle-lock records off the process-spawn budget entirely.
+ * `undefined` means the start time was unavailable; callers must then omit the
+ * epoch rather than record a guess.
+ */
+let selfProcessStartEpochSecondsMemo: number | null = null;
+/** Separate flag so an unavailable (null) result is memoized too — inside a
+ *  codex sandbox `ps` is denied outright, and re-probing per call would spawn
+ *  on every lock acquisition forever. */
+let selfProcessStartEpochSecondsResolved = false;
+
+function selfProcessStartEpochSeconds(): number | undefined {
+  if (!selfProcessStartEpochSecondsResolved) {
+    selfProcessStartEpochSecondsMemo = processStartEpochSecondsCtx.fn(process.pid);
+    selfProcessStartEpochSecondsResolved = true;
+  }
+  return selfProcessStartEpochSecondsMemo ?? undefined;
+}
+
+/** Reset the shared process-start caches. Exported for tests. */
 export function resetProcessStartEpochSecondsCache(): void {
   processStartEpochSecondsCache.clear();
+  selfProcessStartEpochSecondsMemo = null;
+  selfProcessStartEpochSecondsResolved = false;
 }
 
 /** Return a cached process start timestamp, refreshing each PID every 5s. */
@@ -1739,11 +2667,22 @@ function getProcessStartEpochSeconds(pid: number): number | null {
   return value;
 }
 
+function isProcessStartCurrent(
+  processStartEpochSeconds: number,
+  pidWriteEpochSeconds: number,
+): boolean {
+  return Math.abs(processStartEpochSeconds - pidWriteEpochSeconds) <=
+    CLAUDE_PID_START_MARGIN_SECONDS;
+}
+
 /**
  * Claude-specific PID liveness guard. A live PID is accepted only when the OS
- * reports that its process started no later than the current PID-write time
- * plus the documented writeback/skew margin. Failure to read the start time is
- * treated as not alive, including the normal "pid not found" race.
+ * reports that its process start is within the documented writeback/skew
+ * margin of the current PID-write time. Once signal-0 has affirmatively
+ * established that the PID exists, failure to read the start time is
+ * "unknown" and fails open as alive. This is required inside Codex sandboxes,
+ * where signal-0 may return EPERM (alive but unsignalable) and spawning `ps`
+ * is denied; treating that combination as dead reaps live agents.
  */
 function _isPidAliveSince(pid: number, pidWriteEpochSeconds: number | undefined): boolean {
   if (!isPidAliveCtx.fn(pid)) return false;
@@ -1756,14 +2695,71 @@ function _isPidAliveSince(pid: number, pidWriteEpochSeconds: number | undefined)
     pidWriteEpochSeconds <= 0
   ) return true;
   const processStartEpochSeconds = getProcessStartEpochSeconds(pid);
-  return processStartEpochSeconds !== null &&
-    processStartEpochSeconds <= pidWriteEpochSeconds + CLAUDE_PID_START_MARGIN_SECONDS;
+  return processStartEpochSeconds === null ||
+    isProcessStartCurrent(processStartEpochSeconds, pidWriteEpochSeconds);
 }
 
 /** Injectable guarded Claude PID liveness check for tests. */
 export const isPidAliveSinceCtx = new InjectionContext<
   (pid: number, pidWriteEpochSeconds: number | undefined) => boolean
 >(_isPidAliveSince);
+
+/**
+ * isPidAliveSince with the process-start cache bypassed, for confirming a
+ * NOT-ALIVE verdict before ACTING on one.
+ *
+ * The cached read is fine for rendering: a stale entry costs at most one extra
+ * window of a wrong label. It is NOT fine as the last word before teardown,
+ * because a cached start time that no longer matches the recorded PID-write
+ * epoch produces a "dead" verdict for a process that is alive right now — and
+ * detectAgentStates both renders AND reaps, so that verdict reaches
+ * reapOrphanedClaude and takes the agent's tmux session with it.
+ *
+ * Deliberately a re-check, not a replacement: callers must consult the cached
+ * path FIRST and only reach this when it already said dead. Every genuinely
+ * stopped agent short-circuits at signal-0 without spawning `ps`, so the only
+ * case that pays a process spawn is a LIVE pid whose start time disagrees with
+ * the record — rare by construction, and precisely the case worth paying for.
+ * That keeps PROCESS_START_CACHE_TTL_MS doing its job on the hot path.
+ *
+ * Delegates through isPidAliveSinceCtx so a test that stubs the liveness seam
+ * still governs both reads; the only production difference is the eviction.
+ */
+function isPidAliveSinceUncached(
+  pid: number,
+  pidWriteEpochSeconds: number | undefined,
+): boolean {
+  processStartEpochSecondsCache.delete(pid);
+  return isPidAliveSinceCtx.fn(pid, pidWriteEpochSeconds);
+}
+
+/**
+ * Destructive counterpart to isPidAliveSince. Signaling requires fresh,
+ * affirmative identity: a live numeric PID alone is insufficient, missing
+ * epochs are legacy/unknown, and an unavailable process-start observation
+ * must never authorize a signal.
+ */
+function _isPidIdentityCurrent(
+  pid: number,
+  pidWriteEpochSeconds: number | undefined,
+): boolean {
+  if (!isPidAliveCtx.fn(pid)) return false;
+  if (
+    typeof pidWriteEpochSeconds !== "number" ||
+    !Number.isFinite(pidWriteEpochSeconds) ||
+    pidWriteEpochSeconds <= 0
+  ) return false;
+  // Bypass the state-rendering cache immediately before destructive use.
+  processStartEpochSecondsCache.delete(pid);
+  const processStartEpochSeconds = processStartEpochSecondsCtx.fn(pid);
+  return processStartEpochSeconds !== null &&
+    isProcessStartCurrent(processStartEpochSeconds, pidWriteEpochSeconds);
+}
+
+/** Injectable fresh process-identity guard for orphan-reaper tests. */
+export const isPidIdentityCurrentCtx = new InjectionContext<
+  (pid: number, pidWriteEpochSeconds: number | undefined) => boolean
+>(_isPidIdentityCurrent);
 
 /** Test-only re-export of the default _isPidAlive — lets tests exercise the
  *  actual signal-0 + EPERM/ESRCH classification by stubbing process.kill. */
@@ -1947,21 +2943,68 @@ export async function terminateProcess(
 }
 
 /**
+ * Lifecycle diagnostics repeat for as long as their condition holds, and the
+ * paths that emit them run on every watcher pass for every agent (2s
+ * pollStates plus the 10s refresh) — only the kill-session is memoized.
+ * Rate-limit identical lines on the same interval the tmux observation log
+ * uses, for the same reason: watch.log is 1 MB active across 3 files, so one
+ * repeating line rotates away the lifecycle history needed for diagnosis in
+ * minutes.
+ */
+export const LIFECYCLE_LOG_INTERVAL_MS = 60_000;
+const lifecycleLogEpochMs = new Map<string, number>();
+
+/** Reset lifecycle log suppression. Exported for tests. */
+export function resetLifecycleLogState(): void {
+  lifecycleLogEpochMs.clear();
+}
+
+function logRateLimitedLifecycleLine(key: string, line: string): void {
+  const now = Date.now();
+  const last = lifecycleLogEpochMs.get(key) ?? 0;
+  if (now - last < LIFECYCLE_LOG_INTERVAL_MS) return;
+  lifecycleLogEpochMs.delete(key);
+  lifecycleLogEpochMs.set(key, now);
+  trimOldestMapEntries(lifecycleLogEpochMs);
+  logToWatchLog(line);
+}
+
+/**
+ * tmux stderr meaning the session was already gone. Husk teardown fires against
+ * sessions that are usually already dead, so this is the EXPECTED no-op, not a
+ * failure — calling it "failed" in an audit trail is misleading. Both spellings
+ * appear across tmux versions, and a dead server means every session is gone.
+ */
+function isMissingTmuxSessionError(error: string | undefined): boolean {
+  if (!error) return false;
+  const normalized = error.toLowerCase();
+  return /can(?:'t|\s?not) find session/.test(normalized) ||
+    normalized.includes("no server running");
+}
+
+/**
  * Reap an orphaned Claude process AND its watchdog: when an agent's tmux
  * session is gone, the Claude process and its per-agent watchdog are no
  * longer reachable from the dashboard and burn CPU/RAM until manually
  * killed. SIGTERM both (if alive) and write a line per kill to
  * ~/.itsybitsy/watch.log so the user has an audit trail.
  *
- * Sources:
- *  - claude_pid: agent.meta.claude_pid (meta.json)
- *  - watchdog_pid: meta.transient.json (read via readAgentTransient)
+ * Sources (both re-read here, NOT taken from the observation that got us
+ * here — see the final revalidation below):
+ *  - claude_pid / claude_pid_epoch: latestMeta, re-read from meta.json
+ *  - watchdog_pid / watchdog_pid_epoch: meta.transient.json (readAgentTransient)
  *
  * Skipped when:
- *  - the PID is missing/empty/non-numeric (legacy or not-yet-started agents)
- *  - the PID is already dead
  *  - we're about to render the agent as 'creating' (still spawning — Claude
  *    may not have a tmux session yet)
+ *  - the lifecycle lock cannot be acquired within 250ms
+ *  - the lifecycle metadata cannot be re-read, or changed since the
+ *    observation (session, PID, PID epoch, or created_epoch generation)
+ *  - a lifecycle operation (merge/resume/respawn) is in flight
+ *  - the PID is missing/empty/non-numeric (legacy or not-yet-started agents)
+ *  - the PID is already dead
+ *  - the PID is alive but its identity cannot be affirmed: no recorded epoch,
+ *    an unreadable process start, or a start that no longer matches
  *
  * Also tears down the husk tmux session when resolvedState === "stopped".
  * Once we've decided the agent is stopped, the session is by definition
@@ -1971,6 +3014,15 @@ export async function terminateProcess(
  * branches uniformly (PID-liveness gate, dead-pane husk, complete-with-
  * missing-session).
  *
+ * When the caller's `stopped` verdict came from reading claude_pid
+ * (`verdictFromClaudePid`), EVERY destructive act here — the watchdog SIGTERM
+ * as well as the session teardown — is withheld if that PID turns out to be
+ * affirmatively live and current. The per-signal identity guard cannot cover
+ * that case: the watchdog of a wrongly-stopped agent is genuinely live and
+ * current, so it passes its own guard and dies while its agent keeps running
+ * with no outbox delivery and no state updates. Verdicts from tmux evidence are
+ * not affected — see the veto for why the dead-pane husk must still be reaped.
+ *
  * Best-effort: failures are swallowed (logged to watch.log); state detection
  * must never block on a kill.
  */
@@ -1978,16 +3030,138 @@ async function reapOrphanedClaude(
   agent: Agent,
   agentDir: string,
   resolvedState: AgentState,
-  reason: string
+  reason: string,
+  opts: { skipClaudePid?: boolean; verdictFromClaudePid?: boolean } = {}
 ): Promise<void> {
   if (resolvedState === "creating") return;
 
   const repoTag = agent.repoName ? `${agent.repoName}/` : "";
   const tmuxLabel = agent.meta.tmux_session || "<none>";
+  const lifecycleLock = await acquireAgentLifecycleLockCtx.fn(agentDir, 250);
+  if (!lifecycleLock) {
+    logToWatchLog(
+      `[orphan-kill] aborted agent=${repoTag}${agent.id} tmux=${tmuxLabel} ` +
+      `state=${resolvedState} reason=lifecycle lock unavailable before teardown`
+    );
+    return;
+  }
 
-  const reap = (kind: "claude" | "watchdog", pid: number): void => {
+  try {
+  // Re-read mutable lifecycle metadata immediately before teardown. Resume
+  // and respawn write an operation marker before replacing the session/PID;
+  // an observation taken before that transition must never kill the new
+  // lifecycle.
+  const latestMeta = await reapReadAgentMetaCtx.fn(agentDir, agent);
+  if (!latestMeta) {
+    logToWatchLog(
+      `[orphan-kill] aborted agent=${repoTag}${agent.id} tmux=${tmuxLabel} ` +
+      `state=${resolvedState} reason=lifecycle metadata unavailable before teardown`
+    );
+    return;
+  }
+  if (
+    (
+      latestMeta.tmux_session !== agent.meta.tmux_session ||
+      latestMeta.claude_pid !== agent.meta.claude_pid ||
+      latestMeta.claude_pid_epoch !== agent.meta.claude_pid_epoch ||
+      // created_epoch is the lifecycle GENERATION. A recreated agent can land
+      // on the same session name and the same PID/PID-epoch pair, so without
+      // this an observation taken against the previous generation still tears
+      // down the new one.
+      latestMeta.created_epoch !== agent.meta.created_epoch
+    )
+  ) {
+    logToWatchLog(
+      `[orphan-kill] aborted agent=${repoTag}${agent.id} tmux=${tmuxLabel} ` +
+      `state=${resolvedState} reason=lifecycle metadata changed before teardown`
+    );
+    return;
+  }
+
+  // Watchdog PID and the operation marker share meta.transient.json. Read
+  // once so the final operation revalidation and watchdog target are from
+  // the same snapshot.
+  const transient = await readAgentTransient(agentDir);
+  if (transient?.operation) {
+    logToWatchLog(
+      `[orphan-kill] aborted agent=${repoTag}${agent.id} tmux=${tmuxLabel} ` +
+      `state=${resolvedState} reason=operation began before teardown`
+    );
+    return;
+  }
+
+  // Backstop for a verdict that came from reading the PID. When the ONLY reason
+  // we believe this agent is stopped is a claude_pid liveness read, refuse to
+  // destroy ANYTHING while that same PID is affirmatively live and current.
+  //
+  // Above the signal block, not below it. Everything past this point is
+  // destructive to a live agent: the watchdog SIGTERM costs it outbox delivery
+  // and state updates, and the kill-session costs it the pane it is working in.
+  // Vetoing only the session left the earlier shape half-killing exactly the
+  // agent it was written to save.
+  //
+  // Scoped deliberately. A `stopped` verdict from tmux evidence is not a PID
+  // verdict and must still tear down: the dead-pane husk case is a live
+  // claude_pid whose pane is authoritatively dead (#{pane_dead}), where the
+  // session IS garbage and this code SIGTERMs that live PID on purpose.
+  // Vetoing there would resurrect the husk leak that branch exists to fix.
+  // Only the claude_pid gate sets this flag, and it resolves `stopped`.
+  //
+  // Strict identity (not the fail-open rendering guard) because this decides
+  // whether to WITHHOLD teardown: only affirmative proof of life may do that.
+  // A legacy record with no epoch, an unreadable start, or a recycled PID all
+  // read as "not proven live" and teardown proceeds exactly as before, so no
+  // husk becomes unreapable. Reaching here at all requires the caller's own
+  // uncached re-probe to have said dead, so the two can only disagree if that
+  // gate regresses — which is the point of a backstop.
+  //
+  // Returning here also leaves reapedTmuxSessions untouched: a vetoed pass must
+  // not memoize this session as reaped, or a later genuine stop would find the
+  // husk already "handled" and leak it.
+  const vetoClaudePid = parseInt(latestMeta.claude_pid, 10);
+  if (
+    opts.verdictFromClaudePid === true &&
+    Number.isFinite(vetoClaudePid) &&
+    vetoClaudePid > 0 &&
+    isPidIdentityCurrentCtx.fn(vetoClaudePid, latestMeta.claude_pid_epoch)
+  ) {
+    logRateLimitedLifecycleLine(
+      `orphan-kill-veto\0${agent.id}\0${tmuxLabel}`,
+      `[orphan-kill] teardown skipped agent=${repoTag}${agent.id} ` +
+      `tmux=${tmuxLabel} state=${resolvedState} reason=claude pid ${vetoClaudePid} is live and current`
+    );
+    return;
+  }
+
+  const reap = (
+    kind: "claude" | "watchdog",
+    pid: number,
+    pidEpoch: number | undefined,
+  ): void => {
     if (!Number.isFinite(pid) || pid <= 0) return;
+    // An affirmatively DEAD pid is the overwhelmingly common case here — every
+    // pass over an already-stopped agent hits it — and there is nothing to
+    // report: no signal was withheld from a live process. Return silently, as
+    // this branch did before the identity guard was added.
     if (!isPidAliveCtx.fn(pid)) return;
+    if (!isPidIdentityCurrentCtx.fn(pid, pidEpoch)) {
+      // Alive, but the identity could not be affirmed. Three genuinely
+      // informative shapes: no recorded epoch (record written by an older
+      // binary), the process start could not be read, or it no longer matches
+      // (the PID was recycled). Each can hold for many passes, so the line is
+      // rate-limited rather than emitted per pass.
+      const hasEpoch =
+        typeof pidEpoch === "number" && Number.isFinite(pidEpoch) && pidEpoch > 0;
+      const detail = hasEpoch
+        ? "pid alive but process start unavailable or changed"
+        : "pid alive but no recorded pid epoch";
+      logRateLimitedLifecycleLine(
+        `orphan-kill\0${agent.id}\0${kind}\0${pid}\0${detail}`,
+        `[orphan-kill] signal skipped kind=${kind} pid=${pid} agent=${repoTag}${agent.id} ` +
+        `tmux=${tmuxLabel} state=${resolvedState} reason=${detail}`
+      );
+      return;
+    }
     const ok = killPidCtx.fn(pid, "SIGTERM");
     const status = ok ? "SIGTERM sent" : "SIGTERM failed";
     logToWatchLog(
@@ -1996,11 +3170,14 @@ async function reapOrphanedClaude(
     );
   };
 
-  reap("claude", parseInt(agent.meta.claude_pid, 10));
+  if (!opts.skipClaudePid) {
+    reap("claude", parseInt(latestMeta.claude_pid, 10), latestMeta.claude_pid_epoch);
+  }
 
-  // Watchdog PID lives in meta.transient.json, not meta.json
-  const transient = await readAgentTransient(agentDir);
-  if (transient) reap("watchdog", transient.watchdog_pid);
+  // Watchdog PID lives in meta.transient.json, not meta.json.
+  if (transient) {
+    reap("watchdog", transient.watchdog_pid, transient.watchdog_pid_epoch);
+  }
 
   // Tear down the husk tmux session for stopped agents. Best-effort: a kill
   // against an already-gone session is a cheap no-op. Memoize on the session
@@ -2012,8 +3189,27 @@ async function reapOrphanedClaude(
     agent.meta.tmux_session &&
     !reapedTmuxSessions.has(agent.meta.tmux_session)
   ) {
+    // A pid-derived verdict contradicted by a provably live PID never reaches
+    // here — the veto above returns before any of this, so the memo below is
+    // only ever armed by a teardown that actually happened.
     reapedTmuxSessions.add(agent.meta.tmux_session);
-    await killTmuxSession(agent.meta.tmux_session);
+    const result = await killTmuxSessionResult(agent.meta.tmux_session);
+    const alreadyGone = !result.ok && isMissingTmuxSessionError(result.error);
+    const outcome = result.ok
+      ? "kill-session sent"
+      : alreadyGone
+        ? "kill-session already gone"
+        : "kill-session failed";
+    const detail = result.error
+      ? ` error=${JSON.stringify(result.error.slice(0, 500))} exit=${result.exitCode ?? "spawn"}`
+      : "";
+    logToWatchLog(
+      `[orphan-kill] tmux ${outcome} ` +
+      `agent=${repoTag}${agent.id} tmux=${tmuxLabel} state=${resolvedState} reason=${reason}${detail}`
+    );
+  }
+  } finally {
+    await lifecycleLock.release();
   }
 }
 
@@ -2036,7 +3232,7 @@ async function reapOrphanedClaude(
  */
 export async function detectAgentStates(
   agents: Agent[],
-  opts: { reap?: boolean } = {},
+  opts: { reap?: boolean; confirmTmuxMissingAcrossPolls?: boolean } = {},
 ): Promise<void> {
   // Reaping is OPT-IN: callers must pass {reap: true} to authorize SIGTERM +
   // tmux kill-session side-effects. Default is read-only so accidental reads
@@ -2045,6 +3241,11 @@ export async function detectAgentStates(
   // external agents. Lifecycle callers — watcher tick, ib resume, ib respawn —
   // explicitly opt in.
   const shouldReap = opts.reap === true;
+  // Only recurring watcher passes use process-local cross-poll confirmation.
+  // One-shot lifecycle commands already perform an exact-session probe but
+  // cannot carry an in-memory counter into a later process.
+  const requireConsecutiveTmuxConfirmation =
+    shouldReap && opts.confirmTmuxMissingAcrossPolls === true;
 
   // Step 1: archived agents
   for (const agent of agents) {
@@ -2129,15 +3330,38 @@ export async function detectAgentStates(
       // its log. Skip while the agent is recently created so we don't race a
       // still-spawning agent whose claude_pid hasn't been written yet (legacy
       // / empty claude_pid is also covered by the >0 guard).
+      //
+      // This gate does not only RENDER: it is the branch that calls
+      // reapOrphanedClaude, and that reap tears down the tmux session. So a
+      // cached "dead" verdict is confirmed against the OS before it is acted
+      // on — the same discipline isPidIdentityCurrent applies before SIGTERM.
+      // Ordered last so it runs only on the cold path (a verdict that already
+      // says dead), leaving the cache serving every ordinary pass.
       const claudePid = parseInt(agent.meta.claude_pid, 10);
       if (
         claudePid > 0 &&
         !isPidAliveSinceCtx.fn(claudePid, agent.meta.claude_pid_epoch) &&
-        !isRecentlyCreated(agent.meta.created_epoch)
+        !isRecentlyCreated(agent.meta.created_epoch) &&
+        !isPidAliveSinceUncached(claudePid, agent.meta.claude_pid_epoch)
       ) {
         agent.state = "stopped";
         if (shouldReap) {
-          await reapOrphanedClaude(agent, agentDir, "stopped", "claude_pid not alive");
+          // The guard can reject a PID because it was recycled. Never signal
+          // that numeric PID from this branch; it may now belong to an
+          // unrelated process. The watchdog and stale tmux husk are still
+          // safe teardown targets after final lifecycle revalidation.
+          await reapOrphanedClaude(
+            agent,
+            agentDir,
+            "stopped",
+            "claude_pid not alive",
+            // verdictFromClaudePid: this branch — and only this branch —
+            // concluded `stopped` by reading the PID, so the husk teardown
+            // must re-check that PID before destroying the session. Every
+            // other caller resolves from tmux evidence, which no PID cache can
+            // corrupt.
+            { skipClaudePid: true, verdictFromClaudePid: true }
+          );
         }
         return;
       }
@@ -2156,15 +3380,22 @@ export async function detectAgentStates(
       // liveness check happens above (applies to all states).
       if (agent.meta.state === "complete") {
         const liveSessions = await getLiveTmuxSessions();
-        if (!liveSessions.has(tmuxSession)) {
+        const tmuxObservation = await observeTmuxSession(
+          agent,
+          liveSessions,
+          requireConsecutiveTmuxConfirmation
+        );
+        if (tmuxObservation === "unknown") {
+          preserveStoredAgentState(agent);
+          return;
+        }
+        if (tmuxObservation === "missing") {
           agent.state = "stopped";
           if (shouldReap) {
             await reapOrphanedClaude(agent, agentDir, "stopped", "complete agent: tmux session gone");
           }
           return;
         }
-        // Session confirmed live — re-arm husk teardown. See reapedTmuxSessions.
-        clearReapedTmuxSession(tmuxSession);
         agent.state = "complete";
         return;
       }
@@ -2183,11 +3414,25 @@ export async function detectAgentStates(
       // threshold and fall back to live capture even when fresh data was on
       // disk. One stat + a small JSON parse is cheap vs. the tmux spawn we
       // avoid.
+      // The watchdog records its own PID epoch in the transient, so the same
+      // identity rule that guards destructive signalling applies here: a bare
+      // liveness check lets a RECYCLED PID authorize this snapshot for up to
+      // TRANSIENT_FRESH_MS. isPidAliveSince is the rendering-side counterpart —
+      // it preserves PID-only behavior for legacy transients that carry no
+      // epoch, and fails open as alive when the start time can't be read.
+      //
+      // This is the SECOND process-start consumer on this path (the claude_pid
+      // gate above is the first), which is why PROCESS_START_CACHE_TTL_MS is
+      // long: a short TTL turns "two identity checks per agent per pass" into
+      // hundreds of `ps` spawns per minute on the loop whose whole purpose is
+      // to avoid a posix_spawn per agent per tick. Measured at 20 agents: 404
+      // spawns/min and ~100ms of blocking per 2s tick at a 5s TTL, versus 53
+      // spawns/min and ~5ms at 60s.
       if (
         transient &&
         transient.updated_at_ms > 0 &&
         nowMsCtx.fn() - transient.updated_at_ms < TRANSIENT_FRESH_MS &&
-        isPidAliveCtx.fn(transient.watchdog_pid)
+        isPidAliveSinceCtx.fn(transient.watchdog_pid, transient.watchdog_pid_epoch)
       ) {
         // The session is alive again (fresh, watchdog-backed). Re-arm husk
         // teardown so a future stop after a resume re-kills the session. See
@@ -2229,7 +3474,16 @@ export async function detectAgentStates(
       // fast-path and preserves the creating grace + orphan reap behavior of
       // the capture-null path below.
       const liveSessions = await getLiveTmuxSessions();
-      if (!liveSessions.has(tmuxSession)) {
+      const tmuxObservation = await observeTmuxSession(
+        agent,
+        liveSessions,
+        requireConsecutiveTmuxConfirmation
+      );
+      if (tmuxObservation === "unknown") {
+        preserveStoredAgentState(agent);
+        return;
+      }
+      if (tmuxObservation === "missing") {
         const resolved: AgentState = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
         agent.state = resolved;
         if (shouldReap) {
@@ -2238,25 +3492,44 @@ export async function detectAgentStates(
         return;
       }
 
-      const output = await captureTmuxOutputCtx.fn(tmuxSession, 50);
-      if (output === null || isDeadPane(output)) {
-        const reason = output === null ? "tmux capture returned null" : "tmux pane is dead";
-        const resolved: AgentState = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
-        agent.state = resolved;
-        // reapOrphanedClaude tears down the husk tmux session when
-        // resolved === "stopped". Skipped during the creating grace window
-        // so a freshly-spawning agent that briefly shows a dead pane during
-        // startup is not torn down.
-        if (shouldReap) {
-          await reapOrphanedClaude(agent, agentDir, resolved, reason);
-        }
+      const capture = await captureTmuxOutputResultCtx.fn(tmuxSession, 50);
+      if (capture.status === "error") {
+        logTmuxObservation(agent, "unknown", "capture-pane", capture.error);
+        preserveStoredAgentState(agent);
         return;
+      }
+      const output = capture.output;
+      if (isDeadPane(output)) {
+        const pane = await probeTmuxPaneCtx.fn(tmuxSession);
+        if (pane.status === "unknown") {
+          logTmuxObservation(agent, "unknown", "list-panes", pane.error);
+          preserveStoredAgentState(agent);
+          return;
+        }
+        // The phrase can appear in ordinary source/test/review output. Only
+        // authoritative #{pane_dead} metadata may drive teardown.
+        if (pane.status === "dead") {
+          const resolved: AgentState = isRecentlyCreated(agent.meta.created_epoch)
+            ? "creating"
+            : "stopped";
+          agent.state = resolved;
+          // reapOrphanedClaude tears down the husk tmux session when
+          // resolved === "stopped". Skipped during the creating grace window
+          // so a freshly-spawning agent that briefly shows a dead pane during
+          // startup is not torn down.
+          if (shouldReap) {
+            await reapOrphanedClaude(agent, agentDir, resolved, "tmux pane is dead");
+          }
+          return;
+        }
       }
 
       // The pane is live (capture succeeded, not a dead pane). Re-arm husk
       // teardown so a future stop after a resume re-kills the session. See
-      // reapedTmuxSessions.
+      // reapedTmuxSessions. The pane was actually READ here, so this is also
+      // the recovery point that re-arms the capture/pane diagnostics.
       clearReapedTmuxSession(tmuxSession);
+      clearReadTmuxObservation(tmuxSession);
 
       // Step 3: tmux exists — check transient overrides
       if (isCompacting(output)) {

@@ -18,6 +18,20 @@ export interface TmuxPollerEvents {
   onError?: (error: Error) => void;
 }
 
+export type TmuxCaptureResult =
+  | { status: "ok"; output: string }
+  | { status: "error"; error: string; exitCode: number | null };
+
+export type TmuxSessionProbeResult =
+  | { status: "live" }
+  | { status: "missing"; error: string }
+  | { status: "unknown"; error: string; exitCode: number | null };
+
+export type TmuxPaneProbeResult =
+  | { status: "live" }
+  | { status: "dead" }
+  | { status: "unknown"; error: string; exitCode: number | null };
+
 // pi-tui v0.56.0's visibleWidth() expands \t to 3 spaces but its slicing
 // helpers (sliceWithWidth/sliceByColumn/extractSegments) measure \t as 0
 // columns via graphemeWidth (its leadingNonPrintingRegex strips control
@@ -230,17 +244,41 @@ export async function listTmuxSessions(): Promise<string[]> {
 /**
  * Kill a tmux session by name.
  */
-export async function killTmuxSession(sessionName: string): Promise<boolean> {
+export interface TmuxKillResult {
+  ok: boolean;
+  error?: string;
+  exitCode: number | null;
+}
+
+/** Kill a tmux session while preserving diagnostics for lifecycle audit logs. */
+export async function killTmuxSessionResult(sessionName: string): Promise<TmuxKillResult> {
   try {
     const proc = spawnCtx.runner(
       ["tmux", "kill-session", "-t", tmuxSessionTarget(sessionName)],
       { stdout: "pipe", stderr: "pipe" }
     );
-    const exitCode = await proc.exited;
-    return exitCode === 0;
-  } catch { /* expected: tmux not running or session already gone */
-    return false;
+    const [stderr, exitCode] = await Promise.all([
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (exitCode === 0) return { ok: true, exitCode };
+    return {
+      ok: false,
+      error: stderr.trim() || `tmux kill-session exited ${exitCode}`,
+      exitCode,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      exitCode: null,
+    };
   }
+}
+
+/** Backward-compatible boolean wrapper for non-diagnostic callers. */
+export async function killTmuxSession(sessionName: string): Promise<boolean> {
+  return (await killTmuxSessionResult(sessionName)).ok;
 }
 
 /**
@@ -267,6 +305,22 @@ export async function hasAttachedClient(tmuxSession: string): Promise<boolean> {
  * Used by watcher to detect agent state.
  */
 export async function captureTmuxOutput(tmuxSession: string, lines = 5000): Promise<string | null> {
+  const result = await captureTmuxOutputResult(tmuxSession, lines);
+  return result.status === "ok" ? result.output : null;
+}
+
+/**
+ * Capture tmux output without collapsing every failure into "session missing".
+ *
+ * A failed capture is an unavailable observation, not proof that the session
+ * disappeared. Lifecycle callers use this result to avoid reaping a live
+ * agent after a transient spawn/tmux error; the legacy nullable wrapper above
+ * remains for display-only callers.
+ */
+export async function captureTmuxOutputResult(
+  tmuxSession: string,
+  lines = 5000
+): Promise<TmuxCaptureResult> {
   try {
     // -J joins tmux's soft-wrapped continuation lines back into single logical
     // lines (program-emitted \n are preserved). State detection consumes these
@@ -277,13 +331,106 @@ export async function captureTmuxOutput(tmuxSession: string, lines = 5000): Prom
       ["tmux", "capture-pane", "-t", tmuxSessionTarget(tmuxSession), "-p", "-J", `-S`, `-${lines}`, "-E", "-"],
       { stdout: "pipe", stderr: "pipe" }
     );
-    const raw = await new Response(proc.stdout).text();
-    const exitCode = await proc.exited;
+    const [raw, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
 
-    if (exitCode !== 0) return null; // session doesn't exist
-    return stripAnsi(raw);
-  } catch { /* expected: tmux not running or session gone */
-    return null;
+    if (exitCode !== 0) {
+      return {
+        status: "error",
+        error: stderr.trim() || `tmux capture-pane exited ${exitCode}`,
+        exitCode,
+      };
+    }
+    return { status: "ok", output: stripAnsi(raw) };
+  } catch (error) {
+    return {
+      status: "error",
+      error: error instanceof Error ? error.message : String(error),
+      exitCode: null,
+    };
+  }
+}
+
+/**
+ * Probe one exact tmux session and distinguish confirmed absence from an
+ * unavailable observation. Only `missing` is safe evidence for lifecycle
+ * teardown; permission errors and unexpected tmux failures are `unknown`.
+ */
+export async function probeTmuxSession(tmuxSession: string): Promise<TmuxSessionProbeResult> {
+  try {
+    const proc = spawnCtx.runner(
+      ["tmux", "has-session", "-t", tmuxSessionTarget(tmuxSession)],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const [stderr, exitCode] = await Promise.all([
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (exitCode === 0) return { status: "live" };
+
+    const detail = stderr.trim() || `tmux has-session exited ${exitCode}`;
+    // Only a response from a reachable tmux server that names the exact
+    // missing session is affirmative absence. Socket/server visibility
+    // failures remain unknown: a sandbox may simply be unable to see the
+    // authoritative server.
+    if (/^can't find session:/i.test(detail)) {
+      return { status: "missing", error: detail };
+    }
+    return { status: "unknown", error: detail, exitCode };
+  } catch (error) {
+    return {
+      status: "unknown",
+      error: error instanceof Error ? error.message : String(error),
+      exitCode: null,
+    };
+  }
+}
+
+/**
+ * Ask tmux for authoritative pane-dead metadata. Pane contents are not safe
+ * lifecycle evidence because an agent can quote tmux's "Pane is dead" banner
+ * while inspecting source or tests.
+ */
+export async function probeTmuxPane(tmuxSession: string): Promise<TmuxPaneProbeResult> {
+  try {
+    const proc = spawnCtx.runner(
+      // -s covers every window in the session. Without it, list-panes only
+      // reports the selected window and can falsely call a multi-window
+      // session dead while another window still has a live pane.
+      ["tmux", "list-panes", "-s", "-t", tmuxSessionTarget(tmuxSession), "-F", "#{pane_dead}"],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (exitCode !== 0) {
+      return {
+        status: "unknown",
+        error: stderr.trim() || `tmux list-panes exited ${exitCode}`,
+        exitCode,
+      };
+    }
+
+    const states = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (states.length === 0 || states.some((state) => state !== "0" && state !== "1")) {
+      return {
+        status: "unknown",
+        error: `unexpected tmux pane_dead output: ${stdout.trim() || "<empty>"}`,
+        exitCode,
+      };
+    }
+    return states.every((state) => state === "1") ? { status: "dead" } : { status: "live" };
+  } catch (error) {
+    return {
+      status: "unknown",
+      error: error instanceof Error ? error.message : String(error),
+      exitCode: null,
+    };
   }
 }
 

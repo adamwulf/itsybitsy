@@ -501,7 +501,10 @@ describe("AgentWatcher", () => {
       // The state mutation by detectAgentStates should be visible in onUpdate
       expect(receivedAgents.length).toBe(1);
       expect(receivedAgents[0]!.state).toBe("running");
-      expect(mockDetectAgentStates).toHaveBeenCalledWith([agent1], { reap: true });
+      expect(mockDetectAgentStates).toHaveBeenCalledWith([agent1], {
+        reap: true,
+        confirmTmuxMissingAcrossPolls: true,
+      });
     });
 
     test("detectAgentStates changes state between refreshes", async () => {
@@ -762,6 +765,37 @@ describe("AgentWatcher", () => {
   });
 
   describe("background state polling", () => {
+    test("refresh requested during a state poll is queued until the poll finishes", async () => {
+      const agent1 = makeAgent("agent-1");
+      setupDefaultMocks([agent1]);
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "test" }],
+        { onUpdate: () => {} }
+      );
+      await watcher.start();
+
+      let releasePoll!: () => void;
+      const pollBlocked = new Promise<void>((resolve) => {
+        releasePoll = resolve;
+      });
+      mockDetectAgentStates.mockImplementationOnce(async () => {
+        await pollBlocked;
+      });
+
+      const pollPromise = (watcher as any).pollStates() as Promise<void>;
+      await Promise.resolve();
+      const readsBeforeQueuedRefresh = mockReadAllAgents.mock.calls.length;
+      await watcher.refresh();
+      expect(mockReadAllAgents.mock.calls.length).toBe(readsBeforeQueuedRefresh);
+
+      releasePoll();
+      await pollPromise;
+      for (let i = 0; i < 30; i++) await Promise.resolve();
+
+      expect(mockReadAllAgents.mock.calls.length).toBe(readsBeforeQueuedRefresh + 1);
+      watcher.stop();
+    });
+
     test("state poll fires every 2s and emits updates without readAllAgents", async () => {
       const agent1 = makeAgent("agent-1");
       setupDefaultMocks([agent1]);

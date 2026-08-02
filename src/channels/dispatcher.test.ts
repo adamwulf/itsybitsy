@@ -1,6 +1,6 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm } from "fs/promises";
+import { mkdtemp, rm, readdir } from "fs/promises";
 import { tmpdir } from "os";
 import {
   TelegramDispatcher,
@@ -55,6 +55,14 @@ import {
 } from "./message-cache";
 import type { FetchLike } from "../types";
 import type { TelegramUpdate, TelegramMessage } from "./types";
+
+// Raise the per-test timeout above MIN_WAIT_BOUND_MS (see the `waitFor` helper
+// at the bottom of this file). bun's 5s default would otherwise kill a test
+// before its own wait could report WHAT it was waiting for, and that message is
+// the whole value of waiting on a named condition. This is a failure bound
+// only: every wait here returns as soon as its predicate holds, so passing
+// tests are unaffected and no assertion changes.
+setDefaultTimeout(30_000);
 
 /* ------------------------------------------------------------------ */
 /*  Test helpers                                                       */
@@ -1396,9 +1404,20 @@ describe("TelegramDispatcher", () => {
 
     const d = makeDispatcher({ allowedChatIds: ["100"] });
     await d.start();
-    // Wait for both batches to be processed (mock will idle after).
-    await waitFor(() => mock.callCount() >= 3, 1_000);
-    // Give the loop a tick to handle them.
+    // Wait for the condition the POSITIVE half of the assertion is about — the
+    // drop actually being logged — and for both batches to have been fetched.
+    // Waiting only on the fetch count (as this used to) waits for the batches
+    // to be HANDED to the loop, not for the loop to have processed them, which
+    // is a different event from the one asserted below.
+    await waitFor(
+      () =>
+        logs.filter((l) => l.includes("dropped non-allowlisted")).length >= 1 &&
+        mock.callCount() >= 3,
+      1_000,
+    );
+    // Fixed pause on purpose: what is left to check is NEGATIVE — that the
+    // SECOND batch produces neither a send nor a second log. There is no event
+    // to wait for when the expected outcome is that nothing happens.
     await new Promise<void>((r) => setTimeout(r, 50));
     await d.stop();
 
@@ -1472,7 +1491,17 @@ describe("TelegramDispatcher", () => {
     const d = makeDispatcher();
     await d.start();
     await waitFor(() => send.calls.length >= 1, 1_000);
-    // Wait a tick to confirm no Telegram reply fires.
+    // The downloaded file is asserted on below, so wait on THAT condition too
+    // rather than inferring it from the send. readdir throws until the download
+    // creates the chat dir — that is the "not yet" case, not a failure.
+    const chatDir = join(defaultInboundDir(), "100");
+    await waitFor(
+      async () => (await readdir(chatDir).catch(() => [] as string[])).length >= 1,
+      1_000,
+    );
+    // Fixed pause on purpose: the remaining checks are NEGATIVE (no
+    // "text only supported" Telegram reply, no second send), and there is no
+    // event to wait for when the expected outcome is that nothing happens.
     await new Promise<void>((r) => setTimeout(r, 30));
     await d.stop();
 
@@ -1487,8 +1516,6 @@ describe("TelegramDispatcher", () => {
     const sendMessageUrls = mock.allUrls().filter((u) => u.includes("/sendMessage"));
     expect(sendMessageUrls.length).toBe(0);
     // File actually landed under the inbound dir.
-    const { readdir } = await import("fs/promises");
-    const chatDir = join(defaultInboundDir(), "100");
     const files = await readdir(chatDir);
     expect(files.length).toBe(1);
     expect(files[0]!).toContain(".jpg");
@@ -2137,6 +2164,9 @@ describe("TelegramDispatcher", () => {
     await d.start();
     await waitFor(() => restartCalls >= 1, 1_000);
     await waitFor(() => mock.allUrls().some((u) => u.includes("/sendMessage")), 1_000);
+    // Fixed pause on purpose: the assertion below is NEGATIVE — /respawn must
+    // not reach the coordinator at all — and there is no event to wait for when
+    // the expected outcome is that nothing happens.
     await new Promise<void>((r) => setTimeout(r, 50));
     await d.stop();
 
@@ -2168,6 +2198,9 @@ describe("TelegramDispatcher", () => {
     await d.start();
     await waitFor(() => restartCalls >= 1, 1_000);
     await waitFor(() => mock.allUrls().some((u) => u.includes("/sendMessage")), 1_000);
+    // Fixed pause on purpose: the assertion below is NEGATIVE — a failed
+    // restart must still send nothing to the coordinator — and there is no
+    // event to wait for when the expected outcome is that nothing happens.
     await new Promise<void>((r) => setTimeout(r, 50));
     await d.stop();
 
@@ -2201,6 +2234,9 @@ describe("TelegramDispatcher", () => {
     await d.start();
     await waitFor(() => restartCalls >= 1, 1_000);
     await waitFor(() => mock.allUrls().some((u) => u.includes("/sendMessage")), 1_000);
+    // Fixed pause on purpose: the assertion below is NEGATIVE — a thrown
+    // restart must still send nothing to the coordinator — and there is no
+    // event to wait for when the expected outcome is that nothing happens.
     await new Promise<void>((r) => setTimeout(r, 50));
     await d.stop();
 
@@ -2253,6 +2289,9 @@ describe("TelegramDispatcher", () => {
     const d = makeDispatcher();
     await d.start();
     await waitFor(() => send.calls.length >= 1, 1_000);
+    // Fixed pause on purpose: the ">= 1" half is waited on above; what is left
+    // is the NEGATIVE half — that no SECOND send (a slash-command passthrough)
+    // follows — and there is no event to wait for when nothing should happen.
     await new Promise<void>((r) => setTimeout(r, 50));
     await d.stop();
 
@@ -2294,6 +2333,9 @@ describe("TelegramDispatcher", () => {
     const d = makeDispatcher();
     await d.start();
     await waitFor(() => send.calls.length >= 1, 1_000);
+    // Fixed pause on purpose: the ">= 1" half is waited on above; what is left
+    // is the NEGATIVE half — that no SECOND send (a slash-command passthrough)
+    // follows — and there is no event to wait for when nothing should happen.
     await new Promise<void>((r) => setTimeout(r, 50));
     await d.stop();
 
@@ -2500,6 +2542,9 @@ describe("TelegramDispatcher", () => {
     const d = makeDispatcher();
     await d.start();
     await waitFor(() => send.calls.length >= 1, 1_000);
+    // Fixed pause on purpose: the ">= 1" half is waited on above; what is left
+    // is the NEGATIVE half — that no SECOND send (a slash-command passthrough)
+    // follows — and there is no event to wait for when nothing should happen.
     await new Promise<void>((r) => setTimeout(r, 50));
     await d.stop();
 
@@ -2941,12 +2986,41 @@ describe("Sentinel labelling", () => {
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
 
-/** Spin until `pred()` returns true or `timeoutMs` elapses. */
-async function waitFor(pred: () => boolean, timeoutMs: number): Promise<void> {
+/**
+ * Lower bound on how long any wait in this file is allowed to run before it
+ * gives up.
+ *
+ * The `timeoutMs` each of the ~64 call sites passes is a FAILURE bound, not a
+ * wait: `waitFor` returns the instant `pred()` holds, so a generous bound costs
+ * nothing on the passing path — it only decides how long we tolerate before
+ * declaring a hang. Every call site passes 1s, tuned on an idle machine, and
+ * the work behind these predicates goes through a real dispatcher poll loop
+ * with real timers, which takes several times longer when the machine is busy.
+ * That is exactly how the outbox suite's identical 1-3s bounds failed a
+ * correctly-written test during a loaded run (commit 5f9acb9); this file has
+ * the same shape and the same exposure, so it gets the same floor. Flooring it
+ * in the shared helper fixes every wait here at once while still catching a
+ * genuine hang.
+ *
+ * Kept well below the file's 30s per-test timeout so a stuck wait reports WHAT
+ * it was waiting for instead of losing the race to bun's generic timeout.
+ */
+const MIN_WAIT_BOUND_MS = 15_000;
+
+/**
+ * Spin until `pred()` returns true or the (floored) bound elapses. Accepts sync
+ * or async predicates — an async one is awaited, so a predicate that reads the
+ * filesystem still resolves to a real boolean rather than a truthy Promise.
+ */
+async function waitFor(
+  pred: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+): Promise<void> {
+  const bound = Math.max(timeoutMs, MIN_WAIT_BOUND_MS);
   const startedAt = Date.now();
-  while (!pred()) {
-    if (Date.now() - startedAt > timeoutMs) {
-      throw new Error(`waitFor: timed out after ${timeoutMs}ms`);
+  while (!(await pred())) {
+    if (Date.now() - startedAt > bound) {
+      throw new Error(`waitFor: timed out after ${bound}ms`);
     }
     await new Promise<void>((r) => setTimeout(r, 5));
   }

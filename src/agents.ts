@@ -2992,12 +2992,14 @@ function isMissingTmuxSessionError(error: string | undefined): boolean {
  * branches uniformly (PID-liveness gate, dead-pane husk, complete-with-
  * missing-session).
  *
- * That teardown is the one destructive act here that is NOT a signal, so the
- * guards above do not cover it: killing the session kills the agent. When the
- * caller's `stopped` verdict came from reading claude_pid
- * (`verdictFromClaudePid`), teardown is withheld if that PID turns out to be
- * affirmatively live and current. Verdicts from tmux evidence are not affected
- * — see the veto for why the dead-pane husk must still be reaped.
+ * When the caller's `stopped` verdict came from reading claude_pid
+ * (`verdictFromClaudePid`), EVERY destructive act here — the watchdog SIGTERM
+ * as well as the session teardown — is withheld if that PID turns out to be
+ * affirmatively live and current. The per-signal identity guard cannot cover
+ * that case: the watchdog of a wrongly-stopped agent is genuinely live and
+ * current, so it passes its own guard and dies while its agent keeps running
+ * with no outbox delivery and no state updates. Verdicts from tmux evidence are
+ * not affected — see the veto for why the dead-pane husk must still be reaped.
  *
  * Best-effort: failures are swallowed (logged to watch.log); state detection
  * must never block on a kill.
@@ -3066,6 +3068,49 @@ async function reapOrphanedClaude(
     return;
   }
 
+  // Backstop for a verdict that came from reading the PID. When the ONLY reason
+  // we believe this agent is stopped is a claude_pid liveness read, refuse to
+  // destroy ANYTHING while that same PID is affirmatively live and current.
+  //
+  // Above the signal block, not below it. Everything past this point is
+  // destructive to a live agent: the watchdog SIGTERM costs it outbox delivery
+  // and state updates, and the kill-session costs it the pane it is working in.
+  // Vetoing only the session left the earlier shape half-killing exactly the
+  // agent it was written to save.
+  //
+  // Scoped deliberately. A `stopped` verdict from tmux evidence is not a PID
+  // verdict and must still tear down: the dead-pane husk case is a live
+  // claude_pid whose pane is authoritatively dead (#{pane_dead}), where the
+  // session IS garbage and this code SIGTERMs that live PID on purpose.
+  // Vetoing there would resurrect the husk leak that branch exists to fix.
+  // Only the claude_pid gate sets this flag, and it resolves `stopped`.
+  //
+  // Strict identity (not the fail-open rendering guard) because this decides
+  // whether to WITHHOLD teardown: only affirmative proof of life may do that.
+  // A legacy record with no epoch, an unreadable start, or a recycled PID all
+  // read as "not proven live" and teardown proceeds exactly as before, so no
+  // husk becomes unreapable. Reaching here at all requires the caller's own
+  // uncached re-probe to have said dead, so the two can only disagree if that
+  // gate regresses — which is the point of a backstop.
+  //
+  // Returning here also leaves reapedTmuxSessions untouched: a vetoed pass must
+  // not memoize this session as reaped, or a later genuine stop would find the
+  // husk already "handled" and leak it.
+  const vetoClaudePid = parseInt(latestMeta.claude_pid, 10);
+  if (
+    opts.verdictFromClaudePid === true &&
+    Number.isFinite(vetoClaudePid) &&
+    vetoClaudePid > 0 &&
+    isPidIdentityCurrentCtx.fn(vetoClaudePid, latestMeta.claude_pid_epoch)
+  ) {
+    logRateLimitedLifecycleLine(
+      `orphan-kill-veto\0${agent.id}\0${tmuxLabel}`,
+      `[orphan-kill] teardown skipped agent=${repoTag}${agent.id} ` +
+      `tmux=${tmuxLabel} state=${resolvedState} reason=claude pid ${vetoClaudePid} is live and current`
+    );
+    return;
+  }
+
   const reap = (
     kind: "claude" | "watchdog",
     pid: number,
@@ -3122,40 +3167,9 @@ async function reapOrphanedClaude(
     agent.meta.tmux_session &&
     !reapedTmuxSessions.has(agent.meta.tmux_session)
   ) {
-    // Backstop for a verdict that came from reading the PID. Killing the
-    // session kills the agent, and nothing on this path had checked PID
-    // identity at all: skipClaudePid and the identity guard protect only the
-    // SIGTERM. So when the ONLY reason we believe this agent is stopped is a
-    // claude_pid liveness read, refuse to destroy the session while that same
-    // PID is affirmatively live and current.
-    //
-    // Scoped deliberately. A `stopped` verdict from tmux evidence is not a PID
-    // verdict and must still tear down: the dead-pane husk case is a live
-    // claude_pid whose pane is authoritatively dead (#{pane_dead}), where the
-    // session IS garbage and this code SIGTERMs that live PID on purpose.
-    // Vetoing there would resurrect the husk leak that branch exists to fix.
-    //
-    // Strict identity (not the fail-open rendering guard) because this decides
-    // whether to WITHHOLD teardown: only affirmative proof of life may do that.
-    // A legacy record with no epoch, an unreadable start, or a recycled PID all
-    // read as "not proven live" and teardown proceeds exactly as before, so no
-    // husk becomes unreapable. Reaching here at all requires the caller's own
-    // uncached re-probe to have said dead, so the two can only disagree if that
-    // gate regresses — which is the point of a backstop.
-    const claudePid = parseInt(latestMeta.claude_pid, 10);
-    if (
-      opts.verdictFromClaudePid === true &&
-      Number.isFinite(claudePid) &&
-      claudePid > 0 &&
-      isPidIdentityCurrentCtx.fn(claudePid, latestMeta.claude_pid_epoch)
-    ) {
-      logRateLimitedLifecycleLine(
-        `orphan-kill-session\0${agent.id}\0${agent.meta.tmux_session}`,
-        `[orphan-kill] tmux kill-session skipped agent=${repoTag}${agent.id} ` +
-        `tmux=${tmuxLabel} state=${resolvedState} reason=claude pid ${claudePid} is live and current`
-      );
-      return;
-    }
+    // A pid-derived verdict contradicted by a provably live PID never reaches
+    // here — the veto above returns before any of this, so the memo below is
+    // only ever armed by a teardown that actually happened.
     reapedTmuxSessions.add(agent.meta.tmux_session);
     const result = await killTmuxSessionResult(agent.meta.tmux_session);
     const alreadyGone = !result.ok && isMissingTmuxSessionError(result.error);

@@ -3617,7 +3617,80 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     expect(killSessionCalls).toEqual([]);
     expect(killPidCalls).toBe(0); // skipClaudePid still holds on this branch
     const { readFile } = await import("fs/promises");
-    expect(await readFile(logPath, "utf8")).toContain("kill-session skipped");
+    expect(await readFile(logPath, "utf8")).toContain("teardown skipped");
+  });
+
+  // Regression (the veto ran too late): the backstop sat BELOW the signal
+  // block, so on the exact stale-cache case it exists for the session was
+  // spared but the watchdog had already been SIGTERMed. That leaves a live
+  // agent running with no watchdog — no outbox delivery, no state updates —
+  // which is most of the damage the veto is meant to prevent. Proof of life
+  // must withhold every destructive act on this path, not just the last one.
+  test("a vetoed pid-derived verdict withholds the watchdog SIGTERM too", async () => {
+    const killSessionCalls: string[] = [];
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      if (args[0] === "tmux" && args[1] === "kill-session") {
+        killSessionCalls.push(String(args[3]));
+      }
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+    // The whole agent is alive; only the gate's (cached) read disagrees.
+    isPidAliveCtx.set(() => true);
+    isPidAliveSinceCtx.set(() => false); // the gate believes the pid is gone
+    isPidIdentityCurrentCtx.set(() => true); // the OS says otherwise
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-live-veto-wd"]));
+    const killCalls: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    killPidCtx.set((pid, signal) => {
+      killCalls.push({ pid, signal });
+      return true;
+    });
+
+    // Real on-disk agent dir so reapOrphanedClaude finds a watchdog to kill.
+    const agentTmp = await mkdtemp(join(tmpdir(), "claude-liveness-agent-"));
+    const agentDir = join(agentTmp, ".ittybitty", "agents", "agent-live-veto-wd");
+    await mkdir(agentDir, { recursive: true });
+    const transient: TransientState = {
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      tmux_api_error: false,
+      tmux_api_terms: false,
+      has_background_tasks: false,
+      updated_at_ms: 0, // stale on purpose so the transient fast-path is skipped
+      watchdog_pid: 67890,
+      watchdog_pid_epoch: 1_700_000_000,
+    };
+    const { writeFile } = await import("fs/promises");
+    await writeFile(join(agentDir, "meta.transient.json"), JSON.stringify(transient));
+
+    const a = makeAgent({
+      id: "agent-live-veto-wd",
+      repoPath: agentTmp,
+      meta: {
+        state: "running",
+        tmux_session: "ib-live-veto-wd",
+        claude_pid: "18825",
+        claude_pid_epoch: 1_700_000_000,
+        created_epoch: 1_700_000_000 - 3600,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a], { reap: true });
+
+    // The veto withholds destruction, not the label: rendering `stopped` off a
+    // cached read is the bounded cost the cache is allowed to have.
+    expect(a.state).toBe("stopped");
+    expect(killSessionCalls).toEqual([]);
+    // No SIGTERM to ANYTHING — the watchdog is the one this branch would
+    // otherwise still reach (claude_pid is already covered by skipClaudePid).
+    expect(killCalls).toEqual([]);
+    const { readFile } = await import("fs/promises");
+    expect(await readFile(logPath, "utf8")).not.toContain("kind=watchdog");
+
+    await rm(agentTmp, { recursive: true, force: true });
   });
 
   // Companion to the backstop: a genuinely dead agent must still lose its husk.

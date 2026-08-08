@@ -3763,7 +3763,7 @@ async function buildAgentSettings(
  * 10. Create agent directory + write initial meta.json (state="creating")
  * 11. Create git worktree + branch (if worktree mode)
  * 12. Write settings.local.json in worktree
- * 13. (formerly meta.json — now written in step 11 before slow worktree add)
+ * 13. (formerly meta.json — now written in step 10 before slow worktree add)
  * 14. Write prompt.txt
  * 15. Write start.sh + exit-check.sh
  * 16. Init agent.log
@@ -4120,7 +4120,7 @@ export async function newAgent(
   const isLeafAgent = !agentTypeDef.canSpawnChildren;
 
   // Load the agent-type layer files once, up front, so BOTH the model
-  // resolution (step 7) and the permissions merge (step 7.1) read from the
+  // resolution (step 6) and the permissions merge (step 6.1) read from the
   // same objects. This mirrors the permissions-layer set exactly:
   //   - `_all.md` — applied to every spawned agent
   //   - `_non_coordinator.md` — applied to non-coordinator agents only

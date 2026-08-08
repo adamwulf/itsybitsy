@@ -8389,7 +8389,8 @@ describe("spawned_by validation in agents.ts", () => {
       created: "2024-01-01T00:00:00Z",
       created_epoch: 1000,
       worktree: true,
-      worker: false,      model: "opus",
+      worker: false,
+      model: "opus",
       claude_pid: "1234",
       spawned_by: { agent_id: "spawner", repo_path: "/repo" },
     };
@@ -8471,7 +8472,8 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
       prompt: "coordinate",
       manager: null,
       worktree: false,
-      worker: false,      model: "claude:sonnet",
+      worker: false,
+      model: "claude:sonnet",
     }));
 
     // Set user config path to temp dir
@@ -10383,7 +10385,8 @@ describe("writeMetaJsonAtomic — canSpawnChildren round-trip", () => {
       created: "2026-07-19T00:00:00Z",
       created_epoch: 1784490000,
       worktree: true,
-      worker: true,      model: "claude-opus-4-8",
+      worker: true,
+      model: "claude-opus-4-8",
       claude_pid: "12345",
       agentType: "worker",
       nickname: "spot",

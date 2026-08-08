@@ -19,7 +19,8 @@ function makeAgent(overrides: Partial<Agent> & { id: string }): Agent {
     created: "2025-01-01",
     created_epoch: 1700000000,
     worktree: true,
-    worker: false,    model: "opus",
+    worker: false,
+    model: "opus",
     claude_pid: "1234",
   };
   const { meta: metaOverrides, ...rest } = overrides;

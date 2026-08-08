@@ -735,7 +735,8 @@ describe("readRepoAgents", () => {
         created: "2026-03-05T00:00:00Z",
         created_epoch: Math.floor(Date.now() / 1000) - 60,
         worktree: true,
-        worker: false,        model: "sonnet",
+        worker: false,
+        model: "sonnet",
         claude_pid: "999",
       })
     );
@@ -762,7 +763,8 @@ describe("readRepoAgents", () => {
         created: "2026-03-04T00:00:00Z",
         created_epoch: Math.floor(Date.now() / 1000) - 86400,
         worktree: true,
-        worker: true,        model: "opus",
+        worker: true,
+        model: "opus",
         claude_pid: "888",
       })
     );
@@ -1018,7 +1020,8 @@ describe("readAgentMeta", () => {
         created: "2026-03-05T00:00:00Z",
         created_epoch: 1000,
         worktree: true,
-        worker: false,        model: "sonnet",
+        worker: false,
+        model: "sonnet",
         claude_pid: "999",
         claude_pid_epoch: 1001,
       })
@@ -1052,7 +1055,8 @@ describe("readAgentMeta", () => {
         created: true,
         created_epoch: "not-a-number",
         worktree: "yes",
-        worker: "no",        model: 777,
+        worker: "no",
+        model: 777,
         claude_pid: 0,
         claude_pid_epoch: "not-a-number",
       })

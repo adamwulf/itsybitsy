@@ -447,7 +447,14 @@ export async function processTaskIntercept(
         }
       }
       if (meta) {
-        // agentType takes precedence over legacy worker boolean when present
+        // This deliberately does NOT reuse `metaCanSpawnChildren` (the spawn
+        // gate's shared predicate). This is a *messaging* choice, not a security
+        // gate, and it prefers to fail OPEN to manager-style ("use `ib ask`")
+        // where the spawn gate fails CLOSED: an unknown/broken type, or a
+        // manager toggled off via the 'b' dialog, is likely top-level and may
+        // have no manager to "report to", so the `ib ask` hint is the safer
+        // fallback than "report to your manager". Only a clearly-identified
+        // leaf (worker type / legacy `worker: true`) gets the worker message.
         if (meta.agentType && typeof meta.agentType === "string") {
           // The `system` agent type is a layer file (no canSpawnChildren) —
           // short-circuit to manager-style messaging since @system is top-level.

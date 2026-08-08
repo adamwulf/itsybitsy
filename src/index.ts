@@ -1552,7 +1552,10 @@ export async function main() {
       console.log(`Tmux session: ${m.tmux_session || "none"}`);
       console.log(`Worktree:     ${m.worktree}`);
       console.log(`Archived:     ${agent.archived}`);
-      console.log(`Prompt:       ${m.prompt.slice(0, 200).replace(/\n/g, " ")}`);
+      // Detail view: show the full prompt. Continuation lines are indented to
+      // stay aligned under the label instead of being truncated (was slice(0, 200)).
+      const promptIndent = " ".repeat("Prompt:       ".length);
+      console.log(`Prompt:       ${m.prompt.replace(/\n/g, "\n" + promptIndent)}`);
       break;
     }
     case "questions":

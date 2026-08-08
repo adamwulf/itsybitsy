@@ -40,7 +40,6 @@ function mockAgent(overrides: Partial<Agent> & { id: string }): Agent {
       created_epoch: 1704067200,
       worktree: true,
       worker: overrides.meta?.worker ?? false,
-      yolo: false,
       model: overrides.meta?.model ?? "opus",
       claude_pid: "12345",
     } as AgentMeta,

@@ -186,7 +186,6 @@ describe("hookCodexPreToolUse — codex JSON contract (gate (d))", () => {
         created_epoch: 1780000000,
         worktree: true,
         worker: false,
-        yolo: false,
         model: "codex:gpt-5.4-mini",
         claude_pid: "",
         agentType: "worker",

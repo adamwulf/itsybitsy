@@ -48,7 +48,6 @@ function addAgentToRepo(repoPath: string, id: string, extra: Record<string, any>
     created_epoch: Math.floor(Date.now() / 1000) - 60,
     worktree: true,
     worker: false,
-    yolo: false,
     model: "sonnet",
     claude_pid: "99999",
     ...extra,

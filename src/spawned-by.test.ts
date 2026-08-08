@@ -519,7 +519,6 @@ describe("notifySpawner", () => {
         created_epoch: 0,
         worktree: true,
         worker: false,
-        yolo: false,
         model: "sonnet",
         claude_pid: "",
         ...meta,

@@ -1238,14 +1238,13 @@ async function resetCoordinator(agent: Agent): Promise<IbCommandResult> {
  *
  * Sequence (mirrors cmd_resume in ib bash):
  * 1. Read session_id, model from meta.json
- * 2. Check yolo mode from start.sh
- * 3. Create resume.sh script
- * 4. Determine work dir
- * 5. Start tmux session
- * 6. Auto-accept workspace trust if not yolo
- * 7. Send resume nudge
- * 8. Log result
- * 9. Auto-spawn per-agent watchdog
+ * 2. Create resume.sh script
+ * 3. Determine work dir
+ * 4. Start tmux session
+ * 5. Auto-accept workspace trust
+ * 6. Send resume nudge
+ * 7. Log result
+ * 8. Auto-spawn per-agent watchdog
  */
 export async function resumeAgent(
   agent: Agent,
@@ -1367,7 +1366,6 @@ export async function resumeAgent(
     const absExitScript = join(agentDir, "exit-check.sh");
     const resumeScript = join(agentDir, "resume.sh");
 
-    let yoloMode = false;
     if (isCodexBackedCli(resumeCli)) {
       // ── Codex resume branch (SPEC §5.8 + §6 Phase 7) ─────────────────────────
       // Read codex's rollout/session id (NOT the claude session_id UUID).
@@ -1509,19 +1507,8 @@ export async function resumeAgent(
         return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid session ID: ${sessionId}` };
       }
 
-      // Detect yolo mode from start.sh
-      try {
-        const startSh = await Bun.file(join(agentDir, "start.sh")).text();
-        if (startSh.includes("dangerously-skip-permissions")) {
-          yoloMode = true;
-        }
-      } catch { /* start.sh may not exist */ }
-
       // Build claude args
       let claudeArgs = "";
-      if (yoloMode) {
-        claudeArgs = "--dangerously-skip-permissions --permission-mode bypassPermissions";
-      }
       if (modelFlagValue) {
         claudeArgs = claudeArgs ? `${claudeArgs} --model ${modelFlagValue}` : `--model ${modelFlagValue}`;
       }
@@ -1688,11 +1675,9 @@ ${qAbsExitScript}
 
     await logAgent(agentDir, "[resume] tmux session created, running autoAcceptWorkspaceTrust");
 
-    // Auto-accept workspace trust if not yolo (poll tmux for trust prompts)
+    // Auto-accept workspace trust (poll tmux for trust prompts)
     // Must complete before sending nudge to avoid corrupting the permissions flow
-    if (!yoloMode) {
-      await autoAcceptWorkspaceTrust(tmuxSession);
-    }
+    await autoAcceptWorkspaceTrust(tmuxSession);
 
     await logAgent(agentDir, "[resume] autoAcceptWorkspaceTrust completed, sending nudge");
 
@@ -3522,7 +3507,6 @@ export async function roster(name: string, repos: RepoEntry[]): Promise<IbComman
 export interface NewAgentOptions {
   name?: string;
   type?: string;
-  yolo?: boolean;
   model?: string;
   effort?: string;
   manager?: string;
@@ -3771,25 +3755,24 @@ async function buildAgentSettings(
  * 2.  Ensure .ittybitty/agents/ and .ittybitty/archive/ dirs exist
  * 3.  Auto-detect manager from cwd if not provided
  * 4.  Validate manager (resolve partial ID, check not a worker)
- * 5.  Yolo escalation check
- * 6.  Load config for model, maxAgents, permissions, prompts
- * 7.  Model fallback: --model > config.model > 'claude:opus'
- * 8.  Max agents check
- * 9.  Generate agent ID (--name or agent-<8 hex chars>)
- * 10. Uniqueness check (dir + tmux session)
- * 11. Create agent directory + write initial meta.json (state="creating")
- * 12. Create git worktree + branch (if worktree mode)
- * 13. Write settings.local.json in worktree
- * 14. (formerly meta.json — now written in step 11 before slow worktree add)
- * 15. Write prompt.txt
- * 16. Write start.sh + exit-check.sh
- * 17. Init agent.log
- * 18. Start tmux session
- * 19. Verify tmux session created
- * 20. Output agent ID
- * 21. Post-create-agent hook
- * 22. Auto-accept workspace trust (if not yolo)
- * 23. Auto-spawn watchdog
+ * 5.  Load config for model, maxAgents, permissions, prompts
+ * 6.  Model fallback: --model > config.model > 'claude:opus'
+ * 7.  Max agents check
+ * 8.  Generate agent ID (--name or agent-<8 hex chars>)
+ * 9.  Uniqueness check (dir + tmux session)
+ * 10. Create agent directory + write initial meta.json (state="creating")
+ * 11. Create git worktree + branch (if worktree mode)
+ * 12. Write settings.local.json in worktree
+ * 13. (formerly meta.json — now written in step 10 before slow worktree add)
+ * 14. Write prompt.txt
+ * 15. Write start.sh + exit-check.sh
+ * 16. Init agent.log
+ * 17. Start tmux session
+ * 18. Verify tmux session created
+ * 19. Output agent ID
+ * 20. Post-create-agent hook
+ * 21. Auto-accept workspace trust
+ * 22. Auto-spawn watchdog
  */
 /**
  * Block spawning a subagent when the *target repo's* worktree has uncommitted
@@ -3897,7 +3880,6 @@ export async function newAgent(
 
   // Configuration
   let useWorktree = opts?.noWorktree !== true;
-  const yoloMode = opts?.yolo === true;
 
   // Ensure agent types directory is initialized + load the requested type.
   const { ensureAgentTypesDir } = await import("./agent-types");
@@ -4130,32 +4112,7 @@ export async function newAgent(
     };
   }
 
-  // 5. Yolo escalation check (only if cwd is in the same repo)
-  if (yoloMode) {
-    const cwd = opts?._cwd ?? process.cwd();
-    if (/\/.ittybitty\/agents\/[^/]+\/repo/.test(cwd) && (cwd === rootRepoPath || cwd.startsWith(rootRepoPath + "/"))) {
-      const parentAgentDir = cwd.replace(/(\/.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
-      let parentIsYolo = false;
-
-      try {
-        const parentMeta = await Bun.file(join(parentAgentDir, "meta.json")).json();
-        if (parentMeta.yolo === true) parentIsYolo = true;
-      } catch { /* ignore */ }
-
-      if (!parentIsYolo) {
-        try {
-          const startSh = await Bun.file(join(parentAgentDir, "start.sh")).text();
-          if (startSh.includes("dangerously-skip-permissions")) parentIsYolo = true;
-        } catch { /* ignore */ }
-      }
-
-      if (!parentIsYolo) {
-        return { ok: false, exitCode: 1, stdout: "", stderr: "Error: Yolo mode denied - permission escalation not allowed" };
-      }
-    }
-  }
-
-  // 6. Load config
+  // 5. Load config
   const config = await readConfig();
   const customPrompts = await loadCustomPrompts(rootRepoPath);
 
@@ -4163,7 +4120,7 @@ export async function newAgent(
   const isLeafAgent = !agentTypeDef.canSpawnChildren;
 
   // Load the agent-type layer files once, up front, so BOTH the model
-  // resolution (step 7) and the permissions merge (step 7.1) read from the
+  // resolution (step 6) and the permissions merge (step 6.1) read from the
   // same objects. This mirrors the permissions-layer set exactly:
   //   - `_all.md` — applied to every spawned agent
   //   - `_non_coordinator.md` — applied to non-coordinator agents only
@@ -4189,7 +4146,7 @@ export async function newAgent(
     }
   }
 
-  // 7. Model precedence (most-specific wins, where 'more specific' overrides
+  // 6. Model precedence (most-specific wins, where 'more specific' overrides
   //    'less specific'):
   //      --model (CLI flag)
   //        > <type>.md model
@@ -4230,7 +4187,7 @@ export async function newAgent(
     return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${model}` };
   }
 
-  // 7b. Effort precedence — the exact structural twin of the model chain above,
+  // 6b. Effort precedence — the exact structural twin of the model chain above,
   //     reusing the same already-loaded layer objects (agentTypeDef,
   //     nonCoordLayer, allLayer) with the same gating:
   //       --effort (CLI flag)
@@ -4332,7 +4289,7 @@ export async function newAgent(
     }
   }
 
-  // 7.1. Permissions are assembled in three layers (SPEC §2.3):
+  // 6.1. Permissions are assembled in three layers (SPEC §2.3):
   //   1. `_all.md` frontmatter — applied to every spawned agent
   //   2. `_non_coordinator.md` frontmatter — applied to non-coordinator agents only
   //   3. `<type>.md` frontmatter — per-type permissions
@@ -4350,7 +4307,7 @@ export async function newAgent(
   const configAllow = [...new Set([...allLayerAllow, ...nonCoordAllow, ...typeAllow])];
   const configDeny = [...new Set([...allLayerDeny, ...nonCoordDeny, ...typeDeny])];
 
-  // 8. Max agents check — coordinators bypass this (SPEC §12.4.3)
+  // 7. Max agents check — coordinators bypass this (SPEC §12.4.3)
   if (!coordinatorMode) {
     const maxAgents = (config.maxAgents?.value as number | undefined) ?? 10;
     const currentCount = await countAgents(agentsDir);
@@ -4359,7 +4316,7 @@ export async function newAgent(
     }
   }
 
-  // 9. Generate agent ID
+  // 8. Generate agent ID
   const repos = await listRepos();
   let id: string;
   if (coordinatorMode) {
@@ -4418,7 +4375,7 @@ export async function newAgent(
   const repoId = await getRepoId(rootRepoPath);
   const tmuxSession = `ittybitty-${repoId}-${id}`;
 
-  // 10. Uniqueness check
+  // 9. Uniqueness check
   const agentDir = join(agentsDir, id);
   const dirExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
   if (dirExists) {
@@ -4446,7 +4403,7 @@ export async function newAgent(
     }
   }
 
-  // 11. Create agent directory
+  // 10. Create agent directory
   await mkdir(agentDir, { recursive: true });
   // The per-agent outbox now lives under the CENTRAL coordinator-home root
   // (so codex agents under `-s workspace-write` can write to other agents'
@@ -4543,7 +4500,6 @@ export async function newAgent(
     worker: isLeafAgent,
     agentType: typeName,
     agentIcon: agentTypeDef.icon || undefined,
-    yolo: yoloMode,
     model: model || null,
     effort: effort || null,
     spawned_by: spawnedBy ?? null,
@@ -4555,7 +4511,7 @@ export async function newAgent(
   }
   await timed("new-agent", "meta-write", () => writeMetaJsonAtomic(agentDir, initialMetaJson));
 
-  // 12. Create git worktree if requested
+  // 11. Create git worktree if requested
   // Note: coordinator branch format retained for backward compatibility with
   // session-start.ts and health-check.ts, even though coordinators no longer use worktrees.
   const branchName = coordinatorMode ? `agent/${id}-${repoId}` : `agent/${id}`;
@@ -4777,7 +4733,7 @@ export async function newAgent(
         }
       }
     } else {
-      // 13. Write settings.local.json (worktree mode only).
+      // 12. Write settings.local.json (worktree mode only).
       // Coordinators force useWorktree=false above (SPEC §12.2.3), so we never
       // reach here in coordinator mode — only regular agents need settings here.
       await mkdir(join(agentDir, "repo", ".claude"), { recursive: true });
@@ -4826,7 +4782,7 @@ export async function newAgent(
     } catch { /* ignore */ }
   }
 
-  // 14. meta.json was written early (before mkdir worktree) so the dashboard
+  // 13. meta.json was written early (before mkdir worktree) so the dashboard
   // does not flag the in-progress agent dir as orphaned during a slow
   // git worktree add. See the "Compute fields needed for the early meta.json
   // write" block above. Subsequent writers (start.sh → claude_pid, watchdog
@@ -4842,7 +4798,7 @@ export async function newAgent(
     await logAgent(agentDir, `Agent created (prompt: ${prompt})`);
   }
 
-  // 16. Build prompt.txt
+  // 14. Build prompt.txt
   const createPRs = config.createPullRequests?.value === true;
   let completionInstructions = "";
 
@@ -4887,9 +4843,6 @@ When your task is complete:
 
   // Build claude args
   let claudeArgs = "";
-  if (yoloMode) {
-    claudeArgs = "--dangerously-skip-permissions --permission-mode bypassPermissions";
-  }
   if (printMode) {
     claudeArgs = claudeArgs ? `${claudeArgs} --print` : "--print";
   }
@@ -4919,7 +4872,7 @@ When your task is complete:
     claudeArgs = claudeArgs ? `${claudeArgs} --settings ${coordSettingsArg}` : `--settings ${coordSettingsArg}`;
   }
 
-  // 16. Write exit-check.sh
+  // 15. Write exit-check.sh
   const exitScript = join(agentDir, "exit-check.sh");
   const exitCheckContent = `#!/bin/bash
 echo ""
@@ -5103,8 +5056,8 @@ ${qStartExitScript}
   await Bun.write(startScript, startContent);
   await chmod(startScript, 0o755);
 
-  // 17. Init agent.log (already done via logAgent above)
-  // 18. Ensure tmux server is running
+  // 16. Init agent.log (already done via logAgent above)
+  // 17. Ensure tmux server is running
   const startServerResult = await timed("new-agent", "tmux-start-server", () =>
     newAgentSpawnCtx.run(["tmux", "start-server"])
   );
@@ -5163,7 +5116,7 @@ ${qStartExitScript}
     // it back when other clients attach/detach.
     newAgentSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSessionTarget(tmuxSession), "window-size", "manual"]),
     newAgentSpawnCtx.run(["tmux", "set-hook", "-t", tmuxSessionTarget(tmuxSession), "pane-died", paneDiedHook]),
-    // 19. Verify tmux session created
+    // 18. Verify tmux session created
     newAgentSpawnCtx.run(["tmux", "has-session", "-t", tmuxSessionTarget(tmuxSession)]),
   ]);
   await logSpawn(agentDir, spawnerAgentDir, id, `tmux has-session verify → exit=${verifyResult.exitCode}`);
@@ -5177,16 +5130,14 @@ ${qStartExitScript}
 
   await logSpawn(agentDir, spawnerAgentDir, id, `spawn OK: agent ${id} running (tmux=${tmuxSession} workPath=${workPath})`);
 
-  // 20. Output agent ID
+  // 19. Output agent ID
   const stdout = id;
 
-  // 21. Auto-accept workspace trust (if not yolo) — in background
-  if (!yoloMode) {
-    // Run async without awaiting — fire and forget
-    autoAcceptWorkspaceTrustForNewAgent(tmuxSession).catch(() => {});
-  }
+  // 20. Auto-accept workspace trust — in background
+  // Run async without awaiting — fire and forget
+  autoAcceptWorkspaceTrustForNewAgent(tmuxSession).catch(() => {});
 
-  // 22. Auto-spawn per-agent watchdog
+  // 21. Auto-spawn per-agent watchdog
   await timed("new-agent", "watchdog-spawn", async () => {
     try {
       const watchdogLog = join(agentDir, "watchdog.log");
@@ -5219,7 +5170,7 @@ ${qStartExitScript}
     }
   });
 
-  // 23. Generate prompt summary in background (fire-and-forget)
+  // 22. Generate prompt summary in background (fire-and-forget)
   generatePromptSummary(agentDir).catch(() => {});
 
   logToWatchLog(

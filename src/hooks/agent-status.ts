@@ -626,7 +626,6 @@ function buildHookAgent(
       created_epoch: 0,
       worktree: true,
       worker: false,
-      yolo: false,
       model: "",
       claude_pid: "",
     } as import("../agents").AgentMeta,

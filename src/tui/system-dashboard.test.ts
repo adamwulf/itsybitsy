@@ -20,7 +20,6 @@ function makeAgent(overrides: Partial<Agent> & { id: string }): Agent {
     created_epoch: 1700000000,
     worktree: true,
     worker: false,
-    yolo: false,
     model: "opus",
     claude_pid: "1234",
   };

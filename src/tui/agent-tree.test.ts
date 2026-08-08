@@ -24,7 +24,6 @@ function makeAgent(id: string, state: string = "running", overrides: Partial<Age
       created_epoch: 1735689600,
       worktree: true,
       worker: false,
-      yolo: false,
       model: "sonnet",
       claude_pid: "12345",
     },

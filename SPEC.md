@@ -21,22 +21,20 @@ When a new agent is created (`ib new-agent "prompt"`):
 
 2. **Auto-detect manager**: If no `--manager` is provided and the caller is running inside an agent worktree (CWD matches `/.ittybitty/agents/<id>/repo`), the caller's agent ID is automatically set as the manager.
 
-3. **Yolo escalation prevention**: A `--yolo` child cannot be spawned by a non-yolo parent. This prevents permission escalation where a constrained agent spawns an unconstrained one. The parent's yolo status is checked via `meta.json` or `start.sh`.
+3. **Configuration**: Config is loaded from `~/.itsybitsy/config.json` (user-wide). The agent type is resolved by: `--type` flag > default `"manager"`. The type definition is loaded from `~/.itsybitsy/agent-types/<name>.md` — the `.md` file on disk is the sole source of truth (no hardcoded fallback). On first run, `~/.itsybitsy/agent-types/` is auto-populated with embedded default templates (see §2.7). The model is determined by a most-specific-wins precedence chain across the agent-type layer files (same layer set and gating as the permissions merge, §2.3): `--model` flag > `<type>.md` `model` > `_non_coordinator.md` `model` (non-coordinator agents only) > `_all.md` `model` > config `model` (non-coordinator agents only) > `"opus"` (default). The agent-type layers all override the user's config `model`; config `model` is the final fallback before `"opus"` for non-coordinator agents only. Coordinators deliberately skip config `model` — the coordinator agent-type file is authoritative for coordinators, since otherwise the user's global `model` setting would clobber the coordinator agent-type. A blank `model:` value in any layer (parsed to `undefined`) is skipped, so a more-specific file declaring `model:` with no value does NOT clobber a real model set by a less-specific file. The reasoning-effort level (`--effort <level>` for Claude, `model_reasoning_effort` for codex) is resolved by the identical chain and gating: `--effort` flag > `<type>.md` `effort` > `_non_coordinator.md` `effort` (non-coordinator agents only) > `_all.md` `effort` > config `effort` (non-coordinator agents only) > `"xhigh"` (default). Valid levels are `low|medium|high|xhigh|max`; codex has no `xhigh`/`max`, so those two collapse to codex's `high` (see §18). A blank `effort:` is skipped the same way a blank `model:` is.
 
-4. **Configuration**: Config is loaded from `~/.itsybitsy/config.json` (user-wide). The agent type is resolved by: `--type` flag > default `"manager"`. The type definition is loaded from `~/.itsybitsy/agent-types/<name>.md` — the `.md` file on disk is the sole source of truth (no hardcoded fallback). On first run, `~/.itsybitsy/agent-types/` is auto-populated with embedded default templates (see §2.7). The model is determined by a most-specific-wins precedence chain across the agent-type layer files (same layer set and gating as the permissions merge, §2.3): `--model` flag > `<type>.md` `model` > `_non_coordinator.md` `model` (non-coordinator agents only) > `_all.md` `model` > config `model` (non-coordinator agents only) > `"opus"` (default). The agent-type layers all override the user's config `model`; config `model` is the final fallback before `"opus"` for non-coordinator agents only. Coordinators deliberately skip config `model` — the coordinator agent-type file is authoritative for coordinators, since otherwise the user's global `model` setting would clobber the coordinator agent-type. A blank `model:` value in any layer (parsed to `undefined`) is skipped, so a more-specific file declaring `model:` with no value does NOT clobber a real model set by a less-specific file. The reasoning-effort level (`--effort <level>` for Claude, `model_reasoning_effort` for codex) is resolved by the identical chain and gating: `--effort` flag > `<type>.md` `effort` > `_non_coordinator.md` `effort` (non-coordinator agents only) > `_all.md` `effort` > config `effort` (non-coordinator agents only) > `"xhigh"` (default). Valid levels are `low|medium|high|xhigh|max`; codex has no `xhigh`/`max`, so those two collapse to codex's `high` (see §18). A blank `effort:` is skipped the same way a blank `model:` is.
+4. **Max agents check**: The number of active agents (directories with `meta.json` in `.ittybitty/agents/`) must not exceed the `maxAgents` config value (default: 10).
 
-5. **Max agents check**: The number of active agents (directories with `meta.json` in `.ittybitty/agents/`) must not exceed the `maxAgents` config value (default: 10).
+5. **Generate agent ID**: Either `--name NAME` or `agent-<8 random hex chars>` (e.g., `agent-a1b2c3d4`).
 
-6. **Generate agent ID**: Either `--name NAME` or `agent-<8 random hex chars>` (e.g., `agent-a1b2c3d4`).
+6. **Tmux session naming**: The tmux session name is `ittybitty-<repo-id>-<agent-id>`, where `<repo-id>` is an 8-character hex identifier stored in `.ittybitty/repo-id`. This prevents session collisions across different repositories.
 
-7. **Tmux session naming**: The tmux session name is `ittybitty-<repo-id>-<agent-id>`, where `<repo-id>` is an 8-character hex identifier stored in `.ittybitty/repo-id`. This prevents session collisions across different repositories.
-
-8. **Git worktree setup** (default, unless `--no-worktree`):
+7. **Git worktree setup** (default, unless `--no-worktree`):
    - Branch name: `agent/<agent-id>`
    - Base ref: If the agent has a manager, branch from `agent/<manager-id>`. Otherwise, branch from `HEAD`.
    - Command: `git -C <root-repo> worktree add <agent-dir>/repo -b <branch-name> <base-ref>`
 
-9. **Settings**: `<agent-dir>/repo/.claude/settings.local.json` is written with permissions merged from four sources (see §2.3 for full details):
+8. **Settings**: `<agent-dir>/repo/.claude/settings.local.json` is written with permissions merged from four sources (see §2.3 for full details):
    - Base allow list from `<repo>/.claude/settings.json` (deny entries NOT inherited)
    - Hardcoded mandatory permissions (ib commands, git operations, Claude Code tools)
    - Layer-file permissions from `~/.itsybitsy/agent-types/_all.md` (all agents) and `~/.itsybitsy/agent-types/_non_coordinator.md` (non-coordinator agents only)
@@ -44,27 +42,27 @@ When a new agent is created (`ib new-agent "prompt"`):
    - Hook definitions: path-check, stop, permission-denied, session-start, and optionally intercept-task (for agents with `canSpawnChildren: true`)
    - The agent ID placeholder `__AGENT_ID__` is replaced with the actual ID after writing
 
-10. **Write meta.json** to `<agent-dir>/meta.json` (see §5.2 for fields). Includes `agentType` (the resolved type name), `agentIcon` (the type's icon character, if defined), and `allowedPaths` (resolved absolute paths from the type's `allowedPaths` frontmatter, if defined — see §6.1).
+9. **Write meta.json** to `<agent-dir>/meta.json` (see §5.2 for fields). Includes `agentType` (the resolved type name), `agentIcon` (the type's icon character, if defined), and `allowedPaths` (resolved absolute paths from the type's `allowedPaths` frontmatter, if defined — see §6.1).
 
-11. **Write prompt.txt** with the full prompt including any completion instructions, custom prompts, and the user's task.
+10. **Write prompt.txt** with the full prompt including any completion instructions, custom prompts, and the user's task.
 
-12. **Write start.sh**: A bash script that:
+11. **Write start.sh**: A bash script that:
     - Clears `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` env vars (allows nesting)
     - Starts `claude --session-id <uuid> <args> "$(cat prompt.txt)"` in background
     - Captures the Claude PID into `meta.json`
     - Runs `exit-check.sh` after Claude exits
 
-13. **Write exit-check.sh**: Interactive script (for manual agent inspection) that checks for uncommitted changes and unpushed commits after the agent session ends.
+12. **Write exit-check.sh**: Interactive script (for manual agent inspection) that checks for uncommitted changes and unpushed commits after the agent session ends.
 
-14. **Start tmux session**: `tmux new-session -d -x 60 -s <session-name> -c <work-path> <start.sh>`
+13. **Start tmux session**: `tmux new-session -d -x 60 -s <session-name> -c <work-path> <start.sh>`
 
-15. **Auto-accept workspace trust**: For non-yolo agents, a background process polls tmux output for permission prompts ("Do you trust the files", "trust this folder", "Allow external CLAUDE.md file imports") and sends Enter to accept them. Runs up to 5 attempts with 4-second waits between each.
+14. **Auto-accept workspace trust**: A background process polls tmux output for permission prompts ("Do you trust the files", "trust this folder", "Allow external CLAUDE.md file imports") and sends Enter to accept them. Runs up to 5 attempts with 4-second waits between each.
 
-16. **Auto-spawn watchdog**: `ib watchdog <id>` is spawned in the background for ALL agents (not just those with a manager), with output redirected to `<agent-dir>/watchdog.log`. The watchdog PID is saved to `meta.json` as `watchdog_pid`.
+15. **Auto-spawn watchdog**: `ib watchdog <id>` is spawned in the background for ALL agents (not just those with a manager), with output redirected to `<agent-dir>/watchdog.log`. The watchdog PID is saved to `meta.json` as `watchdog_pid`.
 
-17. **Output**: The agent ID is printed to stdout immediately after tmux session creation.
+16. **Output**: The agent ID is printed to stdout immediately after tmux session creation.
 
-18. **Prompt summary generation**: After the watchdog is spawned, `generatePromptSummary()` is called in the background (fire-and-forget) to produce a short human-readable summary of the agent's task. This does not block the creation flow. See §8.9 for details.
+17. **Prompt summary generation**: After the watchdog is spawned, `generatePromptSummary()` is called in the background (fire-and-forget) to produce a short human-readable summary of the agent's task. This does not block the creation flow. See §8.9 for details.
 
 ### 1.2 Agent States
 
@@ -213,13 +211,12 @@ Pause (`ib pause <id>`) stops the agent but preserves all state:
 Resume (`ib resume <id>`) restarts a stopped agent:
 
 1. Read `session_id` from `meta.json` (required for Claude `--resume`)
-2. Detect yolo mode from `start.sh`
-3. Write `resume.sh` with `claude --resume <session-id>` command
-4. Start new tmux session running `resume.sh`
-5. Auto-accept workspace trust (if not yolo)
-6. Send resume nudge message: "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line."
-7. **Auto-spawn watchdog**: `ib watchdog <id>` is spawned in the background for ALL agents (not just those with a manager). The watchdog PID is saved to `meta.json` as `watchdog_pid`. The bash `cmd_resume()` does not include this step (known divergence).
-8. **State reset**: Write `state: "running"` and `state_updated_at` to `meta.json` (atomic merge write). See §1.3.1.
+2. Write `resume.sh` with `claude --resume <session-id>` command
+3. Start new tmux session running `resume.sh`
+4. Auto-accept workspace trust
+5. Send resume nudge message: "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line."
+6. **Auto-spawn watchdog**: `ib watchdog <id>` is spawned in the background for ALL agents (not just those with a manager). The watchdog PID is saved to `meta.json` as `watchdog_pid`. The bash `cmd_resume()` does not include this step (known divergence).
+7. **State reset**: Write `state: "running"` and `state_updated_at` to `meta.json` (atomic merge write). See §1.3.1.
 
 ### 1.7 Archiving
 
@@ -634,7 +631,6 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
   "worker": false,
   "agentType": "manager",         // resolved type name (see §2.1)
   "agentIcon": "◆",               // type icon character (see §2.6)
-  "yolo": false,
   "model": "sonnet",              // bash defaults to "sonnet"; legacy agents may have null
   "claude_pid": "12345",          // written after Claude starts (not in initial write)
   "claude_pid_epoch": 1704825010,  // epoch seconds when the current claude_pid was written
@@ -659,9 +655,8 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 | `worker` | boolean | `true` for leaf agents (`canSpawnChildren: false`), `false` otherwise. Retained for backward compatibility with bash `ib`. |
 | `agentType` | string \| undefined | Resolved agent type name (e.g., `"manager"`, `"worker"`, `"researcher"`). Absent on legacy agents created before the type system. See §2.1. |
 | `agentIcon` | string \| undefined | Single-character icon from the agent type definition. Absent if the type has no icon or for legacy agents. See §2.6. |
-| `yolo` | boolean | Whether `--yolo` (skip permissions) was used |
 | `model` | string \| null | Claude model name (e.g., "sonnet", "opus", "haiku"), or `null` for legacy agents | [^callout]: Bash defaults `MODEL` to config value then `"sonnet"` before writing meta.json (the null branch in the template is unreachable dead code). TS normalizes null/missing to `"unknown"`. The `string \| null` type is retained because legacy agents may have null values, and display code (bash `ib list`) handles this defensively.
-| `effort` | string \| null | Resolved reasoning-effort level (`low\|medium\|high\|xhigh\|max`), or `null`/absent for legacy agents (treated as no override). Stores the **raw itsybitsy level** verbatim; the codex `model_reasoning_effort` mapping happens at launch-arg build time. Re-read by `ib resume` to re-apply the effort flag. See §2 item 4 / §18. |
+| `effort` | string \| null | Resolved reasoning-effort level (`low\|medium\|high\|xhigh\|max`), or `null`/absent for legacy agents (treated as no override). Stores the **raw itsybitsy level** verbatim; the codex `model_reasoning_effort` mapping happens at launch-arg build time. Re-read by `ib resume` to re-apply the effort flag. See §2 item 3 / §18. |
 | `claude_pid` | string | PID of the Claude process (written by `ib write-pid` after start.sh launches Claude — not present in the initial write) |
 | `claude_pid_epoch` | number \| undefined | Unix epoch seconds when the current `claude_pid` was written by `ib write-pid`. Refreshed on spawn and resume; absent on legacy agents, which retain PID-only liveness checks. |
 | `watchdog_pid` | string | PID of the watchdog process (appended to meta.json after watchdog spawns — not present in the initial write; see §8.5) |
@@ -937,7 +932,7 @@ All keys are read from `~/.itsybitsy/config.json`. If a key is absent or has an 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `maxAgents` | number | `10` | Maximum number of concurrently active agents. Checked at spawn time in `newAgent()` — the count of agent directories that contain a `meta.json` must not exceed this value. |
-| `model` | string | `"opus"` | Default Claude model for new agents — the final fallback before `"opus"` for non-coordinator agents. Full resolution order at spawn time (most-specific wins): `--model` CLI flag → `<type>.md` `model` → `_non_coordinator.md` `model` (non-coordinator agents only) → `_all.md` `model` → config `model` (non-coordinator agents only) → `"opus"`. The agent-type layer files all override this config key; a blank `model:` in a layer is skipped (see §2 item 4). Coordinators deliberately skip this fallback — the coordinator agent-type file is authoritative for coordinators. |
+| `model` | string | `"opus"` | Default Claude model for new agents — the final fallback before `"opus"` for non-coordinator agents. Full resolution order at spawn time (most-specific wins): `--model` CLI flag → `<type>.md` `model` → `_non_coordinator.md` `model` (non-coordinator agents only) → `_all.md` `model` → config `model` (non-coordinator agents only) → `"opus"`. The agent-type layer files all override this config key; a blank `model:` in a layer is skipped (see §2 item 3). Coordinators deliberately skip this fallback — the coordinator agent-type file is authoritative for coordinators. |
 | `effort` | string | `"xhigh"` | Default reasoning-effort level for new agents (`low\|medium\|high\|xhigh\|max`) — the final fallback before `"xhigh"` for non-coordinator agents. Resolved by the exact same chain and gating as `model`: `--effort` CLI flag → `<type>.md` `effort` → `_non_coordinator.md` `effort` (non-coordinator agents only) → `_all.md` `effort` → config `effort` (non-coordinator agents only) → `"xhigh"`. Threaded to the CLI as Claude's `--effort <level>` or codex's `model_reasoning_effort` (codex maps `xhigh`/`max` → `high`; see §18). Coordinators skip this fallback for the same reason as `model`. |
 | `fps` | number | `10` | TUI screen refresh rate (frames per second) for `ib watch`. |
 | `createPullRequests` | boolean | `false` | When `true`, agents are instructed (via their prompt) to create a pull request upon completing their work. |
@@ -1126,7 +1121,7 @@ Reads Claude transcript JSONL files to determine context window usage percentage
 
 **State source**: The watchdog reads `state` from `meta.json` (written by the stop hook — see §1.3.1 and §6.2). It does **not** use tmux for primary state detection. For `rate_limited` and `compacting`, the watchdog checks tmux output for those specific patterns only (same minimal tmux parsing that state consumers use — see §1.3 step 3). The rate limit handler also uses tmux to verify dialog dismissal after sending Enter.
 
-**Exit conditions**: The watchdog exits when: (a) the agent's worktree directory is removed (`while [[ -d "$AGENT_DIR/repo" ]]`), which happens on retire/merge/nuke, or (b) in TS, the agent's tmux session has been missing for >10 consecutive seconds (grace period). Bash does **not** check tmux session existence, so it survives pause and must be exited by worktree removal only. On resume, a new watchdog is spawned (§1.6 step 7).
+**Exit conditions**: The watchdog exits when: (a) the agent's worktree directory is removed (`while [[ -d "$AGENT_DIR/repo" ]]`), which happens on retire/merge/nuke, or (b) in TS, the agent's tmux session has been missing for >10 consecutive seconds (grace period). Bash does **not** check tmux session existence, so it survives pause and must be exited by worktree removal only. On resume, a new watchdog is spawned (§1.6 step 6).
 
 Per-agent watchdogs do not use a watchdog lock file for state detection, and there is no global watchdog. (The watchdog does acquire the per-session **message-delivery** lock — `.outbox.lock` — while draining that agent's outbox; see below and §4.1.1. That lock is unrelated to state monitoring.)
 
@@ -2930,7 +2925,7 @@ export function resolveCli(model: string): AgentCli;        // thin wrapper over
 
 `meta.json` stores the **raw qualified value** verbatim (e.g. `"claude:opus"`) — never the parsed pieces. `parseModel(meta.model).cli` is computed on demand wherever the discriminator is needed.
 
-**Reasoning effort (codex side).** The resolved effort level (§2 item 4) is threaded to codex as an inline `-c model_reasoning_effort="<level>"` override alongside the other `-c` flags. Codex's value set is only `low`/`medium`/`high` — it has no `xhigh`/`max` — so `mapEffortForCodex` (`src/agent-cli.ts`) collapses the itsybitsy 5-level scale down: `low→low`, `medium→medium`, `high/xhigh/max→high`. `meta.json` stores the **raw itsybitsy level** verbatim (e.g. `"xhigh"`); the codex mapping happens only at launch-arg build time. Because `model_reasoning_effort` is a `-c` config override (not the rollout-bound `-m <model>`), codex **resume** re-applies it via the same `buildCodexLaunchArgs`, so effort carries over on codex resume — unlike `-m <model>`, which codex resume deliberately drops.
+**Reasoning effort (codex side).** The resolved effort level (§2 item 3) is threaded to codex as an inline `-c model_reasoning_effort="<level>"` override alongside the other `-c` flags. Codex's value set is only `low`/`medium`/`high` — it has no `xhigh`/`max` — so `mapEffortForCodex` (`src/agent-cli.ts`) collapses the itsybitsy 5-level scale down: `low→low`, `medium→medium`, `high/xhigh/max→high`. `meta.json` stores the **raw itsybitsy level** verbatim (e.g. `"xhigh"`); the codex mapping happens only at launch-arg build time. Because `model_reasoning_effort` is a `-c` config override (not the rollout-bound `-m <model>`), codex **resume** re-applies it via the same `buildCodexLaunchArgs`, so effort carries over on codex resume — unlike `-m <model>`, which codex resume deliberately drops.
 
 ### 18.4 Permission Model (Codex side)
 

@@ -41,7 +41,6 @@ function makeAgent(overrides: Partial<Agent> = {}): Agent {
       created_epoch: 1735689600,
       worktree: true,
       worker: false,
-      yolo: false,
       model: "sonnet",
       claude_pid: "12345",
     },

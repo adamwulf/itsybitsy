@@ -170,7 +170,7 @@ Also: `src/usage.ts` — fetches Claude API session+weekly utilization from `GET
 ├── agents/
 │   └── {agent-id}/
 │       ├── meta.json       # id, session_id, tmux_session, prompt, manager, created,
-│       │                   # created_epoch, worktree, worker, yolo, model, claude_pid
+│       │                   # created_epoch, worktree, worker, model, claude_pid
 │       ├── agent.log       # Full agent log
 │       ├── prompt.txt      # Original prompt
 │       ├── start.sh        # Session start script
@@ -197,7 +197,6 @@ Also: `src/usage.ts` — fetches Claude API session+weekly utilization from `GET
   "created_epoch": 1772579016,
   "worktree": true,
   "worker": false,
-  "yolo": false,
   "model": "sonnet",
   "claude_pid": "31269",
   "state": "running",

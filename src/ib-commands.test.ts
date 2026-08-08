@@ -2340,36 +2340,6 @@ describe("resumeAgent (native)", () => {
     expect(setWindowSize).toBeDefined();
   });
 
-  test("detects yolo mode from start.sh", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
-    await mkdir(join(agentDir, "repo"), { recursive: true });
-    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
-      id: "agent-abc",
-      tmux_session: "tmux-agent-abc",
-      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-    }));
-    await Bun.write(join(agentDir, "start.sh"), "#!/bin/bash\nclaude --dangerously-skip-permissions &\n");
-
-    const agent = _makeAgent({
-      id: "agent-abc",
-      repoPath: tempDir,
-      repoName: "test",
-      state: "stopped",
-      meta: {
-        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-        tmux_session: "tmux-agent-abc",
-      } as any,
-    });
-    const result = await resumeAgent(agent);
-
-    expect(result.ok).toBe(true);
-
-    // resume.sh should contain yolo flags
-    const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
-    expect(resumeScript).toContain("--dangerously-skip-permissions");
-    expect(resumeScript).toContain("--permission-mode bypassPermissions");
-  });
-
   test("logs 'Agent resumed' and 'Sent resume nudge'", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
@@ -4543,7 +4513,6 @@ describe("newAgent (native)", () => {
     expect(meta.worktree).toBe(true);
     expect(meta.worker).toBe(false);
     expect(meta.agentType).toBe("manager"); // default type
-    expect(meta.yolo).toBe(false);
     expect(meta.model).toBe("claude:sonnet"); // model from test config (qualified <cli>:<model> form)
     expect(meta.session_id).toMatch(/^[0-9a-f-]+$/);
     expect(typeof meta.created_epoch).toBe("number");
@@ -5151,7 +5120,7 @@ describe("newAgent (native)", () => {
     expect(result.stderr).toContain("Invalid effort level: extreme");
   });
 
-  test("type: worker sets meta.worker and start.sh doesn't have yolo flags", async () => {
+  test("type: worker sets meta.worker and start.sh has no bypass-permissions flags", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("task", { name: "test-worker", type: "worker" });
 
@@ -5160,18 +5129,6 @@ describe("newAgent (native)", () => {
 
     const startSh = await Bun.file(join(agentsDir, "test-worker", "start.sh")).text();
     expect(startSh).not.toContain("dangerously-skip-permissions");
-  });
-
-  test("yolo mode sets meta.yolo and start.sh has yolo flags", async () => {
-    setNewAgentSpawnRunner(mockSpawnRunner());
-    await callNewAgent("task", { name: "test-yolo", yolo: true });
-
-    const meta = await Bun.file(join(agentsDir, "test-yolo", "meta.json")).json();
-    expect(meta.yolo).toBe(true);
-
-    const startSh = await Bun.file(join(agentsDir, "test-yolo", "start.sh")).text();
-    expect(startSh).toContain("--dangerously-skip-permissions");
-    expect(startSh).toContain("--permission-mode bypassPermissions");
   });
 
   test("cleans up on worktree creation failure", async () => {
@@ -5653,33 +5610,6 @@ describe("newAgent (native)", () => {
 
     const startSh = await Bun.file(join(agentsDir, "test-deny", "start.sh")).text();
     expect(startSh).toContain("--disallowedTools Bash");
-  });
-
-  test("yolo escalation blocked when parent is not yolo", async () => {
-    // Create a non-yolo parent agent directory to simulate being inside it
-    const parentDir = join(tempDir, ".ittybitty", "agents", "parent-agent");
-    await mkdir(join(parentDir, "repo"), { recursive: true });
-    await Bun.write(join(parentDir, "meta.json"), JSON.stringify({ id: "parent-agent", yolo: false }));
-    await Bun.write(join(parentDir, "start.sh"), "#!/bin/bash\nclaude --session-id foo");
-
-    // Set cwd to be inside the parent agent's worktree (same repo)
-    const fakeCwd = join(parentDir, "repo", "subdir");
-    setNewAgentSpawnRunner(mockSpawnRunner());
-    const result = await newAgent(tempDir, "yolo task", { yolo: true, _cwd: fakeCwd });
-    expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("permission escalation");
-  });
-
-  test("yolo escalation allowed when parent is yolo", async () => {
-    // Create a yolo parent agent directory
-    const parentDir = join(tempDir, ".ittybitty", "agents", "yolo-parent");
-    await mkdir(join(parentDir, "repo"), { recursive: true });
-    await Bun.write(join(parentDir, "meta.json"), JSON.stringify({ id: "yolo-parent", yolo: true }));
-
-    const fakeCwd = join(parentDir, "repo");
-    setNewAgentSpawnRunner(mockSpawnRunner());
-    const result = await newAgent(tempDir, "yolo task", { name: "yolo-child", yolo: true, _cwd: fakeCwd });
-    expect(result.ok).toBe(true);
   });
 
   test("rejects name with shell metacharacters", async () => {
@@ -8460,7 +8390,6 @@ describe("spawned_by validation in agents.ts", () => {
       created_epoch: 1000,
       worktree: true,
       worker: false,
-      yolo: false,
       model: "opus",
       claude_pid: "1234",
       spawned_by: { agent_id: "spawner", repo_path: "/repo" },
@@ -8544,7 +8473,6 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
       manager: null,
       worktree: false,
       worker: false,
-      yolo: false,
       model: "claude:sonnet",
     }));
 
@@ -10458,7 +10386,6 @@ describe("writeMetaJsonAtomic — canSpawnChildren round-trip", () => {
       created_epoch: 1784490000,
       worktree: true,
       worker: true,
-      yolo: false,
       model: "claude-opus-4-8",
       claude_pid: "12345",
       agentType: "worker",

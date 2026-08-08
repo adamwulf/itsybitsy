@@ -30,7 +30,6 @@ function makeAgent(
       created_epoch: 1735689600,
       worktree: true,
       worker: false,
-      yolo: false,
       model,
       claude_pid: "12345",
     },

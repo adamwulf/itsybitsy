@@ -72,7 +72,6 @@ export interface AgentMeta {
   created_epoch: number;
   worktree: boolean;
   worker: boolean;
-  yolo: boolean;
   model: string;
   /**
    * Reasoning-effort level resolved at spawn time (`low|medium|high|xhigh|max`).
@@ -1576,7 +1575,6 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
     if (typeof data.created_epoch !== "number") data.created_epoch = 0;
     if (typeof data.worktree !== "boolean") data.worktree = true;
     if (typeof data.worker !== "boolean") data.worker = false;
-    if (typeof data.yolo !== "boolean") data.yolo = false;
     if (typeof data.model !== "string") data.model = "unknown";
     if (typeof data.claude_pid !== "string") data.claude_pid = "";
     if (data.claude_pid_epoch !== undefined && typeof data.claude_pid_epoch !== "number") {
@@ -1660,7 +1658,6 @@ async function readAgentsFromDir(
               created_epoch: startEpochSec,
               worktree: false,
               worker: false,
-              yolo: false,
               model: "",
               claude_pid: "",
               state: "creating",

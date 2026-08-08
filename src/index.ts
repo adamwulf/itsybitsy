@@ -166,7 +166,6 @@ export function buildSystemCoordinatorAgent(
       created_epoch: 0,
       worktree: false,
       worker: false,
-      yolo: false,
       model: "",
       claude_pid: "",
     },
@@ -573,7 +572,7 @@ const COMMAND_HELP: Record<string, string> = {
   "new-agent":
     "Usage: ib new-agent [--type <type>] [--model <model>] [--effort <level>] [--manager <id>] [--name <name>]\n" +
     "                    [--repo <name|path>] [--spawned-by <id> [--spawned-by-repo <path>]]\n" +
-    '                    [--allow <tools>] [--deny <tools>] [--no-worktree] [--yolo]\n' +
+    '                    [--allow <tools>] [--deny <tools>] [--no-worktree]\n' +
     '                    [-f|--file|--prompt-file <path>] ["prompt..."]\n' +
     "  Alias: new\n" +
     "  Spawn a new agent. The prompt may be supplied positionally, via -f/--file,\n" +
@@ -587,7 +586,6 @@ const COMMAND_HELP: Record<string, string> = {
     "  --allow <tools>        Comma-separated extra allowed tools\n" +
     "  --deny <tools>         Comma-separated extra denied tools\n" +
     "  --no-worktree          Do not create a git worktree\n" +
-    "  --yolo                 Skip safety prompts (rarely needed)\n" +
     "  -f, --file <path>      Read prompt body from a file",
   acknowledge:
     "Usage: ib acknowledge <question-id>\n" +
@@ -1991,7 +1989,6 @@ export async function main() {
           promptFromFile = true;
         }
         else if (arg === "--no-worktree") { opts.noWorktree = true; }
-        else if (arg === "--yolo") { opts.yolo = true; }
         else if (arg === "--allow") {
           if (!ibArgs[i + 1]) { console.error("Error: --allow requires a value"); process.exit(1); }
           opts.allowTools = ibArgs[++i];

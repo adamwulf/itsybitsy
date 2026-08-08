@@ -101,9 +101,7 @@ function agentWithModel(id: string, state: AgentState, model: string): Agent {
       created: "2026-03-05T00:00:00Z",
       created_epoch: Math.floor(Date.now() / 1000) - 60,
       worktree: true,
-      worker: false,
-      yolo: false,
-      model,
+      worker: false,      model,
       claude_pid: "12345",
     },
   });
@@ -326,9 +324,7 @@ describe("Phase 6 — runPerAgentWatchdog permission-accept gating", () => {
         created: "2026-03-05T00:00:00Z",
         created_epoch: 1000,
         worktree: true,
-        worker: false,
-        yolo: false,
-        model: "codex:gpt-5.4-mini",
+        worker: false,        model: "codex:gpt-5.4-mini",
         claude_pid: "999",
         codex_session_id: "codex-uuid-abc",
       },
@@ -370,9 +366,7 @@ describe("Phase 6 — runPerAgentWatchdog permission-accept gating", () => {
         created: "2026-03-05T00:00:00Z",
         created_epoch: 1000,
         worktree: true,
-        worker: false,
-        yolo: false,
-        model: "claude:opus",
+        worker: false,        model: "claude:opus",
         claude_pid: "999",
       },
     }));
@@ -419,9 +413,7 @@ describe("Phase 6 — runPerAgentWatchdog permission-accept gating", () => {
         created: "2026-03-05T00:00:00Z",
         created_epoch: 1000,
         worktree: true,
-        worker: false,
-        yolo: false,
-        model: "sonnet", // pre-Phase-1 bare name — parseModel throws, falls back to claude
+        worker: false,        model: "sonnet", // pre-Phase-1 bare name — parseModel throws, falls back to claude
         claude_pid: "999",
       },
     }));

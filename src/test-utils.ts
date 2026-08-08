@@ -25,7 +25,6 @@ export function makeAgent(overrides: Partial<Agent> & { id: string }): Agent {
       created_epoch: Math.floor(Date.now() / 1000) - 60,
       worktree: true,
       worker: false,
-      yolo: false,
       model: "claude:sonnet",
       claude_pid: "12345",
       ...(overrides.meta ?? {}),

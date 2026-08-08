@@ -1238,14 +1238,13 @@ async function resetCoordinator(agent: Agent): Promise<IbCommandResult> {
  *
  * Sequence (mirrors cmd_resume in ib bash):
  * 1. Read session_id, model from meta.json
- * 2. Check yolo mode from start.sh
- * 3. Create resume.sh script
- * 4. Determine work dir
- * 5. Start tmux session
- * 6. Auto-accept workspace trust if not yolo
- * 7. Send resume nudge
- * 8. Log result
- * 9. Auto-spawn per-agent watchdog
+ * 2. Create resume.sh script
+ * 3. Determine work dir
+ * 4. Start tmux session
+ * 5. Auto-accept workspace trust
+ * 6. Send resume nudge
+ * 7. Log result
+ * 8. Auto-spawn per-agent watchdog
  */
 export async function resumeAgent(
   agent: Agent,
@@ -1367,7 +1366,6 @@ export async function resumeAgent(
     const absExitScript = join(agentDir, "exit-check.sh");
     const resumeScript = join(agentDir, "resume.sh");
 
-    let yoloMode = false;
     if (isCodexBackedCli(resumeCli)) {
       // ── Codex resume branch (SPEC §5.8 + §6 Phase 7) ─────────────────────────
       // Read codex's rollout/session id (NOT the claude session_id UUID).
@@ -1509,19 +1507,8 @@ export async function resumeAgent(
         return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid session ID: ${sessionId}` };
       }
 
-      // Detect yolo mode from start.sh
-      try {
-        const startSh = await Bun.file(join(agentDir, "start.sh")).text();
-        if (startSh.includes("dangerously-skip-permissions")) {
-          yoloMode = true;
-        }
-      } catch { /* start.sh may not exist */ }
-
       // Build claude args
       let claudeArgs = "";
-      if (yoloMode) {
-        claudeArgs = "--dangerously-skip-permissions --permission-mode bypassPermissions";
-      }
       if (modelFlagValue) {
         claudeArgs = claudeArgs ? `${claudeArgs} --model ${modelFlagValue}` : `--model ${modelFlagValue}`;
       }
@@ -1688,11 +1675,9 @@ ${qAbsExitScript}
 
     await logAgent(agentDir, "[resume] tmux session created, running autoAcceptWorkspaceTrust");
 
-    // Auto-accept workspace trust if not yolo (poll tmux for trust prompts)
+    // Auto-accept workspace trust (poll tmux for trust prompts)
     // Must complete before sending nudge to avoid corrupting the permissions flow
-    if (!yoloMode) {
-      await autoAcceptWorkspaceTrust(tmuxSession);
-    }
+    await autoAcceptWorkspaceTrust(tmuxSession);
 
     await logAgent(agentDir, "[resume] autoAcceptWorkspaceTrust completed, sending nudge");
 
@@ -3522,7 +3507,6 @@ export async function roster(name: string, repos: RepoEntry[]): Promise<IbComman
 export interface NewAgentOptions {
   name?: string;
   type?: string;
-  yolo?: boolean;
   model?: string;
   effort?: string;
   manager?: string;
@@ -3771,7 +3755,6 @@ async function buildAgentSettings(
  * 2.  Ensure .ittybitty/agents/ and .ittybitty/archive/ dirs exist
  * 3.  Auto-detect manager from cwd if not provided
  * 4.  Validate manager (resolve partial ID, check not a worker)
- * 5.  Yolo escalation check
  * 6.  Load config for model, maxAgents, permissions, prompts
  * 7.  Model fallback: --model > config.model > 'claude:opus'
  * 8.  Max agents check
@@ -3788,7 +3771,7 @@ async function buildAgentSettings(
  * 19. Verify tmux session created
  * 20. Output agent ID
  * 21. Post-create-agent hook
- * 22. Auto-accept workspace trust (if not yolo)
+ * 22. Auto-accept workspace trust
  * 23. Auto-spawn watchdog
  */
 /**
@@ -3897,7 +3880,6 @@ export async function newAgent(
 
   // Configuration
   let useWorktree = opts?.noWorktree !== true;
-  const yoloMode = opts?.yolo === true;
 
   // Ensure agent types directory is initialized + load the requested type.
   const { ensureAgentTypesDir } = await import("./agent-types");
@@ -4128,31 +4110,6 @@ export async function newAgent(
         `\n` +
         `git status --porcelain in ${dirtyCheckPath}:\n${dirty}`,
     };
-  }
-
-  // 5. Yolo escalation check (only if cwd is in the same repo)
-  if (yoloMode) {
-    const cwd = opts?._cwd ?? process.cwd();
-    if (/\/.ittybitty\/agents\/[^/]+\/repo/.test(cwd) && (cwd === rootRepoPath || cwd.startsWith(rootRepoPath + "/"))) {
-      const parentAgentDir = cwd.replace(/(\/.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
-      let parentIsYolo = false;
-
-      try {
-        const parentMeta = await Bun.file(join(parentAgentDir, "meta.json")).json();
-        if (parentMeta.yolo === true) parentIsYolo = true;
-      } catch { /* ignore */ }
-
-      if (!parentIsYolo) {
-        try {
-          const startSh = await Bun.file(join(parentAgentDir, "start.sh")).text();
-          if (startSh.includes("dangerously-skip-permissions")) parentIsYolo = true;
-        } catch { /* ignore */ }
-      }
-
-      if (!parentIsYolo) {
-        return { ok: false, exitCode: 1, stdout: "", stderr: "Error: Yolo mode denied - permission escalation not allowed" };
-      }
-    }
   }
 
   // 6. Load config
@@ -4543,7 +4500,6 @@ export async function newAgent(
     worker: isLeafAgent,
     agentType: typeName,
     agentIcon: agentTypeDef.icon || undefined,
-    yolo: yoloMode,
     model: model || null,
     effort: effort || null,
     spawned_by: spawnedBy ?? null,
@@ -4887,9 +4843,6 @@ When your task is complete:
 
   // Build claude args
   let claudeArgs = "";
-  if (yoloMode) {
-    claudeArgs = "--dangerously-skip-permissions --permission-mode bypassPermissions";
-  }
   if (printMode) {
     claudeArgs = claudeArgs ? `${claudeArgs} --print` : "--print";
   }
@@ -5180,11 +5133,9 @@ ${qStartExitScript}
   // 20. Output agent ID
   const stdout = id;
 
-  // 21. Auto-accept workspace trust (if not yolo) — in background
-  if (!yoloMode) {
-    // Run async without awaiting — fire and forget
-    autoAcceptWorkspaceTrustForNewAgent(tmuxSession).catch(() => {});
-  }
+  // 21. Auto-accept workspace trust — in background
+  // Run async without awaiting — fire and forget
+  autoAcceptWorkspaceTrustForNewAgent(tmuxSession).catch(() => {});
 
   // 22. Auto-spawn per-agent watchdog
   await timed("new-agent", "watchdog-spawn", async () => {

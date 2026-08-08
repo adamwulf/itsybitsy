@@ -735,9 +735,7 @@ describe("readRepoAgents", () => {
         created: "2026-03-05T00:00:00Z",
         created_epoch: Math.floor(Date.now() / 1000) - 60,
         worktree: true,
-        worker: false,
-        yolo: false,
-        model: "sonnet",
+        worker: false,        model: "sonnet",
         claude_pid: "999",
       })
     );
@@ -764,9 +762,7 @@ describe("readRepoAgents", () => {
         created: "2026-03-04T00:00:00Z",
         created_epoch: Math.floor(Date.now() / 1000) - 86400,
         worktree: true,
-        worker: true,
-        yolo: false,
-        model: "opus",
+        worker: true,        model: "opus",
         claude_pid: "888",
       })
     );
@@ -795,7 +791,7 @@ describe("readRepoAgents", () => {
       id: "agent-active", session_id: "s-a", tmux_session: "t-a",
       prompt: "active task", manager: null, created: "2026-03-05",
       created_epoch: Math.floor(Date.now() / 1000) - 60,
-      worktree: true, worker: false, yolo: false, model: "sonnet", claude_pid: "1",
+      worktree: true, worker: false, model: "sonnet", claude_pid: "1",
     }));
 
     const archiveDir = join(tempDir, ".ittybitty", "archive", "agent-old");
@@ -804,7 +800,7 @@ describe("readRepoAgents", () => {
       id: "agent-old", session_id: "s-o", tmux_session: "t-o",
       prompt: "old task", manager: null, created: "2026-03-04",
       created_epoch: Math.floor(Date.now() / 1000) - 86400,
-      worktree: true, worker: true, yolo: false, model: "opus", claude_pid: "2",
+      worktree: true, worker: true, model: "opus", claude_pid: "2",
     }));
 
     // Proof the archive dir is never read: replace its meta.json with a value
@@ -828,7 +824,7 @@ describe("readRepoAgents", () => {
       id: "agent-old", session_id: "s-o", tmux_session: "t-o",
       prompt: "old task", manager: null, created: "2026-03-04",
       created_epoch: Math.floor(Date.now() / 1000) - 86400,
-      worktree: true, worker: true, yolo: false, model: "opus", claude_pid: "2",
+      worktree: true, worker: true, model: "opus", claude_pid: "2",
     }));
     await mkdir(join(tempDir, ".ittybitty", "agents"), { recursive: true });
 
@@ -1022,9 +1018,7 @@ describe("readAgentMeta", () => {
         created: "2026-03-05T00:00:00Z",
         created_epoch: 1000,
         worktree: true,
-        worker: false,
-        yolo: false,
-        model: "sonnet",
+        worker: false,        model: "sonnet",
         claude_pid: "999",
         claude_pid_epoch: 1001,
       })
@@ -1041,9 +1035,7 @@ describe("readAgentMeta", () => {
     expect(meta!.created).toBe("2026-03-05T00:00:00Z");
     expect(meta!.created_epoch).toBe(1000);
     expect(meta!.worktree).toBe(true);
-    expect(meta!.worker).toBe(false);
-    expect(meta!.yolo).toBe(false);
-    expect(meta!.model).toBe("sonnet");
+    expect(meta!.worker).toBe(false);    expect(meta!.model).toBe("sonnet");
     expect(meta!.claude_pid).toBe("999");
     expect(meta!.claude_pid_epoch).toBe(1001);
   });
@@ -1060,9 +1052,7 @@ describe("readAgentMeta", () => {
         created: true,
         created_epoch: "not-a-number",
         worktree: "yes",
-        worker: "no",
-        yolo: 1,
-        model: 777,
+        worker: "no",        model: 777,
         claude_pid: 0,
         claude_pid_epoch: "not-a-number",
       })
@@ -1079,9 +1069,7 @@ describe("readAgentMeta", () => {
     expect(meta!.created).toBe("");
     expect(meta!.created_epoch).toBe(0);
     expect(meta!.worktree).toBe(true);
-    expect(meta!.worker).toBe(false);
-    expect(meta!.yolo).toBe(false);
-    expect(meta!.model).toBe("unknown");
+    expect(meta!.worker).toBe(false);    expect(meta!.model).toBe("unknown");
     expect(meta!.claude_pid).toBe("");
     expect(meta!.claude_pid_epoch).toBeUndefined();
   });
@@ -1105,9 +1093,7 @@ describe("readAgentMeta", () => {
     expect(meta!.created).toBe("");
     expect(meta!.created_epoch).toBe(0);
     expect(meta!.worktree).toBe(true);
-    expect(meta!.worker).toBe(false);
-    expect(meta!.yolo).toBe(false);
-    expect(meta!.model).toBe("unknown");
+    expect(meta!.worker).toBe(false);    expect(meta!.model).toBe("unknown");
     expect(meta!.claude_pid).toBe("");
     expect(meta!.summary).toBeUndefined();
   });
@@ -1309,7 +1295,7 @@ describe("readAllAgents", () => {
     await Bun.write(join(dir1, "meta.json"), JSON.stringify({
       id: "agent-r1", session_id: "s1", tmux_session: "t1",
       prompt: "p1", manager: null, created: "2026-03-05", created_epoch: Date.now() / 1000,
-      worktree: true, worker: false, yolo: false, model: "sonnet", claude_pid: "1",
+      worktree: true, worker: false, model: "sonnet", claude_pid: "1",
     }));
 
     // Create agent in repo 2
@@ -1318,7 +1304,7 @@ describe("readAllAgents", () => {
     await Bun.write(join(dir2, "meta.json"), JSON.stringify({
       id: "agent-r2", session_id: "s2", tmux_session: "t2",
       prompt: "p2", manager: null, created: "2026-03-05", created_epoch: Date.now() / 1000,
-      worktree: true, worker: false, yolo: false, model: "opus", claude_pid: "2",
+      worktree: true, worker: false, model: "opus", claude_pid: "2",
     }));
 
     const { agents, errors } = await readAllAgents([
@@ -1346,7 +1332,7 @@ describe("readAllAgents", () => {
       id: "agent-active", session_id: "s1", tmux_session: "t1",
       prompt: "p1", manager: null, created: "2026-03-05",
       created_epoch: Math.floor(Date.now() / 1000) - 60,
-      worktree: true, worker: false, yolo: false, model: "sonnet", claude_pid: "1",
+      worktree: true, worker: false, model: "sonnet", claude_pid: "1",
     }));
 
     // repo2: one archived agent (and an empty agents/ dir)
@@ -1357,7 +1343,7 @@ describe("readAllAgents", () => {
       id: "agent-old", session_id: "s2", tmux_session: "t2",
       prompt: "p2", manager: null, created: "2026-03-04",
       created_epoch: Math.floor(Date.now() / 1000) - 86400,
-      worktree: true, worker: true, yolo: false, model: "opus", claude_pid: "2",
+      worktree: true, worker: true, model: "opus", claude_pid: "2",
     }));
 
     const repos = [

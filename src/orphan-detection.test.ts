@@ -42,7 +42,7 @@ describe("orphaned tmux session detection", () => {
       id, session_id: "s1", tmux_session: tmuxSession,
       prompt: "test", manager: null, created: "2026-03-05",
       created_epoch: Date.now() / 1000,
-      worktree: true, worker: false, yolo: false, model: "sonnet", claude_pid: "1",
+      worktree: true, worker: false, model: "sonnet", claude_pid: "1",
     }));
   }
 

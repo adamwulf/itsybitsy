@@ -69,7 +69,7 @@ import type { SpawnFn } from "./types";
 import { isValidModel, isValidEffort, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, isValidAgentId, shellQuote, tmuxSessionTarget } from "./validation";
 import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome } from "./coordinator";
-import { loadAgentType, agentTypeExists } from "./agent-types";
+import { loadAgentType, agentTypeExists, metaCanSpawnChildren } from "./agent-types";
 import type { AgentType } from "./agent-types";
 import { isCodexBackedCli, parseModel, mapEffortForCodex } from "./agent-cli";
 import {
@@ -3848,6 +3848,29 @@ async function detectManagerFromCwd(cwd: string, rootRepoPath: string): Promise<
   return "";
 }
 
+/**
+ * Read the `meta.json` of the agent whose worktree contains `cwd`, or null when
+ * `cwd` is not inside any agent worktree (primary Claude, a human shell, or a
+ * top-level coordinator running from a repo root — none of which are leaf
+ * agents). Used by `newAgent` to gate the spawn on the *caller's* permission.
+ *
+ * Unlike `detectManagerFromCwd`, this is independent of `rootRepoPath`: it
+ * reads the caller's meta from its absolute worktree path, so it still resolves
+ * the caller when a leaf agent attempts a cross-repo `--repo` spawn from its
+ * own worktree. It is also independent of `opts.spawnedBy` so a caller cannot
+ * dodge the gate by passing `--spawned-by`.
+ */
+async function readCallerMetaFromCwd(cwd: string): Promise<Record<string, unknown> | null> {
+  const agentPattern = /\/.ittybitty\/agents\/([^/]+)\/repo/;
+  if (!agentPattern.test(cwd)) return null;
+  const callerDir = cwd.replace(/(\/.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
+  try {
+    const meta = await Bun.file(join(callerDir, "meta.json")).json();
+    if (meta && typeof meta === "object") return meta as Record<string, unknown>;
+  } catch { /* ignore */ }
+  return null;
+}
+
 export async function newAgent(
   repoPath: string,
   prompt: string,
@@ -4057,6 +4080,29 @@ export async function newAgent(
           }
         }
       } catch { /* ignore */ }
+    }
+  }
+
+  // 3.7. Caller gate. Step 4 below validates the *target* manager; this gates
+  // on whoever is actually running `ib new-agent`. A leaf agent (worker) must
+  // not spawn sub-agents even by pointing `--manager` at another manager that
+  // can spawn — the permission belongs to the caller, not the named parent. The
+  // intercept-task hook enforces this for the Task/Agent tool path, but a
+  // worker can invoke `ib new-agent` directly via Bash, which the hook never
+  // sees, so the same rule must live here. Callers not inside an agent worktree
+  // (primary Claude, a human shell, a top-level coordinator) return null and
+  // are unrestricted.
+  {
+    const callerCwd = opts?._cwd ?? process.cwd();
+    const callerMeta = await readCallerMetaFromCwd(callerCwd);
+    if (callerMeta && !(await metaCanSpawnChildren(callerMeta))) {
+      const callerId = typeof callerMeta.id === "string" ? callerMeta.id : "this agent";
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: `Error: '${callerId}' cannot spawn sub-agents — its agent type does not permit spawning children. Report your work back to your manager instead; naming a different --manager does not grant this permission.`,
+      };
     }
   }
 

@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { parseAgentTypeFile, loadAgentType, listAgentTypes, ensureAgentTypesDir, initAgentTypes, agentTypeExists, validateAllAgentTypes, listSpawnableAgentTypesSync, listSpawnableTypeNamesSync } from "./agent-types";
+import { parseAgentTypeFile, loadAgentType, listAgentTypes, ensureAgentTypesDir, initAgentTypes, agentTypeExists, validateAllAgentTypes, listSpawnableAgentTypesSync, listSpawnableTypeNamesSync, metaCanSpawnChildren } from "./agent-types";
 import { buildAvailableTypesSection } from "./hooks/session-start";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
@@ -1466,5 +1466,60 @@ spawnable: false
 body`);
 
     expect(listSpawnableTypeNamesSync()).toEqual(["manager", "worker"]);
+  });
+});
+
+describe("metaCanSpawnChildren", () => {
+  const originalHome = process.env.HOME;
+  let tempHome: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-canspawn-"));
+    process.env.HOME = tempHome;
+    await mkdir(join(tempHome, ".itsybitsy"), { recursive: true });
+    // Populate the embedded default types (worker, manager, coordinator, …) so
+    // the agentType-driven cases resolve via loadAgentType.
+    await ensureAgentTypesDir();
+  });
+
+  afterEach(async () => {
+    process.env.HOME = originalHome;
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  test("per-agent canSpawnChildren:true override wins even over a worker", async () => {
+    expect(await metaCanSpawnChildren({ agentType: "worker", worker: true, canSpawnChildren: true })).toBe(true);
+  });
+
+  test("per-agent canSpawnChildren:false override wins even over a manager", async () => {
+    expect(await metaCanSpawnChildren({ agentType: "manager", worker: false, canSpawnChildren: false })).toBe(false);
+  });
+
+  test("system layer type is treated as able to spawn (top-level)", async () => {
+    expect(await metaCanSpawnChildren({ agentType: "system" })).toBe(true);
+  });
+
+  test("worker agentType (no override) cannot spawn", async () => {
+    expect(await metaCanSpawnChildren({ agentType: "worker", worker: true })).toBe(false);
+  });
+
+  test("manager agentType (no override) can spawn", async () => {
+    expect(await metaCanSpawnChildren({ agentType: "manager", worker: false })).toBe(true);
+  });
+
+  test("unknown agentType defaults to cannot-spawn (safer default)", async () => {
+    expect(await metaCanSpawnChildren({ agentType: "nonesuch-type" })).toBe(false);
+  });
+
+  test("legacy meta with worker:true (no agentType) cannot spawn", async () => {
+    expect(await metaCanSpawnChildren({ worker: true })).toBe(false);
+  });
+
+  test("legacy meta with worker:false (no agentType) can spawn", async () => {
+    expect(await metaCanSpawnChildren({ worker: false })).toBe(true);
+  });
+
+  test("empty meta defaults to manager-like (can spawn)", async () => {
+    expect(await metaCanSpawnChildren({})).toBe(true);
   });
 });

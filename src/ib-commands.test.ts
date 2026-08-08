@@ -4486,6 +4486,141 @@ describe("newAgent (native)", () => {
     expect(result.stderr).toContain("is a worker agent and cannot manage sub-agents");
   });
 
+  // ── Caller gate ─────────────────────────────────────────────────────────────
+  // The --manager checks above validate the *target* parent. These verify the
+  // spawn is also gated on the *caller* (whoever ran `ib new-agent`), so a leaf
+  // worker cannot bypass its own no-spawn restriction by naming a different
+  // manager that can spawn — the direct-CLI/Bash path the intercept hook can't
+  // see.
+
+  /** Plant a caller agent's worktree + meta and return its worktree cwd. */
+  async function plantCaller(id: string, meta: Record<string, unknown>): Promise<string> {
+    const dir = join(agentsDir, id);
+    await mkdir(join(dir, "repo"), { recursive: true });
+    await Bun.write(join(dir, "meta.json"), JSON.stringify({ id, ...meta }));
+    return join(dir, "repo");
+  }
+
+  test("worker caller cannot spawn by naming a different manager that can spawn", async () => {
+    // The real hole: a worker runs `ib new-agent --manager <real-manager>`
+    // directly via Bash. The target manager passes validation, but the CALLER
+    // is a worker and must be blocked.
+    const realMgr = join(agentsDir, "agent-real-mgr");
+    await mkdir(join(realMgr, "repo"), { recursive: true });
+    await Bun.write(join(realMgr, "meta.json"), JSON.stringify({ id: "agent-real-mgr", worker: false, agentType: "manager" }));
+
+    const callerCwd = await plantCaller("agent-caller-worker", { worker: true, agentType: "worker" });
+
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await newAgent(tempDir, "sub-task", {
+      name: "should-not-exist",
+      manager: "agent-real-mgr",
+      _cwd: callerCwd,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("agent-caller-worker");
+    expect(result.stderr).toContain("cannot spawn sub-agents");
+    // No sub-agent is created — the gate returns before any spawn side effects.
+    expect(await Bun.file(join(agentsDir, "should-not-exist", "meta.json")).exists()).toBe(false);
+  });
+
+  test("worker caller is blocked even without an explicit --manager (auto-detect path)", async () => {
+    // A worker running `ib new-agent` with no --manager auto-detects itself as
+    // the manager from cwd; that path must be gated too.
+    const callerCwd = await plantCaller("agent-caller-worker2", { worker: true, agentType: "worker" });
+
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await newAgent(tempDir, "sub-task", { name: "should-not-exist2", _cwd: callerCwd });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("cannot spawn sub-agents");
+    expect(await Bun.file(join(agentsDir, "should-not-exist2", "meta.json")).exists()).toBe(false);
+  });
+
+  test("manager caller CAN spawn (no regression)", async () => {
+    const callerCwd = await plantCaller("agent-caller-mgr", { worker: false, agentType: "manager" });
+
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await newAgent(tempDir, "sub-task", {
+      name: "mgr-caller-child",
+      manager: "agent-caller-mgr",
+      _cwd: callerCwd,
+    });
+
+    expect(result.stderr).not.toContain("cannot spawn sub-agents");
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("mgr-caller-child");
+  });
+
+  test("worker caller with canSpawnChildren:true override CAN spawn (toggle-ON honored on caller side)", async () => {
+    const realMgr = join(agentsDir, "agent-real-mgr2");
+    await mkdir(join(realMgr, "repo"), { recursive: true });
+    await Bun.write(join(realMgr, "meta.json"), JSON.stringify({ id: "agent-real-mgr2", worker: false, agentType: "manager" }));
+
+    const callerCwd = await plantCaller("agent-caller-worker-on", {
+      worker: true,
+      agentType: "worker",
+      canSpawnChildren: true,
+    });
+
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await newAgent(tempDir, "sub-task", {
+      name: "worker-on-caller-child",
+      manager: "agent-real-mgr2",
+      _cwd: callerCwd,
+    });
+
+    expect(result.stderr).not.toContain("cannot spawn sub-agents");
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("worker-on-caller-child");
+  });
+
+  test("worker caller with canSpawnChildren:false override is blocked even though its type could spawn", async () => {
+    // A manager-type agent toggled OFF via the 'b' dialog (canSpawnChildren:false)
+    // must be blocked as a caller — the per-agent override wins over the type.
+    const realMgr = join(agentsDir, "agent-real-mgr3");
+    await mkdir(join(realMgr, "repo"), { recursive: true });
+    await Bun.write(join(realMgr, "meta.json"), JSON.stringify({ id: "agent-real-mgr3", worker: false, agentType: "manager" }));
+
+    const callerCwd = await plantCaller("agent-caller-mgr-off", {
+      worker: false,
+      agentType: "manager",
+      canSpawnChildren: false,
+    });
+
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await newAgent(tempDir, "sub-task", {
+      name: "should-not-exist3",
+      manager: "agent-real-mgr3",
+      _cwd: callerCwd,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("cannot spawn sub-agents");
+    expect(await Bun.file(join(agentsDir, "should-not-exist3", "meta.json")).exists()).toBe(false);
+  });
+
+  test("non-agent caller (primary Claude / human shell) is unrestricted", async () => {
+    // When cwd is a repo root (not inside any agent worktree), there is no
+    // caller meta and the gate must not fire — primary Claude spawns managers.
+    const realMgr = join(agentsDir, "agent-real-mgr4");
+    await mkdir(join(realMgr, "repo"), { recursive: true });
+    await Bun.write(join(realMgr, "meta.json"), JSON.stringify({ id: "agent-real-mgr4", worker: false, agentType: "manager" }));
+
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await newAgent(tempDir, "sub-task", {
+      name: "top-level-child",
+      manager: "agent-real-mgr4",
+      _cwd: tempDir,
+    });
+
+    expect(result.stderr).not.toContain("cannot spawn sub-agents");
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("top-level-child");
+  });
+
   test("creates agent with correct ID format when no name given", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     const result = await callNewAgent("do something");

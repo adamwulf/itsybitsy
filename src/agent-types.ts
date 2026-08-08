@@ -582,6 +582,40 @@ export async function loadAgentType(name: string): Promise<AgentType> {
 }
 
 /**
+ * Decide whether the agent described by a `meta.json` object is permitted to
+ * spawn sub-agents. This is the single source of truth for that question — the
+ * intercept-task hook (Task/Agent tool path) and the `ib new-agent` CLI caller
+ * gate MUST agree, or a leaf agent could spawn through whichever path is not
+ * checked (the exact hole that let a worker spawn by naming a different
+ * `--manager`).
+ *
+ * Precedence (highest first):
+ *   1. Per-agent `canSpawnChildren` override (the `ib watch` 'b' dialog toggle):
+ *      an explicit boolean wins over everything.
+ *   2. The `system` layer type is top-level and spawns via
+ *      `ib new-agent --repo <name>`, so it counts as able to spawn.
+ *   3. `agentType` decides via its (inherited) `canSpawnChildren`. An unknown
+ *      type resolves to `false` — the safer default is "cannot spawn", matching
+ *      the intercept hook, so a broken/missing type file never opens the gate.
+ *   4. Legacy agents without an `agentType` fall back to the `worker` boolean.
+ *   5. Absent all signals, default to manager-like (can spawn).
+ */
+export async function metaCanSpawnChildren(meta: Record<string, unknown>): Promise<boolean> {
+  if (typeof meta.canSpawnChildren === "boolean") return meta.canSpawnChildren;
+  if (meta.agentType === "system") return true;
+  if (typeof meta.agentType === "string" && meta.agentType.length > 0) {
+    try {
+      const type = await loadAgentType(meta.agentType);
+      return type.canSpawnChildren;
+    } catch {
+      return false;
+    }
+  }
+  if (meta.worker === true) return false;
+  return true;
+}
+
+/**
  * Synchronously list agent type names from ~/.itsybitsy/agent-types/
  * without parsing the files. Returns the basenames of *.md files,
  * sorted alphabetically. Falls back to the embedded default type names

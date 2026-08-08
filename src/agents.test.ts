@@ -1038,7 +1038,8 @@ describe("readAgentMeta", () => {
     expect(meta!.created).toBe("2026-03-05T00:00:00Z");
     expect(meta!.created_epoch).toBe(1000);
     expect(meta!.worktree).toBe(true);
-    expect(meta!.worker).toBe(false);    expect(meta!.model).toBe("sonnet");
+    expect(meta!.worker).toBe(false);
+    expect(meta!.model).toBe("sonnet");
     expect(meta!.claude_pid).toBe("999");
     expect(meta!.claude_pid_epoch).toBe(1001);
   });
@@ -1073,7 +1074,8 @@ describe("readAgentMeta", () => {
     expect(meta!.created).toBe("");
     expect(meta!.created_epoch).toBe(0);
     expect(meta!.worktree).toBe(true);
-    expect(meta!.worker).toBe(false);    expect(meta!.model).toBe("unknown");
+    expect(meta!.worker).toBe(false);
+    expect(meta!.model).toBe("unknown");
     expect(meta!.claude_pid).toBe("");
     expect(meta!.claude_pid_epoch).toBeUndefined();
   });
@@ -1097,7 +1099,8 @@ describe("readAgentMeta", () => {
     expect(meta!.created).toBe("");
     expect(meta!.created_epoch).toBe(0);
     expect(meta!.worktree).toBe(true);
-    expect(meta!.worker).toBe(false);    expect(meta!.model).toBe("unknown");
+    expect(meta!.worker).toBe(false);
+    expect(meta!.model).toBe("unknown");
     expect(meta!.claude_pid).toBe("");
     expect(meta!.summary).toBeUndefined();
   });

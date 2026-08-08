@@ -1507,6 +1507,16 @@ describe("metaCanSpawnChildren", () => {
     expect(await metaCanSpawnChildren({ agentType: "manager", worker: false })).toBe(true);
   });
 
+  test("agentType wins over a disagreeing worker boolean: manager type + worker:true → can spawn", async () => {
+    // No override present; the resolved agentType must take precedence over the
+    // stale/legacy worker boolean.
+    expect(await metaCanSpawnChildren({ agentType: "manager", worker: true })).toBe(true);
+  });
+
+  test("agentType wins over a disagreeing worker boolean: worker type + worker:false → cannot spawn", async () => {
+    expect(await metaCanSpawnChildren({ agentType: "worker", worker: false })).toBe(false);
+  });
+
   test("unknown agentType defaults to cannot-spawn (safer default)", async () => {
     expect(await metaCanSpawnChildren({ agentType: "nonesuch-type" })).toBe(false);
   });

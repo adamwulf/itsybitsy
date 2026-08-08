@@ -4675,6 +4675,47 @@ describe("newAgent (native)", () => {
     }
   });
 
+  test("caller with an unknown/broken agentType is blocked (CLI gate fails closed)", async () => {
+    // Mirror the hook's fail-closed unknown-type behavior on the CLI side: a
+    // caller whose type .md is missing/corrupt (loadAgentType throws) must be
+    // treated as unable to spawn. worker:false proves the block comes from the
+    // unknown-agentType branch, not the legacy worker flag.
+    const realMgr = join(agentsDir, "agent-real-mgr7");
+    await mkdir(join(realMgr, "repo"), { recursive: true });
+    await Bun.write(join(realMgr, "meta.json"), JSON.stringify({ id: "agent-real-mgr7", worker: false, agentType: "manager" }));
+
+    const callerCwd = await plantCaller("agent-broken-caller", { worker: false, agentType: "nonesuch-caller-type-9999" });
+
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await newAgent(tempDir, "sub-task", {
+      name: "should-not-exist-broken",
+      manager: "agent-real-mgr7",
+      _cwd: callerCwd,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("cannot spawn sub-agents");
+    expect(await Bun.file(join(agentsDir, "should-not-exist-broken", "meta.json")).exists()).toBe(false);
+  });
+
+  test("caller gate fires before --manager validation (unpermitted caller + invalid manager → caller error)", async () => {
+    // The caller gate runs ahead of the --manager existence/leaf check, so an
+    // unpermitted caller is rejected with the caller error even when --manager
+    // names a nonexistent agent (it does NOT surface a 'manager not found').
+    const callerCwd = await plantCaller("agent-caller-worker-order", { worker: true, agentType: "worker" });
+
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await newAgent(tempDir, "sub-task", {
+      name: "should-not-exist-order",
+      manager: "does-not-exist-manager",
+      _cwd: callerCwd,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("cannot spawn sub-agents");
+    expect(result.stderr).not.toContain("not found");
+  });
+
   test("creates agent with correct ID format when no name given", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     const result = await callNewAgent("do something");

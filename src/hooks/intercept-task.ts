@@ -5,7 +5,7 @@
 import { join } from "path";
 import { newAgent } from "../ib-commands";
 import { checkGitDirectoryFlags, resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./shared";
-import { loadAgentType } from "../agent-types";
+import { loadAgentType, metaCanSpawnChildren } from "../agent-types";
 import { parseModel } from "../agent-cli";
 
 export interface InterceptResult {
@@ -502,65 +502,37 @@ export async function processTaskIntercept(
       }
     }
     if (meta) {
-      // Per-agent OVERRIDE takes precedence over EVERYTHING (agentType + worker).
-      // When `canSpawnChildren` is a boolean it was explicitly set (e.g. via the
-      // `ib watch` 'b' dialog toggle): true = allow spawning (skip the deny),
-      // false = deny. When undefined, fall through to the existing
-      // agentType/worker logic below unchanged.
-      if (typeof meta.canSpawnChildren === "boolean") {
-        if (!meta.canSpawnChildren) {
-          return {
-            action: "intercept",
-            output: {
-              hookSpecificOutput: {
-                hookEventName: "PreToolUse",
-                permissionDecision: "deny",
-                permissionDecisionReason: "Workers cannot create tasks or spawn sub-agents. Only manager agents can spawn workers.",
-              },
+      // The system coordinator spawns agents via `ib new-agent --repo <name>`,
+      // never via Task/Agent/TaskCreate. Spawning here would resolve repoPath
+      // to `~/.itsybitsy/` (not a registered repo) and produce confusing
+      // failures. In practice Claude can never reach this branch — the system
+      // coordinator's settings.local.json puts Task/Agent/TaskCreate in its
+      // deny list. Keep this explicit deny (with its specific guidance) as
+      // defense-in-depth, and BEFORE the shared predicate below: for @system,
+      // Task is simply the wrong mechanism, not a lack of spawn permission —
+      // `metaCanSpawnChildren` classifies @system as *able* to spawn (true).
+      if (meta.agentType === "system") {
+        return {
+          action: "intercept",
+          output: {
+            hookSpecificOutput: {
+              hookEventName: "PreToolUse",
+              permissionDecision: "deny",
+              permissionDecisionReason: "The system coordinator spawns agents via `ib new-agent --repo <name>`, not Task/Agent/TaskCreate.",
             },
-          };
-        }
-        // canSpawnChildren=true — allow Task, fall through to spawn.
-      } else if (meta.agentType && typeof meta.agentType === "string") {
-        // agentType takes precedence over legacy worker boolean when present
-        // The system coordinator spawns agents via `ib new-agent --repo <name>`,
-        // never via Task/Agent/TaskCreate. Spawning here would resolve repoPath
-        // to `~/.itsybitsy/` (not a registered repo) and produce confusing
-        // failures. In practice Claude can never reach this branch — the
-        // system coordinator's settings.local.json puts Task/Agent/TaskCreate
-        // in its deny list. Keep this explicit deny as defense-in-depth.
-        if (meta.agentType === "system") {
-          return {
-            action: "intercept",
-            output: {
-              hookSpecificOutput: {
-                hookEventName: "PreToolUse",
-                permissionDecision: "deny",
-                permissionDecisionReason: "The system coordinator spawns agents via `ib new-agent --repo <name>`, not Task/Agent/TaskCreate.",
-              },
-            },
-          };
-        }
-        try {
-          const agentType = await loadAgentType(meta.agentType as string);
-          if (!agentType.canSpawnChildren) {
-            return {
-              action: "intercept",
-              output: {
-                hookSpecificOutput: {
-                  hookEventName: "PreToolUse",
-                  permissionDecision: "deny",
-                  permissionDecisionReason: "Workers cannot create tasks or spawn sub-agents. Only manager agents can spawn workers.",
-                },
-              },
-            };
-          }
-          // canSpawnChildren=true — allow Task, fall through to spawn
-        } catch {
-          // Unknown type — fall through to intercept (safer default).
-        }
-      } else if (meta.worker === true) {
-        // Backward compat: legacy agents without agentType
+          },
+        };
+      }
+
+      // Single source of truth shared with the `ib new-agent` CLI caller gate
+      // (see `newAgent` in ib-commands.ts): a leaf agent must be blocked
+      // identically whether it reaches spawning via the Task/Agent tool (here)
+      // or by running `ib new-agent` directly. `metaCanSpawnChildren` encodes
+      // the full precedence — per-agent `canSpawnChildren` override > agentType
+      // `canSpawnChildren` (an unknown/broken type is fail-closed to "cannot
+      // spawn") > legacy `worker` boolean. When it returns true, allow the Task
+      // and fall through to the spawn below.
+      if (!(await metaCanSpawnChildren(meta))) {
         return {
           action: "intercept",
           output: {

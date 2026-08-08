@@ -4621,6 +4621,60 @@ describe("newAgent (native)", () => {
     expect(result.stdout).toBe("top-level-child");
   });
 
+  test("legacy worker-boolean caller (no agentType) is blocked", async () => {
+    // Backward compat: an old-style caller meta with only `worker: true` and no
+    // `agentType` must still be gated, mirroring the legacy path in the
+    // --manager check and the intercept hook.
+    const realMgr = join(agentsDir, "agent-real-mgr5");
+    await mkdir(join(realMgr, "repo"), { recursive: true });
+    await Bun.write(join(realMgr, "meta.json"), JSON.stringify({ id: "agent-real-mgr5", worker: false, agentType: "manager" }));
+
+    const callerCwd = await plantCaller("agent-legacy-worker", { worker: true }); // no agentType
+
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await newAgent(tempDir, "sub-task", {
+      name: "should-not-exist-legacy",
+      manager: "agent-real-mgr5",
+      _cwd: callerCwd,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("cannot spawn sub-agents");
+    expect(await Bun.file(join(agentsDir, "should-not-exist-legacy", "meta.json")).exists()).toBe(false);
+  });
+
+  test("worker caller is blocked cross-repo (caller detection is independent of the target repo)", async () => {
+    // A worker whose worktree lives in a DIFFERENT repo than the spawn target
+    // (rootRepoPath) must still be gated — readCallerMetaFromCwd resolves the
+    // caller from its absolute worktree path, not relative to rootRepoPath.
+    const otherRepo = await mkdtemp(join(tmpdir(), "ib-newagent-otherrepo-"));
+    try {
+      const callerDir = join(otherRepo, ".ittybitty", "agents", "agent-xrepo-worker");
+      await mkdir(join(callerDir, "repo"), { recursive: true });
+      await Bun.write(join(callerDir, "meta.json"), JSON.stringify({ id: "agent-xrepo-worker", worker: true, agentType: "worker" }));
+      const callerCwd = join(callerDir, "repo");
+
+      // Target manager lives in tempDir (the spawn target repo), not otherRepo.
+      const realMgr = join(agentsDir, "agent-real-mgr6");
+      await mkdir(join(realMgr, "repo"), { recursive: true });
+      await Bun.write(join(realMgr, "meta.json"), JSON.stringify({ id: "agent-real-mgr6", worker: false, agentType: "manager" }));
+
+      setNewAgentSpawnRunner(cleanWorktreeRunner());
+      const result = await newAgent(tempDir, "sub-task", {
+        name: "should-not-exist-xrepo",
+        manager: "agent-real-mgr6",
+        _cwd: callerCwd,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain("agent-xrepo-worker");
+      expect(result.stderr).toContain("cannot spawn sub-agents");
+      expect(await Bun.file(join(agentsDir, "should-not-exist-xrepo", "meta.json")).exists()).toBe(false);
+    } finally {
+      await rm(otherRepo, { recursive: true, force: true });
+    }
+  });
+
   test("creates agent with correct ID format when no name given", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     const result = await callNewAgent("do something");

@@ -3861,9 +3861,9 @@ async function detectManagerFromCwd(cwd: string, rootRepoPath: string): Promise<
  * dodge the gate by passing `--spawned-by`.
  */
 async function readCallerMetaFromCwd(cwd: string): Promise<Record<string, unknown> | null> {
-  const agentPattern = /\/.ittybitty\/agents\/([^/]+)\/repo/;
+  const agentPattern = /\/\.ittybitty\/agents\/([^/]+)\/repo/;
   if (!agentPattern.test(cwd)) return null;
-  const callerDir = cwd.replace(/(\/.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
+  const callerDir = cwd.replace(/(\/\.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
   try {
     const meta = await Bun.file(join(callerDir, "meta.json")).json();
     if (meta && typeof meta === "object") return meta as Record<string, unknown>;

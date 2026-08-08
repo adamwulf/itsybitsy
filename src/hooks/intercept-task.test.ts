@@ -1504,6 +1504,53 @@ describe("agent types", () => {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });
+
+  test("unknown/broken agentType denies the Task (fail-closed, matches the CLI caller gate)", async () => {
+    // A leaf whose type .md was deleted/corrupted must NOT be able to spawn via
+    // the Task tool. loadAgentType throws for an unknown type, and
+    // metaCanSpawnChildren fails closed (cannot spawn) — the SAME verdict the
+    // `ib new-agent` caller gate reaches, so the two paths cannot diverge.
+    const fs = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-unknown-type-"));
+    try {
+      const agentId = "agent-brokentype";
+      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      await fs.mkdir(join(agentDir, "repo"), { recursive: true });
+      await Bun.write(
+        join(agentDir, "meta.json"),
+        JSON.stringify({
+          id: agentId,
+          worker: false,
+          manager: null,
+          agentType: "nonesuch-type-xyz-9999", // no .md file exists for this
+        })
+      );
+
+      const cwd = join(agentDir, "repo");
+      let spawnCalled = false;
+      const result = await processTaskIntercept(
+        {
+          tool_name: "Task",
+          tool_input: { prompt: "do stuff", description: "stuff" },
+          cwd,
+        },
+        {
+          spawnAgent: async () => {
+            spawnCalled = true;
+            return { ok: true, stdout: "Created agent-shouldnothappen", stderr: "" };
+          },
+        }
+      );
+      expect(result.action).toBe("intercept");
+      expect(spawnCalled).toBe(false);
+      expect((result.output as any).hookSpecificOutput.permissionDecision).toBe("deny");
+      expect((result.output as any).hookSpecificOutput.permissionDecisionReason).toContain("Workers cannot");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("@system caller", () => {

@@ -585,18 +585,22 @@ export async function loadAgentType(name: string): Promise<AgentType> {
  * Decide whether the agent described by a `meta.json` object is permitted to
  * spawn sub-agents. This is the single source of truth for that question — the
  * intercept-task hook (Task/Agent tool path) and the `ib new-agent` CLI caller
- * gate MUST agree, or a leaf agent could spawn through whichever path is not
- * checked (the exact hole that let a worker spawn by naming a different
+ * gate both call it, so a leaf agent is blocked identically no matter which
+ * path it uses (closing the hole that let a worker spawn by naming a different
  * `--manager`).
  *
  * Precedence (highest first):
  *   1. Per-agent `canSpawnChildren` override (the `ib watch` 'b' dialog toggle):
  *      an explicit boolean wins over everything.
  *   2. The `system` layer type is top-level and spawns via
- *      `ib new-agent --repo <name>`, so it counts as able to spawn.
+ *      `ib new-agent --repo <name>`, so it counts as able to spawn. (The
+ *      Task/Agent hook still denies @system with a specific message BEFORE
+ *      calling this — Task is the wrong mechanism, not a permission denial — so
+ *      that one deliberate divergence lives at the call site, not here.)
  *   3. `agentType` decides via its (inherited) `canSpawnChildren`. An unknown
- *      type resolves to `false` — the safer default is "cannot spawn", matching
- *      the intercept hook, so a broken/missing type file never opens the gate.
+ *      type resolves to `false` — the safer default is "cannot spawn" (fail
+ *      closed), so a broken/missing type file never opens the gate on either
+ *      path.
  *   4. Legacy agents without an `agentType` fall back to the `worker` boolean.
  *   5. Absent all signals, default to manager-like (can spawn).
  */

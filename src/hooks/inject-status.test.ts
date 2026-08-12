@@ -246,6 +246,16 @@ describe("briefSummary", () => {
     expect(briefSummary(agents)).toBe("1 rate_limited, 1 stopped");
   });
 
+  test("api_safeguard follows api_error and api_terms in the ordering", () => {
+    const agents = [
+      mockAgent({ id: "a1", state: "api_safeguard" }),
+      mockAgent({ id: "a2", state: "api_terms" }),
+      mockAgent({ id: "a3", state: "api_error" }),
+    ];
+    // order array: …, api_error, api_terms, api_safeguard, …
+    expect(briefSummary(agents)).toBe("1 api_error, 1 api_terms, 1 api_safeguard");
+  });
+
   test("skips archived agents", () => {
     const agents = [
       mockAgent({ id: "a1", state: "running", archived: false }),

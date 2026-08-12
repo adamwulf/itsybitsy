@@ -723,7 +723,7 @@ describe("AgentTreeComponent", () => {
     const tree = new AgentTreeComponent();
     const states = [
       "running", "waiting", "complete", "creating", "compacting",
-      "rate_limited", "api_error", "api_terms", "merging", "restarting",
+      "rate_limited", "api_error", "api_terms", "api_safeguard", "merging", "restarting",
       "op_stuck", "unknown", "stopped",
     ];
     const flat: FlatEntry[] = [

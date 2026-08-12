@@ -392,6 +392,7 @@ export interface TransientState {
   tmux_rate_limited: boolean;
   tmux_api_error: boolean;
   tmux_api_terms: boolean;
+  tmux_api_safeguard: boolean;
   has_background_tasks: boolean;
   updated_at_ms: number;
   watchdog_pid: number;
@@ -462,6 +463,8 @@ export async function readAgentTransient(agentDir: string): Promise<TransientSta
       tmux_api_error: typeof data.tmux_api_error === "boolean" ? data.tmux_api_error : false,
       // Field added later — older transient files default to false on read.
       tmux_api_terms: typeof data.tmux_api_terms === "boolean" ? data.tmux_api_terms : false,
+      // Field added later — older transient files default to false on read.
+      tmux_api_safeguard: typeof data.tmux_api_safeguard === "boolean" ? data.tmux_api_safeguard : false,
       has_background_tasks: data.has_background_tasks,
       updated_at_ms: data.updated_at_ms,
       watchdog_pid: data.watchdog_pid,
@@ -507,6 +510,7 @@ function emptyTransient(): TransientState {
     tmux_rate_limited: false,
     tmux_api_error: false,
     tmux_api_terms: false,
+    tmux_api_safeguard: false,
     has_background_tasks: false,
     updated_at_ms: 0,
     watchdog_pid: 0,
@@ -1398,6 +1402,45 @@ export function isApiTerms(tmuxOutput: string): boolean {
 }
 
 /**
+ * Check if tmux output indicates the model's input-safety classifier refused
+ * the request — a "model safeguard" rejection. Claude renders this as a
+ * top-level "API Error:" block reading e.g. "Fable 5's safeguards flagged this
+ * message (https://www.anthropic.com/legal/aup). … Claude Code can't respond to
+ * this message with Fable 5." We detect it as a distinct terminal state
+ * (`api_safeguard`) so the watchdog stops retrying: re-sending the same prompt
+ * just re-triggers the safeguard.
+ *
+ * This is a SIBLING of, but deliberately distinct from, `api_terms`:
+ *   - `api_terms` is a genuine Usage-Policy (AUP) violation — the content itself
+ *     was refused, and it says "Claude Code is unable to respond".
+ *   - `api_safeguard` is a probabilistic input-safety FALSE POSITIVE — the same
+ *     prompt often succeeds on retry, and the remediation is different (edit the
+ *     message, or switch models with /model), so it warrants its own state and
+ *     human semantics rather than being folded into `api_terms`.
+ * Neither `isApiTerms` nor `isApiError` matches this banner: `isApiTerms`
+ * requires the literal "Claude Code is unable to respond" phrase (absent here —
+ * the safeguard banner says "can't respond to this message with <model>"), and
+ * `isApiError` requires a recovery-eligible variant (idle timeout / 5xx /
+ * connection error / etc.), none of which are present.
+ *
+ * MODEL-AGNOSTIC: the model name ("Fable 5") is NOT hardcoded — future models
+ * render "<OtherModel>'s safeguards flagged this message". We anchor on the
+ * stable phrase "safeguards flagged this message" plus an AUP/Usage-Policy
+ * reference, and require an "API Error:" line so a quoted occurrence of the
+ * phrase in ordinary agent output (or a watchdog nudge) does not match — the
+ * same anti-false-positive philosophy as `isApiTerms`.
+ */
+export function isApiSafeguard(tmuxOutput: string): boolean {
+  const stripped = stripAnsi(tmuxOutput);
+  // Strip trailing blank padding rows before slicing (see isCompacting). Window stays 15.
+  const lines = stripTrailingBlanks(stripped.split("\n"));
+  const last15 = lines.slice(-15).join("\n");
+  if (!/API Error:/i.test(last15)) return false;
+  if (!/safeguards flagged this message/i.test(last15)) return false;
+  return /usage policy/i.test(last15) || /\/legal\/aup/i.test(last15);
+}
+
+/**
  * Check if tmux output indicates background tasks are running.
  * Checks for ⏵⏵ pattern in last 15 lines.
  */
@@ -1864,8 +1907,8 @@ export function subtreeHasRunning(agent: Agent): boolean {
  * Whether an agent should stay visible in the V-cycle "running-only" filter
  * (the most restrictive mode). That mode hides ONLY fully-`stopped` agents; it
  * keeps everything else — running/waiting/complete plus every transient state
- * (creating, compacting, rate_limited, api_error, api_terms, merging,
- * restarting, op_stuck, unknown). This is deliberately broader than
+ * (creating, compacting, rate_limited, api_error, api_terms, api_safeguard,
+ * merging, restarting, op_stuck, unknown). This is deliberately broader than
  * `isRunningState` (which means "actively working"); do NOT conflate the two.
  */
 export function isVisibleUnderRunningFilter(state: string): boolean {
@@ -3449,6 +3492,13 @@ export async function detectAgentStates(
           agent.state = "api_terms";
           return;
         }
+        // Model-safeguard rejection is terminal (sibling of api_terms) —
+        // checked before tmux_api_error so it can't be misclassified as a
+        // recoverable transient.
+        if (transient.tmux_api_safeguard) {
+          agent.state = "api_safeguard";
+          return;
+        }
         if (transient.tmux_api_error) {
           agent.state = "api_error";
           return;
@@ -3541,6 +3591,13 @@ export async function detectAgentStates(
       // it can't be misclassified as a recoverable transient.
       if (isApiTerms(output)) {
         agent.state = "api_terms";
+        return;
+      }
+      // Model-safeguard rejection is terminal (sibling of api_terms) — checked
+      // before isApiError so it can't be misclassified as a recoverable
+      // transient.
+      if (isApiSafeguard(output)) {
+        agent.state = "api_safeguard";
         return;
       }
       if (isApiError(output)) {

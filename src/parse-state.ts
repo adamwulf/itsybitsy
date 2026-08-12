@@ -17,6 +17,7 @@ export type AgentState =
   | "rate_limited"
   | "api_error"
   | "api_terms"
+  | "api_safeguard"
   | "stopped"
   | "merging" // render label for both merge_check and merging op kinds
   | "restarting" // resume / coordinator-reset in flight

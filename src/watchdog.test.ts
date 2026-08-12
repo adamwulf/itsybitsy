@@ -1533,6 +1533,7 @@ describe("watchdog", () => {
         tmux_rate_limited: false,
         tmux_api_error: false,
         tmux_api_terms: false,
+        tmux_api_safeguard: false,
         has_background_tasks: false,
         updated_at_ms: now,
         watchdog_pid: process.pid,
@@ -1578,6 +1579,7 @@ describe("watchdog", () => {
         tmux_rate_limited: false,
         tmux_api_error: false,
         tmux_api_terms: false,
+        tmux_api_safeguard: false,
         has_background_tasks: false,
         updated_at_ms: now,
         watchdog_pid: process.pid,
@@ -2218,6 +2220,20 @@ describe("watchdog", () => {
 
     test("does not send any notifications", async () => {
       const a1 = agent("a1", "stopped");
+      await tick([a1]);
+
+      const sendKeysCalls = spawnMock.calls.filter((c) =>
+        c.args.some((a: string) => typeof a === "string" && a.includes("send-keys"))
+      );
+      expect(sendKeysCalls.length).toBe(0);
+    });
+  });
+
+  describe("api_safeguard handler", () => {
+    // Terminal, no auto-retry — the handler is a no-op (surface to the user).
+    // Exactly like api_terms/stopped: retrying just re-triggers the safeguard.
+    test("sends no nudge/message (no send-keys)", async () => {
+      const a1 = agent("a1", "api_safeguard");
       await tick([a1]);
 
       const sendKeysCalls = spawnMock.calls.filter((c) =>
@@ -3028,6 +3044,26 @@ describe("resolveWatchdogState — waiting + background shell override", () => {
     expect(resolveWatchdogState(output, "waiting")).toBe("api_error");
     expect(resolveWatchdogState(output, "running")).toBe("api_error");
   });
+
+  test("api_safeguard tmux marker overrides meta state (terminal, before api_error)", () => {
+    const output = "narration\n⏺ API Error: Fable 5's safeguards flagged this message (https://www.anthropic.com/legal/aup). Claude Code can't respond to this message with Fable 5.";
+    expect(resolveWatchdogState(output, "waiting")).toBe("api_safeguard");
+    expect(resolveWatchdogState(output, "running")).toBe("api_safeguard");
+  });
+
+  test("REGRESSION: recoverable api_error + quoted safeguard phrase + aup on separate lines → api_error (NOT api_safeguard)", () => {
+    // The safeguard phrase now appears in our SPEC/tests/docs; a recoverable
+    // api_error line elsewhere in the window must not be flipped to the terminal
+    // api_safeguard (which is checked before api_error) by an independent-token
+    // match. The same-line anchor keeps this recoverable.
+    const output = [
+      "  ⎿  API Error: Stream idle timeout - partial response received",
+      "The reviewer discussed how a model's safeguards flagged this message in some safe conversations.",
+      "See the policy at https://www.anthropic.com/legal/aup for details.",
+    ].join("\n");
+    expect(resolveWatchdogState(output, "running")).toBe("api_error");
+    expect(resolveWatchdogState(output, "waiting")).toBe("api_error");
+  });
 });
 
 // ── Lazy + TTL-cached allAgents loading ──────────────────────────────────────
@@ -3249,6 +3285,29 @@ describe("runPerAgentWatchdog — meta.transient.json persistence", () => {
     expect(written!.has_background_tasks).toBe(true);
     expect(written!.tmux_compacting).toBe(false);
     expect(written!.tmux_rate_limited).toBe(false);
+  });
+
+  test("model-safeguard output → tmux_api_safeguard=true (api_error/api_terms stay false)", async () => {
+    setPerAgentCaptureTmux(async () =>
+      "⏺ API Error: Fable 5's safeguards flagged this message (https://www.anthropic.com/legal/aup). Claude Code can't respond to this message with Fable 5.\n",
+    );
+
+    let existsChecks = 0;
+    setPerAgentExistsSync(() => {
+      existsChecks++;
+      return existsChecks <= 1;
+    });
+
+    await runPerAgentWatchdog("agent-test1", tempDir);
+
+    const { readAgentTransient } = await import("./agents");
+    const written = await readAgentTransient(agentDir);
+    expect(written).not.toBeNull();
+    expect(written!.tmux_api_safeguard).toBe(true);
+    // The safeguard banner must NOT be misclassified as a recoverable error or
+    // a Usage-Policy violation — that is the bug this state fixes.
+    expect(written!.tmux_api_error).toBe(false);
+    expect(written!.tmux_api_terms).toBe(false);
   });
 
   test("watchdog transient write PRESERVES an in-flight operation field", async () => {

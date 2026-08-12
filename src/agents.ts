@@ -392,6 +392,7 @@ export interface TransientState {
   tmux_rate_limited: boolean;
   tmux_api_error: boolean;
   tmux_api_terms: boolean;
+  tmux_api_safeguard: boolean;
   has_background_tasks: boolean;
   updated_at_ms: number;
   watchdog_pid: number;
@@ -462,6 +463,8 @@ export async function readAgentTransient(agentDir: string): Promise<TransientSta
       tmux_api_error: typeof data.tmux_api_error === "boolean" ? data.tmux_api_error : false,
       // Field added later — older transient files default to false on read.
       tmux_api_terms: typeof data.tmux_api_terms === "boolean" ? data.tmux_api_terms : false,
+      // Field added later — older transient files default to false on read.
+      tmux_api_safeguard: typeof data.tmux_api_safeguard === "boolean" ? data.tmux_api_safeguard : false,
       has_background_tasks: data.has_background_tasks,
       updated_at_ms: data.updated_at_ms,
       watchdog_pid: data.watchdog_pid,
@@ -507,6 +510,7 @@ function emptyTransient(): TransientState {
     tmux_rate_limited: false,
     tmux_api_error: false,
     tmux_api_terms: false,
+    tmux_api_safeguard: false,
     has_background_tasks: false,
     updated_at_ms: 0,
     watchdog_pid: 0,
@@ -1398,6 +1402,64 @@ export function isApiTerms(tmuxOutput: string): boolean {
 }
 
 /**
+ * Check if tmux output indicates the model's input-safety classifier refused
+ * the request — a "model safeguard" rejection. Claude renders this as a
+ * top-level "API Error:" block reading e.g. "Fable 5's safeguards flagged this
+ * message (https://www.anthropic.com/legal/aup). … Claude Code can't respond to
+ * this message with Fable 5." We detect it as a distinct terminal state
+ * (`api_safeguard`) so the watchdog stops retrying: re-sending the same prompt
+ * just re-triggers the safeguard.
+ *
+ * This is a SIBLING of, but deliberately distinct from, `api_terms`:
+ *   - `api_terms` is a genuine Usage-Policy (AUP) violation — the content itself
+ *     was refused, and it says "Claude Code is unable to respond".
+ *   - `api_safeguard` is a probabilistic input-safety FALSE POSITIVE — the same
+ *     prompt often succeeds on retry, and the remediation is different (edit the
+ *     message, or switch models with /model), so it warrants its own state and
+ *     human semantics rather than being folded into `api_terms`.
+ * Neither `isApiTerms` nor `isApiError` matches this banner: `isApiTerms`
+ * requires the literal "Claude Code is unable to respond" phrase (absent here —
+ * the safeguard banner says "can't respond to this message with <model>"), and
+ * `isApiError` requires a recovery-eligible variant (idle timeout / 5xx /
+ * connection error / etc.), none of which are present.
+ *
+ * MODEL-AGNOSTIC: the model name ("Fable 5") is NOT hardcoded — future models
+ * render "<OtherModel>'s safeguards flagged this message". We anchor on the
+ * stable phrase "safeguards flagged this message", require it on the SAME
+ * logical line as a `[⎿⏺] API Error:` marker, and keep a secondary AUP/Usage-
+ * Policy reference check.
+ *
+ * The same-line anchor matters: matching the API-Error marker and the safeguard
+ * phrase INDEPENDENTLY across the 15-line window would let a recoverable
+ * api_error line ("⎿  API Error: Stream idle timeout") plus a quoted copy of the
+ * phrase (it now appears in our own SPEC/tests/docs) plus an /legal/aup URL
+ * anywhere in the window falsely classify as the terminal api_safeguard — and
+ * because api_safeguard is checked BEFORE api_error, that would make a
+ * recoverable error never retry. Requiring both on ONE line closes that hole at
+ * zero false-negative cost (the real banner is a single logical line under -J).
+ * The `[⎿⏺]` response-level marker mirrors `isApiError`'s proven anchor and, like
+ * `isApiTerms`' same-line phrase anchor, rejects prose/quoted occurrences.
+ */
+export function isApiSafeguard(tmuxOutput: string): boolean {
+  const stripped = stripAnsi(tmuxOutput);
+  // Strip trailing blank padding rows before slicing (see isCompacting). Window stays 15.
+  const lines = stripTrailingBlanks(stripped.split("\n"));
+  const last15 = lines.slice(-15).join("\n");
+  // SAME-LINE anchor: the API-Error marker AND the safeguard phrase must be on
+  // the SAME logical line. Matching them independently across the window would
+  // let a RECOVERABLE api_error line (e.g. "⎿  API Error: Stream idle timeout")
+  // combine with a quoted "safeguards flagged this message" elsewhere in the
+  // window — and that phrase now lives in our own SPEC/tests/docs — to falsely
+  // yield the terminal api_safeguard, which (checked before api_error) would
+  // stop a recoverable error from ever being retried. The real banner is a
+  // single logical line under -J, so same-line anchoring has ZERO false-negative
+  // cost. The [⎿⏺] response-level marker mirrors isApiError's proven anchor and
+  // rejects prose/quoted occurrences of the phrase.
+  if (!/[⎿⏺]\s*API Error:.*safeguards flagged this message/i.test(last15)) return false;
+  return /usage policy/i.test(last15) || /\/legal\/aup/i.test(last15);
+}
+
+/**
  * Check if tmux output indicates background tasks are running.
  * Checks for ⏵⏵ pattern in last 15 lines.
  */
@@ -1864,8 +1926,8 @@ export function subtreeHasRunning(agent: Agent): boolean {
  * Whether an agent should stay visible in the V-cycle "running-only" filter
  * (the most restrictive mode). That mode hides ONLY fully-`stopped` agents; it
  * keeps everything else — running/waiting/complete plus every transient state
- * (creating, compacting, rate_limited, api_error, api_terms, merging,
- * restarting, op_stuck, unknown). This is deliberately broader than
+ * (creating, compacting, rate_limited, api_error, api_terms, api_safeguard,
+ * merging, restarting, op_stuck, unknown). This is deliberately broader than
  * `isRunningState` (which means "actively working"); do NOT conflate the two.
  */
 export function isVisibleUnderRunningFilter(state: string): boolean {
@@ -3449,6 +3511,13 @@ export async function detectAgentStates(
           agent.state = "api_terms";
           return;
         }
+        // Model-safeguard rejection is terminal (sibling of api_terms) —
+        // checked before tmux_api_error so it can't be misclassified as a
+        // recoverable transient.
+        if (transient.tmux_api_safeguard) {
+          agent.state = "api_safeguard";
+          return;
+        }
         if (transient.tmux_api_error) {
           agent.state = "api_error";
           return;
@@ -3541,6 +3610,13 @@ export async function detectAgentStates(
       // it can't be misclassified as a recoverable transient.
       if (isApiTerms(output)) {
         agent.state = "api_terms";
+        return;
+      }
+      // Model-safeguard rejection is terminal (sibling of api_terms) — checked
+      // before isApiError so it can't be misclassified as a recoverable
+      // transient.
+      if (isApiSafeguard(output)) {
+        agent.state = "api_safeguard";
         return;
       }
       if (isApiError(output)) {

@@ -25,6 +25,7 @@ import {
   isApiError,
   isApiErrorRateLimited,
   isApiTerms,
+  isApiSafeguard,
   hasBackgroundTasks,
   isDeadPane,
   anyChildActive,
@@ -670,7 +671,7 @@ describe("V-filter state predicates", () => {
   test("isVisibleUnderRunningFilter is true for every non-stopped state", () => {
     const nonStopped = [
       "running", "waiting", "complete", "creating", "compacting",
-      "rate_limited", "api_error", "api_terms", "merging", "restarting",
+      "rate_limited", "api_error", "api_terms", "api_safeguard", "merging", "restarting",
       "op_stuck", "unknown",
     ];
     for (const s of nonStopped) expect(isVisibleUnderRunningFilter(s)).toBe(true);
@@ -1893,6 +1894,140 @@ describe("isApiTerms", () => {
   });
 });
 
+describe("isApiSafeguard", () => {
+  // The exact banner Claude Code renders when a model's input-safety classifier
+  // flags a message — captured verbatim from a real retired Fable 5 agent.
+  const SAFEGUARD_BANNER = [
+    "⏺ API Error: Fable 5's safeguards flagged this message (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations. Claude Code can't respond to this message with Fable 5.",
+    "",
+    "  Double press esc to edit your last message, or try a different model with /model.",
+    "",
+    "  Send feedback with /feedback or learn more: https://support.claude.com/en/articles/15363606",
+    "",
+    "  Request ID: req_011CdvREyTYsVU79o9958tFR",
+  ];
+  // Realistic idle TUI chrome that renders BELOW the banner (interior blank
+  // separator + input box + 3 status-bar lines), plus tmux -E - blank padding —
+  // same shape as the F1 follow-up fixtures above.
+  const chrome = [
+    "",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  repo | Model: Fable 5",
+    "  agent/agent-ac7b5633",
+    "  ⏵⏵ accept edits on (shift+tab to cycle)",
+  ];
+  const trailingBlanks = ["", "", ""];
+  /** The verbatim banner wrapped in a realistic tmux tail. */
+  const safeguardTail = [...SAFEGUARD_BANNER, ...chrome, ...trailingBlanks].join("\n");
+
+  test("detects the exact model-safeguard banner behind the TUI chrome", () => {
+    expect(isApiSafeguard(safeguardTail)).toBe(true);
+  });
+
+  test("is model-agnostic — matches a different model's safeguard banner", () => {
+    // Future models render "<OtherModel>'s safeguards flagged this message"; the
+    // detector anchors on the stable phrase, not the model name.
+    const output = [
+      "⏺ API Error: Sonnet 5's safeguards flagged this message (https://www.anthropic.com/legal/aup). Claude Code can't respond to this message with Sonnet 5.",
+    ].join("\n");
+    expect(isApiSafeguard(output)).toBe(true);
+  });
+
+  test("matches on 'usage policy' wording without the aup URL", () => {
+    const output = "⏺ API Error: Fable 5's safeguards flagged this message; see our Usage Policy for details.";
+    expect(isApiSafeguard(output)).toBe(true);
+  });
+
+  test("returns false for a genuine api_terms Usage-Policy refusal", () => {
+    const output = [
+      "API Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy",
+      "(https://www.anthropic.com/legal/aup).",
+    ].join("\n");
+    expect(isApiSafeguard(output)).toBe(false);
+  });
+
+  test("returns false for a plain api_error banner", () => {
+    expect(isApiSafeguard("  ⎿  API Error: Stream idle timeout - partial response received")).toBe(false);
+  });
+
+  test("returns false when the phrase is quoted without an API Error line", () => {
+    // Ordinary output can mention the phrase (e.g. a reviewer discussing this
+    // very feature); without an "API Error:" line it must NOT match.
+    const output = "the reviewer noted 'safeguards flagged this message' is documented at /legal/aup";
+    expect(isApiSafeguard(output)).toBe(false);
+  });
+
+  test("returns false when the safeguard phrase lacks an AUP reference", () => {
+    // Marker + phrase on the same line (passes the primary anchor), but no
+    // /legal/aup or "usage policy" → the secondary AUP check rejects it.
+    const output = "⏺ API Error: Some model's safeguards flagged this message and nothing else";
+    expect(isApiSafeguard(output)).toBe(false);
+  });
+
+  test("only inspects last 15 lines", () => {
+    const oldLines = Array.from({ length: 20 }, () => "filler");
+    const output = [...SAFEGUARD_BANNER, ...oldLines].join("\n");
+    expect(isApiSafeguard(output)).toBe(false);
+  });
+
+  test("returns false on empty input", () => {
+    expect(isApiSafeguard("")).toBe(false);
+  });
+
+  test("strips ANSI before checking", () => {
+    const output = "\x1b[31m⏺ API Error: Fable 5's safeguards flagged this message (https://www.anthropic.com/legal/aup). Claude Code can't respond to this message with Fable 5.\x1b[0m";
+    expect(isApiSafeguard(output)).toBe(true);
+  });
+
+  // Cross-checks — this is the bug the state fixes: the safeguard banner is
+  // caught by NEITHER isApiError NOR isApiTerms, and adding api_safeguard must
+  // not regress api_terms detection for its own banner.
+  test("cross-check: the safeguard banner is NOT isApiError and NOT isApiTerms", () => {
+    expect(isApiError(safeguardTail)).toBe(false);
+    expect(isApiTerms(safeguardTail)).toBe(false);
+  });
+
+  test("cross-check: a genuine api_terms banner is still isApiTerms and NOT isApiSafeguard", () => {
+    const terms = [
+      "API Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy",
+      "(https://www.anthropic.com/legal/aup).",
+    ].join("\n");
+    expect(isApiTerms(terms)).toBe(true);
+    expect(isApiSafeguard(terms)).toBe(false);
+  });
+
+  // REGRESSION (review round 2): a RECOVERABLE api_error must NOT be misread as
+  // terminal api_safeguard just because a QUOTED safeguard phrase (it now lives
+  // in our SPEC/tests/docs) and an /legal/aup URL sit elsewhere in the window on
+  // OTHER lines. The old detector matched its three tokens independently and
+  // returned true here; the same-line anchor returns false. Because
+  // api_safeguard is checked before api_error, the old bug would have made a
+  // recoverable error never retry.
+  const recoverableWithQuotedPhraseAndAup = [
+    ...Array.from({ length: 8 }, (_, i) => `earlier conversation line ${i}`),
+    "  ⎿  API Error: Stream idle timeout - partial response received",
+    "The reviewer discussed how a model's safeguards flagged this message in some safe conversations.",
+    "See the policy at https://www.anthropic.com/legal/aup for details.",
+    "",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  repo | Model: Sonnet 4.6",
+    "  agent/agent-a1",
+    "  ⏵⏵ accept edits on (shift+tab to cycle)",
+    "", "", "",
+  ].join("\n");
+
+  test("REGRESSION: split-line api_error + quoted phrase + aup URL is NOT api_safeguard", () => {
+    expect(isApiSafeguard(recoverableWithQuotedPhraseAndAup)).toBe(false);
+    // It is a genuine recoverable api_error and must classify as such.
+    expect(isApiError(recoverableWithQuotedPhraseAndAup)).toBe(true);
+    expect(isApiTerms(recoverableWithQuotedPhraseAndAup)).toBe(false);
+  });
+});
+
 describe("hasBackgroundTasks", () => {
   test("detects background task pattern", () => {
     const output = "line1\n⏵⏵ tasks · 3 running\nline3";
@@ -1960,6 +2095,14 @@ describe("is* detectors on -J logical-line captures", () => {
       "API Error: Claude Code is unable to respond to this request because it appears to violate Anthropic's Usage Policy; see https://www.anthropic.com/legal/aup for details",
     );
     expect(isApiTerms(lines.join("\n"))).toBe(true);
+  });
+
+  test("isApiSafeguard detects a wide single-line model-safeguard refusal", () => {
+    const lines = Array.from({ length: 10 }, () => "narration ".repeat(15));
+    lines.push(
+      "⏺ API Error: Fable 5's safeguards flagged this message (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations. Claude Code can't respond to this message with Fable 5.",
+    );
+    expect(isApiSafeguard(lines.join("\n"))).toBe(true);
   });
 
   test("isCompacting requires the marker within the last 10 logical lines (F1 window, chrome-sized)", () => {
@@ -2333,6 +2476,92 @@ describe("detectAgentStates — waiting + background shell override", () => {
     });
     await detectAgentStates([a]);
     expect(a.state).toBe("waiting");
+  });
+});
+
+// ── detectAgentStates — api_safeguard classification (fresh capture) ────────
+
+describe("detectAgentStates — api_safeguard from fresh tmux capture", () => {
+  /** Install a tmux-poller spawn runner that returns the given pane text for all capture-pane calls. */
+  function installTmuxRunner(output: string): void {
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      const isCapture = args[0] === "tmux" && args[1] === "capture-pane";
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(isCapture ? output : ""));
+            c.close();
+          },
+        }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+    isPidAliveCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a1"]));
+  }
+
+  afterEach(() => {
+    tmuxPollerSpawnCtx.reset();
+    isPidAliveCtx.reset();
+    liveTmuxSessionsCtx.reset();
+  });
+
+  // The model-safeguard banner (verbatim) wrapped in realistic idle TUI chrome —
+  // no meta.transient.json exists for this agent (default /tmp/test repoPath),
+  // so detection falls through to the live-capture classifier path.
+  const safeguardCapture = [
+    "⏺ API Error: Fable 5's safeguards flagged this message (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations. Claude Code can't respond to this message with Fable 5.",
+    "",
+    "  Double press esc to edit your last message, or try a different model with /model.",
+    "",
+    "  Request ID: req_011CdvREyTYsVU79o9958tFR",
+    "",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  repo | Model: Fable 5",
+    "  agent/agent-a1",
+    "  ⏵⏵ accept edits on (shift+tab to cycle)",
+    "", "", "",
+  ].join("\n");
+
+  test("safeguard banner → api_safeguard (terminal, before api_error)", async () => {
+    installTmuxRunner(safeguardCapture);
+    const a = makeAgent({
+      id: "a1",
+      meta: { state: "running", tmux_session: "ib-a1" } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("api_safeguard");
+  });
+
+  // REGRESSION (review round 2): a recoverable api_error line with a QUOTED
+  // safeguard phrase + an /legal/aup URL on OTHER lines must resolve to the
+  // recoverable api_error, NOT the terminal api_safeguard.
+  const recoverableCapture = [
+    ...Array.from({ length: 8 }, (_, i) => `earlier conversation line ${i}`),
+    "  ⎿  API Error: Stream idle timeout - partial response received",
+    "The reviewer discussed how a model's safeguards flagged this message in some safe conversations.",
+    "See the policy at https://www.anthropic.com/legal/aup for details.",
+    "",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  repo | Model: Sonnet 4.6",
+    "  agent/agent-a1",
+    "  ⏵⏵ accept edits on (shift+tab to cycle)",
+    "", "", "",
+  ].join("\n");
+
+  test("split-line api_error + quoted phrase + aup → api_error (NOT api_safeguard)", async () => {
+    installTmuxRunner(recoverableCapture);
+    const a = makeAgent({
+      id: "a1",
+      meta: { state: "running", tmux_session: "ib-a1" } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("api_error");
   });
 });
 
@@ -3248,7 +3477,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
     const transient: TransientState = {
       tmux_compacting: false,
       tmux_rate_limited: false,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: false,
       updated_at_ms: Date.now(),
       watchdog_pid: 67890,
@@ -3298,7 +3527,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
     const transient: TransientState = {
       tmux_compacting: false,
       tmux_rate_limited: false,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: false,
       updated_at_ms: Date.now(),
       watchdog_pid: 67890,
@@ -3651,6 +3880,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
       tmux_rate_limited: false,
       tmux_api_error: false,
       tmux_api_terms: false,
+      tmux_api_safeguard: false,
       has_background_tasks: false,
       updated_at_ms: 0, // stale on purpose so the transient fast-path is skipped
       watchdog_pid: 67890,
@@ -3969,7 +4199,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
     const transient: TransientState = {
       tmux_compacting: false,
       tmux_rate_limited: false,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: false,
       updated_at_ms: 0, // stale on purpose so the transient fast-path is skipped
       watchdog_pid: 67890,
@@ -4535,7 +4765,7 @@ describe("readAgentTransient / writeAgentTransient", () => {
     const data: TransientState = {
       tmux_compacting: true,
       tmux_rate_limited: false,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: true,
       updated_at_ms: 1_700_000_000_000,
       watchdog_pid: 12345,
@@ -4550,6 +4780,40 @@ describe("readAgentTransient / writeAgentTransient", () => {
       restart_compact_escape_sent_at_ms: null,
       operation: null,
     });
+  });
+
+  test("round-trips tmux_api_safeguard: true", async () => {
+    const data: TransientState = {
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: true,
+      has_background_tasks: false,
+      updated_at_ms: 1_700_000_000_000,
+      watchdog_pid: 12345,
+    };
+    await writeAgentTransient(tempDir, data);
+    const result = await readAgentTransient(tempDir);
+    expect(result!.tmux_api_safeguard).toBe(true);
+  });
+
+  test("defaults tmux_api_safeguard to false when absent from an older file", async () => {
+    // A meta.transient.json written before the field existed omits it; the read
+    // must default it to false (back-compat) rather than reject the whole read.
+    await Bun.write(
+      join(tempDir, "meta.transient.json"),
+      JSON.stringify({
+        tmux_compacting: false,
+        tmux_rate_limited: false,
+        tmux_api_error: false,
+        tmux_api_terms: false,
+        has_background_tasks: false,
+        updated_at_ms: 1_700_000_000_000,
+        watchdog_pid: 999,
+      }),
+    );
+    const result = await readAgentTransient(tempDir);
+    expect(result).not.toBeNull();
+    expect(result!.tmux_api_safeguard).toBe(false);
   });
 
   test("returns null when file is malformed", async () => {
@@ -4568,8 +4832,8 @@ describe("readAgentTransient / writeAgentTransient", () => {
   });
 
   test("write is atomic (.tmp + rename) — second write replaces first", async () => {
-    const first: TransientState = { tmux_compacting: true, tmux_rate_limited: false, tmux_api_error: false, tmux_api_terms: false, has_background_tasks: false, updated_at_ms: 1, watchdog_pid: 100 };
-    const second: TransientState = { tmux_compacting: false, tmux_rate_limited: true, tmux_api_error: false, tmux_api_terms: false, has_background_tasks: false, updated_at_ms: 2, watchdog_pid: 200 };
+    const first: TransientState = { tmux_compacting: true, tmux_rate_limited: false, tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false, has_background_tasks: false, updated_at_ms: 1, watchdog_pid: 100 };
+    const second: TransientState = { tmux_compacting: false, tmux_rate_limited: true, tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false, has_background_tasks: false, updated_at_ms: 2, watchdog_pid: 200 };
     await writeAgentTransient(tempDir, first);
     await writeAgentTransient(tempDir, second);
     expect(await readAgentTransient(tempDir)).toEqual({
@@ -4581,7 +4845,7 @@ describe("readAgentTransient / writeAgentTransient", () => {
   });
 
   test("deleteAgentTransient removes the file", async () => {
-    const data: TransientState = { tmux_compacting: false, tmux_rate_limited: false, tmux_api_error: false, tmux_api_terms: false, has_background_tasks: false, updated_at_ms: 1, watchdog_pid: 1 };
+    const data: TransientState = { tmux_compacting: false, tmux_rate_limited: false, tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false, has_background_tasks: false, updated_at_ms: 1, watchdog_pid: 1 };
     await writeAgentTransient(tempDir, data);
     expect(await readAgentTransient(tempDir)).not.toBeNull();
     await deleteAgentTransient(tempDir);
@@ -5192,7 +5456,7 @@ describe("updateAgentTransient / setAgentOperation / clearAgentOperation", () =>
     expect(result).toEqual({
       tmux_compacting: false,
       tmux_rate_limited: false,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: false,
       updated_at_ms: 0,
       watchdog_pid: 777,
@@ -5251,7 +5515,7 @@ describe("updateAgentTransient / setAgentOperation / clearAgentOperation", () =>
     await writeAgentTransient(tempDir, {
       tmux_compacting: true,
       tmux_rate_limited: false,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: true,
       updated_at_ms: 42,
       watchdog_pid: 9,
@@ -5313,7 +5577,7 @@ describe("updateAgentTransient / setAgentOperation / clearAgentOperation", () =>
       ...cur,
       tmux_compacting: true,
       tmux_rate_limited: false,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: false,
       updated_at_ms: 5000,
       watchdog_pid: 200,
@@ -5362,7 +5626,7 @@ describe("updateAgentTransient / setAgentOperation / clearAgentOperation", () =>
       JSON.stringify({
         tmux_compacting: false,
         tmux_rate_limited: false,
-        tmux_api_error: false, tmux_api_terms: false,
+        tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
         has_background_tasks: false,
         updated_at_ms: 1,
         watchdog_pid: 1,
@@ -5388,7 +5652,7 @@ describe("updateAgentTransient / setAgentOperation / clearAgentOperation", () =>
         JSON.stringify({
           tmux_compacting: false,
           tmux_rate_limited: false,
-          tmux_api_error: false, tmux_api_terms: false,
+          tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
           has_background_tasks: false,
           updated_at_ms: 1,
           watchdog_pid: 1,
@@ -5643,7 +5907,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: false,
       tmux_rate_limited: false,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: false,
       updated_at_ms: fakeNow - 1_000, // 1s old, fresh
       watchdog_pid: 99999,
@@ -5665,7 +5929,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: true,
       tmux_rate_limited: false,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: false,
       updated_at_ms: fakeNow - 100,
       watchdog_pid: 12345,
@@ -5687,7 +5951,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: false,
       tmux_rate_limited: true,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: false,
       updated_at_ms: fakeNow - 100,
       watchdog_pid: 12345,
@@ -5695,6 +5959,28 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
 
     await detectAgentStates([a]);
     expect(a.state).toBe("rate_limited");
+    expect(captureCalls).toBe(0);
+  });
+
+  test("trusts fresh transient with tmux_api_safeguard → state=api_safeguard", async () => {
+    installSpyCapture();
+    const a = await makeBackedAgent("agent-safeguard");
+    isPidAliveCtx.set(() => true);
+    const fakeNow = 5_000_000;
+    nowMsCtx.set(() => fakeNow);
+
+    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: true,
+      has_background_tasks: false,
+      updated_at_ms: fakeNow - 100,
+      watchdog_pid: 12345,
+    });
+
+    await detectAgentStates([a]);
+    expect(a.state).toBe("api_safeguard");
     expect(captureCalls).toBe(0);
   });
 
@@ -5709,7 +5995,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: false,
       tmux_rate_limited: false,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: true,
       updated_at_ms: fakeNow - 100,
       watchdog_pid: 12345,
@@ -5731,7 +6017,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: true, // would say compacting via fast-path
       tmux_rate_limited: false,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: false,
       updated_at_ms: fakeNow - 100,
       watchdog_pid: 99999,
@@ -5760,7 +6046,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: true, // would say compacting via fast-path if trusted
       tmux_rate_limited: false,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: false,
       updated_at_ms: fakeNow - 100,
       watchdog_pid: 99999,
@@ -5788,7 +6074,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: true,
       tmux_rate_limited: false,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: false,
       updated_at_ms: fakeNow - 100,
       watchdog_pid: 99999,
@@ -5810,7 +6096,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: true, // would say compacting via fast-path
       tmux_rate_limited: false,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: false,
       updated_at_ms: fakeNow - TRANSIENT_FRESH_MS - 1,
       watchdog_pid: 12345,
@@ -5840,7 +6126,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: true, // would say compacting via fast-path if trusted
       tmux_rate_limited: false,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: false,
       updated_at_ms: 0,
       watchdog_pid: 12345,
@@ -5873,7 +6159,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: false,
       tmux_rate_limited: true,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: false,
       updated_at_ms: fakeNow - 100,
       watchdog_pid: 12345,
@@ -5887,7 +6173,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: true,
       tmux_rate_limited: false,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: false,
       updated_at_ms: fakeNow - 50,
       watchdog_pid: 12345,
@@ -5920,7 +6206,7 @@ describe("archive cleanup deletes meta.transient.json", () => {
     await writeAgentTransient(agentDir, {
       tmux_compacting: false,
       tmux_rate_limited: false,
-      tmux_api_error: false, tmux_api_terms: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
       has_background_tasks: false,
       updated_at_ms: Date.now(),
       watchdog_pid: 12345,

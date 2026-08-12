@@ -20,10 +20,10 @@ Deterministic model. See SPEC.md §1.3.
 
 1. Stop hook (`ib hook-status`) writes `state` to `meta.json` when Claude goes idle (`waiting`, `complete`, or `running`).
 2. `ib send` and `ib resume` write `state: "running"` to `meta.json`.
-3. `detectAgentStates()` reads state from meta.json with tmux overrides for compacting / rate_limited / api_error / stopped.
-4. `MetaState` = `"creating" | "running" | "waiting" | "complete" | "stopped"` (stored). `AgentState` (parse-state.ts) is the broader union that adds `compacting`, `rate_limited`, `api_error`, and `unknown` for runtime overrides.
+3. `detectAgentStates()` reads state from meta.json with tmux overrides for compacting / rate_limited / api_error / api_terms / api_safeguard / stopped.
+4. `MetaState` = `"creating" | "running" | "waiting" | "complete" | "stopped"` (stored). `AgentState` (parse-state.ts) is the broader union that adds `compacting`, `rate_limited`, `api_error`, `api_terms`, `api_safeguard`, and `unknown` for runtime overrides.
 5. `creating` is also derived from `created_epoch` (< ~6s ago) when the meta state would otherwise be ambiguous.
-6. `api_error` is an override surfaced via `isApiError(tmuxOutput)` and the `tmux_api_error` flag in `TransientState`.
+6. `api_error` is an override surfaced via `isApiError(tmuxOutput)` and the `tmux_api_error` flag in `TransientState`. Two TERMINAL siblings sit next to it, both checked BEFORE `api_error` (terminal-before-recoverable) and both no-op in the watchdog (never retried): `api_terms` (a genuine Usage-Policy/AUP refusal — `isApiTerms` / `tmux_api_terms`) and `api_safeguard` (a model input-safety rejection, e.g. Fable's "safeguards flagged this message"; often a probabilistic false positive — `isApiSafeguard` / `tmux_api_safeguard`; remediation is edit-the-message or switch-model, not retry).
 7. `parseState()` is retained as legacy for the bash ib reference and the watchdog's rate limit bypass retry loop.
 8. Codex agents reach the same `MetaState` via their hooks (SessionStart → running, Stop → waiting/complete). Override states currently surface as `unknown` for codex agents pending codex-specific detection (see SPEC-CODEX-MODEL.md Phase 5).
 

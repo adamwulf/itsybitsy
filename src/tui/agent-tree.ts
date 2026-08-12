@@ -288,8 +288,8 @@ export class AgentTreeComponent implements Component {
    *                     whose agents are ALL stopped. Every non-stopped state
    *                     (running/waiting/complete plus every transient state:
    *                     creating, compacting, rate_limited, api_error,
-   *                     api_terms, merging, restarting, op_stuck, unknown) is
-   *                     shown. See `isVisibleUnderRunningFilter`.
+   *                     api_terms, api_safeguard, merging, restarting, op_stuck,
+   *                     unknown) is shown. See `isVisibleUnderRunningFilter`.
    * The currently-selected row's repo (and the selected agent itself, even if
    * stopped) are always force-kept visible via `_stickyRevealedRepoPath`, and
    * pinned repos stay visible, so a stricter filter never yanks the selection

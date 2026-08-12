@@ -12,7 +12,7 @@
 import { join } from "path";
 import { mkdirSync } from "fs";
 import { watch, type FSWatcher } from "node:fs";
-import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, isApiError, isApiErrorRateLimited, isApiTerms, readAgentState, hasBackgroundTasks, anyChildActive, readAgentTransient, updateAgentTransient } from "./agents";
+import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, isApiError, isApiErrorRateLimited, isApiTerms, isApiSafeguard, readAgentState, hasBackgroundTasks, anyChildActive, readAgentTransient, updateAgentTransient } from "./agents";
 import type { Agent } from "./agents";
 import {
   captureTmuxOutput,
@@ -815,6 +815,21 @@ async function handleApiTerms(_agent: Agent, _tracker: AgentTracker, _getAllAgen
   // No-op — surface to the user, do not retry.
 }
 
+/**
+ * Handler for "api_safeguard" state.
+ *
+ * The model's input-safety classifier flagged the request (a "model safeguard"
+ * rejection, e.g. Fable's). This is terminal for the current prompt: retrying
+ * the same message just re-triggers the safeguard. Unlike a genuine Usage-Policy
+ * violation (`api_terms`), this is usually a probabilistic false positive on
+ * safe content, and the remediation is to edit the message or switch models
+ * (with /model). No-op handler — the agent stays in api_safeguard until the user
+ * intervenes.
+ */
+async function handleApiSafeguard(_agent: Agent, _tracker: AgentTracker, _getAllAgents: GetAllAgents): Promise<void> {
+  // No-op — surface to the user, do not retry.
+}
+
 /** Maximum number of "please retry" nudges per api_error episode */
 export const API_ERROR_MAX_RETRIES = 20;
 
@@ -921,6 +936,7 @@ registerStateHandler("compacting", handleCompacting);
 registerStateHandler("rate_limited", handleRateLimited);
 registerStateHandler("api_error", handleApiError);
 registerStateHandler("api_terms", handleApiTerms);
+registerStateHandler("api_safeguard", handleApiSafeguard);
 registerStateHandler("stopped", handleStopped);
 
 /** States that use the wait counter / backoff system */
@@ -1263,6 +1279,10 @@ export function resolveWatchdogState(tmuxOutput: string, metaState: MetaState | 
   // Usage Policy violation is terminal — checked before isApiError so a
   // refused-by-policy episode isn't misclassified as a recoverable transient.
   if (isApiTerms(tmuxOutput)) return "api_terms";
+  // Model-safeguard rejection is terminal (sibling of api_terms) — checked
+  // before isApiError so a safeguard-flagged episode isn't misclassified as a
+  // recoverable transient.
+  if (isApiSafeguard(tmuxOutput)) return "api_safeguard";
   if (isApiError(tmuxOutput)) return "api_error";
   // Background-shell override: waiting agents with a live background shell
   // are actually still doing work. Scoped strictly to meta.state === "waiting" —
@@ -1560,6 +1580,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
         tmux_rate_limited: isRateLimited(output),
         tmux_api_error: isApiError(output),
         tmux_api_terms: isApiTerms(output),
+        tmux_api_safeguard: isApiSafeguard(output),
         has_background_tasks: hasBackgroundTasks(output),
         updated_at_ms: nowFn(),
         watchdog_pid: process.pid,

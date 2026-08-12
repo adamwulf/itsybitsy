@@ -1425,18 +1425,37 @@ export function isApiTerms(tmuxOutput: string): boolean {
  *
  * MODEL-AGNOSTIC: the model name ("Fable 5") is NOT hardcoded — future models
  * render "<OtherModel>'s safeguards flagged this message". We anchor on the
- * stable phrase "safeguards flagged this message" plus an AUP/Usage-Policy
- * reference, and require an "API Error:" line so a quoted occurrence of the
- * phrase in ordinary agent output (or a watchdog nudge) does not match — the
- * same anti-false-positive philosophy as `isApiTerms`.
+ * stable phrase "safeguards flagged this message", require it on the SAME
+ * logical line as a `[⎿⏺] API Error:` marker, and keep a secondary AUP/Usage-
+ * Policy reference check.
+ *
+ * The same-line anchor matters: matching the API-Error marker and the safeguard
+ * phrase INDEPENDENTLY across the 15-line window would let a recoverable
+ * api_error line ("⎿  API Error: Stream idle timeout") plus a quoted copy of the
+ * phrase (it now appears in our own SPEC/tests/docs) plus an /legal/aup URL
+ * anywhere in the window falsely classify as the terminal api_safeguard — and
+ * because api_safeguard is checked BEFORE api_error, that would make a
+ * recoverable error never retry. Requiring both on ONE line closes that hole at
+ * zero false-negative cost (the real banner is a single logical line under -J).
+ * The `[⎿⏺]` response-level marker mirrors `isApiError`'s proven anchor and, like
+ * `isApiTerms`' same-line phrase anchor, rejects prose/quoted occurrences.
  */
 export function isApiSafeguard(tmuxOutput: string): boolean {
   const stripped = stripAnsi(tmuxOutput);
   // Strip trailing blank padding rows before slicing (see isCompacting). Window stays 15.
   const lines = stripTrailingBlanks(stripped.split("\n"));
   const last15 = lines.slice(-15).join("\n");
-  if (!/API Error:/i.test(last15)) return false;
-  if (!/safeguards flagged this message/i.test(last15)) return false;
+  // SAME-LINE anchor: the API-Error marker AND the safeguard phrase must be on
+  // the SAME logical line. Matching them independently across the window would
+  // let a RECOVERABLE api_error line (e.g. "⎿  API Error: Stream idle timeout")
+  // combine with a quoted "safeguards flagged this message" elsewhere in the
+  // window — and that phrase now lives in our own SPEC/tests/docs — to falsely
+  // yield the terminal api_safeguard, which (checked before api_error) would
+  // stop a recoverable error from ever being retried. The real banner is a
+  // single logical line under -J, so same-line anchoring has ZERO false-negative
+  // cost. The [⎿⏺] response-level marker mirrors isApiError's proven anchor and
+  // rejects prose/quoted occurrences of the phrase.
+  if (!/[⎿⏺]\s*API Error:.*safeguards flagged this message/i.test(last15)) return false;
   return /usage policy/i.test(last15) || /\/legal\/aup/i.test(last15);
 }
 

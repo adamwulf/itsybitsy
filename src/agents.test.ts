@@ -1960,7 +1960,9 @@ describe("isApiSafeguard", () => {
   });
 
   test("returns false when the safeguard phrase lacks an AUP reference", () => {
-    const output = "API Error: Some model's safeguards flagged this message and nothing else";
+    // Marker + phrase on the same line (passes the primary anchor), but no
+    // /legal/aup or "usage policy" → the secondary AUP check rejects it.
+    const output = "⏺ API Error: Some model's safeguards flagged this message and nothing else";
     expect(isApiSafeguard(output)).toBe(false);
   });
 
@@ -1994,6 +1996,35 @@ describe("isApiSafeguard", () => {
     ].join("\n");
     expect(isApiTerms(terms)).toBe(true);
     expect(isApiSafeguard(terms)).toBe(false);
+  });
+
+  // REGRESSION (review round 2): a RECOVERABLE api_error must NOT be misread as
+  // terminal api_safeguard just because a QUOTED safeguard phrase (it now lives
+  // in our SPEC/tests/docs) and an /legal/aup URL sit elsewhere in the window on
+  // OTHER lines. The old detector matched its three tokens independently and
+  // returned true here; the same-line anchor returns false. Because
+  // api_safeguard is checked before api_error, the old bug would have made a
+  // recoverable error never retry.
+  const recoverableWithQuotedPhraseAndAup = [
+    ...Array.from({ length: 8 }, (_, i) => `earlier conversation line ${i}`),
+    "  ⎿  API Error: Stream idle timeout - partial response received",
+    "The reviewer discussed how a model's safeguards flagged this message in some safe conversations.",
+    "See the policy at https://www.anthropic.com/legal/aup for details.",
+    "",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  repo | Model: Sonnet 4.6",
+    "  agent/agent-a1",
+    "  ⏵⏵ accept edits on (shift+tab to cycle)",
+    "", "", "",
+  ].join("\n");
+
+  test("REGRESSION: split-line api_error + quoted phrase + aup URL is NOT api_safeguard", () => {
+    expect(isApiSafeguard(recoverableWithQuotedPhraseAndAup)).toBe(false);
+    // It is a genuine recoverable api_error and must classify as such.
+    expect(isApiError(recoverableWithQuotedPhraseAndAup)).toBe(true);
+    expect(isApiTerms(recoverableWithQuotedPhraseAndAup)).toBe(false);
   });
 });
 
@@ -2503,6 +2534,34 @@ describe("detectAgentStates — api_safeguard from fresh tmux capture", () => {
     });
     await detectAgentStates([a]);
     expect(a.state).toBe("api_safeguard");
+  });
+
+  // REGRESSION (review round 2): a recoverable api_error line with a QUOTED
+  // safeguard phrase + an /legal/aup URL on OTHER lines must resolve to the
+  // recoverable api_error, NOT the terminal api_safeguard.
+  const recoverableCapture = [
+    ...Array.from({ length: 8 }, (_, i) => `earlier conversation line ${i}`),
+    "  ⎿  API Error: Stream idle timeout - partial response received",
+    "The reviewer discussed how a model's safeguards flagged this message in some safe conversations.",
+    "See the policy at https://www.anthropic.com/legal/aup for details.",
+    "",
+    "────────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────────",
+    "  repo | Model: Sonnet 4.6",
+    "  agent/agent-a1",
+    "  ⏵⏵ accept edits on (shift+tab to cycle)",
+    "", "", "",
+  ].join("\n");
+
+  test("split-line api_error + quoted phrase + aup → api_error (NOT api_safeguard)", async () => {
+    installTmuxRunner(recoverableCapture);
+    const a = makeAgent({
+      id: "a1",
+      meta: { state: "running", tmux_session: "ib-a1" } as Partial<AgentMeta> as AgentMeta,
+    });
+    await detectAgentStates([a]);
+    expect(a.state).toBe("api_error");
   });
 });
 

@@ -3050,6 +3050,20 @@ describe("resolveWatchdogState — waiting + background shell override", () => {
     expect(resolveWatchdogState(output, "waiting")).toBe("api_safeguard");
     expect(resolveWatchdogState(output, "running")).toBe("api_safeguard");
   });
+
+  test("REGRESSION: recoverable api_error + quoted safeguard phrase + aup on separate lines → api_error (NOT api_safeguard)", () => {
+    // The safeguard phrase now appears in our SPEC/tests/docs; a recoverable
+    // api_error line elsewhere in the window must not be flipped to the terminal
+    // api_safeguard (which is checked before api_error) by an independent-token
+    // match. The same-line anchor keeps this recoverable.
+    const output = [
+      "  ⎿  API Error: Stream idle timeout - partial response received",
+      "The reviewer discussed how a model's safeguards flagged this message in some safe conversations.",
+      "See the policy at https://www.anthropic.com/legal/aup for details.",
+    ].join("\n");
+    expect(resolveWatchdogState(output, "running")).toBe("api_error");
+    expect(resolveWatchdogState(output, "waiting")).toBe("api_error");
+  });
 });
 
 // ── Lazy + TTL-cached allAgents loading ──────────────────────────────────────

@@ -18,6 +18,7 @@ import {
   INITIAL_NOTIFY_TICKS,
   COMPLETE_FALLBACK_DELAY_TICKS,
   MAX_NOTIFY_TICKS,
+  MAX_MANAGER_NOTIFICATIONS,
   POLL_INTERVAL_MS,
   COMPACT_CHECK_COOLDOWN_MS,
   TMUX_GONE_GRACE_MS,
@@ -1260,6 +1261,248 @@ describe("watchdog", () => {
       // No-recipient case: treat as fully handled so we don't tight-loop
       expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS * 2);
       expect(getTracker("a1").waitCounter).toBe(0);
+    });
+  });
+
+  // =========================================================================
+  // Capped manager/spawner reminders: at most MAX_MANAGER_NOTIFICATIONS per
+  // waiting/unknown episode, each carrying an (reminder X/10) counter.
+  // =========================================================================
+
+  describe("manager notification cap (reminder X/10)", () => {
+    /** Count `send-keys -l <text>` calls whose payload carries `substr`. */
+    function countSendKeysWithText(
+      spawn: ReturnType<typeof mockSpawnRunner>,
+      substr: string,
+    ): number {
+      return spawn.calls.filter((c) =>
+        c.args.includes("send-keys") &&
+        c.args.includes("-l") &&
+        c.args.some((a: any) => typeof a === "string" && a.includes(substr))
+      ).length;
+    }
+
+    /** Spawn runner that fails `tmux has-session` so sendMessage returns ok:false. */
+    function failingSendRunner() {
+      const calls: Array<{ args: any[]; opts: any }> = [];
+      const runner = (args: any[], opts?: any): any => {
+        calls.push({ args: [...args], opts });
+        const isHasSession = args.includes("has-session");
+        return {
+          stdout: new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(""));
+              controller.close();
+            },
+          }),
+          stderr: new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(""));
+              controller.close();
+            },
+          }),
+          exited: Promise.resolve(isHasSession ? 1 : 0),
+        };
+      };
+      return { runner: runner as any, calls };
+    }
+
+    /**
+     * Drive one delivered waiting reminder: preset waitCounter to the current
+     * notifyInterval so `handleWaiting`'s `waitCounter++` crosses the threshold
+     * on the next tick, then tick once. Cheap regardless of how far the backoff
+     * has doubled (no need to actually wait out the interval).
+     */
+    async function tickOneReminder(agents: Agent[], id: string): Promise<void> {
+      const tracker = getTracker(id);
+      tracker.waitCounter = tracker.notifyInterval;
+      await tick(agents);
+    }
+
+    test("MAX_MANAGER_NOTIFICATIONS === 10 (guards accidental retuning)", () => {
+      expect(MAX_MANAGER_NOTIFICATIONS).toBe(10);
+    });
+
+    test("handleWaiting: reminder text increments 1/10, 2/10, 3/10 ...", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const mgr = agent("mgr", "running");
+      const a1 = agent("a1", "waiting", "mgr");
+      const agents = [mgr, a1];
+
+      // Each numbered reminder text is unique, so it is delivered exactly once.
+      await tickOneReminder(agents, "a1");
+      expect(getTracker("a1").notifyCount).toBe(1);
+      expect(
+        countSendKeysWithText(spawnMock, "recently started waiting for input (reminder 1/10)"),
+      ).toBe(1);
+
+      await tickOneReminder(agents, "a1");
+      expect(getTracker("a1").notifyCount).toBe(2);
+      expect(
+        countSendKeysWithText(spawnMock, "recently started waiting for input (reminder 2/10)"),
+      ).toBe(1);
+
+      await tickOneReminder(agents, "a1");
+      expect(getTracker("a1").notifyCount).toBe(3);
+      expect(
+        countSendKeysWithText(spawnMock, "recently started waiting for input (reminder 3/10)"),
+      ).toBe(1);
+    });
+
+    test("handleWaiting: goes silent after 10 delivered reminders (11th+ sends nothing)", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const mgr = agent("mgr", "running");
+      const a1 = agent("a1", "waiting", "mgr");
+      const agents = [mgr, a1];
+
+      for (let n = 0; n < MAX_MANAGER_NOTIFICATIONS; n++) {
+        await tickOneReminder(agents, "a1");
+      }
+      expect(getTracker("a1").notifyCount).toBe(MAX_MANAGER_NOTIFICATIONS);
+      // Each reminder is a single sub-500-char send-keys -l, so the delivered
+      // count is exactly 10.
+      expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBe(10);
+      // The 10th reminder carried 10/10 (delivered exactly once); an 11th was never built.
+      expect(countSendKeysWithText(spawnMock, "(reminder 10/10)")).toBe(1);
+      expect(countSendKeysWithText(spawnMock, "(reminder 11/10)")).toBe(0);
+
+      // Several more eligible ticks — cap reached, nothing more is sent.
+      for (let i = 0; i < 5; i++) {
+        await tickOneReminder(agents, "a1");
+      }
+      expect(getTracker("a1").notifyCount).toBe(MAX_MANAGER_NOTIFICATIONS); // unchanged
+      expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBe(10); // still 10
+    });
+
+    test("handleWaiting: a failed delivery does NOT advance notifyCount (same reminder retried)", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const failing = failingSendRunner();
+      setSendSpawnRunner(failing.runner);
+      try {
+        const mgr = agent("mgr", "running");
+        const a1 = agent("a1", "waiting", "mgr");
+        const agents = [mgr, a1];
+
+        // First eligible tick: delivery fails → notifyCount must NOT advance.
+        await tickOneReminder(agents, "a1");
+        expect(getTracker("a1").notifyCount).toBe(0);
+
+        // Recover: the same reminder number (1/10) is delivered, not skipped.
+        setSendSpawnRunner(spawnMock.runner);
+        const tracker = getTracker("a1");
+        tracker.waitCounter = tracker.notifyInterval;
+        await tick(agents);
+        expect(getTracker("a1").notifyCount).toBe(1);
+        // The failed attempt recorded nothing in spawnMock (it used the failing
+        // runner and never reached send-keys), so the recovered 1/10 is the only
+        // delivery here.
+        expect(
+          countSendKeysWithText(spawnMock, "recently started waiting for input (reminder 1/10)"),
+        ).toBe(1);
+        expect(countSendKeysWithText(spawnMock, "(reminder 2/10)")).toBe(0);
+      } finally {
+        setSendSpawnRunner(spawnMock.runner);
+      }
+    });
+
+    test("notifyCount resets when the agent leaves the backoff states (next episode restarts at 1/10)", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const mgr = agent("mgr", "running");
+      const a1 = agent("a1", "waiting", "mgr");
+      const waitingAgents = [mgr, a1];
+
+      // Burn a couple of reminders in the first episode.
+      await tickOneReminder(waitingAgents, "a1");
+      await tickOneReminder(waitingAgents, "a1");
+      expect(getTracker("a1").notifyCount).toBe(2);
+
+      // Agent goes running — a non-backoff state resets the reminder budget.
+      await tick([mgr, agent("a1", "running", "mgr")]);
+      expect(getTracker("a1").notifyCount).toBe(0);
+      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS);
+
+      // A new waiting episode starts back at 1/10.
+      const a1b = agent("a1", "waiting", "mgr");
+      await tickOneReminder([mgr, a1b], "a1");
+      expect(getTracker("a1").notifyCount).toBe(1);
+      // NOT tightened to toBe(1): "(reminder 1/10)" is delivered once per episode,
+      // and this test runs two episodes, so the substring appears twice overall.
+      // Assert presence — notifyCount === 1 above already proves the reset.
+      expect(
+        countSendKeysWithText(spawnMock, "recently started waiting for input (reminder 1/10)"),
+      ).toBeGreaterThan(0);
+    });
+
+    test("handleUnknown: shares the same cap + X/10 counter", async () => {
+      const mgr = agent("mgr", "running");
+      const a1 = agent("a1", "unknown", "mgr");
+      const agents = [mgr, a1];
+      // Skip the one-shot debug-log capture (real tmux subprocess) by pretending
+      // we were already in unknown last tick.
+      getTracker("a1").previousState = "unknown";
+
+      // Each numbered reminder text is unique, so it is delivered exactly once.
+      await tickOneReminder(agents, "a1");
+      expect(getTracker("a1").notifyCount).toBe(1);
+      expect(
+        countSendKeysWithText(spawnMock, "state is unknown - may need attention (reminder 1/10)"),
+      ).toBe(1);
+
+      await tickOneReminder(agents, "a1");
+      expect(getTracker("a1").notifyCount).toBe(2);
+      expect(
+        countSendKeysWithText(spawnMock, "state is unknown - may need attention (reminder 2/10)"),
+      ).toBe(1);
+
+      // Drive to the cap and confirm it goes silent.
+      for (let n = 2; n < MAX_MANAGER_NOTIFICATIONS; n++) {
+        await tickOneReminder(agents, "a1");
+      }
+      expect(getTracker("a1").notifyCount).toBe(MAX_MANAGER_NOTIFICATIONS);
+      expect(countSendKeysWithText(spawnMock, "state is unknown")).toBe(10);
+
+      for (let i = 0; i < 3; i++) {
+        await tickOneReminder(agents, "a1");
+      }
+      expect(getTracker("a1").notifyCount).toBe(MAX_MANAGER_NOTIFICATIONS);
+      expect(countSendKeysWithText(spawnMock, "state is unknown")).toBe(10);
+    });
+
+    test("handleWaiting: spawner (no manager) reminders also carry X/10 and cap", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const spawner = agent("spawner", "running");
+      const a1 = agent("a1", "waiting", null); // no manager, but has a spawner
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: a1.repoPath };
+      const agents = [spawner, a1];
+
+      await tickOneReminder(agents, "a1");
+      expect(getTracker("a1").notifyCount).toBe(1);
+      expect(
+        countSendKeysWithText(spawnMock, "you spawned recently started waiting for input (reminder 1/10)"),
+      ).toBe(1);
+    });
+
+    test("handleWaiting: spawner path ALSO goes silent after 10 delivered reminders", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const spawner = agent("spawner", "running");
+      const a1 = agent("a1", "waiting", null); // no manager, but has a spawner
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: a1.repoPath };
+      const agents = [spawner, a1];
+
+      for (let n = 0; n < MAX_MANAGER_NOTIFICATIONS; n++) {
+        await tickOneReminder(agents, "a1");
+      }
+      expect(getTracker("a1").notifyCount).toBe(MAX_MANAGER_NOTIFICATIONS);
+      // Each reminder is a single sub-500-char send-keys -l, so the delivered
+      // count is exactly 10.
+      expect(countSendKeysWithText(spawnMock, "you spawned recently started waiting")).toBe(10);
+
+      // Several more eligible ticks — cap reached, the spawner is silenced too.
+      for (let i = 0; i < 5; i++) {
+        await tickOneReminder(agents, "a1");
+      }
+      expect(getTracker("a1").notifyCount).toBe(MAX_MANAGER_NOTIFICATIONS); // unchanged
+      expect(countSendKeysWithText(spawnMock, "you spawned recently started waiting")).toBe(10); // still 10
     });
   });
 

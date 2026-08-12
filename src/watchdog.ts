@@ -63,6 +63,16 @@ export interface AgentTracker {
   previousState: AgentState | null;
   waitCounter: number;
   notifyInterval: number; // in ticks (each tick = POLL_INTERVAL_MS)
+  /**
+   * Number of manager/spawner reminders already sent for the CURRENT
+   * waiting/unknown episode. Capped at MAX_MANAGER_NOTIFICATIONS: once the
+   * cap is reached the watchdog goes silent for that episode. Reset to 0
+   * whenever the agent leaves the backoff states (same reset points as
+   * waitCounter / notifyInterval). `waiting` and `unknown` deliberately SHARE
+   * this counter (both are BACKOFF_STATES), so an agent flapping between the
+   * two does not earn a fresh reminder budget.
+   */
+  notifyCount: number;
   completionNotified: boolean;
   /**
    * Number of consecutive ticks the agent has been observed in `complete`
@@ -144,6 +154,10 @@ export const COMPLETE_FALLBACK_DELAY_TICKS = INITIAL_NOTIFY_TICKS;
 
 /** Maximum notification interval in ticks (768 ticks * 5s = 3840s = 64 minutes) */
 export const MAX_NOTIFY_TICKS = 768;
+
+/** Max manager/spawner reminders sent per waiting/unknown episode before the
+ *  watchdog goes silent (avoids overnight spam the manager cannot act on). */
+export const MAX_MANAGER_NOTIFICATIONS = 10;
 
 /** Recovery threshold for rate limits — matches ib bash's recovery_threshold (5%) */
 const RATE_LIMIT_RECOVERY_THRESHOLD = 5;
@@ -245,6 +259,7 @@ export function createTracker(): AgentTracker {
     previousState: null,
     waitCounter: 0,
     notifyInterval: INITIAL_NOTIFY_TICKS,
+    notifyCount: 0,
     completionNotified: false,
     completeCounter: 0,
     rateLimitBypassed: false,
@@ -499,6 +514,20 @@ async function handleWaiting(agent: Agent, tracker: AgentTracker, getAllAgents: 
   tracker.waitCounter++;
 
   if (tracker.waitCounter >= tracker.notifyInterval) {
+    // Cap reached: go silent for the rest of this waiting/unknown episode.
+    // Still advance the backoff (reset counter, double interval) so we don't
+    // re-enter this block every tick. notifyCount resets to 0 when the agent
+    // leaves the backoff states (processAgents / per-agent loop), which
+    // re-arms the reminder budget for the next episode.
+    if (tracker.notifyCount >= MAX_MANAGER_NOTIFICATIONS) {
+      tracker.waitCounter = 0;
+      tracker.notifyInterval = Math.min(tracker.notifyInterval * 2, MAX_NOTIFY_TICKS);
+      return;
+    }
+
+    // Human-facing reminder number (1-based) for the X/10 counter.
+    const reminderNum = tracker.notifyCount + 1;
+
     // Mutually-exclusive precedence: manager wins if present; otherwise the
     // spawner is notified; otherwise nothing. Previously we notified both
     // when they differed, which led to duplicate noise for cross-repo spawns.
@@ -506,13 +535,13 @@ async function handleWaiting(agent: Agent, tracker: AgentTracker, getAllAgents: 
     if (agent.meta.manager) {
       notified = await notifyManager(
         agent,
-        `Your subtask ${agent.id} recently started waiting for input`,
+        `Your subtask ${agent.id} recently started waiting for input (reminder ${reminderNum}/${MAX_MANAGER_NOTIFICATIONS})`,
         allAgents,
       );
     } else if (agent.meta.spawned_by) {
       notified = await notifySpawner(
         agent,
-        `Agent ${agent.id} you spawned recently started waiting for input`,
+        `Agent ${agent.id} you spawned recently started waiting for input (reminder ${reminderNum}/${MAX_MANAGER_NOTIFICATIONS})`,
         allAgents,
       );
     } else {
@@ -527,6 +556,11 @@ async function handleWaiting(agent: Agent, tracker: AgentTracker, getAllAgents: 
     if (notified) {
       tracker.waitCounter = 0;
       tracker.notifyInterval = Math.min(tracker.notifyInterval * 2, MAX_NOTIFY_TICKS);
+      // Count this reminder only once it was delivered (or had no recipient).
+      // A failed delivery keeps notifyCount put so the SAME reminder number is
+      // retried next tick — the manager sees up to 10 delivered reminders, not
+      // 10 attempts.
+      tracker.notifyCount++;
     } else {
       // Hold the counter just below the threshold so we retry on the next
       // tick instead of waiting for the (now-doubled) interval.
@@ -549,21 +583,33 @@ async function handleUnknown(agent: Agent, tracker: AgentTracker, getAllAgents: 
   tracker.waitCounter++;
 
   if (tracker.waitCounter >= tracker.notifyInterval) {
+    // Cap reached: go silent for the rest of this waiting/unknown episode.
+    // notifyCount resets when the agent leaves the backoff states — see
+    // handleWaiting for the shared rationale. This block predates resolving
+    // allAgents so we skip the snapshot read entirely when silenced.
+    if (tracker.notifyCount >= MAX_MANAGER_NOTIFICATIONS) {
+      tracker.waitCounter = 0;
+      tracker.notifyInterval = Math.min(tracker.notifyInterval * 2, MAX_NOTIFY_TICKS);
+      return;
+    }
+
     // Only resolve allAgents when we actually need to notify — most ticks in
     // unknown state increment the counter without notifying.
     const allAgents = await getAllAgents();
+    // Human-facing reminder number (1-based) for the X/10 counter.
+    const reminderNum = tracker.notifyCount + 1;
     // Mutually-exclusive precedence — see handleWaiting for rationale.
     let notified = false;
     if (agent.meta.manager) {
       notified = await notifyManager(
         agent,
-        `Your subtask ${agent.id} state is unknown - may need attention`,
+        `Your subtask ${agent.id} state is unknown - may need attention (reminder ${reminderNum}/${MAX_MANAGER_NOTIFICATIONS})`,
         allAgents,
       );
     } else if (agent.meta.spawned_by) {
       notified = await notifySpawner(
         agent,
-        `Agent ${agent.id} you spawned has an unknown state - may need attention`,
+        `Agent ${agent.id} you spawned has an unknown state - may need attention (reminder ${reminderNum}/${MAX_MANAGER_NOTIFICATIONS})`,
         allAgents,
       );
     } else {
@@ -571,9 +617,12 @@ async function handleUnknown(agent: Agent, tracker: AgentTracker, getAllAgents: 
     }
 
     // Backoff only advances on successful delivery — see handleWaiting.
+    // notifyCount advances only on delivery so a failed send retries the same
+    // reminder number rather than burning one of the 10.
     if (notified) {
       tracker.waitCounter = 0;
       tracker.notifyInterval = Math.min(tracker.notifyInterval * 2, MAX_NOTIFY_TICKS);
+      tracker.notifyCount++;
     } else {
       tracker.waitCounter = Math.max(0, tracker.notifyInterval - 1);
     }
@@ -969,6 +1018,7 @@ async function processAgents(agents: Agent[], allAgents: Agent[]): Promise<void>
     if (!BACKOFF_STATES.has(agent.state)) {
       tracker.waitCounter = 0;
       tracker.notifyInterval = INITIAL_NOTIFY_TICKS;
+      tracker.notifyCount = 0;
     }
 
     // Reset api_error retry tracking when state has moved off api_error.
@@ -1615,6 +1665,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       if (!BACKOFF_STATES.has(resolvedState)) {
         tracker.waitCounter = 0;
         tracker.notifyInterval = INITIAL_NOTIFY_TICKS;
+        tracker.notifyCount = 0;
       }
 
       // Reset api_error retry tracking when state has moved off api_error.

@@ -66,7 +66,7 @@ import { listTmuxSessions } from "./tmux-poller";
 import { logToWatchLog, logWarning } from "./watch-log";
 import { SpawnContext, InjectionContext } from "./types";
 import type { SpawnFn } from "./types";
-import { isValidModel, isValidEffort, isValidToolList, isValidTmuxSession, isValidSessionId, isValidShellPath, isValidAgentId, shellQuote, tmuxSessionTarget } from "./validation";
+import { isValidModel, isValidEffort, isValidTmuxSession, isValidSessionId, isValidShellPath, isValidAgentId, shellQuote, tmuxSessionTarget } from "./validation";
 import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome } from "./coordinator";
 import { loadAgentType, agentTypeExists, metaCanSpawnChildren } from "./agent-types";
@@ -3511,8 +3511,6 @@ export interface NewAgentOptions {
   effort?: string;
   manager?: string;
   noWorktree?: boolean;
-  allowTools?: string;
-  denyTools?: string;
   print?: boolean;
   spawnedBy?: SpawnedBy;
   /** Override cwd for auto-detect manager (used in tests). */
@@ -3976,16 +3974,6 @@ export async function newAgent(
     }
   }
   const printMode = opts?.print === true;
-  const allowTools = opts?.allowTools ?? "";
-  const denyTools = opts?.denyTools ?? "";
-
-  // Validate CLI-originated values before bash interpolation
-  if (allowTools && !isValidToolList(allowTools)) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid --allow tools value: ${allowTools}` };
-  }
-  if (denyTools && !isValidToolList(denyTools)) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid --deny tools value: ${denyTools}` };
-  }
 
   let manager = opts?.manager ?? "";
 
@@ -4891,12 +4879,6 @@ When your task is complete:
   let claudeArgs = "";
   if (printMode) {
     claudeArgs = claudeArgs ? `${claudeArgs} --print` : "--print";
-  }
-  if (allowTools) {
-    claudeArgs = claudeArgs ? `${claudeArgs} --allowedTools ${allowTools}` : `--allowedTools ${allowTools}`;
-  }
-  if (denyTools) {
-    claudeArgs = claudeArgs ? `${claudeArgs} --disallowedTools ${denyTools}` : `--disallowedTools ${denyTools}`;
   }
   if (modelFlagValue) {
     claudeArgs = claudeArgs ? `${claudeArgs} --model ${modelFlagValue}` : `--model ${modelFlagValue}`;

@@ -572,7 +572,7 @@ const COMMAND_HELP: Record<string, string> = {
   "new-agent":
     "Usage: ib new-agent [--type <type>] [--model <model>] [--effort <level>] [--manager <id>] [--name <name>]\n" +
     "                    [--repo <name|path>] [--spawned-by <id> [--spawned-by-repo <path>]]\n" +
-    '                    [--allow <tools>] [--deny <tools>] [--no-worktree]\n' +
+    '                    [--no-worktree]\n' +
     '                    [-f|--file|--prompt-file <path>] ["prompt..."]\n' +
     "  Alias: new\n" +
     "  Spawn a new agent. The prompt may be supplied positionally, via -f/--file,\n" +
@@ -583,8 +583,6 @@ const COMMAND_HELP: Record<string, string> = {
     "  --manager <id>         Parent manager agent id\n" +
     "  --name <n>             Optional human-readable agent name\n" +
     "  --repo <name|path>     Target repo (defaults to cwd-matched repo)\n" +
-    "  --allow <tools>        Comma-separated extra allowed tools\n" +
-    "  --deny <tools>         Comma-separated extra denied tools\n" +
     "  --no-worktree          Do not create a git worktree\n" +
     "  -f, --file <path>      Read prompt body from a file",
   acknowledge:
@@ -1989,14 +1987,6 @@ export async function main() {
           promptFromFile = true;
         }
         else if (arg === "--no-worktree") { opts.noWorktree = true; }
-        else if (arg === "--allow") {
-          if (!ibArgs[i + 1]) { console.error("Error: --allow requires a value"); process.exit(1); }
-          opts.allowTools = ibArgs[++i];
-        }
-        else if (arg === "--deny") {
-          if (!ibArgs[i + 1]) { console.error("Error: --deny requires a value"); process.exit(1); }
-          opts.denyTools = ibArgs[++i];
-        }
         else if (arg.startsWith("--")) {
           console.error(`Error: unknown flag '${arg}'`);
           process.exit(1);

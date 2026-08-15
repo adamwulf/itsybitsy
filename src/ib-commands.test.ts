@@ -5827,22 +5827,6 @@ describe("newAgent (native)", () => {
     expect(result.stderr.toLowerCase()).toContain("not spawnable");
   });
 
-  test("allowTools flag is included in start.sh", async () => {
-    setNewAgentSpawnRunner(mockSpawnRunner());
-    await callNewAgent("task", { name: "test-allow", allowTools: "Read,Write" });
-
-    const startSh = await Bun.file(join(agentsDir, "test-allow", "start.sh")).text();
-    expect(startSh).toContain("--allowedTools Read,Write");
-  });
-
-  test("denyTools flag is included in start.sh", async () => {
-    setNewAgentSpawnRunner(mockSpawnRunner());
-    await callNewAgent("task", { name: "test-deny", denyTools: "Bash" });
-
-    const startSh = await Bun.file(join(agentsDir, "test-deny", "start.sh")).text();
-    expect(startSh).toContain("--disallowedTools Bash");
-  });
-
   test("rejects name with shell metacharacters", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     const badNames = ["foo;bar", "a`whoami`", "$(rm -rf /)", "hello world", "name&cmd", "a|b", "test'quote"];
@@ -5874,27 +5858,11 @@ describe("newAgent (native)", () => {
     expect(result.stderr).toContain("Invalid model name");
   });
 
-  test("rejects allowTools with shell injection characters", async () => {
-    setNewAgentSpawnRunner(mockSpawnRunner());
-    const result = await callNewAgent("task", { name: "test-bad-allow", allowTools: 'Bash$(whoami)' });
-    expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("Invalid --allow tools value");
-  });
-
-  test("rejects denyTools with shell injection characters", async () => {
-    setNewAgentSpawnRunner(mockSpawnRunner());
-    const result = await callNewAgent("task", { name: "test-bad-deny", denyTools: 'Tool`id`' });
-    expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("Invalid --deny tools value");
-  });
-
-  test("accepts valid model, allowTools, and denyTools", async () => {
+  test("accepts valid model", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     const result = await callNewAgent("task", {
       name: "test-valid-tools",
       model: "claude:claude-sonnet-4-6",
-      allowTools: "Bash(git:*),Read",
-      denyTools: "Write",
     });
     expect(result.ok).toBe(true);
   });

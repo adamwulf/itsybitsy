@@ -479,15 +479,15 @@ describe("CLI arg parsing", () => {
     expect(exitCode).toBe(1);
   });
 
-  test("new-agent --allow without value shows error", async () => {
-    const { stderr, exitCode } = await runCli(["new-agent", "--allow"]);
-    expect(stderr).toContain("--allow requires a value");
+  test("new-agent --allow is now rejected as an unknown flag", async () => {
+    const { stderr, exitCode } = await runCli(["new-agent", "--allow", "Read", "hello"]);
+    expect(stderr).toContain("unknown flag '--allow'");
     expect(exitCode).toBe(1);
   });
 
-  test("new-agent --deny without value shows error", async () => {
-    const { stderr, exitCode } = await runCli(["new-agent", "--deny"]);
-    expect(stderr).toContain("--deny requires a value");
+  test("new-agent --deny is now rejected as an unknown flag", async () => {
+    const { stderr, exitCode } = await runCli(["new-agent", "--deny", "Read", "hello"]);
+    expect(stderr).toContain("unknown flag '--deny'");
     expect(exitCode).toBe(1);
   });
 

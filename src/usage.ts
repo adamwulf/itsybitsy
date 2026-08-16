@@ -132,16 +132,52 @@ function percent(value: unknown): number | null {
   return Math.round(value);
 }
 
+/** Any window shorter than 24h is a session window; longer is weekly. */
+const SESSION_WINDOW_MAX_MINUTES = 1440;
+
+/**
+ * Classify a Codex rate-limit window as session or weekly by its window_minutes.
+ * Codex reorders windows across plan types, so position is not reliable: a window
+ * whose window_minutes is finite and < 24h is the session window, otherwise weekly.
+ * When window_minutes is missing or not finite, fall back to the positional meaning.
+ */
+function classifyCodexWindow(
+  window: CodexRateLimitWindow,
+  positionalRole: "session" | "weekly",
+): "session" | "weekly" {
+  const minutes = window.window_minutes;
+  if (typeof minutes === "number" && Number.isFinite(minutes)) {
+    return minutes < SESSION_WINDOW_MAX_MINUTES ? "session" : "weekly";
+  }
+  return positionalRole;
+}
+
 /** Parse a Codex token_count rate_limits payload into the shared usage shape. */
 export function parseCodexRateLimits(rateLimits: CodexRateLimits, now?: Date): UsageData {
-  const primary = rateLimits.primary;
-  const secondary = rateLimits.secondary;
-  return {
-    sessionPct: primary ? percent(primary.used_percent) : null,
-    weeklyPct: secondary ? percent(secondary.used_percent) : null,
-    sessionReset: primary ? formatCodexResetTime(primary.resets_at, now) : null,
-    weeklyReset: secondary ? formatCodexResetTime(secondary.resets_at, now) : null,
+  const data: UsageData = {
+    sessionPct: null,
+    weeklyPct: null,
+    sessionReset: null,
+    weeklyReset: null,
   };
+
+  const windows: Array<[CodexRateLimitWindow | undefined, "session" | "weekly"]> = [
+    [rateLimits.primary, "session"],
+    [rateLimits.secondary, "weekly"],
+  ];
+
+  for (const [window, positionalRole] of windows) {
+    if (!window) continue;
+    if (classifyCodexWindow(window, positionalRole) === "session") {
+      data.sessionPct = percent(window.used_percent);
+      data.sessionReset = formatCodexResetTime(window.resets_at, now);
+    } else {
+      data.weeklyPct = percent(window.used_percent);
+      data.weeklyReset = formatCodexResetTime(window.resets_at, now);
+    }
+  }
+
+  return data;
 }
 
 async function collectJsonlFiles(dir: string, depth = 0): Promise<string[]> {

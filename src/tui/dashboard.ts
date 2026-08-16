@@ -34,6 +34,7 @@ import {
   releaseSystemCoordinator,
   sanitizeTmuxInput,
   isCoordinatorRestartCommand,
+  restartSystemCoordinatorFresh,
 } from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
@@ -878,7 +879,6 @@ export class DashboardComponent implements Component {
       if (isCoordinatorRestartCommand(trimmed)) {
         this.setNotice("Restarting coordinator (fresh)…", "info");
         this.executeAndRefresh(async () => {
-          const { restartSystemCoordinatorFresh } = await import("../coordinator");
           const ready = await restartSystemCoordinatorFresh();
           this.coordinatorPane.resetForAgent();
           this.setNotice(

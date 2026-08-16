@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, readFile, readdir, mkdir } from "fs/promises";
 import { tmpdir } from "os";
@@ -32,6 +32,17 @@ import { encodeClaudeProjectPath } from "./auto-compact";
 import { spawnCtx as tmuxSpawnCtx } from "./tmux-poller";
 import { setWatchLogPath, resetWatchLogPath } from "./watch-log";
 import { STARTUP_MARKERS } from "./parse-state";
+
+// The system-coordinator lifecycle tests drive real async work — git init /
+// settings writes through the injected spawn contexts, and the ready-poll loop
+// in waitForCoordinatorReady (30 attempts, run TWICE by restartSystemCoordinatorFresh:
+// once inside ensureSystemCoordinator and once in the final wait). Even with
+// sleepFn stubbed, the never-ready path alone is ~60 poll iterations and can
+// exceed Bun's 5s default per-test timeout on a loaded machine. Raise the bound
+// so this file passes standalone (matching index/ib-commands/watchdog test
+// files). This only changes how long a stuck test waits before failing — every
+// assertion is unaffected.
+setDefaultTimeout(60_000);
 
 describe("IB_COORDINATOR_SESSION", () => {
   test("has expected session name", () => {
@@ -1678,8 +1689,11 @@ describe("restartSystemCoordinatorFresh", () => {
     resetCoordinatorHome();
     resetCoordinatorSleepFn();
     process.env.HOME = originalHome;
-    await rm(tmpDir, { recursive: true, force: true });
-    await rm(typesHome, { recursive: true, force: true });
+    // Guard: if a beforeEach ever fails before mkdtemp assigns these, an
+    // unguarded rm(undefined) throws ERR_INVALID_ARG_TYPE and MASKS the real
+    // failure. Only clean up dirs we actually created.
+    if (tmpDir) await rm(tmpDir, { recursive: true, force: true });
+    if (typesHome) await rm(typesHome, { recursive: true, force: true });
   });
 
   test("discards (writes cleared marker), creates a fresh session, and returns true when ready", async () => {

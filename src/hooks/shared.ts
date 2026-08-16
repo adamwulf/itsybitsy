@@ -33,7 +33,7 @@ export const SYSTEM_AGENT_ID = "@system";
  * but does NOT honor the test-only `setCoordinatorHome` override — tests that
  * exercise hook code paths set `HOME` directly via the env var.
  */
-function systemCoordinatorHome(): string {
+export function systemCoordinatorHome(): string {
   return join(process.env.HOME ?? homedir(), ".itsybitsy");
 }
 

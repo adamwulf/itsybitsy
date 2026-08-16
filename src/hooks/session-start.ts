@@ -3,10 +3,12 @@
  */
 
 import { join, basename } from "path";
-import { AGENT_CWD_PATTERN, SYSTEM_AGENT_ID } from "./shared";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { AGENT_CWD_PATTERN, SYSTEM_AGENT_ID, systemCoordinatorHome } from "./shared";
 import { loadAgentType, listSpawnableAgentTypesSync } from "../agent-types";
 import { writeAgentState } from "../agents";
 import { listTeams } from "../teams";
+import { isValidSessionId } from "../validation";
 
 export type SessionRole = "primary" | "manager" | "worker" | "coordinator";
 
@@ -756,6 +758,36 @@ To wait for a sub-agent, just emit \`WAITING\` and stop — don't \`sleep\`, run
 </ittybitty>`;
 }
 
+/**
+ * Best-effort: persist Claude's real session id for the system coordinator to
+ * `~/.itsybitsy/coordinator-session.json` (shape: `{ session_id, captured_at }`).
+ *
+ * The coordinator resume path (`src/coordinator.ts`) reads this back as a
+ * cross-check against its transcript-scan choice. The SessionStart hook fires
+ * on startup, resume, and compact, so the file tracks Claude's session-id
+ * rotation over the coordinator's lifetime.
+ *
+ * Every failure is swallowed: recording the id must NEVER change the hook's
+ * stdout output or exit behavior. `data.session_id` is written only when it is
+ * a string that passes {@link isValidSessionId}; a missing/invalid value is a
+ * no-op (no write, no throw). The file name and `{ session_id, captured_at }`
+ * shape match a prior on-disk implementation and are reused verbatim.
+ */
+function recordCoordinatorSessionId(data: Record<string, unknown>): void {
+  try {
+    const sessionId = data.session_id;
+    if (typeof sessionId !== "string" || !isValidSessionId(sessionId)) return;
+    const home = systemCoordinatorHome();
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      join(home, "coordinator-session.json"),
+      JSON.stringify({ session_id: sessionId, captured_at: Date.now() }),
+    );
+  } catch {
+    /* swallow — recording the session id must never affect the hook */
+  }
+}
+
 export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): Promise<void> {
   const raw = rawStdin ?? await new Response(Bun.stdin.stream()).text();
   let parsed: unknown;
@@ -783,6 +815,10 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
   // and let generateInstructions load `system.md` (merged with `_all.md`,
   // skipping `_non_coordinator.md`).
   if (agentIdArg === SYSTEM_AGENT_ID) {
+    // Best-effort: record Claude's real session id so the coordinator resume
+    // path can cross-check its transcript-scan choice. Must not change the
+    // additionalContext output below (byte-identical) or the exit behavior.
+    recordCoordinatorSessionId(data);
     const systemCtx: SessionContext = {
       role: "coordinator",
       agentId: SYSTEM_AGENT_ID,

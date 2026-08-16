@@ -165,6 +165,19 @@ describe("watch-log", () => {
       resetWatchLogPath();
       expect(getWatchLogPath()).toMatch(/\.itsybitsy\/watch\.log$/);
     });
+
+    test("the default honors IB_WATCH_LOG_PATH when set (test-harness redirect)", () => {
+      resetWatchLogPath();
+      const def = getWatchLogPath();
+      // Under `bun test` the preload sets IB_WATCH_LOG_PATH to a throwaway temp
+      // path so nothing writes to the real ~/.itsybitsy/watch.log; when unset
+      // (e.g. a direct run) the default is the real home path.
+      if (process.env.IB_WATCH_LOG_PATH && process.env.IB_WATCH_LOG_PATH.trim().length > 0) {
+        expect(def).toBe(process.env.IB_WATCH_LOG_PATH);
+      } else {
+        expect(def).toMatch(/\.itsybitsy\/watch\.log$/);
+      }
+    });
   });
 
   describe("logWarning", () => {

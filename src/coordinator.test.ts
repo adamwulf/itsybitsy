@@ -1349,11 +1349,18 @@ describe("acquireSystemCoordinator / releaseSystemCoordinator", () => {
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "coord-refs-"));
     setCoordinatorHome(tmpDir);
+    // readLivePids logs a [coordinator-prune] line to the watch log whenever it
+    // drops a stale PID. Redirect that log into the temp dir so the prune tests
+    // below never append to the developer's real ~/.itsybitsy/watch.log.
+    const { setWatchLogPath } = await import("./watch-log");
+    setWatchLogPath(join(tmpDir, "watch.log"));
   });
 
   afterEach(async () => {
     coordinatorSpawnCtx.reset();
     resetCoordinatorHome();
+    const { resetWatchLogPath } = await import("./watch-log");
+    resetWatchLogPath();
     await rm(tmpDir, { recursive: true, force: true });
   });
 

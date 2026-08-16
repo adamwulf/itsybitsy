@@ -23,9 +23,12 @@ import {
   getRepoBasename,
   getLastCoordinatorSpawnMode,
   discardSystemCoordinator,
+  waitForCoordinatorReady,
 } from "./coordinator";
 import { encodeClaudeProjectPath } from "./auto-compact";
 import { spawnCtx as tmuxSpawnCtx } from "./tmux-poller";
+import { setWatchLogPath, resetWatchLogPath } from "./watch-log";
+import { STARTUP_MARKERS } from "./parse-state";
 
 describe("IB_COORDINATOR_SESSION", () => {
   test("has expected session name", () => {
@@ -339,6 +342,9 @@ describe("ensureSystemCoordinator", () => {
     // customized ones (which would leak extra allow entries into the assertions).
     typesHome = await mkdtemp(join(tmpdir(), "coord-types-home-"));
     process.env.HOME = typesHome;
+    // Redirect the watch log into the temp home so the new [coordinator]
+    // resume/ready log lines don't touch the developer's real ~/.itsybitsy.
+    setWatchLogPath(join(tmpDir, "watch.log"));
     setCoordinatorSleepFn(async () => {}); // No-op sleep for tests
     // Stub tmuxSpawnCtx so waitForCoordinatorReady's capture returns
     // a "ready" marker on the first poll. Individual tests can override.
@@ -354,6 +360,7 @@ describe("ensureSystemCoordinator", () => {
     tmuxSpawnCtx.reset();
     resetCoordinatorHome();
     resetCoordinatorSleepFn();
+    resetWatchLogPath();
     process.env.HOME = originalHome;
     await rm(tmpDir, { recursive: true, force: true });
     await rm(typesHome, { recursive: true, force: true });
@@ -1000,6 +1007,93 @@ describe("ensureSystemCoordinator", () => {
     expect(claudeCmd).not.toContain(oldId);
   });
 
+  test("session resume: skips headless queue-operation stubs and resumes the newest interactive transcript", async () => {
+    // A `claude -p` task-summarizer stub lands in the coordinator's own project
+    // dir with a NEWER mtime than the real coordinator transcript. Without stub
+    // filtering the scan would pick the stub (newest) and dead-resume it; with
+    // filtering it must fall back to the older interactive transcript.
+    const interactiveId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const stubId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    const encoded = encodeClaudeProjectPath(tmpDir);
+    const projectDir = join(typesHome, ".claude", "projects", encoded);
+    await mkdir(projectDir, { recursive: true });
+
+    // Interactive transcript — real conversation record, OLDER mtime.
+    await Bun.write(join(projectDir, `${interactiveId}.jsonl`), '{"type":"summary","summary":"real session"}\n');
+    const { utimes } = await import("fs/promises");
+    const past = new Date(Date.now() - 60_000);
+    await utimes(join(projectDir, `${interactiveId}.jsonl`), past, past);
+
+    // Headless summarizer stub — first line is a queue-operation record, NEWER mtime.
+    await Bun.write(join(projectDir, `${stubId}.jsonl`), '{"type":"queue-operation","op":"summarize"}\n');
+
+    const commands: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      commands.push([...cmd]);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    await ensureSystemCoordinator();
+
+    expect(getLastCoordinatorSpawnMode()).toBe("resumed");
+    const claudeCmd = commands.map((c) => c.join(" ")).find((c) => c.includes("claude --resume"));
+    expect(claudeCmd).toContain(`claude --resume ${interactiveId}`);
+    expect(claudeCmd).not.toContain(stubId);
+  });
+
+  test("session resume: logs a cross-check mismatch when the recorded session id differs from the scan choice", async () => {
+    const scanId = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+    const recordedId = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+    const encoded = encodeClaudeProjectPath(tmpDir);
+    const projectDir = join(typesHome, ".claude", "projects", encoded);
+    await mkdir(projectDir, { recursive: true });
+    await Bun.write(join(projectDir, `${scanId}.jsonl`), '{"type":"summary"}\n');
+    // Recorded id (from the SessionStart hook) points elsewhere.
+    await Bun.write(
+      join(tmpDir, "coordinator-session.json"),
+      JSON.stringify({ session_id: recordedId, captured_at: 123 }),
+    );
+
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    await ensureSystemCoordinator();
+
+    // The scan choice still wins (resume targets scanId), but the mismatch is logged.
+    const log = await readFile(join(tmpDir, "watch.log"), "utf-8");
+    expect(log).toContain(`[coordinator] resume id=${scanId}`);
+    expect(log).toContain(`recorded session id=${recordedId} differs from scan choice ${scanId}`);
+  });
+
+  test("session resume: all transcripts are stubs → fresh launch (no resume candidate)", async () => {
+    const stubId = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+    const encoded = encodeClaudeProjectPath(tmpDir);
+    const projectDir = join(typesHome, ".claude", "projects", encoded);
+    await mkdir(projectDir, { recursive: true });
+    await Bun.write(join(projectDir, `${stubId}.jsonl`), '{"type":"queue-operation","op":"summarize"}\n');
+
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    await ensureSystemCoordinator();
+
+    expect(getLastCoordinatorSpawnMode()).toBe("fresh");
+  });
+
   test("cleared-marker suppresses prior transcripts so the next launch is fresh", async () => {
     const sessionId = "33333333-3333-3333-3333-333333333333";
     const encoded = encodeClaudeProjectPath(tmpDir);
@@ -1060,6 +1154,105 @@ describe("ensureSystemCoordinator", () => {
     // Cleared marker must exist so the bad transcript isn't tried again.
     const markerExists = await Bun.file(join(tmpDir, "coordinator-session.cleared")).exists();
     expect(markerExists).toBe(true);
+  });
+});
+
+// -------------------------------------------------------------------
+// waitForCoordinatorReady
+// -------------------------------------------------------------------
+describe("waitForCoordinatorReady", () => {
+  let logDir: string;
+  let logPath: string;
+
+  beforeEach(async () => {
+    // No-op sleep so the 30×500ms budget runs instantly in tests.
+    setCoordinatorSleepFn(async () => {});
+    // Redirect the watch log to a temp file so the exhausted-poll diagnostic
+    // never touches the real ~/.itsybitsy/watch.log.
+    logDir = await mkdtemp(join(tmpdir(), "ready-poll-log-"));
+    logPath = join(logDir, "watch.log");
+    setWatchLogPath(logPath);
+  });
+
+  afterEach(async () => {
+    tmuxSpawnCtx.reset();
+    resetCoordinatorSleepFn();
+    resetWatchLogPath();
+    await rm(logDir, { recursive: true, force: true });
+  });
+
+  /** Stub the coordinator's capture-pane spawn to return a fixed pane body. */
+  function stubCapture(paneBody: string, exitCode = 0): void {
+    tmuxSpawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd[0] === "tmux" && cmd[1] === "capture-pane") {
+        return { stdout: mockStream(paneBody), stderr: emptyStream(), exited: Promise.resolve(exitCode) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+  }
+
+  // Each of the four shared STARTUP_MARKERS must be accepted as ready.
+  test("returns ready on the original 'Claude Code v' marker", async () => {
+    stubCapture("loading...\nClaude Code v1.2.3");
+    expect(await waitForCoordinatorReady()).toBe(true);
+  });
+
+  test("returns ready on the original '[USER TASK]' marker", async () => {
+    stubCapture("[USER TASK] do the thing");
+    expect(await waitForCoordinatorReady()).toBe(true);
+  });
+
+  // Newly-accepted marker #1 — a resumed session shows the boxed logo line.
+  test("returns ready on the newly-accepted boxed-logo marker '╭─ Claude Code'", async () => {
+    stubCapture("╭─ Claude Code\n│ resumed session");
+    expect(await waitForCoordinatorReady()).toBe(true);
+  });
+
+  // Newly-accepted marker #2 — the agent-context header a resumed session emits.
+  test("returns ready on the newly-accepted '[AGENT CONTEXT]' marker", async () => {
+    stubCapture("[AGENT CONTEXT] resumed coordinator session");
+    expect(await waitForCoordinatorReady()).toBe(true);
+  });
+
+  // Guards against STARTUP_MARKERS silently drifting away from the four the
+  // above cases assert (an emptied array would make marker tests vacuous).
+  test("STARTUP_MARKERS holds exactly the four expected markers", () => {
+    expect(STARTUP_MARKERS).toEqual([
+      "Claude Code v",
+      "[USER TASK]",
+      "╭─ Claude Code",
+      "[AGENT CONTEXT]",
+    ]);
+  });
+
+  test("exhausted poll returns false and logs the last 5 non-empty pane lines", async () => {
+    // Pane body with an interior blank line so we can prove the log keeps only
+    // the last 5 NON-EMPTY lines (l1 is dropped, the blank is dropped).
+    const paneBody = ["l1", "l2", "l3", "", "l4", "l5", "l6"].join("\n");
+    stubCapture(paneBody);
+
+    const ready = await waitForCoordinatorReady();
+    expect(ready).toBe(false);
+
+    const log = await readFile(logPath, "utf-8");
+    // Single log call: header names the nominal 30×500ms = 15000ms budget.
+    expect(log).toContain("[coordinator] ready-poll exhausted after 15000ms; pane tail:");
+    // The last 5 non-empty lines, newline-joined, blank line dropped.
+    expect(log).toContain("l2\nl3\nl4\nl5\nl6");
+    // The dropped earliest line must not appear in the tail.
+    expect(log).not.toContain("l1\nl2");
+  });
+
+  test("exhausted poll with a null final capture logs the null sentinel", async () => {
+    // capture-pane exits non-zero → captureTmuxOutput returns null every poll.
+    stubCapture("", 1);
+
+    const ready = await waitForCoordinatorReady();
+    expect(ready).toBe(false);
+
+    const log = await readFile(logPath, "utf-8");
+    expect(log).toContain("[coordinator] ready-poll exhausted after 15000ms; pane tail:");
+    expect(log).toContain("(final capture returned null)");
   });
 });
 
@@ -1156,11 +1349,18 @@ describe("acquireSystemCoordinator / releaseSystemCoordinator", () => {
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "coord-refs-"));
     setCoordinatorHome(tmpDir);
+    // readLivePids logs a [coordinator-prune] line to the watch log whenever it
+    // drops a stale PID. Redirect that log into the temp dir so the prune tests
+    // below never append to the developer's real ~/.itsybitsy/watch.log.
+    const { setWatchLogPath } = await import("./watch-log");
+    setWatchLogPath(join(tmpDir, "watch.log"));
   });
 
   afterEach(async () => {
     coordinatorSpawnCtx.reset();
     resetCoordinatorHome();
+    const { resetWatchLogPath } = await import("./watch-log");
+    resetWatchLogPath();
     await rm(tmpDir, { recursive: true, force: true });
   });
 

@@ -51,6 +51,8 @@ import {
   isPidIdentityCurrentCtx,
   processStartEpochSecondsCtx,
   resetProcessStartEpochSecondsCache,
+  primeProcessStartCache,
+  batchProcessStartRawCtx,
   CLAUDE_PID_START_MARGIN_SECONDS,
   PROCESS_START_CACHE_TTL_MS,
   LIFECYCLE_LOCK_STALE_MS,
@@ -82,6 +84,23 @@ import { makeAgent } from "./test-utils";
 beforeEach(() => {
   resetProcessStartEpochSecondsCache();
   processStartEpochSecondsCtx.set(() => 0);
+  // detectAgentStates now batch-primes the process-start cache through the
+  // separate batchProcessStartRawCtx seam BEFORE the per-agent gate reads it
+  // per-pid. Keep the two seams consistent by default so a focused test that
+  // stubs only processStartEpochSecondsCtx sees the same value through the
+  // primer: derive the batch `ps` output from the per-pid stub, omitting any
+  // pid the per-pid stub reports as dead (null) — exactly as real `ps` omits a
+  // dead pid. Tests that assert on the batch spawn itself override this.
+  batchProcessStartRawCtx.set(async (pids) =>
+    pids
+      .map((pid) => {
+        const epoch = processStartEpochSecondsCtx.fn(pid);
+        if (epoch === null) return null;
+        return `${pid} ${new Date(epoch * 1000).toUTCString()}`;
+      })
+      .filter((line): line is string => line !== null)
+      .join("\n") + "\n"
+  );
   // Existing fixtures intentionally use synthetic/incomplete AgentMeta. Keep
   // them on their historical bare-PID seam; focused tests below reset this to
   // exercise the real guarded implementation.
@@ -97,6 +116,7 @@ beforeEach(() => {
 afterEach(() => {
   resetProcessStartEpochSecondsCache();
   processStartEpochSecondsCtx.reset();
+  batchProcessStartRawCtx.reset();
   isPidAliveSinceCtx.reset();
   isPidIdentityCurrentCtx.reset();
   captureTmuxOutputResultCtx.reset();
@@ -107,6 +127,146 @@ afterEach(() => {
   nowMsCtx.reset();
   resetTmuxObservationState();
   resetLifecycleLogState();
+});
+
+describe("primeProcessStartCache (batch process-start priming)", () => {
+  const S100 = Math.floor(Date.parse("Sat Aug 15 21:00:00 2026") / 1000);
+  const S200 = Math.floor(Date.parse("Sat Aug 15 20:00:00 2026") / 1000);
+
+  test("populates the cache from ONE batch spawn; dead pid → null entry", async () => {
+    resetProcessStartEpochSecondsCache();
+    // Read the guarded implementation (not the bare-PID beforeEach seam) so the
+    // process-start cache is actually consulted.
+    isPidAliveSinceCtx.reset();
+    isPidAliveCtx.set(() => true);
+
+    let batchCalls = 0;
+    let requested: number[] = [];
+    // pid 300 is deliberately ABSENT from the output — ps reports nothing for a
+    // dead pid, so prime must cache a null entry for it.
+    batchProcessStartRawCtx.set(async (pids) => {
+      batchCalls++;
+      requested = pids;
+      return `  100 Sat Aug 15 21:00:00 2026    \n200 Sat Aug 15 20:00:00 2026\n`;
+    });
+    // After priming, EVERY read must hit the cache — never the per-pid spawn.
+    processStartEpochSecondsCtx.set(() => {
+      throw new Error("per-pid ps spawn must not run after a batch prime");
+    });
+
+    await primeProcessStartCache([100, 200, 300]);
+
+    expect(batchCalls).toBe(1);
+    expect(requested).toEqual([100, 200, 300]);
+
+    // pid 100 cached a real start time: current when the write epoch matches,
+    // NOT current an hour off (a null entry would fail open as alive both ways).
+    expect(isPidAliveSinceCtx.fn(100, S100)).toBe(true);
+    expect(isPidAliveSinceCtx.fn(100, S100 + 3600)).toBe(false);
+    // pid 200 likewise holds its distinct start time.
+    expect(isPidAliveSinceCtx.fn(200, S200)).toBe(true);
+    expect(isPidAliveSinceCtx.fn(200, S200 + 3600)).toBe(false);
+    // pid 300 cached null (dead): fails open as alive for ANY write epoch, and
+    // reading it does NOT trigger the throwing per-pid spawn — proving the null
+    // entry was cached, not merely absent.
+    expect(() => isPidAliveSinceCtx.fn(300, S100 + 3600)).not.toThrow();
+    expect(isPidAliveSinceCtx.fn(300, S100 + 3600)).toBe(true);
+  });
+
+  test("no spawn for an empty pid list", async () => {
+    let batchCalls = 0;
+    batchProcessStartRawCtx.set(async () => {
+      batchCalls++;
+      return "";
+    });
+    await primeProcessStartCache([]);
+    expect(batchCalls).toBe(0);
+  });
+
+  test("unparseable lstart caches null (not a bogus epoch)", async () => {
+    resetProcessStartEpochSecondsCache();
+    isPidAliveSinceCtx.reset();
+    isPidAliveCtx.set(() => true);
+    batchProcessStartRawCtx.set(async () => `  100 not-a-real-date\n`);
+    processStartEpochSecondsCtx.set(() => {
+      throw new Error("per-pid ps spawn must not run after a batch prime");
+    });
+    await primeProcessStartCache([100]);
+    // null entry → fails open as alive for any epoch, no per-pid spawn.
+    expect(() => isPidAliveSinceCtx.fn(100, S100)).not.toThrow();
+    expect(isPidAliveSinceCtx.fn(100, S100)).toBe(true);
+  });
+
+  test("detectAgentStates primes alive claude_pids with one batch spawn", async () => {
+    resetProcessStartEpochSecondsCache();
+    isPidAliveSinceCtx.reset();
+    isPidAliveCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-p1", "ib-p2"]));
+    captureTmuxOutputResultCtx.set(async () => ({ status: "ok", output: "working" }));
+
+    const nowEpoch = Math.floor(Date.now() / 1000);
+    let batchCalls = 0;
+    let requested: number[] = [];
+    batchProcessStartRawCtx.set(async (pids) => {
+      batchCalls++;
+      requested = pids;
+      // Report each requested pid with a start time within margin of nowEpoch.
+      const stamp = new Date(nowEpoch * 1000).toUTCString();
+      return pids.map((p) => `${p} ${stamp}`).join("\n") + "\n";
+    });
+    // If the batch prime worked, the synchronous per-pid path is never hit.
+    processStartEpochSecondsCtx.set(() => {
+      throw new Error("per-pid ps spawn must not run when the batch prime covers the pid");
+    });
+
+    const mk = (id: string, session: string, pid: string) =>
+      makeAgent({
+        id,
+        meta: {
+          state: "running",
+          tmux_session: session,
+          claude_pid: pid,
+          claude_pid_epoch: nowEpoch,
+          created_epoch: nowEpoch - 3600,
+        } as Partial<AgentMeta> as AgentMeta,
+      });
+
+    const agents = [mk("a1", "ib-p1", "4001"), mk("a2", "ib-p2", "4002")];
+    await detectAgentStates(agents);
+
+    expect(batchCalls).toBe(1);
+    expect(requested.sort()).toEqual([4001, 4002]);
+    expect(agents.map((a) => a.state)).toEqual(["running", "running"]);
+  });
+
+  test("detectAgentStates does not spawn a batch for dead or epoch-less claude_pids", async () => {
+    resetProcessStartEpochSecondsCache();
+    isPidAliveSinceCtx.reset();
+    // pid alive check returns false → nothing to prime (dead pids never read the
+    // process-start cache).
+    isPidAliveCtx.set(() => false);
+    liveTmuxSessionsCtx.set(async () => new Set());
+
+    let batchCalls = 0;
+    batchProcessStartRawCtx.set(async () => {
+      batchCalls++;
+      return "";
+    });
+
+    const a = makeAgent({
+      id: "dead-1",
+      meta: {
+        state: "running",
+        tmux_session: "ib-dead",
+        claude_pid: "5001",
+        claude_pid_epoch: Math.floor(Date.now() / 1000),
+        created_epoch: Math.floor(Date.now() / 1000) - 8 * 24 * 60 * 60,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a]);
+    expect(batchCalls).toBe(0);
+  });
 });
 
 /** Narrow a FlatEntry to kind==="agent" or fail */
@@ -3159,30 +3319,29 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
     expect(log).toContain("reason=pid alive but no recorded pid epoch");
   });
 
-  test("an already-absent tmux session is classified as already gone", async () => {
-    // The husk kill fires against sessions that are usually already dead.
-    // "can't find session" is the expected no-op — calling it failed in an
-    // audit trail is misleading.
+  test("a not-live tmux session is skipped entirely (no kill-session spawn, no log)", async () => {
+    // D3: a long-stopped agent whose tmux_session names a session that died
+    // weeks ago must NOT pay a `tmux kill-session` spawn (nor log a redundant
+    // "already gone" line) on every new `ib watch` process. When the recorded
+    // session is absent from the live set detection already resolved, the husk
+    // teardown is skipped outright.
     classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
     isPidAliveCtx.set(() => false);
     killPidCtx.set(() => true);
-    liveTmuxSessionsCtx.set(async () => new Set());
+    liveTmuxSessionsCtx.set(async () => new Set()); // ib-gone is not live
     probeTmuxSessionCtx.set(async () => ({
       status: "missing",
       error: "can't find session: ib-gone",
     }));
-    tmuxPollerSpawnCtx.set(((args: any[]) => ({
-      stdout: new ReadableStream({ start(c) { c.close(); } }),
-      stderr: new ReadableStream({
-        start(c) {
-          if (args[1] === "kill-session") {
-            c.enqueue(new TextEncoder().encode("can't find session: ib-gone"));
-          }
-          c.close();
-        },
-      }),
-      exited: Promise.resolve(args[1] === "kill-session" ? 1 : 0),
-    })) as any);
+    let killSessionSpawns = 0;
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      if (args[0] === "tmux" && args[1] === "kill-session") killSessionSpawns++;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
 
     const a = makeAgent({
       id: "agent-gone",
@@ -3195,17 +3354,27 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
     });
     await detectAgentStates([a], { reap: true });
 
-    const { readFile } = await import("fs/promises");
-    const log = await readFile(logPath, "utf8");
-    expect(log).toContain("[orphan-kill] tmux kill-session already gone");
-    expect(log).not.toContain("kill-session failed");
+    expect(a.state).toBe("stopped");
+    // No kill-session spawn and no "[orphan-kill] tmux ..." teardown line. The
+    // skip logs NOTHING, so the watch log may not exist at all — that is even
+    // stronger proof than an empty line set, so only assert content if present.
+    expect(killSessionSpawns).toBe(0);
+    const { existsSync } = await import("fs");
+    if (existsSync(logPath)) {
+      const { readFile } = await import("fs/promises");
+      const log = await readFile(logPath, "utf8");
+      expect(log).not.toContain("[orphan-kill] tmux");
+    }
   });
 
   test("a genuine tmux teardown failure is still reported as failed", async () => {
     classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
     isPidAliveCtx.set(() => false);
     killPidCtx.set(() => true);
-    liveTmuxSessionsCtx.set(async () => new Set());
+    // D3: a genuine kill-session failure only arises when the session IS live
+    // (otherwise the teardown is skipped). Model a live husk whose kill-session
+    // fails for a real reason (tmux server connection error, not "already gone").
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-broken"]));
     probeTmuxSessionCtx.set(async () => ({
       status: "missing",
       error: "can't find session: ib-broken",
@@ -6708,6 +6877,9 @@ describe("detectAgentStates — reap option", () => {
     classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
     isPidAliveCtx.set(() => false);
     killPidCtx.set(() => true);
+    // D3: the husk session must be LIVE for teardown to fire — a husk that
+    // outlived Claude is exactly the session we want to kill.
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a5"]));
 
     const a = makeAgent({
       id: "agent-5",
@@ -6718,9 +6890,9 @@ describe("detectAgentStates — reap option", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    // Explicit opt-in. The husk tmux teardown is unconditional inside
-    // reapOrphanedClaude when resolvedState === "stopped" and tmux_session is
-    // set — proves we reached it.
+    // Explicit opt-in. The husk tmux teardown fires inside reapOrphanedClaude
+    // when resolvedState === "stopped", tmux_session is set, AND the session is
+    // still live — proves we reached it.
     await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killSessionCalls).toEqual(["=ib-a5:"]);

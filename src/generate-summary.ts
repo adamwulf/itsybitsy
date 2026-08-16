@@ -9,6 +9,25 @@
  */
 
 import { join } from "path";
+import { InjectionContext, type SpawnResult } from "./types";
+
+/**
+ * Spawn signature for the summarizer subprocess. Distinct from the shared
+ * `SpawnFn` in types.ts because this call site drains only stdout (stderr is
+ * ignored) and must pin `cwd` to the agent dir so the headless `claude -p`
+ * transcript lands in the agent's own project dir — never the coordinator's.
+ */
+export type SummarySpawnFn = (
+  cmd: string[],
+  opts: { stdout: "pipe"; stderr: "ignore"; cwd: string },
+) => SpawnResult;
+
+/**
+ * Injectable spawn seam for generateSummary. Defaults to Bun.spawn; tests
+ * override it to assert the spawn options (notably `cwd`) without running the
+ * real `claude` binary.
+ */
+export const spawnCtx = new InjectionContext<SummarySpawnFn>(Bun.spawn as SummarySpawnFn);
 
 /**
  * Validate that agentDir looks like a legitimate .ittybitty/agents/ path.
@@ -57,9 +76,16 @@ Do NOT:
 ${sanitizedPrompt}
 </agent_task>`;
   const cmd = buildSummaryCommand(summaryPrompt);
-  const proc = Bun.spawn(cmd, {
+  // Pin cwd to the agent dir so the headless `claude -p` transcript is written
+  // under the agent's own Claude project dir. Without this the process inherits
+  // the parent cwd; when the system coordinator (cwd ~/.itsybitsy) is the
+  // spawner, the stub transcript lands in the coordinator's project dir and
+  // `ib watch` later wastes ~20s trying to resume it. agentDir is already
+  // validated by isValidAgentDir above.
+  const proc = spawnCtx.fn(cmd, {
     stdout: "pipe",
     stderr: "ignore",
+    cwd: agentDir,
   });
   const text = await new Response(proc.stdout).text();
   const exitCode = await proc.exited;

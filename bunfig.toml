@@ -1,0 +1,7 @@
+# Bun configuration.
+#
+# [test].preload runs test-preload.ts before any test file (or its imports)
+# loads. It redirects the ib-watch diagnostic log to a throwaway temp file so
+# `bun test` never appends to the developer's real ~/.itsybitsy/watch.log.
+[test]
+preload = ["./test-preload.ts"]

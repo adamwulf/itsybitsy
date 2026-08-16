@@ -807,6 +807,69 @@ describe("hookSessionStart with @system", () => {
     // _all.md prefix appears before system.md body.
     expect(ctx.indexOf("ALL_LAYER_MARKER")).toBeLessThan(ctx.indexOf("SYSTEM_BODY_MARKER"));
   });
+
+  // A minimal system.md so generateInstructions() succeeds for @system.
+  async function seedSystemType(): Promise<void> {
+    await Bun.write(
+      join(typesDir, "system.md"),
+      "---\nname: system\ndescription: System coordinator\nspawnable: false\n---\nSYSTEM_BODY_MARKER",
+    );
+  }
+
+  const coordSessionPath = () => join(tempHome, ".itsybitsy", "coordinator-session.json");
+
+  test("records a valid data.session_id to coordinator-session.json", async () => {
+    await seedSystemType();
+    const sessionId = "deadbeef-1234-5678-90ab-cdef00001111";
+    const stdin = JSON.stringify({ cwd: "/tmp", session_id: sessionId });
+    await hookSessionStart(stdin, "@system");
+
+    const file = Bun.file(coordSessionPath());
+    expect(await file.exists()).toBe(true);
+    const recorded = await file.json();
+    expect(recorded.session_id).toBe(sessionId);
+    expect(typeof recorded.captured_at).toBe("number");
+
+    // stdout still emits a valid SessionStart payload with the system body.
+    const output = JSON.parse(captured);
+    expect(output.hookSpecificOutput.hookEventName).toBe("SessionStart");
+    expect(output.hookSpecificOutput.additionalContext).toContain("SYSTEM_BODY_MARKER");
+  });
+
+  test("missing session_id → no coordinator-session.json written, no crash", async () => {
+    await seedSystemType();
+    const stdin = JSON.stringify({ cwd: "/tmp" });
+    await hookSessionStart(stdin, "@system");
+
+    expect(await Bun.file(coordSessionPath()).exists()).toBe(false);
+    const output = JSON.parse(captured);
+    expect(output.hookSpecificOutput.hookEventName).toBe("SessionStart");
+  });
+
+  test("invalid session_id → no coordinator-session.json written, no crash", async () => {
+    await seedSystemType();
+    // Contains characters isValidSessionId rejects (spaces, punctuation).
+    const stdin = JSON.stringify({ cwd: "/tmp", session_id: "not a valid id!" });
+    await hookSessionStart(stdin, "@system");
+
+    expect(await Bun.file(coordSessionPath()).exists()).toBe(false);
+    const output = JSON.parse(captured);
+    expect(output.hookSpecificOutput.hookEventName).toBe("SessionStart");
+  });
+
+  test("additionalContext is byte-identical with vs without a session_id", async () => {
+    await seedSystemType();
+
+    captured = "";
+    await hookSessionStart(JSON.stringify({ cwd: "/tmp", session_id: "deadbeef-1234-5678-90ab-cdef00001111" }), "@system");
+    const withId = JSON.parse(captured).hookSpecificOutput.additionalContext;
+
+    captured = "";
+    await hookSessionStart(JSON.stringify({ cwd: "/tmp" }), "@system");
+    const withoutId = JSON.parse(captured).hookSpecificOutput.additionalContext;
+
+    expect(withId).toBe(withoutId);
+  });
 });
 
 describe("session-start team awareness (§16.6)", () => {

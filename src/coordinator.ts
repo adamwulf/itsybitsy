@@ -10,6 +10,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { readConfig } from "./config";
 import { captureTmuxOutput } from "./tmux-poller";
 import { isCompacting, isRateLimited, isPidAliveCtx } from "./agents";
+import { STARTUP_MARKERS } from "./parse-state";
 import { logToWatchLog } from "./watch-log";
 import { SpawnContext } from "./types";
 import { getTmuxWidthForAgent } from "./tui/widths";
@@ -104,32 +105,52 @@ async function readClearedMarker(): Promise<number> {
 }
 
 /**
+ * Marker every headless task-summarizer transcript begins with. `ib new-agent`
+ * spawns a `claude -p` summarizer (see `src/generate-summary.ts`) that — when
+ * driven by the system coordinator — writes its transcript into the
+ * coordinator's own `~/.claude/projects/<encoded>/` dir. Those stubs start with
+ * a `{"type":"queue-operation"...}` record, NOT a real coordinator session, and
+ * used to get picked as the newest transcript to resume (a 15s dead-resume +
+ * coordinator amnesia — see project_watch_slow_startup_coordinator_resume).
+ */
+const QUEUE_OPERATION_PREFIX = '{"type":"queue-operation"';
+
+/**
  * Scan the coordinator transcript dir and return one entry per `*.jsonl` file
- * whose basename parses as a valid session id. Each entry is `{ id, mtimeMs }`.
+ * whose basename parses as a valid session id. Each entry is
+ * `{ id, mtimeMs, isStub }`, where `isStub` flags a headless summarizer stub
+ * (first bytes match {@link QUEUE_OPERATION_PREFIX}) — classified by reading
+ * only a small 256-byte prefix, never the whole transcript.
  *
  * Returns `[]` when the dir is missing, unreadable, or contains no valid-id
- * transcripts. Per-file `stat` failures are silently skipped so a single
- * unreadable file doesn't poison the whole scan.
+ * transcripts. Per-file `stat` OR prefix-read failures are silently skipped so
+ * a single unreadable file doesn't poison the whole scan.
  *
  * Two callers share this:
  *   - `writeClearedMarker` reduces the entries to the max mtime so it can
- *     stamp the cleared marker past any post-kill flush.
+ *     stamp the cleared marker past any post-kill flush (stub or not).
  *   - `findLatestCoordinatorTranscriptId` filters by `mtimeMs > clearedAt`,
- *     sorts desc, and returns the newest non-cleared id.
+ *     drops stubs, sorts desc, and returns the newest non-cleared id.
  */
-async function scanCoordinatorTranscripts(): Promise<{ id: string; mtimeMs: number }[]> {
+async function scanCoordinatorTranscripts(): Promise<{ id: string; mtimeMs: number; isStub: boolean }[]> {
   const dir = coordinatorTranscriptDir();
   try {
     const { readdir, stat } = await import("fs/promises");
     const names = await readdir(dir);
-    const entries: { id: string; mtimeMs: number }[] = [];
+    const entries: { id: string; mtimeMs: number; isStub: boolean }[] = [];
     for (const name of names) {
       if (!name.endsWith(".jsonl")) continue;
       const id = name.slice(0, -".jsonl".length);
       if (!isValidSessionId(id)) continue;
+      const full = join(dir, name);
       try {
-        const s = await stat(join(dir, name));
-        entries.push({ id, mtimeMs: s.mtimeMs });
+        const s = await stat(full);
+        // Read only the first 256 bytes to classify — a stat failure OR a
+        // prefix-read failure skips this file (same as the pre-existing
+        // stat-failure handling), never the whole scan.
+        const prefix = await Bun.file(full).slice(0, 256).text();
+        const isStub = prefix.trimStart().startsWith(QUEUE_OPERATION_PREFIX);
+        entries.push({ id, mtimeMs: s.mtimeMs, isStub });
       } catch { /* skip */ }
     }
     return entries;
@@ -161,18 +182,57 @@ async function writeClearedMarker(): Promise<void> {
   await Bun.write(clearedMarkerPath(), String(stamp) + "\n");
 }
 
+/** Result of the coordinator resume scan — the chosen id plus counts for logging. */
+interface CoordinatorResumeScan {
+  /** Newest non-cleared, non-stub transcript id, or null when there is none. */
+  id: string | null;
+  /** Number of non-stub candidates the id was chosen from (post cleared-marker). */
+  candidateCount: number;
+  /** Number of headless-summarizer stubs filtered out (post cleared-marker). */
+  stubCount: number;
+}
+
 /**
- * Returns the session id of the newest non-cleared transcript, or null.
+ * Returns the session id of the newest non-cleared, non-stub transcript (or
+ * null), along with the candidate/stub counts for logging. Headless
+ * task-summarizer stubs (see {@link scanCoordinatorTranscripts}) are excluded
+ * so `claude --resume` never targets a `claude -p` summarizer transcript.
+ *
  * Picking the newest each time (rather than persisting an id) sidesteps
  * Claude's mid-conversation session-id rotation.
  */
-async function findLatestCoordinatorTranscriptId(): Promise<string | null> {
+async function findLatestCoordinatorTranscriptId(): Promise<CoordinatorResumeScan> {
   const clearedAt = await readClearedMarker();
-  const entries = (await scanCoordinatorTranscripts())
+  const live = (await scanCoordinatorTranscripts())
     .filter((e) => e.mtimeMs > clearedAt);
-  if (entries.length === 0) return null;
-  entries.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  return entries[0]!.id;
+  const candidates = live
+    .filter((e) => !e.isStub)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return {
+    id: candidates.length > 0 ? candidates[0]!.id : null,
+    candidateCount: candidates.length,
+    stubCount: live.length - candidates.length,
+  };
+}
+
+/**
+ * Read the coordinator session id recorded by the SessionStart hook in
+ * `~/.itsybitsy/coordinator-session.json` (shape: `{ session_id, captured_at }`).
+ * Returns null when the file is missing, malformed, or holds an invalid id.
+ *
+ * Used ONLY as a cross-check against the transcript-scan resume choice — it is
+ * observability we may promote to authoritative later, not the resume source.
+ */
+async function readRecordedCoordinatorSessionId(): Promise<string | null> {
+  try {
+    const file = Bun.file(join(itsybitsyHome(), "coordinator-session.json"));
+    if (!(await file.exists())) return null;
+    const parsed = JSON.parse(await file.text()) as { session_id?: unknown };
+    const id = parsed?.session_id;
+    return typeof id === "string" && isValidSessionId(id) ? id : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -261,22 +321,48 @@ async function tmuxSessionExists(): Promise<boolean> {
 /**
  * Poll the ib-coordinator tmux session until Claude's UI is ready.
  * Mirrors the readiness pattern used by autoAcceptWorkspaceTrustForNewAgent in
- * ib-commands.ts: capture the pane every 500ms and look for the Claude logo
- * (`Claude Code v`) or a previously-injected user task marker (`[USER TASK]`).
+ * ib-commands.ts: capture the pane every 500ms and look for any of the shared
+ * startup markers (`STARTUP_MARKERS` in src/parse-state.ts — the plain Claude
+ * logo line, the boxed logo line, the injected `[USER TASK]` marker, or
+ * `[AGENT CONTEXT]`). A resumed session frequently shows none of the two
+ * original markers in its last 200 lines, so matching the broader shared set
+ * prevents a healthy session from being judged not-ready and then needlessly
+ * killed + relaunched (a ~20s startup penalty).
  *
- * Returns true once the readiness marker appears, false if the poll exhausts
- * its attempt budget (~15s).
+ * Returns true once any readiness marker appears, false if the poll exhausts
+ * its attempt budget (30 × 500ms ≈ 15s). On exhaustion a single diagnostic
+ * line is written to watch.log with the tail of the final captured pane, so we
+ * can tell whether the marker set is still too narrow.
  */
 export async function waitForCoordinatorReady(): Promise<boolean> {
+  const POLL_INTERVAL_MS = 500;
   const maxAttempts = 30;
+  let lastOutput: string | null = null;
   for (let i = 0; i < maxAttempts; i++) {
-    await sleepFn(500);
+    await sleepFn(POLL_INTERVAL_MS);
     const output = await captureTmuxOutput(IB_COORDINATOR_SESSION, 200);
+    lastOutput = output;
     if (output === null) continue;
-    if (output.includes("Claude Code v") || output.includes("[USER TASK]")) {
+    if (STARTUP_MARKERS.some((m) => output.includes(m))) {
       return true;
     }
   }
+
+  // Poll exhausted — record one diagnostic line so the failure leaves a trace.
+  // Append the last 5 non-empty lines of the final capture: that tail is the
+  // signal that tells us whether STARTUP_MARKERS is still too narrow.
+  const budgetMs = maxAttempts * POLL_INTERVAL_MS;
+  let tail: string;
+  if (lastOutput === null) {
+    tail = "(final capture returned null)";
+  } else {
+    tail = lastOutput
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .slice(-5)
+      .join("\n");
+  }
+  logToWatchLog(`[coordinator] ready-poll exhausted after ${budgetMs}ms; pane tail:\n${tail}`);
   return false;
 }
 
@@ -384,8 +470,10 @@ export async function ensureSystemCoordinator(): Promise<string> {
 }
 
 async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Promise<string> {
+  const startedAt = Date.now();
   if (await tmuxSessionExists()) {
     lastSpawnMode = "existing";
+    logToWatchLog(`[coordinator] ready mode=existing after ${Date.now() - startedAt}ms`);
     return IB_COORDINATOR_SESSION;
   }
 
@@ -411,6 +499,7 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
     // TOCTOU: another instance created the session — that's fine
     if (await tmuxSessionExists()) {
       lastSpawnMode = "existing";
+      logToWatchLog(`[coordinator] ready mode=existing after ${Date.now() - startedAt}ms`);
       return IB_COORDINATOR_SESSION;
     }
     throw new Error("Failed to create system coordinator tmux session");
@@ -462,9 +551,30 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   const model = parsed.model;
   const imessage = config["coordinator.imessage"]?.value === true;
 
-  // Resume the newest non-cleared transcript. Skip on the post-failure retry
-  // so a single bad transcript can't trap us in an infinite loop.
-  const resumeId = retryAfterResumeFailure ? null : await findLatestCoordinatorTranscriptId();
+  // Resume the newest non-cleared, non-stub transcript. Skip the scan on the
+  // post-failure retry so a single bad transcript can't trap us in a loop.
+  const scan: CoordinatorResumeScan = retryAfterResumeFailure
+    ? { id: null, candidateCount: 0, stubCount: 0 }
+    : await findLatestCoordinatorTranscriptId();
+  const resumeId = scan.id;
+
+  if (resumeId) {
+    logToWatchLog(
+      `[coordinator] resume id=${resumeId} (newest of ${scan.candidateCount} candidates, ${scan.stubCount} stub(s) filtered)`,
+    );
+    // Cross-check only: the SessionStart hook records Claude's real session id
+    // in coordinator-session.json. A mismatch with the scan choice is logged
+    // for observability — the scan still wins (recorded id may become
+    // authoritative in a later change).
+    const recordedId = await readRecordedCoordinatorSessionId();
+    if (recordedId && recordedId !== resumeId) {
+      logToWatchLog(
+        `[coordinator] recorded session id=${recordedId} differs from scan choice ${resumeId} (using scan choice)`,
+      );
+    }
+  } else {
+    logToWatchLog(`[coordinator] fresh launch (no resume candidate)`);
+  }
 
   const channels: string[] = [];
   if (imessage) channels.push("plugin:imessage@claude-plugins-official");
@@ -488,12 +598,17 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   // (corrupt or version-mismatched transcript) and recover with a fresh
   // launch. The prompt body itself is delivered by the SessionStart hook
   // on both fresh and resume; this poll only watches for the UI marker.
+  const readyStart = Date.now();
   const ready = await waitForCoordinatorReady();
+  const readyMs = Date.now() - readyStart;
 
   if (resumeId && !ready) {
     // Resume failed (likely a corrupt or version-mismatched transcript). Kill
     // the dead session, write the cleared marker so this transcript is
     // skipped, and retry once as a fresh launch.
+    logToWatchLog(
+      `[coordinator] resume of ${resumeId} not ready after ${readyMs}ms — killing session, clearing prior transcripts`,
+    );
     await coordinatorSpawnCtx.run(["tmux", "kill-session", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION)]);
     await writeClearedMarker();
     return await ensureSystemCoordinatorImpl(true);
@@ -502,6 +617,7 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   // The SessionStart hook delivers `system.md`'s markdown body via
   // additionalContext on both fresh and resume — no special-case work here.
   lastSpawnMode = resumeId ? "resumed" : "fresh";
+  logToWatchLog(`[coordinator] ready mode=${lastSpawnMode} after ${readyMs}ms`);
 
   return IB_COORDINATOR_SESSION;
 }

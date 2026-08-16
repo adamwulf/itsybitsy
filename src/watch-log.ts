@@ -18,7 +18,20 @@ import {
 
 const MAX_BYTES = 1_048_576; // 1 MB
 
-const DEFAULT_LOG_PATH = join(homedir(), ".itsybitsy", "watch.log");
+/**
+ * Resolve the default log path. Honors the IB_WATCH_LOG_PATH env override when
+ * present so a harness (notably `bun test`) can redirect the log away from the
+ * user's live ~/.itsybitsy/watch.log for the whole process — including the
+ * path resetWatchLogPath() restores to. In normal use the env is unset and
+ * this is exactly ~/.itsybitsy/watch.log.
+ */
+function resolveDefaultLogPath(): string {
+  const override = process.env.IB_WATCH_LOG_PATH;
+  if (override && override.trim().length > 0) return override;
+  return join(homedir(), ".itsybitsy", "watch.log");
+}
+
+const DEFAULT_LOG_PATH = resolveDefaultLogPath();
 
 let logPath = DEFAULT_LOG_PATH;
 let watchRunning = false;

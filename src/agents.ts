@@ -1488,9 +1488,12 @@ export function hasBackgroundTasks(tmuxOutput: string): boolean {
   const tail = lines.slice(-BACKGROUND_TASKS_WINDOW).join("\n");
   // New footer: a "· N shell" / "· N shells" status-bar segment (and the
   // "· N shell still running" spinner-line variant) that renders regardless of
-  // the auto-accept vs. manual-mode marker. The trailing \b word boundary
-  // prevents false positives like "shellscript".
-  const newFormat = /·\s*\d+\s+shells?\b/.test(tail);
+  // the auto-accept vs. manual-mode marker. The shell segment is always
+  // intra-line, so we match horizontal whitespace only ([ \t], never \s) — that
+  // avoids a theoretical cross-line false match where one joined-tail line ends
+  // in "·" and the next begins with "N shells ...". The trailing \b word
+  // boundary prevents false positives like "shellscript".
+  const newFormat = /·[ \t]*\d+[ \t]+shells?\b/.test(tail);
   // Legacy footer: the "⏵⏵ ... · N ..." auto-accept status bar (background
   // tasks / bashes). Retained for older Claude builds and existing tests.
   const legacyFormat = /⏵⏵.*·\s\d+\s/.test(tail);

@@ -2248,6 +2248,19 @@ describe("hasBackgroundTasks", () => {
       const output = "  · 3 shellscripts staged";
       expect(hasBackgroundTasks(output)).toBe(false);
     });
+
+    test("ANSI-colored new format IS detected", () => {
+      const output = "line1\n\x1b[2m  ⏸ manual mode on · 1 shell · ← for agents\x1b[0m\nline3";
+      expect(hasBackgroundTasks(output)).toBe(true);
+    });
+
+    test("a '·' ending one line and 'N shells' starting the next is NOT detected", () => {
+      // The shell segment is always intra-line; matching horizontal whitespace
+      // only ([ \t], never \s) prevents a cross-line false match in the joined
+      // tail where one line ends in "·" and the next begins with "N shells ...".
+      const output = ["some output ending in a middot ·", "3 shells were opened earlier in the log"].join("\n");
+      expect(hasBackgroundTasks(output)).toBe(false);
+    });
   });
 });
 

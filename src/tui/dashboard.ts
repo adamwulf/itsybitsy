@@ -33,6 +33,7 @@ import {
   ensureSystemCoordinator,
   releaseSystemCoordinator,
   sanitizeTmuxInput,
+  isCoordinatorRestartCommand,
 } from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
@@ -868,8 +869,28 @@ export class DashboardComponent implements Component {
 
     this.coordinatorInputField = new InputFieldComponent();
     this.coordinatorInputField.onSubmit = (text: string) => {
-      if (!text.trim()) return;
-      const sanitized = sanitizeTmuxInput(text.trim());
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      // /restart and /respawn tear down and rebuild the system coordinator with
+      // a FRESH session (cleared marker) rather than being typed into Claude's
+      // prompt — parity with the Telegram dispatch. Intercept before the
+      // verbatim send. (The resume-based `R` key is intentionally separate.)
+      if (isCoordinatorRestartCommand(trimmed)) {
+        this.setNotice("Restarting coordinator (fresh)…", "info");
+        this.executeAndRefresh(async () => {
+          const { restartSystemCoordinatorFresh } = await import("../coordinator");
+          const ready = await restartSystemCoordinatorFresh();
+          this.coordinatorPane.resetForAgent();
+          this.setNotice(
+            ready
+              ? "Coordinator restarted with a fresh session"
+              : "Coordinator restart did not reach ready marker",
+            ready ? "info" : "error",
+          );
+        });
+        return;
+      }
+      const sanitized = sanitizeTmuxInput(trimmed);
       this.executeAndRefresh(async () => {
         // Route the inline coordinator input through sendToSystemCoordinator so
         // it shares the coordinator-home outbox queue + per-session lock with

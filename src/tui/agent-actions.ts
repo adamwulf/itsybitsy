@@ -50,7 +50,7 @@ import { clampLeftWidthAbsolute } from "./widths";
 import { wordWrapLines } from "./wrap";
 import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
-import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, checkCoordinatorExists, getLastCoordinatorSpawnMode, discardSystemCoordinator } from "../coordinator";
+import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, restartSystemCoordinatorFresh, isCoordinatorRestartCommand, checkCoordinatorExists, getLastCoordinatorSpawnMode, discardSystemCoordinator } from "../coordinator";
 import { isValidToolList } from "../validation";
 import { listTeams, getTeam } from "../teams";
 
@@ -1327,8 +1327,26 @@ function handleSendToCoordinator(ctx: ActionCtx) {
     },
     onSubmit: (message: string) => {
       ctx.closeDialog();
-      if (!message.trim()) { ctx.setNotice("Send cancelled", "info"); return; }
-      const sanitized = sanitizeTmuxInput(message.trim());
+      const trimmed = message.trim();
+      if (!trimmed) { ctx.setNotice("Send cancelled", "info"); return; }
+      // /restart and /respawn tear down and rebuild the system coordinator with
+      // a FRESH session (cleared marker) rather than being typed into Claude's
+      // prompt — parity with the Telegram dispatch and the coordinator chat box.
+      if (isCoordinatorRestartCommand(trimmed)) {
+        ctx.setNotice("Restarting coordinator (fresh)…", "info");
+        ctx.executeAndRefresh(async () => {
+          const ready = await restartSystemCoordinatorFresh();
+          ctx.coordinatorPane.resetForAgent();
+          ctx.setNotice(
+            ready
+              ? "Coordinator restarted with a fresh session"
+              : "Coordinator restart did not reach ready marker",
+            ready ? "info" : "error",
+          );
+        });
+        return;
+      }
+      const sanitized = sanitizeTmuxInput(trimmed);
       ctx.executeAndRefresh(async () => {
         // Route through sendToSystemCoordinator so this send shares the
         // coordinator-home outbox queue + per-session lock with `ib send

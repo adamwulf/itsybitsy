@@ -100,6 +100,7 @@
  */
 
 import { InjectionContext } from "../types";
+import { isCoordinatorRestartCommand } from "../coordinator";
 import { TelegramClient, classifyError, TELEGRAM_GETFILE_LIMIT_BYTES } from "./telegram-client";
 import type { PollOutcome } from "./telegram-client";
 import type {
@@ -180,10 +181,8 @@ export const ensureCoordinatorCtx = new InjectionContext<EnsureCoordinatorFn>(de
  *  inject a stub. */
 export type RestartCoordinatorFn = () => Promise<boolean>;
 const defaultRestartCoordinator: RestartCoordinatorFn = async () => {
-  const { discardSystemCoordinator, ensureSystemCoordinator, waitForCoordinatorReady } = await import("../coordinator");
-  await discardSystemCoordinator();
-  await ensureSystemCoordinator();
-  return await waitForCoordinatorReady();
+  const { restartSystemCoordinatorFresh } = await import("../coordinator");
+  return await restartSystemCoordinatorFresh();
 };
 export const restartCoordinatorCtx = new InjectionContext<RestartCoordinatorFn>(defaultRestartCoordinator);
 
@@ -854,7 +853,7 @@ export class TelegramDispatcher {
     // FRESH session ourselves; never forward the slash command text to the
     // coordinator (Claude treats it as a normal prompt too often). Acks
     // fire on Telegram only after the new session is ready.
-    if (commandName === "/restart" || commandName === "/respawn") {
+    if (isCoordinatorRestartCommand(commandName)) {
       try {
         const ready = await restartCoordinatorCtx.fn();
         if (ready) {

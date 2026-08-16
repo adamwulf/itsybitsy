@@ -24,6 +24,9 @@ import {
   getLastCoordinatorSpawnMode,
   discardSystemCoordinator,
   waitForCoordinatorReady,
+  restartSystemCoordinatorFresh,
+  isCoordinatorRestartCommand,
+  COORDINATOR_RESTART_COMMANDS,
 } from "./coordinator";
 import { encodeClaudeProjectPath } from "./auto-compact";
 import { spawnCtx as tmuxSpawnCtx } from "./tmux-poller";
@@ -1604,6 +1607,127 @@ describe("restartSystemCoordinator", () => {
     const newIdx = cmdStrs.findIndex((c) => c.includes("new-session"));
     expect(killIdx).toBeGreaterThanOrEqual(0);
     expect(newIdx).toBeGreaterThan(killIdx);
+  });
+});
+
+// -------------------------------------------------------------------
+// isCoordinatorRestartCommand — the predicate shared by the Telegram
+// dispatch and the TUI chat box / `s`-dialog so all three recognize
+// /restart and /respawn identically (exact, case-sensitive, trimmed).
+// -------------------------------------------------------------------
+describe("isCoordinatorRestartCommand", () => {
+  test("matches /restart and /respawn exactly", () => {
+    expect(isCoordinatorRestartCommand("/restart")).toBe(true);
+    expect(isCoordinatorRestartCommand("/respawn")).toBe(true);
+  });
+
+  test("is case-sensitive — /Restart does not match", () => {
+    expect(isCoordinatorRestartCommand("/Restart")).toBe(false);
+    expect(isCoordinatorRestartCommand("/RESPAWN")).toBe(false);
+  });
+
+  test("does not match when a trailing arg follows the command", () => {
+    expect(isCoordinatorRestartCommand("/restart now")).toBe(false);
+    expect(isCoordinatorRestartCommand("/restart ")).toBe(false);
+    expect(isCoordinatorRestartCommand("/respawn please")).toBe(false);
+  });
+
+  test("does not match other slash commands, empty, or plain text", () => {
+    expect(isCoordinatorRestartCommand("/context")).toBe(false);
+    expect(isCoordinatorRestartCommand("/clear")).toBe(false);
+    expect(isCoordinatorRestartCommand("/compact")).toBe(false);
+    expect(isCoordinatorRestartCommand("")).toBe(false);
+    expect(isCoordinatorRestartCommand("restart")).toBe(false);
+    expect(isCoordinatorRestartCommand("please /restart the coordinator")).toBe(false);
+  });
+
+  test("COORDINATOR_RESTART_COMMANDS holds exactly the two recognized commands", () => {
+    expect([...COORDINATOR_RESTART_COMMANDS].sort()).toEqual(["/respawn", "/restart"]);
+  });
+});
+
+// -------------------------------------------------------------------
+// restartSystemCoordinatorFresh — the shared FRESH-restart helper used by
+// the Telegram /restart dispatch and the TUI chat box / `s`-dialog. It must
+// discard (write the cleared marker so the prior transcript is NOT resumed),
+// ensure a new session, then wait for the ready marker.
+// -------------------------------------------------------------------
+describe("restartSystemCoordinatorFresh", () => {
+  let tmpDir: string;
+  let typesHome: string;
+  const originalHome = process.env.HOME;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "coord-fresh-"));
+    setCoordinatorHome(tmpDir);
+    typesHome = await mkdtemp(join(tmpdir(), "coord-fresh-home-"));
+    process.env.HOME = typesHome;
+    setCoordinatorSleepFn(async () => {});
+    // waitForCoordinatorReady captures the pane via tmuxSpawnCtx — return the
+    // ready marker so the fresh restart resolves true.
+    tmuxSpawnCtx.set((_cmd: string[], _opts?: any) => ({
+      stdout: mockStream("Claude Code v1.0.0"),
+      stderr: emptyStream(),
+      exited: Promise.resolve(0),
+    }));
+  });
+
+  afterEach(async () => {
+    coordinatorSpawnCtx.reset();
+    tmuxSpawnCtx.reset();
+    resetCoordinatorHome();
+    resetCoordinatorSleepFn();
+    process.env.HOME = originalHome;
+    await rm(tmpDir, { recursive: true, force: true });
+    await rm(typesHome, { recursive: true, force: true });
+  });
+
+  test("discards (writes cleared marker), creates a fresh session, and returns true when ready", async () => {
+    const commands: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      commands.push([...cmd]);
+      const cmdStr = cmd.join(" ");
+      // has-session must report "gone" after the discard so ensure spawns anew.
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    const ready = await restartSystemCoordinatorFresh();
+    expect(ready).toBe(true);
+
+    const cmdStrs = commands.map((c) => c.join(" "));
+    // discard → kill; ensure → new-session (kill precedes create).
+    const killIdx = cmdStrs.findIndex((c) => c.includes("kill-session"));
+    const newIdx = cmdStrs.findIndex((c) => c.includes("new-session"));
+    expect(killIdx).toBeGreaterThanOrEqual(0);
+    expect(newIdx).toBeGreaterThan(killIdx);
+
+    // The cleared marker is the proof this is a FRESH restart (the prior
+    // transcript is not resumed) — the key behavioral difference from
+    // restartSystemCoordinator.
+    const markerExists = await Bun.file(join(tmpDir, "coordinator-session.cleared")).exists();
+    expect(markerExists).toBe(true);
+  });
+
+  test("returns false when the new session never reaches the ready marker", async () => {
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+    // Capture never shows the ready marker → waitForCoordinatorReady exhausts.
+    tmuxSpawnCtx.set((_cmd: string[], _opts?: any) => ({
+      stdout: mockStream("still booting..."),
+      stderr: emptyStream(),
+      exited: Promise.resolve(0),
+    }));
+
+    const ready = await restartSystemCoordinatorFresh();
+    expect(ready).toBe(false);
   });
 });
 

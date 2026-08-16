@@ -742,6 +742,31 @@ export async function discardSystemCoordinator(): Promise<void> {
   await writePidsAtomic(remaining);
 }
 
+/** Fresh-restart the system coordinator: discard the current session (kill +
+ *  write the cleared marker so the prior transcript is NOT resumed), spawn a
+ *  new one, and wait for it to reach the ready marker. Returns true when the
+ *  new session is ready, false if it never reached the marker. Single source
+ *  of truth shared by the Telegram `/restart`/`/respawn` dispatch and the TUI
+ *  coordinator chat box / `s`-dialog so both produce identical FRESH restarts.
+ *  Contrast `restartSystemCoordinator`, which RESUMES the prior transcript. */
+export async function restartSystemCoordinatorFresh(): Promise<boolean> {
+  await discardSystemCoordinator();
+  await ensureSystemCoordinator();
+  return await waitForCoordinatorReady();
+}
+
+/** Slash commands that must tear down and rebuild the system coordinator
+ *  rather than being forwarded to its Claude Code prompt. `/restart` and
+ *  `/respawn` are NOT commands the coordinator's Claude session acts on —
+ *  forwarding them was unreliable — so every entry point (Telegram dispatch,
+ *  TUI chat box, TUI `s`-dialog) intercepts them and calls
+ *  `restartSystemCoordinatorFresh()`. Exact, case-sensitive match on the
+ *  trimmed body, matching the Telegram recognizer. */
+export const COORDINATOR_RESTART_COMMANDS: ReadonlySet<string> = new Set(["/restart", "/respawn"]);
+export function isCoordinatorRestartCommand(trimmed: string): boolean {
+  return COORDINATOR_RESTART_COMMANDS.has(trimmed);
+}
+
 export type CoordinatorState = "stopped" | "compacting" | "rate_limited" | "running";
 
 /**

@@ -4971,6 +4971,99 @@ describe("coordinator input field (Phase 49)", () => {
     }
   });
 
+  for (const cmd of ["/restart", "/respawn"]) {
+    test(`coordinator submit of '${cmd}' fresh-restarts the coordinator and does NOT send it verbatim`, async () => {
+      // Parity with the Telegram /restart dispatch: typing /restart or /respawn
+      // into the coordinator chat box must tear down + rebuild a FRESH session
+      // (cleared marker so the prior transcript is not resumed) via
+      // restartSystemCoordinatorFresh — NOT be typed into Claude's prompt. We
+      // prove it by (a) driving the coordinator lifecycle spawns through the
+      // injected coordinatorSpawnCtx and asserting kill-session precedes
+      // new-session + a cleared marker is written, and (b) asserting the outbox
+      // send runner never emitted a verbatim send-keys carrying the command.
+      const {
+        setCoordinatorHome, resetCoordinatorHome, coordinatorSpawnCtx,
+        setCoordinatorSleepFn, resetCoordinatorSleepFn,
+      } = await import("../coordinator");
+      const coordHome = await mkdtemp(join(tmpdir(), "dash-restart-home-"));
+      const typesHome = await mkdtemp(join(tmpdir(), "dash-restart-types-"));
+      const cfgDir = await mkdtemp(join(tmpdir(), "dash-restart-cfg-"));
+      const originalHome = process.env.HOME;
+      setUserConfigPath(join(cfgDir, "config.json"));
+      setCoordinatorHome(coordHome);
+      process.env.HOME = typesHome;
+      setCoordinatorSleepFn(async () => {});
+
+      // coordinatorSpawnCtx / tmuxPollerSpawnCtx are SpawnContexts whose runner
+      // returns a spawn-like object ({stdout, stderr, exited}) — not the flat
+      // SpawnResult that setSendSpawnRunner takes. Build streams for them.
+      const streamOf = (text: string): ReadableStream<Uint8Array> => {
+        const enc = new TextEncoder();
+        return new ReadableStream({ start(c) { c.enqueue(enc.encode(text)); c.close(); } });
+      };
+      const emptyStreamOf = (): ReadableStream<Uint8Array> =>
+        new ReadableStream({ start(c) { c.close(); } });
+
+      const coordCommands: string[][] = [];
+      coordinatorSpawnCtx.set((cmd2: string[], _opts?: any) => {
+        coordCommands.push([...cmd2]);
+        const s = cmd2.join(" ");
+        // has-session must report "gone" after the discard so ensure spawns anew.
+        const exit = s.includes("has-session") ? 1 : 0;
+        return { stdout: streamOf(""), stderr: emptyStreamOf(), exited: Promise.resolve(exit) } as any;
+      });
+      // waitForCoordinatorReady captures the pane via the tmux-poller spawnCtx —
+      // return the ready marker so the fresh restart resolves true.
+      tmuxPollerSpawnCtx.set((_cmd: string[], _opts?: any) =>
+        ({ stdout: streamOf("Claude Code v1.0.0"), stderr: emptyStreamOf(), exited: Promise.resolve(0) } as any));
+
+      const sendKeys: string[][] = [];
+      setSendSpawnRunner((c: string[]) => {
+        sendKeys.push(c);
+        return makeSpawnResult();
+      });
+
+      try {
+        const dashboard = setupCoordinatorDashboard();
+        tabToCoordinator(dashboard);
+        dashboard.handleInput("\t"); // pane → input sub-focus
+        for (const ch of cmd) dashboard.handleInput(ch);
+        dashboard.handleInput("\t"); // input → send
+        dashboard.handleInput("\r");
+
+        await dashboard.flushPendingActions();
+
+        // Fresh-restart lifecycle ran: kill (discard) precedes new-session (ensure).
+        const coordStrs = coordCommands.map((c) => c.join(" "));
+        const killIdx = coordStrs.findIndex((c) => c.includes("kill-session"));
+        const newIdx = coordStrs.findIndex((c) => c.includes("new-session"));
+        expect(killIdx).toBeGreaterThanOrEqual(0);
+        expect(newIdx).toBeGreaterThan(killIdx);
+
+        // Cleared marker written → this is a FRESH restart, not a resume.
+        const markerExists = await Bun.file(join(coordHome, "coordinator-session.cleared")).exists();
+        expect(markerExists).toBe(true);
+
+        // The command was NOT sent verbatim to the coordinator via the outbox.
+        const verbatim = sendKeys.find(
+          (c) => c[0] === "tmux" && c[1] === "send-keys" && c[4] === "-l" && typeof c[6] === "string" && c[6].includes(cmd),
+        );
+        expect(verbatim).toBeUndefined();
+      } finally {
+        coordinatorSpawnCtx.reset();
+        tmuxPollerSpawnCtx.reset();
+        resetCoordinatorHome();
+        resetCoordinatorSleepFn();
+        resetUserConfigPath();
+        resetSendSpawnRunner();
+        process.env.HOME = originalHome;
+        await rm(coordHome, { recursive: true, force: true });
+        await rm(typesHome, { recursive: true, force: true });
+        await rm(cfgDir, { recursive: true, force: true });
+      }
+    });
+  }
+
   test("syncSelectedAgent switches coordinator input field buffer", () => {
     const dashboard = setupCoordinatorDashboard();
 

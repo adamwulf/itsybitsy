@@ -64,7 +64,7 @@ mock.module("fs", () => ({
 
 // Import after mocking the fs module. agentsCtx is the watcher's injection seam
 // for the ./agents functions — fakes are wired in via agentsCtx.set() below.
-const { AgentWatcher, agentsCtx } = await import("./watcher");
+const { AgentWatcher, agentsCtx, mapInChunks } = await import("./watcher");
 // Import coordinatorSpawnCtx to inject noop (prevents real tmux calls in getCoordinatorInfo)
 const { coordinatorSpawnCtx } = await import("./coordinator");
 // Import tmux-poller spawnCtx for tests that exercise captureTmuxOutput / display-message
@@ -1412,6 +1412,71 @@ describe("AgentWatcher", () => {
 
       watcher.stop();
       tmuxPollerSpawnCtx.reset();
+    });
+  });
+});
+
+describe("health-check throttling (D2)", () => {
+  test("HEALTH_CHECK_COOLDOWN_MS is raised to 5 minutes", () => {
+    expect(AgentWatcher.HEALTH_CHECK_COOLDOWN_MS).toBe(300_000);
+  });
+
+  test("HEALTH_CHECK_CHUNK_SIZE bounds the per-tick spawn burst", () => {
+    expect(AgentWatcher.HEALTH_CHECK_CHUNK_SIZE).toBe(8);
+  });
+
+  describe("mapInChunks", () => {
+    test("never runs more than chunkSize calls concurrently, preserving order", async () => {
+      let inFlight = 0;
+      let peak = 0;
+      const items = Array.from({ length: 20 }, (_, i) => i);
+      const results = await mapInChunks(items, 8, async (n) => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        // Yield twice so overlapping calls within a chunk genuinely coexist
+        // before any of them decrements.
+        await Promise.resolve();
+        await Promise.resolve();
+        inFlight--;
+        return n * 2;
+      });
+      // First chunk fills to exactly the cap; no chunk boundary is ever crossed.
+      expect(peak).toBe(8);
+      expect(results).toEqual(items.map((n) => n * 2));
+    });
+
+    test("empty input performs no calls and returns []", async () => {
+      let calls = 0;
+      const results = await mapInChunks<number, number>([], 8, async (x) => {
+        calls++;
+        return x;
+      });
+      expect(results).toEqual([]);
+      expect(calls).toBe(0);
+    });
+
+    test("chunkSize >= length runs everything in one chunk", async () => {
+      let inFlight = 0;
+      let peak = 0;
+      await mapInChunks([1, 2, 3], 8, async (n) => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await Promise.resolve();
+        inFlight--;
+        return n;
+      });
+      expect(peak).toBe(3);
+    });
+
+    test("passes the correct absolute index across chunk boundaries", async () => {
+      const seen: number[] = [];
+      const items = ["a", "b", "c", "d", "e"];
+      const out = await mapInChunks(items, 2, async (item, idx) => {
+        seen.push(idx);
+        return `${idx}:${item}`;
+      });
+      expect(seen.sort((x, y) => x - y)).toEqual([0, 1, 2, 3, 4]);
+      expect(out).toEqual(["0:a", "1:b", "2:c", "3:d", "4:e"]);
     });
   });
 });

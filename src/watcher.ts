@@ -19,6 +19,29 @@ import { InjectionContext } from "./types";
 import { tmuxSessionTarget } from "./validation";
 
 /**
+ * Map `items` through `fn` with at most `chunkSize` calls in flight at once,
+ * preserving input order in the returned results. Each chunk fully settles
+ * before the next begins, so peak concurrency never exceeds `chunkSize`. Used
+ * to bound the per-repo `git` spawn burst in health checks (a big Promise.all
+ * over ~50 repos would launch 150+ processes in one tick). A non-positive
+ * `chunkSize` degrades to a single all-at-once Promise.all.
+ */
+export async function mapInChunks<T, R>(
+  items: readonly T[],
+  chunkSize: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (chunkSize <= 0) return Promise.all(items.map((item, i) => fn(item, i)));
+  const results: R[] = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    const chunk = items.slice(i, i + chunkSize);
+    const settled = await Promise.all(chunk.map((item, j) => fn(item, i + j)));
+    results.push(...settled);
+  }
+  return results;
+}
+
+/**
  * Injectable bundle of the ./agents functions AgentWatcher consumes. Defaults
  * to the real implementations; tests inject fakes via `agentsCtx.set(...)` and
  * restore with `agentsCtx.reset()`. This replaces the old per-file
@@ -128,8 +151,17 @@ export class AgentWatcher {
     }, 2_000);
   }
 
-  /** Cooldown period for health checks (30s) — avoids re-running on every fs.watch event */
-  static readonly HEALTH_CHECK_COOLDOWN_MS = 30_000;
+  /** Cooldown period for health checks (5 min) — avoids re-running on every
+   *  fs.watch event. Raised from 30s: each pass fans out 3 `git` spawns per
+   *  repo, so on a large repo set (~50 repos ≈ 150 processes) a 30s cooldown
+   *  retriggered by every refresh was a steady background spawn storm. Health
+   *  data is slow-moving; 5 min is ample. The `H` keybinding
+   *  (recheckHealth → force=true) still bypasses this for an on-demand refresh. */
+  static readonly HEALTH_CHECK_COOLDOWN_MS = 300_000;
+
+  /** Max repos health-checked concurrently — bounds the `git` spawn burst so a
+   *  large repo set can't launch 150+ processes in one tick. */
+  static readonly HEALTH_CHECK_CHUNK_SIZE = 8;
 
   /** Run health checks for all repos and global config.
    *  Skips if the last check was within the cooldown period (unless force=true). */
@@ -138,8 +170,15 @@ export class AgentWatcher {
     if (!force && now - this.lastHealthCheckAt < AgentWatcher.HEALTH_CHECK_COOLDOWN_MS) return;
     this.lastHealthCheckAt = now;
     try {
+      // Cap concurrency: process repos in fixed-size chunks instead of one big
+      // Promise.all, so the per-repo `git` spawns (3 each) never exceed
+      // HEALTH_CHECK_CHUNK_SIZE * 3 in flight at once.
       const [repoResults, globalWarnings] = await Promise.all([
-        Promise.all(this.repos.map((r) => checkRepoHealth(r.path))),
+        mapInChunks(
+          this.repos,
+          AgentWatcher.HEALTH_CHECK_CHUNK_SIZE,
+          (r) => checkRepoHealth(r.path),
+        ),
         checkGlobalHealth(),
       ]);
       for (const report of repoResults) {

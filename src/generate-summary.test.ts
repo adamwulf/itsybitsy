@@ -2,7 +2,17 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
-import { generateSummary, isValidAgentDir, buildSummaryCommand } from "./generate-summary";
+import { generateSummary, isValidAgentDir, buildSummaryCommand, spawnCtx } from "./generate-summary";
+import type { SpawnResult } from "./types";
+
+/** Build a fake SpawnResult so tests never run the real `claude` binary. */
+function fakeProc(stdoutText: string, exitCode: number): SpawnResult {
+  return {
+    stdout: new Response(stdoutText).body,
+    stderr: null,
+    exited: Promise.resolve(exitCode),
+  };
+}
 
 describe("isValidAgentDir", () => {
   test("rejects relative paths", () => {
@@ -60,7 +70,38 @@ describe("generateSummary", () => {
   });
 
   afterEach(async () => {
+    spawnCtx.reset();
     await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("spawns the summarizer with cwd pinned to the agent dir", async () => {
+    let capturedOpts: { stdout: "pipe"; stderr: "ignore"; cwd: string } | undefined;
+    spawnCtx.set((_cmd, opts) => {
+      capturedOpts = opts;
+      // Return a well-formed but empty result so no summary is written and no
+      // real `claude` process runs.
+      return fakeProc("", 0);
+    });
+
+    await Bun.write(join(agentDir, "prompt.txt"), "Do the thing.");
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "test" }, null, 2));
+
+    await generateSummary(agentDir);
+
+    expect(capturedOpts).toBeDefined();
+    expect(capturedOpts!.cwd).toBe(agentDir);
+  });
+
+  test("merges the summarizer output into meta.json", async () => {
+    spawnCtx.set(() => fakeProc("The agent was asked to do the thing.\n", 0));
+
+    await Bun.write(join(agentDir, "prompt.txt"), "Do the thing.");
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "test" }, null, 2));
+
+    await generateSummary(agentDir);
+
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(meta.summary).toBe("The agent was asked to do the thing.");
   });
 
   test("does nothing when prompt.txt is missing", async () => {

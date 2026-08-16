@@ -777,6 +777,89 @@ describe("handleSend", () => {
     expect(dialogs).toHaveLength(0);
     expect(notices).toEqual(["Coordinator coord-1 is not running"]);
   });
+
+  for (const cmd of ["/restart", "/respawn"]) {
+    test(`s-dialog submit of '${cmd}' to system coordinator fresh-restarts and does NOT send verbatim`, async () => {
+      // Parity with the Telegram /restart dispatch and the coordinator chat box:
+      // /restart and /respawn in the `s`-dialog tear down + rebuild a FRESH
+      // session via restartSystemCoordinatorFresh instead of being typed into
+      // Claude's prompt. Drive the coordinator lifecycle through the injected
+      // coordinatorSpawnCtx and prove: kill precedes new-session, a cleared
+      // marker is written, and the outbox send runner never emitted the command.
+      const {
+        coordinatorSpawnCtx, setCoordinatorSleepFn, resetCoordinatorSleepFn,
+      } = await import("../coordinator");
+      const coordHome = await mkdtemp(join(tmpdir(), "aa-restart-home-"));
+      const typesHome = await mkdtemp(join(tmpdir(), "aa-restart-types-"));
+      const cfgDir = await mkdtemp(join(tmpdir(), "aa-restart-cfg-"));
+      const originalHome = process.env.HOME;
+      setUserConfigPath(join(cfgDir, "config.json"));
+      setCoordinatorHome(coordHome);
+      process.env.HOME = typesHome;
+      setCoordinatorSleepFn(async () => {});
+
+      const streamOf = (text: string): ReadableStream<Uint8Array> => {
+        const enc = new TextEncoder();
+        return new ReadableStream({ start(c) { c.enqueue(enc.encode(text)); c.close(); } });
+      };
+      const emptyStreamOf = (): ReadableStream<Uint8Array> =>
+        new ReadableStream({ start(c) { c.close(); } });
+
+      const coordCommands: string[][] = [];
+      coordinatorSpawnCtx.set((c2: string[], _opts?: any) => {
+        coordCommands.push([...c2]);
+        const exit = c2.join(" ").includes("has-session") ? 1 : 0;
+        return { stdout: streamOf(""), stderr: emptyStreamOf(), exited: Promise.resolve(exit) } as any;
+      });
+      // waitForCoordinatorReady captures the pane via the tmux-poller spawnCtx.
+      tmuxSpawnCtx.set((_cmd: string[], _opts?: any) =>
+        ({ stdout: streamOf("Claude Code v1.0.0"), stderr: emptyStreamOf(), exited: Promise.resolve(0) } as any));
+
+      const sendKeys: string[][] = [];
+      setSendSpawnRunner((c: string[]) => { sendKeys.push(c); return noopSpawnRunner(); });
+
+      try {
+        const { ctx, dialogs, notices, flushActions } = makeMockCtx({});
+        ctx.agentTree.isSystemCoordinatorSelected = true;
+        handleSend(ctx);
+        const d = assertDialog(dialogs[0]!, "textarea");
+        d.onSubmit(cmd);
+        await flushActions();
+
+        // Fresh-restart lifecycle ran: kill (discard) precedes new-session (ensure).
+        const coordStrs = coordCommands.map((c) => c.join(" "));
+        const killIdx = coordStrs.findIndex((c) => c.includes("kill-session"));
+        const newIdx = coordStrs.findIndex((c) => c.includes("new-session"));
+        expect(killIdx).toBeGreaterThanOrEqual(0);
+        expect(newIdx).toBeGreaterThan(killIdx);
+
+        // Cleared marker written → FRESH restart, not a resume.
+        const markerExists = await Bun.file(join(coordHome, "coordinator-session.cleared")).exists();
+        expect(markerExists).toBe(true);
+
+        // Success notice surfaced; NOT the verbatim "Sent to coordinator" notice.
+        expect(notices).toContain("Coordinator restarted with a fresh session");
+        expect(notices).not.toContain("Sent to coordinator");
+
+        // The command was NOT sent verbatim to the coordinator via the outbox.
+        const verbatim = sendKeys.find(
+          (c) => c[0] === "tmux" && c[1] === "send-keys" && c[4] === "-l" && typeof c[6] === "string" && c[6].includes(cmd),
+        );
+        expect(verbatim).toBeUndefined();
+      } finally {
+        coordinatorSpawnCtx.reset();
+        tmuxSpawnCtx.reset();
+        resetCoordinatorSleepFn();
+        resetCoordinatorHome();
+        resetUserConfigPath();
+        resetSendSpawnRunner();
+        process.env.HOME = originalHome;
+        await rm(coordHome, { recursive: true, force: true });
+        await rm(typesHome, { recursive: true, force: true });
+        await rm(cfgDir, { recursive: true, force: true });
+      }
+    });
+  }
 });
 
 describe("handleNewAgent", () => {

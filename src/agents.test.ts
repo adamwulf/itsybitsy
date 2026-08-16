@@ -2203,6 +2203,65 @@ describe("hasBackgroundTasks", () => {
     const output = "line1\n\x1b[33m⏵⏵ tasks · 2 running\x1b[0m\nline3";
     expect(hasBackgroundTasks(output)).toBe(true);
   });
+
+  // ── New "· N shell(s)" footer format (mode-independent) ──────────────────
+  // Recent Claude Code builds render the running-shell count as its own
+  // `·`-delimited status-bar segment that appears regardless of the auto-accept
+  // (⏵⏵) vs. ⏸ manual-mode marker. Agents commonly run in manual mode, where
+  // the legacy ⏵⏵ regex misses the count entirely.
+  describe("new '· N shell(s)' footer format", () => {
+    test("manual-mode status bar, singular, IS detected", () => {
+      const lines = [
+        ...Array.from({ length: 12 }, (_, i) => `earlier output line ${i}`),
+        "  ⏸ manual mode on · 1 shell · ← for agents",
+      ];
+      expect(hasBackgroundTasks(lines.join("\n"))).toBe(true);
+    });
+
+    test("manual-mode status bar, plural, IS detected", () => {
+      const lines = [
+        ...Array.from({ length: 12 }, (_, i) => `earlier output line ${i}`),
+        "  ⏸ manual mode on · 2 shells · ← for agents",
+      ];
+      expect(hasBackgroundTasks(lines.join("\n"))).toBe(true);
+    });
+
+    test("spinner/summary line IS detected", () => {
+      const output = "✻ Churned for 8s · 1 shell still running";
+      expect(hasBackgroundTasks(output)).toBe(true);
+    });
+
+    test("auto-accept status bar with a shell IS detected", () => {
+      const lines = [
+        ...Array.from({ length: 12 }, (_, i) => `earlier output line ${i}`),
+        "  ⏵⏵ accept edits on (shift+tab to cycle) · 1 shell · ← for agents",
+      ];
+      expect(hasBackgroundTasks(lines.join("\n"))).toBe(true);
+    });
+
+    test("a line with the word 'shell' but no '· N shell' count is NOT detected", () => {
+      const output = "  opened a shell to inspect the build output";
+      expect(hasBackgroundTasks(output)).toBe(false);
+    });
+
+    test("'· 3 shellscripts staged' (word boundary) is NOT detected", () => {
+      const output = "  · 3 shellscripts staged";
+      expect(hasBackgroundTasks(output)).toBe(false);
+    });
+
+    test("ANSI-colored new format IS detected", () => {
+      const output = "line1\n\x1b[2m  ⏸ manual mode on · 1 shell · ← for agents\x1b[0m\nline3";
+      expect(hasBackgroundTasks(output)).toBe(true);
+    });
+
+    test("a '·' ending one line and 'N shells' starting the next is NOT detected", () => {
+      // The shell segment is always intra-line; matching horizontal whitespace
+      // only ([ \t], never \s) prevents a cross-line false match in the joined
+      // tail where one line ends in "·" and the next begins with "N shells ...".
+      const output = ["some output ending in a middot ·", "3 shells were opened earlier in the log"].join("\n");
+      expect(hasBackgroundTasks(output)).toBe(false);
+    });
+  });
 });
 
 describe("isDeadPane", () => {
@@ -2352,6 +2411,16 @@ describe("is* detectors on -J logical-line captures", () => {
       ];
       expect(hasBackgroundTasks(lines.join("\n"))).toBe(false);
     });
+
+    test("hasBackgroundTasks: a '· 1 shell' segment 9 logical lines back is NOT reported", () => {
+      // Same aging behavior for the new mode-independent footer: an 8-line
+      // window drops the segment once 8 fresh lines have scrolled past it.
+      const lines = [
+        "⏸ manual mode on · 1 shell · ← for agents",
+        ...Array.from({ length: 8 }, (_, i) => `later output line ${i}`),
+      ];
+      expect(hasBackgroundTasks(lines.join("\n"))).toBe(false);
+    });
   });
 
   // ── F1 follow-up: CURRENT banner behind the live TUI chrome must be caught ──
@@ -2424,6 +2493,23 @@ describe("is* detectors on -J logical-line captures", () => {
         "  repo | Model: Sonnet 4.6",
         "  agent/agent-ac7b5633",
         "  ⏵⏵ accept edits on (shift+tab to cycle) · 2 bashes running",
+        ...trailingBlanks,
+      ].join("\n");
+      expect(hasBackgroundTasks(capture)).toBe(true);
+    });
+
+    test("hasBackgroundTasks: a current '· N shells' manual-mode status line survives trailing blank padding", () => {
+      // The new mode-independent shell segment is in the status bar at the very
+      // tail; trailing blank padding below it must be stripped so the status bar
+      // returns to [-1].
+      const capture = [
+        ...Array.from({ length: 20 }, (_, i) => `earlier line ${i}`),
+        "────────────────────────────────────────────────────────────",
+        "❯ ",
+        "────────────────────────────────────────────────────────────",
+        "  repo | Model: Sonnet 4.6",
+        "  agent/agent-ac7b5633",
+        "  ⏸ manual mode on · 2 shells · ← for agents",
         ...trailingBlanks,
       ].join("\n");
       expect(hasBackgroundTasks(capture)).toBe(true);

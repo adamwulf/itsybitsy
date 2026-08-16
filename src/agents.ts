@@ -1460,20 +1460,44 @@ export function isApiSafeguard(tmuxOutput: string): boolean {
 }
 
 /**
- * Check if tmux output indicates background tasks are running.
- * Checks for ⏵⏵ pattern in last 15 lines.
+ * Check if tmux output indicates a background shell/task is running, within the
+ * last BACKGROUND_TASKS_WINDOW logical lines.
+ *
+ * Two footer formats are recognized:
+ *
+ * 1. New format — a mode-independent `· N shell` / `· N shells` status-bar
+ *    segment (and the `· N shell still running` spinner-line variant). Recent
+ *    Claude Code builds render the running-shell count as its own `·`-delimited
+ *    status-bar segment that appears REGARDLESS of the auto-accept (`⏵⏵`) vs.
+ *    `⏸ manual mode` marker. Because agents commonly run in manual mode (no `⏵⏵`
+ *    marker), the legacy regex below misses this entirely.
+ *
+ * 2. Legacy format — the `⏵⏵ ... · N ...` auto-accept status bar (older builds
+ *    render `· N background tasks` / `· N bashes`). Retained for backward
+ *    compatibility with older Claude builds and the existing test-suite.
  */
 export function hasBackgroundTasks(tmuxOutput: string): boolean {
   const stripped = stripAnsi(tmuxOutput);
   // Strip trailing blank padding rows before slicing (see isCompacting). This is
-  // ESSENTIAL here, not just consistent: the ⏵⏵ status line is the LAST non-blank
+  // ESSENTIAL here, not just consistent: the status line is the LAST non-blank
   // line, so tmux -E - blank padding below it would otherwise push it toward the
   // top of an un-stripped window (or out of it). Stripping trailing blanks brings
   // the status bar back to [-1]; the strip removes only blanks below the bar, never
   // the bar itself (the bar is non-blank). Window stays 8.
   const lines = stripTrailingBlanks(stripped.split("\n"));
   const tail = lines.slice(-BACKGROUND_TASKS_WINDOW).join("\n");
-  return /⏵⏵.*·\s\d+\s/.test(tail);
+  // New footer: a "· N shell" / "· N shells" status-bar segment (and the
+  // "· N shell still running" spinner-line variant) that renders regardless of
+  // the auto-accept vs. manual-mode marker. The shell segment is always
+  // intra-line, so we match horizontal whitespace only ([ \t], never \s) — that
+  // avoids a theoretical cross-line false match where one joined-tail line ends
+  // in "·" and the next begins with "N shells ...". The trailing \b word
+  // boundary prevents false positives like "shellscript".
+  const newFormat = /·[ \t]*\d+[ \t]+shells?\b/.test(tail);
+  // Legacy footer: the "⏵⏵ ... · N ..." auto-accept status bar (background
+  // tasks / bashes). Retained for older Claude builds and existing tests.
+  const legacyFormat = /⏵⏵.*·\s\d+\s/.test(tail);
+  return newFormat || legacyFormat;
 }
 
 /**

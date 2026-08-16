@@ -3166,6 +3166,7 @@ async function reapOrphanedClaude(
   agentDir: string,
   resolvedState: AgentState,
   reason: string,
+  getLiveTmuxSessions: () => Promise<Set<string>>,
   opts: { skipClaudePid?: boolean; verdictFromClaudePid?: boolean } = {}
 ): Promise<void> {
   if (resolvedState === "creating") return;
@@ -3328,6 +3329,21 @@ async function reapOrphanedClaude(
     // here — the veto above returns before any of this, so the memo below is
     // only ever armed by a teardown that actually happened.
     reapedTmuxSessions.add(agent.meta.tmux_session);
+    // Skip the kill-session spawn entirely when the recorded session is not in
+    // the live set this pass already resolved. A long-stopped agent whose
+    // tmux_session named a session that died weeks ago would otherwise pay a
+    // `tmux kill-session` spawn (and a `[orphan-kill] ... already gone` log
+    // line) on the FIRST pass of every new `ib watch` process — the in-process
+    // memo above resets per process, so the husk is re-reaped at each restart.
+    // Reuse the shared getLiveTmuxSessions promise; do NOT add a fresh
+    // list-sessions spawn. The memo is armed above regardless, so a genuinely
+    // live husk (e.g. a dead-pane session still in the live set) still tears
+    // down below exactly once.
+    const liveSessions = await getLiveTmuxSessions();
+    if (!liveSessions.has(agent.meta.tmux_session)) {
+      // Nothing to kill and nothing to log — the session is already gone.
+      return;
+    }
     const result = await killTmuxSessionResult(agent.meta.tmux_session);
     const alreadyGone = !result.ok && isMissingTmuxSessionError(result.error);
     const outcome = result.ok
@@ -3456,7 +3472,7 @@ export async function detectAgentStates(
         const resolved: AgentState = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
         agent.state = resolved;
         if (shouldReap) {
-          await reapOrphanedClaude(agent, agentDir, resolved, "no tmux_session in meta");
+          await reapOrphanedClaude(agent, agentDir, resolved, "no tmux_session in meta", getLiveTmuxSessions);
         }
         return;
       }
@@ -3521,6 +3537,7 @@ export async function detectAgentStates(
             agentDir,
             "stopped",
             "claude_pid not alive",
+            getLiveTmuxSessions,
             // verdictFromClaudePid: this branch — and only this branch —
             // concluded `stopped` by reading the PID, so the husk teardown
             // must re-check that PID before destroying the session. Every
@@ -3558,7 +3575,7 @@ export async function detectAgentStates(
         if (tmuxObservation === "missing") {
           agent.state = "stopped";
           if (shouldReap) {
-            await reapOrphanedClaude(agent, agentDir, "stopped", "complete agent: tmux session gone");
+            await reapOrphanedClaude(agent, agentDir, "stopped", "complete agent: tmux session gone", getLiveTmuxSessions);
           }
           return;
         }
@@ -3660,7 +3677,7 @@ export async function detectAgentStates(
         const resolved: AgentState = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
         agent.state = resolved;
         if (shouldReap) {
-          await reapOrphanedClaude(agent, agentDir, resolved, "tmux session not live");
+          await reapOrphanedClaude(agent, agentDir, resolved, "tmux session not live", getLiveTmuxSessions);
         }
         return;
       }
@@ -3691,7 +3708,7 @@ export async function detectAgentStates(
           // so a freshly-spawning agent that briefly shows a dead pane during
           // startup is not torn down.
           if (shouldReap) {
-            await reapOrphanedClaude(agent, agentDir, resolved, "tmux pane is dead");
+            await reapOrphanedClaude(agent, agentDir, resolved, "tmux pane is dead", getLiveTmuxSessions);
           }
           return;
         }

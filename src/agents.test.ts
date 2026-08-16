@@ -3319,30 +3319,29 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
     expect(log).toContain("reason=pid alive but no recorded pid epoch");
   });
 
-  test("an already-absent tmux session is classified as already gone", async () => {
-    // The husk kill fires against sessions that are usually already dead.
-    // "can't find session" is the expected no-op — calling it failed in an
-    // audit trail is misleading.
+  test("a not-live tmux session is skipped entirely (no kill-session spawn, no log)", async () => {
+    // D3: a long-stopped agent whose tmux_session names a session that died
+    // weeks ago must NOT pay a `tmux kill-session` spawn (nor log a redundant
+    // "already gone" line) on every new `ib watch` process. When the recorded
+    // session is absent from the live set detection already resolved, the husk
+    // teardown is skipped outright.
     classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
     isPidAliveCtx.set(() => false);
     killPidCtx.set(() => true);
-    liveTmuxSessionsCtx.set(async () => new Set());
+    liveTmuxSessionsCtx.set(async () => new Set()); // ib-gone is not live
     probeTmuxSessionCtx.set(async () => ({
       status: "missing",
       error: "can't find session: ib-gone",
     }));
-    tmuxPollerSpawnCtx.set(((args: any[]) => ({
-      stdout: new ReadableStream({ start(c) { c.close(); } }),
-      stderr: new ReadableStream({
-        start(c) {
-          if (args[1] === "kill-session") {
-            c.enqueue(new TextEncoder().encode("can't find session: ib-gone"));
-          }
-          c.close();
-        },
-      }),
-      exited: Promise.resolve(args[1] === "kill-session" ? 1 : 0),
-    })) as any);
+    let killSessionSpawns = 0;
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      if (args[0] === "tmux" && args[1] === "kill-session") killSessionSpawns++;
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
 
     const a = makeAgent({
       id: "agent-gone",
@@ -3355,17 +3354,27 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
     });
     await detectAgentStates([a], { reap: true });
 
-    const { readFile } = await import("fs/promises");
-    const log = await readFile(logPath, "utf8");
-    expect(log).toContain("[orphan-kill] tmux kill-session already gone");
-    expect(log).not.toContain("kill-session failed");
+    expect(a.state).toBe("stopped");
+    // No kill-session spawn and no "[orphan-kill] tmux ..." teardown line. The
+    // skip logs NOTHING, so the watch log may not exist at all — that is even
+    // stronger proof than an empty line set, so only assert content if present.
+    expect(killSessionSpawns).toBe(0);
+    const { existsSync } = await import("fs");
+    if (existsSync(logPath)) {
+      const { readFile } = await import("fs/promises");
+      const log = await readFile(logPath, "utf8");
+      expect(log).not.toContain("[orphan-kill] tmux");
+    }
   });
 
   test("a genuine tmux teardown failure is still reported as failed", async () => {
     classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
     isPidAliveCtx.set(() => false);
     killPidCtx.set(() => true);
-    liveTmuxSessionsCtx.set(async () => new Set());
+    // D3: a genuine kill-session failure only arises when the session IS live
+    // (otherwise the teardown is skipped). Model a live husk whose kill-session
+    // fails for a real reason (tmux server connection error, not "already gone").
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-broken"]));
     probeTmuxSessionCtx.set(async () => ({
       status: "missing",
       error: "can't find session: ib-broken",
@@ -6868,6 +6877,9 @@ describe("detectAgentStates — reap option", () => {
     classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
     isPidAliveCtx.set(() => false);
     killPidCtx.set(() => true);
+    // D3: the husk session must be LIVE for teardown to fire — a husk that
+    // outlived Claude is exactly the session we want to kill.
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-a5"]));
 
     const a = makeAgent({
       id: "agent-5",
@@ -6878,9 +6890,9 @@ describe("detectAgentStates — reap option", () => {
         created_epoch: Math.floor(Date.now() / 1000) - 3600,
       } as Partial<AgentMeta> as AgentMeta,
     });
-    // Explicit opt-in. The husk tmux teardown is unconditional inside
-    // reapOrphanedClaude when resolvedState === "stopped" and tmux_session is
-    // set — proves we reached it.
+    // Explicit opt-in. The husk tmux teardown fires inside reapOrphanedClaude
+    // when resolvedState === "stopped", tmux_session is set, AND the session is
+    // still live — proves we reached it.
     await detectAgentStates([a], { reap: true });
     expect(a.state).toBe("stopped");
     expect(killSessionCalls).toEqual(["=ib-a5:"]);

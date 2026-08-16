@@ -10,6 +10,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { readConfig } from "./config";
 import { captureTmuxOutput } from "./tmux-poller";
 import { isCompacting, isRateLimited, isPidAliveCtx } from "./agents";
+import { STARTUP_MARKERS } from "./parse-state";
 import { logToWatchLog } from "./watch-log";
 import { SpawnContext } from "./types";
 import { getTmuxWidthForAgent } from "./tui/widths";
@@ -261,22 +262,48 @@ async function tmuxSessionExists(): Promise<boolean> {
 /**
  * Poll the ib-coordinator tmux session until Claude's UI is ready.
  * Mirrors the readiness pattern used by autoAcceptWorkspaceTrustForNewAgent in
- * ib-commands.ts: capture the pane every 500ms and look for the Claude logo
- * (`Claude Code v`) or a previously-injected user task marker (`[USER TASK]`).
+ * ib-commands.ts: capture the pane every 500ms and look for any of the shared
+ * startup markers (`STARTUP_MARKERS` in src/parse-state.ts — the plain Claude
+ * logo line, the boxed logo line, the injected `[USER TASK]` marker, or
+ * `[AGENT CONTEXT]`). A resumed session frequently shows none of the two
+ * original markers in its last 200 lines, so matching the broader shared set
+ * prevents a healthy session from being judged not-ready and then needlessly
+ * killed + relaunched (a ~20s startup penalty).
  *
- * Returns true once the readiness marker appears, false if the poll exhausts
- * its attempt budget (~15s).
+ * Returns true once any readiness marker appears, false if the poll exhausts
+ * its attempt budget (30 × 500ms ≈ 15s). On exhaustion a single diagnostic
+ * line is written to watch.log with the tail of the final captured pane, so we
+ * can tell whether the marker set is still too narrow.
  */
 export async function waitForCoordinatorReady(): Promise<boolean> {
+  const POLL_INTERVAL_MS = 500;
   const maxAttempts = 30;
+  let lastOutput: string | null = null;
   for (let i = 0; i < maxAttempts; i++) {
-    await sleepFn(500);
+    await sleepFn(POLL_INTERVAL_MS);
     const output = await captureTmuxOutput(IB_COORDINATOR_SESSION, 200);
+    lastOutput = output;
     if (output === null) continue;
-    if (output.includes("Claude Code v") || output.includes("[USER TASK]")) {
+    if (STARTUP_MARKERS.some((m) => output.includes(m))) {
       return true;
     }
   }
+
+  // Poll exhausted — record one diagnostic line so the failure leaves a trace.
+  // Append the last 5 non-empty lines of the final capture: that tail is the
+  // signal that tells us whether STARTUP_MARKERS is still too narrow.
+  const budgetMs = maxAttempts * POLL_INTERVAL_MS;
+  let tail: string;
+  if (lastOutput === null) {
+    tail = "(final capture returned null)";
+  } else {
+    tail = lastOutput
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .slice(-5)
+      .join("\n");
+  }
+  logToWatchLog(`[coordinator] ready-poll exhausted after ${budgetMs}ms; pane tail:\n${tail}`);
   return false;
 }
 

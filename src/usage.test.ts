@@ -118,6 +118,57 @@ describe("parseCodexRateLimits", () => {
       weeklyReset: "6d 1h",
     });
   });
+
+  test("classifies current shape (primary=weekly 10080, secondary null)", () => {
+    const result = parseCodexRateLimits(
+      {
+        primary: { used_percent: 3.3, window_minutes: 10080, resets_at: 1780779600 },
+        secondary: null as any,
+      },
+      now,
+    );
+
+    expect(result).toEqual({
+      sessionPct: null,
+      weeklyPct: 3,
+      sessionReset: null,
+      weeklyReset: "6d 1h",
+    });
+  });
+
+  test("classifies by window_minutes, not position, when windows are reversed", () => {
+    const result = parseCodexRateLimits(
+      {
+        primary: { used_percent: 1.2, window_minutes: 10080, resets_at: 1780779600 },
+        secondary: { used_percent: 4.4, window_minutes: 300, resets_at: 1780275600 },
+      },
+      now,
+    );
+
+    expect(result).toEqual({
+      sessionPct: 4,
+      weeklyPct: 1,
+      sessionReset: "5h 0m",
+      weeklyReset: "6d 1h",
+    });
+  });
+
+  test("falls back to positional meaning when window_minutes is missing", () => {
+    const result = parseCodexRateLimits(
+      {
+        primary: { used_percent: 4.4, resets_at: 1780275600 },
+        secondary: { used_percent: 1.2, resets_at: 1780779600 },
+      },
+      now,
+    );
+
+    expect(result).toEqual({
+      sessionPct: 4,
+      weeklyPct: 1,
+      sessionReset: "5h 0m",
+      weeklyReset: "6d 1h",
+    });
+  });
 });
 
 describe("fetchUsage", () => {

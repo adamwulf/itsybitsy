@@ -51,6 +51,8 @@ import {
   isPidIdentityCurrentCtx,
   processStartEpochSecondsCtx,
   resetProcessStartEpochSecondsCache,
+  primeProcessStartCache,
+  batchProcessStartRawCtx,
   CLAUDE_PID_START_MARGIN_SECONDS,
   PROCESS_START_CACHE_TTL_MS,
   LIFECYCLE_LOCK_STALE_MS,
@@ -82,6 +84,23 @@ import { makeAgent } from "./test-utils";
 beforeEach(() => {
   resetProcessStartEpochSecondsCache();
   processStartEpochSecondsCtx.set(() => 0);
+  // detectAgentStates now batch-primes the process-start cache through the
+  // separate batchProcessStartRawCtx seam BEFORE the per-agent gate reads it
+  // per-pid. Keep the two seams consistent by default so a focused test that
+  // stubs only processStartEpochSecondsCtx sees the same value through the
+  // primer: derive the batch `ps` output from the per-pid stub, omitting any
+  // pid the per-pid stub reports as dead (null) — exactly as real `ps` omits a
+  // dead pid. Tests that assert on the batch spawn itself override this.
+  batchProcessStartRawCtx.set(async (pids) =>
+    pids
+      .map((pid) => {
+        const epoch = processStartEpochSecondsCtx.fn(pid);
+        if (epoch === null) return null;
+        return `${pid} ${new Date(epoch * 1000).toUTCString()}`;
+      })
+      .filter((line): line is string => line !== null)
+      .join("\n") + "\n"
+  );
   // Existing fixtures intentionally use synthetic/incomplete AgentMeta. Keep
   // them on their historical bare-PID seam; focused tests below reset this to
   // exercise the real guarded implementation.
@@ -97,6 +116,7 @@ beforeEach(() => {
 afterEach(() => {
   resetProcessStartEpochSecondsCache();
   processStartEpochSecondsCtx.reset();
+  batchProcessStartRawCtx.reset();
   isPidAliveSinceCtx.reset();
   isPidIdentityCurrentCtx.reset();
   captureTmuxOutputResultCtx.reset();
@@ -107,6 +127,146 @@ afterEach(() => {
   nowMsCtx.reset();
   resetTmuxObservationState();
   resetLifecycleLogState();
+});
+
+describe("primeProcessStartCache (batch process-start priming)", () => {
+  const S100 = Math.floor(Date.parse("Sat Aug 15 21:00:00 2026") / 1000);
+  const S200 = Math.floor(Date.parse("Sat Aug 15 20:00:00 2026") / 1000);
+
+  test("populates the cache from ONE batch spawn; dead pid → null entry", async () => {
+    resetProcessStartEpochSecondsCache();
+    // Read the guarded implementation (not the bare-PID beforeEach seam) so the
+    // process-start cache is actually consulted.
+    isPidAliveSinceCtx.reset();
+    isPidAliveCtx.set(() => true);
+
+    let batchCalls = 0;
+    let requested: number[] = [];
+    // pid 300 is deliberately ABSENT from the output — ps reports nothing for a
+    // dead pid, so prime must cache a null entry for it.
+    batchProcessStartRawCtx.set(async (pids) => {
+      batchCalls++;
+      requested = pids;
+      return `  100 Sat Aug 15 21:00:00 2026    \n200 Sat Aug 15 20:00:00 2026\n`;
+    });
+    // After priming, EVERY read must hit the cache — never the per-pid spawn.
+    processStartEpochSecondsCtx.set(() => {
+      throw new Error("per-pid ps spawn must not run after a batch prime");
+    });
+
+    await primeProcessStartCache([100, 200, 300]);
+
+    expect(batchCalls).toBe(1);
+    expect(requested).toEqual([100, 200, 300]);
+
+    // pid 100 cached a real start time: current when the write epoch matches,
+    // NOT current an hour off (a null entry would fail open as alive both ways).
+    expect(isPidAliveSinceCtx.fn(100, S100)).toBe(true);
+    expect(isPidAliveSinceCtx.fn(100, S100 + 3600)).toBe(false);
+    // pid 200 likewise holds its distinct start time.
+    expect(isPidAliveSinceCtx.fn(200, S200)).toBe(true);
+    expect(isPidAliveSinceCtx.fn(200, S200 + 3600)).toBe(false);
+    // pid 300 cached null (dead): fails open as alive for ANY write epoch, and
+    // reading it does NOT trigger the throwing per-pid spawn — proving the null
+    // entry was cached, not merely absent.
+    expect(() => isPidAliveSinceCtx.fn(300, S100 + 3600)).not.toThrow();
+    expect(isPidAliveSinceCtx.fn(300, S100 + 3600)).toBe(true);
+  });
+
+  test("no spawn for an empty pid list", async () => {
+    let batchCalls = 0;
+    batchProcessStartRawCtx.set(async () => {
+      batchCalls++;
+      return "";
+    });
+    await primeProcessStartCache([]);
+    expect(batchCalls).toBe(0);
+  });
+
+  test("unparseable lstart caches null (not a bogus epoch)", async () => {
+    resetProcessStartEpochSecondsCache();
+    isPidAliveSinceCtx.reset();
+    isPidAliveCtx.set(() => true);
+    batchProcessStartRawCtx.set(async () => `  100 not-a-real-date\n`);
+    processStartEpochSecondsCtx.set(() => {
+      throw new Error("per-pid ps spawn must not run after a batch prime");
+    });
+    await primeProcessStartCache([100]);
+    // null entry → fails open as alive for any epoch, no per-pid spawn.
+    expect(() => isPidAliveSinceCtx.fn(100, S100)).not.toThrow();
+    expect(isPidAliveSinceCtx.fn(100, S100)).toBe(true);
+  });
+
+  test("detectAgentStates primes alive claude_pids with one batch spawn", async () => {
+    resetProcessStartEpochSecondsCache();
+    isPidAliveSinceCtx.reset();
+    isPidAliveCtx.set(() => true);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-p1", "ib-p2"]));
+    captureTmuxOutputResultCtx.set(async () => ({ status: "ok", output: "working" }));
+
+    const nowEpoch = Math.floor(Date.now() / 1000);
+    let batchCalls = 0;
+    let requested: number[] = [];
+    batchProcessStartRawCtx.set(async (pids) => {
+      batchCalls++;
+      requested = pids;
+      // Report each requested pid with a start time within margin of nowEpoch.
+      const stamp = new Date(nowEpoch * 1000).toUTCString();
+      return pids.map((p) => `${p} ${stamp}`).join("\n") + "\n";
+    });
+    // If the batch prime worked, the synchronous per-pid path is never hit.
+    processStartEpochSecondsCtx.set(() => {
+      throw new Error("per-pid ps spawn must not run when the batch prime covers the pid");
+    });
+
+    const mk = (id: string, session: string, pid: string) =>
+      makeAgent({
+        id,
+        meta: {
+          state: "running",
+          tmux_session: session,
+          claude_pid: pid,
+          claude_pid_epoch: nowEpoch,
+          created_epoch: nowEpoch - 3600,
+        } as Partial<AgentMeta> as AgentMeta,
+      });
+
+    const agents = [mk("a1", "ib-p1", "4001"), mk("a2", "ib-p2", "4002")];
+    await detectAgentStates(agents);
+
+    expect(batchCalls).toBe(1);
+    expect(requested.sort()).toEqual([4001, 4002]);
+    expect(agents.map((a) => a.state)).toEqual(["running", "running"]);
+  });
+
+  test("detectAgentStates does not spawn a batch for dead or epoch-less claude_pids", async () => {
+    resetProcessStartEpochSecondsCache();
+    isPidAliveSinceCtx.reset();
+    // pid alive check returns false → nothing to prime (dead pids never read the
+    // process-start cache).
+    isPidAliveCtx.set(() => false);
+    liveTmuxSessionsCtx.set(async () => new Set());
+
+    let batchCalls = 0;
+    batchProcessStartRawCtx.set(async () => {
+      batchCalls++;
+      return "";
+    });
+
+    const a = makeAgent({
+      id: "dead-1",
+      meta: {
+        state: "running",
+        tmux_session: "ib-dead",
+        claude_pid: "5001",
+        claude_pid_epoch: Math.floor(Date.now() / 1000),
+        created_epoch: Math.floor(Date.now() / 1000) - 8 * 24 * 60 * 60,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+
+    await detectAgentStates([a]);
+    expect(batchCalls).toBe(0);
+  });
 });
 
 /** Narrow a FlatEntry to kind==="agent" or fail */

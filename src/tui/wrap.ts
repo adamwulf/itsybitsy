@@ -347,20 +347,63 @@ export function reflowTable(lines: string[], width: number): string[] | null {
   // Preserve the frame's left indent (Claude indents tables two spaces).
   const indent = /^[ \t]*/.exec(stripAnsi(lines[0]!))![0];
 
-  type Row = { kind: "rule" } | { kind: "cells"; cells: string[] };
-  const rows: Row[] = [];
+  // Parse into rule / cells-group entries. Adjacent │…│ lines group together:
+  // when a table's NATURAL width exceeds the pinned tmux width, Claude Code
+  // wraps cell text itself, so one logical row spans several adjacent physical
+  // lines with rules only between logical rows. What a group means is decided
+  // after the parse (below).
+  type Group = { kind: "rule" } | { kind: "cells"; fragments: string[][] };
+  const groups: Group[] = [];
+  let innerRules = 0;
   for (const line of lines.slice(1, -1)) {
     const s = strippedTrimmed(line);
     if (TABLE_MID_RE.test(s)) {
       if (s.slice(1, -1).split("┼").length !== ncols) return null;
-      rows.push({ kind: "rule" });
+      groups.push({ kind: "rule" });
+      innerRules++;
       continue;
     }
     // Split the row into cells on │. A mismatched count means a │ inside cell
     // text or a misaligned frame — bail rather than re-render wrong data.
     const parts = s.slice(1, -1).split("│");
     if (parts.length !== ncols) return null;
-    rows.push({ kind: "cells", cells: parts.map((c) => c.trim()) });
+    const cells = parts.map((c) => c.trim());
+    const last = groups[groups.length - 1];
+    if (last && last.kind === "cells") last.fragments.push(cells);
+    else groups.push({ kind: "cells", fragments: [cells] });
+  }
+
+  // Decide what an adjacent-line group means. With rules between every logical
+  // row (Claude Code's own table style — ≥2 inner rules), adjacent lines are
+  // wrap FRAGMENTS of one logical row: merge them column-wise (space-joined)
+  // so each cell re-wraps as one flowing text. With a single inner rule
+  // (console.table style: one rule after the header, all body rows adjacent),
+  // adjacent lines are DISTINCT data rows — merging would fuse them, so they
+  // stay separate. A one-logical-row Claude table that wrapped has the same
+  // shape as the latter and also stays unmerged: its fragments still render
+  // adjacently and aligned, just without re-flowing text across the fragment
+  // boundary. (The space join can split a token Claude hard-broke mid-word at
+  // the pinned width — harmless next to the alternative of gluing two words
+  // together.)
+  const mergeFragments = innerRules >= 2;
+  type Row = { kind: "rule" } | { kind: "cells"; cells: string[] };
+  const rows: Row[] = [];
+  for (const group of groups) {
+    if (group.kind === "rule") {
+      rows.push({ kind: "rule" });
+      continue;
+    }
+    if (mergeFragments && group.fragments.length > 1) {
+      const cells = group.fragments[0]!.map((_, i) =>
+        group.fragments
+          .map((f) => f[i]!)
+          .filter((c) => c.length > 0)
+          .join(" "),
+      );
+      rows.push({ kind: "cells", cells });
+    } else {
+      for (const cells of group.fragments) rows.push({ kind: "cells", cells });
+    }
   }
   const bottom = strippedTrimmed(lines[lines.length - 1]!);
   if (bottom.slice(1, -1).split("┴").length !== ncols) return null;

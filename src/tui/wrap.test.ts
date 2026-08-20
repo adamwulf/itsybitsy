@@ -949,4 +949,77 @@ describe("table reflow (┌┬┐ frames re-laid out at pane width)", () => {
     expect(rows.length).toBeGreaterThan(1);
     expect(rows.join(" ")).toContain("appears here");
   });
+
+  describe("multi-line logical rows (cells Claude Code itself wrapped at the pinned width)", () => {
+    // When a table's NATURAL width exceeds the pinned tmux width, Claude Code
+    // wraps cell text: one logical row spans several adjacent │…│ physical
+    // lines, and ├┼┤ rules sit only between logical rows (verified against a
+    // live v2.1.237 capture). Build that shape: two fragments per logical row.
+    function fragmentedTable(): string[] {
+      const w = [20, 20];
+      const rule = (l: string, m: string, r: string) =>
+        "  " + l + w.map((x) => "─".repeat(x + 2)).join(m) + r;
+      const row = (cells: string[]) =>
+        "  │" + cells.map((c, i) => " " + c + " ".repeat(w[i]! - c.length) + " │").join("");
+      return [
+        rule("┌", "┬", "┐"),
+        row(["Head A", "Head B"]),
+        rule("├", "┼", "┤"),
+        row(["alpha begins here", "bravo begins here"]),
+        row(["and alpha ends", "and bravo ends"]),
+        rule("├", "┼", "┤"),
+        row(["charlie begins here", "delta begins here"]),
+        row(["and charlie ends", "and delta ends"]),
+        rule("└", "┴", "┘"),
+      ];
+    }
+
+    test("fragments merge into one flowing cell when rules separate every logical row", () => {
+      // Force reflow with a pane narrower than the (fitting) 51-col source.
+      const rows = wordWrapLines(fragmentedTable().join("\n"), 40);
+      for (const r of rows) expect(visibleWidth(r)).toBeLessThanOrEqual(40);
+      // The merged cell re-wraps as ONE text: "here and" now lands adjacent
+      // inside a cell, crossing the old fragment boundary.
+      const cellText = rows
+        .map((r) => stripAnsi(r))
+        .filter((r) => r.includes("│"))
+        .map((r) => r.split("│")[1]?.trim() ?? "")
+        .join(" ")
+        .replace(/\s+/g, " ");
+      expect(cellText).toContain("alpha begins here and alpha ends");
+      // Both logical rows survive as separate rows (2 inner rules remain).
+      const rules = rows.filter((r) => /^├[─┼]+┤$/.test(stripAnsi(r).trim()));
+      expect(rules.length).toBe(2);
+    });
+
+    test("console.table style (single inner rule, adjacent body rows) does NOT merge", () => {
+      // console.table emits ONE rule after the header and keeps body rows
+      // adjacent — merging would fuse distinct data rows. Widths force reflow.
+      const w = [8, 300];
+      const rule = (l: string, m: string, r: string) =>
+        l + w.map((x) => "─".repeat(x + 2)).join(m) + r;
+      const row = (cells: string[]) =>
+        "│" + cells.map((c, i) => " " + c + " ".repeat(w[i]! - c.length) + " │").join("");
+      const long = "a deliberately long value that overflows the pane width ".repeat(5).trim();
+      const table = [
+        rule("┌", "┬", "┐"),
+        row(["(index)", "value"]),
+        rule("├", "┼", "┤"),
+        row(["0", long]),
+        row(["1", "second row stays its own row"]),
+        rule("└", "┴", "┘"),
+      ];
+      const rows = wordWrapLines(table.join("\n"), 60);
+      for (const r of rows) expect(visibleWidth(r)).toBeLessThanOrEqual(60);
+      // Row 1's index cell must NOT absorb row 0's: "0 1" would appear in the
+      // first column if the two body rows merged.
+      const firstColCells = rows
+        .map((r) => stripAnsi(r))
+        .filter((r) => r.includes("│"))
+        .map((r) => r.split("│")[1]?.trim() ?? "");
+      expect(firstColCells).toContain("0");
+      expect(firstColCells).toContain("1");
+      expect(firstColCells.some((c) => c.includes("0 1"))).toBe(false);
+    });
+  });
 });

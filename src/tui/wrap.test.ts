@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import {
   wrapSingleLine, wrapLines, wordWrapSingleLine, wordWrapLines,
   computeChromeSlice, findCodexInputChromeLogical, findLastTwoSeparators,
+  matchTableBlockEnd, reflowTable,
 } from "./wrap";
 import { stripAnsi } from "../parse-state";
 import { visibleWidth } from "@mariozechner/pi-tui";
@@ -732,5 +733,293 @@ describe("wordWrapLines performance", () => {
     // so on hardware ~3x slower nominal approaches 100ms and the margin is gone.
     // Re-measure before trusting 300 anywhere but a developer machine.
     expect(full).toBeLessThan(300);
+  });
+});
+
+describe("box-chrome clip (╭╮╰╯ corners and │ rows, welcome-box fix)", () => {
+  // Claude's session-start welcome box at the pinned width: a rounded-corner
+  // titled top border, │-bordered content rows (with an interior │ column
+  // divider), and a rounded bottom border. Each is ONE over-width logical line.
+  const W = 1000;
+  const topBorder = "╭─── Claude Code v2.1.237 " + "─".repeat(W - 27) + "╮";
+  const row = "│ left cell content " + " ".repeat(200) + "│ right cell content" + " ".repeat(W - 240) + "│";
+  const bottomBorder = "╰" + "─".repeat(W - 2) + "╯";
+
+  test("rounded top border clips to ONE row ending in ╮", () => {
+    const rows = wordWrapSingleLine(topBorder, 80);
+    expect(rows.length).toBe(1);
+    expect(visibleWidth(rows[0]!)).toBe(80);
+    const s = stripAnsi(rows[0]!);
+    expect(s.startsWith("╭─── Claude Code")).toBe(true);
+    expect(s.endsWith("╮")).toBe(true);
+  });
+
+  test("rounded bottom border clips to ONE row ending in ╯", () => {
+    const rows = wordWrapSingleLine(bottomBorder, 80);
+    expect(rows.length).toBe(1);
+    expect(visibleWidth(rows[0]!)).toBe(80);
+    expect(stripAnsi(rows[0]!).endsWith("╯")).toBe(true);
+  });
+
+  test("│-bordered content row clips to ONE row ending in │", () => {
+    const rows = wordWrapSingleLine(row, 80);
+    expect(rows.length).toBe(1);
+    expect(visibleWidth(rows[0]!)).toBe(80);
+    const s = stripAnsi(rows[0]!);
+    expect(s.startsWith("│")).toBe(true);
+    expect(s.endsWith("│")).toBe(true);
+  });
+
+  test("the whole welcome box keeps one row per logical line", () => {
+    const box = [topBorder, row, row, bottomBorder].join("\n");
+    const rows = wordWrapLines(box, 80);
+    expect(rows.length).toBe(4);
+    for (const r of rows) expect(visibleWidth(r)).toBe(80);
+  });
+
+  test("a box line already within width is returned unchanged", () => {
+    const small = "╭────── title ──────╮";
+    expect(wordWrapSingleLine(small, 80)).toEqual([small]);
+    const smallRow = "│ fits │";
+    expect(wordWrapSingleLine(smallRow, 80)).toEqual([smallRow]);
+  });
+
+  test("ANSI-styled border clips to one row within width", () => {
+    const styled = `\x1b[2m${topBorder}\x1b[0m`;
+    const rows = wordWrapSingleLine(styled, 60);
+    expect(rows.length).toBe(1);
+    expect(visibleWidth(rows[0]!)).toBeLessThanOrEqual(60);
+    expect(stripAnsi(rows[0]!).endsWith("╮")).toBe(true);
+  });
+
+  test("corner-bounded prose WITHOUT a 4+ ─ run still word-wraps (guard)", () => {
+    // The ─{4,} requirement is what separates a box border from decorated
+    // prose. A ╭…╮-bounded sentence with no dash run must keep wrapping.
+    const prose = "╭ a decorated heading that keeps going well past the pane width and then some more ╮";
+    const rows = wordWrapSingleLine(prose, 20);
+    expect(rows.length).toBeGreaterThan(1);
+  });
+
+  test("square table rule lines (┌┬┐ / ├┼┤ / └┴┘) clip when over width", () => {
+    // Table frames normally reflow as a block (see table reflow below); this
+    // covers the per-line fallback for stray/malformed frame lines.
+    const top = "┌" + "─".repeat(500) + "┬" + "─".repeat(500) + "┐";
+    const mid = "├" + "─".repeat(500) + "┼" + "─".repeat(500) + "┤";
+    const bot = "└" + "─".repeat(500) + "┴" + "─".repeat(500) + "┘";
+    for (const [line, suffix] of [[top, "┐"], [mid, "┤"], [bot, "┘"]] as const) {
+      const rows = wordWrapSingleLine(line, 40);
+      expect(rows.length).toBe(1);
+      expect(visibleWidth(rows[0]!)).toBe(40);
+      expect(stripAnsi(rows[0]!).endsWith(suffix)).toBe(true);
+    }
+  });
+});
+
+describe("table reflow (┌┬┐ frames re-laid out at pane width)", () => {
+  // Build a table the way Claude Code renders one at the pinned width: two-space
+  // indent, columns sized to content, one space of padding per side.
+  function renderTable(rows: string[][], widths: number[]): string[] {
+    const rule = (l: string, m: string, r: string) =>
+      "  " + l + widths.map((w) => "─".repeat(w + 2)).join(m) + r;
+    const out = [rule("┌", "┬", "┐")];
+    rows.forEach((cells, ri) => {
+      if (ri > 0) out.push(rule("├", "┼", "┤"));
+      out.push(
+        "  │" + cells.map((c, i) => " " + c + " ".repeat(widths[i]! - c.length) + " │").join(""),
+      );
+    });
+    out.push(rule("└", "┴", "┘"));
+    return out;
+  }
+
+  const longA =
+    "This deliberately long sentence keeps going well past two hundred characters so the rendered table grows very wide and stresses the reflow logic with plenty of words to redistribute across narrow wrapped cell rows.";
+  const longB =
+    "A second long cell engineered the same way so that two columns compete for the remaining width and the fair-share shrink has to split what is left between them evenly.";
+  const wideTable = renderTable(
+    [
+      ["ID", "Description", "Notes", "Status"],
+      ["1", longA, longB, "Open"],
+      ["2", "Short.", "Short.", "Done"],
+    ],
+    [2, longA.length, longB.length, 6],
+  );
+
+  test("matchTableBlockEnd finds a full frame and rejects broken ones", () => {
+    expect(matchTableBlockEnd(wideTable, 0)).toBe(wideTable.length - 1);
+    // Not a top rule at start.
+    expect(matchTableBlockEnd(wideTable, 1)).toBe(-1);
+    // No bottom rule → not a table.
+    expect(matchTableBlockEnd(wideTable.slice(0, -1), 0)).toBe(-1);
+    // Prose interrupting the frame → not a table.
+    const broken = [wideTable[0]!, "prose line", ...wideTable.slice(1)];
+    expect(matchTableBlockEnd(broken, 0)).toBe(-1);
+    // Rules only, no rows → not a table.
+    expect(matchTableBlockEnd(["  ┌────┐", "  └────┘"], 0)).toBe(-1);
+  });
+
+  test("an over-width table reflows: every row fits, all cell words survive", () => {
+    const W = 100;
+    const rows = wordWrapLines(wideTable.join("\n"), W);
+    for (const r of rows) expect(visibleWidth(r)).toBeLessThanOrEqual(W);
+    // The frame survives as a frame.
+    expect(stripAnsi(rows[0]!).trim()).toMatch(/^┌[─┬]+┐$/);
+    expect(stripAnsi(rows[rows.length - 1]!).trim()).toMatch(/^└[─┴]+┘$/);
+    // Column count is preserved on the top rule.
+    expect(stripAnsi(rows[0]!).trim().split("┬").length).toBe(4);
+    // Every word of the long cells is still present (nothing clipped away).
+    const joined = rows.join(" ");
+    for (const word of `${longA} ${longB}`.split(" ")) {
+      expect(joined).toContain(word.length > 20 ? word.slice(0, 20) : word);
+    }
+    // The two-space indent survives.
+    expect(rows[0]!.startsWith("  ┌")).toBe(true);
+  });
+
+  test("a fitting table passes through byte-identical (colors intact)", () => {
+    const small = renderTable(
+      [
+        ["Name", "Type"],
+        ["Alpha", "Int"],
+      ],
+      [5, 4],
+    ).map((l) => `\x1b[2m${l}\x1b[0m`);
+    expect(wordWrapLines(small.join("\n"), 80)).toEqual(small);
+  });
+
+  test("narrow columns keep their natural width; only wide ones shrink", () => {
+    const rows = wordWrapLines(wideTable.join("\n"), 100);
+    // "ID", "Status", their cells: short columns render on one line unwrapped.
+    expect(rows.some((r) => stripAnsi(r).includes("│ ID │"))).toBe(true);
+    expect(rows.some((r) => stripAnsi(r).includes("│ Status │"))).toBe(true);
+  });
+
+  test("a long unbroken token hard-wraps inside its cell", () => {
+    const url =
+      "https://example.com/api/v1/resources/items?category=widgets&sort=descending&filter=active&page=42&limit=100&token=abcdefghijklmnopqrstuvwxyz0123456789";
+    const table = renderTable(
+      [
+        ["Key", "Value"],
+        ["endpoint", url],
+      ],
+      [8, url.length],
+    );
+    const W = 60;
+    const rows = wordWrapLines(table.join("\n"), W);
+    for (const r of rows) expect(visibleWidth(r)).toBeLessThanOrEqual(W);
+    // The URL is split across multiple cell rows but fully present.
+    const rejoined = rows
+      .map((r) => stripAnsi(r))
+      .filter((r) => r.includes("│"))
+      .map((r) => r.split("│")[2]?.trim() ?? "")
+      .join("");
+    expect(rejoined).toContain("token=abcdefghijklmnopqrstuvwxyz0123456789");
+  });
+
+  test("a │ inside cell text bails out to per-line clip (no explosion, no wrong table)", () => {
+    const table = [
+      "  ┌" + "─".repeat(500) + "┬────┐",
+      "  │ cell with a │ pipe" + " ".repeat(480) + "│ ok │",
+      "  └" + "─".repeat(500) + "┴────┘",
+    ];
+    const rows = wordWrapLines(table.join("\n"), 40);
+    // One row per logical line — clipped, not word-wrapped into many rows.
+    expect(rows.length).toBe(3);
+    for (const r of rows) expect(visibleWidth(r)).toBeLessThanOrEqual(40);
+  });
+
+  test("a pane too narrow for the column count bails out to per-line clip", () => {
+    const rows = wordWrapLines(wideTable.join("\n"), 20);
+    // 4 columns need ≥ 12 chars of text budget plus 15 of frame — 20 is too
+    // narrow to reflow, so every logical line clips to one row.
+    expect(rows.length).toBe(wideTable.length);
+    for (const r of rows) expect(visibleWidth(r)).toBeLessThanOrEqual(20);
+  });
+
+  test("reflowTable preserves inner rules between every row", () => {
+    const reflowed = reflowTable(wideTable, 100)!;
+    const rules = reflowed.filter((r) => /^├[─┼]+┤$/.test(stripAnsi(r).trim()));
+    // The source has a rule between each of the 3 rows → 2 inner rules.
+    expect(rules.length).toBe(2);
+  });
+
+  test("prose containing ┌ mid-line does not trigger table matching", () => {
+    const prose = "the char ┌ appears here " + "x".repeat(200);
+    const rows = wordWrapLines(prose, 40);
+    expect(rows.length).toBeGreaterThan(1);
+    expect(rows.join(" ")).toContain("appears here");
+  });
+
+  describe("multi-line logical rows (cells Claude Code itself wrapped at the pinned width)", () => {
+    // When a table's NATURAL width exceeds the pinned tmux width, Claude Code
+    // wraps cell text: one logical row spans several adjacent │…│ physical
+    // lines, and ├┼┤ rules sit only between logical rows (verified against a
+    // live v2.1.237 capture). Build that shape: two fragments per logical row.
+    function fragmentedTable(): string[] {
+      const w = [20, 20];
+      const rule = (l: string, m: string, r: string) =>
+        "  " + l + w.map((x) => "─".repeat(x + 2)).join(m) + r;
+      const row = (cells: string[]) =>
+        "  │" + cells.map((c, i) => " " + c + " ".repeat(w[i]! - c.length) + " │").join("");
+      return [
+        rule("┌", "┬", "┐"),
+        row(["Head A", "Head B"]),
+        rule("├", "┼", "┤"),
+        row(["alpha begins here", "bravo begins here"]),
+        row(["and alpha ends", "and bravo ends"]),
+        rule("├", "┼", "┤"),
+        row(["charlie begins here", "delta begins here"]),
+        row(["and charlie ends", "and delta ends"]),
+        rule("└", "┴", "┘"),
+      ];
+    }
+
+    test("fragments merge into one flowing cell when rules separate every logical row", () => {
+      // Force reflow with a pane narrower than the (fitting) 51-col source.
+      const rows = wordWrapLines(fragmentedTable().join("\n"), 40);
+      for (const r of rows) expect(visibleWidth(r)).toBeLessThanOrEqual(40);
+      // The merged cell re-wraps as ONE text: "here and" now lands adjacent
+      // inside a cell, crossing the old fragment boundary.
+      const cellText = rows
+        .map((r) => stripAnsi(r))
+        .filter((r) => r.includes("│"))
+        .map((r) => r.split("│")[1]?.trim() ?? "")
+        .join(" ")
+        .replace(/\s+/g, " ");
+      expect(cellText).toContain("alpha begins here and alpha ends");
+      // Both logical rows survive as separate rows (2 inner rules remain).
+      const rules = rows.filter((r) => /^├[─┼]+┤$/.test(stripAnsi(r).trim()));
+      expect(rules.length).toBe(2);
+    });
+
+    test("console.table style (single inner rule, adjacent body rows) does NOT merge", () => {
+      // console.table emits ONE rule after the header and keeps body rows
+      // adjacent — merging would fuse distinct data rows. Widths force reflow.
+      const w = [8, 300];
+      const rule = (l: string, m: string, r: string) =>
+        l + w.map((x) => "─".repeat(x + 2)).join(m) + r;
+      const row = (cells: string[]) =>
+        "│" + cells.map((c, i) => " " + c + " ".repeat(w[i]! - c.length) + " │").join("");
+      const long = "a deliberately long value that overflows the pane width ".repeat(5).trim();
+      const table = [
+        rule("┌", "┬", "┐"),
+        row(["(index)", "value"]),
+        rule("├", "┼", "┤"),
+        row(["0", long]),
+        row(["1", "second row stays its own row"]),
+        rule("└", "┴", "┘"),
+      ];
+      const rows = wordWrapLines(table.join("\n"), 60);
+      for (const r of rows) expect(visibleWidth(r)).toBeLessThanOrEqual(60);
+      // Row 1's index cell must NOT absorb row 0's: "0 1" would appear in the
+      // first column if the two body rows merged.
+      const firstColCells = rows
+        .map((r) => stripAnsi(r))
+        .filter((r) => r.includes("│"))
+        .map((r) => r.split("│")[1]?.trim() ?? "");
+      expect(firstColCells).toContain("0");
+      expect(firstColCells).toContain("1");
+      expect(firstColCells.some((c) => c.includes("0 1"))).toBe(false);
+    });
   });
 });

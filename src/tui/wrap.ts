@@ -46,6 +46,42 @@ function isSeparatorLine(line: string): boolean {
 }
 
 /**
+ * A box-chrome line is one physical edge of a box-drawing frame: the bordered
+ * welcome box Claude prints at session start (`╭─── Claude Code … ───╮`, `│ … │`
+ * rows, `╰───…───╯`) and the table frames it renders for markdown tables
+ * (`┌──┬──┐`, `├──┼──┤`, `│ … │`, `└──┴──┘`). Like the ─ separators above,
+ * these are single ~pinned-width logical lines that word-wrap would explode
+ * into many garbled rows. Unlike a bare rule, they carry a closing border char
+ * that plain truncation would cut off — so the wrap path clips them to the pane
+ * width and re-attaches that closing char, keeping the frame's right edge
+ * straight at the pane edge (a horizontal viewport onto the box).
+ *
+ * Returns the border char to re-attach (truncateToWidth's "ellipsis", counted
+ * inside the width and preceded by a reset so styling can't leak into it), or
+ * null when the line is not box chrome.
+ *
+ * Two shapes qualify:
+ *
+ *  1. A border rule — opens with a corner/tee (╭ ╰ ┌ └ ├), closes with one
+ *     (╮ ╯ ┐ ┘ ┤), and carries a 4+ run of ─ (same structural signal as the
+ *     titled-rule test above; prose never opens AND closes with box-drawing
+ *     chars while also carrying a 4+ ─ run).
+ *  2. A content row — opens and closes with │. Prose essentially never starts
+ *     and ends with │; boxes and tables always do.
+ */
+function boxClipSuffix(line: string): string | null {
+  const stripped = stripAnsi(line).trim();
+  if (stripped.length < 2) return null;
+  const first = stripped[0]!;
+  const last = stripped[stripped.length - 1]!;
+  if ("╭╰┌└├".includes(first) && "╮╯┐┘┤".includes(last) && /─{4,}/.test(stripped)) {
+    return last;
+  }
+  if (first === "│" && last === "│") return "│";
+  return null;
+}
+
+/**
  * Check if a byte is a CSI sequence terminator (0x40-0x7E per ECMA-48).
  * This includes letters (A-Z, a-z) and symbols like @, [, \, ], ^, _, `, {, |, }, ~.
  */
@@ -137,6 +173,13 @@ export function wordWrapSingleLine(line: string, width: number): string[] {
   // chrome, and codex's content dividers inside the (trimmed) main transcript.
   if (isSeparatorLine(line)) return [truncateToWidth(line, width, "")];
 
+  // A box-drawing frame line (welcome box border/row, table border/row) is
+  // likewise a visual element — clip it to the pane width and re-attach its
+  // closing border char so the frame's right edge stays straight. Content past
+  // the pane edge is clipped, exactly like a narrow terminal viewport.
+  const borderSuffix = boxClipSuffix(line);
+  if (borderSuffix !== null) return [truncateToWidth(line, width, borderSuffix)];
+
   const chunks: string[] = [];
   // Split into tokens: sequences of non-space chars and individual spaces
   const tokens: string[] = [];
@@ -198,14 +241,252 @@ export function wordWrapSingleLine(line: string, width: number): string[] {
   return chunks;
 }
 
+// ── Table reflow ──────────────────────────────────────────────────────────────
+//
+// Claude Code renders markdown tables as box-drawing frames sized to their
+// content — at the pinned tmux width nothing forces cell wrapping, so a table
+// with long cells becomes a set of ~pinned-width logical lines. The clip rule
+// above keeps such a table readable (straight right edge) but hides everything
+// past the pane edge. Reflow does better: it re-lays the table out at the pane
+// width — shrinking the widest columns and word-wrapping their cell text into
+// multi-row cells — so all cell content stays visible.
+//
+// Reflow only runs when the table overflows the pane; a fitting table passes
+// through byte-identical (colors and all). A reflowed table is re-rendered from
+// ANSI-stripped cell text — acceptable, since the alternative is a clipped or
+// exploded frame. Malformed blocks (a │ inside cell text, mismatched column
+// counts) bail out to the per-line clip rule.
+
+const TABLE_TOP_RE = /^┌[─┬]+┐$/;
+const TABLE_MID_RE = /^├[─┼]+┤$/;
+const TABLE_BOT_RE = /^└[─┴]+┘$/;
+
+/** Narrowest a shrunken column's text area may get before reflow gives up. */
+const MIN_CELL_WIDTH = 3;
+
+function strippedTrimmed(line: string): string {
+  return stripAnsi(line).trim();
+}
+
+/**
+ * If lines[start] opens a table frame (┌──┬──┐), scan forward for the matching
+ * bottom rule. Every line between them must be a row (│…│) or an inner rule
+ * (├──┼──┤), and at least one row must be present. Returns the bottom-rule
+ * index, or -1 when the block is not a well-formed table.
+ */
+export function matchTableBlockEnd(lines: string[], start: number): number {
+  if (!TABLE_TOP_RE.test(strippedTrimmed(lines[start]!))) return -1;
+  let sawRow = false;
+  for (let i = start + 1; i < lines.length; i++) {
+    const s = strippedTrimmed(lines[i]!);
+    if (TABLE_BOT_RE.test(s)) return sawRow ? i : -1;
+    if (TABLE_MID_RE.test(s)) continue;
+    if (s.length >= 2 && s.startsWith("│") && s.endsWith("│")) {
+      sawRow = true;
+      continue;
+    }
+    return -1;
+  }
+  return -1;
+}
+
+/**
+ * Distribute `avail` columns of text width across `natural` column widths.
+ * Columns already narrower than a fair share keep their natural width; the
+ * remaining (wide) columns split what's left evenly. Returns null when the
+ * split would drive a shrunken column below MIN_CELL_WIDTH.
+ */
+function shrinkColumnWidths(natural: number[], avail: number): number[] | null {
+  const n = natural.length;
+  const widths: number[] = new Array(n).fill(0);
+  const fixed: boolean[] = new Array(n).fill(false);
+  let remaining = avail;
+  let flexible = n;
+  // Iteratively fix columns whose natural width fits under the current fair
+  // share — each fix frees width, which can let further columns fit whole.
+  let changed = true;
+  while (changed && flexible > 0) {
+    changed = false;
+    const share = Math.floor(remaining / flexible);
+    for (let i = 0; i < n; i++) {
+      if (!fixed[i] && natural[i]! <= share) {
+        widths[i] = natural[i]!;
+        fixed[i] = true;
+        remaining -= natural[i]!;
+        flexible--;
+        changed = true;
+      }
+    }
+  }
+  if (flexible > 0) {
+    const share = Math.floor(remaining / flexible);
+    if (share < MIN_CELL_WIDTH) return null;
+    let extra = remaining - share * flexible;
+    for (let i = 0; i < n; i++) {
+      if (!fixed[i]) {
+        widths[i] = share + (extra > 0 ? 1 : 0);
+        if (extra > 0) extra--;
+      }
+    }
+  }
+  return widths;
+}
+
+/**
+ * Re-lay a table block out at the pane width. `lines` spans the top rule
+ * through the bottom rule inclusive. Returns the re-rendered physical rows, or
+ * null when the block can't be parsed confidently or the pane is too narrow —
+ * callers then fall back to per-line wrapping (whose clip rule keeps the frame
+ * one row per line).
+ */
+export function reflowTable(lines: string[], width: number): string[] | null {
+  const top = strippedTrimmed(lines[0]!);
+  // Column count from the top rule's ┬ positions.
+  const ncols = top.slice(1, -1).split("┬").length;
+
+  // Preserve the frame's left indent (Claude indents tables two spaces).
+  const indent = /^[ \t]*/.exec(stripAnsi(lines[0]!))![0];
+
+  // Parse into rule / cells-group entries. Adjacent │…│ lines group together:
+  // when a table's NATURAL width exceeds the pinned tmux width, Claude Code
+  // wraps cell text itself, so one logical row spans several adjacent physical
+  // lines with rules only between logical rows. What a group means is decided
+  // after the parse (below).
+  type Group = { kind: "rule" } | { kind: "cells"; fragments: string[][] };
+  const groups: Group[] = [];
+  let innerRules = 0;
+  for (const line of lines.slice(1, -1)) {
+    const s = strippedTrimmed(line);
+    if (TABLE_MID_RE.test(s)) {
+      if (s.slice(1, -1).split("┼").length !== ncols) return null;
+      groups.push({ kind: "rule" });
+      innerRules++;
+      continue;
+    }
+    // Split the row into cells on │. A mismatched count means a │ inside cell
+    // text or a misaligned frame — bail rather than re-render wrong data.
+    const parts = s.slice(1, -1).split("│");
+    if (parts.length !== ncols) return null;
+    const cells = parts.map((c) => c.trim());
+    const last = groups[groups.length - 1];
+    if (last && last.kind === "cells") last.fragments.push(cells);
+    else groups.push({ kind: "cells", fragments: [cells] });
+  }
+
+  // Decide what an adjacent-line group means. With rules between every logical
+  // row (Claude Code's own table style — ≥2 inner rules), adjacent lines are
+  // wrap FRAGMENTS of one logical row: merge them column-wise (space-joined)
+  // so each cell re-wraps as one flowing text. With a single inner rule
+  // (console.table style: one rule after the header, all body rows adjacent),
+  // adjacent lines are DISTINCT data rows — merging would fuse them, so they
+  // stay separate. A one-logical-row Claude table that wrapped has the same
+  // shape as the latter and also stays unmerged: its fragments still render
+  // adjacently and aligned, just without re-flowing text across the fragment
+  // boundary. (The space join can split a token Claude hard-broke mid-word at
+  // the pinned width — harmless next to the alternative of gluing two words
+  // together.)
+  const mergeFragments = innerRules >= 2;
+  type Row = { kind: "rule" } | { kind: "cells"; cells: string[] };
+  const rows: Row[] = [];
+  for (const group of groups) {
+    if (group.kind === "rule") {
+      rows.push({ kind: "rule" });
+      continue;
+    }
+    if (mergeFragments && group.fragments.length > 1) {
+      const cells = group.fragments[0]!.map((_, i) =>
+        group.fragments
+          .map((f) => f[i]!)
+          .filter((c) => c.length > 0)
+          .join(" "),
+      );
+      rows.push({ kind: "cells", cells });
+    } else {
+      for (const cells of group.fragments) rows.push({ kind: "cells", cells });
+    }
+  }
+  const bottom = strippedTrimmed(lines[lines.length - 1]!);
+  if (bottom.slice(1, -1).split("┴").length !== ncols) return null;
+
+  // Natural width per column = widest trimmed cell text in that column.
+  const natural: number[] = new Array(ncols).fill(1);
+  for (const row of rows) {
+    if (row.kind !== "cells") continue;
+    for (let i = 0; i < ncols; i++) {
+      natural[i] = Math.max(natural[i]!, visibleWidth(row.cells[i]!));
+    }
+  }
+
+  // Frame overhead: indent + ncols+1 border chars + a space of padding on each
+  // side of every cell.
+  const overhead = indent.length + (ncols + 1) + 2 * ncols;
+  const avail = width - overhead;
+  if (avail < ncols * MIN_CELL_WIDTH) return null;
+
+  const widths =
+    natural.reduce((a, b) => a + b, 0) <= avail ? natural : shrinkColumnWidths(natural, avail);
+  if (!widths) return null;
+
+  const rule = (left: string, mid: string, right: string): string =>
+    indent + left + widths.map((w) => "─".repeat(w + 2)).join(mid) + right;
+
+  const out: string[] = [];
+  out.push(rule("┌", "┬", "┐"));
+  for (const row of rows) {
+    if (row.kind === "rule") {
+      out.push(rule("├", "┼", "┤"));
+      continue;
+    }
+    // Word-wrap each cell to its column width; the row's height is its tallest
+    // cell, and shorter cells pad with blank rows.
+    const cellLines = row.cells.map((c, i) => (c === "" ? [""] : wordWrapSingleLine(c, widths[i]!)));
+    const height = Math.max(...cellLines.map((ls) => ls.length));
+    for (let r = 0; r < height; r++) {
+      let line = indent + "│";
+      for (let i = 0; i < ncols; i++) {
+        const txt = cellLines[i]![r] ?? "";
+        line += " " + txt + " ".repeat(Math.max(0, widths[i]! - visibleWidth(txt))) + " │";
+      }
+      out.push(line);
+    }
+  }
+  out.push(rule("└", "┴", "┘"));
+  return out;
+}
+
 /**
  * Word-wrap all lines in a multi-line string.
- * Splits on newlines first, then word-wraps each line.
+ * Splits on newlines first, then word-wraps each line — except table frames,
+ * which reflow as a block (see "Table reflow" above).
  */
 export function wordWrapLines(text: string, width: number): string[] {
+  const lines = text.split("\n");
   const result: string[] = [];
-  for (const line of text.split("\n")) {
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i]!;
+    // Cheap pre-filter: only a line containing ┌ can open a table frame.
+    if (line.includes("┌")) {
+      const end = matchTableBlockEnd(lines, i);
+      if (end > i) {
+        const block = lines.slice(i, end + 1);
+        if (block.every((l) => visibleWidth(l) <= width)) {
+          // The whole table fits — pass it through untouched (colors intact).
+          result.push(...block);
+        } else {
+          const reflowed = reflowTable(block, width);
+          if (reflowed) {
+            result.push(...reflowed);
+          } else {
+            for (const l of block) result.push(...wordWrapSingleLine(l, width));
+          }
+        }
+        i = end + 1;
+        continue;
+      }
+    }
     result.push(...wordWrapSingleLine(line, width));
+    i++;
   }
   return result;
 }

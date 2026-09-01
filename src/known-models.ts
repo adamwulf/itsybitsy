@@ -27,9 +27,12 @@ export interface KnownModel {
 
 export const KNOWN_MODELS: KnownModel[] = [
   // Claude
+  { cli: "claude", model: "fable", description: "Alias — current Fable" },
   { cli: "claude", model: "opus", description: "Alias — current Opus" },
   { cli: "claude", model: "sonnet", description: "Alias — current Sonnet" },
   { cli: "claude", model: "haiku", description: "Alias — current Haiku" },
+  { cli: "claude", model: "claude-fable-5-1", description: "Fable 5.1" },
+  { cli: "claude", model: "claude-fable-5", description: "Fable 5" },
   { cli: "claude", model: "claude-opus-4-7", description: "Opus 4.7" },
   { cli: "claude", model: "claude-opus-4-8", description: "Opus 4.8" },
   { cli: "claude", model: "claude-sonnet-4-6", description: "Sonnet 4.6" },

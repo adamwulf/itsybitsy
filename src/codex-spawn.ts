@@ -23,11 +23,17 @@
 
 import { join } from "path";
 import { homedir } from "os";
-import { mkdir, readdir } from "fs/promises";
+import { mkdir } from "fs/promises";
 import { shellQuote } from "./validation";
 import { buildCodexLaunchArgs, FUGU_CODEX_CONFIG_OVERRIDES, isCodexSafeBinaryPath } from "./codex-config";
 import type { SessionContext } from "./hooks/session-start";
 import { generateInstructions } from "./hooks/session-start";
+import { stripIttybittyWrapper, buildSkillsSection } from "./agent-instructions-shared";
+
+// Re-exported so existing importers (codex-spawn.test.ts, ib-commands.ts) keep
+// resolving these from "./codex-spawn". The implementations now live in the
+// shared, CLI-agnostic module so agy-config.ts can reuse them without copy-paste.
+export { stripIttybittyWrapper, buildSkillsSection };
 
 /**
  * Resolve the absolute path to the `ib` binary suitable for codex hook
@@ -516,142 +522,6 @@ export async function buildCodexAgentsMd(ctx: SessionContext): Promise<string> {
 }
 
 /**
- * Build a "Skills" catalog section for the codex AGENTS.md so codex agents
- * can discover the same read-on-demand workflow guides ("skills") that Claude
- * exposes as `/slash` commands. Codex cannot invoke skills as slash commands,
- * so this section is purely a directory: it tells the agent each skill's name,
- * the absolute path to its `SKILL.md`, and the raw YAML frontmatter (name +
- * description) so the agent can decide when a task matches and read the full
- * file on demand. The skill BODY is never inlined — that would bloat AGENTS.md
- * past the `project_doc_max_bytes` cap for no benefit.
- *
- * Skills live under `~/.claude/skills/<name>/SKILL.md`. We resolve HOME the
- * same way `buildClaudeMdImports` does (`process.env.HOME || homedir()`) so a
- * fake HOME in tests points at a temp dir. The `skillsDir` param defaults to
- * the real path so production callers are unchanged; tests pass a temp dir.
- *
- * Only the FIRST `---`...`---` frontmatter block is parsed — skill bodies
- * contain `key:`-looking prose lines that would false-match a whole-file grep.
- * A subdirectory with no `SKILL.md` is skipped; a `SKILL.md` with no leading
- * frontmatter is still listed (name only, empty frontmatter block). Skills are
- * sorted alphabetically by directory name for deterministic output.
- *
- * Graceful degradation is total: a missing skills dir, an unreadable entry, or
- * a malformed `SKILL.md` is skipped rather than thrown — AGENTS.md generation
- * must never fail because of skills. Returns "" when no skills are found so the
- * caller can omit the section header entirely.
- */
-export async function buildSkillsSection(
-  skillsDir: string = join(
-    process.env.HOME || homedir(),
-    ".claude",
-    "skills",
-  ),
-): Promise<string> {
-  // Sort directory names alphabetically so the rendered output is stable and a
-  // test can assert it (no Date/random anywhere in this path).
-  let names: string[];
-  try {
-    const entries = await readdir(skillsDir, { withFileTypes: true });
-    names = entries
-      .filter((e) => e.isDirectory())
-      .map((e) => e.name)
-      .sort();
-  } catch {
-    // Missing (or unreadable) skills dir — no section.
-    return "";
-  }
-
-  const blocks: string[] = [];
-  for (const name of names) {
-    const skillMdPath = join(skillsDir, name, "SKILL.md");
-    let contents: string;
-    try {
-      const file = Bun.file(skillMdPath);
-      if (!(await file.exists())) continue; // subdir without a SKILL.md — skip
-      contents = await file.text();
-    } catch {
-      // Unreadable SKILL.md — skip rather than fail the whole AGENTS.md.
-      continue;
-    }
-    const frontmatter = extractFrontmatter(contents);
-    // Emit the raw frontmatter verbatim inside a fenced block. The fence length
-    // is computed dynamically (see fenceFor) so a frontmatter that itself
-    // contains a ``` run can't terminate the fence early and corrupt this block
-    // — and everything after it — in AGENTS.md. An empty frontmatter still
-    // lists the skill by name so the agent knows it exists.
-    const fence = fenceFor(frontmatter);
-    const fenced = frontmatter.length > 0
-      ? fence + "\n" + frontmatter + "\n" + fence
-      : fence + "\n" + fence;
-    blocks.push(`### ${name}\nPath: ${skillMdPath}\nFrontmatter:\n${fenced}`);
-  }
-
-  if (blocks.length === 0) return "";
-
-  const intro =
-    "These are instruction files, not slash commands — you cannot invoke them " +
-    "as `/name`. When a task matches a skill's description, read its SKILL.md " +
-    "at the absolute path below and follow it.";
-  return (
-    "## Skills (read-on-demand workflow guides)\n\n" +
-    intro +
-    "\n\n" +
-    blocks.join("\n\n") +
-    "\n"
-  );
-}
-
-/**
- * Compute a markdown code-fence (run of backticks) long enough to safely wrap
- * `text` verbatim. A fence must be strictly longer than the longest run of
- * consecutive backticks anywhere inside the content, otherwise that inner run
- * would close the fence early. We return `max(3, longestRun + 1)` backticks so
- * the common case stays a normal ```-fence while user-authored frontmatter that
- * embeds a fenced example can't corrupt the surrounding AGENTS.md.
- */
-function fenceFor(text: string): string {
-  let longest = 0;
-  let run = 0;
-  for (const ch of text) {
-    if (ch === "`") {
-      run += 1;
-      if (run > longest) longest = run;
-    } else {
-      run = 0;
-    }
-  }
-  return "`".repeat(Math.max(3, longest + 1));
-}
-
-/**
- * Extract the raw text BETWEEN the first two `---` delimiter lines of a
- * `SKILL.md` (the YAML frontmatter region), returned verbatim and trimmed of
- * surrounding blank lines. We deliberately do NOT parse the YAML into a struct
- * — the caller wants the frontmatter shown as-is — and we only look at the
- * leading block so skill-body prose with `key:`-shaped lines can't false-match.
- *
- * Returns "" when the file doesn't open with a `---` line (no frontmatter) or
- * when there's no closing `---`, so the caller lists the skill name-only.
- */
-function extractFrontmatter(contents: string): string {
-  // Split on /\r?\n/ (matching the sibling appendCodexGitignoreEntry) so a
-  // CRLF-line-ended SKILL.md doesn't leave a trailing \r on each interior line
-  // of the verbatim frontmatter we emit.
-  const lines = contents.split(/\r?\n/);
-  // Frontmatter must be the very first line (allowing a leading BOM/whitespace
-  // is unnecessary — skill files start with a bare `---`).
-  if (lines[0]?.trim() !== "---") return "";
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i]?.trim() === "---") {
-      return lines.slice(1, i).join("\n").trim();
-    }
-  }
-  // Opened with `---` but never closed — treat as no usable frontmatter.
-  return "";
-}
-
-/**
  * Build a "Project + user CLAUDE.md" appendix for the codex AGENTS.md so
  * codex agents see the same context as claude. Two sources are merged:
  *
@@ -689,32 +559,6 @@ async function buildClaudeMdImports(worktreePath: string): Promise<string> {
     parts.push(`## User-global CLAUDE.md (~/.claude/CLAUDE.md)\n\n${contents.trimEnd()}`);
   }
   return parts.length === 0 ? "" : parts.join("\n\n") + "\n";
-}
-
-/**
- * Remove a single outer `<ittybitty>...</ittybitty>` wrapper. If the input
- * doesn't start with the open tag (or doesn't have a matching close tag),
- * returns the input unchanged — Claude-side templating may evolve, but a
- * codex agent's AGENTS.md should never embed an XML tag that codex won't
- * recognize.
- */
-export function stripIttybittyWrapper(body: string): string {
-  const openTag = "<ittybitty>";
-  const closeTag = "</ittybitty>";
-  const openIdx = body.indexOf(openTag);
-  if (openIdx === -1) return body;
-  // Use lastIndexOf so we drop the outer wrapper even if the body contains
-  // an inner reference to <ittybitty> (templates do mention the tag in some
-  // commentary).
-  const closeIdx = body.lastIndexOf(closeTag);
-  if (closeIdx === -1 || closeIdx <= openIdx) return body;
-  const inner = body.slice(openIdx + openTag.length, closeIdx).trim();
-  // Preserve any text before the open tag (rare) and after the close tag
-  // (also rare) so we don't accidentally drop trailing team-awareness blocks
-  // that were spliced before the close tag.
-  const before = body.slice(0, openIdx).trim();
-  const after = body.slice(closeIdx + closeTag.length).trim();
-  return [before, inner, after].filter((s) => s.length > 0).join("\n\n") + "\n";
 }
 
 /**

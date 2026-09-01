@@ -29,6 +29,7 @@ import { buildCodexLaunchArgs, FUGU_CODEX_CONFIG_OVERRIDES, isCodexSafeBinaryPat
 import type { SessionContext } from "./hooks/session-start";
 import { generateInstructions } from "./hooks/session-start";
 import { stripIttybittyWrapper, buildSkillsSection } from "./agent-instructions-shared";
+import { appendGitignoreEntries, type GitignoreEntryOutcome } from "./agy-config";
 
 // Re-exported so existing importers (codex-spawn.test.ts, ib-commands.ts) keep
 // resolving these from "./codex-spawn". The implementations now live in the
@@ -430,22 +431,13 @@ ${qResumeExitScript}
 `;
 }
 
-export type AppendCodexGitignoreResult =
-  | "appended"
-  | "already-present"
-  | "negation-respected";
+export type AppendCodexGitignoreResult = GitignoreEntryOutcome;
 
 /**
- * Append `.codex/` to <worktree>/.gitignore if not already present. Idempotent:
- * a worktree whose .gitignore already lists `.codex/` (or `.codex` without
- * trailing slash) is left untouched. The file is created with mode 644 if
- * missing — `mkdir -p` is the caller's responsibility (worktree must exist).
- *
- * Per MED 3 from the Phase 4 review, an explicit negation (`!.codex/` or
- * `!.codex`) is treated as the user's intent to TRACK that directory. We
- * skip the append in that case and return "negation-respected" so the
- * caller can log a notice. Without this guard, last-match-wins gitignore
- * semantics would silently reverse the user's intent.
+ * Append `.codex/` to <worktree>/.gitignore if not already present. Now a thin
+ * wrapper over the generalized `appendGitignoreEntries` (agy-config.ts) — the
+ * codex path is just the single-entry `[".codex/"]` case. Idempotent; respects
+ * an explicit `!.codex/` / `!.codex` negation (MED 3 from the Phase 4 review).
  *
  * Returns:
  *   - "appended"          file was created or `.codex/` was appended.
@@ -454,25 +446,8 @@ export type AppendCodexGitignoreResult =
  *                          negation; we did not append.
  */
 export async function appendCodexGitignoreEntry(worktreePath: string): Promise<AppendCodexGitignoreResult> {
-  const gitignorePath = join(worktreePath, ".gitignore");
-  const file = Bun.file(gitignorePath);
-  let existing = "";
-  if (await file.exists()) {
-    existing = await file.text();
-  }
-  const trimmedLines = existing.split(/\r?\n/).map((l) => l.trim());
-  // Explicit negation wins — the user has said "track this directory". Do
-  // not silently override with an `.codex/` append (gitignore last-match
-  // semantics would reverse their intent).
-  const hasNegation = trimmedLines.some((l) => l === "!.codex/" || l === "!.codex");
-  if (hasNegation) return "negation-respected";
-  const hasEntry = trimmedLines.some((l) => l === ".codex/" || l === ".codex");
-  if (hasEntry) return "already-present";
-
-  const needsLeadingNewline = existing.length > 0 && !existing.endsWith("\n");
-  const appended = (needsLeadingNewline ? "\n" : "") + ".codex/\n";
-  await Bun.write(gitignorePath, existing + appended);
-  return "appended";
+  const results = await appendGitignoreEntries(worktreePath, [".codex/"]);
+  return results[".codex/"]!;
 }
 
 /**

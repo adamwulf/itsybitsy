@@ -19,6 +19,8 @@
 
 Recommended shape (details in §8 and §15): `agy:<model>` selector → `agy --agent ittybitty --mode=accept-edits --model <m> --effort <e> --add-dir ~/.itsybitsy --log-file <agentDir>/agy.log --title <agentId> "<prompt>"` inside tmux, with `<worktree>/.agents/hooks.json` registering `PreToolUse` → `ib hooks agy-pre-tool-use <id>`, `PreInvocation` → `ib hooks agy-pre-invocation <id>`, `Stop` → `ib hooks agy-stop <id>`, all git-excluded.
 
+> **Superseded by the spike (§17, same day).** The spike changed three things: (1) use `--dangerously-skip-permissions` plus a deny-by-default hook, because a hook `allow` cannot suppress the permission card but a hook `deny` is a silent hard block and the hook is **fail-closed**; (2) do not use `--agent` — workspace custom agents are not discovered and a global one drops the workspace rules — put the instructions in `<worktree>/.agents/rules/ittybitty-agent.md` with `trigger: always_on`; (3) `--title` does not exist. The design source of truth is now `SPEC-ANTIGRAVITY-CLI.md`.
+
 ---
 
 ## 1. What `agy` is, and what is on this machine
@@ -31,11 +33,37 @@ Recommended shape (details in §8 and §15): `agy:<model>` selector → `agy --a
 
 ## 2. Launch surface
 
-### 2.1 Flags confirmed present in the 1.1.23 binary
+### 2.1 Flags (from `agy --help`, v1.1.23)
 
-`--add-dir`, `--agent`, `--continue`, `--conversation`, `--dangerously-skip-permissions`, `--disable-slash-commands`, `--effort`, `--headless`, `--input-format`, `--json-schema`, `--mode`, `--model`, `--new-project`, `--output-format`, `--print`, `--project`, `--prompt-interactive`, `--remote-control`, `--sandbox`, `--title`[^30]. The docs also list `--print-timeout` and `--log-file`[^6][^50][^53]. A grep of a Go binary proves presence, not absence: flag names are stored without dashes, so a flag I did not find may still exist. **Action: run `agy --help` once and paste it into this file** (my Bash allowlist blocks `agy`).
+```
+  --add-dir                       Add a directory to the workspace (repeatable) (default [])
+  --agent                         Agent for the current CLI session
+  -c                              Short alias for --continue
+  --continue                      Continue the most recent conversation
+  --conversation                  Resume a previous conversation by ID
+  --dangerously-skip-permissions  Auto-approve all tool permission requests without prompting
+  --disable-slash-commands        Disable slash command and skill expansion in print mode
+  --effort                        Reasoning effort for the current CLI session (low|medium|high)
+  -i                              Short alias for --prompt-interactive
+  --input-format                  Input format for print mode (text, stream-json). ...
+  --json-schema                   Optional JSON schema string or path to a schema file ...
+  --log-file                      Override CLI log file path
+  --mode                          Set the agent execution mode for this session (accept-edits, plan)
+  --model                         Model for the current CLI session
+  --new-project                   Create a new project for this session
+  --output-format                 Output format for print mode (text, json, stream-json) (default text)
+  -p                              Short alias for --print
+  --print                         Run a single prompt non-interactively and print the response
+  --print-timeout                 Timeout for print mode wait (default 5m0s)
+  --project                       Project ID or project name for the current CLI session
+  --prompt                        Alias for --print
+  --prompt-interactive            Run an initial prompt interactively and continue the session
+  --sandbox                       Run in a sandbox with terminal restrictions enabled
 
-No flag was found for trust, per-process settings, `--no-subagents`, `--yolo`, or `--resume`[^30][^47].
+Available subcommands: agent, agents, changelog, help, install, mcp, mic-serve, models, plugin, plugins, update
+```
+
+Captured on this machine on 2026-09-01[^75]. There is no `--title`, no trust flag, no per-process settings file, no `--no-subagents`, no `--yolo`, no `--resume`. `agy models` prints `<slug>\t<label>` pairs (e.g. `gemini-3.7-flash-low`, `gemini-3.1-pro-high`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, `gpt-oss-120b-medium`); `--model` takes the slug[^75].
 
 ### 2.2 Flags that matter for us
 
@@ -278,6 +306,121 @@ Run each from a throwaway git worktree under a repo that also has a root `AGENTS
 
 ---
 
+## 17. Spike results (2026-09-01, agy 1.1.23, macOS, Google OAuth sign-in)
+
+Method: a throwaway workspace under the session scratchpad with `git init`, a probe hook (`bash hook.sh <Event>`) registered for all five events in `<ws>/.agents/hooks.json` that appends every stdin payload to a log and answers from a decision file, and `agy` launched inside dedicated tmux sessions (200×50) with `--model gemini-3.7-flash-low --mode=accept-edits --log-file <path>`. Ten sessions total. Everything below was observed directly; pane captures are quoted verbatim[^75].
+
+### 17.1 Trust card (Q5)
+
+Every new directory shows this card once, including a git worktree:
+
+```
+Accessing workspace:
+
+<abs path>
+
+Do you trust the contents of this project?
+
+Antigravity CLI requires permission to read, edit, and execute files here.
+
+> Yes, I trust this folder
+  No, exit
+
+  ↑/↓ Navigate · enter Confirm
+```
+
+`Enter` accepts. On accept, agy appends the path to `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json` and rewrites that file (key order changes). Workspace `hooks.json` is loaded only after trust: the log prints `loaded 0 named hooks from 0 hooks.json file(s)` at start and `loaded 1 named hooks from 1 hooks.json file(s)` right after the accept. The same line appears when launched inside a git worktree whose `.git` is a file, so worktree hook discovery works.
+
+### 17.2 Hook decisions (Q1, Q2)
+
+| Hook output | Without skip-permissions | With `--dangerously-skip-permissions` |
+|---|---|---|
+| `{"decision":"allow"}` on `run_command echo …` | permission card still shown | runs, no card |
+| `{"decision":"allow","permissionOverrides":["command(*)",…]}` | permission card still shown | runs, no card |
+| `{"decision":"deny","reason":"probe deny: …"}` | **silent hard block, no card** | **silent hard block, no card** |
+| same, on `invoke_subagent` | — | silent hard block (issue #640 is fixed in 1.1.23) |
+
+The model sees the deny as tool output: `tool call denied by pre-tool hook: probe deny: blocked by itsybitsy policy`, and continues its turn. The permission card (no skip-permissions) reads:
+
+```
+Requesting permission for:
+   echo hello-from-agy
+
+Do you want to proceed?
+> 1. Yes
+  2. Yes, and always allow in this conversation for commands that start with 'echo'
+  3. Yes, and always allow for commands that start with 'echo' (Persist to settings.json)
+  4. No
+
+  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command
+esc to cancel
+```
+
+Conclusion: the never-prompt launch is `--dangerously-skip-permissions --mode=accept-edits` plus a deny-by-default PreToolUse hook. Under that launch, a hook `allow` on `view_file ../outside/secret.txt` read a file outside the workspace with no card, so the hook must do the path isolation for file tools as well as `run_command`.
+
+### 17.3 Hook failure mode (Q3) — FAIL-CLOSED
+
+| Hook behaviour | Result |
+|---|---|
+| exit 1 with non-JSON stdout | tool not run; model sees `JSON hook "jsonhook__itsybitsy-probe_PreToolUse_0_0" failed: command failed: exit status 1, stderr:` |
+| `{}` (no `decision`) | tool not run; model sees `tool call denied by pre-tool hook:` (empty reason) |
+| sleeps past `timeout` | tool not run; model sees `… failed: command failed: signal: killed, stderr:` |
+
+This is the opposite of codex. The dispatcher still needs try/catch for clean logging, but a crash cannot open the gate.
+
+### 17.4 Payloads (Q9, Q10)
+
+Common fields on every event: `conversationId`, `workspacePaths` (the launch dir), `modelName` (the slug), `transcriptPath` = `~/.gemini/antigravity-cli/brain/<conversationId>/.system_generated/logs/transcript_full.jsonl`, `artifactDirectoryPath` = `~/.gemini/antigravity-cli/brain/<conversationId>`. Nothing is written inside the worktree. The hook runs with cwd `<ws>/.agents`, the full user `PATH`, `TMUX`/`TMUX_PANE`, and `ANTIGRAVITY_CONVERSATION_ID=<uuid>` in its environment.
+
+Tool argument names (`toolCall.args`, all tools also carry `toolAction` and `toolSummary`):
+
+| Tool | Args | TUI line |
+|---|---|---|
+| `run_command` | `CommandLine`, `Cwd`, `WaitMsBeforeAsync` | `● Bash(echo hello-from-agy) (ctrl+o to expand)` |
+| `view_file` | `AbsolutePath` | `● Read(<path>) (ctrl+o to expand)` |
+| `list_dir` | `DirectoryPath` | `● ListDir(<path>)` |
+| `write_to_file` | `TargetFile`, `CodeContent`, `Overwrite`, `Description` | `● Edit(<path>) (ctrl+o to expand)` |
+| `replace_file_content` | `TargetFile`, `TargetContent`, `ReplacementContent`, `StartLine`, `EndLine`, `AllowMultiple`, `Instruction`, `Description` | `● Edit(<path>)` |
+| `invoke_subagent` | `Subagents: [{Model, Prompt, Role, TypeName, Workspace}]` | `● Agent(self: Greeting Subagent)(<prompt>)` |
+| `find_by_name` | not captured | `● Find(<summary>)` |
+
+`PreInvocation`: `invocationNum` starts at 0 and counts within a turn; `initialNumSteps` grows over the conversation. `PostInvocation`: same fields. `Stop`: `terminationReason: "NO_TOOL_CALL"` (not `model_stop`), `error: ""`, `executionNum: 0`, `fullyIdle: true`. `Stop` output `{"decision":"continue","reason":"…"}` re-enters the loop and the reason is injected; agy stopped honouring it after about eight consecutive continuations (the documented cap), so a stuck continue cannot wedge an agent. The transcript is JSONL with `step_index`, `source` (`USER_EXPLICIT` / `MODEL`), `type` (`USER_INPUT` / `PLANNER_RESPONSE`), `status`, `created_at`, `content`, `tool_calls`; the last assistant message is the last `PLANNER_RESPONSE` line with `content`.
+
+### 17.5 Rules and instructions (Q5, Q6)
+
+| File | Loaded? |
+|---|---|
+| `<ws>/AGENTS.md` (repo root) | yes |
+| `<parent of ws>/AGENTS.md` (outside the repo root) | no |
+| `<main checkout>/AGENTS.md` when launched in that repo's git worktree | no — the walk-up stops at the worktree root |
+| `<ws>/.agents/rules/x.md` without frontmatter | no |
+| `<ws>/.agents/rules/x.md` with `trigger: always_on` frontmatter | yes, together with `AGENTS.md` |
+
+Custom agents: `<ws>/.agents/agents/<name>/agent.md` and `<ws>/.agents/agents/<name>.md` were **not** discovered (`agy agents` empty; log `Agent "ittybitty" not found, falling back to default`). `~/.gemini/config/agents/<name>/agent.md` **is** discovered: the body became the system prompt, `tools:` scoping worked (the model reported it had no `invoke_subagent`; `manage_task` and `schedule` are always present), an agent without `tools:` had only read tools, and the status bar showed `accept-edits · ittybitty (Gemini 3.7 Flash · low)  /agents`. But a custom agent dropped the workspace `AGENTS.md` and rules even with `inheritCustomizations: true`. Decision: do not use `--agent`; ship the instructions as an always-on rule file and gate tools in the hook.
+
+### 17.6 Resume (Q11)
+
+`agy --conversation <uuid>` from the same directory restored the full transcript and reloaded the workspace hooks. The model was not carried over (the status bar showed the account default `Gemini 3.7 Flash · high`), so resume must re-pass `--model`.
+
+### 17.7 Rendering (Q8)
+
+- Default is the alternate screen (`tmux display #{alternate_on}` = 1, `history_size` = 0): the pane always shows the current agy screen and tmux keeps no scrollback.
+- `altScreenMode: "never"` (global setting only) renders inline and tmux scrollback grows, but agy repaints the whole transcript on updates, so the scrollback contains duplicate stale frames.
+- Setting `SSH_TTY`/`SSH_CONNECTION` to force inline mode is not usable: agy then shows a "You are currently not signed in" login screen (keyring path disabled).
+- Chrome: a 5-line logo banner with account, model, and workspace path; `────` separator lines; the input line is `>` alone (placeholder `Accept-edits mode: file edits auto-approved (shift+tab to cycle)` on the first draw); bottom line `? for shortcuts` (idle) or `esc to cancel` (working) on the left and `accept-edits · Gemini 3.7 Flash · low` on the right. Working indicators: `⢿  Running command...`, `⣯  Generating...`, `⣻  Reading file...` followed by `└ Tip: …`. Thought line: `▸ Thought for 1s, 215 tokens`. A survey overlay `How's the CLI experience so far? Help us improve:  [1] Good  [2] Fine  [3] Bad  [0] Skip` appeared after some turns; `0` dismisses it (`showFeedbackSurvey: false` in the global settings would suppress it).
+
+### 17.8 Model and effort
+
+`--model gemini-3.7-flash-low` (slug) applied; the log first prints `failed to apply model override: … not recognized` before models are fetched, then `Propagating selected model override to backend: label="Gemini 3.7 Flash (Low)"`. `--mode` accepts only `accept-edits` or `plan`.
+
+### 17.9 Initial prompt and the trust race (load-bearing)
+
+`agy -i "<prompt>"` runs the prompt and then stays interactive. But in an **untrusted** directory the conversation is created and the first model call goes out about two seconds after launch, **before** the trust card is answered: the log shows `Created conversation` at +1.5 s, `prompt section "user_rules"` empty, and `loaded 1 named hooks` only at +10 s when Enter was pressed; the probe recorded **no** payloads for that conversation and the reply ignored the workspace rules. In a **pre-trusted** directory the order is `loaded 1 named hooks` at +30 ms, `Created conversation` at +900 ms, and the first turn's `run_command` was denied by the hook with both `AGENTS.md` and the always-on rule applied.
+
+Consequence: itsybitsy must add the worktree's realpath to `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json` **before** launching, and may remove it at teardown. The watchdog trust-card auto-accept is only a fallback for a resumed or hand-launched session; it must never be the primary path with `-i`, because that first turn would run with no hook.
+
+---
+
 ## Sources
 
 [^1]: [Antigravity CLI Overview](https://antigravity.google/docs/cli/overview/)
@@ -353,3 +496,4 @@ Run each from a throwaway git worktree under a repo that also has a root `AGENTS
 [^72]: [effort mapping for codex](src/agent-cli.ts:mapEffortForCodex)
 [^73]: [newAgent codex branch (git common dir as extra writable root)](src/ib-commands.ts:newAgent)
 [^74]: [CLI Reference (slash commands, keybindings, tool confirmation keys)](https://antigravity.google/docs/cli/reference/)
+[^75]: [Spike run by researcher agent `antigravity` on 2026-09-01: `agy --help`, `agy models`, tmux pane captures, and the probe-hook payload log; captures are reproduced verbatim in §17 because the scratchpad is session-local](/private/tmp/claude-501/-Users-adamwulf-Developer-bun-itsybitsy--ittybitty-agents-antigravity-repo/d1300c90-81ec-4127-8470-f6530a3e7a88/scratchpad/agy-spike/payloads.tsv)

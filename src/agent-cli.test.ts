@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { resolveCli, isCodexModel, parseModel, mapEffortForCodex, KNOWN_CLIS, type AgentCli } from "./agent-cli";
+import { resolveCli, isCodexModel, parseModel, mapEffortForCodex, mapEffortForAgy, agySlugHasEffort, KNOWN_CLIS, type AgentCli } from "./agent-cli";
 
 describe("parseModel", () => {
   describe("split on first colon, model is greedy-to-end (SPEC §5.1)", () => {
@@ -157,13 +157,38 @@ describe("parseModel", () => {
   });
 
   describe("KNOWN_CLIS membership", () => {
-    test("contains claude, codex, and fugu", () => {
+    test("contains claude, codex, fugu, and agy", () => {
       expect(KNOWN_CLIS.has("claude")).toBe(true);
       expect(KNOWN_CLIS.has("codex")).toBe(true);
       expect(KNOWN_CLIS.has("fugu")).toBe(true);
+      expect(KNOWN_CLIS.has("agy")).toBe(true);
     });
-    test("has size 3 (claude + codex + fugu)", () => {
-      expect(KNOWN_CLIS.size).toBe(3);
+    test("has size 4 (claude + codex + fugu + agy)", () => {
+      expect(KNOWN_CLIS.size).toBe(4);
+    });
+  });
+
+  describe("agy selector (SPEC-ANTIGRAVITY-CLI.md D1)", () => {
+    test("parseModel resolves an agy Gemini slug verbatim", () => {
+      expect(parseModel("agy:gemini-3.7-flash-low")).toEqual({
+        cli: "agy",
+        model: "gemini-3.7-flash-low",
+      });
+    });
+    test("parseModel resolves an agy Claude-backed slug verbatim", () => {
+      expect(parseModel("agy:claude-sonnet-4-6")).toEqual({
+        cli: "agy",
+        model: "claude-sonnet-4-6",
+      });
+    });
+    test("the unknown-cli message lists agy", () => {
+      expect(() => parseModel("gemini:foo")).toThrow(/known: claude, codex, fugu, agy/);
+    });
+    test("resolveCli returns agy for an agy string", () => {
+      expect(resolveCli("agy:gemini-3.1-pro-high")).toBe("agy");
+    });
+    test("isCodexModel is false for an agy string", () => {
+      expect(isCodexModel("agy:gemini-3.7-flash-low")).toBe(false);
     });
   });
 });
@@ -318,5 +343,44 @@ describe("mapEffortForCodex — collapse the itsybitsy 5-level scale to codex's 
     // the mapping must be total — an unmapped value must not become undefined.
     expect(mapEffortForCodex("")).toBe("high");
     expect(mapEffortForCodex("bogus")).toBe("high");
+  });
+});
+
+describe("mapEffortForAgy — same collapse table as codex (SPEC-ANTIGRAVITY-CLI.md D1)", () => {
+  test("low and medium pass through unchanged", () => {
+    expect(mapEffortForAgy("low")).toBe("low");
+    expect(mapEffortForAgy("medium")).toBe("medium");
+  });
+  test("high, xhigh, and max all map to 'high'", () => {
+    expect(mapEffortForAgy("high")).toBe("high");
+    expect(mapEffortForAgy("xhigh")).toBe("high");
+    expect(mapEffortForAgy("max")).toBe("high");
+  });
+  test("unrecognized input falls back to 'high' (mapping is total)", () => {
+    expect(mapEffortForAgy("")).toBe("high");
+    expect(mapEffortForAgy("bogus")).toBe("high");
+  });
+  test("agrees with mapEffortForCodex on every itsybitsy level", () => {
+    for (const level of ["low", "medium", "high", "xhigh", "max", "", "bogus"]) {
+      expect(mapEffortForAgy(level)).toBe(mapEffortForCodex(level));
+    }
+  });
+});
+
+describe("agySlugHasEffort — detect a trailing -low/-medium/-high on an agy slug", () => {
+  test("true for Gemini slugs that encode effort", () => {
+    expect(agySlugHasEffort("gemini-3.7-flash-low")).toBe(true);
+    expect(agySlugHasEffort("gemini-3.7-flash-medium")).toBe(true);
+    expect(agySlugHasEffort("gemini-3.1-pro-high")).toBe(true);
+  });
+  test("false for slugs without a trailing effort segment", () => {
+    expect(agySlugHasEffort("claude-sonnet-4-6")).toBe(false);
+    expect(agySlugHasEffort("claude-opus-4-6-thinking")).toBe(false);
+    expect(agySlugHasEffort("gemini-3.7-flash")).toBe(false);
+  });
+  test("only matches at the END of the slug", () => {
+    // A `-high` in the middle must not count — only a trailing segment does.
+    expect(agySlugHasEffort("high-context-model")).toBe(false);
+    expect(agySlugHasEffort("low-latency-pro")).toBe(false);
   });
 });

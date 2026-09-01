@@ -65,6 +65,13 @@ export interface AgentMeta {
    * claude agents leave it unset (they reuse the generated `session_id` UUID).
    */
   codex_session_id?: string;
+  /**
+   * Antigravity CLI (`agy`) agents track their conversation UUID here for
+   * `agy --conversation <uuid>` resume (SPEC-ANTIGRAVITY-CLI.md D12). Captured
+   * from the `conversationId` field of the agy hook payloads. Claude and codex
+   * agents leave it unset.
+   */
+  agy_conversation_id?: string;
   tmux_session: string;
   prompt: string;
   manager: string | null;

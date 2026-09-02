@@ -609,8 +609,10 @@ path permissions in the `.md` files, basic defaults shipped.
      them for writing (child agent dir, `settings.local.json`) and keeps the
      tmux socket; a non-spawning type gets them read-only and loses the tmux
      socket (§6.10 amendment 3). One key, one rule.
-   - **`_all.md` `allowWrite` defaults:** `~/Library/Caches` on macOS (bun,
-     SwiftPM, pip, Xcode).
+   - **Toolchain caches are per-type entries, not baseline** (revised in
+     §6.14): named subpaths such as `~/Library/Caches/org.swift.swiftpm`,
+     added by the types that need them. The only `~/Library` entry in
+     `_all.md` is `~/Library/Keychains`, read only.
    - **`~/.itsybitsy` floor:** not the whole directory, which codex got only
      because its sandbox is coarse, and not `~/.itsybitsy/agents` alone
      either. Running agents also write `~/.itsybitsy/teams/<team>.channel.jsonl`
@@ -657,8 +659,9 @@ collected. Not a `config.json` key, not a code constant.
 **Q1: separate lists for read-write and read-only paths?** Yes. The `paths:`
 block of §6.11 already has them: `allowRead`, `allowWrite`, `deny`. The kernel
 distinguishes the two operations[^52], and the baseline needs the distinction:
-the system directories and the home dot-files are read-only; `~/Library/Caches`,
-the `~/.itsybitsy` floor, and project directories are read-write. One refinement,
+the system directories, the home dot-files, and `~/Library/Keychains` are
+read-only; the `~/.itsybitsy` floor, per-type toolchain caches, and project
+directories are read-write. One refinement,
 which `sandbox-safety` proposes to build: today `allowWrite` compiles to
 `file-write*` only[^52], so a path listed only for writing cannot be opened for
 reading, a footgun with no real use. So **`allowWrite` means read plus write**
@@ -929,6 +932,93 @@ drift. Rows:
 - on macOS, the suite compiles the profile and probes the two scenarios live
   with `sandbox-exec`, because last-match-wins for nested subpaths has been
   relied on but never probed live (`sandbox-safety`'s addition).
+
+### 6.14 The plan, as Adam summarized it, confirmed with precisions
+
+Adam restated the plan in four points on 2026-09-02 at 16:26. All four are
+correct. The precisions below are the parts a reader would otherwise get
+wrong.
+
+**1. `sandbox-exec` on all CLIs.** Yes. Precisions: macOS only, hook-only
+elsewhere. Per type during the transition, because `sandbox.enabled` can only
+be switched on by a layer, never off (§6.12); the end state is on in `_all.md`
+with explicit wide allows for a type that cannot yet be fenced. Agy needs its
+own boot-floor bisection before it can be wrapped. Two pilot checks remain:
+that a hook deny still blocks claude under skip-permissions, and MCP servers
+under the profile.
+
+**2. Yolo for each CLI so the sandbox holds the path logic.** Yes, with two
+precisions. Yolo means "skip the CLI's own permission prompts", and it is
+passed only when that agent's sandbox is enabled; never yolo without the
+kernel. The sandbox holds all path logic for the filesystem **outside the
+structural roots**. The hooks stay, and keep: the structural rules that live
+inside roots the kernel grants (the agent's own settings file inside the
+writable worktree, `git --git-dir` against the shared git directory, other
+agents' directories inside the repo agents dir), tool policy, sub-agent
+interception, the manager-only `ib` commands, state tracking, readable denial
+reasons, and audit mode (§6.12).
+
+**3. Read and write paths defined by the agent-type `.md` files.** Yes:
+
+- One `paths:` block with `allowRead` (read only), `allowWrite` (read and
+  write), and `deny`.
+- The files build one set: the union across `_all.md`, `_non_coordinator.md`,
+  the `inherits:` chain, and the leaf, plus the runtime roots of point 4.
+  Order never matters (§6.13).
+- The most specific entry wins between read and write; the same path in both
+  lists writes; `deny` wins over everything at any depth; globs rank by their
+  literal prefix.
+- A path in no list is disallowed for both operations. A missing `paths` key
+  is strict, not permissive. Fully open must be written out as
+  `allowRead: ["/"]`. Caveat: this is true only after the `_all.md` read floor
+  is tightened (§6.10 amendment 1); today it lists `/` and `~` for reading.
+
+**4. Pre-allowed paths.** Yes, in two kinds. **Runtime roots** are per agent,
+injected by code, and never appear in a `.md`: the agent's worktree (read and
+write), its agent dir with `agent.log` and `meta.json`, the shared git common
+dir (read and write; `git --git-dir` stays hook-guarded), the repo agents dir
+(read for all, write for spawning types, which also keep the tmux socket), the
+Claude project dir under `~/.claude/projects`, and the scratchpad under
+`/private/tmp/claude-<uid>/`. Not the main repo root: that stays denied for
+worktree agents. **Baseline entries** live in `_all.md` and are editable:
+
+- `~/.itsybitsy`: read for the whole directory; write for `agents`, `teams`,
+  `teams.json`, `teams.json.tmp`, and `.teams.lock`; `agent-types/`,
+  `config.json`, `repos.json`, `layout.json` read only (§6.11 item 7).
+- The system read floor: `/usr`, `/bin`, `/sbin`, `/System`, `/Library`,
+  `/opt/homebrew`, `/private/etc`, `/private/var`, `/dev`, plus the raw
+  root-listing rule; write for `/private/tmp` (tmux socket denied for
+  non-spawners) and `/private/var/folders`.
+- The home boot set for claude: `~/.claude`, `~/.claude.json`, `~/.local`,
+  `~/.bun`, `~/.gitconfig`; `~/.codex` for codex; agy's own set once bisected.
+- `~/Library`, to Adam's question "how specific can we be": very. The
+  verified boot floor needs exactly **one** `~/Library` path, `~/Library/Keychains`
+  read only (keychain-backed OAuth and git credentials; writes go through
+  `securityd`, not the process; an accepted reachability, §6.12). That is the
+  only `~/Library` entry in `_all.md`. Toolchain caches are **per-type entries
+  with named subpaths**, found by bisection because the kernel cannot audit:
+  `~/Library/Caches/org.swift.swiftpm` for SwiftPM (xcodebuild aborts during
+  package resolution without it[^14]), `~/Library/Caches/pip`,
+  `~/Library/Caches/Homebrew`; bun's cache lives under `~/.bun`, already in
+  the floor. A coarse `~/Library/Caches` is a fallback a type may choose, not
+  the floor. Xcode and simulator types add their own entries the same way
+  (`~/Library/Developer/CoreSimulator`, `~/Library/Logs`; DerivedData stays
+  inside the worktree per the repo's build rules). `sandbox-safety` revised
+  the earlier "Caches in the baseline" idea to this, and I agree; §6.11 item 7
+  and §6.12 are aligned.
+- Deny carve-outs in the baseline: `~/.ssh`, `~/.aws`, `**/.env`.
+
+**Two precisions `sandbox-safety` is giving Adam, repeated here.** "Agent repo
+root" means the agent's worktree plus its agent dir, never the main repo root;
+coordinators are the exception, because their worktree is the repo root. And
+"not in the list means disallowed" holds for reads, writes, and directory
+listings, but file metadata (`stat`: existence, size, mtime) is granted
+globally because the bisection proved it mandatory, and the root directory
+listing is allowed by the raw rule.
+
+**Pre-denied regardless of any list:** other agents' directories, the main
+repo outside the worktree, the agent's own `.claude/settings*.json` and agy
+boundary files for writing, and the tmux socket for non-spawning types.
 
 ---
 

@@ -1046,7 +1046,73 @@ boundary files for writing, and the tmux socket for non-spawning types.
 
 ---
 
-## 8. Limitations of this report
+## 8. Build order
+
+Adam asked on 2026-09-02 at 16:32 which agent builds first and which builds on
+top. The answer follows from where the shared code lives: `src/sandbox.ts`
+(canonicalizer, glob compiler, profile generator), the `sandbox:` frontmatter
+merge, the meta sandbox block, and the spawn wiring exist only on
+`agent/sandbox-safety`[^29][^39][^52]. The `paths:` block integrates with all
+of them, so it must be built on top of that branch, not on bare `main`.
+
+This **reverses** the order set in §6.9 point 5. That order was set when
+`allowedPaths` was the source of truth; the single model retired it, and the
+`paths:` block is now a refactor of machinery `sandbox-safety` already owns
+and has 141 tests for: the one-level block parse and validation, the union
+across layers, the `meta.json` persistence and resume replay, the
+canonicalizer, the glob compiler, and the generator. `sandbox-safety` proposed
+the reversal and I agree: if `path-isolation` built `paths:` fresh on `main`,
+there would be two list-merge systems to reconcile on rebase.
+
+**Phase A, `sandbox-safety` builds first, on `agent/sandbox-safety`:**
+
+1. Move `allowRead`, `allowWrite`, `deny` out of `sandbox:` into a top-level
+   `paths:` block; `sandbox:` keeps `enabled`, `rawAllow`, `domains`.
+2. `allowWrite` emits read and write; merge-time dedupe of an exact duplicate
+   into `allowWrite`; the total-key specificity sort with the runtime roots in
+   the table; a write-deny per read-only entry; config denies last.
+3. The shared `resolvePathAccess(absPath, op, lists)` in `src/sandbox.ts`,
+   the table-driven oracle, the shuffled-order rows, and the live
+   `sandbox-exec` probe on macOS.
+4. The `_all.md` floors: the read floor to the bisected set, the settled
+   `~/.itsybitsy` write floor, `~/Library/Keychains` only.
+5. The spawn-keyed repo-agents write root and tmux deny.
+6. Claude `--dangerously-skip-permissions` when enabled.
+
+Output: a `paths:` block with the absolute, `~`, and glob grammar, unioned,
+sorted, generated, and one resolver function, all tested.
+
+**Phase B, `path-isolation` builds on top, rebased onto that branch:**
+
+1. The relative-to-repo-root grammar in the `newAgent` resolve step (§6.2),
+   resolving once and storing the authored-resolved lists in `meta.json`.
+2. Retire `allowedPaths` everywhere (§6.11 item 2).
+3. The hook calls `resolvePathAccess` after the structural steps with the
+   runtime roots folded in as write entries, strict by default; the codex and
+   agy handlers pass the lists; codex `--add-dir` parity for the non-sandboxed
+   path.
+4. The scratchpad runtime root; audit mode (`paths.audit`); the advisory Bash
+   scanner (§6.6, against the resolver); session-start text; `ib info` and
+   dashboard display; SPEC §2.2, §5.2, §6.1 and the implementation notes.
+
+**Parallel option during Phase A**, if Adam wants speed: `path-isolation`
+starts the pieces that touch none of `agent-types.ts`, `newAgent`, or
+`sandbox.ts`: the Bash-scanner tokenization in `agent-path.ts` against a
+resolver interface, the session-start text, the codex hook context, the
+`ib info` display, and the audit-mode plumbing. Then it rebases onto the
+sandbox branch for the resolver integration and the `allowedPaths`
+retirement. Conflict risk is low; coordination cost is not zero.
+
+**Merge order.** `agent/sandbox-safety` merges to `main` after Phase A; it
+ships with `enabled: false`, so no live agent changes behaviour. Then
+`agent/path-isolation` rebases onto `main`, finishes Phase B, and merges.
+
+**Phase C, pilot.** Enable the sandbox on one type in this repo, run audit
+mode for reads and writes, confirm the two pilot checks (a hook deny under
+skip-permissions; MCP under the profile), then enable type by type. Agy gets
+its wrapper after its own boot-floor bisection.
+
+## 9. Limitations of this report
 
 - Codex read behavior under `workspace-write` is taken from the repo's research
   notes[^17], not re-tested live in this session.

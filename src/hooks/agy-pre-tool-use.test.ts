@@ -194,6 +194,48 @@ describe("checkAgyPreToolUse — run_command Cwd isolation", () => {
   });
 });
 
+// ── run_command RELATIVE traversal escapes (boundary review fix 1) ───────────
+
+describe("checkAgyPreToolUse — run_command relative traversal", () => {
+  test("relative cat into a sibling worktree is denied even under the default allow list", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: "cat ../../agent-other/repo/.env", Cwd: ctx.worktreePath } },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("other agents");
+  });
+
+  test("ls -la ../.. (listing the agents dir) is denied", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: "ls -la ../..", Cwd: ctx.worktreePath } },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+  });
+
+  test("relative traversal into the main checkout is denied", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: "cat ../../../../SPEC.md", Cwd: ctx.worktreePath } },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("main repo");
+  });
+
+  test("relative path staying inside the worktree is allowed", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: "cat src/../lib/x.ts", Cwd: ctx.worktreePath } },
+      ctx,
+    );
+    expect(d.decision).toBe("allow");
+  });
+});
+
 // ── deny list enforcement (manager fix 2) ────────────────────────────────────
 
 describe("checkAgyPreToolUse — deny list wins over allow", () => {

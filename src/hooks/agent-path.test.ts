@@ -340,6 +340,87 @@ describe("checkPathAccess", () => {
     expect(result.reason).toContain("bash command references main repo");
   });
 
+  // ── relative-path traversal escaping the worktree (boundary review fix 1) ───
+
+  test("bash RELATIVE cat ../../x from the worktree is denied (escapes to agents dir)", () => {
+    const ctx = makeCtx();
+    // ../../x from the worktree resolves to /repo/.ittybitty/agents/x — under
+    // agentsDir, outside this agent's own dir.
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat ../../x" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("other agents");
+  });
+
+  test("bash RELATIVE cat into a sibling worktree is denied", () => {
+    const ctx = makeCtx();
+    // ../../agent-other/repo/.env resolves to a sibling agent's worktree.
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat ../../agent-other/repo/.env" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("other agents");
+  });
+
+  test("bash RELATIVE traversal into the main checkout is denied", () => {
+    const ctx = makeCtx();
+    // ../../../../SPEC.md resolves up out of .ittybitty into /repo (the main checkout).
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat ../../../../SPEC.md" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("main repo");
+  });
+
+  test("git range syntax HEAD..main is NOT flagged as traversal (allowed)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git log HEAD..main" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("git double-dot range with slashes (origin/main..origin/dev) is allowed", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git log origin/main..origin/dev" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("bash ls .. (resolving to the agent's own dir) is allowed", () => {
+    const ctx = makeCtx();
+    // .. from the worktree lands on agentDir — the agent's own directory.
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "ls .." },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("bash relative path staying inside the worktree is allowed", () => {
+    const ctx = makeCtx();
+    // src/../lib normalizes back into the worktree.
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat src/../lib/util.ts" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
   // ── git -C / --git-dir / --work-tree blocking ──────────────────────────────
 
   test("blocks git -C (bypasses path isolation)", () => {

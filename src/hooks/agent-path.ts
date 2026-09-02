@@ -175,7 +175,7 @@ export function checkPathAccess(
     }
 
     // Check bash command for references to restricted directories
-    const bashDenial = checkBashCommandPaths(command, ctx);
+    const bashDenial = checkBashCommandPaths(command, cwd, ctx);
     if (bashDenial) return bashDenial;
 
     // Not a cd command — allowed by allow list, no path check needed
@@ -273,6 +273,70 @@ function checkBashSettingsWrite(
 }
 
 /**
+ * Detect a RELATIVE-path traversal in a bash command that escapes the worktree
+ * into another agent's directory or the main checkout. The absolute-needle
+ * scans (checkBashCommandPaths) only catch absolute references — a relative
+ * `../..` resolves identically at the shell but has no absolute needle to match.
+ *
+ * Best-effort tokenization: split on whitespace and strip one layer of
+ * surrounding quotes. A token is a traversal candidate only when `..` is a WHOLE
+ * path segment (`token.split("/")` contains `".."`) — this deliberately excludes
+ * git range syntax (`HEAD..main`, `a..b`), where `..` sits inside a single
+ * segment. Each candidate is resolved against `cwd` and gated by the same two
+ * rules the absolute needles use:
+ *   - inside `agentsDir` but outside this agent's own `agentDir` → deny
+ *   - inside `rootRepo` (the main checkout) but outside the worktree → deny
+ * A path resolving to (or under) the agent's own `agentDir` — e.g. bare `..`
+ * from the worktree — stays allowed, and anything resolving entirely outside the
+ * repo is left to the same (permissive) treatment absolute references get.
+ */
+function checkRelativeTraversalPaths(
+  command: string,
+  cwd: string,
+  ctx: PathCheckContext
+): HookDecision | null {
+  const { agentDir, agentsDir, worktreePath, rootRepo } = ctx;
+  for (let token of command.split(/\s+/)) {
+    if (!token) continue;
+    // Strip one layer of surrounding matching quotes.
+    if (
+      token.length >= 2 &&
+      ((token.startsWith('"') && token.endsWith('"')) ||
+        (token.startsWith("'") && token.endsWith("'")))
+    ) {
+      token = token.slice(1, -1);
+    }
+    // Absolute paths are handled by the needle scans; skip them here.
+    if (!token || token.startsWith("/")) continue;
+    // Only tokens where `..` is a whole path segment (excludes `HEAD..main`).
+    if (!token.split("/").includes("..")) continue;
+
+    const resolved = resolve(cwd, token);
+
+    // The agent's own directory (and anything under it) is allowed — bare `..`
+    // from the worktree lands on agentDir, mirroring an absolute self-reference.
+    if (resolved === agentDir || resolved.startsWith(agentDir + "/")) continue;
+
+    // Inside another agent's directory (under agentsDir, not our own) → deny.
+    if (agentsDir && resolved.startsWith(agentsDir + "/")) {
+      return { decision: "deny", reason: "Access denied: bash command references other agents' directory" };
+    }
+
+    // Inside the main checkout but outside the worktree → deny.
+    if (
+      rootRepo &&
+      rootRepo !== worktreePath &&
+      (resolved === rootRepo || resolved.startsWith(rootRepo + "/")) &&
+      resolved !== worktreePath &&
+      !resolved.startsWith(worktreePath + "/")
+    ) {
+      return { decision: "deny", reason: "Access denied: bash command references main repo" };
+    }
+  }
+  return null;
+}
+
+/**
  * Check a bash command string for references to restricted directories.
  * Catches commands like `cat /repo/.ittybitty/agents/agent-other/...`
  * or commands referencing the root repo directly.
@@ -282,6 +346,7 @@ function checkBashSettingsWrite(
  */
 function checkBashCommandPaths(
   command: string,
+  cwd: string,
   ctx: PathCheckContext
 ): HookDecision | null {
   const { agentDir, agentsDir, worktreePath, rootRepo } = ctx;
@@ -291,6 +356,14 @@ function checkBashCommandPaths(
   if (blockedFlag) {
     return { decision: "deny", reason: `The ${blockedFlag} flag is not allowed with git. Run git commands from your working directory instead.` };
   }
+
+  // Block RELATIVE-path traversal that escapes the worktree. The absolute-needle
+  // scans below only catch absolute references; a relative `../..` resolves the
+  // same way at the shell but slips past them. Resolve every token that carries
+  // a `..` path SEGMENT against the call's cwd and apply the same rules as the
+  // absolute needles.
+  const traversalDenial = checkRelativeTraversalPaths(command, cwd, ctx);
+  if (traversalDenial) return traversalDenial;
 
   // Block bash mutations of <worktreePath>/.claude/settings*.json — agents
   // must not grant themselves new permissions by rewriting their settings.

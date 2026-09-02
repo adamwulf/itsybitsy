@@ -1096,6 +1096,30 @@ describe("checkPathAccess — .agents/ boundary-file write protection", () => {
     const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "sed -i 's/x/y/' sub/.claude/settings.local.json" } }), ctx);
     expect(result.decision).toBe("allow");
   });
+
+  // ── fd-prefixed redirects (boundary review round 5 fix 3) ─────────────────
+
+  test.each([
+    ["1> spaced onto the agy hooks file", "cat x 1> .agents/hooks.json", "agy hook/rule files"],
+    ["1> glued onto the settings file", "cat x 1>.claude/settings.local.json", "cannot modify their own .claude/settings"],
+    ["2>> glued onto the agy hooks file", "cat x 2>>.agents/hooks.json", "agy hook/rule files"],
+    ["&> glued onto the settings file", "cat x &>.claude/settings.local.json", "cannot modify their own .claude/settings"],
+  ])("fd/&-prefixed redirect (%s) → deny", (_label, command, reasonPart) => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain(reasonPart);
+  });
+
+  test.each([
+    ["cat x 1> src/out.txt"],
+    ["cat x 2>>notes.md"],
+    ["cat x &>build.log"],
+  ])("fd/&-prefixed redirect to an unrelated file (%s) → allow", (command) => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+    expect(result.decision).toBe("allow");
+  });
 });
 
 // ── parseIbCommand ───────────────────────────────────────────────────────────

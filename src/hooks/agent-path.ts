@@ -284,18 +284,18 @@ function checkBashSettingsWrite(
 
   const tokens = command.split(/\s+/);
 
-  // Redirect targets: a `>` / `>>` token → the following token; or a glued
-  // `>file` / `>>file`.
+  // Redirect targets: an optional fd digit(s) or `&`, then `>` / `>>`, then
+  // either the following token (with a space) or a glued target — so `>`, `>>`,
+  // `1>`, `2>>`, `&>`, and `1>file` are all covered.
   for (let idx = 0; idx < tokens.length; idx++) {
-    const tok = tokens[idx]!;
-    if (tok === ">" || tok === ">>") {
+    const m = tokens[idx]!.match(/^(?:&|\d+)?(>>?)(.*)$/);
+    if (!m) continue;
+    const gluedTarget = m[2]!;
+    if (gluedTarget) {
+      const d = denyForTarget(gluedTarget);
+      if (d) return d;
+    } else {
       const target = tokens[idx + 1];
-      if (target) {
-        const d = denyForTarget(target);
-        if (d) return d;
-      }
-    } else if (tok.startsWith(">")) {
-      const target = tok.replace(/^>+/, "");
       if (target) {
         const d = denyForTarget(target);
         if (d) return d;

@@ -4375,7 +4375,7 @@ sandbox:
     expect(start).toContain("sandbox-proxy-launch");
     expect(start).toContain("export HTTPS_PROXY=\"$http_proxy\"");
     expect(start).toContain("<&0 2> \"$STDERR_LOG\" &");
-    expect(codexDryRunCalls.length).toBeGreaterThanOrEqual(3);
+    expect(dispatcherDryRunCalls.length).toBeGreaterThanOrEqual(3);
     expect(spawnCalls.some((call) => call[0] === "codex")).toBe(false);
   });
 

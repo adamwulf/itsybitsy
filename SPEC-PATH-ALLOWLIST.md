@@ -821,6 +821,22 @@ bare-name rule[^32], with `deny` as the tool for carve-outs. A later version
 can add a secondary key for glob specificity. The oracle tests feed every
 fixture in shuffled order and must get the same answer.
 
+Three implementation notes from `sandbox-safety`, accepted, no semantic
+change: (1) order independence needs a **total** sort key, or the shuffled
+test cannot demand a byte-identical profile: primary the specificity key,
+secondary the canonical path lexically, tertiary the operation with read
+before write; the same key is used in the generator and in
+`resolvePathAccess`, so they agree by construction. (2) The write-wins tie is
+applied at merge time by moving an exact duplicate out of `allowRead` into
+`allowWrite`, since write implies read; no duplicate reaches the generator or
+the resolver, and the profile carries one rule pair for that path. The lists
+stored in `meta.json` stay as authored, after resolution to absolute paths but
+without the dedupe, so `ib info`, the dashboard, and audit messages show the
+author's intent; only the resolver and the generator dedupe, through one
+shared normalize step. (3) The same glob in both lists is an exact tie and
+writes; same-prefix globs in the same list never conflict; two different
+globs with one prefix in different lists are the v1 validation error.
+
 **Specificity key**, pinned with `sandbox-safety`: for a plain entry, the
 segment count of its canonical path. For a glob, the literal prefix before the
 first metacharacter; a glob and a plain entry with the same prefix tie on the

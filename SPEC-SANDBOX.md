@@ -967,6 +967,9 @@ fully in place. There is no unsandboxed fallback. Preconditions checked at spawn
 - The generated `sandbox.sb` compiles (dry-run / lint the profile before launch).
 - The per-agent proxy binds its port successfully.
 - (codex) the `-s danger-full-access` flip + proxy env are applied.
+- On resume, metadata for an enabled sandbox includes the frozen top-level
+  `paths` block. Enabled metadata written before the `paths:` split is refused;
+  it is never interpreted as an empty filesystem allowlist.
 
 On any failure, the spawn/resume path must:
 1. **Not exec claude/codex at all** — never a partial or unsandboxed launch.
@@ -989,6 +992,12 @@ with the real `sandbox-exec -f … /usr/bin/true`, and the proxy port is bind-te
 before launch. The generated script performs a second bind/ready check to close
 the allocation race. Any failure aborts before Claude/Codex exec; Codex builders
 also fail if either shared sandbox prefix is missing.
+
+The resume compatibility guard runs before profile or proxy preparation. When
+an enabled legacy `meta.json` has no `paths` block, resume logs a specific
+fail-hard error and returns non-zero. The agent remains stopped, no `sandbox.sb`
+is written, and no proxy is started. Respawning the agent creates current
+metadata with the frozen paths policy.
 
 ## 6. Build phases
 
@@ -1117,10 +1126,13 @@ a review cycle (2 worker reviewers) before merge.
   in v1 (not deferred).
 - ✅ **Failure mode → FAIL HARD, never start unsandboxed.** If `sandbox.enabled:
   true` and the sandbox can't be established (`sandbox-exec` missing, profile
-  won't compile, proxy won't bind), **do NOT start the agent.** Fail hard: log a
+  won't compile, proxy won't bind), **do NOT start the agent.** Enabled legacy
+  resume metadata with no frozen `paths` block is also refused rather than
+  generating an empty-list profile. Fail hard: log a
   meaningful error to the agent's `agent.log` and surface a clear error message to
-  the user (spawn returns non-zero with an explanation). An agent that believes it
-  is sandboxed but isn't is the exact case we refuse to allow. See §5.5.
+  the user (spawn returns non-zero with an explanation). The legacy agent stays
+  stopped, with no profile written and no proxy started. An agent that believes
+  it is sandboxed but isn't is the exact case we refuse to allow. See §5.5.
 - ✅ **Inheritance → union (sum of all `.md` files).** Final permissions = the
   union of every layer's lists (`_all.md` ∪ `_non_coordinator.md` ∪ inherits ∪
   leaf), for `paths.allowRead`/`allowWrite`/`deny` and

@@ -300,14 +300,14 @@ function checkRelativeTraversalPaths(
   const { agentDir, agentsDir, worktreePath, rootRepo } = ctx;
   for (let token of command.split(/\s+/)) {
     if (!token) continue;
-    // Strip one layer of surrounding matching quotes.
-    if (
-      token.length >= 2 &&
-      ((token.startsWith('"') && token.endsWith('"')) ||
-        (token.startsWith("'") && token.endsWith("'")))
-    ) {
-      token = token.slice(1, -1);
-    }
+    // Strip surrounding shell punctuation (quotes, `;`, `,`, `(`, `)`) that
+    // glues onto a token, then unescape backslash sequences (`\/` → `/`,
+    // `\ ` → space). This is what the shell does before the path is used, so
+    // escaped/glued forms like `..\/..\/x` (backslash-escaped slashes) and
+    // `..;` (a `;`-glued token) are seen here as `../../x` and `..` rather than
+    // slipping past the `..`-segment test below.
+    token = token.replace(/^['";,()]+/, "").replace(/['";,()]+$/, "");
+    token = token.replace(/\\(.)/g, "$1");
     // Absolute paths are handled by the needle scans; skip them here.
     if (!token || token.startsWith("/")) continue;
     // Only tokens where `..` is a whole path segment (excludes `HEAD..main`).

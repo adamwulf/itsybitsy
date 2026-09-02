@@ -421,6 +421,19 @@ describe("checkPathAccess", () => {
     expect(result.decision).toBe("allow");
   });
 
+  test("bash backslash-escaped-slash traversal (cat ..\\/..\\/x) is unescaped and denied", () => {
+    const ctx = makeCtx();
+    // The shell unescapes \/ to /, so the tokenizer must too — otherwise the
+    // `..\` segments hide the traversal.
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat ..\\/..\\/x" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("other agents");
+  });
+
   // ── git -C / --git-dir / --work-tree blocking ──────────────────────────────
 
   test("blocks git -C (bypasses path isolation)", () => {

@@ -256,6 +256,64 @@ describe("checkAgyPreToolUse — run_command relative traversal", () => {
   });
 });
 
+// ── run_command single-command rule: no chaining / escaping (boundary review A) ─
+
+describe("checkAgyPreToolUse — run_command single-command rule", () => {
+  function rc(CommandLine: string, ctx = makeCtx()) {
+    return checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine, Cwd: ctx.worktreePath } },
+      ctx,
+    );
+  }
+
+  test("chained commands (cat x; cd ..; cd ..; cat sibling) are denied as shell metacharacters", () => {
+    const d = rc("cat x; cd ..; cd ..; cat agent-other/repo/.env");
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("shell metacharacters");
+    expect(d.reason).toContain("; command separator");
+  });
+
+  test("chained ib (ls y; ib retire other) is denied as shell metacharacters (skips parseIbCommand)", () => {
+    const d = rc("ls y; ib retire agent-victim");
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("shell metacharacters");
+  });
+
+  test("pipe is denied", () => {
+    const d = rc("cat foo | tee /repo/x");
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("| pipe");
+  });
+
+  test("backslash-escaped slashes (cat ..\\/..\\/victim) are unescaped and path-isolation denied", () => {
+    // The shell unescapes \/ to /, so this reads ../../agent-victim/meta.json —
+    // a sibling under agentsDir. No shell metachar, so it passes step 2 and is
+    // caught by the traversal scan once the token is unescaped.
+    const d = rc("cat ..\\/..\\/agent-victim/meta.json");
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("other agents");
+  });
+
+  test("cat ..\\/..\\/x (escaped, no chaining) is a path-isolation deny", () => {
+    const d = rc("cat ..\\/..\\/x");
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("other agents");
+  });
+
+  // Legit single commands must still allow.
+  test.each([
+    ["git commit -F /tmp/msg.txt"],
+    ['ib send other "a ../b message"'],
+    ["git log HEAD..main"],
+    ["grep -rn foo src"],
+    ["bun test src/foo.test.ts"],
+    ["git commit -F - <<'EOF'\nmy commit message\nEOF"],
+  ])("allows the legit single command: %j", (command) => {
+    const d = rc(command);
+    expect(d.decision).toBe("allow");
+  });
+});
+
 // ── deny list enforcement (manager fix 2) ────────────────────────────────────
 
 describe("checkAgyPreToolUse — deny list wins over allow", () => {

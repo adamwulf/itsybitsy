@@ -40,6 +40,7 @@ import {
   type PathCheckContext,
 } from "./agent-path";
 import { translateAgyTool, buildAgyAllowOutput, buildAgyDenyOutput } from "./agy-tools";
+import { findShellMetachar } from "./shell-metachar";
 
 /** Format tool args for denial logs, matching the Claude/codex hook style. */
 function formatToolArgs(toolArgs: Record<string, unknown>): string {
@@ -76,6 +77,25 @@ export function checkAgyPreToolUse(
   const t = translateAgyTool(input.toolName, input.toolArgs, ctx.allowList);
   if (t.action === "deny") {
     return { decision: "deny", reason: t.reason };
+  }
+
+  // run_command must be a SINGLE command with no shell metacharacters outside
+  // quotes. Unlike Claude Code — which re-enforces permissions per sub-command —
+  // agy has no second layer, so chaining/piping/redirection on one line would
+  // evade the allow list AND path isolation (`ls y; ib retire other`,
+  // `cat x; cd ..; cat sibling`). Apply the same single-command rule coordinators
+  // live under, BEFORE the allow-list/path decision.
+  if (input.toolName === "run_command") {
+    const command = typeof t.toolInput.command === "string" ? t.toolInput.command : "";
+    const hit = findShellMetachar(command);
+    if (hit) {
+      return {
+        decision: "deny",
+        reason:
+          `run_command cannot contain shell metacharacters outside quotes (found: ${hit}). ` +
+          `Run one command per call; put literal text in single quotes or a quoted-delimiter heredoc.`,
+      };
+    }
   }
 
   // Deny list wins over allow. Match against the synthesized Claude call (so a

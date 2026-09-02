@@ -818,10 +818,83 @@ describe("ensureSystemCoordinator", () => {
     expect(claudeCmd).not.toContain(" -- ");
   });
 
-  test("fresh launch enables Remote Control when coordinator.remoteControl is true", async () => {
-    // `coordinator.remoteControl` opts the system coordinator into Claude Code
-    // Remote Control. The verified CLI flag is `--remote-control` (claude v2.x,
-    // alias `--rc`): "Start an interactive session with Remote Control enabled".
+  test("settings.local.json disables remote control by default (coordinator.remoteControl unset)", async () => {
+    // Claude 2.1.258+ AUTO-STARTS Remote Control (claude.ai/code); there is no
+    // CLI flag or env var to turn it off. The only kill switch is the
+    // `disableRemoteControl` settings key. With no config file the
+    // coordinator.remoteControl default (false) applies, so the coordinator's
+    // settings.local.json MUST carry `disableRemoteControl: true`.
+    coordinatorSpawnCtx.set(createCommandRouter({
+      "has-session": { exitCode: 1 },
+    }));
+
+    await ensureSystemCoordinator();
+
+    const settingsPath = join(tmpDir, ".claude", "settings.local.json");
+    const settings = JSON.parse(await readFile(settingsPath, "utf-8"));
+    expect(settings.disableRemoteControl).toBe(true);
+  });
+
+  test("settings.local.json disables remote control when coordinator.remoteControl is explicitly false", async () => {
+    // An explicit false is the same as unset: remote control stays off, so
+    // disableRemoteControl is written.
+    await mkdir(tmpDir, { recursive: true });
+    const configPath = join(tmpDir, "config.json");
+    await Bun.write(
+      configPath,
+      JSON.stringify({ coordinator: { remoteControl: false } }),
+    );
+
+    const { setUserConfigPath, resetUserConfigPath } = await import("./config");
+    setUserConfigPath(configPath);
+
+    coordinatorSpawnCtx.set(createCommandRouter({
+      "has-session": { exitCode: 1 },
+    }));
+
+    try {
+      await ensureSystemCoordinator();
+
+      const settingsPath = join(tmpDir, ".claude", "settings.local.json");
+      const settings = JSON.parse(await readFile(settingsPath, "utf-8"));
+      expect(settings.disableRemoteControl).toBe(true);
+    } finally {
+      resetUserConfigPath();
+    }
+  });
+
+  test("settings.local.json OMITS disableRemoteControl when coordinator.remoteControl is true (auto-start allowed)", async () => {
+    // Opting in lets remote-control auto-start run. The disable key is only ever
+    // written to DISABLE, so on opt-in it must be absent entirely (not `false`).
+    await mkdir(tmpDir, { recursive: true });
+    const configPath = join(tmpDir, "config.json");
+    await Bun.write(
+      configPath,
+      JSON.stringify({ coordinator: { remoteControl: true } }),
+    );
+
+    const { setUserConfigPath, resetUserConfigPath } = await import("./config");
+    setUserConfigPath(configPath);
+
+    coordinatorSpawnCtx.set(createCommandRouter({
+      "has-session": { exitCode: 1 },
+    }));
+
+    try {
+      await ensureSystemCoordinator();
+
+      const settingsPath = join(tmpDir, ".claude", "settings.local.json");
+      const settings = JSON.parse(await readFile(settingsPath, "utf-8"));
+      expect("disableRemoteControl" in settings).toBe(false);
+    } finally {
+      resetUserConfigPath();
+    }
+  });
+
+  test("no --remote-control launch flag is ever emitted (settings-key mechanism only)", async () => {
+    // Remote control is driven entirely by the disableRemoteControl settings
+    // key now; the removed `--remote-control` launch flag must never reappear,
+    // even when the user opts in.
     await mkdir(tmpDir, { recursive: true });
     const configPath = join(tmpDir, "config.json");
     await Bun.write(
@@ -849,41 +922,17 @@ describe("ensureSystemCoordinator", () => {
         .map((c) => c.join(" "))
         .find((c) => c.includes("claude --model"));
       expect(claudeCmd).toBeDefined();
-      expect(claudeCmd).toContain("--remote-control");
-      expect(claudeCmd).not.toContain("$(cat");
+      expect(claudeCmd).not.toContain("--remote-control");
+      expect(claudeCmd).not.toContain("--rc");
     } finally {
       resetUserConfigPath();
     }
   });
 
-  test("fresh launch omits --remote-control when coordinator.remoteControl is unset (default off)", async () => {
-    // Default MUST be off — remote-control is never enabled implicitly. With no
-    // config file the coordinator.remoteControl default (false) applies and no
-    // remote-control flag appears on the launch command.
-    const commands: string[][] = [];
-    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
-      commands.push([...cmd]);
-      const cmdStr = cmd.join(" ");
-      if (cmdStr.includes("has-session")) {
-        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
-      }
-      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
-    });
-
-    await ensureSystemCoordinator();
-
-    const claudeCmd = commands
-      .map((c) => c.join(" "))
-      .find((c) => c.includes("claude --model"));
-    expect(claudeCmd).toBeDefined();
-    expect(claudeCmd).not.toContain("--remote-control");
-    expect(claudeCmd).not.toContain("--rc");
-  });
-
-  test("remote-control and imessage combine: --remote-control precedes --channels", async () => {
-    // When both opt-ins are set the launch carries both flags. --remote-control
-    // must precede --channels so its optional [name] cannot consume a channel
-    // value (the following token is the `-`-prefixed --channels flag).
+  test("remoteControl opt-in and imessage combine: disableRemoteControl absent AND --channels present", async () => {
+    // The settings-key mechanism and the imessage --channels launch flag are
+    // independent: opting into remote control must not disturb --channels, and
+    // enabling imessage must not resurrect a remote-control launch flag.
     await mkdir(tmpDir, { recursive: true });
     const configPath = join(tmpDir, "config.json");
     await Bun.write(
@@ -907,13 +956,16 @@ describe("ensureSystemCoordinator", () => {
     try {
       await ensureSystemCoordinator();
 
+      const settingsPath = join(tmpDir, ".claude", "settings.local.json");
+      const settings = JSON.parse(await readFile(settingsPath, "utf-8"));
+      expect("disableRemoteControl" in settings).toBe(false);
+
       const claudeCmd = commands
         .map((c) => c.join(" "))
         .find((c) => c.includes("claude --model"));
       expect(claudeCmd).toBeDefined();
-      expect(claudeCmd).toContain("--remote-control");
       expect(claudeCmd).toContain("--channels plugin:imessage@claude-plugins-official");
-      expect(claudeCmd!.indexOf("--remote-control")).toBeLessThan(claudeCmd!.indexOf("--channels"));
+      expect(claudeCmd).not.toContain("--remote-control");
     } finally {
       resetUserConfigPath();
     }

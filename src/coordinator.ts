@@ -399,6 +399,21 @@ async function ensureHomeRepo(): Promise<void> {
  * `spinnerTipsEnabled: false` matches per-repo coordinators (see
  * `src/ib-commands.ts`, the `coordinatorMode` branch).
  *
+ * Claude Code 2.1.258+ AUTO-STARTS Remote Control (claude.ai/code) by default;
+ * there is no CLI flag or env var to turn it off. The only kill switch is the
+ * `disableRemoteControl` settings key — the installed claude binary reads the
+ * merged `settings.disableRemoteControl` value and blocks remote control when
+ * it is `true`. Because it is a restrictive setting, a `true` value written
+ * into the coordinator's `settings.local.json` reliably disables it. The
+ * user-facing opt-in has inverted semantics: `coordinator.remoteControl`
+ * defaults to `false` (remote control OFF), so the DEFAULT path WRITES
+ * `disableRemoteControl: true`; only when the user opts in
+ * (`coordinator.remoteControl === true`) is the key OMITTED so auto-start runs.
+ * The config value is read here rather than passed in because
+ * `writeCoordinatorFiles` runs before `ensureSystemCoordinatorImpl` reads the
+ * config for model/channels — reading it locally keeps the settings assembly
+ * self-contained.
+ *
  * The system coordinator's prompt body is delivered via the SessionStart hook
  * (see `src/hooks/session-start.ts`'s `@system` branch), same as every other
  * agent type. No prompt file is written.
@@ -412,6 +427,13 @@ async function writeCoordinatorFiles(): Promise<void> {
   await mkdir(claudeDir, { recursive: true });
   const settingsPath = join(claudeDir, "settings.local.json");
   const baseSettings = await buildSystemCoordinatorSettings();
+  // Remote Control (claude.ai/code) auto-starts by default in claude 2.1.258+;
+  // `disableRemoteControl: true` is the only way to stop it. Write the key
+  // UNLESS the user has explicitly opted in via `coordinator.remoteControl`.
+  // See this function's docstring for the inverted-semantics rationale and why
+  // the config is read here rather than threaded in from ensureSystemCoordinator.
+  const config = await readConfig();
+  const remoteControl = config["coordinator.remoteControl"]?.value === true;
   // The literal "@system" appears in the hook command strings on purpose: the
   // settings file is consumed by Claude Code (which invokes these as
   // command-line args), not by TS code that could read SYSTEM_AGENT_ID. Both
@@ -420,6 +442,8 @@ async function writeCoordinatorFiles(): Promise<void> {
   // and `src/hooks/session-start.ts` (agentIdArg branch).
   const settings = {
     ...baseSettings,
+    // Omitted only when the user opts in — otherwise remote control is disabled.
+    ...(remoteControl ? {} : { disableRemoteControl: true }),
     spinnerTipsEnabled: false,
     hooks: buildHooksBlock({
       agentId: "@system",
@@ -550,7 +574,10 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   }
   const model = parsed.model;
   const imessage = config["coordinator.imessage"]?.value === true;
-  const remoteControl = config["coordinator.remoteControl"]?.value === true;
+  // Remote Control is NOT a launch flag — it is driven by the
+  // `disableRemoteControl` settings key written in writeCoordinatorFiles()
+  // (claude 2.1.258+ auto-starts it and offers no disable flag). See that
+  // function for the `coordinator.remoteControl` → settings mapping.
 
   // Resume the newest non-cleared, non-stub transcript. Skip the scan on the
   // post-failure retry so a single bad transcript can't trap us in a loop.
@@ -585,17 +612,10 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   const baseCmd = resumeId
     ? `claude --resume ${resumeId} --model ${model}`
     : `claude --model ${model}`;
-  // Enable Claude Code Remote Control (claude.ai/code) only when the user opts
-  // in via `coordinator.remoteControl`. `--remote-control` is claude's canonical
-  // flag (alias `--rc`); its optional [name] is omitted. It precedes --channels
-  // so its optional name argument can never swallow a channel value — the next
-  // token is either the `-`-prefixed --channels flag or end-of-command. Default
-  // is false: remote-control is NEVER enabled implicitly.
-  const remoteControlArg = remoteControl ? " --remote-control" : "";
   const channelsArg = channels.length > 0
     ? ` --channels ${channels.join(" ")}`
     : "";
-  const claudeCmd = `${baseCmd}${remoteControlArg}${channelsArg}`;
+  const claudeCmd = `${baseCmd}${channelsArg}`;
   await coordinatorSpawnCtx.run([
     "tmux", "send-keys", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION),
     claudeCmd, "Enter",

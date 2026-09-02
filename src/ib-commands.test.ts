@@ -4401,6 +4401,38 @@ sandbox:
     expect(meta.paths.allowWrite).toContain(canonicalizeSandboxPath(tempDir));
   });
 
+  test("resume refuses legacy enabled sandbox metadata with no paths block", async () => {
+    const id = "legacy-enabled-no-paths";
+    const agentDir = join(agentsDir, id);
+    const message = "sandbox refused: meta.json has an enabled sandbox but no paths block (written before the paths: split); respawn the agent or run `ib sandbox refresh <id>` once available";
+    const legacyMeta: Partial<AgentMeta> = {
+      id,
+      state: "stopped",
+      model: "claude:sonnet",
+      tmux_session: "",
+      sandbox: {
+        enabled: true,
+        rawAllow: ["(allow process*)"],
+        domains: ["api.anthropic.com"],
+      },
+    };
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(legacyMeta, null, 2));
+    const resumeCommands: string[][] = [];
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      resumeCommands.push(cmd);
+      return makeSpawnResult("", 0);
+    });
+
+    const result = await resumeAgent(makeAgent(id, tempDir, "stopped", legacyMeta));
+
+    expect(result).toEqual({ ok: false, exitCode: 1, stdout: "", stderr: message });
+    expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain(message);
+    expect((await Bun.file(join(agentDir, "meta.json")).json()).state).toBe("stopped");
+    expect(await Bun.file(join(agentDir, "sandbox.sb")).exists()).toBe(false);
+    expect(resumeCommands.some((cmd) => cmd[0] === "/usr/bin/sandbox-exec")).toBe(false);
+  });
+
   test("sandbox-enabled Codex spawn uses danger-full-access inside our wrapper and proxy", async () => {
     await writeSandboxType("sandbox-codex", { model: "codex:gpt-5.4-mini" });
     setSandboxPortAllocatorForTesting(() => 43121);

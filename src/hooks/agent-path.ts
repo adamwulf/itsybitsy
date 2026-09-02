@@ -238,84 +238,78 @@ export const SETTINGS_WRITE_DENY_REASON =
   "Access denied: agents cannot modify their own .claude/settings*.json (use 'ib' to change permissions)";
 
 /**
- * Detect whether a bash command writes to <worktreePath>/.claude/settings*.json.
- *
- * Best-effort detection — perfect bash parsing isn't possible, but we cover:
- *   - `> .claude/settings*.json`   (truncate redirect)
- *   - `>> .claude/settings*.json`  (append redirect)
- *   - `sed -i ... .claude/settings*.json`  (in-place edit)
- * Both relative (`.claude/settings*.json`) and absolute
- * (`<worktreePath>/.claude/settings*.json`) forms are matched.
- *
- * Read-only commands like `cat`, `grep`, or `jq` without redirection are
- * intentionally left alone.
- */
-/**
- * One protected-file matcher for the bash write guard: a regex whose group[2]
- * captures the file token, a predicate that confirms the token resolves into
- * this worktree, and the deny reason to return.
- */
-interface BashProtectedFileSpec {
-  /** Must have a `g` flag and capture group[1]=boundary, group[2]=path token. */
-  regex: RegExp;
-  matchesWorktree: (matchedPath: string, worktreePath: string) => boolean;
-  reason: string;
-}
-
-/**
  * Detect a bash command that WRITES (redirect `>`/`>>` or in-place `sed -i`) to
- * one of the worktree's protected files. Generalized from the settings-only
- * guard to also cover the agy boundary files (`.agents/hooks.json` and the
- * always-on rule file) — rewriting those would disable the hook gate on the
- * next resume. Reads (`cat`, `grep`, `jq` without redirection) are left alone.
+ * one of the worktree's protected files — `.claude/settings*.json` (permission
+ * self-escalation) or the agy boundary files (`.agents/hooks.json` / the rule
+ * file, whose rewrite disables the hook gate on the next resume).
+ *
+ * Each candidate write-target token is RESOLVED against cwd (join + resolve +
+ * realpathSync-when-it-exists, the same way checkFilePath does) and compared with
+ * the resolved protected files via `worktreeProtectedFileKind`, rather than
+ * literal-matching the raw token. That closes obfuscated spellings the old regex
+ * missed — `.agents/rules/../hooks.json`, `./.agents/hooks.json`, and the
+ * absolute `…/.agents/rules/../hooks.json` (and the same for `.claude/settings`).
+ *
+ * Best-effort target extraction: a `>` / `>>` token's following token (or a
+ * glued `>file`), and — when `sed -i` / `--in-place` is present — every token as
+ * a possible file argument. Reads without redirection are left alone.
  */
 function checkBashSettingsWrite(
   command: string,
+  cwd: string,
   worktreePath: string
 ): HookDecision | null {
-  // .claude/settings*.json — absolute must live under <worktree>/.claude/;
-  // a relative `.claude/…` is accepted unconditionally (cwd is in the worktree).
-  const settingsSpec: BashProtectedFileSpec = {
-    regex: /(^|[\s'"=])((?:\/[^\s'"=;&|<>]*)?\.claude\/settings[^\s'"=;&|<>/]*\.json)/g,
-    matchesWorktree: (p, wt) =>
-      p.startsWith("/") ? p.startsWith(wt + "/.claude/") : p.startsWith(".claude/"),
-    reason: SETTINGS_WRITE_DENY_REASON,
-  };
-  // agy boundary files under <worktree>/.agents/ (hooks.json + the rule file).
-  // Keep the alternation in sync with AGY_WORKTREE_FILES — the Finding B tests
-  // write to every entry, so a drift there fails those tests.
-  const agySpec: BashProtectedFileSpec = {
-    regex: /(^|[\s'"=])((?:\/[^\s'"=;&|<>]*)?\.agents\/(?:hooks\.json|rules\/ittybitty-agent\.md))/g,
-    matchesWorktree: (p, wt) =>
-      p.startsWith("/") ? p.startsWith(wt + "/.agents/") : p.startsWith(".agents/"),
-    reason: AGY_BOUNDARY_WRITE_DENY_REASON,
+  // Resolve one candidate write-target token and deny if it lands on a protected
+  // file. Strips one layer of surrounding quotes first.
+  const denyForTarget = (rawToken: string): HookDecision | null => {
+    let t = rawToken;
+    if (
+      t.length >= 2 &&
+      ((t[0] === "'" && t[t.length - 1] === "'") || (t[0] === '"' && t[t.length - 1] === '"'))
+    ) {
+      t = t.slice(1, -1);
+    }
+    if (!t) return null;
+    let resolved = t.startsWith("/") ? resolve(t) : resolve(join(cwd, t));
+    try {
+      resolved = realpathSync(resolved);
+    } catch {
+      // Target doesn't exist yet — keep the resolve() result.
+    }
+    const kind = worktreeProtectedFileKind(resolved, worktreePath);
+    if (kind === "settings") return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
+    if (kind === "agy") return { decision: "deny", reason: AGY_BOUNDARY_WRITE_DENY_REASON };
+    return null;
   };
 
-  const sedInPlace = /(^|[\s;&|])sed\s+(?:-i\S*|--in-place\S*)/;
-  const hasSed = sedInPlace.test(command);
+  const tokens = command.split(/\s+/);
 
-  for (const spec of [settingsSpec, agySpec]) {
-    // Pass 1: a `>` / `>>` redirect immediately before the file token.
-    spec.regex.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = spec.regex.exec(command)) !== null) {
-      const matchedPath = match[2]!;
-      const tokenStart = match.index + match[1]!.length;
-      if (!spec.matchesWorktree(matchedPath, worktreePath)) continue;
-      let i = tokenStart - 1;
-      while (i >= 0 && (command[i] === " " || command[i] === "\t")) i--;
-      if (i >= 0 && command[i] === ">") {
-        return { decision: "deny", reason: spec.reason };
+  // Redirect targets: a `>` / `>>` token → the following token; or a glued
+  // `>file` / `>>file`.
+  for (let idx = 0; idx < tokens.length; idx++) {
+    const tok = tokens[idx]!;
+    if (tok === ">" || tok === ">>") {
+      const target = tokens[idx + 1];
+      if (target) {
+        const d = denyForTarget(target);
+        if (d) return d;
+      }
+    } else if (tok.startsWith(">")) {
+      const target = tok.replace(/^>+/, "");
+      if (target) {
+        const d = denyForTarget(target);
+        if (d) return d;
       }
     }
-    // Pass 2: `sed -i` / `--in-place` anywhere with the file as an argument.
-    if (hasSed) {
-      spec.regex.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      while ((m = spec.regex.exec(command)) !== null) {
-        if (!spec.matchesWorktree(m[2]!, worktreePath)) continue;
-        return { decision: "deny", reason: spec.reason };
-      }
+  }
+
+  // sed -i / sed -i'<suffix>' / sed --in-place: any file argument that resolves
+  // to a protected file is an in-place mutation.
+  const sedInPlace = /(^|[\s;&|])sed\s+(?:-i\S*|--in-place\S*)/;
+  if (sedInPlace.test(command)) {
+    for (const tok of tokens) {
+      const d = denyForTarget(tok);
+      if (d) return d;
     }
   }
 
@@ -481,9 +475,10 @@ function checkBashCommandPaths(
   const traversalDenial = checkRelativeTraversalPaths(command, cwd, ctx);
   if (traversalDenial) return traversalDenial;
 
-  // Block bash mutations of <worktreePath>/.claude/settings*.json — agents
-  // must not grant themselves new permissions by rewriting their settings.
-  const settingsDenial = checkBashSettingsWrite(command, worktreePath);
+  // Block bash mutations of the worktree's protected files (.claude/settings*.json
+  // and the agy boundary files) — agents must not grant themselves new
+  // permissions or disable their own hook gate.
+  const settingsDenial = checkBashSettingsWrite(command, cwd, worktreePath);
   if (settingsDenial) return settingsDenial;
 
   // Check for references to other agents' directories

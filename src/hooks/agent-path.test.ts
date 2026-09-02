@@ -1041,6 +1041,42 @@ describe("checkPathAccess — .agents/ boundary-file write protection", () => {
     );
     expect(result.decision).toBe("allow");
   });
+
+  // ── obfuscated bash write-target spellings (boundary review round 4 fix 2) ──
+
+  const WT = "/repo/.ittybitty/agents/agent-abc123/repo";
+
+  test.each([
+    ["sed -i on .agents/rules/../hooks.json (relative, dotdot)", `sed -i 's/x/y/' .agents/rules/../hooks.json`, "agy hook/rule files"],
+    ["sed -i on ./.agents/hooks.json (leading ./)", `sed -i 's/x/y/' ./.agents/hooks.json`, "agy hook/rule files"],
+    ["sed -i on the absolute dotdot spelling", `sed -i 's/x/y/' ${WT}/.agents/rules/../hooks.json`, "agy hook/rule files"],
+    ["sed -i on ./.claude/settings.local.json", `sed -i 's/x/y/' ./.claude/settings.local.json`, "cannot modify their own .claude/settings"],
+    ["sed -i on .claude/x/../settings.local.json", `sed -i 's/x/y/' .claude/x/../settings.local.json`, "cannot modify their own .claude/settings"],
+  ])("resolves obfuscated write targets: %s → deny", (_label, command, reasonPart) => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain(reasonPart);
+  });
+
+  test("redirect to the ../-obfuscated agy hooks path → deny", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "echo {} > .agents/rules/../hooks.json" } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("agy hook/rule files");
+  });
+
+  test("a same-named file in a subdirectory (sub/.agents/hooks.json) stays ALLOWED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "sed -i 's/x/y/' sub/.agents/hooks.json" } }), ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("a same-named settings file in a subdirectory stays ALLOWED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "sed -i 's/x/y/' sub/.claude/settings.local.json" } }), ctx);
+    expect(result.decision).toBe("allow");
+  });
 });
 
 // ── parseIbCommand ───────────────────────────────────────────────────────────

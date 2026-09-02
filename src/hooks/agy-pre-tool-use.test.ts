@@ -332,6 +332,25 @@ describe("checkAgyPreToolUse — agy boundary-file write protection", () => {
     expect(d.reason).toContain("agy hook/rule files");
   });
 
+  test("run_command sed -i on the ../-obfuscated hooks path is denied (resolved)", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: "sed -i 's/x/y/' .agents/rules/../hooks.json", Cwd: ctx.worktreePath } },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("agy hook/rule files");
+  });
+
+  test("run_command sed -i on a same-named file in a subdir stays allowed", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: "sed -i 's/x/y/' sub/.agents/hooks.json", Cwd: ctx.worktreePath } },
+      ctx,
+    );
+    expect(d.decision).toBe("allow");
+  });
+
   test("reads of .agents/hooks.json (view_file) are allowed", () => {
     const ctx = makeCtx();
     const d = checkAgyPreToolUse(

@@ -293,22 +293,18 @@ that drift.
 
 ### 4A.0 The core rule (deny-by-default allowlist)
 
-For any absolute path `P` and operation `op ∈ {read, write}`:
-
-```
-visible(P, read)  ⟺  matches(P, allowRead ∪ allowWrite) AND NOT matches(P, deny)
-visible(P, write) ⟺  matches(P, allowWrite)             AND NOT matches(P, deny)
-```
-
-where each named list includes the always-merged required entries from
-`_all.md` (§4A.7). In words, and exactly as Adam stated it:
+For any absolute path `P`, a matching `deny` entry denies both operations.
+Otherwise the most-specific matching entry across `allowRead`, `allowWrite`,
+and the runtime roots decides as specified in §4A.8. Each configured list
+includes the always-merged required entries from `_all.md` (§4A.7). In words,
+and exactly as Adam stated it:
 
 > **The agent can only see what's in the allow lists, unless that file also
 > matches a deny rule.**
 
 - **Not in any allow list → invisible** (kernel `EPERM`). This is the default for
   every path once `enabled: true`.
-- **In an allow list AND in a deny rule → denied.** `deny` always wins; it carves
+- **In an allow list or runtime root AND in a deny rule → denied.** `deny` always wins; it carves
   holes *inside* the allowed set. There is no allow rule that can re-open a
   denied path.
 - **`allowWrite` implies read and write** (Adam, 2026-09-02). The generator emits
@@ -586,6 +582,58 @@ resolved configuration in `src/agents.ts`; resume uses those frozen blocks,
 reallocates only the proxy port, rewrites meta, and regenerates the
 profile/scripts in `src/ib-commands.ts`.
 
+### 4A.8 Most specific entry wins
+
+**Decision (Adam, 2026-09-02):** a configured deny wins at every depth.
+Otherwise, the most-specific matching entry across the union of `allowRead`,
+`allowWrite`, and runtime roots decides. A write entry grants read and write; a
+read entry grants read only. No match denies. Entry order, list order, and layer
+order never affect the result.
+
+The generator and `resolvePathAccess()` share one ascending total sort key:
+
+1. specificity: segment count of the canonical absolute path; for a glob,
+   segment count of its canonical literal prefix (text before the first `*` or
+   `?`);
+2. kind: plain path before glob;
+3. canonical path/pattern string, lexical;
+4. operation: read before write.
+
+Exact cross-list canonical ties are normalized to the write entry before this
+sort. `AGENTDIR`, `WORKTREE`, and `GITDIR` join the table as write roots;
+`REPOAGENTS` joins it as a read root. Their resolved `-D` values determine their
+specificity, while the emitted matchers remain `(param "NAME")`. This table is
+extensible: later runtime roots such as a scratchpad or project directory add a
+row rather than a new emission phase.
+
+For each sorted read entry the profile emits `(allow file-read* M)` followed by
+`(deny file-write* M)`. For each sorted write entry it emits the corresponding
+read allow followed by `(allow file-write* M)`. Configured denies remain a
+separate, deterministic final block and emit both read and write denies. Because
+Seatbelt is last-match-wins, more-specific matches appear later and decide.
+
+This ordering fixes the home-read trap. With `allowRead: ["~"]`, a worktree
+below `~/Developer` still receives the later, deeper runtime write rule. The
+inverse narrowing also works: a type-level read entry for `<worktree>/vendor`
+appears after the worktree root and makes that subtree read-only. Likewise,
+`allowWrite: ["~/Documents"]` plus
+`allowRead: ["~/Documents/Important"]` makes `Important` read-only, while
+`allowRead: ["~"]` plus `allowWrite: ["~/Documents"]` makes Documents writable.
+
+**Glob-prefix v1 limitation:** glob specificity uses only literal-prefix segment
+depth, not the number or shape of wildcard tokens. Thus `allowRead:
+["/a/**/*.pem"]` and `allowWrite: ["/a/b/c"]` make `/a/b/c/x.pem` writable: the
+plain root has depth three while the glob prefix has depth one. Different
+cross-list globs with the same literal prefix remain a validation error in v1.
+
+The test guarantee has two halves. A small SBPL evaluator substitutes `-D`
+values and applies last-match-wins to emitted `subpath`, `literal`, `regex`, and
+`param` matchers; every fixture and seeded ordering permutation must match
+`resolvePathAccess()` and produce byte-identical profile text. On macOS, a live
+probe also compiles the generated profile using the production preflight shape
+and executes nested read/write probes with real `sandbox-exec`, proving that the
+kernel behavior matches the oracle rather than merely assuming it.
+
 ## 4B. Codex: disable its built-in sandbox, use ours (Adam's call)
 
 **Decision (Adam, 2026-07-17): a sandboxed codex agent runs codex in its own
@@ -740,13 +788,14 @@ Pure function: `(SandboxConfig, SandboxProfileParams) → string`
 producing the `.sb` text. Writes `sandbox.sb` into the agent dir next to
 `start.sh`/`meta.json`. **⚠️ Deny-by-default (Model B) — the profile skeleton is
 `(deny default)`, the INVERSE of the reference's `(allow default)`.** SBPL uses
-last-matching-rule-wins, so the structure is: deny everything → allow the
-baseline+config allowlist → re-deny the config `deny` holes last (so deny wins):
+last-matching-rule-wins, so the structure is: deny everything → emit the single
+specificity-sorted config+runtime table → emit raw rules → re-deny the config
+`deny` holes last (so deny wins):
 
 **⚠️ ZERO baked-in static permissions (Adam's call, 2026-07-18).** The generator
 contains no static baseline allow. It is a pure translator: `(deny default)` +
-fixed rules for the runtime-derived parameter roots + exactly the rules the
-merged `.md` config declares + the config `deny` list last. If claude needs the
+the sorted runtime-derived parameter roots and merged `.md` path entries + the
+raw rules + the config `deny` list last. If claude needs the
 `allowRead: ["/"]` root entry to
 boot, **that line comes from `_all.md`, not from code** — visible and user-owned,
 like every other baseline entry (§4A.7). Nothing is assumed; everything is tested
@@ -757,22 +806,15 @@ and then written into a `.md` by the user. This means the derived spike baseline
 (version 1)
 (deny default)                                   ;; unconditional deny floor
 
-;; ---- fixed runtime-derived roots (the only non-.md allows) ----
-
-;; runtime-injected roots — from the -D params the spawn path computes:
-(allow file-read*  (subpath (param "AGENTDIR")))  ;; contains WORKTREE
+;; ---- one table: authored paths + resolved runtime roots, sorted by §4A.8 ----
+;; A read row always carries an explicit write deny:
+(allow file-read* (subpath "/read-root"))
+(deny  file-write* (subpath "/read-root"))
+;; A write row grants both operations:
+(allow file-read*  (subpath (param "AGENTDIR")))
 (allow file-write* (subpath (param "AGENTDIR")))
-(allow file-read*  (subpath (param "GITDIR")))
-(allow file-write* (subpath (param "GITDIR")))
-(allow file-read*  (subpath (param "REPOAGENTS")))
-(allow file-write* (subpath (param "WORKTREE")))
-
-;; filesystem allows — one per merged allowRead / allowWrite entry (incl. the
-;; `(subpath "/")` line IF _all.md lists "/" in allowRead; NOT auto-added):
-(allow file-read*  (subpath "/safe/config/path") ...)
-(allow file-write* (subpath "/safe/config/path") ...)
-;; glob-form allows compile to (regex #"…") instead of (subpath …)
-;; unsafe non-glob strings fall back to (param "ALLOW_R_0") / etc.
+;; REPOAGENTS is a read runtime row, so it also emits a write deny. Glob rows
+;; use (regex #"…"); unsafe plain strings use sorted-position -D names.
 
 ;; syscall / network rules — emitted verbatim from merged sandbox.rawAllow
 
@@ -801,9 +843,9 @@ sandbox:
     # …the full minimal set the phase-1.5 verification derives…
 ```
 
-Beyond the fixed runtime-root rules, the generator emits **only** `(version 1)`,
-`(deny default)`, and the merged
-`allowRead`/`allowWrite` (→ `file-read*`/`file-write*` rules) + the merged
+Beyond the runtime-root rows sorted into the same table, the generator emits
+**only** `(version 1)`, `(deny default)`, and the merged
+`allowRead`/`allowWrite` (each → a read decision plus a write decision) + the merged
 `rawAllow` lines verbatim + the config `deny` list last. `domains` is written
 separately to the per-agent proxy allowlist, not emitted into SBPL. The generator
 contains no static baseline allow of its own — not even the network block. Every
@@ -1146,6 +1188,13 @@ a review cycle (2 worker reviewers) before merge.
   both read and write rules. An exact canonical tie across the read/write lists
   resolves to write; different cross-list globs with the same literal prefix
   are invalid. Deny remains last and wins.
+- ✅ **Most-specific entry wins (Adam, 2026-09-02).** After absolute config
+  denies win, the deepest matching entry across both allow lists and all runtime
+  roots decides. The shared total key is literal-prefix segment depth, plain
+  before glob, canonical lexical string, then read before write. Runtime roots
+  are sorted by resolved `-D` value rather than emitted first; each read entry
+  emits an explicit write deny. The generator, pure resolver, SBPL oracle, and
+  live macOS nested probe share and verify this contract (§4A.8).
 - ✅ **`allowedPaths` relationship (Adam, 2026-09-02):** it remains an
   independent legacy hook-layer field until Phase B. Kernel `paths:` never
   derives from it.

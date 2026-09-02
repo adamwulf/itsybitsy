@@ -16,6 +16,19 @@ export interface PathsConfig {
   deny: string[];
 }
 
+export type PathOperation = "read" | "write";
+
+export interface RuntimePathRoot {
+  /** Canonical absolute path used for specificity and resolver matching. */
+  path: string;
+  op: PathOperation;
+}
+
+/** The complete filesystem access table consumed by the resolver. */
+export interface PathAccessTable extends PathsConfig {
+  runtimeRoots: RuntimePathRoot[];
+}
+
 export interface SandboxProfileParams {
   AGENTDIR: string;
   WORKTREE: string;
@@ -48,8 +61,21 @@ const MOVED_SANDBOX_PATH_KEYS = new Set(["allowRead", "allowWrite", "deny"]);
 const PATHS_KEYS = ["allowRead", "allowWrite", "deny"] as const;
 
 type CompiledPath =
-  | { kind: "subpath"; value: string }
-  | { kind: "regex"; value: string };
+  | { kind: "plain"; canonical: string; value: string }
+  | { kind: "glob"; canonical: string; value: string };
+
+interface ProfileRuntimePathRoot extends RuntimePathRoot {
+  parameterName: keyof SandboxProfileParams;
+}
+
+interface OrderedPathEntry {
+  canonical: string;
+  compiled: CompiledPath;
+  kind: "plain" | "glob";
+  op: PathOperation;
+  specificity: number;
+  parameterName?: string;
+}
 
 /**
  * Resolve the kernel-only sandbox policy without touching spawn wiring.
@@ -181,6 +207,11 @@ export function globToSandboxRegex(pattern: string, home?: string): string {
 
   const expanded = expandHome(pattern, sandboxHome(home));
   const canonical = canonicalizeGlobPrefix(expanded);
+  return canonicalGlobToSandboxRegex(canonical);
+}
+
+/** Translate an already-canonical glob with no further filesystem lookups. */
+function canonicalGlobToSandboxRegex(canonical: string): string {
   let regex = "^";
 
   for (let i = 0; i < canonical.length;) {
@@ -247,23 +278,52 @@ function compilePath(entry: string, home?: string): CompiledPath {
 
   // Glob detection intentionally precedes anchor classification.
   if (/[*?]/.test(entry)) {
-    return { kind: "regex", value: globToSandboxRegex(entry, home) };
+    // globToSandboxRegex owns the public grammar validation. Keep the
+    // canonical pattern as well as the compiled regex because specificity is
+    // defined from the pattern's literal prefix, not from regex source text.
+    const value = globToSandboxRegex(entry, home);
+    const canonical = canonicalizeGlobPrefix(expandHome(entry, sandboxHome(home)));
+    return { kind: "glob", canonical, value };
   }
 
   if (entry === "~" || entry.startsWith("~/")) {
+    const canonical = canonicalizeSandboxPath(expandHome(entry, sandboxHome(home)));
     return {
-      kind: "subpath",
-      value: canonicalizeSandboxPath(expandHome(entry, sandboxHome(home))),
+      kind: "plain",
+      canonical,
+      value: canonical,
     };
   }
 
   if (entry.startsWith("/")) {
-    return { kind: "subpath", value: canonicalizeSandboxPath(entry) };
+    const canonical = canonicalizeSandboxPath(entry);
+    return { kind: "plain", canonical, value: canonical };
   }
 
   throw new Error(
     `Invalid sandbox path entry "${entry}": bare names are not allowed; use "**/${entry}" or an absolute path`,
   );
+}
+
+/** Compile an entry that has already been canonicalized for table evaluation. */
+function compileCanonicalPath(entry: string): CompiledPath {
+  if (typeof entry !== "string" || entry.length === 0 || entry.includes("\0")) {
+    throw new Error(`Invalid canonical sandbox path entry "${String(entry)}"`);
+  }
+  if (/[*?]/.test(entry)) {
+    if (!entry.startsWith("/") && !entry.startsWith("**/")) {
+      throw new Error(`Invalid canonical sandbox glob "${entry}"`);
+    }
+    return {
+      kind: "glob",
+      canonical: entry,
+      value: canonicalGlobToSandboxRegex(entry),
+    };
+  }
+  if (!entry.startsWith("/")) {
+    throw new Error(`Invalid canonical sandbox path "${entry}"`);
+  }
+  return { kind: "plain", canonical: entry, value: entry };
 }
 
 function compiledPathKey(entry: string, home?: string): string {
@@ -288,7 +348,7 @@ export function normalizePathsConfig(paths: PathsConfig, home?: string): PathsCo
 /** Compile one user-facing path entry to an SBPL matcher. */
 export function compileSandboxPath(entry: string, home?: string): string {
   const compiled = compilePath(entry, home);
-  if (compiled.kind === "regex") return `(regex #"${compiled.value}")`;
+  if (compiled.kind === "glob") return `(regex #"${compiled.value}")`;
   return `(subpath "${escapeSbplString(compiled.value)}")`;
 }
 
@@ -298,20 +358,154 @@ function isSafeInlineSubpath(value: string): boolean {
   return !/["\\\n\r\0]/.test(value);
 }
 
-function profileMatcher(
-  entry: string,
-  home: string,
-  parameterName: string,
-): string {
-  const compiled = compilePath(entry, home);
-  if (compiled.kind === "regex") return `(regex #"${compiled.value}")`;
-  if (!isSafeInlineSubpath(compiled.value)) {
+function pathSpecificity(compiled: CompiledPath): number {
+  const literalPrefix = compiled.kind === "glob"
+    ? compiled.canonical.slice(0, compiled.canonical.search(/[*?]/))
+    : compiled.canonical;
+  return literalPrefix.split("/").filter((segment) => segment.length > 0).length;
+}
+
+function compareLexically(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
+/**
+ * One total, input-order-independent sort key is shared by profile emission
+ * and resolver evaluation:
+ *
+ * 1. canonical path segment count (a glob uses its literal prefix),
+ * 2. kind (plain before glob),
+ * 3. canonical path/pattern in lexical order,
+ * 4. operation (read before write).
+ *
+ * Seatbelt is last-match-wins, so ascending order makes the most specific
+ * matching entry authoritative. Exact semantic duplicates compare equal and
+ * emit identical rules; the merge layer already deduplicates authored lists.
+ */
+function compareOrderedPathEntries(left: OrderedPathEntry, right: OrderedPathEntry): number {
+  if (left.specificity !== right.specificity) {
+    return left.specificity - right.specificity;
+  }
+  if (left.kind !== right.kind) return left.kind === "plain" ? -1 : 1;
+  const canonicalOrder = compareLexically(left.canonical, right.canonical);
+  if (canonicalOrder !== 0) return canonicalOrder;
+  if (left.op !== right.op) return left.op === "read" ? -1 : 1;
+  return 0;
+}
+
+function orderedPathEntry(
+  path: string,
+  op: PathOperation,
+  parameterName?: string,
+): OrderedPathEntry {
+  const compiled = compileCanonicalPath(path);
+  return {
+    canonical: compiled.canonical,
+    compiled,
+    kind: compiled.kind,
+    op,
+    specificity: pathSpecificity(compiled),
+    parameterName,
+  };
+}
+
+function profileRuntimeRoots(params: SandboxProfileParams): ProfileRuntimePathRoot[] {
+  return [
+    { path: canonicalizeSandboxPath(params.AGENTDIR), op: "write", parameterName: "AGENTDIR" },
+    { path: canonicalizeSandboxPath(params.WORKTREE), op: "write", parameterName: "WORKTREE" },
+    { path: canonicalizeSandboxPath(params.GITDIR), op: "write", parameterName: "GITDIR" },
+    { path: canonicalizeSandboxPath(params.REPOAGENTS), op: "read", parameterName: "REPOAGENTS" },
+  ];
+}
+
+/** Build the canonical table used by both the profile and hook-side resolver. */
+export function sandboxPathAccessTable(
+  paths: PathsConfig,
+  params: SandboxProfileParams,
+): PathAccessTable {
+  const canonicalPaths = canonicalizePathsConfig(paths, sandboxHome(params.HOME));
+  return {
+    ...canonicalPaths,
+    runtimeRoots: profileRuntimeRoots(params).map(({ path, op }) => ({ path, op })),
+  };
+}
+
+function sortedAllowEntries(
+  table: PathAccessTable,
+  profileRoots: ProfileRuntimePathRoot[] = [],
+): OrderedPathEntry[] {
+  const writeKeys = new Set(table.allowWrite.map((path) => {
+    const compiled = compileCanonicalPath(path);
+    return `${compiled.kind}\0${compiled.value}`;
+  }));
+  const normalizedRead = table.allowRead.filter((path) => {
+    const compiled = compileCanonicalPath(path);
+    return !writeKeys.has(`${compiled.kind}\0${compiled.value}`);
+  });
+  const entries = [
+    ...normalizedRead.map((path) => orderedPathEntry(path, "read")),
+    ...table.allowWrite.map((path) => orderedPathEntry(path, "write")),
+    ...table.runtimeRoots.map((root, index) => orderedPathEntry(
+      root.path,
+      root.op,
+      profileRoots[index]?.parameterName,
+    )),
+  ];
+  return entries.sort(compareOrderedPathEntries);
+}
+
+function sortedDenyEntries(entries: string[]): OrderedPathEntry[] {
+  return entries
+    .map((path) => orderedPathEntry(path, "read"))
+    .sort(compareOrderedPathEntries);
+}
+
+function compiledPathMatches(compiled: CompiledPath, absolutePath: string): boolean {
+  if (compiled.kind === "glob") return new RegExp(compiled.value).test(absolutePath);
+  if (compiled.value === "/") return absolutePath.startsWith("/");
+  return absolutePath === compiled.value || absolutePath.startsWith(`${compiled.value}/`);
+}
+
+/**
+ * Resolve access from the same sorted table that drives SBPL emission.
+ * Inputs are canonical absolute paths/patterns; deny wins at every depth.
+ */
+export function resolvePathAccess(
+  absolutePath: string,
+  op: PathOperation,
+  table: PathAccessTable,
+): "allow" | "deny" {
+  if (!absolutePath.startsWith("/")) {
+    throw new Error(`resolvePathAccess requires a canonical absolute path, got "${absolutePath}"`);
+  }
+
+  if (sortedDenyEntries(table.deny)
+    .some((entry) => compiledPathMatches(entry.compiled, absolutePath))) {
+    return "deny";
+  }
+
+  const matching = sortedAllowEntries(table)
+    .filter((entry) => compiledPathMatches(entry.compiled, absolutePath));
+  const winner = matching.at(-1);
+  if (!winner) return "deny";
+  if (op === "read") return "allow";
+  return winner.op === "write" ? "allow" : "deny";
+}
+
+function profileMatcher(entry: OrderedPathEntry, parameterName: string): string {
+  if (entry.parameterName) {
+    return `(subpath (param "${entry.parameterName}"))`;
+  }
+  if (entry.compiled.kind === "glob") return `(regex #"${entry.compiled.value}")`;
+  if (!isSafeInlineSubpath(entry.compiled.value)) {
     return `(subpath (param "${parameterName}"))`;
   }
   // Tightening hook: the verified baseline can represent allowRead "/" as
   // `(literal "/")` under file-read-data. Keep the ordinary subtree form for
   // v1 correctness until that op-class special case is deliberately adopted.
-  return `(subpath "${escapeSbplString(compiled.value)}")`;
+  return `(subpath "${escapeSbplString(entry.compiled.value)}")`;
 }
 
 /**
@@ -323,27 +517,22 @@ export function sandboxProfileParameterValues(
   paths: PathsConfig,
   params: SandboxProfileParams,
 ): Record<string, string> {
-  const home = sandboxHome(params.HOME);
-  const normalizedPaths = normalizePathsConfig(paths, home);
-  const values: Record<string, string> = {
-    AGENTDIR: canonicalizeSandboxPath(params.AGENTDIR),
-    WORKTREE: canonicalizeSandboxPath(params.WORKTREE),
-    GITDIR: canonicalizeSandboxPath(params.GITDIR),
-    REPOAGENTS: canonicalizeSandboxPath(params.REPOAGENTS),
-  };
+  const roots = profileRuntimeRoots(params);
+  const table = sandboxPathAccessTable(paths, params);
+  const values: Record<string, string> = {};
 
-  const collect = (entries: string[], prefix: string): void => {
-    entries.forEach((entry, index) => {
-      const compiled = compilePath(entry, home);
-      if (compiled.kind === "subpath" && !isSafeInlineSubpath(compiled.value)) {
-        values[`${prefix}_${index}`] = compiled.value;
-      }
-    });
-  };
-
-  collect(normalizedPaths.allowRead, "ALLOW_R");
-  collect(normalizedPaths.allowWrite, "ALLOW_W");
-  collect(normalizedPaths.deny, "DENY");
+  sortedAllowEntries(table, roots).forEach((entry, index) => {
+    if (entry.parameterName) {
+      values[entry.parameterName] = entry.compiled.value;
+    } else if (entry.compiled.kind === "plain" && !isSafeInlineSubpath(entry.compiled.value)) {
+      values[`ALLOW_${index}`] = entry.compiled.value;
+    }
+  });
+  sortedDenyEntries(table.deny).forEach((entry, index) => {
+    if (entry.compiled.kind === "plain" && !isSafeInlineSubpath(entry.compiled.value)) {
+      values[`DENY_${index}`] = entry.compiled.value;
+    }
+  });
   return values;
 }
 
@@ -514,25 +703,17 @@ export function generateProfile(
   paths: PathsConfig,
   params: SandboxProfileParams,
 ): string {
-  const home = sandboxHome(params.HOME);
-  const normalizedPaths = normalizePathsConfig(paths, home);
+  const roots = profileRuntimeRoots(params);
+  const table = sandboxPathAccessTable(paths, params);
   const lines = [
     "(version 1)",
     "(deny default)",
-    '(allow file-read* (subpath (param "AGENTDIR")))',
-    '(allow file-write* (subpath (param "AGENTDIR")))',
-    '(allow file-read* (subpath (param "GITDIR")))',
-    '(allow file-write* (subpath (param "GITDIR")))',
-    '(allow file-read* (subpath (param "REPOAGENTS")))',
-    '(allow file-write* (subpath (param "WORKTREE")))',
   ];
 
-  normalizedPaths.allowRead.forEach((entry, index) => {
-    lines.push(`(allow file-read* ${profileMatcher(entry, home, `ALLOW_R_${index}`)})`);
-  });
-  normalizedPaths.allowWrite.forEach((entry, index) => {
-    lines.push(`(allow file-read* ${profileMatcher(entry, home, `ALLOW_W_${index}`)})`);
-    lines.push(`(allow file-write* ${profileMatcher(entry, home, `ALLOW_W_${index}`)})`);
+  sortedAllowEntries(table, roots).forEach((entry, index) => {
+    const matcher = profileMatcher(entry, `ALLOW_${index}`);
+    lines.push(`(allow file-read* ${matcher})`);
+    lines.push(`(${entry.op === "write" ? "allow" : "deny"} file-write* ${matcher})`);
   });
 
   config.rawAllow.forEach((entry, index) => {
@@ -544,8 +725,8 @@ export function generateProfile(
   });
 
   // Configured filesystem denies are always last: Seatbelt is last-match-wins.
-  normalizedPaths.deny.forEach((entry, index) => {
-    const matcher = profileMatcher(entry, home, `DENY_${index}`);
+  sortedDenyEntries(table.deny).forEach((entry, index) => {
+    const matcher = profileMatcher(entry, `DENY_${index}`);
     lines.push(`(deny file-read* ${matcher})`);
     lines.push(`(deny file-write* ${matcher})`);
   });

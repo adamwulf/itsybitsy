@@ -1,17 +1,26 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, mkdir, rm, writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import { dirname, join } from "path";
+import { parseAgentTypeFile } from "./agent-types";
 import {
+  canonicalizePathsConfig,
   canonicalizeSandboxPath,
   compileSandboxPath,
   generateProfile,
   globToSandboxRegex,
   isBalancedSandboxExpression,
   normalizePathsConfig,
+  resolvePathAccess,
   resolvePathsConfig,
   resolveSandboxConfig,
+  sandboxPathAccessTable,
   sandboxProfileParameterValues,
   validatePathsFrontmatter,
   validateSandboxFrontmatter,
   type PathsConfig,
+  type PathAccessTable,
+  type PathOperation,
   type SandboxConfig,
   type SandboxProfileParams,
 } from "./sandbox";
@@ -44,7 +53,11 @@ function config(overrides: Partial<SandboxConfig> = {}): SandboxConfig {
 }
 
 function paths(overrides: Partial<PathsConfig> = {}): PathsConfig {
-  return { ...EMPTY_PATHS, ...overrides };
+  return {
+    allowRead: [...(overrides.allowRead ?? EMPTY_PATHS.allowRead)],
+    allowWrite: [...(overrides.allowWrite ?? EMPTY_PATHS.allowWrite)],
+    deny: [...(overrides.deny ?? EMPTY_PATHS.deny)],
+  };
 }
 
 describe("sandbox glob to regex", () => {
@@ -138,16 +151,18 @@ describe("sandbox profile emission", () => {
     expect(profile.indexOf("(deny default)")).toBeLessThan(profile.indexOf("(allow "));
   });
 
-  test("emits exactly the six runtime-derived root rules for empty lists", () => {
+  test("emits read and write decisions for all four sorted runtime roots", () => {
     const lines = generateProfile(EMPTY_CONFIG, EMPTY_PATHS, PARAMS).trimEnd().split("\n");
     expect(lines).toEqual([
       "(version 1)",
       "(deny default)",
       '(allow file-read* (subpath (param "AGENTDIR")))',
       '(allow file-write* (subpath (param "AGENTDIR")))',
+      '(allow file-read* (subpath (param "REPOAGENTS")))',
+      '(deny file-write* (subpath (param "REPOAGENTS")))',
       '(allow file-read* (subpath (param "GITDIR")))',
       '(allow file-write* (subpath (param "GITDIR")))',
-      '(allow file-read* (subpath (param "REPOAGENTS")))',
+      '(allow file-read* (subpath (param "WORKTREE")))',
       '(allow file-write* (subpath (param "WORKTREE")))',
     ]);
   });
@@ -207,8 +222,8 @@ describe("sandbox profile emission", () => {
     const profile = generateProfile(EMPTY_CONFIG, pathsConfig, PARAMS);
     expect(profile).not.toContain("(allow default)");
     expect(profile).not.toContain(malicious);
-    expect(profile).toContain('(param "ALLOW_R_0")');
-    expect(sandboxProfileParameterValues(pathsConfig, PARAMS).ALLOW_R_0).toContain(
+    expect(profile).toContain('(param "ALLOW_0")');
+    expect(sandboxProfileParameterValues(pathsConfig, PARAMS).ALLOW_0).toContain(
       '")(allow default)(',
     );
   });
@@ -240,6 +255,470 @@ describe("sandbox profile emission", () => {
     expect(profile).not.toContain('ALLOW_R_0');
     expect(profile).toContain('(allow file-read* (subpath "/private/tmp/shared"))');
     expect(profile).toContain('(allow file-write* (subpath "/private/tmp/shared"))');
+  });
+});
+
+type AccessDecision = "allow" | "deny";
+
+function unescapeSbpl(value: string): string {
+  let result = "";
+  for (let index = 0; index < value.length; index++) {
+    const char = value[index]!;
+    if (char !== "\\" || index + 1 >= value.length) {
+      result += char;
+      continue;
+    }
+    const escaped = value[++index]!;
+    if (escaped === "n") result += "\n";
+    else if (escaped === "r") result += "\r";
+    else if (escaped === "t") result += "\t";
+    else if (escaped === '"' || escaped === "\\") result += escaped;
+    else result += `\\${escaped}`;
+  }
+  return result;
+}
+
+function evaluatorMatcher(
+  line: string,
+  definitions: Record<string, string>,
+): { decision: AccessDecision; op: PathOperation; matches: (path: string) => boolean } | null {
+  const header = line.match(/^\((allow|deny) file-(read|write)\* /);
+  if (!header) return null;
+  const decision = header[1] as AccessDecision;
+  const op = header[2] as PathOperation;
+
+  const param = line.match(/\(subpath \(param "([A-Z0-9_]+)"\)\)\)$/);
+  if (param) {
+    const root = definitions[param[1]!];
+    if (root === undefined) throw new Error(`Missing profile definition ${param[1]}`);
+    return {
+      decision,
+      op,
+      matches: (path) => root === "/" || path === root || path.startsWith(`${root}/`),
+    };
+  }
+
+  const pathMatcher = line.match(/\((subpath|literal) "((?:\\.|[^"])*)"\)\)$/);
+  if (pathMatcher) {
+    const kind = pathMatcher[1]!;
+    const root = unescapeSbpl(pathMatcher[2]!);
+    return {
+      decision,
+      op,
+      matches: kind === "literal"
+        ? (path) => path === root
+        : (path) => root === "/" || path === root || path.startsWith(`${root}/`),
+    };
+  }
+
+  const regexMatcher = line.match(/\(regex #"((?:\\.|[^"])*)"\)\)$/);
+  if (regexMatcher) {
+    const regex = new RegExp(unescapeSbpl(regexMatcher[1]!));
+    return { decision, op, matches: (path) => regex.test(path) };
+  }
+  return null;
+}
+
+/** Minimal SBPL path evaluator: default deny plus last matching file rule wins. */
+function evaluateProfileAccess(
+  profile: string,
+  definitions: Record<string, string>,
+  absolutePath: string,
+  op: PathOperation,
+): AccessDecision {
+  let result: AccessDecision = "deny";
+  for (const line of profile.split("\n")) {
+    if (line === "(deny default)") {
+      result = "deny";
+      continue;
+    }
+    const matcher = evaluatorMatcher(line, definitions);
+    if (matcher?.op === op && matcher.matches(absolutePath)) result = matcher.decision;
+  }
+  return result;
+}
+
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return (state >>> 0) / 0x1_0000_0000;
+  };
+}
+
+function shuffled<T>(values: readonly T[], random: () => number): T[] {
+  const result = [...values];
+  for (let index = result.length - 1; index > 0; index--) {
+    const swapIndex = Math.floor(random() * (index + 1));
+    [result[index], result[swapIndex]] = [result[swapIndex]!, result[index]!];
+  }
+  return result;
+}
+
+const PATH_LIST_KEYS = ["allowRead", "allowWrite", "deny"] as const;
+
+function mergeFixtureLayers(
+  layers: PathsConfig[],
+  listOrder: readonly (keyof PathsConfig)[] = PATH_LIST_KEYS,
+): PathsConfig {
+  const result = paths();
+  for (const layer of layers) {
+    for (const key of listOrder) {
+      for (const entry of layer[key]) {
+        if (!result[key].includes(entry)) result[key].push(entry);
+      }
+    }
+  }
+  return result;
+}
+
+interface AccessFixture {
+  name: string;
+  layers: PathsConfig[];
+  params: SandboxProfileParams;
+  checks: Array<{ path: string; read: AccessDecision; write: AccessDecision }>;
+}
+
+function assertFixtureOracle(
+  fixture: AccessFixture,
+  mergedPaths: PathsConfig,
+  expectedProfile?: string,
+): string {
+  const profile = generateProfile(EMPTY_CONFIG, mergedPaths, fixture.params);
+  if (expectedProfile !== undefined) expect(profile).toBe(expectedProfile);
+  const definitions = sandboxProfileParameterValues(mergedPaths, fixture.params);
+  const table = sandboxPathAccessTable(mergedPaths, fixture.params);
+  for (const check of fixture.checks) {
+    const target = canonicalizeSandboxPath(check.path);
+    for (const op of ["read", "write"] as const) {
+      const resolved = resolvePathAccess(target, op, table);
+      expect(resolved, `${fixture.name}: resolver ${op} ${target}`).toBe(check[op]);
+      expect(
+        evaluateProfileAccess(profile, definitions, target, op),
+        `${fixture.name}: profile ${op} ${target}`,
+      ).toBe(resolved);
+    }
+  }
+  return profile;
+}
+
+describe("most-specific filesystem access oracle", () => {
+  test("resolver and emitted last-match profile agree across required shuffled fixtures", async () => {
+    const home = "/Users/sandbox-test-user";
+    const ordinaryParams: SandboxProfileParams = {
+      AGENTDIR: "/runtime/repo/.ittybitty/agents/oracle",
+      WORKTREE: "/runtime/repo/.ittybitty/agents/oracle/repo",
+      GITDIR: "/runtime/repo/.git/worktrees/oracle",
+      REPOAGENTS: "/runtime/repo/.ittybitty/agents",
+      HOME: home,
+    };
+    const developerParams: SandboxProfileParams = {
+      AGENTDIR: `${home}/Developer/app/.ittybitty/agents/oracle`,
+      WORKTREE: `${home}/Developer/app/.ittybitty/agents/oracle/repo`,
+      GITDIR: `${home}/Developer/app/.git/worktrees/oracle`,
+      REPOAGENTS: `${home}/Developer/app/.ittybitty/agents`,
+      HOME: home,
+    };
+    const allFrontmatter = parseAgentTypeFile(
+      await Bun.file(join(import.meta.dir, "../docs/agent-types/_all.md")).text(),
+    ).frontmatter;
+    const allPaths = allFrontmatter.paths as PathsConfig;
+    const canonicalAllPaths = canonicalizePathsConfig(allPaths, home);
+
+    const fixtures: AccessFixture[] = [
+      {
+        name: "write Documents with nested read-only Important",
+        layers: [
+          paths({ allowWrite: ["~/Documents"] }),
+          paths({ allowRead: ["~/Documents/Important"] }),
+        ],
+        params: ordinaryParams,
+        checks: [
+          { path: `${home}/Documents/Important/x`, read: "allow", write: "deny" },
+          { path: `${home}/Documents/other/x`, read: "allow", write: "allow" },
+          { path: "/outside-every-root/x", read: "deny", write: "deny" },
+        ],
+      },
+      {
+        name: "read home with nested writable Documents",
+        layers: [
+          paths({ allowRead: ["~"] }),
+          paths({ allowWrite: ["~/Documents"] }),
+        ],
+        params: ordinaryParams,
+        checks: [
+          { path: `${home}/Documents/x`, read: "allow", write: "allow" },
+          { path: `${home}/Desktop/x`, read: "allow", write: "deny" },
+        ],
+      },
+      {
+        name: "Developer read trap preserves nested runtime writes",
+        layers: [paths({ allowRead: ["~/Developer"] }), paths()],
+        params: developerParams,
+        checks: [
+          { path: `${developerParams.AGENTDIR}/meta.json`, read: "allow", write: "allow" },
+          { path: `${developerParams.WORKTREE}/src/x.ts`, read: "allow", write: "allow" },
+          { path: `${developerParams.GITDIR}/index`, read: "allow", write: "allow" },
+          { path: `${home}/Developer/sibling/file`, read: "allow", write: "deny" },
+        ],
+      },
+      {
+        name: "verbatim _all floor preserves every declared and runtime write root",
+        layers: [paths(), allPaths],
+        params: developerParams,
+        checks: [
+          ...canonicalAllPaths.allowWrite.map((path) => ({ path, read: "allow" as const, write: "allow" as const })),
+          ...[developerParams.AGENTDIR, developerParams.WORKTREE, developerParams.GITDIR]
+            .map((path) => ({ path, read: "allow" as const, write: "allow" as const })),
+          { path: developerParams.REPOAGENTS, read: "allow", write: "deny" },
+        ],
+      },
+      {
+        name: "type read subtree narrows writable worktree",
+        layers: [paths({ allowRead: [`${ordinaryParams.WORKTREE}/vendor`] }), paths()],
+        params: ordinaryParams,
+        checks: [
+          { path: `${ordinaryParams.WORKTREE}/vendor/pkg/file`, read: "allow", write: "deny" },
+          { path: `${ordinaryParams.WORKTREE}/src/file`, read: "allow", write: "allow" },
+        ],
+      },
+      {
+        name: "canonical cross-list tie writes",
+        layers: [
+          paths({ allowRead: ["/tmp/oracle-tie"] }),
+          paths({ allowWrite: ["/private/tmp/oracle-tie"] }),
+        ],
+        params: ordinaryParams,
+        checks: [{ path: "/private/tmp/oracle-tie/x", read: "allow", write: "allow" }],
+      },
+      {
+        name: "deny wins inside write and around nested write",
+        layers: [
+          paths({ allowWrite: ["/deny-test", "/blocked/inside"] }),
+          paths({ deny: ["/deny-test/secret", "/blocked"] }),
+        ],
+        params: ordinaryParams,
+        checks: [
+          { path: "/deny-test/public/x", read: "allow", write: "allow" },
+          { path: "/deny-test/secret/x", read: "deny", write: "deny" },
+          { path: "/blocked/inside/x", read: "deny", write: "deny" },
+        ],
+      },
+      {
+        name: "read runtime root can contain a deeper authored write root",
+        layers: [paths({ allowWrite: [`${ordinaryParams.REPOAGENTS}/shared/write`] }), paths()],
+        params: ordinaryParams,
+        checks: [
+          { path: `${ordinaryParams.REPOAGENTS}/other/x`, read: "allow", write: "deny" },
+          { path: `${ordinaryParams.REPOAGENTS}/shared/write/x`, read: "allow", write: "allow" },
+        ],
+      },
+      {
+        name: "glob literal-prefix depth v1 limitation",
+        layers: [
+          paths({ allowRead: ["/a/**/*.pem"] }),
+          paths({ allowWrite: ["/a/b/c"] }),
+        ],
+        params: ordinaryParams,
+        checks: [
+          { path: "/a/b/c/x.pem", read: "allow", write: "allow" },
+          { path: "/a/z.pem", read: "allow", write: "deny" },
+        ],
+      },
+      {
+        name: "plain sorts before glob at equal literal-prefix depth",
+        layers: [
+          paths({ allowWrite: ["/kind"] }),
+          paths({ allowRead: ["/kind/**"] }),
+        ],
+        params: ordinaryParams,
+        checks: [{ path: "/kind/x", read: "allow", write: "deny" }],
+      },
+      {
+        name: "read sorts before write for a config-runtime exact tie",
+        layers: [paths({ allowRead: ["/runtime-tie"] }), paths()],
+        params: { ...ordinaryParams, AGENTDIR: "/runtime-tie" },
+        checks: [{ path: "/runtime-tie/x", read: "allow", write: "allow" }],
+      },
+    ];
+
+    for (const [fixtureIndex, fixture] of fixtures.entries()) {
+      const original = mergeFixtureLayers(fixture.layers);
+      const originalProfile = assertFixtureOracle(fixture, original);
+      for (let permutation = 0; permutation < 20; permutation++) {
+        const random = seededRandom(0x5a17 + fixtureIndex * 101 + permutation);
+        const permutedLayers = shuffled(fixture.layers, random).map((layer) => ({
+          allowRead: shuffled(layer.allowRead, random),
+          allowWrite: shuffled(layer.allowWrite, random),
+          deny: shuffled(layer.deny, random),
+        }));
+        const merged = mergeFixtureLayers(permutedLayers, shuffled(PATH_LIST_KEYS, random));
+        assertFixtureOracle(fixture, merged, originalProfile);
+      }
+    }
+  });
+
+  test("sorted-position parameter names make unsafe entries order-independent", () => {
+    const first = paths({
+      allowRead: ['/tmp/z")(allow default)(x', "/tmp/a"],
+      allowWrite: ['/tmp/w")(allow default)(x', "/tmp/c"],
+      deny: ['/tmp/y")(allow default)(x', "/tmp/b"],
+    });
+    const second = paths({
+      allowRead: [...first.allowRead].reverse(),
+      allowWrite: [...first.allowWrite].reverse(),
+      deny: [...first.deny].reverse(),
+    });
+    expect(generateProfile(EMPTY_CONFIG, first, PARAMS)).toBe(generateProfile(EMPTY_CONFIG, second, PARAMS));
+    expect(sandboxProfileParameterValues(first, PARAMS)).toEqual(
+      sandboxProfileParameterValues(second, PARAMS),
+    );
+  });
+
+  test("LIVE macOS sandbox-exec proves nested last-match-wins", async () => {
+    const sandboxExec = Bun.which("sandbox-exec");
+    if (process.platform !== "darwin" || !sandboxExec) {
+      console.log("LIVE sandbox probe: SKIPPED (sandbox-exec is absent; macOS only)");
+      return;
+    }
+    const capability = Bun.spawnSync({
+      cmd: [sandboxExec, "-p", "(version 1)(allow default)", "/usr/bin/true"],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const capabilityError = capability.stderr.toString().trim();
+    if (capability.exitCode !== 0 && capabilityError.includes("sandbox_apply: Operation not permitted")) {
+      // Codex/CI may itself be inside Seatbelt, which forbids applying a nested
+      // profile even though the executable exists. An ordinary macOS process
+      // proceeds to the real compile and probes below.
+      console.log(
+        `LIVE sandbox probe: SKIPPED (sandbox-exec cannot apply a nested profile: exit=${capability.exitCode}, stderr=${capabilityError})`,
+      );
+      return;
+    }
+    if (capability.exitCode !== 0) {
+      throw new Error(
+        `LIVE sandbox capability check failed (${capability.exitCode}): ${capabilityError}`,
+      );
+    }
+
+    const createdRoot = await mkdtemp(join(tmpdir(), "itsybitsy-sandbox-live-"));
+    const root = canonicalizeSandboxPath(createdRoot);
+    try {
+      const baseline = parseAgentTypeFile(
+        await Bun.file(join(import.meta.dir, "../docs/agent-types/_all.md")).text(),
+      ).frontmatter;
+      const baselinePaths = baseline.paths as PathsConfig;
+      const baselineSandbox = baseline.sandbox as SandboxConfig;
+      // The executable/syscall floor belongs to _all.md. The live harness reads
+      // it instead of creating a second hardcoded floor in sandbox.ts.
+      const systemAllowRead = baselinePaths.allowRead.filter((entry) => entry.startsWith("/"));
+
+      const exampleOneRoot = join(root, "examples/one/Documents");
+      const exampleOneImportant = join(exampleOneRoot, "Important/file.txt");
+      const exampleOneOther = join(exampleOneRoot, "Other/file.txt");
+      const exampleTwoRoot = join(root, "examples/two");
+      const exampleTwoDocuments = join(exampleTwoRoot, "Documents/file.txt");
+      const exampleTwoDesktop = join(exampleTwoRoot, "Desktop/file.txt");
+      const tieFile = join(root, "examples/tie/file.txt");
+      const params: SandboxProfileParams = {
+        AGENTDIR: join(root, "Developer/app/.ittybitty/agents/live"),
+        WORKTREE: join(root, "Developer/app/.ittybitty/agents/live/repo"),
+        GITDIR: join(root, "Developer/app/.git/worktrees/live"),
+        REPOAGENTS: join(root, "Developer/app/.ittybitty/agents"),
+        HOME: root,
+      };
+      const trapAgentFile = join(params.AGENTDIR, "meta.json");
+      const trapWorktreeFile = join(params.WORKTREE, "src/file.txt");
+      const trapGitFile = join(params.GITDIR, "index");
+      const trapSiblingFile = join(root, "Developer/sibling/file.txt");
+      const files = [
+        exampleOneImportant,
+        exampleOneOther,
+        exampleTwoDocuments,
+        exampleTwoDesktop,
+        tieFile,
+        trapAgentFile,
+        trapWorktreeFile,
+        trapGitFile,
+        trapSiblingFile,
+      ];
+      for (const file of files) {
+        await mkdir(dirname(file), { recursive: true });
+        await writeFile(file, "probe\n");
+      }
+
+      const livePaths = paths({
+        allowRead: [
+          ...systemAllowRead,
+          join(exampleOneRoot, "Important"),
+          exampleTwoRoot,
+          join(root, "Developer"),
+          dirname(tieFile),
+        ],
+        allowWrite: [exampleOneRoot, join(exampleTwoRoot, "Documents"), dirname(tieFile)],
+      });
+      const liveConfig = config({ rawAllow: baselineSandbox.rawAllow });
+      const profile = generateProfile(liveConfig, livePaths, params);
+      const profilePath = join(root, "live.sb");
+      await Bun.write(profilePath, profile);
+      const definitions = sandboxProfileParameterValues(livePaths, params);
+      const definitionArgs = Object.entries(definitions)
+        .flatMap(([key, value]) => ["-D", `${key}=${value}`]);
+
+      const compileResult = Bun.spawnSync({
+        cmd: [sandboxExec, "-f", profilePath, ...definitionArgs, "/usr/bin/true"],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if (compileResult.exitCode !== 0) {
+        throw new Error(
+          `LIVE sandbox profile compile failed (${compileResult.exitCode}): ${compileResult.stderr.toString()}\n${profile}`,
+        );
+      }
+
+      const checks = [
+        { label: "write-root/nested-read", path: exampleOneImportant },
+        { label: "write-root/sibling", path: exampleOneOther },
+        { label: "read-root/nested-write", path: exampleTwoDocuments },
+        { label: "read-root/sibling", path: exampleTwoDesktop },
+        { label: "trap/agentdir", path: trapAgentFile },
+        { label: "trap/worktree", path: trapWorktreeFile },
+        { label: "trap/gitdir", path: trapGitFile },
+        { label: "trap/sibling", path: trapSiblingFile },
+        { label: "tie", path: tieFile },
+      ];
+      const table: PathAccessTable = sandboxPathAccessTable(livePaths, params);
+      const results: string[] = [];
+      for (const check of checks) {
+        for (const op of ["read", "write"] as const) {
+          const command = op === "read" ? 'cat "$1" >/dev/null' : 'echo x > "$1"';
+          const result = Bun.spawnSync({
+            cmd: [
+              sandboxExec,
+              "-f", profilePath,
+              ...definitionArgs,
+              "/bin/sh", "-c", command, "probe", check.path,
+            ],
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const expected = resolvePathAccess(check.path, op, table);
+          const actual = result.exitCode === 0 ? "allow" : "deny";
+          results.push(`${check.label}:${op}=${result.exitCode}`);
+          if (actual !== expected) {
+            throw new Error(
+              `LIVE sandbox disagreement for ${check.label} ${op}: resolver=${expected}, exit=${result.exitCode}, stderr=${result.stderr.toString()}\n${profile}`,
+            );
+          }
+        }
+      }
+      console.log(`LIVE sandbox probe: compile=${compileResult.exitCode}; ${results.join(", ")}`);
+    } finally {
+      await rm(createdRoot, { recursive: true, force: true });
+    }
   });
 });
 

@@ -40,6 +40,9 @@ describe("readConfig", () => {
     expect(result["externalDiffTool"]).toEqual({ value: undefined, source: "default" });
     expect(result["hooks.injectStatus"]).toEqual({ value: true, source: "default" });
     expect(result["hooks.statusVisible"]).toEqual({ value: true, source: "default" });
+    // Remote-control for the system coordinator must default OFF — it is never
+    // enabled implicitly.
+    expect(result["coordinator.remoteControl"]).toEqual({ value: false, source: "default" });
     // Permission list keys have all been removed from CONFIG_KEYS; they now live in
     // ~/.itsybitsy/agent-types/*.md frontmatter (coordinator.md, _all.md, _non_coordinator.md).
     expect(result["permissions.all.allow"]).toBeUndefined();
@@ -465,6 +468,34 @@ describe("channels.telegram config keys", () => {
     );
     const result = await readConfig(opts());
     expect(result["channels.telegram.bot_token"]).toEqual({ value: "abc:xyz", source: "user" });
+  });
+});
+
+describe("coordinator.remoteControl config key", () => {
+  test("CONFIG_KEYS contains coordinator.remoteControl as a boolean", () => {
+    const def = CONFIG_KEYS.find((d) => d.key === "coordinator.remoteControl");
+    expect(def).toBeDefined();
+    expect(def!.type).toBe("boolean");
+    expect(def!.default).toBe(false);
+  });
+
+  test("default value is false", async () => {
+    const result = await readConfig(opts());
+    expect(result["coordinator.remoteControl"]).toEqual({ value: false, source: "default" });
+  });
+
+  test("round-trips through write/read under a nested coordinator.* path", async () => {
+    await writeConfig(userCfgPath, "coordinator.remoteControl", true);
+    const raw = await Bun.file(userCfgPath).json();
+    expect(raw).toEqual({ coordinator: { remoteControl: true } });
+
+    const result = await readConfig(opts());
+    expect(result["coordinator.remoteControl"]).toEqual({ value: true, source: "user" });
+
+    // Toggle back off and confirm it round-trips again.
+    await writeConfig(userCfgPath, "coordinator.remoteControl", false);
+    const result2 = await readConfig(opts());
+    expect(result2["coordinator.remoteControl"]).toEqual({ value: false, source: "user" });
   });
 });
 

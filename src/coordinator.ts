@@ -550,6 +550,7 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   }
   const model = parsed.model;
   const imessage = config["coordinator.imessage"]?.value === true;
+  const remoteControl = config["coordinator.remoteControl"]?.value === true;
 
   // Resume the newest non-cleared, non-stub transcript. Skip the scan on the
   // post-failure retry so a single bad transcript can't trap us in a loop.
@@ -584,10 +585,17 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   const baseCmd = resumeId
     ? `claude --resume ${resumeId} --model ${model}`
     : `claude --model ${model}`;
+  // Enable Claude Code Remote Control (claude.ai/code) only when the user opts
+  // in via `coordinator.remoteControl`. `--remote-control` is claude's canonical
+  // flag (alias `--rc`); its optional [name] is omitted. It precedes --channels
+  // so its optional name argument can never swallow a channel value — the next
+  // token is either the `-`-prefixed --channels flag or end-of-command. Default
+  // is false: remote-control is NEVER enabled implicitly.
+  const remoteControlArg = remoteControl ? " --remote-control" : "";
   const channelsArg = channels.length > 0
     ? ` --channels ${channels.join(" ")}`
     : "";
-  const claudeCmd = `${baseCmd}${channelsArg}`;
+  const claudeCmd = `${baseCmd}${remoteControlArg}${channelsArg}`;
   await coordinatorSpawnCtx.run([
     "tmux", "send-keys", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION),
     claudeCmd, "Enter",

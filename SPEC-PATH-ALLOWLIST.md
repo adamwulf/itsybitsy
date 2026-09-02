@@ -2,8 +2,11 @@
 
 **Status:** DRAFT. Research report plus a design proposal. Nothing here is implemented.
 **Written:** 2026-09-02 by researcher agent `path-isolation` on branch `agent/path-isolation`,
-reset to the `antigravity` agent's HEAD (`184c671`).
-**Open decisions** are marked **[DECISION]** and collected in §7.
+first on the `antigravity` agent's HEAD (`184c671`), then rebased onto `main` after that
+branch merged.
+**Decisions:** Adam answered the five questions on 2026-09-02. The answers are in §7 and
+applied in §6. The enforcement strategy for command arguments (§6.9) is still under
+discussion with Adam and the `sandbox-safety` agent, who is rebasing `agent/sandbox-feature`.
 
 ---
 
@@ -34,8 +37,10 @@ The gaps that block the request are:
 6. **Layer files do not contribute.** `_all.md` and `_non_coordinator.md` cannot
    add allow-list entries; only the type and its `inherits:` chain can[^5][^4].
 
-Recommendation for the anchor of relative entries: the **main repo root**, not
-the worktree. The reason is in §5.2. This is the first **[DECISION]**.
+Relative entries anchor at the **main repo root** the worktree was spawned from,
+not the worktree. Adam decided this on 2026-09-02; the reason is in §5.2. An
+entry therefore cannot name its own repo root, which is acceptable because steps
+10 and 11 deny that root for worktree agents anyway.
 
 ---
 
@@ -257,8 +262,8 @@ One field, `allowedPaths`, four forms, classified by prefix:
 |---|---|---|
 | Absolute | `/Users/adam/Developer/shared-lib` | none |
 | Home | `~/Documents`, bare `~` | `$HOME`, as today[^5] |
-| Relative | `../fumble`, `./vendor` | **[DECISION]** repo root (recommended) or worktree |
-| Explicit anchor tokens | `{{repoRoot}}/../fumble`, `{{worktree}}/build` | optional; makes intent visible in the `.md` |
+| Relative | `../fumble` | the main repo root the worktree was spawned from (decided, §7) |
+| Explicit anchor tokens | `{{repoRoot}}/../fumble`, `{{worktree}}/build` | optional; makes intent visible in the `.md`; not requested |
 
 Bare names without a leading `/`, `~`, `.` or token are a spawn error, mirroring
 the sandbox branch's fail-closed rule[^32].
@@ -279,27 +284,36 @@ Replace the current block[^5] with:
 
 The hooks need no change for file tools: they already receive absolute paths.
 
-### 6.3 Layer contribution **[DECISION]**
+### 6.3 Layer contribution (decided: union)
 
 Today only the type and its `inherits:` chain feed the list, and a child
-replaces its parent[^4][^5]. Two options:
+replaces its parent[^4][^5]. Adam chose to layer the lists the same way
+`permissions.allow` is merged[^4]: **union across `_all.md` →
+`_non_coordinator.md` → the `inherits:` chain**. This also matches where the
+sandbox spec put its baseline[^31].
 
-- **A. Keep replace.** Simple. A baseline must be repeated in every strict type.
-- **B. Union across `_all.md` → `_non_coordinator.md` → chain**, with `[]` in the
-  leaf meaning "strict, ignore layers". This mirrors how `permissions.allow` is
-  merged[^4] and how the sandbox spec put its baseline in `_all.md`[^31].
+Two consequences to pin down in the implementation:
 
-Recommendation: **B**, because a baseline (§6.4) is otherwise unmaintainable.
+- The "absent = permissive, `[]` = strict" rule needs a home once layers union.
+  Proposal: the mode is decided by the **leaf type**. Leaf absent → permissive
+  (layers ignored, as today). Leaf present (`[]` or entries) → strict, and the
+  effective list is the union of all layers plus the leaf. `_all.md` entries are
+  then a baseline that every strict type inherits.
+- `mergeRawFrontmatters` must move `allowedPaths` out of `SCALAR_KEYS` into a
+  union list, and `newAgent` must read the merged result, not
+  `agentTypeDef.allowedPaths` alone[^4][^5]. SPEC §2.2 and the README sentence
+  about "replace" change accordingly[^26].
 
-### 6.4 Strict-mode baseline **[DECISION]**
+### 6.4 Strict-mode baseline (decided: scratchpad)
 
-Strict mode today denies the scratchpad and `~/.claude`[^6]. Proposed
-always-allowed additions, applied at step 9 alongside the project dir:
+Strict mode today denies the scratchpad and `~/.claude`[^6]. Adam agreed that
+claude agents get their scratchpad. Always-allowed addition, applied at step 9
+alongside the project dir:
 
 - the session scratchpad root `/private/tmp/claude-<uid>/<encoded-cwd>/` (claude
   only; derived the same way as the project dir);
-- nothing else by default. `/tmp` as a whole stays opt-in because it is shared
-  with every other agent.
+- nothing else in code. Anything wider (`/tmp`, `$TMPDIR`) goes into `_all.md`
+  as a visible baseline entry, per §6.3.
 
 Codex already gets `/tmp` from its sandbox[^16]; the hook should keep parity by
 listing the same scratchpad root.
@@ -313,10 +327,12 @@ listing the same scratchpad root.
    `isCodexSafeBinaryPath`[^14]; reject the spawn otherwise.
 3. Update the "Codex ignores this field" comment[^11].
 
-### 6.6 Bash command-line fence **[DECISION]**
+### 6.6 Bash command-line fence (decided: yes; layer under discussion, §6.9)
 
 This is what turns "whitelist which paths agents may visit" from a file-tool rule
-into a real rule. Proposed, for all three CLIs, inside `checkBashCommandPaths`[^8]:
+into a real rule. Adam wants command arguments fenced. Whether the fence is this
+hook scanner, the kernel sandbox, or both is the subject of §6.9. The hook-level
+design, for all three CLIs, inside `checkBashCommandPaths`[^8]:
 
 1. Tokenize as `checkRelativeTraversalPaths` does (quotes stripped, heredoc
    bodies masked)[^9].
@@ -326,8 +342,8 @@ into a real rule. Proposed, for all three CLIs, inside `checkBashCommandPaths`[^
    name `Bash`.
 4. Add a **system read baseline** so toolchains keep working: `/usr`, `/bin`,
    `/sbin`, `/opt/homebrew`, `/Library`, `/System`, `/private/tmp`, `/private/var/folders`,
-   `/dev`, `/etc`. Baseline lives in `_all.md` under a new `systemPaths:` key or
-   is hard-coded; **[DECISION]**.
+   `/dev`, `/etc`. Per §6.3 the baseline lives in `_all.md` as ordinary
+   `allowedPaths` entries, not in code.
 5. Deny a path-looking token that also carries shell noise, the same conservative
    rule the traversal scanner uses[^9].
 
@@ -361,20 +377,70 @@ read fence, the sandbox branch is the answer (§5.3).
 4. **`ib watch` / dashboard.** Show the list in the detail pane. The `b` dialog
    edits `permissions` only; adding path edits there is out of scope.
 
+### 6.9 Enforcement layer for command arguments: hook scanner or `sandbox-exec`
+
+Adam asked whether `sandbox-exec` could enforce the fence. It can, and it is
+already built: `agent/sandbox-feature` wraps the CLI process in a Seatbelt
+profile with a per-agent network proxy, for claude and for codex[^29]. The kernel
+sees each path after the shell has expanded it, so none of the string-scanner
+holes in §6.6 apply. That branch is the right enforcement layer for command
+arguments. `sandbox-exec` is a macOS tool; on any other platform the hook stays
+the only layer.
+
+Proposed split:
+
+| Layer | Role | Source of truth |
+|---|---|---|
+| Kernel (`sandbox-exec`) | The fence. A read or write outside the list fails with EPERM, whatever the spelling. | resolved `allowedPaths` in `meta.json`; the sandbox spec already derives `allowRead` and `allowWrite` from it when its own lists are absent[^31] |
+| Hook, file tools and `cd` | Fast decision plus a readable "Access denied" reason. Unchanged (§1.3). | the same list |
+| Hook, Bash arguments (§6.6) | Advisory. Catches the honest spellings (`/abs`, `~/`, `$HOME`) and explains the denial before the kernel does. Not the security boundary. | the same list |
+
+Integration points for the discussion:
+
+1. **Resolve once.** `newAgent` resolves every entry (absolute, `~`, repo-root
+   relative) to an absolute path and stores it (§6.2). The hook and the profile
+   generator both consume the stored absolutes. `src/sandbox.ts` never sees a
+   relative entry, so its grammar[^39] needs no change for `allowedPaths`.
+   Whether `sandbox.allowRead` / `allowWrite` should accept relative entries
+   themselves is a separate question.
+2. **Mode alignment.** `allowedPaths` absent means permissive; sandbox
+   `enabled: false` means no kernel fence. Proposal: a strict `allowedPaths`
+   (present in the leaf) with the sandbox disabled is a spawn-time warning
+   ("hook-only fence; command arguments are not enforced"), so nobody mistakes
+   the advisory layer for the real one.
+3. **Union rules must match.** §6.3 unions `allowedPaths`; the sandbox branch
+   already unions its lists across layers[^31]. Deny wins there; `allowedPaths`
+   has no deny list, so there is nothing to reconcile yet.
+4. **Agy.** The sandbox branch covers claude and codex[^29]; agy has no
+   sandbox today[^22]. `sandbox-exec` wraps any process, so agy parity is a
+   launch-line change in `buildAgyStartContent`[^21], but agy needs its own
+   baseline bisection, as claude did[^29]. Until then agy relies on the hook,
+   which is one reason to build §6.6 even as an advisory layer.
+5. **Ordering.** `sandbox-safety` rebases the branch first. This feature's
+   spawn-time pieces (§6.2 resolution, §6.3 union, §6.4 scratchpad, §6.5 codex
+   context) do not depend on the sandbox and are small. They can land first so
+   the rebased sandbox branch derives its lists from finished `allowedPaths`
+   semantics.
+
 ---
 
-## 7. Decisions needed
+## 7. Decisions (Adam, 2026-09-02)
 
-1. **Anchor for relative entries.** Repo root (recommended, §5.2) or worktree as
-   originally proposed. Explicit `{{repoRoot}}` / `{{worktree}}` tokens can be
-   added either way.
-2. **Layer contribution.** Replace (today) or union with `[]` as the strict
-   override (recommended, §6.3).
-3. **Strict-mode baseline.** Scratchpad only (recommended, §6.4), or `/tmp`.
-4. **Bash command-line fence.** In scope now (§6.6), or deferred to the sandbox
-   branch. Without it, the allow-list fences file tools and `cd`, not `cat`.
-5. **Sandbox branch.** Rebase and merge it first, or build the hook-level
-   feature now and port the grammar to it later.
+1. **Anchor.** Relative entries resolve against the main repo root the worktree
+   was spawned from. An entry cannot name that root itself; accepted, because
+   steps 10 and 11 deny it for worktree agents anyway.
+2. **Layers.** Union `allowedPaths` across `_all.md`, `_non_coordinator.md`, and
+   the `inherits:` chain, the same way `permissions` merge. §6.3 proposes that
+   the leaf decides the mode.
+3. **Strict baseline.** Claude agents get their scratchpad. Anything wider is an
+   `_all.md` entry.
+4. **Command arguments.** Fence them. Adam raised `sandbox-exec`; §6.9 gives the
+   position. The enforcement layer is to be settled with the `sandbox-safety`
+   agent.
+5. **Ordering.** `antigravity` is merged to `main` and this branch is rebased
+   onto it. `agent/sandbox-feature` is being rebased by `sandbox-safety`. Do not
+   merge it yet. Adam, `sandbox-safety`, and `path-isolation` will discuss the
+   strategy next.
 
 ---
 

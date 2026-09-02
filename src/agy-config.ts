@@ -27,15 +27,12 @@ import { stripIttybittyWrapper, buildSkillsSection } from "./agent-instructions-
 /** Default hook timeout in seconds — matches the codex default and D3's value. */
 export const DEFAULT_AGY_HOOK_TIMEOUT_SECS = 30;
 
-/**
- * The two files itsybitsy writes into an agy agent's worktree (D3 + D6). Both
- * are appended to the worktree `.gitignore`; a spawn is refused (Phase 2) if
- * either is already tracked in the repo (D7).
- */
-export const AGY_WORKTREE_FILES = [
-  ".agents/hooks.json",
-  ".agents/rules/ittybitty-agent.md",
-] as const;
+// The two files itsybitsy writes into an agy agent's worktree (D3 + D6) live in
+// the neutral src/agy-worktree-files.ts so the shared path guard can reference
+// them too. Re-exported here so existing importers keep resolving it from
+// "./agy-config". Both are appended to the worktree `.gitignore`; a spawn is
+// refused (Phase 2) if either is already tracked in the repo (D7).
+export { AGY_WORKTREE_FILES } from "./agy-worktree-files";
 
 /** Hook events agy fires that itsybitsy registers a handler for, in stable order. */
 const AGY_HOOK_DISPATCHER = {

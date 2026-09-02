@@ -877,6 +877,79 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
   });
 });
 
+// ── agy boundary-file write protection (boundary review fix B) ───────────────
+
+describe("checkPathAccess — .agents/ boundary-file write protection", () => {
+  const HOOKS = "/repo/.ittybitty/agents/agent-abc123/repo/.agents/hooks.json";
+  const RULES = "/repo/.ittybitty/agents/agent-abc123/repo/.agents/rules/ittybitty-agent.md";
+
+  test("Write on .agents/hooks.json → DENIED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: HOOKS } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("agy hook/rule files");
+  });
+
+  test("Edit on the rule file → DENIED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Edit", toolInput: { file_path: RULES } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("agy hook/rule files");
+  });
+
+  test("MultiEdit on .agents/hooks.json → DENIED", () => {
+    const ctx = makeCtx({ allowList: ["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "Bash"] });
+    const result = checkPathAccess(makeInput({ toolName: "MultiEdit", toolInput: { file_path: HOOKS } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("agy hook/rule files");
+  });
+
+  test("Bash: sed -i on .agents/hooks.json → DENIED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "sed -i 's/x/y/' .agents/hooks.json" } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("agy hook/rule files");
+  });
+
+  test("Bash: sed -i on the rule file (absolute) → DENIED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: `sed -i 's/x/y/' ${RULES}` } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("agy hook/rule files");
+  });
+
+  test("Bash: redirect into .agents/hooks.json → DENIED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "echo {} > .agents/hooks.json" } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("agy hook/rule files");
+  });
+
+  test("Read on .agents/hooks.json → ALLOWED (reads not gated)", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Read", toolInput: { file_path: HOOKS } }), ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("Write on an unrelated .agents/ file → ALLOWED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(
+      makeInput({ toolName: "Write", toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/.agents/notes.md" } }),
+      ctx,
+    );
+    expect(result.decision).toBe("allow");
+  });
+
+  test("Write on an unrelated worktree file → ALLOWED (regression)", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(
+      makeInput({ toolName: "Write", toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/src/index.ts" } }),
+      ctx,
+    );
+    expect(result.decision).toBe("allow");
+  });
+});
+
 // ── parseIbCommand ───────────────────────────────────────────────────────────
 
 describe("parseIbCommand", () => {

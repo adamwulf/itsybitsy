@@ -142,6 +142,7 @@ Watchdog gating + two answers + heartbeat check; `parseStateForCli` agy branch w
 6. **Repos that track `.agents/hooks.json` or the rules path** cannot host `agy` agents in v1 (spawn refuses).
 7. **Quota / licensing.** The account on this machine shows `Antigravity Starter Quota`; a 403 on the quota endpoint was seen once. Rate-limit strings are not captured yet.
 8. **codex handler omits `checkIbCommandAccess` (parity gap, follow-up).** Phase 1 added the manager-only-`ib`-subcommand relationship check (`ib retire/merge/nuke/pause/resume/reassign <other>`) to the agy PreToolUse handler, matching the claude `hookCheckPath`. The codex `hookCodexPreToolUse` still lacks it, so a codex agent with `Bash(ib:*)` can run those subcommands against agents it does not manage. Not changed in the agy Phase 1 work to keep codex byte-identical; track as a codex-side follow-up (add the same `checkIbCommandAccess` call for Bash before `checkCodexPreToolUse`).
+9. **`run_command` reads outside the worktree are allowed.** A single `run_command` such as `cat ~/.ssh/id_rsa` or `cat /etc/passwd` (absolute paths outside the repo, no traversal into a sibling/main-repo) passes the bash gate — the same model claude workers run under, where the shared scanner only isolates sibling-agent and main-repo paths. agy has no sandbox, so this is an inherited default rather than an agy-specific hole. Needs a conscious decision (an allowlist of readable roots, or accepting the claude-parity default) before treating any read as sensitive; not fixed in Phase 1.
 
 ---
 

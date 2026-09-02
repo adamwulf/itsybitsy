@@ -256,6 +256,71 @@ describe("checkAgyPreToolUse — run_command relative traversal", () => {
   });
 });
 
+// ── agy boundary files are write-protected (boundary review B) ───────────────
+
+describe("checkAgyPreToolUse — agy boundary-file write protection", () => {
+  const HOOKS_REL = ".agents/hooks.json";
+  const RULES_REL = ".agents/rules/ittybitty-agent.md";
+
+  test("write_to_file on .agents/hooks.json is denied", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "write_to_file", toolArgs: { TargetFile: `${ctx.worktreePath}/${HOOKS_REL}`, CodeContent: "x" } },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("agy hook/rule files");
+  });
+
+  test("replace_file_content on the rule file is denied", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "replace_file_content", toolArgs: { TargetFile: `${ctx.worktreePath}/${RULES_REL}` } },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("agy hook/rule files");
+  });
+
+  test("multi_replace_file_content on .agents/hooks.json is denied", () => {
+    const ctx = makeCtx({ allowList: [...makeCtx().allowList, "MultiEdit"] });
+    const d = checkAgyPreToolUse(
+      { toolName: "multi_replace_file_content", toolArgs: { TargetFile: `${ctx.worktreePath}/${HOOKS_REL}` } },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("agy hook/rule files");
+  });
+
+  test("run_command sed -i on the rule file is denied", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: `sed -i 's/x/y/' ${RULES_REL}`, Cwd: ctx.worktreePath } },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("agy hook/rule files");
+  });
+
+  test("reads of .agents/hooks.json (view_file) are allowed", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "view_file", toolArgs: { AbsolutePath: `${ctx.worktreePath}/${HOOKS_REL}` } },
+      ctx,
+    );
+    expect(d.decision).toBe("allow");
+  });
+
+  test("write_to_file on an unrelated worktree file is allowed (regression)", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "write_to_file", toolArgs: { TargetFile: `${ctx.worktreePath}/src/index.ts`, CodeContent: "x" } },
+      ctx,
+    );
+    expect(d.decision).toBe("allow");
+  });
+});
+
 // ── run_command single-command rule: no chaining / escaping (boundary review A) ─
 
 describe("checkAgyPreToolUse — run_command single-command rule", () => {

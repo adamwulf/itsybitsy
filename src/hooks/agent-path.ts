@@ -16,6 +16,7 @@ import { isValidAgentId } from "../validation";
 import { checkGitDirectoryFlags, resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./shared";
 // Single source of truth for the encoding — see src/auto-compact.ts
 import { encodeClaudeProjectPath } from "../auto-compact";
+import { AGY_WORKTREE_FILES } from "../agy-worktree-files";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -126,6 +127,29 @@ export function isWorktreeSettingsFile(filePath: string, worktreePath: string): 
   return /^settings.*\.json$/.test(basename(filePath));
 }
 
+/** Deny reason for mutating an agy agent's own hook/rule boundary files. */
+export const AGY_BOUNDARY_WRITE_DENY_REASON =
+  "Access denied: agents cannot modify their own agy hook/rule files (.agents/hooks.json, .agents/rules/ittybitty-agent.md)";
+
+/**
+ * Classify a write target as a PROTECTED worktree file that agents must not
+ * rewrite — either `.claude/settings*.json` (permission self-escalation) or an
+ * agy boundary file (`.agents/hooks.json` / the always-on rule file, whose
+ * rewrite would disable the hook gate on the next resume). Returns the kind so
+ * the caller picks the right deny reason, or null for any other path. Reads are
+ * never gated here — only the WRITE_TOOLS callers consult this.
+ */
+export function worktreeProtectedFileKind(
+  filePath: string,
+  worktreePath: string,
+): "settings" | "agy" | null {
+  if (isWorktreeSettingsFile(filePath, worktreePath)) return "settings";
+  for (const rel of AGY_WORKTREE_FILES) {
+    if (filePath === join(worktreePath, rel)) return "agy";
+  }
+  return null;
+}
+
 // ── Pure decision logic ──────────────────────────────────────────────────────
 
 /**
@@ -216,58 +240,72 @@ export const SETTINGS_WRITE_DENY_REASON =
  * Read-only commands like `cat`, `grep`, or `jq` without redirection are
  * intentionally left alone.
  */
+/**
+ * One protected-file matcher for the bash write guard: a regex whose group[2]
+ * captures the file token, a predicate that confirms the token resolves into
+ * this worktree, and the deny reason to return.
+ */
+interface BashProtectedFileSpec {
+  /** Must have a `g` flag and capture group[1]=boundary, group[2]=path token. */
+  regex: RegExp;
+  matchesWorktree: (matchedPath: string, worktreePath: string) => boolean;
+  reason: string;
+}
+
+/**
+ * Detect a bash command that WRITES (redirect `>`/`>>` or in-place `sed -i`) to
+ * one of the worktree's protected files. Generalized from the settings-only
+ * guard to also cover the agy boundary files (`.agents/hooks.json` and the
+ * always-on rule file) — rewriting those would disable the hook gate on the
+ * next resume. Reads (`cat`, `grep`, `jq` without redirection) are left alone.
+ */
 function checkBashSettingsWrite(
   command: string,
   worktreePath: string
 ): HookDecision | null {
-  // Match a settings file token: either a path ending in /.claude/settings*.json
-  // or just .claude/settings*.json (when relative). The boundary chars are
-  // start-of-string/space/quote/= on the left and end-of-string/space/quote/;/&/|
-  // on the right.
-  //
-  // Two passes:
-  //   1. Find every settings-file occurrence at a word boundary.
-  //   2. For each occurrence, classify the immediate left-context as a write
-  //      redirect (> / >>) or check whether the command line starts with
-  //      `sed -i` and references the file as an argument.
-  const settingsRe = /(^|[\s'"=])((?:\/[^\s'"=;&|<>]*)?\.claude\/settings[^\s'"=;&|<>/]*\.json)/g;
-  let match: RegExpExecArray | null;
-  while ((match = settingsRe.exec(command)) !== null) {
-    const matchedPath = match[2]!;
-    const tokenStart = match.index + match[1]!.length;
+  // .claude/settings*.json — absolute must live under <worktree>/.claude/;
+  // a relative `.claude/…` is accepted unconditionally (cwd is in the worktree).
+  const settingsSpec: BashProtectedFileSpec = {
+    regex: /(^|[\s'"=])((?:\/[^\s'"=;&|<>]*)?\.claude\/settings[^\s'"=;&|<>/]*\.json)/g,
+    matchesWorktree: (p, wt) =>
+      p.startsWith("/") ? p.startsWith(wt + "/.claude/") : p.startsWith(".claude/"),
+    reason: SETTINGS_WRITE_DENY_REASON,
+  };
+  // agy boundary files under <worktree>/.agents/ (hooks.json + the rule file).
+  // Keep the alternation in sync with AGY_WORKTREE_FILES — the Finding B tests
+  // write to every entry, so a drift there fails those tests.
+  const agySpec: BashProtectedFileSpec = {
+    regex: /(^|[\s'"=])((?:\/[^\s'"=;&|<>]*)?\.agents\/(?:hooks\.json|rules\/ittybitty-agent\.md))/g,
+    matchesWorktree: (p, wt) =>
+      p.startsWith("/") ? p.startsWith(wt + "/.agents/") : p.startsWith(".agents/"),
+    reason: AGY_BOUNDARY_WRITE_DENY_REASON,
+  };
 
-    // Only flag paths that resolve into our own .claude/. For absolute paths,
-    // require the path to begin with worktreePath + "/.claude/". For relative
-    // paths (starting with `.claude/`), accept unconditionally — the agent's
-    // cwd is inside its worktree, so this is the only .claude/ they can write.
-    if (matchedPath.startsWith("/")) {
-      if (!matchedPath.startsWith(worktreePath + "/.claude/")) continue;
-    } else if (!matchedPath.startsWith(".claude/")) {
-      continue;
-    }
-
-    // Look back from tokenStart, skipping whitespace, to find a > or >>.
-    let i = tokenStart - 1;
-    while (i >= 0 && (command[i] === " " || command[i] === "\t")) i--;
-    if (i >= 0 && command[i] === ">") {
-      return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
-    }
-  }
-
-  // sed -i / sed -i'<suffix>' / sed --in-place — any of these followed somewhere
-  // by a settings file argument is a mutation.
   const sedInPlace = /(^|[\s;&|])sed\s+(?:-i\S*|--in-place\S*)/;
-  if (sedInPlace.test(command)) {
-    settingsRe.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = settingsRe.exec(command)) !== null) {
-      const matchedPath = m[2]!;
-      if (matchedPath.startsWith("/")) {
-        if (!matchedPath.startsWith(worktreePath + "/.claude/")) continue;
-      } else if (!matchedPath.startsWith(".claude/")) {
-        continue;
+  const hasSed = sedInPlace.test(command);
+
+  for (const spec of [settingsSpec, agySpec]) {
+    // Pass 1: a `>` / `>>` redirect immediately before the file token.
+    spec.regex.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = spec.regex.exec(command)) !== null) {
+      const matchedPath = match[2]!;
+      const tokenStart = match.index + match[1]!.length;
+      if (!spec.matchesWorktree(matchedPath, worktreePath)) continue;
+      let i = tokenStart - 1;
+      while (i >= 0 && (command[i] === " " || command[i] === "\t")) i--;
+      if (i >= 0 && command[i] === ">") {
+        return { decision: "deny", reason: spec.reason };
       }
-      return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
+    }
+    // Pass 2: `sed -i` / `--in-place` anywhere with the file as an argument.
+    if (hasSed) {
+      spec.regex.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = spec.regex.exec(command)) !== null) {
+        if (!spec.matchesWorktree(m[2]!, worktreePath)) continue;
+        return { decision: "deny", reason: spec.reason };
+      }
     }
   }
 
@@ -452,14 +490,14 @@ function checkFilePath(
     // Path doesn't exist yet — keep the resolve() result
   }
 
-  // 6. Block: writes to <worktreePath>/.claude/settings*.json — agents must
-  // not grant themselves new permissions by editing their own settings file.
-  // Reads are allowed; only mutation tools are blocked here.
-  if (WRITE_TOOLS.has(toolName) && isWorktreeSettingsFile(filePath, worktreePath)) {
-    return {
-      decision: "deny",
-      reason: "Access denied: agents cannot modify their own .claude/settings*.json (use 'ib' to change permissions)",
-    };
+  // 6. Block: writes to a PROTECTED worktree file — <worktreePath>/.claude/
+  // settings*.json (permission self-escalation) or the agy boundary files
+  // (.agents/hooks.json / the rule file, whose rewrite would disable the hook
+  // gate on the next resume). Reads are allowed; only mutation tools are blocked.
+  if (WRITE_TOOLS.has(toolName)) {
+    const kind = worktreeProtectedFileKind(filePath, worktreePath);
+    if (kind === "settings") return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
+    if (kind === "agy") return { decision: "deny", reason: AGY_BOUNDARY_WRITE_DENY_REASON };
   }
 
   // 7. Allow: path within worktree

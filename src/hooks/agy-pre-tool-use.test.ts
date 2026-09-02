@@ -130,6 +130,70 @@ describe("checkAgyPreToolUse — path isolation", () => {
   });
 });
 
+// ── run_command Cwd is model-controlled and must be isolated (manager fix 1) ─
+
+describe("checkAgyPreToolUse — run_command Cwd isolation", () => {
+  test("Cwd = main repo is denied even with an allow-listed command", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: "ls", Cwd: "/repo" } },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("Cwd rejected");
+  });
+
+  test("Cwd = a main-repo subdir is denied with the main-repo reason", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: "ls", Cwd: "/repo/src" } },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("Cwd rejected");
+    expect(d.reason).toContain("main repo");
+  });
+
+  test("Cwd = a sibling worktree is denied", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: "ls", Cwd: SIBLING } },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("Cwd rejected");
+    expect(d.reason).toContain("other agents");
+  });
+
+  test("Cwd = /tmp is denied (forced worktree isolation)", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: "ls", Cwd: "/tmp" } },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("Cwd rejected");
+  });
+
+  test("Cwd = a worktree subdir is allowed", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: "ls", Cwd: `${ctx.worktreePath}/src` } },
+      ctx,
+    );
+    expect(d.decision).toBe("allow");
+  });
+
+  test("Cwd absent falls back to the worktree and is allowed", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: "ls" } },
+      ctx,
+    );
+    expect(d.decision).toBe("allow");
+  });
+});
+
 // ── hookAgyPreToolUse — JSON contract + fail-CLOSED ──────────────────────────
 
 describe("hookAgyPreToolUse — {decision,reason} contract", () => {

@@ -72,6 +72,28 @@ export function checkAgyPreToolUse(
   }
   const effectiveAllowedPaths =
     ctx.allowedPaths !== undefined ? ctx.allowedPaths : [ctx.worktreePath];
+
+  // A run_command carries a MODEL-CONTROLLED `Cwd` (translated to t.cwd). The
+  // shared checkPathAccess never validates the cwd itself — Claude's Bash tool
+  // has no cwd argument — so a benign allow-listed command (e.g. `ls`) with
+  // Cwd set to the main repo / a sibling worktree / /tmp would execute THERE,
+  // outside the worktree. Gate the directory with the same isolation as an LS
+  // on it (allowedPaths forced, "LS" prepended to the allow list) before the
+  // command is checked. Absent Cwd defaults to the worktree, which is always
+  // allowed, so no validation is needed for that case.
+  if (t.cwd !== undefined) {
+    const cwdDecision = checkPathAccess(
+      { toolName: "LS", toolInput: { file_path: t.cwd }, cwd: ctx.worktreePath },
+      { ...ctx, allowList: ["LS", ...ctx.allowList], allowedPaths: effectiveAllowedPaths },
+    );
+    if (cwdDecision.decision === "deny") {
+      return {
+        decision: "deny",
+        reason: `run_command Cwd rejected (${t.cwd}): ${cwdDecision.reason}`,
+      };
+    }
+  }
+
   const cwd = t.cwd ?? ctx.worktreePath;
   return checkPathAccess(
     { toolName: t.toolName, toolInput: t.toolInput, cwd },

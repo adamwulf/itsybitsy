@@ -58,7 +58,7 @@
  */
 
 import { join } from "path";
-import { homedir } from "os";
+import { userHome } from "../home";
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from "fs/promises";
 import { watch, type FSWatcher } from "node:fs";
 import type { TelegramClient } from "./telegram-client";
@@ -82,7 +82,7 @@ export function resetOutboxDir(): void {
 export function defaultOutboxDir(): string {
   return (
     overrideOutboxDir ??
-    join(process.env.HOME ?? homedir(), ".itsybitsy", "channels", "telegram", "outbox")
+    join(userHome(), ".itsybitsy", "channels", "telegram", "outbox")
   );
 }
 

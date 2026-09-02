@@ -4,7 +4,7 @@
  * Uses a lock file to rate-limit API calls to once per 30s across processes.
  */
 
-import { homedir } from "node:os";
+import { userHome } from "./home";
 import { join } from "node:path";
 import { rename, mkdir, stat, writeFile, unlink, readdir, readFile } from "node:fs/promises";
 
@@ -17,11 +17,11 @@ export const fetchCtx = new InjectionContext<FetchLike>(globalThis.fetch);
 /** Spawn context for usage keychain lookup */
 export const spawnCtx = new SpawnContext();
 
-let ITSYBITSY_DIR = join(homedir(), ".itsybitsy");
+let ITSYBITSY_DIR = join(userHome(), ".itsybitsy");
 let CACHE_PATH = join(ITSYBITSY_DIR, "usage-cache.json");
 let LOCK_PATH = join(ITSYBITSY_DIR, "usage.lock");
-let CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
-let CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
+let CREDENTIALS_PATH = join(userHome(), ".claude", ".credentials.json");
+let CODEX_SESSIONS_DIR = join(userHome(), ".codex", "sessions");
 const CACHE_TTL_MS = 180_000; // 3 minute normal refresh
 const LOCK_MAX_AGE_MS = 30_000; // only one API attempt per 30s across processes
 const API_TIMEOUT_MS = 5_000; // 5s fetch timeout
@@ -38,11 +38,11 @@ export function setTestDir(dir: string): void {
 
 /** Reset directory paths to defaults. */
 export function resetTestDir(): void {
-  ITSYBITSY_DIR = join(homedir(), ".itsybitsy");
+  ITSYBITSY_DIR = join(userHome(), ".itsybitsy");
   CACHE_PATH = join(ITSYBITSY_DIR, "usage-cache.json");
   LOCK_PATH = join(ITSYBITSY_DIR, "usage.lock");
-  CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
-  CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
+  CREDENTIALS_PATH = join(userHome(), ".claude", ".credentials.json");
+  CODEX_SESSIONS_DIR = join(userHome(), ".codex", "sessions");
 }
 
 export interface UsageData {

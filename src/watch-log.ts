@@ -11,7 +11,7 @@
  */
 
 import { join } from "path";
-import { homedir } from "os";
+import { userHome } from "./home";
 import {
   appendFileSync, statSync, mkdirSync, renameSync, unlinkSync,
 } from "fs";
@@ -28,7 +28,7 @@ const MAX_BYTES = 1_048_576; // 1 MB
 function resolveDefaultLogPath(): string {
   const override = process.env.IB_WATCH_LOG_PATH;
   if (override && override.trim().length > 0) return override;
-  return join(homedir(), ".itsybitsy", "watch.log");
+  return join(userHome(), ".itsybitsy", "watch.log");
 }
 
 const DEFAULT_LOG_PATH = resolveDefaultLogPath();

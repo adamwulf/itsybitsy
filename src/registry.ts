@@ -1,5 +1,5 @@
 import { join, resolve, basename } from "path";
-import { homedir } from "os";
+import { userHome } from "./home";
 import { mkdir } from "fs/promises";
 // teams.ts imports listRepos/repoDisplayName FROM this module, so a static
 // `import { getTeam } from "./teams"` forms an import cycle. It is SAFE here
@@ -28,7 +28,7 @@ export interface RegistryData {
 }
 
 function itsybitsyDir(): string {
-  return join(process.env.HOME ?? homedir(), ".itsybitsy");
+  return join(userHome(), ".itsybitsy");
 }
 
 function registryPath(): string {

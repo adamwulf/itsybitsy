@@ -5,6 +5,7 @@
  */
 
 import { join } from "path";
+import { userHome } from "./home";
 import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from "./registry";
 import { resolveAgentIcon } from "./agents";
 import type { Agent, FlatEntry } from "./agents";
@@ -2300,7 +2301,7 @@ export async function main() {
       const { initAgentTypes } = await import("./agent-types");
       try {
         const created = await initAgentTypes();
-        const home = process.env.HOME || (await import("os")).homedir();
+        const home = userHome();
         const typesDir = (await import("path")).join(home, ".itsybitsy", "agent-types");
         if (created.length === 0) {
           console.log(`Agent type files already present at: ${typesDir} (no files created)`);

@@ -4,7 +4,8 @@
  */
 
 import { join, dirname } from "path";
-import { homedir, tmpdir } from "os";
+import { tmpdir } from "os";
+import { userHome } from "../home";
 import { mkdir, rename } from "fs/promises";
 import { MIN_SIDEBAR, MAX_SIDEBAR } from "./sidebar";
 
@@ -44,7 +45,7 @@ export interface LayoutState {
 // setLayoutPath().
 const LAYOUT_PATH = process.env.NODE_ENV === "test"
   ? join(tmpdir(), `itsybitsy-layout-test-${process.pid}.json`)
-  : join(homedir(), ".itsybitsy", "layout.json");
+  : join(userHome(), ".itsybitsy", "layout.json");
 
 /** Overridable path for testing */
 let layoutPath = LAYOUT_PATH;

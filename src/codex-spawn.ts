@@ -22,7 +22,7 @@
  */
 
 import { join } from "path";
-import { homedir } from "os";
+import { userHome } from "./home";
 import { mkdir } from "fs/promises";
 import { shellQuote } from "./validation";
 import { buildCodexLaunchArgs, FUGU_CODEX_CONFIG_OVERRIDES, isCodexSafeBinaryPath } from "./codex-config";
@@ -527,7 +527,7 @@ async function buildClaudeMdImports(worktreePath: string): Promise<string> {
   if (await Bun.file(projectClaudeMd).exists()) {
     parts.push("## Project CLAUDE.md\n\n@./CLAUDE.md");
   }
-  const home = process.env.HOME || homedir();
+  const home = userHome();
   const userClaudeMd = join(home, ".claude", "CLAUDE.md");
   if (await Bun.file(userClaudeMd).exists()) {
     const contents = await Bun.file(userClaudeMd).text();

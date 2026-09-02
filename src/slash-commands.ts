@@ -13,7 +13,7 @@
  */
 
 import { join } from "path";
-import { homedir } from "os";
+import { userHome } from "./home";
 import respawnMd from "../docs/slash-commands/respawn.md" with { type: "text" };
 import restartMd from "../docs/slash-commands/restart.md" with { type: "text" };
 
@@ -29,10 +29,11 @@ export const EMBEDDED_SLASH_COMMANDS: Record<string, string> = {
 
 /**
  * Return the absolute path of the user-global Claude Code commands directory
- * (`~/.claude/commands/`). Honors the `HOME` env var so tests can redirect it.
+ * (`~/.claude/commands/`). Resolves home through the shared {@link userHome}
+ * seam so tests can redirect it.
  */
 export function getGlobalClaudeCommandsDir(): string {
-  return join(process.env.HOME ?? homedir(), ".claude", "commands");
+  return join(userHome(), ".claude", "commands");
 }
 
 /**

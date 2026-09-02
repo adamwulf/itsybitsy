@@ -9,7 +9,7 @@
  */
 
 import { join } from "path";
-import { homedir } from "os";
+import { userHome } from "./home";
 import type { Agent } from "./agents";
 import { agentWorktreePath } from "./agents";
 import { logAgent } from "./agent-lifecycle";
@@ -29,7 +29,7 @@ export function encodeClaudeProjectPath(worktreePath: string): string {
 export function transcriptPath(agent: Agent): string {
   const worktree = agentWorktreePath(agent);
   const encoded = encodeClaudeProjectPath(worktree);
-  const home = process.env.HOME ?? homedir();
+  const home = userHome();
   return join(home, ".claude", "projects", encoded, `${agent.meta.session_id}.jsonl`);
 }
 

@@ -593,14 +593,39 @@ path permissions in the `.md` files, basic defaults shipped.
    lists are the same either way.
 7. **Transition.** With today's `_all.md`, whose read list holds `/` and
    `~`[^43], the hook under this model changes nothing for reads and tightens
-   writes to the listed write roots plus the runtime roots. Adam tightens
-   `_all.md` when ready; no mode flag is needed. Before writes tighten, the
-   roots codex receives today through `--add-dir` must appear in `_all.md`
-   `allowWrite` or become runtime roots: the whole `~/.itsybitsy` (today's list
-   has only `~/.itsybitsy/agents`[^43]), `~/Library/Caches` on macOS for Xcode
-   and SwiftPM, the git common dir, and the parent repo's `.ittybitty` and
-   `.claude` subdirectories[^14][^15]. Otherwise the hook denies what codex's
-   own sandbox allows today.
+   writes to the listed write roots plus the runtime roots. Decision 6 (§7)
+   makes the read-floor tightening of §6.10 amendment 1 **required**, not
+   optional: with `/` and `~` in the read list, strict is not strict for reads.
+   The floor becomes the system directories, the five home dot-directories,
+   the two home files, `~/.codex` for codex, and one raw rule for the mandatory
+   root listing. Cost: `bunx tsc` in a worktree without `node_modules` needs
+   `~` for reading; the fix is `bun install` in the worktree, or the type adds
+   `~` itself. That lands on the sandbox branch. Before writes tighten, the
+   roots codex receives today through `--add-dir`[^14][^15] must be covered.
+   `sandbox-safety` split them by kind, and the split is adopted:
+   - **Runtime roots, code-injected, keyed on the resolved
+     `canSpawnChildren`:** the git common dir, and the parent repo's
+     `.ittybitty/agents` and `.claude` subdirectories. A spawning type gets
+     them for writing (child agent dir, `settings.local.json`) and keeps the
+     tmux socket; a non-spawning type gets them read-only and loses the tmux
+     socket (§6.10 amendment 3). One key, one rule.
+   - **`_all.md` `allowWrite` defaults:** `~/Library/Caches` on macOS (bun,
+     SwiftPM, pip, Xcode).
+   - **`~/.itsybitsy` floor:** not the whole directory, which codex got only
+     because its sandbox is coarse, and not `~/.itsybitsy/agents` alone
+     either. Running agents also write `~/.itsybitsy/teams/<team>.channel.jsonl`
+     and `<team>.log` on `ib send @<team>`[^50], and `teams.json` plus
+     `.teams.lock` at the root through the lazy prune in `ib send` and
+     `ib roster` and through `ib team add` / `remove`[^51]. The floor is
+     therefore `~/.itsybitsy/agents`, `~/.itsybitsy/teams`, and the
+     `teams.json` write path with its lock and temp file. `agent-types/`,
+     `config.json`, and `repos.json` stay read-only; `ib watch` and
+     `ib init-types` write them, never a running agent.
+   Known gap on the sandbox branch, stated by `sandbox-safety`: `ib new-agent`
+   from a sandboxed manager is untested and probably fails today, because the
+   shipped profile injects the repo agents dir read-only[^49]. The
+   `canSpawnChildren`-keyed runtime root above fixes it and lands with the tmux
+   deny. No live agent hits it while `enabled` is false everywhere.
 8. **Hook operation classes.** Read, Grep, Glob, LS, and `cd` are reads.
    Write, Edit, MultiEdit, NotebookEdit, and codex `apply_patch` are writes.
    Agy tools map through their translation table[^20]. A Bash token is a read,
@@ -608,12 +633,17 @@ path permissions in the `.md` files, basic defaults shipped.
    (`mv`, `cp`, `tee`, `mkdir`) are not recognised by the scanner; the kernel is
    authoritative for writes.
 
-**Migration risk.** Item 7 makes the read side safe on day one. Writes tighten
-at once, so before the flip: add the codex roots above to `_all.md`, and run an
-**audit mode** for a few days, where the hook logs would-be write denials to
-`agent.log` without denying, to collect the entries each type needs. Types whose
-work reaches outside their repo add their own entries; the `repos:` field
-already scopes such types.
+**Migration risk.** Once the read floor is tightened, every live agent becomes
+strict for reads and writes at the hook on the same day. So before the flip:
+land the roots above, and run an **audit mode** for a few days, where the hook
+logs would-be denials for **both** reads and writes to `agent.log` without
+denying, to collect the entries each type needs. Types whose work
+reaches outside their repo add their own entries; the `repos:` field already
+scopes such types. Audit mode can only live at the hook layer: `sandbox-exec`
+denials never reach the unified log, so the kernel has no audit mode. Per the
+zero-baked-in rule it is a frontmatter scalar, `paths.audit: true` in
+`_all.md`, resolved like `sandbox.enabled`, and removed once the entries are
+collected. Not a `config.json` key, not a code constant.
 
 ---
 
@@ -634,6 +664,10 @@ already scopes such types.
    onto it. `agent/sandbox-feature` is being rebased by `sandbox-safety`. Do not
    merge it yet. Adam, `sandbox-safety`, and `path-isolation` will discuss the
    strategy next.
+6. **Default mode, after reading the discussion.** Key absent means strict.
+   An agent gets only its worktree and the default paths: the runtime roots and
+   the `_all.md` baseline. This is §6.11 item 1. The permissive mode is gone,
+   and with it the "leaf decides the mode" idea in §6.3.
 
 ---
 
@@ -698,3 +732,5 @@ already scopes such types.
 [^47]: [SPEC-SANDBOX §4A.4 worked example: deny all .env, even inside the worktree — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:SPEC-SANDBOX.md`](SPEC-SANDBOX.md:418-435)
 [^48]: [SPEC-SANDBOX: fully-open is explicit-only, `allowRead: ["/"]` — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:SPEC-SANDBOX.md`](SPEC-SANDBOX.md:326-327)
 [^49]: [runtime-injected roots AGENTDIR, GITDIR, REPOAGENTS as `-D` params — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:src/sandbox.ts`](src/sandbox.ts:405-409)
+[^50]: [team channel files under `<coordinator home>/teams/`: `<team>.channel.jsonl` and `<team>.log`](src/team-channel.ts:89-105)
+[^51]: [teams.json at `~/.itsybitsy/`, read-modify-write under `.teams.lock` by `ib team add`/`remove`, lazy prune in `ib send` / `ib roster`, and teardown prune](src/teams.ts:1-40)

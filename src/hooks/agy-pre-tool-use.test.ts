@@ -399,6 +399,14 @@ describe("checkAgyPreToolUse — run_command single-command rule", () => {
     expect(d.reason).toContain("| pipe");
   });
 
+  test("a multi-part-delimiter heredoc hiding a post-terminator command is denied (round 5)", () => {
+    // `E'O'F` is delimiter EOF; the real body ends at the `EOF` line and the
+    // executed `cat ../../agent-other/x` after it is scanned, not swallowed.
+    const d = rc("cat <<E'O'F\nx\nEOF\ncat ../../agent-other/repo/.env");
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("shell metacharacters");
+  });
+
   test("backslash-in-.. token (cat ..\\/..\\/victim) is denied as shell-noise", () => {
     // A `..` token containing a backslash can't be resolved safely (the shell
     // would unescape \/ to /), so it is denied outright.

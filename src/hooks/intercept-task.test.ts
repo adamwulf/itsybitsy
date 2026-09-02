@@ -931,6 +931,45 @@ describe("coordinator Bash restrictions", () => {
     }
   });
 
+  // Round-5 fix 1: the delimiter word is quote-removed as a WHOLE, so a
+  // multi-part delimiter (`E'O'F` = EOF) must terminate the body at `EOF` —
+  // otherwise the executed commands after it were swallowed as body and slipped
+  // past the coordinator gate.
+  test("blocks a multi-part-delimiter heredoc that hides `;` and `|` after the real terminator", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "cat <<E'O'F\nx\nEOF\necho ONE ; echo TWO | tr a-z A-Z",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("allows a multi-part-delimiter heredoc whose body is clean and terminates at EOF", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: {
+          command: "ib send agent-abcd1234 <<'E'OF\nplain body with ; and |\nEOF",
+        },
+        cwd: coordCwd,
+      });
+      expect(result.action).toBe("skip");
+    } finally {
+      await cleanup();
+    }
+  });
+
   test("allows literal newlines inside single quotes", async () => {
     await setupCoordinatorDir();
     try {

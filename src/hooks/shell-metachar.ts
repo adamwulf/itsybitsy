@@ -8,6 +8,83 @@
  */
 
 /**
+ * Result of parsing a heredoc delimiter WORD (everything from the first
+ * non-space char after `<<`/`<<-` up to the next unquoted terminator).
+ */
+export type HeredocDelimiterParse =
+  | {
+      /** A real heredoc delimiter. */
+      kind: "delim";
+      /** The quote-removed delimiter (e.g. `E'O'F` → `EOF`). */
+      delimiter: string;
+      /** false when ANY part of the word was quoted or backslash-escaped. */
+      expand: boolean;
+      /** Index just past the delimiter word. */
+      end: number;
+    }
+  /** Not a heredoc: `<<<` here-string, `<<` at a terminator/EOF (empty word),
+   * or an unterminated quote inside the word. Callers treat this as `< redirect`. */
+  | { kind: "redirect" };
+
+/**
+ * Parse a heredoc delimiter WORD starting at `start`. The shell quote-removes
+ * the WHOLE word — `<<E'O'F`, `<<'E'OF`, and `<<E\OF` all mean delimiter `EOF`
+ * — so we read every adjacent part (bare chars, `'…'`, `"…"` with backslash
+ * handling, and `\<char>` escapes) until an UNQUOTED terminator (whitespace,
+ * `;`, `|`, `&`, `<`, `>`, or end of input) and concatenate them. Expansion is
+ * off if any part was quoted or backslash-escaped. A previous version read only
+ * the first part, so the body ran past the shell's real terminator and the
+ * commands the shell actually executes were swallowed as body — bypassing the
+ * single-command rule, path isolation, and the ib-relationship check at once.
+ */
+export function parseHeredocDelimiterWord(command: string, start: number): HeredocDelimiterParse {
+  const n = command.length;
+  let k = start;
+  let delim = "";
+  let expand = true;
+  while (k < n) {
+    const ch = command[k]!;
+    // Unquoted terminators end the word.
+    if (
+      ch === " " || ch === "\t" || ch === "\n" || ch === "\r" ||
+      ch === ";" || ch === "|" || ch === "&" || ch === "<" || ch === ">"
+    ) {
+      break;
+    }
+    if (ch === "'") {
+      const end = command.indexOf("'", k + 1);
+      if (end === -1) return { kind: "redirect" }; // unterminated quote
+      delim += command.substring(k + 1, end);
+      expand = false;
+      k = end + 1;
+      continue;
+    }
+    if (ch === '"') {
+      let m = k + 1;
+      let buf = "";
+      while (m < n && command[m] !== '"') {
+        if (command[m] === "\\" && m + 1 < n) { buf += command[m + 1]; m += 2; }
+        else { buf += command[m]; m++; }
+      }
+      if (m >= n) return { kind: "redirect" }; // unterminated quote
+      delim += buf;
+      expand = false;
+      k = m + 1;
+      continue;
+    }
+    if (ch === "\\") {
+      if (k + 1 < n) { delim += command[k + 1]; expand = false; k += 2; continue; }
+      break; // trailing backslash — end of word
+    }
+    delim += ch;
+    k++;
+  }
+  // Empty word: `<<<word` here-string, `<<` at EOF/terminator — not a heredoc.
+  if (delim === "") return { kind: "redirect" };
+  return { kind: "delim", delimiter: delim, expand, end: k };
+}
+
+/**
  * Walk `command` and return a description of the first shell-active
  * metacharacter found, or null if it is safe to allow as a single command
  * (SPEC §12.2.4). "Shell-active" depends on context: a `|` inside `'…'` is
@@ -159,56 +236,10 @@ export function findShellMetachar(command: string): string | null {
         }
         while (j < n && (command[j] === " " || command[j] === "\t")) j++;
 
-        // Bash heredoc delimiter forms: 'EOF', "EOF", \EOF, or bare EOF.
-        // The first three suppress $/` expansion in the body; bare does not.
-        let quoted = false;
-        let delim = "";
-        const dc = command[j];
-        if (dc === "'") {
-          quoted = true;
-          const end = command.indexOf("'", j + 1);
-          if (end === -1) return "< redirect";
-          delim = command.substring(j + 1, end);
-          j = end + 1;
-        } else if (dc === '"') {
-          quoted = true;
-          let k = j + 1;
-          let buf = "";
-          while (k < n && command[k] !== '"') {
-            if (command[k] === "\\" && k + 1 < n) {
-              buf += command[k + 1];
-              k += 2;
-            } else {
-              buf += command[k];
-              k++;
-            }
-          }
-          if (k >= n) return "< redirect";
-          delim = buf;
-          j = k + 1;
-        } else if (dc === "\\") {
-          quoted = true;
-          let k = j + 1;
-          let buf = "";
-          while (k < n && /[A-Za-z0-9_]/.test(command[k]!)) {
-            buf += command[k];
-            k++;
-          }
-          delim = buf;
-          j = k;
-        } else {
-          let k = j;
-          let buf = "";
-          while (k < n && /[A-Za-z0-9_]/.test(command[k]!)) {
-            buf += command[k];
-            k++;
-          }
-          // Empty bare delim catches `<<<word` here-string and `<<` at
-          // end-of-input; both are redirects, not heredocs.
-          if (buf === "") return "< redirect";
-          delim = buf;
-          j = k;
-        }
+        // Parse the FULL delimiter word (shell quote-removes the whole word).
+        const parsed = parseHeredocDelimiterWord(command, j);
+        if (parsed.kind === "redirect") return "< redirect";
+        j = parsed.end;
 
         // Defense-in-depth: scan the opener tail (anything between the
         // delimiter and the next newline) for hazards like ` | tee log`
@@ -225,7 +256,7 @@ export function findShellMetachar(command: string): string | null {
         // but inert.
         if (nl === -1) return null;
 
-        heredoc = { delimiter: delim, expand: !quoted, dash };
+        heredoc = { delimiter: parsed.delimiter, expand: parsed.expand, dash };
         i = nl + 1;
         continue;
       }
@@ -251,8 +282,9 @@ export function findShellMetachar(command: string): string | null {
  * legitimately contain `..` and apostrophes. The opener line and any lines
  * after the terminator are NOT part of any range and stay scanned.
  *
- * This shares the opener/delimiter parsing shape with `findShellMetachar` but is
- * a separate walker so that function stays byte-identical.
+ * Shares the delimiter parser (`parseHeredocDelimiterWord`) with
+ * `findShellMetachar` so both agree on where a heredoc body ends; the walk
+ * itself is separate because the two functions collect different things.
  */
 export function heredocBodyRanges(command: string): Array<{ start: number; end: number }> {
   const ranges: Array<{ start: number; end: number }> = [];
@@ -310,42 +342,14 @@ export function heredocBodyRanges(command: string): Array<{ start: number; end: 
       if (command[j] === "-") { dash = true; j++; }
       while (j < n && (command[j] === " " || command[j] === "\t")) j++;
 
-      let delim = "";
-      const dc = command[j];
-      if (dc === "'") {
-        const end = command.indexOf("'", j + 1);
-        if (end === -1) { i = i + 1; continue; }
-        delim = command.substring(j + 1, end);
-        j = end + 1;
-      } else if (dc === '"') {
-        let k = j + 1;
-        let buf = "";
-        while (k < n && command[k] !== '"') {
-          if (command[k] === "\\" && k + 1 < n) { buf += command[k + 1]; k += 2; }
-          else { buf += command[k]; k++; }
-        }
-        if (k >= n) { i = i + 1; continue; }
-        delim = buf;
-        j = k + 1;
-      } else if (dc === "\\") {
-        let k = j + 1;
-        let buf = "";
-        while (k < n && /[A-Za-z0-9_]/.test(command[k]!)) { buf += command[k]; k++; }
-        delim = buf;
-        j = k;
-      } else {
-        let k = j;
-        let buf = "";
-        while (k < n && /[A-Za-z0-9_]/.test(command[k]!)) { buf += command[k]; k++; }
-        // `<<<word` here-string or `<<` at end-of-input — not a heredoc.
-        if (buf === "") { i = i + 1; continue; }
-        delim = buf;
-        j = k;
-      }
+      // Parse the FULL delimiter word (shared with findShellMetachar).
+      const parsed = parseHeredocDelimiterWord(command, j);
+      if (parsed.kind === "redirect") { i = i + 1; continue; } // not a heredoc
+      j = parsed.end;
 
       const nl = command.indexOf("\n", j);
       if (nl === -1) { i = i + 1; continue; } // no body
-      heredoc = { delimiter: delim, dash, bodyStart: nl + 1 };
+      heredoc = { delimiter: parsed.delimiter, dash, bodyStart: nl + 1 };
       i = nl + 1;
       continue;
     }

@@ -5,7 +5,7 @@ import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { interpolateTemplate } from "./hooks/session-start";
-import { setHomeOverrideForTest, resetHomeOverride } from "./home";
+import { setUserHome, resetUserHome } from "./home";
 
 test("parseAgentTypeFile: parses frontmatter and body", () => {
   const content = `---
@@ -343,11 +343,11 @@ describe("initAgentTypes", () => {
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-init-types-"));
-    setHomeOverrideForTest(tempHome);
+    setUserHome(tempHome);
   });
 
   afterEach(async () => {
-    resetHomeOverride();
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -406,11 +406,11 @@ describe("ensureAgentTypesDir: system layer", () => {
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-system-layer-"));
-    setHomeOverrideForTest(tempHome);
+    setUserHome(tempHome);
   });
 
   afterEach(async () => {
-    resetHomeOverride();
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -487,13 +487,13 @@ describe("loadAgentType: inherits", () => {
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-inherits-"));
-    setHomeOverrideForTest(tempHome);
+    setUserHome(tempHome);
     typesDir = join(tempHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
   });
 
   afterEach(async () => {
-    resetHomeOverride();
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -1013,13 +1013,13 @@ describe("validateAllAgentTypes: inherits + repos", () => {
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-validate-"));
-    setHomeOverrideForTest(tempHome);
+    setUserHome(tempHome);
     typesDir = join(tempHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
   });
 
   afterEach(async () => {
-    resetHomeOverride();
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -1213,13 +1213,13 @@ describe("loadAgentType: repos field", () => {
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-repos-load-"));
-    setHomeOverrideForTest(tempHome);
+    setUserHome(tempHome);
     typesDir = join(tempHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
   });
 
   afterEach(async () => {
-    resetHomeOverride();
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -1287,13 +1287,13 @@ describe("buildAvailableTypesSection / listSpawnableAgentTypesSync", () => {
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-available-types-"));
-    setHomeOverrideForTest(tempHome);
+    setUserHome(tempHome);
     typesDir = join(tempHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
   });
 
   afterEach(async () => {
-    resetHomeOverride();
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -1469,7 +1469,7 @@ describe("metaCanSpawnChildren", () => {
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-canspawn-"));
-    setHomeOverrideForTest(tempHome);
+    setUserHome(tempHome);
     await mkdir(join(tempHome, ".itsybitsy"), { recursive: true });
     // Populate the embedded default types (worker, manager, coordinator, …) so
     // the agentType-driven cases resolve via loadAgentType.
@@ -1477,7 +1477,7 @@ describe("metaCanSpawnChildren", () => {
   });
 
   afterEach(async () => {
-    resetHomeOverride();
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 

@@ -13,7 +13,7 @@ import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxPollerSpawnCtx } from "../tmux-poller";
 import { IB_COORDINATOR_SESSION } from "../coordinator";
 import { setUserConfigPath, resetUserConfigPath } from "../config";
-import { setHomeOverrideForTest, resetHomeOverride } from "../home";
+import { setUserHome, resetUserHome } from "../home";
 import type { SpawnResult } from "../types";
 import { PANE_MODES } from "./pane-manager";
 import { computeSidebarHeights } from "./sidebar";
@@ -1030,10 +1030,10 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetMergeSpawnRunner();
     resetUserConfigPath();
     // Failure-safety net for the new-agent tests below, which override the home
-    // dir via setHomeOverrideForTest: if one throws before its inline
-    // resetHomeOverride(), clear the override here so it cannot bleed into a
+    // dir via setUserHome: if one throws before its inline
+    // resetUserHome(), clear the override here so it cannot bleed into a
     // later test's home resolution.
-    resetHomeOverride();
+    resetUserHome();
     const { resetCoordinatorHome } = await import("../coordinator");
     resetCoordinatorHome();
     if (actionTempDir) {
@@ -1749,7 +1749,7 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   // Relies on "worker" sorting immediately after "manager" in the default types list,
   // so a single Space press from the default focus advances the selection from manager to worker.
-  // Isolates the home directory (via setHomeOverrideForTest) so the cycle reads
+  // Isolates the home directory (via setUserHome) so the cycle reads
   // only the embedded layer files (developer-customized ~/.itsybitsy/agent-types/
   // would otherwise inject extra spawnable types between manager and worker).
   test("new-agent form: cycling from manager to worker creates agent with worker meta field", async () => {
@@ -1760,7 +1760,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "claude:sonnet" }));
 
     const tempHome = await mkdtemp(join(tmpdir(), "ib-na-home-"));
-    setHomeOverrideForTest(tempHome);
+    setUserHome(tempHome);
     // Populate the temp home with embedded defaults so listSpawnableTypeNamesSync
     // returns exactly [coordinator, manager, worker] (system / _all / _non_coordinator
     // are filtered out as spawnable: false).
@@ -1824,7 +1824,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetNewAgentSpawnRunner();
     lifecycleSpawnCtx.reset();
     resetUserConfigPath();
-    resetHomeOverride();
+    resetUserHome();
     await rm(newAgentTempDir, { recursive: true, force: true });
     await rm(tempHome, { recursive: true, force: true });
   });
@@ -1842,7 +1842,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     // possibly-stale ~/.itsybitsy/agent-types/_all.md and a bare-name `model:`
     // there would be rejected by parseModel (D1/D5).
     const tempHome = await mkdtemp(join(tmpdir(), "ib-na-home-"));
-    setHomeOverrideForTest(tempHome);
+    setUserHome(tempHome);
     await (await import("../agent-types")).ensureAgentTypesDir();
 
     const spawnCalls: string[] = [];
@@ -1897,7 +1897,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetNewAgentSpawnRunner();
     lifecycleSpawnCtx.reset();
     resetUserConfigPath();
-    resetHomeOverride();
+    resetUserHome();
     await rm(newAgentTempDir, { recursive: true, force: true });
     await rm(tempHome, { recursive: true, force: true });
   });
@@ -1930,7 +1930,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "claude:sonnet" }));
 
     const tempHome = await mkdtemp(join(tmpdir(), "ib-na-fail-home-"));
-    setHomeOverrideForTest(tempHome);
+    setUserHome(tempHome);
     await (await import("../agent-types")).ensureAgentTypesDir();
 
     // Mock spawn so the dirty-worktree gate fires: porcelain returns a dirty
@@ -1978,7 +1978,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetNewAgentSpawnRunner();
     lifecycleSpawnCtx.reset();
     resetUserConfigPath();
-    resetHomeOverride();
+    resetUserHome();
     await rm(newAgentTempDir, { recursive: true, force: true });
     await rm(tempHome, { recursive: true, force: true });
   });
@@ -5031,7 +5031,7 @@ describe("coordinator input field (Phase 49)", () => {
       const cfgDir = await mkdtemp(join(tmpdir(), "dash-restart-cfg-"));
       setUserConfigPath(join(cfgDir, "config.json"));
       setCoordinatorHome(coordHome);
-      setHomeOverrideForTest(typesHome);
+      setUserHome(typesHome);
       setCoordinatorSleepFn(async () => {});
 
       // coordinatorSpawnCtx / tmuxPollerSpawnCtx are SpawnContexts whose runner
@@ -5096,7 +5096,7 @@ describe("coordinator input field (Phase 49)", () => {
         resetCoordinatorSleepFn();
         resetUserConfigPath();
         resetSendSpawnRunner();
-        resetHomeOverride();
+        resetUserHome();
         await rm(coordHome, { recursive: true, force: true });
         await rm(typesHome, { recursive: true, force: true });
         await rm(cfgDir, { recursive: true, force: true });
@@ -5865,7 +5865,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
     let homeTmp: string;
     beforeEach(async () => {
       homeTmp = await mkdtemp(join(tmpdir(), "dash-roster-home-"));
-      setHomeOverrideForTest(homeTmp);
+      setUserHome(homeTmp);
       // Stub the send spawn runner. These tests plant REAL agent dirs so the
       // roster wrappers can resolve bare ids, which means teamAdd/teamRemove's
       // join/leave fan-out reaches the real delivery path and spawns real tmux
@@ -5878,7 +5878,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
     });
     afterEach(async () => {
       resetSendSpawnRunner();
-      resetHomeOverride();
+      resetUserHome();
       await rm(homeTmp, { recursive: true, force: true });
     });
 

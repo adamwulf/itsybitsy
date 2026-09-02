@@ -680,9 +680,19 @@ What it gives:
 
 1. **Uniform enforcement.** The kernel sees every process (git, bun,
    xcodebuild, MCP servers, sub-shells), for every CLI, whatever the spelling of
-   a path. The hook's Bash scanners (needles, traversal, settings-write guard,
-   `git -C` guard)[^8][^9][^35] become unnecessary when the sandbox is on; keep
-   them as advisory messages or delete them.
+   a path. The hook's Bash scanners[^8][^9][^35] lose only one role: fencing
+   paths **outside** the repo, which is the kernel's job. They keep their
+   structural role, because the kernel **grants** the three roots they
+   protect (`sandbox-safety` amendment, accepted): the settings-write guard
+   stays, because `<worktree>/.claude/settings.local.json` is inside the
+   worktree and the worktree is fully writable in the kernel; the `git -C` /
+   `--git-dir` / `--work-tree` guard stays, because the shared git common dir
+   is injected read-write as a boot root[^49], so
+   `git --git-dir=<repo>/.git update-ref refs/heads/main <sha>` passes the
+   kernel; the other-agents needles and the traversal scanner stay, because the
+   repo agents dir is read-injected for every agent and write-injected for
+   spawners (§6.11 item 7), so a manager writing another agent's `meta.json`
+   passes the kernel. This is §6.11 item 5, "structural denies stay in code".
 2. **A network fence too**, through the per-agent proxy on the sandbox
    branch[^29].
 3. **Hook failure stops being catastrophic.** Codex hooks fail open[^12], and
@@ -730,8 +740,11 @@ Conditions and costs, to state plainly:
 - **Baselines per toolchain.** The claude and codex boot floors are
   bisected[^29]; heavy toolchains (Xcode, simulators, Docker) are not, and each
   new one is a manual bisection because the kernel cannot audit[^56].
-  Mitigation: `sandbox.enabled` per type, so a type whose toolchain has no
-  floor yet opts out, and `rawAllow` for syscalls and mach services.
+  Mitigation: types opt in one at a time as each toolchain is verified, and
+  `rawAllow` covers syscalls and mach services. Note that a type cannot opt
+  **out** once a layer above it enables the sandbox: `sandbox.enabled` is
+  OR-merged across the chain, and a descendant may never switch off a sandbox
+  enabled by an ancestor[^58]. See the end state below.
 - **MCP servers under the profile are untested** (a backlog item on the
   sandbox branch).
 - **The tmux socket stays an accepted escape for spawning types** until
@@ -744,10 +757,23 @@ Conditions and costs, to state plainly:
 - **Codex's fail-open hook contract** must be re-judged once its prompts are
   gone; a pilot item.
 
-End state: `sandbox.enabled: true` becomes the `_all.md` default after the floor
-and the spawn-keyed roots land, with per-type opt-out. The `paths:` block is the
-one place path control is defined. The kernel enforces it; the hook explains it
-and keeps the tool and harness rules.
+End state, corrected after `sandbox-safety` flagged the merge rule: "true in
+`_all.md` with per-type opt-out" is not implementable, because a layer can only
+tighten[^58]. Three ways out, for Adam to choose; `sandbox-safety` recommends
+the first for the transition and the third for the end state, and I agree:
+
+- **(a) Transition:** `_all.md` keeps `enabled: false`; types opt in one by one
+  as each toolchain is verified.
+- **(b) Last-wins merge:** rejected by the sandbox spec, because it lets a leaf
+  switch off a floor.
+- **(c) End state:** `_all.md` sets `enabled: true`; a type that cannot yet be
+  fenced writes **explicit** wide allows (`allowRead: ["/"]` plus the write
+  roots Xcode needs) instead of disabling. That keeps the network proxy and
+  matches "fully open is explicit"[^48].
+
+The `paths:` block is the one place path control is defined. The kernel
+enforces it; the hook explains it and keeps the tool, structural, and harness
+rules.
 
 ---
 
@@ -844,3 +870,4 @@ and keeps the tool and harness rules.
 [^55]: [manager-only ib subcommand gate](src/hooks/agent-path.ts:checkIbCommandAccess)
 [^56]: [spike finding: the unified-log harvest does not surface sandbox-exec denials; use bisection — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:docs/SANDBOX-SPIKE-FINDINGS.md`](docs/SANDBOX-SPIKE-FINDINGS.md:26)
 [^57]: [registry atomic write: `teams.json.tmp` then rename; lock file `.teams.lock`](src/teams.ts:53-143)
+[^58]: [sandbox.enabled OR-merged across the chain; a descendant may never switch off a sandbox enabled by an ancestor — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:src/agent-types.ts`](src/agent-types.ts:462-506)

@@ -292,6 +292,20 @@ describe("paths normalization", () => {
       allowWrite: ["~/shared/*.txt"],
     }), "/Users/tester").allowRead).toEqual([]);
   });
+
+  test.each([
+    ["/tmp/shared/*.md", "/private/tmp/shared/*.md"],
+    ["~/shared/*.md", "/Users/tester/shared/*.md"],
+  ])("canonical glob spellings collapse from allowRead into allowWrite", (readEntry, writeEntry) => {
+    expect(normalizePathsConfig(paths({
+      allowRead: [readEntry],
+      allowWrite: [writeEntry],
+    }), "/Users/tester")).toEqual({
+      allowRead: [],
+      allowWrite: [writeEntry],
+      deny: [],
+    });
+  });
 });
 
 describe("sandbox path canonicalization", () => {
@@ -428,5 +442,19 @@ describe("paths frontmatter validation", () => {
       allowRead: ["~/Documents/**/*.pdf"],
       allowWrite: ["~/Documents/**/*.pdf"],
     }).errors).toEqual([]);
+  });
+
+  test("allows /tmp and /private/tmp spellings of the same canonical glob tie", () => {
+    expect(validatePathsFrontmatter({
+      allowRead: ["/tmp/itsybitsy/*.md"],
+      allowWrite: ["/private/tmp/itsybitsy/*.md"],
+    }).errors).toEqual([]);
+  });
+
+  test("allows home and absolute spellings of the same canonical glob tie", () => {
+    expect(validatePathsFrontmatter({
+      allowRead: ["~/Documents/*.md"],
+      allowWrite: ["/Users/tester/Documents/*.md"],
+    }, "/Users/tester").errors).toEqual([]);
   });
 });

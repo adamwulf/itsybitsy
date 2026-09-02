@@ -491,8 +491,8 @@ export function validatePathsFrontmatter(
     const canonicalRead = canonicalizeGlobPrefix(expandHome(readEntry, resolvedHome));
     const readPrefix = canonicalRead.slice(0, canonicalRead.search(/[*?]/));
     for (const writeEntry of writeGlobs) {
-      if (readEntry === writeEntry) continue;
       const canonicalWrite = canonicalizeGlobPrefix(expandHome(writeEntry, resolvedHome));
+      if (canonicalRead === canonicalWrite) continue;
       const writePrefix = canonicalWrite.slice(0, canonicalWrite.search(/[*?]/));
       if (readPrefix === writePrefix) {
         errors.push(

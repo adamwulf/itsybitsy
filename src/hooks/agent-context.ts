@@ -14,6 +14,27 @@
 import { join } from "path";
 import { realpath } from "fs/promises";
 
+/**
+ * Resolve just the (canonicalized) agent directory from an agent id + cwd.
+ * Shared by the codex and agy state hooks (SessionStart / PreInvocation / Stop)
+ * which only need the agent dir, not the full worktree/root-repo context.
+ * Extracted verbatim from those handlers' identical local copies.
+ */
+export async function resolveAgentDir(
+  agentId: string,
+  cwd: string,
+  override?: string,
+): Promise<string> {
+  if (override) return override;
+  const m = cwd.match(/(.*\/\.ittybitty\/agents)/);
+  const agentsDir = m ? m[1]! : join(process.cwd(), ".ittybitty", "agents");
+  let dir = join(agentsDir, agentId);
+  try {
+    dir = await realpath(dir);
+  } catch { /* directory may not exist yet, or was removed mid-hook */ }
+  return dir;
+}
+
 export interface ResolvedAgentContext {
   agentDir: string;
   agentsDir: string;

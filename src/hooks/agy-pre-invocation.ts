@@ -14,28 +14,17 @@
  */
 
 import { join } from "path";
-import { realpath } from "fs/promises";
 import { isValidAgentId } from "../validation";
 import { writeAgentState } from "../agents";
 import { captureAgyConversationId } from "./agy-pre-tool-use";
 import { AGY_EMPTY_OUTPUT } from "./agy-tools";
+import { resolveAgentDir } from "./agent-context";
 
 /** The per-agent liveness marker filename touched on every PreInvocation. */
 export const AGY_HEARTBEAT_FILENAME = "agy-hook-heartbeat";
 
 function emitNoop(write: (chunk: string) => unknown = (c) => process.stdout.write(c)): void {
   write(AGY_EMPTY_OUTPUT);
-}
-
-async function resolveAgentDir(agentId: string, cwd: string, override?: string): Promise<string> {
-  if (override) return override;
-  const m = cwd.match(/(.*\/\.ittybitty\/agents)/);
-  const agentsDir = m ? m[1]! : join(process.cwd(), ".ittybitty", "agents");
-  let dir = join(agentsDir, agentId);
-  try {
-    dir = await realpath(dir);
-  } catch { /* directory may have just been created — fall through */ }
-  return dir;
 }
 
 export interface AgyPreInvocationDeps {

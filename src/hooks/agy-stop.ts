@@ -16,26 +16,15 @@
  */
 
 import { join } from "path";
-import { realpath } from "fs/promises";
 import { isValidAgentId } from "../validation";
 import { writeAgentState, type MetaState } from "../agents";
 import { logAgent } from "../agent-lifecycle";
 import { detectStateFromMessage } from "./agent-status";
 import { AGY_EMPTY_OUTPUT, buildAgyStopContinue } from "./agy-tools";
+import { resolveAgentDir } from "./agent-context";
 
 function emitNoop(write: (chunk: string) => unknown = (c) => process.stdout.write(c)): void {
   write(AGY_EMPTY_OUTPUT);
-}
-
-async function resolveAgentDir(agentId: string, cwd: string, override?: string): Promise<string> {
-  if (override) return override;
-  const m = cwd.match(/(.*\/\.ittybitty\/agents)/);
-  const agentsDir = m ? m[1]! : join(process.cwd(), ".ittybitty", "agents");
-  let dir = join(agentsDir, agentId);
-  try {
-    dir = await realpath(dir);
-  } catch { /* directory may have been removed (agent killed mid-stop) */ }
-  return dir;
 }
 
 /**

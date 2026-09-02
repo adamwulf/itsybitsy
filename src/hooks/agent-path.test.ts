@@ -1130,6 +1130,25 @@ describe("checkPathAccess — .agents/ boundary-file write protection", () => {
     const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
     expect(result.decision).toBe("allow");
   });
+
+  // ── `>|` force-clobber redirect (boundary review round 6 fix 2) ───────────
+
+  test.each([
+    [">| glued onto the settings file", "echo x >|.claude/settings.local.json", "cannot modify their own .claude/settings"],
+    [">| spaced onto the agy hooks file", "echo x >| .agents/hooks.json", "agy hook/rule files"],
+    ["1>| glued onto the settings file", "echo x 1>|.claude/settings.local.json", "cannot modify their own .claude/settings"],
+  ])("force-clobber redirect (%s) → deny", (_label, command, reasonPart) => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain(reasonPart);
+  });
+
+  test("force-clobber redirect to an unrelated file (>| build.log) → allow", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "echo x >| build.log" } }), ctx);
+    expect(result.decision).toBe("allow");
+  });
 });
 
 // ── parseIbCommand ───────────────────────────────────────────────────────────

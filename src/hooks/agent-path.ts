@@ -286,11 +286,12 @@ function checkBashSettingsWrite(
 
   const tokens = command.split(/\s+/);
 
-  // Redirect targets: an optional fd digit(s) or `&`, then `>` / `>>`, then
-  // either the following token (with a space) or a glued target — so `>`, `>>`,
-  // `1>`, `2>>`, `&>`, and `1>file` are all covered.
+  // Redirect targets: an optional fd digit(s) or `&`, then `>` / `>>`, then an
+  // optional `|` force-clobber, then either the following token (with a space)
+  // or a glued target — so `>`, `>>`, `1>`, `2>>`, `&>`, `>|`, and `1>|file` are
+  // all covered.
   for (let idx = 0; idx < tokens.length; idx++) {
-    const m = tokens[idx]!.match(/^(?:&|\d+)?(>>?)(.*)$/);
+    const m = tokens[idx]!.match(/^(?:&|\d+)?(>>?)\|?(.*)$/);
     if (!m) continue;
     const gluedTarget = m[2]!;
     if (gluedTarget) {

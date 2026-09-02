@@ -254,6 +254,36 @@ describe("checkAgyPreToolUse — run_command relative traversal", () => {
     );
     expect(d.decision).toBe("allow");
   });
+
+  // Glued-prefix traversal (boundary review round 3): --flag=, ${IFS}, ~.
+  test("git --output=../../sibling/file (glued flag) is denied", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: "git diff --output=../../agent-other/repo/file HEAD", Cwd: ctx.worktreePath } },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("other agents");
+  });
+
+  test("cat ${IFS}../../sibling/.env (IFS-glued) is denied", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: "cat ${IFS}../../agent-other/repo/.env", Cwd: ctx.worktreePath } },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("other agents");
+  });
+
+  test("glued flag with a non-escaping value (--output=./x) is allowed", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: "git diff --output=./out.txt HEAD", Cwd: ctx.worktreePath } },
+      ctx,
+    );
+    expect(d.decision).toBe("allow");
+  });
 });
 
 // ── agy boundary files are write-protected (boundary review B) ───────────────

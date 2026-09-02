@@ -434,6 +434,63 @@ describe("checkPathAccess", () => {
     expect(result.reason).toContain("other agents");
   });
 
+  // ── glued-prefix traversal (boundary review round 3) ──────────────────────
+
+  test("git --output=../../sibling/file (glued flag prefix) is denied", () => {
+    const ctx = makeCtx();
+    // path.resolve would treat `--output=..` as a directory name and normalize
+    // back into the worktree; the suffix-from-first-`..` form catches the escape.
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git diff --output=../../agent-other/repo/file HEAD" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("other agents");
+  });
+
+  test("${IFS}-glued traversal (cat ${IFS}../../sibling/.env) is denied", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat ${IFS}../../agent-other/repo/.env" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("other agents");
+  });
+
+  test("~-glued traversal that escapes (cat ~/../../sibling/.env) is denied", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat ~/../../agent-other/repo/.env" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("other agents");
+  });
+
+  test("glued flag with a non-escaping value (--output=./x) is allowed", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git diff --output=./out.txt HEAD" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("glued flag whose value normalizes back into the worktree (--flag=src/../lib) is allowed", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git diff --flag=src/../lib HEAD" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
   // ── git -C / --git-dir / --work-tree blocking ──────────────────────────────
 
   test("blocks git -C (bypasses path isolation)", () => {

@@ -319,16 +319,26 @@ function checkBashSettingsWrite(
  * `../..` resolves identically at the shell but has no absolute needle to match.
  *
  * Best-effort tokenization: split on whitespace and strip one layer of
- * surrounding quotes. A token is a traversal candidate only when `..` is a WHOLE
- * path segment (`token.split("/")` contains `".."`) — this deliberately excludes
- * git range syntax (`HEAD..main`, `a..b`), where `..` sits inside a single
- * segment. Each candidate is resolved against `cwd` and gated by the same two
- * rules the absolute needles use:
+ * surrounding quotes. A candidate form is a traversal risk only when `..` is a
+ * WHOLE path segment (`form.split("/")` contains `".."`) — this deliberately
+ * excludes git range syntax (`HEAD..main`, `a..b`), where `..` sits inside a
+ * single segment. Each candidate is resolved against `cwd` and gated by the same
+ * two rules the absolute needles use:
  *   - inside `agentsDir` but outside this agent's own `agentDir` → deny
  *   - inside `rootRepo` (the main checkout) but outside the worktree → deny
  * A path resolving to (or under) the agent's own `agentDir` — e.g. bare `..`
  * from the worktree — stays allowed, and anything resolving entirely outside the
  * repo is left to the same (permissive) treatment absolute references get.
+ *
+ * Glued prefixes: a token like `--output=../../x`, `${IFS}../../x`, or `~/../x`
+ * hides the real path from `path.resolve` (which treats `--output=..` as a
+ * directory NAME and normalizes it back INTO the worktree), while the shell
+ * hands the tool the real relative path. So for each token we test up to FOUR
+ * forms and deny if ANY escapes: the whole token; the suffix starting at the
+ * first `..` (drops any `--flag=` / `$VAR` / `${IFS}` / `~` glue); and, when the
+ * token contains `=`, the right-hand side of the first `=` plus its own
+ * suffix-from-first-`..`. Over-denial for contrived shapes like `a/b/../../..`
+ * (where a real subdir prefix is discarded) is accepted as the safe direction.
  */
 function checkRelativeTraversalPaths(
   command: string,
@@ -336,32 +346,17 @@ function checkRelativeTraversalPaths(
   ctx: PathCheckContext
 ): HookDecision | null {
   const { agentDir, agentsDir, worktreePath, rootRepo } = ctx;
-  for (let token of command.split(/\s+/)) {
-    if (!token) continue;
-    // Strip surrounding shell punctuation (quotes, `;`, `,`, `(`, `)`) that
-    // glues onto a token, then unescape backslash sequences (`\/` → `/`,
-    // `\ ` → space). This is what the shell does before the path is used, so
-    // escaped/glued forms like `..\/..\/x` (backslash-escaped slashes) and
-    // `..;` (a `;`-glued token) are seen here as `../../x` and `..` rather than
-    // slipping past the `..`-segment test below.
-    token = token.replace(/^['";,()]+/, "").replace(/['";,()]+$/, "");
-    token = token.replace(/\\(.)/g, "$1");
-    // Absolute paths are handled by the needle scans; skip them here.
-    if (!token || token.startsWith("/")) continue;
-    // Only tokens where `..` is a whole path segment (excludes `HEAD..main`).
-    if (!token.split("/").includes("..")) continue;
 
-    const resolved = resolve(cwd, token);
-
+  // Return a deny decision when `resolved` escapes into another agent's dir or
+  // the main checkout; null when it is the agent's own dir or outside the repo.
+  const escapeDenial = (resolved: string): HookDecision | null => {
     // The agent's own directory (and anything under it) is allowed — bare `..`
     // from the worktree lands on agentDir, mirroring an absolute self-reference.
-    if (resolved === agentDir || resolved.startsWith(agentDir + "/")) continue;
-
+    if (resolved === agentDir || resolved.startsWith(agentDir + "/")) return null;
     // Inside another agent's directory (under agentsDir, not our own) → deny.
     if (agentsDir && resolved.startsWith(agentsDir + "/")) {
       return { decision: "deny", reason: "Access denied: bash command references other agents' directory" };
     }
-
     // Inside the main checkout but outside the worktree → deny.
     if (
       rootRepo &&
@@ -371,6 +366,38 @@ function checkRelativeTraversalPaths(
       !resolved.startsWith(worktreePath + "/")
     ) {
       return { decision: "deny", reason: "Access denied: bash command references main repo" };
+    }
+    return null;
+  };
+
+  for (let token of command.split(/\s+/)) {
+    if (!token) continue;
+    // Strip surrounding shell punctuation (quotes, `;`, `,`, `(`, `)`) that
+    // glues onto a token, then unescape backslash sequences (`\/` → `/`,
+    // `\ ` → space). This is what the shell does before the path is used, so
+    // escaped/glued forms like `..\/..\/x` and `..;` are seen as `../../x`/`..`.
+    token = token.replace(/^['";,()]+/, "").replace(/['";,()]+$/, "");
+    token = token.replace(/\\(.)/g, "$1");
+    if (!token) continue;
+
+    // Collect the candidate relative-path forms (see the doc comment).
+    const candidates = new Set<string>();
+    const addForms = (s: string) => {
+      if (s) candidates.add(s);
+      const idx = s.indexOf("..");
+      if (idx > 0) candidates.add(s.slice(idx)); // suffix dropping a glued prefix
+    };
+    addForms(token);
+    const eq = token.indexOf("=");
+    if (eq !== -1) addForms(token.slice(eq + 1)); // RHS of `--flag=<path>`
+
+    for (const cand of candidates) {
+      // Absolute paths are handled by the needle scans; skip them here.
+      if (cand.startsWith("/")) continue;
+      // Only forms where `..` is a whole path segment (excludes `HEAD..main`).
+      if (!cand.split("/").includes("..")) continue;
+      const denial = escapeDenial(resolve(cwd, cand));
+      if (denial) return denial;
     }
   }
   return null;

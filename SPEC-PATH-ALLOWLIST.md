@@ -493,8 +493,27 @@ kernel's effective `allowRead ∪ allowWrite` from the meta sandbox block, not a
 second hard-coded system list. Then the hook never denies what the kernel allows
 or the reverse, and `_all.md` does not need to repeat the system read floor
 under `allowedPaths`. When the sandbox is disabled, the scan falls back to
-`allowedPaths` plus the `_all.md` `sandbox.allowRead` list. The kernel's deny
-carve-outs have no hook counterpart; that is fine, the kernel wins.
+`allowedPaths` plus the `_all.md` `sandbox.allowRead` list.
+
+**Caveat accepted from `sandbox-safety`: the hook must also apply the kernel
+deny list, and before step 7.** SPEC-SANDBOX §4A.4 works the example
+`deny: ["**/.env"]`: the kernel returns EPERM for `<worktree>/.env`, but a deny
+evaluated after the worktree allow at step 7 never fires, so the hook would say
+"allowed" for a path the kernel refuses[^47]. Three consequences for the hook:
+
+1. Read the sandbox `deny` list from the meta sandbox block and evaluate it
+   before step 7, next to the existing protected-file check at step 6[^6].
+2. The kernel lists contain globs, so the hook needs `globToSandboxRegex` from
+   `src/sandbox.ts`, which is exported[^46], instead of the prefix match in
+   `isInAllowedPaths`[^6].
+3. Read the effective lists from `meta.json`, frozen at spawn, never from the
+   `.md` files, or a resumed agent gets a hook that disagrees with its own
+   profile.
+
+It also confirmed the scratchpad shape from a second live session and noted
+that the kernel already reaches it today, because `_all.md` grants
+`/private/tmp` for reading and writing[^43]; the tmux deny of amendment 3 is a
+subpath deny under it, so the scratchpad stays reachable.
 
 **Agreed landing order.** This branch first: §6.2 resolution, §6.3 union, §6.4
 scratchpad, §6.5 codex context. Then `agent/sandbox-safety`: the
@@ -581,3 +600,5 @@ has no kernel layer.
 [^43]: [sandbox baseline: allowRead lists "/" (line 13) and "~" (line 31); allowWrite lists "/private/tmp" (line 38) — file version on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:docs/agent-types/_all.md`](docs/agent-types/_all.md:12-40)
 [^44]: [project-dir encoding: replace `/` and `.` with `-`](src/auto-compact.ts:encodeClaudeProjectPath)
 [^45]: [own Claude project dir helper](src/hooks/agent-path.ts:claudeProjectDirFor)
+[^46]: [exported glob compiler — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:src/sandbox.ts`](src/sandbox.ts:globToSandboxRegex)
+[^47]: [SPEC-SANDBOX §4A.4 worked example: deny all .env, even inside the worktree — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:SPEC-SANDBOX.md`](SPEC-SANDBOX.md:418-435)

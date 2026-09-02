@@ -798,23 +798,39 @@ them:
    `allowRead` and `allowWrite` from all layers plus the runtime roots, that is
    P or an ancestor of P. Most specific means the longest canonical path. Its
    list decides: `allowWrite` gives read and write; `allowRead` gives read only.
-3. If the same canonical path is in both lists, the intent is ambiguous.
-   Recommendation, now shared by `sandbox-safety`: a **validation error** at
-   spawn, fail-closed, the same stance the sandbox spec takes for bare
-   names[^32]. If Adam prefers a soft default, read-only wins, because a layer
-   may only tighten, with a warning. (I first proposed "write wins";
-   withdrawn.) Adam picks.
+3. If the same canonical path is in both lists, **writing is allowed**. Adam
+   decided this on 2026-09-02 at 16:19. Listing a path twice is redundant, not
+   a restriction. (Both agents had recommended a validation error; overruled.)
 4. No match means deny.
+
+**Order never matters; only specificity does.** Adam asked this directly on
+2026-09-02 and the answer is yes. The order in which an author lists entries
+in a `.md` file, the order of the lists, and the order of the layers have no
+effect. The merged set is sorted by the specificity key before anything is
+emitted or evaluated, so the profile order is derived, never authored, and the
+kernel's last-match rule is an internal mechanism the author never sees.
+Within one list, order cannot matter at all, because every entry grants the
+same access. Where two entries have the **same** key and different access, the
+tie is broken by a fixed rule, not by position. For the same canonical path in
+both lists, rule 3 applies: **write wins**, and the generator emits the
+read-only entry before the write entry so the allow-write is the last match.
+For two **different** globs that share a literal prefix and sit in different
+lists, prefix depth cannot separate them and "the same path" does not apply;
+v1 treats that as a **validation error** at spawn, fail-closed like the
+bare-name rule[^32], with `deny` as the tool for carve-outs. A later version
+can add a secondary key for glob specificity. The oracle tests feed every
+fixture in shuffled order and must get the same answer.
 
 **Specificity key**, pinned with `sandbox-safety`: for a plain entry, the
 segment count of its canonical path. For a glob, the literal prefix before the
-first metacharacter; a glob and a plain entry with the same prefix tie, and the
-glob sorts later because it matches fewer paths. Two globs with the same prefix
-keep list order, which the tests must pin. A glob's rules affect only the paths
-it matches; it never changes the decision for a path it does not match. The
-deny list is absolute and outside this ordering. So
-`allowWrite: ~/Documents` plus `allowRead: ~/Documents/**/*.pdf` makes the PDFs
-read-only and everything else under Documents writable.
+first metacharacter; a glob and a plain entry with the same prefix tie on the
+key, and the glob sorts later because it matches fewer paths. Two different
+globs with the same prefix and different access are a validation error in v1,
+as stated above, never a list-order question. A glob's rules affect only the paths it matches; it
+never changes the decision for a path it does not match. The deny list is
+absolute and outside this ordering. So `allowWrite: ~/Documents` plus
+`allowRead: ~/Documents/**/*.pdf` makes the PDFs read-only and everything else
+under Documents writable.
 
 **Kernel.** Seatbelt decides by the **last matching rule**[^59], and the
 generator already relies on this by emitting config denies last[^52]. So the
@@ -868,8 +884,9 @@ drift. Rows:
   denied in the parent, read allowed everywhere under the root;
 - three levels alternating write, read, write: the innermost wins at each
   level;
-- the same path in both lists: the chosen rule (validation error, or
-  read-only wins with a warning);
+- the same path in both lists: write wins (decided), in every list order;
+- two different globs with one prefix in different lists: validation error at
+  spawn;
 - a read-only ancestor of a runtime root (`allowRead: ~/Developer`): the
   worktree, agent dir, git dir, scratchpad, and project dir stay writable;
 - today's `_all.md` verbatim, `allowRead: "~"` plus its write roots: every
@@ -885,9 +902,10 @@ drift. Rows:
 - canonicalization: `/tmp/x` against `/private/tmp/x`, trailing slashes, `~`
   expansion, with specificity computed on canonical forms;
 - the prefix trap: `~/Documents` must not match `~/Documents2`;
-- a glob in `allowRead` under a write root (`~/Documents/**/*.pdf`): matched
-  files read-only, unmatched files writable; two globs with one prefix keep
-  list order;
+- a glob in `allowRead` under a plain write root (`~/Documents/**/*.pdf`):
+  matched files read-only, unmatched files writable, whatever the list order;
+- order independence: every fixture is also run with its entries, lists, and
+  layers shuffled, and must give the same answer and the same emitted profile;
 - profile-order test: emitted rules are sorted by the specificity key, every
   read-only entry carries its write-deny, config denies come last;
 - a property test over random nested entry sets: hook, simulator, and a

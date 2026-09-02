@@ -132,6 +132,22 @@ describe("checkAgyPreToolUse — path isolation", () => {
     expect(d.decision).toBe("deny");
     expect(d.reason).toContain("path argument missing");
   });
+
+  test("multi_replace_file_content (MultiEdit) on .claude/settings.local.json is denied (self-escalation)", () => {
+    // Boundary review fix 3: MultiEdit is now in WRITE_TOOLS, so agy's
+    // multi_replace_file_content cannot rewrite the settings file that
+    // loadAgyEffectivePermissions reads.
+    const ctx = makeCtx({ allowList: [...makeCtx().allowList, "MultiEdit"] });
+    const d = checkAgyPreToolUse(
+      {
+        toolName: "multi_replace_file_content",
+        toolArgs: { TargetFile: `${ctx.worktreePath}/.claude/settings.local.json` },
+      },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("cannot modify their own .claude/settings");
+  });
 });
 
 // ── run_command Cwd is model-controlled and must be isolated (manager fix 1) ─

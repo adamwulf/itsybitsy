@@ -109,9 +109,11 @@ export function isInAllowedPaths(filePath: string, allowedPaths: string[]): bool
 
 /**
  * Tool names that mutate files. Used to gate the settings*.json write block —
- * Read/Glob/Grep/LS on settings.json must still be allowed.
+ * Read/Glob/Grep/LS on settings.json must still be allowed. MultiEdit is
+ * included so an agent (claude directly, or agy via multi_replace_file_content)
+ * cannot rewrite its own .claude/settings.local.json to self-escalate.
  */
-const WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit"]);
+const WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit", "MultiEdit"]);
 
 /**
  * Check if an absolute, normalized path points directly to a settings*.json

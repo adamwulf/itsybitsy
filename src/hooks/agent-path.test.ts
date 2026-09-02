@@ -655,6 +655,20 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
     expect(result.reason).toContain("cannot modify their own .claude/settings");
   });
 
+  test("MultiEdit on .claude/settings.local.json → DENIED (boundary review fix 3)", () => {
+    // MultiEdit was missing from WRITE_TOOLS, so an agent could self-escalate by
+    // rewriting its own settings.local.json (which loadAgyEffectivePermissions
+    // reads). Now gated like Write/Edit/NotebookEdit.
+    const ctx = makeCtx({ allowList: ["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "Bash"] });
+    const input = makeInput({
+      toolName: "MultiEdit",
+      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.local.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot modify their own .claude/settings");
+  });
+
   test("Write on .claude/other.json → ALLOWED (not a settings*.json)", () => {
     const ctx = makeCtx();
     const input = makeInput({

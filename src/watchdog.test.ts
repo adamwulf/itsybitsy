@@ -3684,9 +3684,6 @@ describe("runPerAgentWatchdog — meta.transient.json persistence", () => {
         claude_pid: "999",
         sandbox: {
           enabled: true,
-          allowRead: [],
-          allowWrite: [],
-          deny: [],
           rawAllow: [],
           domains: ["api.anthropic.com"],
         },
@@ -3728,9 +3725,6 @@ describe("runPerAgentWatchdog — meta.transient.json persistence", () => {
         claude_pid: "",
         sandbox: {
           enabled: true,
-          allowRead: [],
-          allowWrite: [],
-          deny: [],
           rawAllow: [],
           domains: ["api.anthropic.com"],
         },

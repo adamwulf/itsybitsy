@@ -104,8 +104,11 @@ import { timed } from "./perf";
 import { WATCHDOG_SENTINEL } from "./watchdog";
 import {
   generateProfile,
+  canonicalizePathsConfig,
+  resolvePathsConfig,
   resolveSandboxConfig,
   sandboxProfileParameterValues,
+  type PathsConfig,
   type SandboxConfig,
   type SandboxProfileParams,
 } from "./sandbox";
@@ -988,6 +991,7 @@ interface SandboxCommandRunner {
 
 interface PreparedSandbox {
   config: SandboxConfig;
+  paths: PathsConfig;
   profile: string;
   profilePath: string;
   domainsPath: string;
@@ -995,22 +999,25 @@ interface PreparedSandbox {
   proxyPort: number;
 }
 
-function mergeSandboxLayerConfigs(
+export function mergeSandboxLayerConfigs(
   layers: Array<AgentType | undefined>,
-  allowedPaths?: string[],
-): SandboxConfig {
+): { sandbox: SandboxConfig; paths: PathsConfig } {
   const configs = layers.map((layer) => layer?.sandbox).filter((value): value is SandboxConfig => value !== undefined);
-  if (configs.length === 0) return resolveSandboxConfig({ allowedPaths });
-  return resolveSandboxConfig({
-    sandbox: {
-      enabled: configs.some((config) => config.enabled),
-      allowRead: [...new Set(configs.flatMap((config) => config.allowRead))],
-      allowWrite: [...new Set(configs.flatMap((config) => config.allowWrite))],
-      deny: [...new Set(configs.flatMap((config) => config.deny))],
-      rawAllow: [...new Set(configs.flatMap((config) => config.rawAllow))],
-      domains: [...new Set(configs.flatMap((config) => config.domains))],
-    },
-  });
+  const paths = layers.map((layer) => layer?.paths).filter((value): value is PathsConfig => value !== undefined);
+  return {
+    sandbox: resolveSandboxConfig({
+      sandbox: configs.length > 0 ? {
+        enabled: configs.some((config) => config.enabled),
+        rawAllow: [...new Set(configs.flatMap((config) => config.rawAllow))],
+        domains: [...new Set(configs.flatMap((config) => config.domains))],
+      } : undefined,
+    }),
+    paths: resolvePathsConfig({
+      allowRead: [...new Set(paths.flatMap((config) => config.allowRead))],
+      allowWrite: [...new Set(paths.flatMap((config) => config.allowWrite))],
+      deny: [...new Set(paths.flatMap((config) => config.deny))],
+    }),
+  };
 }
 
 function sandboxDefinitionArgs(parameterValues: Record<string, string>): string[] {
@@ -1062,6 +1069,7 @@ export NO_PROXY="$no_proxy"
 async function prepareSandbox(
   runner: SandboxCommandRunner,
   config: SandboxConfig,
+  paths: PathsConfig,
   agentDir: string,
   workPath: string,
   repoPath: string,
@@ -1092,8 +1100,8 @@ async function prepareSandbox(
     REPOAGENTS: join(repoPath, ".ittybitty", "agents"),
     HOME: homedir(),
   };
-  const profile = generateProfile(config, params);
-  const parameterValues = sandboxProfileParameterValues(config, params);
+  const profile = generateProfile(config, paths, params);
+  const parameterValues = sandboxProfileParameterValues(paths, params);
   const profilePath = join(agentDir, "sandbox.sb");
   const domainsPath = join(agentDir, "sandbox-domains.txt");
   await Bun.write(profilePath, profile);
@@ -1118,7 +1126,7 @@ async function prepareSandbox(
     throw new Error(`sandbox refused: sandbox.sb failed to compile: ${detail}`);
   }
 
-  return { config, profile, profilePath, domainsPath, parameterValues, proxyPort };
+  return { config, paths, profile, profilePath, domainsPath, parameterValues, proxyPort };
 }
 
 async function stopSandboxProxyForAgent(agentDir: string, meta: AgentMeta): Promise<void> {
@@ -1532,15 +1540,18 @@ export async function resumeAgent(
       await stopSandboxProxyForAgent(agentDir, agent.meta);
       try {
         const frozenConfig = resolveSandboxConfig({ sandbox: agent.meta.sandbox });
+        const frozenPaths = resolvePathsConfig(agent.meta.paths);
         preparedResumeSandbox = await prepareSandbox(
           nukeResumeSpawnCtx,
           frozenConfig,
+          frozenPaths,
           agentDir,
           workPath,
           agent.repoPath,
         );
         await mutateAgentMeta(agentDir, (meta) => {
           meta.sandbox = frozenConfig;
+          meta.paths = frozenPaths;
           meta.sandbox_proxy_port = preparedResumeSandbox!.proxyPort;
           delete meta.sandbox_proxy_pid;
         });
@@ -4857,10 +4868,23 @@ export async function newAgent(
   const typeDeny = agentTypeDef.permissions?.deny ?? [];
   const configAllow = [...new Set([...allLayerAllow, ...nonCoordAllow, ...typeAllow])];
   const configDeny = [...new Set([...allLayerDeny, ...nonCoordDeny, ...typeDeny])];
-  const resolvedSandboxConfig = mergeSandboxLayerConfigs(
-    [allLayer, nonCoordLayer, agentTypeDef],
-    agentTypeDef.allowedPaths,
-  );
+  const mergedSandboxLayers = mergeSandboxLayerConfigs([
+    allLayer,
+    nonCoordLayer,
+    agentTypeDef,
+  ]);
+  const resolvedSandboxConfig = mergedSandboxLayers.sandbox;
+  let resolvedPathsConfig: PathsConfig;
+  try {
+    resolvedPathsConfig = canonicalizePathsConfig(mergedSandboxLayers.paths, homedir());
+  } catch (err) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
   // 7. Max agents check — coordinators bypass this (SPEC §12.4.3)
   if (!coordinatorMode) {
     const maxAgents = (config.maxAgents?.value as number | undefined) ?? 10;
@@ -5057,6 +5081,7 @@ export async function newAgent(
     model: model || null,
     effort: effort || null,
     sandbox: resolvedSandboxConfig,
+    paths: resolvedPathsConfig,
     spawned_by: spawnedBy ?? null,
     state: "creating",
     state_updated_at: Math.floor(createdAt.getTime() / 1000),
@@ -5497,6 +5522,7 @@ export async function newAgent(
       preparedSandbox = await prepareSandbox(
         newAgentSpawnCtx,
         resolvedSandboxConfig,
+        resolvedPathsConfig,
         agentDir,
         workPath,
         rootRepoPath,

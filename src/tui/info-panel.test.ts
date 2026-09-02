@@ -110,9 +110,6 @@ describe("InfoPanelComponent", () => {
       if (enabled !== undefined) {
         agent.meta.sandbox = {
           enabled,
-          allowRead: [],
-          allowWrite: [],
-          deny: [],
           rawAllow: [],
           domains: [],
         };

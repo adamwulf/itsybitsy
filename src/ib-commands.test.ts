@@ -83,6 +83,7 @@ import {
   setSandboxPortAllocatorForTesting,
   setSandboxPortCheckForTesting,
   resetSandboxWiringForTesting,
+  mergeSandboxLayerConfigs,
   teamAdd,
   writeMetaJsonAtomic,
 } from "./ib-commands";
@@ -94,6 +95,7 @@ import {
 import { setUserConfigPath, resetUserConfigPath } from "./config";
 import type { AgentState } from "./parse-state";
 import type { SpawnFn, SpawnResult } from "./types";
+import { canonicalizeSandboxPath } from "./sandbox";
 
 // The "retire → rehire recovery" describes drive real `git` subprocesses — a
 // dozen call sites through the local git() helper, plus every git command
@@ -4304,18 +4306,22 @@ describe("newAgent (native)", () => {
 
   async function writeSandboxType(
     name = "sandboxed",
-    options?: { enabled?: boolean; model?: string },
+    options?: { enabled?: boolean; model?: string; allowRead?: string[]; allowWrite?: string[]; deny?: string[] },
   ) {
     const path = join(process.env.HOME!, ".itsybitsy", "agent-types", `${name}.md`);
+    const allowRead = JSON.stringify(options?.allowRead ?? [tempDir]);
+    const allowWrite = JSON.stringify(options?.allowWrite ?? [tempDir]);
+    const deny = JSON.stringify(options?.deny ?? ["**/.env"]);
     await Bun.write(path, `---
 name: ${name}
 description: Sandbox wiring test
 model: ${options?.model ?? "claude:sonnet"}
+paths:
+  allowRead: ${allowRead}
+  allowWrite: ${allowWrite}
+  deny: ${deny}
 sandbox:
   enabled: ${options?.enabled ?? true}
-  allowRead: [${JSON.stringify(tempDir)}]
-  allowWrite: [${JSON.stringify(tempDir)}]
-  deny: ["**/.env"]
   rawAllow: ["(allow process*)"]
   domains: ["api.anthropic.com", "*.anthropic.com"]
 ---
@@ -4342,6 +4348,42 @@ sandbox:
     };
   }
 
+  test("path layer union and dedupe are independent of layer and entry order", () => {
+    const makeLayer = (
+      name: string,
+      allowRead: string[],
+      allowWrite: string[],
+      deny: string[],
+    ): import("./agent-types").AgentType => ({
+      name,
+      description: "",
+      canSpawnChildren: false,
+      instructionStyle: "worker",
+      paths: { allowRead, allowWrite, deny },
+    });
+    const forward = mergeSandboxLayerConfigs([
+      makeLayer("floor", ["/a", "/shared", "/a"], ["/w1"], ["/d1"]),
+      makeLayer("middle", ["/b", "/shared"], ["/w2", "/w1"], ["/d2"]),
+      makeLayer("leaf", ["/c"], ["/w3"], ["/d1", "/d3"]),
+    ]).paths;
+    const shuffled = mergeSandboxLayerConfigs([
+      makeLayer("leaf", ["/c"], ["/w3"], ["/d3", "/d1"]),
+      makeLayer("floor", ["/a", "/a", "/shared"], ["/w1"], ["/d1"]),
+      makeLayer("middle", ["/shared", "/b"], ["/w1", "/w2"], ["/d2"]),
+    ]).paths;
+    const asSets = (value: typeof forward) => ({
+      allowRead: [...value.allowRead].sort(),
+      allowWrite: [...value.allowWrite].sort(),
+      deny: [...value.deny].sort(),
+    });
+    expect(asSets(shuffled)).toEqual(asSets(forward));
+    expect(asSets(forward)).toEqual({
+      allowRead: ["/a", "/b", "/c", "/shared"],
+      allowWrite: ["/w1", "/w2", "/w3"],
+      deny: ["/d1", "/d2", "/d3"],
+    });
+  });
+
   test("sandbox-disabled start.sh has no Seatbelt wrapper or proxy preamble", async () => {
     await writeSandboxType("sandbox-disabled", { enabled: false });
     setNewAgentSpawnRunner(cleanWorktreeRunner());
@@ -4351,9 +4393,12 @@ sandbox:
     const result = await callNewAgent("plain spawn", { name: "sandbox-disabled", type: "sandbox-disabled" });
     expect(result.ok).toBe(true);
     const start = await Bun.file(join(agentsDir, "sandbox-disabled", "start.sh")).text();
+    const meta = await Bun.file(join(agentsDir, "sandbox-disabled", "meta.json")).json();
     expect(start).not.toContain("sandbox-exec");
     expect(start).not.toContain("sandbox-proxy-launch");
     expect(start).not.toContain("export http_proxy=");
+    expect(meta.paths.allowRead).toContain(canonicalizeSandboxPath(tempDir));
+    expect(meta.paths.allowWrite).toContain(canonicalizeSandboxPath(tempDir));
   });
 
   test("sandbox-enabled Codex spawn uses danger-full-access inside our wrapper and proxy", async () => {
@@ -4453,6 +4498,9 @@ sandbox:
     expect(start).not.toContain("NODE_OPTIONS");
     expect(start).toContain("trap cleanup_sandbox_proxy EXIT");
     expect(meta.sandbox.enabled).toBe(true);
+    expect(meta.paths.allowRead).toContain(canonicalizeSandboxPath(tempDir));
+    expect(meta.paths.allowWrite).toContain(canonicalizeSandboxPath(tempDir));
+    expect(meta.paths.deny).toContain("**/.env");
     expect(meta.sandbox_proxy_port).toBe(43123);
     expect(domains).toBe(
       "api.anthropic.com\n*.anthropic.com\nplatform.claude.com\nchatgpt.com\napi.openai.com\n",
@@ -4554,6 +4602,12 @@ sandbox:
     const agentDir = join(agentsDir, "sandbox-resume");
     const spawnProfile = await Bun.file(join(agentDir, "sandbox.sb")).text();
     const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    const frozenPaths = structuredClone(meta.paths);
+    await writeSandboxType("sandbox-resume", {
+      allowRead: ["/tmp/changed-after-spawn"],
+      allowWrite: ["/tmp/changed-after-spawn"],
+      deny: ["**/*.changed"],
+    });
     meta.state = "stopped";
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
 
@@ -4580,6 +4634,7 @@ sandbox:
     const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
     const resumedMeta = await Bun.file(join(agentDir, "meta.json")).json();
     expect(resumeProfile).toBe(spawnProfile);
+    expect(resumedMeta.paths).toEqual(frozenPaths);
     expect(resumedMeta.sandbox_proxy_port).toBe(43131);
     expect(resumeScript).toContain("setsid sandbox-exec -f");
     expect(resumeScript).toContain("    sandbox-exec -f");

@@ -5,20 +5,27 @@ import {
   generateProfile,
   globToSandboxRegex,
   isBalancedSandboxExpression,
+  normalizePathsConfig,
+  resolvePathsConfig,
   resolveSandboxConfig,
   sandboxProfileParameterValues,
+  validatePathsFrontmatter,
   validateSandboxFrontmatter,
+  type PathsConfig,
   type SandboxConfig,
   type SandboxProfileParams,
 } from "./sandbox";
 
 const EMPTY_CONFIG: SandboxConfig = {
   enabled: true,
+  rawAllow: [],
+  domains: [],
+};
+
+const EMPTY_PATHS: PathsConfig = {
   allowRead: [],
   allowWrite: [],
   deny: [],
-  rawAllow: [],
-  domains: [],
 };
 
 const PARAMS: SandboxProfileParams = {
@@ -34,6 +41,10 @@ function config(overrides: Partial<SandboxConfig> = {}): SandboxConfig {
     ...EMPTY_CONFIG,
     ...overrides,
   };
+}
+
+function paths(overrides: Partial<PathsConfig> = {}): PathsConfig {
+  return { ...EMPTY_PATHS, ...overrides };
 }
 
 describe("sandbox glob to regex", () => {
@@ -122,13 +133,13 @@ describe("sandbox glob to regex", () => {
 
 describe("sandbox profile emission", () => {
   test("starts with version and deny-default before every permission", () => {
-    const profile = generateProfile(EMPTY_CONFIG, PARAMS);
+    const profile = generateProfile(EMPTY_CONFIG, EMPTY_PATHS, PARAMS);
     expect(profile.split("\n").slice(0, 2)).toEqual(["(version 1)", "(deny default)"]);
     expect(profile.indexOf("(deny default)")).toBeLessThan(profile.indexOf("(allow "));
   });
 
   test("emits exactly the six runtime-derived root rules for empty lists", () => {
-    const lines = generateProfile(EMPTY_CONFIG, PARAMS).trimEnd().split("\n");
+    const lines = generateProfile(EMPTY_CONFIG, EMPTY_PATHS, PARAMS).trimEnd().split("\n");
     expect(lines).toEqual([
       "(version 1)",
       "(deny default)",
@@ -142,13 +153,14 @@ describe("sandbox profile emission", () => {
   });
 
   test("allowRead root uses the explicit whole-tree subpath form", () => {
-    const profile = generateProfile(config({ allowRead: ["/"] }), PARAMS);
+    const profile = generateProfile(EMPTY_CONFIG, paths({ allowRead: ["/"] }), PARAMS);
     expect(profile).toContain('(allow file-read* (subpath "/"))');
   });
 
   test("glob allows use regex under the requested read and write operations", () => {
     const profile = generateProfile(
-      config({ allowRead: ["**/*.md"], allowWrite: ["~/output/*.txt"] }),
+      EMPTY_CONFIG,
+      paths({ allowRead: ["**/*.md"], allowWrite: ["~/output/*.txt"] }),
       PARAMS,
     );
     expect(profile).toMatch(/\(allow file-read\* \(regex #"\^/);
@@ -157,11 +169,11 @@ describe("sandbox profile emission", () => {
 
   test("all configured file denies are emitted after every allow", () => {
     const profile = generateProfile(
-      config({
+      config({ rawAllow: ["(allow process*)"] }),
+      paths({
         allowRead: ["/tmp/read"],
         allowWrite: ["/tmp/shared"],
         deny: ["/tmp/shared", "**/.env"],
-        rawAllow: ["(allow process*)"],
       }),
       PARAMS,
     );
@@ -175,7 +187,8 @@ describe("sandbox profile emission", () => {
     const networkDeny = "(deny network*)";
     const localhost = '(allow network-outbound (remote ip "localhost:*"))';
     const profile = generateProfile(
-      config({ rawAllow: [networkDeny, localhost], deny: ["**/.env"] }),
+      config({ rawAllow: [networkDeny, localhost] }),
+      paths({ deny: ["**/.env"] }),
       PARAMS,
     );
     expect(profile).toContain(`${networkDeny}\n${localhost}\n`);
@@ -183,57 +196,101 @@ describe("sandbox profile emission", () => {
   });
 
   test("domains do not create a baked-in profile permission", () => {
-    const profile = generateProfile(config({ domains: ["example.com"] }), PARAMS);
+    const profile = generateProfile(config({ domains: ["example.com"] }), EMPTY_PATHS, PARAMS);
     expect(profile).not.toContain("example.com");
     expect(profile).not.toContain("network");
   });
 
   test("a quote-based path injection cannot emit an allow-default rule", () => {
     const malicious = '/tmp/evil")(allow default)(marker';
-    const sandboxConfig = config({ allowRead: [malicious] });
-    const profile = generateProfile(sandboxConfig, PARAMS);
+    const pathsConfig = paths({ allowRead: [malicious] });
+    const profile = generateProfile(EMPTY_CONFIG, pathsConfig, PARAMS);
     expect(profile).not.toContain("(allow default)");
     expect(profile).not.toContain(malicious);
     expect(profile).toContain('(param "ALLOW_R_0")');
-    expect(sandboxProfileParameterValues(sandboxConfig, PARAMS).ALLOW_R_0).toContain(
+    expect(sandboxProfileParameterValues(pathsConfig, PARAMS).ALLOW_R_0).toContain(
       '")(allow default)(',
     );
   });
 
   test("unbalanced rawAllow fails closed during generation", () => {
-    expect(() => generateProfile(config({ rawAllow: ["(allow process*"] }), PARAMS))
+    expect(() => generateProfile(config({ rawAllow: ["(allow process*"] }), EMPTY_PATHS, PARAMS))
       .toThrow("balanced parenthesized s-expression");
+  });
+
+  test("allowWrite emits both read and write permissions", () => {
+    const profile = generateProfile(
+      EMPTY_CONFIG,
+      paths({ allowWrite: ["/tmp/write-only-authored"] }),
+      PARAMS,
+    );
+    expect(profile).toContain('(allow file-read* (subpath "/private/tmp/write-only-authored"))');
+    expect(profile).toContain('(allow file-write* (subpath "/private/tmp/write-only-authored"))');
+  });
+
+  test("generateProfile normalizes a canonical read/write tie to the write entry", () => {
+    const profile = generateProfile(
+      EMPTY_CONFIG,
+      paths({
+        allowRead: ["/tmp/shared"],
+        allowWrite: ["/private/tmp/shared"],
+      }),
+      PARAMS,
+    );
+    expect(profile).not.toContain('ALLOW_R_0');
+    expect(profile).toContain('(allow file-read* (subpath "/private/tmp/shared"))');
+    expect(profile).toContain('(allow file-write* (subpath "/private/tmp/shared"))');
   });
 });
 
 describe("sandbox config resolution", () => {
-  test("derives both read and write lists from allowedPaths when sandbox is omitted", () => {
-    expect(resolveSandboxConfig({ allowedPaths: ["/one", "/two"] })).toEqual({
+  test("an omitted sandbox block resolves to disabled kernel settings", () => {
+    expect(resolveSandboxConfig({})).toEqual({
       enabled: false,
-      allowRead: ["/one", "/two"],
-      allowWrite: ["/one", "/two"],
-      deny: [],
       rawAllow: [],
       domains: [],
     });
   });
 
-  test("an explicit sandbox block is authoritative over allowedPaths", () => {
-    const explicit = config({
-      allowRead: ["/sandbox/read"],
-      allowWrite: ["/sandbox/write"],
-    });
-    expect(resolveSandboxConfig({
-      sandbox: explicit,
-      allowedPaths: ["/legacy"],
-    })).toEqual(explicit);
+  test("an explicit sandbox block is copied", () => {
+    const explicit = config({ domains: ["example.com"] });
+    expect(resolveSandboxConfig({ sandbox: explicit })).toEqual(explicit);
   });
 
   test("returns fresh lists rather than aliasing resolved inputs", () => {
-    const explicit = config({ allowRead: ["/original"] });
+    const explicit = config({ domains: ["original.example"] });
     const resolved = resolveSandboxConfig({ sandbox: explicit });
+    resolved.domains.push("new.example");
+    expect(explicit.domains).toEqual(["original.example"]);
+  });
+
+  test("paths resolve independently and return fresh lists", () => {
+    const explicit = paths({ allowRead: ["/original"] });
+    const resolved = resolvePathsConfig(explicit);
     resolved.allowRead.push("/new");
     expect(explicit.allowRead).toEqual(["/original"]);
+  });
+});
+
+describe("paths normalization", () => {
+  test("canonical exact duplicates in allowRead and allowWrite collapse to allowWrite", () => {
+    const original = paths({
+      allowRead: ["/tmp/shared", "/tmp/read-only"],
+      allowWrite: ["/private/tmp/shared"],
+    });
+    expect(normalizePathsConfig(original, "/Users/tester")).toEqual({
+      allowRead: ["/tmp/read-only"],
+      allowWrite: ["/private/tmp/shared"],
+      deny: [],
+    });
+    expect(original.allowRead).toEqual(["/tmp/shared", "/tmp/read-only"]);
+  });
+
+  test("the same glob in both lists is a write-wins exact tie", () => {
+    expect(normalizePathsConfig(paths({
+      allowRead: ["~/shared/*.txt"],
+      allowWrite: ["~/shared/*.txt"],
+    }), "/Users/tester").allowRead).toEqual([]);
   });
 });
 
@@ -263,7 +320,7 @@ describe("sandbox frontmatter validation", () => {
     ]);
   });
 
-  test.each(["allowRead", "allowWrite", "deny", "rawAllow", "domains"] as const)(
+  test.each(["rawAllow", "domains"] as const)(
     "rejects non-array %s",
     (key) => {
       const result = validateSandboxFrontmatter({ [key]: "not-a-list" });
@@ -271,9 +328,17 @@ describe("sandbox frontmatter validation", () => {
     },
   );
 
+  test.each(["allowRead", "allowWrite", "deny"])(
+    "rejects legacy sandbox.%s with paths migration guidance",
+    (key) => {
+      const result = validateSandboxFrontmatter({ [key]: ["/tmp"] });
+      expect(result.errors).toContain(`sandbox.${key} has moved; move it to paths.${key}`);
+    },
+  );
+
   test("rejects non-string list entries", () => {
-    const result = validateSandboxFrontmatter({ allowRead: ["/tmp", 42] });
-    expect(result.errors).toContain("sandbox.allowRead[1] must be a string, got number");
+    const result = validateSandboxFrontmatter({ domains: ["example.com", 42] });
+    expect(result.errors).toContain("sandbox.domains[1] must be a string, got number");
   });
 
   test("rejects unknown keys", () => {
@@ -302,4 +367,46 @@ describe("sandbox frontmatter validation", () => {
       expect(result.warnings[0]).toContain(entry);
     },
   );
+});
+
+describe("paths frontmatter validation", () => {
+  test("accepts all three lists and an empty object", () => {
+    expect(validatePathsFrontmatter(EMPTY_PATHS).errors).toEqual([]);
+    expect(validatePathsFrontmatter({}).errors).toEqual([]);
+  });
+
+  test.each(["allowRead", "allowWrite", "deny"] as const)(
+    "rejects non-list and non-string paths.%s values",
+    (key) => {
+      expect(validatePathsFrontmatter({ [key]: "bad" }).errors)
+        .toContain(`paths.${key} must be a list`);
+      expect(validatePathsFrontmatter({ [key]: [42] }).errors)
+        .toContain(`paths.${key}[0] must be a string, got number`);
+    },
+  );
+
+  test("rejects unknown keys and every invalid path grammar form", () => {
+    expect(validatePathsFrontmatter({ extra: [] }).errors)
+      .toContain('paths contains unknown key "extra"');
+    for (const entry of ["bare", "relative/*", "/tmp/nul\0path"]) {
+      expect(validatePathsFrontmatter({ allowRead: [entry] }).errors.length).toBeGreaterThan(0);
+    }
+  });
+
+  test("rejects different cross-list globs with the same literal prefix", () => {
+    const result = validatePathsFrontmatter({
+      allowRead: ["~/Documents/**/*.pdf"],
+      allowWrite: ["~/Documents/**/*.txt"],
+    });
+    expect(result.errors).toContain(
+      'paths.allowRead entry "~/Documents/**/*.pdf" and paths.allowWrite entry "~/Documents/**/*.txt" are different globs with the same literal prefix "~/Documents/"',
+    );
+  });
+
+  test("allows the same glob in both lists", () => {
+    expect(validatePathsFrontmatter({
+      allowRead: ["~/Documents/**/*.pdf"],
+      allowWrite: ["~/Documents/**/*.pdf"],
+    }).errors).toEqual([]);
+  });
 });

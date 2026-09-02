@@ -5,8 +5,7 @@ spawnable: false
 permissions:
   allow: []
   deny: []
-sandbox:
-  enabled: false
+paths:
   # Verified static bootstrap floor. Runtime AGENTDIR/WORKTREE/GITDIR/REPOAGENTS
   # roots are injected separately when an agent opts in to sandboxing.
   allowRead:
@@ -42,6 +41,8 @@ sandbox:
     - "~/.ssh"
     - "~/.aws"
     - "**/.env"
+sandbox:
+  enabled: false
   rawAllow:
     - (allow process*)
     - (allow sysctl-read)

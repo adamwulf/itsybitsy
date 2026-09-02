@@ -14,8 +14,8 @@ import allLayerMd from '../docs/agent-types/_all.md' with { type: 'text' };
 import nonCoordinatorLayerMd from '../docs/agent-types/_non_coordinator.md' with { type: 'text' };
 import { parseModel } from './agent-cli';
 import { isValidEffort } from './validation';
-import type { SandboxConfig } from './sandbox';
-import { validateSandboxFrontmatter } from './sandbox';
+import type { PathsConfig, SandboxConfig } from './sandbox';
+import { validatePathsFrontmatter, validateSandboxFrontmatter } from './sandbox';
 
 const EMBEDDED_TYPES: Record<string, string> = {
   'manager': managerMd,
@@ -27,13 +27,13 @@ const EMBEDDED_TYPES: Record<string, string> = {
 };
 
 const SANDBOX_LIST_KEYS = [
-  "allowRead",
-  "allowWrite",
-  "deny",
   "rawAllow",
   "domains",
 ] as const;
 type SandboxListKey = (typeof SANDBOX_LIST_KEYS)[number];
+
+const PATHS_LIST_KEYS = ["allowRead", "allowWrite", "deny"] as const;
+type PathsListKey = (typeof PATHS_LIST_KEYS)[number];
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value)
@@ -67,6 +67,8 @@ export interface AgentType {
   };
   icon?: string;
   allowedPaths?: string[];
+  /** Resolved, inheritance-merged filesystem policy. */
+  paths?: PathsConfig;
   /** Resolved, inheritance-merged Seatbelt sandbox configuration. */
   sandbox?: SandboxConfig;
   /**
@@ -181,7 +183,7 @@ export function parseAgentTypeFile(content: string): {
     if (currentParent) {
       if (currentObj && Object.keys(currentObj).length === 0) {
         // Pending empty-value key that never got nested children → store as ""
-        frontmatter[currentParent] = "";
+        frontmatter[currentParent] = currentParent === "paths" ? {} : "";
       }
       // currentObj with content is already stored via reference in frontmatter[currentParent]
       // top-level lists are already stored directly in frontmatter[currentParent]
@@ -212,7 +214,7 @@ export function parseAgentTypeFile(content: string): {
 
   // Flush any trailing empty-value key that never got nested children
   if (currentParent && currentObj && Object.keys(currentObj).length === 0) {
-    frontmatter[currentParent] = "";
+    frontmatter[currentParent] = currentParent === "paths" ? {} : "";
   }
 
   const body = lines.slice(endIdx + 1).join("\n").trim();
@@ -418,9 +420,10 @@ async function resolveChain(
  * Merge a root-first chain of raw `{frontmatter, body}` records into a single
  * record. Scalar fields take the descendant's value when the key is **present**
  * in the descendant's frontmatter. `permissions.allow` / `permissions.deny`
- * are unioned (deduped via Set) across the entire chain. Sandbox list fields
- * are likewise unioned, while sandbox.enabled is OR-merged. `allowedPaths`
- * and `repos` are replaced (not merged) when the descendant declares them.
+ * are unioned (deduped via Set) across the entire chain. Paths and sandbox
+ * list fields are likewise unioned, while sandbox.enabled is OR-merged.
+ * `allowedPaths` and `repos` are replaced (not merged) when the descendant
+ * declares them.
  *
  * The `name` and `spawnable` keys are intentionally not set here — the caller
  * (`buildAgentTypeFromFrontmatter`) is responsible for the final `name` (from
@@ -457,17 +460,24 @@ function mergeRawFrontmatters(
   const allAllow: string[] = [];
   const allDeny: string[] = [];
 
-  // Sandbox is a separate hand-written union because it mixes five unioned
+  // Sandbox is a separate hand-written union because it mixes two unioned
   // lists with an OR-merged boolean. A descendant may add access or denials,
   // but may never switch off a sandbox enabled by an ancestor.
   let sawSandbox = false;
   let sandboxEnabled = false;
   const sandboxLists: Record<SandboxListKey, string[]> = {
+    rawAllow: [],
+    domains: [],
+  };
+
+  // Filesystem policy is independent of the kernel switch and unions across
+  // every inheritance layer. Exact string duplicates within a list collapse;
+  // cross-list ties are preserved for normalizePathsConfig's write-wins rule.
+  let sawPaths = false;
+  const pathsLists: Record<PathsListKey, string[]> = {
     allowRead: [],
     allowWrite: [],
     deny: [],
-    rawAllow: [],
-    domains: [],
   };
 
   // Accumulated body parts — concatenated root-first with blank-line
@@ -513,6 +523,18 @@ function mergeRawFrontmatters(
       }
     }
 
+    if (typeof fm.paths === "object" && fm.paths !== null && !Array.isArray(fm.paths)) {
+      sawPaths = true;
+      const paths = fm.paths as Record<string, unknown>;
+      for (const key of PATHS_LIST_KEYS) {
+        const values = paths[key];
+        if (!Array.isArray(values)) continue;
+        for (const value of values) {
+          if (typeof value === "string") pathsLists[key].push(value);
+        }
+      }
+    }
+
     // Body — root-first concatenation. Skip empties so missing-body
     // ancestors don't produce stray blank lines.
     if (entry.body.length > 0) {
@@ -533,12 +555,17 @@ function mergeRawFrontmatters(
   if (sawSandbox) {
     merged.sandbox = {
       enabled: sandboxEnabled,
-      allowRead: Array.from(new Set(sandboxLists.allowRead)),
-      allowWrite: Array.from(new Set(sandboxLists.allowWrite)),
-      deny: Array.from(new Set(sandboxLists.deny)),
       rawAllow: Array.from(new Set(sandboxLists.rawAllow)),
       domains: Array.from(new Set(sandboxLists.domains)),
     } satisfies SandboxConfig;
+  }
+
+  if (sawPaths) {
+    merged.paths = {
+      allowRead: Array.from(new Set(pathsLists.allowRead)),
+      allowWrite: Array.from(new Set(pathsLists.allowWrite)),
+      deny: Array.from(new Set(pathsLists.deny)),
+    } satisfies PathsConfig;
   }
 
   return { frontmatter: merged, body };
@@ -572,6 +599,9 @@ function buildAgentTypeFromFrontmatter(
 
   const sandbox = typeof frontmatter.sandbox === "object" && frontmatter.sandbox !== null
     ? (frontmatter.sandbox as Record<string, unknown>)
+    : undefined;
+  const paths = typeof frontmatter.paths === "object" && frontmatter.paths !== null
+    ? (frontmatter.paths as Record<string, unknown>)
     : undefined;
 
   // Extract icon: first non-whitespace character of the icon field.
@@ -619,12 +649,16 @@ function buildAgentTypeFromFrontmatter(
         }
       : undefined,
     allowedPaths,
+    paths: paths
+      ? {
+          allowRead: stringList(paths.allowRead),
+          allowWrite: stringList(paths.allowWrite),
+          deny: stringList(paths.deny),
+        }
+      : undefined,
     sandbox: sandbox
       ? {
           enabled: sandbox.enabled === true,
-          allowRead: stringList(sandbox.allowRead),
-          allowWrite: stringList(sandbox.allowWrite),
-          deny: stringList(sandbox.deny),
           rawAllow: stringList(sandbox.rawAllow),
           domains: stringList(sandbox.domains),
         }
@@ -908,6 +942,13 @@ export async function validateAllAgentTypes(): Promise<string[]> {
           }
           for (const message of sandboxValidation.warnings) {
             console.warn(`${file}: warning: ${message}`);
+          }
+        }
+
+        if (frontmatter.paths !== undefined) {
+          const pathsValidation = validatePathsFrontmatter(frontmatter.paths);
+          for (const message of pathsValidation.errors) {
+            errors.push(`${file}: ${message}`);
           }
         }
 

@@ -1205,23 +1205,26 @@ describe("readAgentMeta", () => {
     expect(meta!.claude_pid_epoch).toBe(1001);
   });
 
-  test("resolved sandbox config round-trips through meta.json coercion", async () => {
+  test("resolved paths and sandbox configs round-trip through meta.json coercion", async () => {
     const sandbox = {
       enabled: true,
-      allowRead: ["/usr", "~/.claude"],
-      allowWrite: ["/private/tmp"],
-      deny: ["**/.env"],
       rawAllow: ["(allow process*)", "(deny network*)"],
       domains: ["api.anthropic.com"],
     };
+    const paths = {
+      allowRead: ["/usr", "~/.claude"],
+      allowWrite: ["/private/tmp"],
+      deny: ["**/.env"],
+    };
     await Bun.write(
       join(tempDir, "meta.json"),
-      JSON.stringify({ id: "agent-sandboxed", sandbox, sandbox_proxy_port: 43123, sandbox_proxy_pid: 54321 }),
+      JSON.stringify({ id: "agent-sandboxed", sandbox, paths, sandbox_proxy_port: 43123, sandbox_proxy_pid: 54321 }),
     );
 
     const { meta, error } = await readAgentMeta(tempDir);
     expect(error).toBeUndefined();
     expect(meta?.sandbox).toEqual(sandbox);
+    expect(meta?.paths).toEqual(paths);
     expect(meta?.sandbox_proxy_port).toBe(43123);
     expect(meta?.sandbox_proxy_pid).toBe(54321);
   });
@@ -1237,11 +1240,13 @@ describe("readAgentMeta", () => {
       join(tempDir, "meta.json"),
       JSON.stringify({
         id: "agent-bad-sandbox",
-        sandbox: {
-          enabled: "true  # note",
+        paths: {
           allowRead: ["/usr", 42],
           allowWrite: "bad",
           deny: null,
+        },
+        sandbox: {
+          enabled: "true  # note",
           rawAllow: ["(allow process*)"],
           domains: [false, "example.com"],
         },
@@ -1251,11 +1256,13 @@ describe("readAgentMeta", () => {
     const { meta } = await readAgentMeta(tempDir);
     expect(meta?.sandbox).toEqual({
       enabled: false,
+      rawAllow: ["(allow process*)"],
+      domains: ["example.com"],
+    });
+    expect(meta?.paths).toEqual({
       allowRead: ["/usr"],
       allowWrite: [],
       deny: [],
-      rawAllow: ["(allow process*)"],
-      domains: ["example.com"],
     });
   });
 
@@ -6682,6 +6689,7 @@ describe("readAgentMeta mtime cache", () => {
     // ("Property '<field>' is missing") — the type-level half of the guard.
     const REQUIRED_DEEP_COPY: Record<NestedMutableKeys<AgentMeta>, true> = {
       spawned_by: true,
+      paths: true,
       sandbox: true,
     };
 
@@ -6691,11 +6699,13 @@ describe("readAgentMeta mtime cache", () => {
       id: "agent-deepcopy",
       tmux_session: "ib-orig",
       spawned_by: spawnedBy,
-      sandbox: {
-        enabled: true,
+      paths: {
         allowRead: ["/original/read"],
         allowWrite: ["/original/write"],
         deny: ["**/.env"],
+      },
+      sandbox: {
+        enabled: true,
         rawAllow: ["(allow process*)"],
         domains: ["example.com"],
       },
@@ -6723,10 +6733,12 @@ describe("readAgentMeta mtime cache", () => {
       first.meta.spawned_by.agent_id = "POLLUTED";
       first.meta.spawned_by.repo_path = "/polluted/path";
     }
+    if (first.meta?.paths) {
+      first.meta.paths.allowRead.push("/polluted/read");
+      first.meta.paths.allowWrite.push("/polluted/write");
+      first.meta.paths.deny.push("/polluted/deny");
+    }
     if (first.meta?.sandbox) {
-      first.meta.sandbox.allowRead.push("/polluted/read");
-      first.meta.sandbox.allowWrite.push("/polluted/write");
-      first.meta.sandbox.deny.push("/polluted/deny");
       first.meta.sandbox.rawAllow.push("(allow default)");
       first.meta.sandbox.domains.push("evil.example");
     }
@@ -6737,11 +6749,13 @@ describe("readAgentMeta mtime cache", () => {
     expect(second.meta?.spawned_by?.repo_path).toBe("/orig/path");
     expect(second.meta?.sandbox).toEqual({
       enabled: true,
+      rawAllow: ["(allow process*)"],
+      domains: ["example.com"],
+    });
+    expect(second.meta?.paths).toEqual({
       allowRead: ["/original/read"],
       allowWrite: ["/original/write"],
       deny: ["**/.env"],
-      rawAllow: ["(allow process*)"],
-      domains: ["example.com"],
     });
   });
 

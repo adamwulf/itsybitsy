@@ -479,16 +479,17 @@ body`;
   expect((frontmatter.allowedPaths as unknown[]).length).toBe(0);
 });
 
-test("parseAgentTypeFile: parses the flat sandbox block with inline and block lists", () => {
+test("parseAgentTypeFile: parses separate paths and sandbox blocks", () => {
   const content = `---
 name: sandboxed
-sandbox:
-  enabled: true
+paths:
   # Full-line comments are ignored.
   allowRead: ["/usr", "~/.claude"]
   allowWrite:
     - "/private/tmp"
   deny: ["**/.env"]
+sandbox:
+  enabled: true
   rawAllow:
     - "(allow process*)"
     - "(deny network*)"
@@ -497,14 +498,37 @@ sandbox:
 body`;
 
   const { frontmatter } = parseAgentTypeFile(content);
-  expect(frontmatter.sandbox).toEqual({
-    enabled: true,
+  expect(frontmatter.paths).toEqual({
     allowRead: ["/usr", "~/.claude"],
     allowWrite: ["/private/tmp"],
     deny: ["**/.env"],
+  });
+  expect(frontmatter.sandbox).toEqual({
+    enabled: true,
     rawAllow: ["(allow process*)", "(deny network*)"],
     domains: ["api.anthropic.com"],
   });
+});
+
+test("loadAgentType: paths absent stays undefined and a present empty block has three lists", async () => {
+  const originalHome = process.env.HOME;
+  const tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-empty-paths-"));
+  process.env.HOME = tempHome;
+  try {
+    const typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+    await Bun.write(join(typesDir, "absent.md"), "---\nname: absent\n---\n");
+    await Bun.write(join(typesDir, "present.md"), "---\nname: present\npaths:\n---\n");
+    expect((await loadAgentType("absent")).paths).toBeUndefined();
+    expect((await loadAgentType("present")).paths).toEqual({
+      allowRead: [],
+      allowWrite: [],
+      deny: [],
+    });
+  } finally {
+    process.env.HOME = originalHome;
+    await rm(tempHome, { recursive: true, force: true });
+  }
 });
 
 // ── inherits: / repos: inheritance tests (see PLAN-INHERITS.md) ──────────────
@@ -744,47 +768,52 @@ body`);
     expect(type.permissions?.deny?.sort()).toEqual(["Bash", "NotebookEdit", "Write"]);
   });
 
-  test("sandbox unions all five lists and OR-merges enabled across a multi-level chain", async () => {
+  test("paths and sandbox lists union while enabled OR-merges across a multi-level chain", async () => {
     await writeType("floor", `---
 name: floor
-sandbox:
-  enabled: true
+paths:
   allowRead: ["/usr", "/shared"]
   allowWrite: ["/tmp/floor"]
   deny: ["**/.env"]
+sandbox:
+  enabled: true
   rawAllow: ["(allow process*)"]
   domains: ["api.anthropic.com"]
 ---
 floor`);
     await writeType("middle", `---
 inherits: floor
-sandbox:
-  enabled: false
+paths:
   allowRead: ["/shared", "/middle"]
   allowWrite: ["/tmp/middle"]
   deny: ["~/.ssh"]
+sandbox:
+  enabled: false
   rawAllow: ["(allow process*)", "(deny network*)"]
   domains: ["api.anthropic.com", "github.com"]
 ---
 middle`);
     await writeType("leaf", `---
 inherits: middle
-sandbox:
-  enabled: false
+paths:
   allowRead: ["/leaf"]
   allowWrite: ["/tmp/floor", "/tmp/leaf"]
   deny: ["**/.env", "~/.aws"]
+sandbox:
+  enabled: false
   rawAllow: ["(allow mach-lookup)"]
   domains: ["*.githubusercontent.com"]
 ---
 leaf`);
 
     const type = await loadAgentType("leaf");
-    expect(type.sandbox).toEqual({
-      enabled: true,
+    expect(type.paths).toEqual({
       allowRead: ["/usr", "/shared", "/middle", "/leaf"],
       allowWrite: ["/tmp/floor", "/tmp/middle", "/tmp/leaf"],
       deny: ["**/.env", "~/.ssh", "~/.aws"],
+    });
+    expect(type.sandbox).toEqual({
+      enabled: true,
       rawAllow: ["(allow process*)", "(deny network*)", "(allow mach-lookup)"],
       domains: ["api.anthropic.com", "github.com", "*.githubusercontent.com"],
     });
@@ -1637,13 +1666,21 @@ body`);
   });
 
   test("rejects a non-list value for every sandbox list field", async () => {
-    for (const key of ["allowRead", "allowWrite", "deny", "rawAllow", "domains"]) {
+    for (const key of ["rawAllow", "domains"]) {
       await writeType(`bad-${key}`, `  ${key}: not-a-list`);
     }
     const errors = await validateAllAgentTypes();
-    for (const key of ["allowRead", "allowWrite", "deny", "rawAllow", "domains"]) {
+    for (const key of ["rawAllow", "domains"]) {
       expect(errors).toContain(`bad-${key}.md: sandbox.${key} must be a list`);
     }
+  });
+
+  test("rejects sandbox path lists with migration guidance", async () => {
+    await writeType("bad-legacy-path", '  allowRead: ["/tmp"]');
+    const errors = await validateAllAgentTypes();
+    expect(errors).toContain(
+      "bad-legacy-path.md: sandbox.allowRead has moved; move it to paths.allowRead",
+    );
   });
 
   test("rejects unknown nested sandbox keys", async () => {
@@ -1672,5 +1709,48 @@ body`);
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe("validateAllAgentTypes: paths", () => {
+  const originalHome = process.env.HOME;
+  let tempHome: string;
+  let typesDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-paths-validation-"));
+    process.env.HOME = tempHome;
+    typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    process.env.HOME = originalHome;
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  test("rejects cross-list different globs sharing a literal prefix", async () => {
+    await Bun.write(join(typesDir, "bad-globs.md"), `---
+name: bad-globs
+paths:
+  allowRead: ["~/Documents/**/*.pdf"]
+  allowWrite: ["~/Documents/**/*.txt"]
+---
+body`);
+    const errors = await validateAllAgentTypes();
+    expect(errors).toContain(
+      'bad-globs.md: paths.allowRead entry "~/Documents/**/*.pdf" and paths.allowWrite entry "~/Documents/**/*.txt" are different globs with the same literal prefix "~/Documents/"',
+    );
+  });
+
+  test("rejects malformed paths entries through the existing grammar", async () => {
+    await Bun.write(join(typesDir, "bad-entry.md"), `---
+name: bad-entry
+paths:
+  deny: ["bare-name"]
+---
+body`);
+    const errors = await validateAllAgentTypes();
+    expect(errors.some((error) => error.includes("bare names are not allowed"))).toBe(true);
   });
 });

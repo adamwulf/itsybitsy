@@ -2478,6 +2478,16 @@ export async function main() {
           console.log("ALLOWED PATHS:");
           for (const p of type.allowedPaths) console.log(`  ${p}`);
         }
+        if (type.paths) {
+          for (const [label, entries] of [
+            ["PATHS ALLOW READ", type.paths.allowRead],
+            ["PATHS ALLOW WRITE", type.paths.allowWrite],
+            ["PATHS DENY", type.paths.deny],
+          ] as const) {
+            console.log(`${label} (${entries.length}):`);
+            for (const entry of entries) console.log(`  ${entry}`);
+          }
+        }
         if (type.repos && type.repos.length > 0) {
           console.log("REPOS:");
           for (const r of type.repos) console.log(`  ${r}`);

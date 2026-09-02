@@ -18,7 +18,7 @@ import {
 } from "./tmux-poller";
 import { InjectionContext } from "./types";
 import { logToWatchLog, logWarning } from "./watch-log";
-import type { SandboxConfig } from "./sandbox";
+import type { PathsConfig, SandboxConfig } from "./sandbox";
 
 /** States that can be written to meta.json */
 export type MetaState = "creating" | "running" | "waiting" | "complete" | "stopped";
@@ -113,6 +113,8 @@ export interface AgentMeta {
    */
   canSpawnChildren?: boolean;
   agentIcon?: string;
+  /** Fully-resolved filesystem policy frozen at spawn time for resume parity. */
+  paths?: PathsConfig;
   /** Fully-resolved sandbox policy frozen at spawn time for resume parity. */
   sandbox?: SandboxConfig;
   /** Fresh per-launch localhost proxy port (reallocated on every resume). */
@@ -1629,12 +1631,16 @@ function copyAgentMeta(meta: AgentMeta): AgentMeta {
   return {
     ...meta,
     spawned_by: meta.spawned_by ? { ...meta.spawned_by } : meta.spawned_by,
+    paths: meta.paths
+      ? {
+          allowRead: [...meta.paths.allowRead],
+          allowWrite: [...meta.paths.allowWrite],
+          deny: [...meta.paths.deny],
+        }
+      : undefined,
     sandbox: meta.sandbox
       ? {
           ...meta.sandbox,
-          allowRead: [...meta.sandbox.allowRead],
-          allowWrite: [...meta.sandbox.allowWrite],
-          deny: [...meta.sandbox.deny],
           rawAllow: [...meta.sandbox.rawAllow],
           domains: [...meta.sandbox.domains],
         }
@@ -1703,20 +1709,29 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
     if (data.summary !== undefined && typeof data.summary !== "string") delete data.summary;
     if (data.agentType !== undefined && typeof data.agentType !== "string") delete data.agentType;
     if (data.agentIcon !== undefined && typeof data.agentIcon !== "string") delete data.agentIcon;
+    const stringList = (value: unknown): string[] =>
+      Array.isArray(value)
+        ? value.filter((entry): entry is string => typeof entry === "string")
+        : [];
+    if (data.paths !== undefined) {
+      if (typeof data.paths !== "object" || data.paths === null || Array.isArray(data.paths)) {
+        delete data.paths;
+      } else {
+        const paths = data.paths as Record<string, unknown>;
+        data.paths = {
+          allowRead: stringList(paths.allowRead),
+          allowWrite: stringList(paths.allowWrite),
+          deny: stringList(paths.deny),
+        } satisfies PathsConfig;
+      }
+    }
     if (data.sandbox !== undefined) {
       if (typeof data.sandbox !== "object" || data.sandbox === null || Array.isArray(data.sandbox)) {
         delete data.sandbox;
       } else {
         const sandbox = data.sandbox as Record<string, unknown>;
-        const stringList = (value: unknown): string[] =>
-          Array.isArray(value)
-            ? value.filter((entry): entry is string => typeof entry === "string")
-            : [];
         data.sandbox = {
           enabled: sandbox.enabled === true,
-          allowRead: stringList(sandbox.allowRead),
-          allowWrite: stringList(sandbox.allowWrite),
-          deny: stringList(sandbox.deny),
           rawAllow: stringList(sandbox.rawAllow),
           domains: stringList(sandbox.domains),
         } satisfies SandboxConfig;

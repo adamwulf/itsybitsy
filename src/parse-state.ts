@@ -410,9 +410,11 @@ export function parseState(input: string): ParseStateResult {
   }
 
   // agy agents have their own TUI shape too — dispatch to the agy parser before
-  // the claude-shaped patterns below. The detector keys on the "Antigravity"
-  // banner, the trust card, or the `accept-edits · … / ? for shortcuts /
-  // esc to cancel` chrome, all disjoint from codex and claude.
+  // the claude-shaped patterns below. The detector keys ONLY on agy-unique
+  // signals: the trust card question, the literal "Antigravity CLI" banner, and
+  // the `accept-edits ·`/`plan ·` + model-label status segment — all disjoint
+  // from codex and claude (see isAgyTmuxOutput for why the shared strings
+  // `? for shortcuts` / `esc to cancel` / bare "Antigravity" are excluded).
   if (isAgyTmuxOutput(input)) {
     return parseAgyState(input);
   }

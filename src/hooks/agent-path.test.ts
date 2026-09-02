@@ -512,6 +512,25 @@ describe("checkPathAccess", () => {
     expect(result.reason).toContain("shell expansion or quoting");
   });
 
+  test("a `..` token with glob chars is denied (cat ../../../../../itsyb*/SPEC.md)", () => {
+    // The glob matches the repo dir name at runtime but resolves to a literal,
+    // non-escaping segment here — so glob chars are treated as noise.
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "cat ../../../../../itsyb*/SPEC.md" } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("shell expansion or quoting");
+  });
+
+  test.each([
+    ["cat ../foo?"],
+    ["cat ../../[abc]/x"],
+  ])("a `..` token with other glob chars (%s) is denied", (command) => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("shell expansion or quoting");
+  });
+
   test("git ranges with ~ / ^ mid-token are NOT noise (allowed)", () => {
     const ctx = makeCtx();
     expect(checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "git log HEAD~2..HEAD^" } }), ctx).decision).toBe("allow");

@@ -416,9 +416,12 @@ function checkRelativeTraversalPaths(
     }
     if (!token.includes("..")) continue; // no traversal risk
 
-    // Noise rule: a `..` mixed with shell expansion/quoting we can't resolve
-    // safely — fail closed rather than guess how the shell rewrites it.
-    if (/['"$`{}\\]/.test(token) || token.startsWith("~")) {
+    // Noise rule: a `..` mixed with shell expansion/quoting/globbing we can't
+    // resolve safely — fail closed rather than guess how the shell rewrites it.
+    // Globs (`*?[]`) are included because a `..` token like
+    // `../../../../../itsyb*/SPEC.md` matches the repo dir name at runtime but
+    // resolves to a literal (non-escaping) segment here.
+    if (/['"$`{}\\*?[\]]/.test(token) || token.startsWith("~")) {
       return { decision: "deny", reason: TRAVERSAL_NOISE_DENY_REASON };
     }
 

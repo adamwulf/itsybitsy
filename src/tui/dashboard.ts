@@ -154,7 +154,7 @@ export class TmuxPaneComponent implements Component {
   private chromeSlice(): ChromeSlice {
     const cached = this.chromeCache;
     if (cached && cached.raw === this.rawOutput) return cached.slice;
-    const slice = computeChromeSlice(this.rawOutput, isCodexAgent(this.agent));
+    const slice = computeChromeSlice(this.rawOutput, isCodexAgent(this.agent), isAgyAgent(this.agent));
     this.chromeCache = { raw: this.rawOutput, slice };
     return slice;
   }
@@ -319,6 +319,16 @@ function isCodexAgent(agent: Agent | null): boolean {
   if (!agent) return false;
   try {
     return isCodexBackedCli(parseModel(agent.meta.model).cli);
+  } catch {
+    return false;
+  }
+}
+
+/** Whether the agent is an Antigravity CLI (`agy`) agent (for chrome detection). */
+function isAgyAgent(agent: Agent | null): boolean {
+  if (!agent) return false;
+  try {
+    return parseModel(agent.meta.model).cli === "agy";
   } catch {
     return false;
   }

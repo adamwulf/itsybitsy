@@ -218,7 +218,10 @@ export class RightPaneComponent implements Component {
     const cached = this.repoCoordinatorChromeCache;
     if (cached && cached.raw === raw) return cached.slice;
     const isCodex = this.isRepoCoordinatorCodex();
-    const slice = computeChromeSlice(raw, isCodex);
+    // agy coordinators are rejected (D11), so this is effectively always false;
+    // computed anyway so a future agy-coordinator can't silently mis-slice.
+    const isAgy = this.isRepoCoordinatorAgy();
+    const slice = computeChromeSlice(raw, isCodex, isAgy);
     this.repoCoordinatorChromeCache = { raw, slice };
     return slice;
   }
@@ -229,6 +232,17 @@ export class RightPaneComponent implements Component {
     if (!agent) return false;
     try {
       return isCodexBackedCli(parseModel(agent.meta.model).cli);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Whether the per-repo coordinator agent is an Antigravity CLI (`agy`) agent. */
+  private isRepoCoordinatorAgy(): boolean {
+    const agent = this.repoCoordinatorAgent;
+    if (!agent) return false;
+    try {
+      return parseModel(agent.meta.model).cli === "agy";
     } catch {
       return false;
     }

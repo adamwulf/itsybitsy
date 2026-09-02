@@ -1,7 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import {
   wrapSingleLine, wrapLines, wordWrapSingleLine, wordWrapLines,
-  computeChromeSlice, findCodexInputChromeLogical, findLastTwoSeparators,
+  computeChromeSlice, findCodexInputChromeLogical, findAgyInputChromeLogical, findLastTwoSeparators,
   matchTableBlockEnd, reflowTable,
 } from "./wrap";
 import { stripAnsi } from "../parse-state";
@@ -612,6 +612,95 @@ describe("computeChromeSlice — chrome detection on UNWRAPPED logical lines", (
       const slice = computeChromeSlice(raw, true);
       expect(slice.transcriptRaw).toBe(raw);
       expect(slice.statusLines).toEqual([]);
+    });
+  });
+
+  describe("agy input chrome", () => {
+    // agy input box: transcript, then `────` / `>` / `────`, then the status
+    // line (`? for shortcuts … accept-edits · <model> · <effort>`), at pin width.
+    const agyStatus = "? for shortcuts                accept-edits · Gemini 3.7 Flash · low";
+    const agyRaw = [
+      "agy: here is a reply line",
+      "agy: and a second reply line",
+      sep,
+      "> ",
+      sep,
+      agyStatus,
+    ].join("\n");
+
+    test("slices the transcript at the upper separator, status line below the lower (isAgy=true)", () => {
+      const slice = computeChromeSlice(agyRaw, false, true);
+      expect(slice.transcriptRaw).toBe(
+        "agy: here is a reply line\nagy: and a second reply line"
+      );
+      expect(slice.statusLines).toEqual([agyStatus]);
+    });
+
+    test("working screen: esc to cancel status line is recognized too", () => {
+      const raw = ["work in progress", sep, "> ", sep,
+        "esc to cancel                accept-edits · Gemini 3.7 Flash · low"].join("\n");
+      const slice = computeChromeSlice(raw, false, true);
+      expect(slice.transcriptRaw).toBe("work in progress");
+      expect(slice.statusLines.length).toBe(1);
+    });
+
+    test("finds the LAST two separators (input box), keeping earlier dividers in the transcript", () => {
+      const raw = [
+        "intro",
+        sep,             // content divider higher up
+        "middle content",
+        sep,             // input-box upper
+        "> ",
+        sep,             // input-box lower
+        agyStatus,
+      ].join("\n");
+      const slice = computeChromeSlice(raw, false, true);
+      expect(slice.transcriptRaw).toBe("intro\n" + sep + "\nmiddle content");
+      expect(slice.statusLines).toEqual([agyStatus]);
+    });
+
+    test("strips trailing blank padding below the status line", () => {
+      const raw = ["reply", sep, "> ", sep, agyStatus, "", "  ", ""].join("\n");
+      const slice = computeChromeSlice(raw, false, true);
+      expect(slice.statusLines).toEqual([agyStatus]);
+    });
+
+    test("no agy status line → not detectable → no trimming", () => {
+      // Two separators but no `? for shortcuts` / `esc to cancel` / accept-edits
+      // → could be a markdown table or code, not the input box. Fall back.
+      const raw = ["output", sep, "content", sep, "plain trailing line"].join("\n");
+      const slice = computeChromeSlice(raw, false, true);
+      expect(slice.transcriptRaw).toBe(raw);
+      expect(slice.statusLines).toEqual([]);
+    });
+
+    test("agy status line but fewer than two separators → no trimming", () => {
+      const raw = ["output", "> ", agyStatus].join("\n");
+      const slice = computeChromeSlice(raw, false, true);
+      expect(slice.transcriptRaw).toBe(raw);
+      expect(slice.statusLines).toEqual([]);
+    });
+
+    test("findAgyInputChromeLogical returns indices for a well-formed input box", () => {
+      const chrome = findAgyInputChromeLogical([
+        "content", sep, "> ", sep, agyStatus,
+      ]);
+      expect(chrome).not.toBeNull();
+      expect(chrome!.upperIndex).toBe(1);
+      expect(chrome!.lowerIndex).toBe(3);
+    });
+
+    test("findAgyInputChromeLogical returns null without an agy status line", () => {
+      expect(findAgyInputChromeLogical(["content", sep, "> ", sep, "plain"])).toBeNull();
+    });
+
+    test("the codex/claude detectors are byte-identical (isAgy defaults to false)", () => {
+      // Same claude capture as the claude block; passing only two args must give
+      // the exact claude slice (regression guard for the new optional param).
+      const claudeRaw = ["reply one", "reply two", sep, "> ", sep, "  ? for shortcuts"].join("\n");
+      const slice = computeChromeSlice(claudeRaw, false);
+      expect(slice.transcriptRaw).toBe("reply one\nreply two");
+      expect(slice.statusLines).toEqual(["  ? for shortcuts"]);
     });
   });
 });

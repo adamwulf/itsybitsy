@@ -7,7 +7,6 @@ import {
   buildAgyRulesFile,
   AGY_WORKTREE_FILES,
   DEFAULT_AGY_HOOK_TIMEOUT_SECS,
-  appendGitignoreEntries,
   ensureAgyTrustedWorkspace,
   removeAgyTrustedWorkspace,
   agySettingsPath,
@@ -170,64 +169,8 @@ describe("buildAgyRulesFile", () => {
   });
 });
 
-// ── appendGitignoreEntries ───────────────────────────────────────────────────
-
-describe("appendGitignoreEntries", () => {
-  let tempDir: string;
-
-  beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), "agy-gitignore-test-"));
-  });
-  afterEach(async () => {
-    await rm(tempDir, { recursive: true, force: true });
-  });
-
-  test("creates .gitignore and appends both worktree files", async () => {
-    const results = await appendGitignoreEntries(tempDir, AGY_WORKTREE_FILES);
-    expect(results[".agents/hooks.json"]).toBe("appended");
-    expect(results[".agents/rules/ittybitty-agent.md"]).toBe("appended");
-    const text = await Bun.file(join(tempDir, ".gitignore")).text();
-    expect(text).toContain(".agents/hooks.json");
-    expect(text).toContain(".agents/rules/ittybitty-agent.md");
-  });
-
-  test("is idempotent — a second call reports already-present and does not rewrite", async () => {
-    await appendGitignoreEntries(tempDir, AGY_WORKTREE_FILES);
-    const before = await Bun.file(join(tempDir, ".gitignore")).text();
-    const results = await appendGitignoreEntries(tempDir, AGY_WORKTREE_FILES);
-    expect(results[".agents/hooks.json"]).toBe("already-present");
-    expect(results[".agents/rules/ittybitty-agent.md"]).toBe("already-present");
-    const after = await Bun.file(join(tempDir, ".gitignore")).text();
-    expect(after).toBe(before);
-  });
-
-  test("respects an explicit negation for one entry while appending the other", async () => {
-    await Bun.write(join(tempDir, ".gitignore"), "node_modules/\n!.agents/hooks.json\n");
-    const results = await appendGitignoreEntries(tempDir, AGY_WORKTREE_FILES);
-    expect(results[".agents/hooks.json"]).toBe("negation-respected");
-    expect(results[".agents/rules/ittybitty-agent.md"]).toBe("appended");
-    const text = await Bun.file(join(tempDir, ".gitignore")).text();
-    expect(text).toContain("!.agents/hooks.json");
-    expect(text).not.toContain("\n.agents/hooks.json\n");
-    expect(text).toContain(".agents/rules/ittybitty-agent.md");
-  });
-
-  test("adds a leading newline when the existing file lacks a trailing one", async () => {
-    await Bun.write(join(tempDir, ".gitignore"), "node_modules/");
-    await appendGitignoreEntries(tempDir, [".agents/hooks.json"]);
-    const text = await Bun.file(join(tempDir, ".gitignore")).text();
-    expect(text).toBe("node_modules/\n.agents/hooks.json\n");
-  });
-
-  test("does not double-append a duplicate input entry", async () => {
-    await appendGitignoreEntries(tempDir, [".codex/", ".codex/"]);
-    // The second occurrence sees the first as already present in the batch, so
-    // the file gets exactly one entry (the per-entry map only records the last
-    // outcome for a repeated key, which is why we assert on file content here).
-    const text = await Bun.file(join(tempDir, ".gitignore")).text();
-    expect(text).toBe(".codex/\n");
-  });
-});
+// appendGitignoreEntries moved to src/worktree-gitignore.ts — its tests live in
+// src/worktree-gitignore.test.ts.
 
 // ── ensureAgyTrustedWorkspace / removeAgyTrustedWorkspace ─────────────────────
 

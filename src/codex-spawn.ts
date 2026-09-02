@@ -29,7 +29,7 @@ import { buildCodexLaunchArgs, FUGU_CODEX_CONFIG_OVERRIDES, isCodexSafeBinaryPat
 import type { SessionContext } from "./hooks/session-start";
 import { generateInstructions } from "./hooks/session-start";
 import { stripIttybittyWrapper, buildSkillsSection } from "./agent-instructions-shared";
-import { appendGitignoreEntries, type GitignoreEntryOutcome } from "./agy-config";
+import { appendGitignoreEntries, type GitignoreEntryOutcome } from "./worktree-gitignore";
 
 // Re-exported so existing importers (codex-spawn.test.ts, ib-commands.ts) keep
 // resolving these from "./codex-spawn". The implementations now live in the
@@ -435,8 +435,8 @@ export type AppendCodexGitignoreResult = GitignoreEntryOutcome;
 
 /**
  * Append `.codex/` to <worktree>/.gitignore if not already present. Now a thin
- * wrapper over the generalized `appendGitignoreEntries` (agy-config.ts) — the
- * codex path is just the single-entry `[".codex/"]` case. Idempotent; respects
+ * wrapper over the generalized `appendGitignoreEntries` (worktree-gitignore.ts)
+ * — the codex path is just the single-entry `[".codex/"]` case. Idempotent; respects
  * an explicit `!.codex/` / `!.codex` negation (MED 3 from the Phase 4 review).
  *
  * Returns:

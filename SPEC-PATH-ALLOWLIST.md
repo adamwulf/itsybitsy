@@ -1094,6 +1094,20 @@ sorted, generated, and one resolver function, all tested.
 4. The scratchpad runtime root; audit mode (`paths.audit`); the advisory Bash
    scanner (§6.6, against the resolver); session-start text; `ib info` and
    dashboard display; SPEC §2.2, §5.2, §6.1 and the implementation notes.
+5. `ib sandbox refresh <id> | --all`: re-derive an existing agent's sandbox
+   block and path lists from the current `.md` files, rewrite its `meta.json`,
+   and resume it. Required by the enable-all gate, because a resumed agent
+   otherwise rebuilds its profile from the config frozen in its own
+   `meta.json`[^60], so flipping `_all.md` would affect new spawns only.
+
+**Shipping ledger and the gate.** Adam asked on 2026-09-02 at 16:55 for
+documentation that says what is shipped and when, and for a clear gate that
+describes how to enable the sandbox for all agents even if existing agents
+break. Both live in `docs/SANDBOX-ROLLOUT.md`. `path-isolation` wrote the
+seed; `sandbox-safety` owns the file from its Phase A docs step, because its
+branch lands on `main` first; `path-isolation` fills the Phase B rows on
+rebase. One file. "Shipped" means installed: on `main`, `ib` rebuilt and on
+PATH, `ib watch` restarted.
 
 **Parallel option during Phase A**, if Adam wants speed: `path-isolation`
 starts the pieces that touch none of `agent-types.ts`, `newAgent`, or
@@ -1183,3 +1197,4 @@ its wrapper after its own boot-floor bisection.
 [^57]: [registry atomic write: `teams.json.tmp` then rename; lock file `.teams.lock`](src/teams.ts:53-143)
 [^58]: [sandbox.enabled OR-merged across the chain; a descendant may never switch off a sandbox enabled by an ancestor — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:src/agent-types.ts`](src/agent-types.ts:462-506)
 [^59]: [SPEC-SANDBOX §4A.4: "SBPL = last matching rule decides"; precedence rule, deny wins over any allow at both layers; filesystem denies emitted last — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:SPEC-SANDBOX.md`](SPEC-SANDBOX.md:426-446)
+[^60]: [resume prepares the sandbox from `agent.meta.sandbox`, the frozen config, not from the type files — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:src/ib-commands.ts`](src/ib-commands.ts:1531-1548)

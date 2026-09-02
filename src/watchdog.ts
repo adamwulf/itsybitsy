@@ -42,6 +42,7 @@ import { listRepos } from "./registry";
 import { OUTBOX_FILENAME, agentOutboxDir } from "./outbox";
 import { parseModel } from "./agent-cli";
 import type { AgentCli } from "./agent-cli";
+import { AGY_HEARTBEAT_FILENAME } from "./hooks/agy-pre-invocation";
 
 /**
  * Phase 6: classify an agent's CLI for watchdog branching.
@@ -126,6 +127,14 @@ export const COMPACT_CHECK_COOLDOWN_MS = 60_000;
 
 /** Window after restart where a detected Claude compaction is treated as restart-triggered. */
 export const RESTART_COMPACT_CANCEL_WINDOW_MS = 10_000;
+
+/**
+ * Grace period after an agy agent's spawn (measured from meta.created_epoch)
+ * within which the PreInvocation hook must have touched `agy-hook-heartbeat`.
+ * Past this with no heartbeat, the hooks are not firing (usually API-key auth,
+ * issue #893) and the watchdog warns once (SPEC-ANTIGRAVITY-CLI.md D10 / §5.4).
+ */
+export const AGY_HEARTBEAT_GRACE_MS = 60_000;
 
 /**
  * Settle gap between the three compact-cancel Escape keystrokes, in ms.
@@ -415,6 +424,28 @@ export async function notifySpawner(
     const result = await sendMessage(spawnerAgent, message, { fromAgent: WATCHDOG_SENTINEL });
     return result.ok;
   } catch {
+    return false;
+  }
+}
+
+/**
+ * Send a single literal key to a tmux session. Used for the agy survey overlay
+ * dismiss (`0` selects `[0] Skip`) — a menu hotkey, so no trailing Enter. The
+ * key is sent with `-l` (literal) so tmux does not interpret it as a key name.
+ */
+async function sendTmuxKey(tmuxSession: string, key: string): Promise<boolean> {
+  if (!isValidTmuxSession(tmuxSession)) {
+    console.error(`[watchdog] Invalid tmux session name: ${tmuxSession}`);
+    return false;
+  }
+  try {
+    const proc = spawnCtx.runner(
+      ["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "-l", key],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const exitCode = await proc.exited;
+    return exitCode === 0;
+  } catch { /* expected: tmux not running or session gone */
     return false;
   }
 }
@@ -793,8 +824,9 @@ async function handleRateLimited(agent: Agent, tracker: AgentTracker, _getAllAge
   // Phase 6: codex has its own rate-limit UX (no "Esc to dismiss" dialog +
   // no Anthropic usage API). The bypass loop's `parseState` matchers and the
   // `fetchUsage()` call are both claude-specific; skip the handler entirely
-  // for codex agents. Phase 5 will add codex-specific override-state handling
-  // if/when it's needed.
+  // for non-claude agents. agy (SPEC-ANTIGRAVITY-CLI.md D10) is covered by the
+  // same `!== "claude"` gate — its rate-limit strings aren't captured yet, so
+  // rate_limited stays `unknown` for agy and this recovery path is a no-op.
   if (classifyAgentCli(agent.meta.model) !== "claude") return;
 
   const tmuxSession = agent.meta.tmux_session;
@@ -924,7 +956,9 @@ async function handleApiError(agent: Agent, tracker: AgentTracker, _getAllAgents
   // Phase 6: "please retry" is claude-specific UX (typed into claude's TUI in
   // response to its api-error idle prompt). Codex surfaces transient errors
   // differently and there's no equivalent retry-by-keypress affordance, so
-  // skip for codex agents. Phase 5 will add codex-specific handling if needed.
+  // skip for non-claude agents. agy (D10) is covered by the same `!== "claude"`
+  // gate — its api_error strings aren't captured yet, so api_error stays
+  // `unknown` for agy and this retry path is a no-op.
   if (classifyAgentCli(agent.meta.model) !== "claude") return;
 
   const now = nowFn();
@@ -1431,6 +1465,13 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
   const tracker = createTracker();
   let tmuxGoneSince: number | null = null;
   let tmuxObservationUnavailable = false;
+  // agy liveness (D10 / §5.4): the PreInvocation hook touches
+  // `<agentDir>/agy-hook-heartbeat` on the first turn. If it never appears within
+  // AGY_HEARTBEAT_GRACE_MS of spawn, the hooks are not firing — almost always
+  // API-key auth (issue #893), which silently disables hooks and leaves the
+  // agent ungated. We log loudly + notify the manager ONCE (no kill in v1); this
+  // one-shot latch keeps it from repeating every tick.
+  let agyHeartbeatWarned = false;
   const watchdogPidEpoch = Math.floor(Date.now() / 1000);
   const observationDetail = (value: unknown): string =>
     String(value ?? "<none>").replace(/\s+/g, " ").slice(0, 500);
@@ -1519,6 +1560,34 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     // pending nudge/notification is delivered promptly regardless of state.
     await drainNow();
 
+    // agy liveness check (D10 / §5.4). Runs before the tmux capture so it fires
+    // even when the pane is a blank, hookless agy screen. One-shot per watchdog.
+    if (agentCli === "agy" && !agyHeartbeatWarned) {
+      const heartbeatPath = join(agentDir, AGY_HEARTBEAT_FILENAME);
+      const createdMs = (meta.created_epoch ?? 0) * 1000;
+      const spawnedLongEnough = createdMs > 0 && nowFn() - createdMs >= AGY_HEARTBEAT_GRACE_MS;
+      if (spawnedLongEnough && !existsSyncFn(heartbeatPath)) {
+        agyHeartbeatWarned = true;
+        await logAgent(
+          agentDir,
+          "[watchdog] agy hooks never fired — check auth mode (API-key auth disables hooks) and the agy log",
+        );
+        // Notify the manager once (no kill in v1). Best-effort — a delivery
+        // failure must never crash the watchdog.
+        try {
+          const allAgents = await makeLazyAllAgents()();
+          const self = findAgent(allAgents, agentId);
+          if (self) {
+            await notifyManager(
+              self,
+              `agy agent ${agentId}: hooks never fired within ${Math.round(AGY_HEARTBEAT_GRACE_MS / 1000)}s of spawn — likely API-key auth (which disables agy hooks) so this agent is UNGATED. Check the agy log and the auth mode.`,
+              allAgents,
+            );
+          }
+        } catch { /* never crash the watchdog on the notify */ }
+      }
+    }
+
     // Check tmux session. Capture and pane probes are independent evidence:
     // capture failures require an exact has-session absence response, while a
     // successful capture still needs authoritative pane metadata because a
@@ -1598,7 +1667,9 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       // Auto-accept permissions prompts (workspace trust, external imports, MCP servers).
       // Phase 6: claude-only — codex never surfaces these modals (`-a never` +
       // hooks pre-resolve every permission decision), so the regex would never
-      // match in practice. Gating on cli is explicit + skips the regex pass.
+      // match in practice. agy has its OWN fallback answers below (trust card +
+      // survey) with different strings, so it's excluded here too. Gating on cli
+      // is explicit + skips the regex pass.
       if (agentCli === "claude" && /enter to confirm/i.test(output)) {
         if (
           /trust/i.test(output) ||
@@ -1612,6 +1683,30 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
           // in EITHER direction: a drain in flight blocks us until it finishes,
           // and a drain that wants to start blocks until we finish.
           await runSessionExclusive(agentId, () => sendTmuxEnter(tmuxSession));
+          await sleepFn(POLL_INTERVAL_MS);
+          continue;
+        }
+      }
+
+      // agy fallback answers (D10). The trust card is normally suppressed by the
+      // spawn-time pre-trust (D5); if it renders here, pre-trust FAILED and the
+      // first turn may have run ungated — accept it as a fallback but log loudly.
+      // The periodic survey overlay is dismissed with `0` ([0] Skip). Both bare
+      // keystrokes are held under the session-write mutex, exactly like the
+      // claude auto-accept Enter above, so they never interleave an outbox drain.
+      if (agentCli === "agy") {
+        if (/Do you trust the contents of this project\?/i.test(output)) {
+          await logAgent(
+            agentDir,
+            "[watchdog] agy TRUST CARD appeared — pre-trust FAILED (the first turn may have run with no hooks/rules). Accepting as a fallback (Enter); check ensureAgyTrustedWorkspace and ~/.gemini/antigravity-cli/settings.json.",
+          );
+          await runSessionExclusive(agentId, () => sendTmuxEnter(tmuxSession));
+          await sleepFn(POLL_INTERVAL_MS);
+          continue;
+        }
+        if (/How's the CLI experience so far\?/i.test(output)) {
+          await logAgent(agentDir, "[watchdog] agy survey overlay detected — sending 0 to skip");
+          await runSessionExclusive(agentId, () => sendTmuxKey(tmuxSession, "0"));
           await sleepFn(POLL_INTERVAL_MS);
           continue;
         }

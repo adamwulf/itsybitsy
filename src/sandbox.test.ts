@@ -397,9 +397,29 @@ describe("paths frontmatter validation", () => {
     const result = validatePathsFrontmatter({
       allowRead: ["~/Documents/**/*.pdf"],
       allowWrite: ["~/Documents/**/*.txt"],
+    }, "/Users/tester");
+    expect(result.errors).toContain(
+      'paths.allowRead entry "~/Documents/**/*.pdf" and paths.allowWrite entry "~/Documents/**/*.txt" are different globs with the same literal prefix "/Users/tester/Documents/"',
+    );
+  });
+
+  test("rejects home and absolute globs that share a canonical prefix", () => {
+    const result = validatePathsFrontmatter({
+      allowRead: ["~/Documents/*.md"],
+      allowWrite: ["/Users/tester/Documents/*.txt"],
+    }, "/Users/tester");
+    expect(result.errors).toContain(
+      'paths.allowRead entry "~/Documents/*.md" and paths.allowWrite entry "/Users/tester/Documents/*.txt" are different globs with the same literal prefix "/Users/tester/Documents/"',
+    );
+  });
+
+  test("rejects /tmp and /private/tmp globs that share a canonical prefix", () => {
+    const result = validatePathsFrontmatter({
+      allowRead: ["/tmp/itsybitsy/*.md"],
+      allowWrite: ["/private/tmp/itsybitsy/*.txt"],
     });
     expect(result.errors).toContain(
-      'paths.allowRead entry "~/Documents/**/*.pdf" and paths.allowWrite entry "~/Documents/**/*.txt" are different globs with the same literal prefix "~/Documents/"',
+      'paths.allowRead entry "/tmp/itsybitsy/*.md" and paths.allowWrite entry "/private/tmp/itsybitsy/*.txt" are different globs with the same literal prefix "/private/tmp/itsybitsy/"',
     );
   });
 

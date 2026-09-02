@@ -6,6 +6,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { interpolateTemplate } from "./hooks/session-start";
 import { setUserHome, resetUserHome } from "./home";
+import { canonicalizeSandboxPath } from "./sandbox";
 
 test("parseAgentTypeFile: parses frontmatter and body", () => {
   const content = `---
@@ -1739,7 +1740,7 @@ paths:
 body`);
     const errors = await validateAllAgentTypes();
     expect(errors).toContain(
-      'bad-globs.md: paths.allowRead entry "~/Documents/**/*.pdf" and paths.allowWrite entry "~/Documents/**/*.txt" are different globs with the same literal prefix "~/Documents/"',
+      `bad-globs.md: paths.allowRead entry "~/Documents/**/*.pdf" and paths.allowWrite entry "~/Documents/**/*.txt" are different globs with the same literal prefix "${canonicalizeSandboxPath(tempHome)}/Documents/"`,
     );
   });
 

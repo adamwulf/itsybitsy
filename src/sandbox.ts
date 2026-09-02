@@ -142,7 +142,7 @@ export function canonicalizePathsConfig(
   paths: PathsConfig,
   home?: string,
 ): PathsConfig {
-  const validation = validatePathsFrontmatter(paths);
+  const validation = validatePathsFrontmatter(paths, home);
   if (validation.errors.length > 0) {
     throw new Error(validation.errors[0]);
   }
@@ -441,7 +441,10 @@ export function validateSandboxFrontmatter(value: unknown): SandboxValidationRes
 }
 
 /** Validate the raw, one-level `paths:` frontmatter object. */
-export function validatePathsFrontmatter(value: unknown): SandboxValidationResult {
+export function validatePathsFrontmatter(
+  value: unknown,
+  home?: string,
+): SandboxValidationResult {
   const errors: string[] = [];
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return {
@@ -450,6 +453,7 @@ export function validatePathsFrontmatter(value: unknown): SandboxValidationResul
     };
   }
 
+  const resolvedHome = sandboxHome(home);
   const paths = value as Record<string, unknown>;
   for (const key of Object.keys(paths)) {
     if (!(PATHS_KEYS as readonly string[]).includes(key)) {
@@ -470,7 +474,7 @@ export function validatePathsFrontmatter(value: unknown): SandboxValidationResul
         return;
       }
       try {
-        compileSandboxPath(entry);
+        compileSandboxPath(entry, resolvedHome);
       } catch (err) {
         errors.push(`paths.${key}[${index}]: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -484,10 +488,12 @@ export function validatePathsFrontmatter(value: unknown): SandboxValidationResul
     ? paths.allowWrite.filter((entry): entry is string => typeof entry === "string" && /[*?]/.test(entry))
     : [];
   for (const readEntry of readGlobs) {
-    const readPrefix = readEntry.slice(0, readEntry.search(/[*?]/));
+    const canonicalRead = canonicalizeGlobPrefix(expandHome(readEntry, resolvedHome));
+    const readPrefix = canonicalRead.slice(0, canonicalRead.search(/[*?]/));
     for (const writeEntry of writeGlobs) {
       if (readEntry === writeEntry) continue;
-      const writePrefix = writeEntry.slice(0, writeEntry.search(/[*?]/));
+      const canonicalWrite = canonicalizeGlobPrefix(expandHome(writeEntry, resolvedHome));
+      const writePrefix = canonicalWrite.slice(0, canonicalWrite.search(/[*?]/));
       if (readPrefix === writePrefix) {
         errors.push(
           `paths.allowRead entry "${readEntry}" and paths.allowWrite entry "${writeEntry}" are different globs with the same literal prefix "${readPrefix}"`,

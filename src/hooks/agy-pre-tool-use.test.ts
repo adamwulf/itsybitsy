@@ -59,14 +59,18 @@ describe("checkAgyPreToolUse — path isolation", () => {
     expect(d.reason).toContain("other agents");
   });
 
-  test("run_command cat ../other is denied when cat is not allow-listed", () => {
-    const ctx = makeCtx({ allowList: ["Bash(git status:*)"] });
+  test("run_command cat into a sibling worktree is a PATH-ISOLATION deny under the default allow list", () => {
+    // cat IS allow-listed (bare Bash). The denial must come from path isolation,
+    // not the allow list — this fails before boundary-review fix 1 and passes
+    // after. ../../agent-other/repo/secret resolves to a sibling under agentsDir.
+    const ctx = makeCtx();
     const d = checkAgyPreToolUse(
-      { toolName: "run_command", toolArgs: { CommandLine: "cat ../other", Cwd: ctx.worktreePath } },
+      { toolName: "run_command", toolArgs: { CommandLine: "cat ../../agent-other/repo/secret", Cwd: ctx.worktreePath } },
       ctx,
     );
     expect(d.decision).toBe("deny");
-    expect(d.reason).toBe("Tool not in allow list");
+    expect(d.reason).toContain("other agents");
+    expect(d.reason).not.toBe("Tool not in allow list");
   });
 
   test("in-worktree view_file (Read) is allowed", () => {

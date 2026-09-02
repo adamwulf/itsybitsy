@@ -18,6 +18,7 @@ import {
   clearAgentOperation,
   readAgentTransient,
   resetReadAgentMetaCache,
+  readAgentMeta,
   readAllAgents,
   buildAgentTree,
 } from "./agents";
@@ -4431,6 +4432,61 @@ sandbox:
     expect((await Bun.file(join(agentDir, "meta.json")).json()).state).toBe("stopped");
     expect(await Bun.file(join(agentDir, "sandbox.sb")).exists()).toBe(false);
     expect(resumeCommands.some((cmd) => cmd[0] === "/usr/bin/sandbox-exec")).toBe(false);
+  });
+
+  test("disabled legacy sandbox metadata resumes without paths or sandbox setup", async () => {
+    const id = "legacy-disabled-no-paths";
+    await writeSandboxType("sandbox-disabled-legacy", { enabled: false });
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99987 }));
+    const spawned = await callNewAgent("legacy disabled", {
+      name: id,
+      type: "sandbox-disabled-legacy",
+    });
+    expect(spawned.ok).toBe(true);
+
+    const agentDir = join(agentsDir, id);
+    const start = await Bun.file(join(agentDir, "start.sh")).text();
+    const legacyMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    const expectedSandbox = structuredClone(legacyMeta.sandbox);
+    legacyMeta.state = "stopped";
+    legacyMeta.session_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+    delete legacyMeta.paths;
+    legacyMeta.sandbox.allowRead = ["/legacy/read"];
+    legacyMeta.sandbox.allowWrite = ["/legacy/write"];
+    legacyMeta.sandbox.deny = ["**/.env"];
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(legacyMeta, null, 2));
+
+    resetReadAgentMetaCache();
+    const { meta: coercedMeta, error } = await readAgentMeta(agentDir);
+    expect(error).toBeUndefined();
+    expect(coercedMeta?.paths).toBeUndefined();
+    expect(coercedMeta?.sandbox).toEqual(expectedSandbox);
+
+    spawnCalls = [];
+    setNukeResumeSpawnRunner(cleanWorktreeRunner());
+    setSendSpawnRunner(() => makeSpawnResult("", 0));
+    let resumed;
+    try {
+      resumed = await resumeAgent(makeAgent(id, tempDir, "stopped", coercedMeta!));
+    } finally {
+      resetSendSpawnRunner();
+    }
+
+    expect(resumed.ok).toBe(true);
+    const resume = await Bun.file(join(agentDir, "resume.sh")).text();
+    const resumedMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(resumedMeta.paths).toBeUndefined();
+    expect(resumedMeta.sandbox_proxy_port).toBeUndefined();
+    expect(resumedMeta.sandbox_proxy_pid).toBeUndefined();
+    expect(await Bun.file(join(agentDir, "sandbox.sb")).exists()).toBe(false);
+    expect(await Bun.file(join(agentDir, "sandbox-proxy.pid")).exists()).toBe(false);
+    expect(start).not.toContain("sandbox-exec");
+    expect(start).not.toContain("sandbox-proxy-launch");
+    expect(resume).not.toContain("sandbox-exec");
+    expect(resume).not.toContain("sandbox-proxy-launch");
+    expect(spawnCalls.some((cmd) => cmd[0] === "/usr/bin/sandbox-exec")).toBe(false);
   });
 
   test("sandbox-enabled Codex spawn uses danger-full-access inside our wrapper and proxy", async () => {

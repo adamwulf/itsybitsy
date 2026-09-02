@@ -110,6 +110,7 @@ The interesting modules and their entry points:
 | Hooks | `src/hooks/` |
 | Agent types | `src/agent-types.ts`, `docs/agent-types/*.md` (embedded) |
 | Codex CLI | `src/codex-spawn.ts`, `src/codex-config.ts`, `src/hooks/codex-*.ts` |
+| Antigravity CLI (`agy`) | `src/agy-spawn.ts`, `src/agy-config.ts`, `src/agy-version.ts`, `src/hooks/agy-*.ts` |
 | Mutations | `src/ib-commands.ts`, `src/agent-lifecycle.ts` |
 | TUI | `src/tui/dashboard.ts`, `src/tui/split-pane.ts`, `src/tui/widths.ts`, `src/tmux-poller.ts` |
 | Config | `src/config.ts` (user-wide; per-agent permissions live in agent-type `.md` files) |

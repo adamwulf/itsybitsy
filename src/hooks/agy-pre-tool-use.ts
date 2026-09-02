@@ -34,6 +34,7 @@ import { loadMergedAgentTypePermissions } from "./shared";
 import { resolveAgentContext } from "./agent-context";
 import {
   checkPathAccess,
+  checkIbCommandAccess,
   toolMatchesPattern,
   type HookDecision,
   type PathCheckContext,
@@ -252,7 +253,25 @@ export async function hookAgyPreToolUse(
       allowedPaths: ctxResolved.allowedPaths,
     };
 
-    const decision = checkAgyPreToolUse({ toolName, toolArgs }, ctx, permissions.deny);
+    // Parity with hookCheckPath: manager-only ib subcommands (retire / merge /
+    // nuke / pause / resume / reassign <target>) require the caller to be the
+    // target's manager or spawner. run_command is agy's Bash, so gate its
+    // CommandLine the same way, BEFORE the path/allow-list decision. A non-ib or
+    // non-manager-only command returns null and falls through unchanged.
+    let ibDenial: HookDecision | null = null;
+    if (toolName === "run_command") {
+      const rc =
+        toolArgs && typeof toolArgs === "object" && !Array.isArray(toolArgs)
+          ? (toolArgs as Record<string, unknown>)
+          : {};
+      const command = typeof rc.CommandLine === "string" ? rc.CommandLine : "";
+      if (command) {
+        ibDenial = await checkIbCommandAccess(command, agentId, ctxResolved.agentsDir);
+      }
+    }
+
+    const decision =
+      ibDenial ?? checkAgyPreToolUse({ toolName, toolArgs }, ctx, permissions.deny);
 
     if (decision.decision === "allow") {
       write(buildAgyAllowOutput(decision.reason));

@@ -395,6 +395,22 @@ describe("hookAgyPreToolUse — {decision,reason} contract", () => {
     expect(parsed.decision).toBe("allow");
   });
 
+  test("run_command 'ib retire <other>' is denied when the caller is not the manager (checkIbCommandAccess parity)", async () => {
+    // Create a sibling target agent this caller does not manage.
+    const agentsDir = join(agentDir, "..");
+    const targetDir = join(agentsDir, "agent-target");
+    await mkdir(targetDir, { recursive: true });
+    await writeFile(
+      join(targetDir, "meta.json"),
+      JSON.stringify({ id: "agent-target", manager: "some-other-manager", agentType: "worker" }),
+    );
+    const parsed = await run(JSON.stringify({
+      toolCall: { name: "run_command", args: { CommandLine: "ib retire agent-target", Cwd: join(agentDir, "repo") } },
+    }));
+    expect(parsed.decision).toBe("deny");
+    expect(parsed.reason).toContain("manager or spawner");
+  });
+
   test("an agent-type deny (Write) is loaded and enforced end-to-end", async () => {
     // Re-declare _all so the merged deny list carries Write, then confirm the
     // full hook (which loads permissions.deny via loadAgyEffectivePermissions)

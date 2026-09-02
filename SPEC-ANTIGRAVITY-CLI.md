@@ -141,6 +141,7 @@ Watchdog gating + two answers + heartbeat check; `parseStateForCli` agy branch w
 5. **Alt-screen capture** shows only the current screen; long transcripts are not scrollable from the dashboard for `agy` agents.
 6. **Repos that track `.agents/hooks.json` or the rules path** cannot host `agy` agents in v1 (spawn refuses).
 7. **Quota / licensing.** The account on this machine shows `Antigravity Starter Quota`; a 403 on the quota endpoint was seen once. Rate-limit strings are not captured yet.
+8. **codex handler omits `checkIbCommandAccess` (parity gap, follow-up).** Phase 1 added the manager-only-`ib`-subcommand relationship check (`ib retire/merge/nuke/pause/resume/reassign <other>`) to the agy PreToolUse handler, matching the claude `hookCheckPath`. The codex `hookCodexPreToolUse` still lacks it, so a codex agent with `Bash(ib:*)` can run those subcommands against agents it does not manage. Not changed in the agy Phase 1 work to keep codex byte-identical; track as a codex-side follow-up (add the same `checkIbCommandAccess` call for Bash before `checkCodexPreToolUse`).
 
 ---
 

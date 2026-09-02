@@ -167,6 +167,43 @@ describe("RightPaneComponent", () => {
     expect(stripAnsi(lines[0]!).trim()).toBe("short line");
   });
 
+  test("AGENT LOG word-wraps at word boundaries (no mid-token split)", () => {
+    // AGENT LOG (like INITIAL PROMPT / ERRORS) is agent prose — the non-QUESTIONS
+    // branch word-wraps via wordWrapLines: it breaks at spaces so words aren't
+    // split mid-token, hard-wrapping only over-width tokens. Every word below is
+    // shorter than the wrap width, so each must appear whole on a single row — a
+    // character-wrap would break a word straddling the boundary.
+    const words = [
+      "antidisestablish",
+      "reflow",
+      "keeps",
+      "whole",
+      "words",
+      "intact",
+      "across",
+      "boundaries",
+      "reliably",
+      "everywhere",
+    ];
+    const rp = new RightPaneComponent();
+    rp.displayHeight = 20;
+    rp.agentLogContent = [words.join(" ")];
+    rp.setMode("AGENT LOG");
+    const width = 24;
+    const rows = rp.render(width).map(stripAnsi);
+    const contentRows = rows.filter((r) => r.trim().length > 0);
+    // The single logical line wrapped across several rows.
+    expect(contentRows.length).toBeGreaterThan(1);
+    // Every whole word survives intact on ONE row (no mid-word split).
+    for (const word of words) {
+      expect(contentRows.some((r) => r.includes(word))).toBe(true);
+    }
+    // No rendered row exceeds the pane width.
+    for (const r of rows) {
+      expect(visibleWidth(r)).toBeLessThanOrEqual(width);
+    }
+  });
+
   test("filteredQuestions returns all when no agent", () => {
     const rp = new RightPaneComponent();
     rp.questions = [

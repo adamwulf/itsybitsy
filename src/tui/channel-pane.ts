@@ -50,7 +50,7 @@ import { truncateToWidth } from "@mariozechner/pi-tui";
 import { readChannel, type ChannelMessage } from "../team-channel";
 import { readConfig } from "../config";
 import { expandTabs } from "../tmux-poller";
-import { wrapLines, padLines } from "./wrap";
+import { wordWrapLines, padLines } from "./wrap";
 import { RESET, BOLD, DIM, CYAN, BRIGHT_BLUE, BRIGHT_MAGENTA } from "./colors";
 
 /**
@@ -233,7 +233,9 @@ export class ChannelPaneComponent implements Component {
 
     // Build the full wrapped line list (newest at the bottom). Each record
     // becomes a `HH:MM` dim gutter + the per-kind formatted body, then is
-    // hard-wrapped to the pane width (ANSI-aware) like the tmux pane does.
+    // word-wrapped to the pane width (ANSI-aware) like the tmux pane does —
+    // breaking at spaces so words aren't split mid-token, hard-wrapping only
+    // over-width tokens.
     // The gutter shape is identical for chat and system records (the clock-
     // time is useful context for both); only the body changes — chat uses the
     // §16.4 sender-prefixed grammar, system uses the dimmed `── … ──` form.
@@ -254,7 +256,7 @@ export class ChannelPaneComponent implements Component {
       // lines are prefixed with two spaces. We wrap to (width - 2) so the
       // indented continuations don't overflow the pane and get truncated by
       // truncateToWidth below.
-      const segments = wrapLines(expandTabs(gutter + body), Math.max(1, width - 2));
+      const segments = wordWrapLines(expandTabs(gutter + body), Math.max(1, width - 2));
       for (let s = 0; s < segments.length; s++) {
         wrapped.push(s === 0 ? segments[s]! : `  ${segments[s]!}`);
       }

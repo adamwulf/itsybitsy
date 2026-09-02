@@ -22,7 +22,7 @@
  *
  * No subprocesses are spawned from this module. The dispatcher precheck and
  * pre-trust that the spawn path also runs live in `ib-commands.ts` so they can
- * share `newAgentSpawnCtx` / `codexDryRunSpawnCtx` with the rest of the flow.
+ * share `newAgentSpawnCtx` / `dispatcherDryRunSpawnCtx` with the rest of the flow.
  */
 
 import { join, dirname } from "path";

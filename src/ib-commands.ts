@@ -1421,11 +1421,11 @@ export async function resumeAgent(
       // worktree — it is the user's existing agent state, not ours to nuke.
       const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-stop"];
       for (const event of codexPrecheckEvents) {
-        // Route through codexDryRunSpawnCtx with cwd=workPath so the dry-run
+        // Route through dispatcherDryRunSpawnCtx with cwd=workPath so the dry-run
         // subprocess's process.cwd() lands inside the agent's worktree —
         // identical reason to the newAgent path above (resolveAgentDir's
         // cwd regex must match `/\.ittybitty\/agents/`).
-        const result = await codexDryRunSpawnCtx.run(
+        const result = await dispatcherDryRunSpawnCtx.run(
           [codexIbBinaryPath, "hooks", event, agent.id, "--dry-run"],
           workPath,
         );
@@ -1583,11 +1583,11 @@ export async function resumeAgent(
       }
 
       // Resume-time dispatcher precheck (same fail-closed rationale as spawn).
-      // Routed through codexDryRunSpawnCtx with cwd=workPath so the runtime
+      // Routed through dispatcherDryRunSpawnCtx with cwd=workPath so the runtime
       // handlers resolve agentsDir from the worktree cwd.
       const agyPrecheckEvents = ["agy-pre-tool-use", "agy-pre-invocation", "agy-stop"];
       for (const event of agyPrecheckEvents) {
-        const result = await codexDryRunSpawnCtx.run(
+        const result = await dispatcherDryRunSpawnCtx.run(
           [agyIbBinaryPath, "hooks", event, agent.id, "--dry-run"],
           workPath,
         );
@@ -2759,8 +2759,12 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
       // D5 teardown: drop the worktree from agy's trustedWorkspaces BEFORE the
       // worktree is removed (so realpath still resolves). No-op + never throws
       // for claude/codex agents (gated on meta.model inside the helper).
-      const { untrustAgyWorkspaceForTeardown } = await import("./agy-spawn");
-      await untrustAgyWorkspaceForTeardown(agentDir, worktreePath);
+      try {
+        const { untrustAgyWorkspaceForTeardown } = await import("./agy-spawn");
+        await untrustAgyWorkspaceForTeardown(agentDir, worktreePath);
+      } catch {
+        /* a module-load failure must never abort a teardown */
+      }
 
       await logAgent(agentDir, "Removing worktree...");
       const removeResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "worktree", "remove", worktreePath, "--force"]);
@@ -3666,32 +3670,33 @@ export function resetNewAgentSpawnRunner(): void {
 }
 
 /**
- * Injectable spawn function for the codex dispatcher dry-run precheck.
- * Takes an explicit `cwd` so the spawned `ib hooks <event> <id> --dry-run`
- * subprocess inherits the agent's worktree path — without this, the dry-run
- * resolves agentsDir relative to the parent process's cwd, which is wrong
- * when the spawn caller (e.g. system coordinator) lives outside any worktree.
+ * Injectable spawn function for the hook-dispatcher dry-run precheck, shared by
+ * BOTH the codex and agy spawn/resume paths (each runs `ib hooks <event> <id>
+ * --dry-run`). Takes an explicit `cwd` so the subprocess inherits the agent's
+ * worktree path — without this, the dry-run resolves agentsDir relative to the
+ * parent process's cwd, which is wrong when the spawn caller (e.g. system
+ * coordinator) lives outside any worktree.
  *
  * Kept separate from SpawnContext/SpawnFn so we don't have to widen the
- * shared signature; tests can inject via setCodexDryRunSpawnRunner.
+ * shared signature; tests can inject via setDispatcherDryRunSpawnRunner.
  */
-export type CodexDryRunFn = (
+export type DispatcherDryRunFn = (
   cmd: string[],
   cwd: string,
 ) => import("./types").SpawnResult;
 
-const defaultCodexDryRunFn: CodexDryRunFn = (cmd, cwd) =>
+const defaultDispatcherDryRunFn: DispatcherDryRunFn = (cmd, cwd) =>
   Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", cwd }) as import("./types").SpawnResult;
 
-class CodexDryRunContext {
-  private _fn: CodexDryRunFn = defaultCodexDryRunFn;
+class DispatcherDryRunContext {
+  private _fn: DispatcherDryRunFn = defaultDispatcherDryRunFn;
 
-  set(fn: CodexDryRunFn): void {
+  set(fn: DispatcherDryRunFn): void {
     this._fn = fn;
   }
 
   reset(): void {
-    this._fn = defaultCodexDryRunFn;
+    this._fn = defaultDispatcherDryRunFn;
   }
 
   async run(
@@ -3708,17 +3713,17 @@ class CodexDryRunContext {
   }
 }
 
-/** Spawn context for the codex spawn-time dispatcher dry-run precheck. */
-export const codexDryRunSpawnCtx = new CodexDryRunContext();
+/** Spawn context for the shared codex/agy spawn- and resume-time dispatcher dry-run precheck. */
+export const dispatcherDryRunSpawnCtx = new DispatcherDryRunContext();
 
-/** Override the codex dry-run spawn runner (for testing). */
-export function setCodexDryRunSpawnRunner(fn: CodexDryRunFn): void {
-  codexDryRunSpawnCtx.set(fn);
+/** Override the dispatcher dry-run spawn runner (for testing). */
+export function setDispatcherDryRunSpawnRunner(fn: DispatcherDryRunFn): void {
+  dispatcherDryRunSpawnCtx.set(fn);
 }
 
-/** Reset the codex dry-run spawn runner. */
-export function resetCodexDryRunSpawnRunner(): void {
-  codexDryRunSpawnCtx.reset();
+/** Reset the dispatcher dry-run spawn runner. */
+export function resetDispatcherDryRunSpawnRunner(): void {
+  dispatcherDryRunSpawnCtx.reset();
 }
 
 /** Injectable watchdog spawn for testing — returns PID or undefined */
@@ -4746,8 +4751,12 @@ export async function newAgent(
     // must still be readable (the helper gates on meta.model) and the worktree
     // realpath must still resolve. It self-gates to agy and never throws, so it
     // is a safe no-op for claude/codex failures.
-    const { untrustAgyWorkspaceForTeardown } = await import("./agy-spawn");
-    await untrustAgyWorkspaceForTeardown(agentDir, join(agentDir, "repo"));
+    try {
+      const { untrustAgyWorkspaceForTeardown } = await import("./agy-spawn");
+      await untrustAgyWorkspaceForTeardown(agentDir, join(agentDir, "repo"));
+    } catch {
+      /* a module-load failure must never abort spawn-failure cleanup */
+    }
     await rm(agentDir, { recursive: true, force: true });
     if (useWorktree) {
       await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
@@ -4930,14 +4939,14 @@ export async function newAgent(
       // (e.g. tmux session kill) are inherited automatically.
       const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-stop"];
       for (const event of codexPrecheckEvents) {
-        // Route through codexDryRunSpawnCtx with cwd=workPath so the dry-run
+        // Route through dispatcherDryRunSpawnCtx with cwd=workPath so the dry-run
         // subprocess's process.cwd() lands inside the agent's worktree. The
         // hook handlers' resolveAgentContext / resolveAgentDir regex matches
         // `/\.ittybitty\/agents/` in cwd; without this, callers whose cwd is
         // outside any worktree (e.g. system coordinator at ~/.itsybitsy/repo)
         // would fall back to `<cwd>/.ittybitty/agents/<id>` and the dry-run
         // would fail with `meta.json not found`.
-        const result = await codexDryRunSpawnCtx.run(
+        const result = await dispatcherDryRunSpawnCtx.run(
           [codexIbBinaryPath!, "hooks", event, id, "--dry-run"],
           workPath,
         );
@@ -5066,12 +5075,12 @@ export async function newAgent(
       // agy hook-dispatcher precheck. agy's hook contract is fail-closed (a
       // crash/timeout DENIES), so a broken dispatcher can't open the gate — but
       // it would deny every tool call and wedge the agent. Catch that before
-      // the tmux session exists. Routed through codexDryRunSpawnCtx (the shared
+      // the tmux session exists. Routed through dispatcherDryRunSpawnCtx (the shared
       // dispatcher-dry-run context) with cwd=workPath so the runtime handlers
       // resolve agentsDir from the worktree cwd, identical to the codex path.
       const agyPrecheckEvents = ["agy-pre-tool-use", "agy-pre-invocation", "agy-stop"];
       for (const event of agyPrecheckEvents) {
-        const result = await codexDryRunSpawnCtx.run(
+        const result = await dispatcherDryRunSpawnCtx.run(
           [agyIbBinaryPath!, "hooks", event, id, "--dry-run"],
           workPath,
         );

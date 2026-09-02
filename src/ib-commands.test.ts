@@ -59,8 +59,8 @@ import {
   resetMergeSpawnRunner,
   setNewAgentSpawnRunner,
   resetNewAgentSpawnRunner,
-  setCodexDryRunSpawnRunner,
-  resetCodexDryRunSpawnRunner,
+  setDispatcherDryRunSpawnRunner,
+  resetDispatcherDryRunSpawnRunner,
   setDiffStatusSpawnRunner,
   resetDiffStatusSpawnRunner,
   hooksStatus,
@@ -2010,7 +2010,7 @@ describe("resumeAgent (native)", () => {
     const { setCoordinatorHome } = await import("./coordinator");
     setCoordinatorHome(join(tempDir, "coord-home"));
     // Default codex dry-run runner: capture (cmd, cwd) + succeed.
-    setCodexDryRunSpawnRunner((cmd, cwd) => {
+    setDispatcherDryRunSpawnRunner((cmd, cwd) => {
       codexDryRunCalls.push({ cmd, cwd });
       return makeSpawnResult();
     });
@@ -2022,7 +2022,7 @@ describe("resumeAgent (native)", () => {
     resetSendSpawnRunner();
     const { resetCoordinatorHome } = await import("./coordinator");
     resetCoordinatorHome();
-    resetCodexDryRunSpawnRunner();
+    resetDispatcherDryRunSpawnRunner();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -2973,7 +2973,7 @@ describe("resumeAgent (native)", () => {
     setNukeResumeSpawnRunner(baseRunner);
     // The dry-run now goes through codexDryRunSpawnCtx — inject failure
     // there to simulate a broken dispatcher.
-    setCodexDryRunSpawnRunner((cmd, cwd) => {
+    setDispatcherDryRunSpawnRunner((cmd, cwd) => {
       codexDryRunCalls.push({ cmd, cwd });
       return makeSpawnResult(1, "", "dispatcher broken");
     });
@@ -4106,7 +4106,7 @@ describe("newAgent (native)", () => {
   // so the runtime hook can resolve agentsDir from the worktree cwd. Without
   // capturing cwd here, tests can't verify the fix that routes workPath into
   // the subprocess. Tests that need to inject precheck failure should override
-  // via setCodexDryRunSpawnRunner.
+  // via setDispatcherDryRunSpawnRunner.
   let codexDryRunCalls: Array<{ cmd: string[]; cwd: string }>;
 
   beforeEach(async () => {
@@ -4116,7 +4116,7 @@ describe("newAgent (native)", () => {
     codexDryRunCalls = [];
 
     // Default codex dry-run runner: capture (cmd, cwd) + succeed.
-    setCodexDryRunSpawnRunner((cmd, cwd) => {
+    setDispatcherDryRunSpawnRunner((cmd, cwd) => {
       codexDryRunCalls.push({ cmd, cwd });
       return makeSpawnResult("", 0);
     });
@@ -4152,7 +4152,7 @@ describe("newAgent (native)", () => {
 
   afterEach(async () => {
     resetNewAgentSpawnRunner();
-    resetCodexDryRunSpawnRunner();
+    resetDispatcherDryRunSpawnRunner();
     resetNewAgentSummaryGenerator();
     lifecycleSpawnCtx.reset();
     resetUserConfigPath();
@@ -6786,7 +6786,7 @@ body`,
       setNewAgentSpawnRunner(customSpawn);
       // Codex dispatcher precheck now goes through codexDryRunSpawnCtx —
       // inject failure here to simulate a broken dispatcher.
-      setCodexDryRunSpawnRunner((cmd, cwd) => {
+      setDispatcherDryRunSpawnRunner((cmd, cwd) => {
         codexDryRunCalls.push({ cmd, cwd });
         return makeSpawnResult("", 1);
       });
@@ -7119,7 +7119,7 @@ body`,
 
     test("fails the spawn cleanly when the dispatcher precheck exits non-zero — no tmux session", async () => {
       setNewAgentSpawnRunner(agyRunner());
-      setCodexDryRunSpawnRunner((cmd, cwd) => {
+      setDispatcherDryRunSpawnRunner((cmd, cwd) => {
         codexDryRunCalls.push({ cmd, cwd });
         return makeSpawnResult("", 1);
       });
@@ -7216,7 +7216,7 @@ body`,
       setNewAgentSpawnRunner(agyRunner());
       // Precheck fails — this runs AFTER the pre-trust, so the worktree realpath
       // is already in trustedWorkspaces when cleanupOnFailure fires.
-      setCodexDryRunSpawnRunner((cmd, cwd) => {
+      setDispatcherDryRunSpawnRunner((cmd, cwd) => {
         codexDryRunCalls.push({ cmd, cwd });
         return makeSpawnResult("", 1);
       });

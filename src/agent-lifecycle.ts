@@ -852,8 +852,12 @@ export async function teardownAgent(
   // trustedWorkspaces BEFORE it is removed (so realpath still resolves). The
   // helper reads meta.model and is a no-op — and never throws — for
   // claude/codex agents, so teardown can't fail on it.
-  const { untrustAgyWorkspaceForTeardown } = await import("./agy-spawn");
-  await untrustAgyWorkspaceForTeardown(agentDir, join(agentDir, "repo"));
+  try {
+    const { untrustAgyWorkspaceForTeardown } = await import("./agy-spawn");
+    await untrustAgyWorkspaceForTeardown(agentDir, join(agentDir, "repo"));
+  } catch {
+    /* a module-load failure must never abort a teardown */
+  }
 
   // 6. Remove git worktree
   const repoDir = join(agentDir, "repo");

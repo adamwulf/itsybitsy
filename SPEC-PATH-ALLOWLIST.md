@@ -263,6 +263,7 @@ One field, `allowedPaths`, four forms, classified by prefix:
 | Absolute | `/Users/adam/Developer/shared-lib` | none |
 | Home | `~/Documents`, bare `~` | `$HOME`, as today[^5] |
 | Relative | `../fumble` | the main repo root the worktree was spawned from (decided, §7) |
+| Glob | `**/.env`, `~/secrets/*`, `../fumble/**/*.md` | as the sandbox grammar[^32]; a relative glob is anchored first, then compiled |
 | Explicit anchor tokens | `{{repoRoot}}/../fumble`, `{{worktree}}/build` | optional; makes intent visible in the `.md`; not requested |
 
 Bare names without a leading `/`, `~`, `.` or token are a spawn error, mirroring
@@ -285,6 +286,9 @@ Replace the current block[^5] with:
 The hooks need no change for file tools: they already receive absolute paths.
 
 ### 6.3 Layer contribution (decided: union)
+
+*Superseded in part by §6.11: with the single model there is no mode, so the
+"leaf decides the mode" proposal below falls away. The union rule stands.*
 
 Today only the type and its `inherits:` chain feed the list, and a child
 replaces its parent[^4][^5]. Adam chose to layer the lists the same way
@@ -521,6 +525,96 @@ scratchpad, §6.5 codex context. Then `agent/sandbox-safety`: the
 deny. Last: the §6.6 advisory scanner, which matters most for agy because agy
 has no kernel layer.
 
+### 6.11 Adam's question: are there two agent types, strict and permissive?
+
+No. No agent type is named strict or permissive. The two words name two
+**modes of one frontmatter field**, `allowedPaths`, on any type[^2][^25]:
+
+| Leaf frontmatter | Mode | Hook behaviour |
+|---|---|---|
+| `allowedPaths` key absent | permissive | steps 7 to 11 (always-allowed and always-denied sets), then step 13 allows everything else |
+| `allowedPaths: []` | strict | steps 7 to 11, then step 12 denies everything else |
+| `allowedPaths: [entries]` | strict | steps 7 to 11, then step 12 allows only the entries |
+
+The presence of the key in the leaf type's frontmatter decides the mode[^2].
+All seven live types omit it, so every live agent is permissive. `meta.json`
+carries the field only when the leaf defined it[^5].
+
+**Where path permissions are defined today.** Three places, which is the
+problem:
+
+1. In code, per agent, in no `.md` file: the always-allowed set (worktree, own
+   `agent.log`, own Claude project dir) and the always-denied set (other agents'
+   dirs, main repo, protected files)[^6]. Codex adds hard-coded `--add-dir`
+   roots of its own[^14][^15].
+2. In the type `.md`: `allowedPaths`, from the leaf and its `inherits:` chain
+   only[^4][^5].
+3. In the type `.md`, sandbox branch only: the `sandbox:` block (`enabled`,
+   `allowRead`, `allowWrite`, `deny`, `rawAllow`, `domains`), unioned across all
+   layers with the baseline in `_all.md`[^43], plus runtime-injected roots for
+   the agent dir, the git dir, and the repo agents dir[^49].
+
+**Proposed single model.** This matches the stated goal: one kind of agent, all
+path permissions in the `.md` files, basic defaults shipped.
+
+1. **One mode, deny by default.** Remove the permissive mode. An agent's
+   effective allow set is the union of `_all.md`, `_non_coordinator.md`, the
+   `inherits:` chain, and the leaf. A type that wants everything says so:
+   `allowedPaths: ["/"]`. The sandbox spec already requires "fully open" to be
+   explicit[^48].
+2. **One vocabulary.** A top-level `paths:` block with `allowRead`,
+   `allowWrite`, and `deny`, one nesting level, parsed like `permissions:`.
+   `sandbox-safety` proposed this and it is adopted here. `sandbox:` keeps only
+   the kernel-only knobs: `enabled`, `rawAllow`, `domains`. `allowedPaths` is
+   retired. No live type uses it, so there is no config migration, but its code
+   goes: parse and validation in `agent-types.ts`[^2][^3], the resolution block
+   in `newAgent`[^5], hook steps 12 and 13[^6], the session-start text[^24], and
+   SPEC §2.2, §5.2, §6.1[^25]. All three lists accept the §6.1 grammar plus
+   globs; relative entries anchor at the main repo root. Everything compiles at
+   spawn into `meta.json`: absolute paths for plain entries, anchored patterns
+   for globs. The hook and the kernel both read `meta.json` (§6.10). A sugar
+   `paths.allow: [x]` meaning read plus write can come later if the duplication
+   annoys.
+3. **Basic defaults live in `_all.md`.** The system read floor (`/usr`, `/bin`,
+   `/opt/homebrew`, `/Library`, `/System`, `/private/tmp`,
+   `/private/var/folders`, `/dev`, `/private/etc`), the home dot-directories
+   claude needs to boot, `~/.itsybitsy`, and the deny carve-outs (`~/.ssh`,
+   `~/.aws`, `**/.env`). §6.10 amendment 1 tightens this list first.
+4. **Runtime-injected, not in `.md`, because they are per agent:** the
+   worktree, own agent dir, own Claude project dir, scratchpad, git common dir,
+   and repo agents dir. The kernel already injects most of these as `-D`
+   parameters[^49]; the hook hard-codes the same set[^6]. SPEC §6.1 lists them
+   as "always on".
+5. **Structural denies stay in code:** other agents' dirs, the main repo for
+   worktree agents, and the protected files. No `.md` can re-open them.
+6. **The kernel switch is the only switch left.** `sandbox.enabled` keeps its
+   default in `_all.md`. Off means hook only, on every platform, at advisory
+   strength for command arguments. On means kernel plus hook, on macOS. The
+   lists are the same either way.
+7. **Transition.** With today's `_all.md`, whose read list holds `/` and
+   `~`[^43], the hook under this model changes nothing for reads and tightens
+   writes to the listed write roots plus the runtime roots. Adam tightens
+   `_all.md` when ready; no mode flag is needed. Before writes tighten, the
+   roots codex receives today through `--add-dir` must appear in `_all.md`
+   `allowWrite` or become runtime roots: the whole `~/.itsybitsy` (today's list
+   has only `~/.itsybitsy/agents`[^43]), `~/Library/Caches` on macOS for Xcode
+   and SwiftPM, the git common dir, and the parent repo's `.ittybitty` and
+   `.claude` subdirectories[^14][^15]. Otherwise the hook denies what codex's
+   own sandbox allows today.
+8. **Hook operation classes.** Read, Grep, Glob, LS, and `cd` are reads.
+   Write, Edit, MultiEdit, NotebookEdit, and codex `apply_patch` are writes.
+   Agy tools map through their translation table[^20]. A Bash token is a read,
+   and a write when it is a redirect or `sed -i` target[^8]. Other write shapes
+   (`mv`, `cp`, `tee`, `mkdir`) are not recognised by the scanner; the kernel is
+   authoritative for writes.
+
+**Migration risk.** Item 7 makes the read side safe on day one. Writes tighten
+at once, so before the flip: add the codex roots above to `_all.md`, and run an
+**audit mode** for a few days, where the hook logs would-be write denials to
+`agent.log` without denying, to collect the entries each type needs. Types whose
+work reaches outside their repo add their own entries; the `repos:` field
+already scopes such types.
+
 ---
 
 ## 7. Decisions (Adam, 2026-09-02)
@@ -602,3 +696,5 @@ has no kernel layer.
 [^45]: [own Claude project dir helper](src/hooks/agent-path.ts:claudeProjectDirFor)
 [^46]: [exported glob compiler — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:src/sandbox.ts`](src/sandbox.ts:globToSandboxRegex)
 [^47]: [SPEC-SANDBOX §4A.4 worked example: deny all .env, even inside the worktree — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:SPEC-SANDBOX.md`](SPEC-SANDBOX.md:418-435)
+[^48]: [SPEC-SANDBOX: fully-open is explicit-only, `allowRead: ["/"]` — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:SPEC-SANDBOX.md`](SPEC-SANDBOX.md:326-327)
+[^49]: [runtime-injected roots AGENTDIR, GITDIR, REPOAGENTS as `-D` params — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:src/sandbox.ts`](src/sandbox.ts:405-409)

@@ -310,4 +310,40 @@ describe("agy trusted-workspace settings (temp HOME)", () => {
     const settings = await readSettings();
     expect(Object.keys(settings)).toEqual(["trustedWorkspaces"]);
   });
+
+  // ── clobber protection (manager fix 3) ─────────────────────────────────────
+
+  test("ensure THROWS on an existing unparseable settings file and leaves it untouched", async () => {
+    await mkdir(join(tempHome, ".gemini", "antigravity-cli"), { recursive: true });
+    const garbage = "{ this is not: json ]]]";
+    await Bun.write(agySettingsPath(), garbage);
+    await expect(ensureAgyTrustedWorkspace("/private/tmp/wt")).rejects.toThrow(/not valid JSON|refusing to overwrite/);
+    // The user's file must be byte-for-byte untouched.
+    expect(await Bun.file(agySettingsPath()).text()).toBe(garbage);
+  });
+
+  test("ensure THROWS when the existing settings file is a JSON array, not an object", async () => {
+    await mkdir(join(tempHome, ".gemini", "antigravity-cli"), { recursive: true });
+    const arr = "[1,2,3]";
+    await Bun.write(agySettingsPath(), arr);
+    await expect(ensureAgyTrustedWorkspace("/private/tmp/wt")).rejects.toThrow(/not a JSON object|refusing to overwrite/);
+    expect(await Bun.file(agySettingsPath()).text()).toBe(arr);
+  });
+
+  test("ensure treats a genuinely empty file as {} (nothing to preserve)", async () => {
+    await mkdir(join(tempHome, ".gemini", "antigravity-cli"), { recursive: true });
+    await Bun.write(agySettingsPath(), "   \n");
+    await ensureAgyTrustedWorkspace("/private/tmp/wt");
+    const settings = await readSettings();
+    expect(settings.trustedWorkspaces).toEqual(["/private/tmp/wt"]);
+  });
+
+  test("remove is a no-op (no throw) on an unparseable file and leaves it untouched", async () => {
+    await mkdir(join(tempHome, ".gemini", "antigravity-cli"), { recursive: true });
+    const garbage = "not json at all";
+    await Bun.write(agySettingsPath(), garbage);
+    // Must not throw.
+    await removeAgyTrustedWorkspace("/private/tmp/wt");
+    expect(await Bun.file(agySettingsPath()).text()).toBe(garbage);
+  });
 });

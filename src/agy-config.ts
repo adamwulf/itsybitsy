@@ -279,19 +279,38 @@ async function withAgySettingsLock<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-/** Read the agy settings JSON object, or `{}` when missing / unparseable. */
+/**
+ * Read the agy settings JSON object.
+ *
+ * A MISSING file (or a genuinely empty one — nothing to preserve) returns `{}`.
+ * An EXISTING file that fails to parse, or parses to something other than a
+ * JSON object, THROWS a descriptive error rather than returning `{}` — the
+ * caller (ensureAgyTrustedWorkspace) would otherwise rewrite the file with only
+ * `trustedWorkspaces`, silently destroying whatever the user had there. Failing
+ * loud lets the spawn refuse and leaves the user's file untouched.
+ */
 async function readAgySettings(): Promise<Record<string, unknown>> {
-  const file = Bun.file(agySettingsPath());
+  const path = agySettingsPath();
+  const file = Bun.file(path);
   if (!(await file.exists())) return {};
+  const raw = await file.text();
+  if (raw.trim() === "") return {};
+  let parsed: unknown;
   try {
-    const parsed = await file.json();
-    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-  } catch {
-    /* malformed — start fresh but preserve nothing we can't parse */
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `agy settings file at ${path} is not valid JSON (${(err as Error).message}); ` +
+        `refusing to overwrite it — fix or remove the file and retry.`,
+    );
   }
-  return {};
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(
+      `agy settings file at ${path} is not a JSON object; ` +
+        `refusing to overwrite it — fix or remove the file and retry.`,
+    );
+  }
+  return parsed as Record<string, unknown>;
 }
 
 /** Atomically write the agy settings object (tmp + rename), creating dirs. */
@@ -345,7 +364,15 @@ export async function removeAgyTrustedWorkspace(realWorktree: string): Promise<v
   await withAgySettingsLock(async () => {
     const file = Bun.file(agySettingsPath());
     if (!(await file.exists())) return;
-    const settings = await readAgySettings();
+    // Teardown is best-effort: an unparseable file is left untouched with a
+    // warning rather than throwing (unlike ensure, which must refuse the spawn).
+    let settings: Record<string, unknown>;
+    try {
+      settings = await readAgySettings();
+    } catch (err) {
+      console.warn(`[agy] untrust skipped — ${(err as Error).message}`);
+      return;
+    }
     const trusted = readTrustedWorkspaces(settings);
     if (!trusted.includes(realWorktree)) {
       // Nothing to remove; only rewrite if the stored value was malformed.

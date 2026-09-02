@@ -26,7 +26,9 @@ import { heredocBodyRanges } from "./shell-metachar";
  * traversal scanner fails closed on these.
  */
 export const TRAVERSAL_NOISE_DENY_REASON =
-  "Access denied: path contains `..` combined with shell expansion or quoting that cannot be resolved safely";
+  "Access denied: path contains `..` combined with shell expansion or quoting that cannot be resolved safely. " +
+  "If this is literal text (a commit message, an `ib send` body), put it in a quoted-delimiter heredoc " +
+  "(<<'EOF' … EOF) or pass it via a file (e.g. `git commit -F <file>`) instead of on the command line.";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -353,6 +355,16 @@ function checkBashSettingsWrite(
  * Heredoc BODY lines are excluded (masked to spaces) before tokenizing — they
  * are data (commit messages, `ib send` bodies) that legitimately contain `..`
  * and apostrophes. The opener line and lines after the terminator stay scanned.
+ *
+ * Known safe-direction OVER-denies (denied though harmless; the caller-facing
+ * reason names the workarounds — a quoted-delimiter heredoc or `-F <file>`):
+ *   - `printf '..\n'` — a quoted `..` argument carrying a backslash.
+ *   - a one-line `git commit -m "…"` or `ib send <id> "…"` where a word ending
+ *     in `..` is glued to the closing quote (e.g. `…resolver.."`) — the split
+ *     token `resolver.."` strips the quote to `resolver..` and reads as a `..`
+ *     path segment.
+ *   - a quoted RELATIVE path containing a space (the whitespace split breaks the
+ *     quoted argument, so an inner `../x` token is examined on its own).
  */
 function checkRelativeTraversalPaths(
   command: string,

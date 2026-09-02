@@ -133,4 +133,51 @@ describe("TeamLogPaneComponent", () => {
     expect(raw).toContain("\x1b[2m[");
     expect(raw).toContain("\x1b[0m");
   });
+
+  test("word-wraps the log at word boundaries, not mid-token", async () => {
+    // A long message that must wrap several times at a narrow width. Word wrap
+    // breaks at spaces; character wrap would split a word across the width
+    // boundary (e.g. "wordfi" / "ve"). Distinct whole words let us assert every
+    // continuation row carries ONLY complete words.
+    const words = ["wordone", "wordtwo", "wordthree", "wordfour", "wordfive", "wordsix", "wordseven"];
+    await appendTeamLog("backend", words.join(" "));
+    const pane = new TeamLogPaneComponent();
+    pane.displayHeight = 20;
+    pane.teamName = "backend";
+    await pane.load();
+
+    const rows = pane.render(30).map(stripAnsi);
+    const contentRows = rows.filter((r) => r.trim().length > 0);
+    // The message spanned more than one physical row → it actually wrapped.
+    expect(contentRows.length).toBeGreaterThan(1);
+
+    // Row 0 carries the `[timestamp]` prefix; every CONTINUATION row (row ≥ 1)
+    // holds message text only, and must contain whole words exclusively —
+    // never a mid-word fragment.
+    const wordSet = new Set(words);
+    for (let i = 1; i < contentRows.length; i++) {
+      const tokens = contentRows[i]!.trim().split(/\s+/);
+      for (const tok of tokens) {
+        expect(wordSet.has(tok)).toBe(true);
+      }
+    }
+  });
+
+  test("collapses an over-width ───── separator to a single row", async () => {
+    // A log entry whose body carries a full-width ── rule on its own physical
+    // line (embedded newline). Character wrapping would explode it into many
+    // full-width separator rows; word wrap collapses it to a single truncated
+    // row (isSeparatorLine).
+    const rule = "─".repeat(200);
+    await appendTeamLog("backend", `context line\n${rule}`);
+    const pane = new TeamLogPaneComponent();
+    pane.displayHeight = 20;
+    pane.teamName = "backend";
+    await pane.load();
+
+    const rows = pane.render(40).map(stripAnsi);
+    // Exactly one physical row is an all-─ separator (not the ~5 char wrap makes).
+    const separatorRows = rows.filter((r) => r.trim().length > 0 && /^─+$/.test(r.trim()));
+    expect(separatorRows.length).toBe(1);
+  });
 });

@@ -3106,8 +3106,15 @@ export class DashboardComponent implements Component {
     const rightPad = 3;
     const leftDashColor = DIM_GRAY;
     const rightDashColor = DIM_GRAY;
-    const leftTitleStyle = BOLD;
-    const rightTitleStyle = BOLD;
+    // Focus-aware highlight, mirroring buildMainTitleSeparator: in the team view
+    // the LEFT (CHAT) pane is the "active-agent" focus target and the RIGHT (LOG)
+    // pane is the "right-pane" target (TEAMS_FOCUS_ORDER in focus.ts). The focused
+    // tab gets the REVERSE highlight; the other stays plain BOLD.
+    const currentFocus = this.focusManager.current();
+    const leftFocused = currentFocus === "active-agent";
+    const rightFocused = currentFocus === "right-pane";
+    const leftTitleStyle = leftFocused ? `${REVERSE}${BOLD}` : BOLD;
+    const rightTitleStyle = rightFocused ? `${REVERSE}${BOLD}` : BOLD;
 
     const splitAt = leftPaneW + 1;
     const leftHalfDashes = Math.max(1, splitAt - leftPad - leftTitle.length);

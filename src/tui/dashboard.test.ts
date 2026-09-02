@@ -5724,6 +5724,49 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       expect(plain).not.toContain("Coordinator");
     });
 
+    // The team title tabs (@team CHAT / @team LOG) must carry the same REVERSE
+    // focus highlight as the AGENT LOG tab when tabbed to. In the team view the
+    // LEFT (CHAT) pane is the "active-agent" focus target and the RIGHT (LOG)
+    // pane is "right-pane" (TEAMS_FOCUS_ORDER).
+    test("team title tab shows the REVERSE focus highlight on the focused pane", () => {
+      Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+      const dashboard = makeDashboard();
+
+      // Get into the team view (mirror the setup above): coordinator selected,
+      // then flip to teams and navigate to the team header.
+      const coordList: FlatEntry[] = [makeFlatSystemCoordinator()];
+      dashboard.onUpdate([], coordList, []);
+      dashboard.teamsTree.setFlatList([
+        { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+      ]);
+      dashboard.handleInput("0"); // sidebarMode -> teams
+      dashboard.handleInput("j"); // navigate to the team header
+      expect(dashboard.activeSelectionSource).toBe("teams");
+      expect(dashboard.channelPane.teamName).toBe("backend");
+
+      // Focused title tabs are wrapped in REVERSE+BOLD (`\x1b[7m\x1b[1m`); an
+      // unfocused tab is plain BOLD (`\x1b[1m`, no preceding REVERSE).
+      const REV_BOLD = "\x1b[7m\x1b[1m";
+
+      // Focus the LOG (right) pane → @backend LOG is REVERSE, CHAT stays plain.
+      dashboard.focusManager.setFocus("right-pane");
+      let raw = dashboard.render(160).join("\n");
+      expect(raw).toContain(`${REV_BOLD} @backend LOG `);
+      expect(raw).not.toContain(`${REV_BOLD} @backend CHAT `);
+
+      // Focus the CHAT (left) pane → @backend CHAT is REVERSE, LOG stays plain.
+      dashboard.focusManager.setFocus("active-agent");
+      raw = dashboard.render(160).join("\n");
+      expect(raw).toContain(`${REV_BOLD} @backend CHAT `);
+      expect(raw).not.toContain(`${REV_BOLD} @backend LOG `);
+
+      // Focus the Teams tree (sidebar) → NEITHER tab is REVERSE.
+      dashboard.focusManager.setFocus("teams-tree");
+      raw = dashboard.render(160).join("\n");
+      expect(raw).not.toContain(`${REV_BOLD} @backend CHAT `);
+      expect(raw).not.toContain(`${REV_BOLD} @backend LOG `);
+    });
+
     test("updatePollerVisibility pauses the coordinator poller when active source is teams", () => {
       const dashboard = makeDashboard();
       dashboard.startPolling();

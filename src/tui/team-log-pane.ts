@@ -18,7 +18,7 @@ import { truncateToWidth } from "@mariozechner/pi-tui";
 import { readFile } from "fs/promises";
 import { teamLogPath } from "../team-channel";
 import { expandTabs } from "../tmux-poller";
-import { wrapLines, padLines } from "./wrap";
+import { wordWrapLines, padLines } from "./wrap";
 import { RESET, DIM } from "./colors";
 
 /** Colorize a `[YYYY-MM-DD HH:MM:SS]` timestamp prefix DIM, the rest plain. */
@@ -100,11 +100,14 @@ export class TeamLogPaneComponent implements Component {
       );
     }
 
-    // Wrap each log line at the pane width, ANSI-aware, mirroring the chat box.
-    const wrapped: string[] = [];
-    for (const line of this.lines) {
-      wrapped.push(...wrapLines(colorizeLogLine(line), width));
-    }
+    // Word-wrap the whole log at the pane width, ANSI-aware, identically to the
+    // agent-log / center tmux pane (`wordWrapLines`): word-break at spaces,
+    // hard-wrap over-width tokens, collapse full-width ───── separators to one
+    // row, box-drawing/table clip+reflow, first-physical-row indent preserved.
+    // Colorize each cached line first (dims the `[YYYY-MM-DD HH:MM:SS]` prefix),
+    // then join and wrap as ONE block so multi-line tables reflow together.
+    const colorized = this.lines.map(colorizeLogLine).join("\n");
+    const wrapped = wordWrapLines(colorized, width);
 
     // Clamp scrollBack to valid range.
     const maxScrollBack = Math.max(0, wrapped.length - this.displayHeight);

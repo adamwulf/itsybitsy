@@ -1984,16 +1984,16 @@ describe("resumeAgent (native)", () => {
   }
 
   // Captures (cmd, cwd) for every codex dispatcher dry-run subprocess.
-  // The codex dry-run goes through codexDryRunSpawnCtx (NOT
+  // The codex dry-run goes through dispatcherDryRunSpawnCtx (NOT
   // nukeResumeSpawnCtx) so the runtime hook can resolve agentsDir from
   // the worktree cwd. Without capturing cwd here, tests can't verify the
   // fix that routes workPath into the subprocess.
-  let codexDryRunCalls: Array<{ cmd: string[]; cwd: string }>;
+  let dispatcherDryRunCalls: Array<{ cmd: string[]; cwd: string }>;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "resume-test-"));
     spawnCalls = [];
-    codexDryRunCalls = [];
+    dispatcherDryRunCalls = [];
     const runner = makeDefaultResumeRunner(spawnCalls);
     lifecycleSpawnCtx.set(runner);
     setNukeResumeSpawnRunner(runner);
@@ -2011,7 +2011,7 @@ describe("resumeAgent (native)", () => {
     setCoordinatorHome(join(tempDir, "coord-home"));
     // Default codex dry-run runner: capture (cmd, cwd) + succeed.
     setDispatcherDryRunSpawnRunner((cmd, cwd) => {
-      codexDryRunCalls.push({ cmd, cwd });
+      dispatcherDryRunCalls.push({ cmd, cwd });
       return makeSpawnResult();
     });
   });
@@ -2934,9 +2934,9 @@ describe("resumeAgent (native)", () => {
     expect(newSessionCall!.some(arg => arg.includes("resume.sh"))).toBe(true);
 
     // dispatcher precheck must have run (3 events) — calls go through
-    // codexDryRunSpawnCtx, NOT the resume spawn runner, so we read from
-    // codexDryRunCalls.
-    const dryRunCmdStrs = codexDryRunCalls.map(c => c.cmd.join(" "));
+    // dispatcherDryRunSpawnCtx, NOT the resume spawn runner, so we read from
+    // dispatcherDryRunCalls.
+    const dryRunCmdStrs = dispatcherDryRunCalls.map(c => c.cmd.join(" "));
     expect(dryRunCmdStrs.some(c => c.includes("hooks codex-pre-tool-use") && c.includes("--dry-run"))).toBe(true);
     expect(dryRunCmdStrs.some(c => c.includes("hooks codex-session-start") && c.includes("--dry-run"))).toBe(true);
     expect(dryRunCmdStrs.some(c => c.includes("hooks codex-stop") && c.includes("--dry-run"))).toBe(true);
@@ -2946,8 +2946,8 @@ describe("resumeAgent (native)", () => {
     // cwd is wrong, the runtime hook's resolveAgentDir regex fails and the
     // precheck explodes with "meta.json not found".
     const expectedCwd = join(agentDir, "repo");
-    expect(codexDryRunCalls.length).toBeGreaterThanOrEqual(3);
-    for (const call of codexDryRunCalls) {
+    expect(dispatcherDryRunCalls.length).toBeGreaterThanOrEqual(3);
+    for (const call of dispatcherDryRunCalls) {
       expect(call.cwd).toBe(expectedCwd);
     }
   });
@@ -2971,10 +2971,10 @@ describe("resumeAgent (native)", () => {
     };
     lifecycleSpawnCtx.set(baseRunner);
     setNukeResumeSpawnRunner(baseRunner);
-    // The dry-run now goes through codexDryRunSpawnCtx — inject failure
+    // The dry-run now goes through dispatcherDryRunSpawnCtx — inject failure
     // there to simulate a broken dispatcher.
     setDispatcherDryRunSpawnRunner((cmd, cwd) => {
-      codexDryRunCalls.push({ cmd, cwd });
+      dispatcherDryRunCalls.push({ cmd, cwd });
       return makeSpawnResult(1, "", "dispatcher broken");
     });
 
@@ -3157,7 +3157,7 @@ describe("resumeAgent (native)", () => {
       expect(newSessionCall!.some(arg => arg.includes("resume.sh"))).toBe(true);
 
       // agy prechecks ran through the shared dispatcher-dry-run context.
-      const dryRunStrs = codexDryRunCalls.map(c => c.cmd.join(" "));
+      const dryRunStrs = dispatcherDryRunCalls.map(c => c.cmd.join(" "));
       expect(dryRunStrs.some(c => c.includes("hooks agy-pre-tool-use") && c.includes("--dry-run"))).toBe(true);
     });
 
@@ -4102,22 +4102,22 @@ describe("newAgent (native)", () => {
 
   let originalHome: string | undefined;
   // Captures (cmd, cwd) for every codex dispatcher dry-run subprocess.
-  // The codex dry-run goes through codexDryRunSpawnCtx (NOT newAgentSpawnCtx)
+  // The codex dry-run goes through dispatcherDryRunSpawnCtx (NOT newAgentSpawnCtx)
   // so the runtime hook can resolve agentsDir from the worktree cwd. Without
   // capturing cwd here, tests can't verify the fix that routes workPath into
   // the subprocess. Tests that need to inject precheck failure should override
   // via setDispatcherDryRunSpawnRunner.
-  let codexDryRunCalls: Array<{ cmd: string[]; cwd: string }>;
+  let dispatcherDryRunCalls: Array<{ cmd: string[]; cwd: string }>;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "ib-newagent-test-"));
     agentsDir = join(tempDir, ".ittybitty", "agents");
     spawnCalls = [];
-    codexDryRunCalls = [];
+    dispatcherDryRunCalls = [];
 
     // Default codex dry-run runner: capture (cmd, cwd) + succeed.
     setDispatcherDryRunSpawnRunner((cmd, cwd) => {
-      codexDryRunCalls.push({ cmd, cwd });
+      dispatcherDryRunCalls.push({ cmd, cwd });
       return makeSpawnResult("", 0);
     });
 
@@ -6772,7 +6772,7 @@ body`,
     test("fails the spawn cleanly when the dispatcher precheck exits non-zero", async () => {
       // Custom runner: succeed normally for general spawn ops, track
       // cleanup git commands. The codex dispatcher precheck now goes
-      // through codexDryRunSpawnCtx — we inject failure there.
+      // through dispatcherDryRunSpawnCtx — we inject failure there.
       const cleanupCalls: string[][] = [];
       const baseRunner = mockSpawnRunner();
       const customSpawn = (cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
@@ -6784,10 +6784,10 @@ body`,
         return baseRunner(cmd, opts);
       };
       setNewAgentSpawnRunner(customSpawn);
-      // Codex dispatcher precheck now goes through codexDryRunSpawnCtx —
+      // Codex dispatcher precheck now goes through dispatcherDryRunSpawnCtx —
       // inject failure here to simulate a broken dispatcher.
       setDispatcherDryRunSpawnRunner((cmd, cwd) => {
-        codexDryRunCalls.push({ cmd, cwd });
+        dispatcherDryRunCalls.push({ cmd, cwd });
         return makeSpawnResult("", 1);
       });
       const result = await callNewAgent("task", {
@@ -6812,7 +6812,7 @@ body`,
     // (`/\.ittybitty\/agents/`). If cwd is the spawn caller's cwd (e.g. the
     // system coordinator's `~/.itsybitsy/repo`), the regex misses and the
     // dry-run dies with "meta.json not found". Reverting the fix (dropping
-    // the `cwd: workPath` from the codexDryRunSpawnCtx.run call) MUST fail
+    // the `cwd: workPath` from the dispatcherDryRunSpawnCtx.run call) MUST fail
     // this test.
     test("dispatcher dry-run subprocess is invoked with cwd === workPath", async () => {
       setNewAgentSpawnRunner(mockSpawnRunner());
@@ -6826,14 +6826,14 @@ body`,
       const expectedCwd = join(agentsDir, "codex-dryrun-cwd", "repo");
 
       // All three codex events should have been pre-checked.
-      const dryRunCmdStrs = codexDryRunCalls.map((c) => c.cmd.join(" "));
+      const dryRunCmdStrs = dispatcherDryRunCalls.map((c) => c.cmd.join(" "));
       expect(dryRunCmdStrs.some((c) => c.includes("hooks codex-pre-tool-use") && c.includes("--dry-run"))).toBe(true);
       expect(dryRunCmdStrs.some((c) => c.includes("hooks codex-session-start") && c.includes("--dry-run"))).toBe(true);
       expect(dryRunCmdStrs.some((c) => c.includes("hooks codex-stop") && c.includes("--dry-run"))).toBe(true);
 
       // Every dry-run subprocess MUST be spawned with cwd === workPath.
-      expect(codexDryRunCalls.length).toBeGreaterThanOrEqual(3);
-      for (const call of codexDryRunCalls) {
+      expect(dispatcherDryRunCalls.length).toBeGreaterThanOrEqual(3);
+      for (const call of dispatcherDryRunCalls) {
         expect(call.cwd).toBe(expectedCwd);
       }
     });
@@ -7120,7 +7120,7 @@ body`,
     test("fails the spawn cleanly when the dispatcher precheck exits non-zero — no tmux session", async () => {
       setNewAgentSpawnRunner(agyRunner());
       setDispatcherDryRunSpawnRunner((cmd, cwd) => {
-        codexDryRunCalls.push({ cmd, cwd });
+        dispatcherDryRunCalls.push({ cmd, cwd });
         return makeSpawnResult("", 1);
       });
       const result = await callNewAgent("task", {
@@ -7133,7 +7133,7 @@ body`,
       const cmdStrs = spawnCalls.map((c) => c.join(" "));
       expect(cmdStrs.some((c) => c.includes("tmux new-session"))).toBe(false);
       // The precheck ran against agy-* events with cwd === workPath.
-      const dryRunStrs = codexDryRunCalls.map((c) => c.cmd.join(" "));
+      const dryRunStrs = dispatcherDryRunCalls.map((c) => c.cmd.join(" "));
       expect(dryRunStrs.some((c) => c.includes("hooks agy-pre-tool-use") && c.includes("--dry-run"))).toBe(true);
     });
 
@@ -7217,7 +7217,7 @@ body`,
       // Precheck fails — this runs AFTER the pre-trust, so the worktree realpath
       // is already in trustedWorkspaces when cleanupOnFailure fires.
       setDispatcherDryRunSpawnRunner((cmd, cwd) => {
-        codexDryRunCalls.push({ cmd, cwd });
+        dispatcherDryRunCalls.push({ cmd, cwd });
         return makeSpawnResult("", 1);
       });
       const result = await callNewAgent("task", {

@@ -7208,6 +7208,43 @@ body`,
       const startSh = await Bun.file(join(agentsDir, "agy-effort-plain", "start.sh")).text();
       expect(startSh).toContain("--model 'claude-sonnet-4-6' --effort 'high'");
     });
+
+    // D5 add/remove symmetry: a spawn that fails AFTER the pre-trust must undo
+    // the trust entry, or a failed retry leaves one dead path in ~/.gemini per
+    // attempt. cleanupOnFailure() untrusts before it deletes the worktree.
+    test("untrusts the workspace when the spawn fails after pre-trust (D5 add/remove symmetry)", async () => {
+      setNewAgentSpawnRunner(agyRunner());
+      // Precheck fails — this runs AFTER the pre-trust, so the worktree realpath
+      // is already in trustedWorkspaces when cleanupOnFailure fires.
+      setCodexDryRunSpawnRunner((cmd, cwd) => {
+        codexDryRunCalls.push({ cmd, cwd });
+        return makeSpawnResult("", 1);
+      });
+      const result = await callNewAgent("task", {
+        name: "agy-untrust-onfail",
+        model: "agy:gemini-3.7-flash-low",
+      });
+      expect(result.ok).toBe(false);
+      // The trust file started nonexistent; the only entry the pre-trust added
+      // was this worktree's, so after the failed spawn it must be empty again.
+      const settingsPath = join(process.env.HOME!, ".gemini", "antigravity-cli", "settings.json");
+      expect(await Bun.file(settingsPath).exists()).toBe(true);
+      const settings = JSON.parse(await Bun.file(settingsPath).text());
+      expect(settings.trustedWorkspaces).toEqual([]);
+    });
+
+    test("a claude spawn failure never creates or touches agy's settings.json", async () => {
+      // A claude agent never pre-trusts; cleanupOnFailure's untrust reads
+      // meta.model=claude and no-ops, so ~/.gemini is never written.
+      setNewAgentSpawnRunner(mockSpawnRunner({ failTmuxNewSession: true }));
+      const result = await callNewAgent("task", {
+        name: "claude-untrust-noop",
+        model: "claude:opus",
+      });
+      expect(result.ok).toBe(false);
+      const settingsPath = join(process.env.HOME!, ".gemini", "antigravity-cli", "settings.json");
+      expect(await Bun.file(settingsPath).exists()).toBe(false);
+    });
   });
 });
 

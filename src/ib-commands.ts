@@ -4739,6 +4739,15 @@ export async function newAgent(
   // from the Phase 4 review. Captures `agentDir`, `useWorktree`,
   // `rootRepoPath`, `branchName` by reference.
   async function cleanupOnFailure() {
+    // D5 add/remove symmetry: a spawn that fails AFTER the agy pre-trust (the
+    // precheck / tmux-create paths) would otherwise leave the worktree realpath
+    // in ~/.gemini's trustedWorkspaces while the worktree is deleted — one dead
+    // entry per failed retry. Untrust FIRST, before rm(agentDir): meta.json
+    // must still be readable (the helper gates on meta.model) and the worktree
+    // realpath must still resolve. It self-gates to agy and never throws, so it
+    // is a safe no-op for claude/codex failures.
+    const { untrustAgyWorkspaceForTeardown } = await import("./agy-spawn");
+    await untrustAgyWorkspaceForTeardown(agentDir, join(agentDir, "repo"));
     await rm(agentDir, { recursive: true, force: true });
     if (useWorktree) {
       await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);

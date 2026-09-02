@@ -1,6 +1,6 @@
 # SPEC: Antigravity CLI (`agy`) as an alternative agent model
 
-Status: **Phases 1–3 MERGED on `agent/antigravity` (Phase 1 `7cf0e65`, Phase 2 `288a577`, Phase 3 `b38052f`, 2026-09-02). Remaining: the live spawn gate (§5 Phase 2 acceptance), blocked by Risk 10 (macOS Gatekeeper stalling every `agy` exec) until the binary is approved; then merge to `main`, rebuild `ib`, restart `ib watch`.** Written 2026-09-01 by researcher agent `antigravity` on branch `agent/antigravity`. All facts are pinned to `agy` 1.1.23 on macOS with Google OAuth sign-in. Evidence and captures live in `ANTIGRAVITY-CLI-NOTES.md` §17; this file is the design source of truth. Read it next to `SPEC-CODEX-MODEL.md`, whose shape it follows, and the Cross-Cutting Review Checklist in `CLAUDE.md`.
+Status: **Phases 1–3 MERGED on `agent/antigravity` (Phase 1 `7cf0e65`, Phase 2 `288a577`, Phase 3 `b38052f`, 2026-09-02). Live spawn gate PASSED 2026-09-02 13:41 CDT (NOTES §17.11). READY for the user to merge to `main`, rebuild `ib`, and restart `ib watch`.** Written 2026-09-01 by researcher agent `antigravity` on branch `agent/antigravity`. All facts are pinned to `agy` 1.1.23 on macOS with Google OAuth sign-in. Evidence and captures live in `ANTIGRAVITY-CLI-NOTES.md` §17; this file is the design source of truth. Read it next to `SPEC-CODEX-MODEL.md`, whose shape it follows, and the Cross-Cutting Review Checklist in `CLAUDE.md`.
 
 ---
 

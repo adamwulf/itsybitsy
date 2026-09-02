@@ -427,6 +427,27 @@ Run with the branch binary first on PATH from a helper tmux shell: `ib new-agent
 - Bug found: the `agy --version` stamping subprocess hung for 80 s because the spawn runner leaves the child's stdin pipe open and agy 1.1.23 blocks on an inherited unclosed stdin (its own release notes mention the fix on their side for a different path). Fix queued for Phase 3: probe with stdin ignored and a 5 s timeout; stamp `""` on failure.
 - Environment blocker, not a code bug: after that, every `agy` exec on the machine — the agent, four probes with different launch shapes, and a bare `agy --version` — sat in `_dyld_start` with a 112 K footprint, no agy log, no sockets. `log show` for `syspolicyd`/kernel: `(AppleSystemPolicy) ASP: Security policy would not allow process: <pid>, /opt/homebrew/Caskroom/antigravity-cli/1.1.23,…/antigravity`, preceded by a 30 s QUIC connection to Apple with 0 bytes transferred. The binary still carries `com.apple.quarantine: 0381;…`. `codex` and `gh` exec normally. Remedy is on the user side (approve the binary once, or `xattr -d com.apple.quarantine` on it); the gate has to be rerun afterwards.
 
+### 17.11 Live gate PASSED (2026-09-02 13:39–13:41 CDT, Phases 1–3 merged, tip `f5487ef`)
+
+After the user approved the binary, `agy --version` returned instantly again and the same gate was rerun through the branch binary (`ib new-agent --model agy:gemini-3.7-flash-low --type worker "…"`, agent `agent-e36475df`):
+
+| Check | Result |
+|---|---|
+| Spawn time | ~5 s (the version probe no longer hangs) |
+| Trust card | none — pre-trust worked; the worktree realpath appeared in `trustedWorkspaces` |
+| Allow-listed `git status --short` | ran with no permission card; output `M .gitignore` (the appended ignore entries, same as codex's `.codex/`) |
+| `cat ../../../../SPEC.md` | denied by the hook; model saw `tool call denied by pre-tool hook: Access denied: bash command references main repo`; `agent.log` recorded `[PreToolUse] Permission denied: run_command (CommandLine=cat ../../../../SPEC.md, …)` |
+| Completion sentinel | replied `WAITING`; `ib list` showed `waiting` written by the Stop hook |
+| Survey overlay | appeared after the first turn; `agent.log`: `[watchdog] agy survey overlay detected — sending 0 to skip`; overlay gone on the next capture |
+| Heartbeat | `<agentDir>/agy-hook-heartbeat` present; `agy.log` (31 KB) created next to it |
+| `ib state` | `tmux ✓ claude:<agy pid> ✓ watchdog ✓` — the agy process is tracked, not an orphan |
+| `ib send` in | delivered as `[sent by agent antigravity]: …`; the agent answered with `ib send antigravity "PONG"`, which the hook allowed and which arrived |
+| Resume | `tmux kill-session` then `ib resume`: transcript restored via `--conversation <uuid>`, model re-passed (status bar `Gemini 3.7 Flash · low`), the watchdog's resume nudge answered `WAITING`, and the regenerated hook still denied the main-repo read on the next turn |
+| Teardown | `ib retire --force` closed the agent and removed the trust entry; `settings.json` back to the single original entry |
+| Rendering | the agent pane ran inline (`alternate_on=0`) at the pinned 1000×24 size, so tmux scrollback works for `ib look` |
+
+Caveat seen: after the hard `tmux kill-session`, the resumed session showed `⚠ Conversation already open … Use /fork to continue here separately.` — agy's presence lock under `~/.gemini/antigravity-cli/presence/<conversationId>.lock` survives a crash. Messages still worked. A follow-up could remove that stale lock on resume when the previous `claude_pid` is dead.
+
 ---
 
 ## Sources

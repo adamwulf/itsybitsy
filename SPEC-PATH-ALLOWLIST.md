@@ -775,6 +775,114 @@ The `paths:` block is the one place path control is defined. The kernel
 enforces it; the hook explains it and keeps the tool, structural, and harness
 rules.
 
+### 6.13 Adam's question: does the more specific entry win between `allowRead` and `allowWrite`?
+
+Yes, at both layers. The two layers reach it by different mechanisms, so they
+need one shared test oracle. Adam's two examples, and the rule that produces
+them:
+
+| Entries | Path | Result |
+|---|---|---|
+| `allowWrite: ~/Documents`, `allowRead: ~/Documents/Important` | `~/Documents/Important/x` | read only |
+| same | `~/Documents/other/x` | read and write |
+| `allowRead: ~`, `allowWrite: ~/Documents` | `~/Documents/x` | read and write |
+| same | `~/Desktop/x` | read only |
+
+**The rule.** For a path P and an operation, read or write:
+
+1. If any `deny` entry matches P, deny. Deny wins over everything at any
+   depth, the existing rule[^59]. So `allowRead ~/Documents/Important` under a
+   write root makes it read-only, while `deny ~/Documents/Important` makes it
+   unreadable too. They are different tools.
+2. Otherwise find the **most specific** plain entry, across the union of
+   `allowRead` and `allowWrite` from all layers plus the runtime roots, that is
+   P or an ancestor of P. Most specific means the longest canonical path. Its
+   list decides: `allowWrite` gives read and write; `allowRead` gives read only.
+3. If the same canonical path is in both lists, the intent is ambiguous.
+   Recommendation: a **validation error** at spawn, fail-closed, the same
+   stance the sandbox spec takes for bare names[^32]. If Adam prefers a soft
+   default, read-only wins, because a layer may only tighten, with a warning.
+   (I first proposed "write wins"; withdrawn.)
+4. No match means deny.
+
+**Specificity key**, pinned with `sandbox-safety`: for a plain entry, the
+segment count of its canonical path. For a glob, the literal prefix before the
+first metacharacter; a glob and a plain entry with the same prefix tie, and the
+glob sorts later because it matches fewer paths. Two globs with the same prefix
+keep list order, which the tests must pin. A glob's rules affect only the paths
+it matches; it never changes the decision for a path it does not match. The
+deny list is absolute and outside this ordering. So
+`allowWrite: ~/Documents` plus `allowRead: ~/Documents/**/*.pdf` makes the PDFs
+read-only and everything else under Documents writable.
+
+**Kernel.** Seatbelt decides by the **last matching rule**[^59], and the
+generator already relies on this by emitting config denies last[^52]. So the
+compiler sorts the merged entries by the specificity key ascending, ancestors
+first, and emits per entry: `allowRead` gives `(allow file-read* X)` plus
+`(deny file-write* X)`; `allowWrite` gives `(allow file-read* X)` plus
+`(allow file-write* X)`. The explicit write-deny on every read-only entry is
+what makes the first example hold; the order is what makes the second hold.
+Config denies come last, unchanged.
+
+**The runtime roots must be sorted into the same table, not emitted first.**
+This is the one point where I differ from `sandbox-safety`'s walk-through,
+which emits the runtime roots before the type entries. If they come first, any
+read-only ancestor of the worktree, such as `allowRead: ~/Developer` to browse
+sibling projects, or today's `allowRead: ~`[^43], emits a later
+`(deny file-write* ~/Developer)` that is the last match for a write inside the
+worktree, and every agent of that type loses write access to its own worktree.
+Sorted by depth, the worktree is deeper, its write allow comes later, and it
+wins. The same holds for the agent dir, the git dir, the scratchpad, and the
+project dir. Runtime roots are ordinary `allowWrite` entries in the table; a
+type entry nested inside one can still narrow it, and `deny **/.env` still
+fires inside the worktree (§6.10).
+
+**Hook.** One pure function in `src/sandbox.ts`,
+`resolvePathAccess(absPath, op, { allowRead, allowWrite, deny })`, returns
+allow or deny: deny list first; then the most specific matching entry across
+both lists decides; no match denies. The runtime roots are passed in as
+`allowWrite` entries so specificity includes them. `checkFilePath` calls it
+after the structural steps 6, 10, and 11[^6]; the always-allowed steps 7 to 9
+fold into the table as runtime write roots, which is what puts deny before the
+worktree allow (§6.10). The same function is the oracle for the generator
+tests.
+
+**Tests, shared by both layers.** One table-driven oracle: each row is
+(entries per list, path, operation, expected). The hook evaluator and a
+simulator that walks the emitted profile in order with last-match semantics
+must both return the expected answer for every row, so the layers cannot
+drift. Rows:
+
+- write root with a nested read-only subtree: read allowed in the subtree,
+  write denied in the subtree, write allowed in a sibling and in the parent;
+- read root with a nested write subtree: write allowed in the subtree, write
+  denied in the parent, read allowed everywhere under the root;
+- three levels alternating write, read, write: the innermost wins at each
+  level;
+- the same path in both lists: the chosen rule (validation error, or
+  read-only wins with a warning);
+- a read-only ancestor of a runtime root (`allowRead: ~/Developer`): the
+  worktree, agent dir, git dir, scratchpad, and project dir stay writable;
+- `deny` inside a write root and inside a read-only subtree: both operations
+  denied;
+- entries from different layers, a read root in `_all.md` and a write subtree
+  in the leaf: specificity over the union;
+- a relative entry resolved to an absolute path that nests inside an absolute
+  entry from another layer;
+- canonicalization: `/tmp/x` against `/private/tmp/x`, trailing slashes, `~`
+  expansion, with specificity computed on canonical forms;
+- the prefix trap: `~/Documents` must not match `~/Documents2`;
+- a glob in `allowRead` under a write root (`~/Documents/**/*.pdf`): matched
+  files read-only, unmatched files writable; two globs with one prefix keep
+  list order;
+- profile-order test: emitted rules are sorted by the specificity key, every
+  read-only entry carries its write-deny, config denies come last;
+- a property test over random nested entry sets: hook, simulator, and a
+  reference most-specific evaluator agree;
+- on macOS, the suite compiles the profile and probes the two scenarios live
+  with `sandbox-exec`, because last-match-wins for nested subpaths has been
+  relied on but never probed live (`sandbox-safety`'s addition).
+
 ---
 
 ## 7. Decisions (Adam, 2026-09-02)
@@ -871,3 +979,4 @@ rules.
 [^56]: [spike finding: the unified-log harvest does not surface sandbox-exec denials; use bisection — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:docs/SANDBOX-SPIKE-FINDINGS.md`](docs/SANDBOX-SPIKE-FINDINGS.md:26)
 [^57]: [registry atomic write: `teams.json.tmp` then rename; lock file `.teams.lock`](src/teams.ts:53-143)
 [^58]: [sandbox.enabled OR-merged across the chain; a descendant may never switch off a sandbox enabled by an ancestor — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:src/agent-types.ts`](src/agent-types.ts:462-506)
+[^59]: [SPEC-SANDBOX §4A.4: "SBPL = last matching rule decides"; precedence rule, deny wins over any allow at both layers; filesystem denies emitted last — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:SPEC-SANDBOX.md`](SPEC-SANDBOX.md:426-446)

@@ -310,8 +310,9 @@ Strict mode today denies the scratchpad and `~/.claude`[^6]. Adam agreed that
 claude agents get their scratchpad. Always-allowed addition, applied at step 9
 alongside the project dir:
 
-- the session scratchpad root `/private/tmp/claude-<uid>/<encoded-cwd>/` (claude
-  only; derived the same way as the project dir);
+- the session scratchpad root
+  `/private/tmp/claude-<uid>/<encodeClaudeProjectPath(worktree)>` (claude only;
+  see §6.10 answer (a) for the derivation and its caveat);
 - nothing else in code. Anything wider (`/tmp`, `$TMPDIR`) goes into `_all.md`
   as a visible baseline entry, per §6.3.
 
@@ -391,7 +392,7 @@ Proposed split:
 
 | Layer | Role | Source of truth |
 |---|---|---|
-| Kernel (`sandbox-exec`) | The fence. A read or write outside the list fails with EPERM, whatever the spelling. | resolved `allowedPaths` in `meta.json`; the sandbox spec already derives `allowRead` and `allowWrite` from it when its own lists are absent[^31] |
+| Kernel (`sandbox-exec`) | The fence. A read or write outside the list fails with EPERM, whatever the spelling. | resolved `allowedPaths` in `meta.json`. The sandbox spec says to derive `allowRead` and `allowWrite` from it[^31], but the code does so only when no layer has a `sandbox:` block[^42], and `_all.md` always has one[^43]. See §6.10 amendment 2. |
 | Hook, file tools and `cd` | Fast decision plus a readable "Access denied" reason. Unchanged (§1.3). | the same list |
 | Hook, Bash arguments (§6.6) | Advisory. Catches the honest spellings (`/abs`, `~/`, `$HOME`) and explains the denial before the kernel does. Not the security boundary. | the same list |
 
@@ -421,6 +422,85 @@ Integration points for the discussion:
    context) do not depend on the sandbox and are small. They can land first so
    the rebased sandbox branch derives its lists from finished `allowedPaths`
    semantics.
+
+### 6.10 Amendments from `sandbox-safety` (2026-09-02)
+
+The `sandbox-safety` agent rebased `agent/sandbox-feature` onto `main` as
+`agent/sandbox-safety` (HEAD `e38ae42`) and reviewed §6.9. It agrees with the
+split and sent four amendments. I verified the first three against that branch.
+
+**Amendment 1: the shipped kernel profile is a write fence only.** The
+`_all.md` baseline lists `/` and bare `~` under `sandbox.allowRead`[^43]. `/`
+compiles to a whole-tree subpath and `~` to the whole home, so reads are limited
+only by the deny carve-outs. Writes are fenced: `allowWrite` lists specific
+directories plus `/private/tmp`, `/private/var/folders` and `/dev`[^43]. Its
+proposal, with no code change: replace `/` with the raw rule
+`(allow file-read-data (literal "/"))`, drop bare `~`, and list the five
+dot-directories and two files claude needs to boot. Types that run `bunx tsc`
+without `node_modules` add `~` themselves. Until this lands, "the kernel fences
+command-argument reads" is false. I agree.
+
+**Amendment 2: `allowedPaths` never reaches the profile today.**
+`mergeSandboxLayerConfigs` calls `resolveSandboxConfig({ allowedPaths })` only
+when no layer carries a `sandbox:` block[^42]. `_all.md` always does[^43], so the
+derivation the spec describes[^31] is dead code in practice. Its fix: when the
+sandbox is enabled, always union the resolved absolute `allowedPaths` into both
+`allowRead` and `allowWrite`. `src/sandbox.ts` keeps rejecting relative entries
+in `sandbox.allowRead` and `allowWrite`[^39]; `allowedPaths` is the only
+relative-capable list. I agree, and this answers my §6.9 point 1 question.
+
+**Amendment 3: the tmux socket is a kernel escape.** SPEC-SANDBOX §4C.3 records
+that a process which can write `/private/tmp/tmux-<uid>/` can run
+`tmux run-shell` as a child of the unsandboxed tmux server. `_all.md` grants
+`/private/tmp` for writing[^43], so the escape is open. Managers need tmux for
+`ib new-agent`; workers do not (`ib send` only appends outbox files). Its
+proposal: a runtime-injected deny keyed on `metaCanSpawnChildren === false`,
+documented as accepted for spawning types. I agree. The same rule covers agy
+`run_command`, since agy spawns through `ib new-agent` too[^20].
+
+**Amendment 4: the reverse mode warning.** Sandbox enabled with `allowedPaths`
+absent is valid (kernel fences, hook permissive), but EPERM arrives with no
+explanation. The session-start text[^24] must say the kernel fence is on and
+name the allowed roots. I agree.
+
+**Answers to its two questions.**
+
+(a) *Scratchpad root.* Observed in this session's environment, not documented in
+the repo: `/private/tmp/claude-<uid>/<encoded-cwd>/<session-uuid>/scratchpad`,
+where `<encoded-cwd>` is the cwd with `/` and `.` replaced by `-`, the same
+transform as `encodeClaudeProjectPath`[^44] (this session's value:
+`-Users-adamwulf-Developer-bun-itsybitsy--ittybitty-agents-path-isolation-repo`).
+Proposed allowed root for both layers:
+`/private/tmp/claude-<uid>/<encodeClaudeProjectPath(worktree)>`, one level above
+the session id so a respawned session is covered. Take `<uid>` from
+`process.getuid()`. Canonicalize by longest existing prefix, as
+`canonicalizeSandboxPath` does, because `/tmp` is a symlink and the directory
+may not exist at profile time. Keep it in one helper next to
+`claudeProjectDirFor`[^45], and verify the layout against a live session before
+relying on it, since it is a Claude Code implementation detail.
+
+(b) *Layer entries when the leaf is absent.* Yes, they should still flow into the
+kernel lists when the sandbox is enabled. Mechanism: `newAgent` resolves the
+layer union once. If the leaf is strict, the union is stored as
+`meta.allowedPaths` and the hook is strict. In both cases the union is passed to
+`mergeSandboxLayerConfigs`, which stores its own resolved lists in the meta
+sandbox block. `meta.allowedPaths` keeps its absent-means-permissive meaning for
+the hook, and the kernel gets the union either way.
+
+**One addition from me: the two layers must read one list.** When the sandbox
+is enabled, the advisory Bash scan (§6.6) should test tokens against the
+kernel's effective `allowRead ∪ allowWrite` from the meta sandbox block, not a
+second hard-coded system list. Then the hook never denies what the kernel allows
+or the reverse, and `_all.md` does not need to repeat the system read floor
+under `allowedPaths`. When the sandbox is disabled, the scan falls back to
+`allowedPaths` plus the `_all.md` `sandbox.allowRead` list. The kernel's deny
+carve-outs have no hook counterpart; that is fine, the kernel wins.
+
+**Agreed landing order.** This branch first: §6.2 resolution, §6.3 union, §6.4
+scratchpad, §6.5 codex context. Then `agent/sandbox-safety`: the
+`mergeSandboxLayerConfigs` union, the `_all.md` read-floor tightening, the tmux
+deny. Last: the §6.6 advisory scanner, which matters most for agy because agy
+has no kernel layer.
 
 ---
 
@@ -497,3 +577,7 @@ Integration points for the discussion:
 [^39]: [relative globs rejected at spawn — file lives only on branch agent/sandbox-feature, read with `git show agent/sandbox-feature:src/sandbox.ts`](src/sandbox.ts:147-150)
 [^40]: [resume copies meta.allowedPaths through](src/ib-commands.ts:1553)
 [^41]: [codex start.sh launch line](src/codex-spawn.ts:buildCodexStartContent)
+[^42]: [allowedPaths reaches resolveSandboxConfig only when no layer has a sandbox block — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:src/ib-commands.ts`](src/ib-commands.ts:mergeSandboxLayerConfigs)
+[^43]: [sandbox baseline: allowRead lists "/" (line 13) and "~" (line 31); allowWrite lists "/private/tmp" (line 38) — file version on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:docs/agent-types/_all.md`](docs/agent-types/_all.md:12-40)
+[^44]: [project-dir encoding: replace `/` and `.` with `-`](src/auto-compact.ts:encodeClaudeProjectPath)
+[^45]: [own Claude project dir helper](src/hooks/agent-path.ts:claudeProjectDirFor)

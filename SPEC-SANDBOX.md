@@ -172,14 +172,12 @@ is possible — but only by an **explicit** `allowRead: ["/"]` in the `.md`, nev
 by default. This is the opposite of the reference project's allow-by-default
 `(allow default)` skeleton; §5.1 flips it to `(deny default)`.
 
-⚠️ **Schema is FLAT — ONE level of nesting (R1 fix).** The frontmatter parser
-(`parseAgentTypeFile`, `agent-types.ts:66-158`) supports only **one** level of
-nesting (a parent object with scalar/list children — exactly how `permissions:`
-works). A two-level `sandbox.filesystem.allowRead` would parse **silently into
-garbage** (the `filesystem:` key becomes an empty list; `allowRead:` flattens into
-the `sandbox` object). So `sandbox:` is a single object whose children are the
-scalar `enabled` and the five lists directly (`allowRead`, `allowWrite`, `deny`,
-`rawAllow`, `domains`) — NO `filesystem:`/`network:` sub-objects:
+⚠️ **Schema uses two FLAT top-level blocks — ONE level of nesting.** The
+frontmatter parser supports a parent object with scalar/list children, exactly
+as `permissions:` does. Filesystem policy lives under `paths:` with exactly the
+three list children `allowRead`, `allowWrite`, and `deny`. Kernel activation,
+raw SBPL, and network domains live under `sandbox:` with `enabled`, `rawAllow`,
+and `domains`. No deeper `filesystem:` or `network:` objects are supported.
 
 ⚠️ **NO trailing inline `#` comments.** The parser strips only FULL-LINE comments
 (`agent-types.ts:102`); a trailing `# …` reaches the value unstripped, so
@@ -189,20 +187,20 @@ its closing `]` and the whole list silently becomes one garbage string — the
 exact footgun §4A.2 warns about. Keep comments on their own lines only:
 
 **Everything the sandbox permits — files, commands, and network — is configured
-in the `.md` (Adam, 2026-07-18). NOTHING is baked into code.** The complete
-surface is five lists under `sandbox:` (the `_all.md` baseline supplies the floor
-via union; a type ADDS what it needs):
+in the `.md` (Adam, 2026-07-18). NOTHING is baked into code.** The `_all.md`
+baseline supplies the floor via union; a type adds what it needs:
 
 ```yaml
 name: netletworker
-sandbox:
-  enabled: true
+paths:
   # FILES — readable paths:
   allowRead:  ["~/.config/foo"]
-  # FILES — writable paths:
+  # FILES — writable paths (write permission also grants read permission):
   allowWrite: ["/private/tmp/agent-scratch"]
   # FILES — carve holes inside the allowed set; deny always wins:
   deny:       ["**/.env", "~/.ssh"]
+sandbox:
+  enabled: true
   # COMMANDS / SYSCALLS / NETWORK-BLOCK — raw SBPL, so every non-path hole is
   # visible in the .md too (process exec, mach-lookup, the (deny network*) +
   # localhost proxy holes, etc.). The _all.md baseline carries the required set:
@@ -213,26 +211,25 @@ sandbox:
     - "(allow network-outbound (remote ip \"localhost:*\"))"
   # NETWORK — domain allowlist enforced by the per-agent proxy (allowlist only):
   domains:    ["api.anthropic.com", "github.com", "*.githubusercontent.com"]
-  # Fully-open file escape hatch (must be explicit, per Adam): allowRead: ["/"]
+  # Fully-open file escape hatch stays explicit under paths: allowRead: ["/"]
 ```
 
 There is no dimension the sandbox controls that isn't a line here: **files** =
-`allowRead`/`allowWrite`/`deny`; **commands/exec + syscalls + the network floor** =
-`rawAllow`; **network egress** = `domains`. The user can read, tighten, or remove
-any hole.
+`paths.allowRead`/`paths.allowWrite`/`paths.deny`; **commands/exec + syscalls +
+the network floor** = `sandbox.rawAllow`; **network egress** =
+`sandbox.domains`. The user can read, tighten, or remove any hole.
 
-This is structurally identical to the existing `permissions: {allow, deny}` block,
-so it parses today with no parser changes — **provided** the validator rejects a
-non-boolean `enabled` and non-array lists (§8 T-2), which also catches an
-accidental inline comment. (Alternative considered and rejected: teaching the
-parser two-level nesting or inline-comment stripping — more code, and the flat
-comment-free form reads fine.) The `AgentType.sandbox` TypeScript type still
-models these as grouped fields internally; only the `.md` surface is flat.
+Both blocks are structurally identical to the existing
+`permissions: {allow, deny}` block. `AgentType.paths` is a `PathsConfig`, while
+`AgentType.sandbox` is a `SandboxConfig`. An absent `paths:` block remains
+`undefined`; a present empty block resolves to three empty lists. Validators
+reject non-list path children, unknown keys, malformed path grammar, non-boolean
+`sandbox.enabled`, non-list sandbox children, and malformed `rawAllow`.
 
-✅ **Implemented in `src/agent-types.ts` and `src/sandbox.ts`:** the shipped
-schema is flat, all five list fields union and dedupe across layers,
-`enabled` OR-merges, and `validateSandboxFrontmatter` provides the T-2 rejection
-for non-boolean/non-list/unknown fields and malformed `rawAllow` expressions.
+✅ **Implemented in `src/agent-types.ts` and `src/sandbox.ts`:** both shipped
+blocks are flat. The three path lists and the two sandbox lists union and dedupe
+within their respective lists across layers, `enabled` OR-merges, and the two
+validators enforce their independent schemas.
 
 Design decisions:
 
@@ -240,7 +237,7 @@ Design decisions:
    (exactly today's behavior). This is the ONLY unsandboxed path once the feature
    ships. When `true`, the model is deny-by-default: nothing is reachable but the
    baseline (§4A.7) + the explicit allow lists. There is no "sandbox but
-   allow-everything" default — openness is opt-in via `allowRead: ["/"]`.
+   allow-everything" default — openness is opt-in via `paths.allowRead: ["/"]`.
 2. **A required baseline allowlist is always present** (§4A.7) so a sandboxed
    agent can actually start. Deny-by-default is unusable without it: Claude Code
    needs `~/.claude`, `/private/tmp`, macOS `/private/var/folders/…` caches, system
@@ -261,19 +258,15 @@ Design decisions:
    blocks all non-localhost egress, the proxy permits only the merged `domains`
    (`_all.md` baseline ∪ the type's own).
 4. **Relationship to the existing `allowedPaths` hook.** `allowedPaths`
-   (`agent-path.ts`) is a deny-by-default *allowlist* at the hook layer **only when
-   it is set** — when `allowedPaths` is unset, rule 13 (`agent-path.ts:435-436`)
-   is allow-everything, so the hook layer is NOT strict by default. Our sandbox is
-   the same allowlist model but kernel-enforced. `sandbox.allowRead`/`allowWrite`
-   are the kernel counterpart. If `sandbox` filesystem lists are omitted but
-   `allowedPaths` is set, derive the kernel allowlist from `allowedPaths` — and
-   since `allowedPaths` is op-agnostic at the hook, the derived kernel config grants
-   **both read AND write** for each entry (G-6). If both
-   are set, the `sandbox` filesystem lists are authoritative for the kernel and `allowedPaths`
-   stays the hook layer; keep them consistent (§4A.1). Document in SPEC §2.
+   (`agent-path.ts`) remains the legacy advisory hook-layer policy and is not
+   changed in this phase. `paths:` is the kernel filesystem policy. There is no
+   fallback derivation from `allowedPaths`: an absent `paths:` block resolves to
+   empty kernel path lists. Phase B retires `allowedPaths`; until then, authors
+   keep the independent policies consistent where both are used.
 5. **Inheritance → UNION of all `.md` layers (Adam's call).** Final permissions =
-   the sum of every layer: `_all.md` ∪ type ∪ any intermediate. **Both** the
-   list fields (`domains`, `allowRead`, `allowWrite`, `deny`, `rawAllow`) union
+   the sum of every layer: `_all.md` ∪ `_non_coordinator.md` ∪ the explicit
+   `inherits` chain ∪ leaf. **Both** the `paths:` lists (`allowRead`,
+   `allowWrite`, `deny`) and the `sandbox:` lists (`rawAllow`, `domains`) union
    across the chain — a child can **add** access (union its allow) and/or **narrow** access
    (union its deny). Because deny-wins (§4A.0), a child (or any layer) can never
    re-open what another layer denied. The scalar `enabled` uses **OR-merge** (any
@@ -283,9 +276,8 @@ Design decisions:
    (Adam authors all type files, so last-wins would be *safe* in practice, but
    OR-merge makes the "a layer can only tighten" invariant hold for `enabled` too.)
    ⚠️ Implementation note: the `permissions` union is a **hand-written special
-   case** (`mergeRawFrontmatters` :459-467), not generic machinery — so `sandbox`
-   needs analogous **new** merge code (union the five lists incl. `rawAllow`,
-   OR-merge `enabled`), modeled on it, not a free reuse.
+   case**, not generic machinery — `paths` and `sandbox` each have analogous
+   merge code, with exact duplicates removed within each list at merge time.
 
    ✅ **Implemented in `src/agent-types.ts` (`mergeRawFrontmatters`).** Spawn also
    unions resolved sandbox layers in `src/ib-commands.ts`, preserving the same
@@ -293,22 +285,23 @@ Design decisions:
 
 ## 4A. Path pattern format for allow/deny lists (AUTHORITATIVE)
 
-This is the exact, user-facing contract for entries in `sandbox`'s
-`allowRead` / `allowWrite` / `deny` lists. **We own the grammar and compile it to
-Seatbelt's kernel layer.** The original design also called for mirroring it into
-the advisory hook layer; the shipped-v1 note in §4A.1 records that drift.
+This is the exact, user-facing contract for entries in the top-level `paths:`
+block's `allowRead` / `allowWrite` / `deny` lists. **We own the grammar and
+compile it to Seatbelt's kernel layer.** The original design also called for
+mirroring it into the advisory hook layer; the shipped-v1 note in §4A.1 records
+that drift.
 
 ### 4A.0 The core rule (deny-by-default allowlist)
 
 For any absolute path `P` and operation `op ∈ {read, write}`:
 
 ```
-visible(P, op)  ⟺  matches(P, allow_op)  AND  NOT matches(P, deny)
+visible(P, read)  ⟺  matches(P, allowRead ∪ allowWrite) AND NOT matches(P, deny)
+visible(P, write) ⟺  matches(P, allowWrite)             AND NOT matches(P, deny)
 ```
 
-where `allow_read = baseline_read ∪ allowRead`, `allow_write = baseline_write ∪
-allowWrite`, and `baseline_*` is the always-merged required set (§4A.7). In
-words, and exactly as Adam stated it:
+where each named list includes the always-merged required entries from
+`_all.md` (§4A.7). In words, and exactly as Adam stated it:
 
 > **The agent can only see what's in the allow lists, unless that file also
 > matches a deny rule.**
@@ -318,11 +311,18 @@ words, and exactly as Adam stated it:
 - **In an allow list AND in a deny rule → denied.** `deny` always wins; it carves
   holes *inside* the allowed set. There is no allow rule that can re-open a
   denied path.
-- **`write` implies nothing about `read`** — they are separate allow lists.
-  Common case: `allowRead` a config dir, don't `allowWrite` it. (A path must be
-  read-allowed to be written in practice, but the profile expresses them
-  independently; document that writing also needs read where the tool reads
-  before writing.)
+- **`allowWrite` implies read and write** (Adam, 2026-09-02). The generator emits
+  both `file-read*` and `file-write*` rules for every `allowWrite` entry.
+  `allowRead` remains read-only.
+- **Exact cross-list ties are write.** If the same canonical compiled path is in
+  both `allowRead` and `allowWrite`, normalization removes the read copy and
+  emits the write entry once (which still grants both operations). List order
+  cannot change that result (Adam, 2026-09-02).
+- **Different cross-list globs with the same literal prefix are invalid.** Two
+  different glob strings in `allowRead` and `allowWrite` whose text before the
+  first `*`, `**`, or `?` is identical are rejected, with both entries and both
+  lists named in the error. This prevents order-dependent ambiguous overlap
+  until specificity ordering ships separately (Adam, 2026-09-02).
 - **Fully-open** is just `allowRead: ["/"]` (and/or `allowWrite: ["/"]`) — an
   explicit `/` subtree allow. Even then, `deny` still carves holes (e.g.
   `allowRead: ["/"]` + `deny: ["**/.env"]` = see everything except `.env` files).
@@ -342,9 +342,9 @@ normalized). Patterns are never matched against relative paths.
 **Shipped-v1 note:** the original two-layer plan above is preserved as design
 history, but the shipped sandbox path lists are enforced by the kernel profile.
 The existing `allowedPaths` hook remains a separate advisory layer; sandbox
-`deny` patterns are not copied into `agent-path.ts`. When no explicit `sandbox:`
-block exists, `resolveSandboxConfig` can derive read+write paths from
-`allowedPaths`, but sandboxing remains disabled unless explicitly enabled.
+`deny` patterns are not copied into `agent-path.ts`. `resolveSandboxConfig` no
+longer derives filesystem rules from `allowedPaths`; `paths:` is the sole source
+for configured kernel filesystem rules.
 
 ⚠️ **ENTRIES are canonicalized too, not just match targets (G-7).** A `/tmp/x`
 entry must compile as `/private/tmp/x`, or it will never match (Seatbelt matches
@@ -418,9 +418,10 @@ for example, `**/foo` matches the `foo` node but not `foo/bar` by path match.
 ### 4A.4 Worked example — deny ALL `.env`, even inside the worktree
 
 ```yaml
+paths:
+  deny: ["**/.env"]
 sandbox:
   enabled: true
-  deny: ["**/.env"]
 ```
 
 The original design called for BOTH of the following:
@@ -494,8 +495,8 @@ permission or domain is baked into code. The fixed
 exception described below; every other filesystem, syscall, and network hole
 comes from merged `.md` configuration.
 
-- The static OS/runtime paths go in `_all.md`'s `sandbox.allowRead`
-  / `sandbox.allowWrite` (and the required domains in `sandbox.domains`). Adam
+- The static OS/runtime paths go in `_all.md`'s `paths.allowRead`
+  / `paths.allowWrite` (and the required domains in `sandbox.domains`). Adam
   edits one file to tune the floor; no code change.
 - **Only the truly per-agent, runtime-determined paths are injected by code at
   spawn** — because they don't exist until the worktree is created and can't be
@@ -559,10 +560,14 @@ profile — these were the largest gap the design review surfaced.
 Two guarantees:
 1. **Spawn resolves, meta.json freezes, resume replays from meta — resume does
    NOT re-read the `.md` files** (fixes C2, matches the model/effort convention).
-   At spawn, the FULLY-RESOLVED merged sandbox config (unioned allow/deny/domains,
-   `enabled`) is written to `meta.json`; both `start.sh` and `resume.sh` build the
-   profile from that frozen config + the recomputed runtime `-D` params (worktree,
-   gitdir). **The proxy port is the ONE deliberately NON-frozen field** — §5.2
+   At spawn, the FULLY-RESOLVED merged `paths` lists and sandbox config
+   (`enabled`, `rawAllow`, `domains`) are written separately to `meta.json`.
+   `meta.paths` is written even when sandboxing is disabled. Its entries have
+   `~` expanded and their paths/glob prefixes canonicalized, while cross-list
+   membership is retained for display of author intent. Both `start.sh` and
+   `resume.sh` build the profile from those frozen values + the recomputed
+   runtime `-D` params (worktree, gitdir). **The proxy port is the ONE
+   deliberately NON-frozen field** — §5.2
    reallocates it on every resume (rewriting meta), so it's stored but not treated
    as immutable like the allow/deny/domain lists (G-5). **Consequence, stated
    explicitly:** editing the `_all.md` floor affects NEW spawns only; a live agent
@@ -576,9 +581,10 @@ children union their allow lists on top — `_all.md` sets the floor, each type
 adds what it needs. `deny` unions too (deny-wins ensures a denied path stays
 denied regardless of layer).
 
-✅ **Implemented:** `AgentMeta.sandbox` persists the fully resolved configuration
-in `src/agents.ts`; resume uses that frozen block, reallocates only the proxy
-port, rewrites meta, and regenerates the profile/scripts in `src/ib-commands.ts`.
+✅ **Implemented:** `AgentMeta.paths` and `AgentMeta.sandbox` persist the fully
+resolved configuration in `src/agents.ts`; resume uses those frozen blocks,
+reallocates only the proxy port, rewrites meta, and regenerates the
+profile/scripts in `src/ib-commands.ts`.
 
 ## 4B. Codex: disable its built-in sandbox, use ours (Adam's call)
 
@@ -1116,16 +1122,21 @@ a review cycle (2 worker reviewers) before merge.
   the user (spawn returns non-zero with an explanation). An agent that believes it
   is sandboxed but isn't is the exact case we refuse to allow. See §5.5.
 - ✅ **Inheritance → union (sum of all `.md` files).** Final permissions = the
-  union of every layer's lists (`_all.md` ∪ type ∪ …), for BOTH `allow*` and
-  `deny`. A child can **add** access (union its allow) or **narrow** access (union
-  its deny); because deny-wins (§4A.0), a child can never re-open what any layer
-  denied. Modeled on (not free reuse of) the existing `permissions` merge
-  (`agent-types.ts:459-483`). The scalar `enabled` uses **OR-merge** (any layer
-  `true` wins) — NOT last-non-empty-wins — so a leaf type can't switch off a
-  sandbox a parent layer turned on (§4 decision 5, §8C).
-- ✅ **`allowedPaths` relationship** (§4 decision 4): sandbox filesystem is the
-  kernel counterpart to the existing `allowedPaths` hook (both deny-by-default
-  allowlists), not a parallel conflicting list.
+  union of every layer's lists (`_all.md` ∪ `_non_coordinator.md` ∪ inherits ∪
+  leaf), for `paths.allowRead`/`allowWrite`/`deny` and
+  `sandbox.rawAllow`/`domains`. Exact duplicates dedupe within a list at merge
+  time. The scalar `sandbox.enabled` uses OR-merge (any layer `true` wins).
+- ✅ **Top-level `paths:` split (Adam, 2026-09-02).** `sandbox:` contains only
+  `enabled`, `rawAllow`, and `domains`; filesystem policy is the separate
+  `paths:` block. Old path keys under `sandbox:` are rejected with migration
+  guidance.
+- ✅ **Write implies read (Adam, 2026-09-02).** Every `allowWrite` matcher emits
+  both read and write rules. An exact canonical tie across the read/write lists
+  resolves to write; different cross-list globs with the same literal prefix
+  are invalid. Deny remains last and wins.
+- ✅ **`allowedPaths` relationship (Adam, 2026-09-02):** it remains an
+  independent legacy hook-layer field until Phase B. Kernel `paths:` never
+  derives from it.
 
 **RESOLVED EMPIRICALLY:**
 1. ✅ Claude Code boots under the tractable `(deny default)` baseline; no
@@ -1162,25 +1173,26 @@ with no spawn required.
   `(regex …)` under the correct op (`file-read*` vs `file-write*`).
 
 **C. Config resolution + merge:**
-- Union across `_all.md` + intermediate + type for all FIVE lists (`allowRead`,
-  `allowWrite`, `deny`, `rawAllow`, `domains`), deduped; deny-wins when the same
-  path is in `allowWrite` AND `deny`; `enabled` OR-merge (leaf `false` does NOT
-  switch off a floor `true` — §4 decision 5).
+- Union across `_all.md` + `_non_coordinator.md` + inherits + leaf for all three
+  `paths` lists and both `sandbox` lists, with exact duplicates deduped within
+  each list; shuffled layer and entry order yields the same merged sets.
+  Deny-wins when the same path is in `allowWrite` AND `deny`; `enabled` OR-merges.
 - **`rawAllow` emission + ordering:** every merged `rawAllow` line appears verbatim
   in the generated `.sb`, in the allow section BEFORE the config `deny` list (so
   config denies still win); a `rawAllow` `(deny network*)` followed by a localhost
   re-allow works via SBPL last-match-wins.
-- `sandbox` omitted + `allowedPaths` set → derived config; both set → `sandbox`
-  authoritative. ⚠️ `allowedPaths` merges by REPLACE (`SCALAR_KEYS`,
-  `agent-types.ts:422`) while `sandbox` lists UNION — pin which semantics a
-  derived config inherits.
-- Frontmatter parse round-trip: flat `sandbox:` block (R1) — block lists, inline
-  arrays, comments; assert NO silent flattening.
+- `paths` omitted does not derive from `allowedPaths`; the legacy hook field is
+  independent until Phase B.
+- Frontmatter parse round-trip: flat sibling `paths:` and `sandbox:` blocks —
+  block lists, inline arrays, comments; assert no silent flattening. An empty
+  present `paths:` block resolves to three empty lists.
 - **T-2 — validator REJECTION (load-bearing; guards the §4 inline-comment footgun):**
   spawn is refused when `enabled` is non-boolean (crucially incl. a trailing-comment
   string like `"true  # note"`, which is truthy and would otherwise silently pass),
-  when any of `allowRead`/`allowWrite`/`deny`/`rawAllow`/`domains` is not an array,
-  or when an unknown key appears inside `sandbox:`. Also reject a `rawAllow` entry
+  when `rawAllow`/`domains` is not an array, when an unknown key appears inside
+  `sandbox:`, or when an old path key remains there (with `paths:` migration
+  guidance). Validate all `paths:` children and reject unknown keys, malformed
+  entries, and different read/write globs with the same literal prefix. Also reject a `rawAllow` entry
   that isn't a balanced `(...)` s-expression, and lint-warn on catch-all
   `rawAllow` lines (`(allow default)`, `(allow file-read*)` with no filter) that
   would defeat Model B. This is the guard §4 relies on to call the flat schema
@@ -1194,10 +1206,10 @@ with no spawn required.
   prefix-only (`:99`); use `Bun.Glob`. Test glob denies actually match.
 
 **E. Meta persistence + resume parity:**
-- Fully-resolved `sandbox` block round-trips `writeMetaJsonAtomic` → `readAgentMeta`
-  — **declare the field in `AgentMeta` and add coercion** (unlike `allowedPaths`,
-  which is written at `ib-commands.ts:4544` but undeclared in `agents.ts:50-92` —
-  don't repeat that gap).
+- Fully-resolved `paths` and `sandbox` blocks round-trip
+  `writeMetaJsonAtomic` → `readAgentMeta`; both fields are declared in
+  `AgentMeta`, coerced, and deep-copied. `meta.paths` is present even when
+  sandboxing is disabled.
 - Legacy meta with no `sandbox` → unsandboxed resume.
 - Same inputs at spawn and resume → **byte-identical `sandbox.sb`** (C2 freeze).
 

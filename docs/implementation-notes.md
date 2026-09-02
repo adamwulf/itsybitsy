@@ -88,15 +88,24 @@ Hooks read input from stdin. Path-check, main-path, intercept-task, and session-
 
 Agent types are `.md` files with YAML frontmatter in `~/.itsybitsy/agent-types/`. The `.md` file on disk is the primary source of truth — `loadAgentType()` reads only from disk and throws if a file is missing. Default types (manager, worker, coordinator) plus three layer files (`_all.md`, `_non_coordinator.md`, `system.md`) are embedded in the binary via text imports from `docs/agent-types/*.md` and auto-populated on first run via `ensureAgentTypesDir()`.
 
-`AgentType` interface: `name`, `description`, `canSpawnChildren`, `spawnable`, `icon`, `model`, `permissions`, `allowedPaths`, `repos`, `instructionStyle`, `markdownBody`.
+`AgentType` interface: `name`, `description`, `canSpawnChildren`, `spawnable`, `icon`, `model`, `permissions`, `allowedPaths`, `paths`, `sandbox`, `repos`, `instructionStyle`, `markdownBody`.
 
 - `spawnable` defaults to `true` when absent; `false` marks layer-only files (`_all.md`, `_non_coordinator.md`, `system.md`) that cannot be spawned but whose frontmatter and body merge into spawned agents (`_all.md` into every agent, `_non_coordinator.md` into non-coordinators, `system.md` into the system coordinator).
 - `repos` is an optional list constraining which repos a type may be spawned into.
 - `allowedPaths` controls file access beyond the worktree: `undefined` = legacy permissive, `[]` = strict (worktree only), entries = allow listed directories. Paths expanded (`~` → homedir, `realpathSync` for symlinks) at agent creation time and stored in `meta.json`. The path hook reads them at runtime (SPEC.md §6.1).
+- `paths` is the kernel filesystem policy from the top-level `paths:` block (`allowRead`, `allowWrite`, `deny`). The lists union and exact-dedupe across `_all.md` → `_non_coordinator.md` → inherits → leaf. `allowWrite` also grants read; exact canonical read/write ties normalize to write, while deny is emitted last and wins. This is independent of legacy `allowedPaths`.
+- `sandbox` contains only `enabled`, `rawAllow`, and `domains`. `enabled` OR-merges; the lists union and exact-dedupe. Old filesystem keys under `sandbox:` are validation errors with `paths:` migration guidance.
 
 Key exports: `loadAgentType(name)`, `agentTypeExists(name)`, `ensureAgentTypesDir()` (auto-populate on first run), `initAgentTypes()` (backs `ib init-types`), `listAgentTypes()`, `listSpawnableTypeNamesSync()` (TUI scan, filters `spawnable: false`), `validateAllAgentTypes()` (startup validation), `parseAgentTypeFile(content)` (YAML frontmatter parser with nested object and list support). When the directory is missing entirely, `listAgentTypeNamesSync()` falls back to the embedded list so the TUI can render type pickers before files are materialized.
 
 See SPEC.md §2 for behavior.
+
+## Seatbelt sandbox (`src/sandbox.ts`, `src/ib-commands.ts`)
+
+- `canonicalizePathsConfig()` expands `~` and canonicalizes authored paths/glob prefixes before `AgentMeta.paths` is persisted, even for a disabled sandbox. Cross-list membership is preserved in meta for display; `readAgentMeta()` coerces and deep-copies all three lists.
+- `normalizePathsConfig()` applies the exact canonical read/write tie rule on a copy. `generateProfile()` calls it, emits `file-read*` plus `file-write*` for each `allowWrite`, and keeps configured deny rules last.
+- `mergeSandboxLayerConfigs()` merges the separately typed `PathsConfig` and `SandboxConfig`. Spawn freezes both in meta. Enabled resume uses only those frozen values to regenerate `sandbox.sb`; it never re-reads agent-type markdown, which preserves byte-identical profiles for unchanged runtime inputs.
+- `prepareSandbox()` owns profile generation, parameter collection, proxy setup, and compile preflight. The proxy port is deliberately refreshed on resume and remains stored separately as `sandbox_proxy_port`.
 
 ## Codex CLI integration
 

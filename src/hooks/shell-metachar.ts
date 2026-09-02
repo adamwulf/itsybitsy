@@ -291,6 +291,10 @@ export function heredocBodyRanges(command: string): Array<{ start: number; end: 
   let i = 0;
   const n = command.length;
   let heredoc: { delimiter: string; dash: boolean; bodyStart: number } | null = null;
+  // Arithmetic nesting: inside `((…))` / `$((…))` a `<<` is the left-shift
+  // operator, NOT a heredoc opener. Tracking this depth stops a false heredoc
+  // (whose "body" would mask the real command lines after it).
+  let arithDepth = 0;
 
   while (i < n) {
     const c = command[i]!;
@@ -335,8 +339,26 @@ export function heredocBodyRanges(command: string): Array<{ start: number; end: 
     // ---- Unquoted backslash escapes the next character ----
     if (c === "\\") { i += 2; continue; }
 
-    // ---- Heredoc opener ----
+    // ---- Arithmetic context: `$((` / `((` open, `))` closes ----
+    if (c === "$" && command[i + 1] === "(" && command[i + 2] === "(") {
+      arithDepth++;
+      i += 3;
+      continue;
+    }
+    if (c === "(" && command[i + 1] === "(") {
+      arithDepth++;
+      i += 2;
+      continue;
+    }
+    if (c === ")" && command[i + 1] === ")" && arithDepth > 0) {
+      arithDepth--;
+      i += 2;
+      continue;
+    }
+
+    // ---- Heredoc opener (a `<<` inside arithmetic is a shift, not a heredoc) ----
     if (c === "<" && command[i + 1] === "<") {
+      if (arithDepth > 0) { i += 2; continue; }
       let j = i + 2;
       let dash = false;
       if (command[j] === "-") { dash = true; j++; }

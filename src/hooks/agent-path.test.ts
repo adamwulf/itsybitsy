@@ -546,6 +546,16 @@ describe("checkPathAccess", () => {
     expect(result.decision).toBe("allow");
   });
 
+  test("arithmetic `<<` does not mask the following line from the traversal scanner", () => {
+    const ctx = makeCtx();
+    // `((1<< y ))` is a shift, not a heredoc — the `cat ../../agent-other` line
+    // after it must still be scanned and denied.
+    const command = "((1<< y ))\ncat ../../agent-other/repo/.env\ny";
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("other agents");
+  });
+
   // ── git -C / --git-dir / --work-tree blocking ──────────────────────────────
 
   test("blocks git -C (bypasses path isolation)", () => {

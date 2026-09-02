@@ -63,6 +63,21 @@ describe("heredocBodyRanges", () => {
     // real `EOF` line.
     expect(bodies("cat <<'EOF'\nEOFX\nEOF")).toEqual(["EOFX\n"]);
   });
+
+  // ── arithmetic `<<` is a shift, not a heredoc (boundary review round 6) ────
+
+  test("`<<` inside ((…)) does not open a false heredoc", () => {
+    // The following command lines must NOT be masked as body.
+    expect(heredocBodyRanges("((1<< y ))\ncat ../../agent-YYY/repo/.env\ny")).toEqual([]);
+  });
+
+  test("echo $((1<<2)) opens no heredoc", () => {
+    expect(heredocBodyRanges("echo $((1<<2))")).toEqual([]);
+  });
+
+  test("a real heredoc after an arithmetic expression on an earlier line is still masked", () => {
+    expect(bodies("echo $((1<<2))\ncat <<'EOF'\nbody\nEOF")).toEqual(["body\n"]);
+  });
 });
 
 describe("findShellMetachar — multi-part heredoc delimiter (round 5 fix 1)", () => {
@@ -80,6 +95,12 @@ describe("findShellMetachar — multi-part heredoc delimiter (round 5 fix 1)", (
 
   test("a plain quoted heredoc is still allowed", () => {
     expect(findShellMetachar("git commit -F - <<'EOF'\nmessage with ; | &\nEOF")).toBeNull();
+  });
+
+  test("findShellMetachar still reports `( subshell` for the arithmetic payload (unchanged)", () => {
+    // findShellMetachar denies `(` as a subshell before it ever reaches the
+    // inner `<<`, so only heredocBodyRanges needed the arithmetic fix.
+    expect(findShellMetachar("((1<< y ))\ncat ../../agent-YYY/repo/.env\ny")).toBe("( subshell");
   });
 });
 

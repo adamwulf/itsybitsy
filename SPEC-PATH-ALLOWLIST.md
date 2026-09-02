@@ -1094,11 +1094,14 @@ sorted, generated, and one resolver function, all tested.
 4. The scratchpad runtime root; audit mode (`paths.audit`); the advisory Bash
    scanner (§6.6, against the resolver); session-start text; `ib info` and
    dashboard display; SPEC §2.2, §5.2, §6.1 and the implementation notes.
-5. `ib sandbox refresh <id> | --all`: re-derive an existing agent's sandbox
-   block and path lists from the current `.md` files, rewrite its `meta.json`,
-   and resume it. Required by the enable-all gate, because a resumed agent
-   otherwise rebuilds its profile from the config frozen in its own
-   `meta.json`[^60], so flipping `_all.md` would affect new spawns only.
+5. ~~`ib sandbox refresh`~~ moved to Phase A (item A7, `sandbox-safety`),
+   because the resume code is theirs. It re-derives an existing agent's
+   sandbox block and path lists from the current `.md` files, rewrites its
+   `meta.json`, and resumes it. Required by the enable-all gate, because a
+   resumed agent otherwise rebuilds its profile from the config frozen in its
+   own `meta.json`[^60], and `/respawn` is a pause plus resume that keeps that
+   block, so flipping `_all.md` in either direction changes nothing for live
+   agents.
 
 **Shipping ledger and the gate.** Adam asked on 2026-09-02 at 16:55 for
 documentation that says what is shipped and when, and for a clear gate that

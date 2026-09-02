@@ -1112,6 +1112,27 @@ branch lands on `main` first; `path-isolation` fills the Phase B rows on
 rebase. One file. "Shipped" means installed: on `main`, `ib` rebuilt and on
 PATH, `ib watch` restarted.
 
+**Phase A progress and the interface Phase B consumes** (reported by
+`sandbox-safety` on 2026-09-02 at 18:16). A1 is merged on
+`agent/sandbox-safety` at `3503607` after two review rounds: the top-level
+`paths:` block parsed, validated, and unioned across layers; `sandbox:` keeps
+`enabled`, `rawAllow`, `domains` and rejects the moved keys with a pointer;
+`allowWrite` emits read and write; exact ties collapse into `allowWrite` at
+normalize time by compiled-key equality, so `/tmp` against `/private/tmp` and
+`~` against its absolute form count as the same path; cross-list different
+globs with one canonical prefix are a validation error; `meta.json` `paths` is
+frozen at spawn as authored, even with the sandbox disabled, and resume
+replays it byte-identical; an enabled meta with no `paths` block is refused on
+resume, fail-hard. The legacy `allowedPaths` derivation into the kernel is
+gone; `allowedPaths` itself is untouched for Phase B to retire. A2 (the sort,
+runtime roots in the table, `resolvePathAccess`, the oracle and live tests) is
+building. Exports Phase B consumes from `src/sandbox.ts`: `PathsConfig`,
+`resolvePathsConfig`, `canonicalizePathsConfig`, `normalizePathsConfig`,
+`validatePathsFrontmatter`, `canonicalizeGlobPrefix`, `canonicalizeSandboxPath`,
+and, from A2, `resolvePathAccess(absPath, op, { allowRead, allowWrite, deny,
+runtimeRoots })`; `mergeSandboxLayerConfigs` is exported from
+`src/ib-commands.ts` and returns `{ sandbox, paths }`.
+
 **Parallel option during Phase A**, if Adam wants speed: `path-isolation`
 starts the pieces that touch none of `agent-types.ts`, `newAgent`, or
 `sandbox.ts`: the Bash-scanner tokenization in `agent-path.ts` against a

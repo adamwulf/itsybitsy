@@ -38,6 +38,7 @@ import { encodeClaudeProjectPath } from "./auto-compact";
 import { spawnCtx as tmuxSpawnCtx } from "./tmux-poller";
 import { setWatchLogPath, resetWatchLogPath } from "./watch-log";
 import { STARTUP_MARKERS } from "./parse-state";
+import { setHomeOverrideForTest, resetHomeOverride } from "./home";
 
 // The system-coordinator lifecycle tests drive real async work — git init /
 // settings writes through the injected spawn contexts, and the ready-poll loop
@@ -57,22 +58,22 @@ describe("IB_COORDINATOR_SESSION", () => {
 });
 
 describe("buildSystemCoordinatorSettings", () => {
-  // Isolate HOME so these tests read the embedded `_all.md` / `system.md`
-  // layers rather than the developer's customized files. Without this, any
-  // extra entry the user has added locally leaks into the test assertions.
-  const originalHome = process.env.HOME;
+  // Isolate the home dir (via setHomeOverrideForTest) so these tests read the
+  // embedded `_all.md` / `system.md` layers rather than the developer's
+  // customized files. Without this, any extra entry the user has added locally
+  // leaks into the test assertions.
   let tempHome: string;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "sys-coord-settings-"));
-    process.env.HOME = tempHome;
+    setHomeOverrideForTest(tempHome);
     // Populate with embedded defaults (including _all.md and system.md)
     // so loadAgentType works and returns the unmodified layers.
     await (await import("./agent-types")).ensureAgentTypesDir();
   });
 
   afterEach(async () => {
-    process.env.HOME = originalHome;
+    resetHomeOverride();
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -352,16 +353,16 @@ function createCommandRouter(handlers: Record<string, { stdout?: string; exitCod
 describe("ensureSystemCoordinator", () => {
   let tmpDir: string;
   let typesHome: string;
-  const originalHome = process.env.HOME;
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "coord-test-"));
     setCoordinatorHome(tmpDir);
-    // Isolate HOME for agent-types loading so buildSystemCoordinatorSettings
-    // reads the embedded `_all.md`/`system.md` layers, not the developer's
-    // customized ones (which would leak extra allow entries into the assertions).
+    // Isolate the home dir (via setHomeOverrideForTest) for agent-types loading
+    // so buildSystemCoordinatorSettings reads the embedded `_all.md`/`system.md`
+    // layers, not the developer's customized ones (which would leak extra allow
+    // entries into the assertions).
     typesHome = await mkdtemp(join(tmpdir(), "coord-types-home-"));
-    process.env.HOME = typesHome;
+    setHomeOverrideForTest(typesHome);
     // Redirect the watch log into the temp home so the new [coordinator]
     // resume/ready log lines don't touch the developer's real ~/.itsybitsy.
     setWatchLogPath(join(tmpDir, "watch.log"));
@@ -381,7 +382,7 @@ describe("ensureSystemCoordinator", () => {
     resetCoordinatorHome();
     resetCoordinatorSleepFn();
     resetWatchLogPath();
-    process.env.HOME = originalHome;
+    resetHomeOverride();
     await rm(tmpDir, { recursive: true, force: true });
     await rm(typesHome, { recursive: true, force: true });
   });
@@ -1457,15 +1458,14 @@ describe("waitForCoordinatorReady", () => {
 describe("discardSystemCoordinator", () => {
   let tmpDir: string;
   let typesHome: string;
-  const originalHome = process.env.HOME;
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "coord-discard-"));
     setCoordinatorHome(tmpDir);
-    // Isolate $HOME so the transcript-dir lookup (~/.claude/projects/<encoded>)
-    // resolves under a test-controlled tree.
+    // Isolate the home dir (via setHomeOverrideForTest) so the transcript-dir
+    // lookup (~/.claude/projects/<encoded>) resolves under a test-controlled tree.
     typesHome = await mkdtemp(join(tmpdir(), "coord-discard-home-"));
-    process.env.HOME = typesHome;
+    setHomeOverrideForTest(typesHome);
     setCoordinatorSleepFn(async () => {}); // No-op sleep so tests don't actually wait 1s
   });
 
@@ -1473,7 +1473,7 @@ describe("discardSystemCoordinator", () => {
     coordinatorSpawnCtx.reset();
     resetCoordinatorHome();
     resetCoordinatorSleepFn();
-    process.env.HOME = originalHome;
+    resetHomeOverride();
     await rm(tmpDir, { recursive: true, force: true });
     await rm(typesHome, { recursive: true, force: true });
   });
@@ -1847,13 +1847,12 @@ describe("isCoordinatorRestartCommand", () => {
 describe("restartSystemCoordinatorFresh", () => {
   let tmpDir: string;
   let typesHome: string;
-  const originalHome = process.env.HOME;
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "coord-fresh-"));
     setCoordinatorHome(tmpDir);
     typesHome = await mkdtemp(join(tmpdir(), "coord-fresh-home-"));
-    process.env.HOME = typesHome;
+    setHomeOverrideForTest(typesHome);
     setCoordinatorSleepFn(async () => {});
     // waitForCoordinatorReady captures the pane via tmuxSpawnCtx — return the
     // ready marker so the fresh restart resolves true.
@@ -1869,7 +1868,7 @@ describe("restartSystemCoordinatorFresh", () => {
     tmuxSpawnCtx.reset();
     resetCoordinatorHome();
     resetCoordinatorSleepFn();
-    process.env.HOME = originalHome;
+    resetHomeOverride();
     // Guard: if a beforeEach ever fails before mkdtemp assigns these, an
     // unguarded rm(undefined) throws ERR_INVALID_ARG_TYPE and MASKS the real
     // failure. Only clean up dirs we actually created.
@@ -2498,24 +2497,24 @@ describe("perRepoCoordinatorPrompt", () => {
 });
 
 describe("buildPerRepoCoordinatorSettings", () => {
-  // Isolate HOME so these tests read the embedded `_all.md` layer rather than
-  // the developer's customized ~/.itsybitsy/agent-types/_all.md. Without this,
-  // any extra Bash(...) entry the user has added locally leaks into the test
-  // assertions (e.g. if the user allows `Bash(git add:*)` for themselves, the
-  // "write git commands not allowed" test fails).
-  const originalHome = process.env.HOME;
+  // Isolate the home dir (via setHomeOverrideForTest) so these tests read the
+  // embedded `_all.md` layer rather than the developer's customized
+  // ~/.itsybitsy/agent-types/_all.md. Without this, any extra Bash(...) entry the
+  // user has added locally leaks into the test assertions (e.g. if the user
+  // allows `Bash(git add:*)` for themselves, the "write git commands not
+  // allowed" test fails).
   let tempHome: string;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "coord-settings-"));
-    process.env.HOME = tempHome;
+    setHomeOverrideForTest(tempHome);
     // Populate with embedded defaults (including _all.md) so loadAgentType
     // works and returns the unmodified layer.
     await (await import("./agent-types")).ensureAgentTypesDir();
   });
 
   afterEach(async () => {
-    process.env.HOME = originalHome;
+    resetHomeOverride();
     await rm(tempHome, { recursive: true, force: true });
   });
 

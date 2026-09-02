@@ -72,6 +72,14 @@ export interface AgentMeta {
    * agents leave it unset.
    */
   agy_conversation_id?: string;
+  /**
+   * Antigravity CLI version string captured from `agy --version` at spawn time
+   * (SPEC-ANTIGRAVITY-CLI.md §6 risk 1 — 1.1.23 behaviour can drift weekly, so
+   * the version is stamped so a later bug report can be pinned to a release).
+   * Best-effort: an empty string when `agy --version` failed. Claude and codex
+   * agents leave it unset.
+   */
+  agy_version?: string;
   tmux_session: string;
   prompt: string;
   manager: string | null;

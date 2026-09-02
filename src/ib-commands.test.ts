@@ -59,6 +59,7 @@ import {
   resetMergeSpawnRunner,
   setNewAgentSpawnRunner,
   resetNewAgentSpawnRunner,
+  setAgyVersionProbeTimeoutMs,
   setDispatcherDryRunSpawnRunner,
   resetDispatcherDryRunSpawnRunner,
   setDiffStatusSpawnRunner,
@@ -7182,6 +7183,41 @@ body`,
       });
       expect(result.ok).toBe(true);
       const meta = await Bun.file(join(agentsDir, "agy-meta-noversion", "meta.json")).json();
+      expect(meta.agy_version).toBe("");
+    });
+
+    test("spawn proceeds with agy_version '' when `agy --version` never resolves (Phase 2 live hang)", async () => {
+      // agy 1.1.23 blocks forever on an inherited unclosed stdin: the old probe
+      // `await`ed proc.exited unconditionally and hung the whole spawn. The fix
+      // is a hard timeout — a never-resolving `agy --version` must NOT block the
+      // spawn; the field is stamped "" and everything else proceeds.
+      setAgyVersionProbeTimeoutMs(100);
+      const base = mockSpawnRunner();
+      setNewAgentSpawnRunner((cmd: string[], o?: { stdout: "pipe"; stderr: "pipe" }) => {
+        const cmdStr = cmd.join(" ");
+        if (cmdStr.includes("ls-files") && cmdStr.includes("--error-unmatch")) return makeSpawnResult("", 1);
+        if (cmd[0] === "agy" && cmd[1] === "--version") {
+          // A child that never exits and whose streams never close.
+          return {
+            stdout: new ReadableStream({ start() { /* never closes */ } }),
+            stderr: new ReadableStream({ start() { /* never closes */ } }),
+            exited: new Promise<number>(() => { /* never resolves */ }),
+            kill: () => { /* best-effort no-op */ },
+          };
+        }
+        return base(cmd, o);
+      });
+      const start = Date.now();
+      const result = await callNewAgent("task", {
+        name: "agy-version-hang",
+        model: "agy:gemini-3.7-flash-low",
+      });
+      const elapsed = Date.now() - start;
+      expect(result.ok).toBe(true);
+      // The probe timed out at 100ms rather than the 5s default — the spawn as a
+      // whole finished well under the old-behaviour "forever".
+      expect(elapsed).toBeLessThan(3000);
+      const meta = await Bun.file(join(agentsDir, "agy-version-hang", "meta.json")).json();
       expect(meta.agy_version).toBe("");
     });
 

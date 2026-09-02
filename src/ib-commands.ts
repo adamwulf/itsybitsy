@@ -3656,6 +3656,13 @@ export interface NewAgentOptions {
 export const newAgentSpawnCtx = new SpawnContext();
 /** Override delay for newAgent tests (null = use real delay) */
 let newAgentDelayOverrideMs: number | null = null;
+/**
+ * Override the hard timeout (ms) for the spawn-time `agy --version` probe
+ * (null = use AGY_VERSION_PROBE_TIMEOUT_MS). Tests set a tiny value so the
+ * never-resolving-runner case proves the spawn proceeds without waiting the
+ * full 5s.
+ */
+let agyVersionProbeTimeoutOverrideMs: number | null = null;
 
 /** Override the newAgent spawn runner (for testing). Sets delay to 0 by default. */
 export function setNewAgentSpawnRunner(runner: SpawnFn): void {
@@ -3667,6 +3674,12 @@ export function setNewAgentSpawnRunner(runner: SpawnFn): void {
 export function resetNewAgentSpawnRunner(): void {
   newAgentSpawnCtx.reset();
   newAgentDelayOverrideMs = null;
+  agyVersionProbeTimeoutOverrideMs = null;
+}
+
+/** Override the `agy --version` probe timeout (ms) for tests. null = default. */
+export function setAgyVersionProbeTimeoutMs(ms: number | null): void {
+  agyVersionProbeTimeoutOverrideMs = ms;
 }
 
 /**
@@ -3685,8 +3698,22 @@ export type DispatcherDryRunFn = (
   cwd: string,
 ) => import("./types").SpawnResult;
 
+// stdin: "ignore" — same discipline as the `agy --version` probe. The dry-run
+// companion feeds the handler a synthetic payload (it never reads real stdin),
+// so closing the child's stdin is belt-and-suspenders that costs nothing and
+// guarantees the precheck subprocess can't inherit an open stdin pipe.
 const defaultDispatcherDryRunFn: DispatcherDryRunFn = (cmd, cwd) =>
-  Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", cwd }) as import("./types").SpawnResult;
+  Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", stdin: "ignore", cwd }) as import("./types").SpawnResult;
+
+/**
+ * Hard timeout for a single `ib hooks <event> --dry-run` precheck subprocess.
+ * The hooks.json runtime timeout is 30s; the dry-run itself does trivial work
+ * (a synthetic payload through the real handler), so a generous 15s guards
+ * against a wedged subprocess without ever tripping a healthy precheck. On
+ * timeout the precheck reports a non-zero exit so the spawn refuses cleanly
+ * (fail-closed) rather than hanging.
+ */
+export const DISPATCHER_DRY_RUN_TIMEOUT_MS = 15_000;
 
 class DispatcherDryRunContext {
   private _fn: DispatcherDryRunFn = defaultDispatcherDryRunFn;
@@ -3702,14 +3729,33 @@ class DispatcherDryRunContext {
   async run(
     cmd: string[],
     cwd: string,
+    timeoutMs: number = DISPATCHER_DRY_RUN_TIMEOUT_MS,
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     const proc = this._fn(cmd, cwd);
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const exitCode = await proc.exited;
-    return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
+    const drain: Promise<{ stdout: string; stderr: string; exitCode: number } | null> = (async () => {
+      const [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      const exitCode = await proc.exited;
+      return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
+    })().catch(() => null);
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), timeoutMs);
+    });
+
+    try {
+      const result = await Promise.race([drain, timeout]);
+      if (result === null) {
+        try { proc.kill?.(); } catch { /* best-effort */ }
+        return { stdout: "", stderr: `dispatcher precheck timed out after ${timeoutMs}ms`, exitCode: 1 };
+      }
+      return result;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 }
 
@@ -4498,12 +4544,17 @@ export async function newAgent(
         stderr: `Error: Unsafe ib binary path for agy launch: ${JSON.stringify(agyIbBinaryPath)} contains quotes, backslashes, or control characters. Reinstall ib to a path made of printable ASCII with no apostrophes, quotes, or backslashes.`,
       };
     }
-    // Risk 1: stamp `agy --version` into meta.agy_version. Best effort — an
-    // empty string on any failure so a missing/broken agy still spawns and the
-    // field is just blank. Routed through the injectable spawn ctx so tests
-    // control it.
-    const agyVerResult = await newAgentSpawnCtx.run(["agy", "--version"]);
-    agyVersion = agyVerResult.exitCode === 0 ? agyVerResult.stdout.trim() : "";
+    // Risk 1 + Phase 2 live bug: stamp `agy --version` into meta.agy_version.
+    // Best effort — an empty string on any failure so a missing/broken agy still
+    // spawns and the field is just blank. probeAgyVersion runs the probe with
+    // stdin explicitly closed (agy 1.1.23 hangs forever on an inherited unclosed
+    // stdin) AND a hard timeout, so the spawn can NEVER block on it. Routed
+    // through the injectable spawn ctx so tests control it.
+    const { probeAgyVersion, AGY_VERSION_PROBE_TIMEOUT_MS } = await import("./agy-version");
+    agyVersion = await probeAgyVersion(
+      newAgentSpawnCtx.runner,
+      agyVersionProbeTimeoutOverrideMs ?? AGY_VERSION_PROBE_TIMEOUT_MS,
+    );
   }
 
   // 6.1. Permissions are assembled in three layers (SPEC §2.3):

@@ -1,0 +1,10 @@
+▸ Thought for 2s, 512 tokens
+
+Done — everything is committed.
+
+How's the CLI experience so far? Help us improve:  [1] Good  [2] Fine  [3] Bad  [0] Skip
+
+────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────
+? for shortcuts                              accept-edits · Gemini 3.7 Flash · low

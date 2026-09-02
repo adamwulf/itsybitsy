@@ -136,33 +136,42 @@ export function isCodexTmuxOutput(input: string): boolean {
 
 /**
  * Detect whether the tmux output came from an Antigravity CLI (`agy`) agent
- * rather than claude or codex (SPEC-ANTIGRAVITY-CLI.md §4.6). Several
- * complementary signals (any one is enough):
- *   1. The welcome/trust banner names "Antigravity" near the top.
- *   2. The trust card's unique question is present anywhere.
- *   3. The bottom status bar carries agy's `accept-edits · <model> · <effort>`
- *      (or `plan · …`) segment, or the idle/working hints `? for shortcuts` /
- *      `esc to cancel` on the left.
+ * rather than claude or codex (SPEC-ANTIGRAVITY-CLI.md §4.6). Only agy-UNIQUE
+ * signals are used (any one is enough):
+ *   1. The trust card's unique question, present anywhere.
+ *   2. The literal `Antigravity CLI` welcome banner near the top.
+ *   3. The bottom status bar's agy-only segment `accept-edits · <model>` (or
+ *      `plan · <model>`) — the mode word followed by `·` and a model label.
  *
- * These strings are disjoint from codex's (`OpenAI Codex (v`, `gpt-/codex-` +
- * `·` status line) and claude's chrome, so the three detectors don't collide.
+ * DELIBERATELY NOT signals (they false-positive claude panes — proven in review):
+ *   - `? for shortcuts` — recent claude builds render this in their idle footer.
+ *   - `esc to cancel` — claude's permission modal shows "Esc to cancel".
+ *   - a bare "Antigravity" substring — a claude agent working on THIS feature has
+ *     "Antigravity" all over its transcript/prompt; only the exact `Antigravity
+ *     CLI` banner counts.
+ * Claude renders "accept edits on" (no hyphen, no `·`), so the `accept-edits · `
+ * segment is agy-only. These strings are also disjoint from codex's
+ * (`OpenAI Codex (v`, `gpt-/codex-` + `·` status line), so the detectors don't
+ * collide.
  */
 export function isAgyTmuxOutput(input: string): boolean {
   if (!input) return false;
   const lines = input.split("\n");
 
-  // Banner / trust card — the strongest signals, present at startup.
-  const head = lines.slice(0, 12).join("\n");
-  if (head.includes("Antigravity")) return true;
+  // Trust card — agy-unique and unambiguous.
   if (input.includes("Do you trust the contents of this project?")) return true;
 
-  // Status-bar check — last few non-blank lines. agy's right-side status segment
-  // is `accept-edits · <model> · <effort>` (or `plan · …`), and the bottom-left
-  // hint is `? for shortcuts` (idle) / `esc to cancel` (working).
+  // Welcome banner — the literal "Antigravity CLI" text near the top.
+  const head = lines.slice(0, 12).join("\n");
+  if (head.includes("Antigravity CLI")) return true;
+
+  // Status-bar segment — last few non-blank lines. Require the agy-only
+  // `accept-edits ·`/`plan ·` mode word FOLLOWED BY a model label (a non-space
+  // token after the `·`) ON THE SAME LINE (horizontal whitespace only, so a
+  // line-ending `accept-edits ·` plus content on the next line can't match), so
+  // a lone `accept-edits ·` echoed in prose can't match.
   const tail = stripTrailingBlanks(lines).slice(-8).join("\n");
-  if (/\b(?:accept-edits|plan)\s+·/.test(tail)) return true;
-  if (/(^|\n)\s*\? for shortcuts\b/.test(tail)) return true;
-  if (/(^|\n)\s*esc to cancel\b/.test(tail)) return true;
+  if (/\b(?:accept-edits|plan)[ \t]+·[ \t]+\S/.test(tail)) return true;
 
   return false;
 }

@@ -11,7 +11,7 @@ import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings } from "../health-check";
 import { readAgentLog, readAgentLogWindow, statAgentLogSize, readAgentPrompt, parseDenials, resolveAgentIcon } from "../agents";
 import { diffAgent, statusAgent } from "../ib-commands";
-import { wrapLines, WordWrapCache, computeChromeSlice } from "./wrap";
+import { wrapLines, wordWrapLines, WordWrapCache, computeChromeSlice } from "./wrap";
 import type { ChromeSlice } from "./wrap";
 import { isCodexBackedCli, parseModel } from "../agent-cli";
 import { getStateColors } from "./color-scheme";
@@ -591,7 +591,12 @@ export class RightPaneComponent implements Component {
       for (const line of visible) {
         if (lines.length >= this.displayHeight) break;
         const isQ = this.mode === "QUESTIONS";
-        const wrapped = isQ ? wrapLines(line, innerWidth - 2) : wrapLines(line, innerWidth);
+        // QUESTIONS keeps character-wrap (wrapLines): it carries OSC8 hyperlink
+        // handling and a 3-space continuation indent (below). AGENT LOG /
+        // INITIAL PROMPT / ERRORS are agent prose — word-wrap them (break at
+        // spaces, hard-wrap only over-width tokens) so words aren't split
+        // mid-token, matching the team-log / center tmux pane.
+        const wrapped = isQ ? wrapLines(line, innerWidth - 2) : wordWrapLines(line, innerWidth);
         for (let wi = 0; wi < wrapped.length; wi++) {
           if (lines.length >= this.displayHeight) break;
           if (isQ && wi > 0) {

@@ -457,6 +457,48 @@ describe("ChannelPaneComponent", () => {
       }
     });
 
+    test("word-boundary wrap: long chat message breaks at spaces (no mid-word split)", async () => {
+      // Every word is shorter than the wrap width, so word-wrap keeps each one
+      // whole on a single row — a character-wrap (the old wrapLines) would break
+      // a word straddling the width boundary, so at least one word would fail to
+      // appear intact on any single line.
+      const words = [
+        "correctness",
+        "readability",
+        "maintainability",
+        "performance",
+        "reliability",
+        "observability",
+        "documentation",
+        "consistency",
+        "resilience",
+        "portability",
+      ];
+      const longMsg = words.join(" ");
+      await appendChannelMessage("backend", {
+        ts: 100,
+        fromAgent: "agent-x",
+        message: longMsg,
+      });
+      const pane = new ChannelPaneComponent();
+      pane.displayHeight = 30;
+      pane.teamName = "backend";
+      await pane.load();
+      const lines = pane.render(30).map(stripAnsi);
+      const contentLines = lines.filter((l) => l.trim().length > 0);
+      // The message wrapped across several rows.
+      expect(contentLines.length).toBeGreaterThan(1);
+      // First wrapped line flush-left; continuations keep the 2-space indent.
+      expect(contentLines[0]!.startsWith(" ")).toBe(false);
+      for (let i = 1; i < contentLines.length; i++) {
+        expect(contentLines[i]!.startsWith("  ")).toBe(true);
+      }
+      // Word-boundary proof: every whole word survives intact on ONE row.
+      for (const word of words) {
+        expect(contentLines.some((l) => l.includes(word))).toBe(true);
+      }
+    });
+
     test("short chat message that does NOT wrap renders as a single flush-left line", async () => {
       await appendChannelMessage("backend", {
         ts: 100,

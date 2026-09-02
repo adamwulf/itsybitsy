@@ -1538,7 +1538,7 @@ export async function resumeAgent(
     let preparedResumeSandbox: PreparedSandbox | null = null;
     if (agent.meta.sandbox?.enabled) {
       if (!agent.meta.paths) {
-        const message = "sandbox refused: meta.json has an enabled sandbox but no paths block (written before the paths: split); respawn the agent or run `ib sandbox refresh <id>` once available";
+        const message = "sandbox refused: meta.json has an enabled sandbox but no paths block (written before the paths: split); respawn the agent";
         await logAgent(agentDir, message);
         return { ok: false, exitCode: 1, stdout: "", stderr: message };
       }

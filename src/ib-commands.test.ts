@@ -4404,7 +4404,7 @@ sandbox:
   test("resume refuses legacy enabled sandbox metadata with no paths block", async () => {
     const id = "legacy-enabled-no-paths";
     const agentDir = join(agentsDir, id);
-    const message = "sandbox refused: meta.json has an enabled sandbox but no paths block (written before the paths: split); respawn the agent or run `ib sandbox refresh <id>` once available";
+    const message = "sandbox refused: meta.json has an enabled sandbox but no paths block (written before the paths: split); respawn the agent";
     const legacyMeta: Partial<AgentMeta> = {
       id,
       state: "stopped",

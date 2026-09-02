@@ -419,6 +419,14 @@ Custom agents: `<ws>/.agents/agents/<name>/agent.md` and `<ws>/.agents/agents/<n
 
 Consequence: itsybitsy must add the worktree's realpath to `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json` **before** launching, and may remove it at teardown. The watchdog trust-card auto-accept is only a fallback for a resumed or hand-launched session; it must never be the primary path with `-i`, because that first turn would run with no hook.
 
+### 17.10 Live spawn gate through `ib` (2026-09-02 02:17–02:25 CDT, Phase 2 merged at `288a577`)
+
+Run with the branch binary first on PATH from a helper tmux shell: `ib new-agent --model agy:gemini-3.7-flash-low --type worker "…"`.
+
+- The itsybitsy side worked end to end: worktree created, `.agents/hooks.json` + `.agents/rules/ittybitty-agent.md` written, `.gitignore` appended (the worktree shows `M .gitignore`, as with codex's `.codex/`), the worktree realpath added to `trustedWorkspaces` before `tmux new-session`, dispatcher prechecks passed, tmux session + watchdog started, `start.sh` launched the D2 line with `setsid=none` (macOS has no `setsid`). `ib retire <id> --force` through the same binary removed the trust entry again.
+- Bug found: the `agy --version` stamping subprocess hung for 80 s because the spawn runner leaves the child's stdin pipe open and agy 1.1.23 blocks on an inherited unclosed stdin (its own release notes mention the fix on their side for a different path). Fix queued for Phase 3: probe with stdin ignored and a 5 s timeout; stamp `""` on failure.
+- Environment blocker, not a code bug: after that, every `agy` exec on the machine — the agent, four probes with different launch shapes, and a bare `agy --version` — sat in `_dyld_start` with a 112 K footprint, no agy log, no sockets. `log show` for `syspolicyd`/kernel: `(AppleSystemPolicy) ASP: Security policy would not allow process: <pid>, /opt/homebrew/Caskroom/antigravity-cli/1.1.23,…/antigravity`, preceded by a 30 s QUIC connection to Apple with 0 bytes transferred. The binary still carries `com.apple.quarantine: 0381;…`. `codex` and `gh` exec normally. Remedy is on the user side (approve the binary once, or `xattr -d com.apple.quarantine` on it); the gate has to be rerun afterwards.
+
 ---
 
 ## Sources

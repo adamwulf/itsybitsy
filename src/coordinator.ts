@@ -399,6 +399,14 @@ async function sendCoordinatorEnter(): Promise<boolean> {
  * directions guarantee the watchdog gets from runSessionExclusive, but at the
  * process boundary that actually separates these two writers. `steal: true`
  * matches the inline-drain fallback so a crashed lock holder can't wedge us.
+ *
+ * If the lock CANNOT be acquired (5s timeout — reachable when a real
+ * `ib send @system` drain legitimately holds it, since deliverMessage sleeps
+ * ~3s per message), we do NOT send the Enter: firing it unlocked would race the
+ * drain's chunked send-keys and risk a half-typed message landing in the
+ * coordinator, exactly the interleave the lock exists to prevent. We skip and
+ * return false — both callers (the 2s state poll and the 500ms ready-poll)
+ * retry, so a dropped tick is harmless and the prompt is re-attempted next tick.
  */
 export async function autoAcceptCoordinatorPrompt(output: string): Promise<boolean> {
   if (!isCoordinatorAutoAcceptablePrompt(output)) return false;
@@ -406,6 +414,12 @@ export async function autoAcceptCoordinatorPrompt(output: string): Promise<boole
   const home = getCoordinatorHome();
   const { acquireOutboxLock, releaseOutboxLock } = await import("./outbox");
   const lock = await acquireOutboxLock(home, { steal: true });
+  if (!lock) {
+    // A drain (or another accepter) holds the session-delivery lock. Skip the
+    // Enter rather than interleave it — the next poll tick retries.
+    logToWatchLog("[coordinator] permission prompt: could not acquire delivery lock — skipping Enter (will retry next poll)");
+    return false;
+  }
   try {
     await sendCoordinatorEnter();
   } finally {

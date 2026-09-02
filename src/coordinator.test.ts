@@ -2233,6 +2233,31 @@ describe("autoAcceptCoordinatorPrompt", () => {
     const enterCmds = cmds.filter((c) => c.includes("send-keys") && c.includes("Enter"));
     expect(enterCmds.length).toBe(0);
   });
+
+  test("does NOT send Enter when the delivery lock cannot be acquired", async () => {
+    // Point the coordinator home at a NON-EXISTENT dir so acquireOutboxLock's
+    // O_EXCL open fails with ENOENT (non-retryable) → returns null immediately.
+    // This deterministically exercises the same null-lock branch a real
+    // `ib send @system` drain holding the lock >5s would hit — without waiting.
+    // The watch log stays at the existing tmpDir so the skip line is readable.
+    setCoordinatorHome(join(tmpDir, "does-not-exist"));
+    const cmds: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      cmds.push([...cmd]);
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    const sent = await autoAcceptCoordinatorPrompt(
+      "Do you trust the files in this folder?\n\nEnter to confirm · Esc to cancel",
+    );
+    // Prompt matched, but the lock was unavailable → no Enter, returns false.
+    expect(sent).toBe(false);
+    const enterCmds = cmds.filter((c) => c.includes("send-keys") && c.includes("Enter"));
+    expect(enterCmds.length).toBe(0);
+    // A skipped-will-retry line is logged so the dropped tick is diagnosable.
+    const log = await readFile(join(tmpDir, "watch.log"), "utf-8");
+    expect(log).toContain("could not acquire delivery lock — skipping Enter");
+  });
 });
 
 // ---------------------------------------------------------------------------

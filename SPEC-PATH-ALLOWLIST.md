@@ -799,10 +799,11 @@ them:
    P or an ancestor of P. Most specific means the longest canonical path. Its
    list decides: `allowWrite` gives read and write; `allowRead` gives read only.
 3. If the same canonical path is in both lists, the intent is ambiguous.
-   Recommendation: a **validation error** at spawn, fail-closed, the same
-   stance the sandbox spec takes for bare names[^32]. If Adam prefers a soft
-   default, read-only wins, because a layer may only tighten, with a warning.
-   (I first proposed "write wins"; withdrawn.)
+   Recommendation, now shared by `sandbox-safety`: a **validation error** at
+   spawn, fail-closed, the same stance the sandbox spec takes for bare
+   names[^32]. If Adam prefers a soft default, read-only wins, because a layer
+   may only tighten, with a warning. (I first proposed "write wins";
+   withdrawn.) Adam picks.
 4. No match means deny.
 
 **Specificity key**, pinned with `sandbox-safety`: for a plain entry, the
@@ -835,13 +836,21 @@ Sorted by depth, the worktree is deeper, its write allow comes later, and it
 wins. The same holds for the agent dir, the git dir, the scratchpad, and the
 project dir. Runtime roots are ordinary `allowWrite` entries in the table; a
 type entry nested inside one can still narrow it, and `deny **/.env` still
-fires inside the worktree (§6.10).
+fires inside the worktree (§6.10). `sandbox-safety` accepted this and
+confirmed it is real against today's `_all.md`, whose `allowRead: "~"`[^43]
+would have cost every agent its own worktree. Fix adopted on its branch: the
+runtime roots join the specificity table and sort by the depth of their
+resolved value, which the generator has at profile time. This changes
+`generateProfile`, which today emits the runtime-root rules first[^49], and
+will be noted in SPEC-SANDBOX §4A.7 and §5.1.
 
 **Hook.** One pure function in `src/sandbox.ts`,
 `resolvePathAccess(absPath, op, { allowRead, allowWrite, deny })`, returns
 allow or deny: deny list first; then the most specific matching entry across
 both lists decides; no match denies. The runtime roots are passed in as
-`allowWrite` entries so specificity includes them. `checkFilePath` calls it
+`allowWrite` entries so specificity includes them; they are an input list
+tagged write, not a separate "always allowed" set, so the hook and the
+generator feed the function the same table. `checkFilePath` calls it
 after the structural steps 6, 10, and 11[^6]; the always-allowed steps 7 to 9
 fold into the table as runtime write roots, which is what puts deny before the
 worktree allow (§6.10). The same function is the oracle for the generator
@@ -863,6 +872,10 @@ drift. Rows:
   read-only wins with a warning);
 - a read-only ancestor of a runtime root (`allowRead: ~/Developer`): the
   worktree, agent dir, git dir, scratchpad, and project dir stay writable;
+- today's `_all.md` verbatim, `allowRead: "~"` plus its write roots: every
+  write root stays writable;
+- a type `allowRead` nested inside the worktree (`<worktree>/vendor`): that
+  subtree becomes read-only, proving narrowing still works after the sort;
 - `deny` inside a write root and inside a read-only subtree: both operations
   denied;
 - entries from different layers, a read root in `_all.md` and a write subtree

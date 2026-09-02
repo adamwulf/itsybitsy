@@ -3104,3 +3104,90 @@ Grep-able file list for the codex implementation:
 The design source-of-truth for codex CLI support is **`SPEC-CODEX-MODEL.md`** in the repo root. It carries the full evidence trail (Phase 2 spike findings, reviewer feedback fold-ins, per-phase commit history) that this §18 summarizes. Future codex SPEC changes update `SPEC-CODEX-MODEL.md` first, then this §18 summary follows. The supporting research docs (`SETTINGS-HOOKS-RESEARCH.md`, `MODEL-NAME-FORMAT-PROPOSAL.md`, `CODEX-CLI-NOTES.md`) referenced from `SPEC-CODEX-MODEL.md` are evidence-only and not summarized here.
 
 ---
+
+## 19. Antigravity CLI (`agy`) as Alternative Agent Model
+
+This section summarizes the design landed in Phases 1–3 of **`SPEC-ANTIGRAVITY-CLI.md`** (the design source-of-truth; all facts pinned to `agy` 1.1.23 on macOS with Google OAuth sign-in). Evidence lives in `ANTIGRAVITY-CLI-NOTES.md` §17. Everything below is implemented and merged on `agent/antigravity` unless flagged otherwise.
+
+### 19.1 Goal
+
+itsybitsy can launch an agent under Google's Antigravity CLI (`agy`) in addition to `claude` and `codex`. Selection is per-agent via the same **`<cli>:<model>`** model string — e.g. `agy:gemini-3.7-flash-low`, `agy:claude-sonnet-4-6`. The slug is the first column of `agy models`, passed verbatim to `--model`. `agy` agents launch the **interactive `agy` TUI inside tmux**, exactly like `claude`/`codex`. Permissions are enforced by a **generated PreToolUse hook** (deny-by-default) so the agent never shows an approval card; role instructions are delivered through an **always-on rule file** in the worktree. Auth is the user's job (one browser sign-in; credentials in the keyring). Non-goals (v1): no headless `-p` loop, no terminal sandbox, no `agy` custom agents (`--agent`), no coordinators under `agy`, no new dashboard panes.
+
+### 19.2 Authoritative Decisions
+
+Verbatim summary of `SPEC-ANTIGRAVITY-CLI.md` §2:
+
+| # | Decision |
+|---|---|
+| D1 | Selector is `agy:<slug>`; the slug is passed verbatim to `--model`. `--effort <low\|medium\|high>` is passed only when the slug does NOT already end in `-low`/`-medium`/`-high` (Gemini slugs encode effort). `xhigh`/`max` map to `high` (`mapEffortForAgy`). |
+| D2 | Launch = `agy --dangerously-skip-permissions --mode=accept-edits --model <slug> [--effort <e>] --log-file <agentDir>/agy.log -i "<prompt>"`. Resume = same flags with `--conversation <uuid>` and no `-i` (resume does not carry `--model`, so it is re-passed). |
+| D3 | **The PreToolUse hook is the only boundary.** Registered in `<worktree>/.agents/hooks.json` under the named hook `ittybitty` for `PreToolUse` (matcher `*`), `PreInvocation`, and `Stop`; each `command` = `<abs ib> hooks agy-<event> <agentId>`, timeout 30. |
+| D4 | The hook contract is **FAIL-CLOSED**: crash, non-JSON, `{}`, and timeout all DENY (the opposite of codex). The dispatcher still wraps everything in try/catch, emits an explicit logged deny, and exits 0. |
+| D5 | **Pre-trust the worktree before launch** — add `realpath(worktree)` to `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json` (read-modify-write, lock-guarded) BEFORE tmux starts, remove at teardown. Without it, `-i` submits the first turn ~2s after launch, before the trust card is answered, with no hooks/rules loaded. The watchdog trust-card accept is a FALLBACK only. |
+| D6 | Instructions go in `<worktree>/.agents/rules/ittybitty-agent.md` with frontmatter `trigger: always_on`; body = session-start template (wrapper stripped) + inlined project `CLAUDE.md` + inlined user `~/.claude/CLAUDE.md` + the skills catalogue. Never `--agent`, never overwrite `AGENTS.md`. |
+| D7 | Both generated files are appended to the worktree `.gitignore`. If either path is already **tracked**, the spawn is refused (v1). |
+| D8 | Sub-agent tools (`invoke_subagent`, `define_subagent`, `manage_subagents`) are always denied ("spawn sub-agents with `ib new-agent`"). Every tool not in the translation table is denied unless an agent-type allow list names the raw `agy` tool. |
+| D9 | State: `PreInvocation` → `running` + captures `agy_conversation_id`; `Stop` → `waiting`, or `complete` when the last `PLANNER_RESPONSE` carries the completion sentinel; `Stop` may return `{"decision":"continue"}` for the uncommitted-work nudge. |
+| D10 | Watchdog: gate the claude-only branches on `classifyAgentCli`; add two `agy` answers — `Enter` on the trust card (fallback) and `0` on the survey overlay. |
+| D11 | Rendering: leave `altScreenMode` alone (alt-screen; the pane shows the current agy screen). The dashboard treats the pane as screen-only for `agy` agents. |
+| D12 | `meta.model` stores the raw `agy:<slug>`; UI renders it verbatim. New optional meta fields `agy_conversation_id` and `agy_version`. `claude_pid` keeps its name. |
+| D13 | `~/.gemini/config/` is never written; the only global mutation is the `trustedWorkspaces` entry of D5. |
+
+### 19.3 Launch Line and Worktree Files
+
+The canonical spawn launch line (D2) is rendered by `buildAgyStartContent()` in `src/agy-spawn.ts` inside the same setsid + SIGHUP-ignore + `ib write-pid` + wait + exit-check skeleton as codex. The PID is stored as `claude_pid` (name preserved so the watchdog/dashboard readers are unchanged). Two files are written into the worktree at spawn (regenerated on resume so permission edits take effect):
+
+- `<worktree>/.agents/hooks.json` — the `ittybitty` named hook registration for PreToolUse/PreInvocation/Stop (`buildAgyHooksJson`, `src/agy-config.ts`).
+- `<worktree>/.agents/rules/ittybitty-agent.md` — the `trigger: always_on` rule file (`buildAgyRulesFile`).
+
+Both are appended to `<worktree>/.gitignore` (`appendGitignoreEntries`), and the spawn is refused if either is already tracked (`refuseIfTracked`, D7). `ensureAgyTrustedWorkspace` / `removeAgyTrustedWorkspace` do the lock-guarded read-modify-write of `~/.gemini/antigravity-cli/settings.json` (D5/D13).
+
+### 19.4 Hook Architecture (agy side)
+
+| Hook | Subcommand | Handler | Purpose |
+|---|---|---|---|
+| **PreToolUse** | `ib hooks agy-pre-tool-use <id>` | `src/hooks/agy-pre-tool-use.ts` | Translate the agy tool call to a synthetic Claude call and run the existing `checkPathAccess`; deny-by-default. Logs each denial. |
+| **PreInvocation** | `ib hooks agy-pre-invocation <id>` | `src/hooks/agy-pre-invocation.ts` | `writeAgentState("running")`, capture `agy_conversation_id`, touch `<agentDir>/agy-hook-heartbeat` (the liveness marker). |
+| **Stop** | `ib hooks agy-stop <id>` | `src/hooks/agy-stop.ts` | Write `waiting`/`complete` from the transcript tail; return the `continue` nudge on uncommitted work (D9). |
+
+Tool translation (`src/hooks/agy-tools.ts`) maps `run_command`→`Bash`, `view_file`→`Read`, `list_dir`→`LS`, `find_by_name`→`Glob`, `grep_search`→`Grep`, `write_to_file`→`Write`, `replace_file_content`→`Edit`, `multi_replace_file_content`→`MultiEdit`, `read_url_content`→`WebFetch`, `search_web`→`WebSearch`, `manage_task`→`TodoWrite`; the three sub-agent tools always deny (D8); unknown tools deny unless allow-listed by raw name; a file tool with a missing path arg denies. All three handlers run through `src/hooks/agy-dispatcher.ts`, which — because agy's contract is fail-closed — emits an explicit deny (PreToolUse) or `{}` (PreInvocation/Stop) on any error and always exits 0 in production; `--dry-run` is the only path that may exit non-zero (the spawn precheck).
+
+### 19.5 Spawn, Resume, Teardown
+
+`newAgent()` / `resumeAgent()` in `src/ib-commands.ts` branch on `parseModel(model).cli === "agy"`: skip `.claude/settings.local.json`; refuse a tracked boundary file (D7); write the two worktree files + gitignore; `ensureAgyTrustedWorkspace(realpath(worktree))` BEFORE tmux (D5); run the dispatcher `--dry-run` precheck for all three events; generate `start.sh`/`resume.sh`. Resume requires `meta.agy_conversation_id` (captured by the first PreInvocation), regenerates the worktree files, re-trusts, re-prechecks, and re-passes `--model` + effort (agy resume remembers neither). Teardown (`archiveAgent`/nuke/retire) calls `untrustAgyWorkspaceForTeardown` best-effort. `--coordinator` with `agy:` is rejected (D11-style stub).
+
+At spawn, `agy --version` is stamped into `meta.agy_version` (best effort). The probe (`src/agy-version.ts`, `probeAgyVersion`) runs with **stdin explicitly `"ignore"` and a hard 5s timeout** — agy 1.1.23 blocks forever on an inherited unclosed stdin, so without this the spawn hung at a blank pane. On timeout the child is killed and the field is stamped `""`. The three `agy-* --dry-run` prechecks share the same discipline (stdin `"ignore"` + a 15s timeout in `DispatcherDryRunContext.run`).
+
+### 19.6 Watchdog (agy side)
+
+The three claude-only behaviors (`handleRateLimited`, `handleApiError`, the permission auto-accept Enter) skip `agy` via their `classifyAgentCli` gate. `runPerAgentWatchdog` adds an `agy` branch: **Enter** when the pane shows `Do you trust the contents of this project?` (fallback only — logged loudly, since pre-trust should have suppressed it) and literal **`0`** when it shows `How's the CLI experience so far?`, both under `runSessionExclusive` like the claude auto-accept Enter. **Liveness:** if `<agentDir>/agy-hook-heartbeat` never appears within 60s of spawn (`AGY_HEARTBEAT_GRACE_MS`, from `meta.created_epoch`), the watchdog logs `[watchdog] agy hooks never fired — check auth mode (API-key auth disables hooks) and the agy log` **once** and notifies the manager **once** (no kill in v1).
+
+### 19.7 State Detection (agy side)
+
+Like codex, agy's PRIMARY state comes from the hooks writing `meta.json`; `parseStateForCli`/`parseState` gain an `agy` branch (`parseAgyState`, `isAgyTmuxOutput` in `src/parse-state.ts`) as the tmux fallback/override: `esc to cancel` bottom-left or a Braille-spinner activity line (`⢿`/`⣯`/`⣻` + Running/Generating/Reading…) → running; the completion sentinel → complete; `WAITING` → waiting; the trust card → creating; `? for shortcuts` (or a bare `>` between `────` separators) → waiting (defers to the meta state). `rate_limited`/`api_error`/`compacting` stay `unknown` for agy (strings not captured yet); the claude-shaped override detectors (`isCompacting`/`isRateLimited`/`isApiError`) do not false-positive on agy panes. The dashboard chrome slicer gets an `agy` detector (`findAgyInputChromeLogical`, `src/tui/wrap.ts`): the input box is the last two `────` separators guarded by an agy status line, with no-trim fallback. `ib state` recognizes `agy --dangerously-skip-permissions` / `agy --conversation` command lines whose cwd is inside a registered worktree as agent processes (same tracked/orphan rules as `claude --resume`).
+
+### 19.8 Cross-Cutting Impact (Four-Perspective Checklist)
+
+1. **General agent functionality** — **affected.** New agy spawn/resume branches; two new optional meta fields (`agy_conversation_id`, `agy_version`); two generated worktree files + a global `trustedWorkspaces` entry (the only global mutation).
+2. **Hooks** — **affected.** Three new agy-side hook handlers (PreToolUse/PreInvocation/Stop) through a fail-CLOSED dispatcher with `--dry-run`; registered via the workspace `.agents/hooks.json` file (no inline flag exists). Claude/codex hooks unchanged.
+3. **Watchdog** — **affected.** claude-only branches skip agy; new trust-card/survey fallback keystrokes and a hook-heartbeat liveness warning (§19.6). Outbox drain, mutex, nudge timing, and routing stay CLI-agnostic.
+4. **`ib watch` / dashboard** — **affected (minor).** Model column renders `agy:<slug>` verbatim; the chrome slicer gains an agy input-box detector; the pane is screen-only (alt-screen, D11). No new panes/modes.
+
+### 19.9 Open Risks
+
+From `SPEC-ANTIGRAVITY-CLI.md` §6 (see there for the full list):
+
+| # | Risk |
+|---|------|
+| 1 | **Version drift.** 1.1.23 behavior (silent deny, fail-closed, `-i`, payload keys) can change; `agy --version` is stamped into `meta.agy_version` and fixtures are dated. |
+| 2 | **Trust-file races.** agy rewrites `settings.json` on every trust accept/change; the lock protects itsybitsy from itsybitsy only. Mitigation: the watchdog fallback (D10) + re-trust on resume. |
+| 3 | **Hooks silently absent under API-key auth** (issue #893). The heartbeat check (§19.6) surfaces it; v1 only warns. |
+| 8 | **codex handler omits `checkIbCommandAccess` (parity gap).** The agy PreToolUse handler added the manager-only-`ib`-subcommand relationship check; the codex handler still lacks it (a codex agent with `Bash(ib:*)` can run `ib retire/merge/…` against agents it does not manage). Tracked as a codex-side follow-up. |
+| 9 | **`run_command` reads outside the worktree are allowed.** A single `cat ~/.ssh/id_rsa` / `cat /etc/passwd` (absolute path, no sibling/main-repo traversal) passes the shared bash gate — the same default claude workers run under. agy has no sandbox, so this is an inherited default, not an agy-specific hole; needs a conscious allowlist decision before treating any read as sensitive. |
+| 10 | **macOS Gatekeeper can stall every `agy` exec** in the dynamic loader when the quarantined Homebrew binary's notarization check cannot reach Apple (observed 2026-09-02: `syspolicyd` "Security policy would not allow process" + a 30s QUIC lookup with 0 bytes). The spawn then sits at a blank pane with no agy log; the remedy is on the user side (approve or de-quarantine the binary). |
+
+### 19.10 Reference: SPEC-ANTIGRAVITY-CLI.md
+
+The design source-of-truth is **`SPEC-ANTIGRAVITY-CLI.md`** in the repo root; `ANTIGRAVITY-CLI-NOTES.md` §17 carries the evidence (spike captures, payloads, TUI strings). Future agy SPEC changes update `SPEC-ANTIGRAVITY-CLI.md` first, then this §19 follows.
+
+---

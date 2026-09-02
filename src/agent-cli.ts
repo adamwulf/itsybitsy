@@ -17,12 +17,13 @@
 /**
  * The selector prefix in an agent model string. `fugu` is Codex-backed, but
  * remains a distinct selector so agent-type files can express the provider
- * explicitly (`fugu:fugu`, `fugu:fugu-ultra`).
+ * explicitly (`fugu:fugu`, `fugu:fugu-ultra`). `agy` launches the Antigravity
+ * CLI (`agy`) — see SPEC-ANTIGRAVITY-CLI.md.
  */
-export type AgentCli = "claude" | "codex" | "fugu";
+export type AgentCli = "claude" | "codex" | "fugu" | "agy";
 
 /** The set of CLIs itsybitsy knows how to launch. */
-export const KNOWN_CLIS: ReadonlySet<AgentCli> = new Set<AgentCli>(["claude", "codex", "fugu"]);
+export const KNOWN_CLIS: ReadonlySet<AgentCli> = new Set<AgentCli>(["claude", "codex", "fugu", "agy"]);
 
 /** True when the selector is launched by the Codex CLI rather than Claude. */
 export function isCodexBackedCli(cli: AgentCli): boolean {
@@ -63,7 +64,7 @@ export function parseModel(input: string): ParsedModel {
   const colon = input.indexOf(":");
   if (colon < 0) {
     throw new Error(
-      `Invalid model '${input}': expected '<cli>:<model>' (e.g. 'claude:opus'); known CLIs: claude, codex, fugu`,
+      `Invalid model '${input}': expected '<cli>:<model>' (e.g. 'claude:opus'); known CLIs: claude, codex, fugu, agy`,
     );
   }
 
@@ -80,7 +81,7 @@ export function parseModel(input: string): ParsedModel {
 
   const cli = rawCli.toLowerCase();
   if (!KNOWN_CLIS.has(cli as AgentCli)) {
-    throw new Error(`Unknown CLI '${cli}' in model '${input}'; known: claude, codex, fugu`);
+    throw new Error(`Unknown CLI '${cli}' in model '${input}'; known: claude, codex, fugu, agy`);
   }
 
   return { cli: cli as AgentCli, model };
@@ -134,4 +135,38 @@ export function mapEffortForCodex(effort: string): string {
     default:
       return "high";
   }
+}
+
+/**
+ * Map itsybitsy's 5-level effort scale down to the Antigravity CLI's
+ * `--effort` value set (SPEC-ANTIGRAVITY-CLI.md D1). `agy` understands only
+ * `low` / `medium` / `high` — the same subset as codex — so the two highest
+ * itsybitsy levels collapse onto `high`, exactly as `mapEffortForCodex` does.
+ * Kept as a distinct function (rather than an alias) so the two CLIs can
+ * diverge later without a silent cross-wire.
+ */
+export function mapEffortForAgy(effort: string): string {
+  switch (effort) {
+    case "low":
+      return "low";
+    case "medium":
+      return "medium";
+    case "high":
+    case "xhigh":
+    case "max":
+      return "high";
+    default:
+      return "high";
+  }
+}
+
+/**
+ * True when an `agy` model slug already encodes a reasoning effort as a
+ * trailing `-low` / `-medium` / `-high` segment (e.g. `gemini-3.7-flash-low`).
+ * Per D1, itsybitsy passes `--effort <e>` ONLY when the slug does NOT already
+ * carry one, because Gemini slugs bake the effort into the name and passing
+ * both would be ambiguous.
+ */
+export function agySlugHasEffort(slug: string): boolean {
+  return /-(low|medium|high)$/.test(slug);
 }

@@ -1,0 +1,8 @@
+⏺ All done — the tests pass and the branch is clean.
+
+  Let me know if you want anything else.
+
+────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────
+  ⏵⏵ accept edits on (shift+tab to cycle)          ? for shortcuts

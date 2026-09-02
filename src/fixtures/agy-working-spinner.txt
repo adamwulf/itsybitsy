@@ -1,0 +1,9 @@
+● Bash(bun test) (ctrl+o to expand)
+
+⣯  Generating...
+└ Tip: press ctrl+o to expand tool output
+
+────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────
+esc to cancel                                accept-edits · Gemini 3.7 Flash · low

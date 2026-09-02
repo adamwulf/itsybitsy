@@ -340,6 +340,222 @@ describe("checkPathAccess", () => {
     expect(result.reason).toContain("bash command references main repo");
   });
 
+  // ── relative-path traversal escaping the worktree (boundary review fix 1) ───
+
+  test("bash RELATIVE cat ../../x from the worktree is denied (escapes to agents dir)", () => {
+    const ctx = makeCtx();
+    // ../../x from the worktree resolves to /repo/.ittybitty/agents/x — under
+    // agentsDir, outside this agent's own dir.
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat ../../x" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("other agents");
+  });
+
+  test("bash RELATIVE cat into a sibling worktree is denied", () => {
+    const ctx = makeCtx();
+    // ../../agent-other/repo/.env resolves to a sibling agent's worktree.
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat ../../agent-other/repo/.env" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("other agents");
+  });
+
+  test("bash RELATIVE traversal into the main checkout is denied", () => {
+    const ctx = makeCtx();
+    // ../../../../SPEC.md resolves up out of .ittybitty into /repo (the main checkout).
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat ../../../../SPEC.md" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("main repo");
+  });
+
+  test("git range syntax HEAD..main is NOT flagged as traversal (allowed)", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git log HEAD..main" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("git double-dot range with slashes (origin/main..origin/dev) is allowed", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git log origin/main..origin/dev" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("bash ls .. (resolving to the agent's own dir) is allowed", () => {
+    const ctx = makeCtx();
+    // .. from the worktree lands on agentDir — the agent's own directory.
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "ls .." },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("bash relative path staying inside the worktree is allowed", () => {
+    const ctx = makeCtx();
+    // src/../lib normalizes back into the worktree.
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat src/../lib/util.ts" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("bash backslash-in-.. token (cat ..\\/..\\/x) is denied as shell-noise", () => {
+    const ctx = makeCtx();
+    // A `..` token containing a backslash can't be resolved safely, so it is
+    // denied outright rather than emulated.
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat ..\\/..\\/x" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("shell expansion or quoting");
+  });
+
+  // ── glued-prefix traversal (boundary review round 3) ──────────────────────
+
+  test("git --output=../../sibling/file (glued flag prefix) is denied", () => {
+    const ctx = makeCtx();
+    // path.resolve would treat `--output=..` as a directory name and normalize
+    // back into the worktree; the suffix-from-first-`..` form catches the escape.
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git diff --output=../../agent-other/repo/file HEAD" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("other agents");
+  });
+
+  test("${IFS}-glued traversal (cat ${IFS}../../sibling/.env) is denied as shell-noise", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat ${IFS}../../agent-other/repo/.env" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("shell expansion or quoting");
+  });
+
+  test("~-leading traversal (cat ~/../../sibling/.env) is denied as shell-noise", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cat ~/../../agent-other/repo/.env" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("shell expansion or quoting");
+  });
+
+  test("glued flag with a non-escaping value (--output=./x) is allowed", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git diff --output=./out.txt HEAD" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("glued flag whose value normalizes back into the worktree (--flag=src/../lib) is allowed", () => {
+    const ctx = makeCtx();
+    const input = makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git diff --flag=src/../lib HEAD" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  // ── glued-SUFFIX shell noise after a `..` (boundary review round 4) ────────
+
+  test.each([
+    ["empty single quotes", "cat ../..''/agent-other/repo/.env"],
+    ["empty double quotes", 'cat ../..""/agent-other/repo/.env'],
+    ["parameter default", "cat ${FOO:-../..}/agent-other/repo/.env"],
+    ["brace expansion", "cat ../..{,}/agent-other/repo/.env"],
+  ])("a `..` token with %s is denied as shell-noise", (_label, command) => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("shell expansion or quoting");
+  });
+
+  test("printf '..\\n' is denied (documented over-deny — a quoted `..` with a backslash)", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "printf '..\\n'" } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("shell expansion or quoting");
+  });
+
+  test("a `..` token with glob chars is denied (cat ../../../../../itsyb*/SPEC.md)", () => {
+    // The glob matches the repo dir name at runtime but resolves to a literal,
+    // non-escaping segment here — so glob chars are treated as noise.
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "cat ../../../../../itsyb*/SPEC.md" } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("shell expansion or quoting");
+  });
+
+  test.each([
+    ["cat ../foo?"],
+    ["cat ../../[abc]/x"],
+  ])("a `..` token with other glob chars (%s) is denied", (command) => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("shell expansion or quoting");
+  });
+
+  test("git ranges with ~ / ^ mid-token are NOT noise (allowed)", () => {
+    const ctx = makeCtx();
+    expect(checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "git log HEAD~2..HEAD^" } }), ctx).decision).toBe("allow");
+    expect(checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "git log origin/main..origin/dev" } }), ctx).decision).toBe("allow");
+  });
+
+  test("heredoc BODY lines containing `..` and apostrophes are data (allowed)", () => {
+    const ctx = makeCtx();
+    // The body line `see ../docs, it's fine` legitimately contains `..` and an
+    // apostrophe; masking heredoc bodies keeps it from tripping the scanner.
+    const command = "git commit -F - <<'EOF'\nsee ../docs, it's fine\nEOF";
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("arithmetic `<<` does not mask the following line from the traversal scanner", () => {
+    const ctx = makeCtx();
+    // `((1<< y ))` is a shift, not a heredoc — the `cat ../../agent-other` line
+    // after it must still be scanned and denied.
+    const command = "((1<< y ))\ncat ../../agent-other/repo/.env\ny";
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("other agents");
+  });
+
   // ── git -C / --git-dir / --work-tree blocking ──────────────────────────────
 
   test("blocks git -C (bypasses path isolation)", () => {
@@ -574,6 +790,20 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
     expect(result.reason).toContain("cannot modify their own .claude/settings");
   });
 
+  test("MultiEdit on .claude/settings.local.json → DENIED (boundary review fix 3)", () => {
+    // MultiEdit was missing from WRITE_TOOLS, so an agent could self-escalate by
+    // rewriting its own settings.local.json (which loadAgyEffectivePermissions
+    // reads). Now gated like Write/Edit/NotebookEdit.
+    const ctx = makeCtx({ allowList: ["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "Bash"] });
+    const input = makeInput({
+      toolName: "MultiEdit",
+      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.local.json" },
+    });
+    const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot modify their own .claude/settings");
+  });
+
   test("Write on .claude/other.json → ALLOWED (not a settings*.json)", () => {
     const ctx = makeCtx();
     const input = makeInput({
@@ -765,6 +995,158 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
       toolInput: { command: "echo {} > .claude/sub/settings.json" },
     });
     const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+});
+
+// ── agy boundary-file write protection (boundary review fix B) ───────────────
+
+describe("checkPathAccess — .agents/ boundary-file write protection", () => {
+  const HOOKS = "/repo/.ittybitty/agents/agent-abc123/repo/.agents/hooks.json";
+  const RULES = "/repo/.ittybitty/agents/agent-abc123/repo/.agents/rules/ittybitty-agent.md";
+
+  test("Write on .agents/hooks.json → DENIED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: HOOKS } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("agy hook/rule files");
+  });
+
+  test("Edit on the rule file → DENIED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Edit", toolInput: { file_path: RULES } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("agy hook/rule files");
+  });
+
+  test("MultiEdit on .agents/hooks.json → DENIED", () => {
+    const ctx = makeCtx({ allowList: ["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "Bash"] });
+    const result = checkPathAccess(makeInput({ toolName: "MultiEdit", toolInput: { file_path: HOOKS } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("agy hook/rule files");
+  });
+
+  test("Bash: sed -i on .agents/hooks.json → DENIED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "sed -i 's/x/y/' .agents/hooks.json" } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("agy hook/rule files");
+  });
+
+  test("Bash: sed -i on the rule file (absolute) → DENIED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: `sed -i 's/x/y/' ${RULES}` } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("agy hook/rule files");
+  });
+
+  test("Bash: redirect into .agents/hooks.json → DENIED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "echo {} > .agents/hooks.json" } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("agy hook/rule files");
+  });
+
+  test("Read on .agents/hooks.json → ALLOWED (reads not gated)", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Read", toolInput: { file_path: HOOKS } }), ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("Write on an unrelated .agents/ file → ALLOWED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(
+      makeInput({ toolName: "Write", toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/.agents/notes.md" } }),
+      ctx,
+    );
+    expect(result.decision).toBe("allow");
+  });
+
+  test("Write on an unrelated worktree file → ALLOWED (regression)", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(
+      makeInput({ toolName: "Write", toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/src/index.ts" } }),
+      ctx,
+    );
+    expect(result.decision).toBe("allow");
+  });
+
+  // ── obfuscated bash write-target spellings (boundary review round 4 fix 2) ──
+
+  const WT = "/repo/.ittybitty/agents/agent-abc123/repo";
+
+  test.each([
+    ["sed -i on .agents/rules/../hooks.json (relative, dotdot)", `sed -i 's/x/y/' .agents/rules/../hooks.json`, "agy hook/rule files"],
+    ["sed -i on ./.agents/hooks.json (leading ./)", `sed -i 's/x/y/' ./.agents/hooks.json`, "agy hook/rule files"],
+    ["sed -i on the absolute dotdot spelling", `sed -i 's/x/y/' ${WT}/.agents/rules/../hooks.json`, "agy hook/rule files"],
+    ["sed -i on ./.claude/settings.local.json", `sed -i 's/x/y/' ./.claude/settings.local.json`, "cannot modify their own .claude/settings"],
+    ["sed -i on .claude/x/../settings.local.json", `sed -i 's/x/y/' .claude/x/../settings.local.json`, "cannot modify their own .claude/settings"],
+  ])("resolves obfuscated write targets: %s → deny", (_label, command, reasonPart) => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain(reasonPart);
+  });
+
+  test("redirect to the ../-obfuscated agy hooks path → deny", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "echo {} > .agents/rules/../hooks.json" } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("agy hook/rule files");
+  });
+
+  test("a same-named file in a subdirectory (sub/.agents/hooks.json) stays ALLOWED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "sed -i 's/x/y/' sub/.agents/hooks.json" } }), ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  test("a same-named settings file in a subdirectory stays ALLOWED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "sed -i 's/x/y/' sub/.claude/settings.local.json" } }), ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  // ── fd-prefixed redirects (boundary review round 5 fix 3) ─────────────────
+
+  test.each([
+    ["1> spaced onto the agy hooks file", "cat x 1> .agents/hooks.json", "agy hook/rule files"],
+    ["1> glued onto the settings file", "cat x 1>.claude/settings.local.json", "cannot modify their own .claude/settings"],
+    ["2>> glued onto the agy hooks file", "cat x 2>>.agents/hooks.json", "agy hook/rule files"],
+    ["&> glued onto the settings file", "cat x &>.claude/settings.local.json", "cannot modify their own .claude/settings"],
+  ])("fd/&-prefixed redirect (%s) → deny", (_label, command, reasonPart) => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain(reasonPart);
+  });
+
+  test.each([
+    ["cat x 1> src/out.txt"],
+    ["cat x 2>>notes.md"],
+    ["cat x &>build.log"],
+  ])("fd/&-prefixed redirect to an unrelated file (%s) → allow", (command) => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  // ── `>|` force-clobber redirect (boundary review round 6 fix 2) ───────────
+
+  test.each([
+    [">| glued onto the settings file", "echo x >|.claude/settings.local.json", "cannot modify their own .claude/settings"],
+    [">| spaced onto the agy hooks file", "echo x >| .agents/hooks.json", "agy hook/rule files"],
+    ["1>| glued onto the settings file", "echo x 1>|.claude/settings.local.json", "cannot modify their own .claude/settings"],
+  ])("force-clobber redirect (%s) → deny", (_label, command, reasonPart) => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain(reasonPart);
+  });
+
+  test("force-clobber redirect to an unrelated file (>| build.log) → allow", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "echo x >| build.log" } }), ctx);
     expect(result.decision).toBe("allow");
   });
 });

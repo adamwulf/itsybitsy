@@ -26,6 +26,16 @@ describe("KNOWN_MODELS", () => {
     expect(clis.has("claude")).toBe(true);
     expect(clis.has("codex")).toBe(true);
     expect(clis.has("fugu")).toBe(true);
+    expect(clis.has("agy")).toBe(true);
+  });
+
+  test("includes the five Antigravity (agy) selectors from SPEC §4.1", () => {
+    const selectors = new Set(KNOWN_MODELS.map((m) => `${m.cli}:${m.model}`));
+    expect(selectors.has("agy:gemini-3.7-flash-high")).toBe(true);
+    expect(selectors.has("agy:gemini-3.7-flash-low")).toBe(true);
+    expect(selectors.has("agy:gemini-3.1-pro-high")).toBe(true);
+    expect(selectors.has("agy:claude-sonnet-4-6")).toBe(true);
+    expect(selectors.has("agy:claude-opus-4-6-thinking")).toBe(true);
   });
 
   test("includes current GPT-5.6 codex selectors", () => {

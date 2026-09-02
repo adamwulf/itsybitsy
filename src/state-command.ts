@@ -316,13 +316,49 @@ export function looksLikeClaudeArgv(command: string): boolean {
 }
 
 /**
+ * Decide whether a `ps` command line LOOKS LIKE an Antigravity CLI (`agy`)
+ * invocation spawned by itsybitsy. The launch/resume argv shapes are
+ * `agy --dangerously-skip-permissions …` (spawn) and `agy --conversation <uuid>`
+ * (resume) — see SPEC-ANTIGRAVITY-CLI.md D2. Like claude's flags these are
+ * STANDARD agy flags a user could run themselves, so this is only a PRE-FILTER
+ * before the cwd check in `isAgyAgentProcess`. Anchor on the `agy` token so an
+ * unrelated binary is not matched.
+ */
+export function looksLikeAgyArgv(command: string): boolean {
+  if (!command) return false;
+  if (!/(?:^|\/|\s)agy(?:\s|$)/.test(command)) return false;
+  return /\s--(?:dangerously-skip-permissions|conversation)\b/.test(command);
+}
+
+/**
+ * True when `pid`'s cwd lives inside `<repoPath>/.ittybitty/agents/…` for at
+ * least one REGISTERED repo. Shared cwd anchor for both the claude and agy
+ * agent-process classifiers: itsybitsy-spawned agent CLIs always run from inside
+ * an agent worktree under a registered repo (see the start.sh templates), and a
+ * user's own `claude --resume` / `agy --conversation` in a regular terminal does
+ * not — so argv shape alone is never enough. Anchoring on the registered repo
+ * paths (not just the `.ittybitty/agents/` substring) also closes the stray /
+ * backup-directory hole. Returns false when `repoPaths` is empty.
+ */
+async function cwdUnderRegisteredWorktree(pid: number, repoPaths: string[]): Promise<boolean> {
+  if (repoPaths.length === 0) return false;
+  const cwd = await readProcessCwdCtx.fn(pid);
+  if (!cwd) return false;
+  for (const repoPath of repoPaths) {
+    if (!repoPath) continue;
+    const prefix = repoPath.endsWith("/")
+      ? `${repoPath}.ittybitty/agents/`
+      : `${repoPath}/.ittybitty/agents/`;
+    if (cwd === prefix.slice(0, -1) || cwd.startsWith(prefix)) return true;
+  }
+  return false;
+}
+
+/**
  * Decide whether a process IS a Claude agent spawned by itsybitsy. Combines
  * the argv shape pre-filter with a positive cwd check: the process's cwd must
  * be inside `<repoPath>/.ittybitty/agents/...` for at least one REGISTERED
- * repo. Anchoring on the registered repo paths (rather than just the
- * `.ittybitty/agents/` substring) closes the hole where a user has a stray
- * or backup `.ittybitty/agents/` directory somewhere on disk and runs
- * claude from there — only paths under a repo we own count.
+ * repo (see `cwdUnderRegisteredWorktree`).
  *
  * Why: `claude --resume` / `claude --session-id` are STANDARD Claude CLI
  * flags. A user running `claude --resume <id>` in a regular terminal must
@@ -341,17 +377,22 @@ export async function isClaudeAgentProcess(
   repoPaths: string[],
 ): Promise<boolean> {
   if (!looksLikeClaudeArgv(command)) return false;
-  if (repoPaths.length === 0) return false;
-  const cwd = await readProcessCwdCtx.fn(pid);
-  if (!cwd) return false;
-  for (const repoPath of repoPaths) {
-    if (!repoPath) continue;
-    const prefix = repoPath.endsWith("/")
-      ? `${repoPath}.ittybitty/agents/`
-      : `${repoPath}/.ittybitty/agents/`;
-    if (cwd === prefix.slice(0, -1) || cwd.startsWith(prefix)) return true;
-  }
-  return false;
+  return cwdUnderRegisteredWorktree(pid, repoPaths);
+}
+
+/**
+ * Decide whether a process IS an agy agent spawned by itsybitsy. Same
+ * two-signal rule as `isClaudeAgentProcess` (argv shape + cwd under a registered
+ * worktree), so a user's own `agy --conversation <uuid>` in a normal terminal is
+ * never flagged as an orphan.
+ */
+export async function isAgyAgentProcess(
+  pid: number,
+  command: string,
+  repoPaths: string[],
+): Promise<boolean> {
+  if (!looksLikeAgyArgv(command)) return false;
+  return cwdUnderRegisteredWorktree(pid, repoPaths);
 }
 
 /**
@@ -451,11 +492,19 @@ export async function gatherOrphans(
       ibWatchAll.push(proc);
       continue;
     }
-    // Claude check is async (cwd lookup) so it goes last — the cheap matchers
-    // above short-circuit common processes first.
+    // Agent-CLI checks are async (cwd lookup) so they go last — the cheap
+    // matchers above short-circuit common processes first. claude and agy share
+    // the `claude_processes` orphan bucket (their PIDs are ALL tracked under
+    // `claude_pid`, so `tracked.claudePids` covers both).
     if (looksLikeClaudeArgv(proc.command)) {
       if (tracked.claudePids.has(proc.pid)) continue;
       const isOurs = await isClaudeAgentProcess(proc.pid, proc.command, repoPaths);
+      if (isOurs) claudeOrphans.push(proc);
+      continue;
+    }
+    if (looksLikeAgyArgv(proc.command)) {
+      if (tracked.claudePids.has(proc.pid)) continue;
+      const isOurs = await isAgyAgentProcess(proc.pid, proc.command, repoPaths);
       if (isOurs) claudeOrphans.push(proc);
     }
   }
@@ -693,13 +742,16 @@ export async function cleanupOrphans(
   // Per-kind verify matchers. These run only on a CHANGED command line — they
   // decide whether the new owner of the PID is still an itsybitsy process of
   // the same category (i.e. true → safe to SIGKILL, false → refuse).
-  //   - claude: re-run isClaudeAgentProcess so the cwd anchor is re-verified.
-  //     argv-only matching here would re-introduce R1#1's false-positive
-  //     hole during PID reuse.
+  //   - agent process (claude OR agy): re-run the matching cwd-anchored check so
+  //     the cwd anchor is re-verified. argv-only matching here would re-introduce
+  //     R1#1's false-positive hole during PID reuse. Both share the bucket, so a
+  //     changed command line is safe to SIGKILL if it is EITHER an itsybitsy
+  //     claude OR agy agent process.
   //   - watchdog / ib watch: argv check is sufficient; no cwd anchor exists
   //     for these (the original orphan classification didn't use one either).
-  const claudeVerify = (pid: number, cmd: string): Promise<boolean> =>
-    isClaudeAgentProcess(pid, cmd, repoPaths);
+  const claudeVerify = async (pid: number, cmd: string): Promise<boolean> =>
+    (await isClaudeAgentProcess(pid, cmd, repoPaths)) ||
+    (await isAgyAgentProcess(pid, cmd, repoPaths));
   const watchdogVerify = async (_pid: number, cmd: string): Promise<boolean> =>
     isWatchdogProcess(cmd);
   const ibWatchVerify = async (_pid: number, cmd: string): Promise<boolean> =>

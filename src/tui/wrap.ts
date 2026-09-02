@@ -611,6 +611,45 @@ export function findCodexInputChromeLogical(
 }
 
 /**
+ * Locate agy's input-box chrome within UNWRAPPED logical lines
+ * (SPEC-ANTIGRAVITY-CLI.md §4.6). agy's input box is a `>` prompt line between
+ * two `────` separators with a bottom status line below them carrying the
+ * `? for shortcuts` (idle) / `esc to cancel` (working) hint and the
+ * `accept-edits · <model> · <effort>` segment — the same two-separator shape as
+ * claude's, so it reuses findLastTwoSeparators. We ADDITIONALLY require an agy
+ * status line in the tail so an unrelated pair of separators inside the
+ * transcript (e.g. a markdown table) can't be mistaken for the input box; when
+ * that guard or the separators are absent, returns null and the caller trims
+ * nothing. Returns the upper/lower separator indices.
+ */
+export function findAgyInputChromeLogical(
+  lines: string[],
+): { upperIndex: number; lowerIndex: number } | null {
+  let endIndex = lines.length - 1;
+  while (endIndex >= 0 && stripAnsi(lines[endIndex]!).trim() === "") {
+    endIndex--;
+  }
+  if (endIndex < 0) return null;
+
+  // Require an agy status line in the last few non-blank lines — the bottom-left
+  // hint or the right-side accept-edits/plan segment that only agy renders.
+  const tailWindow = lines.slice(Math.max(0, endIndex - 3), endIndex + 1);
+  const hasAgyStatus = tailWindow.some((l) => {
+    const s = stripAnsi(l);
+    return (
+      /\? for shortcuts\b/.test(s) ||
+      /\besc to cancel\b/.test(s) ||
+      /\b(?:accept-edits|plan)\s+·/.test(s)
+    );
+  });
+  if (!hasAgyStatus) return null;
+
+  const { upperIndex, lowerIndex } = findLastTwoSeparators(lines);
+  if (upperIndex < 0) return null;
+  return { upperIndex, lowerIndex };
+}
+
+/**
  * Split a tmux capture into its transcript and the CLI's input-box chrome,
  * detecting the chrome on the UNWRAPPED logical lines (NOT on wrapped rows).
  *
@@ -624,12 +663,19 @@ export function findCodexInputChromeLogical(
  *
  * - Codex: anchor on the `›` prompt + status bar; transcript = everything above
  *   the prompt, statusLines = status-bar..end.
+ * - agy: the last two `─` separators (bracketing the `>` prompt) guarded by an
+ *   agy status line; transcript = above the upper separator, statusLines = below
+ *   the lower separator. Falls back to no trimming when not detectable.
  * - Claude: find the last two `─` separators; transcript = everything above the
  *   upper separator, statusLines = everything below the lower separator (trailing
  *   blank padding stripped).
  * - No chrome found: the whole capture is the transcript, no status lines.
+ *
+ * `isCodex` / `isAgy` are mutually exclusive (an agent is exactly one CLI); when
+ * both are false the claude detector runs. Only the flag matching the agent is
+ * set by callers.
  */
-export function computeChromeSlice(raw: string, isCodex: boolean): ChromeSlice {
+export function computeChromeSlice(raw: string, isCodex: boolean, isAgy = false): ChromeSlice {
   const lines = raw.split("\n");
 
   if (isCodex) {
@@ -639,6 +685,19 @@ export function computeChromeSlice(raw: string, isCodex: boolean): ChromeSlice {
       transcriptRaw: lines.slice(0, chrome.promptIndex).join("\n"),
       statusLines: lines.slice(chrome.statusIndex, chrome.endIndex + 1),
     };
+  }
+
+  if (isAgy) {
+    const chrome = findAgyInputChromeLogical(lines);
+    if (!chrome) return { transcriptRaw: raw, statusLines: [] };
+    const { upperIndex, lowerIndex } = chrome;
+    const statusLines = lowerIndex >= 0 && lowerIndex < lines.length - 1
+      ? lines.slice(lowerIndex + 1)
+      : [];
+    while (statusLines.length > 0 && stripAnsi(statusLines[statusLines.length - 1]!).trim() === "") {
+      statusLines.pop();
+    }
+    return { transcriptRaw: lines.slice(0, upperIndex).join("\n"), statusLines };
   }
 
   const { upperIndex, lowerIndex } = findLastTwoSeparators(lines);

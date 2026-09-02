@@ -13,6 +13,8 @@ import {
   isItsybitsyTmuxSession,
   looksLikeClaudeArgv,
   isClaudeAgentProcess,
+  looksLikeAgyArgv,
+  isAgyAgentProcess,
   isWatchdogProcess,
   isIbWatchProcess,
   sanitizeForDisplay,
@@ -363,6 +365,60 @@ describe("isClaudeAgentProcess (cwd-anchored, repo-path-cross-referenced)", () =
   });
 });
 
+describe("looksLikeAgyArgv", () => {
+  test("matches the spawn launch line (--dangerously-skip-permissions)", () => {
+    expect(looksLikeAgyArgv("agy --dangerously-skip-permissions --mode=accept-edits --model gemini-3.7-flash-low")).toBe(true);
+  });
+  test("matches the resume launch line (--conversation)", () => {
+    expect(looksLikeAgyArgv("/opt/homebrew/bin/agy --dangerously-skip-permissions --model x --conversation 11111111-2222-3333-4444-555555555555")).toBe(true);
+  });
+  test("matches --conversation on its own", () => {
+    expect(looksLikeAgyArgv("agy --conversation abc --model x")).toBe(true);
+  });
+  test("bare agy or agy --help is not enough", () => {
+    expect(looksLikeAgyArgv("agy")).toBe(false);
+    expect(looksLikeAgyArgv("agy --help")).toBe(false);
+    expect(looksLikeAgyArgv("agy --version")).toBe(false);
+  });
+  test("a non-agy binary is not matched", () => {
+    expect(looksLikeAgyArgv("vim agy.txt")).toBe(false);
+    expect(looksLikeAgyArgv("/Users/agy/some-app --conversation x")).toBe(false);
+  });
+});
+
+describe("isAgyAgentProcess (cwd-anchored, repo-path-cross-referenced)", () => {
+  const REPOS = ["/Users/me/Code/repo"];
+
+  afterEach(() => {
+    readProcessCwdCtx.reset();
+  });
+
+  test("agy --conversation whose cwd is inside an itsybitsy worktree → ours", async () => {
+    readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.ittybitty/agents/agent-foo/repo");
+    expect(await isAgyAgentProcess(1234, "agy --dangerously-skip-permissions --conversation abc", REPOS)).toBe(true);
+  });
+
+  test("a user's own agy --conversation OUTSIDE every worktree → NOT ours (safety)", async () => {
+    readProcessCwdCtx.set(async () => "/Users/me/Documents/project");
+    expect(await isAgyAgentProcess(1234, "agy --conversation abc --model x", REPOS)).toBe(false);
+  });
+
+  test("cwd under a stray/backup .ittybitty/agents not in a registered repo → NOT ours", async () => {
+    readProcessCwdCtx.set(async () => "/Users/me/Backup/old-clone/.ittybitty/agents/agent-x/repo");
+    expect(await isAgyAgentProcess(1234, "agy --conversation abc", REPOS)).toBe(false);
+  });
+
+  test("no repos registered → never ours", async () => {
+    readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.ittybitty/agents/agent-foo/repo");
+    expect(await isAgyAgentProcess(1234, "agy --conversation abc", [])).toBe(false);
+  });
+
+  test("argv shape not agy → not ours even inside a worktree", async () => {
+    readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.ittybitty/agents/agent-foo/repo");
+    expect(await isAgyAgentProcess(1234, "claude --resume abc", REPOS)).toBe(false);
+  });
+});
+
 describe("sanitizeForDisplay", () => {
   test("strips full ANSI/CSI sequences (no leftover [31m noise)", () => {
     expect(sanitizeForDisplay("hello\x1b[31mred\x1b[0mworld")).toBe("helloredworld");
@@ -642,6 +698,50 @@ describe("gatherOrphans", () => {
       if (cmd[0] === "ps") {
         return makeSpawnResult(0, fakePsOutput([
           { pid: 9999, command: "claude --resume my-personal-session" },
+        ]));
+      }
+      return makeSpawnResult(1);
+    });
+
+    const orphans = await gatherOrphans(tracked, new Set(), FAKE_REPOS);
+    expect(orphans.claude_processes).toEqual([]);
+  });
+
+  test("detects an orphan agy process (untracked, cwd inside a worktree) in the same bucket", async () => {
+    fakeCwdInsideWorktree();
+    const tracked: TrackedSets = {
+      tmuxSessions: new Set(),
+      claudePids: new Set([1111]), // agy PIDs are tracked under claude_pid too
+      watchdogPids: new Set(),
+    };
+    spawnCtx.set((cmd: string[]) => {
+      if (cmd[0] === "ps") {
+        return makeSpawnResult(0, fakePsOutput([
+          { pid: 1111, command: "agy --dangerously-skip-permissions --conversation abc" }, // tracked
+          { pid: 9999, command: "agy --dangerously-skip-permissions --model gemini-3.7-flash-low" }, // orphan
+          { pid: 8888, command: "agy --version" }, // ignored (not a launch/resume shape)
+        ]));
+      }
+      return makeSpawnResult(1);
+    });
+
+    const orphans = await gatherOrphans(tracked, new Set(), FAKE_REPOS);
+    expect(orphans.claude_processes).toEqual([
+      { pid: 9999, command: "agy --dangerously-skip-permissions --model gemini-3.7-flash-low" },
+    ]);
+  });
+
+  test("does NOT flag a user's own agy --conversation OUTSIDE every worktree (safety)", async () => {
+    readProcessCwdCtx.set(async () => "/Users/me/Documents/project");
+    const tracked: TrackedSets = {
+      tmuxSessions: new Set(),
+      claudePids: new Set(),
+      watchdogPids: new Set(),
+    };
+    spawnCtx.set((cmd: string[]) => {
+      if (cmd[0] === "ps") {
+        return makeSpawnResult(0, fakePsOutput([
+          { pid: 9999, command: "agy --conversation my-personal-session --model x" },
         ]));
       }
       return makeSpawnResult(1);

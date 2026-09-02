@@ -7,10 +7,28 @@ export type SpawnResult = {
   stdout: ReadableStream<Uint8Array> | null;
   stderr: ReadableStream<Uint8Array> | null;
   exited: Promise<number>;
+  /**
+   * Best-effort process kill. Optional so hand-built fake `SpawnResult`s in
+   * tests need not provide it; Bun's real `Subprocess` always does. Used by the
+   * `agy --version` probe to terminate a child that outlives its hard timeout
+   * (agy 1.1.23 hangs on an inherited unclosed stdin).
+   */
+  kill?: (signal?: number | string) => void;
 };
 
-/** Injectable spawn function signature. */
-export type SpawnFn = (cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => SpawnResult;
+/**
+ * Injectable spawn function signature.
+ *
+ * `stdin` is optional and defaults (in every existing caller) to Bun's default;
+ * the `agy --version` probe passes `"ignore"` explicitly so the child never
+ * inherits an open stdin pipe (agy 1.1.23 blocks forever on one). Adding the
+ * optional field is backward-compatible — every current call site passes only
+ * `{ stdout, stderr }`.
+ */
+export type SpawnFn = (
+  cmd: string[],
+  opts?: { stdout: "pipe"; stderr: "pipe"; stdin?: "ignore" | "inherit" | "pipe" | null },
+) => SpawnResult;
 
 /** Injectable fetch function signature. */
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;

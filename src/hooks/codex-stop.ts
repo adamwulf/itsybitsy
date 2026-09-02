@@ -24,10 +24,10 @@
  */
 
 import { join } from "path";
-import { realpath } from "fs/promises";
 import { isValidAgentId } from "../validation";
 import { writeAgentState, type MetaState } from "../agents";
 import { detectStateFromMessage } from "./agent-status";
+import { resolveAgentDir } from "./agent-context";
 
 /**
  * Codex Stop hook output contract (verified against developers.openai.com/codex/hooks#stop):
@@ -46,17 +46,6 @@ function buildStopNoop(): string {
 
 function emitNoop(write: (chunk: string) => unknown = (c) => process.stdout.write(c)): void {
   write(buildStopNoop());
-}
-
-async function resolveAgentDir(agentId: string, cwd: string, override?: string): Promise<string> {
-  if (override) return override;
-  const m = cwd.match(/(.*\/\.ittybitty\/agents)/);
-  const agentsDir = m ? m[1]! : join(process.cwd(), ".ittybitty", "agents");
-  let dir = join(agentsDir, agentId);
-  try {
-    dir = await realpath(dir);
-  } catch { /* directory may have been removed (agent killed mid-stop) */ }
-  return dir;
 }
 
 /**

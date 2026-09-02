@@ -1421,11 +1421,11 @@ export async function resumeAgent(
       // worktree — it is the user's existing agent state, not ours to nuke.
       const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-stop"];
       for (const event of codexPrecheckEvents) {
-        // Route through codexDryRunSpawnCtx with cwd=workPath so the dry-run
+        // Route through dispatcherDryRunSpawnCtx with cwd=workPath so the dry-run
         // subprocess's process.cwd() lands inside the agent's worktree —
         // identical reason to the newAgent path above (resolveAgentDir's
         // cwd regex must match `/\.ittybitty\/agents/`).
-        const result = await codexDryRunSpawnCtx.run(
+        const result = await dispatcherDryRunSpawnCtx.run(
           [codexIbBinaryPath, "hooks", event, agent.id, "--dry-run"],
           workPath,
         );
@@ -1493,6 +1493,131 @@ export async function resumeAgent(
         fugu: resumeCli === "fugu",
       });
       await Bun.write(resumeScript, codexResumeContent);
+      await chmod(resumeScript, 0o755);
+    } else if (resumeCli === "agy") {
+      // ── Antigravity CLI (`agy`) resume branch (SPEC-ANTIGRAVITY-CLI.md §4.5) ──
+      // Resume requires the conversation UUID captured by the agy hooks on the
+      // first launch (D12). Without it agy cannot reattach the conversation.
+      const conversationId = agent.meta.agy_conversation_id;
+      if (!conversationId || conversationId === "null" || conversationId.trim() === "") {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Cannot resume agy agent '${agent.id}': agy_conversation_id not yet captured (the PreInvocation hook never fired). Try nuking + respawning instead.`,
+        };
+      }
+      if (!isValidSessionId(conversationId)) {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Invalid agy_conversation_id for agent '${agent.id}': ${conversationId}`,
+        };
+      }
+
+      // Resolve the absolute `ib` binary path (agy hook dispatch + write-pid
+      // need it). Same path-safety check that gates the spawn-side launch.
+      const { resolveIbBinaryPath } = await import("./codex-spawn");
+      const { isCodexSafeBinaryPath } = await import("./codex-config");
+      const agyIbBinaryPath = resolveIbBinaryPath();
+      if (!agyIbBinaryPath) {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: "Error: agy resume requires an absolute path to the `ib` binary, but `ib` is not on PATH. Install ib and ensure it is reachable via PATH before resuming an agy agent.",
+        };
+      }
+      if (!isCodexSafeBinaryPath(agyIbBinaryPath)) {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Error: Unsafe ib binary path for agy resume: ${JSON.stringify(agyIbBinaryPath)} contains quotes, backslashes, or control characters. Reinstall ib to a path made of printable ASCII with no apostrophes, quotes, or backslashes.`,
+        };
+      }
+
+      // Regenerate BOTH worktree files unconditionally: permission edits to the
+      // agent-type .md take effect on resume, and a file the agent tampered
+      // with is overwritten with the canonical boundary (§4.5).
+      const { writeAgyWorktreeFiles, buildAgyResumeContent } = await import("./agy-spawn");
+      const { ensureAgyTrustedWorkspace } = await import("./agy-config");
+      const { detectRole } = await import("./hooks/session-start");
+      const agyResumeCtx = detectRole(workPath, {
+        id: agent.id,
+        manager: agent.meta.manager ?? null,
+        worker: agent.meta.worker === true,
+        agentType: agent.meta.agentType,
+        spawned_by: agent.meta.spawned_by ?? undefined,
+        allowedPaths: (agent.meta as { allowedPaths?: unknown }).allowedPaths,
+      }, agent.id);
+      try {
+        await writeAgyWorktreeFiles(workPath, agyResumeCtx, {
+          ibBinaryPath: agyIbBinaryPath,
+          agentId: agent.id,
+        });
+      } catch (err) {
+        await logAgent(agentDir, `[resume] could not regenerate agy worktree files: ${(err as Error)?.message ?? String(err)}`);
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Error: could not regenerate agy worktree files: ${(err as Error)?.message ?? String(err)}`,
+        };
+      }
+
+      // D5: re-trust the worktree before the tmux session starts. agy rewrites
+      // settings.json itself on every trust/settings change, so an entry from
+      // the first spawn may have been dropped; re-adding it is idempotent.
+      try {
+        await ensureAgyTrustedWorkspace(realpathSync(workPath));
+      } catch (err) {
+        await logAgent(agentDir, `[resume] could not pre-trust agy workspace: ${(err as Error)?.message ?? String(err)}`);
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Error: could not pre-trust agy workspace: ${(err as Error)?.message ?? String(err)}`,
+        };
+      }
+
+      // Resume-time dispatcher precheck (same fail-closed rationale as spawn).
+      // Routed through dispatcherDryRunSpawnCtx with cwd=workPath so the runtime
+      // handlers resolve agentsDir from the worktree cwd.
+      const agyPrecheckEvents = ["agy-pre-tool-use", "agy-pre-invocation", "agy-stop"];
+      for (const event of agyPrecheckEvents) {
+        const result = await dispatcherDryRunSpawnCtx.run(
+          [agyIbBinaryPath, "hooks", event, agent.id, "--dry-run"],
+          workPath,
+        );
+        if (result.exitCode !== 0) {
+          const errMsg = result.stderr.trim() || `dispatcher precheck failed with exit code ${result.exitCode}`;
+          await logAgent(agentDir, `[resume] agy dispatcher precheck failed for ${event}: ${errMsg}`);
+          return {
+            ok: false,
+            exitCode: 1,
+            stdout: "",
+            stderr: `Error: agy dispatcher precheck failed (${event}): ${errMsg}`,
+          };
+        }
+      }
+
+      // Build resume.sh via the shared agy builder (mirrors start.sh). Re-pass
+      // --model (agy resume does not remember it — §17.6) and the effort rule.
+      const agyResumeContent = buildAgyResumeContent({
+        agentId: agent.id,
+        ibBinaryPath: agyIbBinaryPath,
+        agentDir,
+        agyModel: modelFlagValue,
+        effort: resumeEffort || undefined,
+        conversationId,
+        absMetaJson: join(agentDir, "meta.json"),
+        absExitScript,
+        absAgentLog: join(agentDir, "agent.log"),
+        absStderrLog: join(agentDir, "claude.stderr.log"),
+      });
+      await Bun.write(resumeScript, agyResumeContent);
       await chmod(resumeScript, 0o755);
     } else {
       // ── Claude resume branch (unchanged) ─────────────────────────────────────
@@ -2631,6 +2756,16 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
         }
       } catch { /* ignore */ }
 
+      // D5 teardown: drop the worktree from agy's trustedWorkspaces BEFORE the
+      // worktree is removed (so realpath still resolves). No-op + never throws
+      // for claude/codex agents (gated on meta.model inside the helper).
+      try {
+        const { untrustAgyWorkspaceForTeardown } = await import("./agy-spawn");
+        await untrustAgyWorkspaceForTeardown(agentDir, worktreePath);
+      } catch {
+        /* a module-load failure must never abort a teardown */
+      }
+
       await logAgent(agentDir, "Removing worktree...");
       const removeResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "worktree", "remove", worktreePath, "--force"]);
       if (removeResult.exitCode !== 0) {
@@ -3521,6 +3656,13 @@ export interface NewAgentOptions {
 export const newAgentSpawnCtx = new SpawnContext();
 /** Override delay for newAgent tests (null = use real delay) */
 let newAgentDelayOverrideMs: number | null = null;
+/**
+ * Override the hard timeout (ms) for the spawn-time `agy --version` probe
+ * (null = use AGY_VERSION_PROBE_TIMEOUT_MS). Tests set a tiny value so the
+ * never-resolving-runner case proves the spawn proceeds without waiting the
+ * full 5s.
+ */
+let agyVersionProbeTimeoutOverrideMs: number | null = null;
 
 /** Override the newAgent spawn runner (for testing). Sets delay to 0 by default. */
 export function setNewAgentSpawnRunner(runner: SpawnFn): void {
@@ -3532,62 +3674,102 @@ export function setNewAgentSpawnRunner(runner: SpawnFn): void {
 export function resetNewAgentSpawnRunner(): void {
   newAgentSpawnCtx.reset();
   newAgentDelayOverrideMs = null;
+  agyVersionProbeTimeoutOverrideMs = null;
+}
+
+/** Override the `agy --version` probe timeout (ms) for tests. null = default. */
+export function setAgyVersionProbeTimeoutMs(ms: number | null): void {
+  agyVersionProbeTimeoutOverrideMs = ms;
 }
 
 /**
- * Injectable spawn function for the codex dispatcher dry-run precheck.
- * Takes an explicit `cwd` so the spawned `ib hooks <event> <id> --dry-run`
- * subprocess inherits the agent's worktree path — without this, the dry-run
- * resolves agentsDir relative to the parent process's cwd, which is wrong
- * when the spawn caller (e.g. system coordinator) lives outside any worktree.
+ * Injectable spawn function for the hook-dispatcher dry-run precheck, shared by
+ * BOTH the codex and agy spawn/resume paths (each runs `ib hooks <event> <id>
+ * --dry-run`). Takes an explicit `cwd` so the subprocess inherits the agent's
+ * worktree path — without this, the dry-run resolves agentsDir relative to the
+ * parent process's cwd, which is wrong when the spawn caller (e.g. system
+ * coordinator) lives outside any worktree.
  *
  * Kept separate from SpawnContext/SpawnFn so we don't have to widen the
- * shared signature; tests can inject via setCodexDryRunSpawnRunner.
+ * shared signature; tests can inject via setDispatcherDryRunSpawnRunner.
  */
-export type CodexDryRunFn = (
+export type DispatcherDryRunFn = (
   cmd: string[],
   cwd: string,
 ) => import("./types").SpawnResult;
 
-const defaultCodexDryRunFn: CodexDryRunFn = (cmd, cwd) =>
-  Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", cwd }) as import("./types").SpawnResult;
+// stdin: "ignore" — same discipline as the `agy --version` probe. The dry-run
+// companion feeds the handler a synthetic payload (it never reads real stdin),
+// so closing the child's stdin is belt-and-suspenders that costs nothing and
+// guarantees the precheck subprocess can't inherit an open stdin pipe.
+const defaultDispatcherDryRunFn: DispatcherDryRunFn = (cmd, cwd) =>
+  Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", stdin: "ignore", cwd }) as import("./types").SpawnResult;
 
-class CodexDryRunContext {
-  private _fn: CodexDryRunFn = defaultCodexDryRunFn;
+/**
+ * Hard timeout for a single `ib hooks <event> --dry-run` precheck subprocess.
+ * The hooks.json runtime timeout is 30s; the dry-run itself does trivial work
+ * (a synthetic payload through the real handler), so a generous 15s guards
+ * against a wedged subprocess without ever tripping a healthy precheck. On
+ * timeout the precheck reports a non-zero exit so the spawn refuses cleanly
+ * (fail-closed) rather than hanging.
+ */
+export const DISPATCHER_DRY_RUN_TIMEOUT_MS = 15_000;
 
-  set(fn: CodexDryRunFn): void {
+class DispatcherDryRunContext {
+  private _fn: DispatcherDryRunFn = defaultDispatcherDryRunFn;
+
+  set(fn: DispatcherDryRunFn): void {
     this._fn = fn;
   }
 
   reset(): void {
-    this._fn = defaultCodexDryRunFn;
+    this._fn = defaultDispatcherDryRunFn;
   }
 
   async run(
     cmd: string[],
     cwd: string,
+    timeoutMs: number = DISPATCHER_DRY_RUN_TIMEOUT_MS,
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     const proc = this._fn(cmd, cwd);
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const exitCode = await proc.exited;
-    return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
+    const drain: Promise<{ stdout: string; stderr: string; exitCode: number } | null> = (async () => {
+      const [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      const exitCode = await proc.exited;
+      return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
+    })().catch(() => null);
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), timeoutMs);
+    });
+
+    try {
+      const result = await Promise.race([drain, timeout]);
+      if (result === null) {
+        try { proc.kill?.(); } catch { /* best-effort */ }
+        return { stdout: "", stderr: `dispatcher precheck timed out after ${timeoutMs}ms`, exitCode: 1 };
+      }
+      return result;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 }
 
-/** Spawn context for the codex spawn-time dispatcher dry-run precheck. */
-export const codexDryRunSpawnCtx = new CodexDryRunContext();
+/** Spawn context for the shared codex/agy spawn- and resume-time dispatcher dry-run precheck. */
+export const dispatcherDryRunSpawnCtx = new DispatcherDryRunContext();
 
-/** Override the codex dry-run spawn runner (for testing). */
-export function setCodexDryRunSpawnRunner(fn: CodexDryRunFn): void {
-  codexDryRunSpawnCtx.set(fn);
+/** Override the dispatcher dry-run spawn runner (for testing). */
+export function setDispatcherDryRunSpawnRunner(fn: DispatcherDryRunFn): void {
+  dispatcherDryRunSpawnCtx.set(fn);
 }
 
-/** Reset the codex dry-run spawn runner. */
-export function resetCodexDryRunSpawnRunner(): void {
-  codexDryRunSpawnCtx.reset();
+/** Reset the dispatcher dry-run spawn runner. */
+export function resetDispatcherDryRunSpawnRunner(): void {
+  dispatcherDryRunSpawnCtx.reset();
 }
 
 /** Injectable watchdog spawn for testing — returns PID or undefined */
@@ -4323,6 +4505,58 @@ export async function newAgent(
     }
   }
 
+  // Antigravity CLI (`agy`) spawn-path preconditions (SPEC-ANTIGRAVITY-CLI.md
+  // §4.5). Run BEFORE the early meta.json write below so `agy_version` can be
+  // stamped into it (§6 risk 1), and so a coordinator / binary-path failure
+  // refuses the spawn before any worktree/tmux side-effect. Mirrors the codex
+  // precondition block above.
+  let agyIbBinaryPath: string | null = null;
+  let agyVersion = "";
+  if (agentCli === "agy") {
+    // agy coordinators are not implemented yet (mirrors the codex D9 stub) — a
+    // per-repo coordinator reaches newAgent directly with coordinatorMode=true,
+    // so refuse here before any side-effect rather than build a broken half-agy
+    // coordinator.
+    if (coordinatorMode) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: "agy coordinators not yet implemented; use claude:<model>",
+      };
+    }
+    const { resolveIbBinaryPath } = await import("./codex-spawn");
+    const { isCodexSafeBinaryPath } = await import("./codex-config");
+    agyIbBinaryPath = resolveIbBinaryPath();
+    if (!agyIbBinaryPath) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: "Error: agy spawn requires an absolute path to the `ib` binary, but `ib` is not on PATH. Install ib and ensure it is reachable via PATH before spawning an agy agent.",
+      };
+    }
+    if (!isCodexSafeBinaryPath(agyIbBinaryPath)) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: `Error: Unsafe ib binary path for agy launch: ${JSON.stringify(agyIbBinaryPath)} contains quotes, backslashes, or control characters. Reinstall ib to a path made of printable ASCII with no apostrophes, quotes, or backslashes.`,
+      };
+    }
+    // Risk 1 + Phase 2 live bug: stamp `agy --version` into meta.agy_version.
+    // Best effort — an empty string on any failure so a missing/broken agy still
+    // spawns and the field is just blank. probeAgyVersion runs the probe with
+    // stdin explicitly closed (agy 1.1.23 hangs forever on an inherited unclosed
+    // stdin) AND a hard timeout, so the spawn can NEVER block on it. Routed
+    // through the injectable spawn ctx so tests control it.
+    const { probeAgyVersion, AGY_VERSION_PROBE_TIMEOUT_MS } = await import("./agy-version");
+    agyVersion = await probeAgyVersion(
+      newAgentSpawnCtx.runner,
+      agyVersionProbeTimeoutOverrideMs ?? AGY_VERSION_PROBE_TIMEOUT_MS,
+    );
+  }
+
   // 6.1. Permissions are assembled in three layers (SPEC §2.3):
   //   1. `_all.md` frontmatter — applied to every spawned agent
   //   2. `_non_coordinator.md` frontmatter — applied to non-coordinator agents only
@@ -4543,6 +4777,11 @@ export async function newAgent(
   if (resolvedAllowedPaths !== undefined) {
     initialMetaJson.allowedPaths = resolvedAllowedPaths;
   }
+  // agy agents stamp the captured `agy --version` string (empty on failure) so
+  // a later bug report can be pinned to a release (SPEC §6 risk 1).
+  if (agentCli === "agy") {
+    initialMetaJson.agy_version = agyVersion;
+  }
   await timed("new-agent", "meta-write", () => writeMetaJsonAtomic(agentDir, initialMetaJson));
 
   // 11. Create git worktree if requested
@@ -4556,6 +4795,19 @@ export async function newAgent(
   // from the Phase 4 review. Captures `agentDir`, `useWorktree`,
   // `rootRepoPath`, `branchName` by reference.
   async function cleanupOnFailure() {
+    // D5 add/remove symmetry: a spawn that fails AFTER the agy pre-trust (the
+    // precheck / tmux-create paths) would otherwise leave the worktree realpath
+    // in ~/.gemini's trustedWorkspaces while the worktree is deleted — one dead
+    // entry per failed retry. Untrust FIRST, before rm(agentDir): meta.json
+    // must still be readable (the helper gates on meta.model) and the worktree
+    // realpath must still resolve. It self-gates to agy and never throws, so it
+    // is a safe no-op for claude/codex failures.
+    try {
+      const { untrustAgyWorkspaceForTeardown } = await import("./agy-spawn");
+      await untrustAgyWorkspaceForTeardown(agentDir, join(agentDir, "repo"));
+    } catch {
+      /* a module-load failure must never abort spawn-failure cleanup */
+    }
     await rm(agentDir, { recursive: true, force: true });
     if (useWorktree) {
       await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
@@ -4738,14 +4990,14 @@ export async function newAgent(
       // (e.g. tmux session kill) are inherited automatically.
       const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-stop"];
       for (const event of codexPrecheckEvents) {
-        // Route through codexDryRunSpawnCtx with cwd=workPath so the dry-run
+        // Route through dispatcherDryRunSpawnCtx with cwd=workPath so the dry-run
         // subprocess's process.cwd() lands inside the agent's worktree. The
         // hook handlers' resolveAgentContext / resolveAgentDir regex matches
         // `/\.ittybitty\/agents/` in cwd; without this, callers whose cwd is
         // outside any worktree (e.g. system coordinator at ~/.itsybitsy/repo)
         // would fall back to `<cwd>/.ittybitty/agents/<id>` and the dry-run
         // would fail with `meta.json not found`.
-        const result = await codexDryRunSpawnCtx.run(
+        const result = await dispatcherDryRunSpawnCtx.run(
           [codexIbBinaryPath!, "hooks", event, id, "--dry-run"],
           workPath,
         );
@@ -4763,6 +5015,140 @@ export async function newAgent(
             exitCode: 1,
             stdout: "",
             stderr: `Error: codex dispatcher precheck failed (${event}): ${errMsg}`,
+          };
+        }
+      }
+    } else if (agentCli === "agy") {
+      // Antigravity CLI (`agy`) spawn branch (SPEC-ANTIGRAVITY-CLI.md §4.5).
+      // agy agents do NOT launch with Claude settings — skip
+      // .claude/settings.local.json entirely. The permission boundary is the
+      // generated .agents/hooks.json dispatcher (D3); role instructions live
+      // in the always-on rule file (D6); the worktree is pre-trusted before
+      // tmux starts (D5). Coordinator+agy was rejected up-front in the agy
+      // precondition block above.
+      const { writeAgyWorktreeFiles, refuseIfTracked, AGY_WORKTREE_FILES } = await import("./agy-spawn");
+      const { appendGitignoreEntries } = await import("./worktree-gitignore");
+      const { ensureAgyTrustedWorkspace } = await import("./agy-config");
+      const { detectRole } = await import("./hooks/session-start");
+
+      // D7: refuse if either boundary file is already tracked in the repo —
+      // overwriting a tracked file would dirty the worktree and clobber the
+      // repo's own hooks/rules. Check (and refuse) before writing anything.
+      const trackedFile = await refuseIfTracked(
+        workPath,
+        AGY_WORKTREE_FILES,
+        (cmd) => newAgentSpawnCtx.run(cmd),
+      );
+      if (trackedFile) {
+        await logSpawn(
+          agentDir,
+          spawnerAgentDir,
+          id,
+          `spawn FAILED: agy boundary file is tracked in the repo: ${trackedFile}`,
+        );
+        await cleanupOnFailure();
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Error: cannot spawn an agy agent — '${trackedFile}' is tracked in this repo. itsybitsy must own it as the agent's permission boundary; untrack it (git rm --cached '${trackedFile}') and retry.`,
+        };
+      }
+
+      // Write the two boundary files (.agents/hooks.json + the always-on rule).
+      const agySessionCtx = detectRole(workPath, {
+        id,
+        manager: manager || null,
+        worker: isLeafAgent,
+        agentType: typeName,
+        spawned_by: spawnedBy ?? undefined,
+        allowedPaths: resolvedAllowedPaths,
+      }, id);
+      try {
+        const { hooksPath, rulesPath } = await writeAgyWorktreeFiles(workPath, agySessionCtx, {
+          ibBinaryPath: agyIbBinaryPath!,
+          agentId: id,
+        });
+        await logSpawn(agentDir, spawnerAgentDir, id, `agy worktree files written: ${hooksPath}, ${rulesPath}`);
+      } catch (err) {
+        await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: could not write agy worktree files: ${(err as Error)?.message ?? String(err)}`);
+        await cleanupOnFailure();
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Error: could not write agy worktree files: ${(err as Error)?.message ?? String(err)}`,
+        };
+      }
+
+      // Append both boundary files to the worktree .gitignore so the agent
+      // can't accidentally commit them (same helper + negation rule as codex).
+      try {
+        const giResults = await appendGitignoreEntries(workPath, AGY_WORKTREE_FILES);
+        for (const [entry, outcome] of Object.entries(giResults)) {
+          if (outcome === "negation-respected") {
+            await logSpawn(
+              agentDir,
+              spawnerAgentDir,
+              id,
+              `agy .gitignore: explicit negation present for ${entry}; deferring — the file may be tracked.`,
+            );
+          }
+        }
+      } catch (err) {
+        await logSpawn(agentDir, spawnerAgentDir, id, `agy .gitignore append failed: ${(err as Error)?.message ?? String(err)}`);
+      }
+
+      // D5 (LOAD-BEARING — ANTIGRAVITY-CLI-NOTES.md §17.9): pre-trust the
+      // worktree BEFORE the tmux session is created. `agy -i` creates the
+      // conversation and issues the first model call ~2s after launch; in an
+      // untrusted directory that first turn runs BEFORE the trust card is
+      // answered, with NO hooks loaded and the rule file ignored. Adding the
+      // realpath to trustedWorkspaces here — well before the tmux new-session
+      // far below — makes agy load hooks at +30ms and gate the first turn. The
+      // watchdog trust-card auto-accept is only a fallback for a resumed or
+      // hand-launched session.
+      try {
+        const agyRealWorktree = realpathSync(workPath);
+        await ensureAgyTrustedWorkspace(agyRealWorktree);
+        await logSpawn(agentDir, spawnerAgentDir, id, `agy workspace pre-trusted: ${agyRealWorktree}`);
+      } catch (err) {
+        await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: could not pre-trust agy workspace: ${(err as Error)?.message ?? String(err)}`);
+        await cleanupOnFailure();
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Error: could not pre-trust agy workspace: ${(err as Error)?.message ?? String(err)}`,
+        };
+      }
+
+      // agy hook-dispatcher precheck. agy's hook contract is fail-closed (a
+      // crash/timeout DENIES), so a broken dispatcher can't open the gate — but
+      // it would deny every tool call and wedge the agent. Catch that before
+      // the tmux session exists. Routed through dispatcherDryRunSpawnCtx (the shared
+      // dispatcher-dry-run context) with cwd=workPath so the runtime handlers
+      // resolve agentsDir from the worktree cwd, identical to the codex path.
+      const agyPrecheckEvents = ["agy-pre-tool-use", "agy-pre-invocation", "agy-stop"];
+      for (const event of agyPrecheckEvents) {
+        const result = await dispatcherDryRunSpawnCtx.run(
+          [agyIbBinaryPath!, "hooks", event, id, "--dry-run"],
+          workPath,
+        );
+        if (result.exitCode !== 0) {
+          const errMsg = result.stderr.trim() || `dispatcher precheck failed with exit code ${result.exitCode}`;
+          await logSpawn(
+            agentDir,
+            spawnerAgentDir,
+            id,
+            `spawn FAILED: agy dispatcher precheck failed for ${event}: ${errMsg}`,
+          );
+          await cleanupOnFailure();
+          return {
+            ok: false,
+            exitCode: 1,
+            stdout: "",
+            stderr: `Error: agy dispatcher precheck failed (${event}): ${errMsg}`,
           };
         }
       }
@@ -4986,6 +5372,31 @@ echo ""
       absAgentLog: join(agentDir, "agent.log"),
       absStderrLog: join(agentDir, "claude.stderr.log"),
       extraWritableRoots: codexExtraWritableRoots,
+    });
+  } else if (agentCli === "agy") {
+    // Antigravity CLI (`agy`) spawn branch (SPEC-ANTIGRAVITY-CLI.md §4.5). The
+    // launch line is the D2 form: `agy --dangerously-skip-permissions
+    // --mode=accept-edits --model <slug> [--effort <e>] --log-file
+    // <agentDir>/agy.log -i "$(cat <prompt>)"`. The binary-path check + the
+    // worktree files, pre-trust, and dispatcher precheck all ran above (we
+    // wouldn't be here on failure). The effort D1 rule (pass --effort only for
+    // slugs without a trailing effort suffix) is applied inside the builder.
+    // PID variable + meta-field stay CLAUDE_PID / claude_pid so the watchdog
+    // and other readers keep working.
+    const { buildAgyStartContent } = await import("./agy-spawn");
+    startContent = buildAgyStartContent({
+      agentId: id,
+      ibBinaryPath: agyIbBinaryPath!,
+      agentDir,
+      agyModel: modelFlagValue,
+      // `effort` is validated + always non-empty (default 'xhigh'); the builder
+      // applies the slug-suffix rule + mapEffortForAgy down-mapping.
+      effort,
+      absPromptFile,
+      absMetaJson: join(agentDir, "meta.json"),
+      absExitScript,
+      absAgentLog: join(agentDir, "agent.log"),
+      absStderrLog: join(agentDir, "claude.stderr.log"),
     });
   } else {
     startContent = `#!/bin/bash

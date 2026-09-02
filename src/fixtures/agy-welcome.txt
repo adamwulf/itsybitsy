@@ -1,0 +1,10 @@
+
+  ▲ Antigravity CLI
+  Account: adam@example.com
+  Model: Gemini 3.7 Flash · low
+  Workspace: /Users/adam/repo
+
+────────────────────────────────────────────────────────────
+> Accept-edits mode: file edits auto-approved (shift+tab to cycle)
+────────────────────────────────────────────────────────────
+? for shortcuts                              accept-edits · Gemini 3.7 Flash · low

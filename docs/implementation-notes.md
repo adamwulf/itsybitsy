@@ -26,12 +26,13 @@ Deterministic model. See SPEC.md §1.3.
 6. `api_error` is an override surfaced via `isApiError(tmuxOutput)` and the `tmux_api_error` flag in `TransientState`. Two TERMINAL siblings sit next to it, both checked BEFORE `api_error` (terminal-before-recoverable) and both no-op in the watchdog (never retried): `api_terms` (a genuine Usage-Policy/AUP refusal — `isApiTerms` / `tmux_api_terms`) and `api_safeguard` (a model input-safety rejection, e.g. Fable's "safeguards flagged this message"; often a probabilistic false positive — `isApiSafeguard` / `tmux_api_safeguard`; remediation is edit-the-message or switch-model, not retry).
 7. `parseState()` is retained as legacy for the bash ib reference and the watchdog's rate limit bypass retry loop.
 8. Codex agents reach the same `MetaState` via their hooks (SessionStart → running, Stop → waiting/complete). Override states currently surface as `unknown` for codex agents pending codex-specific detection (see SPEC-CODEX-MODEL.md Phase 5).
+9. agy agents reach `MetaState` via their hooks too (PreInvocation → running, Stop → waiting/complete). The tmux fallback/override parser is `parseAgyState` / `isAgyTmuxOutput` in `parse-state.ts` (`esc to cancel` / Braille spinner → running; trust card → creating; `? for shortcuts` or bare `>` between separators → waiting; sentinels as elsewhere). `rate_limited`/`api_error`/`compacting` stay `unknown` for agy (strings not captured yet); the claude-shaped override detectors don't false-positive on agy panes.
 
 ## TUI
 
 - **SplitPane (`src/tui/split-pane.ts`)**: pi-tui's `Box` is vertical-only. `SplitPane` renders two child components side-by-side by calling each child's `render(width)` independently, then merging lines: left is padded to exact width, separator char inserted, right is truncated.
 - **TmuxPoller (`src/tmux-poller.ts`)**: polls only the SELECTED target at ~1s via `setInterval`. The dashboard runs three: selected agent, system coordinator (`ib-coordinator`), and currently selected per-repo coordinator. `setAgent(session)` switches target. Race guard: snapshots `targetSession` before async `Bun.spawn`, discards result if target changed during await. `captureTmuxOutputResult()` is the separate one-shot export used by `detectAgentStates()` in the watcher — it preserves the stderr/spawn detail an unknown observation needs. (`captureTmuxOutput()` is the older nullable wrapper, still used by the watchdog.)
-- **Line wrapping (`src/tui/wrap.ts`)**: `wrapSingleLine`/`wrapLines` (ANSI-aware hard wrap) and `wordWrapSingleLine`/`wordWrapLines` (break at spaces, hard-wrap over-width tokens). The tmux panes reflow the `-J` logical capture to the display width via `wordWrapLines`, memoized per (raw, width) by `WordWrapCache`. `computeChromeSlice(raw, isCodex)` splits the capture into transcript + input-box chrome by detecting the chrome on the **UNWRAPPED logical lines** (`findLastTwoSeparators` for Claude, `findCodexInputChromeLogical` for codex) — this is the crux of the pinned-width design (see below): a pinned-width separator is a single ~1000-col logical line, so detecting after wrapping would explode it into many rows and mis-slice.
+- **Line wrapping (`src/tui/wrap.ts`)**: `wrapSingleLine`/`wrapLines` (ANSI-aware hard wrap) and `wordWrapSingleLine`/`wordWrapLines` (break at spaces, hard-wrap over-width tokens). The tmux panes reflow the `-J` logical capture to the display width via `wordWrapLines`, memoized per (raw, width) by `WordWrapCache`. `computeChromeSlice(raw, isCodex, isAgy=false)` splits the capture into transcript + input-box chrome by detecting the chrome on the **UNWRAPPED logical lines** (`findLastTwoSeparators` for Claude, `findCodexInputChromeLogical` for codex, `findAgyInputChromeLogical` for agy — the last two `────` separators guarded by an agy status line, with a no-trim fallback) — this is the crux of the pinned-width design (see below): a pinned-width separator is a single ~1000-col logical line, so detecting after wrapping would explode it into many rows and mis-slice. `isCodex`/`isAgy` are mutually exclusive; callers set only the flag matching the agent.
 - **Pinned tmux width (`PINNED_TMUX_WIDTH` in `src/tui/widths.ts`)**: every agent AND coordinator tmux window is pinned to 1000 cols and NEVER resized to follow a display pane — because `capture-pane -J` can't un-wrap a TUI's own hard `\n`, so any window resize repaints the whole transcript into scrollback. `tmuxWidthForAgent()` returns `PINNED_TMUX_WIDTH` for both; spawn/resume/coordinator-create all route through `getTmuxWidthForAgent()`. There is NO `onWidth` poller callback and NO on-select / divider-drag / sidebar-resize / SIGWINCH tmux resize — those were removed. `splitPaneLeftWidth`/`mainWidth` are DISPLAY-only (reflow + divider position). A one-time re-pin migration (`requestTmuxRepin()` → `pendingTmuxResize` on first populated `onUpdate`) resizes existing agent + coordinator windows to the pin; Ghostty detach re-pins via `checkClientAttached`. **Deliberate asymmetry**: the per-repo coordinator pane (`pane-manager.ts renderRepoCoordinatorSection`) never did chrome detection — it word-wraps the full capture and shows the coordinator's raw input box — so it is left as-is (no mis-slice to fix); only `TmuxPaneComponent` (center + system-coordinator panes) trims chrome. See SPEC.md §13.8.
 - **Pane widths**: single source of truth in `src/tui/widths.ts`. Spawn/resume code uses the async `getSaved*` / `getTmuxWidthForAgent` helpers; dashboard render uses the sync `getLive*` wrappers (or `DashboardComponent.getMainWidth()`). Per-repo coordinators render at `mainWidth`, same as the system coordinator. **Never compute pane widths inline.** Formula: `mainWidth = terminalWidth - sidebarWidth - 1`.
 - **Layout persistence**: panel sizes saved to `~/.itsybitsy/layout.json` via debounced write (500ms). Restored on startup with validation (rejects NaN/Infinity, clamps to valid ranges).
@@ -55,7 +56,7 @@ Deterministic model. See SPEC.md §1.3.
 
 ## Hooks (`src/hooks/`)
 
-Native hook implementations run as Claude Code hook commands. Five fire inside spawned agent sessions; two fire in the primary Claude session that runs `ib watch`. Three additional codex-side hooks exist (see Codex section below).
+Native hook implementations run as Claude Code hook commands. Five fire inside spawned agent sessions; two fire in the primary Claude session that runs `ib watch`. Three additional codex-side hooks and three agy-side hooks exist (see the Codex and Antigravity CLI sections below).
 
 Agent-session hooks:
 - `hook-check-path <agentId>` → `agent-path.ts`: path isolation. Blocks agents from accessing other agents' worktrees or the main repo.
@@ -69,6 +70,12 @@ Codex hooks (all dispatched through `codex-dispatcher.ts`):
 - `hooks codex-session-start <agentId>` → `codex-session-start.ts`: writes `state: "running"` to meta.json; captures `meta.codex_session_id` on first firing (defensive read of both `session_id` AND `sessionId`).
 - `hooks codex-stop <agentId>` → `codex-stop.ts`: writes `state: "waiting"` or `"complete"` to meta.json — deterministic, no tmux scraping.
 - `codex-dispatcher.ts` — fail-open-safe wrapper. NEVER throws; always exits 0 in production. Validates `<agentId>` before any other work; emits deny + `exit 0` on parse / module-import failure. `--dry-run` is the ONLY path that may exit non-zero (used by spawn-time precheck so callers can refuse cleanly).
+
+agy hooks (all dispatched through `agy-dispatcher.ts`; registered in the workspace `.agents/hooks.json`, NOT via an inline flag):
+- `hooks agy-pre-tool-use <agentId>` → `agy-pre-tool-use.ts`: translates the agy tool call (`agy-tools.ts`) to a synthetic Claude call and runs `checkPathAccess`; deny-by-default; logs each denial. Captures `agy_conversation_id` defensively if empty.
+- `hooks agy-pre-invocation <agentId>` → `agy-pre-invocation.ts`: `writeAgentState("running")`, captures `meta.agy_conversation_id` (PRIMARY capture point), and touches `<agentDir>/agy-hook-heartbeat` (the liveness marker the watchdog checks). Exports `AGY_HEARTBEAT_FILENAME`.
+- `hooks agy-stop <agentId>` → `agy-stop.ts`: writes `state: "waiting"` / `"complete"` from the transcript tail (last `PLANNER_RESPONSE`); returns `{"decision":"continue"}` on uncommitted work (D9).
+- `agy-dispatcher.ts` — fail-CLOSED wrapper (opposite of codex). On any error it emits an explicit deny (PreToolUse) or `{}` (PreInvocation/Stop) and always exits 0 in production; `--dry-run` is the only path that may exit non-zero.
 
 Primary-Claude hooks:
 - `hooks main-path` → `main-path.ts`: PreToolUse hook for the primary Claude session. Blocks the user's main Claude from `cd`-ing into agent worktrees (`.ittybitty/agents/*`).
@@ -109,6 +116,28 @@ Codex-side equivalents of the claude `start.sh` / `resume.sh` assembly. See SPEC
 - `loadMergedAgentTypePermissions(agentType)` — reads merged `_all.md` + `_non_coordinator.md` + `<type>.md` allow/deny lists. Same source as `buildAgentSettings` for claude.
 - `buildCodexDenyOutput(reason)` / `buildCodexAllowOutput(originalToolInput)` — JSON contract emitters. Allow MUST pair `permissionDecision: "allow"` with `updatedInput` echoing original `tool_input` (standalone allow triggers a codex "unsupported permissionDecision" error and fails open).
 
+## Antigravity CLI (`agy`) integration
+
+The third agent CLI, next to claude and codex. See SPEC.md §19 and SPEC-ANTIGRAVITY-CLI.md (design source-of-truth); `ANTIGRAVITY-CLI-NOTES.md` §17 is the evidence. Selector `agy:<slug>` (`agy:gemini-3.7-flash-low`, `agy:claude-sonnet-4-6`); effort via `mapEffortForAgy` + `agySlugHasEffort` in `src/agent-cli.ts`.
+
+**`src/agy-spawn.ts`** — agy-shaped `start.sh` / `resume.sh` (same setsid + SIGHUP trap + `ib write-pid` + wait + exit-check skeleton as codex; PID stored as `claude_pid`).
+
+- `buildAgyStartContent({agentId, ibBinaryPath, agentDir, agyModel, effort?, absPromptFile, ...})` — launches `agy --dangerously-skip-permissions --mode=accept-edits --model <slug> [--effort <e>] --log-file <agentDir>/agy.log -i "$(cat <prompt>)"` (D2). `--effort` is omitted when the slug already ends `-low`/`-medium`/`-high` (D1).
+- `buildAgyResumeContent({..., conversationId})` — same skeleton, launch line carries `--conversation <uuid>` and NO `-i`; `--model` + effort ARE re-passed (agy resume remembers neither, §17.6).
+- `writeAgyWorktreeFiles(worktreePath, ctx, {ibBinaryPath, agentId})` — writes `.agents/hooks.json` + `.agents/rules/ittybitty-agent.md`; returns both paths. Regenerated on resume so permission edits take effect.
+- `refuseIfTracked(worktreePath, files, run)` — D7 guard via `git ls-files --error-unmatch`; returns the first tracked boundary file or null.
+- `untrustAgyWorkspaceForTeardown(agentDir, worktreePath)` — teardown counterpart to the D5 pre-trust; reads `meta.model`, no-ops unless agy, removes `realpath(worktree)` from `trustedWorkspaces`. NEVER throws.
+
+**`src/agy-config.ts`** — worktree-file builders + the trust-file mutator.
+
+- `buildAgyHooksJson({ibBinaryPath, agentId, timeoutSecs?})` — the `.agents/hooks.json` text (the `ittybitty` named hook for PreToolUse/PreInvocation/Stop, each `<abs ib> hooks agy-<event> <id>`). `<abs ib>` must pass `isCodexSafeBinaryPath` (reused).
+- `buildAgyRulesFile(ctx)` — the `trigger: always_on` rule file (session-start template wrapper-stripped + inlined project + user `CLAUDE.md` + skills catalogue).
+- `ensureAgyTrustedWorkspace(realWorktree)` / `removeAgyTrustedWorkspace(realWorktree)` — lock-guarded read-modify-write of `~/.gemini/antigravity-cli/settings.json` `trustedWorkspaces` (D5/D13). Idempotent; preserves all other keys.
+
+**`src/agy-version.ts`** — `probeAgyVersion(run, timeoutMs=5000)` stamps `agy --version` into `meta.agy_version`. Runs with **stdin `"ignore"`** (agy 1.1.23 blocks forever on an inherited unclosed stdin) AND a hard timeout — on timeout it kills the child and returns `""`, so the spawn can never block. The three `agy-* --dry-run` prechecks share the discipline via `DispatcherDryRunContext.run` (stdin `"ignore"` + a 15s timeout).
+
+**`src/hooks/agy-tools.ts`** — translates each agy tool call to a synthetic Claude call (`run_command`→`Bash`, `view_file`→`Read`, `list_dir`→`LS`, `find_by_name`→`Glob`, `grep_search`→`Grep`, `write_to_file`→`Write`, `replace_file_content`→`Edit`, `multi_replace_file_content`→`MultiEdit`, `read_url_content`→`WebFetch`, `search_web`→`WebSearch`, `manage_task`→`TodoWrite`), then routes through the existing `checkPathAccess`. Sub-agent tools always deny (D8); unknown tools deny unless allow-listed by raw name; missing path arg denies.
+
 ## Telegram channel subsystem (`src/channels/`)
 
 The Telegram bridge lives entirely here (NOT in the sibling bash `ittybitty`). Hand-rolled Bot API client — no grammy. Boot (`boot.ts`) runs at `ib watch` start: probe → resolve private chat id → construct `TelegramDispatcher` (inbound long-poll) + `TelegramOutbox` (outbound queue).
@@ -136,6 +165,7 @@ Commands: `retireAgent`, `rehireAgent`, `nukeAgent`, `nukeAllAgents`, `pauseAgen
 - `newAgent()` runs `checkSpawnerWorktreeClean(spawnerCwd)` right after prompt validation and before any side effects (SPEC §1.1 step 1a). Drains `git status --porcelain` directly (NOT via `SpawnContext.run`, which would `.trim()` and strip the porcelain XY column's leading space); both streams are drained concurrently via `Promise.all` to avoid pipe-buffer deadlock on large stderr. Skipped silently when `git rev-parse --is-inside-work-tree` doesn't return `true` (non-git cwd: system coordinator home, raw temp dir). The intercept-task hook forwards Claude's reported `input.cwd` as `_cwd` so the check inspects the spawning agent's worktree, not the hook process's own cwd.
 - `newAgent()` branches on `parseModel(model).cli`. **Codex path**: skips `.claude/settings.local.json` entirely, writes the worktree `.gitignore` entry + per-agent `AGENTS.md`, runs the spawn-time dispatcher precheck (`ib hooks codex-pre-tool-use --dry-run <agentId>` + SessionStart + Stop), then generates a codex-shaped `start.sh`. **Claude path**: unchanged — byte-snapshot-guarded at `tests/fixtures/claude-start-sh-baseline.sh`. Coordinators cannot currently be spawned under codex (`--coordinator` + `codex:<model>` is rejected).
 - `resumeAgent()` branches on `parseModel(meta.model).cli`. **Codex path**: validates `meta.codex_session_id` present, runs the same precheck, generates codex-shaped `resume.sh` invoking `codex resume "<UUID>"`. **Claude path**: byte-snapshot-guarded at `tests/fixtures/claude-resume-sh-baseline.sh`.
+- **agy path** (both `newAgent()` and `resumeAgent()`): skips `.claude/settings.local.json`; refuses a tracked boundary file (D7); writes `.agents/hooks.json` + `.agents/rules/ittybitty-agent.md` + gitignore; `ensureAgyTrustedWorkspace(realpath(worktree))` BEFORE tmux (D5); runs the `agy-* --dry-run` precheck; stamps `meta.agy_version` (best-effort, timeout-guarded). Resume requires `meta.agy_conversation_id`, regenerates the worktree files, re-trusts, re-prechecks, and re-passes `--model` + effort. `--coordinator` + `agy:` is rejected. Teardown calls `untrustAgyWorkspaceForTeardown` best-effort.
 - `ib write-pid <agent-id> <pid>` (`src/index.ts`) routes through `mutateAgentMeta()` in `src/agents.ts` so concurrent meta.json writers can't clobber each other. Used by both claude AND codex `start.sh` + `resume.sh`.
 
 ## Agent lifecycle (`src/agent-lifecycle.ts`)
@@ -152,7 +182,7 @@ the active directory/worktree, then delegates session startup to
 
 ## parse-state.ts priority order (legacy)
 
-`parseState()` is deprecated. Retained for backward compatibility with bash ib and the watchdog rate-limit-bypass retry loop. Priority order:
+`parseState()` is deprecated. Retained for backward compatibility with bash ib and the watchdog rate-limit-bypass retry loop. It content-sniffs the CLI first (`isCodexTmuxOutput` → `parseCodexState`, then `isAgyTmuxOutput` → `parseAgyState`, else `parseClaudeState`); `parseStateForCli(input, cli)` dispatches by the known cli instead. Claude priority order:
 
 Creating (workspace trust prompt, full input) > Compacting (last 5) > Active running (last 5) > Tool waiting (last 15) > Rate limited (last 15) > Complete (last 15) > WAITING (last 15) > Other running (last 15) > Spinners (last 15) > Permission prompts (last 15) > Broader spinners (last 20) > Background tasks (last 15) > Race condition hook > Unknown.
 
@@ -195,6 +225,8 @@ Builds the navigable item list for the add-repo folder browser dialog. Given a c
 ## Debugging — `ib state`
 
 `ib state` (or `ib state --json`) lists every agent with its tmux pane PID, claude PID, and watchdog PID, plus liveness for each (✓ alive, ✗ dead, — missing). When pane_pid has child processes that aren't the recorded claude_pid, they show as `[orphans: N]`. Implementation: `src/state-command.ts`.
+
+Orphan-process detection recognizes each agent CLI by its argv shape AND a cwd inside a registered repo's `.ittybitty/agents/…` (argv alone is never enough — a user's own `claude --resume` / `agy --conversation` in a normal terminal must never be flagged). `looksLikeClaudeArgv` (`claude --resume`/`--session-id`) + `isClaudeAgentProcess`, and `looksLikeAgyArgv` (`agy --dangerously-skip-permissions`/`--conversation`) + `isAgyAgentProcess`, share the `cwdUnderRegisteredWorktree` anchor. claude and agy processes land in the same `claude_processes` orphan bucket (their PIDs are all tracked under `claude_pid`); the cleanup verify matcher (PID-reuse defense) accepts either.
 
 `ib state` always renders an `ORPHANS` section. Four categories:
 

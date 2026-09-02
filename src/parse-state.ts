@@ -135,6 +135,140 @@ export function isCodexTmuxOutput(input: string): boolean {
 }
 
 /**
+ * Detect whether the tmux output came from an Antigravity CLI (`agy`) agent
+ * rather than claude or codex (SPEC-ANTIGRAVITY-CLI.md §4.6). Only agy-UNIQUE
+ * signals are used (any one is enough):
+ *   1. The trust card's unique question, present anywhere.
+ *   2. The literal `Antigravity CLI` welcome banner near the top.
+ *   3. The bottom status bar's agy-only segment `accept-edits · <model>` (or
+ *      `plan · <model>`) — the mode word followed by `·` and a model label.
+ *
+ * DELIBERATELY NOT signals (they false-positive claude panes — proven in review):
+ *   - `? for shortcuts` — recent claude builds render this in their idle footer.
+ *   - `esc to cancel` — claude's permission modal shows "Esc to cancel".
+ *   - a bare "Antigravity" substring — a claude agent working on THIS feature has
+ *     "Antigravity" all over its transcript/prompt; only the exact `Antigravity
+ *     CLI` banner counts.
+ * Claude renders "accept edits on" (no hyphen, no `·`), so the `accept-edits · `
+ * segment is agy-only. These strings are also disjoint from codex's
+ * (`OpenAI Codex (v`, `gpt-/codex-` + `·` status line), so the detectors don't
+ * collide.
+ */
+export function isAgyTmuxOutput(input: string): boolean {
+  if (!input) return false;
+  const lines = input.split("\n");
+
+  // Trust card — agy-unique and unambiguous.
+  if (input.includes("Do you trust the contents of this project?")) return true;
+
+  // Welcome banner — the literal "Antigravity CLI" text near the top.
+  const head = lines.slice(0, 12).join("\n");
+  if (head.includes("Antigravity CLI")) return true;
+
+  // Status-bar segment — last few non-blank lines. Require the agy-only
+  // `accept-edits ·`/`plan ·` mode word FOLLOWED BY a model label (a non-space
+  // token after the `·`) ON THE SAME LINE (horizontal whitespace only, so a
+  // line-ending `accept-edits ·` plus content on the next line can't match), so
+  // a lone `accept-edits ·` echoed in prose can't match.
+  const tail = stripTrailingBlanks(lines).slice(-8).join("\n");
+  if (/\b(?:accept-edits|plan)[ \t]+·[ \t]+\S/.test(tail)) return true;
+
+  return false;
+}
+
+/**
+ * Parse Antigravity CLI (`agy`) agent state from tmux output
+ * (SPEC-ANTIGRAVITY-CLI.md §4.6). Like codex, agy's PRIMARY state is written to
+ * meta.json by its hooks; this tmux parser is the fallback / override path.
+ *
+ * agy's TUI: a `>` input line between `────` separators, `? for shortcuts`
+ * bottom-left when idle and `esc to cancel` when a turn is running, a right-side
+ * `accept-edits · <model> · <effort>` status, and Braille-spinner activity lines
+ * (`⢿  Running command...`, `⣯  Generating...`, `⣻  Reading file...`).
+ *
+ * Priority order (mirrors codex's intent):
+ *   1. Active work — `esc to cancel` bottom-left OR a Braille-spinner activity
+ *      line in the last 15 lines → running.
+ *   2. Completion sentinel ("I HAVE COMPLETED THE GOAL", unquoted) → complete.
+ *   3. Standalone WAITING marker → waiting.
+ *   4. Trust card ("Do you trust the contents of this project?") → creating.
+ *   5. Idle at the input prompt (`? for shortcuts`, or a bare `>` between
+ *      `────` separators) → waiting (defers to the meta state the hooks write).
+ *   6. Default → unknown.
+ *
+ * rate_limited / api_error / compacting are deliberately NOT detected here — agy's
+ * strings for those aren't captured yet, so those override states stay `unknown`
+ * for agy (D10).
+ */
+export function parseAgyState(input: string): ParseStateResult {
+  if (!input || input.trim() === "") {
+    return { state: "unknown", reason: "empty input" };
+  }
+
+  const last15 = lastNLines(input, STANDARD_WINDOW);
+
+  // 1. Active work. `esc to cancel` is agy's bottom-left hint while a turn runs;
+  // the Braille-spinner activity line (⢀-⣿ range, U+2800–U+28FF) leads
+  // "Running command..." / "Generating..." / "Reading file..." and similar.
+  if (/(^|\n)\s*esc to cancel\b/i.test(last15)) {
+    return { state: "running", reason: "agy 'esc to cancel' hint in last 15 lines" };
+  }
+  if (/(^|\n)[ \t]*[⠀-⣿][ \t]+(Running|Generating|Reading|Thinking|Working|Searching|Editing|Analyzing|Planning)/.test(last15)) {
+    return { state: "running", reason: "agy Braille spinner activity line in last 15 lines" };
+  }
+
+  // 2. Completion sentinel — exclude quoted occurrences (watchdog nudge prompts).
+  const unquoted15 = last15.replace(/'I HAVE COMPLETED THE GOAL'/g, "");
+  if (unquoted15.includes("I HAVE COMPLETED THE GOAL")) {
+    return { state: "complete", reason: "I HAVE COMPLETED THE GOAL in last 15 lines (agy)" };
+  }
+
+  // 3. Explicit WAITING — standalone on its own line (agy doesn't use ⏺).
+  const waitingRegex = /(^|\n)\s*WAITING\s*($|\n)/;
+  if (waitingRegex.test(last15)) {
+    return { state: "waiting", reason: "WAITING in last 15 lines (agy)" };
+  }
+
+  // 4. Trust card — startup screen before the first turn.
+  if (input.includes("Do you trust the contents of this project?")) {
+    return { state: "creating", reason: "agy trust card" };
+  }
+
+  // 5. Idle at the input prompt. `? for shortcuts` is the bottom-left hint only
+  // rendered when idle; a bare `>` between the two input-box `────` separators is
+  // the secondary signal. Defers to the meta state (waiting/complete) the hooks
+  // write on the primary path.
+  if (/(^|\n)\s*\? for shortcuts\b/.test(last15)) {
+    return { state: "waiting", reason: "idle at agy input prompt (? for shortcuts)" };
+  }
+  if (hasAgyBarePromptBetweenSeparators(input)) {
+    return { state: "waiting", reason: "idle at agy input prompt (bare > between separators)" };
+  }
+
+  return { state: "unknown", reason: "no agy patterns matched" };
+}
+
+/**
+ * True when the tail carries agy's input box: a bare `>` prompt line sandwiched
+ * between two `────` separator lines. Walks up from the last non-blank line to
+ * find `── > ──` shaped chrome, tolerating the placeholder text agy shows on the
+ * first draw.
+ */
+function hasAgyBarePromptBetweenSeparators(input: string): boolean {
+  const lines = stripTrailingBlanks(input.split("\n"));
+  // Find the last bare `>` prompt line (optionally followed by placeholder text).
+  let promptIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^>(\s|$)/.test((lines[i] ?? "").trimStart())) { promptIdx = i; break; }
+  }
+  if (promptIdx < 0) return false;
+  const isSep = (s: string): boolean => /^─+$/.test(stripAnsi(s).trim());
+  const hasSepAbove = lines.slice(0, promptIdx).some(isSep);
+  const hasSepBelow = lines.slice(promptIdx + 1).some(isSep);
+  return hasSepAbove && hasSepBelow;
+}
+
+/**
  * Parse codex agent state from tmux output. Codex's TUI differs from claude's — different
  * glyphs (› for input prompt, • for output bullets), no surrounding box, and a status
  * bar that may show either cwd or context/quota telemetry on the last line.
@@ -236,7 +370,9 @@ export function parseStateForCli(input: string, cli: AgentCli): ParseStateResult
   if (!input || input.trim() === "") {
     return { state: "unknown", reason: "empty input" };
   }
-  return isCodexBackedCli(cli) ? parseCodexState(input) : parseClaudeState(input);
+  if (isCodexBackedCli(cli)) return parseCodexState(input);
+  if (cli === "agy") return parseAgyState(input);
+  return parseClaudeState(input);
 }
 
 /**
@@ -271,6 +407,16 @@ export function parseState(input: string): ParseStateResult {
   // OR the codex status-bar shape at the tail.
   if (isCodexTmuxOutput(input)) {
     return parseCodexState(input);
+  }
+
+  // agy agents have their own TUI shape too — dispatch to the agy parser before
+  // the claude-shaped patterns below. The detector keys ONLY on agy-unique
+  // signals: the trust card question, the literal "Antigravity CLI" banner, and
+  // the `accept-edits ·`/`plan ·` + model-label status segment — all disjoint
+  // from codex and claude (see isAgyTmuxOutput for why the shared strings
+  // `? for shortcuts` / `esc to cancel` / bare "Antigravity" are excluded).
+  if (isAgyTmuxOutput(input)) {
+    return parseAgyState(input);
   }
 
   return parseClaudeState(input);

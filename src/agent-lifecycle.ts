@@ -848,6 +848,17 @@ export async function teardownAgent(
     }
   } catch { /* ignore */ }
 
+  // D5 teardown (SPEC-ANTIGRAVITY-CLI.md): drop the worktree from agy's
+  // trustedWorkspaces BEFORE it is removed (so realpath still resolves). The
+  // helper reads meta.model and is a no-op — and never throws — for
+  // claude/codex agents, so teardown can't fail on it.
+  try {
+    const { untrustAgyWorkspaceForTeardown } = await import("./agy-spawn");
+    await untrustAgyWorkspaceForTeardown(agentDir, join(agentDir, "repo"));
+  } catch {
+    /* a module-load failure must never abort a teardown */
+  }
+
   // 6. Remove git worktree
   const repoDir = join(agentDir, "repo");
   try {

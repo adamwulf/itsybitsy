@@ -29,10 +29,10 @@
  */
 
 import { join } from "path";
-import { realpath } from "fs/promises";
 import { isValidAgentId } from "../validation";
 import { mutateAgentMeta } from "../agents";
 import { logAgent } from "../agent-lifecycle";
+import { resolveAgentContext } from "./agent-context";
 import {
   REGULAR_AGENT_DEFAULT_ALLOW,
   REGULAR_AGENT_DEFAULT_DENY,
@@ -205,74 +205,6 @@ interface DispatcherDeps {
    * handler's JSON output without leaking to the dispatcher's stdout.
    */
   write?: (chunk: string) => unknown;
-}
-
-/**
- * Resolve `agentDir`/`agentsDir`/`worktreePath` from the agent id. Mirrors
- * the resolution in hookCheckPath (agent-path.ts) but is scoped narrower —
- * codex agents always have a worktree (codex doesn't run for coordinators
- * today; see SPEC §5.4) so we don't need the @system branch here.
- */
-async function resolveAgentContext(
-  agentId: string,
-  cwd: string,
-  agentDirOverride?: string,
-): Promise<{
-  agentDir: string;
-  agentsDir: string;
-  worktreePath: string;
-  rootRepo: string;
-  agentType?: string;
-}> {
-  let agentDir: string;
-  let agentsDir: string;
-  if (agentDirOverride) {
-    agentDir = agentDirOverride;
-    agentsDir = join(agentDir, "..");
-  } else {
-    const cwdMatch = cwd.match(/(.*\/\.ittybitty\/agents)/);
-    agentsDir = cwdMatch ? cwdMatch[1]! : join(process.cwd(), ".ittybitty", "agents");
-    agentDir = join(agentsDir, agentId);
-  }
-
-  // Canonicalize agentDir so PreToolUse + SessionStart agree on path identity
-  // (matters for the per-agent .meta.lock — different forms = different lock
-  // files = no mutual exclusion). resolveAgentDir in codex-session-start.ts
-  // does the same realpath.
-  try {
-    agentDir = await realpath(agentDir);
-  } catch { /* directory may not exist yet (transient) */ }
-
-  let worktreePath = join(agentDir, "repo");
-  try {
-    worktreePath = await realpath(worktreePath);
-  } catch {
-    // worktree directory may not exist (transient); fall through
-  }
-
-  let agentType: string | undefined;
-  try {
-    const metaFile = Bun.file(join(agentDir, "meta.json"));
-    if (await metaFile.exists()) {
-      const meta = await metaFile.json();
-      if (typeof meta.agentType === "string") agentType = meta.agentType;
-    }
-  } catch { /* ignore */ }
-
-  let rootRepo = "";
-  try {
-    const proc = Bun.spawn(
-      ["git", "-C", worktreePath, "worktree", "list", "--porcelain"],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    const out = await new Response(proc.stdout).text();
-    if ((await proc.exited) === 0) {
-      const m = out.match(/^worktree (.+)$/m);
-      if (m) rootRepo = m[1]!;
-    }
-  } catch { /* ignore */ }
-
-  return { agentDir, agentsDir, worktreePath, rootRepo, agentType };
 }
 
 /**

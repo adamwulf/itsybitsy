@@ -59,8 +59,9 @@ import {
   resetMergeSpawnRunner,
   setNewAgentSpawnRunner,
   resetNewAgentSpawnRunner,
-  setCodexDryRunSpawnRunner,
-  resetCodexDryRunSpawnRunner,
+  setAgyVersionProbeTimeoutMs,
+  setDispatcherDryRunSpawnRunner,
+  resetDispatcherDryRunSpawnRunner,
   setDiffStatusSpawnRunner,
   resetDiffStatusSpawnRunner,
   hooksStatus,
@@ -1984,16 +1985,16 @@ describe("resumeAgent (native)", () => {
   }
 
   // Captures (cmd, cwd) for every codex dispatcher dry-run subprocess.
-  // The codex dry-run goes through codexDryRunSpawnCtx (NOT
+  // The codex dry-run goes through dispatcherDryRunSpawnCtx (NOT
   // nukeResumeSpawnCtx) so the runtime hook can resolve agentsDir from
   // the worktree cwd. Without capturing cwd here, tests can't verify the
   // fix that routes workPath into the subprocess.
-  let codexDryRunCalls: Array<{ cmd: string[]; cwd: string }>;
+  let dispatcherDryRunCalls: Array<{ cmd: string[]; cwd: string }>;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "resume-test-"));
     spawnCalls = [];
-    codexDryRunCalls = [];
+    dispatcherDryRunCalls = [];
     const runner = makeDefaultResumeRunner(spawnCalls);
     lifecycleSpawnCtx.set(runner);
     setNukeResumeSpawnRunner(runner);
@@ -2010,8 +2011,8 @@ describe("resumeAgent (native)", () => {
     const { setCoordinatorHome } = await import("./coordinator");
     setCoordinatorHome(join(tempDir, "coord-home"));
     // Default codex dry-run runner: capture (cmd, cwd) + succeed.
-    setCodexDryRunSpawnRunner((cmd, cwd) => {
-      codexDryRunCalls.push({ cmd, cwd });
+    setDispatcherDryRunSpawnRunner((cmd, cwd) => {
+      dispatcherDryRunCalls.push({ cmd, cwd });
       return makeSpawnResult();
     });
   });
@@ -2022,7 +2023,7 @@ describe("resumeAgent (native)", () => {
     resetSendSpawnRunner();
     const { resetCoordinatorHome } = await import("./coordinator");
     resetCoordinatorHome();
-    resetCodexDryRunSpawnRunner();
+    resetDispatcherDryRunSpawnRunner();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -2934,9 +2935,9 @@ describe("resumeAgent (native)", () => {
     expect(newSessionCall!.some(arg => arg.includes("resume.sh"))).toBe(true);
 
     // dispatcher precheck must have run (3 events) — calls go through
-    // codexDryRunSpawnCtx, NOT the resume spawn runner, so we read from
-    // codexDryRunCalls.
-    const dryRunCmdStrs = codexDryRunCalls.map(c => c.cmd.join(" "));
+    // dispatcherDryRunSpawnCtx, NOT the resume spawn runner, so we read from
+    // dispatcherDryRunCalls.
+    const dryRunCmdStrs = dispatcherDryRunCalls.map(c => c.cmd.join(" "));
     expect(dryRunCmdStrs.some(c => c.includes("hooks codex-pre-tool-use") && c.includes("--dry-run"))).toBe(true);
     expect(dryRunCmdStrs.some(c => c.includes("hooks codex-session-start") && c.includes("--dry-run"))).toBe(true);
     expect(dryRunCmdStrs.some(c => c.includes("hooks codex-stop") && c.includes("--dry-run"))).toBe(true);
@@ -2946,8 +2947,8 @@ describe("resumeAgent (native)", () => {
     // cwd is wrong, the runtime hook's resolveAgentDir regex fails and the
     // precheck explodes with "meta.json not found".
     const expectedCwd = join(agentDir, "repo");
-    expect(codexDryRunCalls.length).toBeGreaterThanOrEqual(3);
-    for (const call of codexDryRunCalls) {
+    expect(dispatcherDryRunCalls.length).toBeGreaterThanOrEqual(3);
+    for (const call of dispatcherDryRunCalls) {
       expect(call.cwd).toBe(expectedCwd);
     }
   });
@@ -2971,10 +2972,10 @@ describe("resumeAgent (native)", () => {
     };
     lifecycleSpawnCtx.set(baseRunner);
     setNukeResumeSpawnRunner(baseRunner);
-    // The dry-run now goes through codexDryRunSpawnCtx — inject failure
+    // The dry-run now goes through dispatcherDryRunSpawnCtx — inject failure
     // there to simulate a broken dispatcher.
-    setCodexDryRunSpawnRunner((cmd, cwd) => {
-      codexDryRunCalls.push({ cmd, cwd });
+    setDispatcherDryRunSpawnRunner((cmd, cwd) => {
+      dispatcherDryRunCalls.push({ cmd, cwd });
       return makeSpawnResult(1, "", "dispatcher broken");
     });
 
@@ -3095,6 +3096,95 @@ describe("resumeAgent (native)", () => {
     expect(result.stderr).toContain("Invalid codex_session_id");
     const resumeShExists = await Bun.file(join(agentDir, "resume.sh")).exists();
     expect(resumeShExists).toBe(false);
+  });
+
+  // ── agy resume (SPEC-ANTIGRAVITY-CLI.md §4.5, Phase 2) ──────────────────────
+  // HOME is pointed at a temp fakeHome so ensureAgyTrustedWorkspace writes to
+  // <fakeHome>/.gemini — the real ~/.gemini is never touched.
+  describe("agy resume branch (temp HOME)", () => {
+    let originalHome: string | undefined;
+    beforeEach(async () => {
+      originalHome = process.env.HOME;
+      const fakeHome = join(tempDir, "home");
+      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
+      process.env.HOME = fakeHome;
+      await (await import("./agent-types")).ensureAgentTypesDir();
+    });
+    afterEach(() => {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+    });
+
+    test("resumes an agy agent — regenerates worktree files + writes resume.sh with --conversation and no -i", async () => {
+      const agentDir = join(tempDir, ".ittybitty", "agents", "agent-agy-ok");
+      await mkdir(join(agentDir, "repo", ".agents"), { recursive: true });
+      // Pre-write a TAMPERED hooks.json to prove resume overwrites it.
+      await Bun.write(join(agentDir, "repo", ".agents", "hooks.json"), "TAMPERED");
+      await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+        id: "agent-agy-ok",
+        tmux_session: "tmux-agent-agy-ok",
+        model: "agy:gemini-3.7-flash-low",
+        agy_conversation_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+      }));
+      const agent = _makeAgent({
+        id: "agent-agy-ok",
+        repoPath: tempDir,
+        repoName: "test",
+        state: "stopped",
+        meta: {
+          tmux_session: "tmux-agent-agy-ok",
+          model: "agy:gemini-3.7-flash-low",
+          agy_conversation_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+        } as any,
+      });
+      const result = await resumeAgent(agent);
+      expect(result.ok).toBe(true);
+
+      const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
+      expect(resumeScript).toContain("--conversation '019e7b21-cb7d-7f23-8674-11036ed141ef'");
+      expect(resumeScript).toContain("--model 'gemini-3.7-flash-low'");
+      expect(resumeScript).not.toContain("-i ");
+      expect(resumeScript).not.toContain("claude --resume");
+
+      // Worktree files regenerated unconditionally (tampered file overwritten).
+      const hooks = JSON.parse(await Bun.file(join(agentDir, "repo", ".agents", "hooks.json")).text());
+      expect(hooks.ittybitty.PreToolUse[0].hooks[0].command).toContain("hooks agy-pre-tool-use agent-agy-ok");
+      const rule = await Bun.file(join(agentDir, "repo", ".agents", "rules", "ittybitty-agent.md")).text();
+      expect(rule.startsWith("---\ntrigger: always_on")).toBe(true);
+
+      // tmux new-session ran with the resume script.
+      const newSessionCall = spawnCalls.find(c => c[0] === "tmux" && c[1] === "new-session");
+      expect(newSessionCall).toBeDefined();
+      expect(newSessionCall!.some(arg => arg.includes("resume.sh"))).toBe(true);
+
+      // agy prechecks ran through the shared dispatcher-dry-run context.
+      const dryRunStrs = dispatcherDryRunCalls.map(c => c.cmd.join(" "));
+      expect(dryRunStrs.some(c => c.includes("hooks agy-pre-tool-use") && c.includes("--dry-run"))).toBe(true);
+    });
+
+    test("refuses to resume an agy agent when agy_conversation_id is missing", async () => {
+      const agentDir = join(tempDir, ".ittybitty", "agents", "agent-agy-noconv");
+      await mkdir(join(agentDir, "repo"), { recursive: true });
+      await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+        id: "agent-agy-noconv",
+        tmux_session: "tmux-agent-agy-noconv",
+        model: "agy:gemini-3.7-flash-low",
+      }));
+      const agent = _makeAgent({
+        id: "agent-agy-noconv",
+        repoPath: tempDir,
+        repoName: "test",
+        state: "stopped",
+        meta: {
+          tmux_session: "tmux-agent-agy-noconv",
+          model: "agy:gemini-3.7-flash-low",
+        } as any,
+      });
+      const result = await resumeAgent(agent);
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain("agy_conversation_id not yet captured");
+      expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
+    });
   });
 
 });
@@ -4013,22 +4103,22 @@ describe("newAgent (native)", () => {
 
   let originalHome: string | undefined;
   // Captures (cmd, cwd) for every codex dispatcher dry-run subprocess.
-  // The codex dry-run goes through codexDryRunSpawnCtx (NOT newAgentSpawnCtx)
+  // The codex dry-run goes through dispatcherDryRunSpawnCtx (NOT newAgentSpawnCtx)
   // so the runtime hook can resolve agentsDir from the worktree cwd. Without
   // capturing cwd here, tests can't verify the fix that routes workPath into
   // the subprocess. Tests that need to inject precheck failure should override
-  // via setCodexDryRunSpawnRunner.
-  let codexDryRunCalls: Array<{ cmd: string[]; cwd: string }>;
+  // via setDispatcherDryRunSpawnRunner.
+  let dispatcherDryRunCalls: Array<{ cmd: string[]; cwd: string }>;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "ib-newagent-test-"));
     agentsDir = join(tempDir, ".ittybitty", "agents");
     spawnCalls = [];
-    codexDryRunCalls = [];
+    dispatcherDryRunCalls = [];
 
     // Default codex dry-run runner: capture (cmd, cwd) + succeed.
-    setCodexDryRunSpawnRunner((cmd, cwd) => {
-      codexDryRunCalls.push({ cmd, cwd });
+    setDispatcherDryRunSpawnRunner((cmd, cwd) => {
+      dispatcherDryRunCalls.push({ cmd, cwd });
       return makeSpawnResult("", 0);
     });
 
@@ -4063,7 +4153,7 @@ describe("newAgent (native)", () => {
 
   afterEach(async () => {
     resetNewAgentSpawnRunner();
-    resetCodexDryRunSpawnRunner();
+    resetDispatcherDryRunSpawnRunner();
     resetNewAgentSummaryGenerator();
     lifecycleSpawnCtx.reset();
     resetUserConfigPath();
@@ -6683,7 +6773,7 @@ body`,
     test("fails the spawn cleanly when the dispatcher precheck exits non-zero", async () => {
       // Custom runner: succeed normally for general spawn ops, track
       // cleanup git commands. The codex dispatcher precheck now goes
-      // through codexDryRunSpawnCtx — we inject failure there.
+      // through dispatcherDryRunSpawnCtx — we inject failure there.
       const cleanupCalls: string[][] = [];
       const baseRunner = mockSpawnRunner();
       const customSpawn = (cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
@@ -6695,10 +6785,10 @@ body`,
         return baseRunner(cmd, opts);
       };
       setNewAgentSpawnRunner(customSpawn);
-      // Codex dispatcher precheck now goes through codexDryRunSpawnCtx —
+      // Codex dispatcher precheck now goes through dispatcherDryRunSpawnCtx —
       // inject failure here to simulate a broken dispatcher.
-      setCodexDryRunSpawnRunner((cmd, cwd) => {
-        codexDryRunCalls.push({ cmd, cwd });
+      setDispatcherDryRunSpawnRunner((cmd, cwd) => {
+        dispatcherDryRunCalls.push({ cmd, cwd });
         return makeSpawnResult("", 1);
       });
       const result = await callNewAgent("task", {
@@ -6723,7 +6813,7 @@ body`,
     // (`/\.ittybitty\/agents/`). If cwd is the spawn caller's cwd (e.g. the
     // system coordinator's `~/.itsybitsy/repo`), the regex misses and the
     // dry-run dies with "meta.json not found". Reverting the fix (dropping
-    // the `cwd: workPath` from the codexDryRunSpawnCtx.run call) MUST fail
+    // the `cwd: workPath` from the dispatcherDryRunSpawnCtx.run call) MUST fail
     // this test.
     test("dispatcher dry-run subprocess is invoked with cwd === workPath", async () => {
       setNewAgentSpawnRunner(mockSpawnRunner());
@@ -6737,14 +6827,14 @@ body`,
       const expectedCwd = join(agentsDir, "codex-dryrun-cwd", "repo");
 
       // All three codex events should have been pre-checked.
-      const dryRunCmdStrs = codexDryRunCalls.map((c) => c.cmd.join(" "));
+      const dryRunCmdStrs = dispatcherDryRunCalls.map((c) => c.cmd.join(" "));
       expect(dryRunCmdStrs.some((c) => c.includes("hooks codex-pre-tool-use") && c.includes("--dry-run"))).toBe(true);
       expect(dryRunCmdStrs.some((c) => c.includes("hooks codex-session-start") && c.includes("--dry-run"))).toBe(true);
       expect(dryRunCmdStrs.some((c) => c.includes("hooks codex-stop") && c.includes("--dry-run"))).toBe(true);
 
       // Every dry-run subprocess MUST be spawned with cwd === workPath.
-      expect(codexDryRunCalls.length).toBeGreaterThanOrEqual(3);
-      for (const call of codexDryRunCalls) {
+      expect(dispatcherDryRunCalls.length).toBeGreaterThanOrEqual(3);
+      for (const call of dispatcherDryRunCalls) {
         expect(call.cwd).toBe(expectedCwd);
       }
     });
@@ -6889,6 +6979,307 @@ body`,
       // false-positive the negation.
       const realTempDir = realpathSync(tempDir);
       expect(startSh).not.toContain(`'--add-dir' '${realTempDir}'`);
+    });
+  });
+
+  // ── agy spawn-path tests (SPEC-ANTIGRAVITY-CLI.md §4.5, Phase 2) ─────────────
+  //
+  // Exercise the agy branch of newAgent end-to-end with the mock spawn runner
+  // (no real agy / tmux). The newAgent beforeEach overrides HOME to a temp
+  // fakeHome, so ensureAgyTrustedWorkspace writes to <fakeHome>/.gemini — the
+  // real ~/.gemini is never touched.
+  describe("agy spawn branch", () => {
+    // The default mockSpawnRunner returns exit 0 for unmatched commands, which
+    // would make `git ls-files --error-unmatch` look "tracked". Wrap it so the
+    // D7 tracked-check reports NOT-tracked (exit 1) by default, and stub
+    // `agy --version`.
+    function agyRunner(opts?: { trackedFile?: string; agyVersion?: string }) {
+      const base = mockSpawnRunner();
+      return (cmd: string[], o?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+        const cmdStr = cmd.join(" ");
+        if (cmdStr.includes("ls-files") && cmdStr.includes("--error-unmatch")) {
+          spawnCalls.push(cmd);
+          const file = cmd[cmd.length - 1];
+          const tracked = opts?.trackedFile !== undefined && file === opts.trackedFile;
+          return makeSpawnResult("", tracked ? 0 : 1);
+        }
+        if (cmd[0] === "agy" && cmd[1] === "--version") {
+          spawnCalls.push(cmd);
+          return makeSpawnResult(opts?.agyVersion ?? "", 0);
+        }
+        return base(cmd, o);
+      };
+    }
+
+    test("spawns an agy agent and writes an agy-shaped start.sh", async () => {
+      setNewAgentSpawnRunner(agyRunner());
+      const result = await callNewAgent("read README", {
+        name: "agy-agent-1",
+        model: "agy:gemini-3.7-flash-low",
+      });
+      expect(result.ok).toBe(true);
+
+      const startSh = await Bun.file(join(agentsDir, "agy-agent-1", "start.sh")).text();
+      expect(startSh).toContain("agy --dangerously-skip-permissions --mode=accept-edits --model 'gemini-3.7-flash-low'");
+      expect(startSh).toContain('-i "$(cat ');
+      expect(startSh).toContain("--log-file '");
+      expect(startSh).toContain("CLAUDE_PID=$!");
+      // Not a claude / codex launcher.
+      expect(startSh).not.toMatch(/setsid claude/);
+      expect(startSh).not.toContain("codex");
+      expect(startSh).not.toContain("--session-id");
+    });
+
+    test("does NOT write <worktree>/.claude/settings.local.json for agy", async () => {
+      setNewAgentSpawnRunner(agyRunner());
+      const result = await callNewAgent("task", {
+        name: "agy-no-claude-settings",
+        model: "agy:gemini-3.7-flash-low",
+      });
+      expect(result.ok).toBe(true);
+      const settingsPath = join(agentsDir, "agy-no-claude-settings", "repo", ".claude", "settings.local.json");
+      expect(await Bun.file(settingsPath).exists()).toBe(false);
+    });
+
+    test("writes .agents/hooks.json + the always-on rule file into the worktree", async () => {
+      setNewAgentSpawnRunner(agyRunner());
+      const result = await callNewAgent("task", {
+        name: "agy-worktree-files",
+        model: "agy:gemini-3.7-flash-low",
+      });
+      expect(result.ok).toBe(true);
+      const worktree = join(agentsDir, "agy-worktree-files", "repo");
+      const hooks = JSON.parse(await Bun.file(join(worktree, ".agents", "hooks.json")).text());
+      expect(hooks.ittybitty.PreToolUse[0].hooks[0].command).toContain("hooks agy-pre-tool-use agy-worktree-files");
+      const rule = await Bun.file(join(worktree, ".agents", "rules", "ittybitty-agent.md")).text();
+      expect(rule.startsWith("---\ntrigger: always_on")).toBe(true);
+    });
+
+    test("appends both boundary files to <worktree>/.gitignore", async () => {
+      setNewAgentSpawnRunner(agyRunner());
+      const result = await callNewAgent("task", {
+        name: "agy-gitignore",
+        model: "agy:gemini-3.7-flash-low",
+      });
+      expect(result.ok).toBe(true);
+      const gitignore = await Bun.file(join(agentsDir, "agy-gitignore", "repo", ".gitignore")).text();
+      expect(gitignore).toContain(".agents/hooks.json");
+      expect(gitignore).toContain(".agents/rules/ittybitty-agent.md");
+    });
+
+    test("pre-trusts the worktree BEFORE creating the tmux session (D5 — §17.9)", async () => {
+      const { realpathSync } = await import("fs");
+      let sawTmuxCreate = false;
+      const trustedAtTmuxCreate: string[] = [];
+      const base = mockSpawnRunner();
+      setNewAgentSpawnRunner((cmd: string[], o?: { stdout: "pipe"; stderr: "pipe" }) => {
+        const cmdStr = cmd.join(" ");
+        if (cmdStr.includes("ls-files") && cmdStr.includes("--error-unmatch")) return makeSpawnResult("", 1);
+        if (cmd[0] === "agy" && cmd[1] === "--version") return makeSpawnResult("1.1.23", 0);
+        if (cmd[0] === "tmux" && cmd[1] === "new-session") {
+          // Snapshot the trust file at the exact moment tmux is created. If the
+          // pre-trust ran AFTER tmux, the worktree path would be absent here.
+          sawTmuxCreate = true;
+          try {
+            const raw = require("fs").readFileSync(
+              join(process.env.HOME!, ".gemini", "antigravity-cli", "settings.json"),
+              "utf8",
+            );
+            const tw = JSON.parse(raw).trustedWorkspaces;
+            if (Array.isArray(tw)) trustedAtTmuxCreate.push(...tw);
+          } catch {
+            /* leave trustedAtTmuxCreate empty — the assertion below will fail */
+          }
+        }
+        return base(cmd, o);
+      });
+      const result = await callNewAgent("task", {
+        name: "agy-trust-order",
+        model: "agy:gemini-3.7-flash-low",
+      });
+      expect(result.ok).toBe(true);
+      const expectedReal = realpathSync(join(agentsDir, "agy-trust-order", "repo"));
+      expect(sawTmuxCreate).toBe(true);
+      expect(trustedAtTmuxCreate).toContain(expectedReal);
+    });
+
+    test("refuses the spawn when a boundary file is already tracked (D7) — no tmux session", async () => {
+      setNewAgentSpawnRunner(agyRunner({ trackedFile: ".agents/hooks.json" }));
+      const result = await callNewAgent("task", {
+        name: "agy-tracked",
+        model: "agy:gemini-3.7-flash-low",
+      });
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain(".agents/hooks.json");
+      expect(result.stderr).toContain("tracked");
+      // Agent dir cleaned up; no tmux session created.
+      expect(await Bun.file(join(agentsDir, "agy-tracked", "meta.json")).exists()).toBe(false);
+      const cmdStrs = spawnCalls.map((c) => c.join(" "));
+      expect(cmdStrs.some((c) => c.includes("tmux new-session"))).toBe(false);
+    });
+
+    test("fails the spawn cleanly when the dispatcher precheck exits non-zero — no tmux session", async () => {
+      setNewAgentSpawnRunner(agyRunner());
+      setDispatcherDryRunSpawnRunner((cmd, cwd) => {
+        dispatcherDryRunCalls.push({ cmd, cwd });
+        return makeSpawnResult("", 1);
+      });
+      const result = await callNewAgent("task", {
+        name: "agy-precheck-fail",
+        model: "agy:gemini-3.7-flash-low",
+      });
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain("agy dispatcher precheck failed");
+      expect(await Bun.file(join(agentsDir, "agy-precheck-fail", "meta.json")).exists()).toBe(false);
+      const cmdStrs = spawnCalls.map((c) => c.join(" "));
+      expect(cmdStrs.some((c) => c.includes("tmux new-session"))).toBe(false);
+      // The precheck ran against agy-* events with cwd === workPath.
+      const dryRunStrs = dispatcherDryRunCalls.map((c) => c.cmd.join(" "));
+      expect(dryRunStrs.some((c) => c.includes("hooks agy-pre-tool-use") && c.includes("--dry-run"))).toBe(true);
+    });
+
+    test("rejects a per-repo coordinator + agy model before any side effect", async () => {
+      const localCalls: string[][] = [];
+      setNewAgentSpawnRunner((cmd: string[], _o?: { stdout: "pipe"; stderr: "pipe" }) => {
+        localCalls.push(cmd);
+        return makeSpawnResult("", 0);
+      });
+      const result = await callNewAgent("start coordinator", {
+        name: "agy-coord-attempt",
+        type: "coordinator",
+        model: "agy:gemini-3.7-flash-low",
+      });
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain("agy coordinators not yet implemented");
+      expect(await Bun.file(join(agentsDir, "agy-coord-attempt", "meta.json")).exists()).toBe(false);
+      const cmdStrs = localCalls.map((c) => c.join(" "));
+      expect(cmdStrs.some((c) => c.includes("tmux new-session"))).toBe(false);
+      expect(cmdStrs.some((c) => c.includes("git worktree add"))).toBe(false);
+    });
+
+    test("stamps meta.model verbatim and meta.agy_version from `agy --version`", async () => {
+      setNewAgentSpawnRunner(agyRunner({ agyVersion: "agy version 1.1.23" }));
+      const result = await callNewAgent("task", {
+        name: "agy-meta",
+        model: "agy:gemini-3.7-flash-low",
+      });
+      expect(result.ok).toBe(true);
+      const meta = await Bun.file(join(agentsDir, "agy-meta", "meta.json")).json();
+      expect(meta.model).toBe("agy:gemini-3.7-flash-low");
+      expect(meta.agy_version).toBe("agy version 1.1.23");
+    });
+
+    test("agy_version is an empty string when `agy --version` fails (best effort)", async () => {
+      const base = mockSpawnRunner();
+      setNewAgentSpawnRunner((cmd: string[], o?: { stdout: "pipe"; stderr: "pipe" }) => {
+        const cmdStr = cmd.join(" ");
+        if (cmdStr.includes("ls-files") && cmdStr.includes("--error-unmatch")) return makeSpawnResult("", 1);
+        if (cmd[0] === "agy" && cmd[1] === "--version") return makeSpawnResult("", 127);
+        return base(cmd, o);
+      });
+      const result = await callNewAgent("task", {
+        name: "agy-meta-noversion",
+        model: "agy:gemini-3.7-flash-low",
+      });
+      expect(result.ok).toBe(true);
+      const meta = await Bun.file(join(agentsDir, "agy-meta-noversion", "meta.json")).json();
+      expect(meta.agy_version).toBe("");
+    });
+
+    test("spawn proceeds with agy_version '' when `agy --version` never resolves (Phase 2 live hang)", async () => {
+      // agy 1.1.23 blocks forever on an inherited unclosed stdin: the old probe
+      // `await`ed proc.exited unconditionally and hung the whole spawn. The fix
+      // is a hard timeout — a never-resolving `agy --version` must NOT block the
+      // spawn; the field is stamped "" and everything else proceeds.
+      setAgyVersionProbeTimeoutMs(100);
+      const base = mockSpawnRunner();
+      setNewAgentSpawnRunner((cmd: string[], o?: { stdout: "pipe"; stderr: "pipe" }) => {
+        const cmdStr = cmd.join(" ");
+        if (cmdStr.includes("ls-files") && cmdStr.includes("--error-unmatch")) return makeSpawnResult("", 1);
+        if (cmd[0] === "agy" && cmd[1] === "--version") {
+          // A child that never exits and whose streams never close.
+          return {
+            stdout: new ReadableStream({ start() { /* never closes */ } }),
+            stderr: new ReadableStream({ start() { /* never closes */ } }),
+            exited: new Promise<number>(() => { /* never resolves */ }),
+            kill: () => { /* best-effort no-op */ },
+          };
+        }
+        return base(cmd, o);
+      });
+      const start = Date.now();
+      const result = await callNewAgent("task", {
+        name: "agy-version-hang",
+        model: "agy:gemini-3.7-flash-low",
+      });
+      const elapsed = Date.now() - start;
+      expect(result.ok).toBe(true);
+      // The probe timed out at 100ms rather than the 5s default — the spawn as a
+      // whole finished well under the old-behaviour "forever".
+      expect(elapsed).toBeLessThan(3000);
+      const meta = await Bun.file(join(agentsDir, "agy-version-hang", "meta.json")).json();
+      expect(meta.agy_version).toBe("");
+    });
+
+    test("applies the D1 effort rule in start.sh (suffix slug omits --effort)", async () => {
+      setNewAgentSpawnRunner(agyRunner());
+      const result = await callNewAgent("task", {
+        name: "agy-effort-suffix",
+        model: "agy:gemini-3.7-flash-low",
+        effort: "xhigh",
+      });
+      expect(result.ok).toBe(true);
+      const startSh = await Bun.file(join(agentsDir, "agy-effort-suffix", "start.sh")).text();
+      expect(startSh).not.toContain("--effort");
+    });
+
+    test("applies the D1 effort rule in start.sh (suffix-less slug passes mapped --effort)", async () => {
+      setNewAgentSpawnRunner(agyRunner());
+      const result = await callNewAgent("task", {
+        name: "agy-effort-plain",
+        model: "agy:claude-sonnet-4-6",
+        effort: "xhigh",
+      });
+      expect(result.ok).toBe(true);
+      const startSh = await Bun.file(join(agentsDir, "agy-effort-plain", "start.sh")).text();
+      expect(startSh).toContain("--model 'claude-sonnet-4-6' --effort 'high'");
+    });
+
+    // D5 add/remove symmetry: a spawn that fails AFTER the pre-trust must undo
+    // the trust entry, or a failed retry leaves one dead path in ~/.gemini per
+    // attempt. cleanupOnFailure() untrusts before it deletes the worktree.
+    test("untrusts the workspace when the spawn fails after pre-trust (D5 add/remove symmetry)", async () => {
+      setNewAgentSpawnRunner(agyRunner());
+      // Precheck fails — this runs AFTER the pre-trust, so the worktree realpath
+      // is already in trustedWorkspaces when cleanupOnFailure fires.
+      setDispatcherDryRunSpawnRunner((cmd, cwd) => {
+        dispatcherDryRunCalls.push({ cmd, cwd });
+        return makeSpawnResult("", 1);
+      });
+      const result = await callNewAgent("task", {
+        name: "agy-untrust-onfail",
+        model: "agy:gemini-3.7-flash-low",
+      });
+      expect(result.ok).toBe(false);
+      // The trust file started nonexistent; the only entry the pre-trust added
+      // was this worktree's, so after the failed spawn it must be empty again.
+      const settingsPath = join(process.env.HOME!, ".gemini", "antigravity-cli", "settings.json");
+      expect(await Bun.file(settingsPath).exists()).toBe(true);
+      const settings = JSON.parse(await Bun.file(settingsPath).text());
+      expect(settings.trustedWorkspaces).toEqual([]);
+    });
+
+    test("a claude spawn failure never creates or touches agy's settings.json", async () => {
+      // A claude agent never pre-trusts; cleanupOnFailure's untrust reads
+      // meta.model=claude and no-ops, so ~/.gemini is never written.
+      setNewAgentSpawnRunner(mockSpawnRunner({ failTmuxNewSession: true }));
+      const result = await callNewAgent("task", {
+        name: "claude-untrust-noop",
+        model: "claude:opus",
+      });
+      expect(result.ok).toBe(false);
+      const settingsPath = join(process.env.HOME!, ".gemini", "antigravity-cli", "settings.json");
+      expect(await Bun.file(settingsPath).exists()).toBe(false);
     });
   });
 });

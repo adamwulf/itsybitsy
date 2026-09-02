@@ -656,7 +656,8 @@ const COMMAND_HELP: Record<string, string> = {
     "\n" +
     "Internal hook entrypoints (invoked by Claude Code, not directly by users):\n" +
     "  intercept-task, session-start, main-path, inject-status, inject-timestamp,\n" +
-    "  codex-pre-tool-use, codex-session-start, codex-stop",
+    "  codex-pre-tool-use, codex-session-start, codex-stop,\n" +
+    "  agy-pre-tool-use, agy-pre-invocation, agy-stop",
   "hooks install":
     "Usage: ib hooks install\n" +
     "  Install the safety hooks block into ~/.claude/settings.json.",
@@ -705,6 +706,19 @@ const COMMAND_HELP: Record<string, string> = {
   "hooks codex-stop":
     "Usage: ib hooks codex-stop <agent-id> [--dry-run]\n" +
     "  Internal: codex Stop hook entrypoint. --dry-run is used by the spawn-time\n" +
+    "  precheck.",
+  "hooks agy-pre-tool-use":
+    "Usage: ib hooks agy-pre-tool-use <agent-id> [--dry-run]\n" +
+    "  Internal: Antigravity (agy) PreToolUse hook entrypoint. Deny-by-default\n" +
+    "  gate. --dry-run is used by the spawn-time precheck.",
+  "hooks agy-pre-invocation":
+    "Usage: ib hooks agy-pre-invocation <agent-id> [--dry-run]\n" +
+    "  Internal: agy PreInvocation hook entrypoint. Writes running state,\n" +
+    "  captures the conversation id, touches the heartbeat. --dry-run is used by\n" +
+    "  the spawn-time precheck.",
+  "hooks agy-stop":
+    "Usage: ib hooks agy-stop <agent-id> [--dry-run]\n" +
+    "  Internal: agy Stop hook entrypoint. --dry-run is used by the spawn-time\n" +
     "  precheck.",
   team:
     "Usage: ib team <subcommand> [args...]\n" +
@@ -2510,6 +2524,24 @@ export async function main() {
           const { exitCode } = await runCodexDispatcher(event, id, { dryRun });
           process.exit(exitCode);
         }
+        case "agy-pre-tool-use":
+        case "agy-pre-invocation":
+        case "agy-stop": {
+          // agy's hook contract is FAIL-CLOSED — a crash / non-JSON / {} /
+          // timeout all deny the tool call. The dispatcher still wraps argv
+          // parsing + the lazy handler import so those become an explicit deny
+          // (PreToolUse) or a valid no-op (PreInvocation / Stop) + exit 0. See
+          // src/hooks/agy-dispatcher.ts. Only --dry-run may exit non-zero.
+          const event = subcommand.replace(/^agy-/, "") as
+            | "pre-tool-use"
+            | "pre-invocation"
+            | "stop";
+          const id = args[2];
+          const dryRun = args.slice(3).includes("--dry-run");
+          const { runAgyDispatcher } = await import("./hooks/agy-dispatcher");
+          const { exitCode } = await runAgyDispatcher(event, id, { dryRun });
+          process.exit(exitCode);
+        }
         case "install": {
           const { installSafetyHooks } = await import("./ib-commands");
           await printAndExit(await installSafetyHooks(process.cwd()));
@@ -2542,7 +2574,7 @@ export async function main() {
         }
         default:
           console.error(`Unknown hooks subcommand: ${subcommand}`);
-          console.error("Available: intercept-task, session-start, main-path, inject-status, inject-timestamp, codex-pre-tool-use, codex-session-start, codex-stop, install, uninstall, status, intercept-install, intercept-uninstall, intercept-status");
+          console.error("Available: intercept-task, session-start, main-path, inject-status, inject-timestamp, codex-pre-tool-use, codex-session-start, codex-stop, agy-pre-tool-use, agy-pre-invocation, agy-stop, install, uninstall, status, intercept-install, intercept-uninstall, intercept-status");
           process.exit(1);
       }
       break;

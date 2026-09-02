@@ -16,6 +16,19 @@ import { isValidAgentId } from "../validation";
 import { checkGitDirectoryFlags, resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./shared";
 // Single source of truth for the encoding — see src/auto-compact.ts
 import { encodeClaudeProjectPath } from "../auto-compact";
+import { AGY_WORKTREE_FILES } from "../agy-worktree-files";
+import { heredocBodyRanges } from "./shell-metachar";
+
+/**
+ * Deny reason for a bash token that mixes a `..` path segment with shell
+ * expansion/quoting we cannot resolve safely (empty quotes, `$…`, `${…}`,
+ * backticks, backslashes, a leading `~`). Rather than emulate the shell, the
+ * traversal scanner fails closed on these.
+ */
+export const TRAVERSAL_NOISE_DENY_REASON =
+  "Access denied: path contains `..` combined with shell expansion or quoting that cannot be resolved safely. " +
+  "If this is literal text (a commit message, an `ib send` body), put it in a quoted-delimiter heredoc " +
+  "(<<'EOF' … EOF) or pass it via a file (e.g. `git commit -F <file>`) instead of on the command line.";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -109,9 +122,11 @@ export function isInAllowedPaths(filePath: string, allowedPaths: string[]): bool
 
 /**
  * Tool names that mutate files. Used to gate the settings*.json write block —
- * Read/Glob/Grep/LS on settings.json must still be allowed.
+ * Read/Glob/Grep/LS on settings.json must still be allowed. MultiEdit is
+ * included so an agent (claude directly, or agy via multi_replace_file_content)
+ * cannot rewrite its own .claude/settings.local.json to self-escalate.
  */
-const WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit"]);
+const WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit", "MultiEdit"]);
 
 /**
  * Check if an absolute, normalized path points directly to a settings*.json
@@ -122,6 +137,29 @@ export function isWorktreeSettingsFile(filePath: string, worktreePath: string): 
   const claudeDir = join(worktreePath, ".claude");
   if (dirname(filePath) !== claudeDir) return false;
   return /^settings.*\.json$/.test(basename(filePath));
+}
+
+/** Deny reason for mutating an agy agent's own hook/rule boundary files. */
+export const AGY_BOUNDARY_WRITE_DENY_REASON =
+  "Access denied: agents cannot modify their own agy hook/rule files (.agents/hooks.json, .agents/rules/ittybitty-agent.md)";
+
+/**
+ * Classify a write target as a PROTECTED worktree file that agents must not
+ * rewrite — either `.claude/settings*.json` (permission self-escalation) or an
+ * agy boundary file (`.agents/hooks.json` / the always-on rule file, whose
+ * rewrite would disable the hook gate on the next resume). Returns the kind so
+ * the caller picks the right deny reason, or null for any other path. Reads are
+ * never gated here — only the WRITE_TOOLS callers consult this.
+ */
+export function worktreeProtectedFileKind(
+  filePath: string,
+  worktreePath: string,
+): "settings" | "agy" | null {
+  if (isWorktreeSettingsFile(filePath, worktreePath)) return "settings";
+  for (const rel of AGY_WORKTREE_FILES) {
+    if (filePath === join(worktreePath, rel)) return "agy";
+  }
+  return null;
 }
 
 // ── Pure decision logic ──────────────────────────────────────────────────────
@@ -175,7 +213,7 @@ export function checkPathAccess(
     }
 
     // Check bash command for references to restricted directories
-    const bashDenial = checkBashCommandPaths(command, ctx);
+    const bashDenial = checkBashCommandPaths(command, cwd, ctx);
     if (bashDenial) return bashDenial;
 
     // Not a cd command — allowed by allow list, no path check needed
@@ -202,73 +240,225 @@ export const SETTINGS_WRITE_DENY_REASON =
   "Access denied: agents cannot modify their own .claude/settings*.json (use 'ib' to change permissions)";
 
 /**
- * Detect whether a bash command writes to <worktreePath>/.claude/settings*.json.
+ * Detect a bash command that WRITES (redirect `>`/`>>` or in-place `sed -i`) to
+ * one of the worktree's protected files — `.claude/settings*.json` (permission
+ * self-escalation) or the agy boundary files (`.agents/hooks.json` / the rule
+ * file, whose rewrite disables the hook gate on the next resume).
  *
- * Best-effort detection — perfect bash parsing isn't possible, but we cover:
- *   - `> .claude/settings*.json`   (truncate redirect)
- *   - `>> .claude/settings*.json`  (append redirect)
- *   - `sed -i ... .claude/settings*.json`  (in-place edit)
- * Both relative (`.claude/settings*.json`) and absolute
- * (`<worktreePath>/.claude/settings*.json`) forms are matched.
+ * Each candidate write-target token is RESOLVED against cwd (join + resolve +
+ * realpathSync-when-it-exists, the same way checkFilePath does) and compared with
+ * the resolved protected files via `worktreeProtectedFileKind`, rather than
+ * literal-matching the raw token. That closes obfuscated spellings the old regex
+ * missed — `.agents/rules/../hooks.json`, `./.agents/hooks.json`, and the
+ * absolute `…/.agents/rules/../hooks.json` (and the same for `.claude/settings`).
  *
- * Read-only commands like `cat`, `grep`, or `jq` without redirection are
- * intentionally left alone.
+ * Best-effort target extraction: a `>` / `>>` token's following token (or a
+ * glued `>file`), and — when `sed -i` / `--in-place` is present — every token as
+ * a possible file argument. Reads without redirection are left alone.
  */
 function checkBashSettingsWrite(
   command: string,
+  cwd: string,
   worktreePath: string
 ): HookDecision | null {
-  // Match a settings file token: either a path ending in /.claude/settings*.json
-  // or just .claude/settings*.json (when relative). The boundary chars are
-  // start-of-string/space/quote/= on the left and end-of-string/space/quote/;/&/|
-  // on the right.
-  //
-  // Two passes:
-  //   1. Find every settings-file occurrence at a word boundary.
-  //   2. For each occurrence, classify the immediate left-context as a write
-  //      redirect (> / >>) or check whether the command line starts with
-  //      `sed -i` and references the file as an argument.
-  const settingsRe = /(^|[\s'"=])((?:\/[^\s'"=;&|<>]*)?\.claude\/settings[^\s'"=;&|<>/]*\.json)/g;
-  let match: RegExpExecArray | null;
-  while ((match = settingsRe.exec(command)) !== null) {
-    const matchedPath = match[2]!;
-    const tokenStart = match.index + match[1]!.length;
-
-    // Only flag paths that resolve into our own .claude/. For absolute paths,
-    // require the path to begin with worktreePath + "/.claude/". For relative
-    // paths (starting with `.claude/`), accept unconditionally — the agent's
-    // cwd is inside its worktree, so this is the only .claude/ they can write.
-    if (matchedPath.startsWith("/")) {
-      if (!matchedPath.startsWith(worktreePath + "/.claude/")) continue;
-    } else if (!matchedPath.startsWith(".claude/")) {
-      continue;
+  // Resolve one candidate write-target token and deny if it lands on a protected
+  // file. Strips one layer of surrounding quotes first.
+  const denyForTarget = (rawToken: string): HookDecision | null => {
+    let t = rawToken;
+    if (
+      t.length >= 2 &&
+      ((t[0] === "'" && t[t.length - 1] === "'") || (t[0] === '"' && t[t.length - 1] === '"'))
+    ) {
+      t = t.slice(1, -1);
     }
+    if (!t) return null;
+    let resolved = t.startsWith("/") ? resolve(t) : resolve(join(cwd, t));
+    try {
+      resolved = realpathSync(resolved);
+    } catch {
+      // Target doesn't exist yet — keep the resolve() result.
+    }
+    const kind = worktreeProtectedFileKind(resolved, worktreePath);
+    if (kind === "settings") return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
+    if (kind === "agy") return { decision: "deny", reason: AGY_BOUNDARY_WRITE_DENY_REASON };
+    return null;
+  };
 
-    // Look back from tokenStart, skipping whitespace, to find a > or >>.
-    let i = tokenStart - 1;
-    while (i >= 0 && (command[i] === " " || command[i] === "\t")) i--;
-    if (i >= 0 && command[i] === ">") {
-      return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
+  const tokens = command.split(/\s+/);
+
+  // Redirect targets: an optional fd digit(s) or `&`, then `>` / `>>`, then an
+  // optional `|` force-clobber, then either the following token (with a space)
+  // or a glued target — so `>`, `>>`, `1>`, `2>>`, `&>`, `>|`, and `1>|file` are
+  // all covered.
+  for (let idx = 0; idx < tokens.length; idx++) {
+    const m = tokens[idx]!.match(/^(?:&|\d+)?(>>?)\|?(.*)$/);
+    if (!m) continue;
+    const gluedTarget = m[2]!;
+    if (gluedTarget) {
+      const d = denyForTarget(gluedTarget);
+      if (d) return d;
+    } else {
+      const target = tokens[idx + 1];
+      if (target) {
+        const d = denyForTarget(target);
+        if (d) return d;
+      }
     }
   }
 
-  // sed -i / sed -i'<suffix>' / sed --in-place — any of these followed somewhere
-  // by a settings file argument is a mutation.
+  // sed -i / sed -i'<suffix>' / sed --in-place: any file argument that resolves
+  // to a protected file is an in-place mutation.
   const sedInPlace = /(^|[\s;&|])sed\s+(?:-i\S*|--in-place\S*)/;
   if (sedInPlace.test(command)) {
-    settingsRe.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = settingsRe.exec(command)) !== null) {
-      const matchedPath = m[2]!;
-      if (matchedPath.startsWith("/")) {
-        if (!matchedPath.startsWith(worktreePath + "/.claude/")) continue;
-      } else if (!matchedPath.startsWith(".claude/")) {
-        continue;
-      }
-      return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
+    for (const tok of tokens) {
+      const d = denyForTarget(tok);
+      if (d) return d;
     }
   }
 
+  return null;
+}
+
+/**
+ * Detect a RELATIVE-path traversal in a bash command that escapes the worktree
+ * into another agent's directory or the main checkout. The absolute-needle
+ * scans (checkBashCommandPaths) only catch absolute references — a relative
+ * `../..` resolves identically at the shell but has no absolute needle to match.
+ *
+ * The shell can rewrite a token in ways `path.resolve` cannot follow — empty
+ * quotes (`../..''/x`), parameter expansion (`${FOO:-../..}/x`), brace
+ * expansion (`../..{,}/x`), backslashes (`..\/..\/x`), a leading `~`. Rather
+ * than emulate more of the shell, this scanner is CONSERVATIVE: after the
+ * whitespace split and stripping only surrounding quotes, a token that contains
+ * `..` AND any in-token shell-noise character (single/double quote, `$`, `{`,
+ * `}`, backtick, backslash, or a LEADING `~`) is DENIED outright — it "cannot be
+ * resolved safely". Git ranges (`HEAD..main`, `origin/main..origin/dev`,
+ * `HEAD~2..HEAD^`) carry no noise (the `~`/`^` sit mid-token) and pass through.
+ *
+ * Only CLEAN tokens go through the segment logic. `..` is a traversal risk only
+ * when it is a WHOLE path segment (`form.split("/")` contains `".."`). Each
+ * candidate form is resolved against `cwd` and gated by the same two rules the
+ * absolute needles use:
+ *   - inside `agentsDir` but outside this agent's own `agentDir` → deny
+ *   - inside `rootRepo` (the main checkout) but outside the worktree → deny
+ * A path resolving to (or under) the agent's own `agentDir` — e.g. bare `..`
+ * from the worktree — stays allowed, and anything resolving entirely outside the
+ * repo is left to the same (permissive) treatment absolute references get.
+ *
+ * Glued FLAG prefixes still need care even when clean: `--output=../../x` hides
+ * the path from `path.resolve` (which treats `--output=..` as a directory NAME).
+ * So for a clean token we test up to FOUR forms and deny if ANY escapes: the
+ * whole token; the suffix from the first `..` (drops the glued prefix); and,
+ * when the token has `=`, the right-hand side plus its own suffix-from-first-`..`.
+ * Over-denial for contrived shapes like `a/b/../../..` is accepted as the safe
+ * direction.
+ *
+ * Heredoc BODY lines are excluded (masked to spaces) before tokenizing — they
+ * are data (commit messages, `ib send` bodies) that legitimately contain `..`
+ * and apostrophes. The opener line and lines after the terminator stay scanned.
+ *
+ * Known safe-direction OVER-denies (denied though harmless; the caller-facing
+ * reason names the workarounds — a quoted-delimiter heredoc or `-F <file>`):
+ *   - `printf '..\n'` — a quoted `..` argument carrying a backslash.
+ *   - a one-line `git commit -m "…"` or `ib send <id> "…"` where a word ending
+ *     in `..` is glued to the closing quote (e.g. `…resolver.."`) — the split
+ *     token `resolver.."` strips the quote to `resolver..` and reads as a `..`
+ *     path segment.
+ *   - a quoted RELATIVE path containing a space (the whitespace split breaks the
+ *     quoted argument, so an inner `../x` token is examined on its own).
+ */
+function checkRelativeTraversalPaths(
+  command: string,
+  cwd: string,
+  ctx: PathCheckContext
+): HookDecision | null {
+  const { agentDir, agentsDir, worktreePath, rootRepo } = ctx;
+
+  // Return a deny decision when `resolved` escapes into another agent's dir or
+  // the main checkout; null when it is the agent's own dir or outside the repo.
+  const escapeDenial = (resolved: string): HookDecision | null => {
+    // The agent's own directory (and anything under it) is allowed — bare `..`
+    // from the worktree lands on agentDir, mirroring an absolute self-reference.
+    if (resolved === agentDir || resolved.startsWith(agentDir + "/")) return null;
+    // Inside another agent's directory (under agentsDir, not our own) → deny.
+    if (agentsDir && resolved.startsWith(agentsDir + "/")) {
+      return { decision: "deny", reason: "Access denied: bash command references other agents' directory" };
+    }
+    // Inside the main checkout but outside the worktree → deny.
+    if (
+      rootRepo &&
+      rootRepo !== worktreePath &&
+      (resolved === rootRepo || resolved.startsWith(rootRepo + "/")) &&
+      resolved !== worktreePath &&
+      !resolved.startsWith(worktreePath + "/")
+    ) {
+      return { decision: "deny", reason: "Access denied: bash command references main repo" };
+    }
+    return null;
+  };
+
+  // Mask heredoc body lines (data) to spaces so they aren't tokenized, keeping
+  // char offsets stable for everything else.
+  let scannable = command;
+  const bodyRanges = heredocBodyRanges(command);
+  if (bodyRanges.length > 0) {
+    let out = "";
+    let pos = 0;
+    for (const r of [...bodyRanges].sort((a, b) => a.start - b.start)) {
+      const start = Math.max(pos, r.start);
+      if (start > pos) out += command.slice(pos, start);
+      const end = Math.min(command.length, r.end);
+      if (end > start) out += " ".repeat(end - start);
+      pos = Math.max(pos, end);
+    }
+    out += command.slice(pos);
+    scannable = out;
+  }
+
+  for (let token of scannable.split(/\s+/)) {
+    if (!token) continue;
+    // Strip only one layer of surrounding matching quotes (what the shell peels
+    // off before the path is used). We deliberately do NOT try to emulate any
+    // other shell rewriting — see the noise rule below.
+    if (
+      token.length >= 2 &&
+      ((token[0] === "'" && token[token.length - 1] === "'") ||
+        (token[0] === '"' && token[token.length - 1] === '"'))
+    ) {
+      token = token.slice(1, -1);
+    }
+    if (!token.includes("..")) continue; // no traversal risk
+
+    // Noise rule: a `..` mixed with shell expansion/quoting/globbing we can't
+    // resolve safely — fail closed rather than guess how the shell rewrites it.
+    // Globs (`*?[]`) are included because a `..` token like
+    // `../../../../../itsyb*/SPEC.md` matches the repo dir name at runtime but
+    // resolves to a literal (non-escaping) segment here.
+    if (/['"$`{}\\*?[\]]/.test(token) || token.startsWith("~")) {
+      return { decision: "deny", reason: TRAVERSAL_NOISE_DENY_REASON };
+    }
+
+    // Clean token → resolve the candidate forms (whole, suffix-from-first-`..`,
+    // and the `=` RHS with its own suffix) and deny if any escapes.
+    const candidates = new Set<string>();
+    const addForms = (s: string) => {
+      if (s) candidates.add(s);
+      const idx = s.indexOf("..");
+      if (idx > 0) candidates.add(s.slice(idx)); // suffix dropping a glued prefix
+    };
+    addForms(token);
+    const eq = token.indexOf("=");
+    if (eq !== -1) addForms(token.slice(eq + 1)); // RHS of `--flag=<path>`
+
+    for (const cand of candidates) {
+      // Absolute paths are handled by the needle scans; skip them here.
+      if (cand.startsWith("/")) continue;
+      // Only forms where `..` is a whole path segment (excludes `HEAD..main`).
+      if (!cand.split("/").includes("..")) continue;
+      const denial = escapeDenial(resolve(cwd, cand));
+      if (denial) return denial;
+    }
+  }
   return null;
 }
 
@@ -282,6 +472,7 @@ function checkBashSettingsWrite(
  */
 function checkBashCommandPaths(
   command: string,
+  cwd: string,
   ctx: PathCheckContext
 ): HookDecision | null {
   const { agentDir, agentsDir, worktreePath, rootRepo } = ctx;
@@ -292,9 +483,18 @@ function checkBashCommandPaths(
     return { decision: "deny", reason: `The ${blockedFlag} flag is not allowed with git. Run git commands from your working directory instead.` };
   }
 
-  // Block bash mutations of <worktreePath>/.claude/settings*.json — agents
-  // must not grant themselves new permissions by rewriting their settings.
-  const settingsDenial = checkBashSettingsWrite(command, worktreePath);
+  // Block RELATIVE-path traversal that escapes the worktree. The absolute-needle
+  // scans below only catch absolute references; a relative `../..` resolves the
+  // same way at the shell but slips past them. Resolve every token that carries
+  // a `..` path SEGMENT against the call's cwd and apply the same rules as the
+  // absolute needles.
+  const traversalDenial = checkRelativeTraversalPaths(command, cwd, ctx);
+  if (traversalDenial) return traversalDenial;
+
+  // Block bash mutations of the worktree's protected files (.claude/settings*.json
+  // and the agy boundary files) — agents must not grant themselves new
+  // permissions or disable their own hook gate.
+  const settingsDenial = checkBashSettingsWrite(command, cwd, worktreePath);
   if (settingsDenial) return settingsDenial;
 
   // Check for references to other agents' directories
@@ -377,14 +577,14 @@ function checkFilePath(
     // Path doesn't exist yet — keep the resolve() result
   }
 
-  // 6. Block: writes to <worktreePath>/.claude/settings*.json — agents must
-  // not grant themselves new permissions by editing their own settings file.
-  // Reads are allowed; only mutation tools are blocked here.
-  if (WRITE_TOOLS.has(toolName) && isWorktreeSettingsFile(filePath, worktreePath)) {
-    return {
-      decision: "deny",
-      reason: "Access denied: agents cannot modify their own .claude/settings*.json (use 'ib' to change permissions)",
-    };
+  // 6. Block: writes to a PROTECTED worktree file — <worktreePath>/.claude/
+  // settings*.json (permission self-escalation) or the agy boundary files
+  // (.agents/hooks.json / the rule file, whose rewrite would disable the hook
+  // gate on the next resume). Reads are allowed; only mutation tools are blocked.
+  if (WRITE_TOOLS.has(toolName)) {
+    const kind = worktreeProtectedFileKind(filePath, worktreePath);
+    if (kind === "settings") return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
+    if (kind === "agy") return { decision: "deny", reason: AGY_BOUNDARY_WRITE_DENY_REASON };
   }
 
   // 7. Allow: path within worktree

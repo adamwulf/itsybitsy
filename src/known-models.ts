@@ -51,4 +51,13 @@ export const KNOWN_MODELS: KnownModel[] = [
   // (no remapping).
   { cli: "fugu", model: "fugu", description: "Sakana Fugu — routed multi-agent model" },
   { cli: "fugu", model: "fugu-ultra", description: "Sakana Fugu Ultra — higher-capability routed model" },
+  // Antigravity CLI (`agy`) — the slug is the first column of `agy models` and
+  // is passed verbatim to `--model` (SPEC-ANTIGRAVITY-CLI.md §4.1). Gemini slugs
+  // encode reasoning effort as a trailing `-low`/`-high` segment; Claude-backed
+  // slugs do not. Discovery only — never a spawn-time allow-list.
+  { cli: "agy", model: "gemini-3.7-flash-high", description: "Gemini 3.7 Flash (high effort) via Antigravity" },
+  { cli: "agy", model: "gemini-3.7-flash-low", description: "Gemini 3.7 Flash (low effort) via Antigravity" },
+  { cli: "agy", model: "gemini-3.1-pro-high", description: "Gemini 3.1 Pro (high effort) via Antigravity" },
+  { cli: "agy", model: "claude-sonnet-4-6", description: "Claude Sonnet 4.6 via Antigravity" },
+  { cli: "agy", model: "claude-opus-4-6-thinking", description: "Claude Opus 4.6 (thinking) via Antigravity" },
 ];

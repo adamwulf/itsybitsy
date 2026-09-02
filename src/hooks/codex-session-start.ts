@@ -17,10 +17,10 @@
  */
 
 import { join } from "path";
-import { realpath } from "fs/promises";
 import { isValidAgentId } from "../validation";
 import { writeAgentState } from "../agents";
 import { captureCodexSessionId } from "./codex-pre-tool-use";
+import { resolveAgentDir } from "./agent-context";
 
 const HOOK_EVENT_NAME = "SessionStart";
 
@@ -44,17 +44,6 @@ function buildSessionStartNoop(): string {
 
 function emitNoop(write: (chunk: string) => unknown = (c) => process.stdout.write(c)): void {
   write(buildSessionStartNoop());
-}
-
-async function resolveAgentDir(agentId: string, cwd: string, override?: string): Promise<string> {
-  if (override) return override;
-  const m = cwd.match(/(.*\/\.ittybitty\/agents)/);
-  const agentsDir = m ? m[1]! : join(process.cwd(), ".ittybitty", "agents");
-  let dir = join(agentsDir, agentId);
-  try {
-    dir = await realpath(dir);
-  } catch { /* directory may have just been created — fall through */ }
-  return dir;
 }
 
 export interface CodexSessionStartDeps {

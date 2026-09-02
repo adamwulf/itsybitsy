@@ -616,11 +616,18 @@ path permissions in the `.md` files, basic defaults shipped.
      either. Running agents also write `~/.itsybitsy/teams/<team>.channel.jsonl`
      and `<team>.log` on `ib send @<team>`[^50], and `teams.json` plus
      `.teams.lock` at the root through the lazy prune in `ib send` and
-     `ib roster` and through `ib team add` / `remove`[^51]. The floor is
-     therefore `~/.itsybitsy/agents`, `~/.itsybitsy/teams`, and the
-     `teams.json` write path with its lock and temp file. `agent-types/`,
-     `config.json`, and `repos.json` stay read-only; `ib watch` and
-     `ib init-types` write them, never a running agent.
+     `ib roster` and through `ib team add` / `remove`[^51]. `sandbox-safety`
+     verified this, withdrew "agents only", and settled the floor for
+     `_all.md` `allowWrite`: `~/.itsybitsy/agents` (subtree),
+     `~/.itsybitsy/teams` (subtree), and three literals, `~/.itsybitsy/teams.json`,
+     `~/.itsybitsy/teams.json.tmp`, and `~/.itsybitsy/.teams.lock`. The temp
+     name must be listed because Seatbelt checks a rename against both the
+     source and the destination path; the registry writes `teams.json.tmp` and
+     renames it[^57]. If that name ever changes, `ib send @<team>` fails loudly
+     with EPERM, which is the right failure. `agent-types/`, `config.json`,
+     `repos.json`, and `layout.json` stay read-only; `ib watch` and
+     `ib init-types` write them, never a running agent. The floor no longer
+     needs Adam; the code settles it.
    Known gap on the sandbox branch, stated by `sandbox-safety`: `ib new-agent`
    from a sandboxed manager is untested and probably fails today, because the
    shipped profile injects the repo agents dir read-only[^49]. The
@@ -644,6 +651,103 @@ denials never reach the unified log, so the kernel has no audit mode. Per the
 zero-baked-in rule it is a frontmatter scalar, `paths.audit: true` in
 `_all.md`, resolved like `sandbox.enabled`, and removed once the entries are
 collected. Not a `config.json` key, not a code constant.
+
+### 6.12 Adam's questions: read-only versus read-write lists; `sandbox-exec` around every CLI with yolo
+
+**Q1: separate lists for read-write and read-only paths?** Yes. The `paths:`
+block of §6.11 already has them: `allowRead`, `allowWrite`, `deny`. The kernel
+distinguishes the two operations[^52], and the baseline needs the distinction:
+the system directories and the home dot-files are read-only; `~/Library/Caches`,
+the `~/.itsybitsy` floor, and project directories are read-write. One refinement,
+which `sandbox-safety` proposes to build: today `allowWrite` compiles to
+`file-write*` only[^52], so a path listed only for writing cannot be opened for
+reading, a footgun with no real use. So **`allowWrite` means read plus write**
+(the generator emits both operations), **`allowRead` is the read-only list**,
+and **`deny` wins over both**. An author writes each path once, in the list that
+names the strongest access. At the hook: Read, Grep, Glob, LS, and `cd` pass on
+either list; Write, Edit, MultiEdit, NotebookEdit, and `apply_patch` pass only
+on `allowWrite`.
+
+**Q2: `sandbox-exec` around each CLI, the CLI's own permission-skip flag per
+agent, all path control in the sandbox layer?** Yes, recommended, with a precise
+meaning for "yolo". `sandbox-safety` and I agree on this; the shipped sandbox
+branch already does it for codex (`-a never -s danger-full-access` inside our
+profile)[^29]. Extend it to claude (`--dangerously-skip-permissions` when the
+sandbox is enabled) and to agy (add the wrapper; agy needs its own baseline
+bisection).
+
+What it gives:
+
+1. **Uniform enforcement.** The kernel sees every process (git, bun,
+   xcodebuild, MCP servers, sub-shells), for every CLI, whatever the spelling of
+   a path. The hook's Bash scanners (needles, traversal, settings-write guard,
+   `git -C` guard)[^8][^9][^35] become unnecessary when the sandbox is on; keep
+   them as advisory messages or delete them.
+2. **A network fence too**, through the per-agent proxy on the sandbox
+   branch[^29].
+3. **Hook failure stops being catastrophic.** Codex hooks fail open[^12], and
+   a rebuild that takes `ib` off PATH leaves claude with no hook decision. With
+   the kernel as the boundary, those windows are bounded by the sandbox.
+4. **Codex loses its coarse, leaky sandbox**[^16] in favour of ours.
+
+What "yolo" must mean: skip the CLI's own permission prompts, but **keep the
+PreToolUse hooks**. A hook deny still blocks under skip-permissions; this is
+verified live for agy[^53] and is documented Claude Code behaviour for claude,
+to confirm in the pilot rather than from a desk. The hooks keep the jobs the
+kernel cannot express:
+
+1. **Tool policy.** The type's allow and deny lists (deny WebFetch, deny Write
+   for a read-only researcher, deny `git push --force` inside an allowed path),
+   and the single-command rule for agy and coordinators[^18].
+2. **Sub-agent interception.** Task and Agent redirect to `ib new-agent`,
+   codex `features.multi_agent=false`[^14], agy sub-agent tools denied[^20].
+   The kernel would let a native sub-agent run inside the same sandbox; the
+   rule that spawning goes through `ib` is a harness rule, not a path rule.
+3. **Structural cross-agent denies.** Seatbelt is per path, not per binary. It
+   cannot tell the agent writing another agent's outbox from `ib` doing it on
+   the agent's behalf, and for a spawning type it cannot tell "retire my child"
+   from "retire a sibling". The relationship gate[^55] stays. Follow-up: move
+   that gate into `ib` itself, deriving the caller from cwd as `ib new-agent`
+   already does[^54], so it holds even without hooks.
+4. **State tracking and instructions.** PreToolUse marks the agent running,
+   Stop reads the state line, session-start renders the instructions[^24].
+5. **Readable reasons and audit mode** (§6.10, §6.11). The kernel has no audit
+   mode: `sandbox-exec` denials never reach the unified log; the spike proved
+   bisection is the only way[^56].
+
+Conditions and costs, to state plainly:
+
+- **Never yolo without the kernel.** The permission-skip flag is passed only
+  when the agent's sandbox is enabled. A spawn with the sandbox off keeps
+  today's prompting mode.
+- **macOS only.** `sandbox-exec` is deprecated by Apple but still present, and
+  Claude Code's and codex's own sandboxes depend on it too. Linux falls back to
+  hook-only.
+- **The read floor must land first** (§6.10 amendment 1), or the kernel is a
+  write fence only.
+- **The spawn-keyed runtime root and tmux rule must land** (§6.10 amendment 3,
+  §6.11 item 7), or `ib new-agent` from a sandboxed manager fails.
+- **Baselines per toolchain.** The claude and codex boot floors are
+  bisected[^29]; heavy toolchains (Xcode, simulators, Docker) are not, and each
+  new one is a manual bisection because the kernel cannot audit[^56].
+  Mitigation: `sandbox.enabled` per type, so a type whose toolchain has no
+  floor yet opts out, and `rawAllow` for syscalls and mach services.
+- **MCP servers under the profile are untested** (a backlog item on the
+  sandbox branch).
+- **The tmux socket stays an accepted escape for spawning types** until
+  `ib new-agent` is routed through an unsandboxed helper.
+- **Keychain-backed git credentials remain reachable**, because
+  `~/Library/Keychains` is in the read floor.
+- **The prompt safety net is gone.** Under yolo, a hook that returns no
+  decision no longer falls back to a prompt. Acceptable only because the kernel
+  holds paths and network; tool policy is unenforced during such a window.
+- **Codex's fail-open hook contract** must be re-judged once its prompts are
+  gone; a pilot item.
+
+End state: `sandbox.enabled: true` becomes the `_all.md` default after the floor
+and the spawn-keyed roots land, with per-type opt-out. The `paths:` block is the
+one place path control is defined. The kernel enforces it; the hook explains it
+and keeps the tool and harness rules.
 
 ---
 
@@ -734,3 +838,9 @@ collected. Not a `config.json` key, not a code constant.
 [^49]: [runtime-injected roots AGENTDIR, GITDIR, REPOAGENTS as `-D` params — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:src/sandbox.ts`](src/sandbox.ts:405-409)
 [^50]: [team channel files under `<coordinator home>/teams/`: `<team>.channel.jsonl` and `<team>.log`](src/team-channel.ts:89-105)
 [^51]: [teams.json at `~/.itsybitsy/`, read-modify-write under `.teams.lock` by `ib team add`/`remove`, lazy prune in `ib send` / `ib roster`, and teardown prune](src/teams.ts:1-40)
+[^52]: [allowRead compiles to `file-read*`, allowWrite to `file-write*` only — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:src/sandbox.ts`](src/sandbox.ts:414-417)
+[^53]: [SPEC-ANTIGRAVITY-CLI D2: under skip-permissions nothing prompts and a hook deny still blocks](SPEC-ANTIGRAVITY-CLI.md:20)
+[^54]: [caller identity derived from cwd for the `ib new-agent` gate](src/ib-commands.ts:readCallerMetaFromCwd)
+[^55]: [manager-only ib subcommand gate](src/hooks/agent-path.ts:checkIbCommandAccess)
+[^56]: [spike finding: the unified-log harvest does not surface sandbox-exec denials; use bisection — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:docs/SANDBOX-SPIKE-FINDINGS.md`](docs/SANDBOX-SPIKE-FINDINGS.md:26)
+[^57]: [registry atomic write: `teams.json.tmp` then rename; lock file `.teams.lock`](src/teams.ts:53-143)

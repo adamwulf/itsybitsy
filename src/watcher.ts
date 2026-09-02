@@ -13,7 +13,7 @@ import { repoDisplayName } from "./registry";
 import type { RepoEntry } from "./registry";
 import { checkRepoHealth, checkGlobalHealth } from "./health-check";
 import type { RepoHealthReport, RepoHealthWarning } from "./health-check";
-import { detectSystemCoordinatorState, IB_COORDINATOR_SESSION } from "./coordinator";
+import { pollSystemCoordinator, IB_COORDINATOR_SESSION } from "./coordinator";
 import { spawnCtx as tmuxSpawnCtx } from "./tmux-poller";
 import { InjectionContext } from "./types";
 import { tmuxSessionTarget } from "./validation";
@@ -285,10 +285,13 @@ export class AgentWatcher {
     }, 200);
   }
 
-  /** Get coordinator info for flattenAgentTree: state + age from tmux session creation time */
+  /** Get coordinator info for flattenAgentTree: state + age from tmux session creation time.
+   *  pollSystemCoordinator() also drives the continuous permission-prompt
+   *  auto-accept and edge-triggered pane-condition logging off its single
+   *  capture — see src/coordinator.ts. */
   private async getCoordinatorInfo(): Promise<{ state: string; age: string } | undefined> {
     try {
-      const state = await detectSystemCoordinatorState();
+      const state = await pollSystemCoordinator();
       if (state === "stopped") {
         // Session ended — invalidate cached epoch so a new session re-queries
         this.coordinatorSessionEpoch = null;

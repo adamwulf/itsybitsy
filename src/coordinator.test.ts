@@ -27,6 +27,12 @@ import {
   restartSystemCoordinatorFresh,
   isCoordinatorRestartCommand,
   COORDINATOR_RESTART_COMMANDS,
+  isPermissionPrompt,
+  isCoordinatorAutoAcceptablePrompt,
+  autoAcceptCoordinatorPrompt,
+  pollSystemCoordinator,
+  classifyCoordinatorState,
+  resetCoordinatorPollLogState,
 } from "./coordinator";
 import { encodeClaudeProjectPath } from "./auto-compact";
 import { spawnCtx as tmuxSpawnCtx } from "./tmux-poller";
@@ -425,6 +431,28 @@ describe("ensureSystemCoordinator", () => {
     const newSession = commands.find((c) => c[0] === "tmux" && c[1] === "new-session");
     expect(newSession).toBeDefined();
     expect(newSession![newSession!.length - 1]).toBe("bash");
+  });
+
+  test("logs the resolved model and its source layer on spawn", async () => {
+    coordinatorSpawnCtx.set(createCommandRouter({ "has-session": { exitCode: 1 } }));
+    await ensureSystemCoordinator();
+    const log = await readFile(join(tmpDir, "watch.log"), "utf-8");
+    // The log must name the resolved model AND which layer supplied it — that
+    // source token is how an unexpected fall-off-coordinator.md is spotted. The
+    // exact source depends on the environment's agent-type files, so assert the
+    // SHAPE (a resolved model + a valid source token), not a fixed value.
+    expect(log).toMatch(
+      /\[coordinator\] model resolved to '[^']+' from (coordinator\.md|_all\.md|default\(claude:opus\))/,
+    );
+  });
+
+  test("logs the exact launch command (fresh) on spawn", async () => {
+    coordinatorSpawnCtx.set(createCommandRouter({ "has-session": { exitCode: 1 } }));
+    await ensureSystemCoordinator();
+    const log = await readFile(join(tmpDir, "watch.log"), "utf-8");
+    // Fresh launch (has-session → exit 1, no resume candidate). The model name
+    // is environment-dependent; assert the stable prefix + the fresh mode.
+    expect(log).toMatch(/\[coordinator\] launch cmd \(fresh\): claude --model \S+/);
   });
 
   test("sets window-size manual on the coordinator session during creation", async () => {
@@ -2059,6 +2087,330 @@ describe("detectSystemCoordinatorState", () => {
     // captureTmuxOutput passes "-S" then "-<lines>"
     expect(captureArgs!).toContain("-50");
     expect(captureArgs!).not.toContain("-5000");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// classifyCoordinatorState (pure classifier)
+// ---------------------------------------------------------------------------
+describe("classifyCoordinatorState", () => {
+  test("null output → stopped", () => {
+    expect(classifyCoordinatorState(null)).toBe("stopped");
+  });
+  test("compacting text → compacting", () => {
+    expect(classifyCoordinatorState("l1\nl2\nCompacting conversation\nl4")).toBe("compacting");
+  });
+  test("rate-limit text → rate_limited", () => {
+    expect(classifyCoordinatorState("output\nrate_limit_error\nmore")).toBe("rate_limited");
+  });
+  test("normal output → running", () => {
+    expect(classifyCoordinatorState("Claude is running")).toBe("running");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Permission-prompt detection + gating (Phase 2 — mirrors watchdog gating)
+// ---------------------------------------------------------------------------
+describe("isPermissionPrompt", () => {
+  test("true for any 'Enter to confirm' prompt", () => {
+    expect(isPermissionPrompt("Do you trust the files in this folder?\n\nEnter to confirm · Esc to cancel")).toBe(true);
+    expect(isPermissionPrompt("Allow this tool?\n Enter to confirm · Esc to reject")).toBe(true);
+  });
+  test("false when no confirm line is present", () => {
+    expect(isPermissionPrompt("Claude Code v1.0.0\n[USER TASK]")).toBe(false);
+    expect(isPermissionPrompt("")).toBe(false);
+  });
+});
+
+describe("isCoordinatorAutoAcceptablePrompt (mirrors watchdog gating)", () => {
+  // --- ACCEPT: trust / external-import / MCP prompts ---
+  test("accepts workspace trust prompt", () => {
+    expect(isCoordinatorAutoAcceptablePrompt(
+      "Do you trust the files in this folder?\n\nEnter to confirm · Esc to cancel",
+    )).toBe(true);
+  });
+  test("accepts external CLAUDE.md import prompt", () => {
+    expect(isCoordinatorAutoAcceptablePrompt(
+      "Allow external CLAUDE.md file imports?\n\n Enter to confirm · Esc to reject",
+    )).toBe(true);
+  });
+  test("accepts single new-MCP-server prompt", () => {
+    expect(isCoordinatorAutoAcceptablePrompt([
+      "New MCP server found in .mcp.json: activepieces",
+      "  ❯ 1. Use this and all future MCP servers in this project",
+      "  Enter to confirm · Esc to cancel",
+    ].join("\n"))).toBe(true);
+  });
+  test("accepts multi new-MCP-servers (numeric variant)", () => {
+    expect(isCoordinatorAutoAcceptablePrompt([
+      "3 new MCP servers found in .mcp.json",
+      "  ❯ [✔] granola",
+      " Space to select · Enter to confirm · Esc to reject all",
+    ].join("\n"))).toBe(true);
+  });
+
+  // --- REJECT: generic tool / Bash prompts, and non-prompts ---
+  test("does NOT accept a generic tool-permission prompt", () => {
+    // A generic tool approval also renders 'Enter to confirm' but is NOT a
+    // trust/import/MCP prompt — the coordinator must never blindly confirm it.
+    expect(isCoordinatorAutoAcceptablePrompt([
+      "Allow Read to read this file?",
+      "  ❯ 1. Yes",
+      "    2. No",
+      "  Enter to confirm · Esc to reject",
+    ].join("\n"))).toBe(false);
+  });
+  test("does NOT accept a Bash-command permission prompt", () => {
+    expect(isCoordinatorAutoAcceptablePrompt([
+      "Allow Bash to run `rm -rf build`?",
+      "  Enter to confirm · Esc to reject",
+    ].join("\n"))).toBe(false);
+  });
+  test("does NOT accept when there is no 'Enter to confirm' line even if 'trust' appears", () => {
+    // Gating requires BOTH signals — a stray 'trust' in prose must not fire.
+    expect(isCoordinatorAutoAcceptablePrompt("I trust that your build passed.\nDone.")).toBe(false);
+  });
+  test("does NOT accept an empty / ready pane", () => {
+    expect(isCoordinatorAutoAcceptablePrompt("Claude Code v1.0.0\n[USER TASK]")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// autoAcceptCoordinatorPrompt (sends the bare Enter under the outbox lock)
+// ---------------------------------------------------------------------------
+describe("autoAcceptCoordinatorPrompt", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "coord-autoaccept-"));
+    // Outbox lock lives in the coordinator home — point it at a temp dir so the
+    // lock file never touches the developer's real ~/.itsybitsy.
+    setCoordinatorHome(tmpDir);
+    setWatchLogPath(join(tmpDir, "watch.log"));
+  });
+
+  afterEach(async () => {
+    coordinatorSpawnCtx.reset();
+    resetCoordinatorHome();
+    resetWatchLogPath();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("sends a bare Enter to the coordinator session on a trust prompt", async () => {
+    const cmds: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      cmds.push([...cmd]);
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    const sent = await autoAcceptCoordinatorPrompt(
+      "Do you trust the files in this folder?\n\nEnter to confirm · Esc to cancel",
+    );
+    expect(sent).toBe(true);
+    const enterCmds = cmds.filter(
+      (c) =>
+        c.includes("send-keys") &&
+        c.includes("Enter") &&
+        c.some((a) => a.includes(IB_COORDINATOR_SESSION)),
+    );
+    expect(enterCmds.length).toBe(1);
+    // A bare Enter — never a literal (`-l`) paste.
+    expect(enterCmds[0]!.includes("-l")).toBe(false);
+  });
+
+  test("does NOT send Enter on a generic tool-permission prompt", async () => {
+    const cmds: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      cmds.push([...cmd]);
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    const sent = await autoAcceptCoordinatorPrompt([
+      "Allow Bash to run `ls`?",
+      "  Enter to confirm · Esc to reject",
+    ].join("\n"));
+    expect(sent).toBe(false);
+    const enterCmds = cmds.filter((c) => c.includes("send-keys") && c.includes("Enter"));
+    expect(enterCmds.length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pollSystemCoordinator (periodic poll: state + auto-accept + condition logs)
+// ---------------------------------------------------------------------------
+describe("pollSystemCoordinator", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "coord-poll-"));
+    setCoordinatorHome(tmpDir);
+    setWatchLogPath(join(tmpDir, "watch.log"));
+    resetCoordinatorPollLogState();
+  });
+
+  afterEach(async () => {
+    coordinatorSpawnCtx.reset();
+    tmuxSpawnCtx.reset();
+    resetCoordinatorHome();
+    resetWatchLogPath();
+    resetCoordinatorPollLogState();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  /** Stub the coordinator capture-pane to a fixed body (exit 0 = alive). */
+  function stubPane(body: string, exitCode = 0): void {
+    tmuxSpawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd[0] === "tmux" && cmd[1] === "capture-pane") {
+        return { stdout: mockStream(body), stderr: emptyStream(), exited: Promise.resolve(exitCode) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+  }
+
+  test("returns 'stopped' when the session is gone (capture fails)", async () => {
+    stubPane("", 1);
+    expect(await pollSystemCoordinator()).toBe("stopped");
+  });
+
+  test("returns 'running' for a normal pane", async () => {
+    stubPane("Claude is running");
+    expect(await pollSystemCoordinator()).toBe("running");
+  });
+
+  test("auto-accepts a trust prompt found on the periodic poll", async () => {
+    stubPane("Do you trust the files in this folder?\n\nEnter to confirm · Esc to cancel");
+    const cmds: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      cmds.push([...cmd]);
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    await pollSystemCoordinator();
+    const enterCmds = cmds.filter((c) => c.includes("send-keys") && c.includes("Enter"));
+    expect(enterCmds.length).toBe(1);
+  });
+
+  test("edge-logs an api_safeguard once across repeated ticks", async () => {
+    const safeguardPane = [
+      "⏺ API Error: Fable 5's safeguards flagged this message (https://www.anthropic.com/legal/aup).",
+      "Claude Code can't respond to this message with Fable 5.",
+    ].join("\n");
+    stubPane(safeguardPane);
+
+    await pollSystemCoordinator();
+    await pollSystemCoordinator(); // second tick: still safeguarded
+
+    const log = await readFile(join(tmpDir, "watch.log"), "utf-8");
+    const occurrences = log.split("model-safeguard rejection").length - 1;
+    // Logged exactly once despite the condition persisting across two ticks.
+    expect(occurrences).toBe(1);
+  });
+
+  test("re-arms condition logs after the session stops", async () => {
+    const safeguardPane = [
+      "⏺ API Error: Fable 5's safeguards flagged this message (https://www.anthropic.com/legal/aup).",
+      "Claude Code can't respond to this message with Fable 5.",
+    ].join("\n");
+    stubPane(safeguardPane);
+    await pollSystemCoordinator();
+
+    // Session goes away → re-arm.
+    stubPane("", 1);
+    expect(await pollSystemCoordinator()).toBe("stopped");
+
+    // Safeguard reappears on a fresh session → logs again.
+    stubPane(safeguardPane);
+    await pollSystemCoordinator();
+
+    const log = await readFile(join(tmpDir, "watch.log"), "utf-8");
+    const occurrences = log.split("model-safeguard rejection").length - 1;
+    expect(occurrences).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// waitForCoordinatorReady — full-pane dump + co-present prompt handling
+// ---------------------------------------------------------------------------
+describe("waitForCoordinatorReady diagnostics", () => {
+  let tmpDir: string;
+  let logPath: string;
+
+  beforeEach(async () => {
+    setCoordinatorSleepFn(async () => {});
+    tmpDir = await mkdtemp(join(tmpdir(), "ready-diag-"));
+    logPath = join(tmpDir, "watch.log");
+    setWatchLogPath(logPath);
+    setCoordinatorHome(tmpDir);
+    resetCoordinatorPollLogState();
+  });
+
+  afterEach(async () => {
+    tmuxSpawnCtx.reset();
+    coordinatorSpawnCtx.reset();
+    resetCoordinatorSleepFn();
+    resetWatchLogPath();
+    resetCoordinatorHome();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("on exhaustion, dumps the FULL raw pane to a timestamped file and logs its path", async () => {
+    const paneBody = ["top-of-scrollback", "middle line", "bottom-non-marker-line"].join("\n");
+    tmuxSpawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd[0] === "tmux" && cmd[1] === "capture-pane") {
+        return { stdout: mockStream(paneBody), stderr: emptyStream(), exited: Promise.resolve(0) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    expect(await waitForCoordinatorReady()).toBe(false);
+
+    const log = await readFile(logPath, "utf-8");
+    expect(log).toContain("[coordinator] full pane dumped to ");
+
+    // A coordinator-ready-fail-*.log dump file exists and holds the FULL pane
+    // (including the earliest line the 5-line tail would keep in production but
+    // that here proves the whole capture — not just the tail — was written).
+    const files = await readdir(tmpDir);
+    const dumps = files.filter((f) => f.startsWith("coordinator-ready-fail-") && f.endsWith(".log"));
+    expect(dumps.length).toBe(1);
+    const dumped = await readFile(join(tmpDir, dumps[0]!), "utf-8");
+    expect(dumped).toBe(paneBody);
+  });
+
+  test("null final capture logs the null sentinel and writes NO dump file", async () => {
+    tmuxSpawnCtx.set((_cmd: string[], _opts?: any) => ({
+      stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1),
+    }));
+
+    expect(await waitForCoordinatorReady()).toBe(false);
+
+    const log = await readFile(logPath, "utf-8");
+    expect(log).toContain("(final capture returned null)");
+    const files = await readdir(tmpDir);
+    expect(files.some((f) => f.startsWith("coordinator-ready-fail-"))).toBe(false);
+  });
+
+  test("marker co-present with a trust prompt: returns ready, logs co-presence, and sends Enter", async () => {
+    // The boxed logo marker and a trust prompt render in the SAME frame.
+    const pane = "╭─ Claude Code\n│ resumed session\nDo you trust the files in this folder?\n Enter to confirm · Esc to cancel";
+    tmuxSpawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd[0] === "tmux" && cmd[1] === "capture-pane") {
+        return { stdout: mockStream(pane), stderr: emptyStream(), exited: Promise.resolve(0) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+    const cmds: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      cmds.push([...cmd]);
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    expect(await waitForCoordinatorReady()).toBe(true);
+
+    const log = await readFile(logPath, "utf-8");
+    expect(log).toContain("ready marker found WITH a co-present permission prompt");
+    const enterCmds = cmds.filter((c) => c.includes("send-keys") && c.includes("Enter"));
+    expect(enterCmds.length).toBe(1);
   });
 });
 

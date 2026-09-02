@@ -4,14 +4,14 @@
  * See SPEC.md §12.1 (system) and §12.2 (per-repo) for the full specification.
  */
 
-import { join, basename } from "path";
+import { join, basename, dirname } from "path";
 import { homedir } from "os";
 import { readFileSync, existsSync } from "node:fs";
 import { readConfig } from "./config";
 import { captureTmuxOutput } from "./tmux-poller";
-import { isCompacting, isRateLimited, isPidAliveCtx } from "./agents";
+import { isCompacting, isRateLimited, isPidAliveCtx, isApiError, isApiSafeguard } from "./agents";
 import { STARTUP_MARKERS } from "./parse-state";
-import { logToWatchLog } from "./watch-log";
+import { logToWatchLog, getWatchLogPath } from "./watch-log";
 import { SpawnContext } from "./types";
 import { getTmuxWidthForAgent } from "./tui/widths";
 import { isValidSessionId, isValidModel, tmuxSessionTarget } from "./validation";
@@ -318,6 +318,146 @@ async function tmuxSessionExists(): Promise<boolean> {
   return exitCode === 0;
 }
 
+// ---------------------------------------------------------------------------
+// Continuous permission-prompt auto-accept for the system coordinator.
+//
+// Every NORMAL agent gets its startup permission prompts (workspace trust,
+// external CLAUDE.md imports, new MCP servers) dismissed continuously by its
+// per-agent watchdog (see src/watchdog.ts ~1673). The system coordinator has
+// NO per-agent watchdog, so before this it got nothing — a startup trust/MCP
+// modal would sit unanswered and the coordinator would wedge until a manual
+// restart. The helpers below mirror the watchdog's gating EXACTLY and run on
+// both the launch poll (waitForCoordinatorReady) and the periodic state poll
+// (pollSystemCoordinator, called from the watcher's getCoordinatorInfo).
+// ---------------------------------------------------------------------------
+
+/**
+ * True when the pane shows ANY "Enter to confirm" permission prompt. Broad on
+ * purpose — used only for DIAGNOSTIC logging (co-presence with the ready
+ * marker, and the periodic-poll condition log), never to decide an auto-accept.
+ * The auto-accept decision uses the far narrower {@link isCoordinatorAutoAcceptablePrompt}.
+ */
+export function isPermissionPrompt(output: string): boolean {
+  return /enter to confirm/i.test(output);
+}
+
+/**
+ * True ONLY for the permission prompts that are safe to auto-accept for the
+ * coordinator — the EXACT gating the watchdog uses at src/watchdog.ts ~1673:
+ * an "Enter to confirm" line together with one of a trust prompt, the external
+ * CLAUDE.md-import prompt, or a new-MCP-server prompt (single or the numeric
+ * "N new MCP servers found" variant).
+ *
+ * Deliberately NARROW: a generic tool-permission or Bash prompt must NOT match.
+ * Auto-accepting those would be a permission-escalation vector — and the
+ * coordinator denies every file/web/spawn tool anyway (SYSTEM_COORDINATOR_DENY),
+ * so a generic prompt should stay unanswered (it is effectively blocked in the
+ * unattended tmux session) rather than be blindly confirmed.
+ *
+ * The coordinator is always a claude session (codex/agy coordinators are
+ * rejected at spawn), so — unlike the watchdog — no cli gate is needed here.
+ */
+export function isCoordinatorAutoAcceptablePrompt(output: string): boolean {
+  if (!/enter to confirm/i.test(output)) return false;
+  return (
+    /trust/i.test(output) ||
+    /Allow external CLAUDE\.md file imports/i.test(output) ||
+    /New MCP server found/i.test(output) ||
+    /\d+ new MCP servers? found/i.test(output)
+  );
+}
+
+/** Send a bare Enter to the ib-coordinator tmux session to dismiss a dialog.
+ *  Routed through coordinatorSpawnCtx — the coordinator's established tmux-send
+ *  mechanism (the direct analogue of the watchdog's private sendTmuxEnter),
+ *  which every other tmux write in this module already uses and which the
+ *  coordinator tests inject via coordinatorSpawnCtx.set(). */
+async function sendCoordinatorEnter(): Promise<boolean> {
+  const { exitCode } = await coordinatorSpawnCtx.run([
+    "tmux", "send-keys", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION), "Enter",
+  ]);
+  return exitCode === 0;
+}
+
+/**
+ * If the coordinator pane shows an auto-acceptable permission prompt (trust /
+ * external CLAUDE.md import / new MCP server — see
+ * {@link isCoordinatorAutoAcceptablePrompt}), send a single bare Enter to
+ * dismiss it. Returns true when an Enter was sent, false otherwise.
+ *
+ * CONCURRENCY — why a bare Enter here is safe: the system coordinator has no
+ * in-process watchdog, so the watchdog's in-process runSessionExclusive mutex
+ * does NOT apply. Coordinator tmux writes are instead serialized CROSS-PROCESS
+ * by the outbox DELIVERY LOCK (`.outbox.lock` in the coordinator home — see
+ * src/outbox.ts and sendToSystemCoordinator in src/index.ts): every coordinator
+ * send (CLI `ib send @system`, watchdog `@system` notifications, the dashboard
+ * send dialog) drains inline under that file lock. This auto-accept runs in the
+ * `ib watch` process while a drain runs in a DIFFERENT `ib` process, so an
+ * in-process mutex could never serialize them — we hold the SAME cross-process
+ * file lock around the Enter. A drain in flight blocks us until it finishes, and
+ * a drain that wants to start blocks until we release — the identical both-
+ * directions guarantee the watchdog gets from runSessionExclusive, but at the
+ * process boundary that actually separates these two writers. `steal: true`
+ * matches the inline-drain fallback so a crashed lock holder can't wedge us.
+ */
+export async function autoAcceptCoordinatorPrompt(output: string): Promise<boolean> {
+  if (!isCoordinatorAutoAcceptablePrompt(output)) return false;
+  logToWatchLog("[coordinator] permission prompt detected — sending Enter to accept (trust/import/MCP)");
+  const home = getCoordinatorHome();
+  const { acquireOutboxLock, releaseOutboxLock } = await import("./outbox");
+  const lock = await acquireOutboxLock(home, { steal: true });
+  try {
+    await sendCoordinatorEnter();
+  } finally {
+    await releaseOutboxLock(lock);
+  }
+  return true;
+}
+
+// Edge-triggered logging state for the periodic pane-condition log. The state
+// poll runs every ~2s; a persistent api-error / safeguard banner would flood the
+// watch log if logged level-triggered, so each condition is logged only on its
+// false→true transition and re-armed when it clears (or the session stops).
+let coordPromptConditionLogged = false;
+let coordSafeguardConditionLogged = false;
+let coordApiErrorConditionLogged = false;
+
+/** Reset the edge-triggered pane-condition log flags. Exported for tests so each
+ *  case starts from a known (re-armed) state. */
+export function resetCoordinatorPollLogState(): void {
+  coordPromptConditionLogged = false;
+  coordSafeguardConditionLogged = false;
+  coordApiErrorConditionLogged = false;
+}
+
+/**
+ * Edge-triggered diagnostic logging of notable coordinator-pane conditions on
+ * the periodic state poll: a permission prompt, a Fable-style model-safeguard
+ * rejection, and a (recovery-eligible) api-error. Reuses the shared detectors
+ * (`isApiError`, `isApiSafeguard` from src/agents.ts). Logs each only when it
+ * first appears and re-arms when it clears, so a banner that persists for many
+ * ticks logs once, not every 2s.
+ */
+function logCoordinatorPaneConditions(output: string): void {
+  const prompt = isPermissionPrompt(output);
+  if (prompt && !coordPromptConditionLogged) {
+    logToWatchLog("[coordinator] pane shows a permission prompt ('Enter to confirm')");
+  }
+  coordPromptConditionLogged = prompt;
+
+  const safeguard = isApiSafeguard(output);
+  if (safeguard && !coordSafeguardConditionLogged) {
+    logToWatchLog("[coordinator] pane shows a model-safeguard rejection (api_safeguard)");
+  }
+  coordSafeguardConditionLogged = safeguard;
+
+  const apiError = isApiError(output);
+  if (apiError && !coordApiErrorConditionLogged) {
+    logToWatchLog("[coordinator] pane shows an API error (api_error)");
+  }
+  coordApiErrorConditionLogged = apiError;
+}
+
 /**
  * Poll the ib-coordinator tmux session until Claude's UI is ready.
  * Mirrors the readiness pattern used by autoAcceptWorkspaceTrustForNewAgent in
@@ -332,7 +472,14 @@ async function tmuxSessionExists(): Promise<boolean> {
  * Returns true once any readiness marker appears, false if the poll exhausts
  * its attempt budget (30 × 500ms ≈ 15s). On exhaustion a single diagnostic
  * line is written to watch.log with the tail of the final captured pane, so we
- * can tell whether the marker set is still too narrow.
+ * can tell whether the marker set is still too narrow, AND the FULL raw pane is
+ * dumped to a timestamped file under the itsybitsy home so a blank/wedged
+ * resume is fully diagnosable, not just its 5-line tail.
+ *
+ * On every poll the pane is also run through {@link autoAcceptCoordinatorPrompt}
+ * so a startup trust/import/MCP prompt is cleared DURING launch — the boxed
+ * logo marker often renders in the SAME frame as the prompt, and returning
+ * "ready" while that modal is still up would leave the coordinator wedged.
  */
 export async function waitForCoordinatorReady(): Promise<boolean> {
   const POLL_INTERVAL_MS = 500;
@@ -344,8 +491,18 @@ export async function waitForCoordinatorReady(): Promise<boolean> {
     lastOutput = output;
     if (output === null) continue;
     if (STARTUP_MARKERS.some((m) => output.includes(m))) {
+      // The boxed logo and a permission prompt commonly render in one frame.
+      // Log the co-presence (so a "ready but wedged behind a prompt" launch is
+      // diagnosable) and clear the co-present prompt before returning ready.
+      if (isPermissionPrompt(output)) {
+        logToWatchLog("[coordinator] ready marker found WITH a co-present permission prompt ('Enter to confirm') in the same pane");
+        await autoAcceptCoordinatorPrompt(output);
+      }
       return true;
     }
+    // A prompt that appears BEFORE the ready marker — dismiss it so launch can
+    // proceed to the marker instead of wedging behind an unanswered modal.
+    await autoAcceptCoordinatorPrompt(output);
   }
 
   // Poll exhausted — record one diagnostic line so the failure leaves a trace.
@@ -363,6 +520,23 @@ export async function waitForCoordinatorReady(): Promise<boolean> {
       .join("\n");
   }
   logToWatchLog(`[coordinator] ready-poll exhausted after ${budgetMs}ms; pane tail:\n${tail}`);
+
+  // Dump the FULL raw captured pane to a timestamped file so a blank-pane /
+  // wedged-resume failure is diagnosable beyond the 5-line tail. Best-effort:
+  // a write failure must not change the return value. Placed alongside the
+  // watch log (dirname(getWatchLogPath()) === the itsybitsy home in production,
+  // and the redirected temp dir under test) so it is never written to the real
+  // ~/.itsybitsy while testing.
+  if (lastOutput !== null) {
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const dumpPath = join(dirname(getWatchLogPath()), `coordinator-ready-fail-${stamp}.log`);
+      await Bun.write(dumpPath, lastOutput);
+      logToWatchLog(`[coordinator] full pane dumped to ${dumpPath}`);
+    } catch (err) {
+      logToWatchLog(`[coordinator] failed to dump full pane: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   return false;
 }
 
@@ -554,14 +728,29 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   } catch (err) {
     logToWatchLog(`[coordinator] failed to load _all agent type layer: ${err instanceof Error ? err.message : String(err)}`);
   }
+  // Track which layer actually supplied the model so the log below reveals when
+  // the value FELL BACK off coordinator.md — that fall-through (to _all.md, or
+  // to the hardcoded default) is exactly how an unexpected model (e.g. Opus)
+  // reaches the coordinator.
   let agentTypeModel: string | undefined;
-  for (const layerModel of [coordLayer?.model, allLayer?.model]) {
-    if (layerModel) { agentTypeModel = layerModel; break; }
+  let modelSource: "coordinator.md" | "_all.md" | "default(claude:opus)";
+  if (coordLayer?.model) {
+    agentTypeModel = coordLayer.model;
+    modelSource = "coordinator.md";
+  } else if (allLayer?.model) {
+    agentTypeModel = allLayer.model;
+    modelSource = "_all.md";
+  } else {
+    modelSource = "default(claude:opus)";
   }
   const rawModel = agentTypeModel ?? "claude:opus";
   // Reject malformed model names — they would otherwise be interpolated into
   // the shell command below. Fall back to the qualified default if shell-unsafe.
   const safeModel = isValidModel(rawModel) ? rawModel : "claude:opus";
+  logToWatchLog(
+    `[coordinator] model resolved to '${safeModel}' from ${modelSource}` +
+    (safeModel !== rawModel ? ` (raw '${rawModel}' was rejected as shell-unsafe, using default)` : ""),
+  );
   // Parse the qualified `<cli>:<model>` form (SPEC-CODEX-MODEL.md §5.1, D1/D9).
   // Per D9 the coordinator is NOT claude-only — any `<cli>:<model>` is valid —
   // but full codex-coordinator wiring lands in a later phase. Reject codex
@@ -616,6 +805,9 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
     ? ` --channels ${channels.join(" ")}`
     : "";
   const claudeCmd = `${baseCmd}${channelsArg}`;
+  logToWatchLog(
+    `[coordinator] launch cmd (${resumeId ? "resume" : "fresh"}): ${claudeCmd}`,
+  );
   await coordinatorSpawnCtx.run([
     "tmux", "send-keys", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION),
     claudeCmd, "Enter",
@@ -798,8 +990,32 @@ export function isCoordinatorRestartCommand(trimmed: string): boolean {
 export type CoordinatorState = "stopped" | "compacting" | "rate_limited" | "running";
 
 /**
- * Detect the system coordinator's current state from tmux output.
- * See SPEC.md §12.1.6 for priority order.
+ * Pure classifier: derive the coordinator state from a captured pane (or null
+ * when the session is gone / capture failed). Extracted so the state-detection
+ * priority order lives in ONE place and both the query-only
+ * {@link detectSystemCoordinatorState} and the side-effecting
+ * {@link pollSystemCoordinator} share it off a SINGLE capture each.
+ * See SPEC.md §12.1.6 for the priority order.
+ */
+export function classifyCoordinatorState(output: string | null): CoordinatorState {
+  if (output === null) {
+    // No session (or capture failed) → stopped.
+    return "stopped";
+  }
+  // Compacting in last 5 lines
+  if (isCompacting(output)) {
+    return "compacting";
+  }
+  // Rate limited in last 15 lines
+  if (isRateLimited(output)) {
+    return "rate_limited";
+  }
+  return "running";
+}
+
+/**
+ * Detect the system coordinator's current state from tmux output. Pure query —
+ * no side effects. See SPEC.md §12.1.6 for priority order.
  */
 export async function detectSystemCoordinatorState(): Promise<CoordinatorState> {
   // Capture tmux output — only the last 50 lines are inspected (compacting:
@@ -813,22 +1029,35 @@ export async function detectSystemCoordinatorState(): Promise<CoordinatorState> 
   // per-refresh tmux spawn cost on the coordinator state path (this runs on
   // every `ib watch` watcher refresh — see src/watcher.ts).
   const output = await captureTmuxOutput(IB_COORDINATOR_SESSION, 50);
+  return classifyCoordinatorState(output);
+}
+
+/**
+ * Periodic coordinator poll for the watcher (called from getCoordinatorInfo,
+ * ~every 2s). Captures the pane ONCE and, off that single capture:
+ *   1. classifies the state (same result as detectSystemCoordinatorState),
+ *   2. edge-logs notable pane conditions — a permission prompt, a model-
+ *      safeguard rejection, an api-error (Phase 1 diagnostics), and
+ *   3. runs the continuous permission-prompt auto-accept so a trust/import/MCP
+ *      prompt that appears AFTER the ready marker still gets dismissed (Phase 2).
+ *
+ * Returns the classified state so the caller can keep rendering the tree. Using
+ * one capture keeps the coordinator state path at a single tmux spawn per tick
+ * (the same cost detectSystemCoordinatorState was tuned for) rather than adding
+ * a second capture just for the prompt scan.
+ */
+export async function pollSystemCoordinator(): Promise<CoordinatorState> {
+  const output = await captureTmuxOutput(IB_COORDINATOR_SESSION, 50);
+  const state = classifyCoordinatorState(output);
   if (output === null) {
-    // No session (or capture failed) → stopped.
-    return "stopped";
+    // Session gone — re-arm the edge-triggered condition logs so the next live
+    // session's first occurrence of each condition logs again.
+    resetCoordinatorPollLogState();
+    return state;
   }
-
-  // Compacting in last 5 lines
-  if (isCompacting(output)) {
-    return "compacting";
-  }
-
-  // Rate limited in last 15 lines
-  if (isRateLimited(output)) {
-    return "rate_limited";
-  }
-
-  return "running";
+  logCoordinatorPaneConditions(output);
+  await autoAcceptCoordinatorPrompt(output);
+  return state;
 }
 
 // resizeCoordinatorTmux was removed with the pinned-tmux-width change: the system

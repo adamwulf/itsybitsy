@@ -5765,6 +5765,12 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       raw = dashboard.render(160).join("\n");
       expect(raw).not.toContain(`${REV_BOLD} @backend CHAT `);
       expect(raw).not.toContain(`${REV_BOLD} @backend LOG `);
+
+      // Focus the Info panel (sidebar) → NEITHER tab is REVERSE (same as tree).
+      dashboard.focusManager.setFocus("info");
+      raw = dashboard.render(160).join("\n");
+      expect(raw).not.toContain(`${REV_BOLD} @backend CHAT `);
+      expect(raw).not.toContain(`${REV_BOLD} @backend LOG `);
     });
 
     test("updatePollerVisibility pauses the coordinator poller when active source is teams", () => {

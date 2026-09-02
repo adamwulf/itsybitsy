@@ -9,6 +9,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
+import { visibleWidth } from "@mariozechner/pi-tui";
 import { TeamLogPaneComponent } from "./team-log-pane";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { appendTeamLog } from "../team-channel";
@@ -179,5 +180,52 @@ describe("TeamLogPaneComponent", () => {
     // Exactly one physical row is an all-─ separator (not the ~5 char wrap makes).
     const separatorRows = rows.filter((r) => r.trim().length > 0 && /^─+$/.test(r.trim()));
     expect(separatorRows.length).toBe(1);
+  });
+
+  test("reflows a box-drawing table as a block (whole-log join path)", async () => {
+    // The whole log is joined and wrapped as ONE block, so a box-drawing table
+    // in the log flows through wordWrapLines' table reflow, same as the agent /
+    // center pane. appendTeamLog prefixes only the FIRST physical line of the
+    // entry with a `[timestamp]`, and the table detector matches `^┌[─┬]+┐$` on
+    // the stripped/trimmed line — so the table must sit on CONTINUATION lines
+    // (a leading text line first), leaving its rules un-prefixed.
+    //
+    // The long cell is a multi-word value wide enough that the table's widest
+    // physical line exceeds the render width — that forces the reflow branch
+    // (a table whose every line already fits the width passes through untouched,
+    // never reflowing).
+    const longVal =
+      "a much longer value here that keeps going well past forty columns to force a reflow";
+    const table = [
+      "┌──────────┬──────────┐",
+      "│ alpha    │ beta     │",
+      "├──────────┼──────────┤",
+      `│ ${longVal} │ b-value │`,
+      "└──────────┴──────────┘",
+    ];
+    await appendTeamLog("backend", `results:\n${table.join("\n")}`);
+    const pane = new TeamLogPaneComponent();
+    pane.displayHeight = 30;
+    pane.teamName = "backend";
+    await pane.load();
+
+    const width = 40;
+    const rows = pane.render(width).map(stripAnsi);
+    const trimmed = rows.map((r) => r.trim());
+
+    // The frame survives as a reflowed frame: a top rule and a bottom rule.
+    expect(trimmed.some((r) => /^┌[─┬]+┐$/.test(r))).toBe(true);
+    expect(trimmed.some((r) => /^└[─┴]+┘$/.test(r))).toBe(true);
+
+    // Every rendered row fits the pane — it did NOT explode into over-width rows.
+    for (const r of rows) expect(visibleWidth(r)).toBeLessThanOrEqual(width);
+
+    // Reflow (not a clip): the long cell was re-laid across multiple cell rows,
+    // so every one of its words survives. A per-line clip would truncate the
+    // data row at the pane edge and drop the tail words.
+    const joined = rows.join(" ");
+    for (const word of longVal.split(" ")) {
+      expect(joined).toContain(word);
+    }
   });
 });

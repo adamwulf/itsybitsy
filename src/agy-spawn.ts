@@ -28,7 +28,7 @@
 import { join, dirname } from "path";
 import { realpathSync } from "fs";
 import { mkdir } from "fs/promises";
-import { shellQuote, isValidModel, isValidAgentId } from "./validation";
+import { shellQuote, isValidModel, isValidAgentId, isValidSessionId } from "./validation";
 import { isCodexSafeBinaryPath } from "./codex-config";
 import { parseModel, agySlugHasEffort, mapEffortForAgy } from "./agent-cli";
 import type { SessionContext } from "./hooks/session-start";
@@ -54,8 +54,19 @@ function agyEffortFlag(agyModel: string, effort: string | undefined): string {
  * Validate the pieces of an agy launch line that are interpolated into the
  * shell script. Throws a descriptive error rather than returning a malformed
  * script — callers turn that into a clean spawn/resume rejection.
+ *
+ * `conversationId` is validated only when present (resume). resumeAgent already
+ * checks it with `isValidSessionId` upstream, but the resume builder embeds it
+ * RAW in a log line (not just shell-quoted on the launch line), so the builder
+ * holds the belt-and-suspenders rule itself.
  */
-function assertAgyLaunchPreconditions(ibBinaryPath: string, agentId: string, agyModel: string, context: string): void {
+function assertAgyLaunchPreconditions(
+  ibBinaryPath: string,
+  agentId: string,
+  agyModel: string,
+  context: string,
+  conversationId?: string,
+): void {
   if (!isCodexSafeBinaryPath(ibBinaryPath)) {
     throw new Error(
       `Unsafe ib binary path for agy ${context}: ${JSON.stringify(ibBinaryPath)} contains quotes, backslashes, or control characters. ` +
@@ -70,6 +81,9 @@ function assertAgyLaunchPreconditions(ibBinaryPath: string, agentId: string, agy
   // launch line (it is also shell-quoted below — belt and suspenders).
   if (!isValidModel(agyModel)) {
     throw new Error(`Invalid agy model slug for ${context}: ${JSON.stringify(agyModel)}`);
+  }
+  if (conversationId !== undefined && !isValidSessionId(conversationId)) {
+    throw new Error(`Invalid agy conversation id for ${context}: ${JSON.stringify(conversationId)}`);
   }
 }
 
@@ -266,7 +280,7 @@ export interface BuildAgyResumeContentInput {
  * model slug is unsafe.
  */
 export function buildAgyResumeContent(input: BuildAgyResumeContentInput): string {
-  assertAgyLaunchPreconditions(input.ibBinaryPath, input.agentId, input.agyModel, "resume");
+  assertAgyLaunchPreconditions(input.ibBinaryPath, input.agentId, input.agyModel, "resume", input.conversationId);
 
   const qModel = shellQuote(input.agyModel);
   const effortFlag = agyEffortFlag(input.agyModel, input.effort);

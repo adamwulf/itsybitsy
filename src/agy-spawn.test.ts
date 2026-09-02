@@ -195,6 +195,16 @@ describe("buildAgyResumeContent — launch line", () => {
     expect(() => buildAgyResumeContent({ ...baseInput(), agentId: "bad id" })).toThrow(/Invalid agent id/);
     expect(() => buildAgyResumeContent({ ...baseInput(), agyModel: "a b" })).toThrow(/Invalid agy model slug/);
   });
+
+  test("rejects an unsafe conversation id (belt-and-suspenders — it is embedded RAW in a log line)", () => {
+    expect(() =>
+      buildAgyResumeContent({ ...baseInput(), conversationId: "abc; rm -rf /" }),
+    ).toThrow(/Invalid agy conversation id/);
+    // A well-formed UUID is accepted.
+    expect(() =>
+      buildAgyResumeContent({ ...baseInput(), conversationId: "019e7b21-cb7d-7f23-8674-11036ed141ef" }),
+    ).not.toThrow();
+  });
 });
 
 // ── refuseIfTracked (D7) ─────────────────────────────────────────────────────

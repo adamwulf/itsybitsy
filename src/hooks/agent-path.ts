@@ -17,6 +17,16 @@ import { checkGitDirectoryFlags, resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./
 // Single source of truth for the encoding — see src/auto-compact.ts
 import { encodeClaudeProjectPath } from "../auto-compact";
 import { AGY_WORKTREE_FILES } from "../agy-worktree-files";
+import { heredocBodyRanges } from "./shell-metachar";
+
+/**
+ * Deny reason for a bash token that mixes a `..` path segment with shell
+ * expansion/quoting we cannot resolve safely (empty quotes, `$…`, `${…}`,
+ * backticks, backslashes, a leading `~`). Rather than emulate the shell, the
+ * traversal scanner fails closed on these.
+ */
+export const TRAVERSAL_NOISE_DENY_REASON =
+  "Access denied: path contains `..` combined with shell expansion or quoting that cannot be resolved safely";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -318,27 +328,37 @@ function checkBashSettingsWrite(
  * scans (checkBashCommandPaths) only catch absolute references — a relative
  * `../..` resolves identically at the shell but has no absolute needle to match.
  *
- * Best-effort tokenization: split on whitespace and strip one layer of
- * surrounding quotes. A candidate form is a traversal risk only when `..` is a
- * WHOLE path segment (`form.split("/")` contains `".."`) — this deliberately
- * excludes git range syntax (`HEAD..main`, `a..b`), where `..` sits inside a
- * single segment. Each candidate is resolved against `cwd` and gated by the same
- * two rules the absolute needles use:
+ * The shell can rewrite a token in ways `path.resolve` cannot follow — empty
+ * quotes (`../..''/x`), parameter expansion (`${FOO:-../..}/x`), brace
+ * expansion (`../..{,}/x`), backslashes (`..\/..\/x`), a leading `~`. Rather
+ * than emulate more of the shell, this scanner is CONSERVATIVE: after the
+ * whitespace split and stripping only surrounding quotes, a token that contains
+ * `..` AND any in-token shell-noise character (single/double quote, `$`, `{`,
+ * `}`, backtick, backslash, or a LEADING `~`) is DENIED outright — it "cannot be
+ * resolved safely". Git ranges (`HEAD..main`, `origin/main..origin/dev`,
+ * `HEAD~2..HEAD^`) carry no noise (the `~`/`^` sit mid-token) and pass through.
+ *
+ * Only CLEAN tokens go through the segment logic. `..` is a traversal risk only
+ * when it is a WHOLE path segment (`form.split("/")` contains `".."`). Each
+ * candidate form is resolved against `cwd` and gated by the same two rules the
+ * absolute needles use:
  *   - inside `agentsDir` but outside this agent's own `agentDir` → deny
  *   - inside `rootRepo` (the main checkout) but outside the worktree → deny
  * A path resolving to (or under) the agent's own `agentDir` — e.g. bare `..`
  * from the worktree — stays allowed, and anything resolving entirely outside the
  * repo is left to the same (permissive) treatment absolute references get.
  *
- * Glued prefixes: a token like `--output=../../x`, `${IFS}../../x`, or `~/../x`
- * hides the real path from `path.resolve` (which treats `--output=..` as a
- * directory NAME and normalizes it back INTO the worktree), while the shell
- * hands the tool the real relative path. So for each token we test up to FOUR
- * forms and deny if ANY escapes: the whole token; the suffix starting at the
- * first `..` (drops any `--flag=` / `$VAR` / `${IFS}` / `~` glue); and, when the
- * token contains `=`, the right-hand side of the first `=` plus its own
- * suffix-from-first-`..`. Over-denial for contrived shapes like `a/b/../../..`
- * (where a real subdir prefix is discarded) is accepted as the safe direction.
+ * Glued FLAG prefixes still need care even when clean: `--output=../../x` hides
+ * the path from `path.resolve` (which treats `--output=..` as a directory NAME).
+ * So for a clean token we test up to FOUR forms and deny if ANY escapes: the
+ * whole token; the suffix from the first `..` (drops the glued prefix); and,
+ * when the token has `=`, the right-hand side plus its own suffix-from-first-`..`.
+ * Over-denial for contrived shapes like `a/b/../../..` is accepted as the safe
+ * direction.
+ *
+ * Heredoc BODY lines are excluded (masked to spaces) before tokenizing — they
+ * are data (commit messages, `ib send` bodies) that legitimately contain `..`
+ * and apostrophes. The opener line and lines after the terminator stay scanned.
  */
 function checkRelativeTraversalPaths(
   command: string,
@@ -370,24 +390,46 @@ function checkRelativeTraversalPaths(
     return null;
   };
 
-  for (let token of command.split(/\s+/)) {
-    if (!token) continue;
-    // Strip surrounding shell punctuation (quotes, `;`, `,`, `(`, `)`) that
-    // glues onto a token, then drop backslashes that escape the next character
-    // (`\/` → `/`, `\.` → `.`). This mirrors what the shell does before the path
-    // is used, so an escaped form like `..\/..\/x` is seen as `../../x`. (A
-    // backslash-escaped SPACE never reaches here — the whitespace split above
-    // has already broken the token at that space — so it is not a case this
-    // handles.) The unescape is applied unconditionally, including to text that
-    // was inside single quotes (where a real shell keeps the backslash literal);
-    // that can only ADD a `..` segment that wasn't structurally there, so it can
-    // only over-detect and fail toward DENY, never open a bypass. That trade is
-    // intentional: it is what closes the `..\/..\/x` evasion.
-    token = token.replace(/^['";,()]+/, "").replace(/['";,()]+$/, "");
-    token = token.replace(/\\(.)/g, "$1");
-    if (!token) continue;
+  // Mask heredoc body lines (data) to spaces so they aren't tokenized, keeping
+  // char offsets stable for everything else.
+  let scannable = command;
+  const bodyRanges = heredocBodyRanges(command);
+  if (bodyRanges.length > 0) {
+    let out = "";
+    let pos = 0;
+    for (const r of [...bodyRanges].sort((a, b) => a.start - b.start)) {
+      const start = Math.max(pos, r.start);
+      if (start > pos) out += command.slice(pos, start);
+      const end = Math.min(command.length, r.end);
+      if (end > start) out += " ".repeat(end - start);
+      pos = Math.max(pos, end);
+    }
+    out += command.slice(pos);
+    scannable = out;
+  }
 
-    // Collect the candidate relative-path forms (see the doc comment).
+  for (let token of scannable.split(/\s+/)) {
+    if (!token) continue;
+    // Strip only one layer of surrounding matching quotes (what the shell peels
+    // off before the path is used). We deliberately do NOT try to emulate any
+    // other shell rewriting — see the noise rule below.
+    if (
+      token.length >= 2 &&
+      ((token[0] === "'" && token[token.length - 1] === "'") ||
+        (token[0] === '"' && token[token.length - 1] === '"'))
+    ) {
+      token = token.slice(1, -1);
+    }
+    if (!token.includes("..")) continue; // no traversal risk
+
+    // Noise rule: a `..` mixed with shell expansion/quoting we can't resolve
+    // safely — fail closed rather than guess how the shell rewrites it.
+    if (/['"$`{}\\]/.test(token) || token.startsWith("~")) {
+      return { decision: "deny", reason: TRAVERSAL_NOISE_DENY_REASON };
+    }
+
+    // Clean token → resolve the candidate forms (whole, suffix-from-first-`..`,
+    // and the `=` RHS with its own suffix) and deny if any escapes.
     const candidates = new Set<string>();
     const addForms = (s: string) => {
       if (s) candidates.add(s);

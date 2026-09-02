@@ -237,3 +237,121 @@ export function findShellMetachar(command: string): string | null {
 
   return null;
 }
+
+/**
+ * Return the char-offset ranges of every heredoc BODY in `command` — the region
+ * from just after the opener line's newline up to (but not including) the
+ * terminator line. Openers inside single/double quotes are ignored, matching
+ * the quoting rules `findShellMetachar` uses. An UNTERMINATED heredoc yields no
+ * range (the body was never confirmed), so callers scan it rather than skip it
+ * — the safe direction.
+ *
+ * Used by the path-traversal scanner to EXCLUDE heredoc bodies from
+ * tokenization: those lines are data (commit messages, `ib send` bodies) that
+ * legitimately contain `..` and apostrophes. The opener line and any lines
+ * after the terminator are NOT part of any range and stay scanned.
+ *
+ * This shares the opener/delimiter parsing shape with `findShellMetachar` but is
+ * a separate walker so that function stays byte-identical.
+ */
+export function heredocBodyRanges(command: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  let i = 0;
+  const n = command.length;
+  let heredoc: { delimiter: string; dash: boolean; bodyStart: number } | null = null;
+
+  while (i < n) {
+    const c = command[i]!;
+
+    // ---- Inside an active heredoc body ----
+    if (heredoc) {
+      let lineEnd = command.indexOf("\n", i);
+      const hasNewline = lineEnd !== -1;
+      if (!hasNewline) lineEnd = n;
+      const line = command.substring(i, lineEnd);
+      const leadingStripped = heredoc.dash ? line.replace(/^\t+/, "") : line;
+      if (leadingStripped === heredoc.delimiter) {
+        // Body spans [bodyStart, i) — up to the start of this terminator line.
+        ranges.push({ start: heredoc.bodyStart, end: i });
+        heredoc = null;
+        i = hasNewline ? lineEnd + 1 : n;
+        continue;
+      }
+      i = hasNewline ? lineEnd + 1 : n;
+      continue;
+    }
+
+    // ---- Single-quoted: skip to the next ' ----
+    if (c === "'") {
+      const close = command.indexOf("'", i + 1);
+      if (close === -1) return ranges;
+      i = close + 1;
+      continue;
+    }
+
+    // ---- Double-quoted: skip to the next unescaped " ----
+    if (c === '"') {
+      i++;
+      while (i < n) {
+        if (command[i] === "\\") { i += 2; continue; }
+        if (command[i] === '"') { i++; break; }
+        i++;
+      }
+      continue;
+    }
+
+    // ---- Unquoted backslash escapes the next character ----
+    if (c === "\\") { i += 2; continue; }
+
+    // ---- Heredoc opener ----
+    if (c === "<" && command[i + 1] === "<") {
+      let j = i + 2;
+      let dash = false;
+      if (command[j] === "-") { dash = true; j++; }
+      while (j < n && (command[j] === " " || command[j] === "\t")) j++;
+
+      let delim = "";
+      const dc = command[j];
+      if (dc === "'") {
+        const end = command.indexOf("'", j + 1);
+        if (end === -1) { i = i + 1; continue; }
+        delim = command.substring(j + 1, end);
+        j = end + 1;
+      } else if (dc === '"') {
+        let k = j + 1;
+        let buf = "";
+        while (k < n && command[k] !== '"') {
+          if (command[k] === "\\" && k + 1 < n) { buf += command[k + 1]; k += 2; }
+          else { buf += command[k]; k++; }
+        }
+        if (k >= n) { i = i + 1; continue; }
+        delim = buf;
+        j = k + 1;
+      } else if (dc === "\\") {
+        let k = j + 1;
+        let buf = "";
+        while (k < n && /[A-Za-z0-9_]/.test(command[k]!)) { buf += command[k]; k++; }
+        delim = buf;
+        j = k;
+      } else {
+        let k = j;
+        let buf = "";
+        while (k < n && /[A-Za-z0-9_]/.test(command[k]!)) { buf += command[k]; k++; }
+        // `<<<word` here-string or `<<` at end-of-input — not a heredoc.
+        if (buf === "") { i = i + 1; continue; }
+        delim = buf;
+        j = k;
+      }
+
+      const nl = command.indexOf("\n", j);
+      if (nl === -1) { i = i + 1; continue; } // no body
+      heredoc = { delimiter: delim, dash, bodyStart: nl + 1 };
+      i = nl + 1;
+      continue;
+    }
+
+    i++;
+  }
+
+  return ranges;
+}

@@ -421,17 +421,17 @@ describe("checkPathAccess", () => {
     expect(result.decision).toBe("allow");
   });
 
-  test("bash backslash-escaped-slash traversal (cat ..\\/..\\/x) is unescaped and denied", () => {
+  test("bash backslash-in-.. token (cat ..\\/..\\/x) is denied as shell-noise", () => {
     const ctx = makeCtx();
-    // The shell unescapes \/ to /, so the tokenizer must too — otherwise the
-    // `..\` segments hide the traversal.
+    // A `..` token containing a backslash can't be resolved safely, so it is
+    // denied outright rather than emulated.
     const input = makeInput({
       toolName: "Bash",
       toolInput: { command: "cat ..\\/..\\/x" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
-    expect(result.reason).toContain("other agents");
+    expect(result.reason).toContain("shell expansion or quoting");
   });
 
   // ── glued-prefix traversal (boundary review round 3) ──────────────────────
@@ -449,7 +449,7 @@ describe("checkPathAccess", () => {
     expect(result.reason).toContain("other agents");
   });
 
-  test("${IFS}-glued traversal (cat ${IFS}../../sibling/.env) is denied", () => {
+  test("${IFS}-glued traversal (cat ${IFS}../../sibling/.env) is denied as shell-noise", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Bash",
@@ -457,10 +457,10 @@ describe("checkPathAccess", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
-    expect(result.reason).toContain("other agents");
+    expect(result.reason).toContain("shell expansion or quoting");
   });
 
-  test("~-glued traversal that escapes (cat ~/../../sibling/.env) is denied", () => {
+  test("~-leading traversal (cat ~/../../sibling/.env) is denied as shell-noise", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Bash",
@@ -468,7 +468,7 @@ describe("checkPathAccess", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
-    expect(result.reason).toContain("other agents");
+    expect(result.reason).toContain("shell expansion or quoting");
   });
 
   test("glued flag with a non-escaping value (--output=./x) is allowed", () => {
@@ -488,6 +488,42 @@ describe("checkPathAccess", () => {
       toolInput: { command: "git diff --flag=src/../lib HEAD" },
     });
     const result = checkPathAccess(input, ctx);
+    expect(result.decision).toBe("allow");
+  });
+
+  // ── glued-SUFFIX shell noise after a `..` (boundary review round 4) ────────
+
+  test.each([
+    ["empty single quotes", "cat ../..''/agent-other/repo/.env"],
+    ["empty double quotes", 'cat ../..""/agent-other/repo/.env'],
+    ["parameter default", "cat ${FOO:-../..}/agent-other/repo/.env"],
+    ["brace expansion", "cat ../..{,}/agent-other/repo/.env"],
+  ])("a `..` token with %s is denied as shell-noise", (_label, command) => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("shell expansion or quoting");
+  });
+
+  test("printf '..\\n' is denied (documented over-deny — a quoted `..` with a backslash)", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "printf '..\\n'" } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("shell expansion or quoting");
+  });
+
+  test("git ranges with ~ / ^ mid-token are NOT noise (allowed)", () => {
+    const ctx = makeCtx();
+    expect(checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "git log HEAD~2..HEAD^" } }), ctx).decision).toBe("allow");
+    expect(checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "git log origin/main..origin/dev" } }), ctx).decision).toBe("allow");
+  });
+
+  test("heredoc BODY lines containing `..` and apostrophes are data (allowed)", () => {
+    const ctx = makeCtx();
+    // The body line `see ../docs, it's fine` legitimately contains `..` and an
+    // apostrophe; masking heredoc bodies keeps it from tripping the scanner.
+    const command = "git commit -F - <<'EOF'\nsee ../docs, it's fine\nEOF";
+    const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
     expect(result.decision).toBe("allow");
   });
 

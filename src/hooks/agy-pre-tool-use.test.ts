@@ -266,14 +266,14 @@ describe("checkAgyPreToolUse — run_command relative traversal", () => {
     expect(d.reason).toContain("other agents");
   });
 
-  test("cat ${IFS}../../sibling/.env (IFS-glued) is denied", () => {
+  test("cat ${IFS}../../sibling/.env (IFS-glued) is denied as shell-noise", () => {
     const ctx = makeCtx();
     const d = checkAgyPreToolUse(
       { toolName: "run_command", toolArgs: { CommandLine: "cat ${IFS}../../agent-other/repo/.env", Cwd: ctx.worktreePath } },
       ctx,
     );
     expect(d.decision).toBe("deny");
-    expect(d.reason).toContain("other agents");
+    expect(d.reason).toContain("shell expansion or quoting");
   });
 
   test("glued flag with a non-escaping value (--output=./x) is allowed", () => {
@@ -380,19 +380,31 @@ describe("checkAgyPreToolUse — run_command single-command rule", () => {
     expect(d.reason).toContain("| pipe");
   });
 
-  test("backslash-escaped slashes (cat ..\\/..\\/victim) are unescaped and path-isolation denied", () => {
-    // The shell unescapes \/ to /, so this reads ../../agent-victim/meta.json —
-    // a sibling under agentsDir. No shell metachar, so it passes step 2 and is
-    // caught by the traversal scan once the token is unescaped.
+  test("backslash-in-.. token (cat ..\\/..\\/victim) is denied as shell-noise", () => {
+    // A `..` token containing a backslash can't be resolved safely (the shell
+    // would unescape \/ to /), so it is denied outright.
     const d = rc("cat ..\\/..\\/agent-victim/meta.json");
     expect(d.decision).toBe("deny");
-    expect(d.reason).toContain("other agents");
+    expect(d.reason).toContain("shell expansion or quoting");
   });
 
-  test("cat ..\\/..\\/x (escaped, no chaining) is a path-isolation deny", () => {
+  test("cat ..\\/..\\/x (backslash, no chaining) is denied as shell-noise", () => {
     const d = rc("cat ..\\/..\\/x");
     expect(d.decision).toBe("deny");
-    expect(d.reason).toContain("other agents");
+    expect(d.reason).toContain("shell expansion or quoting");
+  });
+
+  // Glued-SUFFIX shell noise after a `..` (round 4): all pass findShellMetachar
+  // but resolve in real bash to a sibling — denied outright by the noise rule.
+  test.each([
+    ["empty single quotes", "cat ../..''/agent-other/repo/.env"],
+    ["empty double quotes", 'cat ../..""/agent-other/repo/.env'],
+    ["parameter default", "cat ${FOO:-../..}/agent-other/repo/.env"],
+    ["brace expansion", "cat ../..{,}/agent-other/repo/.env"],
+  ])("a `..` token with %s is denied as shell-noise", (_label, command) => {
+    const d = rc(command);
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("shell expansion or quoting");
   });
 
   // Legit single commands must still allow.
@@ -400,9 +412,12 @@ describe("checkAgyPreToolUse — run_command single-command rule", () => {
     ["git commit -F /tmp/msg.txt"],
     ['ib send other "a ../b message"'],
     ["git log HEAD..main"],
+    ["git log HEAD~2..HEAD^"],
+    ["git log origin/main..origin/dev"],
     ["grep -rn foo src"],
     ["bun test src/foo.test.ts"],
     ["git commit -F - <<'EOF'\nmy commit message\nEOF"],
+    ["git commit -F - <<'EOF'\nsee ../docs, it's fine\nEOF"],
   ])("allows the legit single command: %j", (command) => {
     const d = rc(command);
     expect(d.decision).toBe("allow");

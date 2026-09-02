@@ -373,9 +373,16 @@ function checkRelativeTraversalPaths(
   for (let token of command.split(/\s+/)) {
     if (!token) continue;
     // Strip surrounding shell punctuation (quotes, `;`, `,`, `(`, `)`) that
-    // glues onto a token, then unescape backslash sequences (`\/` → `/`,
-    // `\ ` → space). This is what the shell does before the path is used, so
-    // escaped/glued forms like `..\/..\/x` and `..;` are seen as `../../x`/`..`.
+    // glues onto a token, then drop backslashes that escape the next character
+    // (`\/` → `/`, `\.` → `.`). This mirrors what the shell does before the path
+    // is used, so an escaped form like `..\/..\/x` is seen as `../../x`. (A
+    // backslash-escaped SPACE never reaches here — the whitespace split above
+    // has already broken the token at that space — so it is not a case this
+    // handles.) The unescape is applied unconditionally, including to text that
+    // was inside single quotes (where a real shell keeps the backslash literal);
+    // that can only ADD a `..` segment that wasn't structurally there, so it can
+    // only over-detect and fail toward DENY, never open a bypass. That trade is
+    // intentional: it is what closes the `..\/..\/x` evasion.
     token = token.replace(/^['";,()]+/, "").replace(/['";,()]+$/, "");
     token = token.replace(/\\(.)/g, "$1");
     if (!token) continue;

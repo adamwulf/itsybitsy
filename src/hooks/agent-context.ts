@@ -20,6 +20,13 @@ export interface ResolvedAgentContext {
   worktreePath: string;
   rootRepo: string;
   agentType?: string;
+  /**
+   * `meta.allowedPaths`, when the agent type declares extra writable roots
+   * (read from the same meta.json parse as `agentType`). Codex ignores this
+   * field; the agy PreToolUse handler uses it to widen the forced path
+   * isolation (worktree + the type's allowedPaths).
+   */
+  allowedPaths?: string[];
 }
 
 /**
@@ -59,11 +66,17 @@ export async function resolveAgentContext(
   }
 
   let agentType: string | undefined;
+  let allowedPaths: string[] | undefined;
   try {
     const metaFile = Bun.file(join(agentDir, "meta.json"));
     if (await metaFile.exists()) {
       const meta = await metaFile.json();
       if (typeof meta.agentType === "string") agentType = meta.agentType;
+      if (Array.isArray(meta.allowedPaths)) {
+        allowedPaths = (meta.allowedPaths as unknown[]).filter(
+          (p): p is string => typeof p === "string",
+        );
+      }
     }
   } catch { /* ignore */ }
 
@@ -80,5 +93,5 @@ export async function resolveAgentContext(
     }
   } catch { /* ignore */ }
 
-  return { agentDir, agentsDir, worktreePath, rootRepo, agentType };
+  return { agentDir, agentsDir, worktreePath, rootRepo, agentType, allowedPaths };
 }

@@ -94,7 +94,7 @@ export class AgentWatcher {
   private _lastLiveTmuxSessions: Set<string> = new Set();
   /** Cached coordinator tmux session_created epoch — immutable for the session
    * lifetime, so we query tmux display-message once and reuse. Cleared when
-   * detectSystemCoordinatorState() reports 'stopped' (session ended). */
+   * pollSystemCoordinator() reports 'stopped' (session ended). */
   private coordinatorSessionEpoch: number | null = null;
 
   /**

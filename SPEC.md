@@ -1008,7 +1008,7 @@ Lists all known config keys with their current values and sources.
 
 1. Each line shows the key, its effective value, and a source label: `(user)` or `(default)`.
 2. **Unset keys**: Keys with no value and no default display as `(unset)`.
-3. **All known keys are listed**, including those not present in the config file. The full key list matches `CONFIG_KEYS` in `config.ts`: `maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, `hooks.injectStatus`, `hooks.statusVisible`, `coordinator.imessage`. (Permission list keys have moved out of `config.json` into agent type layer files — see §2.3. The former `coordinator.model` key now lives in `~/.itsybitsy/agent-types/coordinator.md` as `model:`.)
+3. **All known keys are listed**, including those not present in the config file. The full key list matches `CONFIG_KEYS` in `config.ts`: `maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, `hooks.injectStatus`, `hooks.statusVisible`, `coordinator.imessage`, `coordinator.remoteControl`. (Permission list keys have moved out of `config.json` into agent type layer files — see §2.3. The former `coordinator.model` key now lives in `~/.itsybitsy/agent-types/coordinator.md` as `model:`.)
 4. A legend line is printed after the list explaining the source labels.
 5. Aliases: `ib config ls` is accepted as an alias for `list`.
 
@@ -1843,7 +1843,7 @@ The coordinator system touches many modules. This section catalogs the current i
 | `src/hooks/intercept-task.ts` | **Implemented** | `checkCoordinatorBashRestrictions()` blocks shell metacharacters and `--output` in git commands for coordinator sessions. Detects coordinators via `coordinator: true` in meta.json. |
 | `src/hooks/agent-path.ts` | **No changes needed** | Per-repo coordinators use standard path isolation. |
 | `src/hooks/agent-status.ts` | **No changes needed** | Stop hook writes state normally. |
-| `src/config.ts` | **Implemented** | Config keys: `coordinator.imessage`. (`coordinator.model` removed — coordinator model lives in `~/.itsybitsy/agent-types/coordinator.md` frontmatter. `permissions.coordinator.*` removed — coordinator permissions live in `~/.itsybitsy/agent-types/coordinator.md` frontmatter.) |
+| `src/config.ts` | **Implemented** | Config keys: `coordinator.imessage`, `coordinator.remoteControl` (default `false`; when `true` the system coordinator launches with claude's `--remote-control` flag). (`coordinator.model` removed — coordinator model lives in `~/.itsybitsy/agent-types/coordinator.md` frontmatter. `permissions.coordinator.*` removed — coordinator permissions live in `~/.itsybitsy/agent-types/coordinator.md` frontmatter.) |
 | `src/watchdog.ts` | **Not yet modified** | Does NOT have coordinator-specific behavior. Treats coordinators identically to regular agents. See §12.2.7. |
 | `src/tui/dashboard.ts` | **Implemented** | System coordinator full-width view with TMUX/DASHBOARD toggle, coordinator lifecycle on startup/shutdown, coordinator restart on `R`, input field routing, per-repo coordinator pausing on exit. |
 | `src/tui/agent-tree.ts` | **Implemented** | System coordinator as first entry with `◆` icon. Per-repo coordinators are not rendered as tree rows — they are surfaced via the repo header (REPO mode, §8.11, §12.2.5). |

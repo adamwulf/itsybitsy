@@ -818,6 +818,107 @@ describe("ensureSystemCoordinator", () => {
     expect(claudeCmd).not.toContain(" -- ");
   });
 
+  test("fresh launch enables Remote Control when coordinator.remoteControl is true", async () => {
+    // `coordinator.remoteControl` opts the system coordinator into Claude Code
+    // Remote Control. The verified CLI flag is `--remote-control` (claude v2.x,
+    // alias `--rc`): "Start an interactive session with Remote Control enabled".
+    await mkdir(tmpDir, { recursive: true });
+    const configPath = join(tmpDir, "config.json");
+    await Bun.write(
+      configPath,
+      JSON.stringify({ coordinator: { remoteControl: true } }),
+    );
+
+    const { setUserConfigPath, resetUserConfigPath } = await import("./config");
+    setUserConfigPath(configPath);
+
+    const commands: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      commands.push([...cmd]);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    try {
+      await ensureSystemCoordinator();
+
+      const claudeCmd = commands
+        .map((c) => c.join(" "))
+        .find((c) => c.includes("claude --model"));
+      expect(claudeCmd).toBeDefined();
+      expect(claudeCmd).toContain("--remote-control");
+      expect(claudeCmd).not.toContain("$(cat");
+    } finally {
+      resetUserConfigPath();
+    }
+  });
+
+  test("fresh launch omits --remote-control when coordinator.remoteControl is unset (default off)", async () => {
+    // Default MUST be off — remote-control is never enabled implicitly. With no
+    // config file the coordinator.remoteControl default (false) applies and no
+    // remote-control flag appears on the launch command.
+    const commands: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      commands.push([...cmd]);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    await ensureSystemCoordinator();
+
+    const claudeCmd = commands
+      .map((c) => c.join(" "))
+      .find((c) => c.includes("claude --model"));
+    expect(claudeCmd).toBeDefined();
+    expect(claudeCmd).not.toContain("--remote-control");
+    expect(claudeCmd).not.toContain("--rc");
+  });
+
+  test("remote-control and imessage combine: --remote-control precedes --channels", async () => {
+    // When both opt-ins are set the launch carries both flags. --remote-control
+    // must precede --channels so its optional [name] cannot consume a channel
+    // value (the following token is the `-`-prefixed --channels flag).
+    await mkdir(tmpDir, { recursive: true });
+    const configPath = join(tmpDir, "config.json");
+    await Bun.write(
+      configPath,
+      JSON.stringify({ coordinator: { remoteControl: true, imessage: true } }),
+    );
+
+    const { setUserConfigPath, resetUserConfigPath } = await import("./config");
+    setUserConfigPath(configPath);
+
+    const commands: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      commands.push([...cmd]);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    try {
+      await ensureSystemCoordinator();
+
+      const claudeCmd = commands
+        .map((c) => c.join(" "))
+        .find((c) => c.includes("claude --model"));
+      expect(claudeCmd).toBeDefined();
+      expect(claudeCmd).toContain("--remote-control");
+      expect(claudeCmd).toContain("--channels plugin:imessage@claude-plugins-official");
+      expect(claudeCmd!.indexOf("--remote-control")).toBeLessThan(claudeCmd!.indexOf("--channels"));
+    } finally {
+      resetUserConfigPath();
+    }
+  });
+
   test("fresh launch does NOT pass any prompt as a positional arg", async () => {
     // The prompt body for @system is delivered via the SessionStart hook's
     // additionalContext (see src/hooks/session-start.ts's @system branch),

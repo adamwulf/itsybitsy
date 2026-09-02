@@ -33,6 +33,7 @@ export const CONFIG_KEYS: ConfigKeyDef[] = [
   { key: "hooks.statusVisible", type: "boolean", default: true },
   { key: "hooks.injectTimestamp", type: "boolean", default: false },
   { key: "coordinator.imessage", type: "boolean", default: false },
+  { key: "coordinator.remoteControl", type: "boolean", default: false },
   { key: "channels.telegram.bot_token", type: "string", default: "" },
   { key: "providers.fugu.api_key", type: "string", default: "", sensitive: true },
   { key: "notifications.sayOnQuestion", type: "boolean", default: true },

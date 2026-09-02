@@ -34,6 +34,7 @@ import { loadMergedAgentTypePermissions } from "./shared";
 import { resolveAgentContext } from "./agent-context";
 import {
   checkPathAccess,
+  toolMatchesPattern,
   type HookDecision,
   type PathCheckContext,
 } from "./agent-path";
@@ -61,15 +62,31 @@ function formatToolArgs(toolArgs: Record<string, unknown>): string {
  * type's declared roots) when present, else `[worktree]` — exactly the shape
  * codex's apply_patch handling uses. Worktree-internal paths still allow via
  * checkPathAccess step 7 before allowedPaths (step 12) is consulted.
+ *
+ * Deny list: for claude the CLI enforces `permissions.deny`; for agy the hook
+ * is the only boundary, so a deny pattern that matches the synthesized call OR
+ * the raw agy tool name denies here, and deny WINS over allow.
  */
 export function checkAgyPreToolUse(
   input: { toolName: string; toolArgs: unknown },
   ctx: PathCheckContext,
+  denyList: string[] = [],
 ): HookDecision {
   const t = translateAgyTool(input.toolName, input.toolArgs, ctx.allowList);
   if (t.action === "deny") {
     return { decision: "deny", reason: t.reason };
   }
+
+  // Deny list wins over allow. Match against the synthesized Claude call (so a
+  // type that denies `Write` blocks write_to_file) OR the raw agy tool name (so
+  // a type can deny an agy tool verbatim).
+  for (const pattern of denyList) {
+    if (!pattern) continue;
+    if (toolMatchesPattern(t.toolName, t.toolInput, pattern) || pattern === input.toolName) {
+      return { decision: "deny", reason: "tool denied by agent-type deny list" };
+    }
+  }
+
   const effectiveAllowedPaths =
     ctx.allowedPaths !== undefined ? ctx.allowedPaths : [ctx.worktreePath];
 
@@ -235,7 +252,7 @@ export async function hookAgyPreToolUse(
       allowedPaths: ctxResolved.allowedPaths,
     };
 
-    const decision = checkAgyPreToolUse({ toolName, toolArgs }, ctx);
+    const decision = checkAgyPreToolUse({ toolName, toolArgs }, ctx, permissions.deny);
 
     if (decision.decision === "allow") {
       write(buildAgyAllowOutput(decision.reason));

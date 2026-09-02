@@ -194,6 +194,50 @@ describe("checkAgyPreToolUse — run_command Cwd isolation", () => {
   });
 });
 
+// ── deny list enforcement (manager fix 2) ────────────────────────────────────
+
+describe("checkAgyPreToolUse — deny list wins over allow", () => {
+  test("a synthesized-name deny (Write) blocks write_to_file but not view_file", () => {
+    const ctx = makeCtx();
+    const denied = checkAgyPreToolUse(
+      { toolName: "write_to_file", toolArgs: { TargetFile: `${ctx.worktreePath}/x.ts`, CodeContent: "y" } },
+      ctx,
+      ["Write"],
+    );
+    expect(denied.decision).toBe("deny");
+    expect(denied.reason).toBe("tool denied by agent-type deny list");
+
+    const allowed = checkAgyPreToolUse(
+      { toolName: "view_file", toolArgs: { AbsolutePath: `${ctx.worktreePath}/x.ts` } },
+      ctx,
+      ["Write"],
+    );
+    expect(allowed.decision).toBe("allow");
+  });
+
+  test("a raw agy-name deny (write_to_file) blocks it verbatim", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "write_to_file", toolArgs: { TargetFile: `${ctx.worktreePath}/x.ts`, CodeContent: "y" } },
+      ctx,
+      ["write_to_file"],
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toBe("tool denied by agent-type deny list");
+  });
+
+  test("a Bash(prefix) deny blocks a matching run_command even when allow-listed", () => {
+    const ctx = makeCtx({ allowList: ["Bash"] });
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: "rm -rf /", Cwd: ctx.worktreePath } },
+      ctx,
+      ["Bash(rm:*)"],
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toBe("tool denied by agent-type deny list");
+  });
+});
+
 // ── hookAgyPreToolUse — JSON contract + fail-CLOSED ──────────────────────────
 
 describe("hookAgyPreToolUse — {decision,reason} contract", () => {
@@ -287,6 +331,21 @@ describe("hookAgyPreToolUse — {decision,reason} contract", () => {
       toolCall: { name: "write_to_file", args: { TargetFile: join(agentDir, "repo", "new.ts"), CodeContent: "x" } },
     }));
     expect(parsed.decision).toBe("allow");
+  });
+
+  test("an agent-type deny (Write) is loaded and enforced end-to-end", async () => {
+    // Re-declare _all so the merged deny list carries Write, then confirm the
+    // full hook (which loads permissions.deny via loadAgyEffectivePermissions)
+    // blocks an otherwise-allowed in-worktree write_to_file.
+    await writeFile(
+      join(tempHome, ".itsybitsy", "agent-types", "_all.md"),
+      "---\nname: _all\ndescription: shared\npermissions:\n  allow:\n    - Read\n    - Write\n  deny:\n    - Write\n---\n",
+    );
+    const parsed = await run(JSON.stringify({
+      toolCall: { name: "write_to_file", args: { TargetFile: join(agentDir, "repo", "new.ts"), CodeContent: "x" } },
+    }));
+    expect(parsed.decision).toBe("deny");
+    expect(parsed.reason).toBe("tool denied by agent-type deny list");
   });
 
   test("fail-CLOSED: malformed stdin JSON denies", async () => {

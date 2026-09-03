@@ -1111,6 +1111,162 @@ describe("most-specific filesystem access oracle", () => {
   }, 120000);
 });
 
+describe("LIVE claude boot under the floor", () => {
+  test("the new _all.md floor boots claude to a network/API error, not a SIGABRT or silent death", async () => {
+    const sandboxExec = Bun.which("sandbox-exec");
+    if (process.platform !== "darwin" || !sandboxExec) {
+      console.log("LIVE claude boot: SKIPPED (sandbox-exec is absent; macOS only)");
+      return;
+    }
+    const claudePath = Bun.which("claude");
+    if (!claudePath) {
+      console.log("LIVE claude boot: SKIPPED (claude is not on PATH)");
+      return;
+    }
+    // Same nested-Seatbelt guard as the LIVE probe: a harness that is itself
+    // sandboxed cannot apply a nested profile, so the gate is not applicable.
+    const capability = Bun.spawnSync({
+      cmd: [sandboxExec, "-p", "(version 1)(allow default)", "/usr/bin/true"],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const capabilityError = capability.stderr.toString().trim();
+    if (capability.exitCode !== 0 && capabilityError.includes("sandbox_apply: Operation not permitted")) {
+      console.log(
+        `LIVE claude boot: SKIPPED (sandbox-exec cannot apply a nested profile: exit=${capability.exitCode}, stderr=${capabilityError})`,
+      );
+      return;
+    }
+    if (capability.exitCode !== 0) {
+      throw new Error(`LIVE claude boot capability check failed (${capability.exitCode}): ${capabilityError}`);
+    }
+
+    const createdRoot = await mkdtemp(join(tmpdir(), "itsybitsy-claude-boot-"));
+    const root = canonicalizeSandboxPath(createdRoot);
+    try {
+      const baseline = parseAgentTypeFile(
+        await Bun.file(join(import.meta.dir, "../docs/agent-types/_all.md")).text(),
+      ).frontmatter;
+      const floorPaths = baseline.paths as PathsConfig;
+      const baselineSandbox = baseline.sandbox as SandboxConfig;
+
+      // A production-shaped agent layout: the agent dir holds the worktree at
+      // /repo, REPOAGENTS is the parent-repo registry, PARENTCLAUDE the parent
+      // repo's .claude, all under the temp root. HOME is the REAL home so the
+      // floor's ~/.claude, ~/.claude.json, and ~/Library/Keychains grant the
+      // real config claude reads at boot (the floor was bisected against it).
+      const repoRoot = join(root, "repo-root");
+      const repoAgents = join(repoRoot, ".ittybitty", "agents");
+      const agentDir = join(repoAgents, "boot");
+      const worktree = join(agentDir, "repo");
+      const parentClaude = join(repoRoot, ".claude");
+      for (const dir of [repoAgents, agentDir, worktree, parentClaude]) {
+        await mkdir(dir, { recursive: true });
+      }
+      const gitInit = Bun.spawnSync({ cmd: ["git", "init", "-q"], cwd: worktree, stdout: "pipe", stderr: "pipe" });
+      if (gitInit.exitCode !== 0) {
+        throw new Error(`LIVE claude boot: git init failed (${gitInit.exitCode}): ${gitInit.stderr.toString().trim()}`);
+      }
+      const uid = process.getuid?.() ?? 0;
+      const params: SandboxProfileParams = {
+        AGENTDIR: agentDir,
+        WORKTREE: worktree,
+        GITDIR: join(worktree, ".git"),
+        REPOAGENTS: repoAgents,
+        PARENTCLAUDE: parentClaude,
+        TMUXSOCK: join("/private/tmp", `tmux-${uid}`),
+        canSpawnChildren: false,
+        HOME: homedir(),
+      };
+      const bootConfig: SandboxConfig = {
+        enabled: true,
+        rawAllow: [...baselineSandbox.rawAllow],
+        domains: [],
+      };
+      const profile = generateProfile(bootConfig, floorPaths, params);
+      const profilePath = join(root, "boot.sb");
+      await Bun.write(profilePath, profile);
+      const defArgs = Object.entries(sandboxProfileParameterValues(floorPaths, params))
+        .flatMap(([key, value]) => ["-D", `${key}=${value}`]);
+
+      const compile = Bun.spawnSync({
+        cmd: [sandboxExec, "-f", profilePath, ...defArgs, "/usr/bin/true"],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if (compile.exitCode !== 0) {
+        throw new Error(
+          `LIVE claude boot: floor profile failed to compile (${compile.exitCode}): ` +
+          `${compile.stderr.toString().trim()}\n--- profile ---\n${profile}`,
+        );
+      }
+
+      // Network is kernel-denied and no proxy is set, so claude must BOOT and
+      // then report an API/network error. Unset the proxy vars so it attempts a
+      // direct (kernel-denied) connection rather than reaching localhost.
+      const childEnv: Record<string, string> = {};
+      for (const [key, value] of Object.entries(process.env)) {
+        if (value !== undefined) childEnv[key] = value;
+      }
+      for (const key of ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"]) {
+        delete childEnv[key];
+      }
+
+      const runTimeoutMs = 60000;
+      const start = Date.now();
+      const run = Bun.spawnSync({
+        cmd: [sandboxExec, "-f", profilePath, ...defArgs, claudePath, "-p", "reply with the single word OK"],
+        cwd: worktree,
+        env: childEnv,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: runTimeoutMs,
+      });
+      const elapsed = Date.now() - start;
+      const stdout = run.stdout.toString();
+      const stderr = run.stderr.toString();
+      const combined = `${stdout}${stderr}`.trim();
+      const sigabrt = run.exitCode === 134 || run.signalCode === "SIGABRT";
+      const outcome =
+        `elapsed=${elapsed}ms exit=${run.exitCode} signal=${run.signalCode ?? "none"} ` +
+        `stdout.len=${stdout.length} stderr.len=${stderr.length}`;
+
+      // A BROKEN floor makes Bun/Node SIGABRT at init (a missing root-dir read,
+      // docs/SANDBOX-BASELINE-MINIMAL.md §(a)) — a near-instant zero-output
+      // crash. A BOOTED claude instead reaches the network layer; with the
+      // kernel denying egress and no proxy, this claude version hangs silently
+      // retrying and is killed at the timeout (exit 143 — the baseline's
+      // documented "fully offline" fail-closed proof, and identical to its
+      // UNSANDBOXED offline behavior). The two are distinguished by SIGABRT and
+      // by whether claude ran long enough to have booted and reached the
+      // network. bootReachedMs is far above a crash (~1s) and far below a
+      // booted-then-hung run (~60s).
+      const bootReachedMs = 15000;
+      const booted = combined.length > 0 || elapsed >= bootReachedMs;
+      if (sigabrt || !booted) {
+        throw new Error(
+          `LIVE claude boot FAILED under the floor ` +
+          `(${sigabrt ? "SIGABRT — a read path is missing" : "fast silent death — claude did not reach boot"}): ${outcome}\n` +
+          `--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}\n` +
+          `profile: ${profilePath}\n-D args: ${defArgs.join(" ")}\n--- profile ---\n${profile}`,
+        );
+      }
+
+      expect(sigabrt).toBe(false);
+      expect(booted).toBe(true);
+      console.log(
+        `LIVE claude boot: BOOTED under the floor (no SIGABRT; ran ${elapsed}ms then blocked on the ` +
+        `kernel-denied network — the baseline exit-143 fail-closed proof). ${outcome}\n` +
+        `stdout(first 300): ${stdout.slice(0, 300).replace(/\s+/g, " ").trim() || "(empty)"}\n` +
+        `stderr(first 300): ${stderr.slice(0, 300).replace(/\s+/g, " ").trim() || "(empty)"}`,
+      );
+    } finally {
+      await rm(createdRoot, { recursive: true, force: true });
+    }
+  }, 90000);
+});
+
 describe("resolver input contract", () => {
   test("each entry point rejects relative input with an error naming itself", () => {
     const table = sandboxPathAccessTable(EMPTY_PATHS, PARAMS);

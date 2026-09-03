@@ -41,7 +41,10 @@ import {
   setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner,
   setSendSpawnRunner, resetSendSpawnRunner,
   setNewAgentSpawnRunner, resetNewAgentSpawnRunner,
+  sealAgentRecord, getRepoId,
+  setSealDirectWriteForTesting, resetSealDirectWriteForTesting,
 } from "../ib-commands";
+import { verifyMetaAgainstSeal, readSealRecord } from "../agent-seal";
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxSpawnCtx } from "../tmux-poller";
 import type { SpawnResult } from "../types";
@@ -1521,6 +1524,130 @@ describe("handleAddPermission", () => {
     const d = assertDialog(dialogs[0]!, "add-permission");
     d.onSubmit("Bash(foo; rm -rf /)");
     expect(notices.some((n) => n.includes("Invalid permission"))).toBe(true);
+  });
+});
+
+// A4 G3 review: the 'b' spawn toggle writes meta.canSpawnChildren, a SEALED
+// profile input. Without re-sealing, this legitimate change reads as tamper on
+// the next resume/respawn and bricks a sandboxed agent. These prove the toggle
+// re-seals an enabled agent, leaves a disabled agent's seal untouched, and rolls
+// the meta write back if the re-seal fails.
+describe("handleAddPermission spawn toggle re-seals (A4 G3)", () => {
+  let repoDir: string;
+  let homeDir: string;
+  let originalHome: string | undefined;
+
+  beforeEach(async () => {
+    repoDir = await mkdtemp(join(tmpdir(), "aa-toggle-seal-"));
+    homeDir = await mkdtemp(join(tmpdir(), "aa-toggle-home-"));
+    originalHome = process.env.HOME;
+    process.env.HOME = homeDir; // isolate the seal dir into the sandbox
+  });
+
+  afterEach(async () => {
+    resetSealDirectWriteForTesting();
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    await rm(repoDir, { recursive: true, force: true });
+    await rm(homeDir, { recursive: true, force: true });
+  });
+
+  async function setupAgent(id: string, meta: Record<string, unknown>): Promise<string> {
+    const agentDir = join(repoDir, ".ittybitty", "agents", id);
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(repoDir, ".ittybitty", "repo-id"), "deadbeef\n");
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: "", ...meta }, null, 2));
+    return agentDir;
+  }
+
+  const enabledMeta = {
+    agentType: "worker",
+    canSpawnChildren: false,
+    worker: true,
+    sandbox: { enabled: true, rawAllow: [], domains: [] },
+    paths: { allowRead: [], allowWrite: [], deny: [] },
+  };
+
+  test("toggling spawn on an ENABLED agent re-seals with the new canSpawnChildren", async () => {
+    const id = "toggle-enabled";
+    const agentDir = await setupAgent(id, enabledMeta);
+    // Seal at the current (false) capability, exactly as spawn would.
+    await sealAgentRecord(repoDir, id, { id, ...enabledMeta }, agentDir);
+    const repoId = await getRepoId(repoDir);
+    const before = await readSealRecord(repoId, id);
+    expect(before!.inputs.canSpawnChildren).toBe(false);
+
+    const agent = makeAgent({ id, repoPath: repoDir, meta: { ...enabledMeta } as any });
+    const { ctx, dialogs, notices } = makeMockCtx({ agent });
+    handleAddPermission(ctx);
+    await waitForDialog(dialogs);
+    const d = assertDialog(dialogs[0]!, "add-permission");
+    expect(d.canSpawnChildren).toBe(false);
+    d.onToggleSpawn();
+
+    // The re-seal happens after the meta write; poll for the seal to reflect it.
+    await waitFor(async () => {
+      const rec = await readSealRecord(repoId, id);
+      return rec?.inputs.canSpawnChildren === true;
+    }, { message: "the seal to reflect the enabled spawn capability", timeoutMs: WAIT_MS });
+
+    const updatedMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(updatedMeta.canSpawnChildren).toBe(true);
+    // The frozen meta now matches its (re-derived) seal — no tamper on resume.
+    const verification = await verifyMetaAgainstSeal(repoId, id, updatedMeta);
+    expect(verification.ok).toBe(true);
+    expect(notices.some((n) => n.includes("Enabled sub-agent spawning"))).toBe(true);
+  });
+
+  test("toggling spawn on a DISABLED agent does not touch the seal", async () => {
+    const id = "toggle-disabled";
+    const disabledMeta = { ...enabledMeta, sandbox: { enabled: false, rawAllow: [], domains: [] } };
+    const agentDir = await setupAgent(id, disabledMeta);
+    const repoId = await getRepoId(repoDir);
+    // No seal exists for a disabled agent (never verified).
+    expect(await readSealRecord(repoId, id)).toBeNull();
+
+    const agent = makeAgent({ id, repoPath: repoDir, meta: { ...disabledMeta } as any });
+    const { ctx, dialogs, notices } = makeMockCtx({ agent });
+    handleAddPermission(ctx);
+    await waitForDialog(dialogs);
+    const d = assertDialog(dialogs[0]!, "add-permission");
+    d.onToggleSpawn();
+
+    // Wait for the toggle to finish (its notice lands after the skipped re-seal).
+    await waitFor(
+      async () => notices.some((n) => n.includes("Enabled sub-agent spawning")),
+      { message: "the disabled-agent toggle to complete", timeoutMs: WAIT_MS },
+    );
+    const updatedMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(updatedMeta.canSpawnChildren).toBe(true); // meta still written
+    expect(await readSealRecord(repoId, id)).toBeNull(); // but no seal created
+  });
+
+  test("a re-seal failure rolls back the meta write", async () => {
+    const id = "toggle-rollback";
+    const agentDir = await setupAgent(id, enabledMeta);
+    await sealAgentRecord(repoDir, id, { id, ...enabledMeta }, agentDir);
+    // Force the re-seal to fail (non-EPERM → sealAgentRecord rethrows, no tmux fallback).
+    setSealDirectWriteForTesting(async () => { throw new Error("disk full"); });
+
+    const agent = makeAgent({ id, repoPath: repoDir, meta: { ...enabledMeta } as any });
+    const { ctx, dialogs, notices } = makeMockCtx({ agent });
+    handleAddPermission(ctx);
+    await waitForDialog(dialogs);
+    const d = assertDialog(dialogs[0]!, "add-permission");
+    d.onToggleSpawn();
+
+    await waitFor(
+      async () => notices.some((n) => n.includes("Failed to re-seal")),
+      { message: "the re-seal failure notice", timeoutMs: WAIT_MS },
+    );
+    // Meta rolled back to the pre-toggle capability — never left mismatching its seal.
+    const rolledBack = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(rolledBack.canSpawnChildren).toBe(false);
+    // In-memory record was NOT advanced, and no enable notice / send happened.
+    expect(agent.meta.canSpawnChildren).toBe(false);
+    expect(notices.some((n) => n.includes("Enabled sub-agent spawning"))).toBe(false);
   });
 });
 

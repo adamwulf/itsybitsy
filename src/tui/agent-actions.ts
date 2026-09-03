@@ -17,7 +17,7 @@ import {
   installSafetyHooks, uninstallSafetyHooks,
   installInterceptHook, uninstallInterceptHook,
   teamCreate, teamAdd, teamDelete, teamRemove,
-  writeMetaJsonAtomic,
+  writeMetaJsonAtomic, sealAgentRecord,
 } from "../ib-commands";
 import { sanitizeAgentNameInput } from "../validation";
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
@@ -1490,8 +1490,37 @@ export function handleAddPermission(ctx: ActionCtx) {
             return;
           }
           const meta = (await metaFile.json()) as Record<string, unknown>;
+          const prevCanSpawn = meta.canSpawnChildren; // for rollback on re-seal failure
           meta.canSpawnChildren = next;
           await writeMetaJsonAtomic(agentDir, meta);
+
+          // Re-seal a sandboxed ENABLED agent so the frozen profile record
+          // reflects the new spawn capability. canSpawnChildren is a sealed
+          // input (SPEC-SANDBOX §4C.3): without re-sealing, this legitimate
+          // toggle reads as tamper on the next resume/respawn (verifyMetaAgainstSeal
+          // fails hard) and `ib sandbox refresh` refuses it. The toggle runs
+          // UNSANDBOXED in `ib watch`, so the direct seal write lands. A disabled
+          // agent has no profile and is never verified, so skip it.
+          const sandbox = meta.sandbox as { enabled?: boolean } | undefined;
+          if (sandbox?.enabled) {
+            try {
+              await sealAgentRecord(agent.repoPath, agent.id, meta, agentDir);
+            } catch (err) {
+              // Roll the meta write back — a half-applied toggle (meta changed,
+              // seal stale) would brick the agent on its next resume, which is
+              // worse than a refused toggle. Restore the prior canSpawnChildren
+              // (its absence when there was no per-agent override) and re-write.
+              if (prevCanSpawn === undefined) delete meta.canSpawnChildren;
+              else meta.canSpawnChildren = prevCanSpawn;
+              await writeMetaJsonAtomic(agentDir, meta).catch(() => {});
+              ctx.setNotice(
+                `Failed to re-seal ${agent.id}; spawn toggle rolled back: ${(err as Error).message}`,
+                "error",
+              );
+              return;
+            }
+          }
+
           // Reflect the change in the in-memory record so the dashboard is current.
           agent.meta.canSpawnChildren = next;
           ctx.setNotice(

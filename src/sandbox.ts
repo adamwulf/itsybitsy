@@ -60,7 +60,7 @@ const SANDBOX_LIST_KEYS = [
 const MOVED_SANDBOX_PATH_KEYS = new Set(["allowRead", "allowWrite", "deny"]);
 const PATHS_KEYS = ["allowRead", "allowWrite", "deny"] as const;
 
-type CompiledPath =
+export type CompiledPath =
   | { kind: "plain"; canonical: string; value: string }
   | { kind: "glob"; canonical: string; value: string };
 
@@ -68,7 +68,7 @@ interface ProfileRuntimePathRoot extends RuntimePathRoot {
   parameterName: keyof SandboxProfileParams;
 }
 
-interface OrderedPathEntry {
+export interface OrderedPathEntry {
   canonical: string;
   compiled: CompiledPath;
   kind: "plain" | "glob";

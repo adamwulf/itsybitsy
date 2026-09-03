@@ -1073,6 +1073,7 @@ async function prepareSandbox(
   agentDir: string,
   workPath: string,
   repoPath: string,
+  canSpawnChildren: boolean,
 ): Promise<PreparedSandbox> {
   const platform = sandboxPlatformOverride ?? process.platform;
   if (platform !== "darwin") {
@@ -1093,11 +1094,18 @@ async function prepareSandbox(
     throw new Error(`sandbox refused: could not resolve git common dir: ${detail}`);
   }
 
+  // The tmux socket lives at /private/tmp/tmux-<uid> (tmux uses TMUX_TMPDIR or
+  // /tmp, never $TMPDIR). It is a deny root for non-spawners and untouched for
+  // spawners; profileRuntimeDenyRoots canonicalizes it like every other entry.
+  const uid = process.getuid?.() ?? 0;
   const params: SandboxProfileParams = {
     AGENTDIR: agentDir,
     WORKTREE: workPath,
     GITDIR: resolveGitRevParsePath(workPath, gitCommonDirResult.stdout),
     REPOAGENTS: join(repoPath, ".ittybitty", "agents"),
+    PARENTCLAUDE: join(repoPath, ".claude"),
+    TMUXSOCK: join("/private/tmp", `tmux-${uid}`),
+    canSpawnChildren,
     HOME: homedir(),
   };
   const profile = generateProfile(config, paths, params);
@@ -1546,6 +1554,13 @@ export async function resumeAgent(
       try {
         const frozenConfig = resolveSandboxConfig({ sandbox: agent.meta.sandbox });
         const frozenPaths = resolvePathsConfig(agent.meta.paths);
+        // Re-derive the spawn capability from meta (per-agent override, then the
+        // type), so an unchanged agent replays a byte-identical profile while a
+        // meta.canSpawnChildren toggle flips exactly the REPOAGENTS op, the
+        // PARENTCLAUDE root, and the tmux deny on resume.
+        const resumeCanSpawnChildren = await metaCanSpawnChildren(
+          agent.meta as unknown as Record<string, unknown>,
+        );
         preparedResumeSandbox = await prepareSandbox(
           nukeResumeSpawnCtx,
           frozenConfig,
@@ -1553,6 +1568,7 @@ export async function resumeAgent(
           agentDir,
           workPath,
           agent.repoPath,
+          resumeCanSpawnChildren,
         );
         await mutateAgentMeta(agentDir, (meta) => {
           meta.sandbox = frozenConfig;
@@ -5524,6 +5540,11 @@ export async function newAgent(
   let preparedSandbox: PreparedSandbox | null = null;
   if (resolvedSandboxConfig.enabled) {
     try {
+      // Resolve spawn capability from the frozen meta (per-agent override, then
+      // the type). A spawner gets REPOAGENTS + PARENTCLAUDE writable and keeps
+      // the tmux socket; a non-spawner gets REPOAGENTS read-only and the tmux
+      // deny.
+      const spawnCanSpawnChildren = await metaCanSpawnChildren(initialMetaJson);
       preparedSandbox = await prepareSandbox(
         newAgentSpawnCtx,
         resolvedSandboxConfig,
@@ -5531,6 +5552,7 @@ export async function newAgent(
         agentDir,
         workPath,
         rootRepoPath,
+        spawnCanSpawnChildren,
       );
       initialMetaJson.sandbox_proxy_port = preparedSandbox.proxyPort;
       await writeMetaJsonAtomic(agentDir, initialMetaJson);

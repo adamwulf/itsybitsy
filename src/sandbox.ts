@@ -26,7 +26,10 @@ export interface RuntimePathRoot {
 
 /** The complete filesystem access table consumed by the resolver. */
 export interface PathAccessTable extends PathsConfig {
+  /** Allow runtime roots (agent dir, worktree, git dir, repo agents, parent .claude). */
   runtimeRoots: RuntimePathRoot[];
+  /** Deny runtime roots carved after the allow table (the tmux socket for non-spawners). */
+  runtimeDenyRoots: RuntimePathRoot[];
 }
 
 export interface SandboxProfileParams {
@@ -34,6 +37,26 @@ export interface SandboxProfileParams {
   WORKTREE: string;
   GITDIR: string;
   REPOAGENTS: string;
+  /**
+   * `<repo>/.claude` — the parent-repo directory `ib new-agent` writes a child's
+   * settings.local.json into. A write runtime root ONLY when canSpawnChildren is
+   * true; a non-spawner never has it in the table.
+   */
+  PARENTCLAUDE: string;
+  /**
+   * `/private/tmp/tmux-<uid>` — the tmux server socket. Writing it runs commands
+   * under the unsandboxed tmux server (a sandbox escape), so it is emitted as a
+   * deny for both operations ONLY when canSpawnChildren is false; a spawner
+   * genuinely needs tmux and keeps it (an accepted escape, SPEC-SANDBOX.md 4C.3).
+   */
+  TMUXSOCK: string;
+  /**
+   * Resolved spawn capability (metaCanSpawnChildren). Keys the runtime roots:
+   * REPOAGENTS is a WRITE root when true and a READ root when false;
+   * PARENTCLAUDE is added only when true; the TMUXSOCK deny is emitted only
+   * when false.
+   */
+  canSpawnChildren: boolean;
   HOME?: string;
 }
 
@@ -445,12 +468,45 @@ function orderedPathEntry(
   };
 }
 
-function profileRuntimeRoots(params: SandboxProfileParams): ProfileRuntimePathRoot[] {
-  return [
+/**
+ * Runtime ALLOW roots, keyed on the resolved spawn capability. AGENTDIR,
+ * WORKTREE, and GITDIR are always read+write boot roots. REPOAGENTS is a write
+ * root for a spawner (it writes its child's agent dir) and read-only otherwise.
+ * PARENTCLAUDE (`<repo>/.claude`, where a child's settings.local.json is
+ * written) is added only for a spawner. This table is extensible: a later root
+ * (scratchpad, project dir) adds a row rather than a new emission phase.
+ */
+function profileRuntimeAllowRoots(params: SandboxProfileParams): ProfileRuntimePathRoot[] {
+  const roots: ProfileRuntimePathRoot[] = [
     { path: canonicalizeSandboxPath(params.AGENTDIR), op: "write", parameterName: "AGENTDIR" },
     { path: canonicalizeSandboxPath(params.WORKTREE), op: "write", parameterName: "WORKTREE" },
     { path: canonicalizeSandboxPath(params.GITDIR), op: "write", parameterName: "GITDIR" },
-    { path: canonicalizeSandboxPath(params.REPOAGENTS), op: "read", parameterName: "REPOAGENTS" },
+    {
+      path: canonicalizeSandboxPath(params.REPOAGENTS),
+      op: params.canSpawnChildren ? "write" : "read",
+      parameterName: "REPOAGENTS",
+    },
+  ];
+  if (params.canSpawnChildren) {
+    roots.push({
+      path: canonicalizeSandboxPath(params.PARENTCLAUDE),
+      op: "write",
+      parameterName: "PARENTCLAUDE",
+    });
+  }
+  return roots;
+}
+
+/**
+ * Runtime DENY roots, emitted after the allow table so they carve holes that
+ * win (Seatbelt is last-match-wins). The tmux socket is denied for a
+ * non-spawner, carving it out of the /private/tmp write floor; a spawner emits
+ * nothing here. The op is nominal — a deny row emits both read and write denies.
+ */
+function profileRuntimeDenyRoots(params: SandboxProfileParams): ProfileRuntimePathRoot[] {
+  if (params.canSpawnChildren) return [];
+  return [
+    { path: canonicalizeSandboxPath(params.TMUXSOCK), op: "read", parameterName: "TMUXSOCK" },
   ];
 }
 
@@ -462,7 +518,8 @@ export function sandboxPathAccessTable(
   const canonicalPaths = canonicalizePathsConfig(paths, sandboxHome(params.HOME));
   return {
     ...canonicalPaths,
-    runtimeRoots: profileRuntimeRoots(params).map(({ path, op }) => ({ path, op })),
+    runtimeRoots: profileRuntimeAllowRoots(params).map(({ path, op }) => ({ path, op })),
+    runtimeDenyRoots: profileRuntimeDenyRoots(params).map(({ path, op }) => ({ path, op })),
   };
 }
 
@@ -487,10 +544,24 @@ function sortedAllowEntries(
   return entries.sort(compareOrderedPathEntries);
 }
 
-function sortedDenyEntries(entries: string[]): OrderedPathEntry[] {
-  return entries
-    .map((path) => orderedPathEntry(path, "read"))
-    .sort(compareOrderedPathEntries);
+/**
+ * Sort the configured file denies together with the runtime deny roots (the
+ * tmux socket for a non-spawner). `denyRoots` only carries parameter names for
+ * -D emission and never affects sorting or resolution, so resolvers may omit it;
+ * profile emission passes it so the tmux deny emits `(param "TMUXSOCK")`.
+ */
+function sortedDenyEntries(
+  table: PathAccessTable,
+  denyRoots: ProfileRuntimePathRoot[] = [],
+): OrderedPathEntry[] {
+  return [
+    ...table.deny.map((path) => orderedPathEntry(path, "read")),
+    ...table.runtimeDenyRoots.map((root, index) => orderedPathEntry(
+      root.path,
+      root.op,
+      denyRoots[index]?.parameterName,
+    )),
+  ].sort(compareOrderedPathEntries);
 }
 
 function orderedEntryMatches(entry: OrderedPathEntry, absolutePath: string): boolean {
@@ -511,17 +582,18 @@ export interface PreparedAccessTable {
 }
 
 /**
- * Sort and compile the access table once for repeated resolution. `roots` only
- * carries parameter names for -D emission and never affects resolution, so
- * resolvers may omit it; profile emission passes it for stable naming.
+ * Sort and compile the access table once for repeated resolution. The `roots`
+ * only carry parameter names for -D emission and never affect resolution, so
+ * resolvers may omit them; profile emission passes them for stable naming.
  */
 export function prepareAccessTable(
   table: PathAccessTable,
-  roots: ProfileRuntimePathRoot[] = [],
+  allowRoots: ProfileRuntimePathRoot[] = [],
+  denyRoots: ProfileRuntimePathRoot[] = [],
 ): PreparedAccessTable {
   return {
-    allow: sortedAllowEntries(table, roots),
-    deny: sortedDenyEntries(table.deny),
+    allow: sortedAllowEntries(table, allowRoots),
+    deny: sortedDenyEntries(table, denyRoots),
   };
 }
 
@@ -597,19 +669,22 @@ export function sandboxProfileParameterValues(
   paths: PathsConfig,
   params: SandboxProfileParams,
 ): Record<string, string> {
-  const roots = profileRuntimeRoots(params);
+  const allowRoots = profileRuntimeAllowRoots(params);
+  const denyRoots = profileRuntimeDenyRoots(params);
   const table = sandboxPathAccessTable(paths, params);
   const values: Record<string, string> = {};
 
-  sortedAllowEntries(table, roots).forEach((entry, index) => {
+  sortedAllowEntries(table, allowRoots).forEach((entry, index) => {
     if (entry.parameterName) {
       values[entry.parameterName] = entry.compiled.value;
     } else if (entry.compiled.kind === "plain" && !isSafeInlineSubpath(entry.compiled.value)) {
       values[`ALLOW_${index}`] = entry.compiled.value;
     }
   });
-  sortedDenyEntries(table.deny).forEach((entry, index) => {
-    if (entry.compiled.kind === "plain" && !isSafeInlineSubpath(entry.compiled.value)) {
+  sortedDenyEntries(table, denyRoots).forEach((entry, index) => {
+    if (entry.parameterName) {
+      values[entry.parameterName] = entry.compiled.value;
+    } else if (entry.compiled.kind === "plain" && !isSafeInlineSubpath(entry.compiled.value)) {
       values[`DENY_${index}`] = entry.compiled.value;
     }
   });
@@ -783,14 +858,15 @@ export function generateProfile(
   paths: PathsConfig,
   params: SandboxProfileParams,
 ): string {
-  const roots = profileRuntimeRoots(params);
+  const allowRoots = profileRuntimeAllowRoots(params);
+  const denyRoots = profileRuntimeDenyRoots(params);
   const table = sandboxPathAccessTable(paths, params);
   const lines = [
     "(version 1)",
     "(deny default)",
   ];
 
-  sortedAllowEntries(table, roots).forEach((entry, index) => {
+  sortedAllowEntries(table, allowRoots).forEach((entry, index) => {
     const matcher = profileMatcher(entry, `ALLOW_${index}`);
     lines.push(`(allow file-read* ${matcher})`);
     lines.push(`(${entry.op === "write" ? "allow" : "deny"} file-write* ${matcher})`);
@@ -804,8 +880,10 @@ export function generateProfile(
     lines.push(entry);
   });
 
-  // Configured filesystem denies are always last: Seatbelt is last-match-wins.
-  sortedDenyEntries(table.deny).forEach((entry, index) => {
+  // Configured filesystem denies plus the runtime tmux-socket deny are always
+  // last: Seatbelt is last-match-wins, so they carve holes the allow table
+  // cannot re-open.
+  sortedDenyEntries(table, denyRoots).forEach((entry, index) => {
     const matcher = profileMatcher(entry, `DENY_${index}`);
     lines.push(`(deny file-read* ${matcher})`);
     lines.push(`(deny file-write* ${matcher})`);

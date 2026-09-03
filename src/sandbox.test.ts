@@ -44,6 +44,9 @@ const PARAMS: SandboxProfileParams = {
   WORKTREE: "/tmp/itsybitsy-agent/repo",
   GITDIR: "/tmp/itsybitsy-git",
   REPOAGENTS: "/tmp/itsybitsy-agents",
+  PARENTCLAUDE: "/tmp/itsybitsy-repo/.claude",
+  TMUXSOCK: "/tmp/tmux-501",
+  canSpawnChildren: false,
   HOME: "/Users/sandbox-test-user",
 };
 
@@ -153,20 +156,92 @@ describe("sandbox profile emission", () => {
     expect(profile.indexOf("(deny default)")).toBeLessThan(profile.indexOf("(allow "));
   });
 
-  test("emits read and write decisions for all four sorted runtime roots", () => {
+  test("emits the sorted runtime roots and the non-spawner tmux deny (canSpawnChildren false)", () => {
     const lines = generateProfile(EMPTY_CONFIG, EMPTY_PATHS, PARAMS).trimEnd().split("\n");
     expect(lines).toEqual([
       "(version 1)",
       "(deny default)",
       '(allow file-read* (subpath (param "AGENTDIR")))',
       '(allow file-write* (subpath (param "AGENTDIR")))',
+      // REPOAGENTS is a READ root for a non-spawner, so its write is denied.
       '(allow file-read* (subpath (param "REPOAGENTS")))',
       '(deny file-write* (subpath (param "REPOAGENTS")))',
       '(allow file-read* (subpath (param "GITDIR")))',
       '(allow file-write* (subpath (param "GITDIR")))',
       '(allow file-read* (subpath (param "WORKTREE")))',
       '(allow file-write* (subpath (param "WORKTREE")))',
+      // No PARENTCLAUDE root. The tmux socket is carved out last for a
+      // non-spawner (both operations denied).
+      '(deny file-read* (subpath (param "TMUXSOCK")))',
+      '(deny file-write* (subpath (param "TMUXSOCK")))',
     ]);
+  });
+
+  test("emits REPOAGENTS write, a PARENTCLAUDE write root, and no tmux deny (canSpawnChildren true)", () => {
+    const spawner: SandboxProfileParams = { ...PARAMS, canSpawnChildren: true };
+    const lines = generateProfile(EMPTY_CONFIG, EMPTY_PATHS, spawner).trimEnd().split("\n");
+    expect(lines).toEqual([
+      "(version 1)",
+      "(deny default)",
+      '(allow file-read* (subpath (param "AGENTDIR")))',
+      '(allow file-write* (subpath (param "AGENTDIR")))',
+      // REPOAGENTS is now a WRITE root (no write deny).
+      '(allow file-read* (subpath (param "REPOAGENTS")))',
+      '(allow file-write* (subpath (param "REPOAGENTS")))',
+      '(allow file-read* (subpath (param "GITDIR")))',
+      '(allow file-write* (subpath (param "GITDIR")))',
+      '(allow file-read* (subpath (param "WORKTREE")))',
+      '(allow file-write* (subpath (param "WORKTREE")))',
+      // PARENTCLAUDE (/private/tmp/itsybitsy-repo/.claude, 4 segments) sorts in
+      // the 4-segment group after WORKTREE; it is write, and there is no tmux
+      // deny for a spawner.
+      '(allow file-read* (subpath (param "PARENTCLAUDE")))',
+      '(allow file-write* (subpath (param "PARENTCLAUDE")))',
+    ]);
+  });
+
+  test("flipping canSpawnChildren changes exactly REPOAGENTS op, the PARENTCLAUDE root, and the tmux deny", () => {
+    // Resume re-derives canSpawnChildren from meta, so a meta.canSpawnChildren
+    // toggle between spawn and resume must change ONLY these three things and
+    // leave every other line — AGENTDIR/WORKTREE/GITDIR, the floor, the read
+    // line for REPOAGENTS — byte-identical. A floor and config denies are
+    // included so the assertion covers a realistic profile, not just the roots.
+    const floor = paths({
+      allowRead: ["/usr", "~/.claude"],
+      allowWrite: ["/private/tmp", "~/.itsybitsy/agents"],
+      deny: ["**/.env"],
+    });
+    const rawConfig = config({ rawAllow: ["(allow process*)", "(deny network*)"] });
+    const nonSpawner = generateProfile(rawConfig, floor, { ...PARAMS, canSpawnChildren: false })
+      .trimEnd().split("\n");
+    const spawner = generateProfile(rawConfig, floor, { ...PARAMS, canSpawnChildren: true })
+      .trimEnd().split("\n");
+
+    const onlyInNonSpawner = nonSpawner.filter((line) => !spawner.includes(line));
+    const onlyInSpawner = spawner.filter((line) => !nonSpawner.includes(line));
+
+    expect(onlyInNonSpawner.sort()).toEqual([
+      '(deny file-read* (subpath (param "TMUXSOCK")))',
+      '(deny file-write* (subpath (param "REPOAGENTS")))',
+      '(deny file-write* (subpath (param "TMUXSOCK")))',
+    ]);
+    expect(onlyInSpawner.sort()).toEqual([
+      '(allow file-read* (subpath (param "PARENTCLAUDE")))',
+      '(allow file-write* (subpath (param "PARENTCLAUDE")))',
+      '(allow file-write* (subpath (param "REPOAGENTS")))',
+    ]);
+    // The shared read line for REPOAGENTS is untouched by the flip.
+    for (const profile of [nonSpawner, spawner]) {
+      expect(profile).toContain('(allow file-read* (subpath (param "REPOAGENTS")))');
+    }
+
+    // The -D parameter set gains PARENTCLAUDE / drops TMUXSOCK accordingly.
+    const nonSpawnerParams = sandboxProfileParameterValues(floor, { ...PARAMS, canSpawnChildren: false });
+    const spawnerParams = sandboxProfileParameterValues(floor, { ...PARAMS, canSpawnChildren: true });
+    expect("TMUXSOCK" in nonSpawnerParams).toBe(true);
+    expect("PARENTCLAUDE" in nonSpawnerParams).toBe(false);
+    expect("TMUXSOCK" in spawnerParams).toBe(false);
+    expect("PARENTCLAUDE" in spawnerParams).toBe(true);
   });
 
   test("allowRead root uses the explicit whole-tree subpath form", () => {
@@ -414,6 +489,9 @@ describe("most-specific filesystem access oracle", () => {
       WORKTREE: "/runtime/repo/.ittybitty/agents/oracle/repo",
       GITDIR: "/runtime/repo/.git/worktrees/oracle",
       REPOAGENTS: "/runtime/repo/.ittybitty/agents",
+      PARENTCLAUDE: "/runtime/repo/.claude",
+      TMUXSOCK: "/private/tmp/tmux-501",
+      canSpawnChildren: false,
       HOME: home,
     };
     const developerParams: SandboxProfileParams = {
@@ -421,6 +499,9 @@ describe("most-specific filesystem access oracle", () => {
       WORKTREE: `${home}/Developer/app/.ittybitty/agents/oracle/repo`,
       GITDIR: `${home}/Developer/app/.git/worktrees/oracle`,
       REPOAGENTS: `${home}/Developer/app/.ittybitty/agents`,
+      PARENTCLAUDE: `${home}/Developer/app/.claude`,
+      TMUXSOCK: "/private/tmp/tmux-501",
+      canSpawnChildren: false,
       HOME: home,
     };
     const allFrontmatter = parseAgentTypeFile(
@@ -677,6 +758,11 @@ describe("most-specific filesystem access oracle", () => {
     const outsideHome = canonicalizeSandboxPath(createdOutsideHome);
     // A unique probe target directly under the absolute /private/tmp write root.
     const tmpWriteProbe = join("/private/tmp", `itsybitsy-sandbox-live-${crypto.randomUUID()}`);
+    // A tmux-socket stand-in under the /private/tmp write floor. For a
+    // non-spawner the profile carves this out with a deny; a sibling directly
+    // under /private/tmp stays writable. Parameterizing TMUXSOCK to this path
+    // lets the live kernel probe exercise the deny without a real tmux server.
+    const tmuxSockStandin = join("/private/tmp", `itsybitsy-sandbox-tmux-${crypto.randomUUID()}`);
     try {
       const baseline = parseAgentTypeFile(
         await Bun.file(join(import.meta.dir, "../docs/agent-types/_all.md")).text(),
@@ -708,6 +794,9 @@ describe("most-specific filesystem access oracle", () => {
         WORKTREE: join(root, "Developer/app/.ittybitty/agents/live/repo"),
         GITDIR: join(root, "Developer/app/.git/worktrees/live"),
         REPOAGENTS: join(root, "Developer/app/.ittybitty/agents"),
+        PARENTCLAUDE: join(root, "Developer/app/.claude"),
+        TMUXSOCK: tmuxSockStandin,
+        canSpawnChildren: false,
         HOME: root,
       };
       const trapAgentFile = join(params.AGENTDIR, "meta.json");
@@ -899,7 +988,7 @@ describe("most-specific filesystem access oracle", () => {
       await rm(createdOutsideHome, { recursive: true, force: true });
       await rm(tmpWriteProbe, { force: true });
     }
-  });
+  }, 120000);
 });
 
 describe("resolver input contract", () => {

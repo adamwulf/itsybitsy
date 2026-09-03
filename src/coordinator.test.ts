@@ -2470,12 +2470,13 @@ describe("perRepoCoordinatorPrompt", () => {
     expect(prompt).toContain("muse-ios");
   });
 
-  test("mentions Read, Glob, Grep, LS", () => {
+  test("mentions Read, Glob, Grep, and Bash(ls:*)", () => {
     const prompt = perRepoCoordinatorPrompt("test-repo");
     expect(prompt).toContain("Read");
     expect(prompt).toContain("Glob");
     expect(prompt).toContain("Grep");
-    expect(prompt).toContain("LS");
+    expect(prompt).toContain("Bash(ls:*)");
+    expect(prompt).not.toContain("LS");
   });
 
   test("mentions ib new-agent --type worker", () => {

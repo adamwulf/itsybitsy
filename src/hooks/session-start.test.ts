@@ -225,7 +225,7 @@ describe("session-start", () => {
     expect(instructions).toContain("ib send @system");
   });
 
-  test("coordinator instructions mention Read, Glob, Grep, LS", async () => {
+  test("coordinator instructions mention Read, Glob, Grep, and Bash(ls:*)", async () => {
     const ctx: SessionContext = {
       role: "coordinator",
       agentId: "coordinator",
@@ -239,7 +239,8 @@ describe("session-start", () => {
     expect(instructions).toContain("Read");
     expect(instructions).toContain("Glob");
     expect(instructions).toContain("Grep");
-    expect(instructions).toContain("LS");
+    expect(instructions).toContain("Bash(ls:*)");
+    expect(instructions).not.toContain("LS");
   });
 
   test("manager State Management warns against sleep/Monitor/poll loops (SPEC §8.5)", async () => {

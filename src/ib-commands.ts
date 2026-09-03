@@ -68,7 +68,7 @@ import { SpawnContext, InjectionContext } from "./types";
 import type { SpawnFn } from "./types";
 import { isValidModel, isValidEffort, isValidTmuxSession, isValidSessionId, isValidShellPath, isValidAgentId, shellQuote, tmuxSessionTarget } from "./validation";
 import { getTmuxWidthForAgent } from "./tui/widths";
-import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome } from "./coordinator";
+import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome, classifyClaudeStartupPrompt } from "./coordinator";
 import { loadAgentType, agentTypeExists, metaCanSpawnChildren } from "./agent-types";
 import type { AgentType } from "./agent-types";
 import { isCodexBackedCli, parseModel, mapEffortForCodex } from "./agent-cli";
@@ -2065,92 +2065,99 @@ export async function respawnSelf(agent: Agent): Promise<IbCommandResult> {
   return { ok: true, exitCode: 0, stdout: `Respawned ${agent.id}`, stderr: "" };
 }
 
+/** True when a captured Claude pane shows the session is up and running (the
+ *  version logo or the injected [USER TASK] marker), i.e. no startup permission
+ *  prompt is blocking startup. */
+function isClaudeReadyPane(output: string): boolean {
+  return output.includes("Claude Code v") || output.includes("[USER TASK]");
+}
+
 /**
- * Auto-accept workspace trust dialog by polling tmux output.
- * Mirrors auto_accept_workspace_trust in ib bash.
- * Runs asynchronously — does not block the caller.
+ * Shared driver for the resume + new-agent workspace-trust auto-accept. Polls
+ * the pane for a startup permission prompt (or the ready marker), then accepts
+ * it with the binary-confirmed 2.1.259 sequence from
+ * {@link classifyClaudeStartupPrompt} — Down,Enter for trust / external imports;
+ * Up,Up,Enter for a single MCP; N Downs then Enter for the multi-MCP checklist;
+ * a bare Enter for the pre-2.1.259 layouts.
+ *
+ * Anti-stale / anti-repeat guard: `capture` reads the CURRENT VISIBLE pane only
+ * (no scrollback), and the pane is re-captured + re-classified immediately
+ * before every send with a co-present prompt accepted BEFORE the ready marker is
+ * honoured — so a navigation sequence is always keyed to the live prompt and a
+ * prompt already answered (now only in history) never triggers a repeat
+ * navigation.
+ *
+ * agy / codex safety: agy's trust-card guide reads "enter Confirm" (no "to") and
+ * codex never shows these modals, so classifyClaudeStartupPrompt returns null
+ * for them and this driver is a no-op — leaving agy's spawn-time pre-trust and
+ * watchdog trust-card fallback path unchanged.
  */
-async function autoAcceptWorkspaceTrust(tmuxSession: string): Promise<void> {
-  const maxAttempts = 5;
-  const maxWaitHalfSecs = 30; // 15 seconds total for initial wait
+async function driveClaudeStartupPromptAccept(opts: {
+  capture: () => Promise<string | null>;
+  send: (keys: string[]) => Promise<void>;
+  sleepPoll: () => Promise<void>;
+  sleepAccept: () => Promise<void>;
+}): Promise<void> {
+  const maxWaitPolls = 30; // ~15s of initial waiting at the default 500ms poll
+  const maxAcceptAttempts = 5;
 
-  // Wait for Claude to start (logo or permissions screen)
-  let startedWith = "";
-  for (let i = 0; i < maxWaitHalfSecs; i++) {
-    const delayMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 500;
-    if (delayMs > 0) await Bun.sleep(delayMs);
-
-    const captureResult = await nukeResumeSpawnCtx.run([
-      "tmux", "capture-pane", "-t", tmuxSessionTarget(tmuxSession), "-p", "-S", "-",
-    ]);
-    if (captureResult.exitCode !== 0) continue;
-
-    const output = captureResult.stdout;
-    // Check for logo or [USER TASK]
-    if (output.includes("Claude Code v") || output.includes("[USER TASK]")) {
-      startedWith = "logo";
-      break;
-    }
-    // Check for permissions screens (workspace trust, external imports, MCP servers)
-    if (/enter to confirm/i.test(output)) {
-      if (
-        /trust/i.test(output) ||
-        /Allow external CLAUDE\.md file imports/i.test(output) ||
-        /New MCP server found/i.test(output) ||
-        /\d+ new MCP servers? found/i.test(output)
-      ) {
-        startedWith = "permissions";
-        break;
-      }
-    }
+  // Phase 1 — wait for a startup prompt (checked FIRST so a prompt co-rendered
+  // with the logo is still accepted) or, absent any prompt, the ready marker.
+  let sawPrompt = false;
+  for (let i = 0; i < maxWaitPolls; i++) {
+    await opts.sleepPoll();
+    const out = await opts.capture();
+    if (out === null) continue;
+    if (classifyClaudeStartupPrompt(out)) { sawPrompt = true; break; }
+    if (isClaudeReadyPane(out)) return; // started with no prompt to answer
   }
+  if (!sawPrompt) return;
 
-  // If logo appeared directly, no permissions needed
-  if (startedWith !== "permissions") return;
-
-  // Accept permissions (may need multiple Enter presses)
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "Enter"]);
-
-    const delayMs = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 4000;
-    if (delayMs > 0) await Bun.sleep(delayMs);
-
-    const captureResult = await nukeResumeSpawnCtx.run([
-      "tmux", "capture-pane", "-t", tmuxSessionTarget(tmuxSession), "-p", "-S", "-",
-    ]);
-    if (captureResult.exitCode !== 0) continue;
-
-    const recent = captureResult.stdout;
-
-    // Check if permissions prompt is still active
-    let hasPermissions = false;
-    if (/enter to confirm/i.test(recent)) {
-      if (
-        /trust/i.test(recent) ||
-        /Allow external CLAUDE\.md file imports/i.test(recent) ||
-        /New MCP server found/i.test(recent) ||
-        /\d+ new MCP servers? found/i.test(recent)
-      ) {
-        hasPermissions = true;
+  // Phase 2 — accept, re-capturing + re-classifying before each send so the keys
+  // match the live pane. Loops so a second prompt (e.g. trust then external
+  // import) is handled, settling after each send before re-reading.
+  for (let attempt = 0; attempt < maxAcceptAttempts; attempt++) {
+    const cur = await opts.capture();
+    if (cur !== null) {
+      const decision = classifyClaudeStartupPrompt(cur);
+      if (decision) {
+        await opts.send(decision.keys);
+      } else if (isClaudeReadyPane(cur)) {
+        return; // prompt cleared and the session is up
       }
     }
-
-    if (!hasPermissions) {
-      // Wait for logo to confirm success
-      for (let j = 0; j < maxWaitHalfSecs; j++) {
-        const logoDelay = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 500;
-        if (logoDelay > 0) await Bun.sleep(logoDelay);
-
-        const logoCapture = await nukeResumeSpawnCtx.run([
-          "tmux", "capture-pane", "-t", tmuxSessionTarget(tmuxSession), "-p", "-S", "-",
-        ]);
-        if (logoCapture.exitCode !== 0) continue;
-        if (logoCapture.stdout.includes("Claude Code v") || logoCapture.stdout.includes("[USER TASK]")) {
-          return; // Success
-        }
-      }
-    }
+    await opts.sleepAccept();
   }
+}
+
+/**
+ * Auto-accept workspace trust for a RESUMED agent by polling tmux output.
+ * Exported for tests. Runs asynchronously — does not block the caller.
+ */
+export async function autoAcceptWorkspaceTrust(tmuxSession: string): Promise<void> {
+  const target = tmuxSessionTarget(tmuxSession);
+  await driveClaudeStartupPromptAccept({
+    // Visible pane only (`-S 0 -E -`, no history): a prompt already answered and
+    // scrolled into scrollback must not re-classify as live and draw a repeat
+    // navigation sequence.
+    capture: async () => {
+      const r = await nukeResumeSpawnCtx.run([
+        "tmux", "capture-pane", "-t", target, "-p", "-J", "-S", "0", "-E", "-",
+      ]);
+      return r.exitCode === 0 ? r.stdout : null;
+    },
+    send: async (keys) => {
+      await nukeResumeSpawnCtx.run(["tmux", "send-keys", "-t", target, ...keys]);
+    },
+    sleepPoll: async () => {
+      const ms = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 500;
+      if (ms > 0) await Bun.sleep(ms);
+    },
+    sleepAccept: async () => {
+      const ms = resumeDelayOverrideMs !== null ? resumeDelayOverrideMs : 4000;
+      if (ms > 0) await Bun.sleep(ms);
+    },
+  });
 }
 
 /**
@@ -5659,81 +5666,32 @@ export function resetNewAgentSummaryGenerator(): void {
 
 /**
  * Auto-accept workspace trust for newly created agents.
- * Uses the newAgent spawn runner for testability.
+ * Uses the newAgent spawn runner for testability. Exported for tests.
  */
-async function autoAcceptWorkspaceTrustForNewAgent(tmuxSession: string): Promise<void> {
-  const maxAttempts = 5;
-  const maxWaitHalfSecs = 30;
-
-  let startedWith = "";
-  for (let i = 0; i < maxWaitHalfSecs; i++) {
-    const delayMs = newAgentDelayOverrideMs !== null ? newAgentDelayOverrideMs : 500;
-    if (delayMs > 0) await Bun.sleep(delayMs);
-
-    const captureResult = await newAgentSpawnCtx.run([
-      "tmux", "capture-pane", "-t", tmuxSessionTarget(tmuxSession), "-p", "-S", "-",
-    ]);
-    if (captureResult.exitCode !== 0) continue;
-
-    const output = captureResult.stdout;
-    if (output.includes("Claude Code v") || output.includes("[USER TASK]")) {
-      startedWith = "logo";
-      break;
-    }
-    if (/enter to confirm/i.test(output)) {
-      if (
-        /trust/i.test(output) ||
-        /Allow external CLAUDE\.md file imports/i.test(output) ||
-        /New MCP server found/i.test(output) ||
-        /\d+ new MCP servers? found/i.test(output)
-      ) {
-        startedWith = "permissions";
-        break;
-      }
-    }
-  }
-
-  if (startedWith !== "permissions") return;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    await newAgentSpawnCtx.run(["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "Enter"]);
-
-    const delayMs = newAgentDelayOverrideMs !== null ? newAgentDelayOverrideMs : 4000;
-    if (delayMs > 0) await Bun.sleep(delayMs);
-
-    const captureResult = await newAgentSpawnCtx.run([
-      "tmux", "capture-pane", "-t", tmuxSessionTarget(tmuxSession), "-p", "-S", "-",
-    ]);
-    if (captureResult.exitCode !== 0) continue;
-
-    const recent = captureResult.stdout;
-    let hasPermissions = false;
-    if (/enter to confirm/i.test(recent)) {
-      if (
-        /trust/i.test(recent) ||
-        /Allow external CLAUDE\.md file imports/i.test(recent) ||
-        /New MCP server found/i.test(recent) ||
-        /\d+ new MCP servers? found/i.test(recent)
-      ) {
-        hasPermissions = true;
-      }
-    }
-
-    if (!hasPermissions) {
-      for (let j = 0; j < maxWaitHalfSecs; j++) {
-        const logoDelay = newAgentDelayOverrideMs !== null ? newAgentDelayOverrideMs : 500;
-        if (logoDelay > 0) await Bun.sleep(logoDelay);
-
-        const logoCapture = await newAgentSpawnCtx.run([
-          "tmux", "capture-pane", "-t", tmuxSessionTarget(tmuxSession), "-p", "-S", "-",
-        ]);
-        if (logoCapture.exitCode !== 0) continue;
-        if (logoCapture.stdout.includes("Claude Code v") || logoCapture.stdout.includes("[USER TASK]")) {
-          return;
-        }
-      }
-    }
-  }
+export async function autoAcceptWorkspaceTrustForNewAgent(tmuxSession: string): Promise<void> {
+  const target = tmuxSessionTarget(tmuxSession);
+  await driveClaudeStartupPromptAccept({
+    // Visible pane only (`-S 0 -E -`, no history): a prompt already answered and
+    // scrolled into scrollback must not re-classify as live and draw a repeat
+    // navigation sequence.
+    capture: async () => {
+      const r = await newAgentSpawnCtx.run([
+        "tmux", "capture-pane", "-t", target, "-p", "-J", "-S", "0", "-E", "-",
+      ]);
+      return r.exitCode === 0 ? r.stdout : null;
+    },
+    send: async (keys) => {
+      await newAgentSpawnCtx.run(["tmux", "send-keys", "-t", target, ...keys]);
+    },
+    sleepPoll: async () => {
+      const ms = newAgentDelayOverrideMs !== null ? newAgentDelayOverrideMs : 500;
+      if (ms > 0) await Bun.sleep(ms);
+    },
+    sleepAccept: async () => {
+      const ms = newAgentDelayOverrideMs !== null ? newAgentDelayOverrideMs : 4000;
+      if (ms > 0) await Bun.sleep(ms);
+    },
+  });
 }
 
 /** Result of resolveAgentId */

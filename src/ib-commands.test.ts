@@ -59,6 +59,8 @@ import {
   resetMergeSpawnRunner,
   setNewAgentSpawnRunner,
   resetNewAgentSpawnRunner,
+  autoAcceptWorkspaceTrust,
+  autoAcceptWorkspaceTrustForNewAgent,
   setAgyVersionProbeTimeoutMs,
   setDispatcherDryRunSpawnRunner,
   resetDispatcherDryRunSpawnRunner,
@@ -11021,5 +11023,110 @@ describe("writeMetaJsonAtomic — canSpawnChildren round-trip", () => {
     const readBack = (await Bun.file(join(dir, "meta.json")).json()) as Record<string, unknown>;
     expect("canSpawnChildren" in readBack).toBe(false);
     expect(readBack.agentType).toBe("manager");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Workspace-trust auto-accept (resume + new-agent) — 2.1.259 navigation
+// ---------------------------------------------------------------------------
+describe("autoAcceptWorkspaceTrust / ...ForNewAgent — startup prompt navigation", () => {
+  const logoPane = "Claude Code v1.0.0\n[USER TASK]";
+  const newTrustPane = [
+    "Do you trust the files in this folder?",
+    "  ❯ No, exit",
+    "    Yes, I trust this folder",
+    "Enter to confirm · Esc to cancel",
+  ].join("\n");
+  const legacyTrustPane = "Do you trust the files in this folder?\n\nEnter to confirm · Esc to cancel";
+  const singleMcpPane = [
+    "New MCP server found in this project: activepieces",
+    "  1. Use this MCP server",
+    "  2. Use this and all future MCP servers in this project",
+    "  ❯ 3. Continue without using this MCP server",
+  ].join("\n");
+  const bashPane = "Allow Bash to run `ls`?\n  Enter to confirm · Esc to reject";
+
+  afterEach(() => {
+    resetNukeResumeSpawnRunner();
+    resetNewAgentSpawnRunner();
+  });
+
+  /** Wire a spawn runner (resume or new-agent): capture-pane returns successive
+   *  `panes` (the last repeats); send-keys are recorded and returned. */
+  function wire(
+    setRunner: (fn: SpawnFn) => void,
+    panes: string[],
+  ): string[][] {
+    const sends: string[][] = [];
+    let capIdx = 0;
+    setRunner(((cmd: string[]) => {
+      if (cmd[0] === "tmux" && cmd[1] === "capture-pane") {
+        const pane = panes[Math.min(capIdx, panes.length - 1)]!;
+        capIdx++;
+        return makeSpawnResult(0, pane);
+      }
+      if (cmd[0] === "tmux" && cmd[1] === "send-keys") {
+        sends.push([...cmd]);
+        return makeSpawnResult(0);
+      }
+      return makeSpawnResult(0);
+    }) as SpawnFn);
+    return sends;
+  }
+
+  test("resume: NEW trust prompt → Down then Enter in one send-keys", async () => {
+    const sends = wire(setNukeResumeSpawnRunner, [newTrustPane, newTrustPane, logoPane]);
+    await autoAcceptWorkspaceTrust("tmux-abc");
+    const sendKeys = sends.filter((c) => c.includes("send-keys"));
+    expect(sendKeys.length).toBe(1);
+    const cmd = sendKeys[0]!;
+    expect(cmd.includes("Down")).toBe(true);
+    expect(cmd.includes("Enter")).toBe(true);
+    expect(cmd.indexOf("Down")).toBeLessThan(cmd.indexOf("Enter"));
+    expect(cmd.includes("-l")).toBe(false);
+  });
+
+  test("resume: LEGACY trust prompt → bare Enter (no navigation keys)", async () => {
+    const sends = wire(setNukeResumeSpawnRunner, [legacyTrustPane, legacyTrustPane, logoPane]);
+    await autoAcceptWorkspaceTrust("tmux-abc");
+    const sendKeys = sends.filter((c) => c.includes("send-keys"));
+    expect(sendKeys.length).toBe(1);
+    const cmd = sendKeys[0]!;
+    expect(cmd.includes("Enter")).toBe(true);
+    expect(cmd.includes("Down")).toBe(false);
+    expect(cmd.includes("Up")).toBe(false);
+  });
+
+  test("resume: generic Bash prompt → nothing sent", async () => {
+    const sends = wire(setNukeResumeSpawnRunner, [bashPane]);
+    await autoAcceptWorkspaceTrust("tmux-abc");
+    expect(sends.filter((c) => c.includes("send-keys")).length).toBe(0);
+  });
+
+  test("resume: session that starts with no prompt → nothing sent", async () => {
+    const sends = wire(setNukeResumeSpawnRunner, [logoPane]);
+    await autoAcceptWorkspaceTrust("tmux-abc");
+    expect(sends.filter((c) => c.includes("send-keys")).length).toBe(0);
+  });
+
+  test("new-agent: NEW single MCP prompt → Up, Up, Enter", async () => {
+    const sends = wire(setNewAgentSpawnRunner, [singleMcpPane, singleMcpPane, logoPane]);
+    await autoAcceptWorkspaceTrustForNewAgent("tmux-def");
+    const sendKeys = sends.filter((c) => c.includes("send-keys"));
+    expect(sendKeys.length).toBe(1);
+    const cmd = sendKeys[0]!;
+    const ups = cmd.filter((a) => a === "Up").length;
+    expect(ups).toBe(2);
+    expect(cmd[cmd.length - 1]).toBe("Enter");
+    expect(cmd.includes("Down")).toBe(false);
+  });
+
+  test("new-agent: NEW trust prompt → Down then Enter", async () => {
+    const sends = wire(setNewAgentSpawnRunner, [newTrustPane, newTrustPane, logoPane]);
+    await autoAcceptWorkspaceTrustForNewAgent("tmux-def");
+    const sendKeys = sends.filter((c) => c.includes("send-keys"));
+    expect(sendKeys.length).toBe(1);
+    const cmd = sendKeys[0]!;
+    expect(cmd.indexOf("Down")).toBeLessThan(cmd.indexOf("Enter"));
   });
 });

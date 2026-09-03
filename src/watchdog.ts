@@ -43,6 +43,7 @@ import { OUTBOX_FILENAME, agentOutboxDir } from "./outbox";
 import { parseModel } from "./agent-cli";
 import type { AgentCli } from "./agent-cli";
 import { AGY_HEARTBEAT_FILENAME } from "./hooks/agy-pre-invocation";
+import { classifyClaudeStartupPrompt } from "./coordinator";
 
 /**
  * Phase 6: classify an agent's CLI for watchdog branching.
@@ -459,6 +460,33 @@ async function sendTmuxEnter(tmuxSession: string): Promise<boolean> {
   try {
     const proc = spawnCtx.runner(
       ["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "Enter"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const exitCode = await proc.exited;
+    return exitCode === 0;
+  } catch { /* expected: tmux not running or session gone */
+    return false;
+  }
+}
+
+/**
+ * Send a startup-prompt accept sequence (e.g. `Down Enter`, `Up Up Enter`) to a
+ * tmux session in ONE `send-keys` call. One call keeps the keys in order with no
+ * other write interleaved between them; it does NOT by itself guarantee every
+ * key lands on the same side of Claude's ~150ms input-refusal window (tmux still
+ * delivers distinct key events). The safety comes from the authoritative
+ * visible-pane re-check immediately before this send plus the >=POLL_INTERVAL_MS
+ * settle before the next attempt. Unlike the bare-ESC compact cancel, arrow keys
+ * are unambiguous CSI sequences and are NOT coalesced when sent together.
+ */
+async function sendTmuxKeys(tmuxSession: string, keys: string[]): Promise<boolean> {
+  if (!isValidTmuxSession(tmuxSession)) {
+    console.error(`[watchdog] Invalid tmux session name: ${tmuxSession}`);
+    return false;
+  }
+  try {
+    const proc = spawnCtx.runner(
+      ["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), ...keys],
       { stdout: "pipe", stderr: "pipe" },
     );
     const exitCode = await proc.exited;
@@ -1193,6 +1221,46 @@ export function resetPerAgentCaptureTmux(): void {
   captureTmuxResultFn = captureTmuxOutputResult;
 }
 
+/**
+ * Capture the CURRENT VISIBLE pane only (`-S 0 -E -`, no history) for the
+ * authoritative pre-send re-check of a startup permission prompt. The tick
+ * capture ({@link captureTmuxResultFn}) intentionally reads a large history
+ * window for state detection, so a prompt that has already been answered and
+ * scrolled into scrollback could still classify from it — this visible-only
+ * capture cannot see that stale history, so it is what actually gates the send.
+ */
+async function defaultPerAgentVisibleCapture(session: string): Promise<string | null> {
+  if (!isValidTmuxSession(session)) return null;
+  try {
+    const proc = spawnCtx.runner(
+      ["tmux", "capture-pane", "-t", tmuxSessionTarget(session), "-p", "-J", "-S", "0", "-E", "-"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const [raw, , exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return exitCode === 0 ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+let perAgentVisibleCaptureFn: (session: string) => Promise<string | null> =
+  defaultPerAgentVisibleCapture;
+
+/** Override the visible-pane capture for tests (models a clean live pane while
+ *  the tick capture still returns stale history). */
+export function setPerAgentVisibleCaptureTmux(fn: (session: string) => Promise<string | null>): void {
+  perAgentVisibleCaptureFn = fn;
+}
+
+/** Reset the visible-pane capture to the default. */
+export function resetPerAgentVisibleCaptureTmux(): void {
+  perAgentVisibleCaptureFn = defaultPerAgentVisibleCapture;
+}
+
 /** Exact-session probe used after a per-agent capture failure. */
 let probeTmuxSessionFn: (session: string) => Promise<TmuxSessionProbeResult> =
   probeTmuxSession;
@@ -1664,28 +1732,45 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       // Tmux session exists — reset grace period
       tmuxGoneSince = null;
 
-      // Auto-accept permissions prompts (workspace trust, external imports, MCP servers).
+      // Auto-accept startup permission prompts (workspace trust, external
+      // CLAUDE.md imports, new MCP servers) with the binary-confirmed 2.1.259
+      // sequences (Down,Enter for trust/imports; Up,Up,Enter for a single MCP;
+      // N Downs then Enter for the multi-MCP checklist; a bare Enter for the
+      // legacy layouts) — see classifyClaudeStartupPrompt.
       // Phase 6: claude-only — codex never surfaces these modals (`-a never` +
-      // hooks pre-resolve every permission decision), so the regex would never
-      // match in practice. agy has its OWN fallback answers below (trust card +
-      // survey) with different strings, so it's excluded here too. Gating on cli
-      // is explicit + skips the regex pass.
-      if (agentCli === "claude" && /enter to confirm/i.test(output)) {
-        if (
-          /trust/i.test(output) ||
-          /Allow external CLAUDE\.md file imports/i.test(output) ||
-          /New MCP server found/i.test(output) ||
-          /\d+ new MCP servers? found/i.test(output)
-        ) {
-          await logAgent(agentDir, "[watchdog] Detected permissions prompt — sending Enter to accept");
-          // Hold the session-write mutex around the bare Enter so it can't
-          // interleave with a concurrent (e.g. fs.watch-driven) outbox drain —
-          // in EITHER direction: a drain in flight blocks us until it finishes,
-          // and a drain that wants to start blocks until we finish.
-          await runSessionExclusive(agentId, () => sendTmuxEnter(tmuxSession));
+      // hooks pre-resolve every permission decision). agy has its OWN fallback
+      // answers below (trust card + survey) with different strings, so it is
+      // excluded here too. Gating on cli is explicit + skips the classify pass.
+      if (agentCli === "claude" && classifyClaudeStartupPrompt(output)) {
+        // Hold the session-write mutex around the accept so it can't interleave
+        // with a concurrent (e.g. fs.watch-driven) outbox drain — in EITHER
+        // direction: a drain in flight blocks us until it finishes, and a drain
+        // that wants to start blocks until we finish. RE-CAPTURE the CURRENT
+        // VISIBLE pane + RE-CLASSIFY under the mutex so a navigation sequence is
+        // keyed to the live pane, never a stale pre-mutex snapshot a drain may
+        // have superseded, and never a prompt that has already been answered and
+        // scrolled into the tick capture's history window. Returns whether a
+        // sequence was actually sent.
+        const sent = await runSessionExclusive(agentId, async () => {
+          const cur = await perAgentVisibleCaptureFn(tmuxSession);
+          const decision = cur === null ? null : classifyClaudeStartupPrompt(cur);
+          if (!decision) {
+            await logAgent(agentDir, "[watchdog] startup permission prompt not present in the live pane (stale history) — sending nothing");
+            return false;
+          }
+          await logAgent(agentDir, `[watchdog] Detected ${decision.kind} startup permission prompt — sending [${decision.keys.join(" ")}] to accept`);
+          await sendTmuxKeys(tmuxSession, decision.keys);
+          return true;
+        });
+        if (sent) {
+          // A prompt was live and we answered it — settle before re-reading.
           await sleepFn(POLL_INTERVAL_MS);
           continue;
         }
+        // The tick capture classified a prompt only from stale history; the live
+        // pane has none. Fall THROUGH to normal state handling rather than
+        // sleep+continue, so state processing is never starved by a phantom
+        // prompt that never clears from the history window.
       }
 
       // agy fallback answers (D10). The trust card is normally suppressed by the

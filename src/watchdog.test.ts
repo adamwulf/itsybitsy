@@ -35,6 +35,8 @@ import {
   resetPerAgentExistsSync,
   setPerAgentCaptureTmux,
   resetPerAgentCaptureTmux,
+  setPerAgentVisibleCaptureTmux,
+  resetPerAgentVisibleCaptureTmux,
   setPerAgentProbeTmuxSession,
   resetPerAgentProbeTmuxSession,
   setPerAgentProbeTmuxPane,
@@ -2804,6 +2806,9 @@ describe("runPerAgentWatchdog", () => {
       pollCount++;
       return tmuxOutput;
     });
+    // Default the visible re-capture to mirror the tick capture; accept-path
+    // tests override it to model the live pane independently of history.
+    setPerAgentVisibleCaptureTmux(async (_session: string) => tmuxOutput);
     setPerAgentProbeTmuxPane(async () => ({ status: "live" }));
     setPerAgentReadMeta(async (_dir: string) => ({
       meta: {
@@ -2839,6 +2844,7 @@ describe("runPerAgentWatchdog", () => {
   afterEach(() => {
     resetPerAgentExistsSync();
     resetPerAgentCaptureTmux();
+    resetPerAgentVisibleCaptureTmux();
     resetPerAgentProbeTmuxSession();
     resetPerAgentProbeTmuxPane();
     resetPerAgentReadMeta();
@@ -2939,33 +2945,29 @@ describe("runPerAgentWatchdog", () => {
     expect(isSessionWriteBusy("agent-err")).toBe(false);
   });
 
-  test("auto-accepts MCP server permissions prompt", async () => {
+  test("auto-accepts the NEW single-MCP prompt with Up, Up, Enter", async () => {
     const sentKeys: string[][] = [];
     setWatchdogSpawnRunner((cmd, _opts) => {
       sentKeys.push(cmd);
       return { stdout: new ReadableStream(), stderr: new ReadableStream(), exited: Promise.resolve(0) } as any;
     });
 
+    const singleMcp = [
+      "New MCP server found in this project: activepieces",
+      "",
+      "  1. Use this MCP server",
+      "  2. Use this and all future MCP servers in this project",
+      "  ❯ 3. Continue without using this MCP server",
+    ].join("\n");
     let captureCalls = 0;
     setPerAgentCaptureTmux(async (_session: string) => {
       captureCalls++;
-      if (captureCalls <= 2) {
-        // First two captures: MCP prompt visible
-        return [
-          "New MCP server found in .mcp.json: activepieces",
-          "",
-          "  ❯ 1. Use this and all future MCP servers in this project",
-          "    2. Use this MCP server",
-          "    3. Continue without using this MCP server",
-          "",
-          "  Enter to confirm · Esc to cancel",
-        ].join("\n");
-      }
-      // Third capture: prompt dismissed, show logo
+      if (captureCalls <= 1) return singleMcp;
       return "Claude Code v1.0.0\n[USER TASK]";
     });
+    setPerAgentVisibleCaptureTmux(async (_session: string) => singleMcp);
 
-    // Exit after 3 captures
+    // Exit after a few ticks
     let existsChecks = 0;
     setPerAgentExistsSync((_path: string) => {
       existsChecks++;
@@ -2977,41 +2979,41 @@ describe("runPerAgentWatchdog", () => {
 
     await runPerAgentWatchdog("agent-test1", "/tmp/test");
 
-    // Should have sent Enter via tmux send-keys at least once
-    const enterCmds = sentKeys.filter(
-      (cmd) => cmd.includes("send-keys") && cmd.includes("Enter"),
-    );
-    expect(enterCmds.length).toBeGreaterThanOrEqual(1);
+    // Exactly ONE send-keys: Up, Up, Enter (select "yes" — this server only).
+    const sendKeys = sentKeys.filter((c) => c.includes("send-keys"));
+    expect(sendKeys.length).toBe(1);
+    const cmd = sendKeys[0]!;
+    expect(cmd.filter((a) => a === "Up").length).toBe(2);
+    expect(cmd[cmd.length - 1]).toBe("Enter");
+    expect(cmd.includes("Down")).toBe(false);
   });
 
-  test("auto-accepts multi-MCP server permissions prompt", async () => {
+  test("auto-accepts the NEW multi-MCP checklist with N Downs then Enter", async () => {
     const sentKeys: string[][] = [];
     setWatchdogSpawnRunner((cmd, _opts) => {
       sentKeys.push(cmd);
       return { stdout: new ReadableStream(), stderr: new ReadableStream(), exited: Promise.resolve(0) } as any;
     });
 
+    const multiMcp = [
+      "3 new MCP servers found in this project",
+      "Select any you wish to enable.",
+      "",
+      "MCP servers may execute code or access system resources. All tool calls require approval.",
+      "",
+      "  ❯ [✔] granola",
+      "    [✔] activepieces",
+      "    [✔] essential-mcp",
+      "",
+      "  Enable selected",
+    ].join("\n");
     let captureCalls = 0;
     setPerAgentCaptureTmux(async (_session: string) => {
       captureCalls++;
-      if (captureCalls <= 2) {
-        // First two captures: multi-MCP checklist prompt visible
-        return [
-          "3 new MCP servers found in .mcp.json",
-          "Select any you wish to enable.",
-          "",
-          "MCP servers may execute code or access system resources. All tool calls require approval.",
-          "",
-          "  ❯ [✔] granola",
-          "    [✔] activepieces",
-          "    [✔] essential-mcp",
-          "",
-          " Space to select · Enter to confirm · Esc to reject all",
-        ].join("\n");
-      }
-      // Third capture: prompt dismissed, show logo
+      if (captureCalls <= 1) return multiMcp;
       return "Claude Code v1.0.0\n[USER TASK]";
     });
+    setPerAgentVisibleCaptureTmux(async (_session: string) => multiMcp);
 
     let existsChecks = 0;
     setPerAgentExistsSync((_path: string) => {
@@ -3023,27 +3025,68 @@ describe("runPerAgentWatchdog", () => {
 
     await runPerAgentWatchdog("agent-test1", "/tmp/test");
 
-    const enterCmds = sentKeys.filter(
-      (cmd) => cmd.includes("send-keys") && cmd.includes("Enter"),
-    );
-    expect(enterCmds.length).toBeGreaterThanOrEqual(1);
+    // Exactly ONE send-keys: 3 Downs (past the 3 preselected options onto the
+    // "Enable selected" submit) then Enter, all in a single burst.
+    const sendKeys = sentKeys.filter((c) => c.includes("send-keys"));
+    expect(sendKeys.length).toBe(1);
+    const cmd = sendKeys[0]!;
+    const downs = cmd.filter((a) => a === "Down").length;
+    expect(downs).toBe(3);
+    expect(cmd[cmd.length - 1]).toBe("Enter");
   });
 
-  test("auto-accepts workspace trust prompt", async () => {
+  test("stale trust prompt in history + clean visible pane → no keys, no starvation", async () => {
     const sentKeys: string[][] = [];
     setWatchdogSpawnRunner((cmd, _opts) => {
       sentKeys.push(cmd);
       return { stdout: new ReadableStream(), stderr: new ReadableStream(), exited: Promise.resolve(0) } as any;
     });
 
+    // TICK capture (history window) keeps showing an already-answered trust
+    // prompt in scrollback on EVERY tick...
+    let tickCaptures = 0;
+    setPerAgentCaptureTmux(async (_session: string) => {
+      tickCaptures++;
+      return "Do you trust the files in this folder?\n\nEnter to confirm · Esc to cancel\n(scrolled-away history)";
+    });
+    // ...but the authoritative VISIBLE pane is the running session — no prompt.
+    setPerAgentVisibleCaptureTmux(async (_session: string) => "Claude Code v1.0.0\n[USER TASK]\nrunning");
+
+    // Let the loop run three full ticks, then the worktree "disappears".
+    let existsChecks = 0;
+    setPerAgentExistsSync((_path: string) => {
+      existsChecks++;
+      return existsChecks <= 3;
+    });
+
+    setPerAgentReadState(async (_dir: string) => undefined);
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+
+    // No keys are ever sent for the phantom prompt...
+    expect(sentKeys.filter((c) => c.includes("send-keys")).length).toBe(0);
+    // ...and the loop is NOT starved: it fell through to normal processing each
+    // tick and exited on the worktree check (3 ticks captured, 4th exists=false).
+    expect(tickCaptures).toBeGreaterThanOrEqual(3);
+    expect(existsChecks).toBe(4);
+  });
+
+  test("auto-accepts a LEGACY workspace trust prompt with a bare Enter", async () => {
+    const sentKeys: string[][] = [];
+    setWatchdogSpawnRunner((cmd, _opts) => {
+      sentKeys.push(cmd);
+      return { stdout: new ReadableStream(), stderr: new ReadableStream(), exited: Promise.resolve(0) } as any;
+    });
+
+    const legacyTrust = "Do you trust the files in this folder?\n\nEnter to confirm · Esc to cancel";
     let captureCalls = 0;
     setPerAgentCaptureTmux(async (_session: string) => {
       captureCalls++;
-      if (captureCalls <= 1) {
-        return "Do you trust the files in this folder?\n\nEnter to confirm · Esc to cancel";
-      }
+      if (captureCalls <= 1) return legacyTrust;
       return "Claude Code v1.0.0\n[USER TASK]";
     });
+    // The authoritative visible re-capture also sees the live prompt.
+    setPerAgentVisibleCaptureTmux(async (_session: string) => legacyTrust);
 
     let existsChecks = 0;
     setPerAgentExistsSync((_path: string) => {
@@ -3059,6 +3102,48 @@ describe("runPerAgentWatchdog", () => {
       (cmd) => cmd.includes("send-keys") && cmd.includes("Enter"),
     );
     expect(enterCmds.length).toBeGreaterThanOrEqual(1);
+    // Legacy layout: a BARE Enter, never navigation keys.
+    expect(enterCmds.every((c) => !c.includes("Down") && !c.includes("Up"))).toBe(true);
+  });
+
+  test("auto-accepts the NEW 2.1.259 trust prompt with Down then Enter", async () => {
+    const sentKeys: string[][] = [];
+    setWatchdogSpawnRunner((cmd, _opts) => {
+      sentKeys.push(cmd);
+      return { stdout: new ReadableStream(), stderr: new ReadableStream(), exited: Promise.resolve(0) } as any;
+    });
+
+    const newTrust = [
+      "Do you trust the files in this folder?",
+      "  ❯ No, exit",
+      "    Yes, I trust this folder",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    let captureCalls = 0;
+    setPerAgentCaptureTmux(async (_session: string) => {
+      captureCalls++;
+      if (captureCalls <= 1) return newTrust;
+      return "Claude Code v1.0.0\n[USER TASK]";
+    });
+    setPerAgentVisibleCaptureTmux(async (_session: string) => newTrust);
+
+    let existsChecks = 0;
+    setPerAgentExistsSync((_path: string) => {
+      existsChecks++;
+      return existsChecks <= 2;
+    });
+
+    setPerAgentReadState(async (_dir: string) => undefined);
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+
+    // Exactly ONE send-keys, and it is Down then Enter in a single burst.
+    const sendKeys = sentKeys.filter((c) => c.includes("send-keys"));
+    expect(sendKeys.length).toBe(1);
+    const cmd = sendKeys[0]!;
+    expect(cmd.includes("Down")).toBe(true);
+    expect(cmd.includes("Enter")).toBe(true);
+    expect(cmd.indexOf("Down")).toBeLessThan(cmd.indexOf("Enter"));
   });
 
   test("exits when worktree directory is removed", async () => {

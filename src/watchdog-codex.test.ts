@@ -29,6 +29,8 @@ import {
   resetPerAgentExistsSync,
   setPerAgentCaptureTmux,
   resetPerAgentCaptureTmux,
+  setPerAgentVisibleCaptureTmux,
+  resetPerAgentVisibleCaptureTmux,
   setPerAgentProbeTmuxPane,
   resetPerAgentProbeTmuxPane,
   setPerAgentReadMeta,
@@ -284,6 +286,7 @@ describe("Phase 6 — runPerAgentWatchdog permission-accept gating", () => {
 
     setPerAgentExistsSync((_path: string) => worktreeExists);
     setPerAgentCaptureTmux(async (_session: string) => tmuxOutput);
+    setPerAgentVisibleCaptureTmux(async (_session: string) => tmuxOutput);
     setPerAgentProbeTmuxPane(async () => ({ status: "live" }));
     setWatchdogNow(() => currentTime);
     setPerAgentSleep(async () => {});
@@ -296,6 +299,7 @@ describe("Phase 6 — runPerAgentWatchdog permission-accept gating", () => {
   afterEach(() => {
     resetPerAgentExistsSync();
     resetPerAgentCaptureTmux();
+    resetPerAgentVisibleCaptureTmux();
     resetPerAgentProbeTmuxPane();
     resetPerAgentReadMeta();
     resetPerAgentSleep();
@@ -375,11 +379,12 @@ describe("Phase 6 — runPerAgentWatchdog permission-accept gating", () => {
     }));
 
     // Switch capture so the prompt clears after one accept (otherwise the
-    // 'continue' branch loops indefinitely).
+    // 'continue' branch loops indefinitely). Both the tick capture AND the
+    // under-mutex re-capture must still see the prompt for the send to fire.
     let captureCalls = 0;
     setPerAgentCaptureTmux(async (_session: string) => {
       captureCalls++;
-      if (captureCalls <= 1) return tmuxOutput;
+      if (captureCalls <= 2) return tmuxOutput;
       return "Claude Code v1.0.0\n[USER TASK]";
     });
 
@@ -425,7 +430,7 @@ describe("Phase 6 — runPerAgentWatchdog permission-accept gating", () => {
     let captureCalls = 0;
     setPerAgentCaptureTmux(async (_session: string) => {
       captureCalls++;
-      if (captureCalls <= 1) return tmuxOutput;
+      if (captureCalls <= 2) return tmuxOutput;
       return "Claude Code v1.0.0\n[USER TASK]";
     });
 

@@ -40,7 +40,7 @@ import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { SplitPane } from "./split-pane";
 import { wordWrapLines, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
 import type { ChromeSlice } from "./wrap";
-import { fetchCodexUsage, fetchUsage } from "../usage";
+import { fetchCodexUsage, fetchGeminiUsage, fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
 import { AgentTreeComponent, nextRepoFilter } from "./agent-tree";
@@ -369,6 +369,8 @@ class StatusBarComponent implements Component {
   errorCount = 0;
   claudeUsage: UsageData | null = null;
   claudeUsageError = false;
+  geminiUsage: UsageData | null = null;
+  geminiUsageError = false;
   codexUsage: UsageData | null = null;
   codexUsageError = false;
   version = "";
@@ -385,11 +387,13 @@ class StatusBarComponent implements Component {
       ? `  ${BOLD}${RED}[${this.errorCount} errors]${RESET}${DIM}`
       : "";
     const claudeUsageStr = this.formatUsage("claude", this.claudeUsage, this.claudeUsageError);
+    const geminiUsageStr = this.formatUsage("gemini", this.geminiUsage, this.geminiUsageError);
     const codexUsageStr = this.formatUsage("codex", this.codexUsage, this.codexUsageError);
     const now = new Date();
     const timeStr = now.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
     const versionStr = this.version ? `v${this.version}` : "";
-    const row2Right = this.composeRight(codexUsageStr, versionStr ? `${DIM}${versionStr}${RESET}` : "");
+    const rightUsage = this.composeRight(geminiUsageStr, codexUsageStr);
+    const row2Right = this.composeRight(rightUsage, versionStr ? `${DIM}${versionStr}${RESET}` : "");
 
     let row1Left: string;
     let row2Left: string;
@@ -421,7 +425,7 @@ class StatusBarComponent implements Component {
     return primary || secondary;
   }
 
-  private formatUsage(label: "claude" | "codex", usage: UsageData | null, usageError: boolean): string {
+  private formatUsage(label: "claude" | "codex" | "gemini", usage: UsageData | null, usageError: boolean): string {
     const prefix = usageError ? "⚠️  " : "";
     if (!usage) {
       return usageError ? `${YELLOW}⚠️  ${label} usage unavailable${RESET}` : "";
@@ -1204,6 +1208,17 @@ export class DashboardComponent implements Component {
       })
       .catch(() => {
         this.statusBar.claudeUsageError = true;
+        this.tui?.requestRender();
+      });
+
+    fetchGeminiUsage()
+      .then((result) => {
+        this.statusBar.geminiUsage = result.data;
+        this.statusBar.geminiUsageError = result.error;
+        this.tui?.requestRender();
+      })
+      .catch(() => {
+        this.statusBar.geminiUsageError = true;
         this.tui?.requestRender();
       });
 

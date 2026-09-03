@@ -3970,6 +3970,62 @@ describe("usage error indicator", () => {
     expect(statusRows[1]).toContain("codex session:4%");
     expect(statusRows[1]).toContain("weekly:1%");
   });
+
+  test("shows gemini usage to the left of codex usage on the second status row", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-1", "/repos/a");
+    const flatList: FlatEntry[] = [
+      makeFlatRepoHeader("a", "/repos/a", true),
+      makeFlatAgent(agent, { connector: "└── " }),
+    ];
+    dashboard.onUpdate([agent], flatList, []);
+
+    (dashboard as any).statusBar.geminiUsage = { sessionPct: 1, weeklyPct: 0, sessionReset: "9h 53m", weeklyReset: "7d 4h" };
+    (dashboard as any).statusBar.geminiUsageError = false;
+    (dashboard as any).statusBar.codexUsage = { sessionPct: 4, weeklyPct: 1, sessionReset: "5h 0m", weeklyReset: "7d 0h" };
+    (dashboard as any).statusBar.codexUsageError = false;
+
+    const lines = dashboard.render(180);
+    const statusRows = lines.slice(-2).map(l => stripAnsi(l));
+    expect(statusRows[1]).toContain("gemini session:1%");
+    expect(statusRows[1]).toContain("codex session:4%");
+    expect(statusRows[1]!.indexOf("gemini")).toBeLessThan(statusRows[1]!.indexOf("codex"));
+  });
+
+  test("shows only weekly gemini usage when user has no session limits", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-1", "/repos/a");
+    const flatList: FlatEntry[] = [
+      makeFlatRepoHeader("a", "/repos/a", true),
+      makeFlatAgent(agent, { connector: "└── " }),
+    ];
+    dashboard.onUpdate([agent], flatList, []);
+
+    (dashboard as any).statusBar.geminiUsage = { sessionPct: null, weeklyPct: 15, sessionReset: null, weeklyReset: "7d 4h" };
+    (dashboard as any).statusBar.geminiUsageError = false;
+
+    const lines = dashboard.render(160);
+    const statusRows = lines.slice(-2).map(l => stripAnsi(l));
+    expect(statusRows[1]).toContain("gemini weekly:15%");
+    expect(statusRows[1]).not.toContain("gemini session:");
+  });
+
+  test("shows gemini usage unavailable when error with no data", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-1", "/repos/a");
+    const flatList: FlatEntry[] = [
+      makeFlatRepoHeader("a", "/repos/a", true),
+      makeFlatAgent(agent, { connector: "└── " }),
+    ];
+    dashboard.onUpdate([agent], flatList, []);
+
+    (dashboard as any).statusBar.geminiUsage = null;
+    (dashboard as any).statusBar.geminiUsageError = true;
+
+    const lines = dashboard.render(160);
+    const statusRows = lines.slice(-2).map(l => stripAnsi(l));
+    expect(statusRows[1]).toContain("⚠️  gemini usage unavailable");
+  });
 });
 
 describe("applyLayout", () => {

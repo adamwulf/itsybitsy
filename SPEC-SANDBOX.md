@@ -641,11 +641,17 @@ so a rawAllow line carrying `file-read*` or `file-write*` can make the live
 kernel wider than the resolver predicts; the validator already warns on a
 catch-all rawAllow (`(allow default)`, `(allow file-read*)`,
 `(allow file-write*)`) for exactly that reason. The one sanctioned rawAllow a
-later piece adds is the mandatory root-directory listing `(allow file-read-data
-(literal "/"))`, which permits the `readdir` of the root node only; the resolver
-does not model it, so `resolvePathAccess("/", "read")` returns `deny` while the
-kernel permits that single listing. No other rawAllow line is expected to widen
-filesystem access, and any that does is outside the resolver's contract.
+later piece (A3) adds is the mandatory root-directory listing `(allow
+file-read-data (literal "/"))`. Today `/` is still an `allowRead` floor entry in
+`_all.md`, so the resolver and the kernel agree on root reads:
+`resolvePathAccess("/", "read")` returns `allow` and the profile emits `(allow
+file-read* (subpath "/"))`. When the floor drops `/` from `allowRead` and
+carries the mandatory root listing as the rawAllow line `(allow file-read-data
+(literal "/"))` instead, the resolver will report `deny` for a read of `/` itself
+while the kernel permits only the directory listing of the root node; this is the
+one sanctioned divergence and is not modelled on purpose. No other rawAllow line
+is expected to widen filesystem access, and any that does is outside the
+resolver's contract.
 
 ## 4B. Codex: disable its built-in sandbox, use ours (Adam's call)
 
@@ -1210,8 +1216,11 @@ a review cycle (2 worker reviewers) before merge.
   live macOS nested probe share and verify this contract (§4A.8).
 - ✅ **Resolver models the paths table only (Adam, 2026-09-02).**
   `resolvePathAccess()` covers `allowRead`/`allowWrite`/`deny`/runtime roots, not
-  `sandbox.rawAllow`; the sole sanctioned widening it does not model is the
-  mandatory `(allow file-read-data (literal "/"))` root listing (§4A.8).
+  `sandbox.rawAllow`. Today `/` is an `allowRead` floor entry, so resolver and
+  kernel agree on root reads; the sole sanctioned widening it will not model
+  arrives only when the floor drops `/` from `allowRead` and carries the
+  mandatory root listing as the rawAllow line `(allow file-read-data (literal
+  "/"))` instead (§4A.8).
 - ✅ **`allowedPaths` relationship (Adam, 2026-09-02):** it remains an
   independent legacy hook-layer field until Phase B. Kernel `paths:` never
   derives from it.

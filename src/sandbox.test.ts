@@ -851,11 +851,17 @@ describe("most-specific filesystem access oracle", () => {
         { label: "glob-read/deep-md-writable", path: globDeepMd },
       ];
       const table: PathAccessTable = sandboxPathAccessTable(livePaths, params);
-      // "/" is a read-only ancestor in the floor: a path under no deeper entry is
-      // readable but not writable. A live kernel probe of that arm would have to
-      // touch a real, unpredictable system path outside every temp tree, so it is
-      // asserted against the resolver here; the SBPL-evaluator oracle exercises
-      // "/" end to end, and the "~" read-only ancestor is kernel-probed below.
+      // Today "/" is an allowRead floor entry, so it is a read-only ancestor: a
+      // path under it with no deeper entry is readable but not writable, and the
+      // resolver and kernel agree on root reads. A live kernel probe of that arm
+      // would have to touch a real, unpredictable system path outside every temp
+      // tree, so it is asserted against the resolver here; the SBPL-evaluator
+      // oracle exercises "/" end to end, and the "~" read-only ancestor is
+      // kernel-probed below. (Only when a later piece drops "/" from allowRead and
+      // carries the root listing as the rawAllow line
+      // (allow file-read-data (literal "/")) instead does a read of "/" itself
+      // become the one sanctioned resolver/kernel divergence — deny in the
+      // resolver, list-only in the kernel — per SPEC-SANDBOX.md 4A.8.)
       expect(resolvePathAccess("/Applications/itsybitsy-nonexistent-probe", "read", table)).toBe("allow");
       expect(resolvePathAccess("/Applications/itsybitsy-nonexistent-probe", "write", table)).toBe("deny");
       const results: string[] = [];

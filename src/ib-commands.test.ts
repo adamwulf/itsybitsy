@@ -5721,8 +5721,8 @@ describe("newAgent (native)", () => {
     await mkdir(join(tempDir, ".claude"), { recursive: true });
     await Bun.write(join(tempDir, ".claude", "settings.json"), JSON.stringify({
       permissions: {
-        allow: ["Bash(ib:*)", "Read", "Glob", "Grep", "LS"],
-        deny: ["Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch",
+        allow: ["Bash(ib:*)", "Bash(ls:*)", "Read", "Glob", "Grep"],
+        deny: ["Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch",
                "Task", "TaskCreate", "TaskOutput", "Agent", "KillShell",
                "EnterPlanMode", "ExitPlanMode"],
       },
@@ -5734,10 +5734,11 @@ describe("newAgent (native)", () => {
     const settingsPath = join(agentsDir, "test-no-inherit-deny", "repo", ".claude", "settings.local.json");
     const settings = await Bun.file(settingsPath).json();
 
-    // Agent should have Write/Edit in allow (from ibPerms), NOT in deny
+    // Agent should have current regular-agent defaults in allow, NOT in deny
     expect(settings.permissions.allow).toContain("Write");
     expect(settings.permissions.allow).toContain("Edit");
-    expect(settings.permissions.allow).toContain("MultiEdit");
+    expect(settings.permissions.allow).not.toContain("MultiEdit");
+    expect(settings.permissions.allow).not.toContain("LS");
     expect(settings.permissions.allow).toContain("NotebookEdit");
     expect(settings.permissions.allow).toContain("Agent");
     expect(settings.permissions.allow).toContain("Task");

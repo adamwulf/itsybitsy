@@ -75,6 +75,11 @@ interface OrderedPathEntry {
   op: PathOperation;
   specificity: number;
   parameterName?: string;
+  /**
+   * Glob matcher compiled once when the entry is built (prepare time), so a
+   * resolver never rebuilds a RegExp per lookup. Undefined for plain entries.
+   */
+  regex?: RegExp;
 }
 
 /**
@@ -436,6 +441,7 @@ function orderedPathEntry(
     op,
     specificity: pathSpecificity(compiled),
     parameterName,
+    regex: compiled.kind === "glob" ? new RegExp(compiled.value) : undefined,
   };
 }
 
@@ -487,10 +493,11 @@ function sortedDenyEntries(entries: string[]): OrderedPathEntry[] {
     .sort(compareOrderedPathEntries);
 }
 
-function compiledPathMatches(compiled: CompiledPath, absolutePath: string): boolean {
-  if (compiled.kind === "glob") return new RegExp(compiled.value).test(absolutePath);
-  if (compiled.value === "/") return absolutePath.startsWith("/");
-  return absolutePath === compiled.value || absolutePath.startsWith(`${compiled.value}/`);
+function orderedEntryMatches(entry: OrderedPathEntry, absolutePath: string): boolean {
+  if (entry.compiled.kind === "glob") return entry.regex!.test(absolutePath);
+  const value = entry.compiled.value;
+  if (value === "/") return absolutePath.startsWith("/");
+  return absolutePath === value || absolutePath.startsWith(`${value}/`);
 }
 
 /**
@@ -519,8 +526,11 @@ export function prepareAccessTable(
 }
 
 /**
- * Resolve access against an already-prepared table. Inputs are canonical
- * absolute paths/patterns; deny wins at every depth. Read-only of `prepared`:
+ * Resolve access against an already-prepared table. The input must be absolute;
+ * it is canonicalized here the same way table entries are (longest existing
+ * prefix via canonicalizeSandboxPath), so a caller passing `/tmp/x` resolves
+ * identically to `/private/tmp/x` and the canonical-input contract is enforced,
+ * not merely documented. Deny wins at every depth. Read-only of `prepared`:
  * resolving never mutates the sorted entries, so one prepared table serves any
  * number of lookups.
  */
@@ -530,15 +540,16 @@ export function resolvePreparedAccess(
   op: PathOperation,
 ): "allow" | "deny" {
   if (!absolutePath.startsWith("/")) {
-    throw new Error(`resolvePreparedAccess requires a canonical absolute path, got "${absolutePath}"`);
+    throw new Error(`resolvePreparedAccess requires an absolute path, got "${absolutePath}"`);
   }
+  const canonical = canonicalizeSandboxPath(absolutePath);
 
-  if (prepared.deny.some((entry) => compiledPathMatches(entry.compiled, absolutePath))) {
+  if (prepared.deny.some((entry) => orderedEntryMatches(entry, canonical))) {
     return "deny";
   }
 
   const matching = prepared.allow
-    .filter((entry) => compiledPathMatches(entry.compiled, absolutePath));
+    .filter((entry) => orderedEntryMatches(entry, canonical));
   const winner = matching.at(-1);
   if (!winner) return "deny";
   if (op === "read") return "allow";
@@ -548,13 +559,18 @@ export function resolvePreparedAccess(
 /**
  * Resolve access from the same sorted table that drives SBPL emission. A thin
  * wrapper that prepares then resolves; prefer prepareAccessTable +
- * resolvePreparedAccess when resolving many paths against one table.
+ * resolvePreparedAccess when resolving many paths against one table. Guards the
+ * absolute-path requirement here too, so a relative-path caller of this
+ * function gets an error naming this function rather than the delegate.
  */
 export function resolvePathAccess(
   absolutePath: string,
   op: PathOperation,
   table: PathAccessTable,
 ): "allow" | "deny" {
+  if (!absolutePath.startsWith("/")) {
+    throw new Error(`resolvePathAccess requires an absolute path, got "${absolutePath}"`);
+  }
   return resolvePreparedAccess(prepareAccessTable(table), absolutePath, op);
 }
 

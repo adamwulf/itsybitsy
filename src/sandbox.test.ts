@@ -899,6 +899,30 @@ describe("most-specific filesystem access oracle", () => {
   });
 });
 
+describe("resolver input contract", () => {
+  test("each entry point rejects relative input with an error naming itself", () => {
+    const table = sandboxPathAccessTable(EMPTY_PATHS, PARAMS);
+    expect(() => resolvePathAccess("relative/path", "read", table))
+      .toThrow("resolvePathAccess requires an absolute path");
+    const prepared = prepareAccessTable(table);
+    expect(() => resolvePreparedAccess(prepared, "relative/path", "read"))
+      .toThrow("resolvePreparedAccess requires an absolute path");
+  });
+
+  test("the target is canonicalized so /tmp and /private/tmp resolve identically", () => {
+    // The write root is canonical (/private/tmp/…). A Phase B caller passing the
+    // /tmp spelling must resolve the same, not silently deny — the resolver
+    // canonicalizes the input the same way the table entries were canonicalized.
+    const table = sandboxPathAccessTable(paths({ allowWrite: ["/private/tmp/canon-agree"] }), PARAMS);
+    for (const op of ["read", "write"] as const) {
+      const viaTmp = resolvePathAccess("/tmp/canon-agree/file", op, table);
+      const viaPrivate = resolvePathAccess("/private/tmp/canon-agree/file", op, table);
+      expect(viaTmp).toBe("allow");
+      expect(viaTmp).toBe(viaPrivate);
+    }
+  });
+});
+
 describe("sandbox config resolution", () => {
   test("an omitted sandbox block resolves to disabled kernel settings", () => {
     expect(resolveSandboxConfig({})).toEqual({

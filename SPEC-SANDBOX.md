@@ -634,6 +634,19 @@ probe also compiles the generated profile using the production preflight shape
 and executes nested read/write probes with real `sandbox-exec`, proving that the
 kernel behavior matches the oracle rather than merely assuming it.
 
+**Resolver boundary.** `resolvePathAccess()` models the `paths` table only —
+`allowRead`, `allowWrite`, `deny`, and the runtime roots — and deliberately does
+not model `sandbox.rawAllow`. rawAllow is the verbatim SBPL escape hatch (§5.1),
+so a rawAllow line carrying `file-read*` or `file-write*` can make the live
+kernel wider than the resolver predicts; the validator already warns on a
+catch-all rawAllow (`(allow default)`, `(allow file-read*)`,
+`(allow file-write*)`) for exactly that reason. The one sanctioned rawAllow a
+later piece adds is the mandatory root-directory listing `(allow file-read-data
+(literal "/"))`, which permits the `readdir` of the root node only; the resolver
+does not model it, so `resolvePathAccess("/", "read")` returns `deny` while the
+kernel permits that single listing. No other rawAllow line is expected to widen
+filesystem access, and any that does is outside the resolver's contract.
+
 ## 4B. Codex: disable its built-in sandbox, use ours (Adam's call)
 
 **Decision (Adam, 2026-07-17): a sandboxed codex agent runs codex in its own
@@ -1195,6 +1208,10 @@ a review cycle (2 worker reviewers) before merge.
   are sorted by resolved `-D` value rather than emitted first; each read entry
   emits an explicit write deny. The generator, pure resolver, SBPL oracle, and
   live macOS nested probe share and verify this contract (§4A.8).
+- ✅ **Resolver models the paths table only (Adam, 2026-09-02).**
+  `resolvePathAccess()` covers `allowRead`/`allowWrite`/`deny`/runtime roots, not
+  `sandbox.rawAllow`; the sole sanctioned widening it does not model is the
+  mandatory `(allow file-read-data (literal "/"))` root listing (§4A.8).
 - ✅ **`allowedPaths` relationship (Adam, 2026-09-02):** it remains an
   independent legacy hook-layer field until Phase B. Kernel `paths:` never
   derives from it.

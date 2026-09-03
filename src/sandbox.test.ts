@@ -727,6 +727,20 @@ describe("most-specific filesystem access oracle", () => {
       const outsideWriteFile = join(outsideHome, "plain.txt"); // /private/var/folders allowWrite
       const outsideReadOnlyDir = join(outsideHome, "readonly");
       const outsideReadOnlyFile = join(outsideReadOnlyDir, "file.txt"); // read-only under write ancestor (R2)
+      // N3 glob arms: one writable tree proves the JS→Seatbelt regex translation
+      // against the real kernel regex engine. A deny glob (**/.env under the
+      // tree) and an allowRead glob (globs/*.md, a read-only hole punched into a
+      // plain write root) both compile to (regex #"…"); every file below asserts
+      // agreement with resolvePathAccess.
+      const globTree = join(root, "examples/glob-tree");     // plain allowWrite root
+      const globDenyEnv = join(globTree, "**/.env");         // deny glob (globstar)
+      const globReadMd = join(globTree, "globs/*.md");       // allowRead glob (single *)
+      const globTreeEnv = join(globTree, ".env");            // denied: **/.env, zero dirs
+      const globTreeSubEnv = join(globTree, "sub/.env");     // denied: **/.env, one dir
+      const globTreeSubNotes = join(globTree, "sub/notes.txt"); // writable: no glob matches
+      const globMdReadOnly = join(globTree, "globs/a.md");   // read-only via globs/*.md
+      const globTxtWritable = join(globTree, "globs/a.txt"); // writable: *.md misses .txt
+      const globDeepMd = join(globTree, "globs/deep/b.md");  // writable: * never crosses /
       const files = [
         exampleOneImportant,
         exampleOneOther,
@@ -745,6 +759,12 @@ describe("most-specific filesystem access oracle", () => {
         outsideWriteFile,
         outsideReadOnlyFile,
         tmpWriteProbe,
+        globTreeEnv,
+        globTreeSubEnv,
+        globTreeSubNotes,
+        globMdReadOnly,
+        globTxtWritable,
+        globDeepMd,
       ];
       for (const file of files) {
         await mkdir(dirname(file), { recursive: true });
@@ -758,8 +778,10 @@ describe("most-specific filesystem access oracle", () => {
           join(root, "Developer"),
           dirname(tieFile),
           outsideReadOnlyDir,
+          globReadMd,
         ],
-        allowWrite: [exampleOneRoot, join(exampleTwoRoot, "Documents"), dirname(tieFile)],
+        allowWrite: [exampleOneRoot, join(exampleTwoRoot, "Documents"), dirname(tieFile), globTree],
+        deny: [globDenyEnv],
       });
       // Union the _all.md floor with the fixture layer exactly as a real spawn
       // merges inheritance layers, then hand the merged config to the same
@@ -816,6 +838,17 @@ describe("most-specific filesystem access oracle", () => {
         { label: "floor/var-folders-write", path: outsideWriteFile },
         { label: "floor/read-only-under-write-ancestor", path: outsideReadOnlyFile },
         { label: "floor/private-tmp-write", path: tmpWriteProbe },
+        // N3 (a): deny glob **/.env matches the tree root and a nested dir, but
+        // never a sibling non-.env file, which stays writable under the tree.
+        { label: "glob-deny/env-zero-dir", path: globTreeEnv },
+        { label: "glob-deny/env-nested", path: globTreeSubEnv },
+        { label: "glob-deny/sibling-writable", path: globTreeSubNotes },
+        // N3 (b): allowRead glob globs/*.md is a read-only hole in the write
+        // root; a non-matching .txt stays writable, and single * never crosses
+        // a segment so a deeper .md stays writable.
+        { label: "glob-read/md-read-only", path: globMdReadOnly },
+        { label: "glob-read/txt-writable", path: globTxtWritable },
+        { label: "glob-read/deep-md-writable", path: globDeepMd },
       ];
       const table: PathAccessTable = sandboxPathAccessTable(livePaths, params);
       // "/" is a read-only ancestor in the floor: a path under no deeper entry is

@@ -29,13 +29,19 @@ describe("KNOWN_MODELS", () => {
     expect(clis.has("agy")).toBe(true);
   });
 
-  test("includes the five Antigravity (agy) selectors from SPEC §4.1", () => {
+  test("includes the current Antigravity (agy) selectors from `agy models`", () => {
     const selectors = new Set(KNOWN_MODELS.map((m) => `${m.cli}:${m.model}`));
-    expect(selectors.has("agy:gemini-3.7-flash-high")).toBe(true);
-    expect(selectors.has("agy:gemini-3.7-flash-low")).toBe(true);
+    // The itsybitsy sentinel that omits --model/--effort (agy's own default).
+    expect(selectors.has("agy:default")).toBe(true);
+    // Current-generation Gemini Flash (all three efforts) + Pro + non-Gemini.
+    expect(selectors.has("agy:gemini-3.8-flash-high")).toBe(true);
+    expect(selectors.has("agy:gemini-3.8-flash-medium")).toBe(true);
+    expect(selectors.has("agy:gemini-3.8-flash-low")).toBe(true);
     expect(selectors.has("agy:gemini-3.1-pro-high")).toBe(true);
+    expect(selectors.has("agy:gemini-3.1-pro-low")).toBe(true);
     expect(selectors.has("agy:claude-sonnet-4-6")).toBe(true);
     expect(selectors.has("agy:claude-opus-4-6-thinking")).toBe(true);
+    expect(selectors.has("agy:gpt-oss-120b-medium")).toBe(true);
   });
 
   test("includes current GPT-5.6 codex selectors", () => {

@@ -51,14 +51,26 @@ export const KNOWN_MODELS: KnownModel[] = [
   // (no remapping).
   { cli: "fugu", model: "fugu", description: "Sakana Fugu — routed multi-agent model" },
   { cli: "fugu", model: "fugu-ultra", description: "Sakana Fugu Ultra — higher-capability routed model" },
-  // Antigravity CLI (`agy`) — the slug is the first column of `agy models` and
-  // is passed verbatim to `--model` (SPEC-ANTIGRAVITY-CLI.md §4.1). Gemini slugs
-  // encode reasoning effort as a trailing `-low`/`-high` segment; Claude-backed
-  // slugs do not. Discovery only — never a spawn-time allow-list.
+  // Antigravity CLI (`agy`) — mirrors the `agy models` catalogue (first column
+  // = slug), passed verbatim to `--model` (SPEC-ANTIGRAVITY-CLI.md §4.1). Gemini
+  // slugs encode reasoning effort as a trailing `-low`/`-medium`/`-high`
+  // segment; Claude- and gpt-oss-backed slugs do not. `agy:default` is the
+  // itsybitsy sentinel (no `--model`/`--effort` → agy's own default model).
+  // Discovery only — never a spawn-time allow-list; refresh when `agy models`
+  // changes (last synced 2026-09-03).
   { cli: "agy", model: "default", description: "Agy's own default model — no --model/--effort passed (currently Gemini 3.8 Flash High)" },
-  { cli: "agy", model: "gemini-3.7-flash-high", description: "Gemini 3.7 Flash (high effort) via Antigravity" },
-  { cli: "agy", model: "gemini-3.7-flash-low", description: "Gemini 3.7 Flash (low effort) via Antigravity" },
-  { cli: "agy", model: "gemini-3.1-pro-high", description: "Gemini 3.1 Pro (high effort) via Antigravity" },
-  { cli: "agy", model: "claude-sonnet-4-6", description: "Claude Sonnet 4.6 via Antigravity" },
-  { cli: "agy", model: "claude-opus-4-6-thinking", description: "Claude Opus 4.6 (thinking) via Antigravity" },
+  { cli: "agy", model: "gemini-3.8-flash-high", description: "Gemini 3.8 Flash (High) via Antigravity" },
+  { cli: "agy", model: "gemini-3.8-flash-medium", description: "Gemini 3.8 Flash (Medium) via Antigravity" },
+  { cli: "agy", model: "gemini-3.8-flash-low", description: "Gemini 3.8 Flash (Low) via Antigravity" },
+  { cli: "agy", model: "gemini-3.7-flash-high", description: "Gemini 3.7 Flash (High) via Antigravity" },
+  { cli: "agy", model: "gemini-3.7-flash-medium", description: "Gemini 3.7 Flash (Medium) via Antigravity" },
+  { cli: "agy", model: "gemini-3.7-flash-low", description: "Gemini 3.7 Flash (Low) via Antigravity" },
+  { cli: "agy", model: "gemini-3.6-flash-high", description: "Gemini 3.6 Flash (High) via Antigravity" },
+  { cli: "agy", model: "gemini-3.6-flash-medium", description: "Gemini 3.6 Flash (Medium) via Antigravity" },
+  { cli: "agy", model: "gemini-3.6-flash-low", description: "Gemini 3.6 Flash (Low) via Antigravity" },
+  { cli: "agy", model: "gemini-3.1-pro-high", description: "Gemini 3.1 Pro (High) via Antigravity" },
+  { cli: "agy", model: "gemini-3.1-pro-low", description: "Gemini 3.1 Pro (Low) via Antigravity" },
+  { cli: "agy", model: "claude-sonnet-4-6", description: "Claude Sonnet 4.6 (Thinking) via Antigravity" },
+  { cli: "agy", model: "claude-opus-4-6-thinking", description: "Claude Opus 4.6 (Thinking) via Antigravity" },
+  { cli: "agy", model: "gpt-oss-120b-medium", description: "GPT-OSS 120B (Medium) via Antigravity" },
 ];

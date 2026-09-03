@@ -50,7 +50,7 @@ Non-goals (v1): no headless `-p` loop; no terminal sandbox; no `agy` custom agen
 
 - `AgentCli` gains `"agy"`; `KNOWN_CLIS` gains `"agy"`; error messages list `claude, codex, fugu, agy`.
 - `mapEffortForAgy(effort)` = same table as `mapEffortForCodex`. `agySlugHasEffort(slug)` = `/-(low|medium|high)$/`.
-- `src/known-models.ts`: add `agy:default` (the D1 sentinel), `agy:gemini-3.7-flash-high`, `agy:gemini-3.7-flash-low`, `agy:gemini-3.1-pro-high`, `agy:claude-sonnet-4-6`, `agy:claude-opus-4-6-thinking` with descriptions; discovery only, never a spawn-time allow-list.
+- `src/known-models.ts`: mirror the `agy models` catalogue — `agy:default` (the D1 sentinel) plus every reported slug (`gemini-3.8/3.7/3.6-flash-{high,medium,low}`, `gemini-3.1-pro-{high,low}`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, `gpt-oss-120b-medium`) with descriptions; discovery only, never a spawn-time allow-list. Refresh when `agy models` changes.
 - `AGY_DEFAULT_MODEL` / `isAgyDefaultModel(slug)` in `src/agent-cli.ts` gate the sentinel; `agyModelAndEffortFlags(slug, effort)` in `src/agy-spawn.ts` returns `""` for it (no `--model`/`--effort`) and the D1 fragment otherwise.
 
 ### 4.2 Worktree files (`src/agy-config.ts`)

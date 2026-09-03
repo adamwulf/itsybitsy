@@ -719,7 +719,11 @@ describe("most-specific filesystem access oracle", () => {
       // above already stand in for AGENTDIR/WORKTREE/GITDIR; REPOAGENTS is a
       // read root, so a file directly under it (not under AGENTDIR) is read-only.
       const repoAgentsFile = join(params.REPOAGENTS, "registry.json");
-      const homeReadOnlyFile = join(root, "loose-home.txt"); // under "~" read ancestor
+      // The temp HOME (root) lives under /private/var/folders, an allowWrite
+      // floor. With "~" dropped from allowRead (A3), a loose file at the home
+      // root is no longer shadowed read-only by "~"; it is now governed by the
+      // /private/var/folders write floor, so it is read+write.
+      const homeVarFoldersWritable = join(root, "loose-home.txt");
       const homeClaudeWrite = join(root, ".claude/probe.txt"); // ~/.claude allowWrite
       const homeItsybitsyWrite = join(root, ".itsybitsy/agents/probe.txt"); // ~/.itsybitsy/agents allowWrite
       const homeItsybitsyRead = join(root, ".itsybitsy/state.json"); // ~/.itsybitsy read, write denied
@@ -752,7 +756,7 @@ describe("most-specific filesystem access oracle", () => {
         trapGitFile,
         trapSiblingFile,
         repoAgentsFile,
-        homeReadOnlyFile,
+        homeVarFoldersWritable,
         homeClaudeWrite,
         homeItsybitsyWrite,
         homeItsybitsyRead,
@@ -828,9 +832,11 @@ describe("most-specific filesystem access oracle", () => {
         { label: "trap/sibling", path: trapSiblingFile },
         { label: "tie", path: tieFile },
         // Row (c): the verbatim _all.md floor keeps every allowWrite root and
-        // runtime root writable while "/" and "~" stay read-only ancestors.
+        // runtime root writable. With "~" dropped from allowRead (A3), a loose
+        // file at the temp HOME root is governed by the /private/var/folders
+        // write floor it lives under, not by "~".
         { label: "floor/repoagents-read-only", path: repoAgentsFile },
-        { label: "floor/home-ancestor-read-only", path: homeReadOnlyFile },
+        { label: "floor/home-under-var-folders-writable", path: homeVarFoldersWritable },
         { label: "floor/home-claude-write", path: homeClaudeWrite },
         { label: "floor/home-itsybitsy-agents-write", path: homeItsybitsyWrite },
         { label: "floor/home-itsybitsy-read-only", path: homeItsybitsyRead },
@@ -851,18 +857,15 @@ describe("most-specific filesystem access oracle", () => {
         { label: "glob-read/deep-md-writable", path: globDeepMd },
       ];
       const table: PathAccessTable = sandboxPathAccessTable(livePaths, params);
-      // Today "/" is an allowRead floor entry, so it is a read-only ancestor: a
-      // path under it with no deeper entry is readable but not writable, and the
-      // resolver and kernel agree on root reads. A live kernel probe of that arm
-      // would have to touch a real, unpredictable system path outside every temp
-      // tree, so it is asserted against the resolver here; the SBPL-evaluator
-      // oracle exercises "/" end to end, and the "~" read-only ancestor is
-      // kernel-probed below. (Only when a later piece drops "/" from allowRead and
-      // carries the root listing as the rawAllow line
-      // (allow file-read-data (literal "/")) instead does a read of "/" itself
-      // become the one sanctioned resolver/kernel divergence — deny in the
-      // resolver, list-only in the kernel — per SPEC-SANDBOX.md 4A.8.)
-      expect(resolvePathAccess("/Applications/itsybitsy-nonexistent-probe", "read", table)).toBe("allow");
+      // The floor no longer lists "/" or "~" for reading (A3, Adam 2026-09-02):
+      // a read of "/" itself resolves to deny, and the kernel lists the root
+      // node only through the rawAllow line (allow file-read-data (literal
+      // "/")). That is the one sanctioned resolver/kernel divergence
+      // (SPEC-SANDBOX.md 4A.8), which resolvePathAccess does not model on
+      // purpose. A path under "/" with no deeper floor entry is now denied for
+      // both operations.
+      expect(resolvePathAccess("/", "read", table)).toBe("deny");
+      expect(resolvePathAccess("/Applications/itsybitsy-nonexistent-probe", "read", table)).toBe("deny");
       expect(resolvePathAccess("/Applications/itsybitsy-nonexistent-probe", "write", table)).toBe("deny");
       const results: string[] = [];
       for (const check of checks) {

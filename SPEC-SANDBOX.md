@@ -843,6 +843,34 @@ recommended. The deny is a runtime deny root (§4A.8), sorted with the config
 denies; the LIVE macOS probe proves a non-spawner is denied writing the socket
 while a `/private/tmp` sibling stays writable, and a spawner writes both.
 
+⚠️ **The file deny does NOT close the socket by itself.** Reaching the tmux
+server is a **unix-socket `connect()`**, which Seatbelt gates under
+`network-outbound`, not `file-read*`/`file-write*` — and `_all.md` carries a
+blanket `(allow network-outbound (remote unix-socket))`. So a non-spawner also
+gets a **scoped network-outbound deny** for the socket dir,
+`(deny network-outbound (remote unix-socket (subpath (param "TMUXSOCK"))))`,
+emitted after `rawAllow` so it last-match-wins over that blanket allow (verified
+live: `nc -U <socket>` connects with only the file deny; it fails once the
+network deny lands, while a unix socket outside the dir still connects). The
+socket dir is derived the way tmux resolves it (`resolveTmuxSocketDir`): the
+directory of `$TMUX`'s first field if set, else `${TMUX_TMPDIR:-/tmp}/tmux-<uid>`.
+
+⚠️ **Trust-boundary limitation, NOT closed in A3 (F2).** `AGENTDIR` is a kernel
+write root because the agent-session hooks write `meta.json` there
+(`writeAgentState`). `meta.canSpawnChildren` and `meta.agentType` therefore live
+inside a path the agent itself can write, and resume/respawn **re-derive** the
+runtime roots from `meta` (§4A.8). So a sandboxed non-spawner can, in principle,
+edit its own `meta.json` to set `canSpawnChildren: true` (or swap `agentType` to
+a spawning type) and then `ib respawn`/resume itself into a **spawner** profile —
+regaining the write REPOAGENTS/PARENTCLAUDE roots and the tmux socket. A3 does
+not prevent this; it is recorded here and in §4C.5 as a current limitation.
+**Planned closure (A4):** the profile inputs that decide the roots (`agentType`,
+`canSpawnChildren`, `paths`, `sandbox`) are recorded or signed at spawn by an
+**unsandboxed helper** — the same `tmux run-shell` path the watchdog spawn
+already uses (§4C.2) — under a path the `_all.md` `deny` list carves out of every
+agent's reach, and resume/respawn/refresh **fail-hard** on any mismatch between
+`meta` and that record. No code for this lands in A3.
+
 ### 4C.4 MCP servers
 
 stdio MCP servers are `claude` children → sandboxed. They need their interpreters
@@ -863,6 +891,19 @@ isolation story: **kernel = coarse walls + network deny; hook (`agent-path.ts`) 
 fine-grained cross-agent etiquette.** Still a big win over today (kernel-blocked
 secrets + a real domain allowlist), but §1 should not oversell worker-vs-worker
 filesystem isolation.
+
+⚠️ **The spawn keying is advisory, not tamper-proof, in A3 (F2).** Because
+`AGENTDIR` is agent-writable (hooks write `meta.json` there) and resume/respawn
+re-derive the runtime roots from `meta` (§4A.8, §4C.3), the `canSpawnChildren`
+keying — REPOAGENTS write, PARENTCLAUDE, and the tmux escape — is only as strong
+as `meta` is trustworthy. A sandboxed non-spawner can edit its own
+`meta.canSpawnChildren`/`agentType` and respawn into a spawner profile. So the
+kernel raises the bar (a non-spawner is genuinely fenced *until* it rewrites its
+own meta and respawns) but does not yet make the spawn boundary unforgeable. The
+A4 closure in §4C.3 — spawn inputs recorded/signed by an unsandboxed helper under
+an agent-unreachable path, with a fail-hard mismatch check on
+resume/respawn/refresh — is what makes it tamper-proof. Set expectations
+accordingly in §1.
 
 ## 5. Shipped components
 

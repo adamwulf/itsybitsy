@@ -606,15 +606,33 @@ describe("most-specific filesystem access oracle", () => {
 
     const createdRoot = await mkdtemp(join(tmpdir(), "itsybitsy-sandbox-live-"));
     const root = canonicalizeSandboxPath(createdRoot);
+    // A sibling temp tree that is NOT under HOME(=root). It lives under
+    // /private/var/folders, a WRITE ancestor in the full floor, so it exercises
+    // that write root and the "a read-only fixture dir deeper than the writable
+    // temp ancestor still wins" rule (R2) without the "~" entry shadowing the
+    // comparison the way it does everywhere under root.
+    const createdOutsideHome = await mkdtemp(join(tmpdir(), "itsybitsy-sandbox-live-outside-"));
+    const outsideHome = canonicalizeSandboxPath(createdOutsideHome);
+    // A unique probe target directly under the absolute /private/tmp write root.
+    const tmpWriteProbe = join("/private/tmp", `itsybitsy-sandbox-live-${crypto.randomUUID()}`);
     try {
       const baseline = parseAgentTypeFile(
         await Bun.file(join(import.meta.dir, "../docs/agent-types/_all.md")).text(),
       ).frontmatter;
       const baselinePaths = baseline.paths as PathsConfig;
       const baselineSandbox = baseline.sandbox as SandboxConfig;
-      // The executable/syscall floor belongs to _all.md. The live harness reads
-      // it instead of creating a second hardcoded floor in sandbox.ts.
-      const systemAllowRead = baselinePaths.allowRead.filter((entry) => entry.startsWith("/"));
+      // The ENTIRE _all.md paths floor is the harness floor: allowRead +
+      // allowWrite + deny, plus sandbox.rawAllow (below). It is unioned with the
+      // fixture layer exactly the way a real spawn merges inheritance layers, so
+      // /dev, /private/tmp, and /private/var/folders keep their allowWrite
+      // writability. The read probe redirects to /dev/null and MUST be able to
+      // open it; the earlier allowRead-only floor emitted (deny file-write*
+      // (subpath "/dev")) and broke that redirect.
+      const floorPaths: PathsConfig = {
+        allowRead: [...baselinePaths.allowRead],
+        allowWrite: [...baselinePaths.allowWrite],
+        deny: [...baselinePaths.deny],
+      };
 
       const exampleOneRoot = join(root, "examples/one/Documents");
       const exampleOneImportant = join(exampleOneRoot, "Important/file.txt");
@@ -634,6 +652,19 @@ describe("most-specific filesystem access oracle", () => {
       const trapWorktreeFile = join(params.WORKTREE, "src/file.txt");
       const trapGitFile = join(params.GITDIR, "index");
       const trapSiblingFile = join(root, "Developer/sibling/file.txt");
+      // Row (c): verbatim-floor writable roots stay writable and the "~"/floor
+      // read ancestors stay read-only. The runtime roots (params, temp dirs)
+      // above already stand in for AGENTDIR/WORKTREE/GITDIR; REPOAGENTS is a
+      // read root, so a file directly under it (not under AGENTDIR) is read-only.
+      const repoAgentsFile = join(params.REPOAGENTS, "registry.json");
+      const homeReadOnlyFile = join(root, "loose-home.txt"); // under "~" read ancestor
+      const homeClaudeWrite = join(root, ".claude/probe.txt"); // ~/.claude allowWrite
+      const homeItsybitsyWrite = join(root, ".itsybitsy/agents/probe.txt"); // ~/.itsybitsy/agents allowWrite
+      const homeItsybitsyRead = join(root, ".itsybitsy/state.json"); // ~/.itsybitsy read, write denied
+      const devNull = "/dev/null"; // /dev allowWrite root, already present
+      const outsideWriteFile = join(outsideHome, "plain.txt"); // /private/var/folders allowWrite
+      const outsideReadOnlyDir = join(outsideHome, "readonly");
+      const outsideReadOnlyFile = join(outsideReadOnlyDir, "file.txt"); // read-only under write ancestor (R2)
       const files = [
         exampleOneImportant,
         exampleOneOther,
@@ -644,22 +675,35 @@ describe("most-specific filesystem access oracle", () => {
         trapWorktreeFile,
         trapGitFile,
         trapSiblingFile,
+        repoAgentsFile,
+        homeReadOnlyFile,
+        homeClaudeWrite,
+        homeItsybitsyWrite,
+        homeItsybitsyRead,
+        outsideWriteFile,
+        outsideReadOnlyFile,
+        tmpWriteProbe,
       ];
       for (const file of files) {
         await mkdir(dirname(file), { recursive: true });
         await writeFile(file, "probe\n");
       }
 
-      const livePaths = paths({
+      const fixturePaths = paths({
         allowRead: [
-          ...systemAllowRead,
           join(exampleOneRoot, "Important"),
           exampleTwoRoot,
           join(root, "Developer"),
           dirname(tieFile),
+          outsideReadOnlyDir,
         ],
         allowWrite: [exampleOneRoot, join(exampleTwoRoot, "Documents"), dirname(tieFile)],
       });
+      // Union the _all.md floor with the fixture layer exactly as a real spawn
+      // merges inheritance layers, then hand the merged config to the same
+      // canonicalize/normalize path production uses (sandboxPathAccessTable,
+      // generateProfile, sandboxProfileParameterValues, resolvePathAccess).
+      const livePaths = mergeFixtureLayers([floorPaths, fixturePaths]);
       const liveConfig = config({ rawAllow: baselineSandbox.rawAllow });
       const profile = generateProfile(liveConfig, livePaths, params);
       const profilePath = join(root, "live.sb");
@@ -667,6 +711,16 @@ describe("most-specific filesystem access oracle", () => {
       const definitions = sandboxProfileParameterValues(livePaths, params);
       const definitionArgs = Object.entries(definitions)
         .flatMap(([key, value]) => ["-D", `${key}=${value}`]);
+      // Every failure reprints enough to reproduce the exact sandbox-exec run by
+      // hand: the profile, its -D substitutions, and the temp roots.
+      const reproduce = (headline: string): string =>
+        `${headline}\n` +
+        `profile file: ${profilePath}\n` +
+        `-D args: ${definitionArgs.join(" ")}\n` +
+        `temp HOME root: ${root}\n` +
+        `outside-home root: ${outsideHome}\n` +
+        `/private/tmp probe: ${tmpWriteProbe}\n` +
+        `--- profile ---\n${profile}`;
 
       const compileResult = Bun.spawnSync({
         cmd: [sandboxExec, "-f", profilePath, ...definitionArgs, "/usr/bin/true"],
@@ -674,9 +728,9 @@ describe("most-specific filesystem access oracle", () => {
         stderr: "pipe",
       });
       if (compileResult.exitCode !== 0) {
-        throw new Error(
-          `LIVE sandbox profile compile failed (${compileResult.exitCode}): ${compileResult.stderr.toString()}\n${profile}`,
-        );
+        throw new Error(reproduce(
+          `LIVE sandbox profile compile failed (${compileResult.exitCode}): ${compileResult.stderr.toString().trim()}`,
+        ));
       }
 
       const checks = [
@@ -689,8 +743,26 @@ describe("most-specific filesystem access oracle", () => {
         { label: "trap/gitdir", path: trapGitFile },
         { label: "trap/sibling", path: trapSiblingFile },
         { label: "tie", path: tieFile },
+        // Row (c): the verbatim _all.md floor keeps every allowWrite root and
+        // runtime root writable while "/" and "~" stay read-only ancestors.
+        { label: "floor/repoagents-read-only", path: repoAgentsFile },
+        { label: "floor/home-ancestor-read-only", path: homeReadOnlyFile },
+        { label: "floor/home-claude-write", path: homeClaudeWrite },
+        { label: "floor/home-itsybitsy-agents-write", path: homeItsybitsyWrite },
+        { label: "floor/home-itsybitsy-read-only", path: homeItsybitsyRead },
+        { label: "floor/dev-null-write", path: devNull },
+        { label: "floor/var-folders-write", path: outsideWriteFile },
+        { label: "floor/read-only-under-write-ancestor", path: outsideReadOnlyFile },
+        { label: "floor/private-tmp-write", path: tmpWriteProbe },
       ];
       const table: PathAccessTable = sandboxPathAccessTable(livePaths, params);
+      // "/" is a read-only ancestor in the floor: a path under no deeper entry is
+      // readable but not writable. A live kernel probe of that arm would have to
+      // touch a real, unpredictable system path outside every temp tree, so it is
+      // asserted against the resolver here; the SBPL-evaluator oracle exercises
+      // "/" end to end, and the "~" read-only ancestor is kernel-probed below.
+      expect(resolvePathAccess("/Applications/itsybitsy-nonexistent-probe", "read", table)).toBe("allow");
+      expect(resolvePathAccess("/Applications/itsybitsy-nonexistent-probe", "write", table)).toBe("deny");
       const results: string[] = [];
       for (const check of checks) {
         for (const op of ["read", "write"] as const) {
@@ -709,15 +781,19 @@ describe("most-specific filesystem access oracle", () => {
           const actual = result.exitCode === 0 ? "allow" : "deny";
           results.push(`${check.label}:${op}=${result.exitCode}`);
           if (actual !== expected) {
-            throw new Error(
-              `LIVE sandbox disagreement for ${check.label} ${op}: resolver=${expected}, exit=${result.exitCode}, stderr=${result.stderr.toString()}\n${profile}`,
-            );
+            throw new Error(reproduce(
+              `LIVE sandbox disagreement for ${check.label} ${op}: resolver=${expected}, ` +
+              `exit=${result.exitCode}, stderr=${result.stderr.toString().trim()}\n` +
+              `probe: /bin/sh -c '${command}' probe ${check.path}`,
+            ));
           }
         }
       }
       console.log(`LIVE sandbox probe: compile=${compileResult.exitCode}; ${results.join(", ")}`);
     } finally {
       await rm(createdRoot, { recursive: true, force: true });
+      await rm(createdOutsideHome, { recursive: true, force: true });
+      await rm(tmpWriteProbe, { force: true });
     }
   });
 });

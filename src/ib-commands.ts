@@ -1066,6 +1066,26 @@ export NO_PROXY="$no_proxy"
 `;
 }
 
+/**
+ * Resolve the tmux server socket DIRECTORY the way tmux itself does: if `$TMUX`
+ * is set (we are inside a tmux server), its first comma-separated field is the
+ * socket path, and the directory of that path is the socket dir; otherwise tmux
+ * uses `${TMUX_TMPDIR:-/tmp}/tmux-<uid>`. Denying this subtree closes the
+ * unix-socket connect() a non-spawner would otherwise use to reach the
+ * unsandboxed tmux server. Canonicalization is left to profileRuntimeDenyRoots.
+ */
+export function resolveTmuxSocketDir(uid: number): string {
+  const tmux = process.env.TMUX;
+  if (tmux && tmux.length > 0) {
+    const socketPath = tmux.split(",")[0];
+    if (socketPath && socketPath.length > 0) return dirname(socketPath);
+  }
+  const base = process.env.TMUX_TMPDIR && process.env.TMUX_TMPDIR.length > 0
+    ? process.env.TMUX_TMPDIR
+    : "/tmp";
+  return join(base, `tmux-${uid}`);
+}
+
 async function prepareSandbox(
   runner: SandboxCommandRunner,
   config: SandboxConfig,
@@ -1094,9 +1114,9 @@ async function prepareSandbox(
     throw new Error(`sandbox refused: could not resolve git common dir: ${detail}`);
   }
 
-  // The tmux socket lives at /private/tmp/tmux-<uid> (tmux uses TMUX_TMPDIR or
-  // /tmp, never $TMPDIR). It is a deny root for non-spawners and untouched for
-  // spawners; profileRuntimeDenyRoots canonicalizes it like every other entry.
+  // The tmux socket directory is a deny root for non-spawners and untouched for
+  // spawners; profileRuntimeDenyRoots canonicalizes it (longest-existing-prefix)
+  // like every other entry.
   const uid = process.getuid?.() ?? 0;
   const params: SandboxProfileParams = {
     AGENTDIR: agentDir,
@@ -1104,7 +1124,7 @@ async function prepareSandbox(
     GITDIR: resolveGitRevParsePath(workPath, gitCommonDirResult.stdout),
     REPOAGENTS: join(repoPath, ".ittybitty", "agents"),
     PARENTCLAUDE: join(repoPath, ".claude"),
-    TMUXSOCK: join("/private/tmp", `tmux-${uid}`),
+    TMUXSOCK: resolveTmuxSocketDir(uid),
     canSpawnChildren,
     HOME: homedir(),
   };

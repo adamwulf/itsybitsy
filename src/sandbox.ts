@@ -44,10 +44,13 @@ export interface SandboxProfileParams {
    */
   PARENTCLAUDE: string;
   /**
-   * `/private/tmp/tmux-<uid>` — the tmux server socket. Writing it runs commands
-   * under the unsandboxed tmux server (a sandbox escape), so it is emitted as a
-   * deny for both operations ONLY when canSpawnChildren is false; a spawner
-   * genuinely needs tmux and keeps it (an accepted escape, SPEC-SANDBOX.md 4C.3).
+   * The tmux server socket DIRECTORY (e.g. `/private/tmp/tmux-<uid>`, derived
+   * the way tmux resolves it — see resolveTmuxSocketDir). Reaching the tmux
+   * server is a sandbox escape (it runs commands unsandboxed). For a non-spawner
+   * the generator emits BOTH a file deny (blocks reads/writes of files in the
+   * dir) AND a network-outbound unix-socket deny scoped to the dir (blocks the
+   * `connect()` — the file deny alone does NOT). A spawner emits neither and
+   * keeps the socket (an accepted escape, SPEC-SANDBOX.md 4C.3).
    */
   TMUXSOCK: string;
   /**
@@ -500,8 +503,10 @@ function profileRuntimeAllowRoots(params: SandboxProfileParams): ProfileRuntimeP
 /**
  * Runtime DENY roots, emitted after the allow table so they carve holes that
  * win (Seatbelt is last-match-wins). The tmux socket is denied for a
- * non-spawner, carving it out of the /private/tmp write floor; a spawner emits
- * nothing here. The op is nominal — a deny row emits both read and write denies.
+ * non-spawner — both a file deny (carving it out of the /private/tmp write
+ * floor) and a network-outbound unix-socket deny (blocking the connect that the
+ * file deny does not); a spawner emits nothing here. The op is nominal — a file
+ * deny row emits both read and write denies.
  */
 function profileRuntimeDenyRoots(params: SandboxProfileParams): ProfileRuntimePathRoot[] {
   if (params.canSpawnChildren) return [];
@@ -887,6 +892,18 @@ export function generateProfile(
     const matcher = profileMatcher(entry, `DENY_${index}`);
     lines.push(`(deny file-read* ${matcher})`);
     lines.push(`(deny file-write* ${matcher})`);
+  });
+
+  // A runtime deny root (the tmux socket) must ALSO block a unix-socket
+  // connect(): Seatbelt gates that under network-outbound, not file-read*/write*,
+  // so the file deny above does NOT stop `nc -U <socket>` reaching the
+  // unsandboxed tmux server. _all.md carries a blanket
+  // `(allow network-outbound (remote unix-socket))`, so emit a scoped deny here —
+  // after rawAllow, so last-match-wins beats that blanket allow. The file deny
+  // above stays (it blocks reads/writes of files inside the socket dir). This
+  // form was verified LIVE to compile and block (src/sandbox.test.ts).
+  denyRoots.forEach((root) => {
+    lines.push(`(deny network-outbound (remote unix-socket (subpath (param "${root.parameterName}"))))`);
   });
 
   return `${lines.join("\n")}\n`;

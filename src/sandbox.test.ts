@@ -171,9 +171,12 @@ describe("sandbox profile emission", () => {
       '(allow file-read* (subpath (param "WORKTREE")))',
       '(allow file-write* (subpath (param "WORKTREE")))',
       // No PARENTCLAUDE root. The tmux socket is carved out last for a
-      // non-spawner (both operations denied).
+      // non-spawner: a file deny (both ops) AND a network-outbound unix-socket
+      // deny (the connect the file deny does not stop), after rawAllow so it
+      // last-match-wins over _all.md's blanket unix-socket allow.
       '(deny file-read* (subpath (param "TMUXSOCK")))',
       '(deny file-write* (subpath (param "TMUXSOCK")))',
+      '(deny network-outbound (remote unix-socket (subpath (param "TMUXSOCK"))))',
     ]);
   });
 
@@ -224,6 +227,7 @@ describe("sandbox profile emission", () => {
       '(deny file-read* (subpath (param "TMUXSOCK")))',
       '(deny file-write* (subpath (param "REPOAGENTS")))',
       '(deny file-write* (subpath (param "TMUXSOCK")))',
+      '(deny network-outbound (remote unix-socket (subpath (param "TMUXSOCK"))))',
     ]);
     expect(onlyInSpawner.sort()).toEqual([
       '(allow file-read* (subpath (param "PARENTCLAUDE")))',
@@ -288,7 +292,15 @@ describe("sandbox profile emission", () => {
   });
 
   test("domains do not create a baked-in profile permission", () => {
-    const profile = generateProfile(config({ domains: ["example.com"] }), EMPTY_PATHS, PARAMS);
+    // Use a spawner (canSpawnChildren: true) so there is NO tmux-socket
+    // network-outbound deny in the profile: with empty rawAllow the profile then
+    // has zero network lines, so any "network" or domain string would be a leak
+    // from the domains list (which must go to the proxy allowlist, not SBPL).
+    const profile = generateProfile(
+      config({ domains: ["example.com"] }),
+      EMPTY_PATHS,
+      { ...PARAMS, canSpawnChildren: true },
+    );
     expect(profile).not.toContain("example.com");
     expect(profile).not.toContain("network");
   });
@@ -1097,6 +1109,65 @@ describe("most-specific filesystem access oracle", () => {
             );
           }
         }
+      }
+
+      // F1: the real tmux escape is a unix-socket connect(), which Seatbelt
+      // gates under network-outbound — the file deny above does NOT stop it. Bind
+      // real unsandboxed unix listeners at a socket INSIDE the tmux stand-in dir
+      // (denied for a non-spawner via the network-outbound deny) and at a sibling
+      // OUTSIDE it (always allowed, so the floor's blanket unix-socket allow
+      // stays intact), then attempt a sandboxed `nc -U` connect. Intended policy,
+      // asserted directly (the resolver models only file access, not network):
+      // non-spawner CANNOT connect the inside socket but CAN the outside one;
+      // spawner CAN connect both.
+      const nc = Bun.which("nc");
+      if (nc) {
+        const insideSock = join(tmuxSockStandin, "s");                   // under TMUXSOCK
+        const outsideSock = join("/private/tmp", `ib-sock-${crypto.randomUUID()}`); // sibling
+        const listeners = [
+          Bun.listen({ unix: insideSock, socket: { data() {}, open() {} } }),
+          Bun.listen({ unix: outsideSock, socket: { data() {}, open() {} } }),
+        ];
+        try {
+          const connect = (sb: string, args: string[], sock: string) => Bun.spawnSync({
+            cmd: [sandboxExec, "-f", sb, ...args, nc, "-U", "-w", "1", sock],
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+            timeout: 5000,
+          });
+          const socketArms = [
+            { label: "non-spawner", sb: profilePath, args: definitionArgs, insideConnects: false },
+            { label: "spawner", sb: spawnerProfilePath, args: spawnerArgs, insideConnects: true },
+          ];
+          for (const arm of socketArms) {
+            const inside = connect(arm.sb, arm.args, insideSock);
+            const outside = connect(arm.sb, arm.args, outsideSock);
+            results.push(
+              `${arm.label}/tmux-connect-inside=${inside.exitCode}`,
+              `${arm.label}/tmux-connect-outside=${outside.exitCode}`,
+            );
+            if ((inside.exitCode === 0) !== arm.insideConnects) {
+              throw new Error(
+                `LIVE tmux CONNECT policy violation (${arm.label}): inside-socket connect exit=${inside.exitCode} ` +
+                `(want ${arm.insideConnects ? "connect" : "DENIED"}), stderr=${inside.stderr.toString().trim()}\n` +
+                `profile: ${arm.sb}\n-D args: ${arm.args.join(" ")}\nsocket: ${insideSock}`,
+              );
+            }
+            if (outside.exitCode !== 0) {
+              throw new Error(
+                `LIVE tmux CONNECT policy violation (${arm.label}): outside-socket connect exit=${outside.exitCode} ` +
+                `(want connect — the floor's unix-socket allow must stay intact), stderr=${outside.stderr.toString().trim()}\n` +
+                `profile: ${arm.sb}\n-D args: ${arm.args.join(" ")}\nsocket: ${outsideSock}`,
+              );
+            }
+          }
+        } finally {
+          for (const listener of listeners) listener.stop();
+          await rm(outsideSock, { force: true });
+        }
+      } else {
+        results.push("tmux-connect=SKIPPED(no nc)");
       }
 
       console.log(`LIVE sandbox probe: compile=${compileResult.exitCode}; ${results.join(", ")}`);

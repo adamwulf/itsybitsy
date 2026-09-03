@@ -653,6 +653,15 @@ one sanctioned divergence and is not modelled on purpose. No other rawAllow line
 is expected to widen filesystem access, and any that does is outside the
 resolver's contract.
 
+Divergence can also go the other way: rawAllow is verbatim SBPL and may carry
+`(deny …)` lines that *narrow* the kernel below a resolver `allow` (Seatbelt is
+last-match-wins and rawAllow is emitted after the allow table, so a rawAllow
+`deny` can override a path the table allowed). So a resolver `allow` is a
+statement about the `paths` table, not a guarantee about the kernel: the kernel
+may be wider (a widening rawAllow) or narrower (a narrowing rawAllow `deny`) than
+the resolver predicts. Only the `paths` table is authoritative for
+`resolvePathAccess()`.
+
 ## 4B. Codex: disable its built-in sandbox, use ours (Adam's call)
 
 **Decision (Adam, 2026-07-17): a sandboxed codex agent runs codex in its own

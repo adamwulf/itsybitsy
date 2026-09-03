@@ -997,27 +997,44 @@ describe("most-specific filesystem access oracle", () => {
       expect(resolvePathAccess("/Applications/itsybitsy-nonexistent-probe", "read", table)).toBe("deny");
       expect(resolvePathAccess("/Applications/itsybitsy-nonexistent-probe", "write", table)).toBe("deny");
       const results: string[] = [];
+      // Batch every (path, op) probe into ONE sandbox-exec run: a /bin/sh script
+      // cats/echoes each path and prints "label:op:exit". Every sh subprocess
+      // inherits the same Seatbelt profile, so the kernel decisions are identical
+      // to separate runs, but the probe pays ONE sandbox_apply instead of ~50 —
+      // which keeps it fast even under load (G3).
+      const sq = (p: string) => `'${p.replace(/'/g, "'\\''")}'`;
+      const batchScript = checks.flatMap((check) => [
+        `cat ${sq(check.path)} >/dev/null 2>&1; echo "${check.label}:read:$?"`,
+        `echo x > ${sq(check.path)} 2>/dev/null; echo "${check.label}:write:$?"`,
+      ]).join("\n");
+      const batch = Bun.spawnSync({
+        cmd: [sandboxExec, "-f", profilePath, ...definitionArgs, "/bin/sh", "-c", batchScript],
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 20000,
+      });
+      const exitByKey = new Map<string, number>();
+      for (const line of batch.stdout.toString().split("\n")) {
+        const m = line.match(/^(.+):(read|write):(\d+)$/);
+        if (m) exitByKey.set(`${m[1]}:${m[2]}`, Number(m[3]));
+      }
       for (const check of checks) {
         for (const op of ["read", "write"] as const) {
-          const command = op === "read" ? 'cat "$1" >/dev/null' : 'echo x > "$1"';
-          const result = Bun.spawnSync({
-            cmd: [
-              sandboxExec,
-              "-f", profilePath,
-              ...definitionArgs,
-              "/bin/sh", "-c", command, "probe", check.path,
-            ],
-            stdout: "pipe",
-            stderr: "pipe",
-          });
+          const exit = exitByKey.get(`${check.label}:${op}`);
+          if (exit === undefined) {
+            throw new Error(reproduce(
+              `LIVE batch probe missing a result for ${check.label}:${op}\n` +
+              `--- batch stdout ---\n${batch.stdout.toString()}\n` +
+              `--- batch stderr ---\n${batch.stderr.toString()}`,
+            ));
+          }
           const expected = resolvePathAccess(check.path, op, table);
-          const actual = result.exitCode === 0 ? "allow" : "deny";
-          results.push(`${check.label}:${op}=${result.exitCode}`);
+          const actual = exit === 0 ? "allow" : "deny";
+          results.push(`${check.label}:${op}=${exit}`);
           if (actual !== expected) {
             throw new Error(reproduce(
               `LIVE sandbox disagreement for ${check.label} ${op}: resolver=${expected}, ` +
-              `exit=${result.exitCode}, stderr=${result.stderr.toString().trim()}\n` +
-              `probe: /bin/sh -c '${command}' probe ${check.path}`,
+              `exit=${exit}\nprobe path: ${check.path}`,
             ));
           }
         }
@@ -1119,48 +1136,64 @@ describe("most-specific filesystem access oracle", () => {
       // stays intact), then attempt a sandboxed `nc -U` connect. Intended policy,
       // asserted directly (the resolver models only file access, not network):
       // non-spawner CANNOT connect the inside socket but CAN the outside one;
-      // spawner CAN connect both.
+      // spawner CAN connect both. nc's `-w 1` gives a successful connect a 1s
+      // idle floor, so run all four connects CONCURRENTLY (Bun.spawn) — their
+      // waits overlap to ~1s wall-clock instead of ~3s serial (G3).
       const nc = Bun.which("nc");
       if (nc) {
         const insideSock = join(tmuxSockStandin, "s");                   // under TMUXSOCK
         const outsideSock = join("/private/tmp", `ib-sock-${crypto.randomUUID()}`); // sibling
         const listeners = [
-          Bun.listen({ unix: insideSock, socket: { data() {}, open() {} } }),
-          Bun.listen({ unix: outsideSock, socket: { data() {}, open() {} } }),
+          Bun.listen({ unix: insideSock, socket: { open(s) { s.end(); }, data() {}, close() {} } }),
+          Bun.listen({ unix: outsideSock, socket: { open(s) { s.end(); }, data() {}, close() {} } }),
         ];
-        // Never let a listener keep the test worker's event loop alive (bun test
-        // reuses workers; a lingering server would stall the whole suite).
+        // Never let a listener keep a reused bun test worker alive; stop(true)
+        // closes them the moment the rows are done.
         for (const listener of listeners) listener.unref();
         try {
-          const connect = (sb: string, args: string[], sock: string) => Bun.spawnSync({
-            cmd: [sandboxExec, "-f", sb, ...args, nc, "-U", "-w", "1", sock],
-            stdin: "ignore",
-            stdout: "pipe",
-            stderr: "pipe",
-            timeout: 5000,
-          });
           const socketArms = [
             { label: "non-spawner", sb: profilePath, args: definitionArgs, insideConnects: false },
             { label: "spawner", sb: spawnerProfilePath, args: spawnerArgs, insideConnects: true },
           ];
+          const jobs = socketArms.flatMap((arm) => (
+            [
+              { arm, kind: "inside" as const, sock: insideSock },
+              { arm, kind: "outside" as const, sock: outsideSock },
+            ].map((job) => ({
+              ...job,
+              proc: Bun.spawn({
+                cmd: [sandboxExec, "-f", job.arm.sb, ...job.arm.args, nc, "-U", "-w", "1", job.sock],
+                stdin: "ignore",
+                stdout: "pipe",
+                stderr: "pipe",
+              }),
+            }))
+          ));
+          // All four were launched above (Bun.spawn is non-blocking); awaiting
+          // now collects them concurrently.
+          const settled = await Promise.all(jobs.map(async (job) => ({
+            ...job,
+            exit: await job.proc.exited,
+            stderr: (await new Response(job.proc.stderr).text()).trim(),
+          })));
           for (const arm of socketArms) {
-            const inside = connect(arm.sb, arm.args, insideSock);
-            const outside = connect(arm.sb, arm.args, outsideSock);
+            const inside = settled.find((s) => s.arm === arm && s.kind === "inside")!;
+            const outside = settled.find((s) => s.arm === arm && s.kind === "outside")!;
             results.push(
-              `${arm.label}/tmux-connect-inside=${inside.exitCode}`,
-              `${arm.label}/tmux-connect-outside=${outside.exitCode}`,
+              `${arm.label}/tmux-connect-inside=${inside.exit}`,
+              `${arm.label}/tmux-connect-outside=${outside.exit}`,
             );
-            if ((inside.exitCode === 0) !== arm.insideConnects) {
+            if ((inside.exit === 0) !== arm.insideConnects) {
               throw new Error(
-                `LIVE tmux CONNECT policy violation (${arm.label}): inside-socket connect exit=${inside.exitCode} ` +
-                `(want ${arm.insideConnects ? "connect" : "DENIED"}), stderr=${inside.stderr.toString().trim()}\n` +
+                `LIVE tmux CONNECT policy violation (${arm.label}): inside-socket connect exit=${inside.exit} ` +
+                `(want ${arm.insideConnects ? "connect" : "DENIED"}), stderr=${inside.stderr}\n` +
                 `profile: ${arm.sb}\n-D args: ${arm.args.join(" ")}\nsocket: ${insideSock}`,
               );
             }
-            if (outside.exitCode !== 0) {
+            if (outside.exit !== 0) {
               throw new Error(
-                `LIVE tmux CONNECT policy violation (${arm.label}): outside-socket connect exit=${outside.exitCode} ` +
-                `(want connect — the floor's unix-socket allow must stay intact), stderr=${outside.stderr.toString().trim()}\n` +
+                `LIVE tmux CONNECT policy violation (${arm.label}): outside-socket connect exit=${outside.exit} ` +
+                `(want connect — the floor's unix-socket allow must stay intact), stderr=${outside.stderr}\n` +
                 `profile: ${arm.sb}\n-D args: ${arm.args.join(" ")}\nsocket: ${outsideSock}`,
               );
             }

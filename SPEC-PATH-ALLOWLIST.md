@@ -1133,6 +1133,37 @@ and, from A2, `resolvePathAccess(absPath, op, { allowRead, allowWrite, deny,
 runtimeRoots })`; `mergeSandboxLayerConfigs` is exported from
 `src/ib-commands.ts` and returns `{ sandbox, paths }`.
 
+**A2 merged** on `agent/sandbox-safety` at `8918447` (reported 21:27, two
+review rounds, all approved). The resolver interface Phase B calls, final:
+
+- `prepareAccessTable(table, roots) -> PreparedAccessTable`: sorted and
+  compiled once, pure, safe to cache per agent; home baked in at prepare time;
+  no environment reads at resolve time. `table = { allowRead, allowWrite, deny }`
+  as canonical absolute paths (run `canonicalizePathsConfig` on the meta
+  lists); `roots = Array<{ name, path, op: "read" | "write" }>` for the
+  runtime roots: worktree, agent dir, git dir, repo agents dir, and Phase B's
+  scratchpad and project dir.
+- `resolvePreparedAccess(prepared, absPath, op) -> "allow" | "deny"`: the
+  target is canonicalized inside (longest existing prefix, `/tmp` to
+  `/private/tmp`), so both spellings resolve identically; relative input
+  throws. Deny wins at any depth; otherwise the most specific matching entry
+  decides; no match denies.
+- `resolvePathAccess(absPath, op, table, roots)` is prepare plus resolve for
+  one-shot use. Exported types: `PathsConfig`, `PreparedAccessTable`,
+  `OrderedPathEntry`, `CompiledPath`.
+- Boundary (SPEC-SANDBOX §4A.8): the resolver models the paths table only,
+  not `sandbox.rawAllow`, which can widen or narrow the kernel; the one
+  sanctioned divergence after A3 is the root listing rule.
+- Proven equal, resolver against the SBPL oracle against the live macOS
+  kernel, on Adam's two examples, the `~`-read trap, today's floor verbatim,
+  ties, deny at any depth, and the glob arms.
+
+A3 (floor tightening, spawn-keyed roots, tmux-socket deny, live claude boot
+gate) is building with a Claude worker. Ledger note: codex builders cannot
+run `sandbox-exec`, because a nested Seatbelt refuses `sandbox_apply`, and one
+wedged for ninety minutes on a long `ib send`; live-gated pieces are built by
+Claude workers from here on.
+
 **Parallel option during Phase A**, if Adam wants speed: `path-isolation`
 starts the pieces that touch none of `agent-types.ts`, `newAgent`, or
 `sandbox.ts`: the Bash-scanner tokenization in `agent-path.ts` against a

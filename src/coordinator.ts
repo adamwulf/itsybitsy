@@ -254,10 +254,8 @@ const SYSTEM_COORDINATOR_DENY = [
   "Read",
   "Write",
   "Edit",
-  "MultiEdit",
   "Glob",
   "Grep",
-  "LS",
   "NotebookEdit",
   "WebFetch",
   "WebSearch",
@@ -1092,7 +1090,7 @@ const PER_REPO_COORDINATOR_ALLOW = [
   "Bash(git status:*)", "Bash(git log:*)", "Bash(git diff:*)",
   "Bash(git show:*)", "Bash(git ls-files:*)",
   "Bash(pwd:*)", "Bash(ls:*)",
-  "Read", "Glob", "Grep", "LS",
+  "Read", "Glob", "Grep",
   "TodoWrite", "ToolSearch",
 ];
 
@@ -1102,7 +1100,7 @@ const PER_REPO_COORDINATOR_ALLOW = [
  * Note: unqualified "Bash" is NOT denied — see SYSTEM_COORDINATOR_DENY comment.
  */
 const PER_REPO_COORDINATOR_DENY = [
-  "Write", "Edit", "MultiEdit", "NotebookEdit",
+  "Write", "Edit", "NotebookEdit",
   "WebFetch", "WebSearch", "Task", "TaskCreate", "TaskOutput", "Agent", "KillShell",
   "EnterPlanMode", "ExitPlanMode",
 ];

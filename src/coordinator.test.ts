@@ -100,10 +100,10 @@ describe("buildSystemCoordinatorSettings", () => {
     expect(deny).toContain("Read");
     expect(deny).toContain("Write");
     expect(deny).toContain("Edit");
-    expect(deny).toContain("MultiEdit");
     expect(deny).toContain("Glob");
     expect(deny).toContain("Grep");
-    expect(deny).toContain("LS");
+    expect(deny).not.toContain("MultiEdit");
+    expect(deny).not.toContain("LS");
   });
 
   test("denies web access tools", async () => {
@@ -131,9 +131,9 @@ describe("buildSystemCoordinatorSettings", () => {
     expect(deny).toContain("ExitPlanMode");
   });
 
-  test("deny list has exactly 17 entries (embedded layers add nothing)", async () => {
+  test("deny list has exactly 15 entries (embedded layers add nothing)", async () => {
     const settings = await buildSystemCoordinatorSettings();
-    expect(settings.permissions.deny).toHaveLength(17);
+    expect(settings.permissions.deny).toHaveLength(15);
   });
 
   test("returns fresh arrays on each call (no shared mutation)", async () => {
@@ -2523,7 +2523,7 @@ describe("buildPerRepoCoordinatorSettings", () => {
     expect(settings.permissions.allow).toContain("Read");
     expect(settings.permissions.allow).toContain("Glob");
     expect(settings.permissions.allow).toContain("Grep");
-    expect(settings.permissions.allow).toContain("LS");
+    expect(settings.permissions.allow).not.toContain("LS");
     expect(settings.permissions.allow).toContain("TodoWrite");
     expect(settings.permissions.allow).not.toContain("AskUserQuestion");
     expect(settings.permissions.allow).toContain("ToolSearch");
@@ -2580,7 +2580,6 @@ describe("buildPerRepoCoordinatorSettings", () => {
     const settings = await buildPerRepoCoordinatorSettings();
     expect(settings.permissions.deny).toContain("Write");
     expect(settings.permissions.deny).toContain("Edit");
-    expect(settings.permissions.deny).toContain("MultiEdit");
     expect(settings.permissions.deny).toContain("NotebookEdit");
     expect(settings.permissions.deny).toContain("WebFetch");
     expect(settings.permissions.deny).toContain("WebSearch");

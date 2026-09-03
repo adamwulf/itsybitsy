@@ -476,8 +476,10 @@ spelled out explicitly in `_all.md`, and the generator bakes in NOTHING.** Not a
 "draft 1" convenience — a firm rule: **zero static baseline permissions are
 hardcoded in `src/sandbox.ts`.** The generator emits the fixed runtime-root
 parameter rules plus exactly what the merged `.md` config declares. Every static
-allow — including the `"/"` root entry (currently emitted as `(subpath "/")`)
-claude needs to boot, and the OS/dylib read paths — is a line in `_all.md` that the
+allow — including the root-node read claude needs to boot (as of A3 the
+`rawAllow` line `(allow file-read-data (literal "/"))`, superseding the earlier
+`allowRead: ["/"]` → `(subpath "/")` whole-tree form), and the OS/dylib read
+paths — is a line in `_all.md` that the
 **user** owns and can inspect, tighten, or remove. Nothing is assumed baked-in and
 then discovered broken; the user adds permissions as testing shows they're needed.
 `_all.md` already merges into every spawned agent (`agent-types.ts` layer files),
@@ -530,6 +532,21 @@ superseded by that doc.
 adds `(allow file-ioctl)` for the Codex TUI. These are shipped additions beyond
 the earlier Claude-headless minimum; the two findings documents remain the
 historical spike record and are intentionally unchanged.
+
+**A3 floor tightening (2026-09-02).** The `_all.md` floor is now the verified
+minimum. `paths.allowRead` **drops `/` and `~`**: the root-directory listing
+claude's Bun/Node runtime needs at init moves to the `sandbox.rawAllow` line
+`(allow file-read-data (literal "/"))` (the root NODE listing only, not a
+whole-tree read), and home is no longer a read ancestor. Known cost, documented
+as an own-line comment in `_all.md`: `bunx tsc` on a worktree without
+`node_modules` scans several home locations and needs broad home read, so a type
+that runs the dev gate on an uninstalled worktree adds `~` to its own
+`allowRead`. `paths.allowWrite` carries the `~/.itsybitsy` write floor a running
+agent needs (`agents`, `teams`, `teams.json`, `teams.json.tmp`, `.teams.lock`);
+`~/Library/Caches` is deliberately absent (toolchain caches are per-type). A LIVE
+boot gate in `src/sandbox.test.ts` proves the tightened floor still boots claude
+(no SIGABRT), matching `docs/SANDBOX-BASELINE-MINIMAL.md §(d)`'s exit-143
+fail-closed proof.
 
 Candidate static `_all.md` contents (SUPERSEDED by `docs/SANDBOX-BASELINE-MINIMAL.md`;
 kept for context):
@@ -600,9 +617,15 @@ The generator and `resolvePathAccess()` share one ascending total sort key:
 4. operation: read before write.
 
 Exact cross-list canonical ties are normalized to the write entry before this
-sort. `AGENTDIR`, `WORKTREE`, and `GITDIR` join the table as write roots;
-`REPOAGENTS` joins it as a read root. Their resolved `-D` values determine their
-specificity, while the emitted matchers remain `(param "NAME")`. This table is
+sort. `AGENTDIR`, `WORKTREE`, and `GITDIR` join the table as write roots. The
+remaining runtime roots are **keyed on the resolved `canSpawnChildren`** (A3):
+`REPOAGENTS` is a **write** root for a spawner and a **read** root otherwise, and
+`PARENTCLAUDE` (`<repo>/.claude`) joins as a **write** root only for a spawner.
+Their resolved `-D` values determine their specificity, while the emitted
+matchers remain `(param "NAME")`. There is also one **runtime deny root**,
+`TMUXSOCK` (`/private/tmp/tmux-<uid>`), emitted for a non-spawner in the config
+`deny` block after the allow table (both operations denied), so it carves the
+tmux socket out of the `/private/tmp` write floor (§4C.3). This table is
 extensible: later runtime roots such as a scratchpad or project directory add a
 row rather than a new emission phase.
 
@@ -640,18 +663,18 @@ not model `sandbox.rawAllow`. rawAllow is the verbatim SBPL escape hatch (§5.1)
 so a rawAllow line carrying `file-read*` or `file-write*` can make the live
 kernel wider than the resolver predicts; the validator already warns on a
 catch-all rawAllow (`(allow default)`, `(allow file-read*)`,
-`(allow file-write*)`) for exactly that reason. The one sanctioned rawAllow a
-later piece (A3) adds is the mandatory root-directory listing `(allow
-file-read-data (literal "/"))`. Today `/` is still an `allowRead` floor entry in
-`_all.md`, so the resolver and the kernel agree on root reads:
-`resolvePathAccess("/", "read")` returns `allow` and the profile emits `(allow
-file-read* (subpath "/"))`. When the floor drops `/` from `allowRead` and
-carries the mandatory root listing as the rawAllow line `(allow file-read-data
-(literal "/"))` instead, the resolver will report `deny` for a read of `/` itself
-while the kernel permits only the directory listing of the root node; this is the
-one sanctioned divergence and is not modelled on purpose. No other rawAllow line
-is expected to widen filesystem access, and any that does is outside the
-resolver's contract.
+`(allow file-write*)`) for exactly that reason. The one sanctioned rawAllow that
+widens filesystem access is the mandatory root-directory listing `(allow
+file-read-data (literal "/"))`. **As of A3 this divergence is LIVE:** the floor
+has dropped `/` from `allowRead` and carries the root listing as that rawAllow
+line instead, so `resolvePathAccess("/", "read")` returns `deny` while the kernel
+permits only the directory listing of the root node (`ls /` succeeds; a read of
+any file under `/` outside the floor does not). This is the one sanctioned
+divergence and is not modelled on purpose. The LIVE macOS probe in
+`src/sandbox.test.ts` exercises it directly: `ls /` succeeds under the profile
+while the resolver reports `deny` for a read of `/`, and `ls /Applications`
+(outside the floor) is denied by both. No other rawAllow line is expected to
+widen filesystem access, and any that does is outside the resolver's contract.
 
 Divergence can also go the other way: rawAllow is verbatim SBPL and may carry
 `(deny …)` lines that *narrow* the kernel below a resolver `allow` (Seatbelt is
@@ -743,6 +766,21 @@ Required in the baseline:
   `deriveCodexParentRepoRoots` grants codex today (`ib-commands.ts:4708-4724`).
   Reuse that precedent in the baseline for `canSpawnChildren` types.
 
+  **A3 shipped (2026-09-02).** The runtime roots are now keyed on the resolved
+  `canSpawnChildren` (metaCanSpawnChildren: per-agent meta override, then the
+  type), passed into `prepareSandbox` at spawn (from `initialMetaJson`) and
+  resume (from `agent.meta`). For a spawner, **REPOAGENTS**
+  (`<repo>/.ittybitty/agents`) becomes a **write** runtime root (it writes the
+  child's agent dir) and **PARENTCLAUDE** (`<repo>/.claude`, where `ib new-agent`
+  writes the child's `settings.local.json` at `ib-commands.ts` ~5481) is added
+  as a **write** runtime root. A non-spawner keeps REPOAGENTS **read-only** and
+  gets neither PARENTCLAUDE nor the tmux socket (§4C.3). This is the
+  `sandbox-safety`-split "runtime roots keyed on `canSpawnChildren`" from
+  `SPEC-PATH-ALLOWLIST.md §6.11 item 7`, and it fixes the previously-noted gap
+  where a sandboxed manager's `ib new-agent` failed on a read-only repo agents
+  dir. Grant is by evidence only — PARENTCLAUDE is the sole extra parent-repo
+  write `newAgent` performs for a child.
+
 ### 4C.2 Watchdog spawn inheritance (resolved: tmux server owns the spawn)
 
 The CHILD's watchdog is launched with asynchronous `tmux run-shell -b`, so the
@@ -783,9 +821,18 @@ escape for manager types as an accepted limitation. Do NOT blanket-allow
 `/private/tmp` — scope it (e.g. allow the specific temp needs, deny the tmux
 socket subpath).
 
-**Shipped state:** `_all.md` still grants `/private/tmp` read+write, so the
-escape remains open to sandboxed agents. The scoping recommendation above is a
-future hardening item, not a claim about current isolation.
+**Shipped state (A3, 2026-09-02):** the recommendation above is now **shipped for
+non-spawners.** `_all.md` still grants `/private/tmp` read+write, but the
+generator now emits a runtime **deny** for the tmux socket
+(`/private/tmp/tmux-<uid>`, uid from `process.getuid()`) for both operations when
+the resolved `canSpawnChildren` is **false**, carving the socket out of the
+`/private/tmp` write floor **after** the allow table (the same last-match-wins
+position as a config `deny`). A **spawner** (`canSpawnChildren: true`) emits
+nothing here and keeps the socket — `ib new-agent` creates tmux sessions, so the
+escape stays an **accepted limitation** for spawning types, exactly as
+recommended. The deny is a runtime deny root (§4A.8), sorted with the config
+denies; the LIVE macOS probe proves a non-spawner is denied writing the socket
+while a `/private/tmp` sibling stays writable, and a spawner writes both.
 
 ### 4C.4 MCP servers
 
@@ -823,12 +870,14 @@ specificity-sorted config+runtime table → emit raw rules → re-deny the confi
 **⚠️ ZERO baked-in static permissions (Adam's call, 2026-07-18).** The generator
 contains no static baseline allow. It is a pure translator: `(deny default)` +
 the sorted runtime-derived parameter roots and merged `.md` path entries + the
-raw rules + the config `deny` list last. If claude needs the
-`allowRead: ["/"]` root entry to
-boot, **that line comes from `_all.md`, not from code** — visible and user-owned,
-like every other baseline entry (§4A.7). Nothing is assumed; everything is tested
-and then written into a `.md` by the user. This means the derived spike baseline
-(findings §4.2) becomes the **initial `_all.md` content**, NOT a generator constant.
+raw rules + the config `deny` list last. The root-node read claude needs to
+boot comes from `_all.md` too — as of A3 the `sandbox.rawAllow` line
+`(allow file-read-data (literal "/"))` (superseding the earlier
+`allowRead: ["/"]`) — **that line comes from `_all.md`, not from code** — visible
+and user-owned, like every other baseline entry (§4A.7). Nothing is assumed;
+everything is tested and then written into a `.md` by the user. This means the
+derived spike baseline (findings §4.2) becomes the **initial `_all.md` content**,
+NOT a generator constant.
 
 ```
 (version 1)
@@ -915,9 +964,12 @@ This is unit-testable in isolation (`bun test`), no spawn required.
    not the whole tree) — a real isolation win, but it can't be expressed in the plain
    path grammar, so it needs a **generator special-case for the `"/"` entry** (or a
    `rawAllow` line). Per Adam's zero-baked-in rule the *permission* still lives in
-   `_all.md` (`allowRead: ["/"]`); only the op-class narrowing is a generator detail.
-   Left as `"/"` for correctness; the `file-read-data` tightening is a documented
-   optional refinement (§8 gap).
+   `_all.md`. **A3 adopted the `rawAllow` form:** `_all.md` now drops `/` from
+   `allowRead` and carries `(allow file-read-data (literal "/"))` in
+   `sandbox.rawAllow`, so the shipped floor grants the root *listing* only, not a
+   whole-tree read. Because `resolvePathAccess()` models only the paths table,
+   this is the one sanctioned resolver/kernel divergence (§4A.8), proven by the
+   LIVE `ls /` vs `ls /Applications` probe.
 2. **A missing READ path → silent SIGABRT/exit-null.** Treat any such failure under
    a new profile as "a read path is missing," and **bisect** (see below).
 3. **Harvest by PROFILE BISECTION, not the unified log.** The spike proved the
@@ -1225,14 +1277,27 @@ a review cycle (2 worker reviewers) before merge.
   live macOS nested probe share and verify this contract (§4A.8).
 - ✅ **Resolver models the paths table only (Adam, 2026-09-02).**
   `resolvePathAccess()` covers `allowRead`/`allowWrite`/`deny`/runtime roots, not
-  `sandbox.rawAllow`. Today `/` is an `allowRead` floor entry, so resolver and
-  kernel agree on root reads; the sole sanctioned widening it will not model
-  arrives only when the floor drops `/` from `allowRead` and carries the
-  mandatory root listing as the rawAllow line `(allow file-read-data (literal
-  "/"))` instead (§4A.8).
+  `sandbox.rawAllow`. As of A3 the floor no longer lists `/` for reading and
+  carries the mandatory root listing as the rawAllow line `(allow file-read-data
+  (literal "/"))`, so the sole sanctioned divergence is now live: the resolver
+  reports `deny` for a read of `/` while the kernel lists the root node (§4A.8).
 - ✅ **`allowedPaths` relationship (Adam, 2026-09-02):** it remains an
   independent legacy hook-layer field until Phase B. Kernel `paths:` never
   derives from it.
+- ✅ **A3 floor tightening + spawn-keyed roots (Adam, 2026-09-02).** `_all.md`
+  `paths.allowRead` drops `/` and `~` to the verified minimum; the root listing
+  moves to the rawAllow line above, and `~` is no longer a read ancestor (a type
+  that runs `bunx tsc` on an uninstalled worktree adds `~` itself). The
+  `~/.itsybitsy` write floor is `agents`, `teams`, `teams.json`,
+  `teams.json.tmp`, and `.teams.lock`; toolchain caches are per-type, never
+  `~/Library/Caches` in the baseline. Runtime roots are keyed on the resolved
+  `canSpawnChildren` (metaCanSpawnChildren: per-agent meta override, then the
+  type): REPOAGENTS is write for a spawner and read for a non-spawner,
+  PARENTCLAUDE (`<repo>/.claude`) is a write root only for a spawner, and the
+  tmux socket (`/private/tmp/tmux-<uid>`) is denied for a non-spawner and kept
+  for a spawner (§4C.3). Resume re-derives the roots from meta, so a
+  meta.canSpawnChildren toggle flips exactly those three things. A LIVE boot gate
+  proves the floor boots claude (no SIGABRT) (§6, §4A.7).
 
 **RESOLVED EMPIRICALLY:**
 1. ✅ Claude Code boots under the tractable `(deny default)` baseline; no

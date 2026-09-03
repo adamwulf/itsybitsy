@@ -20,6 +20,19 @@ by driving each experiment from inside one `bun run <script>.ts` that spawns
 > codex. Where a `-p`-droppable rule is still needed by the TUI/gate/git, it is called
 > out and **kept**. The TUI/MCP/codex tightening is phase-2 (see §7).
 
+> **A3 update (2026-09-02) — the shipped floor lives in `docs/agent-types/_all.md`.**
+> This document is the historical bisection record and is otherwise unchanged.
+> The floor actually shipped since then tightened §(c)/(e) further: `allowRead`
+> **drops `/` and `~`** (the root listing moved to the `rawAllow` line
+> `(allow file-read-data (literal "/"))` of §(a); the `bunx tsc` broad-home cost
+> of §(c) is now paid per-type by adding `~`), `allowWrite` gained the
+> `~/.itsybitsy` team floor (`teams`, `teams.json`, `teams.json.tmp`,
+> `.teams.lock`), and the runtime `-D` roots of §(f) are keyed on
+> `canSpawnChildren` (REPOAGENTS write for spawners, a new PARENTCLAUDE write
+> root, and a TMUXSOCK deny for non-spawners). See SPEC-SANDBOX.md §4A.7, §4A.8,
+> §4C.1, §4C.3 and the LIVE tests in `src/sandbox.test.ts`. The §(d) exit-143
+> "fully offline" proof is the criterion the shipped LIVE boot gate uses.
+
 ---
 
 ## (a) THE `/` VERDICT — mandatory, path-irreducible; op-class narrowable

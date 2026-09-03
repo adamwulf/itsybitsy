@@ -241,15 +241,34 @@ export class AgentWatcher {
 
   /** Close all fs.watch watchers */
   private teardownWatchers(): void {
+    this.watcherGeneration++;
     for (const w of this.watchers) {
       w.close();
     }
     this.watchers = [];
   }
 
+  private watcherGeneration = 0;
+  private hasLoggedInitialWatchers = false;
+
   /** Set up fs.watch on each repo's .ittybitty/agents/ and user-questions.json */
   private setupWatchers(): void {
-    for (const repo of this.repos) {
+    const gen = ++this.watcherGeneration;
+    void this.setupWatchersAsync(gen);
+  }
+
+  static readonly WATCHER_CHUNK_SIZE = 4;
+
+  private async setupWatchersAsync(gen: number): Promise<void> {
+    const t0 = Date.now();
+    for (let i = 0; i < this.repos.length; i++) {
+      if (i > 0 && i % AgentWatcher.WATCHER_CHUNK_SIZE === 0) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+
+      if (!this.running || gen !== this.watcherGeneration) return;
+
+      const repo = this.repos[i]!;
       const agentsDir = join(repo.path, ".ittybitty", "agents");
       const questionsFile = join(repo.path, ".ittybitty", "user-questions.json");
 
@@ -257,25 +276,34 @@ export class AgentWatcher {
         const watcher = watch(agentsDir, { recursive: true }, () => {
           this.debounceRefresh();
         });
+        if (!this.running || gen !== this.watcherGeneration) {
+          watcher.close();
+          return;
+        }
         this.watchers.push(watcher);
       } catch (err) {
         this.events.onError?.(new Error(`Failed to watch ${agentsDir}: ${err}`));
       }
 
-      // NOTE: archive/ is intentionally NOT watched. The dashboard never renders
-      // archived agents, and archival mutates the active agents/ dir first (the
-      // rename/cp happens FROM agents/), which already triggers a refresh via the
-      // agents/ watcher. Watching archive/ recursively across many repos with
-      // thousands of subdirs only adds FSEvent load and redundant full refreshes.
-
       try {
         const watcher = watch(questionsFile, () => {
           this.debounceRefresh();
         });
+        if (!this.running || gen !== this.watcherGeneration) {
+          watcher.close();
+          return;
+        }
         this.watchers.push(watcher);
       } catch (err) {
         // user-questions.json may not exist yet — not an error
       }
+    }
+
+    if (this.running && gen === this.watcherGeneration && !this.hasLoggedInitialWatchers) {
+      this.hasLoggedInitialWatchers = true;
+      logToWatchLog(
+        `[startup] initial fs.watch setup completed: ${this.watchers.length} targets across ${this.repos.length} repos in ${Date.now() - t0}ms`,
+      );
     }
   }
 

@@ -100,10 +100,18 @@ describe("buildSystemCoordinatorSettings", () => {
     expect(deny).toContain("Read");
     expect(deny).toContain("Write");
     expect(deny).toContain("Edit");
-    expect(deny).toContain("MultiEdit");
     expect(deny).toContain("Glob");
     expect(deny).toContain("Grep");
-    expect(deny).toContain("LS");
+    expect(deny).not.toContain("MultiEdit");
+    expect(deny).not.toContain("LS");
+  });
+
+  test("final settings contain no obsolete permission tool names", async () => {
+    const settings = await buildSystemCoordinatorSettings();
+    expect(settings.permissions.allow).not.toContain("MultiEdit");
+    expect(settings.permissions.allow).not.toContain("LS");
+    expect(settings.permissions.deny).not.toContain("MultiEdit");
+    expect(settings.permissions.deny).not.toContain("LS");
   });
 
   test("denies web access tools", async () => {
@@ -131,9 +139,9 @@ describe("buildSystemCoordinatorSettings", () => {
     expect(deny).toContain("ExitPlanMode");
   });
 
-  test("deny list has exactly 17 entries (embedded layers add nothing)", async () => {
+  test("deny list has exactly 15 entries (embedded layers add nothing)", async () => {
     const settings = await buildSystemCoordinatorSettings();
-    expect(settings.permissions.deny).toHaveLength(17);
+    expect(settings.permissions.deny).toHaveLength(15);
   });
 
   test("returns fresh arrays on each call (no shared mutation)", async () => {
@@ -2462,12 +2470,13 @@ describe("perRepoCoordinatorPrompt", () => {
     expect(prompt).toContain("muse-ios");
   });
 
-  test("mentions Read, Glob, Grep, LS", () => {
+  test("mentions Read, Glob, Grep, and Bash(ls:*)", () => {
     const prompt = perRepoCoordinatorPrompt("test-repo");
     expect(prompt).toContain("Read");
     expect(prompt).toContain("Glob");
     expect(prompt).toContain("Grep");
-    expect(prompt).toContain("LS");
+    expect(prompt).toContain("Bash(ls:*)");
+    expect(prompt).not.toContain("LS");
   });
 
   test("mentions ib new-agent --type worker", () => {
@@ -2523,10 +2532,18 @@ describe("buildPerRepoCoordinatorSettings", () => {
     expect(settings.permissions.allow).toContain("Read");
     expect(settings.permissions.allow).toContain("Glob");
     expect(settings.permissions.allow).toContain("Grep");
-    expect(settings.permissions.allow).toContain("LS");
+    expect(settings.permissions.allow).not.toContain("LS");
     expect(settings.permissions.allow).toContain("TodoWrite");
     expect(settings.permissions.allow).not.toContain("AskUserQuestion");
     expect(settings.permissions.allow).toContain("ToolSearch");
+  });
+
+  test("final settings contain no obsolete permission tool names", async () => {
+    const settings = await buildPerRepoCoordinatorSettings();
+    expect(settings.permissions.allow).not.toContain("MultiEdit");
+    expect(settings.permissions.allow).not.toContain("LS");
+    expect(settings.permissions.deny).not.toContain("MultiEdit");
+    expect(settings.permissions.deny).not.toContain("LS");
   });
 
   test("does not allow write tools", async () => {
@@ -2580,7 +2597,6 @@ describe("buildPerRepoCoordinatorSettings", () => {
     const settings = await buildPerRepoCoordinatorSettings();
     expect(settings.permissions.deny).toContain("Write");
     expect(settings.permissions.deny).toContain("Edit");
-    expect(settings.permissions.deny).toContain("MultiEdit");
     expect(settings.permissions.deny).toContain("NotebookEdit");
     expect(settings.permissions.deny).toContain("WebFetch");
     expect(settings.permissions.deny).toContain("WebSearch");

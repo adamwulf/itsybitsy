@@ -54,6 +54,7 @@ import {
 import { createTeam, getTeam, addMember } from "./teams";
 import { readChannel, channelPath } from "./team-channel";
 import { resolveTarget } from "./index";
+import { setUserHome, resetUserHome } from "./home";
 
 // A fresh transient that makes sendMessage believe a live watchdog will drain,
 // so the message is ENQUEUED but NOT delivered inline. Lets us inspect the
@@ -229,7 +230,6 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
   let baseDir: string;
   let homeDir: string;
   let repoDir: string;
-  let originalHome: string | undefined;
 
   function repos() {
     return [{ path: repoDir, name: basename(repoDir) }];
@@ -261,8 +261,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     repoDir = join(baseDir, "repo");
     await mkdir(homeDir, { recursive: true });
     await mkdir(repoDir, { recursive: true });
-    originalHome = process.env.HOME;
-    process.env.HOME = baseDir;
+    setUserHome(baseDir);
     setCoordinatorHome(homeDir);
     setUserConfigPath(join(homeDir, "config.json"));
     await saveRegistry({ repos: [{ path: repoDir, name: basename(repoDir) }] });
@@ -276,8 +275,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     resetUserConfigPath();
     resetCoordinatorHome();
     isPidAliveCtx.reset();
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    resetUserHome();
     resetReadAgentMetaCache();
     await rm(baseDir, { recursive: true, force: true });
   });
@@ -693,7 +691,6 @@ describe("teams: resolveTarget team branch", () => {
   let baseDir: string;
   let homeDir: string;
   let repoDir: string;
-  let originalHome: string | undefined;
 
   function repos() {
     return [{ path: repoDir, name: basename(repoDir) }];
@@ -711,8 +708,7 @@ describe("teams: resolveTarget team branch", () => {
     repoDir = join(baseDir, "repo");
     await mkdir(homeDir, { recursive: true });
     await mkdir(repoDir, { recursive: true });
-    originalHome = process.env.HOME;
-    process.env.HOME = baseDir;
+    setUserHome(baseDir);
     setCoordinatorHome(homeDir);
     await saveRegistry({ repos: [{ path: repoDir, name: basename(repoDir) }] });
     resetReadAgentMetaCache();
@@ -720,8 +716,7 @@ describe("teams: resolveTarget team branch", () => {
 
   afterEach(async () => {
     resetCoordinatorHome();
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    resetUserHome();
     resetReadAgentMetaCache();
     await rm(baseDir, { recursive: true, force: true });
   });

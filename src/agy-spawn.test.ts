@@ -22,6 +22,7 @@ import {
 } from "./agy-spawn";
 import { agySettingsPath } from "./agy-config";
 import type { SessionContext } from "./hooks/session-start";
+import { setUserHome, resetUserHome } from "./home";
 
 // ── buildAgyStartContent — launch line ───────────────────────────────────────
 
@@ -239,7 +240,7 @@ describe("refuseIfTracked", () => {
 
 describe("writeAgyWorktreeFiles / untrust (temp HOME)", () => {
   let tempDir: string;
-  let originalHome: string | undefined;
+  let fakeHome: string;
   let worktree: string;
 
   function ctxFor(overrides: Partial<SessionContext> = {}): SessionContext {
@@ -258,18 +259,16 @@ describe("writeAgyWorktreeFiles / untrust (temp HOME)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "agy-spawn-test-"));
-    originalHome = process.env.HOME;
-    const fakeHome = join(tempDir, "home");
+    fakeHome = join(tempDir, "home");
     await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
-    process.env.HOME = fakeHome;
+    setUserHome(fakeHome);
     await (await import("./agent-types")).ensureAgentTypesDir();
     worktree = join(tempDir, "wt");
     await mkdir(worktree, { recursive: true });
   });
 
   afterEach(async () => {
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -296,7 +295,7 @@ describe("writeAgyWorktreeFiles / untrust (temp HOME)", () => {
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-wtf01", model: "agy:gemini-3.7-flash-low" }));
     // Seed the trust file with the worktree realpath (what spawn stored).
     const real = realpathSync(worktree);
-    await mkdir(join(process.env.HOME!, ".gemini", "antigravity-cli"), { recursive: true });
+    await mkdir(join(fakeHome, ".gemini", "antigravity-cli"), { recursive: true });
     await Bun.write(agySettingsPath(), JSON.stringify({ keepKey: 1, trustedWorkspaces: ["/other", real] }));
 
     await untrustAgyWorkspaceForTeardown(agentDir, worktree);
@@ -311,7 +310,7 @@ describe("writeAgyWorktreeFiles / untrust (temp HOME)", () => {
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "c1", model: "claude:sonnet" }));
     const real = realpathSync(worktree);
-    await mkdir(join(process.env.HOME!, ".gemini", "antigravity-cli"), { recursive: true });
+    await mkdir(join(fakeHome, ".gemini", "antigravity-cli"), { recursive: true });
     const before = JSON.stringify({ trustedWorkspaces: [real] });
     await Bun.write(agySettingsPath(), before);
 

@@ -1,5 +1,4 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { homedir } from "os";
 import {
   buildCodexLaunchArgs,
   isCodexSafeBinaryPath,
@@ -9,6 +8,7 @@ import {
   FUGU_CODEX_CONFIG_OVERRIDES,
 } from "./codex-config";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
+import { setUserHome, resetUserHome } from "./home";
 
 // Pin the coordinator-home to a stable, safe absolute path so assertions about
 // the always-prepended `--add-dir <coordinatorHome>` pair are deterministic
@@ -17,18 +17,10 @@ import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 // pinning to a hand-crafted safe path is fine for the well-formedness tests.
 const FAKE_COORDINATOR_HOME = "/tmp/codex-config-test-home";
 
-// The Library/Caches grant is derived from $HOME at call time, so pin $HOME
-// to a stable, shell-safe path for the same reason.
-//
-// NB: pinning $HOME via process.env.HOME works ONLY because production reads
-// `process.env.HOME || homedir()` — env first, then homedir() fallback. Node's
-// os.homedir() does NOT re-read $HOME at runtime (it's cached from the initial
-// userInfo lookup). If anyone flips the operand order in production to
-// `homedir() || process.env.HOME`, these tests will keep passing while the
-// real binary reads the actual host home — a silent breakage. Don't flip it.
+// The Library/Caches grant is derived from userHome() at call time, so pin the
+// shared seam to a stable, shell-safe path for the same reason.
 const FAKE_HOME = "/tmp/codex-config-test-home-dir";
 const FAKE_LIBRARY_CACHES = `${FAKE_HOME}/Library/Caches`;
-const ORIGINAL_HOME = process.env.HOME;
 
 // Pin process.platform to "darwin" for the positional-argv tests. The
 // Library/Caches grant only fires on macOS, so on Linux/Windows CI the args
@@ -41,13 +33,12 @@ function setPlatform(value: NodeJS.Platform): void {
 
 beforeEach(() => {
   setCoordinatorHome(FAKE_COORDINATOR_HOME);
-  process.env.HOME = FAKE_HOME;
+  setUserHome(FAKE_HOME);
   setPlatform("darwin");
 });
 afterEach(() => {
   resetCoordinatorHome();
-  if (ORIGINAL_HOME === undefined) delete process.env.HOME;
-  else process.env.HOME = ORIGINAL_HOME;
+  resetUserHome();
   setPlatform(originalPlatform);
 });
 
@@ -277,7 +268,7 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
   test("rejects when $HOME resolves to a path with shell-unsafe chars (Library/Caches grant)", () => {
     // Library/Caches is derived from $HOME; the same shell/TOML safety check
     // that gates coordinator-home and the ib binary path must gate this too.
-    process.env.HOME = "/Users/o'malley";
+    setUserHome("/Users/o'malley");
     expect(() =>
       buildCodexLaunchArgs({
         ibBinaryPath: "/bin/ib",
@@ -287,28 +278,17 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
     ).toThrow(/Unsafe Library\/Caches path/);
   });
 
-  test("empty-string $HOME falls back to homedir() (not a relative path)", () => {
-    // An empty-string $HOME (env -i, systemd unit overrides, some sandboxes)
-    // must NOT produce `Library/Caches` as a relative path — that would
-    // either be rejected by codex or, worse, be resolved against the
-    // worktree cwd and silently widen the worktree allowlist. Using `||`
-    // instead of `??` makes empty-string trigger the homedir() fallback.
-    // (A whitespace-only $HOME like "   " is intentionally NOT covered:
-    // `"   "` is truthy under `||`, so it would produce "   /Library/Caches".
-    // No real shell sets $HOME like that; if it ever happens, the existing
-    // isCodexSafeBinaryPath check still permits it (space is not a control
-    // char) and codex would silently fail to register the directory.)
-    const realHomedir = homedir();
-    process.env.HOME = "";
+  test("uses an absolute home-seam path for the Library/Caches grant", () => {
+    // The empty-$HOME fallback semantics live in home.test.ts. This integration
+    // test verifies that buildCodexLaunchArgs consumes the injected seam value
+    // and never emits a relative Library/Caches grant.
+    setUserHome("/tmp/codex-config-absolute-home");
     const { args } = buildCodexLaunchArgs({
       ibBinaryPath: "/bin/ib",
       agentId: "agent-abc",
       agentDir: "/var/agents/agent-abc",
     });
-    // The Library/Caches --add-dir pair MUST be an absolute path. The
-    // exact value depends on the host home (we can't pin it without
-    // monkey-patching os.homedir), but it must start with `/` and end
-    // with `/Library/Caches`.
+    // The Library/Caches --add-dir pair MUST be an absolute path.
     let found: string | undefined;
     for (let i = 0; i < args.length - 1; i++) {
       if (args[i] === "--add-dir" && args[i + 1]!.endsWith("/Library/Caches")) {
@@ -318,7 +298,7 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
     }
     expect(found).toBeDefined();
     expect(found!.startsWith("/")).toBe(true);
-    expect(found).toBe(`${realHomedir}/Library/Caches`);
+    expect(found).toBe("/tmp/codex-config-absolute-home/Library/Caches");
     // Explicitly assert the regression: must NOT be the relative form.
     expect(found).not.toBe("Library/Caches");
   });

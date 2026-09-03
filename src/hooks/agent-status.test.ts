@@ -14,6 +14,7 @@ import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { setSendSpawnRunner, resetSendSpawnRunner } from "../ib-commands";
 import { makeSpawnResult } from "../test-utils";
 import { WATCHDOG_SENTINEL } from "../watchdog";
+import { setUserHome, resetUserHome } from "../home";
 
 /**
  * Per-process itsybitsy home for the whole file.
@@ -37,27 +38,24 @@ import { WATCHDOG_SENTINEL } from "../watchdog";
  *
  * Both halves of the override matter:
  *  - `setCoordinatorHome` is what `getCoordinatorHome`/`agentOutboxDir` consult.
- *  - `process.env.HOME` is what `hooks/shared.ts` resolves independently (it
- *    deliberately does NOT honor the coordinator override), and it is also the
+ *  - `setUserHome` is what `hooks/shared.ts` resolves independently (it does
+ *    not honor the coordinator override), and it is also the
  *    fallback `itsybitsyHome()` uses whenever the override is cleared — which
  *    the "watchdog attribution on delivery" block below does in its `afterEach`.
  *    Without the HOME half, every test after that block would silently fall
  *    back to the real home again.
  */
 let testHome: string;
-let realHome: string | undefined;
 
 beforeAll(() => {
   testHome = mkdtempSync(join(tmpdir(), "ib-agent-status-home-"));
-  realHome = process.env.HOME;
-  process.env.HOME = testHome;
+  setUserHome(testHome);
   setCoordinatorHome(join(testHome, ".itsybitsy"));
 });
 
 afterAll(() => {
   resetCoordinatorHome();
-  if (realHome === undefined) delete process.env.HOME;
-  else process.env.HOME = realHome;
+  resetUserHome();
   rmSync(testHome, { recursive: true, force: true });
 });
 
@@ -1141,7 +1139,7 @@ describe("executeResultActions — watchdog attribution on delivery", () => {
     resetSendSpawnRunner();
     // Hand the override back to the file-wide isolated home rather than
     // clearing it outright: a bare `resetCoordinatorHome()` here would drop
-    // every later test in this file back onto whatever `process.env.HOME`
+    // every later test in this file back onto the real user home
     // resolves to, which is exactly the leak this file is fixing.
     setCoordinatorHome(join(testHome, ".itsybitsy"));
     await rm(coordHome, { recursive: true, force: true });

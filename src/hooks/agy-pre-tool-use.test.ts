@@ -2,6 +2,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, mkdir, readFile, rm, writeFile, realpath } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
+import { setUserHome, resetUserHome } from "../home";
 import {
   checkAgyPreToolUse,
   captureAgyConversationId,
@@ -499,7 +500,6 @@ describe("checkAgyPreToolUse — deny list wins over allow", () => {
 
 describe("hookAgyPreToolUse — {decision,reason} contract", () => {
   let tempHome: string;
-  let originalHome: string | undefined;
   let agentDir: string;
 
   beforeEach(async () => {
@@ -507,8 +507,7 @@ describe("hookAgyPreToolUse — {decision,reason} contract", () => {
     // mismatches in the in-worktree allow test (checkPathAccess realpaths the
     // worktree but not the agentDirOverride).
     tempHome = await realpath(await mkdtemp(join(tmpdir(), "agy-hook-")));
-    originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
     const typesDir = join(tempHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
     await writeFile(
@@ -537,8 +536,7 @@ describe("hookAgyPreToolUse — {decision,reason} contract", () => {
   });
 
   afterEach(async () => {
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -689,13 +687,11 @@ describe("captureAgyConversationId — idempotent capture", () => {
 
 describe("hookAgyPreToolUseDryRun", () => {
   let tempHome: string;
-  let originalHome: string | undefined;
   let agentDir: string;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "agy-dryrun-"));
-    originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
     const typesDir = join(tempHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
     await writeFile(join(typesDir, "_all.md"), "---\nname: _all\ndescription: shared\npermissions:\n  allow: []\n  deny: []\n---\n");
@@ -704,8 +700,7 @@ describe("hookAgyPreToolUseDryRun", () => {
     await writeFile(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-dryrun01", worktree: true, worker: true, model: "agy:gemini-3.7-flash-low", agentType: "worker" }));
   });
   afterEach(async () => {
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 

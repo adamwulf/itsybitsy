@@ -2,6 +2,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
+import { setUserHome, resetUserHome } from "../home";
 import {
   deriveCodexStopState,
   hookCodexStop,
@@ -180,13 +181,11 @@ describe("hookCodexStop — writes deterministic state", () => {
 // ── HIGH 3 from Phase 4 review: dry-run must actually exercise the handler ──
 describe("hookCodexStopDryRun — exercises real handler with synthetic payload", () => {
   let tempHome: string;
-  let originalHome: string | undefined;
   let agentDir: string;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "codex-stop-dryrun-"));
-    originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
     agentDir = join(tempHome, ".ittybitty", "agents", "agent-dryrun01");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await writeFile(
@@ -201,7 +200,7 @@ describe("hookCodexStopDryRun — exercises real handler with synthetic payload"
   });
 
   afterEach(async () => {
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 

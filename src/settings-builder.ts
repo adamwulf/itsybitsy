@@ -23,7 +23,7 @@ export const REGULAR_AGENT_DEFAULT_ALLOW = [
   "Bash(git restore:*)", "Bash(git reset:*)",
   "Bash(pwd:*)", "Bash(ls:*)", "Bash(head:*)", "Bash(tail:*)",
   "Bash(cat:*)", "Bash(grep:*)",
-  "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS",
+  "Read", "Write", "Edit", "Glob", "Grep",
   "TodoWrite", "Task", "TaskCreate", "Agent", "TaskOutput", "KillShell", "NotebookEdit",
   "WebFetch", "WebSearch", "ToolSearch",
 ];

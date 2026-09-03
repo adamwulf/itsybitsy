@@ -5376,11 +5376,12 @@ echo ""
   } else if (agentCli === "agy") {
     // Antigravity CLI (`agy`) spawn branch (SPEC-ANTIGRAVITY-CLI.md §4.5). The
     // launch line is the D2 form: `agy --dangerously-skip-permissions
-    // --mode=accept-edits --model <slug> [--effort <e>] --log-file
+    // --mode=accept-edits [--model <slug>] [--effort <e>] --log-file
     // <agentDir>/agy.log -i "$(cat <prompt>)"`. The binary-path check + the
     // worktree files, pre-trust, and dispatcher precheck all ran above (we
     // wouldn't be here on failure). The effort D1 rule (pass --effort only for
-    // slugs without a trailing effort suffix) is applied inside the builder.
+    // slugs without a trailing effort suffix) is applied inside the builder,
+    // as is the `agy:default` sentinel that omits both --model and --effort.
     // PID variable + meta-field stay CLAUDE_PID / claude_pid so the watchdog
     // and other readers keep working.
     const { buildAgyStartContent } = await import("./agy-spawn");

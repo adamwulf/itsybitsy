@@ -170,3 +170,21 @@ export function mapEffortForAgy(effort: string): string {
 export function agySlugHasEffort(slug: string): boolean {
   return /-(low|medium|high)$/.test(slug);
 }
+
+/**
+ * The sentinel `agy` model half meaning "launch agy with NO `--model` and NO
+ * `--effort`, so agy uses its OWN configured default model" (currently Gemini
+ * 3.8 Flash High). Selected as `agy:default`. Unlike a real slug this is never
+ * passed to `--model`: agy rejects an unknown slug with a "model not
+ * recognized" warning and falls back to its default anyway, so we omit the flag
+ * entirely instead of provoking the warning. Effort is suppressed too — the
+ * point of `agy:default` is agy's untouched defaults. `parseModel` still yields
+ * `{ cli: "agy", model: "default" }` and `isValidModel("default")` passes, so
+ * the selector round-trips like any other.
+ */
+export const AGY_DEFAULT_MODEL = "default";
+
+/** True when an `agy` model half is the `agy:default` sentinel (see AGY_DEFAULT_MODEL). */
+export function isAgyDefaultModel(agyModel: string): boolean {
+  return agyModel === AGY_DEFAULT_MODEL;
+}

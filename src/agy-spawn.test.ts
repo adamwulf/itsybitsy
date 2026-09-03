@@ -124,6 +124,24 @@ describe("buildAgyStartContent — launch line", () => {
     expect(content).not.toContain("--conversation");
   });
 
+  test("agy:default suppresses BOTH --model and --effort (agy uses its own default)", () => {
+    // Even with an explicit effort, the `default` sentinel omits both flags.
+    const content = buildAgyStartContent({ ...baseInput(), agyModel: "default", effort: "high" });
+    expect(content).not.toContain("--model");
+    expect(content).not.toContain("--effort");
+    // The rest of the canonical D2 launch line is intact (no dangling flag).
+    expect(content).toContain(
+      "agy --dangerously-skip-permissions --mode=accept-edits --log-file '/tmp/test/agy.log' -i",
+    );
+  });
+
+  test("agy:default start.sh log line names the default model, never a phantom --model", () => {
+    const content = buildAgyStartContent({ ...baseInput(), agyModel: "default" });
+    const startingLine = content.split("\n").find((l) => l.includes('log "Starting agy'))!;
+    expect(startingLine).toContain("default model (no model flag)");
+    expect(startingLine).not.toContain("--model");
+  });
+
   test("rejects an unsafe ib binary path", () => {
     expect(() =>
       buildAgyStartContent({ ...baseInput(), ibBinaryPath: "/usr/local/bin/ib'; rm -rf /" }),
@@ -181,6 +199,16 @@ describe("buildAgyResumeContent — launch line", () => {
   test("applies --effort for a suffix-less slug on resume too", () => {
     const content = buildAgyResumeContent({ ...baseInput(), agyModel: "claude-sonnet-4-6", effort: "max" });
     expect(content).toContain("--effort 'high'");
+  });
+
+  test("agy:default omits --model/--effort on resume too, keeping --conversation", () => {
+    const content = buildAgyResumeContent({ ...baseInput(), agyModel: "default", effort: "high" });
+    expect(content).not.toContain("--model");
+    expect(content).not.toContain("--effort");
+    // --conversation is still re-passed so the prior conversation reattaches.
+    expect(content).toContain(
+      "agy --dangerously-skip-permissions --mode=accept-edits --log-file '/tmp/test/agy.log' --conversation '019e7b21-cb7d-7f23-8674-11036ed141ef'",
+    );
   });
 
   test("the resume.sh log line names conversation + model but NOT any prompt", () => {

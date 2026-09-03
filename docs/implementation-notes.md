@@ -118,12 +118,12 @@ Codex-side equivalents of the claude `start.sh` / `resume.sh` assembly. See SPEC
 
 ## Antigravity CLI (`agy`) integration
 
-The third agent CLI, next to claude and codex. See SPEC.md §19 and SPEC-ANTIGRAVITY-CLI.md (design source-of-truth); `ANTIGRAVITY-CLI-NOTES.md` §17 is the evidence. Selector `agy:<slug>` (`agy:gemini-3.7-flash-low`, `agy:claude-sonnet-4-6`); effort via `mapEffortForAgy` + `agySlugHasEffort` in `src/agent-cli.ts`.
+The third agent CLI, next to claude and codex. See SPEC.md §19 and SPEC-ANTIGRAVITY-CLI.md (design source-of-truth); `ANTIGRAVITY-CLI-NOTES.md` §17 is the evidence. Selector `agy:<slug>` (`agy:gemini-3.7-flash-low`, `agy:claude-sonnet-4-6`); effort via `mapEffortForAgy` + `agySlugHasEffort` in `src/agent-cli.ts`. The reserved slug **`agy:default`** (`AGY_DEFAULT_MODEL` / `isAgyDefaultModel` in `src/agent-cli.ts`) is a sentinel that launches agy with **no** `--model` and **no** `--effort`, so agy uses its own configured default model.
 
 **`src/agy-spawn.ts`** — agy-shaped `start.sh` / `resume.sh` (same setsid + SIGHUP trap + `ib write-pid` + wait + exit-check skeleton as codex; PID stored as `claude_pid`).
 
-- `buildAgyStartContent({agentId, ibBinaryPath, agentDir, agyModel, effort?, absPromptFile, ...})` — launches `agy --dangerously-skip-permissions --mode=accept-edits --model <slug> [--effort <e>] --log-file <agentDir>/agy.log -i "$(cat <prompt>)"` (D2). `--effort` is omitted when the slug already ends `-low`/`-medium`/`-high` (D1).
-- `buildAgyResumeContent({..., conversationId})` — same skeleton, launch line carries `--conversation <uuid>` and NO `-i`; `--model` + effort ARE re-passed (agy resume remembers neither, §17.6).
+- `buildAgyStartContent({agentId, ibBinaryPath, agentDir, agyModel, effort?, absPromptFile, ...})` — launches `agy --dangerously-skip-permissions --mode=accept-edits [--model <slug>] [--effort <e>] --log-file <agentDir>/agy.log -i "$(cat <prompt>)"` (D2). `--effort` is omitted when the slug already ends `-low`/`-medium`/`-high` (D1); both `--model` and `--effort` are omitted for the `agy:default` sentinel. The `--model <slug>[ --effort <e>]` fragment is built by `agyModelAndEffortFlags`.
+- `buildAgyResumeContent({..., conversationId})` — same skeleton, launch line carries `--conversation <uuid>` and NO `-i`; `--model` + effort ARE re-passed (agy resume remembers neither, §17.6), save for `agy:default` which omits both.
 - `writeAgyWorktreeFiles(worktreePath, ctx, {ibBinaryPath, agentId})` — writes `.agents/hooks.json` + `.agents/rules/ittybitty-agent.md`; returns both paths. Regenerated on resume so permission edits take effect.
 - `refuseIfTracked(worktreePath, files, run)` — D7 guard via `git ls-files --error-unmatch`; returns the first tracked boundary file or null.
 - `untrustAgyWorkspaceForTeardown(agentDir, worktreePath)` — teardown counterpart to the D5 pre-trust; reads `meta.model`, no-ops unless agy, removes `realpath(worktree)` from `trustedWorkspaces`. NEVER throws.

@@ -1113,6 +1113,14 @@ describe("most-specific filesystem access oracle", () => {
 
 describe("LIVE claude boot under the floor", () => {
   test("the new _all.md floor boots claude to a network/API error, not a SIGABRT or silent death", async () => {
+    // Opt-in: this gate runs a real claude that hangs on the kernel-denied
+    // network for the full run timeout, so it is off by default to keep an
+    // ordinary `bun test` fast. Run it with:
+    //   IB_LIVE_BOOT=1 bun test src/sandbox.test.ts --test-name-pattern "LIVE claude boot"
+    if (process.env.IB_LIVE_BOOT !== "1") {
+      console.log("LIVE claude boot: SKIPPED (set IB_LIVE_BOOT=1 to run the live claude boot gate)");
+      return;
+    }
     const sandboxExec = Bun.which("sandbox-exec");
     if (process.platform !== "darwin" || !sandboxExec) {
       console.log("LIVE claude boot: SKIPPED (sandbox-exec is absent; macOS only)");
@@ -1212,7 +1220,7 @@ describe("LIVE claude boot under the floor", () => {
         delete childEnv[key];
       }
 
-      const runTimeoutMs = 60000;
+      const runTimeoutMs = 30000;
       const start = Date.now();
       const run = Bun.spawnSync({
         cmd: [sandboxExec, "-f", profilePath, ...defArgs, claudePath, "-p", "reply with the single word OK"],
@@ -1240,8 +1248,8 @@ describe("LIVE claude boot under the floor", () => {
       // documented "fully offline" fail-closed proof, and identical to its
       // UNSANDBOXED offline behavior). The two are distinguished by SIGABRT and
       // by whether claude ran long enough to have booted and reached the
-      // network. bootReachedMs is far above a crash (~1s) and far below a
-      // booted-then-hung run (~60s).
+      // network. bootReachedMs is far above a crash (~1s) and comfortably below
+      // the booted-then-hung run (it hangs to the 30s run timeout).
       const bootReachedMs = 15000;
       const booted = combined.length > 0 || elapsed >= bootReachedMs;
       if (sigabrt || !booted) {
@@ -1264,7 +1272,7 @@ describe("LIVE claude boot under the floor", () => {
     } finally {
       await rm(createdRoot, { recursive: true, force: true });
     }
-  }, 90000);
+  }, 60000);
 });
 
 describe("resolver input contract", () => {

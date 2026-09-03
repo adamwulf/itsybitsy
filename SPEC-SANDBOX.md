@@ -546,7 +546,16 @@ agent needs (`agents`, `teams`, `teams.json`, `teams.json.tmp`, `.teams.lock`);
 `~/Library/Caches` is deliberately absent (toolchain caches are per-type). A LIVE
 boot gate in `src/sandbox.test.ts` proves the tightened floor still boots claude
 (no SIGABRT), matching `docs/SANDBOX-BASELINE-MINIMAL.md §(d)`'s exit-143
-fail-closed proof.
+fail-closed proof. The boot gate is **opt-in** (it runs a real claude that hangs
+on the kernel-denied network for the run timeout), so an ordinary `bun test`
+skips it; run it with:
+
+```
+IB_LIVE_BOOT=1 bun test src/sandbox.test.ts --test-name-pattern "LIVE claude boot"
+```
+
+The 1-second LIVE kernel probe (floor rows, `ls /` vs `ls /Applications`, tmux
+deny) stays on by default.
 
 Candidate static `_all.md` contents (SUPERSEDED by `docs/SANDBOX-BASELINE-MINIMAL.md`;
 kept for context):

@@ -1128,6 +1128,9 @@ describe("most-specific filesystem access oracle", () => {
           Bun.listen({ unix: insideSock, socket: { data() {}, open() {} } }),
           Bun.listen({ unix: outsideSock, socket: { data() {}, open() {} } }),
         ];
+        // Never let a listener keep the test worker's event loop alive (bun test
+        // reuses workers; a lingering server would stall the whole suite).
+        for (const listener of listeners) listener.unref();
         try {
           const connect = (sb: string, args: string[], sock: string) => Bun.spawnSync({
             cmd: [sandboxExec, "-f", sb, ...args, nc, "-U", "-w", "1", sock],
@@ -1163,7 +1166,7 @@ describe("most-specific filesystem access oracle", () => {
             }
           }
         } finally {
-          for (const listener of listeners) listener.stop();
+          for (const listener of listeners) listener.stop(true);
           await rm(outsideSock, { force: true });
         }
       } else {

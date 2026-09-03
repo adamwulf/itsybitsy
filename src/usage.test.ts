@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { formatResetTime, parseUsageResponse, parseCodexRateLimits, fetchCodexUsage, fetchUsage, setTestDir, resetTestDir, fetchCtx, spawnCtx, type UsageResult } from "./usage";
+import { formatResetTime, parseUsageResponse, parseCodexRateLimits, parseGeminiUsage, fetchCodexUsage, fetchGeminiUsage, fetchUsage, setTestDir, resetTestDir, fetchCtx, spawnCtx, type UsageResult } from "./usage";
 import { join } from "path";
 import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
@@ -672,3 +672,168 @@ describe("readAccessToken keychain fallback", () => {
     expect(result.data).toBeNull();
   });
 });
+
+describe("parseGeminiUsage", () => {
+  const now = new Date("2026-09-02T23:44:44Z");
+
+  test("parses full quota output with session and weekly limits", () => {
+    const output = [
+      "Quota:",
+      "Gemini Models          Weekly Limit Remaining     100%  2026-09-10T04:38:29Z",
+      "Gemini Models          Five Hour Limit Remaining  99%   2026-09-03T09:38:29Z",
+      "Claude and GPT models  Weekly Limit Remaining     100%  2026-09-10T04:44:18Z",
+      "Claude and GPT models  Five Hour Limit Remaining  100%  2026-09-03T09:44:18Z",
+    ].join("\n");
+
+    const result = parseGeminiUsage(output, now);
+    expect(result.sessionPct).toBe(1); // 100 - 99 = 1% used
+    expect(result.weeklyPct).toBe(0); // 100 - 100 = 0% used
+    expect(result.sessionReset).toBe("9h 53m");
+    expect(result.weeklyReset).toBe("7d 4h");
+  });
+
+  test("parses when user does not have session limits (weekly only)", () => {
+    const output = [
+      "Quota:",
+      "Gemini Models          Weekly Limit Remaining     80%  2026-09-10T04:38:29Z",
+      "Claude and GPT models  Weekly Limit Remaining     100%  2026-09-10T04:44:18Z",
+    ].join("\n");
+
+    const result = parseGeminiUsage(output, now);
+    expect(result.sessionPct).toBeNull();
+    expect(result.sessionReset).toBeNull();
+    expect(result.weeklyPct).toBe(20); // 100 - 80 = 20% used
+    expect(result.weeklyReset).toBe("7d 4h");
+  });
+
+  test("parses 0% remaining as 100% used", () => {
+    const output = "Gemini Models   Five Hour Limit Remaining   0%   2026-09-03T09:38:29Z";
+    const result = parseGeminiUsage(output, now);
+    expect(result.sessionPct).toBe(100);
+  });
+
+  test("handles ANSI color escape sequences", () => {
+    const output = "\x1b[32mGemini Models\x1b[0m          \x1b[1mWeekly Limit Remaining\x1b[0m     \x1b[33m75%\x1b[0m  2026-09-10T04:38:29Z";
+    const result = parseGeminiUsage(output, now);
+    expect(result.weeklyPct).toBe(25);
+    expect(result.weeklyReset).toBe("7d 4h");
+  });
+
+  test("returns all nulls when output has no Gemini lines", () => {
+    const output = [
+      "Quota:",
+      "Claude and GPT models  Weekly Limit Remaining     100%  2026-09-10T04:44:18Z",
+      "Claude and GPT models  Five Hour Limit Remaining  100%  2026-09-03T09:44:18Z",
+    ].join("\n");
+
+    const result = parseGeminiUsage(output, now);
+    expect(result).toEqual({
+      sessionPct: null,
+      weeklyPct: null,
+      sessionReset: null,
+      weeklyReset: null,
+    });
+  });
+
+  test("returns all nulls on empty output", () => {
+    const result = parseGeminiUsage("", now);
+    expect(result).toEqual({
+      sessionPct: null,
+      weeklyPct: null,
+      sessionReset: null,
+      weeklyReset: null,
+    });
+  });
+});
+
+describe("fetchGeminiUsage", () => {
+  let tmpDir: string;
+  const sampleAgyOutput = [
+    "Quota:",
+    "Gemini Models          Weekly Limit Remaining     90%  2026-09-10T04:38:29Z",
+    "Gemini Models          Five Hour Limit Remaining  95%   2026-09-03T09:38:29Z",
+  ].join("\n");
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "gemini-usage-test-"));
+    setTestDir(tmpDir);
+  });
+
+  afterEach(async () => {
+    resetTestDir();
+    spawnCtx.reset();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  function mockAgySpawn(stdout: string, exitCode: number): void {
+    spawnCtx.set(() => {
+      const stdoutBlob = new Blob([stdout]);
+      return {
+        stdout: stdoutBlob.stream(),
+        stderr: new Blob([]).stream(),
+        exited: Promise.resolve(exitCode),
+      };
+    });
+  }
+
+  test("fetches from agy and caches result", async () => {
+    mockAgySpawn(sampleAgyOutput, 0);
+
+    const result = await fetchGeminiUsage();
+    expect(result.error).toBe(false);
+    expect(result.data?.sessionPct).toBe(5); // 100 - 95
+    expect(result.data?.weeklyPct).toBe(10); // 100 - 90
+
+    // Check cache file was written
+    const cacheFile = Bun.file(join(tmpDir, "gemini-usage-cache.json"));
+    expect(await cacheFile.exists()).toBe(true);
+    const cached = await cacheFile.json();
+    expect(cached.data.sessionPct).toBe(5);
+    expect(cached.data.weeklyPct).toBe(10);
+  });
+
+  test("returns cached response when cache is fresh", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    await writeFile(
+      join(tmpDir, "gemini-usage-cache.json"),
+      JSON.stringify({
+        timestamp: now,
+        data: { sessionPct: 15, weeklyPct: 8, sessionReset: "2h", weeklyReset: "5d" },
+      }),
+    );
+
+    // If runner is invoked it will fail
+    mockAgySpawn("should not be called", 1);
+
+    const result = await fetchGeminiUsage();
+    expect(result.error).toBe(false);
+    expect(result.data?.sessionPct).toBe(15);
+  });
+
+  test("returns error when agy command fails and no cache exists", async () => {
+    mockAgySpawn("error: command not found", 1);
+
+    const result = await fetchGeminiUsage();
+    expect(result.error).toBe(true);
+    expect(result.data).toBeNull();
+  });
+
+  test("returns stale cache with error: true when agy command fails", async () => {
+    // Write stale cache (4 minutes old)
+    const oldTimestamp = Math.floor((Date.now() - 240_000) / 1000);
+    await writeFile(
+      join(tmpDir, "gemini-usage-cache.json"),
+      JSON.stringify({
+        timestamp: oldTimestamp,
+        data: { sessionPct: 7, weeklyPct: 3, sessionReset: "1h", weeklyReset: "4d" },
+      }),
+    );
+
+    mockAgySpawn("network failure", 1);
+
+    const result = await fetchGeminiUsage();
+    expect(result.error).toBe(true);
+    expect(result.data?.sessionPct).toBe(7);
+  });
+});
+

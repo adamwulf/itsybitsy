@@ -22,6 +22,8 @@ let CACHE_PATH = join(ITSYBITSY_DIR, "usage-cache.json");
 let LOCK_PATH = join(ITSYBITSY_DIR, "usage.lock");
 let CREDENTIALS_PATH = join(userHome(), ".claude", ".credentials.json");
 let CODEX_SESSIONS_DIR = join(userHome(), ".codex", "sessions");
+let GEMINI_CACHE_PATH = join(ITSYBITSY_DIR, "gemini-usage-cache.json");
+let GEMINI_LOCK_PATH = join(ITSYBITSY_DIR, "gemini-usage.lock");
 const CACHE_TTL_MS = 180_000; // 3 minute normal refresh
 const LOCK_MAX_AGE_MS = 30_000; // only one API attempt per 30s across processes
 const API_TIMEOUT_MS = 5_000; // 5s fetch timeout
@@ -34,6 +36,8 @@ export function setTestDir(dir: string): void {
   LOCK_PATH = join(dir, "usage.lock");
   CREDENTIALS_PATH = join(dir, "credentials.json");
   CODEX_SESSIONS_DIR = join(dir, "codex-sessions");
+  GEMINI_CACHE_PATH = join(dir, "gemini-usage-cache.json");
+  GEMINI_LOCK_PATH = join(dir, "gemini-usage.lock");
 }
 
 /** Reset directory paths to defaults. */
@@ -43,6 +47,8 @@ export function resetTestDir(): void {
   LOCK_PATH = join(ITSYBITSY_DIR, "usage.lock");
   CREDENTIALS_PATH = join(userHome(), ".claude", ".credentials.json");
   CODEX_SESSIONS_DIR = join(userHome(), ".codex", "sessions");
+  GEMINI_CACHE_PATH = join(ITSYBITSY_DIR, "gemini-usage-cache.json");
+  GEMINI_LOCK_PATH = join(ITSYBITSY_DIR, "gemini-usage.lock");
 }
 
 export interface UsageData {
@@ -174,6 +180,75 @@ export function parseCodexRateLimits(rateLimits: CodexRateLimits, now?: Date): U
     } else {
       data.weeklyPct = percent(window.used_percent);
       data.weeklyReset = formatCodexResetTime(window.resets_at, now);
+    }
+  }
+
+  return data;
+}
+
+/**
+ * Parse output from `agy -p "/usage"` into UsageData.
+ *
+ * Example output:
+ *   Quota:
+ *   Gemini Models          Weekly Limit Remaining     100%  2026-09-10T04:38:29Z
+ *   Gemini Models          Five Hour Limit Remaining  99%   2026-09-03T09:38:29Z
+ *   Claude and GPT models  Weekly Limit Remaining     100%  2026-09-10T04:44:18Z
+ *   Claude and GPT models  Five Hour Limit Remaining  100%  2026-09-03T09:44:18Z
+ *
+ * Session window is "Five Hour" (or similar hourly/session limit).
+ * Weekly window is "Weekly".
+ * Note that the table reports "Limit Remaining X%". Usage percentage is 100 - remaining.
+ * If the user does not have a session limit, sessionPct will remain null.
+ */
+export function parseGeminiUsage(output: string, now?: Date): UsageData {
+  const data: UsageData = {
+    sessionPct: null,
+    weeklyPct: null,
+    sessionReset: null,
+    weeklyReset: null,
+  };
+
+  // Strip ANSI escape codes if present
+  // eslint-disable-next-line no-control-regex
+  const plain = output.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+
+  const isoRegex = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/;
+  const pctRegex = /(\d+(?:\.\d+)?)\s*%/;
+
+  for (const line of plain.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    // We only process Gemini lines
+    if (!/gemini/i.test(trimmed)) continue;
+
+    const isWeekly = /weekly/i.test(trimmed);
+    const isSession = /five\s*hour|session|\bhour\b/i.test(trimmed);
+    if (!isWeekly && !isSession) continue;
+
+    const pctMatch = trimmed.match(pctRegex);
+    const isoMatch = trimmed.match(isoRegex);
+
+    let pct: number | null = null;
+    if (pctMatch && pctMatch[1] !== undefined) {
+      const val = parseFloat(pctMatch[1]);
+      if (Number.isFinite(val)) {
+        if (/remaining/i.test(trimmed)) {
+          pct = Math.max(0, Math.min(100, Math.round(100 - val)));
+        } else {
+          pct = Math.max(0, Math.min(100, Math.round(val)));
+        }
+      }
+    }
+
+    const reset = isoMatch && isoMatch[0] ? formatResetTime(isoMatch[0], now) : null;
+
+    if (isSession) {
+      data.sessionPct = pct;
+      data.sessionReset = reset;
+    } else if (isWeekly) {
+      data.weeklyPct = pct;
+      data.weeklyReset = reset;
     }
   }
 
@@ -395,3 +470,130 @@ export async function fetchUsage(): Promise<UsageResult> {
     return { data: null, error: true };
   }
 }
+
+interface GeminiCacheFile {
+  timestamp: number;
+  data: UsageData;
+  nextBackoffMs?: number;
+}
+
+async function readGeminiCache(): Promise<GeminiCacheFile | null> {
+  try {
+    const file = Bun.file(GEMINI_CACHE_PATH);
+    return await file.json();
+  } catch {
+    return null;
+  }
+}
+
+async function writeGeminiCache(cache: GeminiCacheFile): Promise<void> {
+  await mkdir(ITSYBITSY_DIR, { recursive: true });
+  const tmpPath = GEMINI_CACHE_PATH + ".tmp." + process.pid;
+  await Bun.write(tmpPath, JSON.stringify(cache));
+  await rename(tmpPath, GEMINI_CACHE_PATH);
+}
+
+async function isGeminiLocked(): Promise<boolean> {
+  try {
+    const s = await stat(GEMINI_LOCK_PATH);
+    return Date.now() - s.mtimeMs < LOCK_MAX_AGE_MS;
+  } catch {
+    return false;
+  }
+}
+
+async function acquireGeminiLock(): Promise<void> {
+  try {
+    await writeFile(GEMINI_LOCK_PATH, "");
+  } catch {
+    // ignore — best-effort
+  }
+}
+
+async function releaseGeminiLock(): Promise<void> {
+  try {
+    await unlink(GEMINI_LOCK_PATH);
+  } catch {
+    // ignore
+  }
+}
+
+async function handleGeminiFailure(cache: GeminiCacheFile | null, now: number): Promise<UsageResult> {
+  await releaseGeminiLock();
+  if (cache) {
+    const backoffMs = Math.min(cache.nextBackoffMs ?? 60_000, MAX_BACKOFF_MS);
+    const nextBackoffMs = Math.min(backoffMs + 60_000, MAX_BACKOFF_MS);
+    const retryTimestamp = Math.floor((now + backoffMs - CACHE_TTL_MS) / 1000);
+    await writeGeminiCache({ timestamp: retryTimestamp, data: cache.data, nextBackoffMs });
+    return { data: cache.data, error: true };
+  }
+  return { data: null, error: true };
+}
+
+export const AGY_USAGE_TIMEOUT_MS = 10_000;
+
+/**
+ * Fetch Gemini usage from `agy -p "/usage"`.
+ * Caches at ~/.itsybitsy/gemini-usage-cache.json with 3-minute TTL.
+ * Uses a lock file to rate-limit calls to once per 30s across processes.
+ */
+export async function fetchGeminiUsage(nowDate?: Date): Promise<UsageResult> {
+  await mkdir(ITSYBITSY_DIR, { recursive: true });
+  const cache = await readGeminiCache();
+  const now = Date.now();
+  if (cache && now - cache.timestamp * 1000 < CACHE_TTL_MS) {
+    return { data: cache.data, error: false };
+  }
+
+  if (await isGeminiLocked()) {
+    if (cache) return { data: cache.data, error: false };
+    return { data: null, error: true };
+  }
+
+  await acquireGeminiLock();
+
+  let proc: any;
+  try {
+    proc = spawnCtx.runner(
+      ["agy", "-p", "/usage"],
+      { stdout: "pipe", stderr: "pipe", stdin: "ignore" },
+    );
+  } catch {
+    return handleGeminiFailure(cache, now);
+  }
+
+  const drain: Promise<{ stdout: string; exitCode: number } | null> = (async () => {
+    const stdout = proc.stdout ? await new Response(proc.stdout).text() : "";
+    const exitCode = await proc.exited;
+    return { stdout, exitCode };
+  })().catch(() => null);
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), AGY_USAGE_TIMEOUT_MS);
+  });
+
+  try {
+    const res = await Promise.race([drain, timeout]);
+    if (timer) clearTimeout(timer);
+
+    if (!res || res.exitCode !== 0) {
+      try { proc.kill?.(); } catch {}
+      return handleGeminiFailure(cache, now);
+    }
+
+    const data = parseGeminiUsage(res.stdout, nowDate ?? new Date(now));
+    if (data.sessionPct === null && data.weeklyPct === null) {
+      return handleGeminiFailure(cache, now);
+    }
+
+    await writeGeminiCache({ timestamp: Math.floor(now / 1000), data, nextBackoffMs: 60_000 });
+    await releaseGeminiLock();
+    return { data, error: false };
+  } catch {
+    if (timer) clearTimeout(timer);
+    try { proc.kill?.(); } catch {}
+    return handleGeminiFailure(cache, now);
+  }
+}
+

@@ -8,7 +8,7 @@ import { join, basename, dirname } from "path";
 import { userHome } from "./home";
 import { readFileSync, existsSync } from "node:fs";
 import { readConfig } from "./config";
-import { captureTmuxOutput } from "./tmux-poller";
+import { captureTmuxOutput, spawnCtx as tmuxCaptureCtx } from "./tmux-poller";
 import { isCompacting, isRateLimited, isPidAliveCtx, isApiError, isApiSafeguard } from "./agents";
 import { STARTUP_MARKERS } from "./parse-state";
 import { logToWatchLog, getWatchLogPath } from "./watch-log";
@@ -394,8 +394,11 @@ const MAX_MCP_MULTI_OPTIONS = 25;
  * "Enter to confirm" excludes it here — agy trust is handled on its own path.
  */
 export function classifyClaudeStartupPrompt(output: string): ClaudeStartupPromptAccept | null {
-  // NEW single-MCP: distinctive option labels; focus on the last option ("no").
+  // NEW single-MCP: the exact header AND both distinctive option labels, so
+  // ordinary assistant text quoting one label cannot trigger navigation. Focus
+  // defaults to the last option ("no"); Up,Up,Enter selects the first ("yes").
   if (
+    /New MCP server found in this project/i.test(output) &&
     /Use this MCP server/.test(output) &&
     /Continue without using this MCP server/.test(output)
   ) {
@@ -411,7 +414,9 @@ export function classifyClaudeStartupPrompt(output: string): ClaudeStartupPrompt
     }
   }
 
-  // NEW workspace trust: both new choices AND the "Enter to confirm" guide.
+  // NEW workspace trust: both new choices AND the "Enter to confirm" guide (per
+  // spec — the co-presence the agy card, whose guide reads "enter Confirm",
+  // cannot satisfy).
   if (
     /Yes, I trust this folder/.test(output) &&
     /No, exit/.test(output) &&
@@ -420,9 +425,11 @@ export function classifyClaudeStartupPrompt(output: string): ClaudeStartupPrompt
     return { kind: "trust", keys: ["Down", "Enter"] };
   }
 
-  // NEW external CLAUDE.md imports: distinctive Yes/No labels of the same
-  // cancelFirst + focus:"cancel" component.
+  // NEW external CLAUDE.md imports: the exact title AND both distinctive Yes/No
+  // labels of the same cancelFirst + focus:"cancel" component, so prose quoting
+  // one label alone cannot trigger navigation.
   if (
+    /Allow external CLAUDE\.md file imports/i.test(output) &&
     /Yes, allow external imports/.test(output) &&
     /No, disable external imports/.test(output)
   ) {
@@ -430,11 +437,13 @@ export function classifyClaudeStartupPrompt(output: string): ClaudeStartupPrompt
   }
 
   // LEGACY (pre-2.1.259): the accept option was the default, so a bare Enter
-  // accepts. Gated on "Enter to confirm" co-present with a trust / import / MCP
-  // marker; a generic tool or Bash prompt matches none of these → null.
+  // accepts. Gated on "Enter to confirm" co-present with an EXPLICIT trust /
+  // import / MCP marker (the old trust format is specifically "Do you trust the
+  // files in this folder", not any prose containing "trust"); a generic tool or
+  // Bash permission prompt matches none of these → null (never auto-accepted).
   if (/enter to confirm/i.test(output)) {
     if (
-      /trust/i.test(output) ||
+      /Do you trust the files in this folder/i.test(output) ||
       /Allow external CLAUDE\.md file imports/i.test(output) ||
       /New MCP server found/i.test(output) ||
       /\d+ new MCP servers? found/i.test(output)
@@ -467,13 +476,33 @@ export function isCoordinatorAutoAcceptablePrompt(output: string): boolean {
   return classifyClaudeStartupPrompt(output) !== null;
 }
 
+/** Capture the CURRENT VISIBLE pane of the coordinator session (`-S 0 -E -`,
+ *  no history) for the authoritative pre-send re-check. A dismissed prompt that
+ *  scrolled into the history buffer must NOT be re-detected as live, so this
+ *  deliberately excludes scrollback — unlike the history-window capture the
+ *  poll/ready detectors use. Routed through the tmux-poller spawn context so the
+ *  coordinator tests inject it via the same `tmuxSpawnCtx`. */
+async function captureCoordinatorVisiblePane(): Promise<string | null> {
+  try {
+    const { stdout, exitCode } = await tmuxCaptureCtx.run([
+      "tmux", "capture-pane", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION),
+      "-p", "-J", "-S", "0", "-E", "-",
+    ]);
+    return exitCode === 0 ? stdout : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Send a key sequence to the ib-coordinator tmux session to accept a dialog.
- *  The whole sequence goes out in ONE `send-keys` call (e.g. `Down Enter`) so a
- *  navigation key and its Enter can never straddle Claude's ~150ms input-refusal
- *  window: the burst is either fully refused (grace still active → retry next
- *  poll) or fully applied — never a lone Enter landing on the default "No, exit".
- *  Arrow keys are unambiguous CSI sequences, so (unlike the bare-ESC compact
- *  cancel) they are not coalesced when bursted together.
+ *  The whole sequence goes out in ONE `send-keys` call (e.g. `Down Enter`) so the
+ *  keys arrive in order with no other write interleaved between them. Note this
+ *  does NOT guarantee every key lands on the same side of Claude's ~150ms
+ *  input-refusal window — tmux still delivers distinct key events — but the
+ *  authoritative visible-pane re-check just before the send, plus the caller's
+ *  >=500ms poll interval before the next attempt, provide the settling. Arrow
+ *  keys are unambiguous CSI sequences, so (unlike the bare-ESC compact cancel)
+ *  they are not coalesced when sent together.
  *  Routed through coordinatorSpawnCtx — the coordinator's established tmux-send
  *  mechanism (the direct analogue of the watchdog's private sendTmuxEnter),
  *  which every other tmux write in this module already uses and which the
@@ -536,12 +565,13 @@ export async function autoAcceptCoordinatorPrompt(output: string): Promise<boole
     return false;
   }
   try {
-    // Re-capture under the lock so the navigation keys match the TRUE current
-    // pane, not the pre-lock snapshot a concurrent drain may have superseded.
-    const fresh = await captureTmuxOutput(IB_COORDINATOR_SESSION, 200);
+    // Re-capture the CURRENT VISIBLE pane under the lock so the navigation keys
+    // match the TRUE live pane — not the pre-lock snapshot a concurrent drain may
+    // have superseded, and not a prompt that has since scrolled into history.
+    const fresh = await captureCoordinatorVisiblePane();
     const decision = fresh === null ? null : classifyClaudeStartupPrompt(fresh);
     if (!decision) {
-      logToWatchLog("[coordinator] permission prompt cleared before accept (stale capture) — sending nothing");
+      logToWatchLog("[coordinator] permission prompt not present in the live pane before accept (stale capture) — sending nothing");
       return false;
     }
     logToWatchLog(`[coordinator] accepting ${decision.kind} prompt — sending [${decision.keys.join(" ")}]`);

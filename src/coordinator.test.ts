@@ -2269,6 +2269,25 @@ describe("classifyClaudeStartupPrompt", () => {
     expect(classifyClaudeStartupPrompt("I trust that your build passed.\nDone.")).toBeNull();
   });
 
+  test("assistant output quoting 'trust' + 'Enter to confirm' but not the old marker → null", () => {
+    // Narrowed legacy trust: only the explicit "Do you trust the files in this
+    // folder" marker triggers a bare Enter, never arbitrary prose with "trust".
+    const pane = "I trust the tests will pass.\nPress Enter to confirm the plan looks right.";
+    expect(classifyClaudeStartupPrompt(pane)).toBeNull();
+  });
+
+  test("external-import option labels WITHOUT the title → null", () => {
+    // Prose that happens to quote both Yes/No labels but lacks the dialog title
+    // must not be mistaken for the live import prompt.
+    const pane = "Options were: Yes, allow external imports / No, disable external imports.";
+    expect(classifyClaudeStartupPrompt(pane)).toBeNull();
+  });
+
+  test("single-MCP option labels WITHOUT the header → null", () => {
+    const pane = "Use this MCP server or Continue without using this MCP server, your call.";
+    expect(classifyClaudeStartupPrompt(pane)).toBeNull();
+  });
+
   test("ready pane → null", () => {
     expect(classifyClaudeStartupPrompt("Claude Code v1.0.0\n[USER TASK]")).toBeNull();
   });
@@ -2394,7 +2413,7 @@ describe("autoAcceptCoordinatorPrompt", () => {
     const sendKeys = cmds.filter((c) => c.includes("send-keys"));
     expect(sendKeys.length).toBe(0);
     const log = await readFile(join(tmpDir, "watch.log"), "utf-8");
-    expect(log).toContain("permission prompt cleared before accept (stale capture)");
+    expect(log).toContain("not present in the live pane before accept (stale capture)");
   });
 
   test("does NOT send anything when the delivery lock cannot be acquired", async () => {

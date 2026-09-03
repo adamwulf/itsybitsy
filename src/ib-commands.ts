@@ -2080,10 +2080,12 @@ function isClaudeReadyPane(output: string): boolean {
  * Up,Up,Enter for a single MCP; N Downs then Enter for the multi-MCP checklist;
  * a bare Enter for the pre-2.1.259 layouts.
  *
- * Anti-stale / anti-repeat guard: the pane is RE-CAPTURED and RE-CLASSIFIED
- * immediately before every send, and a co-present prompt is accepted BEFORE the
- * ready marker is honoured, so a navigation sequence is always keyed to the
- * live prompt and a dismissed prompt never triggers a repeat navigation.
+ * Anti-stale / anti-repeat guard: `capture` reads the CURRENT VISIBLE pane only
+ * (no scrollback), and the pane is re-captured + re-classified immediately
+ * before every send with a co-present prompt accepted BEFORE the ready marker is
+ * honoured — so a navigation sequence is always keyed to the live prompt and a
+ * prompt already answered (now only in history) never triggers a repeat
+ * navigation.
  *
  * agy / codex safety: agy's trust-card guide reads "enter Confirm" (no "to") and
  * codex never shows these modals, so classifyClaudeStartupPrompt returns null
@@ -2135,9 +2137,12 @@ async function driveClaudeStartupPromptAccept(opts: {
 export async function autoAcceptWorkspaceTrust(tmuxSession: string): Promise<void> {
   const target = tmuxSessionTarget(tmuxSession);
   await driveClaudeStartupPromptAccept({
+    // Visible pane only (`-S 0 -E -`, no history): a prompt already answered and
+    // scrolled into scrollback must not re-classify as live and draw a repeat
+    // navigation sequence.
     capture: async () => {
       const r = await nukeResumeSpawnCtx.run([
-        "tmux", "capture-pane", "-t", target, "-p", "-J", "-S", "-",
+        "tmux", "capture-pane", "-t", target, "-p", "-J", "-S", "0", "-E", "-",
       ]);
       return r.exitCode === 0 ? r.stdout : null;
     },
@@ -5666,9 +5671,12 @@ export function resetNewAgentSummaryGenerator(): void {
 export async function autoAcceptWorkspaceTrustForNewAgent(tmuxSession: string): Promise<void> {
   const target = tmuxSessionTarget(tmuxSession);
   await driveClaudeStartupPromptAccept({
+    // Visible pane only (`-S 0 -E -`, no history): a prompt already answered and
+    // scrolled into scrollback must not re-classify as live and draw a repeat
+    // navigation sequence.
     capture: async () => {
       const r = await newAgentSpawnCtx.run([
-        "tmux", "capture-pane", "-t", target, "-p", "-J", "-S", "-",
+        "tmux", "capture-pane", "-t", target, "-p", "-J", "-S", "0", "-E", "-",
       ]);
       return r.exitCode === 0 ? r.stdout : null;
     },

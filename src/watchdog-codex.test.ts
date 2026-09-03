@@ -29,6 +29,8 @@ import {
   resetPerAgentExistsSync,
   setPerAgentCaptureTmux,
   resetPerAgentCaptureTmux,
+  setPerAgentVisibleCaptureTmux,
+  resetPerAgentVisibleCaptureTmux,
   setPerAgentProbeTmuxPane,
   resetPerAgentProbeTmuxPane,
   setPerAgentReadMeta,
@@ -284,6 +286,7 @@ describe("Phase 6 — runPerAgentWatchdog permission-accept gating", () => {
 
     setPerAgentExistsSync((_path: string) => worktreeExists);
     setPerAgentCaptureTmux(async (_session: string) => tmuxOutput);
+    setPerAgentVisibleCaptureTmux(async (_session: string) => tmuxOutput);
     setPerAgentProbeTmuxPane(async () => ({ status: "live" }));
     setWatchdogNow(() => currentTime);
     setPerAgentSleep(async () => {});
@@ -296,6 +299,7 @@ describe("Phase 6 — runPerAgentWatchdog permission-accept gating", () => {
   afterEach(() => {
     resetPerAgentExistsSync();
     resetPerAgentCaptureTmux();
+    resetPerAgentVisibleCaptureTmux();
     resetPerAgentProbeTmuxPane();
     resetPerAgentReadMeta();
     resetPerAgentSleep();

@@ -737,6 +737,26 @@ existing `-s workspace-write` behavior. The shipped `_all.md` includes
 `chatgpt.com` and `api.openai.com`; because proxy apex entries are exact,
 subdomains remain denied unless explicitly added.
 
+### 4B.1 Claude: skip its own permission prompts only under the kernel (A4 G1)
+
+**Decision (Adam, 2026-09-02): NEVER yolo without the kernel.** Codex's
+`-a never` already suppresses its approval prompts under our wrapper; the claude
+equivalent is `--dangerously-skip-permissions`, and it is gated the same way —
+**only** when the per-agent Seatbelt sandbox is the enforcement layer. When
+`meta.sandbox.enabled` is true, the claude launch line in **both** `start.sh`
+(spawn) and `resume.sh` (resume) gains `--dangerously-skip-permissions`, emitted
+**inside** the `sandbox-exec -f … claude …` wrapper (both the `setsid` and the
+plain-background arms). When the sandbox is disabled the launch line is
+**byte-identical** to today — no flag — so an unsandboxed claude keeps its full
+in-session permission gate. The claude-only flag never leaks into the codex or
+agy launch lines (codex has its own no-prompt mode; agy has no wrapper yet and
+is out of scope). ✅ **Implemented in `src/ib-commands.ts`:** the flag is
+appended to `claudeArgs` only when `preparedSandbox`/`preparedResumeSandbox` is
+non-null — exactly the condition that installs the sandbox-exec launch prefix —
+so the byte-identical-when-disabled guarantee falls out of the gate itself
+(regressed by the disabled `start.sh` / resume byte-equality fixtures, with a
+new enabled assertion on both the spawn and resume launch lines).
+
 ## 4C. What ELSE runs inside the sandbox (the big gap — from design review)
 
 ⚠️ **A Seatbelt profile is inherited by every descendant process.** The agent's
@@ -1098,6 +1118,10 @@ matching wildcard. This is a baseline watch item, not implicit proxy behavior.
   persistence convention (`effort || null` at `:4539`).
 - `start.sh` / `resume.sh` builders: when `meta.sandbox.enabled`, wrap the
   `claude` launch (both setsid + fallback branches) and start the proxy first.
+  The wrapped claude launch also gains `--dangerously-skip-permissions` (A4 G1,
+  §4B.1) — appended to `claudeArgs` only when the prepared sandbox is non-null,
+  so it is present exactly when the launch is sandbox-wrapped and the disabled
+  launch line stays byte-identical.
 - `teardownAgent` (`ib-commands.ts:365` area): kill the proxy, free the port.
 - Codex branch (`codex-spawn.ts`): in v1, flip `-s workspace-write` →
   `-s danger-full-access` and apply the same seatbelt + proxy env/domain wrap as

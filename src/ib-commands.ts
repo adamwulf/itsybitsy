@@ -1907,6 +1907,19 @@ export async function resumeAgent(
       if (resumeEffort) {
         claudeArgs = claudeArgs ? `${claudeArgs} --effort ${resumeEffort}` : `--effort ${resumeEffort}`;
       }
+      // Skip claude's own permission prompts ONLY when the kernel sandbox is the
+      // enforcement layer (Adam, 2026-09-02: never yolo without the kernel). This
+      // is the resume twin of the spawn-side append: the flag is added only when
+      // `preparedResumeSandbox` is non-null — the same condition that installs
+      // `sandboxResumeLaunchPrefix` below — so it is emitted only inside the
+      // sandbox-exec-wrapped launch, keeping a disabled resume byte-identical to
+      // today (the claude-resume-sh-baseline fixture pins that). This branch is
+      // claude-only (codex/agy resume are the sibling `if`s above).
+      if (preparedResumeSandbox !== null) {
+        claudeArgs = claudeArgs
+          ? `${claudeArgs} --dangerously-skip-permissions`
+          : "--dangerously-skip-permissions";
+      }
 
       // Rehire resumes the archived coordinator session rather than using the
       // ordinary dashboard reset behavior. Coordinator hooks/permissions live
@@ -5674,6 +5687,19 @@ When your task is complete:
   // claude path.
   if (!isCodexBackedCli(agentCli) && effort) {
     claudeArgs = claudeArgs ? `${claudeArgs} --effort ${effort}` : `--effort ${effort}`;
+  }
+  // Skip claude's own permission prompts ONLY when the kernel sandbox is the
+  // enforcement layer (Adam, 2026-09-02: never yolo without the kernel). The
+  // flag is appended only when `preparedSandbox` is non-null — which is exactly
+  // when `sandboxLaunchPrefix` wraps the launch below — so it is emitted only
+  // inside the sandbox-exec-wrapped claude line and NEVER on a disabled spawn
+  // (where the launch stays byte-identical to today). Codex already selects its
+  // own no-prompt mode (`-a never`); agy is out of scope (no wrapper yet), so
+  // this claude-only flag never leaks into their launch lines.
+  if (!isCodexBackedCli(agentCli) && agentCli !== "agy" && preparedSandbox !== null) {
+    claudeArgs = claudeArgs
+      ? `${claudeArgs} --dangerously-skip-permissions`
+      : "--dangerously-skip-permissions";
   }
   if (coordinatorMode) {
     // Load permissions + hooks from the coordinator's isolated settings file

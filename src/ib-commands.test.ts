@@ -4399,6 +4399,9 @@ sandbox:
     expect(start).not.toContain("sandbox-exec");
     expect(start).not.toContain("sandbox-proxy-launch");
     expect(start).not.toContain("export http_proxy=");
+    // GROUP 1: never yolo without the kernel — a disabled agent's launch line
+    // must not carry the skip-permissions flag.
+    expect(start).not.toContain("--dangerously-skip-permissions");
     expect(meta.paths.allowRead).toContain(canonicalizeSandboxPath(tempDir));
     expect(meta.paths.allowWrite).toContain(canonicalizeSandboxPath(tempDir));
   });
@@ -4586,6 +4589,11 @@ sandbox:
     expect(start).toContain("-D 'AGENTDIR=");
     expect(start).not.toContain("NODE_OPTIONS");
     expect(start).toContain("trap cleanup_sandbox_proxy EXIT");
+    // GROUP 1: claude skips its own permission prompts only under the kernel.
+    // The flag must sit inside the sandbox-exec-wrapped launch (after the
+    // `sandbox-exec -f … claude` prefix), on both the setsid and fallback arms.
+    expect(start).toMatch(/setsid sandbox-exec -f[^\n]*claude --session-id[^\n]*--dangerously-skip-permissions/);
+    expect(start).toMatch(/\n {4}sandbox-exec -f[^\n]*claude --session-id[^\n]*--dangerously-skip-permissions/);
     expect(meta.sandbox.enabled).toBe(true);
     expect(meta.paths.allowRead).toContain(canonicalizeSandboxPath(tempDir));
     expect(meta.paths.allowWrite).toContain(canonicalizeSandboxPath(tempDir));
@@ -4729,6 +4737,11 @@ sandbox:
     expect(resumeScript).toContain("    sandbox-exec -f");
     expect(resumeScript).toContain("export HTTPS_PROXY=\"$http_proxy\"");
     expect(resumeScript).toContain("trap cleanup_sandbox_proxy EXIT");
+    // GROUP 1: the resume launch gains --dangerously-skip-permissions only under
+    // the kernel, inside the sandbox-exec-wrapped claude --resume line, on both
+    // the setsid and fallback arms.
+    expect(resumeScript).toMatch(/setsid sandbox-exec -f[^\n]*claude --resume[^\n]*--dangerously-skip-permissions/);
+    expect(resumeScript).toMatch(/\n {4}sandbox-exec -f[^\n]*claude --resume[^\n]*--dangerously-skip-permissions/);
   });
 
   test("sandbox resume fail-hard leaves no tmux session or resume script", async () => {

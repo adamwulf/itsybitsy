@@ -1572,7 +1572,7 @@ export async function resumeAgent(
     let preparedResumeSandbox: PreparedSandbox | null = null;
     if (agent.meta.sandbox?.enabled) {
       if (!agent.meta.paths) {
-        const message = "sandbox refused: meta.json has an enabled sandbox but no paths block (written before the paths: split); respawn the agent";
+        const message = `sandbox refused: meta.json has an enabled sandbox but no paths block (written before the paths: split); run \`ib sandbox refresh ${agent.id}\` from an unsandboxed session, or respawn the agent`;
         await logAgent(agentDir, message);
         return { ok: false, exitCode: 1, stdout: "", stderr: message };
       }
@@ -2347,6 +2347,149 @@ export async function respawnSelf(agent: Agent): Promise<IbCommandResult> {
  *  prompt is blocking startup. */
 function isClaudeReadyPane(output: string): boolean {
   return output.includes("Claude Code v") || output.includes("[USER TASK]");
+}
+
+/**
+ * One-line "what changed" summary for the `ib sandbox refresh` agent.log entry.
+ * Per list, reports how many entries were added and removed relative to the old
+ * frozen block; scalars report `old→new`. Cheap set math on canonical strings —
+ * the paths were already canonicalized identically on both sides.
+ */
+function summarizeSandboxRefresh(
+  oldSandbox: SandboxConfig,
+  oldPaths: PathsConfig,
+  newSandbox: SandboxConfig,
+  newPaths: PathsConfig,
+): string {
+  const listDelta = (before: readonly string[], after: readonly string[]): string => {
+    const beforeSet = new Set(before);
+    const afterSet = new Set(after);
+    const added = after.filter((entry) => !beforeSet.has(entry)).length;
+    const removed = before.filter((entry) => !afterSet.has(entry)).length;
+    return added === 0 && removed === 0 ? "unchanged" : `+${added}/-${removed}`;
+  };
+  return [
+    `enabled ${oldSandbox.enabled}→${newSandbox.enabled}`,
+    `rawAllow ${listDelta(oldSandbox.rawAllow, newSandbox.rawAllow)}`,
+    `domains ${listDelta(oldSandbox.domains, newSandbox.domains)}`,
+    `allowRead ${listDelta(oldPaths.allowRead, newPaths.allowRead)}`,
+    `allowWrite ${listDelta(oldPaths.allowWrite, newPaths.allowWrite)}`,
+    `deny ${listDelta(oldPaths.deny, newPaths.deny)}`,
+  ].join("; ");
+}
+
+/**
+ * Re-derive an existing agent's sandbox + paths policy from the CURRENT
+ * agent-type files and replay it through the ordinary resume path. Backs
+ * `ib sandbox refresh <id>` (A4 G2, SPEC-SANDBOX 5.6). respawnSelf is the model:
+ * rewrite the frozen meta block, then pause (when running) + resume so the NEW
+ * block is the one resume replays.
+ *
+ * Refusals:
+ *  - A coordinator: its reset path differs (resetCoordinator rebuilds
+ *    settings.local.json + hooks from `_all.md` + `coordinator.md`), which a
+ *    sandbox refresh cannot express. Point the caller at the reset path instead.
+ *  - A missing agent-type file (the error names the type).
+ *
+ * Fail-hard is inherited from resume: if the refreshed sandbox cannot be
+ * established the agent is left stopped with the error already in agent.log.
+ */
+export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult> {
+  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const dirExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
+  if (!dirExists) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
+  }
+
+  // Coordinators reset through resetCoordinator, not the resume sandbox block —
+  // a sandbox refresh cannot rebuild their settings/hooks, so refuse and point
+  // at the reset path (say so, per the spec).
+  if (agent.meta.agentType === "coordinator") {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `sandbox refresh: agent '${agent.id}' is a coordinator; its reset path differs — reset it with the dashboard R key or 'ib resume ${agent.id}' to rebuild it from current sources`,
+    };
+  }
+
+  const typeName = agent.meta.agentType;
+  if (typeof typeName !== "string" || typeName.length === 0) {
+    const msg = `sandbox refresh: agent '${agent.id}' has no agentType in meta.json; cannot re-derive from type files`;
+    await logAgent(agentDir, `[sandbox refresh] ${msg}`);
+    return { ok: false, exitCode: 1, stdout: "", stderr: msg };
+  }
+  // The re-derivation reads the agent-type FILES, so a missing file is refused
+  // by name even when an embedded default of the same name would otherwise load.
+  if (!(await agentTypeExists(typeName))) {
+    const msg = `sandbox refresh: agent-type file for '${typeName}' is missing; run 'ib init-types' to restore defaults or create ~/.itsybitsy/agent-types/${typeName}.md`;
+    await logAgent(agentDir, `[sandbox refresh] ${msg}`);
+    return { ok: false, exitCode: 1, stdout: "", stderr: msg };
+  }
+
+  // Merge exactly as newAgent does: `_all` ∪ `_non_coordinator` ∪ `<type>`.
+  // (_non_coordinator applies because coordinators were already refused above.)
+  let allLayer: AgentType | undefined;
+  try { allLayer = await loadAgentType("_all"); } catch { /* optional floor layer */ }
+  let nonCoordLayer: AgentType | undefined;
+  try { nonCoordLayer = await loadAgentType("_non_coordinator"); } catch { /* optional layer */ }
+  let typeDef: AgentType;
+  try {
+    typeDef = await loadAgentType(typeName);
+  } catch (err) {
+    const msg = `sandbox refresh: could not load agent-type '${typeName}': ${err instanceof Error ? err.message : String(err)}`;
+    await logAgent(agentDir, `[sandbox refresh] ${msg}`);
+    return { ok: false, exitCode: 1, stdout: "", stderr: msg };
+  }
+
+  const merged = mergeSandboxLayerConfigs([allLayer, nonCoordLayer, typeDef]);
+  const newSandbox = merged.sandbox;
+  let newPaths: PathsConfig;
+  try {
+    newPaths = canonicalizePathsConfig(merged.paths, homedir());
+  } catch (err) {
+    const msg = `sandbox refresh: paths policy for '${typeName}' is invalid: ${err instanceof Error ? err.message : String(err)}`;
+    await logAgent(agentDir, `[sandbox refresh] ${msg}`);
+    return { ok: false, exitCode: 1, stdout: "", stderr: msg };
+  }
+
+  const oldSandbox = resolveSandboxConfig({ sandbox: agent.meta.sandbox });
+  const oldPaths = resolvePathsConfig(agent.meta.paths);
+  const summary = summarizeSandboxRefresh(oldSandbox, oldPaths, newSandbox, newPaths);
+  await logAgent(agentDir, `[sandbox refresh] re-derived from agent-type files: ${summary}`);
+
+  // Rewrite the frozen block. Proxy port/pid are left to resume (it reallocates
+  // the port and clears the stale pid), exactly as the ordinary resume path
+  // handles them — do not touch them here.
+  await mutateAgentMeta(agentDir, (meta) => {
+    meta.sandbox = newSandbox;
+    meta.paths = newPaths;
+    return meta;
+  });
+  // Keep the in-memory agent consistent so the resume below replays the NEW
+  // block (resume reads agent.meta.sandbox / agent.meta.paths directly).
+  agent.meta.sandbox = newSandbox;
+  agent.meta.paths = newPaths;
+
+  // Pause (only when running) + resume through the EXISTING resume path so the
+  // new frozen block is the one replayed. A stopped agent skips the pause, like
+  // respawnSelf. Fail-hard on a broken sandbox is inherited from resume.
+  if (agent.state !== "stopped") {
+    const pauseResult = await pauseAgent(agent);
+    if (!pauseResult.ok) {
+      await logAgent(agentDir, `[sandbox refresh] pause failed: ${pauseResult.stderr}`);
+      return { ok: false, exitCode: 1, stdout: "", stderr: `sandbox refresh: pause failed: ${pauseResult.stderr}` };
+    }
+  }
+
+  const resumeResult = await resumeAgent(agent);
+  if (!resumeResult.ok) {
+    await logAgent(agentDir, `[sandbox refresh] resume failed: ${resumeResult.stderr}`);
+    return { ok: false, exitCode: 1, stdout: "", stderr: `sandbox refresh: resume failed: ${resumeResult.stderr}` };
+  }
+
+  await logAgent(agentDir, "[sandbox refresh] complete");
+  return { ok: true, exitCode: 0, stdout: `Refreshed sandbox for ${agent.id}: ${summary}`, stderr: "" };
 }
 
 /**

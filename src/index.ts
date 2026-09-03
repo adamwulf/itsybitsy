@@ -786,6 +786,15 @@ const COMMAND_HELP: Record<string, string> = {
   "write-proxy-pid":
     "Usage: ib write-proxy-pid <agent-id> <pid> <port>\n" +
     "  Internal: record the detached sandbox proxy PID and port.",
+  sandbox:
+    "Usage: ib sandbox refresh <agent-id> | ib sandbox refresh --all\n" +
+    "  Re-derive an existing agent's sandbox + paths policy from the current\n" +
+    "  agent-type files (_all.md, _non_coordinator.md, <type>.md), rewrite its\n" +
+    "  frozen meta block, and restart it through the ordinary resume path so the\n" +
+    "  new policy takes effect. --all refreshes every non-stopped agent in the\n" +
+    "  current repo (id order), continuing on error. Coordinators are refused\n" +
+    "  (reset them with the dashboard R key instead). Run from an unsandboxed\n" +
+    "  session so the sealed record can be re-written.",
   "sandbox-proxy":
     "Usage: ib sandbox-proxy --port <port> --domains <file> --pid-file <file> --ready-file <file>\n" +
     "  Internal: run one per-agent allowlist proxy.",
@@ -868,6 +877,7 @@ function printUsage(): void {
   console.log("  resume <id>         Resume a stopped agent");
   console.log("  respawn [id]        Restart an agent's Claude session in-place (alias: restart)");
   console.log("                      No-arg form infers the agent from cwd — used by the /respawn slash command");
+  console.log("  sandbox refresh <id>|--all  Re-derive an agent's sandbox+paths from the current type files and restart it");
   console.log("");
   console.log("Configuration:");
   console.log("  config list         List all config keys with values");
@@ -1920,6 +1930,84 @@ export async function main() {
       const { mergeAgent } = await import("./ib-commands");
       await printAndExit(await mergeAgent(agent, resolved.targetDir));
       break;
+    }
+    case "sandbox": {
+      // `ib sandbox refresh <id> | --all` (A4 G2). Re-derives an agent's
+      // sandbox + paths from the current type files and restarts it through the
+      // ordinary resume path. `seal` is the internal helper below (A4 G3).
+      const sub = args[1];
+      const repos = await listRepos();
+      const { detectAgentStates, readAllAgents } = await import("./agents");
+      const { refreshAgentSandbox } = await import("./ib-commands");
+
+      if (sub === "refresh") {
+        const target = args[2];
+        if (!target) {
+          console.error("Usage: ib sandbox refresh <agent-id> | ib sandbox refresh --all");
+          process.exit(1);
+        }
+
+        if (target === "--all") {
+          // Resolve the current repo from cwd (same rule @coordinator uses):
+          // exact match, prefix match, or an agent worktree's root repo.
+          const cwd = process.cwd();
+          const ownRepo =
+            repos.find((r) => r.path === cwd) ||
+            repos.find((r) => cwd.startsWith(r.path + "/")) ||
+            (() => {
+              const m = cwd.match(/\/.ittybitty\/agents\/[^/]+\/repo$/);
+              if (!m) return undefined;
+              const repoRoot = cwd.substring(0, cwd.lastIndexOf("/.ittybitty"));
+              return repos.find((r) => r.path === repoRoot);
+            })();
+          if (!ownRepo) {
+            console.error("Error: 'ib sandbox refresh --all' must run from within a registered repo");
+            process.exit(1);
+          }
+
+          const { agents } = await readAllAgents(
+            repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })),
+            false,
+          );
+          let repoAgents = agents.filter((a) => a.repoPath === ownRepo.path);
+          // Live state so only non-stopped agents are touched.
+          await detectAgentStates(repoAgents, { reap: false });
+          repoAgents = repoAgents
+            .filter((a) => a.state !== "stopped")
+            .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+          if (repoAgents.length === 0) {
+            console.log(`No non-stopped agents to refresh in ${repoDisplayName(ownRepo)}`);
+            process.exit(0);
+          }
+
+          let anyFailed = false;
+          for (const a of repoAgents) {
+            // Coordinators are a deliberate skip (their reset path differs), not
+            // a failure — don't flip the exit code for them.
+            if (a.meta.agentType === "coordinator") {
+              console.log(`${a.id}: skipped (coordinator — reset with the dashboard R key)`);
+              continue;
+            }
+            const result = await refreshAgentSandbox(a);
+            if (result.ok) {
+              console.log(`${a.id}: refreshed`);
+            } else {
+              anyFailed = true;
+              console.log(`${a.id}: FAILED — ${result.stderr}`);
+            }
+          }
+          process.exit(anyFailed ? 1 : 0);
+        }
+
+        const agent = await requireAgent(target, repos);
+        // Lifecycle path: about to mutate the agent (refresh restarts it).
+        await detectAgentStates([agent], { reap: true });
+        await printAndExit(await refreshAgentSandbox(agent));
+      }
+
+      console.error("Usage: ib sandbox refresh <agent-id> | ib sandbox refresh --all");
+      process.exit(1);
     }
     case "resume": {
       const repos = await listRepos();

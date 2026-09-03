@@ -1193,8 +1193,43 @@ also fail if either shared sandbox prefix is missing.
 The resume compatibility guard runs before profile or proxy preparation. When
 an enabled legacy `meta.json` has no `paths` block, resume logs a specific
 fail-hard error and returns non-zero. The agent remains stopped, no `sandbox.sb`
-is written, and no proxy is started. Respawning the agent creates current
-metadata with the frozen paths policy.
+is written, and no proxy is started. The refusal now names the recovery:
+`run \`ib sandbox refresh <id>\` from an unsandboxed session, or respawn the
+agent` — refresh (§5.6) re-derives and writes the missing `paths` block.
+
+### 5.6 `ib sandbox refresh <id> | --all` (A4 G2)
+
+A running or stopped agent's sandbox + paths policy is **frozen** in `meta.json`
+at spawn and replayed verbatim on resume, so an edit to the agent-type `.md`
+files does NOT reach an existing agent. `ib sandbox refresh` is the deliberate
+re-derivation: it re-runs the same layer merge `newAgent` does —
+`mergeSandboxLayerConfigs` over `_all.md` ∪ `_non_coordinator.md` ∪ the type
+named in `meta.agentType`, then `canonicalizePathsConfig` — rewrites
+`meta.sandbox` (`enabled`/`rawAllow`/`domains`) and `meta.paths`, appends a
+`[sandbox refresh] re-derived from agent-type files: <what changed>` line to
+`agent.log`, then **pauses (when running) and resumes through the ordinary
+resume path** so the NEW frozen block is the one replayed (respawnSelf is the
+model). The proxy port/pid are left to resume, which reallocates the port and
+clears the stale pid exactly as an ordinary resume does.
+
+- **Refusals.** A **coordinator** is refused (its reset path differs —
+  `resetCoordinator` rebuilds `settings.local.json` + hooks from `_all.md` +
+  `coordinator.md`, which a sandbox refresh cannot express; the caller is
+  pointed at the dashboard R key / `ib resume`). A **missing agent-type file**
+  is refused with the type named.
+- **`--all`.** Refreshes every agent of the **current repo** whose state is not
+  stopped, in id order, one result line per agent, continuing on error;
+  coordinators are reported as a skip (not a failure); the command exits
+  non-zero if any refresh failed.
+- **Fail-hard is inherited from resume.** If the refreshed sandbox cannot be
+  established the agent is left stopped with the error already in `agent.log`.
+- **Run it from an UNSANDBOXED session.** A sealed record (§4C.3, A4 G3) is
+  re-written on every refresh, and its directory is denied to every sandboxed
+  agent, so the re-seal only succeeds unsandboxed (a sandboxed spawner routes
+  the write through the synchronous tmux helper — see G3).
+
+✅ **Implemented as `refreshAgentSandbox` in `src/ib-commands.ts`, dispatched by
+`ib sandbox refresh` in `src/index.ts`.**
 
 ## 6. Build phases
 

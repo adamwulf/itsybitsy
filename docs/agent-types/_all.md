@@ -52,6 +52,15 @@ paths:
     - "~/.ssh"
     - "~/.aws"
     - "**/.env"
+    # Sealed records (A4 G3, SPEC-SANDBOX 4C.3). The seal freezes each agent's
+    # profile inputs (agentType, canSpawnChildren, paths, sandbox) so a later
+    # meta edit is detected on resume. AGENTDIR is a kernel write root, but the
+    # seal dir is NOT — deny both read and write here so a sandboxed non-spawner
+    # can neither read its own seal nor forge one. Deny wins over the
+    # ~/.itsybitsy read floor above and cannot be re-opened by any layer. The
+    # seal is written by unsandboxed lifecycle ops (newAgent/refresh/rehire) or,
+    # for a sandboxed spawner, through the unsandboxed tmux server.
+    - "~/.itsybitsy/sealed"
 sandbox:
   enabled: false
   rawAllow:

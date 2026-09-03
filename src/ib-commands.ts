@@ -117,6 +117,12 @@ import {
   allocateSandboxProxyPort,
   assertSandboxProxyPortAvailable,
 } from "./sandbox-proxy";
+import {
+  writeSealRecordDirect,
+  readSealRecord,
+  deleteSealRecord,
+  verifyMetaAgainstSeal,
+} from "./agent-seal";
 
 export interface IbCommandResult {
   ok: boolean;
@@ -481,6 +487,11 @@ export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
     };
   }
   const { prunedTeams } = teardown;
+
+  // Delete the sealed record — retire tears the agent down (rehire re-seals from
+  // the restored meta if the agent is ever brought back). The seal lives outside
+  // agentDir (~/.itsybitsy/sealed), so teardown's dir removal does not touch it.
+  await removeAgentSeal(agent.repoPath, agent.id);
 
   // Scan for orphaned Claude processes
   await scanAndKillOrphans(agentsDir);
@@ -902,6 +913,29 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
     if (!result?.team) warnings.push(`Team @${team} no longer exists`);
   }
 
+  // Re-seal the reconstructed agent (retire deleted its seal). This must happen
+  // BEFORE the resume below — an enabled agent would otherwise be refused for a
+  // missing sealed record. The seal is computed from the restored meta (the same
+  // deliberate, unsandboxed re-seal trust as spawn/refresh).
+  try {
+    await sealAgentRecord(
+      repoPath,
+      agentId,
+      restoredAgent.meta as unknown as Record<string, unknown>,
+      agentDir,
+    );
+  } catch (err) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: `Reconstructed stopped agent '${agentId}' from ${archived.archiveKey}`,
+      stderr: [
+        `Re-seal failed: ${err instanceof Error ? err.message : String(err)}`,
+        ...warnings,
+      ].join("\n"),
+    };
+  }
+
   let resumed: IbCommandResult;
   try {
     resumed = await resumeAgent(restoredAgent, { resetCoordinator: false });
@@ -1307,6 +1341,10 @@ async function nukeAgentList(
     } catch { /* teardown error — count as failure */
       failed++;
     }
+    // Delete the sealed record (outside agentDir, so teardown's dir removal does
+    // not touch it). Unconditional — a nuked agent is gone whether teardown
+    // fully succeeded or not, so its seal must not linger.
+    await removeAgentSeal(repoPath, id);
   }
 
   // Clean up orphaned tmux sessions
@@ -1575,6 +1613,28 @@ export async function resumeAgent(
         const message = `sandbox refused: meta.json has an enabled sandbox but no paths block (written before the paths: split); run \`ib sandbox refresh ${agent.id}\` from an unsandboxed session, or respawn the agent`;
         await logAgent(agentDir, message);
         return { ok: false, exitCode: 1, stdout: "", stderr: message };
+      }
+      // Verify the frozen meta against the sealed record BEFORE building any
+      // sandbox (SPEC-SANDBOX §4C.3). The seal froze the profile inputs at
+      // spawn/refresh; because AGENTDIR is a kernel write root, a non-spawner
+      // could have edited its own meta.canSpawnChildren/agentType to respawn
+      // into a spawner profile — that divergence is caught here and refused.
+      // Disabled agents are never checked (this is inside the enabled gate).
+      // This also covers respawnSelf, which resumes through this same path.
+      {
+        const sealRepoId = await getRepoId(agent.repoPath);
+        const verification = await verifyMetaAgainstSeal(
+          sealRepoId,
+          agent.id,
+          agent.meta as unknown as Record<string, unknown>,
+        );
+        if (!verification.ok) {
+          const message = verification.field === "(missing)"
+            ? `sandbox refused: no sealed record for '${agent.id}'; run \`ib sandbox refresh ${agent.id}\` from an unsandboxed session to seal it`
+            : `sandbox refused: meta.json does not match the sealed record (${verification.field}); run \`ib sandbox refresh ${agent.id}\` from an unsandboxed session to re-seal`;
+          await logAgent(agentDir, message);
+          return { ok: false, exitCode: 1, stdout: "", stderr: message };
+        }
       }
       await stopSandboxProxyForAgent(agentDir, agent.meta);
       try {
@@ -2453,10 +2513,49 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
     return { ok: false, exitCode: 1, stdout: "", stderr: msg };
   }
 
+  // Verify the CURRENT meta against the seal BEFORE re-sealing (SPEC-SANDBOX
+  // §4C.3), but ONLY when the agent is currently enabled (a disabled agent has
+  // no profile to protect). A genuine field mismatch means the meta was tampered
+  // — a non-spawner cannot launder that into a new seal via refresh, so refuse.
+  // A MISSING seal is NOT a refusal here: refresh is the deliberate, unsandboxed
+  // re-seal tool, so it seals a legacy enabled agent rather than dead-ending the
+  // "run refresh to re-seal" recovery that resume/respawn point at.
+  const sealRepoId = await getRepoId(agent.repoPath);
+  if (agent.meta.sandbox?.enabled) {
+    const verification = await verifyMetaAgainstSeal(
+      sealRepoId,
+      agent.id,
+      agent.meta as unknown as Record<string, unknown>,
+    );
+    if (!verification.ok && verification.field !== "(missing)") {
+      const message = `sandbox refused: meta.json does not match the sealed record (${verification.field}); a tampered meta cannot be re-sealed via refresh — nuke and respawn the agent instead`;
+      await logAgent(agentDir, `[sandbox refresh] ${message}`);
+      return { ok: false, exitCode: 1, stdout: "", stderr: message };
+    }
+  }
+
   const oldSandbox = resolveSandboxConfig({ sandbox: agent.meta.sandbox });
   const oldPaths = resolvePathsConfig(agent.meta.paths);
   const summary = summarizeSandboxRefresh(oldSandbox, oldPaths, newSandbox, newPaths);
   await logAgent(agentDir, `[sandbox refresh] re-derived from agent-type files: ${summary}`);
+
+  // Re-seal from the NEW inputs FIRST (before rewriting meta), so a re-seal
+  // failure leaves both meta and the old seal untouched — the agent stays
+  // resumable with its old policy. On success both are consistent-new. refresh
+  // runs unsandboxed, so the direct write lands; the tmux fallback inside
+  // sealAgentRecord covers the (unusual) sandboxed-refresh case.
+  const newMetaForSeal = {
+    ...(agent.meta as unknown as Record<string, unknown>),
+    sandbox: newSandbox,
+    paths: newPaths,
+  };
+  try {
+    await sealAgentRecord(agent.repoPath, agent.id, newMetaForSeal, agentDir);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await logAgent(agentDir, `[sandbox refresh] re-seal failed: ${message}`);
+    return { ok: false, exitCode: 1, stdout: "", stderr: `sandbox refresh: could not re-seal: ${message}` };
+  }
 
   // Rewrite the frozen block. Proxy port/pid are left to resume (it reallocates
   // the port and clears the stale pid), exactly as the ordinary resume path
@@ -4281,6 +4380,119 @@ async function spawnHelperViaTmuxServer(
 }
 
 /**
+ * Run a command SYNCHRONOUSLY as a child of the unsandboxed tmux server and
+ * wait for it to finish (`tmux run-shell` WITHOUT `-b` blocks until the command
+ * completes). Used by `sealAgentRecord` when a sandboxed spawner cannot write
+ * the denied seal dir directly: the seal write must land before spawn continues,
+ * so we cannot use the fire-and-forget `-b` form. The cwd is set with a quoted
+ * `cd` prefix for the same pre-`-c` tmux compatibility as the async variant.
+ */
+async function runHelperViaTmuxServerBlocking(
+  runner: SandboxCommandRunner,
+  cwd: string,
+  command: string[],
+): Promise<void> {
+  const shellCommand = command.map(shellQuote).join(" ");
+  const result = await runner.run([
+    "tmux",
+    "run-shell",
+    `cd ${shellQuote(cwd)} && exec ${shellCommand}`,
+  ]);
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr.trim() || `tmux run-shell failed with exit ${result.exitCode}`);
+  }
+}
+
+/**
+ * Write (or re-write) an agent's sealed record. The seal freezes the profile
+ * inputs (`agentType`, resolved `canSpawnChildren`, `paths`, `sandbox`) so a
+ * later meta edit — a non-spawner flipping `canSpawnChildren` or `agentType`
+ * into a spawner profile — is detected on resume/respawn/refresh
+ * (SPEC-SANDBOX §4C.3). The record is computed from the read-only agent-type
+ * files (for `canSpawnChildren` resolution) plus the meta the spawner just
+ * wrote (`agentType`/`paths`/`sandbox`), so the seal captures the LEGITIMATE
+ * profile at seal time and any subsequent meta divergence is a mismatch.
+ *
+ * The direct write is attempted first. From a SANDBOXED spawner the seal dir is
+ * denied (`_all.md`), so the direct write throws EPERM/EACCES; we then re-run
+ * ourselves as `ib sandbox seal <id>` synchronously through the unsandboxed
+ * tmux server, which recomputes the record from the same inputs and writes it.
+ * Verified afterwards: if the record still isn't present we throw, so an enabled
+ * agent never launches without a seal (resume would refuse it).
+ */
+export async function sealAgentRecord(
+  repoPath: string,
+  agentId: string,
+  meta: Record<string, unknown>,
+  helperCwd: string,
+): Promise<void> {
+  const repoId = await getRepoId(repoPath);
+  try {
+    // The override lets a test simulate the EPERM a real SANDBOXED spawner hits
+    // when it tries to write the denied seal dir directly, exercising the tmux
+    // fallback below.
+    // Seal home resolves via `process.env.HOME ?? homedir()` (the seal helpers'
+    // default) — the same `~/.itsybitsy` convention getCoordinatorHome uses, so
+    // the seal dir honors a HOME override the way the agents dir does.
+    await (sealDirectWriteOverride ?? writeSealRecordDirect)(repoId, agentId, meta);
+    return;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "EPERM" && code !== "EACCES") throw err;
+    // Sandboxed spawner: the tmux server is unsandboxed, so let it do the write.
+    await runHelperViaTmuxServerBlocking(nukeResumeSpawnCtx, helperCwd, ["ib", "sandbox", "seal", agentId]);
+    if (!(await readSealRecord(repoId, agentId))) {
+      throw new Error(`sandbox refused: could not write the sealed record for '${agentId}' (via the tmux server)`);
+    }
+  }
+}
+
+/** Test seam: force the direct seal write to fail (simulate a sandboxed spawner). */
+let sealDirectWriteOverride: typeof writeSealRecordDirect | null = null;
+export function setSealDirectWriteForTesting(fn: typeof writeSealRecordDirect | null): void {
+  sealDirectWriteOverride = fn;
+}
+export function resetSealDirectWriteForTesting(): void {
+  sealDirectWriteOverride = null;
+}
+
+/**
+ * Refresh a batch of agents' sandboxes, continuing on error (backs
+ * `ib sandbox refresh --all`). Coordinators are a deliberate skip, not a
+ * failure. Returns one result line per agent and whether any refresh failed.
+ * The caller resolves + orders the agent list (current repo, non-stopped, id
+ * order); this owns only the loop so it is unit-testable without process.exit.
+ */
+export async function refreshAgentsSandbox(
+  agents: Agent[],
+): Promise<{ lines: string[]; anyFailed: boolean }> {
+  const lines: string[] = [];
+  let anyFailed = false;
+  for (const agent of agents) {
+    if (agent.meta.agentType === "coordinator") {
+      lines.push(`${agent.id}: skipped (coordinator — reset with the dashboard R key)`);
+      continue;
+    }
+    const result = await refreshAgentSandbox(agent);
+    if (result.ok) {
+      lines.push(`${agent.id}: refreshed`);
+    } else {
+      anyFailed = true;
+      lines.push(`${agent.id}: FAILED — ${result.stderr}`);
+    }
+  }
+  return { lines, anyFailed };
+}
+
+/** Delete an agent's sealed record (idempotent). Used by nuke/retire cleanup. */
+export async function removeAgentSeal(repoPath: string, agentId: string): Promise<void> {
+  try {
+    const repoId = await getRepoId(repoPath);
+    await deleteSealRecord(repoId, agentId);
+  } catch { /* best-effort — a missing seal or repo-id is not an error */ }
+}
+
+/**
  * Read custom prompts from .ittybitty/prompts/ directory.
  * Mirrors load_custom_prompts() in ib bash.
  */
@@ -4329,7 +4541,7 @@ async function countAgents(agentsDir: string): Promise<number> {
  * Read the repo-id from .ittybitty/repo-id (or create one).
  * Mirrors get_repo_id() in ib bash.
  */
-async function getRepoId(repoPath: string): Promise<string> {
+export async function getRepoId(repoPath: string): Promise<string> {
   const repoIdFile = join(repoPath, ".ittybitty", "repo-id");
   try {
     const file = Bun.file(repoIdFile);
@@ -5324,10 +5536,36 @@ export async function newAgent(
       /* a module-load failure must never abort spawn-failure cleanup */
     }
     await rm(agentDir, { recursive: true, force: true });
+    // The sealed record lives OUTSIDE agentDir (~/.itsybitsy/sealed) so rm above
+    // does not touch it — delete it explicitly so a failed spawn leaves no
+    // orphaned seal.
+    await removeAgentSeal(rootRepoPath, id);
     if (useWorktree) {
       await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
       await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
     }
+  }
+
+  // Seal the profile inputs right after the early meta write so a later meta
+  // edit — a non-spawner flipping meta.canSpawnChildren or swapping meta.agentType
+  // into a spawner profile — is detected on resume/respawn/refresh
+  // (SPEC-SANDBOX §4C.3). The seal is computed from the read-only agent-type
+  // files (canSpawnChildren resolution) plus the meta just written, so it
+  // captures the LEGITIMATE profile; the direct write is routed through the
+  // unsandboxed tmux server when the SPAWNER is itself sandboxed. An enabled
+  // agent must not launch without a seal (resume refuses a sealless enabled
+  // agent), so a failed seal fails the spawn; a disabled agent is never
+  // seal-checked, so its seal is best-effort.
+  try {
+    await sealAgentRecord(rootRepoPath, id, initialMetaJson, agentDir);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (resolvedSandboxConfig.enabled) {
+      await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED (seal): ${message}`);
+      await cleanupOnFailure();
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: sandbox refused: ${message}` };
+    }
+    await logSpawn(agentDir, spawnerAgentDir, id, `seal warning (disabled agent): ${message}`);
   }
 
   const baseRefForLog = manager ? `agent/${manager}` : "HEAD";

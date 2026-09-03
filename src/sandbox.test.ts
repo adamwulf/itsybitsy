@@ -842,6 +842,11 @@ describe("most-specific filesystem access oracle", () => {
       // under ~/.itsybitsy/agents (write), so it is read-only — the floor grants
       // agents write without opening agent-types.
       const homeItsybitsyAgentTypes = join(root, ".itsybitsy/agent-types/config.json");
+      // A4 G3: the sealed-record dir is denied for BOTH read and write to every
+      // sandboxed agent. It sits under ~/.itsybitsy (a read floor) but the
+      // _all.md deny carves it out (deny wins), and it is in no allowWrite list —
+      // so a sandboxed non-spawner can neither read its own seal nor forge one.
+      const homeItsybitsySealed = join(root, ".itsybitsy/sealed/live-agent.json");
       // R3(i): a file under the real-home stand-in — outside every floor entry,
       // so both operations are denied (the ~/Documents relation).
       const deniedHomeFile = join(deniedHome, "Documents", "secret.txt");
@@ -882,6 +887,7 @@ describe("most-specific filesystem access oracle", () => {
         homeItsybitsyWrite,
         homeItsybitsyRead,
         homeItsybitsyAgentTypes,
+        homeItsybitsySealed,
         deniedHomeFile,
         outsideWriteFile,
         outsideReadOnlyFile,
@@ -968,6 +974,10 @@ describe("most-specific filesystem access oracle", () => {
         // R3(i): ~/.itsybitsy/agents writable, ~/.itsybitsy/agent-types read-only,
         // and a real-home path (the ~/Documents relation) denied for both ops.
         { label: "floor/home-itsybitsy-agent-types-read-only", path: homeItsybitsyAgentTypes },
+        // A4 G3: the sealed-record dir is denied for BOTH ops (deny wins over the
+        // ~/.itsybitsy read floor) — a sandboxed process can neither read nor
+        // write under it.
+        { label: "floor/home-itsybitsy-sealed-denied", path: homeItsybitsySealed },
         { label: "floor/home-documents-relation-denied", path: deniedHomeFile },
         { label: "floor/dev-null-write", path: devNull },
         { label: "floor/var-folders-write", path: outsideWriteFile },

@@ -876,21 +876,52 @@ network deny lands, while a unix socket outside the dir still connects). The
 socket dir is derived the way tmux resolves it (`resolveTmuxSocketDir`): the
 directory of `$TMUX`'s first field if set, else `${TMUX_TMPDIR:-/tmp}/tmux-<uid>`.
 
-⚠️ **Trust-boundary limitation, NOT closed in A3 (F2).** `AGENTDIR` is a kernel
-write root because the agent-session hooks write `meta.json` there
-(`writeAgentState`). `meta.canSpawnChildren` and `meta.agentType` therefore live
-inside a path the agent itself can write, and resume/respawn **re-derive** the
-runtime roots from `meta` (§4A.8). So a sandboxed non-spawner can, in principle,
-edit its own `meta.json` to set `canSpawnChildren: true` (or swap `agentType` to
-a spawning type) and then `ib respawn`/resume itself into a **spawner** profile —
-regaining the write REPOAGENTS/PARENTCLAUDE roots and the tmux socket. A3 does
-not prevent this; it is recorded here and in §4C.5 as a current limitation.
-**Planned closure (A4):** the profile inputs that decide the roots (`agentType`,
-`canSpawnChildren`, `paths`, `sandbox`) are recorded or signed at spawn by an
-**unsandboxed helper** — the same `tmux run-shell` path the watchdog spawn
-already uses (§4C.2) — under a path the `_all.md` `deny` list carves out of every
-agent's reach, and resume/respawn/refresh **fail-hard** on any mismatch between
-`meta` and that record. No code for this lands in A3.
+✅ **Trust boundary CLOSED for non-spawners by the SEALED RECORD (A4 G3).**
+`AGENTDIR` is a kernel write root because the agent-session hooks write
+`meta.json` there (`writeAgentState`), so `meta.canSpawnChildren` and
+`meta.agentType` live inside a path the agent itself can write, and
+resume/respawn **re-derive** the runtime roots from `meta` (§4A.8). Without a
+countermeasure a sandboxed non-spawner could edit its own `meta.json` to set
+`canSpawnChildren: true` (or swap `agentType` to a spawning type) and then
+`ib respawn`/resume itself into a **spawner** profile. A4 G3 closes this:
+
+- **The seal.** A per-agent record at `~/.itsybitsy/sealed/<repoId>-<agentId>.json`
+  holds the profile inputs `{agentType, canSpawnChildren (resolved via
+  `metaCanSpawnChildren`), paths, sandbox: {enabled, rawAllow, domains}}` as
+  canonical JSON plus a sha256 over them (`src/agent-seal.ts`).
+- **The seal dir is agent-unreachable.** `_all.md` `paths.deny` lists
+  `~/.itsybitsy/sealed` (deny wins over the `~/.itsybitsy` read floor and cannot
+  be re-opened by any layer), so a sandboxed non-spawner can neither read its own
+  seal nor forge one. The LIVE probe proves both ops are denied under it.
+- **The seal is written by unsandboxed lifecycle ops.** `newAgent` seals every
+  new agent right after the early meta write; `ib sandbox refresh` re-seals;
+  `rehire` re-seals; `nuke`/`retire` delete it. `sealAgentRecord` tries a direct
+  write and, on `EPERM`/`EACCES` (a **sandboxed spawner** that cannot write the
+  denied dir), re-runs itself as `ib sandbox seal <id>` **synchronously** through
+  the unsandboxed tmux server (`run-shell` WITHOUT `-b`), which recomputes the
+  record from the read-only type files + the agent's meta and writes it. The
+  record is computed from the read-only type files (for `canSpawnChildren`
+  resolution) plus the meta the spawner just wrote, so it captures the
+  *legitimate* profile at seal time and a later meta edit is exactly the
+  divergence it detects.
+- **Verification.** `resumeAgent`, `respawnSelf` (which resumes through the same
+  path), and `ib sandbox refresh` (before its own re-seal) compare the agent's
+  current inputs against the seal **when `meta.sandbox.enabled` is true**; on any
+  mismatch they **fail hard** — the agent is left stopped, the differing field is
+  named in `agent.log`, and stderr reads `sandbox refused: meta.json does not
+  match the sealed record (<field>); run \`ib sandbox refresh <id>\` from an
+  unsandboxed session to re-seal`. A missing seal for an enabled agent is refused
+  by resume/respawn with its own message (pointing at refresh); **refresh** treats
+  a missing seal as "seal it now" so a legacy enabled agent is recoverable, but
+  refuses a genuine mismatch so a tampered meta cannot be laundered into a new
+  seal. Disabled agents have no profile and are never checked.
+
+⚠️ **Residual (accepted).** A **SPAWNER** can still reach the seal dir the same
+way it reaches everything else off-limits — through the **tmux socket**, the
+accepted spawner escape above (`tmux run-shell 'cat|tee ~/.itsybitsy/sealed/…'`
+runs unsandboxed). The seal protects **non-spawners**, whose tmux socket is
+denied. Closing the spawner path would mean closing the tmux escape itself, out
+of scope here. Documented in §4C.5.
 
 ### 4C.4 MCP servers
 
@@ -913,18 +944,21 @@ fine-grained cross-agent etiquette.** Still a big win over today (kernel-blocked
 secrets + a real domain allowlist), but §1 should not oversell worker-vs-worker
 filesystem isolation.
 
-⚠️ **The spawn keying is advisory, not tamper-proof, in A3 (F2).** Because
+✅ **The spawn keying is now tamper-evident for non-spawners (A4 G3).** Because
 `AGENTDIR` is agent-writable (hooks write `meta.json` there) and resume/respawn
 re-derive the runtime roots from `meta` (§4A.8, §4C.3), the `canSpawnChildren`
 keying — REPOAGENTS write, PARENTCLAUDE, and the tmux escape — is only as strong
-as `meta` is trustworthy. A sandboxed non-spawner can edit its own
-`meta.canSpawnChildren`/`agentType` and respawn into a spawner profile. So the
-kernel raises the bar (a non-spawner is genuinely fenced *until* it rewrites its
-own meta and respawns) but does not yet make the spawn boundary unforgeable. The
-A4 closure in §4C.3 — spawn inputs recorded/signed by an unsandboxed helper under
-an agent-unreachable path, with a fail-hard mismatch check on
-resume/respawn/refresh — is what makes it tamper-proof. Set expectations
-accordingly in §1.
+as `meta` is trustworthy. A3 raised the bar (a non-spawner is genuinely fenced
+*until* it rewrites its own meta) but did not make the spawn boundary
+unforgeable. **A4 G3's sealed record (§4C.3) closes this for non-spawners:** the
+profile inputs are recorded by an unsandboxed lifecycle op under a path the
+`_all.md` `deny` carves out of every agent's reach, and resume/respawn/refresh
+**fail-hard** on any mismatch between `meta` and the seal. A sandboxed
+non-spawner that edits its own `meta.canSpawnChildren`/`agentType` and tries to
+respawn is now refused, not promoted. **Residual (accepted):** a **spawner** can
+still reach the seal dir through its tmux socket (the same accepted escape that
+lets a spawner run anything unsandboxed), so the seal hardens the non-spawner
+boundary, not the spawner one. Set expectations accordingly in §1.
 
 ## 5. Shipped components
 

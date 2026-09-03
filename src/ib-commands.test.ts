@@ -87,9 +87,16 @@ import {
   mergeSandboxLayerConfigs,
   resolveTmuxSocketDir,
   refreshAgentSandbox,
+  refreshAgentsSandbox,
+  sealAgentRecord,
+  removeAgentSeal,
+  getRepoId,
+  setSealDirectWriteForTesting,
+  resetSealDirectWriteForTesting,
   teamAdd,
   writeMetaJsonAtomic,
 } from "./ib-commands";
+import { sealPath, readSealRecord } from "./agent-seal";
 import {
   spawnCtx as lifecycleSpawnCtx,
   setSandboxProxyKillForTesting,
@@ -1382,6 +1389,11 @@ describe("retire → rehire recovery", () => {
     expect(await Bun.file(join(archiveDir, "retirement.json")).exists()).toBe(true);
     expect(await git("-C", tempDir, "rev-parse", manifest.headRef)).toBe(manifest.gitHead);
     expect(await git("-C", worktreePath, "rev-parse", "HEAD")).toBe(manifest.gitHead);
+    // A4 G3: rehire re-seals the reconstructed agent BEFORE the resume attempt,
+    // so the sealed record exists even though this resume fails on
+    // codex_session_id (retire deleted it; rehire brought it back).
+    const rehireRepoId = await getRepoId(tempDir);
+    expect(await readSealRecord(rehireRepoId, agentId, tempDir)).not.toBeNull();
   });
 
   test("rejects an archive without a supported retirement manifest", async () => {
@@ -4202,6 +4214,7 @@ describe("newAgent (native)", () => {
     resetWatchdogSpawnFn();
     resetNukeResumeSpawnRunner();
     resetSandboxWiringForTesting();
+    resetSealDirectWriteForTesting();
     lifecycleSpawnCtx.reset();
     resetUserConfigPath();
     if (originalHome === undefined) {
@@ -4948,6 +4961,295 @@ sandbox:
     // Refusal is logged and the agent stays stopped (no resume.sh).
     expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("ghost-type-xyz");
     expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
+  });
+
+  // ── A4 G3: sealed record ────────────────────────────────────────────────────
+  test("A4 G3: spawn writes a sealed record with the profile inputs and a valid sha256", async () => {
+    await writeSandboxType("seal-spawn");
+    setSandboxPortAllocatorForTesting(() => 43150);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99970 }));
+    const spawned = await callNewAgent("seal me", { name: "seal-spawn", type: "seal-spawn" });
+    expect(spawned.ok).toBe(true);
+
+    const repoId = await getRepoId(tempDir);
+    const record = await readSealRecord(repoId, "seal-spawn", process.env.HOME!);
+    expect(record).not.toBeNull();
+    expect(record!.inputs.agentType).toBe("seal-spawn");
+    expect(record!.inputs.canSpawnChildren).toBe(false); // the sandbox type has no canSpawnChildren
+    expect(record!.inputs.sandbox.enabled).toBe(true);
+    expect(record!.inputs.paths.allowRead).toContain(canonicalizeSandboxPath(tempDir));
+    // The stored sha256 is exactly the canonical hash of the stored inputs.
+    const { computeSealRecord } = await import("./agent-seal");
+    expect(record!.sha256).toBe(computeSealRecord(record!.inputs).sha256);
+    expect(await Bun.file(sealPath(repoId, "seal-spawn", process.env.HOME!)).exists()).toBe(true);
+  });
+
+  test("A4 G3: sealAgentRecord routes through the tmux server on EPERM (sandboxed spawner)", async () => {
+    // Simulate the EPERM a sandboxed spawner hits writing the denied seal dir.
+    setSealDirectWriteForTesting(async () => {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    });
+    const repoId = await getRepoId(tempDir);
+    // Pre-place the record so the post-fallback verify succeeds — standing in for
+    // the unsandboxed `ib sandbox seal` child the tmux server actually runs.
+    await mkdir(join(process.env.HOME!, ".itsybitsy", "sealed"), { recursive: true });
+    await Bun.write(
+      sealPath(repoId, "seal-helper", process.env.HOME!),
+      JSON.stringify({ inputs: {}, sha256: "x" }),
+    );
+    const tmuxCalls: string[][] = [];
+    setNukeResumeSpawnRunner((cmd: string[]) => { tmuxCalls.push(cmd); return makeSpawnResult("", 0); });
+
+    const meta = {
+      id: "seal-helper", agentType: "worker",
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+      paths: { allowRead: [], allowWrite: [], deny: [] },
+    };
+    await sealAgentRecord(tempDir, "seal-helper", meta as unknown as Record<string, unknown>, tempDir);
+
+    const sealCall = tmuxCalls.find((c) => c[0] === "tmux" && c[1] === "run-shell");
+    expect(sealCall).toBeDefined();
+    // Synchronous (blocking) — run-shell WITHOUT -b so the seal lands before spawn continues.
+    expect(sealCall).not.toContain("-b");
+    expect(sealCall!.at(-1)).toContain("'ib' 'sandbox' 'seal' 'seal-helper'");
+  });
+
+  test("A4 G3: sandbox refresh re-seals with the new inputs", async () => {
+    await writeSandboxType("seal-refresh", { allowRead: [tempDir], allowWrite: [tempDir], deny: ["**/.env"] });
+    const ports = [43152, 43153];
+    setSandboxPortAllocatorForTesting(() => ports.shift()!);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99972 }));
+    const spawned = await callNewAgent("re-seal", { name: "seal-refresh", type: "seal-refresh" });
+    expect(spawned.ok).toBe(true);
+
+    const repoId = await getRepoId(tempDir);
+    const before = await readSealRecord(repoId, "seal-refresh", process.env.HOME!);
+    expect(before).not.toBeNull();
+
+    const agentDir = join(agentsDir, "seal-refresh");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
+    const refreshedDir = join(tempDir, "reseal-dir");
+    await mkdir(refreshedDir, { recursive: true });
+    await writeSandboxType("seal-refresh", { allowRead: [tempDir, refreshedDir], allowWrite: [tempDir], deny: ["**/.env"] });
+
+    let createdSession = false;
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      const cmdStr = cmd.join(" ");
+      if (cmd[0] === "which" && cmd[1] === "sandbox-exec") return makeSpawnResult("/usr/bin/sandbox-exec", 0);
+      if (cmd[0] === "/usr/bin/sandbox-exec") return makeSpawnResult("", 0);
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("tmux has-session")) return makeSpawnResult("", createdSession ? 0 : 1);
+      if (cmdStr.includes("tmux new-session")) { createdSession = true; return makeSpawnResult("", 0); }
+      if (cmdStr.includes("capture-pane")) return makeSpawnResult("Claude Code v1.0", 0);
+      return makeSpawnResult("", 0);
+    });
+    setSendSpawnRunner(() => makeSpawnResult("", 0));
+    try {
+      const result = await refreshAgentSandbox(makeAgent("seal-refresh", tempDir, "stopped", meta));
+      expect(result.ok).toBe(true);
+    } finally {
+      resetSendSpawnRunner();
+    }
+
+    const after = await readSealRecord(repoId, "seal-refresh", process.env.HOME!);
+    expect(after).not.toBeNull();
+    // The re-seal reflects the edited type file, so its hash changed.
+    expect(after!.sha256).not.toBe(before!.sha256);
+    expect(after!.inputs.paths.allowRead).toContain(canonicalizeSandboxPath(refreshedDir));
+  });
+
+  test("A4 G3: nuke deletes the sealed record", async () => {
+    await writeSandboxType("seal-nuke");
+    setSandboxPortAllocatorForTesting(() => 43154);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99973 }));
+    const spawned = await callNewAgent("nuke seal", { name: "seal-nuke", type: "seal-nuke" });
+    expect(spawned.ok).toBe(true);
+
+    const repoId = await getRepoId(tempDir);
+    expect(await readSealRecord(repoId, "seal-nuke", process.env.HOME!)).not.toBeNull();
+
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      if (cmd.includes("has-session")) return makeSpawnResult("", 1);
+      return makeSpawnResult("", 0);
+    });
+    setKillPauseSpawnRunner((cmd: string[]) => {
+      if (cmd.includes("has-session")) return makeSpawnResult("", 1);
+      return makeSpawnResult("", 0);
+    });
+    const nuked = await nukeAgent(makeAgent("seal-nuke", tempDir, "running", await Bun.file(join(agentsDir, "seal-nuke", "meta.json")).json()));
+    expect(nuked.ok).toBe(true);
+    expect(await readSealRecord(repoId, "seal-nuke", process.env.HOME!)).toBeNull();
+    resetKillPauseSpawnRunner();
+  });
+
+  test("A4 G3: resume refuses a tampered canSpawnChildren and names the field", async () => {
+    await writeSandboxType("seal-tamper-spawn");
+    setSandboxPortAllocatorForTesting(() => 43155);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99974 }));
+    const spawned = await callNewAgent("tamper spawn", { name: "seal-tamper-spawn", type: "seal-tamper-spawn" });
+    expect(spawned.ok).toBe(true);
+
+    const agentDir = join(agentsDir, "seal-tamper-spawn");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    (meta as unknown as Record<string, unknown>).canSpawnChildren = true; // non-spawner → spawner
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
+
+    const resumeCalls: string[][] = [];
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      resumeCalls.push(cmd);
+      if (cmd.includes("has-session")) return makeSpawnResult("", 1);
+      return makeSpawnResult("", 0);
+    });
+    const resumed = await resumeAgent(makeAgent("seal-tamper-spawn", tempDir, "stopped", meta));
+    expect(resumed.ok).toBe(false);
+    expect(resumed.stderr).toContain("does not match the sealed record");
+    expect(resumed.stderr).toContain("canSpawnChildren");
+    // Fail-hard: no tmux session, agent stays stopped, no sandbox built.
+    expect(resumeCalls.some((c) => c.includes("new-session"))).toBe(false);
+    expect((await Bun.file(join(agentDir, "meta.json")).json()).state).toBe("stopped");
+    expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("does not match the sealed record");
+  });
+
+  test("A4 G3: resume refuses a tampered agentType and names the field", async () => {
+    await writeSandboxType("seal-tamper-type");
+    setSandboxPortAllocatorForTesting(() => 43156);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99975 }));
+    const spawned = await callNewAgent("tamper type", { name: "seal-tamper-type", type: "seal-tamper-type" });
+    expect(spawned.ok).toBe(true);
+
+    const agentDir = join(agentsDir, "seal-tamper-type");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    meta.agentType = "some-other-type"; // swap to a different (spawning) profile
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
+
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      if (cmd.includes("has-session")) return makeSpawnResult("", 1);
+      return makeSpawnResult("", 0);
+    });
+    const resumed = await resumeAgent(makeAgent("seal-tamper-type", tempDir, "stopped", meta));
+    expect(resumed.ok).toBe(false);
+    expect(resumed.stderr).toContain("does not match the sealed record");
+    expect(resumed.stderr).toContain("agentType");
+  });
+
+  test("A4 G3: resume with a matching seal proceeds (no refusal)", async () => {
+    await writeSandboxType("seal-match");
+    const ports = [43157, 43158];
+    setSandboxPortAllocatorForTesting(() => ports.shift()!);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99976 }));
+    const spawned = await callNewAgent("match", { name: "seal-match", type: "seal-match" });
+    expect(spawned.ok).toBe(true);
+
+    const agentDir = join(agentsDir, "seal-match");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
+
+    let createdSession = false;
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      const cmdStr = cmd.join(" ");
+      if (cmd[0] === "which" && cmd[1] === "sandbox-exec") return makeSpawnResult("/usr/bin/sandbox-exec", 0);
+      if (cmd[0] === "/usr/bin/sandbox-exec") return makeSpawnResult("", 0);
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("tmux has-session")) return makeSpawnResult("", createdSession ? 0 : 1);
+      if (cmdStr.includes("tmux new-session")) { createdSession = true; return makeSpawnResult("", 0); }
+      if (cmdStr.includes("capture-pane")) return makeSpawnResult("Claude Code v1.0", 0);
+      return makeSpawnResult("", 0);
+    });
+    setSendSpawnRunner(() => makeSpawnResult("", 0));
+    try {
+      const resumed = await resumeAgent(makeAgent("seal-match", tempDir, "stopped", meta));
+      expect(resumed.ok).toBe(true);
+    } finally {
+      resetSendSpawnRunner();
+    }
+    const resume = await Bun.file(join(agentDir, "resume.sh")).text();
+    expect(resume).toContain("setsid sandbox-exec -f");
+    expect(await Bun.file(join(agentDir, "agent.log")).text()).not.toContain("does not match the sealed record");
+  });
+
+  test("A4 G3: a disabled agent with no seal resumes fine (verification skipped)", async () => {
+    await writeSandboxType("seal-disabled", { enabled: false });
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99977 }));
+    const spawned = await callNewAgent("disabled", { name: "seal-disabled", type: "seal-disabled" });
+    expect(spawned.ok).toBe(true);
+
+    const repoId = await getRepoId(tempDir);
+    // Delete any seal so the resume must succeed WITHOUT one (disabled → no check).
+    await removeAgentSeal(tempDir, "seal-disabled");
+    expect(await readSealRecord(repoId, "seal-disabled", process.env.HOME!)).toBeNull();
+
+    const agentDir = join(agentsDir, "seal-disabled");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
+    let createdSession = false;
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("tmux has-session")) return makeSpawnResult("", createdSession ? 0 : 1);
+      if (cmdStr.includes("tmux new-session")) { createdSession = true; return makeSpawnResult("", 0); }
+      if (cmdStr.includes("capture-pane")) return makeSpawnResult("Claude Code v1.0", 0);
+      return makeSpawnResult("", 0);
+    });
+    setSendSpawnRunner(() => makeSpawnResult("", 0));
+    try {
+      const resumed = await resumeAgent(makeAgent("seal-disabled", tempDir, "stopped", meta));
+      expect(resumed.ok).toBe(true);
+    } finally {
+      resetSendSpawnRunner();
+    }
+    const resume = await Bun.file(join(agentDir, "resume.sh")).text();
+    expect(resume).not.toContain("sandbox-exec");
+  });
+
+  test("A4 G3: refreshAgentsSandbox reports per agent and continues on error", async () => {
+    const failId = "batch-fail";
+    const coordId = "batch-coord";
+    for (const [id, agentType] of [[failId, "ghost-type"], [coordId, "coordinator"]] as const) {
+      const dir = join(agentsDir, id);
+      await mkdir(join(dir, "repo"), { recursive: true });
+      await Bun.write(join(dir, "meta.json"), JSON.stringify({
+        id, state: "running", agentType,
+        sandbox: { enabled: true, rawAllow: [], domains: [] },
+        paths: { allowRead: [], allowWrite: [], deny: [] },
+      }, null, 2));
+    }
+    const fail = makeAgent(failId, tempDir, "running", {
+      agentType: "ghost-type",
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+      paths: { allowRead: [], allowWrite: [], deny: [] },
+    } as unknown as Partial<AgentMeta>);
+    const coord = makeAgent(coordId, tempDir, "running", { agentType: "coordinator" });
+    // Fail first, coordinator second: proves the loop continues past a failure.
+    const { lines, anyFailed } = await refreshAgentsSandbox([fail, coord]);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("batch-fail: FAILED");
+    expect(lines[1]).toContain("batch-coord: skipped (coordinator");
+    expect(anyFailed).toBe(true);
   });
 
   test("rejects spawn when spawner worktree has uncommitted changes", async () => {

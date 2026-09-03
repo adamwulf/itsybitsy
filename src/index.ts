@@ -1981,22 +1981,9 @@ export async function main() {
             process.exit(0);
           }
 
-          let anyFailed = false;
-          for (const a of repoAgents) {
-            // Coordinators are a deliberate skip (their reset path differs), not
-            // a failure — don't flip the exit code for them.
-            if (a.meta.agentType === "coordinator") {
-              console.log(`${a.id}: skipped (coordinator — reset with the dashboard R key)`);
-              continue;
-            }
-            const result = await refreshAgentSandbox(a);
-            if (result.ok) {
-              console.log(`${a.id}: refreshed`);
-            } else {
-              anyFailed = true;
-              console.log(`${a.id}: FAILED — ${result.stderr}`);
-            }
-          }
+          const { refreshAgentsSandbox } = await import("./ib-commands");
+          const { lines, anyFailed } = await refreshAgentsSandbox(repoAgents);
+          for (const line of lines) console.log(line);
           process.exit(anyFailed ? 1 : 0);
         }
 
@@ -2004,6 +1991,42 @@ export async function main() {
         // Lifecycle path: about to mutate the agent (refresh restarts it).
         await detectAgentStates([agent], { reap: true });
         await printAndExit(await refreshAgentSandbox(agent));
+      }
+
+      if (sub === "seal") {
+        // Internal (A4 G3): write/refresh ONE agent's sealed record. Invoked
+        // unsandboxed — either directly, or by a sandboxed spawner's
+        // sealAgentRecord fallback through the tmux server, which cannot write
+        // the denied seal dir itself. Recomputes the record from the read-only
+        // agent-type files (canSpawnChildren resolution) + the agent's meta.
+        const target = args[2];
+        if (!target) {
+          console.error("Usage: ib sandbox seal <agent-id>");
+          process.exit(1);
+        }
+        const agent = await findAgentById(target, repos);
+        if (!agent) {
+          console.error(`Agent not found: ${target}`);
+          process.exit(1);
+        }
+        const { getRepoId } = await import("./ib-commands");
+        const { writeSealRecordDirect } = await import("./agent-seal");
+        const repoId = await getRepoId(agent.repoPath);
+        try {
+          // No explicit home: writeSealRecordDirect defaults to
+          // `process.env.HOME ?? homedir()`, the same seal home the writer/reader
+          // use everywhere else.
+          await writeSealRecordDirect(
+            repoId,
+            agent.id,
+            agent.meta as unknown as Record<string, unknown>,
+          );
+          console.log(`Sealed ${agent.id}`);
+          process.exit(0);
+        } catch (err) {
+          console.error(`Could not seal '${agent.id}': ${err instanceof Error ? err.message : String(err)}`);
+          process.exit(1);
+        }
       }
 
       console.error("Usage: ib sandbox refresh <agent-id> | ib sandbox refresh --all");

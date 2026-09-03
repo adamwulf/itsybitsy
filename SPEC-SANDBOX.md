@@ -780,8 +780,9 @@ Required in the baseline:
   type), passed into `prepareSandbox` at spawn (from `initialMetaJson`) and
   resume (from `agent.meta`). For a spawner, **REPOAGENTS**
   (`<repo>/.ittybitty/agents`) becomes a **write** runtime root (it writes the
-  child's agent dir) and **PARENTCLAUDE** (`<repo>/.claude`, where `ib new-agent`
-  writes the child's `settings.local.json` at `ib-commands.ts` ~5481) is added
+  child's agent dir) and **PARENTCLAUDE** (`<repo>/.claude`, where `newAgent`'s
+  non-coordinator settings-merge branch writes `rootSettingsPath` =
+  `<rootRepoPath>/.claude/settings.local.json`) is added
   as a **write** runtime root. A non-spawner keeps REPOAGENTS **read-only** and
   gets neither PARENTCLAUDE nor the tmux socket (§4C.3). This is the
   `sandbox-safety`-split "runtime roots keyed on `canSpawnChildren`" from

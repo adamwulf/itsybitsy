@@ -11,7 +11,9 @@ import {
   globToSandboxRegex,
   isBalancedSandboxExpression,
   normalizePathsConfig,
+  prepareAccessTable,
   resolvePathAccess,
+  resolvePreparedAccess,
   resolvePathsConfig,
   resolveSandboxConfig,
   sandboxPathAccessTable,
@@ -591,6 +593,32 @@ describe("most-specific filesystem access oracle", () => {
           ).toBe(resolvePathAccess(target, op, rawTable));
         }
       }
+    }
+  });
+
+  test("prepareAccessTable + resolvePreparedAccess match the wrapper and never mutate", async () => {
+    // The two-step form (prepare once, resolve many) must be answer-identical to
+    // the resolvePathAccess wrapper on every fixture, and resolving must leave
+    // the prepared table untouched so one prepared table serves any number of
+    // lookups. The JSON snapshot captures the full sorted/compiled shape.
+    const fixtures = await buildAccessFixtures();
+    for (const fixture of fixtures) {
+      const table = sandboxPathAccessTable(mergeFixtureLayers(fixture.layers), fixture.params);
+      const prepared = prepareAccessTable(table);
+      const snapshot = JSON.stringify(prepared);
+      for (const check of fixture.checks) {
+        const target = canonicalizeSandboxPath(check.path);
+        for (const op of ["read", "write"] as const) {
+          expect(
+            resolvePreparedAccess(prepared, target, op),
+            `${fixture.name}: two-step ${op} ${target}`,
+          ).toBe(resolvePathAccess(target, op, table));
+        }
+      }
+      expect(
+        JSON.stringify(prepared),
+        `${fixture.name}: prepared table mutated by resolving`,
+      ).toBe(snapshot);
     }
   });
 

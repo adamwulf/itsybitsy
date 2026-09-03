@@ -494,29 +494,68 @@ function compiledPathMatches(compiled: CompiledPath, absolutePath: string): bool
 }
 
 /**
- * Resolve access from the same sorted table that drives SBPL emission.
- * Inputs are canonical absolute paths/patterns; deny wins at every depth.
+ * A sorted, compiled access table ready for repeated resolution. Produced once
+ * by prepareAccessTable so a caller resolving many paths against one table does
+ * not re-sort the allow and deny entries on every lookup.
+ */
+export interface PreparedAccessTable {
+  allow: OrderedPathEntry[];
+  deny: OrderedPathEntry[];
+}
+
+/**
+ * Sort and compile the access table once for repeated resolution. `roots` only
+ * carries parameter names for -D emission and never affects resolution, so
+ * resolvers may omit it; profile emission passes it for stable naming.
+ */
+export function prepareAccessTable(
+  table: PathAccessTable,
+  roots: ProfileRuntimePathRoot[] = [],
+): PreparedAccessTable {
+  return {
+    allow: sortedAllowEntries(table, roots),
+    deny: sortedDenyEntries(table.deny),
+  };
+}
+
+/**
+ * Resolve access against an already-prepared table. Inputs are canonical
+ * absolute paths/patterns; deny wins at every depth. Read-only of `prepared`:
+ * resolving never mutates the sorted entries, so one prepared table serves any
+ * number of lookups.
+ */
+export function resolvePreparedAccess(
+  prepared: PreparedAccessTable,
+  absolutePath: string,
+  op: PathOperation,
+): "allow" | "deny" {
+  if (!absolutePath.startsWith("/")) {
+    throw new Error(`resolvePreparedAccess requires a canonical absolute path, got "${absolutePath}"`);
+  }
+
+  if (prepared.deny.some((entry) => compiledPathMatches(entry.compiled, absolutePath))) {
+    return "deny";
+  }
+
+  const matching = prepared.allow
+    .filter((entry) => compiledPathMatches(entry.compiled, absolutePath));
+  const winner = matching.at(-1);
+  if (!winner) return "deny";
+  if (op === "read") return "allow";
+  return winner.op === "write" ? "allow" : "deny";
+}
+
+/**
+ * Resolve access from the same sorted table that drives SBPL emission. A thin
+ * wrapper that prepares then resolves; prefer prepareAccessTable +
+ * resolvePreparedAccess when resolving many paths against one table.
  */
 export function resolvePathAccess(
   absolutePath: string,
   op: PathOperation,
   table: PathAccessTable,
 ): "allow" | "deny" {
-  if (!absolutePath.startsWith("/")) {
-    throw new Error(`resolvePathAccess requires a canonical absolute path, got "${absolutePath}"`);
-  }
-
-  if (sortedDenyEntries(table.deny)
-    .some((entry) => compiledPathMatches(entry.compiled, absolutePath))) {
-    return "deny";
-  }
-
-  const matching = sortedAllowEntries(table)
-    .filter((entry) => compiledPathMatches(entry.compiled, absolutePath));
-  const winner = matching.at(-1);
-  if (!winner) return "deny";
-  if (op === "read") return "allow";
-  return winner.op === "write" ? "allow" : "deny";
+  return resolvePreparedAccess(prepareAccessTable(table), absolutePath, op);
 }
 
 function profileMatcher(entry: OrderedPathEntry, parameterName: string): string {

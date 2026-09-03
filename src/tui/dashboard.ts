@@ -1454,7 +1454,16 @@ export class DashboardComponent implements Component {
 
   // --- Data update + agent sync ---
 
+  private hasLoggedFirstOnUpdate = false;
+
   onUpdate(agents: Agent[], flatList: FlatEntry[], questions: PendingQuestion[], orphanedTmuxSessions: string[] = []) {
+    if (!this.hasLoggedFirstOnUpdate) {
+      this.hasLoggedFirstOnUpdate = true;
+      logToWatchLog(
+        `[startup] first onUpdate received: ${flatList.length} rows, ${agents.length} agents, ` +
+        `${questions.length} questions, ${orphanedTmuxSessions.length} orphans`,
+      );
+    }
     this.agentTree.setFlatList(flatList);
     // §17.1 (user-confirmed startup behavior): on the VERY FIRST populate with a
     // non-empty list, auto-select the first row — the old `ib watch` default.
@@ -3179,8 +3188,11 @@ export class DashboardComponent implements Component {
 }
 
 export async function launchDashboard(): Promise<void> {
+  const bootStart = Date.now();
+  logToWatchLog("[startup] launchDashboard initiated");
   const registry = await loadRegistry();
   const repos = registry.repos;
+  logToWatchLog(`[startup] registry loaded: ${repos.length} repos (+${Date.now() - bootStart}ms)`);
   if (repos.length === 0) {
     console.log("No repos registered. Use 'ib add <path>' to add one.");
     process.exit(1);
@@ -3206,6 +3218,7 @@ export async function launchDashboard(): Promise<void> {
     // route through logWarning to avoid corrupting the dashboard.
     logWarning(`System coordinator startup failed: ${err instanceof Error ? err.message : String(err)}`);
   });
+  logToWatchLog(`[startup] coordinator ref acquired and agent types ensured (+${Date.now() - bootStart}ms)`);
 
   // Validate all agent type files before starting
   const typeErrors = await validateAllAgentTypes();
@@ -3224,6 +3237,7 @@ export async function launchDashboard(): Promise<void> {
   }
 
   const config = await readConfig();
+  logToWatchLog(`[startup] agent types validated and config read (+${Date.now() - bootStart}ms)`);
 
   // Telegram subsystem: three-step boot. Token check → connect probe →
   // resolve chat id from inbound inference → construct dispatcher + outbox.
@@ -3270,6 +3284,7 @@ export async function launchDashboard(): Promise<void> {
   if (savedLayout) {
     dashboard.applyLayout(savedLayout);
   }
+  logToWatchLog(`[startup] layout applied (+${Date.now() - bootStart}ms)`);
   // Always run the one-time re-pin migration on the first populated onUpdate,
   // whether or not a saved layout existed. applyLayout sets pendingTmuxResize
   // when a layout is restored; set it here too so a first-run user (no saved
@@ -3497,7 +3512,10 @@ export async function launchDashboard(): Promise<void> {
   // logWarning() consults this flag to route warnings to watch.log instead.
   setWatchRunning(true);
   tui.start();
+  logToWatchLog(`[startup] tui.start() called (+${Date.now() - bootStart}ms)`);
   colorDetection.queryColorScheme();
   dashboard.startPolling();
+  logToWatchLog(`[startup] dashboard.startPolling() called, starting watcher (+${Date.now() - bootStart}ms)`);
   await watcher.start();
+  logToWatchLog(`[startup] watcher.start() resolved (+${Date.now() - bootStart}ms)`);
 }

@@ -17,6 +17,7 @@ import { pollSystemCoordinator, IB_COORDINATOR_SESSION } from "./coordinator";
 import { spawnCtx as tmuxSpawnCtx } from "./tmux-poller";
 import { InjectionContext } from "./types";
 import { tmuxSessionTarget } from "./validation";
+import { logToWatchLog } from "./watch-log";
 
 /**
  * Map `items` through `fn` with at most `chunkSize` calls in flight at once,
@@ -89,6 +90,7 @@ export class AgentWatcher {
   private polling = false;
   private refreshing = false;
   private refreshQueued = false;
+  private hasCompletedInitialRefresh = false;
   private _lastAgents: Agent[] = [];
   private lastOrphanedSessions: string[] = [];
   private _lastLiveTmuxSessions: Set<string> = new Set();
@@ -370,13 +372,17 @@ export class AgentWatcher {
       return;
     }
     this.refreshing = true;
+    const isInitial = !this.hasCompletedInitialRefresh;
+    const tRefreshStart = isInitial ? Date.now() : 0;
     try {
       const agentsApi = agentsCtx.fn;
       const reposWithDisplayNames = this.repos.map((r) => ({ path: r.path, name: repoDisplayName(r) }));
       // Skip archived agents: the dashboard never renders them (flattenAgentTree
       // drops every archived row) and re-stat'ing thousands of immutable archived
       // meta.json files on every refresh tick is pure waste. See readAllAgents docs.
+      const tReadStart = isInitial ? Date.now() : 0;
       const { agents, errors, orphanedTmuxSessions, liveTmuxSessions } = await agentsApi.readAllAgents(reposWithDisplayNames, false);
+      const tReadMs = isInitial ? Date.now() - tReadStart : 0;
 
       // Report any read errors
       for (const err of errors) {
@@ -391,6 +397,7 @@ export class AgentWatcher {
       // Detect state for each agent via tmux capture + parseState, and get coordinator info.
       // Lifecycle path: the watcher refresh is authorized to reap orphan PIDs
       // and tear down husk tmux sessions for agents detected as stopped.
+      const tDetectStart = isInitial ? Date.now() : 0;
       const [, coordinatorInfo] = await Promise.all([
         agentsApi.detectAgentStates(agents, {
           reap: true,
@@ -398,16 +405,27 @@ export class AgentWatcher {
         }),
         this.getCoordinatorInfo(),
       ]);
+      const tDetectMs = isInitial ? Date.now() - tDetectStart : 0;
 
       const roots = agentsApi.buildAgentTree(agents);
       const repoInfos = this.repos.map((r) => ({ name: repoDisplayName(r), path: r.path }));
       const flatList = agentsApi.flattenAgentTree(roots, repoInfos, coordinatorInfo, this.groupByParent);
 
       // Read pending questions from all repos
+      const tQuestionsStart = isInitial ? Date.now() : 0;
       const questionResults = await Promise.all(
         this.repos.map((r) => agentsApi.readPendingQuestions(r.path))
       );
       const questions = questionResults.flat();
+      const tQuestionsMs = isInitial ? Date.now() - tQuestionsStart : 0;
+
+      if (isInitial) {
+        this.hasCompletedInitialRefresh = true;
+        logToWatchLog(
+          `[startup] initial watcher.refresh completed in ${Date.now() - tRefreshStart}ms ` +
+          `(readAllAgents=${tReadMs}ms, detectStates=${tDetectMs}ms, readQuestions=${tQuestionsMs}ms)`,
+        );
+      }
 
       // Run health checks (fire-and-forget — results available on next update)
       this.runHealthChecks();

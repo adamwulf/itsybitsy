@@ -938,14 +938,16 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
 
   // Resume the newest non-cleared, non-stub transcript. Skip the scan on the
   // post-failure retry so a single bad transcript can't trap us in a loop.
+  const scanStart = Date.now();
   const scan: CoordinatorResumeScan = retryAfterResumeFailure
     ? { id: null, candidateCount: 0, stubCount: 0 }
     : await findLatestCoordinatorTranscriptId();
+  const scanMs = Date.now() - scanStart;
   const resumeId = scan.id;
 
   if (resumeId) {
     logToWatchLog(
-      `[coordinator] resume id=${resumeId} (newest of ${scan.candidateCount} candidates, ${scan.stubCount} stub(s) filtered)`,
+      `[coordinator] resume id=${resumeId} (found in ${scanMs}ms, newest of ${scan.candidateCount} candidates, ${scan.stubCount} stub(s) filtered)`,
     );
     // Cross-check only: the SessionStart hook records Claude's real session id
     // in coordinator-session.json. A mismatch with the scan choice is logged
@@ -958,7 +960,7 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
       );
     }
   } else {
-    logToWatchLog(`[coordinator] fresh launch (no resume candidate)`);
+    logToWatchLog(`[coordinator] fresh launch (no resume candidate, scan took ${scanMs}ms)`);
   }
 
   const channels: string[] = [];

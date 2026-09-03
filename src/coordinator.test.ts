@@ -106,6 +106,14 @@ describe("buildSystemCoordinatorSettings", () => {
     expect(deny).not.toContain("LS");
   });
 
+  test("final settings contain no obsolete permission tool names", async () => {
+    const settings = await buildSystemCoordinatorSettings();
+    expect(settings.permissions.allow).not.toContain("MultiEdit");
+    expect(settings.permissions.allow).not.toContain("LS");
+    expect(settings.permissions.deny).not.toContain("MultiEdit");
+    expect(settings.permissions.deny).not.toContain("LS");
+  });
+
   test("denies web access tools", async () => {
     const settings = await buildSystemCoordinatorSettings();
     const deny = settings.permissions.deny;
@@ -2527,6 +2535,14 @@ describe("buildPerRepoCoordinatorSettings", () => {
     expect(settings.permissions.allow).toContain("TodoWrite");
     expect(settings.permissions.allow).not.toContain("AskUserQuestion");
     expect(settings.permissions.allow).toContain("ToolSearch");
+  });
+
+  test("final settings contain no obsolete permission tool names", async () => {
+    const settings = await buildPerRepoCoordinatorSettings();
+    expect(settings.permissions.allow).not.toContain("MultiEdit");
+    expect(settings.permissions.allow).not.toContain("LS");
+    expect(settings.permissions.deny).not.toContain("MultiEdit");
+    expect(settings.permissions.deny).not.toContain("LS");
   });
 
   test("does not allow write tools", async () => {

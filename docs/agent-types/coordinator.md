@@ -15,7 +15,6 @@ permissions:
   deny:
     - Write
     - Edit
-    - MultiEdit
     - NotebookEdit
     - WebFetch
     - WebSearch

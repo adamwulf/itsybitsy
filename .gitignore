@@ -48,3 +48,5 @@ rebase-editor.sh
 
 # Local Netlify folder
 .netlify
+.agents/hooks.json
+.agents/rules/ittybitty-agent.md

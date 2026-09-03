@@ -55,6 +55,7 @@ export const KNOWN_MODELS: KnownModel[] = [
   // is passed verbatim to `--model` (SPEC-ANTIGRAVITY-CLI.md §4.1). Gemini slugs
   // encode reasoning effort as a trailing `-low`/`-high` segment; Claude-backed
   // slugs do not. Discovery only — never a spawn-time allow-list.
+  { cli: "agy", model: "default", description: "Agy's own default model — no --model/--effort passed (currently Gemini 3.8 Flash High)" },
   { cli: "agy", model: "gemini-3.7-flash-high", description: "Gemini 3.7 Flash (high effort) via Antigravity" },
   { cli: "agy", model: "gemini-3.7-flash-low", description: "Gemini 3.7 Flash (low effort) via Antigravity" },
   { cli: "agy", model: "gemini-3.1-pro-high", description: "Gemini 3.1 Pro (high effort) via Antigravity" },

@@ -30,7 +30,7 @@ import { realpathSync } from "fs";
 import { mkdir } from "fs/promises";
 import { shellQuote, isValidModel, isValidAgentId, isValidSessionId } from "./validation";
 import { isCodexSafeBinaryPath } from "./codex-config";
-import { parseModel, agySlugHasEffort, mapEffortForAgy } from "./agent-cli";
+import { parseModel, agySlugHasEffort, mapEffortForAgy, isAgyDefaultModel } from "./agent-cli";
 import type { SessionContext } from "./hooks/session-start";
 import { buildAgyHooksJson, buildAgyRulesFile, removeAgyTrustedWorkspace } from "./agy-config";
 import { AGY_WORKTREE_FILES } from "./agy-worktree-files";
@@ -48,6 +48,29 @@ function agyEffortFlag(agyModel: string, effort: string | undefined): string {
   if (!effort) return "";
   if (agySlugHasEffort(agyModel)) return "";
   return ` --effort ${shellQuote(mapEffortForAgy(effort))}`;
+}
+
+/**
+ * Render the combined ` --model <slug>[ --effort <e>]` fragment for an agy
+ * launch line. The `agy:default` sentinel (model half `default`) means "use
+ * agy's OWN configured default model": it emits NOTHING — no `--model` and no
+ * `--effort` — so agy falls back to its default with no "model not recognized"
+ * warning. For every real slug the model is passed verbatim (shell-quoted) and
+ * the effort flag follows the D1 slug-suffix rule via `agyEffortFlag`. Returns a
+ * leading-space fragment (or "") so callers can splice it straight in.
+ */
+function agyModelAndEffortFlags(agyModel: string, effort: string | undefined): string {
+  if (isAgyDefaultModel(agyModel)) return "";
+  return ` --model ${shellQuote(agyModel)}${agyEffortFlag(agyModel, effort)}`;
+}
+
+/**
+ * Human-readable model description for a start.sh / resume.sh log line. Kept in
+ * sync with `agyModelAndEffortFlags` so the log never claims a `--model` flag
+ * the launch line does not actually carry.
+ */
+function agyModelLogDesc(agyModel: string): string {
+  return isAgyDefaultModel(agyModel) ? "default model (no model flag)" : `--model ${agyModel}`;
 }
 
 /**
@@ -98,7 +121,11 @@ export interface BuildAgyStartContentInput {
    * ANTIGRAVITY-CLI-NOTES.md §17.1 — is written there).
    */
   agentDir: string;
-  /** agy model slug from `parseModel(model).model` — passed verbatim to `--model`. */
+  /**
+   * agy model slug from `parseModel(model).model` — passed verbatim to
+   * `--model`, EXCEPT the `agy:default` sentinel (`"default"`), which suppresses
+   * both `--model` and `--effort` so agy uses its own default model.
+   */
   agyModel: string;
   /**
    * Raw itsybitsy effort level (`low|medium|high|xhigh|max`), or empty. The D1
@@ -123,8 +150,11 @@ export interface BuildAgyStartContentInput {
  * skeleton exactly (setsid + SIGHUP ignore + pid capture + meta-json write +
  * wait + exit-code annotation + exit-check) but launches agy with the D2 line:
  *
- *   agy --dangerously-skip-permissions --mode=accept-edits --model <slug> \
+ *   agy --dangerously-skip-permissions --mode=accept-edits [--model <slug>] \
  *       [--effort <e>] --log-file <agentDir>/agy.log -i "$(cat <prompt>)"
+ *
+ * The `--model`/`--effort` pair is omitted entirely for the `agy:default`
+ * sentinel so agy uses its own configured default model (D: suppress both).
  *
  * The PID variable stays `CLAUDE_PID` (and is stored as `claude_pid` in
  * meta.json) intentionally — the watchdog, dashboard, and every reader of
@@ -137,8 +167,7 @@ export interface BuildAgyStartContentInput {
 export function buildAgyStartContent(input: BuildAgyStartContentInput): string {
   assertAgyLaunchPreconditions(input.ibBinaryPath, input.agentId, input.agyModel, "launch");
 
-  const qModel = shellQuote(input.agyModel);
-  const effortFlag = agyEffortFlag(input.agyModel, input.effort);
+  const modelAndEffort = agyModelAndEffortFlags(input.agyModel, input.effort);
   const qAgyLog = shellQuote(join(input.agentDir, "agy.log"));
   const qAbsPromptFile = shellQuote(input.absPromptFile);
   const qStartMetaJson = shellQuote(input.absMetaJson);
@@ -148,7 +177,7 @@ export function buildAgyStartContent(input: BuildAgyStartContentInput): string {
   const qIbPath = shellQuote(input.ibBinaryPath);
 
   const launch =
-    `agy --dangerously-skip-permissions --mode=accept-edits --model ${qModel}${effortFlag} --log-file ${qAgyLog} -i "$(cat ${qAbsPromptFile})"`;
+    `agy --dangerously-skip-permissions --mode=accept-edits${modelAndEffort} --log-file ${qAgyLog} -i "$(cat ${qAbsPromptFile})"`;
 
   return `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own agy process
@@ -158,7 +187,7 @@ AGENT_LOG=${qStartAgentLog}
 STDERR_LOG=${qStartStderrLog}
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }
 
-log "Starting agy --model ${input.agyModel} --mode=accept-edits (agy agent id=${input.agentId})"
+log "Starting agy ${agyModelLogDesc(input.agyModel)} --mode=accept-edits (agy agent id=${input.agentId})"
 log "PWD=$(pwd) which_agy=$(which agy 2>&1)"
 
 # Ignore SIGHUP for the lifetime of this script. When spawn is triggered from
@@ -251,7 +280,8 @@ export interface BuildAgyResumeContentInput {
    * agy model slug from `parseModel(meta.model).model`. Unlike codex — which
    * binds the model to the rollout and drops `-m` on resume — agy resume does
    * NOT carry the model (ANTIGRAVITY-CLI-NOTES.md §17.6), so it MUST be re-passed
-   * with `--model` here.
+   * with `--model` here — EXCEPT the `agy:default` sentinel (`"default"`), which
+   * suppresses `--model`/`--effort` so agy re-resolves its own default model.
    */
   agyModel: string;
   /** Raw itsybitsy effort level (`low|medium|high|xhigh|max`), or empty — same D1 rule as start. */
@@ -273,8 +303,9 @@ export interface BuildAgyResumeContentInput {
  * `buildAgyStartContent`; the launch line differs only in that it carries
  * `--conversation <uuid>` (to reattach the prior conversation) and has NO `-i`
  * / prompt. `--model` and the effort flag ARE re-passed — agy resume does not
- * remember either (§17.6). Only the conversation id + agent id are logged,
- * never any prompt content.
+ * remember either (§17.6) — save for the `agy:default` sentinel, which omits
+ * both so agy re-resolves its own default model. Only the conversation id +
+ * agent id are logged, never any prompt content.
  *
  * Throws (via `assertAgyLaunchPreconditions`) if the binary path, agent id, or
  * model slug is unsafe.
@@ -282,8 +313,7 @@ export interface BuildAgyResumeContentInput {
 export function buildAgyResumeContent(input: BuildAgyResumeContentInput): string {
   assertAgyLaunchPreconditions(input.ibBinaryPath, input.agentId, input.agyModel, "resume", input.conversationId);
 
-  const qModel = shellQuote(input.agyModel);
-  const effortFlag = agyEffortFlag(input.agyModel, input.effort);
+  const modelAndEffort = agyModelAndEffortFlags(input.agyModel, input.effort);
   const qConversation = shellQuote(input.conversationId);
   const qAgyLog = shellQuote(join(input.agentDir, "agy.log"));
   const qResumeMetaJson = shellQuote(input.absMetaJson);
@@ -293,7 +323,7 @@ export function buildAgyResumeContent(input: BuildAgyResumeContentInput): string
   const qIbPath = shellQuote(input.ibBinaryPath);
 
   const launch =
-    `agy --dangerously-skip-permissions --mode=accept-edits --model ${qModel}${effortFlag} --log-file ${qAgyLog} --conversation ${qConversation}`;
+    `agy --dangerously-skip-permissions --mode=accept-edits${modelAndEffort} --log-file ${qAgyLog} --conversation ${qConversation}`;
 
   return `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own agy process
@@ -303,7 +333,7 @@ AGENT_LOG=${qResumeAgentLog}
 STDERR_LOG=${qResumeStderrLog}
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [resume.sh] $1" >> "$AGENT_LOG"; }
 
-log "Resuming agy --conversation ${input.conversationId} --model ${input.agyModel} (agy agent id=${input.agentId})"
+log "Resuming agy --conversation ${input.conversationId} ${agyModelLogDesc(input.agyModel)} (agy agent id=${input.agentId})"
 log "PWD=$(pwd) which_agy=$(which agy 2>&1)"
 
 # Ignore SIGHUP for the lifetime of this script. When resume is triggered from

@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { resolveCli, isCodexModel, parseModel, mapEffortForCodex, mapEffortForAgy, agySlugHasEffort, KNOWN_CLIS, type AgentCli } from "./agent-cli";
+import { resolveCli, isCodexModel, parseModel, mapEffortForCodex, mapEffortForAgy, agySlugHasEffort, isAgyDefaultModel, AGY_DEFAULT_MODEL, KNOWN_CLIS, type AgentCli } from "./agent-cli";
 
 describe("parseModel", () => {
   describe("split on first colon, model is greedy-to-end (SPEC §5.1)", () => {
@@ -382,5 +382,24 @@ describe("agySlugHasEffort — detect a trailing -low/-medium/-high on an agy sl
     // A `-high` in the middle must not count — only a trailing segment does.
     expect(agySlugHasEffort("high-context-model")).toBe(false);
     expect(agySlugHasEffort("low-latency-pro")).toBe(false);
+  });
+});
+
+describe("isAgyDefaultModel — the agy:default sentinel (no --model/--effort)", () => {
+  test("true only for the exact 'default' model half", () => {
+    expect(isAgyDefaultModel(AGY_DEFAULT_MODEL)).toBe(true);
+    expect(isAgyDefaultModel("default")).toBe(true);
+  });
+  test("false for any real slug (case-sensitive, no substring match)", () => {
+    expect(isAgyDefaultModel("gemini-3.7-flash-low")).toBe(false);
+    expect(isAgyDefaultModel("Default")).toBe(false);
+    expect(isAgyDefaultModel("default-model")).toBe(false);
+    expect(isAgyDefaultModel("")).toBe(false);
+  });
+  test("the sentinel round-trips through parseModel as agy:default", () => {
+    const parsed = parseModel(`agy:${AGY_DEFAULT_MODEL}`);
+    expect(parsed.cli).toBe("agy");
+    expect(parsed.model).toBe("default");
+    expect(isAgyDefaultModel(parsed.model)).toBe(true);
   });
 });

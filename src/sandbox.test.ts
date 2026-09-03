@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "fs/promises";
-import { tmpdir } from "os";
+import { homedir, tmpdir } from "os";
 import { dirname, join } from "path";
 import { parseAgentTypeFile } from "./agent-types";
 import {
@@ -763,6 +763,16 @@ describe("most-specific filesystem access oracle", () => {
     // under /private/tmp stays writable. Parameterizing TMUXSOCK to this path
     // lets the live kernel probe exercise the deny without a real tmux server.
     const tmuxSockStandin = join("/private/tmp", `itsybitsy-sandbox-tmux-${crypto.randomUUID()}`);
+    // A sibling directly under /private/tmp but NOT under the tmux stand-in, so
+    // it stays writable for both a spawner and a non-spawner (R3 iii).
+    const tmuxSiblingFile = join("/private/tmp", `itsybitsy-sandbox-tmux-sib-${crypto.randomUUID()}`);
+    // R3(i) the "~/Documents denied" relation: a home path in NO floor list.
+    // The temp HOME (root) lives under the /private/var/folders write floor, so
+    // nothing under it is uncovered; a temp dir under the REAL home is outside
+    // every floor entry (the floor's home entries expand to the temp HOME, not
+    // the real home), reproducing exactly the relation ~/Documents has.
+    const createdDeniedHome = await mkdtemp(join(homedir(), "itsybitsy-sandbox-denied-"));
+    const deniedHome = canonicalizeSandboxPath(createdDeniedHome);
     try {
       const baseline = parseAgentTypeFile(
         await Bun.file(join(import.meta.dir, "../docs/agent-types/_all.md")).text(),
@@ -816,6 +826,16 @@ describe("most-specific filesystem access oracle", () => {
       const homeClaudeWrite = join(root, ".claude/probe.txt"); // ~/.claude allowWrite
       const homeItsybitsyWrite = join(root, ".itsybitsy/agents/probe.txt"); // ~/.itsybitsy/agents allowWrite
       const homeItsybitsyRead = join(root, ".itsybitsy/state.json"); // ~/.itsybitsy read, write denied
+      // R3(i): ~/.itsybitsy/agent-types is under ~/.itsybitsy (read) but NOT
+      // under ~/.itsybitsy/agents (write), so it is read-only — the floor grants
+      // agents write without opening agent-types.
+      const homeItsybitsyAgentTypes = join(root, ".itsybitsy/agent-types/config.json");
+      // R3(i): a file under the real-home stand-in — outside every floor entry,
+      // so both operations are denied (the ~/Documents relation).
+      const deniedHomeFile = join(deniedHome, "Documents", "secret.txt");
+      // R3(iii): a file inside the tmux-socket stand-in dir (the TMUXSOCK deny
+      // covers the whole subtree for a non-spawner).
+      const tmuxSockFile = join(tmuxSockStandin, "default");
       const devNull = "/dev/null"; // /dev allowWrite root, already present
       const outsideWriteFile = join(outsideHome, "plain.txt"); // /private/var/folders allowWrite
       const outsideReadOnlyDir = join(outsideHome, "readonly");
@@ -849,9 +869,13 @@ describe("most-specific filesystem access oracle", () => {
         homeClaudeWrite,
         homeItsybitsyWrite,
         homeItsybitsyRead,
+        homeItsybitsyAgentTypes,
+        deniedHomeFile,
         outsideWriteFile,
         outsideReadOnlyFile,
         tmpWriteProbe,
+        tmuxSockFile,
+        tmuxSiblingFile,
         globTreeEnv,
         globTreeSubEnv,
         globTreeSubNotes,
@@ -929,6 +953,10 @@ describe("most-specific filesystem access oracle", () => {
         { label: "floor/home-claude-write", path: homeClaudeWrite },
         { label: "floor/home-itsybitsy-agents-write", path: homeItsybitsyWrite },
         { label: "floor/home-itsybitsy-read-only", path: homeItsybitsyRead },
+        // R3(i): ~/.itsybitsy/agents writable, ~/.itsybitsy/agent-types read-only,
+        // and a real-home path (the ~/Documents relation) denied for both ops.
+        { label: "floor/home-itsybitsy-agent-types-read-only", path: homeItsybitsyAgentTypes },
+        { label: "floor/home-documents-relation-denied", path: deniedHomeFile },
         { label: "floor/dev-null-write", path: devNull },
         { label: "floor/var-folders-write", path: outsideWriteFile },
         { label: "floor/read-only-under-write-ancestor", path: outsideReadOnlyFile },
@@ -982,11 +1010,103 @@ describe("most-specific filesystem access oracle", () => {
           }
         }
       }
+      // R3(i) resolver relations, asserted directly so a floor regression that
+      // accidentally opens one of these fails loudly rather than passing on mere
+      // kernel/resolver agreement.
+      expect(resolvePathAccess(homeItsybitsyWrite, "write", table)).toBe("allow");
+      expect(resolvePathAccess(homeItsybitsyAgentTypes, "read", table)).toBe("allow");
+      expect(resolvePathAccess(homeItsybitsyAgentTypes, "write", table)).toBe("deny");
+      expect(resolvePathAccess(deniedHomeFile, "read", table)).toBe("deny");
+      expect(resolvePathAccess(deniedHomeFile, "write", table)).toBe("deny");
+
+      // R3(ii): the sanctioned root-listing divergence, live. `ls /` succeeds
+      // through the rawAllow (allow file-read-data (literal "/")) even though the
+      // resolver reports deny for a read of "/"; `ls /Applications` (outside the
+      // floor) is denied by BOTH the kernel and the resolver.
+      const lsRoot = Bun.spawnSync({
+        cmd: [sandboxExec, "-f", profilePath, ...definitionArgs, "/bin/ls", "/"],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if (lsRoot.exitCode !== 0) {
+        throw new Error(reproduce(
+          `LIVE root-listing broken: 'ls /' exit=${lsRoot.exitCode}, stderr=${lsRoot.stderr.toString().trim()}`,
+        ));
+      }
+      const lsApplications = Bun.spawnSync({
+        cmd: [sandboxExec, "-f", profilePath, ...definitionArgs, "/bin/ls", "/Applications"],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if (lsApplications.exitCode === 0) {
+        throw new Error(reproduce(
+          `LIVE floor breach: 'ls /Applications' unexpectedly succeeded (it is outside the floor)`,
+        ));
+      }
+      results.push(`ls-root=${lsRoot.exitCode}`, `ls-applications=${lsApplications.exitCode}`);
+
+      // R3(iii): the tmux-socket escape. A non-spawner denies writing the tmux
+      // stand-in while a /private/tmp sibling stays writable; a spawner allows
+      // both (the escape is kept). Build the spawner profile with the same live
+      // floor and probe both arms against their own resolver table.
+      const spawnerParams: SandboxProfileParams = { ...params, canSpawnChildren: true };
+      const spawnerProfile = generateProfile(liveConfig, livePaths, spawnerParams);
+      const spawnerProfilePath = join(root, "live-spawner.sb");
+      await Bun.write(spawnerProfilePath, spawnerProfile);
+      const spawnerArgs = Object.entries(sandboxProfileParameterValues(livePaths, spawnerParams))
+        .flatMap(([key, value]) => ["-D", `${key}=${value}`]);
+      const spawnerTable: PathAccessTable = sandboxPathAccessTable(livePaths, spawnerParams);
+      const spawnerCompile = Bun.spawnSync({
+        cmd: [sandboxExec, "-f", spawnerProfilePath, ...spawnerArgs, "/usr/bin/true"],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if (spawnerCompile.exitCode !== 0) {
+        throw new Error(
+          `LIVE spawner profile compile failed (${spawnerCompile.exitCode}): ` +
+          `${spawnerCompile.stderr.toString().trim()}\n--- profile ---\n${spawnerProfile}`,
+        );
+      }
+      // Assert the intended relations directly, so a broken keying fails loudly.
+      expect(resolvePathAccess(tmuxSockFile, "write", table)).toBe("deny");
+      expect(resolvePathAccess(tmuxSiblingFile, "write", table)).toBe("allow");
+      expect(resolvePathAccess(tmuxSockFile, "write", spawnerTable)).toBe("allow");
+      expect(resolvePathAccess(tmuxSiblingFile, "write", spawnerTable)).toBe("allow");
+      const tmuxArms = [
+        { label: "non-spawner", sb: profilePath, args: definitionArgs, tbl: table },
+        { label: "spawner", sb: spawnerProfilePath, args: spawnerArgs, tbl: spawnerTable },
+      ];
+      for (const arm of tmuxArms) {
+        for (const probe of [
+          { label: "tmux-socket", path: tmuxSockFile },
+          { label: "tmux-sibling", path: tmuxSiblingFile },
+        ]) {
+          const write = Bun.spawnSync({
+            cmd: [sandboxExec, "-f", arm.sb, ...arm.args, "/bin/sh", "-c", 'echo x > "$1"', "probe", probe.path],
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const expected = resolvePathAccess(probe.path, "write", arm.tbl);
+          const actual = write.exitCode === 0 ? "allow" : "deny";
+          results.push(`${arm.label}/${probe.label}:write=${write.exitCode}`);
+          if (actual !== expected) {
+            throw new Error(
+              `LIVE tmux disagreement (${arm.label}) for ${probe.label}: resolver=${expected}, ` +
+              `exit=${write.exitCode}, stderr=${write.stderr.toString().trim()}\n` +
+              `profile: ${arm.sb}\n-D args: ${arm.args.join(" ")}\nprobe path: ${probe.path}`,
+            );
+          }
+        }
+      }
+
       console.log(`LIVE sandbox probe: compile=${compileResult.exitCode}; ${results.join(", ")}`);
     } finally {
       await rm(createdRoot, { recursive: true, force: true });
       await rm(createdOutsideHome, { recursive: true, force: true });
+      await rm(createdDeniedHome, { recursive: true, force: true });
       await rm(tmpWriteProbe, { force: true });
+      await rm(tmuxSockStandin, { recursive: true, force: true });
+      await rm(tmuxSiblingFile, { force: true });
     }
   }, 120000);
 });

@@ -45,6 +45,7 @@ import {
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxSpawnCtx } from "../tmux-poller";
 import type { SpawnResult } from "../types";
+import { setUserHome, resetUserHome } from "../home";
 
 // These tests do REAL subprocess work: `git init`/`commit`/`branch` in the
 // diff-tool fixtures, `mkdir -p` via Bun.$ inside handleSnapshot, and a real
@@ -792,10 +793,9 @@ describe("handleSend", () => {
       const coordHome = await mkdtemp(join(tmpdir(), "aa-restart-home-"));
       const typesHome = await mkdtemp(join(tmpdir(), "aa-restart-types-"));
       const cfgDir = await mkdtemp(join(tmpdir(), "aa-restart-cfg-"));
-      const originalHome = process.env.HOME;
       setUserConfigPath(join(cfgDir, "config.json"));
       setCoordinatorHome(coordHome);
-      process.env.HOME = typesHome;
+      setUserHome(typesHome);
       setCoordinatorSleepFn(async () => {});
 
       const streamOf = (text: string): ReadableStream<Uint8Array> => {
@@ -853,7 +853,7 @@ describe("handleSend", () => {
         resetCoordinatorHome();
         resetUserConfigPath();
         resetSendSpawnRunner();
-        process.env.HOME = originalHome;
+        resetUserHome();
         await rm(coordHome, { recursive: true, force: true });
         await rm(typesHome, { recursive: true, force: true });
         await rm(cfgDir, { recursive: true, force: true });
@@ -1848,15 +1848,13 @@ async function setupTeamsFixture(): Promise<{
   homeDir: string;
   repoDir: string;
   repoEntry: RepoEntry;
-  originalHome: string | undefined;
 }> {
   const baseDir = await mkdtemp(join(tmpdir(), "agent-actions-teams-" + crypto.randomUUID() + "-"));
   const homeDir = join(baseDir, ".itsybitsy");
   const repoDir = join(baseDir, "repo");
   await mkdir(homeDir, { recursive: true });
   await mkdir(repoDir, { recursive: true });
-  const originalHome = process.env.HOME;
-  process.env.HOME = baseDir;
+  setUserHome(baseDir);
   setCoordinatorHome(homeDir);
   setUserConfigPath(join(homeDir, "config.json"));
   const repoEntry: RepoEntry = { path: repoDir, name: basename(repoDir) };
@@ -1864,19 +1862,17 @@ async function setupTeamsFixture(): Promise<{
   setSendSpawnRunner(() => makeSpawnResult());
   isPidAliveCtx.set(() => true);
   resetReadAgentMetaCache();
-  return { baseDir, homeDir, repoDir, repoEntry, originalHome };
+  return { baseDir, homeDir, repoDir, repoEntry };
 }
 
 async function teardownTeamsFixture(fx: {
   baseDir: string;
-  originalHome: string | undefined;
 }): Promise<void> {
   resetSendSpawnRunner();
   resetUserConfigPath();
   resetCoordinatorHome();
   isPidAliveCtx.reset();
-  if (fx.originalHome === undefined) delete process.env.HOME;
-  else process.env.HOME = fx.originalHome;
+  resetUserHome();
   resetReadAgentMetaCache();
   await rm(fx.baseDir, { recursive: true, force: true });
 }

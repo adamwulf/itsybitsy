@@ -4,6 +4,7 @@ import type { PathCheckInput, PathCheckContext } from "./agent-path";
 import { join } from "path";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
+import { setUserHome, resetUserHome } from "../home";
 
 /** Build a default context for testing */
 function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
@@ -1294,8 +1295,7 @@ describe("checkIbCommandAccess", () => {
   });
 
   test("rehire is exact-id-only and denies an archived nickname target", async () => {
-    const originalHome = process.env.HOME;
-    process.env.HOME = tmpDir;
+    setUserHome(tmpDir);
     try {
       await writeRetiredMeta("agent-target1", {
         manager: "agent-manager1",
@@ -1308,7 +1308,7 @@ describe("checkIbCommandAccess", () => {
       );
       expect(result?.decision).toBe("deny");
     } finally {
-      process.env.HOME = originalHome;
+      resetUserHome();
     }
   });
 
@@ -1804,14 +1804,12 @@ describe("checkPathAccess with own Claude project dir", () => {
 
 describe("hookCheckPath with @system", () => {
   let tempHome: string;
-  let originalHome: string | undefined;
   let logged: string[] = [];
   const originalLog = console.log;
 
   beforeEach(async () => {
-    originalHome = process.env.HOME;
     tempHome = await mkdtemp(join(tmpdir(), "sys-coord-hook-check-"));
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
     // Create the system coordinator home with an allow list permitting Bash(ib:*)
     const claudeDir = join(tempHome, ".itsybitsy", ".claude");
     await mkdir(claudeDir, { recursive: true });
@@ -1825,8 +1823,7 @@ describe("hookCheckPath with @system", () => {
 
   afterEach(async () => {
     console.log = originalLog;
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 

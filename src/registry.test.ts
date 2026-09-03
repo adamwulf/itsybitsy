@@ -5,19 +5,19 @@ import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import { createTeam } from "./teams";
+import { setUserHome, resetUserHome } from "./home";
 
 // Override registry path for tests
-const originalHome = process.env.HOME;
 let tempDir: string;
 
 describe("registry", () => {
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "itsybitsy-test-"));
-    process.env.HOME = tempDir;
+    setUserHome(tempDir);
   });
 
   afterEach(async () => {
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -435,25 +435,23 @@ describe("registry", () => {
 
 // Bidirectional repo↔team name-collision refusal (SPEC §16.1). The repo side:
 // adding/renaming a repo whose basename/nickname collides with an EXISTING team
-// is hard-refused. Both repos.json (process.env.HOME/.itsybitsy) and teams.json
-// (coordinator home) must share the test dir, so set BOTH HOME and the
+// is hard-refused. Both repos.json (userHome()/.itsybitsy) and teams.json
+// (coordinator home) must share the test dir, so set BOTH home seams and the
 // coordinator-home override at <tmp>/.itsybitsy — mirrors teams.test.ts.
 describe("registry team-name collision refusal", () => {
   let baseDir: string;
   let homeDir: string;
-  const savedHome = process.env.HOME;
-
   beforeEach(async () => {
     baseDir = await mkdtemp(join(tmpdir(), "ib-registry-teams-" + crypto.randomUUID() + "-"));
     homeDir = join(baseDir, ".itsybitsy");
     await mkdir(homeDir, { recursive: true });
-    process.env.HOME = baseDir;
+    setUserHome(baseDir);
     setCoordinatorHome(homeDir);
   });
 
   afterEach(async () => {
     resetCoordinatorHome();
-    process.env.HOME = savedHome;
+    resetUserHome();
     await rm(baseDir, { recursive: true, force: true });
   });
 

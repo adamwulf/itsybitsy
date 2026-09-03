@@ -3,6 +3,7 @@ import { mkdtemp, rm, mkdir, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
+import { setUserHome, resetUserHome } from "./home";
 import {
   type Team,
   type TeamsRegistry,
@@ -32,19 +33,18 @@ describe("teams registry", () => {
   // by pointing setCoordinatorHome at <tmp>/.itsybitsy.
   let baseDir: string;
   let homeDir: string;
-  const originalHome = process.env.HOME;
 
   beforeEach(async () => {
     baseDir = await mkdtemp(join(tmpdir(), "ib-teams-test-" + crypto.randomUUID() + "-"));
     homeDir = join(baseDir, ".itsybitsy");
     await mkdir(homeDir, { recursive: true });
-    process.env.HOME = baseDir;
+    setUserHome(baseDir);
     setCoordinatorHome(homeDir);
   });
 
   afterEach(async () => {
     resetCoordinatorHome();
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(baseDir, { recursive: true, force: true });
   });
 

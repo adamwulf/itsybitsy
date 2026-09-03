@@ -12,6 +12,7 @@ import {
   agySettingsPath,
 } from "./agy-config";
 import type { SessionContext } from "./hooks/session-start";
+import { setUserHome, resetUserHome } from "./home";
 
 // ── buildAgyHooksJson ────────────────────────────────────────────────────────
 
@@ -91,7 +92,7 @@ describe("AGY_WORKTREE_FILES", () => {
 
 describe("buildAgyRulesFile", () => {
   let tempDir: string;
-  let originalHome: string | undefined;
+  let fakeHome: string;
   let worktree: string;
 
   function ctxFor(overrides: Partial<SessionContext> = {}): SessionContext {
@@ -110,18 +111,16 @@ describe("buildAgyRulesFile", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "agy-rules-test-"));
-    originalHome = process.env.HOME;
-    const fakeHome = join(tempDir, "home");
+    fakeHome = join(tempDir, "home");
     await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
-    process.env.HOME = fakeHome;
+    setUserHome(fakeHome);
     await (await import("./agent-types")).ensureAgentTypesDir();
     worktree = join(tempDir, "wt");
     await mkdir(worktree, { recursive: true });
   });
 
   afterEach(async () => {
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -150,7 +149,7 @@ describe("buildAgyRulesFile", () => {
   });
 
   test("INLINES the user-global ~/.claude/CLAUDE.md when present", async () => {
-    const userClaudeDir = join(process.env.HOME!, ".claude");
+    const userClaudeDir = join(fakeHome, ".claude");
     await mkdir(userClaudeDir, { recursive: true });
     await Bun.write(join(userClaudeDir, "CLAUDE.md"), "Unique-user-marker-5502\n");
     const body = await buildAgyRulesFile(ctxFor());
@@ -160,7 +159,7 @@ describe("buildAgyRulesFile", () => {
 
   test("inlines BOTH CLAUDE.md files together", async () => {
     await Bun.write(join(worktree, "CLAUDE.md"), "proj-marker-A\n");
-    const userClaudeDir = join(process.env.HOME!, ".claude");
+    const userClaudeDir = join(fakeHome, ".claude");
     await mkdir(userClaudeDir, { recursive: true });
     await Bun.write(join(userClaudeDir, "CLAUDE.md"), "user-marker-B\n");
     const body = await buildAgyRulesFile(ctxFor());
@@ -176,16 +175,13 @@ describe("buildAgyRulesFile", () => {
 
 describe("agy trusted-workspace settings (temp HOME)", () => {
   let tempHome: string;
-  let originalHome: string | undefined;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "agy-trust-test-"));
-    originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
   });
   afterEach(async () => {
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 

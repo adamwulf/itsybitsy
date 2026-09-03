@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, rm } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 import { realpathSync } from "fs";
+import { setUserHome, resetUserHome } from "../home";
 import {
   resolveAgentFromCwd,
   SYSTEM_AGENT_ID,
@@ -14,18 +15,17 @@ import {
 describe("resolveAgentFromCwd — system coordinator identity", () => {
   let tempHome: string;
   let resolvedHome: string;
-  const originalHome = process.env.HOME;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "shared-cwd-"));
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
     // Pre-create ~/.itsybitsy/ so realpath resolves cleanly.
     await mkdir(join(tempHome, ".itsybitsy"), { recursive: true });
     resolvedHome = realpathSync(join(tempHome, ".itsybitsy"));
   });
 
   afterEach(async () => {
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 

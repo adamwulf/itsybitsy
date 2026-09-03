@@ -8,6 +8,7 @@ import { join } from "path";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { ensureAgentTypesDir } from "../agent-types";
 import { createTeam, addMember } from "../teams";
+import { setUserHome, resetUserHome } from "../home";
 
 /**
  * Per-process itsybitsy home for the whole file.
@@ -26,28 +27,24 @@ import { createTeam, addMember } from "../teams";
  * they now exercise the types this repo ships rather than the ones this laptop
  * has lying around.
  *
- * `process.env.HOME` is the half that matters most here, because both
- * `agent-types.ts` and `hooks/shared.ts` read it directly and neither honors the
- * `setCoordinatorHome` override. `setCoordinatorHome` is set alongside it so the
+ * `setUserHome` redirects the shared user-home seam used by `agent-types.ts`
+ * and `hooks/shared.ts`. `setCoordinatorHome` is set alongside it so the
  * outbox/teams paths resolve into the same tree instead of the real one.
  */
 let testHome: string;
-let realHome: string | undefined;
 
 beforeAll(async () => {
   testHome = mkdtempSync(join(tmpdir(), "ib-session-start-home-"));
-  realHome = process.env.HOME;
-  process.env.HOME = testHome;
+  setUserHome(testHome);
   setCoordinatorHome(join(testHome, ".itsybitsy"));
   // Populate <testHome>/.itsybitsy/agent-types/ with the embedded defaults.
-  // Reads process.env.HOME at call time, so it lands in the isolated home.
+  // Reads userHome() at call time, so it lands in the isolated home.
   await ensureAgentTypesDir();
 });
 
 afterAll(() => {
   resetCoordinatorHome();
-  if (realHome === undefined) delete process.env.HOME;
-  else process.env.HOME = realHome;
+  resetUserHome();
   rmSync(testHome, { recursive: true, force: true });
 });
 
@@ -462,7 +459,7 @@ describe("interpolateTemplate {{availableTypes}}", () => {
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-tpl-available-"));
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
     typesDir = join(tempHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
   });
@@ -473,7 +470,7 @@ describe("interpolateTemplate {{availableTypes}}", () => {
     // `beforeAll` installed the override, so it held the developer's REAL home —
     // restoring it here handed every later test in this file back to the real
     // ~/.itsybitsy and quietly defeated the isolation.
-    process.env.HOME = testHome;
+    setUserHome(testHome);
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -756,7 +753,7 @@ describe("hookSessionStart with @system", () => {
     }) as typeof process.stdout.write;
 
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-sys-hook-"));
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
     typesDir = join(tempHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
   });
@@ -765,7 +762,7 @@ describe("hookSessionStart with @system", () => {
     process.stdout.write = originalWrite;
     // Restore the file-wide isolated home — see the note on the equivalent
     // afterEach above for why a describe-body capture is the wrong target.
-    process.env.HOME = testHome;
+    setUserHome(testHome);
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -885,7 +882,7 @@ describe("session-start team awareness (§16.6)", () => {
     homeDir = join(baseDir, ".itsybitsy");
     typesDir = join(homeDir, "agent-types");
     await mkdir(typesDir, { recursive: true });
-    process.env.HOME = baseDir;
+    setUserHome(baseDir);
     setCoordinatorHome(homeDir);
   });
 
@@ -894,7 +891,7 @@ describe("session-start team awareness (§16.6)", () => {
     // the override and restoring a module-load-time HOME capture — either one
     // would drop the remaining tests back onto the real ~/.itsybitsy.
     setCoordinatorHome(join(testHome, ".itsybitsy"));
-    process.env.HOME = testHome;
+    setUserHome(testHome);
     await rm(baseDir, { recursive: true, force: true });
   });
 
@@ -1014,4 +1011,3 @@ describe("session-start team awareness (§16.6)", () => {
     expect(block).toBe("");
   });
 });
-

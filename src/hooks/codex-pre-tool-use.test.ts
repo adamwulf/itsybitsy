@@ -2,6 +2,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
+import { setUserHome, resetUserHome } from "../home";
 import {
   checkCodexPreToolUse,
   captureCodexSessionId,
@@ -155,13 +156,11 @@ describe("checkCodexPreToolUse — allow/deny matcher applies to Bash AND apply_
 
 describe("hookCodexPreToolUse — codex JSON contract (gate (d))", () => {
   let tempHome: string;
-  let originalHome: string | undefined;
   let agentDir: string;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "codex-hook-d-"));
-    originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
     // Populate a minimal agent-types dir so loadMergedAgentTypePermissions
     // can return a deterministic allow list.
     const typesDir = join(tempHome, ".itsybitsy", "agent-types");
@@ -194,7 +193,7 @@ describe("hookCodexPreToolUse — codex JSON contract (gate (d))", () => {
   });
 
   afterEach(async () => {
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -496,13 +495,11 @@ describe("captureCodexSessionId — idempotent session id capture", () => {
 // ── HIGH 3 from Phase 4 review: dry-run must actually exercise the handler ──
 describe("hookCodexPreToolUseDryRun — exercises real handler with synthetic payload", () => {
   let tempHome: string;
-  let originalHome: string | undefined;
   let agentDir: string;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "codex-hook-dryrun-"));
-    originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
     const typesDir = join(tempHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
     await writeFile(
@@ -529,7 +526,7 @@ describe("hookCodexPreToolUseDryRun — exercises real handler with synthetic pa
   });
 
   afterEach(async () => {
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 

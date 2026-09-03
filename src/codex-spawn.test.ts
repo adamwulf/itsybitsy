@@ -21,6 +21,7 @@ import {
   buildSkillsSection,
 } from "./codex-spawn";
 import { CODEX_REGISTERED_EVENTS } from "./codex-config";
+import { setUserHome, resetUserHome } from "./home";
 
 describe("buildCodexStartContent — launch line", () => {
   const baseInput = () => ({
@@ -584,25 +585,20 @@ describe("resolveIbBinaryPath", () => {
 
 describe("buildCodexAgentsMd / writeCodexAgentsMd", () => {
   let tempDir: string;
-  let originalHome: string | undefined;
+  let fakeHome: string;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "codex-agents-md-test-"));
     // Provide a fake HOME so generateInstructions() can resolve agent-types
     // without polluting the developer's real ~/.itsybitsy.
-    originalHome = process.env.HOME;
-    const fakeHome = join(tempDir, "home");
+    fakeHome = join(tempDir, "home");
     await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
-    process.env.HOME = fakeHome;
+    setUserHome(fakeHome);
     await (await import("./agent-types")).ensureAgentTypesDir();
   });
 
   afterEach(async () => {
-    if (originalHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = originalHome;
-    }
+    resetUserHome();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -725,7 +721,6 @@ describe("buildCodexAgentsMd / writeCodexAgentsMd", () => {
 
   test("user-global ~/.claude/CLAUDE.md is inlined when present (codex @ import can't reach outside the project root)", async () => {
     const { buildCodexAgentsMd } = await import("./codex-spawn");
-    const fakeHome = process.env.HOME!;
     await mkdir(join(fakeHome, ".claude"), { recursive: true });
     await Bun.write(
       join(fakeHome, ".claude", "CLAUDE.md"),
@@ -929,11 +924,10 @@ describe("buildSkillsSection — skills catalog", () => {
     // buildCodexAgentsMd reads ~/.claude/skills via the default param, so point
     // HOME at a temp dir holding a single skill. generateInstructions() also
     // resolves agent-types from HOME, so build the full fake-home layout.
-    const originalHome = process.env.HOME;
     try {
       const fakeHome = join(tempDir, "home");
       await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
-      process.env.HOME = fakeHome;
+      setUserHome(fakeHome);
       await (await import("./agent-types")).ensureAgentTypesDir();
       await writeSkill(
         join(fakeHome, ".claude", "skills"),
@@ -956,22 +950,17 @@ describe("buildSkillsSection — skills catalog", () => {
       expect(body).toContain("### demo");
       expect(body).toContain("description: Demo skill");
     } finally {
-      if (originalHome === undefined) {
-        delete process.env.HOME;
-      } else {
-        process.env.HOME = originalHome;
-      }
+      resetUserHome();
     }
   });
 
   test("buildCodexAgentsMd integration: no Skills header when the skills dir is absent", async () => {
     const { buildCodexAgentsMd } = await import("./codex-spawn");
-    const originalHome = process.env.HOME;
     try {
       // Fake home WITHOUT a .claude/skills dir.
       const fakeHome = join(tempDir, "home-noskills");
       await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
-      process.env.HOME = fakeHome;
+      setUserHome(fakeHome);
       await (await import("./agent-types")).ensureAgentTypesDir();
 
       const ctx = {
@@ -987,11 +976,7 @@ describe("buildSkillsSection — skills catalog", () => {
       const body = await buildCodexAgentsMd(ctx);
       expect(body).not.toContain("## Skills (read-on-demand workflow guides)");
     } finally {
-      if (originalHome === undefined) {
-        delete process.env.HOME;
-      } else {
-        process.env.HOME = originalHome;
-      }
+      resetUserHome();
     }
   });
 });

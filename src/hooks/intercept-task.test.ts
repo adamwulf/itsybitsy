@@ -5,6 +5,7 @@ import { join } from "path";
 import { processTaskIntercept } from "./intercept-task";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { ensureAgentTypesDir } from "../agent-types";
+import { setUserHome, resetUserHome } from "../home";
 
 /**
  * Per-process itsybitsy home for the whole file.
@@ -22,20 +23,17 @@ import { ensureAgentTypesDir } from "../agent-types";
  * `~/.itsybitsy/agent-types/` happens to contain.
  */
 let testHome: string;
-let realHome: string | undefined;
 
 beforeAll(async () => {
   testHome = mkdtempSync(join(tmpdir(), "ib-intercept-task-home-"));
-  realHome = process.env.HOME;
-  process.env.HOME = testHome;
+  setUserHome(testHome);
   setCoordinatorHome(join(testHome, ".itsybitsy"));
   await ensureAgentTypesDir();
 });
 
 afterAll(() => {
   resetCoordinatorHome();
-  if (realHome === undefined) delete process.env.HOME;
-  else process.env.HOME = realHome;
+  resetUserHome();
   rmSync(testHome, { recursive: true, force: true });
 });
 
@@ -1594,23 +1592,20 @@ describe("agent types", () => {
 
 describe("@system caller", () => {
   let tempHome: string;
-  let originalHome: string | undefined;
   let coordHome: string;
 
   beforeEach(async () => {
     const fs = await import("fs/promises");
     const { tmpdir } = await import("os");
     const { join } = await import("path");
-    originalHome = process.env.HOME;
     tempHome = await fs.mkdtemp(join(tmpdir(), "intercept-system-"));
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
     coordHome = join(tempHome, ".itsybitsy");
     await fs.mkdir(coordHome, { recursive: true });
   });
 
   afterEach(async () => {
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    setUserHome(testHome);
     const fs = await import("fs/promises");
     await fs.rm(tempHome, { recursive: true, force: true });
   });

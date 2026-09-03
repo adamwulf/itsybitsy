@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm, readFile } from "fs/promises";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
+import { setUserHome, resetUserHome } from "../home";
 
 /**
  * Per-process itsybitsy home for the whole file.
@@ -19,19 +20,16 @@ import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
  * THIS home, so isolation survives that block instead of being reverted by it.
  */
 let testHome: string;
-let realHome: string | undefined;
 
 beforeAll(() => {
   testHome = mkdtempSync(join(tmpdir(), "ib-permission-denied-home-"));
-  realHome = process.env.HOME;
-  process.env.HOME = testHome;
+  setUserHome(testHome);
   setCoordinatorHome(join(testHome, ".itsybitsy"));
 });
 
 afterAll(() => {
   resetCoordinatorHome();
-  if (realHome === undefined) delete process.env.HOME;
-  else process.env.HOME = realHome;
+  resetUserHome();
   rmSync(testHome, { recursive: true, force: true });
 });
 
@@ -76,15 +74,13 @@ describe("hookPermissionDenied", () => {
 
 describe("hookPermissionDenied with @system", () => {
   let tempHome: string;
-  let originalHome: string | undefined;
   let originalCwd: string;
   let coordHome: string;
 
   beforeEach(async () => {
-    originalHome = process.env.HOME;
     originalCwd = process.cwd();
     tempHome = await mkdtemp(join(tmpdir(), "perm-denied-system-"));
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
     coordHome = join(tempHome, ".itsybitsy");
     await mkdir(coordHome, { recursive: true });
     process.chdir(coordHome);
@@ -92,8 +88,7 @@ describe("hookPermissionDenied with @system", () => {
 
   afterEach(async () => {
     process.chdir(originalCwd);
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    setUserHome(testHome);
     await rm(tempHome, { recursive: true, force: true });
   });
 

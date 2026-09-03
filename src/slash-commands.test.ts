@@ -2,6 +2,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir, readdir } from "fs/promises";
 import { tmpdir } from "os";
+import { setUserHome, resetUserHome } from "./home";
 import {
   EMBEDDED_SLASH_COMMANDS,
   ensureSlashCommands,
@@ -10,20 +11,14 @@ import {
 
 describe("slash-commands", () => {
   let tempHome: string;
-  let originalHome: string | undefined;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "slash-commands-test-"));
-    originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
   });
 
   afterEach(async () => {
-    if (originalHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = originalHome;
-    }
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm, readFile } from "fs/promises";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
+import { setUserHome, resetUserHome } from "../home";
 
 /**
  * Per-process itsybitsy home for the whole file.
@@ -16,24 +17,21 @@ import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
  * it is one production edit away from becoming a write. Pointing HOME at a
  * per-process temp dir removes the dependency outright.
  *
- * `setCoordinatorHome` is set alongside HOME so the two resolvers cannot
+ * `setCoordinatorHome` is set alongside the user-home seam so the two resolvers cannot
  * disagree: `coordinator.ts` honors the override while `hooks/shared.ts`
- * deliberately does not, and reads only `process.env.HOME`.
+ * resolves through `userHome()`.
  */
 let testHome: string;
-let realHome: string | undefined;
 
 beforeAll(() => {
   testHome = mkdtempSync(join(tmpdir(), "ib-mark-running-home-"));
-  realHome = process.env.HOME;
-  process.env.HOME = testHome;
+  setUserHome(testHome);
   setCoordinatorHome(join(testHome, ".itsybitsy"));
 });
 
 afterAll(() => {
   resetCoordinatorHome();
-  if (realHome === undefined) delete process.env.HOME;
-  else process.env.HOME = realHome;
+  resetUserHome();
   rmSync(testHome, { recursive: true, force: true });
 });
 

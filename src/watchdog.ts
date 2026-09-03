@@ -43,6 +43,7 @@ import { OUTBOX_FILENAME, agentOutboxDir } from "./outbox";
 import { parseModel } from "./agent-cli";
 import type { AgentCli } from "./agent-cli";
 import { AGY_HEARTBEAT_FILENAME } from "./hooks/agy-pre-invocation";
+import { classifyClaudeStartupPrompt } from "./coordinator";
 
 /**
  * Phase 6: classify an agent's CLI for watchdog branching.
@@ -459,6 +460,32 @@ async function sendTmuxEnter(tmuxSession: string): Promise<boolean> {
   try {
     const proc = spawnCtx.runner(
       ["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "Enter"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const exitCode = await proc.exited;
+    return exitCode === 0;
+  } catch { /* expected: tmux not running or session gone */
+    return false;
+  }
+}
+
+/**
+ * Send a startup-prompt accept sequence (e.g. `Down Enter`, `Up Up Enter`) to a
+ * tmux session in ONE `send-keys` call. Bursting the whole sequence together is
+ * deliberate: a navigation key and its trailing Enter can then never straddle
+ * Claude's ~150ms input-refusal window — the burst is either fully refused
+ * (grace still active → the poll loop retries) or fully applied, never a lone
+ * Enter landing on the default "No, exit". Unlike the bare-ESC compact cancel,
+ * arrow keys are unambiguous CSI sequences and are NOT coalesced when bursted.
+ */
+async function sendTmuxKeys(tmuxSession: string, keys: string[]): Promise<boolean> {
+  if (!isValidTmuxSession(tmuxSession)) {
+    console.error(`[watchdog] Invalid tmux session name: ${tmuxSession}`);
+    return false;
+  }
+  try {
+    const proc = spawnCtx.runner(
+      ["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), ...keys],
       { stdout: "pipe", stderr: "pipe" },
     );
     const exitCode = await proc.exited;
@@ -1664,28 +1691,37 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       // Tmux session exists — reset grace period
       tmuxGoneSince = null;
 
-      // Auto-accept permissions prompts (workspace trust, external imports, MCP servers).
+      // Auto-accept startup permission prompts (workspace trust, external
+      // CLAUDE.md imports, new MCP servers) with the binary-confirmed 2.1.259
+      // sequences (Down,Enter for trust/imports; Up,Up,Enter for a single MCP;
+      // N Downs then Enter for the multi-MCP checklist; a bare Enter for the
+      // legacy layouts) — see classifyClaudeStartupPrompt.
       // Phase 6: claude-only — codex never surfaces these modals (`-a never` +
-      // hooks pre-resolve every permission decision), so the regex would never
-      // match in practice. agy has its OWN fallback answers below (trust card +
-      // survey) with different strings, so it's excluded here too. Gating on cli
-      // is explicit + skips the regex pass.
-      if (agentCli === "claude" && /enter to confirm/i.test(output)) {
-        if (
-          /trust/i.test(output) ||
-          /Allow external CLAUDE\.md file imports/i.test(output) ||
-          /New MCP server found/i.test(output) ||
-          /\d+ new MCP servers? found/i.test(output)
-        ) {
-          await logAgent(agentDir, "[watchdog] Detected permissions prompt — sending Enter to accept");
-          // Hold the session-write mutex around the bare Enter so it can't
-          // interleave with a concurrent (e.g. fs.watch-driven) outbox drain —
-          // in EITHER direction: a drain in flight blocks us until it finishes,
-          // and a drain that wants to start blocks until we finish.
-          await runSessionExclusive(agentId, () => sendTmuxEnter(tmuxSession));
-          await sleepFn(POLL_INTERVAL_MS);
-          continue;
-        }
+      // hooks pre-resolve every permission decision). agy has its OWN fallback
+      // answers below (trust card + survey) with different strings, so it is
+      // excluded here too. Gating on cli is explicit + skips the classify pass.
+      if (agentCli === "claude" && classifyClaudeStartupPrompt(output)) {
+        // Hold the session-write mutex around the accept so it can't interleave
+        // with a concurrent (e.g. fs.watch-driven) outbox drain — in EITHER
+        // direction: a drain in flight blocks us until it finishes, and a drain
+        // that wants to start blocks until we finish. RE-CAPTURE + RE-CLASSIFY
+        // under the mutex so a navigation sequence is keyed to the TRUE current
+        // pane, never a stale pre-mutex snapshot a drain may have superseded —
+        // a repeated poll must not fire a second Down/Up into an already
+        // dismissed prompt.
+        await runSessionExclusive(agentId, async () => {
+          const recap = await captureTmuxResultFn(tmuxSession);
+          const cur = recap.status === "ok" ? recap.output : null;
+          const decision = cur === null ? null : classifyClaudeStartupPrompt(cur);
+          if (!decision) {
+            await logAgent(agentDir, "[watchdog] startup permission prompt cleared before accept (stale capture) — sending nothing");
+            return;
+          }
+          await logAgent(agentDir, `[watchdog] Detected ${decision.kind} startup permission prompt — sending [${decision.keys.join(" ")}] to accept`);
+          await sendTmuxKeys(tmuxSession, decision.keys);
+        });
+        await sleepFn(POLL_INTERVAL_MS);
+        continue;
       }
 
       // agy fallback answers (D10). The trust card is normally suppressed by the

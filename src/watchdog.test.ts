@@ -2984,7 +2984,7 @@ describe("runPerAgentWatchdog", () => {
     expect(enterCmds.length).toBeGreaterThanOrEqual(1);
   });
 
-  test("auto-accepts multi-MCP server permissions prompt", async () => {
+  test("auto-accepts the NEW multi-MCP checklist with N Downs then Enter", async () => {
     const sentKeys: string[][] = [];
     setWatchdogSpawnRunner((cmd, _opts) => {
       sentKeys.push(cmd);
@@ -2995,9 +2995,10 @@ describe("runPerAgentWatchdog", () => {
     setPerAgentCaptureTmux(async (_session: string) => {
       captureCalls++;
       if (captureCalls <= 2) {
-        // First two captures: multi-MCP checklist prompt visible
+        // First two captures: the 2.1.259 multi-MCP checklist (all preselected)
+        // with the separate "Enable selected" submit button.
         return [
-          "3 new MCP servers found in .mcp.json",
+          "3 new MCP servers found in this project",
           "Select any you wish to enable.",
           "",
           "MCP servers may execute code or access system resources. All tool calls require approval.",
@@ -3006,7 +3007,7 @@ describe("runPerAgentWatchdog", () => {
           "    [✔] activepieces",
           "    [✔] essential-mcp",
           "",
-          " Space to select · Enter to confirm · Esc to reject all",
+          "  Enable selected",
         ].join("\n");
       }
       // Third capture: prompt dismissed, show logo
@@ -3023,23 +3024,29 @@ describe("runPerAgentWatchdog", () => {
 
     await runPerAgentWatchdog("agent-test1", "/tmp/test");
 
-    const enterCmds = sentKeys.filter(
-      (cmd) => cmd.includes("send-keys") && cmd.includes("Enter"),
-    );
-    expect(enterCmds.length).toBeGreaterThanOrEqual(1);
+    // Exactly ONE send-keys: 3 Downs (past the 3 preselected options onto the
+    // "Enable selected" submit) then Enter, all in a single burst.
+    const sendKeys = sentKeys.filter((c) => c.includes("send-keys"));
+    expect(sendKeys.length).toBe(1);
+    const cmd = sendKeys[0]!;
+    const downs = cmd.filter((a) => a === "Down").length;
+    expect(downs).toBe(3);
+    expect(cmd[cmd.length - 1]).toBe("Enter");
   });
 
-  test("auto-accepts workspace trust prompt", async () => {
+  test("auto-accepts a LEGACY workspace trust prompt with a bare Enter", async () => {
     const sentKeys: string[][] = [];
     setWatchdogSpawnRunner((cmd, _opts) => {
       sentKeys.push(cmd);
       return { stdout: new ReadableStream(), stderr: new ReadableStream(), exited: Promise.resolve(0) } as any;
     });
 
+    // Two prompt captures: the tick capture AND the under-mutex re-capture both
+    // see the prompt, then the logo confirms acceptance.
     let captureCalls = 0;
     setPerAgentCaptureTmux(async (_session: string) => {
       captureCalls++;
-      if (captureCalls <= 1) {
+      if (captureCalls <= 2) {
         return "Do you trust the files in this folder?\n\nEnter to confirm · Esc to cancel";
       }
       return "Claude Code v1.0.0\n[USER TASK]";
@@ -3059,6 +3066,48 @@ describe("runPerAgentWatchdog", () => {
       (cmd) => cmd.includes("send-keys") && cmd.includes("Enter"),
     );
     expect(enterCmds.length).toBeGreaterThanOrEqual(1);
+    // Legacy layout: a BARE Enter, never navigation keys.
+    expect(enterCmds.every((c) => !c.includes("Down") && !c.includes("Up"))).toBe(true);
+  });
+
+  test("auto-accepts the NEW 2.1.259 trust prompt with Down then Enter", async () => {
+    const sentKeys: string[][] = [];
+    setWatchdogSpawnRunner((cmd, _opts) => {
+      sentKeys.push(cmd);
+      return { stdout: new ReadableStream(), stderr: new ReadableStream(), exited: Promise.resolve(0) } as any;
+    });
+
+    const newTrust = [
+      "Do you trust the files in this folder?",
+      "  ❯ No, exit",
+      "    Yes, I trust this folder",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    let captureCalls = 0;
+    setPerAgentCaptureTmux(async (_session: string) => {
+      captureCalls++;
+      if (captureCalls <= 2) return newTrust;
+      return "Claude Code v1.0.0\n[USER TASK]";
+    });
+
+    let existsChecks = 0;
+    setPerAgentExistsSync((_path: string) => {
+      existsChecks++;
+      return existsChecks <= 2;
+    });
+
+    setPerAgentReadState(async (_dir: string) => undefined);
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+
+    // Exactly ONE send-keys, and it is Down then Enter in a single burst so the
+    // keys can never straddle the ~150ms input-refusal window.
+    const sendKeys = sentKeys.filter((c) => c.includes("send-keys"));
+    expect(sendKeys.length).toBe(1);
+    const cmd = sendKeys[0]!;
+    expect(cmd.includes("Down")).toBe(true);
+    expect(cmd.includes("Enter")).toBe(true);
+    expect(cmd.indexOf("Down")).toBeLessThan(cmd.indexOf("Enter"));
   });
 
   test("exits when worktree directory is removed", async () => {

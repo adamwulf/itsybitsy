@@ -29,6 +29,7 @@ import {
   COORDINATOR_RESTART_COMMANDS,
   isPermissionPrompt,
   isCoordinatorAutoAcceptablePrompt,
+  classifyClaudeStartupPrompt,
   autoAcceptCoordinatorPrompt,
   pollSystemCoordinator,
   classifyCoordinatorState,
@@ -2183,7 +2184,112 @@ describe("isCoordinatorAutoAcceptablePrompt (mirrors watchdog gating)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// autoAcceptCoordinatorPrompt (sends the bare Enter under the outbox lock)
+// classifyClaudeStartupPrompt (shared pure detector + accept-sequence resolver)
+// ---------------------------------------------------------------------------
+describe("classifyClaudeStartupPrompt", () => {
+  // --- NEW 2.1.259 layouts (navigation required) ---
+  test("NEW workspace trust → Down,Enter (bare Enter would exit)", () => {
+    const pane = [
+      "Do you trust the files in this folder?",
+      "  ❯ No, exit",
+      "    Yes, I trust this folder",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(classifyClaudeStartupPrompt(pane)).toEqual({ kind: "trust", keys: ["Down", "Enter"] });
+  });
+
+  test("NEW external CLAUDE.md imports → Down,Enter", () => {
+    const pane = [
+      "Allow external CLAUDE.md file imports?",
+      "  ❯ No, disable external imports",
+      "    Yes, allow external imports",
+      "Enter to confirm · Esc to reject",
+    ].join("\n");
+    expect(classifyClaudeStartupPrompt(pane)).toEqual({ kind: "external-import", keys: ["Down", "Enter"] });
+  });
+
+  test("NEW single MCP → Up,Up,Enter (focus defaults to 'no', the last option)", () => {
+    const pane = [
+      "New MCP server found in this project: activepieces",
+      "  1. Use this MCP server",
+      "  2. Use this and all future MCP servers in this project",
+      "  ❯ 3. Continue without using this MCP server",
+    ].join("\n");
+    expect(classifyClaudeStartupPrompt(pane)).toEqual({ kind: "mcp-single", keys: ["Up", "Up", "Enter"] });
+  });
+
+  test("NEW multi MCP → N Downs then Enter (reaches the 'Enable selected' submit)", () => {
+    const pane = [
+      "3 new MCP servers found in this project",
+      "Select any you wish to enable.",
+      "  ❯ [✔] granola",
+      "    [✔] activepieces",
+      "    [✔] essential-mcp",
+      "  Enable selected",
+    ].join("\n");
+    expect(classifyClaudeStartupPrompt(pane)).toEqual({
+      kind: "mcp-multi",
+      keys: ["Down", "Down", "Down", "Enter"],
+    });
+  });
+
+  // --- LEGACY layouts (bare Enter accepts) ---
+  test("LEGACY trust → bare Enter", () => {
+    const pane = "Do you trust the files in this folder?\n\nEnter to confirm · Esc to cancel";
+    expect(classifyClaudeStartupPrompt(pane)).toEqual({ kind: "legacy", keys: ["Enter"] });
+  });
+
+  test("LEGACY external import → bare Enter", () => {
+    const pane = "Allow external CLAUDE.md file imports?\n\nEnter to confirm · Esc to reject";
+    expect(classifyClaudeStartupPrompt(pane)).toEqual({ kind: "legacy", keys: ["Enter"] });
+  });
+
+  test("LEGACY single MCP → bare Enter", () => {
+    const pane = "New MCP server found in .mcp.json: x\n  ❯ 1. Yes\nEnter to confirm · Esc to cancel";
+    expect(classifyClaudeStartupPrompt(pane)).toEqual({ kind: "legacy", keys: ["Enter"] });
+  });
+
+  test("LEGACY multi MCP (no 'Enable selected') → bare Enter", () => {
+    const pane = "3 new MCP servers found in .mcp.json\n Space to select · Enter to confirm · Esc to reject all";
+    expect(classifyClaudeStartupPrompt(pane)).toEqual({ kind: "legacy", keys: ["Enter"] });
+  });
+
+  // --- NEVER auto-accepted ---
+  test("generic tool-permission prompt → null", () => {
+    const pane = ["Allow Read to read this file?", "  ❯ 1. Yes", "    2. No", "Enter to confirm · Esc to reject"].join("\n");
+    expect(classifyClaudeStartupPrompt(pane)).toBeNull();
+  });
+
+  test("Bash-command permission prompt → null", () => {
+    const pane = "Allow Bash to run `rm -rf build`?\nEnter to confirm · Esc to reject";
+    expect(classifyClaudeStartupPrompt(pane)).toBeNull();
+  });
+
+  test("prose containing 'trust' without a confirm line → null", () => {
+    expect(classifyClaudeStartupPrompt("I trust that your build passed.\nDone.")).toBeNull();
+  });
+
+  test("ready pane → null", () => {
+    expect(classifyClaudeStartupPrompt("Claude Code v1.0.0\n[USER TASK]")).toBeNull();
+  });
+
+  test("agy trust card ('enter Confirm', no 'to') is NOT matched as new trust → null", () => {
+    // The agy card shares the choice strings but its guide reads "enter Confirm"
+    // (no "to"), and agy's default is already on Yes — it must keep its own bare
+    // Enter path, never the Claude Down,Enter navigation.
+    const pane = [
+      "Accessing workspace:",
+      "Do you trust the contents of this project?",
+      "> Yes, I trust this folder",
+      "  No, exit",
+      "  ↑/↓ Navigate · enter Confirm",
+    ].join("\n");
+    expect(classifyClaudeStartupPrompt(pane)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// autoAcceptCoordinatorPrompt (accepts the prompt under the outbox lock)
 // ---------------------------------------------------------------------------
 describe("autoAcceptCoordinatorPrompt", () => {
   let tmpDir: string;
@@ -2198,21 +2304,34 @@ describe("autoAcceptCoordinatorPrompt", () => {
 
   afterEach(async () => {
     coordinatorSpawnCtx.reset();
+    tmuxSpawnCtx.reset();
     resetCoordinatorHome();
     resetWatchLogPath();
     await rm(tmpDir, { recursive: true, force: true });
   });
 
-  test("sends a bare Enter to the coordinator session on a trust prompt", async () => {
+  /** Stub the under-lock RE-CAPTURE (tmuxSpawnCtx capture-pane) to a fixed pane
+   *  and record every coordinatorSpawnCtx send. Returns the recorded commands. */
+  function wire(recapturePane: string): string[][] {
     const cmds: string[][] = [];
+    tmuxSpawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd[0] === "tmux" && cmd[1] === "capture-pane") {
+        return { stdout: mockStream(recapturePane), stderr: emptyStream(), exited: Promise.resolve(0) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
     coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
       cmds.push([...cmd]);
       return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
     });
+    return cmds;
+  }
 
-    const sent = await autoAcceptCoordinatorPrompt(
-      "Do you trust the files in this folder?\n\nEnter to confirm · Esc to cancel",
-    );
+  test("sends a bare Enter to the coordinator session on a LEGACY trust prompt", async () => {
+    const pane = "Do you trust the files in this folder?\n\nEnter to confirm · Esc to cancel";
+    const cmds = wire(pane);
+
+    const sent = await autoAcceptCoordinatorPrompt(pane);
     expect(sent).toBe(true);
     const enterCmds = cmds.filter(
       (c) =>
@@ -2221,49 +2340,82 @@ describe("autoAcceptCoordinatorPrompt", () => {
         c.some((a) => a.includes(IB_COORDINATOR_SESSION)),
     );
     expect(enterCmds.length).toBe(1);
-    // A bare Enter — never a literal (`-l`) paste.
+    // A bare Enter — never a literal (`-l`) paste, and never navigation keys.
     expect(enterCmds[0]!.includes("-l")).toBe(false);
+    expect(enterCmds[0]!.includes("Down")).toBe(false);
+    expect(enterCmds[0]!.includes("Up")).toBe(false);
   });
 
-  test("does NOT send Enter on a generic tool-permission prompt", async () => {
-    const cmds: string[][] = [];
-    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
-      cmds.push([...cmd]);
-      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
-    });
+  test("sends Down then Enter on the NEW 2.1.259 trust prompt", async () => {
+    const pane = [
+      "Do you trust the files in this folder?",
+      "",
+      "  ❯ No, exit",
+      "    Yes, I trust this folder",
+      "",
+      "Enter to confirm · Esc to cancel",
+    ].join("\n");
+    const cmds = wire(pane);
+
+    const sent = await autoAcceptCoordinatorPrompt(pane);
+    expect(sent).toBe(true);
+    const sendKeys = cmds.filter((c) => c.includes("send-keys"));
+    // The whole accept sequence goes out in ONE send-keys call: Down then Enter.
+    expect(sendKeys.length).toBe(1);
+    const cmd = sendKeys[0]!;
+    expect(cmd.includes("Down")).toBe(true);
+    expect(cmd.includes("Enter")).toBe(true);
+    expect(cmd.indexOf("Down")).toBeLessThan(cmd.indexOf("Enter"));
+    expect(cmd.includes("-l")).toBe(false);
+  });
+
+  test("does NOT send anything on a generic tool-permission prompt", async () => {
+    const cmds = wire("");
 
     const sent = await autoAcceptCoordinatorPrompt([
       "Allow Bash to run `ls`?",
       "  Enter to confirm · Esc to reject",
     ].join("\n"));
     expect(sent).toBe(false);
-    const enterCmds = cmds.filter((c) => c.includes("send-keys") && c.includes("Enter"));
-    expect(enterCmds.length).toBe(0);
+    const sendKeys = cmds.filter((c) => c.includes("send-keys"));
+    expect(sendKeys.length).toBe(0);
   });
 
-  test("does NOT send Enter when the delivery lock cannot be acquired", async () => {
+  test("re-capture clearing before the send injects nothing (stale-scrollback guard)", async () => {
+    // Caller's snapshot shows a trust prompt, but by the time the lock is held
+    // the pane has moved on to the running session — send NOTHING (a stale
+    // navigation Down/Enter into a live session is exactly what this guards).
+    const cmds = wire("Claude Code v1.0.0\n[USER TASK]\nready");
+
+    const sent = await autoAcceptCoordinatorPrompt(
+      "Do you trust the files in this folder?\n\nEnter to confirm · Esc to cancel",
+    );
+    expect(sent).toBe(false);
+    const sendKeys = cmds.filter((c) => c.includes("send-keys"));
+    expect(sendKeys.length).toBe(0);
+    const log = await readFile(join(tmpDir, "watch.log"), "utf-8");
+    expect(log).toContain("permission prompt cleared before accept (stale capture)");
+  });
+
+  test("does NOT send anything when the delivery lock cannot be acquired", async () => {
     // Point the coordinator home at a NON-EXISTENT dir so acquireOutboxLock's
     // O_EXCL open fails with ENOENT (non-retryable) → returns null immediately.
     // This deterministically exercises the same null-lock branch a real
     // `ib send @system` drain holding the lock >5s would hit — without waiting.
     // The watch log stays at the existing tmpDir so the skip line is readable.
     setCoordinatorHome(join(tmpDir, "does-not-exist"));
-    const cmds: string[][] = [];
-    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
-      cmds.push([...cmd]);
-      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
-    });
+    const cmds = wire("");
 
     const sent = await autoAcceptCoordinatorPrompt(
       "Do you trust the files in this folder?\n\nEnter to confirm · Esc to cancel",
     );
-    // Prompt matched, but the lock was unavailable → no Enter, returns false.
+    // Prompt matched, but the lock was unavailable → no send, returns false.
     expect(sent).toBe(false);
-    const enterCmds = cmds.filter((c) => c.includes("send-keys") && c.includes("Enter"));
-    expect(enterCmds.length).toBe(0);
+    const sendKeys = cmds.filter((c) => c.includes("send-keys"));
+    expect(sendKeys.length).toBe(0);
     // A skipped-will-retry line is logged so the dropped tick is diagnosable.
     const log = await readFile(join(tmpDir, "watch.log"), "utf-8");
-    expect(log).toContain("could not acquire delivery lock — skipping Enter");
+    expect(log).toContain("could not acquire delivery lock — skipping accept");
   });
 });
 

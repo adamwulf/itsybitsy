@@ -340,11 +340,119 @@ export function isPermissionPrompt(output: string): boolean {
 }
 
 /**
+ * The tmux key sequence that ACCEPTS a Claude Code startup permission prompt,
+ * plus which prompt was recognised. Shared by the coordinator auto-accept, the
+ * per-agent watchdog, and the resume / new-agent trust helpers so all four
+ * apply the SAME binary-confirmed sequences.
+ */
+export interface ClaudeStartupPromptAccept {
+  /** Which prompt was recognised. `legacy` = the pre-2.1.259 layout, where the
+   *  accept option is already the default and a bare Enter accepts. */
+  kind: "trust" | "external-import" | "mcp-single" | "mcp-multi" | "legacy";
+  /** tmux key names to send, in order, to accept — e.g. ["Down","Enter"]. */
+  keys: string[];
+}
+
+/**
+ * Upper bound on the "N new MCP servers" checklist navigation. A realistic N is
+ * a handful; a wildly larger parsed value is treated as unrecognised (returns
+ * null) rather than injecting an absurd run of Down keys.
+ */
+const MAX_MCP_MULTI_OPTIONS = 25;
+
+/**
+ * Classify a captured Claude Code pane and return the exact tmux key sequence
+ * that ACCEPTS the startup permission prompt shown (workspace trust, external
+ * CLAUDE.md imports, or new MCP server(s)), or null when the pane shows no such
+ * auto-acceptable startup prompt.
+ *
+ * Every sequence is binary-confirmed against Claude Code 2.1.259's bundled UI:
+ *
+ *  - Workspace trust and external-import both render the shared confirmation
+ *    component with `cancelFirst:true` + `focus:"cancel"`, which builds options
+ *    as `[cancel, confirm]` and puts the cursor on the cancel option. A bare
+ *    Enter therefore picks the CANCEL action — for trust that is "No, exit",
+ *    which QUITS Claude. `Down,Enter` moves to and selects the confirm action.
+ *  - The single new-MCP prompt is a select of `[Use this MCP server=yes, Use
+ *    this and all future...=yes_all, Continue without...=no]` with
+ *    `defaultFocusValue:"no"` (the LAST option). `Up,Up,Enter` selects only the
+ *    first option ("yes" — enable just this server).
+ *  - The multi new-MCP prompt is a checklist of N preselected servers plus a
+ *    separate "Enable selected" submit button; initial focus is the first
+ *    option and Down from the last option moves focus onto the submit button, so
+ *    N Downs then Enter submits with every server still selected.
+ *
+ * The NEW layouts are matched by their distinctive visible strings BEFORE the
+ * legacy fallback, so a 2.1.259 prompt never falls through to a bare Enter. A
+ * generic tool / Bash permission prompt matches none of these and returns null
+ * — it must never be auto-accepted (permission-escalation vector). Detection
+ * fails SAFE: if a trust prompt is present but not fully recognised, the result
+ * is null (send nothing and retry) rather than a bare Enter that would exit.
+ *
+ * NOTE: the agy trust card also shows "Yes, I trust this folder" / "No, exit"
+ * but its guide reads "enter Confirm" (no "to"), so requiring the literal
+ * "Enter to confirm" excludes it here — agy trust is handled on its own path.
+ */
+export function classifyClaudeStartupPrompt(output: string): ClaudeStartupPromptAccept | null {
+  // NEW single-MCP: distinctive option labels; focus on the last option ("no").
+  if (
+    /Use this MCP server/.test(output) &&
+    /Continue without using this MCP server/.test(output)
+  ) {
+    return { kind: "mcp-single", keys: ["Up", "Up", "Enter"] };
+  }
+
+  // NEW multi-MCP: "N new MCP servers found" + an "Enable selected" submit.
+  const multi = output.match(/(\d+)\s+new MCP servers?\s+found/i);
+  if (multi && /Enable selected/.test(output)) {
+    const n = parseInt(multi[1]!, 10);
+    if (Number.isFinite(n) && n > 0 && n <= MAX_MCP_MULTI_OPTIONS) {
+      return { kind: "mcp-multi", keys: [...Array<string>(n).fill("Down"), "Enter"] };
+    }
+  }
+
+  // NEW workspace trust: both new choices AND the "Enter to confirm" guide.
+  if (
+    /Yes, I trust this folder/.test(output) &&
+    /No, exit/.test(output) &&
+    /enter to confirm/i.test(output)
+  ) {
+    return { kind: "trust", keys: ["Down", "Enter"] };
+  }
+
+  // NEW external CLAUDE.md imports: distinctive Yes/No labels of the same
+  // cancelFirst + focus:"cancel" component.
+  if (
+    /Yes, allow external imports/.test(output) &&
+    /No, disable external imports/.test(output)
+  ) {
+    return { kind: "external-import", keys: ["Down", "Enter"] };
+  }
+
+  // LEGACY (pre-2.1.259): the accept option was the default, so a bare Enter
+  // accepts. Gated on "Enter to confirm" co-present with a trust / import / MCP
+  // marker; a generic tool or Bash prompt matches none of these → null.
+  if (/enter to confirm/i.test(output)) {
+    if (
+      /trust/i.test(output) ||
+      /Allow external CLAUDE\.md file imports/i.test(output) ||
+      /New MCP server found/i.test(output) ||
+      /\d+ new MCP servers? found/i.test(output)
+    ) {
+      return { kind: "legacy", keys: ["Enter"] };
+    }
+  }
+
+  return null;
+}
+
+/**
  * True ONLY for the permission prompts that are safe to auto-accept for the
- * coordinator — the EXACT gating the watchdog uses at src/watchdog.ts ~1673:
- * an "Enter to confirm" line together with one of a trust prompt, the external
- * CLAUDE.md-import prompt, or a new-MCP-server prompt (single or the numeric
- * "N new MCP servers found" variant).
+ * coordinator — trust, the external CLAUDE.md-import prompt, or a new-MCP-server
+ * prompt (single or the multi "N new MCP servers found" variant), in either the
+ * 2.1.259 or the legacy layout. Delegates to {@link classifyClaudeStartupPrompt}
+ * so the coordinator uses the SAME detection as the watchdog and the resume /
+ * new-agent trust helpers.
  *
  * Deliberately NARROW: a generic tool-permission or Bash prompt must NOT match.
  * Auto-accepting those would be a permission-escalation vector — and the
@@ -356,23 +464,23 @@ export function isPermissionPrompt(output: string): boolean {
  * rejected at spawn), so — unlike the watchdog — no cli gate is needed here.
  */
 export function isCoordinatorAutoAcceptablePrompt(output: string): boolean {
-  if (!/enter to confirm/i.test(output)) return false;
-  return (
-    /trust/i.test(output) ||
-    /Allow external CLAUDE\.md file imports/i.test(output) ||
-    /New MCP server found/i.test(output) ||
-    /\d+ new MCP servers? found/i.test(output)
-  );
+  return classifyClaudeStartupPrompt(output) !== null;
 }
 
-/** Send a bare Enter to the ib-coordinator tmux session to dismiss a dialog.
+/** Send a key sequence to the ib-coordinator tmux session to accept a dialog.
+ *  The whole sequence goes out in ONE `send-keys` call (e.g. `Down Enter`) so a
+ *  navigation key and its Enter can never straddle Claude's ~150ms input-refusal
+ *  window: the burst is either fully refused (grace still active → retry next
+ *  poll) or fully applied — never a lone Enter landing on the default "No, exit".
+ *  Arrow keys are unambiguous CSI sequences, so (unlike the bare-ESC compact
+ *  cancel) they are not coalesced when bursted together.
  *  Routed through coordinatorSpawnCtx — the coordinator's established tmux-send
  *  mechanism (the direct analogue of the watchdog's private sendTmuxEnter),
  *  which every other tmux write in this module already uses and which the
  *  coordinator tests inject via coordinatorSpawnCtx.set(). */
-async function sendCoordinatorEnter(): Promise<boolean> {
+async function sendCoordinatorKeys(keys: string[]): Promise<boolean> {
   const { exitCode } = await coordinatorSpawnCtx.run([
-    "tmux", "send-keys", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION), "Enter",
+    "tmux", "send-keys", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION), ...keys,
   ]);
   return exitCode === 0;
 }
@@ -380,8 +488,16 @@ async function sendCoordinatorEnter(): Promise<boolean> {
 /**
  * If the coordinator pane shows an auto-acceptable permission prompt (trust /
  * external CLAUDE.md import / new MCP server — see
- * {@link isCoordinatorAutoAcceptablePrompt}), send a single bare Enter to
- * dismiss it. Returns true when an Enter was sent, false otherwise.
+ * {@link classifyClaudeStartupPrompt}), send the prompt-specific accept sequence
+ * to dismiss it. Returns true when a sequence was sent, false otherwise.
+ *
+ * STALE-SCROLLBACK / INTERLEAVED-DRAIN GUARD: the `output` passed in was
+ * captured OUTSIDE the delivery lock; between that capture and acquiring the
+ * lock a cross-process `ib send @system` drain could deliver a message and
+ * change the pane. A bare Enter tolerated that, but a navigation sequence
+ * (Down/Up before Enter) fired against a changed pane could mis-navigate. So we
+ * RE-CAPTURE and RE-CLASSIFY under the lock and send the FRESH sequence — if the
+ * prompt is gone or has changed, we send nothing (or the newly-correct keys).
  *
  * CONCURRENCY — why a bare Enter here is safe: the system coordinator has no
  * in-process watchdog, so the watchdog's in-process runSessionExclusive mutex
@@ -407,19 +523,29 @@ async function sendCoordinatorEnter(): Promise<boolean> {
  * retry, so a dropped tick is harmless and the prompt is re-attempted next tick.
  */
 export async function autoAcceptCoordinatorPrompt(output: string): Promise<boolean> {
-  if (!isCoordinatorAutoAcceptablePrompt(output)) return false;
-  logToWatchLog("[coordinator] permission prompt detected — sending Enter to accept (trust/import/MCP)");
+  const initial = classifyClaudeStartupPrompt(output);
+  if (!initial) return false;
+  logToWatchLog(`[coordinator] permission prompt detected (${initial.kind}) — will accept under the delivery lock`);
   const home = getCoordinatorHome();
   const { acquireOutboxLock, releaseOutboxLock } = await import("./outbox");
   const lock = await acquireOutboxLock(home, { steal: true });
   if (!lock) {
     // A drain (or another accepter) holds the session-delivery lock. Skip the
-    // Enter rather than interleave it — the next poll tick retries.
-    logToWatchLog("[coordinator] permission prompt: could not acquire delivery lock — skipping Enter (will retry next poll)");
+    // send rather than interleave it — the next poll tick retries.
+    logToWatchLog("[coordinator] permission prompt: could not acquire delivery lock — skipping accept (will retry next poll)");
     return false;
   }
   try {
-    await sendCoordinatorEnter();
+    // Re-capture under the lock so the navigation keys match the TRUE current
+    // pane, not the pre-lock snapshot a concurrent drain may have superseded.
+    const fresh = await captureTmuxOutput(IB_COORDINATOR_SESSION, 200);
+    const decision = fresh === null ? null : classifyClaudeStartupPrompt(fresh);
+    if (!decision) {
+      logToWatchLog("[coordinator] permission prompt cleared before accept (stale capture) — sending nothing");
+      return false;
+    }
+    logToWatchLog(`[coordinator] accepting ${decision.kind} prompt — sending [${decision.keys.join(" ")}]`);
+    await sendCoordinatorKeys(decision.keys);
   } finally {
     await releaseOutboxLock(lock);
   }

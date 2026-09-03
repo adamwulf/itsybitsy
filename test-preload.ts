@@ -48,7 +48,7 @@ if (!process.env.IB_WATCH_LOG_PATH) {
 // The dangerous command classes both contexts can emit against that fixed
 // session, and why each is unsafe against a shared server/session:
 //
-//   • tmux new-session ... -t =ib-coordinator:  — would spawn a real coordinator
+//   • tmux new-session ... -s ib-coordinator  — would spawn a real coordinator
 //        Claude process attached to the developer's session (or collide with the
 //        one already there).
 //   • tmux send-keys    ... -t =ib-coordinator:  — would type keystrokes / an

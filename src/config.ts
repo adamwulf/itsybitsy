@@ -1,5 +1,5 @@
 import { join } from "path";
-import { homedir } from "os";
+import { userHome } from "./home";
 import { chmod, stat } from "fs/promises";
 
 export type ConfigSource = "user" | "default";
@@ -97,7 +97,7 @@ export function resetUserConfigPath(): void {
 }
 
 export function defaultUserConfigPath(): string {
-  return overrideUserConfigPath ?? join(process.env.HOME ?? homedir(), ".itsybitsy", "config.json");
+  return overrideUserConfigPath ?? join(userHome(), ".itsybitsy", "config.json");
 }
 
 export interface ReadConfigOptions {

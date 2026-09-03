@@ -3235,9 +3235,9 @@ export async function launchDashboard(): Promise<void> {
   // effort — ignore ENOENT and any other failure.
   try {
     const { join } = await import("path");
-    const { homedir } = await import("os");
+    const { userHome } = await import("../home");
     const { unlink } = await import("fs/promises");
-    const stalePath = join(process.env.HOME ?? homedir(), ".itsybitsy", "channels", "telegram", "chat-id");
+    const stalePath = join(userHome(), ".itsybitsy", "channels", "telegram", "chat-id");
     await unlink(stalePath).catch(() => { /* file already absent */ });
   } catch {
     /* best effort — never block boot on cleanup */

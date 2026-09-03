@@ -3,7 +3,7 @@
  */
 
 import { join } from "path";
-import { homedir } from "os";
+import { userHome } from "../home";
 import { realpathSync } from "fs";
 import { loadAgentType } from "../agent-types";
 
@@ -27,14 +27,16 @@ export const SYSTEM_AGENT_ID = "@system";
  * Inlined here (rather than importing `getCoordinatorHome` from `coordinator.ts`)
  * because `shared.ts` is loaded by every hook entry point, and pulling in
  * `coordinator.ts` would transitively load `tmux-poller`, `agents`, and other
- * heavyweight modules into hooks that don't need them.
+ * heavyweight modules into hooks that don't need them. The lightweight
+ * `home.ts` seam has no such transitive cost.
  *
- * Honors the `HOME` env var (matching `coordinator.ts`'s `itsybitsyHome()`)
- * but does NOT honor the test-only `setCoordinatorHome` override — tests that
- * exercise hook code paths set `HOME` directly via the env var.
+ * Resolves home through the shared {@link userHome} seam (test override →
+ * `HOME` → `homedir()`), matching `coordinator.ts`'s `itsybitsyHome()`. It does
+ * NOT honor the test-only `setCoordinatorHome` override, but tests can redirect
+ * it via `setUserHome` (or the `HOME` env var, which the seam still reads).
  */
 export function systemCoordinatorHome(): string {
-  return join(process.env.HOME ?? homedir(), ".itsybitsy");
+  return join(userHome(), ".itsybitsy");
 }
 
 /**

@@ -3,7 +3,7 @@
  */
 
 import { join } from "path";
-import { homedir } from "os";
+import { userHome } from "./home";
 import { readdirSync, readFileSync } from "fs";
 import { Glob } from "bun";
 import managerMd from '../docs/agent-types/manager.md' with { type: 'text' };
@@ -237,7 +237,7 @@ function parseSimpleValue(valueStr: string): unknown {
  * Use {@link initAgentTypes} to restore missing files without overwriting existing ones.
  */
 export async function ensureAgentTypesDir(): Promise<void> {
-  const home = process.env.HOME || homedir();
+  const home = userHome();
   const typesDir = join(home, ".itsybitsy", "agent-types");
   const { mkdir, stat } = await import("fs/promises");
 
@@ -274,7 +274,7 @@ export async function ensureAgentTypesDir(): Promise<void> {
  * a stock copy without losing their edits to the others.
  */
 export async function initAgentTypes(): Promise<string[]> {
-  const home = process.env.HOME || homedir();
+  const home = userHome();
   const typesDir = join(home, ".itsybitsy", "agent-types");
   const { mkdir, stat } = await import("fs/promises");
 
@@ -308,7 +308,7 @@ export async function initAgentTypes(): Promise<string[]> {
  * Does NOT check built-in types — those must be written to disk by ensureAgentTypesDir().
  */
 export async function agentTypeExists(name: string): Promise<boolean> {
-  const home = process.env.HOME || homedir();
+  const home = userHome();
   const typeFile = join(home, ".itsybitsy", "agent-types", `${name}.md`);
   try {
     return await Bun.file(typeFile).exists();
@@ -328,7 +328,7 @@ export async function agentTypeExists(name: string): Promise<boolean> {
 async function readRawTypeFile(
   name: string,
 ): Promise<{ frontmatter: Record<string, unknown>; body: string }> {
-  const home = process.env.HOME || homedir();
+  const home = userHome();
   const typeFile = join(home, ".itsybitsy", "agent-types", `${name}.md`);
 
   const file = Bun.file(typeFile);
@@ -379,7 +379,7 @@ async function resolveChain(
     }
     // Missing parent — produce a child-aware error
     const child = visited[visited.length - 1]!;
-    const home = process.env.HOME || homedir();
+    const home = userHome();
     const expectedPath = join(home, ".itsybitsy", "agent-types", `${name}.md`);
     throw new Error(
       `Type '${child}' inherits from unknown type '${name}' (file not found: ${expectedPath})`,
@@ -628,7 +628,7 @@ export async function metaCanSpawnChildren(meta: Record<string, unknown>): Promi
  * blocking on disk I/O or YAML parsing.
  */
 export function listAgentTypeNamesSync(): string[] {
-  const home = process.env.HOME || homedir();
+  const home = userHome();
   const typesDir = join(home, ".itsybitsy", "agent-types");
   try {
     const names = readdirSync(typesDir)
@@ -655,7 +655,7 @@ export function listAgentTypeNamesSync(): string[] {
  */
 export function listSpawnableAgentTypesSync(): Array<{ name: string; description: string }> {
   const allNames = listAgentTypeNamesSync();
-  const home = process.env.HOME || homedir();
+  const home = userHome();
   const typesDir = join(home, ".itsybitsy", "agent-types");
 
   const result: Array<{ name: string; description: string }> = [];
@@ -748,7 +748,7 @@ function readFrontmatterScalars(content: string): { spawnable: boolean; descript
  */
 export async function listAgentTypes(): Promise<AgentType[]> {
   const types: AgentType[] = [];
-  const home = process.env.HOME || homedir();
+  const home = userHome();
   const typesDir = join(home, ".itsybitsy", "agent-types");
 
   try {
@@ -775,7 +775,7 @@ export async function listAgentTypes(): Promise<AgentType[]> {
  */
 export async function validateAllAgentTypes(): Promise<string[]> {
   const errors: string[] = [];
-  const home = process.env.HOME || homedir();
+  const home = userHome();
   const typesDir = join(home, ".itsybitsy", "agent-types");
 
   // Collect the basenames we see — used afterwards to try loading each type

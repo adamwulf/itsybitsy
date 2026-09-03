@@ -19,7 +19,7 @@ import {
   symlink,
 } from "fs/promises";
 import { realpathSync } from "fs";
-import { homedir } from "node:os";
+import { userHome } from "./home";
 import type { Agent, AgentMeta, SpawnedBy, AgentOperationKind } from "./agents";
 import {
   writeAgentState,
@@ -4734,9 +4734,9 @@ export async function newAgent(
       // Expand ~ to home directory
       let expanded: string;
       if (p === "~") {
-        expanded = homedir();
+        expanded = userHome();
       } else if (p.startsWith("~/")) {
-        expanded = join(homedir(), p.slice(2));
+        expanded = join(userHome(), p.slice(2));
       } else {
         expanded = p;
       }
@@ -6256,7 +6256,7 @@ export async function acknowledgeQuestion(repoPath: string, questionId: string):
 
 /** Default global settings path: ~/.claude/settings.json */
 function defaultSettingsPath(): string {
-  return join(homedir(), ".claude", "settings.json");
+  return join(userHome(), ".claude", "settings.json");
 }
 
 /** Read and parse settings JSON, returning {} on missing/invalid */

@@ -12,7 +12,7 @@
  */
 
 import { join } from "path";
-import { homedir } from "os";
+import { userHome } from "../home";
 import { mkdirSync } from "fs";
 import { rename } from "fs/promises";
 
@@ -37,7 +37,7 @@ export function resetStateDir(): void {
 }
 
 export function defaultStateDir(): string {
-  return overrideStateDir ?? join(process.env.HOME ?? homedir(), ".itsybitsy", "channels", "telegram");
+  return overrideStateDir ?? join(userHome(), ".itsybitsy", "channels", "telegram");
 }
 
 function accessPath(): string {

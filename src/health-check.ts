@@ -14,7 +14,7 @@
  */
 
 import { join, basename } from "path";
-import { homedir } from "os";
+import { userHome } from "./home";
 import { readdir, rm } from "fs/promises";
 import { SpawnContext } from "./types";
 import { isValidAgentId, tmuxSessionTarget } from "./validation";
@@ -130,7 +130,7 @@ export async function checkLeakedAgentHooks(repoPath: string): Promise<RepoHealt
  * §14.3.2 — Missing global hooks in ~/.claude/settings.json (warning)
  */
 export async function checkMissingGlobalHooks(): Promise<RepoHealthWarning[]> {
-  const settingsPath = join(homedir(), ".claude", "settings.json");
+  const settingsPath = join(userHome(), ".claude", "settings.json");
   const settings = await readJsonFile(settingsPath);
   if (!settings || typeof settings !== "object") {
     return [{

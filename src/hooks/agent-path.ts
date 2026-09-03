@@ -7,7 +7,7 @@
  */
 
 import { join, resolve, dirname, basename } from "path";
-import { homedir } from "os";
+import { userHome } from "../home";
 import { realpath, stat } from "fs/promises";
 import { realpathSync } from "fs";
 import { logAgent } from "../agent-lifecycle";
@@ -542,7 +542,7 @@ function checkBashCommandPaths(
  */
 export function claudeProjectDirFor(worktreePath: string): string {
   const encoded = encodeClaudeProjectPath(worktreePath);
-  let projectDir = resolve(join(homedir(), ".claude", "projects", encoded));
+  let projectDir = resolve(join(userHome(), ".claude", "projects", encoded));
   try {
     projectDir = realpathSync(projectDir);
   } catch {
@@ -944,7 +944,7 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
     //   - allowedPaths = undefined → legacy permissive fallback.
     const resolved = resolveAgentFromCwd(cwd);
     // Prefer the resolved home (handles symlinked HOME) when available.
-    const home = resolved?.agentDir ?? join(process.env.HOME ?? "", ".itsybitsy");
+    const home = resolved?.agentDir ?? join(userHome(), ".itsybitsy");
     agentsDir = "";
     agentDir = home;
     worktreePath = home;

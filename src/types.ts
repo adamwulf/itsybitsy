@@ -56,7 +56,7 @@ export async function runCmd(
  */
 export class InjectionContext<T> {
   private _value: T;
-  private readonly _default: T;
+  private _default: T;
 
   constructor(defaultValue: T) {
     this._default = defaultValue;
@@ -73,6 +73,23 @@ export class InjectionContext<T> {
 
   reset(): void {
     this._value = this._default;
+  }
+
+  /**
+   * Replace the baseline that {@link reset} restores to, and snap the current
+   * value to it as well.
+   *
+   * The production default for a `SpawnContext` is the live `Bun.spawn`, so a
+   * plain {@link reset} after a per-test `.set(mock)` restores the ability to
+   * launch real subprocesses. The global `bun test` preload (test-preload.ts)
+   * uses this to swap that live default for a safe no-op stub, so that EVERY
+   * reset during the test run — including one that fires from async work still
+   * draining after a test has torn its mock down — lands on the stub instead of
+   * the real process spawner. Not called from any production code path.
+   */
+  setDefault(value: T): void {
+    this._default = value;
+    this._value = value;
   }
 }
 

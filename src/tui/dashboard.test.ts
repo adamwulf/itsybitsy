@@ -13,6 +13,7 @@ import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxPollerSpawnCtx } from "../tmux-poller";
 import { IB_COORDINATOR_SESSION } from "../coordinator";
 import { setUserConfigPath, resetUserConfigPath } from "../config";
+import { setUserHome, resetUserHome } from "../home";
 import type { SpawnResult } from "../types";
 import { PANE_MODES } from "./pane-manager";
 import { computeSidebarHeights } from "./sidebar";
@@ -1028,6 +1029,11 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetDiffStatusSpawnRunner();
     resetMergeSpawnRunner();
     resetUserConfigPath();
+    // Failure-safety net for the new-agent tests below, which override the home
+    // dir via setUserHome: if one throws before its inline
+    // resetUserHome(), clear the override here so it cannot bleed into a
+    // later test's home resolution.
+    resetUserHome();
     const { resetCoordinatorHome } = await import("../coordinator");
     resetCoordinatorHome();
     if (actionTempDir) {
@@ -1743,9 +1749,9 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   // Relies on "worker" sorting immediately after "manager" in the default types list,
   // so a single Space press from the default focus advances the selection from manager to worker.
-  // Isolates process.env.HOME so the cycle reads only the embedded layer files
-  // (developer-customized ~/.itsybitsy/agent-types/ would otherwise inject extra
-  // spawnable types between manager and worker).
+  // Isolates the home directory (via setUserHome) so the cycle reads
+  // only the embedded layer files (developer-customized ~/.itsybitsy/agent-types/
+  // would otherwise inject extra spawnable types between manager and worker).
   test("new-agent form: cycling from manager to worker creates agent with worker meta field", async () => {
     const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-test-"));
     await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
@@ -1754,9 +1760,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "claude:sonnet" }));
 
     const tempHome = await mkdtemp(join(tmpdir(), "ib-na-home-"));
-    const originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
-    // Populate the temp HOME with embedded defaults so listSpawnableTypeNamesSync
+    setUserHome(tempHome);
+    // Populate the temp home with embedded defaults so listSpawnableTypeNamesSync
     // returns exactly [coordinator, manager, worker] (system / _all / _non_coordinator
     // are filtered out as spawnable: false).
     await (await import("../agent-types")).ensureAgentTypesDir();
@@ -1819,7 +1824,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetNewAgentSpawnRunner();
     lifecycleSpawnCtx.reset();
     resetUserConfigPath();
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(newAgentTempDir, { recursive: true, force: true });
     await rm(tempHome, { recursive: true, force: true });
   });
@@ -1837,8 +1842,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     // possibly-stale ~/.itsybitsy/agent-types/_all.md and a bare-name `model:`
     // there would be rejected by parseModel (D1/D5).
     const tempHome = await mkdtemp(join(tmpdir(), "ib-na-home-"));
-    const originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
     await (await import("../agent-types")).ensureAgentTypesDir();
 
     const spawnCalls: string[] = [];
@@ -1893,7 +1897,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetNewAgentSpawnRunner();
     lifecycleSpawnCtx.reset();
     resetUserConfigPath();
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(newAgentTempDir, { recursive: true, force: true });
     await rm(tempHome, { recursive: true, force: true });
   });
@@ -1926,8 +1930,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "claude:sonnet" }));
 
     const tempHome = await mkdtemp(join(tmpdir(), "ib-na-fail-home-"));
-    const originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
     await (await import("../agent-types")).ensureAgentTypesDir();
 
     // Mock spawn so the dirty-worktree gate fires: porcelain returns a dirty
@@ -1975,7 +1978,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetNewAgentSpawnRunner();
     lifecycleSpawnCtx.reset();
     resetUserConfigPath();
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(newAgentTempDir, { recursive: true, force: true });
     await rm(tempHome, { recursive: true, force: true });
   });
@@ -4694,26 +4697,64 @@ describe("coordinator TmuxPoller (Phase 47c)", () => {
 });
 
 describe("coordinator lifecycle (Phase 47f)", () => {
-  test("R key triggers restartSystemCoordinator when coordinator is focused", () => {
+  test("R key triggers restartSystemCoordinator when coordinator is focused", async () => {
+    // ESCAPE-VECTOR REGRESSION GUARD. This test formerly pressed R and returned
+    // WITHOUT awaiting the restart, leaking a live async kill-then-recreate into
+    // whichever test ran next:
+    //
+    //   R → handleResume → handleRestartSystemCoordinator →
+    //       executeAndRefresh(async () => { await restartSystemCoordinator(); … })
+    //
+    // restartSystemCoordinator() synchronously launches a REAL `tmux kill-session
+    // -t ib-coordinator` (its first line runs before the first await), then its
+    // ensureSystemCoordinator() continuation resolves the home dir and recreates
+    // `ib-coordinator` there. Un-awaited, that continuation resolved LATER —
+    // while a subsequent new-agent test had pointed the home dir at a temp
+    // `ib-na-home-*` — so the coordinator was recreated inside that unrelated
+    // test's temp home. The file-scope afterEach only stops poller timers, so it
+    // never caught this dangling promise.
+    //
+    // The fix pins the vector two ways: inject a coordinator spawn mock so no
+    // real tmux runs and ensureSystemCoordinator short-circuits (has-session → 0)
+    // before it ever resolves the home dir, and AWAIT flushPendingActions so the
+    // full kill-then-recreate completes inside this test instead of escaping.
     const dashboard = makeDashboard();
-    // Select system coordinator in agent tree to enter coordinator mode
-    // In coordinator mode, COORDINATOR_FOCUS_ORDER applies: agent-tree → info → coordinator
-    const flatList: FlatEntry[] = [makeFlatSystemCoordinator()];
-    dashboard.onUpdate([], flatList, []);
-    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
-    // Tab twice to reach coordinator focus
-    dashboard.handleInput("\t"); // info
-    dashboard.handleInput("\t"); // coordinator
-    expect(dashboard.focus).toBe("coordinator");
+    const { coordinatorSpawnCtx } = await import("../coordinator");
+    const coordCommands: string[][] = [];
+    // Exit 0 for every command: `tmux has-session` → 0 makes
+    // ensureSystemCoordinator believe the session is already live and return
+    // immediately, so it never resolves the home dir or writes coordinator
+    // files; `tmux kill-session` → 0 is a recorded no-op instead of a real kill.
+    coordinatorSpawnCtx.set((cmd: string[]) => {
+      coordCommands.push([...cmd]);
+      return makeSpawnResult(0);
+    });
+    try {
+      // Select system coordinator in agent tree to enter coordinator mode.
+      // In coordinator mode, COORDINATOR_FOCUS_ORDER applies: agent-tree → info → coordinator
+      const flatList: FlatEntry[] = [makeFlatSystemCoordinator()];
+      dashboard.onUpdate([], flatList, []);
+      expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+      // Tab twice to reach coordinator focus
+      dashboard.handleInput("\t"); // info
+      dashboard.handleInput("\t"); // coordinator
+      expect(dashboard.focus).toBe("coordinator");
 
-    // Press R — should NOT call handleResume (no agent selected)
-    // Instead it should trigger coordinator restart via executeAndRefresh
-    // We can verify by checking that no error notice was set for missing agent
-    dashboard.handleInput("R");
-    // The executeAndRefresh will call restartSystemCoordinator which tries tmux commands.
-    // In test environment those will fail silently. The important thing is the code path was taken.
-    // We verify the notice was set (either success or error from the tmux command failing)
-    // Wait a tick for the async operation
+      // Press R — the system coordinator is selected, so handleResume delegates
+      // to handleRestartSystemCoordinator, which queues the restart via
+      // executeAndRefresh.
+      dashboard.handleInput("R");
+      // Drain the queued restart so it runs to completion HERE. Without this
+      // await the kill-then-recreate escapes into a later test (see header).
+      await dashboard.flushPendingActions();
+
+      // Proof the restart ran to completion within the test: kill-session was
+      // issued through the injected mock, so nothing reached real tmux.
+      const issued = coordCommands.map((c) => c.join(" "));
+      expect(issued.some((c) => c.includes("kill-session"))).toBe(true);
+    } finally {
+      coordinatorSpawnCtx.reset();
+    }
   });
 
   test("R key triggers handleResume when agent-tree is focused (not coordinator)", () => {
@@ -4988,10 +5029,9 @@ describe("coordinator input field (Phase 49)", () => {
       const coordHome = await mkdtemp(join(tmpdir(), "dash-restart-home-"));
       const typesHome = await mkdtemp(join(tmpdir(), "dash-restart-types-"));
       const cfgDir = await mkdtemp(join(tmpdir(), "dash-restart-cfg-"));
-      const originalHome = process.env.HOME;
       setUserConfigPath(join(cfgDir, "config.json"));
       setCoordinatorHome(coordHome);
-      process.env.HOME = typesHome;
+      setUserHome(typesHome);
       setCoordinatorSleepFn(async () => {});
 
       // coordinatorSpawnCtx / tmuxPollerSpawnCtx are SpawnContexts whose runner
@@ -5056,7 +5096,7 @@ describe("coordinator input field (Phase 49)", () => {
         resetCoordinatorSleepFn();
         resetUserConfigPath();
         resetSendSpawnRunner();
-        process.env.HOME = originalHome;
+        resetUserHome();
         await rm(coordHome, { recursive: true, force: true });
         await rm(typesHome, { recursive: true, force: true });
         await rm(cfgDir, { recursive: true, force: true });
@@ -5818,16 +5858,14 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
   });
 
   describe("manage roster ('t' on a team anchor)", () => {
-    // saveRegistry writes to `<HOME>/.itsybitsy/repos.json` (registry.ts uses
-    // process.env.HOME, NOT the coordinator-home test seam). Isolate HOME for
+    // saveRegistry writes to `<home>/.itsybitsy/repos.json` (registry.ts resolves
+    // the home dir through the injectable home seam). Isolate the home dir for
     // every test in this sub-describe so a successful or aborted test cannot
     // bleed a `repos.json` entry into the developer's real ~/.itsybitsy/.
-    let savedHome: string | undefined;
     let homeTmp: string;
     beforeEach(async () => {
-      savedHome = process.env.HOME;
       homeTmp = await mkdtemp(join(tmpdir(), "dash-roster-home-"));
-      process.env.HOME = homeTmp;
+      setUserHome(homeTmp);
       // Stub the send spawn runner. These tests plant REAL agent dirs so the
       // roster wrappers can resolve bare ids, which means teamAdd/teamRemove's
       // join/leave fan-out reaches the real delivery path and spawns real tmux
@@ -5840,8 +5878,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
     });
     afterEach(async () => {
       resetSendSpawnRunner();
-      if (savedHome === undefined) delete process.env.HOME;
-      else process.env.HOME = savedHome;
+      resetUserHome();
       await rm(homeTmp, { recursive: true, force: true });
     });
 
@@ -5874,7 +5911,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       await plant("agent-existing");
       await plant("agent-new");
       const repoEntry = { path: repoTmp, name: "repo-a" };
-      // saveRegistry writes to HOME/.itsybitsy/repos.json; HOME is the
+      // saveRegistry writes to <home>/.itsybitsy/repos.json; the home dir is the
       // isolated tmp set in beforeEach, so this is sandboxed.
       await saveRegistry({ repos: [repoEntry] });
       dashboard.repos = [repoEntry];

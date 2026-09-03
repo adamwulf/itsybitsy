@@ -12,7 +12,7 @@
 
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { homedir } from "node:os";
+import { userHome } from "./home";
 import { join } from "node:path";
 
 function isEnabled(): boolean {
@@ -20,7 +20,7 @@ function isEnabled(): boolean {
 }
 
 function logPath(): string {
-  return process.env.IB_PERF_LOG ?? join(homedir(), ".itsybitsy", "perf.jsonl");
+  return process.env.IB_PERF_LOG ?? join(userHome(), ".itsybitsy", "perf.jsonl");
 }
 
 const ensuredDirs = new Set<string>();

@@ -5,7 +5,7 @@
  */
 
 import { join, basename, dirname } from "path";
-import { homedir } from "os";
+import { userHome } from "./home";
 import { readFileSync, existsSync } from "node:fs";
 import { readConfig } from "./config";
 import { captureTmuxOutput } from "./tmux-poller";
@@ -61,7 +61,7 @@ export function resetCoordinatorHome(): void {
 }
 
 function itsybitsyHome(): string {
-  return overrideHome ?? join(process.env.HOME ?? homedir(), ".itsybitsy");
+  return overrideHome ?? join(userHome(), ".itsybitsy");
 }
 
 /**
@@ -83,7 +83,7 @@ function clearedMarkerPath(): string {
 }
 
 function coordinatorTranscriptDir(): string {
-  const home = process.env.HOME ?? homedir();
+  const home = userHome();
   return join(home, ".claude", "projects", encodeClaudeProjectPath(itsybitsyHome()));
 }
 

@@ -16,7 +16,7 @@
  */
 
 import { join, dirname } from "path";
-import { homedir } from "os";
+import { userHome } from "./home";
 import { mkdir, open, stat, unlink, rename } from "fs/promises";
 import { isValidAgentId } from "./validation";
 import { isCodexSafeBinaryPath } from "./codex-config";
@@ -138,7 +138,7 @@ async function buildAgyClaudeMdInline(worktreePath: string): Promise<string> {
     const contents = await Bun.file(projectClaudeMd).text();
     parts.push(`## Project CLAUDE.md\n\n${contents.trimEnd()}`);
   }
-  const home = process.env.HOME || homedir();
+  const home = userHome();
   const userClaudeMd = join(home, ".claude", "CLAUDE.md");
   if (await Bun.file(userClaudeMd).exists()) {
     const contents = await Bun.file(userClaudeMd).text();
@@ -158,13 +158,13 @@ async function buildAgyClaudeMdInline(worktreePath: string): Promise<string> {
  * temp HOME (the real file is never touched in tests).
  */
 export function agySettingsPath(): string {
-  const home = process.env.HOME || homedir();
+  const home = userHome();
   return join(home, ".gemini", "antigravity-cli", "settings.json");
 }
 
 /** Advisory lock path guarding itsybitsy's own read-modify-write of the settings file. */
 export function agySettingsLockPath(): string {
-  const home = process.env.HOME || homedir();
+  const home = userHome();
   return join(home, ".itsybitsy", ".agy-settings.lock");
 }
 

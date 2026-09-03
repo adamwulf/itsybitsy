@@ -15,7 +15,7 @@
  */
 
 import { join } from "path";
-import { homedir } from "os";
+import { userHome } from "./home";
 import { readdir } from "fs/promises";
 
 /**
@@ -54,8 +54,8 @@ export function stripIttybittyWrapper(body: string): string {
  * The skill BODY is never inlined — that would bloat the instruction file for
  * no benefit.
  *
- * Skills live under `~/.claude/skills/<name>/SKILL.md`. We resolve HOME via
- * `process.env.HOME || homedir()` so a fake HOME in tests points at a temp dir.
+ * Skills live under `~/.claude/skills/<name>/SKILL.md`. We resolve HOME via the
+ * shared {@link userHome} seam so a fake HOME in tests points at a temp dir.
  * The `skillsDir` param defaults to the real path so production callers are
  * unchanged; tests pass a temp dir.
  *
@@ -72,7 +72,7 @@ export function stripIttybittyWrapper(body: string): string {
  */
 export async function buildSkillsSection(
   skillsDir: string = join(
-    process.env.HOME || homedir(),
+    userHome(),
     ".claude",
     "skills",
   ),

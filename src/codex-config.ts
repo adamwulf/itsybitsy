@@ -14,7 +14,7 @@
  * Phase 4 work.
  */
 
-import { homedir } from "os";
+import { userHome } from "./home";
 import { join } from "path";
 import { isValidAgentId } from "./validation";
 import { getCoordinatorHome } from "./coordinator";
@@ -238,13 +238,13 @@ export function buildCodexLaunchArgs(input: BuildCodexLaunchArgsInput): CodexLau
   // path does not exist and pushing it would just be noise (or worse, get
   // silently created by some unrelated tool later), so guard on darwin.
   //
-  // Use `||` not `??` so an empty-string $HOME (env -i, systemd unit, some
-  // sandboxes) falls back to homedir() rather than producing the RELATIVE
-  // path `Library/Caches` — which codex would either reject or resolve
-  // relative to its cwd (the worktree), silently widening the worktree
-  // allowlist without granting the intended cache directory.
+  // The `userHome()` seam resolves an empty-string $HOME (env -i, systemd unit,
+  // some sandboxes) to homedir() rather than producing the RELATIVE path
+  // `Library/Caches` — which codex would either reject or resolve relative to
+  // its cwd (the worktree), silently widening the worktree allowlist without
+  // granting the intended cache directory.
   if (process.platform === "darwin") {
-    const libraryCaches = join(process.env.HOME || homedir(), "Library", "Caches");
+    const libraryCaches = join(userHome(), "Library", "Caches");
     if (!isCodexSafeBinaryPath(libraryCaches)) {
       throw new Error(
         `Unsafe Library/Caches path for codex launch: ${JSON.stringify(libraryCaches)} contains quotes, backslashes, or control characters. ` +

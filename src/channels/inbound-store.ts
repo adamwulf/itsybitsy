@@ -28,7 +28,7 @@
  */
 
 import { join } from "path";
-import { homedir } from "os";
+import { userHome } from "../home";
 import { mkdir, readdir, stat, rename, unlink } from "fs/promises";
 
 let overrideInboundDir: string | undefined;
@@ -57,7 +57,7 @@ export function resetInboundDir(): void {
 export function defaultInboundDir(): string {
   return (
     overrideInboundDir ??
-    join(process.env.HOME ?? homedir(), ".itsybitsy", "channels", "telegram", "inbound")
+    join(userHome(), ".itsybitsy", "channels", "telegram", "inbound")
   );
 }
 

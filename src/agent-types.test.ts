@@ -5,6 +5,7 @@ import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { interpolateTemplate } from "./hooks/session-start";
+import { setUserHome, resetUserHome } from "./home";
 
 test("parseAgentTypeFile: parses frontmatter and body", () => {
   const content = `---
@@ -338,16 +339,15 @@ test("agentTypeExists: returns false for nonexistent types", async () => {
 });
 
 describe("initAgentTypes", () => {
-  const originalHome = process.env.HOME;
   let tempHome: string;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-init-types-"));
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
   });
 
   afterEach(async () => {
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -402,16 +402,15 @@ describe("initAgentTypes", () => {
 });
 
 describe("ensureAgentTypesDir: system layer", () => {
-  const originalHome = process.env.HOME;
   let tempHome: string;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-system-layer-"));
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
   });
 
   afterEach(async () => {
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -483,19 +482,18 @@ body`;
 // ── inherits: / repos: inheritance tests (see PLAN-INHERITS.md) ──────────────
 
 describe("loadAgentType: inherits", () => {
-  const originalHome = process.env.HOME;
   let tempHome: string;
   let typesDir: string;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-inherits-"));
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
     typesDir = join(tempHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
   });
 
   afterEach(async () => {
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -1010,19 +1008,18 @@ inherits: does-not-exist
 });
 
 describe("validateAllAgentTypes: inherits + repos", () => {
-  const originalHome = process.env.HOME;
   let tempHome: string;
   let typesDir: string;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-validate-"));
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
     typesDir = join(tempHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
   });
 
   afterEach(async () => {
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -1211,19 +1208,18 @@ effort: ${level}
 });
 
 describe("loadAgentType: repos field", () => {
-  const originalHome = process.env.HOME;
   let tempHome: string;
   let typesDir: string;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-repos-load-"));
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
     typesDir = join(tempHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
   });
 
   afterEach(async () => {
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -1286,19 +1282,18 @@ body`);
 });
 
 describe("buildAvailableTypesSection / listSpawnableAgentTypesSync", () => {
-  const originalHome = process.env.HOME;
   let tempHome: string;
   let typesDir: string;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-available-types-"));
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
     typesDir = join(tempHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
   });
 
   afterEach(async () => {
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 
@@ -1470,12 +1465,11 @@ body`);
 });
 
 describe("metaCanSpawnChildren", () => {
-  const originalHome = process.env.HOME;
   let tempHome: string;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-canspawn-"));
-    process.env.HOME = tempHome;
+    setUserHome(tempHome);
     await mkdir(join(tempHome, ".itsybitsy"), { recursive: true });
     // Populate the embedded default types (worker, manager, coordinator, …) so
     // the agentType-driven cases resolve via loadAgentType.
@@ -1483,7 +1477,7 @@ describe("metaCanSpawnChildren", () => {
   });
 
   afterEach(async () => {
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 

@@ -1164,6 +1164,53 @@ run `sandbox-exec`, because a nested Seatbelt refuses `sandbox_apply`, and one
 wedged for ninety minutes on a long `ib send`; live-gated pieces are built by
 Claude workers from here on.
 
+**A3 merged** on `agent/sandbox-safety` at `bd0a2c4` (reported 2026-09-03
+00:02, two review rounds, approved). Shipped: the `_all.md` floor is the
+verified minimum (no `/` or `~` in `allowRead`; the root listing through
+`rawAllow`; the settled `~/.itsybitsy` write floor; `~/Library/Keychains`
+only); spawn-keyed runtime roots (`REPOAGENTS`, and `PARENTCLAUDE` for
+`<repo>/.claude`, writable only when the resolved `canSpawnChildren` is
+true); the tmux socket closed for non-spawners with both a file deny and a
+network-outbound deny after `rawAllow`, because a review found that a
+unix-socket `connect()` is gated by network rules, not file rules, proven live
+with `nc -U`; the socket dir derived from `$TMUX`, else
+`TMUX_TMPDIR/tmux-<uid>`; a live probe of 62 rows; an opt-in live boot gate
+(`IB_LIVE_BOOT=1`) proving claude boots under the new floor.
+
+Two consequences for Phase B:
+
+1. **Trust boundary, found in review.** The agent dir is a kernel write root,
+   because hooks write `meta.json` there. So `meta.canSpawnChildren` and
+   `meta.agentType` are agent-editable, and a non-spawner could respawn itself
+   into a spawner profile. A4 closes it with a **sealed record** at
+   `~/.itsybitsy/sealed/<repoId>-<agentId>.json` (profile inputs plus sha256),
+   written by `newAgent`, refresh, and rehire, and for a sandboxed spawner
+   through a synchronous unsandboxed tmux `run-shell` helper; the seal dir
+   joins the `_all.md` deny list; resume, respawn, and refresh compare and
+   fail hard on mismatch. Residual: a spawner can still reach the seal dir
+   through the tmux socket, the accepted spawner escape. The hook does not
+   read the seal.
+2. **Hook inputs.** The runtime roots passed to `prepareAccessTable` must
+   include the spawn-keyed operations (`REPOAGENTS` read or write, and
+   `PARENTCLAUDE` write, keyed on `metaCanSpawnChildren`) to match the kernel;
+   `TMUXSOCK` is a deny entry, not a root. A4 also ships
+   `ib sandbox refresh <id> | --all` and claude `--dangerously-skip-permissions`
+   emitted only inside the `sandbox-exec` wrapper when enabled.
+
+**Hook-side item this exposes, for Phase B (B3).** The hook reads its lists
+from `meta.json` at every call, and today it lets the agent write that file
+through Bash: the settings-write guard covers only `.claude/settings*.json` and
+the agy boundary files[^8], the absolute-needle scan allows any path under the
+agent's own dir[^8], and the traversal scanner allows `../meta.json` from the
+worktree for the same reason[^9]; only the Write and Edit tools are stopped, by
+step 10[^6]. In kernel mode the frozen profile and the seal make this
+harmless. In hook-only mode (sandbox disabled, agy today, Linux) it is a
+self-widening path. Phase B adds `<agentDir>/meta.json` to the protected-file
+set for writes, both for the write tools and for the Bash redirect and
+`sed -i` guard, mirroring the settings-file rule. The kernel cannot tell the
+agent's redirect from `ib` writing the file; the hook can, because it sees the
+command.
+
 **Parallel option during Phase A**, if Adam wants speed: `path-isolation`
 starts the pieces that touch none of `agent-types.ts`, `newAgent`, or
 `sandbox.ts`: the Bash-scanner tokenization in `agent-path.ts` against a

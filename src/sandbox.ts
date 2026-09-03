@@ -331,15 +331,43 @@ function compiledPathKey(entry: string, home?: string): string {
   return `${compiled.kind}\0${compiled.value}`;
 }
 
+/** Dedupe key for an entry that has already been canonicalized for the table. */
+function canonicalCompiledPathKey(entry: string): string {
+  const compiled = compileCanonicalPath(entry);
+  return `${compiled.kind}\0${compiled.value}`;
+}
+
+/**
+ * The single write-wins exact-tie rule, without mutating any caller list:
+ * return allowRead with every entry whose compiled key also appears in
+ * allowWrite removed; within-list order and all other entries are unchanged.
+ * `keyOf` compiles each entry to its dedupe key, so a caller may pass authored
+ * (home-relative) entries via compiledPathKey or already-canonical table
+ * entries via canonicalCompiledPathKey. Both the exported normalizePathsConfig
+ * (the Phase B consumer) and the production sortedAllowEntries access table
+ * route through here so their dedupe can never drift apart.
+ */
+function writeWinsFilteredRead(
+  allowRead: readonly string[],
+  allowWrite: readonly string[],
+  keyOf: (entry: string) => string,
+): string[] {
+  const writeKeys = new Set(allowWrite.map(keyOf));
+  return allowRead.filter((entry) => !writeKeys.has(keyOf(entry)));
+}
+
 /**
  * Apply the write-wins exact-tie rule without mutating the authored config.
  * Canonically identical entries in allowWrite are removed from allowRead;
  * within-list order and all other entries remain unchanged.
  */
 export function normalizePathsConfig(paths: PathsConfig, home?: string): PathsConfig {
-  const writeKeys = new Set(paths.allowWrite.map((entry) => compiledPathKey(entry, home)));
   return {
-    allowRead: paths.allowRead.filter((entry) => !writeKeys.has(compiledPathKey(entry, home))),
+    allowRead: writeWinsFilteredRead(
+      paths.allowRead,
+      paths.allowWrite,
+      (entry) => compiledPathKey(entry, home),
+    ),
     allowWrite: [...paths.allowWrite],
     deny: [...paths.deny],
   };
@@ -436,14 +464,11 @@ function sortedAllowEntries(
   table: PathAccessTable,
   profileRoots: ProfileRuntimePathRoot[] = [],
 ): OrderedPathEntry[] {
-  const writeKeys = new Set(table.allowWrite.map((path) => {
-    const compiled = compileCanonicalPath(path);
-    return `${compiled.kind}\0${compiled.value}`;
-  }));
-  const normalizedRead = table.allowRead.filter((path) => {
-    const compiled = compileCanonicalPath(path);
-    return !writeKeys.has(`${compiled.kind}\0${compiled.value}`);
-  });
+  const normalizedRead = writeWinsFilteredRead(
+    table.allowRead,
+    table.allowWrite,
+    canonicalCompiledPathKey,
+  );
   const entries = [
     ...normalizedRead.map((path) => orderedPathEntry(path, "read")),
     ...table.allowWrite.map((path) => orderedPathEntry(path, "write")),

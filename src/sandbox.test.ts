@@ -405,7 +405,7 @@ function assertFixtureOracle(
 }
 
 describe("most-specific filesystem access oracle", () => {
-  test("resolver and emitted last-match profile agree across required shuffled fixtures", async () => {
+  async function buildAccessFixtures(): Promise<AccessFixture[]> {
     const home = "/Users/sandbox-test-user";
     const ordinaryParams: SandboxProfileParams = {
       AGENTDIR: "/runtime/repo/.ittybitty/agents/oracle",
@@ -427,7 +427,7 @@ describe("most-specific filesystem access oracle", () => {
     const allPaths = allFrontmatter.paths as PathsConfig;
     const canonicalAllPaths = canonicalizePathsConfig(allPaths, home);
 
-    const fixtures: AccessFixture[] = [
+    return [
       {
         name: "write Documents with nested read-only Important",
         layers: [
@@ -543,7 +543,10 @@ describe("most-specific filesystem access oracle", () => {
         checks: [{ path: "/runtime-tie/x", read: "allow", write: "allow" }],
       },
     ];
+  }
 
+  test("resolver and emitted last-match profile agree across required shuffled fixtures", async () => {
+    const fixtures = await buildAccessFixtures();
     for (const [fixtureIndex, fixture] of fixtures.entries()) {
       const original = mergeFixtureLayers(fixture.layers);
       const originalProfile = assertFixtureOracle(fixture, original);
@@ -556,6 +559,37 @@ describe("most-specific filesystem access oracle", () => {
         }));
         const merged = mergeFixtureLayers(permutedLayers, shuffled(PATH_LIST_KEYS, random));
         assertFixtureOracle(fixture, merged, originalProfile);
+      }
+    }
+  });
+
+  test("normalizePathsConfig and the sorted access table agree on every fixture", async () => {
+    // The write-wins exact-tie dedupe now lives in one shared helper. Prove the
+    // exported normalizePathsConfig (Phase B) and the production access table
+    // (sortedAllowEntries, reached through generateProfile/resolvePathAccess)
+    // stay in lockstep: pre-normalizing the authored lists must change neither
+    // the emitted profile nor any resolver decision, because the table already
+    // collapses the same cross-list ties.
+    const fixtures = await buildAccessFixtures();
+    for (const fixture of fixtures) {
+      const home = fixture.params.HOME!;
+      const merged = mergeFixtureLayers(fixture.layers);
+      const normalized = normalizePathsConfig(merged, home);
+      expect(
+        generateProfile(EMPTY_CONFIG, normalized, fixture.params),
+        `${fixture.name}: profile identical after normalize`,
+      ).toBe(generateProfile(EMPTY_CONFIG, merged, fixture.params));
+
+      const rawTable = sandboxPathAccessTable(merged, fixture.params);
+      const normTable = sandboxPathAccessTable(normalized, fixture.params);
+      for (const check of fixture.checks) {
+        const target = canonicalizeSandboxPath(check.path);
+        for (const op of ["read", "write"] as const) {
+          expect(
+            resolvePathAccess(target, op, normTable),
+            `${fixture.name}: normalized ${op} ${target}`,
+          ).toBe(resolvePathAccess(target, op, rawTable));
+        }
       }
     }
   });

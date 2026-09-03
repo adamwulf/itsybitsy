@@ -472,7 +472,9 @@ function mergeRawFrontmatters(
 
   // Filesystem policy is independent of the kernel switch and unions across
   // every inheritance layer. Exact string duplicates within a list collapse;
-  // cross-list ties are preserved for normalizePathsConfig's write-wins rule.
+  // cross-list ties are preserved for the sandbox write-wins rule, applied in
+  // production by the profile/resolver access table (sortedAllowEntries) and,
+  // in Phase B, by normalizePathsConfig — both via one shared helper.
   let sawPaths = false;
   const pathsLists: Record<PathsListKey, string[]> = {
     allowRead: [],

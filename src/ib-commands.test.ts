@@ -85,6 +85,7 @@ import {
   setSandboxPortCheckForTesting,
   resetSandboxWiringForTesting,
   mergeSandboxLayerConfigs,
+  resolveTmuxSocketDir,
   teamAdd,
   writeMetaJsonAtomic,
 } from "./ib-commands";
@@ -11671,5 +11672,42 @@ describe("autoAcceptWorkspaceTrust / ...ForNewAgent — startup prompt navigatio
     expect(sendKeys.length).toBe(1);
     const cmd = sendKeys[0]!;
     expect(cmd.indexOf("Down")).toBeLessThan(cmd.indexOf("Enter"));
+  });
+});
+
+describe("resolveTmuxSocketDir — tmux socket dir derivation", () => {
+  const savedTmux = process.env.TMUX;
+  const savedTmpdir = process.env.TMUX_TMPDIR;
+  afterEach(() => {
+    if (savedTmux === undefined) delete process.env.TMUX;
+    else process.env.TMUX = savedTmux;
+    if (savedTmpdir === undefined) delete process.env.TMUX_TMPDIR;
+    else process.env.TMUX_TMPDIR = savedTmpdir;
+  });
+
+  test("TMUX set: the directory of the first comma-separated field, canonicalized", () => {
+    // $TMUX is "<socket-path>,<pid>,<session>"; the socket DIR is dirname of the
+    // first field, canonicalized (longest-existing-prefix).
+    process.env.TMUX = "/tmp/custom-tmux-dir/sock,999,2";
+    delete process.env.TMUX_TMPDIR;
+    expect(resolveTmuxSocketDir(501)).toBe(canonicalizeSandboxPath("/tmp/custom-tmux-dir"));
+  });
+
+  test("TMUX unset, TMUX_TMPDIR set: <TMUX_TMPDIR>/tmux-<uid>, canonicalized", () => {
+    delete process.env.TMUX;
+    process.env.TMUX_TMPDIR = "/tmp/my-tmux-tmpdir";
+    expect(resolveTmuxSocketDir(501)).toBe(canonicalizeSandboxPath("/tmp/my-tmux-tmpdir/tmux-501"));
+  });
+
+  test("both unset: /tmp/tmux-<uid>, canonical (/private/tmp on macOS)", () => {
+    delete process.env.TMUX;
+    delete process.env.TMUX_TMPDIR;
+    const result = resolveTmuxSocketDir(501);
+    expect(result).toBe(canonicalizeSandboxPath("/tmp/tmux-501"));
+    // Canonical: idempotent under canonicalization; on macOS /tmp -> /private/tmp.
+    expect(result).toBe(canonicalizeSandboxPath(result));
+    if (process.platform === "darwin") {
+      expect(result).toBe("/private/tmp/tmux-501");
+    }
   });
 });

@@ -38,7 +38,7 @@ Every Phase A row below is `ON BRANCH agent/sandbox-safety` today
 | A2 | Most-specific-wins access table: one shared total sort, `resolvePathAccess()`, the SBPL last-match oracle, seeded order permutations, and the LIVE `sandbox-exec` probe on macOS; runtime roots sit in the table; the resolver models the `paths` table only, not `rawAllow`[^a2] | ON BRANCH | `8918447` |
 | A3 | `_all.md` floor tightened to the verified minimum (`allowRead` drops `/` and `~`; the root listing moves to the `rawAllow` line `(allow file-read-data (literal "/"))`; the `~/.itsybitsy` write floor; `~/Library/Keychains` only); runtime roots keyed on resolved `canSpawnChildren` (REPOAGENTS write for a spawner / read otherwise; PARENTCLAUDE write for a spawner); the tmux socket denied for non-spawners with both a file deny and a network-outbound deny; the LIVE claude boot gate made opt-in (`IB_LIVE_BOOT=1`)[^a3] | ON BRANCH | `bd0a2c4` |
 | A4 | claude `--dangerously-skip-permissions` emitted only inside the `sandbox-exec` wrapper when enabled (G1); `ib sandbox refresh <id> \| --all` re-derives an existing agent's frozen sandbox from the current `.md` files (G2); the sealed record closes the agent-editable-meta boundary for non-spawners, re-sealed on the dashboard `b` spawn toggle (G3)[^a4] | ON BRANCH | `c7ed698` |
-| A5 | This rollout document (`docs/SANDBOX-ROLLOUT.md`): the single shipping ledger + enable-all gate + pilot + rollback | ON BRANCH | `__A5_SHA__` |
+| A5 | This rollout document (`docs/SANDBOX-ROLLOUT.md`): the single shipping ledger + enable-all gate + pilot + rollback | ON BRANCH | `d41c06d` |
 
 **A→sub-phase mapping.** The commits between `main` (`a5a51b1`) and
 `agent/sandbox-safety` group as: A0 foundation ends at `e38ae42`; A1 (the

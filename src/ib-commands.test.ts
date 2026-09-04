@@ -4400,6 +4400,34 @@ sandbox:
     });
   });
 
+  test("a type with NO paths block merges identically to one with an empty block (deny-by-default)", () => {
+    // Adam's invariant at the production merge path: a .md that omits `paths:`
+    // entirely must resolve the SAME as one declaring empty lists — never
+    // permissive. mergeSandboxLayerConfigs drops undefined layer.paths, so
+    // "no layer declares paths" yields empty lists, exactly like an explicit
+    // empty block. A missing block must never become an allow.
+    const base = { description: "", canSpawnChildren: false, instructionStyle: "worker" as const };
+    const noPaths = (name: string): import("./agent-types").AgentType => ({ name, ...base });
+    const emptyPaths = (name: string): import("./agent-types").AgentType => ({
+      name, ...base, paths: { allowRead: [], allowWrite: [], deny: [] },
+    });
+    const fromMissing = mergeSandboxLayerConfigs([
+      noPaths("_all"), noPaths("_non_coordinator"), noPaths("leaf"),
+    ]).paths;
+    const fromEmpty = mergeSandboxLayerConfigs([
+      emptyPaths("_all"), emptyPaths("_non_coordinator"), emptyPaths("leaf"),
+    ]).paths;
+    expect(fromMissing).toEqual({ allowRead: [], allowWrite: [], deny: [] });
+    expect(fromMissing).toEqual(fromEmpty);
+    // A single layer that DOES declare paths still contributes; the "missing"
+    // case is empty ONLY because no layer declared any — not a permissive default.
+    const withOne = mergeSandboxLayerConfigs([
+      noPaths("_all"), emptyPaths("_non_coordinator"),
+      { name: "leaf", ...base, paths: { allowRead: ["/opt/thing"], allowWrite: [], deny: [] } },
+    ]).paths;
+    expect(withOne.allowRead).toEqual(["/opt/thing"]);
+  });
+
   test("sandbox-disabled start.sh has no Seatbelt wrapper or proxy preamble", async () => {
     await writeSandboxType("sandbox-disabled", { enabled: false });
     setNewAgentSpawnRunner(cleanWorktreeRunner());

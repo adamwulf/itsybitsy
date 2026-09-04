@@ -65,6 +65,55 @@ function paths(overrides: Partial<PathsConfig> = {}): PathsConfig {
   };
 }
 
+describe("a missing paths block is identical to an empty one (deny-by-default)", () => {
+  // Adam's invariant: a type .md with NO `paths:` block MUST behave EXACTLY like
+  // one that declares `paths:` with empty lists — deny-by-default. A missing
+  // block must never mean "allowed". resolvePathsConfig maps an absent block to
+  // empty lists, so the two are indistinguishable downstream; mergeSandboxLayerConfigs
+  // (ib-commands.ts) likewise drops undefined layer.paths, so "no layer declares
+  // paths" also yields empty lists. These tests pin the property at the profile
+  // and resolver level so no future change can reintroduce the absent-means-
+  // permissive fallback that A1 removed.
+  const missing = resolvePathsConfig(undefined);
+  const empty = resolvePathsConfig(EMPTY_PATHS);
+
+  test("resolvePathsConfig(undefined) equals an explicit empty block", () => {
+    expect(missing).toEqual({ allowRead: [], allowWrite: [], deny: [] });
+    expect(missing).toEqual(empty);
+  });
+
+  test("both generate a byte-identical Seatbelt profile", () => {
+    expect(generateProfile(EMPTY_CONFIG, missing, PARAMS)).toBe(
+      generateProfile(EMPTY_CONFIG, empty, PARAMS),
+    );
+  });
+
+  test("both deny every path outside the runtime roots, for read and write", () => {
+    const table = sandboxPathAccessTable(missing, PARAMS);
+    for (const outside of [
+      "/etc/passwd",
+      "/usr/bin/env",
+      "/Users/sandbox-test-user/.ssh/id_rsa",
+      "/Users/sandbox-test-user/secrets",
+    ]) {
+      const target = canonicalizeSandboxPath(outside);
+      expect(resolvePathAccess(target, "read", table), `read ${target}`).toBe("deny");
+      expect(resolvePathAccess(target, "write", table), `write ${target}`).toBe("deny");
+    }
+  });
+
+  test("the runtime roots stay reachable, so the deny is not vacuous", () => {
+    // With absent/empty paths the ONLY thing an enabled agent can touch is its
+    // own runtime roots — proving the profile denies BY DEFAULT rather than
+    // allowing by default (a missing block granting access) or denying
+    // everything (which would fail to boot).
+    const table = sandboxPathAccessTable(missing, PARAMS);
+    const worktreeFile = canonicalizeSandboxPath(join(PARAMS.WORKTREE, "src/index.ts"));
+    expect(resolvePathAccess(worktreeFile, "read", table)).toBe("allow");
+    expect(resolvePathAccess(worktreeFile, "write", table)).toBe("allow");
+  });
+});
+
 describe("sandbox glob to regex", () => {
   test("star never crosses a path separator", () => {
     const regex = new RegExp(globToSandboxRegex("/a/*/b"));

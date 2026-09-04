@@ -1004,6 +1004,90 @@ describe("AgentWatcher", () => {
     });
   });
 
+  describe("per-agent-dir watches (reconcileAgentDirWatchers)", () => {
+    test("installs a shallow watch on each active agent's dir (skipping archived)", async () => {
+      const a1Dir = join(agentsDir, "a1");
+      const a2Dir = join(agentsDir, "a2");
+      const arDir = join(agentsDir, "ar");
+      await mkdir(a1Dir, { recursive: true });
+      await mkdir(a2Dir, { recursive: true });
+      await mkdir(arDir, { recursive: true });
+      const agents = [
+        _makeAgent({ id: "a1", repoPath: tempDir, storageDir: a1Dir }),
+        _makeAgent({ id: "a2", repoPath: tempDir, storageDir: a2Dir }),
+        _makeAgent({ id: "ar", repoPath: tempDir, storageDir: arDir, archived: true }),
+      ];
+      setupDefaultMocks(agents);
+
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "test" }],
+        { onUpdate: () => {} }
+      );
+      await watcher.start();
+
+      const map = (watcher as any).agentDirWatchers as Map<string, unknown>;
+      // Both ACTIVE agents get a watch; the archived one is deliberately skipped.
+      expect(map.size).toBe(2);
+      expect(map.has(a1Dir)).toBe(true);
+      expect(map.has(a2Dir)).toBe(true);
+      expect(map.has(arDir)).toBe(false);
+
+      watcher.stop();
+      // stop() tears down the per-agent set too, not just the per-repo watchers.
+      expect(map.size).toBe(0);
+    });
+
+    test("drops an agent's watch when it retires", async () => {
+      const a1Dir = join(agentsDir, "a1");
+      const a2Dir = join(agentsDir, "a2");
+      await mkdir(a1Dir, { recursive: true });
+      await mkdir(a2Dir, { recursive: true });
+      const both = [
+        _makeAgent({ id: "a1", repoPath: tempDir, storageDir: a1Dir }),
+        _makeAgent({ id: "a2", repoPath: tempDir, storageDir: a2Dir }),
+      ];
+      setupDefaultMocks(both);
+
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "test" }],
+        { onUpdate: () => {} }
+      );
+      await watcher.start();
+      const map = (watcher as any).agentDirWatchers as Map<string, unknown>;
+      expect(map.size).toBe(2);
+
+      // a2 retires: the next disk read returns only a1. The reconcile at the end
+      // of refresh() must close and forget a2's watch.
+      mockReadAllAgents.mockResolvedValue(readResult({ agents: [both[0]!] }));
+      await watcher.refresh();
+
+      expect(map.size).toBe(1);
+      expect(map.has(a1Dir)).toBe(true);
+      expect(map.has(a2Dir)).toBe(false);
+
+      watcher.stop();
+    });
+
+    test("gracefully skips an agent whose dir cannot be watched", async () => {
+      // storageDir points at a path that does not exist — watch() throws and the
+      // agent is left to the polls, without taking down start().
+      const missing = join(agentsDir, "does-not-exist");
+      const agents = [_makeAgent({ id: "gone", repoPath: tempDir, storageDir: missing })];
+      setupDefaultMocks(agents);
+
+      const watcher = new AgentWatcher(
+        [{ path: tempDir, name: "test" }],
+        { onUpdate: () => {} }
+      );
+      await watcher.start(); // must not throw
+
+      const map = (watcher as any).agentDirWatchers as Map<string, unknown>;
+      expect(map.size).toBe(0);
+
+      watcher.stop();
+    });
+  });
+
   describe("archived agents", () => {
     test("refresh() passes includeArchived=false to readAllAgents", async () => {
       setupDefaultMocks();

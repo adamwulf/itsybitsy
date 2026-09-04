@@ -1,11 +1,15 @@
 /**
- * Watch each repo's .ittybitty/agents/ directory (shallow / non-recursive) with
- * fs.watch. Emits events when an agent dir is added or removed (spawn / retire /
- * archive). The watch deliberately does not recurse into agent worktrees — see
- * the rationale at the watch() call in setupWatchersAsync (fseventsd overload).
- * A fallback poll every 10s (plus a 2s state poll) keeps everything current for
- * changes the shallow watch cannot see, e.g. a nested meta.json edit made
- * outside the dashboard.
+ * Watch .ittybitty/agents/ for changes using shallow (non-recursive) fs.watch,
+ * at two levels — NEITHER descends into agent worktrees, so worktree churn stays
+ * off fseventsd (see the rationale at the watch() call in setupWatchersAsync):
+ *   1. One watch per repo on the agents/ dir — fires when an agent dir is added
+ *      or removed (spawn / retire / archive).
+ *   2. One watch per active agent on its <id>/ dir — fires when meta.json /
+ *      meta.transient.json is written (tmp-file + atomic rename changes the dir's
+ *      entries). This gives instant updates for edits made outside the dashboard;
+ *      the set is reconciled after every refresh (see reconcileAgentDirWatchers).
+ * A fallback poll every 10s (plus a 2s state poll) covers anything the shallow
+ * watches miss, and any agent whose per-dir watch failed to install.
  * Captures tmux output and feeds it through parseState() for each active agent.
  */
 
@@ -87,6 +91,19 @@ export class AgentWatcher {
   private repos: RepoEntry[];
   private events: WatcherEvents;
   private watchers: FSWatcher[] = [];
+  /**
+   * Shallow (non-recursive) watches on each active agent's <id>/ directory,
+   * keyed by absolute agent-dir path. These give instant updates for meta.json
+   * / meta.transient.json edits made OUTSIDE the dashboard (an agent's own hooks
+   * writing state, another `ib` process) — those files are written via tmp-file
+   * + atomic rename (see mutateAgentMeta), so the rename changes <id>/'s entry
+   * list and a shallow dir watch fires. We watch the DIRECTORY, not meta.json
+   * itself, because the rename swaps the file's inode and a direct file watch
+   * would go stale. The watch does NOT descend into <id>/repo/, so worktree
+   * churn stays off fseventsd. Kept separate from `watchers` (the per-repo set)
+   * because this set is reconciled continuously as agents spawn and retire.
+   */
+  private agentDirWatchers = new Map<string, FSWatcher>();
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private stateTimer: ReturnType<typeof setInterval> | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -243,13 +260,57 @@ export class AgentWatcher {
     if (this.running) this.refresh();
   }
 
-  /** Close all fs.watch watchers */
+  /** Close all fs.watch watchers (both the per-repo set and the per-agent set) */
   private teardownWatchers(): void {
     this.watcherGeneration++;
     for (const w of this.watchers) {
       w.close();
     }
     this.watchers = [];
+    for (const w of this.agentDirWatchers.values()) {
+      try { w.close(); } catch { /* already closed */ }
+    }
+    this.agentDirWatchers.clear();
+  }
+
+  /**
+   * Reconcile the per-agent-dir shallow watches to match the current active
+   * agent set (`this._lastAgents`). Called at the end of refresh() — the only
+   * path that re-reads the agent set from disk. A newly spawned agent gets a
+   * watch within one refresh cycle (the agents/ watch that saw its dir appear
+   * triggers the refresh that adds it); a retired agent's watch is closed. When
+   * the set is unchanged this is cheap: no watch is created or closed. A watch()
+   * failure (fd limit, or the dir vanished mid-retire) degrades gracefully — the
+   * 10s/2s polls still keep that agent current.
+   */
+  private reconcileAgentDirWatchers(): void {
+    if (!this.running) return;
+    // Desired set: every active (non-archived) agent's storage dir.
+    const desired = new Set<string>();
+    for (const a of this._lastAgents) {
+      if (a.archived) continue;
+      const dir = a.storageDir ?? join(a.repoPath, ".ittybitty", "agents", a.id);
+      desired.add(dir);
+    }
+    // Drop watches for agents that are gone.
+    for (const [dir, w] of this.agentDirWatchers) {
+      if (!desired.has(dir)) {
+        try { w.close(); } catch { /* already closed */ }
+        this.agentDirWatchers.delete(dir);
+      }
+    }
+    // Add watches for agents that don't have one yet.
+    for (const dir of desired) {
+      if (this.agentDirWatchers.has(dir)) continue;
+      try {
+        const w = watch(dir, () => {
+          this.debounceRefresh();
+        });
+        this.agentDirWatchers.set(dir, w);
+      } catch {
+        // Dir vanished (mid-retire) or fd limit hit — polls cover this agent.
+      }
+    }
   }
 
   private watcherGeneration = 0;
@@ -442,6 +503,10 @@ export class AgentWatcher {
       this._lastAgents = agents;
       this.lastOrphanedSessions = orphanedTmuxSessions;
       this._lastLiveTmuxSessions = liveTmuxSessions;
+
+      // Reconcile per-agent-dir watches to the new set (adds watches for freshly
+      // spawned agents, drops them for retired ones). Cheap when unchanged.
+      this.reconcileAgentDirWatchers();
 
       // Detect state for each agent via tmux capture + parseState, and get coordinator info.
       // Lifecycle path: the watcher refresh is authorized to reap orphan PIDs

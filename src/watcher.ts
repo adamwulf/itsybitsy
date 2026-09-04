@@ -1,7 +1,11 @@
 /**
- * Watch .ittybitty/agents/ directories for changes using fs.watch.
- * Emits events when agents are added, changed, or removed.
- * Includes a fallback poll every 10s for macOS FSEvents reliability.
+ * Watch each repo's .ittybitty/agents/ directory (shallow / non-recursive) with
+ * fs.watch. Emits events when an agent dir is added or removed (spawn / retire /
+ * archive). The watch deliberately does not recurse into agent worktrees — see
+ * the rationale at the watch() call in setupWatchersAsync (fseventsd overload).
+ * A fallback poll every 10s (plus a 2s state poll) keeps everything current for
+ * changes the shallow watch cannot see, e.g. a nested meta.json edit made
+ * outside the dashboard.
  * Captures tmux output and feeds it through parseState() for each active agent.
  */
 
@@ -272,8 +276,25 @@ export class AgentWatcher {
       const agentsDir = join(repo.path, ".ittybitty", "agents");
       const questionsFile = join(repo.path, ".ittybitty", "user-questions.json");
 
+      // Watch the agents dir NON-RECURSIVELY (depth 1). We only need to learn
+      // when an agent dir appears or disappears (spawn / retire / archive) —
+      // that is a change to an IMMEDIATE child of agents/, which a shallow watch
+      // reports. We deliberately do NOT recurse: each agent dir holds a full
+      // `repo/` worktree (a complete checkout), and a recursive watch descended
+      // into every file of every worktree across all repos. That registered huge
+      // FSEvents streams (watch.log recorded ~27s to install 93 targets across
+      // 56 repos) and pegged macOS `fseventsd` at ~100% CPU as agents churned
+      // files in their worktrees — churn the dashboard never reads (readAllAgents
+      // only reads each agent's top-level meta.json).
+      //
+      // A shallow watch does NOT fire on a nested meta.json edit. That gap is
+      // covered two ways: (1) every dashboard-initiated mutation calls
+      // watcher.refresh() itself via executeAndRefresh, so a rename / model
+      // change / etc. made inside `ib watch` shows immediately; and (2) the 10s
+      // fallback poll + 2s state poll below pick up any change made outside the
+      // dashboard within a few seconds.
       try {
-        const watcher = watch(agentsDir, { recursive: true }, () => {
+        const watcher = watch(agentsDir, () => {
           this.debounceRefresh();
         });
         if (!this.running || gen !== this.watcherGeneration) {

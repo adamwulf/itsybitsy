@@ -1028,6 +1028,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetNukeResumeSpawnRunner();
     resetDiffStatusSpawnRunner();
     resetMergeSpawnRunner();
+    resetNewAgentSpawnRunner();
     resetUserConfigPath();
     // Failure-safety net for the new-agent tests below, which override the home
     // dir via setUserHome: if one throws before its inline

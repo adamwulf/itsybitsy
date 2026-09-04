@@ -10,7 +10,7 @@ import {
   processStartEpochSecondsCtx,
   resetProcessStartEpochSecondsCache,
 } from "../agents";
-import { RED } from "./colors";
+import { GREEN, RED } from "./colors";
 
 describe("InfoPanelComponent", () => {
   beforeEach(() => {
@@ -68,6 +68,27 @@ describe("InfoPanelComponent", () => {
     expect(claudeLine.startsWith(`${RED}●`)).toBe(true);
   });
 
+  test("renders a live watchdog from transient state when durable meta has no pid", () => {
+    const panel = new InfoPanelComponent();
+    const agent = makeAgent({ id: "agent-transient-watchdog" });
+    delete agent.meta.watchdog_pid;
+    agent.transient = {
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      tmux_api_error: false,
+      tmux_api_terms: false,
+      tmux_api_safeguard: false,
+      has_background_tasks: false,
+      updated_at_ms: Date.now(),
+      watchdog_pid: 4242,
+    };
+    isPidAliveCtx.set((pid) => pid === 4242);
+    panel.agent = agent;
+
+    const watchdogLine = panel.render(60)[1]!;
+    expect(watchdogLine.startsWith(`${GREEN}●`)).toBe(true);
+  });
+
   test("renders model name from agent meta", () => {
     const panel = new InfoPanelComponent();
     panel.displayHeight = 8;
@@ -80,6 +101,27 @@ describe("InfoPanelComponent", () => {
     const text = lines.map(stripAnsi).join("\n");
     expect(text).toContain("sonnet");
     expect(text).toContain("build a widget");
+  });
+
+  test("renders the sandbox lock only when sandboxing is enabled", () => {
+    const renderAgent = (enabled: boolean | undefined): string => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 10;
+      const agent = makeAgent({ id: `agent-sandbox-${String(enabled)}` });
+      if (enabled !== undefined) {
+        agent.meta.sandbox = {
+          enabled,
+          rawAllow: [],
+          domains: [],
+        };
+      }
+      panel.agent = agent;
+      return panel.render(60).map(stripAnsi).join("\n");
+    };
+
+    expect(renderAgent(true)).toContain("🔒 Sandboxed");
+    expect(renderAgent(false)).not.toContain("🔒");
+    expect(renderAgent(undefined)).not.toContain("🔒");
   });
 
   test("shows BOTH nickname and id when a nickname is set", () => {

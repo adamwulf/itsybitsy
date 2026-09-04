@@ -92,13 +92,20 @@ export interface BuildCodexStartContentInput {
   extraWritableRoots?: string[];
   /** Configure Codex to use Sakana Fugu and load its key at launch. */
   fugu?: boolean;
+  /** Disable Codex's own sandbox because the launch is wrapped by ours. */
+  sandboxEnabled?: boolean;
+  /** Proxy startup + environment exports rendered by the shared sandbox wiring. */
+  sandboxScriptPreamble?: string;
+  /** `sandbox-exec -f ... -D ...` prefix rendered by the shared sandbox wiring. */
+  sandboxExecPrefix?: string;
 }
 
 /**
  * Render the codex start.sh body for an agent. Mirrors the claude start.sh
  * skeleton (setsid + SIGHUP ignore + pid capture + meta-json write + wait
  * + exit-check) but launches codex with:
- *   - `-m <model> -a never -s workspace-write --dangerously-bypass-hook-trust`
+ *   - `-m <model> -a never -s <mode> --dangerously-bypass-hook-trust`
+ *     (`workspace-write` normally; `danger-full-access` inside our Seatbelt wrapper)
  *   - inline `-c 'hooks.<Event>=[...]'` flags from buildCodexLaunchArgs
  *   - the prompt as a positional `"$(cat <prompt-file>)"`
  *
@@ -138,9 +145,15 @@ export function buildCodexStartContent(input: BuildCodexStartContentInput): stri
   const qStartExitScript = shellQuote(input.absExitScript);
   const qStartAgentLog = shellQuote(input.absAgentLog);
   const qStartStderrLog = shellQuote(input.absStderrLog);
+  const sandboxMode = input.sandboxEnabled ? "danger-full-access" : "workspace-write";
+  if (input.sandboxEnabled && (!input.sandboxScriptPreamble || !input.sandboxExecPrefix)) {
+    throw new Error("Sandbox-enabled codex launch requires the proxy preamble and sandbox-exec prefix");
+  }
+  const sandboxPreamble = input.sandboxEnabled ? input.sandboxScriptPreamble! : "";
+  const sandboxLaunchPrefix = input.sandboxEnabled ? `${input.sandboxExecPrefix} ` : "";
 
   // The launch line. Per SPEC §3.3:
-  //   codex -m <MODEL> -a never -s workspace-write --dangerously-bypass-hook-trust \
+  //   codex -m <MODEL> -a never -s <sandboxMode> --dangerously-bypass-hook-trust \
   //         <inline -c flags> "<prompt>"
   // We log only the model + sentinel rather than the prompt content so a leak
   // of agent.log doesn't disclose the prompt.
@@ -150,9 +163,9 @@ unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
 AGENT_LOG=${qStartAgentLog}
 STDERR_LOG=${qStartStderrLog}
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }${sandboxPreamble}
 
-log "Starting codex -m ${input.codexModel} -a never -s workspace-write (codex agent id=${input.agentId})"
+log "Starting codex -m ${input.codexModel} -a never -s ${sandboxMode} (codex agent id=${input.agentId})"
 log "PWD=$(pwd) which_codex=$(which codex 2>&1)"
 
 ${input.fugu ? `# Read the Fugu key only at launch time. It stays in the owner-only
@@ -193,9 +206,9 @@ else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid codex -m ${qModel} -a never -s workspace-write --dangerously-bypass-hook-trust ${qFlagArgs} "$(cat ${qAbsPromptFile})" <&0 2> "$STDERR_LOG" &
+    setsid ${sandboxLaunchPrefix}codex -m ${qModel} -a never -s ${sandboxMode} --dangerously-bypass-hook-trust ${qFlagArgs} "$(cat ${qAbsPromptFile})" <&0 2> "$STDERR_LOG" &
 else
-    codex -m ${qModel} -a never -s workspace-write --dangerously-bypass-hook-trust ${qFlagArgs} "$(cat ${qAbsPromptFile})" <&0 2> "$STDERR_LOG" &
+    ${sandboxLaunchPrefix}codex -m ${qModel} -a never -s ${sandboxMode} --dangerously-bypass-hook-trust ${qFlagArgs} "$(cat ${qAbsPromptFile})" <&0 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
 log "Codex PID: $CLAUDE_PID (setsid=$SETSID)"
@@ -280,13 +293,19 @@ export interface BuildCodexResumeContentInput {
   extraWritableRoots?: string[];
   /** Reconfigure Sakana Fugu for the resumed Codex session. */
   fugu?: boolean;
+  /** Disable Codex's own sandbox because the launch is wrapped by ours. */
+  sandboxEnabled?: boolean;
+  /** Proxy startup + environment exports rendered by the shared sandbox wiring. */
+  sandboxScriptPreamble?: string;
+  /** `sandbox-exec -f ... -D ...` prefix rendered by the shared sandbox wiring. */
+  sandboxExecPrefix?: string;
 }
 
 /**
  * Render the codex resume.sh body for an agent. Mirrors `buildCodexStartContent`
  * exactly (same setsid + SIGHUP ignore + pid capture + meta-json write + wait
  * + exit-check skeleton) but the launch line is:
- *   `codex resume "<UUID>" -a never -s workspace-write --dangerously-bypass-hook-trust <inline -c flags>`
+ *   `codex resume "<UUID>" -a never -s <mode> --dangerously-bypass-hook-trust <inline -c flags>`
  *
  * Differences from start.sh:
  *   - Subcommand form (`codex resume <UUID>`), not the top-level `codex` invocation.
@@ -297,8 +316,8 @@ export interface BuildCodexResumeContentInput {
  *     persisting the original spawn's hook registration across resume; passing
  *     them again is a no-op if codex DOES persist them and safety-critical if
  *     it doesn't (without hooks every PreToolUse silently fail-opens).
- *   - Re-passes `-a never -s workspace-write` for the same defense-in-depth
- *     reason (Q2 in the Phase 7 prompt).
+ *   - Re-passes `-a never` and the selected sandbox mode for the same
+ *     defense-in-depth reason (Q2 in the Phase 7 prompt).
  *
  * The PID variable is kept as `CLAUDE_PID` (and stored as `claude_pid` in
  * meta.json) intentionally — see `buildCodexStartContent` rationale.
@@ -330,6 +349,12 @@ export function buildCodexResumeContent(input: BuildCodexResumeContentInput): st
   const qResumeExitScript = shellQuote(input.absExitScript);
   const qResumeAgentLog = shellQuote(input.absAgentLog);
   const qResumeStderrLog = shellQuote(input.absStderrLog);
+  const sandboxMode = input.sandboxEnabled ? "danger-full-access" : "workspace-write";
+  if (input.sandboxEnabled && (!input.sandboxScriptPreamble || !input.sandboxExecPrefix)) {
+    throw new Error("Sandbox-enabled codex resume requires the proxy preamble and sandbox-exec prefix");
+  }
+  const sandboxPreamble = input.sandboxEnabled ? input.sandboxScriptPreamble! : "";
+  const sandboxLaunchPrefix = input.sandboxEnabled ? `${input.sandboxExecPrefix} ` : "";
 
   return `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own claude process
@@ -337,7 +362,7 @@ unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
 AGENT_LOG=${qResumeAgentLog}
 STDERR_LOG=${qResumeStderrLog}
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [resume.sh] $1" >> "$AGENT_LOG"; }
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [resume.sh] $1" >> "$AGENT_LOG"; }${sandboxPreamble}
 
 log "Resuming codex resume ${input.codexSessionId} (codex agent id=${input.agentId})"
 log "PWD=$(pwd) which_codex=$(which codex 2>&1)"
@@ -379,9 +404,9 @@ else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid codex resume ${qSessionId} -a never -s workspace-write --dangerously-bypass-hook-trust ${qFlagArgs} <&0 2> "$STDERR_LOG" &
+    setsid ${sandboxLaunchPrefix}codex resume ${qSessionId} -a never -s ${sandboxMode} --dangerously-bypass-hook-trust ${qFlagArgs} <&0 2> "$STDERR_LOG" &
 else
-    codex resume ${qSessionId} -a never -s workspace-write --dangerously-bypass-hook-trust ${qFlagArgs} <&0 2> "$STDERR_LOG" &
+    ${sandboxLaunchPrefix}codex resume ${qSessionId} -a never -s ${sandboxMode} --dangerously-bypass-hook-trust ${qFlagArgs} <&0 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
 log "Codex PID: $CLAUDE_PID (setsid=$SETSID)"

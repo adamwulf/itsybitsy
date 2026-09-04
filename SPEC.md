@@ -221,6 +221,12 @@ Resume (`ib resume <id>`) restarts a stopped agent:
 6. **Auto-spawn watchdog**: `ib watchdog <id>` is spawned in the background for ALL agents (not just those with a manager). The watchdog PID is saved to `meta.json` as `watchdog_pid`. The bash `cmd_resume()` does not include this step (known divergence).
 7. **State reset**: Write `state: "running"` and `state_updated_at` to `meta.json` (atomic merge write). See §1.3.1.
 
+**Related — `ib sandbox refresh <id> | --all`**: re-derives a sandboxed agent's
+frozen `sandbox`/`paths` block from the current agent-type files and restarts it
+through this same resume path so the new policy takes effect (coordinators are
+refused; `--all` covers every non-stopped agent in the current repo). See
+SPEC-SANDBOX.md §5.6.
+
 ### 1.7 Archiving
 
 Archive moves agent artifacts to `.ittybitty/archive/<YYYYMMDD-HHMMSS>-<agent-id>/`:

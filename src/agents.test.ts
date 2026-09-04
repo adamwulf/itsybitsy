@@ -1205,6 +1205,67 @@ describe("readAgentMeta", () => {
     expect(meta!.claude_pid_epoch).toBe(1001);
   });
 
+  test("resolved paths and sandbox configs round-trip through meta.json coercion", async () => {
+    const sandbox = {
+      enabled: true,
+      rawAllow: ["(allow process*)", "(deny network*)"],
+      domains: ["api.anthropic.com"],
+    };
+    const paths = {
+      allowRead: ["/usr", "~/.claude"],
+      allowWrite: ["/private/tmp"],
+      deny: ["**/.env"],
+    };
+    await Bun.write(
+      join(tempDir, "meta.json"),
+      JSON.stringify({ id: "agent-sandboxed", sandbox, paths, sandbox_proxy_port: 43123, sandbox_proxy_pid: 54321 }),
+    );
+
+    const { meta, error } = await readAgentMeta(tempDir);
+    expect(error).toBeUndefined();
+    expect(meta?.sandbox).toEqual(sandbox);
+    expect(meta?.paths).toEqual(paths);
+    expect(meta?.sandbox_proxy_port).toBe(43123);
+    expect(meta?.sandbox_proxy_pid).toBe(54321);
+  });
+
+  test("legacy meta without sandbox remains unsandboxed", async () => {
+    await Bun.write(join(tempDir, "meta.json"), JSON.stringify({ id: "agent-legacy" }));
+    const { meta } = await readAgentMeta(tempDir);
+    expect(meta?.sandbox).toBeUndefined();
+  });
+
+  test("malformed sandbox fields are safely coerced", async () => {
+    await Bun.write(
+      join(tempDir, "meta.json"),
+      JSON.stringify({
+        id: "agent-bad-sandbox",
+        paths: {
+          allowRead: ["/usr", 42],
+          allowWrite: "bad",
+          deny: null,
+        },
+        sandbox: {
+          enabled: "true  # note",
+          rawAllow: ["(allow process*)"],
+          domains: [false, "example.com"],
+        },
+      }),
+    );
+
+    const { meta } = await readAgentMeta(tempDir);
+    expect(meta?.sandbox).toEqual({
+      enabled: false,
+      rawAllow: ["(allow process*)"],
+      domains: ["example.com"],
+    });
+    expect(meta?.paths).toEqual({
+      allowRead: ["/usr"],
+      allowWrite: [],
+      deny: [],
+    });
+  });
+
   test("meta.json with wrong-typed fields gets defaults applied", async () => {
     await Bun.write(
       join(tempDir, "meta.json"),
@@ -6628,6 +6689,8 @@ describe("readAgentMeta mtime cache", () => {
     // ("Property '<field>' is missing") — the type-level half of the guard.
     const REQUIRED_DEEP_COPY: Record<NestedMutableKeys<AgentMeta>, true> = {
       spawned_by: true,
+      paths: true,
+      sandbox: true,
     };
 
     // Construct a meta with every known nested mutable field populated.
@@ -6636,6 +6699,16 @@ describe("readAgentMeta mtime cache", () => {
       id: "agent-deepcopy",
       tmux_session: "ib-orig",
       spawned_by: spawnedBy,
+      paths: {
+        allowRead: ["/original/read"],
+        allowWrite: ["/original/write"],
+        deny: ["**/.env"],
+      },
+      sandbox: {
+        enabled: true,
+        rawAllow: ["(allow process*)"],
+        domains: ["example.com"],
+      },
     }));
 
     // First read = cache miss (populates the canonical cache entry).
@@ -6660,11 +6733,30 @@ describe("readAgentMeta mtime cache", () => {
       first.meta.spawned_by.agent_id = "POLLUTED";
       first.meta.spawned_by.repo_path = "/polluted/path";
     }
+    if (first.meta?.paths) {
+      first.meta.paths.allowRead.push("/polluted/read");
+      first.meta.paths.allowWrite.push("/polluted/write");
+      first.meta.paths.deny.push("/polluted/deny");
+    }
+    if (first.meta?.sandbox) {
+      first.meta.sandbox.rawAllow.push("(allow default)");
+      first.meta.sandbox.domains.push("evil.example");
+    }
 
     // A fresh read must see the original canonical values — no leak.
     const second = await readAgentMeta(tempDir);
     expect(second.meta?.spawned_by?.agent_id).toBe("spawner-1");
     expect(second.meta?.spawned_by?.repo_path).toBe("/orig/path");
+    expect(second.meta?.sandbox).toEqual({
+      enabled: true,
+      rawAllow: ["(allow process*)"],
+      domains: ["example.com"],
+    });
+    expect(second.meta?.paths).toEqual({
+      allowRead: ["/original/read"],
+      allowWrite: ["/original/write"],
+      deny: ["**/.env"],
+    });
   });
 
   test("invalidates cache after .tmp + rename write pattern", async () => {

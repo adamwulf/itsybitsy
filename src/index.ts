@@ -9,7 +9,7 @@ import { userHome } from "./home";
 import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from "./registry";
 import { resolveAgentIcon } from "./agents";
 import type { Agent, FlatEntry } from "./agents";
-import { isValidAgentId, tmuxSessionTarget } from "./validation";
+import { isValidAgentId, isValidShellPath, tmuxSessionTarget } from "./validation";
 import { SYSTEM_AGENT_ID } from "./hooks/shared";
 import { normalizeTeamName, getTeam } from "./teams";
 
@@ -783,6 +783,24 @@ const COMMAND_HELP: Record<string, string> = {
     "Usage: ib write-pid <agent-id> <pid>\n" +
     "  Internal: record an agent's spawned process PID into meta.json. Called\n" +
     "  by start.sh / resume.sh.",
+  "write-proxy-pid":
+    "Usage: ib write-proxy-pid <agent-id> <pid> <port>\n" +
+    "  Internal: record the detached sandbox proxy PID and port.",
+  sandbox:
+    "Usage: ib sandbox refresh <agent-id> | ib sandbox refresh --all\n" +
+    "  Re-derive an existing agent's sandbox + paths policy from the current\n" +
+    "  agent-type files (_all.md, _non_coordinator.md, <type>.md), rewrite its\n" +
+    "  frozen meta block, and restart it through the ordinary resume path so the\n" +
+    "  new policy takes effect. --all refreshes every non-stopped agent in the\n" +
+    "  current repo (id order), continuing on error. Coordinators are refused\n" +
+    "  (reset them with the dashboard R key instead). Run from an unsandboxed\n" +
+    "  session so the sealed record can be re-written.",
+  "sandbox-proxy":
+    "Usage: ib sandbox-proxy --port <port> --domains <file> --pid-file <file> --ready-file <file>\n" +
+    "  Internal: run one per-agent allowlist proxy.",
+  "sandbox-proxy-launch":
+    "Usage: ib sandbox-proxy-launch --port <port> --domains <file> --log <file> --pid-file <file> --ready-file <file>\n" +
+    "  Internal: detach and health-check one per-agent allowlist proxy.",
   "respawn-self":
     "Usage: ib respawn-self <agent-id>\n" +
     "  Internal: the detached worker launched by `ib respawn` calls this to\n" +
@@ -859,6 +877,7 @@ function printUsage(): void {
   console.log("  resume <id>         Resume a stopped agent");
   console.log("  respawn [id]        Restart an agent's Claude session in-place (alias: restart)");
   console.log("                      No-arg form infers the agent from cwd — used by the /respawn slash command");
+  console.log("  sandbox refresh <id>|--all  Re-derive an agent's sandbox+paths from the current type files and restart it");
   console.log("");
   console.log("Configuration:");
   console.log("  config list         List all config keys with values");
@@ -1357,6 +1376,80 @@ export async function main() {
       } catch { /* ignore — fire-and-forget subprocess */ }
       break;
     }
+    case "sandbox-proxy":
+    case "sandbox-proxy-launch": {
+      const option = (name: string): string | undefined => {
+        const index = args.indexOf(name);
+        return index >= 0 ? args[index + 1] : undefined;
+      };
+      const portText = option("--port");
+      const domainsFile = option("--domains");
+      const pidFile = option("--pid-file");
+      const readyFile = option("--ready-file");
+      if (!portText || !domainsFile || !pidFile || !readyFile || !/^[1-9][0-9]*$/.test(portText)) {
+        console.error(COMMAND_HELP[command]);
+        process.exit(1);
+      }
+      const port = Number(portText);
+      if (port > 65535 || !isValidShellPath(domainsFile) || !isValidShellPath(pidFile) || !isValidShellPath(readyFile)) {
+        console.error("Invalid sandbox proxy port or file path");
+        process.exit(1);
+      }
+      const proxy = await import("./sandbox-proxy");
+      if (command === "sandbox-proxy") {
+        try {
+          await proxy.runSandboxProxy({ port, domainsFile, pidFile, readyFile });
+        } catch (err) {
+          console.error(err instanceof Error ? err.message : String(err));
+          process.exit(1);
+        }
+      } else {
+        const logFile = option("--log");
+        if (!logFile || !isValidShellPath(logFile)) {
+          console.error(COMMAND_HELP[command]);
+          process.exit(1);
+        }
+        try {
+          const pid = await proxy.launchSandboxProxyDetached({
+            port,
+            domainsFile,
+            logFile,
+            pidFile,
+            readyFile,
+          });
+          console.log(pid);
+        } catch (err) {
+          console.error(err instanceof Error ? err.message : String(err));
+          process.exit(1);
+        }
+      }
+      break;
+    }
+    case "write-proxy-pid": {
+      const agentId = args[1];
+      const pidArg = args[2];
+      const portArg = args[3];
+      if (!agentId || !pidArg || !portArg || !isValidAgentId(agentId) ||
+          !/^[1-9][0-9]*$/.test(pidArg) || !/^[1-9][0-9]*$/.test(portArg) || Number(portArg) > 65535) {
+        console.error("Usage: ib write-proxy-pid <agent-id> <pid> <port>");
+        process.exit(1);
+      }
+      const { mutateAgentMeta } = await import("./agents");
+      const repos = await listRepos();
+      const { existsSync } = await import("fs");
+      const repo = repos.find((entry) =>
+        existsSync(join(entry.path, ".ittybitty", "agents", agentId, "meta.json"))
+      );
+      if (!repo) {
+        console.error(`Agent ${agentId} not found in any registered repo.`);
+        process.exit(1);
+      }
+      await mutateAgentMeta(join(repo.path, ".ittybitty", "agents", agentId), (meta) => {
+        meta.sandbox_proxy_pid = Number(pidArg);
+        meta.sandbox_proxy_port = Number(portArg);
+      });
+      break;
+    }
     case "write-pid": {
       // Internal subcommand called by start.sh to record the
       // spawned process PID. Routes through mutateAgentMeta so the
@@ -1837,6 +1930,107 @@ export async function main() {
       const { mergeAgent } = await import("./ib-commands");
       await printAndExit(await mergeAgent(agent, resolved.targetDir));
       break;
+    }
+    case "sandbox": {
+      // `ib sandbox refresh <id> | --all` (A4 G2). Re-derives an agent's
+      // sandbox + paths from the current type files and restarts it through the
+      // ordinary resume path. `seal` is the internal helper below (A4 G3).
+      const sub = args[1];
+      const repos = await listRepos();
+      const { detectAgentStates, readAllAgents } = await import("./agents");
+      const { refreshAgentSandbox } = await import("./ib-commands");
+
+      if (sub === "refresh") {
+        const target = args[2];
+        if (!target) {
+          console.error("Usage: ib sandbox refresh <agent-id> | ib sandbox refresh --all");
+          process.exit(1);
+        }
+
+        if (target === "--all") {
+          // Resolve the current repo from cwd (same rule @coordinator uses):
+          // exact match, prefix match, or an agent worktree's root repo.
+          const cwd = process.cwd();
+          const ownRepo =
+            repos.find((r) => r.path === cwd) ||
+            repos.find((r) => cwd.startsWith(r.path + "/")) ||
+            (() => {
+              const m = cwd.match(/\/.ittybitty\/agents\/[^/]+\/repo$/);
+              if (!m) return undefined;
+              const repoRoot = cwd.substring(0, cwd.lastIndexOf("/.ittybitty"));
+              return repos.find((r) => r.path === repoRoot);
+            })();
+          if (!ownRepo) {
+            console.error("Error: 'ib sandbox refresh --all' must run from within a registered repo");
+            process.exit(1);
+          }
+
+          const { agents } = await readAllAgents(
+            repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })),
+            false,
+          );
+          let repoAgents = agents.filter((a) => a.repoPath === ownRepo.path);
+          // Live state so only non-stopped agents are touched.
+          await detectAgentStates(repoAgents, { reap: false });
+          repoAgents = repoAgents
+            .filter((a) => a.state !== "stopped")
+            .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+          if (repoAgents.length === 0) {
+            console.log(`No non-stopped agents to refresh in ${repoDisplayName(ownRepo)}`);
+            process.exit(0);
+          }
+
+          const { refreshAgentsSandbox } = await import("./ib-commands");
+          const { lines, anyFailed } = await refreshAgentsSandbox(repoAgents);
+          for (const line of lines) console.log(line);
+          process.exit(anyFailed ? 1 : 0);
+        }
+
+        const agent = await requireAgent(target, repos);
+        // Lifecycle path: about to mutate the agent (refresh restarts it).
+        await detectAgentStates([agent], { reap: true });
+        await printAndExit(await refreshAgentSandbox(agent));
+      }
+
+      if (sub === "seal") {
+        // Internal (A4 G3): write/refresh ONE agent's sealed record. Invoked
+        // unsandboxed — either directly, or by a sandboxed spawner's
+        // sealAgentRecord fallback through the tmux server, which cannot write
+        // the denied seal dir itself. Recomputes the record from the read-only
+        // agent-type files (canSpawnChildren resolution) + the agent's meta.
+        const target = args[2];
+        if (!target) {
+          console.error("Usage: ib sandbox seal <agent-id>");
+          process.exit(1);
+        }
+        const agent = await findAgentById(target, repos);
+        if (!agent) {
+          console.error(`Agent not found: ${target}`);
+          process.exit(1);
+        }
+        const { getRepoId } = await import("./ib-commands");
+        const { writeSealRecordDirect } = await import("./agent-seal");
+        const repoId = await getRepoId(agent.repoPath);
+        try {
+          // No explicit home: writeSealRecordDirect defaults to
+          // `process.env.HOME ?? homedir()`, the same seal home the writer/reader
+          // use everywhere else.
+          await writeSealRecordDirect(
+            repoId,
+            agent.id,
+            agent.meta as unknown as Record<string, unknown>,
+          );
+          console.log(`Sealed ${agent.id}`);
+          process.exit(0);
+        } catch (err) {
+          console.error(`Could not seal '${agent.id}': ${err instanceof Error ? err.message : String(err)}`);
+          process.exit(1);
+        }
+      }
+
+      console.error("Usage: ib sandbox refresh <agent-id> | ib sandbox refresh --all");
+      process.exit(1);
     }
     case "resume": {
       const repos = await listRepos();
@@ -2394,6 +2588,16 @@ export async function main() {
         if (type.allowedPaths && type.allowedPaths.length > 0) {
           console.log("ALLOWED PATHS:");
           for (const p of type.allowedPaths) console.log(`  ${p}`);
+        }
+        if (type.paths) {
+          for (const [label, entries] of [
+            ["PATHS ALLOW READ", type.paths.allowRead],
+            ["PATHS ALLOW WRITE", type.paths.allowWrite],
+            ["PATHS DENY", type.paths.deny],
+          ] as const) {
+            console.log(`${label} (${entries.length}):`);
+            for (const entry of entries) console.log(`  ${entry}`);
+          }
         }
         if (type.repos && type.repos.length > 0) {
           console.log("REPOS:");

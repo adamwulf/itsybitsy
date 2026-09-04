@@ -43,6 +43,45 @@ describe("buildCodexStartContent — launch line", () => {
     expect(content).toContain("-a never");
     expect(content).toContain("-s workspace-write");
     expect(content).toContain("--dangerously-bypass-hook-trust");
+    expect(content).not.toContain("sandbox-exec");
+    expect(content).not.toContain("export http_proxy=");
+  });
+
+  test("disabled sandbox start output is byte-identical for omitted, undefined, and explicit false", () => {
+    const omitted = buildCodexStartContent(baseInput());
+    const explicitUndefined = buildCodexStartContent({ ...baseInput(), sandboxEnabled: undefined });
+    const explicitFalse = buildCodexStartContent({
+      ...baseInput(),
+      sandboxEnabled: false,
+      sandboxScriptPreamble: "\nexport http_proxy=SHOULD_NOT_APPEAR\n",
+      sandboxExecPrefix: "sandbox-exec SHOULD_NOT_APPEAR",
+    });
+    expect(explicitUndefined).toBe(omitted);
+    expect(explicitFalse).toBe(omitted);
+    expect(omitted).toContain("-s workspace-write");
+    expect(omitted).not.toContain("sandbox-exec");
+    expect(omitted).not.toContain("danger-full-access");
+    expect(omitted).not.toContain("SHOULD_NOT_APPEAR");
+  });
+
+  test("uses our sandbox wrapper, proxy exports, and danger-full-access on both launch arms when enabled", () => {
+    const content = buildCodexStartContent({
+      ...baseInput(),
+      sandboxEnabled: true,
+      sandboxScriptPreamble: "\nexport HTTPS_PROXY=\"http://localhost:43123\"\n",
+      sandboxExecPrefix: "sandbox-exec -f '/tmp/test/sandbox.sb' -D 'AGENTDIR=/tmp/test'",
+    });
+    expect(content).toContain("export HTTPS_PROXY=\"http://localhost:43123\"");
+    expect(content).toContain("setsid sandbox-exec -f '/tmp/test/sandbox.sb'");
+    expect(content).toMatch(/^    sandbox-exec -f '\/tmp\/test\/sandbox\.sb'.* codex -m/m);
+    expect(content).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
+    expect(content).not.toContain("-s workspace-write");
+    expect(content).toMatch(/sandbox-exec [^\n]* codex [^\n]* <&0 2> "\$STDERR_LOG" &/);
+  });
+
+  test("refuses a sandbox-enabled launch without the complete wrapper", () => {
+    expect(() => buildCodexStartContent({ ...baseInput(), sandboxEnabled: true }))
+      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
   });
 
   test("threads codexEffort into the -c model_reasoning_effort override", () => {
@@ -284,6 +323,45 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     expect(content).toContain("-a never");
     expect(content).toContain("-s workspace-write");
     expect(content).toContain("--dangerously-bypass-hook-trust");
+    expect(content).not.toContain("sandbox-exec");
+    expect(content).not.toContain("export http_proxy=");
+  });
+
+  test("disabled sandbox resume output is byte-identical for omitted, undefined, and explicit false", () => {
+    const omitted = buildCodexResumeContent(baseInput());
+    const explicitUndefined = buildCodexResumeContent({ ...baseInput(), sandboxEnabled: undefined });
+    const explicitFalse = buildCodexResumeContent({
+      ...baseInput(),
+      sandboxEnabled: false,
+      sandboxScriptPreamble: "\nexport http_proxy=SHOULD_NOT_APPEAR\n",
+      sandboxExecPrefix: "sandbox-exec SHOULD_NOT_APPEAR",
+    });
+    expect(explicitUndefined).toBe(omitted);
+    expect(explicitFalse).toBe(omitted);
+    expect(omitted).toContain("-s workspace-write");
+    expect(omitted).not.toContain("sandbox-exec");
+    expect(omitted).not.toContain("danger-full-access");
+    expect(omitted).not.toContain("SHOULD_NOT_APPEAR");
+  });
+
+  test("uses our sandbox wrapper, proxy exports, and danger-full-access on both resume arms when enabled", () => {
+    const content = buildCodexResumeContent({
+      ...baseInput(),
+      sandboxEnabled: true,
+      sandboxScriptPreamble: "\nexport HTTPS_PROXY=\"http://localhost:43124\"\n",
+      sandboxExecPrefix: "sandbox-exec -f '/tmp/test/sandbox.sb' -D 'AGENTDIR=/tmp/test'",
+    });
+    expect(content).toContain("export HTTPS_PROXY=\"http://localhost:43124\"");
+    expect(content).toContain("setsid sandbox-exec -f '/tmp/test/sandbox.sb'");
+    expect(content).toMatch(/^    sandbox-exec -f '\/tmp\/test\/sandbox\.sb'.* codex resume/m);
+    expect(content).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
+    expect(content).not.toContain("-s workspace-write");
+    expect(content).toMatch(/sandbox-exec [^\n]* codex resume [^\n]* <&0 2> "\$STDERR_LOG" &/);
+  });
+
+  test("refuses a sandbox-enabled resume without the complete wrapper", () => {
+    expect(() => buildCodexResumeContent({ ...baseInput(), sandboxEnabled: true }))
+      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
   });
 
   test("re-passes extra writable roots through as --add-dir flags on resume", () => {

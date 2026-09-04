@@ -12,7 +12,7 @@
 import { join } from "path";
 import { mkdirSync } from "fs";
 import { watch, type FSWatcher } from "node:fs";
-import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, isApiError, isApiErrorRateLimited, isApiTerms, isApiSafeguard, readAgentState, hasBackgroundTasks, anyChildActive, readAgentTransient, updateAgentTransient } from "./agents";
+import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, isApiError, isApiErrorRateLimited, isApiTerms, isApiSafeguard, readAgentState, hasBackgroundTasks, anyChildActive, readAgentTransient, updateAgentTransient, mutateAgentMeta } from "./agents";
 import type { Agent } from "./agents";
 import {
   captureTmuxOutput,
@@ -44,6 +44,7 @@ import { parseModel } from "./agent-cli";
 import type { AgentCli } from "./agent-cli";
 import { AGY_HEARTBEAT_FILENAME } from "./hooks/agy-pre-invocation";
 import { classifyClaudeStartupPrompt } from "./coordinator";
+import { isSandboxProxyHealthy, launchSandboxProxyDetached } from "./sandbox-proxy";
 
 /**
  * Phase 6: classify an agent's CLI for watchdog branching.
@@ -122,6 +123,38 @@ export const WATCHDOG_SENTINEL = "@watchdog";
 
 /** How often the watchdog polls, in milliseconds */
 export const POLL_INTERVAL_MS = 5_000;
+
+type SandboxProxyHealthFn = (port: number) => Promise<boolean>;
+type SandboxProxyRestartFn = (agentDir: string, port: number) => Promise<number>;
+let sandboxProxyHealthFn: SandboxProxyHealthFn = isSandboxProxyHealthy;
+let sandboxProxyRestartFn: SandboxProxyRestartFn = async (agentDir, port) => {
+  return await launchSandboxProxyDetached({
+    port,
+    domainsFile: join(agentDir, "sandbox-domains.txt"),
+    logFile: join(agentDir, "sandbox-proxy.log"),
+    pidFile: join(agentDir, "sandbox-proxy.pid"),
+    readyFile: join(agentDir, "sandbox-proxy.ready"),
+  });
+};
+
+export function setWatchdogSandboxProxyFns(
+  health: SandboxProxyHealthFn,
+  restart: SandboxProxyRestartFn,
+): void {
+  sandboxProxyHealthFn = health;
+  sandboxProxyRestartFn = restart;
+}
+
+export function resetWatchdogSandboxProxyFns(): void {
+  sandboxProxyHealthFn = isSandboxProxyHealthy;
+  sandboxProxyRestartFn = async (agentDir, port) => await launchSandboxProxyDetached({
+    port,
+    domainsFile: join(agentDir, "sandbox-domains.txt"),
+    logFile: join(agentDir, "sandbox-proxy.log"),
+    pidFile: join(agentDir, "sandbox-proxy.pid"),
+    readyFile: join(agentDir, "sandbox-proxy.ready"),
+  });
+}
 
 /** Minimum interval between auto-compact checks per agent, in milliseconds (60s) */
 export const COMPACT_CHECK_COOLDOWN_MS = 60_000;
@@ -1731,6 +1764,39 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     } else {
       // Tmux session exists — reset grace period
       tmuxGoneSince = null;
+
+      // Direct egress is kernel-blocked, so a dead proxy means a live Claude
+      // agent is completely offline. The watchdog is deliberately launched
+      // outside Seatbelt (§4C.2) and can safely restore this one network exit.
+      // Re-read durable meta each tick: the watchdog is spawned immediately
+      // after tmux creation, while start.sh is still launching the initial
+      // proxy. Only begin health duty after start.sh has recorded that proxy's
+      // PID; otherwise the watchdog can race the initial bind and steal its
+      // port, making the sandboxed agent fail closed before Claude launches.
+      const { meta: currentMeta } = await readAgentMetaFn(agentDir);
+      if (
+        currentMeta?.sandbox?.enabled &&
+        typeof currentMeta.sandbox_proxy_port === "number" &&
+        typeof currentMeta.sandbox_proxy_pid === "number"
+      ) {
+        try {
+          const proxyPort = currentMeta.sandbox_proxy_port;
+          const healthy = await sandboxProxyHealthFn(proxyPort);
+          if (!healthy) {
+            await logAgent(agentDir, `[watchdog] sandbox proxy unhealthy on localhost:${proxyPort} — restarting`);
+            const pid = await sandboxProxyRestartFn(agentDir, proxyPort);
+            meta.sandbox_proxy_pid = pid;
+            meta.sandbox_proxy_port = proxyPort;
+            await mutateAgentMeta(agentDir, (current) => {
+              current.sandbox_proxy_pid = pid;
+              current.sandbox_proxy_port = proxyPort;
+            });
+            await logAgent(agentDir, `[watchdog] sandbox proxy restarted pid=${pid}`);
+          }
+        } catch (err) {
+          await logAgent(agentDir, `[watchdog] sandbox proxy restart failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
 
       // Auto-accept startup permission prompts (workspace trust, external
       // CLAUDE.md imports, new MCP servers) with the binary-confirmed 2.1.259

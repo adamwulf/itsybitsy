@@ -18,6 +18,7 @@ import {
 } from "./tmux-poller";
 import { InjectionContext } from "./types";
 import { logToWatchLog, logWarning } from "./watch-log";
+import type { PathsConfig, SandboxConfig } from "./sandbox";
 
 /** States that can be written to meta.json */
 export type MetaState = "creating" | "running" | "waiting" | "complete" | "stopped";
@@ -112,6 +113,14 @@ export interface AgentMeta {
    */
   canSpawnChildren?: boolean;
   agentIcon?: string;
+  /** Fully-resolved filesystem policy frozen at spawn time for resume parity. */
+  paths?: PathsConfig;
+  /** Fully-resolved sandbox policy frozen at spawn time for resume parity. */
+  sandbox?: SandboxConfig;
+  /** Fresh per-launch localhost proxy port (reallocated on every resume). */
+  sandbox_proxy_port?: number;
+  /** PID of the detached per-agent allowlist proxy. */
+  sandbox_proxy_pid?: number;
   /**
    * Optional friendly alias the agent ALSO answers to in name resolution
    * (`ib send`, dashboard selection, etc). The immutable `id` remains the
@@ -153,6 +162,8 @@ export interface Agent {
   repoPath: string;
   repoName: string;
   meta: AgentMeta;
+  /** Latest watchdog-owned transient state, when available. */
+  transient?: TransientState | null;
   state: AgentState;
   age: string;
   archived: boolean;
@@ -1620,6 +1631,20 @@ function copyAgentMeta(meta: AgentMeta): AgentMeta {
   return {
     ...meta,
     spawned_by: meta.spawned_by ? { ...meta.spawned_by } : meta.spawned_by,
+    paths: meta.paths
+      ? {
+          allowRead: [...meta.paths.allowRead],
+          allowWrite: [...meta.paths.allowWrite],
+          deny: [...meta.paths.deny],
+        }
+      : undefined,
+    sandbox: meta.sandbox
+      ? {
+          ...meta.sandbox,
+          rawAllow: [...meta.sandbox.rawAllow],
+          domains: [...meta.sandbox.domains],
+        }
+      : undefined,
   };
 }
 
@@ -1684,6 +1709,42 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
     if (data.summary !== undefined && typeof data.summary !== "string") delete data.summary;
     if (data.agentType !== undefined && typeof data.agentType !== "string") delete data.agentType;
     if (data.agentIcon !== undefined && typeof data.agentIcon !== "string") delete data.agentIcon;
+    const stringList = (value: unknown): string[] =>
+      Array.isArray(value)
+        ? value.filter((entry): entry is string => typeof entry === "string")
+        : [];
+    if (data.paths !== undefined) {
+      if (typeof data.paths !== "object" || data.paths === null || Array.isArray(data.paths)) {
+        delete data.paths;
+      } else {
+        const paths = data.paths as Record<string, unknown>;
+        data.paths = {
+          allowRead: stringList(paths.allowRead),
+          allowWrite: stringList(paths.allowWrite),
+          deny: stringList(paths.deny),
+        } satisfies PathsConfig;
+      }
+    }
+    if (data.sandbox !== undefined) {
+      if (typeof data.sandbox !== "object" || data.sandbox === null || Array.isArray(data.sandbox)) {
+        delete data.sandbox;
+      } else {
+        const sandbox = data.sandbox as Record<string, unknown>;
+        data.sandbox = {
+          enabled: sandbox.enabled === true,
+          rawAllow: stringList(sandbox.rawAllow),
+          domains: stringList(sandbox.domains),
+        } satisfies SandboxConfig;
+      }
+    }
+    if (data.sandbox_proxy_port !== undefined &&
+        (!Number.isInteger(data.sandbox_proxy_port) || data.sandbox_proxy_port < 1 || data.sandbox_proxy_port > 65535)) {
+      delete data.sandbox_proxy_port;
+    }
+    if (data.sandbox_proxy_pid !== undefined &&
+        (!Number.isInteger(data.sandbox_proxy_pid) || data.sandbox_proxy_pid < 1)) {
+      delete data.sandbox_proxy_pid;
+    }
     // Drop a non-string OR empty-string nickname on read. "" should never exist
     // (renameAgent deletes the field instead of writing ""), but be defensive so
     // a hand-edited or stale meta.json can't surface an empty nickname.
@@ -1735,7 +1796,10 @@ async function readAgentsFromDir(
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const agentDir = join(dir, entry.name);
-      const { meta, error } = await readAgentMeta(agentDir);
+      const [{ meta, error }, transient] = await Promise.all([
+        readAgentMeta(agentDir),
+        archived ? Promise.resolve(null) : readAgentTransient(agentDir),
+      ]);
       if (error) {
         // Defense-in-depth: when meta.json is missing on a non-archived dir,
         // check agent.log for an in-progress [spawn] start line. A slow
@@ -1791,6 +1855,7 @@ async function readAgentsFromDir(
         repoPath,
         repoName,
         meta,
+        transient,
         state: "unknown", // Updated by watcher via parseState()
         age: computeAge(meta.created_epoch),
         archived,

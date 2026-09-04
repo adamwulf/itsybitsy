@@ -3682,11 +3682,27 @@ export function resetNewAgentSpawnRunner(): void {
   newAgentSpawnCtx.reset();
   newAgentDelayOverrideMs = null;
   agyVersionProbeTimeoutOverrideMs = null;
+  callerMetaReaderOverride = null;
 }
 
 /** Override the `agy --version` probe timeout (ms) for tests. null = default. */
 export function setAgyVersionProbeTimeoutMs(ms: number | null): void {
   agyVersionProbeTimeoutOverrideMs = ms;
+}
+
+/** Type for readCallerMetaFromCwd override in tests */
+export type CallerMetaReaderFn = (cwd: string) => Promise<Record<string, unknown> | null> | Record<string, unknown> | null;
+
+let callerMetaReaderOverride: CallerMetaReaderFn | null = null;
+
+/** Override the caller meta reader for newAgent tests (e.g. to isolate tests from ambient agent worktrees) */
+export function setNewAgentCallerMetaReader(fn: CallerMetaReaderFn): void {
+  callerMetaReaderOverride = fn;
+}
+
+/** Reset the caller meta reader override */
+export function resetNewAgentCallerMetaReader(): void {
+  callerMetaReaderOverride = null;
 }
 
 /**
@@ -4048,6 +4064,9 @@ async function detectManagerFromCwd(cwd: string, rootRepoPath: string): Promise<
  * dodge the gate by passing `--spawned-by`.
  */
 async function readCallerMetaFromCwd(cwd: string): Promise<Record<string, unknown> | null> {
+  if (callerMetaReaderOverride !== null) {
+    return callerMetaReaderOverride(cwd);
+  }
   const agentPattern = /\/\.ittybitty\/agents\/([^/]+)\/repo/;
   if (!agentPattern.test(cwd)) return null;
   const callerDir = cwd.replace(/(\/\.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");

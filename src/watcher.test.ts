@@ -293,7 +293,7 @@ describe("AgentWatcher", () => {
   });
 
   describe("fallback poll", () => {
-    test("poll fires refresh after 10s interval", async () => {
+    test("poll fires refresh after 3s interval", async () => {
       setupDefaultMocks();
       const watcher = new AgentWatcher(
         [{ path: tempDir, name: "test" }],
@@ -306,19 +306,21 @@ describe("AgentWatcher", () => {
         const callsAfterStart = mockReadAllAgents.mock.calls.length;
         expect(callsAfterStart).toBe(1);
 
-        // Advance just under 10s — no poll yet
-        jest.advanceTimersByTime(9_999);
+        // Advance just under 3s — no poll yet. (Stay under the 2s state-poll
+        // tick too: pollStates does not call readAllAgents, but keeping the
+        // window < 2s avoids coupling this assertion to the state timer.)
+        jest.advanceTimersByTime(1_999);
         await Promise.resolve();
         expect(mockReadAllAgents.mock.calls.length).toBe(callsAfterStart);
 
-        // Advance to exactly 10s
-        jest.advanceTimersByTime(1);
+        // Advance to exactly 3s — the structural poll fires one refresh
+        jest.advanceTimersByTime(1_001);
         for (let i = 0; i < 10; i++) await Promise.resolve();
 
         expect(mockReadAllAgents.mock.calls.length).toBe(callsAfterStart + 1);
 
-        // Advance another 10s — second poll fires
-        jest.advanceTimersByTime(10_000);
+        // Advance another 3s — second poll fires
+        jest.advanceTimersByTime(3_000);
         for (let i = 0; i < 10; i++) await Promise.resolve();
 
         expect(mockReadAllAgents.mock.calls.length).toBe(callsAfterStart + 2);
@@ -343,7 +345,7 @@ describe("AgentWatcher", () => {
         const afterStart = updateCount;
         watcher.stop();
 
-        // Advance well past 10s — no poll should fire
+        // Advance well past the 3s poll interval — no poll should fire
         jest.advanceTimersByTime(30_000);
         await Promise.resolve();
         expect(updateCount).toBe(afterStart);

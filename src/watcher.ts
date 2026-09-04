@@ -1,7 +1,14 @@
 /**
- * Watch .ittybitty/agents/ directories for changes using fs.watch.
- * Emits events when agents are added, changed, or removed.
- * Includes a fallback poll every 10s for macOS FSEvents reliability.
+ * Watch each repo's .ittybitty/agents/ directory (shallow / non-recursive) with
+ * fs.watch, so the watch stays off macOS fseventsd — see the rationale at the
+ * watch() call in setupWatchersAsync (recursive watching pegged fseventsd at
+ * ~100% CPU and cost ~27s at startup). NOTE: on Bun 1.3.10 / macOS a
+ * non-recursive DIRECTORY watch does not fire on entry changes, so the way the
+ * dashboard actually stays current is the polling below: a 3s structural refresh
+ * (readAllAgents — catches spawn / retire and out-of-band meta.json edits) plus a
+ * 2s state poll. The agents/ watch is kept as a cheap, dormant fast-path for
+ * platforms / Bun versions that do dispatch directory events; dashboard-initiated
+ * edits refresh immediately via executeAndRefresh regardless.
  * Captures tmux output and feeds it through parseState() for each active agent.
  */
 
@@ -142,10 +149,15 @@ export class AgentWatcher {
     // Set up fs.watch on each repo's .ittybitty/agents/, archive/, and user-questions.json
     this.setupWatchers();
 
-    // Fallback poll every 10s for FSEvents reliability
+    // Structural poll every 3s. On Bun 1.3.10 / macOS the non-recursive agents/
+    // watch does not fire on spawn/retire, so this refresh() is the primary way
+    // new and removed agents (and out-of-band meta.json edits) reach the
+    // dashboard. Shortened from 10s to keep that responsive without the recursive
+    // watch. readAllAgents is cheap (~30ms), and refresh() is serialized with the
+    // 2s state poll below (the refreshing/polling flags) so the two never overlap.
     this.pollTimer = setInterval(() => {
       if (this.running) this.refresh();
-    }, 10_000);
+    }, 3_000);
 
     // Background state poll every 2s — keeps agent states fresh between fs.watch events
     this.stateTimer = setInterval(() => {
@@ -272,8 +284,31 @@ export class AgentWatcher {
       const agentsDir = join(repo.path, ".ittybitty", "agents");
       const questionsFile = join(repo.path, ".ittybitty", "user-questions.json");
 
+      // Watch the agents dir NON-RECURSIVELY. We deliberately do NOT recurse:
+      // each agent dir holds a full `repo/` worktree (a complete checkout), and a
+      // recursive watch descended into every file of every worktree across all
+      // repos. That registered huge FSEvents streams (watch.log recorded ~27s to
+      // install 93 targets across 56 repos) and pegged macOS `fseventsd` at ~100%
+      // CPU as agents churned files in their worktrees — churn the dashboard never
+      // reads (readAllAgents only reads each agent's top-level meta.json). A
+      // non-recursive watch uses kqueue, not FSEvents, so it stays entirely off
+      // fseventsd (verified with lsof on Bun 1.3.10) and fixes both the CPU pin
+      // and the ~27s startup.
+      //
+      // CAVEAT (Bun 1.3.10, macOS): a non-recursive fs.watch on a DIRECTORY does
+      // not dispatch entry-change events (create / rename / unlink of children).
+      // A watch on a FILE fires; a watch on a DIRECTORY does not — confirmed by an
+      // isolated probe. So on this platform THIS WATCH DOES NOT FIRE on
+      // spawn / retire. We keep it because it is cheap, harmless when dormant, and
+      // correct on platforms / Bun versions that do dispatch directory events.
+      // What actually keeps the dashboard current here is the polling below:
+      // the structural refresh (readAllAgents re-reads the agent dirs — catches
+      // spawn / retire and out-of-band meta.json edits) and the 2s state poll.
+      // Dashboard-initiated mutations (rename / model change / retire / etc.)
+      // refresh immediately on their own via executeAndRefresh, independent of
+      // this watch.
       try {
-        const watcher = watch(agentsDir, { recursive: true }, () => {
+        const watcher = watch(agentsDir, () => {
           this.debounceRefresh();
         });
         if (!this.running || gen !== this.watcherGeneration) {

@@ -1094,6 +1094,10 @@ sorted, generated, and one resolver function, all tested.
 4. The scratchpad runtime root; audit mode (`paths.audit`); the advisory Bash
    scanner (§6.6, against the resolver); session-start text; `ib info` and
    dashboard display; SPEC §2.2, §5.2, §6.1 and the implementation notes.
+6. `ib init-types --check`: diff the `paths:` and `sandbox:` blocks of the
+   live layer files against the embedded ones and print what is missing.
+   Agreed with `sandbox-safety` on 2026-09-04 as a Phase B item; listed in
+   the gate preconditions.
 5. ~~`ib sandbox refresh`~~ moved to Phase A (item A7, `sandbox-safety`),
    because the resume code is theirs. It re-derives an existing agent's
    sandbox block and path lists from the current `.md` files, rewrites its

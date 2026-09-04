@@ -38,6 +38,8 @@ export const KNOWN_MODELS: KnownModel[] = [
   { cli: "claude", model: "claude-sonnet-4-6", description: "Sonnet 4.6" },
   { cli: "claude", model: "claude-haiku-4-5-20251001", description: "Haiku 4.5" },
   // Codex — sourced from https://developers.openai.com/codex/models.
+  { cli: "codex", model: "gpt-6-astra", description: "Flagship GPT-6 Astra — complex work across code, apps, computer use, and research" },
+  { cli: "codex", model: "astra", description: "Alias — latest GPT-6 Astra" },
   { cli: "codex", model: "gpt-5.6-sol", description: "Flagship GPT-5.6 — complex coding, computer use, research, cybersecurity" },
   { cli: "codex", model: "gpt-5.6-terra", description: "Balanced GPT-5.6 — everyday work, strong reasoning + tool use" },
   { cli: "codex", model: "gpt-5.6-luna", description: "Fast GPT-5.6 — repeatable tasks at lower cost" },

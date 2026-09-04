@@ -1263,6 +1263,33 @@ agents can never be audited before they are refreshed; this is safe because
 the agent-types directory is read-only in the floor and audit only weakens
 enforcement to logging.
 
+**Refresh confirmed, and a sharper edge** (`sandbox-safety`, 2026-09-04
+17:42). `ib sandbox refresh` rewrites `meta.paths` and `meta.sandbox` from
+the current `.md` files unconditionally, sandbox enabled or not; only the seal
+verify and re-seal are gated on enabled. It also pauses and resumes the
+agent, so `--all` restarts every non-stopped agent. The edge: Adam's **live**
+`~/.itsybitsy/agent-types/_all.md` has no `paths:` block. The tightened floor
+lives in the embedded `docs/agent-types/_all.md`, and `ib init-types` writes
+only files that are missing, never updating an existing one[^61]. So a
+refresh alone would populate every agent's `meta.paths` with an empty floor,
+and the hook would still allow only the worktree and the runtime roots. The
+Phase B install is therefore **three steps**, in this order, or is gated
+behind `paths.audit: true` first:
+
+1. Add the `paths:` floor (read floor and write floor) from the embedded
+   `docs/agent-types/_all.md` to the live `~/.itsybitsy/agent-types/_all.md`.
+2. Install Phase B: merge, rebuild `ib`, copy to PATH, restart `ib watch`.
+3. Run `ib sandbox refresh --all` in each repo.
+
+This replaces the wrong rollout row "after Phase B installed, live agents
+unchanged until refreshed"; `path-isolation` corrects the Phase B rows in
+`docs/SANDBOX-ROLLOUT.md` on rebase. Proposed Phase B helper so step 1 is not
+a hand edit: `ib init-types --check` (or `ib sandbox floor`), which diffs the
+`paths:` and `sandbox:` blocks of the live layer files against the embedded
+ones and prints what is missing; the gate doc lists it as a precondition
+check. The kernel half of the invariant is pinned by tests on the sandbox
+branch at `d757031`, the new rebase target.
+
 **Parallel option during Phase A**, if Adam wants speed: `path-isolation`
 starts the pieces that touch none of `agent-types.ts`, `newAgent`, or
 `sandbox.ts`: the Bash-scanner tokenization in `agent-path.ts` against a
@@ -1352,3 +1379,4 @@ its wrapper after its own boot-floor bisection.
 [^58]: [sandbox.enabled OR-merged across the chain; a descendant may never switch off a sandbox enabled by an ancestor — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:src/agent-types.ts`](src/agent-types.ts:462-506)
 [^59]: [SPEC-SANDBOX §4A.4: "SBPL = last matching rule decides"; precedence rule, deny wins over any allow at both layers; filesystem denies emitted last — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:SPEC-SANDBOX.md`](SPEC-SANDBOX.md:426-446)
 [^60]: [resume prepares the sandbox from `agent.meta.sandbox`, the frozen config, not from the type files — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:src/ib-commands.ts`](src/ib-commands.ts:1531-1548)
+[^61]: [`ib init-types` writes only the missing embedded files; existing files keep their edits](src/agent-types.ts:initAgentTypes)

@@ -1209,11 +1209,11 @@ async function resetCoordinator(agent: Agent): Promise<IbCommandResult> {
 
   // Spawn a fresh coordinator. newAgent's coordinator path generates the
   // agent ID from the repo basename, so it lands at the same ID we just
-  // tore down. _cwd ensures evaluation is hermetic against ambient process.cwd().
+  // tore down.
   const spawnResult = await newAgent(
     agent.repoPath,
     "You are the per-repo coordinator. Await instructions.",
-    { type: "coordinator", _cwd: agent.repoPath },
+    { type: "coordinator" },
   );
   if (!spawnResult.ok) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Reset failed during respawn: ${spawnResult.stderr || spawnResult.stdout}` };
@@ -3682,11 +3682,27 @@ export function resetNewAgentSpawnRunner(): void {
   newAgentSpawnCtx.reset();
   newAgentDelayOverrideMs = null;
   agyVersionProbeTimeoutOverrideMs = null;
+  callerMetaReaderOverride = null;
 }
 
 /** Override the `agy --version` probe timeout (ms) for tests. null = default. */
 export function setAgyVersionProbeTimeoutMs(ms: number | null): void {
   agyVersionProbeTimeoutOverrideMs = ms;
+}
+
+/** Type for readCallerMetaFromCwd override in tests */
+export type CallerMetaReaderFn = (cwd: string) => Promise<Record<string, unknown> | null> | Record<string, unknown> | null;
+
+let callerMetaReaderOverride: CallerMetaReaderFn | null = null;
+
+/** Override the caller meta reader for newAgent tests (e.g. to isolate tests from ambient agent worktrees) */
+export function setNewAgentCallerMetaReader(fn: CallerMetaReaderFn): void {
+  callerMetaReaderOverride = fn;
+}
+
+/** Reset the caller meta reader override */
+export function resetNewAgentCallerMetaReader(): void {
+  callerMetaReaderOverride = null;
 }
 
 /**
@@ -4048,6 +4064,9 @@ async function detectManagerFromCwd(cwd: string, rootRepoPath: string): Promise<
  * dodge the gate by passing `--spawned-by`.
  */
 async function readCallerMetaFromCwd(cwd: string): Promise<Record<string, unknown> | null> {
+  if (callerMetaReaderOverride !== null) {
+    return callerMetaReaderOverride(cwd);
+  }
   const agentPattern = /\/\.ittybitty\/agents\/([^/]+)\/repo/;
   if (!agentPattern.test(cwd)) return null;
   const callerDir = cwd.replace(/(\/\.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");

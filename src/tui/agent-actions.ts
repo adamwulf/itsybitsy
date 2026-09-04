@@ -481,9 +481,8 @@ export function handleResume(ctx: ActionCtx) {
             ctx.setNotice(`Coordinator ${coordStatus.agentId} not found in agent tree`, "error");
           }
         } else {
-          // No coordinator — spawn one. Pass _cwd: repo.path so coordinator spawn
-          // evaluates from the repo rather than ambient process.cwd().
-          const result = await newAgent(repo.path, "You are the per-repo coordinator. Await instructions.", { type: "coordinator", _cwd: repo.path });
+          // No coordinator — spawn one
+          const result = await newAgent(repo.path, "You are the per-repo coordinator. Await instructions.", { type: "coordinator" });
           if (result.ok) ctx.setNotice(`Spawned coordinator ${result.stdout}`, "info");
           else ctx.setNotice(`Spawn failed: ${result.stderr || result.stdout}`, "error");
         }
@@ -1565,10 +1564,7 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
     buffer: new TextBuffer(),
     focused: "name",
     onSubmit: (name: string, agentType: string, prompt: string) => {
-      // Evaluate newAgent from the perspective of the target repo path so
-      // caller detection, manager auto-detection, and caller gates are hermetic
-      // against whatever ambient working directory ib watch (or tests) ran from.
-      const opts: NewAgentOptions = { _cwd: repo.path };
+      const opts: NewAgentOptions = {};
       if (name.trim()) opts.name = name.trim();
       if (agentType) opts.type = agentType;
       ctx.executeAndRefresh(async () => {

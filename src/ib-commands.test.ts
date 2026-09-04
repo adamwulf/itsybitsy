@@ -59,6 +59,8 @@ import {
   resetMergeSpawnRunner,
   setNewAgentSpawnRunner,
   resetNewAgentSpawnRunner,
+  setNewAgentCallerMetaReader,
+  resetNewAgentCallerMetaReader,
   autoAcceptWorkspaceTrust,
   autoAcceptWorkspaceTrustForNewAgent,
   setAgyVersionProbeTimeoutMs,
@@ -4630,6 +4632,16 @@ describe("newAgent (native)", () => {
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("cannot spawn sub-agents");
     expect(await Bun.file(join(agentsDir, "should-not-exist2", "meta.json")).exists()).toBe(false);
+  });
+
+  test("setNewAgentCallerMetaReader overrides caller meta resolution for testing", async () => {
+    setNewAgentCallerMetaReader(() => ({ id: "stubbed-worker", worker: true, agentType: "worker" }));
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await newAgent(tempDir, "sub-task", { name: "should-not-exist-stub" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("stubbed-worker");
+    expect(result.stderr).toContain("cannot spawn sub-agents");
+    resetNewAgentCallerMetaReader();
   });
 
   test("manager caller CAN spawn (no regression)", async () => {

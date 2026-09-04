@@ -8,7 +8,7 @@ import { stripAnsi } from "../parse-state";
 import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult, waitFor } from "../test-utils";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
-import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner } from "../ib-commands";
+import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setNewAgentCallerMetaReader, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner } from "../ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxPollerSpawnCtx } from "../tmux-poller";
 import { IB_COORDINATOR_SESSION } from "../coordinator";
@@ -1795,6 +1795,7 @@ describe("DashboardComponent dialog and action handlers", () => {
       return makeResult("", 0);
     };
     setNewAgentSpawnRunner(mockSpawn);
+    setNewAgentCallerMetaReader(() => null);
     lifecycleSpawnCtx.set(mockSpawn);
 
     dashboard = makeDashboard();
@@ -1874,6 +1875,7 @@ describe("DashboardComponent dialog and action handlers", () => {
       return makeResult("", 0);
     };
     setNewAgentSpawnRunner(mockSpawn);
+    setNewAgentCallerMetaReader(() => null);
     lifecycleSpawnCtx.set(mockSpawn);
 
     dashboard = makeDashboard();
@@ -1953,6 +1955,7 @@ describe("DashboardComponent dialog and action handlers", () => {
       return makeResult("", 0);
     };
     setNewAgentSpawnRunner(mockSpawn);
+    setNewAgentCallerMetaReader(() => null);
     lifecycleSpawnCtx.set(mockSpawn);
 
     dashboard = makeDashboard();

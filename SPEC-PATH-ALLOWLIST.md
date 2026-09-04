@@ -1211,6 +1211,58 @@ set for writes, both for the write tools and for the Bash redirect and
 agent's redirect from `ib` writing the file; the hook can, because it sees the
 command.
 
+**Phase A complete** on `agent/sandbox-safety` (reported 2026-09-03 14:11;
+tip `d34fbf6` then, `005b66f` on 2026-09-04 with seal fixes; `main` moved to
+`ff4f54d`). A4 (`c7ed698`): claude skip-permissions only inside the wrapper;
+`ib sandbox refresh`; the sealed record, re-sealed on the dashboard `b`
+toggle. A5 (`d34fbf6`): `docs/SANDBOX-ROLLOUT.md` seeded from the `8725b37`
+draft, Phase A rows filled, Phase B and C rows left for `path-isolation`.
+Ships `enabled: false`, zero live change. Merge to `main` is Adam's call.
+
+**The invariant Adam asked for: missing `paths:` equals empty equals deny,
+end to end.** The kernel side holds after A1: an undefined block resolves to
+three empty lists, layers without a block are filtered out, and the old
+permissive derivation is gone. The hook side is Phase B, and it is the only
+fence when the kernel is off, for agy, and on other platforms. On `main` today
+the hook treats absent as permissive. B3 removes every such path, listed here
+so the guarantee is checkable:
+
+1. `checkFilePath` step 13, the allow-everything fallback[^6].
+2. Step 12 itself, which fires only when `ctx.allowedPaths` is defined[^6].
+3. The codex handler's context built without `allowedPaths`, so Bash and
+   every non-`apply_patch` tool fall to step 13, and the `apply_patch`
+   fallback to the worktree alone[^12][^13].
+4. The agy handler's fallback to the worktree alone[^18].
+5. The `@system` branch of `hookCheckPath`, which leaves the list undefined
+   on purpose for the legacy fallback[^10].
+6. `hookCheckPath` when `meta.json` is missing or unparseable, which leaves
+   the list undefined and therefore permissive[^10].
+
+After B3 every handler builds one table from `meta.paths` (empty lists when
+the key is absent) plus the runtime roots with the spawn-keyed operations and
+the tmux socket as a deny, and calls `resolvePathAccess`. An unreadable
+`meta.json` denies with a reason. Two fail-open answers in `hookCheckPath`,
+`allow` on malformed stdin and on a non-string `tool_name`[^10], become deny,
+matching agy. Tests pin missing, empty, absent meta, and malformed stdin to
+deny for all three handlers.
+
+**Consequence for live agents on install.** Every live agent today has no
+`paths` key in its `meta.json`. The kernel profile is frozen at spawn, so
+they are unaffected until refreshed. The hook reads `meta.paths` at every
+call, so the moment Phase B is **installed**, every live agent becomes strict
+at the hook: worktree plus runtime roots only, not even the `_all.md` read
+floor, because that floor is not in their `meta.json`. This is decision 6
+applied. The rollout row "after Phase B installed, live agents unchanged
+until refreshed" is therefore wrong for the hook; it must read: install
+Phase B, then run `ib sandbox refresh --all` at once, or set `paths.audit`
+first. The `@system` coordinator has no `meta.json`; its lists come from
+`_all.md` plus `system.md`, resolved at launch and stored where the hook can
+read them; missing is deny there too. The `paths.audit` flag must be read
+**live** from the current `_all.md` by the hook, not from frozen meta, or old
+agents can never be audited before they are refreshed; this is safe because
+the agent-types directory is read-only in the floor and audit only weakens
+enforcement to logging.
+
 **Parallel option during Phase A**, if Adam wants speed: `path-isolation`
 starts the pieces that touch none of `agent-types.ts`, `newAgent`, or
 `sandbox.ts`: the Bash-scanner tokenization in `agent-path.ts` against a

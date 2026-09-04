@@ -1166,7 +1166,7 @@ async function prepareSandbox(
     PARENTCLAUDE: join(repoPath, ".claude"),
     TMUXSOCK: resolveTmuxSocketDir(uid),
     canSpawnChildren,
-    HOME: homedir(),
+    HOME: userHome(),
   };
   const profile = generateProfile(config, paths, params);
   const parameterValues = sandboxProfileParameterValues(paths, params);
@@ -2506,7 +2506,7 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
   const newSandbox = merged.sandbox;
   let newPaths: PathsConfig;
   try {
-    newPaths = canonicalizePathsConfig(merged.paths, homedir());
+    newPaths = canonicalizePathsConfig(merged.paths, userHome());
   } catch (err) {
     const msg = `sandbox refresh: paths policy for '${typeName}' is invalid: ${err instanceof Error ? err.message : String(err)}`;
     await logAgent(agentDir, `[sandbox refresh] ${msg}`);
@@ -5291,7 +5291,7 @@ export async function newAgent(
   const resolvedSandboxConfig = mergedSandboxLayers.sandbox;
   let resolvedPathsConfig: PathsConfig;
   try {
-    resolvedPathsConfig = canonicalizePathsConfig(mergedSandboxLayers.paths, homedir());
+    resolvedPathsConfig = canonicalizePathsConfig(mergedSandboxLayers.paths, userHome());
   } catch (err) {
     return {
       ok: false,

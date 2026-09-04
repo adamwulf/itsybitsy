@@ -1,6 +1,6 @@
 import { realpathSync } from "fs";
-import { homedir } from "os";
 import { basename, dirname, join, resolve } from "path";
+import { userHome } from "./home";
 
 /** Fully-resolved, spawn-time sandbox configuration. */
 export interface SandboxConfig {
@@ -138,7 +138,7 @@ export function resolvePathsConfig(paths?: PathsConfig): PathsConfig {
 }
 
 function sandboxHome(explicitHome?: string): string {
-  return explicitHome ?? process.env.HOME ?? homedir();
+  return explicitHome ?? userHome();
 }
 
 /**

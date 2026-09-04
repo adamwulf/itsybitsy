@@ -1,6 +1,6 @@
 import { createHash } from "crypto";
 import { mkdir, rm } from "fs/promises";
-import { homedir } from "os";
+import { userHome } from "./home";
 import { join } from "path";
 
 import { metaCanSpawnChildren } from "./agent-types";
@@ -37,7 +37,7 @@ export type SealVerification =
   | { ok: false; field: string; reason: string };
 
 function sealHome(home?: string): string {
-  return home ?? process.env.HOME ?? homedir();
+  return home ?? userHome();
 }
 
 /**

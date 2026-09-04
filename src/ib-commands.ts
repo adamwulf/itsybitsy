@@ -925,15 +925,23 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
       agentDir,
     );
   } catch (err) {
-    return {
-      ok: false,
-      exitCode: 1,
-      stdout: `Reconstructed stopped agent '${agentId}' from ${archived.archiveKey}`,
-      stderr: [
-        `Re-seal failed: ${err instanceof Error ? err.message : String(err)}`,
-        ...warnings,
-      ].join("\n"),
-    };
+    const message = err instanceof Error ? err.message : String(err);
+    // Fail-hard ONLY for an enabled agent (resume would refuse a sealless
+    // enabled agent). A disabled agent is never seal-checked, so a seal-write
+    // failure is best-effort — mirror newAgent's enabled/disabled split rather
+    // than blocking the rehire of an unsandboxed agent.
+    if (restoredAgent.meta.sandbox?.enabled) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: `Reconstructed stopped agent '${agentId}' from ${archived.archiveKey}`,
+        stderr: [
+          `Re-seal failed: ${message}`,
+          ...warnings,
+        ].join("\n"),
+      };
+    }
+    warnings.push(`Seal warning (disabled agent): ${message}`);
   }
 
   let resumed: IbCommandResult;
@@ -3315,6 +3323,10 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
       const res = await archiveAgent(agent.repoPath, agent.id, agentDir);
       prunedTeams = res.prunedTeams;
       await removeAgentQuestions(agent.repoPath, agent.id);
+      // Delete the sealed record — it lives OUTSIDE agentDir (~/.itsybitsy/sealed),
+      // so the rm below does not touch it. A merged agent is gone, so its seal must
+      // not linger (retire/nuke delete it the same way).
+      await removeAgentSeal(agent.repoPath, agent.id);
       try { await rm(agentDir, { recursive: true, force: true }); } catch { /* ignore */ }
     });
 

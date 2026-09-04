@@ -1209,11 +1209,11 @@ async function resetCoordinator(agent: Agent): Promise<IbCommandResult> {
 
   // Spawn a fresh coordinator. newAgent's coordinator path generates the
   // agent ID from the repo basename, so it lands at the same ID we just
-  // tore down.
+  // tore down. _cwd ensures evaluation is hermetic against ambient process.cwd().
   const spawnResult = await newAgent(
     agent.repoPath,
     "You are the per-repo coordinator. Await instructions.",
-    { type: "coordinator" },
+    { type: "coordinator", _cwd: agent.repoPath },
   );
   if (!spawnResult.ok) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Reset failed during respawn: ${spawnResult.stderr || spawnResult.stdout}` };

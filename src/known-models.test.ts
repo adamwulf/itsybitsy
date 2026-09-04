@@ -50,4 +50,10 @@ describe("KNOWN_MODELS", () => {
     expect(selectors.has("codex:gpt-5.6-terra")).toBe(true);
     expect(selectors.has("codex:gpt-5.6-luna")).toBe(true);
   });
+
+  test("includes the GPT-6 Astra codex selectors", () => {
+    const selectors = new Set(KNOWN_MODELS.map((m) => `${m.cli}:${m.model}`));
+    expect(selectors.has("codex:gpt-6-astra")).toBe(true);
+    expect(selectors.has("codex:astra")).toBe(true);
+  });
 });

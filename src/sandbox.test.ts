@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "os";
 import { dirname, join } from "path";
 import { parseAgentTypeFile } from "./agent-types";
 import {
+  anchorRelativePaths,
   canonicalizePathsConfig,
   canonicalizeSandboxPath,
   compileSandboxPath,
@@ -1678,5 +1679,67 @@ describe("paths frontmatter validation", () => {
       allowRead: ["~/Documents/*.md"],
       allowWrite: ["/Users/tester/Documents/*.md"],
     }, "/Users/tester").errors).toEqual([]);
+  });
+
+  test("rejects relative entries without the allowRelative option", () => {
+    for (const entry of ["./x", "../fumble", "../../fumble/**/*.md"]) {
+      expect(validatePathsFrontmatter({ allowRead: [entry] }).errors.length)
+        .toBeGreaterThan(0);
+    }
+  });
+
+  test("accepts relative entries only with allowRelative", () => {
+    for (const entry of ["./x", "../fumble", "../../fumble/**/*.md"]) {
+      expect(
+        validatePathsFrontmatter({ allowRead: [entry] }, "/Users/tester", {
+          allowRelative: true,
+        }).errors,
+      ).toEqual([]);
+    }
+  });
+
+  test("still rejects bare names even with allowRelative", () => {
+    expect(
+      validatePathsFrontmatter({ allowRead: ["bare-name"] }, "/Users/tester", {
+        allowRelative: true,
+      }).errors.length,
+    ).toBeGreaterThan(0);
+  });
+});
+
+describe("anchorRelativePaths", () => {
+  const ANCHOR = "/Users/tester/Developer/repo";
+
+  test("anchors ../ at the sibling of the repo root", () => {
+    expect(anchorRelativePaths(paths({ allowRead: ["../fumble"] }), ANCHOR)).toEqual(
+      paths({ allowRead: ["/Users/tester/Developer/fumble"] }),
+    );
+  });
+
+  test("anchors ./ inside the repo root", () => {
+    expect(anchorRelativePaths(paths({ allowWrite: ["./build"] }), ANCHOR)).toEqual(
+      paths({ allowWrite: ["/Users/tester/Developer/repo/build"] }),
+    );
+  });
+
+  test("anchors the literal prefix of a relative glob and re-appends the suffix", () => {
+    expect(
+      anchorRelativePaths(paths({ deny: ["../../fumble/**/*.md"] }), ANCHOR),
+    ).toEqual(paths({ deny: ["/Users/tester/fumble/**/*.md"] }));
+  });
+
+  test("anchors a glob fused onto a relative name without inventing a separator", () => {
+    expect(anchorRelativePaths(paths({ allowRead: ["../fumble*.md"] }), ANCHOR)).toEqual(
+      paths({ allowRead: ["/Users/tester/Developer/fumble*.md"] }),
+    );
+  });
+
+  test("leaves absolute, home, and non-relative glob entries untouched", () => {
+    const input = paths({
+      allowRead: ["/usr", "~/.claude", "**/.env"],
+      allowWrite: ["/private/tmp"],
+      deny: ["~/secrets/*"],
+    });
+    expect(anchorRelativePaths(input, ANCHOR)).toEqual(input);
   });
 });

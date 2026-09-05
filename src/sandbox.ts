@@ -404,6 +404,52 @@ export function normalizePathsConfig(paths: PathsConfig, home?: string): PathsCo
   };
 }
 
+/**
+ * Placeholder absolute anchor used ONLY to validate a relative entry's grammar.
+ * A real spawn anchors relative entries at the main repo root the worktree was
+ * spawned from (anchorRelativePaths); validation runs before a repo root is
+ * known, so it anchors at this fixed absolute path purely to exercise
+ * compileSandboxPath's absolute-path grammar.
+ */
+const RELATIVE_VALIDATION_ANCHOR = "/__anchor__";
+
+/**
+ * Anchor one relative (`./` or `../`) entry at an absolute anchor directory,
+ * re-appending any glob suffix (from the first `*` or `?` onward) unchanged.
+ * Non-relative entries (absolute, home, or globs without a `./`/`../` prefix)
+ * are returned untouched.
+ */
+function anchorRelativeEntry(entry: string, anchor: string): string {
+  if (!entry.startsWith("./") && !entry.startsWith("../")) return entry;
+  const globIndex = entry.search(/[*?]/);
+  const literalPrefix = globIndex === -1 ? entry : entry.slice(0, globIndex);
+  const globSuffix = globIndex === -1 ? "" : entry.slice(globIndex);
+  let resolved = resolve(anchor, literalPrefix);
+  // resolve() strips a trailing slash; keep it so a `.../**` suffix re-appends
+  // as a fresh path segment instead of fusing onto the final directory name.
+  if (literalPrefix.endsWith("/") && !resolved.endsWith("/")) {
+    resolved += "/";
+  }
+  return `${resolved}${globSuffix}`;
+}
+
+/**
+ * Rewrite every relative (`./` or `../`) entry in a PathsConfig to an absolute
+ * path anchored at `anchor` (the main repo root the worktree was spawned from),
+ * re-appending any glob suffix unchanged. All other entries — absolute, home
+ * (`~`), and non-relative globs — pass through untouched, so the profile
+ * generator and the kernel never see a relative entry.
+ * (SPEC-PATH-ALLOWLIST.md 6.1, 6.2)
+ */
+export function anchorRelativePaths(paths: PathsConfig, anchor: string): PathsConfig {
+  const anchorEntry = (entry: string): string => anchorRelativeEntry(entry, anchor);
+  return {
+    allowRead: paths.allowRead.map(anchorEntry),
+    allowWrite: paths.allowWrite.map(anchorEntry),
+    deny: paths.deny.map(anchorEntry),
+  };
+}
+
 /** Compile one user-facing path entry to an SBPL matcher. */
 export function compileSandboxPath(entry: string, home?: string): string {
   const compiled = compilePath(entry, home);
@@ -793,6 +839,7 @@ export function validateSandboxFrontmatter(value: unknown): SandboxValidationRes
 export function validatePathsFrontmatter(
   value: unknown,
   home?: string,
+  options?: { allowRelative?: boolean },
 ): SandboxValidationResult {
   const errors: string[] = [];
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -803,6 +850,15 @@ export function validatePathsFrontmatter(
   }
 
   const resolvedHome = sandboxHome(home);
+  // When allowRelative is set (agent-type frontmatter), a `./` or `../` entry is
+  // validated by anchoring it at a fixed placeholder before compileSandboxPath,
+  // so the relative grammar passes the absolute-path check. Without the option
+  // relative entries stay rejected (the generator/kernel never see one).
+  const allowRelative = options?.allowRelative === true;
+  const anchorForValidation = (entry: string): string =>
+    allowRelative && typeof entry === "string"
+      ? anchorRelativeEntry(entry, RELATIVE_VALIDATION_ANCHOR)
+      : entry;
   const paths = value as Record<string, unknown>;
   for (const key of Object.keys(paths)) {
     if (!(PATHS_KEYS as readonly string[]).includes(key)) {
@@ -823,7 +879,7 @@ export function validatePathsFrontmatter(
         return;
       }
       try {
-        compileSandboxPath(entry, resolvedHome);
+        compileSandboxPath(anchorForValidation(entry), resolvedHome);
       } catch (err) {
         errors.push(`paths.${key}[${index}]: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -837,10 +893,10 @@ export function validatePathsFrontmatter(
     ? paths.allowWrite.filter((entry): entry is string => typeof entry === "string" && /[*?]/.test(entry))
     : [];
   for (const readEntry of readGlobs) {
-    const canonicalRead = canonicalizeGlobPrefix(expandHome(readEntry, resolvedHome));
+    const canonicalRead = canonicalizeGlobPrefix(expandHome(anchorForValidation(readEntry), resolvedHome));
     const readPrefix = canonicalRead.slice(0, canonicalRead.search(/[*?]/));
     for (const writeEntry of writeGlobs) {
-      const canonicalWrite = canonicalizeGlobPrefix(expandHome(writeEntry, resolvedHome));
+      const canonicalWrite = canonicalizeGlobPrefix(expandHome(anchorForValidation(writeEntry), resolvedHome));
       if (canonicalRead === canonicalWrite) continue;
       const writePrefix = canonicalWrite.slice(0, canonicalWrite.search(/[*?]/));
       if (readPrefix === writePrefix) {

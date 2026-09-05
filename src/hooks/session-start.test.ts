@@ -546,7 +546,7 @@ describe("buildPathIsolationSection", () => {
     expect(section).toContain("### Path Isolation");
     expect(section).toContain("You are isolated to your worktree at: /repo/.ittybitty/agents/agent-abc123/repo");
     // Runtime roots the agent always gets, and the deny-by-default lists.
-    expect(section).toContain("You can always access these runtime roots:");
+    expect(section).toContain("Subject to denied paths and protected-file rules, runtime access includes:");
     expect(section).toContain("your worktree (read and write)");
     expect(section).toContain("your own agent.log");
     expect(section).toContain("your Claude project directory and scratchpad");
@@ -607,6 +607,20 @@ describe("buildPathIsolationSection", () => {
     expect(section).toContain("The kernel sandbox is OFF");
     expect(section).not.toContain("EPERM");
   });
+
+  test.each(["codex:gpt-5.6-sol", "fugu:fugu", "agy:default"])(
+    "%s instructions omit Claude-only runtime roots", (model) => {
+      const ctx = detectRole(baseCtx.worktreePath, { model, sandbox: { enabled: true } });
+      const section = buildPathIsolationSection(ctx);
+      expect(section).not.toContain("your Claude project directory and scratchpad");
+      if (model.startsWith("agy:")) {
+        expect(section).toContain("kernel sandbox is unavailable for agy");
+        expect(section).not.toContain("kernel sandbox is ON");
+      } else {
+        expect(section).toContain("kernel sandbox is ON");
+      }
+    },
+  );
 
   test("non-worktree (coordinator) shows repo path and 'this repo' root", () => {
     const ctx: SessionContext = {

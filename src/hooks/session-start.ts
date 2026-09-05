@@ -10,6 +10,7 @@ import { writeAgentState } from "../agents";
 import { listTeams } from "../teams";
 import { isValidSessionId } from "../validation";
 import type { PathsConfig, SandboxConfig } from "../sandbox";
+import { metadataCli } from "../agent-cli";
 
 export type SessionRole = "primary" | "manager" | "worker" | "coordinator";
 
@@ -39,6 +40,8 @@ export interface SessionContext {
    * `enabled` is consulted by the session-start text; absent means hook-only.
    */
   sandbox?: SandboxConfig;
+  /** Qualified model selector; absent legacy metadata uses Claude. */
+  model?: string;
 }
 
 export function detectRole(
@@ -48,9 +51,10 @@ export function detectRole(
     manager?: string | null;
     worker?: boolean;
     agentType?: string;
-    spawned_by?: { agent_id: string; repo_path: string | null };
+    spawned_by?: { agent_id: string; repo_path: string | null } | null;
     paths?: unknown;
     sandbox?: unknown;
+    model?: unknown;
   },
   agentIdOverride?: string,
 ): SessionContext {
@@ -138,6 +142,7 @@ export function detectRole(
     spawnedBy: effectiveSpawnedBy,
     paths,
     sandbox,
+    model: typeof meta.model === "string" ? meta.model : undefined,
   };
 }
 
@@ -429,10 +434,10 @@ export function buildPathIsolationSection(ctx: SessionContext): string {
     cannotAccessSection = `- You CANNOT access: Other agents' worktrees`;
   }
 
-  const runtimeRoots = `You can always access these runtime roots:
+  const cli = metadataCli(ctx.model);
+  const runtimeRoots = `Subject to denied paths and protected-file rules, runtime access includes:
 - ${baseRoot} (read and write)
-- your own agent.log
-- your Claude project directory and scratchpad`;
+- your own agent.log${cli === "claude" ? "\n- your Claude project directory and scratchpad" : ""}`;
 
   const paths = ctx.paths;
   const listsBlock = `Your agent type resolves to exactly these path lists. A missing \`paths\` block, or empty \`allowRead\` and \`allowWrite\` lists, grants only ${baseRoot} and the runtime roots above — nothing else:
@@ -440,7 +445,9 @@ ${renderPathList("Read only (allowRead)", paths?.allowRead)}
 ${renderPathList("Read and write (allowWrite)", paths?.allowWrite)}
 ${renderPathList("Denied (deny), overriding the lists above", paths?.deny)}`;
 
-  const sandboxLine = ctx.sandbox?.enabled
+  const sandboxLine = cli === "agy"
+    ? `The kernel sandbox is unavailable for agy; the itsybitsy hook enforces these paths.`
+    : ctx.sandbox?.enabled
     ? `The kernel sandbox is ON: an access outside these lists fails with EPERM, whatever the spelling. The hook explains the honest command-line attempts in the Denials tab of \`ib watch\`.`
     : `The kernel sandbox is OFF; the itsybitty hook is the only fence for these paths.`;
 
@@ -922,7 +929,7 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
 
   // Detect role - read meta.json from filesystem if in an agent directory
   const match = AGENT_CWD_PATTERN.exec(cwd);
-  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; agentType?: string; paths?: unknown; sandbox?: unknown; spawned_by?: { agent_id: string; repo_path: string | null }; state?: string } | undefined;
+  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; agentType?: string; model?: string; paths?: unknown; sandbox?: unknown; spawned_by?: { agent_id: string; repo_path: string | null }; state?: string } | undefined;
   let agentDirForState: string | undefined;
 
   if (match) {

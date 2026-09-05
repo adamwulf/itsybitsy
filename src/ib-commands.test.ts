@@ -3222,7 +3222,7 @@ describe("resumeAgent (native)", () => {
       expect(rule).toContain("/frozen/agy/read");
       expect(rule).toContain("/frozen/agy/write");
       expect(rule).toContain("**/agy-secret");
-      expect(rule).toContain("The kernel sandbox is OFF");
+      expect(rule).toContain("The kernel sandbox is unavailable for agy");
 
       // tmux new-session ran with the resume script.
       const newSessionCall = spawnCalls.find(c => c[0] === "tmux" && c[1] === "new-session");
@@ -4579,6 +4579,7 @@ sandbox:
     expect(agentsMd).toContain(canonicalizeSandboxPath(tempDir));
     expect(agentsMd).toContain("**/.env");
     expect(agentsMd).toContain("The kernel sandbox is ON");
+    expect(agentsMd).not.toContain("your Claude project directory and scratchpad");
     expect(dispatcherDryRunCalls.length).toBeGreaterThanOrEqual(3);
     expect(spawnCalls.some((call) => call[0] === "codex")).toBe(false);
   });
@@ -4885,6 +4886,71 @@ sandbox:
   });
 
   // ── A4 G2: ib sandbox refresh ──────────────────────────────────────────────
+  test("Codex refresh regenerates AGENTS.md from the new paths and sandbox state", async () => {
+    const id = "codex-refresh-instructions";
+    const oldRead = join(tempDir, "old-policy");
+    const newRead = join(tempDir, "new-policy");
+    await writeSandboxType(id, { model: "codex:gpt-5.4-mini", allowRead: [oldRead] });
+    setSandboxPortAllocatorForTesting(() => 43201);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99960 }));
+    expect((await callNewAgent("refresh policy", { name: id, type: id })).ok).toBe(true);
+    const agentDir = join(agentsDir, id);
+    const instructions = join(agentDir, "repo", "AGENTS.md");
+    expect(await Bun.file(instructions).text()).toContain("The kernel sandbox is ON");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    meta.codex_session_id = "019e7b21-cb7d-7f23-8674-11036ed141ef";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+    await writeSandboxType(id, { model: "codex:gpt-5.4-mini", enabled: false, allowRead: [newRead] });
+    let created = false;
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      if (cmd.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmd.includes("has-session")) return makeSpawnResult("", created ? 0 : 1);
+      if (cmd.includes("new-session")) created = true;
+      return makeSpawnResult("", 0);
+    });
+    const result = await refreshAgentSandbox(makeAgent(id, tempDir, "stopped", meta));
+    expect(result.ok).toBe(true);
+    const text = await Bun.file(instructions).text();
+    expect(text).toContain(canonicalizeSandboxPath(newRead));
+    expect(text).not.toContain(canonicalizeSandboxPath(oldRead));
+    expect(text).toContain("The kernel sandbox is OFF");
+    expect(text).not.toContain("your Claude project directory and scratchpad");
+    expect(await Bun.file(join(agentDir, "resume.sh")).text()).not.toContain("sandbox-exec");
+  });
+
+  test("agy rejects enabled sandbox policy at spawn, resume, and refresh", async () => {
+    const id = "agy-unsupported-sandbox";
+    await writeSandboxType(id, { model: "agy:default" });
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const spawned = await callNewAgent("reject unwrapped launch", { name: id, type: id });
+    expect(spawned.ok).toBe(false);
+    expect(spawned.stderr).toContain("agy has no kernel sandbox wrapper");
+    const agentDir = join(agentsDir, id);
+    expect(await Bun.file(join(agentDir, "start.sh")).exists()).toBe(false);
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    const meta: Partial<AgentMeta> = {
+      id, agentType: id, model: "agy:default", state: "stopped",
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+      paths: { allowRead: [], allowWrite: [], deny: [] },
+    };
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+    const resumed = await resumeAgent(makeAgent(id, tempDir, "stopped", meta));
+    expect(resumed.ok).toBe(false);
+    expect(resumed.stderr).toContain("agy has no kernel sandbox wrapper");
+    // Refresh refuses before mutating an existing disabled agent or stopping it.
+    meta.sandbox!.enabled = false;
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+    const refreshed = await refreshAgentSandbox(makeAgent(id, tempDir, "stopped", meta));
+    expect(refreshed.ok).toBe(false);
+    expect(refreshed.stderr).toContain("agy has no kernel sandbox wrapper");
+    expect((await Bun.file(join(agentDir, "meta.json")).json()).sandbox.enabled).toBe(false);
+    expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
+  });
+
   test("sandbox refresh re-derives paths from edited type files and replays the new frozen block", async () => {
     await writeSandboxType("sandbox-refresh", { allowRead: [tempDir], allowWrite: [tempDir], deny: ["**/.env"] });
     const ports = [43140, 43141];
@@ -8300,7 +8366,7 @@ sandbox:
       expect(rule).toContain(canonicalizeSandboxPath(readPath));
       expect(rule).toContain(canonicalizeSandboxPath(writePath));
       expect(rule).toContain("**/agy-denied");
-      expect(rule).toContain("The kernel sandbox is OFF");
+      expect(rule).toContain("The kernel sandbox is unavailable for agy");
     });
 
     test("appends both boundary files to <worktree>/.gitignore", async () => {

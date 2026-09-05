@@ -77,7 +77,7 @@ export function matchAgentById(id: string, agents: Agent[]): Agent | null {
 
 /** Format the resolved filesystem policy shown by `ib info <id>`. */
 export function formatAgentPathPolicy(
-  meta: Pick<AgentMeta, "paths" | "sandbox" | "model">,
+  meta: Pick<AgentMeta, "paths" | "sandbox"> & Partial<Pick<AgentMeta, "model">>,
 ): string[] {
   const lines = [
     `Sandbox:      ${kernelSandboxStatus(meta)}`,

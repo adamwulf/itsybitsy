@@ -97,10 +97,10 @@ export interface AgentAccessTableParams {
  *
  * The runtime roots come from `sandboxPathAccessTable` (AGENTDIR, WORKTREE,
  * GITDIR, REPOAGENTS — spawn-keyed — and PARENTCLAUDE for spawners, plus the
- * tmux deny for non-spawners); the Claude project dir and scratchpad are
- * appended as additional WRITE runtime allow roots. This matches what the kernel
- * profile grants (worker 1 passes PROJECTDIR/SCRATCHPAD through
- * SandboxProfileParams; the hook computes the same values from the worktree).
+ * tmux deny for non-spawners). Only Claude receives PROJECTDIR/SCRATCHPAD;
+ * Codex, fugu, and agy get neither. The same CLI-specific params are passed to
+ * the kernel profile builder, so the hook grants no extra Claude roots to a
+ * Codex profile that cannot access them.
  */
 export function agentPathAccessTable(p: AgentAccessTableParams): PathAccessTable {
   const params: SandboxProfileParams = {

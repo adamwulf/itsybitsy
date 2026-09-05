@@ -72,7 +72,7 @@ import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome, classifyClaudeStartupPrompt } from "./coordinator";
 import { loadAgentType, agentTypeExists, metaCanSpawnChildren } from "./agent-types";
 import type { AgentType } from "./agent-types";
-import { isCodexBackedCli, parseModel, mapEffortForCodex, type AgentCli } from "./agent-cli";
+import { isCodexBackedCli, parseModel, mapEffortForCodex, metadataCli, type AgentCli } from "./agent-cli";
 import { claudeProjectDirFor, claudeScratchpadDirFor } from "./hooks/paths-table";
 import {
   buildHooksBlock,
@@ -1161,6 +1161,8 @@ export NO_PROXY="$no_proxy"
 `;
 }
 
+const AGY_SANDBOX_ERROR = "sandbox refused: agy has no kernel sandbox wrapper; use sandbox.enabled: false until agy sandbox support is implemented";
+
 async function prepareSandbox(
   runner: SandboxCommandRunner,
   config: SandboxConfig,
@@ -1171,6 +1173,7 @@ async function prepareSandbox(
   canSpawnChildren: boolean,
   agentCli: AgentCli,
 ): Promise<PreparedSandbox> {
+  if (agentCli === "agy") throw new Error(AGY_SANDBOX_ERROR);
   const platform = sandboxPlatformOverride ?? process.platform;
   if (platform !== "darwin") {
     throw new Error(`sandbox refused: Seatbelt requires macOS (current platform: ${platform})`);
@@ -1596,6 +1599,11 @@ export async function resumeAgent(
         };
       }
     }
+    if (resumeCli === "agy" && agent.meta.sandbox?.enabled) {
+      await logAgent(agentDir, `[resume] ${AGY_SANDBOX_ERROR}`);
+      return { ok: false, exitCode: 1, stdout: "", stderr: AGY_SANDBOX_ERROR };
+    }
+
     // Re-derive the reasoning-effort level from the persisted meta value, the
     // exact twin of the model re-derivation above. Without this a resumed
     // agent silently loses its `--effort` setting. Legacy agents (spawned
@@ -1832,6 +1840,19 @@ export async function resumeAgent(
         ...codexParentRepoSubdirs,
       ];
 
+      // Refresh updates frozen metadata before entering resume. Regenerate the
+      // native instructions here so both ordinary resume and refresh describe
+      // the same policy as the hooks and the emitted kernel profile.
+      const { writeCodexAgentsMd } = await import("./codex-spawn");
+      const { detectRole } = await import("./hooks/session-start");
+      try {
+        await writeCodexAgentsMd(workPath, detectRole(workPath, agent.meta, agent.id));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        await logAgent(agentDir, `[resume] could not regenerate Codex AGENTS.md: ${message}`);
+        return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not regenerate Codex AGENTS.md: ${message}` };
+      }
+
       // Build resume.sh via the shared codex builder (mirrors start.sh).
       const { buildCodexResumeContent } = await import("./codex-spawn");
       const codexResumeContent = buildCodexResumeContent({
@@ -1909,6 +1930,7 @@ export async function resumeAgent(
       const { detectRole } = await import("./hooks/session-start");
       const agyResumeCtx = detectRole(workPath, {
         id: agent.id,
+        model: agent.meta.model,
         manager: agent.meta.manager ?? null,
         worker: agent.meta.worker === true,
         agentType: agent.meta.agentType,
@@ -2548,6 +2570,10 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
 
   const merged = mergeSandboxLayerConfigs([allLayer, nonCoordLayer, typeDef]);
   const newSandbox = merged.sandbox;
+  if (metadataCli(agent.meta.model) === "agy" && newSandbox.enabled) {
+    await logAgent(agentDir, `[sandbox refresh] ${AGY_SANDBOX_ERROR}`);
+    return { ok: false, exitCode: 1, stdout: "", stderr: AGY_SANDBOX_ERROR };
+  }
   // Anchor relative (./ ../) entries at this agent's main repo root, exactly as
   // newAgent does at spawn — agent.repoPath is `<repo>` and agentDir is
   // `<repo>/.ittybitty/agents/<id>` — so the refreshed meta.paths holds only
@@ -5363,6 +5389,9 @@ export async function newAgent(
     agentTypeDef,
   ]);
   const resolvedSandboxConfig = mergedSandboxLayers.sandbox;
+  if (agentCli === "agy" && resolvedSandboxConfig.enabled) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: AGY_SANDBOX_ERROR };
+  }
   // SAFETY: a relative entry that climbs to `/` or the home root anchors to a
   // filesystem-wide (or whole-home) grant. The single model requires fully-open
   // to be explicit (`allowRead: ["/"]` / `["~"]`), so this is a spawn ERROR, not
@@ -5755,6 +5784,7 @@ export async function newAgent(
       }
       const sessionCtx = detectRole(workPath, {
         id,
+        model,
         manager: manager || null,
         worker: isLeafAgent,
         agentType: typeName,
@@ -5890,6 +5920,7 @@ export async function newAgent(
       // Write the two boundary files (.agents/hooks.json + the always-on rule).
       const agySessionCtx = detectRole(workPath, {
         id,
+        model,
         manager: manager || null,
         worker: isLeafAgent,
         agentType: typeName,

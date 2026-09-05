@@ -85,6 +85,7 @@ import {
   setSandboxPortCheckForTesting,
   resetSandboxWiringForTesting,
   mergeSandboxLayerConfigs,
+  checkPathsRepoContainment,
   resolveTmuxSocketDir,
   refreshAgentSandbox,
   refreshAgentsSandbox,
@@ -12193,5 +12194,57 @@ describe("resolveTmuxSocketDir — tmux socket dir derivation", () => {
     if (process.platform === "darwin") {
       expect(result).toBe("/private/tmp/tmux-501");
     }
+  });
+});
+
+describe("checkPathsRepoContainment", () => {
+  let repoRoot: string;
+
+  beforeEach(async () => {
+    repoRoot = await mkdtemp(join(tmpdir(), "paths-containment-"));
+  });
+
+  afterEach(async () => {
+    await rm(repoRoot, { recursive: true, force: true });
+  });
+
+  const entry = (rel: string): string => canonicalizeSandboxPath(join(repoRoot, rel));
+
+  test("errors on an allow entry resolving under the agents directory", () => {
+    const result = checkPathsRepoContainment(
+      { allowRead: [], allowWrite: [entry(".ittybitty/agents/agent-x/repo/src")], deny: [] },
+      repoRoot,
+    );
+    expect(result.error).toBeDefined();
+    expect(result.error).toContain(canonicalizeSandboxPath(join(repoRoot, ".ittybitty/agents")));
+    expect(result.error).toContain("dead entry");
+  });
+
+  test("warns on an allow entry inside the repo root but outside the agents dir", () => {
+    const result = checkPathsRepoContainment(
+      { allowRead: [entry("src")], allowWrite: [], deny: [] },
+      repoRoot,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.warnings.length).toBe(1);
+    expect(result.warnings[0]).toContain(canonicalizeSandboxPath(repoRoot));
+  });
+
+  test("passes an entry outside the repo root with no error or warning", () => {
+    const result = checkPathsRepoContainment(
+      { allowRead: [canonicalizeSandboxPath(tmpdir())], allowWrite: [], deny: [] },
+      repoRoot,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.warnings).toEqual([]);
+  });
+
+  test("does not check deny entries (a deny under the agents dir is allowed)", () => {
+    const result = checkPathsRepoContainment(
+      { allowRead: [], allowWrite: [], deny: [entry(".ittybitty/agents/secret")] },
+      repoRoot,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.warnings).toEqual([]);
   });
 });

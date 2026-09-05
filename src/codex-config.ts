@@ -277,6 +277,29 @@ export function buildCodexLaunchArgs(input: BuildCodexLaunchArgsInput): CodexLau
   // package-manager fetches (e.g. xcodebuild resolving GitHub-hosted deps).
   // Revisit when we add per-agent-type capability gating.
   args.push("-c", "sandbox_workspace_write.network_access=true");
+  // Disable codex's unified-computer-use / code-mode runtime so it does NOT
+  // spawn the ChatGPT.app node helpers (cua_node/bin/node_repl and the
+  // unified-computer-use plugin's `node scripts/launch.mjs`, which itself
+  // re-spawns node_repl with stdio:"inherit"). One of those helpers resets the
+  // shared controlling tty to COOKED mode ~0.5s after spawn, racing codex's own
+  // raw-mode setup; when codex loses the race the TUI never submits input (Enter
+  // becomes a newline) and the agent wedges. Removing the helpers removes the
+  // only thing that touches the shared tty, eliminating the race at the root.
+  // NOTE: two independent sources — the plugin AND a standalone node_repl MCP
+  // server — so BOTH overrides are required. The plugin key MUST be passed
+  // WITHOUT TOML quotes: codex's `-c` splits the key on `.` and does NOT strip
+  // quotes, so `plugins."unified-computer-use@openai-bundled".enabled` would
+  // create a mismatched (quoted) key and silently no-op. The name has no dots,
+  // so the unquoted dotted path resolves to the real key. Our sol/codex coding
+  // agents do not use JS code-mode or computer/browser automation.
+  // Experimental gate for before/after measurement: set
+  // IB_CODEX_KEEP_COMPUTER_USE to KEEP the helpers (control / "before"); unset
+  // (default) disables them ("after" / fix). This lets one build produce both
+  // arms of the comparison while keeping every other flag identical.
+  if (!process.env.IB_CODEX_KEEP_COMPUTER_USE) {
+    args.push("-c", "plugins.unified-computer-use@openai-bundled.enabled=false");
+    args.push("-c", "mcp_servers.node_repl.enabled=false");
+  }
   // Disable the "Co-authored-by: Codex <noreply@openai.com>" commit trailer.
   // codex's commit_attribution is a TOML string — an empty string in TOML
   // is `""` (two adjacent double quotes); when codex sees this it skips

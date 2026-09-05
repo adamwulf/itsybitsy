@@ -693,7 +693,11 @@ describe("checkPathAccess", () => {
   });
 
   test("non-git commands with -C are not blocked", () => {
-    const ctx = makeCtx();
+    // `-C` is only a git directory-changing flag; on `ls` it is a column flag
+    // and must pass checkGitDirectoryFlags. The /tmp argument is granted here so
+    // the advisory path scanner (which now resolves absolute Bash args) does not
+    // mask what this test is really checking.
+    const ctx = makeCtx({ access: makeAccess({ allowRead: ["/tmp"] }) });
     const input = makeInput({
       toolName: "Bash",
       toolInput: { command: "ls -C /tmp" },

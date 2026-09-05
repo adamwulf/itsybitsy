@@ -438,6 +438,29 @@ function checkBashSettingsWrite(
 }
 
 /**
+ * Replace every heredoc BODY range (from heredocBodyRanges) with spaces so the
+ * body — data like commit messages and `ib send` payloads that legitimately
+ * carries `..`, apostrophes and absolute paths — is never tokenized, while every
+ * char offset OUTSIDE the bodies stays put. Shared by the relative-traversal
+ * scanner and the advisory Bash path scanner so both agree on what is data.
+ */
+function maskHeredocBodies(command: string): string {
+  const bodyRanges = heredocBodyRanges(command);
+  if (bodyRanges.length === 0) return command;
+  let out = "";
+  let pos = 0;
+  for (const r of [...bodyRanges].sort((a, b) => a.start - b.start)) {
+    const start = Math.max(pos, r.start);
+    if (start > pos) out += command.slice(pos, start);
+    const end = Math.min(command.length, r.end);
+    if (end > start) out += " ".repeat(end - start);
+    pos = Math.max(pos, end);
+  }
+  out += command.slice(pos);
+  return out;
+}
+
+/**
  * Detect a RELATIVE-path traversal in a bash command that escapes the worktree
  * into another agent's directory or the main checkout. The absolute-needle
  * scans (checkBashCommandPaths) only catch absolute references — a relative
@@ -517,21 +540,7 @@ function checkRelativeTraversalPaths(
 
   // Mask heredoc body lines (data) to spaces so they aren't tokenized, keeping
   // char offsets stable for everything else.
-  let scannable = command;
-  const bodyRanges = heredocBodyRanges(command);
-  if (bodyRanges.length > 0) {
-    let out = "";
-    let pos = 0;
-    for (const r of [...bodyRanges].sort((a, b) => a.start - b.start)) {
-      const start = Math.max(pos, r.start);
-      if (start > pos) out += command.slice(pos, start);
-      const end = Math.min(command.length, r.end);
-      if (end > start) out += " ".repeat(end - start);
-      pos = Math.max(pos, end);
-    }
-    out += command.slice(pos);
-    scannable = out;
-  }
+  const scannable = maskHeredocBodies(command);
 
   for (let token of scannable.split(/\s+/)) {
     if (!token) continue;
@@ -577,6 +586,206 @@ function checkRelativeTraversalPaths(
       if (denial) return denial;
     }
   }
+  return null;
+}
+
+// ── Advisory Bash path scanner (SPEC-PATH-ALLOWLIST.md §6.6) ──────────────────
+
+/** Verbs whose every path-looking argument is a WRITE target. */
+const BASH_WRITE_ALL_ARGS = new Set(["mkdir", "touch", "rm", "rmdir", "chmod"]);
+
+/**
+ * The deny reason for a path-looking Bash token that carries shell
+ * expansion/quoting the string scanner cannot resolve safely (a leftover quote,
+ * a `$` other than the leading `$HOME`, a backtick, a brace, or a backslash).
+ * Fails closed like the traversal scanner and names the token plus the fix.
+ */
+export function bashPathNoiseDenyReason(token: string): string {
+  return (
+    `Access denied: path-looking argument \`${token}\` mixes shell expansion or quoting ` +
+    `that cannot be resolved safely. If this is literal text (a commit message, an ` +
+    `\`ib send\` body), put it in a quoted-delimiter heredoc (<<'EOF' … EOF) or pass it ` +
+    `via a file (e.g. \`git commit -F <file>\`) instead of on the command line.`
+  );
+}
+
+/** Does a (quote-stripped) string begin with a path anchor the scanner resolves? */
+function startsWithPathAnchor(s: string): boolean {
+  return (
+    s.startsWith("/") ||
+    s === "~" ||
+    s.startsWith("~/") ||
+    s === "$HOME" ||
+    s.startsWith("$HOME/") ||
+    s === "${HOME}" ||
+    s.startsWith("${HOME}/")
+  );
+}
+
+/**
+ * Return the path PORTION of a token if it is path-looking, else null:
+ *   - a bare path anchor (`/x`, `~`, `~/x`, `$HOME/x`, `${HOME}/x`);
+ *   - a `--flag=<path>` whose right-hand side is a path anchor;
+ *   - a glued short flag `-X<path>` whose right-hand side is a path anchor.
+ * A token that starts with a letter, a digit, a URL scheme, a git range, or a
+ * dash with no path suffix returns null — it is never a path.
+ */
+function bashPathPortion(token: string): string | null {
+  if (startsWithPathAnchor(token)) return token;
+  if (token.startsWith("-")) {
+    const eq = token.indexOf("=");
+    if (eq !== -1) {
+      // --flag=<path>
+      const rhs = token.slice(eq + 1);
+      return startsWithPathAnchor(rhs) ? rhs : null;
+    }
+    if (!token.startsWith("--")) {
+      // -X<path>: the path starts at the first anchor char after the flag.
+      const idx = token.search(/[/~$]/);
+      if (idx > 0) {
+        const rhs = token.slice(idx);
+        if (startsWithPathAnchor(rhs)) return rhs;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * True when a path PORTION carries shell noise the scanner cannot resolve: a
+ * quote, backtick, brace, backslash, or a `$` that is NOT the leading `$HOME` /
+ * `${HOME}`. Glob chars (`*?[]`) are deliberately NOT noise — the caller reduces
+ * a glob to its literal directory prefix instead.
+ */
+function bashPathPortionIsNoise(portion: string): boolean {
+  let rest = portion;
+  if (rest.startsWith("${HOME}")) rest = rest.slice("${HOME}".length);
+  else if (rest.startsWith("$HOME")) rest = rest.slice("$HOME".length);
+  return /['"`{}\\$]/.test(rest);
+}
+
+/** Expand a leading `~` / `$HOME` / `${HOME}` in a noise-free portion to an absolute path. */
+function expandBashPathPortion(portion: string, home: string): string {
+  if (portion === "~") return home;
+  if (portion.startsWith("~/")) return join(home, portion.slice(2));
+  if (portion === "$HOME" || portion === "${HOME}") return home;
+  if (portion.startsWith("$HOME/")) return join(home, portion.slice("$HOME/".length));
+  if (portion.startsWith("${HOME}/")) return join(home, portion.slice("${HOME}/".length));
+  return portion; // already absolute
+}
+
+/** Reduce an absolute path that may contain a glob to the literal directory before the first `*`/`?`/`[`. */
+function bashLiteralDirPrefix(absPath: string): string {
+  const globIdx = absPath.search(/[*?[]/);
+  if (globIdx === -1) return absPath;
+  const slashIdx = absPath.lastIndexOf("/", globIdx);
+  return slashIdx <= 0 ? "/" : absPath.slice(0, slashIdx);
+}
+
+/**
+ * Advisory scan of a Bash command line for path-looking arguments that the
+ * per-agent access table (`ctx.access`) denies — the visibility layer required
+ * by SPEC-PATH-ALLOWLIST.md §8 (2026-09-05): kernel denials never reach
+ * `agent.log`, so the Denials tab of `ib watch` only sees command-line paths
+ * that the HOOK denies. It never allows what the table denies and never denies
+ * what the table allows: each candidate is resolved through the SAME
+ * `resolvePreparedAccess` the file-tool check uses, with the reason worded by
+ * `pathDenialReason`. Runs after the structural checks (traversal, protected
+ * writes, cross-agent and main-repo needles), which fire first with their own
+ * reasons. Only invoked from the Bash branch of checkPathAccess, so it covers
+ * claude Bash, the agy `run_command` translated to Bash, and the codex shell.
+ *
+ * Operation class (SPEC §6.11 item 8): a redirect target (`>`/`>>`/`1>`/`2>`/
+ * `&>`/`>|`, glued or separate), a `sed -i` / `--in-place` argument, a `tee`
+ * argument, the last argument of `cp`/`mv`, and every argument of `mkdir`,
+ * `touch`, `rm`, `rmdir`, `chmod` are WRITES; every other path-looking token is
+ * a READ. The protected-file guard (checkBashSettingsWrite) already ran first.
+ */
+function scanBashCommandPaths(
+  command: string,
+  cwd: string,
+  ctx: PathCheckContext,
+): HookDecision | null {
+  const home = userHome();
+  // Heredoc bodies are data — never scan them (mirrors the traversal scanner).
+  const tokens = maskHeredocBodies(command).split(/\s+/).filter((t) => t.length > 0);
+  if (tokens.length === 0) return null;
+
+  // Resolve one candidate path against the table for the given op; deny (with the
+  // resolver's own reason) only when the resolver denies. cwd is unused for
+  // absolute/home-expanded candidates but kept for symmetry with the file check.
+  const denyIfRejected = (
+    portion: string,
+    op: PathOperation,
+    rawToken: string,
+  ): HookDecision | null => {
+    if (bashPathPortionIsNoise(portion)) {
+      return { decision: "deny", reason: bashPathNoiseDenyReason(rawToken) };
+    }
+    const abs = bashLiteralDirPrefix(expandBashPathPortion(portion, home));
+    try {
+      if (resolvePreparedAccess(ctx.access, abs, op) === "deny") {
+        return { decision: "deny", reason: pathDenialReason(ctx.access, abs, op) };
+      }
+    } catch {
+      // A path with no resolvable prefix cannot be checked safely — advisory
+      // layer, so leave it to the kernel rather than crashing the hook.
+    }
+    return null;
+  };
+
+  // ── Classify write-target token indices ──
+  const forcedWriteIndex = new Set<number>();
+  const gluedWriteTargets: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    // A redirect operator: optional fd digits or `&`, then `>`/`>>`, an optional
+    // `|` force-clobber, then either a glued target or (empty) the next token.
+    const m = tokens[i]!.match(/^(?:&|\d+)?(>>?)\|?(.*)$/);
+    if (!m) continue;
+    if (m[2]) gluedWriteTargets.push(m[2]);
+    else forcedWriteIndex.add(i + 1);
+  }
+
+  const verb = tokens[0]!;
+  const sedInPlace = /(^|[\s;&|])sed\s+(?:-i\S*|--in-place\S*)/.test(command);
+  const sedIndex = sedInPlace ? tokens.indexOf("sed") : -1;
+  const teeIndex = tokens.indexOf("tee");
+  const isCpMv = verb === "cp" || verb === "mv";
+  const isWriteVerb = BASH_WRITE_ALL_ARGS.has(verb);
+
+  const opForIndex = (i: number): PathOperation => {
+    if (forcedWriteIndex.has(i)) return "write";
+    if (sedIndex !== -1 && i > sedIndex) return "write";
+    if (teeIndex !== -1 && i > teeIndex) return "write";
+    if (isWriteVerb && i > 0) return "write";
+    if (isCpMv && i === tokens.length - 1) return "write";
+    return "read";
+  };
+
+  // A glued redirect target (`>/tmp/x`, `2>>log`) is always a WRITE.
+  for (const target of gluedWriteTargets) {
+    const portion = bashPathPortion(target);
+    if (portion === null) continue;
+    const d = denyIfRejected(portion, "write", target);
+    if (d) return d;
+  }
+
+  for (let i = 0; i < tokens.length; i++) {
+    let token = tokens[i]!;
+    // Strip one layer of surrounding matching quotes (what the shell peels off).
+    if (
+      token.length >= 2 &&
+      ((token[0] === "'" && token[token.length - 1] === "'") ||
+        (token[0] === '"' && token[token.length - 1] === '"'))
+    ) {
+      token = token.slice(1, -1);
+    }
+    const portion = bashPathPortion(token);
+    if (portion === null) continue;
+    const d = denyIfRejected(portion, opForIndex(i), token);
+    if (d) return d;
+  }
+
   return null;
 }
 
@@ -650,6 +859,13 @@ function checkBashCommandPaths(
       pos++;
     }
   }
+
+  // Advisory: resolve every path-looking argument against the access table so a
+  // command reaching outside the allowed roots is denied with a readable reason
+  // and logged to the Denials tab (kernel denials never reach agent.log). Runs
+  // LAST so the structural checks above keep their specific reasons.
+  const scanDenial = scanBashCommandPaths(command, cwd, ctx);
+  if (scanDenial) return scanDenial;
 
   return null;
 }

@@ -270,7 +270,10 @@ describe("hookCodexPreToolUse — codex JSON contract (gate (d))", () => {
   });
 
   test("allow includes updatedInput echoing the original tool_input verbatim", async () => {
-    const toolInput = { command: "ls /tmp", extra: "meta" };
+    // Any allow-listed command works; the point is verbatim updatedInput echo.
+    // A worktree-relative `ls src` avoids the advisory path scanner, which now
+    // resolves absolute Bash args against the (empty-floor) fixture table.
+    const toolInput = { command: "ls src", extra: "meta" };
     const stdin = JSON.stringify({
       tool_name: "Bash",
       tool_input: toolInput,

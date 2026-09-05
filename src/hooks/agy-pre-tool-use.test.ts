@@ -401,7 +401,14 @@ describe("checkAgyPreToolUse — agy boundary-file write protection", () => {
 // ── run_command single-command rule: no chaining / escaping (boundary review A) ─
 
 describe("checkAgyPreToolUse — run_command single-command rule", () => {
-  function rc(CommandLine: string, ctx = makeCtx()) {
+  // These rows exercise the single-command / shell-metachar rule, not path
+  // isolation. Grant /tmp (which the real `_all.md` floor carries as
+  // /private/tmp) so the advisory path scanner does not deny the incidental
+  // `git commit -F /tmp/msg.txt` argument and mask what is under test.
+  function rc(
+    CommandLine: string,
+    ctx = makeCtx({ access: makeAccess({ allowRead: ["/tmp"] }) }),
+  ) {
     return checkAgyPreToolUse(
       { toolName: "run_command", toolArgs: { CommandLine, Cwd: ctx.worktreePath } },
       ctx,

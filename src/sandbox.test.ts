@@ -5,6 +5,7 @@ import { dirname, join } from "path";
 import { parseAgentTypeFile } from "./agent-types";
 import {
   anchorRelativePaths,
+  findRelativeEscapes,
   canonicalizePathsConfig,
   canonicalizeSandboxPath,
   compileSandboxPath,
@@ -1704,6 +1705,62 @@ describe("paths frontmatter validation", () => {
         allowRelative: true,
       }).errors.length,
     ).toBeGreaterThan(0);
+  });
+
+  test("rejects cross-list RELATIVE globs sharing a literal prefix under allowRelative", () => {
+    const result = validatePathsFrontmatter(
+      { allowRead: ["../shared/**/*.pdf"], allowWrite: ["../shared/**/*.txt"] },
+      "/Users/tester",
+      { allowRelative: true },
+    );
+    expect(result.errors.some((e) => e.includes("same literal prefix"))).toBe(true);
+  });
+
+  test("accepts cross-list RELATIVE globs with different prefixes under allowRelative", () => {
+    const result = validatePathsFrontmatter(
+      { allowRead: ["../read-only/**/*.pdf"], allowWrite: ["../writable/**/*.txt"] },
+      "/Users/tester",
+      { allowRelative: true },
+    );
+    expect(result.errors).toEqual([]);
+  });
+});
+
+describe("findRelativeEscapes", () => {
+  const HOME = "/Users/tester";
+  const ANCHOR = "/Users/tester/a/b/c"; // three segments below HOME
+  const UP_TO_ROOT = "../".repeat(50); // over-climbs; path.resolve clamps at "/"
+
+  test("flags a plain ../ climb to the filesystem root", () => {
+    const result = findRelativeEscapes(paths({ allowRead: [UP_TO_ROOT] }), ANCHOR, HOME);
+    expect(result.map((e) => e.entry)).toEqual([UP_TO_ROOT]);
+    expect(result[0]!.resolved).toBe("/");
+  });
+
+  test("flags a glob ../ climb to the filesystem root", () => {
+    const entry = `${UP_TO_ROOT}**`;
+    const result = findRelativeEscapes(paths({ allowWrite: [entry] }), ANCHOR, HOME);
+    expect(result.map((e) => e.entry)).toEqual([entry]);
+    expect(result[0]!.resolved).toBe("/");
+  });
+
+  test("flags a plain ../ climb to the home directory", () => {
+    const result = findRelativeEscapes(paths({ allowRead: ["../../.."] }), ANCHOR, HOME);
+    expect(result.map((e) => e.entry)).toEqual(["../../.."]);
+    expect(result[0]!.resolved).toBe(canonicalizeSandboxPath(HOME));
+  });
+
+  test("flags a glob ../ climb to the home directory (deny list is inspected too)", () => {
+    const result = findRelativeEscapes(paths({ deny: ["../../../**"] }), ANCHOR, HOME);
+    expect(result.map((e) => e.entry)).toEqual(["../../../**"]);
+    expect(result[0]!.resolved).toBe(canonicalizeSandboxPath(HOME));
+  });
+
+  test("does not flag explicit / or ~, nor a bounded relative entry", () => {
+    expect(findRelativeEscapes(paths({ allowRead: ["/", "~", "~/x"] }), ANCHOR, HOME)).toEqual([]);
+    expect(
+      findRelativeEscapes(paths({ allowRead: ["../sibling"], allowWrite: ["./vendor"] }), ANCHOR, HOME),
+    ).toEqual([]);
   });
 });
 

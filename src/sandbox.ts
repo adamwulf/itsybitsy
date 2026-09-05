@@ -418,6 +418,12 @@ const RELATIVE_VALIDATION_ANCHOR = "/__anchor__";
  * re-appending any glob suffix (from the first `*` or `?` onward) unchanged.
  * Non-relative entries (absolute, home, or globs without a `./`/`../` prefix)
  * are returned untouched.
+ *
+ * Anchoring is **lexical** (`path.resolve` joins and normalizes without touching
+ * the filesystem), so a `../` that crosses a symlinked component of the anchor
+ * climbs the *lexical* parent, not the symlink target. In practice the anchor is
+ * always a `resolveGitRoot` result — a real (realpath'd) path — so the lexical
+ * parent is the real parent and this is not observable at spawn.
  */
 function anchorRelativeEntry(entry: string, anchor: string): string {
   if (!entry.startsWith("./") && !entry.startsWith("../")) return entry;
@@ -448,6 +454,52 @@ export function anchorRelativePaths(paths: PathsConfig, anchor: string): PathsCo
     allowWrite: paths.allowWrite.map(anchorEntry),
     deny: paths.deny.map(anchorEntry),
   };
+}
+
+/**
+ * Find every relative (`./` or `../`) SOURCE entry that, once anchored, escapes
+ * to the filesystem root `/` or to the home directory — i.e. whose anchored
+ * literal prefix (the part before its first glob metacharacter, or the whole
+ * entry when plain) canonicalizes to `/` or to `home`. Such an entry is a
+ * silent filesystem-wide (or whole-home) grant that the single model requires
+ * to be written EXPLICITLY (`allowRead: ["/"]` or `["~"]`); the caller turns a
+ * non-empty result into a spawn/refresh error naming the entry and its target.
+ *
+ * All three lists are inspected, not just the allow lists: a relative climb that
+ * silently reaches `/` or `home` is almost always a mistake regardless of which
+ * list it lands in (a `deny` that reaches `/` would lock the agent out of
+ * everything). An EXPLICIT `/` or `~` entry never starts with `./`/`../`, so it
+ * is skipped here and stays allowed. Compares canonical forms so `/tmp` vs
+ * `/private/tmp` and `~` vs its absolute spelling agree.
+ * (SPEC-PATH-ALLOWLIST.md 6.11, review round 1 blocker (a))
+ */
+export function findRelativeEscapes(
+  paths: PathsConfig,
+  anchor: string,
+  home?: string,
+): Array<{ entry: string; resolved: string }> {
+  const homeCanonical = canonicalizeSandboxPath(sandboxHome(home));
+  const escapes: Array<{ entry: string; resolved: string }> = [];
+  const inspect = (entry: string): void => {
+    if (typeof entry !== "string") return;
+    if (!entry.startsWith("./") && !entry.startsWith("../")) return;
+    const anchored = anchorRelativeEntry(entry, anchor);
+    const globIndex = anchored.search(/[*?]/);
+    const literalPrefix = globIndex === -1 ? anchored : anchored.slice(0, globIndex);
+    let canonical: string;
+    try {
+      canonical = canonicalizeSandboxPath(literalPrefix);
+    } catch {
+      return; // an unresolvable prefix is the grammar validator's problem
+    }
+    if (canonical === "/" || canonical === homeCanonical) {
+      escapes.push({ entry, resolved: canonical });
+    }
+  };
+  for (const list of [paths.allowRead, paths.allowWrite, paths.deny]) {
+    for (const entry of list) inspect(entry);
+  }
+  return escapes;
 }
 
 /** Compile one user-facing path entry to an SBPL matcher. */

@@ -99,6 +99,17 @@ describe("checkCodexPreToolUse — allow/deny matcher applies to Bash AND apply_
     expect(decision.reason).toContain("paths.allowRead/allowWrite");
   });
 
+  test("quoted screenshot path is denied through the Codex hook", () => {
+    const ctx = makeCtx({ allowList: ["Bash(head:*)"] });
+    const path = "/Users/adamwulf/Downloads/Screenshot 2026-09-05 at 4.23.29\u202fPM.png";
+    const decision = checkCodexPreToolUse(
+      { toolName: "Bash", toolInput: { command: `head -c 8 '${path}'` }, cwd: ctx.worktreePath }, ctx,
+    );
+    expect(decision.decision).toBe("deny");
+    expect(decision.reason).toContain(path);
+    expect(decision.reason).toContain("paths.allowRead/allowWrite");
+  });
+
   test("apply_patch: target inside worktree is allowed", () => {
     const ctx = makeCtx();
     const patch = "*** Begin Patch\n*** Add File: src/new.ts\n+x\n*** End Patch\n";

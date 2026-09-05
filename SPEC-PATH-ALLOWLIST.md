@@ -1365,7 +1365,8 @@ its wrapper after its own boot-floor bisection.
 retirement, deny-by-default shared hook table, protected writes,
 `ib init-types --check`, session-start text, policy displays, and the SPEC /
 implementation-note updates have landed. The companion advisory Bash scanner
-(`a472299`), kernel `PROJECTDIR`/`SCRATCHPAD` spawn/refresh wiring (`7cb9d7c`),
+(`a472299`, hardened by `2368802`), kernel `PROJECTDIR`/`SCRATCHPAD`
+spawn/refresh wiring (`7cb9d7c`),
 and Codex/agy lifecycle propagation (`44ad115`) are complete and green on the
 continuation worker branch but still **IN PROGRESS** for integration into
 `agent/path-isolation`; Phase B is therefore not yet `INSTALLED` in the rollout

@@ -4992,6 +4992,124 @@ sandbox:
     expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
   });
 
+  // ── Phase B: relative entries anchored at the MAIN repo root ────────────────
+  test("spawn anchors a ../ entry at the main repo root, not the worktree", async () => {
+    await writeSandboxType("spawn-relative", {
+      allowRead: [tempDir, "../sibling"],
+      allowWrite: [tempDir],
+      deny: ["**/.env"],
+    });
+    setSandboxPortAllocatorForTesting(() => 43180);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99980 }));
+    const spawned = await callNewAgent("relative spawn", { name: "spawn-relative", type: "spawn-relative" });
+    expect(spawned.ok).toBe(true);
+
+    const meta = await Bun.file(join(agentsDir, "spawn-relative", "meta.json")).json();
+    // rootRepoPath resolves to tempDir; "../sibling" anchors to its SIBLING —
+    // join(tempDir, "..", "sibling") — never the agent dir or worktree.
+    const expectedSibling = canonicalizeSandboxPath(join(tempDir, "..", "sibling"));
+    expect(meta.paths.allowRead).toContain(expectedSibling);
+    // The raw relative form never survives into meta.
+    expect(meta.paths.allowRead).not.toContain("../sibling");
+  });
+
+  test("spawn rejects a relative entry that climbs to the filesystem root", async () => {
+    await writeSandboxType("spawn-escape", {
+      allowRead: [tempDir, "../".repeat(50)],
+      allowWrite: [tempDir],
+      deny: ["**/.env"],
+    });
+    setSandboxPortAllocatorForTesting(() => 43182);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99981 }));
+    const spawned = await callNewAgent("escape spawn", { name: "spawn-escape", type: "spawn-escape" });
+    expect(spawned.ok).toBe(false);
+    expect(spawned.stderr).toContain("climbs out");
+    expect(spawned.stderr).toContain('write "/" or "~"');
+  });
+
+  test("sandbox refresh anchors a ../ entry at the main repo root", async () => {
+    await writeSandboxType("refresh-relative", { allowRead: [tempDir], allowWrite: [tempDir], deny: ["**/.env"] });
+    const ports = [43184, 43185];
+    setSandboxPortAllocatorForTesting(() => ports.shift()!);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99982 }));
+    const spawned = await callNewAgent("refresh relative", { name: "refresh-relative", type: "refresh-relative" });
+    expect(spawned.ok).toBe(true);
+
+    const agentDir = join(agentsDir, "refresh-relative");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
+    // Add a relative entry AFTER spawn so refresh must anchor it.
+    await writeSandboxType("refresh-relative", {
+      allowRead: [tempDir, "../sibling"],
+      allowWrite: [tempDir],
+      deny: ["**/.env"],
+    });
+
+    let createdSession = false;
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      const cmdStr = cmd.join(" ");
+      if (cmd[0] === "which" && cmd[1] === "sandbox-exec") return makeSpawnResult("/usr/bin/sandbox-exec", 0);
+      if (cmd[0] === "/usr/bin/sandbox-exec") return makeSpawnResult("", 0);
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("tmux has-session")) return makeSpawnResult("", createdSession ? 0 : 1);
+      if (cmdStr.includes("tmux new-session")) { createdSession = true; return makeSpawnResult("", 0); }
+      if (cmdStr.includes("capture-pane")) return makeSpawnResult("Claude Code v1.0", 0);
+      return makeSpawnResult("", 0);
+    });
+    setSendSpawnRunner(() => makeSpawnResult("", 0));
+    try {
+      const result = await refreshAgentSandbox(makeAgent("refresh-relative", tempDir, "stopped", meta));
+      expect(result.ok).toBe(true);
+    } finally {
+      resetSendSpawnRunner();
+    }
+
+    const refreshedMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    const expectedSibling = canonicalizeSandboxPath(join(tempDir, "..", "sibling"));
+    expect(refreshedMeta.paths.allowRead).toContain(expectedSibling);
+    expect(refreshedMeta.paths.allowRead).not.toContain("../sibling");
+  });
+
+  test("sandbox refresh refuses an entry under the agents dir added after spawn", async () => {
+    await writeSandboxType("refresh-under-agents", { allowRead: [tempDir], allowWrite: [tempDir], deny: ["**/.env"] });
+    setSandboxPortAllocatorForTesting(() => 43186);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99983 }));
+    const spawned = await callNewAgent("refresh bad", { name: "refresh-under-agents", type: "refresh-under-agents" });
+    expect(spawned.ok).toBe(true);
+
+    const agentDir = join(agentsDir, "refresh-under-agents");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
+    // Add an entry under .ittybitty/agents AFTER spawn (a dead entry the hook
+    // denies structurally) — refresh must refuse it.
+    await writeSandboxType("refresh-under-agents", {
+      allowRead: [tempDir, join(tempDir, ".ittybitty", "agents", "victim")],
+      allowWrite: [tempDir],
+      deny: ["**/.env"],
+    });
+
+    const result = await refreshAgentSandbox(makeAgent("refresh-under-agents", tempDir, "stopped", meta));
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("dead entry");
+    expect(result.stderr).toContain(canonicalizeSandboxPath(join(tempDir, ".ittybitty", "agents")));
+    // The agent stays stopped: refusal happens before any resume.
+    expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
+  });
+
   // ── A4 G3: sealed record ────────────────────────────────────────────────────
   test("A4 G3: spawn writes a sealed record with the profile inputs and a valid sha256", async () => {
     await writeSandboxType("seal-spawn");
@@ -12246,5 +12364,26 @@ describe("checkPathsRepoContainment", () => {
     );
     expect(result.error).toBeUndefined();
     expect(result.warnings).toEqual([]);
+  });
+
+  test("errors on a glob whose literal directory is under the agents dir", () => {
+    const agentsDir = canonicalizeSandboxPath(join(repoRoot, ".ittybitty/agents"));
+    const result = checkPathsRepoContainment(
+      { allowRead: [`${agentsDir}/**`], allowWrite: [], deny: [] },
+      repoRoot,
+    );
+    expect(result.error).toBeDefined();
+    expect(result.error).toContain(agentsDir);
+  });
+
+  test("warns on a file-like-prefix glob directly under the repo root", () => {
+    const repoCanonical = canonicalizeSandboxPath(repoRoot);
+    const result = checkPathsRepoContainment(
+      { allowRead: [`${repoCanonical}/foo*.md`], allowWrite: [], deny: [] },
+      repoRoot,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.warnings.length).toBe(1);
+    expect(result.warnings[0]).toContain(repoCanonical);
   });
 });

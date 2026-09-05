@@ -759,6 +759,16 @@ Conditions and costs, to state plainly:
   holds paths and network; tool policy is unenforced during such a window.
 - **Codex's fail-open hook contract** must be re-judged once its prompts are
   gone; a pilot item.
+- **Residual for the system coordinator in hook-only mode** (found in the
+  Phase B review of the write guard, 2026-09-05). Its worktree root is its
+  whole `~/.itsybitsy` home, so the hook guards writes to the type directory,
+  the config and registry files, and the seal directory structurally, for the
+  write tools and for Bash redirect and in-place-edit targets. The command
+  shapes the scanner does not model (`tee`, `cp`, `mv`, `mkdir`, and a symlink
+  created and then written through) reach those files unguarded while the
+  system coordinator runs without the kernel. The advisory scanner (§6.6)
+  logs the honest spellings; the kernel closes the rest once the coordinator
+  is sandboxed. Accepted and documented, not fixed at the hook.
 
 End state, corrected after `sandbox-safety` flagged the merge rule: "true in
 `_all.md` with per-type opt-out" is not implementable, because a layer can only

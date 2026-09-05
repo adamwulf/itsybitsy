@@ -9,6 +9,8 @@ import { userHome } from "./home";
 import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from "./registry";
 import { resolveAgentIcon } from "./agents";
 import type { Agent, AgentMeta, FlatEntry } from "./agents";
+import { kernelSandboxStatus } from "./agent-cli";
+import { resolvePathsConfig } from "./sandbox";
 import { isValidAgentId, isValidShellPath, tmuxSessionTarget } from "./validation";
 import { SYSTEM_AGENT_ID } from "./hooks/shared";
 import { normalizeTeamName, getTeam } from "./teams";
@@ -75,10 +77,10 @@ export function matchAgentById(id: string, agents: Agent[]): Agent | null {
 
 /** Format the resolved filesystem policy shown by `ib info <id>`. */
 export function formatAgentPathPolicy(
-  meta: Pick<AgentMeta, "paths" | "sandbox">,
+  meta: Pick<AgentMeta, "paths" | "sandbox" | "model">,
 ): string[] {
   const lines = [
-    `Sandbox:      ${meta.sandbox?.enabled === true ? "enabled" : "disabled"}`,
+    `Sandbox:      ${kernelSandboxStatus(meta)}`,
   ];
   if (!meta.paths) {
     lines.push("Paths:        none (worktree and runtime roots only)");
@@ -95,9 +97,10 @@ export function formatAgentPathPolicy(
   };
 
   lines.push("Paths:");
-  renderPaths("read-only", meta.paths.allowRead);
-  renderPaths("read+write", meta.paths.allowWrite);
-  renderPaths("deny", meta.paths.deny);
+  const paths = resolvePathsConfig(meta.paths);
+  renderPaths("read-only", paths.allowRead);
+  renderPaths("read+write", paths.allowWrite);
+  renderPaths("deny", paths.deny);
   return lines;
 }
 

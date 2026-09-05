@@ -124,6 +124,31 @@ describe("InfoPanelComponent", () => {
     expect(renderAgent(undefined)).toContain("Sandbox: disabled");
   });
 
+  test.each([{}, { allowRead: ["/read"] }, { allowWrite: ["/write"] }, { deny: ["/secret"] }])(
+    "renders partial metadata safely: %j", (paths) => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 12;
+      const agent = makeAgent({ id: "agent-partial" });
+      agent.meta.paths = paths as any;
+      panel.agent = agent;
+      const text = panel.render(80).map(stripAnsi).join("\n");
+      expect(text).toContain("Paths");
+      if ("allowRead" in paths) expect(text).toContain("Paths ro: /read");
+      if ("allowWrite" in paths) expect(text).toContain("Paths rw: /write");
+      if ("deny" in paths) expect(text).toContain("Paths deny: /secret");
+    },
+  );
+
+  test("agy sandbox configuration is displayed as unavailable", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 12;
+    const agent = makeAgent({ id: "agent-agy" });
+    agent.meta.model = "agy:default";
+    agent.meta.sandbox = { enabled: true, rawAllow: [], domains: [] };
+    panel.agent = agent;
+    expect(panel.render(80).map(stripAnsi).join("\n")).toContain("Sandbox: unavailable (agy)");
+  });
+
   test("renders the resolved path lists compactly, one line per non-empty list", () => {
     const panel = new InfoPanelComponent();
     panel.displayHeight = 12;

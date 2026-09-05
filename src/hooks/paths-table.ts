@@ -22,6 +22,7 @@
 import { join, resolve } from "path";
 import { realpathSync } from "fs";
 import { userHome } from "../home";
+import { metadataCli, type AgentCli } from "../agent-cli";
 import { encodeClaudeProjectPath } from "../auto-compact";
 import { metaCanSpawnChildren, loadAgentType, type AgentType } from "../agent-types";
 import {
@@ -84,6 +85,8 @@ export interface AgentAccessTableParams {
   /** The tmux socket DIRECTORY (resolveTmuxSocketDir) — a deny root for non-spawners. */
   tmuxSock: string;
   canSpawnChildren: boolean;
+  /** Defaults to Claude for legacy callers without a model. */
+  cli?: AgentCli | null;
   home?: string;
 }
 
@@ -110,13 +113,11 @@ export function agentPathAccessTable(p: AgentAccessTableParams): PathAccessTable
     canSpawnChildren: p.canSpawnChildren,
     HOME: p.home,
   };
-  const table = sandboxPathAccessTable(p.paths, params);
-  const uid = process.getuid?.() ?? 0;
-  table.runtimeRoots.push(
-    { path: canonicalizeSandboxPath(claudeProjectDirFor(p.worktreePath)), op: "write" },
-    { path: claudeScratchpadDirFor(p.worktreePath, uid), op: "write" },
-  );
-  return table;
+  if (p.cli === undefined || p.cli === "claude") {
+    params.PROJECTDIR = claudeProjectDirFor(p.worktreePath);
+    params.SCRATCHPAD = claudeScratchpadDirFor(p.worktreePath, process.getuid?.() ?? 0);
+  }
+  return sandboxPathAccessTable(p.paths, params);
 }
 
 /**
@@ -172,6 +173,7 @@ export async function buildAgentAccessTable(input: {
     gitDir,
     tmuxSock: resolveTmuxSocketDir(uid),
     canSpawnChildren: await metaCanSpawnChildren(input.meta),
+    cli: metadataCli(input.meta.model) ?? null,
     home: input.home ?? userHome(),
   });
   return prepareAccessTable(table);

@@ -106,6 +106,21 @@ describe("collectAgents", () => {
 });
 
 describe("formatAgentPathPolicy", () => {
+  test.each([{}, { allowRead: ["/read"] }, { allowWrite: ["/write"] }, { deny: ["/secret"] }])(
+    "omitted lists in partial path metadata default to empty: %j", (paths) => {
+      const lines = formatAgentPathPolicy({ paths } as any);
+      expect(lines).toContain("  read-only:");
+      expect(lines).toContain("  read+write:");
+      expect(lines).toContain("  deny:");
+      expect(lines).toContain("    (none)");
+    },
+  );
+
+  test("agy never reports an enabled kernel wrapper", () => {
+    expect(formatAgentPathPolicy({ model: "agy:default", sandbox: { enabled: true } } as any)[0])
+      .toBe("Sandbox:      unavailable (agy)");
+  });
+
   test("prints sandbox state and all resolved lists in read/write/deny order", () => {
     expect(formatAgentPathPolicy({
       sandbox: { enabled: true, rawAllow: [], domains: [] },

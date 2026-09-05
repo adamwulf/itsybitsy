@@ -96,6 +96,24 @@ export function resolveCli(model: string): AgentCli {
   return parseModel(model).cli;
 }
 
+/** Legacy metadata without a model belongs to Claude; invalid models grant no CLI-specific roots. */
+export function metadataCli(model: unknown): AgentCli | undefined {
+  if (model == null || model === "" || model === "null") return "claude";
+  try {
+    return typeof model === "string" ? parseModel(model).cli : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Describe wrapper support as well as configuration; agy has no kernel wrapper yet. */
+export function kernelSandboxStatus(meta: { model?: unknown; sandbox?: { enabled?: boolean } }): string {
+  const cli = metadataCli(meta.model);
+  if (cli === "agy") return "unavailable (agy)";
+  if (!cli) return "unavailable (unknown CLI)";
+  return meta.sandbox?.enabled === true ? "enabled" : "disabled";
+}
+
 /**
  * True iff `model` is a codex model string (`codex:<model>`). Thin wrapper over
  * `parseModel`; throws on an invalid / unknown model string.

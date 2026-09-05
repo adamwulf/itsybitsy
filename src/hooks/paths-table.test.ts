@@ -112,6 +112,16 @@ describe("buildAgentAccessTable", () => {
     expect(resolvePreparedAccess(prepared, "/data/ro/f", "read")).toBe("allow");
     expect(resolvePreparedAccess(prepared, "/data/ro/f", "write")).toBe("deny");
   });
+
+  test.each(["claude:opus", "codex:gpt-5.6-sol", "fugu:fugu", "agy:default"])(
+    "%s grants only its CLI runtime directories", async (model) => {
+      const prepared = await build({ agentType: "worker", model });
+      const worktreePath = join(tmp, "repo");
+      const expected = model.startsWith("claude:") ? "allow" : "deny";
+      expect(resolvePreparedAccess(prepared, claudeProjectDirFor(worktreePath), "write")).toBe(expected);
+      expect(resolvePreparedAccess(prepared, claudeScratchpadDirFor(worktreePath, UID), "write")).toBe(expected);
+    },
+  );
 });
 
 // ── buildSystemAccessTable (@system, no meta.json) ───────────────────────────

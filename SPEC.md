@@ -44,7 +44,7 @@ When a new agent is created (`ib new-agent "prompt"`):
    - Hook definitions: path-check, stop, permission-denied, session-start, and optionally intercept-task (for agents with `canSpawnChildren: true`)
    - The agent ID placeholder `__AGENT_ID__` is replaced with the actual ID after writing
 
-9. **Write meta.json** to `<agent-dir>/meta.json` (see §5.2 for fields). Includes `agentType` (the resolved type name), `agentIcon` (the type's icon character, if defined), and `allowedPaths` (resolved absolute paths from the type's `allowedPaths` frontmatter, if defined — see §6.1).
+9. **Write meta.json** to `<agent-dir>/meta.json` (see §5.2 for fields). Includes `agentType` (the resolved type name), `agentIcon` (the type's icon character, if defined), `paths` (the resolved, repo-anchored `allowRead`/`allowWrite`/`deny` lists from the union of the type's `paths:` frontmatter — see §2.2 and §6.1), and `sandbox` (the resolved kernel-sandbox policy).
 
 10. **Write prompt.txt** with the full prompt including any completion instructions, custom prompts, and the user's task.
 
@@ -395,9 +395,13 @@ permissions:
   deny:
     - Write
     - Edit
-allowedPaths:
-  - ~/Developer/shared-lib
-  - /tmp
+paths:
+  allowRead:
+    - ~/Developer/shared-lib      # read a sibling library
+  allowWrite:
+    - ../shared-output            # relative → anchored at the main repo root
+  deny:
+    - "**/.env"
 ---
 
 ## Research Agent Instructions
@@ -430,7 +434,7 @@ You are research agent `{{agentId}}`...
 
 ### 2.8 Startup Validation
 
-When `ib watch` launches, it validates all agent type files in `~/.itsybitsy/agent-types/` before starting the dashboard (after auto-population). If any file has YAML parsing errors, invalid field types (e.g., `canSpawnChildren` is not a boolean), invalid `instructionStyle` values, invalid `allowedPaths` entries (must be a list of strings), a non-string `inherits:` value, `inherits:` on a layer file (`spawnable: false`), a malformed `repos:` value (must be a list of strings; empty lists and bare strings are rejected), a **circular inheritance chain** (`A → B → A`), or a **missing parent** in an inheritance chain, the dashboard exits immediately with error messages describing each issue. This prevents runtime failures from malformed type definitions — inheritance-chain errors in particular surface at startup rather than at spawn time.
+When `ib watch` launches, it validates all agent type files in `~/.itsybitsy/agent-types/` before starting the dashboard (after auto-population). If any file has YAML parsing errors, invalid field types (e.g., `canSpawnChildren` is not a boolean), invalid `instructionStyle` values, a **retired `allowedPaths:` key** (now itself an error — it was replaced by the top-level `paths:` block; see §2.2 and SPEC-PATH-ALLOWLIST.md §6.11), an invalid `paths:` block (each of `allowRead`/`allowWrite`/`deny` must be a list of grammar-valid entries — absolute, `~`, repo-anchored relative, or glob; bare names are rejected), a non-string `inherits:` value, `inherits:` on a layer file (`spawnable: false`), a malformed `repos:` value (must be a list of strings; empty lists and bare strings are rejected), a **circular inheritance chain** (`A → B → A`), or a **missing parent** in an inheritance chain, the dashboard exits immediately with error messages describing each issue. This prevents runtime failures from malformed type definitions — inheritance-chain errors in particular surface at startup rather than at spawn time.
 
 ### 2.9 Backward Compatibility
 
@@ -673,6 +677,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 | `state_updated_at` | number \| undefined | Unix epoch seconds when `state` was last written. Used for debugging. |
 | `coordinator` | boolean \| undefined | `true` for per-repo coordinators (§12.2.2). Absent for regular agents. |
 | `paths` | object \| undefined | Resolved, repo-anchored filesystem policy (`allowRead` / `allowWrite` / `deny`) from the agent type's `paths:` frontmatter, canonicalized to absolute paths at creation and frozen here. A **missing** key equals empty lists equals **strict** (worktree + runtime roots only). Replaced the retired `allowedPaths`. See §6.1. |
+| `sandbox` | object \| undefined | Resolved kernel-sandbox policy (`enabled`, `rawAllow`, `domains`) from the union of the `sandbox:` frontmatter, frozen at spawn for resume parity. `enabled` gates the `sandbox-exec` wrapper (macOS); the hook enforces `paths` regardless. Ships `enabled: false`. See SPEC-SANDBOX.md and SPEC-PATH-ALLOWLIST.md §6.12. |
 
 ### 5.3 Worktree ↔ Branch Relationship
 
@@ -730,37 +735,34 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 **Matcher**: `*` (all tools)
 **Hook type**: PreToolUse (runs before tool execution, can allow/deny)
 
-**Decision logic** (checked in order):
+**Decision logic** (checked in order). Steps 1–5 gate and resolve the candidate path; steps 6, 10, and 11 are **structural** and run BEFORE the shared resolver so the hook stays stricter than the kernel inside the agent dir and the main repo; the resolver then folds in the former always-allowed steps 7–9 and the allow/deny decision. This replaces the retired `allowedPaths` field with the single deny-by-default model of SPEC-PATH-ALLOWLIST.md §6.11.
 
 1. **Allow list check**: Tool must match at least one pattern from `settings.local.json` `permissions.allow`. Patterns are either exact tool names (`"Read"`) or bash prefix patterns (`"Bash(git status:*)"` — matches Bash tool where command starts with `git status`).
-2. **Bash cd commands**: If the tool is Bash and the command starts with `cd`, the target path is checked against the allowed paths.
-3. **Bash command scanning** [^ts-only-bash-scan]: Non-cd bash commands are scanned for path references to:
-   - Other agents' directories (`.ittybitty/agents/<other-id>/`)
-   - The main repo root (when it differs from the worktree)
-   Only paths at word boundaries (preceded by space, quote, `=`, or start of string) are checked.
+2. **Bash cd commands**: If the tool is Bash and the command starts with `cd`, the target path is resolved and checked like any other path (as a `read` op). A **bare `cd`** (no argument, or an empty target) resolves to the **home directory** and is checked like any path — home is not a runtime root, so a strict agent is denied.
+3. **Bash command scanning** [^ts-only-bash-scan]: Non-cd bash commands are scanned for redirect / `sed -i` writes to a **protected file** (the agent's own `.claude/settings*.json`, the agy boundary files, its own `meta.json`, or — for `@system` — its coordinator-config paths; see step 6) and for path references to other agents' directories or the main repo root. Only paths at word boundaries (preceded by space, quote, `=`, or start of string) are checked.
 
-[^ts-only-bash-scan]: **TS-only behavior.** The bash `ib` immediately allows all non-cd Bash commands after the allow-list check — it does not scan command strings for path references. The TS implementation added `checkBashCommandPaths()` as an extra safeguard that catches commands like `cat /repo/.ittybitty/agents/other-agent/...`.
-4. **File path extraction** [^ts-only-notebook-path]: For non-Bash tools, `file_path`, `path`, or `notebook_path` from `tool_input` is checked.
+[^ts-only-bash-scan]: **TS-only behavior.** The bash `ib` immediately allows all non-cd Bash commands after the allow-list check — it does not scan command strings for path references. The TS implementation added `checkBashCommandPaths()` as an extra safeguard that catches commands like `cat /repo/.ittybitty/agents/other-agent/...` and redirect writes to protected files. It is **advisory** for reads (a string scanner cannot be a kernel boundary — see SPEC-PATH-ALLOWLIST.md §6.6); the kernel sandbox is authoritative when enabled.
+4. **File path extraction** [^ts-only-notebook-path]: For non-Bash tools, `file_path`, `path`, or `notebook_path` from `tool_input` is extracted, resolved to an absolute path (relative to cwd, then `realpathSync` for symlinks), and checked.
 
 [^ts-only-notebook-path]: **TS-only behavior.** The bash `ib` only extracts `file_path` and `path` from `tool_input`. The TS implementation additionally checks `notebook_path` to cover Jupyter notebook tools.
 
-**Always allowed paths** (steps 6–8):
-- Agent's own worktree (`<agent-dir>/repo/...`)
-- Agent's own `agent.log`
-- Agent's own Claude project directory (`~/.claude/projects/<encoded-worktree-path>/**`) — where Claude Code spills oversized tool responses and stores transcripts. Encoded via replacing `/` and `.` with `-` (see `src/auto-compact.ts::encodeClaudeProjectPath`).
+5. **Normalize**: resolve `.`/`..` via `path.resolve`, then `realpathSync` when the path exists (else keep the resolved form).
 
-**Always denied paths** (steps 9–10, checked before allowedPaths):
-- Other agents' directories
-- Main repo root (outside the agent's worktree)
+**Structural steps** (run before the resolver; the hook is deliberately stricter than the kernel here):
 
-**allowedPaths-based access control** (step 11): If the agent's `meta.json` contains an `allowedPaths` field (set from the agent type's frontmatter at creation time — see §2.2), it controls access to all other paths:
-- `allowedPaths` **absent** (`undefined`): Legacy permissive mode — all paths outside the always-denied set are allowed (home directory, `/tmp`, system paths, other repos).
-- `allowedPaths: []` (empty array): Strict mode — only the always-allowed paths above are permitted. No system paths, no other repos.
-- `allowedPaths` with entries: Only paths under the listed directories are allowed (in addition to the always-allowed paths). Matching is by exact path or directory prefix (`filePath === allowed || filePath.startsWith(allowed + "/")`).
+6. **Protected-write block** (mutation tools only — reads are allowed): a write to `<worktree>/.claude/settings*.json` (permission self-escalation), the agy boundary files (`.agents/hooks.json` and the rule file, whose rewrite disables the hook gate on the next resume), the agent's own `<agent-dir>/meta.json` (the hook reads its path lists from it — a self-widening path in hook-only mode), or — for the `@system` coordinator, whose worktree root is its whole `~/.itsybitsy` home — its `agent-types/` dir, `config.json`, `repos.json`, `layout.json`, and `sealed/` dir. All are self-widening; agents may read them but must use `ib` to change configuration. Protected paths are canonicalized (symlink-resolving) so a symlinked parent cannot defeat the guard.
+10. **Other agents' / own non-worktree files**: deny anything under `.ittybitty/agents/` that is not the agent's own worktree or its own `agent.log` (so `meta.json`, `prompt.txt`, the outbox, and sibling agents stay denied to file tools, stricter than the kernel's `AGENTDIR` write root).
+11. **Main repo (outside worktree)**: deny the main checkout — including its `.git` (a kernel write root) — for worktree agents. The worktree and the agents dir are excluded (handled above / by the resolver).
 
-The distinction between `undefined` (absent) and `[]` (empty) is critical for backward compatibility: existing agents without `allowedPaths` in meta.json retain the current permissive behavior.
+**Shared resolver** (steps 7–9 and 12–13 folded in): the resolved path is decided by `resolvePreparedAccess()` (`src/sandbox.ts`) against the per-agent **access table** built by `src/hooks/paths-table.ts` — `meta.paths` unioned with the runtime roots — the **same table the kernel profile is generated from**, so the hook and the kernel agree. A Write/Edit/MultiEdit/NotebookEdit (and codex `apply_patch`) resolves as a `write` op; Read/Grep/Glob/LS/`cd` as `read`.
 
-**Logging**: Denials are logged to the agent's `agent.log` with format: `[PreToolUse] Permission denied: <tool-name> (<params>)`
+**Runtime roots** (always granted, per agent, injected by code — never in a `.md`): the worktree (read+write), the agent dir with its `agent.log`, the git common dir (read+write), the repo agents dir (`REPOAGENTS` — **write** for a spawner, **read** for a non-spawner, keyed on the resolved `canSpawnChildren`), the parent repo's `.claude` (`PARENTCLAUDE`, write, spawners only), the Claude project dir (`~/.claude/projects/<encoded-worktree>`), and the scratchpad (`/private/tmp/claude-<uid>/<encoded-worktree>`). For a **non-spawner**, the **tmux socket dir is a deny root** (reaching the tmux server is a sandbox escape); a spawner keeps it (accepted, SPEC-SANDBOX §4C.3).
+
+**Resolution rules**: `paths.deny` **wins** over any allow at any depth; otherwise the **most specific** (longest canonical) matching entry decides — `allowWrite` grants read+write, `allowRead` grants read-only, and the same path in both lists **writes**. **No match denies.** A **missing** `paths` key equals empty lists equals **deny by default** (`resolvePathsConfig(undefined)` returns three empty lists, never a wildcard): the agent reaches only its worktree and the runtime roots.
+
+**Fail closed**: malformed hook stdin, a non-string `tool_name`, and a **missing or unreadable `meta.json`** all **deny** (Phase B removed the historical allow-on-error fallbacks). The `@system` coordinator has no `meta.json`; its lists come from `_all.md ∪ system.md`, resolved **live** at hook time (the agent-types dir is read-only in the floor), and a layer that fails to load yields empty lists — strict, never permissive.
+
+**Logging**: Denials are appended to the agent's `agent.log` keeping the exact prefix `[PreToolUse] Permission denied: <tool> (<params>)` that the **Denials tab** of `ib watch` parses (`src/agents.ts::parseDenials`), plus ` — <reason>` naming the **operation**, the **resolved path**, and the **rule** (a `paths.deny` hit versus no matching allow entry). Kernel `sandbox-exec` denials never reach the agent log, so the advisory Bash scanner is what surfaces an honest `cat ~/.ssh/id_rsa` in the tab before the kernel refuses it.
 
 **State write side effect**: PreToolUse fires before every tool call, so the path-check handler also writes `state: "running"` to the agent's `meta.json` (via `writeAgentState()`). This flips state out of `waiting` when Claude resumes after a background-tool completion. PreToolUse is used (rather than PostToolUse) because it cannot race with Stop — Stop fires after the final tool call has completed, so a late PostToolUse could overwrite a legitimate `complete`/`stopped` state. Skipped for `@system` (no `meta.json`).
 
@@ -839,7 +841,7 @@ Instructions are generated based on the agent's type definition:
 | `{{worktreePath}}` | Full path to agent's worktree |
 | `{{rootRepoPath}}` | Full path to the root repo |
 | `{{repoName}}` | Repository basename |
-| `{{pathIsolation}}` | Rendered Path Isolation section (from `buildPathIsolationSection()`, includes allowedPaths if defined) |
+| `{{pathIsolation}}` | Rendered Path Isolation section (from `buildPathIsolationSection()`: the runtime roots, the resolved `paths.allowWrite`/`allowRead`/`deny` lists, and whether the kernel sandbox is enabled) |
 
 | Condition | True when |
 |-----------|-----------|

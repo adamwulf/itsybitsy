@@ -176,6 +176,26 @@ describe("checkPathAccess", () => {
     expect(result.reason).toContain("work in your worktree");
   });
 
+  test("block the exact main repo root even when paths.allowRead grants it", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowRead: ["/repo"] }) });
+    const result = checkPathAccess(makeInput({
+      toolName: "LS",
+      toolInput: { path: "/repo" },
+    }), { ...ctx, allowList: [...ctx.allowList, "LS"] });
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("work in your worktree");
+  });
+
+  test("cd to the exact main repo root is structurally denied", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowRead: ["/repo"] }) });
+    const result = checkPathAccess(makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cd /repo" },
+    }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("work in your worktree");
+  });
+
   test("system paths (/tmp/foo) are DENIED with empty paths (no permissive mode)", () => {
     const ctx = makeCtx();
     const input = makeInput({
@@ -278,15 +298,15 @@ describe("checkPathAccess", () => {
     expect(result.reason).toContain("work in your worktree");
   });
 
-  test("no file_path or path in toolInput → allow", () => {
+  test("required-path tool with no file_path or path → deny", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Read",
       toolInput: { pattern: "*.ts" },
     });
     const result = checkPathAccess(input, ctx);
-    expect(result.decision).toBe("allow");
-    expect(result.reason).toBe("Tool in allow list");
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("requires a path argument");
   });
 
   test("uses path field when file_path is absent", () => {
@@ -387,6 +407,27 @@ describe("checkPathAccess", () => {
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
     expect(result.reason).toContain("bash command references main repo");
+  });
+
+  test("bash exact main repo root is caught with a real token boundary", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowRead: ["/repo"] }) });
+    for (const command of ["ls /repo", "ls '/repo'", 'ls --directory="/repo"']) {
+      const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+      expect(result.decision).toBe("deny");
+      expect(result.reason).toContain("bash command references main repo");
+    }
+  });
+
+  test("bash main repo scanner preserves worktree exclusions and prefix collisions", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowRead: ["/repo-copy"] }) });
+    expect(checkPathAccess(makeInput({
+      toolName: "Bash",
+      toolInput: { command: "ls /repo/.ittybitty/agents/agent-abc123/repo" },
+    }), ctx).decision).toBe("allow");
+    expect(checkPathAccess(makeInput({
+      toolName: "Bash",
+      toolInput: { command: "ls /repo-copy" },
+    }), ctx).decision).toBe("allow");
   });
 
   // ── relative-path traversal escaping the worktree (boundary review fix 1) ───
@@ -2030,6 +2071,28 @@ describe("checkPathAccess — @system protected config writes (Phase B security)
     expect(result.reason).toBe(protectedConfigWriteDenyReason(join(ITSY, "agent-types")));
   });
 
+  test("@system protected Bash targets expand supported home anchors before matching", () => {
+    setUserHome("/Users/test");
+    try {
+      const commands = [
+        "ib list > ~/.itsybitsy/config.json",
+        'ib list >"$HOME/.itsybitsy/config.json"',
+        "ib list >> '${HOME}/.itsybitsy/config.json'",
+        'sed -i s/x/y/ "~/.itsybitsy/config.json"',
+      ];
+      for (const command of commands) {
+        const result = checkPathAccess(
+          makeInput({ toolName: "Bash", toolInput: { command }, cwd: ITSY }),
+          systemCtx(),
+        );
+        expect(result.decision).toBe("deny");
+        expect(result.reason).toBe(protectedConfigWriteDenyReason(CONFIG));
+      }
+    } finally {
+      resetUserHome();
+    }
+  });
+
   test("@system Read of _all.md → ALLOWED (writes blocked, reads untouched)", () => {
     const result = checkPathAccess(makeInput({ toolName: "Read", toolInput: { file_path: ALL_MD } }), systemCtx());
     expect(result.decision).toBe("allow");
@@ -2234,6 +2297,24 @@ describe("hookCheckPath with @system", () => {
     expect(logged.length).toBe(1);
     const decision = JSON.parse(logged[0]!);
     expect(decision.hookSpecificOutput.permissionDecision).toBe("allow");
+  });
+
+  test("denies ib redirects to protected config through tilde and HOME anchors", async () => {
+    const home = join(tempHome, ".itsybitsy");
+    for (const command of [
+      "ib list > ~/.itsybitsy/config.json",
+      "ib list > $HOME/.itsybitsy/config.json",
+    ]) {
+      logged = [];
+      await hookCheckPath("@system", JSON.stringify({
+        tool_name: "Bash",
+        tool_input: { command },
+        cwd: home,
+      }));
+      const decision = JSON.parse(logged[0]!);
+      expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("protected coordinator configuration");
+    }
   });
 
   test("denies tools not in the system coordinator's allow list", async () => {
@@ -2473,6 +2554,52 @@ describe("hookCheckPath — deny by default (missing meta, malformed stdin)", ()
     await hookCheckPath("agent-test77", JSON.stringify({ tool_name: 42, tool_input: {}, cwd: worktreeCwd }));
     const decision = JSON.parse(logged[0]!);
     expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+  });
+
+  test("an array tool_input → DENY instead of normalizing to a pathless call", async () => {
+    await hookCheckPath("agent-test77", JSON.stringify({ tool_name: "Read", tool_input: [], cwd: worktreeCwd }));
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("Invalid stdin schema");
+  });
+
+  test("a non-string cwd → DENY", async () => {
+    await hookCheckPath("agent-test77", JSON.stringify({ tool_name: "Read", tool_input: {}, cwd: 42 }));
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("Invalid stdin schema");
+  });
+
+  test("invalid or missing required file paths → DENY without throwing", async () => {
+    await writeFile(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-test77", worker: true }));
+    for (const toolInput of [{ file_path: 42 }, {}]) {
+      logged = [];
+      await expect(hookCheckPath("agent-test77", JSON.stringify({
+        tool_name: "Read",
+        tool_input: toolInput,
+        cwd: worktreeCwd,
+      }))).resolves.toBeUndefined();
+      const decision = JSON.parse(logged[0]!);
+      expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("path");
+    }
+  });
+
+  test("valid pathless Glob and Grep calls use cwd fallback", async () => {
+    await writeFile(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-test77", worker: true }));
+    await writeFile(
+      join(worktreeCwd, ".claude", "settings.local.json"),
+      JSON.stringify({ permissions: { allow: ["Glob", "Grep"], deny: [] } }),
+    );
+    for (const [tool_name, tool_input] of [
+      ["Glob", { pattern: "*.ts" }],
+      ["Grep", { pattern: "needle" }],
+    ] as const) {
+      logged = [];
+      await hookCheckPath("agent-test77", JSON.stringify({ tool_name, tool_input, cwd: worktreeCwd }));
+      const decision = JSON.parse(logged[0]!);
+      expect(decision.hookSpecificOutput.permissionDecision).toBe("allow");
+    }
   });
 
   test("missing meta.json → DENY with the unreadable-meta reason", async () => {

@@ -235,6 +235,70 @@ describe("hookCodexPreToolUse — codex JSON contract (gate (d))", () => {
     await rm(tempHome, { recursive: true, force: true });
   });
 
+  async function runPayload(payload: unknown): Promise<{
+    hookSpecificOutput: {
+      permissionDecision: string;
+      permissionDecisionReason?: string;
+      updatedInput?: Record<string, unknown>;
+    };
+  }> {
+    let captured = "";
+    await hookCodexPreToolUse("agent-test01", {
+      rawStdin: JSON.stringify(payload),
+      agentDirOverride: agentDir,
+      skipSessionIdCapture: true,
+      write: (chunk: string) => { captured += chunk; return chunk.length; },
+    });
+    return JSON.parse(captured);
+  }
+
+  test("malformed nested tool_input arrays are denied instead of becoming pathless calls", async () => {
+    const parsed = await runPayload({
+      tool_name: "Read",
+      tool_input: [],
+      cwd: join(agentDir, "repo"),
+    });
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain("Invalid stdin schema");
+  });
+
+  test("non-string cwd is denied instead of falling back to process.cwd", async () => {
+    const parsed = await runPayload({
+      tool_name: "Read",
+      tool_input: { file_path: join(agentDir, "repo", "README.md") },
+      cwd: 42,
+    });
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain("Invalid stdin schema");
+  });
+
+  test("invalid and missing required file paths are denied", async () => {
+    for (const tool_input of [{ file_path: 42 }, {}]) {
+      const parsed = await runPayload({
+        tool_name: "Read",
+        tool_input,
+        cwd: join(agentDir, "repo"),
+      });
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain("path");
+    }
+  });
+
+  test("valid pathless Glob and Grep calls use the hook cwd", async () => {
+    for (const [tool_name, tool_input] of [
+      ["Glob", { pattern: "*.ts" }],
+      ["Grep", { pattern: "needle" }],
+    ] as const) {
+      const parsed = await runPayload({
+        tool_name,
+        tool_input,
+        cwd: join(agentDir, "repo"),
+      });
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("allow");
+      expect(parsed.hookSpecificOutput.updatedInput).toEqual(tool_input);
+    }
+  });
+
   test("deny includes permissionDecisionReason", async () => {
     const stdin = JSON.stringify({
       tool_name: "Bash",

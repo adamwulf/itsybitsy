@@ -105,7 +105,13 @@ export function checkCodexPreToolUse(
   const { toolName, toolInput, cwd } = input;
 
   if (toolName === "apply_patch") {
-    const patchBody = String(toolInput.command ?? "");
+    if (typeof toolInput.command !== "string") {
+      return {
+        decision: "deny",
+        reason: "Invalid tool input schema: apply_patch requires a string command",
+      };
+    }
+    const patchBody = toolInput.command;
     const targets = extractApplyPatchPaths(patchBody);
     if (targets.length === 0) {
       return {
@@ -232,24 +238,39 @@ export async function hookCodexPreToolUse(
 
     const rawStdin =
       deps?.rawStdin ?? (await new Response(Bun.stdin.stream()).text());
-    let data: Record<string, unknown> = {};
+    let data: Record<string, unknown>;
     try {
       const parsed = JSON.parse(rawStdin);
-      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-        data = parsed as Record<string, unknown>;
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        write(buildCodexDenyOutput("Invalid stdin schema: expected a JSON object"));
+        return;
       }
+      data = parsed as Record<string, unknown>;
     } catch {
       // Codex sent malformed JSON. Per fail-safe-on-the-itsybitsy-side, deny.
       write(buildCodexDenyOutput("codex hook stdin was not valid JSON"));
       return;
     }
 
-    const toolName = typeof data.tool_name === "string" ? data.tool_name : "";
-    const toolInput =
-      data.tool_input && typeof data.tool_input === "object" && !Array.isArray(data.tool_input)
-        ? (data.tool_input as Record<string, unknown>)
-        : {};
-    const cwd = typeof data.cwd === "string" ? data.cwd : process.cwd();
+    if (typeof data.tool_name !== "string") {
+      write(buildCodexDenyOutput("Invalid stdin schema: tool_name must be a string"));
+      return;
+    }
+    if (
+      data.tool_input !== undefined &&
+      (typeof data.tool_input !== "object" || data.tool_input === null || Array.isArray(data.tool_input))
+    ) {
+      write(buildCodexDenyOutput("Invalid stdin schema: tool_input must be an object"));
+      return;
+    }
+    if (data.cwd !== undefined && typeof data.cwd !== "string") {
+      write(buildCodexDenyOutput("Invalid stdin schema: cwd must be a string"));
+      return;
+    }
+
+    const toolName = data.tool_name;
+    const toolInput = (data.tool_input as Record<string, unknown> | undefined) ?? {};
+    const cwd = (data.cwd as string | undefined) ?? process.cwd();
 
     const ctxResolved = await resolveAgentContext(agentId, cwd, deps?.agentDirOverride);
 

@@ -145,6 +145,20 @@ export function toolMatchesPattern(
  */
 const WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit", "MultiEdit"]);
 
+/** File tools whose schemas require one of the supported path fields. */
+const REQUIRED_PATH_TOOLS = new Set(["Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "LS"]);
+
+/** Search tools may omit their path and search relative to the hook cwd. */
+const CWD_FALLBACK_PATH_TOOLS = new Set(["Glob", "Grep"]);
+
+/** Path fields understood across Claude, codex synthesis, and agy translation. */
+const TOOL_PATH_KEYS = ["file_path", "path", "notebook_path"] as const;
+
+/** Build a stable fail-closed reason for malformed nested tool input. */
+function invalidToolInputReason(detail: string): HookDecision {
+  return { decision: "deny", reason: `Invalid tool input schema: ${detail}` };
+}
+
 /**
  * Check if an absolute, normalized path points directly to a settings*.json
  * file inside <worktreePath>/.claude/. Files in subdirectories of .claude do
@@ -284,6 +298,10 @@ export function checkPathAccess(
   const { toolName, toolInput, cwd } = input;
   const { agentDir, worktreePath, agentsDir, rootRepo, allowList } = ctx;
 
+  if (typeof cwd !== "string") {
+    return invalidToolInputReason("cwd must be a string");
+  }
+
   // 1. Check allow list (TaskCreate is handled by intercept-task hook)
   let inAllowList = false;
   for (const pattern of allowList) {
@@ -300,7 +318,10 @@ export function checkPathAccess(
 
   // 2. Special handling for Bash tool — check cd commands
   if (toolName === "Bash") {
-    const command = String(toolInput.command ?? "");
+    if (typeof toolInput.command !== "string") {
+      return invalidToolInputReason("Bash requires a string command");
+    }
+    const command = toolInput.command;
 
     if (command.startsWith("cd ") || command === "cd") {
       // Extract cd target
@@ -331,12 +352,29 @@ export function checkPathAccess(
     return { decision: "allow", reason: "Tool in allow list" };
   }
 
-  // 3. Extract file_path or path or notebook_path from toolInput
-  const filePath = (toolInput.file_path as string | undefined) ??
-                   (toolInput.path as string | undefined) ??
-                   (toolInput.notebook_path as string | undefined);
+  // 3. Extract file_path / path / notebook_path without coercion. A present
+  // malformed field fails closed; required-path tools also deny when none is
+  // present. Glob/Grep deliberately support their schemas' cwd fallback, but
+  // still run that fallback through the same structural/resolver checks.
+  let filePath: string | undefined;
+  for (const key of TOOL_PATH_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(toolInput, key)) continue;
+    const value = toolInput[key];
+    if (typeof value !== "string" || value.length === 0) {
+      return invalidToolInputReason(`${toolName}.${key} must be a non-empty string path`);
+    }
+    if (filePath === undefined) {
+      filePath = value;
+    }
+  }
 
-  if (!filePath) {
+  if (filePath === undefined) {
+    if (REQUIRED_PATH_TOOLS.has(toolName)) {
+      return invalidToolInputReason(`${toolName} requires a path argument`);
+    }
+    if (CWD_FALLBACK_PATH_TOOLS.has(toolName)) {
+      return checkFilePath(cwd, cwd, toolName, ctx);
+    }
     return { decision: "allow", reason: "Tool in allow list" };
   }
 
@@ -388,12 +426,18 @@ function checkBashSettingsWrite(
       t = t.slice(1, -1);
     }
     if (!t) return null;
-    let resolved = t.startsWith("/") ? resolve(t) : resolve(join(cwd, t));
-    try {
-      resolved = realpathSync(resolved);
-    } catch {
-      // Target doesn't exist yet — keep the resolve() result.
+    // Redirect and sed targets support the same leading home anchors as the
+    // advisory Bash scanner. Expand before canonicalization so @system cannot
+    // address a protected file as ~/.itsybitsy/config.json, $HOME/…, or
+    // ${HOME}/… and have the raw spelling miss the protected-path table.
+    if (startsWithPathAnchor(t)) {
+      t = expandBashPathPortion(t, userHome());
     }
+    const absolute = t.startsWith("/") ? resolve(t) : resolve(join(cwd, t));
+    // Resolve the longest existing parent as well as the leaf. Redirect
+    // targets commonly do not exist yet, and on macOS /var aliases
+    // /private/var; exact-only realpath would leave that spelling mismatch.
+    const resolved = canonicalizeSandboxPath(absolute);
     const kind = worktreeProtectedFileKind(resolved, worktreePath);
     if (kind === "settings") return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
     if (kind === "agy") return { decision: "deny", reason: AGY_BOUNDARY_WRITE_DENY_REASON };
@@ -871,14 +915,20 @@ function checkBashCommandPaths(
 
   // Check for references to root repo (when it's not the worktree)
   if (rootRepo && rootRepo !== worktreePath) {
-    const needle = rootRepo + "/";
+    const needle = rootRepo;
     let pos = 0;
     while ((pos = command.indexOf(needle, pos)) !== -1) {
-      // Only match at path boundaries
-      if (pos === 0 || " '\"=".includes(command[pos - 1]!)) {
+      const beforeIsBoundary = pos === 0 || /[\s'"=|;&<>()]/.test(command[pos - 1]!);
+      const afterRoot = command[pos + needle.length];
+      const afterIsBoundary =
+        afterRoot === undefined || afterRoot === "/" || /[\s'"`|;&<>()]/.test(afterRoot);
+      if (beforeIsBoundary && afterIsBoundary) {
         const pathFromHere = command.slice(pos);
-        // Allow if the path is under our own worktree
-        if (!pathFromHere.startsWith(worktreePath + "/") && !pathFromHere.startsWith(worktreePath + " ") && pathFromHere !== worktreePath) {
+        const afterWorktree = pathFromHere[worktreePath.length];
+        const isOwnWorktree =
+          pathFromHere.startsWith(worktreePath) &&
+          (afterWorktree === undefined || afterWorktree === "/" || /[\s'"`|;&<>()]/.test(afterWorktree));
+        if (!isOwnWorktree) {
           return { decision: "deny", reason: "Access denied: bash command references main repo" };
         }
       }
@@ -971,7 +1021,7 @@ function checkFilePath(
   // step 11 must not re-block the own agent.log that step 10 let through.
   if (
     rootRepo &&
-    filePath.startsWith(rootRepo + "/") &&
+    (filePath === rootRepo || filePath.startsWith(rootRepo + "/")) &&
     filePath !== worktreePath &&
     !filePath.startsWith(worktreePath + "/") &&
     !(agentsDir !== "" && filePath.startsWith(agentsDir + "/"))
@@ -1245,6 +1295,30 @@ export async function checkIbCommandAccess(
  * Reads stdin JSON, resolves context, calls checkPathAccess(), outputs JSON.
  */
 export async function hookCheckPath(agentId: string, rawStdin?: string): Promise<void> {
+  try {
+    await hookCheckPathImpl(agentId, rawStdin);
+  } catch (err) {
+    // Last-ditch explicit deny: Claude treats a hook crash as an unreliable
+    // boundary. Keep this outside the implementation so unexpected failures
+    // during stdin reads, context resolution, state writes, or logging cannot
+    // escape without a deny decision.
+    const detail = err instanceof Error ? err.message : String(err);
+    try {
+      process.stderr.write(`hook-check-path: unexpected processing failure: ${detail}\n`);
+    } catch { /* best effort */ }
+    try {
+      console.log(JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: `Unexpected hook processing failure: ${detail}`,
+        },
+      }));
+    } catch { /* no remaining output channel */ }
+  }
+}
+
+async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<void> {
   // Read JSON from stdin (use pre-read value if provided)
   const raw = rawStdin ?? await new Response(Bun.stdin.stream()).text();
   let json: unknown;
@@ -1274,8 +1348,17 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
   }
 
   // Validate tool_input is a non-null object
-  if (data.tool_input !== undefined && (typeof data.tool_input !== "object" || data.tool_input === null)) {
+  if (
+    data.tool_input !== undefined &&
+    (typeof data.tool_input !== "object" || data.tool_input === null || Array.isArray(data.tool_input))
+  ) {
     process.stderr.write(`hook-check-path: tool_input is not an object\n`);
+    console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "Invalid stdin schema" } }));
+    return;
+  }
+
+  if (data.cwd !== undefined && typeof data.cwd !== "string") {
+    process.stderr.write(`hook-check-path: cwd is not a string\n`);
     console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "Invalid stdin schema" } }));
     return;
   }

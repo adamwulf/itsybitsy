@@ -121,6 +121,10 @@ describe("formatAgentPathPolicy", () => {
       .toBe("Sandbox:      unavailable (agy)");
   });
 
+  test.each(["sonnet", "opus", "unknown"])("legacy %s metadata keeps Claude display behavior", (model) => {
+    expect(formatAgentPathPolicy({ model })[0]).toBe("Sandbox:      disabled");
+  });
+
   test("prints sandbox state and all resolved lists in read/write/deny order", () => {
     expect(formatAgentPathPolicy({
       sandbox: { enabled: true, rawAllow: [], domains: [] },

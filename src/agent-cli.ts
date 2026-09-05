@@ -96,9 +96,13 @@ export function resolveCli(model: string): AgentCli {
   return parseModel(model).cli;
 }
 
-/** Legacy metadata without a model belongs to Claude; invalid models grant no CLI-specific roots. */
+/** Legacy absent/bare models belong to Claude; invalid qualified models grant no CLI-specific roots. */
 export function metadataCli(model: unknown): AgentCli | undefined {
   if (model == null || model === "" || model === "null") return "claude";
+  // Live pre-selector agents used names such as sonnet/opus. readAgentMeta also
+  // coerces an absent model to "unknown". This metadata compatibility does not
+  // relax parseModel: new spawns still require the qualified selector.
+  if (typeof model === "string" && /^[a-zA-Z0-9._-]+$/.test(model)) return "claude";
   try {
     return typeof model === "string" ? parseModel(model).cli : undefined;
   } catch {

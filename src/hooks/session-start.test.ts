@@ -622,6 +622,13 @@ describe("buildPathIsolationSection", () => {
     },
   );
 
+  test.each(["sonnet", "opus", "unknown"])("legacy %s metadata keeps Claude runtime instructions", (model) => {
+    const section = buildPathIsolationSection(detectRole(baseCtx.worktreePath, { model }));
+    expect(section).toContain("your Claude project directory and scratchpad");
+    expect(section).toContain("The kernel sandbox is OFF");
+    expect(section).toContain("Internal git and agent lifecycle operations");
+  });
+
   test("non-worktree (coordinator) shows repo path and 'this repo' root", () => {
     const ctx: SessionContext = {
       role: "coordinator",

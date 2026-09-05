@@ -493,10 +493,11 @@ describe("ib init-types --check (subprocess exit code)", () => {
     return await proc.exited;
   }
 
+  // Real CLI subprocesses transpile the full index.ts graph and need load headroom.
   test("exits 0 when the local floor matches the embedded default", async () => {
     await populateFloor();
     expect(await runCheckExitCode()).toBe(0);
-  });
+  }, 30_000);
 
   test("exits 1 when a floor entry is missing locally", async () => {
     await populateFloor();
@@ -505,7 +506,7 @@ describe("ib init-types --check (subprocess exit code)", () => {
     const allPath = join(tempHome, ".itsybitsy", "agent-types", "_all.md");
     await Bun.write(allPath, "---\nname: _all\nspawnable: false\n---\nbody");
     expect(await runCheckExitCode()).toBe(1);
-  });
+  }, 30_000);
 });
 
 describe("ensureAgentTypesDir: system layer", () => {
@@ -565,9 +566,8 @@ body`;
 });
 
 test("loadAgentType: paths absent stays undefined and a present empty block has three lists", async () => {
-  const originalHome = process.env.HOME;
   const tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-empty-paths-"));
-  process.env.HOME = tempHome;
+  setUserHome(tempHome);
   try {
     const typesDir = join(tempHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
@@ -580,7 +580,7 @@ test("loadAgentType: paths absent stays undefined and a present empty block has 
       deny: [],
     });
   } finally {
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   }
 });

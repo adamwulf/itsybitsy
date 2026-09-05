@@ -832,10 +832,25 @@ invoker-side.
 
 ✅ **Implemented in `src/ib-commands.ts` (`spawnHelperViaTmuxServer`) for new
 and resumed watchdogs, and for prompt-summary generation.** The final command is
-`tmux run-shell -b 'cd <cwd> && exec …'`: cwd is set with a quoted `cd` prefix,
-not `run-shell -c`, to remain compatible with tmux releases predating that flag.
-The watchdog records its authoritative PID in transient state; test overrides
-retain the direct PID return used by deterministic tests and legacy meta.
+`tmux run-shell -b '<wrapper>'` where the wrapper (`buildTmuxHelperScript`)
+`cd`s to `<cwd>`, runs `… >>log 2>&1` as a backgrounded child, waits for it,
+and always exits 0. cwd is set with a quoted `cd` prefix, not `run-shell -c`, to
+remain compatible with tmux releases predating that flag. The watchdog records
+its authoritative PID in transient state; test overrides retain the direct PID
+return used by deterministic tests and legacy meta.
+
+**Why the wrapper (regression fixed 2026-09-05):** a background `run-shell -b`
+job has no client and no target pane, so when it prints, exits non-zero, or dies
+by a signal, tmux writes a `'<cmd>' terminated by signal 15` notice into the
+active pane of the most recently created/attached session and parks that pane
+in **view-mode** — after which every `send-keys` to that pane is misrouted
+through the copy-mode key table and the agent silently stops receiving messages.
+The orphan-kill SIGTERM to a stopping agent's watchdog triggered exactly this on
+some other agent's pane at every teardown. The wrapper keeps the job's own stdio
+empty, preserves the helper's status in its log (`[helper] exited rc=N`), traps
+signals aimed at the wrapper (forwarding SIGTERM to the helper), and reports 0.
+Delivery additionally probes `#{pane_in_mode}` and cancels an active mode
+(`cancelTmuxPaneModeIfActive`). See docs/codex-cooked-tty-wedge.md.
 
 ### 4C.3 tmux socket = sandbox escape (accepted shipped limitation)
 

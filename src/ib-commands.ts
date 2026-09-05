@@ -3496,11 +3496,49 @@ function resolveSenderId(agentRepoPath: string, opts?: { fromAgent?: string; cwd
 }
 
 /**
+ * Leave tmux view-mode / copy-mode on an agent's pane if it is in one, so the
+ * keystrokes that follow reach the agent instead of the copy-mode key table.
+ *
+ * Probes `#{pane_in_mode}` with `display-message -p`; only a literal `1` (the
+ * pane IS in a mode) triggers `send-keys -X cancel`. A failed probe (session
+ * gone, old tmux) or any other output is treated as "not in a mode" so this can
+ * never block delivery. `-X cancel` is sent ONLY when a mode is active — sent
+ * blind it errors "not in a mode" and does nothing useful.
+ *
+ * Why a pane ends up parked in a mode with nobody attached: a `run-shell -b`
+ * job notice (see `buildTmuxHelperScript`), or a user who scrolled the pane
+ * (mouse-wheel copy-mode) in an attached client and then detached. Either way
+ * every `send-keys` to that pane is silently misrouted until the mode ends.
+ *
+ * Returns true when a mode was active and the cancel was sent successfully.
+ */
+export async function cancelTmuxPaneModeIfActive(tmuxSession: string): Promise<boolean> {
+  const probe = sendSpawnCtx.runner(
+    ["tmux", "display-message", "-p", "-t", tmuxSessionTarget(tmuxSession), "#{pane_in_mode}"],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const [probeOut] = await Promise.all([
+    new Response(probe.stdout).text(),
+    new Response(probe.stderr).text(), // drain
+  ]);
+  const probeExit = await probe.exited;
+  if (probeExit !== 0 || probeOut.trim() !== "1") return false;
+
+  const cancel = sendSpawnCtx.runner(
+    ["tmux", "send-keys", "-t", tmuxSessionTarget(tmuxSession), "-X", "cancel"],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  await new Response(cancel.stderr).text(); // drain
+  return (await cancel.exited) === 0;
+}
+
+/**
  * Deliver ONE queued message to an agent's tmux session — the single tmux
  * writer. This is the exact body the historical `sendMessage` ran for one
- * message: has-session check, sender-prefix formatting (including the
- * `user.name` config read), chunked `send-keys -l`, inter-chunk sleep,
- * length-scaled delay, `Enter`, recipient/sender logging, `writeAgentState`.
+ * message: has-session check, view/copy-mode cancel (`cancelTmuxPaneModeIfActive`),
+ * sender-prefix formatting (including the `user.name` config read), chunked
+ * `send-keys -l`, inter-chunk sleep, length-scaled delay, `Enter`,
+ * recipient/sender logging, `writeAgentState`.
  *
  * Callers (the watchdog drain and the inline fallback) hold the per-session
  * delivery lock for the whole batch, so two `send-keys`/`Enter` sequences to
@@ -3524,6 +3562,21 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
   const hasSessionExit = await hasSessionProc.exited;
   if (hasSessionExit !== 0) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' is not running` };
+  }
+
+  // Log/state writes target the per-worktree agent dir.
+  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+
+  // A pane parked in tmux view-mode / copy-mode never sees our keystrokes: tmux
+  // routes `send-keys` through the copy-mode key table instead (Space pages,
+  // `n` searches, `f`/`t`/`g` open a command-prompt that fails "no current
+  // client", Enter is unbound). A message with none of those letters is eaten
+  // with exit 0 and would be dropped as delivered. Leave the mode first.
+  if (await cancelTmuxPaneModeIfActive(tmuxSession)) {
+    await logAgent(
+      agentDir,
+      "Pane was in tmux view/copy-mode; cancelled it before delivery (see docs/codex-cooked-tty-wedge.md)",
+    );
   }
 
   const fromId = queued.fromAgent;
@@ -3628,7 +3681,6 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
   // recipient line since the recipient pane saw the message without any
   // [sent by ...] prefix — surfacing the sender only in the log would be
   // confusing.
-  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
   if (raw) {
     await logAgent(agentDir, `Received raw message: ${message}`);
   } else if (userPassthrough) {
@@ -4454,9 +4506,72 @@ export function resetSandboxWiringForTesting(): void {
 }
 
 /**
+ * Build the shell script `spawnHelperViaTmuxServer` hands to `tmux run-shell -b`.
+ *
+ * The script exists to keep tmux from ever reporting on the helper. A
+ * background `run-shell -b` job has no waiting client and no target pane, so
+ * when it writes to stdout/stderr, exits non-zero, or dies by a signal, tmux
+ * prints the text or a `'<cmd>' returned N` / `'<cmd>' terminated by signal 15`
+ * notice into the active pane of the MOST RECENTLY ACTIVE session (the one
+ * last created or attached — typically whichever agent the user last opened)
+ * and switches that pane into view-mode. A pane in view-mode routes every
+ * `send-keys` through the copy-mode key table instead of the agent, so the
+ * victim agent silently stops receiving messages (see
+ * docs/codex-cooked-tty-wedge.md, "pane stuck in tmux view-mode"). The
+ * watchdog is exactly such a job: the orphan-kill teardown SIGTERMs it when
+ * its agent stops, and every teardown wedged some other agent's pane.
+ *
+ * Shape (one line, POSIX sh — tmux runs it under `default-shell -c`, which may
+ * be bash, zsh, or /bin/sh):
+ *
+ *   exec >/dev/null 2>&1;                 — the job itself never emits output
+ *   cd <cwd> || { …log…; exit 0; }        — wrapper AND helper run from <cwd>
+ *                                          (never from the spawner's cwd, which
+ *                                          may be an agent dir that later goes
+ *                                          away — the orphan scanners key on
+ *                                          cwd); a failed cd is logged, not
+ *                                          reported to tmux
+ *   trap '…kill -TERM "$child"…; exit 0' — a signal aimed at the wrapper (tmux
+ *                                          `kill-server` etc.) is forwarded to
+ *                                          the helper and reported as exit 0
+ *   <cmd> >>log 2>&1 & child=$!           — the helper runs as a CHILD with its
+ *                                          own output redirected to its log
+ *   wait "$child"; …; exit 0              — the helper's own status (e.g. 143
+ *                                          after SIGTERM) is logged, and the
+ *                                          wrapper always reports 0 to tmux
+ *
+ * The helper's PID is still the helper's own (`ib watchdog` records
+ * `process.pid`), so the orphan-kill SIGTERM targets the helper directly; the
+ * wrapper simply outlives it by one `exit 0`. The `cd` prefix (rather than
+ * `run-shell -c`) keeps compatibility with tmux releases predating that flag.
+ * Nothing in the script contains `#`, which `run-shell` would format-expand.
+ * The helper argv is shell-quoted token by token (`'ib' 'watchdog' '<id>'`), so
+ * the wrapper's own command line does NOT match `isWatchdogProcess` in
+ * state-command.ts — only the real helper process does (pinned by a test).
+ */
+export function buildTmuxHelperScript(cwd: string, command: string[], logPath?: string): string {
+  const shellCommand = command.map(shellQuote).join(" ");
+  const redirect = logPath ? `>>${shellQuote(logPath)} 2>&1` : ">/dev/null 2>&1";
+  return [
+    "exec >/dev/null 2>&1",
+    `cd ${shellQuote(cwd)} || { echo "[helper] cd failed" ${redirect}; exit 0; }`,
+    "child=",
+    `trap 'if [ -n "$child" ]; then kill -TERM "$child"; fi; exit 0' HUP INT TERM`,
+    `${shellCommand} ${redirect} & child=$!`,
+    `wait "$child"`,
+    "rc=$?",
+    `if [ "$rc" -ne 0 ]; then echo "[helper] exited rc=$rc" ${redirect}; fi`,
+    "exit 0",
+  ].join("; ");
+}
+
+/**
  * Launch a long-lived helper as a child of the unsandboxed tmux server. A
  * sandboxed manager invoking `ib new-agent` must not lend its own Seatbelt
  * profile to the child's watchdog or summary worker for their whole lifetime.
+ *
+ * The job is wrapped by `buildTmuxHelperScript` so tmux never has a reason to
+ * print anything about it into a pane (see that function's doc comment).
  */
 async function spawnHelperViaTmuxServer(
   runner: SandboxCommandRunner,
@@ -4464,15 +4579,11 @@ async function spawnHelperViaTmuxServer(
   command: string[],
   logPath?: string,
 ): Promise<void> {
-  const shellCommand = command.map(shellQuote).join(" ")
-    + (logPath ? ` >> ${shellQuote(logPath)} 2>&1` : " >/dev/null 2>&1");
-  // Keep compatibility with tmux releases before run-shell gained `-c` by
-  // setting cwd inside the server-owned shell command itself.
   const result = await runner.run([
     "tmux",
     "run-shell",
     "-b",
-    `cd ${shellQuote(cwd)} && exec ${shellCommand}`,
+    buildTmuxHelperScript(cwd, command, logPath),
   ]);
   if (result.exitCode !== 0) {
     throw new Error(result.stderr.trim() || `tmux run-shell failed with exit ${result.exitCode}`);

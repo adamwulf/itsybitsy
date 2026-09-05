@@ -1420,10 +1420,19 @@ describe("sendToSystemCoordinator", () => {
     expect(result.stdout).toBe("Sent to system coordinator");
 
     // Verify sendMessage routed to IB_COORDINATOR_SESSION via the standard
-    // tmux send-keys path: has-session probe + literal-paste + Enter.
-    expect(spawnCalls.length).toBe(3);
+    // tmux send-keys path: has-session probe + pane-mode probe + literal-paste
+    // + Enter.
+    expect(spawnCalls.length).toBe(4);
     expect(spawnCalls[0]).toEqual(["tmux", "has-session", "-t", "=" + IB_COORDINATOR_SESSION + ":"]);
     expect(spawnCalls[1]).toEqual([
+      "tmux",
+      "display-message",
+      "-p",
+      "-t",
+      "=" + IB_COORDINATOR_SESSION + ":",
+      "#{pane_in_mode}",
+    ]);
+    expect(spawnCalls[2]).toEqual([
       "tmux",
       "send-keys",
       "-t",
@@ -1432,7 +1441,7 @@ describe("sendToSystemCoordinator", () => {
       "--",
       "[sent by user]: hello world",
     ]);
-    expect(spawnCalls[2]).toEqual(["tmux", "send-keys", "-t", "=" + IB_COORDINATOR_SESSION + ":", "Enter"]);
+    expect(spawnCalls[3]).toEqual(["tmux", "send-keys", "-t", "=" + IB_COORDINATOR_SESSION + ":", "Enter"]);
   });
 
   test("renders [sent by agent <id>]: prefix when fromAgent is supplied", async () => {

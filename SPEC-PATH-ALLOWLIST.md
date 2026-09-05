@@ -1360,6 +1360,16 @@ mode for reads and writes, confirm the two pilot checks (a hook deny under
 skip-permissions; MCP under the profile), then enable type by type. Agy gets
 its wrapper after its own boot-floor bisection.
 
+**Phase B shipped note (branch status, 2026-09-05).** On
+`agent/path-isolation`, the repo-anchored `paths:` grammar, `allowedPaths`
+retirement, deny-by-default shared hook table, protected writes,
+`ib init-types --check`, session-start text, policy displays, and the SPEC /
+implementation-note updates have landed. The companion advisory Bash scanner,
+kernel `PROJECTDIR`/`SCRATCHPAD` spawn/refresh wiring, and Codex/agy lifecycle
+propagation are still **IN PROGRESS** on the continuation worker branch; Phase
+B is therefore not yet `INSTALLED` in the rollout document's sense. Audit mode
+was dropped before implementation and does not ship.
+
 ## 9. Limitations of this report
 
 - Codex read behavior under `workspace-write` is taken from the repo's research

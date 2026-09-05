@@ -10,8 +10,9 @@ Design lives in `SPEC-SANDBOX.md` and, for Phase B/C, in `SPEC-PATH-ALLOWLIST.md
 **The word "shipped" means INSTALLED.** An item is shipped only when it is on
 `main`, the `ib` binary rebuilt (`bun run build`) and copied onto PATH
 (`/usr/local/bin/ib`), and `ib watch` restarted. Hooks and spawns call the
-installed binary, so a merge to `main` alone changes nothing at runtime. Nothing
-in this document is INSTALLED yet: every Phase A row is still on the branch.
+installed binary, so a merge to `main` alone changes nothing at runtime. The
+ledger records repository state; it does not claim an operator installation
+unless a row explicitly says `INSTALLED`.
 
 ---
 
@@ -19,8 +20,8 @@ in this document is INSTALLED yet: every Phase A row is still on the branch.
 
 Status vocabulary, in order of progress:
 
-`NOT STARTED` → `IN PROGRESS` → `ON BRANCH <sha>` → `ON MAIN <sha>` →
-`INSTALLED <date>`.
+`NOT STARTED` → `IN PROGRESS` → `ON BRANCH <branch>` → `ON MAIN` →
+`INSTALLED <date>`. The adjacent **Tip sha** column pins the code revision.
 
 `ON BRANCH` means merged onto its working branch and green there; `ON MAIN`
 means merged to `main` but not yet rebuilt/restarted; `INSTALLED` is the only
@@ -28,45 +29,50 @@ state that means "shipped" (see the rule above).
 
 ### Phase A — `sandbox-safety`, branch `agent/sandbox-safety`
 
-Every Phase A row below is `ON BRANCH agent/sandbox-safety` today
-(2026-09-03). None is on `main`.
+Every Phase A row below is reachable from `main`. The tip shas are the rebased
+commits that landed there; none of the rows claims the separate runtime
+`INSTALLED` state.
 
 | # | Item | Status | Tip sha |
 |---|---|---|---|
-| A0 | Foundation: Seatbelt profile generator, per-agent Bun proxy + lifecycle, codex `danger-full-access` parity, fail-hard preconditions; rebased onto `main`[^a0] | ON BRANCH | `e38ae42` |
-| A1 | `paths:` block split out of `sandbox:` (`sandbox:` keeps `enabled`/`rawAllow`/`domains`); `allowWrite` emits read+write; exact cross-list ties collapse to `allowWrite`; `meta.paths` frozen at spawn even when disabled; an enabled meta with no `paths` block is refused on resume[^a1] | ON BRANCH | `3503607` |
-| A2 | Most-specific-wins access table: one shared total sort, `resolvePathAccess()`, the SBPL last-match oracle, seeded order permutations, and the LIVE `sandbox-exec` probe on macOS; runtime roots sit in the table; the resolver models the `paths` table only, not `rawAllow`[^a2] | ON BRANCH | `8918447` |
-| A3 | `_all.md` floor tightened to the verified minimum (`allowRead` drops `/` and `~`; the root listing moves to the `rawAllow` line `(allow file-read-data (literal "/"))`; the `~/.itsybitsy` write floor; `~/Library/Keychains` only); runtime roots keyed on resolved `canSpawnChildren` (REPOAGENTS write for a spawner / read otherwise; PARENTCLAUDE write for a spawner); the tmux socket denied for non-spawners with both a file deny and a network-outbound deny; the LIVE claude boot gate made opt-in (`IB_LIVE_BOOT=1`)[^a3] | ON BRANCH | `bd0a2c4` |
-| A4 | claude `--dangerously-skip-permissions` emitted only inside the `sandbox-exec` wrapper when enabled (G1); `ib sandbox refresh <id> \| --all` re-derives an existing agent's frozen sandbox from the current `.md` files (G2); the sealed record closes the agent-editable-meta boundary for non-spawners, re-sealed on the dashboard `b` spawn toggle (G3)[^a4] | ON BRANCH | `c7ed698` |
-| A5 | This rollout document (`docs/SANDBOX-ROLLOUT.md`): the single shipping ledger + enable-all gate + pilot + rollback | ON BRANCH | `d41c06d` |
+| A0 | Foundation: Seatbelt profile generator, per-agent Bun proxy + lifecycle, codex `danger-full-access` parity, fail-hard preconditions; rebased onto `main`[^a0] | ON MAIN | `e3ddbe8` |
+| A1 | `paths:` block split out of `sandbox:` (`sandbox:` keeps `enabled`/`rawAllow`/`domains`); `allowWrite` emits read+write; exact cross-list ties collapse to `allowWrite`; `meta.paths` frozen at spawn even when disabled; an enabled meta with no `paths` block is refused on resume[^a1] | ON MAIN | `b571f6c` |
+| A2 | Most-specific-wins access table: one shared total sort, `resolvePathAccess()`, the SBPL last-match oracle, seeded order permutations, and the LIVE `sandbox-exec` probe on macOS; runtime roots sit in the table; the resolver models the `paths` table only, not `rawAllow`[^a2] | ON MAIN | `4df425b` |
+| A3 | `_all.md` floor tightened to the verified minimum (`allowRead` drops `/` and `~`; the root listing moves to the `rawAllow` line `(allow file-read-data (literal "/"))`; the `~/.itsybitsy` write floor; `~/Library/Keychains` only); runtime roots keyed on resolved `canSpawnChildren` (REPOAGENTS write for a spawner / read otherwise; PARENTCLAUDE write for a spawner); the tmux socket denied for non-spawners with both a file deny and a network-outbound deny; the LIVE claude boot gate made opt-in (`IB_LIVE_BOOT=1`)[^a3] | ON MAIN | `9703ba1` |
+| A4 | claude `--dangerously-skip-permissions` emitted only inside the `sandbox-exec` wrapper when enabled (G1); `ib sandbox refresh <id> \| --all` re-derives an existing agent's frozen sandbox from the current `.md` files (G2); the sealed record closes the agent-editable-meta boundary for non-spawners, re-sealed on the dashboard `b` spawn toggle (G3)[^a4] | ON MAIN | `34a74c5` |
+| A5 | This rollout document (`docs/SANDBOX-ROLLOUT.md`): the single shipping ledger + enable-all gate + pilot + rollback | ON MAIN | `5d7e0ad` |
 
-**A→sub-phase mapping.** The commits between `main` (`a5a51b1`) and
-`agent/sandbox-safety` group as: A0 foundation ends at `e38ae42`; A1 (the
-`paths:` split) ends at `3503607`; A2 (the resolver + oracle + live probe) ends
-at `8918447`; A3 (floor + spawn keying + tmux deny + opt-in boot gate) ends at
-`bd0a2c4`; A4 (skip-permissions + refresh + sealed record) ends at `c7ed698`.
-`git log --oneline main..agent/sandbox-safety` is the authoritative list.
+**A→sub-phase mapping.** After rebase and merge, the main-reachable phase tips
+are: A0 `e3ddbe8`; A1 `b571f6c`; A2 `4df425b`; A3 `9703ba1`; A4
+`34a74c5`; A5 `5d7e0ad`. The original pre-rebase shas remain in the linked
+design history, while this ledger names the commits present in the current
+history.
 
 ### Phase B — `path-isolation`, branch `agent/path-isolation`, rebased onto Phase A
 
-Owned by `path-isolation`; the rows are for it to fill on rebase[^b].
+The merged worker 1/2 work and worker 3b surface/documentation work are on
+`agent/path-isolation`. Worker 3a's advisory scanner plus kernel
+`PROJECTDIR`/`SCRATCHPAD` spawn/refresh wiring are still in progress on its
+companion branch, so B4 remains `IN PROGRESS` rather than claiming work that
+has not landed here.[^b]
 
-| # | Item | Status |
-|---|---|---|
-| B1 | Relative-to-repo-root grammar resolved once in `newAgent`; authored-resolved lists stored in `meta.json` | NOT STARTED |
-| B2 | `allowedPaths` retired everywhere (parse, validate, `newAgent`, hook steps, session-start text, SPEC) | NOT STARTED |
-| B3 | Hook calls `resolvePathAccess` after the structural steps, runtime roots folded in, strict by default; codex and agy handlers pass the lists; codex `--add-dir` parity for the non-sandboxed path; `<agentDir>/meta.json` added to the hook's protected-file set (self-widening path in hook-only mode) | NOT STARTED |
-| B4 | Scratchpad runtime root at both layers; audit mode (`paths.audit: true` logs would-be denials without denying); advisory Bash scanner against the resolver | NOT STARTED |
-| B5 | Session-start strict/kernel-on wording; `ib info` and dashboard show the resolved lists and sandbox state; SPEC + implementation-notes updated; this ledger's Phase B rows completed | NOT STARTED |
+| # | Item | Status | Tip sha |
+|---|---|---|---|
+| B1 | Relative-to-repo-root grammar resolved once in `newAgent`; authored-resolved lists stored in `meta.json`; spawn and refresh reject escapes to `/` or the home root | ON BRANCH `agent/path-isolation` | `51228df` |
+| B2 | `allowedPaths` retired everywhere (parse, validate, `newAgent`, hook steps, session-start text, SPEC); a type that declares it is a validation error | ON BRANCH `agent/path-isolation` | `2877028` |
+| B3 | Hook calls `resolvePreparedAccess` after the structural steps, runtime roots folded in, strict by default; Claude, codex, and agy handlers pass the lists; codex `--add-dir` parity for the non-sandboxed path; `<agentDir>/meta.json` and the system coordinator's configuration are protected from writes | ON BRANCH `agent/path-isolation` | `854f0e1` |
+| B4 | Project-directory and scratchpad runtime roots at hook and kernel layers; advisory Bash scanner against the shared resolver. Audit mode was deliberately dropped before Phase B began.[^b] | IN PROGRESS | Hook table foundation `bb258d0`; scanner and kernel spawn/refresh wiring pending on the companion branch |
+| B5 | Session-start strict/kernel-on wording; `ib info` and dashboard show resolved lists and sandbox state; SPEC + implementation notes and this ledger updated. The shared builder is complete; Codex/agy lifecycle propagation is pending with the companion worker. | IN PROGRESS | Surface work `7472325`; lifecycle propagation pending on the companion branch |
+| B6 | `ib init-types --check` compares the live layer `paths:` and `sandbox:` blocks with the embedded floor and returns a nonzero exit when they drift | ON BRANCH `agent/path-isolation` | `8fa6b52` |
 
 ### Phase C — pilot and rollout
 
 | # | Item | Status |
 |---|---|---|
-| C1 | Pilot: one non-spawner type in this repo with `sandbox.enabled: true` (and `paths.audit: true` once B4 lands) | NOT STARTED |
+| C1 | Pilot: one non-spawner type in this repo with `sandbox.enabled: true` | NOT STARTED |
 | C2 | Pilot check: the agent boots, reaches the model through the proxy, runs its normal tools, and a hook `PreToolUse` deny still blocks under `--dangerously-skip-permissions` | NOT STARTED |
 | C3 | Pilot check: configured MCP servers work under the profile | NOT STARTED |
-| C4 | Toolchain entries collected (from audit logs / bisection) and added to the types that need them | NOT STARTED |
+| C4 | Toolchain entries collected (from hook denial logs / kernel bisection) and added to the types that need them | NOT STARTED |
 | C5 | Enable-all gate passed (§3) | NOT STARTED |
 | C6 | Agy wrapper built after its own boot-floor bisection (agy has no sandbox wrapper today) | NOT STARTED |
 
@@ -76,10 +82,31 @@ Owned by `path-isolation`; the rows are for it to fill on rebase[^b].
 
 | Point in time | Live agents | New spawns |
 |---|---|---|
-| **Today** — Phase A on `agent/sandbox-safety`; `main` at `a5a51b1` | No kernel sandbox exists on `main` at all. On the branch, `_all.md` ships `enabled: false`[^disabled], so **no agent is sandboxed** — every `_all.md` baseline is disabled and nothing changes for a live agent until a type sets `sandbox.enabled: true`. | Same. |
-| **After merge** — Phase A on `main`, rebuilt, restarted | Unchanged. Every layer still ships `enabled: false`[^disabled], so still **no behavior change**. | Unchanged, until a type opts in. |
+| **Before Phase A is installed** | No itsybitsy kernel sandbox exists. | Same. |
+| **After Phase A is installed** | Every embedded layer ships `enabled: false`[^disabled], so there is still **no behavior change** for a live agent. | Unchanged, until a type opts in. |
+| **After Phase B is installed, before refresh** | The **hook changes immediately** because it reads `meta.paths` on every call. A legacy live agent with no `paths` key becomes strict at the hook: worktree + runtime roots only. Its **kernel profile stays frozen** until refresh. This is why the three-step Phase B install below must be performed as one operation. | New agents receive the resolved live type floor in `meta.paths`; the hook is strict immediately. The kernel remains off unless their resolved `sandbox.enabled` is true. |
 | **After a type opts in** — one type sets `sandbox.enabled: true` | Unchanged until refreshed (§3.2): a live agent replays its frozen profile[^frozen]. | Agents **of that type** get the kernel Seatbelt profile + per-agent proxy. |
 | **After the enable-all gate** (§3) | Sandboxed once `ib sandbox refresh --all` re-derives them, per repo. | Sandboxed. |
+
+### 2.1 Installing Phase B without stranding live agents
+
+Perform these **three steps in order, as one operation**:
+
+1. Add the embedded `paths:` floor to the live
+   `~/.itsybitsy/agent-types/_all.md`. From the Phase B checkout, run
+   `bun index.ts init-types --check` (the candidate `ib init-types --check`)
+   and resolve every reported `paths:` / `sandbox:` difference; **exit 0 is a
+   precondition for step 2**. `ib init-types` does not overwrite an existing
+   customized file.
+2. Install Phase B: merge it, rebuild and copy `ib` onto PATH, and restart
+   `ib watch`.
+3. Run `ib sandbox refresh --all` in **each registered repo**. This writes the
+   resolved floor into every live agent's `meta.paths`; it also refreshes the
+   frozen kernel policy for agents whose sandbox is enabled.
+
+Do not install step 2 against a live `_all.md` that still lacks the floor. In
+that window the hook immediately interprets a missing `meta.paths` as empty and
+allows only the worktree plus runtime roots.
 
 ---
 
@@ -100,7 +127,7 @@ the "fully-open is explicit-only" rule[^open]. So the end state is `_all.md`
 `enabled: true` plus, for any not-yet-fenceable type, an explicit wide `paths`
 block on that type — never `enabled: false` on a leaf.
 
-### 3.2 Why flipping `_all.md` alone changes nothing for live agents
+### 3.2 Why flipping `_all.md` alone changes no live kernel profile
 
 A resumed or respawned agent rebuilds its profile from the sandbox block
 **frozen in its own `meta.json`** at spawn time, not from the current `.md`
@@ -115,6 +142,12 @@ true: setting the file back to `false` does not un-sandbox a running agent until
 it is refreshed. This is deliberate: a security-config change goes through an
 explicit, logged command.
 
+This frozen-profile rule is about the **kernel**. Once Phase B is installed,
+the path hook itself runs the new deny-by-default code immediately and reads
+each call's current `meta.paths`; a missing key is empty, never permissive.
+Follow the Phase B three-step install in §2.1 so live agents receive the floor
+without a strict-but-floorless interval.
+
 ### 3.3 Preconditions — all must hold before the switch
 
 - [ ] The `_all.md` **read floor is tightened** (done in A3: `/` and `~`
@@ -128,9 +161,12 @@ explicit, logged command.
 - [ ] The **pilot on one type passed** (Phase C, §4 — currently **pending**):
       a hook deny still blocks under `--dangerously-skip-permissions`, and MCP
       servers work under the profile.
-- [ ] **Audit mode** ran on every type that will be enabled and the toolchain
-      entries it surfaced were added (Phase C, C4 — pending; audit mode itself
-      is Phase B, B4).
+- [ ] `ib init-types --check` exits 0: every live layer's `paths:` and
+      `sandbox:` blocks match the embedded floor. This is required before the
+      Phase B install sequence in §2.1 and again before enable-all.
+- [ ] The advisory hook denials and kernel bisection identified the toolchain
+      entries each type needs, and those entries were added (Phase C, C4 —
+      pending). Phase B deliberately ships no audit mode.
 - [ ] **agy is handled.** agy has **no sandbox wrapper today**[^agy], so agy
       agents **cannot be sandboxed** — they must stay disabled or be excluded
       until agy gets its own boot-floor bisection (Phase C, C6 — pending).
@@ -152,7 +188,9 @@ explicit, logged command.
    agent's `meta.json` is re-derived from the current `.md` files and the agent
    is resumed under the new profile; stopped agents pick it up on their next
    resume; coordinators are reported as a skip[^refresh].
-5. Watch `ib watch`: an agent that hits `EPERM` shows it in its pane.
+5. Watch the Denials tab in `ib watch`: the hook explains honest denied path
+   attempts before the kernel returns `EPERM`. A kernel-only denial is not
+   harvested into the log and still requires bisection.[^spike]
 
 ### 3.5 What breaks, stated plainly
 
@@ -163,8 +201,9 @@ explicit, logged command.
 - **(b) Any path outside the worktree + the floor.** A sandboxed agent that
   reads or writes anywhere the merged `paths` table does not allow gets `EPERM`
   until its type adds the path[^inherit]. Kernel denials do **not** reach the
-  unified log[^spike]; use the hook's audit lines (Phase B) and, when they
-  don't show it, bisect. Then add the path to that type's `paths.allowWrite` /
+  unified log[^spike]; use Phase B's hook denial lines (including the advisory
+  Bash scanner for honest command-line paths) and, when they do not show it,
+  bisect. Then add the path to that type's `paths.allowWrite` /
   `allowRead` and `ib sandbox refresh <id>`.
 - **(c) The tmux-socket escape stays OPEN for spawner types.** A spawner keeps
   its tmux socket (it needs it for `ib new-agent`), and anything that can write
@@ -175,6 +214,14 @@ explicit, logged command.
   any other host fails closed until its domain is added to `sandbox.domains`
   (proxy apex entries are exact, so subdomains need their own entry)[^proxy].
 - **(e) agy agents cannot be sandboxed yet** — no wrapper (§3.3)[^agy].
+- **(f) The system coordinator is advisory in hook-only mode.** Its worktree
+  root is all of `~/.itsybitsy`, so the hook structurally blocks writes to
+  `agent-types/`, `config.json`, `repos.json`, `layout.json`, and `sealed/` for
+  file tools plus the Bash redirect and in-place-edit shapes it recognizes.
+  Unmodelled command shapes such as `tee`, `cp`, `mv`, `mkdir`, or a write
+  through a newly created symlink can still reach those paths while the kernel
+  is off. This is an accepted residual; the kernel closes it when the system
+  coordinator is sandboxed (SPEC-PATH-ALLOWLIST.md §6.12).
 
 ### 3.6 Recovery / rollback
 
@@ -212,8 +259,8 @@ below has been run.
 3. **MCP under the profile.** Boot any configured MCP server for that type; it
    is a claude child, so it is sandboxed and needs its interpreter paths and its
    own domains — add anything not already in `_all.md`[^mcp].
-4. **Toolchain entries.** Fold whatever the audit surfaced (C4) into the types
-   that need them.
+4. **Toolchain entries.** Fold what the hook denial logs and kernel bisection
+   surfaced (C4) into the types that need them.
 5. **Enable type by type**, re-running steps 1–3 per type.
 6. **agy last**, after its own boot-floor bisection (C6)[^agy].
 
@@ -241,11 +288,11 @@ which is out of scope[^tmux][^residual].
 ---
 
 [^seed]: [SANDBOX-ROLLOUT.md draft seed](https://claude.ai/code) — branch `agent/path-isolation`, commit `8725b37`, read with `git show agent/path-isolation:docs/SANDBOX-ROLLOUT.md`.
-[^a0]: [SPEC-SANDBOX.md §5.1 (profile generator), §5.2 (per-agent proxy + lifecycle), §4B (codex `danger-full-access`), §5.5 (fail-hard preconditions)](../SPEC-SANDBOX.md) — foundation commit `e38ae42` on `agent/sandbox-safety`.
-[^a1]: [SPEC-SANDBOX.md §4A.7 guarantees (frozen `meta.paths`, enabled-without-paths refused) and §7 "Top-level `paths:` split" / "Write implies read"](../SPEC-SANDBOX.md) — A1 tip `3503607`.
-[^a2]: [SPEC-SANDBOX.md §4A.8 "Most specific entry wins" (shared total sort, `resolvePathAccess`, SBPL oracle, live macOS probe, resolver boundary)](../SPEC-SANDBOX.md) — A2 tip `8918447`; resolver in [src/sandbox.ts#resolvePathAccess](../src/sandbox.ts).
-[^a3]: [SPEC-SANDBOX.md §4A.7 "A3 floor tightening", §4C.3 (tmux socket file + network-outbound deny), §7 "A3 floor tightening + spawn-keyed roots"](../SPEC-SANDBOX.md) and the shipped floor [docs/agent-types/_all.md](agent-types/_all.md) — A3 tip `bd0a2c4`.
-[^a4]: [SPEC-SANDBOX.md §4B.1 (claude `--dangerously-skip-permissions` under the kernel), §5.6 (`ib sandbox refresh`), §4C.3 (sealed record)](../SPEC-SANDBOX.md) — A4 tip `c7ed698`; seal helpers in [src/agent-seal.ts](../src/agent-seal.ts).
+[^a0]: [SPEC-SANDBOX.md §5.1 (profile generator), §5.2 (per-agent proxy + lifecycle), §4B (codex `danger-full-access`), §5.5 (fail-hard preconditions)](../SPEC-SANDBOX.md) — main-reachable foundation tip `e3ddbe8`.
+[^a1]: [SPEC-SANDBOX.md §4A.7 guarantees (frozen `meta.paths`, enabled-without-paths refused) and §7 "Top-level `paths:` split" / "Write implies read"](../SPEC-SANDBOX.md) — main-reachable A1 tip `b571f6c`.
+[^a2]: [SPEC-SANDBOX.md §4A.8 "Most specific entry wins" (shared total sort, `resolvePathAccess`, SBPL oracle, live macOS probe, resolver boundary)](../SPEC-SANDBOX.md) — main-reachable A2 tip `4df425b`; resolver in [src/sandbox.ts#resolvePathAccess](../src/sandbox.ts).
+[^a3]: [SPEC-SANDBOX.md §4A.7 "A3 floor tightening", §4C.3 (tmux socket file + network-outbound deny), §7 "A3 floor tightening + spawn-keyed roots"](../SPEC-SANDBOX.md) and the shipped floor [docs/agent-types/_all.md](agent-types/_all.md) — main-reachable A3 tip `9703ba1`.
+[^a4]: [SPEC-SANDBOX.md §4B.1 (claude `--dangerously-skip-permissions` under the kernel), §5.6 (`ib sandbox refresh`), §4C.3 (sealed record)](../SPEC-SANDBOX.md) — main-reachable A4 tip `34a74c5`; seal helpers in [src/agent-seal.ts](../src/agent-seal.ts).
 [^b]: [SPEC-PATH-ALLOWLIST.md §8 "Build order" (Phase B / Phase C)](https://claude.ai/code) — branch `agent/path-isolation`, read with `git show agent/path-isolation:SPEC-PATH-ALLOWLIST.md`.
 [^disabled]: [docs/agent-types/_all.md](agent-types/_all.md) — `sandbox.enabled: false` ships in the baseline; nothing runs sandboxed until a type sets it `true`.
 [^frozen]: [SPEC-SANDBOX.md §4A.7 guarantee 1 and §5.4 ("profile is fixed at exec")](../SPEC-SANDBOX.md) — spawn resolves and freezes `meta.sandbox`/`meta.paths`; resume replays from meta and does not re-read the `.md` files; editing `_all.md` affects new spawns only.

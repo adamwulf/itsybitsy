@@ -66,7 +66,6 @@ export interface AgentType {
     deny?: string[];
   };
   icon?: string;
-  allowedPaths?: string[];
   /** Resolved, inheritance-merged filesystem policy. */
   paths?: PathsConfig;
   /** Resolved, inheritance-merged Seatbelt sandbox configuration. */
@@ -325,6 +324,95 @@ export async function initAgentTypes(): Promise<string[]> {
 }
 
 /**
+ * One field difference between an embedded default and its live copy, as
+ * surfaced by {@link checkAgentTypeFloors}.
+ */
+export interface AgentTypeFloorDiff {
+  /** The type file, e.g. `_all.md`. */
+  file: string;
+  /** Human-readable difference lines (indented, one per missing entry / scalar). */
+  lines: string[];
+}
+
+/**
+ * Compare every embedded agent-type file that ALSO exists locally against the
+ * embedded default, reporting the `paths:` (allowRead, allowWrite, deny) and
+ * `sandbox:` (rawAllow, domains) entries present in the embedded block but
+ * missing from the local file, per list, plus any `sandbox.enabled` scalar
+ * difference. Files that match — and embedded files with no local copy — produce
+ * nothing. Nothing is written.
+ *
+ * Backs `ib init-types --check`, the gate precondition that catches a live
+ * `~/.itsybitsy/agent-types/_all.md` still missing the tightened floor (because
+ * `ib init-types` never updates an existing file). `hasDifferences` is true when
+ * any difference was found, so the command can exit non-zero.
+ * (SPEC-PATH-ALLOWLIST.md section 8; docs/SANDBOX-ROLLOUT.md gate preconditions)
+ */
+export async function checkAgentTypeFloors(): Promise<{
+  diffs: AgentTypeFloorDiff[];
+  hasDifferences: boolean;
+}> {
+  const home = userHome();
+  const typesDir = join(home, ".itsybitsy", "agent-types");
+
+  const blockList = (
+    fm: Record<string, unknown>,
+    block: "paths" | "sandbox",
+    key: string,
+  ): string[] => {
+    const value = fm[block];
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
+    return stringList((value as Record<string, unknown>)[key]);
+  };
+  const sandboxEnabled = (fm: Record<string, unknown>): boolean => {
+    const value = fm.sandbox;
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+    return (value as Record<string, unknown>).enabled === true;
+  };
+
+  const listChecks: Array<{ block: "paths" | "sandbox"; key: string }> = [
+    { block: "paths", key: "allowRead" },
+    { block: "paths", key: "allowWrite" },
+    { block: "paths", key: "deny" },
+    { block: "sandbox", key: "rawAllow" },
+    { block: "sandbox", key: "domains" },
+  ];
+
+  const diffs: AgentTypeFloorDiff[] = [];
+  for (const [name, content] of Object.entries(EMBEDDED_TYPES)) {
+    const fileName = `${name}.md`;
+    const filePath = join(typesDir, fileName);
+    if (!(await Bun.file(filePath).exists())) continue;
+    let localContent: string;
+    try {
+      localContent = await Bun.file(filePath).text();
+    } catch {
+      continue;
+    }
+
+    const embedded = parseAgentTypeFile(content).frontmatter;
+    const local = parseAgentTypeFile(localContent).frontmatter;
+
+    const lines: string[] = [];
+    for (const { block, key } of listChecks) {
+      const localSet = new Set(blockList(local, block, key));
+      for (const entry of blockList(embedded, block, key)) {
+        if (!localSet.has(entry)) lines.push(`  ${block}.${key}: missing ${entry}`);
+      }
+    }
+    const embeddedEnabled = sandboxEnabled(embedded);
+    const localEnabled = sandboxEnabled(local);
+    if (embeddedEnabled !== localEnabled) {
+      lines.push(`  sandbox.enabled: embedded ${embeddedEnabled}, local ${localEnabled}`);
+    }
+
+    if (lines.length > 0) diffs.push({ file: fileName, lines });
+  }
+
+  return { diffs, hasDifferences: diffs.length > 0 };
+}
+
+/**
  * Check if an agent type exists (as a file in ~/.itsybitsy/agent-types/<name>.md).
  * Does NOT check built-in types — those must be written to disk by ensureAgentTypesDir().
  */
@@ -422,8 +510,7 @@ async function resolveChain(
  * in the descendant's frontmatter. `permissions.allow` / `permissions.deny`
  * are unioned (deduped via Set) across the entire chain. Paths and sandbox
  * list fields are likewise unioned, while sandbox.enabled is OR-merged.
- * `allowedPaths` and `repos` are replaced (not merged) when the descendant
- * declares them.
+ * `repos` is replaced (not merged) when the descendant declares it.
  *
  * The `name` and `spawnable` keys are intentionally not set here — the caller
  * (`buildAgentTypeFromFrontmatter`) is responsible for the final `name` (from
@@ -442,7 +529,6 @@ function mergeRawFrontmatters(
     "model",
     "effort",
     "instructionStyle",
-    "allowedPaths",
     "repos",
   ]);
 
@@ -610,14 +696,6 @@ function buildAgentTypeFromFrontmatter(
   const rawIcon = getString(frontmatter.icon, "");
   const iconChar = rawIcon.match(/\S/)?.[0] || undefined;
 
-  // Parse allowedPaths: distinguish between absent (undefined) and present-but-empty ([]).
-  let allowedPaths: string[] | undefined = undefined;
-  if ("allowedPaths" in frontmatter) {
-    allowedPaths = Array.isArray(frontmatter.allowedPaths)
-      ? (frontmatter.allowedPaths as string[])
-      : [];
-  }
-
   // Parse repos: absent → undefined; present non-array → undefined (the
   // validator is the actual gate for bad shapes — defensive here). Entries
   // are trimmed and empties dropped.
@@ -650,7 +728,6 @@ function buildAgentTypeFromFrontmatter(
           deny: Array.isArray(permissions.deny) ? (permissions.deny as string[]) : undefined,
         }
       : undefined,
-    allowedPaths,
     paths: paths
       ? {
           allowRead: stringList(paths.allowRead),
@@ -948,7 +1025,12 @@ export async function validateAllAgentTypes(): Promise<string[]> {
         }
 
         if (frontmatter.paths !== undefined) {
-          const pathsValidation = validatePathsFrontmatter(frontmatter.paths);
+          // Agent-type frontmatter accepts relative (./ ../) entries, anchored
+          // at the main repo root at spawn time; the generator/kernel never see
+          // one. (SPEC-PATH-ALLOWLIST.md 6.1, 6.2)
+          const pathsValidation = validatePathsFrontmatter(frontmatter.paths, undefined, {
+            allowRelative: true,
+          });
           for (const message of pathsValidation.errors) {
             errors.push(`${file}: ${message}`);
           }
@@ -976,18 +1058,13 @@ export async function validateAllAgentTypes(): Promise<string[]> {
           errors.push(`${file}: invalid effort '${frontmatter.effort}' — must be one of low, medium, high, xhigh, max`);
         }
 
-        // Validate allowedPaths if present
+        // allowedPaths is retired: it was replaced by the top-level `paths:`
+        // block. A type file that still declares it is a hard error so the
+        // author migrates rather than silently losing the setting.
         if (frontmatter.allowedPaths !== undefined) {
-          if (!Array.isArray(frontmatter.allowedPaths)) {
-            errors.push(`${file}: allowedPaths must be a list of directory paths`);
-          } else {
-            for (const p of frontmatter.allowedPaths) {
-              if (typeof p !== "string") {
-                errors.push(`${file}: allowedPaths entries must be strings, got ${typeof p}`);
-                break;
-              }
-            }
-          }
+          errors.push(
+            `${file}: allowedPaths was replaced by paths: (allowRead / allowWrite / deny); see SPEC-PATH-ALLOWLIST.md section 6.11`,
+          );
         }
 
         // Validate `inherits:` shape

@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
-import { parseAgentTypeFile, loadAgentType, listAgentTypes, ensureAgentTypesDir, initAgentTypes, agentTypeExists, validateAllAgentTypes, listSpawnableAgentTypesSync, listSpawnableTypeNamesSync, metaCanSpawnChildren } from "./agent-types";
+import { parseAgentTypeFile, loadAgentType, listAgentTypes, ensureAgentTypesDir, initAgentTypes, checkAgentTypeFloors, agentTypeExists, validateAllAgentTypes, listSpawnableAgentTypesSync, listSpawnableTypeNamesSync, metaCanSpawnChildren } from "./agent-types";
 import { buildAvailableTypesSection } from "./hooks/session-start";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
@@ -402,6 +402,63 @@ describe("initAgentTypes", () => {
   });
 });
 
+describe("checkAgentTypeFloors (init-types --check)", () => {
+  let tempHome: string;
+  let typesDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-check-floor-"));
+    setUserHome(tempHome);
+    typesDir = join(tempHome, ".itsybitsy", "agent-types");
+  });
+
+  afterEach(async () => {
+    resetUserHome();
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  test("reports no differences when the local files match the embedded defaults", async () => {
+    await initAgentTypes();
+    const { diffs, hasDifferences } = await checkAgentTypeFloors();
+    expect(hasDifferences).toBe(false);
+    expect(diffs).toEqual([]);
+  });
+
+  test("reports paths floor entries present in the embedded file but missing locally", async () => {
+    await initAgentTypes();
+    // Overwrite _all.md with a bare frontmatter that drops the whole floor.
+    await Bun.write(join(typesDir, "_all.md"), "---\nname: _all\nspawnable: false\n---\nbody");
+    const { diffs, hasDifferences } = await checkAgentTypeFloors();
+    expect(hasDifferences).toBe(true);
+    const allDiff = diffs.find((d) => d.file === "_all.md");
+    expect(allDiff).toBeDefined();
+    expect(allDiff!.lines.some((line) => line.includes("missing"))).toBe(true);
+    // The other embedded files were written verbatim, so they must not appear.
+    expect(diffs.map((d) => d.file)).toEqual(["_all.md"]);
+  });
+
+  test("reports a sandbox.enabled scalar difference", async () => {
+    await initAgentTypes();
+    await Bun.write(
+      join(typesDir, "worker.md"),
+      "---\nname: worker\nsandbox:\n  enabled: true\n---\nbody",
+    );
+    const { diffs, hasDifferences } = await checkAgentTypeFloors();
+    expect(hasDifferences).toBe(true);
+    const workerDiff = diffs.find((d) => d.file === "worker.md");
+    expect(workerDiff).toBeDefined();
+    expect(workerDiff!.lines.some((line) => line.startsWith("  sandbox.enabled:"))).toBe(true);
+  });
+
+  test("skips an embedded file that has no local copy", async () => {
+    await initAgentTypes();
+    await Bun.file(join(typesDir, "worker.md")).delete();
+    const { diffs, hasDifferences } = await checkAgentTypeFloors();
+    expect(hasDifferences).toBe(false);
+    expect(diffs.map((d) => d.file)).not.toContain("worker.md");
+  });
+});
+
 describe("ensureAgentTypesDir: system layer", () => {
   let tempHome: string;
 
@@ -425,59 +482,6 @@ describe("ensureAgentTypesDir: system layer", () => {
     const systemType = await loadAgentType("system");
     expect(systemType.spawnable).toBe(false);
   });
-});
-
-test("parseAgentTypeFile: parses allowedPaths from list syntax", () => {
-  const content = `---
-name: restricted
-allowedPaths:
-  - /home/user/project
-  - /data
----
-body`;
-
-  const { frontmatter } = parseAgentTypeFile(content);
-
-  expect(Array.isArray(frontmatter.allowedPaths)).toBe(true);
-  expect(frontmatter.allowedPaths).toEqual(["/home/user/project", "/data"]);
-});
-
-test("parseAgentTypeFile: parses allowedPaths from inline array", () => {
-  const content = `---
-name: restricted
-allowedPaths: [/home/user/project, /data]
----
-body`;
-
-  const { frontmatter } = parseAgentTypeFile(content);
-
-  expect(Array.isArray(frontmatter.allowedPaths)).toBe(true);
-  expect(frontmatter.allowedPaths).toEqual(["/home/user/project", "/data"]);
-});
-
-test("parseAgentTypeFile: allowedPaths absent means undefined", () => {
-  const content = `---
-name: unrestricted
-canSpawnChildren: true
----
-body`;
-
-  const { frontmatter } = parseAgentTypeFile(content);
-
-  expect(frontmatter.allowedPaths).toBeUndefined();
-});
-
-test("parseAgentTypeFile: allowedPaths empty array is preserved", () => {
-  const content = `---
-name: strict
-allowedPaths: []
----
-body`;
-
-  const { frontmatter } = parseAgentTypeFile(content);
-
-  expect(Array.isArray(frontmatter.allowedPaths)).toBe(true);
-  expect((frontmatter.allowedPaths as unknown[]).length).toBe(0);
 });
 
 test("parseAgentTypeFile: parses separate paths and sandbox blocks", () => {
@@ -922,40 +926,6 @@ C content`);
 
     const type = await loadAgentType("c");
     expect(type.markdownBody).toBe("A content\n\nC content");
-  });
-
-  test("allowedPaths replaces (not merges) when child defines it", async () => {
-    await writeType("parent", `---
-name: parent
-allowedPaths:
-  - /parent/path
----
-body`);
-    await writeType("child", `---
-inherits: parent
-allowedPaths:
-  - /child/path
----
-body`);
-
-    const type = await loadAgentType("child");
-    expect(type.allowedPaths).toEqual(["/child/path"]);
-  });
-
-  test("allowedPaths: [] on child correctly overrides parent's non-empty list", async () => {
-    await writeType("parent", `---
-name: parent
-allowedPaths: [/parent/path, /another]
----
-body`);
-    await writeType("child", `---
-inherits: parent
-allowedPaths: []
----
-body`);
-
-    const type = await loadAgentType("child");
-    expect(type.allowedPaths).toEqual([]);
   });
 
   test("repos replaces when child defines it", async () => {
@@ -1753,5 +1723,30 @@ paths:
 body`);
     const errors = await validateAllAgentTypes();
     expect(errors.some((error) => error.includes("bare names are not allowed"))).toBe(true);
+  });
+
+  test("accepts relative (./ ../) paths entries anchored at the repo root", async () => {
+    await Bun.write(join(typesDir, "relative.md"), `---
+name: relative
+paths:
+  allowRead: ["../sibling", "./vendor"]
+  deny: ["../../fumble/**/*.md"]
+---
+body`);
+    const errors = await validateAllAgentTypes();
+    expect(errors.filter((error) => error.startsWith("relative.md:"))).toEqual([]);
+  });
+
+  test("errors when a type file still declares the retired allowedPaths key", async () => {
+    await Bun.write(join(typesDir, "legacy.md"), `---
+name: legacy
+allowedPaths:
+  - /home/user/project
+---
+body`);
+    const errors = await validateAllAgentTypes();
+    expect(errors).toContain(
+      "legacy.md: allowedPaths was replaced by paths: (allowRead / allowWrite / deny); see SPEC-PATH-ALLOWLIST.md section 6.11",
+    );
   });
 });

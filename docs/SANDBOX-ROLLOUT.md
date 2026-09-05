@@ -48,23 +48,22 @@ are: A0 `e3ddbe8`; A1 `b571f6c`; A2 `4df425b`; A3 `9703ba1`; A4
 design history, while this ledger names the commits present in the current
 history.
 
-### Phase B — `path-isolation`, branch `agent/path-isolation`, rebased onto Phase A
+### Phase B — `path-isolation`, continued on `agent/codex-path-isolation`
 
-The merged worker 1/2 work and worker 3b surface/documentation work are on
-`agent/path-isolation`. Worker 3a's advisory scanner, kernel
-`PROJECTDIR`/`SCRATCHPAD` spawn/refresh wiring, and Codex/agy lifecycle
-propagation are complete and green on its companion branch but not yet merged
-into `agent/path-isolation`. B4/B5 therefore remain `IN PROGRESS` until that
-integration rather than claiming work that has not landed here.[^b]
+The original `agent/path-isolation` work and both Sol continuation branches are
+merged on `agent/codex-path-isolation`: surface/documentation first, then the
+advisory scanner, kernel `PROJECTDIR`/`SCRATCHPAD` wiring, and Codex/agy lifecycle
+propagation. The rows below identify the integrated implementation commits.
+Installation and the Phase C pilot remain separate steps.\[^b]
 
 | # | Item | Status | Tip sha |
-|---|---|---|---|
-| B1 | Relative-to-repo-root grammar resolved once in `newAgent`; authored-resolved lists stored in `meta.json`; spawn and refresh reject escapes to `/` or the home root | ON BRANCH `agent/path-isolation` | `51228df` |
-| B2 | `allowedPaths` retired everywhere (parse, validate, `newAgent`, hook steps, session-start text, SPEC); a type that declares it is a validation error | ON BRANCH `agent/path-isolation` | `2877028` |
-| B3 | Hook calls `resolvePreparedAccess` after the structural steps, runtime roots folded in, strict by default; Claude, codex, and agy handlers pass the lists; codex `--add-dir` parity for the non-sandboxed path; `<agentDir>/meta.json` and the system coordinator's configuration are protected from writes | ON BRANCH `agent/path-isolation` | `854f0e1` |
-| B4 | Project-directory and scratchpad runtime roots at hook and kernel layers; advisory Bash scanner against the shared resolver. Audit mode was deliberately dropped before Phase B began.[^b] | IN PROGRESS | Hook table `bb258d0`; scanner `a472299`, redirect/destination hardening `2368802`, and kernel wiring `7cb9d7c` complete on companion branch, pending merge |
-| B5 | Session-start strict/kernel-on wording; `ib info` and dashboard show resolved lists and sandbox state; SPEC + implementation notes and this ledger updated. Codex/agy lifecycle propagation uses the same shared builder. | IN PROGRESS | Surface `7472325` + `1d57313`; rollout `e9697f3`; propagation `44ad115` complete on companion branch, pending merge |
-| B6 | `ib init-types --check` compares the live layer `paths:` and `sandbox:` blocks with the embedded floor and returns a nonzero exit when they drift | ON BRANCH `agent/path-isolation` | `8fa6b52` |
+| --- | ---- | ------ | ------- |
+| B1 | Relative-to-repo-root grammar resolved once in `newAgent`; authored-resolved lists stored in `meta.json`; spawn and refresh reject escapes to `/` or the home root | ON BRANCH `agent/codex-path-isolation` | `51228df` |
+| B2 | `allowedPaths` retired everywhere (parse, validate, `newAgent`, hook steps, session-start text, SPEC); a type that declares it is a validation error | ON BRANCH `agent/codex-path-isolation` | `2877028` |
+| B3 | Hook calls `resolvePreparedAccess` after the structural steps, runtime roots folded in, strict by default; Claude, codex, and agy handlers pass the lists; codex `--add-dir` parity for the non-sandboxed path; `<agentDir>/meta.json` and the system coordinator's configuration are protected from writes | ON BRANCH `agent/codex-path-isolation` | `854f0e1` |
+| B4 | Project-directory and scratchpad runtime roots at hook and kernel layers; advisory Bash scanner against the shared resolver. Audit mode was deliberately dropped before Phase B began.\[^b] | ON BRANCH `agent/codex-path-isolation` | Hook table `bb258d0`; scanner `a472299`; redirect/destination hardening `2368802`; kernel wiring `7cb9d7c` |
+| B5 | Session-start strict/kernel-on wording; `ib info` and dashboard show resolved lists and sandbox state; SPEC + implementation notes and this ledger updated. Codex/agy lifecycle propagation uses the same shared builder. | ON BRANCH `agent/codex-path-isolation` | Surface `7472325` + `1d57313`; rollout `e9697f3`; propagation `44ad115`; integration `1ec1529` |
+| B6 | `ib init-types --check` compares the live layer `paths:` and `sandbox:` blocks with the embedded floor and returns a nonzero exit when they drift | ON BRANCH `agent/codex-path-isolation` | `8fa6b52` |
 
 ### Phase C — pilot and rollout
 

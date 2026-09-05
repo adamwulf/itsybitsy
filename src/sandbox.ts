@@ -60,6 +60,21 @@ export interface SandboxProfileParams {
    * when false.
    */
   canSpawnChildren: boolean;
+  /**
+   * Optional WRITE runtime root: the agent's Claude project directory
+   * (`~/.claude/projects/<encoded-worktree>`). Emitted by profileRuntimeAllowRoots
+   * exactly like the other roots when present. The spawn side (Phase B worker 1)
+   * must pass it so the kernel profile grants it too; the hook side computes and
+   * appends the same value independently (see buildAgentAccessTable). Absent →
+   * no row, so a profile that omits it stays byte-identical.
+   */
+  PROJECTDIR?: string;
+  /**
+   * Optional WRITE runtime root: the agent's scratchpad directory
+   * (`/private/tmp/claude-<uid>/<encoded-worktree>`). Emitted like the other
+   * roots when present. Absent → no row (byte-identical profile).
+   */
+  SCRATCHPAD?: string;
   HOME?: string;
 }
 
@@ -166,6 +181,35 @@ export function canonicalizeSandboxPath(input: string): string {
       candidate = parent;
     }
   }
+}
+
+/**
+ * Resolve the tmux server socket DIRECTORY the way tmux itself does, canonical
+ * (longest-existing-prefix), ready to hand to the sandbox as `TMUXSOCK`: if
+ * `$TMUX` is set (we are inside a tmux server), its first comma-separated field
+ * is the socket path, and the directory of that path is the socket dir;
+ * otherwise tmux uses `${TMUX_TMPDIR:-/tmp}/tmux-<uid>` (so `/tmp/tmux-<uid>` →
+ * `/private/tmp/tmux-<uid>` on macOS). Denying this subtree closes the
+ * unix-socket connect() a non-spawner would otherwise use to reach the
+ * unsandboxed tmux server. profileRuntimeDenyRoots re-canonicalizes idempotently.
+ *
+ * Lives here (not in ib-commands.ts) so the PreToolUse hooks can import it
+ * without pulling in the heavy ib-commands module; ib-commands re-exports it so
+ * existing callers keep working.
+ */
+export function resolveTmuxSocketDir(uid: number): string {
+  const tmux = process.env.TMUX;
+  const raw = (() => {
+    if (tmux && tmux.length > 0) {
+      const socketPath = tmux.split(",")[0];
+      if (socketPath && socketPath.length > 0) return dirname(socketPath);
+    }
+    const base = process.env.TMUX_TMPDIR && process.env.TMUX_TMPDIR.length > 0
+      ? process.env.TMUX_TMPDIR
+      : "/tmp";
+    return join(base, `tmux-${uid}`);
+  })();
+  return canonicalizeSandboxPath(raw);
 }
 
 function expandHome(entry: string, home: string): string {
@@ -404,6 +448,104 @@ export function normalizePathsConfig(paths: PathsConfig, home?: string): PathsCo
   };
 }
 
+/**
+ * Placeholder absolute anchor used ONLY to validate a relative entry's grammar.
+ * A real spawn anchors relative entries at the main repo root the worktree was
+ * spawned from (anchorRelativePaths); validation runs before a repo root is
+ * known, so it anchors at this fixed absolute path purely to exercise
+ * compileSandboxPath's absolute-path grammar.
+ */
+const RELATIVE_VALIDATION_ANCHOR = "/__anchor__";
+
+/**
+ * Anchor one relative (`./` or `../`) entry at an absolute anchor directory,
+ * re-appending any glob suffix (from the first `*` or `?` onward) unchanged.
+ * Non-relative entries (absolute, home, or globs without a `./`/`../` prefix)
+ * are returned untouched.
+ *
+ * Anchoring is **lexical** (`path.resolve` joins and normalizes without touching
+ * the filesystem), so a `../` that crosses a symlinked component of the anchor
+ * climbs the *lexical* parent, not the symlink target. In practice the anchor is
+ * always a `resolveGitRoot` result — a real (realpath'd) path — so the lexical
+ * parent is the real parent and this is not observable at spawn.
+ */
+function anchorRelativeEntry(entry: string, anchor: string): string {
+  if (!entry.startsWith("./") && !entry.startsWith("../")) return entry;
+  const globIndex = entry.search(/[*?]/);
+  const literalPrefix = globIndex === -1 ? entry : entry.slice(0, globIndex);
+  const globSuffix = globIndex === -1 ? "" : entry.slice(globIndex);
+  let resolved = resolve(anchor, literalPrefix);
+  // resolve() strips a trailing slash; keep it so a `.../**` suffix re-appends
+  // as a fresh path segment instead of fusing onto the final directory name.
+  if (literalPrefix.endsWith("/") && !resolved.endsWith("/")) {
+    resolved += "/";
+  }
+  return `${resolved}${globSuffix}`;
+}
+
+/**
+ * Rewrite every relative (`./` or `../`) entry in a PathsConfig to an absolute
+ * path anchored at `anchor` (the main repo root the worktree was spawned from),
+ * re-appending any glob suffix unchanged. All other entries — absolute, home
+ * (`~`), and non-relative globs — pass through untouched, so the profile
+ * generator and the kernel never see a relative entry.
+ * (SPEC-PATH-ALLOWLIST.md 6.1, 6.2)
+ */
+export function anchorRelativePaths(paths: PathsConfig, anchor: string): PathsConfig {
+  const anchorEntry = (entry: string): string => anchorRelativeEntry(entry, anchor);
+  return {
+    allowRead: paths.allowRead.map(anchorEntry),
+    allowWrite: paths.allowWrite.map(anchorEntry),
+    deny: paths.deny.map(anchorEntry),
+  };
+}
+
+/**
+ * Find every relative (`./` or `../`) SOURCE entry that, once anchored, escapes
+ * to the filesystem root `/` or to the home directory — i.e. whose anchored
+ * literal prefix (the part before its first glob metacharacter, or the whole
+ * entry when plain) canonicalizes to `/` or to `home`. Such an entry is a
+ * silent filesystem-wide (or whole-home) grant that the single model requires
+ * to be written EXPLICITLY (`allowRead: ["/"]` or `["~"]`); the caller turns a
+ * non-empty result into a spawn/refresh error naming the entry and its target.
+ *
+ * All three lists are inspected, not just the allow lists: a relative climb that
+ * silently reaches `/` or `home` is almost always a mistake regardless of which
+ * list it lands in (a `deny` that reaches `/` would lock the agent out of
+ * everything). An EXPLICIT `/` or `~` entry never starts with `./`/`../`, so it
+ * is skipped here and stays allowed. Compares canonical forms so `/tmp` vs
+ * `/private/tmp` and `~` vs its absolute spelling agree.
+ * (SPEC-PATH-ALLOWLIST.md 6.11, review round 1 blocker (a))
+ */
+export function findRelativeEscapes(
+  paths: PathsConfig,
+  anchor: string,
+  home?: string,
+): Array<{ entry: string; resolved: string }> {
+  const homeCanonical = canonicalizeSandboxPath(sandboxHome(home));
+  const escapes: Array<{ entry: string; resolved: string }> = [];
+  const inspect = (entry: string): void => {
+    if (typeof entry !== "string") return;
+    if (!entry.startsWith("./") && !entry.startsWith("../")) return;
+    const anchored = anchorRelativeEntry(entry, anchor);
+    const globIndex = anchored.search(/[*?]/);
+    const literalPrefix = globIndex === -1 ? anchored : anchored.slice(0, globIndex);
+    let canonical: string;
+    try {
+      canonical = canonicalizeSandboxPath(literalPrefix);
+    } catch {
+      return; // an unresolvable prefix is the grammar validator's problem
+    }
+    if (canonical === "/" || canonical === homeCanonical) {
+      escapes.push({ entry, resolved: canonical });
+    }
+  };
+  for (const list of [paths.allowRead, paths.allowWrite, paths.deny]) {
+    for (const entry of list) inspect(entry);
+  }
+  return escapes;
+}
+
 /** Compile one user-facing path entry to an SBPL matcher. */
 export function compileSandboxPath(entry: string, home?: string): string {
   const compiled = compilePath(entry, home);
@@ -497,6 +639,24 @@ function profileRuntimeAllowRoots(params: SandboxProfileParams): ProfileRuntimeP
       parameterName: "PARENTCLAUDE",
     });
   }
+  // Optional Phase B write roots (project dir, scratchpad). Each is emitted only
+  // when the caller supplies it, so a profile that omits both is byte-identical
+  // to the pre-Phase-B output. When present they are ordinary write roots and
+  // sort into the specificity table like any other runtime root.
+  if (params.PROJECTDIR) {
+    roots.push({
+      path: canonicalizeSandboxPath(params.PROJECTDIR),
+      op: "write",
+      parameterName: "PROJECTDIR",
+    });
+  }
+  if (params.SCRATCHPAD) {
+    roots.push({
+      path: canonicalizeSandboxPath(params.SCRATCHPAD),
+      op: "write",
+      parameterName: "SCRATCHPAD",
+    });
+  }
   return roots;
 }
 
@@ -569,7 +729,13 @@ function sortedDenyEntries(
   ].sort(compareOrderedPathEntries);
 }
 
-function orderedEntryMatches(entry: OrderedPathEntry, absolutePath: string): boolean {
+/**
+ * Does an ordered entry match a CANONICAL absolute path? Exported so the hook's
+ * denial-reason wording (pathDenialReason) tests the same matcher the resolver
+ * uses, rather than a duplicate that could drift. Callers must pass an already
+ * canonical path (as resolvePreparedAccess does internally).
+ */
+export function orderedEntryMatches(entry: OrderedPathEntry, absolutePath: string): boolean {
   if (entry.compiled.kind === "glob") return entry.regex!.test(absolutePath);
   const value = entry.compiled.value;
   if (value === "/") return absolutePath.startsWith("/");
@@ -793,6 +959,7 @@ export function validateSandboxFrontmatter(value: unknown): SandboxValidationRes
 export function validatePathsFrontmatter(
   value: unknown,
   home?: string,
+  options?: { allowRelative?: boolean },
 ): SandboxValidationResult {
   const errors: string[] = [];
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -803,6 +970,15 @@ export function validatePathsFrontmatter(
   }
 
   const resolvedHome = sandboxHome(home);
+  // When allowRelative is set (agent-type frontmatter), a `./` or `../` entry is
+  // validated by anchoring it at a fixed placeholder before compileSandboxPath,
+  // so the relative grammar passes the absolute-path check. Without the option
+  // relative entries stay rejected (the generator/kernel never see one).
+  const allowRelative = options?.allowRelative === true;
+  const anchorForValidation = (entry: string): string =>
+    allowRelative && typeof entry === "string"
+      ? anchorRelativeEntry(entry, RELATIVE_VALIDATION_ANCHOR)
+      : entry;
   const paths = value as Record<string, unknown>;
   for (const key of Object.keys(paths)) {
     if (!(PATHS_KEYS as readonly string[]).includes(key)) {
@@ -823,7 +999,7 @@ export function validatePathsFrontmatter(
         return;
       }
       try {
-        compileSandboxPath(entry, resolvedHome);
+        compileSandboxPath(anchorForValidation(entry), resolvedHome);
       } catch (err) {
         errors.push(`paths.${key}[${index}]: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -837,10 +1013,10 @@ export function validatePathsFrontmatter(
     ? paths.allowWrite.filter((entry): entry is string => typeof entry === "string" && /[*?]/.test(entry))
     : [];
   for (const readEntry of readGlobs) {
-    const canonicalRead = canonicalizeGlobPrefix(expandHome(readEntry, resolvedHome));
+    const canonicalRead = canonicalizeGlobPrefix(expandHome(anchorForValidation(readEntry), resolvedHome));
     const readPrefix = canonicalRead.slice(0, canonicalRead.search(/[*?]/));
     for (const writeEntry of writeGlobs) {
-      const canonicalWrite = canonicalizeGlobPrefix(expandHome(writeEntry, resolvedHome));
+      const canonicalWrite = canonicalizeGlobPrefix(expandHome(anchorForValidation(writeEntry), resolvedHome));
       if (canonicalRead === canonicalWrite) continue;
       const writePrefix = canonicalWrite.slice(0, canonicalWrite.search(/[*?]/));
       if (readPrefix === writePrefix) {

@@ -7,6 +7,19 @@ Companion docs (supporting evidence, do not duplicate here):
 - `MODEL-NAME-FORMAT-PROPOSAL.md` — design proposal that drove the §5.1 + Phase 1 design.
 - `CODEX-CLI-NOTES.md` — raw research notes + binary facts.
 
+**Current path-policy addendum (Phase B, 2026-09-05):** The original Codex
+design below predates the shared filesystem policy. Codex and Codex-backed fugu now use the same
+deny-by-default top-level `paths:` model as Claude: `meta.paths` plus
+CLI-appropriate runtime roots feed `resolvePreparedAccess()`. A missing block
+defaults all three member lists to empty; in a partial object, only omitted
+members default empty and populated entries remain enforced. The retired `allowedPaths` field is not
+accepted. The Bash scanner is advisory; the Seatbelt profile is the kernel
+boundary when enabled. Codex resume and `ib sandbox refresh` regenerate
+`AGENTS.md` from the agent's current frozen metadata so the displayed policy
+matches enforcement. [SPEC.md §6.1](SPEC.md) and
+[SPEC-PATH-ALLOWLIST.md](SPEC-PATH-ALLOWLIST.md) are authoritative for this
+cross-CLI policy.
+
 > This SPEC governs adding OpenAI's **Codex CLI** (`codex`, v0.135.0) as a per-agent
 > alternative to the `claude` CLI. It MUST be read alongside the project `SPEC.md`
 > and the Cross-Cutting Review Checklist in `CLAUDE.md` (agent functionality, hooks,
@@ -223,11 +236,21 @@ New `src/hooks/codex-pre-tool-use.ts`, dispatched from `src/index.ts` via `ib ho
 - `hook_event_name`, `turn_id`, `tool_use_id`, `model`, `permission_mode`, `transcript_path` — additional metadata; log but not used for the deny decision.
 
 **Logic:**
+
 1. Resolve agent-type allow/deny lists (same merged source as the claude-side hook): `_all.md` + `_non_coordinator.md` + `<type>.md`. Reuse the matcher logic as a shared library function (don't fork).
-2. **Path-isolation matcher** (the codex analog of `agent-path`):
-   - For `tool_name === "Bash"`: existing shell-command path detection (extract paths from `tool_input.command` via the same regex/parser used in `agent-path.ts`).
-   - For `tool_name === "apply_patch"`: parse the patch body — grep lines starting with `*** Add File:`, `*** Update File:`, `*** Delete File:` and extract the path after the colon. Each path is the target the agent wants to write to.
-   - Deny if ANY extracted path resolves outside the worktree (parent itsybitsy repo, sibling agent worktree, etc.). Allow if all resolve inside or to a known-safe writable_root (cwd, `/tmp` SCOPED to known-safe subpaths IF we want, etc. — defer to a follow-up decision).
+2. **Shared path-isolation matcher** (current Phase B behavior): build the
+   prepared table from the agent's frozen `meta.paths` plus Codex-appropriate
+   runtime roots. A missing block defaults all member lists to empty; a partial
+   object retains populated entries and defaults only its omitted members to
+   empty, never to a wildcard. Do not add Claude's project-directory or
+   scratchpad roots.
+   - For `tool_name === "Bash"`, the shared scanner classifies recognizable
+     literal path arguments and common write destinations and resolves them
+     against that table. It provides readable early denials but is not a full
+     shell parser; the Seatbelt profile is authoritative when enabled.
+   - For `tool_name === "apply_patch"`, parse every Add/Update/Delete target
+     and check each as a write through the same resolver. Deny if any target is
+     rejected. There is no Codex-specific worktree-only fallback.
 3. Apply allow/deny matching from the agent-type lists.
 4. **Always include `permissionDecisionReason`** on deny (omitting it triggers a separate codex error path).
 
@@ -273,7 +296,7 @@ All state-detection hooks are registered via the same inline-`-c` pattern as Pre
 
 ### 5.8 Resume + lifecycle
 
-- `resumeAgent()` branches: codex uses its session/rollout id (`codex resume <id>` / `--last`) read from `codex_session_id`. The `resume.sh` template is regenerated branched on cli.
+- `resumeAgent()` branches: codex uses its session/rollout id (`codex resume <id>` / `--last`) read from `codex_session_id`. The `resume.sh` template and per-agent `AGENTS.md` are regenerated before launch. `AGENTS.md` is rendered from the current frozen `meta.paths` / `meta.sandbox`; `ib sandbox refresh` first re-derives those fields from the current type layers and then takes the same regeneration path.
 - kill / merge / diff / nuke are git- and tmux-level → unaffected.
 - `openInGhostty` is tmux-level → unaffected (D2 satisfied for free).
 
@@ -344,7 +367,15 @@ Scope clarification (post-Phase-3 review, 2026-05-30): three spawn-co-located de
 - `src/index.ts` routes `hooks codex-pre-tool-use` / `hooks codex-session-start` / `hooks codex-stop` → the new handlers, including the `--dry-run` flag (caller-side invocation in Phase 4). **The dispatcher itself MUST be fail-open-safe:** missing/invalid `<agentId>`, module-import failure, or any other dispatcher-level error MUST emit a deny payload to stdout and `exit 0`, never `exit non-zero`. Codex treats any non-zero dispatcher exit as a fail-open hook crash (tool call proceeds).
 - **Gate:** unit tests asserting (a) `buildCodexLaunchArgs()` produces well-formed `-c` payloads (parseable TOML; correct event names; correct command interpolation); (b) path-safety rejection fires for unsafe `<abs ib>` paths; (c) the handler's allow/deny matches the merged `.md` lists for Bash AND apply_patch tool calls — including a regression guard that apply_patch to `/private/tmp` is DENIED (the path-isolation branch MUST require target inside worktree, NOT fall through to `checkPathAccess`'s legacy permissive branch); (d) the codex JSON contract is correct (deny with reason; allow + echo-back `updatedInput`); (e) the handler emits deny on uncaught exception AND the dispatcher emits deny on missing/invalid agentId or module-import failure; (f) SessionStart handler writes `codex_session_id` to meta.json on first firing; (g) defensive `sessionId`/`session_id` read works; (h) two concurrent `meta.json` writes (writeAgentState + captureCodexSessionId) both land via unique tmp suffix. Manual verification deferred to Phase 4 once spawn path is wired.
 
-**apply_patch synthesized-Write contract (post-Phase-3 §5.5 footnote):** the PreToolUse handler treats apply_patch as path-only-gated: it extracts target paths from the patch body, requires them inside the worktree (or in the agent's configured `allowedPaths`), and reuses `checkPathAccess`'s path-isolation logic via a synthesized `{toolName: "Write", toolInput: {file_path: <target>}}` call (prepending `"Write"` to the allow list for the synthesized call). The agent's merged allow/deny list is **not** consulted for tool-name matching on apply_patch — this is intentional and matches codex's tool surface (apply_patch is codex's analog of Claude's Write+Edit). Operators who want to forbid file edits entirely should use `-a never -s read-only` instead of relying on tool-name allow lists.
+**apply_patch synthesized-Write contract (updated by Phase B):** the
+PreToolUse handler treats apply_patch as path-only-gated: it extracts every
+target path from the patch body and checks it as a write against the shared
+deny-by-default table (`meta.paths` plus Codex runtime roots). The agent's
+merged allow/deny list is **not** consulted for tool-name matching on
+apply_patch — this is intentional and matches codex's tool surface
+(apply_patch is codex's analog of Claude's Write+Edit). Operators who want to
+forbid file edits entirely should use `-a never -s read-only` instead of
+relying on tool-name allow lists.
 
 ### Phase 4 — Spawn path (headed, in tmux)
 - Branch `start.sh` assembly in `newAgent()` on `parseModel(model).cli` → launch the canonical line from §3.3. Capture PID + codex session id → meta (`codex_session_id`).

@@ -16,6 +16,8 @@ import { RESET, BOLD, DIM, GREEN, RED, YELLOW } from "./colors";
 import { resolveDefaultAgentType } from "./default-agent-type";
 import { NotesEditorComponent } from "./notes-editor";
 import { _formatTimestamp } from "../agent-lifecycle";
+import { kernelSandboxStatus } from "../agent-cli";
+import { resolvePathsConfig } from "../sandbox";
 
 /**
  * Team-mode payload for the info panel (SPEC §17.3c). Parallel to the
@@ -119,10 +121,27 @@ export class InfoPanelComponent implements Component {
 
     lines.push(...this.renderStoplights(agent, width));
 
-    // Keep the sandbox marker in the width-safe detail panel rather than the
-    // tightly packed sidebar row. Legacy and explicitly disabled agents omit it.
-    if (agent.meta.sandbox?.enabled === true) {
-      lines.push(truncateToWidth(`🔒 ${DIM}Sandboxed${RESET}`, width, ""));
+    // Keep the explicit sandbox state in the width-safe detail panel rather
+    // than the tightly packed sidebar row. A missing legacy block is disabled.
+    const sandboxState = kernelSandboxStatus(agent.meta);
+    lines.push(truncateToWidth(`${DIM}Sandbox:${RESET} ${sandboxState}`, width, ""));
+
+    // Resolved path policy (SPEC-PATH-ALLOWLIST §6.11), frozen in meta.paths.
+    // Each non-empty list is shown compact on one truncated line so the operator
+    // sees an agent's fenced paths without leaving the dashboard; `ib info <id>`
+    // prints the full untruncated lists. Absent/empty lists get one compact row
+    // that states their deny-by-default meaning.
+    const paths = resolvePathsConfig(agent.meta.paths);
+    if (paths && paths.allowRead.length + paths.allowWrite.length + paths.deny.length > 0) {
+      const summarizePaths = (label: string, entries: string[]): void => {
+        if (entries.length === 0) return;
+        lines.push(truncateToWidth(`${DIM}${label}:${RESET} ${entries.join(", ")}`, width, ""));
+      };
+      summarizePaths("Paths ro", paths.allowRead);
+      summarizePaths("Paths rw", paths.allowWrite);
+      summarizePaths("Paths deny", paths.deny);
+    } else {
+      lines.push(truncateToWidth(`${DIM}Paths:${RESET} runtime roots only`, width, ""));
     }
 
     // Identity line — only shown when a nickname is set, so the canonical id

@@ -2,6 +2,22 @@
 
 Status: **Phases 1–3 MERGED on `agent/antigravity` (Phase 1 `7cf0e65`, Phase 2 `288a577`, Phase 3 `b38052f`, 2026-09-02). Live spawn gate PASSED 2026-09-02 13:41 CDT (NOTES §17.11). READY for the user to merge to `main`, rebuild `ib`, and restart `ib watch`.** Written 2026-09-01 by researcher agent `antigravity` on branch `agent/antigravity`. All facts are pinned to `agy` 1.1.23 on macOS with Google OAuth sign-in. Evidence and captures live in `ANTIGRAVITY-CLI-NOTES.md` §17; this file is the design source of truth. Read it next to `SPEC-CODEX-MODEL.md`, whose shape it follows, and the Cross-Cutting Review Checklist in `CLAUDE.md`.
 
+**Current path-policy addendum (Phase B, 2026-09-05):** The original design
+below predates the shared filesystem policy. Agy now uses the same
+deny-by-default top-level `paths:` model as the other CLIs: `meta.paths` plus
+agy-appropriate runtime roots feed `resolvePreparedAccess()`. A missing block
+defaults all three member lists to empty; in a partial object, only omitted
+members default empty and populated entries remain enforced. The retired `allowedPaths` field is not
+accepted. Agy still has no kernel wrapper. If its resolved `sandbox.enabled` is
+`true`, spawn/resume fails closed as unsupported before the interactive agent
+launches unwrapped; the diagnostic `agy --version` probe may already have run.
+Refresh likewise rejects a newly resolved enabled policy before metadata
+mutation, while a sandbox-disabled refresh succeeds and updates paths/rules.
+Instructions, `ib info`, and the dashboard explicitly report the sandbox as
+unavailable. [SPEC.md §6.1](SPEC.md) and
+[SPEC-PATH-ALLOWLIST.md](SPEC-PATH-ALLOWLIST.md) are authoritative for the
+cross-CLI path policy.
+
 ---
 
 ## 1. Summary & goal
@@ -18,7 +34,7 @@ Non-goals (v1): no headless `-p` loop; no terminal sandbox; no `agy` custom agen
 |---|---|---|
 | D1 | Selector is `agy:<slug>`; the slug is the first column of `agy models` and is passed verbatim to `--model`. Bare names are rejected as for every CLI. `--effort <low\|medium\|high>` is passed only when the slug does **not** already end in `-low`/`-medium`/`-high` (Gemini slugs encode effort; passing both would be ambiguous). itsybitsy's `xhigh`/`max` map to `high`, as for codex. **The reserved slug `agy:default` is a sentinel: it launches agy with **no** `--model` and **no** `--effort`, so agy uses its own configured default model (currently Gemini 3.8 Flash High). It is never sent to `--model` — an unknown slug makes agy print "model not recognized" and fall back anyway, so we omit the flag instead.** | `agy models` output; `--help`; the `agy --model gemini` warning |
 | D2 | Launch = `agy --dangerously-skip-permissions --mode=accept-edits [--model <slug>] [--effort <e>] --log-file <agentDir>/agy.log -i "<prompt>"` in tmux. Resume = same flags with `--conversation <uuid>` and no `-i`. The `--model`/`--effort` pair is omitted entirely for the `agy:default` sentinel (D1). | A hook `allow` cannot suppress the permission card, but under skip-permissions nothing prompts and a hook `deny` still blocks. `-i` runs the prompt and stays interactive. Resume does not carry `--model`. |
-| D3 | **The PreToolUse hook is the only boundary.** Registered in `<worktree>/.agents/hooks.json` under the named hook `ittybitty` for `PreToolUse` (matcher `*`), `PreInvocation`, and `Stop`, each `command` = `<abs ib> hooks agy-<event> <agentId>`, `timeout` 30. No `--add-dir`, no sandbox. | Hooks load from the workspace file only; there is no inline flag. Workspace file tools outside the worktree succeed under skip-permissions, so the hook must gate paths too. |
+| D3 | **With `sandbox.enabled: false`, the PreToolUse hook is the only filesystem boundary.** It is registered in `<worktree>/.agents/hooks.json` under the named hook `ittybitty` for `PreToolUse` (matcher `*`), `PreInvocation`, and `Stop`, each `command` = `<abs ib> hooks agy-<event> <agentId>`, `timeout` 30. Agy has no kernel wrapper; an enabled sandbox policy is therefore rejected before launch. | Hooks load from the workspace file only; there is no inline flag. The hook gates paths through the shared `paths:` resolver, but remains a hook-only boundary for shell command shapes its advisory scanner cannot model. |
 | D4 | The hook contract is **fail-closed**: crash, non-JSON, `{}`, and timeout all deny. The dispatcher still wraps everything in try/catch and emits an explicit deny with a reason so denials are logged, and exits 0. | Verified for all three failure shapes. |
 | D5 | **Pre-trust the worktree before launch.** Add `realpath(worktree)` to `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json` (read-modify-write, preserve every other key, guarded by an itsybitsy lock file) before the tmux session starts. Remove the entry at teardown, best effort. The watchdog auto-accepts the trust card only as a fallback. | In an untrusted directory `-i` submits the prompt ~2 s after launch, before the card is answered, with no hooks and no rules loaded. Pre-trusted: hooks load at +30 ms, first turn is gated. |
 | D6 | Instructions go in `<worktree>/.agents/rules/ittybitty-agent.md` with frontmatter `trigger: always_on`. Body = the session-start template (wrapper stripped) + inlined project `CLAUDE.md` + inlined user `~/.claude/CLAUDE.md` + the skills catalogue. Never overwrite `AGENTS.md`. No `--agent`. | A bare rule file is ignored; with `trigger: always_on` it loads alongside the repo's own `AGENTS.md`. Workspace custom agents are not discovered; a global one drops the workspace rules. `agy` has no `@file` import. |
@@ -88,7 +104,15 @@ The agent-type allow/deny lists stay in Claude vocabulary. Each `agy` call is tr
 | `invoke_subagent`, `define_subagent`, `manage_subagents` | always deny (D8) | — |
 | anything else | deny unless the merged allow list contains the raw `agy` name | — |
 
-Unknown arg shapes must not fail open: a file tool whose path arg is missing is denied with "path argument missing". Path isolation forces `allowedPaths` to the worktree (plus the type's `allowedPaths`) exactly as `checkCodexPreToolUse` does for `apply_patch`, so `/tmp` and `~/.itsybitsy` are not writable through file tools.
+Unknown arg shapes must not fail open: a file tool whose path arg is missing is
+denied with "path argument missing". Path isolation uses the shared prepared
+table built from frozen `meta.paths` plus agy-appropriate runtime roots. Missing,
+empty blocks grant no configured paths; a partial object retains populated
+entries and defaults only omitted member lists to empty. Claude's project and
+scratchpad roots are not added. File tools and recognizable literal paths in
+`run_command` are resolved through that table. The Bash scan is advisory rather
+than a complete shell parser, so it must not be described as equivalent to a
+kernel boundary.
 
 ### 4.4 Hook handlers (`src/hooks/agy-*.ts`)
 
@@ -101,12 +125,17 @@ Unknown arg shapes must not fail open: a file tool whose path arg is missing is 
 ### 4.5 Spawn and resume (`src/agy-spawn.ts`, `src/ib-commands.ts`)
 
 `newAgent()` branches on `parseModel(model).cli === "agy"`:
-1. Skip `.claude/settings.local.json`.
-2. Refuse if `git ls-files --error-unmatch` reports either worktree file as tracked (D7).
-3. Write `.agents/hooks.json` and `.agents/rules/ittybitty-agent.md`; append both to `.gitignore`.
-4. `ensureAgyTrustedWorkspace(realpath(worktree))` (D5).
-5. Run the dispatcher precheck: `ib hooks agy-pre-tool-use --dry-run <id>` + the two others.
-6. Generate `start.sh` via `buildAgyStartContent` (same skeleton as `buildCodexStartContent`: `unset CLAUDECODE …`, SIGHUP trap, `setsid`, stderr sidecar, `ib write-pid`, `wait`, exit-code annotation, exit-check). Launch line per D2 with `-i "$(cat <promptfile>)"`.
+
+1. If the resolved frozen policy has `sandbox.enabled: true`, fail closed with
+   an "agy sandbox unavailable" error before starting the interactive agent.
+   The earlier diagnostic `agy --version` probe may already have run.
+2. Skip `.claude/settings.local.json`.
+3. Refuse if `git ls-files --error-unmatch` reports either worktree file as tracked (D7).
+4. Write `.agents/hooks.json` and `.agents/rules/ittybitty-agent.md`; append both to `.gitignore`.
+5. `ensureAgyTrustedWorkspace(realpath(worktree))` (D5).
+6. Run the dispatcher precheck: `ib hooks agy-pre-tool-use --dry-run <id>` + the two others.
+7. Generate `start.sh` via `buildAgyStartContent` (same skeleton as `buildCodexStartContent`: `unset CLAUDECODE …`, SIGHUP trap, `setsid`, stderr sidecar, `ib write-pid`, `wait`, exit-code annotation, exit-check). Launch line per D2 with `-i "$(cat <promptfile>)"`.
+
 `resumeAgent()`: requires `meta.agy_conversation_id`; regenerates the two worktree files (picks up permission edits); re-runs pre-trust and precheck; `buildAgyResumeContent` launches with `--conversation`. Teardown (`archiveAgent` / nuke / retire) calls `removeAgyTrustedWorkspace` best effort. `--coordinator` with `agy:` is rejected (D11-style stub message).
 
 ### 4.6 Watchdog, state, dashboard
@@ -144,7 +173,14 @@ Watchdog gating + two answers + heartbeat check; `parseStateForCli` agy branch w
 6. **Repos that track `.agents/hooks.json` or the rules path** cannot host `agy` agents in v1 (spawn refuses).
 7. **Quota / licensing.** The account on this machine shows `Antigravity Starter Quota`; a 403 on the quota endpoint was seen once. Rate-limit strings are not captured yet.
 8. **codex handler omits `checkIbCommandAccess` (parity gap, follow-up).** Phase 1 added the manager-only-`ib`-subcommand relationship check (`ib retire/merge/nuke/pause/resume/reassign <other>`) to the agy PreToolUse handler, matching the claude `hookCheckPath`. The codex `hookCodexPreToolUse` still lacks it, so a codex agent with `Bash(ib:*)` can run those subcommands against agents it does not manage. Not changed in the agy Phase 1 work to keep codex byte-identical; track as a codex-side follow-up (add the same `checkIbCommandAccess` call for Bash before `checkCodexPreToolUse`).
-9. **`run_command` reads outside the worktree are allowed.** A single `run_command` such as `cat ~/.ssh/id_rsa` or `cat /etc/passwd` (absolute paths outside the repo, no traversal into a sibling/main-repo) passes the bash gate — the same model claude workers run under, where the shared scanner only isolates sibling-agent and main-repo paths. agy has no sandbox, so this is an inherited default rather than an agy-specific hole. Needs a conscious decision (an allowlist of readable roots, or accepting the claude-parity default) before treating any read as sensitive; not fixed in Phase 1.
+9. **Hook-only shell scanning is incomplete (accepted limitation).** Phase B's
+   shared scanner denies recognizable literal read/write paths outside
+   `paths.allowRead` / `paths.allowWrite` and logs them, so a direct
+   `cat ~/.ssh/id_rsa` no longer represents the current behavior. It is not a
+   complete shell parser: dynamic expansion, subprocesses, and unrecognized
+   command shapes can evade classification. Because agy has no kernel wrapper,
+   this residual remains for sandbox-disabled agy agents. Enabling the sandbox
+   does not silently improve confinement; it fails closed as unsupported.
 10. **macOS Gatekeeper can stall every agy exec in the dynamic loader when the quarantined Homebrew binary's notarization check cannot reach Apple** (observed 2026-09-02 02:18 CDT: `syspolicyd` 'Security policy would not allow process' + a 30 s QUIC lookup with 0 bytes); the spawn then sits at a blank pane with no agy log; remedy is on the user side (approve or de-quarantine the binary).
 
 ---

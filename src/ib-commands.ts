@@ -72,7 +72,8 @@ import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome, classifyClaudeStartupPrompt } from "./coordinator";
 import { loadAgentType, agentTypeExists, metaCanSpawnChildren } from "./agent-types";
 import type { AgentType } from "./agent-types";
-import { isCodexBackedCli, parseModel, mapEffortForCodex } from "./agent-cli";
+import { isCodexBackedCli, parseModel, mapEffortForCodex, metadataCli, type AgentCli } from "./agent-cli";
+import { claudeProjectDirFor, claudeScratchpadDirFor } from "./hooks/paths-table";
 import {
   buildHooksBlock,
   COORDINATOR_INTERCEPT_MATCHER,
@@ -103,16 +104,23 @@ import {
 import { timed } from "./perf";
 import { WATCHDOG_SENTINEL } from "./watchdog";
 import {
+  anchorRelativePaths,
+  findRelativeEscapes,
   generateProfile,
   canonicalizePathsConfig,
   canonicalizeSandboxPath,
   resolvePathsConfig,
   resolveSandboxConfig,
+  resolveTmuxSocketDir,
   sandboxProfileParameterValues,
   type PathsConfig,
   type SandboxConfig,
   type SandboxProfileParams,
 } from "./sandbox";
+// resolveTmuxSocketDir moved to ./sandbox (so hooks can import it without the
+// heavy ib-commands module); re-exported here so existing callers/tests that
+// import it from ib-commands keep working.
+export { resolveTmuxSocketDir };
 import {
   allocateSandboxProxyPort,
   assertSandboxProxyPortAvailable,
@@ -1063,6 +1071,50 @@ export function mergeSandboxLayerConfigs(
   };
 }
 
+/**
+ * After relative entries are anchored and canonicalized, check each
+ * allowRead/allowWrite entry for repo containment (SPEC-PATH-ALLOWLIST.md 6.2):
+ *  - an entry resolving to, or under, `<repoRoot>/.ittybitty/agents` is a hard
+ *    ERROR — the hook denies that subtree structurally, so it is a dead entry;
+ *  - an entry resolving inside `repoRoot` but not under the agents dir is a
+ *    WARNING — denied for worktree agents, meaningful for coordinators.
+ * `deny` entries are policy carve-outs, never dead and never repo-scoped, so
+ * they are not checked. Entries are already canonical absolute paths; a glob is
+ * tested by the literal directory prefix that precedes its first metacharacter.
+ */
+export function checkPathsRepoContainment(
+  paths: PathsConfig,
+  repoRoot: string,
+): { error?: string; warnings: string[] } {
+  const warnings: string[] = [];
+  const agentsDir = canonicalizeSandboxPath(join(repoRoot, ".ittybitty", "agents"));
+  const repoCanonical = canonicalizeSandboxPath(repoRoot);
+  const isAtOrUnder = (candidate: string, base: string): boolean =>
+    candidate === base || candidate.startsWith(base + "/");
+  const literalDir = (entry: string): string => {
+    const globIndex = entry.search(/[*?]/);
+    if (globIndex === -1) return entry;
+    const prefix = entry.slice(0, globIndex);
+    const slash = prefix.lastIndexOf("/");
+    return slash <= 0 ? "/" : prefix.slice(0, slash);
+  };
+  for (const entry of [...paths.allowRead, ...paths.allowWrite]) {
+    const dir = literalDir(entry);
+    if (isAtOrUnder(dir, agentsDir)) {
+      return {
+        error: `paths entry "${entry}" resolves to or under the agents directory (${agentsDir}); it is denied structurally and would be a dead entry`,
+        warnings,
+      };
+    }
+    if (isAtOrUnder(dir, repoCanonical)) {
+      warnings.push(
+        `paths entry "${entry}" resolves inside the main repo root (${repoCanonical}); it is denied for worktree agents but allowed for coordinators`,
+      );
+    }
+  }
+  return { warnings };
+}
+
 function sandboxDefinitionArgs(parameterValues: Record<string, string>): string[] {
   return Object.entries(parameterValues).flatMap(([key, value]) => ["-D", `${key}=${value}`]);
 }
@@ -1109,30 +1161,7 @@ export NO_PROXY="$no_proxy"
 `;
 }
 
-/**
- * Resolve the tmux server socket DIRECTORY the way tmux itself does, canonical
- * (longest-existing-prefix), ready to hand to the sandbox as `TMUXSOCK`: if
- * `$TMUX` is set (we are inside a tmux server), its first comma-separated field
- * is the socket path, and the directory of that path is the socket dir;
- * otherwise tmux uses `${TMUX_TMPDIR:-/tmp}/tmux-<uid>` (so `/tmp/tmux-<uid>` →
- * `/private/tmp/tmux-<uid>` on macOS). Denying this subtree closes the
- * unix-socket connect() a non-spawner would otherwise use to reach the
- * unsandboxed tmux server. profileRuntimeDenyRoots re-canonicalizes idempotently.
- */
-export function resolveTmuxSocketDir(uid: number): string {
-  const tmux = process.env.TMUX;
-  const raw = (() => {
-    if (tmux && tmux.length > 0) {
-      const socketPath = tmux.split(",")[0];
-      if (socketPath && socketPath.length > 0) return dirname(socketPath);
-    }
-    const base = process.env.TMUX_TMPDIR && process.env.TMUX_TMPDIR.length > 0
-      ? process.env.TMUX_TMPDIR
-      : "/tmp";
-    return join(base, `tmux-${uid}`);
-  })();
-  return canonicalizeSandboxPath(raw);
-}
+const AGY_SANDBOX_ERROR = "sandbox refused: agy has no kernel sandbox wrapper; use sandbox.enabled: false until agy sandbox support is implemented";
 
 async function prepareSandbox(
   runner: SandboxCommandRunner,
@@ -1142,7 +1171,9 @@ async function prepareSandbox(
   workPath: string,
   repoPath: string,
   canSpawnChildren: boolean,
+  agentCli: AgentCli,
 ): Promise<PreparedSandbox> {
+  if (agentCli === "agy") throw new Error(AGY_SANDBOX_ERROR);
   const platform = sandboxPlatformOverride ?? process.platform;
   if (platform !== "darwin") {
     throw new Error(`sandbox refused: Seatbelt requires macOS (current platform: ${platform})`);
@@ -1176,6 +1207,10 @@ async function prepareSandbox(
     canSpawnChildren,
     HOME: userHome(),
   };
+  if (agentCli === "claude") {
+    params.PROJECTDIR = claudeProjectDirFor(workPath);
+    params.SCRATCHPAD = claudeScratchpadDirFor(workPath, uid);
+  }
   const profile = generateProfile(config, paths, params);
   const parameterValues = sandboxProfileParameterValues(paths, params);
   const profilePath = join(agentDir, "sandbox.sb");
@@ -1564,6 +1599,11 @@ export async function resumeAgent(
         };
       }
     }
+    if (resumeCli === "agy" && agent.meta.sandbox?.enabled) {
+      await logAgent(agentDir, `[resume] ${AGY_SANDBOX_ERROR}`);
+      return { ok: false, exitCode: 1, stdout: "", stderr: AGY_SANDBOX_ERROR };
+    }
+
     // Re-derive the reasoning-effort level from the persisted meta value, the
     // exact twin of the model re-derivation above. Without this a resumed
     // agent silently loses its `--effort` setting. Legacy agents (spawned
@@ -1663,6 +1703,7 @@ export async function resumeAgent(
           workPath,
           agent.repoPath,
           resumeCanSpawnChildren,
+          resumeCli,
         );
         await mutateAgentMeta(agentDir, (meta) => {
           meta.sandbox = frozenConfig;
@@ -1799,6 +1840,19 @@ export async function resumeAgent(
         ...codexParentRepoSubdirs,
       ];
 
+      // Refresh updates frozen metadata before entering resume. Regenerate the
+      // native instructions here so both ordinary resume and refresh describe
+      // the same policy as the hooks and the emitted kernel profile.
+      const { writeCodexAgentsMd } = await import("./codex-spawn");
+      const { detectRole } = await import("./hooks/session-start");
+      try {
+        await writeCodexAgentsMd(workPath, detectRole(workPath, agent.meta, agent.id));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        await logAgent(agentDir, `[resume] could not regenerate Codex AGENTS.md: ${message}`);
+        return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not regenerate Codex AGENTS.md: ${message}` };
+      }
+
       // Build resume.sh via the shared codex builder (mirrors start.sh).
       const { buildCodexResumeContent } = await import("./codex-spawn");
       const codexResumeContent = buildCodexResumeContent({
@@ -1876,11 +1930,15 @@ export async function resumeAgent(
       const { detectRole } = await import("./hooks/session-start");
       const agyResumeCtx = detectRole(workPath, {
         id: agent.id,
+        model: agent.meta.model,
         manager: agent.meta.manager ?? null,
         worker: agent.meta.worker === true,
         agentType: agent.meta.agentType,
         spawned_by: agent.meta.spawned_by ?? undefined,
-        allowedPaths: (agent.meta as { allowedPaths?: unknown }).allowedPaths,
+        // Resume must describe the policy frozen in this agent's metadata,
+        // not today's type files or the detectRole defaults.
+        paths: agent.meta.paths,
+        sandbox: agent.meta.sandbox,
       }, agent.id);
       try {
         await writeAgyWorktreeFiles(workPath, agyResumeCtx, {
@@ -2512,13 +2570,43 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
 
   const merged = mergeSandboxLayerConfigs([allLayer, nonCoordLayer, typeDef]);
   const newSandbox = merged.sandbox;
+  if (metadataCli(agent.meta.model) === "agy" && newSandbox.enabled) {
+    await logAgent(agentDir, `[sandbox refresh] ${AGY_SANDBOX_ERROR}`);
+    return { ok: false, exitCode: 1, stdout: "", stderr: AGY_SANDBOX_ERROR };
+  }
+  // Anchor relative (./ ../) entries at this agent's main repo root, exactly as
+  // newAgent does at spawn — agent.repoPath is `<repo>` and agentDir is
+  // `<repo>/.ittybitty/agents/<id>` — so the refreshed meta.paths holds only
+  // absolute paths (SPEC-PATH-ALLOWLIST.md 6.2). Known limit: if the repo has
+  // MOVED since spawn, refresh anchors at the stale `agent.repoPath` silently,
+  // mirroring the resume path's own fallback to the recorded repo path.
+  const refreshRepoRoot = (await resolveGitRoot(agent.repoPath)) || agent.repoPath;
+  // Same SAFETY gate as newAgent: a relative climb to `/` or the home root is a
+  // refresh ERROR, caught before anchoring erases the relative origin.
+  const refreshEscapes = findRelativeEscapes(merged.paths, refreshRepoRoot, userHome());
+  if (refreshEscapes.length > 0) {
+    const detail = refreshEscapes.map((e) => `"${e.entry}" → ${e.resolved}`).join(", ");
+    const msg = `sandbox refresh: relative paths entry ${detail} climbs out to the filesystem root or your home directory; a fully-open grant must be explicit — write "/" or "~" in the paths block if that is intended.`;
+    await logAgent(agentDir, `[sandbox refresh] ${msg}`);
+    return { ok: false, exitCode: 1, stdout: "", stderr: msg };
+  }
   let newPaths: PathsConfig;
   try {
-    newPaths = canonicalizePathsConfig(merged.paths, userHome());
+    const anchoredPaths = anchorRelativePaths(merged.paths, refreshRepoRoot);
+    newPaths = canonicalizePathsConfig(anchoredPaths, userHome());
   } catch (err) {
     const msg = `sandbox refresh: paths policy for '${typeName}' is invalid: ${err instanceof Error ? err.message : String(err)}`;
     await logAgent(agentDir, `[sandbox refresh] ${msg}`);
     return { ok: false, exitCode: 1, stdout: "", stderr: msg };
+  }
+  const refreshContainment = checkPathsRepoContainment(newPaths, refreshRepoRoot);
+  if (refreshContainment.error) {
+    const msg = `sandbox refresh: ${refreshContainment.error}`;
+    await logAgent(agentDir, `[sandbox refresh] ${msg}`);
+    return { ok: false, exitCode: 1, stdout: "", stderr: msg };
+  }
+  for (const warning of refreshContainment.warnings) {
+    await logAgent(agentDir, `[sandbox refresh] warning: ${warning}`);
   }
 
   // Verify the CURRENT meta against the seal BEFORE re-sealing (SPEC-SANDBOX
@@ -5301,9 +5389,32 @@ export async function newAgent(
     agentTypeDef,
   ]);
   const resolvedSandboxConfig = mergedSandboxLayers.sandbox;
+  if (agentCli === "agy" && resolvedSandboxConfig.enabled) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: AGY_SANDBOX_ERROR };
+  }
+  // SAFETY: a relative entry that climbs to `/` or the home root anchors to a
+  // filesystem-wide (or whole-home) grant. The single model requires fully-open
+  // to be explicit (`allowRead: ["/"]` / `["~"]`), so this is a spawn ERROR, not
+  // a warning — caught here where the relative origin is still visible, before
+  // anchoring erases it (SPEC-PATH-ALLOWLIST.md 6.11).
+  const spawnEscapes = findRelativeEscapes(mergedSandboxLayers.paths, rootRepoPath, userHome());
+  if (spawnEscapes.length > 0) {
+    const detail = spawnEscapes.map((e) => `"${e.entry}" → ${e.resolved}`).join(", ");
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Error: relative paths entry ${detail} climbs out to the filesystem root or your home directory; a fully-open grant must be explicit — write "/" or "~" in the paths block if that is intended.`,
+    };
+  }
   let resolvedPathsConfig: PathsConfig;
   try {
-    resolvedPathsConfig = canonicalizePathsConfig(mergedSandboxLayers.paths, userHome());
+    // Anchor relative (./ ../) entries at the main repo root the worktree is
+    // spawned from BEFORE canonicalizing, so meta.paths — and the profile and
+    // access table derived from it — holds only absolute paths; the generator
+    // and the kernel never see a relative entry (SPEC-PATH-ALLOWLIST.md 6.2).
+    const anchoredPaths = anchorRelativePaths(mergedSandboxLayers.paths, rootRepoPath);
+    resolvedPathsConfig = canonicalizePathsConfig(anchoredPaths, userHome());
   } catch (err) {
     return {
       ok: false,
@@ -5311,6 +5422,16 @@ export async function newAgent(
       stdout: "",
       stderr: `Error: ${err instanceof Error ? err.message : String(err)}`,
     };
+  }
+  // Reject a path that resolves under the agents dir (a dead entry the hook
+  // denies structurally); warn on one inside the repo root (denied for worktree
+  // agents, meaningful for coordinators).
+  const pathsContainment = checkPathsRepoContainment(resolvedPathsConfig, rootRepoPath);
+  if (pathsContainment.error) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${pathsContainment.error}` };
+  }
+  for (const warning of pathsContainment.warnings) {
+    logWarning(`Warning: ${warning}`);
   }
   // 7. Max agents check — coordinators bypass this (SPEC §12.4.3)
   if (!coordinatorMode) {
@@ -5464,30 +5585,6 @@ export async function newAgent(
     };
   }
 
-  // Resolve and normalize allowedPaths from agent type
-  let resolvedAllowedPaths: string[] | undefined = undefined;
-  if (agentTypeDef.allowedPaths !== undefined) {
-    resolvedAllowedPaths = agentTypeDef.allowedPaths.map(p => {
-      // Expand ~ to home directory
-      let expanded: string;
-      if (p === "~") {
-        expanded = userHome();
-      } else if (p.startsWith("~/")) {
-        expanded = join(userHome(), p.slice(2));
-      } else {
-        expanded = p;
-      }
-      // Resolve to absolute path
-      expanded = resolve(expanded);
-      // Try to resolve symlinks, fall back to resolve() result if path doesn't exist
-      try {
-        return realpathSync(expanded);
-      } catch {
-        return expanded;
-      }
-    });
-  }
-
   // Build the initial meta.json. Subsequent writes (start.sh setting claude_pid,
   // watchdog spawn setting watchdog_pid, generate-summary setting summary, the
   // post-worktree refresh below) all read-modify-write so they merge cleanly
@@ -5513,9 +5610,6 @@ export async function newAgent(
     state: "creating",
     state_updated_at: Math.floor(createdAt.getTime() / 1000),
   };
-  if (resolvedAllowedPaths !== undefined) {
-    initialMetaJson.allowedPaths = resolvedAllowedPaths;
-  }
   // agy agents stamp the captured `agy --version` string (empty on failure) so
   // a later bug report can be pinned to a release (SPEC §6 risk 1).
   if (agentCli === "agy") {
@@ -5690,11 +5784,15 @@ export async function newAgent(
       }
       const sessionCtx = detectRole(workPath, {
         id,
+        model,
         manager: manager || null,
         worker: isLeafAgent,
         agentType: typeName,
         spawned_by: spawnedBy ?? undefined,
-        allowedPaths: resolvedAllowedPaths,
+        // These values were resolved once from the layer union above and are
+        // the exact policy frozen into the new agent's meta.json.
+        paths: resolvedPathsConfig,
+        sandbox: resolvedSandboxConfig,
       }, id);
       try {
         await writeCodexAgentsMd(workPath, sessionCtx);
@@ -5822,11 +5920,13 @@ export async function newAgent(
       // Write the two boundary files (.agents/hooks.json + the always-on rule).
       const agySessionCtx = detectRole(workPath, {
         id,
+        model,
         manager: manager || null,
         worker: isLeafAgent,
         agentType: typeName,
         spawned_by: spawnedBy ?? undefined,
-        allowedPaths: resolvedAllowedPaths,
+        paths: resolvedPathsConfig,
+        sandbox: resolvedSandboxConfig,
       }, id);
       try {
         const { hooksPath, rulesPath } = await writeAgyWorktreeFiles(workPath, agySessionCtx, {
@@ -5985,6 +6085,7 @@ export async function newAgent(
         workPath,
         rootRepoPath,
         spawnCanSpawnChildren,
+        agentCli,
       );
       initialMetaJson.sandbox_proxy_port = preparedSandbox.proxyPort;
       await writeMetaJsonAtomic(agentDir, initialMetaJson);

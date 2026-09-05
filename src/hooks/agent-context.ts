@@ -42,12 +42,12 @@ export interface ResolvedAgentContext {
   rootRepo: string;
   agentType?: string;
   /**
-   * `meta.allowedPaths`, when the agent type declares extra writable roots
-   * (read from the same meta.json parse as `agentType`). Codex ignores this
-   * field; the agy PreToolUse handler uses it to widen the forced path
-   * isolation (worktree + the type's allowedPaths).
+   * The parsed `meta.json` object, or `undefined` when it is missing or
+   * unparseable. The codex and agy PreToolUse handlers build their access table
+   * from `meta.paths` (via buildAgentAccessTable) and must DENY when it is
+   * absent — the invariant (missing == deny), never a permissive fallback.
    */
-  allowedPaths?: string[];
+  meta?: Record<string, unknown>;
 }
 
 /**
@@ -87,25 +87,23 @@ export async function resolveAgentContext(
   }
 
   let agentType: string | undefined;
-  let allowedPaths: string[] | undefined;
+  let meta: Record<string, unknown> | undefined;
   try {
     const metaFile = Bun.file(join(agentDir, "meta.json"));
     if (await metaFile.exists()) {
-      const meta = await metaFile.json();
-      if (typeof meta.agentType === "string") agentType = meta.agentType;
-      if (Array.isArray(meta.allowedPaths)) {
-        allowedPaths = (meta.allowedPaths as unknown[]).filter(
-          (p): p is string => typeof p === "string",
-        );
+      const parsed = await metaFile.json();
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        meta = parsed as Record<string, unknown>;
+        if (typeof meta.agentType === "string") agentType = meta.agentType;
       }
     }
-  } catch { /* ignore */ }
+  } catch { /* ignore — meta stays undefined, handlers deny on missing meta */ }
 
   let rootRepo = "";
   try {
     const proc = Bun.spawn(
-      ["git", "-C", worktreePath, "worktree", "list", "--porcelain"],
-      { stdout: "pipe", stderr: "pipe" },
+      ["git", "worktree", "list", "--porcelain"],
+      { cwd: worktreePath, stdout: "pipe", stderr: "pipe" },
     );
     const out = await new Response(proc.stdout).text();
     if ((await proc.exited) === 0) {
@@ -114,5 +112,5 @@ export async function resolveAgentContext(
     }
   } catch { /* ignore */ }
 
-  return { agentDir, agentsDir, worktreePath, rootRepo, agentType, allowedPaths };
+  return { agentDir, agentsDir, worktreePath, rootRepo, agentType, meta };
 }

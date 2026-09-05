@@ -10,6 +10,31 @@ import {
   hookAgyPreToolUseDryRun,
 } from "./agy-pre-tool-use";
 import type { PathCheckContext } from "./agent-path";
+import { agentProtectedWritePaths } from "./agent-path";
+import { prepareAccessTable, type PathsConfig, type PreparedAccessTable } from "../sandbox";
+import { agentPathAccessTable } from "./paths-table";
+
+/**
+ * Build a prepared access table for the fixture agent. Empty paths lists by
+ * default (strict); pass a partial paths config to widen it.
+ */
+function makeAccess(
+  paths: Partial<PathsConfig> = {},
+  opts: { canSpawnChildren?: boolean } = {},
+): PreparedAccessTable {
+  return prepareAccessTable(
+    agentPathAccessTable({
+      paths: { allowRead: [], allowWrite: [], deny: [], ...paths },
+      agentDir: "/repo/.ittybitty/agents/agent-abc123",
+      worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
+      agentsDir: "/repo/.ittybitty/agents",
+      rootRepo: "/repo",
+      gitDir: "/repo/.git",
+      tmuxSock: "/private/tmp/tmux-501",
+      canSpawnChildren: opts.canSpawnChildren ?? false,
+    }),
+  );
+}
 
 function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
   return {
@@ -19,6 +44,8 @@ function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
     agentsDir: "/repo/.ittybitty/agents",
     rootRepo: "/repo",
     allowList: ["Read", "Write", "Edit", "LS", "Glob", "Grep", "Bash"],
+    access: makeAccess(),
+    protectedWritePaths: agentProtectedWritePaths("/repo/.ittybitty/agents/agent-abc123"),
     ...overrides,
   };
 }
@@ -45,9 +72,9 @@ describe("checkAgyPreToolUse — path isolation", () => {
       ctx,
     );
     expect(d.decision).toBe("deny");
-    // With no meta.allowedPaths, allowedPaths is forced to [worktree] so step 12
-    // denies /tmp rather than falling through to the legacy permissive branch.
-    expect(d.reason).toContain("allowedPaths");
+    // With empty paths lists, /tmp is not in the table (only the worktree +
+    // runtime roots are), so the resolver denies it — not a permissive fallback.
+    expect(d.reason).toContain("is not in paths.allowRead/allowWrite");
   });
 
   test("run_command referencing a sibling agent path is denied by the Bash scanner", () => {
@@ -58,6 +85,18 @@ describe("checkAgyPreToolUse — path isolation", () => {
     );
     expect(d.decision).toBe("deny");
     expect(d.reason).toContain("other agents");
+  });
+
+  test("run_command reaches the advisory scanner for ordinary absolute paths", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: "cat /etc/passwd", Cwd: ctx.worktreePath } },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("read");
+    expect(d.reason).toContain("passwd");
+    expect(d.reason).toContain("paths.allowRead/allowWrite");
   });
 
   test("run_command cat into a sibling worktree is a PATH-ISOLATION deny under the default allow list", () => {
@@ -101,8 +140,8 @@ describe("checkAgyPreToolUse — path isolation", () => {
     expect(d.decision).toBe("allow");
   });
 
-  test("write_to_file under a type's allowedPaths is allowed", () => {
-    const ctx = makeCtx({ allowedPaths: ["/private/tmp/agy-shared"] });
+  test("write_to_file under a type's paths.allowWrite is allowed", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/private/tmp/agy-shared"] }) });
     const d = checkAgyPreToolUse(
       { toolName: "write_to_file", toolArgs: { TargetFile: "/private/tmp/agy-shared/out.txt", CodeContent: "x" } },
       ctx,
@@ -374,7 +413,14 @@ describe("checkAgyPreToolUse — agy boundary-file write protection", () => {
 // ── run_command single-command rule: no chaining / escaping (boundary review A) ─
 
 describe("checkAgyPreToolUse — run_command single-command rule", () => {
-  function rc(CommandLine: string, ctx = makeCtx()) {
+  // These rows exercise the single-command / shell-metachar rule, not path
+  // isolation. Grant /tmp (which the real `_all.md` floor carries as
+  // /private/tmp) so the advisory path scanner does not deny the incidental
+  // `git commit -F /tmp/msg.txt` argument and mask what is under test.
+  function rc(
+    CommandLine: string,
+    ctx = makeCtx({ access: makeAccess({ allowRead: ["/tmp"] }) }),
+  ) {
     return checkAgyPreToolUse(
       { toolName: "run_command", toolArgs: { CommandLine, Cwd: ctx.worktreePath } },
       ctx,
@@ -726,5 +772,55 @@ describe("hookAgyPreToolUseDryRun", () => {
 
   test("throws when the agent id is invalid", async () => {
     await expect(hookAgyPreToolUseDryRun("bad agent id")).rejects.toThrow(/Invalid agent id/);
+  });
+});
+
+// ── Phase B invariant: missing meta / malformed stdin → DENY ─────────────────
+
+describe("hookAgyPreToolUse — deny by default (Phase B invariant)", () => {
+  let tempHome: string;
+  let agentDir: string;
+
+  beforeEach(async () => {
+    tempHome = await realpath(await mkdtemp(join(tmpdir(), "agy-deny-default-")));
+    setUserHome(tempHome);
+    const typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+    await writeFile(
+      join(typesDir, "_all.md"),
+      "---\nname: _all\ndescription: shared\npermissions:\n  allow:\n    - Bash(ls:*)\n  deny: []\n---\n",
+    );
+    agentDir = join(tempHome, "fake-repo", ".ittybitty", "agents", "agent-nometa");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    // Deliberately NO meta.json.
+  });
+
+  afterEach(async () => {
+    resetUserHome();
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  async function run(stdin: string): Promise<Record<string, unknown>> {
+    let captured = "";
+    await hookAgyPreToolUse("agent-nometa", {
+      rawStdin: stdin,
+      agentDirOverride: agentDir,
+      skipMetaWrites: true,
+      write: (chunk: string) => { captured += chunk; return chunk.length; },
+    });
+    return JSON.parse(captured);
+  }
+
+  test("missing meta.json → deny", async () => {
+    const parsed = await run(JSON.stringify({
+      toolCall: { name: "run_command", args: { CommandLine: "ls -la", Cwd: join(agentDir, "repo") } },
+    })) as { decision: string; reason: string };
+    expect(parsed.decision).toBe("deny");
+    expect(parsed.reason).toContain("meta.json");
+  });
+
+  test("malformed stdin → deny", async () => {
+    const parsed = await run("not json") as { decision: string };
+    expect(parsed.decision).toBe("deny");
   });
 });

@@ -10,6 +10,32 @@ import {
   hookCodexPreToolUseDryRun,
 } from "./codex-pre-tool-use";
 import type { PathCheckContext } from "./agent-path";
+import { agentProtectedWritePaths } from "./agent-path";
+import { prepareAccessTable, type PathsConfig, type PreparedAccessTable } from "../sandbox";
+import { agentPathAccessTable } from "./paths-table";
+
+/**
+ * Build a prepared access table for the fixture agent. Empty paths lists by
+ * default (strict: only the worktree + runtime roots pass); pass a partial
+ * paths config to widen it.
+ */
+function makeAccess(
+  paths: Partial<PathsConfig> = {},
+  opts: { canSpawnChildren?: boolean } = {},
+): PreparedAccessTable {
+  return prepareAccessTable(
+    agentPathAccessTable({
+      paths: { allowRead: [], allowWrite: [], deny: [], ...paths },
+      agentDir: "/repo/.ittybitty/agents/agent-abc123",
+      worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
+      agentsDir: "/repo/.ittybitty/agents",
+      rootRepo: "/repo",
+      gitDir: "/repo/.git",
+      tmuxSock: "/private/tmp/tmux-501",
+      canSpawnChildren: opts.canSpawnChildren ?? false,
+    }),
+  );
+}
 
 function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
   return {
@@ -19,6 +45,8 @@ function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
     agentsDir: "/repo/.ittybitty/agents",
     rootRepo: "/repo",
     allowList: ["Read", "Write", "Edit", "Bash"],
+    access: makeAccess(),
+    protectedWritePaths: agentProtectedWritePaths("/repo/.ittybitty/agents/agent-abc123"),
     ...overrides,
   };
 }
@@ -57,6 +85,18 @@ describe("checkCodexPreToolUse — allow/deny matcher applies to Bash AND apply_
     );
     expect(decision.decision).toBe("deny");
     expect(decision.reason).toContain("other agents");
+  });
+
+  test("Bash reaches the advisory scanner for ordinary absolute paths", () => {
+    const ctx = makeCtx({ allowList: ["Bash"] });
+    const decision = checkCodexPreToolUse(
+      { toolName: "Bash", toolInput: { command: "cat /etc/passwd" }, cwd: ctx.worktreePath },
+      ctx,
+    );
+    expect(decision.decision).toBe("deny");
+    expect(decision.reason).toContain("read");
+    expect(decision.reason).toContain("passwd");
+    expect(decision.reason).toContain("paths.allowRead/allowWrite");
   });
 
   test("apply_patch: target inside worktree is allowed", () => {
@@ -103,25 +143,23 @@ describe("checkCodexPreToolUse — allow/deny matcher applies to Bash AND apply_
     );
     // SPEC §3.2: codex's `-s workspace-write` sandbox leaks /tmp, $TMPDIR, and
     // ~/.codex/memories. The hook MUST do path-isolation independently of the
-    // sandbox; checkCodexPreToolUse forces step 12 of checkPathAccess to fire
-    // (allowedPaths = [worktreePath] when none configured) so the legacy
-    // permissive fallback can't allow apply_patch escapes.
+    // sandbox; each apply_patch target is a synthesized Write resolved through
+    // ctx.access (deny by default), so with empty paths /private/tmp is denied.
     expect(decision.decision).toBe("deny");
     expect(decision.reason).toContain("apply_patch target rejected");
     expect(decision.reason).toContain("/private/tmp/codex-escape.txt");
   });
 
-  test("apply_patch: target in /private/tmp is allowed when agent.allowedPaths includes it", () => {
-    const ctx = makeCtx({ allowedPaths: ["/private/tmp"] });
+  test("apply_patch: target in /private/tmp is allowed when paths.allowWrite includes it", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/private/tmp"] }) });
     const patch =
       "*** Begin Patch\n*** Add File: /private/tmp/whitelisted.txt\n+ok\n*** End Patch\n";
     const decision = checkCodexPreToolUse(
       { toolName: "apply_patch", toolInput: { command: patch }, cwd: ctx.worktreePath },
       ctx,
     );
-    // If the agent's meta.json declares allowedPaths, we honor that list
-    // verbatim (do NOT override it with [worktreePath]) — same contract as
-    // claude-side hookCheckPath.
+    // If the agent's paths block declares /private/tmp as writable, the resolver
+    // honors it — same shared table as the claude-side hookCheckPath.
     expect(decision.decision).toBe("allow");
   });
 
@@ -197,6 +235,70 @@ describe("hookCodexPreToolUse — codex JSON contract (gate (d))", () => {
     await rm(tempHome, { recursive: true, force: true });
   });
 
+  async function runPayload(payload: unknown): Promise<{
+    hookSpecificOutput: {
+      permissionDecision: string;
+      permissionDecisionReason?: string;
+      updatedInput?: Record<string, unknown>;
+    };
+  }> {
+    let captured = "";
+    await hookCodexPreToolUse("agent-test01", {
+      rawStdin: JSON.stringify(payload),
+      agentDirOverride: agentDir,
+      skipSessionIdCapture: true,
+      write: (chunk: string) => { captured += chunk; return chunk.length; },
+    });
+    return JSON.parse(captured);
+  }
+
+  test("malformed nested tool_input arrays are denied instead of becoming pathless calls", async () => {
+    const parsed = await runPayload({
+      tool_name: "Read",
+      tool_input: [],
+      cwd: join(agentDir, "repo"),
+    });
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain("Invalid stdin schema");
+  });
+
+  test("non-string cwd is denied instead of falling back to process.cwd", async () => {
+    const parsed = await runPayload({
+      tool_name: "Read",
+      tool_input: { file_path: join(agentDir, "repo", "README.md") },
+      cwd: 42,
+    });
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain("Invalid stdin schema");
+  });
+
+  test("invalid and missing required file paths are denied", async () => {
+    for (const tool_input of [{ file_path: 42 }, {}]) {
+      const parsed = await runPayload({
+        tool_name: "Read",
+        tool_input,
+        cwd: join(agentDir, "repo"),
+      });
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain("path");
+    }
+  });
+
+  test("valid pathless Glob and Grep calls use the hook cwd", async () => {
+    for (const [tool_name, tool_input] of [
+      ["Glob", { pattern: "*.ts" }],
+      ["Grep", { pattern: "needle" }],
+    ] as const) {
+      const parsed = await runPayload({
+        tool_name,
+        tool_input,
+        cwd: join(agentDir, "repo"),
+      });
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("allow");
+      expect(parsed.hookSpecificOutput.updatedInput).toEqual(tool_input);
+    }
+  });
+
   test("deny includes permissionDecisionReason", async () => {
     const stdin = JSON.stringify({
       tool_name: "Bash",
@@ -244,7 +346,10 @@ describe("hookCodexPreToolUse — codex JSON contract (gate (d))", () => {
   });
 
   test("allow includes updatedInput echoing the original tool_input verbatim", async () => {
-    const toolInput = { command: "ls /tmp", extra: "meta" };
+    // Any allow-listed command works; the point is verbatim updatedInput echo.
+    // A worktree-relative `ls src` avoids the advisory path scanner, which now
+    // resolves absolute Bash args against the (empty-floor) fixture table.
+    const toolInput = { command: "ls src", extra: "meta" };
     const stdin = JSON.stringify({
       tool_name: "Bash",
       tool_input: toolInput,
@@ -552,5 +657,57 @@ describe("hookCodexPreToolUseDryRun — exercises real handler with synthetic pa
 
   test("throws when agent id is invalid", async () => {
     await expect(hookCodexPreToolUseDryRun("bad agent id")).rejects.toThrow(/Invalid agent id/);
+  });
+});
+
+// ── Phase B invariant: missing meta / malformed stdin → DENY ─────────────────
+
+describe("hookCodexPreToolUse — deny by default (Phase B invariant)", () => {
+  let tempHome: string;
+  let agentDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "codex-deny-default-"));
+    setUserHome(tempHome);
+    const typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+    await writeFile(
+      join(typesDir, "_all.md"),
+      "---\nname: _all\ndescription: shared\npermissions:\n  allow:\n    - Bash(ls:*)\n  deny: []\n---\n",
+    );
+    agentDir = join(tempHome, "fake-repo", ".ittybitty", "agents", "agent-nometa");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    // Deliberately NO meta.json.
+  });
+
+  afterEach(async () => {
+    resetUserHome();
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  async function run(stdin: string): Promise<Record<string, unknown>> {
+    let captured = "";
+    await hookCodexPreToolUse("agent-nometa", {
+      rawStdin: stdin,
+      agentDirOverride: agentDir,
+      skipSessionIdCapture: true,
+      write: (chunk: string) => { captured += chunk; return chunk.length; },
+    });
+    return JSON.parse(captured);
+  }
+
+  test("missing meta.json → deny", async () => {
+    const parsed = await run(JSON.stringify({
+      tool_name: "Bash",
+      tool_input: { command: "ls -la" },
+      cwd: join(agentDir, "repo"),
+    })) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } };
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain("meta.json");
+  });
+
+  test("malformed stdin → deny", async () => {
+    const parsed = await run("not json") as { hookSpecificOutput: { permissionDecision: string } };
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
   });
 });

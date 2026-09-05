@@ -88,39 +88,42 @@ async function runHook(
 describe("hook-check-path stdin validation", () => {
   const cmd = ["hook-check-path", "agent-test1234"];
 
-  test("malformed JSON exits 0 and outputs allow", async () => {
+  // Phase B (SPEC-PATH-ALLOWLIST.md §8): the path hook must never fail open.
+  // Malformed stdin, a non-object payload, a non-string tool_name and a
+  // non-object tool_input all now DENY (they previously allowed).
+  test("malformed JSON exits 0 and outputs deny", async () => {
     const { stdout, stderr, exitCode } = await runHook(cmd, "not json{{{");
     expect(exitCode).toBe(0);
     expect(stderr).toContain("failed to parse stdin JSON");
     const out = JSON.parse(stdout);
-    expect(out.hookSpecificOutput.permissionDecision).toBe("allow");
+    expect(out.hookSpecificOutput.permissionDecision).toBe("deny");
   });
 
-  test("non-object JSON (string) exits 0 and outputs allow", async () => {
+  test("non-object JSON (string) exits 0 and outputs deny", async () => {
     const { stdout, stderr, exitCode } = await runHook(cmd, '"just a string"');
     expect(exitCode).toBe(0);
     expect(stderr).toContain("not a JSON object");
     const out = JSON.parse(stdout);
-    expect(out.hookSpecificOutput.permissionDecision).toBe("allow");
+    expect(out.hookSpecificOutput.permissionDecision).toBe("deny");
   });
 
-  test("non-object JSON (array) exits 0 and outputs allow", async () => {
+  test("non-object JSON (array) exits 0 and outputs deny", async () => {
     const { stdout, stderr, exitCode } = await runHook(cmd, "[1,2,3]");
     expect(exitCode).toBe(0);
     expect(stderr).toContain("not a JSON object");
     const out = JSON.parse(stdout);
-    expect(out.hookSpecificOutput.permissionDecision).toBe("allow");
+    expect(out.hookSpecificOutput.permissionDecision).toBe("deny");
   });
 
-  test("non-object JSON (null) exits 0 and outputs allow", async () => {
+  test("non-object JSON (null) exits 0 and outputs deny", async () => {
     const { stdout, stderr, exitCode } = await runHook(cmd, "null");
     expect(exitCode).toBe(0);
     expect(stderr).toContain("not a JSON object");
     const out = JSON.parse(stdout);
-    expect(out.hookSpecificOutput.permissionDecision).toBe("allow");
+    expect(out.hookSpecificOutput.permissionDecision).toBe("deny");
   });
 
-  test("tool_name not a string exits 0 and outputs allow", async () => {
+  test("tool_name not a string exits 0 and outputs deny", async () => {
     const { stdout, stderr, exitCode } = await runHook(
       cmd,
       JSON.stringify({ tool_name: 42, tool_input: {} })
@@ -128,10 +131,10 @@ describe("hook-check-path stdin validation", () => {
     expect(exitCode).toBe(0);
     expect(stderr).toContain("tool_name is not a string");
     const out = JSON.parse(stdout);
-    expect(out.hookSpecificOutput.permissionDecision).toBe("allow");
+    expect(out.hookSpecificOutput.permissionDecision).toBe("deny");
   });
 
-  test("tool_input not an object exits 0 and outputs allow", async () => {
+  test("tool_input not an object exits 0 and outputs deny", async () => {
     const { stdout, stderr, exitCode } = await runHook(
       cmd,
       JSON.stringify({ tool_name: "Read", tool_input: "bad" })
@@ -139,10 +142,10 @@ describe("hook-check-path stdin validation", () => {
     expect(exitCode).toBe(0);
     expect(stderr).toContain("tool_input is not an object");
     const out = JSON.parse(stdout);
-    expect(out.hookSpecificOutput.permissionDecision).toBe("allow");
+    expect(out.hookSpecificOutput.permissionDecision).toBe("deny");
   });
 
-  test("tool_input null exits 0 and outputs allow", async () => {
+  test("tool_input null exits 0 and outputs deny", async () => {
     const { stdout, stderr, exitCode } = await runHook(
       cmd,
       JSON.stringify({ tool_name: "Read", tool_input: null })
@@ -150,7 +153,7 @@ describe("hook-check-path stdin validation", () => {
     expect(exitCode).toBe(0);
     expect(stderr).toContain("tool_input is not an object");
     const out = JSON.parse(stdout);
-    expect(out.hookSpecificOutput.permissionDecision).toBe("allow");
+    expect(out.hookSpecificOutput.permissionDecision).toBe("deny");
   });
 
   test("empty object is valid input (exits 0)", async () => {

@@ -85,6 +85,7 @@ import {
   setSandboxPortCheckForTesting,
   resetSandboxWiringForTesting,
   mergeSandboxLayerConfigs,
+  checkPathsRepoContainment,
   resolveTmuxSocketDir,
   refreshAgentSandbox,
   refreshAgentsSandbox,
@@ -106,6 +107,7 @@ import { setUserConfigPath, resetUserConfigPath } from "./config";
 import type { AgentState } from "./parse-state";
 import type { SpawnFn, SpawnResult } from "./types";
 import { canonicalizeSandboxPath } from "./sandbox";
+import { claudeProjectDirFor, claudeScratchpadDirFor } from "./hooks/paths-table";
 
 // The "retire → rehire recovery" describes drive real `git` subprocesses — a
 // dozen call sites through the local git() helper, plus every git command
@@ -3176,11 +3178,19 @@ describe("resumeAgent (native)", () => {
       await mkdir(join(agentDir, "repo", ".agents"), { recursive: true });
       // Pre-write a TAMPERED hooks.json to prove resume overwrites it.
       await Bun.write(join(agentDir, "repo", ".agents", "hooks.json"), "TAMPERED");
+      const frozenPaths = {
+        allowRead: ["/frozen/agy/read"],
+        allowWrite: ["/frozen/agy/write"],
+        deny: ["**/agy-secret"],
+      };
+      const frozenSandbox = { enabled: false, rawAllow: [], domains: [] };
       await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
         id: "agent-agy-ok",
         tmux_session: "tmux-agent-agy-ok",
         model: "agy:gemini-3.7-flash-low",
         agy_conversation_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+        paths: frozenPaths,
+        sandbox: frozenSandbox,
       }));
       const agent = _makeAgent({
         id: "agent-agy-ok",
@@ -3191,6 +3201,8 @@ describe("resumeAgent (native)", () => {
           tmux_session: "tmux-agent-agy-ok",
           model: "agy:gemini-3.7-flash-low",
           agy_conversation_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+          paths: frozenPaths,
+          sandbox: frozenSandbox,
         } as any,
       });
       const result = await resumeAgent(agent);
@@ -3207,6 +3219,10 @@ describe("resumeAgent (native)", () => {
       expect(hooks.ittybitty.PreToolUse[0].hooks[0].command).toContain("hooks agy-pre-tool-use agent-agy-ok");
       const rule = await Bun.file(join(agentDir, "repo", ".agents", "rules", "ittybitty-agent.md")).text();
       expect(rule.startsWith("---\ntrigger: always_on")).toBe(true);
+      expect(rule).toContain("/frozen/agy/read");
+      expect(rule).toContain("/frozen/agy/write");
+      expect(rule).toContain("**/agy-secret");
+      expect(rule).toContain("The kernel sandbox is unavailable for agy");
 
       // tmux new-session ran with the resume script.
       const newSessionCall = spawnCalls.find(c => c[0] === "tmux" && c[1] === "new-session");
@@ -4547,6 +4563,8 @@ sandbox:
     expect(result.ok).toBe(true);
     const agentDir = join(agentsDir, "sandbox-codex");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
+    const profile = await Bun.file(join(agentDir, "sandbox.sb")).text();
+    const agentsMd = await Bun.file(join(agentDir, "repo", "AGENTS.md")).text();
     expect(start).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
     expect(start).not.toContain("-s workspace-write");
     expect(start).toContain("setsid sandbox-exec -f");
@@ -4554,6 +4572,14 @@ sandbox:
     expect(start).toContain("sandbox-proxy-launch");
     expect(start).toContain("export HTTPS_PROXY=\"$http_proxy\"");
     expect(start).toContain("<&0 2> \"$STDERR_LOG\" &");
+    expect(start).not.toContain("-D 'PROJECTDIR=");
+    expect(start).not.toContain("-D 'SCRATCHPAD=");
+    expect(profile).not.toContain('param "PROJECTDIR"');
+    expect(profile).not.toContain('param "SCRATCHPAD"');
+    expect(agentsMd).toContain(canonicalizeSandboxPath(tempDir));
+    expect(agentsMd).toContain("**/.env");
+    expect(agentsMd).toContain("The kernel sandbox is ON");
+    expect(agentsMd).not.toContain("your Claude project directory and scratchpad");
     expect(dispatcherDryRunCalls.length).toBeGreaterThanOrEqual(3);
     expect(spawnCalls.some((call) => call[0] === "codex")).toBe(false);
   });
@@ -4622,6 +4648,7 @@ sandbox:
     expect(result.ok).toBe(true);
     const agentDir = join(agentsDir, "sandbox-wiring");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
+    const profile = await Bun.file(join(agentDir, "sandbox.sb")).text();
     const meta = await Bun.file(join(agentDir, "meta.json")).json();
     const domains = await Bun.file(join(agentDir, "sandbox-domains.txt")).text();
 
@@ -4629,6 +4656,13 @@ sandbox:
     expect(start).toContain("setsid sandbox-exec -f");
     expect(start).toContain("    sandbox-exec -f");
     expect(start).toContain("-D 'AGENTDIR=");
+    const worktreePath = join(agentDir, "repo");
+    const projectDir = canonicalizeSandboxPath(claudeProjectDirFor(worktreePath));
+    const scratchpad = claudeScratchpadDirFor(worktreePath, process.getuid?.() ?? 0);
+    expect(start).toContain(`-D 'PROJECTDIR=${projectDir}'`);
+    expect(start).toContain(`-D 'SCRATCHPAD=${scratchpad}'`);
+    expect(profile).toContain('param "PROJECTDIR"');
+    expect(profile).toContain('param "SCRATCHPAD"');
     expect(start).not.toContain("NODE_OPTIONS");
     expect(start).toContain("trap cleanup_sandbox_proxy EXIT");
     // GROUP 1: claude skips its own permission prompts only under the kernel.
@@ -4852,6 +4886,71 @@ sandbox:
   });
 
   // ── A4 G2: ib sandbox refresh ──────────────────────────────────────────────
+  test("Codex refresh regenerates AGENTS.md from the new paths and sandbox state", async () => {
+    const id = "codex-refresh-instructions";
+    const oldRead = join(tempDir, "old-policy");
+    const newRead = join(tempDir, "new-policy");
+    await writeSandboxType(id, { model: "codex:gpt-5.4-mini", allowRead: [oldRead] });
+    setSandboxPortAllocatorForTesting(() => 43201);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99960 }));
+    expect((await callNewAgent("refresh policy", { name: id, type: id })).ok).toBe(true);
+    const agentDir = join(agentsDir, id);
+    const instructions = join(agentDir, "repo", "AGENTS.md");
+    expect(await Bun.file(instructions).text()).toContain("The kernel sandbox is ON");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    meta.codex_session_id = "019e7b21-cb7d-7f23-8674-11036ed141ef";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+    await writeSandboxType(id, { model: "codex:gpt-5.4-mini", enabled: false, allowRead: [newRead] });
+    let created = false;
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      if (cmd.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmd.includes("has-session")) return makeSpawnResult("", created ? 0 : 1);
+      if (cmd.includes("new-session")) created = true;
+      return makeSpawnResult("", 0);
+    });
+    const result = await refreshAgentSandbox(makeAgent(id, tempDir, "stopped", meta));
+    expect(result.ok).toBe(true);
+    const text = await Bun.file(instructions).text();
+    expect(text).toContain(canonicalizeSandboxPath(newRead));
+    expect(text).not.toContain(canonicalizeSandboxPath(oldRead));
+    expect(text).toContain("The kernel sandbox is OFF");
+    expect(text).not.toContain("your Claude project directory and scratchpad");
+    expect(await Bun.file(join(agentDir, "resume.sh")).text()).not.toContain("sandbox-exec");
+  });
+
+  test("agy rejects enabled sandbox policy at spawn, resume, and refresh", async () => {
+    const id = "agy-unsupported-sandbox";
+    await writeSandboxType(id, { model: "agy:default" });
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const spawned = await callNewAgent("reject unwrapped launch", { name: id, type: id });
+    expect(spawned.ok).toBe(false);
+    expect(spawned.stderr).toContain("agy has no kernel sandbox wrapper");
+    const agentDir = join(agentsDir, id);
+    expect(await Bun.file(join(agentDir, "start.sh")).exists()).toBe(false);
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    const meta: Partial<AgentMeta> = {
+      id, agentType: id, model: "agy:default", state: "stopped",
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+      paths: { allowRead: [], allowWrite: [], deny: [] },
+    };
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+    const resumed = await resumeAgent(makeAgent(id, tempDir, "stopped", meta));
+    expect(resumed.ok).toBe(false);
+    expect(resumed.stderr).toContain("agy has no kernel sandbox wrapper");
+    // Refresh refuses before mutating an existing disabled agent or stopping it.
+    meta.sandbox!.enabled = false;
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+    const refreshed = await refreshAgentSandbox(makeAgent(id, tempDir, "stopped", meta));
+    expect(refreshed.ok).toBe(false);
+    expect(refreshed.stderr).toContain("agy has no kernel sandbox wrapper");
+    expect((await Bun.file(join(agentDir, "meta.json")).json()).sandbox.enabled).toBe(false);
+    expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
+  });
+
   test("sandbox refresh re-derives paths from edited type files and replays the new frozen block", async () => {
     await writeSandboxType("sandbox-refresh", { allowRead: [tempDir], allowWrite: [tempDir], deny: ["**/.env"] });
     const ports = [43140, 43141];
@@ -4902,6 +5001,7 @@ sandbox:
     }
 
     const refreshedMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    const refreshedProfile = await Bun.file(join(agentDir, "sandbox.sb")).text();
     // The frozen block now reflects the edited type file — new entries appear
     // that were NOT in the pre-refresh block.
     expect(refreshedMeta.paths.allowRead).toContain(canonicalizeSandboxPath(refreshedDir));
@@ -4914,6 +5014,15 @@ sandbox:
     expect(refreshedMeta.sandbox_proxy_port).toBe(43141);
     const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
     expect(resumeScript).toContain("setsid sandbox-exec -f");
+    const worktreePath = join(agentDir, "repo");
+    expect(resumeScript).toContain(
+      `-D 'PROJECTDIR=${canonicalizeSandboxPath(claudeProjectDirFor(worktreePath))}'`,
+    );
+    expect(resumeScript).toContain(
+      `-D 'SCRATCHPAD=${claudeScratchpadDirFor(worktreePath, process.getuid?.() ?? 0)}'`,
+    );
+    expect(refreshedProfile).toContain('param "PROJECTDIR"');
+    expect(refreshedProfile).toContain('param "SCRATCHPAD"');
     const log = await Bun.file(join(agentDir, "agent.log")).text();
     expect(log).toContain("[sandbox refresh] re-derived from agent-type files:");
   });
@@ -4989,6 +5098,160 @@ sandbox:
     // Refusal is logged and the agent stays stopped (no resume.sh).
     expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("ghost-type-xyz");
     expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
+  });
+
+  // ── Phase B: relative entries anchored at the MAIN repo root ────────────────
+  test("spawn anchors a ../ entry at the main repo root, not the worktree", async () => {
+    await writeSandboxType("spawn-relative", {
+      allowRead: [tempDir, "../sibling"],
+      allowWrite: [tempDir],
+      deny: ["**/.env"],
+    });
+    setSandboxPortAllocatorForTesting(() => 43180);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99980 }));
+    const spawned = await callNewAgent("relative spawn", { name: "spawn-relative", type: "spawn-relative" });
+    expect(spawned.ok).toBe(true);
+
+    const meta = await Bun.file(join(agentsDir, "spawn-relative", "meta.json")).json();
+    // rootRepoPath resolves to tempDir; "../sibling" anchors to its SIBLING —
+    // join(tempDir, "..", "sibling") — never the agent dir or worktree.
+    const expectedSibling = canonicalizeSandboxPath(join(tempDir, "..", "sibling"));
+    expect(meta.paths.allowRead).toContain(expectedSibling);
+    // The raw relative form never survives into meta.
+    expect(meta.paths.allowRead).not.toContain("../sibling");
+  });
+
+  test("spawn rejects a relative entry that climbs to the filesystem root", async () => {
+    await writeSandboxType("spawn-escape", {
+      allowRead: [tempDir, "../".repeat(50)],
+      allowWrite: [tempDir],
+      deny: ["**/.env"],
+    });
+    setSandboxPortAllocatorForTesting(() => 43182);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99981 }));
+    const spawned = await callNewAgent("escape spawn", { name: "spawn-escape", type: "spawn-escape" });
+    expect(spawned.ok).toBe(false);
+    expect(spawned.stderr).toContain("climbs out");
+    expect(spawned.stderr).toContain('write "/" or "~"');
+  });
+
+  test("sandbox refresh anchors a ../ entry at the main repo root", async () => {
+    await writeSandboxType("refresh-relative", { allowRead: [tempDir], allowWrite: [tempDir], deny: ["**/.env"] });
+    const ports = [43184, 43185];
+    setSandboxPortAllocatorForTesting(() => ports.shift()!);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99982 }));
+    const spawned = await callNewAgent("refresh relative", { name: "refresh-relative", type: "refresh-relative" });
+    expect(spawned.ok).toBe(true);
+
+    const agentDir = join(agentsDir, "refresh-relative");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
+    // Add a relative entry AFTER spawn so refresh must anchor it.
+    await writeSandboxType("refresh-relative", {
+      allowRead: [tempDir, "../sibling"],
+      allowWrite: [tempDir],
+      deny: ["**/.env"],
+    });
+
+    let createdSession = false;
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      const cmdStr = cmd.join(" ");
+      if (cmd[0] === "which" && cmd[1] === "sandbox-exec") return makeSpawnResult("/usr/bin/sandbox-exec", 0);
+      if (cmd[0] === "/usr/bin/sandbox-exec") return makeSpawnResult("", 0);
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("tmux has-session")) return makeSpawnResult("", createdSession ? 0 : 1);
+      if (cmdStr.includes("tmux new-session")) { createdSession = true; return makeSpawnResult("", 0); }
+      if (cmdStr.includes("capture-pane")) return makeSpawnResult("Claude Code v1.0", 0);
+      return makeSpawnResult("", 0);
+    });
+    setSendSpawnRunner(() => makeSpawnResult("", 0));
+    try {
+      const result = await refreshAgentSandbox(makeAgent("refresh-relative", tempDir, "stopped", meta));
+      expect(result.ok).toBe(true);
+    } finally {
+      resetSendSpawnRunner();
+    }
+
+    const refreshedMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    const expectedSibling = canonicalizeSandboxPath(join(tempDir, "..", "sibling"));
+    expect(refreshedMeta.paths.allowRead).toContain(expectedSibling);
+    expect(refreshedMeta.paths.allowRead).not.toContain("../sibling");
+  });
+
+  test("sandbox refresh refuses an entry under the agents dir added after spawn", async () => {
+    await writeSandboxType("refresh-under-agents", { allowRead: [tempDir], allowWrite: [tempDir], deny: ["**/.env"] });
+    setSandboxPortAllocatorForTesting(() => 43186);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99983 }));
+    const spawned = await callNewAgent("refresh bad", { name: "refresh-under-agents", type: "refresh-under-agents" });
+    expect(spawned.ok).toBe(true);
+
+    const agentDir = join(agentsDir, "refresh-under-agents");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
+    // Add an entry under .ittybitty/agents AFTER spawn (a dead entry the hook
+    // denies structurally) — refresh must refuse it.
+    await writeSandboxType("refresh-under-agents", {
+      allowRead: [tempDir, join(tempDir, ".ittybitty", "agents", "victim")],
+      allowWrite: [tempDir],
+      deny: ["**/.env"],
+    });
+
+    const result = await refreshAgentSandbox(makeAgent("refresh-under-agents", tempDir, "stopped", meta));
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("dead entry");
+    expect(result.stderr).toContain(canonicalizeSandboxPath(join(tempDir, ".ittybitty", "agents")));
+    // The agent stays stopped: refusal happens before any resume.
+    expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
+  });
+
+  test("sandbox refresh refuses a relative entry that climbs to the home directory", async () => {
+    await writeSandboxType("refresh-home-escape", { allowRead: [tempDir], allowWrite: [tempDir], deny: ["**/.env"] });
+    setSandboxPortAllocatorForTesting(() => 43188);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99984 }));
+    const spawned = await callNewAgent("refresh home escape", { name: "refresh-home-escape", type: "refresh-home-escape" });
+    expect(spawned.ok).toBe(true);
+
+    const agentDir = join(agentsDir, "refresh-home-escape");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
+    const frozenPaths = structuredClone(meta.paths);
+
+    // In this harness HOME is join(tempDir, "home") — nested UNDER the repo root
+    // — so "./home" resolves to exactly the home directory and trips the escape
+    // gate. (In production home is never under a repo, so a ../ climb reaches it.)
+    await writeSandboxType("refresh-home-escape", {
+      allowRead: [tempDir, "./home"],
+      allowWrite: [tempDir],
+      deny: ["**/.env"],
+    });
+
+    const result = await refreshAgentSandbox(makeAgent("refresh-home-escape", tempDir, "stopped", meta));
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("climbs out");
+    // The escape gate fires BEFORE the meta write: meta.paths is untouched and
+    // the agent stays stopped (no resume.sh). A future change that moved the
+    // check after the write would fail these two assertions.
+    expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
+    const afterMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(afterMeta.paths).toEqual(frozenPaths);
   });
 
   // ── A4 G3: sealed record ────────────────────────────────────────────────────
@@ -8072,11 +8335,27 @@ body`,
       expect(await Bun.file(settingsPath).exists()).toBe(false);
     });
 
-    test("writes .agents/hooks.json + the always-on rule file into the worktree", async () => {
+    test("writes .agents/hooks.json + the always-on rule file with resolved path policy", async () => {
+      const readPath = join(tempDir, "agy-read-root");
+      const writePath = join(tempDir, "agy-write-root");
+      await writeAgentTypeFile("agy-instructions", `---
+name: agy-instructions
+description: agy path instructions test
+canSpawnChildren: false
+instructionStyle: worker
+model: agy:gemini-3.7-flash-low
+paths:
+  allowRead: [${JSON.stringify(readPath)}]
+  allowWrite: [${JSON.stringify(writePath)}]
+  deny: ["**/agy-denied"]
+sandbox:
+  enabled: false
+---
+`);
       setNewAgentSpawnRunner(agyRunner());
       const result = await callNewAgent("task", {
         name: "agy-worktree-files",
-        model: "agy:gemini-3.7-flash-low",
+        type: "agy-instructions",
       });
       expect(result.ok).toBe(true);
       const worktree = join(agentsDir, "agy-worktree-files", "repo");
@@ -8084,6 +8363,10 @@ body`,
       expect(hooks.ittybitty.PreToolUse[0].hooks[0].command).toContain("hooks agy-pre-tool-use agy-worktree-files");
       const rule = await Bun.file(join(worktree, ".agents", "rules", "ittybitty-agent.md")).text();
       expect(rule.startsWith("---\ntrigger: always_on")).toBe(true);
+      expect(rule).toContain(canonicalizeSandboxPath(readPath));
+      expect(rule).toContain(canonicalizeSandboxPath(writePath));
+      expect(rule).toContain("**/agy-denied");
+      expect(rule).toContain("The kernel sandbox is unavailable for agy");
     });
 
     test("appends both boundary files to <worktree>/.gitignore", async () => {
@@ -12193,5 +12476,78 @@ describe("resolveTmuxSocketDir — tmux socket dir derivation", () => {
     if (process.platform === "darwin") {
       expect(result).toBe("/private/tmp/tmux-501");
     }
+  });
+});
+
+describe("checkPathsRepoContainment", () => {
+  let repoRoot: string;
+
+  beforeEach(async () => {
+    repoRoot = await mkdtemp(join(tmpdir(), "paths-containment-"));
+  });
+
+  afterEach(async () => {
+    await rm(repoRoot, { recursive: true, force: true });
+  });
+
+  const entry = (rel: string): string => canonicalizeSandboxPath(join(repoRoot, rel));
+
+  test("errors on an allow entry resolving under the agents directory", () => {
+    const result = checkPathsRepoContainment(
+      { allowRead: [], allowWrite: [entry(".ittybitty/agents/agent-x/repo/src")], deny: [] },
+      repoRoot,
+    );
+    expect(result.error).toBeDefined();
+    expect(result.error).toContain(canonicalizeSandboxPath(join(repoRoot, ".ittybitty/agents")));
+    expect(result.error).toContain("dead entry");
+  });
+
+  test("warns on an allow entry inside the repo root but outside the agents dir", () => {
+    const result = checkPathsRepoContainment(
+      { allowRead: [entry("src")], allowWrite: [], deny: [] },
+      repoRoot,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.warnings.length).toBe(1);
+    expect(result.warnings[0]).toContain(canonicalizeSandboxPath(repoRoot));
+  });
+
+  test("passes an entry outside the repo root with no error or warning", () => {
+    const result = checkPathsRepoContainment(
+      { allowRead: [canonicalizeSandboxPath(tmpdir())], allowWrite: [], deny: [] },
+      repoRoot,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.warnings).toEqual([]);
+  });
+
+  test("does not check deny entries (a deny under the agents dir is allowed)", () => {
+    const result = checkPathsRepoContainment(
+      { allowRead: [], allowWrite: [], deny: [entry(".ittybitty/agents/secret")] },
+      repoRoot,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.warnings).toEqual([]);
+  });
+
+  test("errors on a glob whose literal directory is under the agents dir", () => {
+    const agentsDir = canonicalizeSandboxPath(join(repoRoot, ".ittybitty/agents"));
+    const result = checkPathsRepoContainment(
+      { allowRead: [`${agentsDir}/**`], allowWrite: [], deny: [] },
+      repoRoot,
+    );
+    expect(result.error).toBeDefined();
+    expect(result.error).toContain(agentsDir);
+  });
+
+  test("warns on a file-like-prefix glob directly under the repo root", () => {
+    const repoCanonical = canonicalizeSandboxPath(repoRoot);
+    const result = checkPathsRepoContainment(
+      { allowRead: [`${repoCanonical}/foo*.md`], allowWrite: [], deny: [] },
+      repoRoot,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.warnings.length).toBe(1);
+    expect(result.warnings[0]).toContain(repoCanonical);
   });
 });

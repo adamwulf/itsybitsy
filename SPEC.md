@@ -44,7 +44,7 @@ When a new agent is created (`ib new-agent "prompt"`):
    - Hook definitions: path-check, stop, permission-denied, session-start, and optionally intercept-task (for agents with `canSpawnChildren: true`)
    - The agent ID placeholder `__AGENT_ID__` is replaced with the actual ID after writing
 
-9. **Write meta.json** to `<agent-dir>/meta.json` (see §5.2 for fields). Includes `agentType` (the resolved type name), `agentIcon` (the type's icon character, if defined), and `allowedPaths` (resolved absolute paths from the type's `allowedPaths` frontmatter, if defined — see §6.1).
+9. **Write meta.json** to `<agent-dir>/meta.json` (see §5.2 for fields). Includes `agentType` (the resolved type name), `agentIcon` (the type's icon character, if defined), `paths` (the resolved, repo-anchored `allowRead`/`allowWrite`/`deny` lists from the union of the type's `paths:` frontmatter — see §2.2 and §6.1), and `sandbox` (the resolved kernel-sandbox policy).
 
 10. **Write prompt.txt** with the full prompt including any completion instructions, custom prompts, and the user's task.
 
@@ -221,11 +221,13 @@ Resume (`ib resume <id>`) restarts a stopped agent:
 6. **Auto-spawn watchdog**: `ib watchdog <id>` is spawned in the background for ALL agents (not just those with a manager). The watchdog PID is saved to `meta.json` as `watchdog_pid`. The bash `cmd_resume()` does not include this step (known divergence).
 7. **State reset**: Write `state: "running"` and `state_updated_at` to `meta.json` (atomic merge write). See §1.3.1.
 
-**Related — `ib sandbox refresh <id> | --all`**: re-derives a sandboxed agent's
+**Related — `ib sandbox refresh <id> | --all`**: re-derives an existing agent's
 frozen `sandbox`/`paths` block from the current agent-type files and restarts it
 through this same resume path so the new policy takes effect (coordinators are
 refused; `--all` covers every non-stopped agent in the current repo). See
-SPEC-SANDBOX.md §5.6.
+SPEC-SANDBOX.md §5.6. For agy, a newly resolved enabled sandbox is rejected
+before metadata mutation; a sandbox-disabled refresh succeeds and updates the
+agent's paths/rules.
 
 ### 1.7 Archiving
 
@@ -322,12 +324,12 @@ The `AgentType` interface defines these properties:
 | `description` | string | No | Human-readable description. Inheritable (child replaces when present). |
 | `canSpawnChildren` | boolean | Yes | Whether agents of this type can spawn sub-agents. Inheritable (child replaces when present, including explicit `false`). |
 | `spawnable` | boolean | No | Whether this type can be spawned directly via `ib new-agent --type <name>`. Defaults to `true` when absent. `false` marks layer-only files (e.g. `_all.md`, `_non_coordinator.md`) whose frontmatter permissions and markdown body merge into every spawned agent but which cannot themselves be spawned. **Never inherited** — always read from the target file's own frontmatter. |
-| `inherits` | string | No | Name of another agent type (filename minus `.md`) to inherit from. Scalar fields override when the child declares them; `permissions.allow/deny` **merge** across the chain (Set-deduped); `allowedPaths` and `repos` **replace** (not merge) when the child declares them. Cycles and missing parents are errors. Layer files (`spawnable: false`) may NOT use `inherits:`. Empty string (`inherits: ""`) is treated as absent. |
+| `inherits` | string | No | Name of another agent type (filename minus `.md`) to inherit from. Scalar fields override when the child declares them; `permissions.allow/deny` **merge** across the chain (Set-deduped); the `paths:` and `sandbox:` list fields likewise **union** across the chain; `repos` **replaces** (not merge) when the child declares it. Cycles and missing parents are errors. Layer files (`spawnable: false`) may NOT use `inherits:`. Empty string (`inherits: ""`) is treated as absent. |
 | `icon` | string | No | Display icon — first non-whitespace character is extracted. Inheritable (child replaces when present and non-empty). |
 | `model` | string | No | Default model override (used before config fallback). Inheritable (child replaces when present and non-empty — empty string means inherit). |
 | `effort` | string | No | Reasoning-effort override (`low\|medium\|high\|xhigh\|max`) threaded to the CLI (Claude `--effort`, codex `model_reasoning_effort`; used before config fallback, default `xhigh`). Inheritable exactly like `model` (child replaces when present and non-empty — empty string means inherit). |
 | `permissions` | object | No | Type-specific `allow`/`deny` permission lists. Inheritable — each list is **unioned across the chain** and Set-deduped. |
-| `allowedPaths` | string[] | No | Directories the agent can access beyond its worktree. `undefined` = legacy permissive, `[]` = strict (worktree only). Paths may use `~` (expanded at creation time). See §6.1 for enforcement details. Inheritable — **replaces** (not merges) when the child declares it; a child declaring `allowedPaths: []` correctly overrides a permissive parent. |
+| `paths` | object | No | Filesystem policy: `allowRead`, `allowWrite`, and `deny` lists. Each entry is an absolute path, a home path (`~` or `~/x`), a relative path (`./x` or `../x`, anchored at the **main repo root** the worktree was spawned from), or a glob (a relative glob is anchored first, then compiled). Bare names are rejected. Inheritable — each list **unions** across the layers (`_all.md` → `_non_coordinator.md` → the `inherits:` chain → the leaf). `deny` wins over any allow at any depth; otherwise the **most specific** matching entry decides (`allowWrite` grants read+write, `allowRead` grants read-only), and the same path in both lists **writes**. A **missing** `paths` key equals empty lists equals **strict**: the worktree plus the runtime roots only. Resolved to absolute paths at spawn and frozen in `meta.json`. See §6.1 for enforcement. (Replaced the retired `allowedPaths` field — SPEC-PATH-ALLOWLIST.md §6.11.) |
 | `repos` | string[] | No | If defined, this type can only be spawned in repos whose basename or registered nickname matches an entry. Checked by `ib new-agent` before any worktree/tmux/agent-dir allocation. `undefined` = no restriction. **Empty list is rejected at validation** (an unspawnable type is almost always a YAML typo). Inheritable — **replaces** (not merges) when the child declares it. |
 | `instructionStyle` | `"manager"` \| `"worker"` \| `"coordinator"` | Yes | Maps to base instruction set for session-start (defaults to `"manager"`). Inheritable (child replaces when present). |
 | `markdownBody` | string | No | Template body for custom instructions (see §6.3.1). Inheritable — the final body is the **concatenation of every non-empty body in the inheritance chain, root-first, joined by blank lines**. Root-first means the oldest ancestor's body appears first and the leaf (child) appears last. Example: `C inherits B inherits A` yields `A_body\n\nB_body\n\nC_body`. Empty bodies in the chain are skipped so a missing-body ancestor doesn't leave stray blank lines. |
@@ -395,9 +397,13 @@ permissions:
   deny:
     - Write
     - Edit
-allowedPaths:
-  - ~/Developer/shared-lib
-  - /tmp
+paths:
+  allowRead:
+    - ~/Developer/shared-lib      # read a sibling library
+  allowWrite:
+    - ../shared-output            # relative → anchored at the main repo root
+  deny:
+    - "**/.env"
 ---
 
 ## Research Agent Instructions
@@ -430,7 +436,7 @@ You are research agent `{{agentId}}`...
 
 ### 2.8 Startup Validation
 
-When `ib watch` launches, it validates all agent type files in `~/.itsybitsy/agent-types/` before starting the dashboard (after auto-population). If any file has YAML parsing errors, invalid field types (e.g., `canSpawnChildren` is not a boolean), invalid `instructionStyle` values, invalid `allowedPaths` entries (must be a list of strings), a non-string `inherits:` value, `inherits:` on a layer file (`spawnable: false`), a malformed `repos:` value (must be a list of strings; empty lists and bare strings are rejected), a **circular inheritance chain** (`A → B → A`), or a **missing parent** in an inheritance chain, the dashboard exits immediately with error messages describing each issue. This prevents runtime failures from malformed type definitions — inheritance-chain errors in particular surface at startup rather than at spawn time.
+When `ib watch` launches, it validates all agent type files in `~/.itsybitsy/agent-types/` before starting the dashboard (after auto-population). If any file has YAML parsing errors, invalid field types (e.g., `canSpawnChildren` is not a boolean), invalid `instructionStyle` values, a **retired `allowedPaths:` key** (now itself an error — it was replaced by the top-level `paths:` block; see §2.2 and SPEC-PATH-ALLOWLIST.md §6.11), an invalid `paths:` block (each of `allowRead`/`allowWrite`/`deny` must be a list of grammar-valid entries — absolute, `~`, repo-anchored relative, or glob; bare names are rejected), a non-string `inherits:` value, `inherits:` on a layer file (`spawnable: false`), a malformed `repos:` value (must be a list of strings; empty lists and bare strings are rejected), a **circular inheritance chain** (`A → B → A`), or a **missing parent** in an inheritance chain, the dashboard exits immediately with error messages describing each issue. This prevents runtime failures from malformed type definitions — inheritance-chain errors in particular surface at startup rather than at spawn time.
 
 ### 2.9 Backward Compatibility
 
@@ -647,7 +653,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
   "state": "running",             // written by stop hook, ib send, ib resume (see §1.3.1)
   "state_updated_at": 1704825030, // epoch seconds when state was last written
   "coordinator": true,            // only present for per-repo coordinators (§12.2.2)
-  "allowedPaths": ["/Users/adam/Developer/shared-lib", "/tmp"]  // optional, from agent type (§6.1)
+  "paths": { "allowRead": [], "allowWrite": [], "deny": [] }  // resolved + repo-anchored from agent type (§6.1); missing = strict
 }
 ```
 
@@ -672,7 +678,8 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 | `state` | string \| undefined | Deterministic agent state written by the stop hook, `ib send`, or `ib resume`. Values: `"running"`, `"waiting"`, `"complete"`. Absent on legacy agents or before the first stop hook fires (treated as `"running"` if agent is older than 6s). See §1.3.1. |
 | `state_updated_at` | number \| undefined | Unix epoch seconds when `state` was last written. Used for debugging. |
 | `coordinator` | boolean \| undefined | `true` for per-repo coordinators (§12.2.2). Absent for regular agents. |
-| `allowedPaths` | string[] \| undefined | Resolved absolute paths the agent can access beyond its worktree (from agent type `allowedPaths` frontmatter, expanded at creation time). `undefined` = legacy permissive, `[]` = strict mode. See §6.1. |
+| `paths` | object \| undefined | Resolved, repo-anchored filesystem policy (`allowRead` / `allowWrite` / `deny`) from the agent type's `paths:` frontmatter, canonicalized to absolute paths at creation and frozen here. A **missing** key equals empty lists equals **strict** (worktree + runtime roots only). Replaced the retired `allowedPaths`. See §6.1. |
+| `sandbox` | object \| undefined | Resolved kernel-sandbox policy (`enabled`, `rawAllow`, `domains`) from the union of the `sandbox:` frontmatter, frozen at spawn for resume parity. For claude and the Codex-backed codex/fugu CLIs, `enabled` gates the `sandbox-exec` wrapper on macOS; for agy, whose wrapper is unavailable, `enabled: true` fails closed before launch rather than running unwrapped. The hook enforces `paths` regardless. Ships `enabled: false`. See SPEC-SANDBOX.md and SPEC-PATH-ALLOWLIST.md §6.12. |
 
 ### 5.3 Worktree ↔ Branch Relationship
 
@@ -730,37 +737,36 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 **Matcher**: `*` (all tools)
 **Hook type**: PreToolUse (runs before tool execution, can allow/deny)
 
-**Decision logic** (checked in order):
+**Decision logic** (checked in order). Steps 1–5 gate and resolve the candidate path; steps 6, 10, and 11 are **structural** and run BEFORE the shared resolver so the hook stays stricter than the kernel inside the agent dir and the main repo; the resolver then folds in the former always-allowed steps 7–9 and the allow/deny decision. This replaces the retired `allowedPaths` field with the single deny-by-default model of SPEC-PATH-ALLOWLIST.md §6.11.
 
 1. **Allow list check**: Tool must match at least one pattern from `settings.local.json` `permissions.allow`. Patterns are either exact tool names (`"Read"`) or bash prefix patterns (`"Bash(git status:*)"` — matches Bash tool where command starts with `git status`).
-2. **Bash cd commands**: If the tool is Bash and the command starts with `cd`, the target path is checked against the allowed paths.
-3. **Bash command scanning** [^ts-only-bash-scan]: Non-cd bash commands are scanned for path references to:
-   - Other agents' directories (`.ittybitty/agents/<other-id>/`)
-   - The main repo root (when it differs from the worktree)
-   Only paths at word boundaries (preceded by space, quote, `=`, or start of string) are checked.
+2. **Bash cd commands**: If the tool is Bash and the command starts with `cd`, the target path is resolved and checked like any other path (as a `read` op). A **bare `cd`** (no argument, or an empty target) resolves to the **home directory** and is checked like any path — home is not a runtime root, so a strict agent is denied.
+3. **Bash command scanning** [^ts-only-bash-scan]: Non-cd Bash commands first receive the structural checks for protected-file writes, sibling-agent/main-repo references, relative traversal, and forbidden git directory flags. The advisory scanner then classifies recognizable literal path arguments, including `~`/`$HOME` forms and common write destinations (redirects, `sed -i`, `tee`, `cp`/`mv`, and write verbs), and checks each read or write against the shared access table. Heredoc bodies are treated as data.
 
-[^ts-only-bash-scan]: **TS-only behavior.** The bash `ib` immediately allows all non-cd Bash commands after the allow-list check — it does not scan command strings for path references. The TS implementation added `checkBashCommandPaths()` as an extra safeguard that catches commands like `cat /repo/.ittybitty/agents/other-agent/...`.
-4. **File path extraction** [^ts-only-notebook-path]: For non-Bash tools, `file_path`, `path`, or `notebook_path` from `tool_input` is checked.
+[^ts-only-bash-scan]: **TS-only behavior and accepted limitation.** The bash `ib` immediately allows all non-cd Bash commands after the tool allow-list check. The TS `checkBashCommandPaths()` adds useful early enforcement and Denials-tab visibility for recognizable literal paths, but it is not a complete shell parser: dynamic expansion, subprocesses, and unrecognized command shapes can evade classification. The kernel sandbox is authoritative when available and enabled. In hook-only mode this residual is accepted; the scanner must not be described as complete process confinement.
+4. **File path extraction** [^ts-only-notebook-path]: For non-Bash tools, `file_path`, `path`, or `notebook_path` from `tool_input` is extracted, resolved to an absolute path (relative to cwd, then `realpathSync` for symlinks), and checked.
 
 [^ts-only-notebook-path]: **TS-only behavior.** The bash `ib` only extracts `file_path` and `path` from `tool_input`. The TS implementation additionally checks `notebook_path` to cover Jupyter notebook tools.
 
-**Always allowed paths** (steps 6–8):
-- Agent's own worktree (`<agent-dir>/repo/...`)
-- Agent's own `agent.log`
-- Agent's own Claude project directory (`~/.claude/projects/<encoded-worktree-path>/**`) — where Claude Code spills oversized tool responses and stores transcripts. Encoded via replacing `/` and `.` with `-` (see `src/auto-compact.ts::encodeClaudeProjectPath`).
+5. **Normalize**: resolve `.`/`..` via `path.resolve`, then `realpathSync` when the path exists (else keep the resolved form).
 
-**Always denied paths** (steps 9–10, checked before allowedPaths):
-- Other agents' directories
-- Main repo root (outside the agent's worktree)
+**Structural steps** (run before the resolver; the hook is deliberately stricter than the kernel here):
 
-**allowedPaths-based access control** (step 11): If the agent's `meta.json` contains an `allowedPaths` field (set from the agent type's frontmatter at creation time — see §2.2), it controls access to all other paths:
-- `allowedPaths` **absent** (`undefined`): Legacy permissive mode — all paths outside the always-denied set are allowed (home directory, `/tmp`, system paths, other repos).
-- `allowedPaths: []` (empty array): Strict mode — only the always-allowed paths above are permitted. No system paths, no other repos.
-- `allowedPaths` with entries: Only paths under the listed directories are allowed (in addition to the always-allowed paths). Matching is by exact path or directory prefix (`filePath === allowed || filePath.startsWith(allowed + "/")`).
+6. **Protected-write block** (mutation tools only — reads are allowed): a write to `<worktree>/.claude/settings*.json` (permission self-escalation), the agy boundary files (`.agents/hooks.json` and the rule file, whose rewrite disables the hook gate on the next resume), the agent's own `<agent-dir>/meta.json` (the hook reads its path lists from it — a self-widening path in hook-only mode), or — for the `@system` coordinator, whose worktree root is its whole `~/.itsybitsy` home — its `agent-types/` dir, `config.json`, `repos.json`, `layout.json`, and `sealed/` dir. All are self-widening; agents may read them but must use `ib` to change configuration. Protected paths are canonicalized (symlink-resolving) so a symlinked parent cannot defeat the guard.
+10. **Other agents' / own non-worktree files**: deny anything under `.ittybitty/agents/` that is not the agent's own worktree or its own `agent.log` (so `meta.json`, `prompt.txt`, the outbox, and sibling agents stay denied to file tools, stricter than the kernel's `AGENTDIR` write root).
+11. **Main repo (outside worktree)**: deny the main checkout — including its `.git` (a kernel write root) — for worktree agents. The worktree and the agents dir are excluded (handled above / by the resolver).
 
-The distinction between `undefined` (absent) and `[]` (empty) is critical for backward compatibility: existing agents without `allowedPaths` in meta.json retain the current permissive behavior.
+**Shared resolver** (steps 7–9 and 12–13 folded in): the resolved path is decided by `resolvePreparedAccess()` (`src/sandbox.ts`) against the per-agent **access table** built by `src/hooks/paths-table.ts` — normalized `meta.paths` unioned with CLI-appropriate runtime roots. Supported kernel profiles are generated from the corresponding table, so hook and kernel agree. A Write/Edit/MultiEdit/NotebookEdit (and codex `apply_patch`) resolves as a `write` op; Read/Grep/Glob/LS/`cd` as `read`.
 
-**Logging**: Denials are logged to the agent's `agent.log` with format: `[PreToolUse] Permission denied: <tool-name> (<params>)`
+**Runtime roots** (injected by code — never in a `.md`): every CLI receives the worktree (read+write), agent dir / `agent.log`, git common dir (read+write), repo agents dir (`REPOAGENTS` — **write** for a spawner, **read** for a non-spawner, keyed on resolved `canSpawnChildren`), and the parent repo's `.claude` (`PARENTCLAUDE`, write, spawners only). Claude — including legacy metadata with an absent model, a safe bare model such as `sonnet`/`opus`, or the `unknown` value produced by `readAgentMeta` — additionally receives its project directory (`~/.claude/projects/<encoded-worktree>`) and scratchpad (`/private/tmp/claude-<uid>/<encoded-worktree>`); those Claude-only roots are omitted from codex, fugu, and agy hook tables, just as they are from those CLIs' kernel parameter sets. For a **non-spawner**, the **tmux socket dir is a deny root** (reaching the tmux server is a sandbox escape); a spawner keeps it (accepted, SPEC-SANDBOX §4C.3).
+
+**Resolution rules**: `paths.deny` **wins** over any allow at any depth; otherwise the **most specific** (longest canonical) matching entry decides — `allowWrite` grants read+write, `allowRead` grants read-only, and the same path in both lists **writes**. **No match denies.** A missing `paths` key defaults all three lists to empty. In a partially populated object, only omitted member lists default empty; every populated `allowRead`, `allowWrite`, or `deny` entry is retained and enforced. Neither case implies a wildcard.
+
+**Operator display and generated instructions** use the same normalization. `ib info` and the dashboard render partial/missing lists safely instead of widening or crashing. They report the resolved kernel state per CLI: enabled/disabled for claude, codex, and fugu, and unavailable for agy. Codex/fugu spawn, resume, and `ib sandbox refresh` regenerate `AGENTS.md` from the current frozen metadata so it cannot retain stale path or sandbox wording after refresh.
+
+**Fail closed**: malformed hook stdin, a non-string `tool_name`, and a **missing or unreadable `meta.json`** all **deny** (Phase B removed the historical allow-on-error fallbacks). The `@system` coordinator has no `meta.json`; its lists come from `_all.md ∪ system.md`, resolved **live** at hook time (the agent-types dir is read-only in the floor), and a layer that fails to load yields empty lists — strict, never permissive.
+
+**Logging**: Denials are appended to the agent's `agent.log` keeping the exact prefix `[PreToolUse] Permission denied: <tool> (<params>)` that the **Denials tab** of `ib watch` parses (`src/agents.ts::parseDenials`), plus ` — <reason>` naming the **operation**, the **resolved path**, and the **rule** (a `paths.deny` hit versus no matching allow entry). Kernel `sandbox-exec` denials never reach the agent log, so the advisory Bash scanner is what surfaces an honest `cat ~/.ssh/id_rsa` in the tab before the kernel refuses it.
 
 **State write side effect**: PreToolUse fires before every tool call, so the path-check handler also writes `state: "running"` to the agent's `meta.json` (via `writeAgentState()`). This flips state out of `waiting` when Claude resumes after a background-tool completion. PreToolUse is used (rather than PostToolUse) because it cannot race with Stop — Stop fires after the final tool call has completed, so a late PostToolUse could overwrite a legitimate `complete`/`stopped` state. Skipped for `@system` (no `meta.json`).
 
@@ -839,7 +845,7 @@ Instructions are generated based on the agent's type definition:
 | `{{worktreePath}}` | Full path to agent's worktree |
 | `{{rootRepoPath}}` | Full path to the root repo |
 | `{{repoName}}` | Repository basename |
-| `{{pathIsolation}}` | Rendered Path Isolation section (from `buildPathIsolationSection()`, includes allowedPaths if defined) |
+| `{{pathIsolation}}` | Rendered Path Isolation section (from `buildPathIsolationSection()`: the runtime roots, the resolved `paths.allowWrite`/`allowRead`/`deny` lists, and whether the kernel sandbox is enabled) |
 
 | Condition | True when |
 |-----------|-----------|
@@ -3113,11 +3119,11 @@ The design source-of-truth for codex CLI support is **`SPEC-CODEX-MODEL.md`** in
 
 ## 19. Antigravity CLI (`agy`) as Alternative Agent Model
 
-This section summarizes the design landed in Phases 1–3 of **`SPEC-ANTIGRAVITY-CLI.md`** (the design source-of-truth; all facts pinned to `agy` 1.1.23 on macOS with Google OAuth sign-in). Evidence lives in `ANTIGRAVITY-CLI-NOTES.md` §17. Everything below is implemented and merged on `agent/antigravity` unless flagged otherwise.
+This section summarizes the design landed in Phases 1–3 of **`SPEC-ANTIGRAVITY-CLI.md`** (the design source-of-truth; all facts pinned to `agy` 1.1.23 on macOS with Google OAuth sign-in), plus the later shared `paths:` integration. Evidence lives in `ANTIGRAVITY-CLI-NOTES.md` §17. Everything below is implemented on the integration branch unless flagged otherwise.
 
 ### 19.1 Goal
 
-itsybitsy can launch an agent under Google's Antigravity CLI (`agy`) in addition to `claude` and `codex`. Selection is per-agent via the same **`<cli>:<model>`** model string — e.g. `agy:gemini-3.7-flash-low`, `agy:claude-sonnet-4-6`. The slug is the first column of `agy models`, passed verbatim to `--model`. `agy` agents launch the **interactive `agy` TUI inside tmux**, exactly like `claude`/`codex`. Permissions are enforced by a **generated PreToolUse hook** (deny-by-default) so the agent never shows an approval card; role instructions are delivered through an **always-on rule file** in the worktree. Auth is the user's job (one browser sign-in; credentials in the keyring). Non-goals (v1): no headless `-p` loop, no terminal sandbox, no `agy` custom agents (`--agent`), no coordinators under `agy`, no new dashboard panes.
+itsybitsy can launch an agent under Google's Antigravity CLI (`agy`) in addition to `claude` and `codex`. Selection is per-agent via the same **`<cli>:<model>`** model string — e.g. `agy:gemini-3.7-flash-low`, `agy:claude-sonnet-4-6`. The slug is the first column of `agy models`, passed verbatim to `--model`. `agy` agents launch the **interactive `agy` TUI inside tmux**, exactly like `claude`/`codex`. Permissions and the shared deny-by-default `paths:` policy are enforced by a generated PreToolUse hook; role instructions are delivered through an always-on rule file in the worktree. Agy has no kernel wrapper: `sandbox.enabled: true` is unsupported and fails closed before the interactive agent launch rather than running it unwrapped; the diagnostic `agy --version` probe may already have run. Auth is the user's job (one browser sign-in; credentials in the keyring). Non-goals (v1): no headless `-p` loop, no `agy` custom agents (`--agent`), no coordinators under `agy`, no new dashboard panes.
 
 ### 19.2 Authoritative Decisions
 
@@ -3127,7 +3133,7 @@ Verbatim summary of `SPEC-ANTIGRAVITY-CLI.md` §2:
 |---|---|
 | D1 | Selector is `agy:<slug>`; the slug is passed verbatim to `--model`. `--effort <low\|medium\|high>` is passed only when the slug does NOT already end in `-low`/`-medium`/`-high` (Gemini slugs encode effort). `xhigh`/`max` map to `high` (`mapEffortForAgy`). The reserved slug `agy:default` launches agy with no `--model`/`--effort`, so agy uses its own configured default model. |
 | D2 | Launch = `agy --dangerously-skip-permissions --mode=accept-edits --model <slug> [--effort <e>] --log-file <agentDir>/agy.log -i "<prompt>"`. Resume = same flags with `--conversation <uuid>` and no `-i` (resume does not carry `--model`, so it is re-passed). |
-| D3 | **The PreToolUse hook is the only boundary.** Registered in `<worktree>/.agents/hooks.json` under the named hook `ittybitty` for `PreToolUse` (matcher `*`), `PreInvocation`, and `Stop`; each `command` = `<abs ib> hooks agy-<event> <agentId>`, timeout 30. |
+| D3 | With sandbox disabled, **the PreToolUse hook is the only filesystem boundary**. It resolves `meta.paths` plus agy runtime roots through the shared deny-by-default table. Agy has no kernel wrapper, so an enabled sandbox policy is rejected before launch. Hooks are registered in `<worktree>/.agents/hooks.json` under the named hook `ittybitty` for `PreToolUse` (matcher `*`), `PreInvocation`, and `Stop`; each `command` = `<abs ib> hooks agy-<event> <agentId>`, timeout 30. |
 | D4 | The hook contract is **FAIL-CLOSED**: crash, non-JSON, `{}`, and timeout all DENY (the opposite of codex). The dispatcher still wraps everything in try/catch, emits an explicit logged deny, and exits 0. |
 | D5 | **Pre-trust the worktree before launch** — add `realpath(worktree)` to `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json` (read-modify-write, lock-guarded) BEFORE tmux starts, remove at teardown. Without it, `-i` submits the first turn ~2s after launch, before the trust card is answered, with no hooks/rules loaded. The watchdog trust-card accept is a FALLBACK only. |
 | D6 | Instructions go in `<worktree>/.agents/rules/ittybitty-agent.md` with frontmatter `trigger: always_on`; body = session-start template (wrapper stripped) + inlined project `CLAUDE.md` + inlined user `~/.claude/CLAUDE.md` + the skills catalogue. Never `--agent`, never overwrite `AGENTS.md`. |
@@ -3156,11 +3162,16 @@ Both are appended to `<worktree>/.gitignore` (`appendGitignoreEntries`), and the
 | **PreInvocation** | `ib hooks agy-pre-invocation <id>` | `src/hooks/agy-pre-invocation.ts` | `writeAgentState("running")`, capture `agy_conversation_id`, touch `<agentDir>/agy-hook-heartbeat` (the liveness marker). |
 | **Stop** | `ib hooks agy-stop <id>` | `src/hooks/agy-stop.ts` | Write `waiting`/`complete` from the transcript tail; return the `continue` nudge on uncommitted work (D9). |
 
-Tool translation (`src/hooks/agy-tools.ts`) maps `run_command`→`Bash`, `view_file`→`Read`, `list_dir`→`LS`, `find_by_name`→`Glob`, `grep_search`→`Grep`, `write_to_file`→`Write`, `replace_file_content`→`Edit`, `multi_replace_file_content`→`MultiEdit`, `read_url_content`→`WebFetch`, `search_web`→`WebSearch`, `manage_task`→`TodoWrite`; the three sub-agent tools always deny (D8); unknown tools deny unless allow-listed by raw name; a file tool with a missing path arg denies. All three handlers run through `src/hooks/agy-dispatcher.ts`, which — because agy's contract is fail-closed — emits an explicit deny (PreToolUse) or `{}` (PreInvocation/Stop) on any error and always exits 0 in production; `--dry-run` is the only path that may exit non-zero (the spawn precheck).
+Tool translation (`src/hooks/agy-tools.ts`) maps `run_command`→`Bash`, `view_file`→`Read`, `list_dir`→`LS`, `find_by_name`→`Glob`, `grep_search`→`Grep`, `write_to_file`→`Write`, `replace_file_content`→`Edit`, `multi_replace_file_content`→`MultiEdit`, `read_url_content`→`WebFetch`, `search_web`→`WebSearch`, `manage_task`→`TodoWrite`; the three sub-agent tools always deny (D8); unknown tools deny unless allow-listed by raw name; a file tool with a missing path arg denies. File tools and recognizable literal `run_command` paths are checked against normalized `meta.paths` plus agy runtime roots; Claude's project/scratchpad roots are excluded. The Bash scanner is advisory and is not full shell confinement. All three handlers run through `src/hooks/agy-dispatcher.ts`, which — because agy's contract is fail-closed — emits an explicit deny (PreToolUse) or `{}` (PreInvocation/Stop) on any error and always exits 0 in production; `--dry-run` is the only path that may exit non-zero (the spawn precheck).
 
 ### 19.5 Spawn, Resume, Teardown
 
-`newAgent()` / `resumeAgent()` in `src/ib-commands.ts` branch on `parseModel(model).cli === "agy"`: skip `.claude/settings.local.json`; refuse a tracked boundary file (D7); write the two worktree files + gitignore; `ensureAgyTrustedWorkspace(realpath(worktree))` BEFORE tmux (D5); run the dispatcher `--dry-run` precheck for all three events; generate `start.sh`/`resume.sh`. Resume requires `meta.agy_conversation_id` (captured by the first PreInvocation), regenerates the worktree files, re-trusts, re-prechecks, and re-passes `--model` + effort (agy resume remembers neither). Teardown (`archiveAgent`/nuke/retire) calls `untrustAgyWorkspaceForTeardown` best-effort. `--coordinator` with `agy:` is rejected (D11-style stub).
+`newAgent()` / `resumeAgent()` in `src/ib-commands.ts` branch on `parseModel(model).cli === "agy"`: reject a resolved `sandbox.enabled: true` policy as unavailable before starting the interactive agent (the earlier diagnostic `agy --version` probe may already have run); otherwise skip `.claude/settings.local.json`; refuse a tracked boundary file (D7); write the two worktree files + gitignore; `ensureAgyTrustedWorkspace(realpath(worktree))` BEFORE tmux (D5); run the dispatcher `--dry-run` precheck for all three events; generate `start.sh`/`resume.sh`. Resume requires `meta.agy_conversation_id` (captured by the first PreInvocation), regenerates the worktree files, re-trusts, re-prechecks, and re-passes `--model` + effort (agy resume remembers neither). Teardown (`archiveAgent`/nuke/retire) calls `untrustAgyWorkspaceForTeardown` best-effort. `--coordinator` with `agy:` is rejected (D11-style stub).
+
+`ib sandbox refresh` rejects agy only when the newly resolved policy has
+`sandbox.enabled: true`, and does so before metadata mutation. With the sandbox
+disabled, agy refresh succeeds, updates the frozen paths/rules, and follows the
+ordinary resume path.
 
 At spawn, `agy --version` is stamped into `meta.agy_version` (best effort). The probe (`src/agy-version.ts`, `probeAgyVersion`) runs with **stdin explicitly `"ignore"` and a hard 5s timeout** — agy 1.1.23 blocks forever on an inherited unclosed stdin, so without this the spawn hung at a blank pane. On timeout the child is killed and the field is stamped `""`. The three `agy-* --dry-run` prechecks share the same discipline (stdin `"ignore"` + a 15s timeout in `DispatcherDryRunContext.run`).
 
@@ -3189,7 +3200,7 @@ From `SPEC-ANTIGRAVITY-CLI.md` §6 (see there for the full list):
 | 2 | **Trust-file races.** agy rewrites `settings.json` on every trust accept/change; the lock protects itsybitsy from itsybitsy only. Mitigation: the watchdog fallback (D10) + re-trust on resume. |
 | 3 | **Hooks silently absent under API-key auth** (issue #893). The heartbeat check (§19.6) surfaces it; v1 only warns. |
 | 8 | **codex handler omits `checkIbCommandAccess` (parity gap).** The agy PreToolUse handler added the manager-only-`ib`-subcommand relationship check; the codex handler still lacks it (a codex agent with `Bash(ib:*)` can run `ib retire/merge/…` against agents it does not manage). Tracked as a codex-side follow-up. |
-| 9 | **`run_command` reads outside the worktree are allowed.** A single `cat ~/.ssh/id_rsa` / `cat /etc/passwd` (absolute path, no sibling/main-repo traversal) passes the shared bash gate — the same default claude workers run under. agy has no sandbox, so this is an inherited default, not an agy-specific hole; needs a conscious allowlist decision before treating any read as sensitive. |
+| 9 | **Hook-only shell scanning is incomplete (accepted).** The Phase B scanner denies recognizable literal paths outside the shared `paths:` table, so direct `cat ~/.ssh/id_rsa` is no longer the current example of an allowed read. Dynamic expansion, subprocesses, and unrecognized command shapes can evade a string scanner. Agy has no kernel wrapper, so this residual remains while its sandbox is disabled; enabling it fails closed as unsupported. |
 | 10 | **macOS Gatekeeper can stall every `agy` exec** in the dynamic loader when the quarantined Homebrew binary's notarization check cannot reach Apple (observed 2026-09-02: `syspolicyd` "Security policy would not allow process" + a 30s QUIC lookup with 0 bytes). The spawn then sits at a blank pane with no agy log; the remedy is on the user side (approve or de-quarantine the binary). |
 
 ### 19.10 Reference: SPEC-ANTIGRAVITY-CLI.md

@@ -103,7 +103,7 @@ describe("InfoPanelComponent", () => {
     expect(text).toContain("build a widget");
   });
 
-  test("renders the sandbox lock only when sandboxing is enabled", () => {
+  test("renders the sandbox state explicitly, including disabled and legacy agents", () => {
     const renderAgent = (enabled: boolean | undefined): string => {
       const panel = new InfoPanelComponent();
       panel.displayHeight = 10;
@@ -119,9 +119,65 @@ describe("InfoPanelComponent", () => {
       return panel.render(60).map(stripAnsi).join("\n");
     };
 
-    expect(renderAgent(true)).toContain("🔒 Sandboxed");
-    expect(renderAgent(false)).not.toContain("🔒");
-    expect(renderAgent(undefined)).not.toContain("🔒");
+    expect(renderAgent(true)).toContain("Sandbox: enabled");
+    expect(renderAgent(false)).toContain("Sandbox: disabled");
+    expect(renderAgent(undefined)).toContain("Sandbox: disabled");
+  });
+
+  test.each([{}, { allowRead: ["/read"] }, { allowWrite: ["/write"] }, { deny: ["/secret"] }])(
+    "renders partial metadata safely: %j", (paths) => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 12;
+      const agent = makeAgent({ id: "agent-partial" });
+      agent.meta.paths = paths as any;
+      panel.agent = agent;
+      const text = panel.render(80).map(stripAnsi).join("\n");
+      expect(text).toContain("Paths");
+      if ("allowRead" in paths) expect(text).toContain("Paths ro: /read");
+      if ("allowWrite" in paths) expect(text).toContain("Paths rw: /write");
+      if ("deny" in paths) expect(text).toContain("Paths deny: /secret");
+    },
+  );
+
+  test("agy sandbox configuration is displayed as unavailable", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 12;
+    const agent = makeAgent({ id: "agent-agy" });
+    agent.meta.model = "agy:default";
+    agent.meta.sandbox = { enabled: true, rawAllow: [], domains: [] };
+    panel.agent = agent;
+    expect(panel.render(80).map(stripAnsi).join("\n")).toContain("Sandbox: unavailable (agy)");
+  });
+
+  test("renders the resolved path lists compactly, one line per non-empty list", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 12;
+    const agent = makeAgent({ id: "agent-paths" });
+    agent.meta.paths = {
+      allowWrite: ["/shared/lib"],
+      allowRead: ["/var/log"],
+      deny: ["**/.env"],
+    };
+    panel.agent = agent;
+    const text = panel.render(80).map(stripAnsi).join("\n");
+    expect(text).toContain("Paths rw: /shared/lib");
+    expect(text).toContain("Paths ro: /var/log");
+    expect(text).toContain("Paths deny: **/.env");
+  });
+
+  test("renders the runtime-roots-only meaning for empty and absent paths", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 10;
+    // Empty lists and a missing legacy block have the same strict meaning.
+    const emptyAgent = makeAgent({ id: "agent-paths-empty" });
+    emptyAgent.meta.paths = { allowRead: [], allowWrite: [], deny: [] };
+    panel.agent = emptyAgent;
+    expect(panel.render(80).map(stripAnsi).join("\n")).toContain("Paths: runtime roots only");
+
+    const legacyAgent = makeAgent({ id: "agent-paths-legacy" });
+    delete legacyAgent.meta.paths;
+    panel.agent = legacyAgent;
+    expect(panel.render(80).map(stripAnsi).join("\n")).toContain("Paths: runtime roots only");
   });
 
   test("shows BOTH nickname and id when a nickname is set", () => {

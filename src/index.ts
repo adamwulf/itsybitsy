@@ -8,7 +8,9 @@ import { join } from "path";
 import { userHome } from "./home";
 import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from "./registry";
 import { resolveAgentIcon } from "./agents";
-import type { Agent, FlatEntry } from "./agents";
+import type { Agent, AgentMeta, FlatEntry } from "./agents";
+import { kernelSandboxStatus } from "./agent-cli";
+import { resolvePathsConfig } from "./sandbox";
 import { isValidAgentId, isValidShellPath, tmuxSessionTarget } from "./validation";
 import { SYSTEM_AGENT_ID } from "./hooks/shared";
 import { normalizeTeamName, getTeam } from "./teams";
@@ -71,6 +73,35 @@ export function matchAgentById(id: string, agents: Agent[]): Agent | null {
   const exactNick = agents.find((a) => a.meta.nickname === id);
   if (exactNick) return exactNick;
   return null;
+}
+
+/** Format the resolved filesystem policy shown by `ib info <id>`. */
+export function formatAgentPathPolicy(
+  meta: Pick<AgentMeta, "paths" | "sandbox"> & Partial<Pick<AgentMeta, "model">>,
+): string[] {
+  const lines = [
+    `Sandbox:      ${kernelSandboxStatus(meta)}`,
+  ];
+  if (!meta.paths) {
+    lines.push("Paths:        none (worktree and runtime roots only)");
+    return lines;
+  }
+
+  const renderPaths = (label: string, entries: string[]): void => {
+    lines.push(`  ${label}:`);
+    if (entries.length === 0) {
+      lines.push("    (none)");
+      return;
+    }
+    for (const entry of entries) lines.push(`    - ${entry}`);
+  };
+
+  lines.push("Paths:");
+  const paths = resolvePathsConfig(meta.paths);
+  renderPaths("read-only", paths.allowRead);
+  renderPaths("read+write", paths.allowWrite);
+  renderPaths("deny", paths.deny);
+  return lines;
 }
 
 /** Find an agent by exact ID (or nickname) across all registered repos. */
@@ -596,10 +627,13 @@ const COMMAND_HELP: Record<string, string> = {
     "  positionally or piped on stdin.\n" +
     "  --id <id>       Agent id (defaults to cwd-detected agent)",
   "init-types":
-    "Usage: ib init-types\n" +
+    "Usage: ib init-types [--check]\n" +
     "  Alias: init-agent-types\n" +
     "  Populate ~/.itsybitsy/agent-types/ with the built-in agent type files.\n" +
-    "  Existing files are not overwritten.",
+    "  Existing files are not overwritten.\n" +
+    "  --check         Do not write; compare each local layer file against the\n" +
+    "                  embedded default and print the paths:/sandbox: floor\n" +
+    "                  entries missing locally. Exits 1 when anything differs.",
   "list-types":
     "Usage: ib list-types\n" +
     "  Alias: list-agent-types\n" +
@@ -883,7 +917,7 @@ function printUsage(): void {
   console.log("  config list         List all config keys with values");
   console.log("  config get <key>    Get a config value");
   console.log("  config set <k> <v>  Set a config value");
-  console.log("  init-types          Populate ~/.itsybitsy/agent-types/ with built-in types");
+  console.log("  init-types [--check] Populate ~/.itsybitsy/agent-types/ with built-in types (--check: diff local vs embedded floor)");
   console.log("  list-types          List available agent types");
   console.log("  show-type <name>    Show full definition for a single agent type");
   console.log("  list-models, models  List known <cli>:<model> selectors");
@@ -1656,6 +1690,11 @@ export async function main() {
       console.log(`Tmux session: ${m.tmux_session || "none"}`);
       console.log(`Worktree:     ${m.worktree}`);
       console.log(`Archived:     ${agent.archived}`);
+      // Path policy (SPEC-PATH-ALLOWLIST §6.11): the resolved allow/deny lists
+      // and the kernel-sandbox switch, both frozen in meta.json at spawn. An
+      // absent `paths` block is a legacy meta written before the `paths:` split
+      // — deny-by-default at the hook (worktree and runtime roots only).
+      for (const line of formatAgentPathPolicy(m)) console.log(line);
       // Detail view: show the full prompt. Continuation lines are indented to
       // stay aligned under the label instead of being truncated (was slice(0, 200)).
       const promptIndent = " ".repeat("Prompt:       ".length);
@@ -2492,6 +2531,36 @@ export async function main() {
     }
     case "init-types":
     case "init-agent-types": {
+      if (args.includes("--check")) {
+        // Compare the live layer files against the embedded defaults and report
+        // the paths:/sandbox: floor entries missing locally. Writes nothing;
+        // exits non-zero when anything differs. A gate precondition
+        // (SPEC-PATH-ALLOWLIST.md section 8; docs/SANDBOX-ROLLOUT.md).
+        const { checkAgentTypeFloors } = await import("./agent-types");
+        try {
+          const { diffs, hasDifferences } = await checkAgentTypeFloors();
+          if (!hasDifferences) {
+            console.log("All local agent-type files match the embedded floor.");
+          } else {
+            console.log(
+              "Local agent-type files are compared LITERALLY against the embedded floor;",
+            );
+            console.log(
+              "a rewritten equivalent (e.g. an absolute form of a ~ entry) reads as missing.",
+            );
+            console.log("Fix: copy the embedded paths:/sandbox: block verbatim into the file below.");
+            console.log("");
+            for (const diff of diffs) {
+              console.log(`${diff.file}:`);
+              for (const line of diff.lines) console.log(line);
+            }
+          }
+          process.exit(hasDifferences ? 1 : 0);
+        } catch (err) {
+          console.error(`Error checking agent types: ${err instanceof Error ? err.message : String(err)}`);
+          process.exit(1);
+        }
+      }
       const { initAgentTypes } = await import("./agent-types");
       try {
         const created = await initAgentTypes();
@@ -2585,10 +2654,6 @@ export async function main() {
         console.log(`INSTRUCTION STYLE: ${type.instructionStyle}`);
         if (type.model) console.log(`MODEL: ${type.model}`);
         if (type.icon) console.log(`ICON: ${type.icon}`);
-        if (type.allowedPaths && type.allowedPaths.length > 0) {
-          console.log("ALLOWED PATHS:");
-          for (const p of type.allowedPaths) console.log(`  ${p}`);
-        }
         if (type.paths) {
           for (const [label, entries] of [
             ["PATHS ALLOW READ", type.paths.allowRead],

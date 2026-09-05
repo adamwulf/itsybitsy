@@ -7,6 +7,7 @@ import {
   collectAgents,
   findManagerInTree,
   matchAgentById,
+  formatAgentPathPolicy,
   resolveTarget,
   resolveMergeTargetDir,
   buildSystemCoordinatorAgent,
@@ -101,6 +102,54 @@ describe("collectAgents", () => {
     expect(result[0]).toEqual({ agent: root, depth: 0 });
     expect(result[1]).toEqual({ agent: child, depth: 1 });
     expect(result[2]).toEqual({ agent: grandchild, depth: 2 });
+  });
+});
+
+describe("formatAgentPathPolicy", () => {
+  test.each([{}, { allowRead: ["/read"] }, { allowWrite: ["/write"] }, { deny: ["/secret"] }])(
+    "omitted lists in partial path metadata default to empty: %j", (paths) => {
+      const lines = formatAgentPathPolicy({ paths } as any);
+      expect(lines).toContain("  read-only:");
+      expect(lines).toContain("  read+write:");
+      expect(lines).toContain("  deny:");
+      expect(lines).toContain("    (none)");
+    },
+  );
+
+  test("agy never reports an enabled kernel wrapper", () => {
+    expect(formatAgentPathPolicy({ model: "agy:default", sandbox: { enabled: true } } as any)[0])
+      .toBe("Sandbox:      unavailable (agy)");
+  });
+
+  test.each(["sonnet", "opus", "unknown"])("legacy %s metadata keeps Claude display behavior", (model) => {
+    expect(formatAgentPathPolicy({ model })[0]).toBe("Sandbox:      disabled");
+  });
+
+  test("prints sandbox state and all resolved lists in read/write/deny order", () => {
+    expect(formatAgentPathPolicy({
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+      paths: {
+        allowRead: ["/read"],
+        allowWrite: ["/write"],
+        deny: ["**/.env"],
+      },
+    })).toEqual([
+      "Sandbox:      enabled",
+      "Paths:",
+      "  read-only:",
+      "    - /read",
+      "  read+write:",
+      "    - /write",
+      "  deny:",
+      "    - **/.env",
+    ]);
+  });
+
+  test("prints disabled and strict runtime roots for legacy meta", () => {
+    expect(formatAgentPathPolicy({})).toEqual([
+      "Sandbox:      disabled",
+      "Paths:        none (worktree and runtime roots only)",
+    ]);
   });
 });
 

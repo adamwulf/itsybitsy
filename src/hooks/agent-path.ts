@@ -9,7 +9,6 @@
 import { join, resolve, dirname, basename } from "path";
 import { userHome } from "../home";
 import { realpath, stat } from "fs/promises";
-import { realpathSync } from "fs";
 import { logAgent } from "../agent-lifecycle";
 import { writeAgentState } from "../agents";
 import { isValidAgentId } from "../validation";
@@ -398,7 +397,7 @@ export const SETTINGS_WRITE_DENY_REASON =
  * from `ib` writing the file, because it sees the command; the kernel cannot.
  *
  * Each candidate write-target token is RESOLVED against cwd (join + resolve +
- * realpathSync-when-it-exists, the same way checkFilePath does) and compared with
+ * longest-existing-prefix canonicalization, as checkFilePath does) and compared with
  * the resolved protected files via `worktreeProtectedFileKind` and
  * `matchProtectedWrite`, rather than literal-matching the raw token. That closes
  * obfuscated spellings the old regex missed — `.agents/rules/../hooks.json`,
@@ -970,13 +969,9 @@ function checkFilePath(
     filePath = join(cwd, filePath);
   }
 
-  // 5. Normalize: resolve . and .. via path.resolve, then try realpathSync for symlinks
-  filePath = resolve(filePath);
-  try {
-    filePath = realpathSync(filePath);
-  } catch {
-    // Path doesn't exist yet — keep the resolve() result
-  }
+  // 5. Resolve symlink parents even when a file is being created. Structural
+  // checks and the access-table resolver must inspect the same canonical path.
+  filePath = canonicalizeSandboxPath(resolve(filePath));
 
   // The structural steps (6, 10, 11) run BEFORE the resolver so the hook stays
   // STRICTER than the kernel inside the agent dir and the main repo: the

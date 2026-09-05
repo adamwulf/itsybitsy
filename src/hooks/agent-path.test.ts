@@ -972,7 +972,7 @@ describe("checkPathAccess — advisory Bash path scanner", () => {
     expect(main.reason).not.toContain("paths.allowRead/allowWrite");
   });
 
-  test("canonical Bash aliases cannot enter main or sibling roots through an allow entry", async () => {
+  test("canonical Bash and file aliases cannot enter main or sibling roots through an allow entry", async () => {
     const rootRepo = canonicalizeSandboxPath(join(home, "main"));
     const agentsDir = join(rootRepo, ".ittybitty", "agents");
     const agentDir = join(agentsDir, "agent-abc123");
@@ -995,6 +995,11 @@ describe("checkPathAccess — advisory Bash path scanner", () => {
       expect(resolvePreparedAccess(access, alias.target, "write")).toBe("allow");
       for (const command of [`ls ${alias.path}`, `touch ${alias.path}/new.txt`]) {
         const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command }, cwd: worktreePath }), ctx);
+        expect(result.decision).toBe(alias.expected);
+        if (alias.expected === "deny") expect(result.reason).not.toContain("paths.allowRead/allowWrite");
+      }
+      for (const toolName of ["Write", "Edit", "Read"]) {
+        const result = checkPathAccess(makeInput({ toolName, toolInput: { file_path: `${alias.path}/new.txt` }, cwd: worktreePath }), ctx);
         expect(result.decision).toBe(alias.expected);
         if (alias.expected === "deny") expect(result.reason).not.toContain("paths.allowRead/allowWrite");
       }

@@ -103,6 +103,7 @@ import {
 import { timed } from "./perf";
 import { WATCHDOG_SENTINEL } from "./watchdog";
 import {
+  anchorRelativePaths,
   generateProfile,
   canonicalizePathsConfig,
   canonicalizeSandboxPath,
@@ -1063,6 +1064,50 @@ export function mergeSandboxLayerConfigs(
   };
 }
 
+/**
+ * After relative entries are anchored and canonicalized, check each
+ * allowRead/allowWrite entry for repo containment (SPEC-PATH-ALLOWLIST.md 6.2):
+ *  - an entry resolving to, or under, `<repoRoot>/.ittybitty/agents` is a hard
+ *    ERROR — the hook denies that subtree structurally, so it is a dead entry;
+ *  - an entry resolving inside `repoRoot` but not under the agents dir is a
+ *    WARNING — denied for worktree agents, meaningful for coordinators.
+ * `deny` entries are policy carve-outs, never dead and never repo-scoped, so
+ * they are not checked. Entries are already canonical absolute paths; a glob is
+ * tested by the literal directory prefix that precedes its first metacharacter.
+ */
+export function checkPathsRepoContainment(
+  paths: PathsConfig,
+  repoRoot: string,
+): { error?: string; warnings: string[] } {
+  const warnings: string[] = [];
+  const agentsDir = canonicalizeSandboxPath(join(repoRoot, ".ittybitty", "agents"));
+  const repoCanonical = canonicalizeSandboxPath(repoRoot);
+  const isAtOrUnder = (candidate: string, base: string): boolean =>
+    candidate === base || candidate.startsWith(base + "/");
+  const literalDir = (entry: string): string => {
+    const globIndex = entry.search(/[*?]/);
+    if (globIndex === -1) return entry;
+    const prefix = entry.slice(0, globIndex);
+    const slash = prefix.lastIndexOf("/");
+    return slash <= 0 ? "/" : prefix.slice(0, slash);
+  };
+  for (const entry of [...paths.allowRead, ...paths.allowWrite]) {
+    const dir = literalDir(entry);
+    if (isAtOrUnder(dir, agentsDir)) {
+      return {
+        error: `paths entry "${entry}" resolves to or under the agents directory (${agentsDir}); it is denied structurally and would be a dead entry`,
+        warnings,
+      };
+    }
+    if (isAtOrUnder(dir, repoCanonical)) {
+      warnings.push(
+        `paths entry "${entry}" resolves inside the main repo root (${repoCanonical}); it is denied for worktree agents but allowed for coordinators`,
+      );
+    }
+  }
+  return { warnings };
+}
+
 function sandboxDefinitionArgs(parameterValues: Record<string, string>): string[] {
   return Object.entries(parameterValues).flatMap(([key, value]) => ["-D", `${key}=${value}`]);
 }
@@ -1880,7 +1925,6 @@ export async function resumeAgent(
         worker: agent.meta.worker === true,
         agentType: agent.meta.agentType,
         spawned_by: agent.meta.spawned_by ?? undefined,
-        allowedPaths: (agent.meta as { allowedPaths?: unknown }).allowedPaths,
       }, agent.id);
       try {
         await writeAgyWorktreeFiles(workPath, agyResumeCtx, {
@@ -2512,13 +2556,28 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
 
   const merged = mergeSandboxLayerConfigs([allLayer, nonCoordLayer, typeDef]);
   const newSandbox = merged.sandbox;
+  // Anchor relative (./ ../) entries at this agent's main repo root, exactly as
+  // newAgent does at spawn — agent.repoPath is `<repo>` and agentDir is
+  // `<repo>/.ittybitty/agents/<id>` — so the refreshed meta.paths holds only
+  // absolute paths (SPEC-PATH-ALLOWLIST.md 6.2).
+  const refreshRepoRoot = (await resolveGitRoot(agent.repoPath)) || agent.repoPath;
   let newPaths: PathsConfig;
   try {
-    newPaths = canonicalizePathsConfig(merged.paths, userHome());
+    const anchoredPaths = anchorRelativePaths(merged.paths, refreshRepoRoot);
+    newPaths = canonicalizePathsConfig(anchoredPaths, userHome());
   } catch (err) {
     const msg = `sandbox refresh: paths policy for '${typeName}' is invalid: ${err instanceof Error ? err.message : String(err)}`;
     await logAgent(agentDir, `[sandbox refresh] ${msg}`);
     return { ok: false, exitCode: 1, stdout: "", stderr: msg };
+  }
+  const refreshContainment = checkPathsRepoContainment(newPaths, refreshRepoRoot);
+  if (refreshContainment.error) {
+    const msg = `sandbox refresh: ${refreshContainment.error}`;
+    await logAgent(agentDir, `[sandbox refresh] ${msg}`);
+    return { ok: false, exitCode: 1, stdout: "", stderr: msg };
+  }
+  for (const warning of refreshContainment.warnings) {
+    await logAgent(agentDir, `[sandbox refresh] warning: ${warning}`);
   }
 
   // Verify the CURRENT meta against the seal BEFORE re-sealing (SPEC-SANDBOX
@@ -5303,7 +5362,12 @@ export async function newAgent(
   const resolvedSandboxConfig = mergedSandboxLayers.sandbox;
   let resolvedPathsConfig: PathsConfig;
   try {
-    resolvedPathsConfig = canonicalizePathsConfig(mergedSandboxLayers.paths, userHome());
+    // Anchor relative (./ ../) entries at the main repo root the worktree is
+    // spawned from BEFORE canonicalizing, so meta.paths — and the profile and
+    // access table derived from it — holds only absolute paths; the generator
+    // and the kernel never see a relative entry (SPEC-PATH-ALLOWLIST.md 6.2).
+    const anchoredPaths = anchorRelativePaths(mergedSandboxLayers.paths, rootRepoPath);
+    resolvedPathsConfig = canonicalizePathsConfig(anchoredPaths, userHome());
   } catch (err) {
     return {
       ok: false,
@@ -5311,6 +5375,16 @@ export async function newAgent(
       stdout: "",
       stderr: `Error: ${err instanceof Error ? err.message : String(err)}`,
     };
+  }
+  // Reject a path that resolves under the agents dir (a dead entry the hook
+  // denies structurally); warn on one inside the repo root (denied for worktree
+  // agents, meaningful for coordinators).
+  const pathsContainment = checkPathsRepoContainment(resolvedPathsConfig, rootRepoPath);
+  if (pathsContainment.error) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${pathsContainment.error}` };
+  }
+  for (const warning of pathsContainment.warnings) {
+    logWarning(`Warning: ${warning}`);
   }
   // 7. Max agents check — coordinators bypass this (SPEC §12.4.3)
   if (!coordinatorMode) {
@@ -5464,30 +5538,6 @@ export async function newAgent(
     };
   }
 
-  // Resolve and normalize allowedPaths from agent type
-  let resolvedAllowedPaths: string[] | undefined = undefined;
-  if (agentTypeDef.allowedPaths !== undefined) {
-    resolvedAllowedPaths = agentTypeDef.allowedPaths.map(p => {
-      // Expand ~ to home directory
-      let expanded: string;
-      if (p === "~") {
-        expanded = userHome();
-      } else if (p.startsWith("~/")) {
-        expanded = join(userHome(), p.slice(2));
-      } else {
-        expanded = p;
-      }
-      // Resolve to absolute path
-      expanded = resolve(expanded);
-      // Try to resolve symlinks, fall back to resolve() result if path doesn't exist
-      try {
-        return realpathSync(expanded);
-      } catch {
-        return expanded;
-      }
-    });
-  }
-
   // Build the initial meta.json. Subsequent writes (start.sh setting claude_pid,
   // watchdog spawn setting watchdog_pid, generate-summary setting summary, the
   // post-worktree refresh below) all read-modify-write so they merge cleanly
@@ -5513,9 +5563,6 @@ export async function newAgent(
     state: "creating",
     state_updated_at: Math.floor(createdAt.getTime() / 1000),
   };
-  if (resolvedAllowedPaths !== undefined) {
-    initialMetaJson.allowedPaths = resolvedAllowedPaths;
-  }
   // agy agents stamp the captured `agy --version` string (empty on failure) so
   // a later bug report can be pinned to a release (SPEC §6 risk 1).
   if (agentCli === "agy") {
@@ -5694,7 +5741,6 @@ export async function newAgent(
         worker: isLeafAgent,
         agentType: typeName,
         spawned_by: spawnedBy ?? undefined,
-        allowedPaths: resolvedAllowedPaths,
       }, id);
       try {
         await writeCodexAgentsMd(workPath, sessionCtx);
@@ -5826,7 +5872,6 @@ export async function newAgent(
         worker: isLeafAgent,
         agentType: typeName,
         spawned_by: spawnedBy ?? undefined,
-        allowedPaths: resolvedAllowedPaths,
       }, id);
       try {
         const { hooksPath, rulesPath } = await writeAgyWorktreeFiles(workPath, agySessionCtx, {

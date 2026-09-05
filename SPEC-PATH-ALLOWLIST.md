@@ -1294,6 +1294,45 @@ ones and prints what is missing; the gate doc lists it as a precondition
 check. The kernel half of the invariant is pinned by tests on the sandbox
 branch at `d757031`, the new rebase target.
 
+**Adam's decisions before Phase B started (2026-09-05 12:04).** Install right
+away; **no audit-only mode**; `paths.audit` is dropped from the plan. Path
+denials must appear in the **Denials tab of `ib watch`** for an agent, so Adam
+can watch an agent trying to reach a path. That tab parses the agent log for
+lines beginning `[PreToolUse] Permission denied:`[^62], so hook path denials
+already land there; Phase B keeps that prefix and appends the operation, the
+resolved path, and the rule that denied it, so the row says what was tried
+and why. Kernel denials never reach the agent log[^56], so the advisory Bash
+scanner (§6.6) is **required**, not optional: it is the visibility layer for
+command-line paths, turning an honest `cat ~/.ssh/id_rsa` into a logged hook
+denial before the kernel refuses it. The Phase B install is the three-step
+sequence above, run at once.
+
+**Phase B execution (started 2026-09-05).** Three Claude workers, each
+followed by a two-reviewer cycle; codex workers are excluded because they
+cannot run `sandbox-exec`. Worker 1, spawn side: `src/agent-types.ts`,
+`newAgent` and `refreshAgentSandbox` in `src/ib-commands.ts`, the relative
+anchor helper in `src/sandbox.ts`, `src/index.ts`, `ib init-types --check`,
+SPEC §2.2 and §5.2. Worker 2, hook side, in parallel: a new
+`src/hooks/paths-table.ts` that builds the `PathAccessTable` from `meta.paths`
+plus the runtime roots (computed from the hook context, including the git
+common dir and the tmux socket dir, with the scratchpad and project dir
+appended as write roots), the three handlers rebuilt on
+`resolvePreparedAccess`, the six absent-means-allow paths removed, malformed
+input denied, `<agentDir>/meta.json` protected, the denial log line. Worker 3,
+after worker 2 lands: the advisory Bash scanner, session-start wording,
+`ib info` and dashboard display, SPEC §6.1, implementation notes, and the
+Phase B rows of the rollout document. Interface facts for the workers, read
+from the merged `main`: `sandboxPathAccessTable(paths, params)` builds the
+table from `SandboxProfileParams` (`AGENTDIR`, `WORKTREE`, `GITDIR`,
+`REPOAGENTS`, `PARENTCLAUDE`, `TMUXSOCK`, `canSpawnChildren`, `HOME`);
+`prepareAccessTable` and `resolvePreparedAccess` are the per-agent cached
+form; `validatePathsFrontmatter` compiles every entry with the absolute, `~`,
+and glob grammar and so rejects relative entries today; `metaCanSpawnChildren`
+lives in `src/agent-types.ts`; `resolveTmuxSocketDir` lives in
+`src/ib-commands.ts` and must move to a light module before a hook imports it;
+`AgentMeta` already types `paths` and `sandbox`; the profile parameter values
+are not stored in `meta.json`.
+
 **Parallel option during Phase A**, if Adam wants speed: `path-isolation`
 starts the pieces that touch none of `agent-types.ts`, `newAgent`, or
 `sandbox.ts`: the Bash-scanner tokenization in `agent-path.ts` against a
@@ -1384,3 +1423,4 @@ its wrapper after its own boot-floor bisection.
 [^59]: [SPEC-SANDBOX §4A.4: "SBPL = last matching rule decides"; precedence rule, deny wins over any allow at both layers; filesystem denies emitted last — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:SPEC-SANDBOX.md`](SPEC-SANDBOX.md:426-446)
 [^60]: [resume prepares the sandbox from `agent.meta.sandbox`, the frozen config, not from the type files — file lives on branch agent/sandbox-safety, read with `git show agent/sandbox-safety:src/ib-commands.ts`](src/ib-commands.ts:1531-1548)
 [^61]: [`ib init-types` writes only the missing embedded files; existing files keep their edits](src/agent-types.ts:initAgentTypes)
+[^62]: [the Denials tab parses agent.log lines `[YYYY-MM-DD HH:MM:SS] [PreToolUse] Permission denied:`](src/agents.ts:parseDenials)

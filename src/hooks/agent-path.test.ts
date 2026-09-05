@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import { setUserHome, resetUserHome } from "../home";
 import { parseDenials } from "../agents";
-import { prepareAccessTable, type PathsConfig, type PreparedAccessTable } from "../sandbox";
+import { canonicalizeSandboxPath, prepareAccessTable, resolvePreparedAccess, type PathsConfig, type PreparedAccessTable } from "../sandbox";
 import { agentPathAccessTable, claudeScratchpadDirFor } from "./paths-table";
 
 const UID = process.getuid?.() ?? 0;
@@ -970,6 +970,35 @@ describe("checkPathAccess — advisory Bash path scanner", () => {
     const main = run("cat /repo/src/index.ts");
     expect(main.reason).toContain("main repo");
     expect(main.reason).not.toContain("paths.allowRead/allowWrite");
+  });
+
+  test("canonical Bash aliases cannot enter main or sibling roots through an allow entry", async () => {
+    const rootRepo = canonicalizeSandboxPath(join(home, "main"));
+    const agentsDir = join(rootRepo, ".ittybitty", "agents");
+    const agentDir = join(agentsDir, "agent-abc123");
+    const worktreePath = join(agentDir, "repo");
+    const sibling = join(agentsDir, "agent-other", "repo");
+    await mkdir(worktreePath, { recursive: true });
+    await mkdir(sibling, { recursive: true });
+    const aliases = [
+      { path: join(home, "main-alias"), target: rootRepo, expected: "deny" },
+      { path: join(home, "sibling-alias"), target: sibling, expected: "deny" },
+      { path: join(home, "own-alias"), target: worktreePath, expected: "allow" },
+    ] as const;
+    for (const alias of aliases) await symlink(alias.target, alias.path);
+    const layout = { agentDir, worktreePath, agentsDir, rootRepo };
+    const access = buildAccessFor({ ...layout, paths: { allowWrite: aliases.map((alias) => alias.path) } });
+    const ctx = makeCtx({ ...layout, access });
+    for (const alias of aliases) {
+      // The table itself permits these authored grants. Structural checks must
+      // still reject main/sibling aliases for reads and nonexistent write leaves.
+      expect(resolvePreparedAccess(access, alias.target, "write")).toBe("allow");
+      for (const command of [`ls ${alias.path}`, `touch ${alias.path}/new.txt`]) {
+        const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command }, cwd: worktreePath }), ctx);
+        expect(result.decision).toBe(alias.expected);
+        if (alias.expected === "deny") expect(result.reason).not.toContain("paths.allowRead/allowWrite");
+      }
+    }
   });
 });
 

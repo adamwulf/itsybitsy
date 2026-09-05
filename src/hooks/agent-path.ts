@@ -780,8 +780,14 @@ function scanBashCommandPaths(
     }
     const abs = bashLiteralDirPrefix(expandBashPathPortion(portion, home));
     try {
-      if (resolvePreparedAccess(ctx.access, abs, op) === "deny") {
-        return { decision: "deny", reason: pathDenialReason(ctx.access, abs, op) };
+      // Literal needles cannot see a symlink alias into the main checkout or
+      // another agent. Apply the same structural boundary as file tools after
+      // resolving the candidate, before an authored allow can grant it.
+      const canonical = canonicalizeSandboxPath(abs);
+      const boundaryDenial = checkWorktreeBoundary(canonical, ctx);
+      if (boundaryDenial) return boundaryDenial;
+      if (resolvePreparedAccess(ctx.access, canonical, op) === "deny") {
+        return { decision: "deny", reason: pathDenialReason(ctx.access, canonical, op) };
       }
     } catch {
       // This scanner is the only path fence in hook-only mode. An unexpected
@@ -956,7 +962,7 @@ function checkFilePath(
   toolName: string,
   ctx: PathCheckContext
 ): HookDecision {
-  const { agentDir, worktreePath, agentsDir, rootRepo } = ctx;
+  const { worktreePath } = ctx;
 
   // 4. Resolve relative to absolute using cwd
   let filePath = rawPath;
@@ -994,6 +1000,29 @@ function checkFilePath(
     if (protectedReason) return { decision: "deny", reason: protectedReason };
   }
 
+  const boundaryDenial = checkWorktreeBoundary(filePath, ctx, toolName);
+  if (boundaryDenial) return boundaryDenial;
+
+  // Resolver: the worktree, own agent.log's dir, project dir, scratchpad and any
+  // configured paths.allow* are runtime/allow entries in the table; everything
+  // else is denied (empty lists => deny by default). Write tools resolve as a
+  // write op; reads (and cd) as a read op.
+  const op: PathOperation = WRITE_TOOLS.has(toolName) ? "write" : "read";
+  const decision = resolvePreparedAccess(ctx.access, filePath, op);
+  if (decision === "allow") {
+    return { decision: "allow", reason: `Tool in allow list, ${op} ${filePath} permitted by paths` };
+  }
+  return { decision: "deny", reason: pathDenialReason(ctx.access, filePath, op) };
+}
+
+/** Structural steps shared by file tools, cd, and canonical Bash candidates. */
+function checkWorktreeBoundary(
+  filePath: string,
+  ctx: PathCheckContext,
+  toolName = "Read",
+): HookDecision | null {
+  const { agentDir, worktreePath, agentsDir, rootRepo } = ctx;
+
   // 10. Block: other agents' directories, and the agent's OWN dir except its
   // worktree and its agent.log. The worktree (a runtime root) and the own log
   // are allowed via the resolver below; everything else under the agent dir —
@@ -1029,16 +1058,7 @@ function checkFilePath(
     return { decision: "deny", reason: "Access denied: work in your worktree, not the main repo" };
   }
 
-  // Resolver: the worktree, own agent.log's dir, project dir, scratchpad and any
-  // configured paths.allow* are runtime/allow entries in the table; everything
-  // else is denied (empty lists => deny by default). Write tools resolve as a
-  // write op; reads (and cd) as a read op.
-  const op: PathOperation = WRITE_TOOLS.has(toolName) ? "write" : "read";
-  const decision = resolvePreparedAccess(ctx.access, filePath, op);
-  if (decision === "allow") {
-    return { decision: "allow", reason: `Tool in allow list, ${op} ${filePath} permitted by paths` };
-  }
-  return { decision: "deny", reason: pathDenialReason(ctx.access, filePath, op) };
+  return null;
 }
 
 // ── ib command manager access check ─────────────────────────────────────────

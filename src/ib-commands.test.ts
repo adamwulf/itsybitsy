@@ -3178,11 +3178,19 @@ describe("resumeAgent (native)", () => {
       await mkdir(join(agentDir, "repo", ".agents"), { recursive: true });
       // Pre-write a TAMPERED hooks.json to prove resume overwrites it.
       await Bun.write(join(agentDir, "repo", ".agents", "hooks.json"), "TAMPERED");
+      const frozenPaths = {
+        allowRead: ["/frozen/agy/read"],
+        allowWrite: ["/frozen/agy/write"],
+        deny: ["**/agy-secret"],
+      };
+      const frozenSandbox = { enabled: false, rawAllow: [], domains: [] };
       await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
         id: "agent-agy-ok",
         tmux_session: "tmux-agent-agy-ok",
         model: "agy:gemini-3.7-flash-low",
         agy_conversation_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+        paths: frozenPaths,
+        sandbox: frozenSandbox,
       }));
       const agent = _makeAgent({
         id: "agent-agy-ok",
@@ -3193,6 +3201,8 @@ describe("resumeAgent (native)", () => {
           tmux_session: "tmux-agent-agy-ok",
           model: "agy:gemini-3.7-flash-low",
           agy_conversation_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+          paths: frozenPaths,
+          sandbox: frozenSandbox,
         } as any,
       });
       const result = await resumeAgent(agent);
@@ -3209,6 +3219,10 @@ describe("resumeAgent (native)", () => {
       expect(hooks.ittybitty.PreToolUse[0].hooks[0].command).toContain("hooks agy-pre-tool-use agent-agy-ok");
       const rule = await Bun.file(join(agentDir, "repo", ".agents", "rules", "ittybitty-agent.md")).text();
       expect(rule.startsWith("---\ntrigger: always_on")).toBe(true);
+      expect(rule).toContain("/frozen/agy/read");
+      expect(rule).toContain("/frozen/agy/write");
+      expect(rule).toContain("**/agy-secret");
+      expect(rule).toContain("The kernel sandbox is OFF");
 
       // tmux new-session ran with the resume script.
       const newSessionCall = spawnCalls.find(c => c[0] === "tmux" && c[1] === "new-session");
@@ -4550,6 +4564,7 @@ sandbox:
     const agentDir = join(agentsDir, "sandbox-codex");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
     const profile = await Bun.file(join(agentDir, "sandbox.sb")).text();
+    const agentsMd = await Bun.file(join(agentDir, "repo", "AGENTS.md")).text();
     expect(start).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
     expect(start).not.toContain("-s workspace-write");
     expect(start).toContain("setsid sandbox-exec -f");
@@ -4561,6 +4576,9 @@ sandbox:
     expect(start).not.toContain("-D 'SCRATCHPAD=");
     expect(profile).not.toContain('param "PROJECTDIR"');
     expect(profile).not.toContain('param "SCRATCHPAD"');
+    expect(agentsMd).toContain(canonicalizeSandboxPath(tempDir));
+    expect(agentsMd).toContain("**/.env");
+    expect(agentsMd).toContain("The kernel sandbox is ON");
     expect(dispatcherDryRunCalls.length).toBeGreaterThanOrEqual(3);
     expect(spawnCalls.some((call) => call[0] === "codex")).toBe(false);
   });
@@ -8251,11 +8269,27 @@ body`,
       expect(await Bun.file(settingsPath).exists()).toBe(false);
     });
 
-    test("writes .agents/hooks.json + the always-on rule file into the worktree", async () => {
+    test("writes .agents/hooks.json + the always-on rule file with resolved path policy", async () => {
+      const readPath = join(tempDir, "agy-read-root");
+      const writePath = join(tempDir, "agy-write-root");
+      await writeAgentTypeFile("agy-instructions", `---
+name: agy-instructions
+description: agy path instructions test
+canSpawnChildren: false
+instructionStyle: worker
+model: agy:gemini-3.7-flash-low
+paths:
+  allowRead: [${JSON.stringify(readPath)}]
+  allowWrite: [${JSON.stringify(writePath)}]
+  deny: ["**/agy-denied"]
+sandbox:
+  enabled: false
+---
+`);
       setNewAgentSpawnRunner(agyRunner());
       const result = await callNewAgent("task", {
         name: "agy-worktree-files",
-        model: "agy:gemini-3.7-flash-low",
+        type: "agy-instructions",
       });
       expect(result.ok).toBe(true);
       const worktree = join(agentsDir, "agy-worktree-files", "repo");
@@ -8263,6 +8297,10 @@ body`,
       expect(hooks.ittybitty.PreToolUse[0].hooks[0].command).toContain("hooks agy-pre-tool-use agy-worktree-files");
       const rule = await Bun.file(join(worktree, ".agents", "rules", "ittybitty-agent.md")).text();
       expect(rule.startsWith("---\ntrigger: always_on")).toBe(true);
+      expect(rule).toContain(canonicalizeSandboxPath(readPath));
+      expect(rule).toContain(canonicalizeSandboxPath(writePath));
+      expect(rule).toContain("**/agy-denied");
+      expect(rule).toContain("The kernel sandbox is OFF");
     });
 
     test("appends both boundary files to <worktree>/.gitignore", async () => {

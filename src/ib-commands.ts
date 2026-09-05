@@ -1913,6 +1913,10 @@ export async function resumeAgent(
         worker: agent.meta.worker === true,
         agentType: agent.meta.agentType,
         spawned_by: agent.meta.spawned_by ?? undefined,
+        // Resume must describe the policy frozen in this agent's metadata,
+        // not today's type files or the detectRole defaults.
+        paths: agent.meta.paths,
+        sandbox: agent.meta.sandbox,
       }, agent.id);
       try {
         await writeAgyWorktreeFiles(workPath, agyResumeCtx, {
@@ -5755,6 +5759,10 @@ export async function newAgent(
         worker: isLeafAgent,
         agentType: typeName,
         spawned_by: spawnedBy ?? undefined,
+        // These values were resolved once from the layer union above and are
+        // the exact policy frozen into the new agent's meta.json.
+        paths: resolvedPathsConfig,
+        sandbox: resolvedSandboxConfig,
       }, id);
       try {
         await writeCodexAgentsMd(workPath, sessionCtx);
@@ -5886,6 +5894,8 @@ export async function newAgent(
         worker: isLeafAgent,
         agentType: typeName,
         spawned_by: spawnedBy ?? undefined,
+        paths: resolvedPathsConfig,
+        sandbox: resolvedSandboxConfig,
       }, id);
       try {
         const { hooksPath, rulesPath } = await writeAgyWorktreeFiles(workPath, agySessionCtx, {

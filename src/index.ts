@@ -2506,6 +2506,14 @@ export async function main() {
           if (!hasDifferences) {
             console.log("All local agent-type files match the embedded floor.");
           } else {
+            console.log(
+              "Local agent-type files are compared LITERALLY against the embedded floor;",
+            );
+            console.log(
+              "a rewritten equivalent (e.g. an absolute form of a ~ entry) reads as missing.",
+            );
+            console.log("Fix: copy the embedded paths:/sandbox: block verbatim into the file below.");
+            console.log("");
             for (const diff of diffs) {
               console.log(`${diff.file}:`);
               for (const line of diff.lines) console.log(line);

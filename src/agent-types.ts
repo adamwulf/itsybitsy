@@ -346,6 +346,12 @@ export interface AgentTypeFloorDiff {
  * `~/.itsybitsy/agent-types/_all.md` still missing the tightened floor (because
  * `ib init-types` never updates an existing file). `hasDifferences` is true when
  * any difference was found, so the command can exit non-zero.
+ *
+ * The compare is **literal string set-membership**, entry for entry: a locally
+ * rewritten but equivalent form (e.g. the absolute spelling of an embedded `~`
+ * entry, or `/private/tmp` for `/tmp`) is reported as MISSING because it is not
+ * the same string. This is intentional — the fix is to copy the embedded block
+ * verbatim, not to hand-translate it — and keeps the check trivially auditable.
  * (SPEC-PATH-ALLOWLIST.md section 8; docs/SANDBOX-ROLLOUT.md gate preconditions)
  */
 export async function checkAgentTypeFloors(): Promise<{

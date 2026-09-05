@@ -32,6 +32,7 @@ import { join } from "path";
 import { isValidAgentId } from "../validation";
 import { mutateAgentMeta } from "../agents";
 import { logAgent } from "../agent-lifecycle";
+import { userHome } from "../home";
 import { resolveAgentContext } from "./agent-context";
 import {
   REGULAR_AGENT_DEFAULT_ALLOW,
@@ -45,9 +46,11 @@ import {
 } from "./shared";
 import {
   checkPathAccess,
+  META_UNREADABLE_DENY_REASON,
   type HookDecision,
   type PathCheckContext,
 } from "./agent-path";
+import { buildAgentAccessTable } from "./paths-table";
 
 /** Format tool input params for denial logs, matching the Claude hook style. */
 function formatToolInput(toolInput: Record<string, unknown>): string {
@@ -110,15 +113,12 @@ export function checkCodexPreToolUse(
       };
     }
     // SPEC §3.2: codex's `-s workspace-write` sandbox leaks /tmp, $TMPDIR, and
-    // ~/.codex/memories. Per SPEC we MUST do path-isolation in the hook and
-    // MUST NOT fall through to checkPathAccess's legacy permissive branch
-    // (step 13). Force step 12 to fire by passing an explicit `allowedPaths`
-    // that contains only the worktree (plus any agent-configured extras).
-    // Worktree-internal paths still allow via step 7 BEFORE step 12 is checked.
-    // apply_patch's "allow list" is path-only by intent: see SPEC §5.5 — apply_patch
-    // is codex's equivalent of claude's Write+Edit, gated on path not tool-allow.
-    const apEffectiveAllowedPaths =
-      ctx.allowedPaths !== undefined ? ctx.allowedPaths : [ctx.worktreePath];
+    // ~/.codex/memories. Per SPEC we MUST do path-isolation in the hook. Each
+    // apply_patch target is a synthesized Write: it resolves through
+    // checkPathAccess against ctx.access (meta.paths ∪ the runtime roots), which
+    // denies by default — the worktree, project dir and scratchpad pass as
+    // runtime roots, everything else is denied. apply_patch's "allow list" is
+    // path-only by intent (SPEC §5.5 — apply_patch is codex's Write+Edit).
     for (const target of targets) {
       const synthesized = {
         toolName: "Write",
@@ -128,7 +128,6 @@ export function checkCodexPreToolUse(
       const decision = checkPathAccess(synthesized, {
         ...ctx,
         allowList: ["Write", ...ctx.allowList],
-        allowedPaths: apEffectiveAllowedPaths,
       });
       if (decision.decision === "deny") {
         return {
@@ -261,10 +260,38 @@ export async function hookCodexPreToolUse(
       }
     }
 
+    // A missing/unparseable meta.json DENIES — the hook resolves its path lists
+    // from meta.paths, so there is no permissive fallback (the invariant).
+    if (!ctxResolved.meta) {
+      await logAgent(
+        ctxResolved.agentDir,
+        `[PreToolUse] Permission denied: ${toolName} — ${META_UNREADABLE_DENY_REASON}`,
+      );
+      write(buildCodexDenyOutput(META_UNREADABLE_DENY_REASON));
+      return;
+    }
+
     const permissions = await loadCodexEffectivePermissions(
       ctxResolved.agentType,
       ctxResolved.worktreePath,
     );
+
+    const access = await buildAgentAccessTable({
+      meta: ctxResolved.meta,
+      agentDir: ctxResolved.agentDir,
+      worktreePath: ctxResolved.worktreePath,
+      agentsDir: ctxResolved.agentsDir,
+      rootRepo: ctxResolved.rootRepo,
+      home: userHome(),
+    }).catch(() => null);
+    if (!access) {
+      await logAgent(
+        ctxResolved.agentDir,
+        `[PreToolUse] Permission denied: ${toolName} — ${META_UNREADABLE_DENY_REASON}`,
+      );
+      write(buildCodexDenyOutput(META_UNREADABLE_DENY_REASON));
+      return;
+    }
 
     const ctx: PathCheckContext = {
       agentId,
@@ -273,6 +300,7 @@ export async function hookCodexPreToolUse(
       agentsDir: ctxResolved.agentsDir,
       rootRepo: ctxResolved.rootRepo,
       allowList: permissions.allow,
+      access,
     };
 
     const decision = checkCodexPreToolUse({ toolName, toolInput, cwd }, ctx);
@@ -282,7 +310,7 @@ export async function hookCodexPreToolUse(
     } else {
       const params = formatToolInput(toolInput);
       const suffix = params ? ` (${params})` : "";
-      await logAgent(ctxResolved.agentDir, `[PreToolUse] Permission denied: ${toolName}${suffix}`);
+      await logAgent(ctxResolved.agentDir, `[PreToolUse] Permission denied: ${toolName}${suffix} — ${decision.reason}`);
       write(buildCodexDenyOutput(decision.reason));
     }
   } catch (err) {

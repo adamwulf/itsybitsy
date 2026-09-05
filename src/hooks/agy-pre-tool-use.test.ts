@@ -10,6 +10,30 @@ import {
   hookAgyPreToolUseDryRun,
 } from "./agy-pre-tool-use";
 import type { PathCheckContext } from "./agent-path";
+import { prepareAccessTable, type PathsConfig, type PreparedAccessTable } from "../sandbox";
+import { agentPathAccessTable } from "./paths-table";
+
+/**
+ * Build a prepared access table for the fixture agent. Empty paths lists by
+ * default (strict); pass a partial paths config to widen it.
+ */
+function makeAccess(
+  paths: Partial<PathsConfig> = {},
+  opts: { canSpawnChildren?: boolean } = {},
+): PreparedAccessTable {
+  return prepareAccessTable(
+    agentPathAccessTable({
+      paths: { allowRead: [], allowWrite: [], deny: [], ...paths },
+      agentDir: "/repo/.ittybitty/agents/agent-abc123",
+      worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
+      agentsDir: "/repo/.ittybitty/agents",
+      rootRepo: "/repo",
+      gitDir: "/repo/.git",
+      tmuxSock: "/private/tmp/tmux-501",
+      canSpawnChildren: opts.canSpawnChildren ?? false,
+    }),
+  );
+}
 
 function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
   return {
@@ -19,6 +43,7 @@ function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
     agentsDir: "/repo/.ittybitty/agents",
     rootRepo: "/repo",
     allowList: ["Read", "Write", "Edit", "LS", "Glob", "Grep", "Bash"],
+    access: makeAccess(),
     ...overrides,
   };
 }
@@ -45,9 +70,9 @@ describe("checkAgyPreToolUse — path isolation", () => {
       ctx,
     );
     expect(d.decision).toBe("deny");
-    // With no meta.allowedPaths, allowedPaths is forced to [worktree] so step 12
-    // denies /tmp rather than falling through to the legacy permissive branch.
-    expect(d.reason).toContain("allowedPaths");
+    // With empty paths lists, /tmp is not in the table (only the worktree +
+    // runtime roots are), so the resolver denies it — not a permissive fallback.
+    expect(d.reason).toContain("is not in paths.allowRead/allowWrite");
   });
 
   test("run_command referencing a sibling agent path is denied by the Bash scanner", () => {
@@ -101,8 +126,8 @@ describe("checkAgyPreToolUse — path isolation", () => {
     expect(d.decision).toBe("allow");
   });
 
-  test("write_to_file under a type's allowedPaths is allowed", () => {
-    const ctx = makeCtx({ allowedPaths: ["/private/tmp/agy-shared"] });
+  test("write_to_file under a type's paths.allowWrite is allowed", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/private/tmp/agy-shared"] }) });
     const d = checkAgyPreToolUse(
       { toolName: "write_to_file", toolArgs: { TargetFile: "/private/tmp/agy-shared/out.txt", CodeContent: "x" } },
       ctx,

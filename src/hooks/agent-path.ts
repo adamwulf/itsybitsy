@@ -14,10 +14,19 @@ import { logAgent } from "../agent-lifecycle";
 import { writeAgentState } from "../agents";
 import { isValidAgentId } from "../validation";
 import { checkGitDirectoryFlags, resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./shared";
-// Single source of truth for the encoding — see src/auto-compact.ts
-import { encodeClaudeProjectPath } from "../auto-compact";
 import { AGY_WORKTREE_FILES } from "../agy-worktree-files";
 import { heredocBodyRanges } from "./shell-metachar";
+import {
+  buildAgentAccessTable,
+  buildSystemAccessTable,
+  claudeProjectDirFor,
+  pathDenialReason,
+} from "./paths-table";
+import { resolvePreparedAccess, type PathOperation, type PreparedAccessTable } from "../sandbox";
+
+// Re-exported for existing callers/tests that import it from this module; the
+// definition moved to ./paths-table to break the import cycle.
+export { claudeProjectDirFor };
 
 /**
  * Deny reason for a bash token that mixes a `..` path segment with shell
@@ -45,7 +54,14 @@ export interface PathCheckContext {
   agentsDir: string;
   rootRepo: string;
   allowList: string[];
-  allowedPaths?: string[];
+  /**
+   * The prepared filesystem access table (meta.paths ∪ the spawn-keyed runtime
+   * roots, plus the tmux-socket deny), built once per hook invocation by
+   * buildAgentAccessTable / buildSystemAccessTable. A missing paths block
+   * produces empty allow lists — so anything outside the runtime roots is
+   * denied. There is no "undefined means allow" mode: the field is required.
+   */
+  access: PreparedAccessTable;
 }
 
 export interface HookDecision {
@@ -144,6 +160,26 @@ export const AGY_BOUNDARY_WRITE_DENY_REASON =
   "Access denied: agents cannot modify their own agy hook/rule files (.agents/hooks.json, .agents/rules/ittybitty-agent.md)";
 
 /**
+ * Deny reason for an agent writing its OWN `<agentDir>/meta.json`. The hook
+ * reads its path lists (and canSpawnChildren) from that file at every call, so
+ * an agent that could rewrite it could widen its own access. In kernel mode the
+ * frozen profile + sealed record already stop this; the hook adds the same guard
+ * for hook-only mode (sandbox disabled, agy, Linux). Mirrors the settings-file
+ * rule. Exported so tests can assert against it.
+ */
+export const META_WRITE_DENY_REASON =
+  "Access denied: agents cannot modify their own meta.json (the hook reads its path lists from it)";
+
+/**
+ * Deny reason when `meta.json` is missing or unparseable. The hook builds its
+ * access table from `meta.paths`; without a readable meta there is no table, so
+ * it fails CLOSED rather than falling back to a permissive default (the
+ * invariant: missing == deny). Exported so tests can assert against it.
+ */
+export const META_UNREADABLE_DENY_REASON =
+  "Access denied: meta.json is missing or unreadable — cannot resolve the agent's path lists";
+
+/**
  * Classify a write target as a PROTECTED worktree file that agents must not
  * rewrite — either `.claude/settings*.json` (permission self-escalation) or an
  * agy boundary file (`.agents/hooks.json` / the always-on rule file, whose
@@ -203,9 +239,11 @@ export function checkPathAccess(
         cdTarget = cdTarget.slice(1, -1);
       }
 
-      // Empty cd target → allow (cd to home)
+      // Empty cd target → the shell would cd to the home directory. Check it
+      // like any other path (read op) rather than auto-allowing: home is not a
+      // runtime root, so a strict agent is denied — matching the invariant.
       if (!cdTarget || !cdTarget.trim()) {
-        return { decision: "allow", reason: "Tool in allow list" };
+        cdTarget = userHome();
       }
 
       // Use cd target as file_path for further path checks below
@@ -241,16 +279,20 @@ export const SETTINGS_WRITE_DENY_REASON =
 
 /**
  * Detect a bash command that WRITES (redirect `>`/`>>` or in-place `sed -i`) to
- * one of the worktree's protected files — `.claude/settings*.json` (permission
- * self-escalation) or the agy boundary files (`.agents/hooks.json` / the rule
- * file, whose rewrite disables the hook gate on the next resume).
+ * one of the agent's protected files — `.claude/settings*.json` (permission
+ * self-escalation), the agy boundary files (`.agents/hooks.json` / the rule
+ * file, whose rewrite disables the hook gate on the next resume), or the agent's
+ * own `<agentDir>/meta.json` (the hook reads its path lists from it, so a
+ * redirect rewrite is self-widening — the kernel cannot tell the agent's
+ * redirect from `ib` writing the file; the hook can, because it sees the command).
  *
  * Each candidate write-target token is RESOLVED against cwd (join + resolve +
  * realpathSync-when-it-exists, the same way checkFilePath does) and compared with
  * the resolved protected files via `worktreeProtectedFileKind`, rather than
  * literal-matching the raw token. That closes obfuscated spellings the old regex
  * missed — `.agents/rules/../hooks.json`, `./.agents/hooks.json`, and the
- * absolute `…/.agents/rules/../hooks.json` (and the same for `.claude/settings`).
+ * absolute `…/.agents/rules/../hooks.json` (and the same for `.claude/settings`
+ * and `meta.json`).
  *
  * Best-effort target extraction: a `>` / `>>` token's following token (or a
  * glued `>file`), and — when `sed -i` / `--in-place` is present — every token as
@@ -259,8 +301,10 @@ export const SETTINGS_WRITE_DENY_REASON =
 function checkBashSettingsWrite(
   command: string,
   cwd: string,
-  worktreePath: string
+  worktreePath: string,
+  agentDir: string
 ): HookDecision | null {
+  const metaPath = join(agentDir, "meta.json");
   // Resolve one candidate write-target token and deny if it lands on a protected
   // file. Strips one layer of surrounding quotes first.
   const denyForTarget = (rawToken: string): HookDecision | null => {
@@ -281,6 +325,7 @@ function checkBashSettingsWrite(
     const kind = worktreeProtectedFileKind(resolved, worktreePath);
     if (kind === "settings") return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
     if (kind === "agy") return { decision: "deny", reason: AGY_BOUNDARY_WRITE_DENY_REASON };
+    if (resolved === metaPath) return { decision: "deny", reason: META_WRITE_DENY_REASON };
     return null;
   };
 
@@ -491,10 +536,11 @@ function checkBashCommandPaths(
   const traversalDenial = checkRelativeTraversalPaths(command, cwd, ctx);
   if (traversalDenial) return traversalDenial;
 
-  // Block bash mutations of the worktree's protected files (.claude/settings*.json
-  // and the agy boundary files) — agents must not grant themselves new
-  // permissions or disable their own hook gate.
-  const settingsDenial = checkBashSettingsWrite(command, cwd, worktreePath);
+  // Block bash mutations of the agent's protected files (.claude/settings*.json,
+  // the agy boundary files, and the agent's own meta.json) — agents must not
+  // grant themselves new permissions, disable their own hook gate, or rewrite
+  // the meta.json the hook reads its path lists from.
+  const settingsDenial = checkBashSettingsWrite(command, cwd, worktreePath, agentDir);
   if (settingsDenial) return settingsDenial;
 
   // Check for references to other agents' directories
@@ -535,23 +581,6 @@ function checkBashCommandPaths(
 }
 
 /**
- * Compute the fully-resolved absolute path to an agent's Claude project
- * directory (`~/.claude/projects/<encoded-worktree>`). The directory may not
- * exist yet — in that case we fall back to the resolve() result so the match
- * against realpath'd inbound file paths still works once it's created.
- */
-export function claudeProjectDirFor(worktreePath: string): string {
-  const encoded = encodeClaudeProjectPath(worktreePath);
-  let projectDir = resolve(join(userHome(), ".claude", "projects", encoded));
-  try {
-    projectDir = realpathSync(projectDir);
-  } catch {
-    // Directory doesn't exist yet — keep the resolve() result
-  }
-  return projectDir;
-}
-
-/**
  * Check whether a resolved file path is allowed.
  * Shared by both Bash cd and general file-path tools.
  */
@@ -577,63 +606,73 @@ function checkFilePath(
     // Path doesn't exist yet — keep the resolve() result
   }
 
-  // 6. Block: writes to a PROTECTED worktree file — <worktreePath>/.claude/
-  // settings*.json (permission self-escalation) or the agy boundary files
-  // (.agents/hooks.json / the rule file, whose rewrite would disable the hook
-  // gate on the next resume). Reads are allowed; only mutation tools are blocked.
+  // The structural steps (6, 10, 11) run BEFORE the resolver so the hook stays
+  // STRICTER than the kernel inside the agent dir and the main repo: the
+  // resolver's table lists AGENTDIR / GITDIR / REPOAGENTS as runtime roots (to
+  // match what the kernel grants), but the hook must still refuse an agent
+  // rewriting its own meta.json, reaching a sibling's dir, or touching the main
+  // checkout's .git through a file tool. Steps 7/8/9/12/13 are folded into the
+  // single resolvePreparedAccess call at the end.
+
+  // 6. Block: writes to a PROTECTED file — <worktreePath>/.claude/settings*.json
+  // (permission self-escalation), the agy boundary files (.agents/hooks.json /
+  // the rule file, whose rewrite disables the hook gate on the next resume), or
+  // the agent's own <agentDir>/meta.json (the hook reads its path lists from it,
+  // so a rewrite is self-widening). Reads are allowed; only mutation tools blocked.
   if (WRITE_TOOLS.has(toolName)) {
     const kind = worktreeProtectedFileKind(filePath, worktreePath);
     if (kind === "settings") return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
     if (kind === "agy") return { decision: "deny", reason: AGY_BOUNDARY_WRITE_DENY_REASON };
-  }
-
-  // 7. Allow: path within worktree
-  if (filePath.startsWith(worktreePath + "/") || filePath === worktreePath) {
-    return { decision: "allow", reason: "Tool in allow list, path in worktree" };
-  }
-
-  // 8. Allow: own agent.log
-  if (filePath === join(agentDir, "agent.log")) {
-    return { decision: "allow", reason: "Tool in allow list, accessing own log" };
-  }
-
-  // 9. Allow: own Claude project dir (where Claude Code spills oversized tool
-  // responses and stores transcripts — ~/.claude/projects/<encoded-worktree>).
-  const projectDir = claudeProjectDirFor(worktreePath);
-  if (filePath === projectDir || filePath.startsWith(projectDir + "/")) {
-    return { decision: "allow", reason: "Tool in allow list, accessing own Claude project dir" };
-  }
-
-  // 10. Block: other agents' directories
-  // Guard: an empty agentsDir means there are no sibling agents to isolate
-  // against (e.g. the @system context — see hookCheckPath). Without the
-  // guard, `"" + "/"` becomes `/`, which startsWith() matches against every
-  // absolute path and produces a dishonest "cannot cd into other agents'
-  // worktrees" denial for unrelated files.
-  if (agentsDir !== "" && filePath.startsWith(agentsDir + "/")) {
-    if (toolName === "Bash") {
-      return { decision: "deny", reason: "Access denied: cannot cd into other agents' worktrees" };
+    if (filePath === join(agentDir, "meta.json")) {
+      return { decision: "deny", reason: META_WRITE_DENY_REASON };
     }
-    return { decision: "deny", reason: "Access denied: cannot access other agents' files" };
   }
 
-  // 11. Block: main repo (outside worktree)
-  if (rootRepo && filePath.startsWith(rootRepo + "/") && !filePath.startsWith(worktreePath + "/")) {
+  // 10. Block: other agents' directories, and the agent's OWN dir except its
+  // worktree and its agent.log. The worktree (a runtime root) and the own log
+  // are allowed via the resolver below; everything else under the agent dir —
+  // meta.json, prompt.txt, outbox, etc. — stays denied here, keeping the hook
+  // stricter than the kernel's AGENTDIR write root.
+  // Guard: an empty agentsDir means there are no sibling agents to isolate
+  // against (e.g. the @system context — see hookCheckPath). Without the guard,
+  // `"" + "/"` becomes `/`, which startsWith() matches every absolute path.
+  if (agentsDir !== "" && filePath.startsWith(agentsDir + "/")) {
+    const inWorktree = filePath === worktreePath || filePath.startsWith(worktreePath + "/");
+    const isOwnLog = filePath === join(agentDir, "agent.log");
+    if (!inWorktree && !isOwnLog) {
+      if (toolName === "Bash") {
+        return { decision: "deny", reason: "Access denied: cannot cd into other agents' worktrees" };
+      }
+      return { decision: "deny", reason: "Access denied: cannot access other agents' files" };
+    }
+  }
+
+  // 11. Block: main repo (outside worktree). The worktree itself and paths under
+  // it are excluded (they are allowed by the resolver); the main checkout's .git
+  // — a kernel write root — stays denied to file tools here. The agents dir is
+  // excluded too — it lives under the main repo but is step 10's domain (which
+  // already allowed the worktree + own agent.log and denied the rest), so
+  // step 11 must not re-block the own agent.log that step 10 let through.
+  if (
+    rootRepo &&
+    filePath.startsWith(rootRepo + "/") &&
+    filePath !== worktreePath &&
+    !filePath.startsWith(worktreePath + "/") &&
+    !(agentsDir !== "" && filePath.startsWith(agentsDir + "/"))
+  ) {
     return { decision: "deny", reason: "Access denied: work in your worktree, not the main repo" };
   }
 
-  // 12. allowedPaths-based access control
-  if (ctx.allowedPaths !== undefined) {
-    // allowedPaths is defined: check if path is in the list
-    if (isInAllowedPaths(filePath, ctx.allowedPaths)) {
-      return { decision: "allow", reason: "Tool in allow list, path in allowedPaths" };
-    }
-    // Path is not in allowedPaths — deny
-    return { decision: "deny", reason: "Access denied: path not in allowedPaths" };
+  // Resolver: the worktree, own agent.log's dir, project dir, scratchpad and any
+  // configured paths.allow* are runtime/allow entries in the table; everything
+  // else is denied (empty lists => deny by default). Write tools resolve as a
+  // write op; reads (and cd) as a read op.
+  const op: PathOperation = WRITE_TOOLS.has(toolName) ? "write" : "read";
+  const decision = resolvePreparedAccess(ctx.access, filePath, op);
+  if (decision === "allow") {
+    return { decision: "allow", reason: `Tool in allow list, ${op} ${filePath} permitted by paths` };
   }
-
-  // 13. Legacy fallback: allow all other paths (system files, ~/.claude, etc.)
-  return { decision: "allow", reason: "Tool in allow list" };
+  return { decision: "deny", reason: pathDenialReason(ctx.access, filePath, op) };
 }
 
 // ── ib command manager access check ─────────────────────────────────────────
@@ -896,14 +935,16 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
   try {
     json = JSON.parse(raw);
   } catch {
+    // Malformed stdin → DENY (fail closed). Historically this allowed; the
+    // invariant (SPEC §8) requires no fail-open answer here.
     process.stderr.write(`hook-check-path: failed to parse stdin JSON: ${raw.slice(0, 200)}\n`);
-    console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "Failed to parse stdin" } }));
+    console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "Failed to parse stdin" } }));
     return;
   }
 
   if (typeof json !== "object" || json === null || Array.isArray(json)) {
     process.stderr.write(`hook-check-path: stdin is not a JSON object\n`);
-    console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "Invalid stdin schema" } }));
+    console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "Invalid stdin schema" } }));
     return;
   }
 
@@ -912,14 +953,14 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
   // Validate tool_name is a string
   if (data.tool_name !== undefined && typeof data.tool_name !== "string") {
     process.stderr.write(`hook-check-path: tool_name is not a string\n`);
-    console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "Invalid stdin schema" } }));
+    console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "Invalid stdin schema" } }));
     return;
   }
 
   // Validate tool_input is a non-null object
   if (data.tool_input !== undefined && (typeof data.tool_input !== "object" || data.tool_input === null)) {
     process.stderr.write(`hook-check-path: tool_input is not an object\n`);
-    console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "Invalid stdin schema" } }));
+    console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "Invalid stdin schema" } }));
     return;
   }
 
@@ -930,18 +971,18 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
   let agentsDir: string;
   let agentDir: string;
   let worktreePath: string;
-  let allowedPaths: string[] | undefined = undefined;
   let rootRepo = "";
+  // The prepared access table for this invocation. Both branches assign it or
+  // return early on a build failure — there is no permissive default.
+  let access!: PreparedAccessTable;
 
   if (agentId === SYSTEM_AGENT_ID) {
     // System coordinator: it owns its own directory entirely. There is no
     // outer agents-dir to isolate against and no main-repo to block.
-    // Treating ~/.itsybitsy/ as both agentDir and worktreePath lets the
-    // existing path checks (worktree-contains, agentsDir-blocks, rootRepo-blocks)
-    // degrade naturally:
     //   - agentsDir = ""     → cross-agent blocks never fire.
     //   - rootRepo = worktree → main-repo block never fires.
-    //   - allowedPaths = undefined → legacy permissive fallback.
+    // Its path lists come from _all.md ∪ system.md (buildSystemAccessTable),
+    // resolved live; a missing list there is strict (deny), never permissive.
     const resolved = resolveAgentFromCwd(cwd);
     // Prefer the resolved home (handles symlinked HOME) when available.
     const home = resolved?.agentDir ?? join(userHome(), ".itsybitsy");
@@ -949,6 +990,16 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
     agentDir = home;
     worktreePath = home;
     rootRepo = home;
+    try {
+      access = await buildSystemAccessTable(userHome());
+    } catch {
+      // Even a layer-load failure must not fail open.
+      await emitPathDecision(agentDir, toolName, toolInput, {
+        decision: "deny",
+        reason: META_UNREADABLE_DENY_REASON,
+      });
+      return;
+    }
   } else {
     // Resolve agent directory from cwd pattern
     // cwd is typically: .../.ittybitty/agents/{id}/repo/...
@@ -967,18 +1018,27 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
       isNoWorktree = true;
     }
 
-    // Read meta.json for worktree field and allowedPaths
+    // Read meta.json — REQUIRED. The hook resolves its path lists from it, so a
+    // missing or unparseable meta.json DENIES (fail closed) rather than building
+    // a permissive table (the invariant, SPEC-PATH-ALLOWLIST.md §8).
+    let meta: Record<string, unknown> | null = null;
     try {
       const metaFile = Bun.file(join(agentDir, "meta.json"));
       if (await metaFile.exists()) {
-        const meta = await metaFile.json();
-        if (meta.worktree === false) isNoWorktree = true;
-        // Parse allowedPaths from meta.json (should be an array of strings or undefined)
-        if (Array.isArray(meta.allowedPaths)) {
-          allowedPaths = (meta.allowedPaths as unknown[]).filter((p): p is string => typeof p === "string");
+        const parsed = await metaFile.json();
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          meta = parsed as Record<string, unknown>;
         }
       }
-    } catch { /* ignore */ }
+    } catch { meta = null; }
+    if (!meta) {
+      await emitPathDecision(agentDir, toolName, toolInput, {
+        decision: "deny",
+        reason: META_UNREADABLE_DENY_REASON,
+      });
+      return;
+    }
+    if (meta.worktree === false) isNoWorktree = true;
 
     // For non-worktree agents (e.g., coordinators), worktreePath is the repo root
     if (isNoWorktree) {
@@ -1008,6 +1068,25 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
     // background-tool completions don't leave the agent stuck at 'waiting'.
     // Skipped for @system because there is no meta.json to write to.
     await writeAgentState(agentDir, "running");
+
+    // Build the access table from meta.paths ∪ the spawn-keyed runtime roots. A
+    // build failure (e.g. an invalid frozen paths block) denies, never fails open.
+    try {
+      access = await buildAgentAccessTable({
+        meta,
+        agentDir,
+        worktreePath,
+        agentsDir,
+        rootRepo,
+        home: userHome(),
+      });
+    } catch {
+      await emitPathDecision(agentDir, toolName, toolInput, {
+        decision: "deny",
+        reason: META_UNREADABLE_DENY_REASON,
+      });
+      return;
+    }
   }
 
   // Read settings.local.json for allow list (works for both @system and worktree agents)
@@ -1024,7 +1103,7 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
   } catch { /* ignore */ }
 
   // Check ib manager-only command access before path checks
-  const ctx = { agentId, agentDir, worktreePath, agentsDir, rootRepo, allowList, allowedPaths };
+  const ctx: PathCheckContext = { agentId, agentDir, worktreePath, agentsDir, rootRepo, allowList, access };
   let decision: HookDecision;
   if (toolName === "Bash") {
     const command = String(toolInput.command ?? "");
@@ -1034,23 +1113,34 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
     decision = checkPathAccess({ toolName, toolInput, cwd }, ctx);
   }
 
-  // Log denials
+  await emitPathDecision(agentDir, toolName, toolInput, decision);
+}
+
+/**
+ * Emit a PreToolUse hook decision: log denials to agent.log and print the JSON
+ * contract. The log keeps the exact `[PreToolUse] Permission denied: <tool>
+ * <suffix>` prefix that parseDenials (src/agents.ts) matches, and appends
+ * ` — <reason>` so the Denials tab of `ib watch` shows the operation, the
+ * resolved path, and the rule that denied it.
+ */
+async function emitPathDecision(
+  agentDir: string,
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  decision: HookDecision,
+): Promise<void> {
   if (decision.decision === "deny") {
     const params = formatToolInput(toolInput);
     const suffix = params ? ` (${params})` : "";
-    await logAgent(agentDir, `[PreToolUse] Permission denied: ${toolName}${suffix}`);
+    await logAgent(agentDir, `[PreToolUse] Permission denied: ${toolName}${suffix} — ${decision.reason}`);
   }
-
-  // Output JSON decision
-  const output = {
+  console.log(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: decision.decision,
       permissionDecisionReason: decision.reason,
     },
-  };
-
-  console.log(JSON.stringify(output));
+  }));
 }
 
 /** Format tool input params for logging (compact key=value pairs) */

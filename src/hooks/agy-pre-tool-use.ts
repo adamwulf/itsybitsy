@@ -26,6 +26,7 @@ import { join } from "path";
 import { isValidAgentId } from "../validation";
 import { mutateAgentMeta } from "../agents";
 import { logAgent } from "../agent-lifecycle";
+import { userHome } from "../home";
 import {
   REGULAR_AGENT_DEFAULT_ALLOW,
   REGULAR_AGENT_DEFAULT_DENY,
@@ -36,9 +37,11 @@ import {
   checkPathAccess,
   checkIbCommandAccess,
   toolMatchesPattern,
+  META_UNREADABLE_DENY_REASON,
   type HookDecision,
   type PathCheckContext,
 } from "./agent-path";
+import { buildAgentAccessTable } from "./paths-table";
 import { translateAgyTool, buildAgyAllowOutput, buildAgyDenyOutput } from "./agy-tools";
 import { findShellMetachar } from "./shell-metachar";
 
@@ -108,21 +111,18 @@ export function checkAgyPreToolUse(
     }
   }
 
-  const effectiveAllowedPaths =
-    ctx.allowedPaths !== undefined ? ctx.allowedPaths : [ctx.worktreePath];
-
   // A run_command carries a MODEL-CONTROLLED `Cwd` (translated to t.cwd). The
   // shared checkPathAccess never validates the cwd itself — Claude's Bash tool
   // has no cwd argument — so a benign allow-listed command (e.g. `ls`) with
   // Cwd set to the main repo / a sibling worktree / /tmp would execute THERE,
-  // outside the worktree. Gate the directory with the same isolation as an LS
-  // on it (allowedPaths forced, "LS" prepended to the allow list) before the
-  // command is checked. Absent Cwd defaults to the worktree, which is always
-  // allowed, so no validation is needed for that case.
+  // outside the worktree. Gate the directory as a READ through the access table
+  // (an LS on it: "LS" prepended to the allow list) before the command is
+  // checked. Absent Cwd defaults to the worktree, a runtime root, so no
+  // validation is needed for that case.
   if (t.cwd !== undefined) {
     const cwdDecision = checkPathAccess(
       { toolName: "LS", toolInput: { file_path: t.cwd }, cwd: ctx.worktreePath },
-      { ...ctx, allowList: ["LS", ...ctx.allowList], allowedPaths: effectiveAllowedPaths },
+      { ...ctx, allowList: ["LS", ...ctx.allowList] },
     );
     if (cwdDecision.decision === "deny") {
       return {
@@ -135,7 +135,7 @@ export function checkAgyPreToolUse(
   const cwd = t.cwd ?? ctx.worktreePath;
   return checkPathAccess(
     { toolName: t.toolName, toolInput: t.toolInput, cwd },
-    { ...ctx, allowedPaths: effectiveAllowedPaths },
+    ctx,
   );
 }
 
@@ -258,10 +258,39 @@ export async function hookAgyPreToolUse(
       }
     }
 
+    // A missing/unparseable meta.json DENIES — the hook resolves its path lists
+    // from meta.paths, so there is no permissive fallback (the invariant). agy
+    // already fails closed, so this is the explicit, logged form of that.
+    if (!ctxResolved.meta) {
+      await logAgent(
+        ctxResolved.agentDir,
+        `[PreToolUse] Permission denied: ${toolName} — ${META_UNREADABLE_DENY_REASON}`,
+      );
+      write(buildAgyDenyOutput(META_UNREADABLE_DENY_REASON));
+      return;
+    }
+
     const permissions = await loadAgyEffectivePermissions(
       ctxResolved.agentType,
       ctxResolved.worktreePath,
     );
+
+    const access = await buildAgentAccessTable({
+      meta: ctxResolved.meta,
+      agentDir: ctxResolved.agentDir,
+      worktreePath: ctxResolved.worktreePath,
+      agentsDir: ctxResolved.agentsDir,
+      rootRepo: ctxResolved.rootRepo,
+      home: userHome(),
+    }).catch(() => null);
+    if (!access) {
+      await logAgent(
+        ctxResolved.agentDir,
+        `[PreToolUse] Permission denied: ${toolName} — ${META_UNREADABLE_DENY_REASON}`,
+      );
+      write(buildAgyDenyOutput(META_UNREADABLE_DENY_REASON));
+      return;
+    }
 
     const ctx: PathCheckContext = {
       agentId,
@@ -270,7 +299,7 @@ export async function hookAgyPreToolUse(
       agentsDir: ctxResolved.agentsDir,
       rootRepo: ctxResolved.rootRepo,
       allowList: permissions.allow,
-      allowedPaths: ctxResolved.allowedPaths,
+      access,
     };
 
     // Parity with hookCheckPath: manager-only ib subcommands (retire / merge /
@@ -301,7 +330,7 @@ export async function hookAgyPreToolUse(
           ? formatToolArgs(toolArgs as Record<string, unknown>)
           : "";
       const suffix = argsForLog ? ` (${argsForLog})` : "";
-      await logAgent(ctxResolved.agentDir, `[PreToolUse] Permission denied: ${toolName}${suffix}`);
+      await logAgent(ctxResolved.agentDir, `[PreToolUse] Permission denied: ${toolName}${suffix} — ${decision.reason}`);
       write(buildAgyDenyOutput(decision.reason));
     }
   } catch (err) {

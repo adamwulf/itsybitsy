@@ -5,6 +5,47 @@ import { join } from "path";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { setUserHome, resetUserHome } from "../home";
+import { prepareAccessTable, type PathsConfig, type PreparedAccessTable } from "../sandbox";
+import { agentPathAccessTable } from "./paths-table";
+
+/**
+ * Build a prepared access table for a given agent layout. Empty paths lists by
+ * default (strict: only the worktree + runtime roots pass). This is the shared
+ * table both the hook and the kernel resolve against.
+ */
+function buildAccessFor(opts: {
+  paths?: Partial<PathsConfig>;
+  agentDir: string;
+  worktreePath: string;
+  agentsDir: string;
+  rootRepo: string;
+  canSpawnChildren?: boolean;
+}): PreparedAccessTable {
+  return prepareAccessTable(
+    agentPathAccessTable({
+      paths: { allowRead: [], allowWrite: [], deny: [], ...(opts.paths ?? {}) },
+      agentDir: opts.agentDir,
+      worktreePath: opts.worktreePath,
+      agentsDir: opts.agentsDir,
+      rootRepo: opts.rootRepo,
+      gitDir: join(opts.rootRepo, ".git"),
+      tmuxSock: "/private/tmp/tmux-501",
+      canSpawnChildren: opts.canSpawnChildren ?? false,
+    }),
+  );
+}
+
+/** The access table for the default `/repo` fixture agent. */
+function makeAccess(paths: Partial<PathsConfig> = {}, opts: { canSpawnChildren?: boolean } = {}): PreparedAccessTable {
+  return buildAccessFor({
+    paths,
+    agentDir: "/repo/.ittybitty/agents/agent-abc123",
+    worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
+    agentsDir: "/repo/.ittybitty/agents",
+    rootRepo: "/repo",
+    canSpawnChildren: opts.canSpawnChildren,
+  });
+}
 
 /** Build a default context for testing */
 function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
@@ -15,6 +56,7 @@ function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
     agentsDir: "/repo/.ittybitty/agents",
     rootRepo: "/repo",
     allowList: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+    access: makeAccess(),
     ...overrides,
   };
 }
@@ -103,7 +145,7 @@ describe("checkPathAccess", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
-    expect(result.reason).toContain("path in worktree");
+    expect(result.reason).toContain("permitted by paths");
   });
 
   test("block other agent directory", () => {
@@ -130,15 +172,15 @@ describe("checkPathAccess", () => {
     expect(result.reason).toContain("work in your worktree");
   });
 
-  test("allow system paths (/tmp/foo)", () => {
+  test("system paths (/tmp/foo) are DENIED with empty paths (no permissive mode)", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Read",
       toolInput: { file_path: "/tmp/foo/bar.txt" },
     });
     const result = checkPathAccess(input, ctx);
-    expect(result.decision).toBe("allow");
-    expect(result.reason).toBe("Tool in allow list");
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("is not in paths.allowRead/allowWrite");
   });
 
   test("allow own agent.log", () => {
@@ -149,7 +191,7 @@ describe("checkPathAccess", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
-    expect(result.reason).toContain("accessing own log");
+    expect(result.reason).toContain("permitted by paths");
   });
 
   test("tool not in allow list", () => {
@@ -184,26 +226,28 @@ describe("checkPathAccess", () => {
     expect(result.reason).toBe("Tool in allow list");
   });
 
-  test("cd empty target → allow", () => {
+  test("cd empty target → resolves to home, DENIED under empty paths", () => {
+    // An empty cd resolves to the home directory and is checked like any path;
+    // home is not a runtime root, so a strict agent is denied (the invariant).
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Bash",
       toolInput: { command: "cd " },
     });
     const result = checkPathAccess(input, ctx);
-    expect(result.decision).toBe("allow");
-    expect(result.reason).toBe("Tool in allow list");
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("is not in paths.allowRead/allowWrite");
   });
 
-  test("cd with just 'cd' → allow (non-cd path since no space)", () => {
+  test("cd with just 'cd' → resolves to home, DENIED under empty paths", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Bash",
       toolInput: { command: "cd" },
     });
     const result = checkPathAccess(input, ctx);
-    expect(result.decision).toBe("allow");
-    expect(result.reason).toBe("Tool in allow list");
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("is not in paths.allowRead/allowWrite");
   });
 
   test("relative path resolution", () => {
@@ -215,7 +259,7 @@ describe("checkPathAccess", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
-    expect(result.reason).toContain("path in worktree");
+    expect(result.reason).toContain("permitted by paths");
   });
 
   test("relative path with .. that escapes worktree → block", () => {
@@ -249,7 +293,7 @@ describe("checkPathAccess", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
-    expect(result.reason).toContain("path in worktree");
+    expect(result.reason).toContain("permitted by paths");
   });
 
   test("Bash cd with quoted path", () => {
@@ -260,7 +304,7 @@ describe("checkPathAccess", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
-    expect(result.reason).toContain("path in worktree");
+    expect(result.reason).toContain("permitted by paths");
   });
 
   test("worktree path exact match (not just prefix)", () => {
@@ -271,7 +315,7 @@ describe("checkPathAccess", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
-    expect(result.reason).toContain("path in worktree");
+    expect(result.reason).toContain("permitted by paths");
   });
 
   test("notebook_path field is checked", () => {
@@ -293,7 +337,7 @@ describe("checkPathAccess", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
-    expect(result.reason).toContain("path in worktree");
+    expect(result.reason).toContain("permitted by paths");
   });
 
   test("path with .. traversal is normalized and blocked", () => {
@@ -813,7 +857,7 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
-    expect(result.reason).toContain("path in worktree");
+    expect(result.reason).toContain("permitted by paths");
   });
 
   test("Write on .claude/sub/settings.local.json → ALLOWED (not directly in .claude/)", () => {
@@ -824,7 +868,7 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
-    expect(result.reason).toContain("path in worktree");
+    expect(result.reason).toContain("permitted by paths");
   });
 
   test("Read on .claude/settings.local.json → ALLOWED", () => {
@@ -835,7 +879,7 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
-    expect(result.reason).toContain("path in worktree");
+    expect(result.reason).toContain("permitted by paths");
   });
 
   test("Glob on .claude/settings.local.json → ALLOWED (read-style tool)", () => {
@@ -1533,36 +1577,20 @@ describe("isInAllowedPaths", () => {
 
 // ── allowedPaths integration tests ───────────────────────────────────────────
 
-describe("checkPathAccess with allowedPaths", () => {
-  test("allowedPaths undefined: legacy permissive mode (allows all system paths)", () => {
-    const ctx = makeCtx({
-      allowedPaths: undefined,
-    });
-    const input = makeInput({
-      toolName: "Read",
-      toolInput: { file_path: "/usr/local/bin/someapp" },
-    });
-    const result = checkPathAccess(input, ctx);
-    expect(result.decision).toBe("allow");
-  });
-
-  test("allowedPaths empty array: strict mode (denies non-worktree paths)", () => {
-    const ctx = makeCtx({
-      allowedPaths: [],
-    });
+describe("checkPathAccess with the paths access table", () => {
+  test("empty paths: a system path is DENIED (no permissive mode — the invariant)", () => {
+    const ctx = makeCtx({ access: makeAccess() });
     const input = makeInput({
       toolName: "Read",
       toolInput: { file_path: "/usr/local/bin/someapp" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
-    expect(result.reason).toContain("allowedPaths");
+    expect(result.reason).toContain("is not in paths.allowRead/allowWrite");
   });
 
-  test("allowedPaths empty array: still allows worktree", () => {
-    const ctx = makeCtx({
-      allowedPaths: [],
-    });
+  test("empty paths: still allows the worktree (a runtime root)", () => {
+    const ctx = makeCtx({ access: makeAccess() });
     const input = makeInput({
       toolName: "Read",
       toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/src/index.ts" },
@@ -1571,10 +1599,8 @@ describe("checkPathAccess with allowedPaths", () => {
     expect(result.decision).toBe("allow");
   });
 
-  test("allowedPaths with entries: allows matching paths", () => {
-    const ctx = makeCtx({
-      allowedPaths: ["/home/user/data", "/var/log"],
-    });
+  test("allowRead entries: allows matching paths (read)", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowRead: ["/home/user/data", "/var/log"] }) });
     const input = makeInput({
       toolName: "Read",
       toolInput: { file_path: "/home/user/data/file.csv" },
@@ -1583,23 +1609,19 @@ describe("checkPathAccess with allowedPaths", () => {
     expect(result.decision).toBe("allow");
   });
 
-  test("allowedPaths with entries: denies non-matching paths", () => {
-    const ctx = makeCtx({
-      allowedPaths: ["/home/user/data", "/var/log"],
-    });
+  test("allowRead entries: denies non-matching paths", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowRead: ["/home/user/data", "/var/log"] }) });
     const input = makeInput({
       toolName: "Read",
       toolInput: { file_path: "/home/user/config/secret.json" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
-    expect(result.reason).toContain("allowedPaths");
+    expect(result.reason).toContain("is not in paths.allowRead/allowWrite");
   });
 
-  test("allowedPaths: step 8 (other agents) still blocks even if path in allowedPaths", () => {
-    const ctx = makeCtx({
-      allowedPaths: ["/repo/.ittybitty/agents"],
-    });
+  test("step 10 (other agents) still blocks even if the path is in allowWrite", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/repo/.ittybitty/agents"] }) });
     const input = makeInput({
       toolName: "Read",
       toolInput: { file_path: "/repo/.ittybitty/agents/agent-other/repo/src/index.ts" },
@@ -1609,10 +1631,8 @@ describe("checkPathAccess with allowedPaths", () => {
     expect(result.reason).toContain("other agents");
   });
 
-  test("allowedPaths: step 9 (main repo) still blocks even if path in allowedPaths", () => {
-    const ctx = makeCtx({
-      allowedPaths: ["/repo"],
-    });
+  test("step 11 (main repo) still blocks even if the path is in allowWrite", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/repo"] }) });
     const input = makeInput({
       toolName: "Read",
       toolInput: { file_path: "/repo/src/main.ts" },
@@ -1622,10 +1642,8 @@ describe("checkPathAccess with allowedPaths", () => {
     expect(result.reason).toContain("work in your worktree");
   });
 
-  test("allowedPaths with Bash cd command", () => {
-    const ctx = makeCtx({
-      allowedPaths: ["/home/user/project"],
-    });
+  test("Bash cd into an allowRead path is allowed (cd is a read)", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowRead: ["/home/user/project"] }) });
     const input = makeInput({
       toolName: "Bash",
       toolInput: { command: "cd /home/user/project" },
@@ -1634,10 +1652,8 @@ describe("checkPathAccess with allowedPaths", () => {
     expect(result.decision).toBe("allow");
   });
 
-  test("allowedPaths with Glob path field", () => {
-    const ctx = makeCtx({
-      allowedPaths: ["/data/files"],
-    });
+  test("Glob path field against an allowRead entry is allowed", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowRead: ["/data/files"] }) });
     const input = makeInput({
       toolName: "Glob",
       toolInput: { pattern: "*.txt", path: "/data/files" },
@@ -1655,15 +1671,19 @@ describe("checkPathAccess with own Claude project dir", () => {
   const OTHER_WORKTREE = "/Users/test/repo/.ittybitty/agents/agent-other/repo";
   const OTHER_PROJECT_DIR = claudeProjectDirFor(OTHER_WORKTREE);
 
-  function makeClaudeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
+  // The project dir is a WRITE runtime root in the access table (appended by
+  // agentPathAccessTable), so it is allowed by the resolver with EMPTY paths.
+  function makeClaudeCtx(paths: Partial<PathsConfig> = {}): PathCheckContext {
+    const agentDir = "/Users/test/repo/.ittybitty/agents/agent-abc123";
+    const agentsDir = "/Users/test/repo/.ittybitty/agents";
     return {
       agentId: "agent-abc123",
-      agentDir: "/Users/test/repo/.ittybitty/agents/agent-abc123",
+      agentDir,
       worktreePath: WORKTREE,
-      agentsDir: "/Users/test/repo/.ittybitty/agents",
+      agentsDir,
       rootRepo: "/Users/test/repo",
       allowList: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
-      ...overrides,
+      access: buildAccessFor({ paths, agentDir, worktreePath: WORKTREE, agentsDir, rootRepo: "/Users/test/repo" }),
     };
   }
 
@@ -1676,7 +1696,7 @@ describe("checkPathAccess with own Claude project dir", () => {
     };
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
-    expect(result.reason).toContain("accessing own Claude project dir");
+    expect(result.reason).toContain("permitted by paths");
   });
 
   test("allow own transcript file directly under project dir", () => {
@@ -1688,7 +1708,7 @@ describe("checkPathAccess with own Claude project dir", () => {
     };
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
-    expect(result.reason).toContain("accessing own Claude project dir");
+    expect(result.reason).toContain("permitted by paths");
   });
 
   test("allow exact match on project dir path", () => {
@@ -1700,11 +1720,11 @@ describe("checkPathAccess with own Claude project dir", () => {
     };
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
-    expect(result.reason).toContain("accessing own Claude project dir");
+    expect(result.reason).toContain("permitted by paths");
   });
 
-  test("deny sibling prefix dir under allowedPaths:[] (boundary guard)", () => {
-    const ctx = makeClaudeCtx({ allowedPaths: [] });
+  test("deny sibling prefix dir with empty paths (boundary guard)", () => {
+    const ctx = makeClaudeCtx();
     // A sibling dir whose encoded name is a prefix of ours plus "-extra"
     const input = {
       toolName: "Read",
@@ -1713,11 +1733,11 @@ describe("checkPathAccess with own Claude project dir", () => {
     };
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
-    expect(result.reason).toContain("allowedPaths");
+    expect(result.reason).toContain("is not in paths.allowRead/allowWrite");
   });
 
-  test("deny ~/.claude/projects root under allowedPaths:[]", () => {
-    const ctx = makeClaudeCtx({ allowedPaths: [] });
+  test("deny ~/.claude/projects root with empty paths", () => {
+    const ctx = makeClaudeCtx();
     const projectsRoot = join(require("os").homedir(), ".claude", "projects");
     const input = {
       toolName: "Read",
@@ -1726,11 +1746,11 @@ describe("checkPathAccess with own Claude project dir", () => {
     };
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
-    expect(result.reason).toContain("allowedPaths");
+    expect(result.reason).toContain("is not in paths.allowRead/allowWrite");
   });
 
-  test("deny other agent's project dir under allowedPaths:[]", () => {
-    const ctx = makeClaudeCtx({ allowedPaths: [] });
+  test("deny other agent's project dir with empty paths", () => {
+    const ctx = makeClaudeCtx();
     const input = {
       toolName: "Read",
       toolInput: { file_path: `${OTHER_PROJECT_DIR}/abc-session/tool-results/Read-123.txt` },
@@ -1738,11 +1758,11 @@ describe("checkPathAccess with own Claude project dir", () => {
     };
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
-    expect(result.reason).toContain("allowedPaths");
+    expect(result.reason).toContain("is not in paths.allowRead/allowWrite");
   });
 
-  test("allowedPaths:[] does not block own project dir (always-allowed step runs first)", () => {
-    const ctx = makeClaudeCtx({ allowedPaths: [] });
+  test("empty paths does not block own project dir (it is a runtime root)", () => {
+    const ctx = makeClaudeCtx();
     const input = {
       toolName: "Read",
       toolInput: { file_path: `${OWN_PROJECT_DIR}/abc-session/tool-results/Read-123.txt` },
@@ -1750,11 +1770,11 @@ describe("checkPathAccess with own Claude project dir", () => {
     };
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
-    expect(result.reason).toContain("accessing own Claude project dir");
+    expect(result.reason).toContain("permitted by paths");
   });
 
-  test("own project dir allowed without explicit allowedPaths entry", () => {
-    const ctx = makeClaudeCtx({ allowedPaths: ["/var/log"] });
+  test("own project dir allowed even with an unrelated allowRead entry", () => {
+    const ctx = makeClaudeCtx({ allowRead: ["/var/log"] });
     const input = {
       toolName: "Read",
       toolInput: { file_path: `${OWN_PROJECT_DIR}/abc-session.jsonl` },
@@ -1762,11 +1782,11 @@ describe("checkPathAccess with own Claude project dir", () => {
     };
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
-    expect(result.reason).toContain("accessing own Claude project dir");
+    expect(result.reason).toContain("permitted by paths");
   });
 
-  test("Bash cd into own project dir under allowedPaths:[] is allowed", () => {
-    const ctx = makeClaudeCtx({ allowedPaths: [] });
+  test("Bash cd into own project dir with empty paths is allowed", () => {
+    const ctx = makeClaudeCtx();
     const input = {
       toolName: "Bash",
       toolInput: { command: `cd ${OWN_PROJECT_DIR}` },
@@ -1774,20 +1794,22 @@ describe("checkPathAccess with own Claude project dir", () => {
     };
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
-    expect(result.reason).toContain("accessing own Claude project dir");
+    expect(result.reason).toContain("permitted by paths");
   });
 
   test("coordinator case: worktreePath === rootRepo, own project dir allowed", () => {
     const coordRepo = "/Users/test/repo";
     const coordProjectDir = claudeProjectDirFor(coordRepo);
+    const agentDir = "/Users/test/repo/.ittybitty/agents/itsybitsy";
+    const agentsDir = "/Users/test/repo/.ittybitty/agents";
     const ctx: PathCheckContext = {
       agentId: "itsybitsy",
-      agentDir: "/Users/test/repo/.ittybitty/agents/itsybitsy",
+      agentDir,
       worktreePath: coordRepo,
-      agentsDir: "/Users/test/repo/.ittybitty/agents",
+      agentsDir,
       rootRepo: coordRepo,
       allowList: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
-      allowedPaths: [],
+      access: buildAccessFor({ agentDir, worktreePath: coordRepo, agentsDir, rootRepo: coordRepo }),
     };
     const input = {
       toolName: "Read",
@@ -1796,7 +1818,7 @@ describe("checkPathAccess with own Claude project dir", () => {
     };
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
-    expect(result.reason).toContain("accessing own Claude project dir");
+    expect(result.reason).toContain("permitted by paths");
   });
 });
 

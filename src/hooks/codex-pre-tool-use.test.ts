@@ -10,6 +10,31 @@ import {
   hookCodexPreToolUseDryRun,
 } from "./codex-pre-tool-use";
 import type { PathCheckContext } from "./agent-path";
+import { prepareAccessTable, type PathsConfig, type PreparedAccessTable } from "../sandbox";
+import { agentPathAccessTable } from "./paths-table";
+
+/**
+ * Build a prepared access table for the fixture agent. Empty paths lists by
+ * default (strict: only the worktree + runtime roots pass); pass a partial
+ * paths config to widen it.
+ */
+function makeAccess(
+  paths: Partial<PathsConfig> = {},
+  opts: { canSpawnChildren?: boolean } = {},
+): PreparedAccessTable {
+  return prepareAccessTable(
+    agentPathAccessTable({
+      paths: { allowRead: [], allowWrite: [], deny: [], ...paths },
+      agentDir: "/repo/.ittybitty/agents/agent-abc123",
+      worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
+      agentsDir: "/repo/.ittybitty/agents",
+      rootRepo: "/repo",
+      gitDir: "/repo/.git",
+      tmuxSock: "/private/tmp/tmux-501",
+      canSpawnChildren: opts.canSpawnChildren ?? false,
+    }),
+  );
+}
 
 function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
   return {
@@ -19,6 +44,7 @@ function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
     agentsDir: "/repo/.ittybitty/agents",
     rootRepo: "/repo",
     allowList: ["Read", "Write", "Edit", "Bash"],
+    access: makeAccess(),
     ...overrides,
   };
 }
@@ -111,17 +137,16 @@ describe("checkCodexPreToolUse — allow/deny matcher applies to Bash AND apply_
     expect(decision.reason).toContain("/private/tmp/codex-escape.txt");
   });
 
-  test("apply_patch: target in /private/tmp is allowed when agent.allowedPaths includes it", () => {
-    const ctx = makeCtx({ allowedPaths: ["/private/tmp"] });
+  test("apply_patch: target in /private/tmp is allowed when paths.allowWrite includes it", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/private/tmp"] }) });
     const patch =
       "*** Begin Patch\n*** Add File: /private/tmp/whitelisted.txt\n+ok\n*** End Patch\n";
     const decision = checkCodexPreToolUse(
       { toolName: "apply_patch", toolInput: { command: patch }, cwd: ctx.worktreePath },
       ctx,
     );
-    // If the agent's meta.json declares allowedPaths, we honor that list
-    // verbatim (do NOT override it with [worktreePath]) — same contract as
-    // claude-side hookCheckPath.
+    // If the agent's paths block declares /private/tmp as writable, the resolver
+    // honors it — same shared table as the claude-side hookCheckPath.
     expect(decision.decision).toBe("allow");
   });
 

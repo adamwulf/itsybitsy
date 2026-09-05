@@ -540,32 +540,75 @@ describe("buildPathIsolationSection", () => {
     rootRepoPath: "/repo",
   };
 
-  test("worktree agent without allowedPaths shows default message", () => {
+  test("worktree agent without paths shows the deny-by-default runtime roots", () => {
     const ctx = { ...baseCtx };
     const section = buildPathIsolationSection(ctx);
     expect(section).toContain("### Path Isolation");
     expect(section).toContain("You are isolated to your worktree at: /repo/.ittybitty/agents/agent-abc123/repo");
-    expect(section).toContain("You CAN access: Your worktree, ~/.claude, /tmp, and general system paths");
+    // Runtime roots the agent always gets, and the deny-by-default lists.
+    expect(section).toContain("You can always access these runtime roots:");
+    expect(section).toContain("your worktree (read and write)");
+    expect(section).toContain("your own agent.log");
+    expect(section).toContain("your Claude project directory and scratchpad");
+    expect(section).toContain("Read and write (allowWrite):");
+    expect(section).toContain("Read only (allowRead):");
+    expect(section).toContain("Denied (deny), overriding the lists above:");
+    expect(section).toContain("(none)");
     expect(section).toContain("The main repo at /repo");
+    expect(section).toContain("A bare `cd`");
+    // The retired permissive language is gone.
+    expect(section).not.toContain("~/.claude, /tmp, and general system paths");
     expect(section).not.toContain("additional paths");
   });
 
-  test("worktree agent with allowedPaths lists them", () => {
-    const ctx = { ...baseCtx, allowedPaths: ["/home/user/data", "/var/log"] };
+  test("worktree agent with paths lists allowWrite, allowRead and deny", () => {
+    const ctx: SessionContext = {
+      ...baseCtx,
+      paths: {
+        allowWrite: ["/home/user/data"],
+        allowRead: ["/var/log"],
+        deny: ["/home/user/data/.env"],
+      },
+    };
     const section = buildPathIsolationSection(ctx);
-    expect(section).toContain("and these additional paths:");
+    expect(section).toContain("Read and write (allowWrite):");
     expect(section).toContain("/home/user/data");
+    expect(section).toContain("Read only (allowRead):");
     expect(section).toContain("/var/log");
+    expect(section).toContain("Denied (deny), overriding the lists above:");
+    expect(section).toContain("/home/user/data/.env");
   });
 
-  test("worktree agent with empty allowedPaths shows default", () => {
-    const ctx = { ...baseCtx, allowedPaths: [] };
+  test("worktree agent with empty paths lists shows (none) and the missing-list note", () => {
+    const ctx: SessionContext = {
+      ...baseCtx,
+      paths: { allowRead: [], allowWrite: [], deny: [] },
+    };
     const section = buildPathIsolationSection(ctx);
-    expect(section).toContain("You CAN access: Your worktree, ~/.claude, /tmp, and general system paths");
-    expect(section).not.toContain("additional paths");
+    expect(section).toContain("(none)");
+    expect(section).toContain("a missing or empty list means your worktree and the runtime roots above only");
+    expect(section).not.toContain("~/.claude, /tmp, and general system paths");
   });
 
-  test("non-worktree (coordinator) shows repo path", () => {
+  test("sandbox enabled states EPERM and the Denials tab", () => {
+    const ctx: SessionContext = {
+      ...baseCtx,
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+    };
+    const section = buildPathIsolationSection(ctx);
+    expect(section).toContain("The kernel sandbox is ON");
+    expect(section).toContain("EPERM");
+    expect(section).toContain("Denials tab of `ib watch`");
+  });
+
+  test("sandbox absent/disabled states the hook is the only fence", () => {
+    const ctx = { ...baseCtx };
+    const section = buildPathIsolationSection(ctx);
+    expect(section).toContain("The kernel sandbox is OFF");
+    expect(section).not.toContain("EPERM");
+  });
+
+  test("non-worktree (coordinator) shows repo path and 'this repo' root", () => {
     const ctx: SessionContext = {
       role: "coordinator",
       agentId: "coordinator",
@@ -577,11 +620,12 @@ describe("buildPathIsolationSection", () => {
     };
     const section = buildPathIsolationSection(ctx);
     expect(section).toContain("You are working directly in the repo at: /repo");
-    expect(section).toContain("You CAN access: This repo, ~/.claude, /tmp, and general system paths");
+    expect(section).toContain("this repo (read and write)");
     expect(section).not.toContain("The main repo");
+    expect(section).not.toContain("~/.claude, /tmp, and general system paths");
   });
 
-  test("non-worktree coordinator with allowedPaths lists them", () => {
+  test("non-worktree coordinator with paths lists them", () => {
     const ctx: SessionContext = {
       role: "coordinator",
       agentId: "coordinator",
@@ -590,32 +634,51 @@ describe("buildPathIsolationSection", () => {
       branchName: "",
       worktreePath: "",
       rootRepoPath: "/repo",
-      allowedPaths: ["/data/shared"],
+      paths: { allowRead: [], allowWrite: ["/data/shared"], deny: [] },
     };
     const section = buildPathIsolationSection(ctx);
-    expect(section).toContain("and these additional paths:");
     expect(section).toContain("/data/shared");
   });
 
-  test("detectRole parses allowedPaths from meta.json", () => {
+  test("detectRole parses paths from meta.json", () => {
     const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: null,
       worker: false,
-      allowedPaths: ["/home/user/project", "/tmp/shared"],
+      paths: {
+        allowRead: ["/home/user/project"],
+        allowWrite: ["/tmp/shared"],
+        deny: ["/home/user/project/.env"],
+      },
     });
-    expect(ctx.allowedPaths).toEqual(["/home/user/project", "/tmp/shared"]);
+    expect(ctx.paths).toEqual({
+      allowRead: ["/home/user/project"],
+      allowWrite: ["/tmp/shared"],
+      deny: ["/home/user/project/.env"],
+    });
   });
 
-  test("detectRole allowedPaths undefined when not in meta", () => {
+  test("detectRole parses sandbox.enabled from meta.json", () => {
+    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
+    const ctx = detectRole(cwd, {
+      id: "agent-abc12345",
+      manager: null,
+      worker: false,
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+    });
+    expect(ctx.sandbox?.enabled).toBe(true);
+  });
+
+  test("detectRole paths undefined when not in meta", () => {
     const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: null,
       worker: false,
     });
-    expect(ctx.allowedPaths).toBeUndefined();
+    expect(ctx.paths).toBeUndefined();
+    expect(ctx.sandbox).toBeUndefined();
   });
 
   test("manager instructions include buildPathIsolationSection", async () => {
@@ -627,7 +690,7 @@ describe("buildPathIsolationSection", () => {
       branchName: "agent/agent-abc123",
       worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
       rootRepoPath: "/repo",
-      allowedPaths: ["/home/user/data"],
+      paths: { allowRead: [], allowWrite: ["/home/user/data"], deny: [] },
     };
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("### Path Isolation");
@@ -643,7 +706,7 @@ describe("buildPathIsolationSection", () => {
       branchName: "agent/agent-def67890",
       worktreePath: "/repo/.ittybitty/agents/agent-def67890/repo",
       rootRepoPath: "/repo",
-      allowedPaths: ["/var/data"],
+      paths: { allowRead: ["/var/data"], allowWrite: [], deny: [] },
     };
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("### Path Isolation");

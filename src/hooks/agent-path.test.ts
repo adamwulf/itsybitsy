@@ -1,12 +1,14 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, isInAllowedPaths, claudeProjectDirFor, hookCheckPath } from "./agent-path";
+import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, isInAllowedPaths, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON } from "./agent-path";
 import type { PathCheckInput, PathCheckContext } from "./agent-path";
 import { join } from "path";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { setUserHome, resetUserHome } from "../home";
 import { prepareAccessTable, type PathsConfig, type PreparedAccessTable } from "../sandbox";
-import { agentPathAccessTable } from "./paths-table";
+import { agentPathAccessTable, claudeScratchpadDirFor } from "./paths-table";
+
+const UID = process.getuid?.() ?? 0;
 
 /**
  * Build a prepared access table for a given agent layout. Empty paths lists by
@@ -1822,6 +1824,146 @@ describe("checkPathAccess with own Claude project dir", () => {
   });
 });
 
+// ── Phase B: own meta.json protection + resolver behaviour via the tools ─────
+
+describe("checkPathAccess — own meta.json write protection (Phase B)", () => {
+  const META = "/repo/.ittybitty/agents/agent-abc123/meta.json";
+
+  for (const tool of ["Write", "Edit", "MultiEdit"] as const) {
+    test(`${tool} on own meta.json → DENIED`, () => {
+      const ctx = makeCtx({ allowList: ["Read", "Write", "Edit", "MultiEdit", "Bash"] });
+      const result = checkPathAccess(makeInput({ toolName: tool, toolInput: { file_path: META } }), ctx);
+      expect(result.decision).toBe("deny");
+      expect(result.reason).toBe(META_WRITE_DENY_REASON);
+    });
+  }
+
+  test("a Bash redirect onto own meta.json → DENIED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(
+      makeInput({ toolName: "Bash", toolInput: { command: "echo {} > /repo/.ittybitty/agents/agent-abc123/meta.json" } }),
+      ctx,
+    );
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toBe(META_WRITE_DENY_REASON);
+  });
+
+  test("a sed -i in-place edit of own meta.json → DENIED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(
+      makeInput({ toolName: "Bash", toolInput: { command: "sed -i 's/x/y/' /repo/.ittybitty/agents/agent-abc123/meta.json" } }),
+      ctx,
+    );
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toBe(META_WRITE_DENY_REASON);
+  });
+
+  test("a redirect onto meta.json addressed relatively (../meta.json) → DENIED", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(
+      makeInput({
+        toolName: "Bash",
+        toolInput: { command: "echo {} > ../meta.json" },
+        cwd: "/repo/.ittybitty/agents/agent-abc123/repo",
+      }),
+      ctx,
+    );
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toBe(META_WRITE_DENY_REASON);
+  });
+
+  test("READING own meta.json is denied by step 10 (own dir), not the meta guard", () => {
+    const ctx = makeCtx();
+    const result = checkPathAccess(makeInput({ toolName: "Read", toolInput: { file_path: META } }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot access other agents' files");
+  });
+});
+
+describe("checkPathAccess — runtime roots and deny via the tools (Phase B)", () => {
+  test("scratchpad is allowed with EMPTY paths lists", () => {
+    const scratch = claudeScratchpadDirFor("/repo/.ittybitty/agents/agent-abc123/repo", UID);
+    const ctx = makeCtx();
+    const result = checkPathAccess(
+      makeInput({ toolName: "Write", toolInput: { file_path: `${scratch}/tmp.txt` } }),
+      ctx,
+    );
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toContain("permitted by paths");
+  });
+
+  test("other agents' dir is denied even when listed in allowWrite", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/repo/.ittybitty/agents"] }) });
+    const result = checkPathAccess(
+      makeInput({ toolName: "Write", toolInput: { file_path: "/repo/.ittybitty/agents/agent-other/repo/x.ts" } }),
+      ctx,
+    );
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("other agents");
+  });
+
+  test("main repo is denied even when listed in allowWrite", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/repo"] }) });
+    const result = checkPathAccess(
+      makeInput({ toolName: "Write", toolInput: { file_path: "/repo/src/main.ts" } }),
+      ctx,
+    );
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("work in your worktree");
+  });
+
+  test("deny **/.env denies <worktree>/.env (Read and Write) but not <worktree>/src/x", () => {
+    const ctx = makeCtx({ access: makeAccess({ deny: ["**/.env"] }) });
+    const env = "/repo/.ittybitty/agents/agent-abc123/repo/.env";
+    const read = checkPathAccess(makeInput({ toolName: "Read", toolInput: { file_path: env } }), ctx);
+    const write = checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: env } }), ctx);
+    expect(read.decision).toBe("deny");
+    expect(read.reason).toContain("matches a paths.deny entry");
+    expect(write.decision).toBe("deny");
+    const src = checkPathAccess(
+      makeInput({ toolName: "Write", toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/src/x.ts" } }),
+      ctx,
+    );
+    expect(src.decision).toBe("allow");
+  });
+});
+
+describe("checkPathAccess — Adam's §6.13 examples through Read and Write", () => {
+  let home: string;
+  beforeEach(async () => { home = await mkdtemp(join(tmpdir(), "adam-6-13-")); setUserHome(home); });
+  afterEach(async () => { resetUserHome(); await rm(home, { recursive: true, force: true }); });
+
+  // The paths reference the home dir, well outside the worktree/agents/repo, so
+  // steps 10/11 never fire and the resolver alone decides.
+  function ctxWith(paths: Partial<PathsConfig>): PathCheckContext {
+    return makeCtx({ access: makeAccess(paths) });
+  }
+  const read = (ctx: PathCheckContext, p: string) =>
+    checkPathAccess(makeInput({ toolName: "Read", toolInput: { file_path: p } }), ctx);
+  const write = (ctx: PathCheckContext, p: string) =>
+    checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: p } }), ctx);
+
+  test("allowWrite ~/Documents, allowRead ~/Documents/Important: Important is read-only", () => {
+    const ctx = ctxWith({ allowWrite: ["~/Documents"], allowRead: ["~/Documents/Important"] });
+    const important = join(home, "Documents", "Important", "x");
+    expect(read(ctx, important).decision).toBe("allow");
+    expect(write(ctx, important).decision).toBe("deny");
+    const other = join(home, "Documents", "other", "x");
+    expect(read(ctx, other).decision).toBe("allow");
+    expect(write(ctx, other).decision).toBe("allow");
+  });
+
+  test("allowRead ~, allowWrite ~/Documents: Documents is read-write, Desktop is read-only", () => {
+    const ctx = ctxWith({ allowRead: ["~"], allowWrite: ["~/Documents"] });
+    const doc = join(home, "Documents", "x");
+    expect(read(ctx, doc).decision).toBe("allow");
+    expect(write(ctx, doc).decision).toBe("allow");
+    const desk = join(home, "Desktop", "x");
+    expect(read(ctx, desk).decision).toBe("allow");
+    expect(write(ctx, desk).decision).toBe("deny");
+  });
+});
+
 // ── hookCheckPath with @system ────────────────────────────────────────────────
 
 describe("hookCheckPath with @system", () => {
@@ -1959,5 +2101,78 @@ describe("hookCheckPath writes state='running' to meta.json", () => {
 
     const meta = JSON.parse(await readFile(join(agentDir, "meta.json"), "utf-8"));
     expect(meta.state).toBe("running");
+  });
+});
+
+// ── hookCheckPath deny-by-default (Phase B invariant) ────────────────────────
+
+describe("hookCheckPath — deny by default (missing meta, malformed stdin)", () => {
+  let tempDir: string;
+  let agentDir: string;
+  let worktreeCwd: string;
+  let logged: string[] = [];
+  const originalLog = console.log;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "hook-deny-default-"));
+    agentDir = join(tempDir, ".ittybitty", "agents", "agent-test77");
+    worktreeCwd = join(agentDir, "repo");
+    await mkdir(join(worktreeCwd, ".claude"), { recursive: true });
+    await writeFile(
+      join(worktreeCwd, ".claude", "settings.local.json"),
+      JSON.stringify({ permissions: { allow: ["Read", "Bash"], deny: [] } }),
+    );
+    logged = [];
+    console.log = (msg: string) => { logged.push(msg); };
+  });
+
+  afterEach(async () => {
+    console.log = originalLog;
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("malformed stdin → DENY (was fail-open allow)", async () => {
+    await hookCheckPath("agent-test77", "not json at all");
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(decision.hookSpecificOutput.permissionDecisionReason).toBe("Failed to parse stdin");
+  });
+
+  test("a non-object payload → DENY", async () => {
+    await hookCheckPath("agent-test77", JSON.stringify([1, 2, 3]));
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+  });
+
+  test("a non-string tool_name → DENY", async () => {
+    await hookCheckPath("agent-test77", JSON.stringify({ tool_name: 42, tool_input: {}, cwd: worktreeCwd }));
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+  });
+
+  test("missing meta.json → DENY with the unreadable-meta reason", async () => {
+    // No meta.json is ever written for agent-test77.
+    const stdin = JSON.stringify({
+      tool_name: "Read",
+      tool_input: { file_path: join(worktreeCwd, "any.txt") },
+      cwd: worktreeCwd,
+    });
+    await hookCheckPath("agent-test77", stdin);
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(decision.hookSpecificOutput.permissionDecisionReason).toBe(META_UNREADABLE_DENY_REASON);
+  });
+
+  test("with meta present, a path outside the worktree → DENY (deny by default)", async () => {
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-test77", worker: true }));
+    const stdin = JSON.stringify({
+      tool_name: "Read",
+      tool_input: { file_path: "/etc/passwd" },
+      cwd: worktreeCwd,
+    });
+    await hookCheckPath("agent-test77", stdin);
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("is not in paths.allowRead/allowWrite");
   });
 });

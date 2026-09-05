@@ -579,3 +579,55 @@ describe("hookCodexPreToolUseDryRun — exercises real handler with synthetic pa
     await expect(hookCodexPreToolUseDryRun("bad agent id")).rejects.toThrow(/Invalid agent id/);
   });
 });
+
+// ── Phase B invariant: missing meta / malformed stdin → DENY ─────────────────
+
+describe("hookCodexPreToolUse — deny by default (Phase B invariant)", () => {
+  let tempHome: string;
+  let agentDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "codex-deny-default-"));
+    setUserHome(tempHome);
+    const typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+    await writeFile(
+      join(typesDir, "_all.md"),
+      "---\nname: _all\ndescription: shared\npermissions:\n  allow:\n    - Bash(ls:*)\n  deny: []\n---\n",
+    );
+    agentDir = join(tempHome, "fake-repo", ".ittybitty", "agents", "agent-nometa");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    // Deliberately NO meta.json.
+  });
+
+  afterEach(async () => {
+    resetUserHome();
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  async function run(stdin: string): Promise<Record<string, unknown>> {
+    let captured = "";
+    await hookCodexPreToolUse("agent-nometa", {
+      rawStdin: stdin,
+      agentDirOverride: agentDir,
+      skipSessionIdCapture: true,
+      write: (chunk: string) => { captured += chunk; return chunk.length; },
+    });
+    return JSON.parse(captured);
+  }
+
+  test("missing meta.json → deny", async () => {
+    const parsed = await run(JSON.stringify({
+      tool_name: "Bash",
+      tool_input: { command: "ls -la" },
+      cwd: join(agentDir, "repo"),
+    })) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } };
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain("meta.json");
+  });
+
+  test("malformed stdin → deny", async () => {
+    const parsed = await run("not json") as { hookSpecificOutput: { permissionDecision: string } };
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+  });
+});

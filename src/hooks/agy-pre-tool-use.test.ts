@@ -753,3 +753,53 @@ describe("hookAgyPreToolUseDryRun", () => {
     await expect(hookAgyPreToolUseDryRun("bad agent id")).rejects.toThrow(/Invalid agent id/);
   });
 });
+
+// ── Phase B invariant: missing meta / malformed stdin → DENY ─────────────────
+
+describe("hookAgyPreToolUse — deny by default (Phase B invariant)", () => {
+  let tempHome: string;
+  let agentDir: string;
+
+  beforeEach(async () => {
+    tempHome = await realpath(await mkdtemp(join(tmpdir(), "agy-deny-default-")));
+    setUserHome(tempHome);
+    const typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+    await writeFile(
+      join(typesDir, "_all.md"),
+      "---\nname: _all\ndescription: shared\npermissions:\n  allow:\n    - Bash(ls:*)\n  deny: []\n---\n",
+    );
+    agentDir = join(tempHome, "fake-repo", ".ittybitty", "agents", "agent-nometa");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    // Deliberately NO meta.json.
+  });
+
+  afterEach(async () => {
+    resetUserHome();
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  async function run(stdin: string): Promise<Record<string, unknown>> {
+    let captured = "";
+    await hookAgyPreToolUse("agent-nometa", {
+      rawStdin: stdin,
+      agentDirOverride: agentDir,
+      skipMetaWrites: true,
+      write: (chunk: string) => { captured += chunk; return chunk.length; },
+    });
+    return JSON.parse(captured);
+  }
+
+  test("missing meta.json → deny", async () => {
+    const parsed = await run(JSON.stringify({
+      toolCall: { name: "run_command", args: { CommandLine: "ls -la", Cwd: join(agentDir, "repo") } },
+    })) as { decision: string; reason: string };
+    expect(parsed.decision).toBe("deny");
+    expect(parsed.reason).toContain("meta.json");
+  });
+
+  test("malformed stdin → deny", async () => {
+    const parsed = await run("not json") as { decision: string };
+    expect(parsed.decision).toBe("deny");
+  });
+});

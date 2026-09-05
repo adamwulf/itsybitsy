@@ -220,9 +220,18 @@ trap 'log "script received SIGINT; sending SIGINT to Codex PID=$CLAUDE_PID"; kil
 # codex SessionStart write of codex_session_id (HIGH 2 from the Phase 4
 # review). The absolute ib path is used because codex's PATH may not match
 # the spawn shell's.
+#
+# CRITICAL: write-pid runs with stdin redirected from /dev/null so it NEVER
+# touches the tmux pane pty. write-pid is a bun process; codex was backgrounded
+# just above and switches the pane pty to RAW mode shortly after spawn. bun
+# snapshots the tty settings (still COOKED) when it starts and restores them on
+# exit — if write-pid ran on the pane tty that restore would land AFTER codex
+# went raw, putting the pty back into COOKED mode, so Enter inserts a newline
+# instead of submitting and the agent wedges. </dev/null keeps write-pid off the
+# tty entirely; its stdout/stderr go to the agent log so nothing is lost.
 META_JSON=${qStartMetaJson}
 if [[ -f "$META_JSON" ]]; then
-    ${shellQuote(input.ibBinaryPath)} write-pid ${shellQuote(input.agentId)} "$CLAUDE_PID" || log "write-pid failed (exit=$?); meta.json claude_pid not set"
+    ${shellQuote(input.ibBinaryPath)} write-pid ${shellQuote(input.agentId)} "$CLAUDE_PID" </dev/null >> "$AGENT_LOG" 2>&1 || log "write-pid failed (exit=$?); meta.json claude_pid not set"
 fi
 
 # Wait for codex to complete
@@ -418,9 +427,18 @@ trap 'log "script received SIGINT; sending SIGINT to Codex PID=$CLAUDE_PID"; kil
 # codex SessionStart write of codex_session_id (HIGH 2 from the Phase 4
 # review). The absolute ib path is used because codex's PATH may not match
 # the spawn shell's.
+#
+# CRITICAL: write-pid runs with stdin redirected from /dev/null so it NEVER
+# touches the tmux pane pty. write-pid is a bun process; codex was backgrounded
+# just above and switches the pane pty to RAW mode shortly after spawn. bun
+# snapshots the tty settings (still COOKED) when it starts and restores them on
+# exit — if write-pid ran on the pane tty that restore would land AFTER codex
+# went raw, putting the pty back into COOKED mode, so Enter inserts a newline
+# instead of submitting and the agent wedges. </dev/null keeps write-pid off the
+# tty entirely; its stdout/stderr go to the agent log so nothing is lost.
 META_JSON=${qResumeMetaJson}
 if [[ -f "$META_JSON" ]]; then
-    ${shellQuote(input.ibBinaryPath)} write-pid ${shellQuote(input.agentId)} "$CLAUDE_PID" || log "write-pid failed (exit=$?); meta.json claude_pid not set"
+    ${shellQuote(input.ibBinaryPath)} write-pid ${shellQuote(input.agentId)} "$CLAUDE_PID" </dev/null >> "$AGENT_LOG" 2>&1 || log "write-pid failed (exit=$?); meta.json claude_pid not set"
 fi
 
 # Wait for codex to complete

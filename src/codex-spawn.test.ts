@@ -541,6 +541,57 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
   });
 });
 
+describe("write-pid stdin is redirected off the pane tty (codex COOKED-mode wedge fix)", () => {
+  // Regression guard for the codex tty-cook wedge. `ib write-pid` is a bun
+  // process that runs in the foreground AFTER codex has been backgrounded and
+  // has switched the pane pty to RAW mode. If write-pid inherits the pane tty as
+  // stdin, bun's tty save/restore restores the COOKED settings it snapshotted at
+  // startup, undoing codex's raw-mode setup so Enter never submits and the agent
+  // wedges. Redirecting stdin from /dev/null keeps write-pid off the tty; its
+  // stdout/stderr go to the agent log so nothing is lost. Both templates spawn
+  // codex the same way, so BOTH must carry the redirect.
+  const startInput = () => ({
+    agentId: "agent-abc12345",
+    ibBinaryPath: "/usr/local/bin/ib",
+    agentDir: "/tmp/test",
+    codexModel: "gpt-5.4-mini",
+    absPromptFile: "/tmp/test/prompt.txt",
+    absMetaJson: "/tmp/test/meta.json",
+    absExitScript: "/tmp/test/exit-check.sh",
+    absAgentLog: "/tmp/test/agent.log",
+    absStderrLog: "/tmp/test/claude.stderr.log",
+  });
+  const resumeInput = () => ({
+    agentId: "agent-abc12345",
+    ibBinaryPath: "/usr/local/bin/ib",
+    agentDir: "/tmp/test",
+    codexSessionId: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+    absMetaJson: "/tmp/test/meta.json",
+    absExitScript: "/tmp/test/exit-check.sh",
+    absAgentLog: "/tmp/test/agent.log",
+    absStderrLog: "/tmp/test/claude.stderr.log",
+  });
+  // The full line the fix must produce in both templates: stdin off the tty,
+  // stdout/stderr appended to the agent log, and the OR-log fallback preserved
+  // so it still fires only on write-pid failure.
+  const EXPECTED_WRITE_PID_LINE =
+    `'/usr/local/bin/ib' write-pid 'agent-abc12345' "$CLAUDE_PID" </dev/null >> "$AGENT_LOG" 2>&1 || log "write-pid failed (exit=$?); meta.json claude_pid not set"`;
+
+  test("start.sh redirects write-pid stdin from /dev/null", () => {
+    const content = buildCodexStartContent(startInput());
+    // Indispensable part: stdin comes from /dev/null, not the pane tty.
+    expect(content).toContain(`write-pid 'agent-abc12345' "$CLAUDE_PID" </dev/null`);
+    // Full form, including log capture and preserved OR-log fallback.
+    expect(content).toContain(EXPECTED_WRITE_PID_LINE);
+  });
+
+  test("resume.sh redirects write-pid stdin from /dev/null", () => {
+    const content = buildCodexResumeContent(resumeInput());
+    expect(content).toContain(`write-pid 'agent-abc12345' "$CLAUDE_PID" </dev/null`);
+    expect(content).toContain(EXPECTED_WRITE_PID_LINE);
+  });
+});
+
 describe("appendCodexGitignoreEntry", () => {
   let tempDir: string;
 

@@ -1659,6 +1659,27 @@ export async function main() {
       console.log(`Tmux session: ${m.tmux_session || "none"}`);
       console.log(`Worktree:     ${m.worktree}`);
       console.log(`Archived:     ${agent.archived}`);
+      // Path policy (SPEC-PATH-ALLOWLIST §6.11): the resolved allow/deny lists
+      // and the kernel-sandbox switch, both frozen in meta.json at spawn. An
+      // absent `paths` block is a legacy meta written before the `paths:` split
+      // — deny-by-default at the hook (worktree and runtime roots only).
+      console.log(`Sandbox:      ${m.sandbox?.enabled ? "enabled" : "disabled"}`);
+      if (m.paths) {
+        const renderPaths = (label: string, entries: string[]): void => {
+          console.log(`  ${label}:`);
+          if (entries.length === 0) {
+            console.log(`    (none)`);
+          } else {
+            for (const p of entries) console.log(`    - ${p}`);
+          }
+        };
+        console.log(`Paths:`);
+        renderPaths("read+write", m.paths.allowWrite);
+        renderPaths("read-only", m.paths.allowRead);
+        renderPaths("deny", m.paths.deny);
+      } else {
+        console.log(`Paths:        none (worktree and runtime roots only)`);
+      }
       // Detail view: show the full prompt. Continuation lines are indented to
       // stay aligned under the label instead of being truncated (was slice(0, 200)).
       const promptIndent = " ".repeat("Prompt:       ".length);

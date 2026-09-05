@@ -124,6 +124,38 @@ describe("InfoPanelComponent", () => {
     expect(renderAgent(undefined)).not.toContain("🔒");
   });
 
+  test("renders the resolved path lists compactly, one line per non-empty list", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 12;
+    const agent = makeAgent({ id: "agent-paths" });
+    agent.meta.paths = {
+      allowWrite: ["/shared/lib"],
+      allowRead: ["/var/log"],
+      deny: ["**/.env"],
+    };
+    panel.agent = agent;
+    const text = panel.render(80).map(stripAnsi).join("\n");
+    expect(text).toContain("Paths rw: /shared/lib");
+    expect(text).toContain("Paths ro: /var/log");
+    expect(text).toContain("Paths deny: **/.env");
+  });
+
+  test("omits empty path lists and renders nothing when meta.paths is absent", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 10;
+    // Empty lists → no rows.
+    const emptyAgent = makeAgent({ id: "agent-paths-empty" });
+    emptyAgent.meta.paths = { allowRead: [], allowWrite: [], deny: [] };
+    panel.agent = emptyAgent;
+    expect(panel.render(80).map(stripAnsi).join("\n")).not.toContain("Paths ");
+
+    // Absent block (legacy meta) → no rows.
+    const legacyAgent = makeAgent({ id: "agent-paths-legacy" });
+    delete legacyAgent.meta.paths;
+    panel.agent = legacyAgent;
+    expect(panel.render(80).map(stripAnsi).join("\n")).not.toContain("Paths ");
+  });
+
   test("shows BOTH nickname and id when a nickname is set", () => {
     const panel = new InfoPanelComponent();
     panel.displayHeight = 10;

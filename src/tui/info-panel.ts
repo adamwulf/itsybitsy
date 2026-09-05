@@ -125,6 +125,23 @@ export class InfoPanelComponent implements Component {
       lines.push(truncateToWidth(`🔒 ${DIM}Sandboxed${RESET}`, width, ""));
     }
 
+    // Resolved path policy (SPEC-PATH-ALLOWLIST §6.11), frozen in meta.paths.
+    // Each non-empty list is shown compact on one truncated line so the operator
+    // sees an agent's fenced paths without leaving the dashboard; `ib info <id>`
+    // prints the full untruncated lists. Absent/empty lists mean the worktree
+    // and runtime roots only, so nothing is rendered — no clutter for the common
+    // deny-by-default case.
+    const paths = agent.meta.paths;
+    if (paths) {
+      const summarizePaths = (label: string, entries: string[]): void => {
+        if (entries.length === 0) return;
+        lines.push(truncateToWidth(`${DIM}${label}:${RESET} ${entries.join(", ")}`, width, ""));
+      };
+      summarizePaths("Paths rw", paths.allowWrite);
+      summarizePaths("Paths ro", paths.allowRead);
+      summarizePaths("Paths deny", paths.deny);
+    }
+
     // Identity line — only shown when a nickname is set, so the canonical id
     // stays visible/copyable: `nickname (id: <id>)`. The sidebar tree shows the
     // nickname ALONE, so without this the real id would be hidden. When there's

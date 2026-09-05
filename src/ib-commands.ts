@@ -104,6 +104,7 @@ import { timed } from "./perf";
 import { WATCHDOG_SENTINEL } from "./watchdog";
 import {
   anchorRelativePaths,
+  findRelativeEscapes,
   generateProfile,
   canonicalizePathsConfig,
   canonicalizeSandboxPath,
@@ -2559,8 +2560,19 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
   // Anchor relative (./ ../) entries at this agent's main repo root, exactly as
   // newAgent does at spawn — agent.repoPath is `<repo>` and agentDir is
   // `<repo>/.ittybitty/agents/<id>` — so the refreshed meta.paths holds only
-  // absolute paths (SPEC-PATH-ALLOWLIST.md 6.2).
+  // absolute paths (SPEC-PATH-ALLOWLIST.md 6.2). Known limit: if the repo has
+  // MOVED since spawn, refresh anchors at the stale `agent.repoPath` silently,
+  // mirroring the resume path's own fallback to the recorded repo path.
   const refreshRepoRoot = (await resolveGitRoot(agent.repoPath)) || agent.repoPath;
+  // Same SAFETY gate as newAgent: a relative climb to `/` or the home root is a
+  // refresh ERROR, caught before anchoring erases the relative origin.
+  const refreshEscapes = findRelativeEscapes(merged.paths, refreshRepoRoot, userHome());
+  if (refreshEscapes.length > 0) {
+    const detail = refreshEscapes.map((e) => `"${e.entry}" → ${e.resolved}`).join(", ");
+    const msg = `sandbox refresh: relative paths entry ${detail} climbs out to the filesystem root or your home directory; a fully-open grant must be explicit — write "/" or "~" in the paths block if that is intended.`;
+    await logAgent(agentDir, `[sandbox refresh] ${msg}`);
+    return { ok: false, exitCode: 1, stdout: "", stderr: msg };
+  }
   let newPaths: PathsConfig;
   try {
     const anchoredPaths = anchorRelativePaths(merged.paths, refreshRepoRoot);
@@ -5360,6 +5372,21 @@ export async function newAgent(
     agentTypeDef,
   ]);
   const resolvedSandboxConfig = mergedSandboxLayers.sandbox;
+  // SAFETY: a relative entry that climbs to `/` or the home root anchors to a
+  // filesystem-wide (or whole-home) grant. The single model requires fully-open
+  // to be explicit (`allowRead: ["/"]` / `["~"]`), so this is a spawn ERROR, not
+  // a warning — caught here where the relative origin is still visible, before
+  // anchoring erases it (SPEC-PATH-ALLOWLIST.md 6.11).
+  const spawnEscapes = findRelativeEscapes(mergedSandboxLayers.paths, rootRepoPath, userHome());
+  if (spawnEscapes.length > 0) {
+    const detail = spawnEscapes.map((e) => `"${e.entry}" → ${e.resolved}`).join(", ");
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Error: relative paths entry ${detail} climbs out to the filesystem root or your home directory; a fully-open grant must be explicit — write "/" or "~" in the paths block if that is intended.`,
+    };
+  }
   let resolvedPathsConfig: PathsConfig;
   try {
     // Anchor relative (./ ../) entries at the main repo root the worktree is

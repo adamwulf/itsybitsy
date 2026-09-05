@@ -1,8 +1,8 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON, agentProtectedWritePaths, systemProtectedWritePaths, protectedConfigWriteDenyReason } from "./agent-path";
+import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON, agentProtectedWritePaths, systemProtectedWritePaths, protectedConfigWriteDenyReason, matchProtectedWrite } from "./agent-path";
 import type { PathCheckInput, PathCheckContext } from "./agent-path";
 import { join } from "path";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import { setUserHome, resetUserHome } from "../home";
 import { prepareAccessTable, type PathsConfig, type PreparedAccessTable } from "../sandbox";
@@ -1906,6 +1906,62 @@ describe("checkPathAccess — @system protected config writes (Phase B security)
     );
     expect(result.decision).toBe("allow"); // allowWrite grants it; no protected-write guard fires
   });
+
+  test("@system's LEGITIMATE writes are NOT in the protected list (teams.json, agents/<id>/meta.json)", () => {
+    const list = systemProtectedWritePaths(ITSY);
+    expect(matchProtectedWrite(list, join(ITSY, "teams.json"))).toBeNull();
+    expect(matchProtectedWrite(list, join(ITSY, "agents", "agent-xyz", "meta.json"))).toBeNull();
+    // Sanity: a protected path still matches.
+    expect(matchProtectedWrite(list, CONFIG)).not.toBeNull();
+  });
+
+  test("@system Write to teams.json is ALLOWED (a legitimate write, not protected)", () => {
+    const result = checkPathAccess(
+      makeInput({ toolName: "Write", toolInput: { file_path: join(ITSY, "teams.json") } }),
+      systemCtx(),
+    );
+    expect(result.decision).toBe("allow");
+  });
+
+  test("@system Write under agents/<id>/ is ALLOWED (a legitimate write, not protected)", () => {
+    const result = checkPathAccess(
+      makeInput({ toolName: "Write", toolInput: { file_path: join(ITSY, "agents", "agent-xyz", "outbox.json") } }),
+      systemCtx(),
+    );
+    expect(result.decision).toBe("allow");
+  });
+
+  test("the guard fires through a SYMLINKED parent dir (protected paths are canonicalized)", async () => {
+    // real/.itsybitsy holds a config file; `link` is a symlink to `real`. The
+    // agent addresses config.json through the symlink; checkFilePath realpath's
+    // the target, so the protected entry must be canonicalized too or the match
+    // is defeated. Asserting the SPECIFIC protected reason proves the guard
+    // (step 6) fired rather than the resolver.
+    const base = await mkdtemp(join(tmpdir(), "protected-symlink-"));
+    const realItsy = join(base, "real", ".itsybitsy");
+    await mkdir(realItsy, { recursive: true });
+    await writeFile(join(realItsy, "config.json"), "{}");
+    const linkRoot = join(base, "link");
+    await symlink(join(base, "real"), linkRoot);
+    const linkItsy = join(linkRoot, ".itsybitsy");
+    const ctx: PathCheckContext = {
+      agentId: "@system",
+      agentDir: linkItsy,
+      worktreePath: linkItsy,
+      agentsDir: "",
+      rootRepo: linkItsy,
+      allowList: ["Write"],
+      access: buildAccessFor({ agentDir: linkItsy, worktreePath: linkItsy, agentsDir: join(linkItsy, "agents"), rootRepo: linkItsy, canSpawnChildren: true }),
+      protectedWritePaths: systemProtectedWritePaths(linkItsy),
+    };
+    const result = checkPathAccess(
+      makeInput({ toolName: "Write", toolInput: { file_path: join(linkItsy, "config.json") } }),
+      ctx,
+    );
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("protected coordinator configuration");
+    await rm(base, { recursive: true, force: true });
+  });
 });
 
 describe("checkPathAccess — runtime roots and deny via the tools (Phase B)", () => {
@@ -2121,6 +2177,39 @@ describe("hookCheckPath with @system", () => {
     const stdin = JSON.stringify({
       tool_name: "Read",
       tool_input: { file_path: join(typesDir, "_all.md") },
+      cwd: home,
+    });
+    await hookCheckPath("@system", stdin);
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("allow");
+  });
+
+  test("Write to teams.json is ALLOWED end-to-end (a legitimate coordinator write)", async () => {
+    const home = join(tempHome, ".itsybitsy");
+    await writeFile(
+      join(home, ".claude", "settings.local.json"),
+      JSON.stringify({ permissions: { allow: ["Write"], deny: [] } }),
+    );
+    const stdin = JSON.stringify({
+      tool_name: "Write",
+      tool_input: { file_path: join(home, "teams.json") },
+      cwd: home,
+    });
+    await hookCheckPath("@system", stdin);
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("allow");
+  });
+
+  test("Write under agents/<id>/ is ALLOWED end-to-end (a legitimate coordinator write)", async () => {
+    const home = join(tempHome, ".itsybitsy");
+    await mkdir(join(home, "agents", "agent-child"), { recursive: true });
+    await writeFile(
+      join(home, ".claude", "settings.local.json"),
+      JSON.stringify({ permissions: { allow: ["Write"], deny: [] } }),
+    );
+    const stdin = JSON.stringify({
+      tool_name: "Write",
+      tool_input: { file_path: join(home, "agents", "agent-child", "outbox.json") },
       cwd: home,
     });
     await hookCheckPath("@system", stdin);

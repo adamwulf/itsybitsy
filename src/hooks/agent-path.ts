@@ -22,7 +22,7 @@ import {
   claudeProjectDirFor,
   pathDenialReason,
 } from "./paths-table";
-import { resolvePreparedAccess, type PathOperation, type PreparedAccessTable } from "../sandbox";
+import { canonicalizeSandboxPath, resolvePreparedAccess, type PathOperation, type PreparedAccessTable } from "../sandbox";
 
 // Re-exported for existing callers/tests that import it from this module; the
 // definition moved to ./paths-table to break the import cycle.
@@ -184,24 +184,35 @@ export function protectedConfigWriteDenyReason(path: string): string {
 /**
  * The protected-write list for a normal worktree agent: only its own meta.json
  * (the hook reads its path lists and canSpawnChildren from it).
+ *
+ * The path is canonicalized (longest-existing-prefix, resolving symlinks) so it
+ * matches the realpath'd inbound path in checkFilePath even when a parent
+ * directory is a symlink — `agentDir` here is derived from cwd and is NOT
+ * necessarily realpath'd.
  */
 export function agentProtectedWritePaths(agentDir: string): ProtectedWritePath[] {
-  return [{ path: join(agentDir, "meta.json"), subtree: false, reason: META_WRITE_DENY_REASON }];
+  return [{
+    path: canonicalizeSandboxPath(join(agentDir, "meta.json")),
+    subtree: false,
+    reason: META_WRITE_DENY_REASON,
+  }];
 }
 
 /**
  * The protected-write list for the @system coordinator, whose worktree root is
  * its whole `~/.itsybitsy` home: the agent-types dir (widening its own layers),
  * config.json / repos.json / layout.json (widening the harness), and the sealed
- * dir. `itsybitsyHome` is the resolved `~/.itsybitsy` directory.
+ * dir. `itsybitsyHome` is the resolved `~/.itsybitsy` directory. Each path is
+ * canonicalized (symlink-resolving) so a symlinked parent cannot defeat the
+ * match against the realpath'd inbound path.
  */
 export function systemProtectedWritePaths(itsybitsyHome: string): ProtectedWritePath[] {
   const dir = (name: string): ProtectedWritePath => {
-    const p = join(itsybitsyHome, name);
+    const p = canonicalizeSandboxPath(join(itsybitsyHome, name));
     return { path: p, subtree: true, reason: protectedConfigWriteDenyReason(p) };
   };
   const file = (name: string): ProtectedWritePath => {
-    const p = join(itsybitsyHome, name);
+    const p = canonicalizeSandboxPath(join(itsybitsyHome, name));
     return { path: p, subtree: false, reason: protectedConfigWriteDenyReason(p) };
   };
   return [

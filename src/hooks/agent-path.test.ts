@@ -5,6 +5,7 @@ import { join } from "path";
 import { mkdir, mkdtemp, readFile, rm, writeFile, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import { setUserHome, resetUserHome } from "../home";
+import { parseDenials } from "../agents";
 import { prepareAccessTable, type PathsConfig, type PreparedAccessTable } from "../sandbox";
 import { agentPathAccessTable, claudeScratchpadDirFor } from "./paths-table";
 
@@ -788,6 +789,128 @@ describe("checkPathAccess", () => {
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
+  });
+});
+
+// ── advisory Bash path scanner ───────────────────────────────────────────────
+
+describe("checkPathAccess — advisory Bash path scanner", () => {
+  let home: string;
+
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), "bash-path-scanner-home-"));
+    setUserHome(home);
+  });
+
+  afterEach(async () => {
+    resetUserHome();
+    await rm(home, { recursive: true, force: true });
+  });
+
+  const run = (command: string, paths: Partial<PathsConfig> = {}) =>
+    checkPathAccess(
+      makeInput({ toolName: "Bash", toolInput: { command } }),
+      makeCtx({ access: makeAccess(paths) }),
+    );
+
+  test("absolute reads are denied by empty paths and allowed by allowRead", () => {
+    const denied = run("cat /etc/passwd");
+    expect(denied.decision).toBe("deny");
+    expect(denied.reason).toContain("read");
+    expect(denied.reason).toContain("passwd");
+    expect(run("cat /etc/passwd", { allowRead: ["/etc"] }).decision).toBe("allow");
+  });
+
+  test("home paths expand before resolving, including glob directory prefixes", () => {
+    const ssh = run("cat ~/.ssh/id_rsa");
+    expect(ssh.decision).toBe("deny");
+    expect(ssh.reason).toContain(join(home, ".ssh", "id_rsa"));
+
+    const deniedGlob = run("ls ~/Documents/*.md");
+    expect(deniedGlob.decision).toBe("deny");
+    expect(deniedGlob.reason).toContain(join(home, "Documents"));
+    expect(run("ls ~/Documents/*.md", { allowRead: [join(home, "Documents")] }).decision).toBe("allow");
+    expect(run("cat $HOME/Documents/x", { allowRead: [join(home, "Documents")] }).decision).toBe("allow");
+    expect(run("cat ${HOME}/Documents/x", { allowRead: [join(home, "Documents")] }).decision).toBe("allow");
+  });
+
+  test("redirect targets are writes, whether separate, fd-prefixed, or glued", () => {
+    expect(run("echo x > /tmp/out", { allowRead: ["/tmp"] }).decision).toBe("deny");
+    expect(run("echo x > /tmp/out", { allowWrite: ["/tmp"] }).decision).toBe("allow");
+
+    // The embedded floor grants /dev as allowWrite. With an empty table the
+    // same stderr redirect is denied, proving it is classified as a write.
+    expect(run("cat missing 2>/dev/null").decision).toBe("deny");
+    expect(run("cat missing 2>/dev/null", { allowWrite: ["/dev"] }).decision).toBe("allow");
+    expect(run("echo x 1>|/tmp/out", { allowWrite: ["/tmp"] }).decision).toBe("allow");
+  });
+
+  test("cp and mv classify only their last argument as a write", () => {
+    expect(run("cp a /Users/me/x", { allowRead: ["/Users/me"] }).decision).toBe("deny");
+    expect(run("cp a /Users/me/x", { allowWrite: ["/Users/me"] }).decision).toBe("allow");
+    expect(run("mv a /Users/me/x", { allowRead: ["/Users/me"] }).decision).toBe("deny");
+  });
+
+  test("tee and sed in-place path arguments are writes", () => {
+    expect(run("tee ~/notes.txt", { allowRead: [home] }).decision).toBe("deny");
+    expect(run("tee ~/notes.txt", { allowWrite: [home] }).decision).toBe("allow");
+    expect(run("sed -i s/x/y/ ~/notes.txt", { allowRead: [home] }).decision).toBe("deny");
+    expect(run("sed --in-place=.bak s/x/y/ ~/notes.txt", { allowWrite: [home] }).decision).toBe("allow");
+  });
+
+  test.each(["mkdir", "touch", "rm", "rmdir", "chmod 600"])(
+    "%s path arguments are writes",
+    (verb) => {
+      const command = `${verb} ${home}/target`;
+      expect(run(command, { allowRead: [home] }).decision).toBe("deny");
+      expect(run(command, { allowWrite: [home] }).decision).toBe("allow");
+    },
+  );
+
+  test("long and one-character short flag path suffixes are scanned", () => {
+    expect(run("tool --output=/etc/passwd").decision).toBe("deny");
+    expect(run("tool -I/etc").decision).toBe("deny");
+    expect(run("tool -abc/etc").decision).toBe("allow");
+  });
+
+  test.each([
+    "git log HEAD..main",
+    "git diff origin/main...HEAD",
+    "curl https://example.com/x",
+  ])("non-path token %s is ignored", (command) => {
+    expect(run(command).decision).toBe("allow");
+  });
+
+  test("quoted command-line prose with a path fails closed, while a quoted heredoc body is ignored", () => {
+    const noisy = run('ib send other "see /etc/passwd"', { allowRead: ["/etc"] });
+    expect(noisy.decision).toBe("deny");
+    expect(noisy.reason).toContain("/etc/passwd");
+    expect(noisy.reason).toContain("quoted-delimiter heredoc");
+
+    const heredoc = "ib send other <<'EOF'\nsee /etc/passwd\nEOF";
+    expect(run(heredoc).decision).toBe("allow");
+  });
+
+  test("runtime roots pass: the worktree and Claude scratchpad", () => {
+    const ctx = makeCtx();
+    const worktreeFile = `${ctx.worktreePath}/src/index.ts`;
+    const scratchpad = `${claudeScratchpadDirFor(ctx.worktreePath, UID)}/note.txt`;
+    expect(run(`cat ${worktreeFile}`).decision).toBe("allow");
+    expect(run(`touch ${scratchpad}`).decision).toBe("allow");
+  });
+
+  test("structural traversal and absolute needles fire before the advisory resolver", () => {
+    const traversal = run("cat ../../agent-other/repo/.env");
+    expect(traversal.reason).toContain("other agents");
+    expect(traversal.reason).not.toContain("paths.allowRead/allowWrite");
+
+    const sibling = run("cat /repo/.ittybitty/agents/agent-other/repo/.env");
+    expect(sibling.reason).toContain("other agents' directory");
+    expect(sibling.reason).not.toContain("paths.allowRead/allowWrite");
+
+    const main = run("cat /repo/src/index.ts");
+    expect(main.reason).toContain("main repo");
+    expect(main.reason).not.toContain("paths.allowRead/allowWrite");
   });
 });
 
@@ -1942,29 +2065,32 @@ describe("checkPathAccess — @system protected config writes (Phase B security)
     // is defeated. Asserting the SPECIFIC protected reason proves the guard
     // (step 6) fired rather than the resolver.
     const base = await mkdtemp(join(tmpdir(), "protected-symlink-"));
-    const realItsy = join(base, "real", ".itsybitsy");
-    await mkdir(realItsy, { recursive: true });
-    await writeFile(join(realItsy, "config.json"), "{}");
-    const linkRoot = join(base, "link");
-    await symlink(join(base, "real"), linkRoot);
-    const linkItsy = join(linkRoot, ".itsybitsy");
-    const ctx: PathCheckContext = {
-      agentId: "@system",
-      agentDir: linkItsy,
-      worktreePath: linkItsy,
-      agentsDir: "",
-      rootRepo: linkItsy,
-      allowList: ["Write"],
-      access: buildAccessFor({ agentDir: linkItsy, worktreePath: linkItsy, agentsDir: join(linkItsy, "agents"), rootRepo: linkItsy, canSpawnChildren: true }),
-      protectedWritePaths: systemProtectedWritePaths(linkItsy),
-    };
-    const result = checkPathAccess(
-      makeInput({ toolName: "Write", toolInput: { file_path: join(linkItsy, "config.json") } }),
-      ctx,
-    );
-    expect(result.decision).toBe("deny");
-    expect(result.reason).toContain("protected coordinator configuration");
-    await rm(base, { recursive: true, force: true });
+    try {
+      const realItsy = join(base, "real", ".itsybitsy");
+      await mkdir(realItsy, { recursive: true });
+      await writeFile(join(realItsy, "config.json"), "{}");
+      const linkRoot = join(base, "link");
+      await symlink(join(base, "real"), linkRoot);
+      const linkItsy = join(linkRoot, ".itsybitsy");
+      const ctx: PathCheckContext = {
+        agentId: "@system",
+        agentDir: linkItsy,
+        worktreePath: linkItsy,
+        agentsDir: "",
+        rootRepo: linkItsy,
+        allowList: ["Write"],
+        access: buildAccessFor({ agentDir: linkItsy, worktreePath: linkItsy, agentsDir: join(linkItsy, "agents"), rootRepo: linkItsy, canSpawnChildren: true }),
+        protectedWritePaths: systemProtectedWritePaths(linkItsy),
+      };
+      const result = checkPathAccess(
+        makeInput({ toolName: "Write", toolInput: { file_path: join(linkItsy, "config.json") } }),
+        ctx,
+      );
+      expect(result.decision).toBe("deny");
+      expect(result.reason).toContain("protected coordinator configuration");
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
   });
 });
 
@@ -2355,5 +2481,31 @@ describe("hookCheckPath — deny by default (missing meta, malformed stdin)", ()
     const decision = JSON.parse(logged[0]!);
     expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
     expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("is not in paths.allowRead/allowWrite");
+  });
+
+  test("a scanner denial is logged in the format consumed by the Denials tab", async () => {
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify({
+        id: "agent-test77",
+        worker: true,
+        paths: { allowRead: [], allowWrite: [], deny: [] },
+      }),
+    );
+    const stdin = JSON.stringify({
+      tool_name: "Bash",
+      tool_input: { command: "cat /etc/passwd" },
+      cwd: worktreeCwd,
+    });
+
+    await hookCheckPath("agent-test77", stdin);
+
+    const logLines = (await readFile(join(agentDir, "agent.log"), "utf-8")).split("\n");
+    const denials = parseDenials(logLines);
+    expect(denials).toHaveLength(1);
+    expect(denials[0]!.line).toContain("Permission denied: Bash");
+    expect(denials[0]!.line).toContain("read");
+    expect(denials[0]!.line).toContain("passwd");
+    expect(denials[0]!.line).toContain("paths.allowRead/allowWrite");
   });
 });

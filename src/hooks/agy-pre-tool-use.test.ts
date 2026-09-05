@@ -87,6 +87,18 @@ describe("checkAgyPreToolUse — path isolation", () => {
     expect(d.reason).toContain("other agents");
   });
 
+  test("run_command reaches the advisory scanner for ordinary absolute paths", () => {
+    const ctx = makeCtx();
+    const d = checkAgyPreToolUse(
+      { toolName: "run_command", toolArgs: { CommandLine: "cat /etc/passwd", Cwd: ctx.worktreePath } },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("read");
+    expect(d.reason).toContain("passwd");
+    expect(d.reason).toContain("paths.allowRead/allowWrite");
+  });
+
   test("run_command cat into a sibling worktree is a PATH-ISOLATION deny under the default allow list", () => {
     // cat IS allow-listed (bare Bash). The denial must come from path isolation,
     // not the allow list — this fails before boundary-review fix 1 and passes

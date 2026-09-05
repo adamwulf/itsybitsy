@@ -87,6 +87,18 @@ describe("checkCodexPreToolUse — allow/deny matcher applies to Bash AND apply_
     expect(decision.reason).toContain("other agents");
   });
 
+  test("Bash reaches the advisory scanner for ordinary absolute paths", () => {
+    const ctx = makeCtx({ allowList: ["Bash"] });
+    const decision = checkCodexPreToolUse(
+      { toolName: "Bash", toolInput: { command: "cat /etc/passwd" }, cwd: ctx.worktreePath },
+      ctx,
+    );
+    expect(decision.decision).toBe("deny");
+    expect(decision.reason).toContain("read");
+    expect(decision.reason).toContain("passwd");
+    expect(decision.reason).toContain("paths.allowRead/allowWrite");
+  });
+
   test("apply_patch: target inside worktree is allowed", () => {
     const ctx = makeCtx();
     const patch = "*** Begin Patch\n*** Add File: src/new.ts\n+x\n*** End Patch\n";

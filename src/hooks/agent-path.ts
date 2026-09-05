@@ -632,21 +632,21 @@ function startsWithPathAnchor(s: string): boolean {
  */
 function bashPathPortion(token: string): string | null {
   if (startsWithPathAnchor(token)) return token;
-  if (token.startsWith("-")) {
+  if (token.startsWith("--")) {
     const eq = token.indexOf("=");
-    if (eq !== -1) {
+    if (eq > 2) {
       // --flag=<path>
       const rhs = token.slice(eq + 1);
       return startsWithPathAnchor(rhs) ? rhs : null;
     }
-    if (!token.startsWith("--")) {
-      // -X<path>: the path starts at the first anchor char after the flag.
-      const idx = token.search(/[/~$]/);
-      if (idx > 0) {
-        const rhs = token.slice(idx);
-        if (startsWithPathAnchor(rhs)) return rhs;
-      }
-    }
+    return null;
+  }
+  if (token.startsWith("-") && token.length > 2) {
+    // -X<path>: X is exactly one short-option character and the right-hand
+    // side starts immediately after it. Do not reinterpret a value such as
+    // `-abc/etc` as the unrelated absolute path `/etc`.
+    const rhs = token.slice(2);
+    if (startsWithPathAnchor(rhs)) return rhs;
   }
   return null;
 }
@@ -728,8 +728,10 @@ function scanBashCommandPaths(
         return { decision: "deny", reason: pathDenialReason(ctx.access, abs, op) };
       }
     } catch {
-      // A path with no resolvable prefix cannot be checked safely — advisory
-      // layer, so leave it to the kernel rather than crashing the hook.
+      // This scanner is the only path fence in hook-only mode. An unexpected
+      // resolver failure must fail closed; allowing here could turn a malformed
+      // spelling into a write the access table would have denied.
+      return { decision: "deny", reason: bashPathNoiseDenyReason(rawToken) };
     }
     return null;
   };

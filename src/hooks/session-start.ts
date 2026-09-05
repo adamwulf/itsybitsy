@@ -435,7 +435,7 @@ export function buildPathIsolationSection(ctx: SessionContext): string {
 - your Claude project directory and scratchpad`;
 
   const paths = ctx.paths;
-  const listsBlock = `Your agent type resolves to exactly these path lists (a missing or empty list means ${baseRoot} and the runtime roots above only — nothing else):
+  const listsBlock = `Your agent type resolves to exactly these path lists. A missing \`paths\` block, or empty \`allowRead\` and \`allowWrite\` lists, grants only ${baseRoot} and the runtime roots above — nothing else:
 ${renderPathList("Read only (allowRead)", paths?.allowRead)}
 ${renderPathList("Read and write (allowWrite)", paths?.allowWrite)}
 ${renderPathList("Denied (deny), overriding the lists above", paths?.deny)}`;

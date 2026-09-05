@@ -586,7 +586,7 @@ describe("buildPathIsolationSection", () => {
     };
     const section = buildPathIsolationSection(ctx);
     expect(section).toContain("(none)");
-    expect(section).toContain("a missing or empty list means your worktree and the runtime roots above only");
+    expect(section).toContain("A missing `paths` block, or empty `allowRead` and `allowWrite` lists");
     expect(section).not.toContain("~/.claude, /tmp, and general system paths");
   });
 

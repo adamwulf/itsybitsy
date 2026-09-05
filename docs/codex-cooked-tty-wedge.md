@@ -137,6 +137,15 @@ The essential part is `</dev/null` on stdin (proven: `BGWRITENULL` = 10/10 raw v
 not what stops the cook. Also audit any OTHER foreground bun/`ib` call that runs
 between codex being backgrounded and `wait` (today there is only `write-pid`).
 
+**Verified end-to-end (2026-09-05):** a real before/after A/B through
+`ib new-agent` (15 spawns each, tty sampled across startup) — installed/buggy `ib`
+**15/15 wedged**, locally-built `ib` with this fix **0/15 wedged**. Implemented on
+branch `agent/codex-debug`: revert `9bb7816` (drops the ineffective computer-use
+flags), fix `a30ea1e` (both templates + regression tests; `bun test` 5385 pass,
+`tsc` clean). Deploy by merging to main, rebuilding + reinstalling the `ib` binary,
+and restarting `ib watch`. Already-wedged agents still need the manual recovery
+above (the fix only prevents the wedge on newly-spawned agents).
+
 ## Ruled out (kept for the record)
 
 - **NOT the computer-use helpers.** Disabling them (`-c

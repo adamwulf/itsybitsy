@@ -459,6 +459,55 @@ describe("checkAgentTypeFloors (init-types --check)", () => {
   });
 });
 
+describe("ib init-types --check (subprocess exit code)", () => {
+  let tempHome: string;
+  // Run the real CLI entry point (the shipped binary's dispatch path) so the
+  // documented gate precondition — exit 0 when floors match, exit 1 otherwise —
+  // is exercised end to end. The subprocess reads HOME from the environment
+  // (userHome() step 2), so populate the SAME dir in-process first.
+  const indexPath = join(import.meta.dir, "..", "index.ts");
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-check-cli-"));
+  });
+
+  afterEach(async () => {
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  async function populateFloor(): Promise<void> {
+    setUserHome(tempHome);
+    try {
+      await initAgentTypes();
+    } finally {
+      resetUserHome();
+    }
+  }
+
+  async function runCheckExitCode(): Promise<number> {
+    const proc = Bun.spawn(["bun", indexPath, "init-types", "--check"], {
+      env: { ...process.env, HOME: tempHome },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return await proc.exited;
+  }
+
+  test("exits 0 when the local floor matches the embedded default", async () => {
+    await populateFloor();
+    expect(await runCheckExitCode()).toBe(0);
+  });
+
+  test("exits 1 when a floor entry is missing locally", async () => {
+    await populateFloor();
+    // Strip the whole floor from the live _all.md (ib init-types never rewrites
+    // an existing file, which is exactly the drift this gate catches).
+    const allPath = join(tempHome, ".itsybitsy", "agent-types", "_all.md");
+    await Bun.write(allPath, "---\nname: _all\nspawnable: false\n---\nbody");
+    expect(await runCheckExitCode()).toBe(1);
+  });
+});
+
 describe("ensureAgentTypesDir: system layer", () => {
   let tempHome: string;
 
@@ -1684,19 +1733,20 @@ body`);
 });
 
 describe("validateAllAgentTypes: paths", () => {
-  const originalHome = process.env.HOME;
   let tempHome: string;
   let typesDir: string;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-paths-validation-"));
-    process.env.HOME = tempHome;
+    // Use the production home seam (setUserHome), not process.env.HOME — the
+    // env mutation leaks across tests and once killed the live ib-coordinator.
+    setUserHome(tempHome);
     typesDir = join(tempHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
   });
 
   afterEach(async () => {
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 

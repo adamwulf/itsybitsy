@@ -445,14 +445,15 @@ function checkBashSettingsWrite(
     return null;
   };
 
-  const tokens = command.split(/\s+/);
+  const tokens = tokenizeBashPaths(maskHeredocBodies(command));
+  if (tokens === null) return { decision: "deny", reason: BASH_PATH_SYNTAX_DENY_REASON };
 
   // Redirect targets: an optional fd digit(s) or `&`, then `>` / `>>`, then an
   // optional `|` force-clobber, then either the following token (with a space)
   // or a glued target — so `>`, `>>`, `1>`, `2>>`, `&>`, `>|`, and `1>|file` are
   // all covered.
   for (let idx = 0; idx < tokens.length; idx++) {
-    const m = tokens[idx]!.match(/^(?:&|\d+)?(>>?)\|?(.*)$/);
+    const m = tokens[idx]!.match(/^(?:&|\d+)?(>>?)\|?(.*)$/s);
     if (!m) continue;
     const gluedTarget = m[2]!;
     if (gluedTarget) {
@@ -503,6 +504,45 @@ function maskHeredocBodies(command: string): string {
   return out;
 }
 
+const BASH_PATH_SYNTAX_DENY_REASON =
+  "Access denied: unterminated shell quote or escape prevents safe path parsing";
+
+/**
+ * Split shell words without splitting quoted or escaped whitespace. Keep the
+ * original spelling so downstream conservative checks can still reject shell
+ * expansions and mixed quoting they cannot resolve. This is lexical grouping,
+ * not shell evaluation: no substitutions, globbing, or commands are executed.
+ * Only shell whitespace separates words; Unicode spaces are filename content.
+ * Callers mask heredoc bodies before tokenizing because those bodies are data.
+ */
+function tokenizeBashPaths(command: string): string[] | null {
+  const tokens: string[] = [];
+  let token = "";
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i]!;
+    if (c === "\\" && quote !== "'") {
+      const next = command[++i];
+      if (next === undefined) return null;
+      token += c + next;
+    } else if (quote !== null) {
+      token += c;
+      if (c === quote) quote = null;
+    } else if (c === "'" || c === '"') {
+      quote = c;
+      token += c;
+    } else if (/[ \t\n]/.test(c)) {
+      if (token) tokens.push(token);
+      token = "";
+    } else {
+      token += c;
+    }
+  }
+  if (quote !== null) return null;
+  if (token) tokens.push(token);
+  return tokens;
+}
+
 /**
  * Detect a RELATIVE-path traversal in a bash command that escapes the worktree
  * into another agent's directory or the main checkout. The absolute-needle
@@ -513,7 +553,7 @@ function maskHeredocBodies(command: string): string {
  * quotes (`../..''/x`), parameter expansion (`${FOO:-../..}/x`), brace
  * expansion (`../..{,}/x`), backslashes (`..\/..\/x`), a leading `~`. Rather
  * than emulate more of the shell, this scanner is CONSERVATIVE: after the
- * whitespace split and stripping only surrounding quotes, a token that contains
+ * quote-aware word split and stripping only surrounding quotes, a token that contains
  * `..` AND any in-token shell-noise character (single/double quote, `$`, `{`,
  * `}`, backtick, backslash, or a LEADING `~`) is DENIED outright — it "cannot be
  * resolved safely". Git ranges (`HEAD..main`, `origin/main..origin/dev`,
@@ -544,12 +584,8 @@ function maskHeredocBodies(command: string): string {
  * Known safe-direction OVER-denies (denied though harmless; the caller-facing
  * reason names the workarounds — a quoted-delimiter heredoc or `-F <file>`):
  *   - `printf '..\n'` — a quoted `..` argument carrying a backslash.
- *   - a one-line `git commit -m "…"` or `ib send <id> "…"` where a word ending
- *     in `..` is glued to the closing quote (e.g. `…resolver.."`) — the split
- *     token `resolver.."` strips the quote to `resolver..` and reads as a `..`
- *     path segment.
- *   - a quoted RELATIVE path containing a space (the whitespace split breaks the
- *     quoted argument, so an inner `../x` token is examined on its own).
+ *   - quoted prose containing both `..` and additional shell-noise characters;
+ *     use a heredoc body to keep that text out of traversal checks.
  */
 function checkRelativeTraversalPaths(
   command: string,
@@ -585,7 +621,9 @@ function checkRelativeTraversalPaths(
   // char offsets stable for everything else.
   const scannable = maskHeredocBodies(command);
 
-  for (let token of scannable.split(/\s+/)) {
+  const tokens = tokenizeBashPaths(scannable);
+  if (tokens === null) return { decision: "deny", reason: BASH_PATH_SYNTAX_DENY_REASON };
+  for (let token of tokens) {
     if (!token) continue;
     // Strip only one layer of surrounding matching quotes (what the shell peels
     // off before the path is used). We deliberately do NOT try to emulate any
@@ -686,13 +724,15 @@ function stripBashSurroundingQuotes(token: string): string {
  * dash with no path suffix returns null — it is never a path.
  */
 function bashPathPortion(token: string): string | null {
+  token = stripBashSurroundingQuotes(token);
+  const anchored = (s: string) => startsWithPathAnchor(s) || startsWithPathAnchor(s.replace(/['"\\]/g, ""));
   if (startsWithPathAnchor(token)) return token;
   if (token.startsWith("--")) {
     const eq = token.indexOf("=");
     if (eq > 2) {
       // --flag=<path>
-      const rhs = token.slice(eq + 1);
-      return startsWithPathAnchor(rhs) ? rhs : null;
+      const rhs = stripBashSurroundingQuotes(token.slice(eq + 1));
+      return anchored(rhs) ? rhs : null;
     }
     return null;
   }
@@ -700,9 +740,13 @@ function bashPathPortion(token: string): string | null {
     // -X<path>: X is exactly one short-option character and the right-hand
     // side starts immediately after it. Do not reinterpret a value such as
     // `-abc/etc` as the unrelated absolute path `/etc`.
-    const rhs = token.slice(2);
-    if (startsWithPathAnchor(rhs)) return rhs;
+    const rhs = stripBashSurroundingQuotes(token.slice(2));
+    if (anchored(rhs)) return rhs;
   }
+  // Mixed quotes or a leading escape can hide an anchor (e.g. ''/outside or
+  // '/outside folder'/file). Recognize it for denial, but retain the raw noise
+  // so denyIfRejected cannot grant access using an incorrectly decoded path.
+  if (anchored(token)) return token;
   return null;
 }
 
@@ -763,7 +807,8 @@ function scanBashCommandPaths(
 ): HookDecision | null {
   const home = userHome();
   // Heredoc bodies are data — never scan them (mirrors the traversal scanner).
-  const tokens = maskHeredocBodies(command).split(/\s+/).filter((t) => t.length > 0);
+  const tokens = tokenizeBashPaths(maskHeredocBodies(command));
+  if (tokens === null) return { decision: "deny", reason: BASH_PATH_SYNTAX_DENY_REASON };
   if (tokens.length === 0) return null;
 
   // Resolve one candidate path against the table for the given op; deny (with the
@@ -805,7 +850,7 @@ function scanBashCommandPaths(
   for (let i = 0; i < tokens.length; i++) {
     // A redirect operator: optional fd digits or `&`, then `>`/`>>`, an optional
     // `|` force-clobber, then either a glued target or (empty) the next token.
-    const m = tokens[i]!.match(/^(?:&|\d+)?(>>?)\|?(.*)$/);
+    const m = tokens[i]!.match(/^(?:&|\d+)?(>>?)\|?(.*)$/s);
     if (!m) continue;
     redirectSyntaxIndex.add(i);
     if (m[2]) gluedWriteTargets.push(m[2]);

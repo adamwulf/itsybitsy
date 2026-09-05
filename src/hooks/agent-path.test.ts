@@ -862,6 +862,81 @@ describe("checkPathAccess — advisory Bash path scanner", () => {
     expect(run("cat /etc/passwd", { allowRead: ["/etc"] }).decision).toBe("allow");
   });
 
+  test.each(["'", '"'])("quoted paths with spaces are checked as one argument (%s)", (quote) => {
+    const path = join(home, "Downloads", "Screenshot 2026-09-05 at 4.23.29\u202fPM.png");
+    const command = `head -c 8 ${quote}${path}${quote}`;
+    const denied = run(command);
+    expect(denied.decision).toBe("deny");
+    expect(denied.reason).toContain(path);
+    // Grant only the complete filename, proving the scanner did not truncate it.
+    expect(run(command, { allowRead: [path] }).decision).toBe("allow");
+    expect(run(command, { allowRead: [home], deny: [path] }).decision).toBe("deny");
+  });
+
+  test("unquoted Unicode spaces are filename characters", () => {
+    const path = join(home, "Screenshot\u202fPM.png");
+    expect(run(`head -c 8 ${path}`, { allowRead: [path] }).decision).toBe("allow");
+    expect(run(`head -c 8 ${path}`, { allowRead: [home], deny: [path] }).decision).toBe("deny");
+  });
+
+  test.each(["\t", "\n"])("quoted whitespace %j remains part of a filename", (space) => {
+    const path = join(home, `some${space}file`);
+    const command = `cat '${path}'`;
+    expect(run(command).decision).toBe("deny");
+    expect(run(command, { allowRead: [path] }).decision).toBe("allow");
+    expect(run(`echo x >'${path}'`, { allowRead: [path] }).decision).toBe("deny");
+    expect(run(`echo x >'${path}'`, { allowWrite: [path] }).decision).toBe("allow");
+  });
+
+  test.each(["echo x >", "echo x > ", "sed -i s/x/y/ "])(
+    "protected paths with spaces cannot be written using %s", (prefix) => {
+      const path = join(home, "protected folder", "config.json");
+      const ctx = makeCtx({
+        access: makeAccess({ allowWrite: [home] }),
+        protectedWritePaths: [{ path: canonicalizeSandboxPath(path), subtree: false, reason: "protected test config" }],
+      });
+      const decision = checkPathAccess(
+        makeInput({ toolName: "Bash", toolInput: { command: `${prefix}'${path}'` } }), ctx,
+      );
+      expect(decision.decision).toBe("deny");
+      expect(decision.reason).toBe("protected test config");
+    },
+  );
+
+  test.each(["tool --input=", "tool -I", "cat "])("quoted path arguments after %s are checked", (prefix) => {
+    const path = join(home, "folder with spaces", "file");
+    const command = `${prefix}"${path}"`;
+    expect(run(command).decision).toBe("deny");
+    expect(run(command, { allowRead: [path] }).decision).toBe("allow");
+  });
+
+  test.each(["echo x >", "echo x > ", "echo x 2>>", "tee ", "touch ", "cp src ", "mv src ", "sed -i s/x/y/ "])(
+    "quoted destinations after %s remain writes", (prefix) => {
+      const path = join(home, "folder with spaces", "out");
+      const command = `${prefix}'${path}'`;
+      const denied = run(command, { allowRead: [path] });
+      expect(denied.decision).toBe("deny");
+      expect(denied.reason).toContain("write");
+      expect(denied.reason).toContain(path);
+      expect(run(command, { allowWrite: [path] }).decision).toBe("allow");
+    },
+  );
+
+  test.each([
+    "cat '/outside folder'/file", "cat ''/outside", 'cat ""/outside',
+    "tool --input='/outside folder'/file", 'tool -I"/outside folder"/file',
+    "cat /outside\\ folder/file", "cat \\/outside",
+  ])("unsupported quoting or escapes cannot hide a path: %s", (command) => {
+    expect(run(command).decision).toBe("deny");
+  });
+
+  test.each(["cat '/outside folder", 'cat "/outside folder', "cat /outside\\"])(
+    "malformed shell words fail closed: %s", (command) => {
+      expect(run(command).decision).toBe("deny");
+      expect(run(command).reason).toContain("unterminated shell quote or escape");
+    },
+  );
+
   test("home paths expand before resolving, including glob directory prefixes", () => {
     const ssh = run("cat ~/.ssh/id_rsa");
     expect(ssh.decision).toBe("deny");
@@ -940,11 +1015,8 @@ describe("checkPathAccess — advisory Bash path scanner", () => {
     expect(run(command).decision).toBe("allow");
   });
 
-  test("quoted command-line prose with a path fails closed, while a quoted heredoc body is ignored", () => {
-    const noisy = run('ib send other "see /etc/passwd"', { allowRead: ["/etc"] });
-    expect(noisy.decision).toBe("deny");
-    expect(noisy.reason).toContain("/etc/passwd");
-    expect(noisy.reason).toContain("quoted-delimiter heredoc");
+  test("quoted prose and heredoc bodies are not split into path arguments", () => {
+    expect(run('ib send other "see /etc/passwd"').decision).toBe("allow");
 
     const heredoc = "ib send other <<'EOF'\nsee /etc/passwd\nEOF";
     expect(run(heredoc).decision).toBe("allow");

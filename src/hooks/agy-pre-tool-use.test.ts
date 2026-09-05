@@ -10,6 +10,7 @@ import {
   hookAgyPreToolUseDryRun,
 } from "./agy-pre-tool-use";
 import type { PathCheckContext } from "./agent-path";
+import { agentProtectedWritePaths } from "./agent-path";
 import { prepareAccessTable, type PathsConfig, type PreparedAccessTable } from "../sandbox";
 import { agentPathAccessTable } from "./paths-table";
 
@@ -44,6 +45,7 @@ function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
     rootRepo: "/repo",
     allowList: ["Read", "Write", "Edit", "LS", "Glob", "Grep", "Bash"],
     access: makeAccess(),
+    protectedWritePaths: agentProtectedWritePaths("/repo/.ittybitty/agents/agent-abc123"),
     ...overrides,
   };
 }

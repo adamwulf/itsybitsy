@@ -47,6 +47,22 @@ export interface PathCheckInput {
   cwd: string;
 }
 
+/**
+ * A path whose WRITES are denied while reads are left untouched — a structural
+ * guard, NOT a `paths.deny` entry (deny would block reads too, and every agent
+ * legitimately reads these files). Enforced BEFORE the resolver even though the
+ * resolver's runtime roots would otherwise grant the write (e.g. AGENTDIR is a
+ * kernel write root; @system's whole `~/.itsybitsy` is its worktree root).
+ */
+export interface ProtectedWritePath {
+  /** Canonical absolute path. */
+  path: string;
+  /** true → the path and everything under it; false → exactly this file. */
+  subtree: boolean;
+  /** The deny reason, naming the file, shown in the Denials tab. */
+  reason: string;
+}
+
 export interface PathCheckContext {
   agentId: string;
   agentDir: string;
@@ -62,6 +78,13 @@ export interface PathCheckContext {
    * denied. There is no "undefined means allow" mode: the field is required.
    */
   access: PreparedAccessTable;
+  /**
+   * Files/dirs whose WRITES are denied (reads untouched). For a normal agent:
+   * its own `<agentDir>/meta.json`. For @system: the agent-types dir, config.json,
+   * repos.json, layout.json and the sealed dir under `~/.itsybitsy`, none of
+   * which @system may rewrite to widen itself (its worktree root is its whole home).
+   */
+  protectedWritePaths: ProtectedWritePath[];
 }
 
 export interface HookDecision {
@@ -112,28 +135,6 @@ export function toolMatchesPattern(
   return pattern === toolName;
 }
 
-/**
- * Check if a file path is in the allowed paths list.
- * Matches exact directory paths or path prefixes.
- *
- * A path is allowed if:
- * - filePath === allowed (exact match)
- * - filePath.startsWith(allowed + '/') (prefix match with directory separator)
- *
- * Examples:
- * - filePath: /home/user/allowed, allowed: /home/user/allowed → true (exact)
- * - filePath: /home/user/allowed/file.txt, allowed: /home/user/allowed → true (prefix)
- * - filePath: /home/user/allowed-other, allowed: /home/user/allowed → false (partial name)
- */
-export function isInAllowedPaths(filePath: string, allowedPaths: string[]): boolean {
-  for (const allowed of allowedPaths) {
-    if (filePath === allowed || filePath.startsWith(allowed + "/")) {
-      return true;
-    }
-  }
-  return false;
-}
-
 // ── Settings file protection ─────────────────────────────────────────────────
 
 /**
@@ -169,6 +170,67 @@ export const AGY_BOUNDARY_WRITE_DENY_REASON =
  */
 export const META_WRITE_DENY_REASON =
   "Access denied: agents cannot modify their own meta.json (the hook reads its path lists from it)";
+
+/**
+ * Deny reason for a WRITE to a protected coordinator-configuration path (the
+ * @system agent-types dir, config.json, repos.json, layout.json, sealed). Names
+ * the file so the Denials tab shows exactly what was refused. Reads are allowed.
+ * Exported so tests can assert against it.
+ */
+export function protectedConfigWriteDenyReason(path: string): string {
+  return `Access denied: ${path} is a protected coordinator configuration path (agents may read it, not modify it — use 'ib' to change configuration)`;
+}
+
+/**
+ * The protected-write list for a normal worktree agent: only its own meta.json
+ * (the hook reads its path lists and canSpawnChildren from it).
+ */
+export function agentProtectedWritePaths(agentDir: string): ProtectedWritePath[] {
+  return [{ path: join(agentDir, "meta.json"), subtree: false, reason: META_WRITE_DENY_REASON }];
+}
+
+/**
+ * The protected-write list for the @system coordinator, whose worktree root is
+ * its whole `~/.itsybitsy` home: the agent-types dir (widening its own layers),
+ * config.json / repos.json / layout.json (widening the harness), and the sealed
+ * dir. `itsybitsyHome` is the resolved `~/.itsybitsy` directory.
+ */
+export function systemProtectedWritePaths(itsybitsyHome: string): ProtectedWritePath[] {
+  const dir = (name: string): ProtectedWritePath => {
+    const p = join(itsybitsyHome, name);
+    return { path: p, subtree: true, reason: protectedConfigWriteDenyReason(p) };
+  };
+  const file = (name: string): ProtectedWritePath => {
+    const p = join(itsybitsyHome, name);
+    return { path: p, subtree: false, reason: protectedConfigWriteDenyReason(p) };
+  };
+  return [
+    dir("agent-types"),
+    file("config.json"),
+    file("repos.json"),
+    file("layout.json"),
+    dir("sealed"),
+  ];
+}
+
+/**
+ * Return the deny reason if `filePath` is a protected WRITE target, else null.
+ * A subtree entry matches the path and everything under it; a file entry matches
+ * exactly. Shared by the file-tool check (step 6) and the Bash redirect/sed guard.
+ */
+export function matchProtectedWrite(
+  protectedWritePaths: ProtectedWritePath[],
+  filePath: string,
+): string | null {
+  for (const entry of protectedWritePaths) {
+    if (entry.subtree) {
+      if (filePath === entry.path || filePath.startsWith(entry.path + "/")) return entry.reason;
+    } else if (filePath === entry.path) {
+      return entry.reason;
+    }
+  }
+  return null;
+}
 
 /**
  * Deny reason when `meta.json` is missing or unparseable. The hook builds its
@@ -281,18 +343,18 @@ export const SETTINGS_WRITE_DENY_REASON =
  * Detect a bash command that WRITES (redirect `>`/`>>` or in-place `sed -i`) to
  * one of the agent's protected files — `.claude/settings*.json` (permission
  * self-escalation), the agy boundary files (`.agents/hooks.json` / the rule
- * file, whose rewrite disables the hook gate on the next resume), or the agent's
- * own `<agentDir>/meta.json` (the hook reads its path lists from it, so a
- * redirect rewrite is self-widening — the kernel cannot tell the agent's
- * redirect from `ib` writing the file; the hook can, because it sees the command).
+ * file, whose rewrite disables the hook gate on the next resume), or any
+ * `protectedWritePaths` entry (a normal agent's own `<agentDir>/meta.json`, or
+ * @system's agent-types/config/sealed). The hook can tell the agent's redirect
+ * from `ib` writing the file, because it sees the command; the kernel cannot.
  *
  * Each candidate write-target token is RESOLVED against cwd (join + resolve +
  * realpathSync-when-it-exists, the same way checkFilePath does) and compared with
- * the resolved protected files via `worktreeProtectedFileKind`, rather than
- * literal-matching the raw token. That closes obfuscated spellings the old regex
- * missed — `.agents/rules/../hooks.json`, `./.agents/hooks.json`, and the
- * absolute `…/.agents/rules/../hooks.json` (and the same for `.claude/settings`
- * and `meta.json`).
+ * the resolved protected files via `worktreeProtectedFileKind` and
+ * `matchProtectedWrite`, rather than literal-matching the raw token. That closes
+ * obfuscated spellings the old regex missed — `.agents/rules/../hooks.json`,
+ * `./.agents/hooks.json`, and the absolute `…/.agents/rules/../hooks.json` (and
+ * the same for `.claude/settings` and the protected paths).
  *
  * Best-effort target extraction: a `>` / `>>` token's following token (or a
  * glued `>file`), and — when `sed -i` / `--in-place` is present — every token as
@@ -302,9 +364,8 @@ function checkBashSettingsWrite(
   command: string,
   cwd: string,
   worktreePath: string,
-  agentDir: string
+  protectedWritePaths: ProtectedWritePath[]
 ): HookDecision | null {
-  const metaPath = join(agentDir, "meta.json");
   // Resolve one candidate write-target token and deny if it lands on a protected
   // file. Strips one layer of surrounding quotes first.
   const denyForTarget = (rawToken: string): HookDecision | null => {
@@ -325,7 +386,8 @@ function checkBashSettingsWrite(
     const kind = worktreeProtectedFileKind(resolved, worktreePath);
     if (kind === "settings") return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
     if (kind === "agy") return { decision: "deny", reason: AGY_BOUNDARY_WRITE_DENY_REASON };
-    if (resolved === metaPath) return { decision: "deny", reason: META_WRITE_DENY_REASON };
+    const protectedReason = matchProtectedWrite(protectedWritePaths, resolved);
+    if (protectedReason) return { decision: "deny", reason: protectedReason };
     return null;
   };
 
@@ -537,10 +599,11 @@ function checkBashCommandPaths(
   if (traversalDenial) return traversalDenial;
 
   // Block bash mutations of the agent's protected files (.claude/settings*.json,
-  // the agy boundary files, and the agent's own meta.json) — agents must not
-  // grant themselves new permissions, disable their own hook gate, or rewrite
-  // the meta.json the hook reads its path lists from.
-  const settingsDenial = checkBashSettingsWrite(command, cwd, worktreePath, agentDir);
+  // the agy boundary files, and every ctx.protectedWritePaths entry — a normal
+  // agent's own meta.json, or @system's config/agent-types/sealed) — agents must
+  // not grant themselves new permissions, disable their own hook gate, or rewrite
+  // the files the hook and harness read their configuration from.
+  const settingsDenial = checkBashSettingsWrite(command, cwd, worktreePath, ctx.protectedWritePaths);
   if (settingsDenial) return settingsDenial;
 
   // Check for references to other agents' directories
@@ -617,15 +680,15 @@ function checkFilePath(
   // 6. Block: writes to a PROTECTED file — <worktreePath>/.claude/settings*.json
   // (permission self-escalation), the agy boundary files (.agents/hooks.json /
   // the rule file, whose rewrite disables the hook gate on the next resume), or
-  // the agent's own <agentDir>/meta.json (the hook reads its path lists from it,
-  // so a rewrite is self-widening). Reads are allowed; only mutation tools blocked.
+  // any ctx.protectedWritePaths entry (a normal agent's own meta.json; for
+  // @system the agent-types dir, config.json, repos.json, layout.json, sealed —
+  // all self-widening). Reads are allowed; only mutation tools are blocked.
   if (WRITE_TOOLS.has(toolName)) {
     const kind = worktreeProtectedFileKind(filePath, worktreePath);
     if (kind === "settings") return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
     if (kind === "agy") return { decision: "deny", reason: AGY_BOUNDARY_WRITE_DENY_REASON };
-    if (filePath === join(agentDir, "meta.json")) {
-      return { decision: "deny", reason: META_WRITE_DENY_REASON };
-    }
+    const protectedReason = matchProtectedWrite(ctx.protectedWritePaths, filePath);
+    if (protectedReason) return { decision: "deny", reason: protectedReason };
   }
 
   // 10. Block: other agents' directories, and the agent's OWN dir except its
@@ -975,6 +1038,8 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
   // The prepared access table for this invocation. Both branches assign it or
   // return early on a build failure — there is no permissive default.
   let access!: PreparedAccessTable;
+  // Files/dirs whose writes are denied structurally (reads untouched).
+  let protectedWritePaths: ProtectedWritePath[] = [];
 
   if (agentId === SYSTEM_AGENT_ID) {
     // System coordinator: it owns its own directory entirely. There is no
@@ -990,6 +1055,10 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
     agentDir = home;
     worktreePath = home;
     rootRepo = home;
+    // @system's worktree root is its whole ~/.itsybitsy home, so the resolver
+    // would grant writes to the agent-types dir and the harness config files;
+    // deny those writes structurally so @system cannot widen itself.
+    protectedWritePaths = systemProtectedWritePaths(home);
     try {
       access = await buildSystemAccessTable(userHome());
     } catch {
@@ -1050,8 +1119,8 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
     // Detect root repo via git worktree list --porcelain
     try {
       const proc = Bun.spawn(
-        ["git", "-C", worktreePath, "worktree", "list", "--porcelain"],
-        { stdout: "pipe", stderr: "pipe" }
+        ["git", "worktree", "list", "--porcelain"],
+        { cwd: worktreePath, stdout: "pipe", stderr: "pipe" }
       );
       const output = await new Response(proc.stdout).text();
       const exitCode = await proc.exited;
@@ -1068,6 +1137,10 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
     // background-tool completions don't leave the agent stuck at 'waiting'.
     // Skipped for @system because there is no meta.json to write to.
     await writeAgentState(agentDir, "running");
+
+    // A normal agent may not rewrite its own meta.json (the hook reads its path
+    // lists and canSpawnChildren from it).
+    protectedWritePaths = agentProtectedWritePaths(agentDir);
 
     // Build the access table from meta.paths ∪ the spawn-keyed runtime roots. A
     // build failure (e.g. an invalid frozen paths block) denies, never fails open.
@@ -1103,7 +1176,7 @@ export async function hookCheckPath(agentId: string, rawStdin?: string): Promise
   } catch { /* ignore */ }
 
   // Check ib manager-only command access before path checks
-  const ctx: PathCheckContext = { agentId, agentDir, worktreePath, agentsDir, rootRepo, allowList, access };
+  const ctx: PathCheckContext = { agentId, agentDir, worktreePath, agentsDir, rootRepo, allowList, access, protectedWritePaths };
   let decision: HookDecision;
   if (toolName === "Bash") {
     const command = String(toolInput.command ?? "");

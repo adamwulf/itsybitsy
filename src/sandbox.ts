@@ -729,7 +729,13 @@ function sortedDenyEntries(
   ].sort(compareOrderedPathEntries);
 }
 
-function orderedEntryMatches(entry: OrderedPathEntry, absolutePath: string): boolean {
+/**
+ * Does an ordered entry match a CANONICAL absolute path? Exported so the hook's
+ * denial-reason wording (pathDenialReason) tests the same matcher the resolver
+ * uses, rather than a duplicate that could drift. Callers must pass an already
+ * canonical path (as resolvePreparedAccess does internally).
+ */
+export function orderedEntryMatches(entry: OrderedPathEntry, absolutePath: string): boolean {
   if (entry.compiled.kind === "glob") return entry.regex!.test(absolutePath);
   const value = entry.compiled.value;
   if (value === "/") return absolutePath.startsWith("/");

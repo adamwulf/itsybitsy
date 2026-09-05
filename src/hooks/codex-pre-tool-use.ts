@@ -45,6 +45,7 @@ import {
   loadMergedAgentTypePermissions,
 } from "./shared";
 import {
+  agentProtectedWritePaths,
   checkPathAccess,
   META_UNREADABLE_DENY_REASON,
   type HookDecision,
@@ -301,6 +302,7 @@ export async function hookCodexPreToolUse(
       rootRepo: ctxResolved.rootRepo,
       allowList: permissions.allow,
       access,
+      protectedWritePaths: agentProtectedWritePaths(ctxResolved.agentDir),
     };
 
     const decision = checkCodexPreToolUse({ toolName, toolInput, cwd }, ctx);

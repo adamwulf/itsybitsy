@@ -10,6 +10,7 @@ import {
   hookCodexPreToolUseDryRun,
 } from "./codex-pre-tool-use";
 import type { PathCheckContext } from "./agent-path";
+import { agentProtectedWritePaths } from "./agent-path";
 import { prepareAccessTable, type PathsConfig, type PreparedAccessTable } from "../sandbox";
 import { agentPathAccessTable } from "./paths-table";
 
@@ -45,6 +46,7 @@ function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
     rootRepo: "/repo",
     allowList: ["Read", "Write", "Edit", "Bash"],
     access: makeAccess(),
+    protectedWritePaths: agentProtectedWritePaths("/repo/.ittybitty/agents/agent-abc123"),
     ...overrides,
   };
 }
@@ -129,9 +131,8 @@ describe("checkCodexPreToolUse — allow/deny matcher applies to Bash AND apply_
     );
     // SPEC §3.2: codex's `-s workspace-write` sandbox leaks /tmp, $TMPDIR, and
     // ~/.codex/memories. The hook MUST do path-isolation independently of the
-    // sandbox; checkCodexPreToolUse forces step 12 of checkPathAccess to fire
-    // (allowedPaths = [worktreePath] when none configured) so the legacy
-    // permissive fallback can't allow apply_patch escapes.
+    // sandbox; each apply_patch target is a synthesized Write resolved through
+    // ctx.access (deny by default), so with empty paths /private/tmp is denied.
     expect(decision.decision).toBe("deny");
     expect(decision.reason).toContain("apply_patch target rejected");
     expect(decision.reason).toContain("/private/tmp/codex-escape.txt");

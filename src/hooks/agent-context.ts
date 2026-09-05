@@ -102,8 +102,8 @@ export async function resolveAgentContext(
   let rootRepo = "";
   try {
     const proc = Bun.spawn(
-      ["git", "-C", worktreePath, "worktree", "list", "--porcelain"],
-      { stdout: "pipe", stderr: "pipe" },
+      ["git", "worktree", "list", "--porcelain"],
+      { cwd: worktreePath, stdout: "pipe", stderr: "pipe" },
     );
     const out = await new Response(proc.stdout).text();
     if ((await proc.exited) === 0) {

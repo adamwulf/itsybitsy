@@ -9,9 +9,10 @@
  *      call passes the merged agent-type allow list (_all / _non_coordinator /
  *      <type>) AND path isolation.
  *   2. Path isolation. Every agy tool is translated to a synthetic Claude call
- *      (agy-tools.ts) and run through the shared checkPathAccess with
- *      allowedPaths forced to the worktree (plus the type's allowedPaths) so
- *      /tmp and ~/.itsybitsy are not reachable through file tools.
+ *      (agy-tools.ts) and run through the shared checkPathAccess against the
+ *      per-agent access table (ctx.access = meta.paths ∪ the runtime roots), so
+ *      /tmp and ~/.itsybitsy are not reachable through file tools unless the
+ *      agent's paths block grants them.
  *   3. Fail-CLOSED. agy treats a crash / non-JSON / `{}` / timeout as a DENY
  *      (the opposite of codex). We still wrap everything in try/catch and emit
  *      an explicit `{"decision":"deny","reason":…}` so denials are logged, and
@@ -34,6 +35,7 @@ import {
 import { loadMergedAgentTypePermissions } from "./shared";
 import { resolveAgentContext } from "./agent-context";
 import {
+  agentProtectedWritePaths,
   checkPathAccess,
   checkIbCommandAccess,
   toolMatchesPattern,
@@ -59,14 +61,14 @@ function formatToolArgs(toolArgs: Record<string, unknown>): string {
 
 /**
  * Pure decision function for the agy PreToolUse handler. Translates the agy
- * call, then runs the synthesized Claude call through checkPathAccess with
- * path isolation forced.
+ * call, then runs the synthesized Claude call through checkPathAccess against
+ * the per-agent access table.
  *
  * Path isolation: agy has no sandbox, so a file tool that resolves outside the
- * worktree must be denied. We force `allowedPaths` to `ctx.allowedPaths` (the
- * type's declared roots) when present, else `[worktree]` — exactly the shape
- * codex's apply_patch handling uses. Worktree-internal paths still allow via
- * checkPathAccess step 7 before allowedPaths (step 12) is consulted.
+ * agent's access table (ctx.access = meta.paths ∪ the runtime roots) must be
+ * denied. checkPathAccess resolves every path through that table — deny by
+ * default — with the worktree, project dir and scratchpad allowed as runtime
+ * roots. There is no worktree-only fallback; a missing paths block is strict.
  *
  * Deny list: for claude the CLI enforces `permissions.deny`; for agy the hook
  * is the only boundary, so a deny pattern that matches the synthesized call OR
@@ -300,6 +302,7 @@ export async function hookAgyPreToolUse(
       rootRepo: ctxResolved.rootRepo,
       allowList: permissions.allow,
       access,
+      protectedWritePaths: agentProtectedWritePaths(ctxResolved.agentDir),
     };
 
     // Parity with hookCheckPath: manager-only ib subcommands (retire / merge /

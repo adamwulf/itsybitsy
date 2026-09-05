@@ -26,11 +26,11 @@ import { encodeClaudeProjectPath } from "../auto-compact";
 import { metaCanSpawnChildren, loadAgentType, type AgentType } from "../agent-types";
 import {
   canonicalizeSandboxPath,
+  orderedEntryMatches,
   prepareAccessTable,
   resolvePathsConfig,
   resolveTmuxSocketDir,
   sandboxPathAccessTable,
-  type OrderedPathEntry,
   type PathAccessTable,
   type PathOperation,
   type PathsConfig,
@@ -129,8 +129,8 @@ export function agentPathAccessTable(p: AgentAccessTableParams): PathAccessTable
 async function resolveGitCommonDir(worktreePath: string, rootRepo: string): Promise<string> {
   try {
     const proc = Bun.spawn(
-      ["git", "-C", worktreePath, "rev-parse", "--git-common-dir"],
-      { stdout: "pipe", stderr: "pipe" },
+      ["git", "rev-parse", "--git-common-dir"],
+      { cwd: worktreePath, stdout: "pipe", stderr: "pipe" },
     );
     const out = await new Response(proc.stdout).text();
     if ((await proc.exited) === 0) {
@@ -229,25 +229,11 @@ export async function buildSystemAccessTable(home: string): Promise<PreparedAcce
 // ── Denial-reason classification (message only) ──────────────────────────────
 
 /**
- * Does an ordered entry match a canonical absolute path? Mirrors the private
- * `orderedEntryMatches` in src/sandbox.ts. Used ONLY to word the denial reason —
- * the allow/deny decision itself always comes from `resolvePreparedAccess`, so a
- * drift here can never change a decision, only the explanation.
- */
-function entryMatches(entry: OrderedPathEntry, absolutePath: string): boolean {
-  if (entry.compiled.kind === "glob") {
-    const regex = entry.regex ?? new RegExp(entry.compiled.value);
-    return regex.test(absolutePath);
-  }
-  const value = entry.compiled.value;
-  if (value === "/") return absolutePath.startsWith("/");
-  return absolutePath === value || absolutePath.startsWith(`${value}/`);
-}
-
-/**
  * Word the denial reason for a path the resolver rejected: name the operation,
  * the resolved path, and WHY — a `paths.deny` hit versus no matching allow
- * entry. Reads well in the Denials tab of `ib watch`.
+ * entry. Reads well in the Denials tab of `ib watch`. Uses the SAME
+ * `orderedEntryMatches` the resolver uses (imported from src/sandbox.ts), so the
+ * wording can never disagree with the decision.
  */
 export function pathDenialReason(
   prepared: PreparedAccessTable,
@@ -255,7 +241,7 @@ export function pathDenialReason(
   op: PathOperation,
 ): string {
   const canonical = canonicalizeSandboxPath(absolutePath);
-  if (prepared.deny.some((entry) => entryMatches(entry, canonical))) {
+  if (prepared.deny.some((entry) => orderedEntryMatches(entry, canonical))) {
     return `Access denied: ${op} ${canonical} matches a paths.deny entry`;
   }
   return `Access denied: ${op} ${canonical} is not in paths.allowRead/allowWrite`;

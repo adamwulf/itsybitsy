@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, isInAllowedPaths, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON } from "./agent-path";
+import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON, agentProtectedWritePaths, systemProtectedWritePaths, protectedConfigWriteDenyReason } from "./agent-path";
 import type { PathCheckInput, PathCheckContext } from "./agent-path";
 import { join } from "path";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises";
@@ -59,6 +59,7 @@ function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
     rootRepo: "/repo",
     allowList: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
     access: makeAccess(),
+    protectedWritePaths: agentProtectedWritePaths("/repo/.ittybitty/agents/agent-abc123"),
     ...overrides,
   };
 }
@@ -1536,48 +1537,7 @@ describe("checkIbCommandAccess", () => {
   });
 });
 
-// ── isInAllowedPaths ─────────────────────────────────────────────────────────
-
-describe("isInAllowedPaths", () => {
-  test("exact match", () => {
-    const result = isInAllowedPaths("/home/user/allowed", ["/home/user/allowed"]);
-    expect(result).toBe(true);
-  });
-
-  test("prefix match with directory separator", () => {
-    const result = isInAllowedPaths("/home/user/allowed/file.txt", ["/home/user/allowed"]);
-    expect(result).toBe(true);
-  });
-
-  test("no match for partial name", () => {
-    const result = isInAllowedPaths("/home/user/allowed-other", ["/home/user/allowed"]);
-    expect(result).toBe(false);
-  });
-
-  test("multiple paths in allowedPaths list", () => {
-    const allowed = ["/home/user/project", "/data/shared"];
-    expect(isInAllowedPaths("/home/user/project/src/index.ts", allowed)).toBe(true);
-    expect(isInAllowedPaths("/data/shared/file.csv", allowed)).toBe(true);
-    expect(isInAllowedPaths("/home/user/other/file.txt", allowed)).toBe(false);
-  });
-
-  test("empty allowedPaths list", () => {
-    const result = isInAllowedPaths("/home/user/file.txt", []);
-    expect(result).toBe(false);
-  });
-
-  test("nested subdirectory match", () => {
-    const result = isInAllowedPaths("/home/user/project/src/lib/util.ts", ["/home/user/project"]);
-    expect(result).toBe(true);
-  });
-
-  test("does not match when separator is missing", () => {
-    const result = isInAllowedPaths("/home/user/projects", ["/home/user/project"]);
-    expect(result).toBe(false);
-  });
-});
-
-// ── allowedPaths integration tests ───────────────────────────────────────────
+// ── checkPathAccess: the paths access table ──────────────────────────────────
 
 describe("checkPathAccess with the paths access table", () => {
   test("empty paths: a system path is DENIED (no permissive mode — the invariant)", () => {
@@ -1686,6 +1646,7 @@ describe("checkPathAccess with own Claude project dir", () => {
       rootRepo: "/Users/test/repo",
       allowList: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
       access: buildAccessFor({ paths, agentDir, worktreePath: WORKTREE, agentsDir, rootRepo: "/Users/test/repo" }),
+      protectedWritePaths: agentProtectedWritePaths(agentDir),
     };
   }
 
@@ -1812,6 +1773,7 @@ describe("checkPathAccess with own Claude project dir", () => {
       rootRepo: coordRepo,
       allowList: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
       access: buildAccessFor({ agentDir, worktreePath: coordRepo, agentsDir, rootRepo: coordRepo }),
+      protectedWritePaths: agentProtectedWritePaths(agentDir),
     };
     const input = {
       toolName: "Read",
@@ -1877,6 +1839,72 @@ describe("checkPathAccess — own meta.json write protection (Phase B)", () => {
     const result = checkPathAccess(makeInput({ toolName: "Read", toolInput: { file_path: META } }), ctx);
     expect(result.decision).toBe("deny");
     expect(result.reason).toContain("cannot access other agents' files");
+  });
+});
+
+describe("checkPathAccess — @system protected config writes (Phase B security)", () => {
+  const ITSY = "/Users/test/.itsybitsy";
+  // @system's whole ~/.itsybitsy is its worktree root, so the resolver WOULD
+  // grant these writes; the protectedWritePaths guard denies them structurally.
+  function systemCtx(): PathCheckContext {
+    return {
+      agentId: "@system",
+      agentDir: ITSY,
+      worktreePath: ITSY,
+      agentsDir: "", // @system has no sibling-agents dir to isolate against
+      rootRepo: ITSY,
+      allowList: ["Read", "Write", "Edit", "MultiEdit", "Bash"],
+      access: buildAccessFor({ agentDir: ITSY, worktreePath: ITSY, agentsDir: join(ITSY, "agents"), rootRepo: ITSY, canSpawnChildren: true }),
+      protectedWritePaths: systemProtectedWritePaths(ITSY),
+    };
+  }
+  const ALL_MD = join(ITSY, "agent-types", "_all.md");
+  const CONFIG = join(ITSY, "config.json");
+
+  test("the resolver alone WOULD allow the write (control): _all.md is under the worktree root", () => {
+    // Prove the guard is doing the work, not the resolver: with no protected
+    // list the same path resolves to allow.
+    const ctx = { ...systemCtx(), protectedWritePaths: [] };
+    expect(checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: ALL_MD } }), ctx).decision).toBe("allow");
+  });
+
+  for (const tool of ["Write", "Edit"] as const) {
+    test(`@system ${tool} on _all.md → DENIED`, () => {
+      const result = checkPathAccess(makeInput({ toolName: tool, toolInput: { file_path: ALL_MD } }), systemCtx());
+      expect(result.decision).toBe("deny");
+      expect(result.reason).toBe(protectedConfigWriteDenyReason(join(ITSY, "agent-types")));
+    });
+  }
+
+  test("@system redirect onto _all.md → DENIED", () => {
+    const result = checkPathAccess(
+      makeInput({ toolName: "Bash", toolInput: { command: `echo x > ${ALL_MD}` }, cwd: ITSY }),
+      systemCtx(),
+    );
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toBe(protectedConfigWriteDenyReason(join(ITSY, "agent-types")));
+  });
+
+  test("@system Read of _all.md → ALLOWED (writes blocked, reads untouched)", () => {
+    const result = checkPathAccess(makeInput({ toolName: "Read", toolInput: { file_path: ALL_MD } }), systemCtx());
+    expect(result.decision).toBe("allow");
+  });
+
+  test("@system Write to config.json → DENIED (naming the file)", () => {
+    const result = checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: CONFIG } }), systemCtx());
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toBe(protectedConfigWriteDenyReason(CONFIG));
+  });
+
+  test("a normal agent is unaffected by @system's protected list (only its own meta.json is protected)", () => {
+    // The normal fixture agent has no config.json/agent-types guard; a write to a
+    // path outside its worktree is governed by the resolver, not this guard.
+    const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/Users/test/.itsybitsy/config.json"] }) });
+    const result = checkPathAccess(
+      makeInput({ toolName: "Write", toolInput: { file_path: "/Users/test/.itsybitsy/config.json" } }),
+      ctx,
+    );
+    expect(result.decision).toBe("allow"); // allowWrite grants it; no protected-write guard fires
   });
 });
 
@@ -2058,6 +2086,47 @@ describe("hookCheckPath with @system", () => {
     const decision = JSON.parse(logged[0]!);
     expect(decision.hookSpecificOutput.permissionDecision).toBe("allow");
   });
+
+  test("Write to agent-types/_all.md is DENIED end-to-end (protected config wired in)", async () => {
+    const home = join(tempHome, ".itsybitsy");
+    const typesDir = join(home, "agent-types");
+    await mkdir(typesDir, { recursive: true });
+    await writeFile(join(typesDir, "_all.md"), "---\nname: _all\ndescription: shared\n---\n");
+    // Allow Write in @system's own settings so the allow-list check passes and
+    // the protected-write guard is what denies.
+    await writeFile(
+      join(home, ".claude", "settings.local.json"),
+      JSON.stringify({ permissions: { allow: ["Write"], deny: [] } }),
+    );
+    const stdin = JSON.stringify({
+      tool_name: "Write",
+      tool_input: { file_path: join(typesDir, "_all.md") },
+      cwd: home,
+    });
+    await hookCheckPath("@system", stdin);
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("protected coordinator configuration");
+  });
+
+  test("READING agent-types/_all.md is ALLOWED end-to-end", async () => {
+    const home = join(tempHome, ".itsybitsy");
+    const typesDir = join(home, "agent-types");
+    await mkdir(typesDir, { recursive: true });
+    await writeFile(join(typesDir, "_all.md"), "---\nname: _all\ndescription: shared\n---\n");
+    await writeFile(
+      join(home, ".claude", "settings.local.json"),
+      JSON.stringify({ permissions: { allow: ["Read"], deny: [] } }),
+    );
+    const stdin = JSON.stringify({
+      tool_name: "Read",
+      tool_input: { file_path: join(typesDir, "_all.md") },
+      cwd: home,
+    });
+    await hookCheckPath("@system", stdin);
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("allow");
+  });
 });
 
 // ── hookCheckPath state-write side effect (worktree agents) ──────────────────
@@ -2094,6 +2163,25 @@ describe("hookCheckPath writes state='running' to meta.json", () => {
     const stdin = JSON.stringify({
       tool_name: "Read",
       tool_input: { file_path: join(worktreeCwd, "any.txt") },
+      cwd: worktreeCwd,
+    });
+
+    await hookCheckPath("agent-test99", stdin);
+
+    const meta = JSON.parse(await readFile(join(agentDir, "meta.json"), "utf-8"));
+    expect(meta.state).toBe("running");
+  });
+
+  test("flips state to 'running' even when the resolver DENIES the path", async () => {
+    // writeAgentState runs before the path decision, so a present-meta agent
+    // whose tool is denied still transitions waiting -> running.
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify({ state: "waiting", worker: true }),
+    );
+    const stdin = JSON.stringify({
+      tool_name: "Read",
+      tool_input: { file_path: "/etc/passwd" }, // outside the worktree → denied
       cwd: worktreeCwd,
     });
 

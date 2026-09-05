@@ -72,7 +72,8 @@ import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome, classifyClaudeStartupPrompt } from "./coordinator";
 import { loadAgentType, agentTypeExists, metaCanSpawnChildren } from "./agent-types";
 import type { AgentType } from "./agent-types";
-import { isCodexBackedCli, parseModel, mapEffortForCodex } from "./agent-cli";
+import { isCodexBackedCli, parseModel, mapEffortForCodex, type AgentCli } from "./agent-cli";
+import { claudeProjectDirFor, claudeScratchpadDirFor } from "./hooks/paths-table";
 import {
   buildHooksBlock,
   COORDINATOR_INTERCEPT_MATCHER,
@@ -1168,6 +1169,7 @@ async function prepareSandbox(
   workPath: string,
   repoPath: string,
   canSpawnChildren: boolean,
+  agentCli: AgentCli,
 ): Promise<PreparedSandbox> {
   const platform = sandboxPlatformOverride ?? process.platform;
   if (platform !== "darwin") {
@@ -1202,6 +1204,10 @@ async function prepareSandbox(
     canSpawnChildren,
     HOME: userHome(),
   };
+  if (agentCli === "claude") {
+    params.PROJECTDIR = claudeProjectDirFor(workPath);
+    params.SCRATCHPAD = claudeScratchpadDirFor(workPath, uid);
+  }
   const profile = generateProfile(config, paths, params);
   const parameterValues = sandboxProfileParameterValues(paths, params);
   const profilePath = join(agentDir, "sandbox.sb");
@@ -1689,6 +1695,7 @@ export async function resumeAgent(
           workPath,
           agent.repoPath,
           resumeCanSpawnChildren,
+          resumeCli,
         );
         await mutateAgentMeta(agentDir, (meta) => {
           meta.sandbox = frozenConfig;
@@ -6037,6 +6044,7 @@ export async function newAgent(
         workPath,
         rootRepoPath,
         spawnCanSpawnChildren,
+        agentCli,
       );
       initialMetaJson.sandbox_proxy_port = preparedSandbox.proxyPort;
       await writeMetaJsonAtomic(agentDir, initialMetaJson);

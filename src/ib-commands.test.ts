@@ -107,6 +107,7 @@ import { setUserConfigPath, resetUserConfigPath } from "./config";
 import type { AgentState } from "./parse-state";
 import type { SpawnFn, SpawnResult } from "./types";
 import { canonicalizeSandboxPath } from "./sandbox";
+import { claudeProjectDirFor, claudeScratchpadDirFor } from "./hooks/paths-table";
 
 // The "retire → rehire recovery" describes drive real `git` subprocesses — a
 // dozen call sites through the local git() helper, plus every git command
@@ -4548,6 +4549,7 @@ sandbox:
     expect(result.ok).toBe(true);
     const agentDir = join(agentsDir, "sandbox-codex");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
+    const profile = await Bun.file(join(agentDir, "sandbox.sb")).text();
     expect(start).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
     expect(start).not.toContain("-s workspace-write");
     expect(start).toContain("setsid sandbox-exec -f");
@@ -4555,6 +4557,10 @@ sandbox:
     expect(start).toContain("sandbox-proxy-launch");
     expect(start).toContain("export HTTPS_PROXY=\"$http_proxy\"");
     expect(start).toContain("<&0 2> \"$STDERR_LOG\" &");
+    expect(start).not.toContain("-D 'PROJECTDIR=");
+    expect(start).not.toContain("-D 'SCRATCHPAD=");
+    expect(profile).not.toContain('param "PROJECTDIR"');
+    expect(profile).not.toContain('param "SCRATCHPAD"');
     expect(dispatcherDryRunCalls.length).toBeGreaterThanOrEqual(3);
     expect(spawnCalls.some((call) => call[0] === "codex")).toBe(false);
   });
@@ -4623,6 +4629,7 @@ sandbox:
     expect(result.ok).toBe(true);
     const agentDir = join(agentsDir, "sandbox-wiring");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
+    const profile = await Bun.file(join(agentDir, "sandbox.sb")).text();
     const meta = await Bun.file(join(agentDir, "meta.json")).json();
     const domains = await Bun.file(join(agentDir, "sandbox-domains.txt")).text();
 
@@ -4630,6 +4637,13 @@ sandbox:
     expect(start).toContain("setsid sandbox-exec -f");
     expect(start).toContain("    sandbox-exec -f");
     expect(start).toContain("-D 'AGENTDIR=");
+    const worktreePath = join(agentDir, "repo");
+    const projectDir = canonicalizeSandboxPath(claudeProjectDirFor(worktreePath));
+    const scratchpad = claudeScratchpadDirFor(worktreePath, process.getuid?.() ?? 0);
+    expect(start).toContain(`-D 'PROJECTDIR=${projectDir}'`);
+    expect(start).toContain(`-D 'SCRATCHPAD=${scratchpad}'`);
+    expect(profile).toContain('param "PROJECTDIR"');
+    expect(profile).toContain('param "SCRATCHPAD"');
     expect(start).not.toContain("NODE_OPTIONS");
     expect(start).toContain("trap cleanup_sandbox_proxy EXIT");
     // GROUP 1: claude skips its own permission prompts only under the kernel.
@@ -4903,6 +4917,7 @@ sandbox:
     }
 
     const refreshedMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    const refreshedProfile = await Bun.file(join(agentDir, "sandbox.sb")).text();
     // The frozen block now reflects the edited type file — new entries appear
     // that were NOT in the pre-refresh block.
     expect(refreshedMeta.paths.allowRead).toContain(canonicalizeSandboxPath(refreshedDir));
@@ -4915,6 +4930,15 @@ sandbox:
     expect(refreshedMeta.sandbox_proxy_port).toBe(43141);
     const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
     expect(resumeScript).toContain("setsid sandbox-exec -f");
+    const worktreePath = join(agentDir, "repo");
+    expect(resumeScript).toContain(
+      `-D 'PROJECTDIR=${canonicalizeSandboxPath(claudeProjectDirFor(worktreePath))}'`,
+    );
+    expect(resumeScript).toContain(
+      `-D 'SCRATCHPAD=${claudeScratchpadDirFor(worktreePath, process.getuid?.() ?? 0)}'`,
+    );
+    expect(refreshedProfile).toContain('param "PROJECTDIR"');
+    expect(refreshedProfile).toContain('param "SCRATCHPAD"');
     const log = await Bun.file(join(agentDir, "agent.log")).text();
     expect(log).toContain("[sandbox refresh] re-derived from agent-type files:");
   });

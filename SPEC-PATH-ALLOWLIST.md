@@ -1,16 +1,51 @@
 # SPEC-PATH-ALLOWLIST.md — Path allow-list for agent types
 
-**Status:** DRAFT. Research report plus a design proposal. Nothing here is implemented.
-**Written:** 2026-09-02 by researcher agent `path-isolation` on branch `agent/path-isolation`,
-first on the `antigravity` agent's HEAD (`184c671`), then rebased onto `main` after that
-branch merged.
-**Decisions:** Adam answered the five questions on 2026-09-02. The answers are in §7 and
-applied in §6. The enforcement strategy for command arguments (§6.9) is still under
-discussion with Adam and the `sandbox-safety` agent, who is rebasing `agent/sandbox-feature`.
+**Status:** Phase B is implemented on `agent/codex-path-isolation` and recorded as
+**ON BRANCH**, not **INSTALLED**, in [the rollout ledger](docs/SANDBOX-ROLLOUT.md).
+The current contract is summarized immediately below and specified normatively in
+[SPEC.md §6.1](SPEC.md). Sections 0–7 retain the 2026-09-02 research and decision
+trail; statements there about `allowedPaths`, permissive defaults, or work still
+being proposed describe the historical baseline and are not current behavior.
+**Written:** 2026-09-02 by researcher agent `path-isolation`; updated through the
+Phase B integration on 2026-09-05.
+
+## Current authoritative implementation
+
+- Agent types use one top-level `paths:` policy with `allowRead`, `allowWrite`,
+  and `deny`. Lists union across `_all.md`, `_non_coordinator.md`, inheritance,
+  and the leaf type; relative entries anchor at the main repo root and are
+  resolved before being frozen in `meta.paths`. `allowedPaths` is retired and
+  rejected by validation.
+- Missing, empty, and partially populated path lists are normalized to empty
+  lists and are equally strict: no unmatched path is allowed. All three
+  PreToolUse handlers use the shared resolver after the structural protected-file,
+  sibling-agent, and main-checkout checks.
+- The shared runtime table contains the CLI-neutral roots. Claude, including
+  legacy metadata with no model, additionally receives its Claude project
+  directory and scratchpad; those Claude-only roots are excluded from codex,
+  fugu, and agy hook tables, matching their kernel profiles.
+- The Bash scanner classifies recognizable literal path arguments and common
+  write destinations, then consults the same table. It is an advisory visibility
+  and early-denial layer, not a shell parser or kernel boundary. Dynamic shell
+  expansion and unrecognized command shapes remain an accepted limitation when
+  the kernel sandbox is off.
+- The Seatbelt kernel wrapper is available for claude and the Codex-backed
+  codex/fugu CLIs on macOS. It is unavailable for agy: an agy agent whose
+  resolved `sandbox.enabled` is `true` fails closed before launch rather than
+  running unwrapped. Instructions, `ib info`, and the dashboard identify that
+  state as unavailable.
+- Spawn freezes `paths` and `sandbox` in `meta.json`; `ib sandbox refresh`
+  re-derives them from the current type layers. Codex resume and refresh also
+  regenerate `AGENTS.md` from the agent's current frozen metadata, so its
+  instructions describe the policy that will actually be enforced.
 
 ---
 
-## 0. Summary
+## 0. Historical summary (pre-Phase-B baseline)
+
+> **Historical record.** Sections 0–5 describe the implementation inspected on
+> 2026-09-02, before Phase B. They explain why the work was needed; they do not
+> describe the current `paths:` implementation summarized above.
 
 The requested feature already exists in part. Agent-type frontmatter accepts an
 `allowedPaths:` list[^1]. The worktree is always allowed before that list is
@@ -44,7 +79,7 @@ entry therefore cannot name its own repo root, which is acceptable because steps
 
 ---
 
-## 1. What exists today
+## 1. Historical baseline inspected on 2026-09-02
 
 ### 1.1 Data flow
 
@@ -252,7 +287,12 @@ or the two systems will disagree on the same entry.
 
 ---
 
-## 6. Proposed design
+## 6. Historical proposed design
+
+> This section records the proposal as it evolved. Later subsections supersede
+> earlier ones, and the implemented result is the current authoritative summary
+> above. In particular, §6.11 retires `allowedPaths` and §6.12 records the final
+> no-audit decision.
 
 ### 6.1 Entry grammar
 
@@ -1032,14 +1072,16 @@ boundary files for writing, and the tmux socket for non-spawning types.
 
 ---
 
-## 7. Decisions (Adam, 2026-09-02)
+## 7. Historical decisions (Adam, 2026-09-02)
 
 1. **Anchor.** Relative entries resolve against the main repo root the worktree
    was spawned from. An entry cannot name that root itself; accepted, because
    steps 10 and 11 deny it for worktree agents anyway.
-2. **Layers.** Union `allowedPaths` across `_all.md`, `_non_coordinator.md`, and
-   the `inherits:` chain, the same way `permissions` merge. §6.3 proposes that
-   the leaf decides the mode.
+2. **Layers.** The original decision used the then-current `allowedPaths` name:
+   union the path policy across `_all.md`, `_non_coordinator.md`, and the
+   `inherits:` chain, the same way `permissions` merge. The implemented
+   top-level `paths:` block carries that union rule. The later strict-default
+   decision superseded §6.3's idea that the leaf decides the mode.
 3. **Strict baseline.** Claude agents get their scratchpad. Anything wider is an
    `_all.md` entry.
 4. **Command arguments.** Fence them. Adam raised `sandbox-exec`; §6.9 gives the
@@ -1056,7 +1098,7 @@ boundary files for writing, and the tmux socket for non-spawning types.
 
 ---
 
-## 8. Build order
+## 8. Implementation history and build order
 
 Adam asked on 2026-09-02 at 16:32 which agent builds first and which builds on
 top. The answer follows from where the shared code lives: `src/sandbox.ts`
@@ -1101,14 +1143,15 @@ sorted, generated, and one resolver function, all tested.
    runtime roots folded in as write entries, strict by default; the codex and
    agy handlers pass the lists; codex `--add-dir` parity for the non-sandboxed
    path.
-4. The scratchpad runtime root; audit mode (`paths.audit`); the advisory Bash
-   scanner (§6.6, against the resolver); session-start text; `ib info` and
-   dashboard display; SPEC §2.2, §5.2, §6.1 and the implementation notes.
-6. `ib init-types --check`: diff the `paths:` and `sandbox:` blocks of the
+4. The scratchpad runtime root; the advisory Bash scanner (§6.6, against the
+   resolver); session-start text; `ib info` and dashboard display; SPEC §2.2,
+   §5.2, §6.1 and the implementation notes. The proposed `paths.audit` mode was
+   dropped before Phase B began and was not implemented.
+5. `ib init-types --check`: diff the `paths:` and `sandbox:` blocks of the
    live layer files against the embedded ones and print what is missing.
    Agreed with `sandbox-safety` on 2026-09-04 as a Phase B item; listed in
    the gate preconditions.
-5. ~~`ib sandbox refresh`~~ moved to Phase A (item A7, `sandbox-safety`),
+6. ~~`ib sandbox refresh`~~ moved to Phase A (item A7, `sandbox-safety`),
    because the resume code is theirs. It re-derives an existing agent's
    sandbox block and path lists from the current `.md` files, rewrites its
    `meta.json`, and resumes it. Required by the enable-all gate, because a
@@ -1260,22 +1303,19 @@ the tmux socket as a deny, and calls `resolvePathAccess`. An unreadable
 matching agy. Tests pin missing, empty, absent meta, and malformed stdin to
 deny for all three handlers.
 
-**Consequence for live agents on install.** Every live agent today has no
-`paths` key in its `meta.json`. The kernel profile is frozen at spawn, so
+**Historical pre-decision install analysis.** At this point in the design, no
+live agent had a `paths` key in its `meta.json`. The kernel profile is frozen at spawn, so
 they are unaffected until refreshed. The hook reads `meta.paths` at every
 call, so the moment Phase B is **installed**, every live agent becomes strict
 at the hook: worktree plus runtime roots only, not even the `_all.md` read
 floor, because that floor is not in their `meta.json`. This is decision 6
 applied. The rollout row "after Phase B installed, live agents unchanged
-until refreshed" is therefore wrong for the hook; it must read: install
-Phase B, then run `ib sandbox refresh --all` at once, or set `paths.audit`
-first. The `@system` coordinator has no `meta.json`; its lists come from
+until refreshed" was therefore wrong for the hook. The report initially
+presented immediate refresh and a proposed `paths.audit` mode as alternatives;
+Adam's later decision below selected the three-step immediate install and
+dropped audit entirely. The `@system` coordinator has no `meta.json`; its lists come from
 `_all.md` plus `system.md`, resolved at launch and stored where the hook can
-read them; missing is deny there too. The `paths.audit` flag must be read
-**live** from the current `_all.md` by the hook, not from frozen meta, or old
-agents can never be audited before they are refreshed; this is safe because
-the agent-types directory is read-only in the floor and audit only weakens
-enforcement to logging.
+read them; missing is deny there too. No `paths.audit` flag was implemented.
 
 **Refresh confirmed, and a sharper edge** (`sandbox-safety`, 2026-09-04
 17:42). `ib sandbox refresh` rewrites `meta.paths` and `meta.sandbox` from
@@ -1287,8 +1327,7 @@ lives in the embedded `docs/agent-types/_all.md`, and `ib init-types` writes
 only files that are missing, never updating an existing one[^61]. So a
 refresh alone would populate every agent's `meta.paths` with an empty floor,
 and the hook would still allow only the worktree and the runtime roots. The
-Phase B install is therefore **three steps**, in this order, or is gated
-behind `paths.audit: true` first:
+final Phase B install is therefore **three steps**, in this order:
 
 1. Add the `paths:` floor (read floor and write floor) from the embedded
    `docs/agent-types/_all.md` to the live `~/.itsybitsy/agent-types/_all.md`.
@@ -1343,31 +1382,37 @@ lives in `src/agent-types.ts`; `resolveTmuxSocketDir` lives in
 `AgentMeta` already types `paths` and `sandbox`; the profile parameter values
 are not stored in `meta.json`.
 
-**Parallel option during Phase A**, if Adam wants speed: `path-isolation`
-starts the pieces that touch none of `agent-types.ts`, `newAgent`, or
-`sandbox.ts`: the Bash-scanner tokenization in `agent-path.ts` against a
-resolver interface, the session-start text, the codex hook context, the
-`ib info` display, and the audit-mode plumbing. Then it rebases onto the
-sandbox branch for the resolver integration and the `allowedPaths`
-retirement. Conflict risk is low; coordination cost is not zero.
+**Historical parallel option during Phase A** (not the final execution plan):
+`path-isolation` could start the pieces that touched none of `agent-types.ts`,
+`newAgent`, or `sandbox.ts`: Bash-scanner tokenization in `agent-path.ts`
+against a resolver interface, session-start text, the codex hook context, and
+the `ib info` display. The then-proposed audit-mode plumbing was later dropped.
+The branch would then rebase onto the sandbox branch for resolver integration
+and `allowedPaths` retirement.
 
 **Merge order.** `agent/sandbox-safety` merges to `main` after Phase A; it
 ships with `enabled: false`, so no live agent changes behaviour. Then
 `agent/path-isolation` rebases onto `main`, finishes Phase B, and merges.
 
-**Phase C, pilot.** Enable the sandbox on one type in this repo, run audit
-mode for reads and writes, confirm the two pilot checks (a hook deny under
-skip-permissions; MCP under the profile), then enable type by type. Agy gets
-its wrapper after its own boot-floor bisection.
+**Phase C, pilot.** Enable the sandbox on one supported (claude, codex, or fugu) type
+in this repo, confirm the two pilot checks (a hook deny under the CLI's
+permission-bypass/no-prompt mode; MCP under the profile), then enable supported
+types one by one. There is no audit mode. Agy kernel sandboxing is unavailable;
+an enabled agy policy fails closed before launch until a supported wrapper and
+boot floor exist.
 
 **Phase B integration note (branch status, 2026-09-05).** The original
 `agent/path-isolation` work and both Sol continuation branches are merged on
 `agent/codex-path-isolation` at `1ec1529`. This includes the repo-anchored
 `paths:` grammar, `allowedPaths` retirement, deny-by-default shared hook table,
 protected writes, `ib init-types --check`, session-start text, policy displays,
-and SPEC / implementation-note updates. The advisory Bash scanner (`a472299`,
-hardened by `2368802`), kernel `PROJECTDIR`/`SCRATCHPAD` spawn/refresh wiring
-(`7cb9d7c`), and Codex/agy lifecycle propagation (`44ad115`) are integrated.
+and SPEC / implementation-note updates. The reachable integration commits are
+the inherited advisory scanner `a239357`, scanner coverage `165475d`,
+redirect/destination hardening `1ec1529`, kernel `PROJECTDIR`/`SCRATCHPAD`
+spawn/refresh wiring `0480d68`, and instruction/lifecycle wiring `81d018d`.
+The final central-review fixes align CLI-specific roots and safe partial-list
+display at `7cc63fa`, then harden agy rejection and Codex instruction refresh at
+`11f0ebc`.
 Phase B is **ON BRANCH**, not yet `INSTALLED` in the rollout ledger. Audit mode
 was dropped before implementation and does not ship.
 

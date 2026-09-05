@@ -1,11 +1,9 @@
 # Sandbox rollout: shipping ledger and the enable-all gate
 
-**Audience:** the operator (Adam). **Owner:** `sandbox-safety` owns this file,
-because `agent/sandbox-safety` lands on `main` first. This is the single rollout
-document — there is no second one. The seed came from `agent/path-isolation`'s
-draft[^seed]; this version fills in the Phase A reality from
-`agent/sandbox-safety`. `path-isolation` fills the Phase B rows when it rebases.
-Design lives in `SPEC-SANDBOX.md` and, for Phase B/C, in `SPEC-PATH-ALLOWLIST.md`.
+**Audience:** the operator (Adam). This is the single rollout document. It began
+as the `path-isolation` seed[^seed], was filled with the Phase A implementation
+from `sandbox-safety`, and now records the integrated Phase B branch. Design
+lives in `SPEC-SANDBOX.md` and, for Phase B/C, in `SPEC-PATH-ALLOWLIST.md`.
 
 **The word "shipped" means INSTALLED.** An item is shipped only when it is on
 `main`, the `ib` binary rebuilt (`bun run build`) and copied onto PATH
@@ -54,27 +52,27 @@ The original `agent/path-isolation` work and both Sol continuation branches are
 merged on `agent/codex-path-isolation`: surface/documentation first, then the
 advisory scanner, kernel `PROJECTDIR`/`SCRATCHPAD` wiring, and Codex/agy lifecycle
 propagation. The rows below identify the integrated implementation commits.
-Installation and the Phase C pilot remain separate steps.\[^b]
+Installation and the Phase C pilot remain separate steps.[^b]
 
 | # | Item | Status | Tip sha |
 | --- | ---- | ------ | ------- |
 | B1 | Relative-to-repo-root grammar resolved once in `newAgent`; authored-resolved lists stored in `meta.json`; spawn and refresh reject escapes to `/` or the home root | ON BRANCH `agent/codex-path-isolation` | `51228df` |
 | B2 | `allowedPaths` retired everywhere (parse, validate, `newAgent`, hook steps, session-start text, SPEC); a type that declares it is a validation error | ON BRANCH `agent/codex-path-isolation` | `2877028` |
 | B3 | Hook calls `resolvePreparedAccess` after the structural steps, runtime roots folded in, strict by default; Claude, codex, and agy handlers pass the lists; codex `--add-dir` parity for the non-sandboxed path; `<agentDir>/meta.json` and the system coordinator's configuration are protected from writes | ON BRANCH `agent/codex-path-isolation` | `854f0e1` |
-| B4 | Project-directory and scratchpad runtime roots at hook and kernel layers; advisory Bash scanner against the shared resolver. Audit mode was deliberately dropped before Phase B began.\[^b] | ON BRANCH `agent/codex-path-isolation` | Hook table `bb258d0`; scanner `a472299`; redirect/destination hardening `2368802`; kernel wiring `7cb9d7c` |
-| B5 | Session-start strict/kernel-on wording; `ib info` and dashboard show resolved lists and sandbox state; SPEC + implementation notes and this ledger updated. Codex/agy lifecycle propagation uses the same shared builder. | ON BRANCH `agent/codex-path-isolation` | Surface `7472325` + `1d57313`; rollout `e9697f3`; propagation `44ad115`; integration `1ec1529` |
+| B4 | CLI-appropriate runtime roots at hook and kernel layers; advisory Bash scanner against the shared resolver. Claude project/scratchpad roots are Claude-only. Audit mode was deliberately dropped before Phase B began.[^b] | ON BRANCH `agent/codex-path-isolation` | Hook table `bb258d0`; inherited scanner `a239357`; scanner tests `165475d`; redirect/destination hardening `1ec1529`; kernel roots `0480d68`; CLI root alignment `7cc63fa` |
+| B5 | Session-start strict/kernel wording; `ib info` and dashboard show normalized resolved lists and CLI-specific sandbox availability; SPEC + implementation notes and this ledger updated. Codex resume/refresh regenerates `AGENTS.md` from current frozen metadata. | ON BRANCH `agent/codex-path-isolation` | Surface `7472325` + `1d57313`; rollout `e9697f3`; instruction/lifecycle wiring `81d018d`; lifecycle hardening `11f0ebc` |
 | B6 | `ib init-types --check` compares the live layer `paths:` and `sandbox:` blocks with the embedded floor and returns a nonzero exit when they drift | ON BRANCH `agent/codex-path-isolation` | `8fa6b52` |
 
 ### Phase C — pilot and rollout
 
 | # | Item | Status |
 |---|---|---|
-| C1 | Pilot: one non-spawner type in this repo with `sandbox.enabled: true` | NOT STARTED |
+| C1 | Pilot: one claude non-spawner type in this repo with `sandbox.enabled: true` | NOT STARTED |
 | C2 | Pilot check: the agent boots, reaches the model through the proxy, runs its normal tools, and a hook `PreToolUse` deny still blocks under `--dangerously-skip-permissions` | NOT STARTED |
 | C3 | Pilot check: configured MCP servers work under the profile | NOT STARTED |
 | C4 | Toolchain entries collected (from hook denial logs / kernel bisection) and added to the types that need them | NOT STARTED |
 | C5 | Enable-all gate passed (§3) | NOT STARTED |
-| C6 | Agy wrapper built after its own boot-floor bisection (agy has no sandbox wrapper today) | NOT STARTED |
+| C6 | Agy sandbox support designed and built after its own boot-floor bisection; until then an enabled agy policy fails closed as unsupported | NOT STARTED |
 
 ---
 
@@ -85,8 +83,8 @@ Installation and the Phase C pilot remain separate steps.\[^b]
 | **Before Phase A is installed** | No itsybitsy kernel sandbox exists. | Same. |
 | **After Phase A is installed** | Every embedded layer ships `enabled: false`[^disabled], so there is still **no behavior change** for a live agent. | Unchanged, until a type opts in. |
 | **After Phase B is installed, before refresh** | The **hook changes immediately** because it reads `meta.paths` on every call. A legacy live agent with no `paths` key becomes strict at the hook: worktree + runtime roots only. Its **kernel profile stays frozen** until refresh. This is why the three-step Phase B install below must be performed as one operation. | New agents receive the resolved live type floor in `meta.paths`; the hook is strict immediately. The kernel remains off unless their resolved `sandbox.enabled` is true. |
-| **After a type opts in** — one type sets `sandbox.enabled: true` | Unchanged until refreshed (§3.2): a live agent replays its frozen profile[^frozen]. | Agents **of that type** get the kernel Seatbelt profile + per-agent proxy. |
-| **After the enable-all gate** (§3) | Sandboxed once `ib sandbox refresh --all` re-derives them, per repo. | Sandboxed. |
+| **After a supported type opts in** — one claude/codex/fugu type sets `sandbox.enabled: true` | Unchanged until refreshed (§3.2): a live agent replays its frozen profile[^frozen]. | New claude/codex/fugu agents **of that type** get the kernel Seatbelt profile + per-agent proxy. Agy fails closed as unsupported. |
+| **After the enable-all gate** (§3) | Supported agents are sandboxed once `ib sandbox refresh --all` re-derives them, per repo; agy refresh is reported unsupported. | New claude/codex/fugu agents are sandboxed; agy cannot launch while the inherited policy is enabled. |
 
 ### 2.1 Installing Phase B without stranding live agents
 
@@ -101,8 +99,9 @@ Perform these **three steps in order, as one operation**:
 2. Install Phase B: merge it, rebuild and copy `ib` onto PATH, and restart
    `ib watch`.
 3. Run `ib sandbox refresh --all` in **each registered repo**. This writes the
-   resolved floor into every live agent's `meta.paths`; it also refreshes the
-   frozen kernel policy for agents whose sandbox is enabled.
+   resolved floor into every live agent's `meta.paths`; it refreshes the frozen
+   kernel policy for supported agents whose sandbox is enabled and reports agy
+   as unsupported rather than launching it unwrapped.
 
 Do not install step 2 against a live `_all.md` that still lacks the floor. In
 that window the hook immediately interprets a missing `meta.paths` as empty and
@@ -119,13 +118,15 @@ agent, accepting that existing agents may break.
 
 `sandbox.enabled` is **OR-merged** across the type layers — any layer that sets
 it `true` wins, and no descendant layer can set it back to `false`[^ormerge].
-Setting it `true` in `~/.itsybitsy/agent-types/_all.md` therefore enables it for
-every type. A type that cannot yet be fenced does **not** disable the sandbox
-(it can't); instead it writes **explicit wide allows** — `allowRead: ["/"]` plus
-the write roots it needs — which keeps the network proxy in place and matches
-the "fully-open is explicit-only" rule[^open]. So the end state is `_all.md`
-`enabled: true` plus, for any not-yet-fenceable type, an explicit wide `paths`
-block on that type — never `enabled: false` on a leaf.
+Setting it `true` in `~/.itsybitsy/agent-types/_all.md` therefore resolves true
+for every type. A supported claude/codex/fugu type that cannot yet be narrowly fenced
+does **not** disable the sandbox (it can't); instead it writes **explicit wide
+allows** — `allowRead: ["/"]` plus the write roots it needs — which keeps the
+network proxy in place and matches the "fully-open is explicit-only" rule[^open].
+This widening cannot create an agy kernel wrapper: agy fails closed while the
+inherited setting is true. The supported end state is `_all.md` `enabled: true`
+plus explicit wide `paths` only where necessary — never `enabled: false` on a
+leaf.
 
 ### 3.2 Why flipping `_all.md` alone changes no live kernel profile
 
@@ -167,18 +168,19 @@ without a strict-but-floorless interval.
 - [ ] The advisory hook denials and kernel bisection identified the toolchain
       entries each type needs, and those entries were added (Phase C, C4 —
       pending). Phase B deliberately ships no audit mode.
-- [ ] **agy is handled.** agy has **no sandbox wrapper today**[^agy], so agy
-      agents **cannot be sandboxed** — they must stay disabled or be excluded
-      until agy gets its own boot-floor bisection (Phase C, C6 — pending).
-      Because a leaf cannot switch `enabled` off (§3.1), "excluded" means the
-      agy types either are not enabled by leaving them off a repo, or the
-      rollout waits for C6.
+- [ ] **agy is handled.** agy has **no sandbox wrapper today**[^agy]. An agy
+      spawn/resume whose resolved `sandbox.enabled` is `true` fails closed as
+      unsupported before any unwrapped process launches, and the instructions,
+      `ib info`, and dashboard say the sandbox is unavailable. Because a leaf
+      cannot switch `enabled` off (§3.1), a global `_all.md` enable means agy
+      cannot launch; complete C6 or accept that operational exclusion before
+      the enable-all switch.
 - [ ] `ib list-types` validates cleanly (a bad `paths:` block fails validation).
 
 ### 3.4 The switch
 
 1. In `~/.itsybitsy/agent-types/_all.md`, set `sandbox.enabled: true`.
-2. For any type that cannot yet be fenced, give it the explicit wide `paths`
+2. For any supported claude/codex/fugu type that cannot yet be fenced, give it the explicit wide `paths`
    block of §3.1 (`allowRead: ["/"]` + its write roots) rather than trying to
    disable it.
 3. **Rebuild `ib`** (`bun run build`), copy it onto PATH, and **restart
@@ -186,8 +188,8 @@ without a strict-but-floorless interval.
 4. Run **`ib sandbox refresh --all` in each registered repo** — it refreshes
    only the current repo's agents[^refresh], so run it per repo. Every active
    agent's `meta.json` is re-derived from the current `.md` files and the agent
-   is resumed under the new profile; stopped agents pick it up on their next
-   resume; coordinators are reported as a skip[^refresh].
+   is resumed under the new profile where supported; stopped agents pick it up
+   on their next resume; agy failures and coordinator skips are reported.[^refresh]
 5. Watch the Denials tab in `ib watch`: the hook explains honest denied path
    attempts before the kernel returns `EPERM`. A kernel-only denial is not
    harvested into the log and still requires bisection.[^spike]
@@ -213,15 +215,17 @@ without a strict-but-floorless interval.
   which allows only the apex domains in `sandbox.domains`; a tool that must reach
   any other host fails closed until its domain is added to `sandbox.domains`
   (proxy apex entries are exact, so subdomains need their own entry)[^proxy].
-- **(e) agy agents cannot be sandboxed yet** — no wrapper (§3.3)[^agy].
+- **(e) agy agents cannot be sandboxed yet** — no wrapper (§3.3). They fail
+  closed rather than launching unwrapped when their resolved policy is enabled.[^agy]
 - **(f) The system coordinator is advisory in hook-only mode.** Its worktree
   root is all of `~/.itsybitsy`, so the hook structurally blocks writes to
   `agent-types/`, `config.json`, `repos.json`, `layout.json`, and `sealed/` for
-  file tools plus the Bash redirect and in-place-edit shapes it recognizes.
-  Unmodelled command shapes such as `tee`, `cp`, `mv`, `mkdir`, or a write
-  through a newly created symlink can still reach those paths while the kernel
-  is off. This is an accepted residual; the kernel closes it when the system
-  coordinator is sandboxed (SPEC-PATH-ALLOWLIST.md §6.12).
+  file tools plus recognized Bash paths and write destinations. The scanner
+  covers redirects, `sed -i`, `tee`, `cp`/`mv`, and common write verbs, but it
+  is not a shell parser: dynamic expansion, subprocesses, alternate command
+  shapes, and symlink races can evade it while the kernel is off. This is an
+  accepted residual; the kernel closes it when the system coordinator is
+  sandboxed (SPEC-PATH-ALLOWLIST.md §6.12).
 
 ### 3.6 Recovery / rollback
 
@@ -238,8 +242,10 @@ without a strict-but-floorless interval.
 The gate (§3) must not fire until this pilot passes. It is **pending**: nothing
 below has been run.
 
-1. **Pick one non-spawner type** in this repo. Set `sandbox.enabled: true` on
-   that type and run `ib sandbox refresh <id>` for one of its agents.
+1. **Pick one claude non-spawner type** in this repo. Set
+   `sandbox.enabled: true` on that type and run `ib sandbox refresh <id>` for
+   one of its agents. After this Claude-specific boot gate, repeat the live
+   policy/MCP checks for codex/fugu types before enabling them broadly.
 2. **Verify LIVE**, in order:
    - **It boots.** Run the opt-in boot gate[^a3]:
      ```
@@ -262,7 +268,9 @@ below has been run.
 4. **Toolchain entries.** Fold what the hook denial logs and kernel bisection
    surfaced (C4) into the types that need them.
 5. **Enable type by type**, re-running steps 1–3 per type.
-6. **agy last**, after its own boot-floor bisection (C6)[^agy].
+6. **agy remains excluded from kernel rollout** until its own supported wrapper
+   and boot-floor bisection exist (C6). Its enabled-policy failure is the
+   fail-closed guard, not a sandbox implementation.[^agy]
 
 ---
 
@@ -287,23 +295,23 @@ which is out of scope[^tmux][^residual].
 
 ---
 
-[^seed]: [SANDBOX-ROLLOUT.md draft seed](https://claude.ai/code) — branch `agent/path-isolation`, commit `8725b37`, read with `git show agent/path-isolation:docs/SANDBOX-ROLLOUT.md`.
+[^seed]: [Path-isolation implementation history](../SPEC-PATH-ALLOWLIST.md) — the rollout seed was commit `8725b37` on the historical `agent/path-isolation` branch.
 [^a0]: [SPEC-SANDBOX.md §5.1 (profile generator), §5.2 (per-agent proxy + lifecycle), §4B (codex `danger-full-access`), §5.5 (fail-hard preconditions)](../SPEC-SANDBOX.md) — main-reachable foundation tip `e3ddbe8`.
 [^a1]: [SPEC-SANDBOX.md §4A.7 guarantees (frozen `meta.paths`, enabled-without-paths refused) and §7 "Top-level `paths:` split" / "Write implies read"](../SPEC-SANDBOX.md) — main-reachable A1 tip `b571f6c`.
 [^a2]: [SPEC-SANDBOX.md §4A.8 "Most specific entry wins" (shared total sort, `resolvePathAccess`, SBPL oracle, live macOS probe, resolver boundary)](../SPEC-SANDBOX.md) — main-reachable A2 tip `4df425b`; resolver in [src/sandbox.ts#resolvePathAccess](../src/sandbox.ts).
 [^a3]: [SPEC-SANDBOX.md §4A.7 "A3 floor tightening", §4C.3 (tmux socket file + network-outbound deny), §7 "A3 floor tightening + spawn-keyed roots"](../SPEC-SANDBOX.md) and the shipped floor [docs/agent-types/_all.md](agent-types/_all.md) — main-reachable A3 tip `9703ba1`.
 [^a4]: [SPEC-SANDBOX.md §4B.1 (claude `--dangerously-skip-permissions` under the kernel), §5.6 (`ib sandbox refresh`), §4C.3 (sealed record)](../SPEC-SANDBOX.md) — main-reachable A4 tip `34a74c5`; seal helpers in [src/agent-seal.ts](../src/agent-seal.ts).
-[^b]: [SPEC-PATH-ALLOWLIST.md §8 "Build order" (Phase B / Phase C)](https://claude.ai/code) — branch `agent/path-isolation`, read with `git show agent/path-isolation:SPEC-PATH-ALLOWLIST.md`.
+[^b]: [SPEC-PATH-ALLOWLIST.md §8, "Implementation history and build order"](../SPEC-PATH-ALLOWLIST.md).
 [^disabled]: [docs/agent-types/_all.md](agent-types/_all.md) — `sandbox.enabled: false` ships in the baseline; nothing runs sandboxed until a type sets it `true`.
 [^frozen]: [SPEC-SANDBOX.md §4A.7 guarantee 1 and §5.4 ("profile is fixed at exec")](../SPEC-SANDBOX.md) — spawn resolves and freezes `meta.sandbox`/`meta.paths`; resume replays from meta and does not re-read the `.md` files; editing `_all.md` affects new spawns only.
-[^refresh]: [SPEC-SANDBOX.md §5.6 (`ib sandbox refresh <id> | --all`: re-derives from the current `.md` files, resumes; `--all` covers the current repo only; coordinators skipped)](../SPEC-SANDBOX.md).
+[^refresh]: [SPEC-SANDBOX.md §5.6 (`ib sandbox refresh <id> | --all`: re-derives from the current `.md` files, resumes; `--all` covers the current repo only; coordinators skipped)](../SPEC-SANDBOX.md); agy's current refresh refusal is implemented in [`refreshAgentSandbox`](../src/ib-commands.ts:refreshAgentSandbox).
 [^ormerge]: [SPEC-SANDBOX.md §7 "Inheritance → union" — "The scalar `sandbox.enabled` uses OR-merge (any layer `true` wins)"](../SPEC-SANDBOX.md); merge in [src/ib-commands.ts#mergeSandboxLayerConfigs](../src/ib-commands.ts).
 [^open]: [SPEC-SANDBOX.md §7 "Enforcement model → Model B" / §4A.0 — "Fully-open is explicit-only (`allowRead: ["/"]`)"](../SPEC-SANDBOX.md).
 [^inherit]: [SPEC-SANDBOX.md §4C — a Seatbelt profile is inherited by every descendant (hooks, `ib`, MCP, Bash children); under `(deny default)` an unlisted path is `EPERM`](../SPEC-SANDBOX.md).
 [^spike]: [docs/SANDBOX-SPIKE-FINDINGS.md — the unified-log harvest does not surface `sandbox-exec` denials; use bisection](SANDBOX-SPIKE-FINDINGS.md).
 [^tmux]: [SPEC-SANDBOX.md §4C.3 "tmux socket = sandbox escape (accepted shipped limitation)" — denied for non-spawners, kept for spawners](../SPEC-SANDBOX.md).
 [^proxy]: [SPEC-SANDBOX.md §5.2 (per-agent Bun proxy), §4C.4 (MCP egress under the same allowlist), §4B (apex entries are exact)](../SPEC-SANDBOX.md) and the shipped `sandbox.domains` in [docs/agent-types/_all.md](agent-types/_all.md).
-[^agy]: [SPEC-SANDBOX.md §4B.1 — "agy has no wrapper yet and is out of scope"](../SPEC-SANDBOX.md); [SPEC-PATH-ALLOWLIST.md §8 "Phase C" — agy gets its wrapper after its own boot-floor bisection](https://claude.ai/code) (branch `agent/path-isolation`).
+[^agy]: [SPEC-SANDBOX.md §4B.1 — agy has no wrapper yet and is out of scope](../SPEC-SANDBOX.md); current fail-closed lifecycle guards are in [`newAgent`, `resumeAgent`, and `refreshAgentSandbox`](../src/ib-commands.ts:newAgent), and display wording comes from [`kernelSandboxStatus`](../src/agent-cli.ts:kernelSandboxStatus).
 [^allmd]: [docs/agent-types/_all.md](agent-types/_all.md) — the `allowRead` comment documents the `bunx tsc` cost of dropping `~`.
 [^skip]: [SPEC-SANDBOX.md §4B.1 — `--dangerously-skip-permissions` is emitted only inside the `sandbox-exec` wrapper when the sandbox is enabled; it suppresses claude's own prompts, not the itsybitsy hook denies](../SPEC-SANDBOX.md).
 [^mcp]: [SPEC-SANDBOX.md §4C.4 "MCP servers" — stdio MCP servers are claude children, so they are sandboxed and need their interpreter paths + their own domains](../SPEC-SANDBOX.md).

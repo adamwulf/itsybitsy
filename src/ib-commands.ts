@@ -107,14 +107,18 @@ import {
   findRelativeEscapes,
   generateProfile,
   canonicalizePathsConfig,
-  canonicalizeSandboxPath,
   resolvePathsConfig,
   resolveSandboxConfig,
+  resolveTmuxSocketDir,
   sandboxProfileParameterValues,
   type PathsConfig,
   type SandboxConfig,
   type SandboxProfileParams,
 } from "./sandbox";
+// resolveTmuxSocketDir moved to ./sandbox (so hooks can import it without the
+// heavy ib-commands module); re-exported here so existing callers/tests that
+// import it from ib-commands keep working.
+export { resolveTmuxSocketDir };
 import {
   allocateSandboxProxyPort,
   assertSandboxProxyPortAvailable,
@@ -1153,31 +1157,6 @@ export HTTPS_PROXY="$http_proxy"
 export no_proxy="localhost,127.0.0.1,::1"
 export NO_PROXY="$no_proxy"
 `;
-}
-
-/**
- * Resolve the tmux server socket DIRECTORY the way tmux itself does, canonical
- * (longest-existing-prefix), ready to hand to the sandbox as `TMUXSOCK`: if
- * `$TMUX` is set (we are inside a tmux server), its first comma-separated field
- * is the socket path, and the directory of that path is the socket dir;
- * otherwise tmux uses `${TMUX_TMPDIR:-/tmp}/tmux-<uid>` (so `/tmp/tmux-<uid>` →
- * `/private/tmp/tmux-<uid>` on macOS). Denying this subtree closes the
- * unix-socket connect() a non-spawner would otherwise use to reach the
- * unsandboxed tmux server. profileRuntimeDenyRoots re-canonicalizes idempotently.
- */
-export function resolveTmuxSocketDir(uid: number): string {
-  const tmux = process.env.TMUX;
-  const raw = (() => {
-    if (tmux && tmux.length > 0) {
-      const socketPath = tmux.split(",")[0];
-      if (socketPath && socketPath.length > 0) return dirname(socketPath);
-    }
-    const base = process.env.TMUX_TMPDIR && process.env.TMUX_TMPDIR.length > 0
-      ? process.env.TMUX_TMPDIR
-      : "/tmp";
-    return join(base, `tmux-${uid}`);
-  })();
-  return canonicalizeSandboxPath(raw);
 }
 
 async function prepareSandbox(

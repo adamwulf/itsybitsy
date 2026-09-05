@@ -60,6 +60,21 @@ export interface SandboxProfileParams {
    * when false.
    */
   canSpawnChildren: boolean;
+  /**
+   * Optional WRITE runtime root: the agent's Claude project directory
+   * (`~/.claude/projects/<encoded-worktree>`). Emitted by profileRuntimeAllowRoots
+   * exactly like the other roots when present. The spawn side (Phase B worker 1)
+   * must pass it so the kernel profile grants it too; the hook side computes and
+   * appends the same value independently (see buildAgentAccessTable). Absent →
+   * no row, so a profile that omits it stays byte-identical.
+   */
+  PROJECTDIR?: string;
+  /**
+   * Optional WRITE runtime root: the agent's scratchpad directory
+   * (`/private/tmp/claude-<uid>/<encoded-worktree>`). Emitted like the other
+   * roots when present. Absent → no row (byte-identical profile).
+   */
+  SCRATCHPAD?: string;
   HOME?: string;
 }
 
@@ -166,6 +181,35 @@ export function canonicalizeSandboxPath(input: string): string {
       candidate = parent;
     }
   }
+}
+
+/**
+ * Resolve the tmux server socket DIRECTORY the way tmux itself does, canonical
+ * (longest-existing-prefix), ready to hand to the sandbox as `TMUXSOCK`: if
+ * `$TMUX` is set (we are inside a tmux server), its first comma-separated field
+ * is the socket path, and the directory of that path is the socket dir;
+ * otherwise tmux uses `${TMUX_TMPDIR:-/tmp}/tmux-<uid>` (so `/tmp/tmux-<uid>` →
+ * `/private/tmp/tmux-<uid>` on macOS). Denying this subtree closes the
+ * unix-socket connect() a non-spawner would otherwise use to reach the
+ * unsandboxed tmux server. profileRuntimeDenyRoots re-canonicalizes idempotently.
+ *
+ * Lives here (not in ib-commands.ts) so the PreToolUse hooks can import it
+ * without pulling in the heavy ib-commands module; ib-commands re-exports it so
+ * existing callers keep working.
+ */
+export function resolveTmuxSocketDir(uid: number): string {
+  const tmux = process.env.TMUX;
+  const raw = (() => {
+    if (tmux && tmux.length > 0) {
+      const socketPath = tmux.split(",")[0];
+      if (socketPath && socketPath.length > 0) return dirname(socketPath);
+    }
+    const base = process.env.TMUX_TMPDIR && process.env.TMUX_TMPDIR.length > 0
+      ? process.env.TMUX_TMPDIR
+      : "/tmp";
+    return join(base, `tmux-${uid}`);
+  })();
+  return canonicalizeSandboxPath(raw);
 }
 
 function expandHome(entry: string, home: string): string {
@@ -593,6 +637,24 @@ function profileRuntimeAllowRoots(params: SandboxProfileParams): ProfileRuntimeP
       path: canonicalizeSandboxPath(params.PARENTCLAUDE),
       op: "write",
       parameterName: "PARENTCLAUDE",
+    });
+  }
+  // Optional Phase B write roots (project dir, scratchpad). Each is emitted only
+  // when the caller supplies it, so a profile that omits both is byte-identical
+  // to the pre-Phase-B output. When present they are ordinary write roots and
+  // sort into the specificity table like any other runtime root.
+  if (params.PROJECTDIR) {
+    roots.push({
+      path: canonicalizeSandboxPath(params.PROJECTDIR),
+      op: "write",
+      parameterName: "PROJECTDIR",
+    });
+  }
+  if (params.SCRATCHPAD) {
+    roots.push({
+      path: canonicalizeSandboxPath(params.SCRATCHPAD),
+      op: "write",
+      parameterName: "SCRATCHPAD",
     });
   }
   return roots;

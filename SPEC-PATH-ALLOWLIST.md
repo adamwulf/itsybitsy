@@ -1420,8 +1420,9 @@ spawn/refresh wiring `0480d68`, and instruction/lifecycle wiring `81d018d`.
 The final central-review fixes align CLI-specific roots and safe partial-list
 display at `7cc63fa`, harden agy rejection and Codex instruction refresh at
 `11f0ebc`, preserve absent/safe-bare/`readAgentMeta`-`unknown` legacy model
-metadata as Claude at `d9a96cb`, and
-harden scanner boundaries and nested input schemas at `e9fc804`.
+metadata as Claude at `d9a96cb`, harden scanner boundaries and nested input
+schemas at `e9fc804`, enforce canonical Bash worktree boundaries at `8f00605`,
+and canonicalize nonexistent file targets before structural checks at `b6a6bf7`.
 Phase B is **ON BRANCH**, not yet `INSTALLED` in the rollout ledger. Audit mode
 was dropped before implementation and does not ship.
 

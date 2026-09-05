@@ -139,57 +139,16 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
     expect(args[3]).toBe(FAKE_LIBRARY_CACHES);
     const flags = args.slice(4);
     // flags alternates: -c, payload, -c, payload, ... The trailing pairs
-    // beyond the hook events are the 8 always-on flags (with
-    // IB_CODEX_KEEP_COMPUTER_USE unset, the default):
+    // beyond the hook events are the 6 always-on flags:
     //   features.multi_agent, sandbox_workspace_write.network_access,
-    //   plugins.unified-computer-use@openai-bundled.enabled,
-    //   mcp_servers.node_repl.enabled,
     //   commit_attribution, log_dir, tui.show_tooltips, tui.status_line.
-    expect(flags.length).toBe(CODEX_REGISTERED_EVENTS.length * 2 + 16);
+    expect(flags.length).toBe(CODEX_REGISTERED_EVENTS.length * 2 + 12);
     for (let i = 0; i < flags.length; i += 2) {
       expect(flags[i]).toBe("-c");
     }
     expect(flags[1]).toContain("hooks.PreToolUse=");
     expect(flags[3]).toContain("hooks.SessionStart=");
     expect(flags[5]).toContain("hooks.Stop=");
-  });
-
-  test("disables the unified-computer-use plugin and node_repl MCP server (UNQUOTED plugin key)", () => {
-    const prev = process.env.IB_CODEX_KEEP_COMPUTER_USE;
-    delete process.env.IB_CODEX_KEEP_COMPUTER_USE;
-    try {
-      const { args } = buildCodexLaunchArgs({
-        ibBinaryPath: "/usr/local/bin/ib",
-        agentId: "agent-abc123",
-        agentDir: "/var/agents/agent-abc123",
-      });
-      // The plugin name MUST be unquoted: codex's `-c` splits the key on `.`
-      // and does NOT strip TOML quotes, so a quoted key silently no-ops.
-      expect(args).toContain("plugins.unified-computer-use@openai-bundled.enabled=false");
-      expect(args).toContain("mcp_servers.node_repl.enabled=false");
-      // Regression guard: never emit the quoted form.
-      expect(args).not.toContain('plugins."unified-computer-use@openai-bundled".enabled=false');
-    } finally {
-      if (prev === undefined) delete process.env.IB_CODEX_KEEP_COMPUTER_USE;
-      else process.env.IB_CODEX_KEEP_COMPUTER_USE = prev;
-    }
-  });
-
-  test("IB_CODEX_KEEP_COMPUTER_USE keeps the computer-use helpers (control arm)", () => {
-    const prev = process.env.IB_CODEX_KEEP_COMPUTER_USE;
-    process.env.IB_CODEX_KEEP_COMPUTER_USE = "1";
-    try {
-      const { args } = buildCodexLaunchArgs({
-        ibBinaryPath: "/usr/local/bin/ib",
-        agentId: "agent-abc123",
-        agentDir: "/var/agents/agent-abc123",
-      });
-      expect(args).not.toContain("plugins.unified-computer-use@openai-bundled.enabled=false");
-      expect(args).not.toContain("mcp_servers.node_repl.enabled=false");
-    } finally {
-      if (prev === undefined) delete process.env.IB_CODEX_KEEP_COMPUTER_USE;
-      else process.env.IB_CODEX_KEEP_COMPUTER_USE = prev;
-    }
   });
 
   test("each hook payload contains <abs ib> and <agentId>", () => {

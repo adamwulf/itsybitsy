@@ -843,12 +843,30 @@ describe("checkPathAccess — advisory Bash path scanner", () => {
     expect(run("cat missing 2>/dev/null").decision).toBe("deny");
     expect(run("cat missing 2>/dev/null", { allowWrite: ["/dev"] }).decision).toBe("allow");
     expect(run("echo x 1>|/tmp/out", { allowWrite: ["/tmp"] }).decision).toBe("allow");
+
+    expect(run('echo x >"/tmp/out"', { allowRead: ["/tmp"] }).decision).toBe("deny");
+    expect(run('echo x >"/tmp/out"', { allowWrite: ["/tmp"] }).decision).toBe("allow");
+    expect(run('cat missing 2>"/dev/null"').decision).toBe("deny");
+    expect(run('cat missing 2>"/dev/null"', { allowWrite: ["/dev"] }).decision).toBe("allow");
   });
 
   test("cp and mv classify only their last argument as a write", () => {
     expect(run("cp a /Users/me/x", { allowRead: ["/Users/me"] }).decision).toBe("deny");
     expect(run("cp a /Users/me/x", { allowWrite: ["/Users/me"] }).decision).toBe("allow");
     expect(run("mv a /Users/me/x", { allowRead: ["/Users/me"] }).decision).toBe("deny");
+  });
+
+  test.each(["cp", "mv"])("%s destination remains a write when followed by a redirect", (verb) => {
+    const command = `${verb} src /read-only/dest > /allowed/log`;
+    const denied = run(command, {
+      allowRead: ["/read-only"],
+      allowWrite: ["/allowed"],
+    });
+    expect(denied.decision).toBe("deny");
+    expect(denied.reason).toContain("write");
+    expect(denied.reason).toContain("/read-only/dest");
+
+    expect(run(command, { allowWrite: ["/read-only", "/allowed"] }).decision).toBe("allow");
   });
 
   test("tee and sed in-place path arguments are writes", () => {

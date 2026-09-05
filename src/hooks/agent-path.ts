@@ -622,6 +622,18 @@ function startsWithPathAnchor(s: string): boolean {
   );
 }
 
+/** Strip the one matching quote layer that the simple Bash tokenizer supports. */
+function stripBashSurroundingQuotes(token: string): string {
+  if (
+    token.length >= 2 &&
+    ((token[0] === "'" && token[token.length - 1] === "'") ||
+      (token[0] === '"' && token[token.length - 1] === '"'))
+  ) {
+    return token.slice(1, -1);
+  }
+  return token;
+}
+
 /**
  * Return the path PORTION of a token if it is path-looking, else null:
  *   - a bare path anchor (`/x`, `~`, `~/x`, `$HOME/x`, `${HOME}/x`);
@@ -738,14 +750,20 @@ function scanBashCommandPaths(
 
   // ── Classify write-target token indices ──
   const forcedWriteIndex = new Set<number>();
+  const redirectSyntaxIndex = new Set<number>();
+  const redirectTargetIndex = new Set<number>();
   const gluedWriteTargets: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
     // A redirect operator: optional fd digits or `&`, then `>`/`>>`, an optional
     // `|` force-clobber, then either a glued target or (empty) the next token.
     const m = tokens[i]!.match(/^(?:&|\d+)?(>>?)\|?(.*)$/);
     if (!m) continue;
+    redirectSyntaxIndex.add(i);
     if (m[2]) gluedWriteTargets.push(m[2]);
-    else forcedWriteIndex.add(i + 1);
+    else {
+      forcedWriteIndex.add(i + 1);
+      redirectTargetIndex.add(i + 1);
+    }
   }
 
   const verb = tokens[0]!;
@@ -754,37 +772,43 @@ function scanBashCommandPaths(
   const teeIndex = tokens.indexOf("tee");
   const isCpMv = verb === "cp" || verb === "mv";
   const isWriteVerb = BASH_WRITE_ALL_ARGS.has(verb);
+  let cpMvWriteIndex = -1;
+  if (isCpMv) {
+    // Redirections are shell syntax, not cp/mv arguments. Select the final
+    // command argument after excluding both redirect operators and their
+    // separate targets, so `cp src /dest > /log` still treats /dest as WRITE.
+    for (let i = 1; i < tokens.length; i++) {
+      if (redirectSyntaxIndex.has(i) || redirectTargetIndex.has(i)) continue;
+      cpMvWriteIndex = i;
+    }
+  }
 
   const opForIndex = (i: number): PathOperation => {
     if (forcedWriteIndex.has(i)) return "write";
     if (sedIndex !== -1 && i > sedIndex) return "write";
     if (teeIndex !== -1 && i > teeIndex) return "write";
     if (isWriteVerb && i > 0) return "write";
-    if (isCpMv && i === tokens.length - 1) return "write";
+    if (i === cpMvWriteIndex) return "write";
     return "read";
   };
 
   // A glued redirect target (`>/tmp/x`, `2>>log`) is always a WRITE.
   for (const target of gluedWriteTargets) {
-    const portion = bashPathPortion(target);
+    // The shell accepts a quote layer immediately after the operator, as in
+    // `>"/tmp/x"`; normalize it just like an ordinary whitespace token.
+    const portion = bashPathPortion(stripBashSurroundingQuotes(target));
     if (portion === null) continue;
     const d = denyIfRejected(portion, "write", target);
     if (d) return d;
   }
 
   for (let i = 0; i < tokens.length; i++) {
-    let token = tokens[i]!;
+    const rawToken = tokens[i]!;
     // Strip one layer of surrounding matching quotes (what the shell peels off).
-    if (
-      token.length >= 2 &&
-      ((token[0] === "'" && token[token.length - 1] === "'") ||
-        (token[0] === '"' && token[token.length - 1] === '"'))
-    ) {
-      token = token.slice(1, -1);
-    }
+    const token = stripBashSurroundingQuotes(rawToken);
     const portion = bashPathPortion(token);
     if (portion === null) continue;
-    const d = denyIfRejected(portion, opForIndex(i), token);
+    const d = denyIfRejected(portion, opForIndex(i), rawToken);
     if (d) return d;
   }
 

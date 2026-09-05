@@ -1652,19 +1652,20 @@ describe("metaCanSpawnChildren", () => {
 });
 
 describe("validateAllAgentTypes: sandbox", () => {
-  const originalHome = process.env.HOME;
   let tempHome: string;
   let typesDir: string;
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-sandbox-validation-"));
-    process.env.HOME = tempHome;
+    // Use the production home seam (setUserHome), not process.env.HOME — the
+    // env mutation leaks across tests and once killed the live ib-coordinator.
+    setUserHome(tempHome);
     typesDir = join(tempHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
   });
 
   afterEach(async () => {
-    process.env.HOME = originalHome;
+    resetUserHome();
     await rm(tempHome, { recursive: true, force: true });
   });
 

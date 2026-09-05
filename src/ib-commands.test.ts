@@ -5110,6 +5110,42 @@ sandbox:
     expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
   });
 
+  test("sandbox refresh refuses a relative entry that climbs to the home directory", async () => {
+    await writeSandboxType("refresh-home-escape", { allowRead: [tempDir], allowWrite: [tempDir], deny: ["**/.env"] });
+    setSandboxPortAllocatorForTesting(() => 43188);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99984 }));
+    const spawned = await callNewAgent("refresh home escape", { name: "refresh-home-escape", type: "refresh-home-escape" });
+    expect(spawned.ok).toBe(true);
+
+    const agentDir = join(agentsDir, "refresh-home-escape");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
+    const frozenPaths = structuredClone(meta.paths);
+
+    // In this harness HOME is join(tempDir, "home") — nested UNDER the repo root
+    // — so "./home" resolves to exactly the home directory and trips the escape
+    // gate. (In production home is never under a repo, so a ../ climb reaches it.)
+    await writeSandboxType("refresh-home-escape", {
+      allowRead: [tempDir, "./home"],
+      allowWrite: [tempDir],
+      deny: ["**/.env"],
+    });
+
+    const result = await refreshAgentSandbox(makeAgent("refresh-home-escape", tempDir, "stopped", meta));
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("climbs out");
+    // The escape gate fires BEFORE the meta write: meta.paths is untouched and
+    // the agent stays stopped (no resume.sh). A future change that moved the
+    // check after the write would fail these two assertions.
+    expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
+    const afterMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(afterMeta.paths).toEqual(frozenPaths);
+  });
+
   // ── A4 G3: sealed record ────────────────────────────────────────────────────
   test("A4 G3: spawn writes a sealed record with the profile inputs and a valid sha256", async () => {
     await writeSandboxType("seal-spawn");

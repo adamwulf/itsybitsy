@@ -10,8 +10,9 @@ Companion docs (supporting evidence, do not duplicate here):
 **Current path-policy addendum (Phase B, 2026-09-05):** The original Codex
 design below predates the shared filesystem policy. Codex and Codex-backed fugu now use the same
 deny-by-default top-level `paths:` model as Claude: `meta.paths` plus
-CLI-appropriate runtime roots feed `resolvePreparedAccess()`, and missing or
-partial lists normalize to empty lists. The retired `allowedPaths` field is not
+CLI-appropriate runtime roots feed `resolvePreparedAccess()`. A missing block
+defaults all three member lists to empty; in a partial object, only omitted
+members default empty and populated entries remain enforced. The retired `allowedPaths` field is not
 accepted. The Bash scanner is advisory; the Seatbelt profile is the kernel
 boundary when enabled. Codex resume and `ib sandbox refresh` regenerate
 `AGENTS.md` from the agent's current frozen metadata so the displayed policy
@@ -239,8 +240,10 @@ New `src/hooks/codex-pre-tool-use.ts`, dispatched from `src/index.ts` via `ib ho
 1. Resolve agent-type allow/deny lists (same merged source as the claude-side hook): `_all.md` + `_non_coordinator.md` + `<type>.md`. Reuse the matcher logic as a shared library function (don't fork).
 2. **Shared path-isolation matcher** (current Phase B behavior): build the
    prepared table from the agent's frozen `meta.paths` plus Codex-appropriate
-   runtime roots. Missing, empty, or partial lists default to empty, never to a
-   wildcard. Do not add Claude's project-directory or scratchpad roots.
+   runtime roots. A missing block defaults all member lists to empty; a partial
+   object retains populated entries and defaults only its omitted members to
+   empty, never to a wildcard. Do not add Claude's project-directory or
+   scratchpad roots.
    - For `tool_name === "Bash"`, the shared scanner classifies recognizable
      literal path arguments and common write destinations and resolves them
      against that table. It provides readable early denials but is not a full

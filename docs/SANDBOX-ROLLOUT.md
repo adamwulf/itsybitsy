@@ -84,7 +84,7 @@ Installation and the Phase C pilot remain separate steps.[^b]
 | **After Phase A is installed** | Every embedded layer ships `enabled: false`[^disabled], so there is still **no behavior change** for a live agent. | Unchanged, until a type opts in. |
 | **After Phase B is installed, before refresh** | The **hook changes immediately** because it reads `meta.paths` on every call. A legacy live agent with no `paths` key becomes strict at the hook: worktree + runtime roots only. Its **kernel profile stays frozen** until refresh. This is why the three-step Phase B install below must be performed as one operation. | New agents receive the resolved live type floor in `meta.paths`; the hook is strict immediately. The kernel remains off unless their resolved `sandbox.enabled` is true. |
 | **After a supported type opts in** — one claude/codex/fugu type sets `sandbox.enabled: true` | Unchanged until refreshed (§3.2): a live agent replays its frozen profile[^frozen]. | New claude/codex/fugu agents **of that type** get the kernel Seatbelt profile + per-agent proxy. Agy fails closed as unsupported. |
-| **After the enable-all gate** (§3) | Supported agents are sandboxed once `ib sandbox refresh --all` re-derives them, per repo; agy refresh is reported unsupported. | New claude/codex/fugu agents are sandboxed; agy cannot launch while the inherited policy is enabled. |
+| **After the enable-all gate** (§3) | Supported agents are sandboxed once `ib sandbox refresh --all` re-derives them, per repo. An agy refresh whose newly resolved policy is enabled fails before mutating its metadata; a sandbox-disabled agy refresh remains supported. | New claude/codex/fugu agents are sandboxed; agy cannot launch while the inherited policy is enabled. |
 
 ### 2.1 Installing Phase B without stranding live agents
 
@@ -99,9 +99,10 @@ Perform these **three steps in order, as one operation**:
 2. Install Phase B: merge it, rebuild and copy `ib` onto PATH, and restart
    `ib watch`.
 3. Run `ib sandbox refresh --all` in **each registered repo**. This writes the
-   resolved floor into every live agent's `meta.paths`; it refreshes the frozen
-   kernel policy for supported agents whose sandbox is enabled and reports agy
-   as unsupported rather than launching it unwrapped.
+   resolved floor into supported agents and sandbox-disabled agy agents; it
+   refreshes the frozen kernel policy for supported agents whose sandbox is
+   enabled. An agy agent whose newly resolved policy enables the sandbox is
+   reported unsupported before its metadata is mutated.
 
 Do not install step 2 against a live `_all.md` that still lacks the floor. In
 that window the hook immediately interprets a missing `meta.paths` as empty and
@@ -170,7 +171,8 @@ without a strict-but-floorless interval.
       pending). Phase B deliberately ships no audit mode.
 - [ ] **agy is handled.** agy has **no sandbox wrapper today**[^agy]. An agy
       spawn/resume whose resolved `sandbox.enabled` is `true` fails closed as
-      unsupported before any unwrapped process launches, and the instructions,
+      unsupported before its interactive agent launches (a diagnostic
+      `agy --version` probe may already have run), and the instructions,
       `ib info`, and dashboard say the sandbox is unavailable. Because a leaf
       cannot switch `enabled` off (§3.1), a global `_all.md` enable means agy
       cannot launch; complete C6 or accept that operational exclusion before
@@ -186,10 +188,13 @@ without a strict-but-floorless interval.
 3. **Rebuild `ib`** (`bun run build`), copy it onto PATH, and **restart
    `ib watch`**.
 4. Run **`ib sandbox refresh --all` in each registered repo** — it refreshes
-   only the current repo's agents[^refresh], so run it per repo. Every active
-   agent's `meta.json` is re-derived from the current `.md` files and the agent
-   is resumed under the new profile where supported; stopped agents pick it up
-   on their next resume; agy failures and coordinator skips are reported.[^refresh]
+   only the current repo's agents[^refresh], so run it per repo. Supported
+   agents' `meta.json` files are re-derived from the current `.md` files and
+   the agents are resumed under the new profile; stopped supported agents pick
+   it up on their next resume. A sandbox-disabled agy refresh also updates its
+   paths/rules, but an agy entry whose newly resolved policy is enabled fails
+   before metadata mutation; agy failures and coordinator skips are
+   reported.[^refresh]
 5. Watch the Denials tab in `ib watch`: the hook explains honest denied path
    attempts before the kernel returns `EPERM`. A kernel-only denial is not
    harvested into the log and still requires bisection.[^spike]
@@ -216,16 +221,20 @@ without a strict-but-floorless interval.
   any other host fails closed until its domain is added to `sandbox.domains`
   (proxy apex entries are exact, so subdomains need their own entry)[^proxy].
 - **(e) agy agents cannot be sandboxed yet** — no wrapper (§3.3). They fail
-  closed rather than launching unwrapped when their resolved policy is enabled.[^agy]
+  closed before the interactive agent launches when their resolved policy is
+  enabled; a diagnostic `agy --version` probe may already have run.[^agy]
 - **(f) The system coordinator is advisory in hook-only mode.** Its worktree
-  root is all of `~/.itsybitsy`, so the hook structurally blocks writes to
-  `agent-types/`, `config.json`, `repos.json`, `layout.json`, and `sealed/` for
-  file tools plus recognized Bash paths and write destinations. The scanner
-  covers redirects, `sed -i`, `tee`, `cp`/`mv`, and common write verbs, but it
-  is not a shell parser: dynamic expansion, subprocesses, alternate command
-  shapes, and symlink races can evade it while the kernel is off. This is an
-  accepted residual; the kernel closes it when the system coordinator is
-  sandboxed (SPEC-PATH-ALLOWLIST.md §6.12).
+  root is all of `~/.itsybitsy`. The protected-file structural guard blocks
+  file-tool writes plus recognized redirects and `sed -i` targets under
+  `agent-types/`, `config.json`, `repos.json`, `layout.json`, and `sealed/`.
+  Separately, the general path scanner recognizes destinations for `tee`,
+  `cp`/`mv`, `mkdir`, and other common write verbs, but its path-policy check
+  permits those destinations because the coordinator's broad runtime root
+  already allows `~/.itsybitsy`; those command shapes can therefore still
+  mutate coordinator configuration in hook-only mode. Dynamic expansion,
+  subprocesses, alternate command shapes, and symlink races add further
+  scanner limitations. These are accepted residuals; the kernel closes them
+  when the system coordinator is sandboxed (SPEC-PATH-ALLOWLIST.md §6.12).
 
 ### 3.6 Recovery / rollback
 
@@ -304,7 +313,7 @@ which is out of scope[^tmux][^residual].
 [^b]: [SPEC-PATH-ALLOWLIST.md §8, "Implementation history and build order"](../SPEC-PATH-ALLOWLIST.md).
 [^disabled]: [docs/agent-types/_all.md](agent-types/_all.md) — `sandbox.enabled: false` ships in the baseline; nothing runs sandboxed until a type sets it `true`.
 [^frozen]: [SPEC-SANDBOX.md §4A.7 guarantee 1 and §5.4 ("profile is fixed at exec")](../SPEC-SANDBOX.md) — spawn resolves and freezes `meta.sandbox`/`meta.paths`; resume replays from meta and does not re-read the `.md` files; editing `_all.md` affects new spawns only.
-[^refresh]: [SPEC-SANDBOX.md §5.6 (`ib sandbox refresh <id> | --all`: re-derives from the current `.md` files, resumes; `--all` covers the current repo only; coordinators skipped)](../SPEC-SANDBOX.md); agy's current refresh refusal is implemented in [`refreshAgentSandbox`](../src/ib-commands.ts:refreshAgentSandbox).
+[^refresh]: [SPEC-SANDBOX.md §5.6 (`ib sandbox refresh <id> | --all`: re-derives from the current `.md` files, resumes; `--all` covers the current repo only; coordinators skipped)](../SPEC-SANDBOX.md); agy's enabled-policy refusal and sandbox-disabled refresh path are implemented in [`refreshAgentSandbox`](../src/ib-commands.ts:refreshAgentSandbox).
 [^ormerge]: [SPEC-SANDBOX.md §7 "Inheritance → union" — "The scalar `sandbox.enabled` uses OR-merge (any layer `true` wins)"](../SPEC-SANDBOX.md); merge in [src/ib-commands.ts#mergeSandboxLayerConfigs](../src/ib-commands.ts).
 [^open]: [SPEC-SANDBOX.md §7 "Enforcement model → Model B" / §4A.0 — "Fully-open is explicit-only (`allowRead: ["/"]`)"](../SPEC-SANDBOX.md).
 [^inherit]: [SPEC-SANDBOX.md §4C — a Seatbelt profile is inherited by every descendant (hooks, `ib`, MCP, Bash children); under `(deny default)` an unlisted path is `EPERM`](../SPEC-SANDBOX.md).

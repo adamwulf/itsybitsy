@@ -16,14 +16,18 @@ Phase B integration on 2026-09-05.
   and the leaf type; relative entries anchor at the main repo root and are
   resolved before being frozen in `meta.paths`. `allowedPaths` is retired and
   rejected by validation.
-- Missing, empty, and partially populated path lists are normalized to empty
-  lists and are equally strict: no unmatched path is allowed. All three
-  PreToolUse handlers use the shared resolver after the structural protected-file,
-  sibling-agent, and main-checkout checks.
+- A missing `paths` block and an explicitly empty block both grant no configured
+  paths. In a partially populated object, only omitted member lists default to
+  empty; every populated `allowRead`, `allowWrite`, or `deny` entry is retained
+  and enforced. No unmatched path is allowed. All three PreToolUse handlers use
+  the shared resolver after the structural protected-file, sibling-agent, and
+  main-checkout checks.
 - The shared runtime table contains the CLI-neutral roots. Claude, including
-  legacy metadata with no model, additionally receives its Claude project
-  directory and scratchpad; those Claude-only roots are excluded from codex,
-  fugu, and agy hook tables, matching their kernel profiles.
+  legacy metadata with an absent model, a safe bare model such as `sonnet` or
+  `opus`, or the `unknown` value produced by `readAgentMeta`, additionally
+  receives its Claude project directory and scratchpad. Those Claude-only roots
+  are excluded from codex, fugu, and agy hook tables, matching their kernel
+  profiles.
 - The Bash scanner classifies recognizable literal path arguments and common
   write destinations, then consults the same table. It is an advisory visibility
   and early-denial layer, not a shell parser or kernel boundary. Dynamic shell
@@ -31,13 +35,16 @@ Phase B integration on 2026-09-05.
   the kernel sandbox is off.
 - The Seatbelt kernel wrapper is available for claude and the Codex-backed
   codex/fugu CLIs on macOS. It is unavailable for agy: an agy agent whose
-  resolved `sandbox.enabled` is `true` fails closed before launch rather than
-  running unwrapped. Instructions, `ib info`, and the dashboard identify that
+  resolved `sandbox.enabled` is `true` fails closed before its interactive
+  launch rather than running unwrapped. A diagnostic `agy --version` probe may
+  already have run. Instructions, `ib info`, and the dashboard identify that
   state as unavailable.
 - Spawn freezes `paths` and `sandbox` in `meta.json`; `ib sandbox refresh`
-  re-derives them from the current type layers. Codex resume and refresh also
-  regenerate `AGENTS.md` from the agent's current frozen metadata, so its
-  instructions describe the policy that will actually be enforced.
+  re-derives them from the current type layers. For agy, refresh succeeds and
+  updates paths/rules when the newly resolved sandbox is disabled; an enabled
+  result fails before metadata mutation. Codex resume and refresh also regenerate
+  `AGENTS.md` from the agent's current frozen metadata, so its instructions
+  describe the policy that will actually be enforced.
 
 ---
 
@@ -1412,7 +1419,8 @@ redirect/destination hardening `1ec1529`, kernel `PROJECTDIR`/`SCRATCHPAD`
 spawn/refresh wiring `0480d68`, and instruction/lifecycle wiring `81d018d`.
 The final central-review fixes align CLI-specific roots and safe partial-list
 display at `7cc63fa`, harden agy rejection and Codex instruction refresh at
-`11f0ebc`, preserve legacy missing-model metadata as Claude at `d9a96cb`, and
+`11f0ebc`, preserve absent/safe-bare/`readAgentMeta`-`unknown` legacy model
+metadata as Claude at `d9a96cb`, and
 harden scanner boundaries and nested input schemas at `e9fc804`.
 Phase B is **ON BRANCH**, not yet `INSTALLED` in the rollout ledger. Audit mode
 was dropped before implementation and does not ship.

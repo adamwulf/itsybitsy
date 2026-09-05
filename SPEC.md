@@ -221,11 +221,13 @@ Resume (`ib resume <id>`) restarts a stopped agent:
 6. **Auto-spawn watchdog**: `ib watchdog <id>` is spawned in the background for ALL agents (not just those with a manager). The watchdog PID is saved to `meta.json` as `watchdog_pid`. The bash `cmd_resume()` does not include this step (known divergence).
 7. **State reset**: Write `state: "running"` and `state_updated_at` to `meta.json` (atomic merge write). See §1.3.1.
 
-**Related — `ib sandbox refresh <id> | --all`**: re-derives a sandboxed agent's
+**Related — `ib sandbox refresh <id> | --all`**: re-derives an existing agent's
 frozen `sandbox`/`paths` block from the current agent-type files and restarts it
 through this same resume path so the new policy takes effect (coordinators are
 refused; `--all` covers every non-stopped agent in the current repo). See
-SPEC-SANDBOX.md §5.6.
+SPEC-SANDBOX.md §5.6. For agy, a newly resolved enabled sandbox is rejected
+before metadata mutation; a sandbox-disabled refresh succeeds and updates the
+agent's paths/rules.
 
 ### 1.7 Archiving
 
@@ -756,9 +758,9 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 
 **Shared resolver** (steps 7–9 and 12–13 folded in): the resolved path is decided by `resolvePreparedAccess()` (`src/sandbox.ts`) against the per-agent **access table** built by `src/hooks/paths-table.ts` — normalized `meta.paths` unioned with CLI-appropriate runtime roots. Supported kernel profiles are generated from the corresponding table, so hook and kernel agree. A Write/Edit/MultiEdit/NotebookEdit (and codex `apply_patch`) resolves as a `write` op; Read/Grep/Glob/LS/`cd` as `read`.
 
-**Runtime roots** (injected by code — never in a `.md`): every CLI receives the worktree (read+write), agent dir / `agent.log`, git common dir (read+write), repo agents dir (`REPOAGENTS` — **write** for a spawner, **read** for a non-spawner, keyed on resolved `canSpawnChildren`), and the parent repo's `.claude` (`PARENTCLAUDE`, write, spawners only). Claude — including legacy metadata with no model — additionally receives its project directory (`~/.claude/projects/<encoded-worktree>`) and scratchpad (`/private/tmp/claude-<uid>/<encoded-worktree>`); those Claude-only roots are omitted from codex, fugu, and agy hook tables, just as they are from those CLIs' kernel parameter sets. For a **non-spawner**, the **tmux socket dir is a deny root** (reaching the tmux server is a sandbox escape); a spawner keeps it (accepted, SPEC-SANDBOX §4C.3).
+**Runtime roots** (injected by code — never in a `.md`): every CLI receives the worktree (read+write), agent dir / `agent.log`, git common dir (read+write), repo agents dir (`REPOAGENTS` — **write** for a spawner, **read** for a non-spawner, keyed on resolved `canSpawnChildren`), and the parent repo's `.claude` (`PARENTCLAUDE`, write, spawners only). Claude — including legacy metadata with an absent model, a safe bare model such as `sonnet`/`opus`, or the `unknown` value produced by `readAgentMeta` — additionally receives its project directory (`~/.claude/projects/<encoded-worktree>`) and scratchpad (`/private/tmp/claude-<uid>/<encoded-worktree>`); those Claude-only roots are omitted from codex, fugu, and agy hook tables, just as they are from those CLIs' kernel parameter sets. For a **non-spawner**, the **tmux socket dir is a deny root** (reaching the tmux server is a sandbox escape); a spawner keeps it (accepted, SPEC-SANDBOX §4C.3).
 
-**Resolution rules**: `paths.deny` **wins** over any allow at any depth; otherwise the **most specific** (longest canonical) matching entry decides — `allowWrite` grants read+write, `allowRead` grants read-only, and the same path in both lists **writes**. **No match denies.** A missing `paths` key and a partially populated object normalize missing lists to empty lists; both are as strict as explicit empty lists and never imply a wildcard. The agent then reaches only its worktree and CLI-appropriate runtime roots.
+**Resolution rules**: `paths.deny` **wins** over any allow at any depth; otherwise the **most specific** (longest canonical) matching entry decides — `allowWrite` grants read+write, `allowRead` grants read-only, and the same path in both lists **writes**. **No match denies.** A missing `paths` key defaults all three lists to empty. In a partially populated object, only omitted member lists default empty; every populated `allowRead`, `allowWrite`, or `deny` entry is retained and enforced. Neither case implies a wildcard.
 
 **Operator display and generated instructions** use the same normalization. `ib info` and the dashboard render partial/missing lists safely instead of widening or crashing. They report the resolved kernel state per CLI: enabled/disabled for claude, codex, and fugu, and unavailable for agy. Codex/fugu spawn, resume, and `ib sandbox refresh` regenerate `AGENTS.md` from the current frozen metadata so it cannot retain stale path or sandbox wording after refresh.
 
@@ -3121,7 +3123,7 @@ This section summarizes the design landed in Phases 1–3 of **`SPEC-ANTIGRAVITY
 
 ### 19.1 Goal
 
-itsybitsy can launch an agent under Google's Antigravity CLI (`agy`) in addition to `claude` and `codex`. Selection is per-agent via the same **`<cli>:<model>`** model string — e.g. `agy:gemini-3.7-flash-low`, `agy:claude-sonnet-4-6`. The slug is the first column of `agy models`, passed verbatim to `--model`. `agy` agents launch the **interactive `agy` TUI inside tmux**, exactly like `claude`/`codex`. Permissions and the shared deny-by-default `paths:` policy are enforced by a generated PreToolUse hook; role instructions are delivered through an always-on rule file in the worktree. Agy has no kernel wrapper: `sandbox.enabled: true` is unsupported and fails closed before launch rather than running unwrapped. Auth is the user's job (one browser sign-in; credentials in the keyring). Non-goals (v1): no headless `-p` loop, no `agy` custom agents (`--agent`), no coordinators under `agy`, no new dashboard panes.
+itsybitsy can launch an agent under Google's Antigravity CLI (`agy`) in addition to `claude` and `codex`. Selection is per-agent via the same **`<cli>:<model>`** model string — e.g. `agy:gemini-3.7-flash-low`, `agy:claude-sonnet-4-6`. The slug is the first column of `agy models`, passed verbatim to `--model`. `agy` agents launch the **interactive `agy` TUI inside tmux**, exactly like `claude`/`codex`. Permissions and the shared deny-by-default `paths:` policy are enforced by a generated PreToolUse hook; role instructions are delivered through an always-on rule file in the worktree. Agy has no kernel wrapper: `sandbox.enabled: true` is unsupported and fails closed before the interactive agent launch rather than running it unwrapped; the diagnostic `agy --version` probe may already have run. Auth is the user's job (one browser sign-in; credentials in the keyring). Non-goals (v1): no headless `-p` loop, no `agy` custom agents (`--agent`), no coordinators under `agy`, no new dashboard panes.
 
 ### 19.2 Authoritative Decisions
 
@@ -3164,7 +3166,12 @@ Tool translation (`src/hooks/agy-tools.ts`) maps `run_command`→`Bash`, `view_f
 
 ### 19.5 Spawn, Resume, Teardown
 
-`newAgent()` / `resumeAgent()` in `src/ib-commands.ts` branch on `parseModel(model).cli === "agy"`: first reject a resolved `sandbox.enabled: true` policy as unavailable before trust, generated files, tmux, or an unwrapped agy process; otherwise skip `.claude/settings.local.json`; refuse a tracked boundary file (D7); write the two worktree files + gitignore; `ensureAgyTrustedWorkspace(realpath(worktree))` BEFORE tmux (D5); run the dispatcher `--dry-run` precheck for all three events; generate `start.sh`/`resume.sh`. Resume requires `meta.agy_conversation_id` (captured by the first PreInvocation), regenerates the worktree files, re-trusts, re-prechecks, and re-passes `--model` + effort (agy resume remembers neither). Teardown (`archiveAgent`/nuke/retire) calls `untrustAgyWorkspaceForTeardown` best-effort. `--coordinator` with `agy:` is rejected (D11-style stub).
+`newAgent()` / `resumeAgent()` in `src/ib-commands.ts` branch on `parseModel(model).cli === "agy"`: reject a resolved `sandbox.enabled: true` policy as unavailable before starting the interactive agent (the earlier diagnostic `agy --version` probe may already have run); otherwise skip `.claude/settings.local.json`; refuse a tracked boundary file (D7); write the two worktree files + gitignore; `ensureAgyTrustedWorkspace(realpath(worktree))` BEFORE tmux (D5); run the dispatcher `--dry-run` precheck for all three events; generate `start.sh`/`resume.sh`. Resume requires `meta.agy_conversation_id` (captured by the first PreInvocation), regenerates the worktree files, re-trusts, re-prechecks, and re-passes `--model` + effort (agy resume remembers neither). Teardown (`archiveAgent`/nuke/retire) calls `untrustAgyWorkspaceForTeardown` best-effort. `--coordinator` with `agy:` is rejected (D11-style stub).
+
+`ib sandbox refresh` rejects agy only when the newly resolved policy has
+`sandbox.enabled: true`, and does so before metadata mutation. With the sandbox
+disabled, agy refresh succeeds, updates the frozen paths/rules, and follows the
+ordinary resume path.
 
 At spawn, `agy --version` is stamped into `meta.agy_version` (best effort). The probe (`src/agy-version.ts`, `probeAgyVersion`) runs with **stdin explicitly `"ignore"` and a hard 5s timeout** — agy 1.1.23 blocks forever on an inherited unclosed stdin, so without this the spawn hung at a blank pane. On timeout the child is killed and the field is stamped `""`. The three `agy-* --dry-run` prechecks share the same discipline (stdin `"ignore"` + a 15s timeout in `DispatcherDryRunContext.run`).
 

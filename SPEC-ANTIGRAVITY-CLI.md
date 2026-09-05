@@ -5,11 +5,15 @@ Status: **Phases 1–3 MERGED on `agent/antigravity` (Phase 1 `7cf0e65`, Phase 2
 **Current path-policy addendum (Phase B, 2026-09-05):** The original design
 below predates the shared filesystem policy. Agy now uses the same
 deny-by-default top-level `paths:` model as the other CLIs: `meta.paths` plus
-agy-appropriate runtime roots feed `resolvePreparedAccess()`, and missing or
-partial lists normalize to empty lists. The retired `allowedPaths` field is not
+agy-appropriate runtime roots feed `resolvePreparedAccess()`. A missing block
+defaults all three member lists to empty; in a partial object, only omitted
+members default empty and populated entries remain enforced. The retired `allowedPaths` field is not
 accepted. Agy still has no kernel wrapper. If its resolved `sandbox.enabled` is
-`true`, spawn/resume fails closed as unsupported before launching agy unwrapped;
-instructions, `ib info`, and the dashboard explicitly report the sandbox as
+`true`, spawn/resume fails closed as unsupported before the interactive agent
+launches unwrapped; the diagnostic `agy --version` probe may already have run.
+Refresh likewise rejects a newly resolved enabled policy before metadata
+mutation, while a sandbox-disabled refresh succeeds and updates paths/rules.
+Instructions, `ib info`, and the dashboard explicitly report the sandbox as
 unavailable. [SPEC.md §6.1](SPEC.md) and
 [SPEC-PATH-ALLOWLIST.md](SPEC-PATH-ALLOWLIST.md) are authoritative for the
 cross-CLI path policy.
@@ -103,7 +107,8 @@ The agent-type allow/deny lists stay in Claude vocabulary. Each `agy` call is tr
 Unknown arg shapes must not fail open: a file tool whose path arg is missing is
 denied with "path argument missing". Path isolation uses the shared prepared
 table built from frozen `meta.paths` plus agy-appropriate runtime roots. Missing,
-empty, and partial path lists normalize to empty lists; Claude's project and
+empty blocks grant no configured paths; a partial object retains populated
+entries and defaults only omitted member lists to empty. Claude's project and
 scratchpad roots are not added. File tools and recognizable literal paths in
 `run_command` are resolved through that table. The Bash scan is advisory rather
 than a complete shell parser, so it must not be described as equivalent to a
@@ -122,8 +127,8 @@ kernel boundary.
 `newAgent()` branches on `parseModel(model).cli === "agy"`:
 
 1. If the resolved frozen policy has `sandbox.enabled: true`, fail closed with
-   an "agy sandbox unavailable" error before trust, generated files, tmux, or
-   any unwrapped agy launch.
+   an "agy sandbox unavailable" error before starting the interactive agent.
+   The earlier diagnostic `agy --version` probe may already have run.
 2. Skip `.claude/settings.local.json`.
 3. Refuse if `git ls-files --error-unmatch` reports either worktree file as tracked (D7).
 4. Write `.agents/hooks.json` and `.agents/rules/ittybitty-agent.md`; append both to `.gitignore`.

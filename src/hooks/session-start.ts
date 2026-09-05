@@ -436,8 +436,8 @@ export function buildPathIsolationSection(ctx: SessionContext): string {
 
   const paths = ctx.paths;
   const listsBlock = `Your agent type resolves to exactly these path lists (a missing or empty list means ${baseRoot} and the runtime roots above only — nothing else):
-${renderPathList("Read and write (allowWrite)", paths?.allowWrite)}
 ${renderPathList("Read only (allowRead)", paths?.allowRead)}
+${renderPathList("Read and write (allowWrite)", paths?.allowWrite)}
 ${renderPathList("Denied (deny), overriding the lists above", paths?.deny)}`;
 
   const sandboxLine = ctx.sandbox?.enabled

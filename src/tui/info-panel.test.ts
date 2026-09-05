@@ -103,7 +103,7 @@ describe("InfoPanelComponent", () => {
     expect(text).toContain("build a widget");
   });
 
-  test("renders the sandbox lock only when sandboxing is enabled", () => {
+  test("renders the sandbox state explicitly, including disabled and legacy agents", () => {
     const renderAgent = (enabled: boolean | undefined): string => {
       const panel = new InfoPanelComponent();
       panel.displayHeight = 10;
@@ -119,9 +119,9 @@ describe("InfoPanelComponent", () => {
       return panel.render(60).map(stripAnsi).join("\n");
     };
 
-    expect(renderAgent(true)).toContain("🔒 Sandboxed");
-    expect(renderAgent(false)).not.toContain("🔒");
-    expect(renderAgent(undefined)).not.toContain("🔒");
+    expect(renderAgent(true)).toContain("Sandbox: enabled");
+    expect(renderAgent(false)).toContain("Sandbox: disabled");
+    expect(renderAgent(undefined)).toContain("Sandbox: disabled");
   });
 
   test("renders the resolved path lists compactly, one line per non-empty list", () => {
@@ -140,20 +140,19 @@ describe("InfoPanelComponent", () => {
     expect(text).toContain("Paths deny: **/.env");
   });
 
-  test("omits empty path lists and renders nothing when meta.paths is absent", () => {
+  test("renders the runtime-roots-only meaning for empty and absent paths", () => {
     const panel = new InfoPanelComponent();
     panel.displayHeight = 10;
-    // Empty lists → no rows.
+    // Empty lists and a missing legacy block have the same strict meaning.
     const emptyAgent = makeAgent({ id: "agent-paths-empty" });
     emptyAgent.meta.paths = { allowRead: [], allowWrite: [], deny: [] };
     panel.agent = emptyAgent;
-    expect(panel.render(80).map(stripAnsi).join("\n")).not.toContain("Paths ");
+    expect(panel.render(80).map(stripAnsi).join("\n")).toContain("Paths: runtime roots only");
 
-    // Absent block (legacy meta) → no rows.
     const legacyAgent = makeAgent({ id: "agent-paths-legacy" });
     delete legacyAgent.meta.paths;
     panel.agent = legacyAgent;
-    expect(panel.render(80).map(stripAnsi).join("\n")).not.toContain("Paths ");
+    expect(panel.render(80).map(stripAnsi).join("\n")).toContain("Paths: runtime roots only");
   });
 
   test("shows BOTH nickname and id when a nickname is set", () => {

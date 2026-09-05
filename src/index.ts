@@ -8,7 +8,7 @@ import { join } from "path";
 import { userHome } from "./home";
 import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from "./registry";
 import { resolveAgentIcon } from "./agents";
-import type { Agent, FlatEntry } from "./agents";
+import type { Agent, AgentMeta, FlatEntry } from "./agents";
 import { isValidAgentId, isValidShellPath, tmuxSessionTarget } from "./validation";
 import { SYSTEM_AGENT_ID } from "./hooks/shared";
 import { normalizeTeamName, getTeam } from "./teams";
@@ -71,6 +71,34 @@ export function matchAgentById(id: string, agents: Agent[]): Agent | null {
   const exactNick = agents.find((a) => a.meta.nickname === id);
   if (exactNick) return exactNick;
   return null;
+}
+
+/** Format the resolved filesystem policy shown by `ib info <id>`. */
+export function formatAgentPathPolicy(
+  meta: Pick<AgentMeta, "paths" | "sandbox">,
+): string[] {
+  const lines = [
+    `Sandbox:      ${meta.sandbox?.enabled === true ? "enabled" : "disabled"}`,
+  ];
+  if (!meta.paths) {
+    lines.push("Paths:        none (worktree and runtime roots only)");
+    return lines;
+  }
+
+  const renderPaths = (label: string, entries: string[]): void => {
+    lines.push(`  ${label}:`);
+    if (entries.length === 0) {
+      lines.push("    (none)");
+      return;
+    }
+    for (const entry of entries) lines.push(`    - ${entry}`);
+  };
+
+  lines.push("Paths:");
+  renderPaths("read-only", meta.paths.allowRead);
+  renderPaths("read+write", meta.paths.allowWrite);
+  renderPaths("deny", meta.paths.deny);
+  return lines;
 }
 
 /** Find an agent by exact ID (or nickname) across all registered repos. */
@@ -1663,23 +1691,7 @@ export async function main() {
       // and the kernel-sandbox switch, both frozen in meta.json at spawn. An
       // absent `paths` block is a legacy meta written before the `paths:` split
       // — deny-by-default at the hook (worktree and runtime roots only).
-      console.log(`Sandbox:      ${m.sandbox?.enabled ? "enabled" : "disabled"}`);
-      if (m.paths) {
-        const renderPaths = (label: string, entries: string[]): void => {
-          console.log(`  ${label}:`);
-          if (entries.length === 0) {
-            console.log(`    (none)`);
-          } else {
-            for (const p of entries) console.log(`    - ${p}`);
-          }
-        };
-        console.log(`Paths:`);
-        renderPaths("read+write", m.paths.allowWrite);
-        renderPaths("read-only", m.paths.allowRead);
-        renderPaths("deny", m.paths.deny);
-      } else {
-        console.log(`Paths:        none (worktree and runtime roots only)`);
-      }
+      for (const line of formatAgentPathPolicy(m)) console.log(line);
       // Detail view: show the full prompt. Continuation lines are indented to
       // stay aligned under the label instead of being truncated (was slice(0, 200)).
       const promptIndent = " ".repeat("Prompt:       ".length);

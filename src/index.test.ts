@@ -7,6 +7,7 @@ import {
   collectAgents,
   findManagerInTree,
   matchAgentById,
+  formatAgentPathPolicy,
   resolveTarget,
   resolveMergeTargetDir,
   buildSystemCoordinatorAgent,
@@ -101,6 +102,35 @@ describe("collectAgents", () => {
     expect(result[0]).toEqual({ agent: root, depth: 0 });
     expect(result[1]).toEqual({ agent: child, depth: 1 });
     expect(result[2]).toEqual({ agent: grandchild, depth: 2 });
+  });
+});
+
+describe("formatAgentPathPolicy", () => {
+  test("prints sandbox state and all resolved lists in read/write/deny order", () => {
+    expect(formatAgentPathPolicy({
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+      paths: {
+        allowRead: ["/read"],
+        allowWrite: ["/write"],
+        deny: ["**/.env"],
+      },
+    })).toEqual([
+      "Sandbox:      enabled",
+      "Paths:",
+      "  read-only:",
+      "    - /read",
+      "  read+write:",
+      "    - /write",
+      "  deny:",
+      "    - **/.env",
+    ]);
+  });
+
+  test("prints disabled and strict runtime roots for legacy meta", () => {
+    expect(formatAgentPathPolicy({})).toEqual([
+      "Sandbox:      disabled",
+      "Paths:        none (worktree and runtime roots only)",
+    ]);
   });
 });
 

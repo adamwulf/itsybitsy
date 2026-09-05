@@ -119,27 +119,27 @@ export class InfoPanelComponent implements Component {
 
     lines.push(...this.renderStoplights(agent, width));
 
-    // Keep the sandbox marker in the width-safe detail panel rather than the
-    // tightly packed sidebar row. Legacy and explicitly disabled agents omit it.
-    if (agent.meta.sandbox?.enabled === true) {
-      lines.push(truncateToWidth(`🔒 ${DIM}Sandboxed${RESET}`, width, ""));
-    }
+    // Keep the explicit sandbox state in the width-safe detail panel rather
+    // than the tightly packed sidebar row. A missing legacy block is disabled.
+    const sandboxState = agent.meta.sandbox?.enabled === true ? "enabled" : "disabled";
+    lines.push(truncateToWidth(`${DIM}Sandbox:${RESET} ${sandboxState}`, width, ""));
 
     // Resolved path policy (SPEC-PATH-ALLOWLIST §6.11), frozen in meta.paths.
     // Each non-empty list is shown compact on one truncated line so the operator
     // sees an agent's fenced paths without leaving the dashboard; `ib info <id>`
-    // prints the full untruncated lists. Absent/empty lists mean the worktree
-    // and runtime roots only, so nothing is rendered — no clutter for the common
-    // deny-by-default case.
+    // prints the full untruncated lists. Absent/empty lists get one compact row
+    // that states their deny-by-default meaning.
     const paths = agent.meta.paths;
-    if (paths) {
+    if (paths && paths.allowRead.length + paths.allowWrite.length + paths.deny.length > 0) {
       const summarizePaths = (label: string, entries: string[]): void => {
         if (entries.length === 0) return;
         lines.push(truncateToWidth(`${DIM}${label}:${RESET} ${entries.join(", ")}`, width, ""));
       };
-      summarizePaths("Paths rw", paths.allowWrite);
       summarizePaths("Paths ro", paths.allowRead);
+      summarizePaths("Paths rw", paths.allowWrite);
       summarizePaths("Paths deny", paths.deny);
+    } else {
+      lines.push(truncateToWidth(`${DIM}Paths:${RESET} runtime roots only`, width, ""));
     }
 
     // Identity line — only shown when a nickname is set, so the canonical id

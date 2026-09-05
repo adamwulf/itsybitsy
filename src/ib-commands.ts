@@ -107,6 +107,7 @@ import {
   findRelativeEscapes,
   generateProfile,
   canonicalizePathsConfig,
+  canonicalizeSandboxPath,
   resolvePathsConfig,
   resolveSandboxConfig,
   resolveTmuxSocketDir,

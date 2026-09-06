@@ -72,7 +72,7 @@ import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome, classifyClaudeStartupPrompt } from "./coordinator";
 import { loadAgentType, agentTypeExists, metaCanSpawnChildren } from "./agent-types";
 import type { AgentType } from "./agent-types";
-import { isCodexBackedCli, parseModel, mapEffortForCodex, metadataCli, type AgentCli } from "./agent-cli";
+import { isCodexBackedCli, parseModel, mapEffortForCodex, type AgentCli } from "./agent-cli";
 import { claudeProjectDirFor, claudeScratchpadDirFor, agyStateDirFor } from "./hooks/paths-table";
 import {
   buildHooksBlock,

@@ -1,8 +1,10 @@
 # SPEC-SANDBOX.md — Per-Agent Seatbelt Sandboxing
 
-**Current contract (2026-09-05):** sandboxing is mandatory for every agent launch, including coordinator launches and all supported CLIs. Agent-type Markdown has no `sandbox.enabled` toggle; any remaining key is a migration error. Only `paths` and the `sandbox.rawAllow` / `sandbox.domains` rules are configurable. Profile or proxy setup failure must stop the launch. Legacy unsandboxed agents require refresh or their coordinator reset path before they can resume under the new contract.
+**Staged rollout scope:** throughout the current contract below, mandatory sandboxing covers ordinary repository agents and per-repository coordinators (Claude, Codex/fugu, and agy). The global `@system` coordinator remains unsandboxed in this version and is a separate follow-up. See [the rollout guide](docs/SANDBOX-ROLLOUT.md) for configuration migration and validation status.
 
-The mandatory launch and coordinator changes are being integrated on `agent/sandbox-exec-feature`. The rollout procedure and remaining validation are recorded in `docs/SANDBOX-ROLLOUT.md`. This contract supersedes the opt-in defaults, toggle examples, disabled-resume compatibility, and unsupported-agy assumptions in the historical design sections below. Existing path precedence, profile inheritance, sealing, and the documented spawner tmux limitation still apply.
+**Current contract:** sandboxing is mandatory for ordinary repository agents and per-repository coordinators on every launch and resume. Agent-type Markdown has no `sandbox.enabled` toggle; any remaining key is a migration error. Only `paths` and `sandbox.rawAllow` / `sandbox.domains` are configurable. Profile or proxy setup failure stops the launch. Legacy agents require refresh or their per-repository coordinator reset path before resuming. Global `@system` sandboxing is deferred.
+
+The mandatory repository-agent lifecycle is integrated. The rollout procedure and remaining live validation are recorded in `docs/SANDBOX-ROLLOUT.md`. This contract supersedes opt-in defaults, toggle examples, disabled-resume compatibility, and unsupported-agy assumptions in the historical sections below. Existing path precedence, profile inheritance, sealing, and the documented spawner tmux limitation still apply.
 
 **Design history:** initial planning 2026-07-17; opt-in implementation 2026-07-19.
 **Related:** SPEC.md sections 2, 6, 7, and 18.

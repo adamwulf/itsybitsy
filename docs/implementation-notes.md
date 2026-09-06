@@ -1,5 +1,7 @@
 # itsybitsy implementation notes
 
+**Staged rollout scope:** mandatory kernel wrapping described here applies to ordinary repository agents and per-repository coordinators. The global `@system` coordinator remains unsandboxed; its launch, ownership records, and cleanup changes are deferred. See [SANDBOX-ROLLOUT.md](SANDBOX-ROLLOUT.md) for migration steps and validation limits.
+
 Field guide for finding code. SPEC.md is the authoritative behavioral spec; this file points at modules and calls out non-obvious wiring. When a section overlaps SPEC.md, that section is the source of truth.
 
 ## Per-agent message-delivery queue (`src/outbox.ts`)

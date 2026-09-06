@@ -1,5 +1,7 @@
 # SPEC-PATH-ALLOWLIST.md — Path allow-list for agent types
 
+**Staged rollout scope:** kernel sandbox claims below cover ordinary repository agents and per-repository coordinators. The global `@system` coordinator retains its existing hook-based checks and remains unsandboxed in this version. Its kernel confinement is deferred; see [the rollout guide](docs/SANDBOX-ROLLOUT.md).
+
 **Status:** Phase B is implemented on `agent/codex-path-isolation` and recorded as
 **ON BRANCH**, not **INSTALLED**, in [the rollout ledger](docs/SANDBOX-ROLLOUT.md).
 The current contract is summarized immediately below and specified normatively in

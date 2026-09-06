@@ -1,10 +1,27 @@
-# Live kernel sandbox denial probe — evidence report
+# Live kernel sandbox denial — evidence report
 
 Author: worker `agent-9685061d` (branch `agent/agent-9685061d`, forked from
-`agent/sandbox-denial-logs`). Date: 2026-09-05. Host: Darwin 25.5.0 (arm64),
-single macOS host, one boot (`bootUUID` 7908F0D7-...). This is a diagnostic
-capability probe, **not** a production collector and **not** an acceptance pass.
-Findings are single-host observations; timing numbers are environment-dependent.
+`agent/sandbox-denial-logs`). Dates: 2026-09-05 (probe) and 2026-09-06 (collector
+validation). Host: Darwin 25.5.0 (arm64), single macOS host, one boot (`bootUUID`
+7908F0D7-...). Findings are single-host observations; timing numbers are
+environment-dependent.
+
+**Document map — two distinct efforts:**
+- **§1–§9 — Historical capability probe** (2026-09-05): a diagnostic probe of the
+  raw OS behavior via the branch-inherited `scripts/probe-sandbox-denials.ts`. It
+  establishes what the unified log reports, attribution limits, and startup-delay
+  behavior. It is **not** a test of the collector implementation.
+- **§10 — Failed collector candidate** (`008c233`): two blocking adapter defects
+  found live; **its isolated-proof claims are qualified in place** — those
+  experiments established four observed pipeline records, not a compiled-candidate
+  pass. History preserved.
+- **§11 — Corrected collector candidate** (`f09280f`): the authorized live set run
+  through the **compiled** candidate; per-axis results and a further visibility
+  defect (Defect 3). This is the current collector validation.
+
+None of this is a full acceptance pass: single host, synthetic sandboxed offenders
+(not the real CLIs/proxy), and the real `start.sh`/`resume.sh` bash preamble was
+replicated (not run verbatim) — see §11 limits.
 
 This report answers the capability investigation in
 `docs/SANDBOX-ROLLOUT.md` → "Next phase: collect kernel sandbox denials". The
@@ -265,9 +282,14 @@ that lacks a boot identity.
 
 ### Two blocking defects in the native adapter (`src/sandbox-processes.ts`)
 
-Both were found live, reproduced in isolation, and shown to be the complete
-blocker set by an end-to-end run of the **unmodified** `src` attribution pipeline
-with a locally corrected adapter.
+Both were found live and reproduced in isolation. An end-to-end run of the
+**unmodified** `src` attribution pipeline with a locally corrected adapter then
+produced correct records (below). **Qualification (per manager self-review):** that
+isolated run establishes only the four observed pipeline records under a corrected
+adapter — it does **not** by itself prove these were the *only* defects, nor that
+the *compiled* candidate or the remaining scenarios pass. Those required
+independent measurement on the corrected compiled candidate, which is §11 (and
+which did surface a further defect, §11 Defect 3).
 
 1. **Wrong mach clock — attribution never matches.** `openSandboxProcessReader()`
    brackets observed lifetimes with `mach_absolute_time()`, but the kernel sandbox
@@ -294,13 +316,14 @@ with a locally corrected adapter.
    `>= byteLength` to `>= capacity`), or switch to `proc_listpids(PROC_PPID_ONLY)`
    (documented byte return).
 
-**Proof the fixes suffice (real pipeline, real kernel events).** With both fixes
-applied to a local adapter and the unmodified `SandboxAttribution` /
-`parseSandboxReport` / `formatSandboxRecord`, a root that does builtin read+write
-and an observable descendant shell produced **4 correctly attributed** records:
-root pid file-read-data + file-write-create, and descendant pid (distinct birth)
-file-read-data + file-write-create — correct operation, target, birth, boot, and
-mach. No third pipeline defect.
+**Isolated evidence the two fixes are on the right track (real pipeline, real
+kernel events).** With both fixes applied to a local adapter and the unmodified
+`SandboxAttribution` / `parseSandboxReport` / `formatSandboxRecord`, a root that
+does builtin read+write and an observable descendant shell produced **4 correctly
+attributed** records: root pid file-read-data + file-write-create, and descendant
+pid (distinct birth) file-read-data + file-write-create — correct operation,
+target, birth, boot, and mach. This is isolated evidence only; it does not stand
+in for the compiled-candidate run in §11.
 
 ### Attribution timing constraints (kept visible)
 
@@ -339,4 +362,74 @@ End-to-end scenarios through the `ib` binary — root-builtin attribution, obser
 descendant attribution, immediate-children dropped-not-guessed, and concurrent
 no-cross-attribution — currently emit zero `[Sandbox]` records because of Defects
 1+2, so their live confirmation is deferred until the corrected candidate. The
-isolated proof above shows they will pass once both fixes land.
+isolated evidence above is suggestive but not a substitute; the compiled-candidate
+results are in §11.
+
+## 11. Corrected collector candidate — live results (`f09280f`)
+
+Candidate `f09280f` applies both §10 fixes (verified in `src/sandbox-processes.ts`:
+`mach_continuous_time` for the clock; `decodeSandboxChildPids` treats the
+`proc_listchildpids` return as a pid count with a `>= buffer.length` overflow
+guard). Rebuilt locally (`bun run build`, not installed) and driven through the
+**compiled** `ib sandbox-log-watch` binary plus the real gate helper. (A later
+tip `ea01cee` is test-only; production is identical to `f09280f`.)
+
+Method: a bun orchestrator spawns the compiled collector and the real gate
+(`sandboxDenialExecPrefix`, recovered verbatim) as direct children of the owner,
+against the generated floor profile with an explicit `forbidden/` deny. No
+dashboard and no watchdog run in any fixture — collection is driven by the
+launch/collector alone (independence requirement satisfied by construction).
+
+### Per-axis results
+
+| Axis | Result |
+|---|---|
+| Root builtin read+write, held alive | **Attributed** — 2 `[Sandbox]` records, correct pid/birth/target/op/mach |
+| Observable descendant shell (observed before it denies) | **Attributed** to the descendant pid (distinct from root) — descendant enumeration works |
+| Immediate `cat` children (deny at ~0 ms, exit at once) | **Dropped, not guessed** — enforced (EPERM), zero records |
+| Concurrent (2 launches, distinct forbidden dirs, one shared log stream) | **Isolated** — each `agent.log` holds only its own denials; no cross-attribution |
+| Replacement vs late old cleanup | Old launch tears down (removes only its own dir) while the replacement stays ready, attributes its own denials, and removes only its own dir |
+| Enforcement | read + write both EPERM; `write.txt` never created; short-lived children blocked |
+| CLI-exit cleanup (the `008c233` fix) | Collector drains and removes **only its own** dir ~1050 ms after the root exits, owner still alive |
+| SIGTERM teardown | ~1027 ms drain, own-dir removal, `collector stopped`, exit 0 |
+| Startup failure (non-ancestor owner) | Exit 1, visible `[SandboxCollector] ERROR` in `agent.log`, own dir removed, kernel still enforces |
+| `parseDenials` + real DENIALS pane | Real captured `agent.log` → `parseDenials` extracts `[Sandbox]` records (finite epoch) and `[SandboxCollector] ERROR`/`WARNING`, **excludes** `INFO`; `RightPaneComponent.render()` shows an "N denial(s)" header + rows. Collector failures are visible in the pane. |
+
+Attribution requires the offender **observed before it denies** (the gate's
+`root-request`/`root-ready` handshake guarantees this for the root; the ~20 ms
+sampling loop must catch a descendant before its first denied op) and **held alive
+after** so `last` brackets `report.mach`. Records are keyed by pid + birth, so the
+reported leaf `comm` (`bash`) never needs to match the launching CLI.
+
+### Defect 3 (visibility gap; present on `008c233` and `f09280f`)
+
+The collector detects `log stream` death only via `stream.exitCode !== null` (the
+startup guard and the main-loop guard). A `log stream` terminated by a **signal**
+(crash, OOM, `SIGKILL`/`SIGTERM`) sets `signalCode` and leaves `exitCode` null
+(verified: `Bun.spawn` + `SIGKILL` → `{exitCode:null, signalCode:"SIGKILL"}`).
+Live: the collector's only child was SIGKILLed (confirmed it was the log stream —
+the collector then had no children and none reappeared), yet the collector kept
+running, collected nothing further, and exited 0 with `collector stopped` and **no
+ERROR**. So a signal-terminated stream is invisible, violating "collection failure
+must be visible." A stream that **exits with a code** is still detected. Fix: treat
+`signalCode !== null` as failure too, in both guards.
+
+### Explicit limits / untested axes
+
+- The real `start.sh`/`resume.sh` **bash preamble** (`sandboxDenialScriptPreamble`)
+  was **not** run verbatim: the real gate helper was used verbatim, but the
+  preamble's collector launch (mktemp + background + ready-wait) was replicated in
+  the orchestrator, and the owner is the orchestrator process (a valid ancestor),
+  not a real `start.sh`. The preamble text is covered by unit tests + baseline
+  fixtures, not by this live run.
+- Not tested with the real `claude`/`codex`/`agy` CLIs or the per-agent proxy —
+  offenders are synthetic sandboxed shells/`cat` producing the same kernel denials.
+- Concurrent used one owner (the orchestrator) for both collectors with distinct
+  dirs; isolation is by root-tree + own-dir, which is what was validated — not two
+  independent `start.sh` owners.
+- No PID-reuse claim from a single live run; birth identity guards it in the
+  algorithm but was not exercised against a real reuse.
+- The immediate-child drop boundary is timing-dependent (~20 ms sample interval);
+  a child that lives longer before denying could be attributed. Best-effort.
+- Defect 3 is unfixed at the tested tip; the signal-death path was exercised, the
+  code-exit path was not (it is covered by the `exitCode !== null` guard).

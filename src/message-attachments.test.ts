@@ -85,6 +85,15 @@ describe("send-time message attachments", () => {
     expect(result.staged).toBe(false);
   });
 
+  test("a stray inline backtick does not hide a later attachment", async () => {
+    await writeFile(join(dir, "image.png"), "image");
+    const result = await stage("Do not use `rm; inspect ./image.png instead.");
+    expect(result.staged).toBe(true);
+    expect(result.message).toMatch(/^Do not use `rm; inspect \/tmp\/itsybitsy-attachments-.* instead\.$/);
+    const fenced = "Example:\n```sh\ncat ./image.png";
+    expect((await stage(fenced)).message).toBe(fenced);
+  });
+
   test("replaces only a Markdown path and preserves trailing punctuation", async () => {
     await writeFile(join(dir, "image.png"), "image");
     const result = await stage("See [image](./image.png), thanks.");

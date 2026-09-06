@@ -31,7 +31,13 @@ function references(text: string): PathReference[] {
       let width = 1;
       while (text[i + width] === "`") width++;
       const close = text.indexOf("`".repeat(width), i + width);
-      if (close < 0) break;
+      if (close < 0) {
+        // An unfinished fenced block is still code. An unmatched inline
+        // delimiter is ordinary prose and must not hide later attachments.
+        if (width >= 3) break;
+        i += width - 1;
+        continue;
+      }
       i = close + width - 1;
       continue;
     }

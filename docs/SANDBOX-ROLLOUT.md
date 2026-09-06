@@ -106,7 +106,7 @@ Treat OS-event coverage as best-effort diagnostic logging until the live probe e
 
 Implemented for human message submissions in `ib watch`, independently of kernel-denial collection. Screenshots and other local files reach a running repository agent without expanding its sandbox or restarting it. **No `ib send` command, agent-to-agent send, or watchdog delivery enables staging.** Global system-coordinator sends retain their existing behavior.
 
-When a user drags a local file path into the `ib watch` send-message input, retain the original path in the editable draft. Parse and copy attachments only when the user actually sends the message. Deleting or changing a path before submission must not copy the old file or leave an unused temporary attachment.
+When a user drags a local file path into the `ib watch` send-message input, retain the original path in the editable draft. Parse and copy attachments only when the user actually sends the message. Deleting or changing a path before submission must not copy the old file or leave an unused temporary attachment. Live project references are preserved so edit/create instructions keep targeting the agent worktree; only external references become attachments (see SPEC §4.1.2 for relative paths and symlinks).
 
 Send-time behavior:
 

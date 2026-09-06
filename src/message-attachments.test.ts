@@ -94,6 +94,52 @@ describe("send-time message attachments", () => {
     expect((await stage(fenced)).message).toBe(fenced);
   });
 
+  test("live worktree references remain editable, including future project files", async () => {
+    const repo = join(dir, "main");
+    const worktree = join(dir, "agent-worktree");
+    await mkdir(repo);
+    await mkdir(worktree);
+    await writeFile(join(repo, "code.ts"), "main branch");
+    await writeFile(join(worktree, "code.ts"), "agent branch");
+    const message = `Fix ./code.ts, create ./new.ts and inspect ${worktree}/code.ts.`;
+    const result = await stageMessageAttachments(message, repo, worktree);
+    expect(result.message).toBe(message);
+    expect(result.staged).toBe(false);
+    expect((await stageMessageAttachments(`Create ${worktree}/new.ts`, repo, worktree)).staged).toBe(false);
+    // A same-prefix sibling is external, and mixed messages still stage it.
+    const external = `${worktree}-screenshot.png`;
+    await writeFile(external, "image");
+    const mixed = await stageMessageAttachments(`Fix ./code.ts using ${external}`, repo, worktree);
+    attempts.push(mixed);
+    expect(mixed.message).toStartWith("Fix ./code.ts using /tmp/itsybitsy-attachments-");
+    expect(await readFile(stagedPaths(mixed.message)[0]!, "utf8")).toBe("image");
+  });
+
+  test("project symlinks to external files still stage", async () => {
+    const repo = join(dir, "repo");
+    await mkdir(repo);
+    const external = join(dir, "outside.png");
+    await writeFile(external, "image");
+    await symlink(external, join(repo, "image.png"));
+    const result = await stageMessageAttachments("Inspect ./image.png, please", repo, repo);
+    attempts.push(result);
+    expect(result.staged).toBe(true);
+    expect(result.message).toEndWith("/image.png, please");
+    expect(await readFile(stagedPaths(result.message)[0]!.replace(/,$/, ""), "utf8")).toBe("image");
+  });
+
+  test("live-root containment resolves symlink parents for future files", async () => {
+    const repo = join(dir, "repo");
+    const external = join(dir, "external");
+    await mkdir(repo);
+    await mkdir(external);
+    await symlink(external, join(repo, "outside"));
+    await symlink(repo, join(dir, "inside-alias"));
+    const liveFuture = `Create ${dir}/inside-alias/new.ts`;
+    expect((await stageMessageAttachments(liveFuture, repo, repo)).message).toBe(liveFuture);
+    await expect(stageMessageAttachments("Read ./outside/missing.png", repo, repo)).rejects.toThrow("Cannot stage attachment");
+  });
+
   test("replaces only a Markdown path and preserves trailing punctuation", async () => {
     await writeFile(join(dir, "image.png"), "image");
     const result = await stage("See [image](./image.png), thanks.");

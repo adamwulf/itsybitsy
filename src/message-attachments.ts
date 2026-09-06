@@ -1,6 +1,7 @@
 import { copyFile, mkdtemp, mkdir, realpath, rm, stat } from "node:fs/promises";
 import { constants } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
+import { canonicalizeSandboxPath } from "./sandbox";
 
 interface PathReference {
   start: number;
@@ -86,16 +87,38 @@ function spellPath(path: string, quote?: string): string {
  * successful sends retain it for queued delivery and later reads. There is
  * deliberately no acknowledgment-based cleanup or age-based expiry here:
  * the OS/user may clean /tmp, but ib must not invalidate a pending message. */
-export async function stageMessageAttachments(message: string, baseDir: string): Promise<StagedMessage> {
+export async function stageMessageAttachments(message: string, baseDir: string, liveRoot?: string): Promise<StagedMessage> {
   const parsed = references(message);
   const files: Array<PathReference & { source: string }> = [];
+  const repoRoot = resolve(baseDir);
+  const canonicalLiveRoot = liveRoot ? canonicalizeSandboxPath(liveRoot) : undefined;
+  const inside = (root: string, path: string) => path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`);
+  const resolveReference = (path: string): string => {
+    let source = resolve(baseDir, path);
+    // A relative project reference means the recipient's live checkout, even
+    // when baseDir is the main repository and the recipient has a worktree.
+    // Preserve future files too: "create ./src/new.ts" is an instruction, not
+    // an attempt to attach a missing file. Relative paths outside the project
+    // still resolve against baseDir for attachment staging.
+    if (liveRoot && !path.startsWith("/") && inside(repoRoot, source)) {
+      source = resolve(liveRoot, relative(repoRoot, source));
+    }
+    return source;
+  };
+  const isLiveReference = (path: string): boolean => {
+    if (!canonicalLiveRoot) return false;
+    // Resolve existing symlink prefixes so a project symlink pointing outside
+    // the worktree is still staged instead of leaving an inaccessible path.
+    return inside(canonicalLiveRoot, canonicalizeSandboxPath(resolveReference(path)));
+  };
   for (const reference of parsed) {
     let path = reference.path;
     let end = reference.end;
     for (;;) {
-      const source = resolve(baseDir, path);
+      const source = resolveReference(path);
       try {
         const info = await stat(source);
+        if (isLiveReference(path)) break;
         if (!info.isFile()) throw new Error(`Attachment is not a regular file: ${reference.path} (directories are not copied)`);
         files.push({ ...reference, path, end, source: await realpath(source) });
         break;
@@ -110,6 +133,10 @@ export async function stageMessageAttachments(message: string, baseDir: string):
           end--;
           continue;
         }
+        // No successful stat is required for a future live project reference.
+        // Resolve punctuation first so "./external-symlink.png," cannot hide
+        // an external target behind a nonexistent name ending in a comma.
+        if (isLiveReference(path)) break;
         throw new Error(`Cannot stage attachment ${JSON.stringify(reference.path)}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }

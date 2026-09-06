@@ -398,7 +398,7 @@ launch/collector alone (independence requirement satisfied by construction).
 | CLI-exit cleanup (the `008c233` fix) | Collector drains and removes **only its own** dir ~1050 ms after the root exits, owner still alive |
 | SIGTERM teardown | ~1027 ms drain, own-dir removal, `collector stopped`, exit 0 |
 | Startup failure (non-ancestor owner) | Exit 1, visible `[SandboxCollector] ERROR` in `agent.log`, own dir removed, kernel still enforces |
-| `parseDenials` + real DENIALS pane | Real captured `agent.log` → `parseDenials` extracts `[Sandbox]` records (finite epoch) and `[SandboxCollector] ERROR`/`WARNING`, **excludes** `INFO`; `RightPaneComponent.render()` shows an "N denial(s)" header + rows. Collector failures are visible in the pane. |
+| `parseDenials` + real DENIALS pane | **Actual UI rendering:** a real captured `agent.log` with two `[Sandbox]` records → `parseDenials` + `RightPaneComponent.render()` rendered the two Sandbox rows under an "N denial(s)" header. **Separate parser-only check:** `parseDenials` also parses `[SandboxCollector] ERROR`/`WARNING` and excludes `INFO` — this is parser coverage, **not** a captured failure-row UI render (the pane's rendering of those status rows relies on the parser + shipped unit tests). |
 
 Attribution requires the offender **observed before it denies** (the gate's
 `root-request`/`root-ready` handshake guarantees this for the root; the ~20 ms
@@ -468,8 +468,42 @@ attributing only its own registered root-tree — **not** from a shared stream (
 | `start.sh` verbatim preamble, root builtin read+write | **Attributed** (2 `[Sandbox]` records); enforced (EPERM, no file); collector cleaned its own dir |
 | `resume.sh` verbatim preamble | Same as start (helpers are identical) — attributed, enforced, cleaned |
 | Replacement / concurrent (two verbatim preambles) | **Isolated** — each `agent.log` only its own denials; both dirs removed; no cross-attribution |
-| Log-stream SIGKILL (Defect 3 fix) | Collector emits `[SandboxCollector] ERROR: log stream stopped unexpectedly (exit=null, signal=SIGKILL)` and exits 1; supervisor then logs `collector exited 1`; kernel still denies read+write; collector `finally` runs so **no residual** dir/stream |
-| Collector SIGKILL (supervisor visibility) | Shell supervisor logs `[SandboxCollector] ERROR: … collector exited 137` and touches `failed`; kernel still denies read+write |
+| Log-stream SIGKILL (Defect 3 fix) | Collector emits `[SandboxCollector] ERROR: log stream stopped unexpectedly (exit=null, signal=SIGKILL)` and exits 1; supervisor then logs `collector exited 1`; collector `finally` runs so **no residual** dir/stream. Post-failure enforcement measured separately (below) |
+| Collector SIGKILL (supervisor visibility) | Shell supervisor logs `[SandboxCollector] ERROR: … collector exited 137` and touches `failed`. Post-failure enforcement measured separately (below) |
+
+### Post-failure enforcement (corrected — was measured pre-failure)
+
+An earlier version claimed "kernel still denies read+write" for the SIGKILL cases,
+but that EPERM was observed **before** the injected failure. A phased re-run closes
+that gap. The sandboxed offender does a forbidden read+write **before** the kill,
+then waits on a **host-owned release marker**; the host injects the failure, waits
+until the corresponding ERROR is visible in `agent.log`, and only **then** releases
+the offender, which performs a **fresh** forbidden read+write.
+
+Both failure modes (measured, `error_to_release` = 0 ms, i.e. release strictly
+after the ERROR was visible):
+
+- **Pre-failure** read+write → EPERM (`cat: …/read.txt: Operation not permitted`;
+  `/bin/sh: …/write.txt: Operation not permitted`).
+- **Post-failure** (after the ERROR was visible and the host released): a fresh
+  read+write → **still EPERM** (`…/read.txt` and `…/after-write.txt: Operation not
+  permitted`), and the fresh `after-write.txt` was **not** created.
+- Ordering recorded: `before-done → kill (+13 ms) → ERROR visible (+32 ms) →
+  release (+0 ms) → after-done (+31 ms)`.
+
+Kernel enforcement is inherited at launch and is independent of the collector, so
+it persists after the collector or its stream dies. Note: the post-failure denials
+are **not** collected (the collector is down by then) — the evidence is the fresh
+stderr + missing file, not a `[Sandbox]` record.
+
+### Replacement — coverage scope
+
+The replacement/concurrent test prepares **separate** agent roots and logs for A
+and B. It therefore proves **concurrent / staggered-launch cleanup isolation** (two
+independent collectors, each its own stream; old-launch cleanup does not stop or
+mis-attribute the other). It does **not** exercise old and new invocations sharing
+the **same** agent directory/log — that same-directory overlap is covered by the
+manager's shell regression test, not by this live run.
 
 ### Collector-SIGKILL — observed unresolved cleanup limitation
 

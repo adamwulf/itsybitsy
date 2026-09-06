@@ -79,8 +79,9 @@ import {
 import { cancelPaste } from "./clipboard";
 import type { LayoutState } from "./layout";
 import { InputFieldComponent } from "./input-field";
-import { sendMessage, pauseAgent, teamSend as ibTeamSend } from "../ib-commands";
-import type { IbCommandResult } from "../ib-commands";
+import { pauseAgent, teamSend as ibTeamSend } from "../ib-commands";
+import { sendStagedMessage } from "./message-send";
+import type { StagedTeamSendOptions, TeamSendResult } from "./message-send";
 import { getResolvableWarnings } from "../health-check";
 import { logToWatchLog, logWarning, setWatchRunning } from "../watch-log";
 
@@ -866,11 +867,18 @@ export class DashboardComponent implements Component {
     this.inputField = new InputFieldComponent();
     this.inputField.onSubmit = (text: string) => {
       const agent = this.agentTree.selectedAgent;
-      if (!agent || !text.trim()) return;
-      this.executeAndRefresh(async () => {
-        const result = await sendMessage(agent, text.trim(), { cwd: "/" });
-        if (result.ok) this.setNotice(`Sent to ${agent.id}`, "info");
-        else this.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
+      const trimmed = text.trim();
+      if (!agent || !trimmed) return;
+      // Acceptance-gated send: the field keeps the draft until this resolves
+      // true, so a staged-attachment failure preserves the message for
+      // correction and a duplicate Send press is ignored while in flight.
+      // attachmentBaseDir = the destination agent's repo, so ./ and ../ in a
+      // dragged path resolve against the selected repo.
+      return this.executeSendAndRefresh(async () => {
+        const result = await sendStagedMessage(agent, trimmed, { cwd: "/", attachmentBaseDir: agent.repoPath });
+        if (result.ok) { this.setNotice(`Sent to ${agent.id}`, "info"); return true; }
+        this.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
+        return false;
       });
     };
     this.inputField.onCancel = () => {
@@ -931,11 +939,16 @@ export class DashboardComponent implements Component {
     this.repoCoordinatorInputField = new InputFieldComponent();
     this.repoCoordinatorInputField.onSubmit = (text: string) => {
       const agent = this.rightPane.repoCoordinatorAgent;
-      if (!agent || !text.trim()) return;
-      this.executeAndRefresh(async () => {
-        const result = await sendMessage(agent, text.trim(), { cwd: "/" });
-        if (result.ok) this.setNotice(`Sent to ${agent.id}`, "info");
-        else this.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
+      const trimmed = text.trim();
+      if (!agent || !trimmed) return;
+      // Repo coordinator is a normal repository agent (not the global @system
+      // coordinator), so it stages like any other human send. Acceptance-gated:
+      // keep the draft on failure, clear only on acceptance.
+      return this.executeSendAndRefresh(async () => {
+        const result = await sendStagedMessage(agent, trimmed, { cwd: "/", attachmentBaseDir: agent.repoPath });
+        if (result.ok) { this.setNotice(`Sent to ${agent.id}`, "info"); return true; }
+        this.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
+        return false;
       });
     };
     this.repoCoordinatorInputField.onCancel = () => {
@@ -1365,6 +1378,33 @@ export class DashboardComponent implements Component {
     this._pendingActions.add(p);
     p.finally(() => this._pendingActions.delete(p));
     await p;
+  }
+
+  /**
+   * Acceptance-gated variant of {@link executeAndRefresh} for inline send paths.
+   * The body reports whether the send was ACCEPTED (ok); that flag flows back to
+   * the input field so it clears the draft only on acceptance and keeps it on
+   * failure. Errors are surfaced as a notice and reported as NOT accepted, so a
+   * throwing send never silently discards the user's draft. Registered with
+   * `_pendingActions` (as a void view) so tests can await it via
+   * {@link flushPendingActions}.
+   */
+  executeSendAndRefresh(fn: () => Promise<boolean>): Promise<boolean> {
+    const run = (async () => {
+      let accepted = false;
+      try {
+        accepted = await fn();
+      } catch (err) {
+        this.setNotice(`Error: ${err}`, "error");
+        accepted = false;
+      }
+      this.watcher?.refresh();
+      return accepted;
+    })();
+    const tracked = run.then(() => {});
+    this._pendingActions.add(tracked);
+    tracked.finally(() => this._pendingActions.delete(tracked));
+    return run;
   }
 
   /** Wait for all in-flight executeAndRefresh calls to complete. For use in tests. */
@@ -1819,8 +1859,10 @@ export class DashboardComponent implements Component {
     teamName: string,
     members: Agent[],
     message: string,
-    opts: { fromAgent?: string } | undefined,
-  ): Promise<IbCommandResult> => {
+    opts: StagedTeamSendOptions | undefined,
+  ): Promise<TeamSendResult> => {
+    // Forward the send-time staging + retry opts (stageAttachments /
+    // skipRecipientIds / attachmentBaseDir) through to the team fan-out.
     return ibTeamSend(teamName, members, message, opts, this.repos);
   };
 
@@ -2160,11 +2202,13 @@ export class DashboardComponent implements Component {
       // Send sub-focus: Enter submits
       if (sf === "send") {
         if (matchesKey(data, Key.enter) || data === "\r" || data === "\n") {
-          const text = this.inputField.getText();
-          if (text.trim()) {
-            this.inputField.clear();
+          if (this.inputField.getText().trim()) {
             this.focusManager.setSubFocus("pane");
-            this.inputField.onSubmit?.(text);
+            // Acceptance-gated: submit() keeps the draft on screen until the send
+            // is accepted (so a staged-attachment failure preserves it for
+            // correction) and guards a duplicate submit while one is in flight.
+            // The draft is cleared only on acceptance — never before the send.
+            this.inputField.submit();
           }
           this.tui?.requestRender();
           return;
@@ -2218,7 +2262,11 @@ export class DashboardComponent implements Component {
         return;
       }
 
-      // Send sub-focus: Enter submits
+      // Send sub-focus: Enter submits. The GLOBAL @system coordinator is
+      // deliberately excluded from send-time attachment staging (Adam's rule:
+      // auto-copy only for human submissions to repository agents), so this path
+      // keeps the legacy clear-then-submit flow rather than the acceptance-gated
+      // submit() used by the agent and repo-coordinator chat boxes above.
       if (sf === "send") {
         if (matchesKey(data, Key.enter) || data === "\r" || data === "\n") {
           const text = this.coordinatorInputField.getText();
@@ -2280,11 +2328,11 @@ export class DashboardComponent implements Component {
       // Send sub-focus: Enter submits
       if (sf === "send") {
         if (matchesKey(data, Key.enter) || data === "\r" || data === "\n") {
-          const text = this.repoCoordinatorInputField.getText();
-          if (text.trim()) {
-            this.repoCoordinatorInputField.clear();
+          if (this.repoCoordinatorInputField.getText().trim()) {
             this.focusManager.setSubFocus("pane");
-            this.repoCoordinatorInputField.onSubmit?.(text);
+            // Acceptance-gated like the agent chat box: the draft survives a
+            // failed staged send and clears only once the send is accepted.
+            this.repoCoordinatorInputField.submit();
           }
           this.tui?.requestRender();
           return;

@@ -19,6 +19,16 @@ const PASTE_END = "\x1b[201~";
  */
 let pasteInProgress: { buffer: string } | null = null;
 
+/**
+ * Monotonic paste "generation". Bumped by {@link cancelPaste}. An async paste
+ * (a Ctrl+V clipboard read that hasn't returned yet) captures the generation at
+ * dispatch and only applies its result if the generation is unchanged. This lets
+ * cancelPaste() invalidate an IN-FLIGHT clipboard read — not just a buffered
+ * chunked paste — so a read that resolves after the draft was submitted cannot
+ * mutate a buffer that has moved on.
+ */
+let pasteGeneration = 0;
+
 /** Read the system clipboard contents via pbpaste. Returns empty string on failure. */
 export async function readClipboard(): Promise<string> {
   try {
@@ -29,6 +39,21 @@ export async function readClipboard(): Promise<string> {
   } catch {
     return "";
   }
+}
+
+// The clipboard reader is indirected through a module variable so tests can
+// substitute a controllable async source (real pbpaste timing is not
+// deterministic). Production always uses readClipboard.
+let clipboardReader: () => Promise<string> = readClipboard;
+
+/** Test seam: substitute the async clipboard reader used by Ctrl+V. */
+export function setClipboardReaderForTests(reader: () => Promise<string>): void {
+  clipboardReader = reader;
+}
+
+/** Restore the production clipboard reader. */
+export function resetClipboardReaderForTests(): void {
+  clipboardReader = readClipboard;
 }
 
 /** Check if data looks like a multi-character paste (all printable, not an escape sequence). */
@@ -59,6 +84,9 @@ export function extractBracketedPaste(data: string): string | null {
  *  silently swallow subsequent input. */
 export function cancelPaste(): void {
   pasteInProgress = null;
+  // Invalidate any in-flight Ctrl+V clipboard read so its late result is dropped
+  // rather than applied to a buffer that has since been submitted/cleared.
+  pasteGeneration++;
 }
 
 /** Test-only alias for cancelPaste — retained so test setup reads as state reset. */
@@ -99,8 +127,11 @@ export function resolvePasteText(
 
   // Ctrl+V (0x16) → async clipboard read
   if (data === "\x16") {
-    readClipboard().then((text) => {
-      if (text) onAsyncPaste(text);
+    const gen = pasteGeneration;
+    clipboardReader().then((text) => {
+      // Drop the result if paste was cancelled/flushed meanwhile (e.g. the draft
+      // was submitted): a late clipboard read must not mutate the frozen buffer.
+      if (text && gen === pasteGeneration) onAsyncPaste(text);
     });
     return null;
   }

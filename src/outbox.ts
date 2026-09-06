@@ -78,6 +78,18 @@ export interface OutboxMessage {
   enqueuedAtMs: number;
   /** When set, this message was fanned out to team @<team>; deliverMessage renders "in @<team>" in the prefix. Resolved at drain time. */
   team?: string;
+  /**
+   * When true, delivery MUST NOT treat a leading `/` or `!` as a user
+   * slash/bang passthrough (see `deliverMessage`). Set for a send-time-staged
+   * message that BEGINS with a file-path reference — an absolute `/tmp/...`
+   * staged copy OR a live in-worktree path kept literal (e.g. an absolute path
+   * into the agent's own worktree): that path is data, not a command, and must
+   * be delivered with the normal `[sent by ...]:` prefix so it does not land in
+   * column 0 and fire as a slash command. A genuine leading slash command
+   * (`/clear`, or `/compact` before an attachment) leaves this unset so its
+   * passthrough is preserved.
+   */
+  noPassthrough?: boolean;
 }
 
 /** Path to an agent/coordinator outbox file, given the directory that holds meta.json. */
@@ -128,7 +140,8 @@ export async function enqueueOutbox(
       m.fromAgent === msg.fromAgent &&
       m.message === msg.message &&
       m.raw === msg.raw &&
-      m.team === msg.team,
+      m.team === msg.team &&
+      (m.noPassthrough === true) === (msg.noPassthrough === true),
   );
   if (dup) return dup;
 
@@ -139,6 +152,10 @@ export async function enqueueOutbox(
     raw: msg.raw,
     enqueuedAtMs: msg.enqueuedAtMs ?? Date.now(),
     team: msg.team,
+    // Persist only when explicitly true so an ordinary record round-trips
+    // identically to before (JSON.stringify drops the undefined key), keeping
+    // the dedupe match above stable against pre-existing queued messages.
+    noPassthrough: msg.noPassthrough === true ? true : undefined,
   };
   // Ensure the agent/coordinator directory exists before appending. In
   // production this dir always exists (created at spawn); creating it here is a
@@ -186,6 +203,7 @@ export async function readOutbox(dir: string): Promise<OutboxMessage[]> {
           raw: obj.raw,
           enqueuedAtMs: typeof obj.enqueuedAtMs === "number" ? obj.enqueuedAtMs : 0,
           team: typeof obj.team === "string" ? obj.team : undefined,
+          noPassthrough: obj.noPassthrough === true ? true : undefined,
         });
       }
     } catch {

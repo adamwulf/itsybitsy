@@ -9,6 +9,8 @@ import type { ActionCtx } from "./agent-actions";
 import type { DialogState } from "./dialog-handler";
 import type { PaneMode } from "./pane-manager";
 import { assertDialog } from "./test-helpers";
+import { setStagedSenderForTests, resetStagedSenderForTests } from "./message-send";
+import type { StagedSendOptions, StagedTeamSendOptions } from "./message-send";
 import {
   handleRetire, handleNuke, handleNukeAll, handleResume, handlePause,
   handleSend, handleNewAgent, handleScrollUp, handleScrollDown,
@@ -17,7 +19,7 @@ import {
   handleOpenDiffTool, handleOpenDiffToolVsManager, getActiveDiffProc, setActiveDiffProc, killActiveDiffProc,
   getDiffToolLaunching, setDiffToolLaunching,
   handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
-  effectiveSpawnCapability,
+  effectiveSpawnCapability, handleAnswerQuestion,
   getCoordinatorSpawnsInFlight, clearCoordinatorSpawnsInFlight,
   handleCreateTeam, handleAddAgentToTeam, handleDisbandTeam, handleManageTeam,
   handleFolderBrowser,
@@ -179,7 +181,7 @@ function makeMockCtx(overrides?: {
     teamSend: overrides?.teamSend
       ?? (async (teamName, members, message, opts) => {
         teamSendCalls.push({ teamName, members, message, fromAgent: opts?.fromAgent });
-        return { ok: true, stdout: `sent to @${teamName}`, stderr: "", exitCode: 0 };
+        return { ok: true, stdout: `sent to @${teamName}`, stderr: "", exitCode: 0, acceptedRecipientIds: [] };
       }),
     rightPane: {
       mode: overrides?.mode ?? "AGENT LOG",
@@ -2274,6 +2276,7 @@ describe("handleCreateTeam", () => {
         stdout: "",
         stderr: "delivery failed",
         exitCode: 1,
+        acceptedRecipientIds: [],
       }),
     });
     handleCreateTeam(ctx);
@@ -2548,7 +2551,7 @@ describe("handleDisbandTeam", () => {
     // Inject a teamSend stub that deletes the team mid-flight to simulate a race.
     const teamSend: ActionCtx["teamSend"] = async (teamName, _members, _message, _opts) => {
       await deleteTeam(teamName);
-      return { ok: true, stdout: `sent to @${teamName}`, stderr: "", exitCode: 0 };
+      return { ok: true, stdout: `sent to @${teamName}`, stderr: "", exitCode: 0, acceptedRecipientIds: [] };
     };
     const { ctx, dialogs, notices, flushActions } = makeMockCtx({ repos: [fx.repoEntry], teamSend });
     handleDisbandTeam(ctx, "backend");
@@ -2754,5 +2757,296 @@ describe("handleFolderBrowser", () => {
     );
     expect(added).toBeDefined();
     expect(added.name).toBe("rice-teaching");
+  });
+});
+
+describe("handleSend — attachment staging + acceptance-gated draft", () => {
+  const okResult = { ok: true, exitCode: 0, stdout: "", stderr: "" };
+  const failResult = { ok: false, exitCode: 1, stdout: "", stderr: "cannot stage attachment /tmp/missing.png" };
+
+  afterEach(() => {
+    resetStagedSenderForTests();
+  });
+
+  test("point-to-point: a failed send keeps the dialog open and preserves the draft", async () => {
+    setStagedSenderForTests(async () => failResult);
+    const agent = makeAgent({ id: "agent-1" });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent });
+    let closeCalls = 0;
+    ctx.closeDialog = () => { closeCalls++; };
+    handleSend(ctx);
+    const d = assertDialog(dialogs[0]!, "textarea");
+    d.onSubmit("look at /tmp/missing.png");
+    await flushActions();
+    expect(closeCalls).toBe(0); // draft/dialog preserved on failure
+    expect(notices.some((n) => n.includes("Send failed"))).toBe(true);
+  });
+
+  test("point-to-point: a successful send closes the dialog", async () => {
+    setStagedSenderForTests(async () => okResult);
+    const agent = makeAgent({ id: "agent-1" });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent });
+    let closeCalls = 0;
+    ctx.closeDialog = () => { closeCalls++; };
+    handleSend(ctx);
+    const d = assertDialog(dialogs[0]!, "textarea");
+    d.onSubmit("hello");
+    await flushActions();
+    expect(closeCalls).toBe(1); // close/clear only on acceptance
+    expect(notices.some((n) => n.includes("Sent to agent-1"))).toBe(true);
+  });
+
+  test("point-to-point: forwards the destination repo as attachmentBaseDir", async () => {
+    const seen: StagedSendOptions[] = [];
+    setStagedSenderForTests(async (_agent, _message, o) => { if (o) seen.push(o); return okResult; });
+    const agent = makeAgent({ id: "agent-1", repoPath: "/repos/one" });
+    const { ctx, dialogs, flushActions } = makeMockCtx({ agent });
+    handleSend(ctx);
+    const d = assertDialog(dialogs[0]!, "textarea");
+    d.onSubmit("hi");
+    await flushActions();
+    expect(seen[0]?.attachmentBaseDir).toBe("/repos/one");
+  });
+
+  test("point-to-point: a duplicate submit while in flight is ignored", async () => {
+    let calls = 0;
+    let resolve!: (r: typeof okResult) => void;
+    const pending = new Promise<typeof okResult>((r) => { resolve = r; });
+    setStagedSenderForTests(async () => { calls++; return pending; });
+    const agent = makeAgent({ id: "agent-1" });
+    const { ctx, dialogs, flushActions } = makeMockCtx({ agent });
+    handleSend(ctx);
+    const d = assertDialog(dialogs[0]!, "textarea");
+    d.onSubmit("hi"); // first submit → in flight
+    d.onSubmit("hi"); // second submit → guarded
+    expect(calls).toBe(1);
+    resolve(okResult);
+    await flushActions();
+  });
+
+  test("send-all: a retry after partial failure resends only the not-yet-accepted agents", async () => {
+    const attempts = new Map<string, number>();
+    const sends: string[] = [];
+    setStagedSenderForTests(async (agent) => {
+      const n = (attempts.get(agent.id) ?? 0) + 1;
+      attempts.set(agent.id, n);
+      sends.push(agent.id);
+      // agent-2 fails only on its first attempt, succeeds on retry.
+      const ok = !(agent.id === "agent-2" && n === 1);
+      return ok ? okResult : failResult;
+    });
+    const a1 = makeAgent({ id: "agent-1" });
+    const a2 = makeAgent({ id: "agent-2" });
+    const flatList: FlatEntry[] = [makeFlatAgent(a1), makeFlatAgent(a2)];
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent: a1, flatList });
+    let closeCalls = 0;
+    ctx.closeDialog = () => { closeCalls++; };
+    handleSend(ctx);
+    const d = assertDialog(dialogs[0]!, "textarea");
+    d.sendAll = true;
+    d.onSubmit("broadcast"); // round 1: agent-1 accepts, agent-2 fails
+    await flushActions();
+    expect(closeCalls).toBe(0); // partial failure → dialog stays open
+    d.onSubmit("broadcast"); // round 2 (retry): only agent-2 is resent
+    await flushActions();
+    expect(closeCalls).toBe(1); // every recipient accepted → closed
+    // agent-1 accepted in round 1 is never resent; agent-2 retried (fail then ok).
+    expect(sends).toEqual(["agent-1", "agent-2", "agent-2"]);
+    expect(notices.some((n) => n.includes("Sent to 2 agents"))).toBe(true);
+  });
+
+  test("team: a retry after partial failure passes the accepted ids as skipRecipientIds", async () => {
+    const teamOpts: Array<StagedTeamSendOptions | undefined> = [];
+    let round = 0;
+    const teamSend: ActionCtx["teamSend"] = async (_teamName, _members, _message, o) => {
+      round++;
+      teamOpts.push(o);
+      if (round === 1) {
+        // Partial failure: agent-a accepted, overall not-ok so the draft stays.
+        return { ok: false, exitCode: 1, stdout: "", stderr: "1 failed", acceptedRecipientIds: ["agent-a"] };
+      }
+      return { ok: true, exitCode: 0, stdout: "sent", stderr: "", acceptedRecipientIds: ["agent-a", "agent-b"] };
+    };
+    const { ctx, dialogs, flushActions } = makeMockCtx({
+      sidebarMode: "teams",
+      activeSelectionSource: "teams",
+      teamsSelection: { kind: "team", teamName: "backend" },
+      teamSend,
+    });
+    let closeCalls = 0;
+    ctx.closeDialog = () => { closeCalls++; };
+    handleSend(ctx);
+    const d = assertDialog(dialogs[0]!, "textarea");
+    d.onSubmit("standup"); // round 1: partial failure
+    await flushActions();
+    expect(closeCalls).toBe(0);
+    expect(teamOpts[0]?.stageAttachments).toBe(true);
+    expect(teamOpts[0]?.skipRecipientIds).toBeUndefined();
+    d.onSubmit("standup"); // round 2: retry the same draft
+    await flushActions();
+    expect(teamOpts[1]?.skipRecipientIds).toEqual(["agent-a"]);
+    expect(closeCalls).toBe(1);
+  });
+
+  test("send-all: editing the draft after a partial failure resends the new text to everyone", async () => {
+    const sends: Array<{ id: string; message: string }> = [];
+    setStagedSenderForTests(async (agent, message) => {
+      sends.push({ id: agent.id, message });
+      // agent-2 fails on the FIRST message only.
+      const ok = !(agent.id === "agent-2" && message === "msg1");
+      return ok ? okResult : failResult;
+    });
+    const a1 = makeAgent({ id: "agent-1" });
+    const a2 = makeAgent({ id: "agent-2" });
+    const flatList: FlatEntry[] = [makeFlatAgent(a1), makeFlatAgent(a2)];
+    const { ctx, dialogs, flushActions } = makeMockCtx({ agent: a1, flatList });
+    handleSend(ctx);
+    const d = assertDialog(dialogs[0]!, "textarea");
+    d.sendAll = true;
+    d.onSubmit("msg1"); // round 1: agent-1 accepts, agent-2 fails
+    await flushActions();
+    d.onSubmit("msg2"); // EDITED draft → a new message goes to EVERYONE
+    await flushActions();
+    // agent-1 accepted "msg1" but STILL receives the edited "msg2" — the accepted
+    // set is scoped to the exact message, not carried across an edit.
+    expect(sends).toEqual([
+      { id: "agent-1", message: "msg1" },
+      { id: "agent-2", message: "msg1" },
+      { id: "agent-1", message: "msg2" },
+      { id: "agent-2", message: "msg2" },
+    ]);
+  });
+
+  test("team: editing the draft after a partial failure clears skipRecipientIds", async () => {
+    const teamOpts: Array<StagedTeamSendOptions | undefined> = [];
+    const messages: string[] = [];
+    let round = 0;
+    const teamSend: ActionCtx["teamSend"] = async (_teamName, _members, message, o) => {
+      round++;
+      teamOpts.push(o);
+      messages.push(message);
+      if (round === 1) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: "1 failed", acceptedRecipientIds: ["agent-a"] };
+      }
+      return { ok: true, exitCode: 0, stdout: "sent", stderr: "", acceptedRecipientIds: ["agent-a", "agent-b"] };
+    };
+    const { ctx, dialogs, flushActions } = makeMockCtx({
+      sidebarMode: "teams",
+      activeSelectionSource: "teams",
+      teamsSelection: { kind: "team", teamName: "backend" },
+      teamSend,
+    });
+    handleSend(ctx);
+    const d = assertDialog(dialogs[0]!, "textarea");
+    d.onSubmit("msg1"); // round 1: partial failure, accepts agent-a
+    await flushActions();
+    d.onSubmit("msg2"); // EDITED draft
+    await flushActions();
+    expect(messages).toEqual(["msg1", "msg2"]);
+    expect(teamOpts[0]?.skipRecipientIds).toBeUndefined();
+    // The edit reset the accepted set — the new message is NOT skipping agent-a.
+    expect(teamOpts[1]?.skipRecipientIds).toBeUndefined();
+  });
+
+  test("cancelling with an empty draft sends nothing (no attachment copied)", async () => {
+    let calls = 0;
+    setStagedSenderForTests(async () => { calls++; return okResult; });
+    const agent = makeAgent({ id: "agent-1" });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent });
+    handleSend(ctx);
+    const d = assertDialog(dialogs[0]!, "textarea");
+    d.onSubmit("   "); // whitespace-only → cancel, never invokes the sender
+    await flushActions();
+    expect(calls).toBe(0);
+    expect(notices).toContain("Send cancelled");
+  });
+});
+
+describe("handleAnswerQuestion — deliver the answer before acknowledging", () => {
+  afterEach(() => {
+    resetStagedSenderForTests();
+  });
+
+  /** Build a repo dir; optionally seed a pending user-questions.json for q1. */
+  async function makeQuestionRepo(withFile: boolean): Promise<{ repoDir: string; questionsPath: string }> {
+    const repoDir = await mkdtemp(join(tmpdir(), "aa-answer-"));
+    await mkdir(join(repoDir, ".ittybitty"), { recursive: true });
+    const questionsPath = join(repoDir, ".ittybitty", "user-questions.json");
+    if (withFile) {
+      await Bun.write(questionsPath, JSON.stringify({
+        questions: [{ id: "q1", agent: "agent-1", question: "?", status: "pending", timestamp: "2026-01-01T00:00:00Z" }],
+      }));
+    }
+    return { repoDir, questionsPath };
+  }
+
+  function openAnswerDialog(repoDir: string) {
+    const agent = makeAgent({ id: "agent-1", repoPath: repoDir });
+    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+    const question: PendingQuestion = { id: "q1", agent: "agent-1", question: "?", timestamp: "2026-01-01T00:00:00Z", status: "pending" };
+    const mock = makeMockCtx({ agent, flatList, questions: [question] });
+    let closeCalls = 0;
+    mock.ctx.closeDialog = () => { closeCalls++; };
+    handleAnswerQuestion(mock.ctx);
+    const d = assertDialog(mock.dialogs[0]!, "textarea");
+    return { ...mock, d, closeCalls: () => closeCalls };
+  }
+
+  test("a staging failure keeps the draft and does NOT acknowledge the question", async () => {
+    const { repoDir, questionsPath } = await makeQuestionRepo(true);
+    try {
+      setStagedSenderForTests(async () => ({ ok: false, exitCode: 1, stdout: "", stderr: "cannot stage /tmp/x.png" }));
+      const { d, notices, flushActions, closeCalls } = openAnswerDialog(repoDir);
+      d.onSubmit("see /tmp/x.png");
+      await flushActions();
+      // The question must remain — acknowledging before the answer was delivered
+      // would remove an UNANSWERED question permanently.
+      const data = await Bun.file(questionsPath).json();
+      expect(data.questions[0].status).toBe("pending");
+      expect(closeCalls()).toBe(0);
+      expect(notices.some((n) => n.includes("Send failed"))).toBe(true);
+    } finally {
+      await rm(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  test("a successful answer delivers, then acknowledges, then closes", async () => {
+    const { repoDir, questionsPath } = await makeQuestionRepo(true);
+    try {
+      let sends = 0;
+      setStagedSenderForTests(async () => { sends++; return { ok: true, exitCode: 0, stdout: "", stderr: "" }; });
+      const { d, notices, flushActions, closeCalls } = openAnswerDialog(repoDir);
+      d.onSubmit("the answer");
+      await flushActions();
+      const data = await Bun.file(questionsPath).json();
+      expect(data.questions[0].status).toBe("acknowledged");
+      expect(sends).toBe(1);
+      expect(closeCalls()).toBe(1);
+      expect(notices.some((n) => n.includes("Answered"))).toBe(true);
+    } finally {
+      await rm(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  test("if acknowledge fails after a delivered answer, a retry re-acks without resending", async () => {
+    // No questions file → acknowledgeQuestion fails, but the answer still sends.
+    const { repoDir } = await makeQuestionRepo(false);
+    try {
+      let sends = 0;
+      setStagedSenderForTests(async () => { sends++; return { ok: true, exitCode: 0, stdout: "", stderr: "" }; });
+      const { d, notices, flushActions, closeCalls } = openAnswerDialog(repoDir);
+      d.onSubmit("the answer");
+      await flushActions();
+      expect(sends).toBe(1);
+      expect(closeCalls()).toBe(0); // ack failed → dialog stays open
+      expect(notices.some((n) => n.includes("acknowledge failed"))).toBe(true);
+      // Retry the same draft: the answer was already accepted, so it must NOT be
+      // resent — only the acknowledge is retried.
+      d.onSubmit("the answer");
+      await flushActions();
+      expect(sends).toBe(1);
+    } finally {
+      await rm(repoDir, { recursive: true, force: true });
+    }
   });
 });

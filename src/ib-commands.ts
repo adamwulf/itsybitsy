@@ -33,6 +33,7 @@ import {
   readAllAgents,
   detectAgentStates,
   mutateAgentMeta,
+  agentWorktreePath,
 } from "./agents";
 import {
   enqueueOutbox,
@@ -44,6 +45,7 @@ import {
   type OutboxMessage,
   type AcquireLockOpts,
 } from "./outbox";
+import { stageMessageAttachments, type StagedMessage } from "./message-attachments";
 import {
   logAgent,
   logSpawn,
@@ -3438,6 +3440,44 @@ export function resetSendSpawnRunner(): void {
 }
 
 /**
+ * Signature of the send-time attachment stager (`stageMessageAttachments` in
+ * `./message-attachments`). Kept as a named type so the test seam below can
+ * inject a deterministic fake without touching real files.
+ *
+ * `liveRoot` (optional) is the recipient agent's ACTUAL worktree root. When
+ * given, a project-relative reference (e.g. `./src/new.ts`) or an absolute path
+ * INSIDE that worktree is left literal — including a file that does not exist
+ * yet — so the agent edits the live file rather than a frozen `/tmp` snapshot;
+ * only paths OUTSIDE the worktree are copied. Omitted, every referenced file is
+ * copied (the original behavior).
+ */
+export type StageMessageAttachmentsFn = (
+  message: string,
+  baseDir: string,
+  liveRoot?: string,
+) => Promise<StagedMessage>;
+
+// Injectable override for the stager. Production uses the real module import;
+// tests set a fake to exercise the staging → enqueue → drain wiring (including
+// staging/copy/enqueue failures) without creating real temp files.
+let stageAttachmentsOverride: StageMessageAttachmentsFn | null = null;
+
+/** Override the attachment stager (for testing). */
+export function setMessageAttachmentStagerForTesting(fn: StageMessageAttachmentsFn): void {
+  stageAttachmentsOverride = fn;
+}
+
+/** Reset the attachment stager to the real `./message-attachments` module. */
+export function resetMessageAttachmentStagerForTesting(): void {
+  stageAttachmentsOverride = null;
+}
+
+/** The stager currently in effect — the injected fake, else the real module. */
+function activeAttachmentStager(): StageMessageAttachmentsFn {
+  return stageAttachmentsOverride ?? stageMessageAttachments;
+}
+
+/**
  * Resolve the sender ID for a send, performing cwd-based auto-detection.
  *
  * This MUST happen at ENQUEUE time (not drain time): it depends on the SENDER
@@ -3583,7 +3623,16 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
   // `[sent by agent ...]` attribution even when it starts with `/` or `!`, so the
   // recipient still knows who sent it.
   const raw = queued.raw === true;
-  const userPassthrough = !raw && !fromId && (message.startsWith("/") || message.startsWith("!"));
+  // A staged-attachment message (`noPassthrough`) BEGINS with a file-path
+  // reference — an absolute `/tmp/...` staged copy, OR a live in-worktree path
+  // kept literal (e.g. an absolute path into the agent's own worktree). That
+  // leading `/` must NOT be read as a slash-command passthrough: the path is
+  // data, so it keeps the normal `[sent by ...]:` prefix (which pushes it off
+  // column 0 so the recipient CLI never fires it as a command). A genuine
+  // leading slash command (`/clear`, or `/compact` before an attachment)
+  // carries no such flag and still passes through verbatim.
+  const userPassthrough =
+    !raw && !fromId && queued.noPassthrough !== true && (message.startsWith("/") || message.startsWith("!"));
   // A team fan-out (§16.4) carries the team name on the queued message; the
   // delivery prefix gains an ` in @<team>` clause so the recipient learns the
   // reply target by example. The stored team name is BARE (no `@`), so we add a
@@ -3783,11 +3832,43 @@ async function hasLiveWatchdog(agentDir: string): Promise<boolean> {
  *
  * When `opts.raw` is true, the `[sent by ...]:` prefix is suppressed and the
  * message is delivered verbatim (see `deliverMessage`).
+ *
+ * Send-time attachment staging (`opts.stageAttachments`): a security-sensitive,
+ * dashboard-only opt-in. When set, local file-path references in `message` are
+ * copied into `/tmp` and rewritten to the staged paths BEFORE enqueue, so the
+ * receiving agent can read a snapshot under its existing sandbox without any
+ * widening or restart. References that already live INSIDE the recipient's
+ * worktree (project-relative like `./src/x.ts`, or an in-worktree absolute path,
+ * even a not-yet-created file) are left LITERAL so the agent edits the live file
+ * rather than a frozen copy — only out-of-worktree files are copied. This is an
+ * out-of-sandbox copy performed by the trusted
+ * `ib watch` process, so it is NEVER wired to a CLI flag or an agent-originated
+ * send — legacy sends (no `stageAttachments`) behave exactly as before and copy
+ * nothing. See `docs/SANDBOX-ROLLOUT.md` "stage message attachments at send
+ * time". Staging failure returns an error with nothing enqueued; an enqueue
+ * failure cleans up the copies; once a staged message is accepted into the
+ * queue its files are retained indefinitely (OS temp cleanup only), and a later
+ * inline-drain failure still reports success so a retry can't re-stage and
+ * duplicate the already-queued message.
  */
 export async function sendMessage(
   agent: Agent,
   message: string,
-  opts?: { fromAgent?: string; cwd?: string; raw?: boolean; outboxDir?: string; team?: string }
+  opts?: {
+    fromAgent?: string;
+    cwd?: string;
+    raw?: boolean;
+    outboxDir?: string;
+    team?: string;
+    /**
+     * Dashboard-only: stage local file-path references at send time (see the
+     * function docstring). Internal opt — deliberately NOT exposed through any
+     * CLI flag, and never set by an agent-originated send.
+     */
+    stageAttachments?: boolean;
+    /** Base directory for resolving relative attachment paths. Defaults to `agent.repoPath`. */
+    attachmentBaseDir?: string;
+  }
 ): Promise<IbCommandResult> {
   const tmuxSession = agent.meta.tmux_session;
   if (!tmuxSession) {
@@ -3809,21 +3890,102 @@ export async function sendMessage(
   const fromId = resolveSenderId(agent.repoPath, opts);
   const raw = opts?.raw === true;
 
+  // ---- Send-time attachment staging (dashboard opt-in only) ----------------
+  // Copy any referenced local files into /tmp and rewrite the message to the
+  // staged paths BEFORE enqueue, so the copy exists the moment the message is
+  // queued. Only runs when the caller explicitly opts in; ordinary sends (CLI,
+  // watchdog, agent relays, team notices) skip this block entirely and behave
+  // exactly as before — no parse, no copy, no rewrite.
+  const attachmentSend = opts?.stageAttachments === true;
+  let outgoing = message;
+  let stagedCleanup: (() => Promise<void>) | null = null;
+  let noPassthrough = false;
+  if (attachmentSend) {
+    let staged: StagedMessage;
+    try {
+      // `liveRoot` = the recipient's ACTUAL worktree root (agentWorktreePath
+      // handles the meta.worktree/archive/storageDir cases). It lets the stager
+      // keep project-relative refs and in-worktree absolute paths literal (live
+      // files, even not-yet-created ones) instead of freezing them to /tmp;
+      // only files OUTSIDE the worktree are copied. `baseDir` still resolves
+      // out-of-project relative refs.
+      staged = await activeAttachmentStager()(
+        message,
+        opts?.attachmentBaseDir ?? agent.repoPath,
+        agentWorktreePath(agent),
+      );
+    } catch (err) {
+      // Staging failed BEFORE enqueue: nothing is queued and the stager has
+      // already cleaned up any partial copies of its own. Surface an actionable
+      // error so the dashboard keeps the editable draft — no partial delivery.
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: `Failed to stage message attachments: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+    outgoing = staged.message;
+    // Retain the cleanup handle ONLY to undo copies if the enqueue itself
+    // fails; once a staged message is accepted into the queue the files are
+    // retained indefinitely (the agent may not have read them yet). `staged`
+    // reflects whether any file was COPIED, so cleanup keys off it.
+    stagedCleanup = staged.staged ? staged.cleanup : null;
+    // Suppress slash-command passthrough when the message BEGINS with a path
+    // reference — INDEPENDENT of copying. An absolute path into the agent's OWN
+    // worktree is kept literal (staged:false, no copy) yet still starts with `/`
+    // and is data, not a command, so it must be prefixed rather than fired as a
+    // slash command. Prefer the module's computed flag; the `?? staged.staged`
+    // fallback preserves the copy-implies-prefix behavior for older injected
+    // test stagers that don't return the flag. Note `??` (not `||`) so a genuine
+    // leading `/compact` + a later attachment — module returns noPassthrough:
+    // false but staged:true — still passes the command through.
+    noPassthrough = staged.noPassthrough ?? staged.staged;
+  }
+
   // Enqueue. The agent dir is created by spawn; for the rare case it is
   // missing, enqueueOutbox mkdir's the queue dir so a queued message is never
   // silently dropped. A genuine write failure surfaces as an error rather than
   // an unhandled rejection.
   try {
-    await enqueueOutbox(queueDir, { message, fromAgent: fromId, raw, team: opts?.team });
+    await enqueueOutbox(queueDir, { message: outgoing, fromAgent: fromId, raw, team: opts?.team, noPassthrough });
   } catch (err) {
+    // Enqueue failed — nothing is queued. Undo any staged copies so an
+    // abandoned attempt leaves no unused attachment behind (no partial copy).
+    if (stagedCleanup) await stagedCleanup().catch(() => {});
     return { ok: false, exitCode: 1, stdout: "", stderr: `Failed to enqueue message: ${err}` };
   }
 
   const stdout = fromId ? "" : `Sent to ${agent.id}`;
 
-  // If a live watchdog will drain, just return — it owns delivery. (The system
-  // coordinator has no per-agent watchdog, so a coordinator send always drains
-  // inline below.)
+  // After a successful enqueue the message is durably queued. For a staged send
+  // NOTHING past this point may surface as failure: reporting failure would make
+  // the dashboard retry, re-stage under a FRESH /tmp path the outbox dedupe
+  // cannot match, and DUPLICATE the message. That covers BOTH an inline drain
+  // that returns ok:false AND any unexpected exception thrown by the watchdog
+  // probe or the drain. Report success either way, keep the queued copy and the
+  // staged files for the next drainer, and surface the underlying error as a
+  // non-fatal stderr diagnostic.
+  if (attachmentSend) {
+    try {
+      if (await hasLiveWatchdog(agentDir)) {
+        return { ok: true, exitCode: 0, stdout, stderr: "" };
+      }
+      const result = await drainOutbox(agent, queueDir, { steal: true });
+      return { ok: true, exitCode: 0, stdout, stderr: result.ok ? "" : result.stderr };
+    } catch (err) {
+      return {
+        ok: true,
+        exitCode: 0,
+        stdout,
+        stderr: `Delivery error after enqueue (message retained): ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
+  // Ordinary (non-staged) send — historical behavior exactly. If a live watchdog
+  // will drain, just return — it owns delivery. (The system coordinator has no
+  // per-agent watchdog, so a coordinator send always drains inline below.)
   if (await hasLiveWatchdog(agentDir)) {
     return { ok: true, exitCode: 0, stdout, stderr: "" };
   }
@@ -3858,6 +4020,23 @@ function teamErr(message: string): IbCommandResult {
 /** Format `name` as a success IbCommandResult (stdout + exit 0). */
 function teamOk(stdout: string): IbCommandResult {
   return { ok: true, exitCode: 0, stdout, stderr: "" };
+}
+
+/**
+ * `teamSend` result. Extends `IbCommandResult` (so every existing caller,
+ * including the CLI's `printAndExit`, keeps working unchanged) with the set of
+ * members known-delivered after this call — the retry contract for staged
+ * attachment sends (see `teamSend`).
+ */
+export interface TeamSendResult extends IbCommandResult {
+  /**
+   * Every member known-delivered after this call: those skipped via
+   * `opts.skipRecipientIds` (accepted on a prior attempt) plus those newly
+   * accepted here. Feed back as `skipRecipientIds` on an identical-draft retry
+   * so no member is staged or delivered twice. Present on every return path
+   * (empty when nothing has been accepted).
+   */
+  acceptedRecipientIds: string[];
 }
 
 /**
@@ -3905,14 +4084,57 @@ function resolveTeamSenderId(repos: RepoEntry[], opts: { fromAgent?: string } | 
  * Per-member sends are best-effort: a single failure is recorded but does not
  * abort the rest, and the aggregate result is non-zero only if EVERY attempted
  * send failed (mirrors §16.4.1 best-effort notices).
+ *
+ * Send-time attachment staging (dashboard opt-in only, `opts.stageAttachments`)
+ * is threaded to each per-member `sendMessage`, which stages the referenced
+ * files against that member's own `repoPath` (unless `opts.attachmentBaseDir`
+ * overrides the base) — each recipient reads its own `/tmp` snapshot. Because a
+ * staged send is durably queued once accepted (see `sendMessage`), an
+ * identical-draft RETRY must not re-stage and duplicate-deliver to members that
+ * already accepted it. The retry contract for that:
+ *   - `opts.skipRecipientIds` — members to skip (those already accepted).
+ *   - result `acceptedRecipientIds` — every member known-delivered after this
+ *     call (the skipped set ∪ members newly accepted here). The dashboard feeds
+ *     this back as `skipRecipientIds` on the next retry of the same draft, so no
+ *     member is ever staged/delivered twice. Like `stageAttachments`, both are
+ *     internal and NEVER exposed through a CLI flag.
+ *
+ * Result-code divergence for staged sends: unlike a legacy fan-out (which keeps
+ * §16.4.1 partial-success — ok unless EVERY member failed), a staged send
+ * returns `ok:false` whenever ANY member failed, so the dashboard keeps the
+ * draft open and retries the failed members (skipping the accepted ones). The
+ * accepted members are still reported in `acceptedRecipientIds` on that failure.
+ *
+ * Room-history divergence for staged sends: a legacy fan-out records the room
+ * history line REGARDLESS of delivery outcome (§17.4). A staged send WITH
+ * recipients instead records it only when a fresh attempt (empty skip) delivered
+ * to at least one member — a total staging failure records nothing, and because
+ * that failure returns an empty `acceptedRecipientIds`, its same-draft retry
+ * also arrives with an empty skip set, so recording once delivery first succeeds
+ * yields exactly one room line across the failed-then-retried sequence (no
+ * duplicate). A staged send with NO recipients (empty/self-only team) is a
+ * room-only send with nothing to stage — it records once like a legacy send,
+ * but only on a FRESH attempt (empty skip): a skip-carrying retry that finds the
+ * roster emptied by pruning was already recorded on its accepting attempt, so it
+ * records nothing here.
  */
 export async function teamSend(
   teamName: string,
   members: Agent[],
   message: string,
-  opts: { fromAgent?: string } | undefined,
+  opts:
+    | {
+        fromAgent?: string;
+        /** Dashboard-only: stage local file paths per recipient (see docstring). */
+        stageAttachments?: boolean;
+        /** Base dir for relative attachment paths; defaults to each recipient's repoPath. */
+        attachmentBaseDir?: string;
+        /** Members to skip (already accepted on a prior identical-draft attempt). */
+        skipRecipientIds?: string[];
+      }
+    | undefined,
   repos: RepoEntry[],
-): Promise<IbCommandResult> {
+): Promise<TeamSendResult> {
   const name = normalizeTeamName(teamName);
   const senderId = resolveTeamSenderId(repos, opts);
 
@@ -3929,7 +4151,7 @@ export async function teamSend(
   const pruneRes = await pruneDeadMembers(name, isAlive);
   if (!pruneRes.team) {
     // Team vanished between resolveTarget and here — treat as not found.
-    return teamErr(`Error: team @${name} not found`);
+    return { ...teamErr(`Error: team @${name} not found`), acceptedRecipientIds: [] };
   }
 
   // Build the recipient Agent list from the SURVIVING roster, excluding the
@@ -3953,50 +4175,136 @@ export async function teamSend(
     if (agent) recipients.push(agent);
   }
 
-  // Persist ONE channel record per send to the shared team channel (§17.4) — the
-  // chat box's backing history. Placed AFTER the not-found check (so a nonexistent
-  // team writes no channel file) but BEFORE the empty-recipient early return, so a
-  // self-only / zero-survivor send to an EXISTING team still records the message
-  // in the room's history (the §17.4 recommended default: append when the team
-  // exists and the message is non-empty, even with an empty recipient set). It is
-  // ONE record per send (NOT inside the per-recipient loop, which would write N
-  // duplicate lines) and records the message regardless of per-recipient delivery
-  // success — the channel is the room's history, not a delivery receipt.
-  // Best-effort: a channel-append failure must never fail the send (§17.4).
-  if (message) {
+  // Record ONE channel record per send to the shared team channel (§17.4) — the
+  // chat box's backing history. ALWAYS the ORIGINAL `message` (staged sends
+  // rewrite paths per recipient; the room shows the human's intent, not any one
+  // /tmp snapshot). ONE record per send, never per recipient. Best-effort: a
+  // channel-append failure must never fail the send (§17.4).
+  const skip = new Set(opts?.skipRecipientIds ?? []);
+  const stagedSend = opts?.stageAttachments === true;
+  const recordRoomMessage = async () => {
+    if (!message) return;
     await appendChannelMessage(name, {
       ts: Math.floor(Date.now() / 1000),
       fromAgent: senderId,
       message,
     }).catch(() => {});
-  }
+  };
+
+  // Legacy (non-staged) fan-out records the message REGARDLESS of delivery
+  // outcome and even for an empty/self-only recipient set (§17.4 record-
+  // regardless): the channel is the room's history, not a delivery receipt. So
+  // it records here, before the empty-recipient early return. A non-staged send
+  // never carries a skip set, so it records exactly once.
+  //
+  // A STAGED send diverges (deferred to AFTER the send loop): it must record
+  // only when at least one recipient NEWLY accepts AND this is a fresh attempt
+  // (empty skip). A total staging failure yields accepted=[] and returns an
+  // empty acceptedRecipientIds, so a same-draft retry ALSO arrives with an empty
+  // skip set — gating on empty-skip alone (as before) would append a SECOND
+  // room line on that retry. Gating on "newly accepted > 0 && skip empty" adds
+  // no line for a failed attempt and exactly one line once delivery first
+  // succeeds. (Manager: reflect this staged divergence in SPEC.)
+  if (!stagedSend) await recordRoomMessage();
 
   if (recipients.length === 0) {
-    // No one to deliver to — empty team, self-only, or all-pruned. No-op success.
-    return teamOk(`no recipients in @${name}`);
+    // No one to deliver to — empty team, self-only, or all-pruned. A room-only
+    // send: nothing to stage or copy. Still record the room history line (§17.4
+    // records even with an empty recipient set). A legacy send already recorded
+    // it above; a STAGED send records it HERE (its deferred post-loop record
+    // never runs when there are no recipients) — but ONLY on a fresh attempt
+    // (empty skip). A retry that empties the roster (a member accepted on the
+    // first attempt, then every member was pruned before the skip-carrying
+    // retry) already recorded on that first attempt; recording again here would
+    // duplicate the line, so the skip guard suppresses it.
+    if (stagedSend && skip.size === 0) await recordRoomMessage();
+    return { ...teamOk(`no recipients in @${name}`), acceptedRecipientIds: [] };
+  }
+
+  // Members skipped because a prior identical-draft attempt already accepted
+  // them are, by definition, still known-delivered — seed the accepted set with
+  // them so the result reports the complete "safe to skip" set to the caller.
+  const accepted = new Set<string>();
+  const toSend: Agent[] = [];
+  for (const recipient of recipients) {
+    if (skip.has(recipient.id)) accepted.add(recipient.id);
+    else toSend.push(recipient);
+  }
+
+  if (toSend.length === 0) {
+    // Every current recipient was already accepted on a prior attempt — nothing
+    // to re-send. Success no-op; report the full accepted set unchanged.
+    return {
+      ...teamOk(`all ${recipients.length} recipient(s) of @${name} already delivered`),
+      acceptedRecipientIds: [...accepted],
+    };
   }
 
   const fromAgent = senderId || undefined;
   let failures = 0;
+  let newlyAccepted = 0;
   const failureLines: string[] = [];
-  for (const recipient of recipients) {
-    const res = await sendMessage(recipient, message, { fromAgent, team: name });
-    if (!res.ok) {
+  for (const recipient of toSend) {
+    // Thread the dashboard-only staging opts through: each recipient stages the
+    // referenced files against its own repoPath (unless attachmentBaseDir
+    // overrides) and reads its own /tmp snapshot. A staged send that is accepted
+    // into the queue reports ok even if its inline drain fails (see
+    // sendMessage), so an accepted member here is durably queued and safe to
+    // skip on retry.
+    const res = await sendMessage(recipient, message, {
+      fromAgent,
+      team: name,
+      stageAttachments: opts?.stageAttachments,
+      attachmentBaseDir: opts?.attachmentBaseDir,
+    });
+    if (res.ok) {
+      accepted.add(recipient.id);
+      newlyAccepted++;
+    } else {
       failures++;
       failureLines.push(`  ${recipient.id}: ${res.stderr || "delivery failed"}`);
     }
   }
 
-  const delivered = recipients.length - failures;
-  if (failures === recipients.length) {
-    // Every send failed — surface as an error so the caller exits non-zero.
-    return teamErr(`Error: failed to deliver to all ${recipients.length} member(s) of @${name}:\n${failureLines.join("\n")}`);
+  // Staged send: record the room history line now that delivery outcomes are
+  // known — only on a fresh attempt (empty skip) that delivered to at least one
+  // member. A failed attempt (nothing newly accepted) records nothing, so its
+  // same-draft retry (which also arrives with an empty skip set) records exactly
+  // one line once delivery first succeeds; a genuine retry (non-empty skip) was
+  // already recorded on the accepting attempt and appends nothing here.
+  if (stagedSend && skip.size === 0 && newlyAccepted > 0) await recordRoomMessage();
+
+  const acceptedRecipientIds = [...accepted];
+  const delivered = toSend.length - failures;
+  if (failures === toSend.length) {
+    // Every ATTEMPTED send (this call) failed — surface as an error so the
+    // caller exits non-zero. Any previously-accepted (skipped) members remain in
+    // acceptedRecipientIds so a further retry keeps skipping them.
+    return {
+      ...teamErr(`Error: failed to deliver to all ${toSend.length} member(s) of @${name}:\n${failureLines.join("\n")}`),
+      acceptedRecipientIds,
+    };
+  }
+  // A staged send treats ANY per-member failure as a non-success (ok:false): the
+  // dashboard must keep the draft open and RETRY the failed members, skipping
+  // the accepted ones via acceptedRecipientIds — a partial ok:true would let the
+  // UI close the draft and the failed members would never receive the file.
+  // Legacy (non-staged) sends keep §16.4.1 partial-success semantics: a single
+  // failed notice never fails the batch, so only the all-failed case above is an
+  // error. Either way acceptedRecipientIds carries the known-delivered set.
+  if (opts?.stageAttachments && failures > 0) {
+    return {
+      ...teamErr(
+        `Error: delivered to ${delivered} of ${toSend.length} member(s) of @${name}; ${failures} failed:\n${failureLines.join("\n")}`,
+      ),
+      acceptedRecipientIds,
+    };
   }
   let stdout = `Sent to ${delivered} member(s) of @${name}`;
   if (failures > 0) {
     stdout += `\n(${failures} delivery failure(s):\n${failureLines.join("\n")}\n)`;
   }
-  return teamOk(stdout);
+  return { ...teamOk(stdout), acceptedRecipientIds };
 }
 
 /**

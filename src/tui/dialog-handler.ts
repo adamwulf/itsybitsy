@@ -21,7 +21,12 @@ type DialogCommon = { width?: number };
 // Dialog types for agent actions
 export type DialogState =
   | ({ type: "confirm"; prompt: string; confirmLabel: string; focusedButton: "confirm" | "cancel"; confirmColor?: string; onYes: () => void } & DialogCommon)
-  | ({ type: "input"; prompt: string; value: string; onSubmit: (value: string) => void; sanitize?: (text: string) => string } & DialogCommon)
+  | ({ type: "input"; prompt: string; value: string; onSubmit: (value: string) => void; sanitize?: (text: string) => string;
+      /** Set true while an acceptance-gated send launched from this dialog is in
+       *  flight. The dialog is frozen (no re-submit, no cancel) until the send
+       *  resolves — cleared on failure so the draft can be corrected, or the
+       *  dialog is closed on success. */
+      inFlight?: boolean } & DialogCommon)
   | ({
       type: "add-permission";
       prompt: string;
@@ -68,6 +73,11 @@ export type DialogState =
        *  (the wizard's step-3 "first message" textarea is silent on Esc
        *  otherwise, leaving the user wondering whether the team persisted). */
       onCancel?: () => void;
+      /** Set true while an acceptance-gated send launched from this dialog is in
+       *  flight. The dialog is frozen (no re-submit, no cancel, no [Send Esc])
+       *  until the send resolves — cleared on failure so the draft can be
+       *  corrected, or the dialog is closed on success. */
+      inFlight?: boolean;
     } & DialogCommon)
   | ({
       type: "folder-browser";
@@ -167,6 +177,16 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
   const dialog = ctx._dialog;
   if (!dialog) return false;
 
+  // While an acceptance-gated send launched from this dialog is in flight, freeze
+  // it: swallow every key so the send cannot be re-fired (which would re-stage
+  // attachments) and the dialog cannot be cancelled or replaced out from under
+  // the pending send. The submit closure clears `inFlight` on failure (re-enabling
+  // the draft) or closes the dialog on success, so the success close always lands
+  // on THIS dialog, never a later one.
+  if ((dialog.type === "input" || dialog.type === "textarea") && dialog.inFlight) {
+    return true;
+  }
+
   if (dialog.type === "help") {
     // Any key dismisses help
     ctx.closeDialog();
@@ -219,6 +239,9 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
 
   if (dialog.type === "input") {
     if (matchesKey(data, Key.enter)) {
+      // Flush any in-flight paste before submit so a late Ctrl+V clipboard read
+      // cannot append to `dialog.value` after the send is launched and frozen.
+      cancelPaste();
       dialog.onSubmit(dialog.value);
     } else if (matchesKey(data, Key.alt("backspace"))) {
       dialog.value = deleteWord(dialog.value);
@@ -385,6 +408,9 @@ function handleTextareaDialog(
     }
   } else if (d.focusedButton === "send") {
     if (matchesKey(data, Key.enter)) {
+      // Flush any in-flight paste before submit so a late Ctrl+V clipboard read
+      // cannot mutate the textarea buffer after the send is launched and frozen.
+      cancelPaste();
       d.onSubmit(d.buffer.getText());
     } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
       d.focusedButton = nextFocus("send", 1);

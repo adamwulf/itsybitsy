@@ -102,11 +102,11 @@ Acceptance checks:
 
 Treat OS-event coverage as best-effort diagnostic logging until the live probe establishes its practical limits; do not claim a complete audit of every denied attempt.
 
-## Planned phase: stage message attachments at send time
+## Stage message attachments at send time
 
-**Planned only; not implemented in this rollout.** This phase can proceed independently of kernel-denial collection; both precede global coordinator sandbox work. The goal is to send screenshots and other local files to a running repository agent without expanding its sandbox or restarting it.
+Implemented for human message submissions in `ib watch`, independently of kernel-denial collection. Screenshots and other local files reach a running repository agent without expanding its sandbox or restarting it. **No `ib send` command, agent-to-agent send, or watchdog delivery enables staging.** Global system-coordinator sends retain their existing behavior.
 
-When a user drags a local file path into the `ib watch` send-message input, retain the original path in the editable draft. Parse and copy attachments only when the user actually sends the message. Deleting or changing a path before submission must not copy the old file or leave an unused temporary attachment.
+When a user drags a local file path into the `ib watch` send-message input, retain the original path in the editable draft. Parse and copy attachments only when the user actually sends the message. Deleting or changing a path before submission must not copy the old file or leave an unused temporary attachment. Live project references are preserved so edit/create instructions keep targeting the agent worktree; only external references become attachments (see SPEC §4.1.2 for relative paths and symlinks).
 
 Send-time behavior:
 
@@ -123,6 +123,8 @@ Acceptance checks:
 - Quoted paths, escaped spaces, Unicode, multiple files, repeated references, and same-named files from different directories are handled without corrupting surrounding text or colliding.
 - A copy failure preserves the draft and prevents partial delivery; cancelled or failed attempts do not leave unused attachments.
 - Queued messages, retries, and attachment retention do not leave delivered messages pointing to prematurely removed files.
+
+Implementation choices: explicit dot-relative file references resolve from the destination repository root, separately for each recipient in a fan-out. Only regular files are copied; directories produce an error. Absolute paths support terminal backslash escaping and single/double quotes. URLs and backtick code spans/fences are preserved as text; an unmatched inline backtick is ordinary text. Each attempt creates a unique /tmp/itsybitsy-attachments- directory, with separate subdirectories for distinct source files. Accepted copies have no application-managed expiry: queue acknowledgment does not remove them; external temporary-directory cleanup is the retention limit. Direct and team retries retain accepted-recipient state so only failed recipients are retried with an unchanged draft.
 
 ## Later phase: global coordinator sandbox
 

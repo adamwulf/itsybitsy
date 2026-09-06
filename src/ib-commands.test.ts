@@ -21,6 +21,7 @@ import {
   readAgentMeta,
   readAllAgents,
   buildAgentTree,
+  agentWorktreePath,
 } from "./agents";
 import { matchAgentById } from "./index";
 import { saveRegistry } from "./registry";
@@ -52,6 +53,9 @@ import {
   resetAskQuestionTelegramRunner,
   setSendSpawnRunner,
   resetSendSpawnRunner,
+  setMessageAttachmentStagerForTesting,
+  resetMessageAttachmentStagerForTesting,
+  teamSend,
   setKillPauseSpawnRunner,
   resetKillPauseSpawnRunner,
   setRehireSpawnRunner,
@@ -938,6 +942,607 @@ describe("sendMessage outbox integration", () => {
     const queued = await readOutbox(queueDir);
     expect(queued.length).toBe(1);
     expect(queued[0]!.message).toBe("keepme");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Send-time attachment staging (docs/SANDBOX-ROLLOUT.md "stage message
+// attachments at send time"). A dashboard-only opt-in: local file-path
+// references are copied into /tmp and rewritten to the staged paths BEFORE
+// enqueue so the receiving agent can read a snapshot under its existing
+// sandbox. Legacy sends (no stageAttachments) must be entirely unaffected.
+// ---------------------------------------------------------------------------
+describe("sendMessage send-time attachment staging", () => {
+  let spawnCalls: string[][];
+  let tempDir: string;
+  let agentDir: string;
+  let queueDir: string;
+
+  // The single `-l --` chunked send-keys payload the inline drain typed (or
+  // undefined if delivery never reached send-keys).
+  function deliveredMessage(): string | undefined {
+    const call = spawnCalls.find(
+      (c) => c[0] === "tmux" && c[1] === "send-keys" && c.length === 7 && c[4] === "-l" && c[5] === "--",
+    );
+    return call?.[6];
+  }
+
+  beforeEach(async () => {
+    spawnCalls = [];
+    tempDir = await mkdtemp(join(tmpdir(), "send-stage-"));
+    agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    await mkdir(agentDir, { recursive: true });
+    const { setCoordinatorHome } = await import("./coordinator");
+    setCoordinatorHome(join(tempDir, "coord-home"));
+    const { agentOutboxDir } = await import("./outbox");
+    queueDir = agentOutboxDir("agent-abc");
+    await mkdir(queueDir, { recursive: true });
+    setUserConfigPath(join(tempDir, "config.json"));
+    setSendSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      return makeSpawnResult();
+    });
+  });
+
+  afterEach(async () => {
+    resetSendSpawnRunner();
+    resetUserConfigPath();
+    resetMessageAttachmentStagerForTesting();
+    const { resetCoordinatorHome } = await import("./coordinator");
+    resetCoordinatorHome();
+    isPidAliveCtx.reset();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("copies a real out-of-tree file, replaces its path with the staged copy, and delivers it prefixed (real module)", async () => {
+    // A source OUTSIDE the agent worktree — the exact case staging exists for.
+    const srcDir = await mkdtemp(join(tmpdir(), "attach-src-"));
+    const src = join(srcDir, "shot.png");
+    await Bun.write(src, "PNGBYTES");
+
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    const result = await sendMessage(agent, `${src} please describe`, { cwd: "/", stageAttachments: true });
+    expect(result.ok).toBe(true);
+
+    const delivered = deliveredMessage();
+    expect(delivered).toBeDefined();
+    // A message beginning with an absolute path is NOT a slash-command
+    // passthrough: it is prefixed so the /tmp path lands as data, not a command.
+    expect(delivered!.startsWith("[sent by user]: ")).toBe(true);
+    const body = delivered!.slice("[sent by user]: ".length);
+    const stagedPath = body.split(" ")[0]!;
+    // The original path was replaced with a fresh /tmp copy of the same name.
+    expect(stagedPath).not.toBe(src);
+    expect(stagedPath).toContain("itsybitsy-attachments-");
+    expect(basename(stagedPath)).toBe("shot.png");
+    // The staged copy holds the source bytes and the trailing prose survived.
+    expect(await Bun.file(stagedPath).text()).toBe("PNGBYTES");
+    expect(body.endsWith(" please describe")).toBe(true);
+
+    await rm(srcDir, { recursive: true, force: true });
+    await rm(join(stagedPath, "..", ".."), { recursive: true, force: true });
+  });
+
+  test("queues the staged replacement (not the original) before any delivery, marked no-passthrough", async () => {
+    // A live watchdog makes sendMessage enqueue and return WITHOUT draining — so
+    // we can inspect what was queued before any tmux delivery happened.
+    const { writeAgentTransient } = await import("./agents");
+    isPidAliveCtx.set(() => true);
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: false, tmux_rate_limited: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
+      has_background_tasks: false, updated_at_ms: Date.now(), watchdog_pid: 4242,
+    });
+    setMessageAttachmentStagerForTesting(async (msg) => ({
+      message: `/private/tmp/staged/x.png ${msg}`, staged: true, cleanup: async () => {},
+    }));
+
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    const result = await sendMessage(agent, "/orig/x.png hi", { cwd: "/", stageAttachments: true });
+
+    expect(result.ok).toBe(true);
+    expect(spawnCalls.length).toBe(0); // deferred to the watchdog — nothing delivered yet
+    const { readOutbox } = await import("./outbox");
+    const queued = await readOutbox(queueDir);
+    expect(queued.length).toBe(1);
+    expect(queued[0]!.message).toBe("/private/tmp/staged/x.png /orig/x.png hi");
+    expect(queued[0]!.noPassthrough).toBe(true);
+  });
+
+  test("passes the recipient's actual worktree root as liveRoot (3rd arg)", async () => {
+    // The stager needs the recipient's live worktree so in-worktree references
+    // stay literal. sendMessage must pass agentWorktreePath(agent), not repoPath.
+    let capturedBaseDir: string | undefined;
+    let capturedLiveRoot: string | undefined;
+    setMessageAttachmentStagerForTesting(async (_msg, baseDir, liveRoot) => {
+      capturedBaseDir = baseDir;
+      capturedLiveRoot = liveRoot;
+      return { message: "unchanged", staged: false, cleanup: async () => {} };
+    });
+
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    const result = await sendMessage(agent, "./src/new.ts please add a test", { cwd: "/", stageAttachments: true });
+
+    expect(result.ok).toBe(true);
+    expect(capturedLiveRoot).toBe(agentWorktreePath(agent)); // recipient's real worktree
+    expect(capturedBaseDir).toBe(tempDir); // baseDir defaults to agent.repoPath
+  });
+
+  test("staging failure returns an actionable error and enqueues nothing", async () => {
+    setMessageAttachmentStagerForTesting(async () => {
+      throw new Error('Cannot stage attachment "/x/y.png": ENOENT');
+    });
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    const result = await sendMessage(agent, "/x/y.png hi", { cwd: "/", stageAttachments: true });
+
+    expect(result.ok).toBe(false);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Failed to stage message attachments");
+    expect(result.stderr).toContain("/x/y.png");
+    expect(spawnCalls.length).toBe(0); // nothing delivered
+    const { readOutbox } = await import("./outbox");
+    expect(await readOutbox(queueDir)).toEqual([]); // nothing enqueued
+  });
+
+  test("enqueue failure cleans up the staged copies and delivers nothing (no partial send/copy)", async () => {
+    let cleaned = false;
+    setMessageAttachmentStagerForTesting(async () => ({
+      message: "/private/tmp/staged/x.png hi", staged: true,
+      cleanup: async () => { cleaned = true; },
+    }));
+    // Force enqueue to fail: point the outbox at a path under an existing FILE so
+    // enqueueOutbox's recursive mkdir throws ENOTDIR.
+    const blocker = join(tempDir, "blocker");
+    await Bun.write(blocker, "x");
+
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    const result = await sendMessage(agent, "/src/x.png hi", {
+      cwd: "/", stageAttachments: true, outboxDir: join(blocker, "sub"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Failed to enqueue");
+    expect(cleaned).toBe(true); // staged copies removed
+    expect(spawnCalls.length).toBe(0); // nothing delivered
+    const { readOutbox } = await import("./outbox");
+    expect(await readOutbox(queueDir)).toEqual([]); // real queue untouched
+  });
+
+  test("a staged send whose inline drain fails still reports success and RETAINS the queued message", async () => {
+    // Delivery fails at has-session → the inline drain returns ok:false. For a
+    // staged send that must NOT surface as failure (the dashboard would retry,
+    // re-stage under a fresh /tmp path the dedupe can't match, and duplicate the
+    // message). Report success, keep the queued copy, and DON'T clean it up.
+    let cleaned = false;
+    setMessageAttachmentStagerForTesting(async () => ({
+      message: "/private/tmp/staged/x.png hi", staged: true,
+      cleanup: async () => { cleaned = true; },
+    }));
+    setSendSpawnRunner((cmd: string[]) => {
+      spawnCalls.push(cmd);
+      if (cmd.includes("has-session")) return makeSpawnResult(1, "", "no session");
+      return makeSpawnResult();
+    });
+
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    const result = await sendMessage(agent, "/src/x.png hi", { cwd: "/", stageAttachments: true });
+
+    expect(result.ok).toBe(true); // accepted for delivery despite the drain error
+    expect(result.stderr).toContain("not running"); // drain failure surfaced as a diagnostic
+    expect(cleaned).toBe(false); // copies retained — the agent hasn't read them yet
+    const { readOutbox } = await import("./outbox");
+    const queued = await readOutbox(queueDir);
+    expect(queued.length).toBe(1); // message retained for the next drainer
+    expect(queued[0]!.message).toBe("/private/tmp/staged/x.png hi");
+    expect(queued[0]!.noPassthrough).toBe(true);
+  });
+
+  test("a THROWN inline-drain error after enqueue is caught: staged send reports success and retains the queued message", async () => {
+    // Distinct from the ok:false has-session case above: here the drain THROWS
+    // an exception. For a staged send that must still be caught and reported as
+    // accepted (ok:true) — an unhandled rejection would look like a failure to
+    // the dashboard and induce a duplicate retry.
+    let cleaned = false;
+    setMessageAttachmentStagerForTesting(async () => ({
+      message: "/private/tmp/staged/x.png hi", staged: true,
+      cleanup: async () => { cleaned = true; },
+    }));
+    setSendSpawnRunner(() => {
+      throw new Error("spawn blew up during drain");
+    });
+
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    const result = await sendMessage(agent, "/src/x.png hi", { cwd: "/", stageAttachments: true });
+
+    expect(result.ok).toBe(true); // caught — accepted despite the thrown drain error
+    expect(result.stderr).toContain("Delivery error after enqueue");
+    expect(result.stderr).toContain("spawn blew up during drain");
+    expect(cleaned).toBe(false); // copies retained — the agent hasn't read them yet
+    const { readOutbox } = await import("./outbox");
+    const queued = await readOutbox(queueDir);
+    expect(queued.length).toBe(1); // exactly one retained record — nothing delivered/removed
+    expect(queued[0]!.message).toBe("/private/tmp/staged/x.png hi");
+    expect(queued[0]!.noPassthrough).toBe(true);
+  });
+
+  test("stageAttachments with a real /clear (no file paths) preserves slash-command passthrough", async () => {
+    // The real module leaves an unquoted /clear-style token alone (staged:false),
+    // so passthrough survives: the message is delivered verbatim with no prefix.
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    const result = await sendMessage(agent, "/clear", { cwd: "/", stageAttachments: true });
+
+    expect(result.ok).toBe(true);
+    expect(deliveredMessage()).toBe("/clear");
+  });
+
+  test("liveRoot (real module): a project-relative ref stays literal (no copy); an external file is still copied", async () => {
+    // Reviewer2 regression: `./src/new.ts` names the recipient's LIVE worktree
+    // file (even one that doesn't exist yet) and must be delivered literally so
+    // the agent edits the live file — NOT frozen to /tmp. An out-of-worktree
+    // file is still copied. Uses the REAL module through sendMessage's liveRoot.
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    // The recipient's live worktree must exist so canonicalization resolves it;
+    // ./src/new.ts itself is deliberately absent (a future file).
+    await mkdir(agentWorktreePath(agent), { recursive: true });
+    // An external screenshot OUTSIDE the worktree and the repo base.
+    const extDir = await mkdtemp(join(tmpdir(), "ext-shot-"));
+    const ext = join(extDir, "screenshot.png");
+    await Bun.write(ext, "EXTBYTES");
+
+    const result = await sendMessage(agent, `./src/new.ts and ${ext}`, { cwd: "/", stageAttachments: true });
+    expect(result.ok).toBe(true);
+
+    const delivered = deliveredMessage();
+    expect(delivered).toBeDefined();
+    const body = delivered!.slice("[sent by user]: ".length);
+    // The project-relative reference is untouched (live edit intent preserved).
+    expect(body.startsWith("./src/new.ts and ")).toBe(true);
+    // The external file was copied to a fresh /tmp snapshot and its path replaced.
+    const stagedPath = body.slice("./src/new.ts and ".length);
+    expect(stagedPath).not.toBe(ext);
+    expect(stagedPath).toContain("itsybitsy-attachments-");
+    expect(basename(stagedPath)).toBe("screenshot.png");
+    expect(await Bun.file(stagedPath).text()).toBe("EXTBYTES");
+
+    await rm(extDir, { recursive: true, force: true });
+    await rm(join(stagedPath, "..", ".."), { recursive: true, force: true });
+  });
+
+  test("liveRoot (real module): a LEADING absolute own-worktree ref is kept literal but delivered WITH the user prefix", async () => {
+    // The edge the manager caught: an absolute path into the agent's OWN
+    // worktree is preserved (staged:false, no copy) yet still begins with `/`.
+    // Without the module's leading-reference noPassthrough it would slash-
+    // passthrough as a command. It must be delivered with the [sent by user]
+    // prefix (data, not a command) even though nothing was copied.
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    const worktree = agentWorktreePath(agent);
+    await mkdir(worktree, { recursive: true });
+    const live = join(worktree, "file.ts");
+    await Bun.write(live, "LIVE");
+
+    const result = await sendMessage(agent, `${live} explain this`, { cwd: "/", stageAttachments: true });
+    expect(result.ok).toBe(true);
+
+    const delivered = deliveredMessage();
+    expect(delivered).toBeDefined();
+    // Prefixed, NOT a verbatim passthrough (the leading `/` is data).
+    expect(delivered!.startsWith("[sent by user]: ")).toBe(true);
+    const body = delivered!.slice("[sent by user]: ".length);
+    // The own-worktree path is delivered literally — never copied to /tmp.
+    expect(body).toBe(`${live} explain this`);
+    expect(delivered).not.toContain("itsybitsy-attachments");
+  });
+
+  test("liveRoot (real module): a leading /compact before an external attachment still passes through (command fires)", async () => {
+    // The module returns noPassthrough:false for a genuine leading slash command
+    // even when a LATER attachment is copied (staged:true). sendMessage uses
+    // `?? staged.staged` (not `||`), so that explicit false is honored and the
+    // /compact command still fires verbatim.
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    const extDir = await mkdtemp(join(tmpdir(), "ext-shot-"));
+    const ext = join(extDir, "screenshot.png");
+    await Bun.write(ext, "EXTBYTES");
+
+    const result = await sendMessage(agent, `/compact ${ext}`, { cwd: "/", stageAttachments: true });
+    expect(result.ok).toBe(true);
+
+    const delivered = deliveredMessage();
+    expect(delivered).toBeDefined();
+    // Verbatim passthrough (no [sent by user] prefix) so /compact fires.
+    expect(delivered!.startsWith("/compact ")).toBe(true);
+    // The later attachment was still copied and its path replaced.
+    const stagedPath = delivered!.slice("/compact ".length);
+    expect(stagedPath).toContain("itsybitsy-attachments-");
+    expect(await Bun.file(stagedPath).text()).toBe("EXTBYTES");
+
+    await rm(extDir, { recursive: true, force: true });
+    await rm(join(stagedPath, "..", ".."), { recursive: true, force: true });
+  });
+
+  test("REGRESSION: an ordinary send (no stageAttachments) never stages — even an agent-relayed message with a real path", async () => {
+    // Staging is a dashboard-only permission bypass. An installed stager must
+    // NOT run for a legacy send, including an agent-originated (fromAgent) one.
+    setMessageAttachmentStagerForTesting(async () => {
+      throw new Error("stager must not run for a non-staged send");
+    });
+    const src = join(tempDir, "real.png");
+    await Bun.write(src, "BYTES");
+    await mkdir(join(tempDir, ".ittybitty", "agents", "agent-sender"), { recursive: true });
+
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    const result = await sendMessage(agent, `${src} check this`, { fromAgent: "agent-sender" });
+
+    expect(result.ok).toBe(true); // the throwing stager was never called
+    const delivered = deliveredMessage();
+    expect(delivered).toBe(`[sent by agent agent-sender]: ${src} check this`);
+    expect(delivered).not.toContain("itsybitsy-attachments"); // path delivered as-is
+  });
+});
+
+// ---------------------------------------------------------------------------
+// teamSend send-time attachment staging: threads the dashboard-only stage opts
+// per recipient and supports retry-safe partial acceptance (skipRecipientIds /
+// acceptedRecipientIds) so an identical-draft retry never re-delivers to a
+// member that already accepted.
+// ---------------------------------------------------------------------------
+describe("teamSend send-time attachment staging", () => {
+  let baseDir: string;
+  let homeDir: string;
+  let repoDir: string;
+  let originalHome: string | undefined;
+
+  function queueDirOf(id: string): string {
+    return join(homeDir, "agents", id);
+  }
+  function reposArg() {
+    return [{ path: repoDir, name: basename(repoDir) }];
+  }
+  // Plant a member whose per-recipient send DEFERS to its outbox (live watchdog
+  // transient + isPidAliveCtx → true) and returns ok:true (accepted) without
+  // draining, so we can inspect exactly what each member had queued.
+  async function plantMember(id: string): Promise<void> {
+    const agentDir = join(repoDir, ".ittybitty", "agents", id);
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(queueDirOf(id), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}` }));
+    const { writeAgentTransient } = await import("./agents");
+    await writeAgentTransient(agentDir, {
+      tmux_compacting: false, tmux_rate_limited: false,
+      tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
+      has_background_tasks: false, updated_at_ms: Date.now(), watchdog_pid: 4242,
+    });
+  }
+  function agentOf(id: string): Agent {
+    const agent = _makeAgent({ id, repoPath: repoDir, repoName: basename(repoDir), state: "running" as AgentState });
+    return { ...agent, meta: { ...agent.meta, worktree: false } };
+  }
+
+  beforeEach(async () => {
+    baseDir = await mkdtemp(join(tmpdir(), "team-stage-" + crypto.randomUUID() + "-"));
+    homeDir = join(baseDir, ".itsybitsy");
+    repoDir = join(baseDir, "repo");
+    await mkdir(homeDir, { recursive: true });
+    await mkdir(repoDir, { recursive: true });
+    originalHome = process.env.HOME;
+    process.env.HOME = baseDir;
+    const { setCoordinatorHome } = await import("./coordinator");
+    setCoordinatorHome(homeDir);
+    setUserConfigPath(join(homeDir, "config.json"));
+    await saveRegistry({ repos: [{ path: repoDir, name: basename(repoDir) }] });
+    setSendSpawnRunner(() => makeSpawnResult());
+    isPidAliveCtx.set(() => true);
+    resetReadAgentMetaCache();
+  });
+
+  afterEach(async () => {
+    resetSendSpawnRunner();
+    resetMessageAttachmentStagerForTesting();
+    resetUserConfigPath();
+    const { resetCoordinatorHome } = await import("./coordinator");
+    resetCoordinatorHome();
+    isPidAliveCtx.reset();
+    resetReadAgentMetaCache();
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
+  test("a genuine per-member failure fails the staged batch; the retry skips the accepted member and does not duplicate", async () => {
+    const { createTeam, addMember } = await import("./teams");
+    const { readOutbox } = await import("./outbox");
+    const { readChannel } = await import("./team-channel");
+    await createTeam("backend", "", 1000);
+    await plantMember("agent-m1");
+    await plantMember("agent-m2");
+    await addMember("backend", "agent-m1");
+    await addMember("backend", "agent-m2");
+    resetReadAgentMetaCache();
+
+    // Recipients are staged in roster order [m1, m2]. Fail the SECOND stage
+    // (m2) on the first attempt only: m1 is accepted (deferred to its watchdog),
+    // m2's staging throws BEFORE its enqueue so nothing is queued for it.
+    let calls = 0;
+    setMessageAttachmentStagerForTesting(async (msg) => {
+      calls++;
+      if (calls === 2) throw new Error("simulated staging failure for agent-m2");
+      return { message: `${msg} (staged-${calls})`, staged: true, cleanup: async () => {} };
+    });
+
+    const members = [agentOf("agent-m1"), agentOf("agent-m2")];
+
+    // First send: m1 accepts, m2 fails. A staged batch with ANY failure is
+    // ok:false so the dashboard keeps the draft and can retry the failed member.
+    const first = await teamSend("backend", members, "/shot.png hi", { stageAttachments: true }, reposArg());
+    expect(first.ok).toBe(false);
+    expect(first.acceptedRecipientIds).toEqual(["agent-m1"]); // only m1 accepted
+    expect(first.stderr).toContain("agent-m2"); // the failed member is named
+    expect((await readOutbox(queueDirOf("agent-m1"))).length).toBe(1); // m1 queued (staged)
+    expect((await readOutbox(queueDirOf("agent-m2"))).length).toBe(0); // m2 never queued
+
+    // Retry the SAME draft, skipping the accepted member (m1). m1 is NOT
+    // re-staged or re-delivered; m2 now succeeds.
+    const retry = await teamSend(
+      "backend", members, "/shot.png hi",
+      { stageAttachments: true, skipRecipientIds: ["agent-m1"] },
+      reposArg(),
+    );
+    expect(retry.ok).toBe(true);
+    expect(new Set(retry.acceptedRecipientIds)).toEqual(new Set(["agent-m1", "agent-m2"]));
+    // m1(call 1) + m2-fail(call 2) + m2-retry(call 3); m1 was never re-staged.
+    expect(calls).toBe(3);
+    // Each member ends with exactly ONE queued copy — no duplicate.
+    expect((await readOutbox(queueDirOf("agent-m1"))).length).toBe(1);
+    expect((await readOutbox(queueDirOf("agent-m2"))).length).toBe(1);
+
+    // The room recorded the message exactly once: the fresh send appended it;
+    // the retry (carrying a skip set) did not append a duplicate history line.
+    const recs = await readChannel("backend");
+    expect(recs.filter((r) => r.message === "/shot.png hi").length).toBe(1);
+  });
+
+  test("total staging failure records NO room line; the same-draft retry (empty skip) records exactly one", async () => {
+    // Regression for reviewer1's finding: a staged send that records the room
+    // line up-front and infers "fresh vs retry" from an empty skip set would
+    // append a SECOND line on the retry-after-total-failure (which also carries
+    // an empty skip, since a total failure returns acceptedRecipientIds:[]).
+    const { createTeam, addMember } = await import("./teams");
+    const { readOutbox } = await import("./outbox");
+    const { readChannel } = await import("./team-channel");
+    await createTeam("backend", "", 1000);
+    await plantMember("agent-m1");
+    await plantMember("agent-m2");
+    await addMember("backend", "agent-m1");
+    await addMember("backend", "agent-m2");
+    resetReadAgentMetaCache();
+
+    // Fail BOTH members' staging on the first attempt (calls 1 & 2), then let
+    // the retry succeed (calls 3 & 4).
+    let calls = 0;
+    setMessageAttachmentStagerForTesting(async (msg) => {
+      calls++;
+      if (calls <= 2) throw new Error("simulated total staging failure");
+      return { message: `${msg} (staged-${calls})`, staged: true, cleanup: async () => {} };
+    });
+
+    const members = [agentOf("agent-m1"), agentOf("agent-m2")];
+
+    // First attempt: every member fails -> ok:false, nothing accepted, and NO
+    // room line recorded for a failed staged attempt.
+    const first = await teamSend("backend", members, "/shot.png hi", { stageAttachments: true }, reposArg());
+    expect(first.ok).toBe(false);
+    expect(first.acceptedRecipientIds).toEqual([]);
+    expect((await readChannel("backend")).filter((r) => r.message === "/shot.png hi").length).toBe(0);
+
+    // Retry the SAME draft. A total failure returned acceptedRecipientIds:[], so
+    // the UI retries with an EMPTY skip set — this attempt now succeeds.
+    const retry = await teamSend("backend", members, "/shot.png hi", { stageAttachments: true, skipRecipientIds: [] }, reposArg());
+    expect(retry.ok).toBe(true);
+    expect(new Set(retry.acceptedRecipientIds)).toEqual(new Set(["agent-m1", "agent-m2"]));
+    expect((await readOutbox(queueDirOf("agent-m1"))).length).toBe(1);
+    expect((await readOutbox(queueDirOf("agent-m2"))).length).toBe(1);
+
+    // Exactly one room line across the failed-then-retried sequence — no dup.
+    const recs = await readChannel("backend");
+    expect(recs.filter((r) => r.message === "/shot.png hi").length).toBe(1);
+  });
+
+  test("staged send to an EMPTY team records the room message once (room-only send, no copies)", async () => {
+    // A staged send with no recipients is a room-only send: nothing to stage or
+    // copy, but §17.4 still records the room history line. This is preserved for
+    // staged sends, not just legacy ones (regression for reviewer1's note that
+    // the deferred staged record skipped the empty-recipient case).
+    const { createTeam } = await import("./teams");
+    const { readChannel } = await import("./team-channel");
+    await createTeam("backend", "", 1000);
+    resetReadAgentMetaCache();
+
+    // No recipients → the stager must never run (no copies for a room-only send).
+    setMessageAttachmentStagerForTesting(async () => {
+      throw new Error("stager must not run for an empty team");
+    });
+
+    const res = await teamSend("backend", [], "/shot.png hi", { stageAttachments: true }, reposArg());
+    expect(res.ok).toBe(true);
+    expect(res.stdout).toContain("no recipients");
+    expect(res.acceptedRecipientIds).toEqual([]);
+    // The room recorded the message exactly once despite there being no recipients.
+    const recs = await readChannel("backend");
+    expect(recs.filter((r) => r.message === "/shot.png hi").length).toBe(1);
+  });
+
+  test("partial-accept then a skip-carrying retry with the roster pruned empty records NO duplicate room line", async () => {
+    // Reviewer1 LOW: the empty-recipient staged record needs a skip guard. A
+    // fresh partial attempt accepts m1 (records one room line); then every
+    // member is pruned before the retry, so the skip-carrying retry hits the
+    // recipients.length===0 branch — it must NOT record a second line.
+    const { createTeam, addMember } = await import("./teams");
+    const { readChannel } = await import("./team-channel");
+    await createTeam("backend", "", 1000);
+    await plantMember("agent-m1");
+    await plantMember("agent-m2");
+    await addMember("backend", "agent-m1");
+    await addMember("backend", "agent-m2");
+    resetReadAgentMetaCache();
+
+    // m1 accepts, m2 fails on the fresh attempt (partial) -> one room line.
+    let calls = 0;
+    setMessageAttachmentStagerForTesting(async (msg) => {
+      calls++;
+      if (calls === 2) throw new Error("simulated staging failure for agent-m2");
+      return { message: `${msg} (staged-${calls})`, staged: true, cleanup: async () => {} };
+    });
+    const members = [agentOf("agent-m1"), agentOf("agent-m2")];
+
+    const first = await teamSend("backend", members, "/shot.png hi", { stageAttachments: true }, reposArg());
+    expect(first.ok).toBe(false);
+    expect(first.acceptedRecipientIds).toEqual(["agent-m1"]);
+    expect((await readChannel("backend")).filter((r) => r.message === "/shot.png hi").length).toBe(1);
+
+    // Both members die before the retry -> pruneDeadMembers empties the roster.
+    await rm(join(repoDir, ".ittybitty", "agents", "agent-m1"), { recursive: true, force: true });
+    await rm(join(repoDir, ".ittybitty", "agents", "agent-m2"), { recursive: true, force: true });
+    resetReadAgentMetaCache();
+
+    // Retry the SAME draft, skipping the accepted m1. All members are now pruned
+    // -> recipients.length===0 with a NON-empty skip set -> no duplicate record.
+    const retry = await teamSend(
+      "backend", members, "/shot.png hi",
+      { stageAttachments: true, skipRecipientIds: ["agent-m1"] },
+      reposArg(),
+    );
+    expect(retry.ok).toBe(true);
+    expect(retry.stdout).toContain("no recipients"); // roster pruned empty — the branch under test
+    expect((await readChannel("backend")).filter((r) => r.message === "/shot.png hi").length).toBe(1);
+  });
+
+  test("skipping every current recipient is a success no-op that reports the full accepted set", async () => {
+    const { createTeam, addMember } = await import("./teams");
+    const { readOutbox } = await import("./outbox");
+    await createTeam("backend", "", 1000);
+    await plantMember("agent-m1");
+    await plantMember("agent-m2");
+    await addMember("backend", "agent-m1");
+    await addMember("backend", "agent-m2");
+    resetReadAgentMetaCache();
+
+    let stagerCalls = 0;
+    setMessageAttachmentStagerForTesting(async (msg) => {
+      stagerCalls++;
+      return { message: `${msg} (staged)`, staged: true, cleanup: async () => {} };
+    });
+    const members = [agentOf("agent-m1"), agentOf("agent-m2")];
+
+    const res = await teamSend(
+      "backend", members, "/shot.png hi",
+      { stageAttachments: true, skipRecipientIds: ["agent-m1", "agent-m2"] },
+      reposArg(),
+    );
+
+    expect(res.ok).toBe(true);
+    expect(new Set(res.acceptedRecipientIds)).toEqual(new Set(["agent-m1", "agent-m2"]));
+    expect(stagerCalls).toBe(0); // nothing staged — everything already accepted
+    expect(await readOutbox(queueDirOf("agent-m1"))).toEqual([]);
+    expect(await readOutbox(queueDirOf("agent-m2"))).toEqual([]);
   });
 });
 

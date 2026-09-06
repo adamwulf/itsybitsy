@@ -7,6 +7,8 @@ import {
   resetPasteState,
   isPasteInProgress,
   cancelPaste,
+  setClipboardReaderForTests,
+  resetClipboardReaderForTests,
 } from "./clipboard";
 
 describe("isPasteData", () => {
@@ -320,6 +322,41 @@ describe("wrapTextareaLines width invariant after paste", () => {
       // Sanitizing tabs on paste keeps reported and rendered widths aligned.
       expect(line).not.toContain("\t");
       expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+    }
+  });
+});
+
+// ─── cancelPaste invalidates an in-flight Ctrl+V clipboard read ──────────
+describe("cancelPaste cancels a pending clipboard read", () => {
+  test("a Ctrl+V read that resolves AFTER cancelPaste is dropped", async () => {
+    let resolveClip!: (text: string) => void;
+    setClipboardReaderForTests(() => new Promise<string>((r) => { resolveClip = r; }));
+    try {
+      const pasted: string[] = [];
+      // Ctrl+V dispatches the async read (captures the current generation).
+      expect(resolvePasteText("\x16", (t) => { pasted.push(t); })).toBeNull();
+      // Submitting the draft flushes pending paste — bumps the generation.
+      cancelPaste();
+      // The clipboard read now returns late; its result must NOT be applied.
+      resolveClip("late clipboard text");
+      await new Promise((r) => setTimeout(r, 0));
+      expect(pasted).toEqual([]);
+    } finally {
+      resetClipboardReaderForTests();
+    }
+  });
+
+  test("a Ctrl+V read that resolves with NO intervening cancel is applied", async () => {
+    let resolveClip!: (text: string) => void;
+    setClipboardReaderForTests(() => new Promise<string>((r) => { resolveClip = r; }));
+    try {
+      const pasted: string[] = [];
+      resolvePasteText("\x16", (t) => { pasted.push(t); });
+      resolveClip("clipboard text");
+      await new Promise((r) => setTimeout(r, 0));
+      expect(pasted).toEqual(["clipboard text"]);
+    } finally {
+      resetClipboardReaderForTests();
     }
   });
 });

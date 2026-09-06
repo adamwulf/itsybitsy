@@ -6,11 +6,25 @@ Agent-type Markdown defines filesystem paths, raw Seatbelt rules, and allowed ne
 
 ## Implementation and validation status
 
-The mandatory policy and repository-agent lifecycle are integrated on `agent/sandbox-exec-feature`. The integrated branch passed 5,611 tests, TypeScript checking, a local build, and `./ib list-types`. These checks do not mean the binary is installed or existing agents are migrated.
+The mandatory policy, repository-agent lifecycle, and kernel sandbox-denial
+collector are integrated on `agent/sandbox-denial-logs`. The implementation tip
+reviewed by two independent researcher agents is
+`1197f65b868e2e14b3892b0cbd337464a439dd57`; both reviewers approved that
+production-source tip after round-three fixes.
 
-A Claude worker ran the live kernel filesystem and tmux-socket probes successfully. The offline Claude boot test also passed. That test deliberately denies network access and ends by timeout: it does not establish a model reply through the proxy or working MCP servers. Those checks remain part of the candidate pilot before broad deployment.
+Local validation of that source reported 5,742 bun test passes, zero failures,
+29,810 assertions across 120 files, clean TypeScript checking, a successful
+147-module compiled build, and a working `ib list-types` smoke. That test total
+still includes the two explicitly reported live-test early returns from this
+sandboxed Codex environment. It is not an installation or migration result.
 
-The global coordinator launch code is unchanged in this rollout. Neither its running session nor a newly started `@system` session should be reported as kernel-sandboxed.
+Fresh host-side live validation on Darwin 25.6.0 subsequently demonstrated the
+collector against the real shared preamble, real gate, generated Seatbelt floor,
+compiled collector/helper, real `/usr/bin/sandbox-exec`, and real unified-log
+stream. Capability, baseline, and collector-crash phases are recorded below.
+The global coordinator launch code is unchanged in this rollout. Neither its
+running session nor a newly started `@system` session should be reported as
+kernel-sandboxed.
 
 ## Configuration contract
 
@@ -79,7 +93,14 @@ The agy runtime root is shared state under the user home. Granting it only to ag
 
 ## Next phase: collect kernel sandbox denials
 
-**Implementation candidate; independent review continues.** Adam authorized two researcher reviewers after the initial live worker completed. Round two requested an earlier main-shell HUP trap and found a flaky fixture marker; further self-review strengthened ancestry against parent PID reuse within a sampling tick. The next candidate includes those fixes. Fresh review and live kernel validation remain pending. Global system-coordinator sandbox work remains deferred.
+**Implemented and reviewed at production-source tip
+`1197f65b868e2e14b3892b0cbd337464a439dd57`; live host validation completed for
+the staged capability, baseline, and collector-crash phases.** Adam authorized
+two researcher reviewers after the initial live worker completed. Round two
+requested an earlier main-shell HUP trap and found a flaky fixture marker;
+self-review strengthened ancestry against parent PID reuse within a sampling
+tick. Round three approved those fixes. Global system-coordinator sandbox work
+remains deferred.
 
 The candidate adds `ib sandbox-log-watch` to the shared repository-agent start
 and resume wiring. A launch-specific shell supervisor starts it outside Seatbelt
@@ -88,7 +109,7 @@ collector observes its own unique `logger` marker in the live unified-log stream
 before releasing a CLI registration gate. The gate then execs the original
 mandatory `sandbox-exec` command, retaining the PID used by lifecycle code.
 
-Attribution uses proc_pidinfo birth identity and independently observed descendant ancestry, with mach_continuous_time observations bracketing each report timestamp. A new parent-child edge requires the same parent birth identity on both sides of the child read; a reused or unavailable parent drops that edge. The collector never extends an observed interval backwards to birth or forwards to estimated exit. Unknown or previously unobserved reparented children, events outside observed intervals, ambiguous reports, and OS duplicate summaries are omitted. Empty live-stream bootUUID uses the independently obtained running boot identity; persisted or replayed records are not consumed. History is capped at 4,096 instances and 30 seconds, pending reports at 512 entries and 500 milliseconds, with 20 ms polling.
+Attribution uses proc_pidinfo birth identity and independently observed descendant ancestry, with mach_continuous_time observations bracketing each report timestamp. A new parent-child edge requires the same parent PID/birth identity on both sides of the child read; a reused or unavailable parent drops that edge. The collector never extends an observed interval backwards to birth or forwards to estimated exit. Unknown or previously unobserved reparented children, events outside observed intervals, ambiguous reports, and OS duplicate summaries are omitted. Empty live-stream bootUUID uses the independently obtained running boot identity; persisted or replayed records are not consumed. History is capped at 4,096 instances and 30 seconds, pending reports at 512 entries and 500 milliseconds, with 20 ms polling.
 
 Verified reports append `[Sandbox]` entries with the original timestamp,
 operation, offender name/PID/birth, target when present, launch, boot, and
@@ -99,11 +120,78 @@ and warnings also appear in DENIALS alongside unchanged hook denials.
 
 Every invocation allocates a fresh sandbox-log.XXXXXXXX directory beneath \~/.itsybitsy/sealed/sandbox-logs/<agent-directory-hash>/. The shipped floor denies this tree even when AGENTDIR is writable. Creation happens in the unsandboxed script. An initially empty stop file is opened once by both script and collector; the EXIT trap writes through reserved fd 9, so a late EXIT cannot touch a reused pathname. The gate atomically renames its root request, then closes fd 9 and clears control variables before exec. Only the supervisor removes the reserved directory after the collector returns, including collector crashes. Owner or CLI birth-identity disappearance still ends collection with a one-second drain. Stopping while the registered CLI remains alive produces a visible coverage WARNING. Diagnostic failure never removes the mandatory Seatbelt wrapper.
 
-Historical candidate checks before independent review: 5,657 reported bun test passes, zero failures, 29,486 assertions across 115 files; TypeScript, build, CLI table and command-help smoke passed. After rebasing onto main eb5bfa0, candidate a28e0dd reported 5,720 passes, zero failures, 29,723 assertions across 117 files, plus successful TypeScript/build/smoke. Both totals include the kernel capability and opt-in Claude boot early-return skips described below; neither is a live enforcement/capture pass. The authorized live worker tested corrected candidate d198c4d with the actual shared preamble and gate, generated floor, and synthetic sandboxed shells. Those historical fixtures did not run whole production scripts, model CLIs, the proxy, or a controlling terminal. The review fixes change production source after that live evidence and need fresh validation. Claude, Codex/fugu, agy, and per-repository coordinator generation remains covered by lifecycle tests.
+Historical candidate checks before independent review: 5,657 reported bun test passes, zero failures, 29,486 assertions across 115 files; TypeScript, build, CLI table and command-help smoke passed. After rebasing onto main eb5bfa0, candidate a28e0dd reported 5,720 passes, zero failures, 29,723 assertions across 117 files, plus successful TypeScript/build/smoke. Both totals include the kernel capability and opt-in Claude boot early-return skips described below; neither is a live enforcement/capture pass. The authorized live worker tested corrected candidate d198c4d with the actual shared preamble and gate, generated floor, and synthetic sandboxed shells. Those historical fixtures did not run whole production scripts, model CLIs, the proxy, or a controlling terminal. The review fixes changed production source after that live evidence and required the later fresh validation recorded below. Claude, Codex/fugu, agy, and per-repository coordinator generation remains covered by lifecycle tests.
 
-Round-one fixes validated locally: bun test reported 5,736 passes, zero failures, 29,794 assertions across 119 files (111.20 seconds; /private/tmp/sandbox-denial-logs-round1-fixed-full.log). The same two existing live-test early returns remain skips, not live passes. bunx tsc --noEmit passed. The 146-module build passed, and the rebuilt CLI printed list-types plus help for both internal collector commands. New regressions use real Darwin pipes, group signals and a pseudo-terminal with a controlled stream peer; they do not prove revised kernel capture. Direct capability rechecks still fail here: sandbox-exec exits 71 with sandbox_apply: Operation not permitted; log show exits 64 with Cannot run while sandboxed. Fresh independent review and host-side capture validation remain pending.
+Round-one fixes validated locally: bun test reported 5,736 passes, zero failures, 29,794 assertions across 119 files (111.20 seconds; /private/tmp/sandbox-denial-logs-round1-fixed-full.log). The same two existing live-test early returns remain skips, not live passes. bunx tsc --noEmit passed. The 146-module build passed, and the rebuilt CLI printed list-types plus help for both internal collector commands. New regressions use real Darwin pipes, group signals and a pseudo-terminal with a controlled stream peer; they do not prove revised kernel capture. Direct capability rechecks still fail here: sandbox-exec exits 71 with sandbox_apply: Operation not permitted; log show exits 64 with Cannot run while sandboxed. At that point fresh independent review and host-side capture validation were still pending.
 
-Round-two fixes validated locally: bun test reported 5,742 passes, zero failures, 29,810 assertions across 120 files (111.50 seconds; /private/tmp/sandbox-denial-logs-round2-fixed-full.log), including the same two explicitly reported live-test early returns. TypeScript checking passed. The rebuilt 147-module CLI printed the type table. Scoped sampling/lifecycle/parser tests passed 50 tests. Round-three independent review and revised kernel capture remain pending.
+Round-two fixes validated locally: bun test reported 5,742 passes, zero failures, 29,810 assertions across 120 files (111.50 seconds; /private/tmp/sandbox-denial-logs-round2-fixed-full.log), including the same two explicitly reported live-test early returns. TypeScript checking passed. The rebuilt 147-module CLI printed the type table. Scoped sampling/lifecycle/parser tests passed 50 tests. At that point round-three independent review and revised kernel capture were still pending.
+
+Round-three review approved `1197f65b868e2e14b3892b0cbd337464a439dd57`.
+Researchers `agent-9907e073` and `agent-7ceddb24` independently approved the
+source after checking the HUP-readiness fix, atomic fixture marker, native buffer
+reuse, and `sampleSandboxTree` ancestry hardening. `agent-9907e073` modelled
+intra-tick PID reuse and showed the old sampler could accept non-descendant
+edges while the current sampler produced zero wrong-instance and zero
+non-descendant attributions in both baseline and stress runs. `agent-7ceddb24`
+exercised the compiled collector with mocked NDJSON and real process/signal/pty
+fixtures, including the HUP-readiness case. Neither reviewer's round-three checks
+were fresh kernel capture.
+
+Host-side validation on 2026-09-06 ran three live phases against the same
+reproducible 1197f65 build (`sha256
+72c56381096603c5055b1420d002bdf1892ef7fd2d3ce6db64e361eac1f21534`) from a
+Claude researcher context that could apply Seatbelt profiles and read the unified
+log. Capability passed all eight checks: allow-default Seatbelt applied, the
+generated floor profile booted `/usr/bin/true`, the generated profile refused a
+disposable in-process forbidden read with EPERM, AGENTDIR read remained allowed,
+`logger` emitted a marker, bounded real `log stream` and `log show` both returned
+parsed `/usr/bin/logger` NDJSON marker events, and `pgrep` observation was
+available. The log tool's own predicate-echo events were ignored.
+
+The live baseline phase used the real shared preamble and gate, real
+`/usr/bin/sandbox-exec`, compiled collector and stream helper, real
+`/usr/bin/log stream`, and the generated floor with a disposable deny path. It
+captured eight `[Sandbox]` records in `agent.log`: root in-process read/write,
+root attempts to write `stop`, `root-request`, and `ready`, root attempt to read
+`identity.json`, and observable-descendant read/write. Records preserved kernel
+timestamps, operations, launch label, boot id, PID and birth identity. Real
+`parseDenials` accepted all eight records, and the manager rendered the captured
+log through `RightPaneComponent` in DENIALS mode as `8 denial(s)`. No collector
+ERROR/WARNING was present; the launch directory was removed, the helper/log
+stream were gone, fd 9/control environment did not leak, and the proxy cleanup
+trap ran.
+
+The live collector-crash phase used the probe process as an explicit harness
+supervisor with an owned collector handle; the product shell supervisor's
+formatted exit-137 path remains covered by the unit suite. The compiled collector
+became ready, the gate registered the CLI root, and helper plus real log stream
+were present before injection. Killing the collector by the owned handle produced
+SIGKILL, and the real helper plus real `log stream` exited via lifeline EOF within
+26 ms without signalling a looked-up PID. The harness-labelled
+`[SandboxCollector] ERROR` was visible and parsed. Fresh in-process read/write
+attempts released only after that visible failure still returned EPERM and did
+not create the write target; those post-failure attempts were not captured
+because collection had ended visibly. The manager rendered the captured crash log
+through `RightPaneComponent` as `8 denial(s), 1 collector alert(s)`.
+
+Both baseline and collector-crash phases were marked failed by the probe's own
+strict counter because an optional external `/usr/bin/python3` offender was the
+Xcode `xcrun` shim on this host and failed loading
+`/Applications/Xcode.app/Contents/Developer/usr/lib/libxcrun.dylib` before it
+attempted the disposable forbidden read. The mandatory root, descendant, sealed
+control-file tamper, parser, display, cleanup, and post-failure enforcement
+checks passed. Deferred live host phases not run: concurrent launches,
+same-agent-directory overlap, pty teardown, HUP regression, root self-kill, and
+owner kill. Those remain covered by unit tests and earlier mocked-stream
+fixtures, not by this fresh kernel run.
+
+Durable host-probe evidence is under
+`/Users/adamwulf/.claude/projects/-Users-adamwulf-Developer-bun-itsybitsy--ittybitty-agents-agent-7ceddb24-repo/evidence-agent-7ceddb24/`
+with capability, baseline, and collector-crash run directories. The host rebooted
+on 2026-09-06 before these runs and cleared earlier `/private/tmp` evidence
+bundles and test logs referenced by historical notes; those historical paths may
+no longer exist even though their results are preserved in this document, the
+review ledger, and the conversation transcript.
 
 The first full run after the native fixes reported 5,653 passes and two failures:
 both source-entry smoke tests received an empty type table from their shared

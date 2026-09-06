@@ -1178,11 +1178,21 @@ matching wildcard. This is a baseline watch item, not implicit proxy behavior.
   `[<ISO8601>] [SandboxProxy] denied network-outbound target="host:port"` line to
   the agent's `agent.log` (the `--agent-log` file, wired from the start.sh/
   resume.sh preamble), where `parseDenials` picks it up so it surfaces in the
-  DENIALS pane beside the kernel denials. The target is `JSON.stringify`-quoted
-  (mirroring `formatSandboxRecord`) so a crafted CONNECT host cannot forge a log
-  line; each write is a single O_APPEND line and a write failure never breaks the
-  proxied connection. `allowed`/`failed` records stay in `sandbox-proxy.log` only —
-  the agent log carries denials only.
+  DENIALS pane beside the kernel denials (only the `denied` verb matches; any
+  other `[SandboxProxy]` line is informational). The target is
+  `JSON.stringify`-quoted (mirroring `formatSandboxRecord`) so a crafted CONNECT
+  host cannot forge a log line — URL parsing already rejects control characters
+  and whitespace in a host, but a literal `"` is a valid host code point, so the
+  quoting is load-bearing; IPv6 literals are re-bracketed (`[::1]:443`). Each
+  write is a single O_APPEND line and a write failure never breaks the proxied
+  connection. The proxy's own stdout/stderr also land in `sandbox-proxy.log`
+  through an O_APPEND descriptor the launcher hands the detached child, so a
+  startup error or crash trace appends after the records instead of overwriting
+  the head of the file. Malformed requests (400/431) carry no target and are not
+  logged. `allowed`/`failed` records stay in `sandbox-proxy.log` only — the agent
+  log carries denials only. There is no rate limit or dedup on this path (unlike
+  the kernel collector's `SandboxOutputBudget`): a client looping on a blocked
+  domain writes one line per attempt to both files.
 
 ### 5.3 Wiring
 

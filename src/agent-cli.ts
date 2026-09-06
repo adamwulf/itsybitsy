@@ -110,10 +110,15 @@ export function metadataCli(model: unknown): AgentCli | undefined {
   }
 }
 
-/** Describe wrapper support as well as configuration; agy has no kernel wrapper yet. */
+/**
+ * Describe the kernel sandbox status for display. Sandboxing is now MANDATORY for
+ * every supported CLI (claude, codex, fugu, agy), so a wrappable CLI reports the
+ * agent's frozen state: "enabled" for a post-mandatory agent, or "disabled" for a
+ * legacy agent whose frozen metadata predates it (that agent must be migrated via
+ * `ib sandbox refresh` before it can launch again). An unknown CLI has no wrapper.
+ */
 export function kernelSandboxStatus(meta: { model?: unknown; sandbox?: { enabled?: boolean } }): string {
   const cli = metadataCli(meta.model);
-  if (cli === "agy") return "unavailable (agy)";
   if (!cli) return "unavailable (unknown CLI)";
   return meta.sandbox?.enabled === true ? "enabled" : "disabled";
 }

@@ -126,6 +126,13 @@ import {
   assertSandboxProxyPortAvailable,
 } from "./sandbox-proxy";
 import {
+  type SandboxCommandRunner,
+  resolveSandboxExecPath,
+  sandboxExecShellPrefix,
+  lintSandboxProfile,
+  sandboxProxyScriptPreamble,
+} from "./sandbox-launch";
+import {
   writeSealRecordDirect,
   readSealRecord,
   deleteSealRecord,
@@ -934,22 +941,20 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // Fail-hard ONLY for an enabled agent (resume would refuse a sealless
-    // enabled agent). A disabled agent is never seal-checked, so a seal-write
-    // failure is best-effort — mirror newAgent's enabled/disabled split rather
-    // than blocking the rehire of an unsandboxed agent.
-    if (restoredAgent.meta.sandbox?.enabled) {
-      return {
-        ok: false,
-        exitCode: 1,
-        stdout: `Reconstructed stopped agent '${agentId}' from ${archived.archiveKey}`,
-        stderr: [
-          `Re-seal failed: ${message}`,
-          ...warnings,
-        ].join("\n"),
-      };
-    }
-    warnings.push(`Seal warning (disabled agent): ${message}`);
+    // Mandatory sandbox: every agent is sandbox-required, so a failed re-seal
+    // ALWAYS fails the rehire (resume refuses a sealless agent). There is no
+    // best-effort/disabled path. (If the meta is legacy enabled:false / no paths,
+    // the seal may succeed but the resume below still fails closed and points at
+    // `ib sandbox refresh` — the migration path.)
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: `Reconstructed stopped agent '${agentId}' from ${archived.archiveKey}`,
+      stderr: [
+        `Re-seal failed: ${message}`,
+        ...warnings,
+      ].join("\n"),
+    };
   }
 
   let resumed: IbCommandResult;
@@ -1036,10 +1041,6 @@ function resolveGitRevParsePath(worktreePath: string, rawPath: string): string {
   }
 }
 
-interface SandboxCommandRunner {
-  run(cmd: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }>;
-}
-
 interface PreparedSandbox {
   config: SandboxConfig;
   paths: PathsConfig;
@@ -1115,54 +1116,10 @@ export function checkPathsRepoContainment(
   return { warnings };
 }
 
-function sandboxDefinitionArgs(parameterValues: Record<string, string>): string[] {
-  return Object.entries(parameterValues).flatMap(([key, value]) => ["-D", `${key}=${value}`]);
-}
-
-function sandboxExecShellPrefix(prepared: PreparedSandbox): string {
-  const definitions = Object.entries(prepared.parameterValues)
-    .map(([key, value]) => `-D ${shellQuote(`${key}=${value}`)}`)
-    .join(" ");
-  return `sandbox-exec -f ${shellQuote(prepared.profilePath)} ${definitions}`;
-}
-
-function sandboxProxyScriptPreamble(agentId: string, agentDir: string, port: number): string {
-  const domainsPath = shellQuote(join(agentDir, "sandbox-domains.txt"));
-  const proxyLogPath = shellQuote(join(agentDir, "sandbox-proxy.log"));
-  const pidPath = shellQuote(join(agentDir, "sandbox-proxy.pid"));
-  const readyPath = shellQuote(join(agentDir, "sandbox-proxy.ready"));
-  return `
-# Start the per-agent proxy outside Seatbelt. The launcher detaches/unrefs the
-# proxy before returning; the agent CLI alone is wrapped below. Fail closed if the
-# actual bind loses the small race after the parent-process port preflight.
-PROXY_PORT=${port}
-PROXY_PID_FILE=${pidPath}
-PROXY_READY_FILE=${readyPath}
-rm -f "$PROXY_PID_FILE" "$PROXY_READY_FILE"
-if ! ib sandbox-proxy-launch --port "$PROXY_PORT" --domains ${domainsPath} --log ${proxyLogPath} --pid-file "$PROXY_PID_FILE" --ready-file "$PROXY_READY_FILE"; then
-    log "sandbox refused: proxy could not bind localhost:$PROXY_PORT"
-    exit 1
-fi
-cleanup_sandbox_proxy() {
-    local proxy_pid
-    proxy_pid=$(cat "$PROXY_PID_FILE" 2>/dev/null || true)
-    if [[ "$proxy_pid" =~ ^[1-9][0-9]*$ ]]; then kill "$proxy_pid" 2>/dev/null || true; fi
-    rm -f "$PROXY_PID_FILE" "$PROXY_READY_FILE"
-}
-trap cleanup_sandbox_proxy EXIT
-PROXY_PID=$(cat "$PROXY_PID_FILE")
-ib write-proxy-pid ${shellQuote(agentId)} "$PROXY_PID" "$PROXY_PORT" || log "write-proxy-pid failed (exit=$?)"
-export http_proxy="http://localhost:$PROXY_PORT"
-export https_proxy="$http_proxy"
-export HTTP_PROXY="$http_proxy"
-export HTTPS_PROXY="$http_proxy"
-export no_proxy="localhost,127.0.0.1,::1"
-export NO_PROXY="$no_proxy"
-`;
-}
-
-const AGY_SANDBOX_ERROR = "sandbox refused: agy has no kernel sandbox wrapper; use sandbox.enabled: false until agy sandbox support is implemented";
-
+// The kernel sandbox is now a MANDATORY launch invariant for every CLI — there
+// is no "agy has no wrapper" escape and no disabled path. prepareSandbox always
+// builds a profile; a failure here refuses the launch (it never falls back to an
+// unsandboxed spawn/resume).
 async function prepareSandbox(
   runner: SandboxCommandRunner,
   config: SandboxConfig,
@@ -1173,17 +1130,8 @@ async function prepareSandbox(
   canSpawnChildren: boolean,
   agentCli: AgentCli,
 ): Promise<PreparedSandbox> {
-  if (agentCli === "agy") throw new Error(AGY_SANDBOX_ERROR);
   const platform = sandboxPlatformOverride ?? process.platform;
-  if (platform !== "darwin") {
-    throw new Error(`sandbox refused: Seatbelt requires macOS (current platform: ${platform})`);
-  }
-
-  const whichResult = await runner.run(["which", "sandbox-exec"]);
-  if (whichResult.exitCode !== 0 || !whichResult.stdout.trim()) {
-    throw new Error("sandbox refused: sandbox-exec not found (macOS only)");
-  }
-  const sandboxExecPath = whichResult.stdout.trim().split(/\r?\n/)[0]!;
+  const sandboxExecPath = await resolveSandboxExecPath(runner, { platform });
 
   const gitCommonDirResult = await runner.run([
     "git", "-C", workPath, "rev-parse", "--git-common-dir",
@@ -1210,6 +1158,16 @@ async function prepareSandbox(
   if (agentCli === "claude") {
     params.PROJECTDIR = claudeProjectDirFor(workPath);
     params.SCRATCHPAD = claudeScratchpadDirFor(workPath, uid);
+  } else if (agentCli === "agy") {
+    // agy keeps ALL its runtime state under ~/.gemini (settings, config,
+    // transcript, brain, presence, cache, log, skills), which it reads AND
+    // rewrites during a session. Grant that subtree as an agy-only WRITE runtime
+    // root — the mirror of claude's PROJECTDIR/SCRATCHPAD. agyStateDirFor and the
+    // SandboxProfileParams.AGYSTATEDIR field it feeds are owned by the policy
+    // worker (sandbox.ts + hooks/paths-table.ts). Wired here once integrated:
+    //   params.AGYSTATEDIR = agyStateDirFor(userHome());
+    // The hook's agentPathAccessTable computes the identical root for cli==="agy",
+    // so the kernel profile and the hook agree from the one helper.
   }
   const profile = generateProfile(config, paths, params);
   const parameterValues = sandboxProfileParameterValues(paths, params);
@@ -1226,16 +1184,7 @@ async function prepareSandbox(
     throw new Error(`sandbox refused: proxy could not bind localhost:${proxyPort}: ${detail}`);
   }
 
-  const lintResult = await runner.run([
-    sandboxExecPath,
-    "-f", profilePath,
-    ...sandboxDefinitionArgs(parameterValues),
-    "/usr/bin/true",
-  ]);
-  if (lintResult.exitCode !== 0) {
-    const detail = lintResult.stderr.trim() || `exit ${lintResult.exitCode}`;
-    throw new Error(`sandbox refused: sandbox.sb failed to compile: ${detail}`);
-  }
+  await lintSandboxProfile(runner, sandboxExecPath, profilePath, parameterValues);
 
   return { config, paths, profile, profilePath, domainsPath, parameterValues, proxyPort };
 }
@@ -1599,10 +1548,8 @@ export async function resumeAgent(
         };
       }
     }
-    if (resumeCli === "agy" && agent.meta.sandbox?.enabled) {
-      await logAgent(agentDir, `[resume] ${AGY_SANDBOX_ERROR}`);
-      return { ok: false, exitCode: 1, stdout: "", stderr: AGY_SANDBOX_ERROR };
-    }
+    // agy is now sandboxed like every other CLI (mandatory kernel sandbox) — no
+    // special-case refusal remains.
 
     // Re-derive the reasoning-effort level from the persisted meta value, the
     // exact twin of the model re-derivation above. Without this a resumed
@@ -1655,83 +1602,94 @@ export async function resumeAgent(
       workPath = agent.repoPath;
     }
 
+    // MANDATORY sandbox (Adam, 2026-09-05): every resume launches under the
+    // kernel sandbox — there is no unsandboxed resume path. A legacy agent whose
+    // frozen meta predates mandatory sandboxing (sandbox.enabled !== true, or no
+    // paths block) cannot be launched from its frozen policy: it has no valid
+    // profile inputs and no valid seal, and silently upgrading that untrusted
+    // metadata to enabled is refused. The recovery is `ib sandbox refresh`, which
+    // re-derives the policy from the current agent-type files and re-seals it from
+    // an unsandboxed session. This precondition reads RAW meta on purpose:
+    // resolveSandboxConfig now forces enabled:true, so it can never distinguish a
+    // legacy agent — the raw fields do.
+    if (agent.meta.sandbox?.enabled !== true || !agent.meta.paths) {
+      const message = `sandbox refused: agent '${agent.id}' has no valid sandbox policy in meta.json (mandatory sandboxing requires an enabled sandbox and a paths block; this agent's frozen metadata predates it); run \`ib sandbox refresh ${agent.id}\` from an unsandboxed session, or nuke and respawn the agent`;
+      await logAgent(agentDir, message);
+      return { ok: false, exitCode: 1, stdout: "", stderr: message };
+    }
+
     let preparedResumeSandbox: PreparedSandbox | null = null;
-    if (agent.meta.sandbox?.enabled) {
-      if (!agent.meta.paths) {
-        const message = `sandbox refused: meta.json has an enabled sandbox but no paths block (written before the paths: split); run \`ib sandbox refresh ${agent.id}\` from an unsandboxed session, or respawn the agent`;
+    // Verify the frozen meta against the sealed record BEFORE building any
+    // sandbox (SPEC-SANDBOX §4C.3). The seal froze the profile inputs at
+    // spawn/refresh; because AGENTDIR is a kernel write root, a non-spawner
+    // could have edited its own meta.canSpawnChildren/agentType to respawn
+    // into a spawner profile — that divergence is caught here and refused.
+    // The seal check is now unconditional (every agent is sandbox-required).
+    // This also covers respawnSelf, which resumes through this same path.
+    {
+      const sealRepoId = await getRepoId(agent.repoPath);
+      const verification = await verifyMetaAgainstSeal(
+        sealRepoId,
+        agent.id,
+        agent.meta as unknown as Record<string, unknown>,
+      );
+      if (!verification.ok) {
+        const message = verification.field === "(missing)"
+          ? `sandbox refused: no sealed record for '${agent.id}'; run \`ib sandbox refresh ${agent.id}\` from an unsandboxed session to seal it`
+          : `sandbox refused: meta.json does not match the sealed record (${verification.field}); run \`ib sandbox refresh ${agent.id}\` from an unsandboxed session to re-seal`;
         await logAgent(agentDir, message);
         return { ok: false, exitCode: 1, stdout: "", stderr: message };
       }
-      // Verify the frozen meta against the sealed record BEFORE building any
-      // sandbox (SPEC-SANDBOX §4C.3). The seal froze the profile inputs at
-      // spawn/refresh; because AGENTDIR is a kernel write root, a non-spawner
-      // could have edited its own meta.canSpawnChildren/agentType to respawn
-      // into a spawner profile — that divergence is caught here and refused.
-      // Disabled agents are never checked (this is inside the enabled gate).
-      // This also covers respawnSelf, which resumes through this same path.
-      {
-        const sealRepoId = await getRepoId(agent.repoPath);
-        const verification = await verifyMetaAgainstSeal(
-          sealRepoId,
-          agent.id,
-          agent.meta as unknown as Record<string, unknown>,
-        );
-        if (!verification.ok) {
-          const message = verification.field === "(missing)"
-            ? `sandbox refused: no sealed record for '${agent.id}'; run \`ib sandbox refresh ${agent.id}\` from an unsandboxed session to seal it`
-            : `sandbox refused: meta.json does not match the sealed record (${verification.field}); run \`ib sandbox refresh ${agent.id}\` from an unsandboxed session to re-seal`;
-          await logAgent(agentDir, message);
-          return { ok: false, exitCode: 1, stdout: "", stderr: message };
-        }
-      }
-      await stopSandboxProxyForAgent(agentDir, agent.meta);
-      try {
-        const frozenConfig = resolveSandboxConfig({ sandbox: agent.meta.sandbox });
-        const frozenPaths = resolvePathsConfig(agent.meta.paths);
-        // Re-derive the spawn capability from meta (per-agent override, then the
-        // type), so an unchanged agent replays a byte-identical profile while a
-        // meta.canSpawnChildren toggle flips exactly the REPOAGENTS op, the
-        // PARENTCLAUDE root, and the tmux deny on resume.
-        const resumeCanSpawnChildren = await metaCanSpawnChildren(
-          agent.meta as unknown as Record<string, unknown>,
-        );
-        preparedResumeSandbox = await prepareSandbox(
-          nukeResumeSpawnCtx,
-          frozenConfig,
-          frozenPaths,
-          agentDir,
-          workPath,
-          agent.repoPath,
-          resumeCanSpawnChildren,
-          resumeCli,
-        );
-        await mutateAgentMeta(agentDir, (meta) => {
-          meta.sandbox = frozenConfig;
-          meta.paths = frozenPaths;
-          meta.sandbox_proxy_port = preparedResumeSandbox!.proxyPort;
-          delete meta.sandbox_proxy_pid;
-        });
-        agent.meta.sandbox_proxy_port = preparedResumeSandbox.proxyPort;
-        delete agent.meta.sandbox_proxy_pid;
-        await logAgent(
-          agentDir,
-          `[resume] sandbox preflight OK: profile=${preparedResumeSandbox.profilePath} proxy=localhost:${preparedResumeSandbox.proxyPort}`,
-        );
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        await logAgent(agentDir, `[resume] ${message}`);
-        return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${message}` };
-      }
     }
+    await stopSandboxProxyForAgent(agentDir, agent.meta);
+    try {
+      const frozenConfig = resolveSandboxConfig({ sandbox: agent.meta.sandbox });
+      const frozenPaths = resolvePathsConfig(agent.meta.paths);
+      // Re-derive the spawn capability from meta (per-agent override, then the
+      // type), so an unchanged agent replays a byte-identical profile while a
+      // meta.canSpawnChildren toggle flips exactly the REPOAGENTS op, the
+      // PARENTCLAUDE root, and the tmux deny on resume.
+      const resumeCanSpawnChildren = await metaCanSpawnChildren(
+        agent.meta as unknown as Record<string, unknown>,
+      );
+      preparedResumeSandbox = await prepareSandbox(
+        nukeResumeSpawnCtx,
+        frozenConfig,
+        frozenPaths,
+        agentDir,
+        workPath,
+        agent.repoPath,
+        resumeCanSpawnChildren,
+        resumeCli,
+      );
+      await mutateAgentMeta(agentDir, (meta) => {
+        meta.sandbox = frozenConfig;
+        meta.paths = frozenPaths;
+        meta.sandbox_proxy_port = preparedResumeSandbox!.proxyPort;
+        delete meta.sandbox_proxy_pid;
+      });
+      agent.meta.sandbox_proxy_port = preparedResumeSandbox.proxyPort;
+      delete agent.meta.sandbox_proxy_pid;
+      await logAgent(
+        agentDir,
+        `[resume] sandbox preflight OK: profile=${preparedResumeSandbox.profilePath} proxy=localhost:${preparedResumeSandbox.proxyPort}`,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await logAgent(agentDir, `[resume] ${message}`);
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${message}` };
+    }
+    // Past this point the sandbox is prepared or we have already returned; the
+    // wrapper is never absent on a resume.
 
     // Build exit script path
     const absExitScript = join(agentDir, "exit-check.sh");
     const resumeScript = join(agentDir, "resume.sh");
     const sandboxResumePreamble = preparedResumeSandbox
-      ? sandboxProxyScriptPreamble(agent.id, agentDir, preparedResumeSandbox.proxyPort)
+      ? sandboxProxyScriptPreamble({ agentDir, port: preparedResumeSandbox.proxyPort, agentId: agent.id })
       : "";
     const sandboxResumeLaunchPrefix = preparedResumeSandbox
-      ? `${sandboxExecShellPrefix(preparedResumeSandbox)} `
+      ? `${sandboxExecShellPrefix(preparedResumeSandbox.profilePath, preparedResumeSandbox.parameterValues)} `
       : "";
 
     if (isCodexBackedCli(resumeCli)) {
@@ -1872,9 +1830,11 @@ export async function resumeAgent(
         absStderrLog: join(agentDir, "claude.stderr.log"),
         extraWritableRoots: codexExtraWritableRoots,
         fugu: resumeCli === "fugu",
-        sandboxEnabled: preparedResumeSandbox !== null,
-        sandboxScriptPreamble: preparedResumeSandbox ? sandboxResumePreamble : undefined,
-        sandboxExecPrefix: preparedResumeSandbox ? sandboxResumeLaunchPrefix.trimEnd() : undefined,
+        // Mandatory sandbox: the wrapper is always present on resume (the
+        // precondition above returns otherwise), and the generator refuses an
+        // absent wrapper.
+        sandboxScriptPreamble: sandboxResumePreamble,
+        sandboxExecPrefix: sandboxResumeLaunchPrefix.trimEnd(),
       });
       await Bun.write(resumeScript, codexResumeContent);
       await chmod(resumeScript, 0o755);
@@ -2004,6 +1964,10 @@ export async function resumeAgent(
         absExitScript,
         absAgentLog: join(agentDir, "agent.log"),
         absStderrLog: join(agentDir, "claude.stderr.log"),
+        // Mandatory sandbox: agy is wrapped exactly like claude/codex now. The
+        // wrapper is always present on resume; the generator refuses it absent.
+        sandboxScriptPreamble: sandboxResumePreamble,
+        sandboxExecPrefix: sandboxResumeLaunchPrefix.trimEnd(),
       });
       await Bun.write(resumeScript, agyResumeContent);
       await chmod(resumeScript, 0o755);
@@ -2569,11 +2533,10 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
   }
 
   const merged = mergeSandboxLayerConfigs([allLayer, nonCoordLayer, typeDef]);
+  // resolveSandboxConfig forces enabled:true, so refresh always re-derives an
+  // enabled policy for every CLI (agy included) — this is the migration path a
+  // legacy enabled:false agent runs to become launchable again.
   const newSandbox = merged.sandbox;
-  if (metadataCli(agent.meta.model) === "agy" && newSandbox.enabled) {
-    await logAgent(agentDir, `[sandbox refresh] ${AGY_SANDBOX_ERROR}`);
-    return { ok: false, exitCode: 1, stdout: "", stderr: AGY_SANDBOX_ERROR };
-  }
   // Anchor relative (./ ../) entries at this agent's main repo root, exactly as
   // newAgent does at spawn — agent.repoPath is `<repo>` and agentDir is
   // `<repo>/.ittybitty/agents/<id>` — so the refreshed meta.paths holds only
@@ -2610,14 +2573,17 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
   }
 
   // Verify the CURRENT meta against the seal BEFORE re-sealing (SPEC-SANDBOX
-  // §4C.3), but ONLY when the agent is currently enabled (a disabled agent has
-  // no profile to protect). A genuine field mismatch means the meta was tampered
-  // — a non-spawner cannot launder that into a new seal via refresh, so refuse.
-  // A MISSING seal is NOT a refusal here: refresh is the deliberate, unsandboxed
-  // re-seal tool, so it seals a legacy enabled agent rather than dead-ending the
-  // "run refresh to re-seal" recovery that resume/respawn point at.
+  // §4C.3). Keyed on the seal's EXISTENCE, not on raw meta.sandbox.enabled: with
+  // mandatory sandboxing a legacy enabled:false agent MUST still be able to
+  // refresh (this is its migration path), and a genuine field mismatch on a
+  // sealed agent means the meta was tampered — a non-spawner cannot launder that
+  // into a new seal via refresh, so refuse. A MISSING seal is NOT a refusal here
+  // (verifyMetaAgainstSeal reports field "(missing)"): refresh is the deliberate,
+  // unsandboxed re-seal tool, so it seals a sealless agent (legacy or migrating)
+  // rather than dead-ending the "run refresh to re-seal" recovery that
+  // resume/respawn point at.
   const sealRepoId = await getRepoId(agent.repoPath);
-  if (agent.meta.sandbox?.enabled) {
+  {
     const verification = await verifyMetaAgainstSeal(
       sealRepoId,
       agent.id,
@@ -5499,10 +5465,9 @@ export async function newAgent(
     nonCoordLayer,
     agentTypeDef,
   ]);
+  // resolveSandboxConfig forces enabled:true (mandatory sandbox), so this is the
+  // spawn-time policy for EVERY CLI including agy — no special-case refusal.
   const resolvedSandboxConfig = mergedSandboxLayers.sandbox;
-  if (agentCli === "agy" && resolvedSandboxConfig.enabled) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: AGY_SANDBOX_ERROR };
-  }
   // SAFETY: a relative entry that climbs to `/` or the home root anchors to a
   // filesystem-wide (or whole-home) grant. The single model requires fully-open
   // to be explicit (`allowRead: ["/"]` / `["~"]`), so this is a spawn ERROR, not
@@ -5769,20 +5734,16 @@ export async function newAgent(
   // (SPEC-SANDBOX §4C.3). The seal is computed from the read-only agent-type
   // files (canSpawnChildren resolution) plus the meta just written, so it
   // captures the LEGITIMATE profile; the direct write is routed through the
-  // unsandboxed tmux server when the SPAWNER is itself sandboxed. An enabled
-  // agent must not launch without a seal (resume refuses a sealless enabled
-  // agent), so a failed seal fails the spawn; a disabled agent is never
-  // seal-checked, so its seal is best-effort.
+  // unsandboxed tmux server when the SPAWNER is itself sandboxed. Every agent is
+  // sandbox-required now (resume refuses a sealless agent), so a failed seal
+  // ALWAYS fails the spawn — there is no best-effort/disabled path.
   try {
     await sealAgentRecord(rootRepoPath, id, initialMetaJson, agentDir);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (resolvedSandboxConfig.enabled) {
-      await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED (seal): ${message}`);
-      await cleanupOnFailure();
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: sandbox refused: ${message}` };
-    }
-    await logSpawn(agentDir, spawnerAgentDir, id, `seal warning (disabled agent): ${message}`);
+    await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED (seal): ${message}`);
+    await cleanupOnFailure();
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: sandbox refused: ${message}` };
   }
 
   const baseRefForLog = manager ? `agent/${manager}` : "HEAD";
@@ -6177,43 +6138,41 @@ export async function newAgent(
     } catch { /* ignore */ }
   }
 
-  // 12b. Sandbox preflight (profile + per-agent proxy) when the resolved
-  // agent-type config enables it. Fails hard: a broken sandbox must never
-  // silently spawn an unsandboxed agent.
+  // 12b. Sandbox preflight (profile + per-agent proxy). MANDATORY for every
+  // spawn and every CLI — the profile is always prepared. Fails hard: a broken
+  // sandbox refuses the spawn, it never falls back to an unsandboxed agent.
   let preparedSandbox: PreparedSandbox | null = null;
-  if (resolvedSandboxConfig.enabled) {
-    try {
-      // Resolve spawn capability from the frozen meta (per-agent override, then
-      // the type). A spawner gets REPOAGENTS + PARENTCLAUDE writable and keeps
-      // the tmux socket; a non-spawner gets REPOAGENTS read-only and the tmux
-      // deny.
-      const spawnCanSpawnChildren = await metaCanSpawnChildren(initialMetaJson);
-      preparedSandbox = await prepareSandbox(
-        newAgentSpawnCtx,
-        resolvedSandboxConfig,
-        resolvedPathsConfig,
-        agentDir,
-        workPath,
-        rootRepoPath,
-        spawnCanSpawnChildren,
-        agentCli,
-      );
-      initialMetaJson.sandbox_proxy_port = preparedSandbox.proxyPort;
-      await writeMetaJsonAtomic(agentDir, initialMetaJson);
-      await logSpawn(
-        agentDir,
-        spawnerAgentDir,
-        id,
-        `sandbox preflight OK: profile=${preparedSandbox.profilePath} proxy=localhost:${preparedSandbox.proxyPort}`,
-      );
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      initialMetaJson.state = "stopped";
-      initialMetaJson.state_updated_at = Math.floor(Date.now() / 1000);
-      await writeMetaJsonAtomic(agentDir, initialMetaJson);
-      await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: ${message}`);
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${message}` };
-    }
+  try {
+    // Resolve spawn capability from the frozen meta (per-agent override, then
+    // the type). A spawner gets REPOAGENTS + PARENTCLAUDE writable and keeps
+    // the tmux socket; a non-spawner gets REPOAGENTS read-only and the tmux
+    // deny.
+    const spawnCanSpawnChildren = await metaCanSpawnChildren(initialMetaJson);
+    preparedSandbox = await prepareSandbox(
+      newAgentSpawnCtx,
+      resolvedSandboxConfig,
+      resolvedPathsConfig,
+      agentDir,
+      workPath,
+      rootRepoPath,
+      spawnCanSpawnChildren,
+      agentCli,
+    );
+    initialMetaJson.sandbox_proxy_port = preparedSandbox.proxyPort;
+    await writeMetaJsonAtomic(agentDir, initialMetaJson);
+    await logSpawn(
+      agentDir,
+      spawnerAgentDir,
+      id,
+      `sandbox preflight OK: profile=${preparedSandbox.profilePath} proxy=localhost:${preparedSandbox.proxyPort}`,
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    initialMetaJson.state = "stopped";
+    initialMetaJson.state_updated_at = Math.floor(Date.now() / 1000);
+    await writeMetaJsonAtomic(agentDir, initialMetaJson);
+    await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: ${message}`);
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${message}` };
   }
 
   // 13. meta.json was written early (before mkdir worktree) so the dashboard
@@ -6374,10 +6333,10 @@ echo ""
   const qStartAgentLog = shellQuote(join(agentDir, "agent.log"));
   const qStartStderrLog = shellQuote(join(agentDir, "claude.stderr.log"));
   const sandboxStartPreamble = preparedSandbox
-    ? sandboxProxyScriptPreamble(id, agentDir, preparedSandbox.proxyPort)
+    ? sandboxProxyScriptPreamble({ agentDir, port: preparedSandbox.proxyPort, agentId: id })
     : "";
   const sandboxLaunchPrefix = preparedSandbox
-    ? `${sandboxExecShellPrefix(preparedSandbox)} `
+    ? `${sandboxExecShellPrefix(preparedSandbox.profilePath, preparedSandbox.parameterValues)} `
     : "";
 
   let startContent: string;
@@ -6406,9 +6365,10 @@ echo ""
       absAgentLog: join(agentDir, "agent.log"),
       absStderrLog: join(agentDir, "claude.stderr.log"),
       extraWritableRoots: codexExtraWritableRoots,
-      sandboxEnabled: preparedSandbox !== null,
-      sandboxScriptPreamble: preparedSandbox ? sandboxStartPreamble : undefined,
-      sandboxExecPrefix: preparedSandbox ? sandboxLaunchPrefix.trimEnd() : undefined,
+      // Mandatory sandbox: the wrapper is always prepared on spawn; the generator
+      // refuses an absent wrapper.
+      sandboxScriptPreamble: sandboxStartPreamble,
+      sandboxExecPrefix: sandboxLaunchPrefix.trimEnd(),
     });
   } else if (agentCli === "agy") {
     // Antigravity CLI (`agy`) spawn branch (SPEC-ANTIGRAVITY-CLI.md §4.5). The
@@ -6435,6 +6395,10 @@ echo ""
       absExitScript,
       absAgentLog: join(agentDir, "agent.log"),
       absStderrLog: join(agentDir, "claude.stderr.log"),
+      // Mandatory sandbox: agy is wrapped like claude/codex. The wrapper is
+      // always prepared on spawn; the generator refuses it absent.
+      sandboxScriptPreamble: sandboxStartPreamble,
+      sandboxExecPrefix: sandboxLaunchPrefix.trimEnd(),
     });
   } else {
     startContent = `#!/bin/bash

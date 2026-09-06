@@ -143,6 +143,15 @@ export interface BuildAgyStartContentInput {
   absAgentLog: string;
   /** Absolute path to claude.stderr.log (sidecar; reused name for back-compat). */
   absStderrLog: string;
+  /**
+   * Proxy startup + environment exports rendered by the shared sandbox wiring
+   * (src/sandbox-launch.ts). MANDATORY — the kernel sandbox always wraps an agy
+   * launch now; the builder THROWS if this or `sandboxExecPrefix` is empty
+   * (refuse absent wrapper).
+   */
+  sandboxScriptPreamble: string;
+  /** `sandbox-exec -f ... -D ...` prefix rendered by the shared sandbox wiring (MANDATORY). */
+  sandboxExecPrefix: string;
 }
 
 /**
@@ -166,6 +175,12 @@ export interface BuildAgyStartContentInput {
  */
 export function buildAgyStartContent(input: BuildAgyStartContentInput): string {
   assertAgyLaunchPreconditions(input.ibBinaryPath, input.agentId, input.agyModel, "launch");
+  // Mandatory sandbox: refuse to render an agy launch without the wrapper.
+  if (!input.sandboxScriptPreamble || !input.sandboxExecPrefix) {
+    throw new Error("agy launch requires the sandbox proxy preamble and sandbox-exec prefix (mandatory sandbox)");
+  }
+  const sandboxPreamble = input.sandboxScriptPreamble;
+  const sandboxLaunchPrefix = `${input.sandboxExecPrefix} `;
 
   const modelAndEffort = agyModelAndEffortFlags(input.agyModel, input.effort);
   const qAgyLog = shellQuote(join(input.agentDir, "agy.log"));
@@ -185,7 +200,7 @@ unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
 AGENT_LOG=${qStartAgentLog}
 STDERR_LOG=${qStartStderrLog}
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }${sandboxPreamble}
 
 log "Starting agy ${agyModelLogDesc(input.agyModel)} --mode=accept-edits (agy agent id=${input.agentId})"
 log "PWD=$(pwd) which_agy=$(which agy 2>&1)"
@@ -217,9 +232,9 @@ else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid ${launch} <&0 2> "$STDERR_LOG" &
+    setsid ${sandboxLaunchPrefix}${launch} <&0 2> "$STDERR_LOG" &
 else
-    ${launch} <&0 2> "$STDERR_LOG" &
+    ${sandboxLaunchPrefix}${launch} <&0 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
 log "agy PID: $CLAUDE_PID (setsid=$SETSID)"
@@ -296,6 +311,14 @@ export interface BuildAgyResumeContentInput {
   absAgentLog: string;
   /** Absolute path to claude.stderr.log (sidecar; reused name for back-compat). */
   absStderrLog: string;
+  /**
+   * Proxy startup + environment exports rendered by the shared sandbox wiring
+   * (src/sandbox-launch.ts). MANDATORY — agy resume always runs inside our
+   * Seatbelt wrapper; the builder THROWS if this or `sandboxExecPrefix` is empty.
+   */
+  sandboxScriptPreamble: string;
+  /** `sandbox-exec -f ... -D ...` prefix rendered by the shared sandbox wiring (MANDATORY). */
+  sandboxExecPrefix: string;
 }
 
 /**
@@ -312,6 +335,12 @@ export interface BuildAgyResumeContentInput {
  */
 export function buildAgyResumeContent(input: BuildAgyResumeContentInput): string {
   assertAgyLaunchPreconditions(input.ibBinaryPath, input.agentId, input.agyModel, "resume", input.conversationId);
+  // Mandatory sandbox: refuse to render an agy resume without the wrapper.
+  if (!input.sandboxScriptPreamble || !input.sandboxExecPrefix) {
+    throw new Error("agy resume requires the sandbox proxy preamble and sandbox-exec prefix (mandatory sandbox)");
+  }
+  const sandboxPreamble = input.sandboxScriptPreamble;
+  const sandboxLaunchPrefix = `${input.sandboxExecPrefix} `;
 
   const modelAndEffort = agyModelAndEffortFlags(input.agyModel, input.effort);
   const qConversation = shellQuote(input.conversationId);
@@ -331,7 +360,7 @@ unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
 AGENT_LOG=${qResumeAgentLog}
 STDERR_LOG=${qResumeStderrLog}
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [resume.sh] $1" >> "$AGENT_LOG"; }
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [resume.sh] $1" >> "$AGENT_LOG"; }${sandboxPreamble}
 
 log "Resuming agy --conversation ${input.conversationId} ${agyModelLogDesc(input.agyModel)} (agy agent id=${input.agentId})"
 log "PWD=$(pwd) which_agy=$(which agy 2>&1)"
@@ -363,9 +392,9 @@ else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid ${launch} <&0 2> "$STDERR_LOG" &
+    setsid ${sandboxLaunchPrefix}${launch} <&0 2> "$STDERR_LOG" &
 else
-    ${launch} <&0 2> "$STDERR_LOG" &
+    ${sandboxLaunchPrefix}${launch} <&0 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
 log "agy PID: $CLAUDE_PID (setsid=$SETSID)"

@@ -1296,6 +1296,52 @@ describe("teamSend send-time attachment staging", () => {
     expect(recs.filter((r) => r.message === "/shot.png hi").length).toBe(1);
   });
 
+  test("total staging failure records NO room line; the same-draft retry (empty skip) records exactly one", async () => {
+    // Regression for reviewer1's finding: a staged send that records the room
+    // line up-front and infers "fresh vs retry" from an empty skip set would
+    // append a SECOND line on the retry-after-total-failure (which also carries
+    // an empty skip, since a total failure returns acceptedRecipientIds:[]).
+    const { createTeam, addMember } = await import("./teams");
+    const { readOutbox } = await import("./outbox");
+    const { readChannel } = await import("./team-channel");
+    await createTeam("backend", "", 1000);
+    await plantMember("agent-m1");
+    await plantMember("agent-m2");
+    await addMember("backend", "agent-m1");
+    await addMember("backend", "agent-m2");
+    resetReadAgentMetaCache();
+
+    // Fail BOTH members' staging on the first attempt (calls 1 & 2), then let
+    // the retry succeed (calls 3 & 4).
+    let calls = 0;
+    setMessageAttachmentStagerForTesting(async (msg) => {
+      calls++;
+      if (calls <= 2) throw new Error("simulated total staging failure");
+      return { message: `${msg} (staged-${calls})`, staged: true, cleanup: async () => {} };
+    });
+
+    const members = [agentOf("agent-m1"), agentOf("agent-m2")];
+
+    // First attempt: every member fails -> ok:false, nothing accepted, and NO
+    // room line recorded for a failed staged attempt.
+    const first = await teamSend("backend", members, "/shot.png hi", { stageAttachments: true }, reposArg());
+    expect(first.ok).toBe(false);
+    expect(first.acceptedRecipientIds).toEqual([]);
+    expect((await readChannel("backend")).filter((r) => r.message === "/shot.png hi").length).toBe(0);
+
+    // Retry the SAME draft. A total failure returned acceptedRecipientIds:[], so
+    // the UI retries with an EMPTY skip set — this attempt now succeeds.
+    const retry = await teamSend("backend", members, "/shot.png hi", { stageAttachments: true, skipRecipientIds: [] }, reposArg());
+    expect(retry.ok).toBe(true);
+    expect(new Set(retry.acceptedRecipientIds)).toEqual(new Set(["agent-m1", "agent-m2"]));
+    expect((await readOutbox(queueDirOf("agent-m1"))).length).toBe(1);
+    expect((await readOutbox(queueDirOf("agent-m2"))).length).toBe(1);
+
+    // Exactly one room line across the failed-then-retried sequence — no dup.
+    const recs = await readChannel("backend");
+    expect(recs.filter((r) => r.message === "/shot.png hi").length).toBe(1);
+  });
+
   test("skipping every current recipient is a success no-op that reports the full accepted set", async () => {
     const { createTeam, addMember } = await import("./teams");
     const { readOutbox } = await import("./outbox");

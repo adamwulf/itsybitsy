@@ -4068,6 +4068,14 @@ function resolveTeamSenderId(repos: RepoEntry[], opts: { fromAgent?: string } | 
  * returns `ok:false` whenever ANY member failed, so the dashboard keeps the
  * draft open and retries the failed members (skipping the accepted ones). The
  * accepted members are still reported in `acceptedRecipientIds` on that failure.
+ *
+ * Room-history divergence for staged sends: a legacy fan-out records the room
+ * history line REGARDLESS of delivery outcome (§17.4). A staged send instead
+ * records it only when a fresh attempt (empty skip) delivered to at least one
+ * member — a total staging failure records nothing, and because that failure
+ * returns an empty `acceptedRecipientIds`, its same-draft retry also arrives
+ * with an empty skip set, so recording once delivery first succeeds yields
+ * exactly one room line across the failed-then-retried sequence (no duplicate).
  */
 export async function teamSend(
   teamName: string,
@@ -4126,30 +4134,37 @@ export async function teamSend(
     if (agent) recipients.push(agent);
   }
 
-  // Persist ONE channel record per send to the shared team channel (§17.4) — the
-  // chat box's backing history. Placed AFTER the not-found check (so a nonexistent
-  // team writes no channel file) but BEFORE the empty-recipient early return, so a
-  // self-only / zero-survivor send to an EXISTING team still records the message
-  // in the room's history (the §17.4 recommended default: append when the team
-  // exists and the message is non-empty, even with an empty recipient set). It is
-  // ONE record per send (NOT inside the per-recipient loop, which would write N
-  // duplicate lines) and records the message regardless of per-recipient delivery
-  // success — the channel is the room's history, not a delivery receipt.
-  // Best-effort: a channel-append failure must never fail the send (§17.4).
-  //
-  // A retry (non-empty `skipRecipientIds`) is a CONTINUATION of a send already
-  // recorded in the room on its first attempt — appending again would duplicate
-  // that history line. So record only on a fresh send (no skip set). The
-  // recorded text is always the ORIGINAL `message`; staged sends rewrite paths
-  // per recipient, and the room shows the human's intent, not any one snapshot.
+  // Record ONE channel record per send to the shared team channel (§17.4) — the
+  // chat box's backing history. ALWAYS the ORIGINAL `message` (staged sends
+  // rewrite paths per recipient; the room shows the human's intent, not any one
+  // /tmp snapshot). ONE record per send, never per recipient. Best-effort: a
+  // channel-append failure must never fail the send (§17.4).
   const skip = new Set(opts?.skipRecipientIds ?? []);
-  if (message && skip.size === 0) {
+  const stagedSend = opts?.stageAttachments === true;
+  const recordRoomMessage = async () => {
+    if (!message) return;
     await appendChannelMessage(name, {
       ts: Math.floor(Date.now() / 1000),
       fromAgent: senderId,
       message,
     }).catch(() => {});
-  }
+  };
+
+  // Legacy (non-staged) fan-out records the message REGARDLESS of delivery
+  // outcome and even for an empty/self-only recipient set (§17.4 record-
+  // regardless): the channel is the room's history, not a delivery receipt. So
+  // it records here, before the empty-recipient early return. A non-staged send
+  // never carries a skip set, so it records exactly once.
+  //
+  // A STAGED send diverges (deferred to AFTER the send loop): it must record
+  // only when at least one recipient NEWLY accepts AND this is a fresh attempt
+  // (empty skip). A total staging failure yields accepted=[] and returns an
+  // empty acceptedRecipientIds, so a same-draft retry ALSO arrives with an empty
+  // skip set — gating on empty-skip alone (as before) would append a SECOND
+  // room line on that retry. Gating on "newly accepted > 0 && skip empty" adds
+  // no line for a failed attempt and exactly one line once delivery first
+  // succeeds. (Manager: reflect this staged divergence in SPEC.)
+  if (!stagedSend) await recordRoomMessage();
 
   if (recipients.length === 0) {
     // No one to deliver to — empty team, self-only, or all-pruned. No-op success.
@@ -4177,6 +4192,7 @@ export async function teamSend(
 
   const fromAgent = senderId || undefined;
   let failures = 0;
+  let newlyAccepted = 0;
   const failureLines: string[] = [];
   for (const recipient of toSend) {
     // Thread the dashboard-only staging opts through: each recipient stages the
@@ -4193,11 +4209,20 @@ export async function teamSend(
     });
     if (res.ok) {
       accepted.add(recipient.id);
+      newlyAccepted++;
     } else {
       failures++;
       failureLines.push(`  ${recipient.id}: ${res.stderr || "delivery failed"}`);
     }
   }
+
+  // Staged send: record the room history line now that delivery outcomes are
+  // known — only on a fresh attempt (empty skip) that delivered to at least one
+  // member. A failed attempt (nothing newly accepted) records nothing, so its
+  // same-draft retry (which also arrives with an empty skip set) records exactly
+  // one line once delivery first succeeds; a genuine retry (non-empty skip) was
+  // already recorded on the accepting attempt and appends nothing here.
+  if (stagedSend && skip.size === 0 && newlyAccepted > 0) await recordRoomMessage();
 
   const acceptedRecipientIds = [...accepted];
   const delivered = toSend.length - failures;

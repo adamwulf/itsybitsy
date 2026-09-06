@@ -18,6 +18,7 @@ import { getStateColors } from "./color-scheme";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
 import { buildFocusSeparator } from "./focus";
 import { RESET, BOLD, DIM, RED, GREEN, CYAN, REVERSE, DIM_GRAY, YELLOW } from "./colors";
+import { formatSandboxDisplay } from "./sandbox-format";
 
 // Right pane modes
 export const PANE_MODES = [
@@ -75,6 +76,8 @@ export function colorizeDiff(lines: string[]): string[] {
 /** Colorize agent log lines — dim timestamps, cyan bracket markers */
 export function colorizeLog(lines: string[]): string[] {
   return lines.map((line) => {
+    const sandbox = /^(\[\d{4}-[^\]]*\]) (\[Sandbox(?:Proxy)?\] .*)$/.exec(line);
+    if (sandbox) return `${DIM}${sandbox[1]}${RESET} ${formatSandboxDisplay(sandbox[2]!)}`;
     let result = line.replace(/^(\[\d{4}-[^\]]*\])/, `${DIM}$1${RESET}`);
     result = result.replace(new RegExp(`(?<=${escapeForRegex(RESET)}.*)(\\[[^\\]]+\\])`, "g"), `${CYAN}$1${RESET}`);
     return result;
@@ -319,8 +322,7 @@ export class RightPaneComponent implements Component {
           this.content = [`${DIM}${denials.length - alerts} denial(s)${alerts ? `, ${alerts} collector alert(s)` : ""}${RESET}`];
           if (denials.length === 0) { this.content.push(`${DIM}No denials found${RESET}`); }
           else { for (const d of denials) {
-            const stripped = d.line.replace(/^\[.*?\] /, "").replace(/^\[PreToolUse\] /, "")
-              .replace(/^(\[Sandbox(?:Proxy)?\]) ((?:denied )?[a-z][a-z0-9*-]*)/, `${CYAN}$1${RESET} ${YELLOW}$2${RESET}`);
+            const stripped = formatSandboxDisplay(d.line.replace(/^\[.*?\] /, "").replace(/^\[PreToolUse\] /, ""));
             this.content.push(`${DIM}[${d.timestamp}]${RESET} ${stripped}`);
           } }
         }

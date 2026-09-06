@@ -933,7 +933,7 @@ describe("loadDenials (lazy)", () => {
     ctx.rightPane.mode = "DENIALS";
     ctx.rightPane.updateContent();
     const displayed = ctx.rightPane.render(500).map(stripAnsi).join("\n");
-    expect(displayed).toContain("[Sandbox] file-read-data");
+    expect(displayed).toContain('[Sandbox] file-read process="cat" path="/private/tmp/denied"');
     expect(displayed).toContain("[SandboxCollector] ERROR:");
     expect(displayed).toContain("3 denial(s), 1 collector alert(s)");
     expect(displayed.match(/23:01:34\.988314-0500/g)?.length).toBe(1);
@@ -961,7 +961,7 @@ describe("loadDenials (lazy)", () => {
     triggerAsyncLoadIfNeeded(ctx);
     expect(ctx.rightPane.denialsLoading).toBe(true);
     ctx.rightPane.updateContent();
-    expect(ctx.rightPane.render(500).map(stripAnsi).join("\n")).toContain("file-read-data");
+    expect(ctx.rightPane.render(500).map(stripAnsi).join("\n")).toContain('file-read process="security" path="/Users/adamwulf"');
     for (let i = 0; i < 50 && ctx.rightPane.denialsLoading; i++) {
       await new Promise(resolve => setTimeout(resolve, 10));
     }

@@ -37,6 +37,8 @@ import {
   restartSystemCoordinatorFresh,
 } from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
+import { agentWorktreePath } from "../agents";
+import { checkWorktreeCleanliness } from "../git-status";
 import { SplitPane } from "./split-pane";
 import { wordWrapLines, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
 import type { ChromeSlice } from "./wrap";
@@ -666,6 +668,17 @@ export class DashboardComponent implements Component {
    * a load() inside render() would call requestRender on completion and spin.
    */
   private channelRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Periodic "Git Status" stoplight refresh (SPEC §11.4). Every tick probes
+   * the SELECTED agent's worktree with `git status --porcelain` via
+   * `refreshGitStatus` and writes the answer to `infoPanel.gitCleanliness`.
+   * Driven off a timer (plus a one-shot on selection change) — NOT off
+   * render() — for the same reason as `channelRefreshTimer`: a probe inside
+   * render() would call requestRender on completion and spin.
+   */
+  private gitStatusTimer: ReturnType<typeof setInterval> | null = null;
+  /** In-flight guard so a slow `git status` never stacks up behind itself. */
+  private gitStatusInFlight = false;
   private telegramStatus: "red" | "yellow" | "green" | null = null;
   telegramStatusTimer: ReturnType<typeof setInterval> | null = null;
   /** Tracks in-flight executeAndRefresh promises — used by tests to await completion */
@@ -1060,6 +1073,13 @@ export class DashboardComponent implements Component {
     this.channelRefreshTimer = setInterval(() => {
       void this.refreshChannel();
     }, 1000);
+    // "Git Status" stoplight tick (§11.4). Only does work when an agent is
+    // selected (refreshGitStatus returns immediately otherwise). 3s matches
+    // the client-attached check cadence — one `git status` per selected agent
+    // every few seconds is cheap, and selection changes probe immediately.
+    this.gitStatusTimer = setInterval(() => {
+      void this.refreshGitStatus();
+    }, 3000);
   }
 
   stopPolling() {
@@ -1073,6 +1093,10 @@ export class DashboardComponent implements Component {
     if (this.channelRefreshTimer) {
       clearInterval(this.channelRefreshTimer);
       this.channelRefreshTimer = null;
+    }
+    if (this.gitStatusTimer) {
+      clearInterval(this.gitStatusTimer);
+      this.gitStatusTimer = null;
     }
     if (this.clientCheckTimer) {
       clearInterval(this.clientCheckTimer);
@@ -1821,6 +1845,13 @@ export class DashboardComponent implements Component {
         loadAgentPrompt(this, selected);
       }
 
+      // "Git Status" stoplight (§11.4): drop the previous agent's answer so the
+      // light goes grey (unknown) rather than showing a stale colour for the
+      // new selection, then probe the new agent's worktree right away instead
+      // of waiting up to one gitStatusTimer tick.
+      this.infoPanel.gitCleanliness = null;
+      void this.refreshGitStatus();
+
       // Client detection: clear previous timer, check new agent
       if (this.clientCheckTimer) {
         clearInterval(this.clientCheckTimer);
@@ -2029,6 +2060,31 @@ export class DashboardComponent implements Component {
       return;
     }
     if (this.channelPane.teamName !== teamName) return;
+    this.tui?.requestRender();
+  }
+
+  /**
+   * Refresh the info panel's "Git Status" stoplight for the SELECTED agent
+   * (§11.4). Driven off `gitStatusTimer` and a one-shot on selection change —
+   * NOT off render(). No-op when no agent is selected or a probe is already in
+   * flight. Reads the effective selection from `infoPanel.agent` (set by
+   * `syncSelectedAgent`, so a team-member selection works the same as an
+   * Agents-tree one) and snapshots the id so a selection change during the
+   * await discards the result instead of colouring the wrong agent's light.
+   */
+  private async refreshGitStatus(): Promise<void> {
+    const agent = this.infoPanel.agent;
+    if (!agent || this.gitStatusInFlight) return;
+    this.gitStatusInFlight = true;
+    let cleanliness: Awaited<ReturnType<typeof checkWorktreeCleanliness>>;
+    try {
+      cleanliness = await checkWorktreeCleanliness(agentWorktreePath(agent));
+    } finally {
+      this.gitStatusInFlight = false;
+    }
+    if (this.infoPanel.agent?.id !== agent.id) return;
+    if (this.infoPanel.gitCleanliness === cleanliness) return;
+    this.infoPanel.gitCleanliness = cleanliness;
     this.tui?.requestRender();
   }
 

@@ -30,6 +30,7 @@ import {
   killTmuxSessionResult,
 } from "./tmux-poller";
 import { tmuxSessionTarget } from "./validation";
+import { gitStatusSpawnCtx, checkWorktreeCleanliness } from "./git-status";
 import type { SpawnFn } from "./types";
 
 function streamOf(text: string): ReadableStream<Uint8Array> {
@@ -62,6 +63,26 @@ const FIXED_SESSION_COMMANDS = {
 afterEach(() => {
   coordinatorSpawnCtx.reset();
   tmuxPollerSpawnCtx.reset();
+  gitStatusSpawnCtx.reset();
+});
+
+// The dashboard's "Git Status" stoplight probe shares the same backstop: its
+// timer + selection-change trigger reach `git status` from nearly every
+// dashboard test, and late ticks keep firing after a test's `.reset()`.
+describe("git-status probe backstop", () => {
+  test("gitStatusSpawnCtx.reset() restores the safety stub, not Bun.spawn", () => {
+    gitStatusSpawnCtx.set(((): any => { throw new Error("real spawn must never run"); }) as SpawnFn);
+    gitStatusSpawnCtx.reset();
+    expect(gitStatusSpawnCtx.runner).toBe(safeTestSpawnRunner);
+    expect(gitStatusSpawnCtx.runner).not.toBe(Bun.spawn as unknown as SpawnFn);
+  });
+
+  test("checkWorktreeCleanliness on the stub reports clean without spawning", async () => {
+    gitStatusSpawnCtx.reset();
+    expect(gitStatusSpawnCtx.runner).toBe(safeTestSpawnRunner);
+    // The stub yields stdout "" / exit 0 — an empty porcelain listing.
+    expect(await checkWorktreeCleanliness("/nonexistent/agent/worktree")).toBe("clean");
+  });
 });
 
 describe("tmux safety backstop — reset baseline", () => {

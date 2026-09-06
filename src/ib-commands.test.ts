@@ -1470,6 +1470,51 @@ describe("teamSend send-time attachment staging", () => {
     expect(recs.filter((r) => r.message === "/shot.png hi").length).toBe(1);
   });
 
+  test("partial-accept then a skip-carrying retry with the roster pruned empty records NO duplicate room line", async () => {
+    // Reviewer1 LOW: the empty-recipient staged record needs a skip guard. A
+    // fresh partial attempt accepts m1 (records one room line); then every
+    // member is pruned before the retry, so the skip-carrying retry hits the
+    // recipients.length===0 branch — it must NOT record a second line.
+    const { createTeam, addMember } = await import("./teams");
+    const { readChannel } = await import("./team-channel");
+    await createTeam("backend", "", 1000);
+    await plantMember("agent-m1");
+    await plantMember("agent-m2");
+    await addMember("backend", "agent-m1");
+    await addMember("backend", "agent-m2");
+    resetReadAgentMetaCache();
+
+    // m1 accepts, m2 fails on the fresh attempt (partial) -> one room line.
+    let calls = 0;
+    setMessageAttachmentStagerForTesting(async (msg) => {
+      calls++;
+      if (calls === 2) throw new Error("simulated staging failure for agent-m2");
+      return { message: `${msg} (staged-${calls})`, staged: true, cleanup: async () => {} };
+    });
+    const members = [agentOf("agent-m1"), agentOf("agent-m2")];
+
+    const first = await teamSend("backend", members, "/shot.png hi", { stageAttachments: true }, reposArg());
+    expect(first.ok).toBe(false);
+    expect(first.acceptedRecipientIds).toEqual(["agent-m1"]);
+    expect((await readChannel("backend")).filter((r) => r.message === "/shot.png hi").length).toBe(1);
+
+    // Both members die before the retry -> pruneDeadMembers empties the roster.
+    await rm(join(repoDir, ".ittybitty", "agents", "agent-m1"), { recursive: true, force: true });
+    await rm(join(repoDir, ".ittybitty", "agents", "agent-m2"), { recursive: true, force: true });
+    resetReadAgentMetaCache();
+
+    // Retry the SAME draft, skipping the accepted m1. All members are now pruned
+    // -> recipients.length===0 with a NON-empty skip set -> no duplicate record.
+    const retry = await teamSend(
+      "backend", members, "/shot.png hi",
+      { stageAttachments: true, skipRecipientIds: ["agent-m1"] },
+      reposArg(),
+    );
+    expect(retry.ok).toBe(true);
+    expect(retry.stdout).toContain("no recipients"); // roster pruned empty — the branch under test
+    expect((await readChannel("backend")).filter((r) => r.message === "/shot.png hi").length).toBe(1);
+  });
+
   test("skipping every current recipient is a success no-op that reports the full accepted set", async () => {
     const { createTeam, addMember } = await import("./teams");
     const { readOutbox } = await import("./outbox");

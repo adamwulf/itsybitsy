@@ -4113,7 +4113,10 @@ function resolveTeamSenderId(repos: RepoEntry[], opts: { fromAgent?: string } | 
  * also arrives with an empty skip set, so recording once delivery first succeeds
  * yields exactly one room line across the failed-then-retried sequence (no
  * duplicate). A staged send with NO recipients (empty/self-only team) is a
- * room-only send with nothing to stage — it records once like a legacy send.
+ * room-only send with nothing to stage — it records once like a legacy send,
+ * but only on a FRESH attempt (empty skip): a skip-carrying retry that finds the
+ * roster emptied by pruning was already recorded on its accepting attempt, so it
+ * records nothing here.
  */
 export async function teamSend(
   teamName: string,
@@ -4209,9 +4212,12 @@ export async function teamSend(
     // send: nothing to stage or copy. Still record the room history line (§17.4
     // records even with an empty recipient set). A legacy send already recorded
     // it above; a STAGED send records it HERE (its deferred post-loop record
-    // never runs when there are no recipients). This is a one-shot success, not
-    // a retried failure, so recording once cannot duplicate.
-    if (stagedSend) await recordRoomMessage();
+    // never runs when there are no recipients) — but ONLY on a fresh attempt
+    // (empty skip). A retry that empties the roster (a member accepted on the
+    // first attempt, then every member was pruned before the skip-carrying
+    // retry) already recorded on that first attempt; recording again here would
+    // duplicate the line, so the skip guard suppresses it.
+    if (stagedSend && skip.size === 0) await recordRoomMessage();
     return { ...teamOk(`no recipients in @${name}`), acceptedRecipientIds: [] };
   }
 

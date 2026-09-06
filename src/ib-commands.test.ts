@@ -1117,6 +1117,34 @@ describe("sendMessage send-time attachment staging", () => {
     expect(queued[0]!.noPassthrough).toBe(true);
   });
 
+  test("a THROWN inline-drain error after enqueue is caught: staged send reports success and retains the queued message", async () => {
+    // Distinct from the ok:false has-session case above: here the drain THROWS
+    // an exception. For a staged send that must still be caught and reported as
+    // accepted (ok:true) — an unhandled rejection would look like a failure to
+    // the dashboard and induce a duplicate retry.
+    let cleaned = false;
+    setMessageAttachmentStagerForTesting(async () => ({
+      message: "/private/tmp/staged/x.png hi", staged: true,
+      cleanup: async () => { cleaned = true; },
+    }));
+    setSendSpawnRunner(() => {
+      throw new Error("spawn blew up during drain");
+    });
+
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    const result = await sendMessage(agent, "/src/x.png hi", { cwd: "/", stageAttachments: true });
+
+    expect(result.ok).toBe(true); // caught — accepted despite the thrown drain error
+    expect(result.stderr).toContain("Delivery error after enqueue");
+    expect(result.stderr).toContain("spawn blew up during drain");
+    expect(cleaned).toBe(false); // copies retained — the agent hasn't read them yet
+    const { readOutbox } = await import("./outbox");
+    const queued = await readOutbox(queueDir);
+    expect(queued.length).toBe(1); // exactly one retained record — nothing delivered/removed
+    expect(queued[0]!.message).toBe("/private/tmp/staged/x.png hi");
+    expect(queued[0]!.noPassthrough).toBe(true);
+  });
+
   test("stageAttachments with a real /clear (no file paths) preserves slash-command passthrough", async () => {
     // The real module leaves an unquoted /clear-style token alone (staged:false),
     // so passthrough survives: the message is delivered verbatim with no prefix.

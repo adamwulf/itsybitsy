@@ -84,19 +84,34 @@ The agy runtime root is shared state under the user home. Granting it only to ag
 ### Capability investigation (2026-09-05)
 
 The denial-logging implementation is blocked at the live capability probe. This
-Codex session's PreToolUse hook rejected both commands before execution with
-`Tool not in allow list`:
+Codex session's PreToolUse hook initially rejected both commands before execution
+with `Tool not in allow list`:
 
 ```sh
 /usr/bin/sandbox-exec -p '(version 1) (allow default)' /usr/bin/true
 /usr/bin/log help stream
 ```
 
-This is a tool authorization failure, distinct from the earlier nested Seatbelt
-`sandbox_apply: Operation not permitted` failure. Neither probe ran. No event
-fields, privileges, readiness behavior, or safe process-attribution method have
-been established in this session. No production collector or DENIALS integration
-is implemented, and no live acceptance criterion has passed.
+Adam subsequently granted both command permissions. Retrying reached macOS and
+established two OS-level capability failures:
+
+- `sandbox-exec` exited **71**: `sandbox-exec: sandbox_apply: Operation not permitted`.
+- `log help stream` exited **64**: `log: Cannot run while sandboxed`.
+
+The host-side probe's `--run` mode also failed honestly with exit **1** after its
+`log stream` process exited **64** with the same error. It saved empty raw event
+output and the exact stderr/exit result; no sandbox fixture commands ran because
+the stream was unavailable. The artifact directory for this attempt is
+`/private/var/folders/n3/nm2j2qb55ss7ystx9_vps3lw0000gn/T/ib-denial-probe-fVuqx1`.
+
+Command authorization is no longer the blocker; this execution environment
+cannot apply even an allow-default Seatbelt profile or read the unified log.
+No event fields, readiness behavior, or safe process-attribution method have
+been established. A context that permits both operations is required; no bypass
+was attempted. Adam subsequently authorized one worker specifically for live
+testing, with implementation and self-review remaining in this Codex session.
+That independent capability attempt is pending. No production collector or DENIALS integration is
+implemented, and no live acceptance criterion has passed.
 
 `scripts/probe-sandbox-denials.ts` prepares an isolated temporary fixture using
 the current profile generator and shipped `_all.md` floor, with an explicit deny
@@ -130,11 +145,14 @@ real lifecycle/dashboard acceptance checks, remain outstanding.
 Local validation of the probe preparation: preparation-only execution passed;
 `bunx tsc --noEmit` passed; the scoped non-live sandbox suite passed 98 tests
 (2 filtered); the repository-wide non-live suite passed 5,600 tests (11 filtered,
-0 failures) using `bun test --test-name-pattern '^(?!.*LIVE)'`. The unfiltered
-`bun test` run remains outstanding because it includes restricted live probes.
-These results do not establish kernel-denial capture. Self-review found no
+0 failures) using `bun test --test-name-pattern '^(?!.*LIVE)'`. After command
+permissions were granted, unfiltered `bun test` exited zero: 5,611 reported passes,
+0 failures, 29,376 assertions across 111 files. That total includes two tests
+whose bodies returned early: the kernel probe reported the exit-71 nested-profile
+capability skip; Claude boot reported its missing `IB_LIVE_BOOT=1` opt-in skip.
+Neither is a live pass. These results do not establish kernel-denial capture. Self-review found no
 production lifecycle, hook, watchdog, or dashboard changes in this probe-only
-increment. No independent reviewers were spawned, per Adam's instruction.
+increment. No independent reviewers were spawned.
 
 The goal is to capture kernel-only sandbox denials in the affected agent's `agent.log` and show them in the DENIALS pane. Hook-detected denials already reach both places; kernel-only events are not currently collected.
 

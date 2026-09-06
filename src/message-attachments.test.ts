@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import * as fsPromises from "node:fs/promises";
 import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stageMessageAttachments, type StagedMessage } from "./message-attachments";
@@ -107,5 +108,25 @@ describe("send-time message attachments", () => {
     await result.cleanup();
     await result.cleanup();
     expect(await Bun.file(paths[0]!).exists()).toBe(false);
+  });
+
+  test("cleans the whole staging attempt when a later copy fails", async () => {
+    await writeFile(join(dir, "one.png"), "one");
+    await writeFile(join(dir, "two.png"), "two");
+    const before = (await readdir("/tmp")).filter((name) => name.startsWith("itsybitsy-attachments-"));
+    const copy = fsPromises.copyFile;
+    let calls = 0;
+    const spy = spyOn(fsPromises, "copyFile").mockImplementation(async (...args) => {
+      if (++calls === 2) throw new Error("simulated copy failure");
+      await copy(...args);
+    });
+    try {
+      await expect(stage("./one.png ./two.png")).rejects.toThrow("simulated copy failure");
+      expect(calls).toBe(2);
+    } finally {
+      spy.mockRestore();
+    }
+    const after = (await readdir("/tmp")).filter((name) => name.startsWith("itsybitsy-attachments-"));
+    expect(after).toEqual(before);
   });
 });

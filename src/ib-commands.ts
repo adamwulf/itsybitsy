@@ -73,7 +73,7 @@ import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinator
 import { loadAgentType, agentTypeExists, metaCanSpawnChildren } from "./agent-types";
 import type { AgentType } from "./agent-types";
 import { isCodexBackedCli, parseModel, mapEffortForCodex, metadataCli, type AgentCli } from "./agent-cli";
-import { claudeProjectDirFor, claudeScratchpadDirFor } from "./hooks/paths-table";
+import { claudeProjectDirFor, claudeScratchpadDirFor, agyStateDirFor } from "./hooks/paths-table";
 import {
   buildHooksBlock,
   COORDINATOR_INTERCEPT_MATCHER,
@@ -1163,11 +1163,10 @@ async function prepareSandbox(
     // transcript, brain, presence, cache, log, skills), which it reads AND
     // rewrites during a session. Grant that subtree as an agy-only WRITE runtime
     // root — the mirror of claude's PROJECTDIR/SCRATCHPAD. agyStateDirFor and the
-    // SandboxProfileParams.AGYSTATEDIR field it feeds are owned by the policy
-    // worker (sandbox.ts + hooks/paths-table.ts). Wired here once integrated:
-    //   params.AGYSTATEDIR = agyStateDirFor(userHome());
-    // The hook's agentPathAccessTable computes the identical root for cli==="agy",
-    // so the kernel profile and the hook agree from the one helper.
+    // SandboxProfileParams.AGYSTATEDIR field it feeds live in hooks/paths-table.ts
+    // + sandbox.ts; the hook's agentPathAccessTable computes the identical root
+    // for cli==="agy", so the kernel profile and the hook agree from one helper.
+    params.AGYSTATEDIR = agyStateDirFor(userHome());
   }
   const profile = generateProfile(config, paths, params);
   const parameterValues = sandboxProfileParameterValues(paths, params);

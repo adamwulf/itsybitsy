@@ -945,8 +945,44 @@ describe("sendMessage outbox integration", () => {
 function mockSpawnFn(calls: string[][]): (cmd: string[], opts?: any) => SpawnResult {
   return (cmd: string[]) => {
     calls.push(cmd);
+    // Answer the mandatory sandbox subprocess preflight so a spawn/resume that
+    // reaches prepareSandbox clears `which sandbox-exec` + the compile lint.
+    const pf = sandboxPreflightAnswer(cmd);
+    if (pf) return pf;
     return makeSpawnResult();
   };
+}
+
+/**
+ * Mandatory sandbox: prepareSandbox now runs on EVERY spawn/resume, probing
+ * `which sandbox-exec` and compiling the profile via `sandbox-exec … /usr/bin/true`.
+ * Mocked spawn runners must answer both so the preflight clears without a real
+ * sandbox-exec. Returns a canonical (imported convention: exitCode, stdout)
+ * SpawnResult for those two commands, or null to fall through. Blocks with a
+ * local `makeSpawnResult(stdout, exitCode)` shadow handle it inline instead.
+ */
+function sandboxPreflightAnswer(cmd: string[]): SpawnResult | null {
+  if (cmd[0] === "which" && cmd[1] === "sandbox-exec") {
+    return makeSpawnResult(0, "/usr/bin/sandbox-exec\n");
+  }
+  if (cmd[0] === "/usr/bin/sandbox-exec") {
+    return makeSpawnResult(0, "");
+  }
+  return null;
+}
+
+/**
+ * Normalize the mandatory-sandbox bits of a generated start.sh/resume.sh that
+ * vary per run so byte-equality fixtures stay stable: the allocated proxy port,
+ * the absolute sandbox.sb profile path, and every `-D KEY=value` parameter (whose
+ * values are machine/run-specific canonical paths, including the dash-encoded
+ * Claude project/scratchpad dirs that a plain agentsDir replace cannot catch).
+ */
+function normalizeSandboxVolatile(script: string): string {
+  return script
+    .replace(/PROXY_PORT=\d+/g, "PROXY_PORT=<PORT>")
+    .replace(/-f '[^']*\/sandbox\.sb'/g, "-f '<PROFILE>'")
+    .replace(/-D '([A-Za-z_0-9]+)=[^']*'/g, "-D '$1=<VALUE>'");
 }
 
 // Helper: create a mock SpawnFn that returns failure for specific commands
@@ -958,6 +994,37 @@ function mockSpawnFnWithFailures(
     calls.push(cmd);
     return makeSpawnResult(failCommands(cmd) ? 1 : 0);
   };
+}
+
+/**
+ * Mandatory sandbox: resume now refuses any agent whose in-memory meta lacks an
+ * enabled sandbox + paths block or a valid seal. Nearly every resume test wants
+ * to exercise the resume BEHAVIOR (resume.sh, tmux, nudge), not that fail-closed
+ * gate — so this arms the fixture: it stamps `sandbox`/`paths` onto the agent's
+ * meta and writes a matching seal (via the production sealer) before resuming.
+ * Best-effort — a test whose agent dir does not exist (the "not found" path) is
+ * left untouched so it still returns "not found". Tests that DELIBERATELY assert
+ * the legacy-refusal / seal-tamper behavior build their agents with
+ * `resumeAgent(makeAgent(...))` and are intentionally NOT routed through here.
+ */
+async function armAgent(agent: Agent): Promise<void> {
+  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const hasMeta = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
+  if (!hasMeta) return;
+  (agent.meta as unknown as Record<string, unknown>).sandbox = { enabled: true, rawAllow: [], domains: [] };
+  (agent.meta as unknown as Record<string, unknown>).paths = { allowRead: [], allowWrite: [], deny: [] };
+  await sealAgentRecord(
+    agent.repoPath,
+    agent.id,
+    agent.meta as unknown as Record<string, unknown>,
+    agentDir,
+  );
+}
+
+async function armAndResume(agent: Agent) {
+  await armAgent(agent);
+  const target = agent;
+  return resumeAgent(target);
 }
 
 describe("retireAgent (native)", () => {
@@ -1220,6 +1287,11 @@ describe("retire → rehire recovery", () => {
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       manager: opts.manager ?? null,
     }).meta;
+    // Mandatory sandbox: a rehirable archive must carry an enabled sandbox +
+    // paths so the reconstructed agent clears resume's fail-closed precondition
+    // (rehireAgent re-seals the reconstructed meta itself before resuming).
+    (meta as unknown as Record<string, unknown>).sandbox = { enabled: true, rawAllow: [], domains: [] };
+    (meta as unknown as Record<string, unknown>).paths = { allowRead: [], allowWrite: [], deny: [] };
     await Bun.write(join(archiveDir, "meta.json"), JSON.stringify(meta, null, 2));
     await Bun.write(join(archiveDir, "exit-check.sh"), "#!/bin/bash\n");
     await Bun.write(
@@ -1281,6 +1353,10 @@ describe("retire → rehire recovery", () => {
   function successRunner(): SpawnFn {
     let newSessionSeen = false;
     return (cmd) => {
+      // Mandatory sandbox: rehire's internal resume runs prepareSandbox.
+      const pf = sandboxPreflightAnswer(cmd);
+      if (pf) return pf;
+      if (cmd.includes("--git-common-dir")) return makeSpawnResult(0, ".git");
       if (cmd[0] === "tmux" && cmd[1] === "new-session") {
         newSessionSeen = true;
         return makeSpawnResult();
@@ -1386,6 +1462,11 @@ describe("retire → rehire recovery", () => {
       model: "codex:gpt-5.5",
       claude_pid: "",
     });
+    // Mandatory sandbox: carry an enabled sandbox + paths so the reconstructed
+    // agent clears resume's precondition and reaches the codex_session_id check
+    // (the failure this test asserts).
+    (agent.meta as unknown as Record<string, unknown>).sandbox = { enabled: true, rawAllow: [], domains: [] };
+    (agent.meta as unknown as Record<string, unknown>).paths = { allowRead: [], allowWrite: [], deny: [] };
     await Bun.write(
       join(agentDir, "meta.json"),
       JSON.stringify(agent.meta, null, 2),
@@ -1395,6 +1476,10 @@ describe("retire → rehire recovery", () => {
     await addMember("rehire-test", agentId);
 
     const hybridRunner: SpawnFn = (cmd) => {
+      // Mandatory sandbox: answer `which sandbox-exec` + the compile lint (git
+      // rev-parse runs for real below). prepareSandbox runs on every resume.
+      const pf = sandboxPreflightAnswer(cmd);
+      if (pf) return pf;
       if (cmd[0] === "git") {
         return Bun.spawn(cmd, {
           stdout: "pipe",
@@ -1521,6 +1606,10 @@ describe("retire → rehire recovery", () => {
     );
 
     const hybridRunner: SpawnFn = (cmd) => {
+      // Mandatory sandbox: answer `which sandbox-exec` + the compile lint (git
+      // rev-parse runs for real below). prepareSandbox runs on every resume.
+      const pf = sandboxPreflightAnswer(cmd);
+      if (pf) return pf;
       if (cmd[0] === "git") {
         return Bun.spawn(cmd, {
           stdout: "pipe",
@@ -1586,6 +1675,10 @@ describe("retire → rehire recovery", () => {
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       nickname: "shared-name",
     }).meta;
+    // Mandatory sandbox: archive must carry enabled sandbox + paths so the
+    // reconstructed agent clears resume's fail-closed precondition.
+    (meta as unknown as Record<string, unknown>).sandbox = { enabled: true, rawAllow: [], domains: [] };
+    (meta as unknown as Record<string, unknown>).paths = { allowRead: [], allowWrite: [], deny: [] };
     await Bun.write(
       join(archiveDir, "meta.json"),
       JSON.stringify(meta, null, 2),
@@ -1625,6 +1718,9 @@ describe("retire → rehire recovery", () => {
 
     let newSessionSeen = false;
     const runner: SpawnFn = (cmd) => {
+      const pf = sandboxPreflightAnswer(cmd);
+      if (pf) return pf;
+      if (cmd.includes("--git-common-dir")) return makeSpawnResult(0, ".git");
       if (cmd[0] === "tmux" && cmd[1] === "new-session") {
         newSessionSeen = true;
         return makeSpawnResult();
@@ -2113,6 +2209,15 @@ describe("resumeAgent (native)", () => {
       if (cmd[0] === "git" && cmd.includes("rev-parse") && cmd.includes("--git-common-dir")) {
         return makeSpawnResult(0, "/tmp/repo/.git\n");
       }
+      // Sandbox subprocess preflight (mandatory sandbox): every resume is
+      // sandboxed now, so prepareSandbox probes `which sandbox-exec` + compiles
+      // the profile. Mock both so resume clears preflight without a real binary.
+      if (cmd[0] === "which" && cmd[1] === "sandbox-exec") {
+        return makeSpawnResult(0, "/usr/bin/sandbox-exec\n");
+      }
+      if (cmd[0] === "/usr/bin/sandbox-exec") {
+        return makeSpawnResult(0, "");
+      }
       return makeSpawnResult();
     };
   }
@@ -2162,7 +2267,7 @@ describe("resumeAgent (native)", () => {
 
   test("returns error when agent directory doesn't exist", async () => {
     const agent = makeAgent("agent-abc", tempDir, "stopped");
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("not found");
@@ -2188,7 +2293,7 @@ describe("resumeAgent (native)", () => {
     // Even with state="stopped", a live tmux session must refuse resume.
     const agent = makeAgent("agent-abc", tempDir, "stopped");
     agent.meta.tmux_session = "tmux-agent-abc";
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("live tmux session");
@@ -2212,7 +2317,7 @@ describe("resumeAgent (native)", () => {
       state: "stopped",
       meta: { session_id: "", tmux_session: "tmux-agent-abc" } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("session_id");
@@ -2239,7 +2344,7 @@ describe("resumeAgent (native)", () => {
         model: "claude:opus",
       } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
 
     expect(result.ok).toBe(true);
     expect(result.stdout).toContain("ib look agent-abc");
@@ -2294,7 +2399,7 @@ describe("resumeAgent (native)", () => {
         effort: "high",
       } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
     expect(result.ok).toBe(true);
 
     const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
@@ -2323,7 +2428,7 @@ describe("resumeAgent (native)", () => {
         model: "claude:opus",
       } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
     expect(result.ok).toBe(true);
 
     const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
@@ -2351,7 +2456,7 @@ describe("resumeAgent (native)", () => {
         model: "claude:opus",
       } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
     expect(result.ok).toBe(true);
 
     const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
@@ -2396,7 +2501,7 @@ describe("resumeAgent (native)", () => {
         model: "claude:opus",
       } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
     expect(result.ok).toBe(true);
 
     const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
@@ -2414,9 +2519,10 @@ describe("resumeAgent (native)", () => {
     // setsid gives claude its own session (defense-in-depth) with a graceful
     // fallback when setsid is absent — the inherited SIG_IGN still covers that.
     expect(resumeScript).toContain("command -v setsid");
-    expect(resumeScript).toContain("setsid claude --resume");
+    // Mandatory sandbox: claude is wrapped by the sandbox-exec prefix on both arms.
+    expect(resumeScript).toMatch(/setsid sandbox-exec .* claude --resume/);
     // Fallback bare launch is still present for hosts without setsid.
-    expect(resumeScript).toMatch(/^ *claude --resume "/m);
+    expect(resumeScript).toMatch(/^ *sandbox-exec .* claude --resume "/m);
 
     // ORDERING (the subtle part): `trap '' HUP` must be installed BEFORE claude
     // is forked so the SIG_IGN disposition is inherited by the child. If the
@@ -2424,7 +2530,7 @@ describe("resumeAgent (native)", () => {
     // a stray SIGHUP and die — reintroducing the bug.
     const hupIdx = resumeScript.indexOf("trap '' HUP");
     const setsidGuardIdx = resumeScript.indexOf("command -v setsid");
-    const firstLaunchIdx = resumeScript.search(/(setsid )?claude --resume "/);
+    const firstLaunchIdx = resumeScript.search(/(setsid )?sandbox-exec .* claude --resume "/);
     expect(hupIdx).toBeGreaterThan(-1);
     expect(hupIdx).toBeLessThan(firstLaunchIdx);
     // UNCONDITIONAL: the HUP-ignore must not be gated on setsid — it appears
@@ -2459,7 +2565,7 @@ describe("resumeAgent (native)", () => {
         model: "claude:opus",
       } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
     expect(result.ok).toBe(true);
 
     // window-size manual prevents tmux from auto-resizing the agent's
@@ -2494,7 +2600,7 @@ describe("resumeAgent (native)", () => {
         tmux_session: "tmux-agent-abc",
       } as any,
     });
-    await resumeAgent(agent);
+    await armAndResume(agent);
 
     const log = await Bun.file(join(agentDir, "agent.log")).text();
     expect(log).toContain("Agent resumed, nudge sent");
@@ -2520,7 +2626,7 @@ describe("resumeAgent (native)", () => {
         tmux_session: "tmux-agent-abc",
       } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
 
     expect(result.ok).toBe(true);
 
@@ -2551,7 +2657,7 @@ describe("resumeAgent (native)", () => {
       state: "stopped",
       meta: { session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890", tmux_session: "tmux-agent-abc", model: 'opus$(whoami)' } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("Invalid model name");
   });
@@ -2572,7 +2678,7 @@ describe("resumeAgent (native)", () => {
       state: "stopped",
       meta: { session_id: '$(whoami)', tmux_session: "tmux-agent-abc" } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("Invalid session ID");
   });
@@ -2593,7 +2699,7 @@ describe("resumeAgent (native)", () => {
       state: "stopped",
       meta: { session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890", tmux_session: 'session$(whoami)' } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("Invalid tmux session name");
   });
@@ -2617,7 +2723,7 @@ describe("resumeAgent (native)", () => {
         tmux_session: "tmux-agent-abc",
       } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
     expect(result.ok).toBe(true);
 
     const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
@@ -2662,7 +2768,7 @@ describe("resumeAgent (native)", () => {
         manager: null,
       } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
 
     expect(result.ok).toBe(true);
     expect(watchdogSpawned).toBe(true);
@@ -2694,7 +2800,7 @@ describe("resumeAgent (native)", () => {
         manager: null,
       } as any,
     });
-    await resumeAgent(agent);
+    await armAndResume(agent);
 
     const meta = await Bun.file(join(agentDir, "meta.json")).json();
     expect(meta.watchdog_pid).toBe(fakePid);
@@ -2726,7 +2832,7 @@ describe("resumeAgent (native)", () => {
         tmux_session: "tmux-agent-abc",
       } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
 
     expect(result.ok).toBe(true);
     expect(result.stdout).toContain("ib look agent-abc");
@@ -2756,7 +2862,7 @@ describe("resumeAgent (native)", () => {
         tmux_session: "tmux-agent-abc",
       } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
 
     expect(result.ok).toBe(true);
     expect(result.stdout).toContain("ib look agent-abc");
@@ -2788,7 +2894,7 @@ describe("resumeAgent (native)", () => {
         created_epoch: Math.floor(Date.now() / 1000),
       } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("still being created");
@@ -2879,7 +2985,7 @@ describe("resumeAgent (native)", () => {
         } as any,
       });
 
-      await resumeAgent(agent);
+      await armAndResume(agent);
 
       // Old meta.json must be gone — proves nukeAgent ran.
       // (resetCoordinator removes the dir before respawning, and the respawn
@@ -2921,7 +3027,7 @@ describe("resumeAgent (native)", () => {
         } as any,
       });
 
-      const result = await resumeAgent(agent);
+      const result = await armAndResume(agent);
 
       // If respawn succeeded, stdout should reflect the reset.
       // If it failed (test environment limitations), stderr should at
@@ -2957,7 +3063,7 @@ describe("resumeAgent (native)", () => {
         } as any,
       });
 
-      const result = await resumeAgent(agent);
+      const result = await armAndResume(agent);
 
       expect(result.ok).toBe(true);
       // Regular resume path: resume.sh exists, agent dir intact.
@@ -2996,17 +3102,18 @@ describe("resumeAgent (native)", () => {
         model: "claude:sonnet",
       } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
     expect(result.ok).toBe(true);
 
     const rawResumeSh = await Bun.file(join(agentDir, "resume.sh")).text();
     // Normalise per-run varying bits:
     //   * tempDir prefix → <AGENTSDIR>
     //   * UUID session id → <SESSION-UUID>
+    //   * mandatory-sandbox proxy port / profile path / -D param values
     const sessionUuidPattern = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
-    const normalised = rawResumeSh
+    const normalised = normalizeSandboxVolatile(rawResumeSh
       .replaceAll(tempDir, "<AGENTSDIR>")
-      .replaceAll(sessionUuidPattern, "<SESSION-UUID>");
+      .replaceAll(sessionUuidPattern, "<SESSION-UUID>"));
 
     const fixturePath = join(
       import.meta.dir.replace(/\/src$/, ""),
@@ -3050,7 +3157,7 @@ describe("resumeAgent (native)", () => {
         codex_session_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
       } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
 
     expect(result.ok).toBe(true);
     // resume.sh should be created with codex launch line.
@@ -3058,7 +3165,10 @@ describe("resumeAgent (native)", () => {
     expect(resumeScript).toContain("codex resume '019e7b21-cb7d-7f23-8674-11036ed141ef'");
     expect(resumeScript).toContain("--dangerously-bypass-hook-trust");
     expect(resumeScript).toContain("-a never");
-    expect(resumeScript).toContain("-s workspace-write");
+    // Mandatory sandbox: codex resume runs danger-full-access inside our wrapper.
+    expect(resumeScript).toContain("-s danger-full-access");
+    expect(resumeScript).not.toContain("-s workspace-write");
+    expect(resumeScript).toMatch(/setsid sandbox-exec .* codex resume/);
     // Must NOT use claude --resume.
     expect(resumeScript).not.toContain("claude --resume");
 
@@ -3097,8 +3207,13 @@ describe("resumeAgent (native)", () => {
     }));
 
     // Custom runner for non-dry-run tmux/git ops (default resume runner-ish).
+    // Mandatory sandbox: answer the sandbox preflight so prepareSandbox succeeds
+    // and the codex dispatcher precheck (the failure under test) is reached.
     const baseRunner = (cmd: string[]): SpawnResult => {
       spawnCalls.push(cmd);
+      const pf = sandboxPreflightAnswer(cmd);
+      if (pf) return pf;
+      if (cmd.includes("--git-common-dir")) return makeSpawnResult(0, ".git");
       if (cmd[0] === "tmux" && cmd[1] === "new-session") return makeSpawnResult();
       if (cmd.includes("has-session")) return makeSpawnResult(1);
       return makeSpawnResult();
@@ -3123,7 +3238,7 @@ describe("resumeAgent (native)", () => {
         codex_session_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
       } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("codex dispatcher precheck failed");
@@ -3165,7 +3280,7 @@ describe("resumeAgent (native)", () => {
         codex_session_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
       } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("live tmux session");
@@ -3193,7 +3308,7 @@ describe("resumeAgent (native)", () => {
         model: "codex:gpt-5.4-mini",
       } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("codex_session_id not yet captured");
@@ -3223,7 +3338,7 @@ describe("resumeAgent (native)", () => {
         codex_session_id: "not-a-valid-uuid!@#",
       } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("Invalid codex_session_id");
@@ -3258,15 +3373,20 @@ describe("resumeAgent (native)", () => {
         allowWrite: ["/frozen/agy/write"],
         deny: ["**/agy-secret"],
       };
-      const frozenSandbox = { enabled: false, rawAllow: [], domains: [] };
-      await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      // Mandatory sandbox: agy is now sandboxed, so its frozen policy is enabled.
+      const frozenSandbox = { enabled: true, rawAllow: [], domains: [] };
+      const agyMeta = {
         id: "agent-agy-ok",
         tmux_session: "tmux-agent-agy-ok",
         model: "agy:gemini-3.7-flash-low",
         agy_conversation_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
         paths: frozenPaths,
         sandbox: frozenSandbox,
-      }));
+      };
+      await Bun.write(join(agentDir, "meta.json"), JSON.stringify(agyMeta));
+      // Seal the frozen policy so resume's seal-verify passes (arm manually here
+      // rather than via armAndResume, which would clobber the frozen paths).
+      await sealAgentRecord(tempDir, "agent-agy-ok", agyMeta as unknown as Record<string, unknown>, agentDir);
       const agent = _makeAgent({
         id: "agent-agy-ok",
         repoPath: tempDir,
@@ -3297,7 +3417,8 @@ describe("resumeAgent (native)", () => {
       expect(rule).toContain("/frozen/agy/read");
       expect(rule).toContain("/frozen/agy/write");
       expect(rule).toContain("**/agy-secret");
-      expect(rule).toContain("The kernel sandbox is unavailable for agy");
+      // Mandatory sandbox: agy is now wrapped by the kernel like every other CLI.
+      expect(rule).toContain("The kernel sandbox is ON");
 
       // tmux new-session ran with the resume script.
       const newSessionCall = spawnCalls.find(c => c[0] === "tmux" && c[1] === "new-session");
@@ -3327,7 +3448,7 @@ describe("resumeAgent (native)", () => {
           model: "agy:gemini-3.7-flash-low",
         } as any,
       });
-      const result = await resumeAgent(agent);
+      const result = await armAndResume(agent);
       expect(result.ok).toBe(false);
       expect(result.stderr).toContain("agy_conversation_id not yet captured");
       expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
@@ -4211,6 +4332,17 @@ describe("newAgent (native)", () => {
         return makeSpawnResult(".git", 0);
       }
 
+      // Sandbox subprocess preflight (mandatory sandbox): mock `which
+      // sandbox-exec` + the `sandbox-exec … /usr/bin/true` compile lint so every
+      // newAgent spawn — now ALWAYS sandboxed — clears prepareSandbox without a
+      // real sandbox-exec. sandboxSpawnRunner overrides these to inject failures.
+      if (cmd[0] === "which" && cmd[1] === "sandbox-exec") {
+        return makeSpawnResult("/usr/bin/sandbox-exec", 0);
+      }
+      if (cmd[0] === "/usr/bin/sandbox-exec") {
+        return makeSpawnResult("", 0);
+      }
+
       // which gh
       if (cmdStr.includes("which gh")) {
         return makeSpawnResult(overrides?.whichGhExists ? "/usr/local/bin/gh" : "", overrides?.whichGhExists ? 0 : 1);
@@ -4246,6 +4378,23 @@ describe("newAgent (native)", () => {
       }),
       exited: Promise.resolve(exitCode),
     };
+  }
+
+  /**
+   * Mandatory sandbox: prepareSandbox runs on EVERY spawn now, probing `which
+   * sandbox-exec`, resolving the git common dir, and compiling the profile. Any
+   * custom inline runner in this block must answer those so the spawn clears
+   * preflight. Returns a local-convention SpawnResult for those commands, or null
+   * to fall through to the runner's own handling. Only intercepts the sandbox
+   * probe + git rev-parse forms — never the branch/worktree commands a runner may
+   * mock specifically.
+   */
+  function sbPreflight(cmd: string[]): SpawnResult | null {
+    const cmdStr = cmd.join(" ");
+    if (cmd[0] === "which" && cmd[1] === "sandbox-exec") return makeSpawnResult("/usr/bin/sandbox-exec", 0);
+    if (cmd[0] === "/usr/bin/sandbox-exec") return makeSpawnResult("", 0);
+    if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+    return null;
   }
 
   let originalHome: string | undefined;
@@ -4519,7 +4668,10 @@ sandbox:
     expect(withOne.allowRead).toEqual(["/opt/thing"]);
   });
 
-  test("sandbox-disabled start.sh has no Seatbelt wrapper or proxy preamble", async () => {
+  test("start.sh is ALWAYS Seatbelt-wrapped (mandatory sandbox) — a retired enabled:false authoring cannot disable it", async () => {
+    // Even a type that authored the RETIRED `sandbox.enabled: false` toggle
+    // spawns sandboxed: resolveSandboxConfig forces enabled:true, so the launcher
+    // wraps every agent. There is no unsandboxed spawn path anymore.
     await writeSandboxType("sandbox-disabled", { enabled: false });
     setNewAgentSpawnRunner(cleanWorktreeRunner());
     setNewAgentSummaryGenerator(async () => {});
@@ -4529,12 +4681,14 @@ sandbox:
     expect(result.ok).toBe(true);
     const start = await Bun.file(join(agentsDir, "sandbox-disabled", "start.sh")).text();
     const meta = await Bun.file(join(agentsDir, "sandbox-disabled", "meta.json")).json();
-    expect(start).not.toContain("sandbox-exec");
-    expect(start).not.toContain("sandbox-proxy-launch");
-    expect(start).not.toContain("export http_proxy=");
-    // GROUP 1: never yolo without the kernel — a disabled agent's launch line
-    // must not carry the skip-permissions flag.
-    expect(start).not.toContain("--dangerously-skip-permissions");
+    // The Seatbelt wrapper, the egress proxy, and (only under the kernel) the
+    // skip-permissions flag are ALL present.
+    expect(start).toContain("sandbox-exec");
+    expect(start).toContain("sandbox-proxy-launch");
+    expect(start).toContain("export http_proxy=");
+    expect(start).toContain("--dangerously-skip-permissions");
+    // Frozen metadata records the sandbox as enabled (mandatory).
+    expect(meta.sandbox.enabled).toBe(true);
     expect(meta.paths.allowRead).toContain(canonicalizeSandboxPath(tempDir));
     expect(meta.paths.allowWrite).toContain(canonicalizeSandboxPath(tempDir));
   });
@@ -4542,7 +4696,10 @@ sandbox:
   test("resume refuses legacy enabled sandbox metadata with no paths block", async () => {
     const id = "legacy-enabled-no-paths";
     const agentDir = join(agentsDir, id);
-    const message = `sandbox refused: meta.json has an enabled sandbox but no paths block (written before the paths: split); run \`ib sandbox refresh ${id}\` from an unsandboxed session, or respawn the agent`;
+    // Mandatory sandbox: a frozen meta with an enabled sandbox but NO paths block
+    // predates mandatory sandboxing and is refused fail-closed (never silently
+    // upgraded); the recovery is `ib sandbox refresh`.
+    const message = `sandbox refused: agent '${id}' has no valid sandbox policy in meta.json (mandatory sandboxing requires an enabled sandbox and a paths block; this agent's frozen metadata predates it); run \`ib sandbox refresh ${id}\` from an unsandboxed session, or nuke and respawn the agent`;
     const legacyMeta: Partial<AgentMeta> = {
       id,
       state: "stopped",
@@ -4571,58 +4728,37 @@ sandbox:
     expect(resumeCommands.some((cmd) => cmd[0] === "/usr/bin/sandbox-exec")).toBe(false);
   });
 
-  test("disabled legacy sandbox metadata resumes without paths or sandbox setup", async () => {
-    const id = "legacy-disabled-no-paths";
-    await writeSandboxType("sandbox-disabled-legacy", { enabled: false });
-    setNewAgentSpawnRunner(cleanWorktreeRunner());
-    setNewAgentSummaryGenerator(async () => {});
-    setWatchdogSpawnFn(() => ({ pid: 99987 }));
-    const spawned = await callNewAgent("legacy disabled", {
-      name: id,
-      type: "sandbox-disabled-legacy",
-    });
-    expect(spawned.ok).toBe(true);
-
+  test("resume refuses a legacy agent with frozen sandbox.enabled:false, even with a paths block (mandatory sandbox)", async () => {
+    // Mandatory sandbox: a frozen meta that predates it (sandbox.enabled:false)
+    // can no longer resume UNsandboxed — that path is gone. Even with a valid
+    // paths block, the raw enabled:false is refused fail-closed; the recovery is
+    // `ib sandbox refresh`, which re-derives an enabled policy from the type files.
+    const id = "legacy-disabled-with-paths";
     const agentDir = join(agentsDir, id);
-    const start = await Bun.file(join(agentDir, "start.sh")).text();
-    const legacyMeta = await Bun.file(join(agentDir, "meta.json")).json();
-    const expectedSandbox = structuredClone(legacyMeta.sandbox);
-    legacyMeta.state = "stopped";
-    legacyMeta.session_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
-    delete legacyMeta.paths;
-    legacyMeta.sandbox.allowRead = ["/legacy/read"];
-    legacyMeta.sandbox.allowWrite = ["/legacy/write"];
-    legacyMeta.sandbox.deny = ["**/.env"];
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    const legacyMeta: Partial<AgentMeta> = {
+      id,
+      state: "stopped",
+      model: "claude:sonnet",
+      tmux_session: "",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      // Frozen legacy: the sandbox was authored/persisted as disabled.
+      sandbox: { enabled: false, rawAllow: [], domains: [] },
+      paths: { allowRead: [tempDir], allowWrite: [tempDir], deny: [] },
+    };
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(legacyMeta, null, 2));
-
-    resetReadAgentMetaCache();
-    const { meta: coercedMeta, error } = await readAgentMeta(agentDir);
-    expect(error).toBeUndefined();
-    expect(coercedMeta?.paths).toBeUndefined();
-    expect(coercedMeta?.sandbox).toEqual(expectedSandbox);
 
     spawnCalls = [];
     setNukeResumeSpawnRunner(cleanWorktreeRunner());
-    setSendSpawnRunner(() => makeSpawnResult("", 0));
-    let resumed;
-    try {
-      resumed = await resumeAgent(makeAgent(id, tempDir, "stopped", coercedMeta!));
-    } finally {
-      resetSendSpawnRunner();
-    }
+    const resumed = await resumeAgent(makeAgent(id, tempDir, "stopped", legacyMeta));
 
-    expect(resumed.ok).toBe(true);
-    const resume = await Bun.file(join(agentDir, "resume.sh")).text();
-    const resumedMeta = await Bun.file(join(agentDir, "meta.json")).json();
-    expect(resumedMeta.paths).toBeUndefined();
-    expect(resumedMeta.sandbox_proxy_port).toBeUndefined();
-    expect(resumedMeta.sandbox_proxy_pid).toBeUndefined();
+    expect(resumed.ok).toBe(false);
+    expect(resumed.stderr).toContain("no valid sandbox policy");
+    expect(resumed.stderr).toContain(`ib sandbox refresh ${id}`);
+    // Fail-closed: never launched, no sandbox artifacts, no resume.sh.
     expect(await Bun.file(join(agentDir, "sandbox.sb")).exists()).toBe(false);
-    expect(await Bun.file(join(agentDir, "sandbox-proxy.pid")).exists()).toBe(false);
-    expect(start).not.toContain("sandbox-exec");
-    expect(start).not.toContain("sandbox-proxy-launch");
-    expect(resume).not.toContain("sandbox-exec");
-    expect(resume).not.toContain("sandbox-proxy-launch");
+    expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
+    expect((await Bun.file(join(agentDir, "meta.json")).json()).state).toBe("stopped");
     expect(spawnCalls.some((cmd) => cmd[0] === "/usr/bin/sandbox-exec")).toBe(false);
   });
 
@@ -5021,9 +5157,14 @@ sandbox:
     meta.state = "stopped";
     meta.codex_session_id = "019e7b21-cb7d-7f23-8674-11036ed141ef";
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+    // Edit the type's paths (the authored `enabled: false` is a RETIRED toggle
+    // that resolveSandboxConfig ignores — refresh always re-derives enabled).
     await writeSandboxType(id, { model: "codex:gpt-5.4-mini", enabled: false, allowRead: [newRead] });
     let created = false;
     setNukeResumeSpawnRunner((cmd: string[]) => {
+      // Mandatory sandbox: refresh's internal resume runs prepareSandbox.
+      if (cmd[0] === "which" && cmd[1] === "sandbox-exec") return makeSpawnResult("/usr/bin/sandbox-exec", 0);
+      if (cmd[0] === "/usr/bin/sandbox-exec") return makeSpawnResult("", 0);
       if (cmd.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
       if (cmd.includes("has-session")) return makeSpawnResult("", created ? 0 : 1);
       if (cmd.includes("new-session")) created = true;
@@ -5034,38 +5175,49 @@ sandbox:
     const text = await Bun.file(instructions).text();
     expect(text).toContain(canonicalizeSandboxPath(newRead));
     expect(text).not.toContain(canonicalizeSandboxPath(oldRead));
-    expect(text).toContain("The kernel sandbox is OFF");
+    // Mandatory sandbox: refresh re-derives an ENABLED policy, so the kernel is ON.
+    expect(text).toContain("The kernel sandbox is ON");
     expect(text).not.toContain("your Claude project directory and scratchpad");
-    expect(await Bun.file(join(agentDir, "resume.sh")).text()).not.toContain("sandbox-exec");
+    expect(await Bun.file(join(agentDir, "resume.sh")).text()).toContain("sandbox-exec");
   });
 
-  test("agy rejects enabled sandbox policy at spawn, resume, and refresh", async () => {
-    const id = "agy-unsupported-sandbox";
-    await writeSandboxType(id, { model: "agy:default" });
-    setNewAgentSpawnRunner(cleanWorktreeRunner());
-    const spawned = await callNewAgent("reject unwrapped launch", { name: id, type: id });
-    expect(spawned.ok).toBe(false);
-    expect(spawned.stderr).toContain("agy has no kernel sandbox wrapper");
+  test("agy spawns SANDBOXED (mandatory sandbox) — no longer refused for lacking a kernel wrapper", async () => {
+    // The old contract refused agy whenever the sandbox was enabled ("agy has no
+    // kernel sandbox wrapper"). Under mandatory sandboxing agy is wrapped in
+    // sandbox-exec + the egress proxy exactly like claude/codex, so the spawn
+    // SUCCEEDS and the start.sh carries the wrapper.
+    const id = "agy-sandboxed";
+    await writeSandboxType(id, { model: "agy:gemini-3.7-flash-low" });
+    setSandboxPortAllocatorForTesting(() => 43199);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99911 }));
+    // Wrap mockSpawnRunner so the D7 tracked-file guard sees NOT-tracked (exit 1)
+    // and `agy --version` resolves; mockSpawnRunner already answers the sandbox
+    // preflight (which sandbox-exec + the compile lint).
+    setNewAgentSpawnRunner((cmd: string[], o?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("ls-files") && cmdStr.includes("--error-unmatch")) {
+        return makeSpawnResult("", 1);
+      }
+      if (cmd[0] === "agy" && cmd[1] === "--version") return makeSpawnResult("", 0);
+      return cleanWorktreeRunner()(cmd, o);
+    });
+
+    const spawned = await callNewAgent("sandboxed agy", { name: id, type: id });
+    expect(spawned.ok).toBe(true);
     const agentDir = join(agentsDir, id);
-    expect(await Bun.file(join(agentDir, "start.sh")).exists()).toBe(false);
-    await mkdir(join(agentDir, "repo"), { recursive: true });
-    const meta: Partial<AgentMeta> = {
-      id, agentType: id, model: "agy:default", state: "stopped",
-      sandbox: { enabled: true, rawAllow: [], domains: [] },
-      paths: { allowRead: [], allowWrite: [], deny: [] },
-    };
-    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
-    const resumed = await resumeAgent(makeAgent(id, tempDir, "stopped", meta));
-    expect(resumed.ok).toBe(false);
-    expect(resumed.stderr).toContain("agy has no kernel sandbox wrapper");
-    // Refresh refuses before mutating an existing disabled agent or stopping it.
-    meta.sandbox!.enabled = false;
-    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
-    const refreshed = await refreshAgentSandbox(makeAgent(id, tempDir, "stopped", meta));
-    expect(refreshed.ok).toBe(false);
-    expect(refreshed.stderr).toContain("agy has no kernel sandbox wrapper");
-    expect((await Bun.file(join(agentDir, "meta.json")).json()).sandbox.enabled).toBe(false);
-    expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
+    const start = await Bun.file(join(agentDir, "start.sh")).text();
+    // Sandbox wrapper + proxy present, wrapping the agy launch line.
+    expect(start).toContain("sandbox-exec");
+    expect(start).toContain("sandbox-proxy-launch");
+    expect(start).toContain("export http_proxy=");
+    expect(start).toMatch(/sandbox-exec .* agy --dangerously-skip-permissions/);
+    // Frozen metadata records the sandbox as enabled (mandatory).
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(meta.sandbox.enabled).toBe(true);
+    // No stale "agy has no kernel sandbox wrapper" refusal anywhere.
+    expect(start).not.toContain("no kernel sandbox wrapper");
   });
 
   test("sandbox refresh re-derives paths from edited type files and replays the new frozen block", async () => {
@@ -5598,40 +5750,41 @@ sandbox:
     expect(await Bun.file(join(agentDir, "agent.log")).text()).not.toContain("does not match the sealed record");
   });
 
-  test("A4 G3: a disabled agent with no seal resumes fine (verification skipped)", async () => {
-    await writeSandboxType("seal-disabled", { enabled: false });
-    setNewAgentSpawnRunner(cleanWorktreeRunner());
+  test("A4 G3: resume refuses an agent whose seal is missing (mandatory sandbox)", async () => {
+    // Mandatory sandbox: every agent is sandbox-required, so a missing seal is no
+    // longer "verification skipped" — it is a fail-closed refusal that points at
+    // `ib sandbox refresh` (which re-seals from an unsandboxed session).
+    await writeSandboxType("seal-missing", { allowRead: [tempDir], allowWrite: [tempDir] });
+    setSandboxPortAllocatorForTesting(() => 43188);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
     setNewAgentSummaryGenerator(async () => {});
     setWatchdogSpawnFn(() => ({ pid: 99977 }));
-    const spawned = await callNewAgent("disabled", { name: "seal-disabled", type: "seal-disabled" });
+    const spawned = await callNewAgent("needs a seal", { name: "seal-missing", type: "seal-missing" });
     expect(spawned.ok).toBe(true);
 
     const repoId = await getRepoId(tempDir);
-    // Delete any seal so the resume must succeed WITHOUT one (disabled → no check).
-    await removeAgentSeal(tempDir, "seal-disabled");
-    expect(await readSealRecord(repoId, "seal-disabled", process.env.HOME!)).toBeNull();
+    // Delete the seal the sandboxed spawn wrote — resume must now REFUSE.
+    await removeAgentSeal(tempDir, "seal-missing");
+    expect(await readSealRecord(repoId, "seal-missing", process.env.HOME!)).toBeNull();
 
-    const agentDir = join(agentsDir, "seal-disabled");
+    const agentDir = join(agentsDir, "seal-missing");
     const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
     meta.state = "stopped";
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
-    let createdSession = false;
+    // has-session → dead so resume clears the liveness guard and reaches the seal
+    // check (the refusal under test happens BEFORE prepareSandbox).
     setNukeResumeSpawnRunner((cmd: string[]) => {
-      const cmdStr = cmd.join(" ");
-      if (cmdStr.includes("tmux has-session")) return makeSpawnResult("", createdSession ? 0 : 1);
-      if (cmdStr.includes("tmux new-session")) { createdSession = true; return makeSpawnResult("", 0); }
-      if (cmdStr.includes("capture-pane")) return makeSpawnResult("Claude Code v1.0", 0);
+      if (cmd.includes("has-session")) return makeSpawnResult("", 1);
       return makeSpawnResult("", 0);
     });
-    setSendSpawnRunner(() => makeSpawnResult("", 0));
-    try {
-      const resumed = await resumeAgent(makeAgent("seal-disabled", tempDir, "stopped", meta));
-      expect(resumed.ok).toBe(true);
-    } finally {
-      resetSendSpawnRunner();
-    }
-    const resume = await Bun.file(join(agentDir, "resume.sh")).text();
-    expect(resume).not.toContain("sandbox-exec");
+    const resumed = await resumeAgent(makeAgent("seal-missing", tempDir, "stopped", meta));
+
+    expect(resumed.ok).toBe(false);
+    expect(resumed.stderr).toContain("no sealed record");
+    expect(resumed.stderr).toContain("ib sandbox refresh seal-missing");
+    // Fail-closed: never launched, no resume.sh.
+    expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
   });
 
   test("A4 G3: refreshAgentsSandbox reports per agent and continues on error", async () => {
@@ -6410,16 +6563,17 @@ sandbox:
     expect(startSh).not.toContain("SIGHUP diagnostics");
 
     // setsid defense-in-depth with a graceful fallback to a bare launch.
+    // Mandatory sandbox: claude is wrapped by the sandbox-exec prefix on both arms.
     expect(startSh).toContain("command -v setsid");
-    expect(startSh).toContain("setsid claude --session-id");
-    expect(startSh).toMatch(/^ *claude --session-id "/m);
+    expect(startSh).toMatch(/setsid sandbox-exec .* claude --session-id/);
+    expect(startSh).toMatch(/^ *sandbox-exec .* claude --session-id "/m);
 
     // ORDERING + UNCONDITIONAL: `trap '' HUP` must precede the claude launch
     // (so SIG_IGN is inherited by the child) AND precede the `command -v setsid`
     // guard (so the bare-launch fallback path still gets the protection).
     const hupIdx = startSh.indexOf("trap '' HUP");
     const setsidGuardIdx = startSh.indexOf("command -v setsid");
-    const firstLaunchIdx = startSh.search(/(setsid )?claude --session-id "/);
+    const firstLaunchIdx = startSh.search(/(setsid )?sandbox-exec .* claude --session-id "/);
     expect(hupIdx).toBeGreaterThan(-1);
     expect(hupIdx).toBeLessThan(firstLaunchIdx);
     expect(hupIdx).toBeLessThan(setsidGuardIdx);
@@ -6851,7 +7005,7 @@ sandbox:
     expect(result.stderr).toContain("Invalid effort level: extreme");
   });
 
-  test("type: worker sets meta.worker and start.sh has no bypass-permissions flags", async () => {
+  test("type: worker sets meta.worker and (mandatory sandbox) start.sh skips permissions under the kernel", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("task", { name: "test-worker", type: "worker" });
 
@@ -6859,7 +7013,12 @@ sandbox:
     expect(meta.worker).toBe(true);
 
     const startSh = await Bun.file(join(agentsDir, "test-worker", "start.sh")).text();
-    expect(startSh).not.toContain("dangerously-skip-permissions");
+    // Mandatory sandbox: claude is ALWAYS wrapped by the kernel now, so the
+    // launch line carries --dangerously-skip-permissions (Adam: never yolo
+    // WITHOUT the kernel — but the kernel is now always present). The flag is
+    // emitted only inside the sandbox-exec-wrapped launch.
+    expect(startSh).toContain("--dangerously-skip-permissions");
+    expect(startSh).toMatch(/sandbox-exec .* claude .*--dangerously-skip-permissions/);
   });
 
   test("cleans up on worktree creation failure", async () => {
@@ -6919,6 +7078,8 @@ sandbox:
     const branchName = "agent/test-residual";
     setNewAgentSpawnRunner((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       spawnCalls.push(cmd);
+      const pf = sbPreflight(cmd);
+      if (pf) return pf;
       const cmdStr = cmd.join(" ");
 
       // branch --list <branchName> → pretend the branch exists
@@ -6969,6 +7130,8 @@ sandbox:
     const branchName = "agent/test-prefix";
     setNewAgentSpawnRunner((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       spawnCalls.push(cmd);
+      const pf = sbPreflight(cmd);
+      if (pf) return pf;
       const cmdStr = cmd.join(" ");
 
       if (cmd[0] === "git" && cmd.includes("branch") && cmd.includes("--list") && cmd.includes(branchName)) {
@@ -8058,10 +8221,12 @@ body`,
       expect(result.ok).toBe(true);
 
       const startSh = await Bun.file(join(agentsDir, "codex-agent-1", "start.sh")).text();
-      // Canonical §3.3 launch line components, model is shell-quoted.
-      expect(startSh).toContain("setsid codex -m 'gpt-5.4-mini'");
+      // Canonical §3.3 launch line components, model is shell-quoted. Mandatory
+      // sandbox: codex is wrapped by sandbox-exec and runs -s danger-full-access.
+      expect(startSh).toMatch(/setsid sandbox-exec .* codex -m 'gpt-5.4-mini'/);
       expect(startSh).toContain("-a never");
-      expect(startSh).toContain("-s workspace-write");
+      expect(startSh).toContain("-s danger-full-access");
+      expect(startSh).not.toContain("-s workspace-write");
       expect(startSh).toContain("--dangerously-bypass-hook-trust");
       // PID variable + meta-field keep claude_pid for back-compat.
       expect(startSh).toContain("CLAUDE_PID=$!");
@@ -8260,10 +8425,10 @@ body`,
       // Claude agent should still get its settings.local.json
       const settings = await Bun.file(join(agentsDir, "claude-regression-guard", "repo", ".claude", "settings.local.json")).text();
       expect(settings.length).toBeGreaterThan(0);
-      // Claude start.sh launches claude, not codex
+      // Claude start.sh launches claude, not codex (sandbox-wrapped on both).
       const startSh = await Bun.file(join(agentsDir, "claude-regression-guard", "start.sh")).text();
-      expect(startSh).toMatch(/setsid claude/);
-      expect(startSh).not.toContain("setsid codex");
+      expect(startSh).toMatch(/setsid sandbox-exec .* claude/);
+      expect(startSh).not.toMatch(/sandbox-exec .* codex/);
       expect(startSh).toContain("--session-id");
       // No codex artifacts in the worktree
       const agentsMdExists = await Bun.file(join(agentsDir, "claude-regression-guard", "repo", "AGENTS.md")).exists();
@@ -8289,9 +8454,9 @@ body`,
       //   * agentsDir prefix → <AGENTSDIR>
       //   * UUID session id → <SESSION-UUID>
       const sessionUuidPattern = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
-      const normalised = rawStartSh
+      const normalised = normalizeSandboxVolatile(rawStartSh
         .replaceAll(agentsDir, "<AGENTSDIR>")
-        .replaceAll(sessionUuidPattern, "<SESSION-UUID>");
+        .replaceAll(sessionUuidPattern, "<SESSION-UUID>"));
 
       const fixturePath = join(
         import.meta.dir.replace(/\/src$/, ""),
@@ -8356,7 +8521,7 @@ body`,
       });
       expect(result.ok).toBe(true);
       const startSh = await Bun.file(join(agentsDir, "codex-new-model", "start.sh")).text();
-      expect(startSh).toContain("setsid codex -m 'gpt-9-future'");
+      expect(startSh).toMatch(/setsid sandbox-exec .* codex -m 'gpt-9-future'/);
     });
 
     // Round-2 review HIGH: the codex `-s workspace-write` sandbox is granted
@@ -8483,7 +8648,8 @@ sandbox:
       expect(rule).toContain(canonicalizeSandboxPath(readPath));
       expect(rule).toContain(canonicalizeSandboxPath(writePath));
       expect(rule).toContain("**/agy-denied");
-      expect(rule).toContain("The kernel sandbox is unavailable for agy");
+      // Mandatory sandbox: agy is wrapped by the kernel like every other CLI.
+      expect(rule).toContain("The kernel sandbox is ON");
     });
 
     test("appends both boundary files to <worktree>/.gitignore", async () => {
@@ -10432,6 +10598,8 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
   function mockSpawnRunner() {
     return (cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       spawnCalls.push(cmd);
+      const pf = sandboxPreflightAnswer(cmd);
+      if (pf) return pf;
       const cmdStr = cmd.join(" ");
       if (cmdStr.includes("tmux has-session")) {
         const newSessionCalled = spawnCalls.some(c => c.join(" ").includes("tmux new-session"));
@@ -11468,6 +11636,9 @@ describe("respawnSelf (native)", () => {
     });
     setNukeResumeSpawnRunner((cmd: string[]) => {
       spawnCalls.push(cmd);
+      const pf = sandboxPreflightAnswer(cmd);
+      if (pf) return pf;
+      if (cmd.includes("--git-common-dir")) return makeSpawnResult(0, ".git");
       if (cmd[0] === "tmux" && cmd[1] === "has-session") {
         return makeSpawnResult(1);
       }
@@ -11489,9 +11660,10 @@ describe("respawnSelf (native)", () => {
       } as any,
     });
 
+    await armAgent(agent); // mandatory sandbox: arm the fixture before the internal resume
     await respawnSelf(agent);
 
-    // resume.sh is the smoking-gun proof that the non-coordinator branch
+    //resume.sh is the smoking-gun proof that the non-coordinator branch
     // ran — the coordinator branch goes through nukeAgent + newAgent and
     // never touches resume.sh.
     const resumeShExists = await Bun.file(join(agentDir, "resume.sh"))
@@ -11518,6 +11690,9 @@ describe("respawnSelf (native)", () => {
     });
     setNukeResumeSpawnRunner((cmd: string[]) => {
       spawnCalls.push(cmd);
+      const pf = sandboxPreflightAnswer(cmd);
+      if (pf) return pf;
+      if (cmd.includes("--git-common-dir")) return makeSpawnResult(0, ".git");
       if (cmd[0] === "tmux" && cmd[1] === "has-session") {
         return makeSpawnResult(1);
       }
@@ -11539,9 +11714,10 @@ describe("respawnSelf (native)", () => {
       } as any,
     });
 
+    await armAgent(agent); // mandatory sandbox: arm the fixture before the internal resume
     await respawnSelf(agent);
 
-    // Even from stopped, resume.sh must be written — the agent was already
+    //Even from stopped, resume.sh must be written — the agent was already
     // in pause's "after" state, so we skip pause and go straight to resume.
     const resumeShExists = await Bun.file(join(agentDir, "resume.sh"))
       .exists()
@@ -11798,7 +11974,7 @@ describe("long-running-op guard", () => {
     setNukeResumeSpawnRunner(runner);
 
     const agent = makeAgent("agent-res", tempDir, "stopped");
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("currently restarting");
@@ -11816,6 +11992,9 @@ describe("long-running-op guard", () => {
 
     let newSessionSeen = false;
     const runner = (cmd: string[]): SpawnResult => {
+      const pf = sandboxPreflightAnswer(cmd);
+      if (pf) return pf;
+      if (cmd.includes("--git-common-dir")) return makeSpawnResult(0, ".git");
       if (cmd[0] === "tmux" && cmd[1] === "new-session") { newSessionSeen = true; return makeSpawnResult(); }
       if (cmd.includes("has-session")) return makeSpawnResult(newSessionSeen ? 0 : 1);
       return makeSpawnResult();
@@ -11824,7 +12003,7 @@ describe("long-running-op guard", () => {
     setNukeResumeSpawnRunner(runner);
 
     const agent = makeAgent("agent-res-ok", tempDir, "stopped");
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
 
     expect(result.ok).toBe(true);
     const t = await readAgentTransient(agentDir);
@@ -11862,7 +12041,7 @@ describe("long-running-op guard", () => {
       id: "coord-x", repoPath: tempDir, repoName: "test", state: "running",
       meta: { agentType: "coordinator", tmux_session: "ib-coord-x" } as any,
     });
-    const result = await resumeAgent(agent);
+    const result = await armAndResume(agent);
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("currently restarting");

@@ -8,7 +8,7 @@ import { stripAnsi } from "../parse-state";
 import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult, waitFor } from "../test-utils";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
 import { visibleWidth } from "@mariozechner/pi-tui";
-import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setNewAgentCallerMetaReader, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner } from "../ib-commands";
+import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setNewAgentCallerMetaReader, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner, sealAgentRecord } from "../ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxPollerSpawnCtx } from "../tmux-poller";
 import { IB_COORDINATOR_SESSION } from "../coordinator";
@@ -975,10 +975,13 @@ describe("DashboardComponent dialog and action handlers", () => {
     actionTempDir = await mkdtemp(join(tmpdir(), "dashboard-action-"));
     const agentDir = join(actionTempDir, ".ittybitty", "agents", "agent-test");
     await mkdir(agentDir, { recursive: true });
+    // Mandatory sandbox: a resumable agent carries an enabled sandbox + paths.
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-test",
       tmux_session: "tmux-agent-test",
       worktree: false,
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+      paths: { allowRead: [], allowWrite: [], deny: [] },
     }));
 
     setupSendMock();
@@ -989,23 +992,25 @@ describe("DashboardComponent dialog and action handlers", () => {
     // - has-session AFTER new-session → succeed (resume's verify-before-nudge check)
     // - everything else → succeed
     let newSessionSeen = false;
+    const spawnResult = (stdout: string, code: number): SpawnResult => ({
+      stdout: new Response(stdout).body!,
+      stderr: new Response("").body!,
+      exited: Promise.resolve(code),
+    } as SpawnResult);
     const noopSpawn = (cmd: string[]) => {
+      // Mandatory sandbox: resume runs prepareSandbox, so answer `which
+      // sandbox-exec`, the compile lint, and the git common dir.
+      if (cmd[0] === "which" && cmd[1] === "sandbox-exec") return spawnResult("/usr/bin/sandbox-exec\n", 0);
+      if (cmd[0] === "/usr/bin/sandbox-exec") return spawnResult("", 0);
+      if (cmd.includes("--git-common-dir")) return spawnResult(".git", 0);
       if (cmd[0] === "tmux" && cmd[1] === "new-session") {
         newSessionSeen = true;
-        return {
-          stdout: new Response("").body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
+        return spawnResult("", 0);
       }
       const isHasSession = cmd[0] === "tmux" && cmd.includes("has-session");
       const isPgrep = cmd.includes("pgrep");
       const code = isPgrep ? 1 : isHasSession ? (newSessionSeen ? 0 : 1) : 0;
-      return {
-        stdout: new Response("").body!,
-        stderr: new Response("").body!,
-        exited: Promise.resolve(code),
-      } as SpawnResult;
+      return spawnResult("", code);
     };
     setKillPauseSpawnRunner(noopSpawn);
     lifecycleSpawnCtx.set(noopSpawn);
@@ -1016,6 +1021,11 @@ describe("DashboardComponent dialog and action handlers", () => {
 
     const agent = makeAgent("agent-test", actionTempDir);
     agent.meta.worktree = false;
+    // Mandatory sandbox: arm the in-memory agent (resume reads agent.meta) and
+    // seal it so R-key resume clears the fail-closed precondition + seal-verify.
+    agent.meta.sandbox = { enabled: true, rawAllow: [], domains: [] };
+    agent.meta.paths = { allowRead: [], allowWrite: [], deny: [] };
+    await sealAgentRecord(actionTempDir, "agent-test", agent.meta as unknown as Record<string, unknown>, agentDir);
     setAgentState(agent, state);
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     dashboard.onUpdate([agent], flatList, []);

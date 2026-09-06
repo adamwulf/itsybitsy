@@ -613,12 +613,9 @@ describe("buildPathIsolationSection", () => {
       const ctx = detectRole(baseCtx.worktreePath, { model, sandbox: { enabled: true } });
       const section = buildPathIsolationSection(ctx);
       expect(section).not.toContain("your Claude project directory and scratchpad");
-      if (model.startsWith("agy:")) {
-        expect(section).toContain("kernel sandbox is unavailable for agy");
-        expect(section).not.toContain("kernel sandbox is ON");
-      } else {
-        expect(section).toContain("kernel sandbox is ON");
-      }
+      // Mandatory sandbox: every CLI (agy included) is wrapped by the kernel now,
+      // so the section reports the kernel ON — no agy-specific "unavailable" case.
+      expect(section).toContain("kernel sandbox is ON");
     },
   );
 

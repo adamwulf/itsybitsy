@@ -139,14 +139,16 @@ describe("InfoPanelComponent", () => {
     },
   );
 
-  test("agy sandbox configuration is displayed as unavailable", () => {
+  test("agy sandbox configuration reports the kernel wrapper state (mandatory sandbox)", () => {
+    // Mandatory sandbox: agy is wrapped by the kernel like every CLI now, so the
+    // panel shows the agent's frozen sandbox state instead of "unavailable (agy)".
     const panel = new InfoPanelComponent();
     panel.displayHeight = 12;
     const agent = makeAgent({ id: "agent-agy" });
     agent.meta.model = "agy:default";
     agent.meta.sandbox = { enabled: true, rawAllow: [], domains: [] };
     panel.agent = agent;
-    expect(panel.render(80).map(stripAnsi).join("\n")).toContain("Sandbox: unavailable (agy)");
+    expect(panel.render(80).map(stripAnsi).join("\n")).toContain("Sandbox: enabled");
   });
 
   test("renders the resolved path lists compactly, one line per non-empty list", () => {

@@ -24,6 +24,17 @@ import { agySettingsPath } from "./agy-config";
 import type { SessionContext } from "./hooks/session-start";
 import { setUserHome, resetUserHome } from "./home";
 
+// Mandatory sandbox: every agy launch is wrapped now, so the builders REQUIRE the
+// proxy preamble + sandbox-exec prefix (they throw otherwise). These stand in for
+// what ib-commands renders via src/sandbox-launch.ts. The prefix has no regex
+// metacharacters that break the substring assertions below.
+const SANDBOX_PREAMBLE = "\n# test proxy preamble\nexport http_proxy=\"http://localhost:54321\"\n";
+const SANDBOX_PREFIX = "sandbox-exec -f '/tmp/test/sandbox.sb' -D 'AGENTDIR=/tmp/test'";
+const sandboxFields = () => ({
+  sandboxScriptPreamble: SANDBOX_PREAMBLE,
+  sandboxExecPrefix: SANDBOX_PREFIX,
+});
+
 // ── buildAgyStartContent — launch line ───────────────────────────────────────
 
 describe("buildAgyStartContent — launch line", () => {
@@ -37,6 +48,7 @@ describe("buildAgyStartContent — launch line", () => {
     absExitScript: "/tmp/test/exit-check.sh",
     absAgentLog: "/tmp/test/agent.log",
     absStderrLog: "/tmp/test/claude.stderr.log",
+    ...sandboxFields(),
   });
 
   test("contains the canonical D2 flags with a shell-quoted model", () => {
@@ -61,12 +73,13 @@ describe("buildAgyStartContent — launch line", () => {
     expect(content).toContain(`'/usr/local/bin/ib' write-pid 'agent-abc12345' "$CLAUDE_PID"`);
   });
 
-  test("includes the SIGHUP-ignore trap + setsid/bare launch arms", () => {
+  test("includes the SIGHUP-ignore trap + setsid/bare launch arms (sandbox-wrapped)", () => {
     const content = buildAgyStartContent(baseInput());
     expect(content).toContain("trap '' HUP");
-    expect(content).toContain("setsid agy --dangerously-skip-permissions");
-    // Bare (non-setsid) arm also present.
-    expect(content).toMatch(/\n {4}agy --dangerously-skip-permissions/);
+    // Both arms wrap agy under our sandbox-exec prefix (mandatory sandbox).
+    expect(content).toContain(`setsid ${SANDBOX_PREFIX} agy --dangerously-skip-permissions`);
+    // Bare (non-setsid) arm also present — 4-space indent + prefix, no `setsid`.
+    expect(content).toContain(`\n    ${SANDBOX_PREFIX} agy --dangerously-skip-permissions`);
   });
 
   test("re-inherits the pty stdin via <&0 on both launch arms", () => {
@@ -170,6 +183,7 @@ describe("buildAgyResumeContent — launch line", () => {
     absExitScript: "/tmp/test/exit-check.sh",
     absAgentLog: "/tmp/test/agent.log",
     absStderrLog: "/tmp/test/claude.stderr.log",
+    ...sandboxFields(),
   });
 
   test("carries --conversation <uuid> (shell-quoted) and re-passes --model", () => {
@@ -233,6 +247,67 @@ describe("buildAgyResumeContent — launch line", () => {
     expect(() =>
       buildAgyResumeContent({ ...baseInput(), conversationId: "019e7b21-cb7d-7f23-8674-11036ed141ef" }),
     ).not.toThrow();
+  });
+});
+
+// ── mandatory sandbox wrapper ────────────────────────────────────────────────
+
+describe("buildAgy{Start,Resume}Content — mandatory sandbox wrapper", () => {
+  const startBase = () => ({
+    agentId: "agent-abc12345",
+    ibBinaryPath: "/usr/local/bin/ib",
+    agentDir: "/tmp/test",
+    agyModel: "gemini-3.7-flash-low",
+    absPromptFile: "/tmp/test/prompt.txt",
+    absMetaJson: "/tmp/test/meta.json",
+    absExitScript: "/tmp/test/exit-check.sh",
+    absAgentLog: "/tmp/test/agent.log",
+    absStderrLog: "/tmp/test/claude.stderr.log",
+    ...sandboxFields(),
+  });
+  const resumeBase = () => ({
+    agentId: "agent-abc12345",
+    ibBinaryPath: "/usr/local/bin/ib",
+    agentDir: "/tmp/test",
+    agyModel: "gemini-3.7-flash-low",
+    conversationId: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+    absMetaJson: "/tmp/test/meta.json",
+    absExitScript: "/tmp/test/exit-check.sh",
+    absAgentLog: "/tmp/test/agent.log",
+    absStderrLog: "/tmp/test/claude.stderr.log",
+    ...sandboxFields(),
+  });
+
+  test("start.sh splices the proxy preamble after log() and wraps agy on both arms", () => {
+    const content = buildAgyStartContent(startBase());
+    // Preamble sits immediately after the log() definition.
+    expect(content).toContain(`[start.sh] $1" >> "$AGENT_LOG"; }${SANDBOX_PREAMBLE}`);
+    expect(content).toContain('export http_proxy="http://localhost:54321"');
+    // Both launch arms carry the sandbox-exec prefix ahead of agy.
+    expect(content).toContain(`setsid ${SANDBOX_PREFIX} agy --dangerously-skip-permissions`);
+    expect(content).toContain(`\n    ${SANDBOX_PREFIX} agy --dangerously-skip-permissions`);
+  });
+
+  test("resume.sh splices the proxy preamble after log() and wraps agy on both arms", () => {
+    const content = buildAgyResumeContent(resumeBase());
+    expect(content).toContain(`[resume.sh] $1" >> "$AGENT_LOG"; }${SANDBOX_PREAMBLE}`);
+    expect(content).toContain('export http_proxy="http://localhost:54321"');
+    expect(content).toContain(`setsid ${SANDBOX_PREFIX} agy --dangerously-skip-permissions`);
+    expect(content).toContain(`\n    ${SANDBOX_PREFIX} agy --dangerously-skip-permissions`);
+  });
+
+  test("start.sh REFUSES an absent wrapper (mandatory sandbox)", () => {
+    expect(() => buildAgyStartContent({ ...startBase(), sandboxScriptPreamble: "" }))
+      .toThrow(/requires the sandbox proxy preamble and sandbox-exec prefix/);
+    expect(() => buildAgyStartContent({ ...startBase(), sandboxExecPrefix: "" }))
+      .toThrow(/requires the sandbox proxy preamble and sandbox-exec prefix/);
+  });
+
+  test("resume.sh REFUSES an absent wrapper (mandatory sandbox)", () => {
+    expect(() => buildAgyResumeContent({ ...resumeBase(), sandboxScriptPreamble: "" }))
+      .toThrow(/requires the sandbox proxy preamble and sandbox-exec prefix/);
+    expect(() => buildAgyResumeContent({ ...resumeBase(), sandboxExecPrefix: "" }))
+      .toThrow(/requires the sandbox proxy preamble and sandbox-exec prefix/);
   });
 });
 

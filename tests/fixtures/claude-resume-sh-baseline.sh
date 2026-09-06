@@ -7,8 +7,35 @@ export CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
 AGENT_LOG='<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/agent.log'
 STDERR_LOG='<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/claude.stderr.log'
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [resume.sh] $1" >> "$AGENT_LOG"; }
+# Start the per-agent proxy outside Seatbelt. The launcher detaches/unrefs the
+# proxy before returning; the agent CLI alone is wrapped below. Fail closed if the
+# actual bind loses the small race after the parent-process port preflight.
+PROXY_PORT=<PORT>
+PROXY_PID_FILE='<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/sandbox-proxy.pid'
+PROXY_READY_FILE='<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/sandbox-proxy.ready'
+rm -f "$PROXY_PID_FILE" "$PROXY_READY_FILE"
+if ! ib sandbox-proxy-launch --port "$PROXY_PORT" --domains '<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/sandbox-domains.txt' --log '<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/sandbox-proxy.log' --pid-file "$PROXY_PID_FILE" --ready-file "$PROXY_READY_FILE"; then
+    log "sandbox refused: proxy could not bind localhost:$PROXY_PORT"
+    exit 1
+fi
+cleanup_sandbox_proxy() {
+    local proxy_pid
+    proxy_pid=$(cat "$PROXY_PID_FILE" 2>/dev/null || true)
+    if [[ "$proxy_pid" =~ ^[1-9][0-9]*$ ]]; then kill "$proxy_pid" 2>/dev/null || true; fi
+    rm -f "$PROXY_PID_FILE" "$PROXY_READY_FILE"
+}
+trap cleanup_sandbox_proxy EXIT
+PROXY_PID=$(cat "$PROXY_PID_FILE")
+ib write-proxy-pid 'agent-claude-snapshot' "$PROXY_PID" "$PROXY_PORT" || log "write-proxy-pid failed (exit=$?)"
+export http_proxy="http://localhost:$PROXY_PORT"
+export https_proxy="$http_proxy"
+export HTTP_PROXY="$http_proxy"
+export HTTPS_PROXY="$http_proxy"
+export no_proxy="localhost,127.0.0.1,::1"
+export NO_PROXY="$no_proxy"
 
-log "Starting claude --resume <SESSION-UUID> --model sonnet"
+
+log "Starting claude --resume <SESSION-UUID> --model sonnet --dangerously-skip-permissions"
 log "PWD=$(pwd) which_claude=$(which claude 2>&1)"
 
 # Ignore SIGHUP for the lifetime of this script. When resume is triggered from
@@ -39,9 +66,9 @@ else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid claude --resume "<SESSION-UUID>" --model sonnet 2> "$STDERR_LOG" &
+    setsid sandbox-exec -f '<PROFILE>' -D 'SCRATCHPAD=<VALUE>' -D 'GITDIR=<VALUE>' -D 'PROJECTDIR=<VALUE>' -D 'PARENTCLAUDE=<VALUE>' -D 'REPOAGENTS=<VALUE>' -D 'AGENTDIR=<VALUE>' -D 'WORKTREE=<VALUE>' claude --resume "<SESSION-UUID>" --model sonnet --dangerously-skip-permissions 2> "$STDERR_LOG" &
 else
-    claude --resume "<SESSION-UUID>" --model sonnet 2> "$STDERR_LOG" &
+    sandbox-exec -f '<PROFILE>' -D 'SCRATCHPAD=<VALUE>' -D 'GITDIR=<VALUE>' -D 'PROJECTDIR=<VALUE>' -D 'PARENTCLAUDE=<VALUE>' -D 'REPOAGENTS=<VALUE>' -D 'AGENTDIR=<VALUE>' -D 'WORKTREE=<VALUE>' claude --resume "<SESSION-UUID>" --model sonnet --dangerously-skip-permissions 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
 log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"

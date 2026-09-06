@@ -81,6 +81,61 @@ The agy runtime root is shared state under the user home. Granting it only to ag
 
 **Planned only; not implemented or built in this rollout.** Complete this phase after exercising the repository-agent sandbox and before resuming global system-coordinator sandbox work.
 
+### Capability investigation (2026-09-05)
+
+The denial-logging implementation is blocked at the live capability probe. This
+Codex session's PreToolUse hook rejected both commands before execution with
+`Tool not in allow list`:
+
+```sh
+/usr/bin/sandbox-exec -p '(version 1) (allow default)' /usr/bin/true
+/usr/bin/log help stream
+```
+
+This is a tool authorization failure, distinct from the earlier nested Seatbelt
+`sandbox_apply: Operation not permitted` failure. Neither probe ran. No event
+fields, privileges, readiness behavior, or safe process-attribution method have
+been established in this session. No production collector or DENIALS integration
+is implemented, and no live acceptance criterion has passed.
+
+`scripts/probe-sandbox-denials.ts` prepares an isolated temporary fixture using
+the current profile generator and shipped `_all.md` floor, with an explicit deny
+for disposable read/write targets. Preparation alone executes neither restricted
+command. On an authorized macOS host, run:
+
+```sh
+bun scripts/probe-sandbox-denials.ts --run
+```
+
+The probe starts an independent `log stream`, then exercises the allow-default
+capability check, generated-profile boot, immediate denied read, and short-lived
+read/write subprocesses. It retains raw NDJSON, stderr, command arguments,
+timestamps and observed PIDs in the printed temporary directory. Each captured
+stream is capped at 8 MiB with truncation recorded, and collection continues for
+ten seconds after the commands finish. It does not install binaries, change agent
+types, or require a dashboard/watchdog. Inspect results before sharing: the raw
+log predicate can include unrelated system sandbox reports.
+
+This diagnostic script is not the production collector or an automated pass.
+Its two-second startup delay is unverified; PIDs are observations, not sufficient
+attribution evidence. Inspect errors for missing privileges/profile application
+failure and compare actual reports to fixture targets. Determine whether the OS
+provides offender birth/audit identity and ancestry distinct from the reporting
+process before choosing an attribution mechanism. PID sampling alone cannot
+safely resolve delayed reports, PID reuse, or children that exit between samples.
+Missing/private fields and dropped or unreported events must remain explicit
+limitations. Additional startup-delay and concurrent-launch experiments, plus
+real lifecycle/dashboard acceptance checks, remain outstanding.
+
+Local validation of the probe preparation: preparation-only execution passed;
+`bunx tsc --noEmit` passed; the scoped non-live sandbox suite passed 98 tests
+(2 filtered); the repository-wide non-live suite passed 5,600 tests (11 filtered,
+0 failures) using `bun test --test-name-pattern '^(?!.*LIVE)'`. The unfiltered
+`bun test` run remains outstanding because it includes restricted live probes.
+These results do not establish kernel-denial capture. Self-review found no
+production lifecycle, hook, watchdog, or dashboard changes in this probe-only
+increment. No independent reviewers were spawned, per Adam's instruction.
+
 The goal is to capture kernel-only sandbox denials in the affected agent's `agent.log` and show them in the DENIALS pane. Hook-detected denials already reach both places; kernel-only events are not currently collected.
 
 **Ownership:** `start.sh` and `resume.sh` launch a dedicated collector outside the `sandbox-exec` wrapper, before the agent CLI starts. Collection must remain independent of both `ib watch` and the per-agent watchdog: closing the dashboard or a watchdog failure must not stop it. The launch scripts own the collector for that launch's lifetime.

@@ -7,15 +7,9 @@
  * (docs/SANDBOX-ROLLOUT.md "stage message attachments at send time"). Staging is
  * opt-in from the UI only: there is no CLI flag, and agent-originated sends or
  * the global @system coordinator never stage. `sendStagedMessage` is the single
- * choke point the human send paths call.
- *
- * The staging itself lives inside `sendMessage` (owned by the delivery-integration
- * change): this wrapper only flips the `stageAttachments` opt on and forwards the
- * caller's `attachmentBaseDir` (the selected repo, against which ./ and ../
- * resolve). The `sendMessage` opts type gains those two fields in that change; we
- * forward them as forward-compatible options — a named options object is
- * structurally accepted by the current signature and read by `sendMessage` the
- * moment that change lands, so there is no cast and nothing to unwind on rebase.
+ * choke point the human send paths call: it turns on `stageAttachments` and
+ * forwards `attachmentBaseDir` (the selected repo, against which ./ and ../
+ * resolve) to the message-delivery layer, which performs the copy and rewrite.
  *
  * Contract honored by callers:
  *  - staging happens ONLY on invocation (cancel before Send copies nothing);
@@ -30,10 +24,9 @@ import { sendMessage } from "../ib-commands";
 import type { IbCommandResult } from "../ib-commands";
 import type { Agent } from "../agents";
 
-/** Options accepted by {@link sendStagedMessage}. Mirrors `sendMessage`'s opts
- *  plus the send-time attachment base dir. `stageAttachments` is applied
- *  internally by this wrapper — callers never pass it, and it never reaches a
- *  CLI flag. */
+/** Options for {@link sendStagedMessage}. Mirrors `sendMessage`'s opts plus the
+ *  attachment base dir. `stageAttachments` is applied internally by this wrapper
+ *  — callers never pass it, and it never reaches a CLI flag. */
 export interface StagedSendOptions {
   fromAgent?: string;
   cwd?: string;
@@ -50,14 +43,9 @@ export type StagedSender = (
   opts?: StagedSendOptions,
 ) => Promise<IbCommandResult>;
 
-/**
- * Extra options the ib-watch team send forwards to `teamSend`. The staging and
- * skip/accept bookkeeping are owned by the delivery-integration change
- * (agent-c7af53ef); these fields are declared here so the UI compiles today and
- * passes them as forward-compatible options — read by `teamSend` the moment its
- * signature lands. `skipRecipientIds` lets an identical-draft retry after a
- * partial failure resend ONLY the members that have not yet accepted.
- */
+/** Options the ib-watch team send forwards to `teamSend`. `skipRecipientIds`
+ *  lets an identical-draft retry after a partial failure resend ONLY the members
+ *  that have not yet accepted. */
 export interface StagedTeamSendOptions {
   fromAgent?: string;
   stageAttachments?: boolean;
@@ -65,21 +53,15 @@ export interface StagedTeamSendOptions {
   attachmentBaseDir?: string;
 }
 
-/**
- * Result of a team send. `acceptedRecipientIds` (populated by the
- * delivery-integration change) names the members that accepted THIS call; the UI
- * accumulates them across retries and feeds them back as `skipRecipientIds` so an
- * accepted member is never resent. Optional so the current `teamSend` result
- * (which omits it) remains assignable until that change lands.
- */
+/** Result of a team send. `acceptedRecipientIds` names the members known
+ *  delivered after the call; the UI accumulates them across retries and feeds
+ *  them back as `skipRecipientIds` so an accepted member is never resent. It is
+ *  optional here so the wrapper is assignable from a plain `IbCommandResult`;
+ *  the delivery layer always populates it. */
 export type TeamSendResult = IbCommandResult & { acceptedRecipientIds?: string[] };
 
 const forwardToSendMessage: StagedSender = (agent, message, opts) => {
-  // `sendMessage` gains `stageAttachments`/`attachmentBaseDir` in the
-  // delivery-integration change (agent-c7af53ef). Build them as a named
-  // options object: it is structurally accepted by the current signature and
-  // read by `sendMessage` the moment that change lands — no cast, nothing to
-  // unwind on rebase. Until then the flag is simply inert.
+  // Turn on staging and forward the caller's base dir to the delivery layer.
   const forwardOpts: StagedSendOptions & { stageAttachments: boolean } = {
     ...opts,
     stageAttachments: true,

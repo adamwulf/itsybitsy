@@ -222,10 +222,9 @@ export interface ActionCtx {
    *
    * The opts carry the send-time attachment staging + retry bookkeeping
    * (`stageAttachments`, `skipRecipientIds`, `attachmentBaseDir`) and the result
-   * carries `acceptedRecipientIds`; both are owned by the delivery-integration
-   * change and forwarded here as forward-compatible options (see
-   * ./message-send). `skipRecipientIds` lets an identical-draft retry after a
-   * partial failure resend only the members that have not yet accepted.
+   * carries `acceptedRecipientIds` (see ./message-send). `skipRecipientIds` lets
+   * an identical-draft retry after a partial failure resend only the members
+   * that have not yet accepted.
    */
   teamSend: (
     teamName: string,
@@ -1235,13 +1234,15 @@ export function handleSend(ctx: ActionCtx) {
   // send target is correct without going through the agentTree.
   const agent = teamSel?.kind === "agent" ? teamSel.agent : ctx.agentTree.selectedAgent;
   if (!agent) return;
-  // Per-dialog send state, kept across failed submits so the draft stays editable:
-  //  - `inFlight` blocks a duplicate Send press while a send is running, so a
-  //    slow or failed send is never re-fired and attachments are never re-staged.
-  //  - `acceptedAll` remembers the send-all recipients already accepted, so an
-  //    identical-draft retry after a partial failure resends only the remainder.
-  let inFlight = false;
+  // Per-dialog send state, kept across failed submits so the draft stays editable.
+  // While a send is in flight the dialog itself is frozen (`dialog.inFlight`), so
+  // it cannot be re-submitted or cancelled out from under the send. `acceptedAll`
+  // remembers the send-all recipients already accepted so an identical-draft
+  // retry after a partial failure resends only the remainder; it is scoped to
+  // `acceptedAllKey` (the exact message) and reset the moment the draft text
+  // changes, so an EDITED message is sent afresh to everyone.
   const acceptedAll = new Set<string>();
+  let acceptedAllKey = "";
   const dialog: Extract<NonNullable<DialogState>, { type: "textarea" }> = {
     type: "textarea",
     prompt: `Send message to ${agent.id}:`,
@@ -1260,11 +1261,15 @@ export function handleSend(ctx: ActionCtx) {
     },
     onSubmit: (message: string) => {
       // Duplicate-submit guard: ignore a Send press while a send is in flight.
-      if (inFlight) return;
+      if (dialog.inFlight) return;
       // Cancellation-by-empty closes without sending — no attachment is copied.
       if (!message.trim()) { ctx.closeDialog(); ctx.setNotice("Send cancelled", "info"); return; }
       const trimmed = message.trim();
       if (dialog.sendAll) {
+        // The accepted set only applies to the SAME message. If the draft text
+        // changed since it was populated, this is a new message — reset so it is
+        // sent to everyone, not silently skipped for earlier recipients.
+        if (trimmed !== acceptedAllKey) { acceptedAll.clear(); acceptedAllKey = trimmed; }
         // Send to all non-archived agents with active tmux sessions, skipping any
         // already accepted on a prior identical-draft retry (never resend those).
         const targets = ctx.agentTree.flatList.filter(
@@ -1278,7 +1283,7 @@ export function handleSend(ctx: ActionCtx) {
           ctx.setNotice(`Sent to ${acceptedAll.size} agents`, "info");
           return;
         }
-        inFlight = true;
+        dialog.inFlight = true;
         void ctx.executeAndRefresh(async () => {
           let failed = 0;
           for (const f of pending) {
@@ -1294,9 +1299,9 @@ export function handleSend(ctx: ActionCtx) {
             // remaining agents.
             ctx.setNotice(`Sent to ${acceptedAll.size} agents, ${failed} failed — press Send to retry`, "error");
           }
-        }).finally(() => { inFlight = false; });
+        }).finally(() => { dialog.inFlight = false; });
       } else {
-        inFlight = true;
+        dialog.inFlight = true;
         void ctx.executeAndRefresh(async () => {
           const result = await sendStagedMessage(agent, trimmed, { cwd: "/", attachmentBaseDir: agent.repoPath });
           if (result.ok) {
@@ -1307,7 +1312,7 @@ export function handleSend(ctx: ActionCtx) {
             // Keep the editable draft so the user can fix a bad path and resubmit.
             ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
           }
-        }).finally(() => { inFlight = false; });
+        }).finally(() => { dialog.inFlight = false; });
       }
     },
   };
@@ -1326,27 +1331,32 @@ export function handleSend(ctx: ActionCtx) {
  * when configured). This matches `ib send @<team>` from a non-agent shell.
  */
 function handleSendToTeam(ctx: ActionCtx, teamName: string) {
-  // Guard duplicate submits and keep the draft on failure. `acceptedRecipients`
-  // accumulates the members that have accepted across identical-draft retries so
-  // a partial failure resends only the members that have not yet accepted (fed
-  // back to `teamSend` as `skipRecipientIds`).
-  let inFlight = false;
+  // The dialog is frozen while a send is in flight (no re-submit, no cancel) and
+  // the draft is kept on failure. `acceptedRecipients` accumulates the members
+  // that have accepted across identical-draft retries so a partial failure
+  // resends only the members that have not yet accepted (fed back to `teamSend`
+  // as `skipRecipientIds`). It is scoped to `acceptedKey` (the exact message) and
+  // reset when the draft text changes, so an EDITED message goes to EVERY member.
   const acceptedRecipients = new Set<string>();
-  ctx.showDialog({
+  let acceptedKey = "";
+  const dialog: Extract<NonNullable<DialogState>, { type: "textarea" }> = {
     type: "textarea",
     prompt: `Send message to @${teamName}:`,
     buffer: new TextBuffer(),
     focusedButton: "text",
     onSubmit: (message: string) => {
-      if (inFlight) return;
+      if (dialog.inFlight) return;
       const trimmed = message.trim();
       if (!trimmed) { ctx.closeDialog(); ctx.setNotice("Send cancelled", "info"); return; }
+      // A changed draft is a new message — resend to everyone, never skip
+      // recipients accepted for a different text.
+      if (trimmed !== acceptedKey) { acceptedRecipients.clear(); acceptedKey = trimmed; }
       // Resolve member ids → live Agent records from the watcher's last batch
       // (the same source that fed flattenTeamsTree, so the set is consistent
       // with what the user just saw in the Teams panel). `teamSend` re-prunes
       // dead members under its own lock — this is a hint set, not authoritative.
       const live = ctx.watcher?.lastAgents ?? [];
-      inFlight = true;
+      dialog.inFlight = true;
       void ctx.executeAndRefresh(async () => {
         const result = await ctx.teamSend(teamName, live, trimmed, {
           stageAttachments: true,
@@ -1362,9 +1372,10 @@ function handleSendToTeam(ctx: ActionCtx, teamName: string) {
           // Keep the draft; the accepted set makes a retry resend only the rest.
           ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
         }
-      }).finally(() => { inFlight = false; });
+      }).finally(() => { dialog.inFlight = false; });
     },
-  });
+  };
+  ctx.showDialog(dialog);
 }
 
 function handleSendToCoordinator(ctx: ActionCtx) {
@@ -1421,10 +1432,10 @@ function handleSendToCoordinator(ctx: ActionCtx) {
 
 function handleSendToRepoCoordinator(ctx: ActionCtx, agent: Agent) {
   // A repo coordinator is a normal repository agent (not the global @system
-  // coordinator), so its human sends stage like any other. Guard duplicate
-  // submits and keep the draft on failure.
-  let inFlight = false;
-  ctx.showDialog({
+  // coordinator), so its human sends stage like any other. The dialog is frozen
+  // while a send is in flight (no re-submit, no cancel) and the draft is kept on
+  // failure.
+  const dialog: Extract<NonNullable<DialogState>, { type: "textarea" }> = {
     type: "textarea",
     prompt: `Send message to ${agent.id} (coordinator):`,
     buffer: new TextBuffer(),
@@ -1440,10 +1451,10 @@ function handleSendToRepoCoordinator(ctx: ActionCtx, agent: Agent) {
       });
     },
     onSubmit: (message: string) => {
-      if (inFlight) return;
+      if (dialog.inFlight) return;
       if (!message.trim()) { ctx.closeDialog(); ctx.setNotice("Send cancelled", "info"); return; }
       const trimmed = message.trim();
-      inFlight = true;
+      dialog.inFlight = true;
       void ctx.executeAndRefresh(async () => {
         const result = await sendStagedMessage(agent, trimmed, { cwd: "/", attachmentBaseDir: agent.repoPath });
         if (result.ok) {
@@ -1452,9 +1463,10 @@ function handleSendToRepoCoordinator(ctx: ActionCtx, agent: Agent) {
         } else {
           ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
         }
-      }).finally(() => { inFlight = false; });
+      }).finally(() => { dialog.inFlight = false; });
     },
-  });
+  };
+  ctx.showDialog(dialog);
 }
 
 /** 'b' — add an entry to the selected agent's settings.local.json allow list. */
@@ -1684,37 +1696,42 @@ export function handleAnswerQuestion(ctx: ActionCtx) {
   const agentEntry = ctx.agentTree.flatList.find((f) => f.kind === "agent" && f.agent.id === q.agent);
   if (!agentEntry || agentEntry.kind !== "agent") { ctx.setNotice(`Agent ${q.agent} not found`, "error"); return; }
   const answerAgent = agentEntry.agent;
-  // Guard duplicate submits and keep the draft on failure. `acked` ensures the
-  // question is acknowledged at most once even if the staged send fails and the
-  // user resubmits the same draft.
-  let inFlight = false;
-  let acked = false;
-  ctx.showDialog({
+  // The dialog is frozen while a send is in flight (no re-submit, no cancel) and
+  // the draft is kept on failure. `answered` records that the answer was ACCEPTED
+  // for delivery so it is never resent — the acknowledge is what may still be
+  // retried. Critically, the answer is delivered BEFORE the question is
+  // acknowledged: acknowledging first would permanently remove the question even
+  // when a missing/cancelled attachment meant the answer never went out.
+  let answered = false;
+  const dialog: Extract<NonNullable<DialogState>, { type: "textarea" }> = {
     type: "textarea",
     prompt: `Answer ${q.agent}'s question:`,
     buffer: new TextBuffer(),
     focusedButton: "text",
     onSubmit: (answer: string) => {
-      if (inFlight) return;
+      if (dialog.inFlight) return;
       if (!answer.trim()) { ctx.closeDialog(); ctx.setNotice("Answer cancelled", "info"); return; }
       const trimmed = answer.trim();
-      inFlight = true;
+      dialog.inFlight = true;
       void ctx.executeAndRefresh(async () => {
-        if (!acked) {
-          const ackResult = await acknowledgeQuestion(answerAgent.repoPath, q.id);
-          if (!ackResult.ok) { ctx.setNotice(`Acknowledge failed: ${ackResult.stderr || ackResult.stdout}`, "error"); return; }
-          acked = true;
+        // 1) Deliver the answer FIRST. On failure keep the draft and DO NOT
+        //    acknowledge — the question must remain until the answer is queued.
+        if (!answered) {
+          const sendResult = await sendStagedMessage(answerAgent, trimmed, { cwd: "/", attachmentBaseDir: answerAgent.repoPath });
+          if (!sendResult.ok) { ctx.setNotice(`Send failed: ${sendResult.stderr || sendResult.stdout}`, "error"); return; }
+          answered = true;
         }
-        const sendResult = await sendStagedMessage(answerAgent, trimmed, { cwd: "/", attachmentBaseDir: answerAgent.repoPath });
-        if (sendResult.ok) {
-          ctx.closeDialog();
-          ctx.setNotice(`Answered ${q.agent}`, "info");
-        } else {
-          ctx.setNotice(`Send failed: ${sendResult.stderr || sendResult.stdout}`, "error");
-        }
-      }).finally(() => { inFlight = false; });
+        // 2) The answer is accepted (never resend it). Now acknowledge. If the
+        //    acknowledge fails, keep the dialog open — a retry re-acks only,
+        //    never re-sends the already-delivered answer.
+        const ackResult = await acknowledgeQuestion(answerAgent.repoPath, q.id);
+        if (!ackResult.ok) { ctx.setNotice(`Answered ${q.agent}, but acknowledge failed: ${ackResult.stderr || ackResult.stdout}`, "error"); return; }
+        ctx.closeDialog();
+        ctx.setNotice(`Answered ${q.agent}`, "info");
+      }).finally(() => { dialog.inFlight = false; });
     },
-  });
+  };
+  ctx.showDialog(dialog);
 }
 
 export function handleAcknowledgeQuestion(ctx: ActionCtx) {
@@ -2547,16 +2564,15 @@ export function handleCrossRepoSend(ctx: ActionCtx) {
 }
 
 function showMessageInput(ctx: ActionCtx, repo: RepoEntry, destAgent: Agent) {
-  let inFlight = false;
-  ctx.showDialog({
+  const dialog: Extract<NonNullable<DialogState>, { type: "input" }> = {
     type: "input",
     prompt: `Send message to ${destAgent.id}:`,
     value: "",
     onSubmit: (message: string) => {
-      if (inFlight) return;
+      if (dialog.inFlight) return;
       if (!message.trim()) { ctx.closeDialog(); ctx.setNotice("Send cancelled", "info"); return; }
       const trimmed = message.trim();
-      inFlight = true;
+      dialog.inFlight = true;
       void ctx.executeAndRefresh(async () => {
         const result = await sendStagedMessage(destAgent, trimmed, { cwd: "/", attachmentBaseDir: destAgent.repoPath });
         if (result.ok) {
@@ -2565,9 +2581,10 @@ function showMessageInput(ctx: ActionCtx, repo: RepoEntry, destAgent: Agent) {
         } else {
           ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
         }
-      }).finally(() => { inFlight = false; });
+      }).finally(() => { dialog.inFlight = false; });
     },
-  });
+  };
+  ctx.showDialog(dialog);
 }
 
 /** Find the repo matching the currently selected repo header */

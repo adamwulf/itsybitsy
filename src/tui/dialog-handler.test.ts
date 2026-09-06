@@ -6,6 +6,7 @@ import {
 } from "./dialog-handler";
 import { TextBuffer, deleteWord } from "./text-buffer";
 import { assertDialog } from "./test-helpers";
+import { setClipboardReaderForTests, resetClipboardReaderForTests } from "./clipboard";
 
 /** Build a mock DialogCtx */
 function makeDialogCtx(dialog: NonNullable<DialogState>): DialogCtx & { closed: boolean[] } {
@@ -769,5 +770,93 @@ describe("handleDialogInput with null", () => {
       closeDialog: () => {},
     };
     expect(handleDialogInput(ctx, "x")).toBe(false);
+  });
+});
+
+// ─── in-flight dialog freeze (send-time attachment staging) ─────────────
+describe("in-flight dialog freeze", () => {
+  test("textarea dialog frozen while inFlight swallows Escape, Send, and typing", () => {
+    let submits = 0;
+    let cancels = 0;
+    const dialog: NonNullable<DialogState> = {
+      type: "textarea",
+      prompt: "Send:",
+      buffer: new TextBuffer(),
+      focusedButton: "send",
+      onSubmit: () => { submits++; },
+      onCancel: () => { cancels++; },
+      inFlight: true,
+    };
+    const ctx = makeDialogCtx(dialog);
+    // Every key is swallowed while a send launched from this dialog is pending.
+    expect(handleDialogInput(ctx, "\x1b")).toBe(true); // Escape
+    expect(handleDialogInput(ctx, "\r")).toBe(true);   // Enter / [Send]
+    expect(handleDialogInput(ctx, "a")).toBe(true);    // typing
+    expect(ctx.closed).toHaveLength(0);
+    expect(submits).toBe(0);
+    expect(cancels).toBe(0);
+    expect(dialog.buffer.getText()).toBe("");
+  });
+
+  test("input dialog frozen while inFlight swallows Escape, Enter, and typing", () => {
+    let submits = 0;
+    const dialog: NonNullable<DialogState> = {
+      type: "input",
+      prompt: "Send:",
+      value: "hi",
+      onSubmit: () => { submits++; },
+      inFlight: true,
+    };
+    const ctx = makeDialogCtx(dialog);
+    expect(handleDialogInput(ctx, "\x1b")).toBe(true);
+    expect(handleDialogInput(ctx, "\r")).toBe(true);
+    expect(handleDialogInput(ctx, "x")).toBe(true);
+    expect(ctx.closed).toHaveLength(0);
+    expect(submits).toBe(0);
+    expect(dialog.value).toBe("hi");
+  });
+
+  test("clearing inFlight re-enables cancel — so a success close never lands on a later dialog", () => {
+    const dialog: NonNullable<DialogState> = {
+      type: "textarea",
+      prompt: "Send:",
+      buffer: new TextBuffer(),
+      focusedButton: "send",
+      onSubmit: () => {},
+      inFlight: true,
+    };
+    const ctx = makeDialogCtx(dialog);
+    handleDialogInput(ctx, "\x1b");
+    expect(ctx.closed).toHaveLength(0); // frozen: cannot cancel/replace mid-send
+    dialog.inFlight = false;
+    handleDialogInput(ctx, "\x1b");
+    expect(ctx.closed).toHaveLength(1); // unfrozen (send failed): cancel works again
+  });
+
+  test("a late clipboard read after a textarea submit does not mutate the buffer", async () => {
+    let resolveClip!: (text: string) => void;
+    setClipboardReaderForTests(() => new Promise<string>((r) => { resolveClip = r; }));
+    try {
+      const buffer = new TextBuffer(["hi"]);
+      const dialog: Extract<NonNullable<DialogState>, { type: "textarea" }> = {
+        type: "textarea",
+        prompt: "Send:",
+        buffer,
+        focusedButton: "text",
+        // Mimic the real send closure: submitting launches an async send and
+        // freezes the dialog.
+        onSubmit: () => { dialog.inFlight = true; },
+      };
+      const ctx = makeDialogCtx(dialog);
+      handleDialogInput(ctx, "\x16"); // Ctrl+V in text focus → clipboard read dispatched
+      handleDialogInput(ctx, "\t");   // text → cancel
+      handleDialogInput(ctx, "\t");   // cancel → send
+      handleDialogInput(ctx, "\r");   // submit → cancelPaste() invalidates the read
+      resolveClip("late clipboard text");
+      await new Promise((r) => setTimeout(r, 0));
+      expect(buffer.getText()).toBe("hi"); // the frozen draft was not mutated
+    } finally {
+      resetClipboardReaderForTests();
+    }
   });
 });

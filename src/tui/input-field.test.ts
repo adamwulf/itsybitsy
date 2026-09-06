@@ -1,6 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import { InputFieldComponent } from "./input-field";
 import { stripAnsi } from "../parse-state";
+import { setClipboardReaderForTests, resetClipboardReaderForTests } from "./clipboard";
 
 function makeField(): InputFieldComponent {
   return new InputFieldComponent();
@@ -542,6 +543,35 @@ describe("InputFieldComponent", () => {
       await flush();
     });
 
+    test("a Ctrl+V clipboard read that resolves after submit does not mutate the submitted draft", async () => {
+      let resolveClip!: (text: string) => void;
+      setClipboardReaderForTests(() => new Promise<string>((r) => { resolveClip = r; }));
+      try {
+        const field = makeField();
+        let resolveSend!: (accepted: boolean) => void;
+        const pendingSend = new Promise<boolean>((r) => { resolveSend = r; });
+        field.onSubmit = () => pendingSend;
+
+        for (const ch of "hi") field.handleInput(ch);
+        field.handleInput("\x16"); // Ctrl+V → clipboard read dispatched (in flight)
+        field.handleInput("\t");   // → [Send]
+        field.handleInput("\r");   // submit → cancelPaste() invalidates the pending read
+
+        // The clipboard read returns late; it must NOT append to the frozen draft.
+        resolveClip("late clipboard text");
+        await flush();
+        expect(field.getText()).toBe("hi");
+
+        resolveSend(true);
+        await pendingSend;
+        await flush();
+        // Accepted → cleared, and never carried the late clipboard text.
+        expect(field.getText()).toBe("");
+      } finally {
+        resetClipboardReaderForTests();
+      }
+    });
+
     test("typing and Enter in text focus never submit (no send on draft edits)", async () => {
       const field = makeField();
       let calls = 0;
@@ -552,6 +582,51 @@ describe("InputFieldComponent", () => {
       field.handleInput("\r"); // Enter in TEXT focus → newline, not a submit
       expect(calls).toBe(0);
       expect(field.getText()).toBe("hi\n");
+    });
+
+    test("overlapping sends to two agents each stay frozen until their own send resolves", async () => {
+      const field = makeField();
+      let resolveA!: (accepted: boolean) => void;
+      let resolveB!: (accepted: boolean) => void;
+      const pA = new Promise<boolean>((r) => { resolveA = r; });
+      const pB = new Promise<boolean>((r) => { resolveB = r; });
+      let calls = 0;
+      let target: "a" | "b" = "a";
+      field.onSubmit = () => { calls++; return target === "a" ? pA : pB; };
+
+      // Submit A, then switch to B and submit B — both now in flight.
+      field.switchAgent("agent-a");
+      target = "a";
+      submit(field, "for-a");
+      field.switchAgent("agent-b");
+      target = "b";
+      submit(field, "for-b");
+      expect(calls).toBe(2);
+
+      // Back on A: still pending → frozen (typing blocked, no re-submit).
+      field.switchAgent("agent-a");
+      expect(field.getText()).toBe("for-a");
+      field.handleInput("x");
+      expect(field.getText()).toBe("for-a");
+      field.handleInput("\t"); // → send
+      field.handleInput("\r"); // re-submit attempt
+      expect(calls).toBe(2); // A still guarded
+
+      // Resolve A only: A clears; B stays frozen.
+      resolveA(true);
+      await pA;
+      await flush();
+      expect(field.getText()).toBe(""); // A cleared (we are on A)
+
+      field.switchAgent("agent-b");
+      expect(field.getText()).toBe("for-b"); // B still there
+      field.handleInput("y");
+      expect(field.getText()).toBe("for-b"); // B still frozen
+
+      resolveB(true);
+      await pB;
+      await flush();
+      expect(field.getText()).toBe("");
     });
 
     test("acceptance clears the submitted agent's draft, not one navigated to mid-send", async () => {

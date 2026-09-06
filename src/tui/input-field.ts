@@ -42,13 +42,12 @@ export class InputFieldComponent implements Component {
   onSubmit: ((text: string) => void | Promise<boolean>) | null = null;
   onCancel: (() => void) | null = null;
   onAsyncRender?: () => void;
-  /** True while an async (acceptance-gated) submit is in flight — guards
-   *  against a repeated Send press re-firing the same draft. */
-  private submitting = false;
-  /** The buffer whose acceptance-gated submit is in flight. While a send is
-   *  pending, THIS buffer is frozen (no edits, no re-submit) so the sent text
-   *  cannot change under the send; a different agent's buffer stays editable. */
-  private submittingBuffer: TextBuffer | null = null;
+  /** Buffers whose acceptance-gated submit is in flight. A buffer is frozen (no
+   *  edits, no re-submit) while it is in this set, so the sent text cannot change
+   *  under the send. Tracking PER BUFFER — not a single flag — keeps overlapping
+   *  sends to different agents independent: each buffer stays frozen until its
+   *  own send resolves, and one send resolving cannot unfreeze another. */
+  private pendingBuffers = new Set<TextBuffer>();
 
   invalidate(): void {}
 
@@ -96,24 +95,27 @@ export class InputFieldComponent implements Component {
    */
   submit(): void {
     // A pending send on this buffer is frozen — never re-submit it.
-    if (this.submitting && this.buffer === this.submittingBuffer) return;
+    if (this.pendingBuffers.has(this.buffer)) return;
+    // Flush any in-flight paste (a chunked bracketed paste or a Ctrl+V clipboard
+    // read that hasn't returned) BEFORE capturing the message, so a late paste
+    // cannot mutate the submitted draft after it is frozen.
+    cancelPaste();
     const text = this.buffer.getText();
     if (!text.trim()) return;
     const result = this.onSubmit?.(text);
     if (isBooleanPromise(result)) {
       // Capture the submitted buffer/agent so that if the user navigates to
       // another agent mid-send, acceptance clears the message that was actually
-      // sent rather than whatever draft is now on screen.
+      // sent rather than whatever draft is now on screen. Tracking the buffer in
+      // the pending set (not a single flag) keeps overlapping sends independent.
       const submittedBuffer = this.buffer;
       const submittedAgentId = this.currentAgentId;
-      this.submitting = true;
-      this.submittingBuffer = submittedBuffer;
+      this.pendingBuffers.add(submittedBuffer);
       result
         .then((accepted) => { if (accepted) this.discardSubmittedDraft(submittedBuffer, submittedAgentId); })
         .catch(() => { /* keep the draft on error */ })
         .finally(() => {
-          this.submitting = false;
-          this.submittingBuffer = null;
+          this.pendingBuffers.delete(submittedBuffer);
           this.onAsyncRender?.();
         });
     } else {
@@ -184,7 +186,7 @@ export class InputFieldComponent implements Component {
     // (which would re-copy staged attachments). A different agent's draft — after
     // the user navigates away mid-send — is a different buffer and stays fully
     // editable. Escape above still abandons.
-    if (this.submitting && this.buffer === this.submittingBuffer) {
+    if (this.pendingBuffers.has(this.buffer)) {
       return true;
     }
 

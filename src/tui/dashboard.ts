@@ -1861,9 +1861,8 @@ export class DashboardComponent implements Component {
     message: string,
     opts: StagedTeamSendOptions | undefined,
   ): Promise<TeamSendResult> => {
-    // opts (stageAttachments / skipRecipientIds / attachmentBaseDir) are
-    // forwarded as forward-compatible options — read by ibTeamSend once the
-    // delivery-integration signature lands; inert until then.
+    // Forward the send-time staging + retry opts (stageAttachments /
+    // skipRecipientIds / attachmentBaseDir) through to the team fan-out.
     return ibTeamSend(teamName, members, message, opts, this.repos);
   };
 

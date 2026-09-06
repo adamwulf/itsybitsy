@@ -31,7 +31,7 @@ while [ ! -f "$dir/stop" ]; do sleep 0.01; done
     const script = join(dir, `${name}.sh`);
     await writeFile(script, `#!/bin/bash
 AGENT_LOG=${shellQuote(join(dir, "agent.log"))}
-cleanup_sandbox_proxy() { :; }
+cleanup_sandbox_proxy() { printf 'cleanup\\n' >> ${shellQuote(join(dir, "proxy-cleanup"))}; }
 ${sandboxDenialScriptPreamble(dir)}
 printf '%s' "$IB_SANDBOX_LOG_DIR" > ${shellQuote(join(dir, `${name}-dir`))}
 ${sandboxDenialExecPrefix(shellQuote(wrapper))} /bin/sleep ${seconds} &
@@ -77,7 +77,9 @@ test("supervisor reports runtime collector failure while CLI continues without d
     const child = await f.start("start", 0.8);
     await until(async () => (await Bun.file(join(f.dir, "agent.log")).text().catch(() => "")).includes("collector exited 31"));
     expect(child.exitCode).toBeNull();
+    expect(await Bun.file(join(f.dir, "proxy-cleanup")).exists()).toBe(false);
     expect(await child.exited).toBe(0);
+    expect(await readFile(join(f.dir, "proxy-cleanup"), "utf8")).toBe("cleanup\n");
     expect(await readFile(join(f.dir, "enforcement"), "utf8")).toBe("wrapped\n");
   } finally { await f.cleanup(); }
 });

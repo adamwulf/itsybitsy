@@ -117,22 +117,26 @@ failure never removes or bypasses the required Seatbelt wrapper. No system-wide
 collector, dashboard dependency, watchdog dependency, or global `@system` launch
 change is introduced.
 
-Candidate checks in the Codex session: 5,655 reported `bun test` passes, zero
-failures, 29,476 assertions across 114 files; TypeScript checking and local build
+Candidate checks in the Codex session: 5,657 reported `bun test` passes, zero
+failures, 29,486 assertions across 115 files; TypeScript checking and local build
 pass. `./ib list-types` prints its table and the new command's help dispatches.
 The suite total still includes the kernel capability and opt-in Claude boot
 early-return skips described below; it is not a live enforcement/capture pass.
 The authorized worker can run the native process reader, candidate binary,
-shell fixtures, and logger. Corrected candidate `f09280f` is undergoing live
-collector/start/resume fixture validation.
+shell fixtures, and logger. Corrected candidate `d198c4d` is undergoing live
+stream-failure and verbatim start/resume preamble fixture validation.
 
 The first full run after the native fixes reported 5,653 passes and two failures:
 both source-entry smoke tests received an empty type table from their shared
 fixed temporary home. All four entry tests passed on an isolated rerun. Those
-tests now use a fresh temporary home per case; the subsequent full run produced
-the passing total above. No production type-loading behavior changed. The
+tests now use a fresh temporary home per case; the subsequent full run reported
+5,655 passes with zero failures. No production type-loading behavior changed. The
 failed run is retained at `/private/tmp/sandbox-denial-logs-full-test.log`; the
 passing run is `/private/tmp/sandbox-denial-logs-full-test-isolated.log`.
+After the signal-exit fix, the full run at
+`/private/tmp/sandbox-denial-logs-full-test-signal.log` produced the current
+passing total above. Shell regression coverage also confirms collector failure
+does not prematurely invoke proxy cleanup while the CLI is still alive.
 
 Self-review covers lifecycle (PID survives gate exec; collector also ends on CLI
 exit), hooks (existing hook denial format and permissions retained), watchdog

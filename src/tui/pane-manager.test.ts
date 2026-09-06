@@ -204,6 +204,58 @@ describe("RightPaneComponent", () => {
     }
   });
 
+  test("DENIALS word-wraps with a 2-space hanging indent (first row flush, tails hang +2)", () => {
+    // The DENIALS pane routes through the same word-wrap path as AGENT LOG, plus a
+    // 2-space hanging indent (like QUESTIONS / team chat): each denial's first row
+    // is flush-left and its wrapped continuation rows hang in two more spaces. A
+    // long line must WRAP (every word survives on some row) instead of truncating,
+    // and no rendered row can exceed the pane width.
+    const words = [
+      "reflow", "keeps", "whole", "words", "intact", "across",
+      "boundaries", "reliably", "everywhere", "always", "still", "here",
+    ];
+    const rp = new RightPaneComponent();
+    rp.displayHeight = 20;
+    rp.agent = makeAgent({ id: "agent-denial-wrap" });
+    rp.denialsLoading = false;
+    rp.denialsContent = [
+      {
+        timestamp: "2026-09-05 23:01:34",
+        epoch: 1,
+        line: `[2026-09-05 23:01:34] [PreToolUse] Permission denied: ${words.join(" ")}`,
+      },
+    ];
+    rp.setMode("DENIALS"); // setMode runs updateContent() to build this.content
+    const width = 30;
+    const rows = rp.render(width).map(stripAnsi);
+    const contentRows = rows.filter((r) => r.trim().length > 0);
+
+    // Row 0 is the "N denial(s)" header; the denial's own rows follow it.
+    const headerIdx = contentRows.findIndex((r) => r.includes("denial(s)"));
+    expect(headerIdx).toBe(0);
+    const denialRows = contentRows.slice(headerIdx + 1);
+
+    // (a) The long denial WRAPPED across multiple rows (truncation would give 1).
+    expect(denialRows.length).toBeGreaterThan(1);
+    // Every word survives whole on some row — word-wrap, not character-wrap.
+    for (const word of words) {
+      expect(denialRows.some((r) => r.includes(word))).toBe(true);
+    }
+
+    // (b) Hanging indent: the FIRST denial row is flush (one leading space, not
+    // three); every CONTINUATION row hangs in two more spaces (three leading).
+    expect(denialRows[0]!).toMatch(/^ \S/);
+    expect(denialRows[0]!.startsWith("   ")).toBe(false);
+    for (const cont of denialRows.slice(1)) {
+      expect(cont).toMatch(/^   \S/);
+    }
+
+    // No rendered row exceeds the pane width.
+    for (const r of rows) {
+      expect(visibleWidth(r)).toBeLessThanOrEqual(width);
+    }
+  });
+
   test("filteredQuestions returns all when no agent", () => {
     const rp = new RightPaneComponent();
     rp.questions = [

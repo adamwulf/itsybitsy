@@ -588,19 +588,24 @@ export class RightPaneComponent implements Component {
       start = Math.max(0, this.content.length - available - this.scrollOffset);
     }
     const visible = this.content.slice(start, start + available);
-    if (this.mode === "QUESTIONS" || this.mode === "AGENT LOG" || this.mode === "INITIAL PROMPT" || this.mode === "ERRORS") {
+    if (this.mode === "QUESTIONS" || this.mode === "AGENT LOG" || this.mode === "INITIAL PROMPT" || this.mode === "ERRORS" || this.mode === "DENIALS") {
       for (const line of visible) {
         if (lines.length >= this.displayHeight) break;
         const isQ = this.mode === "QUESTIONS";
+        const isDenials = this.mode === "DENIALS";
         // QUESTIONS keeps character-wrap (wrapLines): it carries OSC8 hyperlink
         // handling and a 3-space continuation indent (below). AGENT LOG /
-        // INITIAL PROMPT / ERRORS are agent prose — word-wrap them (break at
-        // spaces, hard-wrap only over-width tokens) so words aren't split
-        // mid-token, matching the team-log / center tmux pane.
-        const wrapped = isQ ? wrapLines(line, innerWidth - 2) : wordWrapLines(line, innerWidth);
+        // INITIAL PROMPT / ERRORS / DENIALS are agent prose — word-wrap them (break
+        // at spaces, hard-wrap only over-width tokens) so words aren't split
+        // mid-token, matching the team-log / center tmux pane. DENIALS additionally
+        // carries the same 2-space hanging indent as QUESTIONS / team chat: it wraps
+        // to (innerWidth - 2) and prefixes every continuation row with two spaces, so
+        // each denial's first row stays flush-left (easy to spot where an entry
+        // starts) and its wrapped tail hangs in two spaces.
+        const wrapped = isQ ? wrapLines(line, innerWidth - 2) : wordWrapLines(line, isDenials ? innerWidth - 2 : innerWidth);
         for (let wi = 0; wi < wrapped.length; wi++) {
           if (lines.length >= this.displayHeight) break;
-          if (isQ && wi > 0) {
+          if ((isQ || isDenials) && wi > 0) {
             lines.push(closeOsc8("   " + truncateToWidth(wrapped[wi]!, innerWidth - 2, "")));
           } else {
             lines.push(closeOsc8(" " + truncateToWidth(wrapped[wi]!, innerWidth, "")));

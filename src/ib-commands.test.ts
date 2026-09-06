@@ -1395,6 +1395,30 @@ describe("teamSend send-time attachment staging", () => {
     expect(recs.filter((r) => r.message === "/shot.png hi").length).toBe(1);
   });
 
+  test("staged send to an EMPTY team records the room message once (room-only send, no copies)", async () => {
+    // A staged send with no recipients is a room-only send: nothing to stage or
+    // copy, but §17.4 still records the room history line. This is preserved for
+    // staged sends, not just legacy ones (regression for reviewer1's note that
+    // the deferred staged record skipped the empty-recipient case).
+    const { createTeam } = await import("./teams");
+    const { readChannel } = await import("./team-channel");
+    await createTeam("backend", "", 1000);
+    resetReadAgentMetaCache();
+
+    // No recipients → the stager must never run (no copies for a room-only send).
+    setMessageAttachmentStagerForTesting(async () => {
+      throw new Error("stager must not run for an empty team");
+    });
+
+    const res = await teamSend("backend", [], "/shot.png hi", { stageAttachments: true }, reposArg());
+    expect(res.ok).toBe(true);
+    expect(res.stdout).toContain("no recipients");
+    expect(res.acceptedRecipientIds).toEqual([]);
+    // The room recorded the message exactly once despite there being no recipients.
+    const recs = await readChannel("backend");
+    expect(recs.filter((r) => r.message === "/shot.png hi").length).toBe(1);
+  });
+
   test("skipping every current recipient is a success no-op that reports the full accepted set", async () => {
     const { createTeam, addMember } = await import("./teams");
     const { readOutbox } = await import("./outbox");

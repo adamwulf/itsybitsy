@@ -4096,12 +4096,14 @@ function resolveTeamSenderId(repos: RepoEntry[], opts: { fromAgent?: string } | 
  * accepted members are still reported in `acceptedRecipientIds` on that failure.
  *
  * Room-history divergence for staged sends: a legacy fan-out records the room
- * history line REGARDLESS of delivery outcome (§17.4). A staged send instead
- * records it only when a fresh attempt (empty skip) delivered to at least one
- * member — a total staging failure records nothing, and because that failure
- * returns an empty `acceptedRecipientIds`, its same-draft retry also arrives
- * with an empty skip set, so recording once delivery first succeeds yields
- * exactly one room line across the failed-then-retried sequence (no duplicate).
+ * history line REGARDLESS of delivery outcome (§17.4). A staged send WITH
+ * recipients instead records it only when a fresh attempt (empty skip) delivered
+ * to at least one member — a total staging failure records nothing, and because
+ * that failure returns an empty `acceptedRecipientIds`, its same-draft retry
+ * also arrives with an empty skip set, so recording once delivery first succeeds
+ * yields exactly one room line across the failed-then-retried sequence (no
+ * duplicate). A staged send with NO recipients (empty/self-only team) is a
+ * room-only send with nothing to stage — it records once like a legacy send.
  */
 export async function teamSend(
   teamName: string,
@@ -4193,7 +4195,13 @@ export async function teamSend(
   if (!stagedSend) await recordRoomMessage();
 
   if (recipients.length === 0) {
-    // No one to deliver to — empty team, self-only, or all-pruned. No-op success.
+    // No one to deliver to — empty team, self-only, or all-pruned. A room-only
+    // send: nothing to stage or copy. Still record the room history line (§17.4
+    // records even with an empty recipient set). A legacy send already recorded
+    // it above; a STAGED send records it HERE (its deferred post-loop record
+    // never runs when there are no recipients). This is a one-shot success, not
+    // a retried failure, so recording once cannot duplicate.
+    if (stagedSend) await recordRoomMessage();
     return { ...teamOk(`no recipients in @${name}`), acceptedRecipientIds: [] };
   }
 

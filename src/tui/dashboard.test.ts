@@ -1759,6 +1759,42 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.agentType).toBe("manager");
   });
 
+  test("new-agent form: Kitty protocol Shift+Space cycles agent type backwards", () => {
+    dashboard = makeDashboard();
+    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
+
+    dashboard.handleInput("a");
+    const d = assertDialog(dashboard.dialog, 'new-agent-form');
+    dashboard.handleInput("\t"); // focus agentType
+    expect(d.focused).toBe("agentType");
+    expect(d.agentType).toBe("manager");
+
+    const types = d.availableTypes;
+    expect(types.length).toBeGreaterThan(1);
+    const managerIdx = types.indexOf("manager");
+    // Kitty protocol Shift+Space: CSI 32;2u (space=32, shift modifier=2)
+    const shiftSpace = "\x1b[32;2u";
+
+    // Shift+Space steps backward once, wrapping to the end when at index 0
+    dashboard.handleInput(shiftSpace);
+    expect(d.agentType).toBe(types[(managerIdx - 1 + types.length) % types.length]!);
+    expect(d.focused).toBe("agentType");
+
+    // Space then Shift+Space is a round trip
+    dashboard.handleInput(" ");
+    expect(d.agentType).toBe("manager");
+    dashboard.handleInput(" ");
+    expect(d.agentType).toBe(types[(managerIdx + 1) % types.length]!);
+    dashboard.handleInput(shiftSpace);
+    expect(d.agentType).toBe("manager");
+
+    // A full backward lap returns to manager
+    for (let i = 0; i < types.length; i++) {
+      dashboard.handleInput(shiftSpace);
+    }
+    expect(d.agentType).toBe("manager");
+  });
+
   // Relies on "worker" sorting immediately after "manager" in the default types list,
   // so a single Space press from the default focus advances the selection from manager to worker.
   // Isolates the home directory (via setUserHome) so the cycle reads

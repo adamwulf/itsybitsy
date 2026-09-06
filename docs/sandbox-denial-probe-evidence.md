@@ -471,27 +471,31 @@ attributing only its own registered root-tree — **not** from a shared stream (
 | Log-stream SIGKILL (Defect 3 fix) | Collector emits `[SandboxCollector] ERROR: log stream stopped unexpectedly (exit=null, signal=SIGKILL)` and exits 1; supervisor then logs `collector exited 1`; kernel still denies read+write; collector `finally` runs so **no residual** dir/stream |
 | Collector SIGKILL (supervisor visibility) | Shell supervisor logs `[SandboxCollector] ERROR: … collector exited 137` and touches `failed`; kernel still denies read+write |
 
-### Collector-SIGKILL residuals and orphan (as designed)
+### Collector-SIGKILL — observed unresolved cleanup limitation
 
 SIGKILL bypasses the collector's `finally`, so — unlike the log-stream-SIGKILL
-case — cleanup does not run:
+case — cleanup does not run. This subsection reports what was **observed**; whether
+these residual effects are acceptable is a decision for Adam / the manager, not a
+conclusion of this report:
 
 - **Residual launch dir**: the launch directory persists with
   `ready, root-ready, collector-lock, stop, identity.json, failed, root-request`.
-  The shell supervisor intentionally does **no** numeric-PID cleanup; its EXIT
-  trap writes `stop` but nothing removes the directory.
+  The shell supervisor performs **no** numeric-PID cleanup; its EXIT trap writes
+  `stop` but nothing removes the directory (observed).
 - **Orphaned log-stream child**: the collector's `/usr/bin/log stream` child was
   still alive after the collector was SIGKILLed (reparented, since `finally`'s
-  `stream.kill()` was bypassed). This is an accepted limitation of SIGKILL — the
-  supervisor reports failure but cannot reap the child by design.
+  `stream.kill()` was bypassed). The supervisor reports failure but does not reap
+  the child. This is an **observed, unresolved** cleanup gap for the collector-
+  SIGKILL path; it is left for the owners to judge and, if desired, address.
 - In this test the orphan was cleaned only by matching the **captured (pid,
   birth)** identity recorded before the kill (never pid alone), and no unrelated
   processes were signalled.
 
-These residual/orphan effects are specific to an external SIGKILL of the collector
-process; a stream failure (log-stream SIGKILL) still routes through the collector's
-`finally`, leaving no residual. Both failure modes remain **visible** in
-`agent.log` (and therefore in the DENIALS pane, §11) with kernel enforcement intact.
+Scope: these residual/orphan effects are specific to an external SIGKILL of the
+collector process; a stream failure (log-stream SIGKILL) still routes through the
+collector's `finally`, leaving no residual. Both failure modes remain **visible**
+in `agent.log` (and therefore in the DENIALS pane, §11) with kernel enforcement
+intact.
 
 ### Remaining limits (unchanged)
 

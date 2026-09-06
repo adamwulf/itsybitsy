@@ -17,11 +17,16 @@ environment-dependent.
   pass. History preserved.
 - **§11 — Corrected collector candidate** (`f09280f`): the authorized live set run
   through the **compiled** candidate; per-axis results and a further visibility
-  defect (Defect 3). This is the current collector validation.
+  defect (Defect 3).
+- **§12 — Real-preamble validation + Defect 3 fix** (`d198c4d`): the REAL
+  `sandboxDenialScriptPreamble` run verbatim in `start.sh`/`resume.sh` fixtures,
+  the Defect 3 fix verified live, collector/stream topology, and collector-SIGKILL
+  residual/orphan behavior. This is the most current collector validation.
 
 None of this is a full acceptance pass: single host, synthetic sandboxed offenders
-(not the real CLIs/proxy), and the real `start.sh`/`resume.sh` bash preamble was
-replicated (not run verbatim) — see §11 limits.
+(not the real CLIs/proxy). §12 runs the real preamble/gate verbatim, but still in a
+minimized harness (no proxy, no real CLI; production `start.sh`/`resume.sh` bodies
+not executed whole).
 
 This report answers the capability investigation in
 `docs/SANDBOX-ROLLOUT.md` → "Next phase: collect kernel sandbox denials". The
@@ -387,7 +392,7 @@ launch/collector alone (independence requirement satisfied by construction).
 | Root builtin read+write, held alive | **Attributed** — 2 `[Sandbox]` records, correct pid/birth/target/op/mach |
 | Observable descendant shell (observed before it denies) | **Attributed** to the descendant pid (distinct from root) — descendant enumeration works |
 | Immediate `cat` children (deny at ~0 ms, exit at once) | **Dropped, not guessed** — enforced (EPERM), zero records |
-| Concurrent (2 launches, distinct forbidden dirs, one shared log stream) | **Isolated** — each `agent.log` holds only its own denials; no cross-attribution |
+| Concurrent (2 launches, distinct forbidden dirs) | **Isolated** — each `agent.log` holds only its own denials; no cross-attribution |
 | Replacement vs late old cleanup | Old launch tears down (removes only its own dir) while the replacement stays ready, attributes its own denials, and removes only its own dir |
 | Enforcement | read + write both EPERM; `write.txt` never created; short-lived children blocked |
 | CLI-exit cleanup (the `008c233` fix) | Collector drains and removes **only its own** dir ~1050 ms after the root exits, owner still alive |
@@ -412,7 +417,8 @@ the collector then had no children and none reappeared), yet the collector kept
 running, collected nothing further, and exited 0 with `collector stopped` and **no
 ERROR**. So a signal-terminated stream is invisible, violating "collection failure
 must be visible." A stream that **exits with a code** is still detected. Fix: treat
-`signalCode !== null` as failure too, in both guards.
+`signalCode !== null` as failure too, in both guards. **Fixed in `d198c4d`
+(shared `sandboxStreamExited`) and verified live — see §12.**
 
 ### Explicit limits / untested axes
 
@@ -433,3 +439,65 @@ must be visible." A stream that **exits with a code** is still detected. Fix: tr
   a child that lives longer before denying could be attributed. Best-effort.
 - Defect 3 is unfixed at the tested tip; the signal-death path was exercised, the
   code-exit path was not (it is covered by the `exitCode !== null` guard).
+
+## 12. Real-preamble validation + Defect 3 fix (`d198c4d`)
+
+Candidate `d198c4d` adds the Defect 3 fix (shared `sandboxStreamExited` =
+`exitCode !== null || signalCode !== null`, applied to both the startup and
+main-loop stream guards; the main-loop guard now also reports failure if the
+stream dies during drain). A later `40863c0` is test-only; production is `d198c4d`.
+Rebuilt locally and driven through **temporary `start.sh` / `resume.sh` fixtures
+that embed the REAL `sandboxDenialScriptPreamble` verbatim** (with `AGENT_LOG`
+exported, a no-op `cleanup_sandbox_proxy`, and the candidate `ib` resolved through
+a temporary `PATH` shim), plus the real gate helper and generated floor. Owner =
+the `bash` fixture process; no dashboard/watchdog.
+
+### Collector/stream topology (correcting §11)
+
+Each collector spawns its **own** `/usr/bin/log stream` (one per collector);
+every fixture collector was observed with exactly one log-stream child. Two
+concurrent launches therefore run **two independent collectors, each with its own
+stream**, both consuming the same system log. Isolation comes from each collector
+attributing only its own registered root-tree — **not** from a shared stream (the
+§11 "shared log stream" phrasing was imprecise and is corrected here).
+
+### Results (real preamble)
+
+| Axis | Result |
+|---|---|
+| `start.sh` verbatim preamble, root builtin read+write | **Attributed** (2 `[Sandbox]` records); enforced (EPERM, no file); collector cleaned its own dir |
+| `resume.sh` verbatim preamble | Same as start (helpers are identical) — attributed, enforced, cleaned |
+| Replacement / concurrent (two verbatim preambles) | **Isolated** — each `agent.log` only its own denials; both dirs removed; no cross-attribution |
+| Log-stream SIGKILL (Defect 3 fix) | Collector emits `[SandboxCollector] ERROR: log stream stopped unexpectedly (exit=null, signal=SIGKILL)` and exits 1; supervisor then logs `collector exited 1`; kernel still denies read+write; collector `finally` runs so **no residual** dir/stream |
+| Collector SIGKILL (supervisor visibility) | Shell supervisor logs `[SandboxCollector] ERROR: … collector exited 137` and touches `failed`; kernel still denies read+write |
+
+### Collector-SIGKILL residuals and orphan (as designed)
+
+SIGKILL bypasses the collector's `finally`, so — unlike the log-stream-SIGKILL
+case — cleanup does not run:
+
+- **Residual launch dir**: the launch directory persists with
+  `ready, root-ready, collector-lock, stop, identity.json, failed, root-request`.
+  The shell supervisor intentionally does **no** numeric-PID cleanup; its EXIT
+  trap writes `stop` but nothing removes the directory.
+- **Orphaned log-stream child**: the collector's `/usr/bin/log stream` child was
+  still alive after the collector was SIGKILLed (reparented, since `finally`'s
+  `stream.kill()` was bypassed). This is an accepted limitation of SIGKILL — the
+  supervisor reports failure but cannot reap the child by design.
+- In this test the orphan was cleaned only by matching the **captured (pid,
+  birth)** identity recorded before the kill (never pid alone), and no unrelated
+  processes were signalled.
+
+These residual/orphan effects are specific to an external SIGKILL of the collector
+process; a stream failure (log-stream SIGKILL) still routes through the collector's
+`finally`, leaving no residual. Both failure modes remain **visible** in
+`agent.log` (and therefore in the DENIALS pane, §11) with kernel enforcement intact.
+
+### Remaining limits (unchanged)
+
+Not tested with the real `claude`/`codex`/`agy` CLIs or the per-agent proxy
+(synthetic sandboxed offenders only); single host / single boot; no real PID-reuse
+exercised (birth identity guards it in-algorithm); the immediate-child drop
+boundary is timing-dependent. The `start.sh`/`resume.sh` fixtures here embed the
+real preamble/gate but are still minimized harnesses (no proxy, no real CLI), and
+the surrounding production `start.sh`/`resume.sh` bodies were not executed whole.

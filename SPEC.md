@@ -544,6 +544,16 @@ After successful merge:
 - **Hook nudges**: the Stop hook (`agent-status.ts`) routes its self-nudge and `notify_manager` messages through `sendMessage` attributed to the watchdog sentinel (`fromAgent: WATCHDOG_SENTINEL`, delivered as `[sent by watchdog]: <message>`) instead of typing into tmux directly — both so a hook nudge can't collide with a concurrent `ib send` AND so the recipient can tell a system nudge apart from a human console send (without the prefix, an agent that had just asked a question could misread the `Resume your work...` nudge as the answer to its own question).
 - **Cleanup**: `outbox.jsonl` and `.outbox.lock` are runtime delivery state with no historical value — `deleteAgentOutbox()` deletes them (does not archive) at the same teardown sites as `deleteAgentTransient()` (see `archiveAgent`).
 
+#### 4\.1.2 Dashboard message attachments
+
+Repository-agent message inputs stage attachments only when Send is invoked. Draft edits, drag/drop, and cancellation before submission create no temporary files. Absolute file references and explicit dot-relative references are parsed as literal data; relative references resolve from the selected repository root. Terminal backslash escaping, single/double quotes, Unicode, repeated paths, and surrounding prose are preserved. URLs and backtick code spans/fences are left unchanged. Missing unquoted slash-command names remain slash commands. Directories and other non-regular files are rejected; no recursive copy is implied.
+
+Each accepted send uses snapshots in a unique temporary directory under /tmp (under /private/tmp on macOS). Referenced filenames retain their extensions; separate subdirectories prevent same-name collisions and repeated references share a copy. Copies use filesystem APIs without executing message text. Every source is validated and every copy completes before anything is enqueued. Staging/enqueue failure removes abandoned copies and keeps the editable draft. Staged messages carry a queue flag that suppresses slash-command passthrough so a leading temporary file path reaches the agent as ordinary user text.
+
+Queue acceptance commits the send: a later delivery failure leaves the message queued and its snapshots retained, and must not invite the dashboard to enqueue a duplicate. Accepted snapshots are not removed on delivery acknowledgment; they remain available for queued delivery and later reads until external temporary-directory cleanup. The feature does not update path permissions or restart agents. Global system-coordinator sends and ordinary CLI/agent-to-agent sends retain their existing behavior.
+
+Cross-cutting impact: agent lifecycle and metadata policy are unchanged; hooks use their existing temporary-directory floor; watchdog delivery preserves attachment queue metadata and never cleans accepted snapshots; dashboard inputs preserve failed drafts and guard concurrent submission.
+
 ### 4.2 ib ask
 
 `ib ask "question"` allows top-level managers to ask the user questions. Both bash and TypeScript implement this command.

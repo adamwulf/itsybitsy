@@ -181,7 +181,7 @@ function makeMockCtx(overrides?: {
     teamSend: overrides?.teamSend
       ?? (async (teamName, members, message, opts) => {
         teamSendCalls.push({ teamName, members, message, fromAgent: opts?.fromAgent });
-        return { ok: true, stdout: `sent to @${teamName}`, stderr: "", exitCode: 0 };
+        return { ok: true, stdout: `sent to @${teamName}`, stderr: "", exitCode: 0, acceptedRecipientIds: [] };
       }),
     rightPane: {
       mode: overrides?.mode ?? "AGENT LOG",
@@ -2276,6 +2276,7 @@ describe("handleCreateTeam", () => {
         stdout: "",
         stderr: "delivery failed",
         exitCode: 1,
+        acceptedRecipientIds: [],
       }),
     });
     handleCreateTeam(ctx);
@@ -2550,7 +2551,7 @@ describe("handleDisbandTeam", () => {
     // Inject a teamSend stub that deletes the team mid-flight to simulate a race.
     const teamSend: ActionCtx["teamSend"] = async (teamName, _members, _message, _opts) => {
       await deleteTeam(teamName);
-      return { ok: true, stdout: `sent to @${teamName}`, stderr: "", exitCode: 0 };
+      return { ok: true, stdout: `sent to @${teamName}`, stderr: "", exitCode: 0, acceptedRecipientIds: [] };
     };
     const { ctx, dialogs, notices, flushActions } = makeMockCtx({ repos: [fx.repoEntry], teamSend });
     handleDisbandTeam(ctx, "backend");

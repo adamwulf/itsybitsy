@@ -21,8 +21,12 @@
  */
 
 import { sendMessage } from "../ib-commands";
-import type { IbCommandResult } from "../ib-commands";
+import type { IbCommandResult, TeamSendResult } from "../ib-commands";
 import type { Agent } from "../agents";
+
+// Re-export the delivery layer's TeamSendResult so the UI (agent-actions,
+// dashboard) has a single import site for it.
+export type { TeamSendResult };
 
 /** Options for {@link sendStagedMessage}. Mirrors `sendMessage`'s opts plus the
  *  attachment base dir. `stageAttachments` is applied internally by this wrapper
@@ -52,13 +56,6 @@ export interface StagedTeamSendOptions {
   skipRecipientIds?: string[];
   attachmentBaseDir?: string;
 }
-
-/** Result of a team send. `acceptedRecipientIds` names the members known
- *  delivered after the call; the UI accumulates them across retries and feeds
- *  them back as `skipRecipientIds` so an accepted member is never resent. It is
- *  optional here so the wrapper is assignable from a plain `IbCommandResult`;
- *  the delivery layer always populates it. */
-export type TeamSendResult = IbCommandResult & { acceptedRecipientIds?: string[] };
 
 const forwardToSendMessage: StagedSender = (agent, message, opts) => {
   // Turn on staging and forward the caller's base dir to the delivery layer.

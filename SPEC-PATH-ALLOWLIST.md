@@ -44,8 +44,9 @@ Phase B integration on 2026-09-05.
   is no `sandbox.enabled` toggle in Markdown and no unsandboxed fallback; a
   platform, profile, or proxy that cannot support it fails closed before launch.
   Instructions, `ib info`, and the dashboard report the resolved kernel state per
-  CLI, surfacing a legacy agent whose frozen metadata predates the contract as
-  needing `ib sandbox refresh`.
+  CLI; a legacy agent whose frozen metadata predates the contract shows as
+  disabled, and the migration guidance to run `ib sandbox refresh` is supplied at
+  resume (SPEC.md §1.6, SPEC-SANDBOX §5.5), not by the display.
 - Spawn freezes `paths` and `sandbox` in `meta.json`; `ib sandbox refresh`
   re-derives them from the current type layers. Refresh applies uniformly to every
   CLI, including agy, and the re-derived policy is always sandbox-wrapped. Codex

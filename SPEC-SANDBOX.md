@@ -1253,14 +1253,14 @@ before launch. The generated script performs a second bind/ready check to close
 the allocation race. Any failure aborts before Claude/Codex exec; Codex builders
 also fail if either shared sandbox prefix is missing.
 
-The resume compatibility guard runs before profile or proxy preparation. When
-a legacy `meta.json` has no `paths` block, resume logs a specific fail-hard error
-and returns non-zero. The agent remains stopped, no `sandbox.sb` is written, and
-no proxy is started. The refusal now names the recovery:
-`run \`ib sandbox refresh <id>\` from an unsandboxed session, or respawn the
-agent` — refresh (§5.6) re-derives and writes the missing `paths` block. The same
-recovery applies to legacy metadata whose sandbox policy predates the mandatory
-contract (a disabled or absent `enabled`): it cannot launch until refreshed.
+The resume compatibility guard runs before profile or proxy preparation. It is a
+single unified refusal: resume logs a specific fail-hard error and returns
+non-zero — leaving the agent stopped, with no `sandbox.sb` written and no proxy
+started — whenever the frozen metadata cannot support the mandatory sandbox. That
+covers a legacy sandbox policy that predates the mandatory contract (missing or
+disabled) and a legacy `meta.json` with no top-level `paths` block. The error
+recommends re-deriving the policy with `ib sandbox refresh` (§5.6, from an
+unsandboxed session), or otherwise nuking and respawning the agent.
 
 ### 5.6 `ib sandbox refresh <id> | --all` (A4 G2)
 

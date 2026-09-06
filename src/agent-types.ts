@@ -338,9 +338,11 @@ export interface AgentTypeFloorDiff {
  * Compare every embedded agent-type file that ALSO exists locally against the
  * embedded default, reporting the `paths:` (allowRead, allowWrite, deny) and
  * `sandbox:` (rawAllow, domains) entries present in the embedded block but
- * missing from the local file, per list, plus any `sandbox.enabled` scalar
- * difference. Files that match — and embedded files with no local copy — produce
- * nothing. Nothing is written.
+ * missing from the local file, per list. `sandbox.enabled` is NOT compared: it
+ * is retired (sandboxing is mandatory, always on), so it is no longer a floor
+ * value and a stale local `enabled` key never registers as drift here. Files
+ * that match — and embedded files with no local copy — produce nothing. Nothing
+ * is written.
  *
  * Backs `ib init-types --check`, the gate precondition that catches a live
  * `~/.itsybitsy/agent-types/_all.md` still missing the tightened floor (because
@@ -369,11 +371,6 @@ export async function checkAgentTypeFloors(): Promise<{
     const value = fm[block];
     if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
     return stringList((value as Record<string, unknown>)[key]);
-  };
-  const sandboxEnabled = (fm: Record<string, unknown>): boolean => {
-    const value = fm.sandbox;
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-    return (value as Record<string, unknown>).enabled === true;
   };
 
   const listChecks: Array<{ block: "paths" | "sandbox"; key: string }> = [
@@ -405,11 +402,6 @@ export async function checkAgentTypeFloors(): Promise<{
       for (const entry of blockList(embedded, block, key)) {
         if (!localSet.has(entry)) lines.push(`  ${block}.${key}: missing ${entry}`);
       }
-    }
-    const embeddedEnabled = sandboxEnabled(embedded);
-    const localEnabled = sandboxEnabled(local);
-    if (embeddedEnabled !== localEnabled) {
-      lines.push(`  sandbox.enabled: embedded ${embeddedEnabled}, local ${localEnabled}`);
     }
 
     if (lines.length > 0) diffs.push({ file: fileName, lines });
@@ -552,11 +544,12 @@ function mergeRawFrontmatters(
   const allAllow: string[] = [];
   const allDeny: string[] = [];
 
-  // Sandbox is a separate hand-written union because it mixes two unioned
-  // lists with an OR-merged boolean. A descendant may add access or denials,
-  // but may never switch off a sandbox enabled by an ancestor.
+  // Sandbox is a separate hand-written union of two lists (rawAllow, domains).
+  // The `enabled` scalar is retired: sandboxing is mandatory, so an authored
+  // `enabled` (true OR false, in any layer) is ignored here — the merged config
+  // is forced `enabled: true` below. A descendant may still add access or
+  // denials, but there is no longer any switch to turn the sandbox off.
   let sawSandbox = false;
-  let sandboxEnabled = false;
   const sandboxLists: Record<SandboxListKey, string[]> = {
     rawAllow: [],
     domains: [],
@@ -603,11 +596,11 @@ function mergeRawFrontmatters(
       }
     }
 
-    // Sandbox — union all five lists and OR-merge enabled across the chain.
+    // Sandbox — union the rawAllow/domains lists across the chain. `enabled` is
+    // intentionally NOT read here (it is retired; see the block comment above).
     if (typeof fm.sandbox === "object" && fm.sandbox !== null && !Array.isArray(fm.sandbox)) {
       sawSandbox = true;
       const sandbox = fm.sandbox as Record<string, unknown>;
-      if (sandbox.enabled === true) sandboxEnabled = true;
       for (const key of SANDBOX_LIST_KEYS) {
         const values = sandbox[key];
         if (!Array.isArray(values)) continue;
@@ -648,7 +641,8 @@ function mergeRawFrontmatters(
 
   if (sawSandbox) {
     merged.sandbox = {
-      enabled: sandboxEnabled,
+      // Mandatory sandbox: always enabled, never derived from authored input.
+      enabled: true,
       rawAllow: Array.from(new Set(sandboxLists.rawAllow)),
       domains: Array.from(new Set(sandboxLists.domains)),
     } satisfies SandboxConfig;
@@ -743,7 +737,9 @@ function buildAgentTypeFromFrontmatter(
       : undefined,
     sandbox: sandbox
       ? {
-          enabled: sandbox.enabled === true,
+          // Mandatory sandbox: a directly-built type ignores any authored
+          // `enabled` and is always enabled (matches resolveSandboxConfig).
+          enabled: true,
           rawAllow: stringList(sandbox.rawAllow),
           domains: stringList(sandbox.domains),
         }

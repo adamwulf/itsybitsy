@@ -398,6 +398,44 @@ describe("sandbox profile emission", () => {
   });
 });
 
+describe("agy state runtime root (AGYSTATEDIR, ~/.gemini)", () => {
+  // A concrete home-relative dir; the resolver/profile canonicalize it the same
+  // way (longest existing prefix), so /tmp maps to /private/tmp under the hood.
+  const agyDir = "/private/tmp/itsybitsy-agy-state/.gemini";
+  const withAgy: SandboxProfileParams = { ...PARAMS, AGYSTATEDIR: agyDir };
+
+  test("an absent AGYSTATEDIR leaves the profile byte-identical (non-agy unchanged)", () => {
+    const withUndefined: SandboxProfileParams = { ...PARAMS, AGYSTATEDIR: undefined };
+    expect(generateProfile(EMPTY_CONFIG, EMPTY_PATHS, withUndefined)).toBe(
+      generateProfile(EMPTY_CONFIG, EMPTY_PATHS, PARAMS),
+    );
+  });
+
+  test("a present AGYSTATEDIR emits read+write roots as a -D param", () => {
+    const profile = generateProfile(EMPTY_CONFIG, EMPTY_PATHS, withAgy);
+    expect(profile).not.toBe(generateProfile(EMPTY_CONFIG, EMPTY_PATHS, PARAMS));
+    expect(profile).toContain('(allow file-read* (subpath (param "AGYSTATEDIR")))');
+    expect(profile).toContain('(allow file-write* (subpath (param "AGYSTATEDIR")))');
+    expect(sandboxProfileParameterValues(EMPTY_PATHS, withAgy).AGYSTATEDIR).toBe(
+      canonicalizeSandboxPath(agyDir),
+    );
+  });
+
+  test("write is allowed anywhere inside the agy state root", () => {
+    const table = sandboxPathAccessTable(EMPTY_PATHS, withAgy);
+    // Both antigravity-cli/ and its SIBLING config/ live under ~/.gemini.
+    expect(resolvePathAccess(`${agyDir}/antigravity-cli/settings.json`, "write", table)).toBe("allow");
+    expect(resolvePathAccess(`${agyDir}/config/config.json`, "write", table)).toBe("allow");
+  });
+
+  test("a paths.deny entry still carves a hole inside the agy state root (deny wins)", () => {
+    const table = sandboxPathAccessTable(paths({ deny: [`${agyDir}/config`] }), withAgy);
+    expect(resolvePathAccess(`${agyDir}/antigravity-cli/settings.json`, "write", table)).toBe("allow");
+    expect(resolvePathAccess(`${agyDir}/config/config.json`, "write", table)).toBe("deny");
+    expect(resolvePathAccess(`${agyDir}/config/config.json`, "read", table)).toBe("deny");
+  });
+});
+
 type AccessDecision = "allow" | "deny";
 
 function unescapeSbpl(value: string): string {
@@ -1467,18 +1505,49 @@ describe("resolver input contract", () => {
   });
 });
 
-describe("sandbox config resolution", () => {
-  test("an omitted sandbox block resolves to disabled kernel settings", () => {
+describe("sandbox config resolution (mandatory always-on)", () => {
+  test("an omitted sandbox block still resolves to an ENABLED sandbox", () => {
+    // Sandboxing is mandatory: an absent block cannot mean "no sandbox".
     expect(resolveSandboxConfig({})).toEqual({
-      enabled: false,
+      enabled: true,
       rawAllow: [],
       domains: [],
     });
   });
 
-  test("an explicit sandbox block is copied", () => {
+  test("an explicit enabled:false cannot authorize an unsandboxed launch", () => {
+    // Legacy runtime metadata may still carry enabled:false; resolution forces
+    // it back on so a stale toggle can never disable the sandbox. rawAllow and
+    // domains still carry through.
+    const legacy: SandboxConfig = {
+      enabled: false,
+      rawAllow: ["(allow process*)"],
+      domains: ["api.anthropic.com"],
+    };
+    expect(resolveSandboxConfig({ sandbox: legacy })).toEqual({
+      enabled: true,
+      rawAllow: ["(allow process*)"],
+      domains: ["api.anthropic.com"],
+    });
+  });
+
+  test("resolution never mutates the source, so a legacy enabled:false stays diagnosable", () => {
+    // The launch/seal layer must still read the ORIGINAL enabled value off the
+    // metadata to detect and migrate a legacy disabled agent — resolution
+    // forces true on the OUTPUT without touching the input object.
+    const legacy: SandboxConfig = { enabled: false, rawAllow: [], domains: [] };
+    const resolved = resolveSandboxConfig({ sandbox: legacy });
+    expect(resolved.enabled).toBe(true);
+    expect(legacy.enabled).toBe(false);
+  });
+
+  test("an explicit enabled:true resolves enabled with its lists carried through", () => {
     const explicit = config({ domains: ["example.com"] });
-    expect(resolveSandboxConfig({ sandbox: explicit })).toEqual(explicit);
+    expect(resolveSandboxConfig({ sandbox: explicit })).toEqual({
+      enabled: true,
+      rawAllow: [],
+      domains: ["example.com"],
+    });
   });
 
   test("returns fresh lists rather than aliasing resolved inputs", () => {
@@ -1546,16 +1615,36 @@ describe("sandbox path canonicalization", () => {
   });
 });
 
+const RETIRED_ENABLED_ERROR =
+  "sandbox.enabled is retired: sandboxing is always on and cannot be toggled — remove this key (see docs/agent-types/README.md)";
+
 describe("sandbox frontmatter validation", () => {
-  test("accepts the complete flat schema", () => {
-    expect(validateSandboxFrontmatter(EMPTY_CONFIG)).toEqual({ errors: [], warnings: [] });
+  test("accepts the complete flat schema (rawAllow + domains, no enabled)", () => {
+    expect(validateSandboxFrontmatter({ rawAllow: [], domains: [] })).toEqual({
+      errors: [],
+      warnings: [],
+    });
   });
 
-  test("rejects non-boolean enabled including the trailing-comment footgun", () => {
-    const result = validateSandboxFrontmatter({ enabled: "true  # note" });
-    expect(result.errors).toEqual([
-      'sandbox.enabled must be true or false, got "true  # note"',
-    ]);
+  test.each([
+    ["true", true],
+    ["false", false],
+    ["the trailing-comment footgun", "true  # note"],
+  ])(
+    "rejects an authored enabled key as retired regardless of value (%s)",
+    (_label, enabled) => {
+      // Neither an authored true nor false (nor the "true # note" footgun that
+      // used to parse to a truthy string) can influence launch policy — every
+      // form is the same retired-key error, guiding the author to remove it.
+      const result = validateSandboxFrontmatter({ enabled });
+      expect(result.errors).toEqual([RETIRED_ENABLED_ERROR]);
+    },
+  );
+
+  test("still reports the retired enabled key alongside other errors", () => {
+    const result = validateSandboxFrontmatter({ enabled: false, domains: "not-a-list" });
+    expect(result.errors).toContain(RETIRED_ENABLED_ERROR);
+    expect(result.errors).toContain("sandbox.domains must be a list");
   });
 
   test.each(["rawAllow", "domains"] as const)(
@@ -1580,7 +1669,7 @@ describe("sandbox frontmatter validation", () => {
   });
 
   test("rejects unknown keys", () => {
-    const result = validateSandboxFrontmatter({ enabled: true, filesystem: {} });
+    const result = validateSandboxFrontmatter({ filesystem: {} });
     expect(result.errors).toContain('sandbox contains unknown key "filesystem"');
   });
 

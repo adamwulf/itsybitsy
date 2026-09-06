@@ -5,6 +5,7 @@ import { tmpdir } from "os";
 import { setUserHome, resetUserHome } from "../home";
 import {
   agentPathAccessTable,
+  agyStateDirFor,
   buildAgentAccessTable,
   buildSystemAccessTable,
   claudeProjectDirFor,
@@ -122,6 +123,70 @@ describe("buildAgentAccessTable", () => {
       expect(resolvePreparedAccess(prepared, claudeScratchpadDirFor(worktreePath, UID), "write")).toBe(expected);
     },
   );
+
+  // These fixtures keep home and agentDir in DISJOINT subtrees (as production
+  // does: agentDir under the repo, home under /Users/<name>), so ~/.gemini is
+  // NOT incidentally covered by the AGENTDIR write root — the agy state root is
+  // the only thing that can grant it.
+  async function buildDisjoint(meta: Record<string, unknown>) {
+    const homeDir = join(tmp, "home");
+    const agentDir = join(tmp, "agent");
+    const worktreePath = join(agentDir, "repo");
+    await mkdir(worktreePath, { recursive: true });
+    await mkdir(homeDir, { recursive: true });
+    return {
+      homeDir,
+      prepared: await buildAgentAccessTable({
+        meta,
+        agentDir,
+        worktreePath,
+        agentsDir: join(agentDir, "agents"),
+        rootRepo: agentDir,
+        home: homeDir,
+      }),
+    };
+  }
+
+  test.each([
+    ["agy:default", "allow"],
+    ["claude:opus", "deny"],
+    ["opus", "deny"],
+    ["codex:gpt-5.6-sol", "deny"],
+    ["fugu:fugu", "deny"],
+  ] as const)(
+    "%s: only an agy agent gets the ~/.gemini state root (write)", async (model, expected) => {
+      const { homeDir, prepared } = await buildDisjoint({ agentType: "worker", model });
+      const agyFile = join(agyStateDirFor(homeDir), "antigravity-cli", "settings.json");
+      const agyConfig = join(agyStateDirFor(homeDir), "config", "config.json");
+      // config/ is a sibling of antigravity-cli/ under ~/.gemini — both covered.
+      expect(resolvePreparedAccess(prepared, agyFile, "write")).toBe(expected);
+      expect(resolvePreparedAccess(prepared, agyConfig, "write")).toBe(expected);
+    },
+  );
+
+  test("a paths.deny inside ~/.gemini still wins for an agy agent (deny overrides the root)", async () => {
+    const homeDir = join(tmp, "home");
+    const agentDir = join(tmp, "agent");
+    const worktreePath = join(agentDir, "repo");
+    await mkdir(worktreePath, { recursive: true });
+    await mkdir(homeDir, { recursive: true });
+    const agyDir = agyStateDirFor(homeDir);
+    const prepared = await buildAgentAccessTable({
+      meta: {
+        agentType: "worker",
+        model: "agy:default",
+        paths: { allowRead: [], allowWrite: [], deny: [join(agyDir, "config")] },
+      },
+      agentDir,
+      worktreePath,
+      agentsDir: join(agentDir, "agents"),
+      rootRepo: agentDir,
+      home: homeDir,
+    });
+    expect(resolvePreparedAccess(prepared, join(agyDir, "antigravity-cli", "settings.json"), "write")).toBe("allow");
+    expect(resolvePreparedAccess(prepared, join(agyDir, "config", "config.json"), "write")).toBe("deny");
+    expect(resolvePreparedAccess(prepared, join(agyDir, "config", "config.json"), "read")).toBe("deny");
+  });
 });
 
 // ── buildSystemAccessTable (@system, no meta.json) ───────────────────────────

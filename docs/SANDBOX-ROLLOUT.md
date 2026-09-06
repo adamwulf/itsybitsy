@@ -79,7 +79,10 @@ The agy runtime root is shared state under the user home. Granting it only to ag
 
 ## Next phase: collect kernel sandbox denials
 
-**Implementation candidate; live lifecycle validation pending.** Complete this phase after exercising the repository-agent sandbox and before resuming global system-coordinator sandbox work.
+**Implementation candidate; live helper fixtures validated. Collector-SIGKILL
+cleanup remains unresolved, and independent review/deployment are pending.**
+Complete this phase after exercising the repository-agent sandbox and before
+resuming global system-coordinator sandbox work.
 
 The candidate adds `ib sandbox-log-watch` to the shared repository-agent start
 and resume wiring. A launch-specific shell supervisor starts it outside Seatbelt
@@ -122,9 +125,13 @@ failures, 29,486 assertions across 115 files; TypeScript checking and local buil
 pass. `./ib list-types` prints its table and the new command's help dispatches.
 The suite total still includes the kernel capability and opt-in Claude boot
 early-return skips described below; it is not a live enforcement/capture pass.
-The authorized worker can run the native process reader, candidate binary,
-shell fixtures, and logger. Corrected candidate `d198c4d` is undergoing live
-stream-failure and verbatim start/resume preamble fixture validation.
+Adam's one authorized worker ran the native process reader, candidate binary,
+shell fixtures, and logger. Corrected candidate `d198c4d` passed live stream-failure
+and verbatim start/resume preamble fixture validation; subsequent production
+source is identical. The fixtures used the actual shared preamble and gate,
+generated floor profile, and synthetic sandboxed shells. They did not run full
+production script bodies, model CLIs, or the proxy. Claude, Codex/fugu, agy, and
+per-repository coordinator generation is covered by automated lifecycle tests.
 
 The first full run after the native fixes reported 5,653 passes and two failures:
 both source-entry smoke tests received an empty type table from their shared
@@ -152,8 +159,8 @@ The worker's first collector run on `008c233` found two blocking native-adapter
 errors: unified-log event ticks use continuous time (including system sleep),
 and `proc_listchildpids` returns a PID count, not bytes. Those errors produced
 zero attributed denials despite successful readiness and kernel enforcement.
-Both are corrected in source with regression cases from the live observations;
-the corrected compiled candidate must be retested before claiming live capture.
+Both were corrected with regression cases from the live observations, then
+verified on the corrected compiled candidate as described below.
 The same run validated roughly one-second CLI-exit/SIGTERM cleanup and visible
 startup failure with kernel enforcement intact. These are partial results,
 not acceptance of the broken candidate's attribution.
@@ -167,7 +174,21 @@ or real model CLIs. It also found that Bun leaves `exitCode` null after signal
 termination: a killed log-stream child silently stopped collection. Both startup
 and runtime guards now check `signalCode` too, including during the drain period.
 Regression tests terminate actual disposable subprocesses by signal and by exit
-code. Live stream-failure and verbatim-preamble retests remain required.
+code. Live retesting on `d198c4d` confirmed both start and resume preambles
+attribute real root reads/writes, concurrent launches stay isolated, and a killed
+stream produces an ERROR, collector exit 1, and cleanup. A killed collector
+produces a supervisor ERROR (exit 137). Kernel read/write enforcement remained
+active in both failure cases; no dashboard or watchdog ran in the fixtures.
+
+**Unresolved crash-cleanup gap:** `SIGKILL` of the collector bypasses its cleanup.
+The launch directory remains and its `/usr/bin/log stream` child can remain
+orphaned. The shell supervisor makes failure visible but does not terminate that
+child or remove the residual directory. Normal CLI exit, SIGTERM, and stream
+failure clean up; old-launch cleanup never signals a replacement by numeric PID.
+The worker removed only its disposable orphan after matching the birth identity
+captured before the kill. This is an observed limitation, not approval to deploy
+with orphaned streams. See `docs/sandbox-denial-probe-evidence.md` sections 10–12
+for failed-candidate history, corrected live results, and remaining limits.
 
 ### Capability investigation (2026-09-05)
 

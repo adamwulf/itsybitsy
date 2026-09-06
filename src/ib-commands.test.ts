@@ -37,6 +37,8 @@ import {
   mergeCheckAgent,
   mergeAgent,
   sendMessage,
+  cancelTmuxPaneModeIfActive,
+  buildTmuxHelperScript,
   newAgent,
   diffAgent,
   diffCwd,
@@ -184,11 +186,83 @@ describe("ib-commands", () => {
       const result = await sendMessage(agent, "hello world", { cwd: "/" });
 
       expect(result.ok).toBe(true);
-      // Should have: has-session, send-keys (message), send-keys (Enter)
-      expect(spawnCalls.length).toBe(3);
+      // Should have: has-session, pane-mode probe, send-keys (message), send-keys (Enter)
+      expect(spawnCalls.length).toBe(4);
       expect(spawnCalls[0]).toEqual(["tmux", "has-session", "-t", `=tmux-agent-abc:`]);
-      expect(spawnCalls[1]).toEqual(["tmux", "send-keys", "-t", `=tmux-agent-abc:`, "-l", "--", "[sent by user]: hello world"]);
-      expect(spawnCalls[2]).toEqual(["tmux", "send-keys", "-t", `=tmux-agent-abc:`, "Enter"]);
+      expect(spawnCalls[1]).toEqual(["tmux", "display-message", "-p", "-t", `=tmux-agent-abc:`, "#{pane_in_mode}"]);
+      expect(spawnCalls[2]).toEqual(["tmux", "send-keys", "-t", `=tmux-agent-abc:`, "-l", "--", "[sent by user]: hello world"]);
+      expect(spawnCalls[3]).toEqual(["tmux", "send-keys", "-t", `=tmux-agent-abc:`, "Enter"]);
+    });
+
+    // A pane parked in tmux view-mode / copy-mode swallows send-keys (the keys
+    // are dispatched to the copy-mode key table, not the agent). Delivery must
+    // leave the mode first — and only when the probe says a mode is active.
+    test("cancels tmux view/copy-mode on the pane before typing when pane_in_mode=1", async () => {
+      setSendSpawnRunner((cmd: string[]) => {
+        spawnCalls.push(cmd);
+        if (cmd[1] === "display-message") return makeSpawnResult(0, "1\n", "");
+        return makeSpawnResult();
+      });
+      const agent = makeAgent("agent-abc", tempDir);
+      const result = await sendMessage(agent, "hello world", { cwd: "/" });
+
+      expect(result.ok).toBe(true);
+      expect(spawnCalls).toEqual([
+        ["tmux", "has-session", "-t", `=tmux-agent-abc:`],
+        ["tmux", "display-message", "-p", "-t", `=tmux-agent-abc:`, "#{pane_in_mode}"],
+        ["tmux", "send-keys", "-t", `=tmux-agent-abc:`, "-X", "cancel"],
+        ["tmux", "send-keys", "-t", `=tmux-agent-abc:`, "-l", "--", "[sent by user]: hello world"],
+        ["tmux", "send-keys", "-t", `=tmux-agent-abc:`, "Enter"],
+      ]);
+      // The cancel is recorded in the recipient's agent.log so the wedge is
+      // diagnosable after the fact.
+      const log = await Bun.file(join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")).text();
+      expect(log).toContain("view/copy-mode");
+    });
+
+    test("does not send -X cancel when the pane is not in a mode", async () => {
+      setSendSpawnRunner((cmd: string[]) => {
+        spawnCalls.push(cmd);
+        if (cmd[1] === "display-message") return makeSpawnResult(0, "0\n", "");
+        return makeSpawnResult();
+      });
+      const agent = makeAgent("agent-abc", tempDir);
+      const result = await sendMessage(agent, "hello", { cwd: "/" });
+
+      expect(result.ok).toBe(true);
+      expect(spawnCalls.some((c) => c.includes("-X"))).toBe(false);
+      expect(spawnCalls.length).toBe(4);
+    });
+
+    test("a failed pane-mode probe never blocks delivery", async () => {
+      // e.g. an old tmux without the format, or a transient error — deliver anyway.
+      setSendSpawnRunner((cmd: string[]) => {
+        spawnCalls.push(cmd);
+        if (cmd[1] === "display-message") return makeSpawnResult(1, "", "unknown format");
+        return makeSpawnResult();
+      });
+      const agent = makeAgent("agent-abc", tempDir);
+      const result = await sendMessage(agent, "hello", { cwd: "/" });
+
+      expect(result.ok).toBe(true);
+      expect(spawnCalls.some((c) => c.includes("-X"))).toBe(false);
+      expect(spawnCalls.at(-2)).toEqual(["tmux", "send-keys", "-t", `=tmux-agent-abc:`, "-l", "--", "[sent by user]: hello"]);
+    });
+
+    test("cancelTmuxPaneModeIfActive reports whether a mode was cancelled", async () => {
+      let probeOut = "1";
+      setSendSpawnRunner((cmd: string[]) => {
+        spawnCalls.push(cmd);
+        if (cmd[1] === "display-message") return makeSpawnResult(0, probeOut, "");
+        return makeSpawnResult();
+      });
+      expect(await cancelTmuxPaneModeIfActive("tmux-agent-abc")).toBe(true);
+      expect(spawnCalls.at(-1)).toEqual(["tmux", "send-keys", "-t", `=tmux-agent-abc:`, "-X", "cancel"]);
+
+      spawnCalls.length = 0;
+      probeOut = "0";
+      expect(await cancelTmuxPaneModeIfActive("tmux-agent-abc")).toBe(false);
+      expect(spawnCalls.length).toBe(1); // probe only, no cancel
     });
 
     test("returns error when tmux session not found", async () => {
@@ -824,8 +898,8 @@ describe("sendMessage outbox integration", () => {
     const result = await sendMessage(agent, "hello", { cwd: "/" });
 
     expect(result.ok).toBe(true);
-    // Delivered inline → has-session + send-keys + Enter.
-    expect(spawnCalls.length).toBe(3);
+    // Delivered inline → has-session + pane-mode probe + send-keys + Enter.
+    expect(spawnCalls.length).toBe(4);
     // Outbox drained empty.
     const { readOutbox } = await import("./outbox");
     expect(await readOutbox(queueDir)).toEqual([]);
@@ -845,7 +919,8 @@ describe("sendMessage outbox integration", () => {
 
     const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
     await sendMessage(agent, "hello", { cwd: "/" });
-    expect(spawnCalls.length).toBe(3);
+    // has-session + pane-mode probe + send-keys + Enter.
+    expect(spawnCalls.length).toBe(4);
   });
 
   test("failed delivery leaves the message enqueued (no loss)", async () => {
@@ -4688,8 +4763,50 @@ sandbox:
     const call = spawnCalls.find((args) => args[0] === "tmux" && args[1] === "run-shell" && args.at(-1)?.includes("watchdog"));
     expect(call).toBeDefined();
     expect(call?.slice(0, 3)).toEqual(["tmux", "run-shell", "-b"]);
-    expect(call?.at(-1)?.startsWith(`cd '${tempDir}' && exec `)).toBe(true);
-    expect(call?.at(-1)).toContain("'ib' 'watchdog' 'watchdog-via-tmux'");
+    const script = call?.at(-1) ?? "";
+    // The helper runs as a child of a wrapper that always reports exit 0 to
+    // tmux — a `run-shell -b` job that exits non-zero, dies by a signal, or
+    // prints anything gets a notice written into some OTHER agent's pane,
+    // parking that pane in view-mode (see buildTmuxHelperScript).
+    expect(script).toBe(
+      buildTmuxHelperScript(tempDir, ["ib", "watchdog", "watchdog-via-tmux"], join(tempDir, ".ittybitty", "agents", "watchdog-via-tmux", "watchdog.log")),
+    );
+    expect(script).toContain(`cd '${tempDir}' || `);
+    expect(script).toContain(`'ib' 'watchdog' 'watchdog-via-tmux' >>`);
+    expect(script.endsWith("; exit 0")).toBe(true);
+  });
+
+  test("buildTmuxHelperScript never lets tmux see output or a non-zero status", async () => {
+    const script = buildTmuxHelperScript("/repo/root", ["ib", "watchdog", "a1"], "/repo/root/.ittybitty/agents/a1/watchdog.log");
+    // Wrapper's own stdout/stderr go nowhere — the job pipe tmux reads stays empty.
+    expect(script.startsWith("exec >/dev/null 2>&1; ")).toBe(true);
+    // The WRAPPER cd's (not just the helper): its cwd must be the repo root,
+    // never the spawner's cwd (an agent dir that may be deleted later — the
+    // orphan scanners key on cwd). A failed cd is logged and reported as 0.
+    expect(script).toContain("cd '/repo/root' || { echo \"[helper] cd failed\" >>'/repo/root/.ittybitty/agents/a1/watchdog.log' 2>&1; exit 0; }");
+    // The helper is a CHILD (backgrounded + waited), not an exec replacement,
+    // so a SIGTERM aimed at the helper (orphan-kill) leaves the wrapper alive
+    // to report 0.
+    expect(script).toContain("'ib' 'watchdog' 'a1' >>'/repo/root/.ittybitty/agents/a1/watchdog.log' 2>&1 & child=$!");
+    expect(script).toContain('wait "$child"');
+    // The wrapper's own command line must NOT read as an `ib watchdog` process
+    // to `ib state`'s classifier — only the real helper child does.
+    const { isWatchdogProcess } = await import("./state-command");
+    expect(isWatchdogProcess(`/bin/sh -c ${script}`)).toBe(false);
+    expect(isWatchdogProcess("ib watchdog a1")).toBe(true);
+    // A signal aimed at the WRAPPER (tmux kill-server) is forwarded to the
+    // helper and still reported as 0.
+    expect(script).toContain(`trap 'if [ -n "$child" ]; then kill -TERM "$child"; fi; exit 0' HUP INT TERM`);
+    // The helper's own status is preserved in its log for diagnosis.
+    expect(script).toContain('echo "[helper] exited rc=$rc" >>\'/repo/root/.ittybitty/agents/a1/watchdog.log\' 2>&1');
+    expect(script.endsWith("; exit 0")).toBe(true);
+    // run-shell format-expands `#…` — the script must not contain any.
+    expect(script).not.toContain("#");
+    // No log → everything to /dev/null (the summary worker).
+    const quiet = buildTmuxHelperScript("/repo/root", ["ib", "generate-summary", "/repo/root/.ittybitty/agents/a1"]);
+    expect(quiet).toContain("cd '/repo/root' || { echo \"[helper] cd failed\" >/dev/null 2>&1; exit 0; }");
+    expect(quiet).toContain("'ib' 'generate-summary' '/repo/root/.ittybitty/agents/a1' >/dev/null 2>&1 & child=$!");
+    expect(quiet).not.toContain("#");
   });
 
   test("sandbox fail-hard preconditions refuse before start.sh or tmux", async () => {

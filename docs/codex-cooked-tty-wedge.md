@@ -2,7 +2,10 @@
 
 **Status:** Symptom, mechanism, detection, no-restart recovery, ROOT CAUSE, and
 the fix are all CONFIRMED (live, 2026-09-05) — see "Root cause (confirmed)" and
-"The fix" below.
+"The fix" below. A SECOND, unrelated wedge with a near-identical symptom (pane
+parked in tmux view-mode by a `run-shell -b` helper notice) was root-caused and
+fixed the same day — see "Second, separate failure" under "Detect it". Check
+`#{pane_in_mode}` BEFORE `stty`: a RAW tty with an empty composer is that one.
 
 This documents a failure where a codex agent (our `sol` / `codex` types, and the
 `agy`/`fugu`/`gemini` codex-family types) silently stops accepting delivered
@@ -58,11 +61,82 @@ stty -a -f <pane_tty>
 line at the very top of `tmux capture-pane` output is a reliable "came up cooked"
 fingerprint.
 
-### Secondary, separate failure: pane stuck in tmux copy-mode
+### Second, separate failure: pane stuck in tmux view-mode (root-caused + fixed 2026-09-05)
 
-If `#{pane_in_mode}` is `1` (view-mode / copy-mode), `tmux send-keys` to that pane
-fails with `no current client` and delivers **nothing** — a delivery failure
-distinct from the cooked-tty one. Exit copy-mode first (see recovery step 3).
+This one is NOT codex-specific — it hits any agent (claude, codex, agy) and the
+`ib-coordinator` session. It looks like a healthy, idle agent that never
+receives messages: the tty is RAW (`-icanon -icrnl`, so the cooked-tty check
+above passes), the composer is EMPTY (nothing ever lands in it), and `ib send`
+either fails or appears to succeed while the agent never reacts.
+
+**Fingerprint:** `#{pane_in_mode}` is `1` and `#{pane_mode}` is `view-mode`.
+Attaching to the session shows a tmux view-mode screen (a `[0/N]` counter in the
+top-right corner) holding one line such as:
+
+```
+'cd '/Users/…/itsybitsy' && exec 'ib' 'watchdog' 'path-test' >> '…/agents/path-test/watchdog.log' 2>&1' terminated by signal 15
+```
+
+— the death notice of ANOTHER agent's watchdog.
+
+**Mechanism (proven live on `package-refactor` + a throwaway-session repro):**
+
+1. `spawnHelperViaTmuxServer` (src/ib-commands.ts) launches every agent's
+   watchdog and `generate-summary` worker through `tmux run-shell -b` so they
+   are children of the unsandboxed tmux server (SPEC-SANDBOX §4C.2, live on main
+   since the sandbox-safety merge 48c52cf, 2026-09-04).
+2. A background `run-shell -b` job has no waiting client and no `-t` pane. When
+   it prints anything, exits non-zero, or dies by a signal, tmux writes the text
+   or a `'<cmd>' returned N` / `'<cmd>' terminated by signal 15` notice into the
+   active pane of the session with the newest `activity_time` — i.e. the session
+   most recently CREATED or ATTACHED, typically whichever agent the user last
+   opened in Ghostty — and switches that pane into **view-mode**.
+3. The orphan-kill teardown in `detectAgentStates` (src/agents.ts, `reap("watchdog", …)`)
+   SIGTERMs the watchdog of every agent that stops. So stopping agent A wedged
+   the pane of some unrelated agent B, on every teardown.
+4. In view-mode, `send-keys -l <text>` is dispatched through the **copy-mode key
+   table** (mode-keys=emacs): Space → page-down, `n` → search-again, `r` →
+   refresh-from-pane, `f`/`t`/`F`/`T`/`g` → `command-prompt`, which fails with
+   **`no current client`** (exit 1). That prompt error — not `send-keys` itself —
+   is the "no current client" failure previously attributed to send-keys. `Enter`
+   is unbound in copy-mode and is dropped. `q` / `Escape` → cancel. A message with
+   none of `f t F T g` returns exit 0 and is silently eaten (the outbox then
+   removes it as delivered = message loss).
+5. `drainOutbox` stops on the first failed chunk and keeps the message queued;
+   the watchdog retries every tick, so `tmux show-messages` fills with repeated
+   `send-keys -X page-down` / `search-again` / `no current client` lines.
+
+**Detect:**
+
+```sh
+tmux list-panes -a -F '#{session_name} in_mode=#{pane_in_mode} mode=#{pane_mode}' | grep -v 'in_mode=0'
+tmux show-messages | grep -E 'send-keys -X|no current client'
+```
+
+**Recover (no restart):** `tmux send-keys -t '=<session>:' -X cancel` (only when
+`pane_in_mode` is 1; otherwise it errors "not in a mode"). A message still in the
+outbox is delivered on the next watchdog tick by itself.
+
+**The fix (src/ib-commands.ts):**
+
+- `buildTmuxHelperScript` wraps every `run-shell -b` helper so tmux never has
+  anything to report: the wrapper's own stdio goes to `/dev/null`, the helper runs
+  as a backgrounded CHILD with its stdio redirected to its log, the wrapper `wait`s
+  for it, logs a non-zero status as `[helper] exited rc=N` into that log, and
+  always `exit 0`s. A signal aimed at the wrapper itself (tmux `kill-server`) is
+  trapped, forwarded as SIGTERM to the helper, and still reported as 0. The
+  orphan-kill SIGTERM still targets the helper's own PID (the watchdog records
+  `process.pid`), so teardown semantics are unchanged.
+- `cancelTmuxPaneModeIfActive`, called by `deliverMessage` after the
+  `has-session` check, probes `#{pane_in_mode}` and sends `send-keys -X cancel`
+  only when it is `1` (logged to the recipient's agent.log). This also covers the
+  other way a detached pane ends up in copy-mode: a user who mouse-scrolled the
+  pane in an attached client and then closed the window.
+
+Verified with a live probe on the ib tmux server: old shape → the most recently
+created session's pane enters view-mode with the signal notice; new wrapper →
+helper SIGTERM'd (orphan-kill) and wrapper SIGTERM'd (job kill) both leave every
+pane out of mode, and the helper log carries `[helper] exited rc=143`.
 
 ## Recover it (NO restart needed)
 

@@ -212,6 +212,38 @@ describe("sandbox proxy CONNECT and HTTP behavior", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  test("the proxy's own stdio appends to the log and never overwrites earlier records", async () => {
+    // `sandbox-proxy.log` is shared between the structured `[proxy]` records the
+    // proxy appends and the child's stdout/stderr. A positional stdio target
+    // (offset 0) would let a startup error overwrite the head of the file; the
+    // launcher must hand the child an O_APPEND descriptor instead. Drive the
+    // failure path: a missing domains file makes `ib sandbox-proxy` print the
+    // error to stderr and exit 1.
+    const dir = await mkdtemp(join(tmpdir(), "sandbox-proxy-stdio-"));
+    const logFile = join(dir, "proxy.log");
+    const earlier = '[2026-09-06T20:00:00.000Z] [proxy] denied target="denied.example:443" reason="not in allowlist"\n';
+    await Bun.write(logFile, earlier);
+    try {
+      await expect(launchSandboxProxyDetached({
+        port: allocateSandboxProxyPort(),
+        domainsFile: join(dir, "missing-domains.txt"),
+        logFile,
+        agentLogFile: join(dir, "agent.log"),
+        pidFile: join(dir, "proxy.pid"),
+        readyFile: join(dir, "proxy.ready"),
+        commandPrefix: [process.execPath, join(import.meta.dir, "index.ts")],
+        timeoutMs: 10_000,
+      })).rejects.toThrow("sandbox proxy could not bind");
+      const text = await Bun.file(logFile).text();
+      // The earlier record is intact at the head; the child's stderr follows it.
+      expect(text.startsWith(earlier)).toBe(true);
+      expect(text.length).toBeGreaterThan(earlier.length);
+      expect(text.slice(earlier.length)).toContain("missing-domains.txt");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("sandbox proxy connection logging", () => {

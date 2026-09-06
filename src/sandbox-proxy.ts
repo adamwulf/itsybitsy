@@ -1,5 +1,5 @@
 import { isIP } from "node:net";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, closeSync, openSync } from "node:fs";
 import { unlink } from "node:fs/promises";
 
 const MAX_HEADER_BYTES = 64 * 1024;
@@ -374,21 +374,34 @@ export async function launchSandboxProxyDetached(
     unlink(options.readyFile).catch(() => {}),
   ]);
   const commandPrefix = options.commandPrefix ?? [options.executable ?? "ib"];
-  const proc = Bun.spawn([
-    ...commandPrefix,
-    "sandbox-proxy",
-    "--port", String(options.port),
-    "--domains", options.domainsFile,
-    "--log", options.logFile,
-    "--agent-log", options.agentLogFile,
-    "--pid-file", options.pidFile,
-    "--ready-file", options.readyFile,
-  ], {
-    stdin: "ignore",
-    stdout: Bun.file(options.logFile),
-    stderr: Bun.file(options.logFile),
-    detached: true,
-  });
+  // The proxy's stdout/stderr share `logFile` with the structured `[proxy]`
+  // records it appends itself. Hand the child an O_APPEND descriptor: a
+  // `Bun.file(logFile)` stdio target is positional (offset 0, no O_APPEND), so
+  // any runtime output from the proxy — a startup error, an uncaught exception
+  // trace — would overwrite the head of the file and corrupt those records
+  // (and each restart would overwrite the previous incarnation's output).
+  const stdioFd = openSync(options.logFile, "a");
+  let proc: ReturnType<typeof Bun.spawn>;
+  try {
+    proc = Bun.spawn([
+      ...commandPrefix,
+      "sandbox-proxy",
+      "--port", String(options.port),
+      "--domains", options.domainsFile,
+      "--log", options.logFile,
+      "--agent-log", options.agentLogFile,
+      "--pid-file", options.pidFile,
+      "--ready-file", options.readyFile,
+    ], {
+      stdin: "ignore",
+      stdout: stdioFd,
+      stderr: stdioFd,
+      detached: true,
+    });
+  } finally {
+    // The child holds its own copy of the descriptor; the launcher's is done.
+    closeSync(stdioFd);
+  }
   proc.unref();
 
   const deadline = Date.now() + (options.timeoutMs ?? 5_000);

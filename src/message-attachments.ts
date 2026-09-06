@@ -36,7 +36,7 @@ function references(text: string): PathReference[] {
       continue;
     }
     const previous = text[i - 1];
-    if (previous !== undefined && !/[\s([<]/.test(previous)) continue;
+    if (previous !== undefined && !/[ \t\r\n([<]/.test(previous)) continue;
     const quote = text[i] === '"' || text[i] === "'" ? text[i] : undefined;
     const pathOffset = i + (quote ? 1 : 0);
     if (!pathStart(text, pathOffset)) continue;
@@ -45,7 +45,7 @@ function references(text: string): PathReference[] {
     let closed = !quote;
     for (i = pathOffset; i < text.length; i++) {
       const char = text[i]!;
-      if (quote ? char === quote : /[\s<>`]/.test(char)) {
+      if (quote ? char === quote : /[ \t\r\n<>`]/.test(char)) {
         closed = true;
         break;
       }

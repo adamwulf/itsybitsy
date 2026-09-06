@@ -57,6 +57,14 @@ describe("send-time message attachments", () => {
     expect(second.message).not.toBe(paths[0]);
   });
 
+  test("Unicode spaces are literal filename content in terminal paths", async () => {
+    const filename = "screenshot\u00a0at\u202fnoon.png";
+    await writeFile(join(dir, filename), "unicode spaces");
+    const result = await stage(`Look at ./` + filename);
+    const path = result.message.slice("Look at ".length).replaceAll("\\", "");
+    expect(await readFile(path, "utf8")).toBe("unicode spaces");
+  });
+
   test("retains exact punctuation and quoted apostrophes without executing text", async () => {
     const file = join(dir, "$(touch SENTINEL).png!");
     await writeFile(file, "literal");

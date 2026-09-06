@@ -1175,6 +1175,39 @@ describe("sendMessage send-time attachment staging", () => {
     expect(deliveredMessage()).toBe("/clear");
   });
 
+  test("liveRoot (real module): a project-relative ref stays literal (no copy); an external file is still copied", async () => {
+    // Reviewer2 regression: `./src/new.ts` names the recipient's LIVE worktree
+    // file (even one that doesn't exist yet) and must be delivered literally so
+    // the agent edits the live file — NOT frozen to /tmp. An out-of-worktree
+    // file is still copied. Uses the REAL module through sendMessage's liveRoot.
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    // The recipient's live worktree must exist so canonicalization resolves it;
+    // ./src/new.ts itself is deliberately absent (a future file).
+    await mkdir(agentWorktreePath(agent), { recursive: true });
+    // An external screenshot OUTSIDE the worktree and the repo base.
+    const extDir = await mkdtemp(join(tmpdir(), "ext-shot-"));
+    const ext = join(extDir, "screenshot.png");
+    await Bun.write(ext, "EXTBYTES");
+
+    const result = await sendMessage(agent, `./src/new.ts and ${ext}`, { cwd: "/", stageAttachments: true });
+    expect(result.ok).toBe(true);
+
+    const delivered = deliveredMessage();
+    expect(delivered).toBeDefined();
+    const body = delivered!.slice("[sent by user]: ".length);
+    // The project-relative reference is untouched (live edit intent preserved).
+    expect(body.startsWith("./src/new.ts and ")).toBe(true);
+    // The external file was copied to a fresh /tmp snapshot and its path replaced.
+    const stagedPath = body.slice("./src/new.ts and ".length);
+    expect(stagedPath).not.toBe(ext);
+    expect(stagedPath).toContain("itsybitsy-attachments-");
+    expect(basename(stagedPath)).toBe("screenshot.png");
+    expect(await Bun.file(stagedPath).text()).toBe("EXTBYTES");
+
+    await rm(extDir, { recursive: true, force: true });
+    await rm(join(stagedPath, "..", ".."), { recursive: true, force: true });
+  });
+
   test("REGRESSION: an ordinary send (no stageAttachments) never stages — even an agent-relayed message with a real path", async () => {
     // Staging is a dashboard-only permission bypass. An installed stager must
     // NOT run for a legacy send, including an agent-originated (fromAgent) one.

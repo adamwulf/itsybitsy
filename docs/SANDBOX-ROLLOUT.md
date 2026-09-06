@@ -1,6 +1,6 @@
 # Staged sandbox rollout
 
-This rollout requires `sandbox-exec` for ordinary agents and per-repository coordinators, including Claude, Codex/fugu, and agy launch and resume paths. The global `@system` coordinator remains unsandboxed for now. Its sandbox implementation is a separate follow-up after experience with the repository agents.
+This rollout requires `sandbox-exec` for ordinary agents and per-repository coordinators, including Claude, Codex/fugu, and agy launch and resume paths. The global `@system` coordinator remains unsandboxed for now. The phase order is: exercise the repository-agent rollout, add launch-script-owned kernel-denial collection, then resume global coordinator sandbox work.
 
 Agent-type Markdown defines filesystem paths, raw Seatbelt rules, and allowed network domains. It does not define an on/off switch. This replaces the former opt-in rollout and its `sandbox.enabled` instructions.
 
@@ -77,9 +77,34 @@ Spawning agents retain access to the tmux server for lifecycle operations. This 
 
 The agy runtime root is shared state under the user home. Granting it only to agy avoids extending that access to other CLIs; it does not provide per-agent isolation between agy instances.
 
-## Global coordinator follow-up
+## Next phase: collect kernel sandbox denials
 
-The separate system-coordinator implementation must establish safe launch adoption, protected configuration and launch records, and cleanup that cannot affect a replacement session or proxy. Its outstanding concurrency and ownership findings are not part of this rollout. Resume that work after collecting experience with ordinary agents and per-repository coordinators.
+**Planned only; not implemented or built in this rollout.** Complete this phase after exercising the repository-agent sandbox and before resuming global system-coordinator sandbox work.
+
+The goal is to capture kernel-only sandbox denials in the affected agent's `agent.log` and show them in the DENIALS pane. Hook-detected denials already reach both places; kernel-only events are not currently collected.
+
+**Ownership:** `start.sh` and `resume.sh` launch a dedicated collector outside the `sandbox-exec` wrapper, before the agent CLI starts. Collection must remain independent of both `ib watch` and the per-agent watchdog: closing the dashboard or a watchdog failure must not stop it. The launch scripts own the collector for that launch's lifetime.
+
+Implementation sequence:
+
+1. Run a live macOS probe against our generated profiles. Confirm which sandbox violation events are available through the system log, whether access needs additional privileges, and whether reports identify the offending process, operation, and target path. Include startup failures and short-lived subprocesses. Do not infer complete reporting from hook logs or a mocked event.
+2. Add a dedicated helper, provisionally `ib sandbox-log-watch`. Start collection before the wrapped CLI for ordinary agents and per-repository coordinators across Claude, Codex/fugu, and agy. Attribute events to the correct launch and its subprocesses; do not rely on a process name or a numeric PID alone. Leave uncertain events unattributed rather than assign them to the wrong agent.
+3. Append distinct `[Sandbox]` records to `agent.log`, preserving the event timestamp, operation, process identity, and target path when available. Extend the DENIALS parser to accept them alongside existing hook records. Bound repeated-event output and deduplicate overlapping collection so a denial loop cannot flood the log.
+4. Give each launch its own collector identity and artifacts. Exit, resume, and teardown must stop only that launch's collector; a delayed exit from an old launch must not stop a replacement collector or remove its files. Report collector startup or runtime failure visibly. Collection is diagnostic: its failure must neither disable the sandbox nor silently imply there were no denials.
+
+Acceptance checks:
+
+- A real forbidden read and write that bypass the advisory hook scanner produce correctly attributed `[Sandbox]` log entries and appear in DENIALS when the dashboard opens.
+- Collection continues with `ib watch` closed and the watchdog stopped.
+- Startup and short-lived subprocess denials are captured when the OS reports enough evidence; unsupported or unattributable cases are documented explicitly.
+- Concurrent agents, PID reuse, resume, and delayed old-launch cleanup cannot cross-attribute events or stop another collector.
+- Existing hook denial display remains intact, and collection failure is visible while kernel enforcement remains active.
+
+Treat OS-event coverage as best-effort diagnostic logging until the live probe establishes its practical limits; do not claim a complete audit of every denied attempt.
+
+## Later phase: global coordinator sandbox
+
+Resume the separate system-coordinator implementation after the repository-agent pilot and kernel-denial collection phase. It must establish safe launch adoption, protected configuration and launch records, and cleanup that cannot affect a replacement session or proxy. Its outstanding concurrency and ownership findings remain deferred and are not part of the current rollout.
 
 ## Historical context
 

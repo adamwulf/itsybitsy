@@ -33,6 +33,7 @@ import {
   readAllAgents,
   detectAgentStates,
   mutateAgentMeta,
+  agentWorktreePath,
 } from "./agents";
 import {
   enqueueOutbox,
@@ -3442,8 +3443,19 @@ export function resetSendSpawnRunner(): void {
  * Signature of the send-time attachment stager (`stageMessageAttachments` in
  * `./message-attachments`). Kept as a named type so the test seam below can
  * inject a deterministic fake without touching real files.
+ *
+ * `liveRoot` (optional) is the recipient agent's ACTUAL worktree root. When
+ * given, a project-relative reference (e.g. `./src/new.ts`) or an absolute path
+ * INSIDE that worktree is left literal — including a file that does not exist
+ * yet — so the agent edits the live file rather than a frozen `/tmp` snapshot;
+ * only paths OUTSIDE the worktree are copied. Omitted, every referenced file is
+ * copied (the original behavior).
  */
-export type StageMessageAttachmentsFn = (message: string, baseDir: string) => Promise<StagedMessage>;
+export type StageMessageAttachmentsFn = (
+  message: string,
+  baseDir: string,
+  liveRoot?: string,
+) => Promise<StagedMessage>;
 
 // Injectable override for the stager. Production uses the real module import;
 // tests set a fake to exercise the staging → enqueue → drain wiring (including
@@ -3823,7 +3835,11 @@ async function hasLiveWatchdog(agentDir: string): Promise<boolean> {
  * dashboard-only opt-in. When set, local file-path references in `message` are
  * copied into `/tmp` and rewritten to the staged paths BEFORE enqueue, so the
  * receiving agent can read a snapshot under its existing sandbox without any
- * widening or restart. This is an out-of-sandbox copy performed by the trusted
+ * widening or restart. References that already live INSIDE the recipient's
+ * worktree (project-relative like `./src/x.ts`, or an in-worktree absolute path,
+ * even a not-yet-created file) are left LITERAL so the agent edits the live file
+ * rather than a frozen copy — only out-of-worktree files are copied. This is an
+ * out-of-sandbox copy performed by the trusted
  * `ib watch` process, so it is NEVER wired to a CLI flag or an agent-originated
  * send — legacy sends (no `stageAttachments`) behave exactly as before and copy
  * nothing. See `docs/SANDBOX-ROLLOUT.md` "stage message attachments at send
@@ -3885,7 +3901,17 @@ export async function sendMessage(
   if (attachmentSend) {
     let staged: StagedMessage;
     try {
-      staged = await activeAttachmentStager()(message, opts?.attachmentBaseDir ?? agent.repoPath);
+      // `liveRoot` = the recipient's ACTUAL worktree root (agentWorktreePath
+      // handles the meta.worktree/archive/storageDir cases). It lets the stager
+      // keep project-relative refs and in-worktree absolute paths literal (live
+      // files, even not-yet-created ones) instead of freezing them to /tmp;
+      // only files OUTSIDE the worktree are copied. `baseDir` still resolves
+      // out-of-project relative refs.
+      staged = await activeAttachmentStager()(
+        message,
+        opts?.attachmentBaseDir ?? agent.repoPath,
+        agentWorktreePath(agent),
+      );
     } catch (err) {
       // Staging failed BEFORE enqueue: nothing is queued and the stager has
       // already cleaned up any partial copies of its own. Surface an actionable

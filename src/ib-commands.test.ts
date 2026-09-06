@@ -21,6 +21,7 @@ import {
   readAgentMeta,
   readAllAgents,
   buildAgentTree,
+  agentWorktreePath,
 } from "./agents";
 import { matchAgentById } from "./index";
 import { saveRegistry } from "./registry";
@@ -1046,6 +1047,25 @@ describe("sendMessage send-time attachment staging", () => {
     expect(queued.length).toBe(1);
     expect(queued[0]!.message).toBe("/private/tmp/staged/x.png /orig/x.png hi");
     expect(queued[0]!.noPassthrough).toBe(true);
+  });
+
+  test("passes the recipient's actual worktree root as liveRoot (3rd arg)", async () => {
+    // The stager needs the recipient's live worktree so in-worktree references
+    // stay literal. sendMessage must pass agentWorktreePath(agent), not repoPath.
+    let capturedBaseDir: string | undefined;
+    let capturedLiveRoot: string | undefined;
+    setMessageAttachmentStagerForTesting(async (_msg, baseDir, liveRoot) => {
+      capturedBaseDir = baseDir;
+      capturedLiveRoot = liveRoot;
+      return { message: "unchanged", staged: false, cleanup: async () => {} };
+    });
+
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    const result = await sendMessage(agent, "./src/new.ts please add a test", { cwd: "/", stageAttachments: true });
+
+    expect(result.ok).toBe(true);
+    expect(capturedLiveRoot).toBe(agentWorktreePath(agent)); // recipient's real worktree
+    expect(capturedBaseDir).toBe(tempDir); // baseDir defaults to agent.repoPath
   });
 
   test("staging failure returns an actionable error and enqueues nothing", async () => {

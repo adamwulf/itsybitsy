@@ -844,6 +844,7 @@ describe("loadDenials (lazy)", () => {
     const displayed = ctx.rightPane.render(500).map(stripAnsi).join("\n");
     expect(displayed).toContain("[Sandbox] file-read-data");
     expect(displayed).toContain("[SandboxCollector] ERROR:");
+    expect(displayed).toContain("3 denial(s), 1 collector alert(s)");
     expect(displayed.match(/23:01:34\.988314-0500/g)?.length).toBe(1);
   });
 

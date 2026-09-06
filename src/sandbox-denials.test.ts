@@ -39,6 +39,28 @@ describe("kernel report parsing", () => {
   test("path is optional, operation is retained", () => {
     expect(parseSandboxReport(raw({ eventMessage: "Sandbox: sh(42) deny(1) network-outbound" }), boot)?.target).toBeUndefined();
   });
+  test("crafted executable names cannot assign reports to a tracked victim", () => {
+    const victim = new SandboxAttribution(obs(12345, 10, "1000:1", 100n));
+    victim.observe([obs(12345, 10, "1000:1", 100n)], 0);
+    victim.observe([obs(12345, 10, "1000:1", 200n)], 1);
+    expect(victim.attribute(parseSandboxReport(raw({ eventMessage: "Sandbox: Ra(12345) deny(1) n /x" }), boot)!)?.pid).toBe(12345);
+    let ambiguous = 0;
+    for (const name of ["Ra(12345) deny(1) n ", "claude(12345) deny(1) n ", "Ra(12345) deny(1) n " + "\ufffd".repeat(10)]) {
+      const report = parseSandboxReport(raw({ eventMessage: `Sandbox: ${name}(25479) deny(1) file-read-data /forbidden/x` }), boot,
+        { onAmbiguous: () => ambiguous++ });
+      expect(report).toBeNull();
+      expect(report && victim.attribute(report)).toBeNull();
+    }
+    expect(ambiguous).toBe(3);
+  });
+  test("unambiguous parentheses and a 32-character kernel name remain supported", () => {
+    for (const name of ["tool(test)", "x".repeat(32)]) {
+      const report = parseSandboxReport(raw({ eventMessage: `Sandbox: ${name}(42) deny(1) file-read-data /x` }), boot)!;
+      expect(report.process).toBe(name);
+      expect(report.pid).toBe(42);
+    }
+    expect(parseSandboxReport(raw({ eventMessage: `Sandbox: ${"x".repeat(33)}(42) deny(1) file-read-data /x` }), boot)).toBeNull();
+  });
   test.each([
     "broken JSON", "null", "[]", raw({ timestamp: "bad" }), raw({ timestamp: "2026-09-05 23:01:34" }),
     raw({ machTimestamp: 0 }), raw({ machTimestamp: Number.MAX_SAFE_INTEGER + 1 }),
@@ -120,6 +142,17 @@ describe("process lifetime attribution", () => {
     const a = new SandboxAttribution(root, 4);
     a.observe([root, ...Array.from({ length: 30 }, (_, i) => obs(i + 100, root.pid, "1001:0", 100n))], 0);
     expect(a.liveIdentities().length).toBeLessThanOrEqual(4);
+  });
+  test("capacity evicts stale history before the root and observed live descendants", () => {
+    const a = new SandboxAttribution(root, 4);
+    a.observe([root, child, obs(100, 40, "1001:2", 100n), obs(101, 40, "1001:3", 100n)], 0);
+    a.observe([obs(40, 10, root.birth, 200n), obs(42, 40, child.birth, 200n), obs(102, 40, "1002:0", 200n)], 10);
+    expect(a.attribute(parseSandboxReport(raw(), boot)!)?.birth).toBe(child.birth);
+    expect(a.liveIdentities().some(p => p.pid === root.pid)).toBe(true);
+    expect(a.liveIdentities().some(p => p.pid === 100)).toBe(false);
+    expect(a.liveIdentities()).toHaveLength(4);
+    a.observe([], 30011);
+    expect(a.attribute(parseSandboxReport(raw(), boot)!)).toBeNull();
   });
 });
 

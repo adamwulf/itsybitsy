@@ -313,7 +313,8 @@ export class RightPaneComponent implements Component {
         else if (this.denialsLoading || !this.denialsContent) { this.content = [`${DIM}Loading denials...${RESET}`]; }
         else {
           const denials = this.denialsContent;
-          this.content = [`${DIM}${denials.length} denial(s)${RESET}`];
+          const alerts = denials.filter(d => /^\[[^\]]+\] \[SandboxCollector\]/.test(d.line)).length;
+          this.content = [`${DIM}${denials.length - alerts} denial(s)${alerts ? `, ${alerts} collector alert(s)` : ""}${RESET}`];
           if (denials.length === 0) { this.content.push(`${DIM}No denials found${RESET}`); }
           else { for (const d of denials) {
             const stripped = d.line.replace(/^\[.*?\] /, "").replace(/^\[PreToolUse\] /, "");

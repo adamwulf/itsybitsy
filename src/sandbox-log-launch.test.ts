@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-log-launch";
 import { shellQuote } from "./validation";
+import { sandboxLogParent } from "./sandbox-log-paths";
 
-async function fixture(mode: "success" | "startup-failure" | "runtime-failure") {
+async function fixture(mode: "success" | "startup-failure" | "runtime-failure" | "collector-sigkill") {
   const dir = await mkdtemp(join(tmpdir(), "sandbox-launch-test-"));
   const bin = join(dir, "bin");
   await mkdir(bin);
@@ -17,24 +18,25 @@ while [ "$#" -gt 0 ]; do
 done
 ${mode === "startup-failure" ? "exit 27" : ""}
 : > "$dir/ready"
-while [ ! -f "$dir/root-request" ] && [ ! -f "$dir/stop" ]; do sleep 0.01; done
+while [ ! -f "$dir/root-request" ] && [ ! -s "$dir/stop" ]; do sleep 0.01; done
 : > "$dir/root-ready"
 ${mode === "runtime-failure" ? "sleep 0.15; exit 31" : ""}
-while [ ! -f "$dir/stop" ]; do sleep 0.01; done
+${mode === "collector-sigkill" ? 'sleep 0.15; kill -KILL "$$"' : ""}
+while [ ! -s "$dir/stop" ]; do sleep 0.01; done
 `);
   await chmod(join(bin, "ib"), 0o755);
   const wrapper = join(bin, "required-wrapper");
   await writeFile(wrapper, `#!/bin/sh\nprintf 'wrapped\\n' >> ${shellQuote(join(dir, "enforcement"))}\nexec "$@"\n`);
   await chmod(wrapper, 0o755);
   const children: Bun.Subprocess[] = [];
-  const start = async (name: string, seconds: number) => {
+  const start = async (name: string, seconds: number, cliCommand = `/bin/sleep ${seconds}`) => {
     const script = join(dir, `${name}.sh`);
     await writeFile(script, `#!/bin/bash
 AGENT_LOG=${shellQuote(join(dir, "agent.log"))}
 cleanup_sandbox_proxy() { printf 'cleanup\\n' >> ${shellQuote(join(dir, "proxy-cleanup"))}; }
-${sandboxDenialScriptPreamble(dir)}
+${sandboxDenialScriptPreamble(dir, dir)}
 printf '%s' "$IB_SANDBOX_LOG_DIR" > ${shellQuote(join(dir, `${name}-dir`))}
-${sandboxDenialExecPrefix(shellQuote(wrapper))} /bin/sleep ${seconds} &
+${sandboxDenialExecPrefix(shellQuote(wrapper))} ${cliCommand} &
 cli=$!
 wait "$cli"
 `);
@@ -44,7 +46,8 @@ wait "$cli"
   };
   return { dir, start, cleanup: async () => {
     for (const child of children) { if (child.exitCode === null) child.kill(); }
-    for (const name of await readdir(dir)) if (name.startsWith("sandbox-log.")) await writeFile(join(dir, name, "stop"), "");
+    const parent = sandboxLogParent(dir, dir);
+    for (const name of await readdir(parent).catch(() => [])) await writeFile(join(parent, name, "stop"), "stop\n").catch(() => {});
     await Bun.sleep(50);
     await rm(dir, { recursive: true, force: true });
   } };
@@ -95,8 +98,8 @@ test("late old-launch cleanup does not stop a replacement or remove its artifact
     const newDir = await readFile(join(f.dir, "resume-dir"), "utf8");
     expect(oldDir).not.toBe(newDir);
     expect(await old.exited).toBe(0);
-    expect(await Bun.file(join(oldDir, "stop")).exists()).toBe(true);
-    expect(await Bun.file(join(newDir, "stop")).exists()).toBe(false);
+    await until(async () => !await Bun.file(join(oldDir, "ready")).exists());
+    expect(await readFile(join(newDir, "stop"), "utf8")).toBe("");
     expect(await Bun.file(join(newDir, "ready")).exists()).toBe(true);
     expect(replacement.exitCode).toBeNull();
     expect(await replacement.exited).toBe(0);
@@ -109,4 +112,45 @@ test("gate preserves arguments and wrapper exit status when collection is unavai
     env: { ...process.env, IB_SANDBOX_LOG_DIR: "" }, stdout: "pipe", stderr: "pipe",
   });
   expect(await child.exited).toBe(23);
+});
+
+test("CLI inherits neither collector control variables nor reserved fd 9", async () => {
+  const f = await fixture("success");
+  try {
+    const probe = join(f.dir, "probe.sh");
+    await writeFile(probe, `#!/bin/sh\n[ -z "\${IB_SANDBOX_LOG_DIR+x}" ] || exit 10\n[ -z "\${IB_SANDBOX_LOG_AGENT_LOG+x}" ] || exit 11\n[ ! -e /dev/fd/9 ] || exit 12\n`);
+    const child = await f.start("start", 0, `/bin/sh ${shellQuote(probe)}`);
+    expect(await child.exited).toBe(0);
+  } finally { await f.cleanup(); }
+});
+
+test("old EXIT writes the original stop inode even after its pathname is reused", async () => {
+  const f = await fixture("runtime-failure");
+  try {
+    const old = await f.start("old", 0.9);
+    await until(() => Bun.file(join(f.dir, "old-dir")).exists());
+    const dir = await readFile(join(f.dir, "old-dir"), "utf8");
+    await until(async () => (await Bun.file(join(f.dir, "agent.log")).text().catch(() => "")).includes("collector exited 31"));
+    await until(async () => !await Bun.file(join(dir, "ready")).exists());
+    // Force an otherwise astronomically unlikely mktemp-name reuse after the
+    // sole supervisor removal, while the old launch still has its EXIT trap.
+    await mkdir(dir);
+    await writeFile(join(dir, "stop"), "replacement");
+    expect(await old.exited).toBe(0);
+    expect(await readFile(join(dir, "stop"), "utf8")).toBe("replacement");
+  } finally { await f.cleanup(); }
+});
+
+test("supervisor removes its reserved directory after collector SIGKILL and reports failure", async () => {
+  const f = await fixture("collector-sigkill");
+  try {
+    const child = await f.start("start", 0.8);
+    await until(() => Bun.file(join(f.dir, "start-dir")).exists());
+    const dir = await readFile(join(f.dir, "start-dir"), "utf8");
+    await until(async () => (await Bun.file(join(f.dir, "agent.log")).text().catch(() => "")).includes("collector exited 137"));
+    await until(async () => !await Bun.file(join(dir, "ready")).exists());
+    expect(child.exitCode).toBeNull();
+    expect(await child.exited).toBe(0);
+    expect(await readFile(join(f.dir, "enforcement"), "utf8")).toBe("wrapped\n");
+  } finally { await f.cleanup(); }
 });

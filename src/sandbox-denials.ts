@@ -16,7 +16,7 @@ export function sandboxTimestampEpoch(timestamp: string): number {
   return Date.parse(timestamp.replace(" ", "T").replace(/([+-]\d{2})(\d{2})$/, "$1:$2")) / 1000;
 }
 
-export function parseSandboxReport(line: string, boot: string, options: { liveStream?: boolean } = {}): SandboxReport | null {
+export function parseSandboxReport(line: string, boot: string, options: { liveStream?: boolean; onAmbiguous?: () => void } = {}): SandboxReport | null {
   if (line.length > 65536) return null;
   try {
     const r = JSON.parse(line);
@@ -36,17 +36,33 @@ export function parseSandboxReport(line: string, boot: string, options: { liveSt
     const epoch = sandboxTimestampEpoch(r.timestamp);
     if (!Number.isFinite(epoch) || !Number.isSafeInteger(r.machTimestamp) || r.machTimestamp <= 0) return null;
     if (typeof r.eventMessage !== "string") return null;
-    const m = /^(?:(\d+) duplicate reports? for )?Sandbox: ([^\r\n()]{1,256})\(([1-9]\d*)\) deny\(\d+\) ([a-z][a-z0-9*-]*)(?: ([^\r\n]*))?$/.exec(r.eventMessage);
-    if (!m) return null;
-    const pid = Number(m[3]);
-    const duplicates = m[1] ? Number(m[1]) : 0;
-    if (!Number.isSafeInteger(pid) || pid > 2147483647 || !Number.isSafeInteger(duplicates)) return null;
     // Duplicate summaries describe earlier attempts whose timestamps are absent.
     // They cannot safely be attributed using the summary's delivery timestamp.
-    if (m[1] !== undefined) return null;
+    if (!r.eventMessage.startsWith("Sandbox: ") || /[\r\n]/.test(r.eventMessage)) return null;
+    const body = r.eventMessage.slice("Sandbox: ".length);
+    // Kernel p_name is at most 32 bytes and is printed without sanitizing the
+    // delimiter. A name such as "Ra(12345) deny(1) n " can forge an earlier PID.
+    // Examine EVERY feasible delimiter, retaining only an unambiguous split.
+    // UTF-16 length is a conservative upper bound here: re-encoding replacement
+    // characters as UTF-8 could otherwise exclude the true delimiter.
+    const splits: { pid: number; name: string; operation: string; target?: string }[] = [];
+    const delimiter = /^\(([1-9]\d*)\) deny\(\d+\) ([a-z][a-z0-9*-]*)(?: ([^\r\n]*))?$/;
+    for (let index = 1; index <= Math.min(32, body.length); index++) {
+      if (body[index] !== "(") continue;
+      const m = delimiter.exec(body.slice(index));
+      if (!m) continue;
+      const pid = Number(m[1]);
+      if (!Number.isSafeInteger(pid) || pid > 2147483647) continue;
+      splits.push({ pid, name: body.slice(0, index), operation: m[2]!, target: m[3] });
+    }
+    if (splits.length !== 1) {
+      if (splits.length > 1) options.onAmbiguous?.();
+      return null;
+    }
+    const split = splits[0]!;
     const mach = BigInt(r.machTimestamp);
-    return { timestamp: r.timestamp, epoch, mach, boot, pid, process: m[2]!,
-      operation: m[4]!, target: m[5], duplicates,
+    return { timestamp: r.timestamp, epoch, mach, boot, pid: split.pid, process: split.name,
+      operation: split.operation, target: split.target, duplicates: 0,
       key: `${boot}:${mach}:${r.eventMessage}` };
   } catch { return null; }
 }
@@ -67,6 +83,7 @@ export const processIdentity = (p: Pick<ProcessObservation, "pid" | "birth">) =>
  */
 export class SandboxAttribution {
   private intervals = new Map<string, Interval>();
+  private byPid = new Map<number, Set<Interval>>();
   constructor(readonly root: ProcessObservation, readonly maxEntries = 4096) {}
 
   observe(samples: ProcessObservation[], now: number): void {
@@ -90,17 +107,36 @@ export class SandboxAttribution {
         existing.last = p.before > existing.last ? p.before : existing.last;
         existing.touched = now;
       } else {
-        this.intervals.set(key, { ...p, first: p.after, last: p.before, touched: now });
+        const interval = { ...p, first: p.after, last: p.before, touched: now };
+        this.intervals.set(key, interval);
+        const instances = this.byPid.get(p.pid) ?? new Set<Interval>();
+        instances.add(interval);
+        this.byPid.set(p.pid, instances);
       }
     }
-    for (const [key, p] of this.intervals) if (now - p.touched > 30000) this.intervals.delete(key);
-    while (this.intervals.size > this.maxEntries) this.intervals.delete(this.intervals.keys().next().value!);
+    for (const [key, p] of this.intervals) if (now - p.touched > 30000) this.remove(key, p);
+    if (this.intervals.size > this.maxEntries) {
+      const rootKey = processIdentity(this.root);
+      const oldest = [...this.intervals.entries()].filter(([key]) => key !== rootKey)
+        .sort((a, b) => a[1].touched - b[1].touched);
+      for (const [key, p] of oldest) {
+        if (this.intervals.size <= Math.max(1, this.maxEntries)) break;
+        this.remove(key, p);
+      }
+    }
   }
 
   attribute(report: SandboxReport): ProcessObservation | null {
-    const matches = [...this.intervals.values()].filter(p =>
-      p.pid === report.pid && p.first <= report.mach && report.mach <= p.last);
+    const matches = [...this.byPid.get(report.pid) ?? []].filter(p =>
+      p.first <= report.mach && report.mach <= p.last);
     return matches.length === 1 ? matches[0]! : null;
+  }
+
+  private remove(key: string, interval: Interval): void {
+    this.intervals.delete(key);
+    const instances = this.byPid.get(interval.pid)!;
+    instances.delete(interval);
+    if (instances.size === 0) this.byPid.delete(interval.pid);
   }
 
   liveIdentities(): ProcessObservation[] { return [...this.intervals.values()]; }

@@ -79,10 +79,7 @@ The agy runtime root is shared state under the user home. Granting it only to ag
 
 ## Next phase: collect kernel sandbox denials
 
-**Implementation candidate; live helper fixtures validated. Collector-SIGKILL
-cleanup remains unresolved, and independent review/deployment are pending.**
-Complete this phase after exercising the repository-agent sandbox and before
-resuming global system-coordinator sandbox work.
+**Implementation candidate; first independent review requested changes.** Adam authorized two researcher reviewers after the initial live worker completed. The current revision fixes their parsing, control-file integrity, and process-ownership findings; fresh review and live validation of the revised collector remain pending. Global system-coordinator sandbox work remains deferred.
 
 The candidate adds `ib sandbox-log-watch` to the shared repository-agent start
 and resume wiring. A launch-specific shell supervisor starts it outside Seatbelt
@@ -109,29 +106,11 @@ and 3 per process/operation/target per minute, with a 2,048-event deduplication
 cache. Suppression and collector errors use `[SandboxCollector]` records; errors
 and warnings also appear in DENIALS alongside unchanged hook denials.
 
-Every script invocation allocates a fresh `sandbox-log.XXXXXXXX` directory.
-Cleanup signals only that directory's stop file, never a numeric collector PID
-or shared filename. The collector also exits if its launch owner's birth identity
-changes/disappears and drains for up to one second on normal shutdown. A shell
-supervisor reports unexpected collector exits while the CLI continues. The collector
-also ends when the registered CLI instance disappears, so an interactive
-`exit-check.sh` cannot keep a stale collector alive. Diagnostic
-failure never removes or bypasses the required Seatbelt wrapper. No system-wide
-collector, dashboard dependency, watchdog dependency, or global `@system` launch
-change is introduced.
+Every invocation allocates a fresh sandbox-log.XXXXXXXX directory beneath \~/.itsybitsy/sealed/sandbox-logs/<agent-directory-hash>/. The shipped floor denies this tree even when AGENTDIR is writable. Creation happens in the unsandboxed script. An initially empty stop file is opened once by both script and collector; the EXIT trap writes through reserved fd 9, so a late EXIT cannot touch a reused pathname. The gate atomically renames its root request, then closes fd 9 and clears control variables before exec. Only the supervisor removes the reserved directory after the collector returns, including collector crashes. Owner or CLI birth-identity disappearance still ends collection with a one-second drain. Stopping while the registered CLI remains alive produces a visible coverage WARNING. Diagnostic failure never removes the mandatory Seatbelt wrapper.
 
-Candidate checks in the Codex session: 5,657 reported `bun test` passes, zero
-failures, 29,486 assertions across 115 files; TypeScript checking and local build
-pass. `./ib list-types` prints its table and the new command's help dispatches.
-The suite total still includes the kernel capability and opt-in Claude boot
-early-return skips described below; it is not a live enforcement/capture pass.
-Adam's one authorized worker ran the native process reader, candidate binary,
-shell fixtures, and logger. Corrected candidate `d198c4d` passed live stream-failure
-and verbatim start/resume preamble fixture validation; subsequent production
-source is identical. The fixtures used the actual shared preamble and gate,
-generated floor profile, and synthetic sandboxed shells. They did not run full
-production script bodies, model CLIs, or the proxy. Claude, Codex/fugu, agy, and
-per-repository coordinator generation is covered by automated lifecycle tests.
+Historical candidate checks before independent review: 5,657 reported bun test passes, zero failures, 29,486 assertions across 115 files; TypeScript, build, CLI table and command-help smoke passed. After rebasing onto main eb5bfa0, candidate a28e0dd reported 5,720 passes, zero failures, 29,723 assertions across 117 files, plus successful TypeScript/build/smoke. Both totals include the kernel capability and opt-in Claude boot early-return skips described below; neither is a live enforcement/capture pass. The authorized live worker tested corrected candidate d198c4d with the actual shared preamble and gate, generated floor, and synthetic sandboxed shells. Those historical fixtures did not run whole production scripts, model CLIs, the proxy, or a controlling terminal. The review fixes change production source after that live evidence and need fresh validation. Claude, Codex/fugu, agy, and per-repository coordinator generation remains covered by lifecycle tests.
+
+Round-one fixes validated locally: bun test reported 5,736 passes, zero failures, 29,794 assertions across 119 files (111.20 seconds; /private/tmp/sandbox-denial-logs-round1-fixed-full.log). The same two existing live-test early returns remain skips, not live passes. bunx tsc --noEmit passed. The 146-module build passed, and the rebuilt CLI printed list-types plus help for both internal collector commands. New regressions use real Darwin pipes, group signals and a pseudo-terminal with a controlled stream peer; they do not prove revised kernel capture. Direct capability rechecks still fail here: sandbox-exec exits 71 with sandbox_apply: Operation not permitted; log show exits 64 with Cannot run while sandboxed. Fresh independent review and host-side capture validation remain pending.
 
 The first full run after the native fixes reported 5,653 passes and two failures:
 both source-entry smoke tests received an empty type table from their shared
@@ -188,20 +167,7 @@ failed. No dashboard or watchdog ran in the fixtures. Same-agent-directory
 old/new overlap is covered by the shell regression test; the live concurrent
 fixtures used separate agent directories.
 
-**Unresolved crash-cleanup gap:** `SIGKILL` of the collector bypasses its cleanup.
-The launch directory remains and its `/usr/bin/log stream` child can remain
-orphaned. The shell supervisor makes failure visible but does not terminate that
-child or remove the residual directory. Normal CLI exit, SIGTERM, and stream
-failure clean up; old-launch cleanup never signals a replacement by numeric PID.
-The worker removed only its disposable orphan after matching the birth identity
-captured before the kill. This is an observed limitation, not approval to deploy
-with orphaned streams. See `docs/sandbox-denial-probe-evidence.md` sections 10–12
-for failed-candidate history, corrected live results, and remaining limits.
-The six evidence commits were merged additively and the sole authorized worker
-was closed. Sanitized result records and fixture harnesses are preserved at
-`/tmp/ib-denial-probe-evidence-agent-9685061d/final-collector/`; its README explains
-scope and reproduction path adjustments. Implementation and artifact self-review
-were performed by the primary Codex agent; no independent reviewers were spawned.
+**Historical collector-crash finding and current remedy:** SIGKILL of d198c4d left an orphan log stream and residual launch directory. The worker removed its fixture orphan immediately after checking its captured birth identity, so its natural lifetime was never measured. The revised collector owns a detached stream helper through a stdin lifeline pipe. EOF after collector death makes that helper terminate its own live process group, with bounded escalation; it never signals a stored PID or group number. The helper verifies its session/group identity before spawning the stream. Detachment also prevents pane-session SIGHUP from killing the stream during normal drain. Stream failure is relayed to the collector; the supervisor removes only its reserved directory. A helper crash itself remains a separate exceptional limitation: the collector cancels and closes output readers without hanging, but an orphan log stream may persist until a subsequent write receives EPIPE. A wedged or killed supervisor can leave its reserved directory under the sealed tree; existing state cleanup does not sweep it. No numeric-PID reaper is introduced. These limits are not deployment approval. Historical evidence and sanitized artifacts remain in docs/sandbox-denial-probe-evidence.md and /tmp/ib-denial-probe-evidence-agent-9685061d/final-collector/. The six evidence commits were merged additively and the worker closed. Round-one reviewer findings and dispositions are recorded in docs/sandbox-denial-review.md.
 
 ### Capability investigation (2026-09-05)
 

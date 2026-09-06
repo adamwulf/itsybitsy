@@ -1,8 +1,9 @@
-import { appendFileSync, existsSync, readFileSync, writeFileSync, rmSync, lstatSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync, lstatSync, openSync, fstatSync, closeSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { SandboxAttribution, SandboxLogFramer, SandboxOutputBudget, formatSandboxRecord,
   parseSandboxReport, processIdentity, type ProcessObservation, type SandboxReport } from "./sandbox-denials";
+import { sandboxLogParent } from "./sandbox-log-paths";
 
 export interface SandboxLogOptions { dir: string; owner: number; agentLog: string }
 
@@ -12,47 +13,82 @@ export function sandboxStreamExited(stream: Pick<Bun.Subprocess, "exitCode" | "s
   return stream.exitCode !== null || stream.signalCode !== null;
 }
 
+function waitForHelperExit(child: Bun.Subprocess, milliseconds: number): Promise<boolean> {
+  return new Promise(resolve => {
+    const timer = setTimeout(() => resolve(false), milliseconds);
+    void child.exited.then(() => { clearTimeout(timer); resolve(true); });
+  });
+}
+
+/** Close the lifeline, then both read ends even if an orphan holds a writer. */
+export async function closeSandboxLogStream(
+  stream: Bun.Subprocess<"pipe", "pipe", "pipe">,
+  readers: (ReturnType<ReadableStream<Uint8Array>["getReader"]> | undefined)[],
+): Promise<void> {
+  try { await stream.stdin.end(); } catch { /* helper may already have exited */ }
+  if (!await waitForHelperExit(stream, 2000)) {
+    stream.kill(); // owned Bun handle fallback on macOS, never a PID from a file
+    if (!await waitForHelperExit(stream, 1200)) stream.kill("SIGKILL");
+  }
+  await stream.exited;
+  for (const reader of readers) await reader?.cancel().catch(() => {});
+}
+
 /** The launch script is the supervisor. No watchdog or dashboard participates. */
 export async function watchSandboxLog(opts: SandboxLogOptions): Promise<number> {
   const launch = basename(opts.dir);
-  const status = (level: string, message: string) => appendFileSync(opts.agentLog,
-    `[${new Date().toISOString()}] [SandboxCollector] ${level}: launch=${launch} ${message.replace(/[\r\n\x00-\x1f\x7f]/g, " ")}\n`);
+  const status = (level: string, message: string) => {
+    const line = `[${new Date().toISOString()}] [SandboxCollector] ${level}: launch=${launch} ${message.replace(/[\r\n\x00-\x1f\x7f]/g, " ")}\n`;
+    try { appendFileSync(opts.agentLog, line); }
+    catch { process.stderr.write(line); } // nuke may already have removed the log directory
+  };
   let reader: ReturnType<typeof import("./sandbox-processes").openSandboxProcessReader> | undefined;
-  let stream: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
+  let stream: Bun.Subprocess<"pipe", "pipe", "pipe"> | undefined;
+  let outputReader: ReturnType<ReadableStream<Uint8Array>["getReader"]> | undefined;
+  let errorReader: ReturnType<ReadableStream<Uint8Array>["getReader"]> | undefined;
   let pumping: Promise<void> | undefined;
   let errors: Promise<void> | undefined;
   let stderr = "";
   let failed: unknown;
-  let ownsDirectory = false;
+  let stopFd: number | undefined;
   let stopping = false;
   const stop = () => { stopping = true; };
   const hup = () => {};
   process.on("SIGTERM", stop); process.on("SIGINT", stop); process.on("SIGHUP", hup);
   try {
-    if (dirname(opts.dir) !== dirname(opts.agentLog) || !/^sandbox-log\.[a-zA-Z0-9]+$/.test(launch) ||
+    if (dirname(opts.dir) !== sandboxLogParent(dirname(opts.agentLog)) || !/^sandbox-log\.[a-zA-Z0-9]+$/.test(launch) ||
         !lstatSync(opts.dir).isDirectory()) throw new Error("invalid launch artifact directory");
     writeFileSync(join(opts.dir, "collector-lock"), String(process.pid), { flag: "wx", mode: 0o600 });
-    ownsDirectory = true;
+    stopFd = openSync(join(opts.dir, "stop"), "r");
     reader = (await import("./sandbox-processes")).openSandboxProcessReader();
     const owner = reader.read(opts.owner);
     if (!owner) throw new Error("launch owner identity unavailable");
     // Prove the supplied owner is an ancestor of this collector at startup.
     let ancestor = reader.read(process.pid);
-    for (let depth = 0; ancestor && depth < 64 && ancestor.pid !== owner.pid; depth++) ancestor = reader.read(ancestor.ppid);
+    const collectorAncestors = new Set<number>();
+    for (let depth = 0; ancestor && depth < 64 && ancestor.pid !== owner.pid; depth++) {
+      collectorAncestors.add(ancestor.pid);
+      ancestor = reader.read(ancestor.ppid);
+    }
     if (!ancestor || processIdentity(ancestor) !== processIdentity(owner)) throw new Error("launch owner is not the collector ancestor");
-    writeFileSync(join(opts.dir, "identity.json"), JSON.stringify({ launch, owner: processIdentity(owner), collector: process.pid, boot: reader.boot }));
+    writeFileSync(join(opts.dir, "identity.json"), JSON.stringify({ launch, owner: processIdentity(owner), collector: process.pid, boot: reader.boot, agentLog: opts.agentLog }));
     const marker = `IBSandboxReady-${launch}`;
     let warm = false;
     const predicate = `(subsystem == "com.apple.sandbox.reporting" AND category == "violation") OR (eventMessage CONTAINS "Sandbox:") OR (eventMessage CONTAINS "${marker}")`;
-    stream = Bun.spawn(["/usr/bin/log", "stream", "--style", "ndjson", "--level", "debug", "--predicate", predicate],
-      { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    stream = Bun.spawn(["ib", "sandbox-log-stream", "--predicate", predicate],
+      { stdin: "pipe", stdout: "pipe", stderr: "pipe", detached: true });
+    outputReader = stream.stdout.getReader();
+    errorReader = stream.stderr.getReader();
     const framer = new SandboxLogFramer();
     const pending: { report: SandboxReport; received: number }[] = [];
     let overflow = 0;
+    let ambiguous = 0;
     pumping = (async () => {
       const decoder = new TextDecoder();
-      for await (const chunk of stream!.stdout) {
-        for (const line of framer.push(decoder.decode(chunk, { stream: true }))) {
+      while (true) {
+        const chunk = await outputReader!.read();
+        if (chunk.done) break;
+        for (const line of framer.push(decoder.decode(chunk.value, { stream: true }))) {
           if (!warm) {
             try {
               const event = JSON.parse(line);
@@ -60,7 +96,7 @@ export async function watchSandboxLog(opts: SandboxLogOptions): Promise<number> 
                   event.processImagePath === "/usr/bin/logger") warm = true;
             } catch { /* log stream's non-JSON banner is not an event */ }
           }
-          const report = parseSandboxReport(line, reader!.boot, { liveStream: true });
+          const report = parseSandboxReport(line, reader!.boot, { liveStream: true, onAmbiguous: () => { ambiguous++; } });
           if (report) {
             if (pending.length < 512) pending.push({ report, received: performance.now() });
             else overflow++;
@@ -70,8 +106,10 @@ export async function watchSandboxLog(opts: SandboxLogOptions): Promise<number> 
     })().catch(error => { failed = error; });
     errors = (async () => {
       const decoder = new TextDecoder();
-      for await (const chunk of stream!.stderr) {
-        if (stderr.length < 4096) stderr += decoder.decode(chunk).slice(0, 4096 - stderr.length);
+      while (true) {
+        const chunk = await errorReader!.read();
+        if (chunk.done) break;
+        if (stderr.length < 4096) stderr += decoder.decode(chunk.value).slice(0, 4096 - stderr.length);
       }
     })().catch(error => { failed = error; });
     const startup = performance.now();
@@ -95,8 +133,13 @@ export async function watchSandboxLog(opts: SandboxLogOptions): Promise<number> 
     while (true) {
       const now = performance.now();
       const currentOwner = reader.read(owner.pid);
-      if (stopping || existsSync(join(opts.dir, "stop")) || !currentOwner || processIdentity(currentOwner) !== processIdentity(owner)) stopAt ??= now + 1000;
       const currentRoot = attribution && reader.read(attribution.root.pid);
+      if (stopping || fstatSync(stopFd).size > 0 || !currentOwner || processIdentity(currentOwner) !== processIdentity(owner)) {
+        if (stopAt === undefined && currentRoot && processIdentity(currentRoot) === processIdentity(attribution!.root)) {
+          status("WARNING", "collection stopping before the registered CLI exits; coverage reduced");
+        }
+        stopAt ??= now + 1000;
+      }
       if (attribution && (!currentRoot || processIdentity(currentRoot) !== processIdentity(attribution.root))) stopAt ??= now + 1000;
       if (stopAt !== undefined && now >= stopAt) break;
       if (sandboxStreamExited(stream) || failed) {
@@ -106,7 +149,7 @@ export async function watchSandboxLog(opts: SandboxLogOptions): Promise<number> 
         const pidText = readFileSync(join(opts.dir, "root-request"), "utf8").trim();
         const root = /^[1-9]\d{0,9}$/.test(pidText) ? reader.read(Number(pidText)) : null;
         // The gate is a direct child of start.sh/resume.sh (setsid execs it).
-        if (!root || root.ppid !== owner.pid) throw new Error("CLI root registration could not verify launch ancestry");
+        if (!root || root.ppid !== owner.pid || collectorAncestors.has(root.pid)) throw new Error("CLI root registration could not verify launch ancestry");
         attribution = new SandboxAttribution(root);
         attribution.observe([root], now);
         active = [root];
@@ -114,14 +157,14 @@ export async function watchSandboxLog(opts: SandboxLogOptions): Promise<number> 
       }
       if (attribution) {
         const samples: ProcessObservation[] = [];
-        const queue = [...active];
-        const queued = new Set(queue.map(p => p.pid));
+        const queue: { expected: ProcessObservation; sample?: ProcessObservation }[] = active.map(expected => ({ expected }));
+        const queued = new Set(active.map(p => p.pid));
         const visited = new Set<number>();
         for (let index = 0; index < queue.length && visited.size < 4096; index++) {
-          const expected = queue[index]!;
+          const { expected, sample: discovered } = queue[index]!;
           if (visited.has(expected.pid)) continue;
           visited.add(expected.pid);
-          const sample = reader.read(expected.pid);
+          const sample = discovered ?? reader.read(expected.pid);
           if (!sample || sample.birth !== expected.birth) continue;
           samples.push(sample);
           for (const pid of reader.children(sample.pid)) {
@@ -130,7 +173,7 @@ export async function watchSandboxLog(opts: SandboxLogOptions): Promise<number> 
             if (child?.ppid === sample.pid) {
               if (queue.length >= 4096) throw new Error("process tracking capacity exceeded; coverage unavailable");
               queued.add(pid);
-              queue.push(child);
+              queue.push({ expected: child, sample: child });
             }
           }
         }
@@ -150,25 +193,27 @@ export async function watchSandboxLog(opts: SandboxLogOptions): Promise<number> 
         pending.length = 0;
       }
       if (now - lastSummary >= 60000) {
-        if (budget.suppressed || overflow) status("WARNING", `output suppressed=${budget.suppressed}; system stream queue overflow=${overflow}; coverage reduced`);
-        budget.suppressed = 0; overflow = 0; lastSummary = now;
+        if (budget.suppressed || overflow || ambiguous) status("WARNING", `output suppressed=${budget.suppressed}; system stream queue overflow=${overflow}; ambiguous reports omitted=${ambiguous}; coverage reduced`);
+        budget.suppressed = 0; overflow = 0; ambiguous = 0; lastSummary = now;
       }
       await Bun.sleep(20);
     }
-    if (budget.suppressed || overflow) status("WARNING", `output suppressed=${budget.suppressed}; system stream queue overflow=${overflow}; coverage reduced`);
+    if (budget.suppressed || overflow || ambiguous) status("WARNING", `output suppressed=${budget.suppressed}; system stream queue overflow=${overflow}; ambiguous reports omitted=${ambiguous}; coverage reduced`);
     status("INFO", "collector stopped");
     return 0;
   } catch (error) {
     status("ERROR", `${String(error)}; kernel enforcement remains required`);
     return 1;
   } finally {
-    stream?.kill();
-    if (stream) await stream.exited;
+    // A crashed helper's descendant may still hold a write end. Explicitly
+    // close both read ends instead of hanging on its inherited output pipes.
+    if (stream) await closeSandboxLogStream(stream, [outputReader, errorReader]);
     await pumping; await errors;
+    outputReader?.releaseLock(); errorReader?.releaseLock();
+    if (stopFd !== undefined) closeSync(stopFd);
     reader?.close();
     process.off("SIGTERM", stop); process.off("SIGINT", stop); process.off("SIGHUP", hup);
-    // Only our atomically allocated launch directory. Never shared filenames or
-    // PID-based kills: a late exit cannot affect a newer launch's collector.
-    if (ownsDirectory) rmSync(opts.dir, { recursive: true, force: true });
+    // The launch supervisor is the ONLY directory remover. Reserving the name
+    // until that one cleanup prevents a late collector exit deleting a reuse.
   }
 }

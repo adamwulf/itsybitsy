@@ -7,6 +7,8 @@ import type { ProcessObservation } from "./sandbox-denials";
 
 /** proc_listchildpids returns a PID count, unlike proc_listpids' byte count.
  * A full buffer cannot establish complete enumeration, so fail visibly.
+ * Zero also represents some native errors; those cannot be distinguished from
+ * "no children" through this API and conservatively reduce coverage.
  */
 export function decodeSandboxChildPids(buffer: Int32Array, count: number): number[] {
   if (!Number.isInteger(count) || count < 0 || count >= buffer.length) {

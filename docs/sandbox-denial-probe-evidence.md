@@ -1,5 +1,7 @@
 # Live kernel sandbox denial — evidence report
 
+Review annotation (2026-09-06): this document preserves the worker observations on the exact historical candidates named below. Later independent review established that the unsanitized kernel name field described here as comm is p_name, up to 32 bytes, and can contain a forged PID delimiter. The revised parser rejects ambiguous splits. The original fixtures had no controlling terminal, and the collector-crash orphan was removed promptly by the harness; its natural lifetime was not measured. Subsequent ownership/control-file changes are documented in sandbox-denial-review.md and require fresh live validation. Historical residual findings below are not claims about those later changes.
+
 Author: worker `agent-9685061d` (branch `agent/agent-9685061d`, forked from
 `agent/sandbox-denial-logs`). Dates: 2026-09-05 (probe) and 2026-09-06 (collector
 validation). Host: Darwin 25.5.0 (arm64), single macOS host, one boot (`bootUUID`

@@ -865,6 +865,9 @@ const COMMAND_HELP: Record<string, string> = {
   "sandbox-log-watch":
     "Usage: ib sandbox-log-watch --dir <launch-directory> --owner <pid> --agent-log <file>\n" +
     "  Internal: collect kernel denials outside Seatbelt for one start.sh/resume.sh launch.",
+  "sandbox-log-stream":
+    "Usage: ib sandbox-log-stream --predicate <predicate>\n" +
+    "  Internal: own a log stream in a detached session with a collector lifeline pipe.",
   "sandbox-proxy":
     "Usage: ib sandbox-proxy --port <port> --domains <file> --pid-file <file> --ready-file <file>\n" +
     "  Internal: run one per-agent allowlist proxy.",
@@ -1445,6 +1448,17 @@ export async function main() {
         await generateSummary(agentDir);
       } catch { /* ignore — fire-and-forget subprocess */ }
       break;
+    }
+    case "sandbox-log-stream": {
+      const predicate = args[args.indexOf("--predicate") + 1];
+      if (!args.includes("--predicate") || !predicate || predicate.length > 4096) {
+        console.error(COMMAND_HELP["sandbox-log-stream"]);
+        process.exitCode = 1;
+        return;
+      }
+      process.exitCode = await (await import("./sandbox-log-stream")).runSandboxLogStream(
+        ["/usr/bin/log", "stream", "--style", "ndjson", "--level", "debug", "--predicate", predicate]);
+      return;
     }
     case "sandbox-log-watch": {
       const dir = args[args.indexOf("--dir") + 1];

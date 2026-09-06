@@ -1589,6 +1589,8 @@ function sandboxPreflightAnswer(cmd: string[]): SpawnResult | null {
  */
 function normalizeSandboxVolatile(script: string): string {
   return script
+    .replace(/'[^']*\/\.itsybitsy\/sealed\/sandbox-logs(?:\/[a-f0-9]{64})?/g, value =>
+      value.endsWith("sandbox-logs") ? "'<SANDBOX-LOG-ROOT>" : "'<SANDBOX-LOG-ROOT>/<AGENT-HASH>")
     .replace(/PROXY_PORT=\d+/g, "PROXY_PORT=<PORT>")
     .replace(/-f '[^']*\/sandbox\.sb'/g, "-f '<PROFILE>'")
     .replace(/-D '([A-Za-z_0-9]+)=[^']*'/g, "-D '$1=<VALUE>'");

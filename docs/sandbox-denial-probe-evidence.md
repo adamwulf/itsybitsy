@@ -244,3 +244,99 @@ captured events by offender pid.
 5. Treat OS coverage as best-effort diagnostic logging: same-process floods are
    OS-coalesced, and dropped/unattributable events must remain explicit limits —
    not a claim of complete audit.
+
+## 10. Live test of the collector candidate (`ib sandbox-log-watch`)
+
+Tested candidate `008c233` on `agent/sandbox-denial-logs` (native reader and
+readiness source unchanged since `5eabf9f`), rebuilt locally (`bun run build`,
+not installed) and driven by a bun orchestrator that spawns the real collector
+binary and the real gate helper (`sandboxDenialExecPrefix`, recovered verbatim)
+as direct children of the owner, against the real generated floor profile.
+
+### Boot identity (as the manager noted)
+
+Live `log stream` records on Darwin 25 carry `bootUUID` as an **empty string**;
+only `log show` (persisted) and the native `sysctl(kern.bootsessionuuid)` provide
+the actual boot (`7908f0d7-…`, lowercased). The collector therefore binds
+empty-bootUUID live events to its independently read boot — verified: the native
+adapter's boot equals the persisted-log boot. `parseSandboxReport` accepts an
+empty `bootUUID` only under `liveStream`, and rejects persisted/replayed input
+that lacks a boot identity.
+
+### Two blocking defects in the native adapter (`src/sandbox-processes.ts`)
+
+Both were found live, reproduced in isolation, and shown to be the complete
+blocker set by an end-to-end run of the **unmodified** `src` attribution pipeline
+with a locally corrected adapter.
+
+1. **Wrong mach clock — attribution never matches.** `openSandboxProcessReader()`
+   brackets observed lifetimes with `mach_absolute_time()`, but the kernel sandbox
+   log stamps events with **`mach_continuous_time`** (which advances through system
+   sleep). On any machine that has slept since boot, `report.mach` is offset from
+   the `[first,last]` interval by the accumulated sleep time, so `attribute()`
+   returns null for **every** real denial — zero `[Sandbox]` records even for a
+   fully observed root. Evidence (walltime-anchored, unique marker): a real event
+   `machTimestamp=43233526391014` fell **inside** the continuous bracket
+   `[43233525855097, 43233574750302]` and **outside** the absolute bracket
+   `[39466358872503, 39466407769032]` (off by ~3.77e12 ticks ≈ total sleep).
+   Fix: use `mach_continuous_time` for the adapter's `clock`.
+2. **`proc_listchildpids` return misread — descendants never enumerated.**
+   `children()` computes `Math.floor(ret/4)` treating the return as a byte count,
+   but on Darwin 25 `proc_listchildpids` returns a **pid count**. So 1–3 children
+   collapse to `[]`; the sampling queue never grows past the root; descendant
+   offenders are never observed, so descendant denials are never attributed. In
+   production the CLI root rarely performs the denied I/O itself — its child tools
+   do — so this alone would miss almost everything even after Defect 1 is fixed.
+   Evidence: a parent with two live children → `proc_listchildpids` returned `2`
+   with `buf[0..1]` = the real child pids, while `proc_listpids(PROC_PPID_ONLY)`
+   returned `8` (bytes) for the same two. Fix: treat the return as a count
+   (`buf.subarray(0, ret)` with a `p>0` filter, and change the overflow guard from
+   `>= byteLength` to `>= capacity`), or switch to `proc_listpids(PROC_PPID_ONLY)`
+   (documented byte return).
+
+**Proof the fixes suffice (real pipeline, real kernel events).** With both fixes
+applied to a local adapter and the unmodified `SandboxAttribution` /
+`parseSandboxReport` / `formatSandboxRecord`, a root that does builtin read+write
+and an observable descendant shell produced **4 correctly attributed** records:
+root pid file-read-data + file-write-create, and descendant pid (distinct birth)
+file-read-data + file-write-create — correct operation, target, birth, boot, and
+mach. No third pipeline defect.
+
+### Attribution timing constraints (kept visible)
+
+- The root/descendant must be **observed before it denies** for the interval to
+  bracket the report. The launch gate guarantees this for the root via the
+  `root-request`/`root-ready` handshake (registration precedes `exec`). A
+  descendant that denies within its first ~20 ms (before the sampling loop sees
+  it) has no observed interval covering the report and is **dropped, not guessed**
+  — the intended behavior for immediate/short-lived children.
+- Offenders must also stay observable **after** a denial so `last` extends past
+  `report.mach`. Order records by `mach`; the walltime string can jitter.
+
+### Clock/children-independent axes that passed on `008c233`
+
+- **Readiness handshake** (emit a `logger` marker, wait to observe it) works — no
+  reliance on a fixed sleep. Confirms §9.4's recommendation is implemented.
+- **Enforcement** under the floor profile: root builtin read and write both EPERM,
+  `write.txt` never created; short-lived children EPERM.
+- **CLI-exit cleanup** (the `008c233` fix): when the registered root exits while
+  the owner stays alive (simulated interactive exit-check), the collector drained
+  and removed **only its own** launch directory at ~1050 ms (~1 s), logging
+  `collector stopped`.
+- **Startup failure** (bad owner): collector exits 1, appends a visible
+  `[SandboxCollector] ERROR: …; kernel enforcement remains required` to
+  `agent.log`, removes its own directory — and the kernel still enforced the
+  offender (EPERM, no file). Collection failure is visible; enforcement intact.
+- **SIGTERM teardown**: ~1033 ms drain, own-directory removal, `collector stopped`
+  INFO, exit 0.
+- **DENIALS parser**: the emitted `[Sandbox] <op> process=… pid=… target=…` record
+  shape matches `parseDenials`'s new pattern; `[SandboxCollector] ERROR/WARNING`
+  lines are recognized too.
+
+### Still blocked (to re-test on the corrected candidate)
+
+End-to-end scenarios through the `ib` binary — root-builtin attribution, observable
+descendant attribution, immediate-children dropped-not-guessed, and concurrent
+no-cross-attribution — currently emit zero `[Sandbox]` records because of Defects
+1+2, so their live confirmation is deferred until the corrected candidate. The
+isolated proof above shows they will pass once both fixes land.

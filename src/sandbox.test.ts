@@ -1626,6 +1626,15 @@ describe("sandbox frontmatter validation", () => {
     });
   });
 
+  test.each([null, "str", 42, ["list"]])(
+    "a non-object sandbox value is rejected naming rawAllow/domains, not the retired enabled (%p)",
+    (value) => {
+      expect(validateSandboxFrontmatter(value).errors).toEqual([
+        "sandbox must be an object with rawAllow and domains list fields",
+      ]);
+    },
+  );
+
   test.each([
     ["true", true],
     ["false", false],

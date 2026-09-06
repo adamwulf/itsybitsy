@@ -344,8 +344,13 @@ export interface AgentTypeFloorDiff {
  * retired `sandbox.enabled` key (true OR false) is reported as a one-sided
  * migration diagnostic: the same stale key would fail `validateAllAgentTypes`
  * at the next `ib watch` startup, so the preflight must flag it here rather than
- * green-light a config that immediately breaks. Files that match — and embedded
- * files with no local copy — produce nothing. Nothing is written.
+ * green-light a config that immediately breaks. This retired-key scan covers
+ * EVERY local `.md` file — the embedded built-ins AND any CUSTOM types the user
+ * added — because a custom type carrying the stale key breaks `ib watch` just
+ * the same, even though it has no embedded floor to compare against. Each file
+ * is reported at most once (a built-in with both a floor miss and a stale key
+ * gets one entry). Files that match — and embedded files with no local copy —
+ * produce nothing. Nothing is written.
  *
  * Backs `ib init-types --check`, the gate precondition that catches a live
  * `~/.itsybitsy/agent-types/_all.md` still missing the tightened floor (because
@@ -385,6 +390,8 @@ export async function checkAgentTypeFloors(): Promise<{
     const sandbox = value as Record<string, unknown>;
     return "enabled" in sandbox ? sandbox.enabled : RETIRED_ABSENT;
   };
+  const retiredLine = (retired: unknown): string =>
+    `  sandbox.enabled: retired key present (value: ${JSON.stringify(retired)}) — remove it; sandboxing is always on and cannot be toggled`;
 
   const listChecks: Array<{ block: "paths" | "sandbox"; key: string }> = [
     { block: "paths", key: "allowRead" },
@@ -394,7 +401,22 @@ export async function checkAgentTypeFloors(): Promise<{
     { block: "sandbox", key: "domains" },
   ];
 
-  const diffs: AgentTypeFloorDiff[] = [];
+  // Accumulate lines per file so each file is reported exactly once even when it
+  // has BOTH an embedded floor miss AND a retired key. `fileOrder` fixes the
+  // output order: embedded files (in EMBEDDED_TYPES order) first, then custom
+  // files (sorted) — so the existing embedded-only assertions are unaffected.
+  const linesByFile = new Map<string, string[]>();
+  const fileOrder: string[] = [];
+  const addLines = (fileName: string, newLines: string[]): void => {
+    if (newLines.length === 0) return;
+    if (!linesByFile.has(fileName)) fileOrder.push(fileName);
+    const existing = linesByFile.get(fileName) ?? [];
+    existing.push(...newLines);
+    linesByFile.set(fileName, existing);
+  };
+
+  // Pass 1: embedded floor comparison (embedded vs local, list-by-list) plus the
+  // retired-key diagnostic for embedded files.
   for (const [name, content] of Object.entries(EMBEDDED_TYPES)) {
     const fileName = `${name}.md`;
     const filePath = join(typesDir, fileName);
@@ -416,21 +438,39 @@ export async function checkAgentTypeFloors(): Promise<{
         if (!localSet.has(entry)) lines.push(`  ${block}.${key}: missing ${entry}`);
       }
     }
-    // Retired-key migration diagnostic: a live file still carrying
-    // sandbox.enabled would fail validateAllAgentTypes at the next `ib watch`
-    // startup, so the preflight flags it (and exits non-zero) rather than
-    // green-lighting a config that immediately breaks. Reported for true AND
-    // false, since sandboxing is mandatory and neither value does anything.
     const retired = localRetiredEnabled(local);
-    if (retired !== RETIRED_ABSENT) {
-      lines.push(
-        `  sandbox.enabled: retired key present (value: ${JSON.stringify(retired)}) — remove it; sandboxing is always on and cannot be toggled`,
-      );
-    }
-
-    if (lines.length > 0) diffs.push({ file: fileName, lines });
+    if (retired !== RETIRED_ABSENT) lines.push(retiredLine(retired));
+    addLines(fileName, lines);
   }
 
+  // Pass 2: retired-key scan of EVERY OTHER local .md file (custom types). A
+  // custom type has no embedded floor to compare, but a stale `sandbox.enabled`
+  // key would still fail validateAllAgentTypes at the next `ib watch` startup —
+  // so the preflight must catch it here too, not just for the embedded set.
+  const embeddedFileNames = new Set(Object.keys(EMBEDDED_TYPES).map((n) => `${n}.md`));
+  let localFileNames: string[] = [];
+  try {
+    localFileNames = readdirSync(typesDir).filter((f) => f.endsWith(".md")).sort();
+  } catch {
+    // Types dir missing → no custom files to scan.
+  }
+  for (const fileName of localFileNames) {
+    if (embeddedFileNames.has(fileName)) continue; // handled in pass 1
+    let content: string;
+    try {
+      content = await Bun.file(join(typesDir, fileName)).text();
+    } catch {
+      continue;
+    }
+    const local = parseAgentTypeFile(content).frontmatter;
+    const retired = localRetiredEnabled(local);
+    if (retired !== RETIRED_ABSENT) addLines(fileName, [retiredLine(retired)]);
+  }
+
+  const diffs: AgentTypeFloorDiff[] = fileOrder.map((file) => ({
+    file,
+    lines: linesByFile.get(file)!,
+  }));
   return { diffs, hasDifferences: diffs.length > 0 };
 }
 

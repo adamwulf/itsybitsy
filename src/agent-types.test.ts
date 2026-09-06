@@ -461,6 +461,29 @@ describe("checkAgentTypeFloors (init-types --check)", () => {
     },
   );
 
+  test.each(["true", "false"])(
+    "flags a CUSTOM type's stale sandbox.enabled: %s (scans ALL local .md, not just embedded names)",
+    async (value) => {
+      await initAgentTypes();
+      // researcher.md is NOT an embedded built-in, so it has no floor to compare
+      // — but a stale enabled key still breaks `ib watch`, so --check must catch
+      // it too (the bug: the scan used to iterate embedded names only).
+      await Bun.write(
+        join(typesDir, "researcher.md"),
+        `---\nname: researcher\nsandbox:\n  enabled: ${value}\n---\nbody`,
+      );
+      const { diffs, hasDifferences } = await checkAgentTypeFloors();
+      expect(hasDifferences).toBe(true);
+      const custom = diffs.find((d) => d.file === "researcher.md");
+      expect(custom).toBeDefined();
+      expect(
+        custom!.lines.some((l) => l.includes("sandbox.enabled") && l.includes("retired")),
+      ).toBe(true);
+      // Reported exactly once for the file.
+      expect(custom!.lines.filter((l) => l.includes("sandbox.enabled")).length).toBe(1);
+    },
+  );
+
   test("a toggle-free floor that matches the embedded defaults stays green (no retired-key false positive)", async () => {
     // The stock embedded files carry NO enabled key, so a verbatim local copy
     // must report nothing — the retired-key diagnostic fires ONLY on a stale key.

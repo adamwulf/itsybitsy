@@ -940,7 +940,7 @@ export function validateSandboxFrontmatter(value: unknown): SandboxValidationRes
 
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return {
-      errors: ["sandbox must be an object with enabled and list fields"],
+      errors: ["sandbox must be an object with rawAllow and domains list fields"],
       warnings,
     };
   }

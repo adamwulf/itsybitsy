@@ -755,6 +755,7 @@ function runCreateTeam(ctx: ActionCtx, initialValue: string, alsoAddSelectedAgen
     type: "input",
     prompt: "Team name:",
     value: initialValue,
+    sanitize: sanitizeAgentNameInput,
     onSubmit: (value: string) => {
       ctx.closeDialog();
       const trimmed = value.trim();

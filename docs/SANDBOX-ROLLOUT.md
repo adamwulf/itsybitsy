@@ -117,14 +117,22 @@ failure never removes or bypasses the required Seatbelt wrapper. No system-wide
 collector, dashboard dependency, watchdog dependency, or global `@system` launch
 change is introduced.
 
-Candidate checks in the Codex session: 5,652 reported `bun test` passes, zero
-failures, 29,464 assertions across 113 files; TypeScript checking and local build
+Candidate checks in the Codex session: 5,655 reported `bun test` passes, zero
+failures, 29,476 assertions across 114 files; TypeScript checking and local build
 pass. `./ib list-types` prints its table and the new command's help dispatches.
 The suite total still includes the kernel capability and opt-in Claude boot
 early-return skips described below; it is not a live enforcement/capture pass.
-The authorized worker verified that the native process reader and candidate
-build work in its context. Its collector/start/resume live fixtures are pending
-permission to execute the built binary, shell fixture scripts, and logger.
+The authorized worker can run the native process reader, candidate binary,
+shell fixtures, and logger. Corrected candidate `f09280f` is undergoing live
+collector/start/resume fixture validation.
+
+The first full run after the native fixes reported 5,653 passes and two failures:
+both source-entry smoke tests received an empty type table from their shared
+fixed temporary home. All four entry tests passed on an isolated rerun. Those
+tests now use a fresh temporary home per case; the subsequent full run produced
+the passing total above. No production type-loading behavior changed. The
+failed run is retained at `/private/tmp/sandbox-denial-logs-full-test.log`; the
+passing run is `/private/tmp/sandbox-denial-logs-full-test-isolated.log`.
 
 Self-review covers lifecycle (PID survives gate exec; collector also ends on CLI
 exit), hooks (existing hook denial format and permissions retained), watchdog
@@ -148,8 +156,8 @@ not acceptance of the broken candidate's attribution.
 
 ### Capability investigation (2026-09-05)
 
-The denial-logging implementation is blocked at the live capability probe. This
-Codex session's PreToolUse hook initially rejected both commands before execution
+The initial denial-logging increment was blocked at the live capability probe.
+This Codex session's PreToolUse hook initially rejected both commands before execution
 with `Tool not in allow list`:
 
 ```sh
@@ -171,9 +179,9 @@ the stream was unavailable. The artifact directory for this attempt is
 
 Command authorization is no longer the blocker; this execution environment
 cannot apply even an allow-default Seatbelt profile or read the unified log.
-No event fields, readiness behavior, or safe process-attribution method have
-been established. A context that permits both operations is required; no bypass
-was attempted. Adam subsequently authorized one worker specifically for live
+At that point no event fields, readiness behavior, or safe process-attribution
+method had been established. A context permitting both operations was required;
+no bypass was attempted. Adam subsequently authorized one worker specifically for live
 testing, with implementation and self-review remaining in this Codex session.
 That worker subsequently established real read/write reporting; see its evidence
 report when integrated. The production candidate still requires live acceptance
@@ -198,7 +206,7 @@ types, or require a dashboard/watchdog. Inspect results before sharing: the raw
 log predicate can include unrelated system sandbox reports.
 
 This diagnostic script is not the production collector or an automated pass.
-Its two-second startup delay is unverified; PIDs are observations, not sufficient
+Its two-second startup delay is not a readiness guarantee; PIDs are observations, not sufficient
 attribution evidence. Inspect errors for missing privileges/profile application
 failure and compare actual reports to fixture targets. Determine whether the OS
 provides offender birth/audit identity and ancestry distinct from the reporting
@@ -220,7 +228,9 @@ Neither is a live pass. These results do not establish kernel-denial capture. Se
 production lifecycle, hook, watchdog, or dashboard changes in this probe-only
 increment. No independent reviewers were spawned.
 
-The goal is to capture kernel-only sandbox denials in the affected agent's `agent.log` and show them in the DENIALS pane. Hook-detected denials already reach both places; kernel-only events are not currently collected.
+The phase requirements below were established before implementation. The goal
+is to capture kernel-only sandbox denials in the affected agent's `agent.log`
+and show them in DENIALS alongside existing hook-detected denials.
 
 **Ownership:** `start.sh` and `resume.sh` launch a dedicated collector outside the `sandbox-exec` wrapper, before the agent CLI starts. Collection must remain independent of both `ib watch` and the per-agent watchdog: closing the dashboard or a watchdog failure must not stop it. The launch scripts own the collector for that launch's lifetime.
 

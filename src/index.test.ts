@@ -1719,6 +1719,9 @@ describe("Telegram admin subcommands", () => {
 
 describe("CLI entry points", () => {
   const repoRoot = import.meta.dir.replace(/\/src$/, "");
+  let entryHome: string;
+  beforeEach(async () => { entryHome = await mkdtemp(join(tmpdir(), "ib-entry-home-")); });
+  afterEach(async () => { await rm(entryHome, { recursive: true, force: true }); });
 
   async function runEntry(
     entry: string,
@@ -1728,7 +1731,7 @@ describe("CLI entry points", () => {
       cwd: repoRoot,
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, HOME: "/tmp/ib-test-nonexistent-home" },
+      env: { ...process.env, HOME: entryHome },
     });
     const [stdout, stderr] = await Promise.all([
       new Response(proc.stdout).text(),
@@ -1771,7 +1774,7 @@ describe("CLI entry points", () => {
           cwd: repoRoot,
           stdout: "pipe",
           stderr: "pipe",
-          env: { ...process.env, HOME: "/tmp/ib-test-nonexistent-home" },
+          env: { ...process.env, HOME: entryHome },
         },
       );
       const [stdout, stderr] = await Promise.all([

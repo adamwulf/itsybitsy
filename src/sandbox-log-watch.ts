@@ -6,6 +6,12 @@ import { SandboxAttribution, SandboxLogFramer, SandboxOutputBudget, formatSandbo
 
 export interface SandboxLogOptions { dir: string; owner: number; agentLog: string }
 
+// Bun keeps exitCode null after signal termination; checking only that field
+// silently leaves a collector running without its log subscription.
+export function sandboxStreamExited(stream: Pick<Bun.Subprocess, "exitCode" | "signalCode">): boolean {
+  return stream.exitCode !== null || stream.signalCode !== null;
+}
+
 /** The launch script is the supervisor. No watchdog or dashboard participates. */
 export async function watchSandboxLog(opts: SandboxLogOptions): Promise<number> {
   const launch = basename(opts.dir);
@@ -70,7 +76,7 @@ export async function watchSandboxLog(opts: SandboxLogOptions): Promise<number> 
     })().catch(error => { failed = error; });
     const startup = performance.now();
     while (!warm && performance.now() - startup < 3000 && !stopping) {
-      if (stream.exitCode !== null || failed) throw new Error(`log stream startup failed (exit=${stream.exitCode}): ${stderr || String(failed ?? "no output")}`);
+      if (sandboxStreamExited(stream) || failed) throw new Error(`log stream startup failed (exit=${stream.exitCode}, signal=${stream.signalCode}): ${stderr || String(failed ?? "no output")}`);
       const markerProcess = Bun.spawn(["/usr/bin/logger", "-t", "itsybitsy-sandbox", marker],
         { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
       const timeout = setTimeout(() => markerProcess.kill(), 500);
@@ -93,9 +99,8 @@ export async function watchSandboxLog(opts: SandboxLogOptions): Promise<number> 
       const currentRoot = attribution && reader.read(attribution.root.pid);
       if (attribution && (!currentRoot || processIdentity(currentRoot) !== processIdentity(attribution.root))) stopAt ??= now + 1000;
       if (stopAt !== undefined && now >= stopAt) break;
-      if (stream.exitCode !== null || failed) {
-        if (stopAt !== undefined) break;
-        throw new Error(`log stream stopped unexpectedly (exit=${stream.exitCode}): ${stderr || String(failed ?? "no output")}`);
+      if (sandboxStreamExited(stream) || failed) {
+        throw new Error(`log stream stopped unexpectedly (exit=${stream.exitCode}, signal=${stream.signalCode}): ${stderr || String(failed ?? "no output")}`);
       }
       if (!attribution && stopAt === undefined && existsSync(join(opts.dir, "root-request"))) {
         const pidText = readFileSync(join(opts.dir, "root-request"), "utf8").trim();

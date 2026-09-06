@@ -154,6 +154,17 @@ The same run validated roughly one-second CLI-exit/SIGTERM cleanup and visible
 startup failure with kernel enforcement intact. These are partial results,
 not acceptance of the broken candidate's attribution.
 
+Live retesting of `f09280f` captured root and observable-descendant denials,
+confirmed concurrent launch isolation and replacement cleanup, and rendered a
+real captured log through the DENIALS component. Immediate children were enforced
+but safely omitted. The worker exercised the compiled collector and real gate
+helper with a synthetic owner; it did not yet execute the bash preamble verbatim
+or real model CLIs. It also found that Bun leaves `exitCode` null after signal
+termination: a killed log-stream child silently stopped collection. Both startup
+and runtime guards now check `signalCode` too, including during the drain period.
+Regression tests terminate actual disposable subprocesses by signal and by exit
+code. Live stream-failure and verbatim-preamble retests remain required.
+
 ### Capability investigation (2026-09-05)
 
 The initial denial-logging increment was blocked at the live capability probe.

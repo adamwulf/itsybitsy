@@ -18,6 +18,7 @@ import type { SpawnResult } from "../types";
 import { PANE_MODES } from "./pane-manager";
 import { computeSidebarHeights } from "./sidebar";
 import { assertDialog } from "./test-helpers";
+import { setStagedSenderForTests, resetStagedSenderForTests } from "./message-send";
 import { setLayoutPath, loadLayout, flushPendingSave, cancelPendingSave } from "./layout";
 
 // Many tests below simulate resize keystrokes, which call persistLayout() and
@@ -4393,35 +4394,103 @@ describe("input field integration", () => {
     }
   });
 
-  test("message submission calls sendMessage on Enter", () => {
-    const calls: { args: string[]; cwd: string }[] = [];
-    mockSendSpawnRunner(calls);
+  test("message submission sends the draft and clears the field only once accepted", async () => {
+    // Deterministic acceptance via the staged-send seam — the field now clears
+    // on ACCEPTANCE (ok:true), not synchronously at submit time.
+    const sends: string[] = [];
+    setStagedSenderForTests(async (_agent, message) => {
+      sends.push(message);
+      return { ok: true, exitCode: 0, stdout: "", stderr: "" };
+    });
+    try {
+      const dashboard = makeDashboard();
+      const agent = makeAgent("agent-a", "/repos/test");
+      agent.meta.tmux_session = "agent-a-session";
+      const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+      dashboard.onUpdate([agent], flatList, []);
 
-    const dashboard = makeDashboard();
-    const agent = makeAgent("agent-a", "/repos/test");
-    agent.meta.tmux_session = "agent-a-session";
-    const flatList: FlatEntry[] = [makeFlatAgent(agent)];
-    dashboard.onUpdate([agent], flatList, []);
+      // Tab to active-agent, then Tab to input sub-focus
+      dashboard.handleInput("\t"); // info
+      dashboard.handleInput("\t"); // active-agent
+      expect(dashboard.focus).toBe("active-agent");
+      dashboard.handleInput("\t"); // pane → input sub-focus
 
-    // Tab to active-agent, then Tab to input sub-focus
-    dashboard.handleInput("\t"); // info
-    dashboard.handleInput("\t"); // active-agent
-    expect(dashboard.focus).toBe("active-agent");
-    dashboard.handleInput("\t"); // pane → input sub-focus
+      // Type message, Tab to [Send], then press Enter to submit
+      dashboard.handleInput("h");
+      dashboard.handleInput("e");
+      dashboard.handleInput("l");
+      dashboard.handleInput("l");
+      dashboard.handleInput("o");
+      dashboard.handleInput("\t"); // input → send sub-focus
+      dashboard.handleInput("\r"); // Enter on [Send] submits
 
-    // Type message, Tab to [Send], then press Enter to submit
-    dashboard.handleInput("h");
-    dashboard.handleInput("e");
-    dashboard.handleInput("l");
-    dashboard.handleInput("l");
-    dashboard.handleInput("o");
-    dashboard.handleInput("\t"); // input → send sub-focus
-    dashboard.handleInput("\r"); // Enter on [Send] submits
+      // The draft is preserved while the send is in flight — NOT cleared before
+      // the send resolves — so a failed staged send could keep it.
+      expect(dashboard.inputField.getText()).toBe("hello");
 
-    // sendMessage is async, so check that the input field was cleared
-    expect(dashboard.inputField.getText()).toBe("");
+      await dashboard.flushPendingActions();
+      expect(sends).toEqual(["hello"]);
+      // Accepted → the field is cleared.
+      expect(dashboard.inputField.getText()).toBe("");
+    } finally {
+      resetStagedSenderForTests();
+    }
+  });
 
-    resetSendSpawnRunner();
+  test("a failed inline send preserves the draft (real handleInput Send path)", async () => {
+    setStagedSenderForTests(async () => ({ ok: false, exitCode: 1, stdout: "", stderr: "cannot stage /tmp/missing.png" }));
+    try {
+      const dashboard = makeDashboard();
+      const agent = makeAgent("agent-a", "/repos/test");
+      agent.meta.tmux_session = "agent-a-session";
+      const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+      dashboard.onUpdate([agent], flatList, []);
+
+      dashboard.handleInput("\t"); // info
+      dashboard.handleInput("\t"); // active-agent
+      dashboard.handleInput("\t"); // pane → input
+      for (const ch of "hello") dashboard.handleInput(ch);
+      dashboard.handleInput("\t"); // input → send
+      dashboard.handleInput("\r"); // submit
+
+      await dashboard.flushPendingActions();
+      // Send failed → the draft is preserved so the user can fix the path and retry.
+      expect(dashboard.inputField.getText()).toBe("hello");
+    } finally {
+      resetStagedSenderForTests();
+    }
+  });
+
+  test("a duplicate inline Send while a send is in flight is ignored (real handleInput)", async () => {
+    let calls = 0;
+    let resolve!: (r: { ok: boolean; exitCode: number; stdout: string; stderr: string }) => void;
+    const pending = new Promise<{ ok: boolean; exitCode: number; stdout: string; stderr: string }>((r) => { resolve = r; });
+    setStagedSenderForTests(async () => { calls++; return pending; });
+    try {
+      const dashboard = makeDashboard();
+      const agent = makeAgent("agent-a", "/repos/test");
+      agent.meta.tmux_session = "agent-a-session";
+      const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+      dashboard.onUpdate([agent], flatList, []);
+
+      dashboard.handleInput("\t"); // info
+      dashboard.handleInput("\t"); // active-agent
+      dashboard.handleInput("\t"); // pane → input
+      for (const ch of "hello") dashboard.handleInput(ch);
+      dashboard.handleInput("\t"); // input → send
+      dashboard.handleInput("\r"); // submit 1 → in flight (sub-focus returns to pane)
+
+      // Navigate back to [Send] and press Enter again while the send is pending.
+      dashboard.handleInput("\t"); // pane → input
+      dashboard.handleInput("\t"); // input → send
+      dashboard.handleInput("\r"); // submit 2 → guarded, no second send
+      expect(calls).toBe(1);
+
+      resolve({ ok: true, exitCode: 0, stdout: "", stderr: "" });
+      await dashboard.flushPendingActions();
+    } finally {
+      resetStagedSenderForTests();
+    }
   });
 
   test("Escape from input sub-focus clears input and returns to pane sub-focus", () => {

@@ -17,6 +17,12 @@ import { cancelPaste } from "./clipboard";
 /** Maximum number of visible content lines before scrolling */
 const MAX_VISIBLE_LINES = 5;
 
+/** True when a submit handler returned a `Promise<boolean>` (the
+ *  acceptance-gated flow) rather than `void` (the legacy immediate-clear flow). */
+function isBooleanPromise(value: void | Promise<boolean>): value is Promise<boolean> {
+  return typeof value === "object" && value !== null && typeof (value as { then?: unknown }).then === "function";
+}
+
 export class InputFieldComponent implements Component {
   private buffer = new TextBuffer();
   private focused: "text" | "send" = "text";
@@ -25,9 +31,24 @@ export class InputFieldComponent implements Component {
   private currentAgentId: string | null = null;
   /** Whether the input field is active (focused panel). Controls cursor visibility. */
   active = true;
-  onSubmit: ((text: string) => void) | null = null;
+  /**
+   * Submit handler. A handler that returns a `Promise<boolean>` opts this field
+   * into the ACCEPTANCE-gated flow: the draft is kept editable until the promise
+   * resolves, cleared only when it resolves `true` (accepted), and preserved
+   * when it resolves `false` or rejects (e.g. a staged attachment failed to
+   * copy) so the user can correct and resubmit. A `void` handler keeps the
+   * legacy behavior of clearing the draft immediately on submit.
+   */
+  onSubmit: ((text: string) => void | Promise<boolean>) | null = null;
   onCancel: (() => void) | null = null;
   onAsyncRender?: () => void;
+  /** True while an async (acceptance-gated) submit is in flight — guards
+   *  against a repeated Send press re-firing the same draft. */
+  private submitting = false;
+  /** The buffer whose acceptance-gated submit is in flight. While a send is
+   *  pending, THIS buffer is frozen (no edits, no re-submit) so the sent text
+   *  cannot change under the send; a different agent's buffer stays editable. */
+  private submittingBuffer: TextBuffer | null = null;
 
   invalidate(): void {}
 
@@ -58,6 +79,61 @@ export class InputFieldComponent implements Component {
     // Also clear from per-agent buffer
     if (this.currentAgentId) {
       this.agentBuffers.delete(this.currentAgentId);
+    }
+  }
+
+  /**
+   * Submit the current draft through {@link onSubmit}, honoring the
+   * acceptance-gated flow. A handler that returns `Promise<boolean>` keeps the
+   * draft on screen (frozen against edits and re-submits) until it resolves and
+   * clears it only when it resolves `true`; a rejected or `false` result leaves
+   * the draft intact for correction and resubmit. A `void` handler clears
+   * immediately (legacy behavior). Whitespace-only drafts are ignored.
+   *
+   * This is the SINGLE submit entry point: the field's own [Send] key handling
+   * and the dashboard's three-level sub-focus both route through it, so the
+   * draft is never cleared before the send is known to be accepted.
+   */
+  submit(): void {
+    // A pending send on this buffer is frozen — never re-submit it.
+    if (this.submitting && this.buffer === this.submittingBuffer) return;
+    const text = this.buffer.getText();
+    if (!text.trim()) return;
+    const result = this.onSubmit?.(text);
+    if (isBooleanPromise(result)) {
+      // Capture the submitted buffer/agent so that if the user navigates to
+      // another agent mid-send, acceptance clears the message that was actually
+      // sent rather than whatever draft is now on screen.
+      const submittedBuffer = this.buffer;
+      const submittedAgentId = this.currentAgentId;
+      this.submitting = true;
+      this.submittingBuffer = submittedBuffer;
+      result
+        .then((accepted) => { if (accepted) this.discardSubmittedDraft(submittedBuffer, submittedAgentId); })
+        .catch(() => { /* keep the draft on error */ })
+        .finally(() => {
+          this.submitting = false;
+          this.submittingBuffer = null;
+          this.onAsyncRender?.();
+        });
+    } else {
+      // Legacy synchronous submit: clear the draft immediately.
+      this.discardSubmittedDraft(this.buffer, this.currentAgentId);
+    }
+  }
+
+  /** Discard the draft that was submitted, after the send was accepted. Clears
+   *  the submitted buffer and drops its per-agent cache entry. Focus is reset
+   *  only when that buffer is still the active one — if the user has navigated to
+   *  another agent mid-send, the on-screen draft (a different buffer) is left
+   *  untouched. Used by both the acceptance-gated and legacy submit branches. */
+  private discardSubmittedDraft(buffer: TextBuffer, agentId: string | null): void {
+    buffer.clear();
+    if (agentId) {
+      this.agentBuffers.delete(agentId);
+    }
+    if (this.buffer === buffer) {
+      this.focused = "text";
     }
   }
 
@@ -102,6 +178,16 @@ export class InputFieldComponent implements Component {
       return true;
     }
 
+    // While an acceptance-gated submit is in flight for the CURRENTLY shown
+    // draft, freeze it: swallow edits, focus changes, and a repeated Send so the
+    // sent text cannot change under the pending send and cannot be re-submitted
+    // (which would re-copy staged attachments). A different agent's draft — after
+    // the user navigates away mid-send — is a different buffer and stays fully
+    // editable. Escape above still abandons.
+    if (this.submitting && this.buffer === this.submittingBuffer) {
+      return true;
+    }
+
     if (this.focused === "text") {
       // Tab: move to [Send] button
       if (data === "\t" || matchesKey(data, Key.tab)) {
@@ -141,14 +227,10 @@ export class InputFieldComponent implements Component {
 
     // focused === "send"
     if (matchesKey(data, Key.enter) || data === "\r" || data === "\n") {
-      const text = this.buffer.getText();
-      this.buffer.clear();
-      this.focused = "text";
-      // Clear per-agent buffer on submit
-      if (this.currentAgentId) {
-        this.agentBuffers.delete(this.currentAgentId);
-      }
-      this.onSubmit?.(text);
+      // A pending send on THIS buffer is already frozen by the guard above, so a
+      // repeated Send never reaches here. Delegate to the shared submit path so
+      // the field's own [Send] key and the dashboard's sub-focus behave alike.
+      this.submit();
       return true;
     }
 

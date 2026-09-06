@@ -30,6 +30,8 @@ import { buildFolderItems } from "./folder-browser";
 import { listSpawnableTypeNamesSync, loadAgentType } from "../agent-types";
 import { resolveDefaultAgentType } from "./default-agent-type";
 import type { DialogState, SetupItem, ConfigDialogItem } from "./dialog-handler";
+import { sendStagedMessage } from "./message-send";
+import type { StagedTeamSendOptions, TeamSendResult } from "./message-send";
 import { TextBuffer } from "./text-buffer";
 import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../config";
 import type { ConfigResult } from "../config";
@@ -217,13 +219,20 @@ export interface ActionCtx {
    * accept `teamSend` as a function-typed ctx field so tests can inject a
    * stub without dragging in `ib-commands.ts`'s real I/O. The dashboard wires
    * the real `teamSend`.
+   *
+   * The opts carry the send-time attachment staging + retry bookkeeping
+   * (`stageAttachments`, `skipRecipientIds`, `attachmentBaseDir`) and the result
+   * carries `acceptedRecipientIds`; both are owned by the delivery-integration
+   * change and forwarded here as forward-compatible options (see
+   * ./message-send). `skipRecipientIds` lets an identical-draft retry after a
+   * partial failure resend only the members that have not yet accepted.
    */
   teamSend: (
     teamName: string,
     members: Agent[],
     message: string,
-    opts: { fromAgent?: string } | undefined,
-  ) => Promise<IbCommandResult>;
+    opts: StagedTeamSendOptions | undefined,
+  ) => Promise<TeamSendResult>;
   rightPane: {
     mode: PaneMode;
     repoCoordinatorAgent: Agent | null;
@@ -1226,6 +1235,13 @@ export function handleSend(ctx: ActionCtx) {
   // send target is correct without going through the agentTree.
   const agent = teamSel?.kind === "agent" ? teamSel.agent : ctx.agentTree.selectedAgent;
   if (!agent) return;
+  // Per-dialog send state, kept across failed submits so the draft stays editable:
+  //  - `inFlight` blocks a duplicate Send press while a send is running, so a
+  //    slow or failed send is never re-fired and attachments are never re-staged.
+  //  - `acceptedAll` remembers the send-all recipients already accepted, so an
+  //    identical-draft retry after a partial failure resends only the remainder.
+  let inFlight = false;
+  const acceptedAll = new Set<string>();
   const dialog: Extract<NonNullable<DialogState>, { type: "textarea" }> = {
     type: "textarea",
     prompt: `Send message to ${agent.id}:`,
@@ -1243,33 +1259,55 @@ export function handleSend(ctx: ActionCtx) {
       });
     },
     onSubmit: (message: string) => {
-      ctx.closeDialog();
-      if (!message.trim()) { ctx.setNotice("Send cancelled", "info"); return; }
+      // Duplicate-submit guard: ignore a Send press while a send is in flight.
+      if (inFlight) return;
+      // Cancellation-by-empty closes without sending — no attachment is copied.
+      if (!message.trim()) { ctx.closeDialog(); ctx.setNotice("Send cancelled", "info"); return; }
       const trimmed = message.trim();
       if (dialog.sendAll) {
-        // Send to all non-archived agents with active tmux sessions
+        // Send to all non-archived agents with active tmux sessions, skipping any
+        // already accepted on a prior identical-draft retry (never resend those).
         const targets = ctx.agentTree.flatList.filter(
           (f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent" && !f.agent.archived && !!f.agent.meta.tmux_session
         );
-        if (targets.length === 0) { ctx.setNotice("No active agents to send to", "error"); return; }
-        ctx.executeAndRefresh(async () => {
-          let sent = 0;
+        if (targets.length === 0) { ctx.closeDialog(); ctx.setNotice("No active agents to send to", "error"); return; }
+        const pending = targets.filter((f) => !acceptedAll.has(f.agent.id));
+        if (pending.length === 0) {
+          // Everything already accepted on an earlier attempt — nothing to resend.
+          ctx.closeDialog();
+          ctx.setNotice(`Sent to ${acceptedAll.size} agents`, "info");
+          return;
+        }
+        inFlight = true;
+        void ctx.executeAndRefresh(async () => {
           let failed = 0;
-          for (const f of targets) {
-            const result = await sendMessage(f.agent, trimmed, { cwd: "/" });
-            if (result.ok) sent++; else failed++;
+          for (const f of pending) {
+            const result = await sendStagedMessage(f.agent, trimmed, { cwd: "/", attachmentBaseDir: f.agent.repoPath });
+            if (result.ok) acceptedAll.add(f.agent.id); else failed++;
           }
-          const notice = failed > 0
-            ? `Sent to ${sent} agents, ${failed} failed`
-            : `Sent to ${sent} agents`;
-          ctx.setNotice(notice, failed > 0 ? "error" : "info");
-        });
+          if (failed === 0) {
+            // Close only once every recipient has accepted.
+            ctx.closeDialog();
+            ctx.setNotice(`Sent to ${acceptedAll.size} agents`, "info");
+          } else {
+            // Keep the draft open; the accepted set makes a retry resend only the
+            // remaining agents.
+            ctx.setNotice(`Sent to ${acceptedAll.size} agents, ${failed} failed — press Send to retry`, "error");
+          }
+        }).finally(() => { inFlight = false; });
       } else {
-        ctx.executeAndRefresh(async () => {
-          const result = await sendMessage(agent, trimmed, { cwd: "/" });
-          if (result.ok) ctx.setNotice(`Sent to ${agent.id}`, "info");
-          else ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
-        });
+        inFlight = true;
+        void ctx.executeAndRefresh(async () => {
+          const result = await sendStagedMessage(agent, trimmed, { cwd: "/", attachmentBaseDir: agent.repoPath });
+          if (result.ok) {
+            // Close/clear only on acceptance.
+            ctx.closeDialog();
+            ctx.setNotice(`Sent to ${agent.id}`, "info");
+          } else {
+            // Keep the editable draft so the user can fix a bad path and resubmit.
+            ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
+          }
+        }).finally(() => { inFlight = false; });
       }
     },
   };
@@ -1288,25 +1326,43 @@ export function handleSend(ctx: ActionCtx) {
  * when configured). This matches `ib send @<team>` from a non-agent shell.
  */
 function handleSendToTeam(ctx: ActionCtx, teamName: string) {
+  // Guard duplicate submits and keep the draft on failure. `acceptedRecipients`
+  // accumulates the members that have accepted across identical-draft retries so
+  // a partial failure resends only the members that have not yet accepted (fed
+  // back to `teamSend` as `skipRecipientIds`).
+  let inFlight = false;
+  const acceptedRecipients = new Set<string>();
   ctx.showDialog({
     type: "textarea",
     prompt: `Send message to @${teamName}:`,
     buffer: new TextBuffer(),
     focusedButton: "text",
     onSubmit: (message: string) => {
-      ctx.closeDialog();
+      if (inFlight) return;
       const trimmed = message.trim();
-      if (!trimmed) { ctx.setNotice("Send cancelled", "info"); return; }
+      if (!trimmed) { ctx.closeDialog(); ctx.setNotice("Send cancelled", "info"); return; }
       // Resolve member ids → live Agent records from the watcher's last batch
       // (the same source that fed flattenTeamsTree, so the set is consistent
       // with what the user just saw in the Teams panel). `teamSend` re-prunes
       // dead members under its own lock — this is a hint set, not authoritative.
       const live = ctx.watcher?.lastAgents ?? [];
-      ctx.executeAndRefresh(async () => {
-        const result = await ctx.teamSend(teamName, live, trimmed, undefined);
-        if (result.ok) ctx.setNotice((result.stdout || `Sent to @${teamName}`), "info");
-        else ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
-      });
+      inFlight = true;
+      void ctx.executeAndRefresh(async () => {
+        const result = await ctx.teamSend(teamName, live, trimmed, {
+          stageAttachments: true,
+          skipRecipientIds: acceptedRecipients.size > 0 ? [...acceptedRecipients] : undefined,
+        });
+        // Remember who accepted this round so a retry never resends them.
+        for (const id of result.acceptedRecipientIds ?? []) acceptedRecipients.add(id);
+        if (result.ok) {
+          // Close only when the whole fan-out accepted.
+          ctx.closeDialog();
+          ctx.setNotice((result.stdout || `Sent to @${teamName}`), "info");
+        } else {
+          // Keep the draft; the accepted set makes a retry resend only the rest.
+          ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
+        }
+      }).finally(() => { inFlight = false; });
     },
   });
 }
@@ -1364,6 +1420,10 @@ function handleSendToCoordinator(ctx: ActionCtx) {
 }
 
 function handleSendToRepoCoordinator(ctx: ActionCtx, agent: Agent) {
+  // A repo coordinator is a normal repository agent (not the global @system
+  // coordinator), so its human sends stage like any other. Guard duplicate
+  // submits and keep the draft on failure.
+  let inFlight = false;
   ctx.showDialog({
     type: "textarea",
     prompt: `Send message to ${agent.id} (coordinator):`,
@@ -1380,13 +1440,19 @@ function handleSendToRepoCoordinator(ctx: ActionCtx, agent: Agent) {
       });
     },
     onSubmit: (message: string) => {
-      ctx.closeDialog();
-      if (!message.trim()) { ctx.setNotice("Send cancelled", "info"); return; }
-      ctx.executeAndRefresh(async () => {
-        const result = await sendMessage(agent, message.trim(), { cwd: "/" });
-        if (result.ok) ctx.setNotice(`Sent to ${agent.id}`, "info");
-        else ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
-      });
+      if (inFlight) return;
+      if (!message.trim()) { ctx.closeDialog(); ctx.setNotice("Send cancelled", "info"); return; }
+      const trimmed = message.trim();
+      inFlight = true;
+      void ctx.executeAndRefresh(async () => {
+        const result = await sendStagedMessage(agent, trimmed, { cwd: "/", attachmentBaseDir: agent.repoPath });
+        if (result.ok) {
+          ctx.closeDialog();
+          ctx.setNotice(`Sent to ${agent.id}`, "info");
+        } else {
+          ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
+        }
+      }).finally(() => { inFlight = false; });
     },
   });
 }
@@ -1617,21 +1683,36 @@ export function handleAnswerQuestion(ctx: ActionCtx) {
   const q = questions[idx]!;
   const agentEntry = ctx.agentTree.flatList.find((f) => f.kind === "agent" && f.agent.id === q.agent);
   if (!agentEntry || agentEntry.kind !== "agent") { ctx.setNotice(`Agent ${q.agent} not found`, "error"); return; }
+  const answerAgent = agentEntry.agent;
+  // Guard duplicate submits and keep the draft on failure. `acked` ensures the
+  // question is acknowledged at most once even if the staged send fails and the
+  // user resubmits the same draft.
+  let inFlight = false;
+  let acked = false;
   ctx.showDialog({
     type: "textarea",
     prompt: `Answer ${q.agent}'s question:`,
     buffer: new TextBuffer(),
     focusedButton: "text",
     onSubmit: (answer: string) => {
-      ctx.closeDialog();
-      if (!answer.trim()) { ctx.setNotice("Answer cancelled", "info"); return; }
-      ctx.executeAndRefresh(async () => {
-        const ackResult = await acknowledgeQuestion(agentEntry.agent.repoPath, q.id);
-        if (!ackResult.ok) { ctx.setNotice(`Acknowledge failed: ${ackResult.stderr || ackResult.stdout}`, "error"); return; }
-        const sendResult = await sendMessage(agentEntry.agent, answer.trim(), { cwd: "/" });
-        if (sendResult.ok) ctx.setNotice(`Answered ${q.agent}`, "info");
-        else ctx.setNotice(`Send failed: ${sendResult.stderr || sendResult.stdout}`, "error");
-      });
+      if (inFlight) return;
+      if (!answer.trim()) { ctx.closeDialog(); ctx.setNotice("Answer cancelled", "info"); return; }
+      const trimmed = answer.trim();
+      inFlight = true;
+      void ctx.executeAndRefresh(async () => {
+        if (!acked) {
+          const ackResult = await acknowledgeQuestion(answerAgent.repoPath, q.id);
+          if (!ackResult.ok) { ctx.setNotice(`Acknowledge failed: ${ackResult.stderr || ackResult.stdout}`, "error"); return; }
+          acked = true;
+        }
+        const sendResult = await sendStagedMessage(answerAgent, trimmed, { cwd: "/", attachmentBaseDir: answerAgent.repoPath });
+        if (sendResult.ok) {
+          ctx.closeDialog();
+          ctx.setNotice(`Answered ${q.agent}`, "info");
+        } else {
+          ctx.setNotice(`Send failed: ${sendResult.stderr || sendResult.stdout}`, "error");
+        }
+      }).finally(() => { inFlight = false; });
     },
   });
 }
@@ -2466,18 +2547,25 @@ export function handleCrossRepoSend(ctx: ActionCtx) {
 }
 
 function showMessageInput(ctx: ActionCtx, repo: RepoEntry, destAgent: Agent) {
+  let inFlight = false;
   ctx.showDialog({
     type: "input",
     prompt: `Send message to ${destAgent.id}:`,
     value: "",
     onSubmit: (message: string) => {
-      ctx.closeDialog();
-      if (!message.trim()) { ctx.setNotice("Send cancelled", "info"); return; }
-      ctx.executeAndRefresh(async () => {
-        const result = await sendMessage(destAgent, message.trim(), { cwd: "/" });
-        if (result.ok) ctx.setNotice(`Sent to ${destAgent.id} in ${repoDisplayName(repo)}`, "info");
-        else ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
-      });
+      if (inFlight) return;
+      if (!message.trim()) { ctx.closeDialog(); ctx.setNotice("Send cancelled", "info"); return; }
+      const trimmed = message.trim();
+      inFlight = true;
+      void ctx.executeAndRefresh(async () => {
+        const result = await sendStagedMessage(destAgent, trimmed, { cwd: "/", attachmentBaseDir: destAgent.repoPath });
+        if (result.ok) {
+          ctx.closeDialog();
+          ctx.setNotice(`Sent to ${destAgent.id} in ${repoDisplayName(repo)}`, "info");
+        } else {
+          ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
+        }
+      }).finally(() => { inFlight = false; });
     },
   });
 }

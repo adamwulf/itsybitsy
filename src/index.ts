@@ -862,6 +862,9 @@ const COMMAND_HELP: Record<string, string> = {
     "  current repo (id order), continuing on error. Coordinators are refused\n" +
     "  (reset them with the dashboard R key instead). Run from an unsandboxed\n" +
     "  session so the sealed record can be re-written.",
+  "sandbox-log-watch":
+    "Usage: ib sandbox-log-watch --dir <launch-directory> --owner <pid> --agent-log <file>\n" +
+    "  Internal: collect kernel denials outside Seatbelt for one start.sh/resume.sh launch.",
   "sandbox-proxy":
     "Usage: ib sandbox-proxy --port <port> --domains <file> --pid-file <file> --ready-file <file>\n" +
     "  Internal: run one per-agent allowlist proxy.",
@@ -1442,6 +1445,20 @@ export async function main() {
         await generateSummary(agentDir);
       } catch { /* ignore — fire-and-forget subprocess */ }
       break;
+    }
+    case "sandbox-log-watch": {
+      const dir = args[args.indexOf("--dir") + 1];
+      const ownerText = args[args.indexOf("--owner") + 1];
+      const agentLog = args[args.indexOf("--agent-log") + 1];
+      if (!args.includes("--dir") || !args.includes("--owner") || !args.includes("--agent-log") ||
+          !dir?.startsWith("/") || !/\/sandbox-log\.[a-zA-Z0-9]+$/.test(dir) ||
+          !agentLog?.startsWith("/") || !ownerText || !/^[1-9]\d{0,9}$/.test(ownerText)) {
+        console.error("Usage: ib sandbox-log-watch --dir <launch-directory> --owner <pid> --agent-log <file>");
+        process.exitCode = 1;
+        return;
+      }
+      process.exitCode = await (await import("./sandbox-log-watch")).watchSandboxLog({ dir, owner: Number(ownerText), agentLog });
+      return;
     }
     case "sandbox-proxy":
     case "sandbox-proxy-launch": {

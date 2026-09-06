@@ -316,7 +316,7 @@ export class RightPaneComponent implements Component {
           this.content = [`${DIM}${denials.length} denial(s)${RESET}`];
           if (denials.length === 0) { this.content.push(`${DIM}No denials found${RESET}`); }
           else { for (const d of denials) {
-            const stripped = d.line.replace(/^\[.*?\] \[PreToolUse\] /, "");
+            const stripped = d.line.replace(/^\[.*?\] /, "").replace(/^\[PreToolUse\] /, "");
             this.content.push(`${DIM}[${d.timestamp}]${RESET} ${stripped}`);
           } }
         }

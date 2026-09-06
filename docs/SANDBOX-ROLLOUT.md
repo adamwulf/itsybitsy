@@ -79,7 +79,41 @@ The agy runtime root is shared state under the user home. Granting it only to ag
 
 ## Next phase: collect kernel sandbox denials
 
-**Planned only; not implemented or built in this rollout.** Complete this phase after exercising the repository-agent sandbox and before resuming global system-coordinator sandbox work.
+**Implementation candidate; live lifecycle validation pending.** Complete this phase after exercising the repository-agent sandbox and before resuming global system-coordinator sandbox work.
+
+The candidate adds `ib sandbox-log-watch` to the shared repository-agent start
+and resume wiring. A launch-specific shell supervisor starts it outside Seatbelt
+before the CLI, independently of `ib watch` and the per-agent watchdog. The
+collector observes its own unique `logger` marker in the live unified-log stream
+before releasing a CLI registration gate. The gate then execs the original
+mandatory `sandbox-exec` command, retaining the PID used by lifecycle code.
+
+Attribution uses `proc_pidinfo` birth identity and independently observed
+descendant ancestry, with `mach_absolute_time` observations bracketing each
+report's `machTimestamp`. It never extends an observed interval backwards to
+process birth or forwards to an estimated exit. PID reuse cannot extend an old
+instance's interval. Unknown children, events before first/after last observation,
+ambiguous reports, and OS duplicate summaries (whose original event times are
+missing) are omitted. Live stream records with empty `bootUUID` use the boot
+identity independently obtained by the running collector; persisted/replayed
+records are not consumed. History is capped at 4,096 instances and 30 seconds;
+pending reports at 512 entries and 500 milliseconds. Polling is every 20 ms.
+
+Verified reports append `[Sandbox]` entries with the original timestamp,
+operation, offender name/PID/birth, target when present, launch, boot, and
+monotonic event identity. Output is capped at 60 entries per minute per launch
+and 3 per process/operation/target per minute, with a 2,048-event deduplication
+cache. Suppression and collector errors use `[SandboxCollector]` records; errors
+and warnings also appear in DENIALS alongside unchanged hook denials.
+
+Every script invocation allocates a fresh `sandbox-log.XXXXXXXX` directory.
+Cleanup signals only that directory's stop file, never a numeric collector PID
+or shared filename. The collector also exits if its launch owner's birth identity
+changes/disappears and drains for up to one second on normal shutdown. A shell
+supervisor reports unexpected collector exits while the CLI continues. Diagnostic
+failure never removes or bypasses the required Seatbelt wrapper. No system-wide
+collector, dashboard dependency, watchdog dependency, or global `@system` launch
+change is introduced.
 
 ### Capability investigation (2026-09-05)
 
@@ -110,8 +144,9 @@ No event fields, readiness behavior, or safe process-attribution method have
 been established. A context that permits both operations is required; no bypass
 was attempted. Adam subsequently authorized one worker specifically for live
 testing, with implementation and self-review remaining in this Codex session.
-That independent capability attempt is pending. No production collector or DENIALS integration is
-implemented, and no live acceptance criterion has passed.
+That worker subsequently established real read/write reporting; see its evidence
+report when integrated. The production candidate still requires live acceptance
+with its actual collector and launch gate.
 
 `scripts/probe-sandbox-denials.ts` prepares an isolated temporary fixture using
 the current profile generator and shipped `_all.md` floor, with an explicit deny

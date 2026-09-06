@@ -825,6 +825,8 @@ describe("loadDenials (lazy)", () => {
       "[2025-01-01 10:00:00] [PreToolUse] Permission denied: Bash(rm:*)",
       "[2025-01-01 10:00:01] [Hook] something else",
       "[2025-01-01 10:00:02] [PreToolUse] Permission denied: Write(/etc/*)",
+      '[2026-09-05 23:01:34.988314-0500] [Sandbox] file-read-data process="cat" pid=42 birth=1000:1 target="/private/tmp/denied"',
+      "[2026-09-05T23:02:00Z] [SandboxCollector] ERROR: log stream unavailable",
     ].join("\n");
     await Bun.write(join(agentDir, "agent.log"), log);
 
@@ -835,7 +837,14 @@ describe("loadDenials (lazy)", () => {
     await loadDenials(ctx, agent);
     expect(ctx.rightPane.denialsLoading).toBe(false);
     expect(ctx.rightPane.denialsContent).not.toBeNull();
-    expect(ctx.rightPane.denialsContent!.length).toBe(2);
+    expect(ctx.rightPane.denialsContent!.length).toBe(4);
+    ctx.rightPane.agent = agent;
+    ctx.rightPane.mode = "DENIALS";
+    ctx.rightPane.updateContent();
+    const displayed = ctx.rightPane.render(500).map(stripAnsi).join("\n");
+    expect(displayed).toContain("[Sandbox] file-read-data");
+    expect(displayed).toContain("[SandboxCollector] ERROR:");
+    expect(displayed.match(/23:01:34\.988314-0500/g)?.length).toBe(1);
   });
 
   test("triggerAsyncLoadIfNeeded triggers loadDenials when DENIALS mode is active", async () => {

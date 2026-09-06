@@ -193,4 +193,22 @@ describe("bounded output and display", () => {
     expect(line).toContain('target="/private/tmp/a b"');
     expect(line).toContain("birth=1001:1");
   });
+
+  test("DENIALS captures [SandboxProxy] network denials with the correct timestamp/epoch", () => {
+    const proxyDenial = '[2026-09-06T20:55:25.123Z] [SandboxProxy] denied network-outbound target="denied.example:443"';
+    const result = parseDenials([proxyDenial]);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.line).toBe(proxyDenial);
+    expect(result[0]!.timestamp).toBe("2026-09-06T20:55:25.123Z");
+    expect(result[0]!.epoch).toBe(new Date("2026-09-06T20:55:25.123Z").getTime() / 1000);
+  });
+
+  test("the proxy's allowed/failed lines are NOT surfaced as denials", () => {
+    const allowed = '[2026-09-06T20:55:25.000Z] [proxy] allowed target="allowed.example:443"';
+    const failed = '[2026-09-06T20:55:25.000Z] [proxy] failed target="allowed.example:443" reason="upstream unreachable"';
+    // Only `[SandboxProxy] denied` is a denial — a future informational
+    // `[SandboxProxy]` line must not inflate the DENIALS count.
+    const informational = '[2026-09-06T20:55:25.000Z] [SandboxProxy] restarted port=41999';
+    expect(parseDenials([allowed, failed, informational])).toHaveLength(0);
+  });
 });

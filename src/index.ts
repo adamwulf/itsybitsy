@@ -869,10 +869,11 @@ const COMMAND_HELP: Record<string, string> = {
     "Usage: ib sandbox-log-stream --predicate <predicate>\n" +
     "  Internal: own a log stream in a detached session with a collector lifeline pipe.",
   "sandbox-proxy":
-    "Usage: ib sandbox-proxy --port <port> --domains <file> --pid-file <file> --ready-file <file>\n" +
-    "  Internal: run one per-agent allowlist proxy.",
+    "Usage: ib sandbox-proxy --port <port> --domains <file> --log <file> --agent-log <file> --pid-file <file> --ready-file <file>\n" +
+    "  Internal: run one per-agent allowlist proxy. Logs every connection attempt\n" +
+    "  to --log; allowlist-denied attempts also append to --agent-log.",
   "sandbox-proxy-launch":
-    "Usage: ib sandbox-proxy-launch --port <port> --domains <file> --log <file> --pid-file <file> --ready-file <file>\n" +
+    "Usage: ib sandbox-proxy-launch --port <port> --domains <file> --log <file> --agent-log <file> --pid-file <file> --ready-file <file>\n" +
     "  Internal: detach and health-check one per-agent allowlist proxy.",
   "respawn-self":
     "Usage: ib respawn-self <agent-id>\n" +
@@ -1482,36 +1483,36 @@ export async function main() {
       };
       const portText = option("--port");
       const domainsFile = option("--domains");
+      const logFile = option("--log");
+      const agentLogFile = option("--agent-log");
       const pidFile = option("--pid-file");
       const readyFile = option("--ready-file");
-      if (!portText || !domainsFile || !pidFile || !readyFile || !/^[1-9][0-9]*$/.test(portText)) {
+      if (!portText || !domainsFile || !logFile || !agentLogFile || !pidFile || !readyFile ||
+          !/^[1-9][0-9]*$/.test(portText)) {
         console.error(COMMAND_HELP[command]);
         process.exit(1);
       }
       const port = Number(portText);
-      if (port > 65535 || !isValidShellPath(domainsFile) || !isValidShellPath(pidFile) || !isValidShellPath(readyFile)) {
+      if (port > 65535 || !isValidShellPath(domainsFile) || !isValidShellPath(logFile) ||
+          !isValidShellPath(agentLogFile) || !isValidShellPath(pidFile) || !isValidShellPath(readyFile)) {
         console.error("Invalid sandbox proxy port or file path");
         process.exit(1);
       }
       const proxy = await import("./sandbox-proxy");
       if (command === "sandbox-proxy") {
         try {
-          await proxy.runSandboxProxy({ port, domainsFile, pidFile, readyFile });
+          await proxy.runSandboxProxy({ port, domainsFile, logFile, agentLogFile, pidFile, readyFile });
         } catch (err) {
           console.error(err instanceof Error ? err.message : String(err));
           process.exit(1);
         }
       } else {
-        const logFile = option("--log");
-        if (!logFile || !isValidShellPath(logFile)) {
-          console.error(COMMAND_HELP[command]);
-          process.exit(1);
-        }
         try {
           const pid = await proxy.launchSandboxProxyDetached({
             port,
             domainsFile,
             logFile,
+            agentLogFile,
             pidFile,
             readyFile,
           });

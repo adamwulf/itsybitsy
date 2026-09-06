@@ -143,6 +143,10 @@ describe("sandboxProxyScriptPreamble", () => {
     expect(preamble).toContain("PROXY_PORT=41999");
     expect(preamble).toContain("ib sandbox-proxy-launch --port \"$PROXY_PORT\"");
     expect(preamble).toContain("--domains '/agents/x/sandbox-domains.txt'");
+    // Proxy connection-attempt logging: full record → sandbox-proxy.log,
+    // allowlist-denied → agent.log (fed to the DENIALS pane).
+    expect(preamble).toContain("--log '/agents/x/sandbox-proxy.log'");
+    expect(preamble).toContain("--agent-log '/agents/x/agent.log'");
     expect(preamble).toContain("trap cleanup_sandbox_proxy EXIT");
     expect(preamble).toContain('export http_proxy="http://localhost:$PROXY_PORT"');
     // The per-agent meta persist lines.

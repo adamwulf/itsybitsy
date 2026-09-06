@@ -618,7 +618,7 @@ const COMMAND_HELP: Record<string, string> = {
   merge:
     "Usage: ib merge <agent-id> [--force] [--keep]\n" +
     "  Merge an agent's branch into its parent and close the agent.\n" +
-    "  --force         Skip confirmation prompts\n" +
+    "  --force         Accepted for compatibility (no-op; the native merge never prompts)\n" +
     "  --keep          Land the agent's commits so far with a real merge commit\n" +
     "                  (git merge --no-ff) but leave the agent running on its\n" +
     "                  branch: no rebase, no teardown. Refuses on a dirty parent\n" +

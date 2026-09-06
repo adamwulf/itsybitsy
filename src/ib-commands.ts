@@ -3061,10 +3061,9 @@ export async function mergeCheckAgent(agent: Agent): Promise<IbCommandResult> {
     }
 
     // 4. Count commits
-    const commitCount = await timed("merge-check", "commit-count", async () => {
-      const logResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "log", `main..${branchName}`, "--oneline"]);
-      return logResult.stdout.trim() ? logResult.stdout.trim().split("\n").length : 0;
-    });
+    const commitCount = await timed("merge-check", "commit-count", () =>
+      countCommitsAhead(agent.repoPath, "main", branchName)
+    );
 
     return {
       ok: true, exitCode: 0,
@@ -3139,6 +3138,17 @@ async function checkRebaseConflicts(
 }
 
 /**
+ * Number of commits on `sourceBranch` that `targetBranch` does not have yet
+ * (`git log <target>..<source> --oneline`, one line per commit). Shared by
+ * merge-check, the closing merge and `--keep` so all three count the same way.
+ */
+async function countCommitsAhead(repoPath: string, targetBranch: string, sourceBranch: string): Promise<number> {
+  const logResult = await mergeSpawnCtx.run(["git", "-C", repoPath, "log", `${targetBranch}..${sourceBranch}`, "--oneline"]);
+  const lines = logResult.stdout.trim();
+  return lines ? lines.split("\n").length : 0;
+}
+
+/**
  * Build the merge-commit message for `ib merge <id> --keep`. A distinct
  * subject from the closing merge's `Merge agent <id> work` so `git log` shows
  * which merges left the agent running; the body records what landed and how
@@ -3196,8 +3206,7 @@ async function mergeKeepIntoTarget(
   // Commits the target does not have yet. Zero → nothing to do; `git merge
   // --no-ff` would say "Already up to date" and create no commit, so say so
   // explicitly and succeed rather than reporting a phantom merge.
-  const logResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "log", `${targetBranch}..${branchName}`, "--oneline"]);
-  const commitCount = logResult.stdout.trim() ? logResult.stdout.trim().split("\n").length : 0;
+  const commitCount = await countCommitsAhead(agent.repoPath, targetBranch, branchName);
   if (commitCount === 0) {
     await logAgent(agentDir, `Nothing to merge (--keep): ${branchName} has no commits ahead of ${targetBranch}`);
     return {
@@ -3425,8 +3434,7 @@ export async function mergeAgent(
     }
 
     // Count commits to merge
-    const logResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "log", `${targetBranch}..${branchName}`, "--oneline"]);
-    const commitCount = logResult.stdout.trim() ? logResult.stdout.trim().split("\n").length : 0;
+    const commitCount = await countCommitsAhead(agent.repoPath, targetBranch, branchName);
 
     await logAgent(agentDir, `Starting rebase of ${branchName} onto ${targetBranch} (${commitCount} commits)`);
 

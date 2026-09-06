@@ -37,6 +37,7 @@ import {
   validateAgentName,
   mergeCheckAgent,
   mergeAgent,
+  buildKeepMergeMessage,
   sendMessage,
   cancelTmuxPaneModeIfActive,
   buildTmuxHelperScript,
@@ -108,7 +109,9 @@ import {
   spawnCtx as lifecycleSpawnCtx,
   setSandboxProxyKillForTesting,
   resetSandboxProxyKillForTesting,
+  isRunningAsAgent,
 } from "./agent-lifecycle";
+import { setUserHome, resetUserHome } from "./home";
 import { setUserConfigPath, resetUserConfigPath } from "./config";
 import type { AgentState } from "./parse-state";
 import type { SpawnFn, SpawnResult } from "./types";
@@ -5175,10 +5178,36 @@ describe("mergeAgent (native)", () => {
 // second --keep lands only the commits made since the first. Real
 // subprocesses, so the same 60s failure bound as the other real-git suites.
 
+describe("buildKeepMergeMessage", () => {
+  test("subject names the agent, target and that it stays running; body says what landed and how to land more", () => {
+    const msg = buildKeepMergeMessage("agent-abc", "agent/agent-abc", "main", 1);
+    const [subject, blank, ...body] = msg.split("\n");
+    expect(subject).toBe("Merge agent agent-abc work into main (agent kept running)");
+    expect(blank).toBe("");
+    expect(body.join("\n")).toBe(
+      "1 commit from agent/agent-abc landed via `ib merge agent-abc --keep`.\n" +
+      "The agent was left running on agent/agent-abc; commits it makes after this\n" +
+      "point can be merged the same way."
+    );
+  });
+
+  test("pluralises the commit count", () => {
+    expect(buildKeepMergeMessage("agent-abc", "agent/agent-abc", "main", 3)).toContain("3 commits from agent/agent-abc");
+    expect(buildKeepMergeMessage("agent-abc", "agent/agent-abc", "main", 0)).toContain("0 commits from");
+  });
+
+  test("uses the detected target branch verbatim (manager branches included)", () => {
+    const msg = buildKeepMergeMessage("agent-abc", "agent/agent-abc", "agent/agent-manager", 2);
+    expect(msg.split("\n")[0]).toBe("Merge agent agent-abc work into agent/agent-manager (agent kept running)");
+  });
+});
+
 describe("mergeAgent --keep (real git)", () => {
   let tempDir: string;
+  let homeDir: string;
   let agentDir: string;
   let worktree: string;
+  let originalHome: string | undefined;
 
   async function git(...args: string[]): Promise<string> {
     const proc = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe" });
@@ -5203,6 +5232,14 @@ describe("mergeAgent --keep (real git)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "merge-keep-git-"));
+    // A throwaway home: the closing-merge test below archives, removes the
+    // seal and prunes teams, all of which resolve under the user home. Keep
+    // every one of those writes out of the real ~/.itsybitsy.
+    homeDir = await mkdtemp(join(tmpdir(), "merge-keep-home-"));
+    originalHome = process.env.HOME;
+    process.env.HOME = homeDir;
+    setUserHome(homeDir);
+    setUserConfigPath(join(homeDir, ".itsybitsy", "config.json"));
     await git("init", "-q", "-b", "main", tempDir);
     await git("-C", tempDir, "config", "user.email", "test@example.com");
     await git("-C", tempDir, "config", "user.name", "Test User");
@@ -5227,7 +5264,12 @@ describe("mergeAgent --keep (real git)", () => {
     resetMergeSpawnRunner();
     lifecycleSpawnCtx.reset();
     isPidAliveCtx.reset();
+    resetUserConfigPath();
+    resetUserHome();
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
     await rm(tempDir, { recursive: true, force: true });
+    await rm(homeDir, { recursive: true, force: true });
   });
 
   test("creates a --no-ff merge commit and leaves the primary checkout consistent and the agent intact; a second --keep lands only newer commits", async () => {
@@ -5346,6 +5388,98 @@ describe("mergeAgent --keep (real git)", () => {
     expect(await Bun.file(join(worktree, "feature.txt")).text()).toBe("one\nwip\n");
     expect(await git("-C", worktree, "status", "--porcelain")).toContain("feature.txt");
     expect(await git("-C", worktree, "status", "--porcelain")).toContain("scratch.txt");
+  });
+
+  test("targets the manager's branch when run from a manager worktree, leaving main untouched", async () => {
+    const managerWorktree = join(tempDir, ".ittybitty", "agents", "agent-manager", "repo");
+    await mkdir(join(tempDir, ".ittybitty", "agents", "agent-manager"), { recursive: true });
+    await git("-C", tempDir, "worktree", "add", "-q", "-b", "agent/agent-manager", managerWorktree, "main");
+    const mainBefore = await git("-C", tempDir, "rev-parse", "main");
+    const managerBefore = await git("-C", managerWorktree, "rev-parse", "HEAD");
+    const agentTip = await agentCommit("feature.txt", "one\n", "agent: one");
+
+    const result = await mergeAgent(makeAgent("agent-abc", tempDir), managerWorktree, { keep: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain("into agent/agent-manager at");
+    // The manager's checkout got the merge commit and is consistent.
+    const parents = (await git("-C", managerWorktree, "log", "-1", "--format=%P", "HEAD")).split(" ");
+    expect(parents).toEqual([managerBefore, agentTip]);
+    expect(await git("-C", managerWorktree, "log", "-1", "--format=%s", "HEAD"))
+      .toBe("Merge agent agent-abc work into agent/agent-manager (agent kept running)");
+    expect(await git("-C", managerWorktree, "branch", "--show-current")).toBe("agent/agent-manager");
+    expect(await git("-C", managerWorktree, "status", "--porcelain")).toBe("");
+    expect(await Bun.file(join(managerWorktree, "feature.txt")).text()).toBe("one\n");
+    // main and the primary checkout did not move.
+    expect(await git("-C", tempDir, "rev-parse", "main")).toBe(mainBefore);
+    expect(await git("-C", tempDir, "status", "--porcelain")).toBe("");
+    expect(await Bun.file(join(tempDir, "feature.txt")).exists()).toBe(false);
+    // The sub-agent is still alive on its branch.
+    expect(await git("-C", tempDir, "rev-parse", "agent/agent-abc")).toBe(agentTip);
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true);
+  });
+
+  test("the eventual closing `ib merge` after a --keep lands only the newer commits and closes the agent", async () => {
+    // Round 1: --keep lands c1; the agent keeps working and commits c2.
+    await agentCommit("feature.txt", "one\n", "agent: one");
+    const keep = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+    expect(keep.ok).toBe(true);
+    const keepMerge = await git("-C", tempDir, "rev-parse", "main");
+    await agentCommit("feature.txt", "two\n", "agent: two");
+
+    // Closing merge with REAL git. tmux/pgrep are mocked so no process is
+    // touched; the temp home (beforeEach) absorbs the archive/seal/team
+    // writes. mergeSpawnCtx runs git + tmux, lifecycleSpawnCtx the kill and
+    // orphan-scan side.
+    const hybrid: SpawnFn = (cmd) => {
+      if (cmd[0] === "git") return Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" }) as SpawnResult;
+      if (cmd[0] === "tmux" && cmd.includes("has-session")) return makeSpawnResult(1);
+      if (cmd[0] === "pgrep") return makeSpawnResult(1);
+      return makeSpawnResult();
+    };
+    setMergeSpawnRunner(hybrid);
+    lifecycleSpawnCtx.set(hybrid);
+
+    const closing = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir);
+    expect(closing.ok).toBe(true);
+    expect(closing.stdout).toMatch(/^Closed agent: agent-abc \(merged to main at [0-9a-f]{40}\)$/);
+
+    // Only c2 landed: the closing rebase dropped the already-landed c1 (it is
+    // reachable from main through the --keep merge commit), so each agent
+    // commit appears exactly once in main's history and the file has c2's
+    // content. Checkout consistent, no merge in progress.
+    const subjects = (await git("-C", tempDir, "log", "--format=%s", "main")).split("\n");
+    expect(subjects.filter((s) => s === "agent: one")).toHaveLength(1);
+    expect(subjects.filter((s) => s === "agent: two")).toHaveLength(1);
+    expect(await Bun.file(join(tempDir, "feature.txt")).text()).toBe("two\n");
+    expect(await git("-C", tempDir, "status", "--porcelain")).toBe("");
+    expect(await Bun.file(join(tempDir, ".git", "MERGE_HEAD")).exists()).toBe(false);
+
+    // The closing strategy depends on the caller (SPEC 3.4): --ff-only when
+    // this process runs as an agent, --no-ff otherwise. Both build on the
+    // --keep merge commit; assert the exact shape for whichever path applies
+    // to the environment running this test.
+    const head = await git("-C", tempDir, "rev-parse", "main");
+    expect(closing.stdout).toContain(head);
+    const parents = (await git("-C", tempDir, "log", "-1", "--format=%P", "main")).split(" ");
+    if (await isRunningAsAgent()) {
+      // Fast-forward to the rebased c2: one parent, the --keep merge commit.
+      expect(parents).toEqual([keepMerge]);
+      expect(subjects[0]).toBe("agent: two");
+      expect(await git("-C", tempDir, "rev-list", "--count", "main")).toBe("4");
+    } else {
+      // A merge commit of the rebased c2 onto the --keep merge commit.
+      expect(parents).toHaveLength(2);
+      expect(parents[0]).toBe(keepMerge);
+      expect(subjects[0]).toBe("Merge agent agent-abc work");
+      expect(await git("-C", tempDir, "rev-list", "--count", "main")).toBe("5");
+    }
+
+    // Closed for real: branch and worktree gone, agent dir archived.
+    expect(await git("-C", tempDir, "branch", "--list", "agent/agent-abc")).toBe("");
+    expect(await readdir(worktree).catch(() => null)).toBeNull();
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
+    expect(await readdir(join(tempDir, ".ittybitty", "archive"))).toHaveLength(1);
   });
 });
 

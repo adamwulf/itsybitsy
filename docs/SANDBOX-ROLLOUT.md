@@ -166,7 +166,8 @@ startup failure with kernel enforcement intact. These are partial results,
 not acceptance of the broken candidate's attribution.
 
 Live retesting of `f09280f` captured root and observable-descendant denials,
-confirmed concurrent launch isolation and replacement cleanup, and rendered a
+confirmed concurrent launch isolation and staggered cleanup in separate agent
+directories, and rendered a
 real captured log through the DENIALS component. Immediate children were enforced
 but safely omitted. The worker exercised the compiled collector and real gate
 helper with a synthetic owner; it did not yet execute the bash preamble verbatim
@@ -177,8 +178,12 @@ Regression tests terminate actual disposable subprocesses by signal and by exit
 code. Live retesting on `d198c4d` confirmed both start and resume preambles
 attribute real root reads/writes, concurrent launches stay isolated, and a killed
 stream produces an ERROR, collector exit 1, and cleanup. A killed collector
-produces a supervisor ERROR (exit 137). Kernel read/write enforcement remained
-active in both failure cases; no dashboard or watchdog ran in the fixtures.
+produces a supervisor ERROR (exit 137). Artifact self-review found those fixtures
+attempted the denied read/write before injecting failure, so they do not directly
+prove post-failure enforcement. Fresh attempts released only after the failure
+ERROR are pending. No dashboard or watchdog ran in the fixtures. Same-agent-directory
+old/new overlap is covered by the shell regression test; the live concurrent
+fixtures used separate agent directories.
 
 **Unresolved crash-cleanup gap:** `SIGKILL` of the collector bypasses its cleanup.
 The launch directory remains and its `/usr/bin/log stream` child can remain

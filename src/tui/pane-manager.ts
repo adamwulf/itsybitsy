@@ -134,6 +134,8 @@ export class RightPaneComponent implements Component {
   promptContent: string[] | null = null;
   denialsContent: DenialEntry[] | null = null;
   denialsLoading = false;
+  loadedDenialsLog: { agentId: string; fileSize: number } | null = null;
+  private denialsRowsCache: { content: string; width: number; rows: string[] } | null = null;
   errors: string[] = [];
   orphanedTmuxSessions: string[] = [];
   healthReport: RepoHealthReport | undefined = undefined;
@@ -310,14 +312,15 @@ export class RightPaneComponent implements Component {
         break;
       case "DENIALS":
         if (!this.agent) { this.content = [`${DIM}No agent selected${RESET}`]; }
-        else if (this.denialsLoading || !this.denialsContent) { this.content = [`${DIM}Loading denials...${RESET}`]; }
+        else if (!this.denialsContent) { this.content = [`${DIM}Loading denials...${RESET}`]; }
         else {
           const denials = this.denialsContent;
           const alerts = denials.filter(d => /^\[[^\]]+\] \[SandboxCollector\]/.test(d.line)).length;
           this.content = [`${DIM}${denials.length - alerts} denial(s)${alerts ? `, ${alerts} collector alert(s)` : ""}${RESET}`];
           if (denials.length === 0) { this.content.push(`${DIM}No denials found${RESET}`); }
           else { for (const d of denials) {
-            const stripped = d.line.replace(/^\[.*?\] /, "").replace(/^\[PreToolUse\] /, "");
+            const stripped = d.line.replace(/^\[.*?\] /, "").replace(/^\[PreToolUse\] /, "")
+              .replace(/^(\[Sandbox(?:Proxy)?\]) ((?:denied )?[a-z][a-z0-9*-]*)/, `${CYAN}$1${RESET} ${YELLOW}$2${RESET}`);
             this.content.push(`${DIM}[${d.timestamp}]${RESET} ${stripped}`);
           } }
         }
@@ -576,6 +579,24 @@ export class RightPaneComponent implements Component {
       return this.renderRepoWithCoordinator(width);
     }
 
+    if (this.mode === "DENIALS") {
+      // Scroll in physical rows: slicing entries before wrapping can fill the
+      // screen with older entries and permanently hide the newest denials.
+      const content = this.content.join("\n");
+      if (this.denialsRowsCache?.content !== content || this.denialsRowsCache.width !== width) {
+        const rows = this.content.flatMap(line => wordWrapLines(line, Math.max(1, width - 3))
+          .map((row, index) => closeOsc8(truncateToWidth((index === 0 ? " " : "   ") + row, Math.max(1, width), ""))));
+        this.denialsRowsCache = { content, width, rows };
+      }
+      const rows = this.denialsRowsCache.rows;
+      const available = Math.max(1, this.displayHeight);
+      this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, rows.length - available));
+      const start = Math.max(0, rows.length - available - this.scrollOffset);
+      const visible = rows.slice(start, start + available);
+      while (visible.length < this.displayHeight) visible.push(" ");
+      return visible;
+    }
+
     const lines: string[] = [];
     const innerWidth = width - 1;
     const available = Math.max(1, this.displayHeight);
@@ -588,24 +609,19 @@ export class RightPaneComponent implements Component {
       start = Math.max(0, this.content.length - available - this.scrollOffset);
     }
     const visible = this.content.slice(start, start + available);
-    if (this.mode === "QUESTIONS" || this.mode === "AGENT LOG" || this.mode === "INITIAL PROMPT" || this.mode === "ERRORS" || this.mode === "DENIALS") {
+    if (this.mode === "QUESTIONS" || this.mode === "AGENT LOG" || this.mode === "INITIAL PROMPT" || this.mode === "ERRORS") {
       for (const line of visible) {
         if (lines.length >= this.displayHeight) break;
         const isQ = this.mode === "QUESTIONS";
-        const isDenials = this.mode === "DENIALS";
         // QUESTIONS keeps character-wrap (wrapLines): it carries OSC8 hyperlink
         // handling and a 3-space continuation indent (below). AGENT LOG /
-        // INITIAL PROMPT / ERRORS / DENIALS are agent prose — word-wrap them (break
+        // INITIAL PROMPT / ERRORS are agent prose — word-wrap them (break
         // at spaces, hard-wrap only over-width tokens) so words aren't split
-        // mid-token, matching the team-log / center tmux pane. DENIALS additionally
-        // carries the same 2-space hanging indent as QUESTIONS / team chat: it wraps
-        // to (innerWidth - 2) and prefixes every continuation row with two spaces, so
-        // each denial's first row stays flush-left (easy to spot where an entry
-        // starts) and its wrapped tail hangs in two spaces.
-        const wrapped = isQ ? wrapLines(line, innerWidth - 2) : wordWrapLines(line, isDenials ? innerWidth - 2 : innerWidth);
+        // mid-token, matching the team-log / center tmux pane.
+        const wrapped = isQ ? wrapLines(line, innerWidth - 2) : wordWrapLines(line, innerWidth);
         for (let wi = 0; wi < wrapped.length; wi++) {
           if (lines.length >= this.displayHeight) break;
-          if ((isQ || isDenials) && wi > 0) {
+          if (isQ && wi > 0) {
             lines.push(closeOsc8("   " + truncateToWidth(wrapped[wi]!, innerWidth - 2, "")));
           } else {
             lines.push(closeOsc8(" " + truncateToWidth(wrapped[wi]!, innerWidth, "")));
@@ -726,7 +742,7 @@ export function triggerAsyncLoadIfNeeded(ctx: PaneCtx, forceRefresh = false) {
     loadDiff(ctx, agent, forceRefresh);
   } else if (mode === "STATUS" && (forceRefresh || (!ctx.rightPane.statusContent && !ctx.rightPane.statusLoading))) {
     loadStatus(ctx, agent, forceRefresh);
-  } else if (mode === "DENIALS" && (forceRefresh || (!ctx.rightPane.denialsContent && !ctx.rightPane.denialsLoading))) {
+  } else if (mode === "DENIALS") {
     loadDenials(ctx, agent, forceRefresh);
   }
 }
@@ -835,14 +851,20 @@ export async function loadDenials(ctx: PaneCtx, agent: Agent, forceRefresh = fal
   // otherwise we'd clobber the new agent's in-flight load flag.
   const startedForAgentId = agent.id;
   ctx.rightPane.denialsLoading = true;
-  ctx.rightPane.updateContent();
-  ctx.tui?.requestRender();
+  let didRead = false;
   try {
+    const fileSize = await statAgentLogSize(agent);
+    if (ctx.currentAgentId !== startedForAgentId) return;
+    const cached = ctx.rightPane.loadedDenialsLog;
+    if (!forceRefresh && ctx.rightPane.denialsContent && fileSize !== null
+      && cached?.agentId === agent.id && cached.fileSize === fileSize) return;
+    didRead = true;
+    ctx.rightPane.updateContent();
+    ctx.tui?.requestRender();
     const lines = await readAgentLog(agent);
     if (ctx.currentAgentId === startedForAgentId) {
       ctx.rightPane.denialsContent = parseDenials(lines);
-      ctx.rightPane.updateContent();
-      ctx.tui?.requestRender();
+      ctx.rightPane.loadedDenialsLog = fileSize === null ? null : { agentId: agent.id, fileSize };
     }
   } finally {
     // Only clear the loading flag if this load is still the active one for
@@ -850,8 +872,10 @@ export async function loadDenials(ctx: PaneCtx, agent: Agent, forceRefresh = fal
     // clobber a newer load's denialsLoading=true.
     if (ctx.currentAgentId === startedForAgentId) {
       ctx.rightPane.denialsLoading = false;
-      ctx.rightPane.updateContent();
-      ctx.tui?.requestRender();
+      if (didRead) {
+        ctx.rightPane.updateContent();
+        ctx.tui?.requestRender();
+      }
     }
   }
 }

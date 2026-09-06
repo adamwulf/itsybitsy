@@ -14,6 +14,8 @@ import {
 import type { PaneCtx, PaneMode } from "./pane-manager";
 import { stripAnsi } from "../parse-state";
 import { visibleWidth } from "@mariozechner/pi-tui";
+import { parseDenials } from "../agents";
+import { CYAN, YELLOW, RESET } from "./colors";
 
 /** Build a mock PaneCtx with a real RightPaneComponent */
 function makePaneCtx(overrides?: {
@@ -254,6 +256,43 @@ describe("RightPaneComponent", () => {
     for (const r of rows) {
       expect(visibleWidth(r)).toBeLessThanOrEqual(width);
     }
+  });
+
+  test("DENIALS shows the newest proxy denial after wrapped sandbox entries and scrolls by rows", () => {
+    const rp = new RightPaneComponent();
+    rp.agent = makeAgent({ id: "agent-denial-scroll" });
+    rp.displayHeight = 8;
+    rp.denialsContent = parseDenials([
+      ...Array.from({ length: 12 }, (_, i) => `[2026-09-06 16:58:14.229856-0500] [Sandbox] ipc-posix-shm-read-data process="security" pid=${i} birth=1788731892:812790 target="apple.cfprefs.daemonv1" launch=sandbox-log.s6ppThmj boot=4b6eeaea-892f-42ef-9b91-9c5a90948f32 mach=330810290809`),
+      '[2026-09-06T21:58:15.485Z] [SandboxProxy] denied network-outbound target="registry.npmjs.org:443"',
+      '[2026-09-06T21:58:22.791Z] [SandboxProxy] denied network-outbound target="downloads.claude.ai:443"',
+    ]);
+    rp.setMode("DENIALS");
+    const bottom = rp.render(120).map(stripAnsi);
+    expect(bottom.join("\n")).toContain('target="downloads.claude.ai:443"');
+    expect(bottom.join("\n")).toContain('target="registry.npmjs.org:443"');
+    rp.scrollOffset = 1;
+    const previous = rp.render(120).map(stripAnsi);
+    expect(previous.slice(1)).toEqual(bottom.slice(0, -1));
+    rp.scrollOffset = 10000;
+    expect(rp.render(120).map(stripAnsi)[0]).toContain("14 denial(s)");
+    rp.scrollOffset = 0;
+    expect(rp.render(80).map(stripAnsi).join("\n")).toContain('target="downloads.claude.ai:443"');
+  });
+
+  test("DENIALS colors sandbox labels separately from operations", () => {
+    const rp = new RightPaneComponent();
+    rp.agent = makeAgent({ id: "agent-denial-colors" });
+    rp.denialsContent = parseDenials([
+      '[2026-09-06 16:58:14.229856-0500] [Sandbox] forbidden-exec-sugid process="security" target="/usr/bin/security"',
+      '[2026-09-06 16:58:14.229856-0500] [Sandbox] ipc-posix-shm-read-data process="security" target="apple.cfprefs.daemonv1"',
+      '[2026-09-06T21:58:15.485Z] [SandboxProxy] denied network-outbound target="registry.npmjs.org:443"',
+    ]);
+    rp.setMode("DENIALS");
+    const rendered = rp.render(500).join("\n");
+    expect(rendered).toContain(`${CYAN}[Sandbox]${RESET} ${YELLOW}forbidden-exec-sugid${RESET}`);
+    expect(rendered).toContain(`${CYAN}[Sandbox]${RESET} ${YELLOW}ipc-posix-shm-read-data${RESET}`);
+    expect(rendered).toContain(`${CYAN}[SandboxProxy]${RESET} ${YELLOW}denied network-outbound${RESET}`);
   });
 
   test("filteredQuestions returns all when no agent", () => {
@@ -898,6 +937,37 @@ describe("loadDenials (lazy)", () => {
     expect(displayed).toContain("[SandboxCollector] ERROR:");
     expect(displayed).toContain("3 denial(s), 1 collector alert(s)");
     expect(displayed.match(/23:01:34\.988314-0500/g)?.length).toBe(1);
+  });
+
+  test("refreshes growing denial logs while retaining cached content between reads", async () => {
+    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-growing");
+    await mkdir(agentDir, { recursive: true });
+    const logPath = join(agentDir, "agent.log");
+    const initial = '[2026-09-06 16:58:14.229856-0500] [Sandbox] file-read-data process="security" target="/Users/adamwulf"\n';
+    await Bun.write(logPath, initial);
+    const agent = makeAgent({ id: "agent-growing", repoPath: tmpDir });
+    const ctx = makePaneCtx({ agent });
+    ctx.rightPane.agent = agent;
+    ctx.modeIndex = PANE_MODES.indexOf("DENIALS");
+    ctx.rightPane.setMode("DENIALS");
+    await loadDenials(ctx, agent);
+    const cached = ctx.rightPane.denialsContent;
+    const renderCount = ctx.renderCalls.length;
+    await loadDenials(ctx, agent);
+    expect(ctx.rightPane.denialsContent).toBe(cached);
+    expect(ctx.renderCalls.length).toBe(renderCount);
+
+    await Bun.write(logPath, initial + '[2026-09-06T21:58:15.485Z] [SandboxProxy] denied network-outbound target="registry.npmjs.org:443"\n');
+    triggerAsyncLoadIfNeeded(ctx);
+    expect(ctx.rightPane.denialsLoading).toBe(true);
+    ctx.rightPane.updateContent();
+    expect(ctx.rightPane.render(500).map(stripAnsi).join("\n")).toContain("file-read-data");
+    for (let i = 0; i < 50 && ctx.rightPane.denialsLoading; i++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    expect(ctx.rightPane.denialsLoading).toBe(false);
+    expect(ctx.rightPane.denialsContent).toHaveLength(2);
+    expect(ctx.rightPane.render(500).map(stripAnsi).join("\n")).toContain('target="registry.npmjs.org:443"');
   });
 
   test("triggerAsyncLoadIfNeeded triggers loadDenials when DENIALS mode is active", async () => {

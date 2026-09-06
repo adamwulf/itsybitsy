@@ -180,8 +180,11 @@ attribute real root reads/writes, concurrent launches stay isolated, and a kille
 stream produces an ERROR, collector exit 1, and cleanup. A killed collector
 produces a supervisor ERROR (exit 137). Artifact self-review found those fixtures
 attempted the denied read/write before injecting failure, so they do not directly
-prove post-failure enforcement. Fresh attempts released only after the failure
-ERROR are pending. No dashboard or watchdog ran in the fixtures. Same-agent-directory
+prove post-failure enforcement. The worker reran both cases with fresh read/write
+attempts released only after the failure ERROR was visible: both returned EPERM
+and the fresh write target was not created. Post-failure enforcement is now
+directly measured; post-failure capture is unavailable because collection has
+failed. No dashboard or watchdog ran in the fixtures. Same-agent-directory
 old/new overlap is covered by the shell regression test; the live concurrent
 fixtures used separate agent directories.
 
@@ -194,6 +197,11 @@ The worker removed only its disposable orphan after matching the birth identity
 captured before the kill. This is an observed limitation, not approval to deploy
 with orphaned streams. See `docs/sandbox-denial-probe-evidence.md` sections 10–12
 for failed-candidate history, corrected live results, and remaining limits.
+The six evidence commits were merged additively and the sole authorized worker
+was closed. Sanitized result records and fixture harnesses are preserved at
+`/tmp/ib-denial-probe-evidence-agent-9685061d/final-collector/`; its README explains
+scope and reproduction path adjustments. Implementation and artifact self-review
+were performed by the primary Codex agent; no independent reviewers were spawned.
 
 ### Capability investigation (2026-09-05)
 

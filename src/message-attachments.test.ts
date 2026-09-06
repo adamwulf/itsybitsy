@@ -106,6 +106,9 @@ describe("send-time message attachments", () => {
     expect(result.message).toBe(message);
     expect(result.staged).toBe(false);
     expect((await stageMessageAttachments(`Create ${worktree}/new.ts`, repo, worktree)).staged).toBe(false);
+    const leadingLive = await stageMessageAttachments(`${worktree}/new.ts should be created`, repo, worktree);
+    expect(leadingLive.staged).toBe(false);
+    expect(leadingLive.noPassthrough).toBe(true);
     // A same-prefix sibling is external, and mixed messages still stage it.
     const external = `${worktree}-screenshot.png`;
     await writeFile(external, "image");
@@ -113,6 +116,10 @@ describe("send-time message attachments", () => {
     attempts.push(mixed);
     expect(mixed.message).toStartWith("Fix ./code.ts using /tmp/itsybitsy-attachments-");
     expect(await readFile(stagedPaths(mixed.message)[0]!, "utf8")).toBe("image");
+    const command = await stageMessageAttachments(`/compact focus on ${external}`, repo, worktree);
+    attempts.push(command);
+    expect(command.staged).toBe(true);
+    expect(command.noPassthrough).toBe(false);
   });
 
   test("project symlinks to external files still stage", async () => {

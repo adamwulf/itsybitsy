@@ -13,6 +13,8 @@ interface PathReference {
 export interface StagedMessage {
   message: string;
   staged: boolean;
+  /** A leading file reference is message text even if it stays in the live tree. */
+  noPassthrough?: boolean;
   /** Only for attempts that were NOT accepted into the delivery queue. */
   cleanup: () => Promise<void>;
 }
@@ -90,6 +92,7 @@ function spellPath(path: string, quote?: string): string {
 export async function stageMessageAttachments(message: string, baseDir: string, liveRoot?: string): Promise<StagedMessage> {
   const parsed = references(message);
   const files: Array<PathReference & { source: string }> = [];
+  let noPassthrough = false;
   const repoRoot = resolve(baseDir);
   const canonicalLiveRoot = liveRoot ? canonicalizeSandboxPath(liveRoot) : undefined;
   const inside = (root: string, path: string) => path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`);
@@ -118,9 +121,13 @@ export async function stageMessageAttachments(message: string, baseDir: string, 
       const source = resolveReference(path);
       try {
         const info = await stat(source);
-        if (isLiveReference(path)) break;
+        if (isLiveReference(path)) {
+          if (reference.start === 0) noPassthrough = true;
+          break;
+        }
         if (!info.isFile()) throw new Error(`Attachment is not a regular file: ${reference.path} (directories are not copied)`);
         files.push({ ...reference, path, end, source: await realpath(source) });
+        if (reference.start === 0) noPassthrough = true;
         break;
       } catch (error) {
         // A missing, unquoted /clear-style name is a slash command. Existing
@@ -136,12 +143,15 @@ export async function stageMessageAttachments(message: string, baseDir: string, 
         // No successful stat is required for a future live project reference.
         // Resolve punctuation first so "./external-symlink.png," cannot hide
         // an external target behind a nonexistent name ending in a comma.
-        if (isLiveReference(path)) break;
+        if (isLiveReference(path)) {
+          if (reference.start === 0) noPassthrough = true;
+          break;
+        }
         throw new Error(`Cannot stage attachment ${JSON.stringify(reference.path)}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   }
-  if (!files.length) return { message, staged: false, cleanup: async () => {} };
+  if (!files.length) return { message, staged: false, noPassthrough, cleanup: async () => {} };
 
   // Use /tmp explicitly, not TMPDIR (which on macOS can be outside the
   // sandbox's /private/tmp floor). mkdtemp + COPYFILE_EXCL prevent collisions.
@@ -164,7 +174,7 @@ export async function stageMessageAttachments(message: string, baseDir: string, 
       cursor = file.end;
     }
     result += message.slice(cursor);
-    return { message: result, staged: true, cleanup };
+    return { message: result, staged: true, noPassthrough, cleanup };
   } catch (error) {
     await cleanup();
     throw new Error(`Could not copy message attachments: ${error instanceof Error ? error.message : String(error)}`);

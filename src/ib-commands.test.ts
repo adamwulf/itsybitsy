@@ -1215,9 +1215,10 @@ describe("teamSend send-time attachment staging", () => {
     await rm(baseDir, { recursive: true, force: true });
   });
 
-  test("partial-acceptance retry: skips already-accepted members and never delivers a duplicate", async () => {
+  test("a genuine per-member failure fails the staged batch; the retry skips the accepted member and does not duplicate", async () => {
     const { createTeam, addMember } = await import("./teams");
     const { readOutbox } = await import("./outbox");
+    const { readChannel } = await import("./team-channel");
     await createTeam("backend", "", 1000);
     await plantMember("agent-m1");
     await plantMember("agent-m2");
@@ -1225,48 +1226,46 @@ describe("teamSend send-time attachment staging", () => {
     await addMember("backend", "agent-m2");
     resetReadAgentMetaCache();
 
-    // Fake stager records each staged message (one call per recipient) and
-    // rewrites the path uniquely per call — mirroring the real module's fresh
-    // /tmp path — so a re-send is a genuinely distinct (non-deduped) message.
-    const staged: string[] = [];
-    let counter = 0;
+    // Recipients are staged in roster order [m1, m2]. Fail the SECOND stage
+    // (m2) on the first attempt only: m1 is accepted (deferred to its watchdog),
+    // m2's staging throws BEFORE its enqueue so nothing is queued for it.
+    let calls = 0;
     setMessageAttachmentStagerForTesting(async (msg) => {
-      counter++;
-      staged.push(msg);
-      return { message: `${msg} (staged-${counter})`, staged: true, cleanup: async () => {} };
+      calls++;
+      if (calls === 2) throw new Error("simulated staging failure for agent-m2");
+      return { message: `${msg} (staged-${calls})`, staged: true, cleanup: async () => {} };
     });
 
     const members = [agentOf("agent-m1"), agentOf("agent-m2")];
 
-    // First send: both members accept (deferred to their watchdog).
+    // First send: m1 accepts, m2 fails. A staged batch with ANY failure is
+    // ok:false so the dashboard keeps the draft and can retry the failed member.
     const first = await teamSend("backend", members, "/shot.png hi", { stageAttachments: true }, reposArg());
-    expect(first.ok).toBe(true);
-    expect(new Set(first.acceptedRecipientIds)).toEqual(new Set(["agent-m1", "agent-m2"]));
-    expect(staged.length).toBe(2); // staged once per recipient
+    expect(first.ok).toBe(false);
+    expect(first.acceptedRecipientIds).toEqual(["agent-m1"]); // only m1 accepted
+    expect(first.stderr).toContain("agent-m2"); // the failed member is named
+    expect((await readOutbox(queueDirOf("agent-m1"))).length).toBe(1); // m1 queued (staged)
+    expect((await readOutbox(queueDirOf("agent-m2"))).length).toBe(0); // m2 never queued
 
-    for (const id of ["agent-m1", "agent-m2"]) {
-      const q = await readOutbox(queueDirOf(id));
-      expect(q.length).toBe(1);
-      expect(q[0]!.message.startsWith("/shot.png hi (staged-")).toBe(true); // STAGED text, not the original
-      expect(q[0]!.noPassthrough).toBe(true);
-      expect(q[0]!.team).toBe("backend");
-    }
-
-    // Retry the SAME draft, skipping the member that already accepted (m1). m1
-    // must NOT be re-staged or re-delivered; m2 (not skipped) is re-sent.
+    // Retry the SAME draft, skipping the accepted member (m1). m1 is NOT
+    // re-staged or re-delivered; m2 now succeeds.
     const retry = await teamSend(
       "backend", members, "/shot.png hi",
       { stageAttachments: true, skipRecipientIds: ["agent-m1"] },
       reposArg(),
     );
     expect(retry.ok).toBe(true);
-    // Accepted set still names both members (skipped ∪ re-accepted).
     expect(new Set(retry.acceptedRecipientIds)).toEqual(new Set(["agent-m1", "agent-m2"]));
-    expect(staged.length).toBe(3); // only m2 re-staged on the retry
-    // m1 skipped: its queue is unchanged (no duplicate).
+    // m1(call 1) + m2-fail(call 2) + m2-retry(call 3); m1 was never re-staged.
+    expect(calls).toBe(3);
+    // Each member ends with exactly ONE queued copy — no duplicate.
     expect((await readOutbox(queueDirOf("agent-m1"))).length).toBe(1);
-    // m2 was re-sent (not in the skip set) → a distinct staged copy queued.
-    expect((await readOutbox(queueDirOf("agent-m2"))).length).toBe(2);
+    expect((await readOutbox(queueDirOf("agent-m2"))).length).toBe(1);
+
+    // The room recorded the message exactly once: the fresh send appended it;
+    // the retry (carrying a skip set) did not append a duplicate history line.
+    const recs = await readChannel("backend");
+    expect(recs.filter((r) => r.message === "/shot.png hi").length).toBe(1);
   });
 
   test("skipping every current recipient is a success no-op that reports the full accepted set", async () => {

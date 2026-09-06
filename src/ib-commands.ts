@@ -3922,10 +3922,34 @@ export async function sendMessage(
 
   const stdout = fromId ? "" : `Sent to ${agent.id}`;
 
-  // If a live watchdog will drain, just return — it owns delivery. (The system
-  // coordinator has no per-agent watchdog, so a coordinator send always drains
-  // inline below.) Staged copies are retained; the watchdog delivers the queued
-  // message under the per-session lock.
+  // After a successful enqueue the message is durably queued. For a staged send
+  // NOTHING past this point may surface as failure: reporting failure would make
+  // the dashboard retry, re-stage under a FRESH /tmp path the outbox dedupe
+  // cannot match, and DUPLICATE the message. That covers BOTH an inline drain
+  // that returns ok:false AND any unexpected exception thrown by the watchdog
+  // probe or the drain. Report success either way, keep the queued copy and the
+  // staged files for the next drainer, and surface the underlying error as a
+  // non-fatal stderr diagnostic.
+  if (attachmentSend) {
+    try {
+      if (await hasLiveWatchdog(agentDir)) {
+        return { ok: true, exitCode: 0, stdout, stderr: "" };
+      }
+      const result = await drainOutbox(agent, queueDir, { steal: true });
+      return { ok: true, exitCode: 0, stdout, stderr: result.ok ? "" : result.stderr };
+    } catch (err) {
+      return {
+        ok: true,
+        exitCode: 0,
+        stdout,
+        stderr: `Delivery error after enqueue (message retained): ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
+  // Ordinary (non-staged) send — historical behavior exactly. If a live watchdog
+  // will drain, just return — it owns delivery. (The system coordinator has no
+  // per-agent watchdog, so a coordinator send always drains inline below.)
   if (await hasLiveWatchdog(agentDir)) {
     return { ok: true, exitCode: 0, stdout, stderr: "" };
   }
@@ -3938,16 +3962,6 @@ export async function sendMessage(
   // generic success — normalize the success stdout to the sender-aware value).
   if (result.ok) {
     return { ok: true, exitCode: 0, stdout, stderr: "" };
-  }
-  // Inline drain failed AFTER a successful enqueue. For a staged send the
-  // message is already durably queued; reporting failure would make the
-  // dashboard retry, which would re-stage under a FRESH /tmp path the outbox
-  // dedupe cannot match and DUPLICATE the message. So report success (the next
-  // drainer — a restarted watchdog, or a later send — delivers the queued copy)
-  // and keep the staged files. Surface the drain failure as a non-fatal
-  // diagnostic in stderr. Ordinary sends keep the historical failure result.
-  if (attachmentSend) {
-    return { ok: true, exitCode: 0, stdout, stderr: result.stderr };
   }
   return result;
 }
@@ -4048,6 +4062,12 @@ function resolveTeamSenderId(repos: RepoEntry[], opts: { fromAgent?: string } | 
  *     this back as `skipRecipientIds` on the next retry of the same draft, so no
  *     member is ever staged/delivered twice. Like `stageAttachments`, both are
  *     internal and NEVER exposed through a CLI flag.
+ *
+ * Result-code divergence for staged sends: unlike a legacy fan-out (which keeps
+ * §16.4.1 partial-success — ok unless EVERY member failed), a staged send
+ * returns `ok:false` whenever ANY member failed, so the dashboard keeps the
+ * draft open and retries the failed members (skipping the accepted ones). The
+ * accepted members are still reported in `acceptedRecipientIds` on that failure.
  */
 export async function teamSend(
   teamName: string,
@@ -4187,6 +4207,21 @@ export async function teamSend(
     // acceptedRecipientIds so a further retry keeps skipping them.
     return {
       ...teamErr(`Error: failed to deliver to all ${toSend.length} member(s) of @${name}:\n${failureLines.join("\n")}`),
+      acceptedRecipientIds,
+    };
+  }
+  // A staged send treats ANY per-member failure as a non-success (ok:false): the
+  // dashboard must keep the draft open and RETRY the failed members, skipping
+  // the accepted ones via acceptedRecipientIds — a partial ok:true would let the
+  // UI close the draft and the failed members would never receive the file.
+  // Legacy (non-staged) sends keep §16.4.1 partial-success semantics: a single
+  // failed notice never fails the batch, so only the all-failed case above is an
+  // error. Either way acceptedRecipientIds carries the known-delivered set.
+  if (opts?.stageAttachments && failures > 0) {
+    return {
+      ...teamErr(
+        `Error: delivered to ${delivered} of ${toSend.length} member(s) of @${name}; ${failures} failed:\n${failureLines.join("\n")}`,
+      ),
       acceptedRecipientIds,
     };
   }

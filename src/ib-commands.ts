@@ -134,6 +134,7 @@ import {
   lintSandboxProfile,
   sandboxProxyScriptPreamble,
 } from "./sandbox-launch";
+import { sandboxDenialScriptPreamble, sandboxDenialExecPrefix } from "./sandbox-log-launch";
 import {
   writeSealRecordDirect,
   readSealRecord,
@@ -1706,12 +1707,12 @@ export async function resumeAgent(
       agentDir,
       port: resumeSandbox.proxyPort,
       agentId: agent.id,
-    });
-    const sandboxResumeLaunchPrefix = `${sandboxExecShellPrefix(
+    }) + sandboxDenialScriptPreamble(agentDir);
+    const sandboxResumeLaunchPrefix = `${sandboxDenialExecPrefix(sandboxExecShellPrefix(
       resumeSandbox.profilePath,
       resumeSandbox.parameterValues,
       resumeSandbox.sandboxExecPath,
-    )} `;
+    ))} `;
 
     if (isCodexBackedCli(resumeCli)) {
       // ── Codex resume branch (SPEC §5.8 + §6 Phase 7) ─────────────────────────
@@ -6848,12 +6849,12 @@ echo ""
     agentDir,
     port: spawnSandbox.proxyPort,
     agentId: id,
-  });
-  const sandboxLaunchPrefix = `${sandboxExecShellPrefix(
+  }) + sandboxDenialScriptPreamble(agentDir);
+  const sandboxLaunchPrefix = `${sandboxDenialExecPrefix(sandboxExecShellPrefix(
     spawnSandbox.profilePath,
     spawnSandbox.parameterValues,
     spawnSandbox.sandboxExecPath,
-  )} `;
+  ))} `;
 
   let startContent: string;
   if (isCodexBackedCli(agentCli)) {

@@ -36,6 +36,7 @@ export NO_PROXY="$no_proxy"
 
 # This launch owns its collector outside Seatbelt, independent of watch/watchdog.
 # Each invocation allocates new artifacts, including when the script is reused.
+trap '' HUP
 IB_SANDBOX_LOG_DIR=""
 IB_SANDBOX_LOG_STOP_OPEN=0
 if (umask 077; mkdir -p '<SANDBOX-LOG-ROOT>/<AGENT-HASH>') && chmod 700 '<SANDBOX-LOG-ROOT>' '<SANDBOX-LOG-ROOT>/<AGENT-HASH>'; then

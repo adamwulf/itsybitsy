@@ -6,7 +6,7 @@ import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-
 import { shellQuote } from "./validation";
 import { sandboxLogParent } from "./sandbox-log-paths";
 
-async function fixture(mode: "success" | "startup-failure" | "runtime-failure" | "collector-sigkill") {
+async function fixture(mode: "success" | "startup-failure" | "runtime-failure" | "collector-sigkill" | "slow-ready") {
   const dir = await mkdtemp(join(tmpdir(), "sandbox-launch-test-"));
   const bin = join(dir, "bin");
   await mkdir(bin);
@@ -17,6 +17,7 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 ${mode === "startup-failure" ? "exit 27" : ""}
+${mode === "slow-ready" ? `: > ${shellQuote(join(dir, "collector-entered"))}; sleep 0.5` : ""}
 : > "$dir/ready"
 while [ ! -f "$dir/root-request" ] && [ ! -s "$dir/stop" ]; do sleep 0.01; done
 : > "$dir/root-ready"
@@ -35,7 +36,8 @@ while [ ! -s "$dir/stop" ]; do sleep 0.01; done
 AGENT_LOG=${shellQuote(join(dir, "agent.log"))}
 cleanup_sandbox_proxy() { printf 'cleanup\\n' >> ${shellQuote(join(dir, "proxy-cleanup"))}; }
 ${sandboxDenialScriptPreamble(dir, dir)}
-printf '%s' "$IB_SANDBOX_LOG_DIR" > ${shellQuote(join(dir, `${name}-dir`))}
+printf '%s' "$IB_SANDBOX_LOG_DIR" > ${shellQuote(join(dir, `${name}-dir.tmp`))}
+mv -f ${shellQuote(join(dir, `${name}-dir.tmp`))} ${shellQuote(join(dir, `${name}-dir`))}
 ${sandboxDenialExecPrefix(shellQuote(wrapper))} ${cliCommand} &
 cli=$!
 wait "$cli"
@@ -150,6 +152,20 @@ test("supervisor removes its reserved directory after collector SIGKILL and repo
     await until(async () => (await Bun.file(join(f.dir, "agent.log")).text().catch(() => "")).includes("collector exited 137"));
     await until(async () => !await Bun.file(join(dir, "ready")).exists());
     expect(child.exitCode).toBeNull();
+    expect(await child.exited).toBe(0);
+    expect(await readFile(join(f.dir, "enforcement"), "utf8")).toBe("wrapped\n");
+  } finally { await f.cleanup(); }
+});
+
+test("SIGHUP during collector readiness does not abort the launch", async () => {
+  const f = await fixture("slow-ready");
+  try {
+    const preamble = sandboxDenialScriptPreamble(f.dir, f.dir);
+    expect(preamble.indexOf("trap '' HUP")).toBeLessThan(preamble.indexOf("collector_wait=0"));
+    const child = await f.start("start", 0);
+    await until(() => Bun.file(join(f.dir, "collector-entered")).exists());
+    expect(await Bun.file(join(f.dir, "enforcement")).exists()).toBe(false);
+    child.kill("SIGHUP");
     expect(await child.exited).toBe(0);
     expect(await readFile(join(f.dir, "enforcement"), "utf8")).toBe("wrapped\n");
   } finally { await f.cleanup(); }

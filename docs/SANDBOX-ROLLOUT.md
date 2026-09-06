@@ -79,7 +79,7 @@ The agy runtime root is shared state under the user home. Granting it only to ag
 
 ## Next phase: collect kernel sandbox denials
 
-**Implementation candidate; first independent review requested changes.** Adam authorized two researcher reviewers after the initial live worker completed. The current revision fixes their parsing, control-file integrity, and process-ownership findings; fresh review and live validation of the revised collector remain pending. Global system-coordinator sandbox work remains deferred.
+**Implementation candidate; independent review continues.** Adam authorized two researcher reviewers after the initial live worker completed. Round two requested an earlier main-shell HUP trap and found a flaky fixture marker; further self-review strengthened ancestry against parent PID reuse within a sampling tick. The next candidate includes those fixes. Fresh review and live kernel validation remain pending. Global system-coordinator sandbox work remains deferred.
 
 The candidate adds `ib sandbox-log-watch` to the shared repository-agent start
 and resume wiring. A launch-specific shell supervisor starts it outside Seatbelt
@@ -88,16 +88,7 @@ collector observes its own unique `logger` marker in the live unified-log stream
 before releasing a CLI registration gate. The gate then execs the original
 mandatory `sandbox-exec` command, retaining the PID used by lifecycle code.
 
-Attribution uses `proc_pidinfo` birth identity and independently observed
-descendant ancestry, with `mach_continuous_time` observations bracketing each
-report's `machTimestamp`. It never extends an observed interval backwards to
-process birth or forwards to an estimated exit. PID reuse cannot extend an old
-instance's interval. Unknown children, events before first/after last observation,
-ambiguous reports, and OS duplicate summaries (whose original event times are
-missing) are omitted. Live stream records with empty `bootUUID` use the boot
-identity independently obtained by the running collector; persisted/replayed
-records are not consumed. History is capped at 4,096 instances and 30 seconds;
-pending reports at 512 entries and 500 milliseconds. Polling is every 20 ms.
+Attribution uses proc_pidinfo birth identity and independently observed descendant ancestry, with mach_continuous_time observations bracketing each report timestamp. A new parent-child edge requires the same parent birth identity on both sides of the child read; a reused or unavailable parent drops that edge. The collector never extends an observed interval backwards to birth or forwards to estimated exit. Unknown or previously unobserved reparented children, events outside observed intervals, ambiguous reports, and OS duplicate summaries are omitted. Empty live-stream bootUUID uses the independently obtained running boot identity; persisted or replayed records are not consumed. History is capped at 4,096 instances and 30 seconds, pending reports at 512 entries and 500 milliseconds, with 20 ms polling.
 
 Verified reports append `[Sandbox]` entries with the original timestamp,
 operation, offender name/PID/birth, target when present, launch, boot, and
@@ -111,6 +102,8 @@ Every invocation allocates a fresh sandbox-log.XXXXXXXX directory beneath \~/.it
 Historical candidate checks before independent review: 5,657 reported bun test passes, zero failures, 29,486 assertions across 115 files; TypeScript, build, CLI table and command-help smoke passed. After rebasing onto main eb5bfa0, candidate a28e0dd reported 5,720 passes, zero failures, 29,723 assertions across 117 files, plus successful TypeScript/build/smoke. Both totals include the kernel capability and opt-in Claude boot early-return skips described below; neither is a live enforcement/capture pass. The authorized live worker tested corrected candidate d198c4d with the actual shared preamble and gate, generated floor, and synthetic sandboxed shells. Those historical fixtures did not run whole production scripts, model CLIs, the proxy, or a controlling terminal. The review fixes change production source after that live evidence and need fresh validation. Claude, Codex/fugu, agy, and per-repository coordinator generation remains covered by lifecycle tests.
 
 Round-one fixes validated locally: bun test reported 5,736 passes, zero failures, 29,794 assertions across 119 files (111.20 seconds; /private/tmp/sandbox-denial-logs-round1-fixed-full.log). The same two existing live-test early returns remain skips, not live passes. bunx tsc --noEmit passed. The 146-module build passed, and the rebuilt CLI printed list-types plus help for both internal collector commands. New regressions use real Darwin pipes, group signals and a pseudo-terminal with a controlled stream peer; they do not prove revised kernel capture. Direct capability rechecks still fail here: sandbox-exec exits 71 with sandbox_apply: Operation not permitted; log show exits 64 with Cannot run while sandboxed. Fresh independent review and host-side capture validation remain pending.
+
+Round-two fixes validated locally: bun test reported 5,742 passes, zero failures, 29,810 assertions across 120 files (111.50 seconds; /private/tmp/sandbox-denial-logs-round2-fixed-full.log), including the same two explicitly reported live-test early returns. TypeScript checking passed. The rebuilt 147-module CLI printed the type table. Scoped sampling/lifecycle/parser tests passed 50 tests. Round-three independent review and revised kernel capture remain pending.
 
 The first full run after the native fixes reported 5,653 passes and two failures:
 both source-entry smoke tests received an empty type table from their shared

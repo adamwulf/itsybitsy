@@ -38,8 +38,12 @@ export function openSandboxProcessReader() {
   }
   const boot = uuid.toString("utf8").split("\0")[0]!.toLowerCase();
   if (!/^[a-f0-9-]{36}$/.test(boot)) { proc.close(); system.close(); throw new Error("invalid kernel boot identity"); }
+  // These calls are synchronous and return copied values, never views into
+  // scratch memory. Reuse buffers at the 50 Hz sampling cadence.
+  const infoBuffer = Buffer.alloc(136);
+  const childBuffer = new Int32Array(4096);
   const read = (pid: number): ProcessObservation | null => {
-    const b = Buffer.alloc(136);
+    const b = infoBuffer;
     const before = clock();
     const length = proc.symbols.proc_pidinfo(pid, 3, 0, ptr(b), b.length);
     const after = clock();
@@ -50,7 +54,7 @@ export function openSandboxProcessReader() {
     return { pid, ppid: b.readUInt32LE(16), birth: `${seconds}:${micros}`, before, after };
   };
   const children = (pid: number): number[] => {
-    const b = new Int32Array(4096);
+    const b = childBuffer;
     const count = proc.symbols.proc_listchildpids(pid, ptr(b), b.byteLength);
     return decodeSandboxChildPids(b, count);
   };

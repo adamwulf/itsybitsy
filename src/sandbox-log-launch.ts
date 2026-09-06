@@ -8,6 +8,7 @@ export function sandboxDenialScriptPreamble(agentDir: string, home?: string): st
   return `
 # This launch owns its collector outside Seatbelt, independent of watch/watchdog.
 # Each invocation allocates new artifacts, including when the script is reused.
+trap '' HUP
 IB_SANDBOX_LOG_DIR=""
 IB_SANDBOX_LOG_STOP_OPEN=0
 if (umask 077; mkdir -p ${shellQuote(parent)}) && chmod 700 ${shellQuote(dirname(parent))} ${shellQuote(parent)}; then

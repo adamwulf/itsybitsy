@@ -4,6 +4,7 @@ import { performance } from "node:perf_hooks";
 import { SandboxAttribution, SandboxLogFramer, SandboxOutputBudget, formatSandboxRecord,
   parseSandboxReport, processIdentity, type ProcessObservation, type SandboxReport } from "./sandbox-denials";
 import { sandboxLogParent } from "./sandbox-log-paths";
+import { sampleSandboxTree } from "./sandbox-process-tree";
 
 export interface SandboxLogOptions { dir: string; owner: number; agentLog: string }
 
@@ -156,27 +157,7 @@ export async function watchSandboxLog(opts: SandboxLogOptions): Promise<number> 
         writeFileSync(join(opts.dir, "root-ready"), launch);
       }
       if (attribution) {
-        const samples: ProcessObservation[] = [];
-        const queue: { expected: ProcessObservation; sample?: ProcessObservation }[] = active.map(expected => ({ expected }));
-        const queued = new Set(active.map(p => p.pid));
-        const visited = new Set<number>();
-        for (let index = 0; index < queue.length && visited.size < 4096; index++) {
-          const { expected, sample: discovered } = queue[index]!;
-          if (visited.has(expected.pid)) continue;
-          visited.add(expected.pid);
-          const sample = discovered ?? reader.read(expected.pid);
-          if (!sample || sample.birth !== expected.birth) continue;
-          samples.push(sample);
-          for (const pid of reader.children(sample.pid)) {
-            if (queued.has(pid)) continue;
-            const child = reader.read(pid);
-            if (child?.ppid === sample.pid) {
-              if (queue.length >= 4096) throw new Error("process tracking capacity exceeded; coverage unavailable");
-              queued.add(pid);
-              queue.push({ expected: child, sample: child });
-            }
-          }
-        }
+        const samples = sampleSandboxTree(reader, attribution.root, active, currentRoot);
         attribution.observe(samples, now);
         active = samples;
         for (let index = 0; index < pending.length;) {

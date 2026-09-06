@@ -89,7 +89,7 @@ before releasing a CLI registration gate. The gate then execs the original
 mandatory `sandbox-exec` command, retaining the PID used by lifecycle code.
 
 Attribution uses `proc_pidinfo` birth identity and independently observed
-descendant ancestry, with `mach_absolute_time` observations bracketing each
+descendant ancestry, with `mach_continuous_time` observations bracketing each
 report's `machTimestamp`. It never extends an observed interval backwards to
 process birth or forwards to an estimated exit. PID reuse cannot extend an old
 instance's interval. Unknown children, events before first/after last observation,
@@ -135,6 +135,16 @@ runtime failure while the CLI continues, and overlapping old/new cleanup.
 Attribution, malformed-report, reuse, bounded-output, and concurrent-launch
 tests use synthetic events/observations; they are not substitutes for live OS
 evidence. Unknown or unsafe-integer monotonic timestamps are rejected.
+
+The worker's first collector run on `008c233` found two blocking native-adapter
+errors: unified-log event ticks use continuous time (including system sleep),
+and `proc_listchildpids` returns a PID count, not bytes. Those errors produced
+zero attributed denials despite successful readiness and kernel enforcement.
+Both are corrected in source with regression cases from the live observations;
+the corrected compiled candidate must be retested before claiming live capture.
+The same run validated roughly one-second CLI-exit/SIGTERM cleanup and visible
+startup failure with kernel enforcement intact. These are partial results,
+not acceptance of the broken candidate's attribution.
 
 ### Capability investigation (2026-09-05)
 

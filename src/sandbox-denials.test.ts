@@ -55,6 +55,17 @@ describe("kernel report parsing", () => {
 });
 
 describe("process lifetime attribution", () => {
+  test("live sleep-offset reproduction requires continuous-time observation brackets", () => {
+    const report = parseSandboxReport(raw({ machTimestamp: 43233526391014 }), boot)!;
+    const continuous = new SandboxAttribution(root);
+    continuous.observe([root, obs(42, 40, child.birth, 43233525855097n)], 0);
+    continuous.observe([obs(42, 40, child.birth, 43233574750302n)], 1);
+    expect(continuous.attribute(report)?.birth).toBe(child.birth);
+    const absolute = new SandboxAttribution(root);
+    absolute.observe([root, obs(42, 40, child.birth, 39466358872503n)], 0);
+    absolute.observe([obs(42, 40, child.birth, 39466407769032n)], 1);
+    expect(absolute.attribute(report)).toBeNull();
+  });
   test("needs observations bracketing the event, not a matching PID or birth timestamp alone", () => {
     const a = new SandboxAttribution(root);
     a.observe([root, child], 0);

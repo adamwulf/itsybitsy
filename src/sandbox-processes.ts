@@ -1,9 +1,19 @@
 /** macOS process identity adapter, loaded only by the unsandboxed collector.
  * ABI: SDK sys/proc_info.h proc_bsdinfo (136 bytes), PROC_PIDTBSDINFO=3;
- * libproc.h proc_listchildpids/proc_pidinfo; mach/mach_time.h absolute ticks.
+ * libproc.h proc_listchildpids/proc_pidinfo; mach/mach_time.h continuous ticks.
  */
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import type { ProcessObservation } from "./sandbox-denials";
+
+/** proc_listchildpids returns a PID count, unlike proc_listpids' byte count.
+ * A full buffer cannot establish complete enumeration, so fail visibly.
+ */
+export function decodeSandboxChildPids(buffer: Int32Array, count: number): number[] {
+  if (!Number.isInteger(count) || count < 0 || count >= buffer.length) {
+    throw new Error(`process descendant enumeration unavailable or exceeds ${buffer.length} entries`);
+  }
+  return [...buffer.subarray(0, count)].filter(pid => pid > 0);
+}
 
 export function openSandboxProcessReader() {
   if (process.platform !== "darwin") throw new Error("kernel denial collection requires macOS");
@@ -12,10 +22,12 @@ export function openSandboxProcessReader() {
     proc_listchildpids: { args: [FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
   });
   const system = dlopen("/usr/lib/libSystem.B.dylib", {
-    mach_absolute_time: { args: [], returns: FFIType.u64 },
+    mach_continuous_time: { args: [], returns: FFIType.u64 },
     sysctlbyname: { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
   });
-  const clock = () => BigInt(system.symbols.mach_absolute_time());
+  // Unified-log machTimestamp advances through system sleep. Absolute time
+  // does not: mixing those domains made every interval miss on a slept host.
+  const clock = () => BigInt(system.symbols.mach_continuous_time());
   const uuid = Buffer.alloc(64);
   const size = new BigUint64Array([64n]);
   const name = Buffer.from("kern.bootsessionuuid\0");
@@ -37,9 +49,8 @@ export function openSandboxProcessReader() {
   };
   const children = (pid: number): number[] => {
     const b = new Int32Array(4096);
-    const bytes = proc.symbols.proc_listchildpids(pid, ptr(b), b.byteLength);
-    if (bytes < 0 || bytes >= b.byteLength) throw new Error("process descendant enumeration unavailable or exceeds 4096 entries");
-    return [...b.subarray(0, Math.floor(bytes / 4))].filter(p => p > 0);
+    const count = proc.symbols.proc_listchildpids(pid, ptr(b), b.byteLength);
+    return decodeSandboxChildPids(b, count);
   };
   return { boot, clock, read, children, close: () => { proc.close(); system.close(); } };
 }

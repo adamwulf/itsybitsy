@@ -1,6 +1,6 @@
 # Staged sandbox rollout
 
-This rollout requires `sandbox-exec` for ordinary agents and per-repository coordinators, including Claude, Codex/fugu, and agy launch and resume paths. The global `@system` coordinator remains unsandboxed for now. The phase order is: exercise the repository-agent rollout, add launch-script-owned kernel-denial collection, then resume global coordinator sandbox work.
+This rollout requires `sandbox-exec` for ordinary agents and per-repository coordinators, including Claude, Codex/fugu, and agy launch and resume paths. The global `@system` coordinator remains unsandboxed for now. The phase order is: exercise the repository-agent rollout; add launch-script-owned kernel-denial collection and send-time attachment staging; then resume global coordinator sandbox work. The two intermediate phases can proceed independently.
 
 Agent-type Markdown defines filesystem paths, raw Seatbelt rules, and allowed network domains. It does not define an on/off switch. This replaces the former opt-in rollout and its `sandbox.enabled` instructions.
 
@@ -102,9 +102,31 @@ Acceptance checks:
 
 Treat OS-event coverage as best-effort diagnostic logging until the live probe establishes its practical limits; do not claim a complete audit of every denied attempt.
 
+## Planned phase: stage message attachments at send time
+
+**Planned only; not implemented in this rollout.** This phase can proceed independently of kernel-denial collection; both precede global coordinator sandbox work. The goal is to send screenshots and other local files to a running repository agent without expanding its sandbox or restarting it.
+
+When a user drags a local file path into the `ib watch` send-message input, retain the original path in the editable draft. Parse and copy attachments only when the user actually sends the message. Deleting or changing a path before submission must not copy the old file or leave an unused temporary attachment.
+
+Send-time behavior:
+
+1. Parse the final submitted message for local file-path references produced by terminal drag/drop. Handle quoted and escaped spaces, Unicode filenames, and multiple paths as data, without executing shell text. Define how relative paths resolve against the selected repository, and leave unrelated prose, URLs, and code unchanged.
+2. Copy each referenced file into a uniquely created location under `/tmp`, preserving its filename extension and avoiding collisions or overwriting an existing file. On macOS this resolves under `/private/tmp`, which the repository-agent sandbox already permits. The dashboard performs the copy outside the receiving agent's sandbox.
+3. After every copy succeeds, replace only those path references in the outgoing message with their staged paths, quoted or escaped appropriately. Send through the existing message-delivery path. The receiving agent reads the staged snapshot immediately under its existing profile.
+4. If a source is missing, unreadable, or cannot be copied, show an actionable error and keep the editable draft. Do not silently send a broken rewritten path or partially deliver the message. Clean up temporary copies created by an abandoned staging attempt. Initially scope staging to files; directory behavior must be explicitly defined before supporting recursive copies.
+5. Retain successfully sent attachments long enough for queued delivery and later agent reads. Define retention and cleanup separately from the send acknowledgment; acknowledgment alone must not delete files the agent has not read. Retry handling must avoid duplicate messages and unnecessary duplicate copies.
+
+Acceptance checks:
+
+- Drag/drop alone creates no temporary file; deleting or modifying the path in the draft affects what is copied at send time.
+- A screenshot outside the allowed roots is copied only on Send, its path is replaced in the delivered message, and the running agent can read it without a sandbox refresh or restart.
+- Quoted paths, escaped spaces, Unicode, multiple files, repeated references, and same-named files from different directories are handled without corrupting surrounding text or colliding.
+- A copy failure preserves the draft and prevents partial delivery; cancelled or failed attempts do not leave unused attachments.
+- Queued messages, retries, and attachment retention do not leave delivered messages pointing to prematurely removed files.
+
 ## Later phase: global coordinator sandbox
 
-Resume the separate system-coordinator implementation after the repository-agent pilot and kernel-denial collection phase. It must establish safe launch adoption, protected configuration and launch records, and cleanup that cannot affect a replacement session or proxy. Its outstanding concurrency and ownership findings remain deferred and are not part of the current rollout.
+Resume the separate system-coordinator implementation after the repository-agent pilot, kernel-denial collection, and send-time attachment staging phases. Denial collection and attachment staging can be implemented independently. The system coordinator must establish safe launch adoption, protected configuration and launch records, and cleanup that cannot affect a replacement session or proxy. Its outstanding concurrency and ownership findings remain deferred and are not part of the current rollout.
 
 ## Historical context
 

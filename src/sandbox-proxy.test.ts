@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import {
   allocateSandboxProxyPort,
   assertSandboxProxyPortAvailable,
+  formatAgentDenial,
+  formatProxyAttempt,
   isSandboxDomainAllowed,
   isSandboxProxyHealthy,
   launchSandboxProxyDetached,
@@ -195,6 +197,7 @@ describe("sandbox proxy CONNECT and HTTP behavior", () => {
         port,
         domainsFile,
         logFile: join(dir, "proxy.log"),
+        agentLogFile: join(dir, "agent.log"),
         pidFile,
         readyFile,
         commandPrefix: [process.execPath, join(import.meta.dir, "index.ts")],
@@ -208,5 +211,113 @@ describe("sandbox proxy CONNECT and HTTP behavior", () => {
       }
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("sandbox proxy connection logging", () => {
+  test("denied target logs to both the proxy log and the agent log", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sandbox-proxy-log-"));
+    const proxyLog = join(dir, "sandbox-proxy.log");
+    const agentLog = join(dir, "agent.log");
+    let dialed = false;
+    const proxy = startSandboxProxyServer(0, ["allowed.example"], "localhost", async () => {
+      dialed = true;
+      throw new Error("must not dial");
+    }, { proxyLog, agentLog });
+    try {
+      const output = await proxyExchange(
+        proxy.port,
+        "CONNECT denied.example:443 HTTP/1.1\r\nHost: denied.example:443\r\n\r\n",
+      );
+      expect(output).toContain("403 Forbidden");
+      expect(dialed).toBe(false);
+      const proxyText = await Bun.file(proxyLog).text();
+      expect(proxyText).toContain(`[proxy] denied target="denied.example:443" reason="not in allowlist"`);
+      const agentText = await Bun.file(agentLog).text();
+      expect(agentText).toContain(`[SandboxProxy] denied network-outbound target="denied.example:443"`);
+      // The agent-log denial must be a single, complete newline-terminated line.
+      expect(agentText.endsWith("\n")).toBe(true);
+      expect(agentText.trimEnd().split("\n")).toHaveLength(1);
+    } finally {
+      proxy.stop();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("allowed target logs only to the proxy log, never the agent log", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sandbox-proxy-log-"));
+    const proxyLog = join(dir, "sandbox-proxy.log");
+    const agentLog = join(dir, "agent.log");
+    const proxy = startSandboxProxyServer(0, ["allowed.example"], "localhost", fakeUpstreamConnect, { proxyLog, agentLog });
+    try {
+      const output = await proxyExchange(
+        proxy.port,
+        "CONNECT allowed.example:443 HTTP/1.1\r\nHost: allowed.example:443\r\n\r\n",
+        "ping",
+      );
+      expect(output).toContain("echo:ping");
+      const proxyText = await Bun.file(proxyLog).text();
+      expect(proxyText).toContain(`[proxy] allowed target="allowed.example:443"`);
+      // No denial occurred, so the agent log is never touched (never created).
+      expect(await Bun.file(agentLog).exists()).toBe(false);
+    } finally {
+      proxy.stop();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("upstream failure logs a failed line to the proxy log, never the agent log", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sandbox-proxy-log-"));
+    const proxyLog = join(dir, "sandbox-proxy.log");
+    const agentLog = join(dir, "agent.log");
+    const proxy = startSandboxProxyServer(0, ["allowed.example"], "localhost", async () => {
+      throw new Error("upstream unreachable");
+    }, { proxyLog, agentLog });
+    try {
+      const output = await proxyExchange(
+        proxy.port,
+        "CONNECT allowed.example:443 HTTP/1.1\r\nHost: allowed.example:443\r\n\r\n",
+      );
+      expect(output).toContain("502 Bad Gateway");
+      const proxyText = await Bun.file(proxyLog).text();
+      expect(proxyText).toContain(`[proxy] failed target="allowed.example:443" reason="upstream unreachable"`);
+      expect(proxyText).not.toContain("[proxy] allowed");
+      expect(await Bun.file(agentLog).exists()).toBe(false);
+    } finally {
+      proxy.stop();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the health-check path is never logged", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sandbox-proxy-log-"));
+    const proxyLog = join(dir, "sandbox-proxy.log");
+    const agentLog = join(dir, "agent.log");
+    const proxy = startSandboxProxyServer(0, ["allowed.example"], "localhost", fakeUpstreamConnect, { proxyLog, agentLog });
+    try {
+      expect(await isSandboxProxyHealthy(proxy.port)).toBe(true);
+      expect(await Bun.file(proxyLog).exists()).toBe(false);
+      expect(await Bun.file(agentLog).exists()).toBe(false);
+    } finally {
+      proxy.stop();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a host with control characters / a quote cannot forge a second log line", () => {
+    // new URL() sanitizes CONNECT hosts before they reach the formatter, so the
+    // JSON quoting is the anti-forgery boundary — exercise it directly with a
+    // host carrying a newline and a double quote.
+    const forged = formatAgentDenial(`evil.example:443"\n[2026-01-01T00:00:00.000Z] [SandboxProxy] denied network-outbound target="pwned`, 443);
+    expect(forged.endsWith("\n")).toBe(true);
+    // Exactly one physical line of content: the injected newline is escaped.
+    expect(forged.trimEnd().split("\n")).toHaveLength(1);
+    expect(forged).toContain("\\n");
+    expect(forged).toContain('\\"');
+
+    const proxyLine = formatProxyAttempt("denied", `bad\nhost`, 443, "not in allowlist");
+    expect(proxyLine.endsWith("\n")).toBe(true);
+    expect(proxyLine.trimEnd().split("\n")).toHaveLength(1);
+    expect(proxyLine).toContain("\\n");
   });
 });

@@ -1168,6 +1168,22 @@ watchdog. `chatgpt.com` is intentionally an exact-apex entry; if Codex moves an
 endpoint to a subdomain it will fail closed until `_all.md` adds that apex or a
 matching wildcard. This is a baseline watch item, not implicit proxy behavior.
 
+- **Connection-attempt logging.** The proxy is the ONLY component that knows the
+  target domain (the in-sandbox CLI reaches it over a localhost CONNECT that
+  Seatbelt allows, so a blocked domain produces no kernel denial). Every real
+  attempt (the health path is never logged) appends one line to
+  `<agentDir>/sandbox-proxy.log` (the `--log` file): `[proxy] allowed`,
+  `[proxy] denied … reason="not in allowlist"`, or `[proxy] failed …
+  reason="upstream unreachable"`. Allowlist-**denied** attempts ALSO append one
+  `[<ISO8601>] [SandboxProxy] denied network-outbound target="host:port"` line to
+  the agent's `agent.log` (the `--agent-log` file, wired from the start.sh/
+  resume.sh preamble), where `parseDenials` picks it up so it surfaces in the
+  DENIALS pane beside the kernel denials. The target is `JSON.stringify`-quoted
+  (mirroring `formatSandboxRecord`) so a crafted CONNECT host cannot forge a log
+  line; each write is a single O_APPEND line and a write failure never breaks the
+  proxied connection. `allowed`/`failed` records stay in `sandbox-proxy.log` only —
+  the agent log carries denials only.
+
 ### 5.3 Wiring
 
 - `AgentType.sandbox` field + parse + validate + merge (`agent-types.ts`).

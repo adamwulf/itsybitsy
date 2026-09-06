@@ -14,7 +14,7 @@ PROXY_PORT=<PORT>
 PROXY_PID_FILE='<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/sandbox-proxy.pid'
 PROXY_READY_FILE='<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/sandbox-proxy.ready'
 rm -f "$PROXY_PID_FILE" "$PROXY_READY_FILE"
-if ! ib sandbox-proxy-launch --port "$PROXY_PORT" --domains '<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/sandbox-domains.txt' --log '<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/sandbox-proxy.log' --pid-file "$PROXY_PID_FILE" --ready-file "$PROXY_READY_FILE"; then
+if ! ib sandbox-proxy-launch --port "$PROXY_PORT" --domains '<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/sandbox-domains.txt' --log '<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/sandbox-proxy.log' --agent-log '<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/agent.log' --pid-file "$PROXY_PID_FILE" --ready-file "$PROXY_READY_FILE"; then
     log "sandbox refused: proxy could not bind localhost:$PROXY_PORT"
     exit 1
 fi

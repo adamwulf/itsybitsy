@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { appendFileSync } from "node:fs";
 import { unlink } from "node:fs/promises";
 
 const MAX_HEADER_BYTES = 64 * 1024;
@@ -13,11 +14,65 @@ export interface SandboxProxyLaunchOptions {
   port: number;
   domainsFile: string;
   logFile: string;
+  /**
+   * The agent's `agent.log`. Allowlist-denied attempts are also appended here
+   * (one `[SandboxProxy]` line each) so they surface in the DENIALS pane next to
+   * the kernel sandbox denials. Passed explicitly — never derived from logFile.
+   */
+  agentLogFile: string;
   pidFile: string;
   readyFile: string;
   executable?: string;
   commandPrefix?: string[];
   timeoutMs?: number;
+}
+
+/**
+ * Where the running proxy appends structured connection-attempt records.
+ * `proxyLog` (the `sandbox-proxy.log`) receives EVERY attempt outcome;
+ * `agentLog` (the agent's `agent.log`) receives ONLY allowlist-denied attempts.
+ * Both are optional so port-preflight / allocation helpers can omit them.
+ */
+export interface SandboxProxyLogTargets {
+  proxyLog?: string;
+  agentLog?: string;
+}
+
+/**
+ * Append one complete newline-terminated line to a log file. O_APPEND makes the
+ * single write atomic at end-of-file, so concurrent writers (the kernel-denial
+ * collector, hooks, lifecycle) never interleave. A write failure (e.g. the log
+ * dir is gone at teardown) is swallowed — logging must never break the proxied
+ * connection.
+ */
+function appendLogLine(path: string | undefined, line: string): void {
+  if (!path) return;
+  try {
+    appendFileSync(path, line);
+  } catch {
+    /* log target may be gone at teardown; never surface to the request path */
+  }
+}
+
+/**
+ * One `sandbox-proxy.log` record. The target is JSON-quoted so a CONNECT host
+ * carrying control characters / newlines cannot forge a second log line — this
+ * mirrors `formatSandboxRecord`'s quoting in `src/sandbox-denials.ts`.
+ */
+export function formatProxyAttempt(
+  outcome: "allowed" | "denied" | "failed",
+  host: string,
+  port: number,
+  reason?: string,
+): string {
+  const target = JSON.stringify(`${host}:${port}`);
+  const reasonPart = reason ? ` reason=${JSON.stringify(reason)}` : "";
+  return `[${new Date().toISOString()}] [proxy] ${outcome} target=${target}${reasonPart}\n`;
+}
+
+/** One `agent.log` denial record in the DENIALS-pane `[SandboxProxy]` format. */
+export function formatAgentDenial(host: string, port: number): string {
+  return `[${new Date().toISOString()}] [SandboxProxy] denied network-outbound target=${JSON.stringify(`${host}:${port}`)}\n`;
 }
 
 function normalizeHostname(value: string): string | null {
@@ -96,10 +151,11 @@ export function startSandboxProxyServer(
   domains: readonly string[],
   hostname = "localhost",
   connectFn: (options: any) => Promise<any> = Bun.connect,
+  logTargets: SandboxProxyLogTargets = {},
 ): SandboxProxyServer {
   const socketHandlers = {
       open(socket: any) {
-        socket.data = { buffer: Buffer.alloc(0), upstream: null, pending: [] as Buffer[], tunnel: false };
+        socket.data = { buffer: Buffer.alloc(0), upstream: null, pending: [] as Buffer[], tunnel: false, outcomeLogged: false };
       },
       data(socket: any, chunk: Uint8Array) {
         const state = socket.data as {
@@ -107,6 +163,7 @@ export function startSandboxProxyServer(
           upstream: any;
           pending: Buffer[];
           tunnel: boolean;
+          outcomeLogged: boolean;
         };
         const bytes = Buffer.from(chunk);
         if (state.tunnel) {
@@ -178,7 +235,18 @@ export function startSandboxProxyServer(
           ]);
         }
 
+        // Record at most one outcome per connection attempt. `denied` returns
+        // early; `allowed`/`failed` are mutually exclusive (upstream opened vs.
+        // upstream unreachable) but the guard also absorbs any error/catch race.
+        const logOutcome = (outcome: "allowed" | "failed", reason?: string) => {
+          if (state.outcomeLogged) return;
+          state.outcomeLogged = true;
+          appendLogLine(logTargets.proxyLog, formatProxyAttempt(outcome, host, targetPort, reason));
+        };
+
         if (!allowedTarget(host, targetPort, domains)) {
+          appendLogLine(logTargets.proxyLog, formatProxyAttempt("denied", host, targetPort, "not in allowlist"));
+          appendLogLine(logTargets.agentLog, formatAgentDenial(host, targetPort));
           socket.end(response(403, "Forbidden", "sandbox proxy: target denied\n"));
           return;
         }
@@ -190,6 +258,7 @@ export function startSandboxProxyServer(
           socket: {
             open(upstream: any) {
               state.upstream = upstream;
+              logOutcome("allowed");
               if (method === "CONNECT") {
                 socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
                 if (initialPayload.length > 0) upstream.write(initialPayload);
@@ -207,6 +276,7 @@ export function startSandboxProxyServer(
             },
             error() {
               if (!state.upstream) {
+                logOutcome("failed", "upstream unreachable");
                 try { socket.end(response(502, "Bad Gateway")); } catch { /* closed */ }
               } else {
                 try { socket.end(); } catch { /* closed */ }
@@ -214,6 +284,7 @@ export function startSandboxProxyServer(
             },
           },
         }).catch(() => {
+          logOutcome("failed", "upstream unreachable");
           try { socket.end(response(502, "Bad Gateway")); } catch { /* closed */ }
         });
       },
@@ -308,6 +379,8 @@ export async function launchSandboxProxyDetached(
     "sandbox-proxy",
     "--port", String(options.port),
     "--domains", options.domainsFile,
+    "--log", options.logFile,
+    "--agent-log", options.agentLogFile,
     "--pid-file", options.pidFile,
     "--ready-file", options.readyFile,
   ], {
@@ -335,11 +408,16 @@ export async function launchSandboxProxyDetached(
 export async function runSandboxProxy(options: {
   port: number;
   domainsFile: string;
+  logFile: string;
+  agentLogFile: string;
   pidFile: string;
   readyFile: string;
 }): Promise<never> {
   const domains = await readSandboxDomains(options.domainsFile);
-  const server = startSandboxProxyServer(options.port, domains);
+  const server = startSandboxProxyServer(options.port, domains, "localhost", Bun.connect, {
+    proxyLog: options.logFile,
+    agentLog: options.agentLogFile,
+  });
   await Bun.write(options.pidFile, `${process.pid}\n`);
   await Bun.write(options.readyFile, `ready ${server.port}\n`);
 

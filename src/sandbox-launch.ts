@@ -153,6 +153,7 @@ export function sandboxProxyScriptPreamble(opts: SandboxProxyPreambleOptions): s
   }
   const domainsPath = shellQuote(join(opts.agentDir, "sandbox-domains.txt"));
   const proxyLogPath = shellQuote(join(opts.agentDir, "sandbox-proxy.log"));
+  const agentLogPath = shellQuote(join(opts.agentDir, "agent.log"));
   const pidPath = shellQuote(join(opts.agentDir, "sandbox-proxy.pid"));
   const readyPath = shellQuote(join(opts.agentDir, "sandbox-proxy.ready"));
   // The meta-persist block — byte-identical to the pre-extraction output when on.
@@ -168,7 +169,7 @@ PROXY_PORT=${opts.port}
 PROXY_PID_FILE=${pidPath}
 PROXY_READY_FILE=${readyPath}
 rm -f "$PROXY_PID_FILE" "$PROXY_READY_FILE"
-if ! ib sandbox-proxy-launch --port "$PROXY_PORT" --domains ${domainsPath} --log ${proxyLogPath} --pid-file "$PROXY_PID_FILE" --ready-file "$PROXY_READY_FILE"; then
+if ! ib sandbox-proxy-launch --port "$PROXY_PORT" --domains ${domainsPath} --log ${proxyLogPath} --agent-log ${agentLogPath} --pid-file "$PROXY_PID_FILE" --ready-file "$PROXY_READY_FILE"; then
     log "sandbox refused: proxy could not bind localhost:$PROXY_PORT"
     exit 1
 fi

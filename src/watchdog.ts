@@ -132,6 +132,7 @@ let sandboxProxyRestartFn: SandboxProxyRestartFn = async (agentDir, port) => {
     port,
     domainsFile: join(agentDir, "sandbox-domains.txt"),
     logFile: join(agentDir, "sandbox-proxy.log"),
+    agentLogFile: join(agentDir, "agent.log"),
     pidFile: join(agentDir, "sandbox-proxy.pid"),
     readyFile: join(agentDir, "sandbox-proxy.ready"),
   });
@@ -151,6 +152,7 @@ export function resetWatchdogSandboxProxyFns(): void {
     port,
     domainsFile: join(agentDir, "sandbox-domains.txt"),
     logFile: join(agentDir, "sandbox-proxy.log"),
+    agentLogFile: join(agentDir, "agent.log"),
     pidFile: join(agentDir, "sandbox-proxy.pid"),
     readyFile: join(agentDir, "sandbox-proxy.ready"),
   });

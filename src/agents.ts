@@ -3905,7 +3905,7 @@ export interface DenialEntry {
 export function parseDenials(logLines: string[]): DenialEntry[] {
   const denials: DenialEntry[] = [];
   const pattern = /^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] \[PreToolUse\] Permission denied:/;
-  const sandboxPattern = /^\[(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2}))\] (?:\[Sandbox\] [a-z][a-z0-9*-]* process=|\[SandboxCollector\] (?:ERROR|WARNING):)/;
+  const sandboxPattern = /^\[(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2}))\] (?:\[Sandbox\] [a-z][a-z0-9*-]* process=|\[SandboxProxy\] |\[SandboxCollector\] (?:ERROR|WARNING):)/;
   for (const line of logLines) {
     const match = pattern.exec(line) ?? sandboxPattern.exec(line);
     if (match) {

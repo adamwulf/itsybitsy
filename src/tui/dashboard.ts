@@ -1830,6 +1830,7 @@ export class DashboardComponent implements Component {
       this.rightPane.agentLogLoading = false;
       this.rightPane.promptContent = null;
       this.rightPane.denialsContent = null;
+      this.rightPane.loadedDenialsLog = null;
       this.rightPane.denialsLoading = false;
       this.rightPane.diffContent = null;
       this.rightPane.diffLoading = false;

@@ -3061,10 +3061,9 @@ export async function mergeCheckAgent(agent: Agent): Promise<IbCommandResult> {
     }
 
     // 4. Count commits
-    const commitCount = await timed("merge-check", "commit-count", async () => {
-      const logResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "log", `main..${branchName}`, "--oneline"]);
-      return logResult.stdout.trim() ? logResult.stdout.trim().split("\n").length : 0;
-    });
+    const commitCount = await timed("merge-check", "commit-count", () =>
+      countCommitsAhead(agent.repoPath, "main", branchName)
+    );
 
     return {
       ok: true, exitCode: 0,
@@ -3139,6 +3138,148 @@ async function checkRebaseConflicts(
 }
 
 /**
+ * Number of commits on `sourceBranch` that `targetBranch` does not have yet
+ * (`git log <target>..<source> --oneline`, one line per commit). Shared by
+ * merge-check, the closing merge and `--keep` so all three count the same way.
+ */
+async function countCommitsAhead(repoPath: string, targetBranch: string, sourceBranch: string): Promise<number> {
+  const logResult = await mergeSpawnCtx.run(["git", "-C", repoPath, "log", `${targetBranch}..${sourceBranch}`, "--oneline"]);
+  const lines = logResult.stdout.trim();
+  return lines ? lines.split("\n").length : 0;
+}
+
+/**
+ * Build the merge-commit message for `ib merge <id> --keep`. A distinct
+ * subject from the closing merge's `Merge agent <id> work` so `git log` shows
+ * which merges left the agent running; the body records what landed and how
+ * to land the rest later.
+ */
+export function buildKeepMergeMessage(
+  agentId: string,
+  branchName: string,
+  targetBranch: string,
+  commitCount: number,
+): string {
+  const noun = commitCount === 1 ? "commit" : "commits";
+  return (
+    `Merge agent ${agentId} work into ${targetBranch} (agent kept running)\n\n` +
+    `${commitCount} ${noun} from ${branchName} landed via \`ib merge ${agentId} --keep\`.\n` +
+    `The agent was left running on ${branchName}; commits it makes after this\n` +
+    `point can be merged the same way.`
+  );
+}
+
+/**
+ * `ib merge <id> --keep` — land an agent's committed work WITHOUT closing it.
+ * Runs after mergeAgent's shared preflight (agent dir, worktree, target
+ * branch, agent branch, clean target checkout) and inside its op-marker guard.
+ *
+ * Why a porcelain `git merge` in the target checkout, not plumbing: the
+ * target branch is checked out in `targetDir` (the primary checkout, or a
+ * manager's worktree). A merge commit written with commit-tree/update-ref
+ * behind that checkout would leave its index and working tree pointing at
+ * the old tree — HEAD moved, files did not. `git merge --no-ff` in the
+ * checkout advances HEAD, index and working tree together, and on a conflict
+ * `git merge --abort` restores all three. The preflight's refusal on a dirty
+ * target checkout is what makes that restore exact.
+ *
+ * Why no rebase and always `--no-ff`: the agent is alive on `agent/<id>`.
+ * Rewriting that branch under a running session (the closing merge's step 8)
+ * is unsafe, and a fast-forward would give no merge commit to identify what
+ * landed. A merge commit whose second parent is the agent's tip also makes
+ * the NEXT --keep (or the eventual closing merge) pick up only newer commits:
+ * a later `git rebase <target>` on the agent branch drops the already-landed
+ * patches by patch-id, and `git log <target>..agent/<id>` counts only what is
+ * new.
+ *
+ * Nothing about the agent changes: no tmux/process teardown, no worktree or
+ * branch removal, no archive, no team prune, no meta.json state write. The
+ * only agent-side write is an agent.log line.
+ */
+async function mergeKeepIntoTarget(
+  agent: Agent,
+  agentDir: string,
+  targetDir: string,
+  targetBranch: string,
+  branchName: string,
+): Promise<IbCommandResult> {
+  // Commits the target does not have yet. Zero → nothing to do; `git merge
+  // --no-ff` would say "Already up to date" and create no commit, so say so
+  // explicitly and succeed rather than reporting a phantom merge.
+  const commitCount = await countCommitsAhead(agent.repoPath, targetBranch, branchName);
+  if (commitCount === 0) {
+    await logAgent(agentDir, `Nothing to merge (--keep): ${branchName} has no commits ahead of ${targetBranch}`);
+    return {
+      ok: true, exitCode: 0,
+      stdout: `Nothing to merge: ${branchName} has no commits ahead of ${targetBranch} (agent ${agent.id} kept running)`,
+      stderr: "",
+    };
+  }
+
+  await logAgent(agentDir, `Merging ${branchName} into ${targetBranch} with --no-ff (${commitCount} commits, --keep: agent stays running)...`);
+
+  // Same checkout step as the closing merge: a no-op when targetDir is already
+  // on targetBranch, and the only way onto main/master when the preflight fell
+  // back to them from a detached HEAD.
+  const checkoutResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "checkout", targetBranch]);
+  if (checkoutResult.exitCode !== 0) {
+    return {
+      ok: false, exitCode: 1, stdout: "",
+      stderr: `Could not checkout ${targetBranch}: ${checkoutResult.stderr || checkoutResult.stdout}`,
+    };
+  }
+
+  const message = buildKeepMergeMessage(agent.id, branchName, targetBranch, commitCount);
+  const mergeResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "merge", "--no-ff", branchName, "-m", message]);
+  if (mergeResult.exitCode !== 0) {
+    // Put the target checkout back exactly as it was. Best-effort: when the
+    // merge never started (no MERGE_HEAD) git reports "There is no merge to
+    // abort" and touches nothing, which is the state we want anyway.
+    await mergeSpawnCtx.run(["git", "-C", targetDir, "merge", "--abort"]);
+    const gitOutput = [mergeResult.stdout.trim(), mergeResult.stderr.trim()].filter(Boolean).join("\n");
+    let stderr =
+      `Merge failed (aborted, ${targetBranch} unchanged, agent ${agent.id} still running): ${gitOutput}\n` +
+      `Ask the agent to merge ${targetBranch} into its branch (or rebase onto it), then retry \`ib merge ${agent.id} --keep\`.`;
+    // Safety net: the abort should leave a clean checkout (the preflight
+    // required one). If it did not, say so instead of leaving a surprise.
+    const afterAbort = await mergeSpawnCtx.run(["git", "-C", targetDir, "status", "--porcelain"]);
+    if (afterAbort.exitCode === 0 && afterAbort.stdout.trim()) {
+      stderr += `\nWARNING: ${targetDir} is not clean after the abort — inspect it before continuing.`;
+    }
+    await logAgent(agentDir, `Merge (--keep) into ${targetBranch} failed - aborted; agent left running`);
+    return { ok: false, exitCode: 1, stdout: "", stderr };
+  }
+
+  // Report the merge commit. Best-effort: the merge already succeeded, so a
+  // failed rev-parse must not fail the operation — omit the SHA instead.
+  let mergedSha: string | null = null;
+  const headResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "rev-parse", "HEAD"]);
+  if (headResult.exitCode === 0 && headResult.stdout.trim()) {
+    mergedSha = headResult.stdout.trim();
+  }
+  const at = mergedSha ? ` at ${mergedSha}` : "";
+  await logAgent(agentDir, `Merged ${commitCount} commit(s) into ${targetBranch}${at} (--keep: agent left running on ${branchName})`);
+  return {
+    ok: true, exitCode: 0,
+    stdout: `Merged agent ${agent.id} into ${targetBranch}${at} (${commitCount} commit(s), agent kept running)`,
+    stderr: "",
+  };
+}
+
+/** Options for {@link mergeAgent}. */
+export interface MergeAgentOptions {
+  /**
+   * `ib merge <id> --keep`: land the agent's committed work on the target
+   * branch with a real merge commit (`git merge --no-ff`) and leave the agent
+   * running on its branch. No rebase, no teardown — the agent keeps its
+   * worktree, branch, tmux session, meta.json state, and team memberships,
+   * and its later commits can be merged again the same way. See
+   * {@link mergeKeepIntoTarget}.
+   */
+  keep?: boolean;
+}
+
+/**
  * Native merge implementation — replaces `ib merge <id> --force`.
  *
  * Sequence (mirrors cmd_merge + do_merge in ib bash):
@@ -3162,16 +3303,28 @@ async function checkRebaseConflicts(
  * 18. Remove questions
  * 19. Remove agent directory
  * 20. Scan for orphaned processes
+ *
+ * With `options.keep` (`ib merge <id> --keep`) only steps 1, 2, 4, 5 and 6
+ * run, then the branch is merged with `--no-ff` and the function returns —
+ * steps 3 and 7-20 are skipped (see {@link mergeKeepIntoTarget}).
  */
-export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCommandResult> {
+export async function mergeAgent(
+  agent: Agent,
+  targetDir: string,
+  options: MergeAgentOptions = {},
+): Promise<IbCommandResult> {
   const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
   const agentsDir = join(agent.repoPath, ".ittybitty", "agents");
   const branchName = `agent/${agent.id}`;
   const worktreePath = join(agentDir, "repo");
   const tmuxSession = agent.meta.tmux_session;
+  const keep = options.keep === true;
 
   // Long-running-op guard: refuse if another op (check/merge/restart) is in
   // flight with a live holder; reclaim on a dead holder. Cleared in `finally`.
+  // `--keep` takes the same `merging` marker: the agent renders `merging`
+  // while the merge commit is created and a concurrent merge/restart is
+  // refused, exactly as for a closing merge.
   const acquired = await acquireAgentOperation(agentDir, "merging");
   if (!acquired.ok) {
     return { ok: false, exitCode: 1, stdout: "", stderr: acquired.stderr };
@@ -3199,10 +3352,20 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
         return { ok: false as const, stderr: "Cannot merge agent from within its own worktree" };
       }
 
-      // 3. Agent worktree must have no uncommitted changes
-      const worktreeStatus = await mergeSpawnCtx.run(["git", "-C", worktreePath, "status", "--porcelain"]);
-      if (worktreeStatus.exitCode === 0 && worktreeStatus.stdout.trim()) {
-        return { ok: false as const, stderr: `Agent '${agent.id}' has uncommitted changes` };
+      // 3. Agent worktree must have no uncommitted changes.
+      //
+      // Skipped for --keep: the closing merge needs a clean worktree because
+      // it REBASES the agent's branch inside that worktree (step 8). --keep
+      // never runs git inside the agent's worktree — it merges the committed
+      // tip of `agent/<id>` into the target checkout — so uncommitted,
+      // in-progress edits are simply not part of what lands. Refusing here
+      // would make --keep unusable in exactly the mid-task situation it
+      // exists for (the agent is still working).
+      if (!keep) {
+        const worktreeStatus = await mergeSpawnCtx.run(["git", "-C", worktreePath, "status", "--porcelain"]);
+        if (worktreeStatus.exitCode === 0 && worktreeStatus.stdout.trim()) {
+          return { ok: false as const, stderr: `Agent '${agent.id}' has uncommitted changes` };
+        }
       }
 
       // 4. Detect target branch from targetDir
@@ -3244,6 +3407,16 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
     }
     const targetBranch = preflight.targetBranch;
 
+    // --keep: merge the committed tip with --no-ff and return with the agent
+    // untouched. Returning from inside the try still runs the `finally`, so
+    // the op marker is cleared and the agent's rendered state falls back to
+    // whatever it was (running/waiting/…). Steps 7-20 never run.
+    if (keep) {
+      return await timed("merge", "keep-merge", () =>
+        mergeKeepIntoTarget(agent, agentDir, targetDir, targetBranch, branchName)
+      );
+    }
+
     // Captured after a successful merge (commitCount > 0). Stays null when no
     // merge happens so the success message can omit the SHA in that case.
     let mergedSha: string | null = null;
@@ -3261,8 +3434,7 @@ export async function mergeAgent(agent: Agent, targetDir: string): Promise<IbCom
     }
 
     // Count commits to merge
-    const logResult = await mergeSpawnCtx.run(["git", "-C", agent.repoPath, "log", `${targetBranch}..${branchName}`, "--oneline"]);
-    const commitCount = logResult.stdout.trim() ? logResult.stdout.trim().split("\n").length : 0;
+    const commitCount = await countCommitsAhead(agent.repoPath, targetBranch, branchName);
 
     await logAgent(agentDir, `Starting rebase of ${branchName} onto ${targetBranch} (${commitCount} commits)`);
 

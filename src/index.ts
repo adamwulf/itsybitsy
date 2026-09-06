@@ -305,6 +305,34 @@ export function resolveMergeTargetDir(
   };
 }
 
+/**
+ * Parse the arguments after `ib merge`: the agent id (first non-flag
+ * argument), `--keep` (merge with --no-ff, leave the agent running — see
+ * `mergeAgent`'s `MergeAgentOptions`), and `--force` (accepted for
+ * compatibility with the bash `ib`; the native merge never prompts, so it is a
+ * no-op). Flags may appear on either side of the id. Anything else is
+ * collected in `unknown` so the caller can warn and ignore it.
+ */
+export function parseMergeArgs(
+  rest: string[],
+): { agentId: string | undefined; keep: boolean; unknown: string[] } {
+  let agentId: string | undefined;
+  let keep = false;
+  const unknown: string[] = [];
+  for (const arg of rest) {
+    if (arg === "--keep") {
+      keep = true;
+    } else if (arg === "--force") {
+      // no-op: kept so existing `ib merge <id> --force` invocations still work
+    } else if (agentId === undefined && !arg.startsWith("-")) {
+      agentId = arg;
+    } else {
+      unknown.push(arg);
+    }
+  }
+  return { agentId, keep, unknown };
+}
+
 /** Require an agent ID argument, find it, or exit with error. */
 export async function requireAgent(idArg: string | undefined, repos: RepoEntry[]): Promise<Agent> {
   if (!idArg) {
@@ -588,9 +616,14 @@ const COMMAND_HELP: Record<string, string> = {
     "  Check whether an agent's branch is ready to merge cleanly into its\n" +
     "  parent. Does not perform the merge.",
   merge:
-    "Usage: ib merge <agent-id> [--force]\n" +
+    "Usage: ib merge <agent-id> [--force] [--keep]\n" +
     "  Merge an agent's branch into its parent and close the agent.\n" +
-    "  --force         Skip confirmation prompts",
+    "  --force         Accepted for compatibility (no-op; the native merge never prompts)\n" +
+    "  --keep          Land the agent's commits so far with a real merge commit\n" +
+    "                  (git merge --no-ff) but leave the agent running on its\n" +
+    "                  branch: no rebase, no teardown. Refuses on a dirty parent\n" +
+    "                  checkout; aborts cleanly on conflict. Run it again later to\n" +
+    "                  land newer commits, or `ib merge <agent-id>` to close.",
   resume:
     "Usage: ib resume <agent-id> [--force]\n" +
     "  Resume a stopped agent in its existing worktree.\n" +
@@ -906,7 +939,7 @@ function printUsage(): void {
   console.log("  retire <id>         Stop and archive an agent without merging");
   console.log("  rehire <id>         Reconstruct and resume a retired agent");
   console.log("  nuke <id>           Kill and archive an agent");
-  console.log("  merge <id>          Merge agent's work and close it");
+  console.log("  merge <id> [--keep] Merge agent's work and close it (--keep: land commits, leave it running)");
   console.log("  merge-check <id>    Check if agent is ready to merge");
   console.log("  resume <id>         Resume a stopped agent");
   console.log("  respawn [id]        Restart an agent's Claude session in-place (alias: restart)");
@@ -1956,10 +1989,10 @@ export async function main() {
     }
     case "merge": {
       const repos = await listRepos();
-      const agent = await requireAgent(args[1], repos);
-      const extraArgs = args.slice(2).filter((a) => a !== "--force");
-      if (extraArgs.length > 0) {
-        console.error(`Warning: unknown arguments ignored: ${extraArgs.join(" ")}`);
+      const parsedMerge = parseMergeArgs(args.slice(1));
+      const agent = await requireAgent(parsedMerge.agentId, repos);
+      if (parsedMerge.unknown.length > 0) {
+        console.error(`Warning: unknown arguments ignored: ${parsedMerge.unknown.join(" ")}`);
       }
       const resolved = resolveMergeTargetDir(agent, process.cwd());
       if (!resolved.ok) {
@@ -1967,7 +2000,7 @@ export async function main() {
         process.exit(1);
       }
       const { mergeAgent } = await import("./ib-commands");
-      await printAndExit(await mergeAgent(agent, resolved.targetDir));
+      await printAndExit(await mergeAgent(agent, resolved.targetDir, { keep: parsedMerge.keep }));
       break;
     }
     case "sandbox": {

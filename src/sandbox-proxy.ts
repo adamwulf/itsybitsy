@@ -55,24 +55,33 @@ function appendLogLine(path: string | undefined, line: string): void {
 }
 
 /**
- * One `sandbox-proxy.log` record. The target is JSON-quoted so a CONNECT host
- * carrying control characters / newlines cannot forge a second log line — this
- * mirrors `formatSandboxRecord`'s quoting in `src/sandbox-denials.ts`.
+ * The JSON-quoted `target="host:port"` field shared by both record formats.
+ * Quoting is what stops a crafted host from forging a second log line — WHATWG
+ * URL parsing rejects control characters, whitespace and newlines in a host,
+ * but a literal `"` IS a valid host code point, so the escape is load-bearing.
+ * This mirrors `formatSandboxRecord`'s quoting in `src/sandbox-denials.ts`.
+ * The proxy strips the brackets from an IPv6 literal when parsing, so they are
+ * restored here: `[::1]:443`, never the ambiguous `::1:443`.
  */
+function formatTarget(host: string, port: number): string {
+  const shown = isIP(host) === 6 ? `[${host}]` : host;
+  return JSON.stringify(`${shown}:${port}`);
+}
+
+/** One `sandbox-proxy.log` record. */
 export function formatProxyAttempt(
   outcome: "allowed" | "denied" | "failed",
   host: string,
   port: number,
   reason?: string,
 ): string {
-  const target = JSON.stringify(`${host}:${port}`);
   const reasonPart = reason ? ` reason=${JSON.stringify(reason)}` : "";
-  return `[${new Date().toISOString()}] [proxy] ${outcome} target=${target}${reasonPart}\n`;
+  return `[${new Date().toISOString()}] [proxy] ${outcome} target=${formatTarget(host, port)}${reasonPart}\n`;
 }
 
 /** One `agent.log` denial record in the DENIALS-pane `[SandboxProxy]` format. */
 export function formatAgentDenial(host: string, port: number): string {
-  return `[${new Date().toISOString()}] [SandboxProxy] denied network-outbound target=${JSON.stringify(`${host}:${port}`)}\n`;
+  return `[${new Date().toISOString()}] [SandboxProxy] denied network-outbound target=${formatTarget(host, port)}\n`;
 }
 
 function normalizeHostname(value: string): string | null {

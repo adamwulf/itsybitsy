@@ -352,4 +352,35 @@ describe("sandbox proxy connection logging", () => {
     expect(proxyLine.trimEnd().split("\n")).toHaveLength(1);
     expect(proxyLine).toContain("\\n");
   });
+
+  test("a literal double quote in a host is escaped, not a line breaker", async () => {
+    // WHATWG URL parsing accepts `"` as a host code point, so `%22` in a CONNECT
+    // authority reaches the formatter as a real quote. It must be escaped so the
+    // record stays one well-formed line.
+    const dir = await mkdtemp(join(tmpdir(), "sandbox-proxy-log-"));
+    const proxyLog = join(dir, "sandbox-proxy.log");
+    const agentLog = join(dir, "agent.log");
+    const proxy = startSandboxProxyServer(0, ["allowed.example"], "localhost", async () => {
+      throw new Error("must not dial");
+    }, { proxyLog, agentLog });
+    try {
+      const output = await proxyExchange(proxy.port, "CONNECT evil%22example:443 HTTP/1.1\r\n\r\n");
+      expect(output).toContain("403 Forbidden");
+      const agentText = await Bun.file(agentLog).text();
+      expect(agentText.trimEnd().split("\n")).toHaveLength(1);
+      expect(agentText).toContain('target="evil\\"example:443"');
+    } finally {
+      proxy.stop();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("IPv6 literal targets are bracketed in the target field", () => {
+    // The proxy strips brackets when parsing the authority; the record must put
+    // them back so `[::1]:443` is not logged as the ambiguous `::1:443`.
+    expect(formatAgentDenial("::1", 443)).toContain('target="[::1]:443"');
+    expect(formatProxyAttempt("denied", "2001:db8::1", 80, "not in allowlist")).toContain('target="[2001:db8::1]:80"');
+    expect(formatProxyAttempt("denied", "127.0.0.1", 443)).toContain('target="127.0.0.1:443"');
+    expect(formatProxyAttempt("allowed", "allowed.example", 443)).toContain('target="allowed.example:443"');
+  });
 });

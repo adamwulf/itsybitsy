@@ -3623,12 +3623,14 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
   // `[sent by agent ...]` attribution even when it starts with `/` or `!`, so the
   // recipient still knows who sent it.
   const raw = queued.raw === true;
-  // A staged-attachment message (`noPassthrough`) may now BEGIN with an
-  // absolute `/tmp/...` staged path. That leading `/` must NOT be read as a
-  // slash-command passthrough: the path is data, so it keeps the normal
-  // `[sent by ...]:` prefix (which pushes it off column 0 so the recipient CLI
-  // never fires it as a command). A genuine `/clear` carries no such flag and
-  // still passes through verbatim.
+  // A staged-attachment message (`noPassthrough`) BEGINS with a file-path
+  // reference — an absolute `/tmp/...` staged copy, OR a live in-worktree path
+  // kept literal (e.g. an absolute path into the agent's own worktree). That
+  // leading `/` must NOT be read as a slash-command passthrough: the path is
+  // data, so it keeps the normal `[sent by ...]:` prefix (which pushes it off
+  // column 0 so the recipient CLI never fires it as a command). A genuine
+  // leading slash command (`/clear`, or `/compact` before an attachment)
+  // carries no such flag and still passes through verbatim.
   const userPassthrough =
     !raw && !fromId && queued.noPassthrough !== true && (message.startsWith("/") || message.startsWith("!"));
   // A team fan-out (§16.4) carries the team name on the queued message; the
@@ -3926,11 +3928,19 @@ export async function sendMessage(
     outgoing = staged.message;
     // Retain the cleanup handle ONLY to undo copies if the enqueue itself
     // fails; once a staged message is accepted into the queue the files are
-    // retained indefinitely (the agent may not have read them yet). A no-op
-    // stage (staged:false, e.g. a real `/clear` with no file paths) has no
-    // copies and leaves passthrough intact.
+    // retained indefinitely (the agent may not have read them yet). `staged`
+    // reflects whether any file was COPIED, so cleanup keys off it.
     stagedCleanup = staged.staged ? staged.cleanup : null;
-    noPassthrough = staged.staged;
+    // Suppress slash-command passthrough when the message BEGINS with a path
+    // reference — INDEPENDENT of copying. An absolute path into the agent's OWN
+    // worktree is kept literal (staged:false, no copy) yet still starts with `/`
+    // and is data, not a command, so it must be prefixed rather than fired as a
+    // slash command. Prefer the module's computed flag; the `?? staged.staged`
+    // fallback preserves the copy-implies-prefix behavior for older injected
+    // test stagers that don't return the flag. Note `??` (not `||`) so a genuine
+    // leading `/compact` + a later attachment — module returns noPassthrough:
+    // false but staged:true — still passes the command through.
+    noPassthrough = staged.noPassthrough ?? staged.staged;
   }
 
   // Enqueue. The agent dir is created by spawn; for the rare case it is

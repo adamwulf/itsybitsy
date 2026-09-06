@@ -1208,6 +1208,57 @@ describe("sendMessage send-time attachment staging", () => {
     await rm(join(stagedPath, "..", ".."), { recursive: true, force: true });
   });
 
+  test("liveRoot (real module): a LEADING absolute own-worktree ref is kept literal but delivered WITH the user prefix", async () => {
+    // The edge the manager caught: an absolute path into the agent's OWN
+    // worktree is preserved (staged:false, no copy) yet still begins with `/`.
+    // Without the module's leading-reference noPassthrough it would slash-
+    // passthrough as a command. It must be delivered with the [sent by user]
+    // prefix (data, not a command) even though nothing was copied.
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    const worktree = agentWorktreePath(agent);
+    await mkdir(worktree, { recursive: true });
+    const live = join(worktree, "file.ts");
+    await Bun.write(live, "LIVE");
+
+    const result = await sendMessage(agent, `${live} explain this`, { cwd: "/", stageAttachments: true });
+    expect(result.ok).toBe(true);
+
+    const delivered = deliveredMessage();
+    expect(delivered).toBeDefined();
+    // Prefixed, NOT a verbatim passthrough (the leading `/` is data).
+    expect(delivered!.startsWith("[sent by user]: ")).toBe(true);
+    const body = delivered!.slice("[sent by user]: ".length);
+    // The own-worktree path is delivered literally — never copied to /tmp.
+    expect(body).toBe(`${live} explain this`);
+    expect(delivered).not.toContain("itsybitsy-attachments");
+  });
+
+  test("liveRoot (real module): a leading /compact before an external attachment still passes through (command fires)", async () => {
+    // The module returns noPassthrough:false for a genuine leading slash command
+    // even when a LATER attachment is copied (staged:true). sendMessage uses
+    // `?? staged.staged` (not `||`), so that explicit false is honored and the
+    // /compact command still fires verbatim.
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
+    const extDir = await mkdtemp(join(tmpdir(), "ext-shot-"));
+    const ext = join(extDir, "screenshot.png");
+    await Bun.write(ext, "EXTBYTES");
+
+    const result = await sendMessage(agent, `/compact ${ext}`, { cwd: "/", stageAttachments: true });
+    expect(result.ok).toBe(true);
+
+    const delivered = deliveredMessage();
+    expect(delivered).toBeDefined();
+    // Verbatim passthrough (no [sent by user] prefix) so /compact fires.
+    expect(delivered!.startsWith("/compact ")).toBe(true);
+    // The later attachment was still copied and its path replaced.
+    const stagedPath = delivered!.slice("/compact ".length);
+    expect(stagedPath).toContain("itsybitsy-attachments-");
+    expect(await Bun.file(stagedPath).text()).toBe("EXTBYTES");
+
+    await rm(extDir, { recursive: true, force: true });
+    await rm(join(stagedPath, "..", ".."), { recursive: true, force: true });
+  });
+
   test("REGRESSION: an ordinary send (no stageAttachments) never stages — even an agent-relayed message with a real path", async () => {
     // Staging is a dashboard-only permission bypass. An installed stager must
     // NOT run for a legacy send, including an agent-originated (fromAgent) one.

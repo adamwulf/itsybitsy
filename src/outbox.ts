@@ -80,12 +80,14 @@ export interface OutboxMessage {
   team?: string;
   /**
    * When true, delivery MUST NOT treat a leading `/` or `!` as a user
-   * slash/bang passthrough (see `deliverMessage`). Set for send-time-staged
-   * attachment messages whose rewritten text may now BEGIN with an absolute
-   * `/tmp/...` staged path: that path is data, not a command, and must be
-   * delivered with the normal `[sent by ...]:` prefix so it does not land in
-   * column 0 and fire as a slash command. A genuine `/clear` (no staging)
-   * leaves this unset so its passthrough is preserved.
+   * slash/bang passthrough (see `deliverMessage`). Set for a send-time-staged
+   * message that BEGINS with a file-path reference — an absolute `/tmp/...`
+   * staged copy OR a live in-worktree path kept literal (e.g. an absolute path
+   * into the agent's own worktree): that path is data, not a command, and must
+   * be delivered with the normal `[sent by ...]:` prefix so it does not land in
+   * column 0 and fire as a slash command. A genuine leading slash command
+   * (`/clear`, or `/compact` before an attachment) leaves this unset so its
+   * passthrough is preserved.
    */
   noPassthrough?: boolean;
 }

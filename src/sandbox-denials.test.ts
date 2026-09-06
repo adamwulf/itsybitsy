@@ -206,6 +206,9 @@ describe("bounded output and display", () => {
   test("the proxy's allowed/failed lines are NOT surfaced as denials", () => {
     const allowed = '[2026-09-06T20:55:25.000Z] [proxy] allowed target="allowed.example:443"';
     const failed = '[2026-09-06T20:55:25.000Z] [proxy] failed target="allowed.example:443" reason="upstream unreachable"';
-    expect(parseDenials([allowed, failed])).toHaveLength(0);
+    // Only `[SandboxProxy] denied` is a denial — a future informational
+    // `[SandboxProxy]` line must not inflate the DENIALS count.
+    const informational = '[2026-09-06T20:55:25.000Z] [SandboxProxy] restarted port=41999';
+    expect(parseDenials([allowed, failed, informational])).toHaveLength(0);
   });
 });

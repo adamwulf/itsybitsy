@@ -506,17 +506,26 @@ function handleNewAgentFormDialog(
       }
     }
   } else if (d.focused === "agentType") {
+    // Step the selected type one position through availableTypes, wrapping
+    // at both ends. When the current value is not in the list, forward lands
+    // on the first entry and backward on the last.
+    const cycleAgentType = (delta: 1 | -1) => {
+      const n = d.availableTypes.length;
+      if (n === 0) return;
+      const currentIdx = d.availableTypes.indexOf(d.agentType);
+      const nextIdx = currentIdx < 0
+        ? (delta > 0 ? 0 : n - 1)
+        : (currentIdx + delta + n) % n;
+      d.agentType = d.availableTypes[nextIdx]!;
+      ctx.tui?.requestRender();
+    };
     if (matchesKey(data, Key.tab)) { nextFocus(); }
     else if (matchesKey(data, Key.shift("tab"))) { prevFocus(); }
-    else if (matchesKey(data, Key.enter) || data === " ") {
-      // Cycle through the available agent types
-      if (d.availableTypes.length > 0) {
-        const currentIdx = d.availableTypes.indexOf(d.agentType);
-        const nextIdx = (currentIdx + 1) % d.availableTypes.length;
-        d.agentType = d.availableTypes[nextIdx]!;
-        ctx.tui?.requestRender();
-      }
-    }
+    // Shift+Space only reaches us as a distinct key under the Kitty keyboard
+    // protocol (CSI 32;2u); legacy terminals send a plain space for it, which
+    // falls through to the forward-cycle branch below.
+    else if (matchesKey(data, Key.shift("space"))) { cycleAgentType(-1); }
+    else if (matchesKey(data, Key.enter) || data === " ") { cycleAgentType(1); }
   } else if (d.focused === "prompt") {
     if (matchesKey(data, Key.tab)) { nextFocus(); }
     else if (matchesKey(data, Key.shift("tab"))) { prevFocus(); }
@@ -1010,13 +1019,13 @@ export function buildNewAgentFormContent(
   lines.push(`${nameLabel}  ${truncateToWidth(nameValue, innerWidth - 8, "")}`);
 
   const cycleHint = dialog.availableTypes.length > 1
-    ? ` ${DIM}[Enter/Space to cycle]${RESET}`
+    ? ` ${DIM}[Space/Enter next, Shift+Space prev]${RESET}`
     : "";
   const typeValue = dialog.agentType || "manager";
   const typeLabel = dialog.focused === "agentType"
     ? `${BOLD}${GREEN}Type: ${typeValue}${RESET}${cycleHint}`
     : `${DIM}Type:${RESET} ${typeValue}`;
-  lines.push(typeLabel);
+  lines.push(truncateToWidth(typeLabel, innerWidth, ""));
   lines.push("");
 
   const promptLabel = dialog.focused === "prompt" ? `${BOLD}Prompt:${RESET} ${DIM}(required)${RESET}` : `${DIM}Prompt: (required)${RESET}`;

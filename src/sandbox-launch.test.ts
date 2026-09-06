@@ -80,14 +80,37 @@ describe("sandboxDefinitionArgs", () => {
 });
 
 describe("sandboxExecShellPrefix", () => {
-  test("shell-quotes the profile path and each -D pair, no trailing space", () => {
+  test("defaults to the safe absolute /usr/bin/sandbox-exec (never a bare PATH lookup), no trailing space", () => {
     const prefix = sandboxExecShellPrefix("/tmp/a b/sandbox.sb", { AGENTDIR: "/x y", WORKTREE: "/w" });
-    expect(prefix).toBe("sandbox-exec -f '/tmp/a b/sandbox.sb' -D 'AGENTDIR=/x y' -D 'WORKTREE=/w'");
+    expect(prefix).toBe("'/usr/bin/sandbox-exec' -f '/tmp/a b/sandbox.sb' -D 'AGENTDIR=/x y' -D 'WORKTREE=/w'");
     expect(prefix.endsWith(" ")).toBe(false);
+    // Never emits a bare `sandbox-exec` token that would re-resolve PATH.
+    expect(prefix.startsWith("sandbox-exec ")).toBe(false);
   });
 
-  test("empty parameter map → just the -f profile, no trailing space", () => {
-    expect(sandboxExecShellPrefix("/tmp/sandbox.sb", {})).toBe("sandbox-exec -f '/tmp/sandbox.sb'");
+  test("empty parameter map → just the exec + -f profile, no trailing space", () => {
+    expect(sandboxExecShellPrefix("/tmp/sandbox.sb", {})).toBe("'/usr/bin/sandbox-exec' -f '/tmp/sandbox.sb'");
+  });
+
+  test("threads the resolved sandbox-exec path so the LINTED binary is the one launched (path with spaces)", () => {
+    // Manager finding: resolveSandboxExecPath returns an absolute path; that exact
+    // path must appear (shell-quoted) in the emitted launch — not a bare re-resolved
+    // `sandbox-exec`. A path with a space proves the quoting keeps it one argument.
+    const execPath = "/opt/my sandbox/sandbox-exec";
+    const prefix = sandboxExecShellPrefix("/tmp/p.sb", { AGENTDIR: "/a" }, execPath);
+    expect(prefix).toBe("'/opt/my sandbox/sandbox-exec' -f '/tmp/p.sb' -D 'AGENTDIR=/a'");
+    // The exact linted path leads the launch, shell-quoted as a single token.
+    expect(prefix.startsWith("'/opt/my sandbox/sandbox-exec' ")).toBe(true);
+  });
+
+  test("rejects an empty or non-absolute sandbox-exec path (never a bare PATH lookup)", () => {
+    expect(() => sandboxExecShellPrefix("/tmp/p.sb", {}, "")).toThrow(/requires an absolute sandbox-exec path/);
+    expect(() => sandboxExecShellPrefix("/tmp/p.sb", {}, "sandbox-exec")).toThrow(
+      /requires an absolute sandbox-exec path/,
+    );
+    expect(() => sandboxExecShellPrefix("/tmp/p.sb", {}, "./sandbox-exec")).toThrow(
+      /requires an absolute sandbox-exec path/,
+    );
   });
 });
 

@@ -2520,9 +2520,9 @@ describe("resumeAgent (native)", () => {
     // fallback when setsid is absent — the inherited SIG_IGN still covers that.
     expect(resumeScript).toContain("command -v setsid");
     // Mandatory sandbox: claude is wrapped by the sandbox-exec prefix on both arms.
-    expect(resumeScript).toMatch(/setsid sandbox-exec .* claude --resume/);
+    expect(resumeScript).toMatch(/setsid \S*sandbox-exec\S* .* claude --resume/);
     // Fallback bare launch is still present for hosts without setsid.
-    expect(resumeScript).toMatch(/^ *sandbox-exec .* claude --resume "/m);
+    expect(resumeScript).toMatch(/^ *\S*sandbox-exec\S* .* claude --resume "/m);
 
     // ORDERING (the subtle part): `trap '' HUP` must be installed BEFORE claude
     // is forked so the SIG_IGN disposition is inherited by the child. If the
@@ -2530,7 +2530,7 @@ describe("resumeAgent (native)", () => {
     // a stray SIGHUP and die — reintroducing the bug.
     const hupIdx = resumeScript.indexOf("trap '' HUP");
     const setsidGuardIdx = resumeScript.indexOf("command -v setsid");
-    const firstLaunchIdx = resumeScript.search(/(setsid )?sandbox-exec .* claude --resume "/);
+    const firstLaunchIdx = resumeScript.search(/(setsid )?\S*sandbox-exec\S* .* claude --resume "/);
     expect(hupIdx).toBeGreaterThan(-1);
     expect(hupIdx).toBeLessThan(firstLaunchIdx);
     // UNCONDITIONAL: the HUP-ignore must not be gated on setsid — it appears
@@ -3168,7 +3168,7 @@ describe("resumeAgent (native)", () => {
     // Mandatory sandbox: codex resume runs danger-full-access inside our wrapper.
     expect(resumeScript).toContain("-s danger-full-access");
     expect(resumeScript).not.toContain("-s workspace-write");
-    expect(resumeScript).toMatch(/setsid sandbox-exec .* codex resume/);
+    expect(resumeScript).toMatch(/setsid \S*sandbox-exec\S* .* codex resume/);
     // Must NOT use claude --resume.
     expect(resumeScript).not.toContain("claude --resume");
 
@@ -4778,8 +4778,8 @@ sandbox:
     const agentsMd = await Bun.file(join(agentDir, "repo", "AGENTS.md")).text();
     expect(start).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
     expect(start).not.toContain("-s workspace-write");
-    expect(start).toContain("setsid sandbox-exec -f");
-    expect(start).toContain("    sandbox-exec -f");
+    expect(start).toContain("setsid '/usr/bin/sandbox-exec' -f");
+    expect(start).toContain("    '/usr/bin/sandbox-exec' -f");
     expect(start).toContain("sandbox-proxy-launch");
     expect(start).toContain("export HTTPS_PROXY=\"$http_proxy\"");
     expect(start).toContain("<&0 2> \"$STDERR_LOG\" &");
@@ -4840,8 +4840,8 @@ sandbox:
     expect(resumedMeta.sandbox_proxy_port).toBe(43123);
     expect(resume).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
     expect(resume).not.toContain("-s workspace-write");
-    expect(resume).toContain("setsid sandbox-exec -f");
-    expect(resume).toContain("    sandbox-exec -f");
+    expect(resume).toContain("setsid '/usr/bin/sandbox-exec' -f");
+    expect(resume).toContain("    '/usr/bin/sandbox-exec' -f");
     expect(resume).toContain("sandbox-proxy-launch");
     expect(resume).toContain("export http_proxy=\"http://localhost:$PROXY_PORT\"");
     expect(resume).toContain("<&0 2> \"$STDERR_LOG\" &");
@@ -4864,8 +4864,8 @@ sandbox:
     const domains = await Bun.file(join(agentDir, "sandbox-domains.txt")).text();
 
     expect(start).toContain("export http_proxy=\"http://localhost:$PROXY_PORT\"");
-    expect(start).toContain("setsid sandbox-exec -f");
-    expect(start).toContain("    sandbox-exec -f");
+    expect(start).toContain("setsid '/usr/bin/sandbox-exec' -f");
+    expect(start).toContain("    '/usr/bin/sandbox-exec' -f");
     expect(start).toContain("-D 'AGENTDIR=");
     const worktreePath = join(agentDir, "repo");
     const projectDir = canonicalizeSandboxPath(claudeProjectDirFor(worktreePath));
@@ -4879,8 +4879,8 @@ sandbox:
     // GROUP 1: claude skips its own permission prompts only under the kernel.
     // The flag must sit inside the sandbox-exec-wrapped launch (after the
     // `sandbox-exec -f … claude` prefix), on both the setsid and fallback arms.
-    expect(start).toMatch(/setsid sandbox-exec -f[^\n]*claude --session-id[^\n]*--dangerously-skip-permissions/);
-    expect(start).toMatch(/\n {4}sandbox-exec -f[^\n]*claude --session-id[^\n]*--dangerously-skip-permissions/);
+    expect(start).toMatch(/setsid \S*sandbox-exec\S* -f[^\n]*claude --session-id[^\n]*--dangerously-skip-permissions/);
+    expect(start).toMatch(/\n {4}\S*sandbox-exec\S* -f[^\n]*claude --session-id[^\n]*--dangerously-skip-permissions/);
     expect(meta.sandbox.enabled).toBe(true);
     expect(meta.paths.allowRead).toContain(canonicalizeSandboxPath(tempDir));
     expect(meta.paths.allowWrite).toContain(canonicalizeSandboxPath(tempDir));
@@ -5062,15 +5062,15 @@ sandbox:
     expect(resumeProfile).toBe(spawnProfile);
     expect(resumedMeta.paths).toEqual(frozenPaths);
     expect(resumedMeta.sandbox_proxy_port).toBe(43131);
-    expect(resumeScript).toContain("setsid sandbox-exec -f");
-    expect(resumeScript).toContain("    sandbox-exec -f");
+    expect(resumeScript).toContain("setsid '/usr/bin/sandbox-exec' -f");
+    expect(resumeScript).toContain("    '/usr/bin/sandbox-exec' -f");
     expect(resumeScript).toContain("export HTTPS_PROXY=\"$http_proxy\"");
     expect(resumeScript).toContain("trap cleanup_sandbox_proxy EXIT");
     // GROUP 1: the resume launch gains --dangerously-skip-permissions only under
     // the kernel, inside the sandbox-exec-wrapped claude --resume line, on both
     // the setsid and fallback arms.
-    expect(resumeScript).toMatch(/setsid sandbox-exec -f[^\n]*claude --resume[^\n]*--dangerously-skip-permissions/);
-    expect(resumeScript).toMatch(/\n {4}sandbox-exec -f[^\n]*claude --resume[^\n]*--dangerously-skip-permissions/);
+    expect(resumeScript).toMatch(/setsid \S*sandbox-exec\S* -f[^\n]*claude --resume[^\n]*--dangerously-skip-permissions/);
+    expect(resumeScript).toMatch(/\n {4}\S*sandbox-exec\S* -f[^\n]*claude --resume[^\n]*--dangerously-skip-permissions/);
   });
 
   test("sandbox resume fail-hard leaves no tmux session or resume script", async () => {
@@ -5212,7 +5212,7 @@ sandbox:
     expect(start).toContain("sandbox-exec");
     expect(start).toContain("sandbox-proxy-launch");
     expect(start).toContain("export http_proxy=");
-    expect(start).toMatch(/sandbox-exec .* agy --dangerously-skip-permissions/);
+    expect(start).toMatch(/\S*sandbox-exec\S* .* agy --dangerously-skip-permissions/);
     // Frozen metadata records the sandbox as enabled (mandatory).
     const meta = await Bun.file(join(agentDir, "meta.json")).json();
     expect(meta.sandbox.enabled).toBe(true);
@@ -5282,7 +5282,7 @@ sandbox:
     // Restarted through the resume path with a fresh proxy port.
     expect(refreshedMeta.sandbox_proxy_port).toBe(43141);
     const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
-    expect(resumeScript).toContain("setsid sandbox-exec -f");
+    expect(resumeScript).toContain("setsid '/usr/bin/sandbox-exec' -f");
     const worktreePath = join(agentDir, "repo");
     expect(resumeScript).toContain(
       `-D 'PROJECTDIR=${canonicalizeSandboxPath(claudeProjectDirFor(worktreePath))}'`,
@@ -5746,7 +5746,7 @@ sandbox:
       resetSendSpawnRunner();
     }
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
-    expect(resume).toContain("setsid sandbox-exec -f");
+    expect(resume).toContain("setsid '/usr/bin/sandbox-exec' -f");
     expect(await Bun.file(join(agentDir, "agent.log")).text()).not.toContain("does not match the sealed record");
   });
 
@@ -6565,15 +6565,15 @@ sandbox:
     // setsid defense-in-depth with a graceful fallback to a bare launch.
     // Mandatory sandbox: claude is wrapped by the sandbox-exec prefix on both arms.
     expect(startSh).toContain("command -v setsid");
-    expect(startSh).toMatch(/setsid sandbox-exec .* claude --session-id/);
-    expect(startSh).toMatch(/^ *sandbox-exec .* claude --session-id "/m);
+    expect(startSh).toMatch(/setsid \S*sandbox-exec\S* .* claude --session-id/);
+    expect(startSh).toMatch(/^ *\S*sandbox-exec\S* .* claude --session-id "/m);
 
     // ORDERING + UNCONDITIONAL: `trap '' HUP` must precede the claude launch
     // (so SIG_IGN is inherited by the child) AND precede the `command -v setsid`
     // guard (so the bare-launch fallback path still gets the protection).
     const hupIdx = startSh.indexOf("trap '' HUP");
     const setsidGuardIdx = startSh.indexOf("command -v setsid");
-    const firstLaunchIdx = startSh.search(/(setsid )?sandbox-exec .* claude --session-id "/);
+    const firstLaunchIdx = startSh.search(/(setsid )?\S*sandbox-exec\S* .* claude --session-id "/);
     expect(hupIdx).toBeGreaterThan(-1);
     expect(hupIdx).toBeLessThan(firstLaunchIdx);
     expect(hupIdx).toBeLessThan(setsidGuardIdx);
@@ -7018,7 +7018,7 @@ sandbox:
     // WITHOUT the kernel — but the kernel is now always present). The flag is
     // emitted only inside the sandbox-exec-wrapped launch.
     expect(startSh).toContain("--dangerously-skip-permissions");
-    expect(startSh).toMatch(/sandbox-exec .* claude .*--dangerously-skip-permissions/);
+    expect(startSh).toMatch(/\S*sandbox-exec\S* .* claude .*--dangerously-skip-permissions/);
   });
 
   test("cleans up on worktree creation failure", async () => {
@@ -8223,7 +8223,7 @@ body`,
       const startSh = await Bun.file(join(agentsDir, "codex-agent-1", "start.sh")).text();
       // Canonical §3.3 launch line components, model is shell-quoted. Mandatory
       // sandbox: codex is wrapped by sandbox-exec and runs -s danger-full-access.
-      expect(startSh).toMatch(/setsid sandbox-exec .* codex -m 'gpt-5.4-mini'/);
+      expect(startSh).toMatch(/setsid \S*sandbox-exec\S* .* codex -m 'gpt-5.4-mini'/);
       expect(startSh).toContain("-a never");
       expect(startSh).toContain("-s danger-full-access");
       expect(startSh).not.toContain("-s workspace-write");
@@ -8427,7 +8427,7 @@ body`,
       expect(settings.length).toBeGreaterThan(0);
       // Claude start.sh launches claude, not codex (sandbox-wrapped on both).
       const startSh = await Bun.file(join(agentsDir, "claude-regression-guard", "start.sh")).text();
-      expect(startSh).toMatch(/setsid sandbox-exec .* claude/);
+      expect(startSh).toMatch(/setsid \S*sandbox-exec\S* .* claude/);
       expect(startSh).not.toMatch(/sandbox-exec .* codex/);
       expect(startSh).toContain("--session-id");
       // No codex artifacts in the worktree
@@ -8521,7 +8521,7 @@ body`,
       });
       expect(result.ok).toBe(true);
       const startSh = await Bun.file(join(agentsDir, "codex-new-model", "start.sh")).text();
-      expect(startSh).toMatch(/setsid sandbox-exec .* codex -m 'gpt-9-future'/);
+      expect(startSh).toMatch(/setsid \S*sandbox-exec\S* .* codex -m 'gpt-9-future'/);
     });
 
     // Round-2 review HIGH: the codex `-s workspace-write` sandbox is granted

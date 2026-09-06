@@ -1049,6 +1049,12 @@ interface PreparedSandbox {
   domainsPath: string;
   parameterValues: Record<string, string>;
   proxyPort: number;
+  /**
+   * The ABSOLUTE sandbox-exec path resolved (and linted) by prepareSandbox. It is
+   * threaded into the emitted launch prefix so the binary compile-checked is the
+   * one launched — never a bare `PATH` re-resolution at launch time.
+   */
+  sandboxExecPath: string;
 }
 
 export function mergeSandboxLayerConfigs(
@@ -1185,7 +1191,7 @@ async function prepareSandbox(
 
   await lintSandboxProfile(runner, sandboxExecPath, profilePath, parameterValues);
 
-  return { config, paths, profile, profilePath, domainsPath, parameterValues, proxyPort };
+  return { config, paths, profile, profilePath, domainsPath, parameterValues, proxyPort, sandboxExecPath };
 }
 
 async function stopSandboxProxyForAgent(agentDir: string, meta: AgentMeta): Promise<void> {
@@ -1678,18 +1684,32 @@ export async function resumeAgent(
       await logAgent(agentDir, `[resume] ${message}`);
       return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${message}` };
     }
-    // Past this point the sandbox is prepared or we have already returned; the
-    // wrapper is never absent on a resume.
+    // MANDATORY sandbox: the sandbox is prepared above or we have already
+    // returned. Assert the invariant explicitly so no future refactor can reach
+    // the launch with a null prepared sandbox and render a BARE (unwrapped)
+    // claude line — the claude equivalent of the codex/agy generators' throw.
+    if (preparedResumeSandbox === null) {
+      const message = `sandbox refused: internal invariant — resume reached launch with no prepared sandbox for '${agent.id}'`;
+      await logAgent(agentDir, `[resume] ${message}`);
+      return { ok: false, exitCode: 1, stdout: "", stderr: message };
+    }
+    // preparedResumeSandbox is now non-null: the preamble/prefix are ALWAYS the
+    // real wrapper, never an empty fallback.
+    const resumeSandbox: PreparedSandbox = preparedResumeSandbox;
 
     // Build exit script path
     const absExitScript = join(agentDir, "exit-check.sh");
     const resumeScript = join(agentDir, "resume.sh");
-    const sandboxResumePreamble = preparedResumeSandbox
-      ? sandboxProxyScriptPreamble({ agentDir, port: preparedResumeSandbox.proxyPort, agentId: agent.id })
-      : "";
-    const sandboxResumeLaunchPrefix = preparedResumeSandbox
-      ? `${sandboxExecShellPrefix(preparedResumeSandbox.profilePath, preparedResumeSandbox.parameterValues)} `
-      : "";
+    const sandboxResumePreamble = sandboxProxyScriptPreamble({
+      agentDir,
+      port: resumeSandbox.proxyPort,
+      agentId: agent.id,
+    });
+    const sandboxResumeLaunchPrefix = `${sandboxExecShellPrefix(
+      resumeSandbox.profilePath,
+      resumeSandbox.parameterValues,
+      resumeSandbox.sandboxExecPath,
+    )} `;
 
     if (isCodexBackedCli(resumeCli)) {
       // ── Codex resume branch (SPEC §5.8 + §6 Phase 7) ─────────────────────────
@@ -1996,19 +2016,15 @@ export async function resumeAgent(
       if (resumeEffort) {
         claudeArgs = claudeArgs ? `${claudeArgs} --effort ${resumeEffort}` : `--effort ${resumeEffort}`;
       }
-      // Skip claude's own permission prompts ONLY when the kernel sandbox is the
-      // enforcement layer (Adam, 2026-09-02: never yolo without the kernel). This
-      // is the resume twin of the spawn-side append: the flag is added only when
-      // `preparedResumeSandbox` is non-null — the same condition that installs
-      // `sandboxResumeLaunchPrefix` below — so it is emitted only inside the
-      // sandbox-exec-wrapped launch, keeping a disabled resume byte-identical to
-      // today (the claude-resume-sh-baseline fixture pins that). This branch is
-      // claude-only (codex/agy resume are the sibling `if`s above).
-      if (preparedResumeSandbox !== null) {
-        claudeArgs = claudeArgs
-          ? `${claudeArgs} --dangerously-skip-permissions`
-          : "--dangerously-skip-permissions";
-      }
+      // Skip claude's own permission prompts because the kernel sandbox is the
+      // enforcement layer (Adam, 2026-09-02: never yolo WITHOUT the kernel — but
+      // the kernel is now MANDATORY on every resume, so the flag is always added
+      // inside the sandbox-exec-wrapped launch). `resumeSandbox` is guaranteed
+      // non-null by the invariant guard above. This branch is claude-only
+      // (codex/agy resume are the sibling `if`s above).
+      claudeArgs = claudeArgs
+        ? `${claudeArgs} --dangerously-skip-permissions`
+        : "--dangerously-skip-permissions";
 
       // Rehire resumes the archived coordinator session rather than using the
       // ordinary dashboard reset behavior. Coordinator hooks/permissions live
@@ -6173,6 +6189,20 @@ export async function newAgent(
     await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: ${message}`);
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${message}` };
   }
+  // MANDATORY sandbox: the sandbox is prepared above or we have already returned.
+  // Assert the invariant so no future refactor can reach the launch with a null
+  // prepared sandbox and render a BARE (unwrapped) claude line. Mirror the
+  // prepare catch (leave the agent stopped) rather than launch unwrapped.
+  if (preparedSandbox === null) {
+    const message = `sandbox refused: internal invariant — spawn reached launch with no prepared sandbox for '${id}'`;
+    initialMetaJson.state = "stopped";
+    initialMetaJson.state_updated_at = Math.floor(Date.now() / 1000);
+    await writeMetaJsonAtomic(agentDir, initialMetaJson);
+    await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: ${message}`);
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${message}` };
+  }
+  // preparedSandbox is now non-null: the launch prefix is ALWAYS the real wrapper.
+  const spawnSandbox: PreparedSandbox = preparedSandbox;
 
   // 13. meta.json was written early (before mkdir worktree) so the dashboard
   // does not flag the in-progress agent dir as orphaned during a slow
@@ -6251,15 +6281,14 @@ When your task is complete:
   if (!isCodexBackedCli(agentCli) && effort) {
     claudeArgs = claudeArgs ? `${claudeArgs} --effort ${effort}` : `--effort ${effort}`;
   }
-  // Skip claude's own permission prompts ONLY when the kernel sandbox is the
-  // enforcement layer (Adam, 2026-09-02: never yolo without the kernel). The
-  // flag is appended only when `preparedSandbox` is non-null — which is exactly
-  // when `sandboxLaunchPrefix` wraps the launch below — so it is emitted only
-  // inside the sandbox-exec-wrapped claude line and NEVER on a disabled spawn
-  // (where the launch stays byte-identical to today). Codex already selects its
-  // own no-prompt mode (`-a never`); agy is out of scope (no wrapper yet), so
-  // this claude-only flag never leaks into their launch lines.
-  if (!isCodexBackedCli(agentCli) && agentCli !== "agy" && preparedSandbox !== null) {
+  // Skip claude's own permission prompts because the kernel sandbox is the
+  // enforcement layer (Adam, 2026-09-02: never yolo WITHOUT the kernel — but the
+  // kernel is now MANDATORY on every spawn, so `spawnSandbox` is always present
+  // and the flag is always emitted inside the sandbox-exec-wrapped claude line).
+  // Codex selects its own no-prompt mode (`-a never`); agy bakes
+  // `--dangerously-skip-permissions` into its own D2 launch line — so this
+  // claude-only append never leaks into their lines.
+  if (!isCodexBackedCli(agentCli) && agentCli !== "agy") {
     claudeArgs = claudeArgs
       ? `${claudeArgs} --dangerously-skip-permissions`
       : "--dangerously-skip-permissions";
@@ -6331,23 +6360,31 @@ echo ""
   const qStartExitScript = shellQuote(absExitScript);
   const qStartAgentLog = shellQuote(join(agentDir, "agent.log"));
   const qStartStderrLog = shellQuote(join(agentDir, "claude.stderr.log"));
-  const sandboxStartPreamble = preparedSandbox
-    ? sandboxProxyScriptPreamble({ agentDir, port: preparedSandbox.proxyPort, agentId: id })
-    : "";
-  const sandboxLaunchPrefix = preparedSandbox
-    ? `${sandboxExecShellPrefix(preparedSandbox.profilePath, preparedSandbox.parameterValues)} `
-    : "";
+  // spawnSandbox is guaranteed non-null by the invariant guard above, so the
+  // preamble/prefix are ALWAYS the real wrapper — never an empty fallback. The
+  // resolved+linted sandbox-exec path is threaded so the launched binary is the
+  // one that was compile-checked.
+  const sandboxStartPreamble = sandboxProxyScriptPreamble({
+    agentDir,
+    port: spawnSandbox.proxyPort,
+    agentId: id,
+  });
+  const sandboxLaunchPrefix = `${sandboxExecShellPrefix(
+    spawnSandbox.profilePath,
+    spawnSandbox.parameterValues,
+    spawnSandbox.sandboxExecPath,
+  )} `;
 
   let startContent: string;
   if (isCodexBackedCli(agentCli)) {
     // Codex spawn branch — SPEC §6 Phase 4. The launch line is the canonical
     // §3.3 form: `codex -m <model> -a never -s <mode>
-    // --dangerously-bypass-hook-trust <inline -c flags> "<prompt>"`. The mode
-    // is workspace-write normally and danger-full-access under our wrapper. The
-    // path-safety + dispatcher precheck guarantees ran above (we wouldn't
-    // be here on failure). PID variable + meta-field stay `CLAUDE_PID` /
-    // `claude_pid` so the watchdog and other readers don't break — renaming
-    // is its own follow-up.
+    // --dangerously-bypass-hook-trust <inline -c flags> "<prompt>"`. Mandatory
+    // sandbox: the mode is ALWAYS danger-full-access (codex's own sandbox off,
+    // our Seatbelt wrapper on). The path-safety + dispatcher precheck guarantees
+    // ran above (we wouldn't be here on failure). PID variable + meta-field stay
+    // `CLAUDE_PID` / `claude_pid` so the watchdog and other readers don't break —
+    // renaming is its own follow-up.
     const { buildCodexStartContent } = await import("./codex-spawn");
     startContent = buildCodexStartContent({
       agentId: id,

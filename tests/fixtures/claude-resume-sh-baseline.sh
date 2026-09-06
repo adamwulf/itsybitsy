@@ -66,9 +66,9 @@ else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid sandbox-exec -f '<PROFILE>' -D 'SCRATCHPAD=<VALUE>' -D 'GITDIR=<VALUE>' -D 'PROJECTDIR=<VALUE>' -D 'PARENTCLAUDE=<VALUE>' -D 'REPOAGENTS=<VALUE>' -D 'AGENTDIR=<VALUE>' -D 'WORKTREE=<VALUE>' claude --resume "<SESSION-UUID>" --model sonnet --dangerously-skip-permissions 2> "$STDERR_LOG" &
+    setsid '/usr/bin/sandbox-exec' -f '<PROFILE>' -D 'SCRATCHPAD=<VALUE>' -D 'GITDIR=<VALUE>' -D 'PROJECTDIR=<VALUE>' -D 'PARENTCLAUDE=<VALUE>' -D 'REPOAGENTS=<VALUE>' -D 'AGENTDIR=<VALUE>' -D 'WORKTREE=<VALUE>' claude --resume "<SESSION-UUID>" --model sonnet --dangerously-skip-permissions 2> "$STDERR_LOG" &
 else
-    sandbox-exec -f '<PROFILE>' -D 'SCRATCHPAD=<VALUE>' -D 'GITDIR=<VALUE>' -D 'PROJECTDIR=<VALUE>' -D 'PARENTCLAUDE=<VALUE>' -D 'REPOAGENTS=<VALUE>' -D 'AGENTDIR=<VALUE>' -D 'WORKTREE=<VALUE>' claude --resume "<SESSION-UUID>" --model sonnet --dangerously-skip-permissions 2> "$STDERR_LOG" &
+    '/usr/bin/sandbox-exec' -f '<PROFILE>' -D 'SCRATCHPAD=<VALUE>' -D 'GITDIR=<VALUE>' -D 'PROJECTDIR=<VALUE>' -D 'PARENTCLAUDE=<VALUE>' -D 'REPOAGENTS=<VALUE>' -D 'AGENTDIR=<VALUE>' -D 'WORKTREE=<VALUE>' claude --resume "<SESSION-UUID>" --model sonnet --dangerously-skip-permissions 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
 log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"

@@ -88,7 +88,11 @@ export interface BuildCodexStartContentInput {
   absAgentLog: string;
   /** Absolute path to claude.stderr.log (sidecar; reused name for back-compat). */
   absStderrLog: string;
-  /** Extra directories Codex should treat as writable under workspace-write. */
+  /**
+   * Extra directories passed to codex as `--add-dir` (codex-side writable roots).
+   * Under the mandatory danger-full-access wrapper these are inert for codex's own
+   * sandbox — the Seatbelt profile is the fence — but they are still emitted.
+   */
   extraWritableRoots?: string[];
   /** Configure Codex to use Sakana Fugu and load its key at launch. */
   fugu?: boolean;
@@ -107,8 +111,8 @@ export interface BuildCodexStartContentInput {
  * Render the codex start.sh body for an agent. Mirrors the claude start.sh
  * skeleton (setsid + SIGHUP ignore + pid capture + meta-json write + wait
  * + exit-check) but launches codex with:
- *   - `-m <model> -a never -s <mode> --dangerously-bypass-hook-trust`
- *     (`workspace-write` normally; `danger-full-access` inside our Seatbelt wrapper)
+ *   - `-m <model> -a never -s danger-full-access --dangerously-bypass-hook-trust`
+ *     (mandatory sandbox: codex's own sandbox is off, our Seatbelt wrapper on)
  *   - inline `-c 'hooks.<Event>=[...]'` flags from buildCodexLaunchArgs
  *   - the prompt as a positional `"$(cat <prompt-file>)"`
  *
@@ -302,7 +306,11 @@ export interface BuildCodexResumeContentInput {
   absAgentLog: string;
   /** Absolute path to claude.stderr.log (sidecar; reused name for back-compat). */
   absStderrLog: string;
-  /** Extra directories Codex should treat as writable under workspace-write. */
+  /**
+   * Extra directories passed to codex as `--add-dir` (codex-side writable roots).
+   * Under the mandatory danger-full-access wrapper these are inert for codex's own
+   * sandbox — the Seatbelt profile is the fence — but they are still emitted.
+   */
   extraWritableRoots?: string[];
   /** Reconfigure Sakana Fugu for the resumed Codex session. */
   fugu?: boolean;

@@ -60,17 +60,30 @@ export function sandboxDefinitionArgs(parameterValues: Record<string, string>): 
 }
 
 /**
- * The shell-quoted `sandbox-exec -f <profile> -D <k=v> …` prefix spliced ahead of
- * the CLI launch line in start.sh / resume.sh. Takes the profile path and the
+ * The shell-quoted `<sandbox-exec> -f <profile> -D <k=v> …` prefix spliced ahead
+ * of the CLI launch line in start.sh / resume.sh. Takes the profile path and the
  * parameter map directly (not a worktree-shaped PreparedSandbox) so the system
- * coordinator can call it with just its own two values. No trailing space —
- * callers append their own separator before the command.
+ * coordinator can call it with just its own values. No trailing space — callers
+ * append their own separator before the command.
+ *
+ * `sandboxExecPath` is the ABSOLUTE executable to launch — thread the SAME path
+ * resolved (and linted) by {@link resolveSandboxExecPath} so the binary that was
+ * compile-checked is exactly the one launched; a bare `sandbox-exec` here would
+ * re-resolve `PATH` at launch and could run a different binary. It defaults to a
+ * safe fixed system path (`/usr/bin/sandbox-exec`), NEVER a bare `PATH` lookup,
+ * and must be absolute — an empty or relative value is rejected.
  */
 export function sandboxExecShellPrefix(
   profilePath: string,
   parameterValues: Record<string, string>,
+  sandboxExecPath: string = "/usr/bin/sandbox-exec",
 ): string {
-  const parts = ["sandbox-exec", "-f", shellQuote(profilePath)];
+  if (!sandboxExecPath.startsWith("/")) {
+    throw new Error(
+      `sandboxExecShellPrefix requires an absolute sandbox-exec path, got ${JSON.stringify(sandboxExecPath)} (a bare PATH lookup would let the launched binary differ from the linted one)`,
+    );
+  }
+  const parts = [shellQuote(sandboxExecPath), "-f", shellQuote(profilePath)];
   for (const [key, value] of Object.entries(parameterValues)) {
     parts.push("-D", shellQuote(`${key}=${value}`));
   }

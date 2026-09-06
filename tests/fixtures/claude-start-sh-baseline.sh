@@ -66,9 +66,9 @@ else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid sandbox-exec -f '<PROFILE>' -D 'SCRATCHPAD=<VALUE>' -D 'PARENTCLAUDE=<VALUE>' -D 'REPOAGENTS=<VALUE>' -D 'AGENTDIR=<VALUE>' -D 'WORKTREE=<VALUE>' -D 'PROJECTDIR=<VALUE>' -D 'GITDIR=<VALUE>' claude --session-id "<SESSION-UUID>" --model sonnet --effort xhigh --dangerously-skip-permissions "$(cat '<AGENTSDIR>/claude-snapshot/prompt.txt')" 2> "$STDERR_LOG" &
+    setsid '/usr/bin/sandbox-exec' -f '<PROFILE>' -D 'SCRATCHPAD=<VALUE>' -D 'PARENTCLAUDE=<VALUE>' -D 'REPOAGENTS=<VALUE>' -D 'AGENTDIR=<VALUE>' -D 'WORKTREE=<VALUE>' -D 'PROJECTDIR=<VALUE>' -D 'GITDIR=<VALUE>' claude --session-id "<SESSION-UUID>" --model sonnet --effort xhigh --dangerously-skip-permissions "$(cat '<AGENTSDIR>/claude-snapshot/prompt.txt')" 2> "$STDERR_LOG" &
 else
-    sandbox-exec -f '<PROFILE>' -D 'SCRATCHPAD=<VALUE>' -D 'PARENTCLAUDE=<VALUE>' -D 'REPOAGENTS=<VALUE>' -D 'AGENTDIR=<VALUE>' -D 'WORKTREE=<VALUE>' -D 'PROJECTDIR=<VALUE>' -D 'GITDIR=<VALUE>' claude --session-id "<SESSION-UUID>" --model sonnet --effort xhigh --dangerously-skip-permissions "$(cat '<AGENTSDIR>/claude-snapshot/prompt.txt')" 2> "$STDERR_LOG" &
+    '/usr/bin/sandbox-exec' -f '<PROFILE>' -D 'SCRATCHPAD=<VALUE>' -D 'PARENTCLAUDE=<VALUE>' -D 'REPOAGENTS=<VALUE>' -D 'AGENTDIR=<VALUE>' -D 'WORKTREE=<VALUE>' -D 'PROJECTDIR=<VALUE>' -D 'GITDIR=<VALUE>' claude --session-id "<SESSION-UUID>" --model sonnet --effort xhigh --dangerously-skip-permissions "$(cat '<AGENTSDIR>/claude-snapshot/prompt.txt')" 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
 log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"

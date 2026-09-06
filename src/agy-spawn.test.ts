@@ -9,6 +9,7 @@
  */
 
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-log-launch";
 import { mkdtemp, mkdir, rm } from "fs/promises";
 import { realpathSync } from "fs";
 import { tmpdir } from "os";
@@ -49,6 +50,14 @@ describe("buildAgyStartContent — launch line", () => {
     absAgentLog: "/tmp/test/agent.log",
     absStderrLog: "/tmp/test/claude.stderr.log",
     ...sandboxFields(),
+  });
+
+  test("starts collection before both gated agy launch arms", () => {
+    const content = buildAgyStartContent({ ...baseInput(),
+      sandboxScriptPreamble: sandboxDenialScriptPreamble("/tmp/test"),
+      sandboxExecPrefix: sandboxDenialExecPrefix("/usr/bin/sandbox-exec -f /tmp/test/sandbox.sb") });
+    expect(content.indexOf("ib sandbox-log-watch")).toBeLessThan(content.indexOf("setsid /bin/sh -c"));
+    expect(content.match(/sandbox-log-gate \/usr\/bin\/sandbox-exec[^\n]* agy /g)?.length).toBe(2);
   });
 
   test("contains the canonical D2 flags with a shell-quoted model", () => {
@@ -184,6 +193,14 @@ describe("buildAgyResumeContent — launch line", () => {
     absAgentLog: "/tmp/test/agent.log",
     absStderrLog: "/tmp/test/claude.stderr.log",
     ...sandboxFields(),
+  });
+
+  test("resumes collection before both gated agy launch arms", () => {
+    const content = buildAgyResumeContent({ ...baseInput(),
+      sandboxScriptPreamble: sandboxDenialScriptPreamble("/tmp/test"),
+      sandboxExecPrefix: sandboxDenialExecPrefix("/usr/bin/sandbox-exec -f /tmp/test/sandbox.sb") });
+    expect(content.indexOf("ib sandbox-log-watch")).toBeLessThan(content.indexOf("setsid /bin/sh -c"));
+    expect(content.match(/sandbox-log-gate \/usr\/bin\/sandbox-exec[^\n]* agy /g)?.length).toBe(2);
   });
 
   test("carries --conversation <uuid> (shell-quoted) and re-passes --model", () => {

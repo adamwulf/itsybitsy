@@ -3644,6 +3644,9 @@ describe("resumeAgent (native)", () => {
       // regular resume path (which would say "session_id" or similar).
       if (result.ok) {
         expect(result.stdout).toContain("Reset coordinator");
+        const start = await Bun.file(join(coordDir, "start.sh")).text();
+        expect(start).toContain("ib sandbox-log-watch");
+        expect(start).toContain("sandbox-log-gate '/usr/bin/sandbox-exec'");
       } else {
         expect(result.stderr).toContain("respawn");
       }
@@ -8077,6 +8080,10 @@ sandbox:
     setNewAgentSpawnRunner(mockSpawnRunner());
     const result = await newAgent(coordRepo, "start", { type: "coordinator", _cwd: coordRepo });
     expect(result.ok).toBe(true);
+    const coordinatorStart = await Bun.file(join(coordRepo, ".ittybitty", "agents", "myrepo", "start.sh")).text();
+    expect(coordinatorStart.indexOf("ib sandbox-log-watch")).toBeGreaterThan(0);
+    expect(coordinatorStart.indexOf("ib sandbox-log-watch")).toBeLessThan(coordinatorStart.indexOf("setsid /bin/sh -c"));
+    expect(coordinatorStart.match(/sandbox-log-gate '\/usr\/bin\/sandbox-exec'/g)?.length).toBe(2);
 
     const coordId = result.stdout.trim();
     const meta = await Bun.file(join(coordRepo, ".ittybitty", "agents", coordId, "meta.json")).json();

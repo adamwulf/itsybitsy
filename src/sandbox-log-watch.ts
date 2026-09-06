@@ -90,6 +90,8 @@ export async function watchSandboxLog(opts: SandboxLogOptions): Promise<number> 
       const now = performance.now();
       const currentOwner = reader.read(owner.pid);
       if (stopping || existsSync(join(opts.dir, "stop")) || !currentOwner || processIdentity(currentOwner) !== processIdentity(owner)) stopAt ??= now + 1000;
+      const currentRoot = attribution && reader.read(attribution.root.pid);
+      if (attribution && (!currentRoot || processIdentity(currentRoot) !== processIdentity(attribution.root))) stopAt ??= now + 1000;
       if (stopAt !== undefined && now >= stopAt) break;
       if (stream.exitCode !== null || failed) {
         if (stopAt !== undefined) break;
@@ -129,13 +131,14 @@ export async function watchSandboxLog(opts: SandboxLogOptions): Promise<number> 
         }
         attribution.observe(samples, now);
         active = samples;
-        for (let index = pending.length - 1; index >= 0; index--) {
+        for (let index = 0; index < pending.length;) {
           const item = pending[index]!;
           const identity = attribution.attribute(item.report);
           if (identity) {
             if (budget.accept(item.report, identity, now)) appendFileSync(opts.agentLog, `${formatSandboxRecord(item.report, identity, launch)}\n`);
             pending.splice(index, 1);
           } else if (now - item.received > 500) pending.splice(index, 1);
+          else index++;
         }
       } else {
         // Before root registration all kernel reports are unrelated/unknown.

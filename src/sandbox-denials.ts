@@ -43,7 +43,7 @@ export function parseSandboxReport(line: string, boot: string, options: { liveSt
     if (!Number.isSafeInteger(pid) || pid > 2147483647 || !Number.isSafeInteger(duplicates)) return null;
     // Duplicate summaries describe earlier attempts whose timestamps are absent.
     // They cannot safely be attributed using the summary's delivery timestamp.
-    if (duplicates) return null;
+    if (m[1] !== undefined) return null;
     const mach = BigInt(r.machTimestamp);
     return { timestamp: r.timestamp, epoch, mach, boot, pid, process: m[2]!,
       operation: m[4]!, target: m[5], duplicates,

@@ -48,6 +48,7 @@ describe("kernel report parsing", () => {
     raw({ eventMessage: "Sandbox: cat(42) deny(1) file-read-data /x\nforged" }),
     raw({ eventMessage: "Sandbox: cat(9999999999999) deny(1) file-read-data /x" }),
     raw({ eventMessage: "1 duplicate report for Sandbox: cat(42) deny(1) file-read-data /x" }),
+    raw({ eventMessage: "0 duplicate report for Sandbox: cat(42) deny(1) file-read-data /x" }),
   ])("rejects malformed, irrelevant, ambiguous or coalesced input %#", line => {
     expect(parseSandboxReport(line, boot)).toBeNull();
   });

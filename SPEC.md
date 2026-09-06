@@ -52,6 +52,7 @@ When a new agent is created (`ib new-agent "prompt"`):
 
 11. **Write start.sh**: A bash script that:
     - Clears `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` env vars (allows nesting)
+    - Starts a launch-owned kernel-denial collector outside Seatbelt, confirms stream readiness, and registers the CLI process identity before the mandatory sandbox wrapper runs (all repository-agent CLIs; global `@system` remains deferred)
     - Starts `claude --session-id <uuid> <args> "$(cat prompt.txt)"` in background
     - Captures the Claude PID into `meta.json`
     - Runs `exit-check.sh` after Claude exits
@@ -216,7 +217,7 @@ Pause (`ib pause <id>`) stops the agent but preserves all state:
 Resume (`ib resume <id>`) restarts a stopped agent:
 
 1. Read `session_id` from `meta.json` (required for Claude `--resume`)
-2. Write `resume.sh` with `claude --resume <session-id>` command
+2. Write `resume.sh` with `claude --resume <session-id>` command and a fresh launch-owned denial collector using the same readiness, identity-registration, and cleanup protocol as `start.sh` (other CLIs use their corresponding resume command)
 3. Start new tmux session running `resume.sh`
 4. Auto-accept workspace trust
 5. Send resume nudge message: "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line."
@@ -799,7 +800,7 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 
 **Fail closed**: malformed hook stdin, a non-string `tool_name`, and a **missing or unreadable `meta.json`** all **deny** (Phase B removed the historical allow-on-error fallbacks). The `@system` coordinator has no `meta.json`; its lists come from `_all.md ∪ system.md`, resolved **live** at hook time (writes to the agent-types dir are protected by the hook), and a layer that fails to load yields empty lists — strict, never permissive.
 
-**Logging**: Denials are appended to the agent's `agent.log` keeping the exact prefix `[PreToolUse] Permission denied: <tool> (<params>)` that the **Denials tab** of `ib watch` parses (`src/agents.ts::parseDenials`), plus ` — <reason>` naming the **operation**, the **resolved path**, and the **rule** (a `paths.deny` hit versus no matching allow entry). Kernel `sandbox-exec` denials never reach the agent log, so the advisory Bash scanner is what surfaces an honest `cat ~/.ssh/id_rsa` in the tab before the kernel refuses it.
+**Logging**: Hook denials retain the exact prefix `[PreToolUse] Permission denied: <tool> (<params>)`, plus ` — <reason>` naming the operation, resolved path, and rule. The launch-owned `ib sandbox-log-watch` additionally appends `[Sandbox]` kernel reports when native process birth identity, descendant ancestry, and monotonic observations safely establish attribution. The DENIALS pane parses both, plus `[SandboxCollector]` warnings/errors. Collection is independent of the dashboard and watchdog; its failure remains visible and never bypasses the mandatory sandbox wrapper. Unique per-launch artifacts and stop-file cleanup avoid killing a replacement collector by a reused PID. Unknown/short-lived processes outside observed intervals, OS-coalesced summaries, and missing reports are not guessed or presented as a complete audit. The rollout guide documents live evidence, bounds, and practical coverage limits.
 
 **State write side effect**: PreToolUse fires before every tool call, so the path-check handler also writes `state: "running"` to the agent's `meta.json` (via `writeAgentState()`). This flips state out of `waiting` when Claude resumes after a background-tool completion. PreToolUse is used (rather than PostToolUse) because it cannot race with Stop — Stop fires after the final tool call has completed, so a late PostToolUse could overwrite a legitimate `complete`/`stopped` state. Skipped for `@system` (no `meta.json`).
 

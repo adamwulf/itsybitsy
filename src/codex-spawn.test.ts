@@ -22,6 +22,7 @@ import {
 } from "./codex-spawn";
 import { CODEX_REGISTERED_EVENTS } from "./codex-config";
 import { setUserHome, resetUserHome } from "./home";
+import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-log-launch";
 
 // Mandatory sandbox: every codex launch is wrapped now, so the builders REQUIRE
 // the proxy preamble + sandbox-exec prefix (they throw otherwise) and always run
@@ -71,6 +72,15 @@ describe("buildCodexStartContent — launch line", () => {
     expect(content).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
     expect(content).not.toContain("-s workspace-write");
     expect(content).toMatch(/sandbox-exec [^\n]* codex [^\n]* <&0 2> "\$STDERR_LOG" &/);
+  });
+
+  test.each([false, true])("start owns collection before both CLI launch arms (fugu=%p)", fugu => {
+    const content = buildCodexStartContent({ ...baseInput(), fugu,
+      sandboxScriptPreamble: SANDBOX_PREAMBLE + sandboxDenialScriptPreamble("/tmp/test"),
+      sandboxExecPrefix: sandboxDenialExecPrefix(SANDBOX_PREFIX) });
+    expect(content.indexOf("ib sandbox-log-watch")).toBeLessThan(content.indexOf("setsid /bin/sh -c"));
+    expect(content.match(/sandbox-log-gate sandbox-exec[^\n]* codex -m/g)?.length).toBe(2);
+    expect(content).toContain("trap 'cleanup_sandbox_log; cleanup_sandbox_proxy' EXIT");
   });
 
   test("REFUSES a launch without the complete wrapper (mandatory sandbox)", () => {
@@ -338,6 +348,14 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     expect(content).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
     expect(content).not.toContain("-s workspace-write");
     expect(content).toMatch(/sandbox-exec [^\n]* codex resume [^\n]* <&0 2> "\$STDERR_LOG" &/);
+  });
+
+  test.each([false, true])("resume owns collection before both CLI launch arms (fugu=%p)", fugu => {
+    const content = buildCodexResumeContent({ ...baseInput(), fugu,
+      sandboxScriptPreamble: SANDBOX_PREAMBLE + sandboxDenialScriptPreamble("/tmp/test"),
+      sandboxExecPrefix: sandboxDenialExecPrefix(SANDBOX_PREFIX) });
+    expect(content.indexOf("ib sandbox-log-watch")).toBeLessThan(content.indexOf("setsid /bin/sh -c"));
+    expect(content.match(/sandbox-log-gate sandbox-exec[^\n]* codex resume/g)?.length).toBe(2);
   });
 
   test("REFUSES a resume without the complete wrapper (mandatory sandbox)", () => {

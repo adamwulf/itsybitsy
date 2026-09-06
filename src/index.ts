@@ -1452,7 +1452,7 @@ export async function main() {
       const agentLog = args[args.indexOf("--agent-log") + 1];
       if (!args.includes("--dir") || !args.includes("--owner") || !args.includes("--agent-log") ||
           !dir?.startsWith("/") || !/\/sandbox-log\.[a-zA-Z0-9]+$/.test(dir) ||
-          !agentLog?.startsWith("/") || !ownerText || !/^[1-9]\d{0,9}$/.test(ownerText)) {
+          !agentLog?.startsWith("/") || !ownerText || !/^[1-9]\d{0,9}$/.test(ownerText) || Number(ownerText) > 2147483647) {
         console.error("Usage: ib sandbox-log-watch --dir <launch-directory> --owner <pid> --agent-log <file>");
         process.exitCode = 1;
         return;

@@ -71,7 +71,7 @@ Restarting the global `@system` coordinator does not sandbox it in this version.
 
 Keep the last working binary and the configuration backup until rollout is verified. The new binary has no repository-agent disable switch. For a failed launch, correct its missing runtime path, domain, or profile rule and retry the supported refresh or restart path. Reverting the entire installation to an older binary restores that version of enforcement; it must not be described as keeping mandatory sandboxing.
 
-The hook scanner provides early errors and denial-log entries for recognizable operations. It is not a complete shell parser, and kernel-only denials may not appear in the Denials tab.
+The hook scanner provides early errors and denial-log entries for recognizable operations. It is not a complete shell parser. The kernel-denial collector adds reports whose process identity and lifetime can be established; absent or unattributable kernel-only events still may not appear in DENIALS.
 
 Spawning agents retain access to the tmux server for lifecycle operations. This is an existing escape from process confinement: they can ask that server to run commands outside their inherited profile. Mandatory wrapping does not close that boundary. Non-spawners have the corresponding socket denied.
 
@@ -110,10 +110,31 @@ Every script invocation allocates a fresh `sandbox-log.XXXXXXXX` directory.
 Cleanup signals only that directory's stop file, never a numeric collector PID
 or shared filename. The collector also exits if its launch owner's birth identity
 changes/disappears and drains for up to one second on normal shutdown. A shell
-supervisor reports unexpected collector exits while the CLI continues. Diagnostic
+supervisor reports unexpected collector exits while the CLI continues. The collector
+also ends when the registered CLI instance disappears, so an interactive
+`exit-check.sh` cannot keep a stale collector alive. Diagnostic
 failure never removes or bypasses the required Seatbelt wrapper. No system-wide
 collector, dashboard dependency, watchdog dependency, or global `@system` launch
 change is introduced.
+
+Candidate checks in the Codex session: 5,652 reported `bun test` passes, zero
+failures, 29,464 assertions across 113 files; TypeScript checking and local build
+pass. `./ib list-types` prints its table and the new command's help dispatches.
+The suite total still includes the kernel capability and opt-in Claude boot
+early-return skips described below; it is not a live enforcement/capture pass.
+The authorized worker verified that the native process reader and candidate
+build work in its context. Its collector/start/resume live fixtures are pending
+permission to execute the built binary, shell fixture scripts, and logger.
+
+Self-review covers lifecycle (PID survives gate exec; collector also ends on CLI
+exit), hooks (existing hook denial format and permissions retained), watchdog
+(no collector dependency or changes), and dashboard (kernel/error records load
+through the existing DENIALS reader, with source labels and one timestamp).
+Shell tests execute isolated supervisor/gate fixtures for startup failure,
+runtime failure while the CLI continues, and overlapping old/new cleanup.
+Attribution, malformed-report, reuse, bounded-output, and concurrent-launch
+tests use synthetic events/observations; they are not substitutes for live OS
+evidence. Unknown or unsafe-integer monotonic timestamps are rejected.
 
 ### Capability investigation (2026-09-05)
 

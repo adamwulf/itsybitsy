@@ -12,7 +12,8 @@ import type { RepoHealthReport } from "../health-check";
 import { getStateColors } from "./color-scheme";
 import { displayState } from "./agent-tree";
 import { wrapLines, padLines } from "./wrap";
-import { RESET, BOLD, DIM, GREEN, RED, YELLOW } from "./colors";
+import { RESET, BOLD, DIM, DIM_GRAY, GREEN, RED, YELLOW } from "./colors";
+import type { WorktreeCleanliness } from "../git-status";
 import { resolveDefaultAgentType } from "./default-agent-type";
 import { NotesEditorComponent } from "./notes-editor";
 import { _formatTimestamp } from "../agent-lifecycle";
@@ -56,6 +57,14 @@ export class InfoPanelComponent implements Component {
   healthReport: RepoHealthReport | undefined = undefined;
   /** Set of live tmux session names — used to render the agent's tmux stoplight. */
   liveTmuxSessions: Set<string> = new Set();
+  /**
+   * Cleanliness of the SELECTED agent's worktree — drives the "Git Status"
+   * stoplight below Tmux (green = clean, yellow = uncommitted work). The
+   * dashboard probes it on selection change and on a periodic tick
+   * (`refreshGitStatus`) and resets it to `null` (unknown, grey) whenever the
+   * selection changes, so a stale answer never shows for a different agent.
+   */
+  gitCleanliness: WorktreeCleanliness = null;
   /** The selected repo's coordinator agent, if any — drives the repo-info stoplights. */
   repoCoordinatorAgent: Agent | null = null;
   /** The currently saved default agent type for the selected repo, if any. */
@@ -120,6 +129,18 @@ export class InfoPanelComponent implements Component {
     const lines: string[] = [];
 
     lines.push(...this.renderStoplights(agent, width));
+
+    // Git Status stoplight — green when the worktree has no uncommitted work,
+    // yellow when it does, grey while unknown (not probed yet, worktree gone,
+    // or not a git directory). Agent mode only: the repo-info coordinator
+    // stoplights don't carry it because the dashboard only probes the
+    // selected agent's worktree.
+    const gitColor = this.gitCleanliness === "clean"
+      ? GREEN
+      : this.gitCleanliness === "dirty"
+        ? YELLOW
+        : DIM_GRAY;
+    lines.push(truncateToWidth(`${gitColor}●${RESET} Git Status`, width, ""));
 
     // Keep the explicit sandbox state in the width-safe detail panel rather
     // than the tightly packed sidebar row. A missing legacy block is disabled.

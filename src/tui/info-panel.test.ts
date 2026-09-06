@@ -10,7 +10,7 @@ import {
   processStartEpochSecondsCtx,
   resetProcessStartEpochSecondsCache,
 } from "../agents";
-import { GREEN, RED } from "./colors";
+import { GREEN, RED, YELLOW, DIM_GRAY } from "./colors";
 
 describe("InfoPanelComponent", () => {
   beforeEach(() => {
@@ -53,6 +53,69 @@ describe("InfoPanelComponent", () => {
     expect(lines.length).toBe(10);
   });
 
+  describe("Git Status stoplight", () => {
+    function agentPanel(): { panel: InfoPanelComponent; gitLine: () => string } {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 10;
+      const agent = makeAgent({ id: "agent-git" });
+      agent.meta.tmux_session = "ib-agent-git";
+      panel.agent = agent;
+      panel.liveTmuxSessions = new Set(["ib-agent-git"]);
+      const gitLine = (): string => {
+        const lines = panel.render(60);
+        const idx = lines.findIndex((l) => stripAnsi(l).includes("Git Status"));
+        expect(idx).toBeGreaterThanOrEqual(0);
+        return lines[idx]!;
+      };
+      return { panel, gitLine };
+    }
+
+    test("sits directly below the Tmux stoplight, above Sandbox", () => {
+      const { panel } = agentPanel();
+      const stripped = panel.render(60).map(stripAnsi);
+      const tmuxIdx = stripped.findIndex((l) => l === "● Tmux");
+      expect(tmuxIdx).toBeGreaterThanOrEqual(0);
+      expect(stripped[tmuxIdx + 1]).toBe("● Git Status");
+      expect(stripped[tmuxIdx + 2]).toStartWith("Sandbox:");
+    });
+
+    test("is green when the worktree is clean", () => {
+      const { panel, gitLine } = agentPanel();
+      panel.gitCleanliness = "clean";
+      expect(gitLine()).toContain(GREEN);
+      expect(gitLine()).not.toContain(YELLOW);
+    });
+
+    test("is yellow when the worktree has uncommitted work", () => {
+      const { panel, gitLine } = agentPanel();
+      panel.gitCleanliness = "dirty";
+      expect(gitLine()).toContain(YELLOW);
+      expect(gitLine()).not.toContain(GREEN);
+    });
+
+    test("is grey while cleanliness is unknown", () => {
+      const { panel, gitLine } = agentPanel();
+      panel.gitCleanliness = null;
+      expect(gitLine()).toContain(DIM_GRAY);
+      expect(gitLine()).not.toContain(GREEN);
+      expect(gitLine()).not.toContain(YELLOW);
+    });
+
+    test("is not shown for the repo-info coordinator stoplights", () => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 10;
+      panel.selectedRepoHeader = "my-repo";
+      panel.selectedRepoPath = "/path/to/my-repo";
+      const coord = makeAgent({ id: "agent-coord", repoName: "my-repo" });
+      coord.meta.tmux_session = "ib-coord-my-repo";
+      panel.repoCoordinatorAgent = coord;
+      panel.gitCleanliness = "dirty";
+      const text = panel.render(60).map(stripAnsi).join("\n");
+      expect(text).toContain("Coord Tmux");
+      expect(text).not.toContain("Git Status");
+    });
+  });
+
   test("renders a red Claude dot when a live PID started after the agent", () => {
     const panel = new InfoPanelComponent();
     const agent = makeAgent({ id: "agent-recycled" });
@@ -91,7 +154,8 @@ describe("InfoPanelComponent", () => {
 
   test("renders model name from agent meta", () => {
     const panel = new InfoPanelComponent();
-    panel.displayHeight = 8;
+    // 4 stoplights + Sandbox + Paths + Model + "Summary:" header + 1 body line
+    panel.displayHeight = 9;
     const agent = makeAgent({ id: "agent-xyz" });
     agent.meta.model = "sonnet";
     agent.meta.prompt = "build a widget";

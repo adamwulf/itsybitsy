@@ -101,3 +101,13 @@ const { coordinatorSpawnCtx } = await import("./src/coordinator");
 const { spawnCtx: tmuxPollerSpawnCtx } = await import("./src/tmux-poller");
 coordinatorSpawnCtx.setDefault(safeTestSpawnRunner);
 tmuxPollerSpawnCtx.setDefault(safeTestSpawnRunner);
+
+// The dashboard's "Git Status" stoplight probe (src/git-status.ts) runs
+// `git status` against the selected agent's worktree from a timer AND from
+// every selection change, so dashboard tests reach it constantly. Unlike the
+// tmux contexts it can't touch the live coordinator, but a real `git status`
+// against a fake test path is still a subprocess launched where none should
+// be — and it keeps firing from late async work after a test tore down. Same
+// backstop: the reset baseline becomes the stub (stdout "" / exit 0 → "clean").
+const { gitStatusSpawnCtx } = await import("./src/git-status");
+gitStatusSpawnCtx.setDefault(safeTestSpawnRunner);

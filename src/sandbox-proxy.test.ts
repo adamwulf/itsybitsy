@@ -111,6 +111,7 @@ describe("sandbox proxy CONNECT and HTTP behavior", () => {
     let received = "";
     let writes = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let closeTimer: ReturnType<typeof setTimeout> | undefined;
     const proxy = startSandboxProxyServer(0, ["allowed.example"], "localhost", async options => {
       const upstream = {
         write(data: Buffer) {
@@ -120,7 +121,7 @@ describe("sandbox proxy CONNECT and HTTP behavior", () => {
             options.socket.data(upstream, Buffer.from(`echo:${received}`));
           } else {
             clearTimeout(timer);
-            timer = setTimeout(() => options.socket.drain(upstream), 5);
+            timer = setTimeout(() => options.socket.drain?.(upstream), 5);
           }
           return count;
         },
@@ -129,6 +130,9 @@ describe("sandbox proxy CONNECT and HTTP behavior", () => {
         end() {},
       };
       options.socket.open(upstream);
+      // Bound the stub's lifetime so a pump that loses bytes reaches the byte
+      // assertion instead of timing out while waiting for the complete echo.
+      closeTimer = setTimeout(() => options.socket.close(upstream), 1_000);
       return upstream;
     });
     try {
@@ -140,6 +144,50 @@ describe("sandbox proxy CONNECT and HTTP behavior", () => {
       expect(writes).toBeGreaterThan(2);
     } finally {
       clearTimeout(timer);
+      clearTimeout(closeTimer);
+      proxy.stop();
+    }
+  });
+
+  test("a slow client pauses the upstream and client close resumes it", async () => {
+    let pauseCalls = 0;
+    let sent = 0;
+    const maxBytes = 64 * 1024 * 1024;
+    const sentUntilBlocked = Promise.withResolvers<void>();
+    const resumed = Promise.withResolvers<void>();
+    const proxy = startSandboxProxyServer(0, ["allowed.example"], "localhost", async options => {
+      const upstream = {
+        write(data: Buffer) { return data.length; },
+        pause() { pauseCalls++; },
+        resume() { resumed.resolve(); },
+        end() {},
+      };
+      options.socket.open(upstream);
+      // The client never reads. Stop producing as soon as the proxy pauses us,
+      // with a finite ceiling so disabling pause fails an assertion quickly.
+      const chunk = Buffer.alloc(64 * 1024, 0x61);
+      while (pauseCalls === 0 && sent < maxBytes) {
+        options.socket.data(upstream, chunk);
+        sent += chunk.length;
+      }
+      sentUntilBlocked.resolve();
+      return upstream;
+    });
+    const client = createConnection({ host: "127.0.0.1", port: proxy.port });
+    const failed = Promise.withResolvers<never>();
+    const timeout = setTimeout(() => failed.reject(new Error("backpressure lifecycle timed out")), 2_000);
+    try {
+      client.on("error", failed.reject);
+      client.pause();
+      client.on("connect", () => client.write("CONNECT allowed.example:443 HTTP/1.1\r\n\r\n"));
+      await Promise.race([sentUntilBlocked.promise, failed.promise]);
+      expect(pauseCalls).toBeGreaterThan(0);
+      expect(sent).toBeLessThan(maxBytes);
+      client.destroy();
+      await Promise.race([resumed.promise, failed.promise]);
+    } finally {
+      clearTimeout(timeout);
+      client.destroy();
       proxy.stop();
     }
   });

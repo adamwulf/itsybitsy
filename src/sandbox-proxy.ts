@@ -178,9 +178,13 @@ function flushWrites(queue: SocketWriteQueue): void {
   if (queue.chunks.length > 0) {
     if (!queue.paused && queue.source) {
       queue.paused = true;
+      // Bun can deliver a few MiB of data callbacks after pause(); those bytes
+      // stay queued, so the per-connection bound is a few MiB, not one chunk.
       queue.source.pause();
     }
   } else if (queue.ending) {
+    // Bun end() synchronously fires close(), re-entering the paired queue's
+    // flushWrites; mark this queue closed before that can happen.
     queue.closed = true;
     try { queue.socket?.end(); } catch { /* already closed */ }
   } else if (queue.paused) {
@@ -359,6 +363,7 @@ export function startSandboxProxyServer(
                 logOutcome("failed", "upstream unreachable");
                 try { socket.end(response(502, "Bad Gateway")); } catch { /* closed */ }
               } else {
+                discardWrites(state.toUpstream);
                 endAfterWrites(state.toClient);
               }
             },
@@ -374,6 +379,12 @@ export function startSandboxProxyServer(
       close(socket: any) {
         const state = socket.data as ProxyConnection;
         discardWrites(state.toClient);
+        // Client-close only: let a paused upstream observe FIN. Resuming the
+        // client on upstream close could discard the response still flushing.
+        if (state.toClient.paused) {
+          state.toClient.paused = false;
+          state.toClient.source.resume();
+        }
         endAfterWrites(state.toUpstream);
       },
       error() {

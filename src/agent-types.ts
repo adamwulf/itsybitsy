@@ -571,7 +571,9 @@ async function resolveChain(
  * record. Scalar fields take the descendant's value when the key is **present**
  * in the descendant's frontmatter. `permissions.allow` / `permissions.deny`
  * are unioned (deduped via Set) across the entire chain. Paths and sandbox
- * list fields are likewise unioned, while sandbox.enabled is OR-merged.
+ * list fields are likewise unioned. `sandbox.enabled` is NOT merged: the
+ * authored key is retired and any layer's value is ignored — the merged sandbox
+ * config is always `enabled: true` (sandboxing is mandatory, always on).
  * `repos` is replaced (not merged) when the descendant declares it.
  *
  * The `name` and `spawnable` keys are intentionally not set here — the caller

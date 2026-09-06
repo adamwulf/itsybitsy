@@ -10,6 +10,7 @@ import {
   formatAgentPathPolicy,
   resolveTarget,
   resolveMergeTargetDir,
+  parseMergeArgs,
   buildSystemCoordinatorAgent,
   sendToSystemCoordinator,
   setSystemCoordinatorHasSessionFn,
@@ -1497,6 +1498,51 @@ describe("merge-check case", () => {
     const matches = source.match(/case "merge-check":/g);
     expect(matches).not.toBeNull();
     expect(matches!.length).toBe(1);
+  });
+});
+
+// ─── parseMergeArgs ──────────────────────────────────────────────────────────
+//
+// `ib merge <id> [--force] [--keep]`: the id is the first non-flag argument,
+// --keep turns on the merge-without-closing path, --force is a compatibility
+// no-op, and anything else is reported back as unknown (the CLI warns and
+// ignores it — matching the pre-existing behaviour for stray arguments).
+
+describe("parseMergeArgs", () => {
+  test("bare id: no keep, nothing unknown", () => {
+    expect(parseMergeArgs(["agent-abc"])).toEqual({ agentId: "agent-abc", keep: false, unknown: [] });
+  });
+
+  test("no arguments: undefined id so requireAgent prints usage", () => {
+    expect(parseMergeArgs([])).toEqual({ agentId: undefined, keep: false, unknown: [] });
+  });
+
+  test("--keep after the id", () => {
+    expect(parseMergeArgs(["agent-abc", "--keep"])).toEqual({ agentId: "agent-abc", keep: true, unknown: [] });
+  });
+
+  test("--keep before the id", () => {
+    expect(parseMergeArgs(["--keep", "agent-abc"])).toEqual({ agentId: "agent-abc", keep: true, unknown: [] });
+  });
+
+  test("--force is accepted and ignored, on either side of the id", () => {
+    expect(parseMergeArgs(["agent-abc", "--force"])).toEqual({ agentId: "agent-abc", keep: false, unknown: [] });
+    expect(parseMergeArgs(["--force", "agent-abc"])).toEqual({ agentId: "agent-abc", keep: false, unknown: [] });
+  });
+
+  test("--keep and --force combine", () => {
+    expect(parseMergeArgs(["agent-abc", "--force", "--keep"])).toEqual({ agentId: "agent-abc", keep: true, unknown: [] });
+  });
+
+  test("unknown flags and extra positionals are reported, not swallowed", () => {
+    expect(parseMergeArgs(["agent-abc", "--into", "main", "--keep"])).toEqual({
+      agentId: "agent-abc", keep: true, unknown: ["--into", "main"],
+    });
+  });
+
+  test("a flag alone never becomes the id", () => {
+    expect(parseMergeArgs(["--keep"])).toEqual({ agentId: undefined, keep: true, unknown: [] });
+    expect(parseMergeArgs(["--bogus"])).toEqual({ agentId: undefined, keep: false, unknown: ["--bogus"] });
   });
 });
 

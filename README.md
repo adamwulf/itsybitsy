@@ -54,6 +54,7 @@ ib look <id>           # see the agent's live terminal
 ib send <id> "also update the docs"
 ib diff <id>           # review its changes
 ib merge <id>          # merge its branch and close it
+ib merge <id> --keep   # or: land its commits so far (real merge commit) and leave it running
 ib retire <id>         # or: archive it without merging
 ```
 

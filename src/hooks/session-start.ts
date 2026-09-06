@@ -514,6 +514,7 @@ Always spawn **manager** agents (not \`--type worker\`). Managers assess the tas
 | \`ib status <id>\` | Show commits/changes |
 | \`ib diff <id>\` | Review agent's changes |
 | \`ib merge <id> --force\` | Merge and close agent (\`--force\` skips confirmation) |
+| \`ib merge <id> --keep\` | Land the agent's commits so far (real merge commit) but leave it running; repeat later for newer commits |
 | \`ib retire <id> --force\` | Stop and archive without merging (\`--force\` skips confirmation) |
 | \`ib rehire <id>\` | Reconstruct and resume an explicitly retired agent |
 | \`ib resume <id>\` | Restart stopped agent |
@@ -631,6 +632,7 @@ You are in a git worktree, which shares the same repository as the main checkout
 | \`ib status <id>\` | Show agent's commits/changes |
 | \`ib diff <id>\` | Review agent's changes |
 | \`ib merge <id>\` | Merge agent's work and close it |
+| \`ib merge <id> --keep\` | Land the agent's commits so far (real merge commit) but leave it running; repeat later for newer commits |
 | \`ib retire <id>\` | Stop and archive an agent without merging |
 | \`ib rehire <id>\` | Reconstruct and resume an explicitly retired agent |
 ${askLine}
@@ -803,6 +805,7 @@ ${buildPathIsolationSection(ctx)}
 | \`ib status <id>\` | Show agent's commits/changes |
 | \`ib diff <id>\` | Review agent's changes |
 | \`ib merge <id>\` | Merge agent's work and close it |
+| \`ib merge <id> --keep\` | Land the agent's commits so far (real merge commit) but leave it running; repeat later for newer commits |
 | \`ib retire <id>\` | Stop and archive an agent without merging |
 | \`ib rehire <id>\` | Reconstruct and resume an explicitly retired agent |
 

@@ -338,16 +338,20 @@ export interface AgentTypeFloorDiff {
  * Compare every embedded agent-type file that ALSO exists locally against the
  * embedded default, reporting the `paths:` (allowRead, allowWrite, deny) and
  * `sandbox:` (rawAllow, domains) entries present in the embedded block but
- * missing from the local file, per list. `sandbox.enabled` is NOT compared: it
- * is retired (sandboxing is mandatory, always on), so it is no longer a floor
- * value and a stale local `enabled` key never registers as drift here. Files
- * that match — and embedded files with no local copy — produce nothing. Nothing
- * is written.
+ * missing from the local file, per list. `sandbox.enabled` is no longer a floor
+ * value (it is retired — sandboxing is mandatory, always on), so it is NOT
+ * compared embedded-vs-local. Instead, a local file that STILL carries the
+ * retired `sandbox.enabled` key (true OR false) is reported as a one-sided
+ * migration diagnostic: the same stale key would fail `validateAllAgentTypes`
+ * at the next `ib watch` startup, so the preflight must flag it here rather than
+ * green-light a config that immediately breaks. Files that match — and embedded
+ * files with no local copy — produce nothing. Nothing is written.
  *
  * Backs `ib init-types --check`, the gate precondition that catches a live
  * `~/.itsybitsy/agent-types/_all.md` still missing the tightened floor (because
- * `ib init-types` never updates an existing file). `hasDifferences` is true when
- * any difference was found, so the command can exit non-zero.
+ * `ib init-types` never updates an existing file) OR still carrying the retired
+ * `sandbox.enabled` key. `hasDifferences` is true when any difference was found,
+ * so the command can exit non-zero.
  *
  * The compare is **literal string set-membership**, entry for entry: a locally
  * rewritten but equivalent form (e.g. the absolute spelling of an embedded `~`
@@ -371,6 +375,15 @@ export async function checkAgentTypeFloors(): Promise<{
     const value = fm[block];
     if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
     return stringList((value as Record<string, unknown>)[key]);
+  };
+  // The retired `sandbox.enabled` key, if a local file still carries it (any
+  // value). Returns the raw value for the diagnostic, or a sentinel when absent.
+  const RETIRED_ABSENT = Symbol("no-enabled");
+  const localRetiredEnabled = (fm: Record<string, unknown>): unknown | typeof RETIRED_ABSENT => {
+    const value = fm.sandbox;
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return RETIRED_ABSENT;
+    const sandbox = value as Record<string, unknown>;
+    return "enabled" in sandbox ? sandbox.enabled : RETIRED_ABSENT;
   };
 
   const listChecks: Array<{ block: "paths" | "sandbox"; key: string }> = [
@@ -402,6 +415,17 @@ export async function checkAgentTypeFloors(): Promise<{
       for (const entry of blockList(embedded, block, key)) {
         if (!localSet.has(entry)) lines.push(`  ${block}.${key}: missing ${entry}`);
       }
+    }
+    // Retired-key migration diagnostic: a live file still carrying
+    // sandbox.enabled would fail validateAllAgentTypes at the next `ib watch`
+    // startup, so the preflight flags it (and exits non-zero) rather than
+    // green-lighting a config that immediately breaks. Reported for true AND
+    // false, since sandboxing is mandatory and neither value does anything.
+    const retired = localRetiredEnabled(local);
+    if (retired !== RETIRED_ABSENT) {
+      lines.push(
+        `  sandbox.enabled: retired key present (value: ${JSON.stringify(retired)}) — remove it; sandboxing is always on and cannot be toggled`,
+      );
     }
 
     if (lines.length > 0) diffs.push({ file: fileName, lines });

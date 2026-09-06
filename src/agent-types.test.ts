@@ -437,18 +437,37 @@ describe("checkAgentTypeFloors (init-types --check)", () => {
     expect(diffs.map((d) => d.file)).toEqual(["_all.md"]);
   });
 
-  test("does NOT report a stale sandbox.enabled key as floor drift (enabled is retired)", async () => {
+  test.each(["true", "false"])(
+    "flags a stale sandbox.enabled: %s key as a retired-key migration diagnostic (init-types --check must catch what ib watch would reject)",
+    async (value) => {
+      await initAgentTypes();
+      // A live file that STILL carries the retired enabled key would fail
+      // validateAllAgentTypes at the next `ib watch` startup, so the preflight
+      // must flag it (non-zero) rather than green-light a config that breaks.
+      // Reported for true AND false — sandboxing is mandatory either way.
+      await Bun.write(
+        join(typesDir, "worker.md"),
+        `---\nname: worker\nsandbox:\n  enabled: ${value}\n---\nbody`,
+      );
+      const { diffs, hasDifferences } = await checkAgentTypeFloors();
+      expect(hasDifferences).toBe(true);
+      const workerDiff = diffs.find((d) => d.file === "worker.md");
+      expect(workerDiff).toBeDefined();
+      expect(
+        workerDiff!.lines.some(
+          (line) => line.includes("sandbox.enabled") && line.includes("retired"),
+        ),
+      ).toBe(true);
+    },
+  );
+
+  test("a toggle-free floor that matches the embedded defaults stays green (no retired-key false positive)", async () => {
+    // The stock embedded files carry NO enabled key, so a verbatim local copy
+    // must report nothing — the retired-key diagnostic fires ONLY on a stale key.
     await initAgentTypes();
-    // enabled is retired and no longer a floor value, so a local file that
-    // still carries a leftover enabled key must not register as drift. worker.md
-    // has no sandbox floor lists, so an enabled key alone yields no diff.
-    await Bun.write(
-      join(typesDir, "worker.md"),
-      "---\nname: worker\nsandbox:\n  enabled: false\n---\nbody",
-    );
     const { diffs, hasDifferences } = await checkAgentTypeFloors();
     expect(hasDifferences).toBe(false);
-    expect(diffs.find((d) => d.file === "worker.md")).toBeUndefined();
+    expect(diffs).toEqual([]);
   });
 
   test("skips an embedded file that has no local copy", async () => {

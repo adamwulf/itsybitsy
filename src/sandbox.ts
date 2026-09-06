@@ -75,6 +75,17 @@ export interface SandboxProfileParams {
    * roots when present. Absent → no row (byte-identical profile).
    */
   SCRATCHPAD?: string;
+  /**
+   * Optional WRITE runtime root: the agy CLI's state/config directory
+   * (`~/.gemini`), where agy reads AND rewrites its own settings.json, trust
+   * list, config, transcripts and caches during a session. Supplied ONLY for an
+   * agy agent (the spawn side and the hook's agentPathAccessTable both gate it on
+   * `cli === "agy"`), so it is the agy analogue of Claude's PROJECTDIR/SCRATCHPAD:
+   * emitted by profileRuntimeAllowRoots exactly like those when present, and
+   * absent → no row (byte-identical profile for claude/codex/fugu). A
+   * `paths.deny` entry still carves holes inside it (deny wins, last-match).
+   */
+  AGYSTATEDIR?: string;
   HOME?: string;
 }
 
@@ -88,7 +99,6 @@ export interface SandboxConfigSource {
 }
 
 const SANDBOX_KEYS = new Set([
-  "enabled",
   "rawAllow",
   "domains",
 ]);
@@ -99,6 +109,15 @@ const SANDBOX_LIST_KEYS = [
 ] as const;
 
 const MOVED_SANDBOX_PATH_KEYS = new Set(["allowRead", "allowWrite", "deny"]);
+
+/**
+ * `sandbox.enabled` is retired. Sandboxing is mandatory (Adam, 2026-09-05), so
+ * there is no authored on/off switch: an authored `enabled` key — true OR false —
+ * is a hard validation error that points the author at the migration. The
+ * `SandboxConfig.enabled` FIELD is kept (always resolved true) purely for
+ * compat/display/seal shape; only the *authored* key is rejected here.
+ */
+const RETIRED_SANDBOX_KEYS = new Set(["enabled"]);
 const PATHS_KEYS = ["allowRead", "allowWrite", "deny"] as const;
 
 export type CompiledPath =
@@ -126,20 +145,22 @@ export interface OrderedPathEntry {
 /**
  * Resolve the kernel-only sandbox policy without touching spawn wiring.
  * Filesystem policy lives independently in `PathsConfig`.
+ *
+ * Sandboxing is MANDATORY (Adam, 2026-09-05): every resolved config is
+ * `enabled: true`. There is no authored on/off switch — an absent `sandbox`
+ * block, one with `enabled: false`, or one with `enabled: true` all resolve to
+ * enabled the same way, so neither omission nor a leftover toggle can authorize
+ * an unsandboxed launch. The source object is NOT mutated: a legacy
+ * `meta.sandbox.enabled: false` stays readable on the input for migration
+ * diagnosis while resolution ignores it. Only `rawAllow`/`domains` are carried
+ * through (as fresh copies); `enabled` is retained on the output type only for
+ * compat/display/seal shape (agent-seal.ts, ib-commands.ts).
  */
 export function resolveSandboxConfig(source: SandboxConfigSource): SandboxConfig {
-  if (source.sandbox) {
-    return {
-      enabled: source.sandbox.enabled,
-      rawAllow: [...source.sandbox.rawAllow],
-      domains: [...source.sandbox.domains],
-    };
-  }
-
   return {
-    enabled: false,
-    rawAllow: [],
-    domains: [],
+    enabled: true,
+    rawAllow: [...(source.sandbox?.rawAllow ?? [])],
+    domains: [...(source.sandbox?.domains ?? [])],
   };
 }
 
@@ -657,6 +678,16 @@ function profileRuntimeAllowRoots(params: SandboxProfileParams): ProfileRuntimeP
       parameterName: "SCRATCHPAD",
     });
   }
+  // Optional agy-only WRITE root (~/.gemini). Emitted exactly like the Claude
+  // PROJECTDIR/SCRATCHPAD roots when present; a non-agy profile omits it and
+  // stays byte-identical.
+  if (params.AGYSTATEDIR) {
+    roots.push({
+      path: canonicalizeSandboxPath(params.AGYSTATEDIR),
+      op: "write",
+      parameterName: "AGYSTATEDIR",
+    });
+  }
   return roots;
 }
 
@@ -909,7 +940,7 @@ export function validateSandboxFrontmatter(value: unknown): SandboxValidationRes
 
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return {
-      errors: ["sandbox must be an object with enabled and list fields"],
+      errors: ["sandbox must be an object with rawAllow and domains list fields"],
       warnings,
     };
   }
@@ -918,13 +949,16 @@ export function validateSandboxFrontmatter(value: unknown): SandboxValidationRes
   for (const key of Object.keys(sandbox)) {
     if (MOVED_SANDBOX_PATH_KEYS.has(key)) {
       errors.push(`sandbox.${key} has moved; move it to paths.${key}`);
+    } else if (RETIRED_SANDBOX_KEYS.has(key)) {
+      // Retired regardless of value: true, false, and the trailing-comment
+      // footgun ("true  # note") all report the same migration guidance, so an
+      // authored toggle can never influence launch policy.
+      errors.push(
+        `sandbox.enabled is retired: sandboxing is always on and cannot be toggled — remove this key (see docs/agent-types/README.md)`,
+      );
     } else if (!SANDBOX_KEYS.has(key)) {
       errors.push(`sandbox contains unknown key "${key}"`);
     }
-  }
-
-  if (sandbox.enabled !== undefined && typeof sandbox.enabled !== "boolean") {
-    errors.push(`sandbox.enabled must be true or false, got "${String(sandbox.enabled)}"`);
   }
 
   for (const key of SANDBOX_LIST_KEYS) {

@@ -1,9 +1,13 @@
 # SPEC-SANDBOX.md — Per-Agent Seatbelt Sandboxing
 
-**Status:** IMPLEMENTED — runtime phases merged; phase-4 spec sync and phase-6
-dashboard marker are in progress in the current change (2026-07-19)
-**Author:** planning session 2026-07-17
-**Related:** SPEC.md §2 (Agent Types), §6 (Hooks), §7 (Configuration), §18 (Codex CLI)
+**Staged rollout scope:** throughout the current contract below, mandatory sandboxing covers ordinary repository agents and per-repository coordinators (Claude, Codex/fugu, and agy). The global `@system` coordinator remains unsandboxed in this version and is a separate follow-up. See [the rollout guide](docs/SANDBOX-ROLLOUT.md) for configuration migration and validation status.
+
+**Current contract:** sandboxing is mandatory for ordinary repository agents and per-repository coordinators on every launch and resume. Agent-type Markdown has no `sandbox.enabled` toggle; any remaining key is a migration error. Only `paths` and `sandbox.rawAllow` / `sandbox.domains` are configurable. Profile or proxy setup failure stops the launch. Legacy agents require refresh or their per-repository coordinator reset path before resuming. Global `@system` sandboxing is deferred.
+
+The mandatory repository-agent lifecycle is integrated. The rollout procedure and remaining live validation are recorded in `docs/SANDBOX-ROLLOUT.md`. This contract supersedes opt-in defaults, toggle examples, disabled-resume compatibility, and unsupported-agy assumptions in the historical sections below. Existing path precedence, profile inheritance, sealing, and the documented spawner tmux limitation still apply.
+
+**Design history:** initial planning 2026-07-17; opt-in implementation 2026-07-19.
+**Related:** SPEC.md sections 2, 6, 7, and 18.
 
 ## 1. Goal
 
@@ -50,10 +54,10 @@ Key takeaways:
   domain is not caught. And any tool that ignores `*_proxy` env vars simply
   fails closed (kernel blocks it) rather than escaping.
 - **macOS only.** `sandbox-exec` is macOS-specific (and Apple-deprecated but
-  functional). On non-macOS, `sandbox.enabled: true` **refuses to spawn** (§5.5
-  fail-hard) — it does NOT fall back to an unsandboxed run. (`sandbox.enabled`
-  absent/false is unaffected everywhere.) This supersedes the earlier
-  "degrade to a no-op" idea, which contradicted Adam's fail-hard call (C1).
+  functional). Because the sandbox is mandatory, on non-macOS **every launch
+  refuses to spawn** (§5.5 fail-hard) — there is no unsandboxed fallback. This
+  supersedes the earlier "degrade to a no-op" idea, which contradicted Adam's
+  fail-hard call (C1).
 
 ## 3. How this fits the existing codebase
 
@@ -76,10 +80,10 @@ Key takeaways:
    must permit exactly this same root set** (the worktree + its shared `.git`
    common dir), or git operations break. Reuse that computation.
 
-✅ **Implemented:** the shared sandbox wiring is in `src/ib-commands.ts`; both
-Codex launch builders in `src/codex-spawn.ts` select `danger-full-access` only
-when the resolved, persisted sandbox is enabled and retain `workspace-write`
-otherwise.
+✅ **Implemented:** the shared sandbox wiring is in `src/ib-commands.ts`; under
+the mandatory contract both Codex launch builders in `src/codex-spawn.ts` always
+select `danger-full-access` under our wrapper — the `workspace-write` fallback is
+gone.
 
 ### 3.2 The `--effort` feature is the threading template
 
@@ -132,7 +136,7 @@ The wrapper transformation at each point:
 ```bash
 # before
 setsid claude --session-id "$UUID" $ARGS "$(cat $PROMPT)" &
-# after (sandbox enabled) — export proxy vars in start.sh (NO `env` link; see below)
+# after (mandatory sandbox wrap) — export proxy vars in start.sh (NO `env` link; see below)
 export http_proxy=http://localhost:$PORT https_proxy=http://localhost:$PORT
 export HTTP_PROXY=$http_proxy HTTPS_PROXY=$https_proxy
 export no_proxy=localhost,127.0.0.1,::1 NO_PROXY=localhost,127.0.0.1,::1
@@ -172,19 +176,29 @@ is possible — but only by an **explicit** `allowRead: ["/"]` in the `.md`, nev
 by default. This is the opposite of the reference project's allow-by-default
 `(allow default)` skeleton; §5.1 flips it to `(deny default)`.
 
+> **Mandatory-contract note (2026-09-05).** `sandbox.enabled` is no longer parsed
+> from agent-type Markdown; the sandbox is applied at every launch (§1, §5.5).
+> The author-configurable keys are exactly `paths.allowRead`/`allowWrite`/`deny`,
+> `sandbox.rawAllow`, and `sandbox.domains`. `enabled` survives only as **internal**
+> resolved `sandbox` metadata — for legacy detection, sealed-record compatibility,
+> and operator display — and is always `true` for a newly resolved policy. Where
+> the schema example and merge rules below still show or discuss `enabled` as an
+> author toggle or an opt-in default, treat that as historical and superseded.
+
 ⚠️ **Schema uses two FLAT top-level blocks — ONE level of nesting.** The
 frontmatter parser supports a parent object with scalar/list children, exactly
 as `permissions:` does. Filesystem policy lives under `paths:` with exactly the
-three list children `allowRead`, `allowWrite`, and `deny`. Kernel activation,
-raw SBPL, and network domains live under `sandbox:` with `enabled`, `rawAllow`,
-and `domains`. No deeper `filesystem:` or `network:` objects are supported.
+three list children `allowRead`, `allowWrite`, and `deny`. Raw SBPL and network
+domains live under `sandbox:` with `rawAllow` and `domains` (the resolved block
+also carries the internal `enabled` flag, no longer authored — see the note
+above). No deeper `filesystem:` or `network:` objects are supported.
 
 ⚠️ **NO trailing inline `#` comments.** The parser strips only FULL-LINE comments
-(`agent-types.ts:102`); a trailing `# …` reaches the value unstripped, so
-`enabled: true  # note` parses to the truthy STRING `"true  # note"` (and
-`enabled: false # note` would ALSO be truthy!), and `deny: [...]  # note` loses
-its closing `]` and the whole list silently becomes one garbage string — the
-exact footgun §4A.2 warns about. Keep comments on their own lines only:
+(`agent-types.ts:102`); a trailing `# …` reaches the value unstripped, so a
+scalar like `model: opus  # note` parses to the string `"opus  # note"`, and
+`deny: [...]  # note` loses its closing `]` and the whole list silently becomes
+one garbage string — the exact footgun §4A.2 warns about. Keep comments on their
+own lines only:
 
 **Everything the sandbox permits — files, commands, and network — is configured
 in the `.md` (Adam, 2026-07-18). NOTHING is baked into code.** The `_all.md`
@@ -200,7 +214,7 @@ paths:
   # FILES — carve holes inside the allowed set; deny always wins:
   deny:       ["**/.env", "~/.ssh"]
 sandbox:
-  enabled: true
+  # (no `enabled` key — the sandbox is mandatory; see the note above)
   # COMMANDS / SYSCALLS / NETWORK-BLOCK — raw SBPL, so every non-path hole is
   # visible in the .md too (process exec, mach-lookup, the (deny network*) +
   # localhost proxy holes, etc.). The _all.md baseline carries the required set:
@@ -223,21 +237,26 @@ Both blocks are structurally identical to the existing
 `permissions: {allow, deny}` block. `AgentType.paths` is a `PathsConfig`, while
 `AgentType.sandbox` is a `SandboxConfig`. An absent `paths:` block remains
 `undefined`; a present empty block resolves to three empty lists. Validators
-reject non-list path children, unknown keys, malformed path grammar, non-boolean
-`sandbox.enabled`, non-list sandbox children, and malformed `rawAllow`.
+reject non-list path children, unknown keys, malformed path grammar, non-list
+sandbox children, and malformed `rawAllow`. A `sandbox.enabled` key in Markdown is
+now a **retired-key migration error** (flagged by `ib init-types --check`), not a
+parsed toggle.
 
 ✅ **Implemented in `src/agent-types.ts` and `src/sandbox.ts`:** both shipped
 blocks are flat. The three path lists and the two sandbox lists union and dedupe
-within their respective lists across layers, `enabled` OR-merges, and the two
-validators enforce their independent schemas.
+within their respective lists across layers, and the two validators enforce their
+independent schemas. `enabled` is not merged from Markdown (it is not authored;
+the resolved policy is always enabled).
 
 Design decisions:
 
-1. **`sandbox.enabled` defaults to `false` → the agent runs fully unsandboxed**
-   (exactly today's behavior). This is the ONLY unsandboxed path once the feature
-   ships. When `true`, the model is deny-by-default: nothing is reachable but the
-   baseline (§4A.7) + the explicit allow lists. There is no "sandbox but
+1. **The sandbox is mandatory — there is no unsandboxed path.** Every launch is
+   wrapped (§1, §5.5); a platform, profile, or proxy that cannot support it fails
+   closed rather than degrading. The model is deny-by-default: nothing is reachable
+   but the baseline (§4A.7) + the explicit allow lists. There is no "sandbox but
    allow-everything" default — openness is opt-in via `paths.allowRead: ["/"]`.
+   (Historically `sandbox.enabled: false` was the default and the only unsandboxed
+   path; that toggle is retired.)
 2. **A required baseline allowlist is always present** (§4A.7) so a sandboxed
    agent can actually start. Deny-by-default is unusable without it: Claude Code
    needs `~/.claude`, `/private/tmp`, macOS `/private/var/folders/…` caches, system
@@ -269,12 +288,11 @@ Design decisions:
    `allowWrite`, `deny`) and the `sandbox:` lists (`rawAllow`, `domains`) union
    across the chain — a child can **add** access (union its allow) and/or **narrow** access
    (union its deny). Because deny-wins (§4A.0), a child (or any layer) can never
-   re-open what another layer denied. The scalar `enabled` uses **OR-merge** (any
-   layer setting `enabled: true` wins), NOT last-non-empty-wins — otherwise a leaf
-   type could set `enabled: false` and switch OFF a sandbox that `_all.md` turned
-   on, the most total possible "re-open", which contradicts the whole model.
-   (Adam authors all type files, so last-wins would be *safe* in practice, but
-   OR-merge makes the "a layer can only tighten" invariant hold for `enabled` too.)
+   re-open what another layer denied. The scalar `enabled` is **no longer merged
+   from Markdown** — it is not authored, and the resolved policy is always enabled
+   (§1). (Historically it OR-merged so a leaf type could not set `enabled: false`
+   to switch OFF a sandbox `_all.md` turned on; the mandatory contract makes that
+   moot.)
    ⚠️ Implementation note: the `permissions` union is a **hand-written special
    case**, not generic machinery — `paths` and `sandbox` each have analogous
    merge code, with exact duplicates removed within each list at merge time.
@@ -303,7 +321,7 @@ and exactly as Adam stated it:
 > matches a deny rule.**
 
 - **Not in any allow list → invisible** (kernel `EPERM`). This is the default for
-  every path once `enabled: true`.
+  every path — the sandbox is always applied.
 - **In an allow list or runtime root AND in a deny rule → denied.** `deny` always wins; it carves
   holes *inside* the allowed set. There is no allow rule that can re-open a
   denied path.
@@ -416,8 +434,6 @@ for example, `**/foo` matches the `foo` node but not `foo/bar` by path match.
 ```yaml
 paths:
   deny: ["**/.env"]
-sandbox:
-  enabled: true
 ```
 
 The original design called for BOTH of the following:
@@ -525,8 +541,9 @@ comes from merged `.md` configuration.
 Claude-version-dependent). The candidate list below is the earlier one-pass draft —
 superseded by that doc.
 
-**Shipped baseline sync (2026-07-19):** `docs/agent-types/_all.md` keeps
-`enabled: false`. Its domain floor is now `api.anthropic.com`,
+**Shipped baseline sync (2026-07-19):** `docs/agent-types/_all.md` no longer
+carries a `sandbox.enabled` key (retired under the mandatory contract). Its domain
+floor is now `api.anthropic.com`,
 `*.anthropic.com`, `platform.claude.com` (required by Claude 2.1.215),
 `chatgpt.com`, and `api.openai.com` (Codex). It grants `~/.codex` read+write and
 adds `(allow file-ioctl)` for the Codex TUI. These are shipped additions beyond
@@ -704,9 +721,10 @@ proxy is the single enforcement layer.** One mental model, one config surface
 Mechanism — codex's sandbox is set by two flags on its launch line
 (`codex-spawn.ts:189/191` spawn, `375/377` resume):
 - `-a never` — approval mode (unchanged; don't prompt).
-- `-s workspace-write` — codex's OS sandbox. **When `sandbox.enabled: true`,
-  change this to `-s danger-full-access`** (codex's no-sandbox mode) so codex
-  stops enforcing its own filesystem/network rules.
+- `-s workspace-write` — codex's OS sandbox. **Under the mandatory contract this
+  is always `-s danger-full-access`** (codex's no-sandbox mode) so codex stops
+  enforcing its own filesystem/network rules and our Seatbelt wrap is the sole
+  boundary.
 
 Then wrap the whole `codex …` launch in `sandbox-exec -f sandbox.sb … codex …`,
 exactly like the claude wrapper (§3.3) — with the proxy vars **exported in the
@@ -720,8 +738,9 @@ Why not nest the two sandboxes: two OS sandboxes on one process enforce the
 `danger-full-access` removes codex's layer so ours is unambiguous.
 
 ✅ **Implemented in `src/codex-spawn.ts`:** spawn and resume preserve `-a never`,
-select `-s danger-full-access` under our Seatbelt wrapper, export the same proxy
-environment, and retain `-s workspace-write` when the per-agent sandbox is off.
+always select `-s danger-full-access` under our Seatbelt wrapper, and export the
+same proxy environment. There is no `-s workspace-write` path left — the builders
+refuse to emit an unwrapped codex line.
 
 ✅ **Codex spike items resolved by the shipped phase-5 path (§6):**
 1. The installed Codex accepts `-s danger-full-access`; both generated launch
@@ -731,9 +750,8 @@ environment, and retain `-s workspace-write` when the per-agent sandbox is off.
 3. `danger-full-access` + `-a never` retains non-interactive approval behavior
    and the existing `<&0` TTY handling on spawn and resume.
 
-The installed CLI accepts `danger-full-access`, Codex runs through the per-agent
-proxy without reintroducing approvals, and `sandbox.enabled: false` keeps its
-existing `-s workspace-write` behavior. The shipped `_all.md` includes
+The installed CLI accepts `danger-full-access`, and Codex runs through the
+per-agent proxy without reintroducing approvals. The shipped `_all.md` includes
 `chatgpt.com` and `api.openai.com`; because proxy apex entries are exact,
 subdomains remain denied unless explicitly added.
 
@@ -741,21 +759,19 @@ subdomains remain denied unless explicitly added.
 
 **Decision (Adam, 2026-09-02): NEVER yolo without the kernel.** Codex's
 `-a never` already suppresses its approval prompts under our wrapper; the claude
-equivalent is `--dangerously-skip-permissions`, and it is gated the same way —
-**only** when the per-agent Seatbelt sandbox is the enforcement layer. When
-`meta.sandbox.enabled` is true, the claude launch line in **both** `start.sh`
-(spawn) and `resume.sh` (resume) gains `--dangerously-skip-permissions`, emitted
-**inside** the `sandbox-exec -f … claude …` wrapper (both the `setsid` and the
-plain-background arms). When the sandbox is disabled the launch line is
-**byte-identical** to today — no flag — so an unsandboxed claude keeps its full
-in-session permission gate. The claude-only flag never leaks into the codex or
-agy launch lines (codex has its own no-prompt mode; agy has no wrapper yet and
-is out of scope). ✅ **Implemented in `src/ib-commands.ts`:** the flag is
-appended to `claudeArgs` only when `preparedSandbox`/`preparedResumeSandbox` is
-non-null — exactly the condition that installs the sandbox-exec launch prefix —
-so the byte-identical-when-disabled guarantee falls out of the gate itself
-(regressed by the disabled `start.sh` / resume byte-equality fixtures, with a
-new enabled assertion on both the spawn and resume launch lines).
+equivalent is `--dangerously-skip-permissions`, gated the same way — it rides
+**inside** the Seatbelt wrapper that is the enforcement layer, never without it.
+Under the mandatory contract every claude launch is wrapped, so the claude launch
+line in **both** `start.sh` (spawn) and `resume.sh` (resume) always gains
+`--dangerously-skip-permissions`, emitted **inside** the `sandbox-exec -f … claude
+…` wrapper (both the `setsid` and the plain-background arms). The invariant is
+that the flag is present **iff** the sandbox prefix is present. The claude-only
+flag never leaks into the codex or agy launch lines (codex has its own no-prompt
+mode; agy runs under its own mandatory wrap with its own launch flags — §19).
+✅ **Implemented in `src/ib-commands.ts`:** the flag is appended to `claudeArgs`
+only when `preparedSandbox`/`preparedResumeSandbox` is non-null — exactly the
+condition that installs the sandbox-exec launch prefix — so "flag present iff
+kernel present" falls out of the gate itself.
 
 ## 4C. What ELSE runs inside the sandbox (the big gap — from design review)
 
@@ -921,15 +937,15 @@ countermeasure a sandboxed non-spawner could edit its own `meta.json` to set
   divergence it detects.
 - **Verification.** `resumeAgent`, `respawnSelf` (which resumes through the same
   path), and `ib sandbox refresh` (before its own re-seal) compare the agent's
-  current inputs against the seal **when `meta.sandbox.enabled` is true**; on any
-  mismatch they **fail hard** — the agent is left stopped, the differing field is
-  named in `agent.log`, and stderr reads `sandbox refused: meta.json does not
-  match the sealed record (<field>); run \`ib sandbox refresh <id>\` from an
-  unsandboxed session to re-seal`. A missing seal for an enabled agent is refused
-  by resume/respawn with its own message (pointing at refresh); **refresh** treats
-  a missing seal as "seal it now" so a legacy enabled agent is recoverable, but
-  refuses a genuine mismatch so a tampered meta cannot be laundered into a new
-  seal. Disabled agents have no profile and are never checked.
+  current inputs against the seal on every launch; on any mismatch they **fail
+  hard** — the agent is left stopped, the differing field is named in `agent.log`,
+  and stderr reads `sandbox refused: meta.json does not match the sealed record
+  (<field>); run \`ib sandbox refresh <id>\` from an unsandboxed session to
+  re-seal`. A missing seal is refused by resume/respawn with its own message
+  (pointing at refresh); **refresh** treats a missing seal as "seal it now" so a
+  legacy agent is recoverable, but refuses a genuine mismatch so a tampered meta
+  cannot be laundered into a new seal. (Legacy metadata whose frozen policy
+  predates the mandatory contract cannot launch until refreshed anyway — §5.5.)
 
 ⚠️ **Residual (accepted).** A **SPAWNER** can still reach the seal dir the same
 way it reaches everything else off-limits — through the **tmux socket**, the
@@ -1165,14 +1181,14 @@ matching wildcard. This is a baseline watch item, not implicit proxy behavior.
   config lived only in the type file, a resumed agent would silently lose (or
   pick up a changed) sandbox after the `.md` is edited. Follow the `effort`
   persistence convention (`effort || null` at `:4539`).
-- `start.sh` / `resume.sh` builders: when `meta.sandbox.enabled`, wrap the
-  `claude` launch (both setsid + fallback branches) and start the proxy first.
-  The wrapped claude launch also gains `--dangerously-skip-permissions` (A4 G1,
-  §4B.1) — appended to `claudeArgs` only when the prepared sandbox is non-null,
-  so it is present exactly when the launch is sandbox-wrapped and the disabled
-  launch line stays byte-identical.
+- `start.sh` / `resume.sh` builders: under the mandatory contract they always
+  wrap the `claude` launch (both setsid + fallback branches) and start the proxy
+  first. The wrapped claude launch also gains `--dangerously-skip-permissions`
+  (A4 G1, §4B.1) — appended to `claudeArgs` only when the prepared sandbox is
+  non-null, so the flag is present exactly when the launch is sandbox-wrapped
+  (present iff the kernel prefix is present).
 - `teardownAgent` (`ib-commands.ts:365` area): kill the proxy, free the port.
-- Codex branch (`codex-spawn.ts`): in v1, flip `-s workspace-write` →
+- Codex branch (`codex-spawn.ts`): flip `-s workspace-write` →
   `-s danger-full-access` and apply the same seatbelt + proxy env/domain wrap as
   claude (§4B) — codex filesystem is covered by OUR profile, not `workspace-write`.
   This lands in phase 5 (codex parity), not "maybe later". **The intended home for
@@ -1205,17 +1221,17 @@ existing truncation makes it safe without changing sidebar width math.
 
 ### 5.5 Fail-hard when the sandbox can't be established (Adam's call)
 
-When `sandbox.enabled: true`, the agent **must not start** unless the sandbox is
-fully in place. There is no unsandboxed fallback. Preconditions checked at spawn
-(and resume), each of which aborts on failure:
+The sandbox is mandatory: an agent **must not start** unless it is fully in place.
+There is no unsandboxed fallback. Preconditions checked at spawn (and resume),
+each of which aborts on failure:
 
 - `sandbox-exec` is present and the OS is macOS (else: platform can't sandbox).
 - The generated `sandbox.sb` compiles (dry-run / lint the profile before launch).
 - The per-agent proxy binds its port successfully.
 - (codex) the `-s danger-full-access` flip + proxy env are applied.
-- On resume, metadata for an enabled sandbox includes the frozen top-level
-  `paths` block. Enabled metadata written before the `paths:` split is refused;
-  it is never interpreted as an empty filesystem allowlist.
+- On resume, the frozen metadata must include the top-level `paths` block.
+  Metadata written before the `paths:` split is refused; it is never interpreted
+  as an empty filesystem allowlist.
 
 On any failure, the spawn/resume path must:
 1. **Not exec claude/codex at all** — never a partial or unsandboxed launch.
@@ -1239,12 +1255,14 @@ before launch. The generated script performs a second bind/ready check to close
 the allocation race. Any failure aborts before Claude/Codex exec; Codex builders
 also fail if either shared sandbox prefix is missing.
 
-The resume compatibility guard runs before profile or proxy preparation. When
-an enabled legacy `meta.json` has no `paths` block, resume logs a specific
-fail-hard error and returns non-zero. The agent remains stopped, no `sandbox.sb`
-is written, and no proxy is started. The refusal now names the recovery:
-`run \`ib sandbox refresh <id>\` from an unsandboxed session, or respawn the
-agent` — refresh (§5.6) re-derives and writes the missing `paths` block.
+The resume compatibility guard runs before profile or proxy preparation. It is a
+single unified refusal: resume logs a specific fail-hard error and returns
+non-zero — leaving the agent stopped, with no `sandbox.sb` written and no proxy
+started — whenever the frozen metadata cannot support the mandatory sandbox. That
+covers a legacy sandbox policy that predates the mandatory contract (missing or
+disabled) and a legacy `meta.json` with no top-level `paths` block. The error
+recommends re-deriving the policy with `ib sandbox refresh` (§5.6, from an
+unsandboxed session), or otherwise nuking and respawning the agent.
 
 ### 5.6 `ib sandbox refresh <id> | --all` (A4 G2)
 
@@ -1281,6 +1299,15 @@ clears the stale pid exactly as an ordinary resume does.
 `ib sandbox refresh` in `src/index.ts`.**
 
 ## 6. Build phases
+
+> **Historical ledger (§6–§8).** These build phases, resolved decisions, and the
+> test matrix were written for the opt-in `sandbox.enabled` design. Entries that
+> describe an on/off toggle, `enabled` OR-merge, a `-s workspace-write` fallback,
+> a disabled or "byte-identical" launch line, or an "enabled vs disabled" test
+> case are **superseded** by the mandatory contract (§1, §4, §5.5): the sandbox is
+> always applied, codex is always `-s danger-full-access`, and `enabled` is
+> retained only as internal metadata. The path grammar, seal/fail-hard, and
+> domain-proxy items remain valid.
 
 1. **Spike (blocking) — ✅ COMPLETE (2026-07-18), BOTH gates GO.** Full results in
    `docs/SANDBOX-SPIKE-FINDINGS.md`. Headlines: exec-in-place confirmed (PID/watchdog

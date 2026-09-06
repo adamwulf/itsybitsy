@@ -23,6 +23,17 @@ import {
 import { CODEX_REGISTERED_EVENTS } from "./codex-config";
 import { setUserHome, resetUserHome } from "./home";
 
+// Mandatory sandbox: every codex launch is wrapped now, so the builders REQUIRE
+// the proxy preamble + sandbox-exec prefix (they throw otherwise) and always run
+// `-s danger-full-access` inside our Seatbelt wrapper. These stand in for what
+// ib-commands renders via src/sandbox-launch.ts.
+const SANDBOX_PREAMBLE = "\n# test proxy preamble\nexport http_proxy=\"http://localhost:54321\"\n";
+const SANDBOX_PREFIX = "sandbox-exec -f '/tmp/test/sandbox.sb' -D 'AGENTDIR=/tmp/test'";
+const sandboxFields = () => ({
+  sandboxScriptPreamble: SANDBOX_PREAMBLE,
+  sandboxExecPrefix: SANDBOX_PREFIX,
+});
+
 describe("buildCodexStartContent — launch line", () => {
   const baseInput = () => ({
     agentId: "agent-abc12345",
@@ -34,40 +45,23 @@ describe("buildCodexStartContent — launch line", () => {
     absExitScript: "/tmp/test/exit-check.sh",
     absAgentLog: "/tmp/test/agent.log",
     absStderrLog: "/tmp/test/claude.stderr.log",
+    ...sandboxFields(),
   });
 
-  test("contains the canonical -m / -a / -s / --dangerously-bypass-hook-trust flags (SPEC §3.3)", () => {
+  test("contains the canonical -m / -a / --dangerously-bypass-hook-trust flags + mandatory danger-full-access (SPEC §3.3)", () => {
     const content = buildCodexStartContent(baseInput());
     // The model is shell-quoted, so it ends up wrapped in single quotes.
     expect(content).toContain("-m 'gpt-5.4-mini'");
     expect(content).toContain("-a never");
-    expect(content).toContain("-s workspace-write");
+    // Mandatory sandbox: codex always runs danger-full-access inside our wrapper.
+    expect(content).toContain("-s danger-full-access");
+    expect(content).not.toContain("-s workspace-write");
     expect(content).toContain("--dangerously-bypass-hook-trust");
-    expect(content).not.toContain("sandbox-exec");
-    expect(content).not.toContain("export http_proxy=");
   });
 
-  test("disabled sandbox start output is byte-identical for omitted, undefined, and explicit false", () => {
-    const omitted = buildCodexStartContent(baseInput());
-    const explicitUndefined = buildCodexStartContent({ ...baseInput(), sandboxEnabled: undefined });
-    const explicitFalse = buildCodexStartContent({
-      ...baseInput(),
-      sandboxEnabled: false,
-      sandboxScriptPreamble: "\nexport http_proxy=SHOULD_NOT_APPEAR\n",
-      sandboxExecPrefix: "sandbox-exec SHOULD_NOT_APPEAR",
-    });
-    expect(explicitUndefined).toBe(omitted);
-    expect(explicitFalse).toBe(omitted);
-    expect(omitted).toContain("-s workspace-write");
-    expect(omitted).not.toContain("sandbox-exec");
-    expect(omitted).not.toContain("danger-full-access");
-    expect(omitted).not.toContain("SHOULD_NOT_APPEAR");
-  });
-
-  test("uses our sandbox wrapper, proxy exports, and danger-full-access on both launch arms when enabled", () => {
+  test("uses our sandbox wrapper, proxy exports, and danger-full-access on both launch arms", () => {
     const content = buildCodexStartContent({
       ...baseInput(),
-      sandboxEnabled: true,
       sandboxScriptPreamble: "\nexport HTTPS_PROXY=\"http://localhost:43123\"\n",
       sandboxExecPrefix: "sandbox-exec -f '/tmp/test/sandbox.sb' -D 'AGENTDIR=/tmp/test'",
     });
@@ -79,9 +73,11 @@ describe("buildCodexStartContent — launch line", () => {
     expect(content).toMatch(/sandbox-exec [^\n]* codex [^\n]* <&0 2> "\$STDERR_LOG" &/);
   });
 
-  test("refuses a sandbox-enabled launch without the complete wrapper", () => {
-    expect(() => buildCodexStartContent({ ...baseInput(), sandboxEnabled: true }))
-      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
+  test("REFUSES a launch without the complete wrapper (mandatory sandbox)", () => {
+    expect(() => buildCodexStartContent({ ...baseInput(), sandboxScriptPreamble: "" }))
+      .toThrow(/requires the sandbox proxy preamble and sandbox-exec prefix/);
+    expect(() => buildCodexStartContent({ ...baseInput(), sandboxExecPrefix: "" }))
+      .toThrow(/requires the sandbox proxy preamble and sandbox-exec prefix/);
   });
 
   test("threads codexEffort into the -c model_reasoning_effort override", () => {
@@ -141,10 +137,10 @@ describe("buildCodexStartContent — launch line", () => {
   test("always grants --add-dir <coordinatorHome> so codex can write centralized state", async () => {
     // Per-agent outboxes (`<coordinatorHome>/agents/<id>/outbox.jsonl`),
     // team channels (`<coordinatorHome>/teams/...`), and `teams.json` all
-    // live under the coordinator home. Codex agents run with `-s workspace-write`,
-    // so the entire coordinator home MUST appear as an --add-dir on every
-    // codex spawn — otherwise `ib send <other-id>` and `ib send @<team>`
-    // fail with EPERM trying to append to centralized state.
+    // live under the coordinator home. The --add-dir flags are emitted on every
+    // codex spawn regardless of sandbox mode, so the entire coordinator home
+    // appears as an --add-dir — otherwise `ib send <other-id>` and `ib send
+    // @<team>` fail with EPERM trying to append to centralized state.
     const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
     const fakeHome = "/tmp/codex-spawn-test-home";
     setCoordinatorHome(fakeHome);
@@ -193,19 +189,20 @@ describe("buildCodexStartContent — launch line", () => {
     expect(content).toContain("trap '' HUP");
   });
 
-  test("offers both setsid and bare-launch paths", () => {
+  test("offers both setsid and bare-launch paths (sandbox-wrapped)", () => {
     const content = buildCodexStartContent(baseInput());
-    expect(content).toContain("setsid codex -m");
-    // Bare-launch arm: an unindented `codex -m` line in the else branch.
-    expect(content).toMatch(/else\s*\n\s*codex -m/);
+    // Both arms wrap codex under our sandbox-exec prefix (mandatory sandbox).
+    expect(content).toMatch(/setsid sandbox-exec [^\n]* codex -m/);
+    // Bare-launch arm: an indented `sandbox-exec … codex -m` line in the else branch.
+    expect(content).toMatch(/else\s*\n\s*sandbox-exec [^\n]* codex -m/);
   });
 
   test("redirects stdin from <&0 on both launch arms (codex enforces isatty(0); bash bg-jobs default stdin to /dev/null)", () => {
     const content = buildCodexStartContent(baseInput());
-    // setsid arm
-    expect(content).toMatch(/setsid codex -m [^\n]* <&0 2> "\$STDERR_LOG" &/);
-    // bare arm
-    expect(content).toMatch(/^    codex -m [^\n]* <&0 2> "\$STDERR_LOG" &$/m);
+    // setsid arm (sandbox-wrapped)
+    expect(content).toMatch(/setsid sandbox-exec [^\n]* codex -m [^\n]* <&0 2> "\$STDERR_LOG" &/);
+    // bare arm (sandbox-wrapped)
+    expect(content).toMatch(/^    sandbox-exec [^\n]* codex -m [^\n]* <&0 2> "\$STDERR_LOG" &$/m);
   });
 
   test("rejects an unsafe ib binary path (SPEC §7 risk 14)", () => {
@@ -306,48 +303,32 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     absExitScript: "/tmp/test/exit-check.sh",
     absAgentLog: "/tmp/test/agent.log",
     absStderrLog: "/tmp/test/claude.stderr.log",
+    ...sandboxFields(),
   });
 
   test("launches `codex resume <UUID>` (subcommand form, not the --resume flag)", () => {
     const content = buildCodexResumeContent(baseInput());
     // The UUID is shell-quoted by shellQuote (no metacharacters in a UUID, so
-    // single-quoting is the form bun's shellQuote produces).
-    expect(content).toContain("setsid codex resume '019e7b21-cb7d-7f23-8674-11036ed141ef'");
+    // single-quoting is the form bun's shellQuote produces). The launch is
+    // sandbox-wrapped, so the setsid arm carries our prefix ahead of `codex`.
+    expect(content).toContain(`setsid ${SANDBOX_PREFIX} codex resume '019e7b21-cb7d-7f23-8674-11036ed141ef'`);
     expect(content).toContain("codex resume '019e7b21-cb7d-7f23-8674-11036ed141ef'"); // bare-launch arm
     // MUST NOT use claude's --resume flag pattern.
     expect(content).not.toContain("--resume");
   });
 
-  test("re-passes -a never -s workspace-write --dangerously-bypass-hook-trust on resume (Phase 7 Q2)", () => {
+  test("re-passes -a never --dangerously-bypass-hook-trust + mandatory danger-full-access on resume (Phase 7 Q2)", () => {
     const content = buildCodexResumeContent(baseInput());
     expect(content).toContain("-a never");
-    expect(content).toContain("-s workspace-write");
+    // Mandatory sandbox: codex resume always runs danger-full-access inside our wrapper.
+    expect(content).toContain("-s danger-full-access");
+    expect(content).not.toContain("-s workspace-write");
     expect(content).toContain("--dangerously-bypass-hook-trust");
-    expect(content).not.toContain("sandbox-exec");
-    expect(content).not.toContain("export http_proxy=");
   });
 
-  test("disabled sandbox resume output is byte-identical for omitted, undefined, and explicit false", () => {
-    const omitted = buildCodexResumeContent(baseInput());
-    const explicitUndefined = buildCodexResumeContent({ ...baseInput(), sandboxEnabled: undefined });
-    const explicitFalse = buildCodexResumeContent({
-      ...baseInput(),
-      sandboxEnabled: false,
-      sandboxScriptPreamble: "\nexport http_proxy=SHOULD_NOT_APPEAR\n",
-      sandboxExecPrefix: "sandbox-exec SHOULD_NOT_APPEAR",
-    });
-    expect(explicitUndefined).toBe(omitted);
-    expect(explicitFalse).toBe(omitted);
-    expect(omitted).toContain("-s workspace-write");
-    expect(omitted).not.toContain("sandbox-exec");
-    expect(omitted).not.toContain("danger-full-access");
-    expect(omitted).not.toContain("SHOULD_NOT_APPEAR");
-  });
-
-  test("uses our sandbox wrapper, proxy exports, and danger-full-access on both resume arms when enabled", () => {
+  test("uses our sandbox wrapper, proxy exports, and danger-full-access on both resume arms", () => {
     const content = buildCodexResumeContent({
       ...baseInput(),
-      sandboxEnabled: true,
       sandboxScriptPreamble: "\nexport HTTPS_PROXY=\"http://localhost:43124\"\n",
       sandboxExecPrefix: "sandbox-exec -f '/tmp/test/sandbox.sb' -D 'AGENTDIR=/tmp/test'",
     });
@@ -359,9 +340,11 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     expect(content).toMatch(/sandbox-exec [^\n]* codex resume [^\n]* <&0 2> "\$STDERR_LOG" &/);
   });
 
-  test("refuses a sandbox-enabled resume without the complete wrapper", () => {
-    expect(() => buildCodexResumeContent({ ...baseInput(), sandboxEnabled: true }))
-      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
+  test("REFUSES a resume without the complete wrapper (mandatory sandbox)", () => {
+    expect(() => buildCodexResumeContent({ ...baseInput(), sandboxScriptPreamble: "" }))
+      .toThrow(/requires the sandbox proxy preamble and sandbox-exec prefix/);
+    expect(() => buildCodexResumeContent({ ...baseInput(), sandboxExecPrefix: "" }))
+      .toThrow(/requires the sandbox proxy preamble and sandbox-exec prefix/);
   });
 
   test("re-passes extra writable roots through as --add-dir flags on resume", () => {
@@ -410,18 +393,18 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     expect(content).toContain("trap '' HUP");
   });
 
-  test("offers both setsid and bare-launch paths", () => {
+  test("offers both setsid and bare-launch paths (sandbox-wrapped)", () => {
     const content = buildCodexResumeContent(baseInput());
-    expect(content).toContain("setsid codex resume");
-    expect(content).toMatch(/else\s*\n\s*codex resume/);
+    expect(content).toMatch(/setsid sandbox-exec [^\n]* codex resume/);
+    expect(content).toMatch(/else\s*\n\s*sandbox-exec [^\n]* codex resume/);
   });
 
   test("redirects stdin from <&0 on both launch arms (codex enforces isatty(0); bash bg-jobs default stdin to /dev/null)", () => {
     const content = buildCodexResumeContent(baseInput());
-    // setsid arm
-    expect(content).toMatch(/setsid codex resume [^\n]* <&0 2> "\$STDERR_LOG" &/);
-    // bare arm
-    expect(content).toMatch(/^    codex resume [^\n]* <&0 2> "\$STDERR_LOG" &$/m);
+    // setsid arm (sandbox-wrapped)
+    expect(content).toMatch(/setsid sandbox-exec [^\n]* codex resume [^\n]* <&0 2> "\$STDERR_LOG" &/);
+    // bare arm (sandbox-wrapped)
+    expect(content).toMatch(/^    sandbox-exec [^\n]* codex resume [^\n]* <&0 2> "\$STDERR_LOG" &$/m);
   });
 
   test("includes the exit-code annotation table (matches start.sh)", () => {
@@ -560,6 +543,7 @@ describe("write-pid stdin is redirected off the pane tty (codex COOKED-mode wedg
     absExitScript: "/tmp/test/exit-check.sh",
     absAgentLog: "/tmp/test/agent.log",
     absStderrLog: "/tmp/test/claude.stderr.log",
+    ...sandboxFields(),
   });
   const resumeInput = () => ({
     agentId: "agent-abc12345",
@@ -570,6 +554,7 @@ describe("write-pid stdin is redirected off the pane tty (codex COOKED-mode wedg
     absExitScript: "/tmp/test/exit-check.sh",
     absAgentLog: "/tmp/test/agent.log",
     absStderrLog: "/tmp/test/claude.stderr.log",
+    ...sandboxFields(),
   });
   // The full line the fix must produce in both templates: stdin off the tty,
   // stdout/stderr appended to the agent log, and the OR-log fallback preserved

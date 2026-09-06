@@ -1,11 +1,17 @@
 # SPEC-PATH-ALLOWLIST.md — Path allow-list for agent types
 
+**Staged rollout scope:** kernel sandbox claims below cover ordinary repository agents and per-repository coordinators. The global `@system` coordinator retains its existing hook-based checks and remains unsandboxed in this version. Its kernel confinement is deferred; see [the rollout guide](docs/SANDBOX-ROLLOUT.md).
+
 **Status:** Phase B is implemented on `agent/codex-path-isolation` and recorded as
 **ON BRANCH**, not **INSTALLED**, in [the rollout ledger](docs/SANDBOX-ROLLOUT.md).
 The current contract is summarized immediately below and specified normatively in
-[SPEC.md §6.1](SPEC.md). Sections 0–7 retain the 2026-09-02 research and decision
-trail; statements there about `allowedPaths`, permissive defaults, or work still
-being proposed describe the historical baseline and are not current behavior.
+[SPEC.md §6.1](SPEC.md); the sandbox is now **mandatory** (SPEC-SANDBOX.md,
+[docs/SANDBOX-ROLLOUT.md](docs/SANDBOX-ROLLOUT.md)). The numbered sections below
+(0–9) retain the 2026-09-02 research, decision, and build-order trail; statements
+there about `allowedPaths`, permissive defaults, an opt-in `sandbox.enabled`
+toggle, a disabled or hook-only fallback, an "enable it per type" transition, a
+"ships `enabled: false` / zero live change" ledger, or an unwrapped agy describe
+the historical baseline and are not current behavior.
 **Written:** 2026-09-02 by researcher agent `path-isolation`; updated through the
 Phase B integration on 2026-09-05.
 
@@ -27,24 +33,27 @@ Phase B integration on 2026-09-05.
   `opus`, or the `unknown` value produced by `readAgentMeta`, additionally
   receives its Claude project directory and scratchpad. Those Claude-only roots
   are excluded from codex, fugu, and agy hook tables, matching their kernel
-  profiles.
+  profiles. agy additionally receives its whole `~/.gemini` state directory as an
+  agy-only read+write root, excluded from the other tables.
 - The Bash scanner classifies recognizable literal path arguments and common
   write destinations, then consults the same table. It is an advisory visibility
   and early-denial layer, not a shell parser or kernel boundary. Dynamic shell
-  expansion and unrecognized command shapes remain an accepted limitation when
-  the kernel sandbox is off.
-- The Seatbelt kernel wrapper is available for claude and the Codex-backed
-  codex/fugu CLIs on macOS. It is unavailable for agy: an agy agent whose
-  resolved `sandbox.enabled` is `true` fails closed before its interactive
-  launch rather than running unwrapped. A diagnostic `agy --version` probe may
-  already have run. Instructions, `ib info`, and the dashboard identify that
-  state as unavailable.
+  expansion and unrecognized command shapes remain an accepted limitation of the
+  advisory scanner; the mandatory kernel wrapper is the authoritative boundary
+  that refuses the operation regardless.
+- The Seatbelt kernel wrapper is applied at every launch on macOS — for claude,
+  the Codex-backed codex/fugu CLIs, and agy alike. Sandboxing is mandatory: there
+  is no `sandbox.enabled` toggle in Markdown and no unsandboxed fallback; a
+  platform, profile, or proxy that cannot support it fails closed before launch.
+  Instructions, `ib info`, and the dashboard report the resolved kernel state per
+  CLI; a legacy agent whose frozen metadata predates the contract shows as
+  disabled, and the migration guidance to run `ib sandbox refresh` is supplied at
+  resume (SPEC.md §1.6, SPEC-SANDBOX §5.5), not by the display.
 - Spawn freezes `paths` and `sandbox` in `meta.json`; `ib sandbox refresh`
-  re-derives them from the current type layers. For agy, refresh succeeds and
-  updates paths/rules when the newly resolved sandbox is disabled; an enabled
-  result fails before metadata mutation. Codex resume and refresh also regenerate
-  `AGENTS.md` from the agent's current frozen metadata, so its instructions
-  describe the policy that will actually be enforced.
+  re-derives them from the current type layers. Refresh applies uniformly to every
+  CLI, including agy, and the re-derived policy is always sandbox-wrapped. Codex
+  resume and refresh also regenerate `AGENTS.md` from the agent's current frozen
+  metadata, so its instructions describe the policy that will actually be enforced.
 
 ---
 
@@ -206,6 +215,11 @@ this field"[^11]. So for codex:
 ---
 
 ## 4. Antigravity (agy) agents
+
+> **Historical (2026-09-02 baseline).** This describes agy *before* the mandatory
+> contract, when it ran unwrapped. agy now launches inside the same `sandbox-exec`
+> + egress-proxy wrapper as claude/codex, with `~/.gemini` as an agy-only runtime
+> root — see the current-implementation summary above and SPEC-SANDBOX §4B.
 
 **Launch.** `agy --dangerously-skip-permissions --mode=accept-edits --model <slug>
 [--effort] --log-file <agentDir>/agy.log -i "<prompt>"`[^21]. No sandbox and no

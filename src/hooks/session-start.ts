@@ -445,9 +445,9 @@ ${renderPathList("Read only (allowRead)", paths?.allowRead)}
 ${renderPathList("Read and write (allowWrite)", paths?.allowWrite)}
 ${renderPathList("Denied (deny), overriding the lists above", paths?.deny)}`;
 
-  const sandboxLine = cli === "agy"
-    ? `The kernel sandbox is unavailable for agy; the itsybitsy hook enforces these paths.`
-    : ctx.sandbox?.enabled
+  // Mandatory sandbox: every CLI (claude, codex, fugu, agy) launches under the
+  // kernel sandbox now, so there is no agy-specific "unavailable" case.
+  const sandboxLine = ctx.sandbox?.enabled
     ? `The kernel sandbox is ON: an access outside these lists fails with EPERM, whatever the spelling. The hook explains the honest command-line attempts in the Denials tab of \`ib watch\`.`
     : `The kernel sandbox is OFF; the itsybitty hook is the only fence for these paths.`;
 

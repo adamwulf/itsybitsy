@@ -73,6 +73,25 @@ export function claudeScratchpadDirFor(worktreePath: string, uid: number): strin
   return canonicalizeSandboxPath(`/private/tmp/claude-${uid}/${encoded}`);
 }
 
+/**
+ * The agy CLI's state/config directory: `<home>/.gemini`. agy stores ALL its
+ * runtime state there — settings.json + the workspace trust list under
+ * `antigravity-cli/`, config, transcripts, brain/presence/cache/log, and builtin
+ * skills — and it reads AND rewrites those during a session, so it must be a
+ * WRITE root, not read-only. The location is home-relative and matches
+ * `agySettingsPath()` in src/agy-config.ts (the file itsybitsy itself writes the
+ * trust entry into); both resolve the same `<home>/.gemini` so the trust file
+ * itsybitsy writes is exactly where the sandboxed agy process looks. Home is not
+ * relocated by any override in the itsybitsy code path, so this is a fixed
+ * `<home>/.gemini`. Supplied only for an agy agent (agentPathAccessTable gates on
+ * `cli === "agy"`); the spawn side passes the identical value so the kernel
+ * profile and the hook agree. Credentials live in the macOS keyring
+ * (`~/Library/Keychains`, already in the `_all.md` read floor), not here.
+ */
+export function agyStateDirFor(home: string): string {
+  return canonicalizeSandboxPath(join(home, ".gemini"));
+}
+
 /** The inputs the sync table builder needs, all pre-resolved by the caller. */
 export interface AgentAccessTableParams {
   paths: PathsConfig;
@@ -97,10 +116,11 @@ export interface AgentAccessTableParams {
  *
  * The runtime roots come from `sandboxPathAccessTable` (AGENTDIR, WORKTREE,
  * GITDIR, REPOAGENTS — spawn-keyed — and PARENTCLAUDE for spawners, plus the
- * tmux deny for non-spawners). Only Claude receives PROJECTDIR/SCRATCHPAD;
- * Codex, fugu, and agy get neither. The same CLI-specific params are passed to
- * the kernel profile builder, so the hook grants no extra Claude roots to a
- * Codex profile that cannot access them.
+ * tmux deny for non-spawners). Each CLI gets ONLY its own extra runtime roots:
+ * Claude receives PROJECTDIR/SCRATCHPAD, agy receives AGYSTATEDIR (`~/.gemini`),
+ * and codex/fugu receive neither. The same CLI-specific params are passed to the
+ * kernel profile builder, so the hook grants no extra Claude roots to a Codex
+ * profile that cannot access them (and no agy root to a Claude profile).
  */
 export function agentPathAccessTable(p: AgentAccessTableParams): PathAccessTable {
   const params: SandboxProfileParams = {
@@ -116,6 +136,8 @@ export function agentPathAccessTable(p: AgentAccessTableParams): PathAccessTable
   if (p.cli === undefined || p.cli === "claude") {
     params.PROJECTDIR = claudeProjectDirFor(p.worktreePath);
     params.SCRATCHPAD = claudeScratchpadDirFor(p.worktreePath, process.getuid?.() ?? 0);
+  } else if (p.cli === "agy") {
+    params.AGYSTATEDIR = agyStateDirFor(p.home ?? userHome());
   }
   return sandboxPathAccessTable(p.paths, params);
 }

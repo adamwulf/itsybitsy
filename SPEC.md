@@ -1,5 +1,7 @@
 # itsybitsy (ib) — Behavioral Specification
 
+**Staged rollout scope:** mandatory kernel sandboxing in this specification applies to ordinary repository agents and per-repository coordinators. The global `@system` coordinator remains unsandboxed; its confinement is deferred (§12.1.8). See [the rollout guide](docs/SANDBOX-ROLLOUT.md) for configuration migration and validation status.
+
 This document is the definitive behavioral specification for itsybitsy, a multi-agent orchestration system for Claude Code. It uses tmux sessions, git worktrees, and a hook system to manage isolated, concurrent Claude agents.
 
 **Annotations used in this document:**
@@ -225,9 +227,10 @@ Resume (`ib resume <id>`) restarts a stopped agent:
 frozen `sandbox`/`paths` block from the current agent-type files and restarts it
 through this same resume path so the new policy takes effect (coordinators are
 refused; `--all` covers every non-stopped agent in the current repo). See
-SPEC-SANDBOX.md §5.6. For agy, a newly resolved enabled sandbox is rejected
-before metadata mutation; a sandbox-disabled refresh succeeds and updates the
-agent's paths/rules.
+SPEC-SANDBOX.md §5.6. Refresh applies uniformly to every CLI, including agy: the
+newly resolved policy is always sandbox-wrapped, so a legacy agent whose frozen
+metadata predates the mandatory contract becomes launchable again through this
+path.
 
 ### 1.7 Archiving
 
@@ -679,7 +682,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 | `state_updated_at` | number \| undefined | Unix epoch seconds when `state` was last written. Used for debugging. |
 | `coordinator` | boolean \| undefined | `true` for per-repo coordinators (§12.2.2). Absent for regular agents. |
 | `paths` | object \| undefined | Resolved, repo-anchored filesystem policy (`allowRead` / `allowWrite` / `deny`) from the agent type's `paths:` frontmatter, canonicalized to absolute paths at creation and frozen here. A **missing** key equals empty lists equals **strict** (worktree + runtime roots only). Replaced the retired `allowedPaths`. See §6.1. |
-| `sandbox` | object \| undefined | Resolved kernel-sandbox policy (`enabled`, `rawAllow`, `domains`) from the union of the `sandbox:` frontmatter, frozen at spawn for resume parity. For claude and the Codex-backed codex/fugu CLIs, `enabled` gates the `sandbox-exec` wrapper on macOS; for agy, whose wrapper is unavailable, `enabled: true` fails closed before launch rather than running unwrapped. The hook enforces `paths` regardless. Ships `enabled: false`. See SPEC-SANDBOX.md and SPEC-PATH-ALLOWLIST.md §6.12. |
+| `sandbox` | object \| undefined | Resolved kernel-sandbox policy (`enabled`, `rawAllow`, `domains`) from the union of the `sandbox:` frontmatter, frozen at spawn for resume parity. Under the mandatory-sandbox contract every launch is wrapped in `sandbox-exec` on macOS — claude, the Codex-backed codex/fugu CLIs, and agy alike — so a newly resolved policy is always enabled and there is no unsandboxed fallback (non-macOS, or a profile/proxy that cannot be established, fails closed before launch). `enabled` survives only as internal metadata: it flags a legacy agent whose frozen policy predates the mandatory contract (a `false` or absent value cannot launch until `ib sandbox refresh` re-derives it) and preserves sealed-record and operator-display compatibility. Agent-type Markdown no longer carries a `sandbox.enabled` toggle — only `paths`, `sandbox.rawAllow`, and `sandbox.domains` are configurable. The hook enforces `paths` regardless. See SPEC-SANDBOX.md and SPEC-PATH-ALLOWLIST.md §6.12. |
 
 ### 5.3 Worktree ↔ Branch Relationship
 
@@ -743,7 +746,7 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 2. **Bash cd commands**: If the tool is Bash and the command starts with `cd`, the target path is resolved and checked like any other path (as a `read` op). A **bare `cd`** (no argument, or an empty target) resolves to the **home directory** and is checked like any path — home is not a runtime root, so a strict agent is denied.
 3. **Bash command scanning** [^ts-only-bash-scan]: Non-cd Bash commands first receive the structural checks for protected-file writes, sibling-agent/main-repo references, relative traversal, and forbidden git directory flags. The advisory scanner then classifies recognizable literal path arguments, including `~`/`$HOME` forms and common write destinations (redirects, `sed -i`, `tee`, `cp`/`mv`, and write verbs), and checks each read or write against the shared access table. The path scanners preserve quoted and escaped whitespace within shell words; single- and double-quoted literal paths, including quoted flag values and redirect destinations, are checked in full. Unicode spaces remain filename content. Unterminated quotes/escapes deny; unsupported mixed quoting and escapes in path-looking words remain conservative denials. Heredoc bodies are treated as data.
 
-[^ts-only-bash-scan]: **TS-only behavior and accepted limitation.** The bash `ib` immediately allows all non-cd Bash commands after the tool allow-list check. The TS `checkBashCommandPaths()` adds useful early enforcement and Denials-tab visibility for recognizable literal paths, but it is not a complete shell parser: dynamic expansion, subprocesses, and unrecognized command shapes can evade classification. The kernel sandbox is authoritative when available and enabled. In hook-only mode this residual is accepted; the scanner must not be described as complete process confinement.
+[^ts-only-bash-scan]: **TS-only behavior and accepted limitation.** The bash `ib` immediately allows all non-cd Bash commands after the tool allow-list check. The TS `checkBashCommandPaths()` adds useful early enforcement and Denials-tab visibility for recognizable literal paths, but it is not a complete shell parser: dynamic expansion, subprocesses, and unrecognized command shapes can evade classification. On macOS the kernel `sandbox-exec` wrapper is applied at every repository-agent launch, including per-repository coordinators (fail-closed elsewhere; global `@system` is deferred) and is the authoritative OS boundary; this advisory scanner is a diagnostic layer beneath it for recognizable operations and must not be described as complete process confinement.
 4. **File path extraction** [^ts-only-notebook-path]: For non-Bash tools, `file_path`, `path`, or `notebook_path` from `tool_input` is extracted, resolved to an absolute path (relative to cwd, then `realpathSync` for symlinks), and checked.
 
 [^ts-only-notebook-path]: **TS-only behavior.** The bash `ib` only extracts `file_path` and `path` from `tool_input`. The TS implementation additionally checks `notebook_path` to cover Jupyter notebook tools.
@@ -752,19 +755,19 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 
 **Structural steps** (run before the resolver; the hook is deliberately stricter than the kernel here):
 
-6. **Protected-write block** (mutation tools only — reads are allowed): a write to `<worktree>/.claude/settings*.json` (permission self-escalation), the agy boundary files (`.agents/hooks.json` and the rule file, whose rewrite disables the hook gate on the next resume), the agent's own `<agent-dir>/meta.json` (the hook reads its path lists from it — a self-widening path in hook-only mode), or — for the `@system` coordinator, whose worktree root is its whole `~/.itsybitsy` home — its `agent-types/` dir, `config.json`, `repos.json`, `layout.json`, and `sealed/` dir. All are self-widening; agents may read them but must use `ib` to change configuration. Protected paths are canonicalized (symlink-resolving) so a symlinked parent cannot defeat the guard.
+6. **Protected-write block** (mutation tools only): writes to `<worktree>/.claude/settings*.json`, the agy boundary files (`.agents/hooks.json` and its rule file), and the agent's own `<agent-dir>/meta.json` are protected against self-escalation. For `@system`, the hook also protects its `agent-types/` directory, `config.json`, `repos.json`, `layout.json`, and `sealed/` against writes. Read access follows the shared path resolver and any authored denies. Protected paths are canonicalized to resolve symlinks. These are hook checks; the global coordinator has no kernel profile in this rollout (§12.1.8).
 10. **Other agents' / own non-worktree files**: deny anything under `.ittybitty/agents/` that is not the agent's own worktree or its own `agent.log` (so `meta.json`, `prompt.txt`, the outbox, and sibling agents stay denied to file tools, stricter than the kernel's `AGENTDIR` write root).
 11. **Main repo (outside worktree)**: deny the main checkout — including its `.git` (a kernel write root) — for worktree agents. The worktree and the agents dir are excluded (handled above / by the resolver).
 
 **Shared resolver** (steps 7–9 and 12–13 folded in): the resolved path is decided by `resolvePreparedAccess()` (`src/sandbox.ts`) against the per-agent **access table** built by `src/hooks/paths-table.ts` — normalized `meta.paths` unioned with CLI-appropriate runtime roots. Supported kernel profiles are generated from the corresponding table, so hook and kernel agree. A Write/Edit/MultiEdit/NotebookEdit (and codex `apply_patch`) resolves as a `write` op; Read/Grep/Glob/LS/`cd` as `read`.
 
-**Runtime roots** (injected by code — never in a `.md`): every CLI receives the worktree (read+write), agent dir / `agent.log`, git common dir (read+write), repo agents dir (`REPOAGENTS` — **write** for a spawner, **read** for a non-spawner, keyed on resolved `canSpawnChildren`), and the parent repo's `.claude` (`PARENTCLAUDE`, write, spawners only). Claude — including legacy metadata with an absent model, a safe bare model such as `sonnet`/`opus`, or the `unknown` value produced by `readAgentMeta` — additionally receives its project directory (`~/.claude/projects/<encoded-worktree>`) and scratchpad (`/private/tmp/claude-<uid>/<encoded-worktree>`); those Claude-only roots are omitted from codex, fugu, and agy hook tables, just as they are from those CLIs' kernel parameter sets. For a **non-spawner**, the **tmux socket dir is a deny root** (reaching the tmux server is a sandbox escape); a spawner keeps it (accepted, SPEC-SANDBOX §4C.3).
+**Runtime roots** (injected by code — never in a `.md`): every CLI receives the worktree (read+write), agent dir / `agent.log`, git common dir (read+write), repo agents dir (`REPOAGENTS` — **write** for a spawner, **read** for a non-spawner, keyed on resolved `canSpawnChildren`), and the parent repo's `.claude` (`PARENTCLAUDE`, write, spawners only). Claude — including legacy metadata with an absent model, a safe bare model such as `sonnet`/`opus`, or the `unknown` value produced by `readAgentMeta` — additionally receives its project directory (`~/.claude/projects/<encoded-worktree>`) and scratchpad (`/private/tmp/claude-<uid>/<encoded-worktree>`); those Claude-only roots are omitted from codex, fugu, and agy hook tables, just as they are from those CLIs' kernel parameter sets. **agy** additionally receives its whole `~/.gemini` state directory (read+write) as an **agy-only** runtime root — omitted from the claude/codex/fugu tables — because agy writes both `~/.gemini/antigravity-cli/` and `~/.gemini/config/` at runtime; its OAuth credentials live in the macOS keyring, not there. For a **non-spawner**, the **tmux socket dir is a deny root** (reaching the tmux server is a sandbox escape); a spawner keeps it (accepted, SPEC-SANDBOX §4C.3).
 
 **Resolution rules**: `paths.deny` **wins** over any allow at any depth; otherwise the **most specific** (longest canonical) matching entry decides — `allowWrite` grants read+write, `allowRead` grants read-only, and the same path in both lists **writes**. **No match denies.** A missing `paths` key defaults all three lists to empty. In a partially populated object, only omitted member lists default empty; every populated `allowRead`, `allowWrite`, or `deny` entry is retained and enforced. Neither case implies a wildcard.
 
-**Operator display and generated instructions** use the same normalization. `ib info` and the dashboard render partial/missing lists safely instead of widening or crashing. They report the resolved kernel state per CLI: enabled/disabled for claude, codex, and fugu, and unavailable for agy. Codex/fugu spawn, resume, and `ib sandbox refresh` regenerate `AGENTS.md` from the current frozen metadata so it cannot retain stale path or sandbox wording after refresh.
+**Operator display and generated instructions** use the same normalization. `ib info` and the dashboard render partial/missing lists safely instead of widening or crashing. They report the resolved kernel state per CLI — under the mandatory contract, sandbox-wrapped for claude, codex, fugu, and agy alike; a legacy agent whose frozen metadata predates the contract shows as disabled, and the migration guidance to run `ib sandbox refresh` is supplied at resume (§1.6, SPEC-SANDBOX §5.5), not by the display. Codex/fugu spawn, resume, and `ib sandbox refresh` regenerate `AGENTS.md` from the current frozen metadata so it cannot retain stale path or sandbox wording after refresh.
 
-**Fail closed**: malformed hook stdin, a non-string `tool_name`, and a **missing or unreadable `meta.json`** all **deny** (Phase B removed the historical allow-on-error fallbacks). The `@system` coordinator has no `meta.json`; its lists come from `_all.md ∪ system.md`, resolved **live** at hook time (the agent-types dir is read-only in the floor), and a layer that fails to load yields empty lists — strict, never permissive.
+**Fail closed**: malformed hook stdin, a non-string `tool_name`, and a **missing or unreadable `meta.json`** all **deny** (Phase B removed the historical allow-on-error fallbacks). The `@system` coordinator has no `meta.json`; its lists come from `_all.md ∪ system.md`, resolved **live** at hook time (writes to the agent-types dir are protected by the hook), and a layer that fails to load yields empty lists — strict, never permissive.
 
 **Logging**: Denials are appended to the agent's `agent.log` keeping the exact prefix `[PreToolUse] Permission denied: <tool> (<params>)` that the **Denials tab** of `ib watch` parses (`src/agents.ts::parseDenials`), plus ` — <reason>` naming the **operation**, the **resolved path**, and the **rule** (a `paths.deny` hit versus no matching allow entry). Kernel `sandbox-exec` denials never reach the agent log, so the advisory Bash scanner is what surfaces an honest `cat ~/.ssh/id_rsa` in the tab before the kernel refuses it.
 
@@ -845,7 +848,7 @@ Instructions are generated based on the agent's type definition:
 | `{{worktreePath}}` | Full path to agent's worktree |
 | `{{rootRepoPath}}` | Full path to the root repo |
 | `{{repoName}}` | Repository basename |
-| `{{pathIsolation}}` | Rendered Path Isolation section (from `buildPathIsolationSection()`: the runtime roots, the resolved `paths.allowWrite`/`allowRead`/`deny` lists, and whether the kernel sandbox is enabled) |
+| `{{pathIsolation}}` | Rendered Path Isolation section (from `buildPathIsolationSection()`: the runtime roots, the resolved `paths.allowWrite`/`allowRead`/`deny` lists, and the resolved kernel-sandbox state) |
 
 | Condition | True when |
 |-----------|-----------|
@@ -1605,6 +1608,12 @@ The system coordinator's `~/.itsybitsy/.claude/settings.local.json` includes fiv
 The Stop hook is intentionally **not** installed — the system coordinator's state detection lives in `detectSystemCoordinatorState()` (§12.1.6), which polls tmux output and does not need a Claude-driven idle signal. The `@system` sentinel is the system coordinator's identity at every hook callsite; it is not a valid agent ID per `isValidAgentId()` (it begins with `@`), but the four hook entry points (`hook-check-path`, `hook-permission-denied`, `hook-mark-running`, and the optional `agentIdArg` of `hooks session-start`) accept the literal `@system` because it is hardcoded into the coordinator's settings file by `writeCoordinatorFiles()` and is not user input. `ib hook-status` does not accept `@system` — the Stop hook is omitted, so the path is unreachable.
 
 Existing system coordinator sessions must be restarted (e.g., via the dashboard `x` action on the system coordinator) to pick up new hook configurations after upgrading; `ensureSystemCoordinator` only writes `settings.local.json` when the tmux session is absent.
+
+#### 12\.1.8 Kernel Sandbox
+
+The global `@system` coordinator remains unsandboxed in this staged rollout. Its launch path and hook-based protections are unchanged. Restarting it does not apply a kernel profile.
+
+Mandatory `sandbox-exec` wrapping applies to ordinary repository agents and per-repository coordinators. Global coordinator sandboxing is deferred until after that rollout has been exercised; the unfinished implementation and review findings are preserved in the retired `sandbox-system-launch` agent archive. Safe launch adoption, configuration protection, and cleanup across overlapping launches remain follow-up requirements.
 
 ### 12.2 Per-Repo Coordinators
 
@@ -2947,7 +2956,7 @@ export function resolveCli(model: string): AgentCli;        // thin wrapper over
 Codex has no `permissions.allow/deny` array, no `--allowedTools` / `--disallowedTools` CLI flags. itsybitsy expresses the same agent-type allow/deny lists as a generated PreToolUse hook handler dispatched from `src/index.ts`. The canonical codex launch line is:
 
 ```
-codex -m <MODEL> -a never -s workspace-write \
+codex -m <MODEL> -a never -s danger-full-access \
       --dangerously-bypass-hook-trust \
       -c 'hooks.PreToolUse=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-pre-tool-use <agentId>",timeout=30}]}]' \
       -c 'hooks.SessionStart=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-session-start <agentId>",timeout=30}]}]' \
@@ -2957,18 +2966,22 @@ codex -m <MODEL> -a never -s workspace-write \
 
 Where `<MODEL>` is the model half of the parsed `<cli>:<model>`, `<abs ib>` is the absolute path to the `ib` binary resolved at spawn time, and `<agentId>` is the itsybitsy agent id.
 
+Under the mandatory-sandbox contract this line is generated **inside** the itsybitsy `sandbox-exec` + egress-proxy wrapper (SPEC-SANDBOX §4B) at both spawn and resume. Codex's own OS sandbox is therefore set to `-s danger-full-access` (off) so the itsybitsy Seatbelt profile is the sole OS boundary rather than double-confining; the `-s workspace-write` mode is no longer emitted. `buildCodexStartContent`/`buildCodexResumeContent` refuse to produce an unwrapped codex line.
+
 **Permission mode mapping** (the claude-side `--permission-mode` analogue):
 
 | Claude `--permission-mode` | Codex equivalent |
 |---|---|
-| `acceptEdits` | `-a never -s workspace-write` ← itsybitsy default for codex agents |
+| `acceptEdits` | `-a never` ← itsybitsy default for codex agents (approval mode) |
 | `plan` | `-a untrusted -s read-only` |
 | `bypassPermissions` / `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` (aka `--yolo`) |
+
+The `-a` column is the approval-mode analogue. The `-s` sandbox mode is no longer chosen per permission mode: under the mandatory-sandbox contract itsybitsy always emits `-s danger-full-access` (codex's own sandbox off) inside its Seatbelt wrap, so the itsybitsy profile is the OS boundary (SPEC-SANDBOX §4B).
 
 **Key constraints (the gritty ones):**
 
 - `-a never` is "never PROMPT", not "deny everything by default." Without the PreToolUse hook a tool call would be ALLOWED (subject to sandbox). The hook returning deny-by-default is what makes D4 (auto-deny-anything-not-granted) true.
-- `-s workspace-write` is leaky on macOS — it permits writes to `/private/tmp` (`/tmp`), `$TMPDIR`, and `~/.codex/memories` by default. The hook MUST do path-isolation; sandbox alone is insufficient. **Hook is the primary boundary, sandbox is defense-in-depth.**
+- With codex's own sandbox off (`-s danger-full-access`), the itsybitsy Seatbelt profile provides the coarse OS walls plus the network deny/allowlist, and the PreToolUse hook does the fine-grained path-isolation the kernel's per-path walls cannot express (worker-vs-worker). **Both layers are required; neither is complete process confinement on its own** (SPEC-SANDBOX §1, §4C.5). (The former default `-s workspace-write` was itself leaky on macOS — it permitted writes to `/private/tmp`, `$TMPDIR`, and `~/.codex/memories` — which is one reason codex's own sandbox is disabled in favor of ours.)
 - `--dangerously-bypass-hook-trust` is **mandatory on every spawn** because codex hashes every hook command and the inline-`-c` payload's hash changes per spawn (the `<agentId>` interpolates into it). Without the bypass, a regenerated hook is silently skipped — a permission-bypass disaster. User-approved bypass per D4.
 - The launch line is built by `buildCodexLaunchArgs()` in `src/codex-config.ts`, which reads the SAME merged allow/deny lists used for Claude (`_all.md` + `_non_coordinator.md` + `<type>.md`) via `loadMergedAgentTypePermissions()`.
 - `~/.codex/config.toml` is NEVER modified by itsybitsy. The user's existing trust entries, model defaults, and other codex config are left untouched. Inline-`-c` registration bypasses codex's project-trust gate entirely (Phase 2 spike Q2).
@@ -3019,7 +3032,7 @@ Coordinators cannot currently be spawned under codex: `newAgent()` rejects `code
 `resumeAgent()` in `src/ib-commands.ts` branches on `parseModel(meta.model).cli`:
 
 - **claude path:** unchanged (byte-snapshot-guarded at `tests/fixtures/claude-resume-sh-baseline.sh`).
-- **codex path:** validates that `meta.codex_session_id` is present (populated by the SessionStart hook on first spawn); runs the same spawn-time dispatcher precheck as `newAgent()`; generates a codex-shaped `resume.sh` via `buildCodexResumeContent()` in `src/codex-spawn.ts`. The resume script invokes `codex resume "<UUID>"` with the SAME re-passed inline `-c` hook flags + `-a never -s workspace-write --dangerously-bypass-hook-trust` flags as the original spawn. Same SIGHUP-ignore insulation, same `ib write-pid` PID capture.
+- **codex path:** validates that `meta.codex_session_id` is present (populated by the SessionStart hook on first spawn); runs the same spawn-time dispatcher precheck as `newAgent()`; generates a codex-shaped `resume.sh` via `buildCodexResumeContent()` in `src/codex-spawn.ts`. The resume script invokes `codex resume "<UUID>"` with the SAME re-passed inline `-c` hook flags + `-a never -s danger-full-access --dangerously-bypass-hook-trust` flags as the original spawn, and — like spawn — inside the mandatory `sandbox-exec` + egress-proxy wrapper (SPEC-SANDBOX §4B). Same SIGHUP-ignore insulation, same `ib write-pid` PID capture.
 
 Resume is a hot-reload-equivalent: any change to the agent-type allow/deny lists takes effect on the next resume (codex has no live hot-reload — §18.13 Risk 4).
 
@@ -3123,7 +3136,7 @@ This section summarizes the design landed in Phases 1–3 of **`SPEC-ANTIGRAVITY
 
 ### 19.1 Goal
 
-itsybitsy can launch an agent under Google's Antigravity CLI (`agy`) in addition to `claude` and `codex`. Selection is per-agent via the same **`<cli>:<model>`** model string — e.g. `agy:gemini-3.7-flash-low`, `agy:claude-sonnet-4-6`. The slug is the first column of `agy models`, passed verbatim to `--model`. `agy` agents launch the **interactive `agy` TUI inside tmux**, exactly like `claude`/`codex`. Permissions and the shared deny-by-default `paths:` policy are enforced by a generated PreToolUse hook; role instructions are delivered through an always-on rule file in the worktree. Agy has no kernel wrapper: `sandbox.enabled: true` is unsupported and fails closed before the interactive agent launch rather than running it unwrapped; the diagnostic `agy --version` probe may already have run. Auth is the user's job (one browser sign-in; credentials in the keyring). Non-goals (v1): no headless `-p` loop, no `agy` custom agents (`--agent`), no coordinators under `agy`, no new dashboard panes.
+itsybitsy can launch an agent under Google's Antigravity CLI (`agy`) in addition to `claude` and `codex`. Selection is per-agent via the same **`<cli>:<model>`** model string — e.g. `agy:gemini-3.7-flash-low`, `agy:claude-sonnet-4-6`. The slug is the first column of `agy models`, passed verbatim to `--model`. `agy` agents launch the **interactive `agy` TUI inside tmux**, exactly like `claude`/`codex`. Permissions and the shared deny-by-default `paths:` policy are enforced by a generated PreToolUse hook; role instructions are delivered through an always-on rule file in the worktree. Under the mandatory-sandbox contract `agy` launches inside the same `sandbox-exec` + egress-proxy wrapper as claude and codex, at both spawn and resume (SPEC-SANDBOX §4B); the whole `~/.gemini` state directory is added as an agy-only runtime write root, excluded from the claude/codex/fugu tables. This supersedes the earlier "agy runs unwrapped" assumption still recorded in `SPEC-ANTIGRAVITY-CLI.md` (which predates the mandatory contract). Auth is the user's job (one browser sign-in; credentials in the macOS keyring, not under `~/.gemini`). Non-goals (v1): no headless `-p` loop, no `agy` custom agents (`--agent`), no coordinators under `agy`, no new dashboard panes.
 
 ### 19.2 Authoritative Decisions
 
@@ -3133,7 +3146,7 @@ Verbatim summary of `SPEC-ANTIGRAVITY-CLI.md` §2:
 |---|---|
 | D1 | Selector is `agy:<slug>`; the slug is passed verbatim to `--model`. `--effort <low\|medium\|high>` is passed only when the slug does NOT already end in `-low`/`-medium`/`-high` (Gemini slugs encode effort). `xhigh`/`max` map to `high` (`mapEffortForAgy`). The reserved slug `agy:default` launches agy with no `--model`/`--effort`, so agy uses its own configured default model. |
 | D2 | Launch = `agy --dangerously-skip-permissions --mode=accept-edits --model <slug> [--effort <e>] --log-file <agentDir>/agy.log -i "<prompt>"`. Resume = same flags with `--conversation <uuid>` and no `-i` (resume does not carry `--model`, so it is re-passed). |
-| D3 | With sandbox disabled, **the PreToolUse hook is the only filesystem boundary**. It resolves `meta.paths` plus agy runtime roots through the shared deny-by-default table. Agy has no kernel wrapper, so an enabled sandbox policy is rejected before launch. Hooks are registered in `<worktree>/.agents/hooks.json` under the named hook `ittybitty` for `PreToolUse` (matcher `*`), `PreInvocation`, and `Stop`; each `command` = `<abs ib> hooks agy-<event> <agentId>`, timeout 30. |
+| D3 | The PreToolUse hook resolves `meta.paths` plus agy runtime roots (including the agy-only `~/.gemini` write root) through the shared deny-by-default table and does the fine-grained path-isolation the coarse kernel walls cannot express. Under the mandatory contract it runs **alongside** the `sandbox-exec` wrap, not instead of it — this row updates the original decision, which predated mandatory sandboxing. Hooks are registered in `<worktree>/.agents/hooks.json` under the named hook `ittybitty` for `PreToolUse` (matcher `*`), `PreInvocation`, and `Stop`; each `command` = `<abs ib> hooks agy-<event> <agentId>`, timeout 30. |
 | D4 | The hook contract is **FAIL-CLOSED**: crash, non-JSON, `{}`, and timeout all DENY (the opposite of codex). The dispatcher still wraps everything in try/catch, emits an explicit logged deny, and exits 0. |
 | D5 | **Pre-trust the worktree before launch** — add `realpath(worktree)` to `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json` (read-modify-write, lock-guarded) BEFORE tmux starts, remove at teardown. Without it, `-i` submits the first turn ~2s after launch, before the trust card is answered, with no hooks/rules loaded. The watchdog trust-card accept is a FALLBACK only. |
 | D6 | Instructions go in `<worktree>/.agents/rules/ittybitty-agent.md` with frontmatter `trigger: always_on`; body = session-start template (wrapper stripped) + inlined project `CLAUDE.md` + inlined user `~/.claude/CLAUDE.md` + the skills catalogue. Never `--agent`, never overwrite `AGENTS.md`. |
@@ -3166,12 +3179,11 @@ Tool translation (`src/hooks/agy-tools.ts`) maps `run_command`→`Bash`, `view_f
 
 ### 19.5 Spawn, Resume, Teardown
 
-`newAgent()` / `resumeAgent()` in `src/ib-commands.ts` branch on `parseModel(model).cli === "agy"`: reject a resolved `sandbox.enabled: true` policy as unavailable before starting the interactive agent (the earlier diagnostic `agy --version` probe may already have run); otherwise skip `.claude/settings.local.json`; refuse a tracked boundary file (D7); write the two worktree files + gitignore; `ensureAgyTrustedWorkspace(realpath(worktree))` BEFORE tmux (D5); run the dispatcher `--dry-run` precheck for all three events; generate `start.sh`/`resume.sh`. Resume requires `meta.agy_conversation_id` (captured by the first PreInvocation), regenerates the worktree files, re-trusts, re-prechecks, and re-passes `--model` + effort (agy resume remembers neither). Teardown (`archiveAgent`/nuke/retire) calls `untrustAgyWorkspaceForTeardown` best-effort. `--coordinator` with `agy:` is rejected (D11-style stub).
+`newAgent()` / `resumeAgent()` in `src/ib-commands.ts` branch on `parseModel(model).cli === "agy"`: skip `.claude/settings.local.json`; refuse a tracked boundary file (D7); write the two worktree files + gitignore; `ensureAgyTrustedWorkspace(realpath(worktree))` BEFORE tmux (D5); run the dispatcher `--dry-run` precheck for all three events; generate `start.sh`/`resume.sh` inside the mandatory `sandbox-exec` + egress-proxy wrapper (SPEC-SANDBOX §4B), with the agy-only `~/.gemini` runtime write root in the profile. Resume requires `meta.agy_conversation_id` (captured by the first PreInvocation), regenerates the worktree files, re-trusts, re-prechecks, and re-passes `--model` + effort (agy resume remembers neither). Teardown (`archiveAgent`/nuke/retire) calls `untrustAgyWorkspaceForTeardown` best-effort. `--coordinator` with `agy:` is rejected (D11-style stub).
 
-`ib sandbox refresh` rejects agy only when the newly resolved policy has
-`sandbox.enabled: true`, and does so before metadata mutation. With the sandbox
-disabled, agy refresh succeeds, updates the frozen paths/rules, and follows the
-ordinary resume path.
+`ib sandbox refresh` treats agy like every other CLI: it re-derives the frozen
+paths/rules and sandbox policy, then follows the ordinary resume path, re-wrapping
+the agent under the mandatory `sandbox-exec` profile.
 
 At spawn, `agy --version` is stamped into `meta.agy_version` (best effort). The probe (`src/agy-version.ts`, `probeAgyVersion`) runs with **stdin explicitly `"ignore"` and a hard 5s timeout** — agy 1.1.23 blocks forever on an inherited unclosed stdin, so without this the spawn hung at a blank pane. On timeout the child is killed and the field is stamped `""`. The three `agy-* --dry-run` prechecks share the same discipline (stdin `"ignore"` + a 15s timeout in `DispatcherDryRunContext.run`).
 
@@ -3200,7 +3212,7 @@ From `SPEC-ANTIGRAVITY-CLI.md` §6 (see there for the full list):
 | 2 | **Trust-file races.** agy rewrites `settings.json` on every trust accept/change; the lock protects itsybitsy from itsybitsy only. Mitigation: the watchdog fallback (D10) + re-trust on resume. |
 | 3 | **Hooks silently absent under API-key auth** (issue #893). The heartbeat check (§19.6) surfaces it; v1 only warns. |
 | 8 | **codex handler omits `checkIbCommandAccess` (parity gap).** The agy PreToolUse handler added the manager-only-`ib`-subcommand relationship check; the codex handler still lacks it (a codex agent with `Bash(ib:*)` can run `ib retire/merge/…` against agents it does not manage). Tracked as a codex-side follow-up. |
-| 9 | **Hook-only shell scanning is incomplete (accepted).** The Phase B scanner denies recognizable literal paths outside the shared `paths:` table, so direct `cat ~/.ssh/id_rsa` is no longer the current example of an allowed read. Dynamic expansion, subprocesses, and unrecognized command shapes can evade a string scanner. Agy has no kernel wrapper, so this residual remains while its sandbox is disabled; enabling it fails closed as unsupported. |
+| 9 | **Advisory shell scanning is incomplete (accepted).** The Phase B scanner denies recognizable literal paths outside the shared `paths:` table, so direct `cat ~/.ssh/id_rsa` is no longer the current example of an allowed read. Dynamic expansion, subprocesses, and unrecognized command shapes can evade a string scanner. Under the mandatory contract agy runs inside the `sandbox-exec` wrap, so the kernel refuses such a read regardless; the scanner is the advisory diagnostic layer, not complete process confinement. |
 | 10 | **macOS Gatekeeper can stall every `agy` exec** in the dynamic loader when the quarantined Homebrew binary's notarization check cannot reach Apple (observed 2026-09-02: `syspolicyd` "Security policy would not allow process" + a 30s QUIC lookup with 0 bytes). The spawn then sits at a blank pane with no agy log; the remedy is on the user side (approve or de-quarantine the binary). |
 
 ### 19.10 Reference: SPEC-ANTIGRAVITY-CLI.md

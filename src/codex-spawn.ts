@@ -88,24 +88,31 @@ export interface BuildCodexStartContentInput {
   absAgentLog: string;
   /** Absolute path to claude.stderr.log (sidecar; reused name for back-compat). */
   absStderrLog: string;
-  /** Extra directories Codex should treat as writable under workspace-write. */
+  /**
+   * Extra directories passed to codex as `--add-dir` (codex-side writable roots).
+   * Under the mandatory danger-full-access wrapper these are inert for codex's own
+   * sandbox — the Seatbelt profile is the fence — but they are still emitted.
+   */
   extraWritableRoots?: string[];
   /** Configure Codex to use Sakana Fugu and load its key at launch. */
   fugu?: boolean;
-  /** Disable Codex's own sandbox because the launch is wrapped by ours. */
-  sandboxEnabled?: boolean;
-  /** Proxy startup + environment exports rendered by the shared sandbox wiring. */
-  sandboxScriptPreamble?: string;
-  /** `sandbox-exec -f ... -D ...` prefix rendered by the shared sandbox wiring. */
-  sandboxExecPrefix?: string;
+  /**
+   * Proxy startup + environment exports rendered by the shared sandbox wiring.
+   * MANDATORY — the kernel sandbox always wraps a codex launch now, so codex runs
+   * `-s danger-full-access` (its own sandbox off) inside our Seatbelt wrapper. The
+   * builder THROWS if this or `sandboxExecPrefix` is empty (refuse absent wrapper).
+   */
+  sandboxScriptPreamble: string;
+  /** `sandbox-exec -f ... -D ...` prefix rendered by the shared sandbox wiring (MANDATORY). */
+  sandboxExecPrefix: string;
 }
 
 /**
  * Render the codex start.sh body for an agent. Mirrors the claude start.sh
  * skeleton (setsid + SIGHUP ignore + pid capture + meta-json write + wait
  * + exit-check) but launches codex with:
- *   - `-m <model> -a never -s <mode> --dangerously-bypass-hook-trust`
- *     (`workspace-write` normally; `danger-full-access` inside our Seatbelt wrapper)
+ *   - `-m <model> -a never -s danger-full-access --dangerously-bypass-hook-trust`
+ *     (mandatory sandbox: codex's own sandbox is off, our Seatbelt wrapper on)
  *   - inline `-c 'hooks.<Event>=[...]'` flags from buildCodexLaunchArgs
  *   - the prompt as a positional `"$(cat <prompt-file>)"`
  *
@@ -145,12 +152,13 @@ export function buildCodexStartContent(input: BuildCodexStartContentInput): stri
   const qStartExitScript = shellQuote(input.absExitScript);
   const qStartAgentLog = shellQuote(input.absAgentLog);
   const qStartStderrLog = shellQuote(input.absStderrLog);
-  const sandboxMode = input.sandboxEnabled ? "danger-full-access" : "workspace-write";
-  if (input.sandboxEnabled && (!input.sandboxScriptPreamble || !input.sandboxExecPrefix)) {
-    throw new Error("Sandbox-enabled codex launch requires the proxy preamble and sandbox-exec prefix");
+  // Mandatory sandbox: refuse to render a codex launch without the wrapper.
+  if (!input.sandboxScriptPreamble || !input.sandboxExecPrefix) {
+    throw new Error("codex launch requires the sandbox proxy preamble and sandbox-exec prefix (mandatory sandbox)");
   }
-  const sandboxPreamble = input.sandboxEnabled ? input.sandboxScriptPreamble! : "";
-  const sandboxLaunchPrefix = input.sandboxEnabled ? `${input.sandboxExecPrefix} ` : "";
+  const sandboxMode = "danger-full-access";
+  const sandboxPreamble = input.sandboxScriptPreamble;
+  const sandboxLaunchPrefix = `${input.sandboxExecPrefix} `;
 
   // The launch line. Per SPEC §3.3:
   //   codex -m <MODEL> -a never -s <sandboxMode> --dangerously-bypass-hook-trust \
@@ -298,16 +306,22 @@ export interface BuildCodexResumeContentInput {
   absAgentLog: string;
   /** Absolute path to claude.stderr.log (sidecar; reused name for back-compat). */
   absStderrLog: string;
-  /** Extra directories Codex should treat as writable under workspace-write. */
+  /**
+   * Extra directories passed to codex as `--add-dir` (codex-side writable roots).
+   * Under the mandatory danger-full-access wrapper these are inert for codex's own
+   * sandbox — the Seatbelt profile is the fence — but they are still emitted.
+   */
   extraWritableRoots?: string[];
   /** Reconfigure Sakana Fugu for the resumed Codex session. */
   fugu?: boolean;
-  /** Disable Codex's own sandbox because the launch is wrapped by ours. */
-  sandboxEnabled?: boolean;
-  /** Proxy startup + environment exports rendered by the shared sandbox wiring. */
-  sandboxScriptPreamble?: string;
-  /** `sandbox-exec -f ... -D ...` prefix rendered by the shared sandbox wiring. */
-  sandboxExecPrefix?: string;
+  /**
+   * Proxy startup + environment exports rendered by the shared sandbox wiring.
+   * MANDATORY — codex resume always runs `-s danger-full-access` inside our
+   * Seatbelt wrapper. The builder THROWS if this or `sandboxExecPrefix` is empty.
+   */
+  sandboxScriptPreamble: string;
+  /** `sandbox-exec -f ... -D ...` prefix rendered by the shared sandbox wiring (MANDATORY). */
+  sandboxExecPrefix: string;
 }
 
 /**
@@ -358,12 +372,13 @@ export function buildCodexResumeContent(input: BuildCodexResumeContentInput): st
   const qResumeExitScript = shellQuote(input.absExitScript);
   const qResumeAgentLog = shellQuote(input.absAgentLog);
   const qResumeStderrLog = shellQuote(input.absStderrLog);
-  const sandboxMode = input.sandboxEnabled ? "danger-full-access" : "workspace-write";
-  if (input.sandboxEnabled && (!input.sandboxScriptPreamble || !input.sandboxExecPrefix)) {
-    throw new Error("Sandbox-enabled codex resume requires the proxy preamble and sandbox-exec prefix");
+  // Mandatory sandbox: refuse to render a codex resume without the wrapper.
+  if (!input.sandboxScriptPreamble || !input.sandboxExecPrefix) {
+    throw new Error("codex resume requires the sandbox proxy preamble and sandbox-exec prefix (mandatory sandbox)");
   }
-  const sandboxPreamble = input.sandboxEnabled ? input.sandboxScriptPreamble! : "";
-  const sandboxLaunchPrefix = input.sandboxEnabled ? `${input.sandboxExecPrefix} ` : "";
+  const sandboxMode = "danger-full-access";
+  const sandboxPreamble = input.sandboxScriptPreamble;
+  const sandboxLaunchPrefix = `${input.sandboxExecPrefix} `;
 
   return `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own claude process

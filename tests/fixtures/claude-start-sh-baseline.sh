@@ -7,8 +7,35 @@ export CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
 AGENT_LOG='<AGENTSDIR>/claude-snapshot/agent.log'
 STDERR_LOG='<AGENTSDIR>/claude-snapshot/claude.stderr.log'
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }
+# Start the per-agent proxy outside Seatbelt. The launcher detaches/unrefs the
+# proxy before returning; the agent CLI alone is wrapped below. Fail closed if the
+# actual bind loses the small race after the parent-process port preflight.
+PROXY_PORT=<PORT>
+PROXY_PID_FILE='<AGENTSDIR>/claude-snapshot/sandbox-proxy.pid'
+PROXY_READY_FILE='<AGENTSDIR>/claude-snapshot/sandbox-proxy.ready'
+rm -f "$PROXY_PID_FILE" "$PROXY_READY_FILE"
+if ! ib sandbox-proxy-launch --port "$PROXY_PORT" --domains '<AGENTSDIR>/claude-snapshot/sandbox-domains.txt' --log '<AGENTSDIR>/claude-snapshot/sandbox-proxy.log' --pid-file "$PROXY_PID_FILE" --ready-file "$PROXY_READY_FILE"; then
+    log "sandbox refused: proxy could not bind localhost:$PROXY_PORT"
+    exit 1
+fi
+cleanup_sandbox_proxy() {
+    local proxy_pid
+    proxy_pid=$(cat "$PROXY_PID_FILE" 2>/dev/null || true)
+    if [[ "$proxy_pid" =~ ^[1-9][0-9]*$ ]]; then kill "$proxy_pid" 2>/dev/null || true; fi
+    rm -f "$PROXY_PID_FILE" "$PROXY_READY_FILE"
+}
+trap cleanup_sandbox_proxy EXIT
+PROXY_PID=$(cat "$PROXY_PID_FILE")
+ib write-proxy-pid 'claude-snapshot' "$PROXY_PID" "$PROXY_PORT" || log "write-proxy-pid failed (exit=$?)"
+export http_proxy="http://localhost:$PROXY_PORT"
+export https_proxy="$http_proxy"
+export HTTP_PROXY="$http_proxy"
+export HTTPS_PROXY="$http_proxy"
+export no_proxy="localhost,127.0.0.1,::1"
+export NO_PROXY="$no_proxy"
 
-log "Starting claude --session-id <SESSION-UUID> --model sonnet --effort xhigh"
+
+log "Starting claude --session-id <SESSION-UUID> --model sonnet --effort xhigh --dangerously-skip-permissions"
 log "PWD=$(pwd) which_claude=$(which claude 2>&1)"
 
 # Ignore SIGHUP for the lifetime of this script. When spawn is triggered from
@@ -39,9 +66,9 @@ else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid claude --session-id "<SESSION-UUID>" --model sonnet --effort xhigh "$(cat '<AGENTSDIR>/claude-snapshot/prompt.txt')" 2> "$STDERR_LOG" &
+    setsid '/usr/bin/sandbox-exec' -f '<PROFILE>' -D 'SCRATCHPAD=<VALUE>' -D 'PARENTCLAUDE=<VALUE>' -D 'REPOAGENTS=<VALUE>' -D 'AGENTDIR=<VALUE>' -D 'WORKTREE=<VALUE>' -D 'PROJECTDIR=<VALUE>' -D 'GITDIR=<VALUE>' claude --session-id "<SESSION-UUID>" --model sonnet --effort xhigh --dangerously-skip-permissions "$(cat '<AGENTSDIR>/claude-snapshot/prompt.txt')" 2> "$STDERR_LOG" &
 else
-    claude --session-id "<SESSION-UUID>" --model sonnet --effort xhigh "$(cat '<AGENTSDIR>/claude-snapshot/prompt.txt')" 2> "$STDERR_LOG" &
+    '/usr/bin/sandbox-exec' -f '<PROFILE>' -D 'SCRATCHPAD=<VALUE>' -D 'PARENTCLAUDE=<VALUE>' -D 'REPOAGENTS=<VALUE>' -D 'AGENTDIR=<VALUE>' -D 'WORKTREE=<VALUE>' -D 'PROJECTDIR=<VALUE>' -D 'GITDIR=<VALUE>' claude --session-id "<SESSION-UUID>" --model sonnet --effort xhigh --dangerously-skip-permissions "$(cat '<AGENTSDIR>/claude-snapshot/prompt.txt')" 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
 log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"

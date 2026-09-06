@@ -95,6 +95,21 @@ Rules:
 - Inheritable via `inherits:` — the child's `repos:` replaces the parent's list entirely. To undo a parent's restriction, either remove `inherits:` or use an intermediate parent without `repos`. There is no sentinel-string escape hatch in v1.
 - The check runs after `loadAgentType` so inherited restrictions are honored, and before the coordinator idempotency check so a restricted `coordinator.md` fails loudly in the wrong repo rather than silently succeeding.
 
+## Sandboxing is mandatory (`sandbox:` / `paths:`)
+
+Every agent runs inside the sandbox — this is not optional. The `_all.md` layer supplies the baseline floor, and a type adds what it needs through two flat blocks:
+
+- **`paths:`** — the kernel filesystem policy: `allowRead`, `allowWrite` (write implies read), and `deny` (deny always wins). These lists **union** across the inheritance chain.
+- **`sandbox:`** — kernel raw SBPL and the network allowlist: `rawAllow` (verbatim s-expressions for process/exec/syscall/network-floor holes) and `domains` (the per-agent proxy allowlist). Both lists **union** across the chain.
+
+There is **no `enabled` toggle.** Sandboxing used to be opt-in via `sandbox.enabled: true`; that switch is **retired** (Adam, 2026-09-05) — sandboxing is always on and cannot be turned off from a type file. A leftover `sandbox.enabled:` key (whether `true` or `false`) is a hard error at `ib watch` startup:
+
+```
+sandbox.enabled is retired: sandboxing is always on and cannot be toggled — remove this key (see docs/agent-types/README.md)
+```
+
+The fix is to delete the key; `rawAllow`, `domains`, and the `paths:` lists keep working unchanged. A legacy agent whose stored `meta.json` still carries `sandbox.enabled: false` is not silently upgraded — resume refuses it and points you at `ib sandbox refresh <id>`, which re-seals it as the enabled agent it now must be.
+
 ## Backward compatibility with older `ib` binaries
 
 Older `ib` binaries that predate `inherits:` and `repos:` simply ignore unknown frontmatter keys — the child file is read standalone (missing any fields the parent would have contributed). The type still loads, just without the merged values. This is a graceful downgrade rather than a hard failure. If you rely on inheritance or repo restriction, make sure your installed `ib` binary is a build that supports them.

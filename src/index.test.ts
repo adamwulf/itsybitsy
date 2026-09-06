@@ -116,9 +116,13 @@ describe("formatAgentPathPolicy", () => {
     },
   );
 
-  test("agy never reports an enabled kernel wrapper", () => {
+  test("agy reports the kernel wrapper state like every other CLI (mandatory sandbox)", () => {
+    // Mandatory sandbox: agy is wrapped by the kernel now, so it reports the
+    // agent's frozen sandbox state (enabled/disabled) — no "unavailable (agy)".
     expect(formatAgentPathPolicy({ model: "agy:default", sandbox: { enabled: true } } as any)[0])
-      .toBe("Sandbox:      unavailable (agy)");
+      .toBe("Sandbox:      enabled");
+    expect(formatAgentPathPolicy({ model: "agy:default", sandbox: { enabled: false } } as any)[0])
+      .toBe("Sandbox:      disabled");
   });
 
   test.each(["sonnet", "opus", "unknown"])("legacy %s metadata keeps Claude display behavior", (model) => {

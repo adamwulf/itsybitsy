@@ -2548,7 +2548,7 @@ export async function main() {
             console.log(
               "a rewritten equivalent (e.g. an absolute form of a ~ entry) reads as missing.",
             );
-            console.log("Fix: copy the embedded paths:/sandbox: block verbatim into the file below.");
+            console.log("Fix missing floor entries from the embedded paths:/sandbox: blocks; remove retired keys as directed below.");
             console.log("");
             for (const diff of diffs) {
               console.log(`${diff.file}:`);

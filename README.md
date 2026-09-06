@@ -102,6 +102,12 @@ ib show-type worker    # full resolved definition
 ib init-types          # restore missing built-ins (never overwrites)
 ```
 
+### Kernel sandbox rollout
+
+Ordinary agents and per-repository coordinators run inside macOS `sandbox-exec`, using the read/write/deny paths and network policy in their agent-type Markdown. This applies to Claude, Codex/fugu, and agy on spawn and resume; unsupported sandbox setup fails closed. There is no Markdown `sandbox.enabled` toggle.
+
+The global `@system` coordinator remains unsandboxed in this staged rollout. Existing running agents do not become sandboxed retroactively: update the live type configuration, install the matching binary and helpers, then refresh/reset repository agents. Start with one worker pilot before migrating the rest. See [the rollout guide](docs/SANDBOX-ROLLOUT.md) for configuration preflight, validation limits, and migration steps.
+
 ### The hierarchy
 
 Agents form a management tree: **you** → the **system coordinator** (`@system`, auto-spawned by `ib watch`, coordinates across repos) → per-repo **coordinators** (optional) → **managers** → **workers**. A manager spawns sub-agents branched from its own branch, reviews their diffs, sends feedback, and merges their work upward — the same `ib` commands you use, gated by hooks so leaf agents cannot spawn. Coordinators are deliberately restricted: they orchestrate through `ib` commands but cannot read or write code themselves.

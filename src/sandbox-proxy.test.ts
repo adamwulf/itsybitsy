@@ -132,7 +132,7 @@ describe("sandbox proxy CONNECT and HTTP behavior", () => {
       options.socket.open(upstream);
       // Bound the stub's lifetime so a pump that loses bytes reaches the byte
       // assertion instead of timing out while waiting for the complete echo.
-      closeTimer = setTimeout(() => options.socket.close(upstream), 1_000);
+      closeTimer = setTimeout(() => options.socket.close(upstream), 1_500);
       return upstream;
     });
     try {

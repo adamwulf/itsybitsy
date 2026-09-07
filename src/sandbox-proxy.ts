@@ -186,6 +186,7 @@ function flushWrites(queue: SocketWriteQueue): void {
     // Bun end() synchronously fires close(), re-entering the paired queue's
     // flushWrites; mark this queue closed before that can happen.
     queue.closed = true;
+    queue.paused = false;
     try { queue.socket?.end(); } catch { /* already closed */ }
   } else if (queue.paused) {
     queue.paused = false;

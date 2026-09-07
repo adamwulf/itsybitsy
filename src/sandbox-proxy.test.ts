@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createConnection, createServer, type Socket } from "node:net";
+import { createHash, randomBytes } from "node:crypto";
 import {
   allocateSandboxProxyPort,
   assertSandboxProxyPortAvailable,
@@ -70,8 +72,11 @@ function fakeUpstreamConnect(options: any): Promise<any> {
       } else {
         options.socket.data(upstream, Buffer.from(`echo:${text}`));
       }
+      return Buffer.byteLength(data);
     },
     end() {},
+    pause() {},
+    resume() {},
   };
   options.socket.open(upstream);
   return Promise.resolve(upstream);
@@ -101,6 +106,172 @@ describe("sandbox proxy domain matching", () => {
 });
 
 describe("sandbox proxy CONNECT and HTTP behavior", () => {
+  test("zero and short upstream writes retain initial bytes ahead of later tunnel bytes", async () => {
+    const expected = "initial-payload:later-tunnel-payload";
+    let received = "";
+    let writes = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let closeTimer: ReturnType<typeof setTimeout> | undefined;
+    const proxy = startSandboxProxyServer(0, ["allowed.example"], "localhost", async options => {
+      const upstream = {
+        write(data: Buffer) {
+          const count = writes++ === 0 ? 0 : Math.min(3, data.length);
+          received += data.subarray(0, count).toString();
+          if (received === expected) {
+            options.socket.data(upstream, Buffer.from(`echo:${received}`));
+          } else {
+            clearTimeout(timer);
+            timer = setTimeout(() => options.socket.drain?.(upstream), 5);
+          }
+          return count;
+        },
+        pause() {},
+        resume() {},
+        end() {},
+      };
+      options.socket.open(upstream);
+      // Bound the stub's lifetime so a pump that loses bytes reaches the byte
+      // assertion instead of timing out while waiting for the complete echo.
+      closeTimer = setTimeout(() => options.socket.close(upstream), 1_500);
+      return upstream;
+    });
+    try {
+      const output = await proxyExchange(proxy.port,
+        "CONNECT allowed.example:443 HTTP/1.1\r\n\r\ninitial-payload:",
+        "later-tunnel-payload");
+      expect(received).toBe(expected);
+      expect(output).toContain(`echo:${expected}`);
+      expect(writes).toBeGreaterThan(2);
+    } finally {
+      clearTimeout(timer);
+      clearTimeout(closeTimer);
+      proxy.stop();
+    }
+  });
+
+  test("a slow client pauses the upstream and client close resumes it", async () => {
+    let pauseCalls = 0;
+    let sent = 0;
+    const maxBytes = 64 * 1024 * 1024;
+    const sentUntilBlocked = Promise.withResolvers<void>();
+    const resumed = Promise.withResolvers<void>();
+    const proxy = startSandboxProxyServer(0, ["allowed.example"], "localhost", async options => {
+      const upstream = {
+        write(data: Buffer) { return data.length; },
+        pause() { pauseCalls++; },
+        resume() { resumed.resolve(); },
+        end() {},
+      };
+      options.socket.open(upstream);
+      // The client never reads. Stop producing as soon as the proxy pauses us,
+      // with a finite ceiling so disabling pause fails an assertion quickly.
+      const chunk = Buffer.alloc(64 * 1024, 0x61);
+      while (pauseCalls === 0 && sent < maxBytes) {
+        options.socket.data(upstream, chunk);
+        sent += chunk.length;
+      }
+      sentUntilBlocked.resolve();
+      return upstream;
+    });
+    const client = createConnection({ host: "127.0.0.1", port: proxy.port });
+    const failed = Promise.withResolvers<never>();
+    const timeout = setTimeout(() => failed.reject(new Error("backpressure lifecycle timed out")), 2_000);
+    try {
+      client.on("error", failed.reject);
+      client.pause();
+      client.on("connect", () => client.write("CONNECT allowed.example:443 HTTP/1.1\r\n\r\n"));
+      await Promise.race([sentUntilBlocked.promise, failed.promise]);
+      expect(pauseCalls).toBeGreaterThan(0);
+      expect(sent).toBeLessThan(maxBytes);
+      client.destroy();
+      await Promise.race([resumed.promise, failed.promise]);
+    } finally {
+      clearTimeout(timeout);
+      client.destroy();
+      proxy.stop();
+    }
+  });
+
+  for (const direction of ["download", "upload"] as const) {
+    test(`CONNECT preserves a 64 MiB ${direction} with a slow reader`, async () => {
+      // Node streams handle the test sender's backpressure independently of
+      // the real Bun socket pump under test. Hashes also catch reordering and
+      // reuse of borrowed data buffers, not just missing bytes.
+      const payload = randomBytes(64 * 1024 * 1024);
+      const expectedHash = createHash("sha256").update(payload).digest("hex");
+      const receivedHash = createHash("sha256");
+      let received = 0;
+      let upstreamSocket: Socket | undefined;
+      const resumeTimers = new Set<ReturnType<typeof setTimeout>>();
+      const slowRead = (socket: Socket, chunk: Buffer) => {
+        received += chunk.length;
+        receivedHash.update(chunk);
+        socket.pause();
+        const timer = setTimeout(() => {
+          resumeTimers.delete(timer);
+          socket.resume();
+        }, 2);
+        resumeTimers.add(timer);
+      };
+      const completed = Promise.withResolvers<void>();
+      const upstream = createServer(socket => {
+        upstreamSocket = socket;
+        socket.on("error", completed.reject);
+        if (direction === "download") socket.end(payload);
+        else {
+          socket.on("data", chunk => slowRead(socket, Buffer.from(chunk)));
+          socket.on("end", completed.resolve);
+        }
+      });
+      await new Promise<void>(resolve => upstream.listen(0, "127.0.0.1", resolve));
+      const upstreamPort = (upstream.address() as { port: number }).port;
+      const proxy = startSandboxProxyServer(0, ["allowed.example"], "localhost", options =>
+        Bun.connect({ ...options, hostname: "127.0.0.1", port: upstreamPort }));
+      const client = createConnection({ host: "127.0.0.1", port: proxy.port });
+      const timeout = setTimeout(() => completed.reject(new Error(
+        `${direction}: received ${received} of ${payload.length} bytes`,
+      )), 20_000);
+      try {
+        let header = Buffer.alloc(0);
+        let established = false;
+        client.on("error", completed.reject);
+        client.on("connect", () => {
+          // Include early tunnel bytes with CONNECT to exercise initialPayload.
+          const request = Buffer.from("CONNECT allowed.example:443 HTTP/1.1\r\n\r\n");
+          client.write(direction === "upload"
+            ? Buffer.concat([request, payload.subarray(0, 1024)]) : request);
+        });
+        client.on("data", data => {
+          let chunk = Buffer.from(data);
+          if (!established) {
+            header = Buffer.concat([header, chunk]);
+            const end = header.indexOf("\r\n\r\n");
+            if (end === -1) return;
+            if (header.subarray(0, end).toString() !== "HTTP/1.1 200 Connection Established") {
+              completed.reject(new Error(`Unexpected CONNECT response: ${header.toString()}`));
+              return;
+            }
+            established = true;
+            if (direction === "upload") client.end(payload.subarray(1024));
+            chunk = header.subarray(end + 4);
+          }
+          if (direction === "download") slowRead(client, chunk);
+        });
+        if (direction === "download") client.on("end", completed.resolve);
+        await completed.promise;
+        expect(received).toBe(payload.length);
+        expect(receivedHash.digest("hex")).toBe(expectedHash);
+      } finally {
+        clearTimeout(timeout);
+        for (const timer of resumeTimers) clearTimeout(timer);
+        client.destroy();
+        proxy.stop();
+        upstreamSocket?.destroy();
+        await new Promise<void>(resolve => upstream.close(() => resolve()));
+      }
+    }, 25_000);
+  }
+
   test("allowed CONNECT establishes a bidirectional tunnel", async () => {
     const proxy = startSandboxProxyServer(0, ["allowed.example"], "localhost", fakeUpstreamConnect);
     try {

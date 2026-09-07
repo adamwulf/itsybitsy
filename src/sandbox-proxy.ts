@@ -151,6 +151,75 @@ function response(status: number, reason: string, body = ""): string {
   return `HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
 }
 
+interface SocketWriteQueue {
+  socket: any;
+  source: any;
+  chunks: Buffer[];
+  paused: boolean;
+  ending: boolean;
+  closed: boolean;
+}
+
+function writeQueue(socket: any, source: any): SocketWriteQueue {
+  return { socket, source, chunks: [], paused: false, ending: false, closed: false };
+}
+
+function flushWrites(queue: SocketWriteQueue): void {
+  if (queue.closed) return;
+  while (queue.socket && queue.chunks.length > 0) {
+    const chunk = queue.chunks[0]!;
+    const written = queue.socket.write(chunk);
+    if (written < chunk.length) {
+      if (written > 0) queue.chunks[0] = chunk.subarray(written);
+      break;
+    }
+    queue.chunks.shift();
+  }
+  if (queue.chunks.length > 0) {
+    if (!queue.paused && queue.source) {
+      queue.paused = true;
+      // Bun can deliver a few MiB of data callbacks after pause(); those bytes
+      // stay queued, so the per-connection bound is a few MiB, not one chunk.
+      queue.source.pause();
+    }
+  } else if (queue.ending) {
+    // Bun end() synchronously fires close(), re-entering the paired queue's
+    // flushWrites; mark this queue closed before that can happen.
+    queue.closed = true;
+    queue.paused = false;
+    try { queue.socket?.end(); } catch { /* already closed */ }
+  } else if (queue.paused) {
+    queue.paused = false;
+    queue.source.resume();
+  }
+}
+
+function enqueueWrite(queue: SocketWriteQueue, bytes: Uint8Array | string): void {
+  if (queue.closed || bytes.length === 0) return;
+  // Bun's data buffers are borrowed; retain our own bytes until drain.
+  queue.chunks.push(Buffer.from(bytes));
+  flushWrites(queue);
+}
+
+function endAfterWrites(queue: SocketWriteQueue): void {
+  queue.ending = true;
+  flushWrites(queue);
+}
+
+function discardWrites(queue: SocketWriteQueue): void {
+  queue.closed = true;
+  queue.chunks.length = 0;
+}
+
+interface ProxyConnection {
+  buffer: Buffer;
+  upstream: any;
+  toClient: SocketWriteQueue;
+  toUpstream: SocketWriteQueue;
+  tunnel: boolean;
+  outcomeLogged: boolean;
+}
+
 /**
  * Start one allowlist proxy. Bun's raw TCP server is used because CONNECT must
  * switch from HTTP header parsing to a byte-for-byte bidirectional tunnel.
@@ -164,20 +233,17 @@ export function startSandboxProxyServer(
 ): SandboxProxyServer {
   const socketHandlers = {
       open(socket: any) {
-        socket.data = { buffer: Buffer.alloc(0), upstream: null, pending: [] as Buffer[], tunnel: false, outcomeLogged: false };
+        socket.data = {
+          buffer: Buffer.alloc(0), upstream: null,
+          toClient: writeQueue(socket, null), toUpstream: writeQueue(null, socket),
+          tunnel: false, outcomeLogged: false,
+        } satisfies ProxyConnection;
       },
       data(socket: any, chunk: Uint8Array) {
-        const state = socket.data as {
-          buffer: Buffer;
-          upstream: any;
-          pending: Buffer[];
-          tunnel: boolean;
-          outcomeLogged: boolean;
-        };
+        const state = socket.data as ProxyConnection;
         const bytes = Buffer.from(chunk);
         if (state.tunnel) {
-          if (state.upstream) state.upstream.write(bytes);
-          else state.pending.push(bytes);
+          enqueueWrite(state.toUpstream, bytes);
           return;
         }
 
@@ -261,34 +327,45 @@ export function startSandboxProxyServer(
         }
 
         state.tunnel = true;
+        // Initial and pre-connect bytes share the same FIFO as tunnel traffic.
+        enqueueWrite(state.toUpstream, initialPayload);
+        state.buffer = Buffer.alloc(0);
         void connectFn({
           hostname: host,
           port: targetPort,
           socket: {
             open(upstream: any) {
-              state.upstream = upstream;
               logOutcome("allowed");
-              if (method === "CONNECT") {
-                socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-                if (initialPayload.length > 0) upstream.write(initialPayload);
-              } else {
-                upstream.write(initialPayload);
+              if (state.toClient.closed) {
+                discardWrites(state.toUpstream);
+                upstream.end();
+                return;
               }
-              for (const pending of state.pending) upstream.write(pending);
-              state.pending.length = 0;
+              state.upstream = upstream;
+              state.toUpstream.socket = upstream;
+              state.toClient.source = upstream;
+              if (method === "CONNECT") {
+                enqueueWrite(state.toClient, "HTTP/1.1 200 Connection Established\r\n\r\n");
+              }
+              flushWrites(state.toUpstream);
             },
             data(_upstream: any, data: Uint8Array) {
-              socket.write(data);
+              enqueueWrite(state.toClient, data);
+            },
+            drain() {
+              flushWrites(state.toUpstream);
             },
             close() {
-              try { socket.end(); } catch { /* client already closed */ }
+              discardWrites(state.toUpstream);
+              endAfterWrites(state.toClient);
             },
             error() {
               if (!state.upstream) {
                 logOutcome("failed", "upstream unreachable");
                 try { socket.end(response(502, "Bad Gateway")); } catch { /* closed */ }
               } else {
-                try { socket.end(); } catch { /* closed */ }
+                discardWrites(state.toUpstream);
+                endAfterWrites(state.toClient);
               }
             },
           },
@@ -297,8 +374,19 @@ export function startSandboxProxyServer(
           try { socket.end(response(502, "Bad Gateway")); } catch { /* closed */ }
         });
       },
+      drain(socket: any) {
+        flushWrites((socket.data as ProxyConnection).toClient);
+      },
       close(socket: any) {
-        try { socket.data?.upstream?.end(); } catch { /* already closed */ }
+        const state = socket.data as ProxyConnection;
+        discardWrites(state.toClient);
+        // Client-close only: let a paused upstream observe FIN. Resuming the
+        // client on upstream close could discard the response still flushing.
+        if (state.toClient.paused) {
+          state.toClient.paused = false;
+          state.toClient.source.resume();
+        }
+        endAfterWrites(state.toUpstream);
       },
       error() {
         // Per-connection errors close that socket; the listener remains alive.

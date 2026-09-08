@@ -2685,7 +2685,7 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
   let removedOldSeal = false;
   if (!newSandbox.enabled && oldSandbox.enabled) {
     try {
-      await deleteSealRecord(sealRepoId, agent.id);
+      await (sealDeleteOverride ?? deleteSealRecord)(sealRepoId, agent.id);
       removedOldSeal = true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2707,7 +2707,10 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
   });
   if (!metaUpdated) {
     if (removedOldSeal) {
-      try { await sealAgentRecord(agent.repoPath, agent.id, agent.meta as unknown as Record<string, unknown>, agentDir); } catch { /* surface original failure */ }
+      try { await sealAgentRecord(agent.repoPath, agent.id, agent.meta as unknown as Record<string, unknown>, agentDir); }
+      catch (rollbackError) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: `sandbox refresh: metadata update failed and seal restoration failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}` };
+      }
     }
     return { ok: false, exitCode: 1, stdout: "", stderr: "sandbox refresh: could not update metadata" };
   }
@@ -5242,6 +5245,8 @@ export async function removeAgentSeal(repoPath: string, agentId: string): Promis
     await deleteSealRecord(repoId, agentId);
   } catch { /* best-effort — a missing seal or repo-id is not an error */ }
 }
+let sealDeleteOverride: typeof deleteSealRecord | null = null;
+export function setSealDeleteForTesting(fn: typeof deleteSealRecord | null): void { sealDeleteOverride = fn; }
 
 /**
  * Read custom prompts from .ittybitty/prompts/ directory.
@@ -6836,6 +6841,12 @@ When your task is complete:
     claudeArgs = claudeArgs
       ? `${claudeArgs} --dangerously-skip-permissions`
       : "--dangerously-skip-permissions";
+  }
+  // In no-worktree mode the shared project settings may contain a user's
+  // bypassPermissions default. Keep that file untouched, but scope native
+  // protection to this disabled launch explicitly.
+  if (!isCodexBackedCli(agentCli) && agentCli !== "agy" && preparedSandbox === null) {
+    claudeArgs = claudeArgs ? `${claudeArgs} --permission-mode default` : "--permission-mode default";
   }
   if (coordinatorMode) {
     // Load permissions + hooks from the coordinator's isolated settings file

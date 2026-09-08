@@ -102,6 +102,7 @@ import {
   getRepoId,
   setSealDirectWriteForTesting,
   resetSealDirectWriteForTesting,
+  setSealDeleteForTesting,
   teamAdd,
   writeMetaJsonAtomic,
 } from "./ib-commands";
@@ -7069,6 +7070,19 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // The re-seal reflects the edited type file, so its hash changed.
     expect(after!.sha256).not.toBe(before!.sha256);
     expect(after!.inputs.paths.allowRead).toContain(canonicalizeSandboxPath(refreshedDir));
+  });
+
+  test("sandbox disable seal deletion failure is surfaced before metadata transition", async () => {
+    const agentId = "seal-delete-failure";
+    const agentDir = join(agentsDir, agentId);
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ agentType: "worker", sandbox: { enabled: true }, paths: { allowRead: [tempDir], allowWrite: [], deny: [] } }));
+    setSealDeleteForTesting(async () => { throw new Error("injected unlink failure"); });
+    try {
+      expect(await refreshAgentSandbox(makeAgent(agentId, tempDir, "stopped", { agentType: "worker", sandbox: { enabled: true }, paths: { allowRead: [tempDir], allowWrite: [], deny: [] } } as unknown as AgentMeta))).toMatchObject({ ok: false });
+    } finally {
+      setSealDeleteForTesting(null);
+    }
   });
 
   test("A4 G3: nuke deletes the sealed record", async () => {

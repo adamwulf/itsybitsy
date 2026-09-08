@@ -3551,7 +3551,7 @@ describe("resumeAgent (native)", () => {
 
       // newAgent uses its own spawn context; route everything through the
       // shared spawnCalls log so tests can introspect.
-      setNewAgentSpawnRunner((cmd: string[]) => {
+      const coordinatorRunner = (cmd: string[]) => {
         spawnCalls.push(cmd);
         const cmdStr = cmd.join(" ");
         if (cmdStr.includes("tmux has-session")) return makeSpawnResult(1);
@@ -3560,11 +3560,14 @@ describe("resumeAgent (native)", () => {
         if (cmdStr.includes("--git-dir")) return makeSpawnResult(0, ".git");
         if (cmdStr.includes("capture-pane")) return makeSpawnResult(0, "Claude Code v1.0");
         return makeSpawnResult(0);
-      });
+      };
+      setNewAgentSpawnRunner(coordinatorRunner);
+      lifecycleSpawnCtx.set(coordinatorRunner);
     });
 
     afterEach(async () => {
       resetNewAgentSpawnRunner();
+      lifecycleSpawnCtx.reset();
       resetUserConfigPath();
       if (originalHome === undefined) {
         delete process.env.HOME;
@@ -5797,7 +5800,7 @@ describe("newAgent (native)", () => {
 
   async function writeSandboxType(
     name = "sandboxed",
-    options?: { enabled?: boolean; model?: string; allowRead?: string[]; allowWrite?: string[]; deny?: string[] },
+    options?: { enabled?: boolean; omitEnabled?: boolean; model?: string; allowRead?: string[]; allowWrite?: string[]; deny?: string[] },
   ) {
     const path = join(process.env.HOME!, ".itsybitsy", "agent-types", `${name}.md`);
     const allowRead = JSON.stringify(options?.allowRead ?? [tempDir]);
@@ -5812,7 +5815,7 @@ paths:
   allowWrite: ${allowWrite}
   deny: ${deny}
 sandbox:
-  enabled: ${options?.enabled ?? true}
+${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   rawAllow: ["(allow process*)"]
   domains: ["api.anthropic.com", "*.anthropic.com"]
 ---
@@ -5875,6 +5878,48 @@ sandbox:
     });
   });
 
+  test("sandbox layer merge uses the most-specific authored enabled value", () => {
+    const layer = (
+      name: string,
+      enabled: boolean | undefined,
+      domain: string,
+    ): import("./agent-types").AgentType => ({
+      name,
+      description: "",
+      canSpawnChildren: false,
+      instructionStyle: "worker",
+      sandbox: {
+        ...(enabled === undefined ? {} : { enabled }),
+        rawAllow: [],
+        domains: [domain],
+      },
+    });
+
+    expect(mergeSandboxLayerConfigs([
+      layer("_all", true, "all.example"),
+      layer("_non_coordinator", false, "middle.example"),
+      layer("leaf", true, "leaf.example"),
+    ]).sandbox).toEqual({
+      enabled: true,
+      rawAllow: [],
+      domains: ["all.example", "middle.example", "leaf.example"],
+    });
+  });
+
+  test("sandbox layer without enabled preserves inherited false while adding lists", () => {
+    const base = { description: "", canSpawnChildren: false, instructionStyle: "worker" as const };
+    const merged = mergeSandboxLayerConfigs([
+      { name: "_all", ...base, sandbox: { enabled: false, rawAllow: [], domains: ["all.example"] } },
+      { name: "leaf", ...base, sandbox: { rawAllow: ["(allow process-fork)"], domains: ["leaf.example"] } },
+    ]);
+    expect(merged.sandbox).toEqual({
+      enabled: false,
+      rawAllow: ["(allow process-fork)"],
+      domains: ["all.example", "leaf.example"],
+    });
+    expect(mergeSandboxLayerConfigs([]).sandbox.enabled).toBe(true);
+  });
+
   test("a type with NO paths block merges identically to one with an empty block (deny-by-default)", () => {
     // Adam's invariant at the production merge path: a .md that omits `paths:`
     // entirely must resolve the SAME as one declaring empty lists — never
@@ -5903,11 +5948,12 @@ sandbox:
     expect(withOne.allowRead).toEqual(["/opt/thing"]);
   });
 
-  test("start.sh is ALWAYS Seatbelt-wrapped (mandatory sandbox) — a retired enabled:false authoring cannot disable it", async () => {
-    // Even a type that authored the RETIRED `sandbox.enabled: false` toggle
-    // spawns sandboxed: resolveSandboxConfig forces enabled:true, so the launcher
-    // wraps every agent. There is no unsandboxed spawn path anymore.
+  test("explicit sandbox.enabled:false launches Claude without kernel/proxy/collector while preserving hooks", async () => {
     await writeSandboxType("sandbox-disabled", { enabled: false });
+    await mkdir(join(tempDir, ".claude"), { recursive: true });
+    await Bun.write(join(tempDir, ".claude", "settings.json"), JSON.stringify({
+      permissions: { defaultMode: "bypassPermissions", allow: ["Bash(git status:*)"] },
+    }));
     setNewAgentSpawnRunner(cleanWorktreeRunner());
     setNewAgentSummaryGenerator(async () => {});
     setWatchdogSpawnFn(() => ({ pid: 99990 }));
@@ -5916,25 +5962,45 @@ sandbox:
     expect(result.ok).toBe(true);
     const start = await Bun.file(join(agentsDir, "sandbox-disabled", "start.sh")).text();
     const meta = await Bun.file(join(agentsDir, "sandbox-disabled", "meta.json")).json();
-    // The Seatbelt wrapper, the egress proxy, and (only under the kernel) the
-    // skip-permissions flag are ALL present.
-    expect(start).toContain("sandbox-exec");
-    expect(start).toContain("sandbox-proxy-launch");
-    expect(start).toContain("export http_proxy=");
-    expect(start).toContain("--dangerously-skip-permissions");
-    // Frozen metadata records the sandbox as enabled (mandatory).
-    expect(meta.sandbox.enabled).toBe(true);
+    expect(start).not.toContain("sandbox-exec");
+    expect(start).not.toContain("sandbox-proxy-launch");
+    expect(start).not.toContain("sandbox-log-watch");
+    expect(start).not.toContain("export http_proxy=");
+    expect(start).not.toContain("--dangerously-skip-permissions");
+    expect(meta.sandbox.enabled).toBe(false);
+    expect(meta.sandbox_proxy_port).toBeUndefined();
     expect(meta.paths.allowRead).toContain(canonicalizeSandboxPath(tempDir));
     expect(meta.paths.allowWrite).toContain(canonicalizeSandboxPath(tempDir));
+    const settings = await Bun.file(join(agentsDir, "sandbox-disabled", "repo", ".claude", "settings.local.json")).json();
+    expect(JSON.stringify(settings.hooks)).toContain("hook-check-path");
+    expect(settings.permissions.defaultMode).toBeUndefined();
+  });
+
+  test("omitted sandbox.enabled defaults to an enabled fail-closed launch", async () => {
+    await writeSandboxType("sandbox-default-on", { omitEnabled: true });
+    setSandboxPortAllocatorForTesting(() => 43120);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99987 }));
+
+    const result = await callNewAgent("default on", { name: "sandbox-default-on", type: "sandbox-default-on" });
+    expect(result.ok).toBe(true);
+    const agentDir = join(agentsDir, "sandbox-default-on");
+    const start = await Bun.file(join(agentDir, "start.sh")).text();
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(meta.sandbox.enabled).toBe(true);
+    expect(start).toContain("sandbox-exec");
+    expect(start).toContain("sandbox-proxy-launch");
+    expect(start).toContain("sandbox-log-watch");
   });
 
   test("resume refuses legacy enabled sandbox metadata with no paths block", async () => {
     const id = "legacy-enabled-no-paths";
     const agentDir = join(agentsDir, id);
-    // Mandatory sandbox: a frozen meta with an enabled sandbox but NO paths block
-    // predates mandatory sandboxing and is refused fail-closed (never silently
-    // upgraded); the recovery is `ib sandbox refresh`.
-    const message = `sandbox refused: agent '${id}' has no valid sandbox policy in meta.json (mandatory sandboxing requires an enabled sandbox and a paths block; this agent's frozen metadata predates it); run \`ib sandbox refresh ${id}\` from an unsandboxed session, or nuke and respawn the agent`;
+    // An enabled frozen policy cannot reproduce its kernel profile without the
+    // corresponding paths block and remains fail-closed.
+    const message = `sandbox refused: agent '${id}' has an enabled sandbox but no paths block in meta.json; run \`ib sandbox refresh ${id}\` from an unsandboxed session, or nuke and respawn the agent`;
     const legacyMeta: Partial<AgentMeta> = {
       id,
       state: "stopped",
@@ -5963,11 +6029,7 @@ sandbox:
     expect(resumeCommands.some((cmd) => cmd[0] === "/usr/bin/sandbox-exec")).toBe(false);
   });
 
-  test("resume refuses a legacy agent with frozen sandbox.enabled:false, even with a paths block (mandatory sandbox)", async () => {
-    // Mandatory sandbox: a frozen meta that predates it (sandbox.enabled:false)
-    // can no longer resume UNsandboxed — that path is gone. Even with a valid
-    // paths block, the raw enabled:false is refused fail-closed; the recovery is
-    // `ib sandbox refresh`, which re-derives an enabled policy from the type files.
+  test("resume preserves frozen sandbox.enabled:false and launches without kernel helpers", async () => {
     const id = "legacy-disabled-with-paths";
     const agentDir = join(agentsDir, id);
     await mkdir(join(agentDir, "repo"), { recursive: true });
@@ -5977,7 +6039,6 @@ sandbox:
       model: "claude:sonnet",
       tmux_session: "",
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-      // Frozen legacy: the sandbox was authored/persisted as disabled.
       sandbox: { enabled: false, rawAllow: [], domains: [] },
       paths: { allowRead: [tempDir], allowWrite: [tempDir], deny: [] },
     };
@@ -5985,16 +6046,61 @@ sandbox:
 
     spawnCalls = [];
     setNukeResumeSpawnRunner(cleanWorktreeRunner());
-    const resumed = await resumeAgent(makeAgent(id, tempDir, "stopped", legacyMeta));
+    setSendSpawnRunner(() => makeSpawnResult("", 0));
+    let resumed;
+    try {
+      resumed = await resumeAgent(makeAgent(id, tempDir, "stopped", legacyMeta));
+    } finally {
+      resetSendSpawnRunner();
+    }
 
-    expect(resumed.ok).toBe(false);
-    expect(resumed.stderr).toContain("no valid sandbox policy");
-    expect(resumed.stderr).toContain(`ib sandbox refresh ${id}`);
-    // Fail-closed: never launched, no sandbox artifacts, no resume.sh.
+    expect(resumed.ok).toBe(true);
     expect(await Bun.file(join(agentDir, "sandbox.sb")).exists()).toBe(false);
-    expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
-    expect((await Bun.file(join(agentDir, "meta.json")).json()).state).toBe("stopped");
+    const resume = await Bun.file(join(agentDir, "resume.sh")).text();
+    expect(resume).not.toContain("sandbox-exec");
+    expect(resume).not.toContain("sandbox-proxy-launch");
+    expect(resume).not.toContain("sandbox-log-watch");
+    expect(resume).not.toContain("--dangerously-skip-permissions");
     expect(spawnCalls.some((cmd) => cmd[0] === "/usr/bin/sandbox-exec")).toBe(false);
+    expect(spawnCalls.some((cmd) => cmd[0] === "which" && cmd[1] === "sandbox-exec")).toBe(false);
+  });
+
+  test("disabled coordinator rehire resume strips archived bypassPermissions while retaining settings hooks", async () => {
+    const id = "disabled-coordinator-resume";
+    const agentDir = join(agentsDir, id);
+    await mkdir(join(agentDir, ".claude"), { recursive: true });
+    const meta: Partial<AgentMeta> = {
+      id,
+      state: "stopped",
+      model: "claude:sonnet",
+      agentType: "coordinator",
+      tmux_session: "",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      sandbox: { enabled: false, rawAllow: [], domains: [] },
+      paths: { allowRead: [tempDir], allowWrite: [tempDir], deny: [] },
+    };
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+    await Bun.write(join(agentDir, ".claude", "settings.local.json"), JSON.stringify({
+      permissions: { defaultMode: "bypassPermissions", allow: ["Bash(ib:*)"] },
+      hooks: { PreToolUse: [{ hooks: [{ command: "ib hooks hook-check-path" }] }] },
+    }));
+    setNukeResumeSpawnRunner(cleanWorktreeRunner());
+    setSendSpawnRunner(() => makeSpawnResult("", 0));
+    let result;
+    try {
+      result = await resumeAgent(makeAgent(id, tempDir, "stopped", meta), { resetCoordinator: false });
+    } finally {
+      resetSendSpawnRunner();
+    }
+
+    expect(result.ok).toBe(true);
+    const resume = await Bun.file(join(agentDir, "resume.sh")).text();
+    expect(resume).toContain("--settings");
+    expect(resume).not.toContain("--dangerously-skip-permissions");
+    expect(resume).not.toContain("--permission-mode bypassPermissions");
+    const settings = await Bun.file(join(agentDir, ".claude", "settings.local.json")).json();
+    expect(settings.permissions.defaultMode).toBeUndefined();
+    expect(JSON.stringify(settings.hooks)).toContain("hook-check-path");
   });
 
   test("sandbox-enabled Codex spawn uses danger-full-access inside our wrapper and proxy", async () => {
@@ -6028,6 +6134,27 @@ sandbox:
     expect(agentsMd).not.toContain("your Claude project directory and scratchpad");
     expect(dispatcherDryRunCalls.length).toBeGreaterThanOrEqual(3);
     expect(spawnCalls.some((call) => call[0] === "codex")).toBe(false);
+  });
+
+  test("sandbox-disabled Codex spawn keeps native protections and hooks but omits every kernel helper", async () => {
+    await writeSandboxType("unsandboxed-codex", { enabled: false, model: "codex:gpt-5.4-mini" });
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99986 }));
+
+    const result = await callNewAgent("unsandboxed codex", { name: "unsandboxed-codex", type: "unsandboxed-codex" });
+    expect(result.ok).toBe(true);
+    const agentDir = join(agentsDir, "unsandboxed-codex");
+    const start = await Bun.file(join(agentDir, "start.sh")).text();
+    expect(start).toContain("--dangerously-bypass-hook-trust");
+    expect(start).not.toContain("-a never");
+    expect(start).not.toContain("-s danger-full-access");
+    expect(start).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(start).toContain("hooks.PreToolUse");
+    expect(start).not.toContain("sandbox-exec");
+    expect(start).not.toContain("sandbox-proxy-launch");
+    expect(start).not.toContain("sandbox-log-watch");
+    expect(spawnCalls.some((cmd) => cmd[0] === "which" && cmd[1] === "sandbox-exec")).toBe(false);
   });
 
   test("sandbox-enabled Codex resume reallocates proxy, preserves profile, and wraps both launch arms", async () => {
@@ -6391,13 +6518,15 @@ sandbox:
     const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
     meta.state = "stopped";
     meta.codex_session_id = "019e7b21-cb7d-7f23-8674-11036ed141ef";
+    meta.sandbox_proxy_pid = 99_999_999;
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
-    // Edit the type's paths (the authored `enabled: false` is a RETIRED toggle
-    // that resolveSandboxConfig ignores — refresh always re-derives enabled).
+    await Bun.write(join(agentDir, "sandbox-proxy.pid"), "99999999\n");
+    await Bun.write(join(agentDir, "sandbox-proxy.ready"), "ready\n");
+    // Edit both paths and the toggle. Refresh must replace the frozen policy and
+    // regenerate native instructions before resuming without kernel helpers.
     await writeSandboxType(id, { model: "codex:gpt-5.4-mini", enabled: false, allowRead: [newRead] });
     let created = false;
     setNukeResumeSpawnRunner((cmd: string[]) => {
-      // Mandatory sandbox: refresh's internal resume runs prepareSandbox.
       if (cmd[0] === "which" && cmd[1] === "sandbox-exec") return makeSpawnResult("/usr/bin/sandbox-exec", 0);
       if (cmd[0] === "/usr/bin/sandbox-exec") return makeSpawnResult("", 0);
       if (cmd.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
@@ -6410,17 +6539,73 @@ sandbox:
     const text = await Bun.file(instructions).text();
     expect(text).toContain(canonicalizeSandboxPath(newRead));
     expect(text).not.toContain(canonicalizeSandboxPath(oldRead));
-    // Mandatory sandbox: refresh re-derives an ENABLED policy, so the kernel is ON.
-    expect(text).toContain("The kernel sandbox is ON");
+    expect(text).toContain("The kernel sandbox is OFF");
     expect(text).not.toContain("your Claude project directory and scratchpad");
-    expect(await Bun.file(join(agentDir, "resume.sh")).text()).toContain("sandbox-exec");
+    const resume = await Bun.file(join(agentDir, "resume.sh")).text();
+    expect(resume).not.toContain("sandbox-exec");
+    expect(resume).not.toContain("sandbox-proxy-launch");
+    expect(resume).not.toContain("sandbox-log-watch");
+    expect(resume).toContain("--dangerously-bypass-hook-trust");
+    expect(resume).not.toContain("-a never");
+    expect(resume).not.toContain("-s danger-full-access");
+    const refreshedMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(refreshedMeta.sandbox.enabled).toBe(false);
+    expect(refreshedMeta.sandbox_proxy_port).toBeUndefined();
+    expect(refreshedMeta.sandbox_proxy_pid).toBeUndefined();
+    expect(await Bun.file(join(agentDir, "sandbox-proxy.pid")).exists()).toBe(false);
+    expect(await Bun.file(join(agentDir, "sandbox-proxy.ready")).exists()).toBe(false);
+    const repoId = await getRepoId(tempDir);
+    expect(await readSealRecord(repoId, id, process.env.HOME!)).toBeNull();
   });
 
-  test("agy spawns SANDBOXED (mandatory sandbox) — no longer refused for lacking a kernel wrapper", async () => {
-    // The old contract refused agy whenever the sandbox was enabled ("agy has no
-    // kernel sandbox wrapper"). Under mandatory sandboxing agy is wrapped in
-    // sandbox-exec + the egress proxy exactly like claude/codex, so the spawn
-    // SUCCEEDS and the start.sh carries the wrapper.
+  test("refresh toggles a disabled Claude agent back to enabled and fails closed through preflight", async () => {
+    const id = "refresh-enable";
+    await writeSandboxType(id, { enabled: false });
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99959 }));
+    expect((await callNewAgent("disabled first", { name: id, type: id })).ok).toBe(true);
+
+    const agentDir = join(agentsDir, id);
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+    await writeSandboxType(id, { enabled: true });
+    setSandboxPortAllocatorForTesting(() => 43202);
+    setSandboxPortCheckForTesting(() => {});
+    const resumeCalls: string[][] = [];
+    let created = false;
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      resumeCalls.push(cmd);
+      if (cmd[0] === "which" && cmd[1] === "sandbox-exec") return makeSpawnResult("/usr/bin/sandbox-exec", 0);
+      if (cmd[0] === "/usr/bin/sandbox-exec") return makeSpawnResult("", 0);
+      if (cmd.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmd.includes("has-session")) return makeSpawnResult("", created ? 0 : 1);
+      if (cmd.includes("new-session")) created = true;
+      if (cmd.includes("capture-pane")) return makeSpawnResult("Claude Code v1.0", 0);
+      return makeSpawnResult("", 0);
+    });
+    setSendSpawnRunner(() => makeSpawnResult("", 0));
+    try {
+      const result = await refreshAgentSandbox(makeAgent(id, tempDir, "stopped", meta));
+      expect(result.ok).toBe(true);
+    } finally {
+      resetSendSpawnRunner();
+    }
+
+    const refreshedMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    const resume = await Bun.file(join(agentDir, "resume.sh")).text();
+    expect(refreshedMeta.sandbox.enabled).toBe(true);
+    expect(refreshedMeta.sandbox_proxy_port).toBe(43202);
+    expect(resume).toContain("sandbox-exec");
+    expect(resume).toContain("sandbox-proxy-launch");
+    expect(resume).toContain("sandbox-log-watch");
+    expect(resumeCalls.some((cmd) => cmd[0] === "/usr/bin/sandbox-exec")).toBe(true);
+    const repoId = await getRepoId(tempDir);
+    expect(await readSealRecord(repoId, id, process.env.HOME!)).not.toBeNull();
+  });
+
+  test("sandbox-enabled agy spawn uses the shared kernel wrapper", async () => {
     const id = "agy-sandboxed";
     await writeSandboxType(id, { model: "agy:gemini-3.7-flash-low" });
     setSandboxPortAllocatorForTesting(() => 43199);
@@ -6448,11 +6633,38 @@ sandbox:
     expect(start).toContain("sandbox-proxy-launch");
     expect(start).toContain("export http_proxy=");
     expect(start).toMatch(/\S*sandbox-exec\S* .* agy --dangerously-skip-permissions/);
-    // Frozen metadata records the sandbox as enabled (mandatory).
+    // Frozen metadata records the authored enabled state.
     const meta = await Bun.file(join(agentDir, "meta.json")).json();
     expect(meta.sandbox.enabled).toBe(true);
     // No stale "agy has no kernel sandbox wrapper" refusal anywhere.
     expect(start).not.toContain("no kernel sandbox wrapper");
+  });
+
+  test("sandbox-disabled agy spawn keeps native approvals and generated hooks but omits every kernel helper", async () => {
+    const id = "agy-unsandboxed";
+    await writeSandboxType(id, { enabled: false, model: "agy:gemini-3.7-flash-low" });
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99912 }));
+    setNewAgentSpawnRunner((cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("ls-files") && cmdStr.includes("--error-unmatch")) return makeSpawnResult("", 1);
+      if (cmd[0] === "agy" && cmd[1] === "--version") return makeSpawnResult("1.1.23", 0);
+      return cleanWorktreeRunner()(cmd, opts);
+    });
+
+    const result = await callNewAgent("unsandboxed agy", { name: id, type: id });
+    expect(result.ok).toBe(true);
+    const agentDir = join(agentsDir, id);
+    const start = await Bun.file(join(agentDir, "start.sh")).text();
+    const hooks = await Bun.file(join(agentDir, "repo", ".agents", "hooks.json")).text();
+    expect(start).toContain("agy --model 'gemini-3.7-flash-low'");
+    expect(start).not.toContain("--dangerously-skip-permissions");
+    expect(start).not.toContain("--mode=accept-edits");
+    expect(start).not.toContain("sandbox-exec");
+    expect(start).not.toContain("sandbox-proxy-launch");
+    expect(start).not.toContain("sandbox-log-watch");
+    expect(hooks).toContain("agy-pre-tool-use");
+    expect(spawnCalls.some((cmd) => cmd[0] === "which" && cmd[1] === "sandbox-exec")).toBe(false);
   });
 
   test("sandbox refresh re-derives paths from edited type files and replays the new frozen block", async () => {
@@ -6918,6 +7130,35 @@ sandbox:
     expect(resumeCalls.some((c) => c.includes("new-session"))).toBe(false);
     expect((await Bun.file(join(agentDir, "meta.json")).json()).state).toBe("stopped");
     expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("does not match the sealed record");
+  });
+
+  test("enabled seal cannot be bypassed by tampering frozen metadata to disabled", async () => {
+    const id = "seal-tamper-disable";
+    await writeSandboxType(id, { enabled: true });
+    setSandboxPortAllocatorForTesting(() => 43189);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99978 }));
+    expect((await callNewAgent("tamper toggle", { name: id, type: id })).ok).toBe(true);
+
+    const agentDir = join(agentsDir, id);
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    meta.sandbox = { ...meta.sandbox!, enabled: false };
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+    setNukeResumeSpawnRunner((cmd: string[]) => makeSpawnResult("", cmd.includes("has-session") ? 1 : 0));
+
+    const resumed = await resumeAgent(makeAgent(id, tempDir, "stopped", meta));
+    expect(resumed.ok).toBe(false);
+    expect(resumed.stderr).toContain("does not match the sealed record (sandbox)");
+    expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
+
+    const refreshed = await refreshAgentSandbox(makeAgent(id, tempDir, "stopped", meta));
+    expect(refreshed.ok).toBe(false);
+    expect(refreshed.stderr).toContain("does not match the sealed record (sandbox)");
+    const repoId = await getRepoId(tempDir);
+    expect(await readSealRecord(repoId, id, process.env.HOME!)).not.toBeNull();
   });
 
   test("A4 G3: resume refuses a tampered agentType and names the field", async () => {
@@ -9887,8 +10128,7 @@ sandbox:
       expect(rule).toContain(canonicalizeSandboxPath(readPath));
       expect(rule).toContain(canonicalizeSandboxPath(writePath));
       expect(rule).toContain("**/agy-denied");
-      // Mandatory sandbox: agy is wrapped by the kernel like every other CLI.
-      expect(rule).toContain("The kernel sandbox is ON");
+      expect(rule).toContain("The kernel sandbox is OFF");
     });
 
     test("appends both boundary files to <worktree>/.gitignore", async () => {

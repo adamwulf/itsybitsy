@@ -318,16 +318,17 @@ export function looksLikeClaudeArgv(command: string): boolean {
 /**
  * Decide whether a `ps` command line LOOKS LIKE an Antigravity CLI (`agy`)
  * invocation spawned by itsybitsy. The launch/resume argv shapes are
- * `agy --dangerously-skip-permissions …` (spawn) and `agy --conversation <uuid>`
- * (resume) — see SPEC-ANTIGRAVITY-CLI.md D2. Like claude's flags these are
- * STANDARD agy flags a user could run themselves, so this is only a PRE-FILTER
+ * `agy --log-file … -i …` (spawn) and `agy --conversation <uuid>` (resume).
+ * Enabled kernel mode also adds `--dangerously-skip-permissions`; disabled
+ * mode deliberately leaves agy's native approvals active. Like claude's flags,
+ * these are STANDARD agy flags a user could run themselves, so this is only a PRE-FILTER
  * before the cwd check in `isAgyAgentProcess`. Anchor on the `agy` token so an
  * unrelated binary is not matched.
  */
 export function looksLikeAgyArgv(command: string): boolean {
   if (!command) return false;
   if (!/(?:^|\/|\s)agy(?:\s|$)/.test(command)) return false;
-  return /\s--(?:dangerously-skip-permissions|conversation)\b/.test(command);
+  return /\s--(?:dangerously-skip-permissions|log-file|conversation)\b/.test(command);
 }
 
 /**

@@ -25,13 +25,12 @@ import { agySettingsPath } from "./agy-config";
 import type { SessionContext } from "./hooks/session-start";
 import { setUserHome, resetUserHome } from "./home";
 
-// Mandatory sandbox: every agy launch is wrapped now, so the builders REQUIRE the
-// proxy preamble + sandbox-exec prefix (they throw otherwise). These stand in for
-// what ib-commands renders via src/sandbox-launch.ts. The prefix has no regex
-// metacharacters that break the substring assertions below.
+// Enabled-mode wrapper fixtures. Builders require the complete pair only when
+// sandboxEnabled is true and ignore both when it is false.
 const SANDBOX_PREAMBLE = "\n# test proxy preamble\nexport http_proxy=\"http://localhost:54321\"\n";
 const SANDBOX_PREFIX = "sandbox-exec -f '/tmp/test/sandbox.sb' -D 'AGENTDIR=/tmp/test'";
 const sandboxFields = () => ({
+  sandboxEnabled: true,
   sandboxScriptPreamble: SANDBOX_PREAMBLE,
   sandboxExecPrefix: SANDBOX_PREFIX,
 });
@@ -267,9 +266,9 @@ describe("buildAgyResumeContent — launch line", () => {
   });
 });
 
-// ── mandatory sandbox wrapper ────────────────────────────────────────────────
+// ── optional sandbox wrapper ─────────────────────────────────────────────────
 
-describe("buildAgy{Start,Resume}Content — mandatory sandbox wrapper", () => {
+describe("buildAgy{Start,Resume}Content — optional sandbox wrapper", () => {
   const startBase = () => ({
     agentId: "agent-abc12345",
     ibBinaryPath: "/usr/local/bin/ib",
@@ -313,18 +312,32 @@ describe("buildAgy{Start,Resume}Content — mandatory sandbox wrapper", () => {
     expect(content).toContain(`\n    ${SANDBOX_PREFIX} agy --dangerously-skip-permissions`);
   });
 
-  test("start.sh REFUSES an absent wrapper (mandatory sandbox)", () => {
+  test("start.sh REFUSES an absent wrapper when enabled", () => {
     expect(() => buildAgyStartContent({ ...startBase(), sandboxScriptPreamble: "" }))
-      .toThrow(/requires the sandbox proxy preamble and sandbox-exec prefix/);
+      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
     expect(() => buildAgyStartContent({ ...startBase(), sandboxExecPrefix: "" }))
-      .toThrow(/requires the sandbox proxy preamble and sandbox-exec prefix/);
+      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
   });
 
-  test("resume.sh REFUSES an absent wrapper (mandatory sandbox)", () => {
+  test("resume.sh REFUSES an absent wrapper when enabled", () => {
     expect(() => buildAgyResumeContent({ ...resumeBase(), sandboxScriptPreamble: "" }))
-      .toThrow(/requires the sandbox proxy preamble and sandbox-exec prefix/);
+      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
     expect(() => buildAgyResumeContent({ ...resumeBase(), sandboxExecPrefix: "" }))
-      .toThrow(/requires the sandbox proxy preamble and sandbox-exec prefix/);
+      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
+  });
+
+  test("disabled start and resume omit yolo flags and kernel helpers", () => {
+    const start = buildAgyStartContent({ ...startBase(), sandboxEnabled: false });
+    const resume = buildAgyResumeContent({ ...resumeBase(), sandboxEnabled: false });
+    for (const content of [start, resume]) {
+      expect(content).toMatch(/agy(?: --model| --log-file)/);
+      expect(content).not.toContain("--dangerously-skip-permissions");
+      expect(content).not.toContain("--mode=accept-edits");
+      expect(content).not.toContain("sandbox-exec");
+      expect(content).not.toContain("sandbox-proxy-launch");
+      expect(content).not.toContain("sandbox-log-watch");
+      expect(content).not.toContain("export http_proxy=");
+    }
   });
 });
 

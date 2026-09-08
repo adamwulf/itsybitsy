@@ -8,11 +8,12 @@
  *      scripts. Same setsid + SIGHUP-ignore + pid-capture + meta-write + wait
  *      + exit-check skeleton as the codex builders (`src/codex-spawn.ts`), so
  *      the watchdog and every reader of `claude_pid` keep working unchanged.
- *      Launch line per D2:
+ *      Enabled-mode launch line per D2:
  *        agy --dangerously-skip-permissions --mode=accept-edits \
  *            --model <slug> [--effort <e>] --log-file <agentDir>/agy.log \
  *            -i "$(cat <promptfile>)"
- *      Resume is the same flags with `--conversation <uuid>` and NO `-i`.
+ *      Disabled mode omits both approval overrides. Resume substitutes
+ *      `--conversation <uuid>` for `-i` in either mode.
  *   2. `writeAgyWorktreeFiles` — write `.agents/hooks.json` and
  *      `.agents/rules/ittybitty-agent.md` into the worktree (D3 + D6).
  *   3. `refuseIfTracked` — the D7 guard: refuse the spawn if either boundary
@@ -143,15 +144,15 @@ export interface BuildAgyStartContentInput {
   absAgentLog: string;
   /** Absolute path to claude.stderr.log (sidecar; reused name for back-compat). */
   absStderrLog: string;
+  /** Whether itsybitsy's kernel sandbox wraps this launch. */
+  sandboxEnabled: boolean;
   /**
    * Proxy startup + environment exports rendered by the shared sandbox wiring
-   * (src/sandbox-launch.ts). MANDATORY — the kernel sandbox always wraps an agy
-   * launch now; the builder THROWS if this or `sandboxExecPrefix` is empty
-   * (refuse absent wrapper).
+   * (src/sandbox-launch.ts). Required only when `sandboxEnabled` is true.
    */
-  sandboxScriptPreamble: string;
-  /** `sandbox-exec -f ... -D ...` prefix rendered by the shared sandbox wiring (MANDATORY). */
-  sandboxExecPrefix: string;
+  sandboxScriptPreamble?: string;
+  /** `sandbox-exec -f ... -D ...` prefix; required only in enabled mode. */
+  sandboxExecPrefix?: string;
 }
 
 /**
@@ -159,7 +160,7 @@ export interface BuildAgyStartContentInput {
  * skeleton exactly (setsid + SIGHUP ignore + pid capture + meta-json write +
  * wait + exit-code annotation + exit-check) but launches agy with the D2 line:
  *
- *   agy --dangerously-skip-permissions --mode=accept-edits [--model <slug>] \
+ *   agy [--dangerously-skip-permissions --mode=accept-edits] [--model <slug>] \
  *       [--effort <e>] --log-file <agentDir>/agy.log -i "$(cat <prompt>)"
  *
  * The `--model`/`--effort` pair is omitted entirely for the `agy:default`
@@ -175,12 +176,14 @@ export interface BuildAgyStartContentInput {
  */
 export function buildAgyStartContent(input: BuildAgyStartContentInput): string {
   assertAgyLaunchPreconditions(input.ibBinaryPath, input.agentId, input.agyModel, "launch");
-  // Mandatory sandbox: refuse to render an agy launch without the wrapper.
-  if (!input.sandboxScriptPreamble || !input.sandboxExecPrefix) {
-    throw new Error("agy launch requires the sandbox proxy preamble and sandbox-exec prefix (mandatory sandbox)");
+  if (input.sandboxEnabled && (!input.sandboxScriptPreamble || !input.sandboxExecPrefix)) {
+    throw new Error("Sandbox-enabled agy launch requires the proxy preamble and sandbox-exec prefix");
   }
-  const sandboxPreamble = input.sandboxScriptPreamble;
-  const sandboxLaunchPrefix = `${input.sandboxExecPrefix} `;
+  const sandboxPreamble = input.sandboxEnabled ? input.sandboxScriptPreamble! : "";
+  const sandboxLaunchPrefix = input.sandboxEnabled ? `${input.sandboxExecPrefix} ` : "";
+  const nativeProtectionOverrides = input.sandboxEnabled
+    ? " --dangerously-skip-permissions --mode=accept-edits"
+    : "";
 
   const modelAndEffort = agyModelAndEffortFlags(input.agyModel, input.effort);
   const qAgyLog = shellQuote(join(input.agentDir, "agy.log"));
@@ -192,7 +195,7 @@ export function buildAgyStartContent(input: BuildAgyStartContentInput): string {
   const qIbPath = shellQuote(input.ibBinaryPath);
 
   const launch =
-    `agy --dangerously-skip-permissions --mode=accept-edits${modelAndEffort} --log-file ${qAgyLog} -i "$(cat ${qAbsPromptFile})"`;
+    `agy${nativeProtectionOverrides}${modelAndEffort} --log-file ${qAgyLog} -i "$(cat ${qAbsPromptFile})"`;
 
   return `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own agy process
@@ -202,7 +205,7 @@ AGENT_LOG=${qStartAgentLog}
 STDERR_LOG=${qStartStderrLog}
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }${sandboxPreamble}
 
-log "Starting agy ${agyModelLogDesc(input.agyModel)} --mode=accept-edits (agy agent id=${input.agentId})"
+log "Starting agy ${agyModelLogDesc(input.agyModel)}${input.sandboxEnabled ? " --mode=accept-edits" : " with native approvals"} (agy agent id=${input.agentId})"
 log "PWD=$(pwd) which_agy=$(which agy 2>&1)"
 
 # Ignore SIGHUP for the lifetime of this script. When spawn is triggered from
@@ -311,14 +314,15 @@ export interface BuildAgyResumeContentInput {
   absAgentLog: string;
   /** Absolute path to claude.stderr.log (sidecar; reused name for back-compat). */
   absStderrLog: string;
+  /** Whether itsybitsy's kernel sandbox wraps this resume. */
+  sandboxEnabled: boolean;
   /**
    * Proxy startup + environment exports rendered by the shared sandbox wiring
-   * (src/sandbox-launch.ts). MANDATORY — agy resume always runs inside our
-   * Seatbelt wrapper; the builder THROWS if this or `sandboxExecPrefix` is empty.
+   * (src/sandbox-launch.ts). Required only when `sandboxEnabled` is true.
    */
-  sandboxScriptPreamble: string;
-  /** `sandbox-exec -f ... -D ...` prefix rendered by the shared sandbox wiring (MANDATORY). */
-  sandboxExecPrefix: string;
+  sandboxScriptPreamble?: string;
+  /** `sandbox-exec -f ... -D ...` prefix; required only in enabled mode. */
+  sandboxExecPrefix?: string;
 }
 
 /**
@@ -335,12 +339,14 @@ export interface BuildAgyResumeContentInput {
  */
 export function buildAgyResumeContent(input: BuildAgyResumeContentInput): string {
   assertAgyLaunchPreconditions(input.ibBinaryPath, input.agentId, input.agyModel, "resume", input.conversationId);
-  // Mandatory sandbox: refuse to render an agy resume without the wrapper.
-  if (!input.sandboxScriptPreamble || !input.sandboxExecPrefix) {
-    throw new Error("agy resume requires the sandbox proxy preamble and sandbox-exec prefix (mandatory sandbox)");
+  if (input.sandboxEnabled && (!input.sandboxScriptPreamble || !input.sandboxExecPrefix)) {
+    throw new Error("Sandbox-enabled agy resume requires the proxy preamble and sandbox-exec prefix");
   }
-  const sandboxPreamble = input.sandboxScriptPreamble;
-  const sandboxLaunchPrefix = `${input.sandboxExecPrefix} `;
+  const sandboxPreamble = input.sandboxEnabled ? input.sandboxScriptPreamble! : "";
+  const sandboxLaunchPrefix = input.sandboxEnabled ? `${input.sandboxExecPrefix} ` : "";
+  const nativeProtectionOverrides = input.sandboxEnabled
+    ? " --dangerously-skip-permissions --mode=accept-edits"
+    : "";
 
   const modelAndEffort = agyModelAndEffortFlags(input.agyModel, input.effort);
   const qConversation = shellQuote(input.conversationId);
@@ -352,7 +358,7 @@ export function buildAgyResumeContent(input: BuildAgyResumeContentInput): string
   const qIbPath = shellQuote(input.ibBinaryPath);
 
   const launch =
-    `agy --dangerously-skip-permissions --mode=accept-edits${modelAndEffort} --log-file ${qAgyLog} --conversation ${qConversation}`;
+    `agy${nativeProtectionOverrides}${modelAndEffort} --log-file ${qAgyLog} --conversation ${qConversation}`;
 
   return `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own agy process

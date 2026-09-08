@@ -113,11 +113,9 @@ export function metadataCli(model: unknown): AgentCli | undefined {
 }
 
 /**
- * Describe the kernel sandbox status for display. Sandboxing is now MANDATORY for
- * every supported CLI (claude, codex, fugu, agy), so a wrappable CLI reports the
- * agent's frozen state: "enabled" for a post-mandatory agent, or "disabled" for a
- * legacy agent whose frozen metadata predates it (that agent must be migrated via
- * `ib sandbox refresh` before it can launch again). An unknown CLI has no wrapper.
+ * Describe the frozen itsybitsy kernel-sandbox toggle for display. Every known
+ * CLI supports either state; disabled agents retain their CLI's native
+ * protections plus itsybitsy's hooks. An unknown CLI has no wrapper.
  */
 export function kernelSandboxStatus(meta: { id?: string; model?: unknown; sandbox?: { enabled?: boolean } }): string {
   const cli = metadataCli(meta.model);

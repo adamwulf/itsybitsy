@@ -141,6 +141,8 @@ import {
   readSealRecord,
   deleteSealRecord,
   verifyMetaAgainstSeal,
+  sealCapabilityPath,
+  newSealCapability,
 } from "./agent-seal";
 
 export interface IbCommandResult {
@@ -5169,7 +5171,11 @@ export async function sealAgentRecord(
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code !== "EPERM" && code !== "EACCES") throw err;
     // Sandboxed spawner: the tmux server is unsandboxed, so let it do the write.
-    await runHelperViaTmuxServerBlocking(nukeResumeSpawnCtx, helperCwd, ["ib", "sandbox", "seal", agentId]);
+    const cap = newSealCapability(meta);
+    const capJson = Buffer.from(JSON.stringify(cap)).toString("base64");
+    const capPath = sealCapabilityPath(repoId, agentId);
+    const capScript = `umask 077; mkdir -p ${shellQuote(dirname(capPath))}; printf %s ${shellQuote(capJson)} | base64 -d > ${shellQuote(`${capPath}.tmp`)}; mv ${shellQuote(`${capPath}.tmp`)} ${shellQuote(capPath)}; IB_SEAL_CAP=${shellQuote(cap.token)} ib sandbox seal ${shellQuote(agentId)}`;
+    await runHelperViaTmuxServerBlocking(nukeResumeSpawnCtx, helperCwd, ["sh", "-c", capScript]);
     if (!(await readSealRecord(repoId, agentId))) {
       throw new Error(`sandbox refused: could not write the sealed record for '${agentId}' (via the tmux server)`);
     }

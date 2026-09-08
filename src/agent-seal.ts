@@ -1,4 +1,4 @@
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { mkdir, rm } from "fs/promises";
 import { userHome } from "./home";
 import { join } from "path";
@@ -55,6 +55,23 @@ export function sealDir(home?: string): string {
 /** The seal file for one agent: `<sealDir>/<repoId>-<agentId>.json`. */
 export function sealPath(repoId: string, agentId: string, home?: string): string {
   return join(sealDir(home), `${repoId}-${agentId}.json`);
+}
+export function sealCapabilityPath(repoId: string, agentId: string, home?: string): string {
+  return join(sealDir(home), `${repoId}-${agentId}.cap`);
+}
+export function sealCapabilityDigest(meta: Record<string, unknown>): string {
+  return createHash("sha256").update(canonicalSealJson(meta)).digest("hex");
+}
+export function newSealCapability(meta: Record<string, unknown>): { token: string; digest: string; expires: number } {
+  return { token: randomUUID(), digest: sealCapabilityDigest(meta), expires: Date.now() + 30_000 };
+}
+export async function consumeSealCapability(repoId: string, agentId: string, meta: Record<string, unknown>, token: string, home?: string): Promise<boolean> {
+  try {
+    const path = sealCapabilityPath(repoId, agentId, home);
+    const cap = await Bun.file(path).json() as { token?: string; digest?: string; expires?: number };
+    await rm(path, { force: true });
+    return cap.token === token && (cap.expires ?? 0) >= Date.now() && cap.digest === sealCapabilityDigest(meta);
+  } catch { return false; }
 }
 
 /**

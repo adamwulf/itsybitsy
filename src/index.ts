@@ -2114,9 +2114,13 @@ export async function main() {
           process.exit(1);
         }
         const { getRepoId } = await import("./ib-commands");
-        const { writeSealRecordDirect } = await import("./agent-seal");
+        const { writeSealRecordDirect, consumeSealCapability } = await import("./agent-seal");
         const repoId = await getRepoId(agent.repoPath);
         try {
+          const token = process.env.IB_SEAL_CAP;
+          if (!token || !(await consumeSealCapability(repoId, agent.id, agent.meta as unknown as Record<string, unknown>, token))) {
+            throw new Error("internal seal capability missing, invalid, or replayed");
+          }
           // No explicit home: writeSealRecordDirect defaults to
           // `process.env.HOME ?? homedir()`, the same seal home the writer/reader
           // use everywhere else.

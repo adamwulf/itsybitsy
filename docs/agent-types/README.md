@@ -109,7 +109,7 @@ sandbox:
 
 The most specific explicit value wins: `_all.md` → `_non_coordinator.md` (except coordinators) → oldest ancestor → child type. A child can turn sandboxing off or back on. Omitting `sandbox` or adding only sandbox lists inherits the existing setting. The `rawAllow` and `domains` lists continue to union across all applicable files, including when a boolean shorthand overrides enablement.
 
-When enabled, repository agents and per-repository coordinators run inside the kernel sandbox and egress proxy; failure to establish either stops launch. With explicit `false`, the kernel sandbox, proxy, and kernel-denial collector are skipped. The hook still enforces the independent `paths:` policy. The global `@system` coordinator remains outside this rollout.
+When enabled, repository agents and per-repository coordinators run inside the kernel sandbox and egress proxy; failure to establish either stops launch. With explicit `false`, the itsybitsy kernel sandbox, proxy, and kernel-denial collector are skipped, and the CLI retains its normal native sandbox and approval protections. YOLO / permission-bypass flags are used only when the itsybitsy kernel sandbox is enabled. The hook still enforces the independent `paths:` policy. The global `@system` coordinator remains outside this rollout.
 
 New agents freeze the resolved value in `meta.json`; resume uses that frozen policy. After editing a type, use `ib sandbox refresh <id>` from an unsandboxed operator session to apply the current policy and restart an existing agent. Non-boolean enablement values are validation errors; valid overrides are accepted by `ib init-types --check`.
 

@@ -10128,7 +10128,7 @@ sandbox:
       expect(rule).toContain(canonicalizeSandboxPath(readPath));
       expect(rule).toContain(canonicalizeSandboxPath(writePath));
       expect(rule).toContain("**/agy-denied");
-      expect(rule).toContain("The kernel sandbox is OFF");
+      expect(rule).toContain("The itsybitsy kernel sandbox is OFF");
     });
 
     test("appends both boundary files to <worktree>/.gitignore", async () => {

@@ -483,7 +483,18 @@ interface BorderlessTableBlock {
   end: number;
   layout: BorderlessRuleLayout;
   rows: string[][];
+  alignments: CellAlignment[];
 }
+
+type CellAlignment = "left" | "center" | "right";
+
+interface ParsedBorderlessRow {
+  cells: string[];
+  alignmentHints: Array<CellAlignment | null>;
+  filled: boolean[];
+}
+
+const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 function parseBorderlessRule(line: string, ruleChar: "━" | "─"): BorderlessRuleLayout | null {
   const plain = stripAnsi(line);
@@ -525,53 +536,121 @@ function sameBorderlessLayout(
   );
 }
 
-/** Slice ANSI-free text by terminal columns rather than UTF-16 indices. */
-function sliceVisibleColumns(text: string, start: number, end: number): string {
+/**
+ * Resolve terminal-column boundaries to UTF-16 string indices in one
+ * grapheme-aware pass. Returns null when a requested table boundary cuts
+ * through a grapheme cluster, which means the line cannot match the rule's
+ * column geometry safely.
+ */
+function visibleBoundaryIndices(text: string, boundaries: number[]): Map<number, number> | null {
+  const pending = [...new Set(boundaries)].sort((a, b) => a - b);
+  const indices = new Map<number, number>();
+  let boundaryIndex = 0;
   let column = 0;
-  let result = "";
-  let includedPrevious = false;
-  for (const char of Array.from(text)) {
-    const charWidth = visibleWidth(char);
-    const include: boolean =
-      charWidth === 0
-        ? includedPrevious
-        : column < end && column + charWidth > start;
-    if (include) result += char;
-    includedPrevious = include;
-    column += charWidth;
+  for (const part of GRAPHEME_SEGMENTER.segment(text)) {
+    while (boundaryIndex < pending.length && pending[boundaryIndex]! <= column) {
+      if (pending[boundaryIndex]! < column) return null;
+      indices.set(pending[boundaryIndex]!, part.index);
+      boundaryIndex++;
+    }
+    const nextColumn = column + visibleWidth(part.segment);
+    if (
+      boundaryIndex < pending.length &&
+      pending[boundaryIndex]! > column &&
+      pending[boundaryIndex]! < nextColumn
+    ) {
+      return null;
+    }
+    column = nextColumn;
   }
-  return result;
+  while (boundaryIndex < pending.length) {
+    if (pending[boundaryIndex]! < column) return null;
+    indices.set(pending[boundaryIndex]!, text.length);
+    boundaryIndex++;
+  }
+  return indices;
 }
 
-function parseBorderlessCells(line: string, layout: BorderlessRuleLayout): string[] | null {
-  const plain = stripAnsi(line);
-  const leading = sliceVisibleColumns(plain, 0, layout.indentWidth);
-  const outside = sliceVisibleColumns(plain, layout.totalWidth, visibleWidth(plain));
-  if (leading.trim().length > 0 || outside.trim().length > 0) return null;
+function inferCellAlignment(rawCell: string): CellAlignment | null {
+  if (rawCell.trim().length === 0) return null;
+  const leading = rawCell.length - rawCell.trimStart().length;
+  const trailing = rawCell.length - rawCell.trimEnd().length;
+  if (leading > trailing) return "right";
+  if (leading > 0 && trailing > 0 && Math.abs(leading - trailing) <= 1) return "center";
+  return "left";
+}
 
-  const cells: string[] = [];
+function parseBorderlessCells(
+  line: string,
+  layout: BorderlessRuleLayout,
+): ParsedBorderlessRow | null {
+  const plain = stripAnsi(line);
+  const boundaries = [0, layout.indentWidth, layout.totalWidth, visibleWidth(plain)];
   for (let i = 0; i < layout.widths.length; i++) {
     const start = layout.starts[i]!;
     const segmentWidth = layout.widths[i]!;
-    const leftPad = sliceVisibleColumns(plain, start, start + 1);
-    const rightPad = sliceVisibleColumns(plain, start + segmentWidth - 1, start + segmentWidth);
+    boundaries.push(start, start + 1, start + segmentWidth - 1, start + segmentWidth);
+    if (i + 1 < layout.widths.length) boundaries.push(layout.starts[i + 1]!);
+  }
+  const indices = visibleBoundaryIndices(plain, boundaries);
+  if (!indices) return null;
+  const slice = (start: number, end: number) =>
+    plain.slice(indices.get(start)!, indices.get(end)!);
+
+  const leading = slice(0, layout.indentWidth);
+  const outside = slice(layout.totalWidth, visibleWidth(plain));
+  if (leading.trim().length > 0 || outside.trim().length > 0) return null;
+
+  const cells: string[] = [];
+  const alignmentHints: Array<CellAlignment | null> = [];
+  const filled: boolean[] = [];
+  for (let i = 0; i < layout.widths.length; i++) {
+    const start = layout.starts[i]!;
+    const segmentWidth = layout.widths[i]!;
+    const leftPad = slice(start, start + 1);
+    const rightPad = slice(start + segmentWidth - 1, start + segmentWidth);
     const gap =
       i + 1 < layout.widths.length
-        ? sliceVisibleColumns(plain, start + segmentWidth, layout.starts[i + 1]!)
+        ? slice(start + segmentWidth, layout.starts[i + 1]!)
         : "";
     if (leftPad.trim().length > 0 || rightPad.trim().length > 0 || gap.trim().length > 0) {
       return null;
     }
-    cells.push(sliceVisibleColumns(plain, start + 1, start + segmentWidth - 1).trim());
+    const rawCell = slice(start + 1, start + segmentWidth - 1);
+    cells.push(rawCell.trim());
+    alignmentHints.push(inferCellAlignment(rawCell));
+    filled.push(visibleWidth(rawCell.trim()) >= segmentWidth - 2);
   }
-  return cells.some((cell) => cell.length > 0) ? cells : null;
+  return cells.some((cell) => cell.length > 0) ? { cells, alignmentHints, filled } : null;
+}
+
+function mergeBorderlessFragments(fragments: ParsedBorderlessRow[]): string[] {
+  return fragments[0]!.cells.map((_, column) => {
+    let merged = "";
+    for (let i = 0; i < fragments.length; i++) {
+      const cell = fragments[i]!.cells[column]!;
+      if (cell.length === 0) continue;
+      if (merged.length > 0) {
+        const previous = fragments[i - 1];
+        const tokenContinues =
+          previous?.filled[column] === true &&
+          !/\s/.test(previous.cells[column]!) &&
+          !/\s/.test(cell);
+        merged += tokenContinues ? "" : " ";
+      }
+      merged += cell;
+    }
+    return merged;
+  });
 }
 
 /**
  * Match a complete borderless Codex table beginning at its header row. The
  * heavy rule is the unambiguous anchor; matching light rules split body rows.
- * Adjacent content lines between rules are source fragments of the same logical
- * row and are merged column-by-column before reflow.
+ * A matching light rule positively terminates a logical body row, so source-
+ * wrapped fragments before it can be merged safely. The final row has no end
+ * marker and is conservatively limited to one source line; otherwise ordinary
+ * prose after a table could be swallowed as another cell fragment.
  */
 function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTableBlock | null {
   if (start + 2 >= lines.length) return null;
@@ -580,38 +659,97 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
   const header = parseBorderlessCells(lines[start]!, layout);
   if (!header) return null;
 
-  const groups: string[][][] = [];
-  let fragments: string[][] = [];
-  let i = start + 2;
-  for (; i < lines.length; i++) {
-    if (stripAnsi(lines[i]!).trim().length === 0) break;
-    const divider = parseBorderlessRule(lines[i]!, "─");
-    if (divider && sameBorderlessLayout(layout, divider)) {
-      if (fragments.length === 0) return null;
-      groups.push(fragments);
-      fragments = [];
+  const rows = [header.cells];
+  // A rendered markdown header is commonly left-aligned even when its body
+  // column is numeric/right-aligned, so prefer the first body-row signal over
+  // a merely left-aligned header. Explicit centered/right headers still win.
+  const alignmentHints: Array<CellAlignment | null> = header.alignmentHints.map((hint) =>
+    hint === "left" ? null : hint,
+  );
+  let end = start + 1;
+  let cursor = start + 2;
+  while (cursor < lines.length) {
+    const groupStart = cursor;
+    const fragments: ParsedBorderlessRow[] = [];
+    while (cursor < lines.length && stripAnsi(lines[cursor]!).trim().length > 0) {
+      const divider = parseBorderlessRule(lines[cursor]!, "─");
+      if (divider && sameBorderlessLayout(layout, divider)) break;
+      const fragment = parseBorderlessCells(lines[cursor]!, layout);
+      if (!fragment) break;
+      fragments.push(fragment);
+      cursor++;
+    }
+    if (fragments.length === 0) {
+      return rows.length > 1
+        ? {
+            end,
+            layout,
+            rows,
+            alignments: alignmentHints.map((hint) => hint ?? "left"),
+          }
+        : null;
+    }
+
+    const divider = cursor < lines.length ? parseBorderlessRule(lines[cursor]!, "─") : null;
+    const hasMatchingDivider = divider !== null && sameBorderlessLayout(layout, divider);
+    const accepted = hasMatchingDivider ? fragments : fragments.slice(0, 1);
+    rows.push(mergeBorderlessFragments(accepted));
+    for (const fragment of accepted) {
+      for (let column = 0; column < alignmentHints.length; column++) {
+        alignmentHints[column] ??= fragment.alignmentHints[column] ?? null;
+      }
+    }
+    end = hasMatchingDivider ? cursor : groupStart;
+    if (!hasMatchingDivider) break;
+    cursor++;
+    if (cursor >= lines.length || stripAnsi(lines[cursor]!).trim().length === 0) return null;
+  }
+  return {
+    end,
+    layout,
+    rows,
+    alignments: alignmentHints.map((hint) => hint ?? "left"),
+  };
+}
+
+function wrapPlainCell(text: string, width: number): string[] {
+  if (text.length === 0 || visibleWidth(text) <= width) return [text];
+
+  const splitToken = (token: string): string[] => {
+    const parts: string[] = [];
+    let current = "";
+    let currentWidth = 0;
+    for (const grapheme of GRAPHEME_SEGMENTER.segment(token)) {
+      const graphemeWidth = visibleWidth(grapheme.segment);
+      if (current.length > 0 && currentWidth + graphemeWidth > width) {
+        parts.push(current);
+        current = "";
+        currentWidth = 0;
+      }
+      current += grapheme.segment;
+      currentWidth += graphemeWidth;
+    }
+    if (current.length > 0) parts.push(current);
+    return parts;
+  };
+
+  const output: string[] = [];
+  let current = "";
+  for (const word of text.trim().split(/\s+/)) {
+    if (current.length > 0 && visibleWidth(current) + 1 + visibleWidth(word) <= width) {
+      current += ` ${word}`;
       continue;
     }
-    const cells = parseBorderlessCells(lines[i]!, layout);
-    if (!cells) break;
-    fragments.push(cells);
+    if (current.length > 0) {
+      output.push(current);
+      current = "";
+    }
+    const pieces = splitToken(word);
+    output.push(...pieces.slice(0, -1));
+    current = pieces.at(-1) ?? "";
   }
-  if (fragments.length > 0) groups.push(fragments);
-  else if (groups.length > 0) return null; // A divider cannot terminate the table.
-  if (groups.length === 0) return null;
-
-  const rows = [header];
-  for (const group of groups) {
-    rows.push(
-      header.map((_, column) =>
-        group
-          .map((fragment) => fragment[column]!)
-          .filter((cell) => cell.length > 0)
-          .join(" "),
-      ),
-    );
-  }
-  return { end: i - 1, layout, rows };
+  if (current.length > 0) output.push(current);
+  return output.length > 0 ? output : [""];
 }
 
 function reflowBorderlessTable(block: BorderlessTableBlock, width: number): string[] | null {
@@ -638,14 +776,22 @@ function reflowBorderlessTable(block: BorderlessTableBlock, width: number): stri
     block.layout.indent + widths.map((cellWidth) => char.repeat(cellWidth + 2)).join("  ");
   const renderRow = (cells: string[]): string[] => {
     const cellLines = cells.map((cell, i) =>
-      cell.length === 0 ? [""] : wordWrapSingleLine(cell, widths[i]!),
+      wrapPlainCell(cell, widths[i]!),
     );
     const height = Math.max(...cellLines.map((cell) => cell.length));
     const rendered: string[] = [];
     for (let row = 0; row < height; row++) {
       const columns = cellLines.map((cell, i) => {
         const text = cell[row] ?? "";
-        return " " + text + " ".repeat(widths[i]! - visibleWidth(text) + 1);
+        const extra = Math.max(0, widths[i]! - visibleWidth(text));
+        const alignment = block.alignments[i]!;
+        const left =
+          alignment === "right"
+            ? extra
+            : alignment === "center"
+              ? Math.floor(extra / 2)
+              : 0;
+        return " " + " ".repeat(left) + text + " ".repeat(extra - left + 1);
       });
       rendered.push(block.layout.indent + columns.join("  "));
     }
@@ -679,6 +825,12 @@ export function wordWrapLines(text: string, width: number): string[] {
       const block = lines.slice(i, borderless.end + 1);
       if (block.every((candidate) => visibleWidth(candidate) <= width)) {
         result.push(...block);
+      } else if (block.some((candidate) => candidate.includes("\x1b"))) {
+        // Captured tmux panes are plain text. If a caller supplies styled table
+        // rows, parsing through stripAnsi would silently discard CSI/OSC
+        // metadata. Preserve those bytes and use viewport clipping instead of
+        // attempting a lossy structural reflow.
+        result.push(...block.map((candidate) => truncateToWidth(candidate, width, "")));
       } else {
         const reflowed = reflowBorderlessTable(borderless, width);
         if (reflowed) {

@@ -1230,6 +1230,21 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     expect(wordWrapLines(table.join("\n"), 80)).toEqual(table);
   });
 
+  test("clips an overflowing styled table without stripping terminal metadata", () => {
+    const table = renderTable(
+      [
+        ["Name", "Meaning"],
+        ["Alpha", "a deliberately long styled value"],
+      ],
+      [8, 50],
+    ).map((line) => `\x1b[2m${line}\x1b[0m`);
+    const rows = wordWrapLines(table.join("\n"), 30);
+    for (const row of rows) {
+      expect(visibleWidth(row)).toBeLessThanOrEqual(30);
+      expect(row).toContain("\x1b[2m");
+    }
+  });
+
   test("reflows a one-body-row table and respects wide Unicode cell widths", () => {
     const table = renderTable(
       [
@@ -1245,25 +1260,111 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     expect(rows.join(" ")).toContain("value cell");
   });
 
-  test("merges source-wrapped fragments within each cell before reflow", () => {
-    const widths = [32, 90];
+  test("merges rule-terminated source fragments without splitting hard-wrapped tokens", () => {
+    const widths = [32, 40];
+    const url = "https://example.com/averylongunbrokentoken";
     const table = renderTable(
       [
         ["First", "Second"],
-        ["alpha begins", "bravo begins with enough texte text to make the source table wide"],
+        ["alpha begins", url.slice(0, 40)],
         ["next row", "another value"],
       ],
       widths,
     );
-    const fragment =
-      "  " +
-      [" and alpha ends", " and bravo ends"]
-        .map((cell, i) => cell + " ".repeat(widths[i]! + 2 - visibleWidth(cell)))
-        .join("  ");
+    const fragment = renderTable([["and alpha ends", url.slice(40)]], widths)[0]!;
     table.splice(3, 0, fragment);
 
     const rows = wordWrapLines(table.join("\n"), 70);
     for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(70);
-    expect(rows.join(" ").replace(/\s+/g, " ")).toContain("alpha begins and alpha ends");
+    const heavyIndex = rows.findIndex((row) => row.includes("━"));
+    const lightIndex = rows.findIndex((row) => row.includes("─"));
+    const segments = Array.from(rows[heavyIndex]!.matchAll(/━+/g));
+    const body = rows.slice(heavyIndex + 1, lightIndex);
+    const firstCell = body
+      .map((row) =>
+        row
+          .slice(
+            segments[0]!.index! + 1,
+            segments[0]!.index! + segments[0]![0].length - 1,
+          )
+          .trim(),
+      )
+      .filter(Boolean)
+      .join(" ");
+    const secondCell = body
+      .map((row) => row.slice(segments[1]!.index! + 1).trim())
+      .join("")
+      .replace(/\s/g, "");
+    expect(firstCell).toBe("alpha begins and alpha ends");
+    expect(secondCell).toContain(url);
+  });
+
+  test("does not swallow adjacent prose after the final table row", () => {
+    const table = renderTable(
+      [
+        ["First", "Second"],
+        ["alpha", "a value long enough to force table reflow in this pane"],
+      ],
+      [32, 90],
+    );
+    table.push("  Follow-up prose remains outside the table.");
+
+    const rows = wordWrapLines(table.join("\n"), 54);
+    expect(rows.filter((row) => stripAnsi(row).includes("Follow-up prose"))).toEqual([
+      "  Follow-up prose remains outside the table.",
+    ]);
+    expect(rows.join(" ")).not.toContain("alpha Follow-up");
+  });
+
+  test("uses grapheme-aware column boundaries before a later cell", () => {
+    const table = renderTable(
+      [
+        ["Family", "Description"],
+        ["👨‍👩‍👧‍👦", "the second cell wraps but stays aligned under its own header"],
+      ],
+      [16, 80],
+    );
+    const rows = wordWrapLines(table.join("\n"), 36);
+    for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(36);
+    const heavy = rows.find((row) => row.includes("━"))!;
+    const second = Array.from(heavy.matchAll(/━+/g))[1]!;
+    const continuation = rows.find((row) => row.includes("stays aligned"))!;
+    expect(continuation.slice(0, second.index! + 1).trim()).toBe("");
+    expect(continuation.slice(second.index! + 1).trimStart()).toStartWith("but stays aligned");
+  });
+
+  test("hard-wraps keycap graphemes without producing over-width cells", () => {
+    const row = (left: string, right: string) =>
+      ` ${left.padEnd(4)}  ${right.padEnd(16)}`.trimEnd();
+    const table = [
+      row("A", "Value"),
+      `${"━".repeat(5)}  ${"━".repeat(17)}`,
+      row("x", "1️⃣2️⃣3️⃣4️⃣5️⃣"),
+    ];
+    const rows = wordWrapLines(table.join("\n"), 12);
+    for (const output of rows) expect(visibleWidth(output)).toBeLessThanOrEqual(12);
+    expect(rows.join("").replace(/\s/g, "")).toContain("1️⃣2️⃣3️⃣4️⃣5️⃣");
+  });
+
+  test("preserves right alignment inferred from body cells", () => {
+    const widths = [10, 40];
+    const table = renderTable(
+      [
+        ["Item", "Amount"],
+        ["Widgets", "42"],
+      ],
+      widths,
+    );
+    table[2] =
+      "  " +
+      [" " + "Widgets".padEnd(widths[0]! + 1), " " + "42".padStart(widths[1]!) + " "].join(
+        "  ",
+      );
+
+    const rows = wordWrapLines(table.join("\n"), 30);
+    const heavy = rows.find((row) => row.includes("━"))!;
+    const second = Array.from(heavy.matchAll(/━+/g))[1]!;
+    const amount = rows.find((row) => row.includes("42"))!;
+    expect(amount.indexOf("42") + 2).toBe(second.index! + second[0].length - 1);
   });
 });

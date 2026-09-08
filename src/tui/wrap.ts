@@ -19,35 +19,31 @@ import { stripAnsi, isCodexStatusLine } from "../parse-state";
  *
  *  1. A bare rule — the entire visible content is a run of light (`─`) or heavy
  *     (`━`) box-drawing chars. Codex uses the heavy form for table header rules.
- *  2. A segmented or titled rule — a run of the same rule character on each
- *     side with spaces or a short inline label between them. Examples are a
- *     table's multi-column header rule (`━━━━  ━━━━━`) and codex's turn divider
- *     (`─ Worked for 3m 50s ────…`). Because the middle breaks the pure run, the
- *     bare-rule test alone lets the line fall through to word-wrapping and it
- *     explodes into many rows at narrow display widths.
+ *  2. A segmented heavy rule — heavy runs separated by the two spaces Codex
+ *     uses between table columns (`━━━━  ━━━━━`).
+ *  3. A titled light rule — a run of ─ on each side with a short inline label
+ *     between them (`─ Worked for 3m 50s ────…`). Codex emits these after each
+ *     turn. Because the middle breaks the pure run, the bare-rule test alone
+ *     lets the line fall through to word-wrapping and it explodes into many rows
+ *     at narrow display widths.
  *
- * The segmented/titled-rule test requires the trimmed line to both start and end
- * with the same rule character and to contain a run of at least four consecutive
- * copies (a length prose never produces). Those structural signals together are
- * what no ordinary sentence satisfies, so the content between the runs may be
- * any text (ASCII or not) without risking a false match.
+ * Heavy rules deliberately accept only runs and two-space column gaps; unlike
+ * the light rule, they do not accept inline labels. That keeps heavy-bar prose
+ * visible instead of misclassifying and truncating it.
  */
 function isSeparatorLine(line: string): boolean {
   const stripped = stripAnsi(line).trim();
   if (stripped.length === 0) return false;
-  for (const ruleChar of ["─", "━"]) {
-    // Bare rule: entirely one horizontal box-drawing character.
-    if (Array.from(stripped).every((char) => char === ruleChar)) return true;
-    // Segmented/titled rule: same-character run … content … same-character run.
-    if (
-      stripped.startsWith(ruleChar) &&
-      stripped.endsWith(ruleChar) &&
-      stripped.includes(ruleChar.repeat(4))
-    ) {
-      return true;
-    }
-  }
-  return false;
+  // Bare light or heavy rule.
+  if (/^─+$/.test(stripped) || /^━+$/.test(stripped)) return true;
+  // Heavy table-header rule: one run per column, separated by two spaces.
+  if (/^━+(?: {2}━+)+$/.test(stripped)) return true;
+  // Titled light rule: ─-run … short label … ─-run.
+  return (
+    stripped.startsWith("─") &&
+    stripped.endsWith("─") &&
+    /─{4,}/.test(stripped)
+  );
 }
 
 /**

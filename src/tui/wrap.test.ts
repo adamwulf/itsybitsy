@@ -343,6 +343,14 @@ describe("separator collapse (─ divider truncation, pinned-width fix)", () => 
     expect(stripAnsi(rows[0]!).trim()).toMatch(/^━+(?:  ━+)?$/);
   });
 
+  test("heavy-bar-decorated prose still wraps without losing content", () => {
+    const prose =
+      "━ This is an ordinary long heading whose contents must remain visible when wrapping across a narrow pane ━━━━";
+    const rows = wordWrapSingleLine(prose, 30);
+    expect(rows.length).toBeGreaterThan(1);
+    expect(rows.join(" ").replace(/\s+/g, " ").trim()).toBe(prose);
+  });
+
   test("wordWrapLines collapses each of several logical separators to one row", () => {
     const sep = "─".repeat(1000);
     const text = ["content above", sep, "content between", sep, "content below"].join("\n");

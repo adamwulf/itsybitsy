@@ -56,8 +56,9 @@ export function sealDir(home?: string): string {
 export function sealPath(repoId: string, agentId: string, home?: string): string {
   return join(sealDir(home), `${repoId}-${agentId}.json`);
 }
-export function sealCapabilityPath(repoId: string, agentId: string, home?: string): string {
-  return join(sealDir(home), `${repoId}-${agentId}.cap`);
+export function sealCapabilityPath(repoId: string, agentId: string, token: string, home?: string): string {
+  if (!/^[0-9a-f-]{36}$/.test(token)) throw new Error("invalid capability token");
+  return join(sealDir(home), `${repoId}-${agentId}-${token}.cap`);
 }
 export async function sealCapabilityDigest(meta: Record<string, unknown>): Promise<string> {
   return createHash("sha256").update(canonicalSealJson(await computeSealInputs(meta))).digest("hex");
@@ -68,10 +69,11 @@ export async function newSealCapability(meta: Record<string, unknown>): Promise<
 export async function consumeSealCapability(repoId: string, agentId: string, meta: Record<string, unknown>, token: string, home?: string): Promise<boolean> {
   try {
     if (!/^[0-9a-f-]{36}$/.test(token)) return false;
-    const path = sealCapabilityPath(repoId, agentId, home);
+    if (!/^[0-9a-f-]{36}$/.test(token)) return false;
+    const path = sealCapabilityPath(repoId, agentId, token, home);
     const cap = await Bun.file(path).json() as { token?: string; digest?: string; expires?: number };
     if (cap.token !== token || (cap.expires ?? 0) < Date.now()) return false;
-    const claimed = `${path}.claimed-${token}`;
+    const claimed = `${path}.claimed`;
     await rename(path, claimed);
     try {
       return cap.digest === await sealCapabilityDigest(meta);

@@ -9,7 +9,7 @@ describe("seal capabilities", () => {
     const meta = { agentType: "worker", sandbox: { enabled: true }, paths: { allowRead: [], allowWrite: [], deny: [] } };
     await mkdir(sealDir(home), { recursive: true });
     const cap = await newSealCapability(meta);
-    await Bun.write(sealCapabilityPath("repo", "agent", home), JSON.stringify(cap));
+    await Bun.write(sealCapabilityPath("repo", "agent", cap.token, home), JSON.stringify(cap));
     expect(await consumeSealCapability("repo", "agent", meta, "wrong", home)).toBe(false);
     expect(await consumeSealCapability("repo", "agent", meta, cap.token, home)).toBe(true);
     expect(await consumeSealCapability("repo", "agent", meta, cap.token, home)).toBe(false);
@@ -22,7 +22,7 @@ describe("seal capabilities", () => {
     await mkdir(sealDir(home), { recursive: true });
     const cap = await newSealCapability(meta);
     cap.expires = 0;
-    await Bun.write(sealCapabilityPath("repo", "agent", home), JSON.stringify(cap));
+    await Bun.write(sealCapabilityPath("repo", "agent", cap.token, home), JSON.stringify(cap));
     expect(await consumeSealCapability("repo", "agent", meta, cap.token, home)).toBe(false);
     await rm(home, { recursive: true, force: true });
   });

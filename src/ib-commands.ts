@@ -860,7 +860,23 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
           throw new Error("archived settings.local.json is not a regular file");
         }
         await mkdir(join(worktreePath, ".claude"), { recursive: true });
-        await cp(archivedSettings, join(worktreePath, ".claude", "settings.local.json"));
+        const restoredSettingsPath = join(worktreePath, ".claude", "settings.local.json");
+        if (archived.meta.sandbox && !resolveSandboxConfig({ sandbox: archived.meta.sandbox }).enabled) {
+          try {
+            const settings = await Bun.file(archivedSettings).json() as Record<string, unknown>;
+            const permissions = settings.permissions;
+            if (permissions && typeof permissions === "object" && !Array.isArray(permissions)) {
+              const next = { ...(permissions as Record<string, unknown>) };
+              if (next.defaultMode === "bypassPermissions") delete next.defaultMode;
+              settings.permissions = next;
+            }
+            await Bun.write(restoredSettingsPath, JSON.stringify(settings, null, 2));
+          } catch {
+            throw new Error("archived settings.local.json is invalid");
+          }
+        } else {
+          await cp(archivedSettings, restoredSettingsPath);
+        }
       }
     }
 
@@ -5173,7 +5189,7 @@ export async function sealAgentRecord(
     // Sandboxed spawner: the tmux server is unsandboxed, so let it do the write.
     const cap = await newSealCapability(meta);
     const capJson = Buffer.from(JSON.stringify(cap)).toString("base64");
-    const capPath = sealCapabilityPath(repoId, agentId);
+    const capPath = sealCapabilityPath(repoId, agentId, cap.token);
     const capScript = `umask 077 && mkdir -p ${shellQuote(dirname(capPath))} && printf %s ${shellQuote(capJson)} | base64 -d > ${shellQuote(`${capPath}.tmp`)} && chmod 600 ${shellQuote(`${capPath}.tmp`)} && mv -f ${shellQuote(`${capPath}.tmp`)} ${shellQuote(capPath)} && IB_SEAL_CAP=${shellQuote(cap.token)} ib sandbox seal ${shellQuote(agentId)}`;
     await runHelperViaTmuxServerBlocking(nukeResumeSpawnCtx, helperCwd, ["sh", "-c", capScript]);
     if (!(await readSealRecord(repoId, agentId)) || !(await verifyMetaAgainstSeal(repoId, agentId, meta)).ok) {

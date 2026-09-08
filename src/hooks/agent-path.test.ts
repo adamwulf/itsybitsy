@@ -1604,6 +1604,11 @@ describe("checkIbCommandAccess", () => {
     expect(await checkIbCommandAccess("ib sandbox seal agent-target1", "@system", agentsDir)).toBeNull();
   });
 
+  test("denies agent-issued sandbox refresh, including refresh all", async () => {
+    expect((await checkIbCommandAccess("ib sandbox refresh agent-target1", "agent-caller1", agentsDir))?.decision).toBe("deny");
+    expect((await checkIbCommandAccess("ib sandbox refresh --all", "agent-caller1", agentsDir))?.decision).toBe("deny");
+  });
+
   test("allows rehire when calling agent is the archived target's manager", async () => {
     await writeRetiredMeta("agent-target1", { manager: "agent-manager1" });
     const result = await checkIbCommandAccess(

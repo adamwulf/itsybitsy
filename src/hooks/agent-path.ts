@@ -1182,6 +1182,9 @@ export async function checkIbCommandAccess(
       reason: "Access denied: ib sandbox seal is an internal operation",
     };
   }
+  if (/(?:^|[;&|]\s*)ib\s+sandbox\s+refresh(?:\s|$)/.test(normalizedCommand)) {
+    return { decision: "deny", reason: "Access denied: ib sandbox refresh is manager-only" };
+  }
 
   // Bash(ib:*) must represent one shell command.  Otherwise a permitted
   // `ib send ...` can append a second lifecycle/internal command after `;`,

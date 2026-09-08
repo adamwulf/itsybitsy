@@ -974,6 +974,13 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
         ].join("\n"),
       };
     }
+  } else {
+    try {
+      const rid = await getRepoId(repoPath);
+      if (await readSealRecord(rid, agentId)) await deleteSealRecord(rid, agentId);
+    } catch (err) {
+      return { ok: false, exitCode: 1, stdout: `Reconstructed stopped agent '${agentId}' from ${archived.archiveKey}`, stderr: `Could not remove stale disabled-agent seal: ${err instanceof Error ? err.message : String(err)}` };
+    }
   }
 
   let resumed: IbCommandResult;
@@ -2666,6 +2673,17 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
   const summary = summarizeSandboxRefresh(oldSandbox, oldPaths, newSandbox, newPaths);
   await logAgent(agentDir, `[sandbox refresh] re-derived from agent-type files: ${summary}`);
 
+  // Stop a running process before changing its frozen policy or seal. This
+  // prevents an old unsandboxed process from continuing while metadata says
+  // the next launch is kernel-sandboxed.
+  if (agent.state !== "stopped") {
+    const pauseResult = await pauseAgent(agent);
+    if (!pauseResult.ok) {
+      await logAgent(agentDir, `[sandbox refresh] pause failed: ${pauseResult.stderr}`);
+      return { ok: false, exitCode: 1, stdout: "", stderr: `sandbox refresh: pause failed: ${pauseResult.stderr}` };
+    }
+  }
+
   // Re-seal enabled NEW inputs before rewriting meta so a failure leaves the
   // old metadata/seal pair intact. Disabled policy has no kernel profile and
   // therefore no seal; its old seal is removed after the metadata flip.
@@ -2736,17 +2754,6 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
     // The checked transition above already removed the seal. Keep this cleanup
     // best-effort only for legacy disabled agents that had no enabled seal.
     if (!removedOldSeal) await removeAgentSeal(agent.repoPath, agent.id);
-  }
-
-  // Pause (only when running) + resume through the EXISTING resume path so the
-  // new frozen block is the one replayed. A stopped agent skips the pause, like
-  // respawnSelf. Fail-hard on a broken sandbox is inherited from resume.
-  if (agent.state !== "stopped") {
-    const pauseResult = await pauseAgent(agent);
-    if (!pauseResult.ok) {
-      await logAgent(agentDir, `[sandbox refresh] pause failed: ${pauseResult.stderr}`);
-      return { ok: false, exitCode: 1, stdout: "", stderr: `sandbox refresh: pause failed: ${pauseResult.stderr}` };
-    }
   }
 
   const resumeResult = await resumeAgent(agent);

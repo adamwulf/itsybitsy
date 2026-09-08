@@ -6331,7 +6331,8 @@ export async function newAgent(
         // The enabled seal is written before worktree setup.  Use the central
         // unwind path so this failure cannot orphan it; git cleanup is safe
         // here because the held branch is checked out elsewhere.
-        await cleanupOnFailure();
+        await rm(agentDir, { recursive: true, force: true });
+        await removeAgentSeal(rootRepoPath, id);
         return {
           ok: false,
           exitCode: 1,

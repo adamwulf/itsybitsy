@@ -6539,7 +6539,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const text = await Bun.file(instructions).text();
     expect(text).toContain(canonicalizeSandboxPath(newRead));
     expect(text).not.toContain(canonicalizeSandboxPath(oldRead));
-    expect(text).toContain("The kernel sandbox is OFF");
+    expect(text).toContain("The itsybitsy kernel sandbox is OFF");
     expect(text).not.toContain("your Claude project directory and scratchpad");
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     expect(resume).not.toContain("sandbox-exec");

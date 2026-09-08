@@ -297,7 +297,11 @@ export function matchTableBlockEnd(lines: string[], start: number): number {
  * remaining (wide) columns split what's left evenly. Returns null when the
  * split would drive a shrunken column below MIN_CELL_WIDTH.
  */
-function shrinkColumnWidths(natural: number[], avail: number): number[] | null {
+function shrinkColumnWidths(
+  natural: number[],
+  avail: number,
+  minimum = MIN_CELL_WIDTH,
+): number[] | null {
   const n = natural.length;
   const widths: number[] = new Array(n).fill(0);
   const fixed: boolean[] = new Array(n).fill(false);
@@ -321,7 +325,7 @@ function shrinkColumnWidths(natural: number[], avail: number): number[] | null {
   }
   if (flexible > 0) {
     const share = Math.floor(remaining / flexible);
-    if (share < MIN_CELL_WIDTH) return null;
+    if (share < minimum) return null;
     let extra = remaining - share * flexible;
     for (let i = 0; i < n; i++) {
       if (!fixed[i]) {
@@ -483,6 +487,7 @@ interface BorderlessTableBlock {
   end: number;
   layout: BorderlessRuleLayout;
   rows: string[][];
+  dividerBefore: boolean[];
   alignments: CellAlignment[];
 }
 
@@ -491,10 +496,10 @@ type CellAlignment = "left" | "center" | "right";
 interface ParsedBorderlessRow {
   cells: string[];
   alignmentHints: Array<CellAlignment | null>;
-  filled: boolean[];
 }
 
 const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const MIN_BORDERLESS_CELL_WIDTH = 2;
 
 function parseBorderlessRule(line: string, ruleChar: "━" | "─"): BorderlessRuleLayout | null {
   const plain = stripAnsi(line);
@@ -575,6 +580,7 @@ function inferCellAlignment(rawCell: string): CellAlignment | null {
   if (rawCell.trim().length === 0) return null;
   const leading = rawCell.length - rawCell.trimStart().length;
   const trailing = rawCell.length - rawCell.trimEnd().length;
+  if (leading === 0 && trailing === 0) return null;
   if (leading > trailing) return "right";
   if (leading > 0 && trailing > 0 && Math.abs(leading - trailing) <= 1) return "center";
   return "left";
@@ -603,7 +609,6 @@ function parseBorderlessCells(
 
   const cells: string[] = [];
   const alignmentHints: Array<CellAlignment | null> = [];
-  const filled: boolean[] = [];
   for (let i = 0; i < layout.widths.length; i++) {
     const start = layout.starts[i]!;
     const segmentWidth = layout.widths[i]!;
@@ -619,38 +624,17 @@ function parseBorderlessCells(
     const rawCell = slice(start + 1, start + segmentWidth - 1);
     cells.push(rawCell.trim());
     alignmentHints.push(inferCellAlignment(rawCell));
-    filled.push(visibleWidth(rawCell.trim()) >= segmentWidth - 2);
   }
-  return cells.some((cell) => cell.length > 0) ? { cells, alignmentHints, filled } : null;
-}
-
-function mergeBorderlessFragments(fragments: ParsedBorderlessRow[]): string[] {
-  return fragments[0]!.cells.map((_, column) => {
-    let merged = "";
-    for (let i = 0; i < fragments.length; i++) {
-      const cell = fragments[i]!.cells[column]!;
-      if (cell.length === 0) continue;
-      if (merged.length > 0) {
-        const previous = fragments[i - 1];
-        const tokenContinues =
-          previous?.filled[column] === true &&
-          !/\s/.test(previous.cells[column]!) &&
-          !/\s/.test(cell);
-        merged += tokenContinues ? "" : " ";
-      }
-      merged += cell;
-    }
-    return merged;
-  });
+  return cells.some((cell) => cell.length > 0) ? { cells, alignmentHints } : null;
 }
 
 /**
  * Match a complete borderless Codex table beginning at its header row. The
  * heavy rule is the unambiguous anchor; matching light rules split body rows.
- * A matching light rule positively terminates a logical body row, so source-
- * wrapped fragments before it can be merged safely. The final row has no end
- * marker and is conservatively limited to one source line; otherwise ordinary
- * prose after a table could be swallowed as another cell fragment.
+ * Source-wrapped cell fragments remain separate physical rows. This retains
+ * their exact word boundaries without guessing whether the renderer wrapped at
+ * whitespace or in the middle of a token. Light rules are recorded separately
+ * and reproduced only where Codex placed them.
  */
 function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTableBlock | null {
   if (start + 2 >= lines.length) return null;
@@ -660,6 +644,7 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
   if (!header) return null;
 
   const rows = [header.cells];
+  const dividerBefore = [false];
   // A rendered markdown header is commonly left-aligned even when its body
   // column is numeric/right-aligned, so prefer the first body-row signal over
   // a merely left-aligned header. Explicit centered/right headers still win.
@@ -668,46 +653,34 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
   );
   let end = start + 1;
   let cursor = start + 2;
+  let nextHasDivider = false;
   while (cursor < lines.length) {
-    const groupStart = cursor;
-    const fragments: ParsedBorderlessRow[] = [];
-    while (cursor < lines.length && stripAnsi(lines[cursor]!).trim().length > 0) {
-      const divider = parseBorderlessRule(lines[cursor]!, "─");
-      if (divider && sameBorderlessLayout(layout, divider)) break;
-      const fragment = parseBorderlessCells(lines[cursor]!, layout);
-      if (!fragment) break;
-      fragments.push(fragment);
+    if (stripAnsi(lines[cursor]!).trim().length === 0) break;
+    const divider = parseBorderlessRule(lines[cursor]!, "─");
+    if (divider && sameBorderlessLayout(layout, divider)) {
+      if (rows.length === 1 || nextHasDivider) return null;
+      nextHasDivider = true;
+      end = cursor;
       cursor++;
+      continue;
     }
-    if (fragments.length === 0) {
-      return rows.length > 1
-        ? {
-            end,
-            layout,
-            rows,
-            alignments: alignmentHints.map((hint) => hint ?? "left"),
-          }
-        : null;
+    const row = parseBorderlessCells(lines[cursor]!, layout);
+    if (!row) break;
+    rows.push(row.cells);
+    dividerBefore.push(nextHasDivider);
+    nextHasDivider = false;
+    for (let column = 0; column < alignmentHints.length; column++) {
+      alignmentHints[column] ??= row.alignmentHints[column] ?? null;
     }
-
-    const divider = cursor < lines.length ? parseBorderlessRule(lines[cursor]!, "─") : null;
-    const hasMatchingDivider = divider !== null && sameBorderlessLayout(layout, divider);
-    const accepted = hasMatchingDivider ? fragments : fragments.slice(0, 1);
-    rows.push(mergeBorderlessFragments(accepted));
-    for (const fragment of accepted) {
-      for (let column = 0; column < alignmentHints.length; column++) {
-        alignmentHints[column] ??= fragment.alignmentHints[column] ?? null;
-      }
-    }
-    end = hasMatchingDivider ? cursor : groupStart;
-    if (!hasMatchingDivider) break;
+    end = cursor;
     cursor++;
-    if (cursor >= lines.length || stripAnsi(lines[cursor]!).trim().length === 0) return null;
   }
+  if (rows.length < 2 || nextHasDivider) return null;
   return {
     end,
     layout,
     rows,
+    dividerBefore,
     alignments: alignmentHints.map((hint) => hint ?? "left"),
   };
 }
@@ -735,16 +708,26 @@ function wrapPlainCell(text: string, width: number): string[] {
 
   const output: string[] = [];
   let current = "";
-  for (const word of text.trim().split(/\s+/)) {
-    if (current.length > 0 && visibleWidth(current) + 1 + visibleWidth(word) <= width) {
-      current += ` ${word}`;
+  let pendingWhitespace = "";
+  for (const token of text.split(/(\s+)/).filter(Boolean)) {
+    if (/^\s+$/.test(token)) {
+      pendingWhitespace += token;
+      continue;
+    }
+    const separator = current.length > 0 ? pendingWhitespace : "";
+    if (current.length > 0 && visibleWidth(current + separator + token) <= width) {
+      current += separator + token;
+      pendingWhitespace = "";
       continue;
     }
     if (current.length > 0) {
       output.push(current);
       current = "";
     }
-    const pieces = splitToken(word);
+    // Whitespace at a line break is layout, not cell content. Whitespace that
+    // fits between words is retained byte-for-byte above.
+    pendingWhitespace = "";
+    const pieces = splitToken(token);
     output.push(...pieces.slice(0, -1));
     current = pieces.at(-1) ?? "";
   }
@@ -765,11 +748,11 @@ function reflowBorderlessTable(block: BorderlessTableBlock, width: number): stri
   // two-space gutter. The source indent sits outside that table geometry.
   const overhead = block.layout.indentWidth + 2 * ncols + 2 * (ncols - 1);
   const avail = width - overhead;
-  if (avail < ncols * MIN_CELL_WIDTH) return null;
+  if (avail < ncols * MIN_BORDERLESS_CELL_WIDTH) return null;
   const widths =
     natural.reduce((sum, value) => sum + value, 0) <= avail
       ? natural
-      : shrinkColumnWidths(natural, avail);
+      : shrinkColumnWidths(natural, avail, MIN_BORDERLESS_CELL_WIDTH);
   if (!widths) return null;
 
   const rule = (char: "━" | "─") =>
@@ -800,10 +783,32 @@ function reflowBorderlessTable(block: BorderlessTableBlock, width: number): stri
 
   const output = [...renderRow(block.rows[0]!), rule("━")];
   for (let i = 1; i < block.rows.length; i++) {
-    if (i > 1) output.push(rule("─"));
+    if (block.dividerBefore[i]) output.push(rule("─"));
     output.push(...renderRow(block.rows[i]!));
   }
   return output;
+}
+
+function uniformTerminalAffixes(lines: string[]): { prefix: string; suffix: string } | null {
+  let expected: { prefix: string; suffix: string } | null = null;
+  for (const line of lines) {
+    const plain = stripAnsi(line);
+    const plainStart = line.indexOf(plain);
+    if (plainStart < 0) return null;
+    const affixes = {
+      prefix: line.slice(0, plainStart),
+      suffix: line.slice(plainStart + plain.length),
+    };
+    if (stripAnsi(affixes.prefix + affixes.suffix).length > 0) return null;
+    if (
+      expected &&
+      (affixes.prefix !== expected.prefix || affixes.suffix !== expected.suffix)
+    ) {
+      return null;
+    }
+    expected = affixes;
+  }
+  return expected;
 }
 
 /**
@@ -825,19 +830,28 @@ export function wordWrapLines(text: string, width: number): string[] {
       const block = lines.slice(i, borderless.end + 1);
       if (block.every((candidate) => visibleWidth(candidate) <= width)) {
         result.push(...block);
-      } else if (block.some((candidate) => candidate.includes("\x1b"))) {
-        // Captured tmux panes are plain text. If a caller supplies styled table
-        // rows, parsing through stripAnsi would silently discard CSI/OSC
-        // metadata. Preserve those bytes and use viewport clipping instead of
-        // attempting a lossy structural reflow.
-        result.push(...block.map((candidate) => truncateToWidth(candidate, width, "")));
       } else {
         const reflowed = reflowBorderlessTable(borderless, width);
         if (reflowed) {
-          result.push(...reflowed);
+          const hasTerminalMetadata = block.some((candidate) => candidate.includes("\x1b"));
+          const affixes = hasTerminalMetadata ? uniformTerminalAffixes(block) : null;
+          if (!hasTerminalMetadata || affixes) {
+            result.push(
+              ...reflowed.map((candidate) =>
+                affixes ? affixes.prefix + candidate + affixes.suffix : candidate,
+              ),
+            );
+          } else {
+            // Inline styling cannot be reassigned to newly reflowed cells
+            // without changing its semantic range. Preserve the original data
+            // and metadata through the ordinary ANSI-aware wrapper instead.
+            for (const candidate of block) {
+              result.push(...wordWrapSingleLine(candidate, width));
+            }
+          }
         } else {
           for (const candidate of block) {
-            result.push(...wordWrapSingleLine(candidate, width));
+            result.push(truncateToWidth(candidate, width, ""));
           }
         }
       }

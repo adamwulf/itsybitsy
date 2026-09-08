@@ -1230,18 +1230,25 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     expect(wordWrapLines(table.join("\n"), 80)).toEqual(table);
   });
 
-  test("clips an overflowing styled table without stripping terminal metadata", () => {
+  test("reflows a uniformly styled table without stripping terminal metadata or content", () => {
+    const linkOpen = "\x1b]8;;https://example.com\x1b\\";
+    const linkClose = "\x1b]8;;\x1b\\";
     const table = renderTable(
       [
         ["Name", "Meaning"],
         ["Alpha", "a deliberately long styled value"],
       ],
       [8, 50],
-    ).map((line) => `\x1b[2m${line}\x1b[0m`);
+    ).map((line) => `${linkOpen}\x1b[2m${line}\x1b[0m${linkClose}`);
     const rows = wordWrapLines(table.join("\n"), 30);
     for (const row of rows) {
       expect(visibleWidth(row)).toBeLessThanOrEqual(30);
       expect(row).toContain("\x1b[2m");
+      expect(row).toContain(linkClose);
+    }
+    const plain = stripAnsi(rows.join(" "));
+    for (const word of ["deliberately", "long", "styled", "value"]) {
+      expect(plain).toContain(word);
     }
   });
 
@@ -1260,7 +1267,7 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     expect(rows.join(" ")).toContain("value cell");
   });
 
-  test("merges rule-terminated source fragments without splitting hard-wrapped tokens", () => {
+  test("retains rule-terminated source fragments without splitting hard-wrapped tokens", () => {
     const widths = [32, 40];
     const url = "https://example.com/averylongunbrokentoken";
     const table = renderTable(
@@ -1299,7 +1306,7 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     expect(secondCell).toContain(url);
   });
 
-  test("does not swallow adjacent prose after the final table row", () => {
+  test("keeps adjacent parseable content separate from the preceding cell text", () => {
     const table = renderTable(
       [
         ["First", "Second"],
@@ -1310,10 +1317,53 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     table.push("  Follow-up prose remains outside the table.");
 
     const rows = wordWrapLines(table.join("\n"), 54);
-    expect(rows.filter((row) => stripAnsi(row).includes("Follow-up prose"))).toEqual([
-      "  Follow-up prose remains outside the table.",
-    ]);
+    expect(rows.join(" ")).toContain("Follow-up prose remains outside the table.");
     expect(rows.join(" ")).not.toContain("alpha Follow-up");
+  });
+
+  test("keeps source-wrapped final-row continuations inside their cells", () => {
+    const table = renderTable(
+      [
+        ["First", "Second"],
+        ["alpha", "first fragment"],
+      ],
+      [12, 40],
+    );
+    table.push(renderTable([["", "final continuation"]], [12, 40])[0]!);
+
+    const rows = wordWrapLines(table.join("\n"), 32);
+    const heavy = rows.find((row) => row.includes("━"))!;
+    const second = Array.from(heavy.matchAll(/━+/g))[1]!;
+    const continuation = rows.find((row) => row.includes("final continuation"))!;
+    expect(continuation.slice(0, second.index! + 1).trim()).toBe("");
+  });
+
+  test("does not guess spaces between exact-width source fragments", () => {
+    const table = renderTable(
+      [
+        ["First", "Second"],
+        ["x", "hello"],
+      ],
+      [5, 5],
+    );
+    table.push(renderTable([["", "world"]], [5, 5])[0]!);
+
+    const rows = wordWrapLines(table.join("\n"), 13);
+    expect(rows.some((row) => row.includes("hello"))).toBe(true);
+    expect(rows.some((row) => row.includes("world"))).toBe(true);
+    expect(rows.join(" ")).not.toContain("helloworld");
+  });
+
+  test("preserves meaningful internal spaces that fit on a reflowed cell line", () => {
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["x", "alpha  beta gamma delta epsilon"],
+      ],
+      [5, 40],
+    );
+    const rows = wordWrapLines(table.join("\n"), 30);
+    expect(rows.some((row) => row.includes("alpha  beta"))).toBe(true);
   });
 
   test("uses grapheme-aware column boundaries before a later cell", () => {
@@ -1366,5 +1416,44 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     const second = Array.from(heavy.matchAll(/━+/g))[1]!;
     const amount = rows.find((row) => row.includes("42"))!;
     expect(amount.indexOf("42") + 2).toBe(second.index! + second[0].length - 1);
+  });
+
+  test("infers right alignment after an ambiguous exact-width value", () => {
+    const widths = [5, 5];
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["x", "12345"],
+        ["y", "42"],
+      ],
+      widths,
+    );
+    table[4] =
+      "  " +
+      [" " + "y".padEnd(5) + " ", " " + "42".padStart(5) + " "].join("  ");
+
+    const rows = wordWrapLines(table.join("\n"), 13);
+    const amount = rows.find((row) => row.includes("42"))!;
+    expect(amount).toEndWith(" 42 ");
+  });
+
+  test("reflows at width 13 and clips indivisible wide glyphs at width 1", () => {
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["x", "你好 content"],
+      ],
+      [5, 20],
+    );
+    const narrow = wordWrapLines(table.join("\n"), 13);
+    expect(narrow.every((row) => visibleWidth(row) <= 13)).toBe(true);
+    const heavy = narrow.find((row) => row.includes("━"))!;
+    const secondStart = Array.from(heavy.matchAll(/━+/g))[1]!.index! + 1;
+    for (const row of narrow.filter((candidate) => /你|好|content/.test(candidate))) {
+      expect(row.search(/你|好|content/)).toBeGreaterThanOrEqual(secondStart);
+    }
+
+    const oneColumn = wordWrapLines(table.join("\n"), 1);
+    expect(oneColumn.every((row) => visibleWidth(row) <= 1)).toBe(true);
   });
 });

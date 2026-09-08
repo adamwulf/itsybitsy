@@ -2,11 +2,11 @@
 
 **Configuration update (2026-09-08):** sandboxing now defaults to true and accepts per-type boolean overrides (`sandbox: false` or `sandbox.enabled: false`). The most specific explicit setting wins through layers and inheritance; omission inherits. See [the type guide](agent-types/README.md). Enabled-mode failures still stop launch. Explicit false skips the itsybitsy kernel wrapper, proxy, and kernel-denial collector; hooks continue enforcing paths and native CLI sandbox/approval protections remain active. YOLO / permission-bypass flags are used only with the itsybitsy kernel sandbox enabled, at both spawn and resume. The global `@system` coordinator remains unsandboxed.
 
-The rollout evidence below records the earlier mandatory-only policy. Its instructions to remove enablement keys, its retired-key preflight diagnostics, and its claims that disabling is unavailable are superseded by the current contract. Keep intentional overrides; `ib init-types --check` compares list floors, and `ib sandbox refresh` applies current type policy to existing agents in either direction. The remaining enabled-mode validation evidence and known collection limits continue to apply.
+The configuration and installation instructions below describe the current default-enabled policy. The later validation ledger records enabled-mode evidence from the earlier rollout; those results do not claim that the new override paths have been installed or live-tested.
 
-## Implementation and validation status
+## Earlier enabled-mode implementation and validation evidence
 
-The mandatory policy, repository-agent lifecycle, and kernel sandbox-denial
+The earlier mandatory policy, repository-agent lifecycle, and kernel sandbox-denial
 collector are integrated on `agent/sandbox-denial-logs`. The implementation tip
 reviewed by two independent researcher agents is
 `1197f65b868e2e14b3892b0cbd337464a439dd57`; both reviewers approved that
@@ -30,19 +30,19 @@ kernel-sandboxed.
 
 - `paths.allowRead`, `paths.allowWrite`, and `paths.deny` remain the authored filesystem rules. Write access includes read access. Denies take precedence.
 - `sandbox.rawAllow` and `sandbox.domains` remain configurable. Their lists and the path lists combine through the existing inheritance rules.
-- `sandbox.enabled` is retired, regardless of its value. Remove the key from every agent-type file that contains it, including custom types. An omitted sandbox block never authorizes an unsandboxed repository-agent launch.
-- Internal metadata can still contain `sandbox.enabled` to identify legacy agents and preserve sealed-record compatibility. Newly resolved policy is always enabled; old disabled metadata must be migrated before resume.
+- Agent types accept boolean `sandbox: true` / `sandbox: false` or object-form `sandbox.enabled`. The most specific explicit value wins across applicable layers and ancestors. Omission inherits; final resolution defaults true.
+- Spawn freezes the resolved boolean in metadata. Resume preserves explicit false and treats omitted enablement as true; enabled policy requires valid frozen paths and sealing. Use operator `ib sandbox refresh` to apply edited type settings in either direction.
 - Required runtime paths are added for the worktree, agent bookkeeping, and the selected CLI. The agy state directory is an agy-only runtime root.
-- If the platform, profile, or proxy cannot support the sandbox, repository-agent launch fails. There is no unsandboxed fallback for those agents. The deferred global coordinator is an explicit rollout exception, not a configurable toggle.
+- If an enabled policy cannot establish its platform, profile, or proxy, launch fails. Explicit false skips the itsybitsy wrapper and bypass flags while native CLI protections and hooks remain active. The global coordinator remains separately unsandboxed.
 
 ## Prepare the existing installation
 
 1. Back up the live agent-type files under `~/.itsybitsy/agent-types` before editing them.
-2. Remove `sandbox.enabled` from both built-in and custom type files. Keep their paths, domains, raw rules, and other settings.
-3. Compare the live files with the candidate using `./ib init-types --check`. Reconcile missing entries from `docs/agent-types/_all.md`, preserving intentional type-specific restrictions. The preflight reports retired keys in custom files too. A zero exit is required before installation, but does not replace type validation or a live launch test.
+2. Keep intentional enablement overrides, paths, domains, raw rules, and other settings. Add a boolean override only where the inherited/default value should change.
+3. Compare the live files with the candidate using `./ib init-types --check`. Reconcile missing entries from `docs/agent-types/_all.md`, preserving intentional type-specific restrictions. The preflight compares path/rule/domain list floors; valid enablement overrides are not errors. A zero exit is required before installation, but does not replace type validation or a live launch test.
 4. Run `./ib list-types` and resolve configuration errors. `ib init-types` alone does not update existing customized files.
 
-Do not replace a customized type wholesale to remove a single retired key. Do not restore the old toggle as a workaround for a denied path; correct the applicable path or domain rule.
+Preserve customized types when reconciling list floors. A path or domain denial can be addressed in its corresponding policy list; disabling the outer sandbox deliberately switches to native CLI protections plus hooks.
 
 ## Validate the candidate pilot
 
@@ -68,30 +68,30 @@ Test a repository worker launch with the candidate and matching helper binary. B
 - Resume, refresh, respawn, and rehire retain sandbox enforcement and clean up their proxies.
 - Each deployed CLI and a per-repository coordinator work under their profiles. The earlier Claude-only boot probe does not prove Codex, fugu, agy, or coordinator integration.
 
-This is a candidate-binary pilot, not a per-type enabled flag. All repository agents started by the candidate follow the mandatory policy; the global coordinator remains outside this stage.
+Also exercise explicit false on each deployed CLI: confirm the absence of the itsybitsy wrapper and bypass flags, active native protections and hooks, and successful spawn/resume/rehire. Test refresh in both directions from an unsandboxed operator session. The global coordinator remains outside this stage.
 
 ## Install and migrate running agents
 
 Merging source does not replace the installed binary or change a running process. A Seatbelt profile takes effect at launch and is inherited by descendants.
 
 1. Install the reviewed candidate `ib` onto PATH and restart `ib watch` after the configuration preflight and pilot checks. Ensure lifecycle and proxy helpers resolve to the same candidate version.
-2. Run `ib sandbox refresh --all` in each registered repository. The command covers the current repository only. It re-derives policy from the current Markdown, updates sealed records, and restarts running agents; stopped agents use the refreshed policy on their next resume.
+2. Run `ib sandbox refresh --all` in each registered repository. The command covers the current repository only. It re-derives policy from the current Markdown, updates sealed records as needed, and resumes agents with the refreshed policy. Running agents are paused before policy changes.
 3. Handle every reported failure and coordinator skip. Per-repository coordinators use their reset path (`ib resume <coordinator-id>` or dashboard R). Reset can also tear down their children, so schedule it before refreshing those children.
-4. Verify remaining live repository agents were launched by the candidate under a kernel profile. A new value in Markdown or metadata is not proof that an old process changed.
+4. Verify each live repository agent was launched by the candidate with its resolved kernel/native protection mode. A new value in Markdown or metadata is not proof that an old process changed.
 
 Restarting the global `@system` coordinator does not sandbox it in this version. Keep that exception visible while observing the repository-agent rollout; global coordinator confinement will require its own reviewed change and migration.
 
 ## Failure recovery and limits
 
-Keep the last working binary and the configuration backup until rollout is verified. The new binary has no repository-agent disable switch. For a failed launch, correct its missing runtime path, domain, or profile rule and retry the supported refresh or restart path. Reverting the entire installation to an older binary restores that version of enforcement; it must not be described as keeping mandatory sandboxing.
+Keep the last working binary and configuration backup until rollout is verified. Enabled setup failures never silently disable the sandbox. Correct the reported configuration or deliberately change the type override, then run the supported operator refresh or restart path. Refresh reports transition/rollback failures; retry the documented recovery after resolving the underlying error. Reverting the installed binary restores that version of enforcement.
 
 The hook scanner provides early errors and denial-log entries for recognizable operations. It is not a complete shell parser. The kernel-denial collector adds reports whose process identity and lifetime can be established; absent or unattributable kernel-only events still may not appear in DENIALS.
 
-Spawning agents retain access to the tmux server for lifecycle operations. This is an existing escape from process confinement: they can ask that server to run commands outside their inherited profile. Mandatory wrapping does not close that boundary. Non-spawners have the corresponding socket denied.
+Spawning agents retain access to the tmux server for lifecycle operations. This is an existing escape from process confinement: they can ask that server to run commands outside their inherited profile. Kernel wrapping does not close that boundary. Non-spawners have the corresponding socket denied.
 
 The agy runtime root is shared state under the user home. Granting it only to agy avoids extending that access to other CLIs; it does not provide per-agent isolation between agy instances.
 
-## Next phase: collect kernel sandbox denials
+## Historical enabled-mode collector validation ledger
 
 **Implemented and reviewed at production-source tip
 `1197f65b868e2e14b3892b0cbd337464a439dd57`; live host validation completed for
@@ -377,6 +377,6 @@ Resume the separate system-coordinator implementation after the repository-agent
 
 ## Historical context
 
-The earlier Phase A implementation supplied the profile generator, proxy, frozen policies, and seals. Phase B shared the path resolver between hooks and kernel profiles. Their opt-in shipping ledger remains in Git history. This staged mandatory rollout supersedes the former instruction to set or unset `sandbox.enabled` and the former assumption that agy must run unwrapped.
+The earlier Phase A implementation supplied the profile generator, proxy, frozen policies, and seals. Phase B shared the path resolver between hooks and kernel profiles. Their opt-in shipping ledger remains in Git history. That mandatory-only milestone has since been superseded by the current default-enabled override policy described above.
 
-The earlier Phase A implementation supplied the profile generator, proxy, frozen policies, and seals. Phase B shared the path resolver between hooks and kernel profiles. Their opt-in shipping ledger remains in Git history. The current mandatory rollout supersedes the former instruction to set or unset `sandbox.enabled` and the former assumption that agy must run unwrapped.
+The earlier Phase A implementation supplied the profile generator, proxy, frozen policies, and seals. Phase B shared the path resolver between hooks and kernel profiles. Their opt-in shipping ledger remains in Git history. That mandatory-only milestone has since been superseded by the current default-enabled override policy described above.

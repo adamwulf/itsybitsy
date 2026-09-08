@@ -6,6 +6,10 @@ An explicit false skips itsybitsy Seatbelt, the egress proxy, and kernel-denial 
 
 This contract supersedes the mandatory-only and earlier opt-in/OR-merge contracts recorded in the historical sections below, including retired-key diagnostics and rejection of every disabled resume. Existing path precedence, enabled-policy sealing, and the documented spawner tmux limitation still apply. See [the type guide](docs/agent-types/README.md) for authoring and [the rollout guide](docs/SANDBOX-ROLLOUT.md) for enabled-mode validation evidence.
 
+# Historical appendix: earlier sandbox designs
+
+The remainder of this document preserves earlier design decisions, migration instructions, and implementation ledgers for reference. It is not the current configuration or launch contract. In particular, old opt-in defaults, OR-merge rules, mandatory-only wrapping, and retired-toggle instructions must not be applied. Use the current contract above, SPEC.md, and the agent-type guide for current behavior.
+
 **Design history:** initial planning 2026-07-17; opt-in implementation 2026-07-19.
 **Related:** SPEC.md sections 2, 6, 7, and 18.
 

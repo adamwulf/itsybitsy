@@ -2052,6 +2052,9 @@ export async function resumeAgent(
           ? `${claudeArgs} --dangerously-skip-permissions`
           : "--dangerously-skip-permissions";
       }
+      if (preparedResumeSandbox === null) {
+        claudeArgs = claudeArgs ? `${claudeArgs} --permission-mode default` : "--permission-mode default";
+      }
 
       // Rehire resumes the archived coordinator session rather than using the
       // ordinary dashboard reset behavior. Coordinator hooks/permissions live
@@ -6318,6 +6321,18 @@ export async function newAgent(
       await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED (seal): ${message}`);
       await cleanupOnFailure();
       return { ok: false, exitCode: 1, stdout: "", stderr: `Error: sandbox refused: ${message}` };
+    }
+  }
+  else {
+    // A disabled same-ID spawn must not inherit an orphaned enabled seal from
+    // an interrupted prior lifecycle. Remove it before exposing the new meta;
+    // failure aborts the spawn rather than stranding a mismatched pair.
+    try {
+      const staleSeal = await readSealRecord(await getRepoId(rootRepoPath), id);
+      if (staleSeal) await deleteSealRecord(await getRepoId(rootRepoPath), id);
+    } catch (err) {
+      await cleanupOnFailure();
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not remove stale sandbox seal: ${err instanceof Error ? err.message : String(err)}` };
     }
   }
 

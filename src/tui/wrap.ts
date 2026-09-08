@@ -455,10 +455,215 @@ export function reflowTable(lines: string[], width: number): string[] | null {
   return out;
 }
 
+// ── Borderless Codex table reflow ───────────────────────────────────────────
+//
+// Codex renders markdown tables without an outer frame. Each column is marked
+// by a heavy header-rule segment and logical body rows are separated by matching
+// light-rule segments:
+//
+//    Header A      Header B
+//   ━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━
+//    short         long cell text
+//   ───────────  ─────────────────
+//
+// At the pinned tmux width, those rows are much wider than a dashboard pane.
+// Treating a row as prose moves wrapped text back to column zero. The helpers
+// below recover the column geometry from the rule, then reuse the same fair
+// width allocation as framed tables so every cell wraps within its own column.
+
+interface BorderlessRuleLayout {
+  indent: string;
+  indentWidth: number;
+  widths: number[];
+  starts: number[];
+  totalWidth: number;
+}
+
+interface BorderlessTableBlock {
+  end: number;
+  layout: BorderlessRuleLayout;
+  rows: string[][];
+}
+
+function parseBorderlessRule(line: string, ruleChar: "━" | "─"): BorderlessRuleLayout | null {
+  const plain = stripAnsi(line);
+  const indent = /^ */.exec(plain)![0];
+  const body = plain.slice(indent.length).trimEnd();
+  const segments = body.split("  ");
+  if (
+    segments.length < 2 ||
+    segments.some((segment) => segment.length < 3 || Array.from(segment).some((c) => c !== ruleChar))
+  ) {
+    return null;
+  }
+
+  const indentWidth = visibleWidth(indent);
+  const widths = segments.map((segment) => visibleWidth(segment));
+  const starts: number[] = [];
+  let column = indentWidth;
+  for (const segmentWidth of widths) {
+    starts.push(column);
+    column += segmentWidth + 2;
+  }
+  return {
+    indent,
+    indentWidth,
+    widths,
+    starts,
+    totalWidth: column - 2,
+  };
+}
+
+function sameBorderlessLayout(
+  left: BorderlessRuleLayout,
+  right: BorderlessRuleLayout,
+): boolean {
+  return (
+    left.indent === right.indent &&
+    left.widths.length === right.widths.length &&
+    left.widths.every((width, i) => width === right.widths[i])
+  );
+}
+
+/** Slice ANSI-free text by terminal columns rather than UTF-16 indices. */
+function sliceVisibleColumns(text: string, start: number, end: number): string {
+  let column = 0;
+  let result = "";
+  let includedPrevious = false;
+  for (const char of Array.from(text)) {
+    const charWidth = visibleWidth(char);
+    const include: boolean =
+      charWidth === 0
+        ? includedPrevious
+        : column < end && column + charWidth > start;
+    if (include) result += char;
+    includedPrevious = include;
+    column += charWidth;
+  }
+  return result;
+}
+
+function parseBorderlessCells(line: string, layout: BorderlessRuleLayout): string[] | null {
+  const plain = stripAnsi(line);
+  const leading = sliceVisibleColumns(plain, 0, layout.indentWidth);
+  const outside = sliceVisibleColumns(plain, layout.totalWidth, visibleWidth(plain));
+  if (leading.trim().length > 0 || outside.trim().length > 0) return null;
+
+  const cells: string[] = [];
+  for (let i = 0; i < layout.widths.length; i++) {
+    const start = layout.starts[i]!;
+    const segmentWidth = layout.widths[i]!;
+    const leftPad = sliceVisibleColumns(plain, start, start + 1);
+    const rightPad = sliceVisibleColumns(plain, start + segmentWidth - 1, start + segmentWidth);
+    const gap =
+      i + 1 < layout.widths.length
+        ? sliceVisibleColumns(plain, start + segmentWidth, layout.starts[i + 1]!)
+        : "";
+    if (leftPad.trim().length > 0 || rightPad.trim().length > 0 || gap.trim().length > 0) {
+      return null;
+    }
+    cells.push(sliceVisibleColumns(plain, start + 1, start + segmentWidth - 1).trim());
+  }
+  return cells.some((cell) => cell.length > 0) ? cells : null;
+}
+
+/**
+ * Match a complete borderless Codex table beginning at its header row. The
+ * heavy rule is the unambiguous anchor; matching light rules split body rows.
+ * Adjacent content lines between rules are source fragments of the same logical
+ * row and are merged column-by-column before reflow.
+ */
+function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTableBlock | null {
+  if (start + 2 >= lines.length) return null;
+  const layout = parseBorderlessRule(lines[start + 1]!, "━");
+  if (!layout) return null;
+  const header = parseBorderlessCells(lines[start]!, layout);
+  if (!header) return null;
+
+  const groups: string[][][] = [];
+  let fragments: string[][] = [];
+  let i = start + 2;
+  for (; i < lines.length; i++) {
+    if (stripAnsi(lines[i]!).trim().length === 0) break;
+    const divider = parseBorderlessRule(lines[i]!, "─");
+    if (divider && sameBorderlessLayout(layout, divider)) {
+      if (fragments.length === 0) return null;
+      groups.push(fragments);
+      fragments = [];
+      continue;
+    }
+    const cells = parseBorderlessCells(lines[i]!, layout);
+    if (!cells) break;
+    fragments.push(cells);
+  }
+  if (fragments.length > 0) groups.push(fragments);
+  else if (groups.length > 0) return null; // A divider cannot terminate the table.
+  if (groups.length === 0) return null;
+
+  const rows = [header];
+  for (const group of groups) {
+    rows.push(
+      header.map((_, column) =>
+        group
+          .map((fragment) => fragment[column]!)
+          .filter((cell) => cell.length > 0)
+          .join(" "),
+      ),
+    );
+  }
+  return { end: i - 1, layout, rows };
+}
+
+function reflowBorderlessTable(block: BorderlessTableBlock, width: number): string[] | null {
+  const ncols = block.layout.widths.length;
+  const natural: number[] = new Array(ncols).fill(1);
+  for (const row of block.rows) {
+    for (let i = 0; i < ncols; i++) {
+      natural[i] = Math.max(natural[i]!, visibleWidth(row[i]!));
+    }
+  }
+
+  // Each column has one space of padding per side; neighboring columns have a
+  // two-space gutter. The source indent sits outside that table geometry.
+  const overhead = block.layout.indentWidth + 2 * ncols + 2 * (ncols - 1);
+  const avail = width - overhead;
+  if (avail < ncols * MIN_CELL_WIDTH) return null;
+  const widths =
+    natural.reduce((sum, value) => sum + value, 0) <= avail
+      ? natural
+      : shrinkColumnWidths(natural, avail);
+  if (!widths) return null;
+
+  const rule = (char: "━" | "─") =>
+    block.layout.indent + widths.map((cellWidth) => char.repeat(cellWidth + 2)).join("  ");
+  const renderRow = (cells: string[]): string[] => {
+    const cellLines = cells.map((cell, i) =>
+      cell.length === 0 ? [""] : wordWrapSingleLine(cell, widths[i]!),
+    );
+    const height = Math.max(...cellLines.map((cell) => cell.length));
+    const rendered: string[] = [];
+    for (let row = 0; row < height; row++) {
+      const columns = cellLines.map((cell, i) => {
+        const text = cell[row] ?? "";
+        return " " + text + " ".repeat(widths[i]! - visibleWidth(text) + 1);
+      });
+      rendered.push(block.layout.indent + columns.join("  "));
+    }
+    return rendered;
+  };
+
+  const output = [...renderRow(block.rows[0]!), rule("━")];
+  for (let i = 1; i < block.rows.length; i++) {
+    if (i > 1) output.push(rule("─"));
+    output.push(...renderRow(block.rows[i]!));
+  }
+  return output;
+}
+
 /**
  * Word-wrap all lines in a multi-line string.
- * Splits on newlines first, then word-wraps each line — except table frames,
- * which reflow as a block (see "Table reflow" above).
+ * Splits on newlines first, then word-wraps each line — except framed and
+ * borderless tables, which reflow as blocks (see the table sections above).
  */
 export function wordWrapLines(text: string, width: number): string[] {
   const lines = text.split("\n");
@@ -466,6 +671,27 @@ export function wordWrapLines(text: string, width: number): string[] {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i]!;
+    // A borderless Codex markdown table is anchored by the segmented heavy
+    // rule immediately after its header. Reflow the whole block so continuation
+    // text stays inside its originating cell instead of returning to column 0.
+    const borderless = matchBorderlessTableBlock(lines, i);
+    if (borderless) {
+      const block = lines.slice(i, borderless.end + 1);
+      if (block.every((candidate) => visibleWidth(candidate) <= width)) {
+        result.push(...block);
+      } else {
+        const reflowed = reflowBorderlessTable(borderless, width);
+        if (reflowed) {
+          result.push(...reflowed);
+        } else {
+          for (const candidate of block) {
+            result.push(...wordWrapSingleLine(candidate, width));
+          }
+        }
+      }
+      i = borderless.end + 1;
+      continue;
+    }
     // Cheap pre-filter: only a line containing ┌ can open a table frame.
     if (line.includes("┌")) {
       const end = matchTableBlockEnd(lines, i);

@@ -1154,3 +1154,116 @@ describe("table reflow (┌┬┐ frames re-laid out at pane width)", () => {
     });
   });
 });
+
+describe("borderless Codex table reflow (per-cell wrapping)", () => {
+  function renderTable(rows: string[][], widths: number[]): string[] {
+    const rule = (char: "━" | "─") =>
+      "  " + widths.map((width) => char.repeat(width + 2)).join("  ");
+    const row = (cells: string[]) =>
+      (
+        "  " +
+        cells
+          .map(
+            (cell, i) =>
+              " " + cell + " ".repeat(Math.max(0, widths[i]! - visibleWidth(cell)) + 1),
+          )
+          .join("  ")
+      ).trimEnd();
+    const output = [row(rows[0]!), rule("━")];
+    for (let i = 1; i < rows.length; i++) {
+      if (i > 1) output.push(rule("─"));
+      output.push(row(rows[i]!));
+    }
+    return output;
+  }
+
+  const realistic = renderTable(
+    [
+      ["", "AllumeServices → AllumeSync → AllumeModel", "AllumeSync → AllumeServices → AllumeModel"],
+      [
+        "Smaller services use",
+        "APIs and types owned by sync",
+        "Protocols owned by the consuming services",
+      ],
+      [
+        "Boundary design",
+        "Simpler initially; follows existing concrete references",
+        "More work initially; forces us to specify what each service actually needs",
+      ],
+      [
+        "Main risk",
+        "A broad sync API becomes the shared interface for everything",
+        "One enormous sync protocol recreates the same coupling behind an interface",
+      ],
+    ],
+    [22, 62, 76],
+  );
+
+  test("wraps each cell independently and keeps continuations in their column", () => {
+    const width = 78;
+    const rows = wordWrapLines(realistic.join("\n"), width);
+    for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(width);
+
+    const heavy = rows.find((row) => /^ *━+(?:  ━+)+$/.test(stripAnsi(row)))!;
+    const segments = Array.from(stripAnsi(heavy).matchAll(/━+/g));
+    expect(segments.length).toBe(3);
+    const thirdCellStart = segments[2]!.index! + 1;
+    const continuation = rows.find((row) => stripAnsi(row).includes("what each service"))!;
+    const plainContinuation = stripAnsi(continuation);
+    expect(plainContinuation.indexOf("what each service")).toBe(thirdCellStart);
+    expect(plainContinuation.slice(thirdCellStart)).toStartWith("what each service");
+
+    const joined = rows.join(" ");
+    for (const word of realistic.join(" ").match(/[A-Za-z]+/g) ?? []) {
+      expect(joined).toContain(word);
+    }
+  });
+
+  test("passes a fitting styled table through byte-identical", () => {
+    const table = renderTable(
+      [
+        ["Name", "Meaning"],
+        ["Alpha", "A short value"],
+      ],
+      [8, 20],
+    ).map((line) => `\x1b[2m${line}\x1b[0m`);
+    expect(wordWrapLines(table.join("\n"), 80)).toEqual(table);
+  });
+
+  test("reflows a one-body-row table and respects wide Unicode cell widths", () => {
+    const table = renderTable(
+      [
+        ["Kind", "Value"],
+        ["Unicode", "你好 🙂 content stays in the value cell when it wraps"],
+      ],
+      [10, 80],
+    );
+    const rows = wordWrapLines(table.join("\n"), 36);
+    for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(36);
+    expect(rows.join(" ")).toContain("你好");
+    expect(rows.join(" ")).toContain("🙂");
+    expect(rows.join(" ")).toContain("value cell");
+  });
+
+  test("merges source-wrapped fragments within each cell before reflow", () => {
+    const widths = [32, 90];
+    const table = renderTable(
+      [
+        ["First", "Second"],
+        ["alpha begins", "bravo begins with enough texte text to make the source table wide"],
+        ["next row", "another value"],
+      ],
+      widths,
+    );
+    const fragment =
+      "  " +
+      [" and alpha ends", " and bravo ends"]
+        .map((cell, i) => cell + " ".repeat(widths[i]! + 2 - visibleWidth(cell)))
+        .join("  ");
+    table.splice(3, 0, fragment);
+
+    const rows = wordWrapLines(table.join("\n"), 70);
+    for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(70);
+    expect(rows.join(" ").replace(/\s+/g, " ")).toContain("alpha begins and alpha ends");
+  });
+});

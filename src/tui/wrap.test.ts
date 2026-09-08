@@ -1339,6 +1339,44 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     expect(continuation.slice(0, second.index! + 1).trim()).toBe("");
   });
 
+  test("accepts a divider-confirmed first-column source continuation", () => {
+    const widths = [20, 40];
+    const table = renderTable(
+      [
+        ["First", "Second"],
+        ["first fragment", "value"],
+        ["next row", "another value"],
+      ],
+      widths,
+    );
+    table.splice(3, 0, renderTable([["final fragment", ""]], widths)[0]!);
+
+    const rows = wordWrapLines(table.join("\n"), 34);
+    expect(rows.join(" ").replace(/\s+/g, " ")).toContain("final fragment");
+    expect(rows.indexOf(rows.find((row) => row.includes("final"))!)).toBeLessThan(
+      rows.indexOf(rows.find((row) => row.includes("─"))!),
+    );
+  });
+
+  test("keeps an EOF-terminated first-column continuation in table geometry", () => {
+    const widths = [50, 12];
+    const table = renderTable(
+      [
+        ["First", "Second"],
+        ["opening fragment", "value"],
+      ],
+      widths,
+    );
+    table.push(renderTable([["final continuation text remains in first cell", ""]], widths)[0]!);
+
+    const rows = wordWrapLines(table.join("\n"), 24);
+    const heavy = rows.find((row) => row.includes("━"))!;
+    const firstStart = heavy.indexOf("━") + 1;
+    for (const row of rows.filter((candidate) => /final|continuation|remains/.test(candidate))) {
+      expect(row.slice(0, firstStart).trim()).toBe("");
+    }
+  });
+
   test("does not guess spaces between exact-width source fragments", () => {
     const table = renderTable(
       [
@@ -1513,6 +1551,27 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
       expect(row).toContain(linkClose);
     }
     expect(linkedRows.map((row) => stripAnsi(row).trim()).join("")).toContain(linkText);
+  });
+
+  test("preserves row-specific OSC-8 wrappers", () => {
+    const linkOpen = "\x1b]8;;https://example.com/body\x1b\\";
+    const linkClose = "\x1b]8;;\x1b\\";
+    const table = renderTable(
+      [
+        ["Name", "Meaning"],
+        ["Alpha", "a long body value that needs several wrapped lines"],
+      ],
+      [10, 60],
+    );
+    table[2] = linkOpen + table[2]! + linkClose;
+
+    const rows = wordWrapLines(table.join("\n"), 24);
+    const body = rows.filter((row) => stripAnsi(row).includes("Alpha") || row.includes(linkOpen));
+    expect(body.length).toBeGreaterThan(1);
+    for (const row of body) {
+      expect(row).toStartWith(linkOpen);
+      expect(row).toEndWith(linkClose);
+    }
   });
 
   test("stacks very narrow tables instead of discarding later columns", () => {

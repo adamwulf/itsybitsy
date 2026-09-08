@@ -483,7 +483,9 @@ interface BorderlessTableBlock {
   end: number;
   layout: BorderlessRuleLayout;
   rows: string[][];
-  dividerBefore: boolean[];
+  rowAffixes: TerminalAffixes[];
+  heavyAffixes: TerminalAffixes;
+  dividerBefore: Array<TerminalAffixes | null>;
   alignments: CellAlignment[];
 }
 
@@ -492,6 +494,12 @@ type CellAlignment = "left" | "center" | "right";
 interface ParsedBorderlessRow {
   cells: string[];
   alignmentHints: Array<CellAlignment | null>;
+  affixes: TerminalAffixes;
+}
+
+interface TerminalAffixes {
+  prefix: string;
+  suffix: string;
 }
 
 const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -572,6 +580,18 @@ function trimTerminalCell(text: string): string {
     .filter((token, index) => token.escape || (index >= first && index <= last))
     .map((token) => token.raw)
     .join("");
+}
+
+function terminalLineAffixes(line: string): TerminalAffixes {
+  const tokens = terminalTokens(line);
+  let firstVisible = 0;
+  while (firstVisible < tokens.length && tokens[firstVisible]!.escape) firstVisible++;
+  let afterLastVisible = tokens.length;
+  while (afterLastVisible > 0 && tokens[afterLastVisible - 1]!.escape) afterLastVisible--;
+  return {
+    prefix: tokens.slice(0, firstVisible).map((token) => token.raw).join(""),
+    suffix: tokens.slice(afterLastVisible).map((token) => token.raw).join(""),
+  };
 }
 
 function parseBorderlessRule(line: string, ruleChar: "━" | "─"): BorderlessRuleLayout | null {
@@ -663,7 +683,9 @@ function parseBorderlessCells(
   line: string,
   layout: BorderlessRuleLayout,
 ): ParsedBorderlessRow | null {
-  const plain = stripAnsi(line);
+  const affixes = terminalLineAffixes(line);
+  const inner = line.slice(affixes.prefix.length, line.length - affixes.suffix.length);
+  const plain = stripAnsi(inner);
   const boundaries = [0, layout.indentWidth, layout.totalWidth, visibleWidth(plain)];
   for (let i = 0; i < layout.widths.length; i++) {
     const start = layout.starts[i]!;
@@ -696,13 +718,13 @@ function parseBorderlessCells(
     }
     const rawCell = slice(start + 1, start + segmentWidth - 1);
     const styledCell = trimTerminalCell(
-      sliceTerminalColumns(line, start + 1, start + segmentWidth - 1),
+      sliceTerminalColumns(inner, start + 1, start + segmentWidth - 1),
     );
     if (stripAnsi(styledCell) !== rawCell.trim()) return null;
     cells.push(styledCell);
     alignmentHints.push(inferCellAlignment(rawCell));
   }
-  return cells.some((cell) => cell.length > 0) ? { cells, alignmentHints } : null;
+  return cells.some((cell) => cell.length > 0) ? { cells, alignmentHints, affixes } : null;
 }
 
 /**
@@ -721,7 +743,9 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
   if (!header) return null;
 
   const rows = [header.cells];
-  const dividerBefore = [false];
+  const rowAffixes = [header.affixes];
+  const heavyAffixes = terminalLineAffixes(lines[start + 1]!);
+  const dividerBefore: Array<TerminalAffixes | null> = [null];
   // A rendered markdown header is commonly left-aligned even when its body
   // column is numeric/right-aligned, so prefer the first body-row signal over
   // a merely left-aligned header. Explicit centered/right headers still win.
@@ -733,28 +757,41 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
   let end = start + 1;
   let cursor = start + 2;
   let nextHasDivider = false;
+  let nextDividerAffixes: TerminalAffixes | null = null;
   while (cursor < lines.length) {
     if (stripAnsi(lines[cursor]!).trim().length === 0) break;
     const divider = parseBorderlessRule(lines[cursor]!, "─");
     if (divider && sameBorderlessLayout(layout, divider)) {
       if (rows.length === 1 || nextHasDivider) return null;
       nextHasDivider = true;
+      nextDividerAffixes = terminalLineAffixes(lines[cursor]!);
       end = cursor;
       cursor++;
       continue;
     }
     const row = parseBorderlessCells(lines[cursor]!, layout);
     if (!row) break;
+    const onlyFirstColumn = row.cells
+      .slice(1)
+      .every((cell) => stripAnsi(cell).trim().length === 0);
+    const followingDivider =
+      cursor + 1 < lines.length ? parseBorderlessRule(lines[cursor + 1]!, "─") : null;
+    const followingEndsBlock =
+      cursor + 1 >= lines.length || stripAnsi(lines[cursor + 1]!).trim().length === 0;
     if (
       rows.length > 1 &&
       !nextHasDivider &&
-      row.cells.slice(1).every((cell) => stripAnsi(cell).trim().length === 0)
+      onlyFirstColumn &&
+      !followingEndsBlock &&
+      (!followingDivider || !sameBorderlessLayout(layout, followingDivider))
     ) {
       break;
     }
     rows.push(row.cells);
-    dividerBefore.push(nextHasDivider);
+    rowAffixes.push(row.affixes);
+    dividerBefore.push(nextHasDivider ? nextDividerAffixes : null);
     nextHasDivider = false;
+    nextDividerAffixes = null;
     for (let column = 0; column < alignmentHints.length; column++) {
       const hint = row.alignmentHints[column];
       if (hint) alignmentHints[column]!.add(hint);
@@ -767,6 +804,8 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
     end,
     layout,
     rows,
+    rowAffixes,
+    heavyAffixes,
     dividerBefore,
     alignments: alignmentHints.map((hints) =>
       hints.size === 1 ? hints.values().next().value! : "left",
@@ -895,18 +934,21 @@ function allocateBorderlessWidths(
 function stackBorderlessTable(block: BorderlessTableBlock, width: number): string[] | null {
   if (width <= 0) return null;
   const output: string[] = [];
-  const pushCell = (cell: string) => {
+  const decorate = (line: string, affixes: TerminalAffixes) =>
+    affixes.prefix + line + affixes.suffix;
+  const pushCell = (cell: string, affixes: TerminalAffixes) => {
     if (visibleWidth(cell) === 0) return;
     for (const line of wrapStyledCell(cell, width)) {
-      output.push(
-        visibleWidth(line) <= width ? line : truncateToWidth(line, width, ""),
-      );
+      const bounded = visibleWidth(line) <= width ? line : truncateToWidth(line, width, "");
+      output.push(decorate(bounded, affixes));
     }
   };
   for (let i = 0; i < block.rows.length; i++) {
-    if (i === 1) output.push("━".repeat(width));
-    else if (block.dividerBefore[i]) output.push("─".repeat(width));
-    for (const cell of block.rows[i]!) pushCell(cell);
+    if (i === 1) output.push(decorate("━".repeat(width), block.heavyAffixes));
+    else if (block.dividerBefore[i]) {
+      output.push(decorate("─".repeat(width), block.dividerBefore[i]!));
+    }
+    for (const cell of block.rows[i]!) pushCell(cell, block.rowAffixes[i]!);
   }
   return output;
 }
@@ -939,7 +981,9 @@ function reflowBorderlessTable(block: BorderlessTableBlock, width: number): stri
 
   const rule = (char: "━" | "─") =>
     block.layout.indent + widths.map((cellWidth) => char.repeat(cellWidth + 2)).join("  ");
-  const renderRow = (cells: string[]): string[] => {
+  const decorate = (line: string, affixes: TerminalAffixes) =>
+    affixes.prefix + line + affixes.suffix;
+  const renderRow = (cells: string[], affixes: TerminalAffixes): string[] => {
     const cellLines = cells.map((cell, i) => wrapStyledCell(cell, widths[i]!));
     const height = Math.max(...cellLines.map((cell) => cell.length));
     const rendered: string[] = [];
@@ -956,39 +1000,22 @@ function reflowBorderlessTable(block: BorderlessTableBlock, width: number): stri
               : 0;
         return " " + " ".repeat(left) + text + " ".repeat(extra - left + 1);
       });
-      rendered.push(block.layout.indent + columns.join("  "));
+      rendered.push(decorate(block.layout.indent + columns.join("  "), affixes));
     }
     return rendered;
   };
 
-  const output = [...renderRow(block.rows[0]!), rule("━")];
+  const output = [
+    ...renderRow(block.rows[0]!, block.rowAffixes[0]!),
+    decorate(rule("━"), block.heavyAffixes),
+  ];
   for (let i = 1; i < block.rows.length; i++) {
-    if (block.dividerBefore[i]) output.push(rule("─"));
-    output.push(...renderRow(block.rows[i]!));
+    if (block.dividerBefore[i]) {
+      output.push(decorate(rule("─"), block.dividerBefore[i]!));
+    }
+    output.push(...renderRow(block.rows[i]!, block.rowAffixes[i]!));
   }
   return output;
-}
-
-function uniformTerminalAffixes(lines: string[]): { prefix: string; suffix: string } | null {
-  let expected: { prefix: string; suffix: string } | null = null;
-  for (const line of lines) {
-    const plain = stripAnsi(line);
-    const plainStart = line.indexOf(plain);
-    if (plainStart < 0) return null;
-    const affixes = {
-      prefix: line.slice(0, plainStart),
-      suffix: line.slice(plainStart + plain.length),
-    };
-    if (stripAnsi(affixes.prefix + affixes.suffix).length > 0) return null;
-    if (
-      expected &&
-      (affixes.prefix !== expected.prefix || affixes.suffix !== expected.suffix)
-    ) {
-      return null;
-    }
-    expected = affixes;
-  }
-  return expected;
 }
 
 /**
@@ -1014,13 +1041,7 @@ export function wordWrapLines(text: string, width: number): string[] {
       } else {
         const reflowed = reflowBorderlessTable(borderless, width);
         if (reflowed) {
-          const hasTerminalMetadata = block.some((candidate) => candidate.includes("\x1b"));
-          const affixes = hasTerminalMetadata ? uniformTerminalAffixes(block) : null;
-          result.push(
-            ...reflowed.map((candidate) =>
-              affixes ? affixes.prefix + candidate + affixes.suffix : candidate,
-            ),
-          );
+          result.push(...reflowed);
         } else {
           for (const candidate of block) {
             result.push(truncateToWidth(candidate, width, ""));

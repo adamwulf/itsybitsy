@@ -5991,6 +5991,13 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const result = await callNewAgent("reuse orphan", { name: id, type: id });
     expect(result.ok).toBe(true);
     expect(await readSealRecord(repoId, id, process.env.HOME!)).toBeNull();
+    const resumedMeta = await Bun.file(join(agentsDir, id, "meta.json")).json() as AgentMeta;
+    resumedMeta.state = "stopped";
+    resumedMeta.tmux_session = "";
+    await Bun.write(join(agentsDir, id, "meta.json"), JSON.stringify(resumedMeta));
+    setNukeResumeSpawnRunner(() => makeSpawnResult("", 0));
+    const resumed = await resumeAgent(makeAgent(id, tempDir, "stopped", resumedMeta));
+    expect(resumed.ok).toBe(true);
   });
 
   test("omitted sandbox.enabled defaults to an enabled fail-closed launch", async () => {

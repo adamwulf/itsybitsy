@@ -141,6 +141,7 @@ import {
   readSealRecord,
   deleteSealRecord,
   verifyMetaAgainstSeal,
+  sealPath,
   sealCapabilityPath,
   newSealCapability,
 } from "./agent-seal";
@@ -2660,6 +2661,7 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
   }
 
   const oldSandbox = resolveSandboxConfig({ sandbox: agent.meta.sandbox });
+  const oldSealRecord = await readSealRecord(sealRepoId, agent.id);
   const oldPaths = resolvePathsConfig(agent.meta.paths);
   const summary = summarizeSandboxRefresh(oldSandbox, oldPaths, newSandbox, newPaths);
   await logAgent(agentDir, `[sandbox refresh] re-derived from agent-type files: ${summary}`);
@@ -2709,6 +2711,12 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
     return meta;
   });
   if (!metaUpdated) {
+    if (newSandbox.enabled) {
+      try {
+        if (oldSealRecord) await Bun.write(sealPath(sealRepoId, agent.id), JSON.stringify(oldSealRecord, null, 2));
+        else await deleteSealRecord(sealRepoId, agent.id);
+      } catch { /* report below; operator can retry with retained metadata */ }
+    }
     if (removedOldSeal) {
       try { await sealAgentRecord(agent.repoPath, agent.id, agent.meta as unknown as Record<string, unknown>, agentDir); }
       catch (rollbackError) {

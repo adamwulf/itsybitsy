@@ -2661,10 +2661,24 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
     }
   }
 
+  // For enabled→disabled, remove the old seal before exposing disabled metadata.
+  // Unlike general cleanup, this transition is checked: a failed deletion must
+  // leave the old metadata/seal pair intact so refresh can be retried safely.
+  let removedOldSeal = false;
+  if (!newSandbox.enabled && oldSandbox.enabled) {
+    try {
+      await deleteSealRecord(sealRepoId, agent.id);
+      removedOldSeal = true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ok: false, exitCode: 1, stdout: "", stderr: `sandbox refresh: could not remove old seal: ${message}` };
+    }
+  }
+
   // Rewrite the frozen block. Proxy port/pid are left to resume (it reallocates
   // the port and clears the stale pid), exactly as the ordinary resume path
   // handles them — do not touch them here.
-  await mutateAgentMeta(agentDir, (meta) => {
+  const metaUpdated = await mutateAgentMeta(agentDir, (meta) => {
     meta.sandbox = newSandbox;
     meta.paths = newPaths;
     if (!newSandbox.enabled) {
@@ -2673,6 +2687,12 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
     }
     return meta;
   });
+  if (!metaUpdated) {
+    if (removedOldSeal) {
+      try { await sealAgentRecord(agent.repoPath, agent.id, agent.meta as unknown as Record<string, unknown>, agentDir); } catch { /* surface original failure */ }
+    }
+    return { ok: false, exitCode: 1, stdout: "", stderr: "sandbox refresh: could not update metadata" };
+  }
   // Keep the in-memory agent consistent so the resume below replays the NEW
   // block (resume reads agent.meta.sandbox / agent.meta.paths directly).
   agent.meta.sandbox = newSandbox;
@@ -2681,7 +2701,9 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
     await stopSandboxProxyForAgent(agentDir, agent.meta);
     delete agent.meta.sandbox_proxy_port;
     delete agent.meta.sandbox_proxy_pid;
-    await removeAgentSeal(agent.repoPath, agent.id);
+    // The checked transition above already removed the seal. Keep this cleanup
+    // best-effort only for legacy disabled agents that had no enabled seal.
+    if (!removedOldSeal) await removeAgentSeal(agent.repoPath, agent.id);
   }
 
   // Pause (only when running) + resume through the EXISTING resume path so the

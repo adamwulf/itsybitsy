@@ -5968,6 +5968,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(start).not.toContain("sandbox-log-watch");
     expect(start).not.toContain("export http_proxy=");
     expect(start).not.toContain("--dangerously-skip-permissions");
+    expect(start).toContain("--permission-mode default");
     expect(meta.sandbox.enabled).toBe(false);
     expect(meta.sandbox_proxy_port).toBeUndefined();
     expect(meta.paths.allowRead).toContain(canonicalizeSandboxPath(tempDir));
@@ -5975,6 +5976,21 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const settings = await Bun.file(join(agentsDir, "sandbox-disabled", "repo", ".claude", "settings.local.json")).json();
     expect(JSON.stringify(settings.hooks)).toContain("hook-check-path");
     expect(settings.permissions.defaultMode).toBeUndefined();
+  });
+
+  test("disabled same-ID spawn removes orphan enabled seal before launch", async () => {
+    const id = "orphan-disabled-reuse";
+    await writeSandboxType(id, { enabled: false });
+    const repoId = await getRepoId(tempDir);
+    const orphanMeta = { agentType: "worker", sandbox: { enabled: true }, paths: { allowRead: [], allowWrite: [], deny: [] } };
+    await mkdir(join(process.env.HOME!, ".itsybitsy", "sealed"), { recursive: true });
+    await Bun.write(sealPath(repoId, id, process.env.HOME!), JSON.stringify(computeSealRecord(await computeSealInputs(orphanMeta))));
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99991 }));
+    const result = await callNewAgent("reuse orphan", { name: id, type: id });
+    expect(result.ok).toBe(true);
+    expect(await readSealRecord(repoId, id, process.env.HOME!)).toBeNull();
   });
 
   test("omitted sandbox.enabled defaults to an enabled fail-closed launch", async () => {

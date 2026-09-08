@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "crypto";
-import { mkdir, rm } from "fs/promises";
+import { mkdir, rm, rename } from "fs/promises";
 import { userHome } from "./home";
 import { join } from "path";
 
@@ -59,18 +59,20 @@ export function sealPath(repoId: string, agentId: string, home?: string): string
 export function sealCapabilityPath(repoId: string, agentId: string, home?: string): string {
   return join(sealDir(home), `${repoId}-${agentId}.cap`);
 }
-export function sealCapabilityDigest(meta: Record<string, unknown>): string {
-  return createHash("sha256").update(canonicalSealJson(meta)).digest("hex");
+export async function sealCapabilityDigest(meta: Record<string, unknown>): Promise<string> {
+  return createHash("sha256").update(canonicalSealJson(await computeSealInputs(meta))).digest("hex");
 }
-export function newSealCapability(meta: Record<string, unknown>): { token: string; digest: string; expires: number } {
-  return { token: randomUUID(), digest: sealCapabilityDigest(meta), expires: Date.now() + 30_000 };
+export async function newSealCapability(meta: Record<string, unknown>): Promise<{ token: string; digest: string; expires: number }> {
+  return { token: randomUUID(), digest: await sealCapabilityDigest(meta), expires: Date.now() + 30_000 };
 }
 export async function consumeSealCapability(repoId: string, agentId: string, meta: Record<string, unknown>, token: string, home?: string): Promise<boolean> {
   try {
     const path = sealCapabilityPath(repoId, agentId, home);
-    const cap = await Bun.file(path).json() as { token?: string; digest?: string; expires?: number };
-    await rm(path, { force: true });
-    return cap.token === token && (cap.expires ?? 0) >= Date.now() && cap.digest === sealCapabilityDigest(meta);
+    const claimed = `${path}.claimed-${token}`;
+    await rename(path, claimed);
+    const cap = await Bun.file(claimed).json() as { token?: string; digest?: string; expires?: number };
+    await rm(claimed, { force: true });
+    return cap.token === token && (cap.expires ?? 0) >= Date.now() && cap.digest === await sealCapabilityDigest(meta);
   } catch { return false; }
 }
 

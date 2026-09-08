@@ -7021,7 +7021,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(sealCall).toBeDefined();
     // Synchronous (blocking) — run-shell WITHOUT -b so the seal lands before spawn continues.
     expect(sealCall).not.toContain("-b");
-    expect(sealCall!.at(-1)).toContain("'ib' 'sandbox' 'seal' 'seal-helper'");
+    expect(sealCall!.at(-1)).toContain("IB_SEAL_CAP=");
+    expect(sealCall!.at(-1)).toContain("ib sandbox seal 'seal-helper'");
   });
 
   test("A4 G3: sandbox refresh re-seals with the new inputs", async () => {

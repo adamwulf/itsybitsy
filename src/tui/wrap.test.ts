@@ -1264,7 +1264,7 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(36);
     expect(rows.join(" ")).toContain("你好");
     expect(rows.join(" ")).toContain("🙂");
-    expect(rows.join(" ")).toContain("value cell");
+    expect(rows.join(" ").replace(/\s+/g, " ")).toContain("value cell");
   });
 
   test("retains rule-terminated source fragments without splitting hard-wrapped tokens", () => {
@@ -1314,11 +1314,12 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
       ],
       [32, 90],
     );
-    table.push("  Follow-up prose remains outside the table.");
+    table.push("   Follow-up prose remains outside the table.");
 
     const rows = wordWrapLines(table.join("\n"), 54);
     expect(rows.join(" ")).toContain("Follow-up prose remains outside the table.");
     expect(rows.join(" ")).not.toContain("alpha Follow-up");
+    expect(rows).toContain("   Follow-up prose remains outside the table.");
   });
 
   test("keeps source-wrapped final-row continuations inside their cells", () => {
@@ -1364,6 +1365,22 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     );
     const rows = wordWrapLines(table.join("\n"), 30);
     expect(rows.some((row) => row.includes("alpha  beta"))).toBe(true);
+  });
+
+  test("retains repeated styled whitespace when it crosses a cell wrap boundary", () => {
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["x", "alpha\x1b[31m          \x1b[0mbeta"],
+      ],
+      [5, 40],
+    );
+    const rows = wordWrapLines(table.join("\n"), 20);
+    const colored = rows
+      .flatMap((row) => Array.from(row.matchAll(/\x1b\[31m(.*?)\x1b\[0m/g)))
+      .map((match) => match[1]!)
+      .join("");
+    expect(colored).toBe(" ".repeat(10));
   });
 
   test("uses grapheme-aware column boundaries before a later cell", () => {
@@ -1437,6 +1454,83 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     expect(amount).toEndWith(" 42 ");
   });
 
+  test("resolves conflicting alignment hints independently of row order", () => {
+    const widths = [8, 20];
+    const build = (rightFirst: boolean) => {
+      const left = ["left", "42"];
+      const right = ["right", "7"];
+      const table = renderTable(
+        [["Item", "Amount"], ...(rightFirst ? [right, left] : [left, right])],
+        widths,
+      );
+      const rightIndex = rightFirst ? 2 : 4;
+      const leftIndex = rightFirst ? 4 : 2;
+      table[leftIndex] =
+        "  " +
+        [" " + "left".padEnd(widths[0]!) + " ", " " + "42".padEnd(widths[1]!) + " "].join(
+          "  ",
+        );
+      table[rightIndex] =
+        "  " +
+        [" " + "right".padEnd(widths[0]!) + " ", " " + "7".padStart(widths[1]!) + " "]
+          .join("  ")
+          .trimEnd();
+      return wordWrapLines(table.join("\n"), 24);
+    };
+    for (const rows of [build(false), build(true)]) {
+      const heavy = rows.find((row) => row.includes("━"))!;
+      const secondStart = Array.from(heavy.matchAll(/━+/g))[1]!.index! + 1;
+      expect(rows.find((row) => row.includes("42"))!.indexOf("42")).toBe(secondStart);
+      expect(rows.find((row) => row.includes("7"))!.indexOf("7")).toBe(secondStart);
+    }
+  });
+
+  test("reflows cell-local CSI and OSC-8 without losing column ownership or control boundaries", () => {
+    const linkOpen = "\x1b]8;;https://example.com/a/long/target\x1b\\";
+    const linkClose = "\x1b]8;;\x1b\\";
+    const linkText = "linked-value-with-a-superlong-token";
+    const table = renderTable(
+      [
+        ["Package", "Rationale"],
+        ["Allume", "\x1b[1mprotocol package boundary remains in column two\x1b[0m"],
+        ["Link", linkOpen + linkText + linkClose],
+      ],
+      [10, 70],
+    );
+
+    const rows = wordWrapLines(table.join("\n"), 40);
+    const heavy = rows.find((row) => stripAnsi(row).includes("━"))!;
+    const secondStart = Array.from(stripAnsi(heavy).matchAll(/━+/g))[1]!.index! + 1;
+    for (const row of rows.filter((candidate) => /boundary|remains|column two/.test(stripAnsi(candidate)))) {
+      expect(stripAnsi(row).search(/boundary|remains|column two/)).toBeGreaterThanOrEqual(
+        secondStart,
+      );
+    }
+    const linkedRows = rows.filter((row) => stripAnsi(row).includes("linked") || row.includes(linkOpen));
+    expect(linkedRows.length).toBeGreaterThan(1);
+    for (const row of linkedRows) {
+      expect(row).toContain(linkOpen);
+      expect(row).toContain(linkClose);
+    }
+    expect(linkedRows.map((row) => stripAnsi(row).trim()).join("")).toContain(linkText);
+  });
+
+  test("stacks very narrow tables instead of discarding later columns", () => {
+    const table = renderTable(
+      [
+        ["Package", "Old owner", "New owner"],
+        ["SyncKit", "OLD-CELL-SURVIVES", "NEW-CELL-SURVIVES"],
+      ],
+      [10, 18, 28],
+    );
+    const rows = wordWrapLines(table.join("\n"), 11);
+    expect(rows.every((row) => visibleWidth(row) <= 11)).toBe(true);
+    const compact = stripAnsi(rows.join("")).replace(/\s/g, "");
+    for (const value of ["SyncKit", "OLD-CELL-SURVIVES", "NEW-CELL-SURVIVES"]) {
+      expect(compact).toContain(value);
+    }
+  });
+
   test("reflows at width 13 and clips indivisible wide glyphs at width 1", () => {
     const table = renderTable(
       [
@@ -1455,5 +1549,6 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
 
     const oneColumn = wordWrapLines(table.join("\n"), 1);
     expect(oneColumn.every((row) => visibleWidth(row) <= 1)).toBe(true);
+    expect(stripAnsi(oneColumn.join("")).replace(/\s/g, "")).toContain("content");
   });
 });

@@ -297,11 +297,7 @@ export function matchTableBlockEnd(lines: string[], start: number): number {
  * remaining (wide) columns split what's left evenly. Returns null when the
  * split would drive a shrunken column below MIN_CELL_WIDTH.
  */
-function shrinkColumnWidths(
-  natural: number[],
-  avail: number,
-  minimum = MIN_CELL_WIDTH,
-): number[] | null {
+function shrinkColumnWidths(natural: number[], avail: number): number[] | null {
   const n = natural.length;
   const widths: number[] = new Array(n).fill(0);
   const fixed: boolean[] = new Array(n).fill(false);
@@ -325,7 +321,7 @@ function shrinkColumnWidths(
   }
   if (flexible > 0) {
     const share = Math.floor(remaining / flexible);
-    if (share < minimum) return null;
+    if (share < MIN_CELL_WIDTH) return null;
     let extra = remaining - share * flexible;
     for (let i = 0; i < n; i++) {
       if (!fixed[i]) {
@@ -499,7 +495,84 @@ interface ParsedBorderlessRow {
 }
 
 const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-const MIN_BORDERLESS_CELL_WIDTH = 2;
+
+interface TerminalToken {
+  raw: string;
+  width: number;
+  text: string;
+  escape: boolean;
+}
+
+function terminalTokens(text: string): TerminalToken[] {
+  const tokens: TerminalToken[] = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    if (text[cursor] === "\x1b") {
+      let end = cursor + 2;
+      const kind = text[cursor + 1];
+      if (kind === "[") {
+        while (end < text.length && !isCsiTerminator(text.charCodeAt(end))) end++;
+        if (end < text.length) end++;
+      } else if (kind === "]" || kind === "_" || kind === "P" || kind === "^") {
+        while (
+          end < text.length &&
+          text[end] !== "\x07" &&
+          !(text[end] === "\x1b" && text[end + 1] === "\\")
+        ) {
+          end++;
+        }
+        end += text[end] === "\x07" ? 1 : end < text.length ? 2 : 0;
+      } else if (kind === "(" || kind === ")") {
+        end = Math.min(text.length, cursor + 3);
+      }
+      tokens.push({ raw: text.slice(cursor, end), width: 0, text: "", escape: true });
+      cursor = end;
+      continue;
+    }
+    const nextEscape = text.indexOf("\x1b", cursor);
+    const end = nextEscape < 0 ? text.length : nextEscape;
+    const plain = text.slice(cursor, end);
+    for (const part of GRAPHEME_SEGMENTER.segment(plain)) {
+      tokens.push({
+        raw: part.segment,
+        width: visibleWidth(part.segment),
+        text: part.segment,
+        escape: false,
+      });
+    }
+    cursor = end;
+  }
+  return tokens;
+}
+
+function sliceTerminalColumns(text: string, start: number, end: number): string {
+  let column = 0;
+  let output = "";
+  for (const token of terminalTokens(text)) {
+    if (token.escape) {
+      if (column >= start && column <= end) output += token.raw;
+      continue;
+    }
+    const nextColumn = column + token.width;
+    if (column >= start && nextColumn <= end) output += token.raw;
+    column = nextColumn;
+  }
+  return output;
+}
+
+function trimTerminalCell(text: string): string {
+  const tokens = terminalTokens(text);
+  const content = tokens
+    .map((token, index) => ({ token, index }))
+    .filter(({ token }) => !token.escape && token.text.trim().length > 0);
+  if (content.length === 0) return "";
+  const first = content[0]!.index;
+  const last = content.at(-1)!.index;
+  return tokens
+    .filter((token, index) => token.escape || (index >= first && index <= last))
+    .map((token) => token.raw)
+    .join("");
+}
 
 function parseBorderlessRule(line: string, ruleChar: "━" | "─"): BorderlessRuleLayout | null {
   const plain = stripAnsi(line);
@@ -622,7 +695,11 @@ function parseBorderlessCells(
       return null;
     }
     const rawCell = slice(start + 1, start + segmentWidth - 1);
-    cells.push(rawCell.trim());
+    const styledCell = trimTerminalCell(
+      sliceTerminalColumns(line, start + 1, start + segmentWidth - 1),
+    );
+    if (stripAnsi(styledCell) !== rawCell.trim()) return null;
+    cells.push(styledCell);
     alignmentHints.push(inferCellAlignment(rawCell));
   }
   return cells.some((cell) => cell.length > 0) ? { cells, alignmentHints } : null;
@@ -648,9 +725,11 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
   // A rendered markdown header is commonly left-aligned even when its body
   // column is numeric/right-aligned, so prefer the first body-row signal over
   // a merely left-aligned header. Explicit centered/right headers still win.
-  const alignmentHints: Array<CellAlignment | null> = header.alignmentHints.map((hint) =>
-    hint === "left" ? null : hint,
-  );
+  const alignmentHints = header.alignmentHints.map((hint) => {
+    const values = new Set<CellAlignment>();
+    if (hint && hint !== "left") values.add(hint);
+    return values;
+  });
   let end = start + 1;
   let cursor = start + 2;
   let nextHasDivider = false;
@@ -666,11 +745,19 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
     }
     const row = parseBorderlessCells(lines[cursor]!, layout);
     if (!row) break;
+    if (
+      rows.length > 1 &&
+      !nextHasDivider &&
+      row.cells.slice(1).every((cell) => stripAnsi(cell).trim().length === 0)
+    ) {
+      break;
+    }
     rows.push(row.cells);
     dividerBefore.push(nextHasDivider);
     nextHasDivider = false;
     for (let column = 0; column < alignmentHints.length; column++) {
-      alignmentHints[column] ??= row.alignmentHints[column] ?? null;
+      const hint = row.alignmentHints[column];
+      if (hint) alignmentHints[column]!.add(hint);
     }
     end = cursor;
     cursor++;
@@ -681,66 +768,159 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
     layout,
     rows,
     dividerBefore,
-    alignments: alignmentHints.map((hint) => hint ?? "left"),
+    alignments: alignmentHints.map((hints) =>
+      hints.size === 1 ? hints.values().next().value! : "left",
+    ),
   };
 }
 
-function wrapPlainCell(text: string, width: number): string[] {
+interface TerminalStyleState {
+  sgr: string[];
+  osc8: string | null;
+}
+
+function copyTerminalStyle(state: TerminalStyleState): TerminalStyleState {
+  return { sgr: [...state.sgr], osc8: state.osc8 };
+}
+
+function applyTerminalEscape(state: TerminalStyleState, raw: string): void {
+  if (raw.startsWith("\x1b[") && raw.endsWith("m")) {
+    const params = raw.slice(2, -1).split(";").map((value) => value || "0");
+    if (params.includes("0")) state.sgr = [];
+    if (params.some((value) => value !== "0")) state.sgr.push(raw);
+    return;
+  }
+  if (raw.startsWith("\x1b]8;")) {
+    const terminatorLength = raw.endsWith("\x07") ? 1 : raw.endsWith("\x1b\\") ? 2 : 0;
+    const payload = raw.slice(2, raw.length - terminatorLength);
+    const match = /^8;[^;]*;(.*)$/s.exec(payload);
+    if (match) state.osc8 = match[1]!.length > 0 ? raw : null;
+  }
+}
+
+function terminalStylePrefix(state: TerminalStyleState): string {
+  return (state.osc8 ?? "") + state.sgr.join("");
+}
+
+function terminalStyleSuffix(state: TerminalStyleState): string {
+  return (state.sgr.length > 0 ? "\x1b[0m" : "") +
+    (state.osc8 ? "\x1b]8;;\x1b\\" : "");
+}
+
+function wrapStyledCell(text: string, width: number): string[] {
   if (text.length === 0 || visibleWidth(text) <= width) return [text];
 
-  const splitToken = (token: string): string[] => {
-    const parts: string[] = [];
-    let current = "";
-    let currentWidth = 0;
-    for (const grapheme of GRAPHEME_SEGMENTER.segment(token)) {
-      const graphemeWidth = visibleWidth(grapheme.segment);
-      if (current.length > 0 && currentWidth + graphemeWidth > width) {
-        parts.push(current);
-        current = "";
-        currentWidth = 0;
-      }
-      current += grapheme.segment;
-      currentWidth += graphemeWidth;
+  interface StyledGrapheme {
+    raw: string;
+    text: string;
+    width: number;
+    before: TerminalStyleState;
+    after: TerminalStyleState;
+  }
+
+  const state: TerminalStyleState = { sgr: [], osc8: null };
+  const units: StyledGrapheme[] = [];
+  let pending = "";
+  let beforePending = copyTerminalStyle(state);
+  for (const token of terminalTokens(text)) {
+    if (token.escape) {
+      if (pending.length === 0) beforePending = copyTerminalStyle(state);
+      pending += token.raw;
+      applyTerminalEscape(state, token.raw);
+      continue;
     }
-    if (current.length > 0) parts.push(current);
-    return parts;
-  };
+    units.push({
+      raw: pending + token.raw,
+      text: token.text,
+      width: token.width,
+      before: pending.length > 0 ? beforePending : copyTerminalStyle(state),
+      after: copyTerminalStyle(state),
+    });
+    pending = "";
+  }
+  if (units.length === 0) return [text];
 
   const output: string[] = [];
-  let current = "";
-  let pendingWhitespace = "";
-  for (const token of text.split(/(\s+)/).filter(Boolean)) {
-    if (/^\s+$/.test(token)) {
-      pendingWhitespace += token;
-      continue;
+  let start = 0;
+  while (start < units.length) {
+    let end = start;
+    let used = 0;
+    let lastWhitespace = -1;
+    while (end < units.length && used + units[end]!.width <= width) {
+      used += units[end]!.width;
+      if (/^\s$/u.test(units[end]!.text)) lastWhitespace = end + 1;
+      end++;
     }
-    const separator = current.length > 0 ? pendingWhitespace : "";
-    if (current.length > 0 && visibleWidth(current + separator + token) <= width) {
-      current += separator + token;
-      pendingWhitespace = "";
-      continue;
-    }
-    if (current.length > 0) {
-      output.push(current);
-      current = "";
-    }
-    // Whitespace at a line break is layout, not cell content. Whitespace that
-    // fits between words is retained byte-for-byte above.
-    pendingWhitespace = "";
-    const pieces = splitToken(token);
-    output.push(...pieces.slice(0, -1));
-    current = pieces.at(-1) ?? "";
+    if (end === start) end++;
+    else if (end < units.length && lastWhitespace > start) end = lastWhitespace;
+
+    const first = units[start]!;
+    const last = units[end - 1]!;
+    let rendered = terminalStylePrefix(first.before);
+    for (let i = start; i < end; i++) rendered += units[i]!.raw;
+    const endState = end === units.length ? state : last.after;
+    if (end === units.length) rendered += pending;
+    rendered += terminalStyleSuffix(endState);
+    output.push(rendered);
+    start = end;
   }
-  if (current.length > 0) output.push(current);
-  return output.length > 0 ? output : [""];
+  return output;
+}
+
+function allocateBorderlessWidths(
+  natural: number[],
+  minimum: number[],
+  available: number,
+): number[] | null {
+  const widths = [...minimum];
+  let remaining = available - widths.reduce((sum, value) => sum + value, 0);
+  if (remaining < 0) return null;
+  while (remaining > 0) {
+    let candidate = -1;
+    for (let i = 0; i < widths.length; i++) {
+      if (
+        widths[i]! < natural[i]! &&
+        (candidate < 0 || widths[i]! < widths[candidate]!)
+      ) {
+        candidate = i;
+      }
+    }
+    if (candidate < 0) break;
+    widths[candidate]!++;
+    remaining--;
+  }
+  return widths;
+}
+
+function stackBorderlessTable(block: BorderlessTableBlock, width: number): string[] | null {
+  if (width <= 0) return null;
+  const output: string[] = [];
+  const pushCell = (cell: string) => {
+    if (visibleWidth(cell) === 0) return;
+    for (const line of wrapStyledCell(cell, width)) {
+      output.push(
+        visibleWidth(line) <= width ? line : truncateToWidth(line, width, ""),
+      );
+    }
+  };
+  for (let i = 0; i < block.rows.length; i++) {
+    if (i === 1) output.push("━".repeat(width));
+    else if (block.dividerBefore[i]) output.push("─".repeat(width));
+    for (const cell of block.rows[i]!) pushCell(cell);
+  }
+  return output;
 }
 
 function reflowBorderlessTable(block: BorderlessTableBlock, width: number): string[] | null {
   const ncols = block.layout.widths.length;
   const natural: number[] = new Array(ncols).fill(1);
+  const minimum: number[] = new Array(ncols).fill(1);
   for (const row of block.rows) {
     for (let i = 0; i < ncols; i++) {
       natural[i] = Math.max(natural[i]!, visibleWidth(row[i]!));
+      for (const token of terminalTokens(row[i]!)) {
+        if (!token.escape) minimum[i] = Math.max(minimum[i]!, token.width);
+      }
     }
   }
 
@@ -748,19 +928,19 @@ function reflowBorderlessTable(block: BorderlessTableBlock, width: number): stri
   // two-space gutter. The source indent sits outside that table geometry.
   const overhead = block.layout.indentWidth + 2 * ncols + 2 * (ncols - 1);
   const avail = width - overhead;
-  if (avail < ncols * MIN_BORDERLESS_CELL_WIDTH) return null;
+  if (avail < minimum.reduce((sum, value) => sum + value, 0)) {
+    return stackBorderlessTable(block, width);
+  }
   const widths =
     natural.reduce((sum, value) => sum + value, 0) <= avail
       ? natural
-      : shrinkColumnWidths(natural, avail, MIN_BORDERLESS_CELL_WIDTH);
+      : allocateBorderlessWidths(natural, minimum, avail);
   if (!widths) return null;
 
   const rule = (char: "━" | "─") =>
     block.layout.indent + widths.map((cellWidth) => char.repeat(cellWidth + 2)).join("  ");
   const renderRow = (cells: string[]): string[] => {
-    const cellLines = cells.map((cell, i) =>
-      wrapPlainCell(cell, widths[i]!),
-    );
+    const cellLines = cells.map((cell, i) => wrapStyledCell(cell, widths[i]!));
     const height = Math.max(...cellLines.map((cell) => cell.length));
     const rendered: string[] = [];
     for (let row = 0; row < height; row++) {
@@ -818,6 +998,7 @@ function uniformTerminalAffixes(lines: string[]): { prefix: string; suffix: stri
  */
 export function wordWrapLines(text: string, width: number): string[] {
   const lines = text.split("\n");
+  if (width <= 0) return lines;
   const result: string[] = [];
   let i = 0;
   while (i < lines.length) {
@@ -835,20 +1016,11 @@ export function wordWrapLines(text: string, width: number): string[] {
         if (reflowed) {
           const hasTerminalMetadata = block.some((candidate) => candidate.includes("\x1b"));
           const affixes = hasTerminalMetadata ? uniformTerminalAffixes(block) : null;
-          if (!hasTerminalMetadata || affixes) {
-            result.push(
-              ...reflowed.map((candidate) =>
-                affixes ? affixes.prefix + candidate + affixes.suffix : candidate,
-              ),
-            );
-          } else {
-            // Inline styling cannot be reassigned to newly reflowed cells
-            // without changing its semantic range. Preserve the original data
-            // and metadata through the ordinary ANSI-aware wrapper instead.
-            for (const candidate of block) {
-              result.push(...wordWrapSingleLine(candidate, width));
-            }
-          }
+          result.push(
+            ...reflowed.map((candidate) =>
+              affixes ? affixes.prefix + candidate + affixes.suffix : candidate,
+            ),
+          );
         } else {
           for (const candidate of block) {
             result.push(truncateToWidth(candidate, width, ""));

@@ -17,32 +17,37 @@ import { stripAnsi, isCodexStatusLine } from "../parse-state";
  *
  * Two shapes qualify:
  *
- *  1. A bare rule — the entire visible content is a run of ─ box-drawing chars
- *     (`────…`).
- *  2. A TITLED rule — a run of ─ on each side with a short inline label between
- *     them (`─ Worked for 3m 50s ────…`). Codex emits these after each turn.
- *     Because the label breaks the pure-─ run, the bare-rule test alone lets the
- *     line fall through to word-wrapping and it explodes into many rows at narrow
- *     display widths — the exact bug this branch handles.
+ *  1. A bare rule — the entire visible content is a run of light (`─`) or heavy
+ *     (`━`) box-drawing chars. Codex uses the heavy form for table header rules.
+ *  2. A segmented or titled rule — a run of the same rule character on each
+ *     side with spaces or a short inline label between them. Examples are a
+ *     table's multi-column header rule (`━━━━  ━━━━━`) and codex's turn divider
+ *     (`─ Worked for 3m 50s ────…`). Because the middle breaks the pure run, the
+ *     bare-rule test alone lets the line fall through to word-wrapping and it
+ *     explodes into many rows at narrow display widths.
  *
- * The titled-rule test requires the trimmed line to both start AND end with ─
- * and to contain a run of at least four consecutive ─ (a length prose never
- * produces). Those three structural signals together are what no ordinary
- * sentence satisfies — prose does not simultaneously begin and end with a
- * box-drawing char while also carrying a 4+ run of them — so the label between
- * the runs may be any text (ASCII or not) without risking a false match.
+ * The segmented/titled-rule test requires the trimmed line to both start and end
+ * with the same rule character and to contain a run of at least four consecutive
+ * copies (a length prose never produces). Those structural signals together are
+ * what no ordinary sentence satisfies, so the content between the runs may be
+ * any text (ASCII or not) without risking a false match.
  */
 function isSeparatorLine(line: string): boolean {
   const stripped = stripAnsi(line).trim();
   if (stripped.length === 0) return false;
-  // Bare rule: entirely ─.
-  if (/^─+$/.test(stripped)) return true;
-  // Titled rule: ─-run … short label … ─-run.
-  return (
-    stripped.startsWith("─") &&
-    stripped.endsWith("─") &&
-    /─{4,}/.test(stripped)
-  );
+  for (const ruleChar of ["─", "━"]) {
+    // Bare rule: entirely one horizontal box-drawing character.
+    if (Array.from(stripped).every((char) => char === ruleChar)) return true;
+    // Segmented/titled rule: same-character run … content … same-character run.
+    if (
+      stripped.startsWith(ruleChar) &&
+      stripped.endsWith(ruleChar) &&
+      stripped.includes(ruleChar.repeat(4))
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**

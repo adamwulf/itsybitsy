@@ -327,6 +327,22 @@ describe("separator collapse (─ divider truncation, pinned-width fix)", () => 
     expect(isSepRow(rows[0]!)).toBe(true);
   });
 
+  test("a 1000-col heavy table-header separator truncates to exactly ONE row", () => {
+    const sep = "━".repeat(1000);
+    const rows = wordWrapSingleLine(sep, 80);
+    expect(rows.length).toBe(1);
+    expect(visibleWidth(rows[0]!)).toBe(80);
+    expect(stripAnsi(rows[0]!).trim()).toMatch(/^━+$/);
+  });
+
+  test("a segmented heavy table-header rule truncates instead of wrapping", () => {
+    const headerRule = `${"━".repeat(40)}  ${"━".repeat(160)}`;
+    const rows = wordWrapSingleLine(headerRule, 80);
+    expect(rows.length).toBe(1);
+    expect(visibleWidth(rows[0]!)).toBe(80);
+    expect(stripAnsi(rows[0]!).trim()).toMatch(/^━+(?:  ━+)?$/);
+  });
+
   test("wordWrapLines collapses each of several logical separators to one row", () => {
     const sep = "─".repeat(1000);
     const text = ["content above", sep, "content between", sep, "content below"].join("\n");

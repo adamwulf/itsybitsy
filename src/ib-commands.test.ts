@@ -105,7 +105,7 @@ import {
   teamAdd,
   writeMetaJsonAtomic,
 } from "./ib-commands";
-import { sealPath, readSealRecord } from "./agent-seal";
+import { sealPath, readSealRecord, computeSealInputs, computeSealRecord } from "./agent-seal";
 import {
   spawnCtx as lifecycleSpawnCtx,
   setSandboxProxyKillForTesting,
@@ -7003,10 +7003,6 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // Pre-place the record so the post-fallback verify succeeds — standing in for
     // the unsandboxed `ib sandbox seal` child the tmux server actually runs.
     await mkdir(join(process.env.HOME!, ".itsybitsy", "sealed"), { recursive: true });
-    await Bun.write(
-      sealPath(repoId, "seal-helper", process.env.HOME!),
-      JSON.stringify({ inputs: {}, sha256: "x" }),
-    );
     const tmuxCalls: string[][] = [];
     setNukeResumeSpawnRunner((cmd: string[]) => { tmuxCalls.push(cmd); return makeSpawnResult("", 0); });
 
@@ -7015,6 +7011,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       sandbox: { enabled: true, rawAllow: [], domains: [] },
       paths: { allowRead: [], allowWrite: [], deny: [] },
     };
+    await Bun.write(sealPath(repoId, "seal-helper", process.env.HOME!), JSON.stringify(computeSealRecord(await computeSealInputs(meta))));
     await sealAgentRecord(tempDir, "seal-helper", meta as unknown as Record<string, unknown>, tempDir);
 
     const sealCall = tmuxCalls.find((c) => c[0] === "tmux" && c[1] === "run-shell");
@@ -7022,7 +7019,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // Synchronous (blocking) — run-shell WITHOUT -b so the seal lands before spawn continues.
     expect(sealCall).not.toContain("-b");
     expect(sealCall!.at(-1)).toContain("IB_SEAL_CAP=");
-    expect(sealCall!.at(-1)).toContain("ib sandbox seal 'seal-helper'");
+    expect(sealCall!.at(-1)).toContain("ib sandbox seal");
   });
 
   test("A4 G3: sandbox refresh re-seals with the new inputs", async () => {

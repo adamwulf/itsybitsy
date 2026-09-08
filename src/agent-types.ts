@@ -68,7 +68,7 @@ export interface AgentType {
   icon?: string;
   /** Resolved, inheritance-merged filesystem policy. */
   paths?: PathsConfig;
-  /** Resolved, inheritance-merged Seatbelt sandbox configuration. */
+  /** Inheritance-merged sandbox policy; omitted enablement inherits from layers. */
   sandbox?: SandboxConfigInput;
   /**
    * If defined, this type can only be spawned in repos whose name or nickname

@@ -542,8 +542,7 @@ describe("ensureAgentTypesDir: system layer", () => {
 test("parseAgentTypeFile: parses separate paths and sandbox blocks", () => {
   // parseAgentTypeFile is a faithful YAML reader, not a policy layer: it still
   // surfaces a sandbox.enabled key verbatim so the downstream
-  // validator can flag it and loadAgentType can force it true. Retirement is
-  // enforced in validateSandboxFrontmatter / mergeRawFrontmatters, not here.
+  // validator and inheritance resolver can process the authored value.
   const content = `---
 name: sandboxed
 paths:

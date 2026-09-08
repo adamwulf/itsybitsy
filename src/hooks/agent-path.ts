@@ -1168,11 +1168,15 @@ export async function checkIbCommandAccess(
   // future refactors that move parsing logic.
   if (callingAgentId === SYSTEM_AGENT_ID) return null;
 
+  // Shell line continuations are removed before execution. Normalize them
+  // before authorization so `ib \\\n+  // sandbox seal ...` cannot evade the internal-command guard.
+  const normalizedCommand = command.replace(/\\\r?\n/g, " ");
+
   // Seal is an internal tmux-server operation.  It must never be reachable
   // from an agent's Bash(ib:*) allowance: the command writes the protected
   // seal record directly and therefore bypasses the normal path hook.  The
   // trusted tmux fallback does not pass through this hook.
-  if (/(?:^|[;&|]\s*)ib\s+sandbox\s+seal(?:\s|$)/.test(command)) {
+  if (/(?:^|[;&|]\s*)ib\s+sandbox\s+seal(?:\s|$)/.test(normalizedCommand)) {
     return {
       decision: "deny",
       reason: "Access denied: ib sandbox seal is an internal operation",
@@ -1183,8 +1187,8 @@ export async function checkIbCommandAccess(
   // `ib send ...` can append a second lifecycle/internal command after `;`,
   // `&&`, a pipe, or a newline.  The scanner is quote/heredoc aware, so
   // punctuation in a quoted message remains usable.
-  if (/(?:^|[;&|\n]\s*)ib\s+/.test(command)) {
-    const shellHit = findShellMetachar(command);
+  if (/(?:^|[;&|\n]\s*)ib\s+/.test(normalizedCommand)) {
+    const shellHit = findShellMetachar(normalizedCommand);
     if (shellHit) {
       return {
         decision: "deny",
@@ -1193,7 +1197,7 @@ export async function checkIbCommandAccess(
     }
   }
 
-  const parsed = parseIbCommand(command);
+  const parsed = parseIbCommand(normalizedCommand);
   if (!parsed) return null;
   if (!IB_MANAGER_ONLY_COMMANDS.has(parsed.subcommand)) return null;
 

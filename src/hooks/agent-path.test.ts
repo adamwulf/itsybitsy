@@ -1596,6 +1596,8 @@ describe("checkIbCommandAccess", () => {
     expect(direct?.decision).toBe("deny");
     expect(chained?.decision).toBe("deny");
     expect(direct?.reason).toContain("internal operation");
+    const continued = await checkIbCommandAccess("ib \\\nsandbox seal agent-target1", "agent-caller1", agentsDir);
+    expect(continued?.decision).toBe("deny");
   });
 
   test("system helper identity may invoke internal sandbox seal", async () => {

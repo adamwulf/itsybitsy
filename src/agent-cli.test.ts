@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { resolveCli, isCodexModel, parseModel, mapEffortForCodex, mapEffortForAgy, agySlugHasEffort, isAgyDefaultModel, AGY_DEFAULT_MODEL, KNOWN_CLIS, type AgentCli } from "./agent-cli";
+import { kernelSandboxStatus, resolveCli, isCodexModel, parseModel, mapEffortForCodex, mapEffortForAgy, agySlugHasEffort, isAgyDefaultModel, AGY_DEFAULT_MODEL, KNOWN_CLIS, type AgentCli } from "./agent-cli";
 
 describe("parseModel", () => {
   describe("split on first colon, model is greedy-to-end (SPEC §5.1)", () => {
@@ -401,5 +401,18 @@ describe("isAgyDefaultModel — the agy:default sentinel (no --model/--effort)",
     expect(parsed.cli).toBe("agy");
     expect(parsed.model).toBe("default");
     expect(isAgyDefaultModel(parsed.model)).toBe(true);
+  });
+});
+
+
+describe("kernelSandboxStatus", () => {
+  test.each(["claude:opus", "codex:gpt-5", "fugu:fugu", "agy:default"])("%s defaults omission on and preserves explicit false", (model) => {
+    expect(kernelSandboxStatus({ model })).toBe("enabled");
+    expect(kernelSandboxStatus({ model, sandbox: {} })).toBe("enabled");
+    expect(kernelSandboxStatus({ model, sandbox: { enabled: true } })).toBe("enabled");
+    expect(kernelSandboxStatus({ model, sandbox: { enabled: false } })).toBe("disabled");
+  });
+  test("the global coordinator remains disabled", () => {
+    expect(kernelSandboxStatus({ id: "@system", model: "claude:opus" })).toBe("disabled");
   });
 });

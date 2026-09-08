@@ -10,7 +10,7 @@ paths:
   # deny-by-default, provenance docs/SANDBOX-BASELINE-MINIMAL.md §(a)–(e) plus
   # the §6.11/§6.14 ~/.itsybitsy write floor. Runtime
   # AGENTDIR/WORKTREE/GITDIR/REPOAGENTS roots are injected separately for every
-  # agent (sandboxing is mandatory); the tmux socket is denied for non-spawners.
+  # agent when sandboxing is enabled; the tmux socket is denied for non-spawners.
   # NOTE: "/" and "~" were dropped from allowRead (A3, Adam 2026-09-02): the
   # root DIRECTORY listing comes from sandbox.rawAllow
   # (allow file-read-data (literal "/")) below, not a whole-tree read, and home
@@ -62,9 +62,9 @@ paths:
     # for a sandboxed spawner, through the unsandboxed tmux server.
     - "~/.itsybitsy/sealed"
 sandbox:
-  # No `enabled` key: sandboxing is mandatory and always on (Adam, 2026-09-05).
-  # The switch was retired — an authored `enabled:` (true OR false) is rejected
-  # at `ib watch` startup. Only rawAllow (raw SBPL) and domains are configurable.
+  # Omitted enablement inherits; the final default is true. More-specific
+  # types can set sandbox: false or sandbox.enabled: false, or turn it back on.
+  # rawAllow (raw SBPL) and domains still union independently across layers.
   rawAllow:
     - (allow process*)
     - (allow sysctl-read)

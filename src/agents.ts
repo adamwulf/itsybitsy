@@ -18,7 +18,7 @@ import {
 } from "./tmux-poller";
 import { InjectionContext } from "./types";
 import { logToWatchLog, logWarning } from "./watch-log";
-import type { PathsConfig, SandboxConfig } from "./sandbox";
+import { resolveSandboxEnabled, type PathsConfig, type SandboxConfig } from "./sandbox";
 
 /** States that can be written to meta.json */
 export type MetaState = "creating" | "running" | "waiting" | "complete" | "stopped";
@@ -1731,7 +1731,7 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
       } else {
         const sandbox = data.sandbox as Record<string, unknown>;
         data.sandbox = {
-          enabled: sandbox.enabled === true,
+          enabled: resolveSandboxEnabled(sandbox.enabled),
           rawAllow: stringList(sandbox.rawAllow),
           domains: stringList(sandbox.domains),
         } satisfies SandboxConfig;

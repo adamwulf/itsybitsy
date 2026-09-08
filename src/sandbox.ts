@@ -145,9 +145,14 @@ export interface OrderedPathEntry {
  * Default to enabled only when no explicit value was resolved from the type
  * hierarchy. Return fresh lists without mutating the source.
  */
+/** Only a literal false opts out; absent or malformed values keep the safe default. */
+export function resolveSandboxEnabled(enabled: unknown): boolean {
+  return enabled !== false;
+}
+
 export function resolveSandboxConfig(source: SandboxConfigSource): SandboxConfig {
   return {
-    enabled: source.sandbox?.enabled !== false,
+    enabled: resolveSandboxEnabled(source.sandbox?.enabled),
     rawAllow: [...(source.sandbox?.rawAllow ?? [])],
     domains: [...(source.sandbox?.domains ?? [])],
   };

@@ -1229,10 +1229,16 @@ describe("readAgentMeta", () => {
     expect(meta?.sandbox_proxy_pid).toBe(54321);
   });
 
-  test("legacy meta without sandbox remains unsandboxed", async () => {
+  test("legacy meta without sandbox preserves the absent block for launch validation", async () => {
     await Bun.write(join(tempDir, "meta.json"), JSON.stringify({ id: "agent-legacy" }));
     const { meta } = await readAgentMeta(tempDir);
     expect(meta?.sandbox).toBeUndefined();
+  });
+
+  test.each([undefined, true, false])("metadata preserves explicit sandbox enablement and defaults omission (%s)", async (enabled) => {
+    await Bun.write(join(tempDir, "meta.json"), JSON.stringify({ id: "agent-policy", sandbox: { enabled, domains: ["example.com"] } }));
+    const { meta } = await readAgentMeta(tempDir);
+    expect(meta?.sandbox).toEqual({ enabled: enabled !== false, rawAllow: [], domains: ["example.com"] });
   });
 
   test("malformed sandbox fields are safely coerced", async () => {
@@ -1255,7 +1261,7 @@ describe("readAgentMeta", () => {
 
     const { meta } = await readAgentMeta(tempDir);
     expect(meta?.sandbox).toEqual({
-      enabled: false,
+      enabled: true,
       rawAllow: ["(allow process*)"],
       domains: ["example.com"],
     });

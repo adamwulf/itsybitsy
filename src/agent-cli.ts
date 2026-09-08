@@ -1,3 +1,5 @@
+import { resolveSandboxEnabled } from "./sandbox";
+
 /**
  * Model → CLI resolution (SPEC-CODEX-MODEL.md §5.1).
  *
@@ -117,10 +119,10 @@ export function metadataCli(model: unknown): AgentCli | undefined {
  * legacy agent whose frozen metadata predates it (that agent must be migrated via
  * `ib sandbox refresh` before it can launch again). An unknown CLI has no wrapper.
  */
-export function kernelSandboxStatus(meta: { model?: unknown; sandbox?: { enabled?: boolean } }): string {
+export function kernelSandboxStatus(meta: { id?: string; model?: unknown; sandbox?: { enabled?: boolean } }): string {
   const cli = metadataCli(meta.model);
   if (!cli) return "unavailable (unknown CLI)";
-  return meta.sandbox?.enabled === true ? "enabled" : "disabled";
+  return meta.id !== "@system" && resolveSandboxEnabled(meta.sandbox?.enabled) ? "enabled" : "disabled";
 }
 
 /**

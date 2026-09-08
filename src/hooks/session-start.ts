@@ -9,7 +9,7 @@ import { loadAgentType, listSpawnableAgentTypesSync } from "../agent-types";
 import { writeAgentState } from "../agents";
 import { listTeams } from "../teams";
 import { isValidSessionId } from "../validation";
-import type { PathsConfig, SandboxConfig } from "../sandbox";
+import { resolveSandboxEnabled, type PathsConfig, type SandboxConfig } from "../sandbox";
 import { metadataCli } from "../agent-cli";
 
 export type SessionRole = "primary" | "manager" | "worker" | "coordinator";
@@ -37,7 +37,7 @@ export interface SessionContext {
   paths?: PathsConfig;
   /**
    * Fully-resolved sandbox policy frozen at spawn (`meta.sandbox`). Only
-   * `enabled` is consulted by the session-start text; absent means hook-only.
+   * `enabled` is consulted by the session-start text; omission defaults to enabled.
    */
   sandbox?: SandboxConfig;
   /** Qualified model selector; absent legacy metadata uses Claude. */
@@ -176,7 +176,7 @@ function parseMetaSandbox(value: unknown): SandboxConfig | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const v = value as Record<string, unknown>;
   return {
-    enabled: v.enabled === true,
+    enabled: resolveSandboxEnabled(v.enabled),
     rawAllow: toStringList(v.rawAllow),
     domains: toStringList(v.domains),
   };
@@ -445,11 +445,10 @@ ${renderPathList("Read only (allowRead)", paths?.allowRead)}
 ${renderPathList("Read and write (allowWrite)", paths?.allowWrite)}
 ${renderPathList("Denied (deny), overriding the lists above", paths?.deny)}`;
 
-  // Mandatory sandbox: every CLI (claude, codex, fugu, agy) launches under the
-  // kernel sandbox now, so there is no agy-specific "unavailable" case.
-  const sandboxLine = ctx.sandbox?.enabled
+  // Repository policy defaults on; the global coordinator remains unwrapped.
+  const sandboxLine = ctx.agentId !== SYSTEM_AGENT_ID && resolveSandboxEnabled(ctx.sandbox?.enabled)
     ? `The kernel sandbox is ON: an access outside these lists fails with EPERM, whatever the spelling. The hook explains the honest command-line attempts in the Denials tab of \`ib watch\`.`
-    : `The kernel sandbox is OFF; the itsybitty hook is the only fence for these paths.`;
+    : `The itsybitsy kernel sandbox is OFF; native CLI protections and the itsybitty path hook remain active.`;
 
   const pathSection = `### Path Isolation
 

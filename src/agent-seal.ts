@@ -67,12 +67,17 @@ export async function newSealCapability(meta: Record<string, unknown>): Promise<
 }
 export async function consumeSealCapability(repoId: string, agentId: string, meta: Record<string, unknown>, token: string, home?: string): Promise<boolean> {
   try {
+    if (!/^[0-9a-f-]{36}$/.test(token)) return false;
     const path = sealCapabilityPath(repoId, agentId, home);
+    const cap = await Bun.file(path).json() as { token?: string; digest?: string; expires?: number };
+    if (cap.token !== token || (cap.expires ?? 0) < Date.now()) return false;
     const claimed = `${path}.claimed-${token}`;
     await rename(path, claimed);
-    const cap = await Bun.file(claimed).json() as { token?: string; digest?: string; expires?: number };
-    await rm(claimed, { force: true });
-    return cap.token === token && (cap.expires ?? 0) >= Date.now() && cap.digest === await sealCapabilityDigest(meta);
+    try {
+      return cap.digest === await sealCapabilityDigest(meta);
+    } finally {
+      await rm(claimed, { force: true });
+    }
   } catch { return false; }
 }
 

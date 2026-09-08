@@ -2709,7 +2709,7 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
     if (removedOldSeal) {
       try { await sealAgentRecord(agent.repoPath, agent.id, agent.meta as unknown as Record<string, unknown>, agentDir); }
       catch (rollbackError) {
-        return { ok: false, exitCode: 1, stdout: "", stderr: `sandbox refresh: metadata update failed and seal restoration failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}` };
+        return { ok: false, exitCode: 1, stdout: "", stderr: `sandbox refresh: metadata update failed and seal restoration failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}; retry refresh to reconstruct the missing seal from the retained metadata, or nuke and respawn if recovery is refused` };
       }
     }
     return { ok: false, exitCode: 1, stdout: "", stderr: "sandbox refresh: could not update metadata" };

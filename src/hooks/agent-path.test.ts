@@ -1590,6 +1590,18 @@ describe("checkIbCommandAccess", () => {
     }));
   }
 
+  test("denies agent-issued internal sandbox seal, including shell chaining", async () => {
+    const direct = await checkIbCommandAccess("ib sandbox seal agent-target1", "agent-caller1", agentsDir);
+    const chained = await checkIbCommandAccess("echo ok; ib sandbox seal agent-target1", "agent-caller1", agentsDir);
+    expect(direct?.decision).toBe("deny");
+    expect(chained?.decision).toBe("deny");
+    expect(direct?.reason).toContain("internal operation");
+  });
+
+  test("system helper identity may invoke internal sandbox seal", async () => {
+    expect(await checkIbCommandAccess("ib sandbox seal agent-target1", "@system", agentsDir)).toBeNull();
+  });
+
   test("allows rehire when calling agent is the archived target's manager", async () => {
     await writeRetiredMeta("agent-target1", { manager: "agent-manager1" });
     const result = await checkIbCommandAccess(

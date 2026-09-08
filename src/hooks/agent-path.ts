@@ -22,6 +22,7 @@ import {
   pathDenialReason,
 } from "./paths-table";
 import { canonicalizeSandboxPath, resolvePreparedAccess, type PathOperation, type PreparedAccessTable } from "../sandbox";
+import { findShellMetachar } from "./shell-metachar";
 
 // Re-exported for existing callers/tests that import it from this module; the
 // definition moved to ./paths-table to break the import cycle.
@@ -1166,6 +1167,31 @@ export async function checkIbCommandAccess(
   // a misleading caller repo path. Also keeps this bypass robust against
   // future refactors that move parsing logic.
   if (callingAgentId === SYSTEM_AGENT_ID) return null;
+
+  // Seal is an internal tmux-server operation.  It must never be reachable
+  // from an agent's Bash(ib:*) allowance: the command writes the protected
+  // seal record directly and therefore bypasses the normal path hook.  The
+  // trusted tmux fallback does not pass through this hook.
+  if (/(?:^|[;&|]\s*)ib\s+sandbox\s+seal(?:\s|$)/.test(command)) {
+    return {
+      decision: "deny",
+      reason: "Access denied: ib sandbox seal is an internal operation",
+    };
+  }
+
+  // Bash(ib:*) must represent one shell command.  Otherwise a permitted
+  // `ib send ...` can append a second lifecycle/internal command after `;`,
+  // `&&`, a pipe, or a newline.  The scanner is quote/heredoc aware, so
+  // punctuation in a quoted message remains usable.
+  if (/(?:^|[;&|\n]\s*)ib\s+/.test(command)) {
+    const shellHit = findShellMetachar(command);
+    if (shellHit) {
+      return {
+        decision: "deny",
+        reason: `Access denied: chained shell command (${shellHit})`,
+      };
+    }
+  }
 
   const parsed = parseIbCommand(command);
   if (!parsed) return null;

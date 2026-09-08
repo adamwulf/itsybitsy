@@ -6306,7 +6306,10 @@ export async function newAgent(
       await logSpawn(agentDir, spawnerAgentDir, id, `git worktree list → exit=${worktreeList.exitCode} holdsBranch=${worktreeHoldsBranch}`);
       if (worktreeHoldsBranch) {
         await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: branch ${branchName} is already checked out in another worktree`);
-        await rm(agentDir, { recursive: true, force: true });
+        // The enabled seal is written before worktree setup.  Use the central
+        // unwind path so this failure cannot orphan it; git cleanup is safe
+        // here because the held branch is checked out elsewhere.
+        await cleanupOnFailure();
         return {
           ok: false,
           exitCode: 1,
@@ -6341,7 +6344,7 @@ export async function newAgent(
     if (worktreeResult.exitCode !== 0) {
       const gitErr = worktreeResult.stderr.trim();
       await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: could not create worktree${gitErr ? `: ${gitErr}` : ""}`);
-      await rm(agentDir, { recursive: true, force: true });
+      await cleanupOnFailure();
       const suffix = gitErr ? `: ${gitErr}` : "";
       return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not create worktree${suffix}` };
     }

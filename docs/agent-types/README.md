@@ -95,20 +95,23 @@ Rules:
 - Inheritable via `inherits:` — the child's `repos:` replaces the parent's list entirely. To undo a parent's restriction, either remove `inherits:` or use an intermediate parent without `repos`. There is no sentinel-string escape hatch in v1.
 - The check runs after `loadAgentType` so inherited restrictions are honored, and before the coordinator idempotency check so a restricted `coordinator.md` fails loudly in the wrong repo rather than silently succeeding.
 
-## Sandboxing is mandatory (`sandbox:` / `paths:`)
+## Sandboxing defaults to enabled (`sandbox:` / `paths:`)
 
-Every agent runs inside the sandbox — this is not optional. The `_all.md` layer supplies the baseline floor, and a type adds what it needs through two flat blocks:
+Agent types may set `sandbox: true` or `sandbox: false`. If no applicable file specifies a value, sandboxing defaults to `true`. The detailed object form also accepts an `enabled` boolean alongside `rawAllow` and `domains`:
 
-- **`paths:`** — the kernel filesystem policy: `allowRead`, `allowWrite` (write implies read), and `deny` (deny always wins). These lists **union** across the inheritance chain.
-- **`sandbox:`** — kernel raw SBPL and the network allowlist: `rawAllow` (verbatim s-expressions for process/exec/syscall/network-floor holes) and `domains` (the per-agent proxy allowlist). Both lists **union** across the chain.
-
-There is **no `enabled` toggle.** Sandboxing used to be opt-in via `sandbox.enabled: true`; that switch is **retired** (Adam, 2026-09-05) — sandboxing is always on and cannot be turned off from a type file. A leftover `sandbox.enabled:` key (whether `true` or `false`) is a hard error at `ib watch` startup:
-
+```yaml
+inherits: manager
+sandbox:
+  enabled: false
+  domains:
+    - example.com
 ```
-sandbox.enabled is retired: sandboxing is always on and cannot be toggled — remove this key (see docs/agent-types/README.md)
-```
 
-The fix is to delete the key; `rawAllow`, `domains`, and the `paths:` lists keep working unchanged. A legacy agent whose stored `meta.json` still carries `sandbox.enabled: false` is not silently upgraded — resume refuses it and points you at `ib sandbox refresh <id>`, which re-seals it as the enabled agent it now must be.
+The most specific explicit value wins: `_all.md` → `_non_coordinator.md` (except coordinators) → oldest ancestor → child type. A child can turn sandboxing off or back on. Omitting `sandbox` or adding only sandbox lists inherits the existing setting. The `rawAllow` and `domains` lists continue to union across all applicable files, including when a boolean shorthand overrides enablement.
+
+When enabled, repository agents and per-repository coordinators run inside the kernel sandbox and egress proxy; failure to establish either stops launch. With explicit `false`, the kernel sandbox, proxy, and kernel-denial collector are skipped. The hook still enforces the independent `paths:` policy. The global `@system` coordinator remains outside this rollout.
+
+New agents freeze the resolved value in `meta.json`; resume uses that frozen policy. After editing a type, use `ib sandbox refresh <id>` from an unsandboxed operator session to apply the current policy and restart an existing agent. Non-boolean enablement values are validation errors; valid overrides are accepted by `ib init-types --check`.
 
 ## Backward compatibility with older `ib` binaries
 

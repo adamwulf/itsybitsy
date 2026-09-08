@@ -1505,9 +1505,8 @@ describe("resolver input contract", () => {
   });
 });
 
-describe("sandbox config resolution (mandatory always-on)", () => {
+describe("sandbox config resolution (default enabled)", () => {
   test("an omitted sandbox block still resolves to an ENABLED sandbox", () => {
-    // Sandboxing is mandatory: an absent block cannot mean "no sandbox".
     expect(resolveSandboxConfig({})).toEqual({
       enabled: true,
       rawAllow: [],
@@ -1515,30 +1514,17 @@ describe("sandbox config resolution (mandatory always-on)", () => {
     });
   });
 
-  test("an explicit enabled:false cannot authorize an unsandboxed launch", () => {
-    // Legacy runtime metadata may still carry enabled:false; resolution forces
-    // it back on so a stale toggle can never disable the sandbox. rawAllow and
-    // domains still carry through.
-    const legacy: SandboxConfig = {
-      enabled: false,
-      rawAllow: ["(allow process*)"],
-      domains: ["api.anthropic.com"],
-    };
-    expect(resolveSandboxConfig({ sandbox: legacy })).toEqual({
-      enabled: true,
-      rawAllow: ["(allow process*)"],
-      domains: ["api.anthropic.com"],
-    });
+  test("explicit false disables sandboxing without changing lists or source", () => {
+    const source: SandboxConfig = { enabled: false, rawAllow: ["(allow process*)"], domains: ["example.com"] };
+    const resolved = resolveSandboxConfig({ sandbox: source });
+    expect(resolved).toEqual(source);
+    expect(resolved).not.toBe(source);
+    expect(source.enabled).toBe(false);
   });
 
-  test("resolution never mutates the source, so a legacy enabled:false stays diagnosable", () => {
-    // The launch/seal layer must still read the ORIGINAL enabled value off the
-    // metadata to detect and migrate a legacy disabled agent — resolution
-    // forces true on the OUTPUT without touching the input object.
-    const legacy: SandboxConfig = { enabled: false, rawAllow: [], domains: [] };
-    const resolved = resolveSandboxConfig({ sandbox: legacy });
-    expect(resolved.enabled).toBe(true);
-    expect(legacy.enabled).toBe(false);
+  test("an omitted enabled value defaults true while preserving lists", () => {
+    expect(resolveSandboxConfig({ sandbox: { rawAllow: [], domains: ["example.com"] } }))
+      .toEqual({ enabled: true, rawAllow: [], domains: ["example.com"] });
   });
 
   test("an explicit enabled:true resolves enabled with its lists carried through", () => {
@@ -1615,9 +1601,6 @@ describe("sandbox path canonicalization", () => {
   });
 });
 
-const RETIRED_ENABLED_ERROR =
-  "sandbox.enabled is retired: sandboxing is always on and cannot be toggled — remove this key (see docs/agent-types/README.md)";
-
 describe("sandbox frontmatter validation", () => {
   test("accepts the complete flat schema (rawAllow + domains, no enabled)", () => {
     expect(validateSandboxFrontmatter({ rawAllow: [], domains: [] })).toEqual({
@@ -1627,32 +1610,26 @@ describe("sandbox frontmatter validation", () => {
   });
 
   test.each([null, "str", 42, ["list"]])(
-    "a non-object sandbox value is rejected naming rawAllow/domains, not the retired enabled (%p)",
+    "invalid sandbox shapes are rejected (%p)",
     (value) => {
       expect(validateSandboxFrontmatter(value).errors).toEqual([
-        "sandbox must be an object with rawAllow and domains list fields",
+        "sandbox must be a boolean or an object with enabled, rawAllow and domains fields",
       ]);
     },
   );
 
-  test.each([
-    ["true", true],
-    ["false", false],
-    ["the trailing-comment footgun", "true  # note"],
-  ])(
-    "rejects an authored enabled key as retired regardless of value (%s)",
-    (_label, enabled) => {
-      // Neither an authored true nor false (nor the "true # note" footgun that
-      // used to parse to a truthy string) can influence launch policy — every
-      // form is the same retired-key error, guiding the author to remove it.
-      const result = validateSandboxFrontmatter({ enabled });
-      expect(result.errors).toEqual([RETIRED_ENABLED_ERROR]);
-    },
-  );
+  test.each([true, false])("accepts boolean shorthand and enabled field %s", (enabled) => {
+    expect(validateSandboxFrontmatter(enabled).errors).toEqual([]);
+    expect(validateSandboxFrontmatter({ enabled }).errors).toEqual([]);
+  });
 
-  test("still reports the retired enabled key alongside other errors", () => {
-    const result = validateSandboxFrontmatter({ enabled: false, domains: "not-a-list" });
-    expect(result.errors).toContain(RETIRED_ENABLED_ERROR);
+  test.each(["false", "true  # note", 0, null])("rejects non-boolean enabled %p", (enabled) => {
+    expect(validateSandboxFrontmatter({ enabled }).errors).toEqual(["sandbox.enabled must be a boolean"]);
+  });
+
+  test("reports invalid enablement alongside list errors", () => {
+    const result = validateSandboxFrontmatter({ enabled: "false", domains: "not-a-list" });
+    expect(result.errors).toContain("sandbox.enabled must be a boolean");
     expect(result.errors).toContain("sandbox.domains must be a list");
   });
 

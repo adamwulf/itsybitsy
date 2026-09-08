@@ -437,56 +437,18 @@ describe("checkAgentTypeFloors (init-types --check)", () => {
     expect(diffs.map((d) => d.file)).toEqual(["_all.md"]);
   });
 
-  test.each(["true", "false"])(
-    "flags a stale sandbox.enabled: %s key as a retired-key migration diagnostic (init-types --check must catch what ib watch would reject)",
-    async (value) => {
-      await initAgentTypes();
-      // A live file that STILL carries the retired enabled key would fail
-      // validateAllAgentTypes at the next `ib watch` startup, so the preflight
-      // must flag it (non-zero) rather than green-light a config that breaks.
-      // Reported for true AND false — sandboxing is mandatory either way.
-      await Bun.write(
-        join(typesDir, "worker.md"),
-        `---\nname: worker\nsandbox:\n  enabled: ${value}\n---\nbody`,
-      );
-      const { diffs, hasDifferences } = await checkAgentTypeFloors();
-      expect(hasDifferences).toBe(true);
-      const workerDiff = diffs.find((d) => d.file === "worker.md");
-      expect(workerDiff).toBeDefined();
-      expect(
-        workerDiff!.lines.some(
-          (line) => line.includes("sandbox.enabled") && line.includes("retired"),
-        ),
-      ).toBe(true);
-    },
-  );
+  test.each(["true", "false"])("allows sandbox.enabled: %s in built-in and custom types", async (value) => {
+    await initAgentTypes();
+    for (const name of ["worker", "researcher"]) {
+      await Bun.write(join(typesDir, `${name}.md`),
+        `---\nname: ${name}\nsandbox:\n  enabled: ${value}\n---\nbody`);
+    }
+    const { diffs } = await checkAgentTypeFloors();
+    expect(diffs.flatMap((diff) => diff.lines).some((line) => line.includes("sandbox.enabled"))).toBe(false);
+    expect(diffs.some((diff) => diff.file === "researcher.md")).toBe(false);
+  });
 
-  test.each(["true", "false"])(
-    "flags a CUSTOM type's stale sandbox.enabled: %s (scans ALL local .md, not just embedded names)",
-    async (value) => {
-      await initAgentTypes();
-      // researcher.md is NOT an embedded built-in, so it has no floor to compare
-      // — but a stale enabled key still breaks `ib watch`, so --check must catch
-      // it too (the bug: the scan used to iterate embedded names only).
-      await Bun.write(
-        join(typesDir, "researcher.md"),
-        `---\nname: researcher\nsandbox:\n  enabled: ${value}\n---\nbody`,
-      );
-      const { diffs, hasDifferences } = await checkAgentTypeFloors();
-      expect(hasDifferences).toBe(true);
-      const custom = diffs.find((d) => d.file === "researcher.md");
-      expect(custom).toBeDefined();
-      expect(
-        custom!.lines.some((l) => l.includes("sandbox.enabled") && l.includes("retired")),
-      ).toBe(true);
-      // Reported exactly once for the file.
-      expect(custom!.lines.filter((l) => l.includes("sandbox.enabled")).length).toBe(1);
-    },
-  );
-
-  test("a toggle-free floor that matches the embedded defaults stays green (no retired-key false positive)", async () => {
-    // The stock embedded files carry NO enabled key, so a verbatim local copy
-    // must report nothing — the retired-key diagnostic fires ONLY on a stale key.
+  test("a floor that matches the embedded defaults stays green", async () => {
     await initAgentTypes();
     const { diffs, hasDifferences } = await checkAgentTypeFloors();
     expect(hasDifferences).toBe(false);
@@ -579,7 +541,7 @@ describe("ensureAgentTypesDir: system layer", () => {
 
 test("parseAgentTypeFile: parses separate paths and sandbox blocks", () => {
   // parseAgentTypeFile is a faithful YAML reader, not a policy layer: it still
-  // surfaces a (now-retired) sandbox.enabled key verbatim so the downstream
+  // surfaces a sandbox.enabled key verbatim so the downstream
   // validator can flag it and loadAgentType can force it true. Retirement is
   // enforced in validateSandboxFrontmatter / mergeRawFrontmatters, not here.
   const content = `---
@@ -869,11 +831,7 @@ body`);
     expect(type.permissions?.deny?.sort()).toEqual(["Bash", "NotebookEdit", "Write"]);
   });
 
-  test("paths and sandbox lists union across a multi-level chain; enabled is forced on despite authored false at every layer", async () => {
-    // Every layer authors `enabled: false`. Under the mandatory-sandbox policy
-    // the merged config is still enabled:true — no authored toggle, at any
-    // layer, can switch the sandbox off. (The validator separately rejects the
-    // authored key; loadAgentType simply ignores it here.)
+  test("paths and sandbox lists union across a multi-level chain independently of disabled sandboxing", async () => {
     await writeType("floor", `---
 name: floor
 paths:
@@ -918,10 +876,29 @@ leaf`);
       deny: ["**/.env", "~/.ssh", "~/.aws"],
     });
     expect(type.sandbox).toEqual({
-      enabled: true,
+      enabled: false,
       rawAllow: ["(allow process*)", "(deny network*)", "(allow mach-lookup)"],
       domains: ["api.anthropic.com", "github.com", "*.githubusercontent.com"],
     });
+  });
+
+  test.each([
+    ["sandbox: true", "sandbox: false", "", false],
+    ["sandbox: false", "", "sandbox: true", true],
+    ["sandbox: false", "sandbox:\n  domains: [example.com]", "", false],
+    ["sandbox:\n  enabled: true", "sandbox: false", "sandbox:\n  enabled: true", true],
+    ["", "sandbox:\n  rawAllow: []", "", undefined],
+  ])("sandbox inheritance preserves the most specific explicit value (%s / %s / %s)", async (root, middle, leaf, enabled) => {
+    await writeType("root", `---\n${root}\n---\nroot`);
+    await writeType("middle", `---\ninherits: root\n${middle}\n---\nmiddle`);
+    await writeType("leaf", `---\ninherits: middle\n${leaf}\n---\nleaf`);
+    expect((await loadAgentType("leaf")).sandbox?.enabled).toBe(enabled);
+  });
+
+  test("boolean overrides retain ancestor sandbox lists", async () => {
+    await writeType("root", `---\nsandbox:\n  enabled: true\n  domains: [example.com]\n---\nroot`);
+    await writeType("leaf", `---\ninherits: root\nsandbox: false\n---\nleaf`);
+    expect((await loadAgentType("leaf")).sandbox).toEqual({ enabled: false, rawAllow: [], domains: ["example.com"] });
   });
 
   test("multi-level chain (A -> B -> C) merges and overrides correctly in order", async () => {
@@ -1729,18 +1706,15 @@ ${sandboxBody}
 body`);
   }
 
-  const RETIRED_ENABLED = "sandbox.enabled is retired: sandboxing is always on and cannot be toggled — remove this key (see docs/agent-types/README.md)";
+  test.each([true, false])("accepts boolean sandbox enablement %s", async (enabled) => {
+    await writeType("object", `  enabled: ${enabled}`);
+    await Bun.write(join(typesDir, "shorthand.md"), `---\nsandbox: ${enabled}\n---\nbody`);
+    expect(await validateAllAgentTypes()).toEqual([]);
+  });
 
-  test.each([
-    ["clean-true", "  enabled: true"],
-    ["clean-false", "  enabled: false"],
-    // The trailing-comment footgun (parses to the truthy string "true  # note")
-    // is also rejected — as a retired key, not as a non-boolean value.
-    ["comment-footgun", "  enabled: true  # note"],
-  ])("rejects an authored sandbox.enabled key as retired (%s)", async (name, body) => {
-    await writeType(`bad-enabled-${name}`, body);
-    const errors = await validateAllAgentTypes();
-    expect(errors).toContain(`bad-enabled-${name}.md: ${RETIRED_ENABLED}`);
+  test("rejects a non-boolean enabled value", async () => {
+    await writeType("bad-enabled", "  enabled: true  # note");
+    expect(await validateAllAgentTypes()).toContain("bad-enabled.md: sandbox.enabled must be a boolean");
   });
 
   test("rejects a non-list value for every sandbox list field", async () => {

@@ -9,6 +9,9 @@ export interface SandboxConfig {
   domains: string[];
 }
 
+/** Type-layer policy before the default is applied at final resolution. */
+export type SandboxConfigInput = Omit<SandboxConfig, "enabled"> & { enabled?: boolean };
+
 /** Filesystem policy authored in the top-level `paths:` frontmatter block. */
 export interface PathsConfig {
   allowRead: string[];
@@ -95,10 +98,11 @@ export interface SandboxValidationResult {
 }
 
 export interface SandboxConfigSource {
-  sandbox?: SandboxConfig;
+  sandbox?: SandboxConfigInput;
 }
 
 const SANDBOX_KEYS = new Set([
+  "enabled",
   "rawAllow",
   "domains",
 ]);
@@ -110,14 +114,6 @@ const SANDBOX_LIST_KEYS = [
 
 const MOVED_SANDBOX_PATH_KEYS = new Set(["allowRead", "allowWrite", "deny"]);
 
-/**
- * `sandbox.enabled` is retired. Sandboxing is mandatory (Adam, 2026-09-05), so
- * there is no authored on/off switch: an authored `enabled` key — true OR false —
- * is a hard validation error that points the author at the migration. The
- * `SandboxConfig.enabled` FIELD is kept (always resolved true) purely for
- * compat/display/seal shape; only the *authored* key is rejected here.
- */
-const RETIRED_SANDBOX_KEYS = new Set(["enabled"]);
 const PATHS_KEYS = ["allowRead", "allowWrite", "deny"] as const;
 
 export type CompiledPath =
@@ -146,19 +142,12 @@ export interface OrderedPathEntry {
  * Resolve the kernel-only sandbox policy without touching spawn wiring.
  * Filesystem policy lives independently in `PathsConfig`.
  *
- * Sandboxing is MANDATORY (Adam, 2026-09-05): every resolved config is
- * `enabled: true`. There is no authored on/off switch — an absent `sandbox`
- * block, one with `enabled: false`, or one with `enabled: true` all resolve to
- * enabled the same way, so neither omission nor a leftover toggle can authorize
- * an unsandboxed launch. The source object is NOT mutated: a legacy
- * `meta.sandbox.enabled: false` stays readable on the input for migration
- * diagnosis while resolution ignores it. Only `rawAllow`/`domains` are carried
- * through (as fresh copies); `enabled` is retained on the output type only for
- * compat/display/seal shape (agent-seal.ts, ib-commands.ts).
+ * Default to enabled only when no explicit value was resolved from the type
+ * hierarchy. Return fresh lists without mutating the source.
  */
 export function resolveSandboxConfig(source: SandboxConfigSource): SandboxConfig {
   return {
-    enabled: true,
+    enabled: source.sandbox?.enabled !== false,
     rawAllow: [...(source.sandbox?.rawAllow ?? [])],
     domains: [...(source.sandbox?.domains ?? [])],
   };
@@ -933,14 +922,16 @@ function isCatchAllRawAllow(value: string): boolean {
   return /^\(\s*allow\s+(?:default|file(?:-[A-Za-z0-9_-]+)?\*)\s*\)$/.test(value.trim());
 }
 
-/** Validate the raw, flat `sandbox:` frontmatter object. */
+/** Validate a boolean shorthand or the flat `sandbox:` frontmatter object. */
 export function validateSandboxFrontmatter(value: unknown): SandboxValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
 
+  if (typeof value === "boolean") return { errors, warnings };
+
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return {
-      errors: ["sandbox must be an object with rawAllow and domains list fields"],
+      errors: ["sandbox must be a boolean or an object with enabled, rawAllow and domains fields"],
       warnings,
     };
   }
@@ -949,16 +940,13 @@ export function validateSandboxFrontmatter(value: unknown): SandboxValidationRes
   for (const key of Object.keys(sandbox)) {
     if (MOVED_SANDBOX_PATH_KEYS.has(key)) {
       errors.push(`sandbox.${key} has moved; move it to paths.${key}`);
-    } else if (RETIRED_SANDBOX_KEYS.has(key)) {
-      // Retired regardless of value: true, false, and the trailing-comment
-      // footgun ("true  # note") all report the same migration guidance, so an
-      // authored toggle can never influence launch policy.
-      errors.push(
-        `sandbox.enabled is retired: sandboxing is always on and cannot be toggled — remove this key (see docs/agent-types/README.md)`,
-      );
     } else if (!SANDBOX_KEYS.has(key)) {
       errors.push(`sandbox contains unknown key "${key}"`);
     }
+  }
+
+  if (sandbox.enabled !== undefined && typeof sandbox.enabled !== "boolean") {
+    errors.push("sandbox.enabled must be a boolean");
   }
 
   for (const key of SANDBOX_LIST_KEYS) {

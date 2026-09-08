@@ -1,8 +1,8 @@
 # Staged sandbox rollout
 
-This rollout requires `sandbox-exec` for ordinary agents and per-repository coordinators, including Claude, Codex/fugu, and agy launch and resume paths. The global `@system` coordinator remains unsandboxed for now. The phase order is: exercise the repository-agent rollout; add launch-script-owned kernel-denial collection and send-time attachment staging; then resume global coordinator sandbox work. The two intermediate phases can proceed independently.
+**Configuration update (2026-09-08):** sandboxing now defaults to true and accepts per-type boolean overrides (`sandbox: false` or `sandbox.enabled: false`). The most specific explicit setting wins through layers and inheritance; omission inherits. See [the type guide](agent-types/README.md). Enabled-mode failures still stop launch. Explicit false skips the kernel wrapper, proxy, and kernel-denial collector; hooks continue enforcing paths. The global `@system` coordinator remains unsandboxed.
 
-Agent-type Markdown defines filesystem paths, raw Seatbelt rules, and allowed network domains. It does not define an on/off switch. This replaces the former opt-in rollout and its `sandbox.enabled` instructions.
+The rollout evidence below records the earlier mandatory-only policy. Its instructions to remove enablement keys, its retired-key preflight diagnostics, and its claims that disabling is unavailable are superseded by the current contract. Keep intentional overrides; `ib init-types --check` compares list floors, and `ib sandbox refresh` applies current type policy to existing agents in either direction. The remaining enabled-mode validation evidence and known collection limits continue to apply.
 
 ## Implementation and validation status
 

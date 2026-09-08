@@ -14,7 +14,7 @@ import allLayerMd from '../docs/agent-types/_all.md' with { type: 'text' };
 import nonCoordinatorLayerMd from '../docs/agent-types/_non_coordinator.md' with { type: 'text' };
 import { parseModel } from './agent-cli';
 import { isValidEffort } from './validation';
-import type { PathsConfig, SandboxConfig } from './sandbox';
+import type { PathsConfig, SandboxConfigInput } from './sandbox';
 import { validatePathsFrontmatter, validateSandboxFrontmatter } from './sandbox';
 
 const EMBEDDED_TYPES: Record<string, string> = {
@@ -69,7 +69,7 @@ export interface AgentType {
   /** Resolved, inheritance-merged filesystem policy. */
   paths?: PathsConfig;
   /** Resolved, inheritance-merged Seatbelt sandbox configuration. */
-  sandbox?: SandboxConfig;
+  sandbox?: SandboxConfigInput;
   /**
    * If defined, this type can only be spawned in repos whose name or nickname
    * matches an entry. Checked by `newAgent` before any worktree or tmux
@@ -338,25 +338,9 @@ export interface AgentTypeFloorDiff {
  * Compare every embedded agent-type file that ALSO exists locally against the
  * embedded default, reporting the `paths:` (allowRead, allowWrite, deny) and
  * `sandbox:` (rawAllow, domains) entries present in the embedded block but
- * missing from the local file, per list. `sandbox.enabled` is no longer a floor
- * value (it is retired — sandboxing is mandatory, always on), so it is NOT
- * compared embedded-vs-local. Instead, a local file that STILL carries the
- * retired `sandbox.enabled` key (true OR false) is reported as a one-sided
- * migration diagnostic: the same stale key would fail `validateAllAgentTypes`
- * at the next `ib watch` startup, so the preflight must flag it here rather than
- * green-light a config that immediately breaks. This retired-key scan covers
- * EVERY local `.md` file — the embedded built-ins AND any CUSTOM types the user
- * added — because a custom type carrying the stale key breaks `ib watch` just
- * the same, even though it has no embedded floor to compare against. Each file
- * is reported at most once (a built-in with both a floor miss and a stale key
- * gets one entry). Files that match — and embedded files with no local copy —
- * produce nothing. Nothing is written.
- *
- * Backs `ib init-types --check`, the gate precondition that catches a live
- * `~/.itsybitsy/agent-types/_all.md` still missing the tightened floor (because
- * `ib init-types` never updates an existing file) OR still carrying the retired
- * `sandbox.enabled` key. `hasDifferences` is true when any difference was found,
- * so the command can exit non-zero.
+ * missing from the local file, per list. Sandbox enablement is a user override,
+ * not a floor value, and is intentionally excluded from this comparison.
+ * Nothing is written. Backs `ib init-types --check`.
  *
  * The compare is **literal string set-membership**, entry for entry: a locally
  * rewritten but equivalent form (e.g. the absolute spelling of an embedded `~`
@@ -381,18 +365,6 @@ export async function checkAgentTypeFloors(): Promise<{
     if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
     return stringList((value as Record<string, unknown>)[key]);
   };
-  // The retired `sandbox.enabled` key, if a local file still carries it (any
-  // value). Returns the raw value for the diagnostic, or a sentinel when absent.
-  const RETIRED_ABSENT = Symbol("no-enabled");
-  const localRetiredEnabled = (fm: Record<string, unknown>): unknown | typeof RETIRED_ABSENT => {
-    const value = fm.sandbox;
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return RETIRED_ABSENT;
-    const sandbox = value as Record<string, unknown>;
-    return "enabled" in sandbox ? sandbox.enabled : RETIRED_ABSENT;
-  };
-  const retiredLine = (retired: unknown): string =>
-    `  sandbox.enabled: retired key present (value: ${JSON.stringify(retired)}) — remove it; sandboxing is always on and cannot be toggled`;
-
   const listChecks: Array<{ block: "paths" | "sandbox"; key: string }> = [
     { block: "paths", key: "allowRead" },
     { block: "paths", key: "allowWrite" },
@@ -401,10 +373,7 @@ export async function checkAgentTypeFloors(): Promise<{
     { block: "sandbox", key: "domains" },
   ];
 
-  // Accumulate lines per file so each file is reported exactly once even when it
-  // has BOTH an embedded floor miss AND a retired key. `fileOrder` fixes the
-  // output order: embedded files (in EMBEDDED_TYPES order) first, then custom
-  // files (sorted) — so the existing embedded-only assertions are unaffected.
+  // Accumulate missing entries in embedded-file order.
   const linesByFile = new Map<string, string[]>();
   const fileOrder: string[] = [];
   const addLines = (fileName: string, newLines: string[]): void => {
@@ -415,8 +384,7 @@ export async function checkAgentTypeFloors(): Promise<{
     linesByFile.set(fileName, existing);
   };
 
-  // Pass 1: embedded floor comparison (embedded vs local, list-by-list) plus the
-  // retired-key diagnostic for embedded files.
+  // Compare embedded and local lists.
   for (const [name, content] of Object.entries(EMBEDDED_TYPES)) {
     const fileName = `${name}.md`;
     const filePath = join(typesDir, fileName);
@@ -438,33 +406,7 @@ export async function checkAgentTypeFloors(): Promise<{
         if (!localSet.has(entry)) lines.push(`  ${block}.${key}: missing ${entry}`);
       }
     }
-    const retired = localRetiredEnabled(local);
-    if (retired !== RETIRED_ABSENT) lines.push(retiredLine(retired));
     addLines(fileName, lines);
-  }
-
-  // Pass 2: retired-key scan of EVERY OTHER local .md file (custom types). A
-  // custom type has no embedded floor to compare, but a stale `sandbox.enabled`
-  // key would still fail validateAllAgentTypes at the next `ib watch` startup —
-  // so the preflight must catch it here too, not just for the embedded set.
-  const embeddedFileNames = new Set(Object.keys(EMBEDDED_TYPES).map((n) => `${n}.md`));
-  let localFileNames: string[] = [];
-  try {
-    localFileNames = readdirSync(typesDir).filter((f) => f.endsWith(".md")).sort();
-  } catch {
-    // Types dir missing → no custom files to scan.
-  }
-  for (const fileName of localFileNames) {
-    if (embeddedFileNames.has(fileName)) continue; // handled in pass 1
-    let content: string;
-    try {
-      content = await Bun.file(join(typesDir, fileName)).text();
-    } catch {
-      continue;
-    }
-    const local = parseAgentTypeFile(content).frontmatter;
-    const retired = localRetiredEnabled(local);
-    if (retired !== RETIRED_ABSENT) addLines(fileName, [retiredLine(retired)]);
   }
 
   const diffs: AgentTypeFloorDiff[] = fileOrder.map((file) => ({
@@ -571,9 +513,9 @@ async function resolveChain(
  * record. Scalar fields take the descendant's value when the key is **present**
  * in the descendant's frontmatter. `permissions.allow` / `permissions.deny`
  * are unioned (deduped via Set) across the entire chain. Paths and sandbox
- * list fields are likewise unioned. `sandbox.enabled` is NOT merged: the
- * authored key is retired and any layer's value is ignored — the merged sandbox
- * config is always `enabled: true` (sandboxing is mandatory, always on).
+ * list fields are likewise unioned. Sandbox enablement takes the most specific
+ * explicit boolean (`sandbox: false` or `sandbox.enabled: false`); omission
+ * inherits the ancestor value, defaulting to true only after the full merge.
  * `repos` is replaced (not merged) when the descendant declares it.
  *
  * The `name` and `spawnable` keys are intentionally not set here — the caller
@@ -610,12 +552,9 @@ function mergeRawFrontmatters(
   const allAllow: string[] = [];
   const allDeny: string[] = [];
 
-  // Sandbox is a separate hand-written union of two lists (rawAllow, domains).
-  // The `enabled` scalar is retired: sandboxing is mandatory, so an authored
-  // `enabled` (true OR false, in any layer) is ignored here — the merged config
-  // is forced `enabled: true` below. A descendant may still add access or
-  // denials, but there is no longer any switch to turn the sandbox off.
+  // Union lists independently of the most specific explicit enablement value.
   let sawSandbox = false;
+  let sandboxEnabled: boolean | undefined;
   const sandboxLists: Record<SandboxListKey, string[]> = {
     rawAllow: [],
     domains: [],
@@ -662,11 +601,15 @@ function mergeRawFrontmatters(
       }
     }
 
-    // Sandbox — union the rawAllow/domains lists across the chain. `enabled` is
-    // intentionally NOT read here (it is retired; see the block comment above).
+    // A shorthand boolean changes only enablement; inherited lists survive.
+    if (typeof fm.sandbox === "boolean") {
+      sawSandbox = true;
+      sandboxEnabled = fm.sandbox;
+    }
     if (typeof fm.sandbox === "object" && fm.sandbox !== null && !Array.isArray(fm.sandbox)) {
       sawSandbox = true;
       const sandbox = fm.sandbox as Record<string, unknown>;
+      if (typeof sandbox.enabled === "boolean") sandboxEnabled = sandbox.enabled;
       for (const key of SANDBOX_LIST_KEYS) {
         const values = sandbox[key];
         if (!Array.isArray(values)) continue;
@@ -707,11 +650,10 @@ function mergeRawFrontmatters(
 
   if (sawSandbox) {
     merged.sandbox = {
-      // Mandatory sandbox: always enabled, never derived from authored input.
-      enabled: true,
+      enabled: sandboxEnabled,
       rawAllow: Array.from(new Set(sandboxLists.rawAllow)),
       domains: Array.from(new Set(sandboxLists.domains)),
-    } satisfies SandboxConfig;
+    } satisfies SandboxConfigInput;
   }
 
   if (sawPaths) {
@@ -751,9 +693,11 @@ function buildAgentTypeFromFrontmatter(
     ? (frontmatter.permissions as Record<string, unknown>)
     : undefined;
 
-  const sandbox = typeof frontmatter.sandbox === "object" && frontmatter.sandbox !== null
-    ? (frontmatter.sandbox as Record<string, unknown>)
-    : undefined;
+  const sandbox = typeof frontmatter.sandbox === "boolean"
+    ? { enabled: frontmatter.sandbox }
+    : typeof frontmatter.sandbox === "object" && frontmatter.sandbox !== null
+      ? (frontmatter.sandbox as Record<string, unknown>)
+      : undefined;
   const paths = typeof frontmatter.paths === "object" && frontmatter.paths !== null
     ? (frontmatter.paths as Record<string, unknown>)
     : undefined;
@@ -803,9 +747,7 @@ function buildAgentTypeFromFrontmatter(
       : undefined,
     sandbox: sandbox
       ? {
-          // Mandatory sandbox: a directly-built type ignores any authored
-          // `enabled` and is always enabled (matches resolveSandboxConfig).
-          enabled: true,
+          enabled: typeof sandbox.enabled === "boolean" ? sandbox.enabled : undefined,
           rawAllow: stringList(sandbox.rawAllow),
           domains: stringList(sandbox.domains),
         }

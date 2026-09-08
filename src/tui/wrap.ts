@@ -15,7 +15,7 @@ import { stripAnsi, isCodexStatusLine } from "../parse-state";
  * correct at any width, so the word-wrap path special-cases them (see
  * wordWrapSingleLine).
  *
- * Two shapes qualify:
+ * Three shapes qualify:
  *
  *  1. A bare rule — the entire visible content is a run of light (`─`) or heavy
  *     (`━`) box-drawing chars. Codex uses the heavy form for table header rules.

@@ -343,6 +343,24 @@ describe("separator collapse (─ divider truncation, pinned-width fix)", () => 
     expect(stripAnsi(rows[0]!).trim()).toMatch(/^━+(?:  ━+)?$/);
   });
 
+  test("an indented ANSI-styled heavy table-header rule still truncates", () => {
+    const headerRule = `  \x1b[1m${"━".repeat(40)}\x1b[0m  \x1b[2m${"━".repeat(160)}\x1b[0m`;
+    const rows = wordWrapSingleLine(headerRule, 80);
+    expect(rows.length).toBe(1);
+    expect(visibleWidth(rows[0]!)).toBe(80);
+    expect(stripAnsi(rows[0]!).startsWith("  ━")).toBe(true);
+  });
+
+  test.each([
+    ["one-space", " "],
+    ["three-space", "   "],
+  ])("a %s heavy-run gap is not classified as a table-header rule", (_name, gap) => {
+    const nearMiss = `${"━".repeat(40)}${gap}${"━".repeat(160)}`;
+    const rows = wordWrapSingleLine(nearMiss, 80);
+    expect(rows.length).toBeGreaterThan(1);
+    expect(rows.join("").replace(/\s/g, "")).toBe(nearMiss.replace(/\s/g, ""));
+  });
+
   test("heavy-bar-decorated prose still wraps without losing content", () => {
     const prose =
       "━ This is an ordinary long heading whose contents must remain visible when wrapping across a narrow pane ━━━━";

@@ -139,7 +139,10 @@ import { sandboxDenialScriptPreamble, sandboxDenialExecPrefix } from "./sandbox-
 import {
   writeSealRecordDirect,
   readSealRecord,
+  readSealRecordStrict,
   deleteSealRecord,
+  deleteSealRecordChecked,
+  canonicalSealJson,
   verifyMetaAgainstSeal,
   computeSealInputs,
   computeSealRecord,
@@ -483,7 +486,16 @@ export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
       tmux_session: tmuxSession,
       claude_pid: agent.meta.claude_pid,
       sandbox_proxy_pid: agent.meta.sandbox_proxy_pid,
-    }, "Agent retired", preparedRetirement);
+    }, "Agent retired", preparedRetirement, async () => {
+      await deleteAgentSealChecked(
+        agent.repoPath,
+        agent.id,
+        agent.repoPath,
+        resolveSandboxConfig({ sandbox: agent.meta.sandbox }).enabled
+          ? agent.meta as unknown as Record<string, unknown>
+          : undefined,
+      );
+    });
   } catch (err) {
     return {
       ok: false,
@@ -513,11 +525,6 @@ export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
     };
   }
   const { prunedTeams } = teardown;
-
-  // Delete the sealed record — retire tears the agent down (rehire re-seals from
-  // the restored meta if the agent is ever brought back). The seal lives outside
-  // agentDir (~/.itsybitsy/sealed), so teardown's dir removal does not touch it.
-  await removeAgentSeal(agent.repoPath, agent.id);
 
   // Scan for orphaned Claude processes
   await scanAndKillOrphans(agentsDir);
@@ -1357,27 +1364,42 @@ async function nukeAgentList(
 
     // Read meta for teardown
     let meta = { tmux_session: "", claude_pid: "" };
+    let fullMeta: Record<string, unknown> | undefined;
     try {
-      const metaData = await Bun.file(join(agentDir, "meta.json")).json();
+      const metaData = await Bun.file(join(agentDir, "meta.json")).json() as Record<string, unknown>;
+      fullMeta = metaData;
       meta = {
-        tmux_session: metaData.tmux_session || "",
-        claude_pid: metaData.claude_pid || "",
+        tmux_session: typeof metaData.tmux_session === "string" ? metaData.tmux_session : "",
+        claude_pid: typeof metaData.claude_pid === "string" ? metaData.claude_pid : "",
       };
     } catch { /* ignore */ }
 
     // Teardown — captures the pruned (team, id) pairs even on the failure path
     // (the prune ran inside archiveAgent regardless of the final dir-removal).
     try {
-      const { prunedTeams } = await teardownAgent(repoPath, id, agentDir, meta, "Agent nuked");
+      const { prunedTeams } = await teardownAgent(
+        repoPath,
+        id,
+        agentDir,
+        meta,
+        "Agent nuked",
+        undefined,
+        async () => {
+          await deleteAgentSealChecked(
+            repoPath,
+            id,
+            repoPath,
+            fullMeta && resolveSandboxConfig({ sandbox: fullMeta.sandbox as SandboxConfig | undefined }).enabled
+              ? fullMeta
+              : undefined,
+          );
+        },
+      );
       allPruned.push(...prunedTeams);
       killed++;
     } catch { /* teardown error — count as failure */
       failed++;
     }
-    // Delete the sealed record (outside agentDir, so teardown's dir removal does
-    // not touch it). Unconditional — a nuked agent is gone whether teardown
-    // fully succeeded or not, so its seal must not linger.
-    await removeAgentSeal(repoPath, id);
   }
 
   // Clean up orphaned tmux sessions
@@ -1731,7 +1753,7 @@ export async function resumeAgent(
       });
       delete agent.meta.sandbox_proxy_port;
       delete agent.meta.sandbox_proxy_pid;
-      await removeAgentSeal(agent.repoPath, agent.id);
+      await deleteAgentSealChecked(agent.repoPath, agent.id, agentDir);
       await logAgent(agentDir, "[resume] kernel sandbox disabled by frozen agent policy; hooks remain enabled");
     }
 
@@ -2817,9 +2839,9 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
     await stopSandboxProxyForAgent(agentDir, agent.meta);
     delete agent.meta.sandbox_proxy_port;
     delete agent.meta.sandbox_proxy_pid;
-    // The checked transition above already removed the seal. Keep this cleanup
-    // best-effort only for legacy disabled agents that had no enabled seal.
-    if (!removedOldSeal) await removeAgentSeal(agent.repoPath, agent.id);
+    // The checked transition above already removed the seal. Legacy disabled
+    // agents still use the same checked idempotent deletion path.
+    if (!removedOldSeal) await deleteAgentSealChecked(agent.repoPath, agent.id, agentDir);
   }
 
   const resumeResult = await resumeAgent(agent);
@@ -3685,6 +3707,27 @@ export async function mergeAgent(
       }
     });
 
+    // Seal cleanup is part of the close transaction. Do it while agentDir and
+    // the worktree still exist, so a helper failure is reported with the
+    // remaining lifecycle state recoverable instead of being silently orphaned.
+    try {
+      await deleteAgentSealChecked(
+        agent.repoPath,
+        agent.id,
+        agent.repoPath,
+        resolveSandboxConfig({ sandbox: agent.meta.sandbox }).enabled
+          ? agent.meta as unknown as Record<string, unknown>
+          : undefined,
+      );
+    } catch (err) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: `Merge completed, but sealed-record cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+
     // 14-16. Copy settings, remove worktree, delete branch
     await timed("merge", "worktree-cleanup", async () => {
       const settingsPath = join(worktreePath, ".claude", "settings.local.json");
@@ -3728,10 +3771,6 @@ export async function mergeAgent(
       const res = await archiveAgent(agent.repoPath, agent.id, agentDir);
       prunedTeams = res.prunedTeams;
       await removeAgentQuestions(agent.repoPath, agent.id);
-      // Delete the sealed record — it lives OUTSIDE agentDir (~/.itsybitsy/sealed),
-      // so the rm below does not touch it. A merged agent is gone, so its seal must
-      // not linger (retire/nuke delete it the same way).
-      await removeAgentSeal(agent.repoPath, agent.id);
       try { await rm(agentDir, { recursive: true, force: true }); } catch { /* ignore */ }
     });
 
@@ -5227,14 +5266,62 @@ async function runHelperViaTmuxServerBlocking(
   command: string[],
 ): Promise<void> {
   const shellCommand = command.map(shellQuote).join(" ");
-  const result = await runner.run([
-    "tmux",
-    "run-shell",
-    `cd ${shellQuote(cwd)} && exec ${shellCommand}`,
-  ]);
-  if (result.exitCode !== 0) {
-    throw new Error(result.stderr.trim() || `tmux run-shell failed with exit ${result.exitCode}`);
+  // tmux's client status only tells us whether run-shell itself was accepted;
+  // it does not reliably relay the child shell's status. Have that shell write
+  // its own status into a unique directory under cwd (which the sandboxed
+  // spawner can already access), then require the result after run-shell's
+  // synchronous wait. The sealed directory never needs to be reopened here.
+  const resultDir = join(cwd, `.ib-seal-helper-${crypto.randomUUID()}`);
+  const resultPath = join(resultDir, "result");
+  const resultTmpPath = join(resultDir, "result.tmp");
+  await mkdir(resultDir, { mode: 0o700 });
+  try {
+    const script = [
+      `cd ${shellQuote(cwd)} || exit 125`,
+      `${shellCommand}`,
+      "rc=$?",
+      "umask 077",
+      `printf '%s\\n' "$rc" > ${shellQuote(resultTmpPath)}`,
+      `mv -f ${shellQuote(resultTmpPath)} ${shellQuote(resultPath)}`,
+      "exit 0",
+    ].join("; ");
+    const result = await runner.run(["tmux", "run-shell", script]);
+    if (result.exitCode !== 0) {
+      throw new Error(result.stderr.trim() || `tmux run-shell failed with exit ${result.exitCode}`);
+    }
+
+    let reported: string;
+    try {
+      reported = (await Bun.file(resultPath).text()).trim();
+    } catch {
+      throw new Error("tmux seal helper did not report completion");
+    }
+    if (!/^(0|[1-9][0-9]*)$/.test(reported)) {
+      throw new Error("tmux seal helper reported an invalid status");
+    }
+    const helperExitCode = Number(reported);
+    if (helperExitCode !== 0) {
+      throw new Error(`tmux seal helper failed with exit ${helperExitCode}`);
+    }
+  } finally {
+    await rm(resultDir, { recursive: true, force: true });
   }
+}
+
+type SealCapabilityCommandBuilder = (
+  action: SealCapabilityAction,
+  agentId: string,
+  repoId: string,
+) => string[];
+let sealCapabilityCommandOverride: SealCapabilityCommandBuilder | null = null;
+
+/** Test seam for exercising the real status-relay shell without invoking ib. */
+export function setSealCapabilityCommandForTesting(fn: SealCapabilityCommandBuilder | null): void {
+  sealCapabilityCommandOverride = fn;
+}
+
+export function resetSealCapabilityCommandForTesting(): void {
+  sealCapabilityCommandOverride = null;
 }
 
 async function runSealCapabilityHelper(
@@ -5249,7 +5336,11 @@ async function runSealCapabilityHelper(
   const capJson = Buffer.from(JSON.stringify(cap)).toString("base64");
   const capPath = sealCapabilityPath(repoId, agentId, cap.token);
   const subcommand = action === "write" ? "seal" : "delete-seal";
-  const capScript = `umask 077 && mkdir -p ${shellQuote(dirname(capPath))} && printf %s ${shellQuote(capJson)} | base64 -d > ${shellQuote(`${capPath}.tmp`)} && chmod 600 ${shellQuote(`${capPath}.tmp`)} && mv -f ${shellQuote(`${capPath}.tmp`)} ${shellQuote(capPath)} && IB_SEAL_CAP=${shellQuote(cap.token)} ib sandbox ${subcommand} ${shellQuote(agentId)}`;
+  const helperCommand = sealCapabilityCommandOverride?.(action, agentId, repoId)
+    ?? ["ib", "sandbox", subcommand, agentId, "--repo-id", repoId];
+  // The trusted shell also removes every capability pathname after the command,
+  // including setup/exec failures where the internal handler never consumed it.
+  const capScript = `umask 077; mkdir -p ${shellQuote(dirname(capPath))} && printf %s ${shellQuote(capJson)} | base64 -d > ${shellQuote(`${capPath}.tmp`)} && chmod 600 ${shellQuote(`${capPath}.tmp`)} && mv -f ${shellQuote(`${capPath}.tmp`)} ${shellQuote(capPath)} && IB_SEAL_CAP=${shellQuote(cap.token)} ${helperCommand.map(shellQuote).join(" ")}; rc=$?; rm -f ${shellQuote(`${capPath}.tmp`)} ${shellQuote(capPath)} ${shellQuote(`${capPath}.claimed`)}; exit "$rc"`;
   await runHelperViaTmuxServerBlocking(nukeResumeSpawnCtx, helperCwd, ["sh", "-c", capScript]);
 }
 
@@ -5267,8 +5358,9 @@ async function runSealCapabilityHelper(
  * denied (`_all.md`), so the direct write throws EPERM/EACCES; we then re-run
  * ourselves as `ib sandbox seal <id>` synchronously through the unsandboxed
  * tmux server, which recomputes the record from the same inputs and writes it.
- * Verified afterwards: if the record still isn't present we throw, so an enabled
- * agent never launches without a seal (resume would refuse it).
+ * The internal helper verifies the exact record before reporting success. The
+ * parent consumes only the helper's explicit status relay because its profile
+ * correctly denies even reads of the sealed tree.
  */
 export async function sealAgentRecord(
   repoPath: string,
@@ -5291,9 +5383,6 @@ export async function sealAgentRecord(
     if (code !== "EPERM" && code !== "EACCES") throw err;
     // Sandboxed spawner: the tmux server is unsandboxed, so let it do the write.
     await runSealCapabilityHelper("write", repoId, agentId, helperCwd, meta);
-    if (!(await readSealRecord(repoId, agentId)) || !(await verifyMetaAgainstSeal(repoId, agentId, meta)).ok) {
-      throw new Error(`sandbox refused: could not write the sealed record for '${agentId}' (via the tmux server)`);
-    }
   }
 }
 
@@ -5315,7 +5404,20 @@ export async function deleteAgentSealChecked(
     ? computeSealRecord(await computeSealInputs(expectedMeta))
     : undefined;
   try {
-    await (sealDeleteOverride ?? deleteSealRecord)(repoId, agentId);
+    if (sealDeleteOverride) {
+      if (expectedRecord !== undefined) {
+        const current = await readSealRecordStrict(repoId, agentId);
+        if (current !== null && canonicalSealJson(current) !== canonicalSealJson(expectedRecord)) {
+          throw new Error("sealed record changed before deletion");
+        }
+      }
+      await sealDeleteOverride(repoId, agentId);
+      if (await readSealRecordStrict(repoId, agentId)) {
+        throw new Error("seal deletion postcondition verification failed");
+      }
+    } else {
+      await deleteSealRecordChecked(repoId, agentId, expectedRecord);
+    }
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code !== "EPERM" && code !== "EACCES") throw err;

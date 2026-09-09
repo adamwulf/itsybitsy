@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdir, rm } from "fs/promises";
 import { join } from "path";
-import { computeSealInputs, computeSealRecord, consumeSealCapability, newSealCapability, sealCapabilityPath, sealDir, writeSealRecordDirect } from "./agent-seal";
+import { applySealCapabilityAction, computeSealInputs, computeSealRecord, consumeSealCapability, newSealCapability, readSealRecordStrict, sealCapabilityPath, sealDir, sealPath, writeSealRecordDirect } from "./agent-seal";
 
 describe("seal capabilities", () => {
   test("valid capability is one-use and rejects replay or wrong token", async () => {
@@ -88,6 +88,32 @@ describe("seal capabilities", () => {
     await Bun.write(sealCapabilityPath("repo", "agent", cap.token, home), JSON.stringify(cap));
     await writeSealRecordDirect("repo", "agent", replacement, home);
     expect(await consumeSealCapability("delete", "repo", "agent", cap.token, undefined, home)).toBe(false);
+    await rm(home, { recursive: true, force: true });
+  });
+
+  test("trusted capability actions verify exact write and delete postconditions", async () => {
+    const home = `/tmp/seal-cap-${crypto.randomUUID()}`;
+    const meta = { agentType: "worker", sandbox: { enabled: true }, paths: { allowRead: ["/expected"], allowWrite: [], deny: [] } };
+    await mkdir(sealDir(home), { recursive: true });
+
+    const writeCap = await newSealCapability("write", "repo", "agent", meta);
+    await Bun.write(sealCapabilityPath("repo", "agent", writeCap.token, home), JSON.stringify(writeCap));
+    await applySealCapabilityAction("write", "repo", "agent", writeCap.token, meta, home);
+    const expected = computeSealRecord(await computeSealInputs(meta));
+    expect(await readSealRecordStrict("repo", "agent", home)).toEqual(expected);
+
+    const deleteCap = await newSealCapability("delete", "repo", "agent", undefined, expected);
+    await Bun.write(sealCapabilityPath("repo", "agent", deleteCap.token, home), JSON.stringify(deleteCap));
+    await applySealCapabilityAction("delete", "repo", "agent", deleteCap.token, undefined, home);
+    expect(await readSealRecordStrict("repo", "agent", home)).toBeNull();
+    await rm(home, { recursive: true, force: true });
+  });
+
+  test("strict trusted reads never mistake a corrupt record for absence", async () => {
+    const home = `/tmp/seal-cap-${crypto.randomUUID()}`;
+    await mkdir(sealDir(home), { recursive: true });
+    await Bun.write(sealPath("repo", "agent", home), "not json");
+    await expect(readSealRecordStrict("repo", "agent", home)).rejects.toThrow();
     await rm(home, { recursive: true, force: true });
   });
 });

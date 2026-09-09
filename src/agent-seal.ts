@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "crypto";
-import { mkdir, rm, rename } from "fs/promises";
+import { mkdir, readFile, rm, rename } from "fs/promises";
 import { userHome } from "./home";
 import { join } from "path";
 
@@ -109,16 +109,16 @@ export async function newSealCapability(
   if (expectedRecord !== undefined) capability.expectedRecord = expectedRecord;
   return capability;
 }
-export async function consumeSealCapability(
+async function claimSealCapability(
   action: SealCapabilityAction,
   repoId: string,
   agentId: string,
   token: string,
   meta?: Record<string, unknown>,
   home?: string,
-): Promise<boolean> {
+): Promise<SealCapability | null> {
   try {
-    if (!/^[0-9a-f-]{36}$/.test(token)) return false;
+    if (!/^[0-9a-f-]{36}$/.test(token)) return null;
     const path = sealCapabilityPath(repoId, agentId, token, home);
     const claimed = `${path}.claimed`;
     await rename(path, claimed);
@@ -130,22 +130,35 @@ export async function consumeSealCapability(
         cap.repoId !== repoId ||
         cap.agentId !== agentId ||
         (cap.expires ?? 0) < Date.now()
-      ) return false;
+      ) return null;
       const expectedRecord = Object.prototype.hasOwnProperty.call(cap, "expectedRecord")
         ? cap.expectedRecord ?? null
         : undefined;
       if (cap.digest !== await sealCapabilityDigest(action, repoId, agentId, meta, expectedRecord)) {
-        return false;
+        return null;
       }
       if (action === "delete" && expectedRecord !== undefined) {
-        const current = await readSealRecord(repoId, agentId, home);
-        if (canonicalSealJson(current) !== canonicalSealJson(expectedRecord)) return false;
+        const current = await readSealRecordStrict(repoId, agentId, home);
+        // Deletion is idempotent: already absent satisfies the intended state.
+        // A present record, however, must still be the exact authorized value.
+        if (current !== null && canonicalSealJson(current) !== canonicalSealJson(expectedRecord)) return null;
       }
-      return true;
+      return cap as SealCapability;
     } finally {
       await rm(claimed, { force: true });
     }
-  } catch { return false; }
+  } catch { return null; }
+}
+
+export async function consumeSealCapability(
+  action: SealCapabilityAction,
+  repoId: string,
+  agentId: string,
+  token: string,
+  meta?: Record<string, unknown>,
+  home?: string,
+): Promise<boolean> {
+  return (await claimSealCapability(action, repoId, agentId, token, meta, home)) !== null;
 }
 
 /**
@@ -229,6 +242,25 @@ export async function readSealRecord(
   }
 }
 
+/**
+ * Read a sealed record without collapsing permission, parse, or I/O failures
+ * into "missing". Trusted mutation helpers use this for postcondition checks:
+ * ENOENT is the only state that means the record is absent; every other error
+ * must fail the lifecycle operation rather than being mistaken for success.
+ */
+export async function readSealRecordStrict(
+  repoId: string,
+  agentId: string,
+  home?: string,
+): Promise<SealRecord | null> {
+  try {
+    return JSON.parse(await readFile(sealPath(repoId, agentId, home), "utf8")) as SealRecord;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+    throw err;
+  }
+}
+
 /** Delete a sealed record (idempotent — a missing file is not an error). */
 export async function deleteSealRecord(
   repoId: string,
@@ -236,6 +268,61 @@ export async function deleteSealRecord(
   home?: string,
 ): Promise<void> {
   await rm(sealPath(repoId, agentId, home), { force: true });
+}
+
+/** Delete a seal only if its current value matches the caller's intent. */
+export async function deleteSealRecordChecked(
+  repoId: string,
+  agentId: string,
+  expectedRecord?: SealRecord | null,
+  home?: string,
+): Promise<void> {
+  if (expectedRecord !== undefined) {
+    const current = await readSealRecordStrict(repoId, agentId, home);
+    if (current !== null && canonicalSealJson(current) !== canonicalSealJson(expectedRecord)) {
+      throw new Error("sealed record changed before deletion");
+    }
+  }
+  await deleteSealRecord(repoId, agentId, home);
+  if (await readSealRecordStrict(repoId, agentId, home)) {
+    throw new Error("seal deletion postcondition verification failed");
+  }
+}
+
+/**
+ * Consume a protected one-use capability, perform its seal mutation, and
+ * verify the exact postcondition while still inside the trusted process that
+ * can access the sealed directory. A sandboxed parent must rely on this
+ * checked result instead of trying (and failing) to reopen the denied tree.
+ */
+export async function applySealCapabilityAction(
+  action: SealCapabilityAction,
+  repoId: string,
+  agentId: string,
+  token: string,
+  meta?: Record<string, unknown>,
+  home?: string,
+): Promise<void> {
+  const capability = await claimSealCapability(action, repoId, agentId, token, meta, home);
+  if (!capability) {
+    throw new Error("internal seal capability missing, invalid, or replayed");
+  }
+
+  if (action === "write") {
+    if (!meta) throw new Error("seal metadata is required");
+    await writeSealRecordDirect(repoId, agentId, meta, home);
+    const expected = computeSealRecord(await computeSealInputs(meta));
+    const actual = await readSealRecordStrict(repoId, agentId, home);
+    if (canonicalSealJson(actual) !== canonicalSealJson(expected)) {
+      throw new Error("sealed record postcondition verification failed");
+    }
+    return;
+  }
+
+  const expectedRecord = Object.prototype.hasOwnProperty.call(capability, "expectedRecord")
+    ? capability.expectedRecord ?? null
+    : undefined;
+  await deleteSealRecordChecked(repoId, agentId, expectedRecord, home);
 }
 
 /**

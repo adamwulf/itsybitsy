@@ -104,6 +104,8 @@ import {
   getRepoId,
   setSealDirectWriteForTesting,
   resetSealDirectWriteForTesting,
+  setSealCapabilityCommandForTesting,
+  resetSealCapabilityCommandForTesting,
   setSealDeleteForTesting,
   setSandboxRefreshMetaMutateForTesting,
   setSandboxRefreshSealRestoreForTesting,
@@ -111,7 +113,7 @@ import {
   teamAdd,
   writeMetaJsonAtomic,
 } from "./ib-commands";
-import { sealPath, readSealRecord, computeSealInputs, computeSealRecord, verifyMetaAgainstSeal } from "./agent-seal";
+import { sealPath, readSealRecord, computeSealInputs, computeSealRecord, verifyMetaAgainstSeal, writeSealRecordDirect } from "./agent-seal";
 import {
   spawnCtx as lifecycleSpawnCtx,
   setSandboxProxyKillForTesting,
@@ -1699,6 +1701,47 @@ describe("retireAgent (native)", () => {
 
     expect(result.ok).toBe(true);
     expect(result.stdout).toBe("Closed agent: agent-abc");
+  });
+
+  test("retire uses checked authenticated seal cleanup when direct deletion is denied", async () => {
+    const id = "agent-retire-sealed";
+    const sealHome = join(tempDir, "seal-home");
+    setUserHome(sealHome);
+    const agentDir = join(tempDir, ".ittybitty", "agents", id);
+    const agent = makeAgent(id, tempDir, "running", {
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+      paths: { allowRead: [], allowWrite: [], deny: [] },
+      worktree: false,
+    });
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(agent.meta));
+    const repoId = await getRepoId(tempDir);
+    await writeSealRecordDirect(repoId, id, agent.meta as unknown as Record<string, unknown>, sealHome);
+    setSealDeleteForTesting(async () => {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    });
+    const tmuxCalls: string[][] = [];
+    setSealCapabilityCommandForTesting((_action, target, boundRepoId) =>
+      ["rm", "-f", sealPath(boundRepoId, target, sealHome)]
+    );
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      tmuxCalls.push(cmd);
+      if (cmd[0] === "tmux" && cmd[1] === "run-shell") {
+        return Bun.spawn(["sh", "-c", cmd.at(-1)!], { stdout: "pipe", stderr: "pipe" }) as SpawnResult;
+      }
+      return makeSpawnResult(cmd.includes("has-session") ? 1 : 0);
+    });
+    try {
+      const result = await retireAgent(agent);
+      expect(result.ok).toBe(true);
+      expect(await readSealRecord(repoId, id, sealHome)).toBeNull();
+      expect(tmuxCalls.some((cmd) => cmd[0] === "tmux" && cmd[1] === "run-shell")).toBe(true);
+    } finally {
+      setSealDeleteForTesting(null);
+      resetSealCapabilityCommandForTesting();
+      resetNukeResumeSpawnRunner();
+      resetUserHome();
+    }
   });
 
   test("removes agent directory after teardown", async () => {
@@ -4235,6 +4278,10 @@ describe("mergeAgent (native)", () => {
   afterEach(async () => {
     lifecycleSpawnCtx.reset();
     resetMergeSpawnRunner();
+    resetNukeResumeSpawnRunner();
+    resetSealCapabilityCommandForTesting();
+    setSealDeleteForTesting(null);
+    resetUserHome();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -4360,23 +4407,74 @@ describe("mergeAgent (native)", () => {
   });
 
   test("succeeds with full merge sequence and includes merge commit SHA in stdout", async () => {
+    const sealHome = join(tempDir, "seal-home");
+    setUserHome(sealHome);
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
-    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
-      id: "agent-abc", tmux_session: "tmux-agent-abc",
-    }));
+    const agent = makeAgent("agent-abc", tempDir);
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(agent.meta));
+    const repoId = await getRepoId(tempDir);
+    await writeSealRecordDirect(repoId, agent.id, agent.meta as unknown as Record<string, unknown>, sealHome);
 
     const runner = makeMergeMock();
     lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
+    setSealDeleteForTesting(async () => {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    });
+    setSealCapabilityCommandForTesting((_action, target, boundRepoId) =>
+      ["rm", "-f", sealPath(boundRepoId, target, sealHome)]
+    );
+    const sealHelperCalls: string[][] = [];
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      sealHelperCalls.push(cmd);
+      if (cmd[0] === "tmux" && cmd[1] === "run-shell") {
+        return Bun.spawn(["sh", "-c", cmd.at(-1)!], { stdout: "pipe", stderr: "pipe" }) as SpawnResult;
+      }
+      return makeSpawnResult(0);
+    });
 
-    const agent = makeAgent("agent-abc", tempDir);
     const result = await mergeAgent(agent, tempDir);
 
     expect(result.ok).toBe(true);
+    expect(await readSealRecord(repoId, agent.id, sealHome)).toBeNull();
+    expect(sealHelperCalls.some((cmd) => cmd[0] === "tmux" && cmd[1] === "run-shell")).toBe(true);
     // A merge with commits reports the target branch + full 40-char merge SHA.
     expect(result.stdout).toBe(`Closed agent: agent-abc (merged to main at ${MERGE_HEAD_SHA})`);
     expect(MERGE_HEAD_SHA).toHaveLength(40);
+  });
+
+  test("merge reports checked seal cleanup failure before removing agent state", async () => {
+    const sealHome = join(tempDir, "seal-home");
+    setUserHome(sealHome);
+    const id = "agent-seal-cleanup-failure";
+    const agentDir = join(tempDir, ".ittybitty", "agents", id);
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    const agent = makeAgent(id, tempDir);
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(agent.meta));
+    const repoId = await getRepoId(tempDir);
+    await writeSealRecordDirect(repoId, id, agent.meta as unknown as Record<string, unknown>, sealHome);
+
+    const runner = makeMergeMock();
+    lifecycleSpawnCtx.set(runner);
+    setMergeSpawnRunner(runner);
+    setSealDeleteForTesting(async () => {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    });
+    setSealCapabilityCommandForTesting(() => ["sh", "-c", "exit 37"]);
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      if (cmd[0] === "tmux" && cmd[1] === "run-shell") {
+        return Bun.spawn(["sh", "-c", cmd.at(-1)!], { stdout: "pipe", stderr: "pipe" }) as SpawnResult;
+      }
+      return makeSpawnResult(0);
+    });
+
+    const result = await mergeAgent(agent, tempDir);
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("sealed-record cleanup failed");
+    expect(await readSealRecord(repoId, id, sealHome)).not.toBeNull();
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true);
+    expect(await readdir(join(agentDir, "repo")).catch(() => null)).not.toBeNull();
   });
 
   test("performs git rebase, checkout, and merge in correct order", async () => {
@@ -5731,6 +5829,8 @@ describe("newAgent (native)", () => {
     resetNukeResumeSpawnRunner();
     resetSandboxWiringForTesting();
     resetSealDirectWriteForTesting();
+    resetSealCapabilityCommandForTesting();
+    setSealDeleteForTesting(null);
     lifecycleSpawnCtx.reset();
     resetUserConfigPath();
     if (originalHome === undefined) {
@@ -7179,19 +7279,22 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     setSealDirectWriteForTesting(async () => {
       throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
     });
-    const repoId = await getRepoId(tempDir);
-    // Pre-place the record so the post-fallback verify succeeds — standing in for
-    // the unsandboxed `ib sandbox seal` child the tmux server actually runs.
-    await mkdir(join(process.env.HOME!, ".itsybitsy", "sealed"), { recursive: true });
+    // The real internal command verifies the seal before it exits zero. Replace
+    // only that command with a successful stub, while executing the exact outer
+    // status-relay shell that tmux runs. The parent must accept the helper's
+    // checked result without reopening the denied sealed directory.
+    setSealCapabilityCommandForTesting(() => ["sh", "-c", "exit 0"]);
     const tmuxCalls: string[][] = [];
-    setNukeResumeSpawnRunner((cmd: string[]) => { tmuxCalls.push(cmd); return makeSpawnResult("", 0); });
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      tmuxCalls.push(cmd);
+      return Bun.spawn(["sh", "-c", cmd.at(-1)!], { stdout: "pipe", stderr: "pipe" }) as SpawnResult;
+    });
 
     const meta = {
       id: "seal-helper", agentType: "worker",
       sandbox: { enabled: true, rawAllow: [], domains: [] },
       paths: { allowRead: [], allowWrite: [], deny: [] },
     };
-    await Bun.write(sealPath(repoId, "seal-helper", process.env.HOME!), JSON.stringify(computeSealRecord(await computeSealInputs(meta))));
     await sealAgentRecord(tempDir, "seal-helper", meta as unknown as Record<string, unknown>, tempDir);
 
     const sealCall = tmuxCalls.find((c) => c[0] === "tmux" && c[1] === "run-shell");
@@ -7199,7 +7302,77 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // Synchronous (blocking) — run-shell WITHOUT -b so the seal lands before spawn continues.
     expect(sealCall).not.toContain("-b");
     expect(sealCall!.at(-1)).toContain("IB_SEAL_CAP=");
-    expect(sealCall!.at(-1)).toContain("ib sandbox seal");
+    expect(sealCall!.at(-1)).toContain("rc=$?");
+    expect(sealCall!.at(-1)).toContain("result.tmp");
+  });
+
+  test("seal helper propagates its real failure when tmux submission itself succeeds", async () => {
+    setSealDirectWriteForTesting(async () => {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    });
+    // tmux run-shell commonly reports only that the job was accepted. Execute
+    // the production relay shell directly and return its (deliberately zero)
+    // wrapper status; sealAgentRecord must still observe the nested exit 23.
+    setSealCapabilityCommandForTesting(() => ["sh", "-c", "exit 23"]);
+    setNukeResumeSpawnRunner((cmd: string[]) =>
+      Bun.spawn(["sh", "-c", cmd.at(-1)!], { stdout: "pipe", stderr: "pipe" }) as SpawnResult
+    );
+    const meta = {
+      id: "seal-helper-failure", agentType: "worker",
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+      paths: { allowRead: [], allowWrite: [], deny: [] },
+    };
+
+    await expect(sealAgentRecord(
+      tempDir,
+      "seal-helper-failure",
+      meta as unknown as Record<string, unknown>,
+      tempDir,
+    )).rejects.toThrow("tmux seal helper failed with exit 23");
+  });
+
+  test("seal helper refuses success when tmux returns before producing a result", async () => {
+    setSealDirectWriteForTesting(async () => {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    });
+    setNukeResumeSpawnRunner(() => makeSpawnResult("", 0));
+    const meta = {
+      id: "seal-helper-missing-result", agentType: "worker",
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+      paths: { allowRead: [], allowWrite: [], deny: [] },
+    };
+
+    await expect(sealAgentRecord(
+      tempDir,
+      "seal-helper-missing-result",
+      meta as unknown as Record<string, unknown>,
+      tempDir,
+    )).rejects.toThrow("did not report completion");
+  });
+
+  test("seal helper command binds the intended repository ID", async () => {
+    setSealDirectWriteForTesting(async () => {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    });
+    let helperScript = "";
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      helperScript = cmd.at(-1)!;
+      return makeSpawnResult("", 0);
+    });
+    const meta = {
+      id: "seal-helper-scoped", agentType: "worker",
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+      paths: { allowRead: [], allowWrite: [], deny: [] },
+    };
+    await expect(sealAgentRecord(
+      tempDir,
+      "seal-helper-scoped",
+      meta as unknown as Record<string, unknown>,
+      tempDir,
+    )).rejects.toThrow("did not report completion");
+    expect(helperScript).toContain("--repo-id");
+    expect(helperScript).toContain("abcd1234");
+    expect(helperScript).toContain("seal-helper-scoped");
   });
 
   test("checked seal deletion routes through a one-use delete capability on EPERM", async () => {
@@ -7207,9 +7380,10 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     setSealDeleteForTesting(async () => {
       throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
     });
+    setSealCapabilityCommandForTesting(() => ["sh", "-c", "exit 0"]);
     setNukeResumeSpawnRunner((cmd: string[]) => {
       tmuxCalls.push(cmd);
-      return makeSpawnResult("", 0);
+      return Bun.spawn(["sh", "-c", cmd.at(-1)!], { stdout: "pipe", stderr: "pipe" }) as SpawnResult;
     });
     try {
       await deleteAgentSealChecked(tempDir, "seal-delete-helper", tempDir);
@@ -7220,8 +7394,52 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(helper).toBeDefined();
     expect(helper).not.toContain("-b");
     expect(helper!.at(-1)).toContain("IB_SEAL_CAP=");
-    expect(helper!.at(-1)).toContain("ib sandbox delete-seal");
-    expect(helper!.at(-1)).toContain("seal-delete-helper");
+    expect(helper!.at(-1)).toContain("rc=$?");
+    expect(helper!.at(-1)).toContain("result.tmp");
+  });
+
+  test("checked seal deletion rejects a failed helper even when tmux reports success", async () => {
+    setSealDeleteForTesting(async () => {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    });
+    setSealCapabilityCommandForTesting(() => ["sh", "-c", "exit 29"]);
+    setNukeResumeSpawnRunner((cmd: string[]) =>
+      Bun.spawn(["sh", "-c", cmd.at(-1)!], { stdout: "pipe", stderr: "pipe" }) as SpawnResult
+    );
+    try {
+      await expect(deleteAgentSealChecked(
+        tempDir,
+        "seal-delete-helper-failure",
+        tempDir,
+      )).rejects.toThrow("tmux seal helper failed with exit 29");
+    } finally {
+      setSealDeleteForTesting(null);
+    }
+  });
+
+  test("direct checked deletion refuses a seal replaced after intent was captured", async () => {
+    const id = "seal-delete-direct-replaced";
+    const expectedMeta = {
+      id, agentType: "worker",
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+      paths: { allowRead: ["/expected"], allowWrite: [], deny: [] },
+    };
+    const replacementMeta = {
+      ...expectedMeta,
+      paths: { allowRead: ["/replacement"], allowWrite: [], deny: [] },
+    };
+    const repoId = await getRepoId(tempDir);
+    await writeSealRecordDirect(repoId, id, replacementMeta, process.env.HOME!);
+
+    await expect(deleteAgentSealChecked(
+      tempDir,
+      id,
+      tempDir,
+      expectedMeta as unknown as Record<string, unknown>,
+    )).rejects.toThrow("sealed record changed before deletion");
+    expect(await readSealRecord(repoId, id, process.env.HOME!)).toEqual(
+      computeSealRecord(await computeSealInputs(replacementMeta)),
+    );
   });
 
   test("A4 G3: sandbox refresh re-seals with the new inputs", async () => {
@@ -7482,7 +7700,18 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const repoId = await getRepoId(tempDir);
     expect(await readSealRecord(repoId, "seal-nuke", process.env.HOME!)).not.toBeNull();
 
+    setSealDeleteForTesting(async () => {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    });
+    setSealCapabilityCommandForTesting((_action, target, boundRepoId) =>
+      ["rm", "-f", sealPath(boundRepoId, target, process.env.HOME!)]
+    );
+    const nukeCalls: string[][] = [];
     setNukeResumeSpawnRunner((cmd: string[]) => {
+      nukeCalls.push(cmd);
+      if (cmd[0] === "tmux" && cmd[1] === "run-shell") {
+        return Bun.spawn(["sh", "-c", cmd.at(-1)!], { stdout: "pipe", stderr: "pipe" }) as SpawnResult;
+      }
       if (cmd.includes("has-session")) return makeSpawnResult("", 1);
       return makeSpawnResult("", 0);
     });
@@ -7490,10 +7719,53 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       if (cmd.includes("has-session")) return makeSpawnResult("", 1);
       return makeSpawnResult("", 0);
     });
-    const nuked = await nukeAgent(makeAgent("seal-nuke", tempDir, "running", await Bun.file(join(agentsDir, "seal-nuke", "meta.json")).json()));
-    expect(nuked.ok).toBe(true);
-    expect(await readSealRecord(repoId, "seal-nuke", process.env.HOME!)).toBeNull();
-    resetKillPauseSpawnRunner();
+    try {
+      const nuked = await nukeAgent(makeAgent("seal-nuke", tempDir, "running", await Bun.file(join(agentsDir, "seal-nuke", "meta.json")).json()));
+      expect(nuked.ok).toBe(true);
+      expect(await readSealRecord(repoId, "seal-nuke", process.env.HOME!)).toBeNull();
+      expect(nukeCalls.some((cmd) => cmd[0] === "tmux" && cmd[1] === "run-shell")).toBe(true);
+    } finally {
+      setSealDeleteForTesting(null);
+      resetKillPauseSpawnRunner();
+    }
+  });
+
+  test("nuke reports checked seal-helper failure and preserves retry metadata", async () => {
+    const id = "seal-nuke-helper-failure";
+    await writeSandboxType(id);
+    setSandboxPortAllocatorForTesting(() => 43190);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99979 }));
+    expect((await callNewAgent("nuke seal failure", { name: id, type: id })).ok).toBe(true);
+    const agentDir = join(agentsDir, id);
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    const repoId = await getRepoId(tempDir);
+
+    setSealDeleteForTesting(async () => {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    });
+    setSealCapabilityCommandForTesting(() => ["sh", "-c", "exit 31"]);
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      if (cmd[0] === "tmux" && cmd[1] === "run-shell") {
+        return Bun.spawn(["sh", "-c", cmd.at(-1)!], { stdout: "pipe", stderr: "pipe" }) as SpawnResult;
+      }
+      return makeSpawnResult("", cmd.includes("has-session") ? 1 : 0);
+    });
+    setKillPauseSpawnRunner((cmd: string[]) =>
+      makeSpawnResult("", cmd.includes("has-session") ? 1 : 0)
+    );
+    try {
+      const result = await nukeAgent(makeAgent(id, tempDir, "running", meta));
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain("failed to kill");
+      expect(await readSealRecord(repoId, id, process.env.HOME!)).not.toBeNull();
+      expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true);
+    } finally {
+      setSealDeleteForTesting(null);
+      resetKillPauseSpawnRunner();
+    }
   });
 
   test("A4 G3: resume refuses a tampered canSpawnChildren and names the field", async () => {

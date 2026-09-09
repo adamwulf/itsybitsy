@@ -1358,7 +1358,7 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     );
   });
 
-  test("keeps an EOF-terminated first-column continuation in table geometry", () => {
+  test("leaves an ambiguous EOF first-column line to conservative prose wrapping", () => {
     const widths = [50, 12];
     const table = renderTable(
       [
@@ -1367,17 +1367,15 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
       ],
       widths,
     );
-    table.push(renderTable([["final continuation text remains in first cell", ""]], widths)[0]!);
+    const ambiguous = renderTable([["final continuation text remains in first cell", ""]], widths)[0]!;
+    table.push(ambiguous);
 
     const rows = wordWrapLines(table.join("\n"), 24);
-    const heavy = rows.find((row) => row.includes("━"))!;
-    const firstStart = heavy.indexOf("━") + 1;
-    for (const row of rows.filter((candidate) => /final|continuation|remains/.test(candidate))) {
-      expect(row.slice(0, firstStart).trim()).toBe("");
-    }
+    const expected = wordWrapSingleLine(ambiguous, 24);
+    expect(rows.slice(-expected.length)).toEqual(expected);
   });
 
-  test("keeps a substantial blank-terminated first-column continuation in table geometry", () => {
+  test("keeps a divider-started first-column row before a blank line", () => {
     const table = renderTable(
       [
         ["First", "Second"],
@@ -1396,7 +1394,7 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     }
   });
 
-  test("does not absorb short indented prose before a blank line", () => {
+  test("does not absorb substantial indented prose before a blank line", () => {
     const table = renderTable(
       [
         ["First", "Second"],
@@ -1404,10 +1402,13 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
       ],
       [70, 40],
     );
-    table.push("   Note.", "");
+    const prose = "   This is follow-up prose outside the table with enough length.";
+    table.push(prose, "");
 
-    const rows = wordWrapLines(table.join("\n"), 30);
-    expect(rows).toContain("   Note.");
+    const rows = wordWrapLines(table.join("\n"), 40);
+    const expected = wordWrapSingleLine(prose, 40);
+    const first = rows.findIndex((row) => row.includes("This is follow-up"));
+    expect(rows.slice(first, first + expected.length)).toEqual(expected);
   });
 
   test("does not guess spaces between exact-width source fragments", () => {
@@ -1607,6 +1608,77 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     }
   });
 
+  test("reconstructs style active before a cell slice boundary", () => {
+    const linkOpen = "\x1b]8;;https://example.com/first\x1b\\";
+    const linkClose = "\x1b]8;;\x1b\\";
+    const open = linkOpen + "\x1b[31m";
+    const close = "\x1b[39m" + linkClose;
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["alpha", "bravo charlie delta echo"],
+      ],
+      [5, 30],
+    );
+    table[2] = open + table[2]!.replace("alpha", "alpha" + close);
+
+    const rows = wordWrapLines(table.join("\n"), 20);
+    const first = rows.find((row) => stripAnsi(row).includes("alpha"))!;
+    expect(first).toContain(open);
+    expect(first).toContain(close);
+    for (const row of rows.filter((candidate) => /charlie|delta|echo/.test(stripAnsi(candidate)))) {
+      expect(row).not.toContain(linkOpen);
+      expect(row).not.toContain("\x1b[31m");
+    }
+  });
+
+  test("keeps ANSI embedded inside a grapheme cluster within pane width", () => {
+    const keycap = "1\x1b[31m\ufe0f\x1b[0m\u20e3";
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["x", keycap],
+      ],
+      [5, 20],
+    );
+
+    const rows = wordWrapLines(table.join("\n"), 10);
+    expect(rows.every((row) => visibleWidth(row) <= 10)).toBe(true);
+    expect(rows.map(stripAnsi).join("")).toContain("1️⃣");
+  });
+
+  test("keeps malformed ESC before an emoji from splitting its surrogate pair", () => {
+    const malformed = "123456\x1b🙂78901234567890";
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["x", malformed],
+      ],
+      [5, 30],
+    );
+
+    const rows = wordWrapLines(table.join("\n"), 20);
+    expect(rows.every((row) => visibleWidth(row) <= 20)).toBe(true);
+    expect(rows.join("")).toContain("🙂");
+  });
+
+  test("honors a selective reset for colon-form underline styles", () => {
+    const underline = "\x1b[4:3m";
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["x", underline + "under\x1b[24m normal words after reset continue"],
+      ],
+      [5, 50],
+    );
+
+    const rows = wordWrapLines(table.join("\n"), 20);
+    expect(rows.find((row) => stripAnsi(row).includes("under"))).toContain(underline);
+    for (const row of rows.filter((candidate) => /normal|words|after|reset|continue/.test(stripAnsi(candidate)))) {
+      expect(row).not.toContain(underline);
+    }
+  });
+
   test("preserves styling that begins before cell padding and after rule indentation", () => {
     const linkOpen = "\x1b]8;;https://example.com/cell\x1b\\";
     const linkClose = "\x1b]8;;\x1b\\";
@@ -1714,6 +1786,37 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     const rows = wordWrapLines(table.join("\n"), 40);
     expect(rows.join("\n").length).toBeLessThan(table.join("\n").length * 4);
     expect(rows.map(stripAnsi).join("").replace(/\s/g, "")).toContain("x".repeat(2_000));
+  });
+
+  test("bounds state growth from unknown SGR extension parameters", () => {
+    const styled = Array.from({ length: 1_000 }, (_value, index) =>
+      `\x1b[${1_000 + index}m` + "x",
+    ).join("") + "\x1b[0m";
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["alpha", styled],
+      ],
+      [5, 1_000],
+    );
+
+    const rows = wordWrapLines(table.join("\n"), 40);
+    expect(rows.join("\n").length).toBeLessThan(table.join("\n").length * 4);
+  });
+
+  test("does not emit a blank row for an ordinary wrap-boundary space", () => {
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["aa bb", "x"],
+      ],
+      [5, 10],
+    );
+
+    const rows = wordWrapLines(table.join("\n"), 11);
+    expect(rows.some((row) => stripAnsi(row).length > 0 && stripAnsi(row).trim().length === 0)).toBe(false);
+    expect(rows.map(stripAnsi).join(" ")).toContain("aa");
+    expect(rows.map(stripAnsi).join(" ")).toContain("bb");
   });
 
   test("stacks very narrow tables instead of discarding later columns", () => {

@@ -519,62 +519,141 @@ interface TerminalToken {
   width: number;
   text: string;
   escape: boolean;
+  embeddedEscapes?: string[];
+}
+
+function terminalEscapeEnd(text: string, cursor: number): number {
+  if (cursor + 1 >= text.length) return cursor + 1;
+  const kind = text[cursor + 1]!;
+  let end = cursor + 2;
+  if (kind === "[") {
+    while (end < text.length && !isCsiTerminator(text.charCodeAt(end))) end++;
+    return end < text.length ? end + 1 : end;
+  }
+  if (kind === "]" || kind === "_" || kind === "P" || kind === "^") {
+    while (
+      end < text.length &&
+      text[end] !== "\x07" &&
+      !(text[end] === "\x1b" && text[end + 1] === "\\")
+    ) {
+      end++;
+    }
+    return end + (text[end] === "\x07" ? 1 : end < text.length ? 2 : 0);
+  }
+  if (kind === "(" || kind === ")") return Math.min(text.length, cursor + 3);
+  const code = kind.charCodeAt(0);
+  // Other valid ESC Fe/Fs sequences are two ASCII bytes. For malformed input,
+  // consume only ESC so a following surrogate pair remains an intact grapheme.
+  return code >= 0x30 && code <= 0x7e ? cursor + 2 : cursor + 1;
 }
 
 function terminalTokens(text: string): TerminalToken[] {
-  const tokens: TerminalToken[] = [];
+  interface PositionedEscape {
+    offset: number;
+    raw: string;
+  }
+  const escapes: PositionedEscape[] = [];
+  let plain = "";
   let cursor = 0;
   while (cursor < text.length) {
     if (text[cursor] === "\x1b") {
-      let end = cursor + 2;
-      const kind = text[cursor + 1];
-      if (kind === "[") {
-        while (end < text.length && !isCsiTerminator(text.charCodeAt(end))) end++;
-        if (end < text.length) end++;
-      } else if (kind === "]" || kind === "_" || kind === "P" || kind === "^") {
-        while (
-          end < text.length &&
-          text[end] !== "\x07" &&
-          !(text[end] === "\x1b" && text[end + 1] === "\\")
-        ) {
-          end++;
-        }
-        end += text[end] === "\x07" ? 1 : end < text.length ? 2 : 0;
-      } else if (kind === "(" || kind === ")") {
-        end = Math.min(text.length, cursor + 3);
-      }
-      tokens.push({ raw: text.slice(cursor, end), width: 0, text: "", escape: true });
+      const end = terminalEscapeEnd(text, cursor);
+      escapes.push({ offset: plain.length, raw: text.slice(cursor, end) });
       cursor = end;
-      continue;
+    } else {
+      const nextEscape = text.indexOf("\x1b", cursor);
+      const end = nextEscape < 0 ? text.length : nextEscape;
+      plain += text.slice(cursor, end);
+      cursor = end;
     }
-    const nextEscape = text.indexOf("\x1b", cursor);
-    const end = nextEscape < 0 ? text.length : nextEscape;
-    const plain = text.slice(cursor, end);
-    for (const part of GRAPHEME_SEGMENTER.segment(plain)) {
+  }
+
+  const tokens: TerminalToken[] = [];
+  let escapeIndex = 0;
+  for (const part of GRAPHEME_SEGMENTER.segment(plain)) {
+    const start = part.index;
+    const end = start + part.segment.length;
+    while (escapeIndex < escapes.length && escapes[escapeIndex]!.offset <= start) {
       tokens.push({
-        raw: part.segment,
-        width: visibleWidth(part.segment),
-        text: part.segment,
-        escape: false,
+        raw: escapes[escapeIndex]!.raw,
+        width: 0,
+        text: "",
+        escape: true,
       });
+      escapeIndex++;
     }
-    cursor = end;
+    let raw = "";
+    let innerCursor = start;
+    const embeddedEscapes: string[] = [];
+    while (escapeIndex < escapes.length && escapes[escapeIndex]!.offset < end) {
+      const embedded = escapes[escapeIndex]!;
+      raw += plain.slice(innerCursor, embedded.offset) + embedded.raw;
+      embeddedEscapes.push(embedded.raw);
+      innerCursor = embedded.offset;
+      escapeIndex++;
+    }
+    raw += plain.slice(innerCursor, end);
+    tokens.push({
+      raw,
+      width: visibleWidth(part.segment),
+      text: part.segment,
+      escape: false,
+      embeddedEscapes,
+    });
+  }
+  while (escapeIndex < escapes.length) {
+    tokens.push({
+      raw: escapes[escapeIndex]!.raw,
+      width: 0,
+      text: "",
+      escape: true,
+    });
+    escapeIndex++;
   }
   return tokens;
 }
 
-function sliceTerminalColumns(text: string, start: number, end: number): string {
+function sliceTerminalColumnRanges(
+  text: string,
+  ranges: Array<{ start: number; end: number }>,
+): string[] {
+  const output = ranges.map(() => "");
+  const begun = ranges.map(() => false);
+  const state: TerminalStyleState = { sgr: new Map(), osc8: null };
+  let rangeIndex = 0;
   let column = 0;
-  let output = "";
+  const begin = () => {
+    if (!begun[rangeIndex]) {
+      output[rangeIndex] += terminalStylePrefix(state);
+      begun[rangeIndex] = true;
+    }
+  };
+  const finish = () => {
+    if (begun[rangeIndex]) output[rangeIndex] += terminalStyleSuffix(state);
+    rangeIndex++;
+  };
   for (const token of terminalTokens(text)) {
     if (token.escape) {
-      if (column >= start && column <= end) output += token.raw;
+      while (rangeIndex < ranges.length && ranges[rangeIndex]!.end < column) finish();
+      const range = ranges[rangeIndex];
+      if (range && column >= range.start && column <= range.end) {
+        begin();
+        output[rangeIndex] += token.raw;
+      }
+      applyTerminalEscape(state, token.raw);
       continue;
     }
     const nextColumn = column + token.width;
-    if (column >= start && nextColumn <= end) output += token.raw;
+    while (rangeIndex < ranges.length && ranges[rangeIndex]!.end <= column) finish();
+    const range = ranges[rangeIndex];
+    if (range && column >= range.start && nextColumn <= range.end) {
+      begin();
+      output[rangeIndex] += token.raw;
+    }
+    for (const escape of token.embeddedEscapes ?? []) applyTerminalEscape(state, escape);
     column = nextColumn;
   }
+  while (rangeIndex < ranges.length) finish();
   return output;
 }
 
@@ -636,8 +715,12 @@ function styledBorderlessRule(
   const parts = terminalLineParts(line);
   return {
     affixes: parts.affixes,
-    segments: layout.starts.map((start, index) =>
-      sliceTerminalColumns(parts.inner, start, start + layout.widths[index]!),
+    segments: sliceTerminalColumnRanges(
+      parts.inner,
+      layout.starts.map((start, index) => ({
+        start,
+        end: start + layout.widths[index]!,
+      })),
     ),
   };
 }
@@ -752,6 +835,13 @@ function parseBorderlessCells(
 
   const cells: string[] = [];
   const alignmentHints: Array<CellAlignment | null> = [];
+  const styledCells = sliceTerminalColumnRanges(
+    inner,
+    layout.starts.map((start, index) => ({
+      start,
+      end: start + layout.widths[index]!,
+    })),
+  );
   for (let i = 0; i < layout.widths.length; i++) {
     const start = layout.starts[i]!;
     const segmentWidth = layout.widths[i]!;
@@ -765,9 +855,7 @@ function parseBorderlessCells(
       return null;
     }
     const rawCell = slice(start + 1, start + segmentWidth - 1);
-    const styledCell = trimTerminalCell(
-      sliceTerminalColumns(inner, start, start + segmentWidth),
-    );
+    const styledCell = trimTerminalCell(styledCells[i]!);
     if (stripAnsi(styledCell) !== rawCell.trim()) return null;
     cells.push(styledCell);
     alignmentHints.push(inferCellAlignment(rawCell));
@@ -824,23 +912,17 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
       .every((cell) => stripAnsi(cell).trim().length === 0);
     const followingDivider =
       cursor + 1 < lines.length ? parseBorderlessRule(lines[cursor + 1]!, "─") : null;
-    const followingEndsBlock =
-      cursor + 1 >= lines.length || stripAnsi(lines[cursor + 1]!).trim().length === 0;
-    // An undivided first-column row at EOF is indistinguishable from indented
-    // prose. A genuine source-wrapped fragment normally occupies a meaningful
-    // portion of its source column; requiring that signal keeps short notes
-    // outside the table while retaining the final fragment from real tables.
-    const substantialFirstCell =
-      visibleWidth(stripAnsi(row.cells[0]!).trim()) >=
-      Math.max(8, Math.floor((layout.widths[0]! - 2) / 2));
-    const firstColumnContinuation =
-      (followingDivider && sameBorderlessLayout(layout, followingDivider)) ||
-      (followingEndsBlock && substantialFirstCell);
+    // Without a following divider, an undivided first-column-only row is
+    // byte-for-byte indistinguishable from ordinary three-space-indented prose.
+    // Prefer the conservative false negative: keep the text visible as prose
+    // rather than silently absorbing unrelated content into the table.
+    const confirmedFirstColumnContinuation =
+      followingDivider && sameBorderlessLayout(layout, followingDivider);
     if (
       rows.length > 1 &&
       !nextHasDivider &&
       onlyFirstColumn &&
-      !firstColumnContinuation
+      !confirmedFirstColumnContinuation
     ) {
       break;
     }
@@ -888,13 +970,23 @@ function applySgrEscape(state: TerminalStyleState, raw: string): void {
   for (let i = 0; i < values.length; i++) {
     const value = values[i]!;
     const colonCode = Number(value.split(":", 1)[0]);
-    if (value.includes(":") && (colonCode === 38 || colonCode === 48 || colonCode === 58)) {
-      setSgr(state, colonCode === 38 ? "fg" : colonCode === 48 ? "bg" : "underline-color", [value]);
+    if (value.includes(":")) {
+      if (colonCode === 38 || colonCode === 48 || colonCode === 58) {
+        setSgr(
+          state,
+          colonCode === 38 ? "fg" : colonCode === 48 ? "bg" : "underline-color",
+          [value],
+        );
+      } else if (colonCode === 4) {
+        setSgr(state, "underline", [value]);
+      } else {
+        setSgr(state, "unknown", [value]);
+      }
       continue;
     }
     const code = Number(value);
     if (!Number.isFinite(code)) {
-      setSgr(state, `raw:${value}`, [value]);
+      setSgr(state, "unknown", [value]);
       continue;
     }
     if (code === 0) {
@@ -962,7 +1054,9 @@ function applySgrEscape(state: TerminalStyleState, raw: string): void {
     } else if (code === 75) {
       state.sgr.delete("script");
     } else {
-      setSgr(state, `code:${code}`, [value]);
+      // Unknown extensions share one bounded slot. Replaying the most recent
+      // value is safer than retaining an unbounded history of vendor codes.
+      setSgr(state, "unknown", [value]);
     }
   }
 }
@@ -1010,6 +1104,7 @@ function resizeStyledRuleSegment(
       break;
     }
     output += token.raw;
+    for (const escape of token.embeddedEscapes ?? []) applyTerminalEscape(state, escape);
     used += token.width;
   }
   if (used < width) output += ruleChar.repeat(width - used);
@@ -1039,11 +1134,13 @@ function wrapStyledCell(text: string, width: number): string[] {
       applyTerminalEscape(state, token.raw);
       continue;
     }
+    const before = pending.length > 0 ? beforePending : copyTerminalStyle(state);
+    for (const escape of token.embeddedEscapes ?? []) applyTerminalEscape(state, escape);
     units.push({
       raw: pending + token.raw,
       text: token.text,
       width: token.width,
-      before: pending.length > 0 ? beforePending : copyTerminalStyle(state),
+      before,
       after: copyTerminalStyle(state),
     });
     pending = "";
@@ -1053,6 +1150,20 @@ function wrapStyledCell(text: string, width: number): string[] {
   const output: string[] = [];
   let start = 0;
   while (start < units.length) {
+    // A normal word-separator space can land alone at the start of the next
+    // chunk when the preceding word exactly filled its cell. Drop that wrap
+    // boundary; explicitly styled whitespace remains content and is retained.
+    while (
+      start > 0 &&
+      start < units.length &&
+      /^\s$/u.test(units[start]!.text) &&
+      units[start]!.raw === units[start]!.text &&
+      units[start]!.before.sgr.size === 0 &&
+      units[start]!.before.osc8 === null
+    ) {
+      start++;
+    }
+    if (start >= units.length) break;
     let end = start;
     let used = 0;
     let lastWhitespace = -1;

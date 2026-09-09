@@ -2186,8 +2186,7 @@ log "SIGHUP ignored (resume insulated from launcher pane teardown)"
 # bare launch. Fall back to a plain background launch on hosts lacking setsid
 # (e.g. macOS, where setsid is absent — the inherited SIG_IGN above covers it).
 : > "$STDERR_LOG"
-${hookAuthPreamble ? `export ${HOOK_AUTH_TOKEN_ENV}="$HOOK_AUTH_TOKEN"` : ""}
-if command -v setsid >/dev/null 2>&1; then
+${hookAuthPreamble ? `export ${HOOK_AUTH_TOKEN_ENV}="$HOOK_AUTH_TOKEN"\n` : ""}if command -v setsid >/dev/null 2>&1; then
     SETSID=setsid
 else
     SETSID=none
@@ -2198,8 +2197,7 @@ else
     ${sandboxResumeLaunchPrefix}claude --resume "${sessionId}" ${claudeArgs} 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
-${hookAuthPreamble ? `unset ${HOOK_AUTH_TOKEN_ENV} HOOK_AUTH_TOKEN` : ""}
-log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
+${hookAuthPreamble ? `unset ${HOOK_AUTH_TOKEN_ENV} HOOK_AUTH_TOKEN\n` : ""}log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
 trap 'log "script received SIGTERM; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' TERM
 trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; kill -INT $CLAUDE_PID 2>/dev/null' INT
 
@@ -5779,8 +5777,10 @@ async function buildAgentSettings(
  * Create the isolated Claude policy used by worktree:false agents. Existing
  * files are never rewritten: this path is solely a compatibility migration for
  * agents archived or spawned before isolated settings were introduced.
- * Required type failures propagate so resume fails closed instead of borrowing
- * the shared repo/user policy.
+ * Historical agents predate agentType but recorded the manager/worker role in
+ * `worker`; map that legacy shape to the matching built-in type. Required type
+ * failures still propagate so resume fails closed instead of borrowing the
+ * shared repo/user policy.
  */
 async function ensureIsolatedClaudeSettings(
   repoPath: string,
@@ -5806,10 +5806,13 @@ async function ensureIsolatedClaudeSettings(
       }),
     }, null, 2);
   } else {
-    const typeName = meta.agentType;
-    if (typeof typeName !== "string" || typeName.length === 0) {
-      throw new Error("meta.json has no agentType; cannot rebuild isolated Claude settings");
-    }
+    // This is the same legacy fallback used by detectRole/metaCanSpawnChildren:
+    // worker:true is a leaf, while false/absent is the historical manager
+    // shape. Coordinators have always carried agentType:"coordinator" and were
+    // handled above, so guessing coordinator from worker:false would be unsafe.
+    const typeName = typeof meta.agentType === "string" && meta.agentType.length > 0
+      ? meta.agentType
+      : meta.worker === true ? "worker" : "manager";
 
     let allLayer: AgentType | undefined;
     try { allLayer = await loadAgentType("_all"); } catch { /* optional layer */ }
@@ -7608,8 +7611,7 @@ log "SIGHUP ignored (spawn insulated from launcher pane teardown)"
 # bare launch. Fall back to a plain background launch on hosts lacking setsid
 # (e.g. macOS, where setsid is absent — the inherited SIG_IGN above covers it).
 : > "$STDERR_LOG"
-${hookAuthPreamble ? `export ${HOOK_AUTH_TOKEN_ENV}="$HOOK_AUTH_TOKEN"` : ""}
-if command -v setsid >/dev/null 2>&1; then
+${hookAuthPreamble ? `export ${HOOK_AUTH_TOKEN_ENV}="$HOOK_AUTH_TOKEN"\n` : ""}if command -v setsid >/dev/null 2>&1; then
     SETSID=setsid
 else
     SETSID=none
@@ -7620,8 +7622,7 @@ else
     ${sandboxLaunchPrefix}claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})" 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
-${hookAuthPreamble ? `unset ${HOOK_AUTH_TOKEN_ENV} HOOK_AUTH_TOKEN` : ""}
-log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
+${hookAuthPreamble ? `unset ${HOOK_AUTH_TOKEN_ENV} HOOK_AUTH_TOKEN\n` : ""}log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
 trap 'log "script received SIGTERM; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' TERM
 trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; kill -INT $CLAUDE_PID 2>/dev/null' INT
 

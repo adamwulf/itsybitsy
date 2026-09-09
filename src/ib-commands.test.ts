@@ -1943,7 +1943,7 @@ describe("retire → rehire recovery", () => {
   // "successfully resumes a retired no-worktree Claude agent" test above.
   async function plantRehirableArchive(
     agentId: string,
-    opts: { manager?: string | null; includeSettings?: boolean } = {},
+    opts: { manager?: string | null; includeSettings?: boolean; worker?: boolean } = {},
   ): Promise<{ archiveKey: string; archiveDir: string }> {
     const archiveKey = `20260703-120000-${agentId}`;
     const archiveDir = join(tempDir, ".ittybitty", "archive", archiveKey);
@@ -1955,7 +1955,7 @@ describe("retire → rehire recovery", () => {
       claude_pid: "",
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       manager: opts.manager ?? null,
-      ...(opts.includeSettings === false ? { agentType: "manager" } : {}),
+      worker: opts.worker ?? false,
     }).meta;
     // Mandatory sandbox: a rehirable archive must carry an enabled sandbox +
     // paths so the reconstructed agent clears resume's fail-closed precondition
@@ -2089,32 +2089,40 @@ describe("retire → rehire recovery", () => {
     expect(await readOutbox(managerQueueDir("agent-bystander"))).toEqual([]);
   });
 
-  test("rehire migrates a legacy worktree:false archive without isolated settings", async () => {
-    const agentId = "agent-legacy-shared";
-    await (await import("./agent-types")).ensureAgentTypesDir();
-    await plantRehirableArchive(agentId, { includeSettings: false });
-    await mkdir(join(tempDir, ".claude"), { recursive: true });
-    const sharedSettingsPath = join(tempDir, ".claude", "settings.local.json");
-    await Bun.write(sharedSettingsPath, JSON.stringify({ permissions: { allow: ["UserOnlyTool"] } }));
-    const sharedBefore = await Bun.file(sharedSettingsPath).text();
-    const runner = successRunner();
-    setRehireSpawnRunner(runner);
-    setNukeResumeSpawnRunner(runner);
+  for (const [legacyRole, worker] of [["manager", false], ["worker", true]] as const) {
+    test(`rehire migrates a legacy worktree:false ${legacyRole} archive without agentType or isolated settings`, async () => {
+      const agentId = `agent-legacy-shared-${legacyRole}`;
+      await (await import("./agent-types")).ensureAgentTypesDir();
+      const roleTool = `Legacy${legacyRole[0]!.toUpperCase()}${legacyRole.slice(1)}Tool`;
+      await Bun.write(
+        join(tempDir, ".itsybitsy", "agent-types", `${legacyRole}.md`),
+        `---\nname: ${legacyRole}\ncanSpawnChildren: ${!worker}\npermissions:\n  allow: ["${roleTool}"]\n---\nlegacy ${legacyRole}\n`,
+      );
+      await plantRehirableArchive(agentId, { includeSettings: false, worker });
+      await mkdir(join(tempDir, ".claude"), { recursive: true });
+      const sharedSettingsPath = join(tempDir, ".claude", "settings.local.json");
+      await Bun.write(sharedSettingsPath, JSON.stringify({ permissions: { allow: ["UserOnlyTool"] } }));
+      const sharedBefore = await Bun.file(sharedSettingsPath).text();
+      const runner = successRunner();
+      setRehireSpawnRunner(runner);
+      setNukeResumeSpawnRunner(runner);
 
-    const result = await rehireAgent(agentId);
+      const result = await rehireAgent(agentId);
 
-    expect(result.ok).toBe(true);
-    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
-    const isolatedSettingsPath = join(agentDir, ".claude", "settings.local.json");
-    const isolated = await Bun.file(isolatedSettingsPath).json();
-    expect(isolated.permissions.allow).toContain("Bash(ib:*)");
-    expect(isolated.hooks.SessionStart[0].hooks[0].command).toBe(`ib hooks session-start ${agentId}`);
-    expect(isolated.hooks.PostToolUse[0].hooks[0].command).toBe(`ib hooks inject-timestamp ${agentId}`);
-    expect(JSON.stringify(isolated.hooks.PreToolUse)).toContain(`ib hooks intercept-task ${agentId}`);
-    expect(JSON.stringify(isolated.hooks)).toContain(`hook-check-path ${agentId}`);
-    expect(await Bun.file(sharedSettingsPath).text()).toBe(sharedBefore);
-    expect(await Bun.file(join(agentDir, "resume.sh")).text()).toContain(`--settings '${isolatedSettingsPath}'`);
-  });
+      expect(result.ok).toBe(true);
+      const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+      const isolatedSettingsPath = join(agentDir, ".claude", "settings.local.json");
+      const isolated = await Bun.file(isolatedSettingsPath).json();
+      expect(isolated.permissions.allow).toContain("Bash(ib:*)");
+      expect(isolated.permissions.allow).toContain(roleTool);
+      expect(isolated.hooks.SessionStart[0].hooks[0].command).toBe(`ib hooks session-start ${agentId}`);
+      expect(isolated.hooks.PostToolUse[0].hooks[0].command).toBe(`ib hooks inject-timestamp ${agentId}`);
+      expect(JSON.stringify(isolated.hooks.PreToolUse)).toContain(`ib hooks intercept-task ${agentId}`);
+      expect(JSON.stringify(isolated.hooks)).toContain(`hook-check-path ${agentId}`);
+      expect(await Bun.file(sharedSettingsPath).text()).toBe(sharedBefore);
+      expect(await Bun.file(join(agentDir, "resume.sh")).text()).toContain(`--settings '${isolatedSettingsPath}'`);
+    });
+  }
 
   for (const [cli, model] of [
     ["codex", "codex:gpt-5.4-mini"],
@@ -6348,6 +6356,50 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(JSON.stringify(migrated.hooks.PreToolUse)).toContain(`ib hooks intercept-task ${id}`);
     expect(JSON.stringify(migrated.hooks)).toContain(`hook-check-path ${id}`);
   });
+
+  for (const [legacyRole, worker] of [["manager", false], ["worker", true]] as const) {
+    test(`live resume migrates legacy worktree:false ${legacyRole} metadata without agentType`, async () => {
+      const id = `live-legacy-${legacyRole}`;
+      const roleTool = `LiveLegacy${legacyRole[0]!.toUpperCase()}${legacyRole.slice(1)}Tool`;
+      await Bun.write(
+        join(process.env.HOME!, ".itsybitsy", "agent-types", `${legacyRole}.md`),
+        `---\nname: ${legacyRole}\ncanSpawnChildren: ${!worker}\npermissions:\n  allow: ["${roleTool}"]\n---\nlegacy ${legacyRole}\n`,
+      );
+      const agentDir = join(agentsDir, id);
+      await mkdir(agentDir, { recursive: true });
+      const meta = makeAgent(id, tempDir, "stopped", {
+        state: "stopped",
+        worktree: false,
+        worker,
+        model: "claude:sonnet",
+        tmux_session: "",
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        sandbox: { enabled: false, rawAllow: [], domains: [] },
+        paths: { allowRead: [tempDir], allowWrite: [tempDir], deny: [] },
+      }).meta;
+      delete (meta as AgentMeta & { agentType?: string }).agentType;
+      await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+      await mkdir(join(tempDir, ".claude"), { recursive: true });
+      const sharedSettingsPath = join(tempDir, ".claude", "settings.local.json");
+      await Bun.write(sharedSettingsPath, JSON.stringify({ permissions: { allow: ["UserOnlyTool"] } }));
+      const sharedBefore = await Bun.file(sharedSettingsPath).text();
+      setNukeResumeSpawnRunner(cleanWorktreeRunner());
+      setSendSpawnRunner(() => makeSpawnResult("", 0));
+
+      let result;
+      try {
+        result = await resumeAgent(makeAgent(id, tempDir, "stopped", meta));
+      } finally {
+        resetSendSpawnRunner();
+      }
+
+      expect(result.ok).toBe(true);
+      const isolated = await Bun.file(join(agentDir, ".claude", "settings.local.json")).json();
+      expect(isolated.permissions.allow).toContain(roleTool);
+      expect(isolated.hooks.SessionStart[0].hooks[0].command).toBe(`ib hooks session-start ${id}`);
+      expect(await Bun.file(sharedSettingsPath).text()).toBe(sharedBefore);
+    });
+  }
 
   for (const [cli, model] of [
     ["codex", "codex:gpt-5.4-mini"],

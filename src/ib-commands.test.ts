@@ -1961,6 +1961,11 @@ describe("retire → rehire recovery", () => {
     (meta as unknown as Record<string, unknown>).paths = { allowRead: [], allowWrite: [], deny: [] };
     await Bun.write(join(archiveDir, "meta.json"), JSON.stringify(meta, null, 2));
     await Bun.write(join(archiveDir, "exit-check.sh"), "#!/bin/bash\n");
+    await mkdir(join(archiveDir, ".claude"), { recursive: true });
+    await Bun.write(join(archiveDir, ".claude", "settings.local.json"), JSON.stringify({
+      permissions: { allow: ["Read"], deny: ["Write"] },
+      hooks: { PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${agentId}` }] }] },
+    }));
     await Bun.write(
       join(archiveDir, "retirement.json"),
       JSON.stringify({
@@ -2384,6 +2389,11 @@ describe("retire → rehire recovery", () => {
       JSON.stringify(meta, null, 2),
     );
     await Bun.write(join(archiveDir, "exit-check.sh"), "#!/bin/bash\n");
+    await mkdir(join(archiveDir, ".claude"), { recursive: true });
+    await Bun.write(join(archiveDir, ".claude", "settings.local.json"), JSON.stringify({
+      permissions: { allow: ["Read"], deny: ["Write"] },
+      hooks: { PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${agentId}` }] }] },
+    }));
     await Bun.write(
       join(archiveDir, "retirement.json"),
       JSON.stringify({
@@ -2482,8 +2492,9 @@ describe("retire → rehire recovery", () => {
     const restoredDir = join(tempDir, ".ittybitty", "agents", agentId);
     expect((await Bun.file(join(restoredDir, "meta.json")).json()).sandbox.enabled).toBe(false);
     const resume = await Bun.file(join(restoredDir, "resume.sh")).text();
-    expect(resume).toContain("--permission-mode default");
+    expect(resume).not.toContain("--permission-mode");
     expect(resume).not.toContain("--dangerously-skip-permissions");
+    expect(resume).toContain(`--settings '${join(restoredDir, ".claude", "settings.local.json")}'`);
   });
 });
 
@@ -6175,7 +6186,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(withOne.allowRead).toEqual(["/opt/thing"]);
   });
 
-  test("explicit sandbox.enabled:false launches Claude without kernel/proxy/collector while preserving hooks", async () => {
+  test("explicit sandbox.enabled:false changes only the kernel wrapper and keeps hook-controlled permissions", async () => {
     await writeSandboxType("sandbox-disabled", { enabled: false });
     await mkdir(join(tempDir, ".claude"), { recursive: true });
     await Bun.write(join(tempDir, ".claude", "settings.json"), JSON.stringify({
@@ -6194,17 +6205,18 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(start).not.toContain("sandbox-log-watch");
     expect(start).not.toContain("export http_proxy=");
     expect(start).not.toContain("--dangerously-skip-permissions");
-    expect(start).toContain("--permission-mode default");
+    expect(start).not.toContain("--permission-mode");
     expect(meta.sandbox.enabled).toBe(false);
     expect(meta.sandbox_proxy_port).toBeUndefined();
     expect(meta.paths.allowRead).toContain(canonicalizeSandboxPath(tempDir));
     expect(meta.paths.allowWrite).toContain(canonicalizeSandboxPath(tempDir));
     const settings = await Bun.file(join(agentsDir, "sandbox-disabled", "repo", ".claude", "settings.local.json")).json();
     expect(JSON.stringify(settings.hooks)).toContain("hook-check-path");
+    expect(settings.permissions.deny).toContain("EnterPlanMode");
     expect(settings.permissions.defaultMode).toBeUndefined();
   });
 
-  test("disabled no-worktree Claude forces native default mode on spawn and resume without rewriting the shared default", async () => {
+  test("disabled no-worktree Claude uses isolated hooks on spawn and resume without rewriting shared settings", async () => {
     const id = "disabled-no-worktree";
     await writeSandboxType(id, { enabled: false });
     await mkdir(join(tempDir, ".claude"), { recursive: true });
@@ -6216,13 +6228,20 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     setNewAgentSummaryGenerator(async () => {});
     setWatchdogSpawnFn(() => ({ pid: 99989 }));
 
-    const spawned = await callNewAgent("native prompts", { name: id, type: id, noWorktree: true });
+    const originalSharedSettings = await Bun.file(settingsPath).text();
+    const spawned = await callNewAgent("hook permissions", { name: id, type: id, noWorktree: true });
     expect(spawned.ok).toBe(true);
     const agentDir = join(agentsDir, id);
     const start = await Bun.file(join(agentDir, "start.sh")).text();
-    expect(start).toContain("--permission-mode default");
+    const isolatedSettingsPath = join(agentDir, ".claude", "settings.local.json");
+    expect(start).not.toContain("--permission-mode");
     expect(start).not.toContain("--dangerously-skip-permissions");
-    expect((await Bun.file(settingsPath).json()).permissions.defaultMode).toBe("bypassPermissions");
+    expect(start).toContain(`--settings '${isolatedSettingsPath}'`);
+    expect(await Bun.file(settingsPath).text()).toBe(originalSharedSettings);
+    const isolated = await Bun.file(isolatedSettingsPath).json();
+    expect(isolated.permissions.allow).toContain("Bash(ib:*)");
+    expect(isolated.permissions.deny).toContain("EnterPlanMode");
+    expect(JSON.stringify(isolated.hooks)).toContain(`hook-check-path ${id}`);
 
     const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
     meta.state = "stopped";
@@ -6239,9 +6258,10 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       resetSendSpawnRunner();
     }
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
-    expect(resume).toContain("--permission-mode default");
+    expect(resume).not.toContain("--permission-mode");
     expect(resume).not.toContain("--dangerously-skip-permissions");
-    expect((await Bun.file(settingsPath).json()).permissions.defaultMode).toBe("bypassPermissions");
+    expect(resume).toContain(`--settings '${isolatedSettingsPath}'`);
+    expect(await Bun.file(settingsPath).text()).toBe(originalSharedSettings);
   });
 
   test("disabled same-ID spawn removes orphan enabled seal before launch", async () => {
@@ -6383,7 +6403,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(spawnCalls.some((cmd) => cmd[0] === "which" && cmd[1] === "sandbox-exec")).toBe(false);
   });
 
-  test("disabled coordinator rehire resume strips archived bypassPermissions while retaining settings hooks", async () => {
+  test("disabled coordinator rehire preserves archived settings while retaining hook authority", async () => {
     const id = "disabled-coordinator-resume";
     const agentDir = join(agentsDir, id);
     await mkdir(join(agentDir, ".claude"), { recursive: true });
@@ -6415,9 +6435,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     expect(resume).toContain("--settings");
     expect(resume).not.toContain("--dangerously-skip-permissions");
-    expect(resume).not.toContain("--permission-mode bypassPermissions");
+    expect(resume).not.toContain("--permission-mode");
     const settings = await Bun.file(join(agentDir, ".claude", "settings.local.json")).json();
-    expect(settings.permissions.defaultMode).toBeUndefined();
+    expect(settings.permissions.defaultMode).toBe("bypassPermissions");
     expect(JSON.stringify(settings.hooks)).toContain("hook-check-path");
   });
 
@@ -6921,9 +6941,56 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(resume).toContain("sandbox-exec");
     expect(resume).toContain("sandbox-proxy-launch");
     expect(resume).toContain("sandbox-log-watch");
+    expect(resume).toContain("--dangerously-skip-permissions");
+    expect(resume).not.toContain("--permission-mode");
     expect(resumeCalls.some((cmd) => cmd[0] === "/usr/bin/sandbox-exec")).toBe(true);
     const repoId = await getRepoId(tempDir);
     expect(await readSealRecord(repoId, id, process.env.HOME!)).not.toBeNull();
+  });
+
+  test("refresh toggles an enabled Claude agent off without changing its hook permission boundary", async () => {
+    const id = "refresh-disable-claude";
+    await writeSandboxType(id, { enabled: true });
+    setSandboxPortAllocatorForTesting(() => 43203);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99958 }));
+    expect((await callNewAgent("enabled first", { name: id, type: id })).ok).toBe(true);
+
+    const agentDir = join(agentsDir, id);
+    const settingsPath = join(agentDir, "repo", ".claude", "settings.local.json");
+    const settingsBefore = await Bun.file(settingsPath).text();
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    meta.sandbox_proxy_pid = 99_999_999;
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+    await writeSandboxType(id, { enabled: false });
+
+    let created = false;
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      if (cmd.includes("has-session")) return makeSpawnResult("", created ? 0 : 1);
+      if (cmd.includes("new-session")) created = true;
+      if (cmd.includes("capture-pane")) return makeSpawnResult("Claude Code v1.0", 0);
+      return makeSpawnResult("", 0);
+    });
+    setSendSpawnRunner(() => makeSpawnResult("", 0));
+    try {
+      const result = await refreshAgentSandbox(makeAgent(id, tempDir, "stopped", meta));
+      expect(result.ok).toBe(true);
+    } finally {
+      resetSendSpawnRunner();
+    }
+
+    const resume = await Bun.file(join(agentDir, "resume.sh")).text();
+    expect(resume).not.toContain("sandbox-exec");
+    expect(resume).not.toContain("sandbox-proxy-launch");
+    expect(resume).not.toContain("sandbox-log-watch");
+    expect(resume).not.toContain("--dangerously-skip-permissions");
+    expect(resume).not.toContain("--permission-mode");
+    expect(await Bun.file(settingsPath).text()).toBe(settingsBefore);
+    expect(JSON.stringify((await Bun.file(settingsPath).json()).hooks)).toContain(`hook-check-path ${id}`);
+    expect((await Bun.file(join(agentDir, "meta.json")).json()).sandbox.enabled).toBe(false);
   });
 
   test("sandbox-enabled agy spawn uses the shared kernel wrapper", async () => {
@@ -10286,17 +10353,26 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     await rm(coordRepoDir, { recursive: true, force: true });
   });
 
-  test("non-coordinator, non-worktree agent still adds Bash(ib:*) to repo settings", async () => {
-    // The fix should NOT change behavior for non-coordinator no-worktree agents:
-    // they still need Bash(ib:*) in the repo's settings so their ib commands work.
+  test("non-coordinator no-worktree Claude isolates permissions and hooks from repo settings", async () => {
+    await mkdir(join(tempDir, ".claude"), { recursive: true });
+    const repoSettingsPath = join(tempDir, ".claude", "settings.local.json");
+    await Bun.write(repoSettingsPath, JSON.stringify({
+      permissions: { defaultMode: "bypassPermissions", allow: ["UserOnlyTool"] },
+    }));
+    const originalRepoSettings = await Bun.file(repoSettingsPath).text();
     setNewAgentSpawnRunner(mockSpawnRunner());
     const result = await callNewAgent("task", { name: "test-no-wt-perm", noWorktree: true });
     expect(result.ok).toBe(true);
 
-    const repoSettings = await Bun.file(join(tempDir, ".claude", "settings.local.json")).json();
-    expect(repoSettings.permissions.allow).toContain("Bash(ib:*)");
-    // No coordinator hooks should appear.
-    expect(repoSettings.hooks).toBeUndefined();
+    expect(await Bun.file(repoSettingsPath).text()).toBe(originalRepoSettings);
+    const agentDir = join(agentsDir, "test-no-wt-perm");
+    const isolatedSettingsPath = join(agentDir, ".claude", "settings.local.json");
+    const isolated = await Bun.file(isolatedSettingsPath).json();
+    expect(isolated.permissions.allow).toContain("Bash(ib:*)");
+    expect(isolated.permissions.allow).not.toContain("UserOnlyTool");
+    expect(isolated.hooks.PreToolUse[0].hooks[0].command).toBe("ib hook-check-path test-no-wt-perm");
+    const start = await Bun.file(join(agentDir, "start.sh")).text();
+    expect(start).toContain(`--settings '${isolatedSettingsPath}'`);
   });
 
   test("start.sh shell-quotes paths to handle spaces and special chars", async () => {

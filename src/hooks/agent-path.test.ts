@@ -59,6 +59,7 @@ function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
     agentsDir: "/repo/.ittybitty/agents",
     rootRepo: "/repo",
     allowList: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+    denyList: [],
     access: makeAccess(),
     protectedWritePaths: agentProtectedWritePaths("/repo/.ittybitty/agents/agent-abc123"),
     ...overrides,
@@ -224,6 +225,23 @@ describe("checkPathAccess", () => {
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
     expect(result.reason).toBe("Tool not in allow list");
+  });
+
+  test("deny list wins over a matching allow", () => {
+    const ctx = makeCtx({
+      allowList: ["Read", "Bash"],
+      denyList: ["Read", "Bash(git status:*)"],
+    });
+    const read = checkPathAccess(makeInput({
+      toolName: "Read",
+      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/file.ts" },
+    }), ctx);
+    const bash = checkPathAccess(makeInput({
+      toolName: "Bash",
+      toolInput: { command: "git status --short" },
+    }), ctx);
+    expect(read).toEqual({ decision: "deny", reason: "Tool in deny list" });
+    expect(bash).toEqual({ decision: "deny", reason: "Tool in deny list" });
   });
 
   test("Bash cd extraction — blocks cd to other agent", () => {
@@ -2700,6 +2718,54 @@ describe("hookCheckPath writes state='running' to meta.json", () => {
 
     const meta = JSON.parse(await readFile(join(agentDir, "meta.json"), "utf-8"));
     expect(meta.state).toBe("running");
+  });
+});
+
+describe("hookCheckPath with worktree:false agent settings", () => {
+  let repo: string;
+  let agentDir: string;
+  let logged: string[] = [];
+  const originalLog = console.log;
+
+  beforeEach(async () => {
+    repo = await mkdtemp(join(tmpdir(), "no-worktree-hook-settings-"));
+    agentDir = join(repo, ".ittybitty", "agents", "agent-shared");
+    await mkdir(join(agentDir, ".claude"), { recursive: true });
+    await mkdir(join(repo, ".claude"), { recursive: true });
+    await writeFile(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-shared",
+      state: "waiting",
+      worktree: false,
+      model: "claude:sonnet",
+      paths: { allowRead: [repo], allowWrite: [repo], deny: [] },
+    }));
+    await writeFile(
+      join(agentDir, ".claude", "settings.local.json"),
+      JSON.stringify({ permissions: { allow: ["Read"], deny: ["Read"] } }),
+    );
+    await writeFile(
+      join(repo, ".claude", "settings.local.json"),
+      JSON.stringify({ permissions: { allow: ["Read"], deny: [] } }),
+    );
+    logged = [];
+    console.log = (msg: string) => { logged.push(msg); };
+  });
+
+  afterEach(async () => {
+    console.log = originalLog;
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  test("uses the isolated --settings policy and enforces its deny list", async () => {
+    await hookCheckPath("agent-shared", JSON.stringify({
+      tool_name: "Read",
+      tool_input: { file_path: join(repo, "tracked.txt") },
+      cwd: repo,
+    }));
+
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(decision.hookSpecificOutput.permissionDecisionReason).toBe("Tool in deny list");
   });
 });
 

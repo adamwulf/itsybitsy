@@ -71,6 +71,12 @@ export interface PathCheckContext {
   rootRepo: string;
   allowList: string[];
   /**
+   * Explicit tool denials from the same generated settings file as allowList.
+   * Deny wins when a call matches both lists. Optional for translated CLI
+   * callers that already apply their deny list before delegating here.
+   */
+  denyList?: string[];
+  /**
    * The prepared filesystem access table (meta.paths ∪ the spawn-keyed runtime
    * roots, plus the tmux-socket deny), built once per hook invocation by
    * buildAgentAccessTable / buildSystemAccessTable. A missing paths block
@@ -306,6 +312,18 @@ export function checkPathAccess(
 ): HookDecision {
   const { toolName, toolInput, cwd } = input;
   const { agentDir, worktreePath, agentsDir, rootRepo, allowList } = ctx;
+
+  // Claude's PreToolUse decision is the permission authority in both kernel
+  // modes. Enforce the generated deny list here as well as in Claude's native
+  // settings so --dangerously-skip-permissions (enabled mode) cannot erase a
+  // type-level denial. Deny has the same precedence as Claude settings: a
+  // matching deny always wins over a matching allow.
+  for (const pattern of ctx.denyList ?? []) {
+    if (!pattern) continue;
+    if (toolMatchesPattern(toolName, toolInput, pattern)) {
+      return { decision: "deny", reason: "Tool in deny list" };
+    }
+  }
 
   if (typeof cwd !== "string") {
     return invalidToolInputReason("cwd must be a string");
@@ -1493,6 +1511,7 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
   let agentDir: string;
   let worktreePath: string;
   let rootRepo = "";
+  let isNoWorktree = false;
   // The prepared access table for this invocation. Both branches assign it or
   // return early on a build failure — there is no permissive default.
   let access!: PreparedAccessTable;
@@ -1531,12 +1550,10 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
     // Resolve agent directory from cwd pattern
     // cwd is typically: .../.ittybitty/agents/{id}/repo/...
     const cwdMatch = cwd.match(/(.*\/.ittybitty\/agents)/);
-    agentsDir = resolve(cwdMatch ? cwdMatch[1]! : join(process.cwd(), ".ittybitty", "agents"));
+    agentsDir = resolve(cwdMatch ? cwdMatch[1]! : join(cwd, ".ittybitty", "agents"));
 
     agentDir = join(agentsDir, agentId);
     worktreePath = join(agentDir, "repo");
-    let isNoWorktree = false;
-
     // Resolve worktree to absolute path if it exists
     try {
       worktreePath = await realpath(worktreePath);
@@ -1620,21 +1637,32 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
     }
   }
 
-  // Read settings.local.json for allow list (works for both @system and worktree agents)
+  // Read the exact settings file that owns this agent's permissions. Worktree
+  // agents use their project-local file. Coordinators and regular
+  // --no-worktree agents use an isolated agent-local file passed to Claude via
+  // --settings, so consulting the repo's shared settings here would apply the
+  // wrong agent type (and could miss the hook's deny list entirely).
   let allowList: string[] = [];
+  let denyList: string[] = [];
   try {
-    const settingsPath = join(worktreePath, ".claude", "settings.local.json");
+    const agentLocalSettingsPath = join(agentDir, ".claude", "settings.local.json");
+    const settingsPath = agentId !== SYSTEM_AGENT_ID && isNoWorktree
+      ? agentLocalSettingsPath
+      : join(worktreePath, ".claude", "settings.local.json");
     const settingsFile = Bun.file(settingsPath);
     if (await settingsFile.exists()) {
       const settings = await settingsFile.json();
       if (Array.isArray(settings?.permissions?.allow)) {
         allowList = settings.permissions.allow;
       }
+      if (Array.isArray(settings?.permissions?.deny)) {
+        denyList = settings.permissions.deny;
+      }
     }
   } catch { /* ignore */ }
 
   // Check ib manager-only command access before path checks
-  const ctx: PathCheckContext = { agentId, agentDir, worktreePath, agentsDir, rootRepo, allowList, access, protectedWritePaths };
+  const ctx: PathCheckContext = { agentId, agentDir, worktreePath, agentsDir, rootRepo, allowList, denyList, access, protectedWritePaths };
   let decision: HookDecision;
   if (toolName === "Bash") {
     const command = String(toolInput.command ?? "");

@@ -876,22 +876,11 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
         }
         await mkdir(join(worktreePath, ".claude"), { recursive: true });
         const restoredSettingsPath = join(worktreePath, ".claude", "settings.local.json");
-        if (archived.meta.sandbox && !resolveSandboxConfig({ sandbox: archived.meta.sandbox }).enabled) {
-          try {
-            const settings = await Bun.file(archivedSettings).json() as Record<string, unknown>;
-            const permissions = settings.permissions;
-            if (permissions && typeof permissions === "object" && !Array.isArray(permissions)) {
-              const next = { ...(permissions as Record<string, unknown>) };
-              if (next.defaultMode === "bypassPermissions") delete next.defaultMode;
-              settings.permissions = next;
-            }
-            await Bun.write(restoredSettingsPath, JSON.stringify(settings, null, 2));
-          } catch {
-            throw new Error("archived settings.local.json is invalid");
-          }
-        } else {
-          await cp(archivedSettings, restoredSettingsPath);
-        }
+        // Sandbox disablement affects only the itsybitsy kernel wrapper. Keep
+        // the archived Claude settings byte-for-byte: the explicit PreToolUse
+        // hook remains the tool permission authority and therefore suppresses
+        // native prompts while preserving allow/deny behavior.
+        await cp(archivedSettings, restoredSettingsPath);
       }
     }
 
@@ -909,18 +898,20 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
       await chmod(join(agentDir, "start.sh"), 0o755);
     }
 
-    const coordinatorSettingsSource = join(
+    // worktree:false Claude agents (per-repo coordinators and regular
+    // --no-worktree agents) archive their isolated --settings file here.
+    const isolatedSettingsSource = join(
       archived.archiveDir,
       ".claude",
       "settings.local.json",
     );
-    if (await Bun.file(coordinatorSettingsSource).exists().catch(() => false)) {
-      if (!(await lstat(coordinatorSettingsSource)).isFile()) {
-        throw new Error("archived coordinator settings are not a regular file");
+    if (await Bun.file(isolatedSettingsSource).exists().catch(() => false)) {
+      if (!(await lstat(isolatedSettingsSource)).isFile()) {
+        throw new Error("archived isolated settings are not a regular file");
       }
       await mkdir(join(agentDir, ".claude"), { recursive: true });
       await cp(
-        coordinatorSettingsSource,
+        isolatedSettingsSource,
         join(agentDir, ".claude", "settings.local.json"),
       );
     }
@@ -2057,7 +2048,7 @@ export async function resumeAgent(
       await Bun.write(resumeScript, agyResumeContent);
       await chmod(resumeScript, 0o755);
     } else {
-      // ── Claude resume branch (unchanged) ─────────────────────────────────────
+      // ── Claude resume branch ──────────────────────────────────────────────
       // Read session_id from meta.json
       const sessionId = agent.meta.session_id;
       if (!sessionId || sessionId === "null") {
@@ -2082,57 +2073,32 @@ export async function resumeAgent(
       if (resumeEffort) {
         claudeArgs = claudeArgs ? `${claudeArgs} --effort ${resumeEffort}` : `--effort ${resumeEffort}`;
       }
-      // Claude may skip its native prompts only when the kernel boundary is
-      // active. Disabled mode keeps Claude's own permission flow in addition
-      // to the always-installed hooks.
+      // Enabled mode may bypass Claude's native permission layer because the
+      // itsybitsy kernel wrapper is active. Disabled mode adds no permission
+      // flag: the explicit PreToolUse hook returns allow/deny for every call,
+      // suppressing native prompts while enforcing the generated policy.
       if (preparedResumeSandbox !== null) {
         claudeArgs = claudeArgs
           ? `${claudeArgs} --dangerously-skip-permissions`
           : "--dangerously-skip-permissions";
       }
-      if (preparedResumeSandbox === null) {
-        claudeArgs = claudeArgs ? `${claudeArgs} --permission-mode default` : "--permission-mode default";
-      }
 
-      // Rehire resumes the archived coordinator session rather than using the
-      // ordinary dashboard reset behavior. Coordinator hooks/permissions live
-      // in the restored agent-local settings file.
-      if (agent.meta.agentType === "coordinator") {
-        const coordinatorSettings = join(agentDir, ".claude", "settings.local.json");
-        if (!(await Bun.file(coordinatorSettings).exists().catch(() => false))) {
+      // Worktree:false Claude agents cannot safely install agent-specific hooks
+      // in the shared repository settings. Their isolated settings file is
+      // passed explicitly on every spawn/resume (including coordinator rehire).
+      if (agent.meta.worktree === false || agent.meta.agentType === "coordinator") {
+        const isolatedSettings = join(agentDir, ".claude", "settings.local.json");
+        if (!(await Bun.file(isolatedSettings).exists().catch(() => false))) {
           return {
             ok: false,
             exitCode: 1,
             stdout: "",
-            stderr: "Cannot resume rehired coordinator: archived settings are missing",
+            stderr: "Cannot resume worktree:false Claude agent: isolated settings are missing",
           };
         }
-        // Older archived coordinator settings may have been generated while
-        // the outer kernel boundary justified bypassPermissions. A disabled
-        // rehire must not reactivate that bypass through --settings.
-        if (!frozenConfig.enabled) {
-          try {
-            const settings = await Bun.file(coordinatorSettings).json() as Record<string, unknown>;
-            const permissions = settings.permissions;
-            if (permissions && typeof permissions === "object" && !Array.isArray(permissions)) {
-              const permissionRecord = permissions as Record<string, unknown>;
-              if (permissionRecord.defaultMode === "bypassPermissions") {
-                delete permissionRecord.defaultMode;
-                await Bun.write(coordinatorSettings, JSON.stringify(settings, null, 2));
-              }
-            }
-          } catch {
-            return {
-              ok: false,
-              exitCode: 1,
-              stdout: "",
-              stderr: "Cannot resume rehired coordinator: archived settings are invalid",
-            };
-          }
-        }
         claudeArgs = claudeArgs
-          ? `${claudeArgs} --settings ${shellQuote(coordinatorSettings)}`
-          : `--settings ${shellQuote(coordinatorSettings)}`;
+          ? `${claudeArgs} --settings ${shellQuote(isolatedSettings)}`
+          : `--settings ${shellQuote(isolatedSettings)}`;
       }
 
       // Shell-quote all paths for safe interpolation
@@ -7080,16 +7046,26 @@ export async function newAgent(
         JSON.stringify(coordSettingsObj, null, 2),
       );
     } catch { /* ignore */ }
+  } else if (agentCli === "claude") {
+    // Regular --no-worktree Claude agents share the main checkout with the
+    // user, so never inject agent permissions or hooks into the repo's
+    // settings.local.json. Generate the same policy as a worktree agent in an
+    // isolated file and pass it via --settings below. The PreToolUse hook reads
+    // this exact file for explicit allow/deny decisions in both kernel modes.
+    const managerOrWorker: "manager" | "worker" = isLeafAgent ? "worker" : "manager";
+    const settingsContent = await buildAgentSettings(rootRepoPath, managerOrWorker, id, configAllow, configDeny);
+    await mkdir(join(agentDir, ".claude"), { recursive: true });
+    await Bun.write(join(agentDir, ".claude", "settings.local.json"), settingsContent);
   } else {
-    // Non-worktree mode (non-coordinator): ensure ib permissions in root repo settings
+    // Codex/Fugu and agy no-worktree lifecycle remains owned by their native
+    // builders/hooks. Preserve the existing dynamic-grant file behavior until
+    // those builders take over this branch completely.
     const rootSettingsPath = join(rootRepoPath, ".claude", "settings.local.json");
     try {
       const rootSettingsFile = Bun.file(rootSettingsPath);
       const settings = await rootSettingsFile.exists() ? await rootSettingsFile.json() : {};
       const allow = (settings?.permissions?.allow as string[]) ?? [];
-      if (!allow.includes("Bash(ib:*)")) {
-        allow.push("Bash(ib:*)");
-      }
+      if (!allow.includes("Bash(ib:*)")) allow.push("Bash(ib:*)");
       settings.permissions = { ...settings.permissions, allow };
       await mkdir(join(rootRepoPath, ".claude"), { recursive: true });
       await Bun.write(rootSettingsPath, JSON.stringify(settings, null, 2));
@@ -7213,25 +7189,21 @@ When your task is complete:
   if (!isCodexBackedCli(agentCli) && effort) {
     claudeArgs = claudeArgs ? `${claudeArgs} --effort ${effort}` : `--effort ${effort}`;
   }
-  // Claude may skip its own prompts only while the kernel sandbox is active.
-  // In disabled mode its native permission flow stays intact alongside hooks.
-  // Codex and agy carry their own CLI-specific approval flags below.
+  // Enabled Claude may bypass its native permission layer because the kernel
+  // wrapper is active. Disabled Claude gets no permission-mode flag at all:
+  // its explicit PreToolUse hook returns allow/deny for every invocation, so
+  // there are no native tool prompts and the deny-by-default type policy stays
+  // authoritative. Codex/Fugu and agy own their CLI-specific flags below.
   if (!isCodexBackedCli(agentCli) && agentCli !== "agy" && preparedSandbox !== null) {
     claudeArgs = claudeArgs
       ? `${claudeArgs} --dangerously-skip-permissions`
       : "--dangerously-skip-permissions";
   }
-  // In no-worktree mode the shared project settings may contain a user's
-  // bypassPermissions default. Keep that file untouched, but scope native
-  // protection to this disabled launch explicitly.
-  if (!isCodexBackedCli(agentCli) && agentCli !== "agy" && preparedSandbox === null) {
-    claudeArgs = claudeArgs ? `${claudeArgs} --permission-mode default` : "--permission-mode default";
-  }
-  if (coordinatorMode) {
-    // Load permissions + hooks from the coordinator's isolated settings file
-    // so they don't pollute the repo's .claude/settings.local.json.
-    const coordSettingsArg = shellQuote(join(agentDir, ".claude", "settings.local.json"));
-    claudeArgs = claudeArgs ? `${claudeArgs} --settings ${coordSettingsArg}` : `--settings ${coordSettingsArg}`;
+  if (agentCli === "claude" && !useWorktree) {
+    // Coordinators and regular --no-worktree agents both load their isolated
+    // permission/hook boundary explicitly, leaving repo/user settings intact.
+    const isolatedSettingsArg = shellQuote(join(agentDir, ".claude", "settings.local.json"));
+    claudeArgs = claudeArgs ? `${claudeArgs} --settings ${isolatedSettingsArg}` : `--settings ${isolatedSettingsArg}`;
   }
 
   // 15. Write exit-check.sh

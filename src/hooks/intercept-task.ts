@@ -2,14 +2,14 @@
  * Hook: intercept Claude Task tool calls and spawn ib agents instead.
  */
 
-import { dirname, join } from "path";
+import { join } from "path";
 import { newAgent } from "../ib-commands";
 import { checkGitDirectoryFlags, resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./shared";
 import { loadAgentType, metaCanSpawnChildren } from "../agent-types";
 import { parseModel } from "../agent-cli";
 import { findShellMetachar } from "./shell-metachar";
 import { isValidAgentId } from "../validation";
-import { findNoWorktreeAgentsDir } from "./agent-context";
+import { resolveBoundHookAgent } from "./agent-context";
 
 export interface InterceptResult {
   action: "skip" | "intercept";
@@ -36,9 +36,9 @@ interface InterceptAgentIdentity {
 /**
  * Resolve the caller identity without trusting a model-controlled id by itself.
  * Existing worktree/system cwd resolution is used when no explicit identity is
- * supplied. An explicit id is used only when the bounded ancestor resolver
- * confirms matching worktree:false metadata, so it cannot fall back to a
- * nested forged worktree shape.
+ * supplied. An explicit id is authenticated against the registered agent and
+ * its cwd/process identity, so it cannot fall back to a forged worktree shape
+ * or let one agent invoke the hook as a sibling.
  */
 async function resolveInterceptAgent(
   cwd: string,
@@ -47,12 +47,16 @@ async function resolveInterceptAgent(
   if (!explicitAgentId) return resolveAgentFromCwd(cwd);
   if (!isValidAgentId(explicitAgentId)) return null;
 
-  const agentsDir = await findNoWorktreeAgentsDir(explicitAgentId, cwd);
-  if (!agentsDir) return null;
+  let bound;
+  try {
+    bound = await resolveBoundHookAgent(explicitAgentId, cwd);
+  } catch {
+    return null;
+  }
   return {
     agentId: explicitAgentId,
-    agentDir: join(agentsDir, explicitAgentId),
-    noWorktreeRepoPath: dirname(dirname(agentsDir)),
+    agentDir: bound.agentDir,
+    noWorktreeRepoPath: bound.meta.worktree === false ? bound.repoPath : undefined,
   };
 }
 

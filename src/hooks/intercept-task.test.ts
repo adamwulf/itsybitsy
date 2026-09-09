@@ -6,6 +6,12 @@ import { processTaskIntercept } from "./intercept-task";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { ensureAgentTypesDir } from "../agent-types";
 import { setUserHome, resetUserHome } from "../home";
+import {
+  resetBoundNoWorktreeCallerResolver,
+  resetNoWorktreeRepoRootsLoader,
+  setBoundNoWorktreeCallerResolver,
+  setNoWorktreeRepoRootsLoader,
+} from "./agent-context";
 
 /**
  * Per-process itsybitsy home for the whole file.
@@ -402,11 +408,18 @@ describe("no-worktree explicit identity", () => {
     const root = await fs.mkdtemp(join(tmpdir(), "intercept-no-worktree-"));
     const agentDir = join(root, ".ittybitty", "agents", agentId);
     await fs.mkdir(agentDir, { recursive: true });
-    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: agentId, worktree: false, ...meta }));
+    const storedMeta = { id: agentId, worktree: false, ...meta };
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(storedMeta));
+    setNoWorktreeRepoRootsLoader(async () => [root]);
+    setBoundNoWorktreeCallerResolver(async () => ({ meta: storedMeta, agentDir, repoPath: root }));
     return {
       root,
       agentDir,
-      cleanup: () => fs.rm(root, { recursive: true, force: true }),
+      cleanup: async () => {
+        resetBoundNoWorktreeCallerResolver();
+        resetNoWorktreeRepoRootsLoader();
+        await fs.rm(root, { recursive: true, force: true });
+      },
     };
   }
 
@@ -477,12 +490,13 @@ describe("no-worktree explicit identity", () => {
     }
   });
 
-  test("outer no-worktree identity wins over a nested forged worktree shape", async () => {
+  test("registered no-worktree identity wins over a standalone forged worktree shape", async () => {
     const fs = await import("fs/promises");
     const agentId = "agent-nwouter01";
     const ctx = await setupNoWorktreeAgent(agentId, { agentType: "manager", worker: false });
+    const fakeRoot = await fs.mkdtemp(join(tmpdir(), "intercept-standalone-fake-"));
     try {
-      const forgedDir = join(ctx.root, "nested", ".ittybitty", "agents", agentId);
+      const forgedDir = join(fakeRoot, ".ittybitty", "agents", agentId);
       const cwd = join(forgedDir, "repo");
       await fs.mkdir(cwd, { recursive: true });
       await Bun.write(
@@ -510,6 +524,44 @@ describe("no-worktree explicit identity", () => {
       expect(result.action).toBe("intercept");
       expect(capturedRepoPath).toBe(await fs.realpath(ctx.root));
       expect(capturedManager).toBe(agentId);
+    } finally {
+      await ctx.cleanup();
+      await fs.rm(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("authenticated no-worktree caller cannot invoke intercept-task as a registered sibling", async () => {
+    const fs = await import("fs/promises");
+    const callerId = "agent-nwcaller01";
+    const siblingId = "agent-nwsibling01";
+    const ctx = await setupNoWorktreeAgent(callerId, { agentType: "manager", worker: false });
+    try {
+      const siblingDir = join(ctx.root, ".ittybitty", "agents", siblingId);
+      await fs.mkdir(siblingDir, { recursive: true });
+      await Bun.write(
+        join(siblingDir, "meta.json"),
+        JSON.stringify({ id: siblingId, worktree: false, agentType: "manager", worker: false }),
+      );
+      let spawnCalled = false;
+      const result = await processTaskIntercept(
+        {
+          tool_name: "Task",
+          tool_input: { prompt: "claim sibling authority" },
+          cwd: ctx.root,
+          agentId: siblingId,
+        },
+        {
+          spawnAgent: async () => {
+            spawnCalled = true;
+            return { ok: true, stdout: "Created agent-deadbeef", stderr: "" };
+          },
+        },
+      );
+
+      const hookOutput = result.output as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } };
+      expect(spawnCalled).toBe(false);
+      expect(hookOutput.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(hookOutput.hookSpecificOutput.permissionDecisionReason).toContain("Cannot validate");
     } finally {
       await ctx.cleanup();
     }
@@ -558,7 +610,7 @@ describe("no-worktree explicit identity", () => {
     expect(hookOutput.hookSpecificOutput.permissionDecisionReason).toContain("Cannot validate");
   });
 
-  test("CLI dispatcher forwards the explicit id to a nested no-worktree leaf", async () => {
+  test("CLI dispatcher forwards an unauthenticated explicit id to fail-closed handling", async () => {
     const fs = await import("fs/promises");
     const agentId = "agent-nwdispatch1";
     const ctx = await setupNoWorktreeAgent(agentId, { agentType: "worker", worker: true });
@@ -587,7 +639,7 @@ describe("no-worktree explicit identity", () => {
       expect(stderr).toBe("");
       const hookOutput = JSON.parse(stdout).hookSpecificOutput;
       expect(hookOutput.permissionDecision).toBe("deny");
-      expect(hookOutput.permissionDecisionReason).toContain("Workers cannot ask");
+      expect(hookOutput.permissionDecisionReason).toContain("Cannot validate");
     } finally {
       await ctx.cleanup();
     }

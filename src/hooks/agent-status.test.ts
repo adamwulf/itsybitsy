@@ -16,6 +16,12 @@ import { setSendSpawnRunner, resetSendSpawnRunner } from "../ib-commands";
 import { makeSpawnResult } from "../test-utils";
 import { WATCHDOG_SENTINEL } from "../watchdog";
 import { setUserHome, resetUserHome } from "../home";
+import {
+  resetBoundNoWorktreeCallerResolver,
+  resetNoWorktreeRepoRootsLoader,
+  setBoundNoWorktreeCallerResolver,
+  setNoWorktreeRepoRootsLoader,
+} from "./agent-context";
 
 /**
  * Per-process itsybitsy home for the whole file.
@@ -67,10 +73,13 @@ describe("hookStatus cwd identity resolution", () => {
   beforeEach(async () => {
     originalCwd = process.cwd();
     root = await mkdtemp(join(tmpdir(), "ib-hook-status-context-"));
+    setNoWorktreeRepoRootsLoader(async () => [root]);
   });
 
   afterEach(async () => {
     process.chdir(originalCwd);
+    resetBoundNoWorktreeCallerResolver();
+    resetNoWorktreeRepoRootsLoader();
     await rm(root, { recursive: true, force: true });
   });
 
@@ -83,6 +92,13 @@ describe("hookStatus cwd identity resolution", () => {
     await mkdir(agentDir, { recursive: true });
     await mkdir(cwd, { recursive: true });
     await writeMeta(agentDir, { id: agentId, worktree, state: "running" });
+    if (!worktree) {
+      setBoundNoWorktreeCallerResolver(async () => ({
+        meta: { id: agentId, worktree: false },
+        agentDir,
+        repoPath: root,
+      }));
+    }
     return { agentDir, cwd };
   }
 
@@ -112,6 +128,62 @@ describe("hookStatus cwd identity resolution", () => {
 
     const meta = JSON.parse(await readFile(join(ctx.agentDir, "meta.json"), "utf-8"));
     expect(meta.state).toBe("waiting");
+  });
+
+  test("authenticated no-worktree Stop selects the registered agent from a standalone fake worktree cwd", async () => {
+    const agentId = "agent-statusreal1";
+    const ctx = await createAgent(agentId, false);
+    const fakeRoot = await mkdtemp(join(tmpdir(), "ib-hook-status-fake-"));
+    try {
+      const fakeAgentDir = join(fakeRoot, ".ittybitty", "agents", agentId);
+      const fakeCwd = join(fakeAgentDir, "repo");
+      await mkdir(fakeCwd, { recursive: true });
+      await writeMeta(fakeAgentDir, { id: agentId, worktree: true, state: "running" });
+      process.chdir(fakeCwd);
+
+      await hookStatus(agentId, JSON.stringify({ last_assistant_message: "WAITING" }));
+
+      expect(JSON.parse(await readFile(join(ctx.agentDir, "meta.json"), "utf-8")).state).toBe("waiting");
+      expect(JSON.parse(await readFile(join(fakeAgentDir, "meta.json"), "utf-8")).state).toBe("running");
+    } finally {
+      process.chdir(originalCwd);
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("launch-authenticated Stop child succeeds while its CLI exits but cannot claim a sibling", async () => {
+    const callerId = "agent-statuscaller1";
+    const siblingId = "agent-statussibling1";
+    const caller = await createAgent(callerId, false);
+    const sibling = await createAgent(siblingId, false);
+    process.chdir(root);
+    // Model the launch-capability branch: it authenticates A even when PID
+    // ancestry is unavailable during shutdown, while the same capability
+    // cannot authenticate a claimed sibling ID.
+    const resolveAgent = async (claimedId: string) => {
+      if (claimedId !== callerId) throw new Error("launch capability belongs to another agent");
+      return {
+        meta: { id: callerId, worktree: false },
+        agentDir: caller.agentDir,
+        agentsDir: join(root, ".ittybitty", "agents"),
+        repoPath: root,
+        worktreePath: root,
+      };
+    };
+
+    await hookStatus(
+      callerId,
+      JSON.stringify({ last_assistant_message: "WAITING" }),
+      { resolveAgent },
+    );
+    await hookStatus(
+      siblingId,
+      JSON.stringify({ last_assistant_message: "WAITING" }),
+      { resolveAgent },
+    );
+
+    expect(JSON.parse(await readFile(join(caller.agentDir, "meta.json"), "utf-8")).state).toBe("waiting");
+    expect(JSON.parse(await readFile(join(sibling.agentDir, "meta.json"), "utf-8")).state).toBe("running");
   });
 
   test("an unvalidated shared-repo identity remains unknown and does not create agent state", async () => {

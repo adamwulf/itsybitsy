@@ -8,11 +8,10 @@
  * Contract: https://code.claude.com/docs/en/hooks#permissionrequest-decision-control
  */
 
-import { join } from "path";
 import { logAgent } from "../agent-lifecycle";
 import { resolveAgentFromCwd } from "./shared";
 import { isValidAgentId } from "../validation";
-import { findNoWorktreeAgentsDir } from "./agent-context";
+import { resolveBoundHookAgent } from "./agent-context";
 
 interface PermissionDeniedDeps {
   write?: (output: string) => unknown;
@@ -47,19 +46,15 @@ export async function hookPermissionDenied(
   }
 
   try {
-    // A validated no-worktree boundary wins over nested path-shaped cwd data.
-    // Otherwise resolveAgentFromCwd preserves regular worktree and system
-    // coordinator routing.
+    // Bind ordinary explicit IDs to registered cwd/process identity. @system
+    // remains structural because it has no registered agent record.
     const cwd = process.cwd();
-    const noWorktreeAgentsDir = isValidAgentId(agentId)
-      ? await findNoWorktreeAgentsDir(agentId, cwd)
-      : null;
     let agentDir: string;
-    if (noWorktreeAgentsDir) {
-      agentDir = join(noWorktreeAgentsDir, agentId);
+    if (isValidAgentId(agentId)) {
+      agentDir = (await resolveBoundHookAgent(agentId, cwd)).agentDir;
     } else {
       const resolved = resolveAgentFromCwd(cwd);
-      if (!resolved) throw new Error("unrecognized agent context");
+      if (!resolved || resolved.agentId !== agentId) throw new Error("unrecognized agent context");
       agentDir = resolved.agentDir;
     }
 

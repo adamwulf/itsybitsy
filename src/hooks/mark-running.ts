@@ -1,25 +1,23 @@
 import { join } from "path";
 import { writeAgentState } from "../agents";
 import { isValidAgentId } from "../validation";
-import { findNoWorktreeAgentsDir } from "./agent-context";
-import { resolveAgentFromCwd } from "./shared";
+import { resolveBoundHookAgent } from "./agent-context";
+import { resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./shared";
 
 export async function hookMarkRunning(agentId = process.argv[3] ?? ""): Promise<void> {
   const cwd = process.cwd();
-  let resolved = null;
-  // UserPromptSubmit hooks for worktree:false Claude sessions run at the shared
-  // repo root (or a nested cwd), so the path-shaped resolver cannot identify
-  // them. The CLI already supplies the agent id on argv; use it only through
-  // the bounded, metadata-validating no-worktree ancestor resolver. Prefer the
-  // validated outermost boundary over any nested worktree-shaped path an agent
-  // could create; otherwise preserve existing worktree/system resolution.
-  if (isValidAgentId(agentId)) {
-    const agentsDir = await findNoWorktreeAgentsDir(agentId, cwd);
-    if (agentsDir) {
-      resolved = { agentId, agentDir: join(agentsDir, agentId) };
+  let resolved = agentId ? null : resolveAgentFromCwd(cwd);
+  if (agentId === SYSTEM_AGENT_ID) {
+    const system = resolveAgentFromCwd(cwd);
+    if (system?.agentId === SYSTEM_AGENT_ID) resolved = system;
+  } else if (isValidAgentId(agentId)) {
+    try {
+      const bound = await resolveBoundHookAgent(agentId, cwd);
+      resolved = { agentId, agentDir: bound.agentDir };
+    } catch {
+      return;
     }
   }
-  resolved ??= resolveAgentFromCwd(cwd);
   if (!resolved) return;
   // guard: don't resurrect terminal states if this hook fires late
   let current: string | undefined;

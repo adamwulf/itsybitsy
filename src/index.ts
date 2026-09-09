@@ -12,19 +12,27 @@ import type { Agent, AgentMeta, FlatEntry } from "./agents";
 import { kernelSandboxStatus } from "./agent-cli";
 import { resolvePathsConfig } from "./sandbox";
 import { isValidAgentId, isValidShellPath, tmuxSessionTarget } from "./validation";
-import { SYSTEM_AGENT_ID } from "./hooks/shared";
+import { resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./hooks/shared";
 import { normalizeTeamName, getTeam } from "./teams";
 
 const args = process.argv.slice(2);
 const command = args[0];
 
 /** Resolve debug-log routing for hooks that may run from a shared repo cwd. */
-async function resolveHookLogAgentDir(cwd: string, agentId?: string): Promise<string | null> {
+export async function resolveHookLogAgentDir(cwd: string, agentId?: string): Promise<string | null> {
   const { resolveAgentDir } = await import("./hooks/slow-hook-logger");
-  if (agentId && isValidAgentId(agentId)) {
-    const { findNoWorktreeAgentsDir } = await import("./hooks/agent-context");
-    const agentsDir = await findNoWorktreeAgentsDir(agentId, cwd);
-    if (agentsDir) return join(agentsDir, agentId);
+  if (agentId !== undefined) {
+    if (agentId === SYSTEM_AGENT_ID) {
+      const system = resolveAgentFromCwd(cwd);
+      return system?.agentId === SYSTEM_AGENT_ID ? system.agentDir : null;
+    }
+    if (!isValidAgentId(agentId)) return null;
+    try {
+      const { resolveBoundHookAgent } = await import("./hooks/agent-context");
+      return (await resolveBoundHookAgent(agentId, cwd)).agentDir;
+    } catch {
+      return null;
+    }
   }
   return resolveAgentDir(cwd, agentId);
 }
@@ -2626,7 +2634,13 @@ export async function main() {
       const { withHookLogging } = await import("./hooks/slow-hook-logger");
       const { hookPermissionDenied } = await import("./hooks/permission-denied");
       const stdin = await new Response(Bun.stdin.stream()).text();
-      const agentDir = await resolveHookLogAgentDir(process.cwd(), id);
+      let agentDir: string | null = null;
+      try {
+        agentDir = await resolveHookLogAgentDir(process.cwd(), id);
+      } catch {
+        // PermissionRequest is fail-closed. Attribution is best effort and
+        // must never prevent the handler from emitting its structured deny.
+      }
       await withHookLogging("hook-permission-denied", agentDir, stdin, () => hookPermissionDenied(id, stdin));
       break;
     }

@@ -9,6 +9,12 @@ import {
   hookInjectTimestamp,
 } from "./inject-timestamp";
 import { resetUserConfigPath, setUserConfigPath } from "../config";
+import {
+  resetBoundNoWorktreeCallerResolver,
+  resetNoWorktreeRepoRootsLoader,
+  setBoundNoWorktreeCallerResolver,
+  setNoWorktreeRepoRootsLoader,
+} from "./agent-context";
 
 // A fixed epoch used across tests: 2025-05-29 19:32:07 UTC.
 const FIXED_EPOCH_MS = 1748547127000;
@@ -161,11 +167,14 @@ describe("hookInjectTimestamp cwd identity resolution", () => {
     configPath = join(root, "config.json");
     await Bun.write(configPath, JSON.stringify({ hooks: { injectTimestamp: true } }));
     setUserConfigPath(configPath);
+    setNoWorktreeRepoRootsLoader(async () => [root]);
   });
 
   afterEach(async () => {
     process.chdir(originalCwd);
     resetUserConfigPath();
+    resetBoundNoWorktreeCallerResolver();
+    resetNoWorktreeRepoRootsLoader();
     await rm(root, { recursive: true, force: true });
   });
 
@@ -192,6 +201,11 @@ describe("hookInjectTimestamp cwd identity resolution", () => {
         join(agentDir, "meta.json"),
         JSON.stringify({ id: agentId, worktree: false }),
       );
+      setBoundNoWorktreeCallerResolver(async () => ({
+        meta: { id: agentId, worktree: false },
+        agentDir,
+        repoPath: root,
+      }));
       process.chdir(cwd);
 
       const output = await invoke(agentId);
@@ -210,6 +224,34 @@ describe("hookInjectTimestamp cwd identity resolution", () => {
     expect(JSON.parse(await invoke()).hookSpecificOutput.hookEventName).toBe("PostToolUse");
   });
 
+  test("registered no-worktree timestamp identity survives a standalone fake cwd but rejects a sibling claim", async () => {
+    const callerId = "agent-timecaller1";
+    const siblingId = "agent-timesibling1";
+    const callerDir = join(root, ".ittybitty", "agents", callerId);
+    const siblingDir = join(root, ".ittybitty", "agents", siblingId);
+    const fakeRoot = await mkdtemp(join(tmpdir(), "inject-timestamp-fake-"));
+    try {
+      const fakeCwd = join(fakeRoot, ".ittybitty", "agents", siblingId, "repo");
+      await mkdir(callerDir, { recursive: true });
+      await mkdir(siblingDir, { recursive: true });
+      await mkdir(fakeCwd, { recursive: true });
+      await Bun.write(join(callerDir, "meta.json"), JSON.stringify({ id: callerId, worktree: false }));
+      await Bun.write(join(siblingDir, "meta.json"), JSON.stringify({ id: siblingId, worktree: false }));
+      setBoundNoWorktreeCallerResolver(async () => ({
+        meta: { id: callerId, worktree: false },
+        agentDir: callerDir,
+        repoPath: root,
+      }));
+      process.chdir(fakeCwd);
+
+      expect(JSON.parse(await invoke(callerId)).hookSpecificOutput.additionalContext).toContain("Current time:");
+      expect(await invoke(siblingId)).toBe("");
+    } finally {
+      process.chdir(originalCwd);
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
   test("primary Claude stays silent even when timestamp injection is configured", async () => {
     process.chdir(root);
 
@@ -222,7 +264,7 @@ describe("hookInjectTimestamp cwd identity resolution", () => {
     expect(await invoke("agent-missing01")).toBe("");
   });
 
-  test("CLI dispatcher forwards the explicit id from a nested no-worktree cwd", async () => {
+  test("CLI dispatcher forwards an unauthenticated explicit id to silent handling", async () => {
     const agentId = "agent-timecli01";
     const agentDir = join(root, ".ittybitty", "agents", agentId);
     const cwd = join(root, "nested");
@@ -256,6 +298,6 @@ describe("hookInjectTimestamp cwd identity resolution", () => {
 
     expect(await proc.exited).toBe(0);
     expect(stderr).toBe("");
-    expect(JSON.parse(stdout).hookSpecificOutput.additionalContext).toContain("Current time:");
+    expect(stdout).toBe("");
   });
 });

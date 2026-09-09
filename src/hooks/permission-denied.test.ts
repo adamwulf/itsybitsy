@@ -1,11 +1,18 @@
 import { test, expect, describe, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdir, mkdtemp, rm, readFile } from "fs/promises";
+import { mkdir, mkdtemp, realpath, rm, readFile } from "fs/promises";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { setUserHome, resetUserHome } from "../home";
 import { hookPermissionDenied } from "./permission-denied";
+import { resolveHookLogAgentDir } from "../index";
+import {
+  resetBoundNoWorktreeCallerResolver,
+  resetNoWorktreeRepoRootsLoader,
+  setBoundNoWorktreeCallerResolver,
+  setNoWorktreeRepoRootsLoader,
+} from "./agent-context";
 
 /**
  * Per-process itsybitsy home for the whole file.
@@ -50,10 +57,18 @@ describe("hookPermissionDenied", () => {
       join(agentDir, "meta.json"),
       JSON.stringify({ id: "agent-test123", worktree: false }),
     );
+    setNoWorktreeRepoRootsLoader(async () => [tempDir]);
+    setBoundNoWorktreeCallerResolver(async () => ({
+      meta: { id: "agent-test123", worktree: false },
+      agentDir,
+      repoPath: tempDir,
+    }));
   });
 
   afterEach(async () => {
     process.chdir(originalCwd);
+    resetBoundNoWorktreeCallerResolver();
+    resetNoWorktreeRepoRootsLoader();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -109,6 +124,87 @@ describe("hookPermissionDenied", () => {
       "[PermissionRequest] Tool denied: Edit",
     );
     expect(JSON.parse(output).hookSpecificOutput.decision.behavior).toBe("deny");
+  });
+
+  test("registered ordinary worktree logging remains supported", async () => {
+    const worktreeId = "agent-permworktree1";
+    const worktreeAgentDir = join(tempDir, ".ittybitty", "agents", worktreeId);
+    const worktree = join(worktreeAgentDir, "repo");
+    await mkdir(worktree, { recursive: true });
+    await Bun.write(join(worktreeAgentDir, "meta.json"), JSON.stringify({ id: worktreeId, worktree: true }));
+    await Bun.write(join(worktreeAgentDir, "agent.log"), "");
+    process.chdir(worktree);
+    let output = "";
+
+    await hookPermissionDenied(worktreeId, '{"tool_name":"Read"}', {
+      write: (chunk) => { output += chunk; },
+    });
+
+    expect(await readFile(join(worktreeAgentDir, "agent.log"), "utf-8")).toContain("Tool denied: Read");
+    expect(JSON.parse(output).hookSpecificOutput.decision.behavior).toBe("deny");
+  });
+
+  test("registered caller logging and debug routing ignore a standalone fake cwd and reject a sibling claim", async () => {
+    const siblingId = "agent-permsibling1";
+    const siblingDir = join(tempDir, ".ittybitty", "agents", siblingId);
+    const fakeRoot = await mkdtemp(join(tmpdir(), "perm-denied-fake-"));
+    try {
+      const fakeAgentDir = join(fakeRoot, ".ittybitty", "agents", siblingId);
+      const fakeCwd = join(fakeAgentDir, "repo");
+      await mkdir(siblingDir, { recursive: true });
+      await mkdir(fakeCwd, { recursive: true });
+      await Bun.write(join(siblingDir, "meta.json"), JSON.stringify({ id: siblingId, worktree: false }));
+      await Bun.write(join(siblingDir, "agent.log"), "");
+      await Bun.write(join(fakeAgentDir, "meta.json"), JSON.stringify({ id: siblingId, worktree: true }));
+      process.chdir(fakeCwd);
+
+      expect(await resolveHookLogAgentDir(fakeCwd, "agent-test123")).toBe(await realpath(agentDir));
+      expect(await resolveHookLogAgentDir(fakeCwd, siblingId)).toBeNull();
+
+      let callerOutput = "";
+      await hookPermissionDenied("agent-test123", '{"tool_name":"Edit"}', {
+        write: (chunk) => { callerOutput += chunk; },
+      });
+      let siblingOutput = "";
+      await hookPermissionDenied(siblingId, '{"tool_name":"Bash"}', {
+        write: (chunk) => { siblingOutput += chunk; },
+      });
+
+      expect(await readFile(join(agentDir, "agent.log"), "utf-8")).toContain("Tool denied: Edit");
+      expect(await readFile(join(siblingDir, "agent.log"), "utf-8")).toBe("");
+      expect(JSON.parse(callerOutput).hookSpecificOutput.decision.behavior).toBe("deny");
+      expect(JSON.parse(siblingOutput).hookSpecificOutput.decision.behavior).toBe("deny");
+    } finally {
+      process.chdir(originalCwd);
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("entrypoint spoofed identity still emits structured denial when attribution fails", async () => {
+    const fakeRoot = await mkdtemp(join(tmpdir(), "perm-denied-entrypoint-fake-"));
+    try {
+      const fakeId = "agent-permspoof1";
+      const fakeCwd = join(fakeRoot, ".ittybitty", "agents", fakeId, "repo");
+      await mkdir(fakeCwd, { recursive: true });
+      await Bun.write(
+        join(fakeRoot, ".ittybitty", "agents", fakeId, "meta.json"),
+        JSON.stringify({ id: fakeId, worktree: false }),
+      );
+      const proc = Bun.spawn(
+        ["bun", "run", join(import.meta.dir, "..", "index.ts"), "hook-permission-denied", fakeId],
+        { cwd: fakeCwd, stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+      );
+      proc.stdin.write('{"tool_name":"Bash"}');
+      proc.stdin.end();
+      const stdout = await new Response(proc.stdout).text();
+      const stderr = await new Response(proc.stderr).text();
+
+      expect(await proc.exited).toBe(0);
+      expect(stderr).toBe("");
+      expect(JSON.parse(stdout).hookSpecificOutput.decision.behavior).toBe("deny");
+    } finally {
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
   });
 
   test("invalid fallback agent identity denies without writing a diagnostic outside the agent", async () => {

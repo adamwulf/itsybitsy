@@ -120,6 +120,7 @@ import {
   teamAdd,
   writeMetaJsonAtomic,
   buildClaudePidBootstrapCommand,
+  resolveTrustedIbCommandArgs,
 } from "./ib-commands";
 import { sealPath, readSealRecord, computeSealInputs, computeSealRecord, verifyMetaAgainstSeal, writeSealRecordDirect } from "./agent-seal";
 import {
@@ -164,29 +165,68 @@ function makeAgent(
 }
 
 describe("Claude PID bootstrap", () => {
-  test("records the exact launch child before exec and preserves its PID", async () => {
+  test("uses the trusted running ib path despite a PATH shadow and preserves the launch PID", async () => {
     const root = await mkdtemp(join(tmpdir(), "claude-pid-bootstrap-"));
     try {
-      const binDir = join(root, "bin");
+      const shadowBinDir = join(root, "shadow-bin");
+      const trustedBinDir = join(root, "trusted-bin");
+      const trustedIb = join(trustedBinDir, "ib");
       const recordedPid = join(root, "recorded-pid");
       const execPid = join(root, "exec-pid");
       const parentPid = join(root, "parent-pid");
-      await mkdir(binDir, { recursive: true });
-      await Bun.write(join(binDir, "ib"), `#!/bin/sh\ntest "$1" = write-pid || exit 8\nprintf '%s' "$3" > '${recordedPid}'\n`);
-      await Bun.write(join(binDir, "claude"), `#!/bin/sh\ntest -f '${recordedPid}' || exit 9\nprintf '%s' "$$" > '${execPid}'\n`);
-      await chmod(join(binDir, "ib"), 0o755);
-      await chmod(join(binDir, "claude"), 0o755);
-      const bootstrap = buildClaudePidBootstrapCommand("agent-bootstrap", "claude");
+      const shadowMarker = join(root, "shadow-writer-ran");
+      await mkdir(shadowBinDir, { recursive: true });
+      await mkdir(trustedBinDir, { recursive: true });
+      await Bun.write(trustedIb, `#!/bin/sh\ntest "$1" = write-pid || exit 8\nprintf '%s' "$3" > '${recordedPid}'\n`);
+      await Bun.write(join(shadowBinDir, "ib"), `#!/bin/sh\nprintf shadow > '${shadowMarker}'\nexit 0\n`);
+      await Bun.write(join(shadowBinDir, "claude"), `#!/bin/sh\ntest -f '${recordedPid}' || exit 9\nprintf '%s' "$$" > '${execPid}'\n`);
+      await chmod(trustedIb, 0o755);
+      await chmod(join(shadowBinDir, "ib"), 0o755);
+      await chmod(join(shadowBinDir, "claude"), 0o755);
+      const trustedCommand = resolveTrustedIbCommandArgs(trustedIb);
+      expect(trustedCommand).toEqual([realpathSync(trustedIb)]);
+      const bootstrap = buildClaudePidBootstrapCommand("agent-bootstrap", "claude", trustedCommand!);
       const proc = Bun.spawn(["/bin/sh", "-c", `${bootstrap} & child=$!\nprintf '%s' "$child" > '${parentPid}'\nwait "$child"`], {
-        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin` },
+        env: { ...process.env, PATH: `${shadowBinDir}:/usr/bin:/bin` },
         stdout: "pipe",
         stderr: "pipe",
       });
       const stderr = await new Response(proc.stderr).text();
       expect(await proc.exited).toBe(0);
       expect(stderr).toBe("");
+      expect(await Bun.file(shadowMarker).exists()).toBe(false);
       expect(await Bun.file(recordedPid).text()).toBe(await Bun.file(parentPid).text());
       expect(await Bun.file(execPid).text()).toBe(await Bun.file(parentPid).text());
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a failing trusted writer cannot be rescued by a successful PATH shadow", async () => {
+    const root = await mkdtemp(join(tmpdir(), "claude-pid-bootstrap-fail-"));
+    try {
+      const shadowBinDir = join(root, "shadow-bin");
+      const trustedBinDir = join(root, "trusted-bin");
+      const trustedIb = join(trustedBinDir, "ib");
+      const shadowMarker = join(root, "shadow-writer-ran");
+      const claudeMarker = join(root, "claude-ran");
+      await mkdir(shadowBinDir, { recursive: true });
+      await mkdir(trustedBinDir, { recursive: true });
+      await Bun.write(trustedIb, "#!/bin/sh\nexit 7\n");
+      await Bun.write(join(shadowBinDir, "ib"), `#!/bin/sh\nprintf shadow > '${shadowMarker}'\nexit 0\n`);
+      await Bun.write(join(shadowBinDir, "claude"), `#!/bin/sh\nprintf claude > '${claudeMarker}'\n`);
+      await chmod(trustedIb, 0o755);
+      await chmod(join(shadowBinDir, "ib"), 0o755);
+      await chmod(join(shadowBinDir, "claude"), 0o755);
+      const bootstrap = buildClaudePidBootstrapCommand("agent-bootstrap", "claude", [trustedIb]);
+      const proc = Bun.spawn(["/bin/sh", "-c", bootstrap], {
+        env: { ...process.env, PATH: `${shadowBinDir}:/usr/bin:/bin` },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(await proc.exited).toBe(1);
+      expect(await Bun.file(shadowMarker).exists()).toBe(false);
+      expect(await Bun.file(claudeMarker).exists()).toBe(false);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -6339,7 +6379,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(start).not.toContain("--dangerously-skip-permissions");
     expect(start).toContain(`--settings '${isolatedSettingsPath}'`);
     expect(start).toContain("/bin/sh -c");
-    expect(start.indexOf("ib write-pid")).toBeLessThan(start.indexOf("exec claude"));
+    expect(start).toContain(realpathSync(process.execPath));
+    expect(start).toContain(realpathSync(join(import.meta.dir, "..", "index.ts")));
+    expect(start.indexOf("write-pid")).toBeLessThan(start.indexOf("exec claude"));
     expect(start).not.toContain("ib write-pid disabled-no-worktree \"$CLAUDE_PID\"");
     expect(await Bun.file(join(agentDir, ".hook-auth-token")).exists()).toBe(false);
     expect(await Bun.file(settingsPath).text()).toBe(originalSharedSettings);
@@ -6370,7 +6412,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(resume).not.toContain("--dangerously-skip-permissions");
     expect(resume).toContain(`--settings '${isolatedSettingsPath}'`);
     expect(resume).toContain("/bin/sh -c");
-    expect(resume.indexOf("ib write-pid")).toBeLessThan(resume.indexOf("exec claude"));
+    expect(resume).toContain(realpathSync(process.execPath));
+    expect(resume).toContain(realpathSync(join(import.meta.dir, "..", "index.ts")));
+    expect(resume.indexOf("write-pid")).toBeLessThan(resume.indexOf("exec claude"));
     expect(resume).not.toContain("ib write-pid disabled-no-worktree \"$CLAUDE_PID\"");
     expect(await Bun.file(settingsPath).text()).toBe(originalSharedSettings);
     const migrated = await Bun.file(isolatedSettingsPath).json();
@@ -10723,7 +10767,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const start = await Bun.file(join(agentDir, "start.sh")).text();
     expect(start).toContain(`--settings '${isolatedSettingsPath}'`);
     expect(start).toContain("/bin/sh -c");
-    expect(start.indexOf("ib write-pid")).toBeLessThan(start.indexOf("\nexec "));
+    expect(start).toContain(realpathSync(process.execPath));
+    expect(start).toContain(realpathSync(join(import.meta.dir, "..", "index.ts")));
+    expect(start.indexOf("write-pid")).toBeLessThan(start.indexOf("\nexec "));
     expect(start).not.toContain("ITSYBITSY_HOOK_AUTH_TOKEN");
   });
 

@@ -1612,6 +1612,20 @@ export async function resumeAgent(
     };
   }
 
+  const usesClaudePidBootstrap = resumeCli === "claude" &&
+    (agent.meta.worktree === false || agent.meta.agentType === "coordinator");
+  const trustedClaudeIbCommand = usesClaudePidBootstrap
+    ? resolveTrustedIbCommandArgs()
+    : null;
+  if (usesClaudePidBootstrap && !trustedClaudeIbCommand) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: "Cannot resume worktree:false Claude agent: could not resolve the trusted running ib command",
+    };
+  }
+
   // Ensure the central per-agent outbox dir exists before the agent starts so
   // the first enqueue doesn't race a missing-dir append. Idempotent — no-op
   // when the dir already exists.
@@ -2145,10 +2159,9 @@ export async function resumeAgent(
       // exec, so SessionStart cannot race the parent script's write. /bin/sh,
       // sandbox-exec, and Claude all replace one another in-place; $! remains
       // the same process targeted by wait/signals and stored in metadata.
-      const usesPidBootstrap = agent.meta.worktree === false || agent.meta.agentType === "coordinator";
       const resumeClaudeCommand = `${sandboxResumeLaunchPrefix}claude --resume "${sessionId}" ${claudeArgs}`;
-      const resumeLaunchCommand = usesPidBootstrap
-        ? buildClaudePidBootstrapCommand(agent.id, resumeClaudeCommand)
+      const resumeLaunchCommand = usesClaudePidBootstrap
+        ? buildClaudePidBootstrapCommand(agent.id, resumeClaudeCommand, trustedClaudeIbCommand!)
         : resumeClaudeCommand;
 
       // Shell-quote all paths for safe interpolation
@@ -2211,7 +2224,7 @@ trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; ki
 # Store PID in meta.json — route through "ib write-pid" which uses
 # mutateAgentMeta + the meta-lock (HIGH 2 from the Phase 4 review).
 META_JSON=${qMetaJson}
-${usesPidBootstrap ? `# The launch child stored this exact PID before exec, so SessionStart could not race it.` : `if [[ -f "$META_JSON" ]]; then
+${usesClaudePidBootstrap ? `# The launch child stored this exact PID before exec, so SessionStart could not race it.` : `if [[ -f "$META_JSON" ]]; then
     ib write-pid ${shellQuote(agent.id)} "$CLAUDE_PID" || log "write-pid failed (exit=$?); meta.json claude_pid not set"
 fi`}
 
@@ -5853,12 +5866,45 @@ async function ensureIsolatedClaudeSettings(
 }
 
 /**
+ * Resolve the current trusted ib invocation without consulting PATH. Compiled
+ * releases re-exec the running ib binary itself. Source-mode launches use the
+ * running Bun executable plus this checkout's canonical CLI entry point.
+ * Either form is derived from the already-running process/code provenance, so
+ * an agent-controlled PATH entry cannot replace the metadata writer.
+ */
+export function resolveTrustedIbCommandArgs(
+  execPath: string = process.execPath,
+  sourceEntryPath: string = join(import.meta.dir, "..", "index.ts"),
+): string[] | null {
+  try {
+    const canonicalExecPath = realpathSync(execPath);
+    if (basename(canonicalExecPath) === "ib") return [canonicalExecPath];
+
+    // Development and tests run the TypeScript entry point through Bun rather
+    // than a compiled ib executable. Keep that path trusted by deriving both
+    // argv elements from the running runtime and this module, never Bun.which.
+    if (!basename(canonicalExecPath).startsWith("bun")) return null;
+    return [canonicalExecPath, realpathSync(sourceEntryPath)];
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Wrap a Claude command so the process that will exec it records its own PID
  * first. Both /bin/sh and the optional sandbox wrappers exec in place, keeping
  * the recorded PID identical to the parent script's $! and the final CLI.
  */
-export function buildClaudePidBootstrapCommand(agentId: string, claudeCommand: string): string {
-  return `/bin/sh -c ${shellQuote(`ib write-pid ${shellQuote(agentId)} "$$" || exit 1\nexec ${claudeCommand}`)}`;
+export function buildClaudePidBootstrapCommand(
+  agentId: string,
+  claudeCommand: string,
+  ibCommandArgs: readonly string[],
+): string {
+  if (ibCommandArgs.length === 0) {
+    throw new Error("Claude PID bootstrap requires a trusted ib command");
+  }
+  const ibCommand = ibCommandArgs.map((arg) => shellQuote(arg)).join(" ");
+  return `/bin/sh -c ${shellQuote(`${ibCommand} write-pid ${shellQuote(agentId)} "$$" || exit 1\nexec ${claudeCommand}`)}`;
 }
 
 /**
@@ -6461,6 +6507,19 @@ export async function newAgent(
       exitCode: 1,
       stdout: "",
       stderr: `Error: --no-worktree is supported only for Claude agents; ${agentCli} agents require an isolated worktree`,
+    };
+  }
+
+  const usesClaudePidBootstrap = agentCli === "claude" && !useWorktree;
+  const trustedClaudeIbCommand = usesClaudePidBootstrap
+    ? resolveTrustedIbCommandArgs()
+    : null;
+  if (usesClaudePidBootstrap && !trustedClaudeIbCommand) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: "Error: worktree:false Claude launch requires the trusted running ib command",
     };
   }
 
@@ -7564,10 +7623,9 @@ echo ""
       sandboxExecPrefix: preparedSandbox ? sandboxLaunchPrefix.trimEnd() : undefined,
     });
   } else {
-    const usesPidBootstrap = !useWorktree;
     const claudeCommand = `${sandboxLaunchPrefix}claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})"`;
-    const claudeLaunchCommand = usesPidBootstrap
-      ? buildClaudePidBootstrapCommand(id, claudeCommand)
+    const claudeLaunchCommand = usesClaudePidBootstrap
+      ? buildClaudePidBootstrapCommand(id, claudeCommand, trustedClaudeIbCommand!)
       : claudeCommand;
     startContent = `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own claude process
@@ -7626,7 +7684,7 @@ trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; ki
 # whose symptom is benign on claude today but matters symmetrically with
 # the codex side (HIGH 2 from the Phase 4 review).
 META_JSON=${qStartMetaJson}
-${usesPidBootstrap ? `# The launch child stored this exact PID before exec, so SessionStart could not race it.` : `if [[ -f "$META_JSON" ]]; then
+${usesClaudePidBootstrap ? `# The launch child stored this exact PID before exec, so SessionStart could not race it.` : `if [[ -f "$META_JSON" ]]; then
     ib write-pid ${shellQuote(id)} "$CLAUDE_PID" || log "write-pid failed (exit=$?); meta.json claude_pid not set"
 fi`}
 

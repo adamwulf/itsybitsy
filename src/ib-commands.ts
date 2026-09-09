@@ -5301,13 +5301,13 @@ async function runHelperViaTmuxServerBlocking(
       // Deliberately NOT mkdir -p: an existing file, directory, or symlink is
       // a collision and must fail closed rather than being reused.
       `mkdir -m 700 ${shellQuote(resultDir)} || exit 124`,
-      `printf '%s\n' ${shellQuote(ownerToken)} > ${shellQuote(ownerPath)}`,
+      `printf '%s\n' ${shellQuote(ownerToken)} > ${shellQuote(ownerPath)} || exit 126`,
       `cd ${shellQuote(cwd)} || exit 125`,
       `${shellCommand} > ${shellQuote(outputTmpPath)} 2>&1`,
       "rc=$?",
-      `mv -f ${shellQuote(outputTmpPath)} ${shellQuote(outputPath)}`,
-      `printf '%s\\n' "$rc" > ${shellQuote(resultTmpPath)}`,
-      `mv -f ${shellQuote(resultTmpPath)} ${shellQuote(resultPath)}`,
+      `mv -f ${shellQuote(outputTmpPath)} ${shellQuote(outputPath)} || rc=126`,
+      `printf '%s\\n' "$rc" > ${shellQuote(resultTmpPath)} || exit 127`,
+      `mv -f ${shellQuote(resultTmpPath)} ${shellQuote(resultPath)} || exit 127`,
       "exit 0",
     ].join("; ");
     const result = await runner.run(["tmux", "run-shell", script]);

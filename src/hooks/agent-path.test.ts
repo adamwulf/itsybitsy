@@ -2886,7 +2886,7 @@ describe("hookCheckPath with worktree:false agent settings", () => {
 
     await hookCheckPath("agent-shared", JSON.stringify({
       tool_name: "Bash",
-      tool_input: { command: "ib new-agent do work" },
+      tool_input: { command: "ib new-agent 'do work'" },
       cwd: repo,
     }));
 

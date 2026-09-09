@@ -373,7 +373,7 @@ export function checkPathAccess(
     // cannot identify the caller inside newAgent without trusted ancestry.
     if (
       ctx.canSpawnChildren === false &&
-      parseIbCommand(command)?.subcommand === "new-agent"
+      containsIbNewAgentInvocation(command)
     ) {
       return { decision: "deny", reason: "Access denied: this agent cannot spawn sub-agents" };
     }
@@ -1230,6 +1230,17 @@ export function parseIbCommand(command: string): { subcommand: string; targetId:
   if (!isValidAgentId(targetId)) return null;
 
   return { subcommand, targetId };
+}
+
+/**
+ * Detect the capability-bearing `ib new-agent` verb without trying to parse
+ * its prompt as a target agent id. `parseIbCommand` intentionally serves
+ * manager commands that take an existing id, so quoted/multi-word new-agent
+ * prompts would otherwise evade the leaf guard. Also recognize a later shell
+ * segment in an otherwise allowed `ib ...; ib new-agent ...` command.
+ */
+function containsIbNewAgentInvocation(command: string): boolean {
+  return /(?:^|[;&|()\n])\s*ib[\t ]+new-agent(?:[\t \n]|$)/.test(command);
 }
 
 /**

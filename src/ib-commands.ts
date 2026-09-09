@@ -7257,20 +7257,6 @@ export async function newAgent(
     );
     await mkdir(join(agentDir, ".claude"), { recursive: true });
     await Bun.write(join(agentDir, ".claude", "settings.local.json"), settingsContent);
-  } else {
-    // Codex/Fugu and agy no-worktree lifecycle remains owned by their native
-    // builders/hooks. Preserve the existing dynamic-grant file behavior until
-    // those builders take over this branch completely.
-    const rootSettingsPath = join(rootRepoPath, ".claude", "settings.local.json");
-    try {
-      const rootSettingsFile = Bun.file(rootSettingsPath);
-      const settings = await rootSettingsFile.exists() ? await rootSettingsFile.json() : {};
-      const allow = (settings?.permissions?.allow as string[]) ?? [];
-      if (!allow.includes("Bash(ib:*)")) allow.push("Bash(ib:*)");
-      settings.permissions = { ...settings.permissions, allow };
-      await mkdir(join(rootRepoPath, ".claude"), { recursive: true });
-      await Bun.write(rootSettingsPath, JSON.stringify(settings, null, 2));
-    } catch { /* ignore */ }
   }
 
   // 12b. Sandbox preflight (profile + proxy + collector wiring) only when the

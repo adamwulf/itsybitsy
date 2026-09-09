@@ -317,6 +317,10 @@ describe("buildAgy{Start,Resume}Content — optional sandbox wrapper", () => {
       .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
     expect(() => buildAgyStartContent({ ...startBase(), sandboxExecPrefix: "" }))
       .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
+    expect(() => buildAgyStartContent({ ...startBase(), sandboxScriptPreamble: " \n\t" }))
+      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
+    expect(() => buildAgyStartContent({ ...startBase(), sandboxExecPrefix: " \t" }))
+      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
   });
 
   test("resume.sh REFUSES an absent wrapper when enabled", () => {
@@ -324,19 +328,41 @@ describe("buildAgy{Start,Resume}Content — optional sandbox wrapper", () => {
       .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
     expect(() => buildAgyResumeContent({ ...resumeBase(), sandboxExecPrefix: "" }))
       .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
+    expect(() => buildAgyResumeContent({ ...resumeBase(), sandboxScriptPreamble: " \n\t" }))
+      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
+    expect(() => buildAgyResumeContent({ ...resumeBase(), sandboxExecPrefix: " \t" }))
+      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
   });
 
-  test("disabled start and resume omit yolo flags and kernel helpers", () => {
+  test("disabled start and resume retain no-prompt hook-controlled mode while omitting kernel helpers", () => {
     const start = buildAgyStartContent({ ...startBase(), sandboxEnabled: false });
     const resume = buildAgyResumeContent({ ...resumeBase(), sandboxEnabled: false });
     for (const content of [start, resume]) {
-      expect(content).toMatch(/agy(?: --model| --log-file)/);
-      expect(content).not.toContain("--dangerously-skip-permissions");
-      expect(content).not.toContain("--mode=accept-edits");
+      expect(content).toContain("agy --dangerously-skip-permissions --mode=accept-edits");
       expect(content).not.toContain("sandbox-exec");
       expect(content).not.toContain("sandbox-proxy-launch");
       expect(content).not.toContain("sandbox-log-watch");
       expect(content).not.toContain("export http_proxy=");
+    }
+  });
+
+  test("disabled mode ignores stale wrapper fields instead of partially enabling the kernel sandbox", () => {
+    const start = buildAgyStartContent({
+      ...startBase(),
+      sandboxEnabled: false,
+      sandboxScriptPreamble: "STALE-PREAMBLE",
+      sandboxExecPrefix: "STALE-PREFIX",
+    });
+    const resume = buildAgyResumeContent({
+      ...resumeBase(),
+      sandboxEnabled: false,
+      sandboxScriptPreamble: "STALE-PREAMBLE",
+      sandboxExecPrefix: "STALE-PREFIX",
+    });
+    for (const content of [start, resume]) {
+      expect(content).not.toContain("STALE-PREAMBLE");
+      expect(content).not.toContain("STALE-PREFIX");
+      expect(content).toContain("agy --dangerously-skip-permissions --mode=accept-edits");
     }
   });
 });

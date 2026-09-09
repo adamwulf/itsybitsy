@@ -86,15 +86,19 @@ describe("buildCodexStartContent — launch line", () => {
       .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
     expect(() => buildCodexStartContent({ ...baseInput(), sandboxExecPrefix: "" }))
       .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
+    expect(() => buildCodexStartContent({ ...baseInput(), sandboxScriptPreamble: " \n\t" }))
+      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
+    expect(() => buildCodexStartContent({ ...baseInput(), sandboxExecPrefix: " \t" }))
+      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
   });
 
-  test("disabled launch keeps native Codex protections and hooks while omitting kernel helpers", () => {
+  test("disabled launch suppresses approvals, keeps native workspace-write and hooks, and omits kernel helpers", () => {
     const content = buildCodexStartContent({
       ...baseInput(),
       sandboxEnabled: false,
     });
+    expect(content).toContain("-a never -s workspace-write --dangerously-bypass-hook-trust");
     expect(content).toContain("--dangerously-bypass-hook-trust");
-    expect(content).not.toContain("-a never");
     expect(content).not.toContain("-s danger-full-access");
     expect(content).not.toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(content).toContain("hooks.PreToolUse");
@@ -102,6 +106,19 @@ describe("buildCodexStartContent — launch line", () => {
     expect(content).not.toContain("sandbox-proxy-launch");
     expect(content).not.toContain("sandbox-log-watch");
     expect(content).not.toContain("export http_proxy=");
+  });
+
+  test("disabled launch ignores stale wrapper fields instead of partially enabling the kernel sandbox", () => {
+    const content = buildCodexStartContent({
+      ...baseInput(),
+      sandboxEnabled: false,
+      sandboxScriptPreamble: "STALE-PREAMBLE",
+      sandboxExecPrefix: "STALE-PREFIX",
+    });
+    expect(content).not.toContain("STALE-PREAMBLE");
+    expect(content).not.toContain("STALE-PREFIX");
+    expect(content).toContain("-a never -s workspace-write");
+    expect(content).toContain("hooks.PreToolUse");
   });
 
   test("threads codexEffort into the -c model_reasoning_effort override", () => {
@@ -376,15 +393,19 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
       .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
     expect(() => buildCodexResumeContent({ ...baseInput(), sandboxExecPrefix: "" }))
       .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
+    expect(() => buildCodexResumeContent({ ...baseInput(), sandboxScriptPreamble: " \n\t" }))
+      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
+    expect(() => buildCodexResumeContent({ ...baseInput(), sandboxExecPrefix: " \t" }))
+      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
   });
 
-  test("disabled resume keeps native Codex protections and hooks while omitting kernel helpers", () => {
+  test("disabled resume suppresses approvals, keeps native workspace-write and hooks, and omits kernel helpers", () => {
     const content = buildCodexResumeContent({
       ...baseInput(),
       sandboxEnabled: false,
     });
+    expect(content).toContain("-a never -s workspace-write --dangerously-bypass-hook-trust");
     expect(content).toContain("--dangerously-bypass-hook-trust");
-    expect(content).not.toContain("-a never");
     expect(content).not.toContain("-s danger-full-access");
     expect(content).not.toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(content).toContain("hooks.PreToolUse");
@@ -392,6 +413,19 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     expect(content).not.toContain("sandbox-proxy-launch");
     expect(content).not.toContain("sandbox-log-watch");
     expect(content).not.toContain("export http_proxy=");
+  });
+
+  test("disabled resume ignores stale wrapper fields instead of partially enabling the kernel sandbox", () => {
+    const content = buildCodexResumeContent({
+      ...baseInput(),
+      sandboxEnabled: false,
+      sandboxScriptPreamble: "STALE-PREAMBLE",
+      sandboxExecPrefix: "STALE-PREFIX",
+    });
+    expect(content).not.toContain("STALE-PREAMBLE");
+    expect(content).not.toContain("STALE-PREFIX");
+    expect(content).toContain("-a never -s workspace-write");
+    expect(content).toContain("hooks.PreToolUse");
   });
 
   test("re-passes extra writable roots through as --add-dir flags on resume", () => {

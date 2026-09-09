@@ -40,6 +40,7 @@ import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { agentWorktreePath } from "../agents";
 import { checkWorktreeCleanliness } from "../git-status";
 import { SplitPane } from "./split-pane";
+import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { wordWrapLines, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
 import type { ChromeSlice } from "./wrap";
 import { fetchCodexUsage, fetchGeminiUsage, fetchUsage } from "../usage";
@@ -3507,6 +3508,8 @@ export async function launchDashboard(): Promise<void> {
     tui.requestRender();
   });
 
+  const typePickerKeyboard = new TypePickerKeyboard(terminal, () =>
+    dashboard.dialog?.type === "new-agent-form" && dashboard.dialog.focused === "agentType");
   tui.addInputListener((data) => {
     if (matchesKey(data, Key.ctrl("c"))) {
       // Re-enable stderr-bound warnings — TUI is going down.
@@ -3576,7 +3579,7 @@ export async function launchDashboard(): Promise<void> {
     }
     if (colorDetection.inputFilter(data)) return undefined;
     if (isKeyRelease(data)) return undefined;
-    dashboard.handleInput(data);
+    typePickerKeyboard.handleInput(data, input => dashboard.handleInput(input));
     return undefined;
   });
 

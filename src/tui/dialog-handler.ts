@@ -521,11 +521,9 @@ function handleNewAgentFormDialog(
     };
     if (matchesKey(data, Key.tab)) { nextFocus(); }
     else if (matchesKey(data, Key.shift("tab"))) { prevFocus(); }
-    // Shift+Space only reaches us as a distinct key under the Kitty keyboard
-    // protocol (CSI 32;2u); legacy terminals send a plain space for it, which
-    // falls through to the forward-cycle branch below.
-    else if (matchesKey(data, Key.shift("space"))) { cycleAgentType(-1); }
-    else if (matchesKey(data, Key.enter) || data === " ") { cycleAgentType(1); }
+    // Left/Right also work on terminals that cannot distinguish Shift+Space.
+    else if (matchesKey(data, Key.shift("space")) || matchesKey(data, Key.left)) { cycleAgentType(-1); }
+    else if (matchesKey(data, Key.enter) || matchesKey(data, Key.space) || matchesKey(data, Key.right)) { cycleAgentType(1); }
   } else if (d.focused === "prompt") {
     if (matchesKey(data, Key.tab)) { nextFocus(); }
     else if (matchesKey(data, Key.shift("tab"))) { prevFocus(); }
@@ -1019,7 +1017,7 @@ export function buildNewAgentFormContent(
   lines.push(`${nameLabel}  ${truncateToWidth(nameValue, innerWidth - 8, "")}`);
 
   const cycleHint = dialog.availableTypes.length > 1
-    ? ` ${DIM}[Space/Enter next, Shift+Space prev]${RESET}`
+    ? ` ${DIM}[Space/Enter/→ next, Shift+Space/← prev]${RESET}`
     : "";
   const typeValue = dialog.agentType || "manager";
   const typeLabel = dialog.focused === "agentType"

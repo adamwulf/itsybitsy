@@ -1,5 +1,23 @@
 import { test, expect, describe } from "bun:test";
-import { parseState, stripAnsi, STARTUP_MARKERS } from "./parse-state";
+import { parseState, parseStateForCli, isAgyTmuxOutput, stripAnsi, STARTUP_MARKERS } from "./parse-state";
+
+describe("Antigravity background tasks", () => {
+  test("UI-shaped task quotes without an agy footer do not select the agy parser", () => {
+    const block = "────\n> quoted fixture\n────\n  ● [23:31:06] sleep 120 running\n────";
+    for (const footer of ["", "\nplain text", "\n⏵⏵ accept edits on", "\ngpt-5.6-sol high · Context 73% left"]) {
+      expect(isAgyTmuxOutput(block + footer)).toBe(false);
+      expect(parseState(block + footer).reason).not.toContain("agy");
+    }
+  });
+
+  test("CLI-specific and auto-detected parsers recognize the live task below WAITING", async () => {
+    const output = await Bun.file(new URL("fixtures/agy-background-task.txt", import.meta.url)).text();
+    expect(parseStateForCli(output, "agy").state).toBe("running");
+    expect(parseState(output).state).toBe("running");
+    expect(parseStateForCli(output.replace(" running", " completed"), "agy").state).toBe("waiting");
+    expect(parseStateForCli(output.replace("WAITING", "I HAVE COMPLETED THE GOAL"), "agy").state).toBe("complete");
+  });
+});
 
 describe("STARTUP_MARKERS", () => {
   test("has exactly 4 markers", () => {

@@ -173,7 +173,7 @@ export function isAgyTmuxOutput(input: string): boolean {
   const tail = stripTrailingBlanks(lines).slice(-8).join("\n");
   if (/\b(?:accept-edits|plan)[ \t]+·[ \t]+\S/.test(tail)) return true;
 
-  return false;
+  return hasAgyBackgroundTasks(input);
 }
 
 /**
@@ -190,6 +190,7 @@ export function isAgyTmuxOutput(input: string): boolean {
  *   1. Active work — `esc to cancel` bottom-left OR a Braille-spinner activity
  *      line in the last 15 lines → running.
  *   2. Completion sentinel ("I HAVE COMPLETED THE GOAL", unquoted) → complete.
+ *      Otherwise a live background task below the input box → running.
  *   3. Standalone WAITING marker → waiting.
  *   4. Trust card ("Do you trust the contents of this project?") → creating.
  *   5. Idle at the input prompt (`? for shortcuts`, or a bare `>` between
@@ -223,6 +224,11 @@ export function parseAgyState(input: string): ParseStateResult {
     return { state: "complete", reason: "I HAVE COMPLETED THE GOAL in last 15 lines (agy)" };
   }
 
+  // A live background task beats WAITING/idle, but preserves intentional completion.
+  if (hasAgyBackgroundTasks(input)) {
+    return { state: "running", reason: "agy background task below input prompt" };
+  }
+
   // 3. Explicit WAITING — standalone on its own line (agy doesn't use ⏺).
   const waitingRegex = /(^|\n)\s*WAITING\s*($|\n)/;
   if (waitingRegex.test(last15)) {
@@ -249,11 +255,54 @@ export function parseAgyState(input: string): ParseStateResult {
 }
 
 /**
- * True when the tail carries agy's input box: a bare `>` prompt line sandwiched
- * between two `────` separator lines. Walks up from the last non-blank line to
- * find `── > ──` shaped chrome, tolerating the placeholder text agy shows on the
- * first draw.
+ * Recognizable agy status chrome, including the model/context footer captured
+ * in current Gemini builds. Caller must also validate the surrounding input box;
+ * the shortcut/cancel hints alone are shared with other CLIs.
  */
+export function isAgyStatusLine(line: string): boolean {
+  const text = stripAnsi(line).trim();
+  return /^(?:\? for shortcuts|esc to cancel)\b/.test(text)
+    || /\b(?:accept-edits|plan)[ \t]+·[ \t]+\S/.test(text)
+    || /^\S[^\n]*[ \t]+\|[ \t]+Context:[ \t]*\d{1,3}%$/.test(text);
+}
+
+/** Locate the latest agy input box, even when a task section adds a third divider. */
+export function findAgyInputBox(lines: string[]): { upperIndex: number; lowerIndex: number } | null {
+  const plain = stripTrailingBlanks(lines.map(stripAnsi));
+  if (!plain.slice(-2).some(isAgyStatusLine)) return null;
+  const isSep = (line: string): boolean => /^─+$/.test(line.trim());
+  const prompt = plain.findLastIndex((line) => /^>(\s|$)/.test(line.trimStart()));
+  if (prompt < 1 || !isSep(plain[prompt - 1]!)) return null;
+  const belowPrompt = plain.slice(prompt + 1);
+  const bottom = belowPrompt.findIndex(isSep);
+  if (bottom < 0) return null;
+  return { upperIndex: prompt - 1, lowerIndex: prompt + 1 + bottom };
+}
+
+/**
+ * Detect agy's live background-task section below its input box. Captured from
+ * sub-builder on 2026-09-08; see fixtures/agy-background-task.txt.
+ */
+export function hasAgyBackgroundTasks(input: string): boolean {
+  const lines = stripTrailingBlanks(stripAnsi(input).split("\n"));
+  const isSep = (line: string): boolean => /^─+$/.test(line.trim());
+  // Only inspect the latest input box. A task row in transcript/scrollback must
+  // not keep a finished agent running. Unlike Claude's fixed footer window, this
+  // section can grow with the number of tasks.
+  const box = findAgyInputBox(lines);
+  if (!box) return false;
+  const belowInput = lines.slice(box.lowerIndex + 1);
+  const tasksBottom = belowInput.findIndex(isSep);
+  if (tasksBottom < 1) return false;
+  // The task section is followed only by the status footer (at most two lines).
+  const footer = belowInput.slice(tasksBottom + 1);
+  if (footer.length > 2 || !footer.some(isAgyStatusLine)) return false;
+  return belowInput.slice(0, tasksBottom).some((line) =>
+    /^[ \t]*●[ \t]+\[\d{2}:\d{2}:\d{2}\][ \t]+\S.*[ \t]running[ \t]*$/.test(line),
+  );
+}
+
+/** True when the tail carries agy's `── > ──` input-box chrome. */
 function hasAgyBarePromptBetweenSeparators(input: string): boolean {
   const lines = stripTrailingBlanks(input.split("\n"));
   // Find the last bare `>` prompt line (optionally followed by placeholder text).

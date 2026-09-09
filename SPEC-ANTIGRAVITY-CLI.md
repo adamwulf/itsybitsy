@@ -141,10 +141,11 @@ kernel boundary.
 
 ### 4.6 Watchdog, state, dashboard
 
+- Background processes: a live `● [HH:MM:SS] <command> running` row in the separator-bounded task section below the latest `>` input box, followed by a recognized agy status footer, overrides stored `waiting` to derived `running`. The shared detector feeds watchdog resolution, waiting-notification suppression, transient-cache writes, and dashboard reads. It preserves stored `complete`, ignores task rows in transcript/older input boxes, and clears on the next capture after the task row disappears. The agy tmux parser also recognizes this section before WAITING/idle (after the completion sentinel). Evidence: `src/fixtures/agy-background-task.txt`, captured from `sub-builder` on 2026-09-08 with a harmless 120-second background process; trailing spaces removed.
 - `classifyAgentCli` already returns the parsed cli; the three Claude-only branches skip `agy` like codex. Add an `agy` branch: `Enter` when the pane contains `Do you trust the contents of this project?` (fallback), `0` when it contains `How's the CLI experience so far?`.
 - Liveness: `runPerAgentWatchdog` for `agy` agents checks that `agy-hook-heartbeat` appears within 60 s of spawn; if not, log loudly and notify the manager (no kill in v1).
 - `parseStateForCli` gets an `agy` branch: `esc to cancel` bottom-left or a `⣯`/`⢿`-style spinner line → running; `? for shortcuts` with a bare `>` line → idle (defers to meta state); `Do you trust the contents` → creating. `rate_limited`/`api_error` overrides stay `unknown` until strings are captured.
-- Dashboard: model column renders `agy:<slug>` verbatim; `computeChromeSlice` gets an `agy` detector (last two `────` separators, same as Claude's `findLastTwoSeparators` shape) or no trimming.
+- Dashboard: model column renders `agy:<slug>` verbatim; `computeChromeSlice` anchors the agy input box on the latest `>` and its surrounding separators, guarded by a recognized agy status footer. Background-task rows and their third separator remain in the status area, outside the transcript. Without recognizable chrome, no trimming occurs.
 - `ib state`: orphan pattern for `agy --conversation <uuid>` / `agy --dangerously-skip-permissions` / disabled `agy --log-file <path>` with cwd inside a worktree.
 
 ---

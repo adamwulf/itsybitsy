@@ -3348,6 +3348,14 @@ describe("runPerAgentWatchdog", () => {
 // ── resolveWatchdogState — background-shell override (Case 1) ────────────────
 
 describe("resolveWatchdogState — waiting + background shell override", () => {
+  test("Gemini stays running until its background task disappears, preserving completion", async () => {
+    const output = await Bun.file(new URL("fixtures/agy-background-task.txt", import.meta.url)).text();
+    expect(resolveWatchdogState(output, "waiting")).toBe("running");
+    expect(resolveWatchdogState(output, "complete")).toBe("complete");
+    expect(resolveWatchdogState(output, "running")).toBe("running");
+    expect(resolveWatchdogState(output.replace(" running", " completed"), "waiting")).toBe("waiting");
+  });
+
   test("waiting + bg shell → running", () => {
     expect(resolveWatchdogState("⏵⏵ accept edits on · 1 shell", "waiting")).toBe("running");
   });
@@ -3617,6 +3625,21 @@ describe("runPerAgentWatchdog — meta.transient.json persistence", () => {
     expect(written!.has_background_tasks).toBe(true);
     expect(written!.tmux_compacting).toBe(false);
     expect(written!.tmux_rate_limited).toBe(false);
+  });
+
+  test("Gemini background-task presence is persisted and cleared on the next capture", async () => {
+    const output = await Bun.file(new URL("fixtures/agy-background-task.txt", import.meta.url)).text();
+    let currentOutput = output;
+    setPerAgentCaptureTmux(async () => currentOutput);
+    setPerAgentReadState(async () => "waiting");
+    const { readAgentTransient } = await import("./agents");
+    for (const active of [true, false]) {
+      currentOutput = active ? output : output.replace(" running", " completed");
+      let existsChecks = 0;
+      setPerAgentExistsSync(() => ++existsChecks <= 1);
+      await runPerAgentWatchdog("agent-test1", tempDir);
+      expect((await readAgentTransient(agentDir))?.has_background_tasks).toBe(active);
+    }
   });
 
   test("model-safeguard output → tmux_api_safeguard=true (api_error/api_terms stay false)", async () => {

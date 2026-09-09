@@ -658,6 +658,22 @@ describe("computeChromeSlice — chrome detection on UNWRAPPED logical lines", (
   });
 
   describe("agy input chrome", () => {
+    test("captured task section stays in chrome, with ANSI and pane padding", async () => {
+      const fixture = await Bun.file(new URL("../fixtures/agy-background-task.txt", import.meta.url)).text();
+      for (const colored of [false, true]) {
+        const raw = colored
+          ? fixture.split("\n").map((line) => `\x1b[32m${line}\x1b[0m`).join("\n") + "\n  \n\n"
+          : fixture;
+        const slice = computeChromeSlice(raw, false, true);
+        expect(stripAnsi(slice.transcriptRaw).trim()).toBe("WAITING");
+        expect(slice.statusLines.map(stripAnsi)).toEqual([
+          '  ● [23:31:06] python3 -c "import time; time.sleep(120)" running',
+          "─".repeat(1000),
+          "Gemini 3.8 Flash (High) | Context: 21%",
+        ]);
+      }
+    });
+
     // agy input box: transcript, then `────` / `>` / `────`, then the status
     // line (`? for shortcuts … accept-edits · <model> · <effort>`), at pin width.
     const agyStatus = "? for shortcuts                accept-edits · Gemini 3.7 Flash · low";

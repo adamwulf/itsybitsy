@@ -1377,6 +1377,39 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     }
   });
 
+  test("keeps a substantial blank-terminated first-column continuation in table geometry", () => {
+    const table = renderTable(
+      [
+        ["First", "Second"],
+        ["primary fragment", "service"],
+        ["final continuation text remains in first cell and wraps again", ""],
+      ],
+      [70, 12],
+    );
+    table.push("");
+
+    const rows = wordWrapLines(table.join("\n"), 24);
+    const heavy = rows.find((row) => row.includes("━"))!;
+    const firstStart = heavy.indexOf("━") + 1;
+    for (const row of rows.filter((candidate) => /final|continuation|remains|wraps again/.test(candidate))) {
+      expect(row.slice(0, firstStart).trim()).toBe("");
+    }
+  });
+
+  test("does not absorb short indented prose before a blank line", () => {
+    const table = renderTable(
+      [
+        ["First", "Second"],
+        ["alpha", "a value long enough to force table reflow"],
+      ],
+      [70, 40],
+    );
+    table.push("   Note.", "");
+
+    const rows = wordWrapLines(table.join("\n"), 30);
+    expect(rows).toContain("   Note.");
+  });
+
   test("does not guess spaces between exact-width source fragments", () => {
     const table = renderTable(
       [
@@ -1600,6 +1633,87 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
       expect(row).toContain(linkOpen);
       expect(row).toContain(linkClose);
     }
+  });
+
+  test("closes and reopens row-wide SGR and OSC-8 wrappers that begin after indentation", () => {
+    const linkOpen = "\x1b]8;;https://example.com/row\x1b\\";
+    const linkClose = "\x1b]8;;\x1b\\";
+    const open = linkOpen + "\x1b[31m";
+    const close = "\x1b[0m" + linkClose;
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["alpha", "bravo charlie delta echo foxtrot"],
+      ],
+      [5, 40],
+    );
+    table[2] = "  " + open + table[2]!.slice(2) + close;
+
+    const rows = wordWrapLines(table.join("\n"), 20);
+    const body = rows.filter((row) => /alpha|bravo|charlie|delta|echo|foxtrot/.test(stripAnsi(row)));
+    expect(body.length).toBeGreaterThan(1);
+    for (const row of body) {
+      expect(row).toContain(open);
+      expect(row).toContain(close);
+    }
+  });
+
+  test("retains a row-wide closer after an otherwise empty final cell", () => {
+    const linkOpen = "\x1b]8;;https://example.com/row\x1b\\";
+    const linkClose = "\x1b]8;;\x1b\\";
+    const open = linkOpen + "\x1b[31m";
+    const close = "\x1b[0m" + linkClose;
+    const table = renderTable(
+      [
+        ["First", "Second"],
+        ["a substantial first-column continuation fragment", ""],
+      ],
+      [70, 12],
+    );
+    table[2] = "  " + open + table[2]!.slice(2) + close;
+    table.push("");
+
+    const rows = wordWrapLines(table.join("\n"), 24);
+    const heavyIndex = rows.findIndex((row) => stripAnsi(row).includes("━"));
+    const body = rows.slice(heavyIndex + 1).filter((row) => stripAnsi(row).trim().length > 0);
+    expect(body.length).toBeGreaterThan(1);
+    for (const row of body) {
+      expect(row).toContain(open);
+      expect(row).toContain(close);
+    }
+  });
+
+  test("preserves independent styling for each resized rule segment", () => {
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["alpha", "bravo charlie delta echo"],
+      ],
+      [5, 30],
+    );
+    table[1] =
+      "  \x1b[31m" + "━".repeat(7) + "\x1b[0m  \x1b[34m" + "━".repeat(32) + "\x1b[0m";
+
+    const rows = wordWrapLines(table.join("\n"), 20);
+    const rule = rows.find((row) => stripAnsi(row).includes("━"))!;
+    expect(rule).toMatch(/^\x1b\[31m  ━+\x1b\[0m  \x1b\[34m━+\x1b\[0m$/);
+  });
+
+  test("keeps alternating SGR wrapping output linear in the cell length", () => {
+    const styled = Array.from({ length: 2_000 }, (_value, index) =>
+      (index % 2 === 0 ? "\x1b[31m" : "\x1b[34m") + "x",
+    ).join("") + "\x1b[0m";
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["alpha", styled],
+      ],
+      [5, 2_000],
+    );
+
+    const rows = wordWrapLines(table.join("\n"), 40);
+    expect(rows.join("\n").length).toBeLessThan(table.join("\n").length * 4);
+    expect(rows.map(stripAnsi).join("").replace(/\s/g, "")).toContain("x".repeat(2_000));
   });
 
   test("stacks very narrow tables instead of discarding later columns", () => {

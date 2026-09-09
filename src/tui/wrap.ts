@@ -484,8 +484,8 @@ interface BorderlessTableBlock {
   layout: BorderlessRuleLayout;
   rows: string[][];
   rowAffixes: TerminalAffixes[];
-  heavyAffixes: TerminalAffixes;
-  dividerBefore: Array<TerminalAffixes | null>;
+  heavyRule: StyledBorderlessRule;
+  dividerBefore: Array<StyledBorderlessRule | null>;
   alignments: CellAlignment[];
 }
 
@@ -500,6 +500,16 @@ interface ParsedBorderlessRow {
 interface TerminalAffixes {
   prefix: string;
   suffix: string;
+}
+
+interface TerminalLineParts {
+  inner: string;
+  affixes: TerminalAffixes;
+}
+
+interface StyledBorderlessRule {
+  affixes: TerminalAffixes;
+  segments: string[];
 }
 
 const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -582,35 +592,53 @@ function trimTerminalCell(text: string): string {
     .join("");
 }
 
-function terminalLineAffixes(line: string): TerminalAffixes {
+function terminalLineParts(line: string): TerminalLineParts {
   const tokens = terminalTokens(line);
-  let firstVisible = 0;
-  while (firstVisible < tokens.length && tokens[firstVisible]!.escape) firstVisible++;
-  const prefix = tokens.slice(0, firstVisible).map((token) => token.raw).join("");
-  let afterLastVisible = tokens.length;
-  while (afterLastVisible > 0 && tokens[afterLastVisible - 1]!.escape) afterLastVisible--;
+  const content = tokens
+    .map((token, index) => ({ token, index }))
+    .filter(({ token }) => !token.escape && token.text.trim().length > 0);
+  if (content.length === 0) {
+    return { inner: line, affixes: { prefix: "", suffix: "" } };
+  }
+  const first = content[0]!.index;
+  const last = content.at(-1)!.index;
+  const prefixTokens = tokens
+    .map((token, index) => ({ token, index }))
+    .filter(({ token, index }) => token.escape && index < first);
+  const suffixTokens = tokens
+    .map((token, index) => ({ token, index }))
+    .filter(({ token, index }) => token.escape && index > last);
+  // Only lift paired outer metadata. A lone escape near a boundary is usually
+  // cell-local and must remain with that cell so its state can be reconstructed.
+  if (prefixTokens.length === 0 || suffixTokens.length === 0) {
+    return { inner: line, affixes: { prefix: "", suffix: "" } };
+  }
+  const extracted = new Set([
+    ...prefixTokens.map(({ index }) => index),
+    ...suffixTokens.map(({ index }) => index),
+  ]);
   return {
-    prefix,
-    // A trailing escape alone is usually a cell-local closer. It is a row
-    // wrapper only when paired with terminal metadata before the indentation.
-    suffix:
-      prefix.length > 0
-        ? tokens.slice(afterLastVisible).map((token) => token.raw).join("")
-        : "",
+    inner: tokens
+      .filter((_token, index) => !extracted.has(index))
+      .map((token) => token.raw)
+      .join(""),
+    affixes: {
+      prefix: prefixTokens.map(({ token }) => token.raw).join(""),
+      suffix: suffixTokens.map(({ token }) => token.raw).join(""),
+    },
   };
 }
 
-function terminalRuleAffixes(line: string): TerminalAffixes {
-  const tokens = terminalTokens(line);
-  const visible = tokens
-    .map((token, index) => ({ token, index }))
-    .filter(({ token }) => !token.escape && token.text.trim().length > 0);
-  if (visible.length === 0) return { prefix: "", suffix: "" };
-  const first = visible[0]!.index;
-  const last = visible.at(-1)!.index;
+function styledBorderlessRule(
+  line: string,
+  layout: BorderlessRuleLayout,
+): StyledBorderlessRule {
+  const parts = terminalLineParts(line);
   return {
-    prefix: tokens.slice(0, first).filter((token) => token.escape).map((token) => token.raw).join(""),
-    suffix: tokens.slice(last + 1).filter((token) => token.escape).map((token) => token.raw).join(""),
+    affixes: parts.affixes,
+    segments: layout.starts.map((start, index) =>
+      sliceTerminalColumns(parts.inner, start, start + layout.widths[index]!),
+    ),
   };
 }
 
@@ -703,8 +731,8 @@ function parseBorderlessCells(
   line: string,
   layout: BorderlessRuleLayout,
 ): ParsedBorderlessRow | null {
-  const affixes = terminalLineAffixes(line);
-  const inner = line.slice(affixes.prefix.length, line.length - affixes.suffix.length);
+  const parts = terminalLineParts(line);
+  const { inner, affixes } = parts;
   const plain = stripAnsi(inner);
   const boundaries = [0, layout.indentWidth, layout.totalWidth, visibleWidth(plain)];
   for (let i = 0; i < layout.widths.length; i++) {
@@ -764,8 +792,8 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
 
   const rows = [header.cells];
   const rowAffixes = [header.affixes];
-  const heavyAffixes = terminalRuleAffixes(lines[start + 1]!);
-  const dividerBefore: Array<TerminalAffixes | null> = [null];
+  const heavyRule = styledBorderlessRule(lines[start + 1]!, layout);
+  const dividerBefore: Array<StyledBorderlessRule | null> = [null];
   // A rendered markdown header is commonly left-aligned even when its body
   // column is numeric/right-aligned, so prefer the first body-row signal over
   // a merely left-aligned header. Explicit centered/right headers still win.
@@ -777,14 +805,14 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
   let end = start + 1;
   let cursor = start + 2;
   let nextHasDivider = false;
-  let nextDividerAffixes: TerminalAffixes | null = null;
+  let nextDivider: StyledBorderlessRule | null = null;
   while (cursor < lines.length) {
     if (stripAnsi(lines[cursor]!).trim().length === 0) break;
     const divider = parseBorderlessRule(lines[cursor]!, "─");
     if (divider && sameBorderlessLayout(layout, divider)) {
       if (rows.length === 1 || nextHasDivider) return null;
       nextHasDivider = true;
-      nextDividerAffixes = terminalRuleAffixes(lines[cursor]!);
+      nextDivider = styledBorderlessRule(lines[cursor]!, layout);
       end = cursor;
       cursor++;
       continue;
@@ -796,21 +824,31 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
       .every((cell) => stripAnsi(cell).trim().length === 0);
     const followingDivider =
       cursor + 1 < lines.length ? parseBorderlessRule(lines[cursor + 1]!, "─") : null;
-    const followingIsEof = cursor + 1 >= lines.length;
+    const followingEndsBlock =
+      cursor + 1 >= lines.length || stripAnsi(lines[cursor + 1]!).trim().length === 0;
+    // An undivided first-column row at EOF is indistinguishable from indented
+    // prose. A genuine source-wrapped fragment normally occupies a meaningful
+    // portion of its source column; requiring that signal keeps short notes
+    // outside the table while retaining the final fragment from real tables.
+    const substantialFirstCell =
+      visibleWidth(stripAnsi(row.cells[0]!).trim()) >=
+      Math.max(8, Math.floor((layout.widths[0]! - 2) / 2));
+    const firstColumnContinuation =
+      (followingDivider && sameBorderlessLayout(layout, followingDivider)) ||
+      (followingEndsBlock && substantialFirstCell);
     if (
       rows.length > 1 &&
       !nextHasDivider &&
       onlyFirstColumn &&
-      !followingIsEof &&
-      (!followingDivider || !sameBorderlessLayout(layout, followingDivider))
+      !firstColumnContinuation
     ) {
       break;
     }
     rows.push(row.cells);
     rowAffixes.push(row.affixes);
-    dividerBefore.push(nextHasDivider ? nextDividerAffixes : null);
+    dividerBefore.push(nextHasDivider ? nextDivider : null);
     nextHasDivider = false;
-    nextDividerAffixes = null;
+    nextDivider = null;
     for (let column = 0; column < alignmentHints.length; column++) {
       const hint = row.alignmentHints[column];
       if (hint) alignmentHints[column]!.add(hint);
@@ -824,7 +862,7 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
     layout,
     rows,
     rowAffixes,
-    heavyAffixes,
+    heavyRule,
     dividerBefore,
     alignments: alignmentHints.map((hints) =>
       hints.size === 1 ? hints.values().next().value! : "left",
@@ -833,19 +871,105 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
 }
 
 interface TerminalStyleState {
-  sgr: string[];
+  sgr: Map<string, string>;
   osc8: string | null;
 }
 
 function copyTerminalStyle(state: TerminalStyleState): TerminalStyleState {
-  return { sgr: [...state.sgr], osc8: state.osc8 };
+  return { sgr: new Map(state.sgr), osc8: state.osc8 };
+}
+
+function setSgr(state: TerminalStyleState, key: string, params: string[]): void {
+  state.sgr.set(key, `\x1b[${params.join(";")}m`);
+}
+
+function applySgrEscape(state: TerminalStyleState, raw: string): void {
+  const values = raw.slice(2, -1).split(";").map((value) => value || "0");
+  for (let i = 0; i < values.length; i++) {
+    const value = values[i]!;
+    const colonCode = Number(value.split(":", 1)[0]);
+    if (value.includes(":") && (colonCode === 38 || colonCode === 48 || colonCode === 58)) {
+      setSgr(state, colonCode === 38 ? "fg" : colonCode === 48 ? "bg" : "underline-color", [value]);
+      continue;
+    }
+    const code = Number(value);
+    if (!Number.isFinite(code)) {
+      setSgr(state, `raw:${value}`, [value]);
+      continue;
+    }
+    if (code === 0) {
+      state.sgr.clear();
+      continue;
+    }
+    if (code === 38 || code === 48 || code === 58) {
+      const mode = values[i + 1];
+      const length = mode === "5" ? 3 : mode === "2" ? 5 : 1;
+      const params = values.slice(i, i + length);
+      setSgr(state, code === 38 ? "fg" : code === 48 ? "bg" : "underline-color", params);
+      i += params.length - 1;
+      continue;
+    }
+    if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
+      setSgr(state, "fg", [value]);
+    } else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107)) {
+      setSgr(state, "bg", [value]);
+    } else if (code === 39) {
+      state.sgr.delete("fg");
+    } else if (code === 49) {
+      state.sgr.delete("bg");
+    } else if (code === 59) {
+      state.sgr.delete("underline-color");
+    } else if (code === 1 || code === 2) {
+      setSgr(state, code === 1 ? "bold" : "faint", [value]);
+    } else if (code === 22) {
+      state.sgr.delete("bold");
+      state.sgr.delete("faint");
+    } else if (code === 3 || code === 20) {
+      setSgr(state, code === 3 ? "italic" : "fraktur", [value]);
+    } else if (code === 23) {
+      state.sgr.delete("italic");
+      state.sgr.delete("fraktur");
+    } else if (code === 4 || code === 21) {
+      setSgr(state, "underline", [value]);
+    } else if (code === 24) {
+      state.sgr.delete("underline");
+    } else if (code === 5 || code === 6) {
+      setSgr(state, "blink", [value]);
+    } else if (code === 25) {
+      state.sgr.delete("blink");
+    } else if (code >= 7 && code <= 9) {
+      setSgr(state, code === 7 ? "inverse" : code === 8 ? "conceal" : "strike", [value]);
+    } else if (code >= 27 && code <= 29) {
+      state.sgr.delete(code === 27 ? "inverse" : code === 28 ? "conceal" : "strike");
+    } else if (code >= 10 && code <= 19) {
+      setSgr(state, "font", [value]);
+    } else if (code === 26 || code === 50) {
+      if (code === 26) setSgr(state, "proportional", [value]);
+      else state.sgr.delete("proportional");
+    } else if (code === 51 || code === 52) {
+      setSgr(state, "frame", [value]);
+    } else if (code === 54) {
+      state.sgr.delete("frame");
+    } else if (code === 53 || code === 55) {
+      if (code === 53) setSgr(state, "overline", [value]);
+      else state.sgr.delete("overline");
+    } else if (code >= 60 && code <= 64) {
+      setSgr(state, "ideogram", [value]);
+    } else if (code === 65) {
+      state.sgr.delete("ideogram");
+    } else if (code === 73 || code === 74) {
+      setSgr(state, "script", [value]);
+    } else if (code === 75) {
+      state.sgr.delete("script");
+    } else {
+      setSgr(state, `code:${code}`, [value]);
+    }
+  }
 }
 
 function applyTerminalEscape(state: TerminalStyleState, raw: string): void {
   if (raw.startsWith("\x1b[") && raw.endsWith("m")) {
-    const params = raw.slice(2, -1).split(";").map((value) => value || "0");
-    if (params.includes("0")) state.sgr = [];
-    if (params.some((value) => value !== "0")) state.sgr.push(raw);
+    applySgrEscape(state, raw);
     return;
   }
   if (raw.startsWith("\x1b]8;")) {
@@ -857,12 +981,40 @@ function applyTerminalEscape(state: TerminalStyleState, raw: string): void {
 }
 
 function terminalStylePrefix(state: TerminalStyleState): string {
-  return (state.osc8 ?? "") + state.sgr.join("");
+  return (state.osc8 ?? "") + [...state.sgr.values()].join("");
 }
 
 function terminalStyleSuffix(state: TerminalStyleState): string {
-  return (state.sgr.length > 0 ? "\x1b[0m" : "") +
+  return (state.sgr.size > 0 ? "\x1b[0m" : "") +
     (state.osc8 ? "\x1b]8;;\x1b\\" : "");
+}
+
+function resizeStyledRuleSegment(
+  segment: string,
+  ruleChar: "━" | "─",
+  width: number,
+  closeTruncated = true,
+): string {
+  const state: TerminalStyleState = { sgr: new Map(), osc8: null };
+  let output = "";
+  let used = 0;
+  let truncated = false;
+  for (const token of terminalTokens(segment)) {
+    if (token.escape) {
+      output += token.raw;
+      applyTerminalEscape(state, token.raw);
+      continue;
+    }
+    if (used + token.width > width) {
+      truncated = true;
+      break;
+    }
+    output += token.raw;
+    used += token.width;
+  }
+  if (used < width) output += ruleChar.repeat(width - used);
+  if (truncated && closeTruncated) output += terminalStyleSuffix(state);
+  return output;
 }
 
 function wrapStyledCell(text: string, width: number): string[] {
@@ -876,7 +1028,7 @@ function wrapStyledCell(text: string, width: number): string[] {
     after: TerminalStyleState;
   }
 
-  const state: TerminalStyleState = { sgr: [], osc8: null };
+  const state: TerminalStyleState = { sgr: new Map(), osc8: null };
   const units: StyledGrapheme[] = [];
   let pending = "";
   let beforePending = copyTerminalStyle(state);
@@ -963,9 +1115,27 @@ function stackBorderlessTable(block: BorderlessTableBlock, width: number): strin
     }
   };
   for (let i = 0; i < block.rows.length; i++) {
-    if (i === 1) output.push(decorate("━".repeat(width), block.heavyAffixes));
-    else if (block.dividerBefore[i]) {
-      output.push(decorate("─".repeat(width), block.dividerBefore[i]!));
+    if (i === 1) {
+      output.push(decorate(
+        resizeStyledRuleSegment(
+          block.heavyRule.segments[0] ?? "",
+          "━",
+          width,
+          block.heavyRule.affixes.suffix.length === 0,
+        ),
+        block.heavyRule.affixes,
+      ));
+    } else if (block.dividerBefore[i]) {
+      const divider = block.dividerBefore[i]!;
+      output.push(decorate(
+        resizeStyledRuleSegment(
+          divider.segments[0] ?? "",
+          "─",
+          width,
+          divider.affixes.suffix.length === 0,
+        ),
+        divider.affixes,
+      ));
     }
     for (const cell of block.rows[i]!) pushCell(cell, block.rowAffixes[i]!);
   }
@@ -998,10 +1168,22 @@ function reflowBorderlessTable(block: BorderlessTableBlock, width: number): stri
       : allocateBorderlessWidths(natural, minimum, avail);
   if (!widths) return null;
 
-  const rule = (char: "━" | "─") =>
-    block.layout.indent + widths.map((cellWidth) => char.repeat(cellWidth + 2)).join("  ");
   const decorate = (line: string, affixes: TerminalAffixes) =>
     affixes.prefix + line + affixes.suffix;
+  const rule = (styled: StyledBorderlessRule, char: "━" | "─") =>
+    decorate(
+      block.layout.indent + widths
+        .map((cellWidth, index) =>
+          resizeStyledRuleSegment(
+            styled.segments[index] ?? "",
+            char,
+            cellWidth + 2,
+            index + 1 < widths.length || styled.affixes.suffix.length === 0,
+          ),
+        )
+        .join("  "),
+      styled.affixes,
+    );
   const renderRow = (cells: string[], affixes: TerminalAffixes): string[] => {
     const cellLines = cells.map((cell, i) => wrapStyledCell(cell, widths[i]!));
     const height = Math.max(...cellLines.map((cell) => cell.length));
@@ -1026,11 +1208,11 @@ function reflowBorderlessTable(block: BorderlessTableBlock, width: number): stri
 
   const output = [
     ...renderRow(block.rows[0]!, block.rowAffixes[0]!),
-    decorate(rule("━"), block.heavyAffixes),
+    rule(block.heavyRule, "━"),
   ];
   for (let i = 1; i < block.rows.length; i++) {
     if (block.dividerBefore[i]) {
-      output.push(decorate(rule("─"), block.dividerBefore[i]!));
+      output.push(rule(block.dividerBefore[i]!, "─"));
     }
     output.push(...renderRow(block.rows[i]!, block.rowAffixes[i]!));
   }

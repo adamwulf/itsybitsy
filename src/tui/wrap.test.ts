@@ -1314,7 +1314,7 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
       ],
       [32, 90],
     );
-    table.push("   Follow-up prose remains outside the table.");
+    table.push("   Follow-up prose remains outside the table.", "");
 
     const rows = wordWrapLines(table.join("\n"), 54);
     expect(rows.join(" ")).toContain("Follow-up prose remains outside the table.");
@@ -1571,6 +1571,34 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     for (const row of body) {
       expect(row).toStartWith(linkOpen);
       expect(row).toEndWith(linkClose);
+    }
+  });
+
+  test("preserves styling that begins before cell padding and after rule indentation", () => {
+    const linkOpen = "\x1b]8;;https://example.com/cell\x1b\\";
+    const linkClose = "\x1b]8;;\x1b\\";
+    const widths = [5, 30];
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["alpha", "bravo charlie delta echo"],
+      ],
+      widths,
+    );
+    table[1] = `  \x1b[31m${"━".repeat(7)}  ${"━".repeat(32)}\x1b[0m`;
+    const first = " " + "alpha" + " ";
+    const second = " " + "bravo charlie delta echo".padEnd(30) + " ";
+    table[2] = "  " + first + "  " + linkOpen + second + linkClose;
+
+    const rows = wordWrapLines(table.join("\n"), 20);
+    const rule = rows.find((row) => stripAnsi(row).includes("━"))!;
+    expect(rule).toContain("\x1b[31m");
+    expect(rule).toContain("\x1b[0m");
+    const linked = rows.filter((row) => row.includes(linkOpen) || /bravo|charlie|delta|echo/.test(row));
+    expect(linked.length).toBeGreaterThan(1);
+    for (const row of linked) {
+      expect(row).toContain(linkOpen);
+      expect(row).toContain(linkClose);
     }
   });
 

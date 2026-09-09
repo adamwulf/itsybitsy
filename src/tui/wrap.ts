@@ -586,11 +586,31 @@ function terminalLineAffixes(line: string): TerminalAffixes {
   const tokens = terminalTokens(line);
   let firstVisible = 0;
   while (firstVisible < tokens.length && tokens[firstVisible]!.escape) firstVisible++;
+  const prefix = tokens.slice(0, firstVisible).map((token) => token.raw).join("");
   let afterLastVisible = tokens.length;
   while (afterLastVisible > 0 && tokens[afterLastVisible - 1]!.escape) afterLastVisible--;
   return {
-    prefix: tokens.slice(0, firstVisible).map((token) => token.raw).join(""),
-    suffix: tokens.slice(afterLastVisible).map((token) => token.raw).join(""),
+    prefix,
+    // A trailing escape alone is usually a cell-local closer. It is a row
+    // wrapper only when paired with terminal metadata before the indentation.
+    suffix:
+      prefix.length > 0
+        ? tokens.slice(afterLastVisible).map((token) => token.raw).join("")
+        : "",
+  };
+}
+
+function terminalRuleAffixes(line: string): TerminalAffixes {
+  const tokens = terminalTokens(line);
+  const visible = tokens
+    .map((token, index) => ({ token, index }))
+    .filter(({ token }) => !token.escape && token.text.trim().length > 0);
+  if (visible.length === 0) return { prefix: "", suffix: "" };
+  const first = visible[0]!.index;
+  const last = visible.at(-1)!.index;
+  return {
+    prefix: tokens.slice(0, first).filter((token) => token.escape).map((token) => token.raw).join(""),
+    suffix: tokens.slice(last + 1).filter((token) => token.escape).map((token) => token.raw).join(""),
   };
 }
 
@@ -718,7 +738,7 @@ function parseBorderlessCells(
     }
     const rawCell = slice(start + 1, start + segmentWidth - 1);
     const styledCell = trimTerminalCell(
-      sliceTerminalColumns(inner, start + 1, start + segmentWidth - 1),
+      sliceTerminalColumns(inner, start, start + segmentWidth),
     );
     if (stripAnsi(styledCell) !== rawCell.trim()) return null;
     cells.push(styledCell);
@@ -744,7 +764,7 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
 
   const rows = [header.cells];
   const rowAffixes = [header.affixes];
-  const heavyAffixes = terminalLineAffixes(lines[start + 1]!);
+  const heavyAffixes = terminalRuleAffixes(lines[start + 1]!);
   const dividerBefore: Array<TerminalAffixes | null> = [null];
   // A rendered markdown header is commonly left-aligned even when its body
   // column is numeric/right-aligned, so prefer the first body-row signal over
@@ -764,7 +784,7 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
     if (divider && sameBorderlessLayout(layout, divider)) {
       if (rows.length === 1 || nextHasDivider) return null;
       nextHasDivider = true;
-      nextDividerAffixes = terminalLineAffixes(lines[cursor]!);
+      nextDividerAffixes = terminalRuleAffixes(lines[cursor]!);
       end = cursor;
       cursor++;
       continue;
@@ -776,13 +796,12 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
       .every((cell) => stripAnsi(cell).trim().length === 0);
     const followingDivider =
       cursor + 1 < lines.length ? parseBorderlessRule(lines[cursor + 1]!, "─") : null;
-    const followingEndsBlock =
-      cursor + 1 >= lines.length || stripAnsi(lines[cursor + 1]!).trim().length === 0;
+    const followingIsEof = cursor + 1 >= lines.length;
     if (
       rows.length > 1 &&
       !nextHasDivider &&
       onlyFirstColumn &&
-      !followingEndsBlock &&
+      !followingIsEof &&
       (!followingDivider || !sameBorderlessLayout(layout, followingDivider))
     ) {
       break;

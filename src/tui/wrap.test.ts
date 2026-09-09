@@ -1663,6 +1663,42 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     }
   });
 
+  test("does not lift a cell-local SGR opener using an unrelated final-cell reset", () => {
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["alpha", "bravo charlie delta echo"],
+      ],
+      [5, 30],
+    );
+    table[2] = "\x1b[41m" + table[2]!.replace("alpha", "alpha\x1b[49m") + "\x1b[49m";
+
+    const rows = wordWrapLines(table.join("\n"), 20);
+    const first = rows.find((row) => stripAnsi(row).includes("alpha"))!;
+    expect(first).toContain("\x1b[41m");
+    expect(first).toContain("\x1b[49m");
+    for (const row of rows.filter((candidate) => /charlie|delta|echo/.test(stripAnsi(candidate)))) {
+      expect(row).not.toContain("\x1b[41m");
+    }
+  });
+
+  test("does not lift a suffix that closes SGR but opens an OSC link", () => {
+    const linkOpen = "\x1b]8;;https://example.com/after-row\x1b\\";
+    const linkClose = "\x1b]8;;\x1b\\";
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["alpha", "bravo charlie delta echo"],
+      ],
+      [5, 30],
+    );
+    table[2] = "\x1b[31m" + table[2]! + "\x1b[0m" + linkOpen;
+    table.push(linkClose);
+
+    const rows = wordWrapLines(table.join("\n"), 20);
+    expect(rows.filter((row) => row.includes(linkOpen)).length).toBe(1);
+  });
+
   test("keeps ANSI embedded inside a grapheme cluster within pane width", () => {
     const keycap = "1\x1b[31m\ufe0f\x1b[0m\u20e3";
     const table = renderTable(
@@ -1775,6 +1811,7 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     const body = rows.filter((row) => /alpha|bravo|charlie|delta|echo|foxtrot/.test(stripAnsi(row)));
     expect(body.length).toBeGreaterThan(1);
     for (const row of body) {
+      expect(row.startsWith("  " + open)).toBe(true);
       expect(row).toContain(open);
       expect(row).toContain(close);
     }
@@ -1959,6 +1996,20 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
       ],
       [5, 20],
     );
+
+    const rows = wordWrapLines(table.join("\n"), 11);
+    expect(rows.join("")).toContain("\u00a0");
+  });
+
+  test("preserves an NBSP-only cell as content rather than padding", () => {
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["x", "Q"],
+      ],
+      [5, 10],
+    );
+    table[2] = table[2]!.replace("Q", "\u00a0");
 
     const rows = wordWrapLines(table.join("\n"), 11);
     expect(rows.join("")).toContain("\u00a0");

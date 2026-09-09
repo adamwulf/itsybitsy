@@ -500,6 +500,7 @@ interface ParsedBorderlessRow {
 interface TerminalAffixes {
   prefix: string;
   suffix: string;
+  prefixColumn: number;
 }
 
 interface TerminalLineParts {
@@ -626,6 +627,10 @@ function stripAnsiForWrap(text: string): string {
   return /\x1b\[[0-9;:]*:/.test(text) ? stripTerminalAnsi(text) : stripAnsi(text);
 }
 
+function isDiscardableWrapSpace(text: string): boolean {
+  return text === " " || text === "\t";
+}
+
 function sliceTerminalColumnRanges(
   text: string,
   ranges: Array<{ start: number; end: number }>,
@@ -686,7 +691,7 @@ function trimTerminalCell(text: string): string {
       applyTerminalEscape(state, escape);
       styled ||= hasTerminalStyle(state);
     }
-    if (token.text.trim().length > 0) nonWhitespace.push(index);
+    if (!isDiscardableWrapSpace(token.text)) nonWhitespace.push(index);
     else if (styled) styledWhitespace.push(index);
   }
   // Alignment padding is discarded whenever the cell has real text, even if a
@@ -706,9 +711,9 @@ function terminalLineParts(line: string): TerminalLineParts {
   const tokens = terminalTokens(line);
   const content = tokens
     .map((token, index) => ({ token, index }))
-    .filter(({ token }) => !token.escape && token.text.trim().length > 0);
+    .filter(({ token }) => !token.escape && !isDiscardableWrapSpace(token.text));
   if (content.length === 0) {
-    return { inner: line, affixes: { prefix: "", suffix: "" } };
+    return { inner: line, affixes: { prefix: "", suffix: "", prefixColumn: 0 } };
   }
   const first = content[0]!.index;
   const last = content.at(-1)!.index;
@@ -722,22 +727,32 @@ function terminalLineParts(line: string): TerminalLineParts {
   // escape at both ends is insufficient: the opener may belong to the first
   // cell while an unrelated reset belongs to the last.
   if (prefixTokens.length === 0 || suffixTokens.length === 0) {
-    return { inner: line, affixes: { prefix: "", suffix: "" } };
+    return { inner: line, affixes: { prefix: "", suffix: "", prefixColumn: 0 } };
   }
   const prefixState: TerminalStyleState = { sgr: new Map(), osc8: null, osc8Active: false };
   for (const { token } of prefixTokens) applyTerminalEscape(prefixState, token.raw);
+  const prefixIndexes = new Set(prefixTokens.map(({ index }) => index));
+  const suffixIndexes = new Set(suffixTokens.map(({ index }) => index));
+  const innerState = copyTerminalStyle(prefixState);
+  let prefixRemainsActive = true;
+  for (let index = 0; index < tokens.length; index++) {
+    if (prefixIndexes.has(index) || suffixIndexes.has(index)) continue;
+    const token = tokens[index]!;
+    if (token.escape) applyTerminalEscape(innerState, token.raw);
+    else for (const escape of token.embeddedEscapes ?? []) applyTerminalEscape(innerState, escape);
+    prefixRemainsActive &&= containsTerminalBase(innerState, prefixState);
+  }
   const closedState = copyTerminalStyle(prefixState);
   for (const { token } of suffixTokens) applyTerminalEscape(closedState, token.raw);
-  const closesPrefixSgr = prefixState.sgr.size === 0 || closedState.sgr.size === 0;
-  const closesPrefixLink = !prefixState.osc8Active || !closedState.osc8Active;
+  const suffixLeavesNoStyle = !hasTerminalStyle(closedState);
   const replayablePrefixLink = !prefixState.osc8Active || prefixState.osc8 !== null;
   if (
     !hasTerminalStyle(prefixState) ||
+    !prefixRemainsActive ||
     !replayablePrefixLink ||
-    !closesPrefixSgr ||
-    !closesPrefixLink
+    !suffixLeavesNoStyle
   ) {
-    return { inner: line, affixes: { prefix: "", suffix: "" } };
+    return { inner: line, affixes: { prefix: "", suffix: "", prefixColumn: 0 } };
   }
   const extracted = new Set([
     ...prefixTokens.map(({ index }) => index),
@@ -751,6 +766,9 @@ function terminalLineParts(line: string): TerminalLineParts {
     affixes: {
       prefix: prefixTokens.map(({ token }) => token.raw).join(""),
       suffix: suffixTokens.map(({ token }) => token.raw).join(""),
+      prefixColumn: tokens
+        .slice(0, prefixTokens[0]!.index)
+        .reduce((sum, token) => sum + token.width, 0),
     },
   };
 }
@@ -1013,6 +1031,19 @@ function hasTerminalStyle(state: TerminalStyleState): boolean {
   return state.sgr.size > 0 || state.osc8Active;
 }
 
+function containsTerminalBase(
+  state: TerminalStyleState,
+  base: TerminalStyleState,
+): boolean {
+  for (const [key, value] of base.sgr) {
+    if (state.sgr.get(key) !== value) return false;
+  }
+  return (
+    !base.osc8Active ||
+    (state.osc8Active && state.osc8 === base.osc8)
+  );
+}
+
 function copyTerminalStyle(state: TerminalStyleState): TerminalStyleState {
   return {
     sgr: new Map(state.sgr),
@@ -1157,6 +1188,12 @@ function terminalAffixRestore(affixes: TerminalAffixes): string {
   return terminalStylePrefix(state);
 }
 
+function decorateTerminalLine(line: string, affixes: TerminalAffixes): string {
+  const prefixIndex = Math.min(affixes.prefixColumn, line.length);
+  return line.slice(0, prefixIndex) + affixes.prefix +
+    line.slice(prefixIndex) + affixes.suffix;
+}
+
 function resizeStyledRuleSegment(
   segment: string,
   ruleChar: "━" | "─",
@@ -1233,7 +1270,7 @@ function wrapStyledCell(text: string, width: number): string[] {
     while (
       start > 0 &&
       start < units.length &&
-      (units[start]!.text === " " || units[start]!.text === "\t") &&
+      isDiscardableWrapSpace(units[start]!.text) &&
       !hasTerminalStyle(units[start]!.during)
     ) {
       start++;
@@ -1244,7 +1281,7 @@ function wrapStyledCell(text: string, width: number): string[] {
     let lastWhitespace = -1;
     while (end < units.length && used + units[end]!.width <= width) {
       used += units[end]!.width;
-      if (units[end]!.text === " " || units[end]!.text === "\t") {
+      if (isDiscardableWrapSpace(units[end]!.text)) {
         lastWhitespace = end + 1;
       }
       end++;
@@ -1273,19 +1310,34 @@ function allocateBorderlessWidths(
   const widths = [...minimum];
   let remaining = available - widths.reduce((sum, value) => sum + value, 0);
   if (remaining < 0) return null;
-  while (remaining > 0) {
-    let candidate = -1;
-    for (let i = 0; i < widths.length; i++) {
-      if (
-        widths[i]! < natural[i]! &&
-        (candidate < 0 || widths[i]! < widths[candidate]!)
-      ) {
-        candidate = i;
-      }
+  const heap = widths
+    .map((_width, index) => index)
+    .filter((index) => widths[index]! < natural[index]!);
+  const less = (left: number, right: number) =>
+    widths[left]! < widths[right]! ||
+    (widths[left] === widths[right] && left < right);
+  const siftDown = (root: number) => {
+    while (true) {
+      const left = root * 2 + 1;
+      if (left >= heap.length) return;
+      const right = left + 1;
+      const child = right < heap.length && less(heap[right]!, heap[left]!) ? right : left;
+      if (!less(heap[child]!, heap[root]!)) return;
+      [heap[root], heap[child]] = [heap[child]!, heap[root]!];
+      root = child;
     }
-    if (candidate < 0) break;
+  };
+  for (let index = Math.floor(heap.length / 2) - 1; index >= 0; index--) siftDown(index);
+
+  while (remaining > 0 && heap.length > 0) {
+    const candidate = heap[0]!;
     widths[candidate]!++;
     remaining--;
+    if (widths[candidate] === natural[candidate]) {
+      const last = heap.pop()!;
+      if (heap.length > 0) heap[0] = last;
+    }
+    if (heap.length > 0) siftDown(0);
   }
   return widths;
 }
@@ -1293,8 +1345,7 @@ function allocateBorderlessWidths(
 function stackBorderlessTable(block: BorderlessTableBlock, width: number): string[] | null {
   if (width <= 0) return null;
   const output: string[] = [];
-  const decorate = (line: string, affixes: TerminalAffixes) =>
-    affixes.prefix + line + affixes.suffix;
+  const decorate = decorateTerminalLine;
   const pushCell = (cell: string, affixes: TerminalAffixes) => {
     if (visibleWidth(cell) === 0) return;
     const restore = terminalAffixRestore(affixes);
@@ -1358,8 +1409,7 @@ function reflowBorderlessTable(block: BorderlessTableBlock, width: number): stri
       : allocateBorderlessWidths(natural, minimum, avail);
   if (!widths) return null;
 
-  const decorate = (line: string, affixes: TerminalAffixes) =>
-    affixes.prefix + line + affixes.suffix;
+  const decorate = decorateTerminalLine;
   const rule = (styled: StyledBorderlessRule, char: "━" | "─") =>
     decorate(
       block.layout.indent + widths

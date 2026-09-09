@@ -2,9 +2,25 @@
 
 **Current contract (2026-09-08):** kernel sandboxing defaults to enabled for repository agents and per-repository coordinators (Claude, Codex/fugu, and agy). Agent types may declare `sandbox: true` / `sandbox: false`, or an object with boolean `sandbox.enabled`, `rawAllow`, and `domains`. Enablement follows the most specific explicit value: `_all` → applicable `_non_coordinator` → oldest ancestor → leaf. Omission inherits; only final resolution defaults to true. Lists still union independently.
 
-An explicit false skips itsybitsy Seatbelt, the egress proxy, and kernel-denial collection; hooks continue enforcing `paths`, and native CLI sandbox/approval protections remain active. YOLO / permission-bypass flags are allowed only inside the enabled itsybitsy kernel wrapper, at both spawn and resume. Enabled launches fail closed if profile or proxy setup fails. Spawn freezes policy in metadata, resume preserves it, and `ib sandbox refresh` applies current type settings in either direction. Global `@system` sandboxing remains deferred.
+Enabled mode runs the agent under itsybitsy's `sandbox-exec` profile and egress proxy. The resolved path configuration supplies the coarse kernel rules, while hooks enforce agent-type tool permissions and finer path isolation. An explicit false omits only the itsybitsy kernel wrapper, proxy, and kernel-denial collector, restoring pre-sandbox launch behavior. Hooks remain installed in both modes and must resolve every tool allow/deny without handing an approval prompt to the user.
 
-This contract supersedes the mandatory-only and earlier opt-in/OR-merge contracts recorded in the historical sections below, including retired-key diagnostics and rejection of every disabled resume. Existing path precedence, enabled-policy sealing, and the documented spawner tmux limitation still apply. See [the type guide](docs/agent-types/README.md) for authoring and [the rollout guide](docs/SANDBOX-ROLLOUT.md) for enabled-mode validation evidence.
+The CLI launch contract is mode-specific only where process confinement changes:
+
+| CLI | Kernel enabled | Kernel disabled |
+|---|---|---|
+| Codex/Fugu | Always `-a never`; `-s danger-full-access` inside the itsybitsy wrapper. | Always `-a never`; explicit `-s workspace-write`; no itsybitsy wrapper/proxy/collector. |
+| Agy/Gemini | Always `--dangerously-skip-permissions --mode=accept-edits`; fail-closed hooks retained; runs inside the itsybitsy wrapper. | The same flags and fail-closed hooks; no itsybitsy wrapper/proxy/collector. |
+| Claude | Adds `--dangerously-skip-permissions` inside the itsybitsy wrapper. PreToolUse explicitly allows or denies before native permission resolution, with `permissions.deny` checked first. | Emits neither `--dangerously-skip-permissions` nor `--permission-mode`; no itsybitsy wrapper/proxy/collector. The same PreToolUse contract prevents prompts and rejects denied or unlisted calls. |
+
+For Claude `worktree: false` sessions (per-repository coordinators and regular
+`--no-worktree` agents), the generated settings live at the agent-local
+`<agentDir>/.claude/settings.local.json` and are passed via `--settings`.
+Repository and user settings are not modified. Spawn, resume, rehire, and
+refresh preserve this arrangement and the mode split above.
+
+Enabled launches fail closed if profile or proxy setup fails. Spawn freezes policy in metadata, resume preserves it, and `ib sandbox refresh` applies current type settings in either direction. Global `@system` sandboxing remains deferred.
+
+This contract supersedes the mandatory-only and earlier opt-in/OR-merge contracts recorded in the historical sections below, including retired-key diagnostics, rejection of every disabled resume, and the former rule that native approval-bypass flags existed only under Seatbelt. Existing path precedence, enabled-policy sealing, and the documented spawner tmux limitation still apply. See [the type guide](docs/agent-types/README.md) for authoring and [the rollout guide](docs/SANDBOX-ROLLOUT.md) for enabled-mode validation evidence.
 
 # Historical appendix: earlier sandbox designs
 
@@ -715,7 +731,11 @@ may be wider (a widening rawAllow) or narrower (a narrowing rawAllow `deny`) tha
 the resolver predicts. Only the `paths` table is authoritative for
 `resolvePathAccess()`.
 
-## 4B. Codex: disable its built-in sandbox, use ours (Adam's call)
+## 4B. Codex: disable its built-in sandbox, use ours (historical enabled-mode record)
+
+> **Superseded launch split:** the rationale below still explains enabled mode,
+> but disabled mode now restores `-s workspace-write`; `-a never` and hooks are
+> retained in both modes. The current table at the top of this file governs.
 
 **Decision (Adam, 2026-07-17): a sandboxed codex agent runs codex in its own
 "yolo"/no-sandbox mode so codex does NOT double-sandbox, and OUR seatbelt +
@@ -759,7 +779,12 @@ per-agent proxy without reintroducing approvals. The shipped `_all.md` includes
 `chatgpt.com` and `api.openai.com`; because proxy apex entries are exact,
 subdomains remain denied unless explicitly added.
 
-### 4B.1 Claude: skip its own permission prompts only under the kernel (A4 G1)
+### 4B.1 Claude: skip its own permission prompts only under the kernel (historical mandatory-contract wording)
+
+> **Superseded scope:** enabled Claude still adds the flag described below.
+> Disabled Claude now emits neither that flag nor `--permission-mode`, while
+> explicit PreToolUse allow/deny prevents prompts in both modes. The current
+> table at the top of this file governs.
 
 **Decision (Adam, 2026-09-02): NEVER yolo without the kernel.** Codex's
 `-a never` already suppresses its approval prompts under our wrapper; the claude

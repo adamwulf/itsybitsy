@@ -20,6 +20,18 @@ matches enforcement. [SPEC.md §6.1](SPEC.md) and
 [SPEC-PATH-ALLOWLIST.md](SPEC-PATH-ALLOWLIST.md) are authoritative for this
 cross-CLI policy.
 
+**Current sandbox/approval addendum (2026-09-08):** Codex and Codex-backed
+Fugu always launch with `-a never`, at spawn and resume, so hooks decide every
+tool allow/deny without a native user prompt. With the itsybitsy kernel sandbox
+enabled they use `-s danger-full-access` inside the shared `sandbox-exec` and
+proxy wrapper. With it disabled they explicitly use `-s workspace-write` and
+omit the itsybitsy wrapper, proxy, and denial collector, restoring the
+pre-sandbox Codex process boundary. Inline hooks and
+`--dangerously-bypass-hook-trust` remain in both modes. Any older literal launch
+line or phase ledger below that says `-a`/`-s` are omitted in disabled mode, or
+that presents one fixed sandbox mode for every launch, is superseded by this
+addendum.
+
 > This SPEC governs adding OpenAI's **Codex CLI** (`codex`, v0.135.0) as a per-agent
 > alternative to the `claude` CLI. It MUST be read alongside the project `SPEC.md`
 > and the Cross-Cutting Review Checklist in `CLAUDE.md` (agent functionality, hooks,
@@ -90,17 +102,17 @@ Authoritative reference: `SETTINGS-HOOKS-RESEARCH.md` (every claim evidence-tagg
 - **`-a never` is "never PROMPT", not "deny everything by default."** Without our PreToolUse hook a command would be ALLOWED (subject to sandbox); with the hook returning deny-by-default, denied commands return to the model rather than escalating to a human. The hook is what makes D4 true.
 - **Hash-pinned hook trust.** Codex hashes every hook command; any edit invalidates trust and the hook is **silently skipped** until re-trusted. [research §B4] ⇒ itsybitsy MUST pass `--dangerously-bypass-hook-trust` on every spawn (our hook source is first-party and vetted). Without it, regenerating the hook silently disables it — a permission-bypass disaster.
 - **No hot-reload.** Codex config + hooks require a fresh session to pick up edits (Claude reloads `permissions`/`hooks` live). [research §C] ⇒ Mutations require respawn.
-- **Permission model is 2D.** Codex: `-a {untrusted|on-request|never} × -s {read-only|workspace-write|danger-full-access}`. Claude: 1D `--permission-mode`. [research §C] ⇒ Map our equivalent of `acceptEdits` to **`-a never -s workspace-write`**.
+- **Permission model is 2D.** Codex: `-a {untrusted|on-request|never} × -s {read-only|workspace-write|danger-full-access}`. Claude: 1D `--permission-mode`. [research §C] The original pre-kernel mapping was `-a never -s workspace-write`; the current contract preserves that pair when the itsybitsy kernel is disabled and substitutes `danger-full-access` only inside our wrapper.
 - **No `.local`-style override file and no on-disk per-worktree config is used.** Hooks are registered via inline `-c` at launch time (Phase 2 spike Q2); no per-worktree config.toml is written by itsybitsy. `<worktree>/.codex/hooks/` is added to `.gitignore` to cover any incidental files (e.g. hook logs).
 - **`CODEX_HOME` relocation breaks auth (Phase 2 spike B2).** Setting `CODEX_HOME=<per-agent-path>` triggers the first-time-login flow because `~/.codex/auth.json` isn't in the redirected home. **NOT pursued** (per user direction — no symlink workaround either). itsybitsy uses global `~/.codex/` for auth + sessions + memories; per-agent isolation comes from cwd + inline `-c` hooks + the worktree path-isolation matcher in the hook handler.
 - **Hook failure mode is FAIL-OPEN (Phase 2 spike B1).** Per the codex docs at `developers.openai.com/codex/hooks`: a hook that crashes, emits malformed JSON, or returns an unsupported `permissionDecision` is marked failed and the tool call PROCEEDS. The hook handler MUST wrap all logic in try/catch and emit a deny payload on exception. See §5.5 for the defense-in-depth requirements.
 - **`permissionDecision: "allow"` requires being paired with `updatedInput` (Phase 2 spike B1).** Standalone `permissionDecision: "allow"` triggers `error: PreToolUse hook returned unsupported permissionDecision:allow` and fails open. Explicit allow must echo the original `tool_input` back as `updatedInput` (a no-op rewrite). Alternative is to emit `{}` and rely on "no decision = proceed" (works empirically but undocumented).
 - **PreToolUse is not airtight** (OpenAI's own caveat — model may route around a blocked tool via another path). [research §B3] ⇒ Hooks + sandbox layered together is the defense; either alone is insufficient.
 
-### 3.3 Canonical codex launch line (Phase 2 verified)
+### 3.3 Canonical codex launch line (Phase 2 shape, current mode split)
 
 ```
-codex -m <MODEL> -a never -s workspace-write \
+codex -m <MODEL> -a never -s <SANDBOX_MODE> \
       --dangerously-bypass-hook-trust \
       -c 'hooks.PreToolUse=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-pre-tool-use <agentId>",timeout=30}]}]' \
       -c 'hooks.SessionStart=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-session-start <agentId>",timeout=30}]}]' \
@@ -109,6 +121,11 @@ codex -m <MODEL> -a never -s workspace-write \
 ```
 
 Where `<MODEL>` is the **model half** of the parsed `<cli>:<model>` (the `codex:` prefix is stripped), `<abs ib>` is the absolute path to the `ib` binary resolved at spawn time (NOT a bare `ib` — codex's spawn environment may have a different PATH; see §5.5), and `<agentId>` is the itsybitsy agent id (ASCII, regex-validated, safe to interpolate).
+
+`<SANDBOX_MODE>` is `danger-full-access` only when this entire command runs
+inside the enabled itsybitsy `sandbox-exec` wrapper. It is explicitly
+`workspace-write` when the itsybitsy kernel sandbox is disabled. `-a never` and
+the generated hooks are invariant across both modes.
 
 **No on-disk config file is written.** Per Phase 2 spike Q2, the inline-`-c` registration bypasses codex's project-config-walk and trust gate entirely. No `<worktree>/.codex/config.toml` is created and no entry is added to `~/.codex/config.toml`.
 
@@ -198,7 +215,7 @@ In `newAgent()`, branch the generated `start.sh` on `parseModel(model).cli`:
 Permission mapping reference (for claude callers translating intent):
 | Claude `--permission-mode` | Codex equivalent |
 |---|---|
-| `acceptEdits` | `-a never -s workspace-write` ← itsybitsy default for codex agents |
+| `acceptEdits` | `-a never`; pair with `-s danger-full-access` under the itsybitsy wrapper or `-s workspace-write` when that wrapper is disabled |
 | `plan` | `-a untrusted -s read-only` |
 | `bypassPermissions` / `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` (aka `--yolo`) |
 
@@ -213,7 +230,7 @@ At spawn (Phase 3), `buildCodexLaunchArgs()`:
    - `-c 'hooks.PreToolUse=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-pre-tool-use <agentId>",timeout=30}]}]'`
    - `-c 'hooks.SessionStart=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-session-start <agentId>",timeout=30}]}]'`
    - `-c 'hooks.Stop=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-stop <agentId>",timeout=30}]}]'`
-4. `model` (`-m`), `approval_policy` (`-a never`), `sandbox_mode` (`-s workspace-write`) are passed as CLI flags, not via `-c`. Per-spawn fail-open hardening: the `command=` value above invokes `ib` directly with no shell wrapper, so any non-zero exit before our handler runs (binary missing, dispatcher crash, `<agentId>` argv parse failure) results in codex fail-open. Mitigation lives in §5.5 (handler-level try/catch + a spawn-time precheck).
+4. `model` (`-m`), invariant approval policy (`-a never`), and mode-specific sandbox policy (`-s danger-full-access` under the itsybitsy wrapper; `-s workspace-write` without it) are passed as CLI flags, not via `-c`. Per-spawn fail-open hardening: the `command=` value above invokes `ib` directly with no shell wrapper, so any non-zero exit before our handler runs (binary missing, dispatcher crash, `<agentId>` argv parse failure) results in codex fail-open. Mitigation lives in §5.5 (handler-level try/catch + a spawn-time precheck).
 5. (Phase 4) Adds `<worktree>/.codex/` to the worktree's `.gitignore` to cover any incidental files (hook logs, sentinel files, future per-agent scratch). No `.codex/config.toml` is created by itsybitsy; if codex itself drops anything there it's gitignored. Slid out of Phase 3 — see Phase 4 in §6.
 6. (Phase 4) Writes a per-agent `<worktree>/AGENTS.md` containing the role/session-start instructions (replaces what `session-start.ts` injects for Claude). Slid out of Phase 3 — see Phase 4 in §6.
 7. **`~/.codex/config.toml` is NEVER modified by itsybitsy.** The user's existing trust entries, model defaults, and other config are left untouched. (Closes Risk #10.)
@@ -222,7 +239,7 @@ At spawn (Phase 3), `buildCodexLaunchArgs()`:
 
 **Launch-line length:** three inline `-c` payloads with absolute paths is ~600–800 bytes. macOS `ARG_MAX` is ~1 MB so we have several orders of magnitude of headroom; not a concern.
 
-**Defense in depth:** Per Phase 2 follow-up, the hook fires for BOTH `Bash` AND `apply_patch` on v0.135.0 (issue #16732 appears resolved). The hook is the primary boundary; `-s workspace-write` is secondary (and leaky on macOS — it permits `/tmp`, `$TMPDIR`, `~/.codex/memories` by default). See §5.5 for the path-extraction approach that gates both tool types.
+**Defense in depth:** Per Phase 2 follow-up, the hook fires for BOTH `Bash` AND `apply_patch` on v0.135.0 (issue #16732 appears resolved). The hook is the primary tool/path boundary in both modes. Enabled mode adds the itsybitsy Seatbelt profile with Codex set to `danger-full-access`; disabled mode restores Codex `workspace-write`, which is broader than the shared path table on macOS (`/tmp`, `$TMPDIR`, and `~/.codex/memories` are writable). See §5.5 for the authorization and path-extraction checks that gate both tool types.
 
 ### 5.5 Codex PreToolUse hook handler (D3 + D4)
 
@@ -238,7 +255,8 @@ New `src/hooks/codex-pre-tool-use.ts`, dispatched from `src/index.ts` via `ib ho
 **Logic:**
 
 1. Resolve agent-type allow/deny lists (same merged source as the claude-side hook): `_all.md` + `_non_coordinator.md` + `<type>.md`. Reuse the matcher logic as a shared library function (don't fork).
-2. **Shared path-isolation matcher** (current Phase B behavior): build the
+2. **Authorize before path checks.** A matching deny always wins. For `apply_patch`, test the raw tool name plus its `Write` and `Edit` aliases: a deny for any one blocks the call; otherwise an allow for any one admits the tool category. Other tools use their ordinary raw-name matching. No matching allow means deny.
+3. **Shared path-isolation matcher** (current Phase B behavior): build the
    prepared table from the agent's frozen `meta.paths` plus Codex-appropriate
    runtime roots. A missing block defaults all member lists to empty; a partial
    object retains populated entries and defaults only its omitted members to
@@ -251,7 +269,6 @@ New `src/hooks/codex-pre-tool-use.ts`, dispatched from `src/index.ts` via `ib ho
    - For `tool_name === "apply_patch"`, parse every Add/Update/Delete target
      and check each as a write through the same resolver. Deny if any target is
      rejected. There is no Codex-specific worktree-only fallback.
-3. Apply allow/deny matching from the agent-type lists.
 4. **Always include `permissionDecisionReason`** on deny (omitting it triggers a separate codex error path).
 
 **Outputs (codex stdout contract, exit 0):**
@@ -362,20 +379,21 @@ Reviewer #2 raised 11 issues; manager triage merged 5 actionable items into the 
 Scope clarification (post-Phase-3 review, 2026-05-30): three spawn-co-located deliverables originally listed here have been **moved to Phase 4** because they live in `src/ib-commands.ts` alongside the start.sh assembly — implementing them in Phase 3 would have required a partial spawn-path edit that Phase 4 must rewrite anyway. The moved items are: (i) `<worktree>/.codex/` gitignore wiring, (ii) per-agent `<worktree>/AGENTS.md` generation, (iii) spawn-time `--dry-run` precheck *caller* (the `--dry-run` *flag* itself ships in Phase 3 on the dispatcher; only the caller-side invocation slides). See Phase 4 below.
 
 - `buildCodexLaunchArgs()` in `src/codex-config.ts` returns the inline-`-c` flag array per §5.4. Reads merged allow/deny lists from `_all.md` + `_non_coordinator.md` + `<type>.md`; resolves `<abs ib>` with path-safety check (no `'`, `"`, `\`, or control chars); emits one `-c 'hooks.<event>=[{...}]'` per registered event (PreToolUse + SessionStart + Stop).
-- `src/hooks/codex-pre-tool-use.ts` implements the allow/deny handler per §5.5: reads stdin JSON; extracts paths from `tool_input.command` for BOTH Bash (existing shell parser) AND `apply_patch` (parse `*** Add/Update/Delete File:` directives); applies path-isolation + allow/deny list matching; emits `permissionDecision: "deny"` (with `permissionDecisionReason`) OR `permissionDecision: "allow"` paired with `updatedInput` echoing the original `tool_input`; defaults to deny. Wraps ALL logic in try/catch and emits deny on exception (codex fail-open mitigation).
+- `src/hooks/codex-pre-tool-use.ts` implements the allow/deny handler per §5.5: reads stdin JSON; applies matching deny patterns before allow or path checks; extracts paths from `tool_input.command` for BOTH Bash (existing shell parser) AND `apply_patch` (parse `*** Add/Update/Delete File:` directives); emits `permissionDecision: "deny"` (with `permissionDecisionReason`) OR `permissionDecision: "allow"` paired with `updatedInput` echoing the original `tool_input`; defaults to deny. For apply_patch, raw-name and `Write`/`Edit` aliases all participate in tool authorization before every target is path-checked. Wraps ALL logic in try/catch and emits deny on exception (codex fail-open mitigation).
 - `src/hooks/codex-session-start.ts` + `src/hooks/codex-stop.ts` for state-detection (per §5.6) — write `state` to meta.json via `writeAgentState()`; SessionStart additionally captures `session_id` into `meta.codex_session_id` if empty (with `sessionId` defensive fallback). Concurrent writes to `meta.json` MUST use a per-write unique tmp suffix (e.g. `metaPath + ".tmp." + crypto.randomUUID()`) to avoid clobbering racing mutations from PreToolUse-driven captures.
 - `src/index.ts` routes `hooks codex-pre-tool-use` / `hooks codex-session-start` / `hooks codex-stop` → the new handlers, including the `--dry-run` flag (caller-side invocation in Phase 4). **The dispatcher itself MUST be fail-open-safe:** missing/invalid `<agentId>`, module-import failure, or any other dispatcher-level error MUST emit a deny payload to stdout and `exit 0`, never `exit non-zero`. Codex treats any non-zero dispatcher exit as a fail-open hook crash (tool call proceeds).
 - **Gate:** unit tests asserting (a) `buildCodexLaunchArgs()` produces well-formed `-c` payloads (parseable TOML; correct event names; correct command interpolation); (b) path-safety rejection fires for unsafe `<abs ib>` paths; (c) the handler's allow/deny matches the merged `.md` lists for Bash AND apply_patch tool calls — including a regression guard that apply_patch to `/private/tmp` is DENIED (the path-isolation branch MUST require target inside worktree, NOT fall through to `checkPathAccess`'s legacy permissive branch); (d) the codex JSON contract is correct (deny with reason; allow + echo-back `updatedInput`); (e) the handler emits deny on uncaught exception AND the dispatcher emits deny on missing/invalid agentId or module-import failure; (f) SessionStart handler writes `codex_session_id` to meta.json on first firing; (g) defensive `sessionId`/`session_id` read works; (h) two concurrent `meta.json` writes (writeAgentState + captureCodexSessionId) both land via unique tmp suffix. Manual verification deferred to Phase 4 once spawn path is wired.
 
-**apply_patch synthesized-Write contract (updated by Phase B):** the
-PreToolUse handler treats apply_patch as path-only-gated: it extracts every
-target path from the patch body and checks it as a write against the shared
-deny-by-default table (`meta.paths` plus Codex runtime roots). The agent's
-merged allow/deny list is **not** consulted for tool-name matching on
-apply_patch — this is intentional and matches codex's tool surface
-(apply_patch is codex's analog of Claude's Write+Edit). Operators who want to
-forbid file edits entirely should use `-a never -s read-only` instead of
-relying on tool-name allow lists.
+**apply_patch authorization contract (clarified after integration audit):** the
+PreToolUse handler evaluates tool denies before tool allows or paths. It checks
+the raw `apply_patch` name and the `Write` and `Edit` aliases; any matching deny
+wins, while an allow for any of those names admits the tool category. It then
+extracts every target path from the patch body and checks each as a write
+against the shared deny-by-default table (`meta.paths` plus Codex runtime
+roots). Any rejected target rejects the whole patch. The mandatory default
+Write/Edit floor therefore continues to allow normal agent patches subject to
+path enforcement, while type-authored denies can forbid patch editing without
+changing sandbox flags.
 
 ### Phase 4 — Spawn path (headed, in tmux)
 - Branch `start.sh` assembly in `newAgent()` on `parseModel(model).cli` → launch the canonical line from §3.3. Capture PID + codex session id → meta (`codex_session_id`).

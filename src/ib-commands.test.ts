@@ -6296,9 +6296,17 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const agentDir = join(agentsDir, id);
     const start = await Bun.file(join(agentDir, "start.sh")).text();
     const isolatedSettingsPath = join(agentDir, ".claude", "settings.local.json");
+    const hookTokenPath = join(agentDir, ".hook-auth-token");
+    const spawnHookToken = await Bun.file(hookTokenPath).text();
     expect(start).not.toContain("--permission-mode");
     expect(start).not.toContain("--dangerously-skip-permissions");
     expect(start).toContain(`--settings '${isolatedSettingsPath}'`);
+    expect(spawnHookToken).toMatch(/^[0-9a-f]{64}$/);
+    expect(start).toContain(`HOOK_AUTH_FILE='${hookTokenPath}'`);
+    expect(start.indexOf("export ITSYBITSY_HOOK_AUTH_TOKEN=\"$HOOK_AUTH_TOKEN\"")).toBeLessThan(
+      start.indexOf("if command -v setsid"),
+    );
+    expect(start.indexOf("CLAUDE_PID=$!")).toBeLessThan(start.indexOf("ib write-pid"));
     expect(await Bun.file(settingsPath).text()).toBe(originalSharedSettings);
     const isolated = await Bun.file(isolatedSettingsPath).json();
     expect(isolated.permissions.allow).toContain("Bash(ib:*)");
@@ -6323,9 +6331,16 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       resetSendSpawnRunner();
     }
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
+    const resumeHookToken = await Bun.file(hookTokenPath).text();
     expect(resume).not.toContain("--permission-mode");
     expect(resume).not.toContain("--dangerously-skip-permissions");
     expect(resume).toContain(`--settings '${isolatedSettingsPath}'`);
+    expect(resumeHookToken).toMatch(/^[0-9a-f]{64}$/);
+    expect(resumeHookToken).not.toBe(spawnHookToken);
+    expect(resume.indexOf("export ITSYBITSY_HOOK_AUTH_TOKEN=\"$HOOK_AUTH_TOKEN\"")).toBeLessThan(
+      resume.indexOf("if command -v setsid"),
+    );
+    expect(resume.indexOf("CLAUDE_PID=$!")).toBeLessThan(resume.indexOf("ib write-pid"));
     expect(await Bun.file(settingsPath).text()).toBe(originalSharedSettings);
     const migrated = await Bun.file(isolatedSettingsPath).json();
     expect(migrated.hooks.SessionStart[0].hooks[0].command).toBe(`ib hooks session-start ${id}`);

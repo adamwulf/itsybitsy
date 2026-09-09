@@ -2919,6 +2919,28 @@ describe("hookCheckPath with worktree:false agent settings", () => {
     expect(decision.hookSpecificOutput.permissionDecision).toBe("allow");
   });
 
+  for (const toolName of ["Read", "Write", "Bash"] as const) {
+    test(`${toolName} cannot access the launch authentication capability`, async () => {
+      const tokenPath = join(agentDir, ".hook-auth-token");
+      await writeFile(tokenPath, "a".repeat(64));
+      await writeFile(
+        join(agentDir, ".claude", "settings.local.json"),
+        JSON.stringify({ permissions: { allow: ["Read", "Write", "Bash"], deny: [] } }),
+      );
+      await hookCheckPath("agent-shared", JSON.stringify({
+        tool_name: toolName,
+        tool_input: toolName === "Bash"
+          ? { command: `cat ${tokenPath}` }
+          : { file_path: tokenPath },
+        cwd: repo,
+      }));
+
+      const decision = JSON.parse(logged[0]!);
+      expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("other agents");
+    });
+  }
+
   for (const [toolName, toolInput] of [
     ["Read", { file_path: "meta.json" }],
     ["Write", { file_path: "meta.json" }],

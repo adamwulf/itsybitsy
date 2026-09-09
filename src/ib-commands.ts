@@ -85,6 +85,7 @@ import {
 } from "./settings-builder";
 import { listRepos, repoDisplayName, type RepoEntry } from "./registry";
 import { resolveNoWorktreeCaller, type NoWorktreeCaller } from "./no-worktree-caller";
+import { HOOK_AUTH_TOKEN_ENV, HOOK_AUTH_TOKEN_FILE } from "./hooks/agent-context";
 import {
   type Team,
   normalizeTeamName,
@@ -2118,6 +2119,7 @@ export async function resumeAgent(
       // Worktree:false Claude agents cannot safely install agent-specific hooks
       // in the shared repository settings. Their isolated settings file is
       // passed explicitly on every spawn/resume (including coordinator rehire).
+      let hookAuthPreamble = "";
       if (agent.meta.worktree === false || agent.meta.agentType === "coordinator") {
         let isolatedSettings: string;
         try {
@@ -2127,6 +2129,8 @@ export async function resumeAgent(
             agent.id,
             agent.meta,
           );
+          const hookAuthPath = await writeHookAuthToken(agentDir);
+          hookAuthPreamble = hookAuthShellPreamble(hookAuthPath);
         } catch (err) {
           return {
             ok: false,
@@ -2155,7 +2159,7 @@ export CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
 
 AGENT_LOG=${qAgentLog}
 STDERR_LOG=${qResumeStderrLog}
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [resume.sh] $1" >> "$AGENT_LOG"; }${sandboxResumePreamble}
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [resume.sh] $1" >> "$AGENT_LOG"; }${sandboxResumePreamble}${hookAuthPreamble}
 
 log "Starting claude --resume ${sessionId} ${claudeArgs}"
 log "PWD=$(pwd) which_claude=$(which claude 2>&1)"
@@ -2182,6 +2186,7 @@ log "SIGHUP ignored (resume insulated from launcher pane teardown)"
 # bare launch. Fall back to a plain background launch on hosts lacking setsid
 # (e.g. macOS, where setsid is absent — the inherited SIG_IGN above covers it).
 : > "$STDERR_LOG"
+${hookAuthPreamble ? `export ${HOOK_AUTH_TOKEN_ENV}="$HOOK_AUTH_TOKEN"` : ""}
 if command -v setsid >/dev/null 2>&1; then
     SETSID=setsid
 else
@@ -2193,6 +2198,7 @@ else
     ${sandboxResumeLaunchPrefix}claude --resume "${sessionId}" ${claudeArgs} 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
+${hookAuthPreamble ? `unset ${HOOK_AUTH_TOKEN_ENV} HOOK_AUTH_TOKEN` : ""}
 log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
 trap 'log "script received SIGTERM; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' TERM
 trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; kill -INT $CLAUDE_PID 2>/dev/null' INT
@@ -5837,6 +5843,31 @@ async function ensureIsolatedClaudeSettings(
 }
 
 /**
+ * Mint the launch capability inherited by no-worktree Claude hooks. The file
+ * lives outside the shared repo and is unreachable through the agent path
+ * policy; each spawn/resume replaces it before Claude starts.
+ */
+async function writeHookAuthToken(agentDir: string): Promise<string> {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const token = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const tokenPath = join(agentDir, HOOK_AUTH_TOKEN_FILE);
+  await Bun.write(tokenPath, token);
+  await chmod(tokenPath, 0o600);
+  return tokenPath;
+}
+
+function hookAuthShellPreamble(tokenPath: string): string {
+  return `
+HOOK_AUTH_FILE=${shellQuote(tokenPath)}
+HOOK_AUTH_TOKEN="$(<\"$HOOK_AUTH_FILE\")"
+if [[ ! "$HOOK_AUTH_TOKEN" =~ ^[0-9a-f]{64}$ ]]; then
+    log "invalid hook authentication capability"
+    exit 1
+fi`;
+}
+
+/**
  * Native newAgent implementation — replaces `ib new-agent`.
  *
  * Sequence (mirrors cmd_new_agent in ib bash):
@@ -7478,6 +7509,9 @@ echo ""
         preparedSandbox.sandboxExecPath,
       ))} `
     : "";
+  const hookAuthPreamble = agentCli === "claude" && !useWorktree
+    ? hookAuthShellPreamble(await writeHookAuthToken(agentDir))
+    : "";
 
   let startContent: string;
   if (isCodexBackedCli(agentCli)) {
@@ -7547,7 +7581,7 @@ export CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
 
 AGENT_LOG=${qStartAgentLog}
 STDERR_LOG=${qStartStderrLog}
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }${sandboxStartPreamble}
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }${sandboxStartPreamble}${hookAuthPreamble}
 
 log "Starting claude --session-id ${sessionUuid} ${claudeArgs}"
 log "PWD=$(pwd) which_claude=$(which claude 2>&1)"
@@ -7574,6 +7608,7 @@ log "SIGHUP ignored (spawn insulated from launcher pane teardown)"
 # bare launch. Fall back to a plain background launch on hosts lacking setsid
 # (e.g. macOS, where setsid is absent — the inherited SIG_IGN above covers it).
 : > "$STDERR_LOG"
+${hookAuthPreamble ? `export ${HOOK_AUTH_TOKEN_ENV}="$HOOK_AUTH_TOKEN"` : ""}
 if command -v setsid >/dev/null 2>&1; then
     SETSID=setsid
 else
@@ -7585,6 +7620,7 @@ else
     ${sandboxLaunchPrefix}claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})" 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
+${hookAuthPreamble ? `unset ${HOOK_AUTH_TOKEN_ENV} HOOK_AUTH_TOKEN` : ""}
 log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
 trap 'log "script received SIGTERM; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' TERM
 trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; kill -INT $CLAUDE_PID 2>/dev/null' INT

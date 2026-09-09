@@ -14,6 +14,7 @@
 import { isAbsolute, join, resolve } from "path";
 import { realpath } from "fs/promises";
 import { userInfo } from "os";
+import { timingSafeEqual } from "crypto";
 import { isValidAgentId } from "../validation";
 import { resolveNoWorktreeCaller, type NoWorktreeCaller } from "../no-worktree-caller";
 
@@ -54,6 +55,26 @@ export interface RegisteredAgentContext {
 
 export interface BoundHookAgentContext extends RegisteredAgentContext {
   worktreePath: string;
+}
+
+export const HOOK_AUTH_TOKEN_FILE = ".hook-auth-token";
+export const HOOK_AUTH_TOKEN_ENV = "ITSYBITSY_HOOK_AUTH_TOKEN";
+
+async function matchesHookAuthToken(
+  agentDir: string,
+  suppliedToken: string | null | undefined,
+): Promise<boolean> {
+  if (!suppliedToken || !/^[0-9a-f]{64}$/.test(suppliedToken)) return false;
+  let expectedToken: string;
+  try {
+    expectedToken = await Bun.file(join(agentDir, HOOK_AUTH_TOKEN_FILE)).text();
+  } catch {
+    return false;
+  }
+  if (!/^[0-9a-f]{64}$/.test(expectedToken)) return false;
+  const supplied = Buffer.from(suppliedToken, "utf8");
+  const expected = Buffer.from(expectedToken, "utf8");
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }
 
 async function registeredRepoRoots(registryHome: string): Promise<string[]> {
@@ -172,6 +193,8 @@ export async function resolveBoundHookAgent(
   cwd: string,
   deps: FindNoWorktreeAgentsDirDeps & {
     noWorktreeCallerResolver?: BoundNoWorktreeCallerResolver;
+    /** Test-only override; production reads the launch capability from env. */
+    hookAuthToken?: string | null;
   } = {},
 ): Promise<BoundHookAgentContext> {
   const registered = await resolveRegisteredAgentById(agentId, deps);
@@ -180,6 +203,18 @@ export async function resolveBoundHookAgent(
   }
 
   if (registered.meta.worktree === false) {
+    // The launch-owned capability covers the two lifecycle windows in which
+    // PID ancestry cannot: SessionStart may run before `ib write-pid`, and Stop
+    // may run after the recorded Claude process begins exiting. Each launch
+    // rewrites a random per-agent token before Claude starts. A sibling's token
+    // cannot authenticate this registered agent id.
+    const suppliedToken = Object.prototype.hasOwnProperty.call(deps, "hookAuthToken")
+      ? deps.hookAuthToken
+      : process.env[HOOK_AUTH_TOKEN_ENV];
+    if (await matchesHookAuthToken(registered.agentDir, suppliedToken)) {
+      return { ...registered, worktreePath: registered.repoPath };
+    }
+
     const caller = await (
       deps.noWorktreeCallerResolver ??
       boundNoWorktreeCallerResolverOverride ??

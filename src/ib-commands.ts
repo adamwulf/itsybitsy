@@ -6022,10 +6022,6 @@ export async function newAgent(
   const agentsDir = join(rootRepoPath, ".ittybitty", "agents");
   const archiveDir = join(rootRepoPath, ".ittybitty", "archive");
 
-  // 2. Ensure dirs exist
-  await mkdir(agentsDir, { recursive: true });
-  await mkdir(archiveDir, { recursive: true });
-
   // Configuration
   let useWorktree = opts?.noWorktree !== true;
 
@@ -6433,6 +6429,12 @@ export async function newAgent(
       stderr: `Error: --no-worktree is supported only for Claude agents; ${agentCli} agents require an isolated worktree`,
     };
   }
+
+  // Do not allocate lifecycle directories until the CLI/worktree shape is
+  // known to be supported. In particular, rejected non-Claude
+  // worktree:false requests must leave an otherwise untouched repo untouched.
+  await mkdir(agentsDir, { recursive: true });
+  await mkdir(archiveDir, { recursive: true });
 
   // Codex spawn-path preconditions (SPEC §5.4 step 2 + §7 risk 14). Run
   // BEFORE any worktree/tmux work so a fail here doesn't leave residual

@@ -6358,6 +6358,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
         expect(result.ok).toBe(false);
         expect(result.stderr).toContain("--no-worktree is supported only for Claude agents");
         expect(await Bun.file(sharedSettingsPath).text()).toBe(sharedBefore);
+        expect(await lstat(agentsDir).then(() => true).catch(() => false)).toBe(false);
         expect(await Bun.file(join(agentsDir, id)).exists()).toBe(false);
       });
     }

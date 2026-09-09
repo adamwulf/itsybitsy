@@ -12,7 +12,7 @@ import {
   lstat,
 } from "fs/promises";
 import { tmpdir } from "os";
-import { chmodSync, symlinkSync } from "fs";
+import { chmodSync, realpathSync, symlinkSync } from "fs";
 import type { Agent, AgentMeta } from "./agents";
 import {
   isPidAliveCtx,
@@ -74,6 +74,8 @@ import {
   resetNewAgentSpawnRunner,
   setNewAgentCallerMetaReader,
   resetNewAgentCallerMetaReader,
+  setNewAgentNoWorktreeCallerResolver,
+  resetNewAgentNoWorktreeCallerResolver,
   autoAcceptWorkspaceTrust,
   autoAcceptWorkspaceTrustForNewAgent,
   setAgyVersionProbeTimeoutMs,
@@ -1953,7 +1955,7 @@ describe("retire → rehire recovery", () => {
       claude_pid: "",
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       manager: opts.manager ?? null,
-      agentType: "manager",
+      ...(opts.includeSettings === false ? { agentType: "manager" } : {}),
     }).meta;
     // Mandatory sandbox: a rehirable archive must carry an enabled sandbox +
     // paths so the reconstructed agent clears resume's fail-closed precondition
@@ -2108,6 +2110,7 @@ describe("retire → rehire recovery", () => {
     expect(isolated.permissions.allow).toContain("Bash(ib:*)");
     expect(isolated.hooks.SessionStart[0].hooks[0].command).toBe(`ib hooks session-start ${agentId}`);
     expect(isolated.hooks.PostToolUse[0].hooks[0].command).toBe(`ib hooks inject-timestamp ${agentId}`);
+    expect(JSON.stringify(isolated.hooks.PreToolUse)).toContain(`ib hooks intercept-task ${agentId}`);
     expect(JSON.stringify(isolated.hooks)).toContain(`hook-check-path ${agentId}`);
     expect(await Bun.file(sharedSettingsPath).text()).toBe(sharedBefore);
     expect(await Bun.file(join(agentDir, "resume.sh")).text()).toContain(`--settings '${isolatedSettingsPath}'`);
@@ -6322,6 +6325,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const migrated = await Bun.file(isolatedSettingsPath).json();
     expect(migrated.hooks.SessionStart[0].hooks[0].command).toBe(`ib hooks session-start ${id}`);
     expect(migrated.hooks.PostToolUse[0].hooks[0].command).toBe(`ib hooks inject-timestamp ${id}`);
+    expect(JSON.stringify(migrated.hooks.PreToolUse)).toContain(`ib hooks intercept-task ${id}`);
     expect(JSON.stringify(migrated.hooks)).toContain(`hook-check-path ${id}`);
   });
 
@@ -8716,6 +8720,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // target repo (tempDir) is clean. The spawn should succeed because the
     // sub-agent inherits from tempDir's HEAD, not from _cwd.
     const dirtyCallerCwd = join(tempDir, "elsewhere");
+    await mkdir(dirtyCallerCwd, { recursive: true });
     setNewAgentSpawnRunner((cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => {
       const cmdStr = cmd.join(" ");
       // Mark the caller's cwd as dirty…
@@ -8748,6 +8753,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // the dirty target's HEAD, so the spawn must be rejected — and the error
     // message must name the *target* repo so the user knows where to commit.
     const cleanCallerCwd = join(tempDir, "elsewhere-clean");
+    await mkdir(cleanCallerCwd, { recursive: true });
     setNewAgentSpawnRunner((cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => {
       const cmdStr = cmd.join(" ");
       if (cmdStr.includes(`-C ${cleanCallerCwd} rev-parse --is-inside-work-tree`)) {
@@ -8988,6 +8994,79 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(result.stderr).toContain("stubbed-worker");
     expect(result.stderr).toContain("cannot spawn sub-agents");
     resetNewAgentCallerMetaReader();
+  });
+
+  test("verified no-worktree leaf caller cannot spawn through the native CLI", async () => {
+    const callerMeta = {
+      id: "agent-shared-leaf",
+      worker: true,
+      worktree: false,
+      agentType: "worker",
+    };
+    setNewAgentNoWorktreeCallerResolver(async () => ({
+      meta: callerMeta,
+      agentDir: join(agentsDir, "agent-shared-leaf"),
+      repoPath: tempDir,
+    }));
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+
+    const result = await newAgent(tempDir, "sub-task", {
+      name: "shared-leaf-child",
+      _cwd: join(tempDir, "packages", "feature"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("agent-shared-leaf");
+    expect(result.stderr).toContain("cannot spawn sub-agents");
+    expect(await Bun.file(join(agentsDir, "shared-leaf-child", "meta.json")).exists()).toBe(false);
+    resetNewAgentNoWorktreeCallerResolver();
+  });
+
+  test("verified no-worktree manager is auto-parent and spawned_by source", async () => {
+    const callerId = "agent-shared-manager";
+    const callerDir = join(agentsDir, callerId);
+    const callerMeta = {
+      id: callerId,
+      worker: false,
+      worktree: false,
+      agentType: "manager",
+    };
+    await mkdir(callerDir, { recursive: true });
+    await Bun.write(join(callerDir, "meta.json"), JSON.stringify(callerMeta));
+    setNewAgentNoWorktreeCallerResolver(async () => ({
+      meta: callerMeta,
+      agentDir: callerDir,
+      repoPath: tempDir,
+    }));
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+
+    const result = await newAgent(tempDir, "sub-task", {
+      name: "shared-manager-child",
+      _cwd: join(tempDir, "packages", "feature"),
+    });
+
+    expect(result.ok).toBe(true);
+    const childMeta = await Bun.file(join(agentsDir, "shared-manager-child", "meta.json")).json();
+    expect(childMeta.manager).toBe(callerId);
+    expect(childMeta.spawned_by).toEqual({ agent_id: callerId, repo_path: realpathSync(tempDir) });
+    resetNewAgentNoWorktreeCallerResolver();
+  });
+
+  test("unverifiable no-worktree caller fails closed before agent allocation", async () => {
+    setNewAgentNoWorktreeCallerResolver(async () => {
+      throw new Error("Cannot verify no-worktree caller process identity");
+    });
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+
+    const result = await newAgent(tempDir, "sub-task", {
+      name: "unverified-shared-child",
+      _cwd: tempDir,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Cannot verify no-worktree caller process identity");
+    expect(await Bun.file(join(agentsDir, "unverified-shared-child", "meta.json")).exists()).toBe(false);
+    resetNewAgentNoWorktreeCallerResolver();
   });
 
   test("manager caller CAN spawn (no regression)", async () => {
@@ -10493,6 +10572,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(isolated.hooks.PreToolUse[0].hooks[0].command).toBe("ib hook-check-path test-no-wt-perm");
     expect(isolated.hooks.SessionStart[0].hooks[0].command).toBe("ib hooks session-start test-no-wt-perm");
     expect(isolated.hooks.PostToolUse[0].hooks[0].command).toBe("ib hooks inject-timestamp test-no-wt-perm");
+    expect(JSON.stringify(isolated.hooks.PreToolUse)).toContain("ib hooks intercept-task test-no-wt-perm");
     expect(isolated.hooks.UserPromptSubmit[1].hooks[0].command).toBe("ib hooks inject-timestamp test-no-wt-perm");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
     expect(start).toContain(`--settings '${isolatedSettingsPath}'`);

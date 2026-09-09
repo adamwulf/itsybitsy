@@ -84,6 +84,7 @@ import {
   REGULAR_AGENT_INTERCEPT_MATCHER,
 } from "./settings-builder";
 import { listRepos, repoDisplayName, type RepoEntry } from "./registry";
+import { resolveNoWorktreeCaller, type NoWorktreeCaller } from "./no-worktree-caller";
 import {
   type Team,
   normalizeTeamName,
@@ -5034,6 +5035,7 @@ export function resetNewAgentSpawnRunner(): void {
   newAgentDelayOverrideMs = null;
   agyVersionProbeTimeoutOverrideMs = null;
   callerMetaReaderOverride = null;
+  noWorktreeCallerResolverOverride = null;
 }
 
 /** Override the `agy --version` probe timeout (ms) for tests. null = default. */
@@ -5043,8 +5045,10 @@ export function setAgyVersionProbeTimeoutMs(ms: number | null): void {
 
 /** Type for readCallerMetaFromCwd override in tests */
 export type CallerMetaReaderFn = (cwd: string) => Promise<Record<string, unknown> | null> | Record<string, unknown> | null;
+export type NoWorktreeCallerResolverFn = (cwd: string) => Promise<NoWorktreeCaller | null>;
 
 let callerMetaReaderOverride: CallerMetaReaderFn | null = null;
+let noWorktreeCallerResolverOverride: NoWorktreeCallerResolverFn | null = null;
 
 /** Override the caller meta reader for newAgent tests (e.g. to isolate tests from ambient agent worktrees) */
 export function setNewAgentCallerMetaReader(fn: CallerMetaReaderFn): void {
@@ -5054,6 +5058,16 @@ export function setNewAgentCallerMetaReader(fn: CallerMetaReaderFn): void {
 /** Reset the caller meta reader override */
 export function resetNewAgentCallerMetaReader(): void {
   callerMetaReaderOverride = null;
+}
+
+/** Override trusted no-worktree caller resolution for deterministic tests. */
+export function setNewAgentNoWorktreeCallerResolver(fn: NoWorktreeCallerResolverFn): void {
+  noWorktreeCallerResolverOverride = fn;
+}
+
+/** Reset trusted no-worktree caller resolution. */
+export function resetNewAgentNoWorktreeCallerResolver(): void {
+  noWorktreeCallerResolverOverride = null;
 }
 
 /**
@@ -5713,8 +5727,12 @@ async function buildAgentSettings(
   const allDeny = [...new Set([...REGULAR_AGENT_DEFAULT_DENY, ...configDeny])];
 
   // Check if intercept hook should be added (reuse already-parsed baseSettings)
-  let addIntercept = false;
-  if (agentType === "manager") {
+  // worktree:false settings always install intercept-task: their explicit
+  // identity lets the handler enforce native Task/Agent spawn capability for
+  // both managers and leaves. Preserve the historical project-hook inheritance
+  // behavior for ordinary worktree agents.
+  let addIntercept = opts.explicitAgentIdentity === true;
+  if (!addIntercept && agentType === "manager") {
     const hooksObj = baseSettings.hooks as Record<string, unknown> | undefined;
     const preToolUse = hooksObj?.PreToolUse;
     if (Array.isArray(preToolUse)) {
@@ -5920,10 +5938,9 @@ async function detectManagerFromCwd(cwd: string, rootRepoPath: string): Promise<
 }
 
 /**
- * Read the `meta.json` of the agent whose worktree contains `cwd`, or null when
- * `cwd` is not inside any agent worktree (primary Claude, a human shell, or a
- * top-level coordinator running from a repo root — none of which are leaf
- * agents). Used by `newAgent` to gate the spawn on the *caller's* permission.
+ * Resolve the verified agent caller for both isolated worktrees and shared-repo
+ * worktree:false sessions. The latter cannot trust cwd, env, or a caller-id
+ * flag, so it delegates to process-ancestry verification.
  *
  * Unlike `detectManagerFromCwd`, this is independent of `rootRepoPath`: it
  * reads the caller's meta from its absolute worktree path, so it still resolves
@@ -5931,18 +5948,35 @@ async function detectManagerFromCwd(cwd: string, rootRepoPath: string): Promise<
  * own worktree. It is also independent of `opts.spawnedBy` so a caller cannot
  * dodge the gate by passing `--spawned-by`.
  */
-async function readCallerMetaFromCwd(cwd: string): Promise<Record<string, unknown> | null> {
+interface ResolvedCallerContext {
+  meta: Record<string, unknown>;
+  agentDir: string;
+  repoPath: string;
+}
+
+async function readCallerMetaFromCwd(cwd: string): Promise<ResolvedCallerContext | null> {
   if (callerMetaReaderOverride !== null) {
-    return callerMetaReaderOverride(cwd);
+    const meta = await callerMetaReaderOverride(cwd);
+    if (!meta) return null;
+    return { meta, agentDir: "", repoPath: "" };
   }
   const agentPattern = /\/\.ittybitty\/agents\/([^/]+)\/repo/;
-  if (!agentPattern.test(cwd)) return null;
-  const callerDir = cwd.replace(/(\/\.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
-  try {
-    const meta = await Bun.file(join(callerDir, "meta.json")).json();
-    if (meta && typeof meta === "object") return meta as Record<string, unknown>;
-  } catch { /* ignore */ }
-  return null;
+  if (agentPattern.test(cwd)) {
+    const callerDir = cwd.replace(/(\/\.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
+    try {
+      const meta = await Bun.file(join(callerDir, "meta.json")).json();
+      if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+        const marker = cwd.indexOf("/.ittybitty/agents/");
+        return {
+          meta: meta as Record<string, unknown>,
+          agentDir: callerDir,
+          repoPath: marker >= 0 ? cwd.substring(0, marker) : "",
+        };
+      }
+    } catch { /* ignore */ }
+    return null;
+  }
+  return (noWorktreeCallerResolverOverride ?? resolveNoWorktreeCaller)(cwd);
 }
 
 export async function newAgent(
@@ -5966,6 +6000,23 @@ export async function newAgent(
   // Validate path for shell script interpolation
   if (!isValidShellPath(rootRepoPath)) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Repository path contains characters unsafe for shell scripts (null bytes or newlines): ${rootRepoPath}` };
+  }
+
+  // Resolve caller identity exactly once, before creating lifecycle dirs. A
+  // worktree caller is identified structurally; a shared-repo caller must pass
+  // the process-ancestry verifier. Observation/ambiguity failures are denied,
+  // never downgraded to an unrestricted human caller.
+  const callerCwd = opts?._cwd ?? process.cwd();
+  let callerContext: ResolvedCallerContext | null;
+  try {
+    callerContext = await readCallerMetaFromCwd(callerCwd);
+  } catch (err) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Error: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
 
   const agentsDir = join(rootRepoPath, ".ittybitty", "agents");
@@ -6056,14 +6107,35 @@ export async function newAgent(
   // 3. Auto-detect manager from cwd (only if cwd is in the same repo)
   //    Coordinators are top-level agents — never auto-detect a manager (SPEC §12.2.3)
   if (!manager && !coordinatorMode) {
-    const cwd = opts?._cwd ?? process.cwd();
-    manager = await detectManagerFromCwd(cwd, rootRepoPath);
+    const sameRepoCaller = callerContext?.repoPath &&
+      resolve(callerContext.repoPath) === resolve(rootRepoPath);
+    const callerId = callerContext && typeof callerContext.meta.id === "string"
+      ? callerContext.meta.id
+      : "";
+    manager = sameRepoCaller && callerId
+      ? callerId
+      : await detectManagerFromCwd(callerCwd, rootRepoPath);
   }
 
   // 3.5. Auto-detect spawned_by from CWD (works cross-repo, unlike manager auto-detect)
   let spawnedBy: SpawnedBy | undefined = opts?.spawnedBy;
   if (!spawnedBy) {
-    const cwd = opts?._cwd ?? process.cwd();
+    const cwd = callerCwd;
+
+    // Verified worktree and worktree:false callers share one attribution path.
+    // Per-repo coordinators retain their stable @repo sentinel so notifications
+    // survive coordinator recreation; regular shared agents use their real id.
+    if (
+      callerContext?.repoPath &&
+      typeof callerContext.meta.id === "string"
+    ) {
+      spawnedBy = {
+        agent_id: callerContext.meta.agentType === "coordinator"
+          ? `@${basename(callerContext.repoPath)}`
+          : callerContext.meta.id,
+        repo_path: callerContext.repoPath,
+      };
+    }
 
     // Case 1: Worktree agent — CWD matches /.ittybitty/agents/<id>/repo
     const agentPattern = /\/.ittybitty\/agents\/([^/]+)\/repo/;
@@ -6152,13 +6224,11 @@ export async function newAgent(
   // not spawn sub-agents even by pointing `--manager` at another manager that
   // can spawn — the permission belongs to the caller, not the named parent. The
   // intercept-task hook enforces this for the Task/Agent tool path, but a
-  // worker can invoke `ib new-agent` directly via Bash, which the hook never
-  // sees, so the same rule must live here. Callers not inside an agent worktree
-  // (primary Claude, a human shell, a top-level coordinator) return null and
-  // are unrestricted.
+  // worker can invoke `ib new-agent` directly via Bash, so the same rule must
+  // live here. Shared-repo agents are process-verified above; primary Claude
+  // and human shells return null and remain unrestricted.
   {
-    const callerCwd = opts?._cwd ?? process.cwd();
-    const callerMeta = await readCallerMetaFromCwd(callerCwd);
+    const callerMeta = callerContext?.meta;
     if (callerMeta && !(await metaCanSpawnChildren(callerMeta))) {
       const callerId = typeof callerMeta.id === "string" ? callerMeta.id : "this agent";
       return {

@@ -1593,8 +1593,10 @@ describe("checkIbCommandAccess", () => {
   test("denies agent-issued internal sandbox seal, including shell chaining", async () => {
     const direct = await checkIbCommandAccess("ib sandbox seal agent-target1", "agent-caller1", agentsDir);
     const chained = await checkIbCommandAccess("echo ok; ib sandbox seal agent-target1", "agent-caller1", agentsDir);
+    const deleted = await checkIbCommandAccess("ib sandbox delete-seal agent-target1", "agent-caller1", agentsDir);
     expect(direct?.decision).toBe("deny");
     expect(chained?.decision).toBe("deny");
+    expect(deleted?.decision).toBe("deny");
     expect(direct?.reason).toContain("internal operation");
     const continued = await checkIbCommandAccess("ib \\\nsandbox seal agent-target1", "agent-caller1", agentsDir);
     expect(continued?.decision).toBe("deny");

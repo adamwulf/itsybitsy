@@ -141,9 +141,13 @@ import {
   readSealRecord,
   deleteSealRecord,
   verifyMetaAgainstSeal,
+  computeSealInputs,
+  computeSealRecord,
   sealPath,
   sealCapabilityPath,
   newSealCapability,
+  type SealCapabilityAction,
+  type SealRecord,
 } from "./agent-seal";
 
 export interface IbCommandResult {
@@ -976,8 +980,7 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
     }
   } else {
     try {
-      const rid = await getRepoId(repoPath);
-      if (await readSealRecord(rid, agentId)) await deleteSealRecord(rid, agentId);
+      await deleteAgentSealChecked(repoPath, agentId, repoPath);
     } catch (err) {
       return { ok: false, exitCode: 1, stdout: `Reconstructed stopped agent '${agentId}' from ${archived.archiveKey}`, stderr: `Could not remove stale disabled-agent seal: ${err instanceof Error ? err.message : String(err)}` };
     }
@@ -2544,12 +2547,61 @@ function summarizeSandboxRefresh(
   ].join("; ");
 }
 
+type SandboxRefreshMetaMutator = typeof mutateAgentMeta;
+type SandboxRefreshPauser = typeof pauseAgent;
+type SandboxRefreshSealRestorer = (
+  repoId: string,
+  agentId: string,
+  record: SealRecord | null,
+) => Promise<void>;
+
+let sandboxRefreshMetaMutateOverride: SandboxRefreshMetaMutator | null = null;
+let sandboxRefreshSealRestoreOverride: SandboxRefreshSealRestorer | null = null;
+let sandboxRefreshPauseOverride: SandboxRefreshPauser | null = null;
+
+export function setSandboxRefreshMetaMutateForTesting(fn: SandboxRefreshMetaMutator | null): void {
+  sandboxRefreshMetaMutateOverride = fn;
+}
+
+export function setSandboxRefreshSealRestoreForTesting(fn: SandboxRefreshSealRestorer | null): void {
+  sandboxRefreshSealRestoreOverride = fn;
+}
+
+export function setSandboxRefreshPauseForTesting(fn: SandboxRefreshPauser | null): void {
+  sandboxRefreshPauseOverride = fn;
+}
+
+async function restoreSealSnapshot(
+  repoId: string,
+  agentId: string,
+  record: SealRecord | null,
+): Promise<void> {
+  if (sandboxRefreshSealRestoreOverride) {
+    await sandboxRefreshSealRestoreOverride(repoId, agentId, record);
+    return;
+  }
+  if (record === null) {
+    await deleteSealRecord(repoId, agentId);
+    return;
+  }
+  const destination = sealPath(repoId, agentId);
+  const tmp = `${destination}.tmp.${process.pid}.${crypto.randomUUID()}`;
+  await mkdir(dirname(destination), { recursive: true });
+  try {
+    await Bun.write(tmp, JSON.stringify(record, null, 2));
+    await rename(tmp, destination);
+  } catch (err) {
+    await rm(tmp, { force: true }).catch(() => {});
+    throw err;
+  }
+}
+
 /**
  * Re-derive an existing agent's sandbox + paths policy from the CURRENT
  * agent-type files and replay it through the ordinary resume path. Backs
- * `ib sandbox refresh <id>` (A4 G2, SPEC-SANDBOX 5.6). respawnSelf is the model:
- * rewrite the frozen meta block, then pause (when running) + resume so the NEW
- * block is the one resume replays.
+ * `ib sandbox refresh <id>` (A4 G2, SPEC-SANDBOX 5.6). A running agent is
+ * paused first, then the frozen block and seal are changed transactionally and
+ * the ordinary resume path replays the new policy.
  *
  * Refusals:
  *  - A coordinator: its reset path differs (resetCoordinator rebuilds
@@ -2677,7 +2729,7 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
   // prevents an old unsandboxed process from continuing while metadata says
   // the next launch is kernel-sandboxed.
   if (agent.state !== "stopped") {
-    const pauseResult = await pauseAgent(agent);
+    const pauseResult = await (sandboxRefreshPauseOverride ?? pauseAgent)(agent);
     if (!pauseResult.ok) {
       await logAgent(agentDir, `[sandbox refresh] pause failed: ${pauseResult.stderr}`);
       return { ok: false, exitCode: 1, stdout: "", stderr: `sandbox refresh: pause failed: ${pauseResult.stderr}` };
@@ -2719,7 +2771,7 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
   // Rewrite the frozen block. Proxy port/pid are left to resume (it reallocates
   // the port and clears the stale pid), exactly as the ordinary resume path
   // handles them — do not touch them here.
-  const metaUpdated = await mutateAgentMeta(agentDir, (meta) => {
+  const metaUpdated = await (sandboxRefreshMetaMutateOverride ?? mutateAgentMeta)(agentDir, (meta) => {
     meta.sandbox = newSandbox;
     meta.paths = newPaths;
     if (!newSandbox.enabled) {
@@ -2729,16 +2781,30 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
     return meta;
   });
   if (!metaUpdated) {
-    if (newSandbox.enabled) {
+    const sealChanged = newSandbox.enabled || removedOldSeal;
+    if (sealChanged) {
       try {
-        if (oldSealRecord) await Bun.write(sealPath(sealRepoId, agent.id), JSON.stringify(oldSealRecord, null, 2));
-        else await deleteSealRecord(sealRepoId, agent.id);
-      } catch { /* report below; operator can retry with retained metadata */ }
-    }
-    if (removedOldSeal) {
-      try { await sealAgentRecord(agent.repoPath, agent.id, agent.meta as unknown as Record<string, unknown>, agentDir); }
-      catch (rollbackError) {
-        return { ok: false, exitCode: 1, stdout: "", stderr: `sandbox refresh: metadata update failed and seal restoration failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}; retry refresh to reconstruct the missing seal from the retained metadata, or nuke and respawn if recovery is refused` };
+        await restoreSealSnapshot(sealRepoId, agent.id, oldSealRecord);
+      } catch (rollbackError) {
+        // A missing seal is a recognized, fail-closed refresh recovery state;
+        // a mismatched replacement is not. If exact restoration failed, remove
+        // the replacement so the retained old metadata can be retried safely.
+        try {
+          await deleteSealRecord(sealRepoId, agent.id);
+        } catch (cleanupError) {
+          return {
+            ok: false,
+            exitCode: 1,
+            stdout: "",
+            stderr: `sandbox refresh: metadata update failed, seal restoration failed (${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}), and mismatched-seal cleanup failed (${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}); nuke and respawn the agent`,
+          };
+        }
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `sandbox refresh: metadata update failed and seal restoration failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}; the mismatched seal was removed, so retry refresh to recover from the retained metadata`,
+        };
       }
     }
     return { ok: false, exitCode: 1, stdout: "", stderr: "sandbox refresh: could not update metadata" };
@@ -5171,6 +5237,22 @@ async function runHelperViaTmuxServerBlocking(
   }
 }
 
+async function runSealCapabilityHelper(
+  action: SealCapabilityAction,
+  repoId: string,
+  agentId: string,
+  helperCwd: string,
+  meta?: Record<string, unknown>,
+  expectedRecord?: SealRecord | null,
+): Promise<void> {
+  const cap = await newSealCapability(action, repoId, agentId, meta, expectedRecord);
+  const capJson = Buffer.from(JSON.stringify(cap)).toString("base64");
+  const capPath = sealCapabilityPath(repoId, agentId, cap.token);
+  const subcommand = action === "write" ? "seal" : "delete-seal";
+  const capScript = `umask 077 && mkdir -p ${shellQuote(dirname(capPath))} && printf %s ${shellQuote(capJson)} | base64 -d > ${shellQuote(`${capPath}.tmp`)} && chmod 600 ${shellQuote(`${capPath}.tmp`)} && mv -f ${shellQuote(`${capPath}.tmp`)} ${shellQuote(capPath)} && IB_SEAL_CAP=${shellQuote(cap.token)} ib sandbox ${subcommand} ${shellQuote(agentId)}`;
+  await runHelperViaTmuxServerBlocking(nukeResumeSpawnCtx, helperCwd, ["sh", "-c", capScript]);
+}
+
 /**
  * Write (or re-write) an agent's sealed record. The seal freezes the profile
  * inputs (`agentType`, resolved `canSpawnChildren`, `paths`, `sandbox`) so a
@@ -5208,14 +5290,36 @@ export async function sealAgentRecord(
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code !== "EPERM" && code !== "EACCES") throw err;
     // Sandboxed spawner: the tmux server is unsandboxed, so let it do the write.
-    const cap = await newSealCapability(meta);
-    const capJson = Buffer.from(JSON.stringify(cap)).toString("base64");
-    const capPath = sealCapabilityPath(repoId, agentId, cap.token);
-    const capScript = `umask 077 && mkdir -p ${shellQuote(dirname(capPath))} && printf %s ${shellQuote(capJson)} | base64 -d > ${shellQuote(`${capPath}.tmp`)} && chmod 600 ${shellQuote(`${capPath}.tmp`)} && mv -f ${shellQuote(`${capPath}.tmp`)} ${shellQuote(capPath)} && IB_SEAL_CAP=${shellQuote(cap.token)} ib sandbox seal ${shellQuote(agentId)}`;
-    await runHelperViaTmuxServerBlocking(nukeResumeSpawnCtx, helperCwd, ["sh", "-c", capScript]);
+    await runSealCapabilityHelper("write", repoId, agentId, helperCwd, meta);
     if (!(await readSealRecord(repoId, agentId)) || !(await verifyMetaAgainstSeal(repoId, agentId, meta)).ok) {
       throw new Error(`sandbox refused: could not write the sealed record for '${agentId}' (via the tmux server)`);
     }
+  }
+}
+
+/**
+ * Remove one agent seal, falling back to the unsandboxed tmux server only when
+ * the caller is itself inside Seatbelt. The fallback is authorized by a
+ * short-lived, one-use capability bound to the delete action, repository, and
+ * target agent; ordinary agent-issued CLI calls cannot mint the protected
+ * capability file.
+ */
+export async function deleteAgentSealChecked(
+  repoPath: string,
+  agentId: string,
+  helperCwd: string,
+  expectedMeta?: Record<string, unknown>,
+): Promise<void> {
+  const repoId = await getRepoId(repoPath);
+  const expectedRecord = expectedMeta
+    ? computeSealRecord(await computeSealInputs(expectedMeta))
+    : undefined;
+  try {
+    await (sealDeleteOverride ?? deleteSealRecord)(repoId, agentId);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "EPERM" && code !== "EACCES") throw err;
+    await runSealCapabilityHelper("delete", repoId, agentId, helperCwd, undefined, expectedRecord);
   }
 }
 
@@ -6314,11 +6418,19 @@ export async function newAgent(
     } catch {
       /* a module-load failure must never abort spawn-failure cleanup */
     }
+    // The sealed record lives OUTSIDE agentDir (~/.itsybitsy/sealed), so delete
+    // it while meta.json still exists for the authenticated helper lookup.
+    try {
+      await deleteAgentSealChecked(
+        rootRepoPath,
+        id,
+        rootRepoPath,
+        resolvedSandboxConfig.enabled ? initialMetaJson : undefined,
+      );
+    } catch (err) {
+      await logSpawn(agentDir, spawnerAgentDir, id, `spawn cleanup warning: could not remove seal: ${err instanceof Error ? err.message : String(err)}`);
+    }
     await rm(agentDir, { recursive: true, force: true });
-    // The sealed record lives OUTSIDE agentDir (~/.itsybitsy/sealed) so rm above
-    // does not touch it — delete it explicitly so a failed spawn leaves no
-    // orphaned seal.
-    await removeAgentSeal(rootRepoPath, id);
     if (useWorktree) {
       await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
       await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "branch", "-D", branchName]);
@@ -6340,11 +6452,10 @@ export async function newAgent(
   }
   else {
     // A disabled same-ID spawn must not inherit an orphaned enabled seal from
-    // an interrupted prior lifecycle. Remove it before exposing the new meta;
-    // failure aborts the spawn rather than stranding a mismatched pair.
+    // an interrupted prior lifecycle. Remove it before launch; failure aborts
+    // the spawn rather than stranding a mismatched pair.
     try {
-      const staleSeal = await readSealRecord(await getRepoId(rootRepoPath), id);
-      if (staleSeal) await deleteSealRecord(await getRepoId(rootRepoPath), id);
+      await deleteAgentSealChecked(rootRepoPath, id, rootRepoPath);
     } catch (err) {
       await cleanupOnFailure();
       return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not remove stale sandbox seal: ${err instanceof Error ? err.message : String(err)}` };
@@ -6388,8 +6499,12 @@ export async function newAgent(
         // The enabled seal is written before worktree setup.  Use the central
         // unwind path so this failure cannot orphan it; git cleanup is safe
         // here because the held branch is checked out elsewhere.
+        try {
+          await deleteAgentSealChecked(rootRepoPath, id, rootRepoPath, initialMetaJson);
+        } catch (err) {
+          await logSpawn(agentDir, spawnerAgentDir, id, `spawn cleanup warning: could not remove seal: ${err instanceof Error ? err.message : String(err)}`);
+        }
         await rm(agentDir, { recursive: true, force: true });
-        await removeAgentSeal(rootRepoPath, id);
         return {
           ok: false,
           exitCode: 1,

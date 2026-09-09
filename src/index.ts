@@ -2097,7 +2097,7 @@ export async function main() {
         await printAndExit(await refreshAgentSandbox(agent));
       }
 
-      if (sub === "seal") {
+      if (sub === "seal" || sub === "delete-seal") {
         // Internal (A4 G3): write/refresh ONE agent's sealed record. Invoked
         // unsandboxed — either directly, or by a sandboxed spawner's
         // sealAgentRecord fallback through the tmux server, which cannot write
@@ -2105,7 +2105,7 @@ export async function main() {
         // agent-type files (canSpawnChildren resolution) + the agent's meta.
         const target = args[2];
         if (!target) {
-          console.error("Usage: ib sandbox seal <agent-id>");
+          console.error(`Usage: ib sandbox ${sub} <agent-id>`);
           process.exit(1);
         }
         const agent = await findAgentById(target, repos);
@@ -2114,25 +2114,33 @@ export async function main() {
           process.exit(1);
         }
         const { getRepoId } = await import("./ib-commands");
-        const { writeSealRecordDirect, consumeSealCapability } = await import("./agent-seal");
+        const { writeSealRecordDirect, deleteSealRecord, consumeSealCapability } = await import("./agent-seal");
         const repoId = await getRepoId(agent.repoPath);
         try {
           const token = process.env.IB_SEAL_CAP;
-          if (!token || !(await consumeSealCapability(repoId, agent.id, agent.meta as unknown as Record<string, unknown>, token))) {
+          const action = sub === "seal" ? "write" : "delete";
+          const meta = action === "write" ? agent.meta as unknown as Record<string, unknown> : undefined;
+          if (!token || !(await consumeSealCapability(action, repoId, agent.id, token, meta))) {
             throw new Error("internal seal capability missing, invalid, or replayed");
           }
-          // No explicit home: writeSealRecordDirect defaults to
-          // `process.env.HOME ?? homedir()`, the same seal home the writer/reader
-          // use everywhere else.
-          await writeSealRecordDirect(
-            repoId,
-            agent.id,
-            agent.meta as unknown as Record<string, unknown>,
-          );
-          console.log(`Sealed ${agent.id}`);
+          if (action === "write") {
+            // No explicit home: writeSealRecordDirect defaults to
+            // `process.env.HOME ?? homedir()`, the same seal home the writer/reader
+            // use everywhere else.
+            await writeSealRecordDirect(
+              repoId,
+              agent.id,
+              agent.meta as unknown as Record<string, unknown>,
+            );
+            console.log(`Sealed ${agent.id}`);
+          } else {
+            await deleteSealRecord(repoId, agent.id);
+            console.log(`Deleted seal for ${agent.id}`);
+          }
           process.exit(0);
         } catch (err) {
-          console.error(`Could not seal '${agent.id}': ${err instanceof Error ? err.message : String(err)}`);
+          const operation = sub === "seal" ? "seal" : "delete seal for";
+          console.error(`Could not ${operation} '${agent.id}': ${err instanceof Error ? err.message : String(err)}`);
           process.exit(1);
         }
       }

@@ -1169,14 +1169,15 @@ export async function checkIbCommandAccess(
   if (callingAgentId === SYSTEM_AGENT_ID) return null;
 
   // Shell line continuations are removed before execution. Normalize them
-  // before authorization so `ib \\\n+  // sandbox seal ...` cannot evade the internal-command guard.
+  // before authorization so a continued `ib sandbox seal ...` cannot evade
+  // the internal-command guard.
   const normalizedCommand = command.replace(/\\\r?\n/g, " ");
 
   // Seal is an internal tmux-server operation.  It must never be reachable
   // from an agent's Bash(ib:*) allowance: the command writes the protected
   // seal record directly and therefore bypasses the normal path hook.  The
   // trusted tmux fallback does not pass through this hook.
-  if (/(?:^|[;&|]\s*)ib\s+sandbox\s+seal(?:\s|$)/.test(normalizedCommand)) {
+  if (/(?:^|[;&|]\s*)ib\s+sandbox\s+(?:seal|delete-seal)(?:\s|$)/.test(normalizedCommand)) {
     return {
       decision: "deny",
       reason: "Access denied: ib sandbox seal is an internal operation",

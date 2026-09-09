@@ -2,7 +2,7 @@
  * Hook: generate ittybitty session-start instructions based on detected role.
  */
 
-import { join, basename, resolve } from "path";
+import { join, basename } from "path";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { AGENT_CWD_PATTERN, SYSTEM_AGENT_ID, systemCoordinatorHome } from "./shared";
 import { loadAgentType, listSpawnableAgentTypesSync } from "../agent-types";
@@ -11,7 +11,7 @@ import { listTeams } from "../teams";
 import { isValidSessionId } from "../validation";
 import { resolveSandboxEnabled, type PathsConfig, type SandboxConfig } from "../sandbox";
 import { metadataCli } from "../agent-cli";
-import { findNoWorktreeAgentsDir } from "./agent-context";
+import { resolveBoundHookAgent } from "./agent-context";
 
 export type SessionRole = "primary" | "manager" | "worker" | "coordinator";
 
@@ -936,29 +936,20 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
   let agentDirForState: string | undefined;
   let roleCwd = cwd;
 
-  if (match) {
+  if (agentIdArg && agentIdArg !== SYSTEM_AGENT_ID) {
+    // Explicit identities are emitted for shared-repo agents. Authenticate the
+    // registered record against the actual Claude process before reading role
+    // metadata or mutating state; payload cwd and lookalike agent trees supply
+    // no authority.
+    const bound = await resolveBoundHookAgent(agentIdArg, cwd);
+    agentDirForState = bound.agentDir;
+    roleCwd = bound.worktreePath;
+    metaJson = bound.meta;
+  } else if (match) {
     const agentId = match[1]!;
     const ittybittyIdx = cwd.indexOf("/.ittybitty/agents/");
     const rootRepoPath = cwd.substring(0, ittybittyIdx);
     const agentDir = join(rootRepoPath, ".ittybitty", "agents", agentId);
-    agentDirForState = agentDir;
-    try {
-      const metaFile = Bun.file(join(agentDir, "meta.json"));
-      if (await metaFile.exists()) {
-        metaJson = await metaFile.json();
-      }
-    } catch {
-      // Fall through to primary if meta can't be read
-    }
-  } else if (agentIdArg) {
-    // Non-worktree agent: the explicit ID is authoritative, while bounded
-    // ancestor discovery finds the shared repo even when Claude reports a
-    // nested cwd. The shared resolver rejects nested forged agent boundaries.
-    const agentsDir = await findNoWorktreeAgentsDir(agentIdArg, cwd);
-    const agentDir = agentsDir
-      ? join(agentsDir, agentIdArg)
-      : join(cwd, ".ittybitty", "agents", agentIdArg);
-    if (agentsDir) roleCwd = resolve(agentsDir, "..", "..");
     agentDirForState = agentDir;
     try {
       const metaFile = Bun.file(join(agentDir, "meta.json"));

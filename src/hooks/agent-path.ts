@@ -1243,6 +1243,24 @@ function containsIbNewAgentInvocation(command: string): boolean {
   return /(?:^|[;&|()\n])\s*ib[\t ]+new-agent(?:[\t \n]|$)/.test(command);
 }
 
+function containsInternalIbInvocation(command: string): boolean {
+  const tokens = tokenizeBashPaths(maskHeredocBodies(command));
+  if (!tokens) return true;
+  for (let i = 0; i + 1 < tokens.length; i++) {
+    const executable = stripBashSurroundingQuotes(tokens[i]!);
+    if (basename(executable) !== "ib") continue;
+    const verb = stripBashSurroundingQuotes(tokens[i + 1]!);
+    if (verb === "hooks" || /^(?:hook-check-path|hook-status|hook-permission-denied|hook-mark-running|write-pid|write-proxy-pid|sandbox-log-watch|sandbox-log-stream|sandbox-proxy|sandbox-proxy-launch)$/.test(verb)) {
+      return true;
+    }
+    if (verb === "sandbox") {
+      const action = stripBashSurroundingQuotes(tokens[i + 2] ?? "");
+      if (/^(?:seal|delete-seal|verify-seal|refresh)$/.test(action)) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Check whether a Bash `ib <cmd> <target>` call is permitted for the calling
  * agent. Manager-only commands (retire, merge, nuke, etc.) require that the
@@ -1255,13 +1273,6 @@ export async function checkIbCommandAccess(
   callingAgentId: string,
   agentsDir: string
 ): Promise<HookDecision | null> {
-  // @system has system-wide authority; skip relationship checks. Must come
-  // BEFORE callerRepoRoot resolution below — for @system, agentsDir is "" and
-  // resolve("", "..", "..") would resolve relative to process.cwd(), producing
-  // a misleading caller repo path. Also keeps this bypass robust against
-  // future refactors that move parsing logic.
-  if (callingAgentId === SYSTEM_AGENT_ID) return null;
-
   // Shell line continuations are removed before execution. Normalize them
   // before authorization so a continued `ib sandbox seal ...` cannot evade
   // the internal-command guard.
@@ -1285,9 +1296,14 @@ export async function checkIbCommandAccess(
   // the Bash tool. They are never valid agent-authored ib commands: allowing A
   // to run one as B would let attacker-controlled argv select B's state or
   // policy handler before that handler can authenticate its process context.
-  if (/(?:^|[;&|]\s*)ib\s+(?:hooks|hook-(?:check-path|status|permission-denied|mark-running))(?:\s|$)/.test(normalizedCommand)) {
-    return { decision: "deny", reason: "Access denied: ib hook dispatch is an internal operation" };
+  if (containsInternalIbInvocation(normalizedCommand)) {
+    return { decision: "deny", reason: "Access denied: ib lifecycle dispatch is an internal operation" };
   }
+
+  // @system has system-wide relationship authority, but cannot invoke the
+  // internal lifecycle entry points above through its Bash tool. Legitimate
+  // launch helpers call those commands directly and never enter PreToolUse.
+  if (callingAgentId === SYSTEM_AGENT_ID) return null;
 
   // Bash(ib:*) must represent one shell command.  Otherwise a permitted
   // `ib send ...` can append a second lifecycle/internal command after `;`,

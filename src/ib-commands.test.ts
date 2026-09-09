@@ -119,6 +119,7 @@ import {
   setSandboxRefreshPauseForTesting,
   teamAdd,
   writeMetaJsonAtomic,
+  buildClaudePidBootstrapCommand,
 } from "./ib-commands";
 import { sealPath, readSealRecord, computeSealInputs, computeSealRecord, verifyMetaAgainstSeal, writeSealRecordDirect } from "./agent-seal";
 import {
@@ -161,6 +162,36 @@ function makeAgent(
   });
   return meta ? { ...agent, meta: { ...agent.meta, ...meta } } : agent;
 }
+
+describe("Claude PID bootstrap", () => {
+  test("records the exact launch child before exec and preserves its PID", async () => {
+    const root = await mkdtemp(join(tmpdir(), "claude-pid-bootstrap-"));
+    try {
+      const binDir = join(root, "bin");
+      const recordedPid = join(root, "recorded-pid");
+      const execPid = join(root, "exec-pid");
+      const parentPid = join(root, "parent-pid");
+      await mkdir(binDir, { recursive: true });
+      await Bun.write(join(binDir, "ib"), `#!/bin/sh\ntest "$1" = write-pid || exit 8\nprintf '%s' "$3" > '${recordedPid}'\n`);
+      await Bun.write(join(binDir, "claude"), `#!/bin/sh\ntest -f '${recordedPid}' || exit 9\nprintf '%s' "$$" > '${execPid}'\n`);
+      await chmod(join(binDir, "ib"), 0o755);
+      await chmod(join(binDir, "claude"), 0o755);
+      const bootstrap = buildClaudePidBootstrapCommand("agent-bootstrap", "claude");
+      const proc = Bun.spawn(["/bin/sh", "-c", `${bootstrap} & child=$!\nprintf '%s' "$child" > '${parentPid}'\nwait "$child"`], {
+        env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin` },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const stderr = await new Response(proc.stderr).text();
+      expect(await proc.exited).toBe(0);
+      expect(stderr).toBe("");
+      expect(await Bun.file(recordedPid).text()).toBe(await Bun.file(parentPid).text());
+      expect(await Bun.file(execPid).text()).toBe(await Bun.file(parentPid).text());
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("ib-commands", () => {
   // nukeAgent, nukeAllAgents, resumeAgent are now native — tested in dedicated describe blocks below
@@ -6304,17 +6335,13 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const agentDir = join(agentsDir, id);
     const start = await Bun.file(join(agentDir, "start.sh")).text();
     const isolatedSettingsPath = join(agentDir, ".claude", "settings.local.json");
-    const hookTokenPath = join(agentDir, ".hook-auth-token");
-    const spawnHookToken = await Bun.file(hookTokenPath).text();
     expect(start).not.toContain("--permission-mode");
     expect(start).not.toContain("--dangerously-skip-permissions");
     expect(start).toContain(`--settings '${isolatedSettingsPath}'`);
-    expect(spawnHookToken).toMatch(/^[0-9a-f]{64}$/);
-    expect(start).toContain(`HOOK_AUTH_FILE='${hookTokenPath}'`);
-    expect(start.indexOf("export ITSYBITSY_HOOK_AUTH_TOKEN=\"$HOOK_AUTH_TOKEN\"")).toBeLessThan(
-      start.indexOf("if command -v setsid"),
-    );
-    expect(start.indexOf("CLAUDE_PID=$!")).toBeLessThan(start.indexOf("ib write-pid"));
+    expect(start).toContain("/bin/sh -c");
+    expect(start.indexOf("ib write-pid")).toBeLessThan(start.indexOf("exec claude"));
+    expect(start).not.toContain("ib write-pid disabled-no-worktree \"$CLAUDE_PID\"");
+    expect(await Bun.file(join(agentDir, ".hook-auth-token")).exists()).toBe(false);
     expect(await Bun.file(settingsPath).text()).toBe(originalSharedSettings);
     const isolated = await Bun.file(isolatedSettingsPath).json();
     expect(isolated.permissions.allow).toContain("Bash(ib:*)");
@@ -6339,16 +6366,12 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       resetSendSpawnRunner();
     }
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
-    const resumeHookToken = await Bun.file(hookTokenPath).text();
     expect(resume).not.toContain("--permission-mode");
     expect(resume).not.toContain("--dangerously-skip-permissions");
     expect(resume).toContain(`--settings '${isolatedSettingsPath}'`);
-    expect(resumeHookToken).toMatch(/^[0-9a-f]{64}$/);
-    expect(resumeHookToken).not.toBe(spawnHookToken);
-    expect(resume.indexOf("export ITSYBITSY_HOOK_AUTH_TOKEN=\"$HOOK_AUTH_TOKEN\"")).toBeLessThan(
-      resume.indexOf("if command -v setsid"),
-    );
-    expect(resume.indexOf("CLAUDE_PID=$!")).toBeLessThan(resume.indexOf("ib write-pid"));
+    expect(resume).toContain("/bin/sh -c");
+    expect(resume.indexOf("ib write-pid")).toBeLessThan(resume.indexOf("exec claude"));
+    expect(resume).not.toContain("ib write-pid disabled-no-worktree \"$CLAUDE_PID\"");
     expect(await Bun.file(settingsPath).text()).toBe(originalSharedSettings);
     const migrated = await Bun.file(isolatedSettingsPath).json();
     expect(migrated.hooks.SessionStart[0].hooks[0].command).toBe(`ib hooks session-start ${id}`);
@@ -9849,7 +9872,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const coordinatorStart = await Bun.file(join(coordRepo, ".ittybitty", "agents", "myrepo", "start.sh")).text();
     expect(coordinatorStart.indexOf("ib sandbox-log-watch")).toBeGreaterThan(0);
     expect(coordinatorStart.indexOf("ib sandbox-log-watch")).toBeLessThan(coordinatorStart.indexOf("setsid /bin/sh -c"));
-    expect(coordinatorStart.match(/sandbox-log-gate '\/usr\/bin\/sandbox-exec'/g)?.length).toBe(2);
+    expect(coordinatorStart.match(/sandbox-log-gate/g)?.length).toBe(2);
 
     const coordId = result.stdout.trim();
     const meta = await Bun.file(join(coordRepo, ".ittybitty", "agents", coordId, "meta.json")).json();
@@ -10699,6 +10722,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(isolated.hooks.UserPromptSubmit[1].hooks[0].command).toBe("ib hooks inject-timestamp test-no-wt-perm");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
     expect(start).toContain(`--settings '${isolatedSettingsPath}'`);
+    expect(start).toContain("/bin/sh -c");
+    expect(start.indexOf("ib write-pid")).toBeLessThan(start.indexOf("\nexec "));
+    expect(start).not.toContain("ITSYBITSY_HOOK_AUTH_TOKEN");
   });
 
   test("start.sh shell-quotes paths to handle spaces and special chars", async () => {

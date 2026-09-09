@@ -1628,8 +1628,8 @@ describe("checkIbCommandAccess", () => {
     expect(continued?.decision).toBe("deny");
   });
 
-  test("system helper identity may invoke internal sandbox seal", async () => {
-    expect(await checkIbCommandAccess("ib sandbox seal agent-target1", "@system", agentsDir)).toBeNull();
+  test("system agent Bash cannot invoke internal sandbox seal", async () => {
+    expect((await checkIbCommandAccess("ib sandbox seal agent-target1", "@system", agentsDir))?.decision).toBe("deny");
   });
 
   test("agents cannot invoke internal hook dispatch under another identity", async () => {
@@ -1646,6 +1646,14 @@ describe("checkIbCommandAccess", () => {
       "ib hook-mark-running @system",
       "ib hook-permission-denied @system",
       "ib hooks session-start @system",
+      "/usr/local/bin/ib hooks session-start agent-target1",
+      "command ib hook-status agent-target1",
+      "ib write-pid agent-target1 123",
+      "ib write-proxy-pid agent-target1 123 4567",
+      "ib sandbox-log-watch --dir /tmp/x",
+      "ib sandbox-log-stream --predicate foo",
+      "ib sandbox-proxy-launch --port 4567",
+      "ib sandbox-proxy --port 4567",
     ]) {
       const result = await checkIbCommandAccess(command, "agent-caller1", agentsDir);
       expect(result?.decision).toBe("deny");
@@ -2730,6 +2738,36 @@ describe("hookCheckPath writes state='running' to meta.json", () => {
     expect(meta.state).toBe("running");
   });
 
+  test("duplicate registered ids bind path policy and state to the matching worktree cwd", async () => {
+    const otherRepo = await mkdtemp(join(tmpdir(), "duplicate-worktree-hook-"));
+    try {
+      const otherAgentDir = join(otherRepo, ".ittybitty", "agents", "agent-test99");
+      const otherWorktree = join(otherAgentDir, "repo");
+      await mkdir(join(otherWorktree, ".claude"), { recursive: true });
+      await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+        id: "agent-test99", state: "waiting", worktree: true,
+      }));
+      await Bun.write(join(otherAgentDir, "meta.json"), JSON.stringify({
+        id: "agent-test99", state: "waiting", worktree: true,
+      }));
+      await Bun.write(join(otherWorktree, ".claude", "settings.local.json"), JSON.stringify({
+        permissions: { allow: ["Read"], deny: [] },
+      }));
+      setNoWorktreeRepoRootsLoader(async () => [tempDir, otherRepo]);
+
+      await hookCheckPath("agent-test99", JSON.stringify({
+        tool_name: "Read",
+        tool_input: { file_path: join(otherWorktree, "any.txt") },
+        cwd: otherWorktree,
+      }));
+
+      expect((await Bun.file(join(otherAgentDir, "meta.json")).json()).state).toBe("running");
+      expect((await Bun.file(join(agentDir, "meta.json")).json()).state).toBe("waiting");
+    } finally {
+      await rm(otherRepo, { recursive: true, force: true });
+    }
+  });
+
   test("flips state to 'running' even when the resolver DENIES the path", async () => {
     // writeAgentState runs before the path decision, so a present-meta agent
     // whose tool is denied still transitions waiting -> running.
@@ -2918,28 +2956,6 @@ describe("hookCheckPath with worktree:false agent settings", () => {
     const decision = JSON.parse(logged[0]!);
     expect(decision.hookSpecificOutput.permissionDecision).toBe("allow");
   });
-
-  for (const toolName of ["Read", "Write", "Bash"] as const) {
-    test(`${toolName} cannot access the launch authentication capability`, async () => {
-      const tokenPath = join(agentDir, ".hook-auth-token");
-      await writeFile(tokenPath, "a".repeat(64));
-      await writeFile(
-        join(agentDir, ".claude", "settings.local.json"),
-        JSON.stringify({ permissions: { allow: ["Read", "Write", "Bash"], deny: [] } }),
-      );
-      await hookCheckPath("agent-shared", JSON.stringify({
-        tool_name: toolName,
-        tool_input: toolName === "Bash"
-          ? { command: `cat ${tokenPath}` }
-          : { file_path: tokenPath },
-        cwd: repo,
-      }));
-
-      const decision = JSON.parse(logged[0]!);
-      expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
-      expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("other agents");
-    });
-  }
 
   for (const [toolName, toolInput] of [
     ["Read", { file_path: "meta.json" }],

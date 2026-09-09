@@ -85,7 +85,6 @@ import {
 } from "./settings-builder";
 import { listRepos, repoDisplayName, type RepoEntry } from "./registry";
 import { resolveNoWorktreeCaller, type NoWorktreeCaller } from "./no-worktree-caller";
-import { HOOK_AUTH_TOKEN_ENV, HOOK_AUTH_TOKEN_FILE } from "./hooks/agent-context";
 import {
   type Team,
   normalizeTeamName,
@@ -2119,7 +2118,6 @@ export async function resumeAgent(
       // Worktree:false Claude agents cannot safely install agent-specific hooks
       // in the shared repository settings. Their isolated settings file is
       // passed explicitly on every spawn/resume (including coordinator rehire).
-      let hookAuthPreamble = "";
       if (agent.meta.worktree === false || agent.meta.agentType === "coordinator") {
         let isolatedSettings: string;
         try {
@@ -2129,8 +2127,6 @@ export async function resumeAgent(
             agent.id,
             agent.meta,
           );
-          const hookAuthPath = await writeHookAuthToken(agentDir);
-          hookAuthPreamble = hookAuthShellPreamble(hookAuthPath);
         } catch (err) {
           return {
             ok: false,
@@ -2143,6 +2139,17 @@ export async function resumeAgent(
           ? `${claudeArgs} --settings ${shellQuote(isolatedSettings)}`
           : `--settings ${shellQuote(isolatedSettings)}`;
       }
+
+      // Shared-repo hooks authenticate through the recorded Claude PID. Have
+      // the exact child that will exec into Claude record its own PID before
+      // exec, so SessionStart cannot race the parent script's write. /bin/sh,
+      // sandbox-exec, and Claude all replace one another in-place; $! remains
+      // the same process targeted by wait/signals and stored in metadata.
+      const usesPidBootstrap = agent.meta.worktree === false || agent.meta.agentType === "coordinator";
+      const resumeClaudeCommand = `${sandboxResumeLaunchPrefix}claude --resume "${sessionId}" ${claudeArgs}`;
+      const resumeLaunchCommand = usesPidBootstrap
+        ? buildClaudePidBootstrapCommand(agent.id, resumeClaudeCommand)
+        : resumeClaudeCommand;
 
       // Shell-quote all paths for safe interpolation
       const qAbsExitScript = shellQuote(absExitScript);
@@ -2159,7 +2166,7 @@ export CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
 
 AGENT_LOG=${qAgentLog}
 STDERR_LOG=${qResumeStderrLog}
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [resume.sh] $1" >> "$AGENT_LOG"; }${sandboxResumePreamble}${hookAuthPreamble}
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [resume.sh] $1" >> "$AGENT_LOG"; }${sandboxResumePreamble}
 
 log "Starting claude --resume ${sessionId} ${claudeArgs}"
 log "PWD=$(pwd) which_claude=$(which claude 2>&1)"
@@ -2186,27 +2193,27 @@ log "SIGHUP ignored (resume insulated from launcher pane teardown)"
 # bare launch. Fall back to a plain background launch on hosts lacking setsid
 # (e.g. macOS, where setsid is absent — the inherited SIG_IGN above covers it).
 : > "$STDERR_LOG"
-${hookAuthPreamble ? `export ${HOOK_AUTH_TOKEN_ENV}="$HOOK_AUTH_TOKEN"\n` : ""}if command -v setsid >/dev/null 2>&1; then
+if command -v setsid >/dev/null 2>&1; then
     SETSID=setsid
 else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid ${sandboxResumeLaunchPrefix}claude --resume "${sessionId}" ${claudeArgs} 2> "$STDERR_LOG" &
+    setsid ${resumeLaunchCommand} 2> "$STDERR_LOG" &
 else
-    ${sandboxResumeLaunchPrefix}claude --resume "${sessionId}" ${claudeArgs} 2> "$STDERR_LOG" &
+    ${resumeLaunchCommand} 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
-${hookAuthPreamble ? `unset ${HOOK_AUTH_TOKEN_ENV} HOOK_AUTH_TOKEN\n` : ""}log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
+log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
 trap 'log "script received SIGTERM; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' TERM
 trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; kill -INT $CLAUDE_PID 2>/dev/null' INT
 
 # Store PID in meta.json — route through "ib write-pid" which uses
 # mutateAgentMeta + the meta-lock (HIGH 2 from the Phase 4 review).
 META_JSON=${qMetaJson}
-if [[ -f "$META_JSON" ]]; then
+${usesPidBootstrap ? `# The launch child stored this exact PID before exec, so SessionStart could not race it.` : `if [[ -f "$META_JSON" ]]; then
     ib write-pid ${shellQuote(agent.id)} "$CLAUDE_PID" || log "write-pid failed (exit=$?); meta.json claude_pid not set"
-fi
+fi`}
 
 # Wait for Claude to complete
 wait $CLAUDE_PID
@@ -5846,28 +5853,12 @@ async function ensureIsolatedClaudeSettings(
 }
 
 /**
- * Mint the launch capability inherited by no-worktree Claude hooks. The file
- * lives outside the shared repo and is unreachable through the agent path
- * policy; each spawn/resume replaces it before Claude starts.
+ * Wrap a Claude command so the process that will exec it records its own PID
+ * first. Both /bin/sh and the optional sandbox wrappers exec in place, keeping
+ * the recorded PID identical to the parent script's $! and the final CLI.
  */
-async function writeHookAuthToken(agentDir: string): Promise<string> {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  const token = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  const tokenPath = join(agentDir, HOOK_AUTH_TOKEN_FILE);
-  await Bun.write(tokenPath, token);
-  await chmod(tokenPath, 0o600);
-  return tokenPath;
-}
-
-function hookAuthShellPreamble(tokenPath: string): string {
-  return `
-HOOK_AUTH_FILE=${shellQuote(tokenPath)}
-HOOK_AUTH_TOKEN="$(<\"$HOOK_AUTH_FILE\")"
-if [[ ! "$HOOK_AUTH_TOKEN" =~ ^[0-9a-f]{64}$ ]]; then
-    log "invalid hook authentication capability"
-    exit 1
-fi`;
+export function buildClaudePidBootstrapCommand(agentId: string, claudeCommand: string): string {
+  return `/bin/sh -c ${shellQuote(`ib write-pid ${shellQuote(agentId)} "$$" || exit 1\nexec ${claudeCommand}`)}`;
 }
 
 /**
@@ -7512,9 +7503,6 @@ echo ""
         preparedSandbox.sandboxExecPath,
       ))} `
     : "";
-  const hookAuthPreamble = agentCli === "claude" && !useWorktree
-    ? hookAuthShellPreamble(await writeHookAuthToken(agentDir))
-    : "";
 
   let startContent: string;
   if (isCodexBackedCli(agentCli)) {
@@ -7576,6 +7564,11 @@ echo ""
       sandboxExecPrefix: preparedSandbox ? sandboxLaunchPrefix.trimEnd() : undefined,
     });
   } else {
+    const usesPidBootstrap = !useWorktree;
+    const claudeCommand = `${sandboxLaunchPrefix}claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})"`;
+    const claudeLaunchCommand = usesPidBootstrap
+      ? buildClaudePidBootstrapCommand(id, claudeCommand)
+      : claudeCommand;
     startContent = `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
@@ -7584,7 +7577,7 @@ export CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
 
 AGENT_LOG=${qStartAgentLog}
 STDERR_LOG=${qStartStderrLog}
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }${sandboxStartPreamble}${hookAuthPreamble}
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }${sandboxStartPreamble}
 
 log "Starting claude --session-id ${sessionUuid} ${claudeArgs}"
 log "PWD=$(pwd) which_claude=$(which claude 2>&1)"
@@ -7611,18 +7604,18 @@ log "SIGHUP ignored (spawn insulated from launcher pane teardown)"
 # bare launch. Fall back to a plain background launch on hosts lacking setsid
 # (e.g. macOS, where setsid is absent — the inherited SIG_IGN above covers it).
 : > "$STDERR_LOG"
-${hookAuthPreamble ? `export ${HOOK_AUTH_TOKEN_ENV}="$HOOK_AUTH_TOKEN"\n` : ""}if command -v setsid >/dev/null 2>&1; then
+if command -v setsid >/dev/null 2>&1; then
     SETSID=setsid
 else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid ${sandboxLaunchPrefix}claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})" 2> "$STDERR_LOG" &
+    setsid ${claudeLaunchCommand} 2> "$STDERR_LOG" &
 else
-    ${sandboxLaunchPrefix}claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})" 2> "$STDERR_LOG" &
+    ${claudeLaunchCommand} 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
-${hookAuthPreamble ? `unset ${HOOK_AUTH_TOKEN_ENV} HOOK_AUTH_TOKEN\n` : ""}log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
+log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
 trap 'log "script received SIGTERM; sending SIGTERM to Claude PID=$CLAUDE_PID"; kill $CLAUDE_PID 2>/dev/null' TERM
 trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; kill -INT $CLAUDE_PID 2>/dev/null' INT
 
@@ -7633,9 +7626,9 @@ trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; ki
 # whose symptom is benign on claude today but matters symmetrically with
 # the codex side (HIGH 2 from the Phase 4 review).
 META_JSON=${qStartMetaJson}
-if [[ -f "$META_JSON" ]]; then
+${usesPidBootstrap ? `# The launch child stored this exact PID before exec, so SessionStart could not race it.` : `if [[ -f "$META_JSON" ]]; then
     ib write-pid ${shellQuote(id)} "$CLAUDE_PID" || log "write-pid failed (exit=$?); meta.json claude_pid not set"
-fi
+fi`}
 
 # Wait for Claude to complete
 wait $CLAUDE_PID

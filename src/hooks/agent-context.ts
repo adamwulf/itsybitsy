@@ -14,7 +14,6 @@
 import { isAbsolute, join, resolve } from "path";
 import { realpath } from "fs/promises";
 import { userInfo } from "os";
-import { timingSafeEqual } from "crypto";
 import { isValidAgentId } from "../validation";
 import { resolveNoWorktreeCaller, type NoWorktreeCaller } from "../no-worktree-caller";
 
@@ -55,26 +54,6 @@ export interface RegisteredAgentContext {
 
 export interface BoundHookAgentContext extends RegisteredAgentContext {
   worktreePath: string;
-}
-
-export const HOOK_AUTH_TOKEN_FILE = ".hook-auth-token";
-export const HOOK_AUTH_TOKEN_ENV = "ITSYBITSY_HOOK_AUTH_TOKEN";
-
-async function matchesHookAuthToken(
-  agentDir: string,
-  suppliedToken: string | null | undefined,
-): Promise<boolean> {
-  if (!suppliedToken || !/^[0-9a-f]{64}$/.test(suppliedToken)) return false;
-  let expectedToken: string;
-  try {
-    expectedToken = await Bun.file(join(agentDir, HOOK_AUTH_TOKEN_FILE)).text();
-  } catch {
-    return false;
-  }
-  if (!/^[0-9a-f]{64}$/.test(expectedToken)) return false;
-  const supplied = Buffer.from(suppliedToken, "utf8");
-  const expected = Buffer.from(expectedToken, "utf8");
-  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }
 
 async function registeredRepoRoots(registryHome: string): Promise<string[]> {
@@ -124,6 +103,17 @@ export async function resolveRegisteredAgentById(
   agentId: string,
   deps: FindNoWorktreeAgentsDirDeps = {},
 ): Promise<RegisteredAgentContext | null> {
+  const matches = await registeredAgentCandidatesById(agentId, deps);
+  if (matches.length > 1) {
+    throw new Error(`Cannot resolve registered agent '${agentId}': ambiguous records`);
+  }
+  return matches[0] ?? null;
+}
+
+async function registeredAgentCandidatesById(
+  agentId: string,
+  deps: FindNoWorktreeAgentsDirDeps,
+): Promise<RegisteredAgentContext[]> {
   if (!isValidAgentId(agentId)) {
     throw new Error(`Cannot resolve registered agent: invalid id '${agentId}'`);
   }
@@ -167,10 +157,7 @@ export async function resolveRegisteredAgentById(
     }
   }
 
-  if (matches.length > 1) {
-    throw new Error(`Cannot resolve registered agent '${agentId}': ambiguous records`);
-  }
-  return matches[0] ?? null;
+  return matches;
 }
 
 /** Backward-compatible narrow lookup used by worktree:false hook handlers. */
@@ -193,64 +180,68 @@ export async function resolveBoundHookAgent(
   cwd: string,
   deps: FindNoWorktreeAgentsDirDeps & {
     noWorktreeCallerResolver?: BoundNoWorktreeCallerResolver;
-    /** Test-only override; production reads the launch capability from env. */
-    hookAuthToken?: string | null;
   } = {},
 ): Promise<BoundHookAgentContext> {
-  const registered = await resolveRegisteredAgentById(agentId, deps);
-  if (!registered) {
+  const candidates = await registeredAgentCandidatesById(agentId, deps);
+  if (candidates.length === 0) {
     throw new Error(`Cannot authenticate hook agent '${agentId}': no registered record`);
   }
 
-  if (registered.meta.worktree === false) {
-    // The launch-owned capability covers the two lifecycle windows in which
-    // PID ancestry cannot: SessionStart may run before `ib write-pid`, and Stop
-    // may run after the recorded Claude process begins exiting. Each launch
-    // rewrites a random per-agent token before Claude starts. A sibling's token
-    // cannot authenticate this registered agent id.
-    const suppliedToken = Object.prototype.hasOwnProperty.call(deps, "hookAuthToken")
-      ? deps.hookAuthToken
-      : process.env[HOOK_AUTH_TOKEN_ENV];
-    if (await matchesHookAuthToken(registered.agentDir, suppliedToken)) {
-      return { ...registered, worktreePath: registered.repoPath };
-    }
-
+  // Process ancestry is stronger evidence than cwd shape. Resolve it first so
+  // a shared-repo agent that enters a path resembling another registered
+  // worktree cannot be rebound to that filesystem record.
+  if (candidates.some((candidate) => candidate.meta.worktree === false)) {
     const caller = await (
       deps.noWorktreeCallerResolver ??
       boundNoWorktreeCallerResolverOverride ??
       resolveNoWorktreeCaller
     )(cwd);
-    if (!caller || caller.meta.id !== agentId) {
+    if (caller && caller.meta.id === agentId) {
+      let callerDir: string;
+      try {
+        callerDir = await realpath(caller.agentDir);
+      } catch {
+        throw new Error(`Cannot authenticate hook agent '${agentId}': invalid shared-repo caller`);
+      }
+      const matchingNoWorktree = candidates.filter(
+        (candidate) => candidate.meta.worktree === false && candidate.agentDir === callerDir,
+      );
+      if (matchingNoWorktree.length === 1) {
+        const registered = matchingNoWorktree[0]!;
+        return { ...registered, worktreePath: registered.repoPath };
+      }
       throw new Error(`Cannot authenticate hook agent '${agentId}': process belongs to another agent`);
     }
-    let callerDir: string;
-    let registeredDir: string;
-    try {
-      callerDir = await realpath(caller.agentDir);
-      registeredDir = await realpath(registered.agentDir);
-    } catch {
-      throw new Error(`Cannot authenticate hook agent '${agentId}': invalid shared-repo caller`);
-    }
-    if (
-      callerDir !== registeredDir
-    ) {
+    if (caller) {
       throw new Error(`Cannot authenticate hook agent '${agentId}': process belongs to another agent`);
     }
-    return { ...registered, worktreePath: registered.repoPath };
   }
 
-  let worktreePath: string;
   let canonicalCwd: string;
   try {
-    worktreePath = await realpath(join(registered.agentDir, "repo"));
     canonicalCwd = await realpath(cwd);
   } catch {
     throw new Error(`Cannot authenticate hook agent '${agentId}': invalid worktree context`);
   }
-  if (canonicalCwd !== worktreePath && !canonicalCwd.startsWith(worktreePath + "/")) {
-    throw new Error(`Cannot authenticate hook agent '${agentId}': cwd is outside its worktree`);
+
+  const worktreeMatches: BoundHookAgentContext[] = [];
+  for (const registered of candidates) {
+    if (registered.meta.worktree === false) continue;
+    let worktreePath: string;
+    try {
+      worktreePath = await realpath(join(registered.agentDir, "repo"));
+    } catch {
+      continue;
+    }
+    if (canonicalCwd === worktreePath || canonicalCwd.startsWith(worktreePath + "/")) {
+      worktreeMatches.push({ ...registered, worktreePath });
+    }
   }
-  return { ...registered, worktreePath };
+  if (worktreeMatches.length === 1) return worktreeMatches[0]!;
+  if (worktreeMatches.length > 1) {
+    throw new Error(`Cannot authenticate hook agent '${agentId}': ambiguous registered context`);
+  }
+  throw new Error(`Cannot authenticate hook agent '${agentId}': cwd is outside its worktree`);
 }
 
 /**

@@ -9,6 +9,12 @@ import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { ensureAgentTypesDir } from "../agent-types";
 import { createTeam, addMember } from "../teams";
 import { setUserHome, resetUserHome } from "../home";
+import {
+  resetBoundNoWorktreeCallerResolver,
+  resetNoWorktreeRepoRootsLoader,
+  setBoundNoWorktreeCallerResolver,
+  setNoWorktreeRepoRootsLoader,
+} from "./agent-context";
 
 /**
  * Per-process itsybitsy home for the whole file.
@@ -762,10 +768,13 @@ describe("hookSessionStart — stale 'creating' state correction", () => {
     // Silence process.stdout.write — the hook emits a JSON blob.
     originalWrite = process.stdout.write.bind(process.stdout);
     process.stdout.write = ((..._args: unknown[]) => true) as typeof process.stdout.write;
+    setNoWorktreeRepoRootsLoader(async () => [tempDir]);
   });
 
   afterEach(async () => {
     process.stdout.write = originalWrite;
+    resetNoWorktreeRepoRootsLoader();
+    resetBoundNoWorktreeCallerResolver();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -824,9 +833,15 @@ describe("hookSessionStart — stale 'creating' state correction", () => {
         id: agentId,
         manager: null,
         agentType: "coordinator",
+        worktree: false,
         state: "creating",
       }),
     );
+    setBoundNoWorktreeCallerResolver(async () => ({
+      meta: await Bun.file(join(agentDir, "meta.json")).json(),
+      agentDir,
+      repoPath: tempDir,
+    }));
     const stdin = JSON.stringify({ cwd: tempDir });
     await hookSessionStart(stdin, agentId);
     const state = await readAgentState(agentDir);
@@ -847,6 +862,11 @@ describe("hookSessionStart — stale 'creating' state correction", () => {
       agentType: "worker",
       state: "waiting",
     }));
+    setBoundNoWorktreeCallerResolver(async () => ({
+      meta: await Bun.file(join(agentDir, "meta.json")).json(),
+      agentDir,
+      repoPath: tempDir,
+    }));
     let captured = "";
     process.stdout.write = ((chunk: unknown) => {
       captured += String(chunk);
@@ -858,6 +878,86 @@ describe("hookSessionStart — stale 'creating' state correction", () => {
     const output = JSON.parse(captured);
     expect(output.hookSpecificOutput.additionalContext).toContain(`You are worker agent \`${agentId}\``);
     expect(output.hookSpecificOutput.additionalContext).toContain("Your manager agent is: agent-parent");
+  });
+
+  test("explicit id cannot claim a sibling or mutate its startup state", async () => {
+    const agentA = "agent-real-a";
+    const agentB = "agent-claimed-b";
+    const agentDirA = join(tempDir, ".ittybitty", "agents", agentA);
+    const agentDirB = join(tempDir, ".ittybitty", "agents", agentB);
+    await mkdir(agentDirA, { recursive: true });
+    await mkdir(agentDirB, { recursive: true });
+    const metaA = { id: agentA, worker: true, worktree: false, state: "running" };
+    await Bun.write(join(agentDirA, "meta.json"), JSON.stringify(metaA));
+    await Bun.write(join(agentDirB, "meta.json"), JSON.stringify({
+      id: agentB,
+      worker: false,
+      worktree: false,
+      state: "creating",
+    }));
+    setBoundNoWorktreeCallerResolver(async () => ({ meta: metaA, agentDir: agentDirA, repoPath: tempDir }));
+
+    await expect(hookSessionStart(JSON.stringify({ cwd: tempDir }), agentB)).rejects.toThrow("another agent");
+    expect(await readAgentState(agentDirB)).toBe("creating");
+  });
+
+  test("duplicate registered ids use verified no-worktree process evidence", async () => {
+    const otherRepo = await mkdtemp(join(tmpdir(), "duplicate-session-start-"));
+    try {
+      const agentId = "agent-duplicate";
+      const agentDirA = join(tempDir, ".ittybitty", "agents", agentId);
+      const agentDirB = join(otherRepo, ".ittybitty", "agents", agentId);
+      await mkdir(agentDirA, { recursive: true });
+      await mkdir(agentDirB, { recursive: true });
+      await Bun.write(join(agentDirA, "meta.json"), JSON.stringify({
+        id: agentId, worker: false, worktree: false, state: "waiting",
+      }));
+      const metaB = {
+        id: agentId,
+        manager: "agent-parent-b",
+        worker: true,
+        worktree: false,
+        agentType: "worker",
+        state: "waiting",
+      };
+      await Bun.write(join(agentDirB, "meta.json"), JSON.stringify(metaB));
+      setNoWorktreeRepoRootsLoader(async () => [tempDir, otherRepo]);
+      setBoundNoWorktreeCallerResolver(async () => ({ meta: metaB, agentDir: agentDirB, repoPath: otherRepo }));
+      let captured = "";
+      process.stdout.write = ((chunk: unknown) => {
+        captured += String(chunk);
+        return true;
+      }) as typeof process.stdout.write;
+
+      await hookSessionStart(JSON.stringify({ cwd: otherRepo }), agentId);
+
+      const output = JSON.parse(captured);
+      expect(output.hookSpecificOutput.additionalContext).toContain(`You are worker agent \`${agentId}\``);
+      expect(output.hookSpecificOutput.additionalContext).toContain("Your manager agent is: agent-parent-b");
+    } finally {
+      await rm(otherRepo, { recursive: true, force: true });
+    }
+  });
+
+  test("standalone forged explicit-id cwd supplies no startup authority", async () => {
+    const forgedRoot = await mkdtemp(join(tmpdir(), "forged-session-start-"));
+    try {
+      const agentId = "agent-forged";
+      const agentDir = join(forgedRoot, ".ittybitty", "agents", agentId);
+      await mkdir(agentDir, { recursive: true });
+      await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+        id: agentId,
+        worker: false,
+        worktree: false,
+        state: "creating",
+      }));
+      setBoundNoWorktreeCallerResolver(async () => null);
+
+      await expect(hookSessionStart(JSON.stringify({ cwd: forgedRoot }), agentId)).rejects.toThrow("no registered record");
+      expect(await readAgentState(agentDir)).toBe("creating");
+    } finally {
+      await rm(forgedRoot, { recursive: true, force: true });
+    }
   });
 
   test("missing meta.json is a no-op (does not crash)", async () => {

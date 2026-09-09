@@ -683,7 +683,7 @@ function checkRelativeTraversalPaths(
 // ── Advisory Bash path scanner (SPEC-PATH-ALLOWLIST.md §6.6) ──────────────────
 
 /** Verbs whose every path-looking argument is a WRITE target. */
-const BASH_WRITE_ALL_ARGS = new Set(["mkdir", "touch", "rm", "rmdir", "chmod"]);
+const BASH_WRITE_ALL_ARGS = new Set(["mkdir", "touch", "rm", "rmdir", "chmod", "ln"]);
 
 /**
  * The deny reason for a path-looking Bash token that carries shell
@@ -806,8 +806,8 @@ function bashLiteralDirPrefix(absPath: string): string {
  *
  * Operation class (SPEC §6.11 item 8): a redirect target (`>`/`>>`/`1>`/`2>`/
  * `&>`/`>|`, glued or separate), a `sed -i` / `--in-place` argument, a `tee`
- * argument, the last argument of `cp`/`mv`, and every argument of `mkdir`,
- * `touch`, `rm`, `rmdir`, `chmod` are WRITES; every other path-looking token is
+ * argument, the last argument of `cp`, every argument of `mv`/`ln`, and every
+ * argument of `mkdir`, `touch`, `rm`, `rmdir`, `chmod` are WRITES; every other path-looking token is
  * a READ. The protected-file guard (checkBashSettingsWrite) already ran first.
  */
 function scanBashCommandPaths(

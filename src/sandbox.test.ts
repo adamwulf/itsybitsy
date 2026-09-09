@@ -442,6 +442,8 @@ test("LIVE macOS profile protects trusted seal-helper results while ordinary tmp
   const newResultDir = `/private/tmp/${SEAL_HELPER_RESULT_PREFIX}${crypto.randomUUID()}`;
   const movedResultDir = `${resultDir}-moved`;
   const sibling = `/private/tmp/ib-seal-helper-ordinary-${crypto.randomUUID()}`;
+  const hardLinkAlias = `/private/tmp/ib-seal-helper-alias-${crypto.randomUUID()}`;
+  const symlinkAlias = `/private/tmp/ib-seal-helper-symlink-${crypto.randomUUID()}`;
   await mkdir(resultDir, { mode: 0o700 });
   await writeFile(join(resultDir, "output"), "trusted");
   await writeFile(join(resultDir, "result"), "0\n");
@@ -460,6 +462,11 @@ test("LIVE macOS profile protects trusted seal-helper results while ordinary tmp
       `rm -f '${join(resultDir, "output")}' 2>/dev/null; printf 'unlink_output=%s\\n' "$?"`,
       `rm -f '${join(resultDir, "result")}' 2>/dev/null; printf 'unlink_result=%s\\n' "$?"`,
       `mv '${resultDir}' '${movedResultDir}' 2>/dev/null; printf 'rename=%s\\n' "$?"`,
+      `ln '${join(resultDir, "output")}' '${hardLinkAlias}' 2>/dev/null; printf 'hardlink=%s\\n' "$?"`,
+      `test -e '${hardLinkAlias}'; printf 'hardlink_exists=%s\\n' "$?"`,
+      `ln -s '${join(resultDir, "output")}' '${symlinkAlias}' 2>/dev/null; printf 'symlink=%s\\n' "$?"`,
+      `test -L '${symlinkAlias}'; printf 'symlink_exists=%s\\n' "$?"`,
+      `if [ -L '${symlinkAlias}' ]; then printf forged > '${symlinkAlias}'; fi`,
       `printf ordinary > '${sibling}' 2>/dev/null; printf 'sibling=%s\\n' "$?"`,
     ].join("; ");
     const probe = Bun.spawnSync({
@@ -474,17 +481,23 @@ test("LIVE macOS profile protects trusted seal-helper results while ordinary tmp
     expect(fields.read).toBe("trusted");
     for (const operation of [
       "mkdir", "overwrite_output", "overwrite_result", "create",
-      "unlink_output", "unlink_result", "rename",
+      "unlink_output", "unlink_result", "rename", "hardlink", "hardlink_exists", "symlink", "symlink_exists",
     ]) {
       expect(fields[operation]).not.toBe("0");
     }
     expect(fields.sibling).toBe("0");
     expect(await readFile(join(resultDir, "output"), "utf8")).toBe("trusted");
+    expect(fields.hardlink).not.toBe("0");
+    expect(fields.hardlink_exists).not.toBe("0");
+    expect(fields.symlink).not.toBe("0");
+    expect(fields.symlink_exists).not.toBe("0");
   } finally {
     await rm(resultDir, { recursive: true, force: true });
     await rm(newResultDir, { recursive: true, force: true });
     await rm(movedResultDir, { recursive: true, force: true });
     await rm(sibling, { force: true });
+    await rm(hardLinkAlias, { force: true });
+    await rm(symlinkAlias, { force: true });
   }
 });
 

@@ -7285,12 +7285,12 @@ echo ""
 
   let startContent: string;
   if (isCodexBackedCli(agentCli)) {
-    // Codex spawn branch — SPEC §6 Phase 4. The launch line is the canonical
-    // §3.3 form: `codex -m <model> [-a never -s danger-full-access]
-    // --dangerously-bypass-hook-trust <inline -c flags> "<prompt>"`. Native
-    // approval/sandbox overrides appear only when our Seatbelt wrapper supplies
-    // the outer boundary. The path-safety + dispatcher precheck guarantees
-    // ran above (we wouldn't be here on failure). PID variable + meta-field stay
+    // Codex spawn branch — the builder owns Codex's native approval/sandbox
+    // arguments in both kernel modes. Sandbox disablement removes only our
+    // Seatbelt wrapper; Codex keeps its native workspace-write sandbox while
+    // inline hooks remain the tool-policy authority. The path-safety and
+    // dispatcher precheck guarantees ran above (we wouldn't be here on
+    // failure). PID variable + meta-field stay
     // `CLAUDE_PID` / `claude_pid` so the watchdog and other readers don't break —
     // renaming is its own follow-up.
     const { buildCodexStartContent } = await import("./codex-spawn");
@@ -7314,16 +7314,14 @@ echo ""
       sandboxExecPrefix: preparedSandbox ? sandboxLaunchPrefix.trimEnd() : undefined,
     });
   } else if (agentCli === "agy") {
-    // Antigravity CLI (`agy`) spawn branch (SPEC-ANTIGRAVITY-CLI.md §4.5). The
-    // enabled-mode launch is the D2 form: `agy --dangerously-skip-permissions
-    // --mode=accept-edits [--model <slug>] [--effort <e>] --log-file`; disabled
-    // mode omits both approval overrides and retains agy's native defaults:
-    // `agy [--model <slug>] [--effort <e>] --log-file
-    // <agentDir>/agy.log -i "$(cat <prompt>)"`. The binary-path check + the
-    // worktree files, pre-trust, and dispatcher precheck all ran above (we
-    // wouldn't be here on failure). The effort D1 rule (pass --effort only for
-    // slugs without a trailing effort suffix) is applied inside the builder,
-    // as is the `agy:default` sentinel that omits both --model and --effort.
+    // Antigravity CLI (`agy`) spawn branch. The builder owns agy's no-prompt
+    // approval arguments in both kernel modes; sandbox disablement removes only
+    // our Seatbelt wrapper, while dispatcher hooks keep enforcing the generated
+    // tool policy. The binary-path check, worktree files, pre-trust, and
+    // dispatcher precheck all ran above (we wouldn't be here on failure). The
+    // effort rule (pass --effort only for slugs without a trailing effort
+    // suffix) is applied inside the builder, as is the `agy:default` sentinel
+    // that omits both --model and --effort.
     // PID variable + meta-field stay CLAUDE_PID / claude_pid so the watchdog
     // and other readers keep working.
     const { buildAgyStartContent } = await import("./agy-spawn");

@@ -98,6 +98,47 @@ export interface HookDecision {
   reason: string;
 }
 
+/**
+ * Locate a worktree:false agent from an arbitrary cwd inside its shared repo.
+ * Claude reports the tool cwd, which may be a nested directory, so appending
+ * `.ittybitty/agents` directly to it is not sufficient. Walk the bounded
+ * ancestor chain and retain the outermost matching agent. Choosing the
+ * outermost match prevents an agent from redirecting its hook to a nested,
+ * self-created `.ittybitty` directory with a forged permissive policy.
+ */
+async function findNoWorktreeAgentsDir(agentId: string, cwd: string): Promise<string | null> {
+  let cursor = resolve(cwd);
+  try {
+    cursor = await realpath(cursor);
+  } catch { /* retain the lexical cwd; the final meta lookup will fail closed */ }
+  let found: string | null = null;
+
+  while (true) {
+    const candidateAgentsDir = join(cursor, ".ittybitty", "agents");
+    const candidateMeta = Bun.file(join(candidateAgentsDir, agentId, "meta.json"));
+    try {
+      if (await candidateMeta.exists()) {
+        const meta = await candidateMeta.json();
+        if (
+          meta &&
+          typeof meta === "object" &&
+          !Array.isArray(meta) &&
+          meta.id === agentId &&
+          meta.worktree === false
+        ) {
+          found = candidateAgentsDir;
+        }
+      }
+    } catch { /* malformed candidates are ignored; the eventual lookup fails closed */ }
+
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+
+  return found;
+}
+
 // ── Pattern matching ─────────────────────────────────────────────────────────
 
 /**
@@ -1550,7 +1591,14 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
     // Resolve agent directory from cwd pattern
     // cwd is typically: .../.ittybitty/agents/{id}/repo/...
     const cwdMatch = cwd.match(/(.*\/.ittybitty\/agents)/);
-    agentsDir = resolve(cwdMatch ? cwdMatch[1]! : join(cwd, ".ittybitty", "agents"));
+    const discoveredNoWorktreeAgentsDir = cwdMatch
+      ? null
+      : await findNoWorktreeAgentsDir(agentId, cwd);
+    agentsDir = resolve(
+      cwdMatch
+        ? cwdMatch[1]!
+        : discoveredNoWorktreeAgentsDir ?? join(cwd, ".ittybitty", "agents"),
+    );
 
     agentDir = join(agentsDir, agentId);
     worktreePath = join(agentDir, "repo");

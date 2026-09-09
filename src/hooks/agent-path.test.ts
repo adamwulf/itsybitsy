@@ -2767,6 +2767,32 @@ describe("hookCheckPath with worktree:false agent settings", () => {
     expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
     expect(decision.hookSpecificOutput.permissionDecisionReason).toBe("Tool in deny list");
   });
+
+  test("resolves the outer agent boundary from a nested cwd", async () => {
+    const nested = join(repo, "packages", "feature");
+    const forgedAgentDir = join(nested, ".ittybitty", "agents", "agent-shared");
+    await mkdir(join(forgedAgentDir, ".claude"), { recursive: true });
+    await writeFile(join(forgedAgentDir, "meta.json"), JSON.stringify({
+      id: "agent-shared",
+      state: "waiting",
+      worktree: false,
+      paths: { allowRead: ["/"], allowWrite: ["/"], deny: [] },
+    }));
+    await writeFile(
+      join(forgedAgentDir, ".claude", "settings.local.json"),
+      JSON.stringify({ permissions: { allow: ["Read"], deny: [] } }),
+    );
+
+    await hookCheckPath("agent-shared", JSON.stringify({
+      tool_name: "Read",
+      tool_input: { file_path: join(repo, "tracked.txt") },
+      cwd: nested,
+    }));
+
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(decision.hookSpecificOutput.permissionDecisionReason).toBe("Tool in deny list");
+  });
 });
 
 // ── hookCheckPath deny-by-default (Phase B invariant) ────────────────────────

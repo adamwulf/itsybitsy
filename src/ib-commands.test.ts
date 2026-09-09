@@ -6738,7 +6738,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(spawnCalls.some((call) => call[0] === "codex")).toBe(false);
   });
 
-  test("sandbox-disabled Codex spawn keeps native protections and hooks but omits every kernel helper", async () => {
+  test("sandbox-disabled Codex spawn suppresses approvals, keeps workspace-write and hooks, and omits every kernel helper", async () => {
     await writeSandboxType("unsandboxed-codex", { enabled: false, model: "codex:gpt-5.4-mini" });
     setNewAgentSpawnRunner(cleanWorktreeRunner());
     setNewAgentSummaryGenerator(async () => {});
@@ -6748,8 +6748,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(result.ok).toBe(true);
     const agentDir = join(agentsDir, "unsandboxed-codex");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
-    expect(start).toContain("--dangerously-bypass-hook-trust");
-    expect(start).not.toContain("-a never");
+    expect(start).toContain("-a never -s workspace-write --dangerously-bypass-hook-trust");
     expect(start).not.toContain("-s danger-full-access");
     expect(start).not.toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(start).toContain("hooks.PreToolUse");
@@ -7106,7 +7105,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   });
 
   // ── A4 G2: ib sandbox refresh ──────────────────────────────────────────────
-  test("Codex refresh regenerates AGENTS.md from the new paths and sandbox state", async () => {
+  test("Codex refresh to disabled regenerates AGENTS.md and keeps no-prompt workspace-write hooks", async () => {
     const id = "codex-refresh-instructions";
     const oldRead = join(tempDir, "old-policy");
     const newRead = join(tempDir, "new-policy");
@@ -7150,9 +7149,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(resume).not.toContain("sandbox-exec");
     expect(resume).not.toContain("sandbox-proxy-launch");
     expect(resume).not.toContain("sandbox-log-watch");
-    expect(resume).toContain("--dangerously-bypass-hook-trust");
-    expect(resume).not.toContain("-a never");
+    expect(resume).toContain("-a never -s workspace-write --dangerously-bypass-hook-trust");
     expect(resume).not.toContain("-s danger-full-access");
+    expect(resume).toContain("hooks.PreToolUse");
     const refreshedMeta = await Bun.file(join(agentDir, "meta.json")).json();
     expect(refreshedMeta.sandbox.enabled).toBe(false);
     expect(refreshedMeta.sandbox_proxy_port).toBeUndefined();
@@ -7292,7 +7291,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(start).not.toContain("no kernel sandbox wrapper");
   });
 
-  test("sandbox-disabled agy spawn keeps native approvals and generated hooks but omits every kernel helper", async () => {
+  test("sandbox-disabled agy spawn suppresses approvals, keeps generated hooks, and omits every kernel helper", async () => {
     const id = "agy-unsandboxed";
     await writeSandboxType(id, { enabled: false, model: "agy:gemini-3.7-flash-low" });
     setNewAgentSummaryGenerator(async () => {});
@@ -7309,9 +7308,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const agentDir = join(agentsDir, id);
     const start = await Bun.file(join(agentDir, "start.sh")).text();
     const hooks = await Bun.file(join(agentDir, "repo", ".agents", "hooks.json")).text();
-    expect(start).toContain("agy --model 'gemini-3.7-flash-low'");
-    expect(start).not.toContain("--dangerously-skip-permissions");
-    expect(start).not.toContain("--mode=accept-edits");
+    expect(start).toContain("agy --dangerously-skip-permissions --mode=accept-edits --model 'gemini-3.7-flash-low'");
     expect(start).not.toContain("sandbox-exec");
     expect(start).not.toContain("sandbox-proxy-launch");
     expect(start).not.toContain("sandbox-log-watch");

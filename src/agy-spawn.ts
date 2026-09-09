@@ -161,7 +161,7 @@ export interface BuildAgyStartContentInput {
  * skeleton exactly (setsid + SIGHUP ignore + pid capture + meta-json write +
  * wait + exit-code annotation + exit-check) but launches agy with the D2 line:
  *
- *   agy [--dangerously-skip-permissions --mode=accept-edits] [--model <slug>] \
+ *   agy --dangerously-skip-permissions --mode=accept-edits [--model <slug>] \
  *       [--effort <e>] --log-file <agentDir>/agy.log -i "$(cat <prompt>)"
  *
  * The `--model`/`--effort` pair is omitted entirely for the `agy:default`

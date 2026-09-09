@@ -5960,6 +5960,15 @@ async function readCallerMetaFromCwd(cwd: string): Promise<ResolvedCallerContext
     if (!meta) return null;
     return { meta, agentDir: "", repoPath: "" };
   }
+
+  // A verified shared-repo process remains authoritative even if it enters a
+  // self-created worktree-shaped cwd. Resolve it before the structural
+  // fallback so forged metadata cannot upgrade a leaf to a manager.
+  const noWorktreeCaller = await (
+    noWorktreeCallerResolverOverride ?? resolveNoWorktreeCaller
+  )(cwd);
+  if (noWorktreeCaller) return noWorktreeCaller;
+
   const agentPattern = /\/\.ittybitty\/agents\/([^/]+)\/repo/;
   if (agentPattern.test(cwd)) {
     const callerDir = cwd.replace(/(\/\.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
@@ -5976,7 +5985,7 @@ async function readCallerMetaFromCwd(cwd: string): Promise<ResolvedCallerContext
     } catch { /* ignore */ }
     return null;
   }
-  return (noWorktreeCallerResolverOverride ?? resolveNoWorktreeCaller)(cwd);
+  return null;
 }
 
 export async function newAgent(
@@ -6136,7 +6145,7 @@ export async function newAgent(
     // Case 1: Worktree agent — CWD matches /.ittybitty/agents/<id>/repo
     const agentPattern = /\/.ittybitty\/agents\/([^/]+)\/repo/;
     const worktreeMatch = cwd.match(agentPattern);
-    if (worktreeMatch) {
+    if (!spawnedBy && worktreeMatch) {
       const spawnerDir = cwd.replace(/(\/.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
       try {
         const spawnerMeta = await Bun.file(join(spawnerDir, "meta.json")).json();

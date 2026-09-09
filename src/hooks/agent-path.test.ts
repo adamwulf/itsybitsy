@@ -8,6 +8,12 @@ import { setUserHome, resetUserHome } from "../home";
 import { parseDenials } from "../agents";
 import { canonicalizeSandboxPath, prepareAccessTable, resolvePreparedAccess, type PathsConfig, type PreparedAccessTable } from "../sandbox";
 import { agentPathAccessTable, claudeScratchpadDirFor } from "./paths-table";
+import {
+  resetBoundNoWorktreeCallerResolver,
+  resetNoWorktreeRepoRootsLoader,
+  setBoundNoWorktreeCallerResolver,
+  setNoWorktreeRepoRootsLoader,
+} from "./agent-context";
 
 const UID = process.getuid?.() ?? 0;
 
@@ -1626,6 +1632,27 @@ describe("checkIbCommandAccess", () => {
     expect(await checkIbCommandAccess("ib sandbox seal agent-target1", "@system", agentsDir)).toBeNull();
   });
 
+  test("agents cannot invoke internal hook dispatch under another identity", async () => {
+    for (const command of [
+      "ib hook-check-path agent-target1",
+      "ib hook-status agent-target1",
+      "ib hook-mark-running agent-target1",
+      "ib hook-permission-denied agent-target1",
+      "ib hooks session-start agent-target1",
+      "ib hooks intercept-task agent-target1",
+      "ib hooks inject-timestamp agent-target1",
+      "ib hook-check-path @system",
+      "ib hook-status @system",
+      "ib hook-mark-running @system",
+      "ib hook-permission-denied @system",
+      "ib hooks session-start @system",
+    ]) {
+      const result = await checkIbCommandAccess(command, "agent-caller1", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result?.reason).toContain("internal operation");
+    }
+  });
+
   test("denies agent-issued sandbox refresh, including refresh all", async () => {
     expect((await checkIbCommandAccess("ib sandbox refresh agent-target1", "agent-caller1", agentsDir))?.decision).toBe("deny");
     expect((await checkIbCommandAccess("ib sandbox refresh --all", "agent-caller1", agentsDir))?.decision).toBe("deny");
@@ -2676,18 +2703,20 @@ describe("hookCheckPath writes state='running' to meta.json", () => {
       join(worktreeCwd, ".claude", "settings.local.json"),
       JSON.stringify({ permissions: { allow: ["Read"], deny: [] } }),
     );
+    setNoWorktreeRepoRootsLoader(async () => [tempDir]);
     console.log = () => {};
   });
 
   afterEach(async () => {
     console.log = originalLog;
+    resetNoWorktreeRepoRootsLoader();
     await rm(tempDir, { recursive: true, force: true });
   });
 
   test("flips state from 'waiting' to 'running' on PreToolUse", async () => {
     await Bun.write(
       join(agentDir, "meta.json"),
-      JSON.stringify({ state: "waiting" }),
+      JSON.stringify({ id: "agent-test99", state: "waiting", worktree: true }),
     );
     const stdin = JSON.stringify({
       tool_name: "Read",
@@ -2706,7 +2735,7 @@ describe("hookCheckPath writes state='running' to meta.json", () => {
     // whose tool is denied still transitions waiting -> running.
     await Bun.write(
       join(agentDir, "meta.json"),
-      JSON.stringify({ state: "waiting", worker: true }),
+      JSON.stringify({ id: "agent-test99", state: "waiting", worker: true, worktree: true }),
     );
     const stdin = JSON.stringify({
       tool_name: "Read",
@@ -2747,12 +2776,20 @@ describe("hookCheckPath with worktree:false agent settings", () => {
       join(repo, ".claude", "settings.local.json"),
       JSON.stringify({ permissions: { allow: ["Read"], deny: [] } }),
     );
+    setNoWorktreeRepoRootsLoader(async () => [repo]);
+    setBoundNoWorktreeCallerResolver(async () => ({
+      meta: await Bun.file(join(agentDir, "meta.json")).json(),
+      agentDir,
+      repoPath: repo,
+    }));
     logged = [];
     console.log = (msg: string) => { logged.push(msg); };
   });
 
   afterEach(async () => {
     console.log = originalLog;
+    resetNoWorktreeRepoRootsLoader();
+    resetBoundNoWorktreeCallerResolver();
     await rm(repo, { recursive: true, force: true });
   });
 
@@ -2768,30 +2805,65 @@ describe("hookCheckPath with worktree:false agent settings", () => {
     expect(decision.hookSpecificOutput.permissionDecisionReason).toBe("Tool in deny list");
   });
 
-  test("resolves the outer agent boundary from a nested cwd", async () => {
+  test("outer no-worktree authority wins over a forged worktree-shaped cwd", async () => {
     const nested = join(repo, "packages", "feature");
     const forgedAgentDir = join(nested, ".ittybitty", "agents", "agent-shared");
-    await mkdir(join(forgedAgentDir, ".claude"), { recursive: true });
+    const forgedWorktree = join(forgedAgentDir, "repo");
+    await mkdir(join(forgedWorktree, ".claude"), { recursive: true });
     await writeFile(join(forgedAgentDir, "meta.json"), JSON.stringify({
       id: "agent-shared",
       state: "waiting",
-      worktree: false,
+      worktree: true,
       paths: { allowRead: ["/"], allowWrite: ["/"], deny: [] },
     }));
     await writeFile(
-      join(forgedAgentDir, ".claude", "settings.local.json"),
+      join(forgedWorktree, ".claude", "settings.local.json"),
       JSON.stringify({ permissions: { allow: ["Read"], deny: [] } }),
     );
 
     await hookCheckPath("agent-shared", JSON.stringify({
       tool_name: "Read",
       tool_input: { file_path: join(repo, "tracked.txt") },
-      cwd: nested,
+      cwd: forgedWorktree,
     }));
 
     const decision = JSON.parse(logged[0]!);
     expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
     expect(decision.hookSpecificOutput.permissionDecisionReason).toBe("Tool in deny list");
+  });
+
+  test("a standalone worktree-shaped same-id tree cannot redirect authority", async () => {
+    const standalone = await mkdtemp(join(tmpdir(), "standalone-worktree-hook-"));
+    try {
+      const standaloneAgentDir = join(standalone, ".ittybitty", "agents", "agent-shared");
+      const standaloneWorktree = join(standaloneAgentDir, "repo");
+      const ownFile = join(standaloneWorktree, "tracked.txt");
+      await mkdir(join(standaloneWorktree, ".claude"), { recursive: true });
+      await writeFile(join(standaloneAgentDir, "meta.json"), JSON.stringify({
+        id: "agent-shared",
+        state: "waiting",
+        worktree: true,
+        paths: { allowRead: [], allowWrite: [], deny: [] },
+      }));
+      await writeFile(
+        join(standaloneWorktree, ".claude", "settings.local.json"),
+        JSON.stringify({ permissions: { allow: ["Read"], deny: [] } }),
+      );
+      await writeFile(ownFile, "ok\n");
+
+      logged = [];
+      await hookCheckPath("agent-shared", JSON.stringify({
+        tool_name: "Read",
+        tool_input: { file_path: ownFile },
+        cwd: standaloneWorktree,
+      }));
+
+      const decision = JSON.parse(logged[0]!);
+      expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(decision.hookSpecificOutput.permissionDecisionReason).toBe("Tool in deny list");
+    } finally {
+      await rm(standalone, { recursive: true, force: true });
+    }
   });
 
   for (const [toolName, pathKey] of [
@@ -2914,12 +2986,14 @@ describe("hookCheckPath — deny by default (missing meta, malformed stdin)", ()
       join(worktreeCwd, ".claude", "settings.local.json"),
       JSON.stringify({ permissions: { allow: ["Read", "Bash"], deny: [] } }),
     );
+    setNoWorktreeRepoRootsLoader(async () => [tempDir]);
     logged = [];
     console.log = (msg: string) => { logged.push(msg); };
   });
 
   afterEach(async () => {
     console.log = originalLog;
+    resetNoWorktreeRepoRootsLoader();
     await rm(tempDir, { recursive: true, force: true });
   });
 

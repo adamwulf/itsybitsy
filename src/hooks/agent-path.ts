@@ -23,7 +23,7 @@ import {
 } from "./paths-table";
 import { canonicalizeSandboxPath, resolvePreparedAccess, type PathOperation, type PreparedAccessTable } from "../sandbox";
 import { findShellMetachar } from "./shell-metachar";
-import { findNoWorktreeAgentsDir } from "./agent-context";
+import { resolveBoundHookAgent } from "./agent-context";
 import { metaCanSpawnChildren } from "../agent-types";
 
 // Re-exported for existing callers/tests that import it from this module; the
@@ -1281,6 +1281,14 @@ export async function checkIbCommandAccess(
     return { decision: "deny", reason: "Access denied: ib sandbox refresh is manager-only" };
   }
 
+  // Hook entry points accept an agent id because Claude invokes them outside
+  // the Bash tool. They are never valid agent-authored ib commands: allowing A
+  // to run one as B would let attacker-controlled argv select B's state or
+  // policy handler before that handler can authenticate its process context.
+  if (/(?:^|[;&|]\s*)ib\s+(?:hooks|hook-(?:check-path|status|permission-denied|mark-running))(?:\s|$)/.test(normalizedCommand)) {
+    return { decision: "deny", reason: "Access denied: ib hook dispatch is an internal operation" };
+  }
+
   // Bash(ib:*) must represent one shell command.  Otherwise a permitted
   // `ib send ...` can append a second lifecycle/internal command after `;`,
   // `&&`, a pipe, or a newline.  The scanner is quote/heredoc aware, so
@@ -1596,41 +1604,29 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
       return;
     }
   } else {
-    // Resolve agent directory from cwd pattern
-    // cwd is typically: .../.ittybitty/agents/{id}/repo/...
-    const cwdMatch = cwd.match(/(.*\/.ittybitty\/agents)/);
-    const discoveredNoWorktreeAgentsDir = cwdMatch
-      ? null
-      : await findNoWorktreeAgentsDir(agentId, cwd);
-    agentsDir = resolve(
-      cwdMatch
-        ? cwdMatch[1]!
-        : discoveredNoWorktreeAgentsDir ?? join(cwd, ".ittybitty", "agents"),
-    );
-
-    agentDir = join(agentsDir, agentId);
-    worktreePath = join(agentDir, "repo");
-    // Resolve worktree to absolute path if it exists
+    // Authenticate the explicit id against an operator-registered record and
+    // either its canonical worktree cwd or its live shared-repo Claude process.
+    // Cwd-shaped metadata alone never supplies hook authority.
+    let boundContext;
     try {
-      worktreePath = await realpath(worktreePath);
+      boundContext = await resolveBoundHookAgent(agentId, cwd);
     } catch {
-      // Worktree dir doesn't exist — agent may be a non-worktree agent (e.g., coordinator)
-      isNoWorktree = true;
+      const fallbackAgentDir = join(cwd, ".ittybitty", "agents", agentId);
+      await emitPathDecision(fallbackAgentDir, toolName, toolInput, {
+        decision: "deny",
+        reason: META_UNREADABLE_DENY_REASON,
+      });
+      return;
     }
+    agentsDir = boundContext.agentsDir;
+    agentDir = boundContext.agentDir;
+    worktreePath = boundContext.worktreePath;
+    isNoWorktree = boundContext.meta.worktree === false;
 
     // Read meta.json — REQUIRED. The hook resolves its path lists from it, so a
     // missing or unparseable meta.json DENIES (fail closed) rather than building
     // a permissive table (the invariant, SPEC-PATH-ALLOWLIST.md §8).
-    let meta: Record<string, unknown> | null = null;
-    try {
-      const metaFile = Bun.file(join(agentDir, "meta.json"));
-      if (await metaFile.exists()) {
-        const parsed = await metaFile.json();
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          meta = parsed as Record<string, unknown>;
-        }
-      }
-    } catch { meta = null; }
+    const meta: Record<string, unknown> | null = boundContext.meta;
     if (!meta) {
       await emitPathDecision(agentDir, toolName, toolInput, {
         decision: "deny",
@@ -1638,7 +1634,6 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
       });
       return;
     }
-    if (meta.worktree === false) isNoWorktree = true;
     canSpawnChildren = await metaCanSpawnChildren(meta);
 
     // For non-worktree agents (e.g., coordinators), worktreePath is the repo root

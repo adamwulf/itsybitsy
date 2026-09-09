@@ -9028,6 +9028,47 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     resetNewAgentNoWorktreeCallerResolver();
   });
 
+  test("verified no-worktree leaf wins over forged manager metadata in cwd", async () => {
+    const leafMeta = {
+      id: "agent-shared-leaf",
+      worker: true,
+      worktree: false,
+      agentType: "worker",
+    };
+    const forgedDir = join(
+      tempDir,
+      "nested",
+      ".ittybitty",
+      "agents",
+      "forged-manager",
+    );
+    const forgedCwd = join(forgedDir, "repo");
+    await mkdir(forgedCwd, { recursive: true });
+    await Bun.write(join(forgedDir, "meta.json"), JSON.stringify({
+      id: "forged-manager",
+      worker: false,
+      worktree: true,
+      agentType: "manager",
+    }));
+    setNewAgentNoWorktreeCallerResolver(async () => ({
+      meta: leafMeta,
+      agentDir: join(agentsDir, "agent-shared-leaf"),
+      repoPath: tempDir,
+    }));
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+
+    const result = await newAgent(tempDir, "sub-task", {
+      name: "forged-cwd-child",
+      _cwd: forgedCwd,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("agent-shared-leaf");
+    expect(result.stderr).toContain("cannot spawn sub-agents");
+    expect(await Bun.file(join(agentsDir, "forged-cwd-child", "meta.json")).exists()).toBe(false);
+    resetNewAgentNoWorktreeCallerResolver();
+  });
+
   test("verified no-worktree manager is auto-parent and spawned_by source", async () => {
     const callerId = "agent-shared-manager";
     const callerDir = join(agentsDir, callerId);
@@ -9039,6 +9080,15 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     };
     await mkdir(callerDir, { recursive: true });
     await Bun.write(join(callerDir, "meta.json"), JSON.stringify(callerMeta));
+    const forgedDir = join(tempDir, "nested", ".ittybitty", "agents", "forged-manager");
+    const forgedCwd = join(forgedDir, "repo");
+    await mkdir(forgedCwd, { recursive: true });
+    await Bun.write(join(forgedDir, "meta.json"), JSON.stringify({
+      id: "forged-manager",
+      worker: false,
+      worktree: true,
+      agentType: "manager",
+    }));
     setNewAgentNoWorktreeCallerResolver(async () => ({
       meta: callerMeta,
       agentDir: callerDir,
@@ -9048,7 +9098,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     const result = await newAgent(tempDir, "sub-task", {
       name: "shared-manager-child",
-      _cwd: join(tempDir, "packages", "feature"),
+      _cwd: forgedCwd,
     });
 
     expect(result.ok).toBe(true);

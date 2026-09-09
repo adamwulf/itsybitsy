@@ -4,7 +4,7 @@
  * CLI entrypoint
  */
 
-import { join } from "path";
+import { isAbsolute, join } from "path";
 import { userHome } from "./home";
 import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from "./registry";
 import { resolveAgentIcon } from "./agents";
@@ -138,6 +138,72 @@ export async function findAgentByIdInRepo(id: string, repo: RepoEntry): Promise<
     false,
   );
   return agents.find((agent) => agent.id === id) ?? null;
+}
+
+/**
+ * Resolve an internal launcher PID update to the one registered agent whose
+ * canonical launch directory is exactly `cwd`.
+ *
+ * Agent IDs are only unique within a repository. Looking up an ID across the
+ * registry and taking the first match can therefore write another repository's
+ * metadata. Launch scripts run with cwd set to the agent's canonical work path:
+ * the registered repo root for worktree:false agents, or the agent worktree
+ * root otherwise. Binding both pieces makes duplicate IDs unambiguous without
+ * accepting a caller-supplied repository path.
+ */
+export async function resolveLauncherAgentDir(
+  agentId: string,
+  cwd: string,
+  repos: RepoEntry[],
+): Promise<string | null> {
+  if (!isValidAgentId(agentId)) return null;
+
+  const { realpath } = await import("fs/promises");
+  let canonicalCwd: string;
+  try {
+    canonicalCwd = await realpath(cwd);
+  } catch {
+    return null;
+  }
+
+  const matches = new Set<string>();
+  for (const repo of repos) {
+    if (!isAbsolute(repo.path)) continue;
+
+    let repoPath: string;
+    try {
+      repoPath = await realpath(repo.path);
+    } catch {
+      continue;
+    }
+
+    const agentDir = join(repoPath, ".ittybitty", "agents", agentId);
+    const metaFile = Bun.file(join(agentDir, "meta.json"));
+    try {
+      if (!(await metaFile.exists())) continue;
+      const meta: unknown = await metaFile.json();
+      if (!meta || typeof meta !== "object" || Array.isArray(meta) ||
+          (meta as { id?: unknown }).id !== agentId) {
+        continue;
+      }
+
+      const expectedCwd = (meta as { worktree?: unknown }).worktree === false
+        ? repoPath
+        : await realpath(join(agentDir, "repo"));
+      if (expectedCwd !== canonicalCwd) continue;
+
+      // A registered agent directory is a concrete protected target, not a
+      // symlink that may redirect the metadata mutation outside the repo.
+      const canonicalAgentDir = await realpath(agentDir);
+      if (canonicalAgentDir !== agentDir) continue;
+      matches.add(canonicalAgentDir);
+    } catch {
+      // Missing, malformed, or concurrently removed records supply no launch
+      // authority. Continue so one other exact cwd-bound record can still win.
+    }
+  }
+
+  return matches.size === 1 ? matches.values().next().value ?? null : null;
 }
 
 /** Print an IbCommandResult and exit. */
@@ -1564,15 +1630,12 @@ export async function main() {
       }
       const { mutateAgentMeta } = await import("./agents");
       const repos = await listRepos();
-      const { existsSync } = await import("fs");
-      const repo = repos.find((entry) =>
-        existsSync(join(entry.path, ".ittybitty", "agents", agentId, "meta.json"))
-      );
-      if (!repo) {
-        console.error(`Agent ${agentId} not found in any registered repo.`);
+      const agentDir = await resolveLauncherAgentDir(agentId, process.cwd(), repos);
+      if (!agentDir) {
+        console.error(`Agent ${agentId} is not registered for launcher cwd ${process.cwd()}.`);
         process.exit(1);
       }
-      await mutateAgentMeta(join(repo.path, ".ittybitty", "agents", agentId), (meta) => {
+      await mutateAgentMeta(agentDir, (meta) => {
         meta.sandbox_proxy_pid = Number(pidArg);
         meta.sandbox_proxy_port = Number(portArg);
       });
@@ -1606,15 +1669,11 @@ export async function main() {
       }
       const { mutateAgentMeta } = await import("./agents");
       const wpRepos = await listRepos();
-      const { existsSync: wpExists } = await import("fs");
-      const wpRepo = wpRepos.find((r) =>
-        wpExists(join(r.path, ".ittybitty", "agents", wpAgentId, "meta.json"))
-      );
-      if (!wpRepo) {
-        console.error(`Agent ${wpAgentId} not found in any registered repo.`);
+      const wpAgentDir = await resolveLauncherAgentDir(wpAgentId, process.cwd(), wpRepos);
+      if (!wpAgentDir) {
+        console.error(`Agent ${wpAgentId} is not registered for launcher cwd ${process.cwd()}.`);
         process.exit(1);
       }
-      const wpAgentDir = join(wpRepo.path, ".ittybitty", "agents", wpAgentId);
       const wpPidEpoch = Math.floor(Date.now() / 1000);
       await mutateAgentMeta(wpAgentDir, (meta) => {
         meta.claude_pid = wpPidArg;

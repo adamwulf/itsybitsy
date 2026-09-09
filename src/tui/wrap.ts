@@ -98,45 +98,29 @@ function isCsiTerminator(code: number): boolean {
  */
 export function wrapSingleLine(line: string, width: number): string[] {
   if (width <= 0) return [line];
-  if (visibleWidth(line) <= width) return [line];
+  if (terminalVisibleWidthForWrap(line) <= width) return [safeTerminalTextForWrap(line)];
 
   const chunks: string[] = [];
   let current = "";
   let visWidth = 0;
 
-  // Use Array.from to split into Unicode codepoints (not UTF-16 code units),
-  // so surrogate pairs and multi-codepoint emoji are kept intact.
-  const codepoints = Array.from(line);
-  let i = 0;
-
-  while (i < codepoints.length) {
-    // Check for ANSI escape sequence: ESC [ ... terminator
-    // ANSI sequences are pure ASCII, so codepoint indexing works fine here.
-    if (codepoints[i] === "\x1b" && i + 1 < codepoints.length && codepoints[i + 1] === "[") {
-      let j = i + 2;
-      while (j < codepoints.length && !isCsiTerminator(codepoints[j]!.codePointAt(0)!)) {
-        j++;
-      }
-      if (j < codepoints.length) j++; // include terminating byte
-      current += codepoints.slice(i, j).join("");
-      i = j;
+  // Tokenize all terminal controls atomically and visible text by grapheme.
+  // Besides CSI styling, this protects OSC hyperlinks (and their payloads)
+  // from being split into printable fragments during a hard wrap.
+  for (const token of terminalTokens(line)) {
+    if (token.escape) {
+      current += safeTerminalTokenRaw(token);
       continue;
     }
 
-    // Measure the visible width of this character (full codepoint)
-    const char = codepoints[i]!;
-    const charWidth = visibleWidth(char);
-
-    // Check if adding this character would exceed the width
-    if (visWidth + charWidth > width) {
+    if (visWidth > 0 && visWidth + token.width > width) {
       chunks.push(current);
       current = "";
       visWidth = 0;
     }
 
-    current += char;
-    visWidth += charWidth;
-    i++;
+    current += safeTerminalTokenRaw(token);
+    visWidth += token.width;
   }
 
   if (current.length > 0 || chunks.length === 0) {
@@ -165,21 +149,21 @@ export function wrapLines(text: string, width: number): string[] {
  */
 export function wordWrapSingleLine(line: string, width: number): string[] {
   if (width <= 0) return [line];
-  if (visibleWidth(line) <= width) return [line];
+  if (terminalVisibleWidthForWrap(line) <= width) return [safeTerminalTextForWrap(line)];
 
   // A full-width ─ separator/divider is a visual element, not prose — truncate
   // it to the pane width (one row) instead of word-wrapping it into many rows.
   // This one rule collapses every over-width separator on every display surface:
   // untrimmed system/repo coordinator panes, the center agent pane's native
   // chrome, and codex's content dividers inside the (trimmed) main transcript.
-  if (isSeparatorLine(line)) return [truncateToWidth(line, width, "")];
+  if (isSeparatorLine(line)) return [truncateTerminalToWidth(line, width, "")];
 
   // A box-drawing frame line (welcome box border/row, table border/row) is
   // likewise a visual element — clip it to the pane width and re-attach its
   // closing border char so the frame's right edge stays straight. Content past
   // the pane edge is clipped, exactly like a narrow terminal viewport.
   const borderSuffix = boxClipSuffix(line);
-  if (borderSuffix !== null) return [truncateToWidth(line, width, borderSuffix)];
+  if (borderSuffix !== null) return [truncateTerminalToWidth(line, width, borderSuffix)];
 
   const chunks: string[] = [];
   // Split into tokens: sequences of non-space chars and individual spaces
@@ -614,6 +598,74 @@ function terminalTokens(text: string): TerminalToken[] {
   return tokens;
 }
 
+function isSafeTerminalEscape(escape: string): boolean {
+  // Colon subparameters are used by extended SGR. Treat them as malformed for
+  // other CSI commands: terminal-width implementations disagree about where
+  // those sequences end, so preserving one can swallow visible text.
+  if (escape.startsWith("\x1b[") && escape.slice(2, -1).includes(":") && !escape.endsWith("m")) {
+    return false;
+  }
+  return visibleWidth(escape) === 0;
+}
+
+function safeTerminalTokenRaw(token: TerminalToken): string {
+  if (token.escape) return isSafeTerminalEscape(token.raw) ? token.raw : "";
+  let raw = token.raw;
+  for (const escape of token.embeddedEscapes ?? []) {
+    if (!isSafeTerminalEscape(escape)) raw = raw.replace(escape, "");
+  }
+  return raw;
+}
+
+function needsRobustTerminalMeasurement(text: string): boolean {
+  return /\x1b\[[0-9;:]*:/.test(text);
+}
+
+function terminalVisibleWidthForWrap(text: string): number {
+  return needsRobustTerminalMeasurement(text)
+    ? terminalTokens(text).reduce((sum, token) => sum + token.width, 0)
+    : visibleWidth(text);
+}
+
+function safeTerminalTextForWrap(text: string): string {
+  return needsRobustTerminalMeasurement(text)
+    ? terminalTokens(text).map(safeTerminalTokenRaw).join("")
+    : text;
+}
+
+function truncateTerminalToWidth(text: string, width: number, marker: string): string {
+  if (width <= 0) return "";
+  const tokens = terminalTokens(text);
+  const totalWidth = tokens.reduce((sum, token) => sum + token.width, 0);
+  if (totalWidth <= width) return tokens.map(safeTerminalTokenRaw).join("");
+
+  const markerWidth = visibleWidth(marker);
+  const contentWidth = Math.max(0, width - Math.min(width, markerWidth));
+  const state: TerminalStyleState = { sgr: new Map(), osc8: null, osc8Active: false };
+  const pendingEscapes: string[] = [];
+  let output = "";
+  let used = 0;
+  for (const token of tokens) {
+    if (token.escape) {
+      const raw = safeTerminalTokenRaw(token);
+      if (raw.length > 0) pendingEscapes.push(raw);
+      continue;
+    }
+    if (used + token.width > contentWidth) break;
+    for (const escape of pendingEscapes) {
+      output += escape;
+      applyTerminalEscape(state, escape);
+    }
+    pendingEscapes.length = 0;
+    output += safeTerminalTokenRaw(token);
+    for (const escape of token.embeddedEscapes ?? []) {
+      if (visibleWidth(escape) === 0) applyTerminalEscape(state, escape);
+    }
+    used += token.width;
+  }
+  return output + terminalStyleSuffix(state) + marker;
+}
+
 function stripTerminalAnsi(text: string): string {
   return terminalTokens(text)
     .filter((token) => !token.escape)
@@ -745,10 +797,12 @@ function terminalLineParts(line: string): TerminalLineParts {
   const closedState = copyTerminalStyle(prefixState);
   for (const { token } of suffixTokens) applyTerminalEscape(closedState, token.raw);
   const suffixLeavesNoStyle = !hasTerminalStyle(closedState);
+  const replayablePrefixSgr = [...prefixState.sgr.values()].every((escape) => escape.length > 0);
   const replayablePrefixLink = !prefixState.osc8Active || prefixState.osc8 !== null;
   if (
     !hasTerminalStyle(prefixState) ||
     !prefixRemainsActive ||
+    !replayablePrefixSgr ||
     !replayablePrefixLink ||
     !suffixLeavesNoStyle
   ) {
@@ -1026,6 +1080,7 @@ interface TerminalStyleState {
 // Replaying an arbitrarily long hyperlink target on every wrapped row would
 // amplify an O(n)-byte input to O(n²). Typical terminal URLs fit comfortably.
 const MAX_REPLAYABLE_OSC8_LENGTH = 256;
+const MAX_REPLAYABLE_SGR_LENGTH = 256;
 
 function hasTerminalStyle(state: TerminalStyleState): boolean {
   return state.sgr.size > 0 || state.osc8Active;
@@ -1053,7 +1108,10 @@ function copyTerminalStyle(state: TerminalStyleState): TerminalStyleState {
 }
 
 function setSgr(state: TerminalStyleState, key: string, params: string[]): void {
-  state.sgr.set(key, `\x1b[${params.join(";")}m`);
+  const escape = `\x1b[${params.join(";")}m`;
+  // Keep tracking the active style so it can be reset, but do not replay an
+  // arbitrarily large extension sequence on every physical wrapped row.
+  state.sgr.set(key, escape.length <= MAX_REPLAYABLE_SGR_LENGTH ? escape : "");
 }
 
 function applySgrEscape(state: TerminalStyleState, raw: string): void {
@@ -1198,7 +1256,6 @@ function resizeStyledRuleSegment(
   segment: string,
   ruleChar: "━" | "─",
   width: number,
-  closeTruncated = true,
 ): string {
   const state: TerminalStyleState = { sgr: new Map(), osc8: null, osc8Active: false };
   let output = "";
@@ -1206,25 +1263,36 @@ function resizeStyledRuleSegment(
   let truncated = false;
   for (const token of terminalTokens(segment)) {
     if (token.escape) {
-      output += token.raw;
-      applyTerminalEscape(state, token.raw);
+      const raw = safeTerminalTokenRaw(token);
+      output += raw;
+      if (raw.length > 0) applyTerminalEscape(state, raw);
       continue;
     }
     if (used + token.width > width) {
       truncated = true;
       break;
     }
-    output += token.raw;
-    for (const escape of token.embeddedEscapes ?? []) applyTerminalEscape(state, escape);
+    output += safeTerminalTokenRaw(token);
+    for (const escape of token.embeddedEscapes ?? []) {
+      if (visibleWidth(escape) === 0) applyTerminalEscape(state, escape);
+    }
     used += token.width;
   }
   if (used < width) output += ruleChar.repeat(width - used);
-  if (truncated && closeTruncated) output += terminalStyleSuffix(state);
+  // A row-wide suffix may close a different control family than a cell-local
+  // style inside this segment (for example, SGR outside and OSC-8 inside).
+  // Always close the segment's active state before the caller restores the
+  // row-wide layer and appends its suffix.
+  if (truncated) output += terminalStyleSuffix(state);
   return output;
 }
 
 function wrapStyledCell(text: string, width: number): string[] {
-  if (text.length === 0 || visibleWidth(text) <= width) return [text];
+  const tokens = terminalTokens(text);
+  const sanitized = () => tokens.map(safeTerminalTokenRaw).join("");
+  if (text.length === 0 || tokens.reduce((sum, token) => sum + token.width, 0) <= width) {
+    return [sanitized()];
+  }
 
   interface StyledGrapheme {
     raw: string;
@@ -1239,18 +1307,22 @@ function wrapStyledCell(text: string, width: number): string[] {
   const units: StyledGrapheme[] = [];
   let pending = "";
   let beforePending = copyTerminalStyle(state);
-  for (const token of terminalTokens(text)) {
+  for (const token of tokens) {
     if (token.escape) {
+      const raw = safeTerminalTokenRaw(token);
+      if (raw.length === 0) continue;
       if (pending.length === 0) beforePending = copyTerminalStyle(state);
-      pending += token.raw;
-      applyTerminalEscape(state, token.raw);
+      pending += raw;
+      applyTerminalEscape(state, raw);
       continue;
     }
     const before = pending.length > 0 ? beforePending : copyTerminalStyle(state);
     const during = copyTerminalStyle(state);
-    for (const escape of token.embeddedEscapes ?? []) applyTerminalEscape(state, escape);
+    for (const escape of token.embeddedEscapes ?? []) {
+      if (visibleWidth(escape) === 0) applyTerminalEscape(state, escape);
+    }
     units.push({
-      raw: pending + token.raw,
+      raw: pending + safeTerminalTokenRaw(token),
       text: token.text,
       width: token.width,
       before,
@@ -1259,7 +1331,7 @@ function wrapStyledCell(text: string, width: number): string[] {
     });
     pending = "";
   }
-  if (units.length === 0) return [text];
+  if (units.length === 0) return [sanitized()];
 
   const output: string[] = [];
   let start = 0;
@@ -1355,8 +1427,7 @@ function stackBorderlessTable(block: BorderlessTableBlock, width: number): strin
     if (visibleWidth(cell) === 0) return;
     const restore = terminalAffixRestore(affixes);
     for (const line of wrapStyledCell(cell, width)) {
-      const bounded =
-        visibleWidth(line) <= width ? line : truncateToWidth(line, width, "…");
+      const bounded = truncateTerminalToWidth(line, width, "…");
       output.push(decorate(bounded + restore, affixes));
     }
   };
@@ -1367,7 +1438,6 @@ function stackBorderlessTable(block: BorderlessTableBlock, width: number): strin
           block.heavyRule.segments[0] ?? "",
           "━",
           width,
-          block.heavyRule.affixes.suffix.length === 0,
         ) + terminalAffixRestore(block.heavyRule.affixes),
         block.heavyRule.affixes,
       ));
@@ -1378,7 +1448,6 @@ function stackBorderlessTable(block: BorderlessTableBlock, width: number): strin
           divider.segments[0] ?? "",
           "─",
           width,
-          divider.affixes.suffix.length === 0,
         ) + terminalAffixRestore(divider.affixes),
         divider.affixes,
       ));
@@ -1423,7 +1492,6 @@ function reflowBorderlessTable(block: BorderlessTableBlock, width: number): stri
             styled.segments[index] ?? "",
             char,
             cellWidth + 2,
-            index + 1 < widths.length || styled.affixes.suffix.length === 0,
           ) + terminalAffixRestore(styled.affixes),
         )
         .join("  "),

@@ -37,6 +37,14 @@ describe("wrapSingleLine", () => {
     expect(visibleWidth(result[1]!)).toBe(5);
   });
 
+  test("keeps OSC-8 controls atomic during a hard wrap", () => {
+    const open = "\x1b]8;;https://example.com/value\x1b\\";
+    const close = "\x1b]8;;\x1b\\";
+    const result = wrapSingleLine(open + "abcdef" + close, 3);
+    expect(result).toEqual([open + "abc", "def" + close]);
+    expect(result.every((row) => visibleWidth(row) <= 3)).toBe(true);
+  });
+
   test("ANSI code at wrap boundary stays with current chunk", () => {
     // 4 visible chars, then ANSI, then 4 more visible chars
     const line = "abcd\x1b[32mefgh";
@@ -358,6 +366,15 @@ describe("separator collapse (─ divider truncation, pinned-width fix)", () => 
     expect(rows.length).toBe(1);
     expect(visibleWidth(rows[0]!)).toBe(40);
     expect(rows[0]).toContain(rgb);
+  });
+
+  test("drops an unsupported colon CSI without splitting or widening a heavy rule", () => {
+    const headerRule = "\x1b[31:z" + "━".repeat(1_000) + "\x1b[0m";
+    const rows = wordWrapSingleLine(headerRule, 40);
+    expect(rows.length).toBe(1);
+    expect(visibleWidth(rows[0]!)).toBe(40);
+    expect(stripAnsi(rows[0]!)).toBe("━".repeat(40));
+    expect(rows[0]).not.toContain("31:z");
   });
 
   test.each([
@@ -1860,6 +1877,46 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     expect(Array.from(stripAnsi(rule).matchAll(/━+/g)).length).toBe(2);
   });
 
+  test("closes a truncated rule segment's cell-local state before its row-wide suffix", () => {
+    const linkOpen = "\x1b]8;;https://example.com/rule\x1b\\";
+    const linkClose = "\x1b]8;;\x1b\\";
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["X", "Y"],
+      ],
+      [8, 8],
+    );
+    const firstSegment = "━" + linkOpen + "━".repeat(8) + linkClose + "━";
+    table[1] = `  \x1b[2m${firstSegment}  ${"━".repeat(10)}\x1b[0m`;
+
+    const rows = wordWrapLines(table.join("\n"), 1);
+    const rule = rows.find((row) => row.includes(linkOpen))!;
+    expect(rule).toContain(linkClose);
+    expect(rule.indexOf(linkClose)).toBeGreaterThan(rule.indexOf(linkOpen));
+    expect(rows.every((row) => visibleWidth(row) <= 1)).toBe(true);
+  });
+
+  test("closes cell-local SGR beneath a row-wide OSC wrapper on a truncated rule", () => {
+    const linkOpen = "\x1b]8;;https://example.com/row-rule\x1b\\";
+    const linkClose = "\x1b]8;;\x1b\\";
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["X", "Y"],
+      ],
+      [8, 8],
+    );
+    const firstSegment = "━\x1b[31m" + "━".repeat(8) + "\x1b[39m━";
+    table[1] = `  ${linkOpen}${firstSegment}  ${"━".repeat(10)}${linkClose}`;
+
+    const rows = wordWrapLines(table.join("\n"), 1);
+    const rule = rows.find((row) => row.includes("\x1b[31m"))!;
+    expect(rule).toContain("\x1b[0m");
+    expect(rule.indexOf("\x1b[0m")).toBeGreaterThan(rule.indexOf("\x1b[31m"));
+    expect(rows.every((row) => visibleWidth(row) <= 1)).toBe(true);
+  });
+
   test("keeps alternating SGR wrapping output linear in the cell length", () => {
     const styled = Array.from({ length: 2_000 }, (_value, index) =>
       (index % 2 === 0 ? "\x1b[31m" : "\x1b[34m") + "x",
@@ -1891,6 +1948,22 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
 
     const rows = wordWrapLines(table.join("\n"), 40);
     expect(rows.join("\n").length).toBeLessThan(table.join("\n").length * 4);
+  });
+
+  test("bounds replay of an unusually long colon-form SGR parameter", () => {
+    const longSgr = `\x1b[38:2:${"1:".repeat(1_000)}2m`;
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["alpha", longSgr + "x".repeat(1_000) + "\x1b[0m"],
+      ],
+      [5, 1_000],
+    );
+
+    const input = table.join("\n");
+    const rows = wordWrapLines(input, 1);
+    expect(rows.join("\n").length).toBeLessThan(input.length * 10);
+    expect(rows.every((row) => visibleWidth(row) <= 1)).toBe(true);
   });
 
   test("does not emit a blank row for an ordinary wrap-boundary space", () => {

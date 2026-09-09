@@ -13,6 +13,7 @@ import { isValidAgentId, isValidTmuxSession } from "../validation";
 import { writeAgentState, hasBackgroundTasks, isRecentlyCreated } from "../agents";
 import type { MetaState } from "../agents";
 import { WATCHDOG_SENTINEL } from "../watchdog";
+import { resolveBoundHookAgent } from "./agent-context";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -437,7 +438,11 @@ export async function findUnfinishedChildren(
  * CLI entry point for the stop hook.
  * Reads stdin JSON, processes the hook, and executes tmux actions.
  */
-export async function hookStatus(agentId: string, rawStdin?: string): Promise<void> {
+export async function hookStatus(
+  agentId: string,
+  rawStdin?: string,
+  deps: { resolveAgent?: typeof resolveBoundHookAgent } = {},
+): Promise<void> {
   // Read stdin (use pre-read value if provided)
   const stdinText = rawStdin ?? await new Response(Bun.stdin.stream()).text();
   let lastMessage = "";
@@ -448,27 +453,19 @@ export async function hookStatus(agentId: string, rawStdin?: string): Promise<vo
     /* stdin may not be valid JSON */
   }
 
-  // Derive agentDir from cwd
+  // Bind the explicit hook identity to a unique registered agent. Worktree
+  // agents must be inside their canonical registered worktree; worktree:false
+  // agents must match the recorded live Claude process ancestry. Never fall
+  // back to a cwd-shaped identity when explicit authentication fails.
   const cwd = process.cwd();
-  let agentDir = "";
-  let agentsDir = "";
-
-  const agentMatch = cwd.match(/(.*\/.ittybitty\/agents\/[^/]+)/);
-  if (agentMatch) {
-    agentDir = agentMatch[1]!;
-    agentsDir = dirname(agentDir);
-  } else {
-    // Construct from agentsDir pattern
-    const ittybittyMatch = cwd.match(/(.*\/.ittybitty)/);
-    if (ittybittyMatch) {
-      agentsDir = join(ittybittyMatch[1]!, "agents");
-      agentDir = join(agentsDir, agentId);
-    } else {
-      // Last resort
-      console.log("unknown");
-      return;
-    }
+  let bound;
+  try {
+    bound = await (deps.resolveAgent ?? resolveBoundHookAgent)(agentId, cwd);
+  } catch {
+    console.log("unknown");
+    return;
   }
+  const { agentDir, agentsDir } = bound;
 
   const result = await processStopHook(
     agentId,

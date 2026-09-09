@@ -11,6 +11,7 @@ import { listTeams } from "../teams";
 import { isValidSessionId } from "../validation";
 import { resolveSandboxEnabled, type PathsConfig, type SandboxConfig } from "../sandbox";
 import { metadataCli } from "../agent-cli";
+import { resolveBoundHookAgent } from "./agent-context";
 
 export type SessionRole = "primary" | "manager" | "worker" | "coordinator";
 
@@ -448,7 +449,7 @@ ${renderPathList("Denied (deny), overriding the lists above", paths?.deny)}`;
   // Repository policy defaults on; the global coordinator remains unwrapped.
   const sandboxLine = ctx.agentId !== SYSTEM_AGENT_ID && resolveSandboxEnabled(ctx.sandbox?.enabled)
     ? `The kernel sandbox is ON: an access outside these lists fails with EPERM, whatever the spelling. The hook explains the honest command-line attempts in the Denials tab of \`ib watch\`.`
-    : `The itsybitsy kernel sandbox is OFF; native CLI protections and the itsybitty path hook remain active.`;
+    : `The itsybitsy kernel sandbox is OFF; hooks enforce tool permissions and path checks without native tool approval prompts.${cli === "codex" || cli === "fugu" ? " Codex's native workspace-write sandbox remains enabled and may further restrict paths." : ""}`;
 
   const pathSection = `### Path Isolation
 
@@ -933,25 +934,22 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
   const match = AGENT_CWD_PATTERN.exec(cwd);
   let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; agentType?: string; model?: string; paths?: unknown; sandbox?: unknown; spawned_by?: { agent_id: string; repo_path: string | null }; state?: string } | undefined;
   let agentDirForState: string | undefined;
+  let roleCwd = cwd;
 
-  if (match) {
+  if (agentIdArg && agentIdArg !== SYSTEM_AGENT_ID) {
+    // Explicit identities are emitted for shared-repo agents. Authenticate the
+    // registered record against the actual Claude process before reading role
+    // metadata or mutating state; payload cwd and lookalike agent trees supply
+    // no authority.
+    const bound = await resolveBoundHookAgent(agentIdArg, cwd);
+    agentDirForState = bound.agentDir;
+    roleCwd = bound.worktreePath;
+    metaJson = bound.meta;
+  } else if (match) {
     const agentId = match[1]!;
     const ittybittyIdx = cwd.indexOf("/.ittybitty/agents/");
     const rootRepoPath = cwd.substring(0, ittybittyIdx);
     const agentDir = join(rootRepoPath, ".ittybitty", "agents", agentId);
-    agentDirForState = agentDir;
-    try {
-      const metaFile = Bun.file(join(agentDir, "meta.json"));
-      if (await metaFile.exists()) {
-        metaJson = await metaFile.json();
-      }
-    } catch {
-      // Fall through to primary if meta can't be read
-    }
-  } else if (agentIdArg) {
-    // Non-worktree agent (e.g., coordinator): CWD is the repo root, not a worktree path.
-    // The agent ID is passed as a command argument. Look for meta.json in the repo's agents dir.
-    const agentDir = join(cwd, ".ittybitty", "agents", agentIdArg);
     agentDirForState = agentDir;
     try {
       const metaFile = Bun.file(join(agentDir, "meta.json"));
@@ -974,7 +972,7 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
     await writeAgentState(agentDirForState, "running");
   }
 
-  const ctx = detectRole(cwd, metaJson, agentIdArg);
+  const ctx = detectRole(roleCwd, metaJson, agentIdArg);
   const instructions = await generateInstructions(ctx);
 
   const output = {

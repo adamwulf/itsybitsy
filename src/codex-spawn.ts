@@ -107,8 +107,9 @@ export interface BuildCodexStartContentInput {
  * Render the codex start.sh body for an agent. Mirrors the claude start.sh
  * skeleton (setsid + SIGHUP ignore + pid capture + meta-json write + wait
  * + exit-check) but launches codex with:
- *   - `-m <model> --dangerously-bypass-hook-trust`, plus `-a never -s
- *     danger-full-access` only when itsybitsy's Seatbelt profile is active
+ *   - `-m <model> -a never --dangerously-bypass-hook-trust`, with `-s
+ *     danger-full-access` beneath itsybitsy's Seatbelt profile and explicit
+ *     `-s workspace-write` when that outer wrapper is disabled
  *   - inline `-c 'hooks.<Event>=[...]'` flags from buildCodexLaunchArgs
  *   - the prompt as a positional `"$(cat <prompt-file>)"`
  *
@@ -148,21 +149,22 @@ export function buildCodexStartContent(input: BuildCodexStartContentInput): stri
   const qStartExitScript = shellQuote(input.absExitScript);
   const qStartAgentLog = shellQuote(input.absAgentLog);
   const qStartStderrLog = shellQuote(input.absStderrLog);
-  if (input.sandboxEnabled && (!input.sandboxScriptPreamble || !input.sandboxExecPrefix)) {
+  if (input.sandboxEnabled && (!input.sandboxScriptPreamble?.trim() || !input.sandboxExecPrefix?.trim())) {
     throw new Error("Sandbox-enabled codex launch requires the proxy preamble and sandbox-exec prefix");
   }
-  // Its yolo flags are safe only inside itsybitsy's outer Seatbelt profile.
-  // Disabled mode intentionally omits both flags so Codex's native approval
-  // and sandbox defaults remain active. Hook trust is independent of those
-  // protections and remains bypassed so the generated hooks load reliably.
+  // Codex agents run unattended, so native approval prompts are suppressed in
+  // both modes while the generated hooks remain the permission boundary. Our
+  // outer Seatbelt wrapper replaces Codex's sandbox only when enabled; when it
+  // is disabled we explicitly retain Codex's native workspace-write sandbox.
   const nativeProtectionOverrides = input.sandboxEnabled
     ? " -a never -s danger-full-access"
-    : "";
+    : " -a never -s workspace-write";
   const sandboxPreamble = input.sandboxEnabled ? input.sandboxScriptPreamble! : "";
   const sandboxLaunchPrefix = input.sandboxEnabled ? `${input.sandboxExecPrefix} ` : "";
 
   // The launch line. Per SPEC §3.3:
-  //   codex -m <MODEL> [-a never -s danger-full-access] --dangerously-bypass-hook-trust \
+  //   codex -m <MODEL> -a never -s <danger-full-access|workspace-write> \
+  //         --dangerously-bypass-hook-trust \
   //         <inline -c flags> "<prompt>"
   // We log only the model + sentinel rather than the prompt content so a leak
   // of agent.log doesn't disclose the prompt.
@@ -326,7 +328,7 @@ export interface BuildCodexResumeContentInput {
  * Render the codex resume.sh body for an agent. Mirrors `buildCodexStartContent`
  * exactly (same setsid + SIGHUP ignore + pid capture + meta-json write + wait
  * + exit-check skeleton) but the launch line is:
- *   `codex resume "<UUID>" [-a never -s danger-full-access] --dangerously-bypass-hook-trust <inline -c flags>`
+ *   `codex resume "<UUID>" -a never -s <danger-full-access|workspace-write> --dangerously-bypass-hook-trust <inline -c flags>`
  *
  * Differences from start.sh:
  *   - Subcommand form (`codex resume <UUID>`), not the top-level `codex` invocation.
@@ -337,8 +339,9 @@ export interface BuildCodexResumeContentInput {
  *     persisting the original spawn's hook registration across resume; passing
  *     them again is a no-op if codex DOES persist them and safety-critical if
  *     it doesn't (without hooks every PreToolUse silently fail-opens).
- *   - Re-passes `-a never -s danger-full-access` only beneath itsybitsy's
- *     outer Seatbelt profile; disabled mode preserves Codex's native defaults.
+ *   - Re-passes `-a never` in both modes so unattended resumes never prompt.
+ *     Enabled mode uses `-s danger-full-access` beneath itsybitsy's outer
+ *     Seatbelt profile; disabled mode explicitly retains `-s workspace-write`.
  *
  * The PID variable is kept as `CLAUDE_PID` (and stored as `claude_pid` in
  * meta.json) intentionally — see `buildCodexStartContent` rationale.
@@ -370,12 +373,12 @@ export function buildCodexResumeContent(input: BuildCodexResumeContentInput): st
   const qResumeExitScript = shellQuote(input.absExitScript);
   const qResumeAgentLog = shellQuote(input.absAgentLog);
   const qResumeStderrLog = shellQuote(input.absStderrLog);
-  if (input.sandboxEnabled && (!input.sandboxScriptPreamble || !input.sandboxExecPrefix)) {
+  if (input.sandboxEnabled && (!input.sandboxScriptPreamble?.trim() || !input.sandboxExecPrefix?.trim())) {
     throw new Error("Sandbox-enabled codex resume requires the proxy preamble and sandbox-exec prefix");
   }
   const nativeProtectionOverrides = input.sandboxEnabled
     ? " -a never -s danger-full-access"
-    : "";
+    : " -a never -s workspace-write";
   const sandboxPreamble = input.sandboxEnabled ? input.sandboxScriptPreamble! : "";
   const sandboxLaunchPrefix = input.sandboxEnabled ? `${input.sandboxExecPrefix} ` : "";
 

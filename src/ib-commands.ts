@@ -84,6 +84,7 @@ import {
   REGULAR_AGENT_INTERCEPT_MATCHER,
 } from "./settings-builder";
 import { listRepos, repoDisplayName, type RepoEntry } from "./registry";
+import { resolveNoWorktreeCaller, type NoWorktreeCaller } from "./no-worktree-caller";
 import {
   type Team,
   normalizeTeamName,
@@ -676,6 +677,32 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
 
   const archived = selected.archive;
   const manifest = archived.manifest!;
+  if (archived.meta.worktree === false || manifest.worktree === false) {
+    const archivedModel = archived.meta.model && archived.meta.model !== "null"
+      ? archived.meta.model
+      : "";
+    let archivedCli: ReturnType<typeof parseModel>["cli"] = "claude";
+    if (archivedModel) {
+      try {
+        archivedCli = parseModel(archivedModel).cli;
+      } catch (err) {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }
+    if (archivedCli !== "claude") {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: `Cannot rehire worktree:false ${archivedCli} agent: only Claude supports --no-worktree`,
+      };
+    }
+  }
   const warnings: string[] = [];
   const archivedNickname = archived.meta.nickname;
   const archivedNicknameCollision =
@@ -876,22 +903,11 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
         }
         await mkdir(join(worktreePath, ".claude"), { recursive: true });
         const restoredSettingsPath = join(worktreePath, ".claude", "settings.local.json");
-        if (archived.meta.sandbox && !resolveSandboxConfig({ sandbox: archived.meta.sandbox }).enabled) {
-          try {
-            const settings = await Bun.file(archivedSettings).json() as Record<string, unknown>;
-            const permissions = settings.permissions;
-            if (permissions && typeof permissions === "object" && !Array.isArray(permissions)) {
-              const next = { ...(permissions as Record<string, unknown>) };
-              if (next.defaultMode === "bypassPermissions") delete next.defaultMode;
-              settings.permissions = next;
-            }
-            await Bun.write(restoredSettingsPath, JSON.stringify(settings, null, 2));
-          } catch {
-            throw new Error("archived settings.local.json is invalid");
-          }
-        } else {
-          await cp(archivedSettings, restoredSettingsPath);
-        }
+        // Sandbox disablement affects only the itsybitsy kernel wrapper. Keep
+        // the archived Claude settings byte-for-byte: the explicit PreToolUse
+        // hook remains the tool permission authority and therefore suppresses
+        // native prompts while preserving allow/deny behavior.
+        await cp(archivedSettings, restoredSettingsPath);
       }
     }
 
@@ -909,18 +925,20 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
       await chmod(join(agentDir, "start.sh"), 0o755);
     }
 
-    const coordinatorSettingsSource = join(
+    // worktree:false Claude agents (per-repo coordinators and regular
+    // --no-worktree agents) archive their isolated --settings file here.
+    const isolatedSettingsSource = join(
       archived.archiveDir,
       ".claude",
       "settings.local.json",
     );
-    if (await Bun.file(coordinatorSettingsSource).exists().catch(() => false)) {
-      if (!(await lstat(coordinatorSettingsSource)).isFile()) {
-        throw new Error("archived coordinator settings are not a regular file");
+    if (await Bun.file(isolatedSettingsSource).exists().catch(() => false)) {
+      if (!(await lstat(isolatedSettingsSource)).isFile()) {
+        throw new Error("archived isolated settings are not a regular file");
       }
       await mkdir(join(agentDir, ".claude"), { recursive: true });
       await cp(
-        coordinatorSettingsSource,
+        isolatedSettingsSource,
         join(agentDir, ".claude", "settings.local.json"),
       );
     }
@@ -1562,6 +1580,52 @@ export async function resumeAgent(
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
   }
 
+  // Parse the persisted CLI before any resume mutation. Legacy non-Claude
+  // worktree:false metadata is unsafe to replay: Codex/Fugu would overwrite
+  // shared AGENTS.md and agy would install hook/rule files in the shared repo.
+  const rawModel = agent.meta.model && agent.meta.model !== "null" ? agent.meta.model : "";
+  if (rawModel && !isValidModel(rawModel)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${rawModel}` };
+  }
+  let modelFlagValue = "";
+  let resumeCli: ReturnType<typeof parseModel>["cli"] = "claude";
+  if (rawModel) {
+    try {
+      const parsedResume = parseModel(rawModel);
+      modelFlagValue = parsedResume.model;
+      resumeCli = parsedResume.cli;
+    } catch (err) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+  if (agent.meta.worktree === false && resumeCli !== "claude") {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Cannot resume worktree:false ${resumeCli} agent: only Claude supports --no-worktree`,
+    };
+  }
+
+  const usesClaudePidBootstrap = resumeCli === "claude" &&
+    (agent.meta.worktree === false || agent.meta.agentType === "coordinator");
+  const trustedClaudeIbCommand = usesClaudePidBootstrap
+    ? resolveTrustedIbCommandArgs()
+    : null;
+  if (usesClaudePidBootstrap && !trustedClaudeIbCommand) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: "Cannot resume worktree:false Claude agent: could not resolve the trusted running ib command",
+    };
+  }
+
   // Ensure the central per-agent outbox dir exists before the agent starts so
   // the first enqueue doesn't race a missing-dir append. Idempotent — no-op
   // when the dir already exists.
@@ -1589,33 +1653,6 @@ export async function resumeAgent(
     ) {
       return await resetCoordinator(agent);
     }
-
-    // Parse the qualified `<cli>:<model>` form (D1) EARLY so we can reject
-    // codex resume before issuing any tmux / shell-script work (MED 1 from
-    // the Phase 4 review). parseModel throws on missing/malformed/unknown
-    // cli — surface as a resume failure (D6).
-    const rawModel = agent.meta.model && agent.meta.model !== "null" ? agent.meta.model : "";
-    if (rawModel && !isValidModel(rawModel)) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${rawModel}` };
-    }
-    let modelFlagValue = "";
-    let resumeCli: ReturnType<typeof parseModel>["cli"] = "claude";
-    if (rawModel) {
-      try {
-        const parsedResume = parseModel(rawModel);
-        modelFlagValue = parsedResume.model;
-        resumeCli = parsedResume.cli;
-      } catch (err) {
-        return {
-          ok: false,
-          exitCode: 1,
-          stdout: "",
-          stderr: err instanceof Error ? err.message : String(err),
-        };
-      }
-    }
-    // agy is now sandboxed like every other CLI (mandatory kernel sandbox) — no
-    // special-case refusal remains.
 
     // Re-derive the reasoning-effort level from the persisted meta value, the
     // exact twin of the model re-derivation above. Without this a resumed
@@ -2057,7 +2094,7 @@ export async function resumeAgent(
       await Bun.write(resumeScript, agyResumeContent);
       await chmod(resumeScript, 0o755);
     } else {
-      // ── Claude resume branch (unchanged) ─────────────────────────────────────
+      // ── Claude resume branch ──────────────────────────────────────────────
       // Read session_id from meta.json
       const sessionId = agent.meta.session_id;
       if (!sessionId || sessionId === "null") {
@@ -2082,58 +2119,50 @@ export async function resumeAgent(
       if (resumeEffort) {
         claudeArgs = claudeArgs ? `${claudeArgs} --effort ${resumeEffort}` : `--effort ${resumeEffort}`;
       }
-      // Claude may skip its native prompts only when the kernel boundary is
-      // active. Disabled mode keeps Claude's own permission flow in addition
-      // to the always-installed hooks.
+      // Enabled mode may bypass Claude's native permission layer because the
+      // itsybitsy kernel wrapper is active. Disabled mode adds no permission
+      // flag: the explicit PreToolUse hook returns allow/deny for every call,
+      // suppressing native prompts while enforcing the generated policy.
       if (preparedResumeSandbox !== null) {
         claudeArgs = claudeArgs
           ? `${claudeArgs} --dangerously-skip-permissions`
           : "--dangerously-skip-permissions";
       }
-      if (preparedResumeSandbox === null) {
-        claudeArgs = claudeArgs ? `${claudeArgs} --permission-mode default` : "--permission-mode default";
-      }
 
-      // Rehire resumes the archived coordinator session rather than using the
-      // ordinary dashboard reset behavior. Coordinator hooks/permissions live
-      // in the restored agent-local settings file.
-      if (agent.meta.agentType === "coordinator") {
-        const coordinatorSettings = join(agentDir, ".claude", "settings.local.json");
-        if (!(await Bun.file(coordinatorSettings).exists().catch(() => false))) {
+      // Worktree:false Claude agents cannot safely install agent-specific hooks
+      // in the shared repository settings. Their isolated settings file is
+      // passed explicitly on every spawn/resume (including coordinator rehire).
+      if (agent.meta.worktree === false || agent.meta.agentType === "coordinator") {
+        let isolatedSettings: string;
+        try {
+          isolatedSettings = await ensureIsolatedClaudeSettings(
+            agent.repoPath,
+            agentDir,
+            agent.id,
+            agent.meta,
+          );
+        } catch (err) {
           return {
             ok: false,
             exitCode: 1,
             stdout: "",
-            stderr: "Cannot resume rehired coordinator: archived settings are missing",
+            stderr: `Cannot resume worktree:false Claude agent: ${err instanceof Error ? err.message : String(err)}`,
           };
         }
-        // Older archived coordinator settings may have been generated while
-        // the outer kernel boundary justified bypassPermissions. A disabled
-        // rehire must not reactivate that bypass through --settings.
-        if (!frozenConfig.enabled) {
-          try {
-            const settings = await Bun.file(coordinatorSettings).json() as Record<string, unknown>;
-            const permissions = settings.permissions;
-            if (permissions && typeof permissions === "object" && !Array.isArray(permissions)) {
-              const permissionRecord = permissions as Record<string, unknown>;
-              if (permissionRecord.defaultMode === "bypassPermissions") {
-                delete permissionRecord.defaultMode;
-                await Bun.write(coordinatorSettings, JSON.stringify(settings, null, 2));
-              }
-            }
-          } catch {
-            return {
-              ok: false,
-              exitCode: 1,
-              stdout: "",
-              stderr: "Cannot resume rehired coordinator: archived settings are invalid",
-            };
-          }
-        }
         claudeArgs = claudeArgs
-          ? `${claudeArgs} --settings ${shellQuote(coordinatorSettings)}`
-          : `--settings ${shellQuote(coordinatorSettings)}`;
+          ? `${claudeArgs} --settings ${shellQuote(isolatedSettings)}`
+          : `--settings ${shellQuote(isolatedSettings)}`;
       }
+
+      // Shared-repo hooks authenticate through the recorded Claude PID. Have
+      // the exact child that will exec into Claude record its own PID before
+      // exec, so SessionStart cannot race the parent script's write. /bin/sh,
+      // sandbox-exec, and Claude all replace one another in-place; $! remains
+      // the same process targeted by wait/signals and stored in metadata.
+      const resumeClaudeCommand = `${sandboxResumeLaunchPrefix}claude --resume "${sessionId}" ${claudeArgs}`;
+      const resumeLaunchCommand = usesClaudePidBootstrap
+        ? buildClaudePidBootstrapCommand(agent.id, resumeClaudeCommand, trustedClaudeIbCommand!)
+        : resumeClaudeCommand;
 
       // Shell-quote all paths for safe interpolation
       const qAbsExitScript = shellQuote(absExitScript);
@@ -2183,9 +2212,9 @@ else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid ${sandboxResumeLaunchPrefix}claude --resume "${sessionId}" ${claudeArgs} 2> "$STDERR_LOG" &
+    setsid ${resumeLaunchCommand} 2> "$STDERR_LOG" &
 else
-    ${sandboxResumeLaunchPrefix}claude --resume "${sessionId}" ${claudeArgs} 2> "$STDERR_LOG" &
+    ${resumeLaunchCommand} 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
 log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
@@ -2195,9 +2224,9 @@ trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; ki
 # Store PID in meta.json — route through "ib write-pid" which uses
 # mutateAgentMeta + the meta-lock (HIGH 2 from the Phase 4 review).
 META_JSON=${qMetaJson}
-if [[ -f "$META_JSON" ]]; then
+${usesClaudePidBootstrap ? `# The launch child stored this exact PID before exec, so SessionStart could not race it.` : `if [[ -f "$META_JSON" ]]; then
     ib write-pid ${shellQuote(agent.id)} "$CLAUDE_PID" || log "write-pid failed (exit=$?); meta.json claude_pid not set"
-fi
+fi`}
 
 # Wait for Claude to complete
 wait $CLAUDE_PID
@@ -5030,6 +5059,7 @@ export function resetNewAgentSpawnRunner(): void {
   newAgentDelayOverrideMs = null;
   agyVersionProbeTimeoutOverrideMs = null;
   callerMetaReaderOverride = null;
+  noWorktreeCallerResolverOverride = null;
 }
 
 /** Override the `agy --version` probe timeout (ms) for tests. null = default. */
@@ -5039,8 +5069,10 @@ export function setAgyVersionProbeTimeoutMs(ms: number | null): void {
 
 /** Type for readCallerMetaFromCwd override in tests */
 export type CallerMetaReaderFn = (cwd: string) => Promise<Record<string, unknown> | null> | Record<string, unknown> | null;
+export type NoWorktreeCallerResolverFn = (cwd: string) => Promise<NoWorktreeCaller | null>;
 
 let callerMetaReaderOverride: CallerMetaReaderFn | null = null;
+let noWorktreeCallerResolverOverride: NoWorktreeCallerResolverFn | null = null;
 
 /** Override the caller meta reader for newAgent tests (e.g. to isolate tests from ambient agent worktrees) */
 export function setNewAgentCallerMetaReader(fn: CallerMetaReaderFn): void {
@@ -5050,6 +5082,16 @@ export function setNewAgentCallerMetaReader(fn: CallerMetaReaderFn): void {
 /** Reset the caller meta reader override */
 export function resetNewAgentCallerMetaReader(): void {
   callerMetaReaderOverride = null;
+}
+
+/** Override trusted no-worktree caller resolution for deterministic tests. */
+export function setNewAgentNoWorktreeCallerResolver(fn: NoWorktreeCallerResolverFn): void {
+  noWorktreeCallerResolverOverride = fn;
+}
+
+/** Reset trusted no-worktree caller resolution. */
+export function resetNewAgentNoWorktreeCallerResolver(): void {
+  noWorktreeCallerResolverOverride = null;
 }
 
 /**
@@ -5681,7 +5723,8 @@ async function buildAgentSettings(
   agentType: "manager" | "worker",
   agentId: string,
   configAllow: string[],
-  configDeny: string[]
+  configDeny: string[],
+  opts: { explicitAgentIdentity?: boolean } = {},
 ): Promise<string> {
   // Start with existing project settings if available.
   // We read settings.json (the version-controlled project settings), NOT settings.local.json.
@@ -5708,8 +5751,12 @@ async function buildAgentSettings(
   const allDeny = [...new Set([...REGULAR_AGENT_DEFAULT_DENY, ...configDeny])];
 
   // Check if intercept hook should be added (reuse already-parsed baseSettings)
-  let addIntercept = false;
-  if (agentType === "manager") {
+  // worktree:false settings always install intercept-task: their explicit
+  // identity lets the handler enforce native Task/Agent spawn capability for
+  // both managers and leaves. Preserve the historical project-hook inheritance
+  // behavior for ordinary worktree agents.
+  let addIntercept = opts.explicitAgentIdentity === true;
+  if (!addIntercept && agentType === "manager") {
     const hooksObj = baseSettings.hooks as Record<string, unknown> | undefined;
     const preToolUse = hooksObj?.PreToolUse;
     if (Array.isArray(preToolUse)) {
@@ -5737,12 +5784,127 @@ async function buildAgentSettings(
       agentId,
       includeStop: true,
       interceptMatcher: addIntercept ? REGULAR_AGENT_INTERCEPT_MATCHER : null,
-      sessionStartIncludesAgentId: false,
+      sessionStartIncludesAgentId: opts.explicitAgentIdentity === true,
+      identityDependentHooksIncludeAgentId: opts.explicitAgentIdentity === true,
       includeTimestamp: true,
     }),
   };
 
   return JSON.stringify(result, null, 2);
+}
+
+/**
+ * Create the isolated Claude policy used by worktree:false agents. Existing
+ * files are never rewritten: this path is solely a compatibility migration for
+ * agents archived or spawned before isolated settings were introduced.
+ * Historical agents predate agentType but recorded the manager/worker role in
+ * `worker`; map that legacy shape to the matching built-in type. Required type
+ * failures still propagate so resume fails closed instead of borrowing the
+ * shared repo/user policy.
+ */
+async function ensureIsolatedClaudeSettings(
+  repoPath: string,
+  agentDir: string,
+  agentId: string,
+  meta: AgentMeta,
+): Promise<string> {
+  const settingsPath = join(agentDir, ".claude", "settings.local.json");
+  if (await Bun.file(settingsPath).exists().catch(() => false)) return settingsPath;
+
+  let settingsContent: string;
+  if (meta.agentType === "coordinator") {
+    const coordinatorSettings = await buildPerRepoCoordinatorSettings();
+    settingsContent = JSON.stringify({
+      ...coordinatorSettings,
+      spinnerTipsEnabled: false,
+      hooks: buildHooksBlock({
+        agentId,
+        includeStop: true,
+        interceptMatcher: COORDINATOR_INTERCEPT_MATCHER,
+        sessionStartIncludesAgentId: true,
+        identityDependentHooksIncludeAgentId: true,
+      }),
+    }, null, 2);
+  } else {
+    // This is the same legacy fallback used by detectRole/metaCanSpawnChildren:
+    // worker:true is a leaf, while false/absent is the historical manager
+    // shape. Coordinators have always carried agentType:"coordinator" and were
+    // handled above, so guessing coordinator from worker:false would be unsafe.
+    const typeName = typeof meta.agentType === "string" && meta.agentType.length > 0
+      ? meta.agentType
+      : meta.worker === true ? "worker" : "manager";
+
+    let allLayer: AgentType | undefined;
+    try { allLayer = await loadAgentType("_all"); } catch { /* optional layer */ }
+    let nonCoordinatorLayer: AgentType | undefined;
+    try { nonCoordinatorLayer = await loadAgentType("_non_coordinator"); } catch { /* optional layer */ }
+    const typeLayer = await loadAgentType(typeName);
+    const configAllow = [...new Set([
+      ...(allLayer?.permissions?.allow ?? []),
+      ...(nonCoordinatorLayer?.permissions?.allow ?? []),
+      ...(typeLayer.permissions?.allow ?? []),
+    ])];
+    const configDeny = [...new Set([
+      ...(allLayer?.permissions?.deny ?? []),
+      ...(nonCoordinatorLayer?.permissions?.deny ?? []),
+      ...(typeLayer.permissions?.deny ?? []),
+    ])];
+    const managerOrWorker: "manager" | "worker" = typeLayer.canSpawnChildren ? "manager" : "worker";
+    settingsContent = await buildAgentSettings(
+      repoPath,
+      managerOrWorker,
+      agentId,
+      configAllow,
+      configDeny,
+      { explicitAgentIdentity: true },
+    );
+  }
+
+  await mkdir(join(agentDir, ".claude"), { recursive: true });
+  await Bun.write(settingsPath, settingsContent);
+  return settingsPath;
+}
+
+/**
+ * Resolve the current trusted ib invocation without consulting PATH. Compiled
+ * releases re-exec the running ib binary itself. Source-mode launches use the
+ * running Bun executable plus this checkout's canonical CLI entry point.
+ * Either form is derived from the already-running process/code provenance, so
+ * an agent-controlled PATH entry cannot replace the metadata writer.
+ */
+export function resolveTrustedIbCommandArgs(
+  execPath: string = process.execPath,
+  sourceEntryPath: string = join(import.meta.dir, "..", "index.ts"),
+): string[] | null {
+  try {
+    const canonicalExecPath = realpathSync(execPath);
+    if (basename(canonicalExecPath) === "ib") return [canonicalExecPath];
+
+    // Development and tests run the TypeScript entry point through Bun rather
+    // than a compiled ib executable. Keep that path trusted by deriving both
+    // argv elements from the running runtime and this module, never Bun.which.
+    if (!basename(canonicalExecPath).startsWith("bun")) return null;
+    return [canonicalExecPath, realpathSync(sourceEntryPath)];
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Wrap a Claude command so the process that will exec it records its own PID
+ * first. Both /bin/sh and the optional sandbox wrappers exec in place, keeping
+ * the recorded PID identical to the parent script's $! and the final CLI.
+ */
+export function buildClaudePidBootstrapCommand(
+  agentId: string,
+  claudeCommand: string,
+  ibCommandArgs: readonly string[],
+): string {
+  if (ibCommandArgs.length === 0) {
+    throw new Error("Claude PID bootstrap requires a trusted ib command");
+  }
+  const ibCommand = ibCommandArgs.map((arg) => shellQuote(arg)).join(" ");
+  return `/bin/sh -c ${shellQuote(`${ibCommand} write-pid ${shellQuote(agentId)} "$$" || exit 1\nexec ${claudeCommand}`)}`;
 }
 
 /**
@@ -5847,10 +6009,9 @@ async function detectManagerFromCwd(cwd: string, rootRepoPath: string): Promise<
 }
 
 /**
- * Read the `meta.json` of the agent whose worktree contains `cwd`, or null when
- * `cwd` is not inside any agent worktree (primary Claude, a human shell, or a
- * top-level coordinator running from a repo root — none of which are leaf
- * agents). Used by `newAgent` to gate the spawn on the *caller's* permission.
+ * Resolve the verified agent caller for both isolated worktrees and shared-repo
+ * worktree:false sessions. The latter cannot trust cwd, env, or a caller-id
+ * flag, so it delegates to process-ancestry verification.
  *
  * Unlike `detectManagerFromCwd`, this is independent of `rootRepoPath`: it
  * reads the caller's meta from its absolute worktree path, so it still resolves
@@ -5858,17 +6019,43 @@ async function detectManagerFromCwd(cwd: string, rootRepoPath: string): Promise<
  * own worktree. It is also independent of `opts.spawnedBy` so a caller cannot
  * dodge the gate by passing `--spawned-by`.
  */
-async function readCallerMetaFromCwd(cwd: string): Promise<Record<string, unknown> | null> {
+interface ResolvedCallerContext {
+  meta: Record<string, unknown>;
+  agentDir: string;
+  repoPath: string;
+}
+
+async function readCallerMetaFromCwd(cwd: string): Promise<ResolvedCallerContext | null> {
   if (callerMetaReaderOverride !== null) {
-    return callerMetaReaderOverride(cwd);
+    const meta = await callerMetaReaderOverride(cwd);
+    if (!meta) return null;
+    return { meta, agentDir: "", repoPath: "" };
   }
+
+  // A verified shared-repo process remains authoritative even if it enters a
+  // self-created worktree-shaped cwd. Resolve it before the structural
+  // fallback so forged metadata cannot upgrade a leaf to a manager.
+  const noWorktreeCaller = await (
+    noWorktreeCallerResolverOverride ?? resolveNoWorktreeCaller
+  )(cwd);
+  if (noWorktreeCaller) return noWorktreeCaller;
+
   const agentPattern = /\/\.ittybitty\/agents\/([^/]+)\/repo/;
-  if (!agentPattern.test(cwd)) return null;
-  const callerDir = cwd.replace(/(\/\.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
-  try {
-    const meta = await Bun.file(join(callerDir, "meta.json")).json();
-    if (meta && typeof meta === "object") return meta as Record<string, unknown>;
-  } catch { /* ignore */ }
+  if (agentPattern.test(cwd)) {
+    const callerDir = cwd.replace(/(\/\.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
+    try {
+      const meta = await Bun.file(join(callerDir, "meta.json")).json();
+      if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+        const marker = cwd.indexOf("/.ittybitty/agents/");
+        return {
+          meta: meta as Record<string, unknown>,
+          agentDir: callerDir,
+          repoPath: marker >= 0 ? cwd.substring(0, marker) : "",
+        };
+      }
+    } catch { /* ignore */ }
+    return null;
+  }
   return null;
 }
 
@@ -5895,12 +6082,25 @@ export async function newAgent(
     return { ok: false, exitCode: 1, stdout: "", stderr: `Repository path contains characters unsafe for shell scripts (null bytes or newlines): ${rootRepoPath}` };
   }
 
+  // Resolve caller identity exactly once, before creating lifecycle dirs. A
+  // worktree caller is identified structurally; a shared-repo caller must pass
+  // the process-ancestry verifier. Observation/ambiguity failures are denied,
+  // never downgraded to an unrestricted human caller.
+  const callerCwd = opts?._cwd ?? process.cwd();
+  let callerContext: ResolvedCallerContext | null;
+  try {
+    callerContext = await readCallerMetaFromCwd(callerCwd);
+  } catch (err) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
   const agentsDir = join(rootRepoPath, ".ittybitty", "agents");
   const archiveDir = join(rootRepoPath, ".ittybitty", "archive");
-
-  // 2. Ensure dirs exist
-  await mkdir(agentsDir, { recursive: true });
-  await mkdir(archiveDir, { recursive: true });
 
   // Configuration
   let useWorktree = opts?.noWorktree !== true;
@@ -5983,19 +6183,40 @@ export async function newAgent(
   // 3. Auto-detect manager from cwd (only if cwd is in the same repo)
   //    Coordinators are top-level agents — never auto-detect a manager (SPEC §12.2.3)
   if (!manager && !coordinatorMode) {
-    const cwd = opts?._cwd ?? process.cwd();
-    manager = await detectManagerFromCwd(cwd, rootRepoPath);
+    const sameRepoCaller = callerContext?.repoPath &&
+      resolve(callerContext.repoPath) === resolve(rootRepoPath);
+    const callerId = callerContext && typeof callerContext.meta.id === "string"
+      ? callerContext.meta.id
+      : "";
+    manager = sameRepoCaller && callerId
+      ? callerId
+      : await detectManagerFromCwd(callerCwd, rootRepoPath);
   }
 
   // 3.5. Auto-detect spawned_by from CWD (works cross-repo, unlike manager auto-detect)
   let spawnedBy: SpawnedBy | undefined = opts?.spawnedBy;
   if (!spawnedBy) {
-    const cwd = opts?._cwd ?? process.cwd();
+    const cwd = callerCwd;
+
+    // Verified worktree and worktree:false callers share one attribution path.
+    // Per-repo coordinators retain their stable @repo sentinel so notifications
+    // survive coordinator recreation; regular shared agents use their real id.
+    if (
+      callerContext?.repoPath &&
+      typeof callerContext.meta.id === "string"
+    ) {
+      spawnedBy = {
+        agent_id: callerContext.meta.agentType === "coordinator"
+          ? `@${basename(callerContext.repoPath)}`
+          : callerContext.meta.id,
+        repo_path: callerContext.repoPath,
+      };
+    }
 
     // Case 1: Worktree agent — CWD matches /.ittybitty/agents/<id>/repo
     const agentPattern = /\/.ittybitty\/agents\/([^/]+)\/repo/;
     const worktreeMatch = cwd.match(agentPattern);
-    if (worktreeMatch) {
+    if (!spawnedBy && worktreeMatch) {
       const spawnerDir = cwd.replace(/(\/.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
       try {
         const spawnerMeta = await Bun.file(join(spawnerDir, "meta.json")).json();
@@ -6079,13 +6300,11 @@ export async function newAgent(
   // not spawn sub-agents even by pointing `--manager` at another manager that
   // can spawn — the permission belongs to the caller, not the named parent. The
   // intercept-task hook enforces this for the Task/Agent tool path, but a
-  // worker can invoke `ib new-agent` directly via Bash, which the hook never
-  // sees, so the same rule must live here. Callers not inside an agent worktree
-  // (primary Claude, a human shell, a top-level coordinator) return null and
-  // are unrestricted.
+  // worker can invoke `ib new-agent` directly via Bash, so the same rule must
+  // live here. Shared-repo agents are process-verified above; primary Claude
+  // and human shells return null and remain unrestricted.
   {
-    const callerCwd = opts?._cwd ?? process.cwd();
-    const callerMeta = await readCallerMetaFromCwd(callerCwd);
+    const callerMeta = callerContext?.meta;
     if (callerMeta && !(await metaCanSpawnChildren(callerMeta))) {
       const callerId = typeof callerMeta.id === "string" ? callerMeta.id : "this agent";
       return {
@@ -6276,6 +6495,39 @@ export async function newAgent(
   }
   const agentCli = parsed.cli;
   const modelFlagValue = parsed.model;
+
+  // Claude is the only CLI whose hook/settings lifecycle supports sharing the
+  // main checkout. Codex/Fugu require their worktree AGENTS.md + inline hook
+  // precheck, and agy requires its worktree hook/rule files. Refuse the unsafe
+  // shape before creating an agent directory, changing shared settings, or
+  // invoking a CLI-specific builder.
+  if (opts?.noWorktree === true && agentCli !== "claude") {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Error: --no-worktree is supported only for Claude agents; ${agentCli} agents require an isolated worktree`,
+    };
+  }
+
+  const usesClaudePidBootstrap = agentCli === "claude" && !useWorktree;
+  const trustedClaudeIbCommand = usesClaudePidBootstrap
+    ? resolveTrustedIbCommandArgs()
+    : null;
+  if (usesClaudePidBootstrap && !trustedClaudeIbCommand) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: "Error: worktree:false Claude launch requires the trusted running ib command",
+    };
+  }
+
+  // Do not allocate lifecycle directories until the CLI/worktree shape is
+  // known to be supported. In particular, rejected non-Claude
+  // worktree:false requests must leave an otherwise untouched repo untouched.
+  await mkdir(agentsDir, { recursive: true });
+  await mkdir(archiveDir, { recursive: true });
 
   // Codex spawn-path preconditions (SPEC §5.4 step 2 + §7 risk 14). Run
   // BEFORE any worktree/tmux work so a fail here doesn't leave residual
@@ -7072,6 +7324,7 @@ export async function newAgent(
           includeStop: true,
           interceptMatcher: COORDINATOR_INTERCEPT_MATCHER,
           sessionStartIncludesAgentId: true,
+          identityDependentHooksIncludeAgentId: true,
         }),
       };
       await mkdir(join(agentDir, ".claude"), { recursive: true });
@@ -7080,20 +7333,23 @@ export async function newAgent(
         JSON.stringify(coordSettingsObj, null, 2),
       );
     } catch { /* ignore */ }
-  } else {
-    // Non-worktree mode (non-coordinator): ensure ib permissions in root repo settings
-    const rootSettingsPath = join(rootRepoPath, ".claude", "settings.local.json");
-    try {
-      const rootSettingsFile = Bun.file(rootSettingsPath);
-      const settings = await rootSettingsFile.exists() ? await rootSettingsFile.json() : {};
-      const allow = (settings?.permissions?.allow as string[]) ?? [];
-      if (!allow.includes("Bash(ib:*)")) {
-        allow.push("Bash(ib:*)");
-      }
-      settings.permissions = { ...settings.permissions, allow };
-      await mkdir(join(rootRepoPath, ".claude"), { recursive: true });
-      await Bun.write(rootSettingsPath, JSON.stringify(settings, null, 2));
-    } catch { /* ignore */ }
+  } else if (agentCli === "claude") {
+    // Regular --no-worktree Claude agents share the main checkout with the
+    // user, so never inject agent permissions or hooks into the repo's
+    // settings.local.json. Generate the same policy as a worktree agent in an
+    // isolated file and pass it via --settings below. The PreToolUse hook reads
+    // this exact file for explicit allow/deny decisions in both kernel modes.
+    const managerOrWorker: "manager" | "worker" = isLeafAgent ? "worker" : "manager";
+    const settingsContent = await buildAgentSettings(
+      rootRepoPath,
+      managerOrWorker,
+      id,
+      configAllow,
+      configDeny,
+      { explicitAgentIdentity: true },
+    );
+    await mkdir(join(agentDir, ".claude"), { recursive: true });
+    await Bun.write(join(agentDir, ".claude", "settings.local.json"), settingsContent);
   }
 
   // 12b. Sandbox preflight (profile + proxy + collector wiring) only when the
@@ -7213,25 +7469,21 @@ When your task is complete:
   if (!isCodexBackedCli(agentCli) && effort) {
     claudeArgs = claudeArgs ? `${claudeArgs} --effort ${effort}` : `--effort ${effort}`;
   }
-  // Claude may skip its own prompts only while the kernel sandbox is active.
-  // In disabled mode its native permission flow stays intact alongside hooks.
-  // Codex and agy carry their own CLI-specific approval flags below.
+  // Enabled Claude may bypass its native permission layer because the kernel
+  // wrapper is active. Disabled Claude gets no permission-mode flag at all:
+  // its explicit PreToolUse hook returns allow/deny for every invocation, so
+  // there are no native tool prompts and the deny-by-default type policy stays
+  // authoritative. Codex/Fugu and agy own their CLI-specific flags below.
   if (!isCodexBackedCli(agentCli) && agentCli !== "agy" && preparedSandbox !== null) {
     claudeArgs = claudeArgs
       ? `${claudeArgs} --dangerously-skip-permissions`
       : "--dangerously-skip-permissions";
   }
-  // In no-worktree mode the shared project settings may contain a user's
-  // bypassPermissions default. Keep that file untouched, but scope native
-  // protection to this disabled launch explicitly.
-  if (!isCodexBackedCli(agentCli) && agentCli !== "agy" && preparedSandbox === null) {
-    claudeArgs = claudeArgs ? `${claudeArgs} --permission-mode default` : "--permission-mode default";
-  }
-  if (coordinatorMode) {
-    // Load permissions + hooks from the coordinator's isolated settings file
-    // so they don't pollute the repo's .claude/settings.local.json.
-    const coordSettingsArg = shellQuote(join(agentDir, ".claude", "settings.local.json"));
-    claudeArgs = claudeArgs ? `${claudeArgs} --settings ${coordSettingsArg}` : `--settings ${coordSettingsArg}`;
+  if (agentCli === "claude" && !useWorktree) {
+    // Coordinators and regular --no-worktree agents both load their isolated
+    // permission/hook boundary explicitly, leaving repo/user settings intact.
+    const isolatedSettingsArg = shellQuote(join(agentDir, ".claude", "settings.local.json"));
+    claudeArgs = claudeArgs ? `${claudeArgs} --settings ${isolatedSettingsArg}` : `--settings ${isolatedSettingsArg}`;
   }
 
   // 15. Write exit-check.sh
@@ -7313,12 +7565,12 @@ echo ""
 
   let startContent: string;
   if (isCodexBackedCli(agentCli)) {
-    // Codex spawn branch — SPEC §6 Phase 4. The launch line is the canonical
-    // §3.3 form: `codex -m <model> [-a never -s danger-full-access]
-    // --dangerously-bypass-hook-trust <inline -c flags> "<prompt>"`. Native
-    // approval/sandbox overrides appear only when our Seatbelt wrapper supplies
-    // the outer boundary. The path-safety + dispatcher precheck guarantees
-    // ran above (we wouldn't be here on failure). PID variable + meta-field stay
+    // Codex spawn branch — the builder owns Codex's native approval/sandbox
+    // arguments in both kernel modes. Sandbox disablement removes only our
+    // Seatbelt wrapper; Codex keeps its native workspace-write sandbox while
+    // inline hooks remain the tool-policy authority. The path-safety and
+    // dispatcher precheck guarantees ran above (we wouldn't be here on
+    // failure). PID variable + meta-field stay
     // `CLAUDE_PID` / `claude_pid` so the watchdog and other readers don't break —
     // renaming is its own follow-up.
     const { buildCodexStartContent } = await import("./codex-spawn");
@@ -7342,16 +7594,14 @@ echo ""
       sandboxExecPrefix: preparedSandbox ? sandboxLaunchPrefix.trimEnd() : undefined,
     });
   } else if (agentCli === "agy") {
-    // Antigravity CLI (`agy`) spawn branch (SPEC-ANTIGRAVITY-CLI.md §4.5). The
-    // enabled-mode launch is the D2 form: `agy --dangerously-skip-permissions
-    // --mode=accept-edits [--model <slug>] [--effort <e>] --log-file`; disabled
-    // mode omits both approval overrides and retains agy's native defaults:
-    // `agy [--model <slug>] [--effort <e>] --log-file
-    // <agentDir>/agy.log -i "$(cat <prompt>)"`. The binary-path check + the
-    // worktree files, pre-trust, and dispatcher precheck all ran above (we
-    // wouldn't be here on failure). The effort D1 rule (pass --effort only for
-    // slugs without a trailing effort suffix) is applied inside the builder,
-    // as is the `agy:default` sentinel that omits both --model and --effort.
+    // Antigravity CLI (`agy`) spawn branch. The builder owns agy's no-prompt
+    // approval arguments in both kernel modes; sandbox disablement removes only
+    // our Seatbelt wrapper, while dispatcher hooks keep enforcing the generated
+    // tool policy. The binary-path check, worktree files, pre-trust, and
+    // dispatcher precheck all ran above (we wouldn't be here on failure). The
+    // effort rule (pass --effort only for slugs without a trailing effort
+    // suffix) is applied inside the builder, as is the `agy:default` sentinel
+    // that omits both --model and --effort.
     // PID variable + meta-field stay CLAUDE_PID / claude_pid so the watchdog
     // and other readers keep working.
     const { buildAgyStartContent } = await import("./agy-spawn");
@@ -7373,6 +7623,10 @@ echo ""
       sandboxExecPrefix: preparedSandbox ? sandboxLaunchPrefix.trimEnd() : undefined,
     });
   } else {
+    const claudeCommand = `${sandboxLaunchPrefix}claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})"`;
+    const claudeLaunchCommand = usesClaudePidBootstrap
+      ? buildClaudePidBootstrapCommand(id, claudeCommand, trustedClaudeIbCommand!)
+      : claudeCommand;
     startContent = `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
@@ -7414,9 +7668,9 @@ else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid ${sandboxLaunchPrefix}claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})" 2> "$STDERR_LOG" &
+    setsid ${claudeLaunchCommand} 2> "$STDERR_LOG" &
 else
-    ${sandboxLaunchPrefix}claude --session-id "${sessionUuid}" ${claudeArgs} "$(cat ${qAbsPromptFile})" 2> "$STDERR_LOG" &
+    ${claudeLaunchCommand} 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
 log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"
@@ -7430,9 +7684,9 @@ trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; ki
 # whose symptom is benign on claude today but matters symmetrically with
 # the codex side (HIGH 2 from the Phase 4 review).
 META_JSON=${qStartMetaJson}
-if [[ -f "$META_JSON" ]]; then
+${usesClaudePidBootstrap ? `# The launch child stored this exact PID before exec, so SessionStart could not race it.` : `if [[ -f "$META_JSON" ]]; then
     ib write-pid ${shellQuote(id)} "$CLAUDE_PID" || log "write-pid failed (exit=$?); meta.json claude_pid not set"
-fi
+fi`}
 
 # Wait for Claude to complete
 wait $CLAUDE_PID

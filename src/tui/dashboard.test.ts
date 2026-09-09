@@ -982,6 +982,7 @@ describe("DashboardComponent dialog and action handlers", () => {
       id: "agent-test",
       tmux_session: "tmux-agent-test",
       worktree: false,
+      agentType: "manager",
       sandbox: { enabled: true, rawAllow: [], domains: [] },
       paths: { allowRead: [], allowWrite: [], deny: [] },
     }));
@@ -1027,6 +1028,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     // seal it so R-key resume clears the fail-closed precondition + seal-verify.
     agent.meta.sandbox = { enabled: true, rawAllow: [], domains: [] };
     agent.meta.paths = { allowRead: [], allowWrite: [], deny: [] };
+    agent.meta.agentType = "manager";
     await sealAgentRecord(actionTempDir, "agent-test", agent.meta as unknown as Record<string, unknown>, agentDir);
     setAgentState(agent, state);
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];

@@ -6,6 +6,12 @@ import { processTaskIntercept } from "./intercept-task";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { ensureAgentTypesDir } from "../agent-types";
 import { setUserHome, resetUserHome } from "../home";
+import {
+  resetBoundNoWorktreeCallerResolver,
+  resetNoWorktreeRepoRootsLoader,
+  setBoundNoWorktreeCallerResolver,
+  setNoWorktreeRepoRootsLoader,
+} from "./agent-context";
 
 /**
  * Per-process itsybitsy home for the whole file.
@@ -390,6 +396,253 @@ describe("intercept-task", () => {
     expect(hookOutput.permissionDecision).toBe("deny");
     expect((hookOutput.permissionDecisionReason as string)).toContain("spawn failed");
     expect((hookOutput.permissionDecisionReason as string)).toContain("Failed to create worktree");
+  });
+});
+
+describe("no-worktree explicit identity", () => {
+  async function setupNoWorktreeAgent(
+    agentId: string,
+    meta: Record<string, unknown>,
+  ): Promise<{ root: string; agentDir: string; cleanup: () => Promise<void> }> {
+    const fs = await import("fs/promises");
+    const root = await fs.mkdtemp(join(tmpdir(), "intercept-no-worktree-"));
+    const agentDir = join(root, ".ittybitty", "agents", agentId);
+    await fs.mkdir(agentDir, { recursive: true });
+    const storedMeta = { id: agentId, worktree: false, ...meta };
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(storedMeta));
+    setNoWorktreeRepoRootsLoader(async () => [root]);
+    setBoundNoWorktreeCallerResolver(async () => ({ meta: storedMeta, agentDir, repoPath: root }));
+    return {
+      root,
+      agentDir,
+      cleanup: async () => {
+        resetBoundNoWorktreeCallerResolver();
+        resetNoWorktreeRepoRootsLoader();
+        await fs.rm(root, { recursive: true, force: true });
+      },
+    };
+  }
+
+  test.each([".", "src/deep"])(
+    "validated manager at %s spawns a worker attributed to itself from the repository root",
+    async (relativeCwd) => {
+      const fs = await import("fs/promises");
+      const agentId = "agent-nwmanager1";
+      const ctx = await setupNoWorktreeAgent(agentId, { agentType: "manager", worker: false });
+      try {
+        const cwd = relativeCwd === "." ? ctx.root : join(ctx.root, relativeCwd);
+        await fs.mkdir(cwd, { recursive: true });
+        let capturedRepoPath = "";
+        let capturedOpts: Record<string, unknown> = {};
+        const result = await processTaskIntercept(
+          {
+            tool_name: "Task",
+            tool_input: { prompt: "implement the fix" },
+            cwd,
+            agentId,
+          },
+          {
+            spawnAgent: async (repoPath, _prompt, spawnOpts) => {
+              capturedRepoPath = repoPath;
+              capturedOpts = spawnOpts;
+              return { ok: true, stdout: "Created agent-a1b2c3d4", stderr: "" };
+            },
+          },
+        );
+
+        expect(result.action).toBe("intercept");
+        expect(capturedRepoPath).toBe(await fs.realpath(ctx.root));
+        expect(capturedOpts.type).toBe("worker");
+        expect(capturedOpts.manager).toBe(agentId);
+        expect(capturedOpts._cwd).toBe(cwd);
+      } finally {
+        await ctx.cleanup();
+      }
+    },
+  );
+
+  test("validated leaf cannot spawn through Task", async () => {
+    const agentId = "agent-nwworker01";
+    const ctx = await setupNoWorktreeAgent(agentId, { agentType: "worker", worker: true });
+    try {
+      let spawnCalled = false;
+      const result = await processTaskIntercept(
+        {
+          tool_name: "Task",
+          tool_input: { prompt: "escape leaf role" },
+          cwd: ctx.root,
+          agentId,
+        },
+        {
+          spawnAgent: async () => {
+            spawnCalled = true;
+            return { ok: true, stdout: "Created agent-deadbeef", stderr: "" };
+          },
+        },
+      );
+
+      const hookOutput = result.output as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } };
+      expect(spawnCalled).toBe(false);
+      expect(hookOutput.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(hookOutput.hookSpecificOutput.permissionDecisionReason).toContain("Workers cannot create tasks");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  test("registered no-worktree identity wins over a standalone forged worktree shape", async () => {
+    const fs = await import("fs/promises");
+    const agentId = "agent-nwouter01";
+    const ctx = await setupNoWorktreeAgent(agentId, { agentType: "manager", worker: false });
+    const fakeRoot = await fs.mkdtemp(join(tmpdir(), "intercept-standalone-fake-"));
+    try {
+      const forgedDir = join(fakeRoot, ".ittybitty", "agents", agentId);
+      const cwd = join(forgedDir, "repo");
+      await fs.mkdir(cwd, { recursive: true });
+      await Bun.write(
+        join(forgedDir, "meta.json"),
+        JSON.stringify({ id: agentId, worktree: true, agentType: "worker", worker: true }),
+      );
+      let capturedRepoPath = "";
+      let capturedManager = "";
+      const result = await processTaskIntercept(
+        {
+          tool_name: "Task",
+          tool_input: { prompt: "use the validated outer identity" },
+          cwd,
+          agentId,
+        },
+        {
+          spawnAgent: async (repoPath, _prompt, spawnOpts) => {
+            capturedRepoPath = repoPath;
+            capturedManager = String(spawnOpts.manager);
+            return { ok: true, stdout: "Created agent-a1b2c3d4", stderr: "" };
+          },
+        },
+      );
+
+      expect(result.action).toBe("intercept");
+      expect(capturedRepoPath).toBe(await fs.realpath(ctx.root));
+      expect(capturedManager).toBe(agentId);
+    } finally {
+      await ctx.cleanup();
+      await fs.rm(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("authenticated no-worktree caller cannot invoke intercept-task as a registered sibling", async () => {
+    const fs = await import("fs/promises");
+    const callerId = "agent-nwcaller01";
+    const siblingId = "agent-nwsibling01";
+    const ctx = await setupNoWorktreeAgent(callerId, { agentType: "manager", worker: false });
+    try {
+      const siblingDir = join(ctx.root, ".ittybitty", "agents", siblingId);
+      await fs.mkdir(siblingDir, { recursive: true });
+      await Bun.write(
+        join(siblingDir, "meta.json"),
+        JSON.stringify({ id: siblingId, worktree: false, agentType: "manager", worker: false }),
+      );
+      let spawnCalled = false;
+      const result = await processTaskIntercept(
+        {
+          tool_name: "Task",
+          tool_input: { prompt: "claim sibling authority" },
+          cwd: ctx.root,
+          agentId: siblingId,
+        },
+        {
+          spawnAgent: async () => {
+            spawnCalled = true;
+            return { ok: true, stdout: "Created agent-deadbeef", stderr: "" };
+          },
+        },
+      );
+
+      const hookOutput = result.output as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } };
+      expect(spawnCalled).toBe(false);
+      expect(hookOutput.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(hookOutput.hookSpecificOutput.permissionDecisionReason).toContain("Cannot validate");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  test("validated coordinator keeps Bash restrictions from a nested cwd", async () => {
+    const fs = await import("fs/promises");
+    const agentId = "agent-nwcoord01";
+    const ctx = await setupNoWorktreeAgent(agentId, { agentType: "coordinator", worker: false });
+    try {
+      const cwd = join(ctx.root, "packages", "app");
+      await fs.mkdir(cwd, { recursive: true });
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "ib list; git status" },
+        cwd,
+        agentId,
+      });
+      const hookOutput = result.output as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } };
+      expect(hookOutput.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(hookOutput.hookSpecificOutput.permissionDecisionReason).toContain("Coordinator Bash commands");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  test("unvalidated explicit identity fails closed instead of becoming primary Claude", async () => {
+    let spawnCalled = false;
+    const result = await processTaskIntercept(
+      {
+        tool_name: "Task",
+        tool_input: { prompt: "must not gain manager privileges" },
+        cwd: "/tmp/not-an-itsybitsy-repo",
+        agentId: "agent-missing01",
+      },
+      {
+        spawnAgent: async () => {
+          spawnCalled = true;
+          return { ok: true, stdout: "Created agent-deadbeef", stderr: "" };
+        },
+      },
+    );
+    const hookOutput = result.output as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } };
+    expect(spawnCalled).toBe(false);
+    expect(hookOutput.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(hookOutput.hookSpecificOutput.permissionDecisionReason).toContain("Cannot validate");
+  });
+
+  test("CLI dispatcher forwards an unauthenticated explicit id to fail-closed handling", async () => {
+    const fs = await import("fs/promises");
+    const agentId = "agent-nwdispatch1";
+    const ctx = await setupNoWorktreeAgent(agentId, { agentType: "worker", worker: true });
+    try {
+      const cwd = join(ctx.root, "nested");
+      await fs.mkdir(cwd, { recursive: true });
+      const proc = Bun.spawn(
+        ["bun", "run", join(import.meta.dir, "..", "index.ts"), "hooks", "intercept-task", agentId],
+        {
+          cwd,
+          env: { ...process.env, HOME: testHome },
+          stdin: "pipe",
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      proc.stdin.write(JSON.stringify({
+        tool_name: "AskUserQuestion",
+        tool_input: { question: "Can I?" },
+        cwd,
+      }));
+      proc.stdin.end();
+      const stdout = await new Response(proc.stdout).text();
+      const stderr = await new Response(proc.stderr).text();
+      expect(await proc.exited).toBe(0);
+      expect(stderr).toBe("");
+      const hookOutput = JSON.parse(stdout).hookSpecificOutput;
+      expect(hookOutput.permissionDecision).toBe("deny");
+      expect(hookOutput.permissionDecisionReason).toContain("Cannot validate");
+    } finally {
+      await ctx.cleanup();
+    }
   });
 });
 

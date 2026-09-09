@@ -1,9 +1,23 @@
 import { join } from "path";
 import { writeAgentState } from "../agents";
-import { resolveAgentFromCwd } from "./shared";
+import { isValidAgentId } from "../validation";
+import { resolveBoundHookAgent } from "./agent-context";
+import { resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./shared";
 
-export async function hookMarkRunning(): Promise<void> {
-  const resolved = resolveAgentFromCwd(process.cwd());
+export async function hookMarkRunning(agentId = process.argv[3] ?? ""): Promise<void> {
+  const cwd = process.cwd();
+  let resolved = agentId ? null : resolveAgentFromCwd(cwd);
+  if (agentId === SYSTEM_AGENT_ID) {
+    const system = resolveAgentFromCwd(cwd);
+    if (system?.agentId === SYSTEM_AGENT_ID) resolved = system;
+  } else if (isValidAgentId(agentId)) {
+    try {
+      const bound = await resolveBoundHookAgent(agentId, cwd);
+      resolved = { agentId, agentDir: bound.agentDir };
+    } catch {
+      return;
+    }
+  }
   if (!resolved) return;
   // guard: don't resurrect terminal states if this hook fires late
   let current: string | undefined;

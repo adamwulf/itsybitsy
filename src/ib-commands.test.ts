@@ -12,7 +12,7 @@ import {
   lstat,
 } from "fs/promises";
 import { tmpdir } from "os";
-import { chmodSync, symlinkSync } from "fs";
+import { chmodSync, realpathSync, symlinkSync } from "fs";
 import type { Agent, AgentMeta } from "./agents";
 import {
   isPidAliveCtx,
@@ -74,6 +74,8 @@ import {
   resetNewAgentSpawnRunner,
   setNewAgentCallerMetaReader,
   resetNewAgentCallerMetaReader,
+  setNewAgentNoWorktreeCallerResolver,
+  resetNewAgentNoWorktreeCallerResolver,
   autoAcceptWorkspaceTrust,
   autoAcceptWorkspaceTrustForNewAgent,
   setAgyVersionProbeTimeoutMs,
@@ -117,6 +119,8 @@ import {
   setSandboxRefreshPauseForTesting,
   teamAdd,
   writeMetaJsonAtomic,
+  buildClaudePidBootstrapCommand,
+  resolveTrustedIbCommandArgs,
 } from "./ib-commands";
 import { sealPath, readSealRecord, computeSealInputs, computeSealRecord, verifyMetaAgainstSeal, writeSealRecordDirect } from "./agent-seal";
 import {
@@ -159,6 +163,75 @@ function makeAgent(
   });
   return meta ? { ...agent, meta: { ...agent.meta, ...meta } } : agent;
 }
+
+describe("Claude PID bootstrap", () => {
+  test("uses the trusted running ib path despite a PATH shadow and preserves the launch PID", async () => {
+    const root = await mkdtemp(join(tmpdir(), "claude-pid-bootstrap-"));
+    try {
+      const shadowBinDir = join(root, "shadow-bin");
+      const trustedBinDir = join(root, "trusted-bin");
+      const trustedIb = join(trustedBinDir, "ib");
+      const recordedPid = join(root, "recorded-pid");
+      const execPid = join(root, "exec-pid");
+      const parentPid = join(root, "parent-pid");
+      const shadowMarker = join(root, "shadow-writer-ran");
+      await mkdir(shadowBinDir, { recursive: true });
+      await mkdir(trustedBinDir, { recursive: true });
+      await Bun.write(trustedIb, `#!/bin/sh\ntest "$1" = write-pid || exit 8\nprintf '%s' "$3" > '${recordedPid}'\n`);
+      await Bun.write(join(shadowBinDir, "ib"), `#!/bin/sh\nprintf shadow > '${shadowMarker}'\nexit 0\n`);
+      await Bun.write(join(shadowBinDir, "claude"), `#!/bin/sh\ntest -f '${recordedPid}' || exit 9\nprintf '%s' "$$" > '${execPid}'\n`);
+      await chmod(trustedIb, 0o755);
+      await chmod(join(shadowBinDir, "ib"), 0o755);
+      await chmod(join(shadowBinDir, "claude"), 0o755);
+      const trustedCommand = resolveTrustedIbCommandArgs(trustedIb);
+      expect(trustedCommand).toEqual([realpathSync(trustedIb)]);
+      const bootstrap = buildClaudePidBootstrapCommand("agent-bootstrap", "claude", trustedCommand!);
+      const proc = Bun.spawn(["/bin/sh", "-c", `${bootstrap} & child=$!\nprintf '%s' "$child" > '${parentPid}'\nwait "$child"`], {
+        env: { ...process.env, PATH: `${shadowBinDir}:/usr/bin:/bin` },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const stderr = await new Response(proc.stderr).text();
+      expect(await proc.exited).toBe(0);
+      expect(stderr).toBe("");
+      expect(await Bun.file(shadowMarker).exists()).toBe(false);
+      expect(await Bun.file(recordedPid).text()).toBe(await Bun.file(parentPid).text());
+      expect(await Bun.file(execPid).text()).toBe(await Bun.file(parentPid).text());
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a failing trusted writer cannot be rescued by a successful PATH shadow", async () => {
+    const root = await mkdtemp(join(tmpdir(), "claude-pid-bootstrap-fail-"));
+    try {
+      const shadowBinDir = join(root, "shadow-bin");
+      const trustedBinDir = join(root, "trusted-bin");
+      const trustedIb = join(trustedBinDir, "ib");
+      const shadowMarker = join(root, "shadow-writer-ran");
+      const claudeMarker = join(root, "claude-ran");
+      await mkdir(shadowBinDir, { recursive: true });
+      await mkdir(trustedBinDir, { recursive: true });
+      await Bun.write(trustedIb, "#!/bin/sh\nexit 7\n");
+      await Bun.write(join(shadowBinDir, "ib"), `#!/bin/sh\nprintf shadow > '${shadowMarker}'\nexit 0\n`);
+      await Bun.write(join(shadowBinDir, "claude"), `#!/bin/sh\nprintf claude > '${claudeMarker}'\n`);
+      await chmod(trustedIb, 0o755);
+      await chmod(join(shadowBinDir, "ib"), 0o755);
+      await chmod(join(shadowBinDir, "claude"), 0o755);
+      const bootstrap = buildClaudePidBootstrapCommand("agent-bootstrap", "claude", [trustedIb]);
+      const proc = Bun.spawn(["/bin/sh", "-c", bootstrap], {
+        env: { ...process.env, PATH: `${shadowBinDir}:/usr/bin:/bin` },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(await proc.exited).toBe(1);
+      expect(await Bun.file(shadowMarker).exists()).toBe(false);
+      expect(await Bun.file(claudeMarker).exists()).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("ib-commands", () => {
   // nukeAgent, nukeAllAgents, resumeAgent are now native — tested in dedicated describe blocks below
@@ -1941,7 +2014,7 @@ describe("retire → rehire recovery", () => {
   // "successfully resumes a retired no-worktree Claude agent" test above.
   async function plantRehirableArchive(
     agentId: string,
-    opts: { manager?: string | null } = {},
+    opts: { manager?: string | null; includeSettings?: boolean; worker?: boolean } = {},
   ): Promise<{ archiveKey: string; archiveDir: string }> {
     const archiveKey = `20260703-120000-${agentId}`;
     const archiveDir = join(tempDir, ".ittybitty", "archive", archiveKey);
@@ -1953,6 +2026,7 @@ describe("retire → rehire recovery", () => {
       claude_pid: "",
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       manager: opts.manager ?? null,
+      worker: opts.worker ?? false,
     }).meta;
     // Mandatory sandbox: a rehirable archive must carry an enabled sandbox +
     // paths so the reconstructed agent clears resume's fail-closed precondition
@@ -1961,6 +2035,13 @@ describe("retire → rehire recovery", () => {
     (meta as unknown as Record<string, unknown>).paths = { allowRead: [], allowWrite: [], deny: [] };
     await Bun.write(join(archiveDir, "meta.json"), JSON.stringify(meta, null, 2));
     await Bun.write(join(archiveDir, "exit-check.sh"), "#!/bin/bash\n");
+    if (opts.includeSettings !== false) {
+      await mkdir(join(archiveDir, ".claude"), { recursive: true });
+      await Bun.write(join(archiveDir, ".claude", "settings.local.json"), JSON.stringify({
+        permissions: { allow: ["Read"], deny: ["Write"] },
+        hooks: { PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${agentId}` }] }] },
+      }));
+    }
     await Bun.write(
       join(archiveDir, "retirement.json"),
       JSON.stringify({
@@ -2078,6 +2159,66 @@ describe("retire → rehire recovery", () => {
     const { readOutbox } = await import("./outbox");
     expect(await readOutbox(managerQueueDir("agent-bystander"))).toEqual([]);
   });
+
+  for (const [legacyRole, worker] of [["manager", false], ["worker", true]] as const) {
+    test(`rehire migrates a legacy worktree:false ${legacyRole} archive without agentType or isolated settings`, async () => {
+      const agentId = `agent-legacy-shared-${legacyRole}`;
+      await (await import("./agent-types")).ensureAgentTypesDir();
+      const roleTool = `Legacy${legacyRole[0]!.toUpperCase()}${legacyRole.slice(1)}Tool`;
+      await Bun.write(
+        join(tempDir, ".itsybitsy", "agent-types", `${legacyRole}.md`),
+        `---\nname: ${legacyRole}\ncanSpawnChildren: ${!worker}\npermissions:\n  allow: ["${roleTool}"]\n---\nlegacy ${legacyRole}\n`,
+      );
+      await plantRehirableArchive(agentId, { includeSettings: false, worker });
+      await mkdir(join(tempDir, ".claude"), { recursive: true });
+      const sharedSettingsPath = join(tempDir, ".claude", "settings.local.json");
+      await Bun.write(sharedSettingsPath, JSON.stringify({ permissions: { allow: ["UserOnlyTool"] } }));
+      const sharedBefore = await Bun.file(sharedSettingsPath).text();
+      const runner = successRunner();
+      setRehireSpawnRunner(runner);
+      setNukeResumeSpawnRunner(runner);
+
+      const result = await rehireAgent(agentId);
+
+      expect(result.ok).toBe(true);
+      const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+      const isolatedSettingsPath = join(agentDir, ".claude", "settings.local.json");
+      const isolated = await Bun.file(isolatedSettingsPath).json();
+      expect(isolated.permissions.allow).toContain("Bash(ib:*)");
+      expect(isolated.permissions.allow).toContain(roleTool);
+      expect(isolated.hooks.SessionStart[0].hooks[0].command).toBe(`ib hooks session-start ${agentId}`);
+      expect(isolated.hooks.PostToolUse[0].hooks[0].command).toBe(`ib hooks inject-timestamp ${agentId}`);
+      expect(JSON.stringify(isolated.hooks.PreToolUse)).toContain(`ib hooks intercept-task ${agentId}`);
+      expect(JSON.stringify(isolated.hooks)).toContain(`hook-check-path ${agentId}`);
+      expect(await Bun.file(sharedSettingsPath).text()).toBe(sharedBefore);
+      expect(await Bun.file(join(agentDir, "resume.sh")).text()).toContain(`--settings '${isolatedSettingsPath}'`);
+    });
+  }
+
+  for (const [cli, model] of [
+    ["codex", "codex:gpt-5.4-mini"],
+    ["fugu", "fugu:gpt-5.4-mini"],
+    ["agy", "agy:gemini-3.7-flash-low"],
+  ] as const) {
+    test(`rejects legacy worktree:false ${cli} rehire before reconstruction`, async () => {
+      const agentId = `archived-shared-${cli}`;
+      const { archiveDir } = await plantRehirableArchive(agentId, { includeSettings: false });
+      const archivedMeta = await Bun.file(join(archiveDir, "meta.json")).json();
+      archivedMeta.model = model;
+      await Bun.write(join(archiveDir, "meta.json"), JSON.stringify(archivedMeta));
+      await Bun.write(join(tempDir, "AGENTS.md"), "user agents content\n");
+      await mkdir(join(tempDir, ".agents"), { recursive: true });
+      await Bun.write(join(tempDir, ".agents", "hooks.json"), "user hooks content\n");
+
+      const result = await rehireAgent(agentId);
+
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain(`Cannot rehire worktree:false ${cli} agent`);
+      expect(await Bun.file(join(tempDir, ".ittybitty", "agents", agentId)).exists()).toBe(false);
+      expect(await Bun.file(join(tempDir, "AGENTS.md")).text()).toBe("user agents content\n");
+      expect(await Bun.file(join(tempDir, ".agents", "hooks.json")).text()).toBe("user hooks content\n");
+    });
+  }
 
   test("sends no rehire notice when the manager is archived/gone", async () => {
     const agentId = "agent-sub-gone";
@@ -2384,6 +2525,11 @@ describe("retire → rehire recovery", () => {
       JSON.stringify(meta, null, 2),
     );
     await Bun.write(join(archiveDir, "exit-check.sh"), "#!/bin/bash\n");
+    await mkdir(join(archiveDir, ".claude"), { recursive: true });
+    await Bun.write(join(archiveDir, ".claude", "settings.local.json"), JSON.stringify({
+      permissions: { allow: ["Read"], deny: ["Write"] },
+      hooks: { PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${agentId}` }] }] },
+    }));
     await Bun.write(
       join(archiveDir, "retirement.json"),
       JSON.stringify({
@@ -2482,8 +2628,9 @@ describe("retire → rehire recovery", () => {
     const restoredDir = join(tempDir, ".ittybitty", "agents", agentId);
     expect((await Bun.file(join(restoredDir, "meta.json")).json()).sandbox.enabled).toBe(false);
     const resume = await Bun.file(join(restoredDir, "resume.sh")).text();
-    expect(resume).toContain("--permission-mode default");
+    expect(resume).not.toContain("--permission-mode");
     expect(resume).not.toContain("--dangerously-skip-permissions");
+    expect(resume).toContain(`--settings '${join(restoredDir, ".claude", "settings.local.json")}'`);
   });
 });
 
@@ -5826,6 +5973,11 @@ describe("newAgent (native)", () => {
     spawnCalls = [];
     dispatcherDryRunCalls = [];
 
+    // Synthetic lifecycle tests do not have a real agent process rooted in
+    // their temporary repositories. Keep OS ancestry out of the shared
+    // fixture; caller-attribution cases install an explicit resolver below.
+    setNewAgentNoWorktreeCallerResolver(async () => null);
+
     // Default codex dry-run runner: capture (cmd, cwd) + succeed.
     setDispatcherDryRunSpawnRunner((cmd, cwd) => {
       dispatcherDryRunCalls.push({ cmd, cwd });
@@ -6175,7 +6327,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(withOne.allowRead).toEqual(["/opt/thing"]);
   });
 
-  test("explicit sandbox.enabled:false launches Claude without kernel/proxy/collector while preserving hooks", async () => {
+  test("explicit sandbox.enabled:false changes only the kernel wrapper and keeps hook-controlled permissions", async () => {
     await writeSandboxType("sandbox-disabled", { enabled: false });
     await mkdir(join(tempDir, ".claude"), { recursive: true });
     await Bun.write(join(tempDir, ".claude", "settings.json"), JSON.stringify({
@@ -6194,17 +6346,18 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(start).not.toContain("sandbox-log-watch");
     expect(start).not.toContain("export http_proxy=");
     expect(start).not.toContain("--dangerously-skip-permissions");
-    expect(start).toContain("--permission-mode default");
+    expect(start).not.toContain("--permission-mode");
     expect(meta.sandbox.enabled).toBe(false);
     expect(meta.sandbox_proxy_port).toBeUndefined();
     expect(meta.paths.allowRead).toContain(canonicalizeSandboxPath(tempDir));
     expect(meta.paths.allowWrite).toContain(canonicalizeSandboxPath(tempDir));
     const settings = await Bun.file(join(agentsDir, "sandbox-disabled", "repo", ".claude", "settings.local.json")).json();
     expect(JSON.stringify(settings.hooks)).toContain("hook-check-path");
+    expect(settings.permissions.deny).toContain("EnterPlanMode");
     expect(settings.permissions.defaultMode).toBeUndefined();
   });
 
-  test("disabled no-worktree Claude forces native default mode on spawn and resume without rewriting the shared default", async () => {
+  test("disabled no-worktree Claude uses isolated hooks on spawn and resume without rewriting shared settings", async () => {
     const id = "disabled-no-worktree";
     await writeSandboxType(id, { enabled: false });
     await mkdir(join(tempDir, ".claude"), { recursive: true });
@@ -6216,13 +6369,29 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     setNewAgentSummaryGenerator(async () => {});
     setWatchdogSpawnFn(() => ({ pid: 99989 }));
 
-    const spawned = await callNewAgent("native prompts", { name: id, type: id, noWorktree: true });
+    const originalSharedSettings = await Bun.file(settingsPath).text();
+    const spawned = await callNewAgent("hook permissions", { name: id, type: id, noWorktree: true });
     expect(spawned.ok).toBe(true);
     const agentDir = join(agentsDir, id);
     const start = await Bun.file(join(agentDir, "start.sh")).text();
-    expect(start).toContain("--permission-mode default");
+    const isolatedSettingsPath = join(agentDir, ".claude", "settings.local.json");
+    expect(start).not.toContain("--permission-mode");
     expect(start).not.toContain("--dangerously-skip-permissions");
-    expect((await Bun.file(settingsPath).json()).permissions.defaultMode).toBe("bypassPermissions");
+    expect(start).toContain(`--settings '${isolatedSettingsPath}'`);
+    expect(start).toContain("/bin/sh -c");
+    expect(start).toContain(realpathSync(process.execPath));
+    expect(start).toContain(realpathSync(join(import.meta.dir, "..", "index.ts")));
+    expect(start.indexOf("write-pid")).toBeLessThan(start.indexOf("exec claude"));
+    expect(start).not.toContain("ib write-pid disabled-no-worktree \"$CLAUDE_PID\"");
+    expect(await Bun.file(join(agentDir, ".hook-auth-token")).exists()).toBe(false);
+    expect(await Bun.file(settingsPath).text()).toBe(originalSharedSettings);
+    const isolated = await Bun.file(isolatedSettingsPath).json();
+    expect(isolated.permissions.allow).toContain("Bash(ib:*)");
+    expect(isolated.permissions.deny).toContain("EnterPlanMode");
+    expect(JSON.stringify(isolated.hooks)).toContain(`hook-check-path ${id}`);
+
+    // Simulate a legacy worktree:false agent created before isolated settings.
+    await rm(isolatedSettingsPath);
 
     const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
     meta.state = "stopped";
@@ -6239,10 +6408,125 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       resetSendSpawnRunner();
     }
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
-    expect(resume).toContain("--permission-mode default");
+    expect(resume).not.toContain("--permission-mode");
     expect(resume).not.toContain("--dangerously-skip-permissions");
-    expect((await Bun.file(settingsPath).json()).permissions.defaultMode).toBe("bypassPermissions");
+    expect(resume).toContain(`--settings '${isolatedSettingsPath}'`);
+    expect(resume).toContain("/bin/sh -c");
+    expect(resume).toContain(realpathSync(process.execPath));
+    expect(resume).toContain(realpathSync(join(import.meta.dir, "..", "index.ts")));
+    expect(resume.indexOf("write-pid")).toBeLessThan(resume.indexOf("exec claude"));
+    expect(resume).not.toContain("ib write-pid disabled-no-worktree \"$CLAUDE_PID\"");
+    expect(await Bun.file(settingsPath).text()).toBe(originalSharedSettings);
+    const migrated = await Bun.file(isolatedSettingsPath).json();
+    expect(migrated.hooks.SessionStart[0].hooks[0].command).toBe(`ib hooks session-start ${id}`);
+    expect(migrated.hooks.PostToolUse[0].hooks[0].command).toBe(`ib hooks inject-timestamp ${id}`);
+    expect(JSON.stringify(migrated.hooks.PreToolUse)).toContain(`ib hooks intercept-task ${id}`);
+    expect(JSON.stringify(migrated.hooks)).toContain(`hook-check-path ${id}`);
   });
+
+  for (const [legacyRole, worker] of [["manager", false], ["worker", true]] as const) {
+    test(`live resume migrates legacy worktree:false ${legacyRole} metadata without agentType`, async () => {
+      const id = `live-legacy-${legacyRole}`;
+      const roleTool = `LiveLegacy${legacyRole[0]!.toUpperCase()}${legacyRole.slice(1)}Tool`;
+      await Bun.write(
+        join(process.env.HOME!, ".itsybitsy", "agent-types", `${legacyRole}.md`),
+        `---\nname: ${legacyRole}\ncanSpawnChildren: ${!worker}\npermissions:\n  allow: ["${roleTool}"]\n---\nlegacy ${legacyRole}\n`,
+      );
+      const agentDir = join(agentsDir, id);
+      await mkdir(agentDir, { recursive: true });
+      const meta = makeAgent(id, tempDir, "stopped", {
+        state: "stopped",
+        worktree: false,
+        worker,
+        model: "claude:sonnet",
+        tmux_session: "",
+        session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        sandbox: { enabled: false, rawAllow: [], domains: [] },
+        paths: { allowRead: [tempDir], allowWrite: [tempDir], deny: [] },
+      }).meta;
+      delete (meta as AgentMeta & { agentType?: string }).agentType;
+      await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+      await mkdir(join(tempDir, ".claude"), { recursive: true });
+      const sharedSettingsPath = join(tempDir, ".claude", "settings.local.json");
+      await Bun.write(sharedSettingsPath, JSON.stringify({ permissions: { allow: ["UserOnlyTool"] } }));
+      const sharedBefore = await Bun.file(sharedSettingsPath).text();
+      setNukeResumeSpawnRunner(cleanWorktreeRunner());
+      setSendSpawnRunner(() => makeSpawnResult("", 0));
+
+      let result;
+      try {
+        result = await resumeAgent(makeAgent(id, tempDir, "stopped", meta));
+      } finally {
+        resetSendSpawnRunner();
+      }
+
+      expect(result.ok).toBe(true);
+      const isolated = await Bun.file(join(agentDir, ".claude", "settings.local.json")).json();
+      expect(isolated.permissions.allow).toContain(roleTool);
+      expect(isolated.hooks.SessionStart[0].hooks[0].command).toBe(`ib hooks session-start ${id}`);
+      expect(await Bun.file(sharedSettingsPath).text()).toBe(sharedBefore);
+    });
+  }
+
+  for (const [cli, model] of [
+    ["codex", "codex:gpt-5.4-mini"],
+    ["fugu", "fugu:gpt-5.4-mini"],
+    ["agy", "agy:gemini-3.7-flash-low"],
+  ] as const) {
+    for (const enabled of [true, false]) {
+      test(`rejects ${cli} no-worktree spawn before shared mutations when sandbox is ${enabled ? "on" : "off"}`, async () => {
+        const id = `reject-${cli}-${enabled ? "on" : "off"}`;
+        await writeSandboxType(id, { enabled, model });
+        await mkdir(join(tempDir, ".claude"), { recursive: true });
+        const sharedSettingsPath = join(tempDir, ".claude", "settings.local.json");
+        await Bun.write(sharedSettingsPath, JSON.stringify({ permissions: { allow: ["UserOnlyTool"] } }));
+        const sharedBefore = await Bun.file(sharedSettingsPath).text();
+        setNewAgentSpawnRunner(cleanWorktreeRunner());
+
+        const result = await callNewAgent("unsupported shared launch", {
+          name: id,
+          type: id,
+          noWorktree: true,
+        });
+
+        expect(result.ok).toBe(false);
+        expect(result.stderr).toContain("--no-worktree is supported only for Claude agents");
+        expect(await Bun.file(sharedSettingsPath).text()).toBe(sharedBefore);
+        expect(await lstat(agentsDir).then(() => true).catch(() => false)).toBe(false);
+        expect(await Bun.file(join(agentsDir, id)).exists()).toBe(false);
+      });
+    }
+  }
+
+  for (const [cli, model] of [
+    ["codex", "codex:gpt-5.4-mini"],
+    ["fugu", "fugu:gpt-5.4-mini"],
+    ["agy", "agy:gemini-3.7-flash-low"],
+  ] as const) {
+    test(`rejects legacy worktree:false ${cli} resume before touching shared boundary files`, async () => {
+      const id = `legacy-shared-${cli}`;
+      const agentDir = join(agentsDir, id);
+      await mkdir(agentDir, { recursive: true });
+      const agent = makeAgent(id, tempDir, "stopped", {
+        worktree: false,
+        model,
+        sandbox: { enabled: false, rawAllow: [], domains: [] },
+      });
+      await Bun.write(join(agentDir, "meta.json"), JSON.stringify(agent.meta));
+      await Bun.write(join(tempDir, "AGENTS.md"), "user agents content\n");
+      await mkdir(join(tempDir, ".agents"), { recursive: true });
+      await Bun.write(join(tempDir, ".agents", "hooks.json"), "user hooks content\n");
+
+      const result = await resumeAgent(agent);
+
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain(`Cannot resume worktree:false ${cli} agent`);
+      expect(await Bun.file(join(tempDir, "AGENTS.md")).text()).toBe("user agents content\n");
+      expect(await Bun.file(join(tempDir, ".agents", "hooks.json")).text()).toBe("user hooks content\n");
+      expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
+      expect(await Bun.file(join(agentDir, ".claude", "settings.local.json")).exists()).toBe(false);
+    });
+  }
 
   test("disabled same-ID spawn removes orphan enabled seal before launch", async () => {
     const id = "orphan-disabled-reuse";
@@ -6383,7 +6667,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(spawnCalls.some((cmd) => cmd[0] === "which" && cmd[1] === "sandbox-exec")).toBe(false);
   });
 
-  test("disabled coordinator rehire resume strips archived bypassPermissions while retaining settings hooks", async () => {
+  test("disabled coordinator rehire preserves archived settings while retaining hook authority", async () => {
     const id = "disabled-coordinator-resume";
     const agentDir = join(agentsDir, id);
     await mkdir(join(agentDir, ".claude"), { recursive: true });
@@ -6415,9 +6699,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     expect(resume).toContain("--settings");
     expect(resume).not.toContain("--dangerously-skip-permissions");
-    expect(resume).not.toContain("--permission-mode bypassPermissions");
+    expect(resume).not.toContain("--permission-mode");
     const settings = await Bun.file(join(agentDir, ".claude", "settings.local.json")).json();
-    expect(settings.permissions.defaultMode).toBeUndefined();
+    expect(settings.permissions.defaultMode).toBe("bypassPermissions");
     expect(JSON.stringify(settings.hooks)).toContain("hook-check-path");
   });
 
@@ -6454,7 +6738,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(spawnCalls.some((call) => call[0] === "codex")).toBe(false);
   });
 
-  test("sandbox-disabled Codex spawn keeps native protections and hooks but omits every kernel helper", async () => {
+  test("sandbox-disabled Codex spawn suppresses approvals, keeps workspace-write and hooks, and omits every kernel helper", async () => {
     await writeSandboxType("unsandboxed-codex", { enabled: false, model: "codex:gpt-5.4-mini" });
     setNewAgentSpawnRunner(cleanWorktreeRunner());
     setNewAgentSummaryGenerator(async () => {});
@@ -6464,8 +6748,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(result.ok).toBe(true);
     const agentDir = join(agentsDir, "unsandboxed-codex");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
-    expect(start).toContain("--dangerously-bypass-hook-trust");
-    expect(start).not.toContain("-a never");
+    expect(start).toContain("-a never -s workspace-write --dangerously-bypass-hook-trust");
     expect(start).not.toContain("-s danger-full-access");
     expect(start).not.toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(start).toContain("hooks.PreToolUse");
@@ -6822,7 +7105,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   });
 
   // ── A4 G2: ib sandbox refresh ──────────────────────────────────────────────
-  test("Codex refresh regenerates AGENTS.md from the new paths and sandbox state", async () => {
+  test("Codex refresh to disabled regenerates AGENTS.md and keeps no-prompt workspace-write hooks", async () => {
     const id = "codex-refresh-instructions";
     const oldRead = join(tempDir, "old-policy");
     const newRead = join(tempDir, "new-policy");
@@ -6866,9 +7149,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(resume).not.toContain("sandbox-exec");
     expect(resume).not.toContain("sandbox-proxy-launch");
     expect(resume).not.toContain("sandbox-log-watch");
-    expect(resume).toContain("--dangerously-bypass-hook-trust");
-    expect(resume).not.toContain("-a never");
+    expect(resume).toContain("-a never -s workspace-write --dangerously-bypass-hook-trust");
     expect(resume).not.toContain("-s danger-full-access");
+    expect(resume).toContain("hooks.PreToolUse");
     const refreshedMeta = await Bun.file(join(agentDir, "meta.json")).json();
     expect(refreshedMeta.sandbox.enabled).toBe(false);
     expect(refreshedMeta.sandbox_proxy_port).toBeUndefined();
@@ -6921,9 +7204,56 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(resume).toContain("sandbox-exec");
     expect(resume).toContain("sandbox-proxy-launch");
     expect(resume).toContain("sandbox-log-watch");
+    expect(resume).toContain("--dangerously-skip-permissions");
+    expect(resume).not.toContain("--permission-mode");
     expect(resumeCalls.some((cmd) => cmd[0] === "/usr/bin/sandbox-exec")).toBe(true);
     const repoId = await getRepoId(tempDir);
     expect(await readSealRecord(repoId, id, process.env.HOME!)).not.toBeNull();
+  });
+
+  test("refresh toggles an enabled Claude agent off without changing its hook permission boundary", async () => {
+    const id = "refresh-disable-claude";
+    await writeSandboxType(id, { enabled: true });
+    setSandboxPortAllocatorForTesting(() => 43203);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99958 }));
+    expect((await callNewAgent("enabled first", { name: id, type: id })).ok).toBe(true);
+
+    const agentDir = join(agentsDir, id);
+    const settingsPath = join(agentDir, "repo", ".claude", "settings.local.json");
+    const settingsBefore = await Bun.file(settingsPath).text();
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    meta.sandbox_proxy_pid = 99_999_999;
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+    await writeSandboxType(id, { enabled: false });
+
+    let created = false;
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      if (cmd.includes("has-session")) return makeSpawnResult("", created ? 0 : 1);
+      if (cmd.includes("new-session")) created = true;
+      if (cmd.includes("capture-pane")) return makeSpawnResult("Claude Code v1.0", 0);
+      return makeSpawnResult("", 0);
+    });
+    setSendSpawnRunner(() => makeSpawnResult("", 0));
+    try {
+      const result = await refreshAgentSandbox(makeAgent(id, tempDir, "stopped", meta));
+      expect(result.ok).toBe(true);
+    } finally {
+      resetSendSpawnRunner();
+    }
+
+    const resume = await Bun.file(join(agentDir, "resume.sh")).text();
+    expect(resume).not.toContain("sandbox-exec");
+    expect(resume).not.toContain("sandbox-proxy-launch");
+    expect(resume).not.toContain("sandbox-log-watch");
+    expect(resume).not.toContain("--dangerously-skip-permissions");
+    expect(resume).not.toContain("--permission-mode");
+    expect(await Bun.file(settingsPath).text()).toBe(settingsBefore);
+    expect(JSON.stringify((await Bun.file(settingsPath).json()).hooks)).toContain(`hook-check-path ${id}`);
+    expect((await Bun.file(join(agentDir, "meta.json")).json()).sandbox.enabled).toBe(false);
   });
 
   test("sandbox-enabled agy spawn uses the shared kernel wrapper", async () => {
@@ -6961,7 +7291,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(start).not.toContain("no kernel sandbox wrapper");
   });
 
-  test("sandbox-disabled agy spawn keeps native approvals and generated hooks but omits every kernel helper", async () => {
+  test("sandbox-disabled agy spawn suppresses approvals, keeps generated hooks, and omits every kernel helper", async () => {
     const id = "agy-unsandboxed";
     await writeSandboxType(id, { enabled: false, model: "agy:gemini-3.7-flash-low" });
     setNewAgentSummaryGenerator(async () => {});
@@ -6978,9 +7308,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const agentDir = join(agentsDir, id);
     const start = await Bun.file(join(agentDir, "start.sh")).text();
     const hooks = await Bun.file(join(agentDir, "repo", ".agents", "hooks.json")).text();
-    expect(start).toContain("agy --model 'gemini-3.7-flash-low'");
-    expect(start).not.toContain("--dangerously-skip-permissions");
-    expect(start).not.toContain("--mode=accept-edits");
+    expect(start).toContain("agy --dangerously-skip-permissions --mode=accept-edits --model 'gemini-3.7-flash-low'");
     expect(start).not.toContain("sandbox-exec");
     expect(start).not.toContain("sandbox-proxy-launch");
     expect(start).not.toContain("sandbox-log-watch");
@@ -8529,6 +8857,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // target repo (tempDir) is clean. The spawn should succeed because the
     // sub-agent inherits from tempDir's HEAD, not from _cwd.
     const dirtyCallerCwd = join(tempDir, "elsewhere");
+    await mkdir(dirtyCallerCwd, { recursive: true });
     setNewAgentSpawnRunner((cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => {
       const cmdStr = cmd.join(" ");
       // Mark the caller's cwd as dirty…
@@ -8561,6 +8890,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // the dirty target's HEAD, so the spawn must be rejected — and the error
     // message must name the *target* repo so the user knows where to commit.
     const cleanCallerCwd = join(tempDir, "elsewhere-clean");
+    await mkdir(cleanCallerCwd, { recursive: true });
     setNewAgentSpawnRunner((cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => {
       const cmdStr = cmd.join(" ");
       if (cmdStr.includes(`-C ${cleanCallerCwd} rev-parse --is-inside-work-tree`)) {
@@ -8801,6 +9131,129 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(result.stderr).toContain("stubbed-worker");
     expect(result.stderr).toContain("cannot spawn sub-agents");
     resetNewAgentCallerMetaReader();
+  });
+
+  test("verified no-worktree leaf caller cannot spawn through the native CLI", async () => {
+    const callerMeta = {
+      id: "agent-shared-leaf",
+      worker: true,
+      worktree: false,
+      agentType: "worker",
+    };
+    setNewAgentNoWorktreeCallerResolver(async () => ({
+      meta: callerMeta,
+      agentDir: join(agentsDir, "agent-shared-leaf"),
+      repoPath: tempDir,
+    }));
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+
+    const result = await newAgent(tempDir, "sub-task", {
+      name: "shared-leaf-child",
+      _cwd: join(tempDir, "packages", "feature"),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("agent-shared-leaf");
+    expect(result.stderr).toContain("cannot spawn sub-agents");
+    expect(await Bun.file(join(agentsDir, "shared-leaf-child", "meta.json")).exists()).toBe(false);
+    resetNewAgentNoWorktreeCallerResolver();
+  });
+
+  test("verified no-worktree leaf wins over forged manager metadata in cwd", async () => {
+    const leafMeta = {
+      id: "agent-shared-leaf",
+      worker: true,
+      worktree: false,
+      agentType: "worker",
+    };
+    const forgedDir = join(
+      tempDir,
+      "nested",
+      ".ittybitty",
+      "agents",
+      "forged-manager",
+    );
+    const forgedCwd = join(forgedDir, "repo");
+    await mkdir(forgedCwd, { recursive: true });
+    await Bun.write(join(forgedDir, "meta.json"), JSON.stringify({
+      id: "forged-manager",
+      worker: false,
+      worktree: true,
+      agentType: "manager",
+    }));
+    setNewAgentNoWorktreeCallerResolver(async () => ({
+      meta: leafMeta,
+      agentDir: join(agentsDir, "agent-shared-leaf"),
+      repoPath: tempDir,
+    }));
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+
+    const result = await newAgent(tempDir, "sub-task", {
+      name: "forged-cwd-child",
+      _cwd: forgedCwd,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("agent-shared-leaf");
+    expect(result.stderr).toContain("cannot spawn sub-agents");
+    expect(await Bun.file(join(agentsDir, "forged-cwd-child", "meta.json")).exists()).toBe(false);
+    resetNewAgentNoWorktreeCallerResolver();
+  });
+
+  test("verified no-worktree manager is auto-parent and spawned_by source", async () => {
+    const callerId = "agent-shared-manager";
+    const callerDir = join(agentsDir, callerId);
+    const callerMeta = {
+      id: callerId,
+      worker: false,
+      worktree: false,
+      agentType: "manager",
+    };
+    await mkdir(callerDir, { recursive: true });
+    await Bun.write(join(callerDir, "meta.json"), JSON.stringify(callerMeta));
+    const forgedDir = join(tempDir, "nested", ".ittybitty", "agents", "forged-manager");
+    const forgedCwd = join(forgedDir, "repo");
+    await mkdir(forgedCwd, { recursive: true });
+    await Bun.write(join(forgedDir, "meta.json"), JSON.stringify({
+      id: "forged-manager",
+      worker: false,
+      worktree: true,
+      agentType: "manager",
+    }));
+    setNewAgentNoWorktreeCallerResolver(async () => ({
+      meta: callerMeta,
+      agentDir: callerDir,
+      repoPath: tempDir,
+    }));
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+
+    const result = await newAgent(tempDir, "sub-task", {
+      name: "shared-manager-child",
+      _cwd: forgedCwd,
+    });
+
+    expect(result.ok).toBe(true);
+    const childMeta = await Bun.file(join(agentsDir, "shared-manager-child", "meta.json")).json();
+    expect(childMeta.manager).toBe(callerId);
+    expect(childMeta.spawned_by).toEqual({ agent_id: callerId, repo_path: realpathSync(tempDir) });
+    resetNewAgentNoWorktreeCallerResolver();
+  });
+
+  test("unverifiable no-worktree caller fails closed before agent allocation", async () => {
+    setNewAgentNoWorktreeCallerResolver(async () => {
+      throw new Error("Cannot verify no-worktree caller process identity");
+    });
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+
+    const result = await newAgent(tempDir, "sub-task", {
+      name: "unverified-shared-child",
+      _cwd: tempDir,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Cannot verify no-worktree caller process identity");
+    expect(await Bun.file(join(agentsDir, "unverified-shared-child", "meta.json")).exists()).toBe(false);
+    resetNewAgentNoWorktreeCallerResolver();
   });
 
   test("manager caller CAN spawn (no regression)", async () => {
@@ -9460,7 +9913,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const coordinatorStart = await Bun.file(join(coordRepo, ".ittybitty", "agents", "myrepo", "start.sh")).text();
     expect(coordinatorStart.indexOf("ib sandbox-log-watch")).toBeGreaterThan(0);
     expect(coordinatorStart.indexOf("ib sandbox-log-watch")).toBeLessThan(coordinatorStart.indexOf("setsid /bin/sh -c"));
-    expect(coordinatorStart.match(/sandbox-log-gate '\/usr\/bin\/sandbox-exec'/g)?.length).toBe(2);
+    expect(coordinatorStart.match(/sandbox-log-gate/g)?.length).toBe(2);
 
     const coordId = result.stdout.trim();
     const meta = await Bun.file(join(coordRepo, ".ittybitty", "agents", coordId, "meta.json")).json();
@@ -10274,7 +10727,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(isolatedSettings.hooks.Stop[0].hooks[0].command).toBe(`ib hook-status ${coordId}`);
     expect(isolatedSettings.hooks.SessionStart[0].hooks[0].command).toBe(`ib hooks session-start ${coordId}`);
     expect(isolatedSettings.hooks.PreToolUse[0].hooks[0].command).toBe(`ib hook-check-path ${coordId}`);
-    expect(isolatedSettings.hooks.PreToolUse[1].hooks[0].command).toBe("ib hooks intercept-task");
+    expect(isolatedSettings.hooks.PreToolUse[1].hooks[0].command).toBe(`ib hooks intercept-task ${coordId}`);
     expect(isolatedSettings.hooks.PermissionRequest[0].hooks[0].command).toBe(`ib hook-permission-denied ${coordId}`);
     expect(isolatedSettings.permissions.allow).toContain("Read");
     expect(isolatedSettings.permissions.allow).toContain("Bash(ib:*)");
@@ -10286,17 +10739,35 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     await rm(coordRepoDir, { recursive: true, force: true });
   });
 
-  test("non-coordinator, non-worktree agent still adds Bash(ib:*) to repo settings", async () => {
-    // The fix should NOT change behavior for non-coordinator no-worktree agents:
-    // they still need Bash(ib:*) in the repo's settings so their ib commands work.
+  test("non-coordinator no-worktree Claude isolates permissions and hooks from repo settings", async () => {
+    await mkdir(join(tempDir, ".claude"), { recursive: true });
+    const repoSettingsPath = join(tempDir, ".claude", "settings.local.json");
+    await Bun.write(repoSettingsPath, JSON.stringify({
+      permissions: { defaultMode: "bypassPermissions", allow: ["UserOnlyTool"] },
+    }));
+    const originalRepoSettings = await Bun.file(repoSettingsPath).text();
     setNewAgentSpawnRunner(mockSpawnRunner());
     const result = await callNewAgent("task", { name: "test-no-wt-perm", noWorktree: true });
     expect(result.ok).toBe(true);
 
-    const repoSettings = await Bun.file(join(tempDir, ".claude", "settings.local.json")).json();
-    expect(repoSettings.permissions.allow).toContain("Bash(ib:*)");
-    // No coordinator hooks should appear.
-    expect(repoSettings.hooks).toBeUndefined();
+    expect(await Bun.file(repoSettingsPath).text()).toBe(originalRepoSettings);
+    const agentDir = join(agentsDir, "test-no-wt-perm");
+    const isolatedSettingsPath = join(agentDir, ".claude", "settings.local.json");
+    const isolated = await Bun.file(isolatedSettingsPath).json();
+    expect(isolated.permissions.allow).toContain("Bash(ib:*)");
+    expect(isolated.permissions.allow).not.toContain("UserOnlyTool");
+    expect(isolated.hooks.PreToolUse[0].hooks[0].command).toBe("ib hook-check-path test-no-wt-perm");
+    expect(isolated.hooks.SessionStart[0].hooks[0].command).toBe("ib hooks session-start test-no-wt-perm");
+    expect(isolated.hooks.PostToolUse[0].hooks[0].command).toBe("ib hooks inject-timestamp test-no-wt-perm");
+    expect(JSON.stringify(isolated.hooks.PreToolUse)).toContain("ib hooks intercept-task test-no-wt-perm");
+    expect(isolated.hooks.UserPromptSubmit[1].hooks[0].command).toBe("ib hooks inject-timestamp test-no-wt-perm");
+    const start = await Bun.file(join(agentDir, "start.sh")).text();
+    expect(start).toContain(`--settings '${isolatedSettingsPath}'`);
+    expect(start).toContain("/bin/sh -c");
+    expect(start).toContain(realpathSync(process.execPath));
+    expect(start).toContain(realpathSync(join(import.meta.dir, "..", "index.ts")));
+    expect(start.indexOf("write-pid")).toBeLessThan(start.indexOf("\nexec "));
+    expect(start).not.toContain("ITSYBITSY_HOOK_AUTH_TOKEN");
   });
 
   test("start.sh shell-quotes paths to handle spaces and special chars", async () => {
@@ -13245,6 +13716,7 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
     agentsDir = join(tempDir, ".ittybitty", "agents");
     fakeHome = require("fs").realpathSync(await mkdtemp(join(tmpdir(), "ib-spawner-case2-home-")));
     spawnCalls = [];
+    setNewAgentNoWorktreeCallerResolver(async () => null);
 
     // Save and override HOME so listRepos reads our fake repos.json
     originalHome = process.env.HOME;

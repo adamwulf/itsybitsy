@@ -967,6 +967,50 @@ describe("CLI arg parsing", () => {
   });
 
   // ── HIGH 2 from Phase 4 review: write-pid CLI surface ─────────────────────
+  async function makeDuplicatePidFixture(worktree: boolean): Promise<{
+    root: string;
+    home: string;
+    repoA: string;
+    repoB: string;
+    agentDirA: string;
+    agentDirB: string;
+    cwdA: string;
+    cwdB: string;
+  }> {
+    const root = await mkdtemp(join(tmpdir(), "ib-pid-duplicate-"));
+    const home = join(root, "home");
+    const repoA = join(root, "repo-a");
+    const repoB = join(root, "repo-b");
+    const agentId = "agent-duplicate-pid";
+    const agentDirA = join(repoA, ".ittybitty", "agents", agentId);
+    const agentDirB = join(repoB, ".ittybitty", "agents", agentId);
+    const cwdA = worktree ? join(agentDirA, "repo") : repoA;
+    const cwdB = worktree ? join(agentDirB, "repo") : repoB;
+    await mkdir(join(home, ".itsybitsy"), { recursive: true });
+    await mkdir(agentDirA, { recursive: true });
+    await mkdir(agentDirB, { recursive: true });
+    await mkdir(cwdA, { recursive: true });
+    await mkdir(cwdB, { recursive: true });
+    await Bun.write(
+      join(home, ".itsybitsy", "repos.json"),
+      JSON.stringify({ repos: [
+        { path: repoA, name: "repo-a" },
+        { path: repoB, name: "repo-b" },
+      ] }),
+    );
+    await Bun.write(join(agentDirA, "meta.json"), JSON.stringify({
+      id: agentId,
+      worktree,
+      marker: "A",
+    }));
+    await Bun.write(join(agentDirB, "meta.json"), JSON.stringify({
+      id: agentId,
+      worktree,
+      marker: "B",
+    }));
+    return { root, home, repoA, repoB, agentDirA, agentDirB, cwdA, cwdB };
+  }
+
   test("write-pid with no args shows usage", async () => {
     const { stderr, exitCode } = await runCli(["write-pid"]);
     expect(stderr).toContain("Usage: ib write-pid <agent-id> <pid>");
@@ -1001,6 +1045,68 @@ describe("CLI arg parsing", () => {
     const { stderr, exitCode } = await runCli(["write-pid", "agent-abc", "012"]);
     expect(stderr).toContain("Invalid PID");
     expect(exitCode).toBe(1);
+  });
+
+  test("write-pid binds a duplicate no-worktree ID to the registered launcher cwd", async () => {
+    const fixture = await makeDuplicatePidFixture(false);
+    try {
+      const { stderr, exitCode } = await runCliStdin(
+        ["write-pid", "agent-duplicate-pid", "43210"],
+        "",
+        { HOME: fixture.home },
+        fixture.cwdB,
+      );
+      expect(exitCode).toBe(0);
+      expect(stderr).toBe("");
+      const metaA = await Bun.file(join(fixture.agentDirA, "meta.json")).json();
+      const metaB = await Bun.file(join(fixture.agentDirB, "meta.json")).json();
+      expect(metaA.claude_pid).toBeUndefined();
+      expect(metaB.claude_pid).toBe("43210");
+      expect(metaB.claude_pid_epoch).toBeNumber();
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  test("write-proxy-pid binds a duplicate worktree ID to the registered launcher cwd", async () => {
+    const fixture = await makeDuplicatePidFixture(true);
+    try {
+      const { stderr, exitCode } = await runCliStdin(
+        ["write-proxy-pid", "agent-duplicate-pid", "43211", "43212"],
+        "",
+        { HOME: fixture.home },
+        fixture.cwdB,
+      );
+      expect(exitCode).toBe(0);
+      expect(stderr).toBe("");
+      const metaA = await Bun.file(join(fixture.agentDirA, "meta.json")).json();
+      const metaB = await Bun.file(join(fixture.agentDirB, "meta.json")).json();
+      expect(metaA.sandbox_proxy_pid).toBeUndefined();
+      expect(metaB.sandbox_proxy_pid).toBe(43211);
+      expect(metaB.sandbox_proxy_port).toBe(43212);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  test("PID writers reject duplicate IDs when cwd is not either registered launch path", async () => {
+    const fixture = await makeDuplicatePidFixture(false);
+    try {
+      const { stderr, exitCode } = await runCliStdin(
+        ["write-pid", "agent-duplicate-pid", "43213"],
+        "",
+        { HOME: fixture.home },
+        fixture.root,
+      );
+      expect(exitCode).toBe(1);
+      expect(stderr).toContain("is not registered for launcher cwd");
+      const metaA = await Bun.file(join(fixture.agentDirA, "meta.json")).json();
+      const metaB = await Bun.file(join(fixture.agentDirB, "meta.json")).json();
+      expect(metaA.claude_pid).toBeUndefined();
+      expect(metaB.claude_pid).toBeUndefined();
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
   });
 });
 

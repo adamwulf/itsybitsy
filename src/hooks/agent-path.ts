@@ -23,6 +23,8 @@ import {
 } from "./paths-table";
 import { canonicalizeSandboxPath, resolvePreparedAccess, type PathOperation, type PreparedAccessTable } from "../sandbox";
 import { findShellMetachar } from "./shell-metachar";
+import { resolveBoundHookAgent } from "./agent-context";
+import { metaCanSpawnChildren } from "../agent-types";
 
 // Re-exported for existing callers/tests that import it from this module; the
 // definition moved to ./paths-table to break the import cycle.
@@ -70,6 +72,14 @@ export interface PathCheckContext {
   agentsDir: string;
   rootRepo: string;
   allowList: string[];
+  /**
+   * Explicit tool denials from the same generated settings file as allowList.
+   * Deny wins when a call matches both lists. Optional for translated CLI
+   * callers that already apply their deny list before delegating here.
+   */
+  denyList?: string[];
+  /** Frozen/dynamically resolved spawn capability for direct `ib new-agent`. */
+  canSpawnChildren?: boolean;
   /**
    * The prepared filesystem access table (meta.paths ∪ the spawn-keyed runtime
    * roots, plus the tmux-socket deny), built once per hook invocation by
@@ -204,20 +214,34 @@ export function protectedConfigWriteDenyReason(path: string): string {
 }
 
 /**
- * The protected-write list for a normal worktree agent: only its own meta.json
- * (the hook reads its path lists and canSpawnChildren from it).
+ * The protected-write list for a normal agent: its own meta.json (the hook
+ * reads its path lists and canSpawnChildren from it), plus the isolated Claude
+ * settings file for worktree:false agents. That agent-local file is passed via
+ * `--settings` and is the hook's allow/deny authority, so it must be immutable
+ * to the running agent just like a worktree's `.claude/settings*.json`.
  *
  * The path is canonicalized (longest-existing-prefix, resolving symlinks) so it
  * matches the realpath'd inbound path in checkFilePath even when a parent
  * directory is a symlink — `agentDir` here is derived from cwd and is NOT
  * necessarily realpath'd.
  */
-export function agentProtectedWritePaths(agentDir: string): ProtectedWritePath[] {
-  return [{
+export function agentProtectedWritePaths(
+  agentDir: string,
+  protectIsolatedClaudeSettings = false,
+): ProtectedWritePath[] {
+  const protectedPaths: ProtectedWritePath[] = [{
     path: canonicalizeSandboxPath(join(agentDir, "meta.json")),
     subtree: false,
     reason: META_WRITE_DENY_REASON,
   }];
+  if (protectIsolatedClaudeSettings) {
+    protectedPaths.push({
+      path: canonicalizeSandboxPath(join(agentDir, ".claude", "settings.local.json")),
+      subtree: false,
+      reason: SETTINGS_WRITE_DENY_REASON,
+    });
+  }
+  return protectedPaths;
 }
 
 /**
@@ -307,6 +331,18 @@ export function checkPathAccess(
   const { toolName, toolInput, cwd } = input;
   const { agentDir, worktreePath, agentsDir, rootRepo, allowList } = ctx;
 
+  // Claude's PreToolUse decision is the permission authority in both kernel
+  // modes. Enforce the generated deny list here as well as in Claude's native
+  // settings so --dangerously-skip-permissions (enabled mode) cannot erase a
+  // type-level denial. Deny has the same precedence as Claude settings: a
+  // matching deny always wins over a matching allow.
+  for (const pattern of ctx.denyList ?? []) {
+    if (!pattern) continue;
+    if (toolMatchesPattern(toolName, toolInput, pattern)) {
+      return { decision: "deny", reason: "Tool in deny list" };
+    }
+  }
+
   if (typeof cwd !== "string") {
     return invalidToolInputReason("cwd must be a string");
   }
@@ -331,6 +367,16 @@ export function checkPathAccess(
       return invalidToolInputReason("Bash requires a string command");
     }
     const command = toolInput.command;
+
+    // Direct Bash must obey the same leaf restriction as native Task tools.
+    // This is especially important for worktree:false agents, whose shared cwd
+    // cannot identify the caller inside newAgent without trusted ancestry.
+    if (
+      ctx.canSpawnChildren === false &&
+      containsIbNewAgentInvocation(command)
+    ) {
+      return { decision: "deny", reason: "Access denied: this agent cannot spawn sub-agents" };
+    }
 
     if (command.startsWith("cd ") || command === "cd") {
       // Extract cd target
@@ -1101,9 +1147,18 @@ function checkWorktreeBoundary(
   // against (e.g. the @system context — see hookCheckPath). Without the guard,
   // `"" + "/"` becomes `/`, which startsWith() matches every absolute path.
   if (agentsDir !== "" && filePath.startsWith(agentsDir + "/")) {
-    const inWorktree = filePath === worktreePath || filePath.startsWith(worktreePath + "/");
+    // A worktree:false agent's worktreePath is the shared repo root, which also
+    // contains `.ittybitty/agents`. Do not let that broad root turn every
+    // sibling agent directory into "in worktree". Its only readable lifecycle
+    // artifact beyond agent.log is the isolated settings authority; writes to
+    // that exact file were already refused by protectedWritePaths in step 6.
+    const isNoWorktree = worktreePath === resolve(agentsDir, "..", "..");
+    const inWorktree = !isNoWorktree &&
+      (filePath === worktreePath || filePath.startsWith(worktreePath + "/"));
     const isOwnLog = filePath === join(agentDir, "agent.log");
-    if (!inWorktree && !isOwnLog) {
+    const isOwnIsolatedSettings = isNoWorktree &&
+      filePath === join(agentDir, ".claude", "settings.local.json");
+    if (!inWorktree && !isOwnLog && !isOwnIsolatedSettings) {
       if (toolName === "Bash") {
         return { decision: "deny", reason: "Access denied: cannot cd into other agents' worktrees" };
       }
@@ -1178,6 +1233,35 @@ export function parseIbCommand(command: string): { subcommand: string; targetId:
 }
 
 /**
+ * Detect the capability-bearing `ib new-agent` verb without trying to parse
+ * its prompt as a target agent id. `parseIbCommand` intentionally serves
+ * manager commands that take an existing id, so quoted/multi-word new-agent
+ * prompts would otherwise evade the leaf guard. Also recognize a later shell
+ * segment in an otherwise allowed `ib ...; ib new-agent ...` command.
+ */
+function containsIbNewAgentInvocation(command: string): boolean {
+  return /(?:^|[;&|()\n])\s*ib[\t ]+new-agent(?:[\t \n]|$)/.test(command);
+}
+
+function containsInternalIbInvocation(command: string): boolean {
+  const tokens = tokenizeBashPaths(maskHeredocBodies(command));
+  if (!tokens) return true;
+  for (let i = 0; i + 1 < tokens.length; i++) {
+    const executable = stripBashSurroundingQuotes(tokens[i]!);
+    if (basename(executable) !== "ib") continue;
+    const verb = stripBashSurroundingQuotes(tokens[i + 1]!);
+    if (verb === "hooks" || /^(?:hook-check-path|hook-status|hook-permission-denied|hook-mark-running|write-pid|write-proxy-pid|sandbox-log-watch|sandbox-log-stream|sandbox-proxy|sandbox-proxy-launch)$/.test(verb)) {
+      return true;
+    }
+    if (verb === "sandbox") {
+      const action = stripBashSurroundingQuotes(tokens[i + 2] ?? "");
+      if (/^(?:seal|delete-seal|verify-seal|refresh)$/.test(action)) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Check whether a Bash `ib <cmd> <target>` call is permitted for the calling
  * agent. Manager-only commands (retire, merge, nuke, etc.) require that the
  * calling agent is listed as the target's manager in meta.json.
@@ -1189,13 +1273,6 @@ export async function checkIbCommandAccess(
   callingAgentId: string,
   agentsDir: string
 ): Promise<HookDecision | null> {
-  // @system has system-wide authority; skip relationship checks. Must come
-  // BEFORE callerRepoRoot resolution below — for @system, agentsDir is "" and
-  // resolve("", "..", "..") would resolve relative to process.cwd(), producing
-  // a misleading caller repo path. Also keeps this bypass robust against
-  // future refactors that move parsing logic.
-  if (callingAgentId === SYSTEM_AGENT_ID) return null;
-
   // Shell line continuations are removed before execution. Normalize them
   // before authorization so a continued `ib sandbox seal ...` cannot evade
   // the internal-command guard.
@@ -1214,6 +1291,19 @@ export async function checkIbCommandAccess(
   if (/(?:^|[;&|]\s*)ib\s+sandbox\s+refresh(?:\s|$)/.test(normalizedCommand)) {
     return { decision: "deny", reason: "Access denied: ib sandbox refresh is manager-only" };
   }
+
+  // Hook entry points accept an agent id because Claude invokes them outside
+  // the Bash tool. They are never valid agent-authored ib commands: allowing A
+  // to run one as B would let attacker-controlled argv select B's state or
+  // policy handler before that handler can authenticate its process context.
+  if (containsInternalIbInvocation(normalizedCommand)) {
+    return { decision: "deny", reason: "Access denied: ib lifecycle dispatch is an internal operation" };
+  }
+
+  // @system has system-wide relationship authority, but cannot invoke the
+  // internal lifecycle entry points above through its Bash tool. Legitimate
+  // launch helpers call those commands directly and never enter PreToolUse.
+  if (callingAgentId === SYSTEM_AGENT_ID) return null;
 
   // Bash(ib:*) must represent one shell command.  Otherwise a permitted
   // `ib send ...` can append a second lifecycle/internal command after `;`,
@@ -1493,6 +1583,8 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
   let agentDir: string;
   let worktreePath: string;
   let rootRepo = "";
+  let isNoWorktree = false;
+  let canSpawnChildren: boolean | undefined;
   // The prepared access table for this invocation. Both branches assign it or
   // return early on a build failure — there is no permissive default.
   let access!: PreparedAccessTable;
@@ -1528,36 +1620,29 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
       return;
     }
   } else {
-    // Resolve agent directory from cwd pattern
-    // cwd is typically: .../.ittybitty/agents/{id}/repo/...
-    const cwdMatch = cwd.match(/(.*\/.ittybitty\/agents)/);
-    agentsDir = resolve(cwdMatch ? cwdMatch[1]! : join(process.cwd(), ".ittybitty", "agents"));
-
-    agentDir = join(agentsDir, agentId);
-    worktreePath = join(agentDir, "repo");
-    let isNoWorktree = false;
-
-    // Resolve worktree to absolute path if it exists
+    // Authenticate the explicit id against an operator-registered record and
+    // either its canonical worktree cwd or its live shared-repo Claude process.
+    // Cwd-shaped metadata alone never supplies hook authority.
+    let boundContext;
     try {
-      worktreePath = await realpath(worktreePath);
+      boundContext = await resolveBoundHookAgent(agentId, cwd);
     } catch {
-      // Worktree dir doesn't exist — agent may be a non-worktree agent (e.g., coordinator)
-      isNoWorktree = true;
+      const fallbackAgentDir = join(cwd, ".ittybitty", "agents", agentId);
+      await emitPathDecision(fallbackAgentDir, toolName, toolInput, {
+        decision: "deny",
+        reason: META_UNREADABLE_DENY_REASON,
+      });
+      return;
     }
+    agentsDir = boundContext.agentsDir;
+    agentDir = boundContext.agentDir;
+    worktreePath = boundContext.worktreePath;
+    isNoWorktree = boundContext.meta.worktree === false;
 
     // Read meta.json — REQUIRED. The hook resolves its path lists from it, so a
     // missing or unparseable meta.json DENIES (fail closed) rather than building
     // a permissive table (the invariant, SPEC-PATH-ALLOWLIST.md §8).
-    let meta: Record<string, unknown> | null = null;
-    try {
-      const metaFile = Bun.file(join(agentDir, "meta.json"));
-      if (await metaFile.exists()) {
-        const parsed = await metaFile.json();
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          meta = parsed as Record<string, unknown>;
-        }
-      }
-    } catch { meta = null; }
+    const meta: Record<string, unknown> | null = boundContext.meta;
     if (!meta) {
       await emitPathDecision(agentDir, toolName, toolInput, {
         decision: "deny",
@@ -1565,7 +1650,7 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
       });
       return;
     }
-    if (meta.worktree === false) isNoWorktree = true;
+    canSpawnChildren = await metaCanSpawnChildren(meta);
 
     // For non-worktree agents (e.g., coordinators), worktreePath is the repo root
     if (isNoWorktree) {
@@ -1598,7 +1683,7 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
 
     // A normal agent may not rewrite its own meta.json (the hook reads its path
     // lists and canSpawnChildren from it).
-    protectedWritePaths = agentProtectedWritePaths(agentDir);
+    protectedWritePaths = agentProtectedWritePaths(agentDir, isNoWorktree);
 
     // Build the access table from meta.paths ∪ the spawn-keyed runtime roots. A
     // build failure (e.g. an invalid frozen paths block) denies, never fails open.
@@ -1620,21 +1705,32 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
     }
   }
 
-  // Read settings.local.json for allow list (works for both @system and worktree agents)
+  // Read the exact settings file that owns this agent's permissions. Worktree
+  // agents use their project-local file. Coordinators and regular
+  // --no-worktree agents use an isolated agent-local file passed to Claude via
+  // --settings, so consulting the repo's shared settings here would apply the
+  // wrong agent type (and could miss the hook's deny list entirely).
   let allowList: string[] = [];
+  let denyList: string[] = [];
   try {
-    const settingsPath = join(worktreePath, ".claude", "settings.local.json");
+    const agentLocalSettingsPath = join(agentDir, ".claude", "settings.local.json");
+    const settingsPath = agentId !== SYSTEM_AGENT_ID && isNoWorktree
+      ? agentLocalSettingsPath
+      : join(worktreePath, ".claude", "settings.local.json");
     const settingsFile = Bun.file(settingsPath);
     if (await settingsFile.exists()) {
       const settings = await settingsFile.json();
       if (Array.isArray(settings?.permissions?.allow)) {
         allowList = settings.permissions.allow;
       }
+      if (Array.isArray(settings?.permissions?.deny)) {
+        denyList = settings.permissions.deny;
+      }
     }
   } catch { /* ignore */ }
 
   // Check ib manager-only command access before path checks
-  const ctx: PathCheckContext = { agentId, agentDir, worktreePath, agentsDir, rootRepo, allowList, access, protectedWritePaths };
+  const ctx: PathCheckContext = { agentId, agentDir, worktreePath, agentsDir, rootRepo, allowList, denyList, canSpawnChildren, access, protectedWritePaths };
   let decision: HookDecision;
   if (toolName === "Bash") {
     const command = String(toolInput.command ?? "");

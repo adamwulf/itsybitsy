@@ -11,8 +11,238 @@
  * without copy-paste; codex behaviour is byte-identical.
  */
 
-import { join } from "path";
+import { isAbsolute, join, resolve } from "path";
 import { realpath } from "fs/promises";
+import { userInfo } from "os";
+import { isValidAgentId } from "../validation";
+import { resolveNoWorktreeCaller, type NoWorktreeCaller } from "../no-worktree-caller";
+
+export interface FindNoWorktreeAgentsDirDeps {
+  /** OS-account home containing .itsybitsy/repos.json; test-only override. */
+  registryHome?: string;
+}
+
+export type NoWorktreeRepoRootsLoader = () => Promise<string[]>;
+let noWorktreeRepoRootsLoaderOverride: NoWorktreeRepoRootsLoader | null = null;
+
+/** Test seam for handlers that call the shared resolver without dependency args. */
+export function setNoWorktreeRepoRootsLoader(loader: NoWorktreeRepoRootsLoader): void {
+  noWorktreeRepoRootsLoaderOverride = loader;
+}
+
+export function resetNoWorktreeRepoRootsLoader(): void {
+  noWorktreeRepoRootsLoaderOverride = null;
+}
+
+export type BoundNoWorktreeCallerResolver = (cwd: string) => Promise<NoWorktreeCaller | null>;
+let boundNoWorktreeCallerResolverOverride: BoundNoWorktreeCallerResolver | null = null;
+
+export function setBoundNoWorktreeCallerResolver(resolver: BoundNoWorktreeCallerResolver): void {
+  boundNoWorktreeCallerResolverOverride = resolver;
+}
+
+export function resetBoundNoWorktreeCallerResolver(): void {
+  boundNoWorktreeCallerResolverOverride = null;
+}
+
+export interface RegisteredAgentContext {
+  meta: Record<string, unknown>;
+  agentDir: string;
+  agentsDir: string;
+  repoPath: string;
+}
+
+export interface BoundHookAgentContext extends RegisteredAgentContext {
+  worktreePath: string;
+}
+
+async function registeredRepoRoots(registryHome: string): Promise<string[]> {
+  const registryFile = Bun.file(join(registryHome, ".itsybitsy", "repos.json"));
+  if (!(await registryFile.exists())) return [];
+
+  let registry: unknown;
+  try {
+    registry = await registryFile.json();
+  } catch {
+    throw new Error("Cannot resolve no-worktree agent: invalid repository registry");
+  }
+  if (
+    !registry ||
+    typeof registry !== "object" ||
+    !Array.isArray((registry as { repos?: unknown }).repos)
+  ) {
+    throw new Error("Cannot resolve no-worktree agent: invalid repository registry");
+  }
+
+  const roots = new Set<string>();
+  for (const entry of (registry as { repos: unknown[] }).repos) {
+    if (
+      !entry ||
+      typeof entry !== "object" ||
+      typeof (entry as { path?: unknown }).path !== "string" ||
+      !isAbsolute((entry as { path: string }).path)
+    ) {
+      throw new Error("Cannot resolve no-worktree agent: invalid registered repository path");
+    }
+    try {
+      roots.add(await realpath((entry as { path: string }).path));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return [...roots];
+}
+
+/**
+ * Locate a worktree:false agent by explicit id under operator-registered repo
+ * roots. Cwd and HOME are model-controlled and therefore supply no authority;
+ * the optional registry-home dependency exists only for isolated tests.
+ * Multiple matching records are ambiguous and fail closed.
+ */
+export async function resolveRegisteredAgentById(
+  agentId: string,
+  deps: FindNoWorktreeAgentsDirDeps = {},
+): Promise<RegisteredAgentContext | null> {
+  const matches = await registeredAgentCandidatesById(agentId, deps);
+  if (matches.length > 1) {
+    throw new Error(`Cannot resolve registered agent '${agentId}': ambiguous records`);
+  }
+  return matches[0] ?? null;
+}
+
+async function registeredAgentCandidatesById(
+  agentId: string,
+  deps: FindNoWorktreeAgentsDirDeps,
+): Promise<RegisteredAgentContext[]> {
+  if (!isValidAgentId(agentId)) {
+    throw new Error(`Cannot resolve registered agent: invalid id '${agentId}'`);
+  }
+  const matches: RegisteredAgentContext[] = [];
+  const repoRoots = deps.registryHome !== undefined
+    ? await registeredRepoRoots(deps.registryHome)
+    : noWorktreeRepoRootsLoaderOverride !== null
+      ? await noWorktreeRepoRootsLoaderOverride()
+      : await registeredRepoRoots(userInfo().homedir);
+  for (const rawRepoRoot of repoRoots) {
+    if (!isAbsolute(rawRepoRoot)) {
+      throw new Error("Cannot resolve no-worktree agent: invalid registered repository path");
+    }
+    let repoRoot: string;
+    try {
+      repoRoot = await realpath(rawRepoRoot);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    const candidateAgentsDir = join(repoRoot, ".ittybitty", "agents");
+    const agentDir = join(candidateAgentsDir, agentId);
+    const candidateMeta = Bun.file(join(agentDir, "meta.json"));
+    try {
+      if (!(await candidateMeta.exists())) continue;
+      const meta = await candidateMeta.json();
+      if (!meta || typeof meta !== "object" || Array.isArray(meta) || meta.id !== agentId) {
+        throw new Error(`Cannot resolve no-worktree agent '${agentId}': invalid metadata`);
+      }
+      matches.push({
+        meta: meta as Record<string, unknown>,
+        agentDir,
+        agentsDir: candidateAgentsDir,
+        repoPath: repoRoot,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Cannot resolve no-worktree agent")) {
+        throw error;
+      }
+      throw new Error(`Cannot resolve no-worktree agent '${agentId}': unreadable metadata`);
+    }
+  }
+
+  return matches;
+}
+
+/** Backward-compatible narrow lookup used by worktree:false hook handlers. */
+export async function findNoWorktreeAgentsDir(
+  agentId: string,
+  _cwd: string,
+  deps: FindNoWorktreeAgentsDirDeps = {},
+): Promise<string | null> {
+  const context = await resolveRegisteredAgentById(agentId, deps);
+  return context?.meta.worktree === false ? context.agentsDir : null;
+}
+
+/**
+ * Authenticate an explicit hook agent id. Worktree agents are bound to their
+ * canonical registered worktree cwd. Shared-repo agents are bound to the
+ * recorded live Claude process ancestry, so agent A cannot invoke a hook as B.
+ */
+export async function resolveBoundHookAgent(
+  agentId: string,
+  cwd: string,
+  deps: FindNoWorktreeAgentsDirDeps & {
+    noWorktreeCallerResolver?: BoundNoWorktreeCallerResolver;
+  } = {},
+): Promise<BoundHookAgentContext> {
+  const candidates = await registeredAgentCandidatesById(agentId, deps);
+  if (candidates.length === 0) {
+    throw new Error(`Cannot authenticate hook agent '${agentId}': no registered record`);
+  }
+
+  // Process ancestry is stronger evidence than cwd shape. Resolve it first so
+  // a shared-repo agent that enters a path resembling another registered
+  // worktree cannot be rebound to that filesystem record.
+  if (candidates.some((candidate) => candidate.meta.worktree === false)) {
+    const caller = await (
+      deps.noWorktreeCallerResolver ??
+      boundNoWorktreeCallerResolverOverride ??
+      resolveNoWorktreeCaller
+    )(cwd);
+    if (caller && caller.meta.id === agentId) {
+      let callerDir: string;
+      try {
+        callerDir = await realpath(caller.agentDir);
+      } catch {
+        throw new Error(`Cannot authenticate hook agent '${agentId}': invalid shared-repo caller`);
+      }
+      const matchingNoWorktree = candidates.filter(
+        (candidate) => candidate.meta.worktree === false && candidate.agentDir === callerDir,
+      );
+      if (matchingNoWorktree.length === 1) {
+        const registered = matchingNoWorktree[0]!;
+        return { ...registered, worktreePath: registered.repoPath };
+      }
+      throw new Error(`Cannot authenticate hook agent '${agentId}': process belongs to another agent`);
+    }
+    if (caller) {
+      throw new Error(`Cannot authenticate hook agent '${agentId}': process belongs to another agent`);
+    }
+  }
+
+  let canonicalCwd: string;
+  try {
+    canonicalCwd = await realpath(cwd);
+  } catch {
+    throw new Error(`Cannot authenticate hook agent '${agentId}': invalid worktree context`);
+  }
+
+  const worktreeMatches: BoundHookAgentContext[] = [];
+  for (const registered of candidates) {
+    if (registered.meta.worktree === false) continue;
+    let worktreePath: string;
+    try {
+      worktreePath = await realpath(join(registered.agentDir, "repo"));
+    } catch {
+      continue;
+    }
+    if (canonicalCwd === worktreePath || canonicalCwd.startsWith(worktreePath + "/")) {
+      worktreeMatches.push({ ...registered, worktreePath });
+    }
+  }
+  if (worktreeMatches.length === 1) return worktreeMatches[0]!;
+  if (worktreeMatches.length > 1) {
+    throw new Error(`Cannot authenticate hook agent '${agentId}': ambiguous registered context`);
+  }
+  throw new Error(`Cannot authenticate hook agent '${agentId}': cwd is outside its worktree`);
+}
 
 /**
  * Resolve just the (canonicalized) agent directory from an agent id + cwd.

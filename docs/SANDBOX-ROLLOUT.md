@@ -1,6 +1,6 @@
 # Staged sandbox rollout
 
-**Configuration update (2026-09-08):** sandboxing now defaults to true and accepts per-type boolean overrides (`sandbox: false` or `sandbox.enabled: false`). The most specific explicit setting wins through layers and inheritance; omission inherits. See [the type guide](agent-types/README.md). Enabled-mode failures still stop launch. Explicit false skips the itsybitsy kernel wrapper, proxy, and kernel-denial collector; hooks continue enforcing paths and native CLI sandbox/approval protections remain active. YOLO / permission-bypass flags are used only with the itsybitsy kernel sandbox enabled, at both spawn and resume. The global `@system` coordinator remains unsandboxed.
+**Configuration update (2026-09-08, clarified):** sandboxing defaults to true and accepts per-type boolean overrides (`sandbox: false` or `sandbox.enabled: false`). The most specific explicit setting wins through layers and inheritance; omission inherits. See [the type guide](agent-types/README.md). Enabled-mode failures still stop launch. Explicit false skips only the itsybitsy kernel wrapper, proxy, and kernel-denial collector and restores pre-sandbox process behavior. Hooks continue enforcing every tool/path allow or deny without native user prompts in both modes. Codex/Fugu always use `-a never`, selecting `-s danger-full-access` when wrapped and explicit `-s workspace-write` when unwrapped. Agy always uses `--dangerously-skip-permissions --mode=accept-edits` with fail-closed hooks. Claude adds `--dangerously-skip-permissions` only when wrapped; unwrapped Claude emits neither that flag nor `--permission-mode`, and PreToolUse explicitly allows or denies before native permission resolution with `permissions.deny` checked first. The global `@system` coordinator remains unsandboxed.
 
 The configuration and installation instructions below describe the current default-enabled policy. The later validation ledger records enabled-mode evidence from the earlier rollout; those results do not claim that the new override paths have been installed or live-tested.
 
@@ -33,7 +33,8 @@ kernel-sandboxed.
 - Agent types accept boolean `sandbox: true` / `sandbox: false` or object-form `sandbox.enabled`. The most specific explicit value wins across applicable layers and ancestors. Omission inherits; final resolution defaults true.
 - Spawn freezes the resolved boolean in metadata. Resume preserves explicit false and treats omitted enablement as true; enabled policy requires valid frozen paths and sealing. Use operator `ib sandbox refresh` to apply edited type settings in either direction.
 - Required runtime paths are added for the worktree, agent bookkeeping, and the selected CLI. The agy state directory is an agy-only runtime root.
-- If an enabled policy cannot establish its platform, profile, or proxy, launch fails. Explicit false skips the itsybitsy wrapper and bypass flags while native CLI protections and hooks remain active. The global coordinator remains separately unsandboxed.
+- `worktree: false` is supported only for Claude. Codex/Fugu/agy creation rejects `--no-worktree` before side effects, and resume/rehire reject non-Claude no-worktree metadata before shared-file mutation.
+- If an enabled policy cannot establish its platform, profile, or proxy, launch fails. Explicit false skips the itsybitsy wrapper/proxy/collector, not the prompt-free hook policy or invariant CLI approval flags described above. The global coordinator remains separately unsandboxed.
 
 ## Prepare the existing installation
 
@@ -42,7 +43,7 @@ kernel-sandboxed.
 3. Compare the live files with the candidate using `./ib init-types --check`. Reconcile missing entries from `docs/agent-types/_all.md`, preserving intentional type-specific restrictions. The preflight compares path/rule/domain list floors; valid enablement overrides are not errors. A zero exit is required before installation, but does not replace type validation or a live launch test.
 4. Run `./ib list-types` and resolve configuration errors. `ib init-types` alone does not update existing customized files.
 
-Preserve customized types when reconciling list floors. A path or domain denial can be addressed in its corresponding policy list; disabling the outer sandbox deliberately switches to native CLI protections plus hooks.
+Preserve customized types when reconciling list floors. A path or domain denial can be addressed in its corresponding policy list; disabling the outer sandbox deliberately restores pre-sandbox process confinement while keeping prompt-free hook authorization.
 
 ## Validate the candidate pilot
 
@@ -68,7 +69,7 @@ Test a repository worker launch with the candidate and matching helper binary. B
 - Resume, refresh, respawn, and rehire retain sandbox enforcement and clean up their proxies.
 - Each deployed CLI and a per-repository coordinator work under their profiles. The earlier Claude-only boot probe does not prove Codex, fugu, agy, or coordinator integration.
 
-Also exercise explicit false on each deployed CLI: confirm the absence of the itsybitsy wrapper and bypass flags, active native protections and hooks, and successful spawn/resume/rehire. Test refresh in both directions from an unsandboxed operator session. The global coordinator remains outside this stage.
+Also exercise explicit false on each deployed CLI: confirm the absence of the itsybitsy wrapper/proxy/collector, the presence of prompt-free hooks, Codex/Fugu `-a never -s workspace-write`, agy `--dangerously-skip-permissions --mode=accept-edits`, and neither `--dangerously-skip-permissions` nor `--permission-mode` on Claude; verify successful spawn/resume/rehire without a native approval card. For Claude, also verify deny-before-allow behavior and that a `worktree:false` agent uses its agent-local `.claude/settings.local.json` via `--settings`, the hook reads that exact policy, normal user/project settings still load and can further restrict behavior, and those source files remain unchanged. Test refresh in both directions from an unsandboxed operator session. The global coordinator remains outside this stage.
 
 ## Install and migrate running agents
 

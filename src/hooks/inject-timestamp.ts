@@ -20,6 +20,8 @@
  */
 
 import { readConfig } from "../config";
+import { isValidAgentId } from "../validation";
+import { resolveBoundHookAgent } from "./agent-context";
 import { resolveAgentFromCwd } from "./shared";
 
 /** Subset of the PostToolUse hook stdin JSON this hook reads. */
@@ -33,6 +35,10 @@ export interface InjectTimestampOutput {
     hookEventName: string;
     additionalContext: string;
   };
+}
+
+interface InjectTimestampDeps {
+  write?: (output: string) => unknown;
 }
 
 /**
@@ -134,10 +140,21 @@ export function computeTimestampOutput(opts: {
 export async function hookInjectTimestamp(
   rawStdin?: string,
   epochMs?: number,
+  agentId?: string,
+  deps: InjectTimestampDeps = {},
 ): Promise<void> {
   const raw = rawStdin ?? (await new Response(Bun.stdin.stream()).text());
 
-  const isAgentContext = resolveAgentFromCwd(process.cwd()) !== null;
+  const cwd = process.cwd();
+  let isAgentContext = agentId ? false : resolveAgentFromCwd(cwd) !== null;
+  if (agentId && isValidAgentId(agentId)) {
+    try {
+      await resolveBoundHookAgent(agentId, cwd);
+      isAgentContext = true;
+    } catch {
+      return;
+    }
+  }
 
   // Skip the config read entirely when the cwd isn't an agent worktree (the
   // common short-circuit — this hook is only wired into agent settings, so a
@@ -158,9 +175,9 @@ export async function hookInjectTimestamp(
   });
 
   if (output === null) {
-    process.exit(0);
     return;
   }
 
-  process.stdout.write(JSON.stringify(output));
+  const write = deps.write ?? ((text: string) => process.stdout.write(text));
+  write(JSON.stringify(output));
 }

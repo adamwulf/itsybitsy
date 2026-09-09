@@ -7,7 +7,8 @@
  *
  *   1. Deny-by-default. Any tool call that doesn't match the merged allow
  *      list from the agent-type layers (_all.md / _non_coordinator.md /
- *      <type>.md) is denied.
+ *      <type>.md) is denied. Deny patterns override grants in both kernel modes;
+ *      apply_patch accepts its raw name or Write/Edit aliases for tool policy.
  *   2. Path isolation. Bash commands are run through the existing
  *      checkPathAccess matcher; apply_patch's patch body is parsed for
  *      `*** Add/Update/Delete File:` directives and each target path is
@@ -48,6 +49,7 @@ import {
   agentProtectedWritePaths,
   checkPathAccess,
   checkIbCommandAccess,
+  toolMatchesPattern,
   META_UNREADABLE_DENY_REASON,
   type HookDecision,
   type PathCheckContext,
@@ -91,7 +93,9 @@ function readDefensive(
  * Behavior:
  *   - Bash: defer entirely to checkPathAccess (handles cd and shell-path
  *     parsing). Async ib-command authorization is applied by the dispatcher.
- *   - apply_patch: parse every target path from the patch body; deny if any
+ *   - Deny patterns take precedence over every tool grant, including the
+ *     Write/Edit aliases for apply_patch.
+ *   - apply_patch: require a tool grant, then parse every target path from the patch body; deny if any
  *     extracted path resolves outside the worktree (or fails the allow list).
  *     A patch with no extractable paths is denied (an apply_patch with no
  *     targets is either malformed or a probe — neither belongs in production).
@@ -102,10 +106,26 @@ function readDefensive(
 export function checkCodexPreToolUse(
   input: { toolName: string; toolInput: Record<string, unknown>; cwd: string },
   ctx: PathCheckContext,
+  denyList: string[] = [],
 ): HookDecision {
   const { toolName, toolInput, cwd } = input;
 
+  // Codex has no native agent-type deny list. Enforce it here in both kernel
+  // modes, before any allow or path decision. apply_patch combines Write and
+  // Edit, so either alias can prohibit it as well as its raw tool name.
+  const policyTools = toolName === "apply_patch" ? [toolName, "Write", "Edit"] : [toolName];
+  if (denyList.some((pattern) => pattern && policyTools.some(
+    (name) => toolMatchesPattern(name, toolInput, pattern),
+  ))) {
+    return { decision: "deny", reason: "tool denied by agent-type deny list" };
+  }
+
   if (toolName === "apply_patch") {
+    if (!ctx.allowList.some((pattern) => policyTools.some(
+      (name) => toolMatchesPattern(name, toolInput, pattern),
+    ))) {
+      return { decision: "deny", reason: "Tool not in allow list" };
+    }
     if (typeof toolInput.command !== "string") {
       return {
         decision: "deny",
@@ -125,8 +145,9 @@ export function checkCodexPreToolUse(
     // apply_patch target is a synthesized Write: it resolves through
     // checkPathAccess against ctx.access (meta.paths ∪ the runtime roots), which
     // denies by default — the worktree, project dir and scratchpad pass as
-    // runtime roots, everything else is denied. apply_patch's "allow list" is
-    // path-only by intent (SPEC §5.5 — apply_patch is codex's Write+Edit).
+    // runtime roots, everything else is denied. The tool policy above accepts
+    // the raw apply_patch name or its Write/Edit aliases; the synthetic Write
+    // below checks paths without requiring a second tool grant.
     for (const target of targets) {
       const synthesized = {
         toolName: "Write",
@@ -333,7 +354,7 @@ export async function hookCodexPreToolUse(
     const ibDecision = toolName === "Bash"
       ? await checkIbCommandAccess(String(toolInput.command ?? ""), agentId, ctxResolved.agentsDir)
       : null;
-    const decision = ibDecision ?? checkCodexPreToolUse({ toolName, toolInput, cwd }, ctx);
+    const decision = ibDecision ?? checkCodexPreToolUse({ toolName, toolInput, cwd }, ctx, permissions.deny);
 
     if (decision.decision === "allow") {
       write(buildCodexAllowOutput(toolInput));

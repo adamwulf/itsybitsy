@@ -6,10 +6,18 @@ Status: **Phases 1–3 MERGED on `agent/antigravity` (Phase 1 `7cf0e65`, Phase 2
 `paths:` policy and kernel sandbox. Sandbox enablement defaults to true; the
 most-specific explicit `sandbox: true` / `sandbox: false` or `sandbox.enabled`
 value wins across type layers and inheritance. Enabled launches and resumes
-require the kernel wrapper and egress proxy, and may bypass native prompts.
-Disabled launches and resumes omit the wrapper, proxy, and native approval
-bypass flags; generated hooks remain active alongside agy's native protections.
+require the kernel wrapper and egress proxy. Both modes launch with
+`--dangerously-skip-permissions --mode=accept-edits`; the generated fail-closed
+hooks remain authoritative for every tool allow/deny so no native user approval
+prompt is surfaced. Disabled launches and resumes omit only the itsybitsy
+wrapper, proxy, and kernel-denial collector, restoring pre-sandbox agy behavior.
 Refresh applies the newly resolved policy through the shared lifecycle.
+
+Agy requires a real agent worktree for its generated hooks, always-on rule,
+tracked-file guard, and dispatcher prechecks. Creation rejects `--no-worktree`
+before side effects. Resume and rehire reject any agy `worktree: false`
+metadata before regenerating those files, changing trusted-workspace state, or
+touching other shared files. No partial no-worktree setup is supported.
 
 `meta.paths` plus agy-appropriate runtime roots feed `resolvePreparedAccess()`.
 A missing paths block defaults all three lists to empty; a partial object keeps
@@ -22,7 +30,7 @@ kernel state. [SPEC.md](SPEC.md) and
 
 ## 1. Summary & goal
 
-A user selects `agy:<model-slug>` as an agent's model (e.g. `agy:gemini-3.7-flash-low`, `agy:claude-sonnet-4-6`). itsybitsy launches the **interactive `agy` TUI inside tmux**, exactly as it launches `claude` and `codex`. A **generated PreToolUse hook** translates the same agent-type allow/deny lists into `agy` tool calls, **deny-by-default**. With the kernel sandbox enabled, native approval prompts are bypassed inside the wrapper. With it disabled, native approval behavior remains in effect. The agent's role instructions are delivered through an **always-on rule file** in the worktree. Auth is the user's job (one browser sign-in; credentials live in the keyring).
+A user selects `agy:<model-slug>` as an agent's model (e.g. `agy:gemini-3.7-flash-low`, `agy:claude-sonnet-4-6`). itsybitsy launches the **interactive `agy` TUI inside tmux**, exactly as it launches `claude` and `codex`. A **generated PreToolUse hook** translates the same agent-type allow/deny lists into `agy` tool calls, **deny-by-default** and fail-closed. Agy always uses `--dangerously-skip-permissions --mode=accept-edits`; hook decisions therefore allow or deny without native user prompts in either kernel mode. The agent's role instructions are delivered through an **always-on rule file** in the worktree. Auth is the user's job (one browser sign-in; credentials live in the keyring).
 
 Non-goals (v1): no headless `-p` loop; no `agy` custom agents (`--agent`); no coordinators under `agy`; no new dashboard panes.
 
@@ -33,8 +41,8 @@ Non-goals (v1): no headless `-p` loop; no `agy` custom agents (`--agent`); no co
 | # | Decision | Why (evidence in NOTES §17) |
 |---|---|---|
 | D1 | Selector is `agy:<slug>`; the slug is the first column of `agy models` and is passed verbatim to `--model`. Bare names are rejected as for every CLI. `--effort <low\|medium\|high>` is passed only when the slug does **not** already end in `-low`/`-medium`/`-high` (Gemini slugs encode effort; passing both would be ambiguous). itsybitsy's `xhigh`/`max` map to `high`, as for codex. **The reserved slug `agy:default` is a sentinel: it launches agy with **no** `--model` and **no** `--effort`, so agy uses its own configured default model (currently Gemini 3.8 Flash High). It is never sent to `--model` — an unknown slug makes agy print "model not recognized" and fall back anyway, so we omit the flag instead.** | `agy models` output; `--help`; the `agy --model gemini` warning |
-| D2 | Launch = `agy [--model <slug>] [--effort <e>] --log-file <agentDir>/agy.log -i "<prompt>"` in tmux. Only enabled kernel mode adds `--dangerously-skip-permissions --mode=accept-edits` beneath the kernel wrapper. Disabled mode omits both overrides. Resume uses the same policy with `--conversation <uuid>` and no `-i`. The `--model`/`--effort` pair is omitted entirely for the `agy:default` sentinel (D1). | A hook `allow` cannot suppress the permission card, but under skip-permissions nothing prompts and a hook `deny` still blocks. `-i` runs the prompt and stays interactive. Resume re-passes model and effort except for the default sentinel. |
-| D3 | **The PreToolUse hook is installed in both kernel modes.** It is registered in `<worktree>/.agents/hooks.json` under the named hook `ittybitty` for `PreToolUse` (matcher `*`), `PreInvocation`, and `Stop`, each `command` = `<abs ib> hooks agy-<event> <agentId>`, `timeout` 30. Enabled mode requires the shared kernel wrapper; disabled mode retains native protections and hook checks. | Hooks load from the workspace file only; there is no inline flag. The hook gates paths through the shared `paths:` resolver, but remains a hook-only boundary for shell command shapes its advisory scanner cannot model. |
+| D2 | Launch = `agy --dangerously-skip-permissions --mode=accept-edits [--model <slug>] [--effort <e>] --log-file <agentDir>/agy.log -i "<prompt>"` in tmux in both modes. Resume uses the same flags with `--conversation <uuid>` and no `-i`. Enabled mode places that command beneath the kernel wrapper; disabled mode omits only the itsybitsy wrapper/proxy/collector. The `--model`/`--effort` pair is omitted entirely for the `agy:default` sentinel (D1). | A hook `allow` cannot suppress the permission card by itself, but under skip-permissions nothing prompts and a hook `deny` still blocks. `-i` runs the prompt and stays interactive. Resume re-passes model and effort except for the default sentinel. |
+| D3 | **The PreToolUse hook is installed in both kernel modes and is authoritative for tool approvals.** It is registered in `<worktree>/.agents/hooks.json` under the named hook `ittybitty` for `PreToolUse` (matcher `*`), `PreInvocation`, and `Stop`, each `command` = `<abs ib> hooks agy-<event> <agentId>`, `timeout` 30. Enabled mode additionally requires the shared kernel wrapper; disabled mode restores pre-sandbox process behavior with the same prompt-free, fail-closed hook checks. | Hooks load from the workspace file only; there is no inline flag. The hook gates paths through the shared `paths:` resolver, but remains a hook-only boundary for shell command shapes its advisory scanner cannot model. |
 | D4 | The hook contract is **fail-closed**: crash, non-JSON, `{}`, and timeout all deny. The dispatcher still wraps everything in try/catch and emits an explicit deny with a reason so denials are logged, and exits 0. | Verified for all three failure shapes. |
 | D5 | **Pre-trust the worktree before launch.** Add `realpath(worktree)` to `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json` (read-modify-write, preserve every other key, guarded by an itsybitsy lock file) before the tmux session starts. Remove the entry at teardown, best effort. The watchdog auto-accepts the trust card only as a fallback. | In an untrusted directory `-i` submits the prompt ~2 s after launch, before the card is answered, with no hooks and no rules loaded. Pre-trusted: hooks load at +30 ms, first turn is gated. |
 | D6 | Instructions go in `<worktree>/.agents/rules/ittybitty-agent.md` with frontmatter `trigger: always_on`. Body = the session-start template (wrapper stripped) + inlined project `CLAUDE.md` + inlined user `~/.claude/CLAUDE.md` + the skills catalogue. Never overwrite `AGENTS.md`. No `--agent`. | A bare rule file is ignored; with `trigger: always_on` it loads alongside the repo's own `AGENTS.md`. Workspace custom agents are not discovered; a global one drops the workspace rules. `agy` has no `@file` import. |
@@ -128,7 +136,8 @@ kernel boundary.
 
 1. Resolve and freeze sandbox policy. Enabled mode requires the shared kernel
    wrapper, seal, and egress proxy; missing required components fail closed.
-   Disabled mode omits these and the native approval bypass flags. The earlier
+   Disabled mode omits those itsybitsy components but retains
+   `--dangerously-skip-permissions --mode=accept-edits` and the hooks. The earlier
    diagnostic `agy --version` probe may already have run.
 2. Skip `.claude/settings.local.json`.
 3. Refuse if `git ls-files --error-unmatch` reports either worktree file as tracked (D7).
@@ -184,8 +193,10 @@ Watchdog gating + two answers + heartbeat check; `parseStateForCli` agy branch w
    `paths.allowRead` / `paths.allowWrite` and logs them, so a direct
    `cat ~/.ssh/id_rsa` no longer represents the current behavior. It is not a
    complete shell parser: dynamic expansion, subprocesses, and unrecognized
-   command shapes can evade classification. This limitation remains when kernel sandboxing is disabled, alongside native
-   CLI protections. Enabled mode additionally enforces the kernel policy.
+   command shapes can evade classification. This limitation remains when kernel
+   sandboxing is disabled: pre-sandbox process behavior is restored, but the
+   same prompt-free, fail-closed hooks remain. Enabled mode additionally
+   enforces the kernel policy.
 10. **macOS Gatekeeper can stall every agy exec in the dynamic loader when the quarantined Homebrew binary's notarization check cannot reach Apple** (observed 2026-09-02 02:18 CDT: `syspolicyd` 'Security policy would not allow process' + a 30 s QUIC lookup with 0 bytes); the spawn then sits at a blank pane with no agy log; remedy is on the user side (approve or de-quarantine the binary).
 
 ---

@@ -89,6 +89,26 @@ describe("buildHooksBlock — byte-identical with prior inline literals", () => 
     expect(JSON.stringify(result, null, 2)).toBe(JSON.stringify(expected, null, 2));
   });
 
+  test("worktree:false settings pass explicit identity to every cwd-sensitive hook", () => {
+    const id = "agent-shared";
+    const result = buildHooksBlock({
+      agentId: id,
+      includeStop: true,
+      interceptMatcher: REGULAR_AGENT_INTERCEPT_MATCHER,
+      sessionStartIncludesAgentId: true,
+      identityDependentHooksIncludeAgentId: true,
+      includeTimestamp: true,
+    }) as Record<string, Array<{ hooks?: Array<{ command?: string }> }>>;
+
+    expect(JSON.stringify(result.SessionStart)).toContain(`ib hooks session-start ${id}`);
+    expect(JSON.stringify(result.PreToolUse)).toContain(`ib hooks intercept-task ${id}`);
+    expect(JSON.stringify(result.PostToolUse)).toContain(`ib hooks inject-timestamp ${id}`);
+    expect(JSON.stringify(result.UserPromptSubmit)).toContain(`ib hooks inject-timestamp ${id}`);
+    expect(JSON.stringify(result.Stop)).toContain(`ib hook-status ${id}`);
+    expect(JSON.stringify(result.PermissionRequest)).toContain(`ib hook-permission-denied ${id}`);
+    expect(JSON.stringify(result.UserPromptSubmit)).toContain(`ib hook-mark-running ${id}`);
+  });
+
   test("intercept matcher constants match the original literals", () => {
     expect(COORDINATOR_INTERCEPT_MATCHER).toBe("Task|Agent|TaskCreate|Bash|AskUserQuestion");
     expect(REGULAR_AGENT_INTERCEPT_MATCHER).toBe("Task|Agent|TaskCreate|Bash|AskUserQuestion");

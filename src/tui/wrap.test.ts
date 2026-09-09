@@ -327,6 +327,48 @@ describe("separator collapse (─ divider truncation, pinned-width fix)", () => 
     expect(isSepRow(rows[0]!)).toBe(true);
   });
 
+  test("a 1000-col heavy table-header separator truncates to exactly ONE row", () => {
+    const sep = "━".repeat(1000);
+    const rows = wordWrapSingleLine(sep, 80);
+    expect(rows.length).toBe(1);
+    expect(visibleWidth(rows[0]!)).toBe(80);
+    expect(stripAnsi(rows[0]!).trim()).toMatch(/^━+$/);
+  });
+
+  test("a segmented heavy table-header rule truncates instead of wrapping", () => {
+    const headerRule = `${"━".repeat(40)}  ${"━".repeat(160)}`;
+    const rows = wordWrapSingleLine(headerRule, 80);
+    expect(rows.length).toBe(1);
+    expect(visibleWidth(rows[0]!)).toBe(80);
+    expect(stripAnsi(rows[0]!).trim()).toMatch(/^━+(?:  ━+)?$/);
+  });
+
+  test("an indented ANSI-styled heavy table-header rule still truncates", () => {
+    const headerRule = `  \x1b[1m${"━".repeat(40)}\x1b[0m  \x1b[2m${"━".repeat(160)}\x1b[0m`;
+    const rows = wordWrapSingleLine(headerRule, 80);
+    expect(rows.length).toBe(1);
+    expect(visibleWidth(rows[0]!)).toBe(80);
+    expect(stripAnsi(rows[0]!).startsWith("  ━")).toBe(true);
+  });
+
+  test.each([
+    ["one-space", " "],
+    ["three-space", "   "],
+  ])("a %s heavy-run gap is not classified as a table-header rule", (_name, gap) => {
+    const nearMiss = `${"━".repeat(40)}${gap}${"━".repeat(160)}`;
+    const rows = wordWrapSingleLine(nearMiss, 80);
+    expect(rows.length).toBeGreaterThan(1);
+    expect(rows.join("").replace(/\s/g, "")).toBe(nearMiss.replace(/\s/g, ""));
+  });
+
+  test("heavy-bar-decorated prose still wraps without losing content", () => {
+    const prose =
+      "━ This is an ordinary long heading whose contents must remain visible when wrapping across a narrow pane ━━━━";
+    const rows = wordWrapSingleLine(prose, 30);
+    expect(rows.length).toBeGreaterThan(1);
+    expect(rows.join(" ").replace(/\s+/g, " ").trim()).toBe(prose);
+  });
+
   test("wordWrapLines collapses each of several logical separators to one row", () => {
     const sep = "─".repeat(1000);
     const text = ["content above", sep, "content between", sep, "content below"].join("\n");
@@ -1110,5 +1152,319 @@ describe("table reflow (┌┬┐ frames re-laid out at pane width)", () => {
       expect(firstColCells).toContain("1");
       expect(firstColCells.some((c) => c.includes("0 1"))).toBe(false);
     });
+  });
+});
+
+describe("borderless Codex table reflow (per-cell wrapping)", () => {
+  function renderTable(rows: string[][], widths: number[]): string[] {
+    const rule = (char: "━" | "─") =>
+      "  " + widths.map((width) => char.repeat(width + 2)).join("  ");
+    const row = (cells: string[]) =>
+      (
+        "  " +
+        cells
+          .map(
+            (cell, i) =>
+              " " + cell + " ".repeat(Math.max(0, widths[i]! - visibleWidth(cell)) + 1),
+          )
+          .join("  ")
+      ).trimEnd();
+    const output = [row(rows[0]!), rule("━")];
+    for (let i = 1; i < rows.length; i++) {
+      if (i > 1) output.push(rule("─"));
+      output.push(row(rows[i]!));
+    }
+    return output;
+  }
+
+  const realistic = renderTable(
+    [
+      ["", "AllumeServices → AllumeSync → AllumeModel", "AllumeSync → AllumeServices → AllumeModel"],
+      [
+        "Smaller services use",
+        "APIs and types owned by sync",
+        "Protocols owned by the consuming services",
+      ],
+      [
+        "Boundary design",
+        "Simpler initially; follows existing concrete references",
+        "More work initially; forces us to specify what each service actually needs",
+      ],
+      [
+        "Main risk",
+        "A broad sync API becomes the shared interface for everything",
+        "One enormous sync protocol recreates the same coupling behind an interface",
+      ],
+    ],
+    [22, 62, 76],
+  );
+
+  test("wraps each cell independently and keeps continuations in their column", () => {
+    const width = 78;
+    const rows = wordWrapLines(realistic.join("\n"), width);
+    for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(width);
+
+    const heavy = rows.find((row) => /^ *━+(?:  ━+)+$/.test(stripAnsi(row)))!;
+    const segments = Array.from(stripAnsi(heavy).matchAll(/━+/g));
+    expect(segments.length).toBe(3);
+    const thirdCellStart = segments[2]!.index! + 1;
+    const continuation = rows.find((row) => stripAnsi(row).includes("what each service"))!;
+    const plainContinuation = stripAnsi(continuation);
+    expect(plainContinuation.indexOf("what each service")).toBe(thirdCellStart);
+    expect(plainContinuation.slice(thirdCellStart)).toStartWith("what each service");
+
+    const joined = rows.join(" ");
+    for (const word of realistic.join(" ").match(/[A-Za-z]+/g) ?? []) {
+      expect(joined).toContain(word);
+    }
+  });
+
+  test("passes a fitting styled table through byte-identical", () => {
+    const table = renderTable(
+      [
+        ["Name", "Meaning"],
+        ["Alpha", "A short value"],
+      ],
+      [8, 20],
+    ).map((line) => `\x1b[2m${line}\x1b[0m`);
+    expect(wordWrapLines(table.join("\n"), 80)).toEqual(table);
+  });
+
+  test("strips styling from an overflowing table while preserving its content", () => {
+    const linkOpen = "\x1b]8;;https://example.com\x1b\\";
+    const linkClose = "\x1b]8;;\x1b\\";
+    const table = renderTable(
+      [
+        ["Name", "Meaning"],
+        ["Alpha", "a deliberately long styled value"],
+      ],
+      [8, 50],
+    ).map((line) => `${linkOpen}\x1b[2m${line}\x1b[0m${linkClose}`);
+    const rows = wordWrapLines(table.join("\n"), 30);
+    for (const row of rows) {
+      expect(visibleWidth(row)).toBeLessThanOrEqual(30);
+      expect(row).not.toContain("\x1b");
+    }
+    const plain = stripAnsi(rows.join(" "));
+    for (const word of ["deliberately", "long", "styled", "value"]) {
+      expect(plain).toContain(word);
+    }
+  });
+
+  test("reflows a one-body-row table and respects wide Unicode cell widths", () => {
+    const table = renderTable(
+      [
+        ["Kind", "Value"],
+        ["Unicode", "你好 🙂 content stays in the value cell when it wraps"],
+      ],
+      [10, 80],
+    );
+    const rows = wordWrapLines(table.join("\n"), 36);
+    for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(36);
+    expect(rows.join(" ")).toContain("你好");
+    expect(rows.join(" ")).toContain("🙂");
+    expect(rows.join(" ")).toContain("value cell");
+  });
+
+  test("retains rule-terminated source fragments without splitting hard-wrapped tokens", () => {
+    const widths = [32, 40];
+    const url = "https://example.com/averylongunbrokentoken";
+    const table = renderTable(
+      [
+        ["First", "Second"],
+        ["alpha begins", url.slice(0, 40)],
+        ["next row", "another value"],
+      ],
+      widths,
+    );
+    const fragment = renderTable([["and alpha ends", url.slice(40)]], widths)[0]!;
+    table.splice(3, 0, fragment);
+
+    const rows = wordWrapLines(table.join("\n"), 70);
+    for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(70);
+    const heavyIndex = rows.findIndex((row) => row.includes("━"));
+    const lightIndex = rows.findIndex((row) => row.includes("─"));
+    const segments = Array.from(rows[heavyIndex]!.matchAll(/━+/g));
+    const body = rows.slice(heavyIndex + 1, lightIndex);
+    const firstCell = body
+      .map((row) =>
+        row
+          .slice(
+            segments[0]!.index! + 1,
+            segments[0]!.index! + segments[0]![0].length - 1,
+          )
+          .trim(),
+      )
+      .filter(Boolean)
+      .join(" ");
+    const secondCell = body
+      .map((row) => row.slice(segments[1]!.index! + 1).trim())
+      .join("")
+      .replace(/\s/g, "");
+    expect(firstCell).toBe("alpha begins and alpha ends");
+    expect(secondCell).toContain(url);
+  });
+
+  test("keeps adjacent parseable content separate from the preceding cell text", () => {
+    const table = renderTable(
+      [
+        ["First", "Second"],
+        ["alpha", "a value long enough to force table reflow in this pane"],
+      ],
+      [70, 40],
+    );
+    const prose = "   This is follow-up prose outside the table with enough length.";
+    table.push(prose, "");
+
+    const rows = wordWrapLines(table.join("\n"), 40);
+    const proseRows = wordWrapSingleLine(prose, 40);
+    expect(rows.slice(-(proseRows.length + 1), -1)).toEqual(proseRows);
+  });
+
+  test("keeps source-wrapped final-row continuations inside their cells", () => {
+    const table = renderTable(
+      [
+        ["First", "Second"],
+        ["alpha", "first fragment"],
+      ],
+      [12, 40],
+    );
+    table.push(renderTable([["", "final continuation"]], [12, 40])[0]!);
+
+    const rows = wordWrapLines(table.join("\n"), 32);
+    const heavy = rows.find((row) => row.includes("━"))!;
+    const second = Array.from(heavy.matchAll(/━+/g))[1]!;
+    const continuation = rows.find((row) => row.includes("final continuation"))!;
+    expect(continuation.slice(0, second.index! + 1).trim()).toBe("");
+  });
+
+  test("does not guess spaces between exact-width source fragments", () => {
+    const table = renderTable(
+      [
+        ["First", "Second"],
+        ["x", "hello"],
+      ],
+      [5, 5],
+    );
+    table.push(renderTable([["", "world"]], [5, 5])[0]!);
+
+    const rows = wordWrapLines(table.join("\n"), 13);
+    expect(rows.some((row) => row.includes("hello"))).toBe(true);
+    expect(rows.some((row) => row.includes("world"))).toBe(true);
+    expect(rows.join(" ")).not.toContain("helloworld");
+  });
+
+  test("preserves meaningful internal spaces that fit on a reflowed cell line", () => {
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["x", "alpha  beta gamma delta epsilon"],
+      ],
+      [5, 40],
+    );
+    const rows = wordWrapLines(table.join("\n"), 30);
+    expect(rows.some((row) => row.includes("alpha  beta"))).toBe(true);
+  });
+
+  test("uses grapheme-aware column boundaries before a later cell", () => {
+    const table = renderTable(
+      [
+        ["Family", "Description"],
+        ["👨‍👩‍👧‍👦", "the second cell wraps but stays aligned under its own header"],
+      ],
+      [16, 80],
+    );
+    const rows = wordWrapLines(table.join("\n"), 36);
+    for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(36);
+    const heavy = rows.find((row) => row.includes("━"))!;
+    const second = Array.from(heavy.matchAll(/━+/g))[1]!;
+    const continuation = rows.find((row) => row.includes("stays aligned"))!;
+    expect(continuation.slice(0, second.index! + 1).trim()).toBe("");
+    expect(continuation.slice(second.index! + 1).trimStart()).toStartWith("but stays aligned");
+  });
+
+  test("hard-wraps keycap graphemes without producing over-width cells", () => {
+    const row = (left: string, right: string) =>
+      ` ${left.padEnd(4)}  ${right.padEnd(16)}`.trimEnd();
+    const table = [
+      row("A", "Value"),
+      `${"━".repeat(5)}  ${"━".repeat(17)}`,
+      row("x", "1️⃣2️⃣3️⃣4️⃣5️⃣"),
+    ];
+    const rows = wordWrapLines(table.join("\n"), 12);
+    for (const output of rows) expect(visibleWidth(output)).toBeLessThanOrEqual(12);
+    expect(rows.join("").replace(/\s/g, "")).toContain("1️⃣2️⃣3️⃣4️⃣5️⃣");
+  });
+
+  test("preserves right alignment inferred from body cells", () => {
+    const widths = [10, 40];
+    const table = renderTable(
+      [
+        ["Item", "Amount"],
+        ["Widgets", "42"],
+      ],
+      widths,
+    );
+    table[2] =
+      "  " +
+      [" " + "Widgets".padEnd(widths[0]! + 1), " " + "42".padStart(widths[1]!) + " "].join(
+        "  ",
+      );
+
+    const rows = wordWrapLines(table.join("\n"), 30);
+    const heavy = rows.find((row) => row.includes("━"))!;
+    const second = Array.from(heavy.matchAll(/━+/g))[1]!;
+    const amount = rows.find((row) => row.includes("42"))!;
+    expect(amount.indexOf("42") + 2).toBe(second.index! + second[0].length - 1);
+  });
+
+  test("infers right alignment after an ambiguous exact-width value", () => {
+    const widths = [5, 5];
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["x", "12345"],
+        ["y", "42"],
+      ],
+      widths,
+    );
+    table[4] =
+      "  " +
+      [" " + "y".padEnd(5) + " ", " " + "42".padStart(5) + " "].join("  ");
+
+    const rows = wordWrapLines(table.join("\n"), 13);
+    const amount = rows.find((row) => row.includes("42"))!;
+    expect(amount).toEndWith(" 42 ");
+  });
+
+  test("reflows a compact two-column table at width 13", () => {
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["x", "你好 content"],
+      ],
+      [5, 20],
+    );
+    const narrow = wordWrapLines(table.join("\n"), 13);
+    expect(narrow.every((row) => visibleWidth(row) <= 13)).toBe(true);
+    const heavy = narrow.find((row) => row.includes("━"))!;
+    const secondStart = Array.from(heavy.matchAll(/━+/g))[1]!.index! + 1;
+    for (const row of narrow.filter((candidate) => /你|好|content/.test(candidate))) {
+      expect(row.search(/你|好|content/)).toBeGreaterThanOrEqual(secondStart);
+    }
+  });
+
+  test("preserves text when there are too many columns to reflow side by side", () => {
+    const table = renderTable(
+      [
+        ["A", "B", "C", "D", "E", "F", "G"],
+        ["one", "two", "three", "four", "five", "six", "SEVENTH-CELL"],
+      ],
+      [6, 6, 6, 6, 6, 6, 14],
+    );
+
+    const rows = wordWrapLines(table.join("\n"), 40);
+    expect(rows.join(" ")).toContain("SEVENTH-CELL");
+    expect(rows.every((row) => visibleWidth(row) <= 40)).toBe(true);
   });
 });

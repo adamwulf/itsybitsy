@@ -15,29 +15,30 @@ import { stripAnsi, isCodexStatusLine } from "../parse-state";
  * correct at any width, so the word-wrap path special-cases them (see
  * wordWrapSingleLine).
  *
- * Two shapes qualify:
+ * Three shapes qualify:
  *
- *  1. A bare rule — the entire visible content is a run of ─ box-drawing chars
- *     (`────…`).
- *  2. A TITLED rule — a run of ─ on each side with a short inline label between
- *     them (`─ Worked for 3m 50s ────…`). Codex emits these after each turn.
- *     Because the label breaks the pure-─ run, the bare-rule test alone lets the
- *     line fall through to word-wrapping and it explodes into many rows at narrow
- *     display widths — the exact bug this branch handles.
+ *  1. A bare rule — the entire visible content is a run of light (`─`) or heavy
+ *     (`━`) box-drawing chars. Codex uses the heavy form for table header rules.
+ *  2. A segmented heavy rule — heavy runs separated by the two spaces Codex
+ *     uses between table columns (`━━━━  ━━━━━`).
+ *  3. A titled light rule — a run of ─ on each side with a short inline label
+ *     between them (`─ Worked for 3m 50s ────…`). Codex emits these after each
+ *     turn. Because the middle breaks the pure run, the bare-rule test alone
+ *     lets the line fall through to word-wrapping and it explodes into many rows
+ *     at narrow display widths.
  *
- * The titled-rule test requires the trimmed line to both start AND end with ─
- * and to contain a run of at least four consecutive ─ (a length prose never
- * produces). Those three structural signals together are what no ordinary
- * sentence satisfies — prose does not simultaneously begin and end with a
- * box-drawing char while also carrying a 4+ run of them — so the label between
- * the runs may be any text (ASCII or not) without risking a false match.
+ * Heavy rules deliberately accept only runs and two-space column gaps; unlike
+ * the light rule, they do not accept inline labels. That keeps heavy-bar prose
+ * visible instead of misclassifying and truncating it.
  */
 function isSeparatorLine(line: string): boolean {
   const stripped = stripAnsi(line).trim();
   if (stripped.length === 0) return false;
-  // Bare rule: entirely ─.
-  if (/^─+$/.test(stripped)) return true;
-  // Titled rule: ─-run … short label … ─-run.
+  // Bare light or heavy rule.
+  if (/^─+$/.test(stripped) || /^━+$/.test(stripped)) return true;
+  // Heavy table-header rule: one run per column, separated by two spaces.
+  if (/^━+(?: {2}━+)+$/.test(stripped)) return true;
+  // Titled light rule: ─-run … short label … ─-run.
   return (
     stripped.startsWith("─") &&
     stripped.endsWith("─") &&
@@ -296,7 +297,11 @@ export function matchTableBlockEnd(lines: string[], start: number): number {
  * remaining (wide) columns split what's left evenly. Returns null when the
  * split would drive a shrunken column below MIN_CELL_WIDTH.
  */
-function shrinkColumnWidths(natural: number[], avail: number): number[] | null {
+function shrinkColumnWidths(
+  natural: number[],
+  avail: number,
+  minimum = MIN_CELL_WIDTH,
+): number[] | null {
   const n = natural.length;
   const widths: number[] = new Array(n).fill(0);
   const fixed: boolean[] = new Array(n).fill(false);
@@ -320,7 +325,7 @@ function shrinkColumnWidths(natural: number[], avail: number): number[] | null {
   }
   if (flexible > 0) {
     const share = Math.floor(remaining / flexible);
-    if (share < MIN_CELL_WIDTH) return null;
+    if (share < minimum) return null;
     let extra = remaining - share * flexible;
     for (let i = 0; i < n; i++) {
       if (!fixed[i]) {
@@ -454,10 +459,293 @@ export function reflowTable(lines: string[], width: number): string[] | null {
   return out;
 }
 
+// ── Borderless Codex table reflow ───────────────────────────────────────────
+//
+// Codex renders markdown tables without an outer frame. Each column is marked
+// by a heavy header-rule segment and logical body rows are separated by matching
+// light-rule segments:
+//
+//    Header A      Header B
+//   ━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━
+//    short         long cell text
+//   ───────────  ─────────────────
+//
+// At the pinned tmux width, those rows are much wider than a dashboard pane.
+// Treating a row as prose moves wrapped text back to column zero. The helpers
+// below recover the column geometry from the rule, then reuse the same fair
+// width allocation as framed tables so every cell wraps within its own column.
+
+interface BorderlessRuleLayout {
+  indent: string;
+  indentWidth: number;
+  widths: number[];
+  starts: number[];
+  totalWidth: number;
+}
+
+interface BorderlessTableBlock {
+  end: number;
+  layout: BorderlessRuleLayout;
+  rows: string[][];
+  dividerBefore: boolean[];
+  alignments: CellAlignment[];
+}
+
+type CellAlignment = "left" | "center" | "right";
+
+interface ParsedBorderlessRow {
+  cells: string[];
+  alignmentHints: Array<CellAlignment | null>;
+}
+
+const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const MIN_BORDERLESS_CELL_WIDTH = 2;
+
+function parseBorderlessRule(line: string, ruleChar: "━" | "─"): BorderlessRuleLayout | null {
+  const plain = stripAnsi(line);
+  const indent = /^ */.exec(plain)![0];
+  const body = plain.slice(indent.length).trimEnd();
+  const segments = body.split("  ");
+  if (
+    segments.length < 2 ||
+    segments.some((segment) => segment.length < 3 || Array.from(segment).some((c) => c !== ruleChar))
+  ) {
+    return null;
+  }
+
+  const indentWidth = visibleWidth(indent);
+  const widths = segments.map((segment) => visibleWidth(segment));
+  const starts: number[] = [];
+  let column = indentWidth;
+  for (const segmentWidth of widths) {
+    starts.push(column);
+    column += segmentWidth + 2;
+  }
+  return {
+    indent,
+    indentWidth,
+    widths,
+    starts,
+    totalWidth: column - 2,
+  };
+}
+
+function sameBorderlessLayout(
+  left: BorderlessRuleLayout,
+  right: BorderlessRuleLayout,
+): boolean {
+  return (
+    left.indent === right.indent &&
+    left.widths.length === right.widths.length &&
+    left.widths.every((width, i) => width === right.widths[i])
+  );
+}
+
+/**
+ * Resolve terminal-column boundaries to UTF-16 string indices in one
+ * grapheme-aware pass. Returns null when a requested table boundary cuts
+ * through a grapheme cluster, which means the line cannot match the rule's
+ * column geometry safely.
+ */
+function visibleBoundaryIndices(text: string, boundaries: number[]): Map<number, number> | null {
+  const pending = [...new Set(boundaries)].sort((a, b) => a - b);
+  const indices = new Map<number, number>();
+  let boundaryIndex = 0;
+  let column = 0;
+  for (const part of GRAPHEME_SEGMENTER.segment(text)) {
+    while (boundaryIndex < pending.length && pending[boundaryIndex]! <= column) {
+      if (pending[boundaryIndex]! < column) return null;
+      indices.set(pending[boundaryIndex]!, part.index);
+      boundaryIndex++;
+    }
+    const nextColumn = column + visibleWidth(part.segment);
+    if (
+      boundaryIndex < pending.length &&
+      pending[boundaryIndex]! > column &&
+      pending[boundaryIndex]! < nextColumn
+    ) {
+      return null;
+    }
+    column = nextColumn;
+  }
+  while (boundaryIndex < pending.length) {
+    if (pending[boundaryIndex]! < column) return null;
+    indices.set(pending[boundaryIndex]!, text.length);
+    boundaryIndex++;
+  }
+  return indices;
+}
+
+function inferCellAlignment(rawCell: string): CellAlignment | null {
+  if (rawCell.trim().length === 0) return null;
+  const leading = rawCell.length - rawCell.trimStart().length;
+  const trailing = rawCell.length - rawCell.trimEnd().length;
+  if (leading === 0 && trailing === 0) return null;
+  if (leading > trailing) return "right";
+  if (leading > 0 && trailing > 0 && Math.abs(leading - trailing) <= 1) return "center";
+  return "left";
+}
+
+function parseBorderlessCells(
+  line: string,
+  layout: BorderlessRuleLayout,
+): ParsedBorderlessRow | null {
+  const plain = stripAnsi(line);
+  const boundaries = [0, layout.indentWidth, layout.totalWidth, visibleWidth(plain)];
+  for (let i = 0; i < layout.widths.length; i++) {
+    const start = layout.starts[i]!;
+    const segmentWidth = layout.widths[i]!;
+    boundaries.push(start, start + 1, start + segmentWidth - 1, start + segmentWidth);
+    if (i + 1 < layout.widths.length) boundaries.push(layout.starts[i + 1]!);
+  }
+  const indices = visibleBoundaryIndices(plain, boundaries);
+  if (!indices) return null;
+  const slice = (start: number, end: number) =>
+    plain.slice(indices.get(start)!, indices.get(end)!);
+
+  const leading = slice(0, layout.indentWidth);
+  const outside = slice(layout.totalWidth, visibleWidth(plain));
+  if (leading.trim().length > 0 || outside.trim().length > 0) return null;
+
+  const cells: string[] = [];
+  const alignmentHints: Array<CellAlignment | null> = [];
+  for (let i = 0; i < layout.widths.length; i++) {
+    const start = layout.starts[i]!;
+    const segmentWidth = layout.widths[i]!;
+    const leftPad = slice(start, start + 1);
+    const rightPad = slice(start + segmentWidth - 1, start + segmentWidth);
+    const gap =
+      i + 1 < layout.widths.length
+        ? slice(start + segmentWidth, layout.starts[i + 1]!)
+        : "";
+    if (leftPad.trim().length > 0 || rightPad.trim().length > 0 || gap.trim().length > 0) {
+      return null;
+    }
+    const rawCell = slice(start + 1, start + segmentWidth - 1);
+    cells.push(rawCell.trim());
+    alignmentHints.push(inferCellAlignment(rawCell));
+  }
+  return cells.some((cell) => cell.length > 0) ? { cells, alignmentHints } : null;
+}
+
+/**
+ * Match a complete borderless Codex table beginning at its header row. The
+ * heavy rule is the unambiguous anchor; matching light rules split body rows.
+ * Source-wrapped cell fragments remain separate physical rows. This retains
+ * their exact word boundaries without guessing whether the renderer wrapped at
+ * whitespace or in the middle of a token. Light rules are recorded separately
+ * and reproduced only where Codex placed them.
+ */
+function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTableBlock | null {
+  if (start + 2 >= lines.length) return null;
+  const layout = parseBorderlessRule(lines[start + 1]!, "━");
+  if (!layout) return null;
+  const header = parseBorderlessCells(lines[start]!, layout);
+  if (!header) return null;
+
+  const rows = [header.cells];
+  const dividerBefore = [false];
+  // A rendered markdown header is commonly left-aligned even when its body
+  // column is numeric/right-aligned, so prefer the first body-row signal over
+  // a merely left-aligned header. Explicit centered/right headers still win.
+  const alignmentHints: Array<CellAlignment | null> = header.alignmentHints.map((hint) =>
+    hint === "left" ? null : hint,
+  );
+  let end = start + 1;
+  let cursor = start + 2;
+  let nextHasDivider = false;
+  while (cursor < lines.length) {
+    if (stripAnsi(lines[cursor]!).trim().length === 0) break;
+    const divider = parseBorderlessRule(lines[cursor]!, "─");
+    if (divider && sameBorderlessLayout(layout, divider)) {
+      if (rows.length === 1 || nextHasDivider) return null;
+      nextHasDivider = true;
+      end = cursor;
+      cursor++;
+      continue;
+    }
+    const row = parseBorderlessCells(lines[cursor]!, layout);
+    if (!row) break;
+    const onlyFirstColumn = row.cells.slice(1).every((cell) => cell.length === 0);
+    // An undivided first-column-only line is indistinguishable from ordinary
+    // indented prose after the table. Stop conservatively once a body row has
+    // already been captured; explicit divider rows remain unambiguous.
+    if (rows.length > 1 && !nextHasDivider && onlyFirstColumn) break;
+    rows.push(row.cells);
+    dividerBefore.push(nextHasDivider);
+    nextHasDivider = false;
+    for (let column = 0; column < alignmentHints.length; column++) {
+      alignmentHints[column] ??= row.alignmentHints[column] ?? null;
+    }
+    end = cursor;
+    cursor++;
+  }
+  if (rows.length < 2 || nextHasDivider) return null;
+  return {
+    end,
+    layout,
+    rows,
+    dividerBefore,
+    alignments: alignmentHints.map((hint) => hint ?? "left"),
+  };
+}
+
+function reflowBorderlessTable(block: BorderlessTableBlock, width: number): string[] | null {
+  const ncols = block.layout.widths.length;
+  const natural: number[] = new Array(ncols).fill(1);
+  for (const row of block.rows) {
+    for (let i = 0; i < ncols; i++) {
+      natural[i] = Math.max(natural[i]!, visibleWidth(row[i]!));
+    }
+  }
+
+  // Each column has one space of padding per side; neighboring columns have a
+  // two-space gutter. The source indent sits outside that table geometry.
+  const overhead = block.layout.indentWidth + 2 * ncols + 2 * (ncols - 1);
+  const avail = width - overhead;
+  if (avail < ncols * MIN_BORDERLESS_CELL_WIDTH) return null;
+  const widths =
+    natural.reduce((sum, value) => sum + value, 0) <= avail
+      ? natural
+      : shrinkColumnWidths(natural, avail, MIN_BORDERLESS_CELL_WIDTH);
+  if (!widths) return null;
+
+  const rule = (char: "━" | "─") =>
+    block.layout.indent + widths.map((cellWidth) => char.repeat(cellWidth + 2)).join("  ");
+  const renderRow = (cells: string[]): string[] => {
+    const cellLines = cells.map((cell, i) => wordWrapSingleLine(cell, widths[i]!));
+    const height = Math.max(...cellLines.map((cell) => cell.length));
+    const rendered: string[] = [];
+    for (let row = 0; row < height; row++) {
+      const columns = cellLines.map((cell, i) => {
+        const text = cell[row] ?? "";
+        const extra = Math.max(0, widths[i]! - visibleWidth(text));
+        const alignment = block.alignments[i]!;
+        const left =
+          alignment === "right"
+            ? extra
+            : alignment === "center"
+              ? Math.floor(extra / 2)
+              : 0;
+        return " " + " ".repeat(left) + text + " ".repeat(extra - left + 1);
+      });
+      rendered.push(block.layout.indent + columns.join("  "));
+    }
+    return rendered;
+  };
+
+  const output = [...renderRow(block.rows[0]!), rule("━")];
+  for (let i = 1; i < block.rows.length; i++) {
+    if (block.dividerBefore[i]) output.push(rule("─"));
+    output.push(...renderRow(block.rows[i]!));
+  }
+  return output;
+}
+
 /**
  * Word-wrap all lines in a multi-line string.
- * Splits on newlines first, then word-wraps each line — except table frames,
- * which reflow as a block (see "Table reflow" above).
+ * Splits on newlines first, then word-wraps each line — except framed and
+ * borderless tables, which reflow as blocks (see the table sections above).
  */
 export function wordWrapLines(text: string, width: number): string[] {
   const lines = text.split("\n");
@@ -465,6 +753,30 @@ export function wordWrapLines(text: string, width: number): string[] {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i]!;
+    // A borderless Codex markdown table is anchored by the segmented heavy
+    // rule immediately after its header. Reflow the whole block so continuation
+    // text stays inside its originating cell instead of returning to column 0.
+    const borderless = matchBorderlessTableBlock(lines, i);
+    if (borderless) {
+      const block = lines.slice(i, borderless.end + 1);
+      if (block.every((candidate) => visibleWidth(candidate) <= width)) {
+        result.push(...block);
+      } else {
+        const reflowed = reflowBorderlessTable(borderless, width);
+        if (reflowed) {
+          // Reflow is geometry-first. Parsing above already strips ANSI, so an
+          // overflowing styled table becomes plain text instead of attempting
+          // to reconstruct terminal state across newly-created physical rows.
+          result.push(...reflowed);
+        } else {
+          for (const candidate of block) {
+            result.push(...wordWrapSingleLine(candidate, width));
+          }
+        }
+      }
+      i = borderless.end + 1;
+      continue;
+    }
     // Cheap pre-filter: only a line containing ┌ can open a table frame.
     if (line.includes("┌")) {
       const end = matchTableBlockEnd(lines, i);

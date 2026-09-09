@@ -11,8 +11,49 @@
  * without copy-paste; codex behaviour is byte-identical.
  */
 
-import { join } from "path";
+import { dirname, join, resolve } from "path";
 import { realpath } from "fs/promises";
+
+/**
+ * Locate a worktree:false agent from an arbitrary cwd inside its shared repo.
+ * Retaining the outermost valid ancestor prevents an agent from redirecting a
+ * hook to a nested, self-created `.ittybitty` directory with forged metadata.
+ */
+export async function findNoWorktreeAgentsDir(
+  agentId: string,
+  cwd: string,
+): Promise<string | null> {
+  let cursor = resolve(cwd);
+  try {
+    cursor = await realpath(cursor);
+  } catch { /* retain the lexical cwd; callers fail closed if no boundary exists */ }
+  let found: string | null = null;
+
+  while (true) {
+    const candidateAgentsDir = join(cursor, ".ittybitty", "agents");
+    const candidateMeta = Bun.file(join(candidateAgentsDir, agentId, "meta.json"));
+    try {
+      if (await candidateMeta.exists()) {
+        const meta = await candidateMeta.json();
+        if (
+          meta &&
+          typeof meta === "object" &&
+          !Array.isArray(meta) &&
+          meta.id === agentId &&
+          meta.worktree === false
+        ) {
+          found = candidateAgentsDir;
+        }
+      }
+    } catch { /* malformed candidates are ignored */ }
+
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+
+  return found;
+}
 
 /**
  * Resolve just the (canonicalized) agent directory from an agent id + cwd.

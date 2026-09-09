@@ -46,6 +46,10 @@ describe("hookPermissionDenied", () => {
     agentDir = join(tempDir, ".ittybitty", "agents", "agent-test123");
     // Create agent directory structure
     await Bun.write(join(agentDir, "agent.log"), "");
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify({ id: "agent-test123", worktree: false }),
+    );
   });
 
   afterEach(async () => {
@@ -88,6 +92,22 @@ describe("hookPermissionDenied", () => {
       write: (chunk) => { output += chunk; },
       log: async () => { throw new Error("log filesystem unavailable"); },
     });
+    expect(JSON.parse(output).hookSpecificOutput.decision.behavior).toBe("deny");
+  });
+
+  test("nested no-worktree cwd routes the diagnostic to the validated agent", async () => {
+    const nested = join(tempDir, "packages", "app", "src");
+    await mkdir(nested, { recursive: true });
+    process.chdir(nested);
+    let output = "";
+
+    await hookPermissionDenied("agent-test123", '{"tool_name":"Edit"}', {
+      write: (chunk) => { output += chunk; },
+    });
+
+    expect(await readFile(join(agentDir, "agent.log"), "utf-8")).toContain(
+      "[PermissionRequest] Tool denied: Edit",
+    );
     expect(JSON.parse(output).hookSpecificOutput.decision.behavior).toBe("deny");
   });
 

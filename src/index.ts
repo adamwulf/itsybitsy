@@ -18,6 +18,17 @@ import { normalizeTeamName, getTeam } from "./teams";
 const args = process.argv.slice(2);
 const command = args[0];
 
+/** Resolve debug-log routing for hooks that may run from a shared repo cwd. */
+async function resolveHookLogAgentDir(cwd: string, agentId?: string): Promise<string | null> {
+  const { resolveAgentDir } = await import("./hooks/slow-hook-logger");
+  if (agentId && isValidAgentId(agentId)) {
+    const { findNoWorktreeAgentsDir } = await import("./hooks/agent-context");
+    const agentsDir = await findNoWorktreeAgentsDir(agentId, cwd);
+    if (agentsDir) return join(agentsDir, agentId);
+  }
+  return resolveAgentDir(cwd, agentId);
+}
+
 /**
  * Collect non-archived agents for display, optionally filtered by manager.
  * Recursively walks children, pushing { agent, depth } into the result array.
@@ -2601,10 +2612,10 @@ export async function main() {
       const id = args[1];
       if (!id) { console.error("Usage: ib hook-status <agent-id>"); process.exit(1); }
       if (!isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
-      const { resolveAgentDir, withHookLogging } = await import("./hooks/slow-hook-logger");
+      const { withHookLogging } = await import("./hooks/slow-hook-logger");
       const { hookStatus } = await import("./hooks/agent-status");
       const stdin = await new Response(Bun.stdin.stream()).text();
-      const agentDir = resolveAgentDir(process.cwd(), id);
+      const agentDir = await resolveHookLogAgentDir(process.cwd(), id);
       await withHookLogging("hook-status", agentDir, stdin, () => hookStatus(id, stdin));
       break;
     }
@@ -2612,10 +2623,10 @@ export async function main() {
       const id = args[1];
       if (!id) { console.error("Usage: ib hook-permission-denied <agent-id>"); process.exit(1); }
       if (id !== SYSTEM_AGENT_ID && !isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
-      const { resolveAgentDir, withHookLogging } = await import("./hooks/slow-hook-logger");
+      const { withHookLogging } = await import("./hooks/slow-hook-logger");
       const { hookPermissionDenied } = await import("./hooks/permission-denied");
       const stdin = await new Response(Bun.stdin.stream()).text();
-      const agentDir = resolveAgentDir(process.cwd(), id);
+      const agentDir = await resolveHookLogAgentDir(process.cwd(), id);
       await withHookLogging("hook-permission-denied", agentDir, stdin, () => hookPermissionDenied(id, stdin));
       break;
     }
@@ -2624,7 +2635,7 @@ export async function main() {
       if (!id) { console.error("Usage: ib hook-mark-running <agent-id>"); process.exit(1); }
       if (id !== SYSTEM_AGENT_ID && !isValidAgentId(id)) { console.error("Invalid agent ID"); process.exit(1); }
       const { hookMarkRunning } = await import("./hooks/mark-running");
-      await hookMarkRunning();
+      await hookMarkRunning(id);
       break;
     }
     case "init-types":
@@ -2825,11 +2836,12 @@ export async function main() {
       const subcommand = args[1];
       switch (subcommand) {
         case "intercept-task": {
-          const { resolveAgentDir, withHookLogging } = await import("./hooks/slow-hook-logger");
+          const agentIdArg = args[2];
+          const { withHookLogging } = await import("./hooks/slow-hook-logger");
           const { hookInterceptTask } = await import("./hooks/intercept-task");
           const stdin = await new Response(Bun.stdin.stream()).text();
-          const agentDir = resolveAgentDir(process.cwd());
-          await withHookLogging("intercept-task", agentDir, stdin, () => hookInterceptTask(stdin));
+          const agentDir = await resolveHookLogAgentDir(process.cwd(), agentIdArg);
+          await withHookLogging("intercept-task", agentDir, stdin, () => hookInterceptTask(stdin, agentIdArg));
           break;
         }
         case "session-start": {
@@ -2867,11 +2879,16 @@ export async function main() {
           break;
         }
         case "inject-timestamp": {
-          const { resolveAgentDir, withHookLogging } = await import("./hooks/slow-hook-logger");
+          const agentIdArg = args[2];
+          if (agentIdArg !== undefined && !isValidAgentId(agentIdArg)) {
+            console.error("Invalid agent ID");
+            process.exit(1);
+          }
+          const { withHookLogging } = await import("./hooks/slow-hook-logger");
           const { hookInjectTimestamp } = await import("./hooks/inject-timestamp");
           const stdin = await new Response(Bun.stdin.stream()).text();
-          const agentDir = resolveAgentDir(process.cwd());
-          await withHookLogging("inject-timestamp", agentDir, stdin, () => hookInjectTimestamp(stdin));
+          const agentDir = await resolveHookLogAgentDir(process.cwd(), agentIdArg);
+          await withHookLogging("inject-timestamp", agentDir, stdin, () => hookInjectTimestamp(stdin, undefined, agentIdArg));
           break;
         }
         case "codex-pre-tool-use":

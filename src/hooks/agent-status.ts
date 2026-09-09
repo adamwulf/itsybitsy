@@ -13,6 +13,7 @@ import { isValidAgentId, isValidTmuxSession } from "../validation";
 import { writeAgentState, hasBackgroundTasks, isRecentlyCreated } from "../agents";
 import type { MetaState } from "../agents";
 import { WATCHDOG_SENTINEL } from "../watchdog";
+import { findNoWorktreeAgentsDir } from "./agent-context";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -448,25 +449,36 @@ export async function hookStatus(agentId: string, rawStdin?: string): Promise<vo
     /* stdin may not be valid JSON */
   }
 
-  // Derive agentDir from cwd
+  // Derive agentDir from cwd. A regular worktree:false Claude runs at the
+  // shared repository root (or below it), so its cwd has no agent-id segment.
+  // Prefer its validated outermost boundary over any nested worktree-shaped
+  // path an agent could create. Existing worktree and system resolution remain
+  // the fallback when no matching worktree:false boundary exists.
   const cwd = process.cwd();
   let agentDir = "";
   let agentsDir = "";
 
-  const agentMatch = cwd.match(/(.*\/.ittybitty\/agents\/[^/]+)/);
-  if (agentMatch) {
-    agentDir = agentMatch[1]!;
-    agentsDir = dirname(agentDir);
+  const noWorktreeAgentsDir = isValidAgentId(agentId)
+    ? await findNoWorktreeAgentsDir(agentId, cwd)
+    : null;
+  if (noWorktreeAgentsDir) {
+    agentsDir = noWorktreeAgentsDir;
+    agentDir = join(agentsDir, agentId);
   } else {
-    // Construct from agentsDir pattern
-    const ittybittyMatch = cwd.match(/(.*\/.ittybitty)/);
-    if (ittybittyMatch) {
-      agentsDir = join(ittybittyMatch[1]!, "agents");
-      agentDir = join(agentsDir, agentId);
+    const agentMatch = cwd.match(/(.*\/.ittybitty\/agents\/[^/]+)/);
+    if (agentMatch) {
+      agentDir = agentMatch[1]!;
+      agentsDir = dirname(agentDir);
     } else {
-      // Last resort
-      console.log("unknown");
-      return;
+      // Construct from agentsDir pattern
+      const ittybittyMatch = cwd.match(/(.*\/.ittybitty)/);
+      if (ittybittyMatch) {
+        agentsDir = join(ittybittyMatch[1]!, "agents");
+        agentDir = join(agentsDir, agentId);
+      } else {
+        console.log("unknown");
+        return;
+      }
     }
   }
 

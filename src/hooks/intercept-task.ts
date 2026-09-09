@@ -2,12 +2,14 @@
  * Hook: intercept Claude Task tool calls and spawn ib agents instead.
  */
 
-import { join } from "path";
+import { dirname, join } from "path";
 import { newAgent } from "../ib-commands";
 import { checkGitDirectoryFlags, resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./shared";
 import { loadAgentType, metaCanSpawnChildren } from "../agent-types";
 import { parseModel } from "../agent-cli";
 import { findShellMetachar } from "./shell-metachar";
+import { isValidAgentId } from "../validation";
+import { findNoWorktreeAgentsDir } from "./agent-context";
 
 export interface InterceptResult {
   action: "skip" | "intercept";
@@ -22,6 +24,37 @@ const SKIP_SUBAGENT_TYPES = [
   "meta-agent",
   "ib-merge",
 ];
+
+interface InterceptAgentIdentity {
+  agentId: string;
+  agentDir: string;
+  syntheticMeta?: Record<string, unknown>;
+  /** Shared repository root for a validated worktree:false agent. */
+  noWorktreeRepoPath?: string;
+}
+
+/**
+ * Resolve the caller identity without trusting a model-controlled id by itself.
+ * Existing worktree/system cwd resolution is used when no explicit identity is
+ * supplied. An explicit id is used only when the bounded ancestor resolver
+ * confirms matching worktree:false metadata, so it cannot fall back to a
+ * nested forged worktree shape.
+ */
+async function resolveInterceptAgent(
+  cwd: string,
+  explicitAgentId?: string,
+): Promise<InterceptAgentIdentity | null> {
+  if (!explicitAgentId) return resolveAgentFromCwd(cwd);
+  if (!isValidAgentId(explicitAgentId)) return null;
+
+  const agentsDir = await findNoWorktreeAgentsDir(explicitAgentId, cwd);
+  if (!agentsDir) return null;
+  return {
+    agentId: explicitAgentId,
+    agentDir: join(agentsDir, explicitAgentId),
+    noWorktreeRepoPath: dirname(dirname(agentsDir)),
+  };
+}
 
 /**
  * Validate a Task-tool-supplied model string. Empty (no override) is fine —
@@ -45,7 +78,8 @@ function isAcceptableTaskModel(value: string): boolean {
  * Returns a deny result if blocked, or null to proceed normally.
  */
 async function checkCoordinatorBashRestrictions(
-  input: { tool_name: string; tool_input: Record<string, unknown>; cwd: string }
+  input: { tool_name: string; tool_input: Record<string, unknown>; cwd: string },
+  resolved: InterceptAgentIdentity | null,
 ): Promise<InterceptResult | null> {
   if (input.tool_name !== "Bash") return null;
 
@@ -53,7 +87,6 @@ async function checkCoordinatorBashRestrictions(
   // `agentType: "system"`; per-repo coordinators have `agentType: "coordinator"`
   // on disk. Both should get the same restrictions (no shell metacharacters,
   // no --output, no -C/--git-dir/--work-tree).
-  const resolved = resolveAgentFromCwd(input.cwd);
   if (!resolved) return null;
 
   let agentType: string | undefined;
@@ -178,6 +211,8 @@ export async function processTaskIntercept(
     tool_name: string;
     tool_input: Record<string, unknown>;
     cwd: string;
+    /** Explicit hook identity, validated against worktree:false metadata. */
+    agentId?: string;
   },
   opts?: {
     spawnAgent?: (
@@ -187,8 +222,27 @@ export async function processTaskIntercept(
     ) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
   }
 ): Promise<InterceptResult> {
+  const resolved = await resolveInterceptAgent(input.cwd, input.agentId);
+
+  // An explicit hook identity is meaningful only when the shared-repo
+  // ancestor chain validates it as this worktree:false agent. Never degrade a
+  // stale, forged, or malformed explicit id into primary-Claude behavior:
+  // that would turn an identity failure into manager privileges.
+  if (input.agentId !== undefined && !resolved) {
+    return {
+      action: "intercept",
+      output: {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: "Cannot validate the explicit itsybitsy agent identity for this repository.",
+        },
+      },
+    };
+  }
+
   // 0. Check coordinator Bash restrictions (SPEC §12.2.4)
-  const coordBlock = await checkCoordinatorBashRestrictions(input);
+  const coordBlock = await checkCoordinatorBashRestrictions(input, resolved);
   if (coordBlock) return coordBlock;
 
   // 0.5. Deny busy-wait / poll Bash commands for ALL agent types (SPEC §8.5).
@@ -199,7 +253,6 @@ export async function processTaskIntercept(
 
   // 1. Deny AskUserQuestion — agents must use `ib ask` instead
   if (input.tool_name === "AskUserQuestion") {
-    const resolved = resolveAgentFromCwd(input.cwd);
     let isWorker = false;
     if (resolved) {
       // Prefer synthetic meta when present (e.g., @system); otherwise read disk.
@@ -263,7 +316,6 @@ export async function processTaskIntercept(
   }
 
   // 3. Check if calling from a worker agent or from an agent type that can't spawn children
-  const resolved = resolveAgentFromCwd(input.cwd);
   if (resolved) {
     let meta: Record<string, unknown> | null = resolved.syntheticMeta ?? null;
     if (!meta) {
@@ -347,10 +399,12 @@ export async function processTaskIntercept(
   }
 
   // 8. Determine repoPath
-  let repoPath = input.cwd;
-  const ittybittyIdx = input.cwd.indexOf("/.ittybitty/agents/");
-  if (ittybittyIdx !== -1) {
-    repoPath = input.cwd.substring(0, ittybittyIdx);
+  let repoPath = resolved?.noWorktreeRepoPath ?? input.cwd;
+  if (!resolved?.noWorktreeRepoPath) {
+    const ittybittyIdx = input.cwd.indexOf("/.ittybitty/agents/");
+    if (ittybittyIdx !== -1) {
+      repoPath = input.cwd.substring(0, ittybittyIdx);
+    }
   }
 
   // 9. Determine calling agent ID. @system cannot reach here — the explicit
@@ -419,7 +473,7 @@ export async function processTaskIntercept(
   };
 }
 
-export async function hookInterceptTask(rawStdin?: string): Promise<void> {
+export async function hookInterceptTask(rawStdin?: string, agentId?: string): Promise<void> {
   const raw = rawStdin ?? await new Response(Bun.stdin.stream()).text();
   let parsed: unknown;
   try {
@@ -456,6 +510,7 @@ export async function hookInterceptTask(rawStdin?: string): Promise<void> {
     tool_name: (data.tool_name as string) ?? "",
     tool_input: (data.tool_input as Record<string, unknown>) ?? {},
     cwd: (data.cwd as string) ?? process.cwd(),
+    agentId,
   });
 
   if (result.action === "skip") {

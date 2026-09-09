@@ -38,13 +38,14 @@ afterAll(() => {
 describe("hookMarkRunning", () => {
   let tempDir: string;
   let agentDir: string;
+  let agentId: string;
   let worktreeCwd: string;
   let originalCwd: string;
 
   beforeEach(async () => {
     originalCwd = process.cwd();
     tempDir = await mkdtemp(join(tmpdir(), "mark-running-test-"));
-    const agentId = "agent-test1234";
+    agentId = "agent-test1234";
     agentDir = join(tempDir, ".ittybitty", "agents", agentId);
     worktreeCwd = join(agentDir, "repo");
     await mkdir(worktreeCwd, { recursive: true });
@@ -105,5 +106,56 @@ describe("hookMarkRunning", () => {
 
     const meta = JSON.parse(await readFile(join(agentDir, "meta.json"), "utf-8"));
     expect(meta.state).toBe("stopped");
+  });
+
+  test.each([".", "packages/app"])(
+    "worktree:false explicit identity writes running from %s",
+    async (relativeCwd) => {
+      const sharedRoot = await mkdtemp(join(tmpdir(), "mark-running-no-worktree-"));
+      try {
+        const noWorktreeId = "agent-shared123";
+        const noWorktreeDir = join(sharedRoot, ".ittybitty", "agents", noWorktreeId);
+        const cwd = relativeCwd === "." ? sharedRoot : join(sharedRoot, relativeCwd);
+        await mkdir(cwd, { recursive: true });
+        await mkdir(noWorktreeDir, { recursive: true });
+        await Bun.write(
+          join(noWorktreeDir, "meta.json"),
+          JSON.stringify({ id: noWorktreeId, worktree: false, state: "waiting" }),
+        );
+        process.chdir(cwd);
+
+        const { hookMarkRunning } = await import("./mark-running");
+        await hookMarkRunning(noWorktreeId);
+
+        const meta = JSON.parse(await readFile(join(noWorktreeDir, "meta.json"), "utf-8"));
+        expect(meta.state).toBe("running");
+      } finally {
+        process.chdir(originalCwd);
+        await rm(sharedRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("existing system-coordinator cwd resolution wins over an explicit regular-agent id", async () => {
+    const coordHome = join(testHome, ".itsybitsy");
+    await mkdir(coordHome, { recursive: true });
+    await Bun.write(join(coordHome, "meta.json"), JSON.stringify({ state: "waiting" }));
+    process.chdir(coordHome);
+
+    const { hookMarkRunning } = await import("./mark-running");
+    await hookMarkRunning(agentId);
+
+    const meta = JSON.parse(await readFile(join(coordHome, "meta.json"), "utf-8"));
+    expect(meta.state).toBe("running");
+    await rm(join(coordHome, "meta.json"), { force: true });
+  });
+
+  test("unvalidated explicit identity remains a no-op", async () => {
+    process.chdir(tempDir);
+
+    const { hookMarkRunning } = await import("./mark-running");
+    await hookMarkRunning("agent-missing123");
+
+    expect(await Bun.file(join(tempDir, ".ittybitty", "agents", "agent-missing123", "meta.json")).exists()).toBe(false);
   });
 });

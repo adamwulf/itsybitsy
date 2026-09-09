@@ -9,6 +9,7 @@ import {
   executeResultActions,
   findUnfinishedChildren,
   hasActiveChildren,
+  hookStatus,
 } from "./agent-status";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { setSendSpawnRunner, resetSendSpawnRunner } from "../ib-commands";
@@ -57,6 +58,70 @@ afterAll(() => {
   resetCoordinatorHome();
   resetUserHome();
   rmSync(testHome, { recursive: true, force: true });
+});
+
+describe("hookStatus cwd identity resolution", () => {
+  let originalCwd: string;
+  let root: string;
+
+  beforeEach(async () => {
+    originalCwd = process.cwd();
+    root = await mkdtemp(join(tmpdir(), "ib-hook-status-context-"));
+  });
+
+  afterEach(async () => {
+    process.chdir(originalCwd);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  async function createAgent(
+    agentId: string,
+    worktree: boolean,
+  ): Promise<{ agentDir: string; cwd: string }> {
+    const agentDir = join(root, ".ittybitty", "agents", agentId);
+    const cwd = worktree ? join(agentDir, "repo") : root;
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(cwd, { recursive: true });
+    await writeMeta(agentDir, { id: agentId, worktree, state: "running" });
+    return { agentDir, cwd };
+  }
+
+  test.each([".", "packages/app"])(
+    "worktree:false Stop hook records waiting from %s",
+    async (relativeCwd) => {
+      const agentId = "agent-statusnw1";
+      const ctx = await createAgent(agentId, false);
+      const cwd = relativeCwd === "." ? ctx.cwd : join(ctx.cwd, relativeCwd);
+      await mkdir(cwd, { recursive: true });
+      process.chdir(cwd);
+
+      await hookStatus(agentId, JSON.stringify({ last_assistant_message: "done for now\nWAITING" }));
+
+      const meta = JSON.parse(await readFile(join(ctx.agentDir, "meta.json"), "utf-8"));
+      expect(meta.state).toBe("waiting");
+      expect(await readFile(join(ctx.agentDir, "agent.log"), "utf-8")).toContain("state=waiting");
+    },
+  );
+
+  test("existing worktree-shaped Stop hook resolution remains unchanged", async () => {
+    const agentId = "agent-statuswt1";
+    const ctx = await createAgent(agentId, true);
+    process.chdir(ctx.cwd);
+
+    await hookStatus(agentId, JSON.stringify({ last_assistant_message: "WAITING" }));
+
+    const meta = JSON.parse(await readFile(join(ctx.agentDir, "meta.json"), "utf-8"));
+    expect(meta.state).toBe("waiting");
+  });
+
+  test("an unvalidated shared-repo identity remains unknown and does not create agent state", async () => {
+    const agentId = "agent-statusbad1";
+    process.chdir(root);
+
+    await hookStatus(agentId, JSON.stringify({ last_assistant_message: "WAITING" }));
+
+    expect(await Bun.file(join(root, ".ittybitty", "agents", agentId, "meta.json")).exists()).toBe(false);
+  });
 });
 
 // ── Helper to create temp agent dirs ─────────────────────────────────────────

@@ -12,6 +12,7 @@ import { join } from "path";
 import { logAgent } from "../agent-lifecycle";
 import { resolveAgentFromCwd } from "./shared";
 import { isValidAgentId } from "../validation";
+import { findNoWorktreeAgentsDir } from "./agent-context";
 
 interface PermissionDeniedDeps {
   write?: (output: string) => unknown;
@@ -46,23 +47,20 @@ export async function hookPermissionDenied(
   }
 
   try {
-    // Derive agentDir from cwd. resolveAgentFromCwd handles both worktree
-    // agents (cwd inside `<repo>/.ittybitty/agents/<id>/repo`) and the
-    // system coordinator (cwd inside `~/.itsybitsy/`). For the system
-    // coordinator this routes the log to `~/.itsybitsy/agent.log`.
+    // A validated no-worktree boundary wins over nested path-shaped cwd data.
+    // Otherwise resolveAgentFromCwd preserves regular worktree and system
+    // coordinator routing.
     const cwd = process.cwd();
-    const resolved = resolveAgentFromCwd(cwd);
+    const noWorktreeAgentsDir = isValidAgentId(agentId)
+      ? await findNoWorktreeAgentsDir(agentId, cwd)
+      : null;
     let agentDir: string;
-    if (resolved) {
-      agentDir = resolved.agentDir;
+    if (noWorktreeAgentsDir) {
+      agentDir = join(noWorktreeAgentsDir, agentId);
     } else {
-      if (!isValidAgentId(agentId)) throw new Error("invalid agent id");
-      // Fallback: assume standard agent directory layout, using the
-      // settings-supplied agentId arg.
-      const agentsDirMatch = cwd.match(/(.*\/.ittybitty\/agents)/);
-      agentDir = agentsDirMatch
-        ? join(agentsDirMatch[1]!, agentId)
-        : join(cwd, ".ittybitty", "agents", agentId);
+      const resolved = resolveAgentFromCwd(cwd);
+      if (!resolved) throw new Error("unrecognized agent context");
+      agentDir = resolved.agentDir;
     }
 
     await (deps.log ?? logAgent)(agentDir, `[PermissionRequest] Tool denied: ${toolName}`);

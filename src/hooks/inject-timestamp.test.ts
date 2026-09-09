@@ -1,9 +1,14 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { mkdir, mkdtemp, rm } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
 import {
   formatTimestamp,
   buildTimestampContext,
   computeTimestampOutput,
+  hookInjectTimestamp,
 } from "./inject-timestamp";
+import { resetUserConfigPath, setUserConfigPath } from "../config";
 
 // A fixed epoch used across tests: 2025-05-29 19:32:07 UTC.
 const FIXED_EPOCH_MS = 1748547127000;
@@ -142,5 +147,115 @@ describe("computeTimestampOutput", () => {
     expect(out?.hookSpecificOutput.additionalContext).toMatch(
       new RegExp(`^\\[information only, no ack required\\] Current time: \\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2} .+ \\(epoch ${FIXED_EPOCH_SECONDS}\\)$`),
     );
+  });
+});
+
+describe("hookInjectTimestamp cwd identity resolution", () => {
+  let root: string;
+  let originalCwd: string;
+  let configPath: string;
+
+  beforeEach(async () => {
+    originalCwd = process.cwd();
+    root = await mkdtemp(join(tmpdir(), "inject-timestamp-context-"));
+    configPath = join(root, "config.json");
+    await Bun.write(configPath, JSON.stringify({ hooks: { injectTimestamp: true } }));
+    setUserConfigPath(configPath);
+  });
+
+  afterEach(async () => {
+    process.chdir(originalCwd);
+    resetUserConfigPath();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  async function invoke(agentId?: string): Promise<string> {
+    let output = "";
+    await hookInjectTimestamp(
+      JSON.stringify({ hook_event_name: "PostToolUse" }),
+      FIXED_EPOCH_MS,
+      agentId,
+      { write: (chunk) => { output += chunk; } },
+    );
+    return output;
+  }
+
+  test.each([".", "src/deep"])(
+    "validated worktree:false identity injects from %s",
+    async (relativeCwd) => {
+      const agentId = "agent-timestamp1";
+      const agentDir = join(root, ".ittybitty", "agents", agentId);
+      const cwd = relativeCwd === "." ? root : join(root, relativeCwd);
+      await mkdir(agentDir, { recursive: true });
+      await mkdir(cwd, { recursive: true });
+      await Bun.write(
+        join(agentDir, "meta.json"),
+        JSON.stringify({ id: agentId, worktree: false }),
+      );
+      process.chdir(cwd);
+
+      const output = await invoke(agentId);
+
+      expect(JSON.parse(output).hookSpecificOutput.additionalContext).toContain(
+        `epoch ${FIXED_EPOCH_SECONDS}`,
+      );
+    },
+  );
+
+  test("existing worktree context still injects without an explicit id", async () => {
+    const worktree = join(root, ".ittybitty", "agents", "agent-existing1", "repo");
+    await mkdir(worktree, { recursive: true });
+    process.chdir(worktree);
+
+    expect(JSON.parse(await invoke()).hookSpecificOutput.hookEventName).toBe("PostToolUse");
+  });
+
+  test("primary Claude stays silent even when timestamp injection is configured", async () => {
+    process.chdir(root);
+
+    expect(await invoke()).toBe("");
+  });
+
+  test("unvalidated explicit identity stays silent", async () => {
+    process.chdir(root);
+
+    expect(await invoke("agent-missing01")).toBe("");
+  });
+
+  test("CLI dispatcher forwards the explicit id from a nested no-worktree cwd", async () => {
+    const agentId = "agent-timecli01";
+    const agentDir = join(root, ".ittybitty", "agents", agentId);
+    const cwd = join(root, "nested");
+    const cliHome = join(root, "home");
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(cwd, { recursive: true });
+    await mkdir(join(cliHome, ".itsybitsy"), { recursive: true });
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify({ id: agentId, worktree: false }),
+    );
+    await Bun.write(
+      join(cliHome, ".itsybitsy", "config.json"),
+      JSON.stringify({ hooks: { injectTimestamp: true } }),
+    );
+
+    const proc = Bun.spawn(
+      ["bun", "run", join(import.meta.dir, "..", "index.ts"), "hooks", "inject-timestamp", agentId],
+      {
+        cwd,
+        env: { ...process.env, HOME: cliHome },
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    proc.stdin.write(JSON.stringify({ hook_event_name: "PostToolUse" }));
+    proc.stdin.end();
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+
+    expect(await proc.exited).toBe(0);
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout).hookSpecificOutput.additionalContext).toContain("Current time:");
   });
 });

@@ -18,6 +18,7 @@ import type { SpawnResult } from "../types";
 import { PANE_MODES } from "./pane-manager";
 import { computeSidebarHeights } from "./sidebar";
 import { assertDialog } from "./test-helpers";
+import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { setStagedSenderForTests, resetStagedSenderForTests } from "./message-send";
 import { setLayoutPath, loadLayout, flushPendingSave, cancelPendingSave } from "./layout";
 
@@ -1793,6 +1794,65 @@ describe("DashboardComponent dialog and action handlers", () => {
       dashboard.handleInput(shiftSpace);
     }
     expect(d.agentType).toBe("manager");
+  });
+
+  test("new-agent form: negotiates text-key reporting and restores it after Type loses focus", () => {
+    dashboard = makeDashboard();
+    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
+    let flags = 7; // ProcessTerminal's initial Kitty flags
+    const keyboard = new TypePickerKeyboard({
+      kittyProtocolActive: true,
+      write(sequence) {
+        const match = sequence.match(/^\x1b\[=(\d+);([23])u$/)!;
+        flags = match[2] === "2" ? flags | Number(match[1]) : flags & ~Number(match[1]);
+      },
+    }, () => dashboard.dialog?.type === "new-agent-form" && dashboard.dialog.focused === "agentType");
+    const input = (data: string) => keyboard.handleInput(data, data => dashboard.handleInput(data));
+    input("a");
+    expect(flags).toBe(7);
+    const d = assertDialog(dashboard.dialog, "new-agent-form");
+    input("\t");
+    expect(flags).toBe(31);
+    d.agentType = d.availableTypes[0]!;
+    // A terminal sends plain text unless report-all-keys is enabled.
+    input(flags & 8 ? "\x1b[32;2;32u" : " ");
+    expect(d.agentType).toBe(d.availableTypes.at(-1)!);
+    input("\x1b[32;2:3u"); // release must not cycle a second time
+    expect(d.agentType).toBe(d.availableTypes.at(-1)!);
+    input("\x1b[32;1;32u"); // encoded plain Space still cycles forward
+    expect(d.agentType).toBe(d.availableTypes[0]!);
+    input("\x1b[9u"); // Tab to Prompt
+    expect(d.focused).toBe("prompt");
+    expect(flags).toBe(7);
+    // Input may already be queued in the previous reporting mode.
+    input("\x1b[97:65;2;65u");
+    input("\x1b[32;2;32u");
+    input("normal text");
+    expect(d.buffer.getText()).toBe("A normal text");
+    input("\x1b[9;2u"); // Shift+Tab back to Type
+    expect(flags).toBe(31);
+    input("\x1b[27u"); // Escape closes the form and restores reporting
+    expect(dashboard.dialog).toBeNull();
+    expect(flags).toBe(7);
+  });
+
+  test("new-agent form: Left/Right cycle without Kitty support", () => {
+    dashboard = makeDashboard();
+    dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
+    const writes: string[] = [];
+    const keyboard = new TypePickerKeyboard({ kittyProtocolActive: false, write: data => { writes.push(data); } },
+      () => dashboard.dialog?.type === "new-agent-form" && dashboard.dialog.focused === "agentType");
+    const input = (data: string) => keyboard.handleInput(data, data => dashboard.handleInput(data));
+    input("a");
+    input("\t");
+    const d = assertDialog(dashboard.dialog, "new-agent-form");
+    d.agentType = d.availableTypes[0]!;
+    input("\x1b[D");
+    expect(d.agentType).toBe(d.availableTypes.at(-1)!);
+    input("\x1b[C");
+    expect(d.agentType).toBe(d.availableTypes[0]!);
+    expect(d.focused).toBe("agentType");
+    expect(writes).toEqual([]);
   });
 
   // Relies on "worker" sorting immediately after "manager" in the default types list,

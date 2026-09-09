@@ -138,12 +138,12 @@ import {
 import { sandboxDenialScriptPreamble, sandboxDenialExecPrefix } from "./sandbox-log-launch";
 import {
   writeSealRecordDirect,
-  readSealRecord,
   readSealRecordStrict,
   deleteSealRecord,
   deleteSealRecordChecked,
   canonicalSealJson,
-  verifyMetaAgainstSeal,
+  verifyMetaAgainstSealRecord,
+  verifyMetaAgainstSealStrict,
   computeSealInputs,
   computeSealRecord,
   sealPath,
@@ -151,6 +151,7 @@ import {
   newSealCapability,
   type SealCapabilityAction,
   type SealRecord,
+  type SealVerification,
 } from "./agent-seal";
 
 export interface IbCommandResult {
@@ -1677,34 +1678,36 @@ export async function resumeAgent(
       return { ok: false, exitCode: 1, stdout: "", stderr: message };
     }
 
+    // Enabled agents require a seal. Disabled agents normally have none, but if
+    // one exists we still verify it: changing an enabled agent's writable meta
+    // to enabled:false must not bypass the sealed-record check. A legitimate
+    // disabled agent with no seal proceeds to the hook-only launch. This check
+    // deliberately precedes proxy cleanup or any metadata/runtime mutation.
+    try {
+      const verification = await verifyAgentSealChecked(
+        agent.repoPath,
+        agent.id,
+        agent.meta as unknown as Record<string, unknown>,
+        agentDir,
+      );
+      if (!verification.ok && (frozenConfig.enabled || verification.field !== "(missing)")) {
+        const message = verification.field === "(missing)"
+          ? `sandbox refused: no sealed record for '${agent.id}'; run \`ib sandbox refresh ${agent.id}\` from an unsandboxed session to seal it`
+          : `sandbox refused: meta.json does not match the sealed record (${verification.field}); run \`ib sandbox refresh ${agent.id}\` from an unsandboxed session to re-seal`;
+        await logAgent(agentDir, message);
+        return { ok: false, exitCode: 1, stdout: "", stderr: message };
+      }
+    } catch (err) {
+      const message = `sandbox refused: could not verify sealed record for '${agent.id}': ${err instanceof Error ? err.message : String(err)}`;
+      await logAgent(agentDir, message);
+      return { ok: false, exitCode: 1, stdout: "", stderr: message };
+    }
+
     let preparedResumeSandbox: PreparedSandbox | null = null;
     // Stop leftovers before either mode resumes. This is important when refresh
     // toggles enabled -> disabled for an already-stopped agent whose launcher
     // did not get a chance to run its EXIT cleanup.
     await stopSandboxProxyForAgent(agentDir, agent.meta);
-
-    // Enabled agents require a seal. Disabled agents normally have none, but if
-    // one exists we still verify it: changing an enabled agent's writable meta
-    // to enabled:false must not bypass the sealed-record check. A legitimate
-    // disabled agent with no seal proceeds to the hook-only launch.
-    {
-      const sealRepoId = await getRepoId(agent.repoPath);
-      const existingSeal = await readSealRecord(sealRepoId, agent.id);
-      if (frozenConfig.enabled || existingSeal !== null) {
-        const verification = await verifyMetaAgainstSeal(
-          sealRepoId,
-          agent.id,
-          agent.meta as unknown as Record<string, unknown>,
-        );
-        if (!verification.ok) {
-          const message = verification.field === "(missing)"
-            ? `sandbox refused: no sealed record for '${agent.id}'; run \`ib sandbox refresh ${agent.id}\` from an unsandboxed session to seal it`
-            : `sandbox refused: meta.json does not match the sealed record (${verification.field}); run \`ib sandbox refresh ${agent.id}\` from an unsandboxed session to re-seal`;
-          await logAgent(agentDir, message);
-          return { ok: false, exitCode: 1, stdout: "", stderr: message };
-        }
-      }
-    }
 
     if (frozenConfig.enabled) {
       try {
@@ -2724,13 +2727,14 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
   // whose seal is missing, but it never overwrites an existing mismatched seal.
   // Checking existing seals regardless of the current toggle prevents an
   // enabled agent from bypassing verification by editing only enabled to false.
-  const sealRepoId = await getRepoId(agent.repoPath);
-  {
-    const existingSeal = await readSealRecord(sealRepoId, agent.id);
-    if (existingSeal !== null) {
-      const verification = await verifyMetaAgainstSeal(
-        sealRepoId,
-        agent.id,
+  let sealRepoId: string;
+  let oldSealRecord: SealRecord | null;
+  try {
+    sealRepoId = await getRepoId(agent.repoPath);
+    oldSealRecord = await readSealRecordStrict(sealRepoId, agent.id);
+    if (oldSealRecord !== null) {
+      const verification = await verifyMetaAgainstSealRecord(
+        oldSealRecord,
         agent.meta as unknown as Record<string, unknown>,
       );
       if (!verification.ok) {
@@ -2739,10 +2743,13 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
         return { ok: false, exitCode: 1, stdout: "", stderr: message };
       }
     }
+  } catch (err) {
+    const message = `sandbox refresh: could not read the protected sealed record for '${agent.id}': ${err instanceof Error ? err.message : String(err)}; retry from an unsandboxed operator session`;
+    await logAgent(agentDir, `[sandbox refresh] ${message}`);
+    return { ok: false, exitCode: 1, stdout: "", stderr: message };
   }
 
   const oldSandbox = resolveSandboxConfig({ sandbox: agent.meta.sandbox });
-  const oldSealRecord = await readSealRecord(sealRepoId, agent.id);
   const oldPaths = resolvePathsConfig(agent.meta.paths);
   const summary = summarizeSandboxRefresh(oldSandbox, oldPaths, newSandbox, newPaths);
   await logAgent(agentDir, `[sandbox refresh] re-derived from agent-type files: ${summary}`);
@@ -2782,7 +2789,12 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
   let removedOldSeal = false;
   if (!newSandbox.enabled && oldSandbox.enabled) {
     try {
-      await (sealDeleteOverride ?? deleteSealRecord)(sealRepoId, agent.id);
+      await deleteAgentSealChecked(
+        agent.repoPath,
+        agent.id,
+        agentDir,
+        agent.meta as unknown as Record<string, unknown>,
+      );
       removedOldSeal = true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -5264,7 +5276,7 @@ async function runHelperViaTmuxServerBlocking(
   runner: SandboxCommandRunner,
   cwd: string,
   command: string[],
-): Promise<void> {
+): Promise<string> {
   const shellCommand = command.map(shellQuote).join(" ");
   // tmux's client status only tells us whether run-shell itself was accepted;
   // it does not reliably relay the child shell's status. Have that shell write
@@ -5274,13 +5286,16 @@ async function runHelperViaTmuxServerBlocking(
   const resultDir = join(cwd, `.ib-seal-helper-${crypto.randomUUID()}`);
   const resultPath = join(resultDir, "result");
   const resultTmpPath = join(resultDir, "result.tmp");
+  const outputPath = join(resultDir, "output");
+  const outputTmpPath = join(resultDir, "output.tmp");
   await mkdir(resultDir, { mode: 0o700 });
   try {
     const script = [
       `cd ${shellQuote(cwd)} || exit 125`,
-      `${shellCommand}`,
-      "rc=$?",
       "umask 077",
+      `${shellCommand} > ${shellQuote(outputTmpPath)} 2>&1`,
+      "rc=$?",
+      `mv -f ${shellQuote(outputTmpPath)} ${shellQuote(outputPath)}`,
       `printf '%s\\n' "$rc" > ${shellQuote(resultTmpPath)}`,
       `mv -f ${shellQuote(resultTmpPath)} ${shellQuote(resultPath)}`,
       "exit 0",
@@ -5300,9 +5315,12 @@ async function runHelperViaTmuxServerBlocking(
       throw new Error("tmux seal helper reported an invalid status");
     }
     const helperExitCode = Number(reported);
+    const output = await Bun.file(outputPath).text().catch(() => "");
     if (helperExitCode !== 0) {
-      throw new Error(`tmux seal helper failed with exit ${helperExitCode}`);
+      const detail = output.trim();
+      throw new Error(`tmux seal helper failed with exit ${helperExitCode}${detail ? `: ${detail}` : ""}`);
     }
+    return output;
   } finally {
     await rm(resultDir, { recursive: true, force: true });
   }
@@ -5312,6 +5330,7 @@ type SealCapabilityCommandBuilder = (
   action: SealCapabilityAction,
   agentId: string,
   repoId: string,
+  meta?: Record<string, unknown>,
 ) => string[];
 let sealCapabilityCommandOverride: SealCapabilityCommandBuilder | null = null;
 
@@ -5331,17 +5350,75 @@ async function runSealCapabilityHelper(
   helperCwd: string,
   meta?: Record<string, unknown>,
   expectedRecord?: SealRecord | null,
-): Promise<void> {
+): Promise<string> {
   const cap = await newSealCapability(action, repoId, agentId, meta, expectedRecord);
   const capJson = Buffer.from(JSON.stringify(cap)).toString("base64");
   const capPath = sealCapabilityPath(repoId, agentId, cap.token);
-  const subcommand = action === "write" ? "seal" : "delete-seal";
-  const helperCommand = sealCapabilityCommandOverride?.(action, agentId, repoId)
+  const subcommand = action === "write" ? "seal" : action === "verify" ? "verify-seal" : "delete-seal";
+  const helperCommand = sealCapabilityCommandOverride?.(action, agentId, repoId, meta)
     ?? ["ib", "sandbox", subcommand, agentId, "--repo-id", repoId];
   // The trusted shell also removes every capability pathname after the command,
   // including setup/exec failures where the internal handler never consumed it.
   const capScript = `umask 077; mkdir -p ${shellQuote(dirname(capPath))} && printf %s ${shellQuote(capJson)} | base64 -d > ${shellQuote(`${capPath}.tmp`)} && chmod 600 ${shellQuote(`${capPath}.tmp`)} && mv -f ${shellQuote(`${capPath}.tmp`)} ${shellQuote(capPath)} && IB_SEAL_CAP=${shellQuote(cap.token)} ${helperCommand.map(shellQuote).join(" ")}; rc=$?; rm -f ${shellQuote(`${capPath}.tmp`)} ${shellQuote(capPath)} ${shellQuote(`${capPath}.claimed`)}; exit "$rc"`;
-  await runHelperViaTmuxServerBlocking(nukeResumeSpawnCtx, helperCwd, ["sh", "-c", capScript]);
+  return runHelperViaTmuxServerBlocking(nukeResumeSpawnCtx, helperCwd, ["sh", "-c", capScript]);
+}
+
+let sealDirectVerifyOverride: typeof verifyMetaAgainstSealStrict | null = null;
+
+/** Test seam for simulating the denied read seen by a sandboxed manager. */
+export function setSealDirectVerifyForTesting(fn: typeof verifyMetaAgainstSealStrict | null): void {
+  sealDirectVerifyOverride = fn;
+}
+
+export function resetSealDirectVerifyForTesting(): void {
+  sealDirectVerifyOverride = null;
+}
+
+function parseSealVerificationResult(output: string): SealVerification {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output.trim());
+  } catch {
+    throw new Error("tmux seal verification helper returned an invalid result");
+  }
+  if (parsed && typeof parsed === "object" && (parsed as { ok?: unknown }).ok === true) {
+    return { ok: true };
+  }
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    (parsed as { ok?: unknown }).ok === false &&
+    typeof (parsed as { field?: unknown }).field === "string" &&
+    typeof (parsed as { reason?: unknown }).reason === "string"
+  ) {
+    return parsed as SealVerification;
+  }
+  throw new Error("tmux seal verification helper returned an invalid result");
+}
+
+/**
+ * Verify a lifecycle target's frozen metadata against the protected record.
+ * Sandboxed managers cannot read ~/.itsybitsy/sealed, so permission failures
+ * are retried through the authenticated one-use tmux helper. Missing, mismatch,
+ * corrupt, helper failure, and malformed/missing helper output remain distinct
+ * fail-closed outcomes; only a real `(missing)` result may be treated as the
+ * legitimate disabled/no-seal state by the caller.
+ */
+export async function verifyAgentSealChecked(
+  repoPath: string,
+  agentId: string,
+  meta: Record<string, unknown>,
+  helperCwd: string,
+): Promise<SealVerification> {
+  const repoId = await getRepoId(repoPath);
+  try {
+    return await (sealDirectVerifyOverride ?? verifyMetaAgainstSealStrict)(repoId, agentId, meta);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "EPERM" && code !== "EACCES") throw err;
+    const output = await runSealCapabilityHelper("verify", repoId, agentId, helperCwd, meta);
+    return parseSealVerificationResult(output);
+  }
 }
 
 /**
@@ -5527,9 +5604,13 @@ export async function getRepoId(repoPath: string): Promise<string> {
     const file = Bun.file(repoIdFile);
     if (await file.exists()) {
       const id = (await file.text()).trim();
-      if (id) return id;
+      if (/^[0-9a-f]{8}$/.test(id)) return id;
+      if (id) throw new Error(`Invalid repository id in ${repoIdFile}: expected 8 lowercase hexadecimal characters`);
     }
-  } catch { /* ignore */ }
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("Invalid repository id in ")) throw err;
+    // Missing/unreadable files fall through to the ordinary creation path.
+  }
 
   // Generate new 8 hex char ID
   const bytes = new Uint8Array(4);

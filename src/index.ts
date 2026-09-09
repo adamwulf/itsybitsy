@@ -2107,14 +2107,14 @@ export async function main() {
         await printAndExit(await refreshAgentSandbox(agent));
       }
 
-      if (sub === "seal" || sub === "delete-seal") {
+      if (sub === "seal" || sub === "delete-seal" || sub === "verify-seal") {
         // Internal (A4 G3): write/refresh ONE agent's sealed record. Invoked
         // unsandboxed — either directly, or through the tmux server for a
         // sandboxed spawner that cannot write the denied seal dir itself.
         // Recomputes the record from the read-only
         // agent-type files (canSpawnChildren resolution) + the agent's meta.
         const target = args[2];
-        if (!target) {
+        if (!target || !isValidAgentId(target)) {
           console.error(`Usage: ib sandbox ${sub} <agent-id> --repo-id <repo-id>`);
           process.exit(1);
         }
@@ -2133,9 +2133,9 @@ export async function main() {
           console.error(`Repository not found or ambiguous: ${requestedRepoId}`);
           process.exit(1);
         }
-        const action = sub === "seal" ? "write" : "delete";
+        const action = sub === "seal" ? "write" : sub === "verify-seal" ? "verify" : "delete";
         let meta: Record<string, unknown> | undefined;
-        if (action === "write") {
+        if (action === "write" || action === "verify") {
           const repo = matchingRepos[0]!;
           const agent = await findAgentByIdInRepo(target, repo);
           if (!agent) {
@@ -2150,15 +2150,17 @@ export async function main() {
           // Mutation and exact postcondition verification both happen here,
           // inside the unsandboxed helper. The sandboxed parent cannot read the
           // sealed tree and receives only this command's checked status.
-          await applySealCapabilityAction(action, requestedRepoId, target, token, meta);
+          const verification = await applySealCapabilityAction(action, requestedRepoId, target, token, meta);
           if (action === "write") {
             console.log(`Sealed ${target}`);
+          } else if (action === "verify") {
+            console.log(JSON.stringify(verification));
           } else {
             console.log(`Deleted seal for ${target}`);
           }
           process.exit(0);
         } catch (err) {
-          const operation = sub === "seal" ? "seal" : "delete seal for";
+          const operation = sub === "seal" ? "seal" : sub === "verify-seal" ? "verify seal for" : "delete seal for";
           console.error(`Could not ${operation} '${target}': ${err instanceof Error ? err.message : String(err)}`);
           process.exit(1);
         }

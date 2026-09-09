@@ -105,6 +105,8 @@ import {
   getRepoId,
   setSealDirectWriteForTesting,
   resetSealDirectWriteForTesting,
+  setSealDirectVerifyForTesting,
+  resetSealDirectVerifyForTesting,
   setSealCapabilityCommandForTesting,
   resetSealCapabilityCommandForTesting,
   setSealDeleteForTesting,
@@ -1924,6 +1926,8 @@ describe("retire → rehire recovery", () => {
     resetKillPauseSpawnRunner();
     resetRehireSpawnRunner();
     resetNukeResumeSpawnRunner();
+    resetSealDirectVerifyForTesting();
+    resetSealCapabilityCommandForTesting();
     isPidAliveCtx.reset();
     process.env.HOME = originalHome;
     await rm(tempDir, { recursive: true, force: true });
@@ -2090,6 +2094,39 @@ describe("retire → rehire recovery", () => {
 
     const { readOutbox } = await import("./outbox");
     expect(await readOutbox(managerQueueDir(managerId))).toEqual([]);
+  });
+
+  test("enabled rehire resumes when its sandboxed caller cannot read the new seal", async () => {
+    const agentId = "agent-rehire-denied-read";
+    await plantRehirableArchive(agentId);
+    const modulePath = join(import.meta.dir, "agent-seal.ts");
+    setSealDirectVerifyForTesting(async () => {
+      throw Object.assign(new Error("EACCES: protected seal read denied"), { code: "EACCES" });
+    });
+    setSealCapabilityCommandForTesting((action, target, repoId, meta) => {
+      if (action !== "verify") return ["sh", "-c", "exit 99"];
+      const script = [
+        `const m = await import(${JSON.stringify(modulePath)});`,
+        `const result = await m.applySealCapabilityAction("verify", ${JSON.stringify(repoId)}, ${JSON.stringify(target)}, process.env.IB_SEAL_CAP, ${JSON.stringify(meta)}, ${JSON.stringify(tempDir)});`,
+        "console.log(JSON.stringify(result));",
+      ].join(" ");
+      return ["bun", "-e", script];
+    });
+    const inner = successRunner();
+    const helperRunner: SpawnFn = (cmd) => {
+      if (cmd[0] === "tmux" && cmd[1] === "run-shell") {
+        return Bun.spawn(["sh", "-c", cmd.at(-1)!], { stdout: "pipe", stderr: "pipe" }) as SpawnResult;
+      }
+      return inner(cmd);
+    };
+    setRehireSpawnRunner(inner);
+    setNukeResumeSpawnRunner(helperRunner);
+
+    const result = await rehireAgent(agentId);
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain(`Rehired agent: ${agentId}`);
+    expect(await readSealRecord("1a2b3c4d", agentId, tempDir)).not.toBeNull();
+    expect(await Bun.file(join(tempDir, ".ittybitty", "agents", agentId, "resume.sh")).exists()).toBe(true);
   });
 
   test("round-trips committed HEAD, tracked changes, and untracked files; resume failure leaves stopped agent", async () => {
@@ -5830,6 +5867,7 @@ describe("newAgent (native)", () => {
     resetNukeResumeSpawnRunner();
     resetSandboxWiringForTesting();
     resetSealDirectWriteForTesting();
+    resetSealDirectVerifyForTesting();
     resetSealCapabilityCommandForTesting();
     setSealDeleteForTesting(null);
     lifecycleSpawnCtx.reset();
@@ -5993,6 +6031,40 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       if (command.includes("capture-pane")) return makeSpawnResult("Claude Code v1.0", 0);
       return makeSpawnResult("", 0);
     };
+  }
+
+  function sandboxResumeWithTmuxHelperRunner() {
+    const inner = sandboxResumeRunner();
+    return (cmd: string[]): SpawnResult => {
+      if (cmd[0] === "tmux" && cmd[1] === "run-shell") {
+        return Bun.spawn(["sh", "-c", cmd.at(-1)!], { stdout: "pipe", stderr: "pipe" }) as SpawnResult;
+      }
+      return inner(cmd);
+    };
+  }
+
+  function useRealSealVerificationHelper(): void {
+    const modulePath = join(import.meta.dir, "agent-seal.ts");
+    const helperHome = process.env.HOME!;
+    setSealCapabilityCommandForTesting((action, target, repoId, meta) => {
+      if (action !== "verify") return ["sh", "-c", "exit 99"];
+      const script = [
+        `const m = await import(${JSON.stringify(modulePath)});`,
+        `const capPath = m.sealCapabilityPath(${JSON.stringify(repoId)}, ${JSON.stringify(target)}, process.env.IB_SEAL_CAP, ${JSON.stringify(helperHome)});`,
+        `const cap = await Bun.file(capPath).json();`,
+        `const digest = await m.sealCapabilityDigest("verify", ${JSON.stringify(repoId)}, ${JSON.stringify(target)}, ${JSON.stringify(meta)});`,
+        `if (cap.digest !== digest) console.error(JSON.stringify({ capDigest: cap.digest, digest, home: process.env.HOME }));`,
+        `const result = await m.applySealCapabilityAction("verify", ${JSON.stringify(repoId)}, ${JSON.stringify(target)}, process.env.IB_SEAL_CAP, ${JSON.stringify(meta)}, ${JSON.stringify(helperHome)});`,
+        "console.log(JSON.stringify(result));",
+      ].join(" ");
+      return ["bun", "-e", script];
+    });
+  }
+
+  function denyDirectSealVerification(): void {
+    setSealDirectVerifyForTesting(async () => {
+      throw Object.assign(new Error("EACCES: protected seal read denied"), { code: "EACCES" });
+    });
   }
 
   test("path layer union and dedupe are independent of layer and entry order", () => {
@@ -7067,6 +7139,85 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(await readSealRecord(await getRepoId(tempDir), id, process.env.HOME!)).toBeNull();
   });
 
+  test("sandbox refresh refuses denied protected-record reads before pause or policy mutation", async () => {
+    const id = "refresh-denied-seal-read";
+    await writeSandboxType(id, { enabled: true });
+    setSandboxPortAllocatorForTesting(() => 43324);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99985 }));
+    expect((await callNewAgent("refresh denied read", { name: id, type: id })).ok).toBe(true);
+    const agentDir = join(agentsDir, id);
+    const metaPath = join(agentDir, "meta.json");
+    const meta = await Bun.file(metaPath).json() as AgentMeta;
+    const originalMeta = await Bun.file(metaPath).text();
+    let pauseCalled = false;
+    let policyCalled = false;
+    setSandboxRefreshPauseForTesting(async () => {
+      pauseCalled = true;
+      return { ok: true, exitCode: 0, stdout: "", stderr: "" };
+    });
+    setSandboxRefreshMetaMutateForTesting(async () => {
+      policyCalled = true;
+      return true;
+    });
+    const protectedDir = join(process.env.HOME!, ".itsybitsy", "sealed");
+    await chmod(protectedDir, 0o000);
+    try {
+      const result = await refreshAgentSandbox(makeAgent(id, tempDir, "running", meta));
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain("could not read the protected sealed record");
+      expect(result.stderr).toContain("unsandboxed operator session");
+      expect(pauseCalled).toBe(false);
+      expect(policyCalled).toBe(false);
+      expect(await Bun.file(metaPath).text()).toBe(originalMeta);
+    } finally {
+      await chmod(protectedDir, 0o700);
+      setSandboxRefreshPauseForTesting(null);
+      setSandboxRefreshMetaMutateForTesting(null);
+    }
+    expect(await readSealRecord(await getRepoId(tempDir), id, process.env.HOME!)).not.toBeNull();
+  });
+
+  test("sandbox refresh refuses a corrupt protected record before pause or policy mutation", async () => {
+    const id = "refresh-corrupt-seal";
+    await writeSandboxType(id, { enabled: true });
+    setSandboxPortAllocatorForTesting(() => 43325);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99986 }));
+    expect((await callNewAgent("refresh corrupt", { name: id, type: id })).ok).toBe(true);
+    const agentDir = join(agentsDir, id);
+    const metaPath = join(agentDir, "meta.json");
+    const meta = await Bun.file(metaPath).json() as AgentMeta;
+    const originalMeta = await Bun.file(metaPath).text();
+    const repoId = await getRepoId(tempDir);
+    await Bun.write(sealPath(repoId, id, process.env.HOME!), "not json");
+    let pauseCalled = false;
+    let policyCalled = false;
+    setSandboxRefreshPauseForTesting(async () => {
+      pauseCalled = true;
+      return { ok: true, exitCode: 0, stdout: "", stderr: "" };
+    });
+    setSandboxRefreshMetaMutateForTesting(async () => {
+      policyCalled = true;
+      return true;
+    });
+    try {
+      const result = await refreshAgentSandbox(makeAgent(id, tempDir, "running", meta));
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain("could not read the protected sealed record");
+      expect(pauseCalled).toBe(false);
+      expect(policyCalled).toBe(false);
+      expect(await Bun.file(metaPath).text()).toBe(originalMeta);
+    } finally {
+      setSandboxRefreshPauseForTesting(null);
+      setSandboxRefreshMetaMutateForTesting(null);
+    }
+  });
+
   test("sandbox refresh refuses a coordinator and points at the reset path", async () => {
     const id = "refresh-coord";
     const agentDir = join(agentsDir, id);
@@ -7252,6 +7403,20 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   });
 
   // ── A4 G3: sealed record ────────────────────────────────────────────────────
+  test("malformed stored repo id is rejected before seal capability issuance or escaped mutation", async () => {
+    const repoIdPath = join(tempDir, ".ittybitty", "repo-id");
+    const escaped = join(process.env.HOME!, "escaped-agent.json");
+    await Bun.write(repoIdPath, "../../escaped\n");
+    const meta = {
+      id: "agent", agentType: "worker",
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+      paths: { allowRead: [], allowWrite: [], deny: [] },
+    };
+    await expect(sealAgentRecord(tempDir, "agent", meta, tempDir)).rejects.toThrow("Invalid repository id");
+    expect(await Bun.file(escaped).exists()).toBe(false);
+    await Bun.write(repoIdPath, "abcd1234\n");
+  });
+
   test("A4 G3: spawn writes a sealed record with the profile inputs and a valid sha256", async () => {
     await writeSandboxType("seal-spawn");
     setSandboxPortAllocatorForTesting(() => 43150);
@@ -7919,6 +8084,144 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     expect(resume).toContain(`setsid ${sandboxDenialExecPrefix("'/usr/bin/sandbox-exec' -f")}`);
     expect(await Bun.file(join(agentDir, "agent.log")).text()).not.toContain("does not match the sealed record");
+  });
+
+  test("sandboxed manager resumes an enabled child through authenticated denied-read verification", async () => {
+    const id = "seal-denied-read-valid";
+    await writeSandboxType(id);
+    setSandboxPortAllocatorForTesting(() => 43320);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99981 }));
+    expect((await callNewAgent("denied read valid", { name: id, type: id })).ok).toBe(true);
+
+    const agentDir = join(agentsDir, id);
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+    denyDirectSealVerification();
+    useRealSealVerificationHelper();
+    setNukeResumeSpawnRunner(sandboxResumeWithTmuxHelperRunner());
+    setSendSpawnRunner(() => makeSpawnResult("", 0));
+    try {
+      const resumed = await resumeAgent(makeAgent(id, tempDir, "stopped", meta));
+      expect(resumed.stderr).toBe("");
+      expect(resumed.ok).toBe(true);
+      expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(true);
+    } finally {
+      resetSendSpawnRunner();
+    }
+  });
+
+  test("denied-read helper rejects an enabled seal whose writable metadata was flipped false", async () => {
+    const id = "seal-denied-read-tamper";
+    await writeSandboxType(id);
+    setSandboxPortAllocatorForTesting(() => 43321);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99982 }));
+    expect((await callNewAgent("denied read tamper", { name: id, type: id })).ok).toBe(true);
+
+    const agentDir = join(agentsDir, id);
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    meta.sandbox = { ...meta.sandbox!, enabled: false };
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+    denyDirectSealVerification();
+    useRealSealVerificationHelper();
+    setNukeResumeSpawnRunner(sandboxResumeWithTmuxHelperRunner());
+
+    const resumed = await resumeAgent(makeAgent(id, tempDir, "stopped", meta));
+    expect(resumed.ok).toBe(false);
+    expect(resumed.stderr).toContain("does not match the sealed record (sandbox)");
+    expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
+  });
+
+  test("denied-read helper distinguishes missing enabled seal from legitimate disabled no-seal", async () => {
+    const enabledId = "seal-denied-read-missing";
+    await writeSandboxType(enabledId);
+    setSandboxPortAllocatorForTesting(() => 43322);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99983 }));
+    expect((await callNewAgent("missing enabled", { name: enabledId, type: enabledId })).ok).toBe(true);
+    await removeAgentSeal(tempDir, enabledId);
+    const enabledDir = join(agentsDir, enabledId);
+    const enabledMeta = await Bun.file(join(enabledDir, "meta.json")).json() as AgentMeta;
+    enabledMeta.state = "stopped";
+    await Bun.write(join(enabledDir, "meta.json"), JSON.stringify(enabledMeta));
+
+    denyDirectSealVerification();
+    useRealSealVerificationHelper();
+    setNukeResumeSpawnRunner(sandboxResumeWithTmuxHelperRunner());
+    const missing = await resumeAgent(makeAgent(enabledId, tempDir, "stopped", enabledMeta));
+    expect(missing.ok).toBe(false);
+    expect(missing.stderr).toContain("no sealed record");
+
+    resetSealDirectVerifyForTesting();
+    resetSealCapabilityCommandForTesting();
+    const disabledId = "seal-denied-read-disabled";
+    await writeSandboxType(disabledId, { enabled: false });
+    spawnCalls = [];
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const disabledSpawn = await callNewAgent("missing disabled", { name: disabledId, type: disabledId });
+    expect(disabledSpawn.stderr).toBe("");
+    expect(disabledSpawn.ok).toBe(true);
+    const disabledDir = join(agentsDir, disabledId);
+    const disabledMeta = await Bun.file(join(disabledDir, "meta.json")).json() as AgentMeta;
+    disabledMeta.state = "stopped";
+    await Bun.write(join(disabledDir, "meta.json"), JSON.stringify(disabledMeta));
+    denyDirectSealVerification();
+    useRealSealVerificationHelper();
+    setNukeResumeSpawnRunner(sandboxResumeWithTmuxHelperRunner());
+    setSendSpawnRunner(() => makeSpawnResult("", 0));
+    try {
+      const resumed = await resumeAgent(makeAgent(disabledId, tempDir, "stopped", disabledMeta));
+      expect(resumed.ok).toBe(true);
+    } finally {
+      resetSendSpawnRunner();
+    }
+  });
+
+  test("denied-read verification fails closed when helper fails or omits its completion result", async () => {
+    const id = "seal-verify-helper-failure";
+    await writeSandboxType(id);
+    setSandboxPortAllocatorForTesting(() => 43323);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99984 }));
+    expect((await callNewAgent("helper failure", { name: id, type: id })).ok).toBe(true);
+    const agentDir = join(agentsDir, id);
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+    denyDirectSealVerification();
+
+    setSealCapabilityCommandForTesting(() => ["sh", "-c", "echo verify-failed >&2; exit 37"]);
+    setNukeResumeSpawnRunner(sandboxResumeWithTmuxHelperRunner());
+    const failed = await resumeAgent(makeAgent(id, tempDir, "stopped", meta));
+    expect(failed.ok).toBe(false);
+    expect(failed.stderr).toContain("tmux seal helper failed with exit 37");
+    expect(failed.stderr).toContain("verify-failed");
+
+    setSealCapabilityCommandForTesting(() => ["sh", "-c", "exit 0"]);
+    setNukeResumeSpawnRunner(sandboxResumeWithTmuxHelperRunner());
+    const emptyOutput = await resumeAgent(makeAgent(id, tempDir, "stopped", meta));
+    expect(emptyOutput.ok).toBe(false);
+    expect(emptyOutput.stderr).toContain("verification helper returned an invalid result");
+
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      if (cmd[0] === "tmux" && cmd[1] === "run-shell") return makeSpawnResult("", 0);
+      return sandboxResumeRunner()(cmd);
+    });
+    const missingResult = await resumeAgent(makeAgent(id, tempDir, "stopped", meta));
+    expect(missingResult.ok).toBe(false);
+    expect(missingResult.stderr).toContain("did not report completion");
+    expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
   });
 
   test("A4 G3: resume refuses an agent whose seal is missing (mandatory sandbox)", async () => {
@@ -8992,7 +9295,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const coordRepoDir = await mkdtemp(join(tmpdir(), "ib-coord-model-"));
     const coordRepo = join(coordRepoDir, "myrepo");
     await mkdir(join(coordRepo, ".ittybitty", "agents"), { recursive: true });
-    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "coordmodel\n");
+    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "c00d0001\n");
 
     const userConfigPath = join(coordRepo, "config.json");
     setUserConfigPath(userConfigPath);
@@ -9790,7 +10093,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const coordRepoDir = await mkdtemp(join(tmpdir(), "ib-coord-settings-"));
     const coordRepo = join(coordRepoDir, "myrepo");
     await mkdir(join(coordRepo, ".ittybitty", "agents"), { recursive: true });
-    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "coordsettings\n");
+    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "c00d0002\n");
 
     // Pre-existing repo settings with an unrelated user permission; must
     // remain untouched by coordinator spawn.
@@ -9944,7 +10247,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const coordRepoDir = await mkdtemp(join(tmpdir(), "ib-coord-test-"));
     const coordRepo = join(coordRepoDir, "coordinator");
     await mkdir(join(coordRepo, ".ittybitty", "agents"), { recursive: true });
-    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "coordtest\n");
+    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "c00d0003\n");
 
     const userConfigPath = join(coordRepo, "config.json");
     setUserConfigPath(userConfigPath);
@@ -9992,7 +10295,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // Create existing non-coordinator agent named "coordinator" (the collision)
     await mkdir(join(coordAgentsDir, "coordinator"), { recursive: true });
     await Bun.write(join(coordAgentsDir, "coordinator", "meta.json"), JSON.stringify({ id: "coordinator" }));
-    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "colltest\n");
+    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "c00d0004\n");
 
     const userConfigPath = join(coordRepo, "config.json");
     setUserConfigPath(userConfigPath);

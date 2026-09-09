@@ -32,7 +32,7 @@ export interface SealRecord {
   sha256: string;
 }
 
-export type SealCapabilityAction = "write" | "delete";
+export type SealCapabilityAction = "write" | "delete" | "verify";
 
 export interface SealCapability {
   token: string;
@@ -65,11 +65,24 @@ export function sealDir(home?: string): string {
   return join(sealHome(home), ".itsybitsy", "sealed");
 }
 
+function assertSealTarget(repoId: string, agentId: string): void {
+  // Repository IDs are generated as exactly eight lowercase hex characters.
+  // Agent IDs intentionally retain their established alphanumeric / hyphen /
+  // underscore syntax. Validate both before either value is interpolated into
+  // a protected pathname: path traversal here would move a seal or capability
+  // outside ~/.itsybitsy/sealed before the internal CLI got a chance to reject
+  // the request.
+  if (!/^[0-9a-f]{8}$/.test(repoId)) throw new Error(`invalid seal repository id: ${repoId}`);
+  if (!/^[a-zA-Z0-9_-]+$/.test(agentId)) throw new Error(`invalid seal agent id: ${agentId}`);
+}
+
 /** The seal file for one agent: `<sealDir>/<repoId>-<agentId>.json`. */
 export function sealPath(repoId: string, agentId: string, home?: string): string {
+  assertSealTarget(repoId, agentId);
   return join(sealDir(home), `${repoId}-${agentId}.json`);
 }
 export function sealCapabilityPath(repoId: string, agentId: string, token: string, home?: string): string {
+  assertSealTarget(repoId, agentId);
   if (!/^[0-9a-f-]{36}$/.test(token)) throw new Error("invalid capability token");
   return join(sealDir(home), `${repoId}-${agentId}-${token}.cap`);
 }
@@ -80,15 +93,15 @@ export async function sealCapabilityDigest(
   meta?: Record<string, unknown>,
   expectedRecord?: SealRecord | null,
 ): Promise<string> {
-  const intent = action === "write"
-    ? { action, repoId, agentId, inputs: await computeSealInputs(meta ?? {}) }
-    : {
+  const intent = action === "delete"
+    ? {
         action,
         repoId,
         agentId,
         intendedRecord: null,
         expectedRecord: expectedRecord === undefined ? "stale-id-any" : expectedRecord,
-      };
+      }
+    : { action, repoId, agentId, inputs: await computeSealInputs(meta ?? {}) };
   return createHash("sha256").update(canonicalSealJson(intent)).digest("hex");
 }
 export async function newSealCapability(
@@ -98,6 +111,7 @@ export async function newSealCapability(
   meta?: Record<string, unknown>,
   expectedRecord?: SealRecord | null,
 ): Promise<SealCapability> {
+  assertSealTarget(repoId, agentId);
   const capability: SealCapability = {
     token: randomUUID(),
     action,
@@ -302,10 +316,15 @@ export async function applySealCapabilityAction(
   token: string,
   meta?: Record<string, unknown>,
   home?: string,
-): Promise<void> {
+): Promise<SealVerification | void> {
   const capability = await claimSealCapability(action, repoId, agentId, token, meta, home);
   if (!capability) {
     throw new Error("internal seal capability missing, invalid, or replayed");
+  }
+
+  if (action === "verify") {
+    if (!meta) throw new Error("seal metadata is required");
+    return verifyMetaAgainstSealStrict(repoId, agentId, meta, home);
   }
 
   if (action === "write") {
@@ -323,6 +342,37 @@ export async function applySealCapabilityAction(
     ? capability.expectedRecord ?? null
     : undefined;
   await deleteSealRecordChecked(repoId, agentId, expectedRecord, home);
+}
+
+/** Strict verification for trusted helpers and operator-only lifecycle paths. */
+export async function verifyMetaAgainstSealStrict(
+  repoId: string,
+  agentId: string,
+  meta: Record<string, unknown>,
+  home?: string,
+): Promise<SealVerification> {
+  const record = await readSealRecordStrict(repoId, agentId, home);
+  if (!record) return { ok: false, field: "(missing)", reason: "no sealed record" };
+  return verifyMetaAgainstSealRecord(record, meta);
+}
+
+export async function verifyMetaAgainstSealRecord(
+  record: SealRecord,
+  meta: Record<string, unknown>,
+): Promise<SealVerification> {
+  const recomputed = createHash("sha256").update(canonicalSealJson(record.inputs)).digest("hex");
+  if (recomputed !== record.sha256) {
+    return { ok: false, field: "sha256", reason: "sealed record integrity check failed" };
+  }
+
+  const current = await computeSealInputs(meta);
+  const fields: Array<keyof SealInputs> = ["agentType", "canSpawnChildren", "paths", "sandbox"];
+  for (const field of fields) {
+    if (canonicalSealJson(current[field]) !== canonicalSealJson(record.inputs[field])) {
+      return { ok: false, field, reason: `${field} does not match the sealed record` };
+    }
+  }
+  return { ok: true };
 }
 
 /**
@@ -343,18 +393,5 @@ export async function verifyMetaAgainstSeal(
   if (!record) {
     return { ok: false, field: "(missing)", reason: "no sealed record" };
   }
-  const recomputed = createHash("sha256").update(canonicalSealJson(record.inputs)).digest("hex");
-  if (recomputed !== record.sha256) {
-    return { ok: false, field: "sha256", reason: "sealed record integrity check failed" };
-  }
-
-  const current = await computeSealInputs(meta);
-  // Compare field-by-field in a fixed order so the FIRST divergence is named.
-  const fields: Array<keyof SealInputs> = ["agentType", "canSpawnChildren", "paths", "sandbox"];
-  for (const field of fields) {
-    if (canonicalSealJson(current[field]) !== canonicalSealJson(record.inputs[field])) {
-      return { ok: false, field, reason: `${field} does not match the sealed record` };
-    }
-  }
-  return { ok: true };
+  return verifyMetaAgainstSealRecord(record, meta);
 }

@@ -1177,7 +1177,7 @@ export async function checkIbCommandAccess(
   // from an agent's Bash(ib:*) allowance: the command writes the protected
   // seal record directly and therefore bypasses the normal path hook.  The
   // trusted tmux fallback does not pass through this hook.
-  if (/(?:^|[;&|]\s*)ib\s+sandbox\s+(?:seal|delete-seal)(?:\s|$)/.test(normalizedCommand)) {
+  if (/(?:^|[;&|]\s*)ib\s+sandbox\s+(?:seal|delete-seal|verify-seal)(?:\s|$)/.test(normalizedCommand)) {
     return {
       decision: "deny",
       reason: "Access denied: ib sandbox seal is an internal operation",

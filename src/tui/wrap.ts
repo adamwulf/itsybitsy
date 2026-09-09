@@ -559,19 +559,23 @@ function terminalEscapeEnd(text: string, cursor: number): number {
     return cursor + 1;
   }
   if (kind === "]" || kind === "_" || kind === "P" || kind === "^") {
-    while (
-      end < text.length &&
-      text[end] !== "\x07" &&
-      !(text[end] === "\x1b" && text[end + 1] === "\\")
-    ) {
+    while (end < text.length && text[end] !== "\x07") {
+      if (text[end] === "\x1b") {
+        if (text[end + 1] === "\\") return end + 2;
+        // A new escape before the string terminator makes this opener
+        // malformed. Stop here so repeated unterminated controls stay linear.
+        return cursor + 1;
+      }
       end++;
     }
     if (text[end] === "\x07") return end + 1;
-    if (end < text.length) return end + 2;
     // Unterminated string control: preserve its payload as ordinary text.
     return cursor + 1;
   }
-  if (kind === "(" || kind === ")") return Math.min(text.length, cursor + 3);
+  if (kind === "(" || kind === ")") {
+    const designator = text.charCodeAt(cursor + 2);
+    return designator >= 0x30 && designator <= 0x7e ? cursor + 3 : cursor + 1;
+  }
   const code = kind.charCodeAt(0);
   // Other valid ESC Fe/Fs sequences are two ASCII bytes. For malformed input,
   // consume only ESC so a following surrogate pair remains an intact grapheme.
@@ -730,9 +734,10 @@ function stripTerminalAnsi(text: string): string {
 }
 
 function stripAnsiForWrap(text: string): string {
-  // The shared parser's fast regex handles ordinary CSI/OSC but not colon-form
-  // SGR. Pay for grapheme tokenization only on the uncommon extended form.
-  return /\x1b\[[0-9;:]*:/.test(text) ? stripTerminalAnsi(text) : stripAnsi(text);
+  // The shared fast regex omits valid CSI intermediate-space and non-letter
+  // final forms. Use the grammar-aware tokenizer whenever a control is present;
+  // plain transcript lines retain the cheap no-allocation path.
+  return text.includes("\x1b") ? stripTerminalAnsi(text) : text;
 }
 
 function isDiscardableWrapSpace(text: string): boolean {
@@ -837,6 +842,8 @@ function terminalLineParts(line: string): TerminalLineParts {
   if (prefixTokens.length === 0 || suffixTokens.length === 0) {
     return { inner: line, affixes: { prefix: "", suffix: "", prefixColumn: 0 } };
   }
+  const prefixRaw = prefixTokens.map(({ token }) => token.raw).join("");
+  const suffixRaw = suffixTokens.map(({ token }) => token.raw).join("");
   const prefixState: TerminalStyleState = { sgr: new Map(), osc8: null, osc8Active: false };
   for (const { token } of prefixTokens) applyTerminalEscape(prefixState, token.raw);
   const prefixIndexes = new Set(prefixTokens.map(({ index }) => index));
@@ -857,6 +864,8 @@ function terminalLineParts(line: string): TerminalLineParts {
   const replayablePrefixLink = !prefixState.osc8Active || prefixState.osc8 !== null;
   if (
     !hasTerminalStyle(prefixState) ||
+    prefixRaw.length > MAX_REPLAYABLE_AFFIX_LENGTH ||
+    suffixRaw.length > MAX_REPLAYABLE_AFFIX_LENGTH ||
     !prefixRemainsActive ||
     !replayablePrefixSgr ||
     !replayablePrefixLink ||
@@ -874,8 +883,8 @@ function terminalLineParts(line: string): TerminalLineParts {
       .map((token) => token.raw)
       .join(""),
     affixes: {
-      prefix: prefixTokens.map(({ token }) => token.raw).join(""),
-      suffix: suffixTokens.map(({ token }) => token.raw).join(""),
+      prefix: prefixRaw,
+      suffix: suffixRaw,
       prefixColumn: tokens
         .slice(0, prefixTokens[0]!.index)
         .reduce((sum, token) => sum + token.width, 0),
@@ -1137,6 +1146,7 @@ interface TerminalStyleState {
 // amplify an O(n)-byte input to O(n²). Typical terminal URLs fit comfortably.
 const MAX_REPLAYABLE_OSC8_LENGTH = 256;
 const MAX_REPLAYABLE_SGR_LENGTH = 256;
+const MAX_REPLAYABLE_AFFIX_LENGTH = 256;
 
 function hasTerminalStyle(state: TerminalStyleState): boolean {
   return state.sgr.size > 0 || state.osc8Active;
@@ -1561,7 +1571,7 @@ function reflowBorderlessTable(block: BorderlessTableBlock, width: number): stri
     for (let row = 0; row < height; row++) {
       const columns = cellLines.map((cell, i) => {
         const text = cell[row] ?? "";
-        const extra = Math.max(0, widths[i]! - visibleWidth(text));
+        const extra = Math.max(0, widths[i]! - terminalVisibleWidthForWrap(text));
         const alignment = block.alignments[i]!;
         const left =
           alignment === "right"
@@ -1607,15 +1617,15 @@ export function wordWrapLines(text: string, width: number): string[] {
     const borderless = matchBorderlessTableBlock(lines, i);
     if (borderless) {
       const block = lines.slice(i, borderless.end + 1);
-      if (block.every((candidate) => visibleWidth(candidate) <= width)) {
-        result.push(...block);
+      if (block.every((candidate) => terminalVisibleWidthForWrap(candidate) <= width)) {
+        result.push(...block.map(safeTerminalTextForWrap));
       } else {
         const reflowed = reflowBorderlessTable(borderless, width);
         if (reflowed) {
           result.push(...reflowed);
         } else {
           for (const candidate of block) {
-            result.push(truncateToWidth(candidate, width, ""));
+            result.push(truncateTerminalToWidth(candidate, width, ""));
           }
         }
       }
@@ -1627,9 +1637,9 @@ export function wordWrapLines(text: string, width: number): string[] {
       const end = matchTableBlockEnd(lines, i);
       if (end > i) {
         const block = lines.slice(i, end + 1);
-        if (block.every((l) => visibleWidth(l) <= width)) {
+        if (block.every((l) => terminalVisibleWidthForWrap(l) <= width)) {
           // The whole table fits — pass it through untouched (colors intact).
-          result.push(...block);
+          result.push(...block.map(safeTerminalTextForWrap));
         } else {
           const reflowed = reflowTable(block, width);
           if (reflowed) {

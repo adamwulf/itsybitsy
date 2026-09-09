@@ -178,6 +178,20 @@ describe("wrapSingleLine", () => {
     expect(result.join("")).toBe(line);
     expect(result.length).toBeGreaterThan(1);
   });
+
+  test("keeps repeated unterminated string controls linear and visible", () => {
+    const line = "\x1b]x".repeat(2_000) + "tail";
+    const result = wrapSingleLine(line, 3);
+    expect(result.join("")).toBe(line);
+    expect(result.length).toBeGreaterThan(1_000);
+  });
+
+  test("does not consume an emoji as an ESC charset designator", () => {
+    const line = "12\x1b(🙂abcdef";
+    const result = wrapSingleLine(line, 3);
+    expect(result.join("")).toBe(line);
+    expect(result.join("")).toContain("🙂a");
+  });
 });
 
 describe("wrapLines", () => {
@@ -408,6 +422,14 @@ describe("separator collapse (─ divider truncation, pinned-width fix)", () => 
     expect(visibleWidth(rows[0]!)).toBe(40);
     expect(stripAnsi(rows[0]!)).toBe("━".repeat(40));
     expect(rows[0]).not.toContain("31:z");
+  });
+
+  test("recognizes a heavy rule through a valid CSI intermediate-space control", () => {
+    const control = "\x1b[1 q";
+    const headerRule = control + "━".repeat(20) + "  " + "━".repeat(80);
+    const rows = wordWrapSingleLine(headerRule, 10);
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.replace(control, "")).toBe("━".repeat(10));
   });
 
   test.each([
@@ -1289,6 +1311,21 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     expect(wordWrapLines(table.join("\n"), 80)).toEqual(table);
   });
 
+  test("sanitizes an unsupported colon CSI even when the table already fits", () => {
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["X", "Y"],
+      ],
+      [3, 3],
+    );
+    table[0] = table[0]!.replace("A", "\x1b[31:zA");
+
+    const rows = wordWrapLines(table.join("\n"), 20);
+    expect(rows.join("\n")).not.toContain("31:z");
+    expect(stripAnsi(rows.join("")).replace(/[\s━]/g, "")).toContain("ABXY");
+  });
+
   test("reflows a uniformly styled table without stripping terminal metadata or content", () => {
     const linkOpen = "\x1b]8;;https://example.com\x1b\\";
     const linkClose = "\x1b]8;;\x1b\\";
@@ -2092,6 +2129,32 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     expect(wordWrapLines(rowWideInput, 11).join("\n").length).toBeLessThan(
       rowWideInput.length * 20,
     );
+  });
+
+  test("does not let a short opener hide an oversized row-wide affix", () => {
+    const size = 1_000;
+    const hugeSgr = `\x1b[38:2:${"1:".repeat(size)}2m`;
+    const repeatedSgr = "\x1b[31m".repeat(size);
+    const hugeLink = "\x1b]8;;https://example.com/" + "a".repeat(size) + "\x1b\\";
+    const cases: Array<[string, string, string, string]> = [
+      [hugeSgr, "\x1b[31m", "\x1b[0m", hugeSgr],
+      [repeatedSgr, "", "\x1b[0m", repeatedSgr],
+      [hugeLink, "\x1b]8;;https://example.com/short\x1b\\", "\x1b]8;;\x1b\\", hugeLink],
+    ];
+    for (const [huge, short, close, marker] of cases) {
+      const table = renderTable(
+        [
+          ["A", "B"],
+          ["x", "y".repeat(size)],
+        ],
+        [5, size],
+      );
+      table[2] = "  " + huge + short + table[2]!.slice(2) + close;
+      const input = table.join("\n");
+      const output = wordWrapLines(input, 1).join("\n");
+      expect(output.length).toBeLessThan(input.length * 20);
+      expect(output.split(marker).length - 1).toBeLessThanOrEqual(1);
+    }
   });
 
   test("retains non-breaking spaces instead of treating them as wrap separators", () => {

@@ -48,7 +48,7 @@ describe("buildCodexStartContent — launch line", () => {
     ...sandboxFields(),
   });
 
-  test("enabled mode carries Codex yolo flags only beneath the shared Seatbelt wrapper", () => {
+  test("enabled mode disables Codex native protections beneath the shared Seatbelt wrapper", () => {
     const content = buildCodexStartContent(baseInput());
     // The model is shell-quoted, so it ends up wrapped in single quotes.
     expect(content).toContain("-m 'gpt-5.4-mini'");
@@ -92,14 +92,15 @@ describe("buildCodexStartContent — launch line", () => {
       .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
   });
 
-  test("disabled launch suppresses approvals, keeps native workspace-write and hooks, and omits kernel helpers", () => {
+  test.each([false, true])("disabled launch disables native protections, retains hooks, and omits kernel helpers (fugu=%s)", (fugu) => {
     const content = buildCodexStartContent({
       ...baseInput(),
       sandboxEnabled: false,
+      fugu,
     });
-    expect(content).toContain("-a never -s workspace-write --dangerously-bypass-hook-trust");
+    expect(content.match(/codex -m [^\n]* -a never -s danger-full-access --dangerously-bypass-hook-trust/g)?.length).toBe(2);
     expect(content).toContain("--dangerously-bypass-hook-trust");
-    expect(content).not.toContain("-s danger-full-access");
+    expect(content).not.toContain("-s workspace-write");
     expect(content).not.toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(content).toContain("hooks.PreToolUse");
     expect(content).not.toContain("sandbox-exec");
@@ -117,7 +118,7 @@ describe("buildCodexStartContent — launch line", () => {
     });
     expect(content).not.toContain("STALE-PREAMBLE");
     expect(content).not.toContain("STALE-PREFIX");
-    expect(content).toContain("-a never -s workspace-write");
+    expect(content).toContain("-a never -s danger-full-access");
     expect(content).toContain("hooks.PreToolUse");
   });
 
@@ -358,7 +359,7 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     expect(content).not.toContain("--resume");
   });
 
-  test("enabled resume re-passes Codex yolo flags beneath the shared Seatbelt wrapper", () => {
+  test("enabled resume disables Codex native protections beneath the shared Seatbelt wrapper", () => {
     const content = buildCodexResumeContent(baseInput());
     expect(content).toContain("-a never");
     expect(content).toContain("-s danger-full-access");
@@ -399,14 +400,15 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
       .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
   });
 
-  test("disabled resume suppresses approvals, keeps native workspace-write and hooks, and omits kernel helpers", () => {
+  test.each([false, true])("disabled resume disables native protections, retains hooks, and omits kernel helpers (fugu=%s)", (fugu) => {
     const content = buildCodexResumeContent({
       ...baseInput(),
       sandboxEnabled: false,
+      fugu,
     });
-    expect(content).toContain("-a never -s workspace-write --dangerously-bypass-hook-trust");
+    expect(content.match(/codex resume [^\n]* -a never -s danger-full-access --dangerously-bypass-hook-trust/g)?.length).toBe(2);
     expect(content).toContain("--dangerously-bypass-hook-trust");
-    expect(content).not.toContain("-s danger-full-access");
+    expect(content).not.toContain("-s workspace-write");
     expect(content).not.toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(content).toContain("hooks.PreToolUse");
     expect(content).not.toContain("sandbox-exec");
@@ -424,7 +426,7 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     });
     expect(content).not.toContain("STALE-PREAMBLE");
     expect(content).not.toContain("STALE-PREFIX");
-    expect(content).toContain("-a never -s workspace-write");
+    expect(content).toContain("-a never -s danger-full-access");
     expect(content).toContain("hooks.PreToolUse");
   });
 

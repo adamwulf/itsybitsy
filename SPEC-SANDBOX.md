@@ -2,13 +2,13 @@
 
 **Current contract (2026-09-08):** kernel sandboxing defaults to enabled for repository agents and per-repository coordinators (Claude, Codex/fugu, and agy). Agent types may declare `sandbox: true` / `sandbox: false`, or an object with boolean `sandbox.enabled`, `rawAllow`, and `domains`. Enablement follows the most specific explicit value: `_all` → applicable `_non_coordinator` → oldest ancestor → leaf. Omission inherits; only final resolution defaults to true. Lists still union independently.
 
-Enabled mode runs the agent under itsybitsy's `sandbox-exec` profile and egress proxy. The resolved path configuration supplies the coarse kernel rules, while hooks enforce agent-type tool permissions and finer path isolation. An explicit false omits only the itsybitsy kernel wrapper, proxy, and kernel-denial collector, restoring pre-sandbox launch behavior. Hooks remain installed in both modes and must resolve every tool allow/deny without handing an approval prompt to the user.
+Enabled mode runs the agent under itsybitsy's `sandbox-exec` profile and egress proxy. The resolved path configuration supplies the coarse kernel rules, while hooks enforce agent-type tool permissions and finer path isolation. An explicit false omits the itsybitsy kernel wrapper, proxy, and kernel-denial collector. Codex/Fugu also disable their native sandbox in both modes (2026-09-09 correction to the earlier fallback). Hooks remain installed in both modes and must resolve every tool allow/deny without handing an approval prompt to the user.
 
 The CLI launch contract is mode-specific only where process confinement changes:
 
 | CLI | Kernel enabled | Kernel disabled |
 |---|---|---|
-| Codex/Fugu | Always `-a never`; `-s danger-full-access` inside the itsybitsy wrapper. | Always `-a never`; explicit `-s workspace-write`; no itsybitsy wrapper/proxy/collector. |
+| Codex/Fugu | Always `-a never -s danger-full-access` with hooks inside the itsybitsy wrapper. | The same flags and hooks; no native sandbox or itsybitsy wrapper/proxy/collector. |
 | Agy/Gemini | Always `--dangerously-skip-permissions --mode=accept-edits`; fail-closed hooks retained; runs inside the itsybitsy wrapper. | The same flags and fail-closed hooks; no itsybitsy wrapper/proxy/collector. |
 | Claude | Adds `--dangerously-skip-permissions` inside the itsybitsy wrapper. PreToolUse explicitly allows or denies before native permission resolution, with `permissions.deny` checked first. | Emits neither `--dangerously-skip-permissions` nor `--permission-mode`; no itsybitsy wrapper/proxy/collector. The same PreToolUse contract prevents prompts and rejects denied or unlisted calls. |
 

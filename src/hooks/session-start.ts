@@ -449,7 +449,7 @@ ${renderPathList("Denied (deny), overriding the lists above", paths?.deny)}`;
   // Repository policy defaults on; the global coordinator remains unwrapped.
   const sandboxLine = ctx.agentId !== SYSTEM_AGENT_ID && resolveSandboxEnabled(ctx.sandbox?.enabled)
     ? `The kernel sandbox is ON: an access outside these lists fails with EPERM, whatever the spelling. The hook explains the honest command-line attempts in the Denials tab of \`ib watch\`.`
-    : `The itsybitsy kernel sandbox is OFF; hooks enforce tool permissions and path checks without native tool approval prompts.${cli === "codex" || cli === "fugu" ? " Codex's native workspace-write sandbox remains enabled and may further restrict paths." : ""}`;
+    : `The itsybitsy kernel sandbox is OFF; hooks enforce tool permissions and path checks without native tool approval prompts.${cli === "codex" || cli === "fugu" ? " Codex's native sandbox is also OFF; tool permissions are handled by the hooks." : ""}`;
 
   const pathSection = `### Path Isolation
 

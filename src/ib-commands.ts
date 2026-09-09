@@ -490,7 +490,7 @@ export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
       await deleteAgentSealChecked(
         agent.repoPath,
         agent.id,
-        agent.repoPath,
+        agentDir,
         resolveSandboxConfig({ sandbox: agent.meta.sandbox }).enabled
           ? agent.meta as unknown as Record<string, unknown>
           : undefined,
@@ -987,7 +987,7 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
     }
   } else {
     try {
-      await deleteAgentSealChecked(repoPath, agentId, repoPath);
+      await deleteAgentSealChecked(repoPath, agentId, agentDir);
     } catch (err) {
       return { ok: false, exitCode: 1, stdout: `Reconstructed stopped agent '${agentId}' from ${archived.archiveKey}`, stderr: `Could not remove stale disabled-agent seal: ${err instanceof Error ? err.message : String(err)}` };
     }
@@ -1388,7 +1388,7 @@ async function nukeAgentList(
           await deleteAgentSealChecked(
             repoPath,
             id,
-            repoPath,
+            agentDir,
             fullMeta && resolveSandboxConfig({ sandbox: fullMeta.sandbox as SandboxConfig | undefined }).enabled
               ? fullMeta
               : undefined,
@@ -3714,7 +3714,7 @@ export async function mergeAgent(
       await deleteAgentSealChecked(
         agent.repoPath,
         agent.id,
-        agent.repoPath,
+        agentDir,
         resolveSandboxConfig({ sandbox: agent.meta.sandbox }).enabled
           ? agent.meta as unknown as Record<string, unknown>
           : undefined,
@@ -6526,7 +6526,7 @@ export async function newAgent(
       await deleteAgentSealChecked(
         rootRepoPath,
         id,
-        rootRepoPath,
+        agentDir,
         resolvedSandboxConfig.enabled ? initialMetaJson : undefined,
       );
     } catch (err) {
@@ -6557,7 +6557,7 @@ export async function newAgent(
     // an interrupted prior lifecycle. Remove it before launch; failure aborts
     // the spawn rather than stranding a mismatched pair.
     try {
-      await deleteAgentSealChecked(rootRepoPath, id, rootRepoPath);
+      await deleteAgentSealChecked(rootRepoPath, id, agentDir);
     } catch (err) {
       await cleanupOnFailure();
       return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not remove stale sandbox seal: ${err instanceof Error ? err.message : String(err)}` };
@@ -6602,7 +6602,7 @@ export async function newAgent(
         // unwind path so this failure cannot orphan it; git cleanup is safe
         // here because the held branch is checked out elsewhere.
         try {
-          await deleteAgentSealChecked(rootRepoPath, id, rootRepoPath, initialMetaJson);
+          await deleteAgentSealChecked(rootRepoPath, id, agentDir, initialMetaJson);
         } catch (err) {
           await logSpawn(agentDir, spawnerAgentDir, id, `spawn cleanup warning: could not remove seal: ${err instanceof Error ? err.message : String(err)}`);
         }

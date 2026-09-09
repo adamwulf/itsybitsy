@@ -5,6 +5,7 @@ import {
   mkdtemp,
   rm,
   mkdir,
+  chmod,
   readdir,
   readlink,
   symlink,
@@ -7396,6 +7397,32 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(helper!.at(-1)).toContain("IB_SEAL_CAP=");
     expect(helper!.at(-1)).toContain("rc=$?");
     expect(helper!.at(-1)).toContain("result.tmp");
+  });
+
+  test("checked helper completion uses writable agentDir when the main repo root is read-only", async () => {
+    const id = "seal-delete-restricted-parent";
+    const agentDir = join(agentsDir, id);
+    await mkdir(agentDir, { recursive: true });
+    setSealDeleteForTesting(async () => {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    });
+    setSealCapabilityCommandForTesting(() => ["sh", "-c", "exit 0"]);
+    setNukeResumeSpawnRunner((cmd: string[]) =>
+      Bun.spawn(["sh", "-c", cmd.at(-1)!], { stdout: "pipe", stderr: "pipe" }) as SpawnResult
+    );
+
+    // A sandboxed worktree manager can write REPOAGENTS/agentDir but not the
+    // main repo root. POSIX permissions reproduce that split and would make the
+    // old resultDir-under-repoPath implementation fail before tmux was called.
+    await chmod(tempDir, 0o555);
+    try {
+      await expect(mkdir(join(tempDir, "forbidden-result-dir"))).rejects.toThrow();
+      await deleteAgentSealChecked(tempDir, id, agentDir);
+      expect((await readdir(agentDir)).some((name) => name.startsWith(".ib-seal-helper-"))).toBe(false);
+    } finally {
+      await chmod(tempDir, 0o755);
+      setSealDeleteForTesting(null);
+    }
   });
 
   test("checked seal deletion rejects a failed helper even when tmux reports success", async () => {

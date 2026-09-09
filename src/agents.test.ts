@@ -2283,6 +2283,20 @@ describe("hasBackgroundTasks", () => {
       expect(hasBackgroundTasks('  ● [23:31:06] sleep 120 running\n────\n>\n────\nGemini')).toBe(false);
     });
 
+    test("rejects UI-shaped quoted blocks without an agy status footer", () => {
+      const block = "────\n> quoted fixture\n────\n  ● [23:31:06] sleep 120 running\n────";
+      for (const footer of ["", "\nplain text", "\n⏵⏵ accept edits on", "\ngpt-5.6-sol high · Context 73% left"]) {
+        expect(hasBackgroundTasks(block + footer)).toBe(false);
+      }
+    });
+
+    test("accepts the established agy footer formats after the task section", async () => {
+      const output = await fixture;
+      for (const footer of ["? for shortcuts", "esc to cancel", "accept-edits · Gemini 3.7 Flash · low"]) {
+        expect(hasBackgroundTasks(output.replace(/Gemini .*Context: 21%/, footer))).toBe(true);
+      }
+    });
+
     test("supports multiple tasks and typed input without limiting task count", async () => {
       const output = (await fixture).replace(/  ● .* running/, [
         "  ● [23:31:06] sleep 120 running",

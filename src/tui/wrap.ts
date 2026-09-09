@@ -4,7 +4,7 @@
  */
 
 import { visibleWidth, truncateToWidth } from "@mariozechner/pi-tui";
-import { stripAnsi, isCodexStatusLine } from "../parse-state";
+import { stripAnsi, isCodexStatusLine, findAgyInputBox } from "../parse-state";
 
 /**
  * A "separator" line is a full-width visual divider, not prose — Claude's
@@ -927,8 +927,9 @@ export function findCodexInputChromeLogical(
  * (SPEC-ANTIGRAVITY-CLI.md §4.6). agy's input box is a `>` prompt line between
  * two `────` separators with a bottom status line below them carrying the
  * `? for shortcuts` (idle) / `esc to cancel` (working) hint and the
- * `accept-edits · <model> · <effort>` segment — the same two-separator shape as
- * claude's, so it reuses findLastTwoSeparators. We ADDITIONALLY require an agy
+ * `accept-edits · <model> · <effort>` segment or model/context footer. Anchor on
+ * the latest `>` so a background-task section's third separator is not mistaken
+ * for the input box. We ADDITIONALLY require an agy
  * status line in the tail so an unrelated pair of separators inside the
  * transcript (e.g. a markdown table) can't be mistaken for the input box; when
  * that guard or the separators are absent, returns null and the caller trims
@@ -937,28 +938,7 @@ export function findCodexInputChromeLogical(
 export function findAgyInputChromeLogical(
   lines: string[],
 ): { upperIndex: number; lowerIndex: number } | null {
-  let endIndex = lines.length - 1;
-  while (endIndex >= 0 && stripAnsi(lines[endIndex]!).trim() === "") {
-    endIndex--;
-  }
-  if (endIndex < 0) return null;
-
-  // Require an agy status line in the last few non-blank lines — the bottom-left
-  // hint or the right-side accept-edits/plan segment that only agy renders.
-  const tailWindow = lines.slice(Math.max(0, endIndex - 3), endIndex + 1);
-  const hasAgyStatus = tailWindow.some((l) => {
-    const s = stripAnsi(l);
-    return (
-      /\? for shortcuts\b/.test(s) ||
-      /\besc to cancel\b/.test(s) ||
-      /\b(?:accept-edits|plan)\s+·/.test(s)
-    );
-  });
-  if (!hasAgyStatus) return null;
-
-  const { upperIndex, lowerIndex } = findLastTwoSeparators(lines);
-  if (upperIndex < 0) return null;
-  return { upperIndex, lowerIndex };
+  return findAgyInputBox(lines);
 }
 
 /**
@@ -975,7 +955,7 @@ export function findAgyInputChromeLogical(
  *
  * - Codex: anchor on the `›` prompt + status bar; transcript = everything above
  *   the prompt, statusLines = status-bar..end.
- * - agy: the last two `─` separators (bracketing the `>` prompt) guarded by an
+ * - agy: the `─` separators bracketing the latest `>` prompt, guarded by an
  *   agy status line; transcript = above the upper separator, statusLines = below
  *   the lower separator. Falls back to no trimming when not detectable.
  * - Claude: find the last two `─` separators; transcript = everything above the

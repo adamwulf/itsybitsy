@@ -255,6 +255,31 @@ export function parseAgyState(input: string): ParseStateResult {
 }
 
 /**
+ * Recognizable agy status chrome, including the model/context footer captured
+ * in current Gemini builds. Caller must also validate the surrounding input box;
+ * the shortcut/cancel hints alone are shared with other CLIs.
+ */
+export function isAgyStatusLine(line: string): boolean {
+  const text = stripAnsi(line).trim();
+  return /^(?:\? for shortcuts|esc to cancel)\b/.test(text)
+    || /\b(?:accept-edits|plan)[ \t]+·[ \t]+\S/.test(text)
+    || /^\S[^\n]*[ \t]+\|[ \t]+Context:[ \t]*\d{1,3}%$/.test(text);
+}
+
+/** Locate the latest agy input box, even when a task section adds a third divider. */
+export function findAgyInputBox(lines: string[]): { upperIndex: number; lowerIndex: number } | null {
+  const plain = stripTrailingBlanks(lines.map(stripAnsi));
+  if (!plain.slice(-2).some(isAgyStatusLine)) return null;
+  const isSep = (line: string): boolean => /^─+$/.test(line.trim());
+  const prompt = plain.findLastIndex((line) => /^>(\s|$)/.test(line.trimStart()));
+  if (prompt < 1 || !isSep(plain[prompt - 1]!)) return null;
+  const belowPrompt = plain.slice(prompt + 1);
+  const bottom = belowPrompt.findIndex(isSep);
+  if (bottom < 0) return null;
+  return { upperIndex: prompt - 1, lowerIndex: prompt + 1 + bottom };
+}
+
+/**
  * Detect agy's live background-task section below its input box. Captured from
  * sub-builder on 2026-09-08; see fixtures/agy-background-task.txt.
  */
@@ -264,16 +289,14 @@ export function hasAgyBackgroundTasks(input: string): boolean {
   // Only inspect the latest input box. A task row in transcript/scrollback must
   // not keep a finished agent running. Unlike Claude's fixed footer window, this
   // section can grow with the number of tasks.
-  const prompt = lines.findLastIndex((line) => /^>(\s|$)/.test(line.trimStart()));
-  if (prompt < 1 || !isSep(lines[prompt - 1]!)) return false;
-  const belowPrompt = lines.slice(prompt + 1);
-  const inputBottom = belowPrompt.findIndex(isSep);
-  if (inputBottom < 0) return false;
-  const belowInput = belowPrompt.slice(inputBottom + 1);
+  const box = findAgyInputBox(lines);
+  if (!box) return false;
+  const belowInput = lines.slice(box.lowerIndex + 1);
   const tasksBottom = belowInput.findIndex(isSep);
   if (tasksBottom < 1) return false;
   // The task section is followed only by the status footer (at most two lines).
-  if (belowInput.length - tasksBottom - 1 > 2) return false;
+  const footer = belowInput.slice(tasksBottom + 1);
+  if (footer.length > 2 || !footer.some(isAgyStatusLine)) return false;
   return belowInput.slice(0, tasksBottom).some((line) =>
     /^[ \t]*●[ \t]+\[\d{2}:\d{2}:\d{2}\][ \t]+\S.*[ \t]running[ \t]*$/.test(line),
   );

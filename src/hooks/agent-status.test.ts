@@ -1342,6 +1342,25 @@ describe("processStopHook — waiting-branch suppression", () => {
     expect(result.action).toBe("none");
   });
 
+  test("Gemini task section suppresses waiting notifications and running nudges", async () => {
+    const fixture = await Bun.file(new URL("../fixtures/agy-background-task.txt", import.meta.url)).text();
+    const output = fixture.replace(/  ● .* running/, [
+      "  ● [23:31:06] sleep 120 running",
+      ...Array.from({ length: 12 }, () => "  ● [23:31:07] sleep 30 completed"),
+    ].join("\n"));
+    for (const message of ["need input\nWAITING", "Still working"]) {
+      const result = await processStopHook(ctx.agentId, message, ctx.agentDir, ctx.agentsDir, {
+        captureOutput: async () => output,
+      });
+      expect(result.state).toBe(message.endsWith("WAITING") ? "waiting" : "running");
+      expect(result.action).toBe("none");
+    }
+    const finished = await processStopHook(ctx.agentId, "WAITING", ctx.agentDir, ctx.agentsDir, {
+      captureOutput: async () => output.replace(" running", " completed"),
+    });
+    expect(finished.action).toBe("notify_manager");
+  });
+
   test("waiting + active child (running) → action 'none'", async () => {
     const childDir = join(ctx.agentsDir, "child-run");
     await mkdir(childDir, { recursive: true });

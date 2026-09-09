@@ -21,6 +21,19 @@ export interface PathsConfig {
 
 export type PathOperation = "read" | "write";
 
+/**
+ * Result directories used by the privileged seal helper. They are direct
+ * children of the OS-owned /private/tmp directory, so there is no
+ * caller-writable ancestor that can be swapped while a result is in flight.
+ * The generated profile makes this reserved namespace read-only even when a
+ * type uses raw `(allow file-write*)` rules; the unsandboxed tmux child is the
+ * only process allowed to create, publish, rename, or remove these paths.
+ */
+export const SEAL_HELPER_RESULT_ROOT = "/private/tmp";
+export const SEAL_HELPER_RESULT_PREFIX = ".ib-seal-helper-";
+const SEAL_HELPER_RESULT_MATCHER =
+  '(regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$")';
+
 export interface RuntimePathRoot {
   /** Canonical absolute path used for specificity and resolver matching. */
   path: string;
@@ -1108,6 +1121,12 @@ export function generateProfile(
   denyRoots.forEach((root) => {
     lines.push(`(deny network-outbound (remote unix-socket (subpath (param "${root.parameterName}"))))`);
   });
+
+  // The ordinary /private/tmp floor lets the parent read the helper's
+  // atomically-published status/output, but it must never be able to forge or
+  // remove them. Keep this write-only deny last so even rawAllow and a broad
+  // authored /private/tmp allow cannot reopen mutation access.
+  lines.push(`(deny file-write* ${SEAL_HELPER_RESULT_MATCHER})`);
 
   return `${lines.join("\n")}\n`;
 }

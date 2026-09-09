@@ -149,6 +149,38 @@ describe("checkAgyPreToolUse — path isolation", () => {
     expect(d.decision).toBe("allow");
   });
 
+  test("write_to_file cannot forge a reserved helper result despite a private-tmp allow", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/private/tmp"] }) });
+    const d = checkAgyPreToolUse(
+      {
+        toolName: "write_to_file",
+        toolArgs: {
+          TargetFile: "/private/tmp/.ib-seal-helper-deadbeef/output",
+          CodeContent: "forged",
+        },
+      },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("protected lifecycle result namespace");
+  });
+
+  test("run_command cannot remove a reserved helper result despite a private-tmp allow", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowRead: ["/private/tmp"], allowWrite: ["/private/tmp"] }) });
+    const d = checkAgyPreToolUse(
+      {
+        toolName: "run_command",
+        toolArgs: {
+          CommandLine: "rm /private/tmp/.ib-seal-helper-deadbeef/result",
+          Cwd: ctx.worktreePath,
+        },
+      },
+      ctx,
+    );
+    expect(d.decision).toBe("deny");
+    expect(d.reason).toContain("protected lifecycle result namespace");
+  });
+
   test("sub-agent tool is denied", () => {
     const ctx = makeCtx({ allowList: [...makeCtx().allowList, "invoke_subagent"] });
     const d = checkAgyPreToolUse(

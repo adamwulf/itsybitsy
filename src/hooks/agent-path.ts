@@ -185,6 +185,14 @@ export const AGY_BOUNDARY_WRITE_DENY_REASON =
 export const META_WRITE_DENY_REASON =
   "Access denied: agents cannot modify their own meta.json (the hook reads its path lists from it)";
 
+/** Hook-only analogue of the kernel's reserved seal-helper result namespace. */
+export const SEAL_HELPER_RESULT_WRITE_DENY_REASON =
+  "Access denied: .ib-seal-helper-* is a protected lifecycle result namespace (agents may read it, not modify it)";
+
+function isSealHelperResultPath(filePath: string): boolean {
+  return filePath.split("/").some((component) => /^\.ib-seal-helper-[0-9a-f-]+$/.test(component));
+}
+
 /**
  * Deny reason for a WRITE to a protected coordinator-configuration path (the
  * @system agent-types dir, config.json, repos.json, layout.json, sealed). Names
@@ -247,6 +255,7 @@ export function matchProtectedWrite(
   protectedWritePaths: ProtectedWritePath[],
   filePath: string,
 ): string | null {
+  if (isSealHelperResultPath(filePath)) return SEAL_HELPER_RESULT_WRITE_DENY_REASON;
   for (const entry of protectedWritePaths) {
     if (entry.subtree) {
       if (filePath === entry.path || filePath.startsWith(entry.path + "/")) return entry.reason;
@@ -831,6 +840,10 @@ function scanBashCommandPaths(
       const canonical = canonicalizeSandboxPath(abs);
       const boundaryDenial = checkWorktreeBoundary(canonical, ctx);
       if (boundaryDenial) return boundaryDenial;
+      if (op === "write") {
+        const protectedReason = matchProtectedWrite(ctx.protectedWritePaths, canonical);
+        if (protectedReason) return { decision: "deny", reason: protectedReason };
+      }
       if (resolvePreparedAccess(ctx.access, canonical, op) === "deny") {
         return { decision: "deny", reason: pathDenialReason(ctx.access, canonical, op) };
       }
@@ -883,6 +896,9 @@ function scanBashCommandPaths(
     if (sedIndex !== -1 && i > sedIndex) return "write";
     if (teeIndex !== -1 && i > teeIndex) return "write";
     if (isWriteVerb && i > 0) return "write";
+    // mv mutates both its source and destination. Treating the source as a read
+    // would let an agent rename/unlink a protected result directory.
+    if (verb === "mv" && i > 0) return "write";
     if (i === cpMvWriteIndex) return "write";
     return "read";
   };

@@ -9,8 +9,10 @@ import {
   readdir,
   readlink,
   symlink,
+  lstat,
 } from "fs/promises";
 import { tmpdir } from "os";
+import { chmodSync, symlinkSync } from "fs";
 import type { Agent, AgentMeta } from "./agents";
 import {
   isPidAliveCtx,
@@ -127,7 +129,7 @@ import { setUserHome, resetUserHome } from "./home";
 import { setUserConfigPath, resetUserConfigPath } from "./config";
 import type { AgentState } from "./parse-state";
 import type { SpawnFn, SpawnResult } from "./types";
-import { canonicalizeSandboxPath } from "./sandbox";
+import { canonicalizeSandboxPath, SEAL_HELPER_RESULT_PREFIX, SEAL_HELPER_RESULT_ROOT } from "./sandbox";
 import { claudeProjectDirFor, claudeScratchpadDirFor } from "./hooks/paths-table";
 
 // The "retire → rehire recovery" describes drive real `git` subprocesses — a
@@ -6515,6 +6517,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     const resumedMeta = await Bun.file(join(agentDir, "meta.json")).json();
     expect(resumeProfile).toBe(spawnProfile);
+    for (const profile of [spawnProfile, resumeProfile]) {
+      expect(profile).toContain('(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-');
+    }
     expect(resumedMeta.sandbox_proxy_port).toBe(43123);
     expect(resume).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
     expect(resume).not.toContain("-s workspace-write");
@@ -7522,7 +7527,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     });
     let helperScript = "";
     setNukeResumeSpawnRunner((cmd: string[]) => {
-      helperScript = cmd.at(-1)!;
+      if (cmd.at(-1)!.includes("IB_SEAL_CAP=")) helperScript = cmd.at(-1)!;
       return makeSpawnResult("", 0);
     });
     const meta = {
@@ -7564,7 +7569,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(helper!.at(-1)).toContain("result.tmp");
   });
 
-  test("checked helper completion uses writable agentDir when the main repo root is read-only", async () => {
+  test("checked helper completion uses protected private tmp when repo and agent paths are read-only", async () => {
     const id = "seal-delete-restricted-parent";
     const agentDir = join(agentsDir, id);
     await mkdir(agentDir, { recursive: true });
@@ -7576,18 +7581,149 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       Bun.spawn(["sh", "-c", cmd.at(-1)!], { stdout: "pipe", stderr: "pipe" }) as SpawnResult
     );
 
-    // A sandboxed worktree manager can write REPOAGENTS/agentDir but not the
-    // main repo root. POSIX permissions reproduce that split and would make the
-    // old resultDir-under-repoPath implementation fail before tmux was called.
+    // Result publication must not depend on a caller-writable repo/agent path.
+    // The trusted tmux child creates the result directly under /private/tmp,
+    // and the parent only reads it before trusted cleanup.
     await chmod(tempDir, 0o555);
+    await chmod(agentDir, 0o555);
     try {
       await expect(mkdir(join(tempDir, "forbidden-result-dir"))).rejects.toThrow();
       await deleteAgentSealChecked(tempDir, id, agentDir);
       expect((await readdir(agentDir)).some((name) => name.startsWith(".ib-seal-helper-"))).toBe(false);
     } finally {
+      await chmod(agentDir, 0o755);
       await chmod(tempDir, 0o755);
       setSealDeleteForTesting(null);
     }
+  });
+
+  test("seal helper rejects a pre-created symlink collision without deleting its target", async () => {
+    setSealDirectWriteForTesting(async () => {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    });
+    setSealCapabilityCommandForTesting(() => ["sh", "-c", "exit 0"]);
+    const victim = join(tempDir, "collision-victim");
+    await mkdir(victim);
+    await Bun.write(join(victim, "keep"), "safe");
+    let collisionPath = "";
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      const script = cmd.at(-1)!;
+      if (script.includes("mkdir -m 700")) {
+        collisionPath = script.match(/\/private\/tmp\/\.ib-seal-helper-[0-9a-f-]+/)?.[0] ?? "";
+        expect(collisionPath).not.toBe("");
+        symlinkSync(victim, collisionPath);
+      }
+      return Bun.spawn(["sh", "-c", script], { stdout: "pipe", stderr: "pipe" }) as SpawnResult;
+    });
+    const meta = {
+      id: "seal-helper-collision", agentType: "worker",
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+      paths: { allowRead: [], allowWrite: [], deny: [] },
+    };
+    try {
+      await expect(sealAgentRecord(
+        tempDir,
+        "seal-helper-collision",
+        meta as unknown as Record<string, unknown>,
+        tempDir,
+      )).rejects.toThrow(/File exists.*cleanup failed/);
+      expect(await readlink(collisionPath)).toBe(victim);
+      expect(await Bun.file(join(victim, "keep")).text()).toBe("safe");
+    } finally {
+      if (collisionPath) await rm(collisionPath, { force: true });
+    }
+  });
+
+  test("seal helper rejects invalid nested status and still performs trusted cleanup", async () => {
+    setSealDirectWriteForTesting(async () => {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    });
+    setSealCapabilityCommandForTesting(() => ["sh", "-c", "exit 0"]);
+    let resultDir = "";
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      let script = cmd.at(-1)!;
+      if (script.includes("mkdir -m 700")) {
+        resultDir = script.match(/\/private\/tmp\/\.ib-seal-helper-[0-9a-f-]+/)?.[0] ?? "";
+        script = script.replace(`printf '%s\\n' "$rc"`, `printf 'invalid\\n'`);
+      }
+      return Bun.spawn(["sh", "-c", script], { stdout: "pipe", stderr: "pipe" }) as SpawnResult;
+    });
+    const meta = {
+      id: "seal-helper-invalid-status", agentType: "worker",
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+      paths: { allowRead: [], allowWrite: [], deny: [] },
+    };
+    await expect(sealAgentRecord(
+      tempDir,
+      "seal-helper-invalid-status",
+      meta as unknown as Record<string, unknown>,
+      tempDir,
+    )).rejects.toThrow("tmux seal helper reported an invalid status");
+    expect(resultDir.startsWith(`${SEAL_HELPER_RESULT_ROOT}/${SEAL_HELPER_RESULT_PREFIX}`)).toBe(true);
+    expect(await lstat(resultDir).then(() => true).catch(() => false)).toBe(false);
+  });
+
+  test("seal helper reports trusted cleanup failure instead of accepting a leftover result", async () => {
+    setSealDirectWriteForTesting(async () => {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    });
+    setSealCapabilityCommandForTesting(() => ["sh", "-c", "exit 0"]);
+    let resultDir = "";
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      const script = cmd.at(-1)!;
+      if (script.includes("mkdir -m 700")) {
+        resultDir = script.match(/\/private\/tmp\/\.ib-seal-helper-[0-9a-f-]+/)?.[0] ?? "";
+        return Bun.spawn(["sh", "-c", script], { stdout: "pipe", stderr: "pipe" }) as SpawnResult;
+      }
+      // Faithfully model tmux accepting cleanup without running the nested rm.
+      return makeSpawnResult("", 0);
+    });
+    const meta = {
+      id: "seal-helper-cleanup-failure", agentType: "worker",
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+      paths: { allowRead: [], allowWrite: [], deny: [] },
+    };
+    try {
+      await expect(sealAgentRecord(
+        tempDir,
+        "seal-helper-cleanup-failure",
+        meta as unknown as Record<string, unknown>,
+        tempDir,
+      )).rejects.toThrow("tmux seal helper cleanup failed: result directory remains");
+      expect(await lstat(resultDir).then(() => true).catch(() => false)).toBe(true);
+    } finally {
+      if (resultDir) await rm(resultDir, { recursive: true, force: true });
+    }
+  });
+
+  test("seal helper fails closed on a thrown parent result read and still cleans up", async () => {
+    setSealDirectWriteForTesting(async () => {
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    });
+    setSealCapabilityCommandForTesting(() => ["sh", "-c", "exit 0"]);
+    let resultDir = "";
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      const script = cmd.at(-1)!;
+      if (script.includes("mkdir -m 700")) {
+        resultDir = script.match(/\/private\/tmp\/\.ib-seal-helper-[0-9a-f-]+/)?.[0] ?? "";
+        const completed = Bun.spawnSync({ cmd: ["sh", "-c", script], stdout: "pipe", stderr: "pipe" });
+        chmodSync(join(resultDir, "result"), 0o000);
+        return makeSpawnResult(completed.stderr.toString(), completed.exitCode);
+      }
+      return Bun.spawn(["sh", "-c", script], { stdout: "pipe", stderr: "pipe" }) as SpawnResult;
+    });
+    const meta = {
+      id: "seal-helper-read-failure", agentType: "worker",
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+      paths: { allowRead: [], allowWrite: [], deny: [] },
+    };
+    await expect(sealAgentRecord(
+      tempDir,
+      "seal-helper-read-failure",
+      meta as unknown as Record<string, unknown>,
+      tempDir,
+    )).rejects.toThrow("tmux seal helper did not report completion");
+    expect(await lstat(resultDir).then(() => true).catch(() => false)).toBe(false);
   });
 
   test("checked seal deletion rejects a failed helper even when tmux reports success", async () => {

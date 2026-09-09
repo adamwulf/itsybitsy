@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "fs/promises";
 import { homedir, tmpdir } from "os";
 import { dirname, join } from "path";
 import { parseAgentTypeFile } from "./agent-types";
@@ -20,6 +20,7 @@ import {
   resolveSandboxConfig,
   sandboxPathAccessTable,
   sandboxProfileParameterValues,
+  SEAL_HELPER_RESULT_PREFIX,
   validatePathsFrontmatter,
   validateSandboxFrontmatter,
   type PathsConfig,
@@ -228,6 +229,7 @@ describe("sandbox profile emission", () => {
       '(deny file-read* (subpath (param "TMUXSOCK")))',
       '(deny file-write* (subpath (param "TMUXSOCK")))',
       '(deny network-outbound (remote unix-socket (subpath (param "TMUXSOCK"))))',
+      '(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))',
     ]);
   });
 
@@ -251,7 +253,24 @@ describe("sandbox profile emission", () => {
       // deny for a spawner.
       '(allow file-read* (subpath (param "PARENTCLAUDE")))',
       '(allow file-write* (subpath (param "PARENTCLAUDE")))',
+      '(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))',
     ]);
+  });
+
+  test("reserved seal-helper results stay readable but never writable after broad raw allows", () => {
+    const broadTmp = paths({ allowRead: ["/private/tmp"], allowWrite: ["/private/tmp"] });
+    const profile = generateProfile(
+      config({ rawAllow: ["(allow file-read*)", "(allow file-write*)"] }),
+      broadTmp,
+      PARAMS,
+    );
+    const definitions = sandboxProfileParameterValues(broadTmp, PARAMS);
+    const resultDir = `/private/tmp/${SEAL_HELPER_RESULT_PREFIX}01234567-89ab-cdef-0123-456789abcdef`;
+    expect(evaluateProfileAccess(profile, definitions, resultDir, "read")).toBe("allow");
+    expect(evaluateProfileAccess(profile, definitions, join(resultDir, "output"), "read")).toBe("allow");
+    expect(evaluateProfileAccess(profile, definitions, resultDir, "write")).toBe("deny");
+    expect(evaluateProfileAccess(profile, definitions, join(resultDir, "output"), "write")).toBe("deny");
+    expect(evaluateProfileAccess(profile, definitions, "/private/tmp/ordinary-sibling", "write")).toBe("allow");
   });
 
   test("flipping canSpawnChildren changes exactly REPOAGENTS op, the PARENTCLAUDE root, and the tmux deny", () => {
@@ -396,6 +415,77 @@ describe("sandbox profile emission", () => {
     expect(profile).toContain('(allow file-read* (subpath "/private/tmp/shared"))');
     expect(profile).toContain('(allow file-write* (subpath "/private/tmp/shared"))');
   });
+});
+
+test("LIVE macOS profile protects trusted seal-helper results while ordinary tmp stays writable", async () => {
+  const sandboxExec = Bun.which("sandbox-exec");
+  if (process.platform !== "darwin" || !sandboxExec) {
+    console.log("LIVE seal-helper result probe: SKIPPED (sandbox-exec is absent; macOS only)");
+    return;
+  }
+  const capability = Bun.spawnSync({
+    cmd: [sandboxExec, "-p", "(version 1)(allow default)", "/usr/bin/true"],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const capabilityError = capability.stderr.toString().trim();
+  if (capability.exitCode !== 0 && capabilityError.includes("sandbox_apply: Operation not permitted")) {
+    console.log("LIVE seal-helper result probe: SKIPPED (nested sandbox-exec is unavailable)");
+    return;
+  }
+  if (capability.exitCode !== 0) {
+    throw new Error(`LIVE seal-helper capability check failed: ${capabilityError}`);
+  }
+
+  const uuid = crypto.randomUUID();
+  const resultDir = `/private/tmp/${SEAL_HELPER_RESULT_PREFIX}${uuid}`;
+  const newResultDir = `/private/tmp/${SEAL_HELPER_RESULT_PREFIX}${crypto.randomUUID()}`;
+  const movedResultDir = `${resultDir}-moved`;
+  const sibling = `/private/tmp/ib-seal-helper-ordinary-${crypto.randomUUID()}`;
+  await mkdir(resultDir, { mode: 0o700 });
+  await writeFile(join(resultDir, "output"), "trusted");
+  await writeFile(join(resultDir, "result"), "0\n");
+  try {
+    const params = { ...PARAMS, canSpawnChildren: true };
+    const profile = generateProfile(config({ rawAllow: ["(allow default)"] }), EMPTY_PATHS, params);
+    const definitions = sandboxProfileParameterValues(EMPTY_PATHS, params);
+    const args = Object.entries(definitions).flatMap(([key, value]) => ["-D", `${key}=${value}`]);
+    const script = [
+      `value=$(cat '${join(resultDir, "output")}')`,
+      `printf 'read=%s\\n' "$value"`,
+      `mkdir '${newResultDir}' 2>/dev/null; printf 'mkdir=%s\\n' "$?"`,
+      `printf forged > '${join(resultDir, "output")}' 2>/dev/null; printf 'overwrite_output=%s\\n' "$?"`,
+      `printf 0 > '${join(resultDir, "result")}' 2>/dev/null; printf 'overwrite_result=%s\\n' "$?"`,
+      `touch '${join(resultDir, "created")}' 2>/dev/null; printf 'create=%s\\n' "$?"`,
+      `rm -f '${join(resultDir, "output")}' 2>/dev/null; printf 'unlink_output=%s\\n' "$?"`,
+      `rm -f '${join(resultDir, "result")}' 2>/dev/null; printf 'unlink_result=%s\\n' "$?"`,
+      `mv '${resultDir}' '${movedResultDir}' 2>/dev/null; printf 'rename=%s\\n' "$?"`,
+      `printf ordinary > '${sibling}' 2>/dev/null; printf 'sibling=%s\\n' "$?"`,
+    ].join("; ");
+    const probe = Bun.spawnSync({
+      cmd: [sandboxExec, "-p", profile, ...args, "/bin/sh", "-c", script],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(probe.exitCode).toBe(0);
+    const fields = Object.fromEntries(
+      probe.stdout.toString().trim().split("\n").map((line) => line.split("=", 2)),
+    );
+    expect(fields.read).toBe("trusted");
+    for (const operation of [
+      "mkdir", "overwrite_output", "overwrite_result", "create",
+      "unlink_output", "unlink_result", "rename",
+    ]) {
+      expect(fields[operation]).not.toBe("0");
+    }
+    expect(fields.sibling).toBe("0");
+    expect(await readFile(join(resultDir, "output"), "utf8")).toBe("trusted");
+  } finally {
+    await rm(resultDir, { recursive: true, force: true });
+    await rm(newResultDir, { recursive: true, force: true });
+    await rm(movedResultDir, { recursive: true, force: true });
+    await rm(sibling, { force: true });
+  }
 });
 
 describe("agy state runtime root (AGYSTATEDIR, ~/.gemini)", () => {

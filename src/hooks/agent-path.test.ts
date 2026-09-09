@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON, agentProtectedWritePaths, systemProtectedWritePaths, protectedConfigWriteDenyReason, matchProtectedWrite } from "./agent-path";
+import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON, SEAL_HELPER_RESULT_WRITE_DENY_REASON, agentProtectedWritePaths, systemProtectedWritePaths, protectedConfigWriteDenyReason, matchProtectedWrite } from "./agent-path";
 import type { PathCheckInput, PathCheckContext } from "./agent-path";
 import { join } from "path";
 import { mkdir, mkdtemp, readFile, rm, writeFile, symlink } from "fs/promises";
@@ -2154,6 +2154,56 @@ describe("checkPathAccess — own meta.json write protection (Phase B)", () => {
     const result = checkPathAccess(makeInput({ toolName: "Read", toolInput: { file_path: META } }), ctx);
     expect(result.decision).toBe("deny");
     expect(result.reason).toContain("cannot access other agents' files");
+  });
+});
+
+describe("checkPathAccess — reserved seal-helper result namespace", () => {
+  const ownResult = "/repo/.ittybitty/agents/agent-abc123/.ib-seal-helper-deadbeef/output";
+  const otherResult = "/repo/.ittybitty/agents/agent-other/.ib-seal-helper-cafebabe/result";
+  const tmpResult = "/private/tmp/.ib-seal-helper-01234567-89ab-cdef-0123-456789abcdef/output";
+  const writable = makeAccess(
+    { allowRead: ["/private/tmp"], allowWrite: ["/private/tmp"] },
+    { canSpawnChildren: true },
+  );
+
+  for (const [toolName, path] of [
+    ["Write", ownResult],
+    ["Edit", otherResult],
+    ["MultiEdit", tmpResult],
+  ] as const) {
+    test(`${toolName} cannot write a reserved result in own, sibling, or private-tmp scope`, () => {
+      const result = checkPathAccess(
+        makeInput({ toolName, toolInput: { file_path: path } }),
+        makeCtx({ access: writable, allowList: ["Read", "Write", "Edit", "MultiEdit", "Bash"] }),
+      );
+      expect(result).toEqual({ decision: "deny", reason: SEAL_HELPER_RESULT_WRITE_DENY_REASON });
+    });
+  }
+
+  for (const command of [
+    `echo forged > ${tmpResult}`,
+    `rm -f ${tmpResult}`,
+    `mv ${tmpResult} /private/tmp/forged-output`,
+    `mkdir /repo/.ittybitty/agents/agent-other/.ib-seal-helper-deadbeef`,
+  ]) {
+    test(`Bash/translated run_command cannot mutate reserved result: ${command.split(" ")[0]}`, () => {
+      const result = checkPathAccess(
+        makeInput({ toolName: "Bash", toolInput: { command } }),
+        makeCtx({ access: writable }),
+      );
+      expect(result.decision).toBe("deny");
+      if (command.includes("/private/tmp/")) {
+        expect(result.reason).toBe(SEAL_HELPER_RESULT_WRITE_DENY_REASON);
+      }
+    });
+  }
+
+  test("reads remain governed normally and a broad private-tmp allow permits result reads", () => {
+    const result = checkPathAccess(
+      makeInput({ toolName: "Read", toolInput: { file_path: tmpResult } }),
+      makeCtx({ access: writable }),
+    );
+    expect(result.decision).toBe("allow");
   });
 });
 

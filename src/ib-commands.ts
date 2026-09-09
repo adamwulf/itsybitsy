@@ -109,6 +109,8 @@ import {
   anchorRelativePaths,
   findRelativeEscapes,
   generateProfile,
+  SEAL_HELPER_RESULT_PREFIX,
+  SEAL_HELPER_RESULT_ROOT,
   canonicalizePathsConfig,
   canonicalizeSandboxPath,
   resolvePathsConfig,
@@ -5279,20 +5281,28 @@ async function runHelperViaTmuxServerBlocking(
 ): Promise<string> {
   const shellCommand = command.map(shellQuote).join(" ");
   // tmux's client status only tells us whether run-shell itself was accepted;
-  // it does not reliably relay the child shell's status. Have that shell write
-  // its own status into a unique directory under cwd (which the sandboxed
-  // spawner can already access), then require the result after run-shell's
-  // synchronous wait. The sealed directory never needs to be reopened here.
-  const resultDir = join(cwd, `.ib-seal-helper-${crypto.randomUUID()}`);
+  // it does not reliably relay the child shell's status. Have that trusted
+  // shell exclusively create and publish into a unique directory directly
+  // beneath OS-owned /private/tmp. Enabled profiles reserve that namespace as
+  // read-only, so the sandboxed parent cannot pre-create, replace, truncate,
+  // rename, or delete a result (including through an agentDir ancestor swap).
+  const resultDir = join(SEAL_HELPER_RESULT_ROOT, `${SEAL_HELPER_RESULT_PREFIX}${crypto.randomUUID()}`);
   const resultPath = join(resultDir, "result");
   const resultTmpPath = join(resultDir, "result.tmp");
   const outputPath = join(resultDir, "output");
   const outputTmpPath = join(resultDir, "output.tmp");
-  await mkdir(resultDir, { mode: 0o700 });
+  const ownerPath = join(resultDir, "owner");
+  const ownerToken = crypto.randomUUID();
+  let output = "";
+  let operationError: unknown;
   try {
     const script = [
-      `cd ${shellQuote(cwd)} || exit 125`,
       "umask 077",
+      // Deliberately NOT mkdir -p: an existing file, directory, or symlink is
+      // a collision and must fail closed rather than being reused.
+      `mkdir -m 700 ${shellQuote(resultDir)} || exit 124`,
+      `printf '%s\n' ${shellQuote(ownerToken)} > ${shellQuote(ownerPath)}`,
+      `cd ${shellQuote(cwd)} || exit 125`,
       `${shellCommand} > ${shellQuote(outputTmpPath)} 2>&1`,
       "rc=$?",
       `mv -f ${shellQuote(outputTmpPath)} ${shellQuote(outputPath)}`,
@@ -5315,15 +5325,56 @@ async function runHelperViaTmuxServerBlocking(
       throw new Error("tmux seal helper reported an invalid status");
     }
     const helperExitCode = Number(reported);
-    const output = await Bun.file(outputPath).text().catch(() => "");
+    output = await Bun.file(outputPath).text().catch(() => "");
     if (helperExitCode !== 0) {
       const detail = output.trim();
       throw new Error(`tmux seal helper failed with exit ${helperExitCode}${detail ? `: ${detail}` : ""}`);
     }
-    return output;
+  } catch (err) {
+    operationError = err;
   } finally {
-    await rm(resultDir, { recursive: true, force: true });
+    // Cleanup is another trusted tmux-server operation. The parent never
+    // mutates a result pathname itself; after the blocking cleanup returns it
+    // verifies success solely by observing that the directory is absent.
+    let cleanupDetail = "";
+    try {
+      // Never delete an EEXIST/symlink collision that this invocation did not
+      // create. The trusted creator publishes the independent ownership nonce
+      // immediately after its exclusive mkdir; cleanup checks it before rm.
+      const cleanupScript =
+        `test "$(cat ${shellQuote(ownerPath)} 2>/dev/null)" = ${shellQuote(ownerToken)}` +
+        ` && rm -rf -- ${shellQuote(resultDir)}`;
+      const cleanup = await runner.run(["tmux", "run-shell", cleanupScript]);
+      if (cleanup.exitCode !== 0) {
+        cleanupDetail = cleanup.stderr.trim() || `tmux run-shell failed with exit ${cleanup.exitCode}`;
+      }
+    } catch (err) {
+      cleanupDetail = err instanceof Error ? err.message : String(err);
+    }
+    let stillExists = true;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try {
+        await lstat(resultDir);
+        stillExists = true;
+      } catch (err) {
+        stillExists = (err as NodeJS.ErrnoException).code !== "ENOENT";
+      }
+      if (!stillExists) break;
+      await Bun.sleep(10);
+    }
+    if (stillExists) {
+      const cleanupError = new Error(
+        `tmux seal helper cleanup failed${cleanupDetail ? `: ${cleanupDetail}` : ": result directory remains"}`,
+      );
+      if (operationError) {
+        const detail = operationError instanceof Error ? operationError.message : String(operationError);
+        throw new Error(`${detail}; additionally ${cleanupError.message}`);
+      }
+      throw cleanupError;
+    }
   }
+  if (operationError) throw operationError;
+  return output;
 }
 
 type SealCapabilityCommandBuilder = (

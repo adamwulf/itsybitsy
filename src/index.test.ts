@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
-import { mkdtemp, rm } from "fs/promises";
+import { mkdir, mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { makeAgent, makeSpawnResult } from "./test-utils";
@@ -13,6 +13,7 @@ import {
   parseMergeArgs,
   buildSystemCoordinatorAgent,
   sendToSystemCoordinator,
+  findAgentByIdInRepo,
   setSystemCoordinatorHasSessionFn,
   resetSystemCoordinatorHasSessionFn,
 } from "./index";
@@ -30,6 +31,34 @@ import type { RepoEntry } from "./registry";
 // Raising the bound only changes how long a genuinely stuck spawn takes to
 // fail; it weakens no assertion, and passing tests are unaffected.
 setDefaultTimeout(60_000);
+
+describe("findAgentByIdInRepo", () => {
+  test("duplicate exact IDs resolve only inside the explicitly selected repository", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ib-scoped-agent-"));
+    const repoA = join(root, "repo-a");
+    const repoB = join(root, "repo-b");
+    try {
+      for (const [repoPath, marker] of [[repoA, "A"], [repoB, "B"]] as const) {
+        const agentDir = join(repoPath, ".ittybitty", "agents", "agent-duplicate");
+        await mkdir(agentDir, { recursive: true });
+        await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+          id: "agent-duplicate",
+          prompt: marker,
+          tmux_session: `tmux-${marker}`,
+        }));
+      }
+
+      const resolved = await findAgentByIdInRepo(
+        "agent-duplicate",
+        { path: repoB, name: "repo-b" },
+      );
+      expect(resolved?.repoPath).toBe(repoB);
+      expect(resolved?.meta.prompt).toBe("B");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
 
 // ─── collectAgents ───────────────────────────────────────────────────────────
 
@@ -117,9 +146,8 @@ describe("formatAgentPathPolicy", () => {
     },
   );
 
-  test("agy reports the kernel wrapper state like every other CLI (mandatory sandbox)", () => {
-    // Mandatory sandbox: agy is wrapped by the kernel now, so it reports the
-    // agent's frozen sandbox state (enabled/disabled) — no "unavailable (agy)".
+  test("agy reports the resolved kernel wrapper state", () => {
+    // Every CLI supports enabled and disabled kernel policies.
     expect(formatAgentPathPolicy({ model: "agy:default", sandbox: { enabled: true } } as any)[0])
       .toBe("Sandbox:      enabled");
     expect(formatAgentPathPolicy({ model: "agy:default", sandbox: { enabled: false } } as any)[0])
@@ -127,7 +155,7 @@ describe("formatAgentPathPolicy", () => {
   });
 
   test.each(["sonnet", "opus", "unknown"])("legacy %s metadata keeps Claude display behavior", (model) => {
-    expect(formatAgentPathPolicy({ model })[0]).toBe("Sandbox:      disabled");
+    expect(formatAgentPathPolicy({ model })[0]).toBe("Sandbox:      enabled");
   });
 
   test("prints sandbox state and all resolved lists in read/write/deny order", () => {
@@ -150,9 +178,9 @@ describe("formatAgentPathPolicy", () => {
     ]);
   });
 
-  test("prints disabled and strict runtime roots for legacy meta", () => {
+  test("prints the enabled default and strict runtime roots for legacy meta", () => {
     expect(formatAgentPathPolicy({})).toEqual([
-      "Sandbox:      disabled",
+      "Sandbox:      enabled",
       "Paths:        none (worktree and runtime roots only)",
     ]);
   });

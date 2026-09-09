@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON, agentProtectedWritePaths, systemProtectedWritePaths, protectedConfigWriteDenyReason, matchProtectedWrite } from "./agent-path";
+import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON, SEAL_HELPER_RESULT_WRITE_DENY_REASON, agentProtectedWritePaths, systemProtectedWritePaths, protectedConfigWriteDenyReason, matchProtectedWrite } from "./agent-path";
 import type { PathCheckInput, PathCheckContext } from "./agent-path";
 import { join } from "path";
 import { mkdir, mkdtemp, readFile, rm, writeFile, symlink } from "fs/promises";
@@ -1590,6 +1590,29 @@ describe("checkIbCommandAccess", () => {
     }));
   }
 
+  test("denies agent-issued internal sandbox seal, including shell chaining", async () => {
+    const direct = await checkIbCommandAccess("ib sandbox seal agent-target1", "agent-caller1", agentsDir);
+    const chained = await checkIbCommandAccess("echo ok; ib sandbox seal agent-target1", "agent-caller1", agentsDir);
+    const deleted = await checkIbCommandAccess("ib sandbox delete-seal agent-target1", "agent-caller1", agentsDir);
+    const verified = await checkIbCommandAccess("ib sandbox verify-seal agent-target1", "agent-caller1", agentsDir);
+    expect(direct?.decision).toBe("deny");
+    expect(chained?.decision).toBe("deny");
+    expect(deleted?.decision).toBe("deny");
+    expect(verified?.decision).toBe("deny");
+    expect(direct?.reason).toContain("internal operation");
+    const continued = await checkIbCommandAccess("ib \\\nsandbox seal agent-target1", "agent-caller1", agentsDir);
+    expect(continued?.decision).toBe("deny");
+  });
+
+  test("system helper identity may invoke internal sandbox seal", async () => {
+    expect(await checkIbCommandAccess("ib sandbox seal agent-target1", "@system", agentsDir)).toBeNull();
+  });
+
+  test("denies agent-issued sandbox refresh, including refresh all", async () => {
+    expect((await checkIbCommandAccess("ib sandbox refresh agent-target1", "agent-caller1", agentsDir))?.decision).toBe("deny");
+    expect((await checkIbCommandAccess("ib sandbox refresh --all", "agent-caller1", agentsDir))?.decision).toBe("deny");
+  });
+
   test("allows rehire when calling agent is the archived target's manager", async () => {
     await writeRetiredMeta("agent-target1", { manager: "agent-manager1" });
     const result = await checkIbCommandAccess(
@@ -2131,6 +2154,70 @@ describe("checkPathAccess — own meta.json write protection (Phase B)", () => {
     const result = checkPathAccess(makeInput({ toolName: "Read", toolInput: { file_path: META } }), ctx);
     expect(result.decision).toBe("deny");
     expect(result.reason).toContain("cannot access other agents' files");
+  });
+});
+
+describe("checkPathAccess — reserved seal-helper result namespace", () => {
+  const ownResult = "/repo/.ittybitty/agents/agent-abc123/.ib-seal-helper-deadbeef/output";
+  const otherResult = "/repo/.ittybitty/agents/agent-other/.ib-seal-helper-cafebabe/result";
+  const tmpResult = "/private/tmp/.ib-seal-helper-01234567-89ab-cdef-0123-456789abcdef/output";
+  const writable = makeAccess(
+    { allowRead: ["/private/tmp"], allowWrite: ["/private/tmp"] },
+    { canSpawnChildren: true },
+  );
+
+  for (const [toolName, path] of [
+    ["Write", ownResult],
+    ["Edit", otherResult],
+    ["MultiEdit", tmpResult],
+  ] as const) {
+    test(`${toolName} cannot write a reserved result in own, sibling, or private-tmp scope`, () => {
+      const result = checkPathAccess(
+        makeInput({ toolName, toolInput: { file_path: path } }),
+        makeCtx({ access: writable, allowList: ["Read", "Write", "Edit", "MultiEdit", "Bash"] }),
+      );
+      expect(result).toEqual({ decision: "deny", reason: SEAL_HELPER_RESULT_WRITE_DENY_REASON });
+    });
+  }
+
+  for (const command of [
+    `echo forged > ${tmpResult}`,
+    `rm -f ${tmpResult}`,
+    `mv ${tmpResult} /private/tmp/forged-output`,
+    `ln ${tmpResult} /private/tmp/forged-alias`,
+    `ln -s ${tmpResult} /private/tmp/forged-symlink`,
+    `cp -l ${tmpResult} /private/tmp/forged-cp-link`,
+    `cp --link ${tmpResult} /private/tmp/forged-cp-long-link`,
+    `cp -al ${tmpResult} /private/tmp/forged-cp-al-link`,
+    `cp -fl ${tmpResult} /private/tmp/forged-cp-fl-link`,
+    `mkdir /repo/.ittybitty/agents/agent-other/.ib-seal-helper-deadbeef`,
+  ]) {
+    test(`Bash/translated run_command cannot mutate reserved result: ${command.split(" ")[0]}`, () => {
+      const result = checkPathAccess(
+        makeInput({ toolName: "Bash", toolInput: { command } }),
+        makeCtx({ access: writable }),
+      );
+      expect(result.decision).toBe("deny");
+      if (command.includes("/private/tmp/")) {
+        expect(result.reason).toBe(SEAL_HELPER_RESULT_WRITE_DENY_REASON);
+      }
+    });
+  }
+
+  test("cp option terminator preserves protected source read semantics", () => {
+    const result = checkPathAccess(
+      makeInput({ toolName: "Bash", toolInput: { command: `cp -- -l ${tmpResult} /private/tmp/ordinary-copy` } }),
+      makeCtx({ access: writable }),
+    );
+    expect(result.decision).toBe("allow");
+  });
+
+  test("reads remain governed normally and a broad private-tmp allow permits result reads", () => {
+    const result = checkPathAccess(
+      makeInput({ toolName: "Read", toolInput: { file_path: tmpResult } }),
+      makeCtx({ access: writable }),
+    );
+    expect(result.decision).toBe("allow");
   });
 });
 

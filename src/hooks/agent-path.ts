@@ -22,6 +22,7 @@ import {
   pathDenialReason,
 } from "./paths-table";
 import { canonicalizeSandboxPath, resolvePreparedAccess, type PathOperation, type PreparedAccessTable } from "../sandbox";
+import { findShellMetachar } from "./shell-metachar";
 
 // Re-exported for existing callers/tests that import it from this module; the
 // definition moved to ./paths-table to break the import cycle.
@@ -184,6 +185,14 @@ export const AGY_BOUNDARY_WRITE_DENY_REASON =
 export const META_WRITE_DENY_REASON =
   "Access denied: agents cannot modify their own meta.json (the hook reads its path lists from it)";
 
+/** Hook-only analogue of the kernel's reserved seal-helper result namespace. */
+export const SEAL_HELPER_RESULT_WRITE_DENY_REASON =
+  "Access denied: .ib-seal-helper-* is a protected lifecycle result namespace (agents may read it, not modify it)";
+
+function isSealHelperResultPath(filePath: string): boolean {
+  return filePath.split("/").some((component) => /^\.ib-seal-helper-[0-9a-f-]+$/.test(component));
+}
+
 /**
  * Deny reason for a WRITE to a protected coordinator-configuration path (the
  * @system agent-types dir, config.json, repos.json, layout.json, sealed). Names
@@ -246,6 +255,7 @@ export function matchProtectedWrite(
   protectedWritePaths: ProtectedWritePath[],
   filePath: string,
 ): string | null {
+  if (isSealHelperResultPath(filePath)) return SEAL_HELPER_RESULT_WRITE_DENY_REASON;
   for (const entry of protectedWritePaths) {
     if (entry.subtree) {
       if (filePath === entry.path || filePath.startsWith(entry.path + "/")) return entry.reason;
@@ -673,7 +683,7 @@ function checkRelativeTraversalPaths(
 // ── Advisory Bash path scanner (SPEC-PATH-ALLOWLIST.md §6.6) ──────────────────
 
 /** Verbs whose every path-looking argument is a WRITE target. */
-const BASH_WRITE_ALL_ARGS = new Set(["mkdir", "touch", "rm", "rmdir", "chmod"]);
+const BASH_WRITE_ALL_ARGS = new Set(["mkdir", "touch", "rm", "rmdir", "chmod", "ln"]);
 
 /**
  * The deny reason for a path-looking Bash token that carries shell
@@ -796,8 +806,8 @@ function bashLiteralDirPrefix(absPath: string): string {
  *
  * Operation class (SPEC §6.11 item 8): a redirect target (`>`/`>>`/`1>`/`2>`/
  * `&>`/`>|`, glued or separate), a `sed -i` / `--in-place` argument, a `tee`
- * argument, the last argument of `cp`/`mv`, and every argument of `mkdir`,
- * `touch`, `rm`, `rmdir`, `chmod` are WRITES; every other path-looking token is
+ * argument, the last argument of `cp`, every argument of `mv`/`ln`, and every
+ * argument of `mkdir`, `touch`, `rm`, `rmdir`, `chmod` are WRITES; every other path-looking token is
  * a READ. The protected-file guard (checkBashSettingsWrite) already ran first.
  */
 function scanBashCommandPaths(
@@ -830,6 +840,10 @@ function scanBashCommandPaths(
       const canonical = canonicalizeSandboxPath(abs);
       const boundaryDenial = checkWorktreeBoundary(canonical, ctx);
       if (boundaryDenial) return boundaryDenial;
+      if (op === "write") {
+        const protectedReason = matchProtectedWrite(ctx.protectedWritePaths, canonical);
+        if (protectedReason) return { decision: "deny", reason: protectedReason };
+      }
       if (resolvePreparedAccess(ctx.access, canonical, op) === "deny") {
         return { decision: "deny", reason: pathDenialReason(ctx.access, canonical, op) };
       }
@@ -865,6 +879,17 @@ function scanBashCommandPaths(
   const sedIndex = sedInPlace ? tokens.indexOf("sed") : -1;
   const teeIndex = tokens.indexOf("tee");
   const isCpMv = verb === "cp" || verb === "mv";
+  // BSD/GNU cp hard-link modes mutate the source inode's link count. Treat
+  // every operand as a write so a protected result cannot be linked into an
+  // ordinary writable alias (`cp -l` / `cp --link`). Plain cp remains read
+  // source + write destination below.
+  const cpHardLink = verb === "cp" && (() => {
+    for (const token of tokens.slice(1)) {
+      if (token === "--") break;
+      if (token === "--link" || (/^-[^-]/.test(token) && token.slice(1).includes("l"))) return true;
+    }
+    return false;
+  })();
   const isWriteVerb = BASH_WRITE_ALL_ARGS.has(verb);
   let cpMvWriteIndex = -1;
   if (isCpMv) {
@@ -882,6 +907,10 @@ function scanBashCommandPaths(
     if (sedIndex !== -1 && i > sedIndex) return "write";
     if (teeIndex !== -1 && i > teeIndex) return "write";
     if (isWriteVerb && i > 0) return "write";
+    // mv mutates both its source and destination. Treating the source as a read
+    // would let an agent rename/unlink a protected result directory.
+    if (verb === "mv" && i > 0) return "write";
+    if (cpHardLink && i > 0) return "write";
     if (i === cpMvWriteIndex) return "write";
     return "read";
   };
@@ -1167,7 +1196,40 @@ export async function checkIbCommandAccess(
   // future refactors that move parsing logic.
   if (callingAgentId === SYSTEM_AGENT_ID) return null;
 
-  const parsed = parseIbCommand(command);
+  // Shell line continuations are removed before execution. Normalize them
+  // before authorization so a continued `ib sandbox seal ...` cannot evade
+  // the internal-command guard.
+  const normalizedCommand = command.replace(/\\\r?\n/g, " ");
+
+  // Seal is an internal tmux-server operation.  It must never be reachable
+  // from an agent's Bash(ib:*) allowance: the command writes the protected
+  // seal record directly and therefore bypasses the normal path hook.  The
+  // trusted tmux fallback does not pass through this hook.
+  if (/(?:^|[;&|]\s*)ib\s+sandbox\s+(?:seal|delete-seal|verify-seal)(?:\s|$)/.test(normalizedCommand)) {
+    return {
+      decision: "deny",
+      reason: "Access denied: ib sandbox seal is an internal operation",
+    };
+  }
+  if (/(?:^|[;&|]\s*)ib\s+sandbox\s+refresh(?:\s|$)/.test(normalizedCommand)) {
+    return { decision: "deny", reason: "Access denied: ib sandbox refresh is manager-only" };
+  }
+
+  // Bash(ib:*) must represent one shell command.  Otherwise a permitted
+  // `ib send ...` can append a second lifecycle/internal command after `;`,
+  // `&&`, a pipe, or a newline.  The scanner is quote/heredoc aware, so
+  // punctuation in a quoted message remains usable.
+  if (/(?:^|[;&|\n]\s*)ib\s+/.test(normalizedCommand)) {
+    const shellHit = findShellMetachar(normalizedCommand);
+    if (shellHit) {
+      return {
+        decision: "deny",
+        reason: `Access denied: chained shell command (${shellHit})`,
+      };
+    }
+  }
+
+  const parsed = parseIbCommand(normalizedCommand);
   if (!parsed) return null;
   if (!IB_MANAGER_ONLY_COMMANDS.has(parsed.subcommand)) return null;
 

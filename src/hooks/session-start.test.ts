@@ -601,10 +601,21 @@ describe("buildPathIsolationSection", () => {
     expect(section).toContain("Denials tab of `ib watch`");
   });
 
-  test("sandbox absent/disabled states the hook is the only fence", () => {
-    const ctx = { ...baseCtx };
+  test.each([undefined, {}, { domains: ["example.com"] }])("omitted sandbox enablement defaults on in session instructions (%j)", (sandbox) => {
+    const ctx = detectRole(baseCtx.worktreePath, { sandbox });
+    expect(buildPathIsolationSection(ctx)).toContain("kernel sandbox is ON");
+    if (sandbox) expect(ctx.sandbox?.enabled).toBe(true);
+  });
+
+  test("global coordinator remains outside the repository sandbox default", () => {
+    const section = buildPathIsolationSection({ ...baseCtx, agentId: "@system" });
+    expect(section).toContain("kernel sandbox is OFF");
+  });
+
+  test("explicitly disabled sandbox retains native protections and path hooks", () => {
+    const ctx = { ...baseCtx, sandbox: { enabled: false, rawAllow: [], domains: [] } };
     const section = buildPathIsolationSection(ctx);
-    expect(section).toContain("The kernel sandbox is OFF");
+    expect(section).toContain("kernel sandbox is OFF");
     expect(section).not.toContain("EPERM");
   });
 
@@ -622,7 +633,7 @@ describe("buildPathIsolationSection", () => {
   test.each(["sonnet", "opus", "unknown"])("legacy %s metadata keeps Claude runtime instructions", (model) => {
     const section = buildPathIsolationSection(detectRole(baseCtx.worktreePath, { model }));
     expect(section).toContain("your Claude project directory and scratchpad");
-    expect(section).toContain("The kernel sandbox is OFF");
+    expect(section).toContain("kernel sandbox is ON");
     expect(section).toContain("Internal git and agent lifecycle operations");
   });
 

@@ -24,13 +24,12 @@ import { CODEX_REGISTERED_EVENTS } from "./codex-config";
 import { setUserHome, resetUserHome } from "./home";
 import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-log-launch";
 
-// Mandatory sandbox: every codex launch is wrapped now, so the builders REQUIRE
-// the proxy preamble + sandbox-exec prefix (they throw otherwise) and always run
-// `-s danger-full-access` inside our Seatbelt wrapper. These stand in for what
-// ib-commands renders via src/sandbox-launch.ts.
+// Enabled-mode wrapper fixtures. Builders require the complete pair only when
+// sandboxEnabled is true and ignore both when it is false.
 const SANDBOX_PREAMBLE = "\n# test proxy preamble\nexport http_proxy=\"http://localhost:54321\"\n";
 const SANDBOX_PREFIX = "sandbox-exec -f '/tmp/test/sandbox.sb' -D 'AGENTDIR=/tmp/test'";
 const sandboxFields = () => ({
+  sandboxEnabled: true,
   sandboxScriptPreamble: SANDBOX_PREAMBLE,
   sandboxExecPrefix: SANDBOX_PREFIX,
 });
@@ -49,12 +48,11 @@ describe("buildCodexStartContent — launch line", () => {
     ...sandboxFields(),
   });
 
-  test("contains the canonical -m / -a / --dangerously-bypass-hook-trust flags + mandatory danger-full-access (SPEC §3.3)", () => {
+  test("enabled mode carries Codex yolo flags only beneath the shared Seatbelt wrapper", () => {
     const content = buildCodexStartContent(baseInput());
     // The model is shell-quoted, so it ends up wrapped in single quotes.
     expect(content).toContain("-m 'gpt-5.4-mini'");
     expect(content).toContain("-a never");
-    // Mandatory sandbox: codex always runs danger-full-access inside our wrapper.
     expect(content).toContain("-s danger-full-access");
     expect(content).not.toContain("-s workspace-write");
     expect(content).toContain("--dangerously-bypass-hook-trust");
@@ -83,11 +81,27 @@ describe("buildCodexStartContent — launch line", () => {
     expect(content).toContain("trap 'cleanup_sandbox_log; cleanup_sandbox_proxy' EXIT");
   });
 
-  test("REFUSES a launch without the complete wrapper (mandatory sandbox)", () => {
+  test("REFUSES an enabled launch without the complete wrapper", () => {
     expect(() => buildCodexStartContent({ ...baseInput(), sandboxScriptPreamble: "" }))
-      .toThrow(/requires the sandbox proxy preamble and sandbox-exec prefix/);
+      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
     expect(() => buildCodexStartContent({ ...baseInput(), sandboxExecPrefix: "" }))
-      .toThrow(/requires the sandbox proxy preamble and sandbox-exec prefix/);
+      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
+  });
+
+  test("disabled launch keeps native Codex protections and hooks while omitting kernel helpers", () => {
+    const content = buildCodexStartContent({
+      ...baseInput(),
+      sandboxEnabled: false,
+    });
+    expect(content).toContain("--dangerously-bypass-hook-trust");
+    expect(content).not.toContain("-a never");
+    expect(content).not.toContain("-s danger-full-access");
+    expect(content).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(content).toContain("hooks.PreToolUse");
+    expect(content).not.toContain("sandbox-exec");
+    expect(content).not.toContain("sandbox-proxy-launch");
+    expect(content).not.toContain("sandbox-log-watch");
+    expect(content).not.toContain("export http_proxy=");
   });
 
   test("threads codexEffort into the -c model_reasoning_effort override", () => {
@@ -327,10 +341,9 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     expect(content).not.toContain("--resume");
   });
 
-  test("re-passes -a never --dangerously-bypass-hook-trust + mandatory danger-full-access on resume (Phase 7 Q2)", () => {
+  test("enabled resume re-passes Codex yolo flags beneath the shared Seatbelt wrapper", () => {
     const content = buildCodexResumeContent(baseInput());
     expect(content).toContain("-a never");
-    // Mandatory sandbox: codex resume always runs danger-full-access inside our wrapper.
     expect(content).toContain("-s danger-full-access");
     expect(content).not.toContain("-s workspace-write");
     expect(content).toContain("--dangerously-bypass-hook-trust");
@@ -358,11 +371,27 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     expect(content.match(/sandbox-log-gate sandbox-exec[^\n]* codex resume/g)?.length).toBe(2);
   });
 
-  test("REFUSES a resume without the complete wrapper (mandatory sandbox)", () => {
+  test("REFUSES an enabled resume without the complete wrapper", () => {
     expect(() => buildCodexResumeContent({ ...baseInput(), sandboxScriptPreamble: "" }))
-      .toThrow(/requires the sandbox proxy preamble and sandbox-exec prefix/);
+      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
     expect(() => buildCodexResumeContent({ ...baseInput(), sandboxExecPrefix: "" }))
-      .toThrow(/requires the sandbox proxy preamble and sandbox-exec prefix/);
+      .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
+  });
+
+  test("disabled resume keeps native Codex protections and hooks while omitting kernel helpers", () => {
+    const content = buildCodexResumeContent({
+      ...baseInput(),
+      sandboxEnabled: false,
+    });
+    expect(content).toContain("--dangerously-bypass-hook-trust");
+    expect(content).not.toContain("-a never");
+    expect(content).not.toContain("-s danger-full-access");
+    expect(content).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(content).toContain("hooks.PreToolUse");
+    expect(content).not.toContain("sandbox-exec");
+    expect(content).not.toContain("sandbox-proxy-launch");
+    expect(content).not.toContain("sandbox-log-watch");
+    expect(content).not.toContain("export http_proxy=");
   });
 
   test("re-passes extra writable roots through as --add-dir flags on resume", () => {

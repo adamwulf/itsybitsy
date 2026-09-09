@@ -1,9 +1,10 @@
 /**
  * Antigravity CLI (`agy`) PreToolUse hook handler — the deny-by-default gate.
  *
- * agy is launched with `--dangerously-skip-permissions --mode=accept-edits`
- * (no card ever shows) and NO sandbox, so this hook is the ONLY permission
- * boundary (SPEC-ANTIGRAVITY-CLI.md D3). Load-bearing properties:
+ * Kernel-enabled agy is launched with `--dangerously-skip-permissions
+ * --mode=accept-edits`; kernel-disabled agy retains native protections. This
+ * hook remains the always-on path boundary in both modes
+ * (SPEC-ANTIGRAVITY-CLI.md D3). Load-bearing properties:
  *
  *   1. Deny-by-default. A tool call is allowed only if the translated Claude
  *      call passes the merged agent-type allow list (_all / _non_coordinator /

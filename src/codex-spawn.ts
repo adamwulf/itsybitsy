@@ -88,31 +88,27 @@ export interface BuildCodexStartContentInput {
   absAgentLog: string;
   /** Absolute path to claude.stderr.log (sidecar; reused name for back-compat). */
   absStderrLog: string;
-  /**
-   * Extra directories passed to codex as `--add-dir` (codex-side writable roots).
-   * Under the mandatory danger-full-access wrapper these are inert for codex's own
-   * sandbox — the Seatbelt profile is the fence — but they are still emitted.
-   */
+  /** Extra directories passed to codex as `--add-dir` writable roots. */
   extraWritableRoots?: string[];
   /** Configure Codex to use Sakana Fugu and load its key at launch. */
   fugu?: boolean;
+  /** Whether itsybitsy's kernel sandbox wraps this launch. */
+  sandboxEnabled: boolean;
   /**
    * Proxy startup + environment exports rendered by the shared sandbox wiring.
-   * MANDATORY — the kernel sandbox always wraps a codex launch now, so codex runs
-   * `-s danger-full-access` (its own sandbox off) inside our Seatbelt wrapper. The
-   * builder THROWS if this or `sandboxExecPrefix` is empty (refuse absent wrapper).
+   * Required when `sandboxEnabled` is true and omitted when it is false.
    */
-  sandboxScriptPreamble: string;
-  /** `sandbox-exec -f ... -D ...` prefix rendered by the shared sandbox wiring (MANDATORY). */
-  sandboxExecPrefix: string;
+  sandboxScriptPreamble?: string;
+  /** `sandbox-exec -f ... -D ...` prefix; required only in enabled mode. */
+  sandboxExecPrefix?: string;
 }
 
 /**
  * Render the codex start.sh body for an agent. Mirrors the claude start.sh
  * skeleton (setsid + SIGHUP ignore + pid capture + meta-json write + wait
  * + exit-check) but launches codex with:
- *   - `-m <model> -a never -s danger-full-access --dangerously-bypass-hook-trust`
- *     (mandatory sandbox: codex's own sandbox is off, our Seatbelt wrapper on)
+ *   - `-m <model> --dangerously-bypass-hook-trust`, plus `-a never -s
+ *     danger-full-access` only when itsybitsy's Seatbelt profile is active
  *   - inline `-c 'hooks.<Event>=[...]'` flags from buildCodexLaunchArgs
  *   - the prompt as a positional `"$(cat <prompt-file>)"`
  *
@@ -152,16 +148,21 @@ export function buildCodexStartContent(input: BuildCodexStartContentInput): stri
   const qStartExitScript = shellQuote(input.absExitScript);
   const qStartAgentLog = shellQuote(input.absAgentLog);
   const qStartStderrLog = shellQuote(input.absStderrLog);
-  // Mandatory sandbox: refuse to render a codex launch without the wrapper.
-  if (!input.sandboxScriptPreamble || !input.sandboxExecPrefix) {
-    throw new Error("codex launch requires the sandbox proxy preamble and sandbox-exec prefix (mandatory sandbox)");
+  if (input.sandboxEnabled && (!input.sandboxScriptPreamble || !input.sandboxExecPrefix)) {
+    throw new Error("Sandbox-enabled codex launch requires the proxy preamble and sandbox-exec prefix");
   }
-  const sandboxMode = "danger-full-access";
-  const sandboxPreamble = input.sandboxScriptPreamble;
-  const sandboxLaunchPrefix = `${input.sandboxExecPrefix} `;
+  // Its yolo flags are safe only inside itsybitsy's outer Seatbelt profile.
+  // Disabled mode intentionally omits both flags so Codex's native approval
+  // and sandbox defaults remain active. Hook trust is independent of those
+  // protections and remains bypassed so the generated hooks load reliably.
+  const nativeProtectionOverrides = input.sandboxEnabled
+    ? " -a never -s danger-full-access"
+    : "";
+  const sandboxPreamble = input.sandboxEnabled ? input.sandboxScriptPreamble! : "";
+  const sandboxLaunchPrefix = input.sandboxEnabled ? `${input.sandboxExecPrefix} ` : "";
 
   // The launch line. Per SPEC §3.3:
-  //   codex -m <MODEL> -a never -s <sandboxMode> --dangerously-bypass-hook-trust \
+  //   codex -m <MODEL> [-a never -s danger-full-access] --dangerously-bypass-hook-trust \
   //         <inline -c flags> "<prompt>"
   // We log only the model + sentinel rather than the prompt content so a leak
   // of agent.log doesn't disclose the prompt.
@@ -173,7 +174,7 @@ AGENT_LOG=${qStartAgentLog}
 STDERR_LOG=${qStartStderrLog}
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [start.sh] $1" >> "$AGENT_LOG"; }${sandboxPreamble}
 
-log "Starting codex -m ${input.codexModel} -a never -s ${sandboxMode} (codex agent id=${input.agentId})"
+log "Starting codex -m ${input.codexModel}${nativeProtectionOverrides} (codex agent id=${input.agentId})"
 log "PWD=$(pwd) which_codex=$(which codex 2>&1)"
 
 ${input.fugu ? `# Read the Fugu key only at launch time. It stays in the owner-only
@@ -214,9 +215,9 @@ else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid ${sandboxLaunchPrefix}codex -m ${qModel} -a never -s ${sandboxMode} --dangerously-bypass-hook-trust ${qFlagArgs} "$(cat ${qAbsPromptFile})" <&0 2> "$STDERR_LOG" &
+    setsid ${sandboxLaunchPrefix}codex -m ${qModel}${nativeProtectionOverrides} --dangerously-bypass-hook-trust ${qFlagArgs} "$(cat ${qAbsPromptFile})" <&0 2> "$STDERR_LOG" &
 else
-    ${sandboxLaunchPrefix}codex -m ${qModel} -a never -s ${sandboxMode} --dangerously-bypass-hook-trust ${qFlagArgs} "$(cat ${qAbsPromptFile})" <&0 2> "$STDERR_LOG" &
+    ${sandboxLaunchPrefix}codex -m ${qModel}${nativeProtectionOverrides} --dangerously-bypass-hook-trust ${qFlagArgs} "$(cat ${qAbsPromptFile})" <&0 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
 log "Codex PID: $CLAUDE_PID (setsid=$SETSID)"
@@ -306,29 +307,26 @@ export interface BuildCodexResumeContentInput {
   absAgentLog: string;
   /** Absolute path to claude.stderr.log (sidecar; reused name for back-compat). */
   absStderrLog: string;
-  /**
-   * Extra directories passed to codex as `--add-dir` (codex-side writable roots).
-   * Under the mandatory danger-full-access wrapper these are inert for codex's own
-   * sandbox — the Seatbelt profile is the fence — but they are still emitted.
-   */
+  /** Extra directories passed to codex as `--add-dir` writable roots. */
   extraWritableRoots?: string[];
   /** Reconfigure Sakana Fugu for the resumed Codex session. */
   fugu?: boolean;
+  /** Whether itsybitsy's kernel sandbox wraps this resume. */
+  sandboxEnabled: boolean;
   /**
    * Proxy startup + environment exports rendered by the shared sandbox wiring.
-   * MANDATORY — codex resume always runs `-s danger-full-access` inside our
-   * Seatbelt wrapper. The builder THROWS if this or `sandboxExecPrefix` is empty.
+   * Required when `sandboxEnabled` is true and omitted when it is false.
    */
-  sandboxScriptPreamble: string;
-  /** `sandbox-exec -f ... -D ...` prefix rendered by the shared sandbox wiring (MANDATORY). */
-  sandboxExecPrefix: string;
+  sandboxScriptPreamble?: string;
+  /** `sandbox-exec -f ... -D ...` prefix; required only in enabled mode. */
+  sandboxExecPrefix?: string;
 }
 
 /**
  * Render the codex resume.sh body for an agent. Mirrors `buildCodexStartContent`
  * exactly (same setsid + SIGHUP ignore + pid capture + meta-json write + wait
  * + exit-check skeleton) but the launch line is:
- *   `codex resume "<UUID>" -a never -s <mode> --dangerously-bypass-hook-trust <inline -c flags>`
+ *   `codex resume "<UUID>" [-a never -s danger-full-access] --dangerously-bypass-hook-trust <inline -c flags>`
  *
  * Differences from start.sh:
  *   - Subcommand form (`codex resume <UUID>`), not the top-level `codex` invocation.
@@ -339,8 +337,8 @@ export interface BuildCodexResumeContentInput {
  *     persisting the original spawn's hook registration across resume; passing
  *     them again is a no-op if codex DOES persist them and safety-critical if
  *     it doesn't (without hooks every PreToolUse silently fail-opens).
- *   - Re-passes `-a never` and the selected sandbox mode for the same
- *     defense-in-depth reason (Q2 in the Phase 7 prompt).
+ *   - Re-passes `-a never -s danger-full-access` only beneath itsybitsy's
+ *     outer Seatbelt profile; disabled mode preserves Codex's native defaults.
  *
  * The PID variable is kept as `CLAUDE_PID` (and stored as `claude_pid` in
  * meta.json) intentionally — see `buildCodexStartContent` rationale.
@@ -372,13 +370,14 @@ export function buildCodexResumeContent(input: BuildCodexResumeContentInput): st
   const qResumeExitScript = shellQuote(input.absExitScript);
   const qResumeAgentLog = shellQuote(input.absAgentLog);
   const qResumeStderrLog = shellQuote(input.absStderrLog);
-  // Mandatory sandbox: refuse to render a codex resume without the wrapper.
-  if (!input.sandboxScriptPreamble || !input.sandboxExecPrefix) {
-    throw new Error("codex resume requires the sandbox proxy preamble and sandbox-exec prefix (mandatory sandbox)");
+  if (input.sandboxEnabled && (!input.sandboxScriptPreamble || !input.sandboxExecPrefix)) {
+    throw new Error("Sandbox-enabled codex resume requires the proxy preamble and sandbox-exec prefix");
   }
-  const sandboxMode = "danger-full-access";
-  const sandboxPreamble = input.sandboxScriptPreamble;
-  const sandboxLaunchPrefix = `${input.sandboxExecPrefix} `;
+  const nativeProtectionOverrides = input.sandboxEnabled
+    ? " -a never -s danger-full-access"
+    : "";
+  const sandboxPreamble = input.sandboxEnabled ? input.sandboxScriptPreamble! : "";
+  const sandboxLaunchPrefix = input.sandboxEnabled ? `${input.sandboxExecPrefix} ` : "";
 
   return `#!/bin/bash
 # Clear Claude Code nesting detection so agents can start their own claude process
@@ -428,9 +427,9 @@ else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid ${sandboxLaunchPrefix}codex resume ${qSessionId} -a never -s ${sandboxMode} --dangerously-bypass-hook-trust ${qFlagArgs} <&0 2> "$STDERR_LOG" &
+    setsid ${sandboxLaunchPrefix}codex resume ${qSessionId}${nativeProtectionOverrides} --dangerously-bypass-hook-trust ${qFlagArgs} <&0 2> "$STDERR_LOG" &
 else
-    ${sandboxLaunchPrefix}codex resume ${qSessionId} -a never -s ${sandboxMode} --dangerously-bypass-hook-trust ${qFlagArgs} <&0 2> "$STDERR_LOG" &
+    ${sandboxLaunchPrefix}codex resume ${qSessionId}${nativeProtectionOverrides} --dangerously-bypass-hook-trust ${qFlagArgs} <&0 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
 log "Codex PID: $CLAUDE_PID (setsid=$SETSID)"

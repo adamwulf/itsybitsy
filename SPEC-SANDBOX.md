@@ -1,10 +1,14 @@
 # SPEC-SANDBOX.md — Per-Agent Seatbelt Sandboxing
 
-**Staged rollout scope:** throughout the current contract below, mandatory sandboxing covers ordinary repository agents and per-repository coordinators (Claude, Codex/fugu, and agy). The global `@system` coordinator remains unsandboxed in this version and is a separate follow-up. See [the rollout guide](docs/SANDBOX-ROLLOUT.md) for configuration migration and validation status.
+**Current contract (2026-09-08):** kernel sandboxing defaults to enabled for repository agents and per-repository coordinators (Claude, Codex/fugu, and agy). Agent types may declare `sandbox: true` / `sandbox: false`, or an object with boolean `sandbox.enabled`, `rawAllow`, and `domains`. Enablement follows the most specific explicit value: `_all` → applicable `_non_coordinator` → oldest ancestor → leaf. Omission inherits; only final resolution defaults to true. Lists still union independently.
 
-**Current contract:** sandboxing is mandatory for ordinary repository agents and per-repository coordinators on every launch and resume. Agent-type Markdown has no `sandbox.enabled` toggle; any remaining key is a migration error. Only `paths` and `sandbox.rawAllow` / `sandbox.domains` are configurable. Profile or proxy setup failure stops the launch. Legacy agents require refresh or their per-repository coordinator reset path before resuming. Global `@system` sandboxing is deferred.
+An explicit false skips itsybitsy Seatbelt, the egress proxy, and kernel-denial collection; hooks continue enforcing `paths`, and native CLI sandbox/approval protections remain active. YOLO / permission-bypass flags are allowed only inside the enabled itsybitsy kernel wrapper, at both spawn and resume. Enabled launches fail closed if profile or proxy setup fails. Spawn freezes policy in metadata, resume preserves it, and `ib sandbox refresh` applies current type settings in either direction. Global `@system` sandboxing remains deferred.
 
-The mandatory repository-agent lifecycle is integrated. The rollout procedure and remaining live validation are recorded in `docs/SANDBOX-ROLLOUT.md`. This contract supersedes opt-in defaults, toggle examples, disabled-resume compatibility, and unsupported-agy assumptions in the historical sections below. Existing path precedence, profile inheritance, sealing, and the documented spawner tmux limitation still apply.
+This contract supersedes the mandatory-only and earlier opt-in/OR-merge contracts recorded in the historical sections below, including retired-key diagnostics and rejection of every disabled resume. Existing path precedence, enabled-policy sealing, and the documented spawner tmux limitation still apply. See [the type guide](docs/agent-types/README.md) for authoring and [the rollout guide](docs/SANDBOX-ROLLOUT.md) for enabled-mode validation evidence.
+
+# Historical appendix: earlier sandbox designs
+
+The remainder of this document preserves earlier design decisions, migration instructions, and implementation ledgers for reference. It is not the current configuration or launch contract. In particular, old opt-in defaults, OR-merge rules, mandatory-only wrapping, and retired-toggle instructions must not be applied. Use the current contract above, SPEC.md, and the agent-type guide for current behavior.
 
 **Design history:** initial planning 2026-07-17; opt-in implementation 2026-07-19.
 **Related:** SPEC.md sections 2, 6, 7, and 18.

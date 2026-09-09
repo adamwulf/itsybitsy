@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "fs/promises";
 import { homedir, tmpdir } from "os";
 import { dirname, join } from "path";
 import { parseAgentTypeFile } from "./agent-types";
@@ -20,6 +20,7 @@ import {
   resolveSandboxConfig,
   sandboxPathAccessTable,
   sandboxProfileParameterValues,
+  SEAL_HELPER_RESULT_PREFIX,
   validatePathsFrontmatter,
   validateSandboxFrontmatter,
   type PathsConfig,
@@ -228,6 +229,8 @@ describe("sandbox profile emission", () => {
       '(deny file-read* (subpath (param "TMUXSOCK")))',
       '(deny file-write* (subpath (param "TMUXSOCK")))',
       '(deny network-outbound (remote unix-socket (subpath (param "TMUXSOCK"))))',
+      '(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))',
+      '(deny file-link (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))',
     ]);
   });
 
@@ -251,7 +254,25 @@ describe("sandbox profile emission", () => {
       // deny for a spawner.
       '(allow file-read* (subpath (param "PARENTCLAUDE")))',
       '(allow file-write* (subpath (param "PARENTCLAUDE")))',
+      '(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))',
+      '(deny file-link (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))',
     ]);
+  });
+
+  test("reserved seal-helper results stay readable but never writable after broad raw allows", () => {
+    const broadTmp = paths({ allowRead: ["/private/tmp"], allowWrite: ["/private/tmp"] });
+    const profile = generateProfile(
+      config({ rawAllow: ["(allow file-read*)", "(allow file-write*)"] }),
+      broadTmp,
+      PARAMS,
+    );
+    const definitions = sandboxProfileParameterValues(broadTmp, PARAMS);
+    const resultDir = `/private/tmp/${SEAL_HELPER_RESULT_PREFIX}01234567-89ab-cdef-0123-456789abcdef`;
+    expect(evaluateProfileAccess(profile, definitions, resultDir, "read")).toBe("allow");
+    expect(evaluateProfileAccess(profile, definitions, join(resultDir, "output"), "read")).toBe("allow");
+    expect(evaluateProfileAccess(profile, definitions, resultDir, "write")).toBe("deny");
+    expect(evaluateProfileAccess(profile, definitions, join(resultDir, "output"), "write")).toBe("deny");
+    expect(evaluateProfileAccess(profile, definitions, "/private/tmp/ordinary-sibling", "write")).toBe("allow");
   });
 
   test("flipping canSpawnChildren changes exactly REPOAGENTS op, the PARENTCLAUDE root, and the tmux deny", () => {
@@ -396,6 +417,103 @@ describe("sandbox profile emission", () => {
     expect(profile).toContain('(allow file-read* (subpath "/private/tmp/shared"))');
     expect(profile).toContain('(allow file-write* (subpath "/private/tmp/shared"))');
   });
+});
+
+test("LIVE macOS profile protects trusted seal-helper results while ordinary tmp stays writable", async () => {
+  const sandboxExec = Bun.which("sandbox-exec");
+  if (process.platform !== "darwin" || !sandboxExec) {
+    console.log("LIVE seal-helper result probe: SKIPPED (sandbox-exec is absent; macOS only)");
+    return;
+  }
+  const capability = Bun.spawnSync({
+    cmd: [sandboxExec, "-p", "(version 1)(allow default)", "/usr/bin/true"],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const capabilityError = capability.stderr.toString().trim();
+  if (capability.exitCode !== 0 && capabilityError.includes("sandbox_apply: Operation not permitted")) {
+    console.log("LIVE seal-helper result probe: SKIPPED (nested sandbox-exec is unavailable)");
+    return;
+  }
+  if (capability.exitCode !== 0) {
+    throw new Error(`LIVE seal-helper capability check failed: ${capabilityError}`);
+  }
+
+  const uuid = crypto.randomUUID();
+  const resultDir = `/private/tmp/${SEAL_HELPER_RESULT_PREFIX}${uuid}`;
+  const newResultDir = `/private/tmp/${SEAL_HELPER_RESULT_PREFIX}${crypto.randomUUID()}`;
+  const movedResultDir = `${resultDir}-moved`;
+  const sibling = `/private/tmp/ib-seal-helper-ordinary-${crypto.randomUUID()}`;
+  const hardLinkAlias = `/private/tmp/ib-seal-helper-alias-${crypto.randomUUID()}`;
+  const cpHardLinkAlias = `/private/tmp/ib-seal-helper-cp-alias-${crypto.randomUUID()}`;
+  const symlinkAlias = `/private/tmp/ib-seal-helper-symlink-${crypto.randomUUID()}`;
+  await mkdir(resultDir, { mode: 0o700 });
+  await writeFile(join(resultDir, "output"), "trusted");
+  await writeFile(join(resultDir, "result"), "0\n");
+  await symlink(join(resultDir, "output"), symlinkAlias);
+  const outputBefore = await stat(join(resultDir, "output"));
+  const resultBefore = await stat(join(resultDir, "result"));
+  const resultContentBefore = await readFile(join(resultDir, "result"), "utf8");
+  try {
+    const params = { ...PARAMS, canSpawnChildren: true };
+    const profile = generateProfile(config({ rawAllow: ["(allow default)"] }), EMPTY_PATHS, params);
+    const definitions = sandboxProfileParameterValues(EMPTY_PATHS, params);
+    const args = Object.entries(definitions).flatMap(([key, value]) => ["-D", `${key}=${value}`]);
+    const script = [
+      `value=$(cat '${join(resultDir, "output")}')`,
+      `printf 'read=%s\\n' "$value"`,
+      `mkdir '${newResultDir}' 2>/dev/null; printf 'mkdir=%s\\n' "$?"`,
+      `printf forged > '${join(resultDir, "output")}' 2>/dev/null; printf 'overwrite_output=%s\\n' "$?"`,
+      `printf 0 > '${join(resultDir, "result")}' 2>/dev/null; printf 'overwrite_result=%s\\n' "$?"`,
+      `touch '${join(resultDir, "created")}' 2>/dev/null; printf 'create=%s\\n' "$?"`,
+      `rm -f '${join(resultDir, "output")}' 2>/dev/null; printf 'unlink_output=%s\\n' "$?"`,
+      `rm -f '${join(resultDir, "result")}' 2>/dev/null; printf 'unlink_result=%s\\n' "$?"`,
+      `mv '${resultDir}' '${movedResultDir}' 2>/dev/null; printf 'rename=%s\\n' "$?"`,
+      `ln '${join(resultDir, "output")}' '${hardLinkAlias}' 2>/dev/null; printf 'hardlink=%s\\n' "$?"`,
+      `test -e '${hardLinkAlias}'; printf 'hardlink_exists=%s\\n' "$?"`,
+      `cp -l '${join(resultDir, "output")}' '${cpHardLinkAlias}' 2>/dev/null; printf 'cp_hardlink=%s\\n' "$?"`,
+      `test -e '${cpHardLinkAlias}'; printf 'cp_hardlink_exists=%s\\n' "$?"`,
+      `printf forged > '${symlinkAlias}' 2>/dev/null; printf 'symlink_write=%s\\n' "$?"`,
+      `printf ordinary > '${sibling}' 2>/dev/null; printf 'sibling=%s\\n' "$?"`,
+    ].join("; ");
+    const probe = Bun.spawnSync({
+      cmd: [sandboxExec, "-p", profile, ...args, "/bin/sh", "-c", script],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(probe.exitCode).toBe(0);
+    const fields = Object.fromEntries(
+      probe.stdout.toString().trim().split("\n").map((line) => line.split("=", 2)),
+    );
+    expect(fields.read).toBe("trusted");
+    for (const operation of [
+      "mkdir", "overwrite_output", "overwrite_result", "create",
+      "unlink_output", "unlink_result", "rename", "hardlink", "hardlink_exists", "cp_hardlink", "cp_hardlink_exists", "symlink_write",
+    ]) {
+      expect(fields[operation]).toMatch(/^[1-9][0-9]*$/);
+    }
+    expect(fields.sibling).toBe("0");
+    expect(await readFile(join(resultDir, "output"), "utf8")).toBe("trusted");
+    expect(await readFile(join(resultDir, "result"), "utf8")).toBe(resultContentBefore);
+    expect(fields.hardlink).not.toBe("0");
+    expect(fields.hardlink_exists).not.toBe("0");
+    expect(fields.cp_hardlink).not.toBe("0");
+    expect(fields.cp_hardlink_exists).not.toBe("0");
+    const outputAfter = await stat(join(resultDir, "output"));
+    const resultAfter = await stat(join(resultDir, "result"));
+    expect({ ino: outputAfter.ino, nlink: outputAfter.nlink, size: outputAfter.size })
+      .toEqual({ ino: outputBefore.ino, nlink: outputBefore.nlink, size: outputBefore.size });
+    expect({ ino: resultAfter.ino, nlink: resultAfter.nlink, size: resultAfter.size })
+      .toEqual({ ino: resultBefore.ino, nlink: resultBefore.nlink, size: resultBefore.size });
+  } finally {
+    await rm(resultDir, { recursive: true, force: true });
+    await rm(newResultDir, { recursive: true, force: true });
+    await rm(movedResultDir, { recursive: true, force: true });
+    await rm(sibling, { force: true });
+    await rm(hardLinkAlias, { force: true });
+    await rm(cpHardLinkAlias, { force: true });
+    await rm(symlinkAlias, { force: true });
+  }
 });
 
 describe("agy state runtime root (AGYSTATEDIR, ~/.gemini)", () => {
@@ -1505,9 +1623,8 @@ describe("resolver input contract", () => {
   });
 });
 
-describe("sandbox config resolution (mandatory always-on)", () => {
+describe("sandbox config resolution (default enabled)", () => {
   test("an omitted sandbox block still resolves to an ENABLED sandbox", () => {
-    // Sandboxing is mandatory: an absent block cannot mean "no sandbox".
     expect(resolveSandboxConfig({})).toEqual({
       enabled: true,
       rawAllow: [],
@@ -1515,30 +1632,17 @@ describe("sandbox config resolution (mandatory always-on)", () => {
     });
   });
 
-  test("an explicit enabled:false cannot authorize an unsandboxed launch", () => {
-    // Legacy runtime metadata may still carry enabled:false; resolution forces
-    // it back on so a stale toggle can never disable the sandbox. rawAllow and
-    // domains still carry through.
-    const legacy: SandboxConfig = {
-      enabled: false,
-      rawAllow: ["(allow process*)"],
-      domains: ["api.anthropic.com"],
-    };
-    expect(resolveSandboxConfig({ sandbox: legacy })).toEqual({
-      enabled: true,
-      rawAllow: ["(allow process*)"],
-      domains: ["api.anthropic.com"],
-    });
+  test("explicit false disables sandboxing without changing lists or source", () => {
+    const source: SandboxConfig = { enabled: false, rawAllow: ["(allow process*)"], domains: ["example.com"] };
+    const resolved = resolveSandboxConfig({ sandbox: source });
+    expect(resolved).toEqual(source);
+    expect(resolved).not.toBe(source);
+    expect(source.enabled).toBe(false);
   });
 
-  test("resolution never mutates the source, so a legacy enabled:false stays diagnosable", () => {
-    // The launch/seal layer must still read the ORIGINAL enabled value off the
-    // metadata to detect and migrate a legacy disabled agent — resolution
-    // forces true on the OUTPUT without touching the input object.
-    const legacy: SandboxConfig = { enabled: false, rawAllow: [], domains: [] };
-    const resolved = resolveSandboxConfig({ sandbox: legacy });
-    expect(resolved.enabled).toBe(true);
-    expect(legacy.enabled).toBe(false);
+  test("an omitted enabled value defaults true while preserving lists", () => {
+    expect(resolveSandboxConfig({ sandbox: { rawAllow: [], domains: ["example.com"] } }))
+      .toEqual({ enabled: true, rawAllow: [], domains: ["example.com"] });
   });
 
   test("an explicit enabled:true resolves enabled with its lists carried through", () => {
@@ -1615,9 +1719,6 @@ describe("sandbox path canonicalization", () => {
   });
 });
 
-const RETIRED_ENABLED_ERROR =
-  "sandbox.enabled is retired: sandboxing is always on and cannot be toggled — remove this key (see docs/agent-types/README.md)";
-
 describe("sandbox frontmatter validation", () => {
   test("accepts the complete flat schema (rawAllow + domains, no enabled)", () => {
     expect(validateSandboxFrontmatter({ rawAllow: [], domains: [] })).toEqual({
@@ -1627,32 +1728,26 @@ describe("sandbox frontmatter validation", () => {
   });
 
   test.each([null, "str", 42, ["list"]])(
-    "a non-object sandbox value is rejected naming rawAllow/domains, not the retired enabled (%p)",
+    "invalid sandbox shapes are rejected (%p)",
     (value) => {
       expect(validateSandboxFrontmatter(value).errors).toEqual([
-        "sandbox must be an object with rawAllow and domains list fields",
+        "sandbox must be a boolean or an object with enabled, rawAllow and domains fields",
       ]);
     },
   );
 
-  test.each([
-    ["true", true],
-    ["false", false],
-    ["the trailing-comment footgun", "true  # note"],
-  ])(
-    "rejects an authored enabled key as retired regardless of value (%s)",
-    (_label, enabled) => {
-      // Neither an authored true nor false (nor the "true # note" footgun that
-      // used to parse to a truthy string) can influence launch policy — every
-      // form is the same retired-key error, guiding the author to remove it.
-      const result = validateSandboxFrontmatter({ enabled });
-      expect(result.errors).toEqual([RETIRED_ENABLED_ERROR]);
-    },
-  );
+  test.each([true, false])("accepts boolean shorthand and enabled field %s", (enabled) => {
+    expect(validateSandboxFrontmatter(enabled).errors).toEqual([]);
+    expect(validateSandboxFrontmatter({ enabled }).errors).toEqual([]);
+  });
 
-  test("still reports the retired enabled key alongside other errors", () => {
-    const result = validateSandboxFrontmatter({ enabled: false, domains: "not-a-list" });
-    expect(result.errors).toContain(RETIRED_ENABLED_ERROR);
+  test.each(["false", "true  # note", 0, null])("rejects non-boolean enabled %p", (enabled) => {
+    expect(validateSandboxFrontmatter({ enabled }).errors).toEqual(["sandbox.enabled must be a boolean"]);
+  });
+
+  test("reports invalid enablement alongside list errors", () => {
+    const result = validateSandboxFrontmatter({ enabled: "false", domains: "not-a-list" });
+    expect(result.errors).toContain("sandbox.enabled must be a boolean");
     expect(result.errors).toContain("sandbox.domains must be a list");
   });
 

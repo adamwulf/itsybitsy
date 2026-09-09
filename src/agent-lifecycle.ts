@@ -815,6 +815,7 @@ export async function teardownAgent(
   meta: TeardownMeta,
   logMsg: string = "Agent killed",
   preparedRetirement?: PreparedRetirement,
+  beforeRemove?: () => Promise<void>,
 ): Promise<{ ok: boolean; prunedTeams: Array<{ team: string; id: string }> }> {
   const tmuxSession = meta.tmux_session;
 
@@ -913,7 +914,12 @@ export async function teardownAgent(
     preparedRetirement,
   );
 
-  // 9. Remove agent directory
+  // 9. Finish external lifecycle cleanup while agentDir/meta still exist. A
+  // checked seal deletion uses this boundary so failure leaves a retryable
+  // stopped/archive state instead of silently orphaning protected state.
+  if (beforeRemove) await beforeRemove();
+
+  // 10. Remove agent directory
   try {
     await rm(agentDir, { recursive: true, force: true });
     return { ok: true, prunedTeams };

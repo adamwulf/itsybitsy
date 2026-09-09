@@ -185,7 +185,7 @@ describe("InfoPanelComponent", () => {
 
     expect(renderAgent(true)).toContain("Sandbox: enabled");
     expect(renderAgent(false)).toContain("Sandbox: disabled");
-    expect(renderAgent(undefined)).toContain("Sandbox: disabled");
+    expect(renderAgent(undefined)).toContain("Sandbox: enabled");
   });
 
   test.each([{}, { allowRead: ["/read"] }, { allowWrite: ["/write"] }, { deny: ["/secret"] }])(

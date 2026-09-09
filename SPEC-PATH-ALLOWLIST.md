@@ -1,59 +1,15 @@
 # SPEC-PATH-ALLOWLIST.md — Path allow-list for agent types
 
-**Staged rollout scope:** kernel sandbox claims below cover ordinary repository agents and per-repository coordinators. The global `@system` coordinator retains its existing hook-based checks and remains unsandboxed in this version. Its kernel confinement is deferred; see [the rollout guide](docs/SANDBOX-ROLLOUT.md).
-
-**Status:** Phase B is implemented on `agent/codex-path-isolation` and recorded as
-**ON BRANCH**, not **INSTALLED**, in [the rollout ledger](docs/SANDBOX-ROLLOUT.md).
-The current contract is summarized immediately below and specified normatively in
-[SPEC.md §6.1](SPEC.md); the sandbox is now **mandatory** (SPEC-SANDBOX.md,
-[docs/SANDBOX-ROLLOUT.md](docs/SANDBOX-ROLLOUT.md)). The numbered sections below
-(0–9) retain the 2026-09-02 research, decision, and build-order trail; statements
-there about `allowedPaths`, permissive defaults, an opt-in `sandbox.enabled`
-toggle, a disabled or hook-only fallback, an "enable it per type" transition, a
-"ships `enabled: false` / zero live change" ledger, or an unwrapped agy describe
-the historical baseline and are not current behavior.
-**Written:** 2026-09-02 by researcher agent `path-isolation`; updated through the
-Phase B integration on 2026-09-05.
+**Current scope:** repository agents and per-repository coordinators support kernel sandboxing, enabled by default. Global `@system` remains unsandboxed. The numbered sections below retain historical research and build notes; current behavior is defined here and in SPEC.md and SPEC-SANDBOX.md.
 
 ## Current authoritative implementation
 
-- Agent types use one top-level `paths:` policy with `allowRead`, `allowWrite`,
-  and `deny`. Lists union across `_all.md`, `_non_coordinator.md`, inheritance,
-  and the leaf type; relative entries anchor at the main repo root and are
-  resolved before being frozen in `meta.paths`. `allowedPaths` is retired and
-  rejected by validation.
-- A missing `paths` block and an explicitly empty block both grant no configured
-  paths. In a partially populated object, only omitted member lists default to
-  empty; every populated `allowRead`, `allowWrite`, or `deny` entry is retained
-  and enforced. No unmatched path is allowed. All three PreToolUse handlers use
-  the shared resolver after the structural protected-file, sibling-agent, and
-  main-checkout checks.
-- The shared runtime table contains the CLI-neutral roots. Claude, including
-  legacy metadata with an absent model, a safe bare model such as `sonnet` or
-  `opus`, or the `unknown` value produced by `readAgentMeta`, additionally
-  receives its Claude project directory and scratchpad. Those Claude-only roots
-  are excluded from codex, fugu, and agy hook tables, matching their kernel
-  profiles. agy additionally receives its whole `~/.gemini` state directory as an
-  agy-only read+write root, excluded from the other tables.
-- The Bash scanner classifies recognizable literal path arguments and common
-  write destinations, then consults the same table. It is an advisory visibility
-  and early-denial layer, not a shell parser or kernel boundary. Dynamic shell
-  expansion and unrecognized command shapes remain an accepted limitation of the
-  advisory scanner; the mandatory kernel wrapper is the authoritative boundary
-  that refuses the operation regardless.
-- The Seatbelt kernel wrapper is applied at every launch on macOS — for claude,
-  the Codex-backed codex/fugu CLIs, and agy alike. Sandboxing is mandatory: there
-  is no `sandbox.enabled` toggle in Markdown and no unsandboxed fallback; a
-  platform, profile, or proxy that cannot support it fails closed before launch.
-  Instructions, `ib info`, and the dashboard report the resolved kernel state per
-  CLI; a legacy agent whose frozen metadata predates the contract shows as
-  disabled, and the migration guidance to run `ib sandbox refresh` is supplied at
-  resume (SPEC.md §1.6, SPEC-SANDBOX §5.5), not by the display.
-- Spawn freezes `paths` and `sandbox` in `meta.json`; `ib sandbox refresh`
-  re-derives them from the current type layers. Refresh applies uniformly to every
-  CLI, including agy, and the re-derived policy is always sandbox-wrapped. Codex
-  resume and refresh also regenerate `AGENTS.md` from the agent's current frozen
-  metadata, so its instructions describe the policy that will actually be enforced.
+- Agent types use top-level `paths` lists (`allowRead`, `allowWrite`, `deny`), unioned across applicable layers and inheritance. Relative entries anchor at the main repo root. Missing or empty lists grant no configured access; populated lists remain enforced. `allowedPaths` is retired.
+- Kernel enablement accepts `sandbox: true` / `sandbox: false` or object-form boolean `sandbox.enabled`. The most specific explicit value wins across `_all`, applicable `_non_coordinator`, and the parent-first type chain. Omission inherits; final resolution defaults true. Sandbox rule and domain lists union independently.
+- All CLI hooks use the shared path resolver after structural protected-file, sibling-agent, and main-checkout checks. Runtime roots are CLI-specific: Claude adds its project directory and scratchpad; agy adds its state directory; Codex/Fugu omit those roots.
+- The shell scanner provides early denials for recognizable paths; it is not a complete shell parser or kernel boundary. Enabled Seatbelt profiles supply the outer OS boundary. With explicit false, native CLI sandbox and approval protections remain active alongside the hooks.
+- Enabled launches and resumes require a valid profile and proxy, failing closed on setup or platform errors. YOLO / permission-bypass flags are used only inside that wrapper. Disabled launches omit itsybitsy wrapping, proxy, and kernel-denial collection and preserve normal CLI protections.
+- Spawn freezes policy in metadata; resume preserves it. Metadata readers and displays treat only literal false as an opt-out. `ib sandbox refresh` applies current type settings in either direction, and Codex/Fugu instructions are regenerated to match the policy.
 
 ---
 

@@ -174,6 +174,18 @@ describe("checkCodexPreToolUse — allow/deny matcher applies to Bash AND apply_
     expect(decision.decision).toBe("allow");
   });
 
+  test("apply_patch: reserved seal-helper result stays denied despite a private-tmp write allow", () => {
+    const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/private/tmp"] }) });
+    const patch =
+      "*** Begin Patch\n*** Update File: /private/tmp/.ib-seal-helper-deadbeef/output\n@@\n-trusted\n+forged\n*** End Patch\n";
+    const decision = checkCodexPreToolUse(
+      { toolName: "apply_patch", toolInput: { command: patch }, cwd: ctx.worktreePath },
+      ctx,
+    );
+    expect(decision.decision).toBe("deny");
+    expect(decision.reason).toContain("protected lifecycle result namespace");
+  });
+
   test("apply_patch: rejects an empty patch body (no targets)", () => {
     const ctx = makeCtx();
     const decision = checkCodexPreToolUse(

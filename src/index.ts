@@ -111,6 +111,16 @@ export async function findAgentById(id: string, repos: RepoEntry[]): Promise<Age
   return matchAgentById(id, agents);
 }
 
+/** Resolve an exact agent ID inside one already-selected repository only. */
+export async function findAgentByIdInRepo(id: string, repo: RepoEntry): Promise<Agent | null> {
+  const { readAllAgents } = await import("./agents");
+  const { agents } = await readAllAgents(
+    [{ path: repo.path, name: repoDisplayName(repo) }],
+    false,
+  );
+  return agents.find((agent) => agent.id === id) ?? null;
+}
+
 /** Print an IbCommandResult and exit. */
 export async function printAndExit(result: { ok: boolean; exitCode: number; stdout: string; stderr: string }): Promise<never> {
   if (result.stdout) console.log(result.stdout);
@@ -2097,38 +2107,61 @@ export async function main() {
         await printAndExit(await refreshAgentSandbox(agent));
       }
 
-      if (sub === "seal") {
+      if (sub === "seal" || sub === "delete-seal" || sub === "verify-seal") {
         // Internal (A4 G3): write/refresh ONE agent's sealed record. Invoked
-        // unsandboxed — either directly, or by a sandboxed spawner's
-        // sealAgentRecord fallback through the tmux server, which cannot write
-        // the denied seal dir itself. Recomputes the record from the read-only
+        // unsandboxed — either directly, or through the tmux server for a
+        // sandboxed spawner that cannot write the denied seal dir itself.
+        // Recomputes the record from the read-only
         // agent-type files (canSpawnChildren resolution) + the agent's meta.
         const target = args[2];
-        if (!target) {
-          console.error("Usage: ib sandbox seal <agent-id>");
+        if (!target || !isValidAgentId(target)) {
+          console.error(`Usage: ib sandbox ${sub} <agent-id> --repo-id <repo-id>`);
           process.exit(1);
         }
-        const agent = await findAgentById(target, repos);
-        if (!agent) {
-          console.error(`Agent not found: ${target}`);
+        const requestedRepoId = args[3] === "--repo-id" ? args[4] : undefined;
+        if (!requestedRepoId || !/^[0-9a-f]{8}$/.test(requestedRepoId)) {
+          console.error(`Usage: ib sandbox ${sub} <agent-id> --repo-id <repo-id>`);
           process.exit(1);
         }
         const { getRepoId } = await import("./ib-commands");
-        const { writeSealRecordDirect } = await import("./agent-seal");
-        const repoId = await getRepoId(agent.repoPath);
+        const { applySealCapabilityAction } = await import("./agent-seal");
+        const matchingRepos: RepoEntry[] = [];
+        for (const repo of repos) {
+          if (await getRepoId(repo.path) === requestedRepoId) matchingRepos.push(repo);
+        }
+        if (matchingRepos.length !== 1) {
+          console.error(`Repository not found or ambiguous: ${requestedRepoId}`);
+          process.exit(1);
+        }
+        const action = sub === "seal" ? "write" : sub === "verify-seal" ? "verify" : "delete";
+        let meta: Record<string, unknown> | undefined;
+        if (action === "write" || action === "verify") {
+          const repo = matchingRepos[0]!;
+          const agent = await findAgentByIdInRepo(target, repo);
+          if (!agent) {
+            console.error(`Agent not found in repository ${requestedRepoId}: ${target}`);
+            process.exit(1);
+          }
+          meta = agent.meta as unknown as Record<string, unknown>;
+        }
         try {
-          // No explicit home: writeSealRecordDirect defaults to
-          // `process.env.HOME ?? homedir()`, the same seal home the writer/reader
-          // use everywhere else.
-          await writeSealRecordDirect(
-            repoId,
-            agent.id,
-            agent.meta as unknown as Record<string, unknown>,
-          );
-          console.log(`Sealed ${agent.id}`);
+          const token = process.env.IB_SEAL_CAP;
+          if (!token) throw new Error("internal seal capability missing, invalid, or replayed");
+          // Mutation and exact postcondition verification both happen here,
+          // inside the unsandboxed helper. The sandboxed parent cannot read the
+          // sealed tree and receives only this command's checked status.
+          const verification = await applySealCapabilityAction(action, requestedRepoId, target, token, meta);
+          if (action === "write") {
+            console.log(`Sealed ${target}`);
+          } else if (action === "verify") {
+            console.log(JSON.stringify(verification));
+          } else {
+            console.log(`Deleted seal for ${target}`);
+          }
           process.exit(0);
         } catch (err) {
-          console.error(`Could not seal '${agent.id}': ${err instanceof Error ? err.message : String(err)}`);
+          const operation = sub === "seal" ? "seal" : sub === "verify-seal" ? "verify seal for" : "delete seal for";
+          console.error(`Could not ${operation} '${target}': ${err instanceof Error ? err.message : String(err)}`);
           process.exit(1);
         }
       }

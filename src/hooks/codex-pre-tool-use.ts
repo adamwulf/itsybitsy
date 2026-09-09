@@ -47,6 +47,7 @@ import {
 import {
   agentProtectedWritePaths,
   checkPathAccess,
+  checkIbCommandAccess,
   META_UNREADABLE_DENY_REASON,
   type HookDecision,
   type PathCheckContext,
@@ -88,8 +89,8 @@ function readDefensive(
  *   - ctx — the same PathCheckContext the claude-side hook uses
  *
  * Behavior:
- *   - Bash: defer entirely to checkPathAccess (handles cd, shell-path parser,
- *     ib subcommand restrictions).
+ *   - Bash: defer entirely to checkPathAccess (handles cd and shell-path
+ *     parsing). Async ib-command authorization is applied by the dispatcher.
  *   - apply_patch: parse every target path from the patch body; deny if any
  *     extracted path resolves outside the worktree (or fails the allow list).
  *     A patch with no extractable paths is denied (an apply_patch with no
@@ -326,7 +327,13 @@ export async function hookCodexPreToolUse(
       protectedWritePaths: agentProtectedWritePaths(ctxResolved.agentDir),
     };
 
-    const decision = checkCodexPreToolUse({ toolName, toolInput, cwd }, ctx);
+    // Relationship and internal-command authorization is asynchronous and
+    // must run before the pure path decision.  Codex agents otherwise receive
+    // Bash(ib:*) and could bypass manager-only lifecycle restrictions.
+    const ibDecision = toolName === "Bash"
+      ? await checkIbCommandAccess(String(toolInput.command ?? ""), agentId, ctxResolved.agentsDir)
+      : null;
+    const decision = ibDecision ?? checkCodexPreToolUse({ toolName, toolInput, cwd }, ctx);
 
     if (decision.decision === "allow") {
       write(buildCodexAllowOutput(toolInput));

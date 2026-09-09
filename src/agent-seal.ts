@@ -1,5 +1,5 @@
-import { createHash } from "crypto";
-import { mkdir, rm } from "fs/promises";
+import { createHash, randomUUID } from "crypto";
+import { mkdir, readFile, rm, rename } from "fs/promises";
 import { userHome } from "./home";
 import { join } from "path";
 
@@ -32,6 +32,19 @@ export interface SealRecord {
   sha256: string;
 }
 
+export type SealCapabilityAction = "write" | "delete" | "verify";
+
+export interface SealCapability {
+  token: string;
+  action: SealCapabilityAction;
+  repoId: string;
+  agentId: string;
+  digest: string;
+  expires: number;
+  /** Exact record a delete may remove; absent means stale-ID cleanup intent. */
+  expectedRecord?: SealRecord | null;
+}
+
 export type SealVerification =
   | { ok: true }
   | { ok: false; field: string; reason: string };
@@ -52,9 +65,114 @@ export function sealDir(home?: string): string {
   return join(sealHome(home), ".itsybitsy", "sealed");
 }
 
+function assertSealTarget(repoId: string, agentId: string): void {
+  // Repository IDs are generated as exactly eight lowercase hex characters.
+  // Agent IDs intentionally retain their established alphanumeric / hyphen /
+  // underscore syntax. Validate both before either value is interpolated into
+  // a protected pathname: path traversal here would move a seal or capability
+  // outside ~/.itsybitsy/sealed before the internal CLI got a chance to reject
+  // the request.
+  if (!/^[0-9a-f]{8}$/.test(repoId)) throw new Error(`invalid seal repository id: ${repoId}`);
+  if (!/^[a-zA-Z0-9_-]+$/.test(agentId)) throw new Error(`invalid seal agent id: ${agentId}`);
+}
+
 /** The seal file for one agent: `<sealDir>/<repoId>-<agentId>.json`. */
 export function sealPath(repoId: string, agentId: string, home?: string): string {
+  assertSealTarget(repoId, agentId);
   return join(sealDir(home), `${repoId}-${agentId}.json`);
+}
+export function sealCapabilityPath(repoId: string, agentId: string, token: string, home?: string): string {
+  assertSealTarget(repoId, agentId);
+  if (!/^[0-9a-f-]{36}$/.test(token)) throw new Error("invalid capability token");
+  return join(sealDir(home), `${repoId}-${agentId}-${token}.cap`);
+}
+export async function sealCapabilityDigest(
+  action: SealCapabilityAction,
+  repoId: string,
+  agentId: string,
+  meta?: Record<string, unknown>,
+  expectedRecord?: SealRecord | null,
+): Promise<string> {
+  const intent = action === "delete"
+    ? {
+        action,
+        repoId,
+        agentId,
+        intendedRecord: null,
+        expectedRecord: expectedRecord === undefined ? "stale-id-any" : expectedRecord,
+      }
+    : { action, repoId, agentId, inputs: await computeSealInputs(meta ?? {}) };
+  return createHash("sha256").update(canonicalSealJson(intent)).digest("hex");
+}
+export async function newSealCapability(
+  action: SealCapabilityAction,
+  repoId: string,
+  agentId: string,
+  meta?: Record<string, unknown>,
+  expectedRecord?: SealRecord | null,
+): Promise<SealCapability> {
+  assertSealTarget(repoId, agentId);
+  const capability: SealCapability = {
+    token: randomUUID(),
+    action,
+    repoId,
+    agentId,
+    digest: await sealCapabilityDigest(action, repoId, agentId, meta, expectedRecord),
+    expires: Date.now() + 30_000,
+  };
+  if (expectedRecord !== undefined) capability.expectedRecord = expectedRecord;
+  return capability;
+}
+async function claimSealCapability(
+  action: SealCapabilityAction,
+  repoId: string,
+  agentId: string,
+  token: string,
+  meta?: Record<string, unknown>,
+  home?: string,
+): Promise<SealCapability | null> {
+  try {
+    if (!/^[0-9a-f-]{36}$/.test(token)) return null;
+    const path = sealCapabilityPath(repoId, agentId, token, home);
+    const claimed = `${path}.claimed`;
+    await rename(path, claimed);
+    try {
+      const cap = await Bun.file(claimed).json() as Partial<SealCapability>;
+      if (
+        cap.token !== token ||
+        cap.action !== action ||
+        cap.repoId !== repoId ||
+        cap.agentId !== agentId ||
+        (cap.expires ?? 0) < Date.now()
+      ) return null;
+      const expectedRecord = Object.prototype.hasOwnProperty.call(cap, "expectedRecord")
+        ? cap.expectedRecord ?? null
+        : undefined;
+      if (cap.digest !== await sealCapabilityDigest(action, repoId, agentId, meta, expectedRecord)) {
+        return null;
+      }
+      if (action === "delete" && expectedRecord !== undefined) {
+        const current = await readSealRecordStrict(repoId, agentId, home);
+        // Deletion is idempotent: already absent satisfies the intended state.
+        // A present record, however, must still be the exact authorized value.
+        if (current !== null && canonicalSealJson(current) !== canonicalSealJson(expectedRecord)) return null;
+      }
+      return cap as SealCapability;
+    } finally {
+      await rm(claimed, { force: true });
+    }
+  } catch { return null; }
+}
+
+export async function consumeSealCapability(
+  action: SealCapabilityAction,
+  repoId: string,
+  agentId: string,
+  token: string,
+  meta?: Record<string, unknown>,
+  home?: string,
+): Promise<boolean> {
+  return (await claimSealCapability(action, repoId, agentId, token, meta, home)) !== null;
 }
 
 /**
@@ -138,6 +256,25 @@ export async function readSealRecord(
   }
 }
 
+/**
+ * Read a sealed record without collapsing permission, parse, or I/O failures
+ * into "missing". Trusted mutation helpers use this for postcondition checks:
+ * ENOENT is the only state that means the record is absent; every other error
+ * must fail the lifecycle operation rather than being mistaken for success.
+ */
+export async function readSealRecordStrict(
+  repoId: string,
+  agentId: string,
+  home?: string,
+): Promise<SealRecord | null> {
+  try {
+    return JSON.parse(await readFile(sealPath(repoId, agentId, home), "utf8")) as SealRecord;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+    throw err;
+  }
+}
+
 /** Delete a sealed record (idempotent — a missing file is not an error). */
 export async function deleteSealRecord(
   repoId: string,
@@ -147,12 +284,104 @@ export async function deleteSealRecord(
   await rm(sealPath(repoId, agentId, home), { force: true });
 }
 
+/** Delete a seal only if its current value matches the caller's intent. */
+export async function deleteSealRecordChecked(
+  repoId: string,
+  agentId: string,
+  expectedRecord?: SealRecord | null,
+  home?: string,
+): Promise<void> {
+  if (expectedRecord !== undefined) {
+    const current = await readSealRecordStrict(repoId, agentId, home);
+    if (current !== null && canonicalSealJson(current) !== canonicalSealJson(expectedRecord)) {
+      throw new Error("sealed record changed before deletion");
+    }
+  }
+  await deleteSealRecord(repoId, agentId, home);
+  if (await readSealRecordStrict(repoId, agentId, home)) {
+    throw new Error("seal deletion postcondition verification failed");
+  }
+}
+
 /**
- * Compare an agent's CURRENT meta inputs against its sealed record. Callers gate
- * this on `meta.sandbox.enabled` — a disabled agent has no profile and is never
- * checked. Returns the first differing field so the caller can name it. A
- * missing seal for an enabled agent is a failure with its own reason; a record
- * whose stored sha256 does not match its stored inputs is a tamper failure.
+ * Consume a protected one-use capability, perform its seal mutation, and
+ * verify the exact postcondition while still inside the trusted process that
+ * can access the sealed directory. A sandboxed parent must rely on this
+ * checked result instead of trying (and failing) to reopen the denied tree.
+ */
+export async function applySealCapabilityAction(
+  action: SealCapabilityAction,
+  repoId: string,
+  agentId: string,
+  token: string,
+  meta?: Record<string, unknown>,
+  home?: string,
+): Promise<SealVerification | void> {
+  const capability = await claimSealCapability(action, repoId, agentId, token, meta, home);
+  if (!capability) {
+    throw new Error("internal seal capability missing, invalid, or replayed");
+  }
+
+  if (action === "verify") {
+    if (!meta) throw new Error("seal metadata is required");
+    return verifyMetaAgainstSealStrict(repoId, agentId, meta, home);
+  }
+
+  if (action === "write") {
+    if (!meta) throw new Error("seal metadata is required");
+    await writeSealRecordDirect(repoId, agentId, meta, home);
+    const expected = computeSealRecord(await computeSealInputs(meta));
+    const actual = await readSealRecordStrict(repoId, agentId, home);
+    if (canonicalSealJson(actual) !== canonicalSealJson(expected)) {
+      throw new Error("sealed record postcondition verification failed");
+    }
+    return;
+  }
+
+  const expectedRecord = Object.prototype.hasOwnProperty.call(capability, "expectedRecord")
+    ? capability.expectedRecord ?? null
+    : undefined;
+  await deleteSealRecordChecked(repoId, agentId, expectedRecord, home);
+}
+
+/** Strict verification for trusted helpers and operator-only lifecycle paths. */
+export async function verifyMetaAgainstSealStrict(
+  repoId: string,
+  agentId: string,
+  meta: Record<string, unknown>,
+  home?: string,
+): Promise<SealVerification> {
+  const record = await readSealRecordStrict(repoId, agentId, home);
+  if (!record) return { ok: false, field: "(missing)", reason: "no sealed record" };
+  return verifyMetaAgainstSealRecord(record, meta);
+}
+
+export async function verifyMetaAgainstSealRecord(
+  record: SealRecord,
+  meta: Record<string, unknown>,
+): Promise<SealVerification> {
+  const recomputed = createHash("sha256").update(canonicalSealJson(record.inputs)).digest("hex");
+  if (recomputed !== record.sha256) {
+    return { ok: false, field: "sha256", reason: "sealed record integrity check failed" };
+  }
+
+  const current = await computeSealInputs(meta);
+  const fields: Array<keyof SealInputs> = ["agentType", "canSpawnChildren", "paths", "sandbox"];
+  for (const field of fields) {
+    if (canonicalSealJson(current[field]) !== canonicalSealJson(record.inputs[field])) {
+      return { ok: false, field, reason: `${field} does not match the sealed record` };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * Compare an agent's CURRENT meta inputs against its sealed record. Enabled
+ * agents always verify; disabled agents also verify whenever a record exists so
+ * editing only `sandbox.enabled` cannot bypass the seal. Returns the first
+ * differing field so the caller can name it. A missing seal for an enabled
+ * agent is a failure with its own reason; a record whose stored sha256 does not
+ * match its stored inputs is a tamper failure.
  */
 export async function verifyMetaAgainstSeal(
   repoId: string,
@@ -164,18 +393,5 @@ export async function verifyMetaAgainstSeal(
   if (!record) {
     return { ok: false, field: "(missing)", reason: "no sealed record" };
   }
-  const recomputed = createHash("sha256").update(canonicalSealJson(record.inputs)).digest("hex");
-  if (recomputed !== record.sha256) {
-    return { ok: false, field: "sha256", reason: "sealed record integrity check failed" };
-  }
-
-  const current = await computeSealInputs(meta);
-  // Compare field-by-field in a fixed order so the FIRST divergence is named.
-  const fields: Array<keyof SealInputs> = ["agentType", "canSpawnChildren", "paths", "sandbox"];
-  for (const field of fields) {
-    if (canonicalSealJson(current[field]) !== canonicalSealJson(record.inputs[field])) {
-      return { ok: false, field, reason: `${field} does not match the sealed record` };
-    }
-  }
-  return { ok: true };
+  return verifyMetaAgainstSealRecord(record, meta);
 }

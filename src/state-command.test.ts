@@ -369,6 +369,9 @@ describe("looksLikeAgyArgv", () => {
   test("matches the spawn launch line (--dangerously-skip-permissions)", () => {
     expect(looksLikeAgyArgv("agy --dangerously-skip-permissions --mode=accept-edits --model gemini-3.7-flash-low")).toBe(true);
   });
+  test("matches a native-protection spawn by its managed log file flag", () => {
+    expect(looksLikeAgyArgv("agy --model gemini-3.7-flash-low --log-file /tmp/agent/agy.log -i prompt")).toBe(true);
+  });
   test("matches the resume launch line (--conversation)", () => {
     expect(looksLikeAgyArgv("/opt/homebrew/bin/agy --dangerously-skip-permissions --model x --conversation 11111111-2222-3333-4444-555555555555")).toBe(true);
   });

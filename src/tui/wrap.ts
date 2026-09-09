@@ -1345,7 +1345,12 @@ function allocateBorderlessWidths(
 function stackBorderlessTable(block: BorderlessTableBlock, width: number): string[] | null {
   if (width <= 0) return null;
   const output: string[] = [];
-  const decorate = decorateTerminalLine;
+  // Stacked rows intentionally drop the source table's indentation so every
+  // cell has the full narrow pane width. Apply row-wide styling at the new
+  // column zero; the source prefixColumn no longer describes these lines and
+  // can otherwise point into a cell-local terminal escape sequence.
+  const decorate = (line: string, affixes: TerminalAffixes) =>
+    decorateTerminalLine(line, { ...affixes, prefixColumn: 0 });
   const pushCell = (cell: string, affixes: TerminalAffixes) => {
     if (visibleWidth(cell) === 0) return;
     const restore = terminalAffixRestore(affixes);

@@ -2031,6 +2031,27 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     }
   });
 
+  test("stacks indented row-wide terminal styles without corrupting their escapes", () => {
+    const linkOpen = "\x1b]8;;https://example.com/narrow\x1b\\";
+    const linkClose = "\x1b]8;;\x1b\\";
+    for (const [open, close, leaked] of [
+      ["\x1b[31m", "\x1b[0m", "31m"],
+      [linkOpen, linkClose, "https://example.com/narrow"],
+    ]) {
+      const table = [
+        `   ${open} A    B ${close}`,
+        `   ${open}━━━  ━━━${close}`,
+        `   ${open} X    Y ${close}`,
+      ];
+
+      const rows = wordWrapLines(table.join("\n"), 1);
+      expect(rows.every((row) => visibleWidth(row) <= 1)).toBe(true);
+      const plain = stripAnsi(rows.join(""));
+      for (const value of ["A", "B", "X", "Y"]) expect(plain).toContain(value);
+      expect(plain).not.toContain(leaked);
+    }
+  });
+
   test("reflows at width 13 and marks indivisible wide glyphs at width 1", () => {
     const table = renderTable(
       [

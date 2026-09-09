@@ -7104,14 +7104,12 @@ export async function newAgent(
       // Parent repo subdirs — granted as writable roots so `ib new-agent`
       // from inside a codex agent can mkdir into <parentRepo>/.ittybitty/
       // (agents+archive subdirs) and write <parentRepo>/.claude/settings.local.json
-      // when spawning a claude sub-agent. These remain necessary for the
-      // ordinary `-s workspace-write` path; under our Seatbelt wrapper they
-      // are redundant but harmless and preserve disabled-mode behavior.
+      // when spawning a claude sub-agent. These CLI writable roots are
+      // retained for compatibility; danger-full-access does not enforce them.
       //
       // We grant the .ittybitty and .claude SUBDIRS rather than the bare
-      // parent repo so a misbehaving agent cannot reach src/, CLAUDE.md,
-      // etc. via a relative-path Bash write that bypasses the textual
-      // matcher in checkBashCommandPaths.
+      // parent repo, matching the narrow runtime roots in our hook and
+      // enabled Seatbelt policy. The CLI flags alone do not enforce isolation.
       const codexParentRepoSubdirs = await deriveCodexParentRepoRoots(rootRepoPath);
       codexExtraWritableRoots = [
         resolveGitRevParsePath(workPath, gitCommonDirResult.stdout),
@@ -7567,7 +7565,7 @@ echo ""
   if (isCodexBackedCli(agentCli)) {
     // Codex spawn branch — the builder owns Codex's native approval/sandbox
     // arguments in both kernel modes. Sandbox disablement removes only our
-    // Seatbelt wrapper; Codex keeps its native workspace-write sandbox while
+    // Seatbelt wrapper; Codex's native sandbox is off in both modes while
     // inline hooks remain the tool-policy authority. The path-safety and
     // dispatcher precheck guarantees ran above (we wouldn't be here on
     // failure). PID variable + meta-field stay

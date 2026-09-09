@@ -6738,7 +6738,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(spawnCalls.some((call) => call[0] === "codex")).toBe(false);
   });
 
-  test("sandbox-disabled Codex spawn suppresses approvals, keeps workspace-write and hooks, and omits every kernel helper", async () => {
+  test("sandbox-disabled Codex spawn disables native protections, retains hooks, and omits every kernel helper", async () => {
     await writeSandboxType("unsandboxed-codex", { enabled: false, model: "codex:gpt-5.4-mini" });
     setNewAgentSpawnRunner(cleanWorktreeRunner());
     setNewAgentSummaryGenerator(async () => {});
@@ -6748,8 +6748,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(result.ok).toBe(true);
     const agentDir = join(agentsDir, "unsandboxed-codex");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
-    expect(start).toContain("-a never -s workspace-write --dangerously-bypass-hook-trust");
-    expect(start).not.toContain("-s danger-full-access");
+    expect(start).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
+    expect(start).not.toContain("-s workspace-write");
     expect(start).not.toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(start).toContain("hooks.PreToolUse");
     expect(start).not.toContain("sandbox-exec");
@@ -7105,7 +7105,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   });
 
   // ── A4 G2: ib sandbox refresh ──────────────────────────────────────────────
-  test("Codex refresh to disabled regenerates AGENTS.md and keeps no-prompt workspace-write hooks", async () => {
+  test("Codex refresh to disabled regenerates AGENTS.md and disables native protections with hooks retained", async () => {
     const id = "codex-refresh-instructions";
     const oldRead = join(tempDir, "old-policy");
     const newRead = join(tempDir, "new-policy");
@@ -7144,13 +7144,14 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(text).toContain(canonicalizeSandboxPath(newRead));
     expect(text).not.toContain(canonicalizeSandboxPath(oldRead));
     expect(text).toContain("The itsybitsy kernel sandbox is OFF");
+    expect(text).toContain("Codex's native sandbox is also OFF");
     expect(text).not.toContain("your Claude project directory and scratchpad");
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     expect(resume).not.toContain("sandbox-exec");
     expect(resume).not.toContain("sandbox-proxy-launch");
     expect(resume).not.toContain("sandbox-log-watch");
-    expect(resume).toContain("-a never -s workspace-write --dangerously-bypass-hook-trust");
-    expect(resume).not.toContain("-s danger-full-access");
+    expect(resume).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
+    expect(resume).not.toContain("-s workspace-write");
     expect(resume).toContain("hooks.PreToolUse");
     const refreshedMeta = await Bun.file(join(agentDir, "meta.json")).json();
     expect(refreshedMeta.sandbox.enabled).toBe(false);

@@ -879,6 +879,11 @@ function scanBashCommandPaths(
   const sedIndex = sedInPlace ? tokens.indexOf("sed") : -1;
   const teeIndex = tokens.indexOf("tee");
   const isCpMv = verb === "cp" || verb === "mv";
+  // BSD/GNU cp hard-link modes mutate the source inode's link count. Treat
+  // every operand as a write so a protected result cannot be linked into an
+  // ordinary writable alias (`cp -l` / `cp --link`). Plain cp remains read
+  // source + write destination below.
+  const cpHardLink = verb === "cp" && tokens.slice(1).some((token) => token === "-l" || token === "--link");
   const isWriteVerb = BASH_WRITE_ALL_ARGS.has(verb);
   let cpMvWriteIndex = -1;
   if (isCpMv) {
@@ -899,6 +904,7 @@ function scanBashCommandPaths(
     // mv mutates both its source and destination. Treating the source as a read
     // would let an agent rename/unlink a protected result directory.
     if (verb === "mv" && i > 0) return "write";
+    if (cpHardLink && i > 0) return "write";
     if (i === cpMvWriteIndex) return "write";
     return "read";
   };

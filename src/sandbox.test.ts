@@ -443,6 +443,7 @@ test("LIVE macOS profile protects trusted seal-helper results while ordinary tmp
   const movedResultDir = `${resultDir}-moved`;
   const sibling = `/private/tmp/ib-seal-helper-ordinary-${crypto.randomUUID()}`;
   const hardLinkAlias = `/private/tmp/ib-seal-helper-alias-${crypto.randomUUID()}`;
+  const cpHardLinkAlias = `/private/tmp/ib-seal-helper-cp-alias-${crypto.randomUUID()}`;
   const symlinkAlias = `/private/tmp/ib-seal-helper-symlink-${crypto.randomUUID()}`;
   await mkdir(resultDir, { mode: 0o700 });
   await writeFile(join(resultDir, "output"), "trusted");
@@ -464,6 +465,8 @@ test("LIVE macOS profile protects trusted seal-helper results while ordinary tmp
       `mv '${resultDir}' '${movedResultDir}' 2>/dev/null; printf 'rename=%s\\n' "$?"`,
       `ln '${join(resultDir, "output")}' '${hardLinkAlias}' 2>/dev/null; printf 'hardlink=%s\\n' "$?"`,
       `test -e '${hardLinkAlias}'; printf 'hardlink_exists=%s\\n' "$?"`,
+      `cp -l '${join(resultDir, "output")}' '${cpHardLinkAlias}' 2>/dev/null; printf 'cp_hardlink=%s\\n' "$?"`,
+      `test -e '${cpHardLinkAlias}'; printf 'cp_hardlink_exists=%s\\n' "$?"`,
       `ln -s '${join(resultDir, "output")}' '${symlinkAlias}' 2>/dev/null; printf 'symlink=%s\\n' "$?"`,
       `test -L '${symlinkAlias}'; printf 'symlink_exists=%s\\n' "$?"`,
       `if [ -L '${symlinkAlias}' ]; then printf forged > '${symlinkAlias}'; fi`,
@@ -481,7 +484,7 @@ test("LIVE macOS profile protects trusted seal-helper results while ordinary tmp
     expect(fields.read).toBe("trusted");
     for (const operation of [
       "mkdir", "overwrite_output", "overwrite_result", "create",
-      "unlink_output", "unlink_result", "rename", "hardlink", "hardlink_exists", "symlink", "symlink_exists",
+      "unlink_output", "unlink_result", "rename", "hardlink", "hardlink_exists", "cp_hardlink", "cp_hardlink_exists", "symlink", "symlink_exists",
     ]) {
       expect(fields[operation]).not.toBe("0");
     }
@@ -489,6 +492,8 @@ test("LIVE macOS profile protects trusted seal-helper results while ordinary tmp
     expect(await readFile(join(resultDir, "output"), "utf8")).toBe("trusted");
     expect(fields.hardlink).not.toBe("0");
     expect(fields.hardlink_exists).not.toBe("0");
+    expect(fields.cp_hardlink).not.toBe("0");
+    expect(fields.cp_hardlink_exists).not.toBe("0");
     expect(fields.symlink).not.toBe("0");
     expect(fields.symlink_exists).not.toBe("0");
   } finally {
@@ -497,6 +502,7 @@ test("LIVE macOS profile protects trusted seal-helper results while ordinary tmp
     await rm(movedResultDir, { recursive: true, force: true });
     await rm(sibling, { force: true });
     await rm(hardLinkAlias, { force: true });
+    await rm(cpHardLinkAlias, { force: true });
     await rm(symlinkAlias, { force: true });
   }
 });

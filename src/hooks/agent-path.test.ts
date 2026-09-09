@@ -2186,6 +2186,8 @@ describe("checkPathAccess — reserved seal-helper result namespace", () => {
     `mv ${tmpResult} /private/tmp/forged-output`,
     `ln ${tmpResult} /private/tmp/forged-alias`,
     `ln -s ${tmpResult} /private/tmp/forged-symlink`,
+    `cp -l ${tmpResult} /private/tmp/forged-cp-link`,
+    `cp --link ${tmpResult} /private/tmp/forged-cp-long-link`,
     `mkdir /repo/.ittybitty/agents/agent-other/.ib-seal-helper-deadbeef`,
   ]) {
     test(`Bash/translated run_command cannot mutate reserved result: ${command.split(" ")[0]}`, () => {

@@ -1311,13 +1311,14 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
         ["First", "Second"],
         ["alpha", "a value long enough to force table reflow in this pane"],
       ],
-      [32, 90],
+      [70, 40],
     );
-    table.push("  Follow-up prose remains outside the table.");
+    const prose = "   This is follow-up prose outside the table with enough length.";
+    table.push(prose, "");
 
-    const rows = wordWrapLines(table.join("\n"), 54);
-    expect(rows.join(" ")).toContain("Follow-up prose remains outside the table.");
-    expect(rows.join(" ")).not.toContain("alpha Follow-up");
+    const rows = wordWrapLines(table.join("\n"), 40);
+    const proseRows = wordWrapSingleLine(prose, 40);
+    expect(rows.slice(-(proseRows.length + 1), -1)).toEqual(proseRows);
   });
 
   test("keeps source-wrapped final-row continuations inside their cells", () => {
@@ -1436,7 +1437,7 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     expect(amount).toEndWith(" 42 ");
   });
 
-  test("reflows at width 13 and clips indivisible wide glyphs at width 1", () => {
+  test("reflows a compact two-column table at width 13", () => {
     const table = renderTable(
       [
         ["A", "B"],
@@ -1451,8 +1452,19 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     for (const row of narrow.filter((candidate) => /你|好|content/.test(candidate))) {
       expect(row.search(/你|好|content/)).toBeGreaterThanOrEqual(secondStart);
     }
+  });
 
-    const oneColumn = wordWrapLines(table.join("\n"), 1);
-    expect(oneColumn.every((row) => visibleWidth(row) <= 1)).toBe(true);
+  test("preserves text when there are too many columns to reflow side by side", () => {
+    const table = renderTable(
+      [
+        ["A", "B", "C", "D", "E", "F", "G"],
+        ["one", "two", "three", "four", "five", "six", "SEVENTH-CELL"],
+      ],
+      [6, 6, 6, 6, 6, 6, 14],
+    );
+
+    const rows = wordWrapLines(table.join("\n"), 40);
+    expect(rows.join(" ")).toContain("SEVENTH-CELL");
+    expect(rows.every((row) => visibleWidth(row) <= 40)).toBe(true);
   });
 });

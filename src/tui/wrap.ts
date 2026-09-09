@@ -666,6 +666,11 @@ function matchBorderlessTableBlock(lines: string[], start: number): BorderlessTa
     }
     const row = parseBorderlessCells(lines[cursor]!, layout);
     if (!row) break;
+    const onlyFirstColumn = row.cells.slice(1).every((cell) => cell.length === 0);
+    // An undivided first-column-only line is indistinguishable from ordinary
+    // indented prose after the table. Stop conservatively once a body row has
+    // already been captured; explicit divider rows remain unambiguous.
+    if (rows.length > 1 && !nextHasDivider && onlyFirstColumn) break;
     rows.push(row.cells);
     dividerBefore.push(nextHasDivider);
     nextHasDivider = false;
@@ -765,7 +770,7 @@ export function wordWrapLines(text: string, width: number): string[] {
           result.push(...reflowed);
         } else {
           for (const candidate of block) {
-            result.push(truncateToWidth(candidate, width, ""));
+            result.push(...wordWrapSingleLine(candidate, width));
           }
         }
       }

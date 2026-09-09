@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { setUserHome, resetUserHome } from "../home";
+import { hookPermissionDenied } from "./permission-denied";
 
 /**
  * Per-process itsybitsy home for the whole file.
@@ -36,39 +37,69 @@ afterAll(() => {
 describe("hookPermissionDenied", () => {
   let tempDir: string;
   let agentDir: string;
+  let originalCwd: string;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "perm-denied-test-"));
+    originalCwd = process.cwd();
+    process.chdir(tempDir);
     agentDir = join(tempDir, ".ittybitty", "agents", "agent-test123");
     // Create agent directory structure
     await Bun.write(join(agentDir, "agent.log"), "");
   });
 
   afterEach(async () => {
+    process.chdir(originalCwd);
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test("logs tool_name to agent dir", async () => {
-    // We can't easily test hookPermissionDenied directly because it reads from
-    // Bun.stdin.stream(). Instead, test logAgent integration directly.
-    const { logAgent } = await import("../agent-lifecycle");
-
-    const toolName = "Bash";
-    await logAgent(agentDir, `[PermissionRequest] Tool denied: ${toolName}`);
+  test("logs tool_name and emits a PermissionRequest denial instead of deferring to a prompt", async () => {
+    const output: string[] = [];
+    await hookPermissionDenied("agent-test123", JSON.stringify({ tool_name: "Bash" }), {
+      write: (chunk) => output.push(chunk),
+    });
 
     const logContent = await readFile(join(agentDir, "agent.log"), "utf-8");
     expect(logContent).toContain("[PermissionRequest] Tool denied: Bash");
+    expect(output).toHaveLength(1);
+    expect(JSON.parse(output[0]!)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: {
+          behavior: "deny",
+          message: "Permission denied by itsybitsy: tool requests must be authorized by the PreToolUse hook.",
+        },
+      },
+    });
   });
 
-  test("handles missing tool_name gracefully", async () => {
-    // When tool_name is missing, it should default to "unknown"
-    const { logAgent } = await import("../agent-lifecycle");
-
-    const toolName = "unknown";
-    await logAgent(agentDir, `[PermissionRequest] Tool denied: ${toolName}`);
+  test.each(["{}", "null", "[]", "{broken", '{"tool_name":42}'])("malformed or incomplete input %s still denies", async (raw) => {
+    let output = "";
+    await hookPermissionDenied("agent-test123", raw, { write: (chunk) => { output += chunk; } });
+    expect(JSON.parse(output).hookSpecificOutput.decision.behavior).toBe("deny");
 
     const logContent = await readFile(join(agentDir, "agent.log"), "utf-8");
     expect(logContent).toContain("[PermissionRequest] Tool denied: unknown");
+  });
+
+  test("logging failure cannot turn a denial into a native prompt", async () => {
+    let output = "";
+    await hookPermissionDenied("agent-test123", '{"tool_name":"Bash"}', {
+      write: (chunk) => { output += chunk; },
+      log: async () => { throw new Error("log filesystem unavailable"); },
+    });
+    expect(JSON.parse(output).hookSpecificOutput.decision.behavior).toBe("deny");
+  });
+
+  test("invalid fallback agent identity denies without writing a diagnostic outside the agent", async () => {
+    let output = "";
+    let logged = false;
+    await hookPermissionDenied("../escape", "{}", {
+      write: (chunk) => { output += chunk; },
+      log: async () => { logged = true; },
+    });
+    expect(logged).toBe(false);
+    expect(JSON.parse(output).hookSpecificOutput.decision.behavior).toBe("deny");
   });
 });
 
@@ -93,11 +124,12 @@ describe("hookPermissionDenied with @system", () => {
   });
 
   test("routes log to ~/.itsybitsy/agent.log when called from system coordinator", async () => {
-    const { hookPermissionDenied } = await import("./permission-denied");
     const stdin = JSON.stringify({ tool_name: "Read" });
-    await hookPermissionDenied("@system", stdin);
+    let output = "";
+    await hookPermissionDenied("@system", stdin, { write: (chunk) => { output += chunk; } });
 
     const logContent = await readFile(join(coordHome, "agent.log"), "utf-8");
     expect(logContent).toContain("[PermissionRequest] Tool denied: Read");
+    expect(JSON.parse(output).hookSpecificOutput.decision.behavior).toBe("deny");
   });
 });

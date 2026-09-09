@@ -511,10 +511,12 @@ interface ParsedBorderlessRow {
 }
 
 interface TerminalAffixes {
+  /** Repeatable style/link controls used on intermediate physical rows. */
   prefix: string;
   suffix: string;
-  oncePrefix: string;
-  onceSuffix: string;
+  /** Exact source-order controls used only on the first/last physical row. */
+  firstPrefix: string;
+  lastSuffix: string;
   prefixColumn: number;
 }
 
@@ -838,7 +840,7 @@ function terminalLineParts(line: string): TerminalLineParts {
   if (content.length === 0) {
     return {
       inner: line,
-      affixes: { prefix: "", suffix: "", oncePrefix: "", onceSuffix: "", prefixColumn: 0 },
+      affixes: { prefix: "", suffix: "", firstPrefix: "", lastSuffix: "", prefixColumn: 0 },
     };
   }
   const first = content[0]!.index;
@@ -849,35 +851,20 @@ function terminalLineParts(line: string): TerminalLineParts {
   const suffixTokens = tokens
     .map((token, index) => ({ token, index }))
     .filter(({ token, index }) => token.escape && index > last);
-  // Only lift semantic pairs of outer style/link metadata. Merely having an
-  // escape at both ends is insufficient: the opener may belong to the first
-  // cell while an unrelated reset belongs to the last.
-  if (prefixTokens.length === 0 || suffixTokens.length === 0) {
+  if (prefixTokens.length === 0 && suffixTokens.length === 0) {
     return {
       inner: line,
-      affixes: { prefix: "", suffix: "", oncePrefix: "", onceSuffix: "", prefixColumn: 0 },
+      affixes: { prefix: "", suffix: "", firstPrefix: "", lastSuffix: "", prefixColumn: 0 },
     };
   }
   const isStyleEscape = (raw: string) =>
     (raw.startsWith("\x1b[") && raw.endsWith("m")) || raw.startsWith("\x1b]8;");
   const repeatPrefixTokens = prefixTokens.filter(({ token }) => isStyleEscape(token.raw));
   const repeatSuffixTokens = suffixTokens.filter(({ token }) => isStyleEscape(token.raw));
-  if (repeatPrefixTokens.length === 0 || repeatSuffixTokens.length === 0) {
-    return {
-      inner: line,
-      affixes: { prefix: "", suffix: "", oncePrefix: "", onceSuffix: "", prefixColumn: 0 },
-    };
-  }
   const prefixRaw = repeatPrefixTokens.map(({ token }) => token.raw).join("");
   const suffixRaw = repeatSuffixTokens.map(({ token }) => token.raw).join("");
-  const oncePrefix = prefixTokens
-    .filter(({ token }) => !isStyleEscape(token.raw))
-    .map(({ token }) => token.raw)
-    .join("");
-  const onceSuffix = suffixTokens
-    .filter(({ token }) => !isStyleEscape(token.raw))
-    .map(({ token }) => token.raw)
-    .join("");
+  const firstPrefix = prefixTokens.map(({ token }) => token.safeRaw).join("");
+  const lastSuffix = suffixTokens.map(({ token }) => token.safeRaw).join("");
   const prefixState: TerminalStyleState = { sgr: new Map(), osc8: null, osc8Active: false };
   for (const { token } of repeatPrefixTokens) applyTerminalEscape(prefixState, token.raw);
   const prefixIndexes = new Set(prefixTokens.map(({ index }) => index));
@@ -894,19 +881,17 @@ function terminalLineParts(line: string): TerminalLineParts {
   const closedState = copyTerminalStyle(prefixState);
   for (const { token } of repeatSuffixTokens) applyTerminalEscape(closedState, token.raw);
   const suffixLeavesNoStyle = !hasTerminalStyle(closedState);
-  if (
-    !hasTerminalStyle(prefixState) ||
-    prefixRaw.length > MAX_REPLAYABLE_AFFIX_LENGTH ||
-    suffixRaw.length > MAX_REPLAYABLE_AFFIX_LENGTH ||
-    !prefixRemainsActive ||
-    !canReplayTerminalStyle(prefixState) ||
-    !suffixLeavesNoStyle
-  ) {
-    return {
-      inner: line,
-      affixes: { prefix: "", suffix: "", oncePrefix: "", onceSuffix: "", prefixColumn: 0 },
-    };
-  }
+  const canRepeat =
+    repeatPrefixTokens.length > 0 &&
+    repeatSuffixTokens.length > 0 &&
+    hasTerminalStyle(prefixState);
+  const repeatable =
+    canRepeat &&
+    prefixRaw.length <= MAX_REPLAYABLE_AFFIX_LENGTH &&
+    suffixRaw.length <= MAX_REPLAYABLE_AFFIX_LENGTH &&
+    prefixRemainsActive &&
+    canReplayTerminalStyle(prefixState) &&
+    suffixLeavesNoStyle;
   const extracted = new Set([
     ...prefixTokens.map(({ index }) => index),
     ...suffixTokens.map(({ index }) => index),
@@ -917,13 +902,15 @@ function terminalLineParts(line: string): TerminalLineParts {
       .map((token) => token.raw)
       .join(""),
     affixes: {
-      prefix: prefixRaw,
-      suffix: suffixRaw,
-      oncePrefix,
-      onceSuffix,
-      prefixColumn: tokens
-        .slice(0, prefixTokens[0]!.index)
-        .reduce((sum, token) => sum + token.width, 0),
+      prefix: repeatable ? prefixRaw : "",
+      suffix: repeatable ? suffixRaw : "",
+      firstPrefix,
+      lastSuffix,
+      prefixColumn: prefixTokens.length === 0
+        ? 0
+        : tokens
+            .slice(0, prefixTokens[0]!.index)
+            .reduce((sum, token) => sum + token.width, 0),
     },
   };
 }
@@ -1184,6 +1171,7 @@ const MAX_REPLAYABLE_OSC8_LENGTH = 256;
 const MAX_REPLAYABLE_SGR_LENGTH = 256;
 const MAX_REPLAYABLE_AFFIX_LENGTH = 256;
 const MAX_REPLAYABLE_STYLE_PREFIX_LENGTH = 256;
+const MAX_CELL_STYLE_REPLAY_BYTES = 4096;
 
 function hasTerminalStyle(state: TerminalStyleState): boolean {
   return state.sgr.size > 0 || state.osc8Active;
@@ -1362,12 +1350,12 @@ function terminalAffixRestore(affixes: TerminalAffixes): string {
 function decorateTerminalLine(
   line: string,
   affixes: TerminalAffixes,
-  includeOncePrefix = false,
-  includeOnceSuffix = false,
+  includeFirstPrefix = false,
+  includeLastSuffix = false,
 ): string {
   const prefixIndex = Math.min(affixes.prefixColumn, line.length);
-  const prefix = (includeOncePrefix ? affixes.oncePrefix : "") + affixes.prefix;
-  const suffix = affixes.suffix + (includeOnceSuffix ? affixes.onceSuffix : "");
+  const prefix = includeFirstPrefix ? affixes.firstPrefix : affixes.prefix;
+  const suffix = includeLastSuffix ? affixes.lastSuffix : affixes.suffix;
   return line.slice(0, prefixIndex) + prefix + line.slice(prefixIndex) + suffix;
 }
 
@@ -1459,6 +1447,7 @@ function wrapStyledCell(text: string, width: number): string[] {
   if (units.length === 0) return [sanitized()];
 
   const output: string[] = [];
+  let replayBytes = 0;
   let start = 0;
   while (start < units.length) {
     // A normal word-separator space can land alone at the start of the next
@@ -1492,12 +1481,18 @@ function wrapStyledCell(text: string, width: number): string[] {
     for (let i = start; i < end; i++) rendered += units[i]!.raw;
     const endState = end === units.length ? state : last.after;
     if (end === units.length) rendered += pending;
-    // If an active style is too large to replay safely, let terminal state flow
-    // across the newline and close it only on the final fragment. This preserves
-    // semantics without multiplying a large opener or emitting unmatched closes.
-    if (end === units.length || canReplayTerminalStyle(endState)) {
-      rendered += terminalStyleSuffix(endState);
+    if (end < units.length) {
+      const nextState = units[end]!.before;
+      if (!canReplayTerminalStyle(endState) || !canReplayTerminalStyle(nextState)) {
+        return wordWrapSingleLine(stripAnsiForWrap(text), width);
+      }
+      replayBytes +=
+        terminalStyleSuffix(endState).length + terminalStylePrefix(nextState).length;
+      if (replayBytes > MAX_CELL_STYLE_REPLAY_BYTES) {
+        return wordWrapSingleLine(stripAnsiForWrap(text), width);
+      }
     }
+    rendered += terminalStyleSuffix(endState);
     output.push(rendered);
     start = end;
   }
@@ -1592,7 +1587,7 @@ function reflowBorderlessTable(block: BorderlessTableBlock, width: number): stri
   const minimum: number[] = new Array(ncols).fill(1);
   for (const row of block.rows) {
     for (let i = 0; i < ncols; i++) {
-      natural[i] = Math.max(natural[i]!, visibleWidth(row[i]!));
+      natural[i] = Math.max(natural[i]!, terminalVisibleWidthForWrap(row[i]!));
       for (const token of terminalTokens(row[i]!)) {
         if (!token.escape) minimum[i] = Math.max(minimum[i]!, token.width);
       }

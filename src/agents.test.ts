@@ -2256,6 +2256,42 @@ describe("isApiSafeguard", () => {
 });
 
 describe("hasBackgroundTasks", () => {
+  describe("Antigravity background-task footer", () => {
+    const fixture = Bun.file(new URL("fixtures/agy-background-task.txt", import.meta.url)).text();
+
+    test("detects the captured running task despite WAITING above the prompt", async () => {
+      expect(hasBackgroundTasks(await fixture)).toBe(true);
+    });
+
+    test("ignores ANSI styling and trailing pane padding", async () => {
+      expect(hasBackgroundTasks(`\x1b[32m${await fixture}\x1b[0m\n${"   \n".repeat(30)}`)).toBe(true);
+    });
+
+    test("finished or removed tasks stop overriding waiting", async () => {
+      const output = await fixture;
+      expect(hasBackgroundTasks(output.replace(" running", " completed"))).toBe(false);
+      expect(hasBackgroundTasks(output.split("\n").filter((line) => !line.includes("● [")).join("\n"))).toBe(false);
+    });
+
+    test("ignores an old footer above the latest idle prompt", async () => {
+      const output = `${await fixture}\n────\n>\n────\nGemini 3.8 Flash (High) | Context: 21%\n`;
+      expect(hasBackgroundTasks(output)).toBe(false);
+    });
+
+    test("requires the live input-box section, not a timestamped transcript line", () => {
+      expect(hasBackgroundTasks('  ● [23:31:06] python3 -c "import time; time.sleep(120)" running')).toBe(false);
+      expect(hasBackgroundTasks('  ● [23:31:06] sleep 120 running\n────\n>\n────\nGemini')).toBe(false);
+    });
+
+    test("supports multiple tasks and typed input without limiting task count", async () => {
+      const output = (await fixture).replace(/  ● .* running/, [
+        "  ● [23:31:06] sleep 120 running",
+        ...Array.from({ length: 12 }, () => "  ● [23:31:07] sleep 30 completed"),
+      ].join("\n")).replace("\n>\n", "\n> next request\n");
+      expect(hasBackgroundTasks(output)).toBe(true);
+    });
+  });
+
   test("detects background task pattern", () => {
     const output = "line1\n⏵⏵ tasks · 3 running\nline3";
     expect(hasBackgroundTasks(output)).toBe(true);

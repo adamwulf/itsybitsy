@@ -7,7 +7,7 @@ import { join, dirname, basename } from "path";
 import { readdir, link, rename, stat, unlink, open } from "fs/promises";
 import { randomUUID } from "crypto";
 import type { AgentState } from "./parse-state";
-import { parseState, stripAnsi, stripTrailingBlanks, STARTUP_MARKERS } from "./parse-state";
+import { parseState, stripAnsi, stripTrailingBlanks, STARTUP_MARKERS, hasAgyBackgroundTasks } from "./parse-state";
 import {
   captureTmuxOutput,
   captureTmuxOutputResult,
@@ -1489,7 +1489,7 @@ export function isApiSafeguard(tmuxOutput: string): boolean {
  * Check if tmux output indicates a background shell/task is running, within the
  * last BACKGROUND_TASKS_WINDOW logical lines.
  *
- * Two footer formats are recognized:
+ * Three footer formats are recognized:
  *
  * 1. New format — a mode-independent `· N shell` / `· N shells` status-bar
  *    segment (and the `· N shell still running` spinner-line variant). Recent
@@ -1501,6 +1501,10 @@ export function isApiSafeguard(tmuxOutput: string): boolean {
  * 2. Legacy format — the `⏵⏵ ... · N ...` auto-accept status bar (older builds
  *    render `· N background tasks` / `· N bashes`). Retained for backward
  *    compatibility with older Claude builds and the existing test-suite.
+ *
+ * 3. Antigravity — timestamped running-task rows in a separate section below
+ *    the latest input box. This variable-height section is bounded by its TUI
+ *    separators rather than the fixed Claude footer window.
  */
 export function hasBackgroundTasks(tmuxOutput: string): boolean {
   const stripped = stripAnsi(tmuxOutput);
@@ -1523,7 +1527,7 @@ export function hasBackgroundTasks(tmuxOutput: string): boolean {
   // Legacy footer: the "⏵⏵ ... · N ..." auto-accept status bar (background
   // tasks / bashes). Retained for older Claude builds and existing tests.
   const legacyFormat = /⏵⏵.*·\s\d+\s/.test(tail);
-  return newFormat || legacyFormat;
+  return newFormat || legacyFormat || hasAgyBackgroundTasks(stripped);
 }
 
 /**

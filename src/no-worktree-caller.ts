@@ -1,4 +1,4 @@
-import { isAbsolute, join } from "path";
+import { dirname, isAbsolute, join, resolve } from "path";
 import { readdir, realpath } from "fs/promises";
 import { CLAUDE_PID_START_MARGIN_SECONDS } from "./agents";
 import { isValidAgentId } from "./validation";
@@ -86,25 +86,63 @@ function ancestorPids(pid: number, parents: Map<number, number>): Set<number> {
 }
 
 /**
+ * An existing agent worktree already identifies its caller. Verify both the
+ * registered repository and Git's worktree backlink before taking this fast
+ * path: a directory that only resembles an agent worktree is not sufficient.
+ * This uses filesystem reads only; Codex's native sandbox can prohibit ps.
+ */
+async function isRegisteredAgentWorktree(cwd: string, roots: string[]): Promise<boolean> {
+  try {
+    const canonicalCwd = await realpath(cwd);
+    const match = canonicalCwd.match(/^(.*?)\/\.ittybitty\/agents\/([^/]+)\/repo(?:\/|$)/);
+    if (!match || !roots.includes(match[1]!) || !isValidAgentId(match[2]!)) return false;
+    const repoPath = match[1]!;
+    const agentId = match[2]!;
+    const agentDir = join(repoPath, ".ittybitty", "agents", agentId);
+    const worktreePath = join(agentDir, "repo");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    if (!meta || Array.isArray(meta) || meta.id !== agentId || meta.worktree === false) return false;
+
+    const gitFile = join(worktreePath, ".git");
+    const pointer = (await Bun.file(gitFile).text()).trim().match(/^gitdir: (.+)$/);
+    if (!pointer) return false;
+    const gitDir = await realpath(resolve(worktreePath, pointer[1]!));
+    // Git's worktree administration directory must belong to this registered
+    // repo, and its backlink must name this exact worktree's .git file.
+    const worktreesDir = await realpath(join(repoPath, ".git", "worktrees"));
+    if (dirname(gitDir) !== worktreesDir) return false;
+    const backlink = (await Bun.file(join(gitDir, "gitdir")).text()).trim();
+    if (!backlink) return false;
+    return await realpath(resolve(gitDir, backlink)) === await realpath(gitFile);
+  } catch {
+    // Missing or unverifiable worktree metadata must use the existing caller
+    // verification, never gain an exemption from caller authorization.
+    return false;
+  }
+}
+
+/**
  * Identify an agent that shares a repository cwd with human CLI callers.
  * A cwd or claimed environment/argument ID alone cannot distinguish them.
  * Match the actual process ancestry to a recorded live CLI PID/start epoch.
  * Recheck ancestry after metadata reads and identity validation so a vanished
  * or reparented process never supplies caller authority.
  *
- * Only canonical roots from the operator's repository registry are authority
- * roots. Search them independently of cwd so moving to a different directory
- * cannot hide the real caller or replace it with an unregistered forged tree.
+ * Registered agent worktrees do not need process ancestry: their protected
+ * metadata identifies the caller. Otherwise search canonical registered roots
+ * independently of cwd so an unregistered forged tree cannot replace it.
  * Multiple matching records are an error; filesystem order cannot choose which
  * caller policy wins.
  */
 export async function resolveNoWorktreeCaller(
-  _cwd: string,
+  cwd: string,
   deps: CallerDeps = {},
 ): Promise<NoWorktreeCaller | null> {
   const candidates: NoWorktreeCaller[] = [];
   // HOME is model-controlled. Resolve the operator home from the OS account.
-  for (const repoPath of await registeredRoots(deps.registryHome ?? userInfo().homedir)) {
+  const roots = await registeredRoots(deps.registryHome ?? userInfo().homedir);
+  if (await isRegisteredAgentWorktree(cwd, roots)) return null;
+  for (const repoPath of roots) {
     const agentsDir = join(repoPath, ".ittybitty", "agents");
     const entries = await readdir(agentsDir, { withFileTypes: true }).catch((error) => {
       if (error.code === "ENOENT" || error.code === "ENOTDIR") return [];

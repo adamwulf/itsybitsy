@@ -1,4 +1,5 @@
 import { sandboxDenialExecPrefix } from "./sandbox-log-launch";
+import { resolveNoWorktreeCaller } from "./no-worktree-caller";
 import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
 import { join, basename } from "path";
 import {
@@ -6738,7 +6739,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(spawnCalls.some((call) => call[0] === "codex")).toBe(false);
   });
 
-  test("sandbox-disabled Codex spawn disables native protections, retains hooks, and omits every kernel helper", async () => {
+  test("sandbox-disabled Codex spawn suppresses approvals, keeps workspace-write and hooks, and omits every kernel helper", async () => {
     await writeSandboxType("unsandboxed-codex", { enabled: false, model: "codex:gpt-5.4-mini" });
     setNewAgentSpawnRunner(cleanWorktreeRunner());
     setNewAgentSummaryGenerator(async () => {});
@@ -6748,8 +6749,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(result.ok).toBe(true);
     const agentDir = join(agentsDir, "unsandboxed-codex");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
-    expect(start).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
-    expect(start).not.toContain("-s workspace-write");
+    expect(start).toContain("-a never -s workspace-write --dangerously-bypass-hook-trust");
+    expect(start).not.toContain("-s danger-full-access");
     expect(start).not.toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(start).toContain("hooks.PreToolUse");
     expect(start).not.toContain("sandbox-exec");
@@ -7105,7 +7106,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   });
 
   // ── A4 G2: ib sandbox refresh ──────────────────────────────────────────────
-  test("Codex refresh to disabled regenerates AGENTS.md and disables native protections with hooks retained", async () => {
+  test("Codex refresh to disabled regenerates AGENTS.md and keeps no-prompt workspace-write hooks", async () => {
     const id = "codex-refresh-instructions";
     const oldRead = join(tempDir, "old-policy");
     const newRead = join(tempDir, "new-policy");
@@ -7144,14 +7145,13 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(text).toContain(canonicalizeSandboxPath(newRead));
     expect(text).not.toContain(canonicalizeSandboxPath(oldRead));
     expect(text).toContain("The itsybitsy kernel sandbox is OFF");
-    expect(text).toContain("Codex's native sandbox is also OFF");
     expect(text).not.toContain("your Claude project directory and scratchpad");
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     expect(resume).not.toContain("sandbox-exec");
     expect(resume).not.toContain("sandbox-proxy-launch");
     expect(resume).not.toContain("sandbox-log-watch");
-    expect(resume).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
-    expect(resume).not.toContain("-s workspace-write");
+    expect(resume).toContain("-a never -s workspace-write --dangerously-bypass-hook-trust");
+    expect(resume).not.toContain("-s danger-full-access");
     expect(resume).toContain("hooks.PreToolUse");
     const refreshedMeta = await Bun.file(join(agentDir, "meta.json")).json();
     expect(refreshedMeta.sandbox.enabled).toBe(false);
@@ -9085,6 +9085,39 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     await Bun.write(join(dir, "meta.json"), JSON.stringify({ id, ...meta }));
     return join(dir, "repo");
   }
+
+  test.each([true, false])("registered worktree spawning honors canSpawnChildren=%s without ps", async (canSpawnChildren) => {
+    const callerId = "registered-worktree-caller";
+    const callerCwd = await plantCaller(callerId, {
+      worktree: true, worker: !canSpawnChildren, canSpawnChildren,
+      agentType: canSpawnChildren ? "manager" : "worker",
+    });
+    const gitDir = join(tempDir, ".git", "worktrees", callerId);
+    await mkdir(gitDir, { recursive: true });
+    await Bun.write(join(callerCwd, ".git"), `gitdir: ${gitDir}\n`);
+    await Bun.write(join(gitDir, "gitdir"), `${join(callerCwd, ".git")}\n`);
+    await plantCaller("unrelated-shared-agent", { worktree: false });
+    const registryHome = join(tempDir, "caller-registry-home");
+    await Bun.write(join(registryHome, ".itsybitsy", "repos.json"), JSON.stringify({ repos: [{ path: tempDir }] }));
+    setNewAgentNoWorktreeCallerResolver((cwd) => resolveNoWorktreeCaller(cwd, {
+      registryHome,
+      readParents: () => { throw new Error("EPERM: posix_spawn /bin/ps"); },
+    }));
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    const result = await newAgent(tempDir, "sub-task", {
+      name: "worktree-spawn-child", _cwd: callerCwd,
+    });
+    expect(result.ok).toBe(canSpawnChildren);
+    expect(result.stderr).not.toContain("posix_spawn");
+    if (canSpawnChildren) {
+      const child = await Bun.file(join(agentsDir, "worktree-spawn-child", "meta.json")).json();
+      expect(child.manager).toBe(callerId);
+    } else {
+      expect(result.stderr).toContain("cannot spawn sub-agents");
+      expect(await Bun.file(join(agentsDir, "worktree-spawn-child", "meta.json")).exists()).toBe(false);
+    }
+  });
 
   test("worker caller cannot spawn by naming a different manager that can spawn", async () => {
     // The real hole: a worker runs `ib new-agent --manager <real-manager>`

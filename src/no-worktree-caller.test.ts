@@ -27,6 +27,56 @@ describe("trusted no-worktree caller attribution", () => {
   const parents = () => new Map([[500, 400], [400, 300], [300, 1]]);
   const deps = () => ({ registryHome: join(repo, "home"), pid: 500, readParents: parents, identityCurrent: () => true });
 
+  async function worktree(root = repo, id = "worktree-manager", overrides: Record<string, unknown> = {}) {
+    const agentDir = await record(root, id, { worktree: true, ...overrides });
+    const cwd = join(agentDir, "repo");
+    const gitDir = join(root, ".git", "worktrees", id);
+    await mkdir(cwd, { recursive: true });
+    await mkdir(gitDir, { recursive: true });
+    await Bun.write(join(cwd, ".git"), `gitdir: ${gitDir}\n`);
+    await Bun.write(join(gitDir, "gitdir"), `${join(cwd, ".git")}\n`);
+    return { cwd, gitDir };
+  }
+
+  test.each([true, false])("registered worktree skips ps despite unrelated no-worktree records (canSpawnChildren=%s)", async (canSpawnChildren) => {
+    await record(repo, "unrelated-shared-agent");
+    const { cwd } = await worktree(repo, "worktree-agent", { canSpawnChildren });
+    const nestedCwd = join(cwd, "src", "nested");
+    await mkdir(nestedCwd, { recursive: true });
+    expect(await resolveNoWorktreeCaller(nestedCwd, {
+      ...deps(),
+      readParents: () => { throw new Error("EPERM: posix_spawn /bin/ps"); },
+      identityCurrent: () => { throw new Error("must not inspect processes"); },
+    })).toBeNull();
+    // null delegates to the ordinary worktree metadata/canSpawnChildren gate;
+    // it does not grant spawn permission to a worker.
+  });
+
+  test("a worktree-shaped directory without Git registration still resolves the shared leaf", async () => {
+    await record(repo, "leaf", { canSpawnChildren: false });
+    const dir = await record(repo, "fake-worktree", { worktree: true });
+    await mkdir(join(dir, "repo"), { recursive: true });
+    expect((await resolveNoWorktreeCaller(join(dir, "repo"), deps()))?.meta.id).toBe("leaf");
+  });
+
+  test("a Git worktree in an unregistered repository cannot skip caller verification", async () => {
+    await record(repo, "leaf", { canSpawnChildren: false });
+    const { cwd } = await worktree(join(repo, "unregistered"));
+    expect((await resolveNoWorktreeCaller(cwd, deps()))?.meta.id).toBe("leaf");
+  });
+
+  test("a mismatched Git backlink cannot skip caller verification", async () => {
+    await record(repo, "leaf", { canSpawnChildren: false });
+    const { cwd, gitDir } = await worktree();
+    await Bun.write(join(gitDir, "gitdir"), `${join(repo, "other", ".git")}\n`);
+    expect((await resolveNoWorktreeCaller(cwd, deps()))?.meta.id).toBe("leaf");
+  });
+
+  test("worktree:false metadata cannot use the worktree shortcut", async () => {
+    const { cwd } = await worktree(repo, "shared-leaf", { worktree: false, canSpawnChildren: false });
+    expect((await resolveNoWorktreeCaller(cwd, deps()))?.meta.id).toBe("shared-leaf");
+  });
+
   test("matches live process ancestry from a nested shared-repo cwd", async () => {
     const dir = await record();
     const cwd = join(repo, "packages", "app");

@@ -5894,6 +5894,11 @@ describe("newAgent (native)", () => {
     spawnCalls = [];
     dispatcherDryRunCalls = [];
 
+    // Synthetic lifecycle tests do not have a real agent process rooted in
+    // their temporary repositories. Keep OS ancestry out of the shared
+    // fixture; caller-attribution cases install an explicit resolver below.
+    setNewAgentNoWorktreeCallerResolver(async () => null);
+
     // Default codex dry-run runner: capture (cmd, cwd) + succeed.
     setDispatcherDryRunSpawnRunner((cmd, cwd) => {
       dispatcherDryRunCalls.push({ cmd, cwd });
@@ -13524,6 +13529,7 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
     agentsDir = join(tempDir, ".ittybitty", "agents");
     fakeHome = require("fs").realpathSync(await mkdtemp(join(tmpdir(), "ib-spawner-case2-home-")));
     spawnCalls = [];
+    setNewAgentNoWorktreeCallerResolver(async () => null);
 
     // Save and override HOME so listRepos reads our fake repos.json
     originalHome = process.env.HOME;

@@ -41,6 +41,7 @@ import { agentWorktreePath } from "../agents";
 import { checkWorktreeCleanliness } from "../git-status";
 import { SplitPane } from "./split-pane";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
+import { installTerminalCleanup } from "./terminal-cleanup";
 import { wordWrapLines, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
 import type { ChromeSlice } from "./wrap";
 import { fetchCodexUsage, fetchGeminiUsage, fetchUsage } from "../usage";
@@ -3510,6 +3511,10 @@ export async function launchDashboard(): Promise<void> {
 
   const typePickerKeyboard = new TypePickerKeyboard(terminal, () =>
     dashboard.dialog?.type === "new-agent-form" && dashboard.dialog.focused === "agentType");
+  const stopTerminal = installTerminalCleanup(() => {
+    typePickerKeyboard.stop();
+    tui.stop();
+  });
   tui.addInputListener((data) => {
     if (matchesKey(data, Key.ctrl("c"))) {
       // Re-enable stderr-bound warnings — TUI is going down.
@@ -3518,7 +3523,7 @@ export async function launchDashboard(): Promise<void> {
       colorDetection.cleanup();
       dashboard.stopPolling();
       watcher.stop();
-      tui.stop();
+      stopTerminal();
       dashboard.setTerminalTitle("");
       process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[2J\x1b[H");
       // Unsubscribe the state-change listener before stopping so a stop()
@@ -3620,6 +3625,7 @@ export async function launchDashboard(): Promise<void> {
   // logWarning() consults this flag to route warnings to watch.log instead.
   setWatchRunning(true);
   tui.start();
+  typePickerKeyboard.start();
   logToWatchLog(`[startup] tui.start() called (+${Date.now() - bootStart}ms)`);
   colorDetection.queryColorScheme();
   dashboard.startPolling();

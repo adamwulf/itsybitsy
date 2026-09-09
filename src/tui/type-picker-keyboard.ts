@@ -7,11 +7,32 @@ import { isKeyRelease, type Terminal } from "@mariozechner/pi-tui";
  */
 export class TypePickerKeyboard {
   private reporting = false;
+  private inputEvents?: Pick<NodeJS.ReadStream, "on" | "off">;
+  private onData = () => this.sync();
 
   constructor(
     private terminal: Pick<Terminal, "write" | "kittyProtocolActive">,
     private isTypeFocused: () => boolean,
   ) {}
+
+  /** Attach AFTER ProcessTerminal.start(), so its stdin listener handles the
+   * otherwise-hidden Kitty response before we check the negotiated capability.
+   */
+  start(inputEvents: Pick<NodeJS.ReadStream, "on" | "off"> = process.stdin): void {
+    if (this.inputEvents) return;
+    this.inputEvents = inputEvents;
+    inputEvents.on("data", this.onData);
+    this.sync();
+  }
+
+  stop(): void {
+    this.inputEvents?.off("data", this.onData);
+    this.inputEvents = undefined;
+    if (this.reporting && this.terminal.kittyProtocolActive) {
+      this.terminal.write("\x1b[=24;3u");
+    }
+    this.reporting = false;
+  }
 
   handleInput(data: string, dispatch: (data: string) => void): void {
     // pi-tui 0.56 does not parse Kitty's associated-text parameter. Strip it

@@ -54,6 +54,66 @@ function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
 // ── (c) allow/deny matches the merged lists for Bash + apply_patch ──────────
 
 describe("checkCodexPreToolUse — allow/deny matcher applies to Bash AND apply_patch (gate (c))", () => {
+  test.each(["Bash", "Bash(ls:*)", "Bash(ls -la)"])("Bash deny %s wins over an allow", (pattern) => {
+    const ctx = makeCtx();
+    const decision = checkCodexPreToolUse(
+      { toolName: "Bash", toolInput: { command: "ls -la" }, cwd: ctx.worktreePath },
+      ctx,
+      [pattern],
+    );
+    expect(decision).toEqual({ decision: "deny", reason: "tool denied by agent-type deny list" });
+  });
+
+  test("a command deny does not reject a different allow-listed command", () => {
+    const ctx = makeCtx();
+    const decision = checkCodexPreToolUse(
+      { toolName: "Bash", toolInput: { command: "ls -la" }, cwd: ctx.worktreePath },
+      ctx,
+      ["Bash(git reset:*)"],
+    );
+    expect(decision.decision).toBe("allow");
+  });
+
+  test.each(["apply_patch", "Write", "Edit"])("apply_patch obeys the %s deny despite safe paths", (pattern) => {
+    const ctx = makeCtx();
+    const decision = checkCodexPreToolUse(
+      {
+        toolName: "apply_patch",
+        toolInput: { command: "*** Begin Patch\n*** Add File: allowed.txt\n+hello\n*** End Patch\n" },
+        cwd: ctx.worktreePath,
+      },
+      ctx,
+      [pattern],
+    );
+    expect(decision).toEqual({ decision: "deny", reason: "tool denied by agent-type deny list" });
+  });
+
+  test.each(["apply_patch", "Write", "Edit"])("apply_patch accepts its %s tool grant", (pattern) => {
+    const ctx = makeCtx({ allowList: [pattern] });
+    const decision = checkCodexPreToolUse(
+      {
+        toolName: "apply_patch",
+        toolInput: { command: "*** Begin Patch\n*** Add File: allowed.txt\n+hello\n*** End Patch\n" },
+        cwd: ctx.worktreePath,
+      },
+      ctx,
+    );
+    expect(decision.decision).toBe("allow");
+  });
+
+  test("apply_patch requires a tool grant even when the target path is allowed", () => {
+    const ctx = makeCtx({ allowList: ["Read"] });
+    const decision = checkCodexPreToolUse(
+      {
+        toolName: "apply_patch",
+        toolInput: { command: "*** Begin Patch\n*** Add File: allowed.txt\n+hello\n*** End Patch\n" },
+        cwd: ctx.worktreePath,
+      },
+      ctx,
+    );
+    expect(decision).toEqual({ decision: "deny", reason: "Tool not in allow list" });
+  });
+
   test("Bash: command in allow list is allowed", () => {
     const ctx = makeCtx({ allowList: ["Bash(ls:*)"] });
     const decision = checkCodexPreToolUse(
@@ -283,6 +343,47 @@ describe("hookCodexPreToolUse — codex JSON contract (gate (d))", () => {
     });
     expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
     expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain("Invalid stdin schema");
+  });
+
+  for (const enabled of [true, false]) {
+    test(`agent-type denies override default tool grants with kernel sandbox ${enabled}`, async () => {
+      const metaPath = join(agentDir, "meta.json");
+      const meta = JSON.parse(await readFile(metaPath, "utf8"));
+      meta.sandbox = { enabled, rawAllow: [], domains: [] };
+      await writeFile(metaPath, JSON.stringify(meta));
+      await writeFile(
+        join(tempHome, ".itsybitsy", "agent-types", "worker.md"),
+        "---\nname: worker\ndescription: test\npermissions:\n  deny:\n    - Bash(ls:*)\n    - Edit\n---\n",
+      );
+
+      for (const [tool_name, tool_input] of [
+        ["Bash", { command: "ls -la" }],
+        ["apply_patch", { command: "*** Begin Patch\n*** Add File: allowed.txt\n+hello\n*** End Patch\n" }],
+      ] as const) {
+        const parsed = await runPayload({ tool_name, tool_input, cwd: join(agentDir, "repo") });
+        expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+        expect(parsed.hookSpecificOutput.permissionDecisionReason).toBe("tool denied by agent-type deny list");
+      }
+      const allowed = await runPayload({
+        tool_name: "Bash", tool_input: { command: "git status --short" }, cwd: join(agentDir, "repo"),
+      });
+      expect(allowed.hookSpecificOutput.permissionDecision).toBe("allow");
+    });
+  }
+
+  test("dynamic settings denies override default file-tool grants", async () => {
+    await mkdir(join(agentDir, "repo", ".claude"), { recursive: true });
+    await writeFile(
+      join(agentDir, "repo", ".claude", "settings.local.json"),
+      JSON.stringify({ permissions: { allow: ["Read"], deny: ["Read"] } }),
+    );
+    const parsed = await runPayload({
+      tool_name: "Read",
+      tool_input: { file_path: join(agentDir, "repo", "README.md") },
+      cwd: join(agentDir, "repo"),
+    });
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toBe("tool denied by agent-type deny list");
   });
 
   test("non-string cwd is denied instead of falling back to process.cwd", async () => {

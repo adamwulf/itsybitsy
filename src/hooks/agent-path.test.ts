@@ -2204,6 +2204,14 @@ describe("checkPathAccess — reserved seal-helper result namespace", () => {
     });
   }
 
+  test("cp option terminator preserves protected source read semantics", () => {
+    const result = checkPathAccess(
+      makeInput({ toolName: "Bash", toolInput: { command: `cp -- -l ${tmpResult} /private/tmp/ordinary-copy` } }),
+      makeCtx({ access: writable }),
+    );
+    expect(result.decision).toBe("allow");
+  });
+
   test("reads remain governed normally and a broad private-tmp allow permits result reads", () => {
     const result = checkPathAccess(
       makeInput({ toolName: "Read", toolInput: { file_path: tmpResult } }),

@@ -453,6 +453,7 @@ test("LIVE macOS profile protects trusted seal-helper results while ordinary tmp
   await symlink(join(resultDir, "output"), symlinkAlias);
   const outputBefore = await stat(join(resultDir, "output"));
   const resultBefore = await stat(join(resultDir, "result"));
+  const resultContentBefore = await readFile(join(resultDir, "result"), "utf8");
   try {
     const params = { ...PARAMS, canSpawnChildren: true };
     const profile = generateProfile(config({ rawAllow: ["(allow default)"] }), EMPTY_PATHS, params);
@@ -493,6 +494,7 @@ test("LIVE macOS profile protects trusted seal-helper results while ordinary tmp
     }
     expect(fields.sibling).toBe("0");
     expect(await readFile(join(resultDir, "output"), "utf8")).toBe("trusted");
+    expect(await readFile(join(resultDir, "result"), "utf8")).toBe(resultContentBefore);
     expect(fields.hardlink).not.toBe("0");
     expect(fields.hardlink_exists).not.toBe("0");
     expect(fields.cp_hardlink).not.toBe("0");

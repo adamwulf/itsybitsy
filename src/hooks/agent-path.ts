@@ -883,9 +883,13 @@ function scanBashCommandPaths(
   // every operand as a write so a protected result cannot be linked into an
   // ordinary writable alias (`cp -l` / `cp --link`). Plain cp remains read
   // source + write destination below.
-  const cpHardLink = verb === "cp" && tokens.slice(1).some((token) =>
-    token === "--link" || (/^-[^-]/.test(token) && token.slice(1).includes("l"))
-  );
+  const cpHardLink = verb === "cp" && (() => {
+    for (const token of tokens.slice(1)) {
+      if (token === "--") break;
+      if (token === "--link" || (/^-[^-]/.test(token) && token.slice(1).includes("l"))) return true;
+    }
+    return false;
+  })();
   const isWriteVerb = BASH_WRITE_ALL_ARGS.has(verb);
   let cpMvWriteIndex = -1;
   if (isCpMv) {

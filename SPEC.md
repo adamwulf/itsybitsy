@@ -928,9 +928,9 @@ This hook is installed for spawning agents (managers, when the main repo's setti
 **Matcher**: `*`
 **Hook type**: PermissionRequest
 
-Fires when Claude requests permission for a tool that isn't auto-allowed. Simply logs `[PermissionRequest] Tool denied: <tool-name>` to `agent.log`. Cannot override permissions — PermissionRequest hooks are informational only. Always exits 0 with no stdout output. [^callout-permission-denied]
+This is the defense-in-depth fallback if a request reaches Claude's native permission layer despite the explicit PreToolUse decision. It logs `[PermissionRequest] Tool denied: <tool-name>` to `agent.log` and returns a deny decision, so the request is rejected without surfacing a user prompt. In the normal path PreToolUse has already allowed or denied the tool, with `permissions.deny` evaluated before `permissions.allow`.
 
-[^callout-permission-denied]: **Bash/TS divergence.** The bash `ib` does not have a handler for the `hook-permission-denied` subcommand — the command hits the "Unknown command" default case and exits 1 with an error to stderr. Since PermissionRequest hooks are informational only and Claude Code ignores non-zero exits from them, this means the bash version silently fails to log permission denials. The TS implementation properly handles the command and logs to `agent.log`.
+[^callout-permission-denied]: **Historical Bash/TS divergence (superseded for the TypeScript implementation).** The bash `ib` has no handler for `hook-permission-denied`; the command reaches its unknown-command case. The current TypeScript hook both logs and denies. This historical difference does not weaken the current no-prompt contract.
 
 ### 6.6 Mark Running Hook (UserPromptSubmit)
 
@@ -1642,7 +1642,7 @@ The system coordinator's `~/.itsybitsy/.claude/settings.local.json` includes fiv
 
 - `PreToolUse` → `ib hook-check-path @system` (path isolation — `~/.itsybitsy/` is its own worktree, so cross-agent and main-repo blocks are no-ops; the allow-list check still runs. The state-write side effect from §6.1 is skipped for `@system` because there is no `meta.json` to write to.)
 - `PreToolUse` → `ib hooks intercept-task` (intercepts Task/Agent/TaskCreate, denies AskUserQuestion, blocks shell metacharacters and `--output` in coordinator Bash commands per §12.2.4)
-- `PermissionRequest` → `ib hook-permission-denied @system` (logs denials to `~/.itsybitsy/agent.log`)
+- `PermissionRequest` → `ib hook-permission-denied @system` (denies the request and logs it to `~/.itsybitsy/agent.log`)
 - `UserPromptSubmit` → `ib hook-mark-running @system` (no-op for `@system` — there is no `meta.json` to update; the hook entry is installed for uniformity with regular agents and to keep `health-check`'s leaked-hook scan symmetric)
 - `SessionStart` → `ib hooks session-start @system` (delivers `system.md`'s markdown body, prefixed with `_all.md`, via `additionalContext` on every session start — see §12.1.5)
 

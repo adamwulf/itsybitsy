@@ -612,12 +612,22 @@ describe("buildPathIsolationSection", () => {
     expect(section).toContain("kernel sandbox is OFF");
   });
 
-  test("explicitly disabled sandbox retains native protections and path hooks", () => {
+  test("explicitly disabled sandbox retains hook-controlled approvals and path checks", () => {
     const ctx = { ...baseCtx, sandbox: { enabled: false, rawAllow: [], domains: [] } };
     const section = buildPathIsolationSection(ctx);
     expect(section).toContain("kernel sandbox is OFF");
+    expect(section).toContain("hooks enforce tool permissions and path checks without native tool approval prompts");
     expect(section).not.toContain("EPERM");
   });
+
+  test.each(["codex:gpt-5.6-sol", "fugu:fugu"])(
+    "%s disabled instructions describe the remaining native sandbox", (model) => {
+      const section = buildPathIsolationSection({
+        ...baseCtx, model, sandbox: { enabled: false, rawAllow: [], domains: [] },
+      });
+      expect(section).toContain("Codex's native workspace-write sandbox remains enabled");
+    },
+  );
 
   test.each(["codex:gpt-5.6-sol", "fugu:fugu", "agy:default"])(
     "%s instructions omit Claude-only runtime roots", (model) => {

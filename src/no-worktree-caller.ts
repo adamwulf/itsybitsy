@@ -1,7 +1,8 @@
-import { dirname, join, resolve } from "path";
+import { isAbsolute, join } from "path";
 import { readdir, realpath } from "fs/promises";
-import { isPidIdentityCurrentCtx } from "./agents";
+import { CLAUDE_PID_START_MARGIN_SECONDS } from "./agents";
 import { isValidAgentId } from "./validation";
+import { userInfo } from "os";
 
 export interface NoWorktreeCaller {
   meta: Record<string, unknown>;
@@ -10,14 +11,16 @@ export interface NoWorktreeCaller {
 }
 
 interface CallerDeps {
+  registryHome?: string;
   pid?: number;
   readParents?: () => Map<number, number>;
   identityCurrent?: (pid: number, epoch: number | undefined) => boolean;
 }
 
 function readParentPids(): Map<number, number> {
-  const result = Bun.spawnSync(["ps", "-axo", "pid=,ppid="], {
+  const result = Bun.spawnSync(["/bin/ps", "-axo", "pid=,ppid="], {
     stdout: "pipe", stderr: "pipe", timeout: 2_000,
+    env: { LC_ALL: "C", LC_TIME: "C" },
   });
   if (result.exitCode !== 0 || result.stdout.length > 4 * 1024 * 1024) {
     throw new Error("Cannot verify no-worktree caller process ancestry");
@@ -28,6 +31,42 @@ function readParentPids(): Map<number, number> {
     if (fields) parents.set(Number(fields[1]), Number(fields[2]));
   }
   return parents;
+}
+
+function processIdentityCurrent(pid: number, epoch: number | undefined): boolean {
+  if (typeof epoch !== "number" || !Number.isFinite(epoch) || epoch <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    const result = Bun.spawnSync(["/bin/ps", "-o", "lstart=", "-p", String(pid)], {
+      stdout: "pipe", stderr: "pipe", timeout: 2_000,
+      env: { LC_ALL: "C", LC_TIME: "C" },
+    });
+    if (result.exitCode !== 0 || result.stdout.length > 1_024) return false;
+    const start = Date.parse(result.stdout.toString().trim()) / 1_000;
+    return Number.isFinite(start) && Math.abs(start - epoch) <= CLAUDE_PID_START_MARGIN_SECONDS;
+  } catch { return false; }
+}
+
+async function registeredRoots(registryHome: string): Promise<string[]> {
+  // Unlike the display-oriented registry reader, malformed/unreadable policy
+  // must not silently become an empty registry and misclassify an agent as a
+  // human. Missing registry is the ordinary pre-registration human case.
+  const file = Bun.file(join(registryHome, ".itsybitsy", "repos.json"));
+  if (!(await file.exists())) return [];
+  const registry = await file.json();
+  if (!registry || !Array.isArray(registry.repos)) throw new Error("Cannot verify caller: invalid repository registry");
+  const roots = new Set<string>();
+  for (const entry of registry.repos) {
+    if (!entry || typeof entry.path !== "string" || !isAbsolute(entry.path)) {
+      throw new Error("Cannot verify caller: invalid registered repository path");
+    }
+    try {
+      roots.add(await realpath(entry.path));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return [...roots];
 }
 
 function ancestorPids(pid: number, parents: Map<number, number>): Set<number> {
@@ -53,18 +92,20 @@ function ancestorPids(pid: number, parents: Map<number, number>): Set<number> {
  * Recheck ancestry after metadata reads and identity validation so a vanished
  * or reparented process never supplies caller authority.
  *
- * Only metadata below cwd's real ancestor repositories is considered. Multiple
- * matching records are an error, including a forged nested .ittybitty tree;
- * arbitrary filesystem order must never choose which caller policy wins.
+ * Only canonical roots from the operator's repository registry are authority
+ * roots. Search them independently of cwd so moving to a different directory
+ * cannot hide the real caller or replace it with an unregistered forged tree.
+ * Multiple matching records are an error; filesystem order cannot choose which
+ * caller policy wins.
  */
 export async function resolveNoWorktreeCaller(
-  cwd: string,
+  _cwd: string,
   deps: CallerDeps = {},
 ): Promise<NoWorktreeCaller | null> {
-  let cursor = await realpath(resolve(cwd));
   const candidates: NoWorktreeCaller[] = [];
-  while (true) {
-    const agentsDir = join(cursor, ".ittybitty", "agents");
+  // HOME is model-controlled. Resolve the operator home from the OS account.
+  for (const repoPath of await registeredRoots(deps.registryHome ?? userInfo().homedir)) {
+    const agentsDir = join(repoPath, ".ittybitty", "agents");
     const entries = await readdir(agentsDir, { withFileTypes: true }).catch((error) => {
       if (error.code === "ENOENT" || error.code === "ENOTDIR") return [];
       throw error;
@@ -77,16 +118,13 @@ export async function resolveNoWorktreeCaller(
         meta = await Bun.file(join(agentDir, "meta.json")).json();
       } catch { continue; }
       if (!meta || Array.isArray(meta) || meta.id !== entry.name || meta.worktree !== false) continue;
-      candidates.push({ meta, agentDir, repoPath: cursor });
+      candidates.push({ meta, agentDir, repoPath });
     }
-    const parent = dirname(cursor);
-    if (parent === cursor) break;
-    cursor = parent;
   }
   if (!candidates.length) return null;
 
   const readParents = deps.readParents ?? readParentPids;
-  const identityCurrent = deps.identityCurrent ?? isPidIdentityCurrentCtx.fn;
+  const identityCurrent = deps.identityCurrent ?? processIdentityCurrent;
   const pid = deps.pid ?? process.pid;
   const before = ancestorPids(pid, readParents());
   const matches = candidates.filter(({ meta }) => {

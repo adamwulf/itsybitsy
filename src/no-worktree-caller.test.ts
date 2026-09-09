@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, mkdir, realpath, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -6,8 +6,13 @@ import { resolveNoWorktreeCaller } from "./no-worktree-caller";
 
 describe("trusted no-worktree caller attribution", () => {
   let repo: string;
-  beforeEach(async () => { repo = await realpath(await mkdtemp(join(tmpdir(), "ib-caller-"))); });
-  afterEach(async () => { await rm(repo, { recursive: true, force: true }); });
+  beforeEach(async () => {
+    repo = await realpath(await mkdtemp(join(tmpdir(), "ib-caller-")));
+    await Bun.write(join(repo, "home", ".itsybitsy", "repos.json"), JSON.stringify({ repos: [{ path: repo, name: "test" }] }));
+  });
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
 
   async function record(root = repo, id = "manager", overrides: Record<string, unknown> = {}) {
     const dir = join(root, ".ittybitty", "agents", id);
@@ -20,7 +25,7 @@ describe("trusted no-worktree caller attribution", () => {
   }
 
   const parents = () => new Map([[500, 400], [400, 300], [300, 1]]);
-  const deps = () => ({ pid: 500, readParents: parents, identityCurrent: () => true });
+  const deps = () => ({ registryHome: join(repo, "home"), pid: 500, readParents: parents, identityCurrent: () => true });
 
   test("matches live process ancestry from a nested shared-repo cwd", async () => {
     const dir = await record();
@@ -53,11 +58,39 @@ describe("trusted no-worktree caller attribution", () => {
     })).toBeNull();
   });
 
-  test("a nested forged policy cannot choose a different identity for the same process", async () => {
+  test("unregistered nested policy cannot choose a different identity for the same process", async () => {
     await record();
     const nested = join(repo, "nested");
     await record(nested, "forged", { canSpawnChildren: true });
-    await expect(resolveNoWorktreeCaller(nested, deps())).rejects.toThrow("ambiguous agent records");
+    expect((await resolveNoWorktreeCaller(nested, deps()))?.meta.id).toBe("manager");
+  });
+
+  test("a sole forged record in an arbitrary cwd cannot grant caller authority", async () => {
+    const unregistered = join(repo, "fake");
+    await record(unregistered, "forged", { canSpawnChildren: true });
+    expect(await resolveNoWorktreeCaller(unregistered, deps())).toBeNull();
+  });
+
+  test("leaving the real repo for a forged cwd still resolves the registered leaf", async () => {
+    const registered = join(repo, "registered");
+    const fake = join(repo, "fake");
+    await record(registered, "leaf", { canSpawnChildren: false });
+    await record(fake, "forged", { canSpawnChildren: true });
+    await Bun.write(join(repo, "home", ".itsybitsy", "repos.json"), JSON.stringify({ repos: [{ path: registered }] }));
+    const caller = await resolveNoWorktreeCaller(fake, deps());
+    expect(caller?.meta.id).toBe("leaf");
+    expect(caller?.meta.canSpawnChildren).toBe(false);
+  });
+
+  test("ambiguous registered metadata cannot select a permissive caller", async () => {
+    await record(repo, "leaf", { canSpawnChildren: false });
+    await record(repo, "manager", { canSpawnChildren: true });
+    await expect(resolveNoWorktreeCaller(repo, deps())).rejects.toThrow("ambiguous agent records");
+  });
+
+  test("malformed registry is an error rather than a human-caller fallback", async () => {
+    await Bun.write(join(repo, "home", ".itsybitsy", "repos.json"), "{broken");
+    await expect(resolveNoWorktreeCaller(repo, deps())).rejects.toThrow();
   });
 
   test.each([undefined, 0, -1, "12345"])("matching PID with invalid epoch %j does not establish identity", async (epoch) => {
@@ -102,12 +135,38 @@ describe("trusted no-worktree caller attribution", () => {
     })).rejects.toThrow("invalid process ancestry");
   });
 
+  test("caller PATH cannot redirect either authority probe to a fake ps", async () => {
+    const originalPath = process.env.PATH;
+    const fakeBin = join(repo, "fake-bin");
+    await Bun.write(join(fakeBin, "ps"), "#!/bin/sh\nexit 99\n");
+    const start = "Wed Sep  9 12:00:00 2026";
+    await record(repo, "live", { claude_pid: String(process.pid), claude_pid_epoch: Date.parse(start) / 1000 });
+    const calls: string[][] = [];
+    const probe = spyOn(Bun, "spawnSync").mockImplementation(((args: string[], options: { env: Record<string, string> }) => {
+      expect(args[0]).toBe("/bin/ps");
+      expect(options.env).toEqual({ LC_ALL: "C", LC_TIME: "C" });
+      calls.push(args);
+      return { exitCode: 0, stdout: Buffer.from(args.includes("lstart=") ? start : `${process.pid} 1\n`) };
+    }) as typeof Bun.spawnSync);
+    try {
+      process.env.PATH = fakeBin;
+      const caller = await resolveNoWorktreeCaller(repo, { registryHome: join(repo, "home") });
+      expect(caller?.meta.id).toBe("live");
+      expect(calls.filter(args => args.includes("lstart="))).toHaveLength(2);
+      expect(calls.filter(args => args.includes("pid=,ppid="))).toHaveLength(2);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      probe.mockRestore();
+    }
+  });
+
   // Codex's native sandbox can deny spawning ps. Keep the actual OS probe
   // opt-in; the unavailable-observation test above verifies the default-deny
   // behavior independently of that host permission.
   test.skipIf(process.env.IB_LIVE_CALLER !== "1")("reads actual OS ancestry without relying on caller environment variables", async () => {
     await record(repo, "live-test", { claude_pid: String(process.pid) });
-    const caller = await resolveNoWorktreeCaller(repo, { identityCurrent: () => true });
+    const caller = await resolveNoWorktreeCaller(repo, { registryHome: join(repo, "home"), identityCurrent: () => true });
     expect(caller?.meta.id).toBe("live-test");
   });
 });

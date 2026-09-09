@@ -192,6 +192,23 @@ describe("wrapSingleLine", () => {
     expect(result.join("")).toBe(line);
     expect(result.join("")).toContain("🙂a");
   });
+
+  test("keeps SOS and general ESC-intermediate controls atomic", () => {
+    for (const control of ["\x1bXsecret\x1b\\", "\x1b#8"]) {
+      const line = control + "abcdef";
+      const result = wrapSingleLine(line, 3);
+      expect(result.join("")).toBe(line);
+      expect(result.length).toBe(2);
+    }
+  });
+
+  test("does not treat BEL as a DCS terminator", () => {
+    const control = "\x1bPabc\x07def\x1b\\";
+    const line = control + "abcdef";
+    const result = wrapSingleLine(line, 3);
+    expect(result.join("")).toBe(line);
+    expect(result.length).toBe(2);
+  });
 });
 
 describe("wrapLines", () => {
@@ -263,6 +280,12 @@ describe("wordWrapSingleLine", () => {
         .toBe(true);
       expect(result.every((row) => row.length > 0)).toBe(true);
     }
+  });
+
+  test("measures the remainder of a hard-wrapped ANSI word with terminal grammar", () => {
+    const line = "abcdefg \x1b[1 qxy";
+    const result = wordWrapSingleLine(line, 5);
+    expect(result).toEqual(["abcde", "fg \x1b[1 qxy"]);
   });
 
   test("handles empty string", () => {
@@ -1070,6 +1093,20 @@ describe("table reflow (┌┬┐ frames re-laid out at pane width)", () => {
     expect(matchTableBlockEnd(["  ┌────┐", "  └────┘"], 0)).toBe(-1);
   });
 
+  test("reflows a framed table through valid CSI intermediate controls", () => {
+    const control = "\x1b[1 @";
+    const table = renderTable(
+      [["x", "gamma delta"]],
+      [20, 20],
+    );
+    table[0] = control + table[0]!;
+
+    const rows = wordWrapLines(table.join("\n"), 18);
+    const compact = rows.join("").replace(/[\s┌┬┐│└┴┘─]/g, "");
+    expect(compact).toContain("xgammadelta");
+    expect(rows.every((row) => visibleWidth(row.replace(control, "")) <= 18)).toBe(true);
+  });
+
   test("an over-width table reflows: every row fits, all cell words survive", () => {
     const W = 100;
     const rows = wordWrapLines(wideTable.join("\n"), W);
@@ -1704,6 +1741,24 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     }
   });
 
+  test("emits a non-style row control once instead of replaying it as styling", () => {
+    const dcs = "\x1bPqabc\x1b\\";
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["x", "bravo charlie delta"],
+      ],
+      [5, 20],
+    );
+    table[2] = dcs + "\x1b[31m" + table[2]! + "\x1b[0m";
+
+    const rows = wordWrapLines(table.join("\n"), 15);
+    expect(rows.join("").split(dcs).length - 1).toBe(1);
+    expect(rows.length).toBeGreaterThan(3);
+    const compact = stripAnsi(rows.join("")).replace(dcs, "").replace(/[\s━]/g, "");
+    expect(compact).toContain("xbravocharliedelta");
+  });
+
   test("reconstructs style active before a cell slice boundary", () => {
     const linkOpen = "\x1b]8;;https://example.com/first\x1b\\";
     const linkClose = "\x1b]8;;\x1b\\";
@@ -2116,6 +2171,8 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
     const rows = wordWrapLines(input, 11);
     expect(rows.join("\n").length).toBeLessThan(input.length * 20);
     expect(rows.map(stripAnsi).join("").replace(/\s/g, "")).toContain("x".repeat(size));
+    expect(rows.join("").split(linkOpen).length - 1).toBe(1);
+    expect(rows.join("").split("\x1b]8;;\x1b\\").length - 1).toBe(1);
 
     const rowWide = renderTable(
       [
@@ -2155,6 +2212,31 @@ describe("borderless Codex table reflow (per-cell wrapping)", () => {
       expect(output.length).toBeLessThan(input.length * 20);
       expect(output.split(marker).length - 1).toBeLessThanOrEqual(1);
     }
+  });
+
+  test("bounds the aggregate replay of several individually small active styles", () => {
+    const component = "1:".repeat(100) + "2";
+    const opens = [
+      `\x1b[38:2:${component}m`,
+      `\x1b[48:2:${component}m`,
+      `\x1b[58:2:${component}m`,
+      `\x1b[4:${component}m`,
+      `\x1b[999:${component}m`,
+      "\x1b]8;;https://example.com/" + "a".repeat(200) + "\x1b\\",
+    ];
+    const closes = "\x1b[0m\x1b]8;;\x1b\\";
+    const table = renderTable(
+      [
+        ["A", "B"],
+        ["x", opens.join("") + "y".repeat(2_000) + closes],
+      ],
+      [5, 2_000],
+    );
+    const input = table.join("\n");
+    const output = wordWrapLines(input, 1).join("\n");
+    expect(output.length).toBeLessThan(input.length * 20);
+    for (const open of opens) expect(output.split(open).length - 1).toBe(1);
+    expect(output.split("\x1b]8;;\x1b\\").length - 1).toBe(1);
   });
 
   test("retains non-breaking spaces instead of treating them as wrap separators", () => {

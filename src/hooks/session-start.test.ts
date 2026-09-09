@@ -833,6 +833,33 @@ describe("hookSessionStart — stale 'creating' state correction", () => {
     expect(state).toBe("running");
   });
 
+  test("explicit id injects the no-worktree agent role from a nested cwd", async () => {
+    const agentId = "agent-shared-worker";
+    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const nested = join(tempDir, "packages", "feature");
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(nested, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: agentId,
+      manager: "agent-parent",
+      worker: true,
+      worktree: false,
+      agentType: "worker",
+      state: "waiting",
+    }));
+    let captured = "";
+    process.stdout.write = ((chunk: unknown) => {
+      captured += String(chunk);
+      return true;
+    }) as typeof process.stdout.write;
+
+    await hookSessionStart(JSON.stringify({ cwd: nested }), agentId);
+
+    const output = JSON.parse(captured);
+    expect(output.hookSpecificOutput.additionalContext).toContain(`You are worker agent \`${agentId}\``);
+    expect(output.hookSpecificOutput.additionalContext).toContain("Your manager agent is: agent-parent");
+  });
+
   test("missing meta.json is a no-op (does not crash)", async () => {
     // cwd points outside any agent dir — no meta to update.
     const stdin = JSON.stringify({ cwd: tempDir });

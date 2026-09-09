@@ -676,6 +676,32 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
 
   const archived = selected.archive;
   const manifest = archived.manifest!;
+  if (archived.meta.worktree === false || manifest.worktree === false) {
+    const archivedModel = archived.meta.model && archived.meta.model !== "null"
+      ? archived.meta.model
+      : "";
+    let archivedCli: ReturnType<typeof parseModel>["cli"] = "claude";
+    if (archivedModel) {
+      try {
+        archivedCli = parseModel(archivedModel).cli;
+      } catch (err) {
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }
+    if (archivedCli !== "claude") {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: `Cannot rehire worktree:false ${archivedCli} agent: only Claude supports --no-worktree`,
+      };
+    }
+  }
   const warnings: string[] = [];
   const archivedNickname = archived.meta.nickname;
   const archivedNicknameCollision =
@@ -1553,6 +1579,38 @@ export async function resumeAgent(
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
   }
 
+  // Parse the persisted CLI before any resume mutation. Legacy non-Claude
+  // worktree:false metadata is unsafe to replay: Codex/Fugu would overwrite
+  // shared AGENTS.md and agy would install hook/rule files in the shared repo.
+  const rawModel = agent.meta.model && agent.meta.model !== "null" ? agent.meta.model : "";
+  if (rawModel && !isValidModel(rawModel)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${rawModel}` };
+  }
+  let modelFlagValue = "";
+  let resumeCli: ReturnType<typeof parseModel>["cli"] = "claude";
+  if (rawModel) {
+    try {
+      const parsedResume = parseModel(rawModel);
+      modelFlagValue = parsedResume.model;
+      resumeCli = parsedResume.cli;
+    } catch (err) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+  if (agent.meta.worktree === false && resumeCli !== "claude") {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Cannot resume worktree:false ${resumeCli} agent: only Claude supports --no-worktree`,
+    };
+  }
+
   // Ensure the central per-agent outbox dir exists before the agent starts so
   // the first enqueue doesn't race a missing-dir append. Idempotent — no-op
   // when the dir already exists.
@@ -1580,33 +1638,6 @@ export async function resumeAgent(
     ) {
       return await resetCoordinator(agent);
     }
-
-    // Parse the qualified `<cli>:<model>` form (D1) EARLY so we can reject
-    // codex resume before issuing any tmux / shell-script work (MED 1 from
-    // the Phase 4 review). parseModel throws on missing/malformed/unknown
-    // cli — surface as a resume failure (D6).
-    const rawModel = agent.meta.model && agent.meta.model !== "null" ? agent.meta.model : "";
-    if (rawModel && !isValidModel(rawModel)) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${rawModel}` };
-    }
-    let modelFlagValue = "";
-    let resumeCli: ReturnType<typeof parseModel>["cli"] = "claude";
-    if (rawModel) {
-      try {
-        const parsedResume = parseModel(rawModel);
-        modelFlagValue = parsedResume.model;
-        resumeCli = parsedResume.cli;
-      } catch (err) {
-        return {
-          ok: false,
-          exitCode: 1,
-          stdout: "",
-          stderr: err instanceof Error ? err.message : String(err),
-        };
-      }
-    }
-    // agy is now sandboxed like every other CLI (mandatory kernel sandbox) — no
-    // special-case refusal remains.
 
     // Re-derive the reasoning-effort level from the persisted meta value, the
     // exact twin of the model re-derivation above. Without this a resumed
@@ -2087,13 +2118,20 @@ export async function resumeAgent(
       // in the shared repository settings. Their isolated settings file is
       // passed explicitly on every spawn/resume (including coordinator rehire).
       if (agent.meta.worktree === false || agent.meta.agentType === "coordinator") {
-        const isolatedSettings = join(agentDir, ".claude", "settings.local.json");
-        if (!(await Bun.file(isolatedSettings).exists().catch(() => false))) {
+        let isolatedSettings: string;
+        try {
+          isolatedSettings = await ensureIsolatedClaudeSettings(
+            agent.repoPath,
+            agentDir,
+            agent.id,
+            agent.meta,
+          );
+        } catch (err) {
           return {
             ok: false,
             exitCode: 1,
             stdout: "",
-            stderr: "Cannot resume worktree:false Claude agent: isolated settings are missing",
+            stderr: `Cannot resume worktree:false Claude agent: ${err instanceof Error ? err.message : String(err)}`,
           };
         }
         claudeArgs = claudeArgs
@@ -5647,7 +5685,8 @@ async function buildAgentSettings(
   agentType: "manager" | "worker",
   agentId: string,
   configAllow: string[],
-  configDeny: string[]
+  configDeny: string[],
+  opts: { explicitAgentIdentity?: boolean } = {},
 ): Promise<string> {
   // Start with existing project settings if available.
   // We read settings.json (the version-controlled project settings), NOT settings.local.json.
@@ -5703,12 +5742,80 @@ async function buildAgentSettings(
       agentId,
       includeStop: true,
       interceptMatcher: addIntercept ? REGULAR_AGENT_INTERCEPT_MATCHER : null,
-      sessionStartIncludesAgentId: false,
+      sessionStartIncludesAgentId: opts.explicitAgentIdentity === true,
+      identityDependentHooksIncludeAgentId: opts.explicitAgentIdentity === true,
       includeTimestamp: true,
     }),
   };
 
   return JSON.stringify(result, null, 2);
+}
+
+/**
+ * Create the isolated Claude policy used by worktree:false agents. Existing
+ * files are never rewritten: this path is solely a compatibility migration for
+ * agents archived or spawned before isolated settings were introduced.
+ * Required type failures propagate so resume fails closed instead of borrowing
+ * the shared repo/user policy.
+ */
+async function ensureIsolatedClaudeSettings(
+  repoPath: string,
+  agentDir: string,
+  agentId: string,
+  meta: AgentMeta,
+): Promise<string> {
+  const settingsPath = join(agentDir, ".claude", "settings.local.json");
+  if (await Bun.file(settingsPath).exists().catch(() => false)) return settingsPath;
+
+  let settingsContent: string;
+  if (meta.agentType === "coordinator") {
+    const coordinatorSettings = await buildPerRepoCoordinatorSettings();
+    settingsContent = JSON.stringify({
+      ...coordinatorSettings,
+      spinnerTipsEnabled: false,
+      hooks: buildHooksBlock({
+        agentId,
+        includeStop: true,
+        interceptMatcher: COORDINATOR_INTERCEPT_MATCHER,
+        sessionStartIncludesAgentId: true,
+        identityDependentHooksIncludeAgentId: true,
+      }),
+    }, null, 2);
+  } else {
+    const typeName = meta.agentType;
+    if (typeof typeName !== "string" || typeName.length === 0) {
+      throw new Error("meta.json has no agentType; cannot rebuild isolated Claude settings");
+    }
+
+    let allLayer: AgentType | undefined;
+    try { allLayer = await loadAgentType("_all"); } catch { /* optional layer */ }
+    let nonCoordinatorLayer: AgentType | undefined;
+    try { nonCoordinatorLayer = await loadAgentType("_non_coordinator"); } catch { /* optional layer */ }
+    const typeLayer = await loadAgentType(typeName);
+    const configAllow = [...new Set([
+      ...(allLayer?.permissions?.allow ?? []),
+      ...(nonCoordinatorLayer?.permissions?.allow ?? []),
+      ...(typeLayer.permissions?.allow ?? []),
+    ])];
+    const configDeny = [...new Set([
+      ...(allLayer?.permissions?.deny ?? []),
+      ...(nonCoordinatorLayer?.permissions?.deny ?? []),
+      ...(typeLayer.permissions?.deny ?? []),
+    ])];
+    const managerOrWorker: "manager" | "worker" = typeLayer.canSpawnChildren ? "manager" : "worker";
+    settingsContent = await buildAgentSettings(
+      repoPath,
+      managerOrWorker,
+      agentId,
+      configAllow,
+      configDeny,
+      { explicitAgentIdentity: true },
+    );
+  }
+
+  await mkdir(join(agentDir, ".claude"), { recursive: true });
+  await Bun.write(settingsPath, settingsContent);
+  return settingsPath;
 }
 
 /**
@@ -6242,6 +6349,20 @@ export async function newAgent(
   }
   const agentCli = parsed.cli;
   const modelFlagValue = parsed.model;
+
+  // Claude is the only CLI whose hook/settings lifecycle supports sharing the
+  // main checkout. Codex/Fugu require their worktree AGENTS.md + inline hook
+  // precheck, and agy requires its worktree hook/rule files. Refuse the unsafe
+  // shape before creating an agent directory, changing shared settings, or
+  // invoking a CLI-specific builder.
+  if (opts?.noWorktree === true && agentCli !== "claude") {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Error: --no-worktree is supported only for Claude agents; ${agentCli} agents require an isolated worktree`,
+    };
+  }
 
   // Codex spawn-path preconditions (SPEC §5.4 step 2 + §7 risk 14). Run
   // BEFORE any worktree/tmux work so a fail here doesn't leave residual
@@ -7038,6 +7159,7 @@ export async function newAgent(
           includeStop: true,
           interceptMatcher: COORDINATOR_INTERCEPT_MATCHER,
           sessionStartIncludesAgentId: true,
+          identityDependentHooksIncludeAgentId: true,
         }),
       };
       await mkdir(join(agentDir, ".claude"), { recursive: true });
@@ -7053,7 +7175,14 @@ export async function newAgent(
     // isolated file and pass it via --settings below. The PreToolUse hook reads
     // this exact file for explicit allow/deny decisions in both kernel modes.
     const managerOrWorker: "manager" | "worker" = isLeafAgent ? "worker" : "manager";
-    const settingsContent = await buildAgentSettings(rootRepoPath, managerOrWorker, id, configAllow, configDeny);
+    const settingsContent = await buildAgentSettings(
+      rootRepoPath,
+      managerOrWorker,
+      id,
+      configAllow,
+      configDeny,
+      { explicitAgentIdentity: true },
+    );
     await mkdir(join(agentDir, ".claude"), { recursive: true });
     await Bun.write(join(agentDir, ".claude", "settings.local.json"), settingsContent);
   } else {

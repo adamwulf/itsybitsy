@@ -107,6 +107,8 @@ export async function buildLayeredPermissions(opts: {
  *   - whether the session-start hook command takes the agent ID as an
  *     argument (coordinators do; regular agents don't because the hook
  *     derives identity from cwd)
+ *   - whether the other cwd-sensitive hooks receive an explicit agent ID
+ *     (required by worktree:false agents because their cwd is the shared repo)
  *   - whether the inject-timestamp PostToolUse hook is included (regular
  *     agents get it; the hook body is gated on the `hooks.injectTimestamp`
  *     config so the entry being present is harmless when the config is off)
@@ -123,6 +125,9 @@ export function buildHooksBlock(opts: {
   includeStop: boolean;
   interceptMatcher: string | null;
   sessionStartIncludesAgentId: boolean;
+  /** Pass agent identity to intercept-task and inject-timestamp instead of
+   * deriving it from cwd. Required for worktree:false isolated settings. */
+  identityDependentHooksIncludeAgentId?: boolean;
   includeTimestamp?: boolean;
   /** When true (system coordinator only), append `ib tgtyping` to both the
    *  UserPromptSubmit and PostToolUse hook arrays so the Telegram chat shows
@@ -134,16 +139,23 @@ export function buildHooksBlock(opts: {
     { matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${opts.agentId}` }] },
   ];
   if (opts.interceptMatcher !== null) {
+    const interceptCommand = opts.identityDependentHooksIncludeAgentId
+      ? `ib hooks intercept-task ${opts.agentId}`
+      : "ib hooks intercept-task";
     preToolUseHooks.push({
       matcher: opts.interceptMatcher,
-      hooks: [{ type: "command", command: "ib hooks intercept-task" }],
+      hooks: [{ type: "command", command: interceptCommand }],
     });
   }
+
+  const timestampCommand = opts.identityDependentHooksIncludeAgentId
+    ? `ib hooks inject-timestamp ${opts.agentId}`
+    : "ib hooks inject-timestamp";
 
   const postToolUseHooks: unknown[] | null =
     opts.includeTimestamp || opts.includeTelegramTyping ? [] : null;
   if (postToolUseHooks && opts.includeTimestamp) {
-    postToolUseHooks.push({ matcher: "*", hooks: [{ type: "command", command: "ib hooks inject-timestamp" }] });
+    postToolUseHooks.push({ matcher: "*", hooks: [{ type: "command", command: timestampCommand }] });
   }
   if (postToolUseHooks && opts.includeTelegramTyping) {
     postToolUseHooks.push({ matcher: "*", hooks: [{ type: "command", command: "ib tgtyping" }] });
@@ -160,7 +172,7 @@ export function buildHooksBlock(opts: {
     { hooks: [{ type: "command", command: `ib hook-mark-running ${opts.agentId}` }] },
   ];
   if (opts.includeTimestamp) {
-    userPromptSubmitHooks.push({ hooks: [{ type: "command", command: "ib hooks inject-timestamp" }] });
+    userPromptSubmitHooks.push({ hooks: [{ type: "command", command: timestampCommand }] });
   }
   if (opts.includeTelegramTyping) {
     userPromptSubmitHooks.push({ hooks: [{ type: "command", command: "ib tgtyping" }] });

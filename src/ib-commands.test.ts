@@ -1941,7 +1941,7 @@ describe("retire → rehire recovery", () => {
   // "successfully resumes a retired no-worktree Claude agent" test above.
   async function plantRehirableArchive(
     agentId: string,
-    opts: { manager?: string | null } = {},
+    opts: { manager?: string | null; includeSettings?: boolean } = {},
   ): Promise<{ archiveKey: string; archiveDir: string }> {
     const archiveKey = `20260703-120000-${agentId}`;
     const archiveDir = join(tempDir, ".ittybitty", "archive", archiveKey);
@@ -1953,6 +1953,7 @@ describe("retire → rehire recovery", () => {
       claude_pid: "",
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       manager: opts.manager ?? null,
+      agentType: "manager",
     }).meta;
     // Mandatory sandbox: a rehirable archive must carry an enabled sandbox +
     // paths so the reconstructed agent clears resume's fail-closed precondition
@@ -1961,11 +1962,13 @@ describe("retire → rehire recovery", () => {
     (meta as unknown as Record<string, unknown>).paths = { allowRead: [], allowWrite: [], deny: [] };
     await Bun.write(join(archiveDir, "meta.json"), JSON.stringify(meta, null, 2));
     await Bun.write(join(archiveDir, "exit-check.sh"), "#!/bin/bash\n");
-    await mkdir(join(archiveDir, ".claude"), { recursive: true });
-    await Bun.write(join(archiveDir, ".claude", "settings.local.json"), JSON.stringify({
-      permissions: { allow: ["Read"], deny: ["Write"] },
-      hooks: { PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${agentId}` }] }] },
-    }));
+    if (opts.includeSettings !== false) {
+      await mkdir(join(archiveDir, ".claude"), { recursive: true });
+      await Bun.write(join(archiveDir, ".claude", "settings.local.json"), JSON.stringify({
+        permissions: { allow: ["Read"], deny: ["Write"] },
+        hooks: { PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: `ib hook-check-path ${agentId}` }] }] },
+      }));
+    }
     await Bun.write(
       join(archiveDir, "retirement.json"),
       JSON.stringify({
@@ -2083,6 +2086,57 @@ describe("retire → rehire recovery", () => {
     const { readOutbox } = await import("./outbox");
     expect(await readOutbox(managerQueueDir("agent-bystander"))).toEqual([]);
   });
+
+  test("rehire migrates a legacy worktree:false archive without isolated settings", async () => {
+    const agentId = "agent-legacy-shared";
+    await (await import("./agent-types")).ensureAgentTypesDir();
+    await plantRehirableArchive(agentId, { includeSettings: false });
+    await mkdir(join(tempDir, ".claude"), { recursive: true });
+    const sharedSettingsPath = join(tempDir, ".claude", "settings.local.json");
+    await Bun.write(sharedSettingsPath, JSON.stringify({ permissions: { allow: ["UserOnlyTool"] } }));
+    const sharedBefore = await Bun.file(sharedSettingsPath).text();
+    const runner = successRunner();
+    setRehireSpawnRunner(runner);
+    setNukeResumeSpawnRunner(runner);
+
+    const result = await rehireAgent(agentId);
+
+    expect(result.ok).toBe(true);
+    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const isolatedSettingsPath = join(agentDir, ".claude", "settings.local.json");
+    const isolated = await Bun.file(isolatedSettingsPath).json();
+    expect(isolated.permissions.allow).toContain("Bash(ib:*)");
+    expect(isolated.hooks.SessionStart[0].hooks[0].command).toBe(`ib hooks session-start ${agentId}`);
+    expect(isolated.hooks.PostToolUse[0].hooks[0].command).toBe(`ib hooks inject-timestamp ${agentId}`);
+    expect(JSON.stringify(isolated.hooks)).toContain(`hook-check-path ${agentId}`);
+    expect(await Bun.file(sharedSettingsPath).text()).toBe(sharedBefore);
+    expect(await Bun.file(join(agentDir, "resume.sh")).text()).toContain(`--settings '${isolatedSettingsPath}'`);
+  });
+
+  for (const [cli, model] of [
+    ["codex", "codex:gpt-5.4-mini"],
+    ["fugu", "fugu:gpt-5.4-mini"],
+    ["agy", "agy:gemini-3.7-flash-low"],
+  ] as const) {
+    test(`rejects legacy worktree:false ${cli} rehire before reconstruction`, async () => {
+      const agentId = `archived-shared-${cli}`;
+      const { archiveDir } = await plantRehirableArchive(agentId, { includeSettings: false });
+      const archivedMeta = await Bun.file(join(archiveDir, "meta.json")).json();
+      archivedMeta.model = model;
+      await Bun.write(join(archiveDir, "meta.json"), JSON.stringify(archivedMeta));
+      await Bun.write(join(tempDir, "AGENTS.md"), "user agents content\n");
+      await mkdir(join(tempDir, ".agents"), { recursive: true });
+      await Bun.write(join(tempDir, ".agents", "hooks.json"), "user hooks content\n");
+
+      const result = await rehireAgent(agentId);
+
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain(`Cannot rehire worktree:false ${cli} agent`);
+      expect(await Bun.file(join(tempDir, ".ittybitty", "agents", agentId)).exists()).toBe(false);
+      expect(await Bun.file(join(tempDir, "AGENTS.md")).text()).toBe("user agents content\n");
+      expect(await Bun.file(join(tempDir, ".agents", "hooks.json")).text()).toBe("user hooks content\n");
+    });
+  }
 
   test("sends no rehire notice when the manager is archived/gone", async () => {
     const agentId = "agent-sub-gone";
@@ -6243,6 +6297,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(isolated.permissions.deny).toContain("EnterPlanMode");
     expect(JSON.stringify(isolated.hooks)).toContain(`hook-check-path ${id}`);
 
+    // Simulate a legacy worktree:false agent created before isolated settings.
+    await rm(isolatedSettingsPath);
+
     const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
     meta.state = "stopped";
     meta.tmux_session = "";
@@ -6262,7 +6319,70 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(resume).not.toContain("--dangerously-skip-permissions");
     expect(resume).toContain(`--settings '${isolatedSettingsPath}'`);
     expect(await Bun.file(settingsPath).text()).toBe(originalSharedSettings);
+    const migrated = await Bun.file(isolatedSettingsPath).json();
+    expect(migrated.hooks.SessionStart[0].hooks[0].command).toBe(`ib hooks session-start ${id}`);
+    expect(migrated.hooks.PostToolUse[0].hooks[0].command).toBe(`ib hooks inject-timestamp ${id}`);
+    expect(JSON.stringify(migrated.hooks)).toContain(`hook-check-path ${id}`);
   });
+
+  for (const [cli, model] of [
+    ["codex", "codex:gpt-5.4-mini"],
+    ["fugu", "fugu:gpt-5.4-mini"],
+    ["agy", "agy:gemini-3.7-flash-low"],
+  ] as const) {
+    for (const enabled of [true, false]) {
+      test(`rejects ${cli} no-worktree spawn before shared mutations when sandbox is ${enabled ? "on" : "off"}`, async () => {
+        const id = `reject-${cli}-${enabled ? "on" : "off"}`;
+        await writeSandboxType(id, { enabled, model });
+        await mkdir(join(tempDir, ".claude"), { recursive: true });
+        const sharedSettingsPath = join(tempDir, ".claude", "settings.local.json");
+        await Bun.write(sharedSettingsPath, JSON.stringify({ permissions: { allow: ["UserOnlyTool"] } }));
+        const sharedBefore = await Bun.file(sharedSettingsPath).text();
+        setNewAgentSpawnRunner(cleanWorktreeRunner());
+
+        const result = await callNewAgent("unsupported shared launch", {
+          name: id,
+          type: id,
+          noWorktree: true,
+        });
+
+        expect(result.ok).toBe(false);
+        expect(result.stderr).toContain("--no-worktree is supported only for Claude agents");
+        expect(await Bun.file(sharedSettingsPath).text()).toBe(sharedBefore);
+        expect(await Bun.file(join(agentsDir, id)).exists()).toBe(false);
+      });
+    }
+  }
+
+  for (const [cli, model] of [
+    ["codex", "codex:gpt-5.4-mini"],
+    ["fugu", "fugu:gpt-5.4-mini"],
+    ["agy", "agy:gemini-3.7-flash-low"],
+  ] as const) {
+    test(`rejects legacy worktree:false ${cli} resume before touching shared boundary files`, async () => {
+      const id = `legacy-shared-${cli}`;
+      const agentDir = join(agentsDir, id);
+      await mkdir(agentDir, { recursive: true });
+      const agent = makeAgent(id, tempDir, "stopped", {
+        worktree: false,
+        model,
+        sandbox: { enabled: false, rawAllow: [], domains: [] },
+      });
+      await Bun.write(join(agentDir, "meta.json"), JSON.stringify(agent.meta));
+      await Bun.write(join(tempDir, "AGENTS.md"), "user agents content\n");
+      await mkdir(join(tempDir, ".agents"), { recursive: true });
+      await Bun.write(join(tempDir, ".agents", "hooks.json"), "user hooks content\n");
+
+      const result = await resumeAgent(agent);
+
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain(`Cannot resume worktree:false ${cli} agent`);
+      expect(await Bun.file(join(tempDir, "AGENTS.md")).text()).toBe("user agents content\n");
+      expect(await Bun.file(join(tempDir, ".agents", "hooks.json")).text()).toBe("user hooks content\n");
+      expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
+      expect(await Bun.file(join(agentDir, ".claude", "settings.local.json")).exists()).toBe(false);
+    });
+  }
 
   test("disabled same-ID spawn removes orphan enabled seal before launch", async () => {
     const id = "orphan-disabled-reuse";
@@ -10341,7 +10461,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(isolatedSettings.hooks.Stop[0].hooks[0].command).toBe(`ib hook-status ${coordId}`);
     expect(isolatedSettings.hooks.SessionStart[0].hooks[0].command).toBe(`ib hooks session-start ${coordId}`);
     expect(isolatedSettings.hooks.PreToolUse[0].hooks[0].command).toBe(`ib hook-check-path ${coordId}`);
-    expect(isolatedSettings.hooks.PreToolUse[1].hooks[0].command).toBe("ib hooks intercept-task");
+    expect(isolatedSettings.hooks.PreToolUse[1].hooks[0].command).toBe(`ib hooks intercept-task ${coordId}`);
     expect(isolatedSettings.hooks.PermissionRequest[0].hooks[0].command).toBe(`ib hook-permission-denied ${coordId}`);
     expect(isolatedSettings.permissions.allow).toContain("Read");
     expect(isolatedSettings.permissions.allow).toContain("Bash(ib:*)");
@@ -10371,6 +10491,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(isolated.permissions.allow).toContain("Bash(ib:*)");
     expect(isolated.permissions.allow).not.toContain("UserOnlyTool");
     expect(isolated.hooks.PreToolUse[0].hooks[0].command).toBe("ib hook-check-path test-no-wt-perm");
+    expect(isolated.hooks.SessionStart[0].hooks[0].command).toBe("ib hooks session-start test-no-wt-perm");
+    expect(isolated.hooks.PostToolUse[0].hooks[0].command).toBe("ib hooks inject-timestamp test-no-wt-perm");
+    expect(isolated.hooks.UserPromptSubmit[1].hooks[0].command).toBe("ib hooks inject-timestamp test-no-wt-perm");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
     expect(start).toContain(`--settings '${isolatedSettingsPath}'`);
   });

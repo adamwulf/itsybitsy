@@ -2741,7 +2741,7 @@ describe("hookCheckPath with worktree:false agent settings", () => {
     }));
     await writeFile(
       join(agentDir, ".claude", "settings.local.json"),
-      JSON.stringify({ permissions: { allow: ["Read"], deny: ["Read"] } }),
+      JSON.stringify({ permissions: { allow: ["Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"], deny: ["Read"] } }),
     );
     await writeFile(
       join(repo, ".claude", "settings.local.json"),
@@ -2792,6 +2792,107 @@ describe("hookCheckPath with worktree:false agent settings", () => {
     const decision = JSON.parse(logged[0]!);
     expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
     expect(decision.hookSpecificOutput.permissionDecisionReason).toBe("Tool in deny list");
+  });
+
+  for (const [toolName, pathKey] of [
+    ["Write", "file_path"],
+    ["Edit", "file_path"],
+    ["MultiEdit", "file_path"],
+    ["NotebookEdit", "notebook_path"],
+  ] as const) {
+    test(`${toolName} cannot mutate the isolated settings authority`, async () => {
+      const settingsPath = join(agentDir, ".claude", "settings.local.json");
+      await hookCheckPath("agent-shared", JSON.stringify({
+        tool_name: toolName,
+        tool_input: { [pathKey]: settingsPath },
+        cwd: repo,
+      }));
+
+      const decision = JSON.parse(logged[0]!);
+      expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("cannot modify their own .claude/settings");
+    });
+  }
+
+  for (const command of [
+    "echo '{}' > .ittybitty/agents/agent-shared/.claude/settings.local.json",
+    "sed -i 's/Read/Write/' .ittybitty/agents/agent-shared/.claude/settings.local.json",
+  ]) {
+    test(`Bash cannot mutate the isolated settings authority: ${command.split(" ")[0]}`, async () => {
+      await hookCheckPath("agent-shared", JSON.stringify({
+        tool_name: "Bash",
+        tool_input: { command },
+        cwd: repo,
+      }));
+
+      const decision = JSON.parse(logged[0]!);
+      expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("cannot modify their own .claude/settings");
+    });
+  }
+
+  test("Read may inspect the isolated settings authority", async () => {
+    const settingsPath = join(agentDir, ".claude", "settings.local.json");
+    await writeFile(
+      settingsPath,
+      JSON.stringify({ permissions: { allow: ["Read"], deny: [] } }),
+    );
+    await hookCheckPath("agent-shared", JSON.stringify({
+      tool_name: "Read",
+      tool_input: { file_path: settingsPath },
+      cwd: repo,
+    }));
+
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("allow");
+  });
+
+  for (const [toolName, toolInput] of [
+    ["Read", { file_path: "meta.json" }],
+    ["Write", { file_path: "meta.json" }],
+    ["Bash", { command: "cat meta.json" }],
+  ] as const) {
+    test(`${toolName} cannot access a sibling agent through the shared repo root`, async () => {
+      const siblingDir = join(repo, ".ittybitty", "agents", "agent-sibling");
+      await mkdir(siblingDir, { recursive: true });
+      await writeFile(join(siblingDir, "meta.json"), JSON.stringify({ id: "agent-sibling" }));
+      await writeFile(
+        join(agentDir, ".claude", "settings.local.json"),
+        JSON.stringify({ permissions: { allow: ["Read", "Write", "Bash"], deny: [] } }),
+      );
+      const siblingMeta = join(siblingDir, "meta.json");
+      const input = toolName === "Bash"
+        ? { command: `cat ${siblingMeta}` }
+        : { ...toolInput, file_path: siblingMeta };
+
+      await hookCheckPath("agent-shared", JSON.stringify({
+        tool_name: toolName,
+        tool_input: input,
+        cwd: repo,
+      }));
+
+      const decision = JSON.parse(logged[0]!);
+      expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("other agents");
+    });
+  }
+
+  test("a no-worktree leaf cannot invoke ib new-agent directly through Bash", async () => {
+    const metaPath = join(agentDir, "meta.json");
+    const meta = await Bun.file(metaPath).json();
+    meta.agentType = "worker";
+    meta.worker = true;
+    await writeFile(metaPath, JSON.stringify(meta));
+
+    await hookCheckPath("agent-shared", JSON.stringify({
+      tool_name: "Bash",
+      tool_input: { command: "ib new-agent do work" },
+      cwd: repo,
+    }));
+
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("cannot spawn sub-agents");
   });
 });
 

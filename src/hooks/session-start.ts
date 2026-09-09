@@ -2,7 +2,7 @@
  * Hook: generate ittybitty session-start instructions based on detected role.
  */
 
-import { join, basename } from "path";
+import { join, basename, resolve } from "path";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { AGENT_CWD_PATTERN, SYSTEM_AGENT_ID, systemCoordinatorHome } from "./shared";
 import { loadAgentType, listSpawnableAgentTypesSync } from "../agent-types";
@@ -11,6 +11,7 @@ import { listTeams } from "../teams";
 import { isValidSessionId } from "../validation";
 import { resolveSandboxEnabled, type PathsConfig, type SandboxConfig } from "../sandbox";
 import { metadataCli } from "../agent-cli";
+import { findNoWorktreeAgentsDir } from "./agent-context";
 
 export type SessionRole = "primary" | "manager" | "worker" | "coordinator";
 
@@ -933,6 +934,7 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
   const match = AGENT_CWD_PATTERN.exec(cwd);
   let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; agentType?: string; model?: string; paths?: unknown; sandbox?: unknown; spawned_by?: { agent_id: string; repo_path: string | null }; state?: string } | undefined;
   let agentDirForState: string | undefined;
+  let roleCwd = cwd;
 
   if (match) {
     const agentId = match[1]!;
@@ -949,9 +951,14 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
       // Fall through to primary if meta can't be read
     }
   } else if (agentIdArg) {
-    // Non-worktree agent (e.g., coordinator): CWD is the repo root, not a worktree path.
-    // The agent ID is passed as a command argument. Look for meta.json in the repo's agents dir.
-    const agentDir = join(cwd, ".ittybitty", "agents", agentIdArg);
+    // Non-worktree agent: the explicit ID is authoritative, while bounded
+    // ancestor discovery finds the shared repo even when Claude reports a
+    // nested cwd. The shared resolver rejects nested forged agent boundaries.
+    const agentsDir = await findNoWorktreeAgentsDir(agentIdArg, cwd);
+    const agentDir = agentsDir
+      ? join(agentsDir, agentIdArg)
+      : join(cwd, ".ittybitty", "agents", agentIdArg);
+    if (agentsDir) roleCwd = resolve(agentsDir, "..", "..");
     agentDirForState = agentDir;
     try {
       const metaFile = Bun.file(join(agentDir, "meta.json"));
@@ -974,7 +981,7 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
     await writeAgentState(agentDirForState, "running");
   }
 
-  const ctx = detectRole(cwd, metaJson, agentIdArg);
+  const ctx = detectRole(roleCwd, metaJson, agentIdArg);
   const instructions = await generateInstructions(ctx);
 
   const output = {

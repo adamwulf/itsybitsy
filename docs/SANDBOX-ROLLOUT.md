@@ -33,6 +33,7 @@ kernel-sandboxed.
 - Agent types accept boolean `sandbox: true` / `sandbox: false` or object-form `sandbox.enabled`. The most specific explicit value wins across applicable layers and ancestors. Omission inherits; final resolution defaults true.
 - Spawn freezes the resolved boolean in metadata. Resume preserves explicit false and treats omitted enablement as true; enabled policy requires valid frozen paths and sealing. Use operator `ib sandbox refresh` to apply edited type settings in either direction.
 - Required runtime paths are added for the worktree, agent bookkeeping, and the selected CLI. The agy state directory is an agy-only runtime root.
+- `worktree: false` is supported only for Claude. Codex/Fugu/agy creation rejects `--no-worktree` before side effects, and resume/rehire reject non-Claude no-worktree metadata before shared-file mutation.
 - If an enabled policy cannot establish its platform, profile, or proxy, launch fails. Explicit false skips the itsybitsy wrapper/proxy/collector, not the prompt-free hook policy or invariant CLI approval flags described above. The global coordinator remains separately unsandboxed.
 
 ## Prepare the existing installation
@@ -68,7 +69,7 @@ Test a repository worker launch with the candidate and matching helper binary. B
 - Resume, refresh, respawn, and rehire retain sandbox enforcement and clean up their proxies.
 - Each deployed CLI and a per-repository coordinator work under their profiles. The earlier Claude-only boot probe does not prove Codex, fugu, agy, or coordinator integration.
 
-Also exercise explicit false on each deployed CLI: confirm the absence of the itsybitsy wrapper/proxy/collector, the presence of prompt-free hooks, Codex/Fugu `-a never -s workspace-write`, agy `--dangerously-skip-permissions --mode=accept-edits`, and neither `--dangerously-skip-permissions` nor `--permission-mode` on Claude; verify successful spawn/resume/rehire without a native approval card. For Claude, also verify deny-before-allow behavior and that a `worktree:false` agent uses its agent-local `.claude/settings.local.json` via `--settings` without modifying repository or user settings. Test refresh in both directions from an unsandboxed operator session. The global coordinator remains outside this stage.
+Also exercise explicit false on each deployed CLI: confirm the absence of the itsybitsy wrapper/proxy/collector, the presence of prompt-free hooks, Codex/Fugu `-a never -s workspace-write`, agy `--dangerously-skip-permissions --mode=accept-edits`, and neither `--dangerously-skip-permissions` nor `--permission-mode` on Claude; verify successful spawn/resume/rehire without a native approval card. For Claude, also verify deny-before-allow behavior and that a `worktree:false` agent uses its agent-local `.claude/settings.local.json` via `--settings`, the hook reads that exact policy, normal user/project settings still load and can further restrict behavior, and those source files remain unchanged. Test refresh in both directions from an unsandboxed operator session. The global coordinator remains outside this stage.
 
 ## Install and migrate running agents
 

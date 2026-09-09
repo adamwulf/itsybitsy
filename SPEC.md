@@ -21,11 +21,13 @@ When a new agent is created (`ib new-agent "prompt"`):
 
 1a0. **Caller spawn permission gate**: Independently of the `--manager` *target* check above, the spawn is gated on the *caller* — the agent whose worktree contains the CWD (`opts._cwd` if provided, else `process.cwd()`; matched against `/.ittybitty/agents/<id>/repo`). If that agent is not permitted to spawn children, the spawn is rejected regardless of which `--manager` is named. "Permitted to spawn children" is decided by `metaCanSpawnChildren`, the single predicate that BOTH this CLI caller gate and the intercept-task hook's Task/Agent/TaskCreate gate call, so a leaf agent is blocked identically on either path: a per-agent `canSpawnChildren` boolean override wins outright; otherwise the `system` type and any agent-type whose `canSpawnChildren` is true may spawn, an unknown/broken type may not (fail-closed on both paths), and legacy agents fall back to the `worker` boolean. This closes the hole where a leaf agent (worker) bypassed its no-spawn restriction by running `ib new-agent --manager <other-manager>` directly via Bash — a path the intercept-task hook (which only sees the `Task`/`Agent`/`TaskCreate` tools) never observes. The one deliberate divergence is `@system`: `metaCanSpawnChildren` reports it *can* spawn (via `ib new-agent --repo`), but the Task/Agent hook denies it with a specific "use `ib new-agent --repo`" message as a pre-check, because Task is the wrong mechanism for the system coordinator, not a permission denial. A caller not inside any agent worktree (primary Claude, a human shell, a top-level coordinator running from a repo root) has no caller meta and is unrestricted. In the implementation this gate executes *before* the step-1 `--manager` resolution and leaf-check, so an unpermitted caller is rejected with the caller error even when `--manager` is missing or names a nonexistent/invalid agent (it does not first surface a "manager not found"). Note this gate is about the *caller's* permission only; whether the *named* `--manager` may parent children is the separate step-1 target check, which still uses its own narrower `worker`-based leaf test (it inspects a different agent — the prospective parent — whose stored `worker` flag reliably reflects its type).
 
-1a. **Spawner worktree cleanliness**: The spawner's CWD (`opts._cwd` if provided by the intercept-task hook, else `process.cwd()`) must have an empty `git status --porcelain`. If non-empty, the spawn is rejected before any side effects (no agent directory created, no worktree allocated, no tmux session started). Skipped when the CWD is not a git working tree (e.g. system coordinator home, raw temp dir) — `git rev-parse --is-inside-work-tree` must exit 0 AND print `true` for the check to fire. Also skipped (falls open) when `git status --porcelain` itself exits non-zero, since a transient git failure shouldn't block spawning. The rationale differs by spawn mode: for worktree spawns, the new sub-agent's worktree forks from HEAD and would silently miss the spawner's pending edits; for `--no-worktree` spawns, the sub-agent runs in the spawner's own CWD and its edits would interleave with the spawner's pending edits, producing incoherent diffs. The error message names both `uncommitted changes` and `untracked files`, suggests `commit` / `.gitignore` / `remove` as remediations, and includes the raw porcelain output for the user to triage.
+1a. **Spawner worktree cleanliness**: The spawner's CWD (`opts._cwd` if provided by the intercept-task hook, else `process.cwd()`) must have an empty `git status --porcelain`. If non-empty, the spawn is rejected before any side effects (no agent directory created, no worktree allocated, no tmux session started). Skipped when the CWD is not a git working tree (e.g. system coordinator home, raw temp dir) — `git rev-parse --is-inside-work-tree` must exit 0 AND print `true` for the check to fire. Also skipped (falls open) when `git status --porcelain` itself exits non-zero, since a transient git failure shouldn't block spawning. The rationale differs by spawn mode: for worktree spawns, the new sub-agent's worktree forks from HEAD and would silently miss the spawner's pending edits; for supported Claude `--no-worktree` spawns (item 3a), the sub-agent runs in the spawner's own CWD and its edits would interleave with the spawner's pending edits, producing incoherent diffs. The error message names both `uncommitted changes` and `untracked files`, suggests `commit` / `.gitignore` / `remove` as remediations, and includes the raw porcelain output for the user to triage.
 
 2. **Auto-detect manager**: If no `--manager` is provided and the caller is running inside an agent worktree (CWD matches `/.ittybitty/agents/<id>/repo`), the caller's agent ID is automatically set as the manager.
 
 3. **Configuration**: Config is loaded from `~/.itsybitsy/config.json` (user-wide). The agent type is resolved by: `--type` flag > default `"manager"`. The type definition is loaded from `~/.itsybitsy/agent-types/<name>.md` — the `.md` file on disk is the sole source of truth (no hardcoded fallback). On first run, `~/.itsybitsy/agent-types/` is auto-populated with embedded default templates (see §2.7). The model is determined by a most-specific-wins precedence chain across the agent-type layer files (same layer set and gating as the permissions merge, §2.3): `--model` flag > `<type>.md` `model` > `_non_coordinator.md` `model` (non-coordinator agents only) > `_all.md` `model` > config `model` (non-coordinator agents only) > `"opus"` (default). The agent-type layers all override the user's config `model`; config `model` is the final fallback before `"opus"` for non-coordinator agents only. Coordinators deliberately skip config `model` — the coordinator agent-type file is authoritative for coordinators, since otherwise the user's global `model` setting would clobber the coordinator agent-type. A blank `model:` value in any layer (parsed to `undefined`) is skipped, so a more-specific file declaring `model:` with no value does NOT clobber a real model set by a less-specific file. The reasoning-effort level (`--effort <level>` for Claude, `model_reasoning_effort` for codex) is resolved by the identical chain and gating: `--effort` flag > `<type>.md` `effort` > `_non_coordinator.md` `effort` (non-coordinator agents only) > `_all.md` `effort` > config `effort` (non-coordinator agents only) > `"xhigh"` (default). Valid levels are `low|medium|high|xhigh|max`; codex has no `xhigh`/`max`, so those two collapse to codex's `high` (see §18). A blank `effort:` is skipped the same way a blank `model:` is.
+
+3a. **CLI/worktree compatibility**: `--no-worktree` is supported only for Claude. After resolving the model/CLI and before allocating an agent directory, worktree, tmux session, or other persistent state, creation rejects `--no-worktree` for Codex, Fugu, and agy. Their hook/rule/precheck paths require a real isolated worktree. Resume and rehire likewise refuse legacy or malformed non-Claude metadata with `worktree: false` before regenerating hooks/rules, changing trust state, or touching other shared files. This is an explicit unsupported-mode error, not a fallback to partial setup.
 
 4. **Max agents check**: The number of active agents (directories with `meta.json` in `.ittybitty/agents/`) must not exceed the `maxAgents` config value (default: 10).
 
@@ -45,7 +47,7 @@ When a new agent is created (`ib new-agent "prompt"`):
    - Type-defined permissions from `~/.itsybitsy/agent-types/<type>.md` frontmatter
    - Hook definitions: path-check, stop, permission-denied, session-start, and optionally intercept-task (for agents with `canSpawnChildren: true`)
    - The agent ID placeholder `__AGENT_ID__` is replaced with the actual ID after writing
-   - For a Claude agent with `worktree: false` (a coordinator or regular `--no-worktree` agent), the generated file instead lives at `<agent-dir>/.claude/settings.local.json` and is passed explicitly with `--settings`. Repository and user settings remain byte-for-byte unchanged.
+   - For a Claude agent with `worktree: false` (a coordinator or regular `--no-worktree` agent), the generated file instead lives at `<agent-dir>/.claude/settings.local.json` and is passed explicitly with `--settings`; the itsybitsy hook reads this exact file as the agent policy. This isolates itsybitsy's generated settings without changing setting sources: normal user/project settings still load and may further restrict behavior, preserving pre-sandbox customization, while their files remain byte-for-byte unchanged.
 
 9. **Write meta.json** to `<agent-dir>/meta.json` (see §5.2 for fields). Includes `agentType` (the resolved type name), `agentIcon` (the type's icon character, if defined), `paths` (the resolved, repo-anchored `allowRead`/`allowWrite`/`deny` lists from the union of the type's `paths:` frontmatter — see §2.2 and §6.1), and `sandbox` (the resolved kernel-sandbox policy).
 
@@ -217,6 +219,8 @@ Pause (`ib pause <id>`) stops the agent but preserves all state:
 
 Resume (`ib resume <id>`) restarts a stopped agent:
 
+Before any resume mutation, a non-Claude agent whose metadata has `worktree: false` is rejected as unsupported. Only Claude has a no-worktree resume path.
+
 1. Read `session_id` from `meta.json` (required for Claude `--resume`)
 2. Write `resume.sh` with `claude --resume <session-id>` command and a fresh launch-owned denial collector using the same readiness, identity-registration, and cleanup protocol as `start.sh` (other CLIs use their corresponding resume command)
 3. Start new tmux session running `resume.sh`
@@ -284,6 +288,10 @@ Session-resume failures leave a valid stopped agent so `ib resume` can be
 retried. Archives and retained refs remain immutable. Legacy archives and
 merge/nuke archives without a supported manifest produce a non-destructive
 "not rehirable" error.
+
+Rehire rejects archived Codex, Fugu, or agy metadata with `worktree: false`
+before reconstructing files or mutating shared state. Claude remains the only
+CLI with supported no-worktree rehire.
 
 ### 1.8 Nuking
 
@@ -759,9 +767,9 @@ itsybitsy hooks operate across these execution contexts. Each context has differ
 | **Primary Claude** | Any non-worktree path | `~/.claude/settings.json` (global hooks only) | User's own `~/.claude/settings.json` + repo `.claude/settings.local.json` | CWD does NOT match `/.ittybitsy/agents/<id>/repo` |
 | **Spawning agent** (`canSpawnChildren: true`) | `<repo>/.ittybitsy/agents/<id>/repo` | Agent's `settings.local.json` (5 hooks: path-check, stop, session-start, permission-denied, intercept-task) | Built per §2.3 with `_all.md` (always) + `_non_coordinator.md` (non-coordinators only) + type-defined permissions | CWD matches pattern AND agent type has `canSpawnChildren: true` |
 | **Leaf agent** (`canSpawnChildren: false`) | `<repo>/.ittybitty/agents/<id>/repo` | Agent's `settings.local.json` (4 hooks: path-check, stop, session-start, permission-denied — NO intercept-task) | Built per §2.3 with `_all.md` + `_non_coordinator.md` + type-defined permissions | CWD matches pattern AND agent type has `canSpawnChildren: false` |
-| **Claude `worktree: false` agent** | Shared repo/coordinator working directory | `<agent-dir>/.claude/settings.local.json`, passed with `--settings` | Built from the same applicable layers as its role above | Explicit agent-bound hook commands and `meta.json`, not the worktree CWD pattern |
+| **Claude `worktree: false` agent** | Shared repo/coordinator working directory | `<agent-dir>/.claude/settings.local.json`, passed with `--settings`; normal user/project sources also load | Built from the same applicable layers as its role above; the hook reads this exact agent file | Explicit agent-bound hook commands and `meta.json`, not the worktree CWD pattern |
 
-**Key distinction**: Primary Claude uses ONLY the global hooks from `~/.claude/settings.json` (§6.7). Per-agent hooks (§6.1–6.6) live either in the isolated worktree settings file or, for `worktree: false`, in the agent-local settings file passed with `--settings`. They must never leak into the user's repository or user settings, both of which remain byte-for-byte unchanged.
+**Key distinction**: Primary Claude uses ONLY the global hooks from `~/.claude/settings.json` (§6.7). Per-agent hooks (§6.1–6.6) live either in the isolated worktree settings file or, for `worktree: false`, in the agent-local settings file passed with `--settings`. The agent-local file is an additional explicit settings file, not a setting-source override: normal user/project sources continue to load and may add restrictions. itsybitsy never writes those repository or user files.
 
 **Hook isolation invariant**: `ib retire`, `ib nuke`, and `ib merge` must ensure agent-specific hooks are cleaned from the repo's `settings.local.json` if they were ever written there. The intended flow is:
 1. Worktree agent creation writes hooks to `<agent-dir>/repo/.claude/settings.local.json`.
@@ -3051,6 +3059,10 @@ Three codex-side hook handlers, all dispatched through a fail-open-safe wrapper:
 
 `newAgent()` in `src/ib-commands.ts` branches on `parseModel(model).cli`:
 
+Codex and Fugu require an isolated worktree. `--no-worktree` is rejected before
+agent-directory, worktree, or tmux allocation, rather than entering a launch
+path whose generated files and hook prechecks were skipped.
+
 - **claude path:** unchanged (byte-snapshot-guarded at `tests/fixtures/claude-start-sh-baseline.sh` — any drift fails CI).
 - **codex path:** generates a codex-shaped `start.sh` via `buildCodexStartContent()` in `src/codex-spawn.ts`. The codex branch:
   1. Skips `<worktree>/.claude/settings.local.json` entirely (codex doesn't read it).
@@ -3066,6 +3078,9 @@ Coordinators cannot currently be spawned under codex: `newAgent()` rejects `code
 ### 18.7 Resume Path
 
 `resumeAgent()` in `src/ib-commands.ts` branches on `parseModel(meta.model).cli`:
+
+A Codex/Fugu record with `worktree: false` is rejected before resume changes
+files or shared state. Rehire applies the same pre-mutation restriction.
 
 - **claude path:** unchanged (byte-snapshot-guarded at `tests/fixtures/claude-resume-sh-baseline.sh`).
 - **codex path:** validates that `meta.codex_session_id` is present (populated by the SessionStart hook on first spawn); runs the same spawn-time dispatcher precheck as `newAgent()`; generates a codex-shaped `resume.sh` via `buildCodexResumeContent()` in `src/codex-spawn.ts`. The resume script invokes `codex resume "<UUID>"` with generated inline hook flags, `--dangerously-bypass-hook-trust`, and `-a never` in both modes. Frozen enabled policy selects `-s danger-full-access` inside Seatbelt and the proxy; frozen false explicitly selects `-s workspace-write` without the itsybitsy wrapper. Same SIGHUP-ignore insulation, same `ib write-pid` PID capture.
@@ -3216,6 +3231,11 @@ Tool translation (`src/hooks/agy-tools.ts`) maps `run_command`→`Bash`, `view_f
 ### 19.5 Spawn, Resume, Teardown
 
 `newAgent()` / `resumeAgent()` in `src/ib-commands.ts` branch on `parseModel(model).cli === "agy"`: skip `.claude/settings.local.json`; refuse a tracked boundary file (D7); write the two worktree files + gitignore; `ensureAgyTrustedWorkspace(realpath(worktree))` BEFORE tmux (D5); run the dispatcher `--dry-run` precheck for all three events; generate `start.sh`/`resume.sh` with the `sandbox-exec` + proxy wrapper only when enabled, with the agy-only `~/.gemini` runtime write root in the profile. Resume requires `meta.agy_conversation_id` (captured by the first PreInvocation), regenerates the worktree files, re-trusts, re-prechecks, and re-passes `--model` + effort (agy resume remembers neither). Teardown (`archiveAgent`/nuke/retire) calls `untrustAgyWorkspaceForTeardown` best-effort. `--coordinator` with `agy:` is rejected (D11-style stub).
+
+Agy requires a real isolated worktree. Creation rejects `--no-worktree` before
+any allocation or persistent mutation. Resume and rehire reject agy metadata
+with `worktree: false` before regenerating hook/rule files or changing trusted
+workspace state.
 
 `ib sandbox refresh` treats agy like every other CLI: it re-derives the frozen
 paths/rules and sandbox policy, then follows the ordinary resume path using the

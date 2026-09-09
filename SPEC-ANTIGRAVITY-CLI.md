@@ -13,6 +13,12 @@ prompt is surfaced. Disabled launches and resumes omit only the itsybitsy
 wrapper, proxy, and kernel-denial collector, restoring pre-sandbox agy behavior.
 Refresh applies the newly resolved policy through the shared lifecycle.
 
+Agy requires a real agent worktree for its generated hooks, always-on rule,
+tracked-file guard, and dispatcher prechecks. Creation rejects `--no-worktree`
+before side effects. Resume and rehire reject any agy `worktree: false`
+metadata before regenerating those files, changing trusted-workspace state, or
+touching other shared files. No partial no-worktree setup is supported.
+
 `meta.paths` plus agy-appropriate runtime roots feed `resolvePreparedAccess()`.
 A missing paths block defaults all three lists to empty; a partial object keeps
 populated entries and defaults only omitted lists. The retired `allowedPaths`

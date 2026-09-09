@@ -32,6 +32,13 @@ line or phase ledger below that says `-a`/`-s` are omitted in disabled mode, or
 that presents one fixed sandbox mode for every launch, is superseded by this
 addendum.
 
+**Current worktree support restriction:** Codex and Fugu require a real agent
+worktree because their generated `AGENTS.md`, inline-hook prechecks, and launch
+setup depend on it. Creation rejects `--no-worktree` before side effects.
+Resume and rehire reject any non-Claude `worktree: false` metadata before
+regenerating files or touching shared state. No partial no-worktree setup is
+supported.
+
 > This SPEC governs adding OpenAI's **Codex CLI** (`codex`, v0.135.0) as a per-agent
 > alternative to the `claude` CLI. It MUST be read alongside the project `SPEC.md`
 > and the Cross-Cutting Review Checklist in `CLAUDE.md` (agent functionality, hooks,

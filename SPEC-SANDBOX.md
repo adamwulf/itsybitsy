@@ -14,9 +14,16 @@ The CLI launch contract is mode-specific only where process confinement changes:
 
 For Claude `worktree: false` sessions (per-repository coordinators and regular
 `--no-worktree` agents), the generated settings live at the agent-local
-`<agentDir>/.claude/settings.local.json` and are passed via `--settings`.
-Repository and user settings are not modified. Spawn, resume, rehire, and
+`<agentDir>/.claude/settings.local.json`, are passed via `--settings`, and are
+read directly by the itsybitsy hook as the agent policy. Normal user/project
+settings still load and may further restrict behavior; their files are not
+modified. There is no setting-source override. Spawn, resume, rehire, and
 refresh preserve this arrangement and the mode split above.
+
+No-worktree execution is unsupported for Codex, Fugu, and agy. Their create
+paths reject `--no-worktree` before side effects, and resume/rehire reject any
+non-Claude `worktree: false` metadata before hook/rule regeneration or shared
+file mutation.
 
 Enabled launches fail closed if profile or proxy setup fails. Spawn freezes policy in metadata, resume preserves it, and `ib sandbox refresh` applies current type settings in either direction. Global `@system` sandboxing remains deferred.
 

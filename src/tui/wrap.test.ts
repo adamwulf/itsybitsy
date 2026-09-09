@@ -164,6 +164,20 @@ describe("wrapSingleLine", () => {
     expect(result[0]).toContain("abc");
     expect(result[1]).toBe("def");
   });
+
+  test("does not let a malformed CSI consume following emoji or text", () => {
+    const line = "12\x1b[🙂abcdef";
+    const result = wrapSingleLine(line, 3);
+    expect(result.join("")).toBe(line);
+    expect(result.join("")).toContain("🙂a");
+  });
+
+  test("does not let an unterminated OSC consume the rest of the line", () => {
+    const line = "12\x1b]unterminated🙂abcdef";
+    const result = wrapSingleLine(line, 3);
+    expect(result.join("")).toBe(line);
+    expect(result.length).toBeGreaterThan(1);
+  });
 });
 
 describe("wrapLines", () => {
@@ -216,6 +230,25 @@ describe("wordWrapSingleLine", () => {
   test("hard-wraps words longer than width", () => {
     const result = wordWrapSingleLine("abcdefghij short", 6);
     expect(result).toEqual(["abcdef", "ghij", "short"]);
+  });
+
+  test("does not split spaces inside valid CSI or OSC controls", () => {
+    const controls = [
+      "\x1b[1 q",
+      "\x1b]0;hello world\x07",
+      "\x1b]8;id=hello world;https://example.com\x1b\\",
+    ];
+    for (const control of controls) {
+      const close = control.startsWith("\x1b]8;") ? "\x1b]8;;\x1b\\" : "";
+      const line = control + "ABCDEFGHIJ" + close;
+      const result = wordWrapSingleLine(line, 3);
+      expect(result.join("")).toBe(line);
+      // pi-tui does not recognize the valid CSI-intermediate form, so measure
+      // its visible payload after removing the known zero-width controls.
+      expect(result.every((row) => visibleWidth(row.replace(control, "").replace(close, "")) <= 3))
+        .toBe(true);
+      expect(result.every((row) => row.length > 0)).toBe(true);
+    }
   });
 
   test("handles empty string", () => {

@@ -166,24 +166,53 @@ export function wordWrapSingleLine(line: string, width: number): string[] {
   if (borderSuffix !== null) return [truncateTerminalToWidth(line, width, borderSuffix)];
 
   const chunks: string[] = [];
-  // Split into tokens: sequences of non-space chars and individual spaces
-  const tokens: string[] = [];
-  let current = "";
-  for (const ch of Array.from(line)) {
-    if (ch === " ") {
-      if (current) { tokens.push(current); current = ""; }
-      tokens.push(" ");
-    } else {
-      current += ch;
+  // Split visible content into words and spaces without inspecting bytes inside
+  // terminal controls. OSC payloads and CSI sequences may legally contain
+  // spaces, but those are not word-wrap opportunities.
+  const tokens: Array<{ raw: string; width: number; space: boolean }> = [];
+  if (line.includes("\x1b")) {
+    let word = "";
+    let wordWidth = 0;
+    const flushWord = () => {
+      if (word.length === 0) return;
+      tokens.push({ raw: word, width: wordWidth, space: false });
+      word = "";
+      wordWidth = 0;
+    };
+    for (const token of terminalTokens(line)) {
+      const raw = safeTerminalTokenRaw(token);
+      if (token.escape) {
+        word += raw;
+      } else if (token.text === " ") {
+        flushWord();
+        tokens.push({ raw, width: token.width, space: true });
+      } else {
+        word += raw;
+        wordWidth += token.width;
+      }
     }
+    flushWord();
+  } else {
+    let word = "";
+    for (const ch of Array.from(line)) {
+      if (ch === " ") {
+        if (word) {
+          tokens.push({ raw: word, width: visibleWidth(word), space: false });
+          word = "";
+        }
+        tokens.push({ raw: " ", width: 1, space: true });
+      } else {
+        word += ch;
+      }
+    }
+    if (word) tokens.push({ raw: word, width: visibleWidth(word), space: false });
   }
-  if (current) tokens.push(current);
 
   let lineStr = "";
   let lineWidth = 0;
 
   for (const token of tokens) {
-    const tokenW = visibleWidth(token);
+    const tokenW = token.width;
 
     // Skip spaces at the start of a CONTINUATION line (after a wrap point).
     // On the FIRST physical row (chunks.length === 0) we do NOT skip leading
@@ -196,12 +225,12 @@ export function wordWrapSingleLine(line: string, width: number): string[] {
     // (below) and the indent is not carried onto its wrapped rows — the same
     // behavior as the pre-reflow code. An all-spaces line, or an indent >= width,
     // falls out the same way.
-    if (token === " " && lineWidth === 0 && chunks.length > 0) continue;
+    if (token.space && lineWidth === 0 && chunks.length > 0) continue;
 
     // If adding this token would exceed width
     if (lineWidth + tokenW > width) {
       // If this is a space, just skip it (acts as the break point)
-      if (token === " ") {
+      if (token.space) {
         if (lineStr) { chunks.push(lineStr.trimEnd()); lineStr = ""; lineWidth = 0; }
         continue;
       }
@@ -209,7 +238,7 @@ export function wordWrapSingleLine(line: string, width: number): string[] {
       if (lineStr) { chunks.push(lineStr.trimEnd()); lineStr = ""; lineWidth = 0; }
       // If the word itself is wider than width, hard-wrap it
       if (tokenW > width) {
-        const hardWrapped = wrapSingleLine(token, width);
+        const hardWrapped = wrapSingleLine(token.raw, width);
         for (let i = 0; i < hardWrapped.length - 1; i++) {
           chunks.push(hardWrapped[i]!);
         }
@@ -219,7 +248,7 @@ export function wordWrapSingleLine(line: string, width: number): string[] {
       }
     }
 
-    lineStr += token;
+    lineStr += token.raw;
     lineWidth += tokenW;
   }
   if (lineStr || chunks.length === 0) chunks.push(lineStr.trimEnd());
@@ -501,6 +530,7 @@ const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "graphem
 
 interface TerminalToken {
   raw: string;
+  safeRaw: string;
   width: number;
   text: string;
   escape: boolean;
@@ -512,8 +542,21 @@ function terminalEscapeEnd(text: string, cursor: number): number {
   const kind = text[cursor + 1]!;
   let end = cursor + 2;
   if (kind === "[") {
-    while (end < text.length && !isCsiTerminator(text.charCodeAt(end))) end++;
-    return end < text.length ? end + 1 : end;
+    let intermediates = false;
+    while (end < text.length) {
+      const code = text.charCodeAt(end);
+      if (isCsiTerminator(code)) return end + 1;
+      if (code >= 0x20 && code <= 0x2f) intermediates = true;
+      else if (code >= 0x30 && code <= 0x3f && !intermediates) {
+        // Parameter byte before any intermediate bytes.
+      } else {
+        // Invalid CSI byte: consume only ESC so the remaining text, including
+        // a surrogate pair at this position, is preserved as visible content.
+        return cursor + 1;
+      }
+      end++;
+    }
+    return cursor + 1;
   }
   if (kind === "]" || kind === "_" || kind === "P" || kind === "^") {
     while (
@@ -523,7 +566,10 @@ function terminalEscapeEnd(text: string, cursor: number): number {
     ) {
       end++;
     }
-    return end + (text[end] === "\x07" ? 1 : end < text.length ? 2 : 0);
+    if (text[end] === "\x07") return end + 1;
+    if (end < text.length) return end + 2;
+    // Unterminated string control: preserve its payload as ordinary text.
+    return cursor + 1;
   }
   if (kind === "(" || kind === ")") return Math.min(text.length, cursor + 3);
   const code = kind.charCodeAt(0);
@@ -561,25 +607,35 @@ function terminalTokens(text: string): TerminalToken[] {
     while (escapeIndex < escapes.length && escapes[escapeIndex]!.offset <= start) {
       tokens.push({
         raw: escapes[escapeIndex]!.raw,
+        safeRaw: isSafeTerminalEscape(escapes[escapeIndex]!.raw)
+          ? escapes[escapeIndex]!.raw
+          : "",
         width: 0,
         text: "",
         escape: true,
       });
       escapeIndex++;
     }
-    let raw = "";
+    const rawParts: string[] = [];
+    const safeParts: string[] = [];
     let innerCursor = start;
     const embeddedEscapes: string[] = [];
     while (escapeIndex < escapes.length && escapes[escapeIndex]!.offset < end) {
       const embedded = escapes[escapeIndex]!;
-      raw += plain.slice(innerCursor, embedded.offset) + embedded.raw;
+      const plainPart = plain.slice(innerCursor, embedded.offset);
+      rawParts.push(plainPart, embedded.raw);
+      safeParts.push(plainPart);
+      if (isSafeTerminalEscape(embedded.raw)) safeParts.push(embedded.raw);
       embeddedEscapes.push(embedded.raw);
       innerCursor = embedded.offset;
       escapeIndex++;
     }
-    raw += plain.slice(innerCursor, end);
+    const finalPlain = plain.slice(innerCursor, end);
+    rawParts.push(finalPlain);
+    safeParts.push(finalPlain);
     tokens.push({
-      raw,
+      raw: rawParts.join(""),
+      safeRaw: safeParts.join(""),
       width: visibleWidth(part.segment),
       text: part.segment,
       escape: false,
@@ -589,6 +645,9 @@ function terminalTokens(text: string): TerminalToken[] {
   while (escapeIndex < escapes.length) {
     tokens.push({
       raw: escapes[escapeIndex]!.raw,
+      safeRaw: isSafeTerminalEscape(escapes[escapeIndex]!.raw)
+        ? escapes[escapeIndex]!.raw
+        : "",
       width: 0,
       text: "",
       escape: true,
@@ -605,20 +664,17 @@ function isSafeTerminalEscape(escape: string): boolean {
   if (escape.startsWith("\x1b[") && escape.slice(2, -1).includes(":") && !escape.endsWith("m")) {
     return false;
   }
-  return visibleWidth(escape) === 0;
+  // terminalEscapeEnd already admitted only a syntactically complete control;
+  // width libraries do not consistently recognize valid CSI intermediates.
+  return true;
 }
 
 function safeTerminalTokenRaw(token: TerminalToken): string {
-  if (token.escape) return isSafeTerminalEscape(token.raw) ? token.raw : "";
-  let raw = token.raw;
-  for (const escape of token.embeddedEscapes ?? []) {
-    if (!isSafeTerminalEscape(escape)) raw = raw.replace(escape, "");
-  }
-  return raw;
+  return token.safeRaw;
 }
 
 function needsRobustTerminalMeasurement(text: string): boolean {
-  return /\x1b\[[0-9;:]*:/.test(text);
+  return text.includes("\x1b");
 }
 
 function terminalVisibleWidthForWrap(text: string): number {

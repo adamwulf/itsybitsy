@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "fs/promises";
 import { homedir, tmpdir } from "os";
 import { dirname, join } from "path";
 import { parseAgentTypeFile } from "./agent-types";
@@ -230,6 +230,7 @@ describe("sandbox profile emission", () => {
       '(deny file-write* (subpath (param "TMUXSOCK")))',
       '(deny network-outbound (remote unix-socket (subpath (param "TMUXSOCK"))))',
       '(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))',
+      '(deny file-link (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))',
     ]);
   });
 
@@ -254,6 +255,7 @@ describe("sandbox profile emission", () => {
       '(allow file-read* (subpath (param "PARENTCLAUDE")))',
       '(allow file-write* (subpath (param "PARENTCLAUDE")))',
       '(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))',
+      '(deny file-link (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))',
     ]);
   });
 
@@ -448,6 +450,9 @@ test("LIVE macOS profile protects trusted seal-helper results while ordinary tmp
   await mkdir(resultDir, { mode: 0o700 });
   await writeFile(join(resultDir, "output"), "trusted");
   await writeFile(join(resultDir, "result"), "0\n");
+  await symlink(join(resultDir, "output"), symlinkAlias);
+  const outputBefore = await stat(join(resultDir, "output"));
+  const resultBefore = await stat(join(resultDir, "result"));
   try {
     const params = { ...PARAMS, canSpawnChildren: true };
     const profile = generateProfile(config({ rawAllow: ["(allow default)"] }), EMPTY_PATHS, params);
@@ -467,9 +472,7 @@ test("LIVE macOS profile protects trusted seal-helper results while ordinary tmp
       `test -e '${hardLinkAlias}'; printf 'hardlink_exists=%s\\n' "$?"`,
       `cp -l '${join(resultDir, "output")}' '${cpHardLinkAlias}' 2>/dev/null; printf 'cp_hardlink=%s\\n' "$?"`,
       `test -e '${cpHardLinkAlias}'; printf 'cp_hardlink_exists=%s\\n' "$?"`,
-      `ln -s '${join(resultDir, "output")}' '${symlinkAlias}' 2>/dev/null; printf 'symlink=%s\\n' "$?"`,
-      `test -L '${symlinkAlias}'; printf 'symlink_exists=%s\\n' "$?"`,
-      `if [ -L '${symlinkAlias}' ]; then printf forged > '${symlinkAlias}'; fi`,
+      `printf forged > '${symlinkAlias}' 2>/dev/null; printf 'symlink_write=%s\\n' "$?"`,
       `printf ordinary > '${sibling}' 2>/dev/null; printf 'sibling=%s\\n' "$?"`,
     ].join("; ");
     const probe = Bun.spawnSync({
@@ -484,9 +487,9 @@ test("LIVE macOS profile protects trusted seal-helper results while ordinary tmp
     expect(fields.read).toBe("trusted");
     for (const operation of [
       "mkdir", "overwrite_output", "overwrite_result", "create",
-      "unlink_output", "unlink_result", "rename", "hardlink", "hardlink_exists", "cp_hardlink", "cp_hardlink_exists", "symlink", "symlink_exists",
+      "unlink_output", "unlink_result", "rename", "hardlink", "hardlink_exists", "cp_hardlink", "cp_hardlink_exists", "symlink_write",
     ]) {
-      expect(fields[operation]).not.toBe("0");
+      expect(fields[operation]).toMatch(/^[1-9][0-9]*$/);
     }
     expect(fields.sibling).toBe("0");
     expect(await readFile(join(resultDir, "output"), "utf8")).toBe("trusted");
@@ -494,8 +497,12 @@ test("LIVE macOS profile protects trusted seal-helper results while ordinary tmp
     expect(fields.hardlink_exists).not.toBe("0");
     expect(fields.cp_hardlink).not.toBe("0");
     expect(fields.cp_hardlink_exists).not.toBe("0");
-    expect(fields.symlink).not.toBe("0");
-    expect(fields.symlink_exists).not.toBe("0");
+    const outputAfter = await stat(join(resultDir, "output"));
+    const resultAfter = await stat(join(resultDir, "result"));
+    expect({ ino: outputAfter.ino, nlink: outputAfter.nlink, size: outputAfter.size })
+      .toEqual({ ino: outputBefore.ino, nlink: outputBefore.nlink, size: outputBefore.size });
+    expect({ ino: resultAfter.ino, nlink: resultAfter.nlink, size: resultAfter.size })
+      .toEqual({ ino: resultBefore.ino, nlink: resultBefore.nlink, size: resultBefore.size });
   } finally {
     await rm(resultDir, { recursive: true, force: true });
     await rm(newResultDir, { recursive: true, force: true });

@@ -1127,6 +1127,10 @@ export function generateProfile(
   // remove them. Keep this write-only deny last so even rawAllow and a broad
   // authored /private/tmp allow cannot reopen mutation access.
   lines.push(`(deny file-write* ${SEAL_HELPER_RESULT_MATCHER})`);
+  // Seatbelt treats hard/symbolic-link creation as a distinct operation from
+  // file-write*. Deny it explicitly so a protected inode cannot be aliased
+  // into an ordinary writable /private/tmp pathname.
+  lines.push(`(deny file-link ${SEAL_HELPER_RESULT_MATCHER})`);
 
   return `${lines.join("\n")}\n`;
 }

@@ -92,15 +92,15 @@ describe("buildCodexStartContent — launch line", () => {
       .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
   });
 
-  test.each([false, true])("disabled launch disables native protections, retains hooks, and omits kernel helpers (fugu=%s)", (fugu) => {
+  test.each([false, true])("disabled launch keeps native workspace-write and hooks, and omits kernel helpers (fugu=%s)", (fugu) => {
     const content = buildCodexStartContent({
       ...baseInput(),
       sandboxEnabled: false,
       fugu,
     });
-    expect(content.match(/codex -m [^\n]* -a never -s danger-full-access --dangerously-bypass-hook-trust/g)?.length).toBe(2);
+    expect(content.match(/codex -m [^\n]* -a never -s workspace-write --dangerously-bypass-hook-trust/g)?.length).toBe(2);
     expect(content).toContain("--dangerously-bypass-hook-trust");
-    expect(content).not.toContain("-s workspace-write");
+    expect(content).not.toContain("-s danger-full-access");
     expect(content).not.toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(content).toContain("hooks.PreToolUse");
     expect(content).not.toContain("sandbox-exec");
@@ -118,7 +118,7 @@ describe("buildCodexStartContent — launch line", () => {
     });
     expect(content).not.toContain("STALE-PREAMBLE");
     expect(content).not.toContain("STALE-PREFIX");
-    expect(content).toContain("-a never -s danger-full-access");
+    expect(content).toContain("-a never -s workspace-write");
     expect(content).toContain("hooks.PreToolUse");
   });
 
@@ -400,15 +400,15 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
       .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
   });
 
-  test.each([false, true])("disabled resume disables native protections, retains hooks, and omits kernel helpers (fugu=%s)", (fugu) => {
+  test.each([false, true])("disabled resume keeps native workspace-write and hooks, and omits kernel helpers (fugu=%s)", (fugu) => {
     const content = buildCodexResumeContent({
       ...baseInput(),
       sandboxEnabled: false,
       fugu,
     });
-    expect(content.match(/codex resume [^\n]* -a never -s danger-full-access --dangerously-bypass-hook-trust/g)?.length).toBe(2);
+    expect(content.match(/codex resume [^\n]* -a never -s workspace-write --dangerously-bypass-hook-trust/g)?.length).toBe(2);
     expect(content).toContain("--dangerously-bypass-hook-trust");
-    expect(content).not.toContain("-s workspace-write");
+    expect(content).not.toContain("-s danger-full-access");
     expect(content).not.toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(content).toContain("hooks.PreToolUse");
     expect(content).not.toContain("sandbox-exec");
@@ -426,7 +426,7 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     });
     expect(content).not.toContain("STALE-PREAMBLE");
     expect(content).not.toContain("STALE-PREFIX");
-    expect(content).toContain("-a never -s danger-full-access");
+    expect(content).toContain("-a never -s workspace-write");
     expect(content).toContain("hooks.PreToolUse");
   });
 

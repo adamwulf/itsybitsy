@@ -627,12 +627,11 @@ describe("buildPathIsolationSection", () => {
   });
 
   test.each(["codex:gpt-5.6-sol", "fugu:fugu"])(
-    "%s disabled instructions describe hook authorization without a native sandbox", (model) => {
+    "%s disabled instructions describe the remaining native sandbox", (model) => {
       const section = buildPathIsolationSection({
         ...baseCtx, model, sandbox: { enabled: false, rawAllow: [], domains: [] },
       });
-      expect(section).toContain("Codex's native sandbox is also OFF; tool permissions are handled by the hooks");
-      expect(section).not.toContain("workspace-write");
+      expect(section).toContain("Codex's native workspace-write sandbox remains enabled");
     },
   );
 

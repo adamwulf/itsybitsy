@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { formatResetTime, parseUsageResponse, parseCodexRateLimits, parseGeminiUsage, fetchCodexUsage, fetchGeminiUsage, fetchUsage, setTestDir, resetTestDir, fetchCtx, spawnCtx, type UsageResult } from "./usage";
+import { formatResetTime, parseUsageResponse, parseCodexRateLimits, parseGeminiUsage, fetchCodexUsage, fetchGeminiUsage, fetchUsage, rankTokenCandidates, setTestDir, resetTestDir, fetchCtx, spawnCtx, type UsageResult } from "./usage";
 import { join } from "path";
 import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
@@ -182,25 +182,37 @@ describe("fetchUsage", () => {
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "usage-test-"));
     setTestDir(tmpDir);
+    // The credential reader always consults the Keychain too. Keep these
+    // tests hermetic: no real `security` lookups on the developer's Mac.
+    spawnCtx.set(() => {
+      throw new Error("keychain unavailable in test");
+    });
   });
 
   afterEach(async () => {
     resetTestDir();
     fetchCtx.reset();
+    spawnCtx.reset();
     await rm(tmpDir, { recursive: true, force: true });
   });
 
-  /** Write a credentials file so readAccessToken succeeds. */
+  /** Write a credentials file so readAccessTokens succeeds. */
   async function writeCredentials(token = "test-token"): Promise<void> {
     const credPath = join(tmpDir, "credentials.json");
     await Bun.write(credPath, JSON.stringify({ claudeAiOauth: { accessToken: token } }));
   }
 
   /** Write a cache file with the given timestamp (epoch seconds). */
-  async function writeTestCache(timestampSec: number, response = apiResponse, nextBackoffMs?: number): Promise<void> {
+  async function writeTestCache(
+    timestampSec: number,
+    response = apiResponse,
+    nextBackoffMs?: number,
+    failedAt?: number,
+  ): Promise<void> {
     const cachePath = join(tmpDir, "usage-cache.json");
     const cache: any = { timestamp: timestampSec, response };
     if (nextBackoffMs !== undefined) cache.nextBackoffMs = nextBackoffMs;
+    if (failedAt !== undefined) cache.failedAt = failedAt;
     await Bun.write(cachePath, JSON.stringify(cache));
   }
 
@@ -314,6 +326,58 @@ describe("fetchUsage", () => {
     expect(updatedCache.nextBackoffMs).toBeDefined();
     // Retry timestamp should be in the future
     expect(updatedCache.timestamp).toBeGreaterThan(staleSec);
+    // The placeholder is marked so later reads report it as stale
+    expect(updatedCache.failedAt).toBeGreaterThanOrEqual(staleSec + 240);
+  });
+
+  test("reports a backoff placeholder as error until its retry time", async () => {
+    // A failed refresh leaves the last good response with a future timestamp
+    // and failedAt set. Serving it must keep error:true — the dashboard shows
+    // the ⚠️ marker and the watchdog does not trust the stale numbers.
+    const nowSec = Math.floor(Date.now() / 1000);
+    await writeTestCache(nowSec + 400, apiResponse, 600_000, nowSec - 20);
+    let fetchCalled = false;
+    fetchCtx.set((async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; }) as any);
+
+    const result = await fetchUsage();
+
+    expect(fetchCalled).toBe(false);
+    expect(result.error).toBe(true);
+    expect(result.data).not.toBeNull();
+    expect(result.data!.sessionPct).toBe(42);
+  });
+
+  test("reports a backoff placeholder as error when locked", async () => {
+    const staleSec = Math.floor(Date.now() / 1000) - 240;
+    await writeTestCache(staleSec, apiResponse, 120_000, staleSec);
+    await writeCredentials();
+    await writeFile(join(tmpDir, "usage.lock"), "");
+    fetchCtx.set((async () => { throw new Error("should not be called"); }) as any);
+
+    const result = await fetchUsage();
+
+    expect(result.error).toBe(true);
+    expect(result.data!.sessionPct).toBe(42);
+  });
+
+  test("a successful refresh after backoff clears the failure marker", async () => {
+    const staleSec = Math.floor(Date.now() / 1000) - 240;
+    await writeTestCache(staleSec, apiResponse, 600_000, staleSec);
+    await writeCredentials();
+    const freshResponse = {
+      five_hour: { utilization: 5.0, resets_at: "2025-12-12T22:00:00Z" },
+      seven_day: { utilization: 2.0, resets_at: "2025-12-19T00:00:00Z" },
+    };
+    mockFetch(freshResponse);
+
+    const result = await fetchUsage();
+
+    expect(result.error).toBe(false);
+    expect(result.data!.sessionPct).toBe(5);
+    expect(result.data!.weeklyPct).toBe(2);
+    const cache = await Bun.file(join(tmpDir, "usage-cache.json")).json();
+    expect(cache.failedAt).toBeUndefined();
+    expect(cache.nextBackoffMs).toBe(60_000);
   });
 
   test("returns error on non-ok response with no cache", async () => {
@@ -377,6 +441,7 @@ describe("fetchUsage", () => {
     const cache = await cacheFile.json();
     expect(cache.response).toEqual(apiResponse);
     expect(cache.nextBackoffMs).toBe(60_000);
+    expect(cache.failedAt).toBeUndefined();
 
     // Lock should be released
     const lockFile = Bun.file(join(tmpDir, "usage.lock"));
@@ -469,6 +534,67 @@ describe("fetchCodexUsage", () => {
 
     expect(result.error).toBe(true);
     expect(result.data).toBeNull();
+  });
+});
+
+describe("rankTokenCandidates", () => {
+  const now = 1_000_000;
+
+  test("puts an unexpired token ahead of an expired one regardless of source order", () => {
+    // Stale credentials file first (the real-world stuck-footer case): the
+    // file token expired days ago while the Keychain holds the refreshed one.
+    const ranked = rankTokenCandidates([
+      { token: "file-expired", expiresAt: now - 1 },
+      { token: "keychain-fresh", expiresAt: now + 60_000 },
+    ], now);
+    expect(ranked).toEqual(["keychain-fresh", "file-expired"]);
+  });
+
+  test("orders unexpired tokens by latest expiry first", () => {
+    const ranked = rankTokenCandidates([
+      { token: "soon", expiresAt: now + 1_000 },
+      { token: "later", expiresAt: now + 5_000 },
+    ], now);
+    expect(ranked).toEqual(["later", "soon"]);
+  });
+
+  test("ranks a token with unknown expiry below a fresh one and above an expired one", () => {
+    const ranked = rankTokenCandidates([
+      { token: "expired", expiresAt: now - 5 },
+      { token: "unknown", expiresAt: null },
+      { token: "fresh", expiresAt: now + 5 },
+    ], now);
+    expect(ranked).toEqual(["fresh", "unknown", "expired"]);
+  });
+
+  test("keeps source order among tokens with unknown expiry", () => {
+    const ranked = rankTokenCandidates([
+      { token: "file", expiresAt: null },
+      { token: "keychain", expiresAt: null },
+    ], now);
+    expect(ranked).toEqual(["file", "keychain"]);
+  });
+
+  test("orders expired tokens by latest expiry first", () => {
+    const ranked = rankTokenCandidates([
+      { token: "older", expiresAt: now - 5_000 },
+      { token: "newer", expiresAt: now - 1_000 },
+    ], now);
+    expect(ranked).toEqual(["newer", "older"]);
+  });
+
+  test("drops null candidates and duplicate tokens", () => {
+    const ranked = rankTokenCandidates([
+      null,
+      { token: "same", expiresAt: now + 5 },
+      { token: "same", expiresAt: null },
+      null,
+    ], now);
+    expect(ranked).toEqual(["same"]);
+  });
+
+  test("returns an empty list when no candidate is available", () => {
+    expect(rankTokenCandidates([null, null], now)).toEqual([]);
   });
 });
 
@@ -584,28 +710,138 @@ describe("readAccessToken keychain fallback", () => {
     expect(result.data).toBeNull();
   });
 
-  test("prefers credentials file over keychain", async () => {
-    // Write a valid credentials file
+  /**
+   * Fetch mock that records the bearer token of every call and accepts only
+   * `accepted`; every other token gets the 429 the real endpoint returns for
+   * a dead token.
+   */
+  function mockFetchAccepting(accepted: string, response: unknown = apiResponse): string[] {
+    const tokens: string[] = [];
+    fetchCtx.set((async (_url: unknown, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      tokens.push(String(headers.Authorization ?? "").replace(/^Bearer /, ""));
+      if (tokens[tokens.length - 1] === accepted) {
+        return { ok: true, status: 200, json: async () => response };
+      }
+      return {
+        ok: false,
+        status: 429,
+        json: async () => ({ error: { type: "rate_limit_error", message: "Rate limited." } }),
+      };
+    }) as any);
+    return tokens;
+  }
+
+  test("tries the credentials file token before the keychain token when neither records an expiry", async () => {
     await Bun.write(join(tmpDir, "credentials.json"),
       JSON.stringify({ claudeAiOauth: { accessToken: "file-token" } }));
-
-    // Keychain should NOT be called
-    let spawnCalled = false;
-    spawnCtx.set(() => {
-      spawnCalled = true;
-      return {
-        stdout: new Blob([]).stream(),
-        stderr: new Blob([]).stream(),
-        exited: Promise.resolve(1),
-      };
-    });
-    mockFetch(apiResponse);
+    mockSpawn(JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token" } }), 0);
+    const tokens = mockFetchAccepting("file-token");
 
     const result = await fetchUsage();
 
-    expect(spawnCalled).toBe(false);
-    expect(result.data).not.toBeNull();
+    expect(tokens).toEqual(["file-token"]);
+    expect(result.error).toBe(false);
     expect(result.data!.sessionPct).toBe(42);
+  });
+
+  test("prefers the keychain token when the credentials file token has expired", async () => {
+    // The stuck-footer bug: ~/.claude/.credentials.json is a stale copy whose
+    // token expired days ago, while Claude Code kept refreshing the Keychain
+    // entry. The expired token must not be tried first.
+    const now = Date.now();
+    await Bun.write(join(tmpDir, "credentials.json"),
+      JSON.stringify({ claudeAiOauth: { accessToken: "file-token", expiresAt: now - 4 * 86_400_000 } }));
+    mockSpawn(JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token", expiresAt: now + 6 * 3_600_000 } }), 0);
+    const tokens = mockFetchAccepting("keychain-token");
+
+    const result = await fetchUsage();
+
+    expect(tokens).toEqual(["keychain-token"]);
+    expect(result.error).toBe(false);
+    expect(result.data!.sessionPct).toBe(42);
+  });
+
+  test("prefers the credentials file token when the keychain token has expired", async () => {
+    const now = Date.now();
+    await Bun.write(join(tmpDir, "credentials.json"),
+      JSON.stringify({ claudeAiOauth: { accessToken: "file-token", expiresAt: now + 3_600_000 } }));
+    mockSpawn(JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token", expiresAt: now - 3_600_000 } }), 0);
+    const tokens = mockFetchAccepting("file-token");
+
+    const result = await fetchUsage();
+
+    expect(tokens).toEqual(["file-token"]);
+    expect(result.error).toBe(false);
+  });
+
+  test("falls back to the next token when the API rejects the first", async () => {
+    // Neither store records an expiry, so the file token is tried first; the
+    // API rejects it and the keychain token must be tried before giving up.
+    await Bun.write(join(tmpDir, "credentials.json"),
+      JSON.stringify({ claudeAiOauth: { accessToken: "file-token" } }));
+    mockSpawn(JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token" } }), 0);
+    const tokens = mockFetchAccepting("keychain-token");
+
+    const result = await fetchUsage();
+
+    expect(tokens).toEqual(["file-token", "keychain-token"]);
+    expect(result.error).toBe(false);
+    expect(result.data!.sessionPct).toBe(42);
+
+    // Success path: cache written cleanly, lock released
+    const cache = await Bun.file(join(tmpDir, "usage-cache.json")).json();
+    expect(cache.failedAt).toBeUndefined();
+    expect(await Bun.file(join(tmpDir, "usage.lock")).exists()).toBe(false);
+  });
+
+  test("falls back to the next token when the first response carries an error body", async () => {
+    await Bun.write(join(tmpDir, "credentials.json"),
+      JSON.stringify({ claudeAiOauth: { accessToken: "file-token" } }));
+    mockSpawn(JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token" } }), 0);
+    const tokens: string[] = [];
+    fetchCtx.set((async (_url: unknown, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      const token = String(headers.Authorization ?? "").replace(/^Bearer /, "");
+      tokens.push(token);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => (token === "keychain-token" ? apiResponse : { error: "expired" }),
+      };
+    }) as any);
+
+    const result = await fetchUsage();
+
+    expect(tokens).toEqual(["file-token", "keychain-token"]);
+    expect(result.error).toBe(false);
+    expect(result.data!.sessionPct).toBe(42);
+  });
+
+  test("reports failure when the API rejects every token", async () => {
+    await Bun.write(join(tmpDir, "credentials.json"),
+      JSON.stringify({ claudeAiOauth: { accessToken: "file-token" } }));
+    mockSpawn(JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token" } }), 0);
+    const tokens = mockFetchAccepting("no-such-token");
+
+    const result = await fetchUsage();
+
+    expect(tokens).toEqual(["file-token", "keychain-token"]);
+    expect(result.error).toBe(true);
+    expect(result.data).toBeNull();
+    expect(await Bun.file(join(tmpDir, "usage.lock")).exists()).toBe(false);
+  });
+
+  test("makes a single request when both stores hold the same token", async () => {
+    await Bun.write(join(tmpDir, "credentials.json"),
+      JSON.stringify({ claudeAiOauth: { accessToken: "shared-token" } }));
+    mockSpawn(JSON.stringify({ claudeAiOauth: { accessToken: "shared-token" } }), 0);
+    const tokens = mockFetchAccepting("no-such-token");
+
+    const result = await fetchUsage();
+
+    expect(tokens).toEqual(["shared-token"]);
+    expect(result.error).toBe(true);
   });
 
   test("falls through to keychain when credentials file has empty token", async () => {

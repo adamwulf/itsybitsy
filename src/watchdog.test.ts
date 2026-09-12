@@ -1980,6 +1980,27 @@ describe("watchdog", () => {
       expect(nudgeCalls.length).toBe(0);
     });
 
+    test("does not nudge on a stale usage reading (error: true)", async () => {
+      // While the usage API is failing, fetchUsage serves the last good
+      // response flagged error:true. A stale low percentage says nothing
+      // about the live limit, so it must not trigger the "refreshed" nudge.
+      setWatchdogFetchUsage(async () => ({ data: { sessionPct: 3, weeklyPct: 30, sessionReset: "now", weeklyReset: "2d" }, error: true }));
+
+      const a1 = agent("a1", "rate_limited");
+      const tracker = getTracker("a1");
+      tracker.rateLimitBypassed = true;
+
+      await tick([a1]);
+
+      const nudgeCalls = spawnMock.calls.filter((c) => {
+        const joined = c.args.join(" ");
+        return joined.includes("send-keys") && joined.includes("Usage has refreshed");
+      });
+      expect(nudgeCalls.length).toBe(0);
+      // Bypass flag stays set: the episode is not over until a live reading says so
+      expect(tracker.rateLimitBypassed).toBe(true);
+    });
+
     test("resets wait counters", async () => {
       setWatchdogFetchUsage(async () => ({ data: { sessionPct: 80, weeklyPct: 50, sessionReset: "1h", weeklyReset: "2d" }, error: false }));
       setWatchdogSleep(async () => {});

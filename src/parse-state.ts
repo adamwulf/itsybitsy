@@ -258,12 +258,18 @@ export function parseAgyState(input: string): ParseStateResult {
  * Recognizable agy status chrome, including the model/context footer captured
  * in current Gemini builds. Caller must also validate the surrounding input box;
  * the shortcut/cancel hints alone are shared with other CLIs.
+ *
+ * The footer comes from the user's custom statusline script
+ * (`~/.gemini/antigravity-cli/statusline.sh`), which prints `Context: -%` when
+ * agy gave it no payload (stdin held open / empty). That footer can be the ONLY
+ * status line in the capture (see fixtures/agy-background-task.txt), so the
+ * unknown marker must be accepted too or the whole input box goes undetected.
  */
 export function isAgyStatusLine(line: string): boolean {
   const text = stripAnsi(line).trim();
   return /^(?:\? for shortcuts|esc to cancel)\b/.test(text)
     || /\b(?:accept-edits|plan)[ \t]+·[ \t]+\S/.test(text)
-    || /^\S[^\n]*[ \t]+\|[ \t]+Context:[ \t]*\d{1,3}%$/.test(text);
+    || /^\S[^\n]*[ \t]+\|[ \t]+Context:[ \t]*(?:\d{1,3}|-)%$/.test(text);
 }
 
 /** Locate the latest agy input box, even when a task section adds a third divider. */

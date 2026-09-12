@@ -2292,7 +2292,14 @@ describe("hasBackgroundTasks", () => {
 
     test("accepts the established agy footer formats after the task section", async () => {
       const output = await fixture;
-      for (const footer of ["? for shortcuts", "esc to cancel", "accept-edits · Gemini 3.7 Flash · low"]) {
+      for (const footer of [
+        "? for shortcuts",
+        "esc to cancel",
+        "accept-edits · Gemini 3.7 Flash · low",
+        // Custom statusline.sh output when agy handed it no payload.
+        "Gemini 3.8 Flash (High) | Context: -%",
+        "model | Context: -%",
+      ]) {
         expect(hasBackgroundTasks(output.replace(/Gemini .*Context: 21%/, footer))).toBe(true);
       }
     });

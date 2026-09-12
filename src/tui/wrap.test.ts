@@ -694,6 +694,17 @@ describe("computeChromeSlice — chrome detection on UNWRAPPED logical lines", (
       expect(slice.statusLines).toEqual([agyStatus]);
     });
 
+    test("custom footer with unknown context (-%) is still the status line", () => {
+      // statusline.sh prints `Context: -%` when agy gave it no payload; that
+      // footer is the only status line in current builds, so it must still
+      // anchor the input box or the whole capture collapses into transcript.
+      const footer = "Gemini 3.8 Flash (High) | Context: -%";
+      const raw = ["agy: reply", sep, "> ", sep, footer].join("\n");
+      const slice = computeChromeSlice(raw, false, true);
+      expect(slice.transcriptRaw).toBe("agy: reply");
+      expect(slice.statusLines).toEqual([footer]);
+    });
+
     test("working screen: esc to cancel status line is recognized too", () => {
       const raw = ["work in progress", sep, "> ", sep,
         "esc to cancel                accept-edits · Gemini 3.7 Flash · low"].join("\n");

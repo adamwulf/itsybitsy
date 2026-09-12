@@ -925,10 +925,13 @@ async function handleRateLimited(agent: Agent, tracker: AgentTracker, _getAllAge
     tracker.rateLimitBypassed = true;
   }
 
-  // Check usage API to see if usage has dropped enough to resume
+  // Check usage API to see if usage has dropped enough to resume. Only a live
+  // reading counts: while the API is failing, fetchUsage serves the last good
+  // response flagged `error: true`, and a stale low percentage would nudge the
+  // agent straight back into the rate-limit dialog.
   const usageResult = await fetchUsageFn();
   const usage = usageResult.data;
-  if (usage && usage.sessionPct !== null && usage.sessionPct < RATE_LIMIT_RECOVERY_THRESHOLD) {
+  if (!usageResult.error && usage && usage.sessionPct !== null && usage.sessionPct < RATE_LIMIT_RECOVERY_THRESHOLD) {
     await sendMessage(
       agent,
       `Usage has refreshed (${usage.sessionPct}%). Please continue your task.`,

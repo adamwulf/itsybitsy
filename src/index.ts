@@ -6,7 +6,7 @@
 
 import { isAbsolute, join } from "path";
 import { userHome } from "./home";
-import { addRepo, removeRepo, listRepos, repoDisplayName, type RepoEntry } from "./registry";
+import { addRepo, removeRepo, listRepos, repoDisplayName, resolveRepo, repoResolutionError, type RepoEntry } from "./registry";
 import { resolveAgentIcon } from "./agents";
 import type { Agent, AgentMeta, FlatEntry } from "./agents";
 import { kernelSandboxStatus } from "./agent-cli";
@@ -515,7 +515,15 @@ export async function resolveTarget(
     const repoName = slashIdx >= 0 ? afterAt.substring(0, slashIdx) : afterAt;
     const agentId = slashIdx >= 0 ? afterAt.substring(slashIdx + 1) : null;
 
-    const repo = repos.find((r) => repoDisplayName(r) === repoName);
+    // Shared resolver: registry id / basename (case-insensitive) or path.
+    const repoResolution = resolveRepo(repoName, repos, cwd);
+    if (!repoResolution.ok && repoResolution.reason === "ambiguous") {
+      // An ambiguous `@<name>` must NOT fall through to a team — that would
+      // silently pick a different namespace. Report the collision instead.
+      console.error(`Error: ${repoResolutionError(repoName, repoResolution)}`);
+      return { agent: null, isSystemCoordinator: false };
+    }
+    const repo = repoResolution.ok ? repoResolution.repo : null;
     if (!repo) {
       // No repo by this name. For a bare `@<name>` (no slash) this is where the
       // TEAM lookup falls through (§16.1/§16.4): try a team before erroring. A
@@ -1148,15 +1156,13 @@ export async function main() {
         process.exit(1);
       }
       const repos = await listRepos();
-      const match = repos.find(
-        (r) => r.path === repoId || r.name === repoId || r.nickname === repoId,
-      );
-      if (!match) {
-        console.error(`Repo not found: ${repoId}`);
+      const resolved = resolveRepo(repoId, repos);
+      if (!resolved.ok) {
+        console.error(repoResolutionError(repoId, resolved));
         process.exit(1);
       }
       const { pushRepo } = await import("./ib-commands");
-      await printAndExit(await pushRepo(match.path));
+      await printAndExit(await pushRepo(resolved.repo.path));
       break;
     }
     case "list":
@@ -2461,12 +2467,12 @@ export async function main() {
       let repoPath: string | null = null;
 
       if (repoArg) {
-        const match = repos.find((r) => r.name === repoArg || r.path === repoArg);
-        if (!match) {
-          console.error(`Repo not found: ${repoArg}`);
+        const resolved = resolveRepo(repoArg, repos);
+        if (!resolved.ok) {
+          console.error(repoResolutionError(repoArg, resolved));
           process.exit(1);
         }
-        repoPath = match.path;
+        repoPath = resolved.repo.path;
       } else {
         const cwd = process.cwd();
         const cwdMatch = repos.find((r) => cwd === r.path || cwd.startsWith(r.path + "/"));

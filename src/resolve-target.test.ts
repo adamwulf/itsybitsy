@@ -184,10 +184,19 @@ describe("Group C: @repo-name coordinator lookup", () => {
     expect(result.agent?.id).toBe("coord-lib");
   });
 
-  test("C3: @lib fails because nickname 'libs' overrides basename 'lib'", async () => {
+  test("C3: @lib now resolves Repo B by basename even though nickname 'libs' is set", async () => {
+    // Unified resolver: a repo is reachable by BOTH its registry id (nickname)
+    // and its directory basename. Before the shared resolveRepo() this failed
+    // because only the display name (nickname) was matched.
+    addCoordinatorToRepo(repoB.path, "coord-lib");
     const result = await resolveTarget("@lib", repos);
-    expect(result.agent).toBeNull();
-    expect(errorOutput.some((e) => e.includes("no repo or team named: lib"))).toBe(true);
+    expect(result.agent?.id).toBe("coord-lib");
+  });
+
+  test("C3b: @LIB resolves case-insensitively by basename", async () => {
+    addCoordinatorToRepo(repoB.path, "coord-lib");
+    const result = await resolveTarget("@LIB", repos);
+    expect(result.agent?.id).toBe("coord-lib");
   });
 
   test("C4: @unknown fails with repo not found", async () => {

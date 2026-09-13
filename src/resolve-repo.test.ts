@@ -55,6 +55,38 @@ describe("resolveRepo", () => {
     if (res.ok) expect(res.repo.path).toBe("/tmp/root/realdir");
   });
 
+  test("resolves a dotted basename by name (dots do not force the path namespace)", () => {
+    // Real registry example: basename "milestonemade.com", nickname "milestonemadecom".
+    const local: RepoEntry[] = [
+      { path: "/Users/adamwulf/Developer/html/milestonemade.com", name: "milestonemade.com", nickname: "milestonemadecom" },
+    ];
+    const byBasename = resolveRepo("milestonemade.com", local);
+    expect(byBasename.ok).toBe(true);
+    if (byBasename.ok) expect(byBasename.repo.nickname).toBe("milestonemadecom");
+    // case-insensitive too
+    expect(resolveRepo("MilestoneMade.COM", local).ok).toBe(true);
+    // and still reachable by its dot-free nickname
+    expect(resolveRepo("milestonemadecom", local).ok).toBe(true);
+  });
+
+  test("a dotted key that is also an exact registered path still matches", () => {
+    const local: RepoEntry[] = [
+      { path: "/Users/adamwulf/Developer/html/milestonemade.com", name: "milestonemade.com" },
+    ];
+    const res = resolveRepo("/Users/adamwulf/Developer/html/milestonemade.com", local);
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.repo.name).toBe("milestonemade.com");
+  });
+
+  test("no false ambiguity when one repo matches by both name and its exact path", () => {
+    // One repo whose stored path equals the key AND whose basename equals the
+    // key: both matchers fire on the SAME repo, so it dedupes to one match.
+    const local: RepoEntry[] = [{ path: "milestonemade.com", name: "milestonemade.com" }];
+    const res = resolveRepo("milestonemade.com", local);
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.repo.path).toBe("milestonemade.com");
+  });
+
   test("returns not-found for an unknown key", () => {
     const res = resolveRepo("nope", repos);
     expect(res.ok).toBe(false);

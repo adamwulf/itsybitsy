@@ -38,17 +38,22 @@ export type RepoResolution =
  *   - the directory basename (RepoEntry.name), case-INSENSITIVELY
  *   - the registry id / nickname (RepoEntry.nickname), case-INSENSITIVELY
  *   - an absolute or relative filesystem path (RepoEntry.path), matched exactly
- *     and against resolve(cwd, key) so a relative path works too
+ *     and — for a path-shaped key — against resolve(cwd, key) so a relative
+ *     path works too
  *
- * Names and paths occupy DISJOINT namespaces: a valid repo name/nickname is
- * `[A-Za-z0-9_-]+` (see isValidRepoName — no "/" and no "."), so a key that
- * contains "/" or "." can only ever be a path attempt, and a bare token can
- * only ever be a name attempt. That split keeps `resolve(cwd, "<name>")` from
- * ever colliding with a repo that happens to live at `<cwd>/<name>`.
+ * A "/" is the ONLY marker that puts a key exclusively in the path namespace: a
+ * valid repo name/nickname is `[A-Za-z0-9_-]+` (see isValidRepoName — no "/"),
+ * so a key that contains "/" can only be a path and skips name matching. Every
+ * other key (bare like "pandora" OR dotted like "milestonemade.com" — a real
+ * registered basename) is tried as a name/nickname AND against an exact path,
+ * but is NEVER fed to resolve(cwd, key): that keeps a bare/dotted name from
+ * colliding with a repo that merely happens to live at `<cwd>/<name>`.
  *
  * Ambiguity — one key matching two DIFFERENT registered repos, e.g. repo A's
  * basename equals repo B's nickname — is reported with the full candidate list
- * so the caller can print a clear error instead of silently picking one.
+ * so the caller can print a clear error instead of silently picking one. A
+ * single repo matched more than one way (name AND its exact path) is deduped by
+ * path, so it stays one unambiguous match.
  */
 export function resolveRepo(
   key: string,
@@ -58,22 +63,25 @@ export function resolveRepo(
   const trimmed = key.trim();
   if (!trimmed) return { ok: false, reason: "not-found" };
 
-  const looksLikePath = trimmed.includes("/") || trimmed.includes(".");
-  let matches: RepoEntry[];
-  if (looksLikePath) {
-    const resolved = resolve(cwd, trimmed);
-    matches = repos.filter((r) => r.path === trimmed || r.path === resolved);
-  } else {
-    const lower = trimmed.toLowerCase();
-    matches = repos.filter(
-      (r) =>
-        r.name.toLowerCase() === lower ||
-        (r.nickname !== undefined && r.nickname.toLowerCase() === lower),
-    );
-  }
+  const hasSlash = trimmed.includes("/");
+  const lower = trimmed.toLowerCase();
+  const resolvedPath = hasSlash ? resolve(cwd, trimmed) : null;
 
-  // Dedupe by path so a single repo matched on more than one field (e.g. its
-  // name equals its own nickname) is never mistaken for an ambiguous pair.
+  const matches = repos.filter((r) => {
+    // Path namespace: an exact path always counts; resolve(cwd, key) only for a
+    // slashed (path-shaped) key, so a bare/dotted name never resolves as a path.
+    const pathMatch = r.path === trimmed || r.path === resolvedPath;
+    // Name namespace: skipped only for a slashed key. Dotted basenames stay here.
+    const nameMatch =
+      !hasSlash &&
+      (r.name.toLowerCase() === lower ||
+        (r.nickname !== undefined && r.nickname.toLowerCase() === lower));
+    return pathMatch || nameMatch;
+  });
+
+  // Dedupe by path so a single repo matched on more than one field (its name and
+  // its exact path, say) is never mistaken for an ambiguous pair — and a stray
+  // duplicate-path registry entry can't inflate the candidate count either.
   const unique = Array.from(new Map(matches.map((r) => [r.path, r])).values());
   if (unique.length === 0) return { ok: false, reason: "not-found" };
   if (unique.length === 1) return { ok: true, repo: unique[0]! };

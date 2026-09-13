@@ -912,6 +912,113 @@ describe("CLI arg parsing", () => {
     }
   });
 
+  // --- new-agent --repo resolution (shared resolveRepo) ---
+  // Each case registers a repo whose registry id (nickname) differs from its
+  // directory basename, then proves `--repo <key>` reaches newAgent() (it fails
+  // on the bogus --type, which only happens AFTER repo resolution succeeds) — or
+  // fails with the right message. A resolved repo NEVER prints "Repo not found".
+
+  async function withNewAgentRepoHome(
+    reposJson: unknown,
+    run: (env: { HOME: string }, cwd: string) => Promise<void>,
+  ) {
+    const { mkdtemp, rm } = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const fakeHome = await mkdtemp(join(tmpdir(), "ib-newagent-reporesolve-home-"));
+    const cwd = await mkdtemp(join(tmpdir(), "ib-newagent-reporesolve-cwd-"));
+    await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify(reposJson));
+    try {
+      await run({ HOME: fakeHome }, cwd);
+    } finally {
+      await rm(fakeHome, { recursive: true, force: true }).catch(() => {});
+      await rm(cwd, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  // A registry mirroring the reported bug: nickname "passwhats", basename "Pandora".
+  const passwhatsRegistry = {
+    version: 1,
+    repos: [{ path: "/tmp/ib-resolve-pandora", name: "Pandora", nickname: "passwhats" }],
+  };
+
+  test("new-agent --repo resolves by registry id (nickname)", async () => {
+    await withNewAgentRepoHome(passwhatsRegistry, async (env, cwd) => {
+      const { stderr, exitCode } = await runCliStdin(
+        ["new-agent", "--repo", "passwhats", "--type", "bogus-nonexistent-type", "hi"],
+        "",
+        env,
+        cwd,
+      );
+      expect(stderr).not.toContain("Repo not found");
+      expect(stderr).toContain("unknown agent type 'bogus-nonexistent-type'");
+      expect(exitCode).toBe(1);
+    });
+  });
+
+  test("new-agent --repo resolves by directory basename even when a nickname is set", async () => {
+    await withNewAgentRepoHome(passwhatsRegistry, async (env, cwd) => {
+      const { stderr, exitCode } = await runCliStdin(
+        ["new-agent", "--repo", "Pandora", "--type", "bogus-nonexistent-type", "hi"],
+        "",
+        env,
+        cwd,
+      );
+      expect(stderr).not.toContain("Repo not found");
+      expect(stderr).toContain("unknown agent type 'bogus-nonexistent-type'");
+      expect(exitCode).toBe(1);
+    });
+  });
+
+  test("new-agent --repo resolves basename case-insensitively", async () => {
+    await withNewAgentRepoHome(passwhatsRegistry, async (env, cwd) => {
+      const { stderr, exitCode } = await runCliStdin(
+        ["new-agent", "--repo", "pandora", "--type", "bogus-nonexistent-type", "hi"],
+        "",
+        env,
+        cwd,
+      );
+      expect(stderr).not.toContain("Repo not found");
+      expect(stderr).toContain("unknown agent type 'bogus-nonexistent-type'");
+      expect(exitCode).toBe(1);
+    });
+  });
+
+  test("new-agent --repo still reports 'Repo not found' for a genuinely unknown key", async () => {
+    await withNewAgentRepoHome(passwhatsRegistry, async (env, cwd) => {
+      const { stderr, exitCode } = await runCliStdin(
+        ["new-agent", "--repo", "does-not-exist", "hi"],
+        "",
+        env,
+        cwd,
+      );
+      expect(stderr).toContain("Repo not found: does-not-exist");
+      expect(exitCode).toBe(1);
+    });
+  });
+
+  test("new-agent --repo fails with a candidate list on an ambiguous key", async () => {
+    const ambiguousRegistry = {
+      version: 1,
+      repos: [
+        { path: "/tmp/ib-resolve-a-foo", name: "foo" },
+        { path: "/tmp/ib-resolve-b-bar", name: "bar", nickname: "foo" },
+      ],
+    };
+    await withNewAgentRepoHome(ambiguousRegistry, async (env, cwd) => {
+      const { stderr, exitCode } = await runCliStdin(
+        ["new-agent", "--repo", "foo", "hi"],
+        "",
+        env,
+        cwd,
+      );
+      expect(stderr).toContain("Ambiguous repo");
+      expect(stderr).toContain("/tmp/ib-resolve-a-foo");
+      expect(stderr).toContain("/tmp/ib-resolve-b-bar");
+      expect(exitCode).toBe(1);
+    });
+  });
+
   test("new-agent still rejects flag typos before reading stdin (guard intact)", async () => {
     // The flag-typo guard must fire during arg parsing, before any stdin read,
     // so a piped body does not mask a typo like '-F'.

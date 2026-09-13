@@ -23,6 +23,81 @@ export function repoDisplayName(repo: RepoEntry): string {
   return repo.nickname ?? repo.name;
 }
 
+/** Outcome of resolving a user-typed key to a single registered repo. */
+export type RepoResolution =
+  | { ok: true; repo: RepoEntry }
+  | { ok: false; reason: "not-found" }
+  | { ok: false; reason: "ambiguous"; candidates: RepoEntry[] };
+
+/**
+ * Resolve a user-typed repo key to a single registered repo. This is the ONE
+ * resolver every by-name lookup shares (`ib new-agent --repo`, `ib send
+ * @<repo>`, `ib push <repo-id>`, `ib remove <name>`), so they all agree.
+ *
+ * A key is matched, in one flat pass, against:
+ *   - the directory basename (RepoEntry.name), case-INSENSITIVELY
+ *   - the registry id / nickname (RepoEntry.nickname), case-INSENSITIVELY
+ *   - an absolute or relative filesystem path (RepoEntry.path), matched exactly
+ *     and against resolve(cwd, key) so a relative path works too
+ *
+ * Names and paths occupy DISJOINT namespaces: a valid repo name/nickname is
+ * `[A-Za-z0-9_-]+` (see isValidRepoName — no "/" and no "."), so a key that
+ * contains "/" or "." can only ever be a path attempt, and a bare token can
+ * only ever be a name attempt. That split keeps `resolve(cwd, "<name>")` from
+ * ever colliding with a repo that happens to live at `<cwd>/<name>`.
+ *
+ * Ambiguity — one key matching two DIFFERENT registered repos, e.g. repo A's
+ * basename equals repo B's nickname — is reported with the full candidate list
+ * so the caller can print a clear error instead of silently picking one.
+ */
+export function resolveRepo(
+  key: string,
+  repos: RepoEntry[],
+  cwd: string = process.cwd(),
+): RepoResolution {
+  const trimmed = key.trim();
+  if (!trimmed) return { ok: false, reason: "not-found" };
+
+  const looksLikePath = trimmed.includes("/") || trimmed.includes(".");
+  let matches: RepoEntry[];
+  if (looksLikePath) {
+    const resolved = resolve(cwd, trimmed);
+    matches = repos.filter((r) => r.path === trimmed || r.path === resolved);
+  } else {
+    const lower = trimmed.toLowerCase();
+    matches = repos.filter(
+      (r) =>
+        r.name.toLowerCase() === lower ||
+        (r.nickname !== undefined && r.nickname.toLowerCase() === lower),
+    );
+  }
+
+  // Dedupe by path so a single repo matched on more than one field (e.g. its
+  // name equals its own nickname) is never mistaken for an ambiguous pair.
+  const unique = Array.from(new Map(matches.map((r) => [r.path, r])).values());
+  if (unique.length === 0) return { ok: false, reason: "not-found" };
+  if (unique.length === 1) return { ok: true, repo: unique[0]! };
+  return { ok: false, reason: "ambiguous", candidates: unique };
+}
+
+/**
+ * Human-readable error for a failed resolveRepo(), reused by every call site so
+ * the wording stays uniform. Not-found keeps the historical "Repo not found:
+ * <key>" wording; ambiguous lists every candidate with its path.
+ */
+export function repoResolutionError(
+  key: string,
+  res: Exclude<RepoResolution, { ok: true }>,
+): string {
+  if (res.reason === "ambiguous") {
+    const list = res.candidates
+      .map((r) => `  - ${repoDisplayName(r)} (${r.path})`)
+      .join("\n");
+    return `Ambiguous repo "${key}" matches multiple registered repos:\n${list}`;
+  }
+  return `Repo not found: ${key}`;
+}
+
 export interface RegistryData {
   repos: RepoEntry[];
 }
@@ -95,18 +170,22 @@ export async function removeRepo(repoPath: string): Promise<{ ok: boolean; messa
   const registry = await loadRegistry();
   const before = registry.repos.length;
   registry.repos = registry.repos.filter((r) => r.path !== resolved);
+  let removedPath = resolved;
 
   if (registry.repos.length === before) {
-    // Try matching by name — only remove the first match
-    const idx = registry.repos.findIndex((r) => r.name === repoPath);
-    if (idx === -1) {
-      return { ok: false, message: `Not found: ${repoPath}` };
+    // No exact path match — fall back to the shared resolver so `ib remove`
+    // accepts a registry id / basename (case-insensitively) just like every
+    // other by-name lookup.
+    const res = resolveRepo(repoPath, registry.repos);
+    if (!res.ok) {
+      return { ok: false, message: repoResolutionError(repoPath, res) };
     }
-    registry.repos.splice(idx, 1);
+    removedPath = res.repo.path;
+    registry.repos = registry.repos.filter((r) => r.path !== removedPath);
   }
 
   await saveRegistry(registry);
-  return { ok: true, message: `Removed: ${resolved}` };
+  return { ok: true, message: `Removed: ${removedPath}` };
 }
 
 export async function renameRepo(repoPath: string, nickname: string): Promise<{ ok: boolean; message: string }> {

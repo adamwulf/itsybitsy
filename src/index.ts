@@ -2100,9 +2100,26 @@ export async function main() {
       break;
     }
     case "nuke": {
+      // User-only command: no agent may nuke. This is the defense-in-depth
+      // backstop to the agent-path hook (which denies `ib nuke` for every
+      // agent); it guards a caller that reached the CLI dispatch anyway (e.g. a
+      // misconfigured hook), mirroring newAgent()'s caller gate. A human /
+      // primary-Claude caller resolves to null and is unrestricted; a verified
+      // agent caller is refused. An unverifiable caller is denied (fail-closed).
+      const { nukeAgent, resolveCallerAgentContext } = await import("./ib-commands");
+      try {
+        const nukeCaller = await resolveCallerAgentContext(process.cwd());
+        if (nukeCaller) {
+          const callerId = typeof nukeCaller.meta.id === "string" ? nukeCaller.meta.id : "this agent";
+          console.error(`Error: '${callerId}' cannot run 'ib nuke' — nuke is a user-only command. Ask the user to nuke the agent, or use 'ib retire' to tear it down.`);
+          process.exit(1);
+        }
+      } catch (err) {
+        console.error(`Error: cannot verify caller for 'ib nuke': ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
-      const { nukeAgent } = await import("./ib-commands");
       await printAndExit(await nukeAgent(agent));
       break;
     }

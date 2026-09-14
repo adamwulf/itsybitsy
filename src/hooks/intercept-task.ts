@@ -396,6 +396,28 @@ export async function processTaskIntercept(
     model = "";
   }
 
+  // 6b. The Task/Agent `model` argument is the native-spawn equivalent of
+  // `--model`, and it is user-only (§1a0): an agent — even a spawn-permitted
+  // manager or coordinator — must let its spawned child inherit the model from
+  // the agent-type layers / config, never pin it. `resolved` present ⇒ an agent
+  // caller (primary Claude has no resolved agent and stays unrestricted; @system
+  // was already intercepted above). Mirrors the `ib new-agent --model` deny in
+  // checkIbCommandAccess and the newAgent() backstop. Checked against the RAW
+  // arg so a malformed value that step 6 would coerce away still reports the
+  // attempt clearly rather than silently spawning with an inherited model.
+  if (resolved && typeof input.tool_input.model === "string" && input.tool_input.model.trim()) {
+    return {
+      action: "intercept",
+      output: {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: "The Task `model` argument is user-only — a spawned sub-agent inherits its model from its agent type; ask the user if a different model is needed.",
+        },
+      },
+    };
+  }
+
   // 7. Determine agent prompt
   const agentPrompt = prompt || description;
   if (!agentPrompt.trim()) {

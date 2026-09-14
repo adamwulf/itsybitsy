@@ -6019,10 +6019,22 @@ async function detectManagerFromCwd(cwd: string, rootRepoPath: string): Promise<
  * own worktree. It is also independent of `opts.spawnedBy` so a caller cannot
  * dodge the gate by passing `--spawned-by`.
  */
-interface ResolvedCallerContext {
+export interface ResolvedCallerContext {
   meta: Record<string, unknown>;
   agentDir: string;
   repoPath: string;
+}
+
+/**
+ * Public caller-identity resolver for CLI command gates (e.g. the user-only
+ * `ib nuke` backstop in index.ts). Returns the resolved agent caller context —
+ * a worktree agent identified structurally, or a shared-repo agent verified by
+ * process ancestry — or null for a human / primary-Claude caller (unrestricted).
+ * Throws on an unverifiable or ambiguous caller; a destructive-command gate must
+ * treat a throw as "deny" (fail-closed), matching newAgent()'s posture.
+ */
+export async function resolveCallerAgentContext(cwd: string): Promise<ResolvedCallerContext | null> {
+  return readCallerMetaFromCwd(cwd);
 }
 
 async function readCallerMetaFromCwd(cwd: string): Promise<ResolvedCallerContext | null> {
@@ -6314,6 +6326,24 @@ export async function newAgent(
         stderr: `Error: '${callerId}' cannot spawn sub-agents — its agent type does not permit spawning children. Report your work back to your manager instead; naming a different --manager does not grant this permission.`,
       };
     }
+  }
+
+  // 3.8. User-only --model gate. --model is a human CLI override; an agent
+  // (even one permitted to spawn, i.e. a manager or coordinator) must let the
+  // spawned child inherit its model from the agent-type layers / config, never
+  // pin it. The agent-path hook denies `ib new-agent --model` up front; this is
+  // the defense-in-depth backstop for a caller that reached newAgent() anyway
+  // (e.g. a misconfigured hook), mirroring the caller gate above. A human /
+  // primary-Claude caller (callerContext === null) is unrestricted.
+  if (callerContext && opts?.model) {
+    const callerMeta = callerContext.meta;
+    const callerId = typeof callerMeta.id === "string" ? callerMeta.id : "this agent";
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Error: '${callerId}' cannot pass --model — the model is a user-only setting. The spawned agent's model comes from its agent type (or the user's config); ask the user if a different model is needed.`,
+    };
   }
 
   // 4. Validate manager

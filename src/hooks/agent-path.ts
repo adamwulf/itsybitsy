@@ -1193,11 +1193,14 @@ function checkWorktreeBoundary(
  * diff, status, merge-check) are intentionally excluded and remain unrestricted.
  * merge-check is read-only (checks mergeability without mutating) — workers
  * need to run it as a preflight before asking their manager to merge.
+ *
+ * `nuke` is deliberately NOT in this set: it is a user-only command (no agent
+ * — worker, manager, coordinator, or @system — may run it), enforced by the
+ * blanket deny near the top of checkIbCommandAccess.
  */
 const IB_MANAGER_ONLY_COMMANDS = new Set([
   "retire",
   "rehire",
-  "nuke",
   "merge",
   "resume",
   "pause",
@@ -1241,6 +1244,30 @@ export function parseIbCommand(command: string): { subcommand: string; targetId:
  */
 function containsIbNewAgentInvocation(command: string): boolean {
   return /(?:^|[;&|()\n])\s*ib[\t ]+new-agent(?:[\t \n]|$)/.test(command);
+}
+
+/**
+ * Detect a user-only `--model` flag on an `ib new-agent` invocation. The model
+ * override may only be set by a human at the CLI — an agent's spawned children
+ * inherit their model from the agent-type layers / config (§2 item 3). This is
+ * quote/heredoc aware so a prompt body containing the literal text "--model" is
+ * never mistaken for the flag: only a standalone `--model` (or `--model=...`)
+ * token counts. Untokenizable input is left to the newAgent() backstop rather
+ * than denied here, to avoid false positives on unusual quoting.
+ *
+ * The verb match covers BOTH `new-agent` and its `new` alias (index.ts accepts
+ * either) — deliberately broader than containsIbNewAgentInvocation so the alias
+ * cannot smuggle a `--model` past this gate.
+ */
+function containsIbNewAgentModelFlag(command: string): boolean {
+  if (!/(?:^|[;&|()\n])\s*ib[\t ]+new(?:-agent)?(?:[\t \n]|$)/.test(command)) return false;
+  const tokens = tokenizeBashPaths(maskHeredocBodies(command));
+  if (!tokens) return false;
+  for (const raw of tokens) {
+    const tok = stripBashSurroundingQuotes(raw);
+    if (tok === "--model" || tok.startsWith("--model=")) return true;
+  }
+  return false;
 }
 
 function containsInternalIbInvocation(command: string): boolean {
@@ -1290,6 +1317,30 @@ export async function checkIbCommandAccess(
   }
   if (/(?:^|[;&|]\s*)ib\s+sandbox\s+refresh(?:\s|$)/.test(normalizedCommand)) {
     return { decision: "deny", reason: "Access denied: ib sandbox refresh is manager-only" };
+  }
+
+  // `nuke` is a user-only command. No agent — worker, manager, coordinator, or
+  // @system — may run it: it is a destructive, irreversible teardown reserved
+  // for a human at the CLI/TUI. This blanket deny sits ahead of the @system
+  // early-return below so even the system coordinator is blocked. It matches
+  // `ib nuke <id>`, `ib nuke --force`, and the bare `ib nuke` (nuke-all) form.
+  // Agents tear down agents through `ib retire` instead.
+  if (/(?:^|[;&|]\s*)ib\s+nuke(?:\s|$)/.test(normalizedCommand)) {
+    return {
+      decision: "deny",
+      reason: "Access denied: 'ib nuke' is a user-only command — ask the user to nuke, or use 'ib retire' to tear down an agent",
+    };
+  }
+
+  // `--model` on `ib new-agent` is a user-only override. An agent spawning a
+  // child must inherit the model from the agent-type layers / config (§2 item
+  // 3), never pin it with --model. Applies to every agent (the leaf-spawn
+  // restriction is enforced separately in checkPathAccess).
+  if (containsIbNewAgentModelFlag(normalizedCommand)) {
+    return {
+      decision: "deny",
+      reason: "Access denied: '--model' on 'ib new-agent' is user-only — the spawned agent's model comes from its agent type; ask the user if a different model is needed",
+    };
   }
 
   // Hook entry points accept an agent id because Claude invokes them outside

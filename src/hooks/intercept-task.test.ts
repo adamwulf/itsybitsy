@@ -301,6 +301,67 @@ describe("intercept-task", () => {
     expect(capturedOpts.model).toBeUndefined();
   });
 
+  test("Task `model` from an agent (manager) → deny, user-only, spawn not attempted", async () => {
+    const fs = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-model-mgr-"));
+    try {
+      const agentId = "agent-55556666";
+      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      await fs.mkdir(join(agentDir, "repo"), { recursive: true });
+      await Bun.write(
+        join(agentDir, "meta.json"),
+        JSON.stringify({ id: agentId, worker: false }) // manager → can spawn
+      );
+
+      let spawnCalled = false;
+      const result = await processTaskIntercept(
+        {
+          tool_name: "Task",
+          tool_input: { prompt: "do stuff", model: "claude:opus" },
+          cwd: join(agentDir, "repo"),
+        },
+        {
+          spawnAgent: async () => {
+            spawnCalled = true;
+            return { ok: true, stdout: "Created agent-deadbeef77", stderr: "" };
+          },
+        }
+      );
+
+      expect(result.action).toBe("intercept");
+      const output = result.output as Record<string, unknown>;
+      const hookOutput = output.hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+      expect(hookOutput.permissionDecisionReason).toContain("user-only");
+      // The child must never be spawned when the model override is refused.
+      expect(spawnCalled).toBe(false);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("Task `model` from primary Claude (non-agent cwd) is allowed and forwarded", async () => {
+    let capturedOpts: Record<string, unknown> = {};
+    const result = await processTaskIntercept(
+      {
+        tool_name: "Task",
+        tool_input: { prompt: "do stuff", model: "claude:opus" },
+        cwd: "/some/repo",
+      },
+      {
+        spawnAgent: async (_repoPath, _prompt, spawnOpts) => {
+          capturedOpts = spawnOpts;
+          return { ok: true, stdout: "Created agent-cafef00d01", stderr: "" };
+        },
+      }
+    );
+    // No resolved agent → primary Claude → unrestricted: the model is forwarded.
+    expect(result.action).toBe("intercept");
+    expect(capturedOpts.model).toBe("claude:opus");
+  });
+
   test("AskUserQuestion from manager agent → deny with 'ib ask' message", async () => {
     const fs = await import("fs/promises");
     const { tmpdir } = await import("os");

@@ -75,6 +75,7 @@ import {
   resetNewAgentSpawnRunner,
   setNewAgentCallerMetaReader,
   resetNewAgentCallerMetaReader,
+  resolveCallerAgentContext,
   setNewAgentNoWorktreeCallerResolver,
   resetNewAgentNoWorktreeCallerResolver,
   autoAcceptWorkspaceTrust,
@@ -9164,6 +9165,44 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("stubbed-worker");
     expect(result.stderr).toContain("cannot spawn sub-agents");
+    resetNewAgentCallerMetaReader();
+  });
+
+  test("--model is refused for an agent caller that CAN spawn (user-only backstop)", async () => {
+    // A manager can spawn sub-agents, but must not pin the child's model with
+    // --model — that override is user-only (§2 item 3). The gate sits after the
+    // canSpawnChildren check, so a spawn-capable caller still hits it.
+    setNewAgentCallerMetaReader(() => ({ id: "stubbed-manager", canSpawnChildren: true }));
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await newAgent(tempDir, "sub-task", { name: "should-not-exist-model", model: "claude:opus" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("stubbed-manager");
+    expect(result.stderr).toContain("cannot pass --model");
+    expect(await Bun.file(join(agentsDir, "should-not-exist-model", "meta.json")).exists()).toBe(false);
+    resetNewAgentCallerMetaReader();
+  });
+
+  test("--model gate does NOT fire for a human / primary-Claude caller (null context)", async () => {
+    // callerContext === null → unrestricted; the user-only --model refusal must
+    // be absent regardless of whether the (mocked) spawn otherwise succeeds.
+    setNewAgentCallerMetaReader(() => null);
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await newAgent(tempDir, "human-task", { name: "human-model-spawn", model: "claude:opus" });
+    expect(result.stderr).not.toContain("cannot pass --model");
+    resetNewAgentCallerMetaReader();
+  });
+
+  test("resolveCallerAgentContext resolves an agent caller vs a human (nuke CLI backstop)", async () => {
+    // The user-only `ib nuke` dispatch gate relies on this: an agent caller
+    // resolves to a non-null context (denied), a human to null (allowed).
+    setNewAgentCallerMetaReader(() => ({ id: "stubbed-agent", agentType: "worker" }));
+    const asAgent = await resolveCallerAgentContext(tempDir);
+    expect(asAgent).not.toBeNull();
+    expect(asAgent!.meta.id).toBe("stubbed-agent");
+
+    setNewAgentCallerMetaReader(() => null);
+    const asHuman = await resolveCallerAgentContext(tempDir);
+    expect(asHuman).toBeNull();
     resetNewAgentCallerMetaReader();
   });
 

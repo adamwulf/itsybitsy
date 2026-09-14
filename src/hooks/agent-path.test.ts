@@ -1761,10 +1761,19 @@ describe("checkIbCommandAccess", () => {
     expect(result).toBeNull();
   });
 
-  test("allows nuke when calling agent is the manager", async () => {
+  test("denies nuke even when calling agent is the manager — nuke is user-only", async () => {
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
     const result = await checkIbCommandAccess("ib nuke agent-target1", "agent-manager1", agentsDir);
-    expect(result).toBeNull();
+    expect(result).not.toBeNull();
+    expect(result!.decision).toBe("deny");
+    expect(result!.reason).toContain("user-only");
+  });
+
+  test("denies bare `ib nuke` (nuke-all) for an agent — user-only", async () => {
+    const result = await checkIbCommandAccess("ib nuke --force", "agent-manager1", agentsDir);
+    expect(result).not.toBeNull();
+    expect(result!.decision).toBe("deny");
+    expect(result!.reason).toContain("user-only");
   });
 
   test("merge-check is unrestricted — returns null even for non-manager", async () => {
@@ -1837,12 +1846,13 @@ describe("checkIbCommandAccess", () => {
     expect(result).toBeNull();
   });
 
-  test("per-repo coordinator CANNOT nuke a non-child regular agent (not in expanded list)", async () => {
+  test("per-repo coordinator CANNOT nuke any agent — nuke is user-only", async () => {
     await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-someone" });
     const result = await checkIbCommandAccess("ib nuke agent-target1", "itsybitsy", agentsDir);
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");
+    expect(result!.reason).toContain("user-only");
   });
 
   test("per-repo coordinator CANNOT merge a non-child regular agent", async () => {
@@ -1892,15 +1902,83 @@ describe("checkIbCommandAccess", () => {
     expect(result).toBeNull();
   });
 
-  test("@system can run nuke on any agent", async () => {
+  test("@system is also denied nuke — nuke is user-only, not even @system may run it", async () => {
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
     const result = await checkIbCommandAccess("ib nuke agent-target1", "@system", agentsDir);
-    expect(result).toBeNull();
+    expect(result).not.toBeNull();
+    expect(result!.decision).toBe("deny");
+    expect(result!.reason).toContain("user-only");
   });
 
   test("@system can run retire on a target that doesn't exist (no found-in-repo check)", async () => {
     // No target meta written — @system bypass returns null before existence check
     const result = await checkIbCommandAccess("ib retire agent-target1", "@system", agentsDir);
+    expect(result).toBeNull();
+  });
+
+  // ── --model on new-agent is user-only ──────────────────────────────────────
+
+  test("denies `ib new-agent --model` for an agent — --model is user-only", async () => {
+    const result = await checkIbCommandAccess(
+      'ib new-agent --type worker --model claude:opus "do the thing"',
+      "agent-manager1",
+      agentsDir,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.decision).toBe("deny");
+    expect(result!.reason).toContain("user-only");
+  });
+
+  test("denies `ib new --model` (alias) for an agent — --model is user-only", async () => {
+    const result = await checkIbCommandAccess(
+      'ib new --model codex:gpt-5.6-sol "task"',
+      "agent-manager1",
+      agentsDir,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.decision).toBe("deny");
+    expect(result!.reason).toContain("user-only");
+  });
+
+  test("denies --model even when it trails the prompt", async () => {
+    const result = await checkIbCommandAccess(
+      'ib new-agent "task" --model claude:sonnet',
+      "agent-manager1",
+      agentsDir,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.decision).toBe("deny");
+  });
+
+  test("@system is also denied --model on new-agent — user-only", async () => {
+    const result = await checkIbCommandAccess(
+      'ib new-agent --repo /some/repo --model claude:opus "task"',
+      "@system",
+      agentsDir,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.decision).toBe("deny");
+    expect(result!.reason).toContain("user-only");
+  });
+
+  test("allows `ib new-agent` with the literal text '--model' inside the prompt (not the flag)", async () => {
+    // A prompt body mentioning --model is not the flag; the leaf/spawn guards
+    // still run elsewhere, but checkIbCommandAccess must not deny on the model
+    // rule here (returns null so the normal path/spawn checks proceed).
+    const result = await checkIbCommandAccess(
+      'ib new-agent --type worker "fix the bug where --model is ignored"',
+      "agent-manager1",
+      agentsDir,
+    );
+    expect(result).toBeNull();
+  });
+
+  test("allows `ib new-agent` with no --model flag (returns null — model rule not triggered)", async () => {
+    const result = await checkIbCommandAccess(
+      'ib new-agent --type worker "implement feature"',
+      "agent-manager1",
+      agentsDir,
+    );
     expect(result).toBeNull();
   });
 });

@@ -38,7 +38,7 @@ import {
 } from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { agentWorktreePath } from "../agents";
-import { checkWorktreeCleanliness } from "../git-status";
+import { checkWorktreeCleanliness, getWorktreeHead } from "../git-status";
 import { SplitPane } from "./split-pane";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { installTerminalCleanup } from "./terminal-cleanup";
@@ -1853,6 +1853,7 @@ export class DashboardComponent implements Component {
       // new selection, then probe the new agent's worktree right away instead
       // of waiting up to one gitStatusTimer tick.
       this.infoPanel.gitCleanliness = null;
+      this.infoPanel.gitHead = null;
       void this.refreshGitStatus();
 
       // Client detection: clear previous timer, check new agent
@@ -2080,14 +2081,21 @@ export class DashboardComponent implements Component {
     if (!agent || this.gitStatusInFlight) return;
     this.gitStatusInFlight = true;
     let cleanliness: Awaited<ReturnType<typeof checkWorktreeCleanliness>>;
+    let head: string | null;
     try {
-      cleanliness = await checkWorktreeCleanliness(agentWorktreePath(agent));
+      const worktreePath = agentWorktreePath(agent);
+      [cleanliness, head] = await Promise.all([
+        checkWorktreeCleanliness(worktreePath),
+        getWorktreeHead(worktreePath),
+      ]);
     } finally {
       this.gitStatusInFlight = false;
     }
-    if (this.infoPanel.agent?.id !== agent.id) return;
-    if (this.infoPanel.gitCleanliness === cleanliness) return;
+    if (this.infoPanel.agent?.id !== agent.id ||
+        agentWorktreePath(this.infoPanel.agent) !== agentWorktreePath(agent)) return;
+    if (this.infoPanel.gitCleanliness === cleanliness && this.infoPanel.gitHead === head) return;
     this.infoPanel.gitCleanliness = cleanliness;
+    this.infoPanel.gitHead = head;
     this.tui?.requestRender();
   }
 

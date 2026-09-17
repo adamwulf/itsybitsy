@@ -29,6 +29,19 @@ export const gitStatusSpawnCtx = new SpawnContext();
  */
 export type WorktreeCleanliness = "clean" | "dirty" | null;
 
+/** Resolve the worktree's current HEAD, including detached HEAD; omit unavailable HEADs. */
+export async function getWorktreeHead(cwd: string): Promise<string | null> {
+  try {
+    const { stdout, exitCode } = await gitStatusSpawnCtx.run([
+      "git", "-C", cwd, "rev-parse", "--short", "HEAD",
+    ]);
+    const hash = stdout.trim();
+    return exitCode === 0 && /^[0-9a-f]+$/i.test(hash) ? hash : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Probe `cwd` for uncommitted work. Never throws — a missing directory (an
  * archived agent whose worktree is gone), a non-git directory, or a failing

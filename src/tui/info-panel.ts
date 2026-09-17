@@ -65,6 +65,8 @@ export class InfoPanelComponent implements Component {
    * selection changes, so a stale answer never shows for a different agent.
    */
   gitCleanliness: WorktreeCleanliness = null;
+  /** Short HEAD hash, refreshed and cleared alongside gitCleanliness. */
+  gitHead: string | null = null;
   /** The selected repo's coordinator agent, if any — drives the repo-info stoplights. */
   repoCoordinatorAgent: Agent | null = null;
   /** The currently saved default agent type for the selected repo, if any. */
@@ -140,7 +142,8 @@ export class InfoPanelComponent implements Component {
       : this.gitCleanliness === "dirty"
         ? YELLOW
         : DIM_GRAY;
-    lines.push(truncateToWidth(`${gitColor}●${RESET} Git Status`, width, ""));
+    const gitHead = this.gitHead ? ` (${this.gitHead})` : "";
+    lines.push(truncateToWidth(`${gitColor}●${RESET} Git Status${gitHead}`, width, ""));
 
     // Keep the explicit sandbox state in the width-safe detail panel rather
     // than the tightly packed sidebar row. A missing legacy block is disabled.

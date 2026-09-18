@@ -83,6 +83,7 @@ sandbox:
     - (allow network-outbound (remote ip "localhost:*"))
     - (allow network-outbound (literal "/private/var/run/mDNSResponder"))
     - (allow network-outbound (remote unix-socket))
+    - (allow mach-lookup (global-name "com.apple.FileCoordination"))
   domains:
     - "api.anthropic.com"
     - "*.anthropic.com"

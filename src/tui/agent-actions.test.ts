@@ -224,9 +224,16 @@ function makeMockCtx(overrides?: {
     watcher: { refresh: () => refreshCalls.push(1), updateRepos: () => {}, recheckHealth: () => {}, lastAgents: overrides?.lastAgents ?? [] },
     diffTool: undefined,
     pendingSelectNewestInRepo: null,
-    showDialog: (d: NonNullable<DialogState>) => { dialogs.push(d); },
-    closeDialog: () => {},
-    setNotice: (text: string, _kind: "info" | "error") => { notices.push(text); },
+    // Dashboard methods depend on their receiver; arrow stubs hide unbound callbacks.
+    showDialog(d: NonNullable<DialogState>) {
+      expect(this).toBe(ctx);
+      dialogs.push(d);
+    },
+    closeDialog() { expect(this).toBe(ctx); },
+    setNotice(text: string, _kind: "info" | "error") {
+      expect(this).toBe(ctx);
+      notices.push(text);
+    },
     executeAndRefresh: (fn: () => Promise<void>) => {
       // Capture the in-flight action so tests can await it deterministically
       // (flushActions) instead of racing a fixed sleep against the inline
@@ -3027,6 +3034,38 @@ describe("handleSend — attachment staging + acceptance-gated draft", () => {
       expect(sent).not.toContain(file1);
       expect(sent).toContain(file2);
       expect(notices).toContain("Sent to agent-1");
+    } finally {
+      await rm(testDir, { recursive: true, force: true });
+    }
+  });
+
+  test("reports attachment copy failures through the context notice method", async () => {
+    const testDir = await mkdtemp(join(process.cwd(), ".test-aa-send-"));
+    const file = join(testDir, "test.txt");
+    await Bun.write(file, "hello");
+
+    try {
+      let sends = 0;
+      setStagedSenderForTests(async () => {
+        sends++;
+        return okResult;
+      });
+      const agent = makeAgent({ id: "agent-1", repoPath: testDir });
+      const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent });
+      handleSend(ctx);
+      assertDialog(dialogs[0]!, "textarea").onSubmit(`See ${file}`);
+      await waitFor(() => dialogs.length === 2, {
+        message: "attachment picker to open",
+        timeoutMs: WAIT_MS,
+      });
+
+      // The file can disappear between discovery and confirmation.
+      await rm(file);
+      await assertDialog(dialogs[1]!, "multi-select").onSubmit([0]);
+      await flushActions();
+
+      expect(sends).toBe(0);
+      expect(notices.some((notice) => notice.startsWith("Failed to copy attachments:"))).toBe(true);
     } finally {
       await rm(testDir, { recursive: true, force: true });
     }

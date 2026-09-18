@@ -1290,9 +1290,9 @@ export function handleSend(ctx: ActionCtx) {
           await promptAndStageAttachmentsIfNeeded({
             text: trimmed,
             baseDir: agent.repoPath,
-            showDialog: ctx.showDialog,
-            closeDialog: ctx.closeDialog,
-            setNotice: ctx.setNotice,
+            showDialog: (dialog) => ctx.showDialog(dialog),
+            closeDialog: () => ctx.closeDialog(),
+            setNotice: (text, kind) => ctx.setNotice(text, kind),
             onConfirm: async (processedText) => {
               let failed = 0;
               for (const f of pending) {
@@ -1320,9 +1320,9 @@ export function handleSend(ctx: ActionCtx) {
           await promptAndStageAttachmentsIfNeeded({
             text: trimmed,
             baseDir: agent.repoPath,
-            showDialog: ctx.showDialog,
-            closeDialog: ctx.closeDialog,
-            setNotice: ctx.setNotice,
+            showDialog: (dialog) => ctx.showDialog(dialog),
+            closeDialog: () => ctx.closeDialog(),
+            setNotice: (text, kind) => ctx.setNotice(text, kind),
             onConfirm: async (processedText) => {
               const result = await sendStagedMessage(agent, processedText, { cwd: "/", attachmentBaseDir: agent.repoPath });
               if (result.ok) {
@@ -1485,9 +1485,9 @@ function handleSendToRepoCoordinator(ctx: ActionCtx, agent: Agent) {
         await promptAndStageAttachmentsIfNeeded({
           text: trimmed,
           baseDir: agent.repoPath,
-          showDialog: ctx.showDialog,
-          closeDialog: ctx.closeDialog,
-          setNotice: ctx.setNotice,
+          showDialog: (dialog) => ctx.showDialog(dialog),
+          closeDialog: () => ctx.closeDialog(),
+          setNotice: (text, kind) => ctx.setNotice(text, kind),
           onConfirm: async (processedText) => {
             const result = await sendStagedMessage(agent, processedText, { cwd: "/", attachmentBaseDir: agent.repoPath });
             if (result.ok) {
@@ -1716,9 +1716,9 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
         await promptAndStageAttachmentsIfNeeded({
           text: prompt,
           baseDir: repo.path,
-          showDialog: ctx.showDialog,
-          closeDialog: ctx.closeDialog,
-          setNotice: ctx.setNotice,
+          showDialog: (dialog) => ctx.showDialog(dialog),
+          closeDialog: () => ctx.closeDialog(),
+          setNotice: (text, kind) => ctx.setNotice(text, kind),
           onConfirm: async (processedPrompt) => {
             const result = await newAgent(repo.path, processedPrompt, opts);
             if (result.ok) {
@@ -1767,9 +1767,9 @@ export function handleAnswerQuestion(ctx: ActionCtx) {
         await promptAndStageAttachmentsIfNeeded({
           text: trimmed,
           baseDir: answerAgent.repoPath,
-          showDialog: ctx.showDialog,
-          closeDialog: ctx.closeDialog,
-          setNotice: ctx.setNotice,
+          showDialog: (dialog) => ctx.showDialog(dialog),
+          closeDialog: () => ctx.closeDialog(),
+          setNotice: (text, kind) => ctx.setNotice(text, kind),
           onConfirm: async (processedAnswer) => {
             // 1) Deliver the answer FIRST. On failure keep the draft and DO NOT
             //    acknowledge — the question must remain until the answer is queued.
@@ -2639,9 +2639,9 @@ function showMessageInput(ctx: ActionCtx, repo: RepoEntry, destAgent: Agent) {
         await promptAndStageAttachmentsIfNeeded({
           text: trimmed,
           baseDir: destAgent.repoPath,
-          showDialog: ctx.showDialog,
-          closeDialog: ctx.closeDialog,
-          setNotice: ctx.setNotice,
+          showDialog: (dialog) => ctx.showDialog(dialog),
+          closeDialog: () => ctx.closeDialog(),
+          setNotice: (text, kind) => ctx.setNotice(text, kind),
           onConfirm: async (processedText) => {
             const result = await sendStagedMessage(destAgent, processedText, { cwd: "/", attachmentBaseDir: destAgent.repoPath });
             if (result.ok) {

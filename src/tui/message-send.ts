@@ -39,6 +39,7 @@ export interface StagedSendOptions {
   team?: string;
   /** Base dir for resolving ./ and ../ attachment references; the selected repo. */
   attachmentBaseDir?: string;
+  stageAttachments?: boolean;
 }
 
 export type StagedSender = (
@@ -58,10 +59,11 @@ export interface StagedTeamSendOptions {
 }
 
 const forwardToSendMessage: StagedSender = (agent, message, opts) => {
-  // Turn on staging and forward the caller's base dir to the delivery layer.
-  const forwardOpts: StagedSendOptions & { stageAttachments: boolean } = {
+  // Forward opts without forcing automatic staging, so user checkbox selections
+  // in the interactive attachment prompt are honored.
+  const forwardOpts: StagedSendOptions & { stageAttachments?: boolean } = {
     ...opts,
-    stageAttachments: true,
+    stageAttachments: opts?.stageAttachments ?? false,
   };
   return sendMessage(agent, message, forwardOpts);
 };

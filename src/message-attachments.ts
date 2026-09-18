@@ -2,8 +2,9 @@ import { copyFile, mkdtemp, mkdir, realpath, rm, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { basename, join, relative, resolve } from "node:path";
 import { canonicalizeSandboxPath } from "./sandbox";
+import { userHome } from "./home";
 
-interface PathReference {
+export interface PathReference {
   start: number;
   end: number;
   path: string;
@@ -21,12 +22,13 @@ export interface StagedMessage {
 
 function pathStart(text: string, offset: number): boolean {
   return (text[offset] === "/" && text[offset + 1] !== "/")
-    || text.startsWith("./", offset) || text.startsWith("../", offset);
+    || text.startsWith("./", offset) || text.startsWith("../", offset)
+    || text.startsWith("~/", offset);
 }
 
 /** Read terminal drag/drop spelling as data; never invoke a shell. Offsets
  * refer to the original text so replacing a path preserves surrounding prose. */
-function references(text: string): PathReference[] {
+export function references(text: string): PathReference[] {
   const found: PathReference[] = [];
   for (let i = 0; i < text.length; i++) {
     // Code spans/fences are examples, not attachment requests.
@@ -79,7 +81,7 @@ function references(text: string): PathReference[] {
   return found;
 }
 
-function spellPath(path: string, quote?: string): string {
+export function spellPath(path: string, quote?: string): string {
   if (quote === "'") return `'${path.replaceAll("'", "'\\''")}'`;
   if (quote === '"') return `"${path.replace(/[\\"$`]/g, "\\$&")}"`;
   return path.replace(/[\s\\'"`$&;|<>(){}\[\]!?*#~]/g, "\\$&");
@@ -97,7 +99,9 @@ export async function stageMessageAttachments(message: string, baseDir: string, 
   const canonicalLiveRoot = liveRoot ? canonicalizeSandboxPath(liveRoot) : undefined;
   const inside = (root: string, path: string) => path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`);
   const resolveReference = (path: string): string => {
-    let source = resolve(baseDir, path);
+    let source = path.startsWith("~/")
+      ? resolve(userHome(), path.slice(2))
+      : resolve(baseDir, path);
     // A relative project reference means the recipient's live checkout, even
     // when baseDir is the main repository and the recipient has a worktree.
     // Preserve future files too: "create ./src/new.ts" is an instruction, not

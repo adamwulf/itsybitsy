@@ -86,6 +86,7 @@ import { InputFieldComponent } from "./input-field";
 import { pauseAgent, teamSend as ibTeamSend } from "../ib-commands";
 import { sendStagedMessage } from "./message-send";
 import type { StagedTeamSendOptions, TeamSendResult } from "./message-send";
+import { promptAndStageAttachmentsIfNeeded } from "./attachment-prompt";
 import { getResolvableWarnings } from "../health-check";
 import { logToWatchLog, logWarning, setWatchRunning } from "../watch-log";
 
@@ -884,16 +885,20 @@ export class DashboardComponent implements Component {
       const agent = this.agentTree.selectedAgent;
       const trimmed = text.trim();
       if (!agent || !trimmed) return;
-      // Acceptance-gated send: the field keeps the draft until this resolves
-      // true, so a staged-attachment failure preserves the message for
-      // correction and a duplicate Send press is ignored while in flight.
-      // attachmentBaseDir = the destination agent's repo, so ./ and ../ in a
-      // dragged path resolve against the selected repo.
-      return this.executeSendAndRefresh(async () => {
-        const result = await sendStagedMessage(agent, trimmed, { cwd: "/", attachmentBaseDir: agent.repoPath });
-        if (result.ok) { this.setNotice(`Sent to ${agent.id}`, "info"); return true; }
-        this.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
-        return false;
+      return promptAndStageAttachmentsIfNeeded({
+        text: trimmed,
+        baseDir: agent.repoPath,
+        showDialog: (d) => this.showDialog(d),
+        closeDialog: () => this.closeDialog(),
+        setNotice: (msg, kind) => this.setNotice(msg, kind),
+        onConfirm: (processedText) => {
+          return this.executeSendAndRefresh(async () => {
+            const result = await sendStagedMessage(agent, processedText, { cwd: "/", attachmentBaseDir: agent.repoPath });
+            if (result.ok) { this.setNotice(`Sent to ${agent.id}`, "info"); return true; }
+            this.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
+            return false;
+          });
+        },
       });
     };
     this.inputField.onCancel = () => {
@@ -956,14 +961,20 @@ export class DashboardComponent implements Component {
       const agent = this.rightPane.repoCoordinatorAgent;
       const trimmed = text.trim();
       if (!agent || !trimmed) return;
-      // Repo coordinator is a normal repository agent (not the global @system
-      // coordinator), so it stages like any other human send. Acceptance-gated:
-      // keep the draft on failure, clear only on acceptance.
-      return this.executeSendAndRefresh(async () => {
-        const result = await sendStagedMessage(agent, trimmed, { cwd: "/", attachmentBaseDir: agent.repoPath });
-        if (result.ok) { this.setNotice(`Sent to ${agent.id}`, "info"); return true; }
-        this.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
-        return false;
+      return promptAndStageAttachmentsIfNeeded({
+        text: trimmed,
+        baseDir: agent.repoPath,
+        showDialog: (d) => this.showDialog(d),
+        closeDialog: () => this.closeDialog(),
+        setNotice: (msg, kind) => this.setNotice(msg, kind),
+        onConfirm: (processedText) => {
+          return this.executeSendAndRefresh(async () => {
+            const result = await sendStagedMessage(agent, processedText, { cwd: "/", attachmentBaseDir: agent.repoPath });
+            if (result.ok) { this.setNotice(`Sent to ${agent.id}`, "info"); return true; }
+            this.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
+            return false;
+          });
+        },
       });
     };
     this.repoCoordinatorInputField.onCancel = () => {

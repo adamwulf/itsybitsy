@@ -32,6 +32,7 @@ import { resolveDefaultAgentType } from "./default-agent-type";
 import type { DialogState, SetupItem, ConfigDialogItem } from "./dialog-handler";
 import { sendStagedMessage } from "./message-send";
 import type { StagedTeamSendOptions, TeamSendResult } from "./message-send";
+import { promptAndStageAttachmentsIfNeeded } from "./attachment-prompt";
 import { TextBuffer } from "./text-buffer";
 import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../config";
 import type { ConfigResult } from "../config";
@@ -1286,33 +1287,57 @@ export function handleSend(ctx: ActionCtx) {
         }
         dialog.inFlight = true;
         void ctx.executeAndRefresh(async () => {
-          let failed = 0;
-          for (const f of pending) {
-            const result = await sendStagedMessage(f.agent, trimmed, { cwd: "/", attachmentBaseDir: f.agent.repoPath });
-            if (result.ok) acceptedAll.add(f.agent.id); else failed++;
-          }
-          if (failed === 0) {
-            // Close only once every recipient has accepted.
-            ctx.closeDialog();
-            ctx.setNotice(`Sent to ${acceptedAll.size} agents`, "info");
-          } else {
-            // Keep the draft open; the accepted set makes a retry resend only the
-            // remaining agents.
-            ctx.setNotice(`Sent to ${acceptedAll.size} agents, ${failed} failed — press Send to retry`, "error");
-          }
+          await promptAndStageAttachmentsIfNeeded({
+            text: trimmed,
+            baseDir: agent.repoPath,
+            showDialog: ctx.showDialog,
+            closeDialog: ctx.closeDialog,
+            setNotice: ctx.setNotice,
+            onConfirm: async (processedText) => {
+              let failed = 0;
+              for (const f of pending) {
+                const result = await sendStagedMessage(f.agent, processedText, { cwd: "/", attachmentBaseDir: f.agent.repoPath });
+                if (result.ok) acceptedAll.add(f.agent.id); else failed++;
+              }
+              if (failed === 0) {
+                // Close only once every recipient has accepted.
+                ctx.closeDialog();
+                ctx.setNotice(`Sent to ${acceptedAll.size} agents`, "info");
+              } else {
+                // Keep the draft open; the accepted set makes a retry resend only the
+                // remaining agents.
+                ctx.setNotice(`Sent to ${acceptedAll.size} agents, ${failed} failed — press Send to retry`, "error");
+              }
+            },
+            onCancel: () => {
+              ctx.setNotice("Send cancelled", "info");
+            },
+          });
         }).finally(() => { dialog.inFlight = false; });
       } else {
         dialog.inFlight = true;
         void ctx.executeAndRefresh(async () => {
-          const result = await sendStagedMessage(agent, trimmed, { cwd: "/", attachmentBaseDir: agent.repoPath });
-          if (result.ok) {
-            // Close/clear only on acceptance.
-            ctx.closeDialog();
-            ctx.setNotice(`Sent to ${agent.id}`, "info");
-          } else {
-            // Keep the editable draft so the user can fix a bad path and resubmit.
-            ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
-          }
+          await promptAndStageAttachmentsIfNeeded({
+            text: trimmed,
+            baseDir: agent.repoPath,
+            showDialog: ctx.showDialog,
+            closeDialog: ctx.closeDialog,
+            setNotice: ctx.setNotice,
+            onConfirm: async (processedText) => {
+              const result = await sendStagedMessage(agent, processedText, { cwd: "/", attachmentBaseDir: agent.repoPath });
+              if (result.ok) {
+                // Close/clear only on acceptance.
+                ctx.closeDialog();
+                ctx.setNotice(`Sent to ${agent.id}`, "info");
+              } else {
+                // Keep the editable draft so the user can fix a bad path and resubmit.
+                ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
+              }
+            },
+            onCancel: () => {
+              ctx.setNotice("Send cancelled", "info");
+            },
+          });
         }).finally(() => { dialog.inFlight = false; });
       }
     },
@@ -1457,13 +1482,25 @@ function handleSendToRepoCoordinator(ctx: ActionCtx, agent: Agent) {
       const trimmed = message.trim();
       dialog.inFlight = true;
       void ctx.executeAndRefresh(async () => {
-        const result = await sendStagedMessage(agent, trimmed, { cwd: "/", attachmentBaseDir: agent.repoPath });
-        if (result.ok) {
-          ctx.closeDialog();
-          ctx.setNotice(`Sent to ${agent.id}`, "info");
-        } else {
-          ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
-        }
+        await promptAndStageAttachmentsIfNeeded({
+          text: trimmed,
+          baseDir: agent.repoPath,
+          showDialog: ctx.showDialog,
+          closeDialog: ctx.closeDialog,
+          setNotice: ctx.setNotice,
+          onConfirm: async (processedText) => {
+            const result = await sendStagedMessage(agent, processedText, { cwd: "/", attachmentBaseDir: agent.repoPath });
+            if (result.ok) {
+              ctx.closeDialog();
+              ctx.setNotice(`Sent to ${agent.id}`, "info");
+            } else {
+              ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
+            }
+          },
+          onCancel: () => {
+            ctx.setNotice("Send cancelled", "info");
+          },
+        });
       }).finally(() => { dialog.inFlight = false; });
     },
   };
@@ -1676,14 +1713,26 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
       if (name.trim()) opts.name = name.trim();
       if (agentType) opts.type = agentType;
       ctx.executeAndRefresh(async () => {
-        const result = await newAgent(repo.path, prompt, opts);
-        if (result.ok) {
-          ctx.closeDialog();
-          ctx.pendingSelectNewestInRepo = repo.path;
-          ctx.setNotice(`Created new agent in ${repoDisplayName(repo)}`, "info");
-        } else {
-          ctx.setNotice(`New agent failed: ${result.stderr || result.stdout}`, "error");
-        }
+        await promptAndStageAttachmentsIfNeeded({
+          text: prompt,
+          baseDir: repo.path,
+          showDialog: ctx.showDialog,
+          closeDialog: ctx.closeDialog,
+          setNotice: ctx.setNotice,
+          onConfirm: async (processedPrompt) => {
+            const result = await newAgent(repo.path, processedPrompt, opts);
+            if (result.ok) {
+              ctx.closeDialog();
+              ctx.pendingSelectNewestInRepo = repo.path;
+              ctx.setNotice(`Created new agent in ${repoDisplayName(repo)}`, "info");
+            } else {
+              ctx.setNotice(`New agent failed: ${result.stderr || result.stdout}`, "error");
+            }
+          },
+          onCancel: () => {
+            ctx.setNotice("New agent cancelled", "info");
+          },
+        });
       });
     },
   });
@@ -1715,20 +1764,32 @@ export function handleAnswerQuestion(ctx: ActionCtx) {
       const trimmed = answer.trim();
       dialog.inFlight = true;
       void ctx.executeAndRefresh(async () => {
-        // 1) Deliver the answer FIRST. On failure keep the draft and DO NOT
-        //    acknowledge — the question must remain until the answer is queued.
-        if (!answered) {
-          const sendResult = await sendStagedMessage(answerAgent, trimmed, { cwd: "/", attachmentBaseDir: answerAgent.repoPath });
-          if (!sendResult.ok) { ctx.setNotice(`Send failed: ${sendResult.stderr || sendResult.stdout}`, "error"); return; }
-          answered = true;
-        }
-        // 2) The answer is accepted (never resend it). Now acknowledge. If the
-        //    acknowledge fails, keep the dialog open — a retry re-acks only,
-        //    never re-sends the already-delivered answer.
-        const ackResult = await acknowledgeQuestion(answerAgent.repoPath, q.id);
-        if (!ackResult.ok) { ctx.setNotice(`Answered ${q.agent}, but acknowledge failed: ${ackResult.stderr || ackResult.stdout}`, "error"); return; }
-        ctx.closeDialog();
-        ctx.setNotice(`Answered ${q.agent}`, "info");
+        await promptAndStageAttachmentsIfNeeded({
+          text: trimmed,
+          baseDir: answerAgent.repoPath,
+          showDialog: ctx.showDialog,
+          closeDialog: ctx.closeDialog,
+          setNotice: ctx.setNotice,
+          onConfirm: async (processedAnswer) => {
+            // 1) Deliver the answer FIRST. On failure keep the draft and DO NOT
+            //    acknowledge — the question must remain until the answer is queued.
+            if (!answered) {
+              const sendResult = await sendStagedMessage(answerAgent, processedAnswer, { cwd: "/", attachmentBaseDir: answerAgent.repoPath });
+              if (!sendResult.ok) { ctx.setNotice(`Send failed: ${sendResult.stderr || sendResult.stdout}`, "error"); return; }
+              answered = true;
+            }
+            // 2) The answer is accepted (never resend it). Now acknowledge. If the
+            //    acknowledge fails, keep the dialog open — a retry re-acks only,
+            //    never re-sends the already-delivered answer.
+            const ackResult = await acknowledgeQuestion(answerAgent.repoPath, q.id);
+            if (!ackResult.ok) { ctx.setNotice(`Answered ${q.agent}, but acknowledge failed: ${ackResult.stderr || ackResult.stdout}`, "error"); return; }
+            ctx.closeDialog();
+            ctx.setNotice(`Answered ${q.agent}`, "info");
+          },
+          onCancel: () => {
+            ctx.setNotice("Answer cancelled", "info");
+          },
+        });
       }).finally(() => { dialog.inFlight = false; });
     },
   };
@@ -2575,13 +2636,25 @@ function showMessageInput(ctx: ActionCtx, repo: RepoEntry, destAgent: Agent) {
       const trimmed = message.trim();
       dialog.inFlight = true;
       void ctx.executeAndRefresh(async () => {
-        const result = await sendStagedMessage(destAgent, trimmed, { cwd: "/", attachmentBaseDir: destAgent.repoPath });
-        if (result.ok) {
-          ctx.closeDialog();
-          ctx.setNotice(`Sent to ${destAgent.id} in ${repoDisplayName(repo)}`, "info");
-        } else {
-          ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
-        }
+        await promptAndStageAttachmentsIfNeeded({
+          text: trimmed,
+          baseDir: destAgent.repoPath,
+          showDialog: ctx.showDialog,
+          closeDialog: ctx.closeDialog,
+          setNotice: ctx.setNotice,
+          onConfirm: async (processedText) => {
+            const result = await sendStagedMessage(destAgent, processedText, { cwd: "/", attachmentBaseDir: destAgent.repoPath });
+            if (result.ok) {
+              ctx.closeDialog();
+              ctx.setNotice(`Sent to ${destAgent.id} in ${repoDisplayName(repo)}`, "info");
+            } else {
+              ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
+            }
+          },
+          onCancel: () => {
+            ctx.setNotice("Send cancelled", "info");
+          },
+        });
       }).finally(() => { dialog.inFlight = false; });
     },
   };

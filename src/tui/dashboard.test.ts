@@ -4591,6 +4591,58 @@ describe("input field integration", () => {
     }
   });
 
+  test("inline send with candidate attachment paths opens multi-select dialog and stages on confirm", async () => {
+    const testDir = join(process.cwd(), `.test-db-send-${Math.random().toString(36).slice(2)}`);
+    await mkdir(testDir, { recursive: true });
+    const file = join(testDir, "doc.txt");
+    await Bun.write(file, "some content");
+
+    const sends: string[] = [];
+    setStagedSenderForTests(async (_agent, message) => {
+      sends.push(message);
+      return { ok: true, exitCode: 0, stdout: "", stderr: "" };
+    });
+
+    try {
+      const dashboard = makeDashboard();
+      const agent = makeAgent("agent-a", testDir);
+      agent.meta.tmux_session = "agent-a-session";
+      const flatList: FlatEntry[] = [makeFlatAgent(agent)];
+      dashboard.onUpdate([agent], flatList, []);
+
+      // Focus input field
+      dashboard.handleInput("\t"); // info
+      dashboard.handleInput("\t"); // active-agent
+      dashboard.handleInput("\t"); // pane → input
+
+      // Type message with file path
+      const msg = `check ${file}`;
+      for (const ch of msg) dashboard.handleInput(ch);
+      dashboard.handleInput("\t"); // input → send
+      dashboard.handleInput("\r"); // submit
+
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(dashboard.dialog).not.toBeNull();
+      expect(dashboard.dialog?.type).toBe("multi-select");
+      const dlg = dashboard.dialog as Extract<NonNullable<typeof dashboard.dialog>, { type: "multi-select" }>;
+      expect(dlg.items).toEqual([file]);
+
+      // Confirm with the item checked
+      await (dlg.onSubmit as any)([0]);
+
+      await dashboard.flushPendingActions();
+
+      expect(sends).toHaveLength(1);
+      expect(sends[0]).toContain("/tmp/itsybitsy-attachments-");
+      expect(sends[0]).not.toContain(file);
+      expect(dashboard.inputField.getText()).toBe("");
+    } finally {
+      resetStagedSenderForTests();
+      await rm(testDir, { recursive: true, force: true });
+    }
+  });
+
   test("Escape from input sub-focus clears input and returns to pane sub-focus", () => {
     const dashboard = makeDashboard();
     const agent = makeAgent("agent-a", "/repos/test");

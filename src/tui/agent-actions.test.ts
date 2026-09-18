@@ -935,6 +935,35 @@ describe("handleNewAgent", () => {
       expect(d.agentType).toBe("manager");
     }
   });
+
+  test("submitting new-agent-form with candidate paths prompts and stages selected attachments", async () => {
+    const testDir = join(process.cwd(), `.test-aa-newagent-${Math.random().toString(36).slice(2)}`);
+    await mkdir(testDir, { recursive: true });
+    const file = join(testDir, "spec.txt");
+    await Bun.write(file, "specification");
+
+    try {
+      const repos: RepoEntry[] = [{ path: testDir, name: "repo" }];
+      const { ctx, dialogs, flushActions } = makeMockCtx({ repos });
+      handleNewAgent(ctx);
+      const d = assertDialog(dialogs[0]!, "new-agent-form");
+
+      // Submit with path in prompt
+      d.onSubmit("worker-1", "worker", `Read ${file}`);
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Should open multi-select dialog for attachments
+      expect(dialogs.length).toBe(2);
+      const picker = assertDialog(dialogs[1]!, "multi-select");
+      expect(picker.items).toEqual([file]);
+      expect(picker.checked).toEqual([false]);
+
+      picker.onSubmit([0]);
+      await flushActions();
+    } finally {
+      await rm(testDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("handleScrollUp / handleScrollDown", () => {
@@ -2959,6 +2988,113 @@ describe("handleSend — attachment staging + acceptance-gated draft", () => {
     await flushActions();
     expect(calls).toBe(0);
     expect(notices).toContain("Send cancelled");
+  });
+
+  test("shows checkbox dialog when message contains file paths; checked paths are copied to /tmp and swapped", async () => {
+    const testDir = join(process.cwd(), `.test-aa-send-${Math.random().toString(36).slice(2)}`);
+    await mkdir(testDir, { recursive: true });
+    const file1 = join(testDir, "test1.txt");
+    const file2 = join(testDir, "test2.txt");
+    await Bun.write(file1, "content 1");
+    await Bun.write(file2, "content 2");
+
+    try {
+      const sentMessages: string[] = [];
+      setStagedSenderForTests(async (_agent, message) => {
+        sentMessages.push(message);
+        return okResult;
+      });
+      const agent = makeAgent({ id: "agent-1", repoPath: testDir });
+      const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent });
+
+      handleSend(ctx);
+      const textDialog = assertDialog(dialogs[0]!, "textarea");
+      textDialog.onSubmit(`Here is ${file1} and ${file2}`);
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(dialogs.length).toBe(2);
+      const picker = assertDialog(dialogs[1]!, "multi-select");
+      expect(picker.prompt).toBe("Copy paths to /tmp:");
+      expect(picker.items).toEqual([file1, file2]);
+      expect(picker.checked).toEqual([false, false]);
+
+      picker.onSubmit([0]);
+      await flushActions();
+
+      expect(sentMessages).toHaveLength(1);
+      const sent = sentMessages[0]!;
+      expect(sent).toContain("/tmp/itsybitsy-attachments-");
+      expect(sent).not.toContain(file1);
+      expect(sent).toContain(file2);
+      expect(notices).toContain("Sent to agent-1");
+    } finally {
+      await rm(testDir, { recursive: true, force: true });
+    }
+  });
+
+  test("filters out nonexistent paths and /tmp paths from the checkbox list", async () => {
+    const testDir = join(process.cwd(), `.test-aa-send-${Math.random().toString(36).slice(2)}`);
+    await mkdir(testDir, { recursive: true });
+    const existingFile = join(testDir, "exists.txt");
+    await Bun.write(existingFile, "exists");
+
+    try {
+      const sentMessages: string[] = [];
+      setStagedSenderForTests(async (_agent, message) => {
+        sentMessages.push(message);
+        return okResult;
+      });
+      const agent = makeAgent({ id: "agent-1", repoPath: testDir });
+      const { ctx, dialogs, flushActions } = makeMockCtx({ agent });
+
+      handleSend(ctx);
+      const textDialog = assertDialog(dialogs[0]!, "textarea");
+      textDialog.onSubmit(`Check ${existingFile}, /tmp/some_temp.png, and /nonexistent/fake.png`);
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(dialogs.length).toBe(2);
+      const picker = assertDialog(dialogs[1]!, "multi-select");
+      expect(picker.items).toEqual([existingFile]);
+
+      picker.onSubmit([]);
+      await flushActions();
+
+      expect(sentMessages).toHaveLength(1);
+      expect(sentMessages[0]).toBe(`Check ${existingFile}, /tmp/some_temp.png, and /nonexistent/fake.png`);
+    } finally {
+      await rm(testDir, { recursive: true, force: true });
+    }
+  });
+
+  test("cancelling the checkbox dialog cancels the send", async () => {
+    const testDir = join(process.cwd(), `.test-aa-send-${Math.random().toString(36).slice(2)}`);
+    await mkdir(testDir, { recursive: true });
+    const file = join(testDir, "test.txt");
+    await Bun.write(file, "hello");
+
+    try {
+      let sends = 0;
+      setStagedSenderForTests(async () => {
+        sends++;
+        return okResult;
+      });
+      const agent = makeAgent({ id: "agent-1", repoPath: testDir });
+      const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent });
+
+      handleSend(ctx);
+      const textDialog = assertDialog(dialogs[0]!, "textarea");
+      textDialog.onSubmit(`See ${file}`);
+      await new Promise((r) => setTimeout(r, 20));
+
+      const picker = assertDialog(dialogs[1]!, "multi-select");
+      picker.onCancel?.();
+      await flushActions();
+
+      expect(sends).toBe(0);
+      expect(notices).toContain("Send cancelled");
+    } finally {
+      await rm(testDir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -307,18 +307,18 @@ describe("watchdog", () => {
       expect(getTracker("a1").waitCounter).toBe(2);
     });
 
-    test("notifies manager after initial threshold (6 ticks = 30s)", async () => {
+    test("notifies manager after initial threshold (48 ticks = 4m)", async () => {
       const a1 = agent("a1", "waiting", "mgr");
       const mgr = agent("mgr", "running");
       const agents = [mgr, a1];
 
-      // Tick 5 times — no notification yet
-      for (let i = 0; i < 5; i++) {
+      // Stop one tick short — no notification yet.
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS - 1; i++) {
         await tick(agents);
       }
-      expect(getTracker("a1").waitCounter).toBe(5);
+      expect(getTracker("a1").waitCounter).toBe(INITIAL_NOTIFY_TICKS - 1);
 
-      // Tick 6 — threshold reached, notification sent
+      // Final tick — threshold reached, notification sent.
       await tick(agents);
       // After notification, counter resets to 0
       expect(getTracker("a1").waitCounter).toBe(0);
@@ -329,23 +329,23 @@ describe("watchdog", () => {
       const mgr = agent("mgr", "running");
       const agents = [mgr, a1];
 
-      // First threshold: 6 ticks
+      // First threshold: 48 ticks
       for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
         await tick(agents);
       }
-      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS * 2); // 12
+      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS * 2); // 96
 
-      // Second threshold: 12 ticks
+      // Second threshold: 96 ticks
       for (let i = 0; i < INITIAL_NOTIFY_TICKS * 2; i++) {
         await tick(agents);
       }
-      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS * 4); // 24
+      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS * 4); // 192
 
-      // Third threshold: 24 ticks
+      // Third threshold: 192 ticks
       for (let i = 0; i < INITIAL_NOTIFY_TICKS * 4; i++) {
         await tick(agents);
       }
-      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS * 8); // 48
+      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS * 8); // 384
     });
 
     test("caps backoff at MAX_NOTIFY_TICKS (64 minutes)", async () => {
@@ -440,7 +440,7 @@ describe("watchdog", () => {
       for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
         await tick(agents);
       }
-      // After the sixth tick, both a1 AND child waiting-handlers fire. One of them
+      // At the threshold, both a1 AND child waiting-handlers fire. One of them
       // (a1) is what we want to verify notified its manager.
       expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBeGreaterThan(0);
     });
@@ -473,7 +473,7 @@ describe("watchdog", () => {
       expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBeGreaterThan(0);
     });
 
-    test("counter-pause behavioral: suppressed 3 ticks, then clear 6 ticks → notification on 9th", async () => {
+    test("counter-pause behavioral: suppressed ticks do not count toward the threshold", async () => {
       let suppressed = true;
       setWatchdogCaptureTmux(async () =>
         suppressed ? "⏵⏵ accept edits on · 1 shell" : "no shells",
@@ -489,12 +489,12 @@ describe("watchdog", () => {
       expect(getTracker("a1").waitCounter).toBe(0);
       expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBe(0);
 
-      // Clear for 5 ticks — counter reaches 5 (no notification yet, threshold is 6)
+      // Clear until one tick before the threshold — no notification yet.
       suppressed = false;
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS - 1; i++) {
         await tick(agents);
       }
-      expect(getTracker("a1").waitCounter).toBe(5);
+      expect(getTracker("a1").waitCounter).toBe(INITIAL_NOTIFY_TICKS - 1);
       expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBe(0);
 
       // One more clear tick → threshold reached, notification fires, counter resets
@@ -512,7 +512,7 @@ describe("watchdog", () => {
       const mgr = agent("mgr", "running");
       const agents = [mgr, a1];
 
-      // Run one full cycle so notifyInterval doubles to 12.
+      // Run one full cycle so notifyInterval doubles to 96.
       for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
         await tick(agents);
       }
@@ -523,7 +523,7 @@ describe("watchdog", () => {
       for (let i = 0; i < 4; i++) {
         await tick(agents);
       }
-      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS * 2); // still 12
+      expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS * 2); // still 96
     });
 
     test("notifySpawner is suppressed alongside notifyManager", async () => {
@@ -1271,10 +1271,10 @@ describe("watchdog", () => {
 
   // =========================================================================
   // Capped manager/spawner reminders: at most MAX_MANAGER_NOTIFICATIONS per
-  // waiting/unknown episode, each carrying an (reminder X/10) counter.
+  // waiting/unknown episode, each carrying an (reminder X/5) counter.
   // =========================================================================
 
-  describe("manager notification cap (reminder X/10)", () => {
+  describe("manager notification cap (reminder X/5)", () => {
     /** Count `send-keys -l <text>` calls whose payload carries `substr`. */
     function countSendKeysWithText(
       spawn: ReturnType<typeof mockSpawnRunner>,
@@ -1324,11 +1324,11 @@ describe("watchdog", () => {
       await tick(agents);
     }
 
-    test("MAX_MANAGER_NOTIFICATIONS === 10 (guards accidental retuning)", () => {
-      expect(MAX_MANAGER_NOTIFICATIONS).toBe(10);
+    test("MAX_MANAGER_NOTIFICATIONS === 5 (one reminder at each backoff interval)", () => {
+      expect(MAX_MANAGER_NOTIFICATIONS).toBe(5);
     });
 
-    test("handleWaiting: reminder text increments 1/10, 2/10, 3/10 ...", async () => {
+    test("handleWaiting: reminder text increments 1/5, 2/5, 3/5 ...", async () => {
       setWatchdogCaptureTmux(async () => "no shells");
       const mgr = agent("mgr", "running");
       const a1 = agent("a1", "waiting", "mgr");
@@ -1338,23 +1338,23 @@ describe("watchdog", () => {
       await tickOneReminder(agents, "a1");
       expect(getTracker("a1").notifyCount).toBe(1);
       expect(
-        countSendKeysWithText(spawnMock, "recently started waiting for input (reminder 1/10)"),
+        countSendKeysWithText(spawnMock, "recently started waiting for input (reminder 1/5)"),
       ).toBe(1);
 
       await tickOneReminder(agents, "a1");
       expect(getTracker("a1").notifyCount).toBe(2);
       expect(
-        countSendKeysWithText(spawnMock, "recently started waiting for input (reminder 2/10)"),
+        countSendKeysWithText(spawnMock, "recently started waiting for input (reminder 2/5)"),
       ).toBe(1);
 
       await tickOneReminder(agents, "a1");
       expect(getTracker("a1").notifyCount).toBe(3);
       expect(
-        countSendKeysWithText(spawnMock, "recently started waiting for input (reminder 3/10)"),
+        countSendKeysWithText(spawnMock, "recently started waiting for input (reminder 3/5)"),
       ).toBe(1);
     });
 
-    test("handleWaiting: goes silent after 10 delivered reminders (11th+ sends nothing)", async () => {
+    test("handleWaiting: goes silent after 5 delivered reminders (6th+ sends nothing)", async () => {
       setWatchdogCaptureTmux(async () => "no shells");
       const mgr = agent("mgr", "running");
       const a1 = agent("a1", "waiting", "mgr");
@@ -1365,18 +1365,18 @@ describe("watchdog", () => {
       }
       expect(getTracker("a1").notifyCount).toBe(MAX_MANAGER_NOTIFICATIONS);
       // Each reminder is a single sub-500-char send-keys -l, so the delivered
-      // count is exactly 10.
-      expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBe(10);
-      // The 10th reminder carried 10/10 (delivered exactly once); an 11th was never built.
-      expect(countSendKeysWithText(spawnMock, "(reminder 10/10)")).toBe(1);
-      expect(countSendKeysWithText(spawnMock, "(reminder 11/10)")).toBe(0);
+      // count is exactly 5.
+      expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBe(5);
+      // The 5th reminder carried 5/5 (delivered exactly once); a 6th was never built.
+      expect(countSendKeysWithText(spawnMock, "(reminder 5/5)")).toBe(1);
+      expect(countSendKeysWithText(spawnMock, "(reminder 6/5)")).toBe(0);
 
       // Several more eligible ticks — cap reached, nothing more is sent.
       for (let i = 0; i < 5; i++) {
         await tickOneReminder(agents, "a1");
       }
       expect(getTracker("a1").notifyCount).toBe(MAX_MANAGER_NOTIFICATIONS); // unchanged
-      expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBe(10); // still 10
+      expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBe(5); // still 5
     });
 
     test("handleWaiting: a failed delivery does NOT advance notifyCount (same reminder retried)", async () => {
@@ -1392,25 +1392,25 @@ describe("watchdog", () => {
         await tickOneReminder(agents, "a1");
         expect(getTracker("a1").notifyCount).toBe(0);
 
-        // Recover: the same reminder number (1/10) is delivered, not skipped.
+        // Recover: the same reminder number (1/5) is delivered, not skipped.
         setSendSpawnRunner(spawnMock.runner);
         const tracker = getTracker("a1");
         tracker.waitCounter = tracker.notifyInterval;
         await tick(agents);
         expect(getTracker("a1").notifyCount).toBe(1);
         // The failed attempt recorded nothing in spawnMock (it used the failing
-        // runner and never reached send-keys), so the recovered 1/10 is the only
+        // runner and never reached send-keys), so the recovered 1/5 is the only
         // delivery here.
         expect(
-          countSendKeysWithText(spawnMock, "recently started waiting for input (reminder 1/10)"),
+          countSendKeysWithText(spawnMock, "recently started waiting for input (reminder 1/5)"),
         ).toBe(1);
-        expect(countSendKeysWithText(spawnMock, "(reminder 2/10)")).toBe(0);
+        expect(countSendKeysWithText(spawnMock, "(reminder 2/5)")).toBe(0);
       } finally {
         setSendSpawnRunner(spawnMock.runner);
       }
     });
 
-    test("notifyCount resets when the agent leaves the backoff states (next episode restarts at 1/10)", async () => {
+    test("notifyCount resets when the agent leaves the backoff states (next episode restarts at 1/5)", async () => {
       setWatchdogCaptureTmux(async () => "no shells");
       const mgr = agent("mgr", "running");
       const a1 = agent("a1", "waiting", "mgr");
@@ -1426,19 +1426,19 @@ describe("watchdog", () => {
       expect(getTracker("a1").notifyCount).toBe(0);
       expect(getTracker("a1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS);
 
-      // A new waiting episode starts back at 1/10.
+      // A new waiting episode starts back at 1/5.
       const a1b = agent("a1", "waiting", "mgr");
       await tickOneReminder([mgr, a1b], "a1");
       expect(getTracker("a1").notifyCount).toBe(1);
-      // NOT tightened to toBe(1): "(reminder 1/10)" is delivered once per episode,
+      // NOT tightened to toBe(1): "(reminder 1/5)" is delivered once per episode,
       // and this test runs two episodes, so the substring appears twice overall.
       // Assert presence — notifyCount === 1 above already proves the reset.
       expect(
-        countSendKeysWithText(spawnMock, "recently started waiting for input (reminder 1/10)"),
+        countSendKeysWithText(spawnMock, "recently started waiting for input (reminder 1/5)"),
       ).toBeGreaterThan(0);
     });
 
-    test("handleUnknown: shares the same cap + X/10 counter", async () => {
+    test("handleUnknown: shares the same cap + X/5 counter", async () => {
       const mgr = agent("mgr", "running");
       const a1 = agent("a1", "unknown", "mgr");
       const agents = [mgr, a1];
@@ -1450,13 +1450,13 @@ describe("watchdog", () => {
       await tickOneReminder(agents, "a1");
       expect(getTracker("a1").notifyCount).toBe(1);
       expect(
-        countSendKeysWithText(spawnMock, "state is unknown - may need attention (reminder 1/10)"),
+        countSendKeysWithText(spawnMock, "state is unknown - may need attention (reminder 1/5)"),
       ).toBe(1);
 
       await tickOneReminder(agents, "a1");
       expect(getTracker("a1").notifyCount).toBe(2);
       expect(
-        countSendKeysWithText(spawnMock, "state is unknown - may need attention (reminder 2/10)"),
+        countSendKeysWithText(spawnMock, "state is unknown - may need attention (reminder 2/5)"),
       ).toBe(1);
 
       // Drive to the cap and confirm it goes silent.
@@ -1464,16 +1464,16 @@ describe("watchdog", () => {
         await tickOneReminder(agents, "a1");
       }
       expect(getTracker("a1").notifyCount).toBe(MAX_MANAGER_NOTIFICATIONS);
-      expect(countSendKeysWithText(spawnMock, "state is unknown")).toBe(10);
+      expect(countSendKeysWithText(spawnMock, "state is unknown")).toBe(5);
 
       for (let i = 0; i < 3; i++) {
         await tickOneReminder(agents, "a1");
       }
       expect(getTracker("a1").notifyCount).toBe(MAX_MANAGER_NOTIFICATIONS);
-      expect(countSendKeysWithText(spawnMock, "state is unknown")).toBe(10);
+      expect(countSendKeysWithText(spawnMock, "state is unknown")).toBe(5);
     });
 
-    test("handleWaiting: spawner (no manager) reminders also carry X/10 and cap", async () => {
+    test("handleWaiting: spawner (no manager) reminders also carry X/5 and cap", async () => {
       setWatchdogCaptureTmux(async () => "no shells");
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "waiting", null); // no manager, but has a spawner
@@ -1483,11 +1483,11 @@ describe("watchdog", () => {
       await tickOneReminder(agents, "a1");
       expect(getTracker("a1").notifyCount).toBe(1);
       expect(
-        countSendKeysWithText(spawnMock, "you spawned recently started waiting for input (reminder 1/10)"),
+        countSendKeysWithText(spawnMock, "you spawned recently started waiting for input (reminder 1/5)"),
       ).toBe(1);
     });
 
-    test("handleWaiting: spawner path ALSO goes silent after 10 delivered reminders", async () => {
+    test("handleWaiting: spawner path ALSO goes silent after 5 delivered reminders", async () => {
       setWatchdogCaptureTmux(async () => "no shells");
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "waiting", null); // no manager, but has a spawner
@@ -1499,15 +1499,15 @@ describe("watchdog", () => {
       }
       expect(getTracker("a1").notifyCount).toBe(MAX_MANAGER_NOTIFICATIONS);
       // Each reminder is a single sub-500-char send-keys -l, so the delivered
-      // count is exactly 10.
-      expect(countSendKeysWithText(spawnMock, "you spawned recently started waiting")).toBe(10);
+      // count is exactly 5.
+      expect(countSendKeysWithText(spawnMock, "you spawned recently started waiting")).toBe(5);
 
       // Several more eligible ticks — cap reached, the spawner is silenced too.
       for (let i = 0; i < 5; i++) {
         await tickOneReminder(agents, "a1");
       }
       expect(getTracker("a1").notifyCount).toBe(MAX_MANAGER_NOTIFICATIONS); // unchanged
-      expect(countSendKeysWithText(spawnMock, "you spawned recently started waiting")).toBe(10); // still 10
+      expect(countSendKeysWithText(spawnMock, "you spawned recently started waiting")).toBe(5); // still 5
     });
   });
 
@@ -1516,26 +1516,30 @@ describe("watchdog", () => {
       expect(POLL_INTERVAL_MS).toBe(5000);
     });
 
-    test("INITIAL_NOTIFY_TICKS is 6 (30s at 5s/tick)", () => {
-      expect(INITIAL_NOTIFY_TICKS).toBe(6);
+    test("INITIAL_NOTIFY_TICKS is 48 (4 minutes at 5s/tick)", () => {
+      expect(INITIAL_NOTIFY_TICKS).toBe(48);
+    });
+
+    test("COMPLETE_FALLBACK_DELAY_TICKS remains 6 (30s at 5s/tick)", () => {
+      expect(COMPLETE_FALLBACK_DELAY_TICKS).toBe(6);
     });
 
     test("MAX_NOTIFY_TICKS is 768 (64 minutes at 5s/tick)", () => {
       expect(MAX_NOTIFY_TICKS).toBe(768);
     });
 
-    test("backoff sequence matches ib: 30s, 1m, 2m, 4m, 8m, 16m, 32m, 64m", () => {
+    test("waiting reminder sequence is 4m, 8m, 16m, 32m, 64m", () => {
       // Verify the doubling sequence in seconds
       const ticksToSeconds = (ticks: number) => ticks * (POLL_INTERVAL_MS / 1000);
       let interval = INITIAL_NOTIFY_TICKS;
       const sequence: number[] = [];
 
-      for (let i = 0; i < 8; i++) {
+      for (let i = 0; i < MAX_MANAGER_NOTIFICATIONS; i++) {
         sequence.push(ticksToSeconds(interval));
         interval = Math.min(interval * 2, MAX_NOTIFY_TICKS);
       }
 
-      expect(sequence).toEqual([30, 60, 120, 240, 480, 960, 1920, 3840]);
+      expect(sequence).toEqual([240, 480, 960, 1920, 3840]);
     });
   });
 
@@ -1550,7 +1554,7 @@ describe("watchdog", () => {
 
       let totalTicks = 0;
 
-      // First notification at tick 6
+      // First notification at tick 48 (4 minutes)
       for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) {
         await tick(agents);
         totalTicks++;
@@ -1558,7 +1562,7 @@ describe("watchdog", () => {
       notifications.push(totalTicks);
       expect(tracker.waitCounter).toBe(0); // reset
 
-      // Second at tick 6 + 12 = 18
+      // Second at tick 48 + 96 = 144
       for (let i = 0; i < INITIAL_NOTIFY_TICKS * 2; i++) {
         await tick(agents);
         totalTicks++;
@@ -1566,7 +1570,7 @@ describe("watchdog", () => {
       notifications.push(totalTicks);
       expect(tracker.waitCounter).toBe(0);
 
-      // Third at tick 18 + 24 = 42
+      // Third at tick 144 + 192 = 336
       for (let i = 0; i < INITIAL_NOTIFY_TICKS * 4; i++) {
         await tick(agents);
         totalTicks++;
@@ -1574,7 +1578,7 @@ describe("watchdog", () => {
       notifications.push(totalTicks);
       expect(tracker.waitCounter).toBe(0);
 
-      expect(notifications).toEqual([6, 18, 42]);
+      expect(notifications).toEqual([48, 144, 336]);
     });
   });
 
@@ -2557,10 +2561,10 @@ describe("watchdog", () => {
       expect(getTracker("w1").waitCounter).toBe(0);
       expect(getTracker("w1").notifyInterval).toBe(INITIAL_NOTIFY_TICKS);
 
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS - 1; i++) {
         await tick([mgr, agent("w1", "waiting", "mgr")]);
       }
-      expect(getTracker("w1").waitCounter).toBe(5);
+      expect(getTracker("w1").waitCounter).toBe(INITIAL_NOTIFY_TICKS - 1);
 
       await tick([mgr, agent("w1", "waiting", "mgr")]);
       expect(getTracker("w1").waitCounter).toBe(0);

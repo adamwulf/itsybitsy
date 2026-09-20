@@ -188,21 +188,20 @@ export const AGY_HEARTBEAT_GRACE_MS = 60_000;
  */
 export const COMPACT_CANCEL_ESCAPE_GAP_MS = 250;
 
-/** Initial notification threshold in ticks (6 ticks * 5s = 30s) */
-export const INITIAL_NOTIFY_TICKS = 6;
+/** Initial waiting-reminder threshold in ticks (48 ticks * 5s = 4 minutes) */
+export const INITIAL_NOTIFY_TICKS = 48;
 
 /** Ticks the watchdog waits in `complete` state before sending its
- *  "recently completed" fallback (see handleComplete). Aliased to
- *  INITIAL_NOTIFY_TICKS today, but named separately so tuning the
- *  waiting-backoff base does not silently change this delay. */
-export const COMPLETE_FALLBACK_DELAY_TICKS = INITIAL_NOTIFY_TICKS;
+ *  "recently completed" fallback (see handleComplete). This remains a
+ *  separate 30-second delay from the waiting-reminder backoff. */
+export const COMPLETE_FALLBACK_DELAY_TICKS = 6;
 
 /** Maximum notification interval in ticks (768 ticks * 5s = 3840s = 64 minutes) */
 export const MAX_NOTIFY_TICKS = 768;
 
 /** Max manager/spawner reminders sent per waiting/unknown episode before the
  *  watchdog goes silent (avoids overnight spam the manager cannot act on). */
-export const MAX_MANAGER_NOTIFICATIONS = 10;
+export const MAX_MANAGER_NOTIFICATIONS = 5;
 
 /** Recovery threshold for rate limits — matches ib bash's recovery_threshold (5%) */
 const RATE_LIMIT_RECOVERY_THRESHOLD = 5;
@@ -567,7 +566,7 @@ async function sendTmuxCompactCancel(tmuxSession: string): Promise<boolean> {
 /**
  * Handler for "waiting" state.
  * Increments wait counter. After threshold, notifies manager with exponential backoff.
- * Backoff: 30s -> 1m -> 2m -> 4m -> 8m -> 16m -> 32m -> 64m cap.
+ * Backoff: 4m -> 8m -> 16m -> 32m -> 64m, then stop.
  *
  * Work-in-flight suppression (SPEC §8.5.1):
  *   If the agent has a direct background shell OR at least one direct child
@@ -619,7 +618,7 @@ async function handleWaiting(agent: Agent, tracker: AgentTracker, getAllAgents: 
       return;
     }
 
-    // Human-facing reminder number (1-based) for the X/10 counter.
+    // Human-facing reminder number (1-based) for the capped counter.
     const reminderNum = tracker.notifyCount + 1;
 
     // Mutually-exclusive precedence: manager wins if present; otherwise the
@@ -652,8 +651,8 @@ async function handleWaiting(agent: Agent, tracker: AgentTracker, getAllAgents: 
       tracker.notifyInterval = Math.min(tracker.notifyInterval * 2, MAX_NOTIFY_TICKS);
       // Count this reminder only once it was delivered (or had no recipient).
       // A failed delivery keeps notifyCount put so the SAME reminder number is
-      // retried next tick — the manager sees up to 10 delivered reminders, not
-      // 10 attempts.
+      // retried next tick — the manager sees up to the configured number of
+      // delivered reminders, not that many attempts.
       tracker.notifyCount++;
     } else {
       // Hold the counter just below the threshold so we retry on the next
@@ -690,7 +689,7 @@ async function handleUnknown(agent: Agent, tracker: AgentTracker, getAllAgents: 
     // Only resolve allAgents when we actually need to notify — most ticks in
     // unknown state increment the counter without notifying.
     const allAgents = await getAllAgents();
-    // Human-facing reminder number (1-based) for the X/10 counter.
+    // Human-facing reminder number (1-based) for the capped counter.
     const reminderNum = tracker.notifyCount + 1;
     // Mutually-exclusive precedence — see handleWaiting for rationale.
     let notified = false;
@@ -1952,7 +1951,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
 }
 
 /**
- * 10s — covers two 5s POLL_INTERVAL_MS ticks; bounded staleness vs. the 30s
+ * 10s — covers two 5s POLL_INTERVAL_MS ticks; bounded staleness vs. the 4m
  * INITIAL_NOTIFY_TICKS threshold so a manager spawned mid-window is still
  * visible before the first notification fires.
  */

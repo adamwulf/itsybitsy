@@ -2907,6 +2907,24 @@ describe("runPerAgentWatchdog", () => {
     expect(drainCalls).toBe(3);
   });
 
+  test("background-task suppression preserves waiting reminder progress and budget", async () => {
+    const tracker = getTracker("agent-test1");
+    tracker.waitCounter = 321;
+    tracker.notifyInterval = MAX_NOTIFY_TICKS;
+    tracker.notifyCount = MAX_MANAGER_NOTIFICATIONS;
+
+    tmuxOutput = "⏵⏵ accept edits on · 1 shell";
+    setPerAgentReadState(async () => "waiting");
+    let existsChecks = 0;
+    setPerAgentExistsSync(() => ++existsChecks <= 1);
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+
+    expect(tracker.waitCounter).toBe(321);
+    expect(tracker.notifyInterval).toBe(MAX_NOTIFY_TICKS);
+    expect(tracker.notifyCount).toBe(MAX_MANAGER_NOTIFICATIONS);
+  });
+
   test("runSessionExclusive serializes overlapping critical sections (both directions)", async () => {
     // The session-write mutex must guarantee a drain and a bare watchdog Enter
     // (or any two session writes) never overlap, in EITHER arrival order. We

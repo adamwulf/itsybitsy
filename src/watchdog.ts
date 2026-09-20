@@ -1890,6 +1890,14 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       // Resolve state from meta.json with tmux overrides
       const metaState = await readAgentStateFn(agentDir);
       const resolvedState = resolveWatchdogState(output, metaState);
+      // A waiting agent with a live background task is presented as running,
+      // but it is still in the same waiting-reminder episode. Preserve the
+      // counter, interval, and delivered-reminder budget while work is in
+      // flight so suppression pauses the schedule instead of re-arming it.
+      const preserveWaitingBackoff =
+        metaState === "waiting" &&
+        resolvedState === "running" &&
+        hasBackgroundTasks(output);
 
       const agent: Agent = {
         id: agentId,
@@ -1912,7 +1920,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       }
 
       // Reset backoff for non-backoff states
-      if (!BACKOFF_STATES.has(resolvedState)) {
+      if (!BACKOFF_STATES.has(resolvedState) && !preserveWaitingBackoff) {
         tracker.waitCounter = 0;
         tracker.notifyInterval = INITIAL_NOTIFY_TICKS;
         tracker.notifyCount = 0;

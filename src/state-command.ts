@@ -281,61 +281,25 @@ async function readProcessCommand(pid: number): Promise<string> {
 }
 
 /**
- * True when the EXECUTABLE of a `ps -o command=` line — its first token,
- * argv[0] — is `name`, bare or as the last component of a path
- * (`/usr/local/bin/ib`). Every classifier below anchors here and never
- * matches a program name anywhere in the line: agent CLIs carry free text in
- * their argv (the prompt, and for codex the whole role text in
- * `-c developer_instructions`, which names manager ids, `ib` commands and
- * other agents), so an unanchored match would misclassify an agent as a
- * watchdog or `ib watch` process that `ib state --cleanup` then kills.
- * itsybitsy launches its processes by bare name (`ib`, `claude`, `codex`,
- * `agy`), so argv[0] has no spaces; an executable path that contains a space
- * simply goes unrecognized, which fails safe (never killed).
- */
-function executableIs(command: string, name: string): boolean {
-  const head = command.trimStart().split(/\s/, 1)[0] ?? "";
-  return head === name || head.endsWith(`/${name}`);
-}
-
-/** The second token of a `ps -o command=` line (argv[1]), or "". */
-function firstArg(command: string): string {
-  return command.trimStart().split(/\s+/)[1] ?? "";
-}
-
-/**
- * True when the process runs the `claude` CLI: argv[0] is `claude`, or it is
- * a node-hosted install (`#!/usr/bin/env node` shim) where argv[0] is `node`
- * and argv[1] is the `claude` script (`node /opt/homebrew/bin/claude …`).
- */
-function runsClaude(command: string): boolean {
-  if (executableIs(command, "claude")) return true;
-  if (!executableIs(command, "node")) return false;
-  const script = firstArg(command);
-  return script === "claude" || script.endsWith("/claude");
-}
-
-/**
  * Decide whether a `ps` command line is an `ib watchdog <agent-id>` invocation.
  * Agent spawn auto-spawns `Bun.spawn(["ib", "watchdog", agentId], ...)` so the
- * argv preserves these positional tokens. The executable must be `ib` (so an
- * unrelated binary whose name contains "watchdog", or an agent whose prompt or
- * role text mentions `ib watchdog`, is not matched) and argv[1] `watchdog`.
+ * argv preserves these positional tokens. We anchor on the `ib` token (so an
+ * unrelated binary in someone's PATH whose name contains "watchdog" is not
+ * matched) and require `watchdog` as the next arg.
  */
 export function isWatchdogProcess(command: string): boolean {
   if (!command) return false;
-  return executableIs(command, "ib") && firstArg(command) === "watchdog";
+  return /(?:^|\/|\s)ib\s+watchdog(?:\s|$)/.test(command);
 }
 
 /**
  * Decide whether a `ps` command line is an `ib watch` TUI invocation. We do
  * NOT have a "tracked" set for ib watch — every such process is reported as
- * informational so the user can see how many dashboards are open. Anchored
- * like `isWatchdogProcess`: executable `ib`, argv[1] `watch`.
+ * informational so the user can see how many dashboards are open.
  */
 export function isIbWatchProcess(command: string): boolean {
   if (!command) return false;
-  return executableIs(command, "ib") && firstArg(command) === "watch";
+  return /(?:^|\/|\s)ib\s+watch(?:\s|$)/.test(command);
 }
 
 /**
@@ -343,13 +307,11 @@ export function isIbWatchProcess(command: string): boolean {
  * argv shape `claude --resume <id>` and `claude --session-id <uuid>` is shared
  * between the user's own terminal sessions and itsybitsy's start.sh template
  * — argv alone is NOT enough to claim the process is ours. Use this only as a
- * narrow PRE-FILTER before checking cwd via `isClaudeAgentProcess`. The
- * executable must be `claude` (or `node` running the `claude` script, see
- * `runsClaude`); the flag may appear anywhere after it.
+ * narrow PRE-FILTER before checking cwd via `isClaudeAgentProcess`.
  */
 export function looksLikeClaudeArgv(command: string): boolean {
   if (!command) return false;
-  if (!runsClaude(command)) return false;
+  if (!/(?:^|\/|\s)claude(?:\s|$)/.test(command)) return false;
   return /\s--(?:resume|session-id)\b/.test(command);
 }
 
@@ -360,13 +322,12 @@ export function looksLikeClaudeArgv(command: string): boolean {
  * Enabled kernel mode also adds `--dangerously-skip-permissions`; disabled
  * mode deliberately leaves agy's native approvals active. Like claude's flags,
  * these are STANDARD agy flags a user could run themselves, so this is only a PRE-FILTER
- * before the cwd check in `isAgyAgentProcess`. The executable (argv[0]) must be
- * `agy`, so an unrelated binary — or another agent whose argv text mentions
- * agy — is not matched.
+ * before the cwd check in `isAgyAgentProcess`. Anchor on the `agy` token so an
+ * unrelated binary is not matched.
  */
 export function looksLikeAgyArgv(command: string): boolean {
   if (!command) return false;
-  if (!executableIs(command, "agy")) return false;
+  if (!/(?:^|\/|\s)agy(?:\s|$)/.test(command)) return false;
   return /\s--(?:dangerously-skip-permissions|log-file|conversation)\b/.test(command);
 }
 

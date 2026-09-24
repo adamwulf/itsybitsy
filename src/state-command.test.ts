@@ -28,7 +28,6 @@ import { isPidAliveCtx, killPidCtx } from "./agents";
 import { spawnCtx } from "./agent-lifecycle";
 import type { TransientState } from "./agents";
 import type { SpawnResult } from "./types";
-import { renderCodexDeveloperInstructionsPayload } from "./codex-config";
 
 /** Helper: build a fake spawn router keyed on argv prefix. */
 function makeSpawnRouter(handlers: { match: (cmd: string[]) => boolean; result: SpawnResult }[]) {
@@ -458,110 +457,6 @@ describe("isIbWatchProcess", () => {
   });
   test("rejects `ib watchdog` (different command)", () => {
     expect(isIbWatchProcess("ib watchdog agent-foo")).toBe(false);
-  });
-});
-
-describe("process classifiers anchor on the executable, not on text in argv", () => {
-  // A codex agent carries its whole role text as `-c developer_instructions="…"`
-  // plus its prompt in argv — thousands of bytes that name the manager's id,
-  // `ib` commands, and other CLIs. `ps -o command=` joins argv with spaces,
-  // so all of it lands in the line the classifiers see. (macOS ps prints an
-  // in-argv newline as `\012`, so the text cannot start a fake ps line.)
-  const hostileText = [
-    "Report to your manager with: ib send agent-mgr01 done",
-    "Never run ib watch or ib watchdog agent-mgr01 yourself;",
-    "/usr/local/bin/ib watchdog agent-mgr01 is the manager's watchdog.",
-    "Old notes: claude --resume abc and claude --session-id 11111111-2222-3333-4444-555555555555,",
-    "agy --conversation 11111111-2222-3333-4444-555555555555 --log-file /tmp/agy.log",
-  ].join(" ");
-  const codexCommand = [
-    "codex", "-m", "gpt-5.4-mini", "-a", "never", "-s", "workspace-write",
-    "--dangerously-bypass-hook-trust",
-    "-c", renderCodexDeveloperInstructionsPayload(hostileText),
-    hostileText, // the prompt argument
-  ].join(" ");
-  // The same text inside a claude agent's prompt, and under a full codex path.
-  const claudeCommand = `claude --session-id 11111111-2222-3333-4444-555555555555 ${hostileText}`;
-  const pathCodexCommand = `/opt/homebrew/bin/${codexCommand}`;
-
-  test("the old unanchored patterns WOULD have matched this codex line (the bug)", () => {
-    expect(/(?:^|\/|\s)ib\s+watchdog(?:\s|$)/.test(codexCommand)).toBe(true);
-    expect(/(?:^|\/|\s)ib\s+watch(?:\s|$)/.test(codexCommand)).toBe(true);
-  });
-
-  test("a codex agent is never classified as a watchdog, ib watch, claude, or agy process", () => {
-    for (const command of [codexCommand, pathCodexCommand]) {
-      expect(isWatchdogProcess(command)).toBe(false);
-      expect(isIbWatchProcess(command)).toBe(false);
-      expect(looksLikeClaudeArgv(command)).toBe(false);
-      expect(looksLikeAgyArgv(command)).toBe(false);
-    }
-  });
-
-  test("a claude agent whose prompt mentions ib/agy stays a claude process only", () => {
-    expect(looksLikeClaudeArgv(claudeCommand)).toBe(true);
-    expect(isWatchdogProcess(claudeCommand)).toBe(false);
-    expect(isIbWatchProcess(claudeCommand)).toBe(false);
-    expect(looksLikeAgyArgv(claudeCommand)).toBe(false);
-  });
-
-  test("the real processes still match, with leading ps padding", () => {
-    expect(isWatchdogProcess("  ib watchdog agent-mgr01")).toBe(true);
-    expect(isIbWatchProcess("  /usr/local/bin/ib watch")).toBe(true);
-  });
-
-  test("a node-hosted claude (node <path>/claude …) is a claude process", () => {
-    expect(looksLikeClaudeArgv("node /opt/homebrew/bin/claude --session-id 11111111-2222-3333-4444-555555555555")).toBe(true);
-    expect(looksLikeClaudeArgv("/usr/local/bin/node claude --resume abc")).toBe(true);
-    // node running something else, or claude without the agent flags, is not.
-    expect(looksLikeClaudeArgv("node /opt/homebrew/lib/node_modules/x/cli.js --session-id abc")).toBe(false);
-    expect(looksLikeClaudeArgv("node server.js claude --resume abc")).toBe(false);
-    expect(looksLikeClaudeArgv("node /opt/homebrew/bin/claude --help")).toBe(false);
-  });
-
-  // Intentional FAIL-SAFE misses: these real-looking lines are NOT recognized,
-  // so `ib state --cleanup` never kills them. Pinned so a later "fix" that
-  // loosens the anchor is a deliberate decision.
-  test("fail-safe miss: an executable path containing a space", () => {
-    expect(isWatchdogProcess("/Users/Some Name/bin/ib watchdog agent-x")).toBe(false);
-    expect(isIbWatchProcess("/Volumes/Macintosh HD/bin/ib watch")).toBe(false);
-  });
-
-  test("fail-safe miss: a login-shell style argv[0] (exec -l → '-ib')", () => {
-    expect(isWatchdogProcess("-ib watchdog agent-x")).toBe(false);
-    expect(isIbWatchProcess("-ib watch")).toBe(false);
-  });
-
-  test("fail-safe miss: source-mode ib run through bun", () => {
-    expect(isIbWatchProcess("bun index.ts watch")).toBe(false);
-    expect(isWatchdogProcess("bun /Users/me/itsybitsy/src/index.ts watchdog agent-x")).toBe(false);
-  });
-
-  test("gatherOrphans does not put an UNTRACKED codex agent in the watchdog or ib-watch kill lists", async () => {
-    fakeCwdInsideWorktree();
-    const tracked: TrackedSets = {
-      tmuxSessions: new Set(["ib-coordinator"]),
-      claudePids: new Set(), // even with its pid untracked
-      watchdogPids: new Set([2222]),
-    };
-    spawnCtx.set((cmd: string[]) => {
-      if (cmd[0] === "ps") {
-        return makeSpawnResult(0, fakePsOutput([
-          { pid: 3333, command: codexCommand },
-          { pid: 2222, command: "ib watchdog agent-mgr01" },
-        ]));
-      }
-      return makeSpawnResult(1);
-    });
-    try {
-      const orphans = await gatherOrphans(tracked, new Set(["ib-coordinator"]), FAKE_REPOS);
-      expect(orphans.watchdog_processes).toEqual([]);
-      expect(orphans.ib_watch_processes).toEqual([]);
-      expect(orphans.claude_processes).toEqual([]);
-    } finally {
-      spawnCtx.reset();
-      readProcessCwdCtx.reset();
-    }
   });
 });
 

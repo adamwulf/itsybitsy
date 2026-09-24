@@ -1122,7 +1122,6 @@ describe("developer_instructions reaches codex byte-for-byte through the real st
   });
 });
 
-
 describe("buildSkillsSection — skills catalog", () => {
   let tempDir: string;
 

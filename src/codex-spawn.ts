@@ -26,8 +26,7 @@
 import { shellQuote } from "./validation";
 import { buildCodexLaunchArgs, FUGU_CODEX_CONFIG_OVERRIDES, isCodexSafeBinaryPath } from "./codex-config";
 import type { SessionContext } from "./hooks/session-start";
-import { generateInstructions } from "./hooks/session-start";
-import { stripIttybittyWrapper, buildSkillsSection } from "./agent-instructions-shared";
+import { stripIttybittyWrapper, buildSkillsSection, buildAgentRoleBody } from "./agent-instructions-shared";
 import { appendGitignoreEntries, type GitignoreEntryOutcome } from "./worktree-gitignore";
 
 // Re-exported so existing importers (codex-spawn.test.ts, ib-commands.ts) keep
@@ -535,12 +534,14 @@ export async function appendCodexGitignoreEntry(worktreePath: string): Promise<A
  * adds to the session as a developer message — the codex analog of the Claude
  * session-start injection.
  *
- * We reuse `generateInstructions()` from `session-start.ts` so the codex agent
- * gets the same role-shaped context (path isolation, bash rules, ib-send
- * guidance, commands table, worker/manager-specific blocks, team-awareness)
- * as the claude agent of the same type, then append the skills catalog. We
- * strip the `<ittybitty>` XML wrapper because codex doesn't recognize it; the
- * rest is portable markdown.
+ * The text is the shared `buildAgentRoleBody()` (agent-instructions-shared.ts):
+ * `generateInstructions()` from `session-start.ts`, so the codex agent gets the
+ * same role-shaped context (path isolation, bash rules, ib-send guidance,
+ * commands table, worker/manager-specific blocks, team-awareness) as the claude
+ * agent of the same type, with the `<ittybitty>` wrapper stripped (codex
+ * doesn't recognize it), plus the skills catalog. This adapter adds nothing;
+ * the codex-specific encoding (TOML string + shell quoting + size cap) happens
+ * in `buildCodexLaunchArgs`.
  *
  * Project and user-wide instructions are deliberately NOT included. Codex
  * reads the repo's own `AGENTS.md` natively (itsybitsy never writes one), and
@@ -563,15 +564,5 @@ export async function appendCodexGitignoreEntry(worktreePath: string): Promise<A
  *     agent-type template engine grows {{#if cli == "claude"}} support.
  */
 export async function buildCodexDeveloperInstructions(ctx: SessionContext): Promise<string> {
-  const wrapped = await generateInstructions(ctx);
-  // generateInstructions wraps its body in <ittybitty>...</ittybitty>. Codex
-  // doesn't read that tag (it's a Claude convention) — strip the outermost
-  // wrapper so the markdown reads naturally as a developer message. The body
-  // inside may still contain <ittybitty>-related text but the wrapping XML
-  // tags are what we drop.
-  const body = stripIttybittyWrapper(wrapped);
-  const skillsSection = await buildSkillsSection();
-  // The skills section is "" when there are no skills, so it never leaves a
-  // dangling header.
-  return [body, skillsSection].filter((s) => s.length > 0).join("\n");
+  return buildAgentRoleBody(ctx);
 }

@@ -22,8 +22,7 @@ import { mkdir, open, stat, unlink, rename } from "fs/promises";
 import { isValidAgentId } from "./validation";
 import { isCodexSafeBinaryPath } from "./codex-config";
 import type { SessionContext } from "./hooks/session-start";
-import { generateInstructions } from "./hooks/session-start";
-import { stripIttybittyWrapper, buildSkillsSection } from "./agent-instructions-shared";
+import { buildAgentRoleBody } from "./agent-instructions-shared";
 
 /** Default hook timeout in seconds — matches the codex default and D3's value. */
 export const DEFAULT_AGY_HOOK_TIMEOUT_SECS = 30;
@@ -115,11 +114,7 @@ export function buildAgyHooksJson(input: BuildAgyHooksJsonInput): string {
 export async function buildAgyRulesFile(ctx: SessionContext): Promise<string> {
   const frontmatter =
     "---\ntrigger: always_on\ndescription: itsybitsy agent instructions\n---\n";
-  const wrapped = await generateInstructions(ctx);
-  const body = stripIttybittyWrapper(wrapped);
-  const skillsSection = await buildSkillsSection();
-  const sections = [body, skillsSection].filter((s) => s.length > 0);
-  return frontmatter + sections.join("\n");
+  return frontmatter + (await buildAgentRoleBody(ctx));
 }
 
 // The generalized `.gitignore` append helper (`appendGitignoreEntries`) lives in

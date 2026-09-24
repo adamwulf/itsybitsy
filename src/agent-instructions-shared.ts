@@ -20,6 +20,25 @@
 import { join } from "path";
 import { userHome } from "./home";
 import { readdir } from "fs/promises";
+import type { SessionContext } from "./hooks/session-start";
+
+/**
+ * The role text every non-Claude CLI receives: the Claude session-start
+ * instructions (`generateInstructions`) with the `<ittybitty>` wrapper
+ * stripped, followed by the skills catalog. The CLI adapters add only their
+ * own encoding — codex launches it as `-c developer_instructions`
+ * (`buildCodexDeveloperInstructions`), agy prepends rule-file frontmatter
+ * (`buildAgyRulesFile`). The skills section is "" when there are no skills, so
+ * it never leaves a dangling header.
+ */
+export async function buildAgentRoleBody(ctx: SessionContext): Promise<string> {
+  // Lazy import: ib-commands.ts imports this module statically, and
+  // session-start → teams → ib-commands would otherwise form an import cycle.
+  const { generateInstructions } = await import("./hooks/session-start");
+  const body = stripIttybittyWrapper(await generateInstructions(ctx));
+  const skillsSection = await buildSkillsSection();
+  return [body, skillsSection].filter((s) => s.length > 0).join("\n");
+}
 
 /**
  * Spawn-time check for the non-Claude CLIs. Codex and agy read a project's

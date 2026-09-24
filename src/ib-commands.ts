@@ -620,49 +620,6 @@ function selectRetirementArchive(
 }
 
 /**
- * Rehire guard for Codex/Fugu agents spawned before role instructions moved
- * to `-c developer_instructions` (SPEC §18.7 "Legacy codex agents"). Such an
- * agent's codex session holds its role text ONLY as the instructions of a
- * generated, untracked `<worktree>/AGENTS.md`. Retirement archives untracked
- * files with `git ls-files --others --exclude-standard`, so where git ignored
- * that file (this repo's pre-change branches list AGENTS.md in .gitignore) it
- * is not archived. Rehire would then resume the old codex session without it:
- * codex withdraws the AGENTS.md role text, and the regenerated
- * developer_instructions is not injected until a compaction.
- *
- * Legacy is detected from the archived `start.sh` (written once at spawn and
- * restored by rehire): a pre-change codex spawn has no `developer_instructions=`
- * argument. Returns the refusal message, or null to proceed. A missing
- * start.sh counts as legacy (fails safe). Invalid models are left to the
- * existing validation.
- */
-async function legacyCodexRehireRefusal(
-  agentId: string,
-  archiveDir: string,
-  model: string | undefined,
-  manifest: { worktree: boolean; untrackedFiles: string[] },
-): Promise<string | null> {
-  if (!manifest.worktree || !model || model === "null") return null;
-  let cli: ReturnType<typeof parseModel>["cli"];
-  try {
-    cli = parseModel(model).cli;
-  } catch {
-    return null;
-  }
-  if (!isCodexBackedCli(cli)) return null;
-  const startSh = await Bun.file(join(archiveDir, "start.sh")).text().catch(() => "");
-  if (startSh.includes("developer_instructions=")) return null;
-  if (manifest.untrackedFiles.includes("AGENTS.md")) return null;
-  return (
-    `Cannot rehire '${agentId}': it is a ${cli} agent spawned before role instructions moved to ` +
-    `developer_instructions. Its role text lived only in a generated <worktree>/AGENTS.md, which ` +
-    `the retirement did not archive (git ignored it), so resuming its old ${cli} session would run ` +
-    `without role text. Start a FRESH agent instead with 'ib new-agent' (a new session, not a ` +
-    `resume of this one).`
-  );
-}
-
-/**
  * Reconstruct a retired agent from its immutable archive and resume the
  * original Claude/Codex session.
  */
@@ -746,17 +703,6 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
         stderr: `Cannot rehire worktree:false ${archivedCli} agent: only Claude supports --no-worktree`,
       };
     }
-  }
-  // Refuse BEFORE any state change (no agent dir, worktree, branch, tmux or
-  // meta write): a pre-change codex agent whose only role copy was not archived.
-  const legacyCodexRefusal = await legacyCodexRehireRefusal(
-    agentId,
-    archived.archiveDir,
-    archived.meta.model,
-    manifest,
-  );
-  if (legacyCodexRefusal) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: legacyCodexRefusal };
   }
   const warnings: string[] = [];
   const archivedNickname = archived.meta.nickname;
@@ -2007,13 +1953,6 @@ export async function resumeAgent(
       // the same policy as the hooks and the emitted kernel profile. (Codex
       // keeps the spawn-time copy in the resumed context and usually sends
       // this one only after its next compaction — see buildCodexResumeContent.)
-      //
-      // A codex agent spawned before role instructions moved to
-      // developer_instructions still has a generated <worktree>/AGENTS.md. It is
-      // left untouched on purpose: its resumed rollout holds the role text ONLY
-      // as that file's AGENTS.md instructions, so deleting or changing it would
-      // make codex withdraw the role text while the new developer_instructions
-      // is not yet injected (SPEC §18.7 "Legacy codex agents").
       const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
       const { renderCodexDeveloperInstructionsPayload } = await import("./codex-config");
       const { detectRole } = await import("./hooks/session-start");

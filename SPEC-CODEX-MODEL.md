@@ -68,17 +68,8 @@ repo-tracked `AGENTS.md`. Instead:
   full initial context. With a saved reference context (the normal case) that
   happens after the next compaction; a rollout with no saved reference context
   rebuilds it — with the regenerated value — on the first resumed turn.
-- **Legacy agents** (spawned before this change) keep their generated
-  `<worktree>/AGENTS.md`; itsybitsy never touches it, because their rollout
-  holds the role text only as that file's instructions and removing it would
-  leave them with no role text until a compaction. After compaction they carry
-  the old and new role text. A rebase onto a branch that tracks `AGENTS.md`
-  either silently replaces the file (when ignored, as on this repo's old
-  branches) or aborts (when not ignored). Where git ignored it, retirement
-  does not archive it, so rehire refuses such an archive before any state
-  change. Migration means retiring them and starting FRESH agents with
-  `ib new-agent`; `/respawn` / `/restart` (pause + resume) keep the legacy
-  session (SPEC.md §18.7, Risk 16).
+- **Agents spawned before this change:** no migration code. Retire them and
+  start fresh agents with `ib new-agent`; do not resume or rehire them.
 - `-c developer_instructions` replaces any `developer_instructions` set in the
   user's `~/.codex/config.toml` for itsybitsy agents.
 Any older text below that says itsybitsy writes, regenerates, or relies on a

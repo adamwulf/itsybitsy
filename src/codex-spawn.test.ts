@@ -19,7 +19,6 @@ import {
   stripIttybittyWrapper,
   resolveIbBinaryPath,
   buildSkillsSection,
-  removeLegacyCodexAgentsMd,
 } from "./codex-spawn";
 import {
   CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES,
@@ -1099,72 +1098,6 @@ describe("developer_instructions reaches codex byte-for-byte through the real st
   });
 });
 
-describe("removeLegacyCodexAgentsMd — pre-2026-09 generated AGENTS.md cleanup", () => {
-  let worktree: string;
-  const NOT_TRACKED = {
-    stdout: "",
-    stderr: "error: pathspec 'AGENTS.md' did not match any file(s) known to git\n",
-    exitCode: 1,
-  };
-  const runner = (result: { stdout: string; stderr: string; exitCode: number }) => {
-    const calls: string[][] = [];
-    const run = async (cmd: string[]) => {
-      calls.push(cmd);
-      return result;
-    };
-    return { run, calls };
-  };
-
-  beforeEach(async () => {
-    worktree = await mkdtemp(join(tmpdir(), "codex-legacy-agents-md-"));
-  });
-
-  afterEach(async () => {
-    await rm(worktree, { recursive: true, force: true });
-  });
-
-  test("removes an untracked file with an old generator section", async () => {
-    await Bun.write(join(worktree, "AGENTS.md"), "## State Management\n\n## Project CLAUDE.md\n\n@./CLAUDE.md\n");
-    const { run, calls } = runner(NOT_TRACKED);
-    expect(await removeLegacyCodexAgentsMd(worktree, "agent-old01", run)).toBe("removed");
-    expect(await Bun.file(join(worktree, "AGENTS.md")).exists()).toBe(false);
-    expect(calls).toEqual([["git", "-C", worktree, "ls-files", "--error-unmatch", "AGENTS.md"]]);
-  });
-
-  test("removes an untracked file carrying the agent's identity line", async () => {
-    await Bun.write(
-      join(worktree, "AGENTS.md"),
-      "You are worker agent `agent-old02` in the ittybitty multi-agent orchestration system.\n",
-    );
-    expect(await removeLegacyCodexAgentsMd(worktree, "agent-old02", runner(NOT_TRACKED).run)).toBe("removed");
-  });
-
-  test("keeps a TRACKED AGENTS.md even when it looks generated (the repo's own file)", async () => {
-    await Bun.write(join(worktree, "AGENTS.md"), "## Skills (read-on-demand workflow guides)\n");
-    const tracked = runner({ stdout: "AGENTS.md\n", stderr: "", exitCode: 0 });
-    expect(await removeLegacyCodexAgentsMd(worktree, "agent-old03", tracked.run)).toBe("tracked");
-    expect(await Bun.file(join(worktree, "AGENTS.md")).exists()).toBe(true);
-  });
-
-  test("keeps an untracked AGENTS.md that itsybitsy did not generate", async () => {
-    await Bun.write(join(worktree, "AGENTS.md"), "# Build\n\nRun `make`.\n");
-    expect(await removeLegacyCodexAgentsMd(worktree, "agent-old04", runner(NOT_TRACKED).run)).toBe("kept");
-    expect(await Bun.file(join(worktree, "AGENTS.md")).text()).toBe("# Build\n\nRun `make`.\n");
-  });
-
-  test("leaves the file alone when git fails without a clear 'not tracked' answer", async () => {
-    await Bun.write(join(worktree, "AGENTS.md"), "## Skills (read-on-demand workflow guides)\n");
-    const broken = runner({ stdout: "", stderr: "fatal: not a git repository\n", exitCode: 128 });
-    expect(await removeLegacyCodexAgentsMd(worktree, "agent-old05", broken.run)).toBe("unknown");
-    expect(await Bun.file(join(worktree, "AGENTS.md")).exists()).toBe(true);
-  });
-
-  test("does nothing (and runs no git) when there is no AGENTS.md", async () => {
-    const { run, calls } = runner(NOT_TRACKED);
-    expect(await removeLegacyCodexAgentsMd(worktree, "agent-old06", run)).toBe("absent");
-    expect(calls).toEqual([]);
-  });
-});
 
 describe("buildSkillsSection — skills catalog", () => {
   let tempDir: string;

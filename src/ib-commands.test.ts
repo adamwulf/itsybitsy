@@ -6818,10 +6818,13 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(resume).toContain("<&0 2> \"$STDERR_LOG\" &");
   });
 
-  test("Codex resume removes a legacy generated AGENTS.md and relaunches with developer_instructions", async () => {
+  test("Codex resume leaves a legacy generated AGENTS.md untouched and relaunches with developer_instructions", async () => {
     // Agents spawned before role instructions moved to developer_instructions
-    // still carry an untracked, generated <worktree>/AGENTS.md. Resume must
-    // delete it, or codex would read a second, stale copy of the role text.
+    // carry an untracked, generated <worktree>/AGENTS.md, and their resumed
+    // rollout holds the role text ONLY as that file's AGENTS.md instructions.
+    // Deleting or rewriting it would make codex withdraw the role text while
+    // developer_instructions is not yet injected (reference context is Some),
+    // so resume must not touch it — or even ask git about it.
     const id = "codex-legacy-resume";
     await writeSandboxType(id, { enabled: false, model: "codex:gpt-5.4-mini" });
     setNewAgentSpawnRunner(cleanWorktreeRunner());
@@ -6830,7 +6833,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect((await callNewAgent("legacy agents md", { name: id, type: id })).ok).toBe(true);
     const agentDir = join(agentsDir, id);
     const legacyPath = join(agentDir, "repo", "AGENTS.md");
-    await Bun.write(legacyPath, "## State Management\n\n## Project CLAUDE.md\n\n@./CLAUDE.md\n");
+    const legacyText = "## State Management\n\n## Project CLAUDE.md\n\n@./CLAUDE.md\n";
+    await Bun.write(legacyPath, legacyText);
     const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
     meta.state = "stopped";
     meta.codex_session_id = "019e7b21-cb7d-7f23-8674-11036ed141ef";
@@ -6839,13 +6843,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     let createdSession = false;
     setNukeResumeSpawnRunner((cmd: string[]) => {
       const cmdStr = cmd.join(" ");
-      if (cmdStr.includes("ls-files") && cmdStr.includes("--error-unmatch")) {
+      if (cmdStr.includes("ls-files")) {
         lsFilesCalls.push(cmd);
-        return {
-          stdout: new Response("").body,
-          stderr: new Response("error: pathspec 'AGENTS.md' did not match any file(s) known to git\n").body,
-          exited: Promise.resolve(1),
-        } as SpawnResult;
+        return makeSpawnResult("", 1);
       }
       if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
       if (cmdStr.includes("tmux has-session")) return makeSpawnResult("", createdSession ? 0 : 1);
@@ -6860,9 +6860,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     } finally {
       resetSendSpawnRunner();
     }
-    expect(lsFilesCalls).toEqual([["git", "-C", join(agentDir, "repo"), "ls-files", "--error-unmatch", "AGENTS.md"]]);
-    expect(await Bun.file(legacyPath).exists()).toBe(false);
-    expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("removed the legacy generated <worktree>/AGENTS.md");
+    expect(lsFilesCalls).toEqual([]);
+    expect(await Bun.file(legacyPath).text()).toBe(legacyText);
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     expect(codexDeveloperInstructionsFromScript(resume)).toContain(id);
   });

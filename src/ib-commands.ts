@@ -1600,10 +1600,9 @@ export async function resumeAgent(
   }
 
   // Parse the persisted CLI before any resume mutation. Legacy non-Claude
-  // worktree:false metadata is unsafe to replay: Codex/Fugu prechecks and
-  // cleanup assume a per-agent worktree (an old Codex spawn also wrote an
-  // AGENTS.md into it), and agy would install hook/rule files in the shared
-  // repo.
+  // worktree:false metadata is unsafe to replay: Codex/Fugu prechecks assume
+  // a per-agent worktree (an old Codex spawn also wrote an AGENTS.md into it),
+  // and agy would install hook/rule files in the shared repo.
   const rawModel = agent.meta.model && agent.meta.model !== "null" ? agent.meta.model : "";
   if (rawModel && !isValidModel(rawModel)) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${rawModel}` };
@@ -1944,25 +1943,18 @@ export async function resumeAgent(
         ...codexParentRepoSubdirs,
       ];
 
-      // An agent spawned before role instructions moved to developer_instructions
-      // still has the generated <worktree>/AGENTS.md; codex would read it as the
-      // project's AGENTS.md next to the new instructions. Remove only that
-      // untracked, itsybitsy-generated leftover.
-      const { removeLegacyCodexAgentsMd } = await import("./codex-spawn");
-      const legacyAgentsMd = await removeLegacyCodexAgentsMd(
-        workPath,
-        agent.id,
-        (cmd) => nukeResumeSpawnCtx.run(cmd),
-      );
-      if (legacyAgentsMd === "removed") {
-        await logAgent(agentDir, "[resume] removed the legacy generated <worktree>/AGENTS.md (role instructions now travel as developer_instructions)");
-      }
-
       // Refresh updates frozen metadata before entering resume. Regenerate the
       // role instructions here so both ordinary resume and refresh describe
       // the same policy as the hooks and the emitted kernel profile. (Codex
       // keeps the spawn-time copy in the resumed context and sends this one
       // after its next compaction — see buildCodexResumeContent.)
+      //
+      // A codex agent spawned before role instructions moved to
+      // developer_instructions still has a generated <worktree>/AGENTS.md. It is
+      // left untouched on purpose: its resumed rollout holds the role text ONLY
+      // as that file's AGENTS.md instructions, so deleting or changing it would
+      // make codex withdraw the role text while the new developer_instructions
+      // is not yet injected (SPEC §18.7 "Legacy codex agents").
       const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
       const { renderCodexDeveloperInstructionsPayload } = await import("./codex-config");
       const { detectRole } = await import("./hooks/session-start");

@@ -34,8 +34,8 @@ that presents one fixed sandbox mode for every launch, is superseded by this
 addendum.
 
 **Current worktree support restriction:** Codex and Fugu require a real agent
-worktree because their `.codex/` gitignore entry, inline-hook prechecks, legacy
-`AGENTS.md` cleanup, and launch setup depend on it. Creation rejects
+worktree because their `.codex/` gitignore entry, inline-hook prechecks, and
+launch setup depend on it. Creation rejects
 `--no-worktree` before side effects. Resume and rehire reject any non-Claude
 `worktree: false` metadata before regenerating files or touching shared state.
 No partial no-worktree setup is supported.
@@ -65,9 +65,15 @@ repo-tracked `AGENTS.md`. Instead:
   copy: the resumed rollout keeps the spawn-time copy and its reference context,
   and plain `developer_instructions` is re-sent only when codex rebuilds the
   full initial context (after compaction). So a regenerated value reaches the
-  model at the next compaction. Resume also deletes a leftover generated
-  `<worktree>/AGENTS.md` from pre-change agents (untracked + generator marker
-  only).
+  model at the next compaction.
+- **Legacy agents** (spawned before this change) keep their generated
+  `<worktree>/AGENTS.md`; itsybitsy never touches it, because their rollout
+  holds the role text only as that file's instructions and removing it would
+  leave them with no role text until a compaction. After compaction they carry
+  the old and new role text. A rebase onto a branch that tracks `AGENTS.md`
+  either silently replaces the file (when ignored, as on this repo's old
+  branches) or aborts (when not ignored). Retire or respawn them when
+  convenient (SPEC.md §18.7, Risk 16).
 - `-c developer_instructions` replaces any `developer_instructions` set in the
   user's `~/.codex/config.toml` for itsybitsy agents.
 Any older text below that says itsybitsy writes, regenerates, or relies on a

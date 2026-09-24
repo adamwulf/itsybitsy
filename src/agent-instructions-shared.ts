@@ -13,8 +13,6 @@
  * repo's `AGENTS.md` natively (Claude Code 2.1.277+, codex, agy), and each
  * reads its own global file (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`,
  * `~/.gemini/GEMINI.md`).
- *
- * codex-spawn.ts re-exports the builders so existing importers are unaffected.
  */
 
 import { join } from "path";

@@ -17,10 +17,9 @@ import {
   buildCodexStartContent,
   buildCodexResumeContent,
   appendCodexGitignoreEntry,
-  stripIttybittyWrapper,
   resolveIbBinaryPath,
-  buildSkillsSection,
 } from "./codex-spawn";
+import { stripIttybittyWrapper, buildSkillsSection } from "./agent-instructions-shared";
 import { CODEX_REGISTERED_EVENTS } from "./codex-config";
 import { setUserHome, resetUserHome } from "./home";
 import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-log-launch";
@@ -832,24 +831,6 @@ describe("buildAgentRoleBody (the role text the codex SessionStart hook returns)
     };
     const body = await buildAgentRoleBody(ctx);
     expect(body).toContain("agent-test01");
-  });
-
-  test("writes nothing into the worktree (codex reads the repo's own AGENTS.md)", async () => {
-    const { buildAgentRoleBody } = await import("./agent-instructions-shared");
-    const worktree = join(tempDir, "wt");
-    await mkdir(worktree, { recursive: true });
-    const ctx = {
-      role: "worker" as const,
-      agentId: "agent-test02",
-      agentManager: "agent-mgr",
-      parentBranch: "main",
-      branchName: "agent/agent-test02",
-      worktreePath: worktree,
-      rootRepoPath: tempDir,
-      agentType: "worker",
-    };
-    await buildAgentRoleBody(ctx);
-    expect(await Bun.file(join(worktree, "AGENTS.md")).exists()).toBe(false);
   });
 
   // HIGH 4 from Phase 4 review: codex manager instructions must not

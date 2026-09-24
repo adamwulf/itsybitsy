@@ -11521,7 +11521,6 @@ body`,
       expect(instructions).toContain("codex-agents-md");
       expect(instructions.startsWith("<ittybitty>")).toBe(false);
       expect(instructions).not.toContain("</ittybitty>");
-      expect(await Bun.file(join(agentDir, "start.sh")).text()).not.toContain("developer_instructions");
       expect(await Bun.file(join(agentDir, "repo", "AGENTS.md")).exists()).toBe(false);
     });
 

@@ -23,13 +23,7 @@
 
 import { shellQuote } from "./validation";
 import { buildCodexLaunchArgs, FUGU_CODEX_CONFIG_OVERRIDES, isCodexSafeBinaryPath } from "./codex-config";
-import { stripIttybittyWrapper, buildSkillsSection } from "./agent-instructions-shared";
 import { appendGitignoreEntries, type GitignoreEntryOutcome } from "./worktree-gitignore";
-
-// Re-exported so existing importers (codex-spawn.test.ts, ib-commands.ts) keep
-// resolving these from "./codex-spawn". The implementations now live in the
-// shared, CLI-agnostic module so agy-config.ts can reuse them without copy-paste.
-export { stripIttybittyWrapper, buildSkillsSection };
 
 /**
  * Resolve the absolute path to the `ib` binary suitable for codex hook

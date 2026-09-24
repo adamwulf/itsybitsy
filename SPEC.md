@@ -3191,7 +3191,7 @@ Grep-able file list for the codex implementation:
 |------|------|
 | `src/agent-cli.ts` | `AgentCli` type, `KNOWN_CLIS` set, `parseModel()`, `resolveCli()`, `isCodexModel()` — the model-string parser. |
 | `src/codex-config.ts` | `buildCodexLaunchArgs()` (inline-`-c` flag array builder), `isCodexSafeBinaryPath()`, `renderCodexHookFlagPayload()` (sets `additionalContextLimit=0` on SessionStart), `loadMergedAgentTypePermissions()`, `buildCodexDenyOutput()`, `buildCodexAllowOutput()`. |
-| `src/codex-spawn.ts` | `buildCodexStartContent()`, `buildCodexResumeContent()`, `appendCodexGitignoreEntry()`, `resolveIbBinaryPath()`, `stripIttybittyWrapper()`. |
+| `src/codex-spawn.ts` | `buildCodexStartContent()`, `buildCodexResumeContent()`, `appendCodexGitignoreEntry()`, `resolveIbBinaryPath()`. |
 | `src/agent-instructions-shared.ts` | `buildAgentRoleBody()` (the role text for codex and agy: wrapper-stripped session-start template plus skills catalogue; the codex SessionStart hook and `buildAgyRulesFile()` both use it), `stripIttybittyWrapper()`, `buildSkillsSection()`. |
 | `src/hooks/codex-pre-tool-use.ts` | PreToolUse handler — allow/deny + path-isolation for Bash AND apply_patch. |
 | `src/hooks/codex-session-start.ts` | SessionStart handler — writes `state: "running"`, captures `codex_session_id`, and returns the role text as `additionalContext`. |

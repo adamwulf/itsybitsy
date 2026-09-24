@@ -1946,8 +1946,8 @@ export async function resumeAgent(
       // Refresh updates frozen metadata before entering resume. Regenerate the
       // role instructions here so both ordinary resume and refresh describe
       // the same policy as the hooks and the emitted kernel profile. (Codex
-      // keeps the spawn-time copy in the resumed context and sends this one
-      // after its next compaction — see buildCodexResumeContent.)
+      // keeps the spawn-time copy in the resumed context and usually sends
+      // this one only after its next compaction — see buildCodexResumeContent.)
       //
       // A codex agent spawned before role instructions moved to
       // developer_instructions still has a generated <worktree>/AGENTS.md. It is

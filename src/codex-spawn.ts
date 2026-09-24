@@ -317,10 +317,10 @@ export interface BuildCodexResumeContentInput {
    * The agent's role instructions, regenerated from the current frozen meta
    * and passed again as `-c developer_instructions="…"`. Codex does NOT add a
    * second copy on resume: the resumed rollout already holds the spawn-time
-   * copy and its context baseline, and codex re-sends the configured
-   * developer instructions only when it rebuilds the full initial context
-   * (after a compaction). So a changed value reaches the model at the next
-   * compaction, not at the resume itself.
+   * copy, and codex re-sends the configured developer instructions only when
+   * it rebuilds the full initial context. With a saved reference context in
+   * the rollout (the normal case) that is after the next compaction; with none,
+   * it is the first resumed turn (SPEC §18.7).
    */
   developerInstructions: string;
   /** Absolute path to meta.json — pid is written here. */

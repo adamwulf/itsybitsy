@@ -65,8 +65,9 @@ repo-tracked `AGENTS.md`. Instead:
 - **Resume** regenerates the role text, but codex 0.154.0 does not add a second
   copy: the resumed rollout keeps the spawn-time copy and its reference context,
   and plain `developer_instructions` is re-sent only when codex rebuilds the
-  full initial context (after compaction). So a regenerated value reaches the
-  model at the next compaction.
+  full initial context. With a saved reference context (the normal case) that
+  happens after the next compaction; a rollout with no saved reference context
+  rebuilds it — with the regenerated value — on the first resumed turn.
 - **Legacy agents** (spawned before this change) keep their generated
   `<worktree>/AGENTS.md`; itsybitsy never touches it, because their rollout
   holds the role text only as that file's instructions and removing it would
@@ -362,7 +363,7 @@ All state-detection hooks are registered via the same inline-`-c` pattern as Pre
 
 ### 5.8 Resume + lifecycle
 
-- `resumeAgent()` branches: codex uses its session/rollout id (`codex resume <id>` / `--last`) read from `codex_session_id`. The `resume.sh` template, including its `-c developer_instructions` role text, is regenerated before launch. The role text is rendered from the current frozen `meta.paths` / `meta.sandbox`; `ib sandbox refresh` first re-derives those fields from the current type layers and then takes the same regeneration path. (A resumed session sees the regenerated text after codex's next compaction — see the instructions addendum at the top.)
+- `resumeAgent()` branches: codex uses its session/rollout id (`codex resume <id>` / `--last`) read from `codex_session_id`. The `resume.sh` template, including its `-c developer_instructions` role text, is regenerated before launch. The role text is rendered from the current frozen `meta.paths` / `meta.sandbox`; `ib sandbox refresh` first re-derives those fields from the current type layers and then takes the same regeneration path. (A resumed session usually sees the regenerated text only after codex's next compaction — see the instructions addendum at the top for the exact rule.)
 - kill / merge / diff / nuke are git- and tmux-level → unaffected.
 - `openInGhostty` is tmux-level → unaffected (D2 satisfied for free).
 

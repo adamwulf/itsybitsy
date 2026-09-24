@@ -2438,7 +2438,9 @@ describe("retire → rehire recovery", () => {
     const absoluteLinkTarget = join(worktreePath, "tracked.txt");
     await symlink(absoluteLinkTarget, join(worktreePath, "absolute-link"));
     await Bun.write(join(agentDir, "prompt.txt"), "continue the task");
-    await Bun.write(join(agentDir, "start.sh"), "#!/bin/bash\n");
+    // A post-change codex spawn: its start.sh carries developer_instructions,
+    // so the legacy-codex rehire guard lets it through to the recovery path.
+    await Bun.write(join(agentDir, "start.sh"), CURRENT_CODEX_START_SH);
     await Bun.write(join(agentDir, "exit-check.sh"), "#!/bin/bash\n");
 
     const agent = makeAgent(agentId, tempDir, "running", {
@@ -2577,6 +2579,8 @@ describe("retire → rehire recovery", () => {
       "-b", `agent/${agentId}`, "HEAD",
     );
     await Bun.write(join(worktreePath, "tracked.txt"), "modified\n");
+    // Post-change codex spawn (see the round-trip test above).
+    await Bun.write(join(agentDir, "start.sh"), CURRENT_CODEX_START_SH);
     await Bun.write(join(agentDir, "exit-check.sh"), "#!/bin/bash\n");
 
     const agent = makeAgent(agentId, tempDir, "running", {

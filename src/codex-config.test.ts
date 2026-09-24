@@ -785,7 +785,8 @@ describe("renderCodexDeveloperInstructionsPayload", () => {
     // Each "é" is one UTF-16 unit but two UTF-8 bytes; each newline grows to a
     // two-byte "\n" escape. Both texts are under the limit in .length terms.
     const wide = "é".repeat(Math.ceil(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES / 2));
-    const escaped = "\n".repeat(Math.ceil(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES / 2));
+    // A trailing letter keeps it non-blank (blank text is rejected separately).
+    const escaped = "\n".repeat(Math.ceil(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES / 2)) + "x";
     expect(wide.length).toBeLessThan(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES);
     expect(escaped.length).toBeLessThan(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES);
     expect(() => renderCodexDeveloperInstructionsPayload(wide)).toThrow(/too large/);

@@ -33,7 +33,8 @@ user-wide instructions only from its global `~/.gemini/GEMINI.md`. To share one
 user-wide file with Claude, symlink `~/.gemini/GEMINI.md -> ~/.claude/CLAUDE.md`.
 Under the kernel sandbox the `~/.gemini` runtime root and the `_all.md` read
 floor on `~/.claude` make both the link and its target readable. A spawn in a
-repo with `CLAUDE.md` but no `AGENTS.md` prints a warning (agy never reads
+repo with `CLAUDE.md` but no `AGENTS.md`, `GEMINI.md`, `.gemini/GEMINI.md`, or
+repo-owned `.agents/rules/*.md` prints a warning (agy does not read
 `CLAUDE.md`). Earlier text below that inlines the project or user `CLAUDE.md`
 is superseded. [SPEC.md §18.6](SPEC.md) has the cross-CLI instruction-file table.
 

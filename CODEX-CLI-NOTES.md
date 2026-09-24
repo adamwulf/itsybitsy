@@ -106,7 +106,7 @@ Confirmed via the official doc `developers.openai.com/codex/hooks` AND the binar
 9. **Watchdog** — `src/watchdog.ts` (`runPerAgentWatchdog`). Claude-specific behaviors: rate-limit bypass via bare Enter, permission auto-accept, nudge messages — all assume Claude's tmux UI. ⇒ codex variant needed (different rate-limit/idle signatures; with `-a never` + hooks, permission auto-accept may be unnecessary).
 10. **session_id** — Claude `--session-id <uuid>` generated in `newAgent`, stored in meta `session_id`, reused on resume. **Codex differs:** it has its own session/rollout id model (`codex resume <id>` / `--last`; rollouts in `~/.codex` sqlite). Spec must define how we capture/track the codex session id for resume + Ghostty attach.
 
-### Cross-cutting checklist (per CLAUDE.md) — all four need codex treatment
+### Cross-cutting checklist (per AGENTS.md) — all four need codex treatment
 - **General agent functionality:** new launch path, possibly meta fields, model resolver.
 - **Hooks:** codex hook-config writer + codex PreToolUse handler emitting Codex's JSON; trust handling.
 - **Watchdog:** codex state signatures, idle/rate-limit detection, whether bare-Enter nudges apply.

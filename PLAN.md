@@ -153,7 +153,7 @@ itsybitsy
 │   ├── parity-check-ux.md          # Post-P0 UX parity check (G-01 through G-16)
 │   └── parity-check-logic.md       # Post-P0 logic/correctness parity check
 ├── PLAN.md
-├── CLAUDE.md
+├── AGENTS.md
 └── package.json
 ```
 

@@ -309,7 +309,7 @@ Smallest phase. Reuses the Phase 4 client.
 
 ## Cross-cutting checklist (every phase)
 
-Per `CLAUDE.md`, evaluate each phase against the four perspectives:
+Per `AGENTS.md`, evaluate each phase against the four perspectives:
 
 1. **General agent functionality.** Phases 1, 5 affect the system
    coordinator's launch and inbound message path. No other agents

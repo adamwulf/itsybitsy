@@ -11,7 +11,7 @@
 
 | Question | Answer |
 |---|---|
-| CLAUDE.md vs AGENTS.md | `agy` reads `GEMINI.md` and `AGENTS.md` (walk-up from cwd to the repo root), `.agents/rules/*.md`, and global `~/.gemini/GEMINI.md`. It does not read `CLAUDE.md`[^22][^23][^13][^30]. Generate the per-agent instructions into an `agy` custom-agent file (`.agents/agents/ittybitty/agent.md`, body = system prompt) or into `.agents/rules/ittybitty.md`, and inline the project and user `CLAUDE.md` text into it. Do not overwrite a repo's own `AGENTS.md` (§3). |
+| CLAUDE.md vs AGENTS.md | `agy` reads `GEMINI.md` and `AGENTS.md` (walk-up from cwd to the repo root), `.agents/rules/*.md`, and global `~/.gemini/GEMINI.md`. It does not read `CLAUDE.md`[^22][^23][^13][^30]. Generate the per-agent instructions into an `agy` custom-agent file (`.agents/agents/ittybitty/agent.md`, body = system prompt) or into `.agents/rules/ittybitty.md`, and inline the project and user `CLAUDE.md` text into it. Do not overwrite a repo's own `AGENTS.md` (§3). **Update 2026-09-23:** no `CLAUDE.md` is inlined anymore; agy reads the repo's `AGENTS.md` and its global `~/.gemini/GEMINI.md` itself (§3.4). |
 | Hooks for tool permissions | Yes. `agy` has `PreToolUse` hooks in `.agents/hooks.json` with a `decision: allow \| deny \| ask \| force_ask \| deny_unless_prior_grant` output and `permissionOverrides`[^21][^30]. Same architecture as the codex PreToolUse handler[^58]. Two things need a spike: whether `deny` blocks without an approval card on 1.1.23 (it did not on 1.1.2[^34]), and whether a crashed hook fails open or closed (undocumented[^21]). |
 | Hooks for directory reads | Mostly not needed for the file tools. `agy` fences `view_file` / `write_to_file` to the workspace by default (`allowNonWorkspaceAccess: off`, workspace read/write auto-allowed, outside = ask)[^3][^4][^32]. The hook is still required for `run_command` path checks (`cat ../x`, `cd`, `git -C`) and for any root we add with `--add-dir` (§7). |
 | CLI settings instead of hooks | Use flags, not the global `settings.json`: `--mode=accept-edits` (no per-file diff review card), `--agent <name>` (custom agent with a scoped `tools:` list that omits the sub-agent tools), `--add-dir`, `--model`, `--effort`, `--conversation <id>`, `--log-file`, `--title`[^7][^19][^18][^50][^6][^30]. The `permissions.allow/deny` engine lives only in the user-global `~/.gemini/antigravity-cli/settings.json`[^3] and has open correctness bugs[^43][^37], so it cannot be the per-agent boundary. |
@@ -106,6 +106,10 @@ Captured on this machine on 2026-09-01[^75]. There is no `--title`, no trust fla
 Write **one generated file** per agent: `<worktree>/.agents/agents/ittybitty/agent.md`, an `agy` custom agent[^17][^19]. Its frontmatter carries the pass-through settings from our own agent-type `.md` (model tier, `tools:` list, `commandExecutionPolicy`, optional `hooks:`), and its markdown body is the system prompt built from our session-start template[^19][^20]. Launch with `--agent ittybitty`. If the spike shows the body is not injected as a system prompt in the CLI, fall back to `<worktree>/.agents/rules/ittybitty.md` with `trigger: always_on`[^22].
 
 Git hygiene: `.agents/hooks.json`, `.agents/agents/ittybitty/`, and `.gemini/antigravity-cli/` (transcript and artifacts, if they land in the worktree — see §10) must be excluded. The codex precedent appends to the worktree `.gitignore`[^68]; for `agy` prefer the per-repo `.git/info/exclude` so a tracked `.gitignore` stays clean. Note `.agents/` itself may be tracked by a repo (skills, `mcp_config.json`)[^13][^16], so exclude only our files, not the directory.
+
+### 3.4 Update (2026-09-23): AGENTS.md everywhere, nothing inlined
+
+Claude Code 2.1.277 added native `AGENTS.md` support (read when a project has no `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`), so every CLI now reads a repo's own `AGENTS.md`. The rule file keeps only the role text and the skills catalogue; the project and user `CLAUDE.md` inlines were removed. User-wide text comes from agy's global `~/.gemini/GEMINI.md`; to share one file with Claude, symlink it to `~/.claude/CLAUDE.md` (readable under the kernel sandbox through the `~/.gemini` runtime root and the `_all.md` `~/.claude` read floor). A spawn in a repo with `CLAUDE.md` but no `AGENTS.md` warns. Codex made the matching change: its role text moved from a generated `<worktree>/AGENTS.md` to `-c developer_instructions`, so problem 2 in §3.2 is gone for both CLIs.
 
 ## 4. The permissions engine (settings, no hooks)
 
@@ -517,7 +521,7 @@ Caveat seen: after the hard `tmux kill-session`, the resumed session showed `⚠
 [^64]: [docs/implementation-notes.md (hooks, codex integration, state detection, TUI capture, ib state)](docs/implementation-notes.md)
 [^65]: [default allow floor](src/settings-builder.ts:REGULAR_AGENT_DEFAULT_ALLOW)
 [^66]: [merged agent-type permission loader](src/hooks/shared.ts:loadMergedAgentTypePermissions)
-[^67]: [codex AGENTS.md generator (CLAUDE.md import + skills catalogue)](src/codex-spawn.ts:buildCodexAgentsMd)
+[^67]: [codex AGENTS.md generator (CLAUDE.md import + skills catalogue)](src/codex-spawn.ts:buildCodexAgentsMd) — removed 2026-09-23; replaced by `buildCodexDeveloperInstructions` (role text + skills, launched as `-c developer_instructions`).
 [^68]: [codex .gitignore appender](src/codex-spawn.ts:appendCodexGitignoreEntry)
 [^69]: [watchdog permission-prompt auto-accept (Enter on trust / MCP cards)](src/watchdog.ts:runPerAgentWatchdog)
 [^70]: [claude trust-prompt strings in the legacy state parser](src/parse-state.ts:parseClaudeState)

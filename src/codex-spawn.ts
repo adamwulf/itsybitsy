@@ -4,19 +4,17 @@
  * and the worktree on disk. Splitting them out keeps the codex-specific
  * spawn logic unit-testable without booting a real codex / tmux session.
  *
- * Three responsibilities:
+ * Two responsibilities:
  *   1. Render the codex launch line that goes into start.sh — shell-quoted
  *      argv per SPEC §3.3, with the inline `-c hooks.*=[...]` flags from
  *      `buildCodexLaunchArgs()` already in place.
  *   2. Append `.codex/` to the worktree's `.gitignore` so any incidental
  *      files codex itself drops don't end up tracked.
- *   3. Build the per-agent role instructions codex receives as
- *      `-c developer_instructions="…"` — the codex analog of the Claude
- *      `session-start.ts` injection. We delegate to `generateInstructions()`
- *      from `src/hooks/session-start.ts` and strip the Claude-specific
- *      `<ittybitty>...</ittybitty>` wrapper (codex doesn't read that tag).
- *      itsybitsy never writes an `AGENTS.md`: codex reads the repo's own
- *      `AGENTS.md` natively, next to these instructions.
+ *
+ * The agent's role text does not travel on the launch line: the codex
+ * SessionStart hook (`hooks/codex-session-start.ts`) returns it as
+ * `additionalContext`, as the Claude session-start hook does. itsybitsy never
+ * writes an `AGENTS.md`: codex reads the repo's own `AGENTS.md` natively.
  *
  * No subprocesses are spawned from this module — the precheck that runs
  * `ib hooks codex-* --dry-run` lives in `ib-commands.ts` so it can share
@@ -25,8 +23,7 @@
 
 import { shellQuote } from "./validation";
 import { buildCodexLaunchArgs, FUGU_CODEX_CONFIG_OVERRIDES, isCodexSafeBinaryPath } from "./codex-config";
-import type { SessionContext } from "./hooks/session-start";
-import { stripIttybittyWrapper, buildSkillsSection, buildAgentRoleBody } from "./agent-instructions-shared";
+import { stripIttybittyWrapper, buildSkillsSection } from "./agent-instructions-shared";
 import { appendGitignoreEntries, type GitignoreEntryOutcome } from "./worktree-gitignore";
 
 // Re-exported so existing importers (codex-spawn.test.ts, ib-commands.ts) keep
@@ -76,13 +73,6 @@ export interface BuildCodexStartContentInput {
    * with `-c model_reasoning_effort="…"`. Optional — absent means no override.
    */
   codexEffort?: string;
-  /**
-   * The agent's role instructions from `buildCodexDeveloperInstructions`,
-   * launched as `-c developer_instructions="…"` (TOML-escaped, then
-   * shell-quoted). Required so a caller cannot launch a codex agent that
-   * silently has no role context.
-   */
-  developerInstructions: string;
   /** Absolute path to prompt.txt — passed as `"$(cat <quoted>)"`. */
   absPromptFile: string;
   /** Absolute path to meta.json — pid is written here. */
@@ -131,11 +121,6 @@ export function buildCodexStartContent(input: BuildCodexStartContentInput): stri
         `Reinstall ib to a path made of printable ASCII with no apostrophes, quotes, or backslashes.`,
     );
   }
-  // buildCodexLaunchArgs silently omits the flag for empty text; a launch
-  // script must never do that, or the agent starts with no role context.
-  if (!input.developerInstructions.trim()) {
-    throw new Error("Codex launch requires non-empty developer instructions (the agent's role text)");
-  }
 
   const { args: hookFlags } = buildCodexLaunchArgs({
     ibBinaryPath: input.ibBinaryPath,
@@ -143,14 +128,12 @@ export function buildCodexStartContent(input: BuildCodexStartContentInput): stri
     agentDir: input.agentDir,
     effort: input.codexEffort,
     extraWritableRoots: input.extraWritableRoots,
-    developerInstructions: input.developerInstructions,
   });
 
   // Shell-quote each codex argv element so the resulting `codex ... ` line is
-  // robust against an attacker-controlled model string or path component — and
-  // so the free-text developer_instructions payload (quotes, `$(...)`,
-  // newline escapes) reaches codex byte-for-byte. The hookFlags array already
-  // alternates `-c` then the payload; quote both halves uniformly.
+  // robust against an attacker-controlled model string or path component. The
+  // hookFlags array already alternates `-c` then the payload; quote both
+  // halves uniformly.
   const qModel = shellQuote(input.codexModel);
   const providerFlags = input.fugu
     ? FUGU_CODEX_CONFIG_OVERRIDES.flatMap((override) => ["-c", override])
@@ -313,16 +296,6 @@ export interface BuildCodexResumeContentInput {
    * agents) means no override.
    */
   codexEffort?: string;
-  /**
-   * The agent's role instructions, regenerated from the current frozen meta
-   * and passed again as `-c developer_instructions="…"`. Codex does NOT add a
-   * second copy on resume: the resumed rollout already holds the spawn-time
-   * copy, and codex re-sends the configured developer instructions only when
-   * it rebuilds the full initial context. With a saved reference context in
-   * the rollout (the normal case) that is after the next compaction; with none,
-   * it is the first resumed turn (SPEC §18.7).
-   */
-  developerInstructions: string;
   /** Absolute path to meta.json — pid is written here. */
   absMetaJson: string;
   /** Absolute path to exit-check.sh. */
@@ -377,11 +350,6 @@ export function buildCodexResumeContent(input: BuildCodexResumeContentInput): st
         `Reinstall ib to a path made of printable ASCII with no apostrophes, quotes, or backslashes.`,
     );
   }
-  // Same guard as buildCodexStartContent: never write a resume.sh that
-  // silently drops the role text.
-  if (!input.developerInstructions.trim()) {
-    throw new Error("Codex resume requires non-empty developer instructions (the agent's role text)");
-  }
 
   const { args: hookFlags } = buildCodexLaunchArgs({
     ibBinaryPath: input.ibBinaryPath,
@@ -389,7 +357,6 @@ export function buildCodexResumeContent(input: BuildCodexResumeContentInput): st
     agentDir: input.agentDir,
     effort: input.codexEffort,
     extraWritableRoots: input.extraWritableRoots,
-    developerInstructions: input.developerInstructions,
   });
 
   const qSessionId = shellQuote(input.codexSessionId);
@@ -536,44 +503,4 @@ export type AppendCodexGitignoreResult = GitignoreEntryOutcome;
 export async function appendCodexGitignoreEntry(worktreePath: string): Promise<AppendCodexGitignoreResult> {
   const results = await appendGitignoreEntries(worktreePath, [".codex/"]);
   return results[".codex/"]!;
-}
-
-/**
- * Build the per-agent role instructions for a codex agent. They are launched
- * as `-c developer_instructions="…"` (see `buildCodexLaunchArgs`), which codex
- * adds to the session as a developer message — the codex analog of the Claude
- * session-start injection.
- *
- * The text is the shared `buildAgentRoleBody()` (agent-instructions-shared.ts):
- * `generateInstructions()` from `session-start.ts`, so the codex agent gets the
- * same role-shaped context (path isolation, bash rules, ib-send guidance,
- * commands table, worker/manager-specific blocks, team-awareness) as the claude
- * agent of the same type, with the `<ittybitty>` wrapper stripped (codex
- * doesn't recognize it), plus the skills catalog. This adapter adds nothing;
- * the codex-specific encoding happens later: TOML string + size cap in
- * `buildCodexLaunchArgs` (via `renderCodexDeveloperInstructionsPayload`), shell
- * quoting in `buildCodexStartContent` / `buildCodexResumeContent`.
- *
- * Project and user-wide instructions are deliberately NOT included. Codex
- * reads the repo's own `AGENTS.md` natively (itsybitsy never writes one), and
- * user-wide instructions come from codex's global `~/.codex/AGENTS.md` — a
- * symlink to `~/.claude/CLAUDE.md` shares one file with Claude.
- *
- * Claude-only tool audit (HIGH 4 from the Phase 4 review):
- *   - `TodoWrite` references — removed in manager.md + the session-start.ts
- *     hardcoded fallback; replaced with "Track progress with measurable
- *     criteria" (CLI-agnostic).
- *   - `Write(...)` snippet in `_non_coordinator.md`'s commit-message
- *     section — rewritten to "Default to writing the message to a temp
- *     file first" so codex agents (whose file-edit tool is apply_patch,
- *     not Write) read CLI-agnostic guidance.
- *   - The Tool Interception block in manager.md (mentions Task, Agent,
- *     TaskCreate) is left in place. Those tools don't exist on codex, so
- *     a codex manager simply won't trigger the deny-on-intercept path
- *     described — the block is harmless but technically Claude-specific.
- *     A future phase should conditionalize this block per-cli once the
- *     agent-type template engine grows {{#if cli == "claude"}} support.
- */
-export async function buildCodexDeveloperInstructions(ctx: SessionContext): Promise<string> {
-  return buildAgentRoleBody(ctx);
 }

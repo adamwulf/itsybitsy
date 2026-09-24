@@ -105,7 +105,7 @@ export function buildAgyHooksJson(input: BuildAgyHooksJsonInput): string {
  *   - the session-start instruction template (wrapper stripped),
  *   - the skills catalog.
  *
- * The same role content codex receives as `developer_instructions`, with the
+ * The same role content codex receives from its SessionStart hook, with the
  * `trigger: always_on` frontmatter so agy loads it alongside the repo's own
  * `AGENTS.md`. Project and user-wide instructions are not copied in: agy reads
  * the repo's `AGENTS.md` natively and its user-wide `~/.gemini/GEMINI.md` (a

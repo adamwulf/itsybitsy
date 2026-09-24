@@ -31,7 +31,7 @@ import {
 } from "./agents";
 import { matchAgentById } from "./index";
 import { saveRegistry } from "./registry";
-import { makeAgent as _makeAgent, makeSpawnResult, waitFor, codexDeveloperInstructionsFromScript } from "./test-utils";
+import { makeAgent as _makeAgent, makeSpawnResult, waitFor } from "./test-utils";
 import {
   retireAgent,
   rehireAgent,
@@ -164,6 +164,19 @@ function makeAgent(
     state: state as AgentState,
   });
   return meta ? { ...agent, meta: { ...agent.meta, ...meta } } : agent;
+}
+
+/** The role text the codex SessionStart hook gives this agent (its additionalContext). */
+async function codexHookRoleText(agentId: string, agentDir: string): Promise<string> {
+  const { hookCodexSessionStart } = await import("./hooks/codex-session-start");
+  const out: string[] = [];
+  await hookCodexSessionStart(agentId, {
+    rawStdin: "{}",
+    agentDirOverride: agentDir,
+    skipMetaWrites: true,
+    write: (chunk) => out.push(chunk),
+  });
+  return JSON.parse(out.join("")).hookSpecificOutput.additionalContext;
 }
 
 describe("Claude PID bootstrap", () => {
@@ -6720,9 +6733,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const agentDir = join(agentsDir, "sandbox-codex");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
     const profile = await Bun.file(join(agentDir, "sandbox.sb")).text();
-    // Role instructions travel as -c developer_instructions; nothing is
-    // written into the worktree.
-    const instructions = codexDeveloperInstructionsFromScript(start);
+    // The role text comes from the SessionStart hook; nothing is written
+    // into the worktree.
+    const instructions = await codexHookRoleText("sandbox-codex", agentDir);
     expect(await Bun.file(join(agentDir, "repo", "AGENTS.md")).exists()).toBe(false);
     expect(start).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
     expect(start).not.toContain("-s workspace-write");
@@ -6816,159 +6829,6 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(resume).toContain("sandbox-proxy-launch");
     expect(resume).toContain("export http_proxy=\"http://localhost:$PROXY_PORT\"");
     expect(resume).toContain("<&0 2> \"$STDERR_LOG\" &");
-  });
-
-  /**
-   * A codex agent type whose markdown body is `bodyBytes` of filler, so the
-   * role text (and its developer_instructions payload) can be pushed past
-   * CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES. Kernel sandbox off to keep the
-   * spawn path free of sandbox preflight.
-   */
-  async function writeCodexTypeWithBody(name: string, bodyBytes: number): Promise<void> {
-    await writeCodexType(name, `You are worker agent \`{{agentId}}\`.\n${"x".repeat(bodyBytes)}\n`);
-  }
-
-  async function writeCodexType(name: string, body: string): Promise<void> {
-    const path = join(process.env.HOME!, ".itsybitsy", "agent-types", `${name}.md`);
-    await Bun.write(path, `---
-name: ${name}
-description: Codex role-text test
-model: codex:gpt-5.4-mini
-instructionStyle: worker
-canSpawnChildren: false
-sandbox:
-  enabled: false
----
-${body}`);
-  }
-
-  /**
-   * Make the generated role text BLANK: strip the bodies (keeping the
-   * frontmatter) of the `_all` / `_non_coordinator` prefix layers, and give
-   * the type a body that renders to nothing for a top-level agent.
-   */
-  async function writeBlankRoleCodexType(name: string): Promise<void> {
-    for (const layer of ["_all", "_non_coordinator"]) {
-      const path = join(process.env.HOME!, ".itsybitsy", "agent-types", `${layer}.md`);
-      const file = Bun.file(path);
-      if (!(await file.exists())) continue;
-      const text = await file.text();
-      const close = text.indexOf("\n---", 3);
-      if (text.startsWith("---") && close !== -1) await Bun.write(path, text.slice(0, close + 4) + "\n");
-    }
-    await writeCodexType(name, "{{#if hasManager}}only with a manager{{/if}}\n");
-  }
-
-  test("Codex spawn with BLANK role text fails cleanly: agent dir, worktree and branch all removed", async () => {
-    const id = "codex-blank-spawn";
-    await writeBlankRoleCodexType(id);
-    const calls: string[][] = [];
-    const inner = cleanWorktreeRunner();
-    setNewAgentSpawnRunner((cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => {
-      calls.push(cmd);
-      return inner(cmd, opts);
-    });
-    setNewAgentSummaryGenerator(async () => {});
-    setWatchdogSpawnFn(() => ({ pid: 99982 }));
-
-    const result = await callNewAgent("blank role", { name: id, type: id });
-
-    expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("could not build codex developer instructions");
-    expect(result.stderr).toContain("developer instructions are empty");
-    expect(await lstat(join(agentsDir, id)).then(() => true, () => false)).toBe(false);
-    const cmdStrs = calls.map((c) => c.join(" "));
-    expect(cmdStrs.some((c) => c.includes("worktree remove") && c.includes(join(agentsDir, id, "repo")))).toBe(true);
-    expect(cmdStrs.some((c) => c.includes(`branch -D agent/${id}`))).toBe(true);
-    expect(cmdStrs.some((c) => c.includes("new-session"))).toBe(false);
-  });
-
-  test("Codex resume refuses BLANK regenerated role text without writing resume.sh or starting tmux", async () => {
-    const id = "codex-blank-resume";
-    await writeCodexTypeWithBody(id, 64);
-    setNewAgentSpawnRunner(cleanWorktreeRunner());
-    setNewAgentSummaryGenerator(async () => {});
-    setWatchdogSpawnFn(() => ({ pid: 99981 }));
-    expect((await callNewAgent("normal role", { name: id, type: id })).ok).toBe(true);
-    const agentDir = join(agentsDir, id);
-    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
-    meta.state = "stopped";
-    meta.codex_session_id = "019e7b21-cb7d-7f23-8674-11036ed141ef";
-    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
-    await writeBlankRoleCodexType(id);
-    const resumeCalls: string[][] = [];
-    setNukeResumeSpawnRunner((cmd: string[]) => {
-      resumeCalls.push(cmd);
-      if (cmd.join(" ").includes("--git-common-dir")) return makeSpawnResult(".git", 0);
-      return makeSpawnResult("", cmd.join(" ").includes("has-session") ? 1 : 0);
-    });
-
-    const result = await resumeAgent(makeAgent(id, tempDir, "stopped", meta));
-
-    expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("could not regenerate Codex developer instructions");
-    expect(result.stderr).toContain("developer instructions are empty");
-    expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
-    expect(resumeCalls.some((c) => c.join(" ").includes("new-session"))).toBe(false);
-  });
-
-  test("Codex spawn with oversized role text fails cleanly: agent dir, worktree and branch all removed", async () => {
-    const id = "codex-oversized-spawn";
-    await writeCodexTypeWithBody(id, 130 * 1024);
-    const calls: string[][] = [];
-    const inner = cleanWorktreeRunner();
-    setNewAgentSpawnRunner((cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => {
-      calls.push(cmd);
-      return inner(cmd, opts);
-    });
-    setNewAgentSummaryGenerator(async () => {});
-    setWatchdogSpawnFn(() => ({ pid: 99984 }));
-
-    const result = await callNewAgent("oversized role", { name: id, type: id });
-
-    expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("could not build codex developer instructions");
-    expect(result.stderr).toMatch(/too large: \d+ bytes after TOML escaping, limit \d+/);
-    // cleanupOnFailure: the whole agent dir is gone, and the worktree and
-    // branch removals were issued.
-    expect(await lstat(join(agentsDir, id)).then(() => true, () => false)).toBe(false);
-    const cmdStrs = calls.map((c) => c.join(" "));
-    expect(cmdStrs.some((c) => c.includes("worktree remove") && c.includes(join(agentsDir, id, "repo")))).toBe(true);
-    expect(cmdStrs.some((c) => c.includes(`branch -D agent/${id}`))).toBe(true);
-    // Refused before any tmux session or dispatcher precheck.
-    expect(cmdStrs.some((c) => c.includes("new-session"))).toBe(false);
-    expect(dispatcherDryRunCalls.length).toBe(0);
-  });
-
-  test("Codex resume refuses oversized regenerated role text without writing resume.sh or starting tmux", async () => {
-    const id = "codex-oversized-resume";
-    await writeCodexTypeWithBody(id, 1024);
-    setNewAgentSpawnRunner(cleanWorktreeRunner());
-    setNewAgentSummaryGenerator(async () => {});
-    setWatchdogSpawnFn(() => ({ pid: 99983 }));
-    expect((await callNewAgent("normal role", { name: id, type: id })).ok).toBe(true);
-    const agentDir = join(agentsDir, id);
-    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
-    meta.state = "stopped";
-    meta.codex_session_id = "019e7b21-cb7d-7f23-8674-11036ed141ef";
-    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
-    // The type grows past the limit between spawn and resume.
-    await writeCodexTypeWithBody(id, 130 * 1024);
-    const resumeCalls: string[][] = [];
-    setNukeResumeSpawnRunner((cmd: string[]) => {
-      resumeCalls.push(cmd);
-      if (cmd.join(" ").includes("--git-common-dir")) return makeSpawnResult(".git", 0);
-      return makeSpawnResult("", cmd.join(" ").includes("has-session") ? 1 : 0);
-    });
-
-    const result = await resumeAgent(makeAgent(id, tempDir, "stopped", meta));
-
-    expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("could not regenerate Codex developer instructions");
-    expect(result.stderr).toMatch(/too large: \d+ bytes/);
-    expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
-    expect(resumeCalls.some((c) => c.join(" ").includes("new-session"))).toBe(false);
-    expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("[resume] could not regenerate Codex developer instructions");
   });
 
   test("sandbox-enabled start.sh wraps both Claude branches and exports only proxy vars", async () => {
@@ -7263,7 +7123,7 @@ ${body}`);
   });
 
   // ── A4 G2: ib sandbox refresh ──────────────────────────────────────────────
-  test("Codex refresh to disabled regenerates developer_instructions and keeps no-prompt workspace-write hooks", async () => {
+  test("Codex refresh to disabled updates the SessionStart role text and keeps no-prompt workspace-write hooks", async () => {
     const id = "codex-refresh-instructions";
     const oldRead = join(tempDir, "old-policy");
     const newRead = join(tempDir, "new-policy");
@@ -7275,7 +7135,7 @@ ${body}`);
     setWatchdogSpawnFn(() => ({ pid: 99960 }));
     expect((await callNewAgent("refresh policy", { name: id, type: id })).ok).toBe(true);
     const agentDir = join(agentsDir, id);
-    const startInstructions = codexDeveloperInstructionsFromScript(await Bun.file(join(agentDir, "start.sh")).text());
+    const startInstructions = await codexHookRoleText(id, agentDir);
     expect(startInstructions).toContain("The kernel sandbox is ON");
     expect(startInstructions).toContain(canonicalizeSandboxPath(oldRead));
     const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
@@ -7285,8 +7145,8 @@ ${body}`);
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
     await Bun.write(join(agentDir, "sandbox-proxy.pid"), "99999999\n");
     await Bun.write(join(agentDir, "sandbox-proxy.ready"), "ready\n");
-    // Edit both paths and the toggle. Refresh must replace the frozen policy and
-    // regenerate native instructions before resuming without kernel helpers.
+    // Edit both paths and the toggle. Refresh must replace the frozen policy
+    // (which the SessionStart hook reads) before resuming without kernel helpers.
     await writeSandboxType(id, { model: "codex:gpt-5.4-mini", enabled: false, allowRead: [newRead] });
     let created = false;
     setNukeResumeSpawnRunner((cmd: string[]) => {
@@ -7300,7 +7160,7 @@ ${body}`);
     const result = await refreshAgentSandbox(makeAgent(id, tempDir, "stopped", meta));
     expect(result.ok).toBe(true);
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
-    const text = codexDeveloperInstructionsFromScript(resume);
+    const text = await codexHookRoleText(id, agentDir);
     expect(text).toContain(canonicalizeSandboxPath(newRead));
     expect(text).not.toContain(canonicalizeSandboxPath(oldRead));
     expect(text).toContain("The itsybitsy kernel sandbox is OFF");
@@ -11648,7 +11508,7 @@ body`,
       expect(gitignore).toContain(".codex/");
     });
 
-    test("passes role + agent id as developer_instructions (no <ittybitty> wrapper) and writes no AGENTS.md", async () => {
+    test("the SessionStart hook gives the spawned agent its role + agent id (no <ittybitty> wrapper); no AGENTS.md is written", async () => {
       setNewAgentSpawnRunner(mockSpawnRunner());
       const result = await callNewAgent("task", {
         name: "codex-agents-md",
@@ -11656,14 +11516,13 @@ body`,
         type: "worker",
       });
       expect(result.ok).toBe(true);
-      const startSh = await Bun.file(join(agentsDir, "codex-agents-md", "start.sh")).text();
-      const instructions = codexDeveloperInstructionsFromScript(startSh);
+      const agentDir = join(agentsDir, "codex-agents-md");
+      const instructions = await codexHookRoleText("codex-agents-md", agentDir);
       expect(instructions).toContain("codex-agents-md");
       expect(instructions.startsWith("<ittybitty>")).toBe(false);
       expect(instructions).not.toContain("</ittybitty>");
-      expect(await Bun.file(join(agentsDir, "codex-agents-md", "repo", "AGENTS.md")).exists()).toBe(false);
-      const log = await Bun.file(join(agentsDir, "codex-agents-md", "agent.log")).text();
-      expect(log).toMatch(/codex developer_instructions: \d+ bytes/);
+      expect(await Bun.file(join(agentDir, "start.sh")).text()).not.toContain("developer_instructions");
+      expect(await Bun.file(join(agentDir, "repo", "AGENTS.md")).exists()).toBe(false);
     });
 
     test("leaves a repo-tracked AGENTS.md untouched in the worktree", async () => {

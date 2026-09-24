@@ -1924,24 +1924,6 @@ export async function resumeAgent(
         ...codexParentRepoSubdirs,
       ];
 
-      // Refresh updates frozen metadata before entering resume. Regenerate the
-      // role instructions here so both ordinary resume and refresh describe
-      // the same policy as the hooks and the emitted kernel profile. (Codex
-      // keeps the spawn-time copy in the resumed context and usually sends
-      // this one only after its next compaction — see buildCodexResumeContent.)
-      const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
-      const { renderCodexDeveloperInstructionsPayload } = await import("./codex-config");
-      const { detectRole } = await import("./hooks/session-start");
-      let resumeDeveloperInstructions: string;
-      try {
-        resumeDeveloperInstructions = await buildCodexDeveloperInstructions(detectRole(workPath, agent.meta, agent.id));
-        renderCodexDeveloperInstructionsPayload(resumeDeveloperInstructions);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        await logAgent(agentDir, `[resume] could not regenerate Codex developer instructions: ${message}`);
-        return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not regenerate Codex developer instructions: ${message}` };
-      }
-
       // Build resume.sh via the shared codex builder (mirrors start.sh).
       const { buildCodexResumeContent } = await import("./codex-spawn");
       const codexResumeContent = buildCodexResumeContent({
@@ -1949,7 +1931,6 @@ export async function resumeAgent(
         ibBinaryPath: codexIbBinaryPath,
         agentDir,
         codexSessionId,
-        developerInstructions: resumeDeveloperInstructions,
         // Re-apply the persisted effort as a `-c model_reasoning_effort` override.
         // Unlike `-m <model>` (which codex resume drops because the model is
         // bound to the rollout), `-c` config overrides ARE re-applied on codex
@@ -6578,7 +6559,7 @@ export async function newAgent(
   // The system coordinator path (coordinator.ts:spawnCoordinator) has the
   // same guard, but per-repo coordinators reach `newAgent` directly with
   // coordinatorMode=true, so we need a guard HERE — without it the spawn
-  // would skip the useWorktree branch (role instructions, .gitignore, precheck)
+  // would skip the useWorktree branch (.gitignore, precheck)
   // and produce a broken half-codex coordinator.
   let codexIbBinaryPath: string | null = null;
   if (isCodexBackedCli(agentCli)) {
@@ -6851,9 +6832,6 @@ export async function newAgent(
   // Working directory defaults to root repo
   let workPath = rootRepoPath;
   let codexExtraWritableRoots: string[] = [];
-  // Codex role instructions, built in the worktree branch below and launched
-  // as `-c developer_instructions="…"` by buildCodexStartContent.
-  let codexDeveloperInstructions = "";
 
   // Compute fields needed for the early meta.json write below. These were
   // previously computed just before the late meta.json write (post worktree-add),
@@ -7076,20 +7054,17 @@ export async function newAgent(
       // registration is inline via `-c` flags built in `buildCodexLaunchArgs`
       // (SPEC §3.3 + §5.4). The codex PreToolUse hook itself reads the shared
       // dynamic grant file at <worktree>/.claude/settings.local.json so ib
-      // watch's permission-grant flow works for running agents. Here we:
-      //   1. Append `.codex/` to <worktree>/.gitignore (covers any incidental
-      //      files codex itself drops — hook logs, sentinels, scratch).
-      //   2. Build the role instructions start.sh passes as
-      //      `-c developer_instructions="…"` (the codex analog of the claude
-      //      session-start prompt injection). Nothing is written into the
-      //      worktree: codex reads the repo's own AGENTS.md natively.
+      // watch's permission-grant flow works for running agents. Here we
+      // append `.codex/` to <worktree>/.gitignore (covers any incidental
+      // files codex itself drops — hook logs, sentinels, scratch). The role
+      // text comes from the codex SessionStart hook, as for claude; nothing
+      // is written into the worktree: codex reads the repo's own AGENTS.md
+      // natively.
       // Coordinator+codex was rejected up-front in the codex precondition
       // block above (SPEC §D9 stub) — both the system coordinator (handled
       // in coordinator.ts) and the per-repo coordinator (handled here in
       // newAgent) refuse codex models before any side-effects.
-      const { appendCodexGitignoreEntry, buildCodexDeveloperInstructions } = await import("./codex-spawn");
-      const { renderCodexDeveloperInstructionsPayload } = await import("./codex-config");
-      const { detectRole } = await import("./hooks/session-start");
+      const { appendCodexGitignoreEntry } = await import("./codex-spawn");
       try {
         const giResult = await appendCodexGitignoreEntry(workPath);
         if (giResult === "negation-respected") {
@@ -7105,35 +7080,6 @@ export async function newAgent(
         }
       } catch (err) {
         await logSpawn(agentDir, spawnerAgentDir, id, `codex .gitignore append failed: ${(err as Error)?.message ?? String(err)}`);
-      }
-      const sessionCtx = detectRole(workPath, {
-        id,
-        model,
-        manager: manager || null,
-        worker: isLeafAgent,
-        agentType: typeName,
-        spawned_by: spawnedBy ?? undefined,
-        // These values were resolved once from the layer union above and are
-        // the exact policy frozen into the new agent's meta.json.
-        paths: resolvedPathsConfig,
-        sandbox: resolvedSandboxConfig,
-      }, id);
-      try {
-        codexDeveloperInstructions = await buildCodexDeveloperInstructions(sessionCtx);
-        // Size-check now, while cleanupOnFailure can still undo the spawn;
-        // buildCodexStartContent renders the same payload again below.
-        const payloadBytes = Buffer.byteLength(renderCodexDeveloperInstructionsPayload(codexDeveloperInstructions), "utf8");
-        await logSpawn(agentDir, spawnerAgentDir, id, `codex developer_instructions: ${payloadBytes} bytes`);
-      } catch (err) {
-        const errMsg = (err as Error)?.message ?? String(err);
-        await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: could not build codex developer instructions: ${errMsg}`);
-        await cleanupOnFailure();
-        return {
-          ok: false,
-          exitCode: 1,
-          stdout: "",
-          stderr: `Error: could not build codex developer instructions: ${errMsg}`,
-        };
       }
 
       const gitCommonDirResult = await newAgentSpawnCtx.run([
@@ -7637,8 +7583,6 @@ echo ""
       // `effort` is validated + always non-empty (default 'xhigh' → 'high').
       codexEffort: mapEffortForCodex(effort),
       fugu: agentCli === "fugu",
-      // Built and size-checked in the worktree branch above.
-      developerInstructions: codexDeveloperInstructions,
       absPromptFile,
       absMetaJson: join(agentDir, "meta.json"),
       absExitScript,

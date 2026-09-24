@@ -159,10 +159,10 @@ describe("buildAgyRulesFile", () => {
   });
 
   test("body is the shared role body — byte-identical to what codex receives", async () => {
-    const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
+    const { buildAgentRoleBody } = await import("./agent-instructions-shared");
     const frontmatter = "---\ntrigger: always_on\ndescription: itsybitsy agent instructions\n---\n";
     const rules = await buildAgyRulesFile(ctxFor());
-    expect(rules).toBe(frontmatter + (await buildCodexDeveloperInstructions(ctxFor())));
+    expect(rules).toBe(frontmatter + (await buildAgentRoleBody(ctxFor())));
   });
 
   test("appends the skills catalog after the role body", async () => {

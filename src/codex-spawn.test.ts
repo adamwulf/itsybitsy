@@ -3,15 +3,14 @@
  * branch of newAgent() (SPEC-CODEX-MODEL.md §6 Phase 4).
  *
  * The Phase 4 acceptance gate spans these as unit-level invariants on the
- * SHELL STRING and the generated role text (`-c developer_instructions`).
- * The scripts are also run with bash against a stub `codex` to check the argv
- * codex receives. End-to-end spawn coverage with the real CLI is the manual
+ * SHELL STRING and the shared role text (`buildAgentRoleBody`, which the
+ * codex SessionStart hook returns). End-to-end spawn coverage is the manual
  * gate documented in the SPEC; we explicitly DO NOT spawn a real codex / tmux
  * session from this file.
  */
 
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { chmod, mkdtemp, rm, mkdir, realpath } from "fs/promises";
+import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
@@ -22,20 +21,8 @@ import {
   resolveIbBinaryPath,
   buildSkillsSection,
 } from "./codex-spawn";
-import {
-  CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES,
-  CODEX_REGISTERED_EVENTS,
-  renderCodexDeveloperInstructionsPayload,
-  tomlBasicString,
-} from "./codex-config";
+import { CODEX_REGISTERED_EVENTS } from "./codex-config";
 import { setUserHome, resetUserHome } from "./home";
-import { shellQuote } from "./validation";
-import {
-  codexDeveloperInstructionsFromScript,
-  decodeCodexStringOverride,
-  hasPythonTomllib,
-  pythonTomlDecodeBasicString,
-} from "./test-utils";
 import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-log-launch";
 
 // Enabled-mode wrapper fixtures. Builders require the complete pair only when
@@ -48,16 +35,12 @@ const sandboxFields = () => ({
   sandboxExecPrefix: SANDBOX_PREFIX,
 });
 
-// Role instructions the launch-line fixtures pass as developer_instructions.
-const ROLE_TEXT = "## Role\n\nYou are worker agent `agent-abc12345`.\n";
-
 describe("buildCodexStartContent — launch line", () => {
   const baseInput = () => ({
     agentId: "agent-abc12345",
     ibBinaryPath: "/usr/local/bin/ib",
     agentDir: "/tmp/test",
     codexModel: "gpt-5.4-mini",
-    developerInstructions: ROLE_TEXT,
     absPromptFile: "/tmp/test/prompt.txt",
     absMetaJson: "/tmp/test/meta.json",
     absExitScript: "/tmp/test/exit-check.sh",
@@ -351,17 +334,6 @@ describe("buildCodexStartContent — launch line", () => {
       }),
     ).toThrow(/Unsafe extra writable root/);
   });
-
-  test("rejects empty or whitespace-only developer instructions (never launch without role text)", () => {
-    for (const developerInstructions of ["", " ", "\n\t \r\n"]) {
-      expect(() => buildCodexStartContent({ ...baseInput(), developerInstructions }))
-        .toThrow(/requires non-empty developer instructions/);
-    }
-  });
-
-  test("carries the role text as a developer_instructions argument", () => {
-    expect(codexDeveloperInstructionsFromScript(buildCodexStartContent(baseInput()))).toBe(ROLE_TEXT);
-  });
 });
 
 describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", () => {
@@ -370,7 +342,6 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     ibBinaryPath: "/usr/local/bin/ib",
     agentDir: "/tmp/test",
     codexSessionId: "019e7b21-cb7d-7f23-8674-11036ed141ef",
-    developerInstructions: ROLE_TEXT,
     absMetaJson: "/tmp/test/meta.json",
     absExitScript: "/tmp/test/exit-check.sh",
     absAgentLog: "/tmp/test/agent.log",
@@ -635,17 +606,6 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
       }),
     ).toThrow(/Unsafe extra writable root/);
   });
-
-  test("rejects empty or whitespace-only developer instructions on resume", () => {
-    for (const developerInstructions of ["", " ", "\n\t \r\n"]) {
-      expect(() => buildCodexResumeContent({ ...baseInput(), developerInstructions }))
-        .toThrow(/requires non-empty developer instructions/);
-    }
-  });
-
-  test("carries the role text as a developer_instructions argument on resume", () => {
-    expect(codexDeveloperInstructionsFromScript(buildCodexResumeContent(baseInput()))).toBe(ROLE_TEXT);
-  });
 });
 
 describe("write-pid stdin is redirected off the pane tty (codex COOKED-mode wedge fix)", () => {
@@ -662,7 +622,6 @@ describe("write-pid stdin is redirected off the pane tty (codex COOKED-mode wedg
     ibBinaryPath: "/usr/local/bin/ib",
     agentDir: "/tmp/test",
     codexModel: "gpt-5.4-mini",
-    developerInstructions: ROLE_TEXT,
     absPromptFile: "/tmp/test/prompt.txt",
     absMetaJson: "/tmp/test/meta.json",
     absExitScript: "/tmp/test/exit-check.sh",
@@ -675,7 +634,6 @@ describe("write-pid stdin is redirected off the pane tty (codex COOKED-mode wedg
     ibBinaryPath: "/usr/local/bin/ib",
     agentDir: "/tmp/test",
     codexSessionId: "019e7b21-cb7d-7f23-8674-11036ed141ef",
-    developerInstructions: ROLE_TEXT,
     absMetaJson: "/tmp/test/meta.json",
     absExitScript: "/tmp/test/exit-check.sh",
     absAgentLog: "/tmp/test/agent.log",
@@ -823,12 +781,12 @@ describe("resolveIbBinaryPath", () => {
   });
 });
 
-describe("buildCodexDeveloperInstructions", () => {
+describe("buildAgentRoleBody (the role text the codex SessionStart hook returns)", () => {
   let tempDir: string;
   let fakeHome: string;
 
   beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), "codex-dev-instructions-test-"));
+    tempDir = await mkdtemp(join(tmpdir(), "codex-role-body-test-"));
     // Provide a fake HOME so generateInstructions() can resolve agent-types
     // without polluting the developer's real ~/.itsybitsy.
     fakeHome = join(tempDir, "home");
@@ -843,7 +801,7 @@ describe("buildCodexDeveloperInstructions", () => {
   });
 
   test("strips the <ittybitty> wrapper", async () => {
-    const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
+    const { buildAgentRoleBody } = await import("./agent-instructions-shared");
     const ctx = {
       role: "worker" as const,
       agentId: "agent-test01",
@@ -854,14 +812,14 @@ describe("buildCodexDeveloperInstructions", () => {
       rootRepoPath: tempDir,
       agentType: "worker",
     };
-    const body = await buildCodexDeveloperInstructions(ctx);
+    const body = await buildAgentRoleBody(ctx);
     expect(body.startsWith("<ittybitty>")).toBe(false);
     expect(body.endsWith("</ittybitty>")).toBe(false);
     expect(body.endsWith("</ittybitty>\n")).toBe(false);
   });
 
   test("contains the agent id (interpolated from template)", async () => {
-    const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
+    const { buildAgentRoleBody } = await import("./agent-instructions-shared");
     const ctx = {
       role: "worker" as const,
       agentId: "agent-test01",
@@ -872,12 +830,12 @@ describe("buildCodexDeveloperInstructions", () => {
       rootRepoPath: tempDir,
       agentType: "worker",
     };
-    const body = await buildCodexDeveloperInstructions(ctx);
+    const body = await buildAgentRoleBody(ctx);
     expect(body).toContain("agent-test01");
   });
 
   test("writes nothing into the worktree (codex reads the repo's own AGENTS.md)", async () => {
-    const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
+    const { buildAgentRoleBody } = await import("./agent-instructions-shared");
     const worktree = join(tempDir, "wt");
     await mkdir(worktree, { recursive: true });
     const ctx = {
@@ -890,14 +848,14 @@ describe("buildCodexDeveloperInstructions", () => {
       rootRepoPath: tempDir,
       agentType: "worker",
     };
-    await buildCodexDeveloperInstructions(ctx);
+    await buildAgentRoleBody(ctx);
     expect(await Bun.file(join(worktree, "AGENTS.md")).exists()).toBe(false);
   });
 
   // HIGH 4 from Phase 4 review: codex manager instructions must not
   // reference Claude-only tools like TodoWrite.
   test("HIGH 4: codex manager instructions do not reference TodoWrite", async () => {
-    const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
+    const { buildAgentRoleBody } = await import("./agent-instructions-shared");
     const ctx = {
       role: "manager" as const,
       agentId: "agent-mgr-test",
@@ -908,14 +866,14 @@ describe("buildCodexDeveloperInstructions", () => {
       rootRepoPath: tempDir,
       agentType: "manager",
     };
-    const body = await buildCodexDeveloperInstructions(ctx);
+    const body = await buildAgentRoleBody(ctx);
     expect(body).not.toContain("TodoWrite");
     // Replacement phrasing should be present.
     expect(body).toContain("Track progress with measurable criteria");
   });
 
   test("HIGH 4: codex worker instructions do not contain Write(...) tool reference", async () => {
-    const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
+    const { buildAgentRoleBody } = await import("./agent-instructions-shared");
     const ctx = {
       role: "worker" as const,
       agentId: "agent-w-test",
@@ -926,7 +884,7 @@ describe("buildCodexDeveloperInstructions", () => {
       rootRepoPath: tempDir,
       agentType: "worker",
     };
-    const body = await buildCodexDeveloperInstructions(ctx);
+    const body = await buildAgentRoleBody(ctx);
     // The original _non_coordinator.md had `Write(/tmp/commit-msg.txt, ...)`
     // which references the Claude `Write` tool. After the HIGH 4 fix, this
     // exact snippet must be gone.
@@ -937,7 +895,7 @@ describe("buildCodexDeveloperInstructions", () => {
     // Codex reads the repo's AGENTS.md itself and its user-wide text from
     // ~/.codex/AGENTS.md; copying any of these in would give the agent two
     // copies (or, for CLAUDE.md, text the other CLIs never see).
-    const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
+    const { buildAgentRoleBody } = await import("./agent-instructions-shared");
     const worktree = join(tempDir, "wt");
     await mkdir(join(worktree, ".claude"), { recursive: true });
     await Bun.write(join(worktree, "CLAUDE.md"), "project-claude-marker-3141\n");
@@ -955,7 +913,7 @@ describe("buildCodexDeveloperInstructions", () => {
       rootRepoPath: tempDir,
       agentType: "worker",
     };
-    const body = await buildCodexDeveloperInstructions(ctx);
+    const body = await buildAgentRoleBody(ctx);
     for (const marker of [
       "project-claude-marker-3141",
       "dot-claude-marker-2718",
@@ -967,158 +925,6 @@ describe("buildCodexDeveloperInstructions", () => {
     ]) {
       expect(body).not.toContain(marker);
     }
-  });
-});
-
-describe("developer_instructions reaches codex byte-for-byte through the real start.sh / resume.sh", () => {
-  // End-to-end over the shell layer: render the scripts, run them with bash
-  // against a stub `codex` that records its argv NUL-separated, then decode
-  // the recorded developer_instructions argument the way codex does.
-  let dir: string;
-
-  beforeEach(async () => {
-    dir = await realpath(await mkdtemp(join(tmpdir(), "codex-argv-")));
-    await mkdir(join(dir, "bin"), { recursive: true });
-    // Stub codex: each argv element exactly as received, NUL-terminated.
-    await Bun.write(
-      join(dir, "bin", "codex"),
-      `#!/bin/bash\nprintf '%s\\0' "$@" > ${shellQuote(join(dir, "argv.bin"))}\n`,
-    );
-    await Bun.write(join(dir, "bin", "ib"), "#!/bin/bash\nexit 0\n");
-    await Bun.write(join(dir, "exit-check.sh"), "#!/bin/bash\nexit 0\n");
-    await Bun.write(join(dir, "prompt.txt"), "do the task");
-    for (const exe of [join(dir, "bin", "codex"), join(dir, "bin", "ib"), join(dir, "exit-check.sh")]) {
-      await chmod(exe, 0o755);
-    }
-  });
-
-  afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
-  });
-
-  const common = () => ({
-    agentId: "agent-argv01",
-    ibBinaryPath: join(dir, "bin", "ib"),
-    agentDir: dir,
-    absMetaJson: join(dir, "no-meta.json"), // absent → write-pid is skipped
-    absExitScript: join(dir, "exit-check.sh"),
-    absAgentLog: join(dir, "agent.log"),
-    absStderrLog: join(dir, "stderr.log"),
-    sandboxEnabled: false,
-  });
-
-  // Hostile at every layer, plus live shell expansions that would create
-  // files if bash ever evaluated them.
-  const hostileText = () => [
-    "## Role",
-    "it's O'Brien's \"quoted\" text; back\\slash and trailing \\",
-    `\`touch ${dir}/pwned-backtick\` $(touch ${dir}/pwned-subst) \${HOME} $HOME !! $'ansi'`,
-    "tab\there\r\ncrlf, controls \x00\x01\x1b[31m\x7f, bell \x07",
-    "unicode: é 日本語 🎉 👩‍💻 \u{2028} \u{2029} \u{FEFF}",
-    'toml: """ \'\'\' [table] key = "v" # not a comment',
-  ].join("\n");
-
-  async function runAndReadArgv(script: string): Promise<string[]> {
-    const scriptPath = join(dir, "launch.sh");
-    await Bun.write(scriptPath, script);
-    const proc = Bun.spawn(["bash", scriptPath], {
-      cwd: dir,
-      env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH ?? ""}` },
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    expect(await proc.exited).toBe(0);
-    const bytes = await Bun.file(join(dir, "argv.bin")).bytes();
-    const decoder = new TextDecoder("utf-8", { fatal: true });
-    const args: string[] = [];
-    let start = 0;
-    for (let i = 0; i < bytes.length; i++) {
-      if (bytes[i] === 0) {
-        args.push(decoder.decode(bytes.subarray(start, i)));
-        start = i + 1;
-      }
-    }
-    return args;
-  }
-
-  function developerInstructionsArg(args: string[]): string {
-    const matches = args.filter((a, i) => a.startsWith("developer_instructions=") && args[i - 1] === "-c");
-    expect(matches.length).toBe(1);
-    return matches[0]!;
-  }
-
-  async function expectExactDelivery(args: string[], text: string): Promise<void> {
-    const payload = developerInstructionsArg(args);
-    const { key, value } = decodeCodexStringOverride(payload);
-    expect(key).toBe("developer_instructions");
-    expect(value).toBe(text);
-    if (hasPythonTomllib()) {
-      expect(pythonTomlDecodeBasicString(payload.slice("developer_instructions=".length))).toBe(text);
-    }
-    // No shell expansion ran.
-    expect(await Bun.file(join(dir, "pwned-backtick")).exists()).toBe(false);
-    expect(await Bun.file(join(dir, "pwned-subst")).exists()).toBe(false);
-  }
-
-  test("start.sh: the argument codex receives decodes to the exact role text", async () => {
-    const text = hostileText();
-    const script = buildCodexStartContent({
-      ...common(),
-      codexModel: "gpt-5.4-mini",
-      developerInstructions: text,
-      absPromptFile: join(dir, "prompt.txt"),
-    });
-    // The generated script decodes to the same text as well (used by the
-    // ib-commands integration tests to inspect role content).
-    expect(codexDeveloperInstructionsFromScript(script)).toBe(text);
-    const args = await runAndReadArgv(script);
-    expect(args.slice(0, 2)).toEqual(["-m", "gpt-5.4-mini"]);
-    expect(args.at(-1)).toBe("do the task");
-    await expectExactDelivery(args, text);
-  });
-
-  test("resume.sh: the argument codex receives decodes to the exact role text", async () => {
-    const text = hostileText();
-    const script = buildCodexResumeContent({
-      ...common(),
-      codexSessionId: "019e7b21-cb7d-7f23-8674-11036ed141ef",
-      developerInstructions: text,
-    });
-    expect(codexDeveloperInstructionsFromScript(script)).toBe(text);
-    const args = await runAndReadArgv(script);
-    expect(args.slice(0, 2)).toEqual(["resume", "019e7b21-cb7d-7f23-8674-11036ed141ef"]);
-    await expectExactDelivery(args, text);
-  });
-
-  test("a payload near the size limit still launches as one argument", async () => {
-    // ~110 KiB after escaping: every line holds characters that grow when
-    // escaped (quotes, backslashes, newlines) plus multi-byte text.
-    const line = "\"q\" \\b\\ é日 $(x) `y`\n";
-    const text = line.repeat(Math.floor((110 * 1024) / Buffer.byteLength(tomlBasicString(line), "utf8")));
-    const payloadBytes = Buffer.byteLength(renderCodexDeveloperInstructionsPayload(text), "utf8");
-    expect(payloadBytes).toBeGreaterThan(100 * 1024);
-    expect(payloadBytes).toBeLessThanOrEqual(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES);
-    const script = buildCodexStartContent({
-      ...common(),
-      codexModel: "gpt-5.4-mini",
-      developerInstructions: text,
-      absPromptFile: join(dir, "prompt.txt"),
-    });
-    const args = await runAndReadArgv(script);
-    expect(Buffer.byteLength(developerInstructionsArg(args), "utf8")).toBe(payloadBytes);
-    expect(decodeCodexStringOverride(developerInstructionsArg(args)).value).toBe(text);
-  });
-
-  test("rendering refuses role text over the limit instead of writing a script codex cannot launch", () => {
-    expect(() =>
-      buildCodexStartContent({
-        ...common(),
-        codexModel: "gpt-5.4-mini",
-        developerInstructions: "x".repeat(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES),
-        absPromptFile: join(dir, "prompt.txt"),
-      }),
-    ).toThrow(/too large/);
   });
 });
 
@@ -1279,9 +1085,9 @@ describe("buildSkillsSection — skills catalog", () => {
     expect(section).toBe("");
   });
 
-  test("buildCodexDeveloperInstructions integration: output contains the Skills header when a skills dir exists", async () => {
-    const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
-    // buildCodexDeveloperInstructions reads ~/.claude/skills via the default param, so point
+  test("buildAgentRoleBody integration: output contains the Skills header when a skills dir exists", async () => {
+    const { buildAgentRoleBody } = await import("./agent-instructions-shared");
+    // buildAgentRoleBody reads ~/.claude/skills via the default param, so point
     // HOME at a temp dir holding a single skill. generateInstructions() also
     // resolves agent-types from HOME, so build the full fake-home layout.
     try {
@@ -1305,7 +1111,7 @@ describe("buildSkillsSection — skills catalog", () => {
         rootRepoPath: tempDir,
         agentType: "worker",
       };
-      const body = await buildCodexDeveloperInstructions(ctx);
+      const body = await buildAgentRoleBody(ctx);
       expect(body).toContain("## Skills (read-on-demand workflow guides)");
       expect(body).toContain("### demo");
       expect(body).toContain("description: Demo skill");
@@ -1314,8 +1120,8 @@ describe("buildSkillsSection — skills catalog", () => {
     }
   });
 
-  test("buildCodexDeveloperInstructions integration: no Skills header when the skills dir is absent", async () => {
-    const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
+  test("buildAgentRoleBody integration: no Skills header when the skills dir is absent", async () => {
+    const { buildAgentRoleBody } = await import("./agent-instructions-shared");
     try {
       // Fake home WITHOUT a .claude/skills dir.
       const fakeHome = join(tempDir, "home-noskills");
@@ -1333,7 +1139,7 @@ describe("buildSkillsSection — skills catalog", () => {
         rootRepoPath: tempDir,
         agentType: "worker",
       };
-      const body = await buildCodexDeveloperInstructions(ctx);
+      const body = await buildAgentRoleBody(ctx);
       expect(body).not.toContain("## Skills (read-on-demand workflow guides)");
     } finally {
       resetUserHome();

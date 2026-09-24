@@ -83,7 +83,8 @@ export interface BuildCodexLaunchArgsInput {
    * it to the session as a developer message NEXT TO the repo's own
    * `AGENTS.md`, so itsybitsy never writes an `AGENTS.md` of its own. Encoded
    * with `tomlBasicString` and size-checked by
-   * `renderCodexDeveloperInstructionsPayload`. Absent or empty → no flag.
+   * `renderCodexDeveloperInstructionsPayload`. Absent, empty or
+   * whitespace-only → no flag (the start/resume builders reject that case).
    */
   developerInstructions?: string;
 }
@@ -221,12 +222,17 @@ export const CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES = 120 * 1024;
 
 /**
  * Render the `developer_instructions="…"` payload (without the leading `-c`)
- * for the agent's role instructions. Throws, naming the size and the limit,
- * when the escaped payload is larger than
+ * for the agent's role instructions. Throws when the text is empty or only
+ * whitespace (an agent must never launch without role text), and, naming the
+ * size and the limit, when the escaped payload is larger than
  * `CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES` — the launch would otherwise fail
- * with E2BIG, or leave no room for the prompt.
+ * with E2BIG, or leave no room for the prompt. Spawn and resume call this
+ * inside their build try-blocks, so either error fails them cleanly.
  */
 export function renderCodexDeveloperInstructionsPayload(text: string): string {
+  if (!text.trim()) {
+    throw new Error("Codex developer instructions are empty; the agent would start without role text.");
+  }
   const payload = `developer_instructions=${tomlBasicString(text)}`;
   const bytes = Buffer.byteLength(payload, "utf8");
   if (bytes > CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES) {
@@ -397,7 +403,7 @@ export function buildCodexLaunchArgs(input: BuildCodexLaunchArgsInput): CodexLau
   // The agent's role instructions. Last so the long payload does not bury the
   // short flags in `ps` output. Free text, so it goes through the full TOML
   // escaper rather than the quote-safe-path rule the flags above rely on.
-  if (input.developerInstructions) {
+  if (input.developerInstructions?.trim()) {
     args.push("-c", renderCodexDeveloperInstructionsPayload(input.developerInstructions));
   }
   return { args };

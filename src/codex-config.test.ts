@@ -792,6 +792,12 @@ describe("renderCodexDeveloperInstructionsPayload", () => {
     expect(() => renderCodexDeveloperInstructionsPayload(escaped)).toThrow(/too large/);
   });
 
+  test("rejects empty or whitespace-only role text", () => {
+    for (const text of ["", " ", "\n\t \r\n"]) {
+      expect(() => renderCodexDeveloperInstructionsPayload(text)).toThrow(/developer instructions are empty/);
+    }
+  });
+
   test("the limit stays under Linux's per-argument MAX_ARG_STRLEN (131072 incl. NUL)", () => {
     expect(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES).toBeLessThan(131072);
   });
@@ -818,9 +824,11 @@ describe("buildCodexLaunchArgs — developer_instructions", () => {
     expect(args.some((a) => a.startsWith("developer_instructions"))).toBe(false);
   });
 
-  test("omits the flag for empty role text (codex ignores it; do not override user config with nothing)", () => {
-    const { args } = buildCodexLaunchArgs({ ...base, developerInstructions: "" });
-    expect(args.some((a) => a.startsWith("developer_instructions"))).toBe(false);
+  test("omits the flag for empty or whitespace-only role text (optional contract; do not override user config with nothing)", () => {
+    for (const developerInstructions of ["", "  \n\t"]) {
+      const { args } = buildCodexLaunchArgs({ ...base, developerInstructions });
+      expect(args.some((a) => a.startsWith("developer_instructions"))).toBe(false);
+    }
   });
 
   test("propagates the size-limit error instead of emitting an oversized argument", () => {

@@ -3024,7 +3024,7 @@ Codex has no `permissions.allow/deny` array, no `--allowedTools` / `--disallowed
 codex -m <MODEL> -a never -s danger-full-access \
       --dangerously-bypass-hook-trust \
       -c 'hooks.PreToolUse=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-pre-tool-use <agentId>",timeout=30}]}]' \
-      -c 'hooks.SessionStart=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-session-start <agentId>",timeout=30}]}]' \
+      -c 'hooks.SessionStart=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-session-start <agentId>",timeout=30,additionalContextLimit=0}]}]' \
       -c 'hooks.Stop=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-stop <agentId>",timeout=30}]}]' \
       "<prompt>"
 ```
@@ -3053,7 +3053,7 @@ Three codex-side hook handlers, all dispatched through a fail-open-safe wrapper:
 | Hook | Subcommand | Handler | Purpose |
 |---|---|---|---|
 | **PreToolUse** | `ib hooks codex-pre-tool-use <agentId>` | `src/hooks/codex-pre-tool-use.ts` | Allow/deny + path-isolation for `Bash` AND `apply_patch`. Default: deny. |
-| **SessionStart** | `ib hooks codex-session-start <agentId>` | `src/hooks/codex-session-start.ts` | Writes `state: "running"` to `meta.json`; captures `meta.codex_session_id` on first firing (defensive snake_case/camelCase read). |
+| **SessionStart** | `ib hooks codex-session-start <agentId>` | `src/hooks/codex-session-start.ts` | Writes `state: "running"` to `meta.json`; captures `meta.codex_session_id` on first firing (defensive snake_case/camelCase read); returns the agent's role text as `additionalContext` (§18.6). |
 | **Stop** | `ib hooks codex-stop <agentId>` | `src/hooks/codex-stop.ts` | Writes `state: "waiting"` / `"complete"` to `meta.json` (deterministic state — no tmux scraping). |
 
 **Dispatcher pattern (`src/hooks/codex-dispatcher.ts`):** all three handlers are invoked through a single dispatcher that NEVER throws and ALWAYS exits 0 in the production path. Codex's documented hook failure mode is **FAIL-OPEN** (a hook that crashes, emits malformed JSON, or returns an unsupported `permissionDecision` is marked failed and the tool call PROCEEDS per `developers.openai.com/codex/hooks`). The dispatcher is the defense:

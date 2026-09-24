@@ -3197,7 +3197,7 @@ Grep-able file list for the codex implementation:
 | `src/agent-cli.ts` | `AgentCli` type, `KNOWN_CLIS` set, `parseModel()`, `resolveCli()`, `isCodexModel()` — the model-string parser. |
 | `src/codex-config.ts` | `buildCodexLaunchArgs()` (inline-`-c` flag array builder), `isCodexSafeBinaryPath()`, `renderCodexHookFlagPayload()`, `tomlBasicString()` + `renderCodexDeveloperInstructionsPayload()` (the escaped, size-checked `developer_instructions` payload), `loadMergedAgentTypePermissions()`, `buildCodexDenyOutput()`, `buildCodexAllowOutput()`. |
 | `src/codex-spawn.ts` | `buildCodexStartContent()`, `buildCodexResumeContent()`, `appendCodexGitignoreEntry()`, `buildCodexDeveloperInstructions()`, `resolveIbBinaryPath()`, `stripIttybittyWrapper()`. |
-| `src/agent-instructions-shared.ts` | `stripIttybittyWrapper()`, `buildSkillsSection()` (shared with agy). |
+| `src/agent-instructions-shared.ts` | `buildAgentRoleBody()` (the role text for codex and agy: wrapper-stripped session-start template plus skills catalogue; `buildCodexDeveloperInstructions()` and `buildAgyRulesFile()` both delegate to it), `stripIttybittyWrapper()`, `buildSkillsSection()`. |
 | `src/hooks/codex-pre-tool-use.ts` | PreToolUse handler — allow/deny + path-isolation for Bash AND apply_patch. |
 | `src/hooks/codex-session-start.ts` | SessionStart handler — writes `state: "running"` + captures `codex_session_id`. |
 | `src/hooks/codex-stop.ts` | Stop handler — writes `state: "waiting"` / `"complete"`. |

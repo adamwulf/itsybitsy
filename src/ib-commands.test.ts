@@ -11783,8 +11783,8 @@ body`,
     // Round-2 review HIGH: the codex `-s workspace-write` sandbox is granted
     // the NARROW `.ittybitty` + `.claude` subdirs of the parent repo, not
     // the bare parent repo. Granting the bare parent would let a misbehaving
-    // codex agent reach src/, CLAUDE.md, etc. via relative-path Bash writes
-    // (`../../../../CLAUDE.md`) that the PreToolUse hook's textual matcher
+    // codex agent reach src/, AGENTS.md, etc. via relative-path Bash writes
+    // (`../../../../AGENTS.md`) that the PreToolUse hook's textual matcher
     // does not catch. This test asserts the narrowed grant is encoded in
     // the rendered start.sh launch line.
     test("codex start.sh grants narrow parent-repo subdirs (.ittybitty + .claude), not the bare parent repo", async () => {

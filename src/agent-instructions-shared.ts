@@ -17,7 +17,7 @@
  * codex-spawn.ts re-exports the builders so existing importers are unaffected.
  */
 
-import { basename, join } from "path";
+import { join } from "path";
 import { userHome } from "./home";
 import { readdir } from "fs/promises";
 import type { SessionContext } from "./hooks/session-start";
@@ -46,23 +46,27 @@ export async function buildAgentRoleBody(ctx: SessionContext): Promise<string> {
  * (besides `AGENTS.md`). codex: `AGENTS.override.md`, which it prefers over
  * `AGENTS.md` in the same directory. agy: `GEMINI.md` (its migration doc and
  * the builtin agy-customizations docs list only root `GEMINI.md` / `AGENTS.md`
- * as directory rules); its workspace `.agents/rules/*.md` are checked
- * separately in `hasNativeProjectInstructions`.
+ * as directory rules); its workspace rule files are checked separately in
+ * `hasAlwaysOnAgyRule`.
  */
 const NATIVE_PROJECT_FILES: Record<"codex" | "agy", readonly string[]> = {
   codex: ["AGENTS.md", "AGENTS.override.md"],
   agy: ["AGENTS.md", "GEMINI.md"],
 };
 
-/** Rule files itsybitsy itself writes into an agy worktree (role text only). */
-const AGY_OWN_RULE_FILES: ReadonlySet<string> = new Set(
-  AGY_WORKTREE_FILES.filter((file) => file.startsWith(".agents/rules/")).map((file) => basename(file)),
-);
+/**
+ * agy's workspace customization roots: `.agents/` or its aliases (builtin
+ * agy-customizations SKILL.md). Workspace rules live in `<root>/rules/*.md`.
+ */
+const AGY_CUSTOMIZATION_ROOTS: readonly string[] = [".agents", ".agent", "_agents", "_agent"];
+
+/** Worktree files itsybitsy itself writes for agy (its rule file holds only role text). */
+const AGY_OWN_FILES: ReadonlySet<string> = new Set(AGY_WORKTREE_FILES);
 
 /** Human-readable list of the alternatives, for the warning text. */
 const NATIVE_PROJECT_FILES_LABEL: Record<"codex" | "agy", string> = {
   codex: "AGENTS.md (or AGENTS.override.md)",
-  agy: "AGENTS.md (or GEMINI.md / an .agents/rules file)",
+  agy: "AGENTS.md (or GEMINI.md / an always-on .agents/rules file)",
 };
 
 /** codex and codex-backed fugu share codex's file discovery. */
@@ -70,32 +74,71 @@ function nativeFileFamily(cli: string): "codex" | "agy" {
   return cli === "agy" ? "agy" : "codex";
 }
 
-async function hasNativeProjectInstructions(worktreePath: string, family: "codex" | "agy"): Promise<boolean> {
-  for (const file of NATIVE_PROJECT_FILES[family]) {
-    if (await Bun.file(join(worktreePath, file)).exists()) return true;
-  }
-  if (family === "agy") {
-    // Any workspace rule the repo ships counts — except itsybitsy's own
-    // generated rule file, which holds only the role text.
-    let rules: string[] = [];
-    try {
-      rules = await readdir(join(worktreePath, ".agents", "rules"));
-    } catch {
-      // No rules dir.
-    }
-    if (rules.some((name) => name.endsWith(".md") && !AGY_OWN_RULE_FILES.has(name))) return true;
+/**
+ * True when an agy rule file's leading YAML frontmatter sets
+ * `trigger: always_on` — the only rules agy loads unconditionally. agy ignores
+ * a rule file with no frontmatter (ANTIGRAVITY-CLI-NOTES.md §17.5, live), and
+ * loads `trigger: model_decision` rules only on demand (SKILL.md).
+ */
+export function isAlwaysOnAgyRule(text: string): boolean {
+  const lines = text.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") return false;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i]!.trim();
+    if (line === "---") return false;
+    const trigger = line.match(/^trigger:\s*["']?([A-Za-z_]+)["']?\s*(?:#.*)?$/);
+    if (trigger) return trigger[1] === "always_on";
   }
   return false;
 }
 
 /**
+ * True when the repo ships an always-on agy rule in any customization root
+ * (`AGY_CUSTOMIZATION_ROOTS`). itsybitsy's own generated rule file does not
+ * count — it holds only the role text, not project instructions.
+ */
+async function hasAlwaysOnAgyRule(worktreePath: string): Promise<boolean> {
+  for (const root of AGY_CUSTOMIZATION_ROOTS) {
+    let names: string[];
+    try {
+      names = await readdir(join(worktreePath, root, "rules"));
+    } catch {
+      continue; // No rules dir under this root.
+    }
+    for (const name of names) {
+      if (!name.endsWith(".md") || AGY_OWN_FILES.has(`${root}/rules/${name}`)) continue;
+      let text: string;
+      try {
+        text = await Bun.file(join(worktreePath, root, "rules", name)).text();
+      } catch {
+        continue; // Unreadable (or a directory named *.md).
+      }
+      if (isAlwaysOnAgyRule(text)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * True when the worktree root has a project-instruction file the CLI loads
+ * UNCONDITIONALLY: codex `AGENTS.md` / `AGENTS.override.md`; agy `AGENTS.md` /
+ * `GEMINI.md` or an always-on workspace rule.
+ */
+async function hasNativeProjectInstructions(worktreePath: string, family: "codex" | "agy"): Promise<boolean> {
+  for (const file of NATIVE_PROJECT_FILES[family]) {
+    if (await Bun.file(join(worktreePath, file)).exists()) return true;
+  }
+  return family === "agy" && (await hasAlwaysOnAgyRule(worktreePath));
+}
+
+/**
  * Spawn-time check for the non-Claude CLIs. By default codex and agy read a
  * project's instructions from `AGENTS.md` and their own native files (see
- * `NATIVE_PROJECT_FILES`), not from `CLAUDE.md`, and itsybitsy does not copy
- * `CLAUDE.md` into their instructions. Returns a one-line warning when the
- * worktree root has `CLAUDE.md` (or `.claude/CLAUDE.md`) but none of the
- * CLI's native files, so the user knows the agent starts without the project's
- * instructions; null otherwise. Symlinked files count as present. (codex can
+ * `hasNativeProjectInstructions`), not from `CLAUDE.md`, and itsybitsy does
+ * not copy `CLAUDE.md` into their instructions. Returns a one-line warning
+ * when the worktree root has `CLAUDE.md` (or `.claude/CLAUDE.md`) but no file
+ * the CLI loads unconditionally, so the user knows the agent starts without
+ * the project's instructions; null otherwise. Symlinked files count as present. (codex can
  * be configured to read other names via `project_doc_fallback_filenames`; the
  * warning does not inspect user config, hence "by default".)
  */

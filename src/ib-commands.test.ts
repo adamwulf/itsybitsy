@@ -4175,46 +4175,6 @@ describe("resumeAgent (native)", () => {
     expect(resumeShExists).toBe(false);
   });
 
-  for (const [cli, model] of [["codex", "codex:gpt-5.4-mini"], ["fugu", "fugu:fugu"]] as const) {
-    for (const [label, files, expectWarning] of [
-      ["CLAUDE.md-only worktree → warns", { "CLAUDE.md": "old rules\n" }, true],
-      ["worktree with AGENTS.md → no warning", { "CLAUDE.md": "old\n", "AGENTS.md": "rules\n" }, false],
-    ] as const) {
-      test(`${cli} resume: ${label}, and the resume still succeeds`, async () => {
-        const id = `agent-${cli}-${expectWarning ? "warn" : "nowarn"}`;
-        const agentDir = join(tempDir, ".ittybitty", "agents", id);
-        await mkdir(join(agentDir, "repo"), { recursive: true });
-        for (const [name, text] of Object.entries(files)) {
-          await Bun.write(join(agentDir, "repo", name), text);
-        }
-        const meta = {
-          id,
-          tmux_session: `tmux-${id}`,
-          model,
-          codex_session_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
-        };
-        await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
-        const agent = _makeAgent({
-          id,
-          repoPath: tempDir,
-          repoName: "test",
-          state: "stopped",
-          meta: { ...meta } as any,
-        });
-
-        const result = await armAndResume(agent);
-
-        expect(result.ok).toBe(true);
-        const log = await Bun.file(join(agentDir, "agent.log")).text().catch(() => "");
-        if (expectWarning) {
-          expect(log).toContain(`[resume] Warning: ${cli} agent '${id}' starts without the project instructions`);
-        } else {
-          expect(log).not.toContain("starts without the project instructions");
-        }
-      });
-    }
-  }
-
   test("refuses to resume codex agent when codex_session_id is missing", async () => {
     const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex01");
     await mkdir(join(agentDir, "repo"), { recursive: true });
@@ -4356,50 +4316,6 @@ describe("resumeAgent (native)", () => {
       const dryRunStrs = dispatcherDryRunCalls.map(c => c.cmd.join(" "));
       expect(dryRunStrs.some(c => c.includes("hooks agy-pre-tool-use") && c.includes("--dry-run"))).toBe(true);
     });
-
-    // A pre-change agy agent's rule file inlined CLAUDE.md; the regenerated one
-    // does not, so resume in a CLAUDE.md-only worktree must say so (and still
-    // succeed).
-    for (const [label, files, expectWarning] of [
-      ["CLAUDE.md-only worktree → warns", { "CLAUDE.md": "old rules\n" }, true],
-      ["worktree with AGENTS.md → no warning", { "CLAUDE.md": "old\n", "AGENTS.md": "rules\n" }, false],
-    ] as const) {
-      test(`agy resume: ${label}, and the resume still succeeds`, async () => {
-        const id = expectWarning ? "agent-agy-warn" : "agent-agy-nowarn";
-        const agentDir = join(tempDir, ".ittybitty", "agents", id);
-        await mkdir(join(agentDir, "repo"), { recursive: true });
-        for (const [name, text] of Object.entries(files)) {
-          await Bun.write(join(agentDir, "repo", name), text);
-        }
-        const agyMeta = {
-          id,
-          tmux_session: `tmux-${id}`,
-          model: "agy:gemini-3.7-flash-low",
-          agy_conversation_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
-          paths: { allowRead: [], allowWrite: [], deny: [] },
-          sandbox: { enabled: true, rawAllow: [], domains: [] },
-        };
-        await Bun.write(join(agentDir, "meta.json"), JSON.stringify(agyMeta));
-        await sealAgentRecord(tempDir, id, agyMeta as unknown as Record<string, unknown>, agentDir);
-        const agent = _makeAgent({
-          id,
-          repoPath: tempDir,
-          repoName: "test",
-          state: "stopped",
-          meta: { ...agyMeta } as any,
-        });
-
-        const result = await resumeAgent(agent);
-
-        expect(result.ok).toBe(true);
-        const log = await Bun.file(join(agentDir, "agent.log")).text().catch(() => "");
-        if (expectWarning) {
-          expect(log).toContain(`[resume] Warning: agy agent '${id}' starts without the project instructions`);
-        } else {
-          expect(log).not.toContain("starts without the project instructions");
-        }
-      });
-    }
 
     test("refuses to resume an agy agent when agy_conversation_id is missing", async () => {
       const agentDir = join(tempDir, ".ittybitty", "agents", "agent-agy-noconv");
@@ -11765,29 +11681,6 @@ body`,
       expect(result.ok).toBe(true);
       const worktree = join(agentsDir, "codex-repo-agents-md", "repo");
       expect(await Bun.file(join(worktree, "AGENTS.md")).text()).toBe("repo rules: run make\n");
-      const log = await Bun.file(join(agentsDir, "codex-repo-agents-md", "agent.log")).text();
-      expect(log).not.toContain("starts without the project instructions");
-    });
-
-    test("warns when the repo has CLAUDE.md but no AGENTS.md (codex never reads CLAUDE.md)", async () => {
-      const base = mockSpawnRunner();
-      setNewAgentSpawnRunner((cmd: string[], o?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
-        const out = base(cmd, o);
-        if (cmd.join(" ").includes("worktree add")) {
-          const repoDir = cmd[cmd.indexOf("add") + 1]!;
-          require("fs").writeFileSync(join(repoDir, "CLAUDE.md"), "old rules\n");
-        }
-        return out;
-      });
-      const result = await callNewAgent("task", { name: "codex-claude-only", model: "codex:gpt-5.4-mini" });
-      // A warning, never a failure.
-      expect(result.ok).toBe(true);
-      const log = await Bun.file(join(agentsDir, "codex-claude-only", "agent.log")).text();
-      expect(log).toContain("Warning: codex agent 'codex-claude-only' starts without the project instructions");
-      expect(log).toContain("git mv CLAUDE.md AGENTS.md");
-      // The CLAUDE.md text is not copied into the role instructions.
-      const startSh = await Bun.file(join(agentsDir, "codex-claude-only", "start.sh")).text();
-      expect(codexDeveloperInstructionsFromScript(startSh)).not.toContain("old rules");
     });
 
     test("fails the spawn cleanly when the dispatcher precheck exits non-zero", async () => {
@@ -12105,42 +11998,6 @@ sandbox:
       const gitignore = await Bun.file(join(agentsDir, "agy-gitignore", "repo", ".gitignore")).text();
       expect(gitignore).toContain(".agents/hooks.json");
       expect(gitignore).toContain(".agents/rules/ittybitty-agent.md");
-    });
-
-    test("warns when the repo has CLAUDE.md but no AGENTS.md, and copies neither into the rule file", async () => {
-      const base = agyRunner();
-      setNewAgentSpawnRunner((cmd: string[], o?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
-        const out = base(cmd, o);
-        if (cmd.join(" ").includes("worktree add")) {
-          const repoDir = cmd[cmd.indexOf("add") + 1]!;
-          require("fs").writeFileSync(join(repoDir, "CLAUDE.md"), "agy-claude-only-marker\n");
-        }
-        return out;
-      });
-      const result = await callNewAgent("task", { name: "agy-claude-only", model: "agy:gemini-3.7-flash-low" });
-      expect(result.ok).toBe(true);
-      const log = await Bun.file(join(agentsDir, "agy-claude-only", "agent.log")).text();
-      expect(log).toContain("Warning: agy agent 'agy-claude-only' starts without the project instructions");
-      const rule = await Bun.file(join(agentsDir, "agy-claude-only", "repo", ".agents", "rules", "ittybitty-agent.md")).text();
-      expect(rule).not.toContain("agy-claude-only-marker");
-      expect(rule).not.toContain("CLAUDE.md");
-    });
-
-    test("does not warn when the repo has AGENTS.md", async () => {
-      const base = agyRunner();
-      setNewAgentSpawnRunner((cmd: string[], o?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
-        const out = base(cmd, o);
-        if (cmd.join(" ").includes("worktree add")) {
-          const repoDir = cmd[cmd.indexOf("add") + 1]!;
-          require("fs").writeFileSync(join(repoDir, "CLAUDE.md"), "legacy\n");
-          require("fs").writeFileSync(join(repoDir, "AGENTS.md"), "rules\n");
-        }
-        return out;
-      });
-      const result = await callNewAgent("task", { name: "agy-has-agents-md", model: "agy:gemini-3.7-flash-low" });
-      expect(result.ok).toBe(true);
-      const log = await Bun.file(join(agentsDir, "agy-has-agents-md", "agent.log")).text();
-      expect(log).not.toContain("starts without the project instructions");
     });
 
     test("pre-trusts the worktree BEFORE creating the tmux session (D5 — §17.9)", async () => {

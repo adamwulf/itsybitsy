@@ -32,16 +32,10 @@ file: agy reads the repo's `AGENTS.md` / `GEMINI.md` natively and gets
 user-wide instructions only from its global `~/.gemini/GEMINI.md`. To share one
 user-wide file with Claude, symlink `~/.gemini/GEMINI.md -> ~/.claude/CLAUDE.md`.
 Under the kernel sandbox the `~/.gemini` runtime root and the `_all.md` read
-floor on `~/.claude` make both the link and its target readable. A spawn in a
-repo with `CLAUDE.md` but no `AGENTS.md`, `GEMINI.md`, or repo-owned
-`trigger: always_on` rule (under `.agents/rules/` or the `.agent/`, `_agents/`,
-`_agent/` aliases; frontmatter-less rules are ignored by agy and do not count)
-prints a warning (agy does not read `CLAUDE.md`). Resume logs the same
-warning: an agy agent spawned before this change had the project `CLAUDE.md`
-inlined in its rule file, and resume regenerates that file without it, so in a
-CLAUDE.md-only worktree such an agent loses its project instructions
-mid-conversation (the warning never fails the resume). Earlier text below that
-inlines the project or user `CLAUDE.md` is superseded. [SPEC.md §18.6](SPEC.md) has the cross-CLI instruction-file table.
+floor on `~/.claude` make both the link and its target readable. agy does not
+read `CLAUDE.md`. Retire agy agents spawned before this change; do not resume
+them. Earlier text below that inlines the project or user `CLAUDE.md` is
+superseded. [SPEC.md §18.6](SPEC.md) has the cross-CLI instruction-file table.
 
 ---
 

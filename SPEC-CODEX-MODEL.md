@@ -55,8 +55,6 @@ repo-tracked `AGENTS.md`. Instead:
   received argument with a TOML-1.0-grammar decoder and Python `tomllib`.
 - **Project instructions** come from the repo's own `AGENTS.md`, read natively.
   The old `@./CLAUDE.md` line was never expanded (codex has no `@` import).
-  Spawn warns when the repo has `CLAUDE.md` but no `AGENTS.md` or
-  `AGENTS.override.md` (codex does not read `CLAUDE.md` by default).
 - **User-wide instructions** come only from codex's global `~/.codex/AGENTS.md`
   (the old inline of `~/.claude/CLAUDE.md` is gone). A symlink
   `~/.codex/AGENTS.md -> ~/.claude/CLAUDE.md` shares one file with Claude; the

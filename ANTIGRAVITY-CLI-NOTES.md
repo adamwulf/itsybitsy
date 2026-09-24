@@ -109,7 +109,7 @@ Git hygiene: `.agents/hooks.json`, `.agents/agents/ittybitty/`, and `.gemini/ant
 
 ### 3.4 Update (2026-09-23): AGENTS.md everywhere, nothing inlined
 
-Claude Code 2.1.277 added native `AGENTS.md` support (read when a project has no `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`), so every CLI now reads a repo's own `AGENTS.md`. The rule file keeps only the role text and the skills catalogue; the project and user `CLAUDE.md` inlines were removed. User-wide text comes from agy's global `~/.gemini/GEMINI.md`; to share one file with Claude, symlink it to `~/.claude/CLAUDE.md` (readable under the kernel sandbox through the `~/.gemini` runtime root and the `_all.md` `~/.claude` read floor). A spawn in a repo with `CLAUDE.md` but no `AGENTS.md` warns. Codex made the matching change: its role text moved from a generated `<worktree>/AGENTS.md` to `-c developer_instructions`, so problem 2 in §3.2 is gone for both CLIs.
+Claude Code 2.1.277 added native `AGENTS.md` support (read when a project has no `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`), so every CLI now reads a repo's own `AGENTS.md`. The rule file keeps only the role text and the skills catalogue; the project and user `CLAUDE.md` inlines were removed. User-wide text comes from agy's global `~/.gemini/GEMINI.md`; to share one file with Claude, symlink it to `~/.claude/CLAUDE.md` (readable under the kernel sandbox through the `~/.gemini` runtime root and the `_all.md` `~/.claude` read floor). Codex made the matching change: its role text moved from a generated `<worktree>/AGENTS.md` to `-c developer_instructions`, so problem 2 in §3.2 is gone for both CLIs.
 
 ## 4. The permissions engine (settings, no hooks)
 

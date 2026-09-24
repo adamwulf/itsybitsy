@@ -11,8 +11,7 @@
  * Project and user-wide instructions are never copied in: every CLI reads the
  * repo's `AGENTS.md` natively (Claude Code 2.1.277+, codex, agy), and each
  * reads its own global file (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`,
- * `~/.gemini/GEMINI.md`). `missingAgentsMdWarning` flags a repo that still
- * keeps its instructions only in `CLAUDE.md`.
+ * `~/.gemini/GEMINI.md`).
  *
  * codex-spawn.ts re-exports the builders so existing importers are unaffected.
  */
@@ -21,7 +20,6 @@ import { join } from "path";
 import { userHome } from "./home";
 import { readdir } from "fs/promises";
 import type { SessionContext } from "./hooks/session-start";
-import { AGY_WORKTREE_FILES } from "./agy-worktree-files";
 
 /**
  * The role text every non-Claude CLI receives: the Claude session-start
@@ -39,127 +37,6 @@ export async function buildAgentRoleBody(ctx: SessionContext): Promise<string> {
   const body = stripIttybittyWrapper(await generateInstructions(ctx));
   const skillsSection = await buildSkillsSection();
   return [body, skillsSection].filter((s) => s.length > 0).join("\n");
-}
-
-/**
- * Worktree-root project-instruction files each non-Claude CLI reads natively
- * (besides `AGENTS.md`). codex: `AGENTS.override.md`, which it prefers over
- * `AGENTS.md` in the same directory. agy: `GEMINI.md` (its migration doc and
- * the builtin agy-customizations docs list only root `GEMINI.md` / `AGENTS.md`
- * as directory rules); its workspace rule files are checked separately in
- * `hasAlwaysOnAgyRule`.
- */
-const NATIVE_PROJECT_FILES: Record<"codex" | "agy", readonly string[]> = {
-  codex: ["AGENTS.md", "AGENTS.override.md"],
-  agy: ["AGENTS.md", "GEMINI.md"],
-};
-
-/**
- * agy's workspace customization roots: `.agents/` or its aliases (builtin
- * agy-customizations SKILL.md). Workspace rules live in `<root>/rules/*.md`.
- */
-const AGY_CUSTOMIZATION_ROOTS: readonly string[] = [".agents", ".agent", "_agents", "_agent"];
-
-/** Worktree files itsybitsy itself writes for agy (its rule file holds only role text). */
-const AGY_OWN_FILES: ReadonlySet<string> = new Set(AGY_WORKTREE_FILES);
-
-/** Human-readable list of the alternatives, for the warning text. */
-const NATIVE_PROJECT_FILES_LABEL: Record<"codex" | "agy", string> = {
-  codex: "AGENTS.md (or AGENTS.override.md)",
-  agy: "AGENTS.md (or GEMINI.md / an always-on .agents/rules file)",
-};
-
-/** codex and codex-backed fugu share codex's file discovery. */
-function nativeFileFamily(cli: string): "codex" | "agy" {
-  return cli === "agy" ? "agy" : "codex";
-}
-
-/**
- * True when an agy rule file's leading YAML frontmatter sets
- * `trigger: always_on` — the only rules agy loads unconditionally. agy ignores
- * a rule file with no frontmatter (ANTIGRAVITY-CLI-NOTES.md §17.5, live), and
- * loads `trigger: model_decision` rules only on demand (SKILL.md).
- */
-export function isAlwaysOnAgyRule(text: string): boolean {
-  const lines = text.split(/\r?\n/);
-  if (lines[0]?.trim() !== "---") return false;
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i]!.trim();
-    if (line === "---") return false;
-    const trigger = line.match(/^trigger:\s*["']?([A-Za-z_]+)["']?\s*(?:#.*)?$/);
-    if (trigger) return trigger[1] === "always_on";
-  }
-  return false;
-}
-
-/**
- * True when the repo ships an always-on agy rule in any customization root
- * (`AGY_CUSTOMIZATION_ROOTS`). itsybitsy's own generated rule file does not
- * count — it holds only the role text, not project instructions.
- */
-async function hasAlwaysOnAgyRule(worktreePath: string): Promise<boolean> {
-  for (const root of AGY_CUSTOMIZATION_ROOTS) {
-    let names: string[];
-    try {
-      names = await readdir(join(worktreePath, root, "rules"));
-    } catch {
-      continue; // No rules dir under this root.
-    }
-    for (const name of names) {
-      if (!name.endsWith(".md") || AGY_OWN_FILES.has(`${root}/rules/${name}`)) continue;
-      let text: string;
-      try {
-        text = await Bun.file(join(worktreePath, root, "rules", name)).text();
-      } catch {
-        continue; // Unreadable (or a directory named *.md).
-      }
-      if (isAlwaysOnAgyRule(text)) return true;
-    }
-  }
-  return false;
-}
-
-/**
- * True when the worktree root has a project-instruction file the CLI loads
- * UNCONDITIONALLY: codex `AGENTS.md` / `AGENTS.override.md`; agy `AGENTS.md` /
- * `GEMINI.md` or an always-on workspace rule.
- */
-async function hasNativeProjectInstructions(worktreePath: string, family: "codex" | "agy"): Promise<boolean> {
-  for (const file of NATIVE_PROJECT_FILES[family]) {
-    if (await Bun.file(join(worktreePath, file)).exists()) return true;
-  }
-  return family === "agy" && (await hasAlwaysOnAgyRule(worktreePath));
-}
-
-/**
- * Spawn-time check for the non-Claude CLIs. By default codex and agy read a
- * project's instructions from `AGENTS.md` and their own native files (see
- * `hasNativeProjectInstructions`), not from `CLAUDE.md`, and itsybitsy does
- * not copy `CLAUDE.md` into their instructions. Returns a one-line warning
- * when the worktree root has `CLAUDE.md` (or `.claude/CLAUDE.md`) but no file
- * the CLI loads unconditionally, so the user knows the agent starts without
- * the project's instructions; null otherwise. Symlinked files count as present. (codex can
- * be configured to read other names via `project_doc_fallback_filenames`; the
- * warning does not inspect user config, hence "by default".)
- */
-export async function missingAgentsMdWarning(
-  worktreePath: string,
-  cli: string,
-  agentId: string,
-): Promise<string | null> {
-  const family = nativeFileFamily(cli);
-  if (await hasNativeProjectInstructions(worktreePath, family)) return null;
-  for (const claudeMd of ["CLAUDE.md", join(".claude", "CLAUDE.md")]) {
-    if (await Bun.file(join(worktreePath, claudeMd)).exists()) {
-      return (
-        `${cli} agent '${agentId}' starts without the project instructions: the repo has ` +
-        `${claudeMd} but no ${NATIVE_PROJECT_FILES_LABEL[family]}, and ${cli} does not read ` +
-        `CLAUDE.md by default. Rename it (git mv ${claudeMd} AGENTS.md); Claude Code 2.1.277+ ` +
-        `reads AGENTS.md too.`
-      );
-    }
-  }
-  return null;
 }
 
 /**

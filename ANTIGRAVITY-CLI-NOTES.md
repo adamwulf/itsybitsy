@@ -109,7 +109,7 @@ Git hygiene: `.agents/hooks.json`, `.agents/agents/ittybitty/`, and `.gemini/ant
 
 ### 3.4 Update (2026-09-23): AGENTS.md everywhere, nothing inlined
 
-Claude Code 2.1.277 added native `AGENTS.md` support (read when a project has no `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`), so every CLI now reads a repo's own `AGENTS.md`. The rule file keeps only the role text and the skills catalogue; the project and user `CLAUDE.md` inlines were removed. User-wide text comes from agy's global `~/.gemini/GEMINI.md`; to share one file with Claude, symlink it to `~/.claude/CLAUDE.md` (readable under the kernel sandbox through the `~/.gemini` runtime root and the `_all.md` `~/.claude` read floor). Codex made the matching change: its role text moved from a generated `<worktree>/AGENTS.md` to `-c developer_instructions`, so problem 2 in §3.2 is gone for both CLIs.
+Claude Code 2.1.277 added native `AGENTS.md` support (read when a project has no `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`), so every CLI now reads a repo's own `AGENTS.md`. The rule file keeps only the role text and the skills catalogue; the project and user `CLAUDE.md` inlines were removed. User-wide text comes from agy's global `~/.gemini/GEMINI.md`; to share one file with Claude, symlink it to `~/.claude/CLAUDE.md` (readable under the kernel sandbox through the `~/.gemini` runtime root and the `_all.md` `~/.claude` read floor). Codex made the matching change: its role text moved from a generated `<worktree>/AGENTS.md` to its SessionStart hook's `additionalContext` (as Claude gets it), so problem 2 in §3.2 is gone for both CLIs.
 
 ## 4. The permissions engine (settings, no hooks)
 
@@ -521,7 +521,7 @@ Caveat seen: after the hard `tmux kill-session`, the resumed session showed `⚠
 [^64]: [docs/implementation-notes.md (hooks, codex integration, state detection, TUI capture, ib state)](docs/implementation-notes.md)
 [^65]: [default allow floor](src/settings-builder.ts:REGULAR_AGENT_DEFAULT_ALLOW)
 [^66]: [merged agent-type permission loader](src/hooks/shared.ts:loadMergedAgentTypePermissions)
-[^67]: History: the codex AGENTS.md generator (`@./CLAUDE.md` line + inlined user CLAUDE.md + skills catalogue) is `src/codex-spawn.ts:buildCodexAgentsMd` / `writeCodexAgentsMd` at commit `4f97e09` (`git show 4f97e09:src/codex-spawn.ts`); it was removed 2026-09-23. Current behavior: [codex role text, launched as `-c developer_instructions`](src/codex-spawn.ts:buildCodexDeveloperInstructions), built by the shared `src/agent-instructions-shared.ts:buildAgentRoleBody`.
+[^67]: History: the codex AGENTS.md generator (`@./CLAUDE.md` line + inlined user CLAUDE.md + skills catalogue) is `src/codex-spawn.ts:buildCodexAgentsMd` / `writeCodexAgentsMd` at commit `4f97e09` (`git show 4f97e09:src/codex-spawn.ts`); it was removed 2026-09-23. Current behavior: [codex role text, returned by the SessionStart hook as `additionalContext`](src/hooks/codex-session-start.ts:hookCodexSessionStart), built by the shared `src/agent-instructions-shared.ts:buildAgentRoleBody`.
 [^68]: [codex .gitignore appender](src/codex-spawn.ts:appendCodexGitignoreEntry)
 [^69]: [watchdog permission-prompt auto-accept (Enter on trust / MCP cards)](src/watchdog.ts:runPerAgentWatchdog)
 [^70]: [claude trust-prompt strings in the legacy state parser](src/parse-state.ts:parseClaudeState)

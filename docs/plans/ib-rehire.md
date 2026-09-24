@@ -205,9 +205,9 @@ Factor small shared helpers out of `newAgent()` only where necessary:
 
 - restoring/building the standard exit script;
 - codex `AGENTS.md` regeneration if the archived worktree did not preserve it
-  (obsolete since 2026-09-23: codex role text travels as
-  `-c developer_instructions` in `resume.sh`, which `resumeAgent()` always
-  rebuilds, so rehire has no worktree file to restore);
+  (obsolete since 2026-09-23: codex role text comes from the codex SessionStart
+  hook, built from `meta.json` each time it runs, so rehire has no worktree
+  file to restore);
 - safe worktree creation/cleanup.
 
 Avoid routing rehire through `newAgent()`: new-agent generates a new identity,

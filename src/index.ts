@@ -1086,7 +1086,7 @@ function printUsage(): void {
 }
 
 // Exported so the root `index.ts` shim can dispatch it. That shim is the entry
-// point for CLAUDE.md's documented `bun build --compile ... index.ts`, where
+// point for AGENTS.md's documented `bun build --compile ... index.ts`, where
 // `import.meta.main` is false *here* — see the guard at the bottom of this file.
 export async function main() {
   if (command === "--help" || command === "-h" || command === "help") {
@@ -3277,7 +3277,7 @@ export async function main() {
 // `bun run src/index.ts` and for a binary compiled from this file (package.json's
 // `build` script), false when a test imports a symbol from here.
 //
-// NOTE: this guard alone is NOT enough to keep the CLI working. CLAUDE.md builds
+// NOTE: this guard alone is NOT enough to keep the CLI working. AGENTS.md builds
 // the binary from the ROOT `index.ts` shim, which merely re-exports this module;
 // through that entry `import.meta.main` is false here and the CLI would dispatch
 // nothing at all. The root shim therefore carries its own guarded `main()` call.

@@ -1,7 +1,7 @@
 /**
  * Codex SessionStart hook handler.
  *
- * Two responsibilities per SPEC §5.6:
+ * Three responsibilities per SPEC §5.6:
  *   1. Write deterministic state ("running") to meta.json via writeAgentState —
  *      mirrors the Phase-42 flow on the claude side so detectAgentStates() can
  *      read the stored state without scraping codex's TUI.
@@ -9,11 +9,14 @@
  *      `sessionId`) into meta.codex_session_id IF the field is empty. This
  *      is the PRIMARY session-id capture point — SessionStart always fires,
  *      regardless of whether the agent reaches a tool call (reviewer #1).
+ *   3. Return the agent's role text as `additionalContext`, the same way the
+ *      Claude session-start hook does. Codex runs this hook on startup, resume,
+ *      /clear and after each compaction, and adds the text to the model context
+ *      before the turn's user input.
  *
  * Codex's hook contract is FAIL-OPEN (any crash → tool call proceeds), so
  * the entire handler is wrapped in try/catch and always emits valid JSON +
- * exits 0. The stdout payload is intentionally a minimal SessionStart shape
- * (no additionalContext) — codex consumes it but does not require any data.
+ * exits 0.
  */
 
 import { join } from "path";
@@ -21,6 +24,8 @@ import { isValidAgentId } from "../validation";
 import { writeAgentState } from "../agents";
 import { captureCodexSessionId } from "./codex-pre-tool-use";
 import { resolveAgentDir } from "./agent-context";
+import { detectRole } from "./session-start";
+import { buildAgentRoleBody } from "../agent-instructions-shared";
 
 const HOOK_EVENT_NAME = "SessionStart";
 
@@ -36,14 +41,14 @@ function readDefensive(
   return undefined;
 }
 
-function buildSessionStartNoop(): string {
+function buildSessionStartOutput(additionalContext: string): string {
   return JSON.stringify({
-    hookSpecificOutput: { hookEventName: HOOK_EVENT_NAME, additionalContext: "" },
+    hookSpecificOutput: { hookEventName: HOOK_EVENT_NAME, additionalContext },
   });
 }
 
 function emitNoop(write: (chunk: string) => unknown = (c) => process.stdout.write(c)): void {
-  write(buildSessionStartNoop());
+  write(buildSessionStartOutput(""));
 }
 
 export interface CodexSessionStartDeps {
@@ -88,7 +93,11 @@ export async function hookCodexSessionStart(
       }
     }
 
-    emitNoop(write);
+    // Role text from the agent's frozen meta.json and its worktree (codex
+    // agents always have one) — the same inputs the Claude hook uses.
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    const roleText = await buildAgentRoleBody(detectRole(join(agentDir, "repo"), meta, agentId));
+    write(buildSessionStartOutput(roleText));
   } catch {
     try {
       emitNoop(write);

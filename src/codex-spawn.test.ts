@@ -3,9 +3,10 @@
  * branch of newAgent() (SPEC-CODEX-MODEL.md §6 Phase 4).
  *
  * The Phase 4 acceptance gate spans these as unit-level invariants on the
- * SHELL STRING and the generated AGENTS.md. End-to-end spawn coverage is
- * the manual gate documented in the SPEC; we explicitly DO NOT spawn a
- * real codex / tmux session from this file.
+ * SHELL STRING and the shared role text (`buildAgentRoleBody`, which the
+ * codex SessionStart hook returns). End-to-end spawn coverage is the manual
+ * gate documented in the SPEC; we explicitly DO NOT spawn a real codex / tmux
+ * session from this file.
  */
 
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
@@ -16,10 +17,9 @@ import {
   buildCodexStartContent,
   buildCodexResumeContent,
   appendCodexGitignoreEntry,
-  stripIttybittyWrapper,
   resolveIbBinaryPath,
-  buildSkillsSection,
 } from "./codex-spawn";
+import { stripIttybittyWrapper, buildSkillsSection } from "./agent-instructions-shared";
 import { CODEX_REGISTERED_EVENTS } from "./codex-config";
 import { setUserHome, resetUserHome } from "./home";
 import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-log-launch";
@@ -780,12 +780,12 @@ describe("resolveIbBinaryPath", () => {
   });
 });
 
-describe("buildCodexAgentsMd / writeCodexAgentsMd", () => {
+describe("buildAgentRoleBody (the role text the codex SessionStart hook returns)", () => {
   let tempDir: string;
   let fakeHome: string;
 
   beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), "codex-agents-md-test-"));
+    tempDir = await mkdtemp(join(tmpdir(), "codex-role-body-test-"));
     // Provide a fake HOME so generateInstructions() can resolve agent-types
     // without polluting the developer's real ~/.itsybitsy.
     fakeHome = join(tempDir, "home");
@@ -799,8 +799,8 @@ describe("buildCodexAgentsMd / writeCodexAgentsMd", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test("buildCodexAgentsMd strips the <ittybitty> wrapper", async () => {
-    const { buildCodexAgentsMd } = await import("./codex-spawn");
+  test("strips the <ittybitty> wrapper", async () => {
+    const { buildAgentRoleBody } = await import("./agent-instructions-shared");
     const ctx = {
       role: "worker" as const,
       agentId: "agent-test01",
@@ -811,14 +811,14 @@ describe("buildCodexAgentsMd / writeCodexAgentsMd", () => {
       rootRepoPath: tempDir,
       agentType: "worker",
     };
-    const body = await buildCodexAgentsMd(ctx);
+    const body = await buildAgentRoleBody(ctx);
     expect(body.startsWith("<ittybitty>")).toBe(false);
     expect(body.endsWith("</ittybitty>")).toBe(false);
     expect(body.endsWith("</ittybitty>\n")).toBe(false);
   });
 
-  test("buildCodexAgentsMd contains the agent id (interpolated from template)", async () => {
-    const { buildCodexAgentsMd } = await import("./codex-spawn");
+  test("contains the agent id (interpolated from template)", async () => {
+    const { buildAgentRoleBody } = await import("./agent-instructions-shared");
     const ctx = {
       role: "worker" as const,
       agentId: "agent-test01",
@@ -829,34 +829,14 @@ describe("buildCodexAgentsMd / writeCodexAgentsMd", () => {
       rootRepoPath: tempDir,
       agentType: "worker",
     };
-    const body = await buildCodexAgentsMd(ctx);
+    const body = await buildAgentRoleBody(ctx);
     expect(body).toContain("agent-test01");
   });
 
-  test("writeCodexAgentsMd writes the file inside the worktree", async () => {
-    const { writeCodexAgentsMd } = await import("./codex-spawn");
-    const worktree = join(tempDir, "wt");
-    const ctx = {
-      role: "worker" as const,
-      agentId: "agent-test02",
-      agentManager: "agent-mgr",
-      parentBranch: "main",
-      branchName: "agent/agent-test02",
-      worktreePath: worktree,
-      rootRepoPath: tempDir,
-      agentType: "worker",
-    };
-    const written = await writeCodexAgentsMd(worktree, ctx);
-    expect(written).toBe(join(worktree, "AGENTS.md"));
-    const body = await Bun.file(written).text();
-    expect(body.length).toBeGreaterThan(0);
-    expect(body).toContain("agent-test02");
-  });
-
-  // HIGH 4 from Phase 4 review: AGENTS.md for codex manager must not
+  // HIGH 4 from Phase 4 review: codex manager instructions must not
   // reference Claude-only tools like TodoWrite.
-  test("HIGH 4: codex manager AGENTS.md does not reference TodoWrite", async () => {
-    const { buildCodexAgentsMd } = await import("./codex-spawn");
+  test("HIGH 4: codex manager instructions do not reference TodoWrite", async () => {
+    const { buildAgentRoleBody } = await import("./agent-instructions-shared");
     const ctx = {
       role: "manager" as const,
       agentId: "agent-mgr-test",
@@ -867,14 +847,14 @@ describe("buildCodexAgentsMd / writeCodexAgentsMd", () => {
       rootRepoPath: tempDir,
       agentType: "manager",
     };
-    const body = await buildCodexAgentsMd(ctx);
+    const body = await buildAgentRoleBody(ctx);
     expect(body).not.toContain("TodoWrite");
     // Replacement phrasing should be present.
     expect(body).toContain("Track progress with measurable criteria");
   });
 
-  test("HIGH 4: codex worker AGENTS.md does not contain Write(...) tool reference", async () => {
-    const { buildCodexAgentsMd } = await import("./codex-spawn");
+  test("HIGH 4: codex worker instructions do not contain Write(...) tool reference", async () => {
+    const { buildAgentRoleBody } = await import("./agent-instructions-shared");
     const ctx = {
       role: "worker" as const,
       agentId: "agent-w-test",
@@ -885,77 +865,47 @@ describe("buildCodexAgentsMd / writeCodexAgentsMd", () => {
       rootRepoPath: tempDir,
       agentType: "worker",
     };
-    const body = await buildCodexAgentsMd(ctx);
+    const body = await buildAgentRoleBody(ctx);
     // The original _non_coordinator.md had `Write(/tmp/commit-msg.txt, ...)`
     // which references the Claude `Write` tool. After the HIGH 4 fix, this
     // exact snippet must be gone.
     expect(body).not.toContain('Write(/tmp/commit-msg.txt');
   });
 
-  test("project CLAUDE.md is referenced via codex @./CLAUDE.md import when present in the worktree", async () => {
-    const { buildCodexAgentsMd } = await import("./codex-spawn");
+  test("copies in no project or user-wide instruction file — each CLI reads its own natively", async () => {
+    // Codex reads the repo's AGENTS.md itself and its user-wide text from
+    // ~/.codex/AGENTS.md; copying any of these in would give the agent two
+    // copies (or, for CLAUDE.md, text the other CLIs never see).
+    const { buildAgentRoleBody } = await import("./agent-instructions-shared");
     const worktree = join(tempDir, "wt");
-    await mkdir(worktree, { recursive: true });
-    await Bun.write(join(worktree, "CLAUDE.md"), "# project rules\n");
+    await mkdir(join(worktree, ".claude"), { recursive: true });
+    await Bun.write(join(worktree, "CLAUDE.md"), "project-claude-marker-3141\n");
+    await Bun.write(join(worktree, ".claude", "CLAUDE.md"), "dot-claude-marker-2718\n");
+    await Bun.write(join(worktree, "AGENTS.md"), "project-agents-marker-1618\n");
+    await mkdir(join(fakeHome, ".claude"), { recursive: true });
+    await Bun.write(join(fakeHome, ".claude", "CLAUDE.md"), "user-global-marker-1414\n");
     const ctx = {
       role: "worker" as const,
-      agentId: "agent-pclaude",
+      agentId: "agent-noinline",
       agentManager: "agent-mgr",
       parentBranch: "main",
-      branchName: "agent/agent-pclaude",
+      branchName: "agent/agent-noinline",
       worktreePath: worktree,
       rootRepoPath: tempDir,
       agentType: "worker",
     };
-    const body = await buildCodexAgentsMd(ctx);
-    expect(body).toContain("## Project CLAUDE.md");
-    expect(body).toContain("@./CLAUDE.md");
-    // The project CLAUDE.md content must NOT be inlined — it goes through
-    // the `@` import so edits to the checked-in file propagate without a
-    // regeneration.
-    expect(body).not.toContain("# project rules");
-  });
-
-  test("user-global ~/.claude/CLAUDE.md is inlined when present (codex @ import can't reach outside the project root)", async () => {
-    const { buildCodexAgentsMd } = await import("./codex-spawn");
-    await mkdir(join(fakeHome, ".claude"), { recursive: true });
-    await Bun.write(
-      join(fakeHome, ".claude", "CLAUDE.md"),
-      "GLOBAL: be terse\n",
-    );
-    const ctx = {
-      role: "worker" as const,
-      agentId: "agent-gclaude",
-      agentManager: "agent-mgr",
-      parentBranch: "main",
-      branchName: "agent/agent-gclaude",
-      worktreePath: join(tempDir, "wt"),
-      rootRepoPath: tempDir,
-      agentType: "worker",
-    };
-    const body = await buildCodexAgentsMd(ctx);
-    expect(body).toContain("## User-global CLAUDE.md");
-    // The global file MUST be inlined — codex `@` import doesn't resolve
-    // paths outside the project root.
-    expect(body).toContain("GLOBAL: be terse");
-  });
-
-  test("no CLAUDE.md section is emitted when neither project nor user-global file exists", async () => {
-    const { buildCodexAgentsMd } = await import("./codex-spawn");
-    const ctx = {
-      role: "worker" as const,
-      agentId: "agent-noclaude",
-      agentManager: "agent-mgr",
-      parentBranch: "main",
-      branchName: "agent/agent-noclaude",
-      worktreePath: join(tempDir, "wt"),
-      rootRepoPath: tempDir,
-      agentType: "worker",
-    };
-    const body = await buildCodexAgentsMd(ctx);
-    expect(body).not.toContain("## Project CLAUDE.md");
-    expect(body).not.toContain("## User-global CLAUDE.md");
-    expect(body).not.toContain("@./CLAUDE.md");
+    const body = await buildAgentRoleBody(ctx);
+    for (const marker of [
+      "project-claude-marker-3141",
+      "dot-claude-marker-2718",
+      "project-agents-marker-1618",
+      "user-global-marker-1414",
+      "## Project CLAUDE.md",
+      "## User-global CLAUDE.md",
+      "@./CLAUDE.md",
+    ]) {
+      expect(body).not.toContain(marker);
+    }
   });
 });
 
@@ -1057,7 +1007,7 @@ describe("buildSkillsSection — skills catalog", () => {
     const skillsDir = join(tempDir, "skills");
     // A description whose value embeds a literal triple-backtick fenced example.
     // With a naive 3-backtick wrapper this inner ``` would close the fence
-    // early and leak everything after it into the rendered AGENTS.md.
+    // early and leak everything after it into the rendered role text.
     const fmDescription =
       'description: "Use ```code``` blocks in your output"';
     await writeSkill(
@@ -1116,9 +1066,9 @@ describe("buildSkillsSection — skills catalog", () => {
     expect(section).toBe("");
   });
 
-  test("buildCodexAgentsMd integration: output contains the Skills header when a skills dir exists", async () => {
-    const { buildCodexAgentsMd } = await import("./codex-spawn");
-    // buildCodexAgentsMd reads ~/.claude/skills via the default param, so point
+  test("buildAgentRoleBody integration: output contains the Skills header when a skills dir exists", async () => {
+    const { buildAgentRoleBody } = await import("./agent-instructions-shared");
+    // buildAgentRoleBody reads ~/.claude/skills via the default param, so point
     // HOME at a temp dir holding a single skill. generateInstructions() also
     // resolves agent-types from HOME, so build the full fake-home layout.
     try {
@@ -1142,7 +1092,7 @@ describe("buildSkillsSection — skills catalog", () => {
         rootRepoPath: tempDir,
         agentType: "worker",
       };
-      const body = await buildCodexAgentsMd(ctx);
+      const body = await buildAgentRoleBody(ctx);
       expect(body).toContain("## Skills (read-on-demand workflow guides)");
       expect(body).toContain("### demo");
       expect(body).toContain("description: Demo skill");
@@ -1151,8 +1101,8 @@ describe("buildSkillsSection — skills catalog", () => {
     }
   });
 
-  test("buildCodexAgentsMd integration: no Skills header when the skills dir is absent", async () => {
-    const { buildCodexAgentsMd } = await import("./codex-spawn");
+  test("buildAgentRoleBody integration: no Skills header when the skills dir is absent", async () => {
+    const { buildAgentRoleBody } = await import("./agent-instructions-shared");
     try {
       // Fake home WITHOUT a .claude/skills dir.
       const fakeHome = join(tempDir, "home-noskills");
@@ -1170,7 +1120,7 @@ describe("buildSkillsSection — skills catalog", () => {
         rootRepoPath: tempDir,
         agentType: "worker",
       };
-      const body = await buildCodexAgentsMd(ctx);
+      const body = await buildAgentRoleBody(ctx);
       expect(body).not.toContain("## Skills (read-on-demand workflow guides)");
     } finally {
       resetUserHome();

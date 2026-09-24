@@ -118,6 +118,14 @@ describe("renderCodexHookFlagPayload", () => {
     expect(out).toContain("timeout=42");
     expect(out).toContain('type="command"');
   });
+
+  test("only SessionStart turns off codex's additionalContext cap (it carries the role text)", () => {
+    expect(renderCodexHookFlagPayload("SessionStart", "/bin/ib", "agent-abc123", 30)).toBe(
+      'hooks.SessionStart=[{matcher=".*",hooks=[{type="command",command="/bin/ib hooks codex-session-start agent-abc123",timeout=30,additionalContextLimit=0}]}]',
+    );
+    expect(renderCodexHookFlagPayload("PreToolUse", "/bin/ib", "agent-abc123", 30)).not.toContain("additionalContextLimit");
+    expect(renderCodexHookFlagPayload("Stop", "/bin/ib", "agent-abc123", 30)).not.toContain("additionalContextLimit");
+  });
 });
 
 describe("buildCodexLaunchArgs — well-formedness", () => {

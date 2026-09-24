@@ -273,7 +273,7 @@ ib tgreact --clear  [--message-id <id>]   # remove the bot's reaction
 - `src/index.ts` — `tgreact` CLI verb + usage.
 - Tests: `reactions.test.ts`, `last-message-cache.test.ts` (new); additions to `telegram-client.test.ts`, `dispatcher.test.ts`, `outbox.test.ts`, `ib-commands.test.ts`.
 
-### 7.5 Cross-cutting review (per CLAUDE.md checklist)
+### 7.5 Cross-cutting review (per AGENTS.md checklist)
 
 - **General agent functionality:** new `ib tgreact` verb; richer channel-reminder format. No meta.json/lifecycle change.
 - **Hooks:** none changed. The coordinator learns `tgreact` via the channel-reminder reply hint (same mechanism as the `ib tgsend` hint).
@@ -388,7 +388,7 @@ ib tgsendfile <path> [caption] --document    # send as a document (exact bytes; 
 - Tests: `inbound-store.test.ts` (new); additions to `telegram-client.test.ts`,
   `dispatcher.test.ts`, `outbox.test.ts`, `ib-commands.test.ts`.
 
-### 8.4 Cross-cutting review (per CLAUDE.md checklist)
+### 8.4 Cross-cutting review (per AGENTS.md checklist)
 
 - **General agent functionality:** new `ib tgsendfile` verb; inbound attachment
   bodies now carry real local paths (and captions). No meta.json/lifecycle change.
@@ -657,7 +657,7 @@ mechanism that delivers it.
   §7 code paths, but the *new* reliance on `sendMessage`'s response body is
   unproven against the live API.
 
-### 9.9 Cross-cutting review (per CLAUDE.md checklist)
+### 9.9 Cross-cutting review (per AGENTS.md checklist)
 
 - **General agent functionality:** `ib tgsend`'s stdout contract changed (see
   the §9.1 table) and reaction blocks carry more text. No new CLI verb, no
@@ -815,7 +815,7 @@ Pinned in `dispatcher.test.ts` against hardcoded literals of the WHOLE block
   the three live-API assumptions this feature rests on; see the §4 sanity-check
   step added for exercising them.
 
-### 10.9 Cross-cutting review (per CLAUDE.md checklist)
+### 10.9 Cross-cutting review (per AGENTS.md checklist)
 
 - **General agent functionality:** unchanged. No new CLI verb, no meta.json or
   lifecycle change. The coordinator sees a richer block on replies only.

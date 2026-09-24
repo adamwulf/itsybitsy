@@ -6,8 +6,9 @@
  *      Stop hooks under the named hook `ittybitty` (D3). This is the ONLY
  *      permission boundary — there is no sandbox, no `--add-dir` (D3).
  *   2. `.agents/rules/ittybitty-agent.md` — the always-on rule file carrying the
- *      agent's role instructions + inlined CLAUDE.md files + the skills catalog
- *      (D6). agy has no `@file` import, so everything is inlined.
+ *      agent's role instructions + the skills catalog (D6). Project and
+ *      user-wide instructions are not copied in: agy reads the repo's own
+ *      `AGENTS.md` and its global `~/.gemini/GEMINI.md` natively.
  *   3. The `trustedWorkspaces` entry in `~/.gemini/antigravity-cli/settings.json`
  *      (D5): the worktree MUST be pre-trusted before launch or `-i` runs the
  *      first turn before the trust card is answered, with no hooks loaded.
@@ -21,8 +22,7 @@ import { mkdir, open, stat, unlink, rename } from "fs/promises";
 import { isValidAgentId } from "./validation";
 import { isCodexSafeBinaryPath } from "./codex-config";
 import type { SessionContext } from "./hooks/session-start";
-import { generateInstructions } from "./hooks/session-start";
-import { stripIttybittyWrapper, buildSkillsSection } from "./agent-instructions-shared";
+import { buildAgentRoleBody } from "./agent-instructions-shared";
 
 /** Default hook timeout in seconds — matches the codex default and D3's value. */
 export const DEFAULT_AGY_HOOK_TIMEOUT_SECS = 30;
@@ -103,48 +103,18 @@ export function buildAgyHooksJson(input: BuildAgyHooksJsonInput): string {
  * Build the body for `<worktree>/.agents/rules/ittybitty-agent.md` (D6). The
  * always-on rule file frontmatter is followed by:
  *   - the session-start instruction template (wrapper stripped),
- *   - the project `CLAUDE.md` INLINED (agy has no `@file` import),
- *   - the user-global `~/.claude/CLAUDE.md` INLINED,
  *   - the skills catalog.
  *
- * Mirrors `buildCodexAgentsMd` but inlines the project CLAUDE.md rather than
- * referencing it via `@./CLAUDE.md`, and prepends the `trigger: always_on`
- * frontmatter so agy loads it alongside the repo's own `AGENTS.md`.
+ * The same role content codex receives from its SessionStart hook, with the
+ * `trigger: always_on` frontmatter so agy loads it alongside the repo's own
+ * `AGENTS.md`. Project and user-wide instructions are not copied in: agy reads
+ * the repo's `AGENTS.md` natively and its user-wide `~/.gemini/GEMINI.md` (a
+ * symlink to `~/.claude/CLAUDE.md` shares one file with Claude).
  */
 export async function buildAgyRulesFile(ctx: SessionContext): Promise<string> {
   const frontmatter =
     "---\ntrigger: always_on\ndescription: itsybitsy agent instructions\n---\n";
-  const wrapped = await generateInstructions(ctx);
-  const body = stripIttybittyWrapper(wrapped);
-  const claudeMdSection = await buildAgyClaudeMdInline(ctx.worktreePath);
-  const skillsSection = await buildSkillsSection();
-  const sections = [body, claudeMdSection, skillsSection].filter((s) => s.length > 0);
-  return frontmatter + sections.join("\n");
-}
-
-/**
- * Build the "Project + user CLAUDE.md" appendix for the agy rule file. Unlike
- * codex — which references the project CLAUDE.md via a native `@./CLAUDE.md`
- * import — agy has NO `@file` import (D6), so BOTH the project and the
- * user-global CLAUDE.md are inlined verbatim. A regeneration (next spawn or
- * `ib resume`) is required to pick up edits to either file.
- *
- * Returns "" when neither source exists so the caller omits the section.
- */
-async function buildAgyClaudeMdInline(worktreePath: string): Promise<string> {
-  const parts: string[] = [];
-  const projectClaudeMd = join(worktreePath, "CLAUDE.md");
-  if (await Bun.file(projectClaudeMd).exists()) {
-    const contents = await Bun.file(projectClaudeMd).text();
-    parts.push(`## Project CLAUDE.md\n\n${contents.trimEnd()}`);
-  }
-  const home = userHome();
-  const userClaudeMd = join(home, ".claude", "CLAUDE.md");
-  if (await Bun.file(userClaudeMd).exists()) {
-    const contents = await Bun.file(userClaudeMd).text();
-    parts.push(`## User-global CLAUDE.md (~/.claude/CLAUDE.md)\n\n${contents.trimEnd()}`);
-  }
-  return parts.length === 0 ? "" : parts.join("\n\n") + "\n";
+  return frontmatter + (await buildAgentRoleBody(ctx));
 }
 
 // The generalized `.gitignore` append helper (`appendGitignoreEntries`) lives in

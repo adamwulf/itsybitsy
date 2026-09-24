@@ -1471,7 +1471,7 @@ clears the stale pid exactly as an ordinary resume does.
    `meta.sandbox?.enabled === true`; the width-sensitive sidebar is unchanged.
    Focused true/false/absent render coverage is included.
 
-Each phase: `bun test` green + `bunx tsc --noEmit` clean (CLAUDE.md gate), then
+Each phase: `bun test` green + `bunx tsc --noEmit` clean (AGENTS.md gate), then
 a review cycle (2 worker reviewers) before merge.
 
 ## 7. Decisions and resolved questions
@@ -1555,7 +1555,7 @@ a review cycle (2 worker reviewers) before merge.
 
 ## 8. Test matrix (MANDATED phase gate — from design review)
 
-`bun test` green + `bunx tsc --noEmit` clean is the CLAUDE.md gate, but that
+`bun test` green + `bunx tsc --noEmit` clean is the AGENTS.md gate, but that
 gates nothing *specific*. The matrix below is retained as the shipped regression
 contract for phases 2–6, with the unshipped hook-layer follow-up called out in D.
 The profile generator, glob compiler, merge, and proxy are pure/unit-testable

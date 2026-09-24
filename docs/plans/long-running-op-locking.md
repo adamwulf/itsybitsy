@@ -295,7 +295,7 @@ finishing, in case a new render site has been added since this plan was written.
   refusal `stderr` in `handleMerge`/`handleResume`; keep `setNotice` immediate feedback.
 - Re-grep `"compacting"`/`"rate_limited"` to catch any render site added since this plan.
 
-## Cross-cutting review checklist (per CLAUDE.md)
+## Cross-cutting review checklist (per AGENTS.md)
 
 1. **General agent functionality** — adds a transient op marker to the lifecycle; no change to
    spawn or meta.json *durable* shape (field lives in `meta.transient.json`). meta.json

@@ -1984,7 +1984,7 @@ describe("CLI entry points", () => {
 
   // Both files are real entry points and the project builds the binary from
   // BOTH depending on which instruction you follow: package.json's `build`
-  // script compiles src/index.ts, while CLAUDE.md documents
+  // script compiles src/index.ts, while AGENTS.md documents
   // `bun build --compile ... index.ts` (the root shim). Dispatch is guarded by
   // `import.meta.main`, which is per-module — so a guard that only covers one
   // file silently produces a binary that starts up and does nothing. That is

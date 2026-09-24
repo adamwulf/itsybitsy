@@ -1278,8 +1278,8 @@ async function stopSandboxProxyForAgent(agentDir: string, meta: AgentMeta): Prom
  * paths for `<parentRepo>/.ittybitty` and `<parentRepo>/.claude` (the only
  * two subdirs `ib new-agent` writes outside the worktree/gitdir/caches).
  *
- * Granting the bare `<parentRepo>` would expose src/, CLAUDE.md, etc. to
- * relative-path Bash writes (`../../../../CLAUDE.md`) that bypass the
+ * Granting the bare `<parentRepo>` would expose src/, AGENTS.md, etc. to
+ * relative-path Bash writes (`../../../../AGENTS.md`) that bypass the
  * PreToolUse hook's textual matcher (see round-2 review HIGH). The two
  * subdirs above are the minimum needed for `ib new-agent` to function.
  *
@@ -1581,8 +1581,9 @@ export async function resumeAgent(
   }
 
   // Parse the persisted CLI before any resume mutation. Legacy non-Claude
-  // worktree:false metadata is unsafe to replay: Codex/Fugu would overwrite
-  // shared AGENTS.md and agy would install hook/rule files in the shared repo.
+  // worktree:false metadata is unsafe to replay: Codex/Fugu prechecks assume
+  // a per-agent worktree, and agy would install hook/rule files in the shared
+  // repo.
   const rawModel = agent.meta.model && agent.meta.model !== "null" ? agent.meta.model : "";
   if (rawModel && !isValidModel(rawModel)) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${rawModel}` };
@@ -1922,19 +1923,6 @@ export async function resumeAgent(
         resolveGitRevParsePath(workPath, gitCommonDirResult.stdout),
         ...codexParentRepoSubdirs,
       ];
-
-      // Refresh updates frozen metadata before entering resume. Regenerate the
-      // native instructions here so both ordinary resume and refresh describe
-      // the same policy as the hooks and the emitted kernel profile.
-      const { writeCodexAgentsMd } = await import("./codex-spawn");
-      const { detectRole } = await import("./hooks/session-start");
-      try {
-        await writeCodexAgentsMd(workPath, detectRole(workPath, agent.meta, agent.id));
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        await logAgent(agentDir, `[resume] could not regenerate Codex AGENTS.md: ${message}`);
-        return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not regenerate Codex AGENTS.md: ${message}` };
-      }
 
       // Build resume.sh via the shared codex builder (mirrors start.sh).
       const { buildCodexResumeContent } = await import("./codex-spawn");
@@ -6527,8 +6515,8 @@ export async function newAgent(
   const modelFlagValue = parsed.model;
 
   // Claude is the only CLI whose hook/settings lifecycle supports sharing the
-  // main checkout. Codex/Fugu require their worktree AGENTS.md + inline hook
-  // precheck, and agy requires its worktree hook/rule files. Refuse the unsafe
+  // main checkout. Codex/Fugu require their worktree `.codex/` gitignore entry
+  // + inline hook precheck, and agy requires its worktree hook/rule files. Refuse the unsafe
   // shape before creating an agent directory, changing shared settings, or
   // invoking a CLI-specific builder.
   if (opts?.noWorktree === true && agentCli !== "claude") {
@@ -6571,7 +6559,7 @@ export async function newAgent(
   // The system coordinator path (coordinator.ts:spawnCoordinator) has the
   // same guard, but per-repo coordinators reach `newAgent` directly with
   // coordinatorMode=true, so we need a guard HERE — without it the spawn
-  // would skip the useWorktree branch (AGENTS.md, .gitignore, precheck)
+  // would skip the useWorktree branch (.gitignore, precheck)
   // and produce a broken half-codex coordinator.
   let codexIbBinaryPath: string | null = null;
   if (isCodexBackedCli(agentCli)) {
@@ -7066,18 +7054,17 @@ export async function newAgent(
       // registration is inline via `-c` flags built in `buildCodexLaunchArgs`
       // (SPEC §3.3 + §5.4). The codex PreToolUse hook itself reads the shared
       // dynamic grant file at <worktree>/.claude/settings.local.json so ib
-      // watch's permission-grant flow works for running agents. Per Phase 4:
-      //   1. Append `.codex/` to <worktree>/.gitignore (covers any incidental
-      //      files codex itself drops — hook logs, sentinels, scratch).
-      //   2. Generate a per-agent <worktree>/AGENTS.md — codex reads this
-      //      natively at session start (the codex analog of the claude
-      //      session-start prompt injection).
+      // watch's permission-grant flow works for running agents. Here we
+      // append `.codex/` to <worktree>/.gitignore (covers any incidental
+      // files codex itself drops — hook logs, sentinels, scratch). The role
+      // text comes from the codex SessionStart hook, as for claude; nothing
+      // is written into the worktree: codex reads the repo's own AGENTS.md
+      // natively.
       // Coordinator+codex was rejected up-front in the codex precondition
       // block above (SPEC §D9 stub) — both the system coordinator (handled
       // in coordinator.ts) and the per-repo coordinator (handled here in
       // newAgent) refuse codex models before any side-effects.
-      const { appendCodexGitignoreEntry, writeCodexAgentsMd } = await import("./codex-spawn");
-      const { detectRole } = await import("./hooks/session-start");
+      const { appendCodexGitignoreEntry } = await import("./codex-spawn");
       try {
         const giResult = await appendCodexGitignoreEntry(workPath);
         if (giResult === "negation-respected") {
@@ -7093,23 +7080,6 @@ export async function newAgent(
         }
       } catch (err) {
         await logSpawn(agentDir, spawnerAgentDir, id, `codex .gitignore append failed: ${(err as Error)?.message ?? String(err)}`);
-      }
-      const sessionCtx = detectRole(workPath, {
-        id,
-        model,
-        manager: manager || null,
-        worker: isLeafAgent,
-        agentType: typeName,
-        spawned_by: spawnedBy ?? undefined,
-        // These values were resolved once from the layer union above and are
-        // the exact policy frozen into the new agent's meta.json.
-        paths: resolvedPathsConfig,
-        sandbox: resolvedSandboxConfig,
-      }, id);
-      try {
-        await writeCodexAgentsMd(workPath, sessionCtx);
-      } catch (err) {
-        await logSpawn(agentDir, spawnerAgentDir, id, `codex AGENTS.md write failed: ${(err as Error)?.message ?? String(err)}`);
       }
 
       const gitCommonDirResult = await newAgentSpawnCtx.run([
@@ -7139,7 +7109,7 @@ export async function newAgent(
       // are redundant but harmless and preserve disabled-mode behavior.
       //
       // We grant the .ittybitty and .claude SUBDIRS rather than the bare
-      // parent repo so a misbehaving agent cannot reach src/, CLAUDE.md,
+      // parent repo so a misbehaving agent cannot reach src/, AGENTS.md,
       // etc. via a relative-path Bash write that bypasses the textual
       // matcher in checkBashCommandPaths.
       const codexParentRepoSubdirs = await deriveCodexParentRepoRoots(rootRepoPath);

@@ -214,7 +214,7 @@ Other test files:
 - new-agent validation: a new id colliding with an existing nickname (global) is rejected.
 - `agent-actions`/dashboard: nickname renders in the tree row; fuzzy finder matches nickname.
 
-## Cross-cutting review checklist (from CLAUDE.md)
+## Cross-cutting review checklist (from AGENTS.md)
 
 1. **General agent functionality** — YES: adds an optional `meta.json` field + a new
    resolution alias. Lifecycle/spawn unchanged (no pause/resume). Note `--manager <name>`

@@ -166,6 +166,19 @@ function makeAgent(
   return meta ? { ...agent, meta: { ...agent.meta, ...meta } } : agent;
 }
 
+/** The role text the codex SessionStart hook gives this agent (its additionalContext). */
+async function codexHookRoleText(agentId: string, agentDir: string): Promise<string> {
+  const { hookCodexSessionStart } = await import("./hooks/codex-session-start");
+  const out: string[] = [];
+  await hookCodexSessionStart(agentId, {
+    rawStdin: "{}",
+    agentDirOverride: agentDir,
+    skipMetaWrites: true,
+    write: (chunk) => out.push(chunk),
+  });
+  return JSON.parse(out.join("")).hookSpecificOutput.additionalContext;
+}
+
 describe("Claude PID bootstrap", () => {
   test("uses the trusted running ib path despite a PATH shadow and preserves the launch PID", async () => {
     const root = await mkdtemp(join(tmpdir(), "claude-pid-bootstrap-"));
@@ -6720,7 +6733,10 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const agentDir = join(agentsDir, "sandbox-codex");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
     const profile = await Bun.file(join(agentDir, "sandbox.sb")).text();
-    const agentsMd = await Bun.file(join(agentDir, "repo", "AGENTS.md")).text();
+    // The role text comes from the SessionStart hook; nothing is written
+    // into the worktree.
+    const instructions = await codexHookRoleText("sandbox-codex", agentDir);
+    expect(await Bun.file(join(agentDir, "repo", "AGENTS.md")).exists()).toBe(false);
     expect(start).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
     expect(start).not.toContain("-s workspace-write");
     expect(start).toContain(`setsid ${sandboxDenialExecPrefix("'/usr/bin/sandbox-exec' -f")}`);
@@ -6732,10 +6748,10 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(start).not.toContain("-D 'SCRATCHPAD=");
     expect(profile).not.toContain('param "PROJECTDIR"');
     expect(profile).not.toContain('param "SCRATCHPAD"');
-    expect(agentsMd).toContain(canonicalizeSandboxPath(tempDir));
-    expect(agentsMd).toContain("**/.env");
-    expect(agentsMd).toContain("The kernel sandbox is ON");
-    expect(agentsMd).not.toContain("your Claude project directory and scratchpad");
+    expect(instructions).toContain(canonicalizeSandboxPath(tempDir));
+    expect(instructions).toContain("**/.env");
+    expect(instructions).toContain("The kernel sandbox is ON");
+    expect(instructions).not.toContain("your Claude project directory and scratchpad");
     expect(dispatcherDryRunCalls.length).toBeGreaterThanOrEqual(3);
     expect(spawnCalls.some((call) => call[0] === "codex")).toBe(false);
   });
@@ -7107,7 +7123,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   });
 
   // ── A4 G2: ib sandbox refresh ──────────────────────────────────────────────
-  test("Codex refresh to disabled regenerates AGENTS.md and keeps no-prompt workspace-write hooks", async () => {
+  test("Codex refresh to disabled updates the SessionStart role text and keeps no-prompt workspace-write hooks", async () => {
     const id = "codex-refresh-instructions";
     const oldRead = join(tempDir, "old-policy");
     const newRead = join(tempDir, "new-policy");
@@ -7119,8 +7135,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     setWatchdogSpawnFn(() => ({ pid: 99960 }));
     expect((await callNewAgent("refresh policy", { name: id, type: id })).ok).toBe(true);
     const agentDir = join(agentsDir, id);
-    const instructions = join(agentDir, "repo", "AGENTS.md");
-    expect(await Bun.file(instructions).text()).toContain("The kernel sandbox is ON");
+    const startInstructions = await codexHookRoleText(id, agentDir);
+    expect(startInstructions).toContain("The kernel sandbox is ON");
+    expect(startInstructions).toContain(canonicalizeSandboxPath(oldRead));
     const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
     meta.state = "stopped";
     meta.codex_session_id = "019e7b21-cb7d-7f23-8674-11036ed141ef";
@@ -7128,8 +7145,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
     await Bun.write(join(agentDir, "sandbox-proxy.pid"), "99999999\n");
     await Bun.write(join(agentDir, "sandbox-proxy.ready"), "ready\n");
-    // Edit both paths and the toggle. Refresh must replace the frozen policy and
-    // regenerate native instructions before resuming without kernel helpers.
+    // Edit both paths and the toggle. Refresh must replace the frozen policy
+    // (which the SessionStart hook reads) before resuming without kernel helpers.
     await writeSandboxType(id, { model: "codex:gpt-5.4-mini", enabled: false, allowRead: [newRead] });
     let created = false;
     setNukeResumeSpawnRunner((cmd: string[]) => {
@@ -7142,12 +7159,12 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     });
     const result = await refreshAgentSandbox(makeAgent(id, tempDir, "stopped", meta));
     expect(result.ok).toBe(true);
-    const text = await Bun.file(instructions).text();
+    const resume = await Bun.file(join(agentDir, "resume.sh")).text();
+    const text = await codexHookRoleText(id, agentDir);
     expect(text).toContain(canonicalizeSandboxPath(newRead));
     expect(text).not.toContain(canonicalizeSandboxPath(oldRead));
     expect(text).toContain("The itsybitsy kernel sandbox is OFF");
     expect(text).not.toContain("your Claude project directory and scratchpad");
-    const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     expect(resume).not.toContain("sandbox-exec");
     expect(resume).not.toContain("sandbox-proxy-launch");
     expect(resume).not.toContain("sandbox-log-watch");
@@ -11491,7 +11508,7 @@ body`,
       expect(gitignore).toContain(".codex/");
     });
 
-    test("writes <worktree>/AGENTS.md with role + agent id (no <ittybitty> wrapper)", async () => {
+    test("the SessionStart hook gives the spawned agent its role + agent id (no <ittybitty> wrapper); no AGENTS.md is written", async () => {
       setNewAgentSpawnRunner(mockSpawnRunner());
       const result = await callNewAgent("task", {
         name: "codex-agents-md",
@@ -11499,9 +11516,29 @@ body`,
         type: "worker",
       });
       expect(result.ok).toBe(true);
-      const agentsMd = await Bun.file(join(agentsDir, "codex-agents-md", "repo", "AGENTS.md")).text();
-      expect(agentsMd).toContain("codex-agents-md");
-      expect(agentsMd.startsWith("<ittybitty>")).toBe(false);
+      const agentDir = join(agentsDir, "codex-agents-md");
+      const instructions = await codexHookRoleText("codex-agents-md", agentDir);
+      expect(instructions).toContain("codex-agents-md");
+      expect(instructions.startsWith("<ittybitty>")).toBe(false);
+      expect(instructions).not.toContain("</ittybitty>");
+      expect(await Bun.file(join(agentDir, "repo", "AGENTS.md")).exists()).toBe(false);
+    });
+
+    test("leaves a repo-tracked AGENTS.md untouched in the worktree", async () => {
+      const base = mockSpawnRunner();
+      setNewAgentSpawnRunner((cmd: string[], o?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+        const out = base(cmd, o);
+        // Simulate the checkout of a repo that tracks AGENTS.md.
+        if (cmd.join(" ").includes("worktree add")) {
+          const repoDir = cmd[cmd.indexOf("add") + 1]!;
+          require("fs").writeFileSync(join(repoDir, "AGENTS.md"), "repo rules: run make\n");
+        }
+        return out;
+      });
+      const result = await callNewAgent("task", { name: "codex-repo-agents-md", model: "codex:gpt-5.4-mini" });
+      expect(result.ok).toBe(true);
+      const worktree = join(agentsDir, "codex-repo-agents-md", "repo");
+      expect(await Bun.file(join(worktree, "AGENTS.md")).text()).toBe("repo rules: run make\n");
     });
 
     test("fails the spawn cleanly when the dispatcher precheck exits non-zero", async () => {
@@ -11685,8 +11722,8 @@ body`,
     // Round-2 review HIGH: the codex `-s workspace-write` sandbox is granted
     // the NARROW `.ittybitty` + `.claude` subdirs of the parent repo, not
     // the bare parent repo. Granting the bare parent would let a misbehaving
-    // codex agent reach src/, CLAUDE.md, etc. via relative-path Bash writes
-    // (`../../../../CLAUDE.md`) that the PreToolUse hook's textual matcher
+    // codex agent reach src/, AGENTS.md, etc. via relative-path Bash writes
+    // (`../../../../AGENTS.md`) that the PreToolUse hook's textual matcher
     // does not catch. This test asserts the narrowed grant is encoded in
     // the rendered start.sh launch line.
     test("codex start.sh grants narrow parent-repo subdirs (.ittybitty + .claude), not the bare parent repo", async () => {

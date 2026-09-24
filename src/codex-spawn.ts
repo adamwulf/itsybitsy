@@ -4,37 +4,26 @@
  * and the worktree on disk. Splitting them out keeps the codex-specific
  * spawn logic unit-testable without booting a real codex / tmux session.
  *
- * Three responsibilities:
+ * Two responsibilities:
  *   1. Render the codex launch line that goes into start.sh — shell-quoted
  *      argv per SPEC §3.3, with the inline `-c hooks.*=[...]` flags from
  *      `buildCodexLaunchArgs()` already in place.
  *   2. Append `.codex/` to the worktree's `.gitignore` so any incidental
  *      files codex itself drops don't end up tracked.
- *   3. Generate the per-agent `AGENTS.md` body codex reads natively at
- *      session start — the codex analog of the Claude `session-start.ts`
- *      injection. For Phase 4 we delegate to `generateInstructions()` from
- *      `src/hooks/session-start.ts` and strip the Claude-specific
- *      `<ittybitty>...</ittybitty>` wrapper (codex doesn't read that tag).
+ *
+ * The agent's role text does not travel on the launch line: the codex
+ * SessionStart hook (`hooks/codex-session-start.ts`) returns it as
+ * `additionalContext`, as the Claude session-start hook does. itsybitsy never
+ * writes an `AGENTS.md`: codex reads the repo's own `AGENTS.md` natively.
  *
  * No subprocesses are spawned from this module — the precheck that runs
  * `ib hooks codex-* --dry-run` lives in `ib-commands.ts` so it can share
  * `newAgentSpawnCtx` with the rest of the spawn flow.
  */
 
-import { join } from "path";
-import { userHome } from "./home";
-import { mkdir } from "fs/promises";
 import { shellQuote } from "./validation";
 import { buildCodexLaunchArgs, FUGU_CODEX_CONFIG_OVERRIDES, isCodexSafeBinaryPath } from "./codex-config";
-import type { SessionContext } from "./hooks/session-start";
-import { generateInstructions } from "./hooks/session-start";
-import { stripIttybittyWrapper, buildSkillsSection } from "./agent-instructions-shared";
 import { appendGitignoreEntries, type GitignoreEntryOutcome } from "./worktree-gitignore";
-
-// Re-exported so existing importers (codex-spawn.test.ts, ib-commands.ts) keep
-// resolving these from "./codex-spawn". The implementations now live in the
-// shared, CLI-agnostic module so agy-config.ts can reuse them without copy-paste.
-export { stripIttybittyWrapper, buildSkillsSection };
 
 /**
  * Resolve the absolute path to the `ib` binary suitable for codex hook
@@ -508,109 +497,4 @@ export type AppendCodexGitignoreResult = GitignoreEntryOutcome;
 export async function appendCodexGitignoreEntry(worktreePath: string): Promise<AppendCodexGitignoreResult> {
   const results = await appendGitignoreEntries(worktreePath, [".codex/"]);
   return results[".codex/"]!;
-}
-
-/**
- * Generate a per-agent `AGENTS.md` body for a codex agent. Codex reads
- * `AGENTS.md` in the worktree natively at session start (SPEC §3.1) — this
- * is the codex analog of the Claude session-start injection.
- *
- * For Phase 4 we reuse `generateInstructions()` from `session-start.ts` so
- * the codex agent gets the same role-shaped context (path isolation, bash
- * rules, ib-send guidance, commands table, worker/manager-specific blocks,
- * team-awareness) as the claude agent of the same type. We strip the
- * `<ittybitty>` XML wrapper because codex doesn't recognize it; the rest is
- * portable markdown.
- *
- * Claude-only tool audit (HIGH 4 from the Phase 4 review):
- *   - `TodoWrite` references — removed in manager.md + the session-start.ts
- *     hardcoded fallback; replaced with "Track progress with measurable
- *     criteria" (CLI-agnostic).
- *   - `Write(...)` snippet in `_non_coordinator.md`'s commit-message
- *     section — rewritten to "Default to writing the message to a temp
- *     file first" so codex agents (whose file-edit tool is apply_patch,
- *     not Write) read CLI-agnostic guidance.
- *   - The Tool Interception block in manager.md (mentions Task, Agent,
- *     TaskCreate) is left in place. Those tools don't exist on codex, so
- *     a codex manager simply won't trigger the deny-on-intercept path
- *     described — the block is harmless but technically Claude-specific.
- *     A future phase should conditionalize this block per-cli once the
- *     agent-type template engine grows {{#if cli == "claude"}} support.
- */
-export async function buildCodexAgentsMd(ctx: SessionContext): Promise<string> {
-  const wrapped = await generateInstructions(ctx);
-  // generateInstructions wraps its body in <ittybitty>...</ittybitty>. Codex
-  // doesn't read that tag (it's a Claude convention) — strip the outermost
-  // wrapper so the markdown reads naturally in codex's session-start context.
-  // The body inside may still contain <ittybitty>-related text but the
-  // wrapping XML tags are what we drop.
-  const body = stripIttybittyWrapper(wrapped);
-  const claudeMdSection = await buildClaudeMdImports(ctx.worktreePath);
-  const skillsSection = await buildSkillsSection();
-  // Assemble in order: instruction body, then the CLAUDE.md appendix, then the
-  // skills catalog. Each section is conditional — only joined in when it has
-  // content — so we never emit a dangling header for an absent source.
-  const sections = [body, claudeMdSection, skillsSection].filter(
-    (s) => s.length > 0,
-  );
-  return sections.join("\n");
-}
-
-/**
- * Build a "Project + user CLAUDE.md" appendix for the codex AGENTS.md so
- * codex agents see the same context as claude. Two sources are merged:
- *
- *   - Project CLAUDE.md (`<worktree>/CLAUDE.md`): referenced via codex's
- *     native `@./CLAUDE.md` import. This keeps the AGENTS.md small and
- *     stays in sync with the checked-in project doc on every branch switch.
- *     Codex's `@` import is scoped to within the project root, so a
- *     relative reference from `<worktree>/AGENTS.md` resolves correctly.
- *
- *   - User-global CLAUDE.md (`~/.claude/CLAUDE.md`): codex's `@` import
- *     refuses paths outside the project root (openai/codex discussion
- *     #4272), so the global file is INLINED at AGENTS.md write time.
- *     A regeneration is required to pick up edits to the user-global file
- *     — that's the same lifecycle as the rest of AGENTS.md (next spawn or
- *     `ib resume` rewrites it).
- *
- * Returns an empty string if neither source exists so the caller can avoid
- * emitting a trailing section header for nothing.
- *
- * Codex's default `project_doc_max_bytes` cap is 32 KiB; the combined
- * AGENTS.md plus inlined global doc can exceed this. Bumping the cap to
- * 128 KiB via `~/.codex/config.toml` (`project_doc_max_bytes = 131072`) is
- * recommended.
- */
-async function buildClaudeMdImports(worktreePath: string): Promise<string> {
-  const parts: string[] = [];
-  const projectClaudeMd = join(worktreePath, "CLAUDE.md");
-  if (await Bun.file(projectClaudeMd).exists()) {
-    parts.push("## Project CLAUDE.md\n\n@./CLAUDE.md");
-  }
-  const home = userHome();
-  const userClaudeMd = join(home, ".claude", "CLAUDE.md");
-  if (await Bun.file(userClaudeMd).exists()) {
-    const contents = await Bun.file(userClaudeMd).text();
-    parts.push(`## User-global CLAUDE.md (~/.claude/CLAUDE.md)\n\n${contents.trimEnd()}`);
-  }
-  return parts.length === 0 ? "" : parts.join("\n\n") + "\n";
-}
-
-/**
- * Write the codex AGENTS.md to the agent's worktree. Returns the absolute
- * path written so the caller can log it.
- *
- * The parent directory is created if missing (defensive — the worktree
- * itself should exist by the time this runs, but a stale residual dir
- * could be in flight).
- */
-export async function writeCodexAgentsMd(
-  worktreePath: string,
-  ctx: SessionContext,
-): Promise<string> {
-  await mkdir(worktreePath, { recursive: true });
-  const agentsMdPath = join(worktreePath, "AGENTS.md");
-  const body = await buildCodexAgentsMd(ctx);
-  await Bun.write(agentsMdPath, body);
-  return agentsMdPath;
 }

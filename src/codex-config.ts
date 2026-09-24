@@ -159,6 +159,11 @@ export function isCodexSafeBinaryPath(path: string): boolean {
  * Render a single inline `-c hooks.<event>=[...]` flag payload (without the
  * leading `-c` token). Splitting this out lets the tests parse-and-inspect
  * the TOML body for each event independently.
+ *
+ * SessionStart returns the agent's role text as `additionalContext`. Codex
+ * cuts additionalContext above 2,500 estimated tokens (~10 KB) down to a
+ * preview plus a file path; `additionalContextLimit=0` turns that off so the
+ * whole role text reaches the model.
  */
 export function renderCodexHookFlagPayload(
   event: CodexHookEvent,
@@ -167,7 +172,8 @@ export function renderCodexHookFlagPayload(
   timeoutSecs: number,
 ): string {
   const cmd = `${ibBinaryPath} hooks ${HOOK_DISPATCHER[event]} ${agentId}`;
-  return `hooks.${event}=[{matcher=".*",hooks=[{type="command",command="${cmd}",timeout=${timeoutSecs}}]}]`;
+  const contextLimit = event === "SessionStart" ? ",additionalContextLimit=0" : "";
+  return `hooks.${event}=[{matcher=".*",hooks=[{type="command",command="${cmd}",timeout=${timeoutSecs}${contextLimit}}]}]`;
 }
 
 /**

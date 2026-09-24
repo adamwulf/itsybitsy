@@ -217,6 +217,55 @@ describe("hookCodexSessionStart — state write + fail-open", () => {
   });
 });
 
+// ── Role text: delivered as additionalContext, like the Claude hook ─────────
+
+describe("hookCodexSessionStart — role text in additionalContext", () => {
+  let tempHome: string;
+  let agentDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "codex-ss-role-"));
+    setUserHome(tempHome);
+    await (await import("../agent-types")).ensureAgentTypesDir();
+    agentDir = join(tempHome, "project", ".ittybitty", "agents", "agent-role01");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await writeFile(
+      join(agentDir, "meta.json"),
+      JSON.stringify({
+        id: "agent-role01",
+        model: "codex:gpt-5.4-mini",
+        agentType: "worker",
+        manager: "agent-mgr01",
+      }),
+    );
+  });
+
+  afterEach(async () => {
+    resetUserHome();
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  test("additionalContext is the agent's role text (buildAgentRoleBody for its meta)", async () => {
+    const { capture, restore } = captureStdout();
+    try {
+      await hookCodexSessionStart("agent-role01", {
+        rawStdin: JSON.stringify({ session_id: "rollout-role", source: "startup", cwd: join(agentDir, "repo") }),
+        agentDirOverride: agentDir,
+      });
+    } finally {
+      restore();
+    }
+    const context: string = JSON.parse(capture.join("")).hookSpecificOutput.additionalContext;
+    const { buildAgentRoleBody } = await import("../agent-instructions-shared");
+    const { detectRole } = await import("./session-start");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(context).toBe(await buildAgentRoleBody(detectRole(join(agentDir, "repo"), meta, "agent-role01")));
+    expect(context).toContain("agent-role01");
+    expect(context).toContain("agent-mgr01");
+    expect(context).not.toContain("<ittybitty>");
+  });
+});
+
 // ── HIGH 3 from Phase 4 review: dry-run must actually exercise the handler ──
 describe("hookCodexSessionStartDryRun — exercises real handler with synthetic payload", () => {
   let tempHome: string;

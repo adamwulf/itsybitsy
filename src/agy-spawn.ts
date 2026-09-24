@@ -457,7 +457,8 @@ ${qResumeExitScript}
  *   - `<worktree>/.agents/hooks.json` — the PreToolUse/PreInvocation/Stop
  *     dispatcher registration (the ONLY permission boundary).
  *   - `<worktree>/.agents/rules/ittybitty-agent.md` — the always-on rule file
- *     carrying the agent's role instructions + inlined CLAUDE.md + skills.
+ *     carrying the agent's role instructions + skills (agy reads the repo's
+ *     own AGENTS.md natively).
  *
  * Both parent directories are created. Returns the two absolute paths so the
  * caller can log them. Regenerated unconditionally on resume so permission

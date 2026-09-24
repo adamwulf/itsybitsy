@@ -1,22 +1,46 @@
 /**
  * Shared instruction-building helpers for the non-Claude agent CLIs.
  *
- * Codex reads its role context from a per-worktree `AGENTS.md`; Antigravity
- * (`agy`) reads it from an always-on rule file. Both start from the same
- * Claude `session-start` template, strip the Claude-only `<ittybitty>` XML
- * wrapper, and append a directory of the read-on-demand skills. Those two
- * pieces are CLI-agnostic and live here so codex-spawn.ts and agy-config.ts
- * share one implementation (no copy-paste); the CLAUDE.md appendix differs
- * per CLI (codex uses a native `@./CLAUDE.md` import, agy inlines it) and so
- * stays in each CLI's own module.
+ * Codex receives its role context from its SessionStart hook's
+ * `additionalContext`, as Claude does; Antigravity (`agy`) reads it from an
+ * always-on rule file. Both start from the same Claude `session-start`
+ * template, strip the Claude-only `<ittybitty>` XML wrapper, and append a
+ * directory of the read-on-demand skills. Those pieces are CLI-agnostic and
+ * live here so hooks/codex-session-start.ts and agy-config.ts share one
+ * implementation (no copy-paste).
  *
- * Extracted verbatim from codex-spawn.ts; codex behaviour is byte-identical
- * (codex-spawn.ts re-exports these so existing importers are unaffected).
+ * Project and user-wide instructions are never copied in: every CLI reads the
+ * repo's `AGENTS.md` natively (Claude Code 2.1.277+, codex, agy), and each
+ * reads its own global file (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`,
+ * `~/.gemini/GEMINI.md`).
  */
 
 import { join } from "path";
 import { userHome } from "./home";
 import { readdir } from "fs/promises";
+import type { SessionContext } from "./hooks/session-start";
+import { generateInstructions } from "./hooks/session-start";
+
+/**
+ * The role text every non-Claude CLI receives: the Claude session-start
+ * instructions (`generateInstructions`) with the `<ittybitty>` wrapper
+ * stripped, followed by the skills catalog. The CLI adapters add only their
+ * own encoding — the codex SessionStart hook returns it as `additionalContext`
+ * (`hookCodexSessionStart`), agy prepends rule-file frontmatter
+ * (`buildAgyRulesFile`). The skills section is "" when there are no skills, so
+ * it never leaves a dangling header.
+ *
+ * Claude-only tool audit (HIGH 4 from the codex Phase 4 review): the
+ * templates say "Track progress with measurable criteria" instead of
+ * `TodoWrite`, and the commit-message section no longer shows a `Write(...)`
+ * call. The Tool Interception block in manager.md (Task, Agent, TaskCreate)
+ * stays; those tools do not exist on codex or agy, so it is harmless there.
+ */
+export async function buildAgentRoleBody(ctx: SessionContext): Promise<string> {
+  const body = stripIttybittyWrapper(await generateInstructions(ctx));
+  const skillsSection = await buildSkillsSection();
+  return [body, skillsSection].filter((s) => s.length > 0).join("\n");
+}
 
 /**
  * Remove a single outer `<ittybitty>...</ittybitty>` wrapper. If the input

@@ -74,8 +74,11 @@ repo-tracked `AGENTS.md`. Instead:
   leave them with no role text until a compaction. After compaction they carry
   the old and new role text. A rebase onto a branch that tracks `AGENTS.md`
   either silently replaces the file (when ignored, as on this repo's old
-  branches) or aborts (when not ignored). Retire or respawn them when
-  convenient (SPEC.md §18.7, Risk 16).
+  branches) or aborts (when not ignored). Where git ignored it, retirement
+  does not archive it, so rehire refuses such an archive before any state
+  change. Migration means retiring them and starting FRESH agents with
+  `ib new-agent`; `/respawn` / `/restart` (pause + resume) keep the legacy
+  session (SPEC.md §18.7, Risk 16).
 - `-c developer_instructions` replaces any `developer_instructions` set in the
   user's `~/.codex/config.toml` for itsybitsy agents.
 Any older text below that says itsybitsy writes, regenerates, or relies on a

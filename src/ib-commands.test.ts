@@ -2222,6 +2222,148 @@ describe("retire → rehire recovery", () => {
     });
   }
 
+  // ── Legacy codex worktree archives (SPEC §18.7 "Legacy codex agents") ──────
+  // A codex agent spawned before role instructions moved to
+  // developer_instructions kept its role text only in a generated, untracked
+  // <worktree>/AGENTS.md. Where git ignored it, retirement did not archive it,
+  // so rehire must refuse before touching anything.
+  const LEGACY_CODEX_START_SH =
+    "#!/bin/bash\nsetsid codex -m 'gpt-5.4-mini' -a never --dangerously-bypass-hook-trust -c 'hooks.Stop=[]' \"$(cat '/tmp/prompt.txt')\" &\n";
+  const CURRENT_CODEX_START_SH =
+    "#!/bin/bash\nsetsid codex -m 'gpt-5.4-mini' -a never -c 'developer_instructions=\"role\"' \"$(cat '/tmp/prompt.txt')\" &\n";
+
+  async function plantCodexWorktreeArchive(
+    agentId: string,
+    opts: { model?: string; startSh?: string | null; untrackedFiles?: string[] },
+  ): Promise<{ archiveDir: string }> {
+    const archiveKey = `20260703-120000-${agentId}`;
+    const archiveDir = join(tempDir, ".ittybitty", "archive", archiveKey);
+    await mkdir(archiveDir, { recursive: true });
+    const meta = makeAgent(agentId, tempDir, "stopped", {
+      tmux_session: `ittybitty-1a2b3c4d-${agentId}`,
+      worktree: true,
+      model: opts.model ?? "codex:gpt-5.4-mini",
+      claude_pid: "",
+      codex_session_id: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+    }).meta;
+    (meta as unknown as Record<string, unknown>).sandbox = { enabled: true, rawAllow: [], domains: [] };
+    (meta as unknown as Record<string, unknown>).paths = { allowRead: [], allowWrite: [], deny: [] };
+    await Bun.write(join(archiveDir, "meta.json"), JSON.stringify(meta, null, 2));
+    await Bun.write(join(archiveDir, "exit-check.sh"), "#!/bin/bash\n");
+    if (opts.startSh !== null) {
+      await Bun.write(join(archiveDir, "start.sh"), opts.startSh ?? LEGACY_CODEX_START_SH);
+    }
+    const untrackedFiles = opts.untrackedFiles ?? [];
+    for (const file of untrackedFiles) {
+      await mkdir(join(archiveDir, "untracked"), { recursive: true });
+      await Bun.write(join(archiveDir, "untracked", file), "## Project CLAUDE.md\n\n@./CLAUDE.md\n");
+    }
+    await Bun.write(
+      join(archiveDir, "retirement.json"),
+      JSON.stringify({
+        version: 1,
+        agentId,
+        retiredAt: "2026-07-03T12:00:00.000Z",
+        repoPath: tempDir,
+        archiveKey,
+        worktree: true,
+        gitHead: "a".repeat(40),
+        headRef: `refs/ittybitty/retired/${archiveKey}/head`,
+        untrackedFiles,
+        prunedTeams: [],
+      }),
+    );
+    return { archiveDir };
+  }
+
+  // Records every rehire subprocess call. The first call a rehire makes after
+  // validation is `tmux has-session`; answering "live" (exit 0) stops the
+  // rehire right there with a sentinel error, so "allowed" tests prove the
+  // legacy guard passed without running the whole reconstruction.
+  function sentinelRunner(calls: string[][]): SpawnFn {
+    return (cmd) => {
+      calls.push(cmd);
+      if (cmd[0] === "tmux" && cmd.includes("has-session")) return makeSpawnResult(0);
+      return makeSpawnResult(1, "", "unexpected call");
+    };
+  }
+
+  for (const [cli, model] of [["codex", "codex:gpt-5.4-mini"], ["fugu", "fugu:fugu"]] as const) {
+    test(`refuses a legacy ${cli} worktree rehire whose AGENTS.md was not archived — before ANY state change`, async () => {
+      const agentId = `legacy-${cli}-lost`;
+      const { archiveDir } = await plantCodexWorktreeArchive(agentId, { model });
+      const calls: string[][] = [];
+      setRehireSpawnRunner(sentinelRunner(calls));
+      setNukeResumeSpawnRunner(sentinelRunner(calls));
+
+      const result = await rehireAgent(agentId);
+
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain(`Cannot rehire '${agentId}'`);
+      expect(result.stderr).toContain("developer_instructions");
+      expect(result.stderr).toContain("ib new-agent");
+      expect(result.stderr).not.toMatch(/\brespawn\b/);
+      // Nothing reconstructed: no subprocess at all (no worktree, branch or
+      // tmux call), no agent dir, and the archive is untouched.
+      expect(calls).toEqual([]);
+      expect(await lstat(join(tempDir, ".ittybitty", "agents", agentId)).then(() => true, () => false)).toBe(false);
+      expect(await Bun.file(join(archiveDir, "meta.json")).exists()).toBe(true);
+      expect(await Bun.file(join(archiveDir, "retirement.json")).exists()).toBe(true);
+    });
+  }
+
+  test("refuses a legacy codex archive with NO start.sh (cannot prove it is post-change)", async () => {
+    const agentId = "legacy-codex-nostart";
+    await plantCodexWorktreeArchive(agentId, { startSh: null });
+    const calls: string[][] = [];
+    setRehireSpawnRunner(sentinelRunner(calls));
+
+    const result = await rehireAgent(agentId);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain(`Cannot rehire '${agentId}'`);
+    expect(calls).toEqual([]);
+  });
+
+  test("allows a post-change codex archive (start.sh carries developer_instructions)", async () => {
+    const agentId = "current-codex";
+    await plantCodexWorktreeArchive(agentId, { startSh: CURRENT_CODEX_START_SH });
+    const calls: string[][] = [];
+    setRehireSpawnRunner(sentinelRunner(calls));
+
+    const result = await rehireAgent(agentId);
+
+    expect(result.stderr).not.toContain("Cannot rehire");
+    expect(result.stderr).toContain("still has a live tmux session");
+    expect(calls.length).toBeGreaterThan(0);
+  });
+
+  test("allows a legacy codex archive whose manifest kept AGENTS.md (not ignored in that repo)", async () => {
+    const agentId = "legacy-codex-kept";
+    await plantCodexWorktreeArchive(agentId, { untrackedFiles: ["AGENTS.md"] });
+    const calls: string[][] = [];
+    setRehireSpawnRunner(sentinelRunner(calls));
+
+    const result = await rehireAgent(agentId);
+
+    expect(result.stderr).not.toContain("Cannot rehire");
+    expect(result.stderr).toContain("still has a live tmux session");
+  });
+
+  for (const [cli, model] of [["claude", "claude:sonnet"], ["agy", "agy:gemini-3.7-flash-low"]] as const) {
+    test(`the legacy codex guard ignores ${cli} worktree archives`, async () => {
+      const agentId = `worktree-${cli}`;
+      await plantCodexWorktreeArchive(agentId, { model });
+      const calls: string[][] = [];
+      setRehireSpawnRunner(sentinelRunner(calls));
+
+      const result = await rehireAgent(agentId);
+
+      expect(result.stderr).not.toContain("Cannot rehire");
+      expect(result.stderr).toContain("still has a live tmux session");
+    });
+  }
+
   test("sends no rehire notice when the manager is archived/gone", async () => {
     const agentId = "agent-sub-gone";
     const managerId = "agent-mgr-gone";

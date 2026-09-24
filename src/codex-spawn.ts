@@ -10,20 +10,22 @@
  *      `buildCodexLaunchArgs()` already in place.
  *   2. Append `.codex/` to the worktree's `.gitignore` so any incidental
  *      files codex itself drops don't end up tracked.
- *   3. Generate the per-agent `AGENTS.md` body codex reads natively at
- *      session start — the codex analog of the Claude `session-start.ts`
- *      injection. For Phase 4 we delegate to `generateInstructions()` from
- *      `src/hooks/session-start.ts` and strip the Claude-specific
+ *   3. Build the per-agent role instructions codex receives as
+ *      `-c developer_instructions="…"` — the codex analog of the Claude
+ *      `session-start.ts` injection. We delegate to `generateInstructions()`
+ *      from `src/hooks/session-start.ts` and strip the Claude-specific
  *      `<ittybitty>...</ittybitty>` wrapper (codex doesn't read that tag).
+ *      itsybitsy never writes an `AGENTS.md`: codex reads the repo's own
+ *      `AGENTS.md` natively, next to these instructions.
  *
  * No subprocesses are spawned from this module — the precheck that runs
  * `ib hooks codex-* --dry-run` lives in `ib-commands.ts` so it can share
- * `newAgentSpawnCtx` with the rest of the spawn flow.
+ * `newAgentSpawnCtx` with the rest of the spawn flow; the one git query here
+ * (`removeLegacyCodexAgentsMd`) goes through an injected runner.
  */
 
 import { join } from "path";
-import { userHome } from "./home";
-import { mkdir } from "fs/promises";
+import { unlink } from "fs/promises";
 import { shellQuote } from "./validation";
 import { buildCodexLaunchArgs, FUGU_CODEX_CONFIG_OVERRIDES, isCodexSafeBinaryPath } from "./codex-config";
 import type { SessionContext } from "./hooks/session-start";
@@ -78,6 +80,13 @@ export interface BuildCodexStartContentInput {
    * with `-c model_reasoning_effort="…"`. Optional — absent means no override.
    */
   codexEffort?: string;
+  /**
+   * The agent's role instructions from `buildCodexDeveloperInstructions`,
+   * launched as `-c developer_instructions="…"` (TOML-escaped, then
+   * shell-quoted). Required so a caller cannot launch a codex agent that
+   * silently has no role context.
+   */
+  developerInstructions: string;
   /** Absolute path to prompt.txt — passed as `"$(cat <quoted>)"`. */
   absPromptFile: string;
   /** Absolute path to meta.json — pid is written here. */
@@ -133,12 +142,14 @@ export function buildCodexStartContent(input: BuildCodexStartContentInput): stri
     agentDir: input.agentDir,
     effort: input.codexEffort,
     extraWritableRoots: input.extraWritableRoots,
+    developerInstructions: input.developerInstructions,
   });
 
   // Shell-quote each codex argv element so the resulting `codex ... ` line is
-  // robust against an attacker-controlled model string or path component. The
-  // hookFlags array already alternates `-c` then the payload; quote both
-  // halves uniformly.
+  // robust against an attacker-controlled model string or path component — and
+  // so the free-text developer_instructions payload (quotes, `$(...)`,
+  // newline escapes) reaches codex byte-for-byte. The hookFlags array already
+  // alternates `-c` then the payload; quote both halves uniformly.
   const qModel = shellQuote(input.codexModel);
   const providerFlags = input.fugu
     ? FUGU_CODEX_CONFIG_OVERRIDES.flatMap((override) => ["-c", override])
@@ -301,6 +312,16 @@ export interface BuildCodexResumeContentInput {
    * agents) means no override.
    */
   codexEffort?: string;
+  /**
+   * The agent's role instructions, regenerated from the current frozen meta
+   * and passed again as `-c developer_instructions="…"`. Codex does NOT add a
+   * second copy on resume: the resumed rollout already holds the spawn-time
+   * copy and its context baseline, and codex re-sends the configured
+   * developer instructions only when it rebuilds the full initial context
+   * (after a compaction). So a changed value reaches the model at the next
+   * compaction, not at the resume itself.
+   */
+  developerInstructions: string;
   /** Absolute path to meta.json — pid is written here. */
   absMetaJson: string;
   /** Absolute path to exit-check.sh. */
@@ -362,6 +383,7 @@ export function buildCodexResumeContent(input: BuildCodexResumeContentInput): st
     agentDir: input.agentDir,
     effort: input.codexEffort,
     extraWritableRoots: input.extraWritableRoots,
+    developerInstructions: input.developerInstructions,
   });
 
   const qSessionId = shellQuote(input.codexSessionId);
@@ -511,16 +533,22 @@ export async function appendCodexGitignoreEntry(worktreePath: string): Promise<A
 }
 
 /**
- * Generate a per-agent `AGENTS.md` body for a codex agent. Codex reads
- * `AGENTS.md` in the worktree natively at session start (SPEC §3.1) — this
- * is the codex analog of the Claude session-start injection.
+ * Build the per-agent role instructions for a codex agent. They are launched
+ * as `-c developer_instructions="…"` (see `buildCodexLaunchArgs`), which codex
+ * adds to the session as a developer message — the codex analog of the Claude
+ * session-start injection.
  *
- * For Phase 4 we reuse `generateInstructions()` from `session-start.ts` so
- * the codex agent gets the same role-shaped context (path isolation, bash
- * rules, ib-send guidance, commands table, worker/manager-specific blocks,
- * team-awareness) as the claude agent of the same type. We strip the
- * `<ittybitty>` XML wrapper because codex doesn't recognize it; the rest is
- * portable markdown.
+ * We reuse `generateInstructions()` from `session-start.ts` so the codex agent
+ * gets the same role-shaped context (path isolation, bash rules, ib-send
+ * guidance, commands table, worker/manager-specific blocks, team-awareness)
+ * as the claude agent of the same type, then append the skills catalog. We
+ * strip the `<ittybitty>` XML wrapper because codex doesn't recognize it; the
+ * rest is portable markdown.
+ *
+ * Project and user-wide instructions are deliberately NOT included. Codex
+ * reads the repo's own `AGENTS.md` natively (itsybitsy never writes one), and
+ * user-wide instructions come from codex's global `~/.codex/AGENTS.md` — a
+ * symlink to `~/.claude/CLAUDE.md` shares one file with Claude.
  *
  * Claude-only tool audit (HIGH 4 from the Phase 4 review):
  *   - `TodoWrite` references — removed in manager.md + the session-start.ts
@@ -537,80 +565,66 @@ export async function appendCodexGitignoreEntry(worktreePath: string): Promise<A
  *     A future phase should conditionalize this block per-cli once the
  *     agent-type template engine grows {{#if cli == "claude"}} support.
  */
-export async function buildCodexAgentsMd(ctx: SessionContext): Promise<string> {
+export async function buildCodexDeveloperInstructions(ctx: SessionContext): Promise<string> {
   const wrapped = await generateInstructions(ctx);
   // generateInstructions wraps its body in <ittybitty>...</ittybitty>. Codex
   // doesn't read that tag (it's a Claude convention) — strip the outermost
-  // wrapper so the markdown reads naturally in codex's session-start context.
-  // The body inside may still contain <ittybitty>-related text but the
-  // wrapping XML tags are what we drop.
+  // wrapper so the markdown reads naturally as a developer message. The body
+  // inside may still contain <ittybitty>-related text but the wrapping XML
+  // tags are what we drop.
   const body = stripIttybittyWrapper(wrapped);
-  const claudeMdSection = await buildClaudeMdImports(ctx.worktreePath);
   const skillsSection = await buildSkillsSection();
-  // Assemble in order: instruction body, then the CLAUDE.md appendix, then the
-  // skills catalog. Each section is conditional — only joined in when it has
-  // content — so we never emit a dangling header for an absent source.
-  const sections = [body, claudeMdSection, skillsSection].filter(
-    (s) => s.length > 0,
-  );
-  return sections.join("\n");
+  // The skills section is "" when there are no skills, so it never leaves a
+  // dangling header.
+  return [body, skillsSection].filter((s) => s.length > 0).join("\n");
 }
 
 /**
- * Build a "Project + user CLAUDE.md" appendix for the codex AGENTS.md so
- * codex agents see the same context as claude. Two sources are merged:
- *
- *   - Project CLAUDE.md (`<worktree>/CLAUDE.md`): referenced via codex's
- *     native `@./CLAUDE.md` import. This keeps the AGENTS.md small and
- *     stays in sync with the checked-in project doc on every branch switch.
- *     Codex's `@` import is scoped to within the project root, so a
- *     relative reference from `<worktree>/AGENTS.md` resolves correctly.
- *
- *   - User-global CLAUDE.md (`~/.claude/CLAUDE.md`): codex's `@` import
- *     refuses paths outside the project root (openai/codex discussion
- *     #4272), so the global file is INLINED at AGENTS.md write time.
- *     A regeneration is required to pick up edits to the user-global file
- *     — that's the same lifecycle as the rest of AGENTS.md (next spawn or
- *     `ib resume` rewrites it).
- *
- * Returns an empty string if neither source exists so the caller can avoid
- * emitting a trailing section header for nothing.
- *
- * Codex's default `project_doc_max_bytes` cap is 32 KiB; the combined
- * AGENTS.md plus inlined global doc can exceed this. Bumping the cap to
- * 128 KiB via `~/.codex/config.toml` (`project_doc_max_bytes = 131072`) is
- * recommended.
+ * Text only the retired `<worktree>/AGENTS.md` generator wrote. Until
+ * 2026-09, codex role instructions lived in an untracked, generated
+ * `<worktree>/AGENTS.md`; they now travel as `developer_instructions`. A codex
+ * agent spawned before the change still has that file, and codex would read it
+ * as the project's AGENTS.md — a second, stale copy of the role text. Every
+ * old file carries at least one of these (for the default types, the identity
+ * line always matches); a hand-written AGENTS.md carries none of them.
  */
-async function buildClaudeMdImports(worktreePath: string): Promise<string> {
-  const parts: string[] = [];
-  const projectClaudeMd = join(worktreePath, "CLAUDE.md");
-  if (await Bun.file(projectClaudeMd).exists()) {
-    parts.push("## Project CLAUDE.md\n\n@./CLAUDE.md");
-  }
-  const home = userHome();
-  const userClaudeMd = join(home, ".claude", "CLAUDE.md");
-  if (await Bun.file(userClaudeMd).exists()) {
-    const contents = await Bun.file(userClaudeMd).text();
-    parts.push(`## User-global CLAUDE.md (~/.claude/CLAUDE.md)\n\n${contents.trimEnd()}`);
-  }
-  return parts.length === 0 ? "" : parts.join("\n\n") + "\n";
-}
+const LEGACY_GENERATED_AGENTS_MD_MARKERS: readonly string[] = [
+  "## Project CLAUDE.md\n\n@./CLAUDE.md",
+  "## User-global CLAUDE.md (~/.claude/CLAUDE.md)",
+  "## Skills (read-on-demand workflow guides)",
+];
+
+export type LegacyCodexAgentsMdOutcome = "absent" | "tracked" | "unknown" | "kept" | "removed";
 
 /**
- * Write the codex AGENTS.md to the agent's worktree. Returns the absolute
- * path written so the caller can log it.
- *
- * The parent directory is created if missing (defensive — the worktree
- * itself should exist by the time this runs, but a stale residual dir
- * could be in flight).
+ * Delete a leftover itsybitsy-generated `<worktree>/AGENTS.md` before a codex
+ * agent resumes (see `LEGACY_GENERATED_AGENTS_MD_MARKERS`). Conservative: the
+ * file is removed only when git positively reports it untracked AND its text
+ * carries a generator marker or the agent's identity line. Outcomes:
+ *   - "absent"   no AGENTS.md in the worktree.
+ *   - "tracked"  the repo tracks it — the project's own file; never touched.
+ *   - "unknown"  git failed without a clear "not tracked" answer; left alone.
+ *   - "kept"     untracked but not generated by itsybitsy; left alone.
+ *   - "removed"  the generated leftover was deleted.
+ * `run` is the injected spawn-ctx runner (`git -C <worktree>` targets the
+ * worktree), matching `refuseIfTracked` in agy-spawn.ts.
  */
-export async function writeCodexAgentsMd(
+export async function removeLegacyCodexAgentsMd(
   worktreePath: string,
-  ctx: SessionContext,
-): Promise<string> {
-  await mkdir(worktreePath, { recursive: true });
+  agentId: string,
+  run: (cmd: string[]) => Promise<{ stdout: string; stderr: string; exitCode: number }>,
+): Promise<LegacyCodexAgentsMdOutcome> {
   const agentsMdPath = join(worktreePath, "AGENTS.md");
-  const body = await buildCodexAgentsMd(ctx);
-  await Bun.write(agentsMdPath, body);
-  return agentsMdPath;
+  const file = Bun.file(agentsMdPath);
+  if (!(await file.exists())) return "absent";
+  const lsFiles = await run(["git", "-C", worktreePath, "ls-files", "--error-unmatch", "AGENTS.md"]);
+  if (lsFiles.exitCode === 0) return "tracked";
+  if (!lsFiles.stderr.includes("did not match any file(s) known to git")) return "unknown";
+  const text = await file.text();
+  const generated =
+    LEGACY_GENERATED_AGENTS_MD_MARKERS.some((marker) => text.includes(marker)) ||
+    text.includes(`agent \`${agentId}\` in the ittybitty multi-agent orchestration system`);
+  if (!generated) return "kept";
+  await unlink(agentsMdPath);
+  return "removed";
 }

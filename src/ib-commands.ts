@@ -67,6 +67,7 @@ import {
 import { readConfig } from "./config";
 import { listTmuxSessions } from "./tmux-poller";
 import { logToWatchLog, logWarning } from "./watch-log";
+import { missingAgentsMdWarning } from "./agent-instructions-shared";
 import { SpawnContext, InjectionContext } from "./types";
 import type { SpawnFn } from "./types";
 import { isValidModel, isValidEffort, isValidTmuxSession, isValidSessionId, isValidShellPath, isValidAgentId, shellQuote, tmuxSessionTarget } from "./validation";
@@ -1273,13 +1274,31 @@ async function stopSandboxProxyForAgent(agentDir: string, meta: AgentMeta): Prom
 }
 
 /**
+ * Spawn-time warning for codex and agy agents whose repo keeps its
+ * instructions only in CLAUDE.md (see `missingAgentsMdWarning`). Goes to
+ * stderr (or the watch log under `ib watch`) and to the spawn log via `log`.
+ * Never fails the spawn.
+ */
+async function warnIfNoAgentsMd(
+  worktreePath: string,
+  cli: string,
+  agentId: string,
+  log: (line: string) => Promise<void>,
+): Promise<void> {
+  const warning = await missingAgentsMdWarning(worktreePath, cli, agentId);
+  if (!warning) return;
+  logWarning(`Warning: ${warning}`);
+  await log(`Warning: ${warning}`);
+}
+
+/**
  * Derive the narrow set of parent-repo subdirectories codex agents need
  * write access to under `-s workspace-write`. Returns absolute, canonicalised
  * paths for `<parentRepo>/.ittybitty` and `<parentRepo>/.claude` (the only
  * two subdirs `ib new-agent` writes outside the worktree/gitdir/caches).
  *
- * Granting the bare `<parentRepo>` would expose src/, CLAUDE.md, etc. to
- * relative-path Bash writes (`../../../../CLAUDE.md`) that bypass the
+ * Granting the bare `<parentRepo>` would expose src/, AGENTS.md, etc. to
+ * relative-path Bash writes (`../../../../AGENTS.md`) that bypass the
  * PreToolUse hook's textual matcher (see round-2 review HIGH). The two
  * subdirs above are the minimum needed for `ib new-agent` to function.
  *
@@ -1581,8 +1600,10 @@ export async function resumeAgent(
   }
 
   // Parse the persisted CLI before any resume mutation. Legacy non-Claude
-  // worktree:false metadata is unsafe to replay: Codex/Fugu would overwrite
-  // shared AGENTS.md and agy would install hook/rule files in the shared repo.
+  // worktree:false metadata is unsafe to replay: Codex/Fugu prechecks and
+  // cleanup assume a per-agent worktree (an old Codex spawn also wrote an
+  // AGENTS.md into it), and agy would install hook/rule files in the shared
+  // repo.
   const rawModel = agent.meta.model && agent.meta.model !== "null" ? agent.meta.model : "";
   if (rawModel && !isValidModel(rawModel)) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${rawModel}` };
@@ -1923,17 +1944,36 @@ export async function resumeAgent(
         ...codexParentRepoSubdirs,
       ];
 
+      // An agent spawned before role instructions moved to developer_instructions
+      // still has the generated <worktree>/AGENTS.md; codex would read it as the
+      // project's AGENTS.md next to the new instructions. Remove only that
+      // untracked, itsybitsy-generated leftover.
+      const { removeLegacyCodexAgentsMd } = await import("./codex-spawn");
+      const legacyAgentsMd = await removeLegacyCodexAgentsMd(
+        workPath,
+        agent.id,
+        (cmd) => nukeResumeSpawnCtx.run(cmd),
+      );
+      if (legacyAgentsMd === "removed") {
+        await logAgent(agentDir, "[resume] removed the legacy generated <worktree>/AGENTS.md (role instructions now travel as developer_instructions)");
+      }
+
       // Refresh updates frozen metadata before entering resume. Regenerate the
-      // native instructions here so both ordinary resume and refresh describe
-      // the same policy as the hooks and the emitted kernel profile.
-      const { writeCodexAgentsMd } = await import("./codex-spawn");
+      // role instructions here so both ordinary resume and refresh describe
+      // the same policy as the hooks and the emitted kernel profile. (Codex
+      // keeps the spawn-time copy in the resumed context and sends this one
+      // after its next compaction — see buildCodexResumeContent.)
+      const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
+      const { renderCodexDeveloperInstructionsPayload } = await import("./codex-config");
       const { detectRole } = await import("./hooks/session-start");
+      let resumeDeveloperInstructions: string;
       try {
-        await writeCodexAgentsMd(workPath, detectRole(workPath, agent.meta, agent.id));
+        resumeDeveloperInstructions = await buildCodexDeveloperInstructions(detectRole(workPath, agent.meta, agent.id));
+        renderCodexDeveloperInstructionsPayload(resumeDeveloperInstructions);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        await logAgent(agentDir, `[resume] could not regenerate Codex AGENTS.md: ${message}`);
-        return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not regenerate Codex AGENTS.md: ${message}` };
+        await logAgent(agentDir, `[resume] could not regenerate Codex developer instructions: ${message}`);
+        return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not regenerate Codex developer instructions: ${message}` };
       }
 
       // Build resume.sh via the shared codex builder (mirrors start.sh).
@@ -1943,6 +1983,7 @@ export async function resumeAgent(
         ibBinaryPath: codexIbBinaryPath,
         agentDir,
         codexSessionId,
+        developerInstructions: resumeDeveloperInstructions,
         // Re-apply the persisted effort as a `-c model_reasoning_effort` override.
         // Unlike `-m <model>` (which codex resume drops because the model is
         // bound to the rollout), `-c` config overrides ARE re-applied on codex
@@ -6527,8 +6568,8 @@ export async function newAgent(
   const modelFlagValue = parsed.model;
 
   // Claude is the only CLI whose hook/settings lifecycle supports sharing the
-  // main checkout. Codex/Fugu require their worktree AGENTS.md + inline hook
-  // precheck, and agy requires its worktree hook/rule files. Refuse the unsafe
+  // main checkout. Codex/Fugu require their worktree `.codex/` gitignore entry
+  // + inline hook precheck, and agy requires its worktree hook/rule files. Refuse the unsafe
   // shape before creating an agent directory, changing shared settings, or
   // invoking a CLI-specific builder.
   if (opts?.noWorktree === true && agentCli !== "claude") {
@@ -6571,7 +6612,7 @@ export async function newAgent(
   // The system coordinator path (coordinator.ts:spawnCoordinator) has the
   // same guard, but per-repo coordinators reach `newAgent` directly with
   // coordinatorMode=true, so we need a guard HERE — without it the spawn
-  // would skip the useWorktree branch (AGENTS.md, .gitignore, precheck)
+  // would skip the useWorktree branch (role instructions, .gitignore, precheck)
   // and produce a broken half-codex coordinator.
   let codexIbBinaryPath: string | null = null;
   if (isCodexBackedCli(agentCli)) {
@@ -6844,6 +6885,9 @@ export async function newAgent(
   // Working directory defaults to root repo
   let workPath = rootRepoPath;
   let codexExtraWritableRoots: string[] = [];
+  // Codex role instructions, built in the worktree branch below and launched
+  // as `-c developer_instructions="…"` by buildCodexStartContent.
+  let codexDeveloperInstructions = "";
 
   // Compute fields needed for the early meta.json write below. These were
   // previously computed just before the late meta.json write (post worktree-add),
@@ -7066,17 +7110,19 @@ export async function newAgent(
       // registration is inline via `-c` flags built in `buildCodexLaunchArgs`
       // (SPEC §3.3 + §5.4). The codex PreToolUse hook itself reads the shared
       // dynamic grant file at <worktree>/.claude/settings.local.json so ib
-      // watch's permission-grant flow works for running agents. Per Phase 4:
+      // watch's permission-grant flow works for running agents. Here we:
       //   1. Append `.codex/` to <worktree>/.gitignore (covers any incidental
       //      files codex itself drops — hook logs, sentinels, scratch).
-      //   2. Generate a per-agent <worktree>/AGENTS.md — codex reads this
-      //      natively at session start (the codex analog of the claude
-      //      session-start prompt injection).
+      //   2. Build the role instructions start.sh passes as
+      //      `-c developer_instructions="…"` (the codex analog of the claude
+      //      session-start prompt injection). Nothing is written into the
+      //      worktree: codex reads the repo's own AGENTS.md natively.
       // Coordinator+codex was rejected up-front in the codex precondition
       // block above (SPEC §D9 stub) — both the system coordinator (handled
       // in coordinator.ts) and the per-repo coordinator (handled here in
       // newAgent) refuse codex models before any side-effects.
-      const { appendCodexGitignoreEntry, writeCodexAgentsMd } = await import("./codex-spawn");
+      const { appendCodexGitignoreEntry, buildCodexDeveloperInstructions } = await import("./codex-spawn");
+      const { renderCodexDeveloperInstructionsPayload } = await import("./codex-config");
       const { detectRole } = await import("./hooks/session-start");
       try {
         const giResult = await appendCodexGitignoreEntry(workPath);
@@ -7107,10 +7153,23 @@ export async function newAgent(
         sandbox: resolvedSandboxConfig,
       }, id);
       try {
-        await writeCodexAgentsMd(workPath, sessionCtx);
+        codexDeveloperInstructions = await buildCodexDeveloperInstructions(sessionCtx);
+        // Size-check now, while cleanupOnFailure can still undo the spawn;
+        // buildCodexStartContent renders the same payload again below.
+        const payloadBytes = Buffer.byteLength(renderCodexDeveloperInstructionsPayload(codexDeveloperInstructions), "utf8");
+        await logSpawn(agentDir, spawnerAgentDir, id, `codex developer_instructions: ${payloadBytes} bytes`);
       } catch (err) {
-        await logSpawn(agentDir, spawnerAgentDir, id, `codex AGENTS.md write failed: ${(err as Error)?.message ?? String(err)}`);
+        const errMsg = (err as Error)?.message ?? String(err);
+        await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: could not build codex developer instructions: ${errMsg}`);
+        await cleanupOnFailure();
+        return {
+          ok: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: `Error: could not build codex developer instructions: ${errMsg}`,
+        };
       }
+      await warnIfNoAgentsMd(workPath, agentCli, id, (line) => logSpawn(agentDir, spawnerAgentDir, id, line));
 
       const gitCommonDirResult = await newAgentSpawnCtx.run([
         "git", "-C", workPath, "rev-parse", "--git-common-dir",
@@ -7139,7 +7198,7 @@ export async function newAgent(
       // are redundant but harmless and preserve disabled-mode behavior.
       //
       // We grant the .ittybitty and .claude SUBDIRS rather than the bare
-      // parent repo so a misbehaving agent cannot reach src/, CLAUDE.md,
+      // parent repo so a misbehaving agent cannot reach src/, AGENTS.md,
       // etc. via a relative-path Bash write that bypasses the textual
       // matcher in checkBashCommandPaths.
       const codexParentRepoSubdirs = await deriveCodexParentRepoRoots(rootRepoPath);
@@ -7274,6 +7333,8 @@ export async function newAgent(
       } catch (err) {
         await logSpawn(agentDir, spawnerAgentDir, id, `agy .gitignore append failed: ${(err as Error)?.message ?? String(err)}`);
       }
+      // agy reads the repo's AGENTS.md (and GEMINI.md) natively, never CLAUDE.md.
+      await warnIfNoAgentsMd(workPath, agentCli, id, (line) => logSpawn(agentDir, spawnerAgentDir, id, line));
 
       // D5 (LOAD-BEARING — ANTIGRAVITY-CLI-NOTES.md §17.9): pre-trust the
       // worktree BEFORE the tmux session is created. `agy -i` creates the
@@ -7613,6 +7674,8 @@ echo ""
       // `effort` is validated + always non-empty (default 'xhigh' → 'high').
       codexEffort: mapEffortForCodex(effort),
       fugu: agentCli === "fugu",
+      // Built and size-checked in the worktree branch above.
+      developerInstructions: codexDeveloperInstructions,
       absPromptFile,
       absMetaJson: join(agentDir, "meta.json"),
       absExitScript,

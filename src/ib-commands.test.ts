@@ -31,7 +31,7 @@ import {
 } from "./agents";
 import { matchAgentById } from "./index";
 import { saveRegistry } from "./registry";
-import { makeAgent as _makeAgent, makeSpawnResult, waitFor } from "./test-utils";
+import { makeAgent as _makeAgent, makeSpawnResult, waitFor, codexDeveloperInstructionsFromScript } from "./test-utils";
 import {
   retireAgent,
   rehireAgent,
@@ -6720,7 +6720,10 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const agentDir = join(agentsDir, "sandbox-codex");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
     const profile = await Bun.file(join(agentDir, "sandbox.sb")).text();
-    const agentsMd = await Bun.file(join(agentDir, "repo", "AGENTS.md")).text();
+    // Role instructions travel as -c developer_instructions; nothing is
+    // written into the worktree.
+    const instructions = codexDeveloperInstructionsFromScript(start);
+    expect(await Bun.file(join(agentDir, "repo", "AGENTS.md")).exists()).toBe(false);
     expect(start).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
     expect(start).not.toContain("-s workspace-write");
     expect(start).toContain(`setsid ${sandboxDenialExecPrefix("'/usr/bin/sandbox-exec' -f")}`);
@@ -6732,10 +6735,10 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(start).not.toContain("-D 'SCRATCHPAD=");
     expect(profile).not.toContain('param "PROJECTDIR"');
     expect(profile).not.toContain('param "SCRATCHPAD"');
-    expect(agentsMd).toContain(canonicalizeSandboxPath(tempDir));
-    expect(agentsMd).toContain("**/.env");
-    expect(agentsMd).toContain("The kernel sandbox is ON");
-    expect(agentsMd).not.toContain("your Claude project directory and scratchpad");
+    expect(instructions).toContain(canonicalizeSandboxPath(tempDir));
+    expect(instructions).toContain("**/.env");
+    expect(instructions).toContain("The kernel sandbox is ON");
+    expect(instructions).not.toContain("your Claude project directory and scratchpad");
     expect(dispatcherDryRunCalls.length).toBeGreaterThanOrEqual(3);
     expect(spawnCalls.some((call) => call[0] === "codex")).toBe(false);
   });
@@ -6813,6 +6816,55 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(resume).toContain("sandbox-proxy-launch");
     expect(resume).toContain("export http_proxy=\"http://localhost:$PROXY_PORT\"");
     expect(resume).toContain("<&0 2> \"$STDERR_LOG\" &");
+  });
+
+  test("Codex resume removes a legacy generated AGENTS.md and relaunches with developer_instructions", async () => {
+    // Agents spawned before role instructions moved to developer_instructions
+    // still carry an untracked, generated <worktree>/AGENTS.md. Resume must
+    // delete it, or codex would read a second, stale copy of the role text.
+    const id = "codex-legacy-resume";
+    await writeSandboxType(id, { enabled: false, model: "codex:gpt-5.4-mini" });
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99985 }));
+    expect((await callNewAgent("legacy agents md", { name: id, type: id })).ok).toBe(true);
+    const agentDir = join(agentsDir, id);
+    const legacyPath = join(agentDir, "repo", "AGENTS.md");
+    await Bun.write(legacyPath, "## State Management\n\n## Project CLAUDE.md\n\n@./CLAUDE.md\n");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    meta.codex_session_id = "019e7b21-cb7d-7f23-8674-11036ed141ef";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
+    const lsFilesCalls: string[][] = [];
+    let createdSession = false;
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("ls-files") && cmdStr.includes("--error-unmatch")) {
+        lsFilesCalls.push(cmd);
+        return {
+          stdout: new Response("").body,
+          stderr: new Response("error: pathspec 'AGENTS.md' did not match any file(s) known to git\n").body,
+          exited: Promise.resolve(1),
+        } as SpawnResult;
+      }
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("tmux has-session")) return makeSpawnResult("", createdSession ? 0 : 1);
+      if (cmdStr.includes("tmux new-session")) { createdSession = true; return makeSpawnResult("", 0); }
+      if (cmdStr.includes("capture-pane")) return makeSpawnResult("OpenAI Codex", 0);
+      return makeSpawnResult("", 0);
+    });
+    setSendSpawnRunner(() => makeSpawnResult("", 0));
+    try {
+      const result = await resumeAgent(makeAgent(id, tempDir, "stopped", meta));
+      expect(result.ok).toBe(true);
+    } finally {
+      resetSendSpawnRunner();
+    }
+    expect(lsFilesCalls).toEqual([["git", "-C", join(agentDir, "repo"), "ls-files", "--error-unmatch", "AGENTS.md"]]);
+    expect(await Bun.file(legacyPath).exists()).toBe(false);
+    expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("removed the legacy generated <worktree>/AGENTS.md");
+    const resume = await Bun.file(join(agentDir, "resume.sh")).text();
+    expect(codexDeveloperInstructionsFromScript(resume)).toContain(id);
   });
 
   test("sandbox-enabled start.sh wraps both Claude branches and exports only proxy vars", async () => {
@@ -7107,7 +7159,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   });
 
   // ── A4 G2: ib sandbox refresh ──────────────────────────────────────────────
-  test("Codex refresh to disabled regenerates AGENTS.md and keeps no-prompt workspace-write hooks", async () => {
+  test("Codex refresh to disabled regenerates developer_instructions and keeps no-prompt workspace-write hooks", async () => {
     const id = "codex-refresh-instructions";
     const oldRead = join(tempDir, "old-policy");
     const newRead = join(tempDir, "new-policy");
@@ -7119,8 +7171,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     setWatchdogSpawnFn(() => ({ pid: 99960 }));
     expect((await callNewAgent("refresh policy", { name: id, type: id })).ok).toBe(true);
     const agentDir = join(agentsDir, id);
-    const instructions = join(agentDir, "repo", "AGENTS.md");
-    expect(await Bun.file(instructions).text()).toContain("The kernel sandbox is ON");
+    const startInstructions = codexDeveloperInstructionsFromScript(await Bun.file(join(agentDir, "start.sh")).text());
+    expect(startInstructions).toContain("The kernel sandbox is ON");
+    expect(startInstructions).toContain(canonicalizeSandboxPath(oldRead));
     const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
     meta.state = "stopped";
     meta.codex_session_id = "019e7b21-cb7d-7f23-8674-11036ed141ef";
@@ -7142,12 +7195,12 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     });
     const result = await refreshAgentSandbox(makeAgent(id, tempDir, "stopped", meta));
     expect(result.ok).toBe(true);
-    const text = await Bun.file(instructions).text();
+    const resume = await Bun.file(join(agentDir, "resume.sh")).text();
+    const text = codexDeveloperInstructionsFromScript(resume);
     expect(text).toContain(canonicalizeSandboxPath(newRead));
     expect(text).not.toContain(canonicalizeSandboxPath(oldRead));
     expect(text).toContain("The itsybitsy kernel sandbox is OFF");
     expect(text).not.toContain("your Claude project directory and scratchpad");
-    const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     expect(resume).not.toContain("sandbox-exec");
     expect(resume).not.toContain("sandbox-proxy-launch");
     expect(resume).not.toContain("sandbox-log-watch");
@@ -11491,7 +11544,7 @@ body`,
       expect(gitignore).toContain(".codex/");
     });
 
-    test("writes <worktree>/AGENTS.md with role + agent id (no <ittybitty> wrapper)", async () => {
+    test("passes role + agent id as developer_instructions (no <ittybitty> wrapper) and writes no AGENTS.md", async () => {
       setNewAgentSpawnRunner(mockSpawnRunner());
       const result = await callNewAgent("task", {
         name: "codex-agents-md",
@@ -11499,9 +11552,54 @@ body`,
         type: "worker",
       });
       expect(result.ok).toBe(true);
-      const agentsMd = await Bun.file(join(agentsDir, "codex-agents-md", "repo", "AGENTS.md")).text();
-      expect(agentsMd).toContain("codex-agents-md");
-      expect(agentsMd.startsWith("<ittybitty>")).toBe(false);
+      const startSh = await Bun.file(join(agentsDir, "codex-agents-md", "start.sh")).text();
+      const instructions = codexDeveloperInstructionsFromScript(startSh);
+      expect(instructions).toContain("codex-agents-md");
+      expect(instructions.startsWith("<ittybitty>")).toBe(false);
+      expect(instructions).not.toContain("</ittybitty>");
+      expect(await Bun.file(join(agentsDir, "codex-agents-md", "repo", "AGENTS.md")).exists()).toBe(false);
+      const log = await Bun.file(join(agentsDir, "codex-agents-md", "agent.log")).text();
+      expect(log).toMatch(/codex developer_instructions: \d+ bytes/);
+    });
+
+    test("leaves a repo-tracked AGENTS.md untouched in the worktree", async () => {
+      const base = mockSpawnRunner();
+      setNewAgentSpawnRunner((cmd: string[], o?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+        const out = base(cmd, o);
+        // Simulate the checkout of a repo that tracks AGENTS.md.
+        if (cmd.join(" ").includes("worktree add")) {
+          const repoDir = cmd[cmd.indexOf("add") + 1]!;
+          require("fs").writeFileSync(join(repoDir, "AGENTS.md"), "repo rules: run make\n");
+        }
+        return out;
+      });
+      const result = await callNewAgent("task", { name: "codex-repo-agents-md", model: "codex:gpt-5.4-mini" });
+      expect(result.ok).toBe(true);
+      const worktree = join(agentsDir, "codex-repo-agents-md", "repo");
+      expect(await Bun.file(join(worktree, "AGENTS.md")).text()).toBe("repo rules: run make\n");
+      const log = await Bun.file(join(agentsDir, "codex-repo-agents-md", "agent.log")).text();
+      expect(log).not.toContain("starts without the project instructions");
+    });
+
+    test("warns when the repo has CLAUDE.md but no AGENTS.md (codex never reads CLAUDE.md)", async () => {
+      const base = mockSpawnRunner();
+      setNewAgentSpawnRunner((cmd: string[], o?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+        const out = base(cmd, o);
+        if (cmd.join(" ").includes("worktree add")) {
+          const repoDir = cmd[cmd.indexOf("add") + 1]!;
+          require("fs").writeFileSync(join(repoDir, "CLAUDE.md"), "old rules\n");
+        }
+        return out;
+      });
+      const result = await callNewAgent("task", { name: "codex-claude-only", model: "codex:gpt-5.4-mini" });
+      // A warning, never a failure.
+      expect(result.ok).toBe(true);
+      const log = await Bun.file(join(agentsDir, "codex-claude-only", "agent.log")).text();
+      expect(log).toContain("Warning: codex agent 'codex-claude-only' starts without the project instructions");
+      expect(log).toContain("git mv CLAUDE.md AGENTS.md");
+      // The CLAUDE.md text is not copied into the role instructions.
+      const startSh = await Bun.file(join(agentsDir, "codex-claude-only", "start.sh")).text();
+      expect(codexDeveloperInstructionsFromScript(startSh)).not.toContain("old rules");
     });
 
     test("fails the spawn cleanly when the dispatcher precheck exits non-zero", async () => {
@@ -11819,6 +11917,42 @@ sandbox:
       const gitignore = await Bun.file(join(agentsDir, "agy-gitignore", "repo", ".gitignore")).text();
       expect(gitignore).toContain(".agents/hooks.json");
       expect(gitignore).toContain(".agents/rules/ittybitty-agent.md");
+    });
+
+    test("warns when the repo has CLAUDE.md but no AGENTS.md, and copies neither into the rule file", async () => {
+      const base = agyRunner();
+      setNewAgentSpawnRunner((cmd: string[], o?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+        const out = base(cmd, o);
+        if (cmd.join(" ").includes("worktree add")) {
+          const repoDir = cmd[cmd.indexOf("add") + 1]!;
+          require("fs").writeFileSync(join(repoDir, "CLAUDE.md"), "agy-claude-only-marker\n");
+        }
+        return out;
+      });
+      const result = await callNewAgent("task", { name: "agy-claude-only", model: "agy:gemini-3.7-flash-low" });
+      expect(result.ok).toBe(true);
+      const log = await Bun.file(join(agentsDir, "agy-claude-only", "agent.log")).text();
+      expect(log).toContain("Warning: agy agent 'agy-claude-only' starts without the project instructions");
+      const rule = await Bun.file(join(agentsDir, "agy-claude-only", "repo", ".agents", "rules", "ittybitty-agent.md")).text();
+      expect(rule).not.toContain("agy-claude-only-marker");
+      expect(rule).not.toContain("CLAUDE.md");
+    });
+
+    test("does not warn when the repo has AGENTS.md", async () => {
+      const base = agyRunner();
+      setNewAgentSpawnRunner((cmd: string[], o?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+        const out = base(cmd, o);
+        if (cmd.join(" ").includes("worktree add")) {
+          const repoDir = cmd[cmd.indexOf("add") + 1]!;
+          require("fs").writeFileSync(join(repoDir, "CLAUDE.md"), "legacy\n");
+          require("fs").writeFileSync(join(repoDir, "AGENTS.md"), "rules\n");
+        }
+        return out;
+      });
+      const result = await callNewAgent("task", { name: "agy-has-agents-md", model: "agy:gemini-3.7-flash-low" });
+      expect(result.ok).toBe(true);
+      const log = await Bun.file(join(agentsDir, "agy-has-agents-md", "agent.log")).text();
+      expect(log).not.toContain("starts without the project instructions");
     });
 
     test("pre-trusts the worktree BEFORE creating the tmux session (D5 — §17.9)", async () => {

@@ -9,7 +9,7 @@
  */
 
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir } from "fs/promises";
+import { chmod, mkdtemp, rm, mkdir, realpath } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
@@ -19,9 +19,22 @@ import {
   stripIttybittyWrapper,
   resolveIbBinaryPath,
   buildSkillsSection,
+  removeLegacyCodexAgentsMd,
 } from "./codex-spawn";
-import { CODEX_REGISTERED_EVENTS } from "./codex-config";
+import {
+  CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES,
+  CODEX_REGISTERED_EVENTS,
+  renderCodexDeveloperInstructionsPayload,
+  tomlBasicString,
+} from "./codex-config";
 import { setUserHome, resetUserHome } from "./home";
+import { shellQuote } from "./validation";
+import {
+  codexDeveloperInstructionsFromScript,
+  decodeCodexStringOverride,
+  hasPythonTomllib,
+  pythonTomlDecodeBasicString,
+} from "./test-utils";
 import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-log-launch";
 
 // Enabled-mode wrapper fixtures. Builders require the complete pair only when
@@ -34,12 +47,16 @@ const sandboxFields = () => ({
   sandboxExecPrefix: SANDBOX_PREFIX,
 });
 
+// Role instructions the launch-line fixtures pass as developer_instructions.
+const ROLE_TEXT = "## Role\n\nYou are worker agent `agent-abc12345`.\n";
+
 describe("buildCodexStartContent — launch line", () => {
   const baseInput = () => ({
     agentId: "agent-abc12345",
     ibBinaryPath: "/usr/local/bin/ib",
     agentDir: "/tmp/test",
     codexModel: "gpt-5.4-mini",
+    developerInstructions: ROLE_TEXT,
     absPromptFile: "/tmp/test/prompt.txt",
     absMetaJson: "/tmp/test/meta.json",
     absExitScript: "/tmp/test/exit-check.sh",
@@ -341,6 +358,7 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     ibBinaryPath: "/usr/local/bin/ib",
     agentDir: "/tmp/test",
     codexSessionId: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+    developerInstructions: ROLE_TEXT,
     absMetaJson: "/tmp/test/meta.json",
     absExitScript: "/tmp/test/exit-check.sh",
     absAgentLog: "/tmp/test/agent.log",
@@ -621,6 +639,7 @@ describe("write-pid stdin is redirected off the pane tty (codex COOKED-mode wedg
     ibBinaryPath: "/usr/local/bin/ib",
     agentDir: "/tmp/test",
     codexModel: "gpt-5.4-mini",
+    developerInstructions: ROLE_TEXT,
     absPromptFile: "/tmp/test/prompt.txt",
     absMetaJson: "/tmp/test/meta.json",
     absExitScript: "/tmp/test/exit-check.sh",
@@ -633,6 +652,7 @@ describe("write-pid stdin is redirected off the pane tty (codex COOKED-mode wedg
     ibBinaryPath: "/usr/local/bin/ib",
     agentDir: "/tmp/test",
     codexSessionId: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+    developerInstructions: ROLE_TEXT,
     absMetaJson: "/tmp/test/meta.json",
     absExitScript: "/tmp/test/exit-check.sh",
     absAgentLog: "/tmp/test/agent.log",
@@ -780,12 +800,12 @@ describe("resolveIbBinaryPath", () => {
   });
 });
 
-describe("buildCodexAgentsMd / writeCodexAgentsMd", () => {
+describe("buildCodexDeveloperInstructions", () => {
   let tempDir: string;
   let fakeHome: string;
 
   beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), "codex-agents-md-test-"));
+    tempDir = await mkdtemp(join(tmpdir(), "codex-dev-instructions-test-"));
     // Provide a fake HOME so generateInstructions() can resolve agent-types
     // without polluting the developer's real ~/.itsybitsy.
     fakeHome = join(tempDir, "home");
@@ -799,8 +819,8 @@ describe("buildCodexAgentsMd / writeCodexAgentsMd", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test("buildCodexAgentsMd strips the <ittybitty> wrapper", async () => {
-    const { buildCodexAgentsMd } = await import("./codex-spawn");
+  test("strips the <ittybitty> wrapper", async () => {
+    const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
     const ctx = {
       role: "worker" as const,
       agentId: "agent-test01",
@@ -811,14 +831,14 @@ describe("buildCodexAgentsMd / writeCodexAgentsMd", () => {
       rootRepoPath: tempDir,
       agentType: "worker",
     };
-    const body = await buildCodexAgentsMd(ctx);
+    const body = await buildCodexDeveloperInstructions(ctx);
     expect(body.startsWith("<ittybitty>")).toBe(false);
     expect(body.endsWith("</ittybitty>")).toBe(false);
     expect(body.endsWith("</ittybitty>\n")).toBe(false);
   });
 
-  test("buildCodexAgentsMd contains the agent id (interpolated from template)", async () => {
-    const { buildCodexAgentsMd } = await import("./codex-spawn");
+  test("contains the agent id (interpolated from template)", async () => {
+    const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
     const ctx = {
       role: "worker" as const,
       agentId: "agent-test01",
@@ -829,13 +849,14 @@ describe("buildCodexAgentsMd / writeCodexAgentsMd", () => {
       rootRepoPath: tempDir,
       agentType: "worker",
     };
-    const body = await buildCodexAgentsMd(ctx);
+    const body = await buildCodexDeveloperInstructions(ctx);
     expect(body).toContain("agent-test01");
   });
 
-  test("writeCodexAgentsMd writes the file inside the worktree", async () => {
-    const { writeCodexAgentsMd } = await import("./codex-spawn");
+  test("writes nothing into the worktree (codex reads the repo's own AGENTS.md)", async () => {
+    const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
     const worktree = join(tempDir, "wt");
+    await mkdir(worktree, { recursive: true });
     const ctx = {
       role: "worker" as const,
       agentId: "agent-test02",
@@ -846,17 +867,14 @@ describe("buildCodexAgentsMd / writeCodexAgentsMd", () => {
       rootRepoPath: tempDir,
       agentType: "worker",
     };
-    const written = await writeCodexAgentsMd(worktree, ctx);
-    expect(written).toBe(join(worktree, "AGENTS.md"));
-    const body = await Bun.file(written).text();
-    expect(body.length).toBeGreaterThan(0);
-    expect(body).toContain("agent-test02");
+    await buildCodexDeveloperInstructions(ctx);
+    expect(await Bun.file(join(worktree, "AGENTS.md")).exists()).toBe(false);
   });
 
-  // HIGH 4 from Phase 4 review: AGENTS.md for codex manager must not
+  // HIGH 4 from Phase 4 review: codex manager instructions must not
   // reference Claude-only tools like TodoWrite.
-  test("HIGH 4: codex manager AGENTS.md does not reference TodoWrite", async () => {
-    const { buildCodexAgentsMd } = await import("./codex-spawn");
+  test("HIGH 4: codex manager instructions do not reference TodoWrite", async () => {
+    const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
     const ctx = {
       role: "manager" as const,
       agentId: "agent-mgr-test",
@@ -867,14 +885,14 @@ describe("buildCodexAgentsMd / writeCodexAgentsMd", () => {
       rootRepoPath: tempDir,
       agentType: "manager",
     };
-    const body = await buildCodexAgentsMd(ctx);
+    const body = await buildCodexDeveloperInstructions(ctx);
     expect(body).not.toContain("TodoWrite");
     // Replacement phrasing should be present.
     expect(body).toContain("Track progress with measurable criteria");
   });
 
-  test("HIGH 4: codex worker AGENTS.md does not contain Write(...) tool reference", async () => {
-    const { buildCodexAgentsMd } = await import("./codex-spawn");
+  test("HIGH 4: codex worker instructions do not contain Write(...) tool reference", async () => {
+    const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
     const ctx = {
       role: "worker" as const,
       agentId: "agent-w-test",
@@ -885,77 +903,266 @@ describe("buildCodexAgentsMd / writeCodexAgentsMd", () => {
       rootRepoPath: tempDir,
       agentType: "worker",
     };
-    const body = await buildCodexAgentsMd(ctx);
+    const body = await buildCodexDeveloperInstructions(ctx);
     // The original _non_coordinator.md had `Write(/tmp/commit-msg.txt, ...)`
     // which references the Claude `Write` tool. After the HIGH 4 fix, this
     // exact snippet must be gone.
     expect(body).not.toContain('Write(/tmp/commit-msg.txt');
   });
 
-  test("project CLAUDE.md is referenced via codex @./CLAUDE.md import when present in the worktree", async () => {
-    const { buildCodexAgentsMd } = await import("./codex-spawn");
+  test("copies in no project or user-wide instruction file — each CLI reads its own natively", async () => {
+    // Codex reads the repo's AGENTS.md itself and its user-wide text from
+    // ~/.codex/AGENTS.md; copying any of these in would give the agent two
+    // copies (or, for CLAUDE.md, text the other CLIs never see).
+    const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
     const worktree = join(tempDir, "wt");
-    await mkdir(worktree, { recursive: true });
-    await Bun.write(join(worktree, "CLAUDE.md"), "# project rules\n");
+    await mkdir(join(worktree, ".claude"), { recursive: true });
+    await Bun.write(join(worktree, "CLAUDE.md"), "project-claude-marker-3141\n");
+    await Bun.write(join(worktree, ".claude", "CLAUDE.md"), "dot-claude-marker-2718\n");
+    await Bun.write(join(worktree, "AGENTS.md"), "project-agents-marker-1618\n");
+    await mkdir(join(fakeHome, ".claude"), { recursive: true });
+    await Bun.write(join(fakeHome, ".claude", "CLAUDE.md"), "user-global-marker-1414\n");
     const ctx = {
       role: "worker" as const,
-      agentId: "agent-pclaude",
+      agentId: "agent-noinline",
       agentManager: "agent-mgr",
       parentBranch: "main",
-      branchName: "agent/agent-pclaude",
+      branchName: "agent/agent-noinline",
       worktreePath: worktree,
       rootRepoPath: tempDir,
       agentType: "worker",
     };
-    const body = await buildCodexAgentsMd(ctx);
-    expect(body).toContain("## Project CLAUDE.md");
-    expect(body).toContain("@./CLAUDE.md");
-    // The project CLAUDE.md content must NOT be inlined — it goes through
-    // the `@` import so edits to the checked-in file propagate without a
-    // regeneration.
-    expect(body).not.toContain("# project rules");
+    const body = await buildCodexDeveloperInstructions(ctx);
+    for (const marker of [
+      "project-claude-marker-3141",
+      "dot-claude-marker-2718",
+      "project-agents-marker-1618",
+      "user-global-marker-1414",
+      "## Project CLAUDE.md",
+      "## User-global CLAUDE.md",
+      "@./CLAUDE.md",
+    ]) {
+      expect(body).not.toContain(marker);
+    }
   });
+});
 
-  test("user-global ~/.claude/CLAUDE.md is inlined when present (codex @ import can't reach outside the project root)", async () => {
-    const { buildCodexAgentsMd } = await import("./codex-spawn");
-    await mkdir(join(fakeHome, ".claude"), { recursive: true });
+describe("developer_instructions reaches codex byte-for-byte through the real start.sh / resume.sh", () => {
+  // End-to-end over the shell layer: render the scripts, run them with bash
+  // against a stub `codex` that records its argv NUL-separated, then decode
+  // the recorded developer_instructions argument the way codex does.
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await realpath(await mkdtemp(join(tmpdir(), "codex-argv-")));
+    await mkdir(join(dir, "bin"), { recursive: true });
+    // Stub codex: each argv element exactly as received, NUL-terminated.
     await Bun.write(
-      join(fakeHome, ".claude", "CLAUDE.md"),
-      "GLOBAL: be terse\n",
+      join(dir, "bin", "codex"),
+      `#!/bin/bash\nprintf '%s\\0' "$@" > ${shellQuote(join(dir, "argv.bin"))}\n`,
     );
-    const ctx = {
-      role: "worker" as const,
-      agentId: "agent-gclaude",
-      agentManager: "agent-mgr",
-      parentBranch: "main",
-      branchName: "agent/agent-gclaude",
-      worktreePath: join(tempDir, "wt"),
-      rootRepoPath: tempDir,
-      agentType: "worker",
-    };
-    const body = await buildCodexAgentsMd(ctx);
-    expect(body).toContain("## User-global CLAUDE.md");
-    // The global file MUST be inlined — codex `@` import doesn't resolve
-    // paths outside the project root.
-    expect(body).toContain("GLOBAL: be terse");
+    await Bun.write(join(dir, "bin", "ib"), "#!/bin/bash\nexit 0\n");
+    await Bun.write(join(dir, "exit-check.sh"), "#!/bin/bash\nexit 0\n");
+    await Bun.write(join(dir, "prompt.txt"), "do the task");
+    for (const exe of [join(dir, "bin", "codex"), join(dir, "bin", "ib"), join(dir, "exit-check.sh")]) {
+      await chmod(exe, 0o755);
+    }
   });
 
-  test("no CLAUDE.md section is emitted when neither project nor user-global file exists", async () => {
-    const { buildCodexAgentsMd } = await import("./codex-spawn");
-    const ctx = {
-      role: "worker" as const,
-      agentId: "agent-noclaude",
-      agentManager: "agent-mgr",
-      parentBranch: "main",
-      branchName: "agent/agent-noclaude",
-      worktreePath: join(tempDir, "wt"),
-      rootRepoPath: tempDir,
-      agentType: "worker",
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const common = () => ({
+    agentId: "agent-argv01",
+    ibBinaryPath: join(dir, "bin", "ib"),
+    agentDir: dir,
+    absMetaJson: join(dir, "no-meta.json"), // absent → write-pid is skipped
+    absExitScript: join(dir, "exit-check.sh"),
+    absAgentLog: join(dir, "agent.log"),
+    absStderrLog: join(dir, "stderr.log"),
+    sandboxEnabled: false,
+  });
+
+  // Hostile at every layer, plus live shell expansions that would create
+  // files if bash ever evaluated them.
+  const hostileText = () => [
+    "## Role",
+    "it's O'Brien's \"quoted\" text; back\\slash and trailing \\",
+    `\`touch ${dir}/pwned-backtick\` $(touch ${dir}/pwned-subst) \${HOME} $HOME !! $'ansi'`,
+    "tab\there\r\ncrlf, controls \x00\x01\x1b[31m\x7f, bell \x07",
+    "unicode: é 日本語 🎉 👩‍💻 \u{2028} \u{2029} \u{FEFF}",
+    'toml: """ \'\'\' [table] key = "v" # not a comment',
+  ].join("\n");
+
+  async function runAndReadArgv(script: string): Promise<string[]> {
+    const scriptPath = join(dir, "launch.sh");
+    await Bun.write(scriptPath, script);
+    const proc = Bun.spawn(["bash", scriptPath], {
+      cwd: dir,
+      env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH ?? ""}` },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(await proc.exited).toBe(0);
+    const bytes = await Bun.file(join(dir, "argv.bin")).bytes();
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    const args: string[] = [];
+    let start = 0;
+    for (let i = 0; i < bytes.length; i++) {
+      if (bytes[i] === 0) {
+        args.push(decoder.decode(bytes.subarray(start, i)));
+        start = i + 1;
+      }
+    }
+    return args;
+  }
+
+  function developerInstructionsArg(args: string[]): string {
+    const matches = args.filter((a, i) => a.startsWith("developer_instructions=") && args[i - 1] === "-c");
+    expect(matches.length).toBe(1);
+    return matches[0]!;
+  }
+
+  async function expectExactDelivery(args: string[], text: string): Promise<void> {
+    const payload = developerInstructionsArg(args);
+    const { key, value } = decodeCodexStringOverride(payload);
+    expect(key).toBe("developer_instructions");
+    expect(value).toBe(text);
+    if (hasPythonTomllib()) {
+      expect(pythonTomlDecodeBasicString(payload.slice("developer_instructions=".length))).toBe(text);
+    }
+    // No shell expansion ran.
+    expect(await Bun.file(join(dir, "pwned-backtick")).exists()).toBe(false);
+    expect(await Bun.file(join(dir, "pwned-subst")).exists()).toBe(false);
+  }
+
+  test("start.sh: the argument codex receives decodes to the exact role text", async () => {
+    const text = hostileText();
+    const script = buildCodexStartContent({
+      ...common(),
+      codexModel: "gpt-5.4-mini",
+      developerInstructions: text,
+      absPromptFile: join(dir, "prompt.txt"),
+    });
+    // The generated script decodes to the same text as well (used by the
+    // ib-commands integration tests to inspect role content).
+    expect(codexDeveloperInstructionsFromScript(script)).toBe(text);
+    const args = await runAndReadArgv(script);
+    expect(args.slice(0, 2)).toEqual(["-m", "gpt-5.4-mini"]);
+    expect(args.at(-1)).toBe("do the task");
+    await expectExactDelivery(args, text);
+  });
+
+  test("resume.sh: the argument codex receives decodes to the exact role text", async () => {
+    const text = hostileText();
+    const script = buildCodexResumeContent({
+      ...common(),
+      codexSessionId: "019e7b21-cb7d-7f23-8674-11036ed141ef",
+      developerInstructions: text,
+    });
+    expect(codexDeveloperInstructionsFromScript(script)).toBe(text);
+    const args = await runAndReadArgv(script);
+    expect(args.slice(0, 2)).toEqual(["resume", "019e7b21-cb7d-7f23-8674-11036ed141ef"]);
+    await expectExactDelivery(args, text);
+  });
+
+  test("a payload near the size limit still launches as one argument", async () => {
+    // ~110 KiB after escaping: every line holds characters that grow when
+    // escaped (quotes, backslashes, newlines) plus multi-byte text.
+    const line = "\"q\" \\b\\ é日 $(x) `y`\n";
+    const text = line.repeat(Math.floor((110 * 1024) / Buffer.byteLength(tomlBasicString(line), "utf8")));
+    const payloadBytes = Buffer.byteLength(renderCodexDeveloperInstructionsPayload(text), "utf8");
+    expect(payloadBytes).toBeGreaterThan(100 * 1024);
+    expect(payloadBytes).toBeLessThanOrEqual(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES);
+    const script = buildCodexStartContent({
+      ...common(),
+      codexModel: "gpt-5.4-mini",
+      developerInstructions: text,
+      absPromptFile: join(dir, "prompt.txt"),
+    });
+    const args = await runAndReadArgv(script);
+    expect(Buffer.byteLength(developerInstructionsArg(args), "utf8")).toBe(payloadBytes);
+    expect(decodeCodexStringOverride(developerInstructionsArg(args)).value).toBe(text);
+  });
+
+  test("rendering refuses role text over the limit instead of writing a script codex cannot launch", () => {
+    expect(() =>
+      buildCodexStartContent({
+        ...common(),
+        codexModel: "gpt-5.4-mini",
+        developerInstructions: "x".repeat(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES),
+        absPromptFile: join(dir, "prompt.txt"),
+      }),
+    ).toThrow(/too large/);
+  });
+});
+
+describe("removeLegacyCodexAgentsMd — pre-2026-09 generated AGENTS.md cleanup", () => {
+  let worktree: string;
+  const NOT_TRACKED = {
+    stdout: "",
+    stderr: "error: pathspec 'AGENTS.md' did not match any file(s) known to git\n",
+    exitCode: 1,
+  };
+  const runner = (result: { stdout: string; stderr: string; exitCode: number }) => {
+    const calls: string[][] = [];
+    const run = async (cmd: string[]) => {
+      calls.push(cmd);
+      return result;
     };
-    const body = await buildCodexAgentsMd(ctx);
-    expect(body).not.toContain("## Project CLAUDE.md");
-    expect(body).not.toContain("## User-global CLAUDE.md");
-    expect(body).not.toContain("@./CLAUDE.md");
+    return { run, calls };
+  };
+
+  beforeEach(async () => {
+    worktree = await mkdtemp(join(tmpdir(), "codex-legacy-agents-md-"));
+  });
+
+  afterEach(async () => {
+    await rm(worktree, { recursive: true, force: true });
+  });
+
+  test("removes an untracked file with an old generator section", async () => {
+    await Bun.write(join(worktree, "AGENTS.md"), "## State Management\n\n## Project CLAUDE.md\n\n@./CLAUDE.md\n");
+    const { run, calls } = runner(NOT_TRACKED);
+    expect(await removeLegacyCodexAgentsMd(worktree, "agent-old01", run)).toBe("removed");
+    expect(await Bun.file(join(worktree, "AGENTS.md")).exists()).toBe(false);
+    expect(calls).toEqual([["git", "-C", worktree, "ls-files", "--error-unmatch", "AGENTS.md"]]);
+  });
+
+  test("removes an untracked file carrying the agent's identity line", async () => {
+    await Bun.write(
+      join(worktree, "AGENTS.md"),
+      "You are worker agent `agent-old02` in the ittybitty multi-agent orchestration system.\n",
+    );
+    expect(await removeLegacyCodexAgentsMd(worktree, "agent-old02", runner(NOT_TRACKED).run)).toBe("removed");
+  });
+
+  test("keeps a TRACKED AGENTS.md even when it looks generated (the repo's own file)", async () => {
+    await Bun.write(join(worktree, "AGENTS.md"), "## Skills (read-on-demand workflow guides)\n");
+    const tracked = runner({ stdout: "AGENTS.md\n", stderr: "", exitCode: 0 });
+    expect(await removeLegacyCodexAgentsMd(worktree, "agent-old03", tracked.run)).toBe("tracked");
+    expect(await Bun.file(join(worktree, "AGENTS.md")).exists()).toBe(true);
+  });
+
+  test("keeps an untracked AGENTS.md that itsybitsy did not generate", async () => {
+    await Bun.write(join(worktree, "AGENTS.md"), "# Build\n\nRun `make`.\n");
+    expect(await removeLegacyCodexAgentsMd(worktree, "agent-old04", runner(NOT_TRACKED).run)).toBe("kept");
+    expect(await Bun.file(join(worktree, "AGENTS.md")).text()).toBe("# Build\n\nRun `make`.\n");
+  });
+
+  test("leaves the file alone when git fails without a clear 'not tracked' answer", async () => {
+    await Bun.write(join(worktree, "AGENTS.md"), "## Skills (read-on-demand workflow guides)\n");
+    const broken = runner({ stdout: "", stderr: "fatal: not a git repository\n", exitCode: 128 });
+    expect(await removeLegacyCodexAgentsMd(worktree, "agent-old05", broken.run)).toBe("unknown");
+    expect(await Bun.file(join(worktree, "AGENTS.md")).exists()).toBe(true);
+  });
+
+  test("does nothing (and runs no git) when there is no AGENTS.md", async () => {
+    const { run, calls } = runner(NOT_TRACKED);
+    expect(await removeLegacyCodexAgentsMd(worktree, "agent-old06", run)).toBe("absent");
+    expect(calls).toEqual([]);
   });
 });
 
@@ -1116,9 +1323,9 @@ describe("buildSkillsSection — skills catalog", () => {
     expect(section).toBe("");
   });
 
-  test("buildCodexAgentsMd integration: output contains the Skills header when a skills dir exists", async () => {
-    const { buildCodexAgentsMd } = await import("./codex-spawn");
-    // buildCodexAgentsMd reads ~/.claude/skills via the default param, so point
+  test("buildCodexDeveloperInstructions integration: output contains the Skills header when a skills dir exists", async () => {
+    const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
+    // buildCodexDeveloperInstructions reads ~/.claude/skills via the default param, so point
     // HOME at a temp dir holding a single skill. generateInstructions() also
     // resolves agent-types from HOME, so build the full fake-home layout.
     try {
@@ -1142,7 +1349,7 @@ describe("buildSkillsSection — skills catalog", () => {
         rootRepoPath: tempDir,
         agentType: "worker",
       };
-      const body = await buildCodexAgentsMd(ctx);
+      const body = await buildCodexDeveloperInstructions(ctx);
       expect(body).toContain("## Skills (read-on-demand workflow guides)");
       expect(body).toContain("### demo");
       expect(body).toContain("description: Demo skill");
@@ -1151,8 +1358,8 @@ describe("buildSkillsSection — skills catalog", () => {
     }
   });
 
-  test("buildCodexAgentsMd integration: no Skills header when the skills dir is absent", async () => {
-    const { buildCodexAgentsMd } = await import("./codex-spawn");
+  test("buildCodexDeveloperInstructions integration: no Skills header when the skills dir is absent", async () => {
+    const { buildCodexDeveloperInstructions } = await import("./codex-spawn");
     try {
       // Fake home WITHOUT a .claude/skills dir.
       const fakeHome = join(tempDir, "home-noskills");
@@ -1170,7 +1377,7 @@ describe("buildSkillsSection — skills catalog", () => {
         rootRepoPath: tempDir,
         agentType: "worker",
       };
-      const body = await buildCodexAgentsMd(ctx);
+      const body = await buildCodexDeveloperInstructions(ctx);
       expect(body).not.toContain("## Skills (read-on-demand workflow guides)");
     } finally {
       resetUserHome();

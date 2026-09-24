@@ -1,22 +1,51 @@
 /**
  * Shared instruction-building helpers for the non-Claude agent CLIs.
  *
- * Codex reads its role context from a per-worktree `AGENTS.md`; Antigravity
- * (`agy`) reads it from an always-on rule file. Both start from the same
- * Claude `session-start` template, strip the Claude-only `<ittybitty>` XML
- * wrapper, and append a directory of the read-on-demand skills. Those two
- * pieces are CLI-agnostic and live here so codex-spawn.ts and agy-config.ts
- * share one implementation (no copy-paste); the CLAUDE.md appendix differs
- * per CLI (codex uses a native `@./CLAUDE.md` import, agy inlines it) and so
- * stays in each CLI's own module.
+ * Codex receives its role context as `-c developer_instructions="…"`;
+ * Antigravity (`agy`) reads it from an always-on rule file. Both start from
+ * the same Claude `session-start` template, strip the Claude-only
+ * `<ittybitty>` XML wrapper, and append a directory of the read-on-demand
+ * skills. Those pieces are CLI-agnostic and live here so codex-spawn.ts and
+ * agy-config.ts share one implementation (no copy-paste).
  *
- * Extracted verbatim from codex-spawn.ts; codex behaviour is byte-identical
- * (codex-spawn.ts re-exports these so existing importers are unaffected).
+ * Project and user-wide instructions are never copied in: every CLI reads the
+ * repo's `AGENTS.md` natively (Claude Code 2.1.277+, codex, agy), and each
+ * reads its own global file (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`,
+ * `~/.gemini/GEMINI.md`). `missingAgentsMdWarning` flags a repo that still
+ * keeps its instructions only in `CLAUDE.md`.
+ *
+ * codex-spawn.ts re-exports the builders so existing importers are unaffected.
  */
 
 import { join } from "path";
 import { userHome } from "./home";
 import { readdir } from "fs/promises";
+
+/**
+ * Spawn-time check for the non-Claude CLIs. Codex and agy read a project's
+ * instructions from `AGENTS.md`, never from `CLAUDE.md`, and itsybitsy does
+ * not copy `CLAUDE.md` into their instructions. Returns a one-line warning when
+ * the worktree root has `CLAUDE.md` (or `.claude/CLAUDE.md`) but no
+ * `AGENTS.md`, so the user knows the agent starts without the project's
+ * instructions; null otherwise. A symlinked `AGENTS.md` counts as present.
+ */
+export async function missingAgentsMdWarning(
+  worktreePath: string,
+  cli: string,
+  agentId: string,
+): Promise<string | null> {
+  if (await Bun.file(join(worktreePath, "AGENTS.md")).exists()) return null;
+  for (const claudeMd of ["CLAUDE.md", join(".claude", "CLAUDE.md")]) {
+    if (await Bun.file(join(worktreePath, claudeMd)).exists()) {
+      return (
+        `${cli} agent '${agentId}' starts without the project instructions: the repo has ` +
+        `${claudeMd} but no AGENTS.md, and ${cli} does not read CLAUDE.md. Rename it ` +
+        `(git mv ${claudeMd} AGENTS.md); Claude Code 2.1.277+ reads AGENTS.md too.`
+      );
+    }
+  }
+  return null;
+}
 
 /**
  * Remove a single outer `<ittybitty>...</ittybitty>` wrapper. If the input

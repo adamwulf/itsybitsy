@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from "fs/promises";
 import { homedir, tmpdir } from "os";
 import { dirname, join } from "path";
 import { parseAgentTypeFile } from "./agent-types";
@@ -551,6 +551,48 @@ describe("agy state runtime root (AGYSTATEDIR, ~/.gemini)", () => {
     expect(resolvePathAccess(`${agyDir}/antigravity-cli/settings.json`, "write", table)).toBe("allow");
     expect(resolvePathAccess(`${agyDir}/config/config.json`, "write", table)).toBe("deny");
     expect(resolvePathAccess(`${agyDir}/config/config.json`, "read", table)).toBe("deny");
+  });
+});
+
+describe("user-wide instruction symlinks under the verbatim _all floor", () => {
+  // Codex and agy get user-wide instructions only from their own global files.
+  // The supported setup links both to one real file:
+  //   ~/.codex/AGENTS.md  -> ~/.claude/CLAUDE.md
+  //   ~/.gemini/GEMINI.md -> ~/.claude/CLAUDE.md
+  // Under the kernel sandbox the CLI process itself must read the link AND its
+  // target. Built on real symlinks so the resolver's realpath canonicalization
+  // is exercised, not just string prefixes.
+  test("codex and agy can read both the link and the ~/.claude/CLAUDE.md target", async () => {
+    const home = await realpath(await mkdtemp(join(tmpdir(), "sandbox-global-md-")));
+    try {
+      const target = join(home, ".claude", "CLAUDE.md");
+      const codexLink = join(home, ".codex", "AGENTS.md");
+      const agyLink = join(home, ".gemini", "GEMINI.md");
+      for (const dir of [".claude", ".codex", ".gemini"]) await mkdir(join(home, dir), { recursive: true });
+      await writeFile(target, "user-wide rules\n");
+      await symlink(target, codexLink);
+      await symlink(target, agyLink);
+
+      const allPaths = parseAgentTypeFile(
+        await Bun.file(join(import.meta.dir, "../docs/agent-types/_all.md")).text(),
+      ).frontmatter.paths as PathsConfig;
+      const codexParams: SandboxProfileParams = { ...PARAMS, HOME: home };
+      const agyParams: SandboxProfileParams = { ...codexParams, AGYSTATEDIR: join(home, ".gemini") };
+
+      for (const [params, link] of [[codexParams, codexLink], [agyParams, agyLink]] as const) {
+        const table = sandboxPathAccessTable(allPaths, params);
+        expect(resolvePathAccess(link, "read", table)).toBe("allow");
+        expect(resolvePathAccess(target, "read", table)).toBe("allow");
+        // The link's own directory is readable too (path lookup of the link).
+        expect(resolvePathAccess(join(link, ".."), "read", table)).toBe("allow");
+      }
+      // The emitted SBPL carries the ~/.claude and ~/.codex floor rows.
+      const profile = generateProfile(EMPTY_CONFIG, allPaths, codexParams);
+      expect(profile).toContain(`(subpath "${home}/.claude")`);
+      expect(profile).toContain(`(subpath "${home}/.codex")`);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
   });
 });
 

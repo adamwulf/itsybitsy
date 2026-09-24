@@ -140,31 +140,31 @@ describe("buildAgyRulesFile", () => {
     expect(body).toContain("agent-rules01");
   });
 
-  test("INLINES the project CLAUDE.md verbatim (no @./CLAUDE.md import)", async () => {
-    await Bun.write(join(worktree, "CLAUDE.md"), "# project rules\nUnique-project-marker-9271\n");
-    const body = await buildAgyRulesFile(ctxFor());
-    expect(body).toContain("Unique-project-marker-9271");
-    // agy has no @file import — the project doc must be inlined, not referenced.
-    expect(body).not.toContain("@./CLAUDE.md");
-  });
-
-  test("INLINES the user-global ~/.claude/CLAUDE.md when present", async () => {
+  test("copies in no project or user-wide instruction file — agy reads AGENTS.md and ~/.gemini/GEMINI.md itself", async () => {
+    await Bun.write(join(worktree, "CLAUDE.md"), "Unique-project-marker-9271\n");
+    await Bun.write(join(worktree, "AGENTS.md"), "Unique-agents-marker-7734\n");
     const userClaudeDir = join(fakeHome, ".claude");
     await mkdir(userClaudeDir, { recursive: true });
     await Bun.write(join(userClaudeDir, "CLAUDE.md"), "Unique-user-marker-5502\n");
     const body = await buildAgyRulesFile(ctxFor());
-    expect(body).toContain("Unique-user-marker-5502");
-    expect(body).toContain("User-global CLAUDE.md");
+    for (const marker of [
+      "Unique-project-marker-9271",
+      "Unique-agents-marker-7734",
+      "Unique-user-marker-5502",
+      "## Project CLAUDE.md",
+      "User-global CLAUDE.md",
+    ]) {
+      expect(body).not.toContain(marker);
+    }
   });
 
-  test("inlines BOTH CLAUDE.md files together", async () => {
-    await Bun.write(join(worktree, "CLAUDE.md"), "proj-marker-A\n");
-    const userClaudeDir = join(fakeHome, ".claude");
-    await mkdir(userClaudeDir, { recursive: true });
-    await Bun.write(join(userClaudeDir, "CLAUDE.md"), "user-marker-B\n");
+  test("appends the skills catalog after the role body", async () => {
+    const skillDir = join(fakeHome, ".claude", "skills", "demo");
+    await mkdir(skillDir, { recursive: true });
+    await Bun.write(join(skillDir, "SKILL.md"), "---\nname: demo\ndescription: Demo skill\n---\n");
     const body = await buildAgyRulesFile(ctxFor());
-    expect(body).toContain("proj-marker-A");
-    expect(body).toContain("user-marker-B");
+    expect(body).toContain("## Skills (read-on-demand workflow guides)");
+    expect(body.indexOf("agent-rules01")).toBeLessThan(body.indexOf("## Skills"));
   });
 });
 

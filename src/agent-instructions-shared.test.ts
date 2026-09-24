@@ -75,10 +75,12 @@ describe("missingAgentsMdWarning", () => {
       expect(await missingAgentsMdWarning(worktree, "agy", "agent-n3")).toBeNull();
     });
 
-    test("agy: .gemini/GEMINI.md suppresses the warning", async () => {
+    test("agy: .gemini/GEMINI.md is NOT a directory rule — still warns", async () => {
+      // agy's docs list only root GEMINI.md / AGENTS.md as directory rules;
+      // .gemini/ holds Gemini CLI settings, not rules.
       await write("CLAUDE.md");
       await write(".gemini/GEMINI.md");
-      expect(await missingAgentsMdWarning(worktree, "agy", "agent-n4")).toBeNull();
+      expect(await missingAgentsMdWarning(worktree, "agy", "agent-n4")).toContain("starts without");
     });
 
     test("agy: a repo-owned .agents/rules/*.md suppresses the warning", async () => {

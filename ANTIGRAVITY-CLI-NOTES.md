@@ -90,7 +90,7 @@ Captured on this machine on 2026-09-01[^75]. There is no `--title`, no trust fla
 
 - "Directory-Based Rules (`GEMINI.md` / `AGENTS.md`)": the system walks up from cwd to the repository root and loads them; they apply to their directory and below; these standalone files do not support frontmatter and are always active[^23].
 - Workspace customization roots: `.agents/` (or `.agent/`, `_agents/`, `_agent/`) at the project root; rules also in `.agents/rules/*.md`; global root `~/.gemini/config/`; only `always_on` rules load unconditionally, `trigger: model_decision` rules are lazy[^22].
-- Migration doc: "`.gemini/GEMINI.md` and `AGENTS.md`" locally, `~/.gemini/GEMINI.md` globally; existing files work unchanged[^13].
+- Migration doc: "rule constraints defined inside your active directory's `GEMINI.md` and `AGENTS.md` files" locally, `~/.gemini/GEMINI.md` globally; existing files work unchanged[^13]. (Corrected 2026-09-23: an earlier version of this line said "`.gemini/GEMINI.md`" locally. The current doc and the builtin agy-customizations docs[^22][^23] list only root `GEMINI.md` / `AGENTS.md` as directory rules; a project `.gemini/GEMINI.md` is not a documented rule file.)
 - The binary contains the strings `AGENTS.md` and `GEMINI.md` and no `CLAUDE.md`[^30]. Nothing in the docs mentions `CLAUDE.md`.
 - The first local run logged `prompt section "user_rules"` as empty (the itsybitsy checkout has `CLAUDE.md` only)[^27].
 
@@ -226,7 +226,7 @@ Codex reaches `running` / `waiting` / `complete` through hooks, with tmux scrapi
 - Keep a tmux fallback in `parseStateForCli`[^63] because `Stop` has an open never-fires bug on Linux[^42]. Idle-prompt shape, spinner text, approval-card text, and quota-exhausted text must be captured from a real session (§16 Q8); nothing in the docs gives them.
 - Watchdog gating: extend `classifyAgentCli`[^62] so the Claude-only rate-limit / api-error / auto-accept branches skip `agy`, then add an `agy` branch for the trust card (§9) and, under option A, for a hook-deny approval card (`n`).
 
-`transcriptPath` is documented as `<workspace>/.gemini/antigravity-cli/transcript.jsonl`[^21]. If that is inside the worktree, exclude `.gemini/antigravity-cli/` (§3.3). Verify in §16 Q10; a checked-in `.gemini/GEMINI.md` is a legitimate rules file[^13], so do not exclude `.gemini/` wholesale.
+`transcriptPath` is documented as `<workspace>/.gemini/antigravity-cli/transcript.jsonl`[^21]. If that is inside the worktree, exclude `.gemini/antigravity-cli/` (§3.3). Verify in §16 Q10; a repo may check in other files under `.gemini/` (Gemini CLI settings or skills), so do not exclude `.gemini/` wholesale. (Corrected 2026-09-23: this used to call a checked-in `.gemini/GEMINI.md` a rules file, which agy's docs do not support; see §3.1.)
 
 ## 11. Sub-agent gating (intercept-task analog)
 

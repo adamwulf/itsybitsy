@@ -44,13 +44,14 @@ export async function buildAgentRoleBody(ctx: SessionContext): Promise<string> {
 /**
  * Worktree-root project-instruction files each non-Claude CLI reads natively
  * (besides `AGENTS.md`). codex: `AGENTS.override.md`, which it prefers over
- * `AGENTS.md` in the same directory. agy (ANTIGRAVITY-CLI-NOTES.md §3.1):
- * `GEMINI.md` and `.gemini/GEMINI.md`; its workspace `.agents/rules/*.md` are
- * checked separately in `hasNativeProjectInstructions`.
+ * `AGENTS.md` in the same directory. agy: `GEMINI.md` (its migration doc and
+ * the builtin agy-customizations docs list only root `GEMINI.md` / `AGENTS.md`
+ * as directory rules); its workspace `.agents/rules/*.md` are checked
+ * separately in `hasNativeProjectInstructions`.
  */
 const NATIVE_PROJECT_FILES: Record<"codex" | "agy", readonly string[]> = {
   codex: ["AGENTS.md", "AGENTS.override.md"],
-  agy: ["AGENTS.md", "GEMINI.md", join(".gemini", "GEMINI.md")],
+  agy: ["AGENTS.md", "GEMINI.md"],
 };
 
 /** Rule files itsybitsy itself writes into an agy worktree (role text only). */

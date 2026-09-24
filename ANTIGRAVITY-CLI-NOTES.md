@@ -94,9 +94,9 @@ Captured on this machine on 2026-09-01[^75]. There is no `--title`, no trust fla
 - The binary contains the strings `AGENTS.md` and `GEMINI.md` and no `CLAUDE.md`[^30]. Nothing in the docs mentions `CLAUDE.md`.
 - The first local run logged `prompt section "user_rules"` as empty (the itsybitsy checkout has `CLAUDE.md` only)[^27].
 
-### 3.2 What codex does today, and why not to copy it verbatim
+### 3.2 What codex did at the time (before 2026-09-23), and why not to copy it verbatim
 
-`writeCodexAgentsMd` renders the same session-start template Claude gets, strips the `<ittybitty>` wrapper, appends a `@./CLAUDE.md` import (a codex-specific syntax) plus the inlined user-global `~/.claude/CLAUDE.md`, and **overwrites `<worktree>/AGENTS.md`**[^67]. Two problems for `agy`:
+`writeCodexAgentsMd` renders the same session-start template Claude gets, strips the `<ittybitty>` wrapper, appends a `@./CLAUDE.md` import (a codex-specific syntax) plus the inlined user-global `~/.claude/CLAUDE.md`, and **overwrites `<worktree>/AGENTS.md`**[^67]. **Correction (2026-09-23):** the "codex-specific `@` import syntax" premise was wrong — codex has no `@` import (checked in the 0.154.0 source: `codex-rs/core/src/agents_md.rs` reads each file verbatim), so that line reached the model as plain text and codex agents never received the project `CLAUDE.md`. See §3.4 for the current design. Two problems for `agy`:
 
 1. `agy` has no documented `@file` import in rule files, so both the project `CLAUDE.md` and the user `CLAUDE.md` must be inlined (or the user adds an `AGENTS.md` to the repo).
 2. Overwriting `AGENTS.md` dirties the worktree in any repo that tracks that file, and the agent may commit it. Prefer a file no repo tracks.
@@ -521,7 +521,7 @@ Caveat seen: after the hard `tmux kill-session`, the resumed session showed `⚠
 [^64]: [docs/implementation-notes.md (hooks, codex integration, state detection, TUI capture, ib state)](docs/implementation-notes.md)
 [^65]: [default allow floor](src/settings-builder.ts:REGULAR_AGENT_DEFAULT_ALLOW)
 [^66]: [merged agent-type permission loader](src/hooks/shared.ts:loadMergedAgentTypePermissions)
-[^67]: [codex AGENTS.md generator (CLAUDE.md import + skills catalogue)](src/codex-spawn.ts:buildCodexAgentsMd) — removed 2026-09-23; replaced by `buildCodexDeveloperInstructions` (role text + skills, launched as `-c developer_instructions`).
+[^67]: History: the codex AGENTS.md generator (`@./CLAUDE.md` line + inlined user CLAUDE.md + skills catalogue) is `src/codex-spawn.ts:buildCodexAgentsMd` / `writeCodexAgentsMd` at commit `4f97e09` (`git show 4f97e09:src/codex-spawn.ts`); it was removed 2026-09-23. Current behavior: [codex role text, launched as `-c developer_instructions`](src/codex-spawn.ts:buildCodexDeveloperInstructions), built by the shared `src/agent-instructions-shared.ts:buildAgentRoleBody`.
 [^68]: [codex .gitignore appender](src/codex-spawn.ts:appendCodexGitignoreEntry)
 [^69]: [watchdog permission-prompt auto-accept (Enter on trust / MCP cards)](src/watchdog.ts:runPerAgentWatchdog)
 [^70]: [claude trust-prompt strings in the legacy state parser](src/parse-state.ts:parseClaudeState)

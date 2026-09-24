@@ -131,6 +131,11 @@ export function buildCodexStartContent(input: BuildCodexStartContentInput): stri
         `Reinstall ib to a path made of printable ASCII with no apostrophes, quotes, or backslashes.`,
     );
   }
+  // buildCodexLaunchArgs silently omits the flag for empty text; a launch
+  // script must never do that, or the agent starts with no role context.
+  if (!input.developerInstructions.trim()) {
+    throw new Error("Codex launch requires non-empty developer instructions (the agent's role text)");
+  }
 
   const { args: hookFlags } = buildCodexLaunchArgs({
     ibBinaryPath: input.ibBinaryPath,
@@ -371,6 +376,11 @@ export function buildCodexResumeContent(input: BuildCodexResumeContentInput): st
       `Unsafe ib binary path for codex resume: ${JSON.stringify(input.ibBinaryPath)} contains quotes, backslashes, or control characters. ` +
         `Reinstall ib to a path made of printable ASCII with no apostrophes, quotes, or backslashes.`,
     );
+  }
+  // Same guard as buildCodexStartContent: never write a resume.sh that
+  // silently drops the role text.
+  if (!input.developerInstructions.trim()) {
+    throw new Error("Codex resume requires non-empty developer instructions (the agent's role text)");
   }
 
   const { args: hookFlags } = buildCodexLaunchArgs({

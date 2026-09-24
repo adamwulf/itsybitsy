@@ -349,6 +349,17 @@ describe("buildCodexStartContent — launch line", () => {
       }),
     ).toThrow(/Unsafe extra writable root/);
   });
+
+  test("rejects empty or whitespace-only developer instructions (never launch without role text)", () => {
+    for (const developerInstructions of ["", " ", "\n\t \r\n"]) {
+      expect(() => buildCodexStartContent({ ...baseInput(), developerInstructions }))
+        .toThrow(/requires non-empty developer instructions/);
+    }
+  });
+
+  test("carries the role text as a developer_instructions argument", () => {
+    expect(codexDeveloperInstructionsFromScript(buildCodexStartContent(baseInput()))).toBe(ROLE_TEXT);
+  });
 });
 
 describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", () => {
@@ -621,6 +632,17 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
         extraWritableRoots: ["/Users/o'malley/repo/.git"],
       }),
     ).toThrow(/Unsafe extra writable root/);
+  });
+
+  test("rejects empty or whitespace-only developer instructions on resume", () => {
+    for (const developerInstructions of ["", " ", "\n\t \r\n"]) {
+      expect(() => buildCodexResumeContent({ ...baseInput(), developerInstructions }))
+        .toThrow(/requires non-empty developer instructions/);
+    }
+  });
+
+  test("carries the role text as a developer_instructions argument on resume", () => {
+    expect(codexDeveloperInstructionsFromScript(buildCodexResumeContent(baseInput()))).toBe(ROLE_TEXT);
   });
 });
 

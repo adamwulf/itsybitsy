@@ -510,6 +510,33 @@ describe("process classifiers anchor on the executable, not on text in argv", ()
     expect(isIbWatchProcess("  /usr/local/bin/ib watch")).toBe(true);
   });
 
+  test("a node-hosted claude (node <path>/claude …) is a claude process", () => {
+    expect(looksLikeClaudeArgv("node /opt/homebrew/bin/claude --session-id 11111111-2222-3333-4444-555555555555")).toBe(true);
+    expect(looksLikeClaudeArgv("/usr/local/bin/node claude --resume abc")).toBe(true);
+    // node running something else, or claude without the agent flags, is not.
+    expect(looksLikeClaudeArgv("node /opt/homebrew/lib/node_modules/x/cli.js --session-id abc")).toBe(false);
+    expect(looksLikeClaudeArgv("node server.js claude --resume abc")).toBe(false);
+    expect(looksLikeClaudeArgv("node /opt/homebrew/bin/claude --help")).toBe(false);
+  });
+
+  // Intentional FAIL-SAFE misses: these real-looking lines are NOT recognized,
+  // so `ib state --cleanup` never kills them. Pinned so a later "fix" that
+  // loosens the anchor is a deliberate decision.
+  test("fail-safe miss: an executable path containing a space", () => {
+    expect(isWatchdogProcess("/Users/Some Name/bin/ib watchdog agent-x")).toBe(false);
+    expect(isIbWatchProcess("/Volumes/Macintosh HD/bin/ib watch")).toBe(false);
+  });
+
+  test("fail-safe miss: a login-shell style argv[0] (exec -l → '-ib')", () => {
+    expect(isWatchdogProcess("-ib watchdog agent-x")).toBe(false);
+    expect(isIbWatchProcess("-ib watch")).toBe(false);
+  });
+
+  test("fail-safe miss: source-mode ib run through bun", () => {
+    expect(isIbWatchProcess("bun index.ts watch")).toBe(false);
+    expect(isWatchdogProcess("bun /Users/me/itsybitsy/src/index.ts watchdog agent-x")).toBe(false);
+  });
+
   test("gatherOrphans does not put an UNTRACKED codex agent in the watchdog or ib-watch kill lists", async () => {
     fakeCwdInsideWorktree();
     const tracked: TrackedSets = {

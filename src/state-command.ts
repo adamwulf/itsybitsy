@@ -304,6 +304,18 @@ function firstArg(command: string): string {
 }
 
 /**
+ * True when the process runs the `claude` CLI: argv[0] is `claude`, or it is
+ * a node-hosted install (`#!/usr/bin/env node` shim) where argv[0] is `node`
+ * and argv[1] is the `claude` script (`node /opt/homebrew/bin/claude …`).
+ */
+function runsClaude(command: string): boolean {
+  if (executableIs(command, "claude")) return true;
+  if (!executableIs(command, "node")) return false;
+  const script = firstArg(command);
+  return script === "claude" || script.endsWith("/claude");
+}
+
+/**
  * Decide whether a `ps` command line is an `ib watchdog <agent-id>` invocation.
  * Agent spawn auto-spawns `Bun.spawn(["ib", "watchdog", agentId], ...)` so the
  * argv preserves these positional tokens. The executable must be `ib` (so an
@@ -332,11 +344,12 @@ export function isIbWatchProcess(command: string): boolean {
  * between the user's own terminal sessions and itsybitsy's start.sh template
  * — argv alone is NOT enough to claim the process is ours. Use this only as a
  * narrow PRE-FILTER before checking cwd via `isClaudeAgentProcess`. The
- * executable must be `claude`; the flag may appear anywhere after it.
+ * executable must be `claude` (or `node` running the `claude` script, see
+ * `runsClaude`); the flag may appear anywhere after it.
  */
 export function looksLikeClaudeArgv(command: string): boolean {
   if (!command) return false;
-  if (!executableIs(command, "claude")) return false;
+  if (!runsClaude(command)) return false;
   return /\s--(?:resume|session-id)\b/.test(command);
 }
 

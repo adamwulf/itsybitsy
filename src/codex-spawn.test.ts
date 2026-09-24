@@ -3,9 +3,11 @@
  * branch of newAgent() (SPEC-CODEX-MODEL.md §6 Phase 4).
  *
  * The Phase 4 acceptance gate spans these as unit-level invariants on the
- * SHELL STRING and the generated AGENTS.md. End-to-end spawn coverage is
- * the manual gate documented in the SPEC; we explicitly DO NOT spawn a
- * real codex / tmux session from this file.
+ * SHELL STRING and the generated role text (`-c developer_instructions`).
+ * The scripts are also run with bash against a stub `codex` to check the argv
+ * codex receives. End-to-end spawn coverage with the real CLI is the manual
+ * gate documented in the SPEC; we explicitly DO NOT spawn a real codex / tmux
+ * session from this file.
  */
 
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
@@ -1219,7 +1221,7 @@ describe("buildSkillsSection — skills catalog", () => {
     const skillsDir = join(tempDir, "skills");
     // A description whose value embeds a literal triple-backtick fenced example.
     // With a naive 3-backtick wrapper this inner ``` would close the fence
-    // early and leak everything after it into the rendered AGENTS.md.
+    // early and leak everything after it into the rendered role text.
     const fmDescription =
       'description: "Use ```code``` blocks in your output"';
     await writeSkill(

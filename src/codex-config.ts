@@ -77,6 +77,15 @@ export interface BuildCodexLaunchArgsInput {
    * but git metadata writes go through the resolved common git dir.
    */
   extraWritableRoots?: string[];
+  /**
+   * The agent's role instructions (the session-start template plus the skills
+   * catalog), free text. Pushed as `-c developer_instructions="…"`; Codex adds
+   * it to the session as a developer message NEXT TO the repo's own
+   * `AGENTS.md`, so itsybitsy never writes an `AGENTS.md` of its own. Encoded
+   * with `tomlBasicString` and size-checked by
+   * `renderCodexDeveloperInstructionsPayload`. Absent or empty → no flag.
+   */
+  developerInstructions?: string;
 }
 
 export interface CodexLaunchArgs {
@@ -153,6 +162,80 @@ export function isCodexSafeBinaryPath(path: string): boolean {
     if (code < 0x20 || code === 0x7f) return false;
   }
   return true;
+}
+
+/**
+ * Encode arbitrary text as a single-line TOML basic string (the double-quoted
+ * form) for a `-c key=<value>` override whose value is free text. Codex reads a
+ * `-c` value by parsing `_x_ = <value>` as TOML, so the value must be one
+ * complete, valid TOML string literal. (If it is not, Codex silently falls back
+ * to the raw text with its outer quotes trimmed — so a bad escape would corrupt
+ * the value, not fail loudly.)
+ *
+ * Escapes follow TOML 1.0: `"` and `\` get a backslash; backspace, tab,
+ * newline, form feed, and carriage return use their short escapes; every other
+ * control character (U+0000–U+001F, U+007F) becomes `\uXXXX`. U+2028 and
+ * U+2029 are also written as `\uXXXX`: TOML allows them raw, but some parsers
+ * (Bun's, for one) treat them as line ends. Everything else, non-ASCII
+ * included, passes through unchanged, so the result holds no line break of any
+ * kind. A lone UTF-16 surrogate has no UTF-8 form and no valid TOML escape, so
+ * it is replaced with U+FFFD first — what any UTF-8 argv would carry anyway.
+ *
+ * The result is NOT shell-safe: callers shell-quote the whole `key=<value>`
+ * argument (`shellQuote`) when they render it into a script.
+ */
+export function tomlBasicString(value: string): string {
+  const parts: string[] = ['"'];
+  for (const ch of value.toWellFormed()) {
+    switch (ch) {
+      case '"': parts.push('\\"'); break;
+      case "\\": parts.push("\\\\"); break;
+      case "\b": parts.push("\\b"); break;
+      case "\t": parts.push("\\t"); break;
+      case "\n": parts.push("\\n"); break;
+      case "\f": parts.push("\\f"); break;
+      case "\r": parts.push("\\r"); break;
+      default: {
+        const code = ch.codePointAt(0)!;
+        if (code < 0x20 || code === 0x7f || code === 0x2028 || code === 0x2029) {
+          parts.push(`\\u${code.toString(16).toUpperCase().padStart(4, "0")}`);
+        } else {
+          parts.push(ch);
+        }
+      }
+    }
+  }
+  parts.push('"');
+  return parts.join("");
+}
+
+/**
+ * Upper bound, in UTF-8 bytes, for the whole `developer_instructions="…"`
+ * argument. The role text and skills catalog travel as ONE argv string. Linux
+ * caps a single argv string at MAX_ARG_STRLEN = 131072 bytes (NUL included);
+ * macOS has no per-string cap but limits argv plus environment to ARG_MAX =
+ * 1 MiB, shared with the prompt argument. 120 KiB stays under both, with room
+ * for the rest of the command line.
+ */
+export const CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES = 120 * 1024;
+
+/**
+ * Render the `developer_instructions="…"` payload (without the leading `-c`)
+ * for the agent's role instructions. Throws, naming the size and the limit,
+ * when the escaped payload is larger than
+ * `CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES` — the launch would otherwise fail
+ * with E2BIG, or leave no room for the prompt.
+ */
+export function renderCodexDeveloperInstructionsPayload(text: string): string {
+  const payload = `developer_instructions=${tomlBasicString(text)}`;
+  const bytes = Buffer.byteLength(payload, "utf8");
+  if (bytes > CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES) {
+    throw new Error(
+      `Codex developer instructions are too large: ${bytes} bytes after TOML escaping, limit ${CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES}. ` +
+        `They travel as one command-line argument; shorten the agent-type body or the skills under ~/.claude/skills.`,
+    );
+  }
+  return payload;
 }
 
 /**
@@ -311,5 +394,11 @@ export function buildCodexLaunchArgs(input: BuildCodexLaunchArgsInput): CodexLau
   // Keep Codex's native status line useful inside the manager pane. Show the
   // model, context budget, and ChatGPT session/weekly usage limits.
   args.push("-c", 'tui.status_line=["model-with-reasoning","context-remaining","five-hour-limit","weekly-limit"]');
+  // The agent's role instructions. Last so the long payload does not bury the
+  // short flags in `ps` output. Free text, so it goes through the full TOML
+  // escaper rather than the quote-safe-path rule the flags above rely on.
+  if (input.developerInstructions) {
+    args.push("-c", renderCodexDeveloperInstructionsPayload(input.developerInstructions));
+  }
   return { args };
 }

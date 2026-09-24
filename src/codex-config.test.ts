@@ -3,12 +3,21 @@ import {
   buildCodexLaunchArgs,
   isCodexSafeBinaryPath,
   renderCodexHookFlagPayload,
+  CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES,
   CODEX_REGISTERED_EVENTS,
   DEFAULT_CODEX_HOOK_TIMEOUT_SECS,
   FUGU_CODEX_CONFIG_OVERRIDES,
+  renderCodexDeveloperInstructionsPayload,
+  tomlBasicString,
 } from "./codex-config";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import { setUserHome, resetUserHome } from "./home";
+import {
+  decodeCodexStringOverride,
+  decodeTomlBasicString,
+  hasPythonTomllib,
+  pythonTomlDecodeBasicString,
+} from "./test-utils";
 
 // Pin the coordinator-home to a stable, safe absolute path so assertions about
 // the always-prepended `--add-dir <coordinatorHome>` pair are deterministic
@@ -686,5 +695,137 @@ describe("buildCodexLaunchArgs — path-safety rejection (gate (b))", () => {
         agentDir: okAgentDir,
       }),
     ).toThrow(/Invalid agent id/);
+  });
+});
+
+// Text that breaks naive quoting at every layer: shell single quotes, TOML
+// double quotes and backslashes, shell expansions (which must stay literal),
+// every control character class, CRLF, and multi-byte / astral Unicode.
+const HOSTILE_TEXTS: readonly string[] = [
+  "it's O'Brien's \"quoted\" text",
+  "back\\slash, trailing backslash\\",
+  "literal backslash-n: \\n and backslash-u: \\u0041",
+  "`backticks` $(touch /tmp/pwned) ${HOME} $HOME $'ansi' !! \\$",
+  "line one\nline two\r\nline three\rtab\there",
+  "controls: \x00 \x01 \x07 \b \f \v \x1b[31m \x1f \x7f end",
+  "unicode: é ñ 日本語 🎉 👩‍💻 \u{2028} \u{2029} \u{00A0} \u{FEFF}",
+  'toml look-alikes: """ triple """ \'\'\' literal \'\'\' # comment [table] key = "v"',
+  "```ts\nconst x = `a ${b}`;\n```\n## Heading\n- item \"one\"\n",
+  "",
+];
+
+describe("tomlBasicString", () => {
+  for (const text of HOSTILE_TEXTS) {
+    test(`round-trips byte-identically through the TOML 1.0 grammar: ${JSON.stringify(text).slice(0, 40)}`, () => {
+      expect(decodeTomlBasicString(tomlBasicString(text))).toBe(text);
+    });
+  }
+
+  test.skipIf(!hasPythonTomllib())("round-trips every hostile text through Python's tomllib (independent parser)", () => {
+    for (const text of HOSTILE_TEXTS) {
+      expect(pythonTomlDecodeBasicString(tomlBasicString(text))).toBe(text);
+    }
+  });
+
+  test("emits a single line with no raw control characters or U+2028/U+2029", () => {
+    const encoded = tomlBasicString(HOSTILE_TEXTS.join("\n"));
+    expect(encoded).not.toMatch(/[\x00-\x1f\x7f\u{2028}\u{2029}]/u);
+    expect(encoded.startsWith('"')).toBe(true);
+    expect(encoded.endsWith('"')).toBe(true);
+  });
+
+  test("uses the TOML short escapes and \\uXXXX for other controls", () => {
+    expect(tomlBasicString('"\\\b\t\n\f\r')).toBe('"\\"\\\\\\b\\t\\n\\f\\r"');
+    expect(tomlBasicString("\x00\x1b\x7f\u{2028}\u{2029}")).toBe('"\\u0000\\u001B\\u007F\\u2028\\u2029"');
+  });
+
+  test("passes other non-ASCII through unescaped", () => {
+    expect(tomlBasicString("é🎉")).toBe('"é🎉"');
+  });
+
+  test("replaces a lone surrogate with U+FFFD (no UTF-8 form, no TOML escape)", () => {
+    expect(decodeTomlBasicString(tomlBasicString("a\uD800b\uDC00c"))).toBe("a\u{FFFD}b\u{FFFD}c");
+  });
+});
+
+describe("decodeTomlBasicString — the oracle rejects what TOML rejects", () => {
+  // Guards the oracle itself: a lenient decoder would let a broken escaper pass.
+  for (const bad of ['"raw\nnewline"', '"raw"quote"', '"bad \\x escape"', '"\\uD800"', '"\\u12"', '"trailing\\"', 'no quotes']) {
+    test(`rejects ${JSON.stringify(bad)}`, () => {
+      expect(() => decodeTomlBasicString(bad)).toThrow();
+    });
+  }
+});
+
+describe("renderCodexDeveloperInstructionsPayload", () => {
+  const PREFIX_BYTES = 'developer_instructions="'.length + '"'.length;
+
+  test("renders a developer_instructions override that decodes to the input", () => {
+    const text = HOSTILE_TEXTS.join("\n---\n");
+    const payload = renderCodexDeveloperInstructionsPayload(text);
+    const { key, value } = decodeCodexStringOverride(payload);
+    expect(key).toBe("developer_instructions");
+    expect(value).toBe(text);
+  });
+
+  test("accepts a payload of exactly the byte limit", () => {
+    const text = "x".repeat(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES - PREFIX_BYTES);
+    const payload = renderCodexDeveloperInstructionsPayload(text);
+    expect(Buffer.byteLength(payload, "utf8")).toBe(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES);
+  });
+
+  test("rejects a payload one byte over the limit, naming size and limit", () => {
+    const text = "x".repeat(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES - PREFIX_BYTES + 1);
+    expect(() => renderCodexDeveloperInstructionsPayload(text)).toThrow(
+      new RegExp(`too large: ${CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES + 1} bytes .* limit ${CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES}`),
+    );
+  });
+
+  test("counts UTF-8 bytes and escape growth, not UTF-16 length", () => {
+    // Each "é" is one UTF-16 unit but two UTF-8 bytes; each newline grows to a
+    // two-byte "\n" escape. Both texts are under the limit in .length terms.
+    const wide = "é".repeat(Math.ceil(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES / 2));
+    const escaped = "\n".repeat(Math.ceil(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES / 2));
+    expect(wide.length).toBeLessThan(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES);
+    expect(escaped.length).toBeLessThan(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES);
+    expect(() => renderCodexDeveloperInstructionsPayload(wide)).toThrow(/too large/);
+    expect(() => renderCodexDeveloperInstructionsPayload(escaped)).toThrow(/too large/);
+  });
+
+  test("the limit stays under Linux's per-argument MAX_ARG_STRLEN (131072 incl. NUL)", () => {
+    expect(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES).toBeLessThan(131072);
+  });
+});
+
+describe("buildCodexLaunchArgs — developer_instructions", () => {
+  const base = {
+    ibBinaryPath: "/bin/ib",
+    agentId: "agent-abc",
+    agentDir: "/var/agents/agent-abc",
+  };
+
+  test("pushes the role text as the LAST -c pair, decoding to the input", () => {
+    const text = HOSTILE_TEXTS.join("\n");
+    const { args } = buildCodexLaunchArgs({ ...base, developerInstructions: text });
+    expect(args.at(-2)).toBe("-c");
+    const { key, value } = decodeCodexStringOverride(args.at(-1)!);
+    expect(key).toBe("developer_instructions");
+    expect(value).toBe(text);
+  });
+
+  test("omits the flag when no role text is given", () => {
+    const { args } = buildCodexLaunchArgs(base);
+    expect(args.some((a) => a.startsWith("developer_instructions"))).toBe(false);
+  });
+
+  test("omits the flag for empty role text (codex ignores it; do not override user config with nothing)", () => {
+    const { args } = buildCodexLaunchArgs({ ...base, developerInstructions: "" });
+    expect(args.some((a) => a.startsWith("developer_instructions"))).toBe(false);
+  });
+
+  test("propagates the size-limit error instead of emitting an oversized argument", () => {
+    expect(() =>
+      buildCodexLaunchArgs({ ...base, developerInstructions: "x".repeat(CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES) }),
+    ).toThrow(/too large/);
   });
 });

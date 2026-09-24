@@ -1328,10 +1328,11 @@ async function stopSandboxProxyForAgent(agentDir: string, meta: AgentMeta): Prom
 }
 
 /**
- * Spawn-time warning for codex and agy agents whose repo keeps its
+ * Spawn- and resume-time warning for codex and agy agents whose repo keeps its
  * instructions only in CLAUDE.md (see `missingAgentsMdWarning`). Goes to
- * stderr (or the watch log under `ib watch`) and to the spawn log via `log`.
- * Never fails the spawn.
+ * stderr (or the watch log under `ib watch`) and to the agent log via `log`.
+ * Advisory only: every error is swallowed, so it can never fail a spawn or a
+ * resume.
  */
 async function warnIfNoAgentsMd(
   worktreePath: string,
@@ -1339,10 +1340,14 @@ async function warnIfNoAgentsMd(
   agentId: string,
   log: (line: string) => Promise<void>,
 ): Promise<void> {
-  const warning = await missingAgentsMdWarning(worktreePath, cli, agentId);
-  if (!warning) return;
-  logWarning(`Warning: ${warning}`);
-  await log(`Warning: ${warning}`);
+  try {
+    const warning = await missingAgentsMdWarning(worktreePath, cli, agentId);
+    if (!warning) return;
+    logWarning(`Warning: ${warning}`);
+    await log(`Warning: ${warning}`);
+  } catch {
+    // Advisory warning; never block the lifecycle operation.
+  }
 }
 
 /**
@@ -2021,6 +2026,9 @@ export async function resumeAgent(
         await logAgent(agentDir, `[resume] could not regenerate Codex developer instructions: ${message}`);
         return { ok: false, exitCode: 1, stdout: "", stderr: `Error: could not regenerate Codex developer instructions: ${message}` };
       }
+      // Same spawn-time warning on resume (codex never reads CLAUDE.md by
+      // default); never fails the resume.
+      await warnIfNoAgentsMd(workPath, resumeCli, agent.id, (line) => logAgent(agentDir, `[resume] ${line}`));
 
       // Build resume.sh via the shared codex builder (mirrors start.sh).
       const { buildCodexResumeContent } = await import("./codex-spawn");
@@ -2124,6 +2132,10 @@ export async function resumeAgent(
           stderr: `Error: could not regenerate agy worktree files: ${(err as Error)?.message ?? String(err)}`,
         };
       }
+      // The regenerated rule file no longer inlines CLAUDE.md, so an agent
+      // spawned before that change in a CLAUDE.md-only worktree loses its
+      // project instructions here. Say so; never fail the resume over it.
+      await warnIfNoAgentsMd(workPath, "agy", agent.id, (line) => logAgent(agentDir, `[resume] ${line}`));
 
       // D5: re-trust the worktree before the tmux session starts. agy rewrites
       // settings.json itself on every trust/settings change, so an entry from

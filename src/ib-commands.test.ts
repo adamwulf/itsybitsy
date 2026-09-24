@@ -6866,6 +6866,87 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(codexDeveloperInstructionsFromScript(resume)).toContain(id);
   });
 
+  /**
+   * A codex agent type whose markdown body is `bodyBytes` of filler, so the
+   * role text (and its developer_instructions payload) can be pushed past
+   * CODEX_DEVELOPER_INSTRUCTIONS_MAX_BYTES. Kernel sandbox off to keep the
+   * spawn path free of sandbox preflight.
+   */
+  async function writeCodexTypeWithBody(name: string, bodyBytes: number): Promise<void> {
+    const path = join(process.env.HOME!, ".itsybitsy", "agent-types", `${name}.md`);
+    await Bun.write(path, `---
+name: ${name}
+description: Codex role-size test
+model: codex:gpt-5.4-mini
+instructionStyle: worker
+canSpawnChildren: false
+sandbox:
+  enabled: false
+---
+You are worker agent \`{{agentId}}\`.
+${"x".repeat(bodyBytes)}
+`);
+  }
+
+  test("Codex spawn with oversized role text fails cleanly: agent dir, worktree and branch all removed", async () => {
+    const id = "codex-oversized-spawn";
+    await writeCodexTypeWithBody(id, 130 * 1024);
+    const calls: string[][] = [];
+    const inner = cleanWorktreeRunner();
+    setNewAgentSpawnRunner((cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) => {
+      calls.push(cmd);
+      return inner(cmd, opts);
+    });
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99984 }));
+
+    const result = await callNewAgent("oversized role", { name: id, type: id });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("could not build codex developer instructions");
+    expect(result.stderr).toMatch(/too large: \d+ bytes after TOML escaping, limit \d+/);
+    // cleanupOnFailure: the whole agent dir is gone, and the worktree and
+    // branch removals were issued.
+    expect(await lstat(join(agentsDir, id)).then(() => true, () => false)).toBe(false);
+    const cmdStrs = calls.map((c) => c.join(" "));
+    expect(cmdStrs.some((c) => c.includes("worktree remove") && c.includes(join(agentsDir, id, "repo")))).toBe(true);
+    expect(cmdStrs.some((c) => c.includes(`branch -D agent/${id}`))).toBe(true);
+    // Refused before any tmux session or dispatcher precheck.
+    expect(cmdStrs.some((c) => c.includes("new-session"))).toBe(false);
+    expect(dispatcherDryRunCalls.length).toBe(0);
+  });
+
+  test("Codex resume refuses oversized regenerated role text without writing resume.sh or starting tmux", async () => {
+    const id = "codex-oversized-resume";
+    await writeCodexTypeWithBody(id, 1024);
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99983 }));
+    expect((await callNewAgent("normal role", { name: id, type: id })).ok).toBe(true);
+    const agentDir = join(agentsDir, id);
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    meta.codex_session_id = "019e7b21-cb7d-7f23-8674-11036ed141ef";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
+    // The type grows past the limit between spawn and resume.
+    await writeCodexTypeWithBody(id, 130 * 1024);
+    const resumeCalls: string[][] = [];
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      resumeCalls.push(cmd);
+      if (cmd.join(" ").includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      return makeSpawnResult("", cmd.join(" ").includes("has-session") ? 1 : 0);
+    });
+
+    const result = await resumeAgent(makeAgent(id, tempDir, "stopped", meta));
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("could not regenerate Codex developer instructions");
+    expect(result.stderr).toMatch(/too large: \d+ bytes/);
+    expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
+    expect(resumeCalls.some((c) => c.join(" ").includes("new-session"))).toBe(false);
+    expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("[resume] could not regenerate Codex developer instructions");
+  });
+
   test("sandbox-enabled start.sh wraps both Claude branches and exports only proxy vars", async () => {
     await writeSandboxType();
     setSandboxPortAllocatorForTesting(() => 43123);

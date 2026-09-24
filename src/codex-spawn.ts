@@ -550,8 +550,9 @@ export async function appendCodexGitignoreEntry(worktreePath: string): Promise<A
  * commands table, worker/manager-specific blocks, team-awareness) as the claude
  * agent of the same type, with the `<ittybitty>` wrapper stripped (codex
  * doesn't recognize it), plus the skills catalog. This adapter adds nothing;
- * the codex-specific encoding (TOML string + shell quoting + size cap) happens
- * in `buildCodexLaunchArgs`.
+ * the codex-specific encoding happens later: TOML string + size cap in
+ * `buildCodexLaunchArgs` (via `renderCodexDeveloperInstructionsPayload`), shell
+ * quoting in `buildCodexStartContent` / `buildCodexResumeContent`.
  *
  * Project and user-wide instructions are deliberately NOT included. Codex
  * reads the repo's own `AGENTS.md` natively (itsybitsy never writes one), and

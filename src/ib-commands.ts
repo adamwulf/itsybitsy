@@ -1582,8 +1582,8 @@ export async function resumeAgent(
 
   // Parse the persisted CLI before any resume mutation. Legacy non-Claude
   // worktree:false metadata is unsafe to replay: Codex/Fugu prechecks assume
-  // a per-agent worktree (an old Codex spawn also wrote an AGENTS.md into it),
-  // and agy would install hook/rule files in the shared repo.
+  // a per-agent worktree, and agy would install hook/rule files in the shared
+  // repo.
   const rawModel = agent.meta.model && agent.meta.model !== "null" ? agent.meta.model : "";
   if (rawModel && !isValidModel(rawModel)) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid model name: ${rawModel}` };

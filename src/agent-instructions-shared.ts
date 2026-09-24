@@ -20,6 +20,7 @@ import { join } from "path";
 import { userHome } from "./home";
 import { readdir } from "fs/promises";
 import type { SessionContext } from "./hooks/session-start";
+import { generateInstructions } from "./hooks/session-start";
 
 /**
  * The role text every non-Claude CLI receives: the Claude session-start
@@ -31,9 +32,6 @@ import type { SessionContext } from "./hooks/session-start";
  * it never leaves a dangling header.
  */
 export async function buildAgentRoleBody(ctx: SessionContext): Promise<string> {
-  // Lazy import: ib-commands.ts imports this module statically, and
-  // session-start → teams → ib-commands would otherwise form an import cycle.
-  const { generateInstructions } = await import("./hooks/session-start");
   const body = stripIttybittyWrapper(await generateInstructions(ctx));
   const skillsSection = await buildSkillsSection();
   return [body, skillsSection].filter((s) => s.length > 0).join("\n");

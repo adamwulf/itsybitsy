@@ -37,6 +37,11 @@ paths:
     - "~/Library/Keychains"
   allowWrite:
     - "~/.claude"
+    # Claude auto-memory (~/.claude/projects/<main-repo>/memory). Redundant with
+    # "~/.claude" above, but keeps memory writable when an installed _all.md adds
+    # a read-only "~/.claude/**" glob: that glob ties "~/.claude" on specificity,
+    # sorts after it (plain before glob), and so wins and denies every write.
+    - "~/.claude/projects/*/memory/**"
     - "~/.claude.json"
     - "~/.bun"
     - "~/.codex"

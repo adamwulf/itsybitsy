@@ -5778,17 +5778,13 @@ describe("mergeAgent --keep (real git)", () => {
   });
 
   test("the eventual closing `ib merge` after a --keep lands only the newer commits and closes the agent", async () => {
-    // Round 1: --keep lands c1; the agent keeps working and commits c2.
-    await agentCommit("feature.txt", "one\n", "agent: one");
-    const keep = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
-    expect(keep.ok).toBe(true);
-    const keepHead = await git("-C", tempDir, "rev-parse", "main");
-    await agentCommit("feature.txt", "two\n", "agent: two");
-
-    // Closing merge with REAL git. tmux/pgrep are mocked so no process is
-    // touched; the temp home (beforeEach) absorbs the archive/seal/team
-    // writes. mergeSpawnCtx runs git + tmux, lifecycleSpawnCtx the kill and
-    // orphan-scan side.
+    // REAL git for both merges. tmux/pgrep are mocked so the closing merge
+    // touches no process; the temp home (beforeEach) absorbs the
+    // archive/seal/team writes. mergeSpawnCtx runs git + tmux,
+    // lifecycleSpawnCtx the kill and orphan-scan side — and the tmux
+    // session-name probe in isRunningAsAgent(). Set before round 1 so the
+    // --keep, the closing merge and the assertion below all see the same
+    // caller type, and so use the same merge strategy.
     const hybrid: SpawnFn = (cmd) => {
       if (cmd[0] === "git") return Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" }) as SpawnResult;
       if (cmd[0] === "tmux" && cmd.includes("has-session")) return makeSpawnResult(1);
@@ -5797,6 +5793,13 @@ describe("mergeAgent --keep (real git)", () => {
     };
     setMergeSpawnRunner(hybrid);
     lifecycleSpawnCtx.set(hybrid);
+
+    // Round 1: --keep lands c1; the agent keeps working and commits c2.
+    await agentCommit("feature.txt", "one\n", "agent: one");
+    const keep = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+    expect(keep.ok).toBe(true);
+    const keepHead = await git("-C", tempDir, "rev-parse", "main");
+    await agentCommit("feature.txt", "two\n", "agent: two");
 
     const closing = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir);
     expect(closing.ok).toBe(true);

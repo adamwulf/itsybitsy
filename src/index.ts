@@ -402,8 +402,8 @@ export function resolveMergeTargetDir(
 
 /**
  * Parse the arguments after `ib merge`: the agent id (first non-flag
- * argument), `--keep` (merge with --no-ff, leave the agent running — see
- * `mergeAgent`'s `MergeAgentOptions`), and `--force` (accepted for
+ * argument), `--keep` (the normal rebase + merge, but leave the agent running
+ * — see `mergeAgent`'s `MergeAgentOptions`), and `--force` (accepted for
  * compatibility with the bash `ib`; the native merge never prompts, so it is a
  * no-op). Flags may appear on either side of the id. Anything else is
  * collected in `unknown` so the caller can warn and ignore it.
@@ -722,10 +722,9 @@ const COMMAND_HELP: Record<string, string> = {
     "Usage: ib merge <agent-id> [--force] [--keep]\n" +
     "  Merge an agent's branch into its parent and close the agent.\n" +
     "  --force         Accepted for compatibility (no-op; the native merge never prompts)\n" +
-    "  --keep          Land the agent's commits so far with a real merge commit\n" +
-    "                  (git merge --no-ff) but leave the agent running on its\n" +
-    "                  branch: no rebase, no teardown. Refuses on a dirty parent\n" +
-    "                  checkout; aborts cleanly on conflict. Run it again later to\n" +
+    "  --keep          Merge exactly as above (same checks, rebase and merge;\n" +
+    "                  fails the same way on conflict) but leave the agent running\n" +
+    "                  on its rebased branch: no teardown. Run it again later to\n" +
     "                  land newer commits, or `ib merge <agent-id>` to close.",
   resume:
     "Usage: ib resume <agent-id> [--force]\n" +

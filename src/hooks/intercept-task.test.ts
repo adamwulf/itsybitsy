@@ -767,6 +767,8 @@ describe("coordinator Bash restrictions", () => {
       expect(hookOutput.permissionDecision).toBe("deny");
       expect(hookOutput.permissionDecisionReason).toContain("WAITING");
       expect(hookOutput.permissionDecisionReason).not.toContain("metacharacters");
+      // Coordinators are not notified about agents in other repos.
+      expect(hookOutput.permissionDecisionReason).toContain("ScheduleWakeup");
     } finally {
       await cleanup();
     }
@@ -1966,6 +1968,7 @@ describe("@system caller", () => {
     expect(hookOutput.permissionDecision).toBe("deny");
     expect(hookOutput.permissionDecisionReason).toContain("WAITING");
     expect(hookOutput.permissionDecisionReason).not.toContain("metacharacters");
+    expect(hookOutput.permissionDecisionReason).toContain("ScheduleWakeup");
   });
 
   test("allows clean ib commands from system coordinator", async () => {
@@ -2234,6 +2237,9 @@ describe("busy-wait Bash interception", () => {
         cwd: managerCwd,
       });
       expectDeniedWaitHint(result);
+      // Only coordinators get the ScheduleWakeup variant; managers are denied it.
+      const hookOutput = (result.output as Record<string, unknown>).hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecisionReason).not.toContain("ScheduleWakeup");
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

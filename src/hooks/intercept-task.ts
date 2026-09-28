@@ -10,7 +10,7 @@ import { parseModel } from "../agent-cli";
 import { findShellMetachar } from "./shell-metachar";
 import { isValidAgentId } from "../validation";
 import { resolveBoundHookAgent } from "./agent-context";
-import { isBusyWaitBashCommand, WAIT_HINT } from "./wait-hint";
+import { isBusyWaitBashCommand, waitHintFor } from "./wait-hint";
 
 export interface InterceptResult {
   action: "skip" | "intercept";
@@ -78,21 +78,12 @@ function isAcceptableTaskModel(value: string): boolean {
 }
 
 /**
- * Check if this is a Bash tool call from a coordinator session that contains
- * shell metacharacters or --output in git commands (SPEC §12.2.4).
- * Returns a deny result if blocked, or null to proceed normally.
+ * Whether the caller is a coordinator. The system coordinator's synthetic
+ * meta carries `agentType: "system"`; per-repo coordinators have
+ * `agentType: "coordinator"` on disk.
  */
-async function checkCoordinatorBashRestrictions(
-  input: { tool_name: string; tool_input: Record<string, unknown>; cwd: string },
-  resolved: InterceptAgentIdentity | null,
-): Promise<InterceptResult | null> {
-  if (input.tool_name !== "Bash") return null;
-
-  // Resolve agent identity. The system coordinator's synthetic meta carries
-  // `agentType: "system"`; per-repo coordinators have `agentType: "coordinator"`
-  // on disk. Both should get the same restrictions (no shell metacharacters,
-  // no --output, no -C/--git-dir/--work-tree).
-  if (!resolved) return null;
+async function isCoordinatorCaller(resolved: InterceptAgentIdentity | null): Promise<boolean> {
+  if (!resolved) return false;
 
   let agentType: string | undefined;
   if (resolved.syntheticMeta) {
@@ -109,8 +100,23 @@ async function checkCoordinatorBashRestrictions(
     }
   }
 
-  const isCoordinator = agentType === "coordinator" || agentType === "system";
-  if (!isCoordinator) return null;
+  return agentType === "coordinator" || agentType === "system";
+}
+
+/**
+ * Check if this is a Bash tool call from a coordinator session that contains
+ * shell metacharacters or --output in git commands (SPEC §12.2.4).
+ * Returns a deny result if blocked, or null to proceed normally.
+ */
+async function checkCoordinatorBashRestrictions(
+  input: { tool_name: string; tool_input: Record<string, unknown>; cwd: string },
+  resolved: InterceptAgentIdentity | null,
+): Promise<InterceptResult | null> {
+  if (input.tool_name !== "Bash") return null;
+
+  // Both coordinator kinds get the same restrictions (no shell metacharacters,
+  // no --output, no -C/--git-dir/--work-tree).
+  if (!(await isCoordinatorCaller(resolved))) return null;
 
   const command = (input.tool_input.command as string) ?? "";
 
@@ -173,28 +179,31 @@ async function checkCoordinatorBashRestrictions(
  * This deny is NOT the only one the agent may see. Claude Code blocks
  * `sleep N` itself before any hook runs, and when both PreToolUse hooks deny
  * a polling loop Claude surfaces only one reason — in practice the path
- * hook's. So the path hook (agent-path.ts) adds the same WAIT_HINT to its own
+ * hook's. So the path hook (agent-path.ts) adds the same wait hint to its own
  * deny of a wait attempt; keep both (wait-hint.ts, SPEC §6.1 "Wait hint").
+ * Coordinators get the coordinator variant of the hint.
  *
  * The detector does not branch on agent identity; which roles run it depends
  * on where this hook is installed (SPEC §6.4 — spawned worktree workers do
  * not get it; every worktree:false agent does, see buildAgentSettings).
  */
-function checkBusyWaitBash(
-  input: { tool_name: string; tool_input: Record<string, unknown> }
-): InterceptResult | null {
+async function checkBusyWaitBash(
+  input: { tool_name: string; tool_input: Record<string, unknown> },
+  resolved: InterceptAgentIdentity | null,
+): Promise<InterceptResult | null> {
   if (input.tool_name !== "Bash") return null;
 
   const command = (input.tool_input.command as string) ?? "";
   if (!isBusyWaitBashCommand(command)) return null;
 
+  const hint = waitHintFor(await isCoordinatorCaller(resolved));
   return {
     action: "intercept",
     output: {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason: `Don't sleep or busy-loop to wait — it spins tokens. ${WAIT_HINT}`,
+        permissionDecisionReason: `Don't sleep or busy-loop to wait — it spins tokens. ${hint}`,
       },
     },
   };
@@ -241,7 +250,7 @@ export async function processTaskIntercept(
   // restrictions: a one-line polling loop always contains `;`, and a
   // coordinator must get the WAITING hint, not "quote your metacharacters".
   // Both deny, so the order changes only the reason.
-  const busyWaitBlock = checkBusyWaitBash(input);
+  const busyWaitBlock = await checkBusyWaitBash(input, resolved);
   if (busyWaitBlock) return busyWaitBlock;
 
   // 0.5. Check coordinator Bash restrictions (SPEC §12.2.4)

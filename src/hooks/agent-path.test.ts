@@ -2655,6 +2655,18 @@ describe("hookCheckPath with @system", () => {
     expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("not in allow list");
   });
 
+  test("a denied Monitor call gets the coordinator wait hint", async () => {
+    await hookCheckPath("@system", JSON.stringify({
+      tool_name: "Monitor",
+      tool_input: { description: "agent done", command: "until ib status agent-x; do sleep 5; done" },
+      cwd: join(tempHome, ".itsybitsy"),
+    }));
+    const decision = JSON.parse(logged[0]!);
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("WAITING");
+    expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("ScheduleWakeup");
+  });
+
   test("does not crash when worktree/agentsDir do not exist", async () => {
     // Sanity check: even without a real git worktree, the @system path
     // resolution shouldn't throw.
@@ -3274,6 +3286,16 @@ describe("hookCheckPath — denied wait attempts point at WAITING", () => {
     expect(out.permissionDecision).toBe("deny");
     expect(out.permissionDecisionReason).toStartWith("Tool not in allow list — ");
     expect(out.permissionDecisionReason).toContain("WAITING");
+    // A worker is denied ScheduleWakeup, so its hint must not suggest it.
+    expect(out.permissionDecisionReason).not.toContain("ScheduleWakeup");
+  });
+
+  test("a per-repo coordinator gets the coordinator hint", async () => {
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-test66", agentType: "coordinator" }));
+    const out = await run("Monitor", { description: "worker done", command: "until ib status agent-x; do sleep 5; done" });
+    expect(out.permissionDecision).toBe("deny");
+    expect(out.permissionDecisionReason).toContain("WAITING");
+    expect(out.permissionDecisionReason).toContain("ScheduleWakeup");
   });
 
   test("a denied until/sleep polling loop tells the agent to use WAITING", async () => {

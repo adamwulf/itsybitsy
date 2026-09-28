@@ -17,6 +17,24 @@ export const WAIT_HINT =
   "watchdog notifies you when a sub-agent completes or needs input.";
 
 /**
+ * The coordinator variant (per-repo coordinators and @system). The watchdog
+ * notifies a coordinator about its own subtasks, but not about an agent it
+ * started in another repo, so coordinators schedule their own check-ins with
+ * ScheduleWakeup / CronCreate (coordinator.md, system.md). Other agent types
+ * are denied ScheduleWakeup, so only coordinators get this text.
+ */
+export const COORDINATOR_WAIT_HINT =
+  "To wait, don't poll. The watchdog notifies you when one of your subtasks " +
+  "completes or needs input, but not about an agent you started in another repo: " +
+  "for that, schedule a check-in with ScheduleWakeup or CronCreate. Then make " +
+  "'WAITING' the LAST line of your message and stop.";
+
+/** The wait hint for this caller's role. */
+export function waitHintFor(coordinator: boolean): string {
+  return coordinator ? COORDINATOR_WAIT_HINT : WAIT_HINT;
+}
+
+/**
  * A Bash command whose purpose is to busy-wait. Matched conservatively so a
  * command that merely mentions "sleep" (`grep sleep file`) is not a match:
  *  - the command IS or STARTS WITH `sleep <number>`, or
@@ -37,11 +55,12 @@ export function isWaitAttempt(toolName: string, toolInput: Record<string, unknow
     && isBusyWaitBashCommand(toolInput.command);
 }
 
-/** Append WAIT_HINT to a deny reason when the denied call was a wait attempt. */
+/** Append the role's wait hint to a deny reason when the denied call was a wait attempt. */
 export function withWaitHint(
   reason: string,
   toolName: string,
   toolInput: Record<string, unknown>,
+  coordinator: boolean,
 ): string {
-  return isWaitAttempt(toolName, toolInput) ? `${reason} — ${WAIT_HINT}` : reason;
+  return isWaitAttempt(toolName, toolInput) ? `${reason} — ${waitHintFor(coordinator)}` : reason;
 }

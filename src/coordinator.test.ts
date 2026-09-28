@@ -85,9 +85,14 @@ describe("buildSystemCoordinatorSettings", () => {
     expect(settings.permissions).toHaveProperty("deny");
   });
 
-  test("allows Bash(ib:*) and ToolSearch", async () => {
+  // The scheduling tools come from the embedded system.md layer: the watchdog
+  // does not notify @system about agents in other repos, so it schedules its
+  // own check-ins (the coordinator wait hint in hooks/wait-hint.ts names them).
+  test("allows Bash(ib:*), ToolSearch, and the scheduling tools", async () => {
     const settings = await buildSystemCoordinatorSettings();
-    expect(settings.permissions.allow).toEqual(["Bash(ib:*)", "ToolSearch"]);
+    expect(settings.permissions.allow).toEqual([
+      "Bash(ib:*)", "ToolSearch", "ScheduleWakeup", "CronCreate", "CronDelete", "CronList",
+    ]);
   });
 
   test("does not deny unqualified Bash (would remove tool entirely)", async () => {
@@ -509,7 +514,9 @@ describe("ensureSystemCoordinator", () => {
     const settingsPath = join(tmpDir, ".claude", "settings.local.json");
     const content = await readFile(settingsPath, "utf-8");
     const settings = JSON.parse(content);
-    expect(settings.permissions.allow).toEqual(["Bash(ib:*)", "ToolSearch"]);
+    expect(settings.permissions.allow).toEqual([
+      "Bash(ib:*)", "ToolSearch", "ScheduleWakeup", "CronCreate", "CronDelete", "CronList",
+    ]);
     expect(settings.permissions.deny).not.toContain("Bash");
   });
 

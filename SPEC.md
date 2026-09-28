@@ -1545,7 +1545,7 @@ The system coordinator runs from `~/.itsybitsy/`, which is not initially a git r
 ```json
 {
   "permissions": {
-    "allow": ["Bash(ib:*)", "ToolSearch"],
+    "allow": ["Bash(ib:*)", "ToolSearch", "ScheduleWakeup", "CronCreate", "CronDelete", "CronList"],
     "deny": ["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS", "NotebookEdit", "WebFetch", "WebSearch", "Task", "TaskOutput", "Agent", "KillShell", "EnterPlanMode", "ExitPlanMode"]
   }
 }
@@ -1553,7 +1553,7 @@ The system coordinator runs from `~/.itsybitsy/`, which is not initially a git r
 
 **Note**: Claude Code requires a project directory context to load `settings.local.json`. Since `~/.itsybitsy/` is not initially a git repo, the coordinator startup must run `git init` there (a standard repo, not `--bare`). This matches the existing settings pattern and is simpler than passing permissions via `--allowedTools` CLI flags.
 
-This ensures the system coordinator can only run `ib` commands (e.g., `ib list`, `ib send`, `ib merge`, `ib new-agent`, `ib retire`, `ib rehire`, `ib status`, `ib diff`) and use `ToolSearch` to discover available deferred tools. It cannot access files, browse the web, or spawn sub-agents directly.
+This ensures the system coordinator can only run `ib` commands (e.g., `ib list`, `ib send`, `ib merge`, `ib new-agent`, `ib retire`, `ib rehire`, `ib status`, `ib diff`), use `ToolSearch` to discover available deferred tools, and schedule its own check-ins. It cannot access files, browse the web, or spawn sub-agents directly. `Bash(ib:*)` and `ToolSearch` are the hardcoded floor in `src/coordinator.ts`. The scheduling tools (`ScheduleWakeup`, `CronCreate`, `CronDelete`, `CronList`) come from the embedded `system.md` layer. The watchdog does not notify `@system` about agents it starts in other repos, so it needs these tools to follow up on them, and the coordinator wait hint (§6.1) tells it to use them.
 
 #### 12.1.4 Display
 

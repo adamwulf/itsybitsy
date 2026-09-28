@@ -177,7 +177,8 @@ async function checkCoordinatorBashRestrictions(
  * deny of a wait attempt; keep both (wait-hint.ts, SPEC §6.1 "Wait hint").
  *
  * The detector does not branch on agent identity; which roles run it depends
- * on where this hook is installed (SPEC §6.4 — spawned workers do not get it).
+ * on where this hook is installed (SPEC §6.4 — spawned worktree workers do
+ * not get it; every worktree:false agent does, see buildAgentSettings).
  */
 function checkBusyWaitBash(
   input: { tool_name: string; tool_input: Record<string, unknown> }

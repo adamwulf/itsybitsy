@@ -236,8 +236,10 @@ async function readRecordedCoordinatorSessionId(): Promise<string | null> {
 }
 
 /**
- * Hardcoded allow list for the system coordinator.
- * Only ib commands and ToolSearch are permitted.
+ * Hardcoded allow floor for the system coordinator: ib commands and
+ * ToolSearch. The `_all.md` / `system.md` layers add more (the shipped
+ * system.md adds the ScheduleWakeup/Cron check-in tools); see
+ * buildSystemCoordinatorSettings.
  */
 const SYSTEM_COORDINATOR_ALLOW = ["Bash(ib:*)", "ToolSearch"];
 

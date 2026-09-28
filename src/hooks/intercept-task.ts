@@ -10,6 +10,7 @@ import { parseModel } from "../agent-cli";
 import { findShellMetachar } from "./shell-metachar";
 import { isValidAgentId } from "../validation";
 import { resolveBoundHookAgent } from "./agent-context";
+import { isBusyWaitBashCommand, WAIT_HINT } from "./wait-hint";
 
 export interface InterceptResult {
   action: "skip" | "intercept";
@@ -172,12 +173,9 @@ async function checkCoordinatorBashRestrictions(
  * PreToolUse hook) pre-empts the built-in deny so the agent sees OUR message.
  *
  * Applies to ALL agent types (worker, manager, coordinator) — any of them
- * might try to sleep-wait — so this is independent of agent identity.
- *
- * Conservative matching (avoid false positives on commands that merely
- * mention "sleep"):
- *  - The command IS or STARTS WITH `sleep <number>` (anchored at start).
- *  - A `while`/`until` loop (anchored at start) whose body contains `sleep`.
+ * might try to sleep-wait — so this is independent of agent identity. The
+ * conservative match and the WAITING hint are shared with the path hook
+ * (wait-hint.ts), which adds the same hint when it rejects a wait attempt.
  */
 function checkBusyWaitBash(
   input: { tool_name: string; tool_input: Record<string, unknown> }
@@ -185,17 +183,7 @@ function checkBusyWaitBash(
   if (input.tool_name !== "Bash") return null;
 
   const command = (input.tool_input.command as string) ?? "";
-
-  // A command that is, or starts with, `sleep <number>` — covers
-  // `sleep 45`, `sleep 5 && ib list`, `sleep 30 ; ib status x`.
-  const startsWithSleep = /^\s*sleep\s+[0-9.]+/i.test(command);
-
-  // A `while`/`until` loop whose body contains a `sleep` call — covers
-  // `until …; do sleep 5; done`, `while …; do sleep 2; done`.
-  const isPollingLoop =
-    /^\s*(while|until)\b/i.test(command) && /\bsleep\b/i.test(command);
-
-  if (!startsWithSleep && !isPollingLoop) return null;
+  if (!isBusyWaitBashCommand(command)) return null;
 
   return {
     action: "intercept",
@@ -203,8 +191,7 @@ function checkBusyWaitBash(
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason:
-          "Don't sleep or busy-loop to wait for sub-agents — it spins tokens and these wait commands are blocked anyway. To wait, make 'WAITING' the LAST line of your message and stop. A per-agent watchdog will notify you when a sub-agent completes or needs input — you don't need to poll. When you're notified, resume with 'ib look <id>' / 'ib diff <id>'.",
+        permissionDecisionReason: `Don't sleep or busy-loop to wait — it spins tokens. ${WAIT_HINT}`,
       },
     },
   };

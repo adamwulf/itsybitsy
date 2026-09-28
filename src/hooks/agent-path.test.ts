@@ -3230,3 +3230,77 @@ describe("hookCheckPath — deny by default (missing meta, malformed stdin)", ()
     expect(denials[0]!.line).toContain("paths.allowRead/allowWrite");
   });
 });
+
+describe("hookCheckPath — denied wait attempts point at WAITING", () => {
+  let tempDir: string;
+  let agentDir: string;
+  let worktreeCwd: string;
+  let logged: string[] = [];
+  const originalLog = console.log;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "hook-wait-hint-"));
+    agentDir = join(tempDir, ".ittybitty", "agents", "agent-test66");
+    worktreeCwd = join(agentDir, "repo");
+    await mkdir(join(worktreeCwd, ".claude"), { recursive: true });
+    // A typical agent allow list: Read plus prefix-scoped Bash. Monitor, sleep,
+    // and until-loops are not listed, exactly as in real agent settings.
+    await writeFile(
+      join(worktreeCwd, ".claude", "settings.local.json"),
+      JSON.stringify({ permissions: { allow: ["Read", "Bash(git:*)", "Bash(tail:*)"], deny: [] } }),
+    );
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-test66", worker: true }));
+    setNoWorktreeRepoRootsLoader(async () => [tempDir]);
+    logged = [];
+    console.log = (msg: string) => { logged.push(msg); };
+  });
+
+  afterEach(async () => {
+    console.log = originalLog;
+    resetNoWorktreeRepoRootsLoader();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  async function run(tool_name: string, tool_input: Record<string, unknown>) {
+    await hookCheckPath("agent-test66", JSON.stringify({ tool_name, tool_input, cwd: worktreeCwd }));
+    return JSON.parse(logged[0]!).hookSpecificOutput as Record<string, string>;
+  }
+
+  test("a denied Monitor call tells the agent to use WAITING", async () => {
+    const out = await run("Monitor", {
+      description: "build result",
+      command: "until grep -q DONE /tmp/build.log; do sleep 2; done",
+    });
+    expect(out.permissionDecision).toBe("deny");
+    expect(out.permissionDecisionReason).toStartWith("Tool not in allow list — ");
+    expect(out.permissionDecisionReason).toContain("WAITING");
+  });
+
+  test("a denied until/sleep polling loop tells the agent to use WAITING", async () => {
+    const out = await run("Bash", { command: "until grep -q DONE /tmp/build.log; do sleep 2; done" });
+    expect(out.permissionDecision).toBe("deny");
+    expect(out.permissionDecisionReason).toContain("WAITING");
+  });
+
+  test("the Denials tab keeps the short reason (hint is agent-facing only)", async () => {
+    await run("Monitor", { description: "build result", command: "tail -f /tmp/build.log" });
+    const logLines = (await readFile(join(agentDir, "agent.log"), "utf-8")).split("\n");
+    const denials = parseDenials(logLines);
+    expect(denials).toHaveLength(1);
+    expect(denials[0]!.line).toContain("Permission denied: Monitor");
+    expect(denials[0]!.line).toEndWith("— Tool not in allow list");
+    expect(denials[0]!.line).not.toContain("WAITING");
+  });
+
+  test("a denial that is not a wait attempt gets no hint", async () => {
+    const out = await run("WebFetch", { url: "https://example.com" });
+    expect(out.permissionDecision).toBe("deny");
+    expect(out.permissionDecisionReason).toBe("Tool not in allow list");
+  });
+
+  test("an allowed call is unchanged", async () => {
+    const out = await run("Bash", { command: "tail -5 build.log" });
+    expect(out.permissionDecision).toBe("allow");
+    expect(out.permissionDecisionReason).toBe("Tool in allow list");
+  });
+});

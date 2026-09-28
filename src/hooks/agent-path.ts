@@ -25,6 +25,7 @@ import { canonicalizeSandboxPath, resolvePreparedAccess, type PathOperation, typ
 import { findShellMetachar } from "./shell-metachar";
 import { resolveBoundHookAgent } from "./agent-context";
 import { metaCanSpawnChildren } from "../agent-types";
+import { withWaitHint } from "./wait-hint";
 
 // Re-exported for existing callers/tests that import it from this module; the
 // definition moved to ./paths-table to break the import cycle.
@@ -1799,7 +1800,9 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
  * contract. The log keeps the exact `[PreToolUse] Permission denied: <tool>
  * <suffix>` prefix that parseDenials (src/agents.ts) matches, and appends
  * ` — <reason>` so the Denials tab of `ib watch` shows the operation, the
- * resolved path, and the rule that denied it.
+ * resolved path, and the rule that denied it. A denied wait attempt (Monitor,
+ * sleep, a polling loop) also tells the agent to use WAITING; that hint goes
+ * only to the agent, so the Denials tab keeps the short reason.
  */
 async function emitPathDecision(
   agentDir: string,
@@ -1807,16 +1810,18 @@ async function emitPathDecision(
   toolInput: Record<string, unknown>,
   decision: HookDecision,
 ): Promise<void> {
+  let reason = decision.reason;
   if (decision.decision === "deny") {
     const params = formatToolInput(toolInput);
     const suffix = params ? ` (${params})` : "";
     await logAgent(agentDir, `[PreToolUse] Permission denied: ${toolName}${suffix} — ${decision.reason}`);
+    reason = withWaitHint(decision.reason, toolName, toolInput);
   }
   console.log(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: decision.decision,
-      permissionDecisionReason: decision.reason,
+      permissionDecisionReason: reason,
     },
   }));
 }

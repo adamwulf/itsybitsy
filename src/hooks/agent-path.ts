@@ -25,6 +25,7 @@ import { canonicalizeSandboxPath, resolvePreparedAccess, type PathOperation, typ
 import { findShellMetachar } from "./shell-metachar";
 import { resolveBoundHookAgent } from "./agent-context";
 import { metaCanSpawnChildren } from "../agent-types";
+import { withWaitHint } from "./wait-hint";
 
 // Re-exported for existing callers/tests that import it from this module; the
 // definition moved to ./paths-table to break the import cycle.
@@ -1636,6 +1637,9 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
   let rootRepo = "";
   let isNoWorktree = false;
   let canSpawnChildren: boolean | undefined;
+  // Coordinators get their own wait hint (wait-hint.ts). Same test as
+  // intercept-task's coordinator check: @system, or agentType "coordinator".
+  let isCoordinator = agentId === SYSTEM_AGENT_ID;
   // The prepared access table for this invocation. Both branches assign it or
   // return early on a build failure — there is no permissive default.
   let access!: PreparedAccessTable;
@@ -1667,7 +1671,7 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
       await emitPathDecision(agentDir, toolName, toolInput, {
         decision: "deny",
         reason: META_UNREADABLE_DENY_REASON,
-      });
+      }, isCoordinator);
       return;
     }
   } else {
@@ -1682,7 +1686,7 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
       await emitPathDecision(fallbackAgentDir, toolName, toolInput, {
         decision: "deny",
         reason: META_UNREADABLE_DENY_REASON,
-      });
+      }, isCoordinator);
       return;
     }
     agentsDir = boundContext.agentsDir;
@@ -1698,10 +1702,11 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
       await emitPathDecision(agentDir, toolName, toolInput, {
         decision: "deny",
         reason: META_UNREADABLE_DENY_REASON,
-      });
+      }, isCoordinator);
       return;
     }
     canSpawnChildren = await metaCanSpawnChildren(meta);
+    isCoordinator = meta.agentType === "coordinator";
 
     // For non-worktree agents (e.g., coordinators), worktreePath is the repo root
     if (isNoWorktree) {
@@ -1751,7 +1756,7 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
       await emitPathDecision(agentDir, toolName, toolInput, {
         decision: "deny",
         reason: META_UNREADABLE_DENY_REASON,
-      });
+      }, isCoordinator);
       return;
     }
   }
@@ -1791,7 +1796,7 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
     decision = checkPathAccess({ toolName, toolInput, cwd }, ctx);
   }
 
-  await emitPathDecision(agentDir, toolName, toolInput, decision);
+  await emitPathDecision(agentDir, toolName, toolInput, decision, isCoordinator);
 }
 
 /**
@@ -1799,24 +1804,30 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
  * contract. The log keeps the exact `[PreToolUse] Permission denied: <tool>
  * <suffix>` prefix that parseDenials (src/agents.ts) matches, and appends
  * ` — <reason>` so the Denials tab of `ib watch` shows the operation, the
- * resolved path, and the rule that denied it.
+ * resolved path, and the rule that denied it. A denied wait attempt (Monitor,
+ * sleep, a polling loop) also tells the agent how to wait (the coordinator
+ * variant when `coordinator`); that hint goes only to the agent, so the
+ * Denials tab keeps the short reason.
  */
 async function emitPathDecision(
   agentDir: string,
   toolName: string,
   toolInput: Record<string, unknown>,
   decision: HookDecision,
+  coordinator: boolean,
 ): Promise<void> {
+  let reason = decision.reason;
   if (decision.decision === "deny") {
     const params = formatToolInput(toolInput);
     const suffix = params ? ` (${params})` : "";
     await logAgent(agentDir, `[PreToolUse] Permission denied: ${toolName}${suffix} — ${decision.reason}`);
+    reason = withWaitHint(decision.reason, toolName, toolInput, coordinator);
   }
   console.log(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: decision.decision,
-      permissionDecisionReason: decision.reason,
+      permissionDecisionReason: reason,
     },
   }));
 }

@@ -753,6 +753,27 @@ describe("coordinator Bash restrictions", () => {
     }
   });
 
+  // A one-line polling loop always has a `;`. The busy-wait check runs first so
+  // the coordinator is pointed at WAITING rather than told to quote its text.
+  test("a coordinator polling loop gets the WAITING hint, not the metachar reason", async () => {
+    await setupCoordinatorDir();
+    try {
+      const result = await processTaskIntercept({
+        tool_name: "Bash",
+        tool_input: { command: "until ib status agent-x; do sleep 5; done" },
+        cwd: coordCwd,
+      });
+      const hookOutput = (result.output as Record<string, unknown>).hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecision).toBe("deny");
+      expect(hookOutput.permissionDecisionReason).toContain("WAITING");
+      expect(hookOutput.permissionDecisionReason).not.toContain("metacharacters");
+      // Coordinators are not notified about agents in other repos.
+      expect(hookOutput.permissionDecisionReason).toContain("ScheduleWakeup");
+    } finally {
+      await cleanup();
+    }
+  });
+
   test("blocks && in coordinator Bash commands", async () => {
     await setupCoordinatorDir();
     try {
@@ -1937,6 +1958,19 @@ describe("@system caller", () => {
     expect(hookOutput.permissionDecisionReason).toContain("shell metacharacters");
   });
 
+  test("a system-coordinator polling loop gets the WAITING hint, not the metachar reason", async () => {
+    const result = await processTaskIntercept({
+      tool_name: "Bash",
+      tool_input: { command: "while true; do sleep 2; done" },
+      cwd: coordHome,
+    });
+    const hookOutput = (result.output as Record<string, unknown>).hookSpecificOutput as Record<string, unknown>;
+    expect(hookOutput.permissionDecision).toBe("deny");
+    expect(hookOutput.permissionDecisionReason).toContain("WAITING");
+    expect(hookOutput.permissionDecisionReason).not.toContain("metacharacters");
+    expect(hookOutput.permissionDecisionReason).toContain("ScheduleWakeup");
+  });
+
   test("allows clean ib commands from system coordinator", async () => {
     const result = await processTaskIntercept({
       tool_name: "Bash",
@@ -2203,6 +2237,9 @@ describe("busy-wait Bash interception", () => {
         cwd: managerCwd,
       });
       expectDeniedWaitHint(result);
+      // Only coordinators get the ScheduleWakeup variant; managers are denied it.
+      const hookOutput = (result.output as Record<string, unknown>).hookSpecificOutput as Record<string, unknown>;
+      expect(hookOutput.permissionDecisionReason).not.toContain("ScheduleWakeup");
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

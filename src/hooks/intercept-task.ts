@@ -10,6 +10,7 @@ import { parseModel } from "../agent-cli";
 import { findShellMetachar } from "./shell-metachar";
 import { isValidAgentId } from "../validation";
 import { resolveBoundHookAgent } from "./agent-context";
+import { isBusyWaitBashCommand, waitHintFor } from "./wait-hint";
 
 export interface InterceptResult {
   action: "skip" | "intercept";
@@ -77,21 +78,12 @@ function isAcceptableTaskModel(value: string): boolean {
 }
 
 /**
- * Check if this is a Bash tool call from a coordinator session that contains
- * shell metacharacters or --output in git commands (SPEC §12.2.4).
- * Returns a deny result if blocked, or null to proceed normally.
+ * Whether the caller is a coordinator. The system coordinator's synthetic
+ * meta carries `agentType: "system"`; per-repo coordinators have
+ * `agentType: "coordinator"` on disk.
  */
-async function checkCoordinatorBashRestrictions(
-  input: { tool_name: string; tool_input: Record<string, unknown>; cwd: string },
-  resolved: InterceptAgentIdentity | null,
-): Promise<InterceptResult | null> {
-  if (input.tool_name !== "Bash") return null;
-
-  // Resolve agent identity. The system coordinator's synthetic meta carries
-  // `agentType: "system"`; per-repo coordinators have `agentType: "coordinator"`
-  // on disk. Both should get the same restrictions (no shell metacharacters,
-  // no --output, no -C/--git-dir/--work-tree).
-  if (!resolved) return null;
+async function isCoordinatorCaller(resolved: InterceptAgentIdentity | null): Promise<boolean> {
+  if (!resolved) return false;
 
   let agentType: string | undefined;
   if (resolved.syntheticMeta) {
@@ -108,8 +100,23 @@ async function checkCoordinatorBashRestrictions(
     }
   }
 
-  const isCoordinator = agentType === "coordinator" || agentType === "system";
-  if (!isCoordinator) return null;
+  return agentType === "coordinator" || agentType === "system";
+}
+
+/**
+ * Check if this is a Bash tool call from a coordinator session that contains
+ * shell metacharacters or --output in git commands (SPEC §12.2.4).
+ * Returns a deny result if blocked, or null to proceed normally.
+ */
+async function checkCoordinatorBashRestrictions(
+  input: { tool_name: string; tool_input: Record<string, unknown>; cwd: string },
+  resolved: InterceptAgentIdentity | null,
+): Promise<InterceptResult | null> {
+  if (input.tool_name !== "Bash") return null;
+
+  // Both coordinator kinds get the same restrictions (no shell metacharacters,
+  // no --output, no -C/--git-dir/--work-tree).
+  if (!(await isCoordinatorCaller(resolved))) return null;
 
   const command = (input.tool_input.command as string) ?? "";
 
@@ -164,47 +171,39 @@ async function checkCoordinatorBashRestrictions(
  * Detect Bash commands whose purpose is to busy-wait / poll for a sub-agent,
  * and deny them with a pointer to the WAITING workflow (SPEC §8.5 / §8.5.1).
  *
- * Agents sometimes try to "wait" for a sub-agent by sleeping or spinning a
- * polling loop (e.g. `sleep 45; ib look x`, `until …; do sleep 5; done`).
- * These waste tokens and are blocked by Claude Code's built-ins anyway. The
- * correct behavior is to emit WAITING and let the per-agent watchdog notify
- * the agent when the sub-agent completes or needs input. Denying here (as a
- * PreToolUse hook) pre-empts the built-in deny so the agent sees OUR message.
+ * Agents sometimes try to "wait" for a sub-agent or a background command by
+ * sleeping or spinning a polling loop (e.g. `sleep 45; ib look x`,
+ * `until …; do sleep 5; done`). These waste tokens. The correct behavior is
+ * to emit WAITING and let the watchdog or the background command wake it.
  *
- * Applies to ALL agent types (worker, manager, coordinator) — any of them
- * might try to sleep-wait — so this is independent of agent identity.
+ * This deny is NOT the only one the agent may see. Claude Code blocks
+ * `sleep N` itself before any hook runs, and when both PreToolUse hooks deny
+ * a polling loop Claude surfaces only one reason — in practice the path
+ * hook's. So the path hook (agent-path.ts) adds the same wait hint to its own
+ * deny of a wait attempt; keep both (wait-hint.ts, SPEC §6.1 "Wait hint").
+ * Coordinators get the coordinator variant of the hint.
  *
- * Conservative matching (avoid false positives on commands that merely
- * mention "sleep"):
- *  - The command IS or STARTS WITH `sleep <number>` (anchored at start).
- *  - A `while`/`until` loop (anchored at start) whose body contains `sleep`.
+ * The detector does not branch on agent identity; which roles run it depends
+ * on where this hook is installed (SPEC §6.4 — spawned worktree workers do
+ * not get it; every worktree:false agent does, see buildAgentSettings).
  */
-function checkBusyWaitBash(
-  input: { tool_name: string; tool_input: Record<string, unknown> }
-): InterceptResult | null {
+async function checkBusyWaitBash(
+  input: { tool_name: string; tool_input: Record<string, unknown> },
+  resolved: InterceptAgentIdentity | null,
+): Promise<InterceptResult | null> {
   if (input.tool_name !== "Bash") return null;
 
   const command = (input.tool_input.command as string) ?? "";
+  if (!isBusyWaitBashCommand(command)) return null;
 
-  // A command that is, or starts with, `sleep <number>` — covers
-  // `sleep 45`, `sleep 5 && ib list`, `sleep 30 ; ib status x`.
-  const startsWithSleep = /^\s*sleep\s+[0-9.]+/i.test(command);
-
-  // A `while`/`until` loop whose body contains a `sleep` call — covers
-  // `until …; do sleep 5; done`, `while …; do sleep 2; done`.
-  const isPollingLoop =
-    /^\s*(while|until)\b/i.test(command) && /\bsleep\b/i.test(command);
-
-  if (!startsWithSleep && !isPollingLoop) return null;
-
+  const hint = waitHintFor(await isCoordinatorCaller(resolved));
   return {
     action: "intercept",
     output: {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason:
-          "Don't sleep or busy-loop to wait for sub-agents — it spins tokens and these wait commands are blocked anyway. To wait, make 'WAITING' the LAST line of your message and stop. A per-agent watchdog will notify you when a sub-agent completes or needs input — you don't need to poll. When you're notified, resume with 'ib look <id>' / 'ib diff <id>'.",
+        permissionDecisionReason: `Don't sleep or busy-loop to wait — it spins tokens. ${hint}`,
       },
     },
   };
@@ -245,15 +244,18 @@ export async function processTaskIntercept(
     };
   }
 
-  // 0. Check coordinator Bash restrictions (SPEC §12.2.4)
+  // 0. Deny busy-wait / poll Bash commands for ALL agent types (SPEC §8.5).
+  // Runs before the `tool_name !== 'Task'…` early-return so it applies to
+  // workers, managers, and coordinators alike, and before the coordinator
+  // restrictions: a one-line polling loop always contains `;`, and a
+  // coordinator must get the WAITING hint, not "quote your metacharacters".
+  // Both deny, so the order changes only the reason.
+  const busyWaitBlock = await checkBusyWaitBash(input, resolved);
+  if (busyWaitBlock) return busyWaitBlock;
+
+  // 0.5. Check coordinator Bash restrictions (SPEC §12.2.4)
   const coordBlock = await checkCoordinatorBashRestrictions(input, resolved);
   if (coordBlock) return coordBlock;
-
-  // 0.5. Deny busy-wait / poll Bash commands for ALL agent types (SPEC §8.5).
-  // Runs before the `tool_name !== 'Task'…` early-return so it applies to
-  // workers, managers, and coordinators alike.
-  const busyWaitBlock = checkBusyWaitBash(input);
-  if (busyWaitBlock) return busyWaitBlock;
 
   // 1. Deny AskUserQuestion — agents must use `ib ask` instead
   if (input.tool_name === "AskUserQuestion") {

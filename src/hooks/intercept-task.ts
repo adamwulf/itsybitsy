@@ -165,17 +165,19 @@ async function checkCoordinatorBashRestrictions(
  * Detect Bash commands whose purpose is to busy-wait / poll for a sub-agent,
  * and deny them with a pointer to the WAITING workflow (SPEC §8.5 / §8.5.1).
  *
- * Agents sometimes try to "wait" for a sub-agent by sleeping or spinning a
- * polling loop (e.g. `sleep 45; ib look x`, `until …; do sleep 5; done`).
- * These waste tokens and are blocked by Claude Code's built-ins anyway. The
- * correct behavior is to emit WAITING and let the per-agent watchdog notify
- * the agent when the sub-agent completes or needs input. Denying here (as a
- * PreToolUse hook) pre-empts the built-in deny so the agent sees OUR message.
+ * Agents sometimes try to "wait" for a sub-agent or a background command by
+ * sleeping or spinning a polling loop (e.g. `sleep 45; ib look x`,
+ * `until …; do sleep 5; done`). These waste tokens. The correct behavior is
+ * to emit WAITING and let the watchdog or the background command wake it.
  *
- * Applies to ALL agent types (worker, manager, coordinator) — any of them
- * might try to sleep-wait — so this is independent of agent identity. The
- * conservative match and the WAITING hint are shared with the path hook
- * (wait-hint.ts), which adds the same hint when it rejects a wait attempt.
+ * This deny is NOT the only one the agent may see. Claude Code blocks
+ * `sleep N` itself before any hook runs, and when both PreToolUse hooks deny
+ * a polling loop Claude surfaces only one reason — in practice the path
+ * hook's. So the path hook (agent-path.ts) adds the same WAIT_HINT to its own
+ * deny of a wait attempt; keep both (wait-hint.ts, SPEC §6.1 "Wait hint").
+ *
+ * The detector does not branch on agent identity; which roles run it depends
+ * on where this hook is installed (SPEC §6.4 — spawned workers do not get it).
  */
 function checkBusyWaitBash(
   input: { tool_name: string; tool_input: Record<string, unknown> }
@@ -232,15 +234,18 @@ export async function processTaskIntercept(
     };
   }
 
-  // 0. Check coordinator Bash restrictions (SPEC §12.2.4)
-  const coordBlock = await checkCoordinatorBashRestrictions(input, resolved);
-  if (coordBlock) return coordBlock;
-
-  // 0.5. Deny busy-wait / poll Bash commands for ALL agent types (SPEC §8.5).
+  // 0. Deny busy-wait / poll Bash commands for ALL agent types (SPEC §8.5).
   // Runs before the `tool_name !== 'Task'…` early-return so it applies to
-  // workers, managers, and coordinators alike.
+  // workers, managers, and coordinators alike, and before the coordinator
+  // restrictions: a one-line polling loop always contains `;`, and a
+  // coordinator must get the WAITING hint, not "quote your metacharacters".
+  // Both deny, so the order changes only the reason.
   const busyWaitBlock = checkBusyWaitBash(input);
   if (busyWaitBlock) return busyWaitBlock;
+
+  // 0.5. Check coordinator Bash restrictions (SPEC §12.2.4)
+  const coordBlock = await checkCoordinatorBashRestrictions(input, resolved);
+  if (coordBlock) return coordBlock;
 
   // 1. Deny AskUserQuestion — agents must use `ib ask` instead
   if (input.tool_name === "AskUserQuestion") {

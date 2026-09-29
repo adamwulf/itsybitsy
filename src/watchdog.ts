@@ -1386,6 +1386,44 @@ export function resetPerAgentDrain(): void {
   };
 }
 
+/**
+ * Spawn-request broker hooks (spawn-broker.ts). A SANDBOXED `ib new-agent`
+ * cannot spawn a child itself, so it drops a request file in this agent's own
+ * directory and this — unsandboxed — watchdog performs the spawn. `setup` makes
+ * the queue directories and returns the request directory to watch (null = no
+ * watch); `process` handles whatever is queued. Both are lazy imports for the
+ * same cycle-avoidance reason as the outbox drain, and both are injectable so
+ * the per-agent watchdog tests never touch the filesystem.
+ */
+export interface SpawnBrokerHooks {
+  setup: (agentDir: string) => Promise<string | null>;
+  process: (agentId: string, repoPath: string) => Promise<void>;
+}
+
+const defaultSpawnBrokerHooks: SpawnBrokerHooks = {
+  setup: async (agentDir) => {
+    const { ensureSpawnBrokerDirs, spawnRequestDir } = await import("./spawn-broker");
+    await ensureSpawnBrokerDirs(agentDir);
+    return spawnRequestDir(agentDir);
+  },
+  process: async (agentId, repoPath) => {
+    const { processSpawnRequests } = await import("./spawn-broker");
+    await processSpawnRequests(agentId, repoPath);
+  },
+};
+
+let spawnBrokerHooks: SpawnBrokerHooks = defaultSpawnBrokerHooks;
+
+/** Override the spawn-request broker hooks (for testing). */
+export function setPerAgentSpawnBroker(hooks: SpawnBrokerHooks): void {
+  spawnBrokerHooks = hooks;
+}
+
+/** Reset the spawn-request broker hooks to default. */
+export function resetPerAgentSpawnBroker(): void {
+  spawnBrokerHooks = defaultSpawnBrokerHooks;
+}
+
 /** Debounce window for fs.watch-triggered drains, in ms. */
 const OUTBOX_WATCH_DEBOUNCE_MS = 50;
 
@@ -1648,9 +1686,39 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     watcher = null; // fs.watch unavailable — per-tick draining still covers it
   }
 
+  // ── Spawn-request broker ──────────────────────────────────────────────────
+  // A sandboxed `ib new-agent` queues a request in <agentDir>/spawn-requests/;
+  // we are unsandboxed, so we run the spawn. NOT awaited by the loop: a spawn
+  // (worktree add, tmux, proxy) takes seconds and must not stall state
+  // detection or the outbox drain. The guard keeps at most one handler running;
+  // a request that arrives meanwhile is picked up by the next tick/watch event.
+  let spawnBusy = false;
+  const spawnNow = (): void => {
+    if (spawnBusy) return;
+    spawnBusy = true;
+    void spawnBrokerHooks.process(agentId, repoPath)
+      .catch(() => { /* never crash the watchdog on a spawn-request error */ })
+      .finally(() => { spawnBusy = false; });
+  };
+  let spawnWatcher: FSWatcher | null = null;
+  let spawnDebounce: ReturnType<typeof setTimeout> | null = null;
+  try {
+    const requestDir = await spawnBrokerHooks.setup(agentDir);
+    if (requestDir) {
+      spawnWatcher = watch(requestDir, () => {
+        if (spawnDebounce) clearTimeout(spawnDebounce);
+        spawnDebounce = setTimeout(spawnNow, OUTBOX_WATCH_DEBOUNCE_MS);
+      });
+    }
+  } catch {
+    spawnWatcher = null; // no watch — the per-tick pass still handles requests
+  }
+
   const stopWatching = (): void => {
     if (watchDebounce) { clearTimeout(watchDebounce); watchDebounce = null; }
     if (watcher) { try { watcher.close(); } catch { /* ignore */ } watcher = null; }
+    if (spawnDebounce) { clearTimeout(spawnDebounce); spawnDebounce = null; }
+    if (spawnWatcher) { try { spawnWatcher.close(); } catch { /* ignore */ } spawnWatcher = null; }
   };
 
   // Poll loop
@@ -1664,6 +1732,9 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     // Drain any queued outbox messages first, before state handling, so a
     // pending nudge/notification is delivered promptly regardless of state.
     await drainNow();
+
+    // Handle any queued spawn requests from this agent (sandboxed spawner).
+    spawnNow();
 
     // agy liveness check (D10 / §5.4). Runs before the tmux capture so it fires
     // even when the pane is a blank, hookless agy screen. One-shot per watchdog.

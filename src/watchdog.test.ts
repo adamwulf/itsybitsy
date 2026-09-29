@@ -49,6 +49,8 @@ import {
   resetPerAgentReadState,
   setPerAgentDrain,
   resetPerAgentDrain,
+  setPerAgentSpawnBroker,
+  resetPerAgentSpawnBroker,
   setWatchdogSleep,
   resetWatchdogSleep,
   setWatchdogCaptureTmux,
@@ -2862,6 +2864,8 @@ describe("runPerAgentWatchdog", () => {
     // (default drainOutbox would touch /tmp/test). Per-drain assertions set
     // their own spy.
     setPerAgentDrain(async () => {});
+    // No-op spawn-request broker — same reason: never touch the real FS.
+    setPerAgentSpawnBroker({ setup: async () => null, process: async () => {} });
     // Disable auto-compact
     setWatchdogReadConfig(async () => ({} as any));
     // Module-level snapshot cache survives across tests; clear so
@@ -2883,6 +2887,7 @@ describe("runPerAgentWatchdog", () => {
     resetWatchdogSpawnRunner();
     resetPerAgentReadState();
     resetPerAgentDrain();
+    resetPerAgentSpawnBroker();
     clearAllAgentsCache();
   });
 
@@ -2905,6 +2910,57 @@ describe("runPerAgentWatchdog", () => {
 
     // One drain per tick (3 ticks before the worktree-gone exit).
     expect(drainCalls).toBe(3);
+  });
+
+  test("sets up the spawn-request broker once and runs it on every poll tick", async () => {
+    // A sandboxed `ib new-agent` queues a request in the agent's own directory;
+    // the (unsandboxed) watchdog must pick it up each tick.
+    const setups: string[] = [];
+    const processed: Array<[string, string]> = [];
+    setPerAgentSpawnBroker({
+      setup: async (agentDir) => { setups.push(agentDir); return null; },
+      process: async (agentId, repoPath) => { processed.push([agentId, repoPath]); },
+    });
+    let existsChecks = 0;
+    setPerAgentExistsSync(() => ++existsChecks <= 3);
+    setPerAgentReadState(async () => undefined);
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+
+    expect(setups).toEqual(["/tmp/test/.ittybitty/agents/agent-test1"]);
+    expect(processed.length).toBeGreaterThanOrEqual(1);
+    expect(processed.every(([id, repo]) => id === "agent-test1" && repo === "/tmp/test")).toBe(true);
+  });
+
+  test("a spawn-request handler that throws never crashes the watchdog", async () => {
+    let calls = 0;
+    setPerAgentSpawnBroker({
+      setup: async () => null,
+      process: async () => { calls++; throw new Error("boom"); },
+    });
+    let existsChecks = 0;
+    setPerAgentExistsSync(() => ++existsChecks <= 3);
+    setPerAgentReadState(async () => undefined);
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+
+    expect(calls).toBeGreaterThanOrEqual(1);
+  });
+
+  test("a broker setup failure is survivable: the watchdog still runs its ticks", async () => {
+    setPerAgentSpawnBroker({
+      setup: async () => { throw new Error("cannot create the queue"); },
+      process: async () => {},
+    });
+    let drainCalls = 0;
+    setPerAgentDrain(async () => { drainCalls++; });
+    let existsChecks = 0;
+    setPerAgentExistsSync(() => ++existsChecks <= 2);
+    setPerAgentReadState(async () => undefined);
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+
+    expect(drainCalls).toBe(2);
   });
 
   test("background-task suppression preserves waiting reminder progress and budget", async () => {

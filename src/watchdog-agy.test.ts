@@ -33,6 +33,8 @@ import {
   resetPerAgentSleep,
   setPerAgentDrain,
   resetPerAgentDrain,
+  setPerAgentSpawnBroker,
+  resetPerAgentSpawnBroker,
   setWatchdogSpawnRunner,
   resetWatchdogSpawnRunner,
   setWatchdogNow,
@@ -93,6 +95,7 @@ describe("Phase 3 — agy watchdog fallback keystrokes", () => {
     setWatchdogNow(() => NOW);
     setPerAgentSleep(async () => {});
     setPerAgentDrain(async () => {});
+    setPerAgentSpawnBroker({ setup: async () => null, process: async () => {} });
     setWatchdogReadConfig(async () => ({} as any));
     setPerAgentReadState(async () => undefined);
     clearAllAgentsCache();
@@ -107,6 +110,7 @@ describe("Phase 3 — agy watchdog fallback keystrokes", () => {
     resetPerAgentReadState();
     resetPerAgentSleep();
     resetPerAgentDrain();
+    resetPerAgentSpawnBroker();
     resetWatchdogReadConfig();
     resetWatchdogNow();
     clearAllAgentsCache();
@@ -181,6 +185,7 @@ describe("Phase 3 — agy heartbeat liveness", () => {
     setWatchdogNow(() => NOW);
     setPerAgentSleep(async () => {});
     setPerAgentDrain(async () => {});
+    setPerAgentSpawnBroker({ setup: async () => null, process: async () => {} });
     setWatchdogReadConfig(async () => ({} as any));
     setPerAgentReadState(async () => undefined);
     clearAllAgentsCache();
@@ -195,6 +200,7 @@ describe("Phase 3 — agy heartbeat liveness", () => {
     resetPerAgentReadState();
     resetPerAgentSleep();
     resetPerAgentDrain();
+    resetPerAgentSpawnBroker();
     resetWatchdogReadConfig();
     resetWatchdogNow();
     resetWatchdogListRepos();

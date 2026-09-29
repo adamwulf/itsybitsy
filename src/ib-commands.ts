@@ -4093,7 +4093,7 @@ export async function drainOutbox(
  * watchdog is "live" when meta.transient.json records a watchdog_pid that is
  * fresh (updated within TRANSIENT_FRESH_MS) and whose process is alive.
  */
-async function hasLiveWatchdog(agentDir: string): Promise<boolean> {
+export async function hasLiveWatchdog(agentDir: string): Promise<boolean> {
   const transient = await readAgentTransient(agentDir);
   if (!transient) return false;
   const fresh = transient.updated_at_ms > 0 && Date.now() - transient.updated_at_ms < TRANSIENT_FRESH_MS;
@@ -4908,6 +4908,18 @@ export interface NewAgentOptions {
   spawnedBy?: SpawnedBy;
   /** Override cwd for auto-detect manager (used in tests). */
   _cwd?: string;
+  /**
+   * INTERNAL. The already-verified calling agent, supplied ONLY by the watchdog
+   * spawn broker (spawn-broker.ts) after it checked the requester's meta against
+   * its sealed record. It replaces the cwd-based caller lookup, which cannot work
+   * from the watchdog: for a worktree:false agent the lookup verifies process
+   * ancestry, and the watchdog is not a descendant of the agent's CLI, so the
+   * caller would come back null and be treated as an unrestricted human. Every
+   * caller gate below (canSpawnChildren, user-only --model, spawnedBy) then
+   * applies to this identity exactly as it would to a direct call. The CLI never
+   * populates this field from user input.
+   */
+  _trustedCaller?: ResolvedCallerContext;
 }
 
 /** Spawn context for newAgent operations */
@@ -5983,7 +5995,7 @@ export async function newAgent(
   const callerCwd = opts?._cwd ?? process.cwd();
   let callerContext: ResolvedCallerContext | null;
   try {
-    callerContext = await readCallerMetaFromCwd(callerCwd);
+    callerContext = opts?._trustedCaller ?? await readCallerMetaFromCwd(callerCwd);
   } catch (err) {
     return {
       ok: false,

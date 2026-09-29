@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtemp, mkdir, realpath, rm } from "fs/promises";
+import { chmod, mkdtemp, mkdir, realpath, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { resolveNoWorktreeCaller } from "./no-worktree-caller";
@@ -141,6 +141,46 @@ describe("trusted no-worktree caller attribution", () => {
   test("malformed registry is an error rather than a human-caller fallback", async () => {
     await Bun.write(join(repo, "home", ".itsybitsy", "repos.json"), "{broken");
     await expect(resolveNoWorktreeCaller(repo, deps())).rejects.toThrow();
+  });
+
+  // A sandboxed agent can only read its own repo; every other registered repo
+  // fails with EPERM/EACCES. Those repos must be skipped, not abort the lookup
+  // (regression: `ib new-agent` failed with `EPERM ... lstat '<other repo>'`).
+  // chmod 000 is the portable stand-in for the sandbox denial; root ignores it.
+  const unreadableTest = process.getuid?.() === 0 ? test.skip : test;
+
+  unreadableTest("a registered repo whose path cannot be resolved is skipped", async () => {
+    await record();
+    const blockedParent = join(repo, "blocked-parent");
+    const blockedRepo = join(blockedParent, "other");
+    await record(blockedRepo, "hidden-manager");
+    await Bun.write(join(repo, "home", ".itsybitsy", "repos.json"), JSON.stringify({
+      repos: [{ path: blockedRepo }, { path: repo }],
+    }));
+    await chmod(blockedParent, 0o000);
+    try {
+      // The unreadable repo comes first in the registry, as itsybitsy/LogDriver
+      // did; the reachable repo's caller must still be found.
+      expect((await resolveNoWorktreeCaller(repo, deps()))?.meta.id).toBe("manager");
+    } finally {
+      await chmod(blockedParent, 0o755);
+    }
+  });
+
+  unreadableTest("a registered repo whose agents directory cannot be read is skipped", async () => {
+    await record();
+    const other = join(repo, "other");
+    await record(other, "hidden-manager");
+    await Bun.write(join(repo, "home", ".itsybitsy", "repos.json"), JSON.stringify({
+      repos: [{ path: other }, { path: repo }],
+    }));
+    const blocked = join(other, ".ittybitty");
+    await chmod(blocked, 0o000);
+    try {
+      expect((await resolveNoWorktreeCaller(repo, deps()))?.meta.id).toBe("manager");
+    } finally {
+      await chmod(blocked, 0o755);
+    }
   });
 
   test.each([undefined, 0, -1, "12345"])("matching PID with invalid epoch %j does not establish identity", async (epoch) => {

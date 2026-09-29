@@ -9196,6 +9196,27 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     resetNewAgentCallerMetaReader();
   });
 
+  test("_trustedCaller (watchdog spawn broker) gates a worker even when the cwd resolves to nobody", async () => {
+    // The watchdog is not a descendant of the agent's CLI and its cwd is not the
+    // agent's, so the cwd-based caller lookup would return null and the caller
+    // would look like an unrestricted human. The broker passes the verified
+    // caller explicitly and every gate must apply to THAT identity.
+    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const result = await newAgent(tempDir, "sub-task", {
+      name: "should-not-exist-trusted",
+      _cwd: tempDir, // not an agent worktree: cwd lookup alone finds no caller
+      _trustedCaller: {
+        meta: { id: "trusted-worker", worker: true, agentType: "worker" },
+        agentDir: join(agentsDir, "trusted-worker"),
+        repoPath: tempDir,
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("trusted-worker");
+    expect(result.stderr).toContain("cannot spawn sub-agents");
+    expect(await Bun.file(join(agentsDir, "should-not-exist-trusted", "meta.json")).exists()).toBe(false);
+  });
+
   test("--model is refused for an agent caller that CAN spawn (user-only backstop)", async () => {
     // A manager can spawn sub-agents, but must not pin the child's model with
     // --model — that override is user-only (§2 item 3). The gate sits after the

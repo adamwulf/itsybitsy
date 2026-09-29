@@ -1041,6 +1041,90 @@ still reach the seal dir through its tmux socket (the same accepted escape that
 lets a spawner run anything unsandboxed), so the seal hardens the non-spawner
 boundary, not the spawner one. Set expectations accordingly in §1.
 
+### 4C.6 Sandboxed spawn: the watchdog spawn broker (2026-09-29)
+
+**Problem.** A sandboxed `ib new-agent` cannot do the spawn work itself. Measured
+with a real agent profile: (1) `sandbox-exec` for the child's profile from inside
+the parent's sandbox fails with `sandbox_apply: Operation not permitted`
+whenever the child grants anything the parent does not (it always does: its own
+worktree and agent dir), which is what `prepareSandbox`'s compile lint does;
+(2) binding the child's proxy port is denied (`EADDRINUSE`-shaped); (3) starting
+the child needs the tmux server, i.e. the §4C.3 escape. Two smaller findings
+shipped with it: a compiled Bun binary scans its cwd's ancestors for `.env` /
+`bunfig.toml` at startup and, when those directories are unreadable, starts with
+an EMPTY environment — hence the `--no-compile-autoload-dotenv
+--no-compile-autoload-bunfig` build flags (AGENTS.md) — and `getRepoId` no longer
+regenerates an id it merely could not read.
+
+**Design.** The agent's watchdog is started by the tmux server (§4C.2), so it is
+UNSANDBOXED. A sandboxed `ib new-agent` therefore hands the request to its own
+watchdog, which performs the normal `newAgent()` flow. The child is then
+launched as always: its CLI wrapped in its OWN profile by `start.sh`, plus its
+own unsandboxed watchdog. This needs no `ib watch`, no coordinator and no
+tmux-socket access from the requester.
+
+- **Detection** — `isSandboxedProcess()` (`src/sandbox-detect.ts`): macOS
+  `sandbox_check(pid, NULL, 0)` via `bun:ffi`. Asks the kernel, so it cannot be
+  forged by an env var or file, and it is 1 under any profile and 0 outside
+  (probed in a compiled binary). It only ROUTES: a failure to ask means "not
+  sandboxed" and the direct path runs (which the sandbox itself still limits).
+  Unsandboxed callers (humans, the TUI, the watchdog itself) never use the broker.
+- **Queue** — files in the requester's own agent directory (`AGENTDIR`, always
+  writable to it): `spawn-requests/<id>.json` (client to watchdog) and
+  `spawn-results/<id>.json` (watchdog to client). `<id>` is 32 hex chars; any
+  other file name is ignored. Writes are temp-file + rename.
+- **Request** — `{v:1, id, prompt, type?, name?, effort?, manager?, noWorktree?}`.
+  The FULL prompt text is inside the JSON: the sandbox reads any `-f` file, and
+  the unsandboxed watchdog never reads a path on the agent's behalf. Any other
+  field (`model`, `repo`, `spawnedBy`, `_trustedCaller`, ...) is rejected.
+  `--repo` and `--spawned-by*` are refused client-side inside a sandbox.
+- **Client** — `requestSpawnViaWatchdog`. It identifies the caller
+  (`resolveCallerAgentContext`), refuses `--model` and oversize prompts, then
+  checks `hasLiveWatchdog(agentDir)` (a fresh `meta.transient.json` heartbeat,
+  under 15s old, with a live `watchdog_pid`) and, if the watchdog is not live,
+  FAILS AT ONCE with a clear message instead of waiting. Otherwise it writes the
+  request and polls for the result, giving up after **30 seconds**
+  (`SPAWN_CLIENT_TIMEOUT_MS`) so the command can never hang. On timeout it
+  withdraws the request if the watchdog has not taken it. A spawn the watchdog
+  already started may still complete after a timeout; this is accepted and the
+  message says to check `ib list`.
+- **Server** — `processSpawnRequests`, run by `runPerAgentWatchdog` every tick and
+  on an `fs.watch` of the request directory, NOT awaited by the loop (a spawn
+  takes seconds and must not stall state detection or the outbox drain), at most
+  one at a time. Each request is deleted BEFORE it is acted on (at-most-once: a
+  request that crashes the handler is never retried in a loop). The caller's
+  identity comes from the agent's own `meta.json`, which the watchdog verifies
+  against the SEALED record (§4C.3, `verifyAgentSealChecked`): an agent cannot edit
+  `canSpawnChildren` into existence. The verified caller is passed to `newAgent()`
+  as `_trustedCaller` (a cwd lookup cannot work from the watchdog: for a
+  `worktree:false` agent it checks process ancestry, and the watchdog is not a
+  descendant of the agent's CLI), so every ordinary caller gate — spawn
+  permission, user-only `--model`, `spawnedBy`, manager auto-detect — applies to
+  the requester exactly as in a direct call. Results over 64 KiB are clipped;
+  uncollected results are pruned after 10 minutes.
+- **Old watchdogs** predate this and do not read requests; restart the agent so
+  its watchdog picks up the feature (no capability marker is checked).
+
+**Verified.** Unit tests (`src/spawn-broker.test.ts`, watchdog tests); and a live
+run of the compiled `ib` inside a real deny-default agent profile as the client
+against the broker code as an unsandboxed server: the spawn request was handled
+in ~1s with the right caller and cwd, a stale heartbeat failed in ~1s, `--repo`
+and `--model` were refused, and both queue directories were left empty.
+
+**Known limitations.**
+1. While a spawner holds a WRITE grant on `<repo>/.ittybitty/agents` (§4C.1, A3)
+   it can write ANOTHER agent's request directory in the same repo and so ask
+   that agent's watchdog to spawn as it. Removing that grant (and the
+   spawner-only `PARENTCLAUDE`, `REPOID` and tmux-socket grants) for spawners is
+   the follow-up that turns the broker from a convenience into a boundary; other
+   lifecycle commands (merge, retire, rehire) still need those grants today.
+2. `worktree:false` agents resolve as callers by process ancestry
+   (`ps` must work inside the sandbox); if it does not, `ib new-agent` reports
+   the verification error instead of spawning.
+3. The child sandbox preflight (profile lint, port allocation) now runs in the
+   unsandboxed watchdog for brokered spawns, so it is no longer subject to the
+   nested-sandbox and bind denials above.
+
 ## 5. Shipped components
 
 ### 5.1 Profile generator — `src/sandbox.ts`

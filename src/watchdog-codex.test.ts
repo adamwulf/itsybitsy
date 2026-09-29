@@ -41,6 +41,8 @@ import {
   resetPerAgentReadState,
   setPerAgentDrain,
   resetPerAgentDrain,
+  setPerAgentSpawnBroker,
+  resetPerAgentSpawnBroker,
   setWatchdogSpawnRunner,
   resetWatchdogSpawnRunner,
   setWatchdogFetchUsage,
@@ -292,6 +294,7 @@ describe("Phase 6 — runPerAgentWatchdog permission-accept gating", () => {
     setPerAgentSleep(async () => {});
     setSendSpawnRunner(() => ({ stdout: "", exitCode: 0 }) as any);
     setPerAgentDrain(async () => {});
+    setPerAgentSpawnBroker({ setup: async () => null, process: async () => {} });
     setWatchdogReadConfig(async () => ({} as any));
     clearAllAgentsCache();
   });
@@ -309,6 +312,7 @@ describe("Phase 6 — runPerAgentWatchdog permission-accept gating", () => {
     resetWatchdogSpawnRunner();
     resetPerAgentReadState();
     resetPerAgentDrain();
+    resetPerAgentSpawnBroker();
     clearAllAgentsCache();
   });
 

@@ -2478,6 +2478,20 @@ export async function main() {
         };
       }
 
+      // A SANDBOXED process cannot spawn a child itself (nested sandbox-exec is
+      // refused, the proxy port cannot be bound, tmux is out of reach), so it
+      // asks this agent's own — unsandboxed — watchdog to do it and waits up to
+      // 30s for the answer. Returns null when this process is not sandboxed, in
+      // which case we spawn directly, exactly as before. See spawn-broker.ts.
+      {
+        const { routeNewAgentThroughWatchdog } = await import("./spawn-broker");
+        const brokered = await routeNewAgentThroughWatchdog(prompt, opts, {
+          repoArg,
+          spawnedByFlags: spawnedByAgentId !== undefined || spawnedByRepoPath !== undefined,
+        });
+        if (brokered) await printAndExit(brokered);
+      }
+
       // Determine target repo: --repo flag > cwd match > single registered repo > error
       const repos = await listRepos();
       let repoPath: string | null = null;

@@ -8,7 +8,7 @@ the actual coordinator-tmux interaction, and graceful shutdown.
 ## 1. Build the binary
 
 ```sh
-bun build --compile --minify --sourcemap index.ts --outfile ib
+bun build --compile --minify --sourcemap --no-compile-autoload-dotenv --no-compile-autoload-bunfig index.ts --outfile ib
 ```
 
 Phase 5 added new dynamic imports (`./channels/dispatcher`,

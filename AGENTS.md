@@ -52,10 +52,21 @@ Run with `bun --hot ./index.ts`.
 ## Building the `ib` binary
 
 ```sh
-bun build --compile --minify --sourcemap index.ts --outfile ib
+bun build --compile --minify --sourcemap --no-compile-autoload-dotenv --no-compile-autoload-bunfig index.ts --outfile ib
 ```
 
 Produces a single `ib` binary with no runtime dependencies. Install to PATH (`sudo cp ib /usr/local/bin/ib`) or add the project dir to PATH. Hook commands like `ib hooks main-path` reference the binary by its installed name.
+
+The two `--no-compile-autoload-*` flags are required, not cosmetic. By default a
+compiled Bun binary scans the ancestors of its working directory at startup for
+`.env` and `bunfig.toml`. Inside a sandboxed agent those directories are
+unreadable (`file-read-data` denied on `/Users`, `/Users/<you>`, ...), and Bun
+then starts with an EMPTY environment: `process.env` has 0 entries, `PATH` is
+gone, and `ib new-agent` fails with `Executable not found in $PATH: "tmux"`.
+Measured under a real agent profile: default build → 0 env vars, `tmux` not
+found; with the flags → all vars, `tmux` found. The flags also stop a `.env` in
+an agent's worktree from changing `ib`'s environment. `src/build-flags.test.ts`
+keeps this command, `package.json` and `build.sh` in step.
 
 `bun run build` runs exactly this command — keep the two identical. The root
 `index.ts` is the authoritative entry point; it re-exports `src/index.ts` and

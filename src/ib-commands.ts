@@ -5567,17 +5567,24 @@ async function countAgents(agentsDir: string): Promise<number> {
  */
 export async function getRepoId(repoPath: string): Promise<string> {
   const repoIdFile = join(repoPath, ".ittybitty", "repo-id");
+  let existing = "";
   try {
-    const file = Bun.file(repoIdFile);
-    if (await file.exists()) {
-      const id = (await file.text()).trim();
-      if (/^[0-9a-f]{8}$/.test(id)) return id;
-      if (id) throw new Error(`Invalid repository id in ${repoIdFile}: expected 8 lowercase hexadecimal characters`);
-    }
+    existing = (await Bun.file(repoIdFile).text()).trim();
   } catch (err) {
-    if (err instanceof Error && err.message.startsWith("Invalid repository id in ")) throw err;
-    // Missing/unreadable files fall through to the ordinary creation path.
+    // Only a file that is genuinely absent may be (re)created. Any other read
+    // failure (a sandboxed agent's EPERM/EACCES, an I/O error) means an id may
+    // already exist that we simply cannot see; generating a new one would
+    // silently re-key every tmux session name (`ittybitty-<repoId>-<agent>`)
+    // and sealed record of the repo. Fail loudly instead.
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      throw new Error(
+        `Cannot read repository id ${repoIdFile}: ${err instanceof Error ? err.message : String(err)}. ` +
+          `Refusing to generate a new id over one that may already exist.`,
+      );
+    }
   }
+  if (/^[0-9a-f]{8}$/.test(existing)) return existing;
+  if (existing) throw new Error(`Invalid repository id in ${repoIdFile}: expected 8 lowercase hexadecimal characters`);
 
   // Generate new 8 hex char ID
   const bytes = new Uint8Array(4);

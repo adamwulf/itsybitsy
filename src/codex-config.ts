@@ -317,5 +317,17 @@ export function buildCodexLaunchArgs(input: BuildCodexLaunchArgsInput): CodexLau
   // Keep Codex's native status line useful inside the manager pane. Show the
   // model, context budget, and ChatGPT session/weekly usage limits.
   args.push("-c", 'tui.status_line=["model-with-reasoning","context-remaining","five-hour-limit","weekly-limit"]');
+  // Keep codex on the terminal's normal screen instead of the alternate
+  // screen. Since codex 0.158.0 the TUI defaults to the alternate screen, and
+  // tmux keeps NO scrollback for an alternate-screen pane (measured:
+  // `#{alternate_on}`=1, `#{history_size}`=0, versus 0 / 984 for a pane
+  // started on an older codex). itsybitsy reads agent history with
+  // `tmux capture-pane -J -S -` (scrollback + reflow), so without this flag
+  // the dashboard only sees the visible screen. `--no-alt-screen` is a
+  // valueless flag ("Disable alternate screen mode") accepted by both
+  // `codex` and `codex resume`; verified on 0.158.0 that history grows and
+  // capture-pane returns the full transcript. It is a bare flag rather than a
+  // `-c` pair on purpose: the config-key spelling is not documented.
+  args.push("--no-alt-screen");
   return { args };
 }

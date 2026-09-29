@@ -150,8 +150,10 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
     // beyond the hook events are the 6 always-on flags:
     //   features.multi_agent, sandbox_workspace_write.network_access,
     //   commit_attribution, log_dir, tui.show_tooltips, tui.status_line.
-    expect(flags.length).toBe(CODEX_REGISTERED_EVENTS.length * 2 + 12);
-    for (let i = 0; i < flags.length; i += 2) {
+    // The final element is the valueless `--no-alt-screen` flag (no pair).
+    expect(flags.length).toBe(CODEX_REGISTERED_EVENTS.length * 2 + 13);
+    expect(flags[flags.length - 1]).toBe("--no-alt-screen");
+    for (let i = 0; i < flags.length - 1; i += 2) {
       expect(flags[i]).toBe("-c");
     }
     expect(flags[1]).toContain("hooks.PreToolUse=");
@@ -541,6 +543,21 @@ describe("buildCodexLaunchArgs — log_dir and tui.show_tooltips flags", () => {
       }
     }
     expect(foundAt).toBeGreaterThanOrEqual(0);
+  });
+
+  test("passes the bare `--no-alt-screen` flag exactly once so tmux keeps scrollback", () => {
+    // codex >= 0.158.0 defaults to the alternate screen, where tmux keeps no
+    // history (`#{alternate_on}`=1, `#{history_size}`=0). itsybitsy reads
+    // scrollback via `tmux capture-pane -J -S -`, so the flag must stay. It is
+    // a valueless flag — never a `-c` pair.
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/usr/local/bin/ib",
+      agentId: "agent-abc123",
+      agentDir: "/var/agents/agent-abc123",
+    });
+    expect(args.filter((a) => a === "--no-alt-screen")).toHaveLength(1);
+    const at = args.indexOf("--no-alt-screen");
+    expect(args[at - 1]).not.toBe("-c");
   });
 
   test("appends `-c tui.status_line=[...]` with Codex context and limit usage items", () => {

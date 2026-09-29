@@ -63,10 +63,25 @@ async function registeredRoots(registryHome: string): Promise<string[]> {
     try {
       roots.add(await realpath(entry.path));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if (!isSkippableRepoError(error)) throw error;
     }
   }
   return [...roots];
+}
+
+/**
+ * A registered repo the current process cannot reach is not a candidate, so it
+ * is skipped rather than failing the whole lookup. ENOENT covers a repo that was
+ * moved or deleted; EPERM/EACCES cover a repo outside the caller's reach — a
+ * sandboxed agent (kernel Seatbelt profile) can only read its own repo, so
+ * every other registered repo fails `realpath`/`readdir` with EPERM. Skipping
+ * is safe for caller attribution: a caller's own agent record lives in a repo
+ * it can read, so the record that identifies it is never the one skipped.
+ * Malformed registry data and every other I/O error still throw (fail closed).
+ */
+function isSkippableRepoError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "ENOENT" || code === "EPERM" || code === "EACCES";
 }
 
 function ancestorPids(pid: number, parents: Map<number, number>): Set<number> {
@@ -145,7 +160,7 @@ export async function resolveNoWorktreeCaller(
   for (const repoPath of roots) {
     const agentsDir = join(repoPath, ".ittybitty", "agents");
     const entries = await readdir(agentsDir, { withFileTypes: true }).catch((error) => {
-      if (error.code === "ENOENT" || error.code === "ENOTDIR") return [];
+      if (error.code === "ENOTDIR" || isSkippableRepoError(error)) return [];
       throw error;
     });
     for (const entry of entries) {

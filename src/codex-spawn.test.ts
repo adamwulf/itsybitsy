@@ -316,6 +316,15 @@ describe("buildCodexStartContent — launch line", () => {
     expect(content).toContain("'tui.show_tooltips=false'");
   });
 
+  test("keeps codex on the normal screen with --no-alt-screen on every spawn", () => {
+    // codex >= 0.158.0 defaults to the alternate screen, where tmux keeps no
+    // scrollback; the dashboard's `capture-pane -S -` would then see only the
+    // visible screen. The flag must stay before the positional prompt.
+    const content = buildCodexStartContent(baseInput());
+    expect(content).toContain("'--no-alt-screen'");
+    expect(content.indexOf("'--no-alt-screen'")).toBeLessThan(content.indexOf('"$(cat '));
+  });
+
   test("rejects an unsafe agentDir (apostrophe would break TOML+shell quoting)", () => {
     expect(() =>
       buildCodexStartContent({
@@ -586,6 +595,13 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
   test("re-passes tui.show_tooltips=false on resume", () => {
     const content = buildCodexResumeContent(baseInput());
     expect(content).toContain("'tui.show_tooltips=false'");
+  });
+
+  test("re-passes --no-alt-screen on resume so a resumed pane keeps tmux scrollback", () => {
+    // `--no-alt-screen` is a launch argument, so resume.sh must pass it again
+    // or a resumed codex would use the alternate screen (no tmux scrollback).
+    const content = buildCodexResumeContent(baseInput());
+    expect(content).toContain("'--no-alt-screen'");
   });
 
   test("rejects an unsafe agentDir on resume", () => {

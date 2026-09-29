@@ -244,6 +244,20 @@ describe("agentPathAccessTable — spawn-keyed runtime roots", () => {
     expect(resolvePreparedAccess(worker, child, "read")).toBe("allow");
   });
 
+  test("REPOID (<repo>/.ittybitty/repo-id) is a read-only root only for a spawner", () => {
+    // Mirrors the kernel profile: `ib new-agent` reads the repo id to name and
+    // seal its child. Never writable, and a non-spawner gets no access at all.
+    const idFile = `${ROOT_REPO}/.ittybitty/repo-id`;
+    const spawner = prepareAccessTable(table({}, { canSpawnChildren: true }));
+    const worker = prepareAccessTable(table({}, { canSpawnChildren: false }));
+    expect(resolvePreparedAccess(spawner, idFile, "read")).toBe("allow");
+    expect(resolvePreparedAccess(spawner, idFile, "write")).toBe("deny");
+    expect(resolvePreparedAccess(worker, idFile, "read")).toBe("deny");
+    expect(resolvePreparedAccess(worker, idFile, "write")).toBe("deny");
+    // Only the one file, not the rest of <repo>/.ittybitty.
+    expect(resolvePreparedAccess(spawner, `${ROOT_REPO}/.ittybitty/other`, "read")).toBe("deny");
+  });
+
   test("PARENTCLAUDE (<repo>/.claude) is a write root only for a spawner", () => {
     const target = `${ROOT_REPO}/.claude/settings.local.json`;
     const spawner = prepareAccessTable(table({}, { canSpawnChildren: true }));

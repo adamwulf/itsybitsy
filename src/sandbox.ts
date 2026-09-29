@@ -60,6 +60,18 @@ export interface SandboxProfileParams {
    */
   PARENTCLAUDE: string;
   /**
+   * Optional READ runtime root, spawner-only: `<repo>/.ittybitty/repo-id`, the
+   * 8-hex id `getRepoId` reads to name a child's tmux session
+   * (`ittybitty-<repoId>-<agent>`) and to key its sealed record. `ib new-agent`
+   * (and rehire / `ib sandbox refresh`) read it from inside the spawner's
+   * sandbox; without a read grant the file looks missing and the spawn fails.
+   * Read-only on purpose: getRepoId never creates the id from a sandbox (an
+   * absent file is created by an unsandboxed `ib`), and a spawner must not be
+   * able to rewrite the id every session name and seal is derived from. Emitted
+   * only when canSpawnChildren is true; absent → no row (byte-identical profile).
+   */
+  REPOID?: string;
+  /**
    * The tmux server socket DIRECTORY (e.g. `/private/tmp/tmux-<uid>`, derived
    * the way tmux resolves it — see resolveTmuxSocketDir). Reaching the tmux
    * server is a sandbox escape (it runs commands unsandboxed). For a non-spawner
@@ -646,7 +658,8 @@ function orderedPathEntry(
  * WORKTREE, and GITDIR are always read+write boot roots. REPOAGENTS is a write
  * root for a spawner (it writes its child's agent dir) and read-only otherwise.
  * PARENTCLAUDE (`<repo>/.claude`, where a child's settings.local.json is
- * written) is added only for a spawner. This table is extensible: a later root
+ * written) is added only for a spawner, as is the read-only REPOID
+ * (`<repo>/.ittybitty/repo-id`). This table is extensible: a later root
  * (scratchpad, project dir) adds a row rather than a new emission phase.
  */
 function profileRuntimeAllowRoots(params: SandboxProfileParams): ProfileRuntimePathRoot[] {
@@ -666,6 +679,14 @@ function profileRuntimeAllowRoots(params: SandboxProfileParams): ProfileRuntimeP
       op: "write",
       parameterName: "PARENTCLAUDE",
     });
+    // The repo id the spawner reads to name and seal its child. Read-only.
+    if (params.REPOID) {
+      roots.push({
+        path: canonicalizeSandboxPath(params.REPOID),
+        op: "read",
+        parameterName: "REPOID",
+      });
+    }
   }
   // Optional Phase B write roots (project dir, scratchpad). Each is emitted only
   // when the caller supplies it, so a profile that omits both is byte-identical

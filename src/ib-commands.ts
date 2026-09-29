@@ -1221,6 +1221,7 @@ async function prepareSandbox(
     GITDIR: resolveGitRevParsePath(workPath, gitCommonDirResult.stdout),
     REPOAGENTS: join(repoPath, ".ittybitty", "agents"),
     PARENTCLAUDE: join(repoPath, ".claude"),
+    REPOID: join(repoPath, ".ittybitty", "repo-id"),
     TMUXSOCK: resolveTmuxSocketDir(uid),
     canSpawnChildren,
     HOME: userHome(),

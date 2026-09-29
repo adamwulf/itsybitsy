@@ -115,7 +115,8 @@ export interface AgentAccessTableParams {
  * `buildAgentAccessTable` and the unit tests can drive it with explicit params.
  *
  * The runtime roots come from `sandboxPathAccessTable` (AGENTDIR, WORKTREE,
- * GITDIR, REPOAGENTS — spawn-keyed — and PARENTCLAUDE for spawners, plus the
+ * GITDIR, REPOAGENTS — spawn-keyed — and PARENTCLAUDE plus the read-only
+ * REPOID (`<repo>/.ittybitty/repo-id`) for spawners, plus the
  * tmux deny for non-spawners). Each CLI gets ONLY its own extra runtime roots:
  * Claude receives PROJECTDIR/SCRATCHPAD, agy receives AGYSTATEDIR (`~/.gemini`),
  * and codex/fugu receive neither. The same CLI-specific params are passed to the
@@ -129,6 +130,7 @@ export function agentPathAccessTable(p: AgentAccessTableParams): PathAccessTable
     GITDIR: p.gitDir,
     REPOAGENTS: p.agentsDir,
     PARENTCLAUDE: join(p.rootRepo, ".claude"),
+    REPOID: join(p.rootRepo, ".ittybitty", "repo-id"),
     TMUXSOCK: p.tmuxSock,
     canSpawnChildren: p.canSpawnChildren,
     HOME: p.home,

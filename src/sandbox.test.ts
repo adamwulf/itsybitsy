@@ -259,6 +259,37 @@ describe("sandbox profile emission", () => {
     ]);
   });
 
+  test("REPOID is a read-only root for a spawner and absent for a non-spawner", () => {
+    // `ib new-agent` reads <repo>/.ittybitty/repo-id from inside the spawner's
+    // sandbox to name and seal its child. It must be readable but never
+    // writable (the id keys every tmux session name and seal of the repo), and
+    // a non-spawner never gets it.
+    const idFile = "/tmp/itsybitsy-repo/.ittybitty/repo-id";
+    const withId = { ...PARAMS, REPOID: idFile };
+    const spawner = { ...withId, canSpawnChildren: true };
+    const nonSpawner = { ...withId, canSpawnChildren: false };
+
+    const spawnerProfile = generateProfile(EMPTY_CONFIG, EMPTY_PATHS, spawner);
+    expect(spawnerProfile).toContain('(allow file-read* (subpath (param "REPOID")))');
+    expect(spawnerProfile).toContain('(deny file-write* (subpath (param "REPOID")))');
+    expect(spawnerProfile).not.toContain('(allow file-write* (subpath (param "REPOID")))');
+
+    const spawnerValues = sandboxProfileParameterValues(EMPTY_PATHS, spawner);
+    expect(spawnerValues.REPOID).toBe("/private/tmp/itsybitsy-repo/.ittybitty/repo-id");
+    // The evaluator compares canonical paths (/tmp is a symlink to /private/tmp).
+    const canonicalId = spawnerValues.REPOID!;
+    expect(evaluateProfileAccess(spawnerProfile, spawnerValues, canonicalId, "read")).toBe("allow");
+    expect(evaluateProfileAccess(spawnerProfile, spawnerValues, canonicalId, "write")).toBe("deny");
+    // The grant is the one file, not the .ittybitty directory around it.
+    expect(evaluateProfileAccess(
+      spawnerProfile, spawnerValues, "/private/tmp/itsybitsy-repo/.ittybitty/other", "read",
+    )).toBe("deny");
+
+    const nonSpawnerProfile = generateProfile(EMPTY_CONFIG, EMPTY_PATHS, nonSpawner);
+    expect(nonSpawnerProfile).not.toContain('param "REPOID"');
+    expect("REPOID" in sandboxProfileParameterValues(EMPTY_PATHS, nonSpawner)).toBe(false);
+  });
+
   test("reserved seal-helper results stay readable but never writable after broad raw allows", () => {
     const broadTmp = paths({ allowRead: ["/private/tmp"], allowWrite: ["/private/tmp"] });
     const profile = generateProfile(

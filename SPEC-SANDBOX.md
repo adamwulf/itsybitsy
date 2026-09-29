@@ -673,7 +673,9 @@ Exact cross-list canonical ties are normalized to the write entry before this
 sort. `AGENTDIR`, `WORKTREE`, and `GITDIR` join the table as write roots. The
 remaining runtime roots are **keyed on the resolved `canSpawnChildren`** (A3):
 `REPOAGENTS` is a **write** root for a spawner and a **read** root otherwise, and
-`PARENTCLAUDE` (`<repo>/.claude`) joins as a **write** root only for a spawner.
+`PARENTCLAUDE` (`<repo>/.claude`) joins as a **write** root only for a spawner,
+as does the **read-only** `REPOID` (`<repo>/.ittybitty/repo-id`, one file; see
+§4C.1 for why it is never writable).
 Their resolved `-D` values determine their specificity, while the emitted
 matchers remain `(param "NAME")`. There is also one **runtime deny root**,
 `TMUXSOCK` (`/private/tmp/tmux-<uid>`), emitted for a non-spawner in the config
@@ -862,6 +864,18 @@ Required in the baseline:
   where a sandboxed manager's `ib new-agent` failed on a read-only repo agents
   dir. Grant is by evidence only — PARENTCLAUDE is the sole extra parent-repo
   write `newAgent` performs for a child.
+
+  **REPOID (added 2026-09-29).** `newAgent` (and rehire / `ib sandbox refresh`)
+  also READ `<repo>/.ittybitty/repo-id` through `getRepoId` to name the child's
+  tmux session (`ittybitty-<repoId>-<agent>`) and key its sealed record. Only
+  `.ittybitty/agents` was granted, so a sandboxed spawner saw the file as
+  missing and `ib new-agent` failed trying to create it. A spawner now gets that
+  one file as a **read-only** runtime root (`REPOID`, `SandboxProfileParams`
+  optional field; a non-spawner never gets it). It is deliberately not writable:
+  the id keys every session name and seal of the repo. `getRepoId` correspondingly
+  creates an id only on `ENOENT` and throws on any other read error, so an
+  unreadable id is never regenerated. A repo whose id file does not exist yet must
+  have it created by an unsandboxed `ib` first.
 
 ### 4C.2 Watchdog spawn inheritance (resolved: tmux server owns the spawn)
 

@@ -1389,7 +1389,9 @@ export function resetPerAgentDrain(): void {
 /**
  * Spawn-request broker hooks (spawn-broker.ts). A SANDBOXED `ib new-agent`
  * cannot spawn a child itself, so it drops a request file in this agent's own
- * directory and this — unsandboxed — watchdog performs the spawn. `setup` makes
+ * directory and this — unsandboxed — watchdog performs the spawn. The same
+ * queue carries the lifecycle commands a sandboxed agent cannot run itself
+ * (lifecycle-broker.ts); `process` handles both kinds. `setup` makes
  * the queue directories and returns the request directory to watch (null = no
  * watch); `process` handles whatever is queued. Both are lazy imports for the
  * same cycle-avoidance reason as the outbox drain, and both are injectable so
@@ -1688,10 +1690,12 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
 
   // ── Spawn-request broker ──────────────────────────────────────────────────
   // A sandboxed `ib new-agent` queues a request in <agentDir>/spawn-requests/;
-  // we are unsandboxed, so we run the spawn. NOT awaited by the loop: a spawn
-  // (worktree add, tmux, proxy) takes seconds and must not stall state
-  // detection or the outbox drain. The guard keeps at most one handler running;
-  // a request that arrives meanwhile is picked up by the next tick/watch event.
+  // we are unsandboxed, so we run the spawn. A sandboxed lifecycle command
+  // (`ib retire` of a child) arrives in the same queue. NOT awaited by the loop:
+  // a spawn (worktree add, tmux, proxy) or a teardown takes seconds and must
+  // not stall state detection or the outbox drain. The guard keeps at most one
+  // handler running; a request that arrives meanwhile is picked up by the next
+  // tick/watch event.
   let spawnBusy = false;
   const spawnNow = (): void => {
     if (spawnBusy) return;

@@ -2081,6 +2081,15 @@ export async function main() {
       if (extraArgs.length > 0) {
         console.error(`Warning: unknown arguments ignored: ${extraArgs.join(" ")}`);
       }
+      // A SANDBOXED process cannot retire an agent itself (it cannot read the
+      // main repo root or write the archive), so it asks this agent's own —
+      // unsandboxed — watchdog to do it. Returns null when this process is not
+      // sandboxed, in which case we retire directly. See lifecycle-broker.ts.
+      {
+        const { routeLifecycleThroughWatchdog } = await import("./lifecycle-broker");
+        const brokered = await routeLifecycleThroughWatchdog({ op: "retire", target: agent.id });
+        if (brokered) await printAndExit(brokered);
+      }
       const { retireAgent } = await import("./ib-commands");
       await printAndExit(await retireAgent(agent));
       break;

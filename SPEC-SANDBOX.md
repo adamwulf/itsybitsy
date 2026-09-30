@@ -1116,14 +1116,88 @@ and `--model` were refused, and both queue directories were left empty.
    it can write ANOTHER agent's request directory in the same repo and so ask
    that agent's watchdog to spawn as it. Removing that grant (and the
    spawner-only `PARENTCLAUDE`, `REPOID` and tmux-socket grants) for spawners is
-   the follow-up that turns the broker from a convenience into a boundary; other
-   lifecycle commands (merge, retire, rehire) still need those grants today.
+   the follow-up that turns the broker from a convenience into a boundary; the
+   other lifecycle commands (merge, rehire) still need those grants today.
+   Retire goes through the broker (§4C.7).
 2. `worktree:false` agents resolve as callers by process ancestry
    (`ps` must work inside the sandbox); if it does not, `ib new-agent` reports
    the verification error instead of spawning.
 3. The child sandbox preflight (profile lint, port allocation) now runs in the
    unsandboxed watchdog for brokered spawns, so it is no longer subject to the
    nested-sandbox and bind denials above.
+
+### 4C.7 Sandboxed lifecycle commands: the same broker (2026-09-30)
+
+**Problem.** `ib retire <child>` from a sandboxed manager failed with `Could not
+prepare retirement: fatal: Unable to read current working directory: Operation
+not permitted`. A spawner's profile grants `AGENTDIR`, `WORKTREE`, `GITDIR` and
+`REPOAGENTS` (§4C.1) but NOT the main repo root. `prepareAgentRetirement` runs
+`git -C <main repo> update-ref ...`; git changes to that directory and then
+cannot read it. Reproduced on a throwaway repo under a profile of the same
+shape: the three git calls in the child's worktree pass, the main-root call
+fails with exactly that text, and the same `update-ref` run in the child's
+worktree passes. The teardown that follows has the same problem
+(`git -C <main repo> worktree remove` / `branch -D`) and then moves the agent
+into `<repo>/.ittybitty/archive`, which no worktree agent's profile grants.
+Granting the repo root and the archive to every spawner would widen the sandbox
+for all managers, so the command leaves the sandbox instead.
+
+**Design.** The same route as a spawn (§4C.6): the sandboxed command hands the
+request to the caller's own unsandboxed watchdog and waits. Queue, file names,
+atomic writes, at-most-once handling, result clipping and pruning are the spawn
+broker's. `src/lifecycle-broker.ts` adds:
+
+- **Request** — `{v:1, id, op, target}`, `op` = `retire`. A request that has an
+  `op` field is a lifecycle request; one without is a spawn. `target` must be a
+  plain agent id (it becomes a path segment). Any other field is rejected.
+- **Client** — `routeLifecycleThroughWatchdog`, called from the `retire` case in
+  `src/index.ts` after the target is resolved. It returns null when the process
+  is not sandboxed (`isSandboxedProcess()`), and the command then runs directly
+  as before. Otherwise it identifies the caller, fails at once when the watchdog
+  has no fresh heartbeat, writes the request and waits at most **100 seconds**
+  (`LIFECYCLE_CLIENT_TIMEOUT_MS` — a teardown removes a whole worktree; the
+  value stays under the 120s default tool timeout). On timeout it withdraws an
+  unclaimed request; a command the watchdog already started may still finish,
+  and the message says so.
+- **Server** — `handleLifecycleRequest`, reached from `processSpawnRequests`.
+  The requester is the watchdog's own agent, verified against its sealed record
+  exactly as for a spawn. **Authorization is applied here, not only in the
+  hook:** the watchdog runs the PreToolUse rule itself
+  (`checkIbCommandAccess` on the equivalent `ib <op> <target>` line), so only
+  the target's manager or spawner — or the repo's coordinator for `retire` —
+  passes. The hook alone cannot carry this, because a sandboxed agent can write
+  a request file without running `ib`. The target is then resolved by exact id
+  inside the requester's OWN repo (a sandboxed agent manages agents only in its
+  repo, matching the `--repo` refusal for spawns) and the normal `retireAgent()`
+  runs.
+- **Old watchdogs** parse every request as a spawn and answer `unsupported
+  field 'op'`; the client turns that into "restart this agent so its watchdog
+  picks up the feature".
+
+**Verified.** Unit tests (`src/lifecycle-broker.test.ts`), including the real
+authorization rule against `meta.json` files on disk; and a live run of the
+compiled `ib` as the client inside a deny-default profile of the spawner shape
+(no main repo root, no archive), on a throwaway repo with real worktrees,
+against the broker code and the real `retireAgent()` as the unsandboxed server.
+Under that one profile: the previous binary failed with the text above; the new
+binary failed at once with no fresh heartbeat; a target managed by another agent
+was refused by the server; and the caller's own child was retired in under a
+second, leaving `retirement.json`, `worktree.patch`, the untracked file and the
+retained ref in place, the branch deleted and both queue directories empty.
+
+**Known limitations.**
+1. The authorization rule reads `manager` / `spawned_by` from the TARGET's
+   `meta.json`. A spawner holds a write grant on `<repo>/.ittybitty/agents`, and
+   the seal covers only `agentType`, `canSpawnChildren`, `paths` and `sandbox`,
+   so a spawner can write itself in as the manager of any agent in its repo and
+   then retire it. This is the same grant as limitation 1 of §4C.6 and is closed
+   by the same follow-up (or by sealing the two fields). A retirement is
+   recoverable with `ib rehire`. A non-spawner cannot do this: its
+   `REPOAGENTS` grant is read-only.
+2. The watchdog runs git in a repository whose git dir the agent can write
+   (`GITDIR`), outside the sandbox. This is not new — a brokered spawn already
+   runs `git worktree add` there — and a spawner also holds the tmux socket
+   (§4C.3), but each brokered command adds git calls to that surface.
 
 ## 5. Shipped components
 

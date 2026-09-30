@@ -2174,6 +2174,29 @@ describe("retire → rehire recovery", () => {
     expect(await readOutbox(managerQueueDir("agent-bystander"))).toEqual([]);
   });
 
+  // The watchdog lifecycle broker rehires for a sandboxed agent, in that
+  // agent's own repository only.
+  test("repoPath limits the archive search to that one repository", async () => {
+    const agentId = "agent-elsewhere";
+    await plantRehirableArchive(agentId);
+    const otherRepo = await mkdtemp(join(tmpdir(), "rehire-other-repo-"));
+    const runner = successRunner();
+    setRehireSpawnRunner(runner);
+    setNukeResumeSpawnRunner(runner);
+    try {
+      const missed = await rehireAgent(agentId, { repoPath: otherRepo });
+      expect(missed.ok).toBe(false);
+      expect(missed.stderr).toBe("Retired agent not found");
+      expect(await Bun.file(join(tempDir, ".ittybitty", "agents", agentId, "meta.json")).exists()).toBe(false);
+
+      const found = await rehireAgent(agentId, { repoPath: tempDir });
+      expect(found.ok).toBe(true);
+      expect(found.stdout).toContain(`Rehired agent: ${agentId}`);
+    } finally {
+      await rm(otherRepo, { recursive: true, force: true });
+    }
+  });
+
   for (const [legacyRole, worker] of [["manager", false], ["worker", true]] as const) {
     test(`rehire migrates a legacy worktree:false ${legacyRole} archive without agentType or isolated settings`, async () => {
       const agentId = `agent-legacy-shared-${legacyRole}`;
@@ -5333,6 +5356,78 @@ describe("mergeAgent (native)", () => {
       }
       const order = [checkRebase!, rebase!, checkout!, merge!].map((c) => spawnCalls.indexOf(c));
       expect(order).toEqual([...order].sort((a, b) => a - b));
+    });
+
+    // The watchdog lifecycle broker runs the merge for a sandboxed agent. The
+    // watchdog's own cwd and tmux environment describe the watchdog, so the
+    // broker states the requester's location in `_brokeredCaller`.
+    describe("brokered (run by the watchdog for a sandboxed agent)", () => {
+      test("merges --ff-only even when the process itself does not look like an agent", async () => {
+        await makeKeepAgentDir();
+        const runner = makeMergeMock();
+        lifecycleSpawnCtx.set(runner);
+        setMergeSpawnRunner(runner);
+
+        // Make THIS process look like a user: a cwd outside any agent worktree
+        // and no tmux. (The suite itself often runs inside an agent worktree,
+        // where the direct path would pick --ff-only by itself.)
+        const savedCwd = process.cwd();
+        const savedTmux = process.env.TMUX;
+        process.chdir(tempDir);
+        delete process.env.TMUX;
+        try {
+          expect(await isRunningAsAgent()).toBe(false);
+
+          // Control: the direct path makes a user merge.
+          const direct = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, KEEP);
+          expect(direct.ok).toBe(true);
+          expect(findMerge()).toEqual(["git", "-C", tempDir, "merge", "--no-ff", "agent/agent-abc", "-m", "Merge agent agent-abc work"]);
+
+          spawnCalls.length = 0;
+          const brokered = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, {
+            keep: true,
+            _brokeredCaller: { cwd: tempDir },
+          });
+          expect(brokered.ok).toBe(true);
+          expect(findMerge()).toEqual(["git", "-C", tempDir, "merge", "--ff-only", "agent/agent-abc"]);
+        } finally {
+          process.chdir(savedCwd);
+          if (savedTmux === undefined) delete process.env.TMUX;
+          else process.env.TMUX = savedTmux;
+        }
+      });
+
+      test("resolves a detached target's main branch in the requester's directory", async () => {
+        await makeKeepAgentDir();
+        const runner = makeMergeMock({ currentBranch: "" });
+        lifecycleSpawnCtx.set(runner);
+        setMergeSpawnRunner(runner);
+
+        const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, {
+          keep: true,
+          _brokeredCaller: { cwd: tempDir },
+        });
+
+        expect(result.ok).toBe(true);
+        expect(spawnCalls).toContainEqual(["git", "-C", tempDir, "show-ref", "--verify", "refs/heads/main"]);
+        expect(spawnCalls).not.toContainEqual(["git", "show-ref", "--verify", "refs/heads/main"]);
+      });
+
+      test("refuses a merge requested from the target's own worktree", async () => {
+        const agentDir = await makeKeepAgentDir();
+        const runner = makeMergeMock();
+        lifecycleSpawnCtx.set(runner);
+        setMergeSpawnRunner(runner);
+
+        const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, {
+          keep: true,
+          _brokeredCaller: { cwd: join(agentDir, "repo") },
+        });
+
+        expect(result.ok).toBe(false);
+        expect(result.stderr).toBe("Cannot merge agent from within its own worktree");
+        expect(findMerge()).toBeUndefined();
+      });
     });
 
     test("leaves the agent untouched after the merge: no teardown, no archive, state unchanged", async () => {

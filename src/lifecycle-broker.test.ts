@@ -1,0 +1,705 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtemp, mkdir, readdir, rm, symlink } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
+import type { Agent, AgentMeta } from "./agents";
+import { resetUserHome, setUserHome } from "./home";
+import { hasLiveWatchdog } from "./ib-commands";
+import type { IbCommandResult, MergeAgentOptions, NewAgentOptions, ResolvedCallerContext } from "./ib-commands";
+import {
+  LIFECYCLE_CLIENT_TIMEOUT_MS,
+  LIFECYCLE_OPS,
+  parseLifecycleRequest,
+  requestLifecycleViaWatchdog,
+  routeLifecycleThroughWatchdog,
+  type LifecycleServerDeps,
+} from "./lifecycle-broker";
+import { setSandboxedProcessOverride } from "./sandbox-detect";
+import { processSpawnRequests, spawnRequestDir, spawnResultDir, type SpawnServerDeps } from "./spawn-broker";
+import { runPerAgentWatchdog } from "./watchdog";
+
+const MANAGER_ID = "agent-manager";
+const CHILD_ID = "agent-child";
+const ID_A = "a".repeat(32);
+
+describe("lifecycle broker", () => {
+  let home: string;
+  let repo: string;
+  let agentsDir: string;
+  let agentDir: string;
+
+  beforeEach(async () => {
+    // The authorization rule looks the target up in the registry when it is not
+    // in the caller's repo; keep that lookup away from the real ~/.itsybitsy.
+    home = await mkdtemp(join(tmpdir(), "ib-lifecycle-home-"));
+    setUserHome(home);
+    repo = await mkdtemp(join(tmpdir(), "ib-lifecycle-"));
+    agentsDir = join(repo, ".ittybitty", "agents");
+    agentDir = join(agentsDir, MANAGER_ID);
+    await mkdir(agentDir, { recursive: true });
+  });
+  afterEach(async () => {
+    setSandboxedProcessOverride(null);
+    resetUserHome();
+    await rm(repo, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  });
+
+  const managerMeta = (overrides: Record<string, unknown> = {}): AgentMeta =>
+    ({ id: MANAGER_ID, worktree: true, canSpawnChildren: true, ...overrides }) as unknown as AgentMeta;
+
+  const caller = (): ResolvedCallerContext => ({ meta: { id: MANAGER_ID }, agentDir, repoPath: repo });
+
+  /** Put an agent's meta.json on disk, where the authorization rule reads it. */
+  async function writeAgent(id: string, meta: Record<string, unknown>): Promise<void> {
+    await mkdir(join(agentsDir, id), { recursive: true });
+    await Bun.write(join(agentsDir, id, "meta.json"), JSON.stringify({ id, ...meta }));
+  }
+
+  const agentRecord = (id: string): Agent =>
+    ({ id, repoPath: repo, repoName: "repo", meta: { id } as unknown as AgentMeta, state: "waiting", age: "", archived: false, children: [] }) as Agent;
+
+  async function queue(id: string, body: unknown): Promise<void> {
+    await mkdir(spawnRequestDir(agentDir), { recursive: true });
+    await Bun.write(join(spawnRequestDir(agentDir), `${id}.json`), typeof body === "string" ? body : JSON.stringify(body));
+  }
+  const retireRequest = (id: string, extra: Record<string, unknown> = {}) => ({ v: 1, id, op: "retire", target: CHILD_ID, ...extra });
+
+  async function result(id: string): Promise<any> {
+    return Bun.file(join(spawnResultDir(agentDir), `${id}.json`)).json();
+  }
+
+  /** Server deps that record every command the watchdog would run. */
+  function server(over: Partial<LifecycleServerDeps> = {}, spawnOver: Partial<SpawnServerDeps> = {}) {
+    const retired: Agent[] = [];
+    const merged: Array<{ agent: Agent; targetDir: string; options: MergeAgentOptions }> = [];
+    const rehired: Array<{ agentId: string; opts: { repoPath: string } }> = [];
+    const spawned: Array<{ prompt: string; opts: NewAgentOptions }> = [];
+    const deps: SpawnServerDeps = {
+      readMeta: async () => ({ meta: managerMeta() }),
+      verifySeal: async () => ({ ok: true }) as any,
+      newAgent: async (_repoPath, prompt, opts) => {
+        spawned.push({ prompt, opts });
+        return { ok: true, exitCode: 0, stdout: "agent-new", stderr: "" };
+      },
+      lifecycle: {
+        findAgent: async (_repoPath, id) => agentRecord(id),
+        retire: async (agent) => {
+          retired.push(agent);
+          return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
+        },
+        merge: async (agent, targetDir, options) => {
+          merged.push({ agent, targetDir, options });
+          return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id} (merged)`, stderr: "" };
+        },
+        rehire: async (agentId, opts) => {
+          rehired.push({ agentId, opts });
+          return { ok: true, exitCode: 0, stdout: `Rehired agent: ${agentId}`, stderr: "" };
+        },
+        ...over,
+      },
+      ...spawnOver,
+    };
+    return { deps, retired, merged, rehired, spawned };
+  }
+
+  /** Put a retired agent's archive on disk, where the authorization rule reads it. */
+  async function writeArchive(id: string, meta: Record<string, unknown>): Promise<void> {
+    const archiveDir = join(repo, ".ittybitty", "archive", `20260703-120000-${id}`);
+    await mkdir(archiveDir, { recursive: true });
+    await Bun.write(join(archiveDir, "meta.json"), JSON.stringify({ id, ...meta }));
+  }
+
+  // ── request parsing (untrusted input) ──────────────────────────────────────
+
+  describe("parseLifecycleRequest", () => {
+    test("accepts an op and a target, and nothing else", () => {
+      expect(parseLifecycleRequest(JSON.stringify(retireRequest(ID_A)), ID_A)).toEqual({
+        ok: true,
+        request: { v: 1, id: ID_A, op: "retire", target: CHILD_ID },
+      });
+    });
+
+    test("accepts keep on a merge, and drops a false one", () => {
+      expect(parseLifecycleRequest(JSON.stringify(retireRequest(ID_A, { op: "merge", keep: true })), ID_A)).toEqual({
+        ok: true,
+        request: { v: 1, id: ID_A, op: "merge", target: CHILD_ID, keep: true },
+      });
+      expect(parseLifecycleRequest(JSON.stringify(retireRequest(ID_A, { op: "merge", keep: false })), ID_A)).toEqual({
+        ok: true,
+        request: { v: 1, id: ID_A, op: "merge", target: CHILD_ID },
+      });
+    });
+
+    test.each([
+      ["repo", { repo: "/somewhere" }],
+      ["prompt", { prompt: "do it" }],
+      ["manager", { manager: "someone" }],
+      ["_cwd", { _cwd: "/" }],
+      ["targetDir", { targetDir: "/" }],
+    ])("rejects the unsupported field %s", (field, extra) => {
+      const parsed = parseLifecycleRequest(JSON.stringify(retireRequest(ID_A, extra)), ID_A);
+      expect(parsed.ok).toBe(false);
+      expect((parsed as any).error).toContain(`'${field}'`);
+    });
+
+    test.each([
+      ["not JSON", "{oops"],
+      ["an array", "[]"],
+      ["a wrong version", JSON.stringify({ ...retireRequest(ID_A), v: 2 })],
+      ["an id that does not match the file", JSON.stringify(retireRequest("b".repeat(32)))],
+      ["an unknown op", JSON.stringify(retireRequest(ID_A, { op: "nuke" }))],
+      ["a non-string op", JSON.stringify(retireRequest(ID_A, { op: 5 }))],
+      ["a missing target", JSON.stringify({ v: 1, id: ID_A, op: "retire" })],
+      ["a non-string target", JSON.stringify(retireRequest(ID_A, { target: 5 }))],
+      ["a path as the target", JSON.stringify(retireRequest(ID_A, { target: "../other" }))],
+      ["a target with shell text", JSON.stringify(retireRequest(ID_A, { target: "kid; ib nuke" }))],
+      ["keep on a retire", JSON.stringify(retireRequest(ID_A, { keep: true }))],
+      ["a non-boolean keep", JSON.stringify(retireRequest(ID_A, { op: "merge", keep: "yes" }))],
+    ])("rejects %s", (_label, text) => {
+      expect(parseLifecycleRequest(text, ID_A).ok).toBe(false);
+    });
+  });
+
+  // ── server (unsandboxed watchdog) ──────────────────────────────────────────
+
+  describe("the watchdog's queue handler", () => {
+    test("retires a child for its verified manager and writes the result", async () => {
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      const { deps, retired, spawned } = server();
+      await queue(ID_A, retireRequest(ID_A));
+
+      expect(await processSpawnRequests(MANAGER_ID, repo, deps)).toBe(1);
+
+      expect(retired.map((agent) => agent.id)).toEqual([CHILD_ID]);
+      // A lifecycle request is never treated as a spawn.
+      expect(spawned).toEqual([]);
+      expect(await result(ID_A)).toEqual({ v: 1, id: ID_A, ok: true, exitCode: 0, stdout: `Closed agent: ${CHILD_ID}`, stderr: "" });
+      expect(await readdir(spawnRequestDir(agentDir))).toEqual([]);
+    });
+
+    test("a spawn request in the same queue still spawns", async () => {
+      const { deps, retired, spawned } = server();
+      await queue(ID_A, { v: 1, id: ID_A, prompt: "build it" });
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(spawned.map((call) => call.prompt)).toEqual(["build it"]);
+      expect(retired).toEqual([]);
+    });
+
+    test("an agent that is not the target's manager or spawner is refused", async () => {
+      await writeAgent(CHILD_ID, { manager: "someone-else" });
+      const { deps, retired } = server();
+      await queue(ID_A, retireRequest(ID_A));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired).toEqual([]);
+      const written = await result(ID_A);
+      expect(written.ok).toBe(false);
+      expect(written.stderr).toContain(`only the manager or spawner of '${CHILD_ID}' can run 'ib retire'`);
+    });
+
+    // Every brokered op must be one the manager rule knows and gates.
+    test.each([...LIFECYCLE_OPS])("'%s' is gated: a stranger is refused", async (op) => {
+      await writeAgent(CHILD_ID, { manager: "someone-else" });
+      const { deps, retired, merged, rehired } = server();
+      await queue(ID_A, retireRequest(ID_A, { op }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired).toEqual([]);
+      expect(merged).toEqual([]);
+      expect(rehired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain("Access denied");
+    });
+
+    test("rehires an archived child of the requester, in the requester's repo only", async () => {
+      await writeArchive(CHILD_ID, { manager: MANAGER_ID });
+      // The target is an archive: no active agent is looked up.
+      const { deps, rehired } = server({ findAgent: async () => { throw new Error("must not be called"); } });
+      await queue(ID_A, retireRequest(ID_A, { op: "rehire" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(rehired).toEqual([{ agentId: CHILD_ID, opts: { repoPath: repo } }]);
+      expect(await result(ID_A)).toMatchObject({ ok: true, stdout: `Rehired agent: ${CHILD_ID}` });
+    });
+
+    test("an archive that belonged to another manager is refused", async () => {
+      await writeArchive(CHILD_ID, { manager: "someone-else" });
+      const { deps, rehired } = server();
+      await queue(ID_A, retireRequest(ID_A, { op: "rehire" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(rehired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain(`only the manager or spawner of '${CHILD_ID}' can run 'ib rehire'`);
+    });
+
+    test("merges a child into the requester's own worktree, as an agent", async () => {
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      const worktree = join(agentDir, "repo");
+      await mkdir(worktree);
+      const { deps, merged, retired } = server();
+      await queue(ID_A, retireRequest(ID_A, { op: "merge" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+
+      expect(merged).toHaveLength(1);
+      expect(merged[0]!.agent.id).toBe(CHILD_ID);
+      expect(merged[0]!.targetDir).toBe(worktree);
+      expect(merged[0]!.options).toEqual({ keep: false, _brokeredCaller: { cwd: worktree } });
+      expect(retired).toEqual([]);
+      expect((await result(ID_A)).stdout).toBe(`Closed agent: ${CHILD_ID} (merged)`);
+    });
+
+    test("merge --keep is carried through", async () => {
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      await mkdir(join(agentDir, "repo"));
+      const { deps, merged } = server();
+      await queue(ID_A, retireRequest(ID_A, { op: "merge", keep: true }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(merged[0]!.options.keep).toBe(true);
+    });
+
+    // meta.worktree is the requester's to write and is not sealed. It must not
+    // be able to move the merge to the main checkout.
+    test("meta.worktree cannot redirect the merge away from the requester's worktree", async () => {
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      const worktree = join(agentDir, "repo");
+      await mkdir(worktree);
+      const { deps, merged } = server({}, { readMeta: async () => ({ meta: managerMeta({ worktree: false }) }) });
+      await queue(ID_A, retireRequest(ID_A, { op: "merge" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(merged[0]!.targetDir).toBe(worktree);
+      expect(merged[0]!.options._brokeredCaller).toEqual({ cwd: worktree });
+    });
+
+    test("a requester without a worktree directory gets no merge", async () => {
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      const { deps, merged } = server({}, { readMeta: async () => ({ meta: managerMeta({ worktree: false }) }) });
+      await queue(ID_A, retireRequest(ID_A, { op: "merge" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(merged).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain(`'${MANAGER_ID}' has no worktree to merge into`);
+    });
+
+    test("a symlink in place of the requester's worktree is refused", async () => {
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      // As an agent could do to aim the merge at the main checkout.
+      await symlink(repo, join(agentDir, "repo"));
+      const { deps, merged } = server();
+      await queue(ID_A, retireRequest(ID_A, { op: "merge" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(merged).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain("has no worktree to merge into");
+    });
+
+    // ── nothing may rest on a field the requester can write ──
+
+    test.each([...LIFECYCLE_OPS])("an agent cannot %s itself, even as its own 'manager'", async (op) => {
+      // Every agent can write its own meta.json; `manager` is not sealed.
+      await writeAgent(MANAGER_ID, { manager: MANAGER_ID });
+      await mkdir(join(agentDir, "repo"));
+      const { deps, retired, merged, rehired } = server();
+      await queue(ID_A, retireRequest(ID_A, { op, target: MANAGER_ID }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect([retired, merged, rehired]).toEqual([[], [], []]);
+      expect((await result(ID_A)).stderr).toBe(`Error: '${MANAGER_ID}' cannot ${op} itself`);
+    });
+
+    test("the coordinator authority comes from the verified meta, not a second read of the file", async () => {
+      await writeAgent(CHILD_ID, { manager: "someone-else" });
+      // On disk the requester now claims to be a coordinator; the meta that was
+      // checked against the seal (readMeta) says it is a worker.
+      await writeAgent(MANAGER_ID, { agentType: "coordinator" });
+      const { deps, retired } = server({}, { readMeta: async () => ({ meta: managerMeta({ agentType: "worker" }) }) });
+      await queue(ID_A, retireRequest(ID_A));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain(`only the manager or spawner of '${CHILD_ID}' can run 'ib retire'`);
+    });
+
+    test("a verified coordinator may retire any non-coordinator in its repo", async () => {
+      await writeAgent(CHILD_ID, { manager: "someone-else" });
+      const { deps, retired } = server({}, { readMeta: async () => ({ meta: managerMeta({ agentType: "coordinator" }) }) });
+      await queue(ID_A, retireRequest(ID_A));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired.map((agent) => agent.id)).toEqual([CHILD_ID]);
+    });
+
+    test("a target whose id starts with '-' is authorized like any other", async () => {
+      // On a command line `-v` reads as a flag; here the target is data.
+      await writeAgent("-v", { manager: "someone-else" });
+      const { deps, retired } = server();
+      await queue(ID_A, retireRequest(ID_A, { target: "-v" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain("only the manager or spawner of '-v' can run 'ib retire'");
+
+      await writeAgent("-w", { manager: MANAGER_ID });
+      await queue(ID_A, retireRequest(ID_A, { target: "-w" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired.map((agent) => agent.id)).toEqual(["-w"]);
+    });
+
+    test("a rehire is decided from the archive, not from an active record a spawner could plant", async () => {
+      await writeArchive(CHILD_ID, { manager: "someone-else" });
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      const { deps, rehired } = server();
+      await queue(ID_A, retireRequest(ID_A, { op: "rehire" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(rehired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain(`only the manager or spawner of '${CHILD_ID}' can run 'ib rehire'`);
+    });
+
+    test("a rehire target with no archive in the requester's repo is refused", async () => {
+      const { deps, rehired } = server();
+      await queue(ID_A, retireRequest(ID_A, { op: "rehire" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(rehired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain(`retired agent '${CHILD_ID}' not found in this repository`);
+    });
+
+    test("the target is resolved from the requester's repo on disk", async () => {
+      // No findAgent seam: the production lookup reads the agents directory.
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID, tmux_session: "ittybitty-test-child" });
+      const { deps, retired } = server({ findAgent: undefined });
+      await queue(ID_A, retireRequest(ID_A));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired).toHaveLength(1);
+      expect(retired[0]!.id).toBe(CHILD_ID);
+      expect(retired[0]!.repoPath).toBe(repo);
+      expect(retired[0]!.meta.tmux_session).toBe("ittybitty-test-child");
+    });
+
+    test("the spawner of the target may act on it", async () => {
+      await writeAgent(CHILD_ID, { spawned_by: { agent_id: MANAGER_ID, repo_path: repo } });
+      const { deps, retired } = server();
+      await queue(ID_A, retireRequest(ID_A));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired.map((agent) => agent.id)).toEqual([CHILD_ID]);
+    });
+
+    test("a target that exists nowhere is refused", async () => {
+      const { deps, retired } = server({ findAgent: undefined });
+      await queue(ID_A, retireRequest(ID_A));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain(`agent '${CHILD_ID}' is not in the repository of '${MANAGER_ID}'`);
+    });
+
+    // ── the target is a directory entry, not an `id` in somebody's meta.json ──
+
+    test("a case variant of the requester's own id is not a target", async () => {
+      // On a case-insensitive volume `agents/Agent-Manager` opens the
+      // requester's own directory. The requester then rewrites its own
+      // meta.json (after the seal check, which used the `readMeta` copy) so the
+      // record reads as that variant, with itself as manager.
+      const variant = "Agent-Manager";
+      await writeAgent(MANAGER_ID, { id: variant, manager: MANAGER_ID });
+      await mkdir(join(agentDir, "repo"));
+      for (const op of ["retire", "merge"] as const) {
+        const { deps, retired, merged } = server({ findAgent: undefined });
+        await queue(ID_A, retireRequest(ID_A, { op, target: variant }));
+        await processSpawnRequests(MANAGER_ID, repo, deps);
+        expect([retired, merged]).toEqual([[], []]);
+        expect((await result(ID_A)).stderr).toContain(`agent '${variant}' is not in the repository of '${MANAGER_ID}'`);
+      }
+    });
+
+    test("a record that claims another agent's id is not that agent", async () => {
+      await writeAgent("agent-imposter", { id: CHILD_ID, manager: MANAGER_ID });
+      const { deps, retired } = server({ findAgent: undefined });
+      await queue(ID_A, retireRequest(ID_A));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain(`agent '${CHILD_ID}' is not in the repository of '${MANAGER_ID}'`);
+
+      // With the real child present, the real child's directory is the target.
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      await queue(ID_A, retireRequest(ID_A));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired.map((agent) => agent.storageDir)).toEqual([join(agentsDir, CHILD_ID)]);
+    });
+
+    test("a target that resolves to the requester's own directory is refused", async () => {
+      // Another name for the requester's directory (here a symlink).
+      await symlink(agentDir, join(agentsDir, "alias"));
+      const { deps, retired } = server({ authorize: async () => null });
+      await queue(ID_A, retireRequest(ID_A, { target: "alias" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired).toEqual([]);
+      expect((await result(ID_A)).stderr).toBe(`Error: '${MANAGER_ID}' cannot retire itself`);
+    });
+
+    test("the production lookup does not follow a symlink in the agents directory", async () => {
+      await writeAgent(MANAGER_ID, { manager: MANAGER_ID });
+      await symlink(agentDir, join(agentsDir, "alias"));
+      const { deps, retired } = server({ findAgent: undefined });
+      await queue(ID_A, retireRequest(ID_A, { target: "alias" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain("agent 'alias' is not in the repository");
+    });
+
+    test("a permitted target outside the caller's repo is refused", async () => {
+      const { deps, retired } = server({ authorize: async () => null, findAgent: async () => null });
+      await queue(ID_A, retireRequest(ID_A));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain("only agents in its own repo");
+    });
+
+    test("the caller is the watchdog's own agent and its verified meta, whatever the request says", async () => {
+      const seen: Array<{ callerId: string; callerMeta: Record<string, unknown> }> = [];
+      await writeAgent(CHILD_ID, { manager: "someone-else" });
+      const { deps } = server({
+        authorize: async (_op, _target, callerId, _agentsDir, callerMeta) => { seen.push({ callerId, callerMeta }); return null; },
+      });
+      await queue(ID_A, retireRequest(ID_A));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(seen).toEqual([{ callerId: MANAGER_ID, callerMeta: managerMeta() as unknown as Record<string, unknown> }]);
+    });
+
+    test("meta that no longer matches its sealed record is refused", async () => {
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      const { deps, retired } = server({}, { verifySeal: async () => ({ ok: false, field: "agentType" }) as any });
+      await queue(ID_A, retireRequest(ID_A));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain("does not match its sealed record (agentType); refusing to retire");
+    });
+
+    test("an invalid request is answered, not acted on", async () => {
+      const { deps, retired } = server();
+      await queue(ID_A, retireRequest(ID_A, { target: "../escape" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain("invalid target");
+    });
+
+    test("at-most-once: a retire that throws is consumed and answered, never retried", async () => {
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      let attempts = 0;
+      const { deps } = server({ retire: async () => { attempts++; throw new Error("boom"); } });
+      await queue(ID_A, retireRequest(ID_A));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(attempts).toBe(1);
+      expect((await result(ID_A)).stderr).toContain("boom");
+    });
+
+    test("relays the command's failure to the client", async () => {
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      const failure: IbCommandResult = { ok: false, exitCode: 1, stdout: "", stderr: `Could not retire agent '${CHILD_ID}'` };
+      const { deps } = server({ retire: async () => failure });
+      await queue(ID_A, retireRequest(ID_A));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(await result(ID_A)).toMatchObject({ ok: false, exitCode: 1, stderr: failure.stderr });
+    });
+  });
+
+  // ── client (runs inside the sandbox) ───────────────────────────────────────
+
+  describe("requestLifecycleViaWatchdog", () => {
+    const clientDeps = (over: Record<string, unknown> = {}) => ({
+      resolveCaller: async () => caller(),
+      watchdogLive: async () => true,
+      sleep: async () => {},
+      ...over,
+    });
+
+    test("round trip: the request reaches the watchdog and its answer comes back", async () => {
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      const { deps, retired } = server();
+      const out = await requestLifecycleViaWatchdog(
+        { op: "retire", target: CHILD_ID },
+        // Each poll gap, run the watchdog once — as it would between ticks.
+        clientDeps({ sleep: async () => { await processSpawnRequests(MANAGER_ID, repo, deps); } }),
+      );
+      expect(out).toEqual({ ok: true, exitCode: 0, stdout: `Closed agent: ${CHILD_ID}`, stderr: "" });
+      expect(retired.map((agent) => agent.id)).toEqual([CHILD_ID]);
+      expect(await readdir(spawnRequestDir(agentDir))).toEqual([]);
+      expect(await readdir(spawnResultDir(agentDir))).toEqual([]);
+    });
+
+    test("fails immediately, writing nothing, when the watchdog is not live", async () => {
+      const out = await requestLifecycleViaWatchdog({ op: "retire", target: CHILD_ID }, clientDeps({ watchdogLive: async () => false }));
+      expect(out.ok).toBe(false);
+      expect(out.stderr).toContain(`watchdog for '${MANAGER_ID}' is not running`);
+      await expect(readdir(spawnRequestDir(agentDir))).rejects.toThrow();
+    });
+
+    test("times out after the deadline and withdraws the unclaimed request", async () => {
+      let clock = 0;
+      const out = await requestLifecycleViaWatchdog({ op: "retire", target: CHILD_ID }, clientDeps({
+        now: () => clock,
+        sleep: async (ms: number) => { clock += ms; },
+      }));
+      expect(clock).toBeGreaterThanOrEqual(LIFECYCLE_CLIENT_TIMEOUT_MS);
+      expect(out.ok).toBe(false);
+      expect(out.stderr).toContain(`timed out after 100s waiting for the watchdog of '${MANAGER_ID}' to retire '${CHILD_ID}'`);
+      expect(out.stderr).toContain("withdrawn");
+      expect(await readdir(spawnRequestDir(agentDir))).toEqual([]);
+    });
+
+    test("the default deadline is 100 seconds, under the 120s tool timeout", () => {
+      expect(LIFECYCLE_CLIENT_TIMEOUT_MS).toBe(100_000);
+    });
+
+    test("a timeout after the watchdog took the request says the command may still finish", async () => {
+      let clock = 0;
+      const out = await requestLifecycleViaWatchdog({ op: "retire", target: CHILD_ID }, clientDeps({
+        now: () => clock,
+        sleep: async (ms: number) => {
+          clock += ms;
+          // The watchdog claims (removes) the request but never answers.
+          for (const name of await readdir(spawnRequestDir(agentDir))) await rm(join(spawnRequestDir(agentDir), name));
+        },
+        timeoutMs: 1000,
+      }));
+      expect(out.ok).toBe(false);
+      expect(out.stderr).toContain("already started the retire, so it may still finish");
+    });
+
+    test("a watchdog that predates the broker gets a restart hint, not a spawn error", async () => {
+      const out = await requestLifecycleViaWatchdog({ op: "retire", target: CHILD_ID }, clientDeps({
+        sleep: async () => {
+          // An old watchdog parses every request as a spawn request.
+          const [name] = await readdir(spawnRequestDir(agentDir));
+          const id = name!.replace(".json", "");
+          await rm(join(spawnRequestDir(agentDir), name!));
+          await mkdir(spawnResultDir(agentDir), { recursive: true });
+          await Bun.write(
+            join(spawnResultDir(agentDir), `${id}.json`),
+            JSON.stringify({ v: 1, id, ok: false, exitCode: 1, stdout: "", stderr: "Error: spawn request has unsupported field 'op'" }),
+          );
+        },
+      }));
+      expect(out.ok).toBe(false);
+      expect(out.stderr).toContain(`the watchdog for '${MANAGER_ID}' predates sandboxed 'ib retire'`);
+      expect(out.stderr).toContain("Restart this agent");
+    });
+
+    test("a merge request carries keep only when --keep was given", async () => {
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      await mkdir(join(agentDir, "repo"));
+      const { deps } = server();
+      const seen: Array<Record<string, unknown>> = [];
+      const capturing = clientDeps({
+        sleep: async () => {
+          for (const name of await readdir(spawnRequestDir(agentDir))) {
+            seen.push(await Bun.file(join(spawnRequestDir(agentDir), name)).json());
+          }
+          await processSpawnRequests(MANAGER_ID, repo, deps);
+        },
+      });
+      const kept = await requestLifecycleViaWatchdog({ op: "merge", target: CHILD_ID, keep: true }, capturing);
+      const closed = await requestLifecycleViaWatchdog({ op: "merge", target: CHILD_ID }, capturing);
+      expect(kept.ok).toBe(true);
+      expect(closed.ok).toBe(true);
+      expect(seen.map(({ op, target, keep }) => ({ op, target, keep }))).toEqual([
+        { op: "merge", target: CHILD_ID, keep: true },
+        { op: "merge", target: CHILD_ID, keep: undefined },
+      ]);
+    });
+
+    test("an invalid id is refused before anything is written", async () => {
+      const out = await requestLifecycleViaWatchdog({ op: "rehire", target: "../escape" }, clientDeps());
+      expect(out).toEqual({ ok: false, exitCode: 1, stdout: "", stderr: "Invalid agent id: ../escape" });
+      await expect(readdir(spawnRequestDir(agentDir))).rejects.toThrow();
+    });
+
+    // The router never sends these two callers here (it runs them directly);
+    // asked anyway, the client refuses rather than guess an agent.
+    test("a shell that is not inside an agent gets a clear error", async () => {
+      const out = await requestLifecycleViaWatchdog({ op: "retire", target: CHILD_ID }, clientDeps({ resolveCaller: async () => null }));
+      expect(out.ok).toBe(false);
+      expect(out.stderr).toContain("not inside a registered agent");
+    });
+
+    test("an unverifiable caller is an error", async () => {
+      const out = await requestLifecycleViaWatchdog({ op: "retire", target: CHILD_ID }, clientDeps({
+        resolveCaller: async () => { throw new Error("Cannot verify no-worktree caller"); },
+      }));
+      expect(out.ok).toBe(false);
+      expect(out.stderr).toContain("Cannot verify no-worktree caller");
+    });
+  });
+
+  // ── routing from the CLI ───────────────────────────────────────────────────
+
+  describe("routeLifecycleThroughWatchdog", () => {
+    test("returns null when the process is not sandboxed (run directly, as before)", async () => {
+      setSandboxedProcessOverride(() => false);
+      expect(await routeLifecycleThroughWatchdog({ op: "retire", target: CHILD_ID })).toBeNull();
+    });
+
+    test("routes a sandboxed worktree agent through the watchdog", async () => {
+      setSandboxedProcessOverride(() => true);
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      const { deps } = server();
+      const out = await routeLifecycleThroughWatchdog({ op: "retire", target: CHILD_ID }, {
+        resolveCaller: async () => caller(),
+        watchdogLive: async () => true,
+        sleep: async () => { await processSpawnRequests(MANAGER_ID, repo, deps); },
+      });
+      expect(out).toEqual({ ok: true, exitCode: 0, stdout: `Closed agent: ${CHILD_ID}`, stderr: "" });
+    });
+
+    // Callers that keep the direct path. None of them may reach the broker:
+    // `watchdogLive` throws if the client gets that far.
+    const directOnly = (resolveCaller: () => Promise<ResolvedCallerContext | null>) => ({
+      resolveCaller,
+      watchdogLive: async (): Promise<boolean> => { throw new Error("the broker must not be asked"); },
+    });
+    const callerWith = (meta: Record<string, unknown>): ResolvedCallerContext =>
+      ({ meta: { id: MANAGER_ID, ...meta }, agentDir, repoPath: repo });
+
+    test("a worktree:false agent runs the command directly (it has no per-agent watchdog)", async () => {
+      setSandboxedProcessOverride(() => true);
+      const out = await routeLifecycleThroughWatchdog(
+        { op: "retire", target: CHILD_ID },
+        directOnly(async () => callerWith({ worktree: false })),
+      );
+      expect(out).toBeNull();
+      await expect(readdir(spawnRequestDir(agentDir))).rejects.toThrow();
+    });
+
+    test("an agent whose itsybitsy sandbox is off runs the command directly (e.g. codex in its own sandbox)", async () => {
+      setSandboxedProcessOverride(() => true);
+      const out = await routeLifecycleThroughWatchdog(
+        { op: "merge", target: CHILD_ID },
+        directOnly(async () => callerWith({ sandbox: { enabled: false, rawAllow: [], domains: [] } })),
+      );
+      expect(out).toBeNull();
+      await expect(readdir(spawnRequestDir(agentDir))).rejects.toThrow();
+    });
+
+    test("a sandboxed shell that is not an agent runs the command directly", async () => {
+      setSandboxedProcessOverride(() => true);
+      expect(await routeLifecycleThroughWatchdog({ op: "retire", target: CHILD_ID }, directOnly(async () => null))).toBeNull();
+    });
+
+    test("a caller that cannot be verified runs the command directly", async () => {
+      setSandboxedProcessOverride(() => true);
+      const out = await routeLifecycleThroughWatchdog(
+        { op: "rehire", target: CHILD_ID },
+        directOnly(async () => { throw new Error("Cannot verify no-worktree caller"); }),
+      );
+      expect(out).toBeNull();
+    });
+
+    test("an absent sandbox block counts as enabled (the default) and is routed", async () => {
+      setSandboxedProcessOverride(() => true);
+      const out = await routeLifecycleThroughWatchdog(
+        { op: "retire", target: CHILD_ID },
+        { resolveCaller: async () => callerWith({}), watchdogLive: async () => false },
+      );
+      expect(out?.stderr).toContain(`watchdog for '${MANAGER_ID}' is not running`);
+    });
+  });
+
+  // A worktree:false agent has no `<agentDir>/repo`, so its per-agent watchdog
+  // leaves its loop at once: no heartbeat, and nobody to serve a request. That
+  // is why such a caller is never routed here.
+  test("a worktree:false agent's watchdog does not stay up", async () => {
+    await writeAgent(MANAGER_ID, { worktree: false, tmux_session: "ittybitty-test-manager" });
+    const started = Date.now();
+    await runPerAgentWatchdog(MANAGER_ID, repo);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(await hasLiveWatchdog(agentDir)).toBe(false);
+  });
+});

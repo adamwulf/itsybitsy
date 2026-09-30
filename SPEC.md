@@ -215,6 +215,10 @@ snapshot:
    i. Remove agent directory
 4. Scan and kill orphaned Claude processes
 
+When the caller is a worktree agent inside its itsybitsy sandbox, its watchdog
+performs these steps for it (§8.5, lifecycle-request broker); the steps
+themselves do not change.
+
 Ignored files, pending questions, transient operation metadata, process IDs,
 and queued outbox messages are not recovery state.
 
@@ -304,6 +308,10 @@ merge/nuke archives without a supported manifest produce a non-destructive
 Rehire rejects archived Codex, Fugu, or agy metadata with `worktree: false`
 before reconstructing files or mutating shared state. Claude remains the only
 CLI with supported no-worktree rehire.
+
+When the caller is a worktree agent inside its itsybitsy sandbox, its watchdog
+performs the rehire for it (§8.5, lifecycle-request broker) and step 1 scans
+only the caller's own repository.
 
 ### 1.8 Nuking
 
@@ -489,6 +497,8 @@ The merge strategy depends on whether the caller is an agent or a user. Detectio
 2. **TMUX session name**: If inside tmux, the session name starts with `ittybitty-`
 
 If either check matches, the caller is considered an agent.
+
+**Sandboxed caller (TypeScript only)**: a merge requested by a worktree agent inside its itsybitsy sandbox is run by that agent's watchdog (§8.5, lifecycle-request broker). Neither check describes the requester there, so the broker states it: the caller is an agent, and "the caller's CWD" in §3.2–§3.4 is always the requester's own worktree, `<agent-dir>/repo`.
 
 ### 3.2 Pre-Merge Checks
 
@@ -1230,6 +1240,8 @@ Per-agent watchdogs do not use a watchdog lock file for state detection, and the
 **Outbox drain (single tmux writer)**: [^note] **TypeScript only.** The per-agent watchdog is the single owner of writes to its agent's tmux session, so it drains the per-agent outbox queue (`outbox.jsonl`, §4.1.1). It drains at the top of every 5 s poll tick (before state handling) AND on an `fs.watch` event on the agent directory (debounced ~50 ms) so delivery feels instant. Drain triggers are coalesced (a redundant trigger while one is queued/running is dropped), and against other processes the drain is serialized by the per-session file lock. The watchdog ALSO makes its own bare keystroke writes — the rate-limit-bypass Enter and the permission auto-accept Enter — which bypass `deliverMessage` and the file lock; those are serialized against the drain by a per-agent **in-process async mutex** (`runSessionExclusive`, keyed by agent id) that wraps both the drain and every bare Enter, so a drain and a bare write can never overlap in either direction (a drain in flight blocks the Enter, and an Enter in flight blocks the drain). If `fs.watch` is unavailable/throws, the watchdog falls back silently to per-tick draining. `POLL_INTERVAL_MS` (state detection cadence) is unchanged. When the watchdog exits (worktree removed, or tmux gone >10 s) it stops the watcher and clears the debounce timer.
 
 **Spawn-request broker (sandboxed spawners)**: **TypeScript only.** The watchdog runs unsandboxed (started by the tmux server), so it also performs `ib new-agent` on behalf of its own SANDBOXED agent, which cannot (nested `sandbox-exec` is refused, the proxy port cannot be bound). A sandboxed `ib new-agent` (kernel check `sandbox_check`, `src/sandbox-detect.ts`) writes `<agentDir>/spawn-requests/<id>.json` — carrying the FULL prompt text, never a file path — fails at once if the watchdog has no fresh heartbeat, and otherwise waits at most 30 s for `<agentDir>/spawn-results/<id>.json`. At the top of every tick, and on an `fs.watch` of the request directory, the watchdog handles queued requests (`processSpawnRequests`, `src/spawn-broker.ts`): each request file is deleted before it is acted on (at-most-once), only allowlisted fields are honored (never `model`, `repo` or `spawnedBy`), the caller's `meta.json` is verified against its sealed record, and `newAgent()` runs with that verified caller (`_trustedCaller`) so every ordinary caller gate applies. The handler is not awaited by the loop (a spawn takes seconds) and at most one runs at a time; a handler error never crashes the watchdog. Unsandboxed callers never use the broker. Details and limitations: SPEC-SANDBOX.md §4C.6.
+
+**Lifecycle-request broker (sandboxed managers)**: **TypeScript only.** The same queue carries the lifecycle commands a sandboxed worktree agent cannot run itself, because its profile grants neither the main repo root nor `.ittybitty/archive`: `ib retire <id>`, `ib merge <id> [--keep]` and `ib rehire <id>`. Only a worktree agent with its itsybitsy sandbox enabled is routed; every other caller — unsandboxed, not an agent, `worktree: false` (no per-agent watchdog, and its profile grants the repo root), or itsybitsy sandbox off (for example codex in its own sandbox) — runs the command directly as before. The routed command writes `{v:1, id, op, target, keep?}` to `<agentDir>/spawn-requests/<id>.json` and waits at most 100 s for the result (`src/lifecycle-broker.ts`). The watchdog verifies the requester against its sealed record, resolves a retire/merge target by its directory entry inside the requester's own repo (the `id` in a `meta.json` alone identifies nothing), refuses a target that is the requester itself, applies the PreToolUse hook's manager-or-spawner rule itself (`checkManagerCommandAccess`, including the coordinator authority of §12.2 — the hook cannot be the only gate, since a sandboxed agent can write a request file without running `ib`), and runs the normal command. The rule is given the verified meta and no unsealed field of the requester's `meta.json` is trusted; the TARGET's `manager` / `spawned_by` are still the target's own word. A merge is aimed at the requester's own worktree (`<agentDir>/repo`, checked once to be a real directory) with agent (`--ff-only`) semantics (§3.1); neither the request nor `meta.worktree` can choose the directory. A rehire is authorized from, and searches, the requester's repo archive only. Because a sandboxed worktree agent cannot read `.ittybitty/archive`, the hook rule leaves `ib rehire` of a non-active target undecided in that one case and the watchdog's check is the gate. Details and limitations: SPEC-SANDBOX.md §4C.7.
 
 **State resolution per tick**: The watchdog resolves the agent's effective state on each 5-second tick using the same resolution order as consumers (§1.3):
 1. No tmux session → `stopped` (or `creating` if within grace period)

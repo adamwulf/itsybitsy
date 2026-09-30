@@ -621,8 +621,15 @@ function selectRetirementArchive(
 /**
  * Reconstruct a retired agent from its immutable archive and resume the
  * original Claude/Codex session.
+ *
+ * `opts.repoPath` limits the archive search to that one repository. The
+ * watchdog lifecycle broker sets it: a sandboxed agent rehires only in its own
+ * repo.
  */
-export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
+export async function rehireAgent(
+  agentId: string,
+  opts: { repoPath?: string } = {},
+): Promise<IbCommandResult> {
   if (!isValidAgentId(agentId)) {
     return {
       ok: false,
@@ -662,8 +669,9 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
   }
 
   const archiveMatches: RetiredAgentArchive[] = [];
-  for (const repo of repos) {
-    archiveMatches.push(...await findRetiredAgentArchives(repo.path, agentId));
+  const archiveRepoPaths = opts.repoPath ? [opts.repoPath] : repos.map((repo) => repo.path);
+  for (const archiveRepoPath of archiveRepoPaths) {
+    archiveMatches.push(...await findRetiredAgentArchives(archiveRepoPath, agentId));
   }
   const selected = selectRetirementArchive(archiveMatches);
   if (!selected.archive) {
@@ -3375,6 +3383,14 @@ export interface MergeAgentOptions {
    * memberships, and its later commits can be merged again the same way.
    */
   keep?: boolean;
+  /**
+   * Set ONLY by the watchdog lifecycle broker (lifecycle-broker.ts), which runs
+   * the merge for a sandboxed agent. The watchdog's own cwd and tmux
+   * environment say nothing about that agent, so the broker states where the
+   * requester is: `cwd` stands in for `process.cwd()`, and the caller counts
+   * as an agent (a `--ff-only` merge) without the cwd / tmux probe.
+   */
+  _brokeredCaller?: { cwd: string };
 }
 
 /**
@@ -3417,6 +3433,7 @@ export async function mergeAgent(
   const worktreePath = join(agentDir, "repo");
   const tmuxSession = agent.meta.tmux_session;
   const keep = options.keep === true;
+  const brokered = options._brokeredCaller;
 
   // Long-running-op guard: refuse if another op (check/merge/restart) is in
   // flight with a live holder; reclaim on a dead holder. Cleared in `finally`.
@@ -3445,7 +3462,7 @@ export async function mergeAgent(
       }
 
       // 2b. Cannot merge from within the agent's own worktree
-      const currentDir = process.cwd();
+      const currentDir = brokered?.cwd ?? process.cwd();
       if (currentDir.startsWith(worktreePath)) {
         return { ok: false as const, stderr: "Cannot merge agent from within its own worktree" };
       }
@@ -3463,11 +3480,13 @@ export async function mergeAgent(
         targetBranch = currentBranch.stdout.trim();
       }
       if (!targetBranch) {
-        const mainRef = await mergeSpawnCtx.run(["git", "show-ref", "--verify", "refs/heads/main"]);
+        // These two run in the caller's cwd; a brokered merge names it.
+        const inCallerCwd = brokered ? ["-C", brokered.cwd] : [];
+        const mainRef = await mergeSpawnCtx.run(["git", ...inCallerCwd, "show-ref", "--verify", "refs/heads/main"]);
         if (mainRef.exitCode === 0) {
           targetBranch = "main";
         } else {
-          const masterRef = await mergeSpawnCtx.run(["git", "show-ref", "--verify", "refs/heads/master"]);
+          const masterRef = await mergeSpawnCtx.run(["git", ...inCallerCwd, "show-ref", "--verify", "refs/heads/master"]);
           if (masterRef.exitCode === 0) {
             targetBranch = "master";
           } else {
@@ -3539,7 +3558,7 @@ export async function mergeAgent(
           return { ok: false as const, stderr: `Could not checkout ${targetBranch}: ${checkoutResult.stderr || checkoutResult.stdout}` };
         }
 
-        const runningAsAgent = await isRunningAsAgent();
+        const runningAsAgent = brokered ? true : await isRunningAsAgent();
         if (runningAsAgent) {
           await logAgent(agentDir, `Fast-forwarding ${targetBranch} to ${branchName}...`);
           const ffResult = await mergeSpawnCtx.run(["git", "-C", targetDir, "merge", "--ff-only", branchName]);

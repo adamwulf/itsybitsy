@@ -2081,6 +2081,15 @@ export async function main() {
       if (extraArgs.length > 0) {
         console.error(`Warning: unknown arguments ignored: ${extraArgs.join(" ")}`);
       }
+      // A sandboxed WORKTREE agent cannot retire an agent itself (it cannot read
+      // the main repo root or write the archive), so it asks its own —
+      // unsandboxed — watchdog to do it. Null for every other caller, which
+      // retires directly as before. See routeLifecycleThroughWatchdog.
+      {
+        const { routeLifecycleThroughWatchdog } = await import("./lifecycle-broker");
+        const brokered = await routeLifecycleThroughWatchdog({ op: "retire", target: agent.id });
+        if (brokered) await printAndExit(brokered);
+      }
       const { retireAgent } = await import("./ib-commands");
       await printAndExit(await retireAgent(agent));
       break;
@@ -2093,6 +2102,15 @@ export async function main() {
       }
       if (args.length > 2) {
         console.error(`Warning: unknown arguments ignored: ${args.slice(2).join(" ")}`);
+      }
+      // A sandboxed WORKTREE agent cannot rehire an agent itself (it cannot
+      // read the archive or the main repo root, or start the session), so its
+      // own — unsandboxed — watchdog does it. Null for every other caller,
+      // which rehires directly as before. See routeLifecycleThroughWatchdog.
+      {
+        const { routeLifecycleThroughWatchdog } = await import("./lifecycle-broker");
+        const brokered = await routeLifecycleThroughWatchdog({ op: "rehire", target: agentId });
+        if (brokered) await printAndExit(brokered);
       }
       const { rehireAgent } = await import("./ib-commands");
       await printAndExit(await rehireAgent(agentId));
@@ -2135,6 +2153,16 @@ export async function main() {
       const agent = await requireAgent(parsedMerge.agentId, repos);
       if (parsedMerge.unknown.length > 0) {
         console.error(`Warning: unknown arguments ignored: ${parsedMerge.unknown.join(" ")}`);
+      }
+      // A sandboxed WORKTREE agent cannot merge an agent itself (every git call
+      // on the main repo root fails, and the close cannot write the archive),
+      // so its own — unsandboxed — watchdog does it and merges into this
+      // agent's worktree. Null for every other caller, which merges directly
+      // as before. See routeLifecycleThroughWatchdog.
+      {
+        const { routeLifecycleThroughWatchdog } = await import("./lifecycle-broker");
+        const brokered = await routeLifecycleThroughWatchdog({ op: "merge", target: agent.id, keep: parsedMerge.keep });
+        if (brokered) await printAndExit(brokered);
       }
       const resolved = resolveMergeTargetDir(agent, process.cwd());
       if (!resolved.ok) {

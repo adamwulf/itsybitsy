@@ -1,10 +1,11 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON, SEAL_HELPER_RESULT_WRITE_DENY_REASON, agentProtectedWritePaths, systemProtectedWritePaths, protectedConfigWriteDenyReason, matchProtectedWrite } from "./agent-path";
+import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, checkManagerCommandAccess, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON, SEAL_HELPER_RESULT_WRITE_DENY_REASON, agentProtectedWritePaths, systemProtectedWritePaths, protectedConfigWriteDenyReason, matchProtectedWrite } from "./agent-path";
 import type { PathCheckInput, PathCheckContext } from "./agent-path";
 import { join } from "path";
-import { mkdir, mkdtemp, readFile, rm, writeFile, symlink } from "fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import { setUserHome, resetUserHome } from "../home";
+import { setSandboxedProcessOverride } from "../sandbox-detect";
 import { parseDenials } from "../agents";
 import { canonicalizeSandboxPath, prepareAccessTable, resolvePreparedAccess, type PathsConfig, type PreparedAccessTable } from "../sandbox";
 import { agentPathAccessTable, claudeScratchpadDirFor } from "./paths-table";
@@ -1725,6 +1726,132 @@ describe("checkIbCommandAccess", () => {
     } finally {
       resetUserHome();
     }
+  });
+
+  // A sandboxed worktree agent's profile does not grant <repo>/.ittybitty/archive,
+  // so this rule cannot see an archived agent's manager. `ib rehire` then goes to
+  // the caller's watchdog, which runs this rule again where the archive is
+  // readable (lifecycle-broker.ts) — so the hook must not deny first.
+  describe("rehire when the sandbox hides the archive", () => {
+    const archiveRoot = () => join(tmpDir, ".ittybitty", "archive");
+
+    /** Make the archive unlistable, as the kernel sandbox does. */
+    async function hideArchive(): Promise<void> {
+      await chmod(archiveRoot(), 0o000);
+    }
+
+    beforeEach(async () => {
+      // Keep the cross-repo fallback off the real registry.
+      setUserHome(tmpDir);
+      await writeRetiredMeta("agent-target1", { manager: "agent-manager1" });
+    });
+
+    afterEach(async () => {
+      setSandboxedProcessOverride(null);
+      resetUserHome();
+      await chmod(archiveRoot(), 0o755).catch(() => {});
+    });
+
+    test("leaves the decision to the watchdog", async () => {
+      setSandboxedProcessOverride(() => true);
+      await hideArchive();
+      // Not even the target's manager could be recognised here.
+      expect(await checkIbCommandAccess("ib rehire agent-target1", "agent-manager1", agentsDir)).toBeNull();
+      expect(await checkIbCommandAccess("ib rehire agent-target1", "agent-other111", agentsDir)).toBeNull();
+    });
+
+    test("still decides when the sandbox can read the archive (a worktree:false agent)", async () => {
+      setSandboxedProcessOverride(() => true);
+      const result = await checkIbCommandAccess("ib rehire agent-target1", "agent-other111", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result?.reason).toContain("only the manager");
+      expect(await checkIbCommandAccess("ib rehire agent-target1", "agent-manager1", agentsDir)).toBeNull();
+    });
+
+    test("an unreadable archive outside the sandbox is still a denial", async () => {
+      setSandboxedProcessOverride(() => false);
+      await hideArchive();
+      const result = await checkIbCommandAccess("ib rehire agent-target1", "agent-manager1", agentsDir);
+      expect(result?.decision).toBe("deny");
+    });
+
+    test("an ACTIVE target is still decided here, from its meta.json", async () => {
+      setSandboxedProcessOverride(() => true);
+      await hideArchive();
+      await writeAgentMeta("agent-active11", { id: "agent-active11", manager: "agent-manager1" });
+      const result = await checkIbCommandAccess("ib rehire agent-active11", "agent-other111", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result?.reason).toContain("only the manager");
+    });
+
+    test("only rehire is left open: retire and merge of an unknown id are denied", async () => {
+      setSandboxedProcessOverride(() => true);
+      await hideArchive();
+      for (const command of ["ib retire agent-target1", "ib merge agent-target1"]) {
+        expect((await checkIbCommandAccess(command, "agent-manager1", agentsDir))?.decision).toBe("deny");
+      }
+    });
+  });
+
+  // The watchdog lifecycle broker calls the rule with structured arguments
+  // (lifecycle-broker.ts). There, null must mean "allowed" and nothing else.
+  describe("checkManagerCommandAccess (the rule, without a command line)", () => {
+    test("allows the manager and denies a stranger", async () => {
+      await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
+      expect(await checkManagerCommandAccess("retire", "agent-target1", "agent-manager1", agentsDir)).toBeNull();
+      const denied = await checkManagerCommandAccess("merge", "agent-target1", "agent-other111", agentsDir);
+      expect(denied?.decision).toBe("deny");
+      expect(denied?.reason).toContain("only the manager or spawner of 'agent-target1' can run 'ib merge'");
+    });
+
+    test("a command it does not gate, or a target that is not an agent id, is denied", async () => {
+      await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
+      for (const [subcommand, target] of [
+        ["list", "agent-target1"],
+        ["nuke", "agent-target1"],
+        ["retire", "../agent-target1"],
+        ["retire", ""],
+      ] as const) {
+        const result = await checkManagerCommandAccess(subcommand, target, "agent-manager1", agentsDir);
+        expect(result?.decision).toBe("deny");
+      }
+    });
+
+    test("an id that starts with '-' is a target here, not a flag", async () => {
+      await writeAgentMeta("-v", { id: "-v", manager: "agent-manager1" });
+      expect(await checkManagerCommandAccess("retire", "-v", "agent-manager1", agentsDir)).toBeNull();
+      expect((await checkManagerCommandAccess("retire", "-v", "agent-other111", agentsDir))?.decision).toBe("deny");
+    });
+
+    test("callerMeta replaces the read of the caller's own file", async () => {
+      await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
+      // On disk the caller claims to be a coordinator.
+      await writeAgentMeta("agent-other111", { id: "agent-other111", agentType: "coordinator" });
+      expect(await checkManagerCommandAccess("retire", "agent-target1", "agent-other111", agentsDir)).toBeNull();
+      const verified = await checkManagerCommandAccess("retire", "agent-target1", "agent-other111", agentsDir, {
+        callerMeta: { id: "agent-other111", agentType: "worker" },
+      });
+      expect(verified?.decision).toBe("deny");
+      // And the reverse: a verified coordinator needs no file.
+      expect(await checkManagerCommandAccess("retire", "agent-target1", "agent-nofile1", agentsDir, {
+        callerMeta: { id: "agent-nofile1", agentType: "coordinator" },
+      })).toBeNull();
+    });
+
+    test("ownArchiveOnly decides a rehire from the caller's own archive alone", async () => {
+      await writeRetiredMeta("agent-target1", { manager: "agent-manager1" });
+      // An active record naming someone else as manager does not count.
+      await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-other111" });
+      const opts = { ownArchiveOnly: true };
+      expect(await checkManagerCommandAccess("rehire", "agent-target1", "agent-manager1", agentsDir, opts)).toBeNull();
+      const stranger = await checkManagerCommandAccess("rehire", "agent-target1", "agent-other111", agentsDir, opts);
+      expect(stranger?.decision).toBe("deny");
+      expect(stranger?.reason).toContain("only the manager or spawner");
+
+      const missing = await checkManagerCommandAccess("rehire", "agent-nowhere1", "agent-manager1", agentsDir, opts);
+      expect(missing?.reason).toContain("retired agent 'agent-nowhere1' not found in this repository");
+      expect((await checkManagerCommandAccess("retire", "agent-target1", "agent-manager1", agentsDir, opts))?.decision).toBe("deny");
+    });
   });
 
   test("allows retire when calling agent is the manager", async () => {

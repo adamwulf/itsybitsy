@@ -11,7 +11,8 @@
  * nested `sandbox-exec` for the child's profile fails with `sandbox_apply:
  * Operation not permitted`, binding the proxy port is denied, tmux may be
  * unreachable) and instead hands the request to its unsandboxed watchdog
- * (spawn-broker.ts).
+ * (spawn-broker.ts). The lifecycle commands that need the main repo root or the
+ * archive take the same route (lifecycle-broker.ts).
  *
  * Any failure to ask (non-macOS, FFI unavailable) reports "not sandboxed": the
  * caller then takes the ordinary direct path, which the sandbox itself still

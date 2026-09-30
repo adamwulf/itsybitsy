@@ -350,6 +350,16 @@ export function parseCodexState(input: string): ParseStateResult {
     return { state: "running", reason: "codex Working interrupt marker in last 15 lines" };
   }
 
+  // Codex shows the "tab to queue message" footer only while a turn runs with a
+  // draft in the composer. A long multi-line draft (a multi-line `ib send` that
+  // is not yet submitted) pushes the Working line out of the last-15 window, so
+  // this footer is the only running signal left.
+  const tailLines = stripTrailingBlanks(input.split("\n"));
+  const last = tailLines[tailLines.length - 1] ?? "";
+  if (/^tab to queue message\b/i.test(last.trim())) {
+    return { state: "running", reason: "codex queue-message footer (turn running with a draft)" };
+  }
+
   // Completion signal — exclude quoted occurrences (in watchdog nudge prompts)
   const unquoted15 = last15.replace(/'I HAVE COMPLETED THE GOAL'/g, "");
   if (unquoted15.includes("I HAVE COMPLETED THE GOAL")) {
@@ -389,8 +399,6 @@ export function parseCodexState(input: string): ParseStateResult {
   // then inspect the tail block after it. Codex can wrap long typed prompts
   // across many terminal lines, so fixed "last 5 lines" prompt lookbacks are
   // brittle.
-  const tailLines = stripTrailingBlanks(input.split("\n"));
-  const last = tailLines[tailLines.length - 1] ?? "";
   const hasStatusBar = isCodexStatusLine(last);
   if (hasStatusBar) {
     const promptIndex = findLastCodexPromptIndex(tailLines);
@@ -398,8 +406,9 @@ export function parseCodexState(input: string): ParseStateResult {
       return { state: "waiting", reason: "idle at codex input prompt" };
     }
     // Even without a "›" in the last 5 lines, a trailing status bar alone is a
-    // strong signal of idle — codex only renders the status bar when the prompt
-    // is interactive. Fall through to a softer waiting verdict.
+    // strong signal of idle. The one footer codex shows only during a turn (the
+    // queue-message hint) already returned running above. Fall through to a
+    // softer waiting verdict.
     return { state: "waiting", reason: "codex status bar at tail (no visible › in last 5)" };
   }
 
@@ -426,7 +435,7 @@ function findLastCodexPromptIndex(lines: string[]): number {
  */
 export function isCodexStatusLine(line: string): boolean {
   const trimmed = line.trim();
-  if (/(?:^|\s{2,})\d{1,3}%\s+context left$/i.test(trimmed)) return true;
+  if (/(?:^|\s{2})\d{1,3}%\s+context left$/i.test(trimmed)) return true;
   if (!trimmed.includes("·")) return false;
   if (!/^(?:gpt|codex)-[A-Za-z0-9._-]+(?:\s+\S+)?\s+·\s+/i.test(trimmed)) return false;
   if (/\s·\s+(?:~|\/)/.test(trimmed)) return true;

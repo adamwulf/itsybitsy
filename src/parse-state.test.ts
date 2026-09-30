@@ -590,6 +590,22 @@ describe("parseState", () => {
       expect(parseState(input).state).toBe("running");
     });
 
+    test("codex draft-in-composer footer reads running when a long draft hides the Working line", () => {
+      // A multi-line `ib send` sits in the composer as one logical line per
+      // newline until Enter. 12 draft lines push the Working line out of the
+      // last-15 window; the queue-message footer must still read as running.
+      const input = [
+        "• Working (3m 32s • esc to interrupt)",
+        " ",
+        " ",
+        "› [sent by agent package-audit]: first line of a long message",
+        ...Array.from({ length: 11 }, (_, i) => `  draft line ${i + 2}`),
+        " ",
+        "  tab to queue message" + " ".repeat(900) + "29% context left",
+      ].join("\n");
+      expect(parseState(input).state).toBe("running");
+    });
+
     // F1 (false-positive direction): a recovered agent whose stale banner has
     // scrolled far enough back must NOT keep classifying as rate_limited /
     // compacting. The stale windows are tighter than the historical 15 so a

@@ -8173,10 +8173,6 @@ export function resetSayRunner(): void {
   sayCtx.reset();
 }
 
-/**
- * Injection context for the Telegram send call in askQuestion(). Tests
- * swap this out to observe the message text without going through the outbox.
- */
 export interface TelegramSendOptions {
   /**
    * `false` queues the message and returns without the up-to-1s poll for the
@@ -8186,6 +8182,10 @@ export interface TelegramSendOptions {
   awaitResult?: boolean;
 }
 
+/**
+ * Injection context for the Telegram send call in askQuestion(). Tests
+ * swap this out to observe the message text without going through the outbox.
+ */
 export type TelegramSendFn = (text: string, opts?: TelegramSendOptions) => Promise<{ ok: boolean; message: string }>;
 
 export const askQuestionTelegramCtx = new InjectionContext<TelegramSendFn>(

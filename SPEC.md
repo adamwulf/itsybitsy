@@ -928,7 +928,9 @@ The hook still returns the full text. A failure to write the log line or the que
 Two cases give the log line only, with no question:
 
 - `allowAgentQuestions` is `false` (§7.2). The config check in `askQuestion` applies to a harness question too.
-- The kernel sandbox is ON for a worktree agent. The hook runs in the sandboxed agent process, and `<repo>/.ittybitty/user-questions.json` is not one of its write roots, so the write fails. `ib ask` from a sandboxed agent has the same limit. The `@system` coordinator and primary Claude have no agent record and get no flag. Codex and agy agents do not use this cap (§18.6, §19.3) and get no flag.
+- The kernel sandbox is ON for a worktree agent. The hook runs in the sandboxed agent process, and `<repo>/.ittybitty/user-questions.json` is not one of its write roots, so the write fails. `ib ask` from a sandboxed agent has the same limit.
+
+The `@system` coordinator and primary Claude have no agent record and get no flag. Codex and agy agents do not use this cap (§18.6, §19.3) and get no flag.
 
 | Condition | True when |
 |-----------|-----------|

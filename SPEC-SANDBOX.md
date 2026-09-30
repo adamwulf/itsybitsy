@@ -1409,11 +1409,12 @@ the compiled `ib` inside a real agent profile.
    which the agent can write and the seal does not cover. A sub-agent that
    removes the field can ask the user. This is the same for a direct `ib ask`;
    the rule is a convention for who talks to the user, not a boundary.
-   `askQuestion()` also reads the unsealed `name` from that file and puts it,
-   with the question, in the text for `say` and in the Telegram message. Both
-   now run outside the sandbox. They are text only: `say` gets one argv entry
-   (no shell), and the message is sent as written. So the agent chooses the
-   words that the user hears and reads, not only the question.
+   `askQuestion()` also reads the unsealed `name` from that file and puts it
+   in the text for `say` (the name only) and in the Telegram message (the name
+   and the question). Both now run outside the sandbox. They are text only:
+   `say` gets one argv entry (no shell), and the message is sent as written. So
+   the agent chooses the name that the user hears and reads, not only the
+   question.
 2. The harness question of the session-start hook (SPEC.md §6.3.1, "Size flag")
    is NOT brokered. The hook calls `askQuestion()` in the sandboxed agent
    process, so a sandboxed worktree agent still gets the log line only.
@@ -1421,10 +1422,13 @@ the compiled `ib` inside a real agent profile.
    direct path (§4C.7 limitation 3). It was not run live for this section. For
    a sandboxed `worktree:false` agent the direct `ib ask` is only partly
    served: its profile grants the repo root, so the question is recorded, but
-   the stock `_all.md` does not grant `~/.itsybitsy/channels`, so the Telegram
-   outbox write fails and `askQuestion()` swallows the error (from the code;
-   not run). The question shows in the QUESTIONS pane, with no Telegram
-   message.
+   no Telegram message goes out. Two causes give that result. The stock
+   `_all.md` does not grant `~/.itsybitsy/channels`, so the outbox write is
+   refused and `askQuestion()` swallows the error (from the code; not run).
+   And every direct `ib ask`, sandboxed or not, exits before its un-awaited
+   Telegram write is made (measured in review with a probe run from source; it
+   is older than this section and is not changed here). The question shows in
+   the QUESTIONS pane only.
 4. Requests are handled one at a time per agent, so a question queued behind a
    long brokered merge or teardown can time out on the client while it is
    still queued. It is then withdrawn, and the agent can ask again.

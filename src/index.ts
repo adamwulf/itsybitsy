@@ -2103,6 +2103,15 @@ export async function main() {
       if (args.length > 2) {
         console.error(`Warning: unknown arguments ignored: ${args.slice(2).join(" ")}`);
       }
+      // A SANDBOXED process cannot rehire an agent itself (it cannot read the
+      // archive or the main repo root, or start the session), so its own —
+      // unsandboxed — watchdog does it. Null when not sandboxed. See
+      // lifecycle-broker.ts.
+      {
+        const { routeLifecycleThroughWatchdog } = await import("./lifecycle-broker");
+        const brokered = await routeLifecycleThroughWatchdog({ op: "rehire", target: agentId });
+        if (brokered) await printAndExit(brokered);
+      }
       const { rehireAgent } = await import("./ib-commands");
       await printAndExit(await rehireAgent(agentId));
       break;

@@ -2174,6 +2174,29 @@ describe("retire → rehire recovery", () => {
     expect(await readOutbox(managerQueueDir("agent-bystander"))).toEqual([]);
   });
 
+  // The watchdog lifecycle broker rehires for a sandboxed agent, in that
+  // agent's own repository only.
+  test("repoPath limits the archive search to that one repository", async () => {
+    const agentId = "agent-elsewhere";
+    await plantRehirableArchive(agentId);
+    const otherRepo = await mkdtemp(join(tmpdir(), "rehire-other-repo-"));
+    const runner = successRunner();
+    setRehireSpawnRunner(runner);
+    setNukeResumeSpawnRunner(runner);
+    try {
+      const missed = await rehireAgent(agentId, { repoPath: otherRepo });
+      expect(missed.ok).toBe(false);
+      expect(missed.stderr).toBe("Retired agent not found");
+      expect(await Bun.file(join(tempDir, ".ittybitty", "agents", agentId, "meta.json")).exists()).toBe(false);
+
+      const found = await rehireAgent(agentId, { repoPath: tempDir });
+      expect(found.ok).toBe(true);
+      expect(found.stdout).toContain(`Rehired agent: ${agentId}`);
+    } finally {
+      await rm(otherRepo, { recursive: true, force: true });
+    }
+  });
+
   for (const [legacyRole, worker] of [["manager", false], ["worker", true]] as const) {
     test(`rehire migrates a legacy worktree:false ${legacyRole} archive without agentType or isolated settings`, async () => {
       const agentId = `agent-legacy-shared-${legacyRole}`;

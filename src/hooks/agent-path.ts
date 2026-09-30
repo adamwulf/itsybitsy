@@ -8,8 +8,9 @@
 
 import { join, resolve, dirname, basename } from "path";
 import { userHome } from "../home";
-import { realpath, stat } from "fs/promises";
+import { readdir, realpath, stat } from "fs/promises";
 import { logAgent } from "../agent-lifecycle";
+import { isSandboxedProcess } from "../sandbox-detect";
 import { writeAgentState } from "../agents";
 import { isValidAgentId } from "../validation";
 import { checkGitDirectoryFlags, resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./shared";
@@ -1290,6 +1291,24 @@ function containsInternalIbInvocation(command: string): boolean {
 }
 
 /**
+ * True when this process is inside the kernel sandbox AND that sandbox hides
+ * `<repo>/.ittybitty/archive` from it. A worktree agent's profile does not
+ * grant the archive; a worktree:false agent (whose worktree IS the repo root)
+ * can read it. An archive that is merely absent, or unreadable for an
+ * unsandboxed process, is not "hidden".
+ */
+async function archiveHiddenBySandbox(repoRoot: string): Promise<boolean> {
+  if (!isSandboxedProcess()) return false;
+  try {
+    await readdir(join(repoRoot, ".ittybitty", "archive"));
+    return false;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return code === "EPERM" || code === "EACCES";
+  }
+}
+
+/**
  * Check whether a Bash `ib <cmd> <target>` call is permitted for the calling
  * agent. Manager-only commands (retire, merge, nuke, etc.) require that the
  * calling agent is listed as the target's manager in meta.json.
@@ -1499,6 +1518,13 @@ export async function checkIbCommandAccess(
         };
       }
     } catch { /* fall through to cross-repo archive search */ }
+
+    // A sandboxed worktree agent cannot list its repo's archive, so this rule
+    // cannot see whose agent the archive was and would deny every rehire. Do
+    // not decide here. Inside the sandbox `ib rehire` never rehires by itself:
+    // it hands the request to the caller's watchdog, which applies this same
+    // rule unsandboxed, where the archive is readable (lifecycle-broker.ts).
+    if (await archiveHiddenBySandbox(callerRepoRoot)) return null;
   }
 
   // Cross-repo check: target not in this repo — search other repos

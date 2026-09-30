@@ -2,9 +2,10 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON, SEAL_HELPER_RESULT_WRITE_DENY_REASON, agentProtectedWritePaths, systemProtectedWritePaths, protectedConfigWriteDenyReason, matchProtectedWrite } from "./agent-path";
 import type { PathCheckInput, PathCheckContext } from "./agent-path";
 import { join } from "path";
-import { mkdir, mkdtemp, readFile, rm, writeFile, symlink } from "fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import { setUserHome, resetUserHome } from "../home";
+import { setSandboxedProcessOverride } from "../sandbox-detect";
 import { parseDenials } from "../agents";
 import { canonicalizeSandboxPath, prepareAccessTable, resolvePreparedAccess, type PathsConfig, type PreparedAccessTable } from "../sandbox";
 import { agentPathAccessTable, claudeScratchpadDirFor } from "./paths-table";
@@ -1725,6 +1726,71 @@ describe("checkIbCommandAccess", () => {
     } finally {
       resetUserHome();
     }
+  });
+
+  // A sandboxed worktree agent's profile does not grant <repo>/.ittybitty/archive,
+  // so this rule cannot see an archived agent's manager. `ib rehire` then goes to
+  // the caller's watchdog, which runs this rule again where the archive is
+  // readable (lifecycle-broker.ts) — so the hook must not deny first.
+  describe("rehire when the sandbox hides the archive", () => {
+    const archiveRoot = () => join(tmpDir, ".ittybitty", "archive");
+
+    /** Make the archive unlistable, as the kernel sandbox does. */
+    async function hideArchive(): Promise<void> {
+      await chmod(archiveRoot(), 0o000);
+    }
+
+    beforeEach(async () => {
+      // Keep the cross-repo fallback off the real registry.
+      setUserHome(tmpDir);
+      await writeRetiredMeta("agent-target1", { manager: "agent-manager1" });
+    });
+
+    afterEach(async () => {
+      setSandboxedProcessOverride(null);
+      resetUserHome();
+      await chmod(archiveRoot(), 0o755).catch(() => {});
+    });
+
+    test("leaves the decision to the watchdog", async () => {
+      setSandboxedProcessOverride(() => true);
+      await hideArchive();
+      // Not even the target's manager could be recognised here.
+      expect(await checkIbCommandAccess("ib rehire agent-target1", "agent-manager1", agentsDir)).toBeNull();
+      expect(await checkIbCommandAccess("ib rehire agent-target1", "agent-other111", agentsDir)).toBeNull();
+    });
+
+    test("still decides when the sandbox can read the archive (a worktree:false agent)", async () => {
+      setSandboxedProcessOverride(() => true);
+      const result = await checkIbCommandAccess("ib rehire agent-target1", "agent-other111", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result?.reason).toContain("only the manager");
+      expect(await checkIbCommandAccess("ib rehire agent-target1", "agent-manager1", agentsDir)).toBeNull();
+    });
+
+    test("an unreadable archive outside the sandbox is still a denial", async () => {
+      setSandboxedProcessOverride(() => false);
+      await hideArchive();
+      const result = await checkIbCommandAccess("ib rehire agent-target1", "agent-manager1", agentsDir);
+      expect(result?.decision).toBe("deny");
+    });
+
+    test("an ACTIVE target is still decided here, from its meta.json", async () => {
+      setSandboxedProcessOverride(() => true);
+      await hideArchive();
+      await writeAgentMeta("agent-active11", { id: "agent-active11", manager: "agent-manager1" });
+      const result = await checkIbCommandAccess("ib rehire agent-active11", "agent-other111", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result?.reason).toContain("only the manager");
+    });
+
+    test("only rehire is left open: retire and merge of an unknown id are denied", async () => {
+      setSandboxedProcessOverride(() => true);
+      await hideArchive();
+      for (const command of ["ib retire agent-target1", "ib merge agent-target1"]) {
+        expect((await checkIbCommandAccess(command, "agent-manager1", agentsDir))?.decision).toBe("deny");
+      }
+    });
   });
 
   test("allows retire when calling agent is the manager", async () => {

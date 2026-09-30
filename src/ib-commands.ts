@@ -621,8 +621,15 @@ function selectRetirementArchive(
 /**
  * Reconstruct a retired agent from its immutable archive and resume the
  * original Claude/Codex session.
+ *
+ * `opts.repoPath` limits the archive search to that one repository. The
+ * watchdog lifecycle broker sets it: a sandboxed agent rehires only in its own
+ * repo.
  */
-export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
+export async function rehireAgent(
+  agentId: string,
+  opts: { repoPath?: string } = {},
+): Promise<IbCommandResult> {
   if (!isValidAgentId(agentId)) {
     return {
       ok: false,
@@ -662,8 +669,9 @@ export async function rehireAgent(agentId: string): Promise<IbCommandResult> {
   }
 
   const archiveMatches: RetiredAgentArchive[] = [];
-  for (const repo of repos) {
-    archiveMatches.push(...await findRetiredAgentArchives(repo.path, agentId));
+  const archiveRepoPaths = opts.repoPath ? [opts.repoPath] : repos.map((repo) => repo.path);
+  for (const archiveRepoPath of archiveRepoPaths) {
+    archiveMatches.push(...await findRetiredAgentArchives(archiveRepoPath, agentId));
   }
   const selected = selectRetirementArchive(archiveMatches);
   if (!selected.archive) {

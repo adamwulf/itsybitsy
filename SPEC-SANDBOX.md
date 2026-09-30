@@ -1116,8 +1116,8 @@ and `--model` were refused, and both queue directories were left empty.
    it can write ANOTHER agent's request directory in the same repo and so ask
    that agent's watchdog to spawn as it. Removing that grant (and the
    spawner-only `PARENTCLAUDE`, `REPOID` and tmux-socket grants) for spawners is
-   the follow-up that turns the broker from a convenience into a boundary;
-   rehire still needs those grants today. Retire and merge go through the
+   the follow-up that turns the broker from a convenience into a boundary.
+   Retire, merge and rehire no longer need those grants: they go through the
    broker (§4C.7).
 2. `worktree:false` agents resolve as callers by process ancestry
    (`ps` must work inside the sandbox); if it does not, `ib new-agent` reports
@@ -1141,7 +1141,9 @@ worktree passes. The teardown that follows has the same problem
 into `<repo>/.ittybitty/archive`, which no worktree agent's profile grants.
 `ib merge <child>` fails the same way, earlier and with a misleading message:
 its `git -C <main repo> show-ref` cannot run, so it reports `Branch
-'agent/<id>' does not exist`.
+'agent/<id>' does not exist`. `ib rehire <child>` never got that far: the
+archive is unreadable, so the command reports `Retired agent not found`, and
+the PreToolUse hook had already denied it for the same reason (below).
 Granting the repo root and the archive to every spawner would widen the sandbox
 for all managers, so the command leaves the sandbox instead.
 
@@ -1150,13 +1152,14 @@ request to the caller's own unsandboxed watchdog and waits. Queue, file names,
 atomic writes, at-most-once handling, result clipping and pruning are the spawn
 broker's. `src/lifecycle-broker.ts` adds:
 
-- **Request** — `{v:1, id, op, target, keep?}`, `op` = `retire` | `merge`. A
-  request that has an `op` field is a lifecycle request; one without is a spawn.
+- **Request** — `{v:1, id, op, target, keep?}`, `op` = `retire` | `merge` |
+  `rehire`. A request that has an `op` field is a lifecycle request; one without is a spawn.
   `target` must be a plain agent id (it becomes a path segment). `keep` (`ib
   merge --keep`) is accepted for `merge` only. Any other field is rejected — in
   particular there is no way to name a directory.
-- **Client** — `routeLifecycleThroughWatchdog`, called from the `retire` and
-  `merge` cases in `src/index.ts` after the target is resolved. It returns null when the process
+- **Client** — `routeLifecycleThroughWatchdog`, called from the `retire`,
+  `merge` and `rehire` cases in `src/index.ts` after the target is resolved
+  (`rehire` takes the id as typed and refuses an invalid one before queuing). It returns null when the process
   is not sandboxed (`isSandboxedProcess()`), and the command then runs directly
   as before. Otherwise it identifies the caller, fails at once when the watchdog
   has no fresh heartbeat, writes the request and waits at most **100 seconds**
@@ -1169,8 +1172,8 @@ broker's. `src/lifecycle-broker.ts` adds:
   exactly as for a spawn. **Authorization is applied here, not only in the
   hook:** the watchdog runs the PreToolUse rule itself
   (`checkIbCommandAccess` on the equivalent `ib <op> <target>` line), so only
-  the target's manager or spawner — or the repo's coordinator for `retire` —
-  passes. The hook alone cannot carry this, because a sandboxed agent can write
+  the target's manager or spawner — or the repo's coordinator for `retire` and
+  `rehire` — passes. The hook alone cannot carry this, because a sandboxed agent can write
   a request file without running `ib`. The target is then resolved by exact id
   inside the requester's OWN repo (a sandboxed agent manages agents only in its
   repo, matching the `--repo` refusal for spawns) and the normal `retireAgent()`
@@ -1183,6 +1186,24 @@ broker's. `src/lifecycle-broker.ts` adds:
   HEAD `main`/`master` lookup). The watchdog's own cwd and tmux environment say
   nothing about the requester, so a brokered merge is always an agent merge
   (`--ff-only`, SPEC.md §3.4) without the `isRunningAsAgent` probe.
+- **Rehire** — the target is an archive, not an active agent, so no agent is
+  looked up; `rehireAgent(id, { repoPath })` searches the requester's repo only
+  (a direct `ib rehire` still searches every registered repo). Reconstruction,
+  re-seal and the session start all run in the watchdog, as for a brokered
+  spawn.
+- **The hook defers one case.** The PreToolUse rule authorizes `ib rehire` from
+  the archived `meta.json`, and a sandboxed worktree agent cannot list
+  `<repo>/.ittybitty/archive`. The rule therefore found nothing and denied every
+  rehire — including the agent's own child — before the command could run.
+  `checkIbCommandAccess` now returns "no decision" for `rehire` when the target
+  is not an active agent in the caller's repo AND the process is sandboxed AND
+  listing the archive fails with `EPERM`/`EACCES`. That is safe because a
+  sandboxed `ib rehire` cannot rehire by itself — `isSandboxedProcess()` is the
+  same kernel fact for the hook and for the command — and the watchdog then
+  applies the full rule unsandboxed. Nothing else changes: an active target is
+  still decided from its `meta.json`, `retire`/`merge` of an unknown id are
+  still denied, and a sandboxed agent that CAN read the archive (a
+  `worktree:false` agent) is still decided by the hook.
 - **Old watchdogs** parse every request as a spawn and answer `unsupported
   field 'op'`; the client turns that into "restart this agent so its watchdog
   picks up the feature".
@@ -1202,6 +1223,16 @@ does not exist`; the new binary was refused for another agent's child; `merge
 --keep` fast-forwarded the manager's branch and left the child in place; and a
 closing merge fast-forwarded the manager's branch (no merge commit), archived
 the child and deleted its branch, with the main checkout untouched.
+For rehire: `checkIbCommandAccess`, compiled into a probe and run inside the
+profile, denied the caller's own archived child before the change and returns
+"no decision" after it, while an active agent of another manager stays denied
+there and a stranger's archive stays denied unsandboxed; the previous binary
+reported `Retired agent not found`; and the new binary was refused for a
+stranger's archive and rebuilt its own child (worktree at the retained HEAD,
+branch, committed and untracked files, `manager`) as a stopped agent. **Not
+run live:** the session start that follows a rehire. It is the unchanged
+`resumeAgent`, and the test stubbed tmux on the server side, so the run ends
+with `Resume failed` after the reconstruction.
 
 **Known limitations.**
 1. The authorization rule reads `manager` / `spawned_by` from the TARGET's
@@ -1212,7 +1243,9 @@ the child and deleted its branch, with the main checkout untouched.
    limitation 1 of §4C.6 and is closed by the same follow-up (or by sealing the
    two fields). A retirement is recoverable with `ib rehire`; a closing merge is
    not rehirable, but its commits are on the requester's branch. A non-spawner
-   cannot do this: its `REPOAGENTS` grant is read-only.
+   cannot do this: its `REPOAGENTS` grant is read-only. Rehire is not affected:
+   it is authorized from the ARCHIVED `meta.json`, which no worktree agent can
+   write.
 2. The watchdog runs git in a repository whose git dir the agent can write
    (`GITDIR`), outside the sandbox. This is not new — a brokered spawn already
    runs `git worktree add` there, and every unsandboxed `ib` (the TUI, the

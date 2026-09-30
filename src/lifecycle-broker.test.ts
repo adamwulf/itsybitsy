@@ -71,6 +71,7 @@ describe("lifecycle broker", () => {
   function server(over: Partial<LifecycleServerDeps> = {}, spawnOver: Partial<SpawnServerDeps> = {}) {
     const retired: Agent[] = [];
     const merged: Array<{ agent: Agent; targetDir: string; options: MergeAgentOptions }> = [];
+    const rehired: Array<{ agentId: string; opts: { repoPath: string } }> = [];
     const spawned: Array<{ prompt: string; opts: NewAgentOptions }> = [];
     const deps: SpawnServerDeps = {
       readMeta: async () => ({ meta: managerMeta() }),
@@ -89,11 +90,22 @@ describe("lifecycle broker", () => {
           merged.push({ agent, targetDir, options });
           return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id} (merged)`, stderr: "" };
         },
+        rehire: async (agentId, opts) => {
+          rehired.push({ agentId, opts });
+          return { ok: true, exitCode: 0, stdout: `Rehired agent: ${agentId}`, stderr: "" };
+        },
         ...over,
       },
       ...spawnOver,
     };
-    return { deps, retired, merged, spawned };
+    return { deps, retired, merged, rehired, spawned };
+  }
+
+  /** Put a retired agent's archive on disk, where the authorization rule reads it. */
+  async function writeArchive(id: string, meta: Record<string, unknown>): Promise<void> {
+    const archiveDir = join(repo, ".ittybitty", "archive", `20260703-120000-${id}`);
+    await mkdir(archiveDir, { recursive: true });
+    await Bun.write(join(archiveDir, "meta.json"), JSON.stringify({ id, ...meta }));
   }
 
   // ── request parsing (untrusted input) ──────────────────────────────────────
@@ -187,12 +199,32 @@ describe("lifecycle broker", () => {
     // does not know. Every brokered op must therefore be one the hook gates.
     test.each([...LIFECYCLE_OPS])("'%s' is gated: a stranger is refused", async (op) => {
       await writeAgent(CHILD_ID, { manager: "someone-else" });
-      const { deps, retired, merged } = server();
+      const { deps, retired, merged, rehired } = server();
       await queue(ID_A, retireRequest(ID_A, { op }));
       await processSpawnRequests(MANAGER_ID, repo, deps);
       expect(retired).toEqual([]);
       expect(merged).toEqual([]);
+      expect(rehired).toEqual([]);
       expect((await result(ID_A)).stderr).toContain("Access denied");
+    });
+
+    test("rehires an archived child of the requester, in the requester's repo only", async () => {
+      await writeArchive(CHILD_ID, { manager: MANAGER_ID });
+      // The target is an archive: no active agent is looked up.
+      const { deps, rehired } = server({ findAgent: async () => { throw new Error("must not be called"); } });
+      await queue(ID_A, retireRequest(ID_A, { op: "rehire" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(rehired).toEqual([{ agentId: CHILD_ID, opts: { repoPath: repo } }]);
+      expect(await result(ID_A)).toMatchObject({ ok: true, stdout: `Rehired agent: ${CHILD_ID}` });
+    });
+
+    test("an archive that belonged to another manager is refused", async () => {
+      await writeArchive(CHILD_ID, { manager: "someone-else" });
+      const { deps, rehired } = server();
+      await queue(ID_A, retireRequest(ID_A, { op: "rehire" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(rehired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain(`only the manager or spawner of '${CHILD_ID}' can run 'ib rehire'`);
     });
 
     test("merges a child into the requester's own worktree, as an agent", async () => {
@@ -399,6 +431,12 @@ describe("lifecycle broker", () => {
         { op: "merge", target: CHILD_ID, keep: true },
         { op: "merge", target: CHILD_ID, keep: undefined },
       ]);
+    });
+
+    test("an invalid id is refused before anything is written", async () => {
+      const out = await requestLifecycleViaWatchdog({ op: "rehire", target: "../escape" }, clientDeps());
+      expect(out).toEqual({ ok: false, exitCode: 1, stdout: "", stderr: "Invalid agent id: ../escape" });
+      await expect(readdir(spawnRequestDir(agentDir))).rejects.toThrow();
     });
 
     test("a shell that is not inside an agent gets a clear error", async () => {

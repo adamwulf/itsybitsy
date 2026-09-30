@@ -1,13 +1,14 @@
 /**
- * Watchdog lifecycle broker — how a SANDBOXED agent retires or merges a child
- * agent.
+ * Watchdog lifecycle broker — how a SANDBOXED agent retires, merges or rehires
+ * a child agent.
  *
  * A sandboxed manager cannot do this work itself. Its profile grants its own
  * agent dir, its worktree, the repo's git dir and `<repo>/.ittybitty/agents`,
  * but NOT the main repo root or `<repo>/.ittybitty/archive`. The lifecycle code
  * runs `git -C <main repo> ...` (which dies with `Unable to read current working
- * directory: Operation not permitted`) and moves the agent into the archive, so
- * a direct `ib retire` or `ib merge` fails inside the sandbox.
+ * directory: Operation not permitted`) and moves the agent into the archive or
+ * reads it back, so a direct `ib retire`, `ib merge` or `ib rehire` fails inside
+ * the sandbox.
  *
  * The answer is the one `ib new-agent` already uses (spawn-broker.ts): the
  * agent's WATCHDOG runs unsandboxed, so the sandboxed command hands it the
@@ -40,6 +41,7 @@ import { readAllAgents, type Agent } from "./agents";
 import {
   hasLiveWatchdog,
   mergeAgent,
+  rehireAgent,
   resolveCallerAgentContext,
   retireAgent,
   type IbCommandResult,
@@ -58,7 +60,7 @@ import {
 import { isValidAgentId } from "./validation";
 
 /** The commands a sandboxed agent hands to its watchdog. */
-export const LIFECYCLE_OPS = ["retire", "merge"] as const;
+export const LIFECYCLE_OPS = ["retire", "merge", "rehire"] as const;
 export type LifecycleOp = (typeof LIFECYCLE_OPS)[number];
 
 /**
@@ -83,7 +85,8 @@ export interface LifecycleRequest {
 /** What the CLI asks for; the request id is added by the client. */
 export type LifecycleCommand =
   | { op: "retire"; target: string }
-  | { op: "merge"; target: string; keep?: boolean };
+  | { op: "merge"; target: string; keep?: boolean }
+  | { op: "rehire"; target: string };
 
 type ParsedLifecycleRequest = { ok: true; request: LifecycleRequest } | { ok: false; error: string };
 
@@ -138,6 +141,9 @@ export async function requestLifecycleViaWatchdog(
   deps: SpawnClientDeps = {},
 ): Promise<IbCommandResult> {
   const { op, target } = command;
+  // `ib rehire` takes the id straight from the command line; refuse a bad one
+  // here, with the direct path's message, rather than queue it.
+  if (!isValidAgentId(target)) return brokerFail(`Invalid agent id: ${target}`);
 
   let caller: ResolvedCallerContext | null;
   try {
@@ -214,6 +220,7 @@ export interface LifecycleServerDeps {
   findAgent?: (repoPath: string, agentId: string) => Promise<Agent | null>;
   retire?: (agent: Agent) => Promise<IbCommandResult>;
   merge?: (agent: Agent, targetDir: string, options: MergeAgentOptions) => Promise<IbCommandResult>;
+  rehire?: (agentId: string, opts: { repoPath: string }) => Promise<IbCommandResult>;
 }
 
 /**
@@ -262,6 +269,12 @@ export async function handleLifecycleRequest(
   try {
     const denied = await (seams.authorize ?? authorizeLifecycle)(op, target, ctx.agentId, agentsDir);
     if (denied) return brokerFail(denied);
+
+    // A rehire target is an archive, not an active agent. Only the requester's
+    // own repo is searched.
+    if (op === "rehire") {
+      return await (seams.rehire ?? rehireAgent)(target, { repoPath: ctx.repoPath });
+    }
 
     const agent = await (seams.findAgent ?? findAgentInRepo)(ctx.repoPath, target);
     if (!agent) {

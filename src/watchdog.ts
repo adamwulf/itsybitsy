@@ -1691,9 +1691,10 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
   // ── Spawn-request broker ──────────────────────────────────────────────────
   // A sandboxed `ib new-agent` queues a request in <agentDir>/spawn-requests/;
   // we are unsandboxed, so we run the spawn. A sandboxed lifecycle command
-  // (`ib retire` / `ib merge` of a child) arrives in the same queue. NOT awaited
-  // by the loop: a spawn (worktree add, tmux, proxy), a teardown or a merge
-  // takes seconds and must not stall state detection or the outbox drain. The guard keeps at most one
+  // (`ib retire` / `ib merge` / `ib rehire` of a child) arrives in the same
+  // queue. NOT awaited by the loop: a spawn (worktree add, tmux, proxy), a
+  // teardown, a merge or a rehire takes seconds and must not stall state
+  // detection or the outbox drain. The guard keeps at most one
   // handler running; a request that arrives meanwhile is picked up by the next
   // tick/watch event.
   let spawnBusy = false;

@@ -125,6 +125,7 @@ The interesting modules and their entry points:
 | Mutations | `src/ib-commands.ts`, `src/agent-lifecycle.ts` |
 | Sandboxed spawn (watchdog broker) | `src/spawn-broker.ts`, `src/sandbox-detect.ts`, `runPerAgentWatchdog` in `src/watchdog.ts` (SPEC-SANDBOX.md §4C.6) |
 | Sandboxed lifecycle commands (same broker) | `src/lifecycle-broker.ts` (SPEC-SANDBOX.md §4C.7) |
+| Sandboxed `ib ask` (same broker) | `src/ask-broker.ts` (SPEC-SANDBOX.md §4C.8) |
 | TUI | `src/tui/dashboard.ts`, `src/tui/split-pane.ts`, `src/tui/widths.ts`, `src/tmux-poller.ts` |
 | Config | `src/config.ts` (user-wide; per-agent permissions live in agent-type `.md` files) |
 | Validation | `src/validation.ts` (shell-injection allowlists) |

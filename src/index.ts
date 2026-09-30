@@ -2578,7 +2578,6 @@ export async function main() {
       break;
     }
     case "ask": {
-      const repos = await listRepos();
       // Parse --id flag or auto-detect from CWD
       const askArgs = args.slice(1);
       let askAgentId: string | undefined;
@@ -2618,7 +2617,18 @@ export async function main() {
         process.exit(1);
       }
 
+      // A sandboxed WORKTREE agent cannot record a question itself
+      // (`<repo>/.ittybitty/user-questions.json` is outside its write roots), so
+      // it asks its own — unsandboxed — watchdog to do it. Null for every other
+      // caller, which asks directly as before. See routeAskThroughWatchdog.
+      {
+        const { routeAskThroughWatchdog } = await import("./ask-broker");
+        const brokered = await routeAskThroughWatchdog(askQuestionText, askAgentId);
+        if (brokered) await printAndExit(brokered);
+      }
+
       // Determine repo path from agent
+      const repos = await listRepos();
       const askAgent = await findAgentById(askAgentId, repos);
       if (!askAgent) {
         console.error(`Agent not found: ${askAgentId}`);

@@ -307,8 +307,10 @@ export async function routeNewAgentThroughWatchdog(
  *   - a process that is not sandboxed;
  *   - a sandboxed shell that is not (or cannot be shown to be) an agent;
  *   - a `worktree:false` agent — its profile grants the repo root, so the
- *     direct path works, and its per-agent watchdog exits at once (there is no
- *     `<agentDir>/repo`), so there is nobody to ask;
+ *     direct path works (for `ib ask`: the question is recorded, but the
+ *     Telegram outbox is outside the stock profile, SPEC-SANDBOX §4C.8), and
+ *     its per-agent watchdog exits at once (there is no `<agentDir>/repo`),
+ *     so there is nobody to ask;
  *   - an agent whose itsybitsy sandbox is disabled. `isSandboxedProcess()` is
  *     still true for a codex agent there (codex's own sandbox), which grants
  *     what these commands need; and such an agent has no seal to verify.

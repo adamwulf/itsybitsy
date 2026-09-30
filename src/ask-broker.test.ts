@@ -344,6 +344,29 @@ describe("ask broker", () => {
       await expect(readdir(spawnRequestDir(agentDir))).rejects.toThrow();
     });
 
+    // A sub-agent must get the "use ib send" hint whatever the state of its
+    // watchdog (old, stopped): a restart hint would send it the wrong way.
+    test("a sub-agent with a live manager is refused before the watchdog is asked", async () => {
+      await writeAgent(OTHER_ID, {});
+      const out = await requestAskViaWatchdog(QUESTION, clientDeps({
+        resolveCaller: async () => ({ ...caller(), meta: { id: ASKER_ID, manager: OTHER_ID } }),
+        watchdogLive: async (): Promise<boolean> => { throw new Error("the watchdog must not be asked"); },
+      }));
+      expect(out.ok).toBe(false);
+      expect(out.stderr).toBe(`Agent has a manager (${OTHER_ID}). Use 'ib send ${OTHER_ID} "message"' to communicate with your manager.`);
+      await expect(readdir(spawnRequestDir(agentDir))).rejects.toThrow();
+    });
+
+    test("an agent whose manager is gone is sent to the watchdog", async () => {
+      const { deps, asked } = server();
+      const out = await requestAskViaWatchdog(QUESTION, clientDeps({
+        resolveCaller: async () => ({ ...caller(), meta: { id: ASKER_ID, manager: "agent-gone" } }),
+        sleep: async () => { await processSpawnRequests(ASKER_ID, repo, deps); },
+      }));
+      expect(out.ok).toBe(true);
+      expect(asked).toHaveLength(1);
+    });
+
     test("times out after the deadline and withdraws the unclaimed request", async () => {
       let clock = 0;
       const out = await requestAskViaWatchdog(QUESTION, clientDeps({

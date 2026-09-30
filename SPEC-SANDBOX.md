@@ -1378,7 +1378,11 @@ result clipping and pruning are the spawn broker's. `src/ask-broker.ts` adds:
   (`resolveRoutedCaller` in `src/spawn-broker.ts`, the rule of §4C.7): only a
   worktree agent inside its own itsybitsy sandbox. For every other caller it
   returns null and `ib ask` runs directly, exactly as before. A routed caller
-  asks only as itself: `--id` for another agent is refused. It fails at once
+  asks only as itself: `--id` for another agent is refused. It applies the
+  top-level rule first (`askTopLevelRefusal`, the function `askQuestion()`
+  uses), so a sub-agent gets the "use `ib send <manager>`" hint whatever the
+  state of its watchdog; the watchdog's own check is the one that decides. It
+  then fails at once
   when the watchdog has no fresh heartbeat, writes the request and waits at
   most **30 seconds** (`SPAWN_CLIENT_TIMEOUT_MS`). On timeout it withdraws an
   unclaimed request; a question the watchdog already took may still reach the
@@ -1405,11 +1409,22 @@ the compiled `ib` inside a real agent profile.
    which the agent can write and the seal does not cover. A sub-agent that
    removes the field can ask the user. This is the same for a direct `ib ask`;
    the rule is a convention for who talks to the user, not a boundary.
+   `askQuestion()` also reads the unsealed `name` from that file and puts it,
+   with the question, in the text for `say` and in the Telegram message. Both
+   now run outside the sandbox. They are text only: `say` gets one argv entry
+   (no shell), and the message is sent as written. So the agent chooses the
+   words that the user hears and reads, not only the question.
 2. The harness question of the session-start hook (SPEC.md §6.3.1, "Size flag")
    is NOT brokered. The hook calls `askQuestion()` in the sandboxed agent
    process, so a sandboxed worktree agent still gets the log line only.
 3. `worktree:false` agents and agents with the itsybitsy sandbox off keep the
-   direct path (§4C.7 limitation 3). It was not run live for this section.
+   direct path (§4C.7 limitation 3). It was not run live for this section. For
+   a sandboxed `worktree:false` agent the direct `ib ask` is only partly
+   served: its profile grants the repo root, so the question is recorded, but
+   the stock `_all.md` does not grant `~/.itsybitsy/channels`, so the Telegram
+   outbox write fails and `askQuestion()` swallows the error (from the code;
+   not run). The question shows in the QUESTIONS pane, with no Telegram
+   message.
 4. Requests are handled one at a time per agent, so a question queued behind a
    long brokered merge or teardown can time out on the client while it is
    still queued. It is then withdrawn, and the agent can ask again.

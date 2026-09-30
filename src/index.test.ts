@@ -723,9 +723,14 @@ describe("CLI arg parsing", () => {
     // No positional question; --id given so agent-ID detection succeeds. The
     // question comes from stdin, so we must reach agent lookup (Agent not found),
     // NOT the 'Usage: ib ask' error — proving stdin was consumed into the question.
+    // The cwd is outside an agent worktree: when this suite runs in a sandboxed
+    // agent, `ib ask --id <another agent>` from the worktree is refused before
+    // the lookup (ask-broker.ts).
     const { stderr, exitCode } = await runCliStdin(
       ["ask", "--id", "agent-deadbeef"],
       "what should I do next?\n",
+      undefined,
+      tmpdir(),
     );
     expect(stderr).not.toContain("Usage: ib ask");
     expect(stderr).toContain("Agent not found: agent-deadbeef");
@@ -742,10 +747,13 @@ describe("CLI arg parsing", () => {
 
   test("ask positional question takes precedence over stdin", async () => {
     // A positional question is present, so stdin must be IGNORED (precedence:
-    // positional > stdin). Reaches agent lookup, not the usage error.
+    // positional > stdin). Reaches agent lookup, not the usage error. The cwd
+    // is outside an agent worktree, as in the heredoc test above.
     const { stderr, exitCode } = await runCliStdin(
       ["ask", "--id", "agent-deadbeef", "inline question"],
       "stdin question that should be ignored\n",
+      undefined,
+      tmpdir(),
     );
     expect(stderr).not.toContain("Usage: ib ask");
     expect(stderr).toContain("Agent not found: agent-deadbeef");

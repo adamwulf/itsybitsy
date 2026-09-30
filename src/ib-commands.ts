@@ -8231,6 +8231,29 @@ export interface AskQuestionOptions {
 }
 
 /**
+ * The top-level rule of `ib ask`: only an agent with no manager (or whose
+ * manager is gone) may ask the user. Returns the refusal, or null when the
+ * agent may ask. Also called by the sandboxed client (ask-broker.ts), so a
+ * sub-agent gets this hint without a round trip to its watchdog.
+ */
+export async function askTopLevelRefusal(agentsDir: string, meta: Record<string, unknown>): Promise<IbCommandResult | null> {
+  const managerId = meta.manager as string | undefined;
+  if (!managerId) return null;
+  // Check if the manager's directory still exists (non-archived)
+  const managerMetaFile = Bun.file(join(agentsDir, managerId, "meta.json"));
+  if (await managerMetaFile.exists()) {
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: `Agent has a manager (${managerId}). Use 'ib send ${managerId} "message"' to communicate with your manager.`,
+    };
+  }
+  // Manager dir doesn't exist → merged/killed/archived, allow asking
+  return null;
+}
+
+/**
  * Native ask implementation — replaces `ib ask "question"`.
  * Top-level agents (no manager, or manager merged/killed) can ask the user a question.
  */
@@ -8252,20 +8275,9 @@ export async function askQuestion(repoPath: string, agentId: string, question: s
   }
 
   // Top-level check: only agents with no manager (or whose manager is gone) may ask
-  const managerId = meta.manager as string | undefined;
-  if (managerId && !opts.fromHarness) {
-    // Check if the manager's directory still exists (non-archived)
-    const managerDir = join(agentsDir, managerId);
-    const managerMetaFile = Bun.file(join(managerDir, "meta.json"));
-    if (await managerMetaFile.exists()) {
-      return {
-        ok: false,
-        exitCode: 1,
-        stdout: "",
-        stderr: `Agent has a manager (${managerId}). Use 'ib send ${managerId} "message"' to communicate with your manager.`,
-      };
-    }
-    // Manager dir doesn't exist → merged/killed/archived, allow asking
+  if (!opts.fromHarness) {
+    const refusal = await askTopLevelRefusal(agentsDir, meta);
+    if (refusal) return refusal;
   }
 
   // Config check: allowAgentQuestions must be true

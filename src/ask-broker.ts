@@ -31,12 +31,16 @@
  * Known limitation (SPEC-SANDBOX §4C.8): the top-level rule reads `manager`
  * from the requester's own meta.json, which the agent can write and the seal
  * does not cover. That is the same for a direct `ib ask`; the rule is a
- * convention for who talks to the user, not a boundary.
+ * convention for who talks to the user, not a boundary. `askQuestion()` also
+ * puts the unsealed `name` from that file in the `say` and Telegram text,
+ * which now run outside the sandbox (text only: one argv entry, no shell).
  */
 
 import { randomBytes } from "crypto";
+import { dirname } from "path";
 import {
   askQuestion,
+  askTopLevelRefusal,
   hasLiveWatchdog,
   resolveCallerAgentContext,
   type IbCommandResult,
@@ -118,6 +122,12 @@ export async function requestAskViaWatchdog(
     );
   }
   const callerId = caller.meta.id;
+
+  // The same top-level rule askQuestion() applies in the watchdog; checked
+  // here first so that a sub-agent gets "use ib send <manager>" and not a hint
+  // about its watchdog. The watchdog's check is the one that decides.
+  const refusal = await askTopLevelRefusal(dirname(caller.agentDir), caller.meta);
+  if (refusal) return refusal;
 
   if (Buffer.byteLength(question, "utf8") > SPAWN_MAX_PROMPT_BYTES) {
     return brokerFail(`Error: question is larger than ${SPAWN_MAX_PROMPT_BYTES} bytes; shorten it`);

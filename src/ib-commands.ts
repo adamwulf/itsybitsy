@@ -8177,10 +8177,19 @@ export function resetSayRunner(): void {
  * Injection context for the Telegram send call in askQuestion(). Tests
  * swap this out to observe the message text without going through the outbox.
  */
-export type TelegramSendFn = (text: string) => Promise<{ ok: boolean; message: string }>;
+export interface TelegramSendOptions {
+  /**
+   * `false` queues the message and returns without the up-to-1s poll for the
+   * outbox result. For a caller whose process must not stay alive for it (the
+   * session-start hook: Claude Code waits for the hook process to exit).
+   */
+  awaitResult?: boolean;
+}
+
+export type TelegramSendFn = (text: string, opts?: TelegramSendOptions) => Promise<{ ok: boolean; message: string }>;
 
 export const askQuestionTelegramCtx = new InjectionContext<TelegramSendFn>(
-  (text: string) => telegramSend(text)
+  (text: string, opts?: TelegramSendOptions) => telegramSend(text, opts)
 );
 
 export function setAskQuestionTelegramRunner(runner: TelegramSendFn): void {
@@ -8313,7 +8322,10 @@ export async function askQuestion(repoPath: string, agentId: string, question: s
     // 2. Telegram — always attempted; harmlessly queues if `ib watch` isn't running.
     const tgMsg = `Agent ${metaName} in ${repoName} has a question:\n${question}`;
     try {
-      void askQuestionTelegramCtx.fn(tgMsg).catch(() => { /* swallow */ });
+      const sent = opts.fromHarness
+        ? askQuestionTelegramCtx.fn(tgMsg, { awaitResult: false })
+        : askQuestionTelegramCtx.fn(tgMsg);
+      void sent.catch(() => { /* swallow */ });
     } catch { /* swallow synchronous throws */ }
   } catch { /* defensive: never let notification setup affect the return */ }
 
@@ -8647,7 +8659,7 @@ export async function uninstallInterceptHook(_repoPath: string, settingsPath?: s
  * return an "ok-but-queued" outcome so the caller exits 0 — the message is
  * legitimately waiting on disk and `ib watch` will pick it up next start.
  */
-export async function telegramSend(text: string): Promise<{ ok: boolean; message: string }> {
+export async function telegramSend(text: string, opts: TelegramSendOptions = {}): Promise<{ ok: boolean; message: string }> {
   const { defaultOutboxDir } = await import("./channels/outbox");
   const { mkdir, rename, readFile, unlink } = await import("fs/promises");
   const { randomBytes } = await import("crypto");
@@ -8662,6 +8674,10 @@ export async function telegramSend(text: string): Promise<{ ok: boolean; message
   await mkdir(dir, { recursive: true });
   await Bun.write(tmpPath, text);
   await rename(tmpPath, txtPath);
+
+  if (opts.awaitResult === false) {
+    return { ok: true, message: "queued" };
+  }
 
   // Poll up to 1s for the result file. 100ms cadence keeps the small-message
   // happy path fast (one round trip is typically <100ms) without spinning.

@@ -14191,6 +14191,17 @@ describe("telegramSend (native, file-drop client)", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
+  test("awaitResult:false queues the message and returns without the result poll", async () => {
+    const { ibCmds } = await loadDeps();
+    const result = await ibCmds.telegramSend("from the hook", { awaitResult: false });
+    // The polled "queued" outcome has a longer message; this exact text is
+    // returned only by the no-poll branch.
+    expect(result).toEqual({ ok: true, message: "queued" });
+    const files = (await readdir(outboxDir)).filter((f) => f.endsWith(".txt"));
+    expect(files).toHaveLength(1);
+    expect(await Bun.file(join(outboxDir, files[0]!)).text()).toBe("from the hook");
+  });
+
   test("no `ib watch` running → returns ok:true with 'queued' after ~1s", async () => {
     const { ibCmds } = await loadDeps();
     const start = Date.now();

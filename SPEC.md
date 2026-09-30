@@ -914,7 +914,7 @@ Instructions are generated based on the agent's type definition:
 | `{{rootRepoPath}}` | Full path to the root repo |
 | `{{repoName}}` | Repository basename |
 | `{{pathIsolation}}` | Rendered Path Isolation section (from `buildPathIsolationSection()`: the worktree or repo root, the rule that access is limited to that root and the paths the agent type needs, what to do when a needed path is blocked (ask the manager or the user, or use a different path), and the resolved kernel-sandbox state). It does not print the resolved `paths` lists. |
-| `{{availableTypes}}` | A short section that points the agent at `ib list-types` (from `buildAvailableTypesSection()`). It does not list the installed types. |
+| `{{availableTypes}}` | A short section that points the agent at `ib list-types`, and at `ib show-type <name>` for a full description (from `buildAvailableTypesSection()`). It does not list the installed types. |
 
 Both sections have a fixed size on purpose. Claude Code caps a hook's `additionalContext` at 10,000 characters and gives the agent only a 2,000-character preview above that. Sections that grow with the user's config (path lists, installed types) pushed the manager instructions over the cap.
 
@@ -923,7 +923,12 @@ Both sections have a fixed size on purpose. Claude Code caps a hook's `additiona
 1. It writes a `[SessionStart] instructions are N characters, over the 10000-character hook cap; …` line to the agent's `agent.log`.
 2. It raises a question on the agent's behalf (§4.2), so the agent shows in the QUESTIONS pane. The question says that the instructions are too long and that the agent possibly did not read them.
 
-The hook still returns the full text. A failure to write the log line or the question never blocks session-start. The `@system` coordinator and primary Claude have no agent record and get no flag. Codex and agy agents do not use this cap (§18.6, §19.3) and get no flag.
+The hook still returns the full text. A failure to write the log line or the question never blocks session-start.
+
+Two cases give the log line only, with no question:
+
+- `allowAgentQuestions` is `false` (§7.2). The config check in `askQuestion` applies to a harness question too.
+- The kernel sandbox is ON for a worktree agent. The hook runs in the sandboxed agent process, and `<repo>/.ittybitty/user-questions.json` is not one of its write roots, so the write fails. `ib ask` from a sandboxed agent has the same limit. The `@system` coordinator and primary Claude have no agent record and get no flag. Codex and agy agents do not use this cap (§18.6, §19.3) and get no flag.
 
 | Condition | True when |
 |-----------|-----------|

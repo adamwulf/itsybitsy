@@ -497,6 +497,8 @@ describe("interpolateTemplate {{availableTypes}}", () => {
 
     expect(result).toContain("### Available Agent Types");
     expect(result).toContain("`ib list-types`");
+    // `ib list-types` cuts each description at 60 characters.
+    expect(result).toContain("`ib show-type <name>`");
     expect(result).toContain('`ib new-agent --type <name> "task"`');
     // The installed types stay out of the prompt: the section must not grow
     // with the number of types.
@@ -911,7 +913,7 @@ describe("hookSessionStart — instructions over the hook context cap", () => {
   let tempDir: string;
   let originalWrite: typeof process.stdout.write;
   let stdout: string;
-  let sayCalls: string[][];
+  let telegramCalls: Array<{ text: string; opts?: { awaitResult?: boolean } }>;
 
   /** Write an agent type whose rendered instructions are `bodyChars` + a little. */
   async function writeType(name: string, bodyChars: number): Promise<void> {
@@ -949,9 +951,14 @@ describe("hookSessionStart — instructions over the hook context cap", () => {
       stdout += String(chunk);
       return true;
     }) as typeof process.stdout.write;
-    sayCalls = [];
-    setSayRunner((cmd) => { sayCalls.push(cmd); });
-    setAskQuestionTelegramRunner(async () => ({ ok: true, message: "" }));
+    // The notifications are stubbed so the tests never speak or queue a real
+    // message. The Telegram stub also counts the raises: `say` runs on macOS only.
+    setSayRunner(() => {});
+    telegramCalls = [];
+    setAskQuestionTelegramRunner(async (text, opts) => {
+      telegramCalls.push({ text, opts });
+      return { ok: true, message: "" };
+    });
     await writeType("oversized", HOOK_CONTEXT_CHAR_CAP);
     await writeType("undersized", 100);
   });
@@ -982,7 +989,41 @@ describe("hookSessionStart — instructions over the hook context cap", () => {
 
     const log = await Bun.file(join(agentDir, "agent.log")).text();
     expect(log).toContain(`[SessionStart] instructions are ${instructions.length} characters`);
-    expect(sayCalls).toHaveLength(1);
+    // The notification is queued without the 1s wait for the outbox result:
+    // Claude Code waits for the hook process to exit.
+    expect(telegramCalls).toHaveLength(1);
+    expect(telegramCalls[0]!.opts).toEqual({ awaitResult: false });
+  });
+
+  test("raises the question on the explicit-id path (no-worktree agent from a nested cwd)", async () => {
+    const agentId = "agent-shared-big";
+    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const nested = join(tempDir, "packages", "feature");
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(nested, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: agentId,
+      manager: null,
+      worktree: false,
+      agentType: "oversized",
+      state: "waiting",
+    }));
+    setNoWorktreeRepoRootsLoader(async () => [tempDir]);
+    setBoundNoWorktreeCallerResolver(async () => ({
+      meta: await Bun.file(join(agentDir, "meta.json")).json(),
+      agentDir,
+      repoPath: tempDir,
+    }));
+    try {
+      await hookSessionStart(JSON.stringify({ cwd: nested }), agentId);
+    } finally {
+      resetNoWorktreeRepoRootsLoader();
+      resetBoundNoWorktreeCallerResolver();
+    }
+
+    const questions = await readQuestions();
+    expect(questions.map((q) => q.agent)).toEqual([agentId]);
+    expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("[SessionStart] instructions are");
   });
 
   test("raises the question for a sub-agent too (ib ask itself refuses agents with a manager)", async () => {
@@ -1001,7 +1042,7 @@ describe("hookSessionStart — instructions over the hook context cap", () => {
     await hookSessionStart(JSON.stringify({ cwd }));
 
     expect(await readQuestions()).toHaveLength(1);
-    expect(sayCalls).toHaveLength(1);
+    expect(telegramCalls).toHaveLength(1);
   });
 
   test("raises nothing when the instructions are under the cap", async () => {
@@ -1012,7 +1053,7 @@ describe("hookSessionStart — instructions over the hook context cap", () => {
     expect(instructions.length).toBeLessThanOrEqual(HOOK_CONTEXT_CHAR_CAP);
     expect(await readQuestions()).toEqual([]);
     expect(await Bun.file(join(agentDir, "agent.log")).exists()).toBe(false);
-    expect(sayCalls).toHaveLength(0);
+    expect(telegramCalls).toHaveLength(0);
   });
 
   test("still delivers the instructions when the question cannot be written", async () => {

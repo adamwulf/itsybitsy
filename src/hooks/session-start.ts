@@ -428,7 +428,7 @@ ${cannotAccessSection}
 export function buildAvailableTypesSection(): string {
   return `### Available Agent Types
 
-Run \`ib list-types\` to see the agent types and what each one is for. Spawn one marked SPAWNABLE with \`ib new-agent --type <name> "task"\`.`;
+Run \`ib list-types\` to see the agent types, and \`ib show-type <name>\` for the full description of one. Spawn one marked SPAWNABLE with \`ib new-agent --type <name> "task"\`.`;
 }
 
 function generatePrimaryInstructions(): string {

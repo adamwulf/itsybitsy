@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
-import { parseAgentTypeFile, loadAgentType, listAgentTypes, ensureAgentTypesDir, initAgentTypes, checkAgentTypeFloors, agentTypeExists, validateAllAgentTypes, listSpawnableAgentTypesSync, listSpawnableTypeNamesSync, metaCanSpawnChildren } from "./agent-types";
+import { parseAgentTypeFile, loadAgentType, listAgentTypes, ensureAgentTypesDir, initAgentTypes, checkAgentTypeFloors, agentTypeExists, validateAllAgentTypes, listSpawnableTypeNamesSync, metaCanSpawnChildren } from "./agent-types";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -1430,7 +1430,7 @@ body`);
   });
 });
 
-describe("listSpawnableAgentTypesSync", () => {
+describe("listSpawnableTypeNamesSync", () => {
   let tempHome: string;
   let typesDir: string;
 
@@ -1450,26 +1450,7 @@ describe("listSpawnableAgentTypesSync", () => {
     await Bun.write(join(typesDir, `${name}.md`), content);
   }
 
-  test("listSpawnableAgentTypesSync returns name + description for spawnable types", async () => {
-    await writeType("manager", `---
-name: manager
-description: Manages sub-agents and coordinates work
----
-body`);
-    await writeType("worker", `---
-name: worker
-description: Implements a focused task
----
-body`);
-
-    const types = listSpawnableAgentTypesSync();
-    expect(types).toEqual([
-      { name: "manager", description: "Manages sub-agents and coordinates work" },
-      { name: "worker", description: "Implements a focused task" },
-    ]);
-  });
-
-  test("listSpawnableAgentTypesSync excludes layer types (spawnable: false)", async () => {
+  test("excludes layer types (spawnable: false)", async () => {
     await writeType("manager", `---
 name: manager
 description: Manages sub-agents
@@ -1488,62 +1469,23 @@ description: Another layer file
 ---
 body`);
 
-    const types = listSpawnableAgentTypesSync();
-    const names = types.map((t) => t.name);
-    expect(names).toContain("manager");
-    expect(names).not.toContain("_all");
-    expect(names).not.toContain("_non_coordinator");
+    expect(listSpawnableTypeNamesSync()).toEqual(["manager"]);
   });
 
-  test("listSpawnableAgentTypesSync handles missing description gracefully", async () => {
-    await writeType("plain", `---
-name: plain
----
-body`);
-
-    const types = listSpawnableAgentTypesSync();
-    expect(types).toEqual([{ name: "plain", description: "" }]);
-  });
-
-  test("listSpawnableAgentTypesSync strips quotes from description", async () => {
-    await writeType("quoted", `---
-name: quoted
-description: "A quoted description"
----
-body`);
-
-    const types = listSpawnableAgentTypesSync();
-    expect(types[0]?.description).toBe("A quoted description");
-  });
-
-  test("listSpawnableAgentTypesSync ignores nested description: keys", async () => {
-    // A nested key like permissions.description would be incorrectly picked
-    // up by a flat scan. The top-level description should win.
+  test("ignores a nested spawnable: key", async () => {
+    // A nested key would be incorrectly picked up by a flat scan. Only the
+    // top-level key decides.
     await writeType("nested", `---
 name: nested
-description: top-level
 permissions:
-  description: nested-should-be-ignored
+  spawnable: false
 ---
 body`);
 
-    const types = listSpawnableAgentTypesSync();
-    expect(types).toEqual([{ name: "nested", description: "top-level" }]);
+    expect(listSpawnableTypeNamesSync()).toEqual(["nested"]);
   });
 
-  test("listSpawnableAgentTypesSync returns empty description when only nested description: is present", async () => {
-    await writeType("only-nested", `---
-name: only-nested
-permissions:
-  description: nested-only
----
-body`);
-
-    const types = listSpawnableAgentTypesSync();
-    expect(types).toEqual([{ name: "only-nested", description: "" }]);
-  });
-
-  test("listSpawnableTypeNamesSync still returns names only after refactor", async () => {
+  test("returns the names of the spawnable types in alphabetical order", async () => {
     await writeType("manager", `---
 name: manager
 description: Manages sub-agents

@@ -19,14 +19,24 @@ export async function hookMarkRunning(agentId = process.argv[3] ?? ""): Promise<
     }
   }
   if (!resolved) return;
-  // guard: don't resurrect terminal states if this hook fires late
+  await markRunningOnPrompt(resolved.agentDir);
+}
+
+/**
+ * The prompt-submit state rule, shared by Claude's UserPromptSubmit hook and
+ * codex's (SPEC §6.6): a submitted prompt starts a turn, so write `running` —
+ * which also ends a manager's `ib ack` (SPEC §8.5.2). That includes a
+ * `complete` agent a human types into directly. Only `stopped` is left alone.
+ * No-op when meta.json is missing or unreadable.
+ */
+export async function markRunningOnPrompt(agentDir: string): Promise<void> {
   let current: string | undefined;
   try {
-    const meta = await Bun.file(join(resolved.agentDir, "meta.json")).json();
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
     current = typeof meta?.state === "string" ? meta.state : undefined;
   } catch {
     return;
   }
-  if (current === "complete" || current === "stopped") return;
-  await writeAgentState(resolved.agentDir, "running");
+  if (current === "stopped") return;
+  await writeAgentState(agentDir, "running");
 }

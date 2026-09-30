@@ -38,7 +38,7 @@ import {
 } from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { agentWorktreePath } from "../agents";
-import { checkWorktreeCleanliness, getWorktreeHead } from "../git-status";
+import { checkWorktreeCleanliness, getCommitsSinceParent, getWorktreeHead } from "../git-status";
 import { SplitPane } from "./split-pane";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { installTerminalCleanup } from "./terminal-cleanup";
@@ -673,8 +673,10 @@ export class DashboardComponent implements Component {
   private channelRefreshTimer: ReturnType<typeof setInterval> | null = null;
   /**
    * Periodic "Git Status" stoplight refresh (SPEC §11.4). Every tick probes
-   * the SELECTED agent's worktree with `git status --porcelain` via
-   * `refreshGitStatus` and writes the answer to `infoPanel.gitCleanliness`.
+   * the SELECTED agent's worktree via `refreshGitStatus` with three git
+   * processes — `status --porcelain`, `rev-parse --short HEAD`, and
+   * `rev-list --count <parent>..HEAD` — and writes the answers to
+   * `infoPanel.gitCleanliness` / `gitHead` / `gitCommitCount`.
    * Driven off a timer (plus a one-shot on selection change) — NOT off
    * render() — for the same reason as `channelRefreshTimer`: a probe inside
    * render() would call requestRender on completion and spin.
@@ -1088,8 +1090,9 @@ export class DashboardComponent implements Component {
     }, 1000);
     // "Git Status" stoplight tick (§11.4). Only does work when an agent is
     // selected (refreshGitStatus returns immediately otherwise). 3s matches
-    // the client-attached check cadence — one `git status` per selected agent
-    // every few seconds is cheap, and selection changes probe immediately.
+    // the client-attached check cadence — three short git processes (status,
+    // rev-parse, rev-list) for the selected agent every few seconds is cheap,
+    // and selection changes probe immediately.
     this.gitStatusTimer = setInterval(() => {
       void this.refreshGitStatus();
     }, 3000);
@@ -1865,6 +1868,7 @@ export class DashboardComponent implements Component {
       // of waiting up to one gitStatusTimer tick.
       this.infoPanel.gitCleanliness = null;
       this.infoPanel.gitHead = null;
+      this.infoPanel.gitCommitCount = null;
       void this.refreshGitStatus();
 
       // Client detection: clear previous timer, check new agent
@@ -2093,20 +2097,26 @@ export class DashboardComponent implements Component {
     this.gitStatusInFlight = true;
     let cleanliness: Awaited<ReturnType<typeof checkWorktreeCleanliness>>;
     let head: string | null;
+    let commitCount: number | null;
     try {
       const worktreePath = agentWorktreePath(agent);
-      [cleanliness, head] = await Promise.all([
+      // Same parent rule as `ib status` / `ib diff`.
+      const parentBranch = agent.meta.manager ? `agent/${agent.meta.manager}` : "main";
+      [cleanliness, head, commitCount] = await Promise.all([
         checkWorktreeCleanliness(worktreePath),
         getWorktreeHead(worktreePath),
+        getCommitsSinceParent(worktreePath, parentBranch),
       ]);
     } finally {
       this.gitStatusInFlight = false;
     }
     if (this.infoPanel.agent?.id !== agent.id ||
         agentWorktreePath(this.infoPanel.agent) !== agentWorktreePath(agent)) return;
-    if (this.infoPanel.gitCleanliness === cleanliness && this.infoPanel.gitHead === head) return;
+    if (this.infoPanel.gitCleanliness === cleanliness && this.infoPanel.gitHead === head &&
+        this.infoPanel.gitCommitCount === commitCount) return;
     this.infoPanel.gitCleanliness = cleanliness;
     this.infoPanel.gitHead = head;
+    this.infoPanel.gitCommitCount = commitCount;
     this.tui?.requestRender();
   }
 

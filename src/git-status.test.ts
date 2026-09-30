@@ -1,5 +1,5 @@
 import { test, expect, describe, afterEach } from "bun:test";
-import { checkWorktreeCleanliness, gitStatusSpawnCtx } from "./git-status";
+import { checkWorktreeCleanliness, getCommitsSinceParent, gitStatusSpawnCtx } from "./git-status";
 import type { SpawnFn, SpawnResult } from "./types";
 
 function streamOf(text: string): ReadableStream<Uint8Array> {
@@ -86,5 +86,47 @@ describe("checkWorktreeCleanliness", () => {
       kill: () => {},
     })) as SpawnFn);
     expect(await checkWorktreeCleanliness("/wt")).toBeNull();
+  });
+});
+
+describe("getCommitsSinceParent", () => {
+  afterEach(() => {
+    gitStatusSpawnCtx.reset();
+  });
+
+  test("counts the commits HEAD has that the parent branch does not", async () => {
+    const { fn, calls } = fakeSpawn(() => ({ stdout: "3\n" }));
+    gitStatusSpawnCtx.set(fn);
+    expect(await getCommitsSinceParent("/wt", "agent/agent-mgr")).toBe(3);
+    expect(calls).toEqual([[
+      "git", "-C", "/wt", "rev-list", "--count", "agent/agent-mgr..HEAD",
+    ]]);
+  });
+
+  test("reports 0 when the agent has no commits of its own", async () => {
+    gitStatusSpawnCtx.set(fakeSpawn(() => ({ stdout: "0\n" })).fn);
+    expect(await getCommitsSinceParent("/wt", "main")).toBe(0);
+  });
+
+  test("returns null for empty output — the shape of the bun test safety stub", async () => {
+    // Every dashboard test reaches this probe through the preload stub (exit 0,
+    // stdout ""); it must read as unknown, never as "0 commits".
+    gitStatusSpawnCtx.set(fakeSpawn(() => ({ stdout: "" })).fn);
+    expect(await getCommitsSinceParent("/wt", "main")).toBeNull();
+  });
+
+  test("returns null when git exits non-zero (parent branch is gone)", async () => {
+    gitStatusSpawnCtx.set(fakeSpawn(() => ({
+      stderr: "fatal: ambiguous argument 'agent/agent-gone..HEAD'",
+      exitCode: 128,
+    })).fn);
+    expect(await getCommitsSinceParent("/wt", "agent/agent-gone")).toBeNull();
+  });
+
+  test("returns null when the spawn itself throws", async () => {
+    gitStatusSpawnCtx.set((() => {
+      throw new Error("ENOENT: no such file or directory");
+    }) as SpawnFn);
+    expect(await getCommitsSinceParent("/gone", "main")).toBeNull();
   });
 });

@@ -67,6 +67,12 @@ export class InfoPanelComponent implements Component {
   gitCleanliness: WorktreeCleanliness = null;
   /** Short HEAD hash, refreshed and cleared alongside gitCleanliness. */
   gitHead: string | null = null;
+  /**
+   * Commits on the worktree's HEAD since its merge base with the parent
+   * agent's branch (or `main` with no parent). Refreshed and cleared alongside
+   * gitCleanliness; shown inside the HEAD parentheses.
+   */
+  gitCommitCount: number | null = null;
   /** The selected repo's coordinator agent, if any — drives the repo-info stoplights. */
   repoCoordinatorAgent: Agent | null = null;
   /** The currently saved default agent type for the selected repo, if any. */
@@ -142,8 +148,16 @@ export class InfoPanelComponent implements Component {
       : this.gitCleanliness === "dirty"
         ? YELLOW
         : DIM_GRAY;
-    const gitHead = this.gitHead ? ` (${this.gitHead})` : "";
+    const commits = this.gitCommitCount === null
+      ? ""
+      : `, ${this.gitCommitCount} commit${this.gitCommitCount === 1 ? "" : "s"}`;
+    const gitHead = this.gitHead ? ` (${this.gitHead}${commits})` : "";
     lines.push(truncateToWidth(`${gitColor}●${RESET} Git Status${gitHead}`, width, ""));
+
+    // Agent type, directly under the stoplights. Legacy agents with no
+    // `agentType` fall back to the `worker` boolean, same as `ib info`.
+    const agentType = agent.meta.agentType ?? (agent.meta.worker ? "worker" : "manager");
+    lines.push(truncateToWidth(`${DIM}Type:${RESET} ${agentType}`, width, ""));
 
     // Keep the explicit sandbox state in the width-safe detail panel rather
     // than the tightly packed sidebar row. A missing legacy block is disabled.

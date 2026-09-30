@@ -109,5 +109,7 @@ tmuxPollerSpawnCtx.setDefault(safeTestSpawnRunner);
 // against a fake test path is still a subprocess launched where none should
 // be — and it keeps firing from late async work after a test tore down. Same
 // backstop: the reset baseline becomes the stub (stdout "" / exit 0 → "clean").
+// The same refresh also runs `git rev-parse` (HEAD hash) and `git rev-list`
+// (commit count) through this context; on the stub both read as null.
 const { gitStatusSpawnCtx } = await import("./src/git-status");
 gitStatusSpawnCtx.setDefault(safeTestSpawnRunner);

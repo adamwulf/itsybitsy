@@ -644,6 +644,38 @@ describe("computeChromeSlice — chrome detection on UNWRAPPED logical lines", (
       for (const row of wrapped) expect(visibleWidth(row)).toBeLessThanOrEqual(60);
     });
 
+    test("slices the newer display-cased footer with right-aligned warnings (real captured sample)", () => {
+      const footer = "  GPT-6.1-Sol high · Context 48% left · weekly 46% left" + " ".repeat(PIN - 80) + "⚠ 5 warnings · f2 to view";
+      const raw = [
+        "• WAITING",
+        "",
+        "  Worked for 1m 56s • 11:08 AM",
+        " ",
+        " ",
+        "› Ask Codex to do anything",
+        " ",
+        footer,
+      ].join("\n");
+      const slice = computeChromeSlice(raw, true);
+      expect(slice.transcriptRaw).toBe("• WAITING\n\n  Worked for 1m 56s • 11:08 AM\n \n ");
+      expect(slice.statusLines).toEqual([footer]);
+    });
+
+    test("slices the draft-in-composer footer shown while a turn runs (real captured sample)", () => {
+      const footer = "  tab to queue message" + " ".repeat(PIN - 40) + "29% context left";
+      const raw = [
+        "• Working (3m 32s • esc to interrupt)",
+        " ",
+        " ",
+        "› [sent by agent muse-build-helper]: not running this one.",
+        " ",
+        footer,
+      ].join("\n");
+      const slice = computeChromeSlice(raw, true);
+      expect(slice.transcriptRaw).toBe("• Working (3m 32s • esc to interrupt)\n \n ");
+      expect(slice.statusLines).toEqual([footer]);
+    });
+
     test("findCodexInputChromeLogical returns null when no › prompt is present", () => {
       const noPrompt = ["output", "more output", codexStatus].join("\n");
       expect(findCodexInputChromeLogical(noPrompt.split("\n"))).toBeNull();

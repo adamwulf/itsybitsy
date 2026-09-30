@@ -413,10 +413,22 @@ function findLastCodexPromptIndex(lines: string[]): number {
   return -1;
 }
 
+/**
+ * Recognise codex's bottom footer line. Three real shapes (captured samples):
+ *   - "gpt-6-astra high · Context 66% left · weekly 46% left" — the status line.
+ *   - "GPT-6.1-Sol high · Context 48% left · weekly 46% left   ⚠ 5 warnings · f2 to view"
+ *     — newer codex display-cases the model name and right-aligns a warnings
+ *     segment, so the model prefix is matched case-insensitively.
+ *   - "tab to queue message      29% context left" — while a turn runs with a
+ *     draft in the composer, a key hint replaces the status line and the context
+ *     gauge moves to the right edge. There is no model name and no "·" here, so
+ *     the right-aligned "<n>% context left" is the anchor.
+ */
 export function isCodexStatusLine(line: string): boolean {
   const trimmed = line.trim();
+  if (/(?:^|\s{2,})\d{1,3}%\s+context left$/i.test(trimmed)) return true;
   if (!trimmed.includes("·")) return false;
-  if (!/^(?:gpt|codex)-[A-Za-z0-9._-]+(?:\s+\S+)?\s+·\s+/.test(trimmed)) return false;
+  if (!/^(?:gpt|codex)-[A-Za-z0-9._-]+(?:\s+\S+)?\s+·\s+/i.test(trimmed)) return false;
   if (/\s·\s+(?:~|\/)/.test(trimmed)) return true;
   return /\bContext\s+\d+%|\b\d+[hm]\b.*\bleft\b|\bweekly\b.*\bleft\b/.test(trimmed);
 }

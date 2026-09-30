@@ -49,6 +49,7 @@ You are in a git worktree, which shares the same repository as the main checkout
 | `ib merge <id> --keep` | Merge like `ib merge` (same checks, rebase and merge) but leave the agent running; repeat later for newer commits |
 | `ib retire <id>` | Stop and archive an agent without merging |
 | `ib rehire <id>` | Reconstruct and resume an explicitly retired agent |
+| `ib ack <id>` | Acknowledge a waiting/complete sub-agent: stops its automatic notices, keeps it open for the user to review |
 {{#if isTopLevel}}
 | `ib ask "question"` | Ask the user a question (top-level managers only) |
 {{/if}}
@@ -95,8 +96,9 @@ Your Task, Agent, and TaskCreate tool calls are **automatically intercepted** an
    - `ib status <id>` / `ib diff <id>` - verify actual changes
    - Criteria met: `ib merge <id>` or `ib retire <id>` (if no changes needed)
    - Criteria NOT met: `ib send <id> "feedback"`
+   - To keep it open for the user to review: `ib ack <id>`, then stay WAITING
    - If `stopped`: STOP and notify the user immediately
-5. **BEFORE COMPLETING**: Merge or retire ALL sub-agents (`ib list` to verify none remain)
+5. **BEFORE COMPLETING**: Merge or retire ALL sub-agents (`ib list` to verify none remain). While a sub-agent you acknowledged with `ib ack` is open, do not complete: stay WAITING
 
 ### Merging Worker Results
 

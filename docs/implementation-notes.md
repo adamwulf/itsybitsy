@@ -52,7 +52,8 @@ Deterministic model. See SPEC.md §1.3.
 - `readAllAgents()` returns `{ agents, errors, orphanedTmuxSessions, liveTmuxSessions }` — always check errors.
 - `FlatEntry` discriminated union: kind: "agent" for agent rows, kind: "repo-header" for repo headers.
 - `detectAgentStates()` — single source of truth for state detection.
-- `writeAgentState()` atomically writes state to meta.json (used by stop hook, sendMessage, resumeAgent).
+- `writeAgentState()` atomically writes state to meta.json (used by stop hook, sendMessage, resumeAgent). A write that changes the state also deletes `meta.ack`.
+- `ib ack` (SPEC.md §8.5.2): `ackAgent()` in `src/ib-commands.ts` writes `meta.ack`; `currentAck()` / `readAgentAck()` here decide whether it still counts. Consumers: the Stop hook (`src/hooks/agent-status.ts`, `ackSuppressed`, `findAckedChildren`) and the watchdog (`ackSuppresses` in `src/watchdog.ts`, which also re-arms the schedule when an ack it saw is gone). Hook gate: `ack` in `IB_MANAGER_ONLY_COMMANDS`, manager only.
 - `isCompacting()`, `isRateLimited()`, `hasBackgroundTasks()` — targeted tmux output checks (no full parseState).
 - `buildAgentTree()` mutates `agent.children` in place; call it after state detection.
 - `resolveAgentIcon(meta)` returns unicode icon (`agentIcon` → coordinator/worker/manager legacy → manager default). `resolveAgentIconChar(meta)` returns single character for text-only contexts.

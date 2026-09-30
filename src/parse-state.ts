@@ -330,11 +330,13 @@ function hasAgyBarePromptBetweenSeparators(input: string): boolean {
  *
  * Priority order (mirrors claude's intent):
  *   1. Active work marker ("Working (... esc to interrupt)") in last 15 lines → running.
- *   2. Completion sentinel ("I HAVE COMPLETED THE GOAL") in last 15 lines (excluding quoted) → complete.
- *   3. Standalone WAITING marker in last 15 lines → waiting.
- *   4. Idle at codex input prompt (a line starting with "›" near the tail AND a status-bar
+ *   2. Queue-message footer ("tab to queue message ...") on the last non-blank line → running.
+ *   3. Completion sentinel ("I HAVE COMPLETED THE GOAL") in last 15 lines (excluding quoted) → complete.
+ *   4. Standalone WAITING marker in last 15 lines → waiting.
+ *   5. Usage-limit message ("hit your usage limit") in last 15 lines → rate_limited.
+ *   6. Idle at codex input prompt (a line starting with "›" near the tail AND a status-bar
  *      line at the very end) → waiting.
- *   5. Default → unknown.
+ *   7. Default → unknown.
  */
 export function parseCodexState(input: string): ParseStateResult {
   if (!input || input.trim() === "") {

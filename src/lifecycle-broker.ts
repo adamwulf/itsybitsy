@@ -43,15 +43,20 @@
  *   - an agent is never its own target (its `manager` field is its own to
  *     write), compared by directory as well as by id;
  *   - the rule gets the verified meta and does not read the file again;
- *   - a merge always lands in `<agentDir>/repo`, never where `meta.worktree`
+ *   - a merge is aimed at `<agentDir>/repo`, never where `meta.worktree`
  *     points, and the request cannot name a directory;
  *   - a rehire is authorized from the archive of the requester's repo only.
  * The target must be in the requester's own repo.
  *
- * Known limitation (SPEC-SANDBOX §4C.7): the rule reads `manager` /
- * `spawned_by` from the TARGET's meta.json, which a SPAWNER can write (it holds
- * a write grant on `.ittybitty/agents`) and which the seal does not cover. A
- * spawner can therefore make itself the manager of any agent in its repo.
+ * Known limitations (SPEC-SANDBOX §4C.7):
+ *   - The rule reads `manager` / `spawned_by` from the TARGET's meta.json, and
+ *     the seal does not cover them. The target itself can write them, and they
+ *     are copied into its archive when it is retired; a spawner can write them
+ *     for any agent in its repo. So an agent can hand itself to any other agent
+ *     in the repo, and a spawner can take any agent. What the broker does NOT
+ *     trust is the REQUESTER's own file.
+ *   - The `<agentDir>/repo` check is check-then-use: the requester can swap the
+ *     directory for a symlink after the check, while the merge runs.
  */
 
 import { randomBytes } from "crypto";
@@ -386,12 +391,14 @@ export async function handleLifecycleRequest(
     if (denied) return brokerFail(denied);
 
     if (op === "merge") {
-      // The merge lands in the requester's own worktree, always. The directory
-      // is fixed by the agent's id — not by the request, and not by
+      // The merge is aimed at the requester's own worktree. The directory is
+      // fixed by the agent's id — not by the request, and not by
       // `meta.worktree`, which the requester can write and the seal does not
       // cover (it would otherwise choose the main checkout as the target).
       // lstat: a symlink there is refused too, or the agent could point it at
-      // the main checkout.
+      // the main checkout. This is a check before use, not a lock: mergeAgent
+      // then uses the same PATH for several seconds, and the requester owns
+      // the parent directory (SPEC-SANDBOX §4C.7, limitation 5).
       const callerWorktree = join(ctx.agentDir, "repo");
       const isDirectory = await lstat(callerWorktree).then((entry) => entry.isDirectory()).catch(() => false);
       if (!isDirectory) {

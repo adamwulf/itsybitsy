@@ -1408,8 +1408,10 @@ export interface ManagerCommandAccessOptions {
   /**
    * `rehire` only: decide from the archive of the caller's OWN repo and nothing
    * else. An active `agents/<id>/meta.json` and other repos are not consulted.
-   * The watchdog broker sets it: a spawner can write an active record, but no
-   * worktree agent can write the archive.
+   * The watchdog broker sets it: a spawner can write an active record at any
+   * time, but no worktree agent can write the archive afterwards. (The archived
+   * meta.json is still a copy of the file the retired agent itself could write
+   * until its teardown, so its `manager` / `spawned_by` are that agent's word.)
    */
   ownArchiveOnly?: boolean;
 }

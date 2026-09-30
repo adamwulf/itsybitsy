@@ -1222,11 +1222,12 @@ broker's. `src/lifecycle-broker.ts` adds:
   5. *A rehire is decided from the archive of the requester's repo only*
      (`opts.ownArchiveOnly`). An active `agents/<id>/meta.json` is ignored: a
      spawner could write one.
-- **Merge** — the merge always lands in `<agentDir>/repo`, the requester's own
+- **Merge** — the merge is aimed at `<agentDir>/repo`, the requester's own
   worktree. The directory is fixed by the agent's id. It is not taken from the
   request, and not from `meta.worktree`, which is unsealed (the requester could
-  otherwise choose the main checkout). It must be a real directory; a symlink
-  there is refused. The same path is passed as
+  otherwise choose the main checkout). It must be a real directory when the
+  request is handled; a symlink there is refused. That check is made once,
+  before use (limitation 5). The same path is passed as
   `MergeAgentOptions._brokeredCaller.cwd`, which stands in for `process.cwd()`
   inside `mergeAgent` (the own-worktree check and the detached HEAD
   `main`/`master` lookup). The watchdog's own cwd and tmux environment say
@@ -1287,22 +1288,35 @@ seal check, a `-v` target, an active record planted over an archive, a symlink
 in place of its worktree) — each against files on disk.
 
 **Known limitations.**
-1. The authorization rule reads `manager` / `spawned_by` from the TARGET's
-   `meta.json`. A spawner holds a write grant on `<repo>/.ittybitty/agents`, and
-   the seal covers only `agentType`, `canSpawnChildren`, `paths` and `sandbox`,
-   so a spawner can write itself in as the manager of any agent in its repo and
-   then retire it, or merge its branch into its own. This is the same grant as
-   limitation 1 of §4C.6 and is closed by the same follow-up (or by sealing the
-   two fields). A retirement is recoverable with `ib rehire`; a closing merge is
-   not rehirable, but its commits are on the requester's branch. A non-spawner
-   cannot do this: its `REPOAGENTS` grant is read-only, so the only
-   `meta.json` it can write is its own, and the broker trusts no unsealed field
-   of that file (above). A brokered rehire is authorized from the ARCHIVED
-   `meta.json` only, which no WORKTREE agent can write. A `worktree:false`
-   agent can: its `WORKTREE` is the repo root, so `<repo>/.ittybitty/archive`
-   is inside its write grant. Such an agent is never a broker requester (it has
-   no per-agent watchdog), but an archive it rewrote is what a later rehire —
-   brokered or direct — reads.
+1. **The rule trusts the TARGET's word about who manages it.** It reads
+   `manager` / `spawned_by` from the target's `meta.json`, and the seal covers
+   only `agentType`, `canSpawnChildren`, `paths` and `sandbox`. Two kinds of
+   agent can write those fields:
+   - *The target itself* — every agent can write its own `meta.json`. So an
+     agent can hand itself to ANY other agent in the repo. The rule does not
+     ask whether the requester is a spawner, so two cooperating non-spawners
+     are enough: X writes `manager: Y`, and Y's watchdog will retire or merge
+     X. A merge runs the repository's git hooks outside the sandbox
+     (limitation 2) with no real manager in the sequence. One agent alone
+     cannot do this: the broker trusts no unsealed field of the REQUESTER's
+     own file, and an agent is never its own target (above).
+   - *A spawner* — it holds a write grant on `<repo>/.ittybitty/agents`, so it
+     can write itself in as the manager of any agent in its repo and then
+     retire it, or merge its branch into its own. This is the same grant as
+     limitation 1 of §4C.6.
+
+   A rehire has the same input one step removed: it is authorized from the
+   ARCHIVED `meta.json` only, and no worktree agent can write the archive — but
+   the archive holds a copy of the file the retired agent could write until its
+   teardown. A `worktree:false` agent can also write the archive directly (its
+   `WORKTREE` is the repo root); it is never a broker requester (no per-agent
+   watchdog), but an archive it rewrote is what a later rehire, brokered or
+   direct, reads.
+   A retirement is recoverable with `ib rehire`; a closing merge is not
+   rehirable, but its commits are on the requester's branch. Closing this needs
+   a decision: seal `manager` / `spawned_by`, or have the broker serve only
+   requesters whose SEALED `canSpawnChildren` is true (which closes the
+   non-spawner case and leaves the spawner case).
 2. The watchdog runs git in a repository whose git dir the agent can write
    (`GITDIR`), outside the sandbox. This is not new — a brokered spawn already
    runs `git worktree add` there, and every unsandboxed `ib` (the TUI, the
@@ -1324,6 +1338,15 @@ in place of its worktree) — each against files on disk.
 4. `ib merge-check <child>` is not brokered. From a sandboxed worktree manager
    its `git -C <main repo> show-ref` cannot run, so it reports `Main branch not
    found` (from the code; not run).
+5. The merge-directory check is check-then-use. `<agentDir>/repo` is tested
+   once with `lstat`; `mergeAgent` then uses the same path in several
+   `git -C` calls over some seconds, and `AGENTDIR` is the requester's to
+   write. A requester that swaps the directory for a symlink to the main
+   checkout after the check gets the `checkout` and the `--ff-only` merge run
+   there, and so changes files its profile does not let it write (from the
+   code; the race was not run). There is no atomic fix by path. It adds little
+   to limitation 2, under which the same requester's git hooks already run
+   outside the sandbox during that merge.
 
 ## 5. Shipped components
 

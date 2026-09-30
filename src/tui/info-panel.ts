@@ -145,6 +145,11 @@ export class InfoPanelComponent implements Component {
     const gitHead = this.gitHead ? ` (${this.gitHead})` : "";
     lines.push(truncateToWidth(`${gitColor}●${RESET} Git Status${gitHead}`, width, ""));
 
+    // Agent type, directly under the stoplights. Legacy agents with no
+    // `agentType` fall back to the `worker` boolean, same as `ib info`.
+    const agentType = agent.meta.agentType ?? (agent.meta.worker ? "worker" : "manager");
+    lines.push(truncateToWidth(`${DIM}Type:${RESET} ${agentType}`, width, ""));
+
     // Keep the explicit sandbox state in the width-safe detail panel rather
     // than the tightly packed sidebar row. A missing legacy block is disabled.
     const sandboxState = kernelSandboxStatus(agent.meta);

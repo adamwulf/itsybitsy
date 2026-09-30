@@ -1495,8 +1495,9 @@ The info panel displays details for the currently selected item. It is read-only
    - `● Watchdog` — green if `watchdog_pid` from `meta.json` refers to a running process, red otherwise
    - `● Tmux` — green if the agent's `tmux_session` is among the live tmux sessions, red otherwise
    - `● Git Status (<short HEAD hash>)` — appends the current HEAD of the selected agent’s worktree, refreshed alongside the status; omits the parentheses when HEAD is unavailable (including an unborn branch). Green if the agent's worktree has no uncommitted work, yellow if it does. "Uncommitted work" is any line of `git status --porcelain` (staged, unstaged, or untracked) — the same rule the `ib new-agent` dirty-worktree gate applies. Grey while unknown: not probed yet, worktree missing (archived agent), or not a git directory. The dashboard probes the SELECTED agent's worktree only, once on selection change and then every ~3s, with `--no-optional-locks` so the probe never takes `index.lock` from under the agent's own git commands. Not shown on the repo header's coordinator stoplights.
-2. **Model**: The agent's model name (e.g., `opus`, `sonnet`)
-3. **Summary/Prompt**: The agent's summary (if available) or the first few lines of the prompt, wrapped to sidebar width
+2. **Type**: `Type: <agent type>`, directly below the stoplights. Shows `meta.agentType`; a legacy agent without it shows `worker` when `meta.worker` is true and `manager` otherwise — the same fallback as `ib info`.
+3. **Model**: The agent's model name (e.g., `opus`, `sonnet`)
+4. **Summary/Prompt**: The agent's summary (if available) or the first few lines of the prompt, wrapped to sidebar width
 
 **When a repo header is selected**, the info panel shows:
 

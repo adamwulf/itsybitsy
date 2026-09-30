@@ -70,13 +70,14 @@ describe("InfoPanelComponent", () => {
       return { panel, gitLine };
     }
 
-    test("sits directly below the Tmux stoplight, above Sandbox", () => {
+    test("sits directly below the Tmux stoplight, above Type and Sandbox", () => {
       const { panel } = agentPanel();
       const stripped = panel.render(60).map(stripAnsi);
       const tmuxIdx = stripped.findIndex((l) => l === "● Tmux");
       expect(tmuxIdx).toBeGreaterThanOrEqual(0);
       expect(stripped[tmuxIdx + 1]).toBe("● Git Status");
-      expect(stripped[tmuxIdx + 2]).toStartWith("Sandbox:");
+      expect(stripped[tmuxIdx + 2]).toStartWith("Type:");
+      expect(stripped[tmuxIdx + 3]).toStartWith("Sandbox:");
     });
 
     test("is green when the worktree is clean", () => {
@@ -113,6 +114,28 @@ describe("InfoPanelComponent", () => {
       const text = panel.render(60).map(stripAnsi).join("\n");
       expect(text).toContain("Coord Tmux");
       expect(text).not.toContain("Git Status");
+    });
+  });
+
+  describe("Type row", () => {
+    function typeLine(mutate: (agent: ReturnType<typeof makeAgent>) => void): string {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 10;
+      const agent = makeAgent({ id: "agent-type" });
+      mutate(agent);
+      panel.agent = agent;
+      const line = panel.render(60).map(stripAnsi).find((l) => l.startsWith("Type:"));
+      expect(line).toBeDefined();
+      return line!;
+    }
+
+    test("shows the agent's type from meta.agentType", () => {
+      expect(typeLine((a) => { a.meta.agentType = "researcher"; })).toBe("Type: researcher");
+    });
+
+    test("falls back to the worker flag for a legacy agent with no agentType", () => {
+      expect(typeLine((a) => { delete a.meta.agentType; a.meta.worker = true; })).toBe("Type: worker");
+      expect(typeLine((a) => { delete a.meta.agentType; a.meta.worker = false; })).toBe("Type: manager");
     });
   });
 
@@ -154,8 +177,8 @@ describe("InfoPanelComponent", () => {
 
   test("renders model name from agent meta", () => {
     const panel = new InfoPanelComponent();
-    // 4 stoplights + Sandbox + Paths + Model + "Summary:" header + 1 body line
-    panel.displayHeight = 9;
+    // 4 stoplights + Type + Sandbox + Paths + Model + "Summary:" header + 1 body line
+    panel.displayHeight = 10;
     const agent = makeAgent({ id: "agent-xyz" });
     agent.meta.model = "sonnet";
     agent.meta.prompt = "build a widget";

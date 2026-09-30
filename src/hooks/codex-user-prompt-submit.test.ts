@@ -152,8 +152,8 @@ describe("LIVE: codex UserPromptSubmit on the installed codex", () => {
     const worktree = join(agentDir, "repo");
     const firedLog = join(root, "ups-fired.log");
     const payloadLog = join(root, "ups-payloads.log");
-    const sh = (cmd: string[]) => {
-      const out = Bun.spawnSync({ cmd, stdout: "pipe", stderr: "pipe" });
+    const sh = (cmd: string[], cwd?: string) => {
+      const out = Bun.spawnSync({ cmd, cwd, stdout: "pipe", stderr: "pipe" });
       return { exitCode: out.exitCode, stdout: out.stdout.toString(), stderr: out.stderr.toString() };
     };
     const pane = () => sh([tmux, "capture-pane", "-p", "-J", "-t", session, "-S", "-200"]).stdout;
@@ -182,7 +182,7 @@ describe("LIVE: codex UserPromptSubmit on the installed codex", () => {
 
     try {
       await mkdir(worktree, { recursive: true });
-      sh(["git", "-C", worktree, "init", "-q"]);
+      sh(["git", "init", "-q"], worktree);
       await writeFile(join(agentDir, "meta.json"), JSON.stringify({
         id: agentId, worktree: true, manager: "agent-livemgr1", model: "codex:default", state: "waiting",
       }));

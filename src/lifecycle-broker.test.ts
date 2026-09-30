@@ -4,7 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import type { Agent, AgentMeta } from "./agents";
 import { resetUserHome, setUserHome } from "./home";
-import type { IbCommandResult, NewAgentOptions, ResolvedCallerContext } from "./ib-commands";
+import type { IbCommandResult, MergeAgentOptions, NewAgentOptions, ResolvedCallerContext } from "./ib-commands";
 import {
   LIFECYCLE_CLIENT_TIMEOUT_MS,
   LIFECYCLE_OPS,
@@ -70,6 +70,7 @@ describe("lifecycle broker", () => {
   /** Server deps that record every command the watchdog would run. */
   function server(over: Partial<LifecycleServerDeps> = {}, spawnOver: Partial<SpawnServerDeps> = {}) {
     const retired: Agent[] = [];
+    const merged: Array<{ agent: Agent; targetDir: string; options: MergeAgentOptions }> = [];
     const spawned: Array<{ prompt: string; opts: NewAgentOptions }> = [];
     const deps: SpawnServerDeps = {
       readMeta: async () => ({ meta: managerMeta() }),
@@ -84,11 +85,15 @@ describe("lifecycle broker", () => {
           retired.push(agent);
           return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
         },
+        merge: async (agent, targetDir, options) => {
+          merged.push({ agent, targetDir, options });
+          return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id} (merged)`, stderr: "" };
+        },
         ...over,
       },
       ...spawnOver,
     };
-    return { deps, retired, spawned };
+    return { deps, retired, merged, spawned };
   }
 
   // ── request parsing (untrusted input) ──────────────────────────────────────
@@ -98,6 +103,17 @@ describe("lifecycle broker", () => {
       expect(parseLifecycleRequest(JSON.stringify(retireRequest(ID_A)), ID_A)).toEqual({
         ok: true,
         request: { v: 1, id: ID_A, op: "retire", target: CHILD_ID },
+      });
+    });
+
+    test("accepts keep on a merge, and drops a false one", () => {
+      expect(parseLifecycleRequest(JSON.stringify(retireRequest(ID_A, { op: "merge", keep: true })), ID_A)).toEqual({
+        ok: true,
+        request: { v: 1, id: ID_A, op: "merge", target: CHILD_ID, keep: true },
+      });
+      expect(parseLifecycleRequest(JSON.stringify(retireRequest(ID_A, { op: "merge", keep: false })), ID_A)).toEqual({
+        ok: true,
+        request: { v: 1, id: ID_A, op: "merge", target: CHILD_ID },
       });
     });
 
@@ -124,6 +140,8 @@ describe("lifecycle broker", () => {
       ["a non-string target", JSON.stringify(retireRequest(ID_A, { target: 5 }))],
       ["a path as the target", JSON.stringify(retireRequest(ID_A, { target: "../other" }))],
       ["a target with shell text", JSON.stringify(retireRequest(ID_A, { target: "kid; ib nuke" }))],
+      ["keep on a retire", JSON.stringify(retireRequest(ID_A, { keep: true }))],
+      ["a non-boolean keep", JSON.stringify(retireRequest(ID_A, { op: "merge", keep: "yes" }))],
     ])("rejects %s", (_label, text) => {
       expect(parseLifecycleRequest(text, ID_A).ok).toBe(false);
     });
@@ -169,11 +187,44 @@ describe("lifecycle broker", () => {
     // does not know. Every brokered op must therefore be one the hook gates.
     test.each([...LIFECYCLE_OPS])("'%s' is gated: a stranger is refused", async (op) => {
       await writeAgent(CHILD_ID, { manager: "someone-else" });
-      const { deps, retired } = server();
+      const { deps, retired, merged } = server();
       await queue(ID_A, retireRequest(ID_A, { op }));
       await processSpawnRequests(MANAGER_ID, repo, deps);
       expect(retired).toEqual([]);
+      expect(merged).toEqual([]);
       expect((await result(ID_A)).stderr).toContain("Access denied");
+    });
+
+    test("merges a child into the requester's own worktree, as an agent", async () => {
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      const { deps, merged, retired } = server();
+      await queue(ID_A, retireRequest(ID_A, { op: "merge" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+
+      const worktree = join(agentDir, "repo");
+      expect(merged).toHaveLength(1);
+      expect(merged[0]!.agent.id).toBe(CHILD_ID);
+      expect(merged[0]!.targetDir).toBe(worktree);
+      expect(merged[0]!.options).toEqual({ keep: false, _brokeredCaller: { cwd: worktree } });
+      expect(retired).toEqual([]);
+      expect((await result(ID_A)).stdout).toBe(`Closed agent: ${CHILD_ID} (merged)`);
+    });
+
+    test("merge --keep is carried through", async () => {
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      const { deps, merged } = server();
+      await queue(ID_A, retireRequest(ID_A, { op: "merge", keep: true }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(merged[0]!.options.keep).toBe(true);
+    });
+
+    test("a worktree:false requester merges into the repo root", async () => {
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      const { deps, merged } = server({}, { readMeta: async () => ({ meta: managerMeta({ worktree: false }) }) });
+      await queue(ID_A, retireRequest(ID_A, { op: "merge" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(merged[0]!.targetDir).toBe(repo);
+      expect(merged[0]!.options._brokeredCaller).toEqual({ cwd: repo });
     });
 
     test("the spawner of the target may act on it", async () => {
@@ -326,6 +377,28 @@ describe("lifecycle broker", () => {
       expect(out.ok).toBe(false);
       expect(out.stderr).toContain(`the watchdog for '${MANAGER_ID}' predates sandboxed 'ib retire'`);
       expect(out.stderr).toContain("Restart this agent");
+    });
+
+    test("a merge request carries keep only when --keep was given", async () => {
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      const { deps } = server();
+      const seen: Array<Record<string, unknown>> = [];
+      const capturing = clientDeps({
+        sleep: async () => {
+          for (const name of await readdir(spawnRequestDir(agentDir))) {
+            seen.push(await Bun.file(join(spawnRequestDir(agentDir), name)).json());
+          }
+          await processSpawnRequests(MANAGER_ID, repo, deps);
+        },
+      });
+      const kept = await requestLifecycleViaWatchdog({ op: "merge", target: CHILD_ID, keep: true }, capturing);
+      const closed = await requestLifecycleViaWatchdog({ op: "merge", target: CHILD_ID }, capturing);
+      expect(kept.ok).toBe(true);
+      expect(closed.ok).toBe(true);
+      expect(seen.map(({ op, target, keep }) => ({ op, target, keep }))).toEqual([
+        { op: "merge", target: CHILD_ID, keep: true },
+        { op: "merge", target: CHILD_ID, keep: undefined },
+      ]);
     });
 
     test("a shell that is not inside an agent gets a clear error", async () => {

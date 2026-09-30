@@ -1,12 +1,13 @@
 /**
- * Watchdog lifecycle broker — how a SANDBOXED agent retires a child agent.
+ * Watchdog lifecycle broker — how a SANDBOXED agent retires or merges a child
+ * agent.
  *
  * A sandboxed manager cannot do this work itself. Its profile grants its own
  * agent dir, its worktree, the repo's git dir and `<repo>/.ittybitty/agents`,
  * but NOT the main repo root or `<repo>/.ittybitty/archive`. The lifecycle code
  * runs `git -C <main repo> ...` (which dies with `Unable to read current working
  * directory: Operation not permitted`) and moves the agent into the archive, so
- * a direct `ib retire` fails inside the sandbox.
+ * a direct `ib retire` or `ib merge` fails inside the sandbox.
  *
  * The answer is the one `ib new-agent` already uses (spawn-broker.ts): the
  * agent's WATCHDOG runs unsandboxed, so the sandboxed command hands it the
@@ -24,7 +25,8 @@
  * PreToolUse hook applies to a direct command — `checkIbCommandAccess`: only the
  * target's manager or spawner (or the repo's coordinator) may act on it. The
  * hook alone is not enough here, because a sandboxed agent can write a request
- * file without running `ib`. The target must be in the caller's own repo.
+ * file without running `ib`. The target must be in the caller's own repo, and a
+ * merge lands in the caller's own worktree (the request cannot name a directory).
  *
  * Known limitation (SPEC-SANDBOX §4C.6): that rule reads `manager` /
  * `spawned_by` from the TARGET's meta.json, which a spawner can write (it holds
@@ -37,9 +39,11 @@ import { basename, join, resolve } from "path";
 import { readAllAgents, type Agent } from "./agents";
 import {
   hasLiveWatchdog,
+  mergeAgent,
   resolveCallerAgentContext,
   retireAgent,
   type IbCommandResult,
+  type MergeAgentOptions,
   type ResolvedCallerContext,
 } from "./ib-commands";
 import { listRepos, repoDisplayName } from "./registry";
@@ -54,7 +58,7 @@ import {
 import { isValidAgentId } from "./validation";
 
 /** The commands a sandboxed agent hands to its watchdog. */
-export const LIFECYCLE_OPS = ["retire"] as const;
+export const LIFECYCLE_OPS = ["retire", "merge"] as const;
 export type LifecycleOp = (typeof LIFECYCLE_OPS)[number];
 
 /**
@@ -65,17 +69,21 @@ export type LifecycleOp = (typeof LIFECYCLE_OPS)[number];
  */
 export const LIFECYCLE_CLIENT_TIMEOUT_MS = 100_000;
 
-const REQUEST_FIELDS = new Set(["v", "id", "op", "target"]);
+const REQUEST_FIELDS = new Set(["v", "id", "op", "target", "keep"]);
 
 export interface LifecycleRequest {
   v: 1;
   id: string;
   op: LifecycleOp;
   target: string;
+  /** `ib merge --keep`; valid for `merge` only. */
+  keep?: boolean;
 }
 
 /** What the CLI asks for; the request id is added by the client. */
-export type LifecycleCommand = { op: "retire"; target: string };
+export type LifecycleCommand =
+  | { op: "retire"; target: string }
+  | { op: "merge"; target: string; keep?: boolean };
 
 type ParsedLifecycleRequest = { ok: true; request: LifecycleRequest } | { ok: false; error: string };
 
@@ -103,7 +111,19 @@ export function parseLifecycleRequest(text: string, expectedId: string): ParsedL
   if (typeof obj.target !== "string" || !isValidAgentId(obj.target)) {
     return { ok: false, error: "lifecycle request has an invalid target" };
   }
-  return { ok: true, request: { v: 1, id: expectedId, op: obj.op as LifecycleOp, target: obj.target } };
+  if (obj.keep !== undefined && (obj.op !== "merge" || typeof obj.keep !== "boolean")) {
+    return { ok: false, error: "lifecycle request has an invalid keep" };
+  }
+  return {
+    ok: true,
+    request: {
+      v: 1,
+      id: expectedId,
+      op: obj.op as LifecycleOp,
+      target: obj.target,
+      ...(obj.keep === true ? { keep: true } : {}),
+    },
+  };
 }
 
 // ── Client (runs inside the sandbox) ─────────────────────────────────────────
@@ -145,7 +165,13 @@ export async function requestLifecycleViaWatchdog(
 
   // Field order matters for one case: a watchdog that predates this broker
   // parses every request as a spawn and names the first field it does not know.
-  const request: LifecycleRequest = { v: 1, id: randomBytes(16).toString("hex"), op, target };
+  const request: LifecycleRequest = {
+    v: 1,
+    id: randomBytes(16).toString("hex"),
+    op,
+    target,
+    ...(command.op === "merge" && command.keep ? { keep: true } : {}),
+  };
   const result = await submitWatchdogRequest(
     caller.agentDir,
     callerId,
@@ -187,6 +213,7 @@ export interface LifecycleServerDeps {
   authorize?: (op: LifecycleOp, targetId: string, callerId: string, agentsDir: string) => Promise<string | null>;
   findAgent?: (repoPath: string, agentId: string) => Promise<Agent | null>;
   retire?: (agent: Agent) => Promise<IbCommandResult>;
+  merge?: (agent: Agent, targetDir: string, options: MergeAgentOptions) => Promise<IbCommandResult>;
 }
 
 /**
@@ -223,7 +250,8 @@ export async function handleLifecycleRequest(
 ): Promise<IbCommandResult> {
   const parsed = parseLifecycleRequest(ctx.text, ctx.id);
   if (!parsed.ok) return brokerFail(`Error: ${parsed.error}`);
-  const { op, target } = parsed.request;
+  const request = parsed.request;
+  const { op, target } = request;
 
   // Identity comes from the agent's own sealed record, never from the request.
   const requester = await verifyBrokerRequester(ctx.agentId, ctx.repoPath, ctx.agentDir, op, deps);
@@ -240,6 +268,15 @@ export async function handleLifecycleRequest(
       return brokerFail(
         `Error: agent '${target}' is not in the repository of '${ctx.agentId}'; a sandboxed agent can ${op} only agents in its own repo`,
       );
+    }
+    if (op === "merge") {
+      // The merge lands where the requester is: its worktree, or the repo root
+      // for a worktree:false agent. Never a directory named by the request.
+      const callerCwd = requester.meta.worktree === false ? ctx.repoPath : join(ctx.agentDir, "repo");
+      return await (seams.merge ?? mergeAgent)(agent, callerCwd, {
+        keep: request.keep === true,
+        _brokeredCaller: { cwd: callerCwd },
+      });
     }
     return await (seams.retire ?? retireAgent)(agent);
   } catch (err) {

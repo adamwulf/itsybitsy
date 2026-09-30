@@ -2145,6 +2145,15 @@ export async function main() {
       if (parsedMerge.unknown.length > 0) {
         console.error(`Warning: unknown arguments ignored: ${parsedMerge.unknown.join(" ")}`);
       }
+      // A SANDBOXED process cannot merge an agent itself (every git call on the
+      // main repo root fails, and the close cannot write the archive), so its
+      // own — unsandboxed — watchdog does it and merges into this agent's
+      // worktree. Null when not sandboxed. See lifecycle-broker.ts.
+      {
+        const { routeLifecycleThroughWatchdog } = await import("./lifecycle-broker");
+        const brokered = await routeLifecycleThroughWatchdog({ op: "merge", target: agent.id, keep: parsedMerge.keep });
+        if (brokered) await printAndExit(brokered);
+      }
       const resolved = resolveMergeTargetDir(agent, process.cwd());
       if (!resolved.ok) {
         console.error(resolved.error);

@@ -1116,9 +1116,9 @@ and `--model` were refused, and both queue directories were left empty.
    it can write ANOTHER agent's request directory in the same repo and so ask
    that agent's watchdog to spawn as it. Removing that grant (and the
    spawner-only `PARENTCLAUDE`, `REPOID` and tmux-socket grants) for spawners is
-   the follow-up that turns the broker from a convenience into a boundary; the
-   other lifecycle commands (merge, rehire) still need those grants today.
-   Retire goes through the broker (§4C.7).
+   the follow-up that turns the broker from a convenience into a boundary;
+   rehire still needs those grants today. Retire and merge go through the
+   broker (§4C.7).
 2. `worktree:false` agents resolve as callers by process ancestry
    (`ps` must work inside the sandbox); if it does not, `ib new-agent` reports
    the verification error instead of spawning.
@@ -1139,6 +1139,9 @@ fails with exactly that text, and the same `update-ref` run in the child's
 worktree passes. The teardown that follows has the same problem
 (`git -C <main repo> worktree remove` / `branch -D`) and then moves the agent
 into `<repo>/.ittybitty/archive`, which no worktree agent's profile grants.
+`ib merge <child>` fails the same way, earlier and with a misleading message:
+its `git -C <main repo> show-ref` cannot run, so it reports `Branch
+'agent/<id>' does not exist`.
 Granting the repo root and the archive to every spawner would widen the sandbox
 for all managers, so the command leaves the sandbox instead.
 
@@ -1147,11 +1150,13 @@ request to the caller's own unsandboxed watchdog and waits. Queue, file names,
 atomic writes, at-most-once handling, result clipping and pruning are the spawn
 broker's. `src/lifecycle-broker.ts` adds:
 
-- **Request** — `{v:1, id, op, target}`, `op` = `retire`. A request that has an
-  `op` field is a lifecycle request; one without is a spawn. `target` must be a
-  plain agent id (it becomes a path segment). Any other field is rejected.
-- **Client** — `routeLifecycleThroughWatchdog`, called from the `retire` case in
-  `src/index.ts` after the target is resolved. It returns null when the process
+- **Request** — `{v:1, id, op, target, keep?}`, `op` = `retire` | `merge`. A
+  request that has an `op` field is a lifecycle request; one without is a spawn.
+  `target` must be a plain agent id (it becomes a path segment). `keep` (`ib
+  merge --keep`) is accepted for `merge` only. Any other field is rejected — in
+  particular there is no way to name a directory.
+- **Client** — `routeLifecycleThroughWatchdog`, called from the `retire` and
+  `merge` cases in `src/index.ts` after the target is resolved. It returns null when the process
   is not sandboxed (`isSandboxedProcess()`), and the command then runs directly
   as before. Otherwise it identifies the caller, fails at once when the watchdog
   has no fresh heartbeat, writes the request and waits at most **100 seconds**
@@ -1169,7 +1174,15 @@ broker's. `src/lifecycle-broker.ts` adds:
   a request file without running `ib`. The target is then resolved by exact id
   inside the requester's OWN repo (a sandboxed agent manages agents only in its
   repo, matching the `--repo` refusal for spawns) and the normal `retireAgent()`
-  runs.
+  or `mergeAgent()` runs.
+- **Merge** — the merge lands where the requester is: its own worktree, or the
+  repo root for a `worktree:false` agent. The watchdog derives that directory
+  from the requester's verified meta and passes it both as the target directory
+  and as `MergeAgentOptions._brokeredCaller.cwd`, which stands in for
+  `process.cwd()` inside `mergeAgent` (the own-worktree check and the detached
+  HEAD `main`/`master` lookup). The watchdog's own cwd and tmux environment say
+  nothing about the requester, so a brokered merge is always an agent merge
+  (`--ff-only`, SPEC.md §3.4) without the `isRunningAsAgent` probe.
 - **Old watchdogs** parse every request as a spawn and answer `unsupported
   field 'op'`; the client turns that into "restart this agent so its watchdog
   picks up the feature".
@@ -1184,20 +1197,31 @@ binary failed at once with no fresh heartbeat; a target managed by another agent
 was refused by the server; and the caller's own child was retired in under a
 second, leaving `retirement.json`, `worktree.patch`, the untracked file and the
 retained ref in place, the branch deleted and both queue directories empty.
+For merge, under the same profile: the previous binary failed with `Branch ...
+does not exist`; the new binary was refused for another agent's child; `merge
+--keep` fast-forwarded the manager's branch and left the child in place; and a
+closing merge fast-forwarded the manager's branch (no merge commit), archived
+the child and deleted its branch, with the main checkout untouched.
 
 **Known limitations.**
 1. The authorization rule reads `manager` / `spawned_by` from the TARGET's
    `meta.json`. A spawner holds a write grant on `<repo>/.ittybitty/agents`, and
    the seal covers only `agentType`, `canSpawnChildren`, `paths` and `sandbox`,
    so a spawner can write itself in as the manager of any agent in its repo and
-   then retire it. This is the same grant as limitation 1 of §4C.6 and is closed
-   by the same follow-up (or by sealing the two fields). A retirement is
-   recoverable with `ib rehire`. A non-spawner cannot do this: its
-   `REPOAGENTS` grant is read-only.
+   then retire it, or merge its branch into its own. This is the same grant as
+   limitation 1 of §4C.6 and is closed by the same follow-up (or by sealing the
+   two fields). A retirement is recoverable with `ib rehire`; a closing merge is
+   not rehirable, but its commits are on the requester's branch. A non-spawner
+   cannot do this: its `REPOAGENTS` grant is read-only.
 2. The watchdog runs git in a repository whose git dir the agent can write
    (`GITDIR`), outside the sandbox. This is not new — a brokered spawn already
-   runs `git worktree add` there — and a spawner also holds the tmux socket
-   (§4C.3), but each brokered command adds git calls to that surface.
+   runs `git worktree add` there, and every unsandboxed `ib` (the TUI, the
+   user) already runs git in that repository — but each brokered command adds
+   git calls to that surface. A brokered merge runs `rebase`, `checkout` and
+   `merge`, which fire the repository's git hooks and read its git config. A
+   non-spawner whose manager merges it can therefore have code it placed in the
+   git dir run outside the sandbox. Narrowing what an agent may write under
+   `GITDIR` is the fix and is out of scope here.
 
 ## 5. Shipped components
 

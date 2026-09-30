@@ -10,7 +10,7 @@ import { logAgent } from "../agent-lifecycle";
 import { parseState } from "../parse-state";
 import { captureTmuxOutput } from "../tmux-poller";
 import { isValidAgentId, isValidTmuxSession } from "../validation";
-import { writeAgentState, hasBackgroundTasks, isRecentlyCreated } from "../agents";
+import { writeAgentState, hasBackgroundTasks, isRecentlyCreated, currentAck } from "../agents";
 import type { MetaState } from "../agents";
 import { WATCHDOG_SENTINEL } from "../watchdog";
 import { resolveBoundHookAgent } from "./agent-context";
@@ -164,6 +164,7 @@ export async function processStopHook(
     const meta = await readMeta(agentDir);
 
     if (meta?.manager && await isManagerActive(agentsDir, meta.manager)) {
+      if (currentAck(meta)) return await ackSuppressed(agentDir, state, meta.manager);
       return {
         state,
         action: "notify_manager",
@@ -180,10 +181,15 @@ export async function processStopHook(
     if (unfinishedChildren.length > 0) {
       const childCount = unfinishedChildren.length;
       const childList = unfinishedChildren.join(", ");
+      // Children this agent acknowledged with `ib ack` are open on purpose
+      // (kept for human review), so tell it to wait for them, not complete.
+      const acked = await findAckedChildren(agentsDir, agentId, unfinishedChildren);
+      const ackedNote = acked.length === 0 ? "" :
+        ` You acknowledged ${acked.join(", ")} with 'ib ack' to keep ${acked.length === 1 ? "it" : "them"} open for human review, so you cannot complete while ${acked.length === 1 ? "it is" : "they are"} open: end your turn with WAITING instead.`;
       return {
         state,
         action: "remind_children",
-        message: `You have ${childCount} unfinished sub-agent(s) that need attention: ${childList}. Before you can complete, you must merge or retire each sub-agent using 'ib merge <id>' or 'ib retire <id>'. Use 'ib list' to check their status, 'ib look <id>' to see their output, 'ib status <id>' for their commits, and 'ib diff <id>' to review their changes.`,
+        message: `You have ${childCount} unfinished sub-agent(s) that need attention: ${childList}. Before you can complete, you must merge or retire each sub-agent using 'ib merge <id>' or 'ib retire <id>'.${ackedNote} Use 'ib list' to check their status, 'ib look <id>' to see their output, 'ib status <id>' for their commits, and 'ib diff <id>' to review their changes.`,
       };
     }
 
@@ -194,6 +200,9 @@ export async function processStopHook(
     const meta = await readMeta(agentDir);
 
     if (meta?.manager && await isManagerActive(agentsDir, meta.manager)) {
+      // The manager acknowledged this waiting state with `ib ack`. The write
+      // above kept the ack only because the state did not change.
+      if (currentAck(meta)) return await ackSuppressed(agentDir, state, meta.manager);
       // Suppress upward notification if the agent still has work in flight
       // (background shell or an active direct child). See SPEC.md §8.5.1.
       // `waiting` / `complete` children do NOT count as active — see
@@ -271,6 +280,25 @@ async function handleNudge(
     message:
       "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line.",
   };
+}
+
+/**
+ * The manager acknowledged this state with `ib ack` (SPEC §8.5.2), so the
+ * notice it would get is dropped. Logged so the silence can be explained.
+ */
+async function ackSuppressed(agentDir: string, state: MetaState, managerId: string): Promise<StopHookResult> {
+  await logAgent(agentDir, `[hook] ${state} notice to ${managerId} suppressed: acknowledged with ib ack`);
+  return { state, action: "none" };
+}
+
+/** The ids in `childIds` whose manager `parentId` acknowledged them with `ib ack`. */
+async function findAckedChildren(agentsDir: string, parentId: string, childIds: string[]): Promise<string[]> {
+  const acked: string[] = [];
+  for (const id of childIds) {
+    const meta = await readMeta(join(agentsDir, id));
+    if (meta?.manager === parentId && currentAck(meta)) acked.push(id);
+  }
+  return acked;
 }
 
 async function readMeta(

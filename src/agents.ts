@@ -375,12 +375,65 @@ export async function mutateAgentMeta(
  * concurrent codex SessionStart `writeAgentState("running")` and a
  * PreToolUse `captureCodexSessionId` both land in the final file.
  * No-op if meta.json doesn't exist.
+ *
+ * A write that CHANGES the stored state also drops the manager's `ack`
+ * (SPEC §8.5.2) in the same locked write. The ack covers one waiting or
+ * complete episode, and a state change ends that episode — even a
+ * waiting → running → waiting flip that happens between two watchdog polls.
+ * Rewriting the same state keeps the ack.
  */
 export async function writeAgentState(agentDir: string, state: MetaState): Promise<void> {
   await mutateAgentMeta(agentDir, (meta) => {
+    if (meta.state !== state) delete meta.ack;
     meta.state = state;
     meta.state_updated_at = Math.floor(Date.now() / 1000);
   });
+}
+
+/**
+ * A manager's acknowledgement of a direct child's current waiting or complete
+ * episode, written by `ib ack` to the child's meta.json as `ack` (SPEC §8.5.2).
+ * While it is current, the Stop hook and the watchdog send no automatic
+ * notices about that episode to the manager.
+ */
+export interface AgentAck {
+  /** The stored state the ack covers. */
+  state: "waiting" | "complete";
+  /** The manager that acknowledged. */
+  by: string;
+  /** Epoch seconds when `ib ack` wrote it. */
+  at: number;
+}
+
+/**
+ * Return the ack in a parsed meta.json when it is current, else null. An ack
+ * is current only while it names the stored `state` and the current
+ * `manager`: a state change drops it (writeAgentState), and a reassigned child
+ * no longer carries its old manager's ack.
+ */
+export function currentAck(meta: unknown): AgentAck | null {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return null;
+  const record = meta as Record<string, unknown>;
+  const ack = record.ack;
+  if (!ack || typeof ack !== "object" || Array.isArray(ack)) return null;
+  const { state, by, at } = ack as Record<string, unknown>;
+  if (state !== "waiting" && state !== "complete") return null;
+  if (state !== record.state) return null;
+  if (typeof by !== "string" || by === "" || by !== record.manager) return null;
+  return { state, by, at: typeof at === "number" ? at : 0 };
+}
+
+/**
+ * Read an agent's current ack straight from meta.json (no mtime cache), for
+ * the watchdog, which must see an ack — or its removal — on the next poll.
+ * Null when there is no current ack or meta.json cannot be read.
+ */
+export async function readAgentAck(agentDir: string): Promise<AgentAck | null> {
+  try {
+    return currentAck(await Bun.file(join(agentDir, "meta.json")).json());
+  } catch {
+    return null;
+  }
 }
 
 /**

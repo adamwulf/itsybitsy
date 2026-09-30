@@ -754,8 +754,17 @@ const COMMAND_HELP: Record<string, string> = {
     "  -f, --file <path>      Read prompt body from a file",
   acknowledge:
     "Usage: ib acknowledge <question-id>\n" +
-    "  Alias: ack\n" +
-    "  Acknowledge a pending agent question by id.",
+    "  Acknowledge a pending agent question by id. (`ib ack` is a different\n" +
+    "  command: it acknowledges a sub-agent.)",
+  ack:
+    "Usage: ib ack <agent-id>\n" +
+    "  Run by a manager on its own direct sub-agent that is waiting or complete.\n" +
+    "  Stops the automatic 'waiting' / 'completed' notices about that state and\n" +
+    "  keeps the sub-agent open (unmerged) for human review. The sub-agent's state,\n" +
+    "  session and worktree are not changed. Any change of its state ends the\n" +
+    "  acknowledgement, and notices start again. A manager with an acknowledged\n" +
+    "  sub-agent still open cannot complete: stay WAITING. Running it again for the\n" +
+    "  same state does nothing.",
   ask:
     'Usage: ib ask [--id <agent-id>] "question"\n' +
     "  Ask the user a question from an agent context. The question may be passed\n" +
@@ -1033,7 +1042,7 @@ function printUsage(): void {
   console.log("  send <id> <msg>     Send a message to an agent or @<team> (--from <id>, stdin)");
   console.log("  ask <question>      Ask user a question (--id <agent-id>)");
   console.log("  questions, q        Show pending agent questions (--all)");
-  console.log("  acknowledge <qid>   Acknowledge a pending question (alias: ack)");
+  console.log("  acknowledge <qid>   Acknowledge a pending question");
   console.log("");
   console.log("Teams:");
   console.log("  team create <name>  Create an empty team");
@@ -1050,6 +1059,7 @@ function printUsage(): void {
   console.log("  nuke <id>           Kill and archive an agent");
   console.log("  merge <id> [--keep] Merge agent's work and close it (--keep: land commits, leave it running)");
   console.log("  merge-check <id>    Check if agent is ready to merge");
+  console.log("  ack <id>            Manager: stop notices about a waiting/complete sub-agent, keep it open for review");
   console.log("  resume <id>         Resume a stopped agent");
   console.log("  respawn [id]        Restart an agent's Claude session in-place (alias: restart)");
   console.log("                      No-arg form infers the agent from cwd — used by the /respawn slash command");
@@ -1115,7 +1125,6 @@ export async function main() {
       command === "ls" ? "list"
       : command === "tree" ? "agents"
       : command === "q" ? "questions"
-      : command === "ack" ? "acknowledge"
       : command === "new" ? "new-agent"
       : command === "restart" ? "respawn"
       : command === "init-agent-types" ? "init-types"
@@ -2548,11 +2557,23 @@ export async function main() {
       await printAndExit(await newAgent(repoPath, prompt, opts));
       break;
     }
-    case "acknowledge":
     case "ack": {
+      // `ib ack <agent-id>`: a manager acknowledges its direct sub-agent's
+      // waiting/complete state (SPEC §8.5.2). Not the question command below.
+      if (!args[1]) {
+        console.error("Usage: ib ack <agent-id>  (to acknowledge a question, use: ib acknowledge <question-id>)");
+        process.exit(1);
+      }
+      const repos = await listRepos();
+      const agent = await requireAgent(args[1], repos);
+      const { ackAgent } = await import("./ib-commands");
+      await printAndExit(await ackAgent(agent));
+      break;
+    }
+    case "acknowledge": {
       const questionId = args[1];
       if (!questionId) {
-        console.error("Usage: ib ack <question-id>");
+        console.error("Usage: ib acknowledge <question-id>");
         process.exit(1);
       }
       // Find which repo has this question

@@ -1662,6 +1662,23 @@ describe("checkIbCommandAccess", () => {
     }
   });
 
+  test("ib ack: only the target's manager — not its spawner or the repo coordinator", async () => {
+    await writeAgentMeta("agent-target1", {
+      manager: "agent-manager1",
+      spawned_by: { agent_id: "agent-spawner1", repo_path: tmpDir },
+    });
+    await writeAgentMeta("itsy", { agentType: "coordinator" });
+
+    expect(await checkIbCommandAccess("ib ack agent-target1", "agent-manager1", agentsDir)).toBeNull();
+    for (const caller of ["agent-spawner1", "itsy", "agent-other111"]) {
+      const denied = await checkIbCommandAccess("ib ack agent-target1", caller, agentsDir);
+      expect(denied?.decision).toBe("deny");
+      expect(denied?.reason).toBe("Access denied: only the manager of 'agent-target1' can run 'ib ack'");
+    }
+    // The spawner keeps its existing rights on the other manager commands.
+    expect(await checkIbCommandAccess("ib retire agent-target1", "agent-spawner1", agentsDir)).toBeNull();
+  });
+
   test("denies agent-issued sandbox refresh, including refresh all", async () => {
     expect((await checkIbCommandAccess("ib sandbox refresh agent-target1", "agent-caller1", agentsDir))?.decision).toBe("deny");
     expect((await checkIbCommandAccess("ib sandbox refresh --all", "agent-caller1", agentsDir))?.decision).toBe("deny");

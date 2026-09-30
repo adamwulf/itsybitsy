@@ -1071,9 +1071,22 @@ describe("CLI arg parsing", () => {
   });
 
   test("acknowledge without question-id shows usage", async () => {
-    const { stderr, exitCode } = await runCli(["ack"]);
-    expect(stderr).toContain("Usage:");
+    const { stderr, exitCode } = await runCli(["acknowledge"]);
+    expect(stderr).toContain("Usage: ib acknowledge <question-id>");
     expect(exitCode).toBe(1);
+  });
+
+  test("ack is the sub-agent command, not a question alias: usage names both", async () => {
+    const { stderr, exitCode } = await runCli(["ack"]);
+    expect(stderr).toContain("Usage: ib ack <agent-id>");
+    expect(stderr).toContain("ib acknowledge <question-id>");
+    expect(exitCode).toBe(1);
+  });
+
+  test("ack --help prints the ack help, not the question help", async () => {
+    const { stdout } = await runCli(["ack", "--help"]);
+    expect(stdout).toContain("Usage: ib ack <agent-id>");
+    expect(stdout).not.toContain("question-id");
   });
 
   test("questions (q alias) with no repos shows message", async () => {

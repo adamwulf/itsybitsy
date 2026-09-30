@@ -8191,11 +8191,22 @@ export function resetAskQuestionTelegramRunner(): void {
   askQuestionTelegramCtx.reset();
 }
 
+export interface AskQuestionOptions {
+  /**
+   * The harness raises the question on the agent's behalf (the session-start
+   * hook does this when the instructions are over the hook context cap). The
+   * question is ABOUT the agent, not from it, so the top-level check is
+   * skipped, and the same text is recorded only once per agent — the hook
+   * fires again on resume, `/clear` and after each compaction.
+   */
+  fromHarness?: boolean;
+}
+
 /**
  * Native ask implementation — replaces `ib ask "question"`.
  * Top-level agents (no manager, or manager merged/killed) can ask the user a question.
  */
-export async function askQuestion(repoPath: string, agentId: string, question: string): Promise<IbCommandResult> {
+export async function askQuestion(repoPath: string, agentId: string, question: string, opts: AskQuestionOptions = {}): Promise<IbCommandResult> {
   // Verify agent exists
   const agentsDir = join(repoPath, ".ittybitty", "agents");
   const agentDir = join(agentsDir, agentId);
@@ -8214,7 +8225,7 @@ export async function askQuestion(repoPath: string, agentId: string, question: s
 
   // Top-level check: only agents with no manager (or whose manager is gone) may ask
   const managerId = meta.manager as string | undefined;
-  if (managerId) {
+  if (managerId && !opts.fromHarness) {
     // Check if the manager's directory still exists (non-archived)
     const managerDir = join(agentsDir, managerId);
     const managerMetaFile = Bun.file(join(managerDir, "meta.json"));
@@ -8255,6 +8266,10 @@ export async function askQuestion(repoPath: string, agentId: string, question: s
     const activeIds = new Set(agentEntries.filter(e => e.isDirectory()).map(e => e.name));
     data.questions = data.questions.filter((q: any) => activeIds.has(q.agent));
   } catch { /* ignore readdir failure */ }
+
+  if (opts.fromHarness && data.questions.some((q: any) => q.agent === agentId && q.question === question)) {
+    return { ok: true, exitCode: 0, stdout: "Question already recorded", stderr: "" };
+  }
 
   // Generate question ID: q-<unix-epoch>-<6-char-hash>
   const epoch = Math.floor(Date.now() / 1000);

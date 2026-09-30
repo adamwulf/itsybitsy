@@ -1,6 +1,7 @@
 import { test, expect, describe, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
-import { detectRole, generateInstructions, teamAwarenessBlock, interpolateTemplate, buildPathIsolationSection, hookSessionStart, type SessionContext } from "./session-start";
+import { detectRole, generateInstructions, teamAwarenessBlock, interpolateTemplate, buildPathIsolationSection, hookSessionStart, oversizedInstructionsQuestion, HOOK_CONTEXT_CHAR_CAP, type SessionContext } from "./session-start";
 import { readAgentState } from "../agents";
+import { setSayRunner, resetSayRunner, setAskQuestionTelegramRunner, resetAskQuestionTelegramRunner } from "../ib-commands";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
@@ -903,6 +904,133 @@ describe("hookSessionStart — stale 'creating' state correction", () => {
     const stdin = JSON.stringify({ cwd: tempDir });
     await hookSessionStart(stdin);
     // No exception means pass.
+  });
+});
+
+describe("hookSessionStart — instructions over the hook context cap", () => {
+  let tempDir: string;
+  let originalWrite: typeof process.stdout.write;
+  let stdout: string;
+  let sayCalls: string[][];
+
+  /** Write an agent type whose rendered instructions are `bodyChars` + a little. */
+  async function writeType(name: string, bodyChars: number): Promise<void> {
+    await Bun.write(
+      join(testHome, ".itsybitsy", "agent-types", `${name}.md`),
+      `---\nname: ${name}\ndescription: size test type\n---\n${"x".repeat(bodyChars)}`,
+    );
+  }
+
+  async function setupAgent(agentId: string, agentType: string, manager: string | null = null): Promise<{
+    agentDir: string;
+    cwd: string;
+  }> {
+    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const cwd = join(agentDir, "repo");
+    await mkdir(cwd, { recursive: true });
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify({ id: agentId, manager, agentType, state: "running" }),
+    );
+    return { agentDir, cwd };
+  }
+
+  async function readQuestions(): Promise<Array<{ agent: string; question: string; status: string }>> {
+    const file = Bun.file(join(tempDir, ".ittybitty", "user-questions.json"));
+    if (!(await file.exists())) return [];
+    return (await file.json()).questions;
+  }
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "ib-sessstart-cap-"));
+    stdout = "";
+    originalWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: unknown) => {
+      stdout += String(chunk);
+      return true;
+    }) as typeof process.stdout.write;
+    sayCalls = [];
+    setSayRunner((cmd) => { sayCalls.push(cmd); });
+    setAskQuestionTelegramRunner(async () => ({ ok: true, message: "" }));
+    await writeType("oversized", HOOK_CONTEXT_CHAR_CAP);
+    await writeType("undersized", 100);
+  });
+
+  afterEach(async () => {
+    process.stdout.write = originalWrite;
+    resetSayRunner();
+    resetAskQuestionTelegramRunner();
+    await rm(join(testHome, ".itsybitsy", "agent-types", "oversized.md"), { force: true });
+    await rm(join(testHome, ".itsybitsy", "agent-types", "undersized.md"), { force: true });
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("raises a question from the agent, logs it, and still delivers the full instructions", async () => {
+    const { agentDir, cwd } = await setupAgent("agent-big", "oversized");
+    await hookSessionStart(JSON.stringify({ cwd }));
+
+    const instructions: string = JSON.parse(stdout).hookSpecificOutput.additionalContext;
+    expect(instructions.length).toBeGreaterThan(HOOK_CONTEXT_CHAR_CAP);
+
+    const questions = await readQuestions();
+    expect(questions).toHaveLength(1);
+    expect(questions[0]!.agent).toBe("agent-big");
+    expect(questions[0]!.status).toBe("pending");
+    expect(questions[0]!.question).toBe(oversizedInstructionsQuestion(instructions.length));
+    expect(questions[0]!.question).toContain("10,000-character limit");
+    expect(questions[0]!.question).toContain("possibly did not read the rest");
+
+    const log = await Bun.file(join(agentDir, "agent.log")).text();
+    expect(log).toContain(`[SessionStart] instructions are ${instructions.length} characters`);
+    expect(sayCalls).toHaveLength(1);
+  });
+
+  test("raises the question for a sub-agent too (ib ask itself refuses agents with a manager)", async () => {
+    await setupAgent("agent-parent", "undersized");
+    const { cwd } = await setupAgent("agent-child", "oversized", "agent-parent");
+    await hookSessionStart(JSON.stringify({ cwd }));
+
+    const questions = await readQuestions();
+    expect(questions.map((q) => q.agent)).toEqual(["agent-child"]);
+  });
+
+  test("records the question once when the hook fires again (resume, /clear, compaction)", async () => {
+    const { cwd } = await setupAgent("agent-big", "oversized");
+    await hookSessionStart(JSON.stringify({ cwd }));
+    await hookSessionStart(JSON.stringify({ cwd }));
+    await hookSessionStart(JSON.stringify({ cwd }));
+
+    expect(await readQuestions()).toHaveLength(1);
+    expect(sayCalls).toHaveLength(1);
+  });
+
+  test("raises nothing when the instructions are under the cap", async () => {
+    const { agentDir, cwd } = await setupAgent("agent-small", "undersized");
+    await hookSessionStart(JSON.stringify({ cwd }));
+
+    const instructions: string = JSON.parse(stdout).hookSpecificOutput.additionalContext;
+    expect(instructions.length).toBeLessThanOrEqual(HOOK_CONTEXT_CHAR_CAP);
+    expect(await readQuestions()).toEqual([]);
+    expect(await Bun.file(join(agentDir, "agent.log")).exists()).toBe(false);
+    expect(sayCalls).toHaveLength(0);
+  });
+
+  test("still delivers the instructions when the question cannot be written", async () => {
+    const { cwd } = await setupAgent("agent-big", "oversized");
+    // A directory where the questions file belongs makes the write fail.
+    await mkdir(join(tempDir, ".ittybitty", "user-questions.json"), { recursive: true });
+    const originalErr = process.stderr.write.bind(process.stderr);
+    let stderr = "";
+    process.stderr.write = ((chunk: unknown) => { stderr += String(chunk); return true; }) as typeof process.stderr.write;
+    try {
+      await hookSessionStart(JSON.stringify({ cwd }));
+    } finally {
+      process.stderr.write = originalErr;
+    }
+
+    const instructions: string = JSON.parse(stdout).hookSpecificOutput.additionalContext;
+    expect(instructions.length).toBeGreaterThan(HOOK_CONTEXT_CHAR_CAP);
+    expect(stderr).toContain("session-start: could not flag oversized instructions");
   });
 });
 

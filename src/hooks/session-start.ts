@@ -7,6 +7,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { AGENT_CWD_PATTERN, SYSTEM_AGENT_ID, systemCoordinatorHome } from "./shared";
 import { loadAgentType } from "../agent-types";
 import { writeAgentState } from "../agents";
+import { logAgent } from "../agent-lifecycle";
 import { listTeams } from "../teams";
 import { isValidSessionId } from "../validation";
 import { resolveSandboxEnabled, type SandboxConfig } from "../sandbox";
@@ -816,6 +817,50 @@ function recordCoordinatorSessionId(data: Record<string, unknown>): void {
   }
 }
 
+/**
+ * Claude Code caps a hook's `additionalContext` at 10,000 characters. Above
+ * that it saves the text to a file and gives the agent the file path and a
+ * preview of the first 2,000 characters, so most of the instructions never
+ * reach the agent. No setting raises the cap.
+ */
+export const HOOK_CONTEXT_CHAR_CAP = 10_000;
+
+/** The question raised for an agent whose instructions are over the cap. */
+export function oversizedInstructionsQuestion(chars: number): string {
+  return `My session-start instructions are ${chars.toLocaleString("en-US")} characters. This is more than the ${HOOK_CONTEXT_CHAR_CAP.toLocaleString("en-US")}-character limit of Claude Code, so I received only a 2,000-character preview and possibly did not read the rest. Make my agent type shorter, or tell me to read the full instructions file.`;
+}
+
+/**
+ * When the instructions are over {@link HOOK_CONTEXT_CHAR_CAP}, record it in
+ * the agent's log and raise a question on the agent's behalf, so the user sees
+ * it in the QUESTIONS pane. Best-effort: a failure here must never break
+ * session-start.
+ */
+async function flagOversizedInstructions(ctx: SessionContext, agentDir: string, instructions: string): Promise<void> {
+  if (instructions.length <= HOOK_CONTEXT_CHAR_CAP) return;
+  try {
+    await logAgent(
+      agentDir,
+      `[SessionStart] instructions are ${instructions.length} characters, over the ${HOOK_CONTEXT_CHAR_CAP}-character hook cap; Claude Code gave the agent only a 2,000-character preview`,
+    );
+    // Dynamic import: ib-commands imports this module.
+    const { askQuestion } = await import("../ib-commands");
+    const result = await askQuestion(
+      ctx.rootRepoPath,
+      ctx.agentId,
+      oversizedInstructionsQuestion(instructions.length),
+      { fromHarness: true },
+    );
+    if (!result.ok) {
+      process.stderr.write(`session-start: could not raise the oversized-instructions question: ${result.stderr}\n`);
+    }
+  } catch (err) {
+    process.stderr.write(
+      `session-start: could not flag oversized instructions: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
+}
+
 export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): Promise<void> {
   const raw = rawStdin ?? await new Response(Bun.stdin.stream()).text();
   let parsed: unknown;
@@ -912,6 +957,10 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
 
   const ctx = detectRole(roleCwd, metaJson, agentIdArg);
   const instructions = await generateInstructions(ctx);
+
+  if (metaJson && agentDirForState) {
+    await flagOversizedInstructions(ctx, agentDirForState, instructions);
+  }
 
   const output = {
     hookSpecificOutput: {

@@ -380,9 +380,16 @@ read fence, the sandbox branch is the answer (§5.3).
 
 ### 6.7 Instructions and display
 
-- `buildPathIsolationSection`[^24] must say "worktree only" plus the entries
+- ~~`buildPathIsolationSection`[^24] must say "worktree only" plus the entries
   when the list is defined, and drop the "`~/.claude`, `/tmp`, and general system
-  paths" sentence in that case.
+  paths" sentence in that case.~~ **Superseded (2026-09-30):**
+  `buildPathIsolationSection`[^24] says that access is limited to the worktree
+  and the paths the agent type needs, and tells the agent to ask its manager or
+  the user, or use a different path, when a needed path is blocked. It does
+  **not** print the entries. The printed lists pushed the manager instructions
+  over Claude Code's 10,000-character cap on a hook's `additionalContext`, and
+  the agent then got only a 2,000-character preview of its instructions
+  (SPEC.md, "Template interpolation").
 - `ib info` and the `ib watch` detail pane should show the resolved list. Today
   only `ib list-types` prints it[^33].
 - SPEC.md §2.2, §5.2 and §6.1, `docs/implementation-notes.md`, and

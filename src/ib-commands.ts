@@ -2009,7 +2009,6 @@ export async function resumeAgent(
         spawned_by: agent.meta.spawned_by ?? undefined,
         // Resume must describe the policy frozen in this agent's metadata,
         // not today's type files or the detectRole defaults.
-        paths: agent.meta.paths,
         sandbox: agent.meta.sandbox,
       }, agent.id);
       try {
@@ -7113,7 +7112,6 @@ export async function newAgent(
         worker: isLeafAgent,
         agentType: typeName,
         spawned_by: spawnedBy ?? undefined,
-        paths: resolvedPathsConfig,
         sandbox: resolvedSandboxConfig,
       }, id);
       try {
@@ -8175,14 +8173,23 @@ export function resetSayRunner(): void {
   sayCtx.reset();
 }
 
+export interface TelegramSendOptions {
+  /**
+   * `false` queues the message and returns without the up-to-1s poll for the
+   * outbox result. For a caller whose process must not stay alive for it (the
+   * session-start hook: Claude Code waits for the hook process to exit).
+   */
+  awaitResult?: boolean;
+}
+
 /**
  * Injection context for the Telegram send call in askQuestion(). Tests
  * swap this out to observe the message text without going through the outbox.
  */
-export type TelegramSendFn = (text: string) => Promise<{ ok: boolean; message: string }>;
+export type TelegramSendFn = (text: string, opts?: TelegramSendOptions) => Promise<{ ok: boolean; message: string }>;
 
 export const askQuestionTelegramCtx = new InjectionContext<TelegramSendFn>(
-  (text: string) => telegramSend(text)
+  (text: string, opts?: TelegramSendOptions) => telegramSend(text, opts)
 );
 
 export function setAskQuestionTelegramRunner(runner: TelegramSendFn): void {
@@ -8193,11 +8200,22 @@ export function resetAskQuestionTelegramRunner(): void {
   askQuestionTelegramCtx.reset();
 }
 
+export interface AskQuestionOptions {
+  /**
+   * The harness raises the question on the agent's behalf (the session-start
+   * hook does this when the instructions are over the hook context cap). The
+   * question is ABOUT the agent, not from it, so the top-level check is
+   * skipped, and the same text is recorded only once per agent — the hook
+   * fires again on resume, `/clear` and after each compaction.
+   */
+  fromHarness?: boolean;
+}
+
 /**
  * Native ask implementation — replaces `ib ask "question"`.
  * Top-level agents (no manager, or manager merged/killed) can ask the user a question.
  */
-export async function askQuestion(repoPath: string, agentId: string, question: string): Promise<IbCommandResult> {
+export async function askQuestion(repoPath: string, agentId: string, question: string, opts: AskQuestionOptions = {}): Promise<IbCommandResult> {
   // Verify agent exists
   const agentsDir = join(repoPath, ".ittybitty", "agents");
   const agentDir = join(agentsDir, agentId);
@@ -8216,7 +8234,7 @@ export async function askQuestion(repoPath: string, agentId: string, question: s
 
   // Top-level check: only agents with no manager (or whose manager is gone) may ask
   const managerId = meta.manager as string | undefined;
-  if (managerId) {
+  if (managerId && !opts.fromHarness) {
     // Check if the manager's directory still exists (non-archived)
     const managerDir = join(agentsDir, managerId);
     const managerMetaFile = Bun.file(join(managerDir, "meta.json"));
@@ -8257,6 +8275,10 @@ export async function askQuestion(repoPath: string, agentId: string, question: s
     const activeIds = new Set(agentEntries.filter(e => e.isDirectory()).map(e => e.name));
     data.questions = data.questions.filter((q: any) => activeIds.has(q.agent));
   } catch { /* ignore readdir failure */ }
+
+  if (opts.fromHarness && data.questions.some((q: any) => q.agent === agentId && q.question === question)) {
+    return { ok: true, exitCode: 0, stdout: "Question already recorded", stderr: "" };
+  }
 
   // Generate question ID: q-<unix-epoch>-<6-char-hash>
   const epoch = Math.floor(Date.now() / 1000);
@@ -8300,7 +8322,10 @@ export async function askQuestion(repoPath: string, agentId: string, question: s
     // 2. Telegram — always attempted; harmlessly queues if `ib watch` isn't running.
     const tgMsg = `Agent ${metaName} in ${repoName} has a question:\n${question}`;
     try {
-      void askQuestionTelegramCtx.fn(tgMsg).catch(() => { /* swallow */ });
+      const sent = opts.fromHarness
+        ? askQuestionTelegramCtx.fn(tgMsg, { awaitResult: false })
+        : askQuestionTelegramCtx.fn(tgMsg);
+      void sent.catch(() => { /* swallow */ });
     } catch { /* swallow synchronous throws */ }
   } catch { /* defensive: never let notification setup affect the return */ }
 
@@ -8634,7 +8659,7 @@ export async function uninstallInterceptHook(_repoPath: string, settingsPath?: s
  * return an "ok-but-queued" outcome so the caller exits 0 — the message is
  * legitimately waiting on disk and `ib watch` will pick it up next start.
  */
-export async function telegramSend(text: string): Promise<{ ok: boolean; message: string }> {
+export async function telegramSend(text: string, opts: TelegramSendOptions = {}): Promise<{ ok: boolean; message: string }> {
   const { defaultOutboxDir } = await import("./channels/outbox");
   const { mkdir, rename, readFile, unlink } = await import("fs/promises");
   const { randomBytes } = await import("crypto");
@@ -8649,6 +8674,10 @@ export async function telegramSend(text: string): Promise<{ ok: boolean; message
   await mkdir(dir, { recursive: true });
   await Bun.write(tmpPath, text);
   await rename(tmpPath, txtPath);
+
+  if (opts.awaitResult === false) {
+    return { ok: true, message: "queued" };
+  }
 
   // Poll up to 1s for the result file. 100ms cadence keeps the small-message
   // happy path fast (one round trip is typically <100ms) without spinning.

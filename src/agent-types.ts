@@ -838,22 +838,22 @@ export function listAgentTypeNamesSync(): string[] {
 }
 
 /**
- * Synchronously list spawnable agent types as `{name, description}` pairs.
- * Used by both the new-agent UI cyclers (which only care about names) and
- * session-start templates that render the `{{availableTypes}}` placeholder.
+ * Synchronously list the names of types that can be spawned directly
+ * (i.e. their frontmatter does not declare `spawnable: false`).
+ * Used by UI cyclers in the new-agent dialog so layer-only files like
+ * `_all.md` / `_non_coordinator.md` never appear as spawn choices.
  *
- * Performs a single lightweight scan of each `.md` file's frontmatter to
- * extract `spawnable` and `description` together — no full parse is
- * required. Layer-only files (`spawnable: false`) are excluded.
+ * Performs a lightweight scan of each `.md` file's frontmatter for
+ * `spawnable` — no full parse is required.
  *
  * Listing order is alphabetical (inherited from {@link listAgentTypeNamesSync}).
  */
-export function listSpawnableAgentTypesSync(): Array<{ name: string; description: string }> {
+export function listSpawnableTypeNamesSync(): string[] {
   const allNames = listAgentTypeNamesSync();
   const home = userHome();
   const typesDir = join(home, ".itsybitsy", "agent-types");
 
-  const result: Array<{ name: string; description: string }> = [];
+  const result: string[] = [];
   for (const name of allNames) {
     const filePath = join(typesDir, `${name}.md`);
     let content: string | undefined;
@@ -863,57 +863,26 @@ export function listSpawnableAgentTypesSync(): Array<{ name: string; description
       // File gone between listing and read — fall back to embedded content if we know it
       content = EMBEDDED_TYPES[name];
     }
-    if (content === undefined) {
-      // Directory didn't exist and no embedded default — assume spawnable, no description
-      result.push({ name, description: "" });
-      continue;
-    }
-    const { spawnable, description } = readFrontmatterScalars(content);
-    if (spawnable) {
-      result.push({ name, description });
+    // No content: directory didn't exist and no embedded default — assume spawnable
+    if (content === undefined || readFrontmatterSpawnable(content)) {
+      result.push(name);
     }
   }
   return result;
 }
 
 /**
- * Synchronously list the names of types that can be spawned directly
- * (i.e. their frontmatter does not declare `spawnable: false`).
- * Used by UI cyclers in the new-agent dialog so layer-only files like
- * `_all.md` / `_non_coordinator.md` never appear as spawn choices.
- *
- * Implemented on top of {@link listSpawnableAgentTypesSync} so the disk
- * scan and fallback semantics stay in one place.
- */
-export function listSpawnableTypeNamesSync(): string[] {
-  return listSpawnableAgentTypesSync().map((t) => t.name);
-}
-
-/**
- * Lightweight sync extractor: read both `spawnable` and `description`
- * from a frontmatter block in a single pass. Avoids the full parser so
- * this stays cheap enough to call from UI render paths and the
- * session-start hook.
- *
- * - `spawnable` is true unless explicitly declared `spawnable: false`.
- * - `description` is the trimmed value of the top-level `description:`
- *   key, with surrounding single/double quotes stripped. An absent key
- *   yields an empty string.
+ * Lightweight sync extractor: read `spawnable` from a frontmatter block.
+ * Avoids the full parser so this stays cheap enough to call from UI render
+ * paths. True unless the block explicitly declares `spawnable: false`.
  *
  * Only top-level keys are considered: lines beginning with whitespace
- * (i.e. nested values like `permissions:\n  description: ...`) are
- * skipped so a nested key never accidentally shadows the top-level one.
- *
- * YAML block scalars (`description: |`, `description: >`) are not
- * supported — same limitation as the full parser. The literal `|` or
- * `>` would be returned as the description string. None of the
- * embedded defaults use this form.
+ * (i.e. nested values like `permissions:\n  spawnable: ...`) are skipped so
+ * a nested key never accidentally shadows the top-level one.
  */
-function readFrontmatterScalars(content: string): { spawnable: boolean; description: string } {
-  let spawnable = true;
-  let description = "";
+function readFrontmatterSpawnable(content: string): boolean {
   const lines = content.split("\n");
-  if (lines[0] !== "---") return { spawnable, description };
+  if (lines[0] !== "---") return true;
 
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i]!;
@@ -921,20 +890,14 @@ function readFrontmatterScalars(content: string): { spawnable: boolean; descript
     // Skip nested keys: anything indented is part of a nested object/list,
     // not a top-level frontmatter key.
     if (/^\s/.test(line)) continue;
-    if (!line.trim() || line.trim().startsWith("#")) continue;
 
     const colonIdx = line.indexOf(":");
     if (colonIdx === -1) continue;
     const key = line.substring(0, colonIdx).trim();
     const valueStr = line.substring(colonIdx + 1).trim();
-
-    if (key === "spawnable") {
-      if (valueStr === "false") spawnable = false;
-    } else if (key === "description") {
-      description = valueStr.replace(/^["']|["']$/g, "");
-    }
+    if (key === "spawnable" && valueStr === "false") return false;
   }
-  return { spawnable, description };
+  return true;
 }
 
 /**

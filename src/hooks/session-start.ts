@@ -5,11 +5,12 @@
 import { join, basename } from "path";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { AGENT_CWD_PATTERN, SYSTEM_AGENT_ID, systemCoordinatorHome } from "./shared";
-import { loadAgentType, listSpawnableAgentTypesSync } from "../agent-types";
+import { loadAgentType } from "../agent-types";
 import { writeAgentState } from "../agents";
+import { logAgent } from "../agent-lifecycle";
 import { listTeams } from "../teams";
 import { isValidSessionId } from "../validation";
-import { resolveSandboxEnabled, type PathsConfig, type SandboxConfig } from "../sandbox";
+import { resolveSandboxEnabled, type SandboxConfig } from "../sandbox";
 import { metadataCli } from "../agent-cli";
 import { resolveBoundHookAgent } from "./agent-context";
 
@@ -30,13 +31,6 @@ export interface SessionContext {
    * has no repo). `agent_id` may be `@system` or `@<repo-name>`. */
   spawnedBy?: { agent_id: string; repo_path: string | null };
   /**
-   * Fully-resolved filesystem policy frozen at spawn (`meta.paths`): absolute
-   * `allowRead`, `allowWrite`, and `deny` lists. Absent for legacy meta written
-   * before the `paths:` block existed, and for the `@system` coordinator (no
-   * meta.json). A missing or empty list means the worktree and runtime roots only.
-   */
-  paths?: PathsConfig;
-  /**
    * Fully-resolved sandbox policy frozen at spawn (`meta.sandbox`). Only
    * `enabled` is consulted by the session-start text; omission defaults to enabled.
    */
@@ -53,7 +47,6 @@ export function detectRole(
     worker?: boolean;
     agentType?: string;
     spawned_by?: { agent_id: string; repo_path: string | null } | null;
-    paths?: unknown;
     sandbox?: unknown;
     model?: unknown;
   },
@@ -121,12 +114,6 @@ export function detectRole(
   const effectiveSpawnedBy =
     spawnedBy && spawnedBy.agent_id !== agentManager ? spawnedBy : undefined;
 
-  // Parse the frozen `paths:` policy from meta. Each list is an array of
-  // strings; anything else is dropped so a malformed meta never breaks
-  // session-start. Absent → undefined (rendered as "worktree + runtime roots
-  // only"), NOT a permissive fallback.
-  const paths = parseMetaPaths(meta.paths);
-
   // Parse the frozen sandbox policy from meta — only `enabled` is consulted by
   // the session-start text, but the whole config is carried for fidelity.
   const sandbox = parseMetaSandbox(meta.sandbox);
@@ -141,7 +128,6 @@ export function detectRole(
     rootRepoPath,
     agentType,
     spawnedBy: effectiveSpawnedBy,
-    paths,
     sandbox,
     model: typeof meta.model === "string" ? meta.model : undefined,
   };
@@ -151,21 +137,6 @@ export function detectRole(
 function toStringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((p): p is string => typeof p === "string");
-}
-
-/**
- * Parse `meta.paths` into a {@link PathsConfig}. Returns `undefined` when the
- * block is absent or not an object — the caller renders that as "worktree and
- * runtime roots only", never as a permissive fallback.
- */
-function parseMetaPaths(value: unknown): PathsConfig | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-  const v = value as Record<string, unknown>;
-  return {
-    allowRead: toStringList(v.allowRead),
-    allowWrite: toStringList(v.allowWrite),
-    deny: toStringList(v.deny),
-  };
 }
 
 /**
@@ -207,10 +178,6 @@ The quoted heredoc terminator (\`<<'EOF'\`) is the safest option — nothing ins
  * Interpolate {{placeholder}} variables and {{#if cond}}...{{/if}} blocks in a template.
  * Available variables: agentId, agentManager, parentBranch, worktreePath, rootRepoPath, repoName, pathIsolation, availableTypes
  * Available conditions: hasManager (agent has a manager), isTopLevel (no manager = top-level)
- *
- * `availableTypes` is evaluated lazily so templates that don't reference it
- * don't pay the synchronous disk-scan cost of reading every file in
- * `~/.itsybitsy/agent-types/`.
  */
 export function interpolateTemplate(template: string, ctx: SessionContext): string {
   const repoName = basename(ctx.rootRepoPath);
@@ -396,27 +363,20 @@ async function generateInstructionsInner(ctx: SessionContext): Promise<string> {
   }
 }
 
-/** Render one `paths:` list as an indented markdown bullet block, or "(none)". */
-function renderPathList(label: string, entries: string[] | undefined): string {
-  const items = entries ?? [];
-  if (items.length === 0) {
-    return `- ${label}:\n  - (none)`;
-  }
-  return `- ${label}:\n${items.map((p) => `  - ${p}`).join("\n")}`;
-}
-
 /**
  * Build the Path Isolation section of instructions based on agent context.
  *
  * There is one path model (SPEC-PATH-ALLOWLIST §6.11): deny by default. The
- * agent may reach its worktree, its own `agent.log`, its Claude project
- * directory and scratchpad, and exactly the paths in its resolved `meta.paths`
- * lists — nothing else. This renders:
+ * agent may reach its worktree, its runtime roots, and exactly the paths in its
+ * resolved `meta.paths` lists — nothing else. The section does NOT print those
+ * lists: their length follows the user's `paths:` config, and they pushed the
+ * rendered instructions over Claude Code's 10,000-character cap on a hook's
+ * `additionalContext`, which cut the agent down to a 2KB preview. This renders:
  * - the worktree (or repo) root,
- * - the always-on runtime roots,
- * - `allowWrite` (read and write), `allowRead` (read only), and `deny`,
+ * - the rule (that root plus the paths the agent type needs) and what to do
+ *   when a needed path is blocked,
  * - whether the kernel sandbox is on (`meta.sandbox.enabled`),
- * - the structural CANNOT-access set and the `cd`/Access-denied notes.
+ * - the structural CANNOT-access set and the `cd` note.
  */
 export function buildPathIsolationSection(ctx: SessionContext): string {
   let baseSection = "";
@@ -436,60 +396,39 @@ export function buildPathIsolationSection(ctx: SessionContext): string {
   }
 
   const cli = metadataCli(ctx.model);
-  const runtimeRoots = `Subject to denied paths and protected-file rules, runtime access includes:
-- ${baseRoot} (read and write)
-- your own agent.log${cli === "claude" ? "\n- your Claude project directory and scratchpad" : ""}`;
-
-  const paths = ctx.paths;
-  const listsBlock = `Your agent type resolves to these path lists. A missing \`paths\` block, or empty \`allowRead\` and \`allowWrite\` lists, adds no access beyond runtime roots. Internal git and agent lifecycle operations also use the git common directory and agent-management directories, subject to tool-specific restrictions:
-${renderPathList("Read only (allowRead)", paths?.allowRead)}
-${renderPathList("Read and write (allowWrite)", paths?.allowWrite)}
-${renderPathList("Denied (deny), overriding the lists above", paths?.deny)}`;
+  const helper = ctx.agentManager ? "your manager" : "the user";
+  const accessRule = `Your access is limited to ${baseRoot} and the paths your agent type needs. If a path you need is blocked ("Access denied" or "Path violation"), ask ${helper} for help, or use a different path.`;
 
   // Repository policy defaults on; the global coordinator remains unwrapped.
   const sandboxLine = ctx.agentId !== SYSTEM_AGENT_ID && resolveSandboxEnabled(ctx.sandbox?.enabled)
-    ? `The kernel sandbox is ON: an access outside these lists fails with EPERM, whatever the spelling. The hook explains the honest command-line attempts in the Denials tab of \`ib watch\`.`
+    ? `The kernel sandbox is ON: an access outside your allowed paths fails with EPERM, whatever the spelling. The hook explains the honest command-line attempts in the Denials tab of \`ib watch\`.`
     : `The itsybitsy kernel sandbox is OFF; hooks enforce tool permissions and path checks without native tool approval prompts.${cli === "codex" || cli === "fugu" ? " Codex's native workspace-write sandbox remains enabled and may further restrict paths." : ""}`;
 
   const pathSection = `### Path Isolation
 
 ${baseSection}
 
-${runtimeRoots}
-
-${listsBlock}
+${accessRule}
 
 ${sandboxLine}
 
 ${cannotAccessSection}
-- A bare \`cd\` (no argument) resolves to your home directory and is checked like any other path.
-- If you get "Access denied" or "Path violation" errors, you're trying to access a forbidden path`;
+- A bare \`cd\` (no argument) resolves to your home directory and is checked like any other path.`;
 
   return pathSection;
 }
 
 /**
- * Build a markdown section listing every spawnable agent type with its
- * description, for use in session-start templates via `{{availableTypes}}`.
- *
- * Falls back to a placeholder note if no spawnable types are found (this
- * shouldn't happen in practice — the embedded defaults guarantee at least
- * `manager` and `worker`).
+ * Build the markdown section that session-start templates render via
+ * `{{availableTypes}}`. It points at `ib list-types` instead of listing the
+ * types: the list grows with every installed type, and the rendered
+ * instructions must stay under the hook `additionalContext` cap (see
+ * `buildPathIsolationSection`).
  */
 export function buildAvailableTypesSection(): string {
-  const types = listSpawnableAgentTypesSync();
-  const header = `### Available Agent Types
+  return `### Available Agent Types
 
-You can spawn any of these with \`ib new-agent --type <name> "task"\`:`;
-
-  if (types.length === 0) {
-    return `${header}\n\n_No agent types installed. Run \`ib init-types\` to restore defaults._`;
-  }
-
-  const lines = types.map(({ name, description }) =>
-    description ? `- \`${name}\` — ${description}` : `- \`${name}\``,
-  );
-  return `${header}\n\n${lines.join("\n")}`;
+Run \`ib list-types\` to see the agent types, and \`ib show-type <name>\` for the full description of one. Spawn one marked SPAWNABLE with \`ib new-agent --type <name> "task"\`.`;
 }
 
 function generatePrimaryInstructions(): string {
@@ -878,6 +817,50 @@ function recordCoordinatorSessionId(data: Record<string, unknown>): void {
   }
 }
 
+/**
+ * Claude Code caps a hook's `additionalContext` at 10,000 characters. Above
+ * that it saves the text to a file and gives the agent the file path and a
+ * preview of the first 2,000 characters, so most of the instructions never
+ * reach the agent. No setting raises the cap.
+ */
+export const HOOK_CONTEXT_CHAR_CAP = 10_000;
+
+/** The question raised for an agent whose instructions are over the cap. */
+export function oversizedInstructionsQuestion(chars: number): string {
+  return `My session-start instructions are ${chars.toLocaleString("en-US")} characters. This is more than the ${HOOK_CONTEXT_CHAR_CAP.toLocaleString("en-US")}-character limit of Claude Code, so I received only a 2,000-character preview and possibly did not read the rest. Make my agent type shorter, or tell me to read the full instructions file.`;
+}
+
+/**
+ * When the instructions are over {@link HOOK_CONTEXT_CHAR_CAP}, record it in
+ * the agent's log and raise a question on the agent's behalf, so the user sees
+ * it in the QUESTIONS pane. Best-effort: a failure here must never break
+ * session-start.
+ */
+async function flagOversizedInstructions(ctx: SessionContext, agentDir: string, instructions: string): Promise<void> {
+  if (instructions.length <= HOOK_CONTEXT_CHAR_CAP) return;
+  try {
+    await logAgent(
+      agentDir,
+      `[SessionStart] instructions are ${instructions.length} characters, over the ${HOOK_CONTEXT_CHAR_CAP}-character hook cap; Claude Code gave the agent only a 2,000-character preview`,
+    );
+    // Dynamic import: ib-commands imports this module.
+    const { askQuestion } = await import("../ib-commands");
+    const result = await askQuestion(
+      ctx.rootRepoPath,
+      ctx.agentId,
+      oversizedInstructionsQuestion(instructions.length),
+      { fromHarness: true },
+    );
+    if (!result.ok) {
+      process.stderr.write(`session-start: could not raise the oversized-instructions question: ${result.stderr}\n`);
+    }
+  } catch (err) {
+    process.stderr.write(
+      `session-start: could not flag oversized instructions: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
+}
+
 export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): Promise<void> {
   const raw = rawStdin ?? await new Response(Bun.stdin.stream()).text();
   let parsed: unknown;
@@ -932,7 +915,7 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
 
   // Detect role - read meta.json from filesystem if in an agent directory
   const match = AGENT_CWD_PATTERN.exec(cwd);
-  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; agentType?: string; model?: string; paths?: unknown; sandbox?: unknown; spawned_by?: { agent_id: string; repo_path: string | null }; state?: string } | undefined;
+  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; agentType?: string; model?: string; sandbox?: unknown; spawned_by?: { agent_id: string; repo_path: string | null }; state?: string } | undefined;
   let agentDirForState: string | undefined;
   let roleCwd = cwd;
 
@@ -974,6 +957,10 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
 
   const ctx = detectRole(roleCwd, metaJson, agentIdArg);
   const instructions = await generateInstructions(ctx);
+
+  if (metaJson && agentDirForState) {
+    await flagOversizedInstructions(ctx, agentDirForState, instructions);
+  }
 
   const output = {
     hookSpecificOutput: {

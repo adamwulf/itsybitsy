@@ -1,6 +1,7 @@
 import { test, expect, describe, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
-import { detectRole, generateInstructions, teamAwarenessBlock, interpolateTemplate, buildPathIsolationSection, hookSessionStart, type SessionContext } from "./session-start";
+import { detectRole, generateInstructions, teamAwarenessBlock, interpolateTemplate, buildPathIsolationSection, hookSessionStart, oversizedInstructionsQuestion, HOOK_CONTEXT_CHAR_CAP, type SessionContext } from "./session-start";
 import { readAgentState } from "../agents";
+import { setSayRunner, resetSayRunner, setAskQuestionTelegramRunner, resetAskQuestionTelegramRunner } from "../ib-commands";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
@@ -481,7 +482,7 @@ describe("interpolateTemplate {{availableTypes}}", () => {
     await rm(tempHome, { recursive: true, force: true });
   });
 
-  test("expands to a markdown section listing spawnable types", async () => {
+  test("expands to a pointer at `ib list-types`, not a list of the installed types", async () => {
     await Bun.write(
       join(typesDir, "manager.md"),
       "---\nname: manager\ndescription: Manages sub-agents\n---\nbody",
@@ -490,48 +491,47 @@ describe("interpolateTemplate {{availableTypes}}", () => {
       join(typesDir, "worker.md"),
       "---\nname: worker\ndescription: Implements a focused task\n---\nbody",
     );
-    await Bun.write(
-      join(typesDir, "_all.md"),
-      "---\nname: _all\nspawnable: false\ndescription: Layer file\n---\nbody",
-    );
 
     const template = "before\n\n{{availableTypes}}\n\nafter";
     const result = interpolateTemplate(template, baseCtx);
 
     expect(result).toContain("### Available Agent Types");
+    expect(result).toContain("`ib list-types`");
+    // `ib list-types` cuts each description at 60 characters.
+    expect(result).toContain("`ib show-type <name>`");
     expect(result).toContain('`ib new-agent --type <name> "task"`');
-    expect(result).toContain("`manager` — Manages sub-agents");
-    expect(result).toContain("`worker` — Implements a focused task");
-    // Layer files must not appear
-    expect(result).not.toContain("_all");
-    expect(result).not.toContain("Layer file");
+    // The installed types stay out of the prompt: the section must not grow
+    // with the number of types.
+    expect(result).not.toContain("Manages sub-agents");
+    expect(result).not.toContain("Implements a focused task");
     // Surrounding text preserved
     expect(result).toContain("before");
     expect(result).toContain("after");
   });
 
-  test("templates without {{availableTypes}} render unaffected when agent-types dir is empty", () => {
-    // HOME points at a tempdir whose agent-types directory exists but is empty.
-    // Eagerly invoking buildAvailableTypesSection would still succeed (the
-    // empty-types fallback message would be produced), but the rendered
-    // template shouldn't contain it because the placeholder isn't referenced.
+  test("the section has the same size whatever types are installed", async () => {
+    const empty = interpolateTemplate("{{availableTypes}}", baseCtx);
+    for (let i = 0; i < 20; i++) {
+      await Bun.write(
+        join(typesDir, `type${i}.md`),
+        `---\nname: type${i}\ndescription: A long description of agent type number ${i}\n---\nbody`,
+      );
+    }
+    expect(interpolateTemplate("{{availableTypes}}", baseCtx)).toBe(empty);
+  });
+
+  test("templates without {{availableTypes}} do not render the section", () => {
     const template = "{{agentId}} on {{parentBranch}}";
     const result = interpolateTemplate(template, baseCtx);
     expect(result).toBe("agent-abc123 on agent/agent-parent");
     expect(result).not.toContain("Available Agent Types");
   });
 
-  test("multiple {{availableTypes}} placeholders all expand to the same content", async () => {
-    await Bun.write(
-      join(typesDir, "manager.md"),
-      "---\nname: manager\ndescription: Manages\n---\nbody",
-    );
+  test("multiple {{availableTypes}} placeholders all expand to the same content", () => {
     const template = "{{availableTypes}}\n---\n{{availableTypes}}";
     const result = interpolateTemplate(template, baseCtx);
     const occurrences = result.split("### Available Agent Types").length - 1;
     expect(occurrences).toBe(2);
-    // Both copies must list the same type
-    expect(result.split("`manager` — Manages").length - 1).toBe(2);
   });
 });
 
@@ -546,54 +546,35 @@ describe("buildPathIsolationSection", () => {
     rootRepoPath: "/repo",
   };
 
-  test("worktree agent without paths shows the deny-by-default runtime roots", () => {
-    const ctx = { ...baseCtx };
-    const section = buildPathIsolationSection(ctx);
+  test("worktree agent gets the worktree root and the access rule, not path lists", () => {
+    const section = buildPathIsolationSection(baseCtx);
     expect(section).toContain("### Path Isolation");
     expect(section).toContain("You are isolated to your worktree at: /repo/.ittybitty/agents/agent-abc123/repo");
-    // Runtime roots the agent always gets, and the deny-by-default lists.
-    expect(section).toContain("Subject to denied paths and protected-file rules, runtime access includes:");
-    expect(section).toContain("your worktree (read and write)");
-    expect(section).toContain("your own agent.log");
-    expect(section).toContain("your Claude project directory and scratchpad");
-    expect(section).toContain("Read and write (allowWrite):");
-    expect(section).toContain("Read only (allowRead):");
-    expect(section).toContain("Denied (deny), overriding the lists above:");
-    expect(section).toContain("(none)");
+    expect(section).toContain("Your access is limited to your worktree and the paths your agent type needs.");
+    expect(section).toContain('If a path you need is blocked ("Access denied" or "Path violation")');
+    expect(section).toContain("or use a different path");
     expect(section).toContain("The main repo at /repo");
     expect(section).toContain("A bare `cd`");
+    // The resolved `paths:` lists stay out of the prompt: they follow the user's
+    // config and pushed the instructions over the hook additionalContext cap.
+    expect(section).not.toContain("allowRead");
+    expect(section).not.toContain("allowWrite");
+    expect(section).not.toContain("(none)");
     // The retired permissive language is gone.
     expect(section).not.toContain("~/.claude, /tmp, and general system paths");
     expect(section).not.toContain("additional paths");
   });
 
-  test("worktree agent with paths lists allowWrite, allowRead and deny", () => {
-    const ctx: SessionContext = {
-      ...baseCtx,
-      paths: {
-        allowWrite: ["/home/user/data"],
-        allowRead: ["/var/log"],
-        deny: ["/home/user/data/.env"],
-      },
-    };
-    const section = buildPathIsolationSection(ctx);
-    expect(section).toContain("Read and write (allowWrite):");
-    expect(section).toContain("/home/user/data");
-    expect(section).toContain("Read only (allowRead):");
-    expect(section).toContain("/var/log");
-    expect(section).toContain("Denied (deny), overriding the lists above:");
-    expect(section).toContain("/home/user/data/.env");
+  test("top-level agent is told to ask the user when a needed path is blocked", () => {
+    const section = buildPathIsolationSection(baseCtx);
+    expect(section).toContain("ask the user for help");
+    expect(section).not.toContain("your manager");
   });
 
-  test("worktree agent with empty paths lists shows (none) and the missing-list note", () => {
-    const ctx: SessionContext = {
-      ...baseCtx,
-      paths: { allowRead: [], allowWrite: [], deny: [] },
-    };
-    const section = buildPathIsolationSection(ctx);
-    expect(section).toContain("(none)");
-    expect(section).toContain("A missing `paths` block, or empty `allowRead` and `allowWrite` lists");
-    expect(section).not.toContain("~/.claude, /tmp, and general system paths");
+  test("sub-agent is told to ask its manager when a needed path is blocked", () => {
+    const section = buildPathIsolationSection({ ...baseCtx, agentManager: "agent-parent" });
+    expect(section).toContain("ask your manager for help");
+    expect(section).not.toContain("ask the user");
   });
 
   test("sandbox enabled states EPERM and the Denials tab", () => {
@@ -636,21 +617,18 @@ describe("buildPathIsolationSection", () => {
   );
 
   test.each(["codex:gpt-5.6-sol", "fugu:fugu", "agy:default"])(
-    "%s instructions omit Claude-only runtime roots", (model) => {
+    "%s instructions report the kernel sandbox ON", (model) => {
       const ctx = detectRole(baseCtx.worktreePath, { model, sandbox: { enabled: true } });
       const section = buildPathIsolationSection(ctx);
-      expect(section).not.toContain("your Claude project directory and scratchpad");
       // Mandatory sandbox: every CLI (agy included) is wrapped by the kernel now,
       // so the section reports the kernel ON — no agy-specific "unavailable" case.
       expect(section).toContain("kernel sandbox is ON");
     },
   );
 
-  test.each(["sonnet", "opus", "unknown"])("legacy %s metadata keeps Claude runtime instructions", (model) => {
+  test.each(["sonnet", "opus", "unknown"])("legacy %s metadata reports the kernel sandbox ON", (model) => {
     const section = buildPathIsolationSection(detectRole(baseCtx.worktreePath, { model }));
-    expect(section).toContain("your Claude project directory and scratchpad");
     expect(section).toContain("kernel sandbox is ON");
-    expect(section).toContain("Internal git and agent lifecycle operations");
   });
 
   test("non-worktree (coordinator) shows repo path and 'this repo' root", () => {
@@ -665,43 +643,9 @@ describe("buildPathIsolationSection", () => {
     };
     const section = buildPathIsolationSection(ctx);
     expect(section).toContain("You are working directly in the repo at: /repo");
-    expect(section).toContain("this repo (read and write)");
+    expect(section).toContain("Your access is limited to this repo and the paths your agent type needs.");
     expect(section).not.toContain("The main repo");
     expect(section).not.toContain("~/.claude, /tmp, and general system paths");
-  });
-
-  test("non-worktree coordinator with paths lists them", () => {
-    const ctx: SessionContext = {
-      role: "coordinator",
-      agentId: "coordinator",
-      agentManager: "",
-      parentBranch: "main",
-      branchName: "",
-      worktreePath: "",
-      rootRepoPath: "/repo",
-      paths: { allowRead: [], allowWrite: ["/data/shared"], deny: [] },
-    };
-    const section = buildPathIsolationSection(ctx);
-    expect(section).toContain("/data/shared");
-  });
-
-  test("detectRole parses paths from meta.json", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
-    const ctx = detectRole(cwd, {
-      id: "agent-abc12345",
-      manager: null,
-      worker: false,
-      paths: {
-        allowRead: ["/home/user/project"],
-        allowWrite: ["/tmp/shared"],
-        deny: ["/home/user/project/.env"],
-      },
-    });
-    expect(ctx.paths).toEqual({
-      allowRead: ["/home/user/project"],
-      allowWrite: ["/tmp/shared"],
-      deny: ["/home/user/project/.env"],
-    });
   });
 
   test("detectRole parses sandbox.enabled from meta.json", () => {
@@ -715,14 +659,13 @@ describe("buildPathIsolationSection", () => {
     expect(ctx.sandbox?.enabled).toBe(true);
   });
 
-  test("detectRole paths undefined when not in meta", () => {
+  test("detectRole sandbox undefined when not in meta", () => {
     const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: null,
       worker: false,
     });
-    expect(ctx.paths).toBeUndefined();
     expect(ctx.sandbox).toBeUndefined();
   });
 
@@ -735,11 +678,10 @@ describe("buildPathIsolationSection", () => {
       branchName: "agent/agent-abc123",
       worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
       rootRepoPath: "/repo",
-      paths: { allowRead: [], allowWrite: ["/home/user/data"], deny: [] },
     };
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("### Path Isolation");
-    expect(instructions).toContain("/home/user/data");
+    expect(instructions).toContain("ask the user for help");
   });
 
   test("worker instructions include buildPathIsolationSection", async () => {
@@ -751,11 +693,10 @@ describe("buildPathIsolationSection", () => {
       branchName: "agent/agent-def67890",
       worktreePath: "/repo/.ittybitty/agents/agent-def67890/repo",
       rootRepoPath: "/repo",
-      paths: { allowRead: ["/var/data"], allowWrite: [], deny: [] },
     };
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("### Path Isolation");
-    expect(instructions).toContain("/var/data");
+    expect(instructions).toContain("ask your manager for help");
   });
 });
 
@@ -965,6 +906,172 @@ describe("hookSessionStart — stale 'creating' state correction", () => {
     const stdin = JSON.stringify({ cwd: tempDir });
     await hookSessionStart(stdin);
     // No exception means pass.
+  });
+});
+
+describe("hookSessionStart — instructions over the hook context cap", () => {
+  let tempDir: string;
+  let originalWrite: typeof process.stdout.write;
+  let stdout: string;
+  let telegramCalls: Array<{ text: string; opts?: { awaitResult?: boolean } }>;
+
+  /** Write an agent type whose rendered instructions are `bodyChars` + a little. */
+  async function writeType(name: string, bodyChars: number): Promise<void> {
+    await Bun.write(
+      join(testHome, ".itsybitsy", "agent-types", `${name}.md`),
+      `---\nname: ${name}\ndescription: size test type\n---\n${"x".repeat(bodyChars)}`,
+    );
+  }
+
+  async function setupAgent(agentId: string, agentType: string, manager: string | null = null): Promise<{
+    agentDir: string;
+    cwd: string;
+  }> {
+    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const cwd = join(agentDir, "repo");
+    await mkdir(cwd, { recursive: true });
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify({ id: agentId, manager, agentType, state: "running" }),
+    );
+    return { agentDir, cwd };
+  }
+
+  async function readQuestions(): Promise<Array<{ agent: string; question: string; status: string }>> {
+    const file = Bun.file(join(tempDir, ".ittybitty", "user-questions.json"));
+    if (!(await file.exists())) return [];
+    return (await file.json()).questions;
+  }
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "ib-sessstart-cap-"));
+    stdout = "";
+    originalWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: unknown) => {
+      stdout += String(chunk);
+      return true;
+    }) as typeof process.stdout.write;
+    // The notifications are stubbed so the tests never speak or queue a real
+    // message. The Telegram stub also counts the raises: `say` runs on macOS only.
+    setSayRunner(() => {});
+    telegramCalls = [];
+    setAskQuestionTelegramRunner(async (text, opts) => {
+      telegramCalls.push({ text, opts });
+      return { ok: true, message: "" };
+    });
+    await writeType("oversized", HOOK_CONTEXT_CHAR_CAP);
+    await writeType("undersized", 100);
+  });
+
+  afterEach(async () => {
+    process.stdout.write = originalWrite;
+    resetSayRunner();
+    resetAskQuestionTelegramRunner();
+    await rm(join(testHome, ".itsybitsy", "agent-types", "oversized.md"), { force: true });
+    await rm(join(testHome, ".itsybitsy", "agent-types", "undersized.md"), { force: true });
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("raises a question from the agent, logs it, and still delivers the full instructions", async () => {
+    const { agentDir, cwd } = await setupAgent("agent-big", "oversized");
+    await hookSessionStart(JSON.stringify({ cwd }));
+
+    const instructions: string = JSON.parse(stdout).hookSpecificOutput.additionalContext;
+    expect(instructions.length).toBeGreaterThan(HOOK_CONTEXT_CHAR_CAP);
+
+    const questions = await readQuestions();
+    expect(questions).toHaveLength(1);
+    expect(questions[0]!.agent).toBe("agent-big");
+    expect(questions[0]!.status).toBe("pending");
+    expect(questions[0]!.question).toBe(oversizedInstructionsQuestion(instructions.length));
+    expect(questions[0]!.question).toContain("10,000-character limit");
+    expect(questions[0]!.question).toContain("possibly did not read the rest");
+
+    const log = await Bun.file(join(agentDir, "agent.log")).text();
+    expect(log).toContain(`[SessionStart] instructions are ${instructions.length} characters`);
+    // The notification is queued without the 1s wait for the outbox result:
+    // Claude Code waits for the hook process to exit.
+    expect(telegramCalls).toHaveLength(1);
+    expect(telegramCalls[0]!.opts).toEqual({ awaitResult: false });
+  });
+
+  test("raises the question on the explicit-id path (no-worktree agent from a nested cwd)", async () => {
+    const agentId = "agent-shared-big";
+    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const nested = join(tempDir, "packages", "feature");
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(nested, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: agentId,
+      manager: null,
+      worktree: false,
+      agentType: "oversized",
+      state: "waiting",
+    }));
+    setNoWorktreeRepoRootsLoader(async () => [tempDir]);
+    setBoundNoWorktreeCallerResolver(async () => ({
+      meta: await Bun.file(join(agentDir, "meta.json")).json(),
+      agentDir,
+      repoPath: tempDir,
+    }));
+    try {
+      await hookSessionStart(JSON.stringify({ cwd: nested }), agentId);
+    } finally {
+      resetNoWorktreeRepoRootsLoader();
+      resetBoundNoWorktreeCallerResolver();
+    }
+
+    const questions = await readQuestions();
+    expect(questions.map((q) => q.agent)).toEqual([agentId]);
+    expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("[SessionStart] instructions are");
+  });
+
+  test("raises the question for a sub-agent too (ib ask itself refuses agents with a manager)", async () => {
+    await setupAgent("agent-parent", "undersized");
+    const { cwd } = await setupAgent("agent-child", "oversized", "agent-parent");
+    await hookSessionStart(JSON.stringify({ cwd }));
+
+    const questions = await readQuestions();
+    expect(questions.map((q) => q.agent)).toEqual(["agent-child"]);
+  });
+
+  test("records the question once when the hook fires again (resume, /clear, compaction)", async () => {
+    const { cwd } = await setupAgent("agent-big", "oversized");
+    await hookSessionStart(JSON.stringify({ cwd }));
+    await hookSessionStart(JSON.stringify({ cwd }));
+    await hookSessionStart(JSON.stringify({ cwd }));
+
+    expect(await readQuestions()).toHaveLength(1);
+    expect(telegramCalls).toHaveLength(1);
+  });
+
+  test("raises nothing when the instructions are under the cap", async () => {
+    const { agentDir, cwd } = await setupAgent("agent-small", "undersized");
+    await hookSessionStart(JSON.stringify({ cwd }));
+
+    const instructions: string = JSON.parse(stdout).hookSpecificOutput.additionalContext;
+    expect(instructions.length).toBeLessThanOrEqual(HOOK_CONTEXT_CHAR_CAP);
+    expect(await readQuestions()).toEqual([]);
+    expect(await Bun.file(join(agentDir, "agent.log")).exists()).toBe(false);
+    expect(telegramCalls).toHaveLength(0);
+  });
+
+  test("still delivers the instructions when the question cannot be written", async () => {
+    const { cwd } = await setupAgent("agent-big", "oversized");
+    // A directory where the questions file belongs makes the write fail.
+    await mkdir(join(tempDir, ".ittybitty", "user-questions.json"), { recursive: true });
+    const originalErr = process.stderr.write.bind(process.stderr);
+    let stderr = "";
+    process.stderr.write = ((chunk: unknown) => { stderr += String(chunk); return true; }) as typeof process.stderr.write;
+    try {
+      await hookSessionStart(JSON.stringify({ cwd }));
+    } finally {
+      process.stderr.write = originalErr;
+    }
+
+    const instructions: string = JSON.parse(stdout).hookSpecificOutput.additionalContext;
+    expect(instructions.length).toBeGreaterThan(HOOK_CONTEXT_CHAR_CAP);
+    expect(stderr).toContain("session-start: could not flag oversized instructions");
   });
 });
 

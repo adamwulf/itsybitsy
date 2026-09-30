@@ -102,6 +102,24 @@ describe("InfoPanelComponent", () => {
       expect(gitLine()).not.toContain(YELLOW);
     });
 
+    test("shows the commit count inside the HEAD parentheses", () => {
+      const { panel, gitLine } = agentPanel();
+      panel.gitHead = "abc1234";
+      panel.gitCommitCount = 3;
+      expect(stripAnsi(gitLine())).toBe("● Git Status (abc1234, 3 commits)");
+      panel.gitCommitCount = 1;
+      expect(stripAnsi(gitLine())).toBe("● Git Status (abc1234, 1 commit)");
+      panel.gitCommitCount = 0;
+      expect(stripAnsi(gitLine())).toBe("● Git Status (abc1234, 0 commits)");
+    });
+
+    test("omits the commit count while it is unknown", () => {
+      const { panel, gitLine } = agentPanel();
+      panel.gitHead = "abc1234";
+      panel.gitCommitCount = null;
+      expect(stripAnsi(gitLine())).toBe("● Git Status (abc1234)");
+    });
+
     test("is not shown for the repo-info coordinator stoplights", () => {
       const panel = new InfoPanelComponent();
       panel.displayHeight = 10;

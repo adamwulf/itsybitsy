@@ -38,7 +38,7 @@ import {
 } from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { agentWorktreePath } from "../agents";
-import { checkWorktreeCleanliness, getWorktreeHead } from "../git-status";
+import { checkWorktreeCleanliness, getCommitsSinceParent, getWorktreeHead } from "../git-status";
 import { SplitPane } from "./split-pane";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { installTerminalCleanup } from "./terminal-cleanup";
@@ -1865,6 +1865,7 @@ export class DashboardComponent implements Component {
       // of waiting up to one gitStatusTimer tick.
       this.infoPanel.gitCleanliness = null;
       this.infoPanel.gitHead = null;
+      this.infoPanel.gitCommitCount = null;
       void this.refreshGitStatus();
 
       // Client detection: clear previous timer, check new agent
@@ -2093,20 +2094,26 @@ export class DashboardComponent implements Component {
     this.gitStatusInFlight = true;
     let cleanliness: Awaited<ReturnType<typeof checkWorktreeCleanliness>>;
     let head: string | null;
+    let commitCount: number | null;
     try {
       const worktreePath = agentWorktreePath(agent);
-      [cleanliness, head] = await Promise.all([
+      // Same parent rule as `ib status` / `ib diff`.
+      const parentBranch = agent.meta.manager ? `agent/${agent.meta.manager}` : "main";
+      [cleanliness, head, commitCount] = await Promise.all([
         checkWorktreeCleanliness(worktreePath),
         getWorktreeHead(worktreePath),
+        getCommitsSinceParent(worktreePath, parentBranch),
       ]);
     } finally {
       this.gitStatusInFlight = false;
     }
     if (this.infoPanel.agent?.id !== agent.id ||
         agentWorktreePath(this.infoPanel.agent) !== agentWorktreePath(agent)) return;
-    if (this.infoPanel.gitCleanliness === cleanliness && this.infoPanel.gitHead === head) return;
+    if (this.infoPanel.gitCleanliness === cleanliness && this.infoPanel.gitHead === head &&
+        this.infoPanel.gitCommitCount === commitCount) return;
     this.infoPanel.gitCleanliness = cleanliness;
     this.infoPanel.gitHead = head;
+    this.infoPanel.gitCommitCount = commitCount;
     this.tui?.requestRender();
   }
 

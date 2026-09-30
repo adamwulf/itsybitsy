@@ -43,6 +43,23 @@ export async function getWorktreeHead(cwd: string): Promise<string | null> {
 }
 
 /**
+ * Count the commits on the worktree's HEAD since its merge base with
+ * `parentBranch` — the commits HEAD has that the parent does not. `null` when
+ * git fails, e.g. the parent branch no longer exists.
+ */
+export async function getCommitsSinceParent(cwd: string, parentBranch: string): Promise<number | null> {
+  try {
+    const { stdout, exitCode } = await gitStatusSpawnCtx.run([
+      "git", "-C", cwd, "rev-list", "--count", `${parentBranch}..HEAD`,
+    ]);
+    const count = stdout.trim();
+    return exitCode === 0 && /^\d+$/.test(count) ? parseInt(count, 10) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Probe `cwd` for uncommitted work. Never throws — a missing directory (an
  * archived agent whose worktree is gone), a non-git directory, or a failing
  * `git` all resolve to `null`.

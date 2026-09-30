@@ -11,6 +11,7 @@ import { visibleWidth } from "@mariozechner/pi-tui";
 import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setNewAgentCallerMetaReader, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner, sealAgentRecord } from "../ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxPollerSpawnCtx } from "../tmux-poller";
+import { gitStatusSpawnCtx } from "../git-status";
 import { IB_COORDINATOR_SESSION } from "../coordinator";
 import { setUserConfigPath, resetUserConfigPath } from "../config";
 import { setUserHome, resetUserHome } from "../home";
@@ -6523,5 +6524,86 @@ describe("pinned-width resize side-effects", () => {
     expect(tmux.forSession(IB_COORDINATOR_SESSION)).toEqual([
       { session: IB_COORDINATOR_SESSION, width: 1000 },
     ]);
+  });
+});
+
+describe("Git Status commit count (§11.4)", () => {
+  afterEach(() => {
+    gitStatusSpawnCtx.reset();
+  });
+
+  /**
+   * Fake git for the Git Status probes. Returns the array it records every
+   * `rev-list` range into, and answers 5 for a range against `main` and 3 for
+   * a range against a manager's branch, so a test can tell the two apart.
+   */
+  function fakeGit(): string[] {
+    const ranges: string[] = [];
+    gitStatusSpawnCtx.set((cmd: string[]) => {
+      if (cmd.includes("rev-list")) {
+        const range = cmd[cmd.length - 1]!;
+        ranges.push(range);
+        return makeSpawnResult(0, range.startsWith("main..") ? "5\n" : "3\n");
+      }
+      if (cmd.includes("rev-parse")) return makeSpawnResult(0, "abc1234\n");
+      return makeSpawnResult(0, "");
+    });
+    return ranges;
+  }
+
+  test("counts against the manager's branch for an agent with a manager", async () => {
+    const ranges = fakeGit();
+    const dashboard = makeDashboard();
+    const child = makeAgent("agent-child", "/tmp/repo-git-count");
+    child.meta.manager = "agent-mgr";
+    dashboard.onUpdate([child], [makeFlatAgent(child)], []);
+
+    await waitFor(() => dashboard.infoPanel.gitCommitCount === 3, {
+      timeoutMs: WAIT_TIMEOUT_MS,
+      message: "the commit count against the manager's branch",
+    });
+    expect(ranges).toEqual(["agent/agent-mgr..HEAD"]);
+    expect(dashboard.infoPanel.gitHead).toBe("abc1234");
+  });
+
+  test("counts against main for an agent with no manager", async () => {
+    const ranges = fakeGit();
+    const dashboard = makeDashboard();
+    const top = makeAgent("agent-top", "/tmp/repo-git-count");
+    top.meta.manager = null;
+    dashboard.onUpdate([top], [makeFlatAgent(top)], []);
+
+    await waitFor(() => dashboard.infoPanel.gitCommitCount === 5, {
+      timeoutMs: WAIT_TIMEOUT_MS,
+      message: "the commit count against main",
+    });
+    expect(ranges).toEqual(["main..HEAD"]);
+  });
+
+  test("a selection change clears the count, then probes the new agent", async () => {
+    const ranges = fakeGit();
+    const dashboard = makeDashboard();
+    const top = makeAgent("agent-top", "/tmp/repo-git-count");
+    top.meta.manager = null;
+    const child = makeAgent("agent-child", "/tmp/repo-git-count");
+    child.meta.manager = "agent-mgr";
+    dashboard.onUpdate([top, child], [makeFlatAgent(top), makeFlatAgent(child)], []);
+    await waitFor(() => dashboard.infoPanel.gitCommitCount === 5, {
+      timeoutMs: WAIT_TIMEOUT_MS,
+      message: "the first agent's commit count",
+    });
+
+    dashboard.agentTree.moveSelection(1);
+    dashboard.syncSelectedAgent();
+    // Reset is synchronous: the previous agent's count never shows for the new one.
+    expect(dashboard.infoPanel.agent?.id).toBe("agent-child");
+    expect(dashboard.infoPanel.gitCommitCount).toBeNull();
+    expect(dashboard.infoPanel.gitHead).toBeNull();
+
+    await waitFor(() => dashboard.infoPanel.gitCommitCount === 3, {
+      timeoutMs: WAIT_TIMEOUT_MS,
+      message: "the second agent's commit count",
+    });
+    expect(ranges).toEqual(["main..HEAD", "agent/agent-mgr..HEAD"]);
   });
 });

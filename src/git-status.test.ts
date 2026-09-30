@@ -108,6 +108,13 @@ describe("getCommitsSinceParent", () => {
     expect(await getCommitsSinceParent("/wt", "main")).toBe(0);
   });
 
+  test("returns null for empty output — the shape of the bun test safety stub", async () => {
+    // Every dashboard test reaches this probe through the preload stub (exit 0,
+    // stdout ""); it must read as unknown, never as "0 commits".
+    gitStatusSpawnCtx.set(fakeSpawn(() => ({ stdout: "" })).fn);
+    expect(await getCommitsSinceParent("/wt", "main")).toBeNull();
+  });
+
   test("returns null when git exits non-zero (parent branch is gone)", async () => {
     gitStatusSpawnCtx.set(fakeSpawn(() => ({
       stderr: "fatal: ambiguous argument 'agent/agent-gone..HEAD'",

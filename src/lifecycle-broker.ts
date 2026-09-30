@@ -38,7 +38,10 @@
  * Every agent can write its OWN meta.json, and the seal covers only
  * `agentType`, `canSpawnChildren`, `paths` and `sandbox`. So nothing here trusts
  * an unsealed field of the requester's meta:
- *   - an agent is never its own target (its `manager` field is its own to write);
+ *   - the target is the directory entry named exactly by the request, whose
+ *     meta.json carries the same id — `meta.id` alone identifies nothing;
+ *   - an agent is never its own target (its `manager` field is its own to
+ *     write), compared by directory as well as by id;
  *   - the rule gets the verified meta and does not read the file again;
  *   - a merge always lands in `<agentDir>/repo`, never where `meta.worktree`
  *     points, and the request cannot name a directory;
@@ -52,7 +55,7 @@
  */
 
 import { randomBytes } from "crypto";
-import { lstat } from "fs/promises";
+import { lstat, realpath } from "fs/promises";
 import { basename, join, resolve } from "path";
 import { readAllAgents, type Agent } from "./agents";
 import {
@@ -293,12 +296,31 @@ async function authorizeLifecycle(
   return decision ? decision.reason : null;
 }
 
-/** Resolve an exact agent id inside one repository only. */
+/**
+ * Resolve an exact agent id inside one repository only. The record must be the
+ * one stored in the directory ENTRY named exactly `agentId`, and its own
+ * `meta.id` must say the same. `meta.id` alone is not an identity: an agent can
+ * write its own meta.json. readAllAgents lists real directories under their
+ * on-disk names, so neither a case variant of an id (macOS volumes are
+ * case-insensitive), nor a symlink, nor a record that claims another agent's
+ * id can match.
+ */
 async function findAgentInRepo(repoPath: string, agentId: string): Promise<Agent | null> {
   const repo = (await listRepos()).find((entry) => resolve(entry.path) === resolve(repoPath));
   const name = repo ? repoDisplayName(repo) : basename(repoPath);
   const { agents } = await readAllAgents([{ path: repoPath, name }], false);
-  return agents.find((agent) => agent.id === agentId) ?? null;
+  const directory = join(repoPath, ".ittybitty", "agents", agentId);
+  return agents.find((agent) => agent.storageDir === directory && agent.id === agentId) ?? null;
+}
+
+/** Do two paths name the same directory? Unknown (either cannot be resolved) counts as yes. */
+async function isSameDirectory(a: string, b: string): Promise<boolean> {
+  try {
+    const [resolvedA, resolvedB] = await Promise.all([realpath(a), realpath(b)]);
+    return resolvedA === resolvedB;
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -327,28 +349,42 @@ export async function handleLifecycleRequest(
 
   const seams = deps.lifecycle ?? {};
   const agentsDir = join(ctx.repoPath, ".ittybitty", "agents");
-  try {
-    const denied = await (seams.authorize ?? authorizeLifecycle)(
+  const authorize = (): Promise<string | null> =>
+    (seams.authorize ?? authorizeLifecycle)(
       op,
       target,
       ctx.agentId,
       agentsDir,
       requester.meta as unknown as Record<string, unknown>,
     );
-    if (denied) return brokerFail(denied);
-
+  try {
     // A rehire target is an archive, not an active agent. Only the requester's
-    // own repo is searched.
+    // own repo is searched, and only its archive decides.
     if (op === "rehire") {
+      const denied = await authorize();
+      if (denied) return brokerFail(denied);
       return await (seams.rehire ?? rehireAgent)(target, { repoPath: ctx.repoPath });
     }
 
+    // Resolve the target FIRST, by its directory. Everything after this point
+    // — the rule's read of the target's meta.json and the command itself —
+    // then acts on a directory that is known to exist under exactly this name
+    // and is known not to be the requester's own.
     const agent = await (seams.findAgent ?? findAgentInRepo)(ctx.repoPath, target);
     if (!agent) {
       return brokerFail(
         `Error: agent '${target}' is not in the repository of '${ctx.agentId}'; a sandboxed agent can ${op} only agents in its own repo`,
       );
     }
+    // The string compare above is not enough on a case-insensitive volume,
+    // where `Agent-X` opens the directory of `agent-x`.
+    if (await isSameDirectory(agent.storageDir ?? join(agentsDir, target), ctx.agentDir)) {
+      return brokerFail(`Error: '${ctx.agentId}' cannot ${op} itself`);
+    }
+
+    const denied = await authorize();
+    if (denied) return brokerFail(denied);
+
     if (op === "merge") {
       // The merge lands in the requester's own worktree, always. The directory
       // is fixed by the agent's id — not by the request, and not by

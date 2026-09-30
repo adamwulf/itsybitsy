@@ -373,11 +373,65 @@ describe("lifecycle broker", () => {
     });
 
     test("a target that exists nowhere is refused", async () => {
-      const { deps, retired } = server();
+      const { deps, retired } = server({ findAgent: undefined });
       await queue(ID_A, retireRequest(ID_A));
       await processSpawnRequests(MANAGER_ID, repo, deps);
       expect(retired).toEqual([]);
-      expect((await result(ID_A)).stderr).toContain("not found in any registered repo");
+      expect((await result(ID_A)).stderr).toContain(`agent '${CHILD_ID}' is not in the repository of '${MANAGER_ID}'`);
+    });
+
+    // ── the target is a directory entry, not an `id` in somebody's meta.json ──
+
+    test("a case variant of the requester's own id is not a target", async () => {
+      // On a case-insensitive volume `agents/Agent-Manager` opens the
+      // requester's own directory. The requester then rewrites its own
+      // meta.json (after the seal check, which used the `readMeta` copy) so the
+      // record reads as that variant, with itself as manager.
+      const variant = "Agent-Manager";
+      await writeAgent(MANAGER_ID, { id: variant, manager: MANAGER_ID });
+      await mkdir(join(agentDir, "repo"));
+      for (const op of ["retire", "merge"] as const) {
+        const { deps, retired, merged } = server({ findAgent: undefined });
+        await queue(ID_A, retireRequest(ID_A, { op, target: variant }));
+        await processSpawnRequests(MANAGER_ID, repo, deps);
+        expect([retired, merged]).toEqual([[], []]);
+        expect((await result(ID_A)).stderr).toContain(`agent '${variant}' is not in the repository of '${MANAGER_ID}'`);
+      }
+    });
+
+    test("a record that claims another agent's id is not that agent", async () => {
+      await writeAgent("agent-imposter", { id: CHILD_ID, manager: MANAGER_ID });
+      const { deps, retired } = server({ findAgent: undefined });
+      await queue(ID_A, retireRequest(ID_A));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain(`agent '${CHILD_ID}' is not in the repository of '${MANAGER_ID}'`);
+
+      // With the real child present, the real child's directory is the target.
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      await queue(ID_A, retireRequest(ID_A));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired.map((agent) => agent.storageDir)).toEqual([join(agentsDir, CHILD_ID)]);
+    });
+
+    test("a target that resolves to the requester's own directory is refused", async () => {
+      // Another name for the requester's directory (here a symlink).
+      await symlink(agentDir, join(agentsDir, "alias"));
+      const { deps, retired } = server({ authorize: async () => null });
+      await queue(ID_A, retireRequest(ID_A, { target: "alias" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired).toEqual([]);
+      expect((await result(ID_A)).stderr).toBe(`Error: '${MANAGER_ID}' cannot retire itself`);
+    });
+
+    test("the production lookup does not follow a symlink in the agents directory", async () => {
+      await writeAgent(MANAGER_ID, { manager: MANAGER_ID });
+      await symlink(agentDir, join(agentsDir, "alias"));
+      const { deps, retired } = server({ findAgent: undefined });
+      await queue(ID_A, retireRequest(ID_A, { target: "alias" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain("agent 'alias' is not in the repository");
     });
 
     test("a permitted target outside the caller's repo is refused", async () => {
@@ -390,6 +444,7 @@ describe("lifecycle broker", () => {
 
     test("the caller is the watchdog's own agent and its verified meta, whatever the request says", async () => {
       const seen: Array<{ callerId: string; callerMeta: Record<string, unknown> }> = [];
+      await writeAgent(CHILD_ID, { manager: "someone-else" });
       const { deps } = server({
         authorize: async (_op, _target, callerId, _agentsDir, callerMeta) => { seen.push({ callerId, callerMeta }); return null; },
       });

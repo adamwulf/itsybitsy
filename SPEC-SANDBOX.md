@@ -1121,7 +1121,8 @@ and `--model` were refused, and both queue directories were left empty.
    broker (§4C.7).
 2. `worktree:false` agents resolve as callers by process ancestry
    (`ps` must work inside the sandbox); if it does not, `ib new-agent` reports
-   the verification error instead of spawning.
+   the verification error instead of spawning. Even when it does, such an agent
+   has no live per-agent watchdog to ask — see §4C.7 limitation 3.
 3. The child sandbox preflight (profile lint, port allocation) now runs in the
    unsandboxed watchdog for brokered spawns, so it is no longer subject to the
    nested-sandbox and bind denials above.
@@ -1188,26 +1189,37 @@ broker's. `src/lifecycle-broker.ts` adds:
   hook:** the watchdog runs the PreToolUse hook's manager rule itself, so only
   the target's manager or spawner — or the repo's coordinator for `retire` and
   `rehire` — passes. The hook alone cannot carry this, because a sandboxed agent
-  can write a request file without running `ib`. The target is then resolved by
-  exact id inside the requester's OWN repo (a sandboxed agent manages agents
-  only in its repo, matching the `--repo` refusal for spawns) and the normal
-  `retireAgent()`, `mergeAgent()` or `rehireAgent()` runs.
+  can write a request file without running `ib`. The target is resolved inside
+  the requester's OWN repo only (a sandboxed agent manages agents only in its
+  repo, matching the `--repo` refusal for spawns). The order for `retire` and
+  `merge` is: parse, verify the requester, resolve the target, refuse a
+  self-target, authorize, run the normal `retireAgent()` / `mergeAgent()`. A
+  `rehire` has no active target: authorize, then `rehireAgent()`.
 - **Nothing rests on an unsealed field of the requester's meta.** `AGENTDIR` is
   a write root for every agent, so every agent can write its own `meta.json`,
   and the seal covers only `agentType`, `canSpawnChildren`, `paths` and
-  `sandbox`. Four rules follow:
-  1. *An agent is never its own target.* The rule reads `manager` from the
+  `sandbox`. Five rules follow:
+  1. *The target is a directory entry, not an `id` in a `meta.json`.* For
+     `retire` and `merge` the target is resolved before anything else: it must
+     be the real directory named exactly `<repo>/.ittybitty/agents/<target>`
+     (as `readdir` spells it — a case variant or a symlink does not count),
+     and the `meta.json` in it must carry the same id. `meta.id` is unsealed
+     too, and `readAllAgents` reports it as the agent's id.
+  2. *An agent is never its own target.* The rule reads `manager` from the
      target's `meta.json`; for a self-target that is the requester's own file.
-  2. *The rule is called with structured arguments* —
+     The comparison is by id and then by resolved directory, because on a
+     case-insensitive volume (the macOS default) `Agent-X` opens the directory
+     of `agent-x`.
+  3. *The rule is called with structured arguments* —
      `checkManagerCommandAccess(op, target, caller, agentsDir, opts)` in
      `src/hooks/agent-path.ts`, the body of `checkIbCommandAccess` — not with a
      synthesized command line. On a command line a target such as `-v` reads as
      a flag and the hook rule makes no decision; here null means "allowed" and
      nothing else, and a command the rule does not gate is denied.
-  3. *The rule gets the verified meta* (`opts.callerMeta`) and does not read the
+  4. *The rule gets the verified meta* (`opts.callerMeta`) and does not read the
      requester's file a second time, so the coordinator authority is the sealed
      `agentType`, not whatever is on disk a moment after the seal check.
-  4. *A rehire is decided from the archive of the requester's repo only*
+  5. *A rehire is decided from the archive of the requester's repo only*
      (`opts.ownArchiveOnly`). An active `agents/<id>/meta.json` is ignored: a
      spawner could write one.
 - **Merge** — the merge always lands in `<agentDir>/repo`, the requester's own

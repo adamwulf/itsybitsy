@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { parseState, parseStateForCli, isAgyTmuxOutput, stripAnsi, STARTUP_MARKERS } from "./parse-state";
+import { parseState, parseStateForCli, isAgyTmuxOutput, isCodexStatusLine, stripAnsi, STARTUP_MARKERS } from "./parse-state";
 
 describe("Antigravity background tasks", () => {
   test("UI-shaped task quotes without an agy footer do not select the agy parser", () => {
@@ -551,6 +551,59 @@ describe("parseState", () => {
         "  gpt-5.5 default · /repo",
       ].join("\n");
       expect(parseState(input).state).toBe("waiting");
+    });
+
+    test("codex idle-at-prompt with a display-cased model and right-aligned warnings (real captured sample)", () => {
+      // Newer codex renders "GPT-6.1-Sol" (not "gpt-6.1-sol") and right-aligns a
+      // warnings segment at the pinned pane width.
+      const footer = "  GPT-6.1-Sol high · Context 48% left · weekly 46% left" + " ".repeat(900) + "⚠ 5 warnings · f2 to view";
+      expect(isCodexStatusLine(footer)).toBe(true);
+      const input = [
+        "• Four moves are ready for manual review.",
+        "",
+        "  Worked for 1m 56s • 11:08 AM",
+        " ",
+        " ",
+        "› Ask Codex to do anything",
+        " ",
+        footer,
+      ].join("\n");
+      expect(parseState(input).state).toBe("waiting");
+    });
+
+    test("codex draft-in-composer footer is a status line (real captured sample)", () => {
+      // While a turn runs with text in the composer, a key hint replaces the
+      // status line: no model name and no "·", only the right-aligned gauge.
+      const footer = "  tab to queue message" + " ".repeat(900) + "29% context left";
+      expect(isCodexStatusLine(footer)).toBe(true);
+      expect(isCodexStatusLine("29% context left")).toBe(true);
+      // Prose that only mentions the gauge is not a footer.
+      expect(isCodexStatusLine("• The agent has 29% context left")).toBe(false);
+      const input = [
+        "• Working (3m 32s • esc to interrupt)",
+        " ",
+        " ",
+        "› [sent by agent muse-build-helper]: not running this one.",
+        " ",
+        footer,
+      ].join("\n");
+      expect(parseState(input).state).toBe("running");
+    });
+
+    test("codex draft-in-composer footer reads running when a long draft hides the Working line", () => {
+      // A multi-line `ib send` sits in the composer as one logical line per
+      // newline until Enter. 12 draft lines push the Working line out of the
+      // last-15 window; the queue-message footer must still read as running.
+      const input = [
+        "• Working (3m 32s • esc to interrupt)",
+        " ",
+        " ",
+        "› [sent by agent package-audit]: first line of a long message",
+        ...Array.from({ length: 11 }, (_, i) => `  draft line ${i + 2}`),
+        " ",
+        "  tab to queue message" + " ".repeat(900) + "29% context left",
+      ].join("\n");
+      expect(parseState(input).state).toBe("running");
     });
 
     // F1 (false-positive direction): a recovered agent whose stale banner has

@@ -330,11 +330,13 @@ function hasAgyBarePromptBetweenSeparators(input: string): boolean {
  *
  * Priority order (mirrors claude's intent):
  *   1. Active work marker ("Working (... esc to interrupt)") in last 15 lines → running.
- *   2. Completion sentinel ("I HAVE COMPLETED THE GOAL") in last 15 lines (excluding quoted) → complete.
- *   3. Standalone WAITING marker in last 15 lines → waiting.
- *   4. Idle at codex input prompt (a line starting with "›" near the tail AND a status-bar
+ *   2. Queue-message footer ("tab to queue message ...") on the last non-blank line → running.
+ *   3. Completion sentinel ("I HAVE COMPLETED THE GOAL") in last 15 lines (excluding quoted) → complete.
+ *   4. Standalone WAITING marker in last 15 lines → waiting.
+ *   5. Usage-limit message ("hit your usage limit") in last 15 lines → rate_limited.
+ *   6. Idle at codex input prompt (a line starting with "›" near the tail AND a status-bar
  *      line at the very end) → waiting.
- *   5. Default → unknown.
+ *   7. Default → unknown.
  */
 export function parseCodexState(input: string): ParseStateResult {
   if (!input || input.trim() === "") {
@@ -348,6 +350,16 @@ export function parseCodexState(input: string): ParseStateResult {
   // "›" prompt/status bar, otherwise active agents are misclassified as idle.
   if (/\bWorking\s*\([^)]*(?:esc|ctrl\+c) to interrupt/i.test(last15)) {
     return { state: "running", reason: "codex Working interrupt marker in last 15 lines" };
+  }
+
+  // Codex shows the "tab to queue message" footer only while a turn runs with a
+  // draft in the composer. A long multi-line draft (a multi-line `ib send` that
+  // is not yet submitted) pushes the Working line out of the last-15 window, so
+  // this footer is the only running signal left.
+  const tailLines = stripTrailingBlanks(input.split("\n"));
+  const last = tailLines[tailLines.length - 1] ?? "";
+  if (/^tab to queue message\b/i.test(last.trim())) {
+    return { state: "running", reason: "codex queue-message footer (turn running with a draft)" };
   }
 
   // Completion signal — exclude quoted occurrences (in watchdog nudge prompts)
@@ -389,8 +401,6 @@ export function parseCodexState(input: string): ParseStateResult {
   // then inspect the tail block after it. Codex can wrap long typed prompts
   // across many terminal lines, so fixed "last 5 lines" prompt lookbacks are
   // brittle.
-  const tailLines = stripTrailingBlanks(input.split("\n"));
-  const last = tailLines[tailLines.length - 1] ?? "";
   const hasStatusBar = isCodexStatusLine(last);
   if (hasStatusBar) {
     const promptIndex = findLastCodexPromptIndex(tailLines);
@@ -398,8 +408,9 @@ export function parseCodexState(input: string): ParseStateResult {
       return { state: "waiting", reason: "idle at codex input prompt" };
     }
     // Even without a "›" in the last 5 lines, a trailing status bar alone is a
-    // strong signal of idle — codex only renders the status bar when the prompt
-    // is interactive. Fall through to a softer waiting verdict.
+    // strong signal of idle. The one footer codex shows only during a turn (the
+    // queue-message hint) already returned running above. Fall through to a
+    // softer waiting verdict.
     return { state: "waiting", reason: "codex status bar at tail (no visible › in last 5)" };
   }
 
@@ -413,10 +424,22 @@ function findLastCodexPromptIndex(lines: string[]): number {
   return -1;
 }
 
+/**
+ * Recognise codex's bottom footer line. Three real shapes (captured samples):
+ *   - "gpt-6-astra high · Context 66% left · weekly 46% left" — the status line.
+ *   - "GPT-6.1-Sol high · Context 48% left · weekly 46% left   ⚠ 5 warnings · f2 to view"
+ *     — newer codex display-cases the model name and right-aligns a warnings
+ *     segment, so the model prefix is matched case-insensitively.
+ *   - "tab to queue message      29% context left" — while a turn runs with a
+ *     draft in the composer, a key hint replaces the status line and the context
+ *     gauge moves to the right edge. There is no model name and no "·" here, so
+ *     the right-aligned "<n>% context left" is the anchor.
+ */
 export function isCodexStatusLine(line: string): boolean {
   const trimmed = line.trim();
+  if (/(?:^|\s{2})\d{1,3}%\s+context left$/i.test(trimmed)) return true;
   if (!trimmed.includes("·")) return false;
-  if (!/^(?:gpt|codex)-[A-Za-z0-9._-]+(?:\s+\S+)?\s+·\s+/.test(trimmed)) return false;
+  if (!/^(?:gpt|codex)-[A-Za-z0-9._-]+(?:\s+\S+)?\s+·\s+/i.test(trimmed)) return false;
   if (/\s·\s+(?:~|\/)/.test(trimmed)) return true;
   return /\bContext\s+\d+%|\b\d+[hm]\b.*\bleft\b|\bweekly\b.*\bleft\b/.test(trimmed);
 }

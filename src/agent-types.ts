@@ -839,8 +839,9 @@ export function listAgentTypeNamesSync(): string[] {
 
 /**
  * Synchronously list spawnable agent types as `{name, description}` pairs.
- * Used by both the new-agent UI cyclers (which only care about names) and
- * session-start templates that render the `{{availableTypes}}` placeholder.
+ * Used by the new-agent UI cyclers (which only care about names). The
+ * session-start `{{availableTypes}}` placeholder no longer lists the types; it
+ * points agents at `ib list-types`.
  *
  * Performs a single lightweight scan of each `.md` file's frontmatter to
  * extract `spawnable` and `description` together — no full parse is

@@ -4313,9 +4313,10 @@ describe("resumeAgent (native)", () => {
       expect(hooks.ittybitty.PreToolUse[0].hooks[0].command).toContain("hooks agy-pre-tool-use agent-agy-ok");
       const rule = await Bun.file(join(agentDir, "repo", ".agents", "rules", "ittybitty-agent.md")).text();
       expect(rule.startsWith("---\ntrigger: always_on")).toBe(true);
-      expect(rule).toContain("/frozen/agy/read");
-      expect(rule).toContain("/frozen/agy/write");
-      expect(rule).toContain("**/agy-secret");
+      // The rule does not print the frozen path lists.
+      expect(rule).not.toContain("/frozen/agy/read");
+      expect(rule).not.toContain("/frozen/agy/write");
+      expect(rule).not.toContain("**/agy-secret");
       // Mandatory sandbox: agy is now wrapped by the kernel like every other CLI.
       expect(rule).toContain("The kernel sandbox is ON");
 
@@ -6759,10 +6760,12 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(start).not.toContain("-D 'SCRATCHPAD=");
     expect(profile).not.toContain('param "PROJECTDIR"');
     expect(profile).not.toContain('param "SCRATCHPAD"');
-    expect(instructions).toContain(canonicalizeSandboxPath(tempDir));
-    expect(instructions).toContain("**/.env");
+    // The role text states the rule and the sandbox state; it does not print
+    // the resolved path lists (they pushed Claude's SessionStart text over the
+    // 10,000-character additionalContext cap).
+    expect(instructions).toContain("the paths your agent type needs");
+    expect(instructions).not.toContain("**/.env");
     expect(instructions).toContain("The kernel sandbox is ON");
-    expect(instructions).not.toContain("your Claude project directory and scratchpad");
     expect(dispatcherDryRunCalls.length).toBeGreaterThanOrEqual(3);
     expect(spawnCalls.some((call) => call[0] === "codex")).toBe(false);
   });
@@ -7148,8 +7151,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const agentDir = join(agentsDir, id);
     const startInstructions = await codexHookRoleText(id, agentDir);
     expect(startInstructions).toContain("The kernel sandbox is ON");
-    expect(startInstructions).toContain(canonicalizeSandboxPath(oldRead));
     const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    expect(meta.paths!.allowRead).toContain(canonicalizeSandboxPath(oldRead));
     meta.state = "stopped";
     meta.codex_session_id = "019e7b21-cb7d-7f23-8674-11036ed141ef";
     meta.sandbox_proxy_pid = 99_999_999;
@@ -7172,10 +7175,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(result.ok).toBe(true);
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     const text = await codexHookRoleText(id, agentDir);
-    expect(text).toContain(canonicalizeSandboxPath(newRead));
-    expect(text).not.toContain(canonicalizeSandboxPath(oldRead));
     expect(text).toContain("The itsybitsy kernel sandbox is OFF");
-    expect(text).not.toContain("your Claude project directory and scratchpad");
     expect(resume).not.toContain("sandbox-exec");
     expect(resume).not.toContain("sandbox-proxy-launch");
     expect(resume).not.toContain("sandbox-log-watch");
@@ -7183,6 +7183,10 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(resume).not.toContain("-s danger-full-access");
     expect(resume).toContain("hooks.PreToolUse");
     const refreshedMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    // The role text does not print the path lists, so the refreshed paths are
+    // checked in meta.json; the sandbox line above proves the role text followed.
+    expect(refreshedMeta.paths.allowRead).toContain(canonicalizeSandboxPath(newRead));
+    expect(refreshedMeta.paths.allowRead).not.toContain(canonicalizeSandboxPath(oldRead));
     expect(refreshedMeta.sandbox.enabled).toBe(false);
     expect(refreshedMeta.sandbox_proxy_port).toBeUndefined();
     expect(refreshedMeta.sandbox_proxy_pid).toBeUndefined();
@@ -11844,7 +11848,7 @@ body`,
       expect(await Bun.file(settingsPath).exists()).toBe(false);
     });
 
-    test("writes .agents/hooks.json + the always-on rule file with resolved path policy", async () => {
+    test("writes .agents/hooks.json + the always-on rule file with the resolved sandbox state", async () => {
       const readPath = join(tempDir, "agy-read-root");
       const writePath = join(tempDir, "agy-write-root");
       await writeAgentTypeFile("agy-instructions", `---
@@ -11872,9 +11876,12 @@ sandbox:
       expect(hooks.ittybitty.PreToolUse[0].hooks[0].command).toContain("hooks agy-pre-tool-use agy-worktree-files");
       const rule = await Bun.file(join(worktree, ".agents", "rules", "ittybitty-agent.md")).text();
       expect(rule.startsWith("---\ntrigger: always_on")).toBe(true);
-      expect(rule).toContain(canonicalizeSandboxPath(readPath));
-      expect(rule).toContain(canonicalizeSandboxPath(writePath));
-      expect(rule).toContain("**/agy-denied");
+      // The rule states the access rule and the resolved sandbox state. It does
+      // not print the resolved path lists.
+      expect(rule).toContain("the paths your agent type needs");
+      expect(rule).not.toContain("agy-read-root");
+      expect(rule).not.toContain("agy-write-root");
+      expect(rule).not.toContain("**/agy-denied");
       expect(rule).toContain("The itsybitsy kernel sandbox is OFF");
     });
 

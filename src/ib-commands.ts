@@ -2009,7 +2009,6 @@ export async function resumeAgent(
         spawned_by: agent.meta.spawned_by ?? undefined,
         // Resume must describe the policy frozen in this agent's metadata,
         // not today's type files or the detectRole defaults.
-        paths: agent.meta.paths,
         sandbox: agent.meta.sandbox,
       }, agent.id);
       try {
@@ -7113,7 +7112,6 @@ export async function newAgent(
         worker: isLeafAgent,
         agentType: typeName,
         spawned_by: spawnedBy ?? undefined,
-        paths: resolvedPathsConfig,
         sandbox: resolvedSandboxConfig,
       }, id);
       try {

@@ -1,6 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
 import { parseAgentTypeFile, loadAgentType, listAgentTypes, ensureAgentTypesDir, initAgentTypes, checkAgentTypeFloors, agentTypeExists, validateAllAgentTypes, listSpawnableAgentTypesSync, listSpawnableTypeNamesSync, metaCanSpawnChildren } from "./agent-types";
-import { buildAvailableTypesSection } from "./hooks/session-start";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -1431,7 +1430,7 @@ body`);
   });
 });
 
-describe("buildAvailableTypesSection / listSpawnableAgentTypesSync", () => {
+describe("listSpawnableAgentTypesSync", () => {
   let tempHome: string;
   let typesDir: string;
 
@@ -1515,55 +1514,6 @@ body`);
 
     const types = listSpawnableAgentTypesSync();
     expect(types[0]?.description).toBe("A quoted description");
-  });
-
-  test("buildAvailableTypesSection produces markdown with header and list", async () => {
-    await writeType("manager", `---
-name: manager
-description: Manages sub-agents
----
-body`);
-    await writeType("worker", `---
-name: worker
-description: Implements a focused task
----
-body`);
-
-    const section = buildAvailableTypesSection();
-    expect(section).toContain("### Available Agent Types");
-    expect(section).toContain("`ib new-agent --type <name> \"task\"`");
-    expect(section).toContain("`manager` — Manages sub-agents");
-    expect(section).toContain("`worker` — Implements a focused task");
-  });
-
-  test("buildAvailableTypesSection excludes layer types from output", async () => {
-    await writeType("manager", `---
-name: manager
-description: Manages sub-agents
----
-body`);
-    await writeType("_all", `---
-name: _all
-spawnable: false
-description: Layer file
----
-body`);
-
-    const section = buildAvailableTypesSection();
-    expect(section).toContain("`manager`");
-    expect(section).not.toContain("_all");
-    expect(section).not.toContain("Layer file");
-  });
-
-  test("buildAvailableTypesSection omits em-dash when description is empty", async () => {
-    await writeType("plain", `---
-name: plain
----
-body`);
-
-    const section = buildAvailableTypesSection();
-    expect(section).toContain("- `plain`");
-    expect(section).not.toContain("- `plain` —");
   });
 
   test("listSpawnableAgentTypesSync ignores nested description: keys", async () => {

@@ -1881,7 +1881,7 @@ export async function resumeAgent(
       //
       // On precheck failure: refuse the resume cleanly. Do NOT touch the
       // worktree — it is the user's existing agent state, not ours to nuke.
-      const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-stop"];
+      const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-user-prompt-submit", "codex-stop"];
       for (const event of codexPrecheckEvents) {
         // Route through dispatcherDryRunSpawnCtx with cwd=workPath so the dry-run
         // subprocess's process.cwd() lands inside the agent's worktree —
@@ -7135,7 +7135,7 @@ export async function newAgent(
       // creating the tmux session. On failure we reuse `cleanupOnFailure()`
       // (see MED 2 from the Phase 4 review) so any future cleanup additions
       // (e.g. tmux session kill) are inherited automatically.
-      const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-stop"];
+      const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-user-prompt-submit", "codex-stop"];
       for (const event of codexPrecheckEvents) {
         // Route through dispatcherDryRunSpawnCtx with cwd=workPath so the dry-run
         // subprocess's process.cwd() lands inside the agent's worktree. The

@@ -835,7 +835,7 @@ const COMMAND_HELP: Record<string, string> = {
     "\n" +
     "Internal hook entrypoints (invoked by Claude Code, not directly by users):\n" +
     "  intercept-task, session-start, main-path, inject-status, inject-timestamp,\n" +
-    "  codex-pre-tool-use, codex-session-start, codex-stop,\n" +
+    "  codex-pre-tool-use, codex-session-start, codex-user-prompt-submit, codex-stop,\n" +
     "  agy-pre-tool-use, agy-pre-invocation, agy-stop",
   "hooks install":
     "Usage: ib hooks install\n" +
@@ -882,6 +882,10 @@ const COMMAND_HELP: Record<string, string> = {
     "Usage: ib hooks codex-session-start <agent-id> [--dry-run]\n" +
     "  Internal: codex SessionStart hook entrypoint. --dry-run is used by the\n" +
     "  spawn-time precheck.",
+  "hooks codex-user-prompt-submit":
+    "Usage: ib hooks codex-user-prompt-submit <agent-id> [--dry-run]\n" +
+    "  Internal: codex UserPromptSubmit hook entrypoint. Writes running state.\n" +
+    "  --dry-run is used by the spawn-time precheck.",
   "hooks codex-stop":
     "Usage: ib hooks codex-stop <agent-id> [--dry-run]\n" +
     "  Internal: codex Stop hook entrypoint. --dry-run is used by the spawn-time\n" +
@@ -3061,6 +3065,7 @@ export async function main() {
         }
         case "codex-pre-tool-use":
         case "codex-session-start":
+        case "codex-user-prompt-submit":
         case "codex-stop": {
           // Codex's hook contract is FAIL-OPEN — any non-zero exit / thrown
           // error / unsupported decision means the tool call PROCEEDS.
@@ -3070,6 +3075,7 @@ export async function main() {
           const event = subcommand.replace(/^codex-/, "") as
             | "pre-tool-use"
             | "session-start"
+            | "user-prompt-submit"
             | "stop";
           const id = args[2];
           const dryRun = args.slice(3).includes("--dry-run");
@@ -3127,7 +3133,7 @@ export async function main() {
         }
         default:
           console.error(`Unknown hooks subcommand: ${subcommand}`);
-          console.error("Available: intercept-task, session-start, main-path, inject-status, inject-timestamp, codex-pre-tool-use, codex-session-start, codex-stop, agy-pre-tool-use, agy-pre-invocation, agy-stop, install, uninstall, status, intercept-install, intercept-uninstall, intercept-status");
+          console.error("Available: intercept-task, session-start, main-path, inject-status, inject-timestamp, codex-pre-tool-use, codex-session-start, codex-user-prompt-submit, codex-stop, agy-pre-tool-use, agy-pre-invocation, agy-stop, install, uninstall, status, intercept-install, intercept-uninstall, intercept-status");
           process.exit(1);
       }
       break;

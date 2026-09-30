@@ -152,7 +152,7 @@ State is written to `meta.json` by exactly five actors:
 |-------|------|---------------|
 | **Stop hook** (`ib hook-status`) | Claude becomes idle | `waiting`, `complete`, or `running` (nudge case) |
 | **PreToolUse hook** (`ib hook-check-path`) | Before every tool call | `running` |
-| **UserPromptSubmit hook** (`ib hook-mark-running`) | Input arrives (incl. `tmux send-keys` from another agent) | `running` (guarded — bails if current state is `complete` or `stopped`) |
+| **UserPromptSubmit hook** (`ib hook-mark-running`; codex: `ib hooks codex-user-prompt-submit`) | Input arrives (incl. `tmux send-keys` from another agent) | `running` (guarded — bails only if current state is `stopped`) |
 | **`ib send`** | Message sent to agent | `running` |
 | **`ib resume`** | Agent resumed from stopped | `running` |
 
@@ -1006,7 +1006,9 @@ This is the defense-in-depth fallback if a request reaches Claude's native permi
 
 Writes `state: "running"` to the agent's `meta.json` the instant input arrives. This covers the case where another agent sends a message via `tmux send-keys` (e.g. a `notify_manager` from a child) — without this hook the recipient would stay labeled `waiting` until its next Stop hook fires. PreToolUse covers the post-background-tool case (see §6.1).
 
-**Terminal-state guard**: Reads the current `state` from `meta.json` first; bails if it is `complete` or `stopped`. UserPromptSubmit can in theory fire after Stop, and we never want to resurrect a terminal state. No-op when `meta.json` is missing or unparseable. No logging.
+**Stopped guard**: Reads the current `state` from `meta.json` first and bails only if it is `stopped`: a stopped agent has no live session, and `ib resume` writes `running` itself, so a prompt event on a stopped record is stale. A `complete` agent is written `running`: UserPromptSubmit runs before the prompt is processed, so it always starts a new turn (a human typing into a finished agent), and PreToolUse and `ib send` already write `running` over `complete`. (An earlier guard also skipped `complete`, against a UserPromptSubmit firing after Stop, which cannot happen.) The write also ends a manager's `ack` (§8.5.2). No-op when `meta.json` is missing or unparseable. No logging.
+
+**Codex**: codex agents get the same rule from their own UserPromptSubmit hook, `ib hooks codex-user-prompt-submit <id>` (§18.5; `markRunningOnPrompt` is shared). It prints `{}`: codex parses this event's output as JSON, like Stop's.
 
 ### 6.6.1 Inject Timestamp Hook (PostToolUse)
 
@@ -1300,7 +1302,7 @@ We suppress upward notification of a waiting agent when that agent has work in f
 - **Who**: only the child's current manager (`meta.manager`), from its own agent session. `ackAgent` (`src/ib-commands.ts`) resolves the caller with the resolver `ib new-agent` uses (an unverifiable caller is refused) and needs the child to be in the caller's repository. A human shell, a spawner that is not the manager, and a coordinator that is not the manager are refused. The PreToolUse hook lists `ack` with the manager-only commands, but with no spawner access and no coordinator bypass (`checkManagerCommandAccess`); codex and agy use the same check.
 - **Record**: `ack: {state, by, at}` in the child's meta.json. `state` is the child's stored state, which must be `waiting` or `complete` (anything else, including a missing state, is refused); `by` is the manager; `at` is epoch seconds. The write goes through `mutateAgentMeta`, and the manager and state checks run again inside its lock. The child's `state`, `state_updated_at`, tmux session, and worktree do not change. Acknowledging an already acknowledged state changes nothing and succeeds.
 - **Current**: an ack counts only while `ack.state` equals the stored `state` and `ack.by` equals `manager` (`currentAck`, `src/agents.ts`). Reassigning the child ends it.
-- **Invalidation**: `writeAgentState` removes `ack` in the same locked write when the stored state changes (§1.3.1). A `waiting → running → waiting` change between two watchdog polls therefore leaves no ack. A Stop hook that writes the same state again keeps it.
+- **Invalidation**: `writeAgentState` removes `ack` in the same locked write when the stored state changes (§1.3.1). A `waiting → running → waiting` change between two watchdog polls therefore leaves no ack. A Stop hook that writes the same state again keeps it. A prompt to the agent — a human typing in the pane, or `ib send` — also ends it: the UserPromptSubmit hook of Claude and of codex writes `running` (§6.6), including over `complete`. agy's PreInvocation hook writes `running` at the start of every turn.
 - **Stop hook** (§6.2): when a current ack covers the state the hook just wrote, the `notify_manager` for `waiting` or `complete` is not sent, and a line goes to the child's `agent.log`. The commit reminder is not affected.
 - **Watchdog** (§8.5): `handleWaiting` and `handleComplete` read the ack from meta.json on each tick (so it survives a watchdog restart), and send nothing while it covers the current state. When a tick finds that an ack the watchdog saw before is gone, a new episode started, maybe between two polls. The watchdog then restarts that episode's schedule: reminders from `1/5` at the first interval, and the 30 s complete fallback. Until an ack is written, timings do not change. There is no ack for `unknown`.
 - **Queued notices**: an ack stops notices created after it. A notice already in the manager's outbox is delivered as usual.
@@ -3091,6 +3093,7 @@ codex -m <MODEL> -a never -s danger-full-access \
       --dangerously-bypass-hook-trust \
       -c 'hooks.PreToolUse=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-pre-tool-use <agentId>",timeout=30}]}]' \
       -c 'hooks.SessionStart=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-session-start <agentId>",timeout=30,additionalContextLimit=0}]}]' \
+      -c 'hooks.UserPromptSubmit=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-user-prompt-submit <agentId>",timeout=30}]}]' \
       -c 'hooks.Stop=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-stop <agentId>",timeout=30}]}]' \
       "<prompt>"
 ```
@@ -3114,15 +3117,16 @@ At spawn and resume, Codex/Fugu always use `-a never`, so native approval UI is 
 
 ### 18.5 Hook Architecture (Codex side)
 
-Three codex-side hook handlers, all dispatched through a fail-open-safe wrapper:
+Four codex-side hook handlers, all dispatched through a fail-open-safe wrapper:
 
 | Hook | Subcommand | Handler | Purpose |
 |---|---|---|---|
 | **PreToolUse** | `ib hooks codex-pre-tool-use <agentId>` | `src/hooks/codex-pre-tool-use.ts` | Allow/deny + path-isolation for `Bash` AND `apply_patch`. Default: deny. |
 | **SessionStart** | `ib hooks codex-session-start <agentId>` | `src/hooks/codex-session-start.ts` | Writes `state: "running"` to `meta.json`; captures `meta.codex_session_id` on first firing (defensive snake_case/camelCase read); returns the agent's role text as `additionalContext` (§18.6). |
+| **UserPromptSubmit** | `ib hooks codex-user-prompt-submit <agentId>` | `src/hooks/codex-user-prompt-submit.ts` | Writes `state: "running"` when a prompt is submitted (a human typing in the pane, or `ib send`), except for `stopped` — the same rule as Claude's (§6.6). This is codex's only turn-start state write after SessionStart, and it ends a manager's `ib ack` (§8.5.2). Prints `{}` (codex parses this event's output as JSON). Running codex agents pick it up only after a respawn (codex has no hook hot-reload). |
 | **Stop** | `ib hooks codex-stop <agentId>` | `src/hooks/codex-stop.ts` | Writes `state: "waiting"` / `"complete"` to `meta.json` (deterministic state — no tmux scraping). |
 
-**Dispatcher pattern (`src/hooks/codex-dispatcher.ts`):** all three handlers are invoked through a single dispatcher that NEVER throws and ALWAYS exits 0 in the production path. Codex's documented hook failure mode is **FAIL-OPEN** (a hook that crashes, emits malformed JSON, or returns an unsupported `permissionDecision` is marked failed and the tool call PROCEEDS per `developers.openai.com/codex/hooks`). The dispatcher is the defense:
+**Dispatcher pattern (`src/hooks/codex-dispatcher.ts`):** all four handlers are invoked through a single dispatcher that NEVER throws and ALWAYS exits 0 in the production path. Codex's documented hook failure mode is **FAIL-OPEN** (a hook that crashes, emits malformed JSON, or returns an unsupported `permissionDecision` is marked failed and the tool call PROCEEDS per `developers.openai.com/codex/hooks`). The dispatcher is the defense:
 
 - Wraps all handler logic in try/catch; emits a deny payload on any uncaught exception.
 - Validates `<agentId>` as the first argv before doing any other work; emits deny + `exit 0` on parse failure.
@@ -3229,7 +3233,7 @@ The subcommand routes through `mutateAgentMeta()` in `src/agents.ts` so concurre
 Per the mandated `AGENTS.md` Cross-Cutting Review Checklist:
 
 1. **General agent functionality** — **affected.** New spawn (§18.6) and resume (§18.7) paths branch on a new CLI discriminator derived from `meta.model`. Codex agents skip the claude-side `settings.local.json` write entirely and instead get their role instructions from the codex SessionStart hook's `additionalContext`, as Claude does (nothing written into the worktree) + a `.codex/` gitignore entry. One new optional meta field (`codex_session_id`, §18.10). One new mutate-meta-from-shell subcommand (`ib write-pid`, §18.11) used by spawn scripts of BOTH CLIs.
-2. **Hooks** — **affected.** Three new codex-side hook handlers (PreToolUse, SessionStart, Stop) dispatched through a fail-open-safe dispatcher with `--dry-run` support (§18.5). All three are registered via inline `-c` flags at spawn time (no on-disk codex config is written). Claude-side hooks are unchanged.
+2. **Hooks** — **affected.** Four codex-side hook handlers (PreToolUse, SessionStart, UserPromptSubmit, Stop) dispatched through a fail-open-safe dispatcher with `--dry-run` support (§18.5). All four are registered via inline `-c` flags at spawn time (no on-disk codex config is written). Claude-side hooks are unchanged.
 3. **Watchdog** — **affected.** Three Claude-specific behaviors (`handleRateLimited`, `handleApiError`, permission auto-accept) are gated behind `classifyAgentCli(meta)` (§18.8). The outbox drain, `fs.watch` coalescing, `runSessionExclusive` mutex, nudge timing, and notification routing stay CLI-agnostic.
 4. **`ib watch` / dashboard** — **largely unaffected.** Info-panel and agent-tree render `meta.model` verbatim (D8), so `codex:<model>` displays correctly with no special split required. No new modes, no new panels, no new layout fields. (State detection in the dashboard for codex's override states is deferred — §18.9.)
 

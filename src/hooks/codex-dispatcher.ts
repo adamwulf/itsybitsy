@@ -1,5 +1,5 @@
 /**
- * Dispatcher-layer fail-open hardening for the three codex hook subcommands.
+ * Dispatcher-layer fail-open hardening for the four codex hook subcommands.
  *
  * Codex's hook contract is FAIL-OPEN: any non-zero exit, malformed JSON, or
  * unsupported decision string means the tool call PROCEEDS. The argv parsing
@@ -11,7 +11,7 @@
  * and exit 0.
  *
  * This module owns:
- *   - Three dispatcher functions (one per event) returning a Promise that
+ *   - Four dispatcher functions (one per event) returning a Promise that
  *     never rejects. Each unconditionally writes a valid stdout payload.
  *   - A test-only `runCodexDispatcher` entry point that takes the writer +
  *     loader as dependencies so the wiring is exercised end-to-end without
@@ -33,8 +33,11 @@ const SESSION_START_NOOP = JSON.stringify({
 // `Stop hook (failed) — error: hook returned invalid stop hook JSON output`.
 // See developers.openai.com/codex/hooks#stop.
 const STOP_NOOP = "{}";
+// UserPromptSubmit output is parsed as JSON the same way as Stop's; `{}` is
+// the no-op (never plain text or empty stdout).
+const USER_PROMPT_SUBMIT_NOOP = "{}";
 
-export type CodexDispatcherEvent = "pre-tool-use" | "session-start" | "stop";
+export type CodexDispatcherEvent = "pre-tool-use" | "session-start" | "user-prompt-submit" | "stop";
 
 export interface CodexDispatcherDeps {
   /** Where to write the response payload. Defaults to `process.stdout.write`. */
@@ -49,13 +52,14 @@ export interface CodexDispatcherDeps {
 }
 
 /**
- * Pick the right no-op payload for SessionStart/Stop. PreToolUse has no
+ * Pick the right no-op payload for SessionStart/UserPromptSubmit/Stop. PreToolUse has no
  * meaningful no-op — the only safe codex-side fail-open response is a
  * deny payload via `buildCodexDenyOutput`.
  */
 function dispatcherFailureOutput(event: CodexDispatcherEvent, reason: string): string {
   if (event === "pre-tool-use") return buildCodexDenyOutput(reason);
   if (event === "session-start") return SESSION_START_NOOP;
+  if (event === "user-prompt-submit") return USER_PROMPT_SUBMIT_NOOP;
   return STOP_NOOP;
 }
 
@@ -70,6 +74,10 @@ async function defaultInvokeHandler(
   if (event === "session-start") {
     const { hookCodexSessionStart } = await import("./codex-session-start");
     return hookCodexSessionStart(agentId);
+  }
+  if (event === "user-prompt-submit") {
+    const { hookCodexUserPromptSubmit } = await import("./codex-user-prompt-submit");
+    return hookCodexUserPromptSubmit(agentId);
   }
   const { hookCodexStop } = await import("./codex-stop");
   return hookCodexStop(agentId);
@@ -86,6 +94,10 @@ async function defaultInvokeDryRun(
   if (event === "session-start") {
     const { hookCodexSessionStartDryRun } = await import("./codex-session-start");
     return hookCodexSessionStartDryRun(agentId);
+  }
+  if (event === "user-prompt-submit") {
+    const { hookCodexUserPromptSubmitDryRun } = await import("./codex-user-prompt-submit");
+    return hookCodexUserPromptSubmitDryRun(agentId);
   }
   const { hookCodexStopDryRun } = await import("./codex-stop");
   return hookCodexStopDryRun(agentId);

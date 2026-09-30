@@ -20,22 +20,39 @@
  *        (client, this file)                        (server, this file)
  *                               ◀──result.json───   runs the normal retireAgent()
  *
+ * Who uses it: only a WORKTREE agent whose itsybitsy sandbox is enabled. Every
+ * other caller runs the command directly, as before — an unsandboxed caller, a
+ * shell that is not an agent, a `worktree:false` agent (its profile grants the
+ * repo root, and it has no per-agent watchdog to ask), and an agent whose
+ * itsybitsy sandbox is off (a codex agent then sits in codex's own sandbox,
+ * which grants what these commands need, and it has no seal to verify).
+ *
  * Trust model: the request is untrusted DATA and carries only an op and a target
  * id. The watchdog takes the caller's identity from its own agent (verified
  * against the sealed record, as for a spawn) and applies the SAME rule the
- * PreToolUse hook applies to a direct command — `checkIbCommandAccess`: only the
- * target's manager or spawner (or the repo's coordinator) may act on it. The
- * hook alone is not enough here, because a sandboxed agent can write a request
- * file without running `ib`. The target must be in the caller's own repo, and a
- * merge lands in the caller's own worktree (the request cannot name a directory).
+ * PreToolUse hook applies to a direct command — `checkManagerCommandAccess`:
+ * only the target's manager or spawner (or the repo's coordinator) may act on
+ * it. The hook alone is not enough here, because a sandboxed agent can write a
+ * request file without running `ib`.
  *
- * Known limitation (SPEC-SANDBOX §4C.6): that rule reads `manager` /
- * `spawned_by` from the TARGET's meta.json, which a spawner can write (it holds
+ * Every agent can write its OWN meta.json, and the seal covers only
+ * `agentType`, `canSpawnChildren`, `paths` and `sandbox`. So nothing here trusts
+ * an unsealed field of the requester's meta:
+ *   - an agent is never its own target (its `manager` field is its own to write);
+ *   - the rule gets the verified meta and does not read the file again;
+ *   - a merge always lands in `<agentDir>/repo`, never where `meta.worktree`
+ *     points, and the request cannot name a directory;
+ *   - a rehire is authorized from the archive of the requester's repo only.
+ * The target must be in the requester's own repo.
+ *
+ * Known limitation (SPEC-SANDBOX §4C.7): the rule reads `manager` /
+ * `spawned_by` from the TARGET's meta.json, which a SPAWNER can write (it holds
  * a write grant on `.ittybitty/agents`) and which the seal does not cover. A
  * spawner can therefore make itself the manager of any agent in its repo.
  */
 
 import { randomBytes } from "crypto";
+import { lstat } from "fs/promises";
 import { basename, join, resolve } from "path";
 import { readAllAgents, type Agent } from "./agents";
 import {
@@ -49,6 +66,7 @@ import {
   type ResolvedCallerContext,
 } from "./ib-commands";
 import { listRepos, repoDisplayName } from "./registry";
+import { resolveSandboxEnabled } from "./sandbox";
 import { isSandboxedProcess } from "./sandbox-detect";
 import {
   brokerFail,
@@ -200,23 +218,51 @@ export async function requestLifecycleViaWatchdog(
 }
 
 /**
- * The lifecycle-command entry point for a sandboxed process. Returns null when
- * the process is NOT sandboxed (the caller then runs the command directly,
- * exactly as before).
+ * The lifecycle-command entry point. Returns null when the caller must run the
+ * command directly, exactly as before this broker existed. Only one kind of
+ * caller is routed to the watchdog: a worktree agent inside its own itsybitsy
+ * sandbox. Everyone else keeps the direct path:
+ *   - a process that is not sandboxed;
+ *   - a sandboxed shell that is not (or cannot be shown to be) an agent;
+ *   - a `worktree:false` agent — its profile grants the repo root, so the
+ *     direct path works, and its per-agent watchdog exits at once (there is no
+ *     `<agentDir>/repo`), so there is nobody to ask;
+ *   - an agent whose itsybitsy sandbox is disabled. `isSandboxedProcess()` is
+ *     still true for a codex agent there (codex's own sandbox), which grants
+ *     what these commands need; and such an agent has no seal to verify.
+ * This only ROUTES. A caller that lies in its own meta.json to get the direct
+ * path runs the command inside its real sandbox, where it fails as before.
  */
 export async function routeLifecycleThroughWatchdog(
   command: LifecycleCommand,
   deps: SpawnClientDeps = {},
 ): Promise<IbCommandResult | null> {
   if (!isSandboxedProcess()) return null;
-  return requestLifecycleViaWatchdog(command, deps);
+  let caller: ResolvedCallerContext | null;
+  try {
+    caller = await (deps.resolveCaller ?? resolveCallerAgentContext)(deps.cwd ?? process.cwd());
+  } catch {
+    return null;
+  }
+  if (!caller || !caller.agentDir) return null;
+  if (caller.meta.worktree === false) return null;
+  const sandbox = caller.meta.sandbox as { enabled?: unknown } | undefined;
+  if (!resolveSandboxEnabled(sandbox?.enabled)) return null;
+  const resolved = caller;
+  return requestLifecycleViaWatchdog(command, { ...deps, resolveCaller: async () => resolved });
 }
 
 // ── Server (runs in the unsandboxed watchdog) ────────────────────────────────
 
 export interface LifecycleServerDeps {
   /** Returns the deny reason, or null when the caller may run `op` on the target. */
-  authorize?: (op: LifecycleOp, targetId: string, callerId: string, agentsDir: string) => Promise<string | null>;
+  authorize?: (
+    op: LifecycleOp,
+    targetId: string,
+    callerId: string,
+    agentsDir: string,
+    callerMeta: Record<string, unknown>,
+  ) => Promise<string | null>;
   findAgent?: (repoPath: string, agentId: string) => Promise<Agent | null>;
   retire?: (agent: Agent) => Promise<IbCommandResult>;
   merge?: (agent: Agent, targetDir: string, options: MergeAgentOptions) => Promise<IbCommandResult>;
@@ -224,19 +270,27 @@ export interface LifecycleServerDeps {
 }
 
 /**
- * The rule for a direct command, reused as-is: the PreToolUse hook's
- * `checkIbCommandAccess` on the equivalent command line, so the brokered and
- * the direct path can never disagree about who may act on an agent.
+ * The rule for a direct command, reused: the PreToolUse hook's manager rule, so
+ * the brokered and the direct path cannot disagree about who may act on an
+ * agent. It is called with structured arguments (a synthesized command line
+ * would be re-parsed, and a target such as `-v` would read as a flag and skip
+ * the rule), with the VERIFIED caller meta (the rule must not read the caller's
+ * file again after the seal check), and, for a rehire, against the archive of
+ * the requester's repo only (an active record is something a spawner can write).
  */
 async function authorizeLifecycle(
   op: LifecycleOp,
   targetId: string,
   callerId: string,
   agentsDir: string,
+  callerMeta: Record<string, unknown>,
 ): Promise<string | null> {
-  const { checkIbCommandAccess } = await import("./hooks/agent-path");
-  const decision = await checkIbCommandAccess(`ib ${op} ${targetId}`, callerId, agentsDir);
-  return decision?.decision === "deny" ? decision.reason : null;
+  const { checkManagerCommandAccess } = await import("./hooks/agent-path");
+  const decision = await checkManagerCommandAccess(op, targetId, callerId, agentsDir, {
+    callerMeta,
+    ownArchiveOnly: op === "rehire",
+  });
+  return decision ? decision.reason : null;
 }
 
 /** Resolve an exact agent id inside one repository only. */
@@ -264,10 +318,23 @@ export async function handleLifecycleRequest(
   const requester = await verifyBrokerRequester(ctx.agentId, ctx.repoPath, ctx.agentDir, op, deps);
   if (!requester.ok) return requester.result;
 
+  // An agent is never its own target. The rule reads `manager` from the
+  // TARGET's meta.json; for a self-target that is the requester's own file,
+  // which it can write, so it could name itself its own manager.
+  if (target === ctx.agentId) {
+    return brokerFail(`Error: '${ctx.agentId}' cannot ${op} itself`);
+  }
+
   const seams = deps.lifecycle ?? {};
   const agentsDir = join(ctx.repoPath, ".ittybitty", "agents");
   try {
-    const denied = await (seams.authorize ?? authorizeLifecycle)(op, target, ctx.agentId, agentsDir);
+    const denied = await (seams.authorize ?? authorizeLifecycle)(
+      op,
+      target,
+      ctx.agentId,
+      agentsDir,
+      requester.meta as unknown as Record<string, unknown>,
+    );
     if (denied) return brokerFail(denied);
 
     // A rehire target is an archive, not an active agent. Only the requester's
@@ -283,12 +350,20 @@ export async function handleLifecycleRequest(
       );
     }
     if (op === "merge") {
-      // The merge lands where the requester is: its worktree, or the repo root
-      // for a worktree:false agent. Never a directory named by the request.
-      const callerCwd = requester.meta.worktree === false ? ctx.repoPath : join(ctx.agentDir, "repo");
-      return await (seams.merge ?? mergeAgent)(agent, callerCwd, {
+      // The merge lands in the requester's own worktree, always. The directory
+      // is fixed by the agent's id — not by the request, and not by
+      // `meta.worktree`, which the requester can write and the seal does not
+      // cover (it would otherwise choose the main checkout as the target).
+      // lstat: a symlink there is refused too, or the agent could point it at
+      // the main checkout.
+      const callerWorktree = join(ctx.agentDir, "repo");
+      const isDirectory = await lstat(callerWorktree).then((entry) => entry.isDirectory()).catch(() => false);
+      if (!isDirectory) {
+        return brokerFail(`Error: '${ctx.agentId}' has no worktree to merge into (${callerWorktree})`);
+      }
+      return await (seams.merge ?? mergeAgent)(agent, callerWorktree, {
         keep: request.keep === true,
-        _brokeredCaller: { cwd: callerCwd },
+        _brokeredCaller: { cwd: callerWorktree },
       });
     }
     return await (seams.retire ?? retireAgent)(agent);

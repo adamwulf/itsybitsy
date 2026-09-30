@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON, SEAL_HELPER_RESULT_WRITE_DENY_REASON, agentProtectedWritePaths, systemProtectedWritePaths, protectedConfigWriteDenyReason, matchProtectedWrite } from "./agent-path";
+import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, checkManagerCommandAccess, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON, SEAL_HELPER_RESULT_WRITE_DENY_REASON, agentProtectedWritePaths, systemProtectedWritePaths, protectedConfigWriteDenyReason, matchProtectedWrite } from "./agent-path";
 import type { PathCheckInput, PathCheckContext } from "./agent-path";
 import { join } from "path";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile, symlink } from "fs/promises";
@@ -1790,6 +1790,67 @@ describe("checkIbCommandAccess", () => {
       for (const command of ["ib retire agent-target1", "ib merge agent-target1"]) {
         expect((await checkIbCommandAccess(command, "agent-manager1", agentsDir))?.decision).toBe("deny");
       }
+    });
+  });
+
+  // The watchdog lifecycle broker calls the rule with structured arguments
+  // (lifecycle-broker.ts). There, null must mean "allowed" and nothing else.
+  describe("checkManagerCommandAccess (the rule, without a command line)", () => {
+    test("allows the manager and denies a stranger", async () => {
+      await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
+      expect(await checkManagerCommandAccess("retire", "agent-target1", "agent-manager1", agentsDir)).toBeNull();
+      const denied = await checkManagerCommandAccess("merge", "agent-target1", "agent-other111", agentsDir);
+      expect(denied?.decision).toBe("deny");
+      expect(denied?.reason).toContain("only the manager or spawner of 'agent-target1' can run 'ib merge'");
+    });
+
+    test("a command it does not gate, or a target that is not an agent id, is denied", async () => {
+      await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
+      for (const [subcommand, target] of [
+        ["list", "agent-target1"],
+        ["nuke", "agent-target1"],
+        ["retire", "../agent-target1"],
+        ["retire", ""],
+      ] as const) {
+        const result = await checkManagerCommandAccess(subcommand, target, "agent-manager1", agentsDir);
+        expect(result?.decision).toBe("deny");
+      }
+    });
+
+    test("an id that starts with '-' is a target here, not a flag", async () => {
+      await writeAgentMeta("-v", { id: "-v", manager: "agent-manager1" });
+      expect(await checkManagerCommandAccess("retire", "-v", "agent-manager1", agentsDir)).toBeNull();
+      expect((await checkManagerCommandAccess("retire", "-v", "agent-other111", agentsDir))?.decision).toBe("deny");
+    });
+
+    test("callerMeta replaces the read of the caller's own file", async () => {
+      await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
+      // On disk the caller claims to be a coordinator.
+      await writeAgentMeta("agent-other111", { id: "agent-other111", agentType: "coordinator" });
+      expect(await checkManagerCommandAccess("retire", "agent-target1", "agent-other111", agentsDir)).toBeNull();
+      const verified = await checkManagerCommandAccess("retire", "agent-target1", "agent-other111", agentsDir, {
+        callerMeta: { id: "agent-other111", agentType: "worker" },
+      });
+      expect(verified?.decision).toBe("deny");
+      // And the reverse: a verified coordinator needs no file.
+      expect(await checkManagerCommandAccess("retire", "agent-target1", "agent-nofile1", agentsDir, {
+        callerMeta: { id: "agent-nofile1", agentType: "coordinator" },
+      })).toBeNull();
+    });
+
+    test("ownArchiveOnly decides a rehire from the caller's own archive alone", async () => {
+      await writeRetiredMeta("agent-target1", { manager: "agent-manager1" });
+      // An active record naming someone else as manager does not count.
+      await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-other111" });
+      const opts = { ownArchiveOnly: true };
+      expect(await checkManagerCommandAccess("rehire", "agent-target1", "agent-manager1", agentsDir, opts)).toBeNull();
+      const stranger = await checkManagerCommandAccess("rehire", "agent-target1", "agent-other111", agentsDir, opts);
+      expect(stranger?.decision).toBe("deny");
+      expect(stranger?.reason).toContain("only the manager or spawner");
+
+      const missing = await checkManagerCommandAccess("rehire", "agent-nowhere1", "agent-manager1", agentsDir, opts);
+      expect(missing?.reason).toContain("retired agent 'agent-nowhere1' not found in this repository");
+      expect((await checkManagerCommandAccess("retire", "agent-target1", "agent-manager1", agentsDir, opts))?.decision).toBe("deny");
     });
   });
 

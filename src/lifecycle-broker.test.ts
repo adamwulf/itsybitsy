@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readdir, rm } from "fs/promises";
+import { mkdtemp, mkdir, readdir, rm, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import type { Agent, AgentMeta } from "./agents";
 import { resetUserHome, setUserHome } from "./home";
+import { hasLiveWatchdog } from "./ib-commands";
 import type { IbCommandResult, MergeAgentOptions, NewAgentOptions, ResolvedCallerContext } from "./ib-commands";
 import {
   LIFECYCLE_CLIENT_TIMEOUT_MS,
@@ -15,6 +16,7 @@ import {
 } from "./lifecycle-broker";
 import { setSandboxedProcessOverride } from "./sandbox-detect";
 import { processSpawnRequests, spawnRequestDir, spawnResultDir, type SpawnServerDeps } from "./spawn-broker";
+import { runPerAgentWatchdog } from "./watchdog";
 
 const MANAGER_ID = "agent-manager";
 const CHILD_ID = "agent-child";
@@ -195,8 +197,7 @@ describe("lifecycle broker", () => {
       expect(written.stderr).toContain(`only the manager or spawner of '${CHILD_ID}' can run 'ib retire'`);
     });
 
-    // The rule is the PreToolUse hook's, and the hook allows any command it
-    // does not know. Every brokered op must therefore be one the hook gates.
+    // Every brokered op must be one the manager rule knows and gates.
     test.each([...LIFECYCLE_OPS])("'%s' is gated: a stranger is refused", async (op) => {
       await writeAgent(CHILD_ID, { manager: "someone-else" });
       const { deps, retired, merged, rehired } = server();
@@ -229,11 +230,12 @@ describe("lifecycle broker", () => {
 
     test("merges a child into the requester's own worktree, as an agent", async () => {
       await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      const worktree = join(agentDir, "repo");
+      await mkdir(worktree);
       const { deps, merged, retired } = server();
       await queue(ID_A, retireRequest(ID_A, { op: "merge" }));
       await processSpawnRequests(MANAGER_ID, repo, deps);
 
-      const worktree = join(agentDir, "repo");
       expect(merged).toHaveLength(1);
       expect(merged[0]!.agent.id).toBe(CHILD_ID);
       expect(merged[0]!.targetDir).toBe(worktree);
@@ -244,19 +246,122 @@ describe("lifecycle broker", () => {
 
     test("merge --keep is carried through", async () => {
       await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      await mkdir(join(agentDir, "repo"));
       const { deps, merged } = server();
       await queue(ID_A, retireRequest(ID_A, { op: "merge", keep: true }));
       await processSpawnRequests(MANAGER_ID, repo, deps);
       expect(merged[0]!.options.keep).toBe(true);
     });
 
-    test("a worktree:false requester merges into the repo root", async () => {
+    // meta.worktree is the requester's to write and is not sealed. It must not
+    // be able to move the merge to the main checkout.
+    test("meta.worktree cannot redirect the merge away from the requester's worktree", async () => {
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      const worktree = join(agentDir, "repo");
+      await mkdir(worktree);
+      const { deps, merged } = server({}, { readMeta: async () => ({ meta: managerMeta({ worktree: false }) }) });
+      await queue(ID_A, retireRequest(ID_A, { op: "merge" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(merged[0]!.targetDir).toBe(worktree);
+      expect(merged[0]!.options._brokeredCaller).toEqual({ cwd: worktree });
+    });
+
+    test("a requester without a worktree directory gets no merge", async () => {
       await writeAgent(CHILD_ID, { manager: MANAGER_ID });
       const { deps, merged } = server({}, { readMeta: async () => ({ meta: managerMeta({ worktree: false }) }) });
       await queue(ID_A, retireRequest(ID_A, { op: "merge" }));
       await processSpawnRequests(MANAGER_ID, repo, deps);
-      expect(merged[0]!.targetDir).toBe(repo);
-      expect(merged[0]!.options._brokeredCaller).toEqual({ cwd: repo });
+      expect(merged).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain(`'${MANAGER_ID}' has no worktree to merge into`);
+    });
+
+    test("a symlink in place of the requester's worktree is refused", async () => {
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      // As an agent could do to aim the merge at the main checkout.
+      await symlink(repo, join(agentDir, "repo"));
+      const { deps, merged } = server();
+      await queue(ID_A, retireRequest(ID_A, { op: "merge" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(merged).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain("has no worktree to merge into");
+    });
+
+    // ── nothing may rest on a field the requester can write ──
+
+    test.each([...LIFECYCLE_OPS])("an agent cannot %s itself, even as its own 'manager'", async (op) => {
+      // Every agent can write its own meta.json; `manager` is not sealed.
+      await writeAgent(MANAGER_ID, { manager: MANAGER_ID });
+      await mkdir(join(agentDir, "repo"));
+      const { deps, retired, merged, rehired } = server();
+      await queue(ID_A, retireRequest(ID_A, { op, target: MANAGER_ID }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect([retired, merged, rehired]).toEqual([[], [], []]);
+      expect((await result(ID_A)).stderr).toBe(`Error: '${MANAGER_ID}' cannot ${op} itself`);
+    });
+
+    test("the coordinator authority comes from the verified meta, not a second read of the file", async () => {
+      await writeAgent(CHILD_ID, { manager: "someone-else" });
+      // On disk the requester now claims to be a coordinator; the meta that was
+      // checked against the seal (readMeta) says it is a worker.
+      await writeAgent(MANAGER_ID, { agentType: "coordinator" });
+      const { deps, retired } = server({}, { readMeta: async () => ({ meta: managerMeta({ agentType: "worker" }) }) });
+      await queue(ID_A, retireRequest(ID_A));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain(`only the manager or spawner of '${CHILD_ID}' can run 'ib retire'`);
+    });
+
+    test("a verified coordinator may retire any non-coordinator in its repo", async () => {
+      await writeAgent(CHILD_ID, { manager: "someone-else" });
+      const { deps, retired } = server({}, { readMeta: async () => ({ meta: managerMeta({ agentType: "coordinator" }) }) });
+      await queue(ID_A, retireRequest(ID_A));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired.map((agent) => agent.id)).toEqual([CHILD_ID]);
+    });
+
+    test("a target whose id starts with '-' is authorized like any other", async () => {
+      // On a command line `-v` reads as a flag; here the target is data.
+      await writeAgent("-v", { manager: "someone-else" });
+      const { deps, retired } = server();
+      await queue(ID_A, retireRequest(ID_A, { target: "-v" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain("only the manager or spawner of '-v' can run 'ib retire'");
+
+      await writeAgent("-w", { manager: MANAGER_ID });
+      await queue(ID_A, retireRequest(ID_A, { target: "-w" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired.map((agent) => agent.id)).toEqual(["-w"]);
+    });
+
+    test("a rehire is decided from the archive, not from an active record a spawner could plant", async () => {
+      await writeArchive(CHILD_ID, { manager: "someone-else" });
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      const { deps, rehired } = server();
+      await queue(ID_A, retireRequest(ID_A, { op: "rehire" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(rehired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain(`only the manager or spawner of '${CHILD_ID}' can run 'ib rehire'`);
+    });
+
+    test("a rehire target with no archive in the requester's repo is refused", async () => {
+      const { deps, rehired } = server();
+      await queue(ID_A, retireRequest(ID_A, { op: "rehire" }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(rehired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain(`retired agent '${CHILD_ID}' not found in this repository`);
+    });
+
+    test("the target is resolved from the requester's repo on disk", async () => {
+      // No findAgent seam: the production lookup reads the agents directory.
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID, tmux_session: "ittybitty-test-child" });
+      const { deps, retired } = server({ findAgent: undefined });
+      await queue(ID_A, retireRequest(ID_A));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(retired).toHaveLength(1);
+      expect(retired[0]!.id).toBe(CHILD_ID);
+      expect(retired[0]!.repoPath).toBe(repo);
+      expect(retired[0]!.meta.tmux_session).toBe("ittybitty-test-child");
     });
 
     test("the spawner of the target may act on it", async () => {
@@ -283,12 +388,14 @@ describe("lifecycle broker", () => {
       expect((await result(ID_A)).stderr).toContain("only agents in its own repo");
     });
 
-    test("the caller is the watchdog's own agent, whatever the request says", async () => {
-      const seen: string[] = [];
-      const { deps } = server({ authorize: async (_op, _target, callerId) => { seen.push(callerId); return null; } });
+    test("the caller is the watchdog's own agent and its verified meta, whatever the request says", async () => {
+      const seen: Array<{ callerId: string; callerMeta: Record<string, unknown> }> = [];
+      const { deps } = server({
+        authorize: async (_op, _target, callerId, _agentsDir, callerMeta) => { seen.push({ callerId, callerMeta }); return null; },
+      });
       await queue(ID_A, retireRequest(ID_A));
       await processSpawnRequests(MANAGER_ID, repo, deps);
-      expect(seen).toEqual([MANAGER_ID]);
+      expect(seen).toEqual([{ callerId: MANAGER_ID, callerMeta: managerMeta() as unknown as Record<string, unknown> }]);
     });
 
     test("meta that no longer matches its sealed record is refused", async () => {
@@ -413,6 +520,7 @@ describe("lifecycle broker", () => {
 
     test("a merge request carries keep only when --keep was given", async () => {
       await writeAgent(CHILD_ID, { manager: MANAGER_ID });
+      await mkdir(join(agentDir, "repo"));
       const { deps } = server();
       const seen: Array<Record<string, unknown>> = [];
       const capturing = clientDeps({
@@ -439,13 +547,15 @@ describe("lifecycle broker", () => {
       await expect(readdir(spawnRequestDir(agentDir))).rejects.toThrow();
     });
 
+    // The router never sends these two callers here (it runs them directly);
+    // asked anyway, the client refuses rather than guess an agent.
     test("a shell that is not inside an agent gets a clear error", async () => {
       const out = await requestLifecycleViaWatchdog({ op: "retire", target: CHILD_ID }, clientDeps({ resolveCaller: async () => null }));
       expect(out.ok).toBe(false);
       expect(out.stderr).toContain("not inside a registered agent");
     });
 
-    test("an unverifiable caller is an error, not a direct run", async () => {
+    test("an unverifiable caller is an error", async () => {
       const out = await requestLifecycleViaWatchdog({ op: "retire", target: CHILD_ID }, clientDeps({
         resolveCaller: async () => { throw new Error("Cannot verify no-worktree caller"); },
       }));
@@ -462,7 +572,7 @@ describe("lifecycle broker", () => {
       expect(await routeLifecycleThroughWatchdog({ op: "retire", target: CHILD_ID })).toBeNull();
     });
 
-    test("routes a sandboxed command through the watchdog", async () => {
+    test("routes a sandboxed worktree agent through the watchdog", async () => {
       setSandboxedProcessOverride(() => true);
       await writeAgent(CHILD_ID, { manager: MANAGER_ID });
       const { deps } = server();
@@ -473,5 +583,68 @@ describe("lifecycle broker", () => {
       });
       expect(out).toEqual({ ok: true, exitCode: 0, stdout: `Closed agent: ${CHILD_ID}`, stderr: "" });
     });
+
+    // Callers that keep the direct path. None of them may reach the broker:
+    // `watchdogLive` throws if the client gets that far.
+    const directOnly = (resolveCaller: () => Promise<ResolvedCallerContext | null>) => ({
+      resolveCaller,
+      watchdogLive: async (): Promise<boolean> => { throw new Error("the broker must not be asked"); },
+    });
+    const callerWith = (meta: Record<string, unknown>): ResolvedCallerContext =>
+      ({ meta: { id: MANAGER_ID, ...meta }, agentDir, repoPath: repo });
+
+    test("a worktree:false agent runs the command directly (it has no per-agent watchdog)", async () => {
+      setSandboxedProcessOverride(() => true);
+      const out = await routeLifecycleThroughWatchdog(
+        { op: "retire", target: CHILD_ID },
+        directOnly(async () => callerWith({ worktree: false })),
+      );
+      expect(out).toBeNull();
+      await expect(readdir(spawnRequestDir(agentDir))).rejects.toThrow();
+    });
+
+    test("an agent whose itsybitsy sandbox is off runs the command directly (e.g. codex in its own sandbox)", async () => {
+      setSandboxedProcessOverride(() => true);
+      const out = await routeLifecycleThroughWatchdog(
+        { op: "merge", target: CHILD_ID },
+        directOnly(async () => callerWith({ sandbox: { enabled: false, rawAllow: [], domains: [] } })),
+      );
+      expect(out).toBeNull();
+      await expect(readdir(spawnRequestDir(agentDir))).rejects.toThrow();
+    });
+
+    test("a sandboxed shell that is not an agent runs the command directly", async () => {
+      setSandboxedProcessOverride(() => true);
+      expect(await routeLifecycleThroughWatchdog({ op: "retire", target: CHILD_ID }, directOnly(async () => null))).toBeNull();
+    });
+
+    test("a caller that cannot be verified runs the command directly", async () => {
+      setSandboxedProcessOverride(() => true);
+      const out = await routeLifecycleThroughWatchdog(
+        { op: "rehire", target: CHILD_ID },
+        directOnly(async () => { throw new Error("Cannot verify no-worktree caller"); }),
+      );
+      expect(out).toBeNull();
+    });
+
+    test("an absent sandbox block counts as enabled (the default) and is routed", async () => {
+      setSandboxedProcessOverride(() => true);
+      const out = await routeLifecycleThroughWatchdog(
+        { op: "retire", target: CHILD_ID },
+        { resolveCaller: async () => callerWith({}), watchdogLive: async () => false },
+      );
+      expect(out?.stderr).toContain(`watchdog for '${MANAGER_ID}' is not running`);
+    });
+  });
+
+  // A worktree:false agent has no `<agentDir>/repo`, so its per-agent watchdog
+  // leaves its loop at once: no heartbeat, and nobody to serve a request. That
+  // is why such a caller is never routed here.
+  test("a worktree:false agent's watchdog does not stay up", async () => {
+    await writeAgent(MANAGER_ID, { worktree: false, tmux_session: "ittybitty-test-manager" });
+    const started = Date.now();
+    await runPerAgentWatchdog(MANAGER_ID, repo);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(await hasLiveWatchdog(agentDir)).toBe(false);
   });
 });

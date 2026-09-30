@@ -5362,21 +5362,39 @@ describe("mergeAgent (native)", () => {
     // watchdog's own cwd and tmux environment describe the watchdog, so the
     // broker states the requester's location in `_brokeredCaller`.
     describe("brokered (run by the watchdog for a sandboxed agent)", () => {
-      test("always merges --ff-only, whatever the process looks like", async () => {
+      test("merges --ff-only even when the process itself does not look like an agent", async () => {
         await makeKeepAgentDir();
         const runner = makeMergeMock();
         lifecycleSpawnCtx.set(runner);
         setMergeSpawnRunner(runner);
 
-        const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, {
-          keep: true,
-          _brokeredCaller: { cwd: tempDir },
-        });
+        // Make THIS process look like a user: a cwd outside any agent worktree
+        // and no tmux. (The suite itself often runs inside an agent worktree,
+        // where the direct path would pick --ff-only by itself.)
+        const savedCwd = process.cwd();
+        const savedTmux = process.env.TMUX;
+        process.chdir(tempDir);
+        delete process.env.TMUX;
+        try {
+          expect(await isRunningAsAgent()).toBe(false);
 
-        expect(result.ok).toBe(true);
-        expect(findMerge()).toEqual(["git", "-C", tempDir, "merge", "--ff-only", "agent/agent-abc"]);
-        // The cwd / tmux probe of the direct path is not consulted.
-        expect(spawnCalls.find((c) => c.includes("display-message"))).toBeUndefined();
+          // Control: the direct path makes a user merge.
+          const direct = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, KEEP);
+          expect(direct.ok).toBe(true);
+          expect(findMerge()).toEqual(["git", "-C", tempDir, "merge", "--no-ff", "agent/agent-abc", "-m", "Merge agent agent-abc work"]);
+
+          spawnCalls.length = 0;
+          const brokered = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, {
+            keep: true,
+            _brokeredCaller: { cwd: tempDir },
+          });
+          expect(brokered.ok).toBe(true);
+          expect(findMerge()).toEqual(["git", "-C", tempDir, "merge", "--ff-only", "agent/agent-abc"]);
+        } finally {
+          process.chdir(savedCwd);
+          if (savedTmux === undefined) delete process.env.TMUX;
+          else process.env.TMUX = savedTmux;
+        }
       });
 
       test("resolves a detached target's main branch in the requester's directory", async () => {

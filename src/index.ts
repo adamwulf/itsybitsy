@@ -2081,10 +2081,10 @@ export async function main() {
       if (extraArgs.length > 0) {
         console.error(`Warning: unknown arguments ignored: ${extraArgs.join(" ")}`);
       }
-      // A SANDBOXED process cannot retire an agent itself (it cannot read the
-      // main repo root or write the archive), so it asks this agent's own —
-      // unsandboxed — watchdog to do it. Returns null when this process is not
-      // sandboxed, in which case we retire directly. See lifecycle-broker.ts.
+      // A sandboxed WORKTREE agent cannot retire an agent itself (it cannot read
+      // the main repo root or write the archive), so it asks its own —
+      // unsandboxed — watchdog to do it. Null for every other caller, which
+      // retires directly as before. See routeLifecycleThroughWatchdog.
       {
         const { routeLifecycleThroughWatchdog } = await import("./lifecycle-broker");
         const brokered = await routeLifecycleThroughWatchdog({ op: "retire", target: agent.id });
@@ -2103,10 +2103,10 @@ export async function main() {
       if (args.length > 2) {
         console.error(`Warning: unknown arguments ignored: ${args.slice(2).join(" ")}`);
       }
-      // A SANDBOXED process cannot rehire an agent itself (it cannot read the
-      // archive or the main repo root, or start the session), so its own —
-      // unsandboxed — watchdog does it. Null when not sandboxed. See
-      // lifecycle-broker.ts.
+      // A sandboxed WORKTREE agent cannot rehire an agent itself (it cannot
+      // read the archive or the main repo root, or start the session), so its
+      // own — unsandboxed — watchdog does it. Null for every other caller,
+      // which rehires directly as before. See routeLifecycleThroughWatchdog.
       {
         const { routeLifecycleThroughWatchdog } = await import("./lifecycle-broker");
         const brokered = await routeLifecycleThroughWatchdog({ op: "rehire", target: agentId });
@@ -2154,10 +2154,11 @@ export async function main() {
       if (parsedMerge.unknown.length > 0) {
         console.error(`Warning: unknown arguments ignored: ${parsedMerge.unknown.join(" ")}`);
       }
-      // A SANDBOXED process cannot merge an agent itself (every git call on the
-      // main repo root fails, and the close cannot write the archive), so its
-      // own — unsandboxed — watchdog does it and merges into this agent's
-      // worktree. Null when not sandboxed. See lifecycle-broker.ts.
+      // A sandboxed WORKTREE agent cannot merge an agent itself (every git call
+      // on the main repo root fails, and the close cannot write the archive),
+      // so its own — unsandboxed — watchdog does it and merges into this
+      // agent's worktree. Null for every other caller, which merges directly
+      // as before. See routeLifecycleThroughWatchdog.
       {
         const { routeLifecycleThroughWatchdog } = await import("./lifecycle-broker");
         const brokered = await routeLifecycleThroughWatchdog({ op: "merge", target: agent.id, keep: parsedMerge.keep });

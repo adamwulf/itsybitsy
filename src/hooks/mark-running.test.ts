@@ -89,7 +89,7 @@ describe("hookMarkRunning", () => {
     expect(exists).toBe(false);
   });
 
-  test("guard: keeps state='complete' (does not resurrect terminal state)", async () => {
+  test("a prompt to a complete agent writes running: the prompt starts a new turn", async () => {
     await Bun.write(
       join(agentDir, "meta.json"),
       JSON.stringify({ state: "complete" }),
@@ -100,10 +100,61 @@ describe("hookMarkRunning", () => {
     await hookMarkRunning();
 
     const meta = JSON.parse(await readFile(join(agentDir, "meta.json"), "utf-8"));
-    expect(meta.state).toBe("complete");
+    expect(meta.state).toBe("running");
   });
 
-  test("guard: keeps state='stopped' (does not resurrect terminal state)", async () => {
+  test("a prompt to an acknowledged complete agent ends the ack", async () => {
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify({
+        id: agentId,
+        worktree: true,
+        manager: "agent-mgr12345",
+        state: "complete",
+        ack: { state: "complete", by: "agent-mgr12345", at: 1 },
+      }),
+    );
+    process.chdir(worktreeCwd);
+
+    const { hookMarkRunning } = await import("./mark-running");
+    await hookMarkRunning(agentId);
+
+    const meta = JSON.parse(await readFile(join(agentDir, "meta.json"), "utf-8"));
+    expect(meta.state).toBe("running");
+    expect(meta.ack).toBeUndefined();
+  });
+
+  test("direct human turn on an acknowledged complete child: the tool-free answer notifies the manager again", async () => {
+    const managerDir = join(tempDir, ".ittybitty", "agents", "agent-mgr12345");
+    await mkdir(managerDir, { recursive: true });
+    await Bun.write(join(managerDir, "meta.json"), JSON.stringify({ id: "agent-mgr12345", tmux_session: "ib-mgr" }));
+    await Bun.write(
+      join(agentDir, "meta.json"),
+      JSON.stringify({
+        id: agentId,
+        worktree: true,
+        manager: "agent-mgr12345",
+        state: "complete",
+        ack: { state: "complete", by: "agent-mgr12345", at: 1 },
+      }),
+    );
+    process.chdir(worktreeCwd);
+
+    // UserPromptSubmit, then a turn with no tool call that ends complete again.
+    const { hookMarkRunning } = await import("./mark-running");
+    await hookMarkRunning(agentId);
+    const { processStopHook } = await import("./agent-status");
+    const result = await processStopHook(
+      agentId,
+      "answered\nI HAVE COMPLETED THE GOAL",
+      agentDir,
+      join(tempDir, ".ittybitty", "agents"),
+      { checkGitStatus: async () => "" },
+    );
+    expect(result.action).toBe("notify_manager");
+  });
+
+  test("guard: keeps state='stopped' (a stale prompt on a stopped record must not revive it)", async () => {
     await Bun.write(
       join(agentDir, "meta.json"),
       JSON.stringify({ state: "stopped" }),

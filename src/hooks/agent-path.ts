@@ -1199,6 +1199,9 @@ function checkWorktreeBoundary(
  * `nuke` is deliberately NOT in this set: it is a user-only command (no agent
  * — worker, manager, coordinator, or @system — may run it), enforced by the
  * blanket deny near the top of checkIbCommandAccess.
+ *
+ * `ack` is narrower than the rest: only the target's MANAGER may run it (no
+ * spawner, no coordinator bypass). `ackAgent` enforces the same rule again.
  */
 const IB_MANAGER_ONLY_COMMANDS = new Set([
   "retire",
@@ -1207,6 +1210,7 @@ const IB_MANAGER_ONLY_COMMANDS = new Set([
   "resume",
   "pause",
   "reassign",
+  "ack",
 ]);
 
 /**
@@ -1420,7 +1424,7 @@ export interface ManagerCommandAccessOptions {
  * The manager-relationship rule behind {@link checkIbCommandAccess}: may
  * `callingAgentId` run the manager-only command `subcommand` on `targetId`?
  * Only the target's manager or spawner may, plus the repo's coordinator for
- * retire / rehire / reassign (SPEC §12.2).
+ * retire / rehire / reassign (SPEC §12.2). `ack` is the manager's only.
  *
  * Returns a deny decision, or null when the command is allowed. Unlike
  * `checkIbCommandAccess`, null here never means "not my concern": a command
@@ -1474,6 +1478,8 @@ export async function checkManagerCommandAccess(
     if (typeof meta.manager === "string" && meta.manager === callingAgentId) {
       return true;
     }
+    // `ib ack` is the manager's alone.
+    if (requestedSubcommand === "ack") return false;
     // Allow if caller is the spawner.
     const sb = meta.spawned_by as { agent_id?: string; repo_path?: string | null } | undefined;
     if (!sb || typeof sb.agent_id !== "string") return false;
@@ -1572,7 +1578,9 @@ export async function checkManagerCommandAccess(
       if (await hasAccess(meta)) return null; // allow
       return {
         decision: "deny",
-        reason: `Access denied: only the manager or spawner of '${targetId}' can run 'ib ${subcommand}'`,
+        reason: subcommand === "ack"
+          ? `Access denied: only the manager of '${targetId}' can run 'ib ack'`
+          : `Access denied: only the manager or spawner of '${targetId}' can run 'ib ${subcommand}'`,
       };
     }
   } catch { /* exists() failed — fall through to cross-repo check */ }

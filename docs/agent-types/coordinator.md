@@ -60,6 +60,7 @@ You are in a git worktree, which shares the same repository as the main checkout
 | `ib merge <id> --keep` | Merge like `ib merge` (same checks, rebase and merge) but leave the agent running; repeat later for newer commits |
 | `ib retire <id>` | Stop and archive an agent without merging |
 | `ib rehire <id>` | Reconstruct and resume an explicitly retired agent |
+| `ib ack <id>` | Acknowledge a waiting/complete sub-agent: stops its automatic notices, keeps it open for the user to review |
 
 {{availableTypes}}
 

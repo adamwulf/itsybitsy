@@ -152,7 +152,7 @@ State is written to `meta.json` by exactly five actors:
 |-------|------|---------------|
 | **Stop hook** (`ib hook-status`) | Claude becomes idle | `waiting`, `complete`, or `running` (nudge case) |
 | **PreToolUse hook** (`ib hook-check-path`) | Before every tool call | `running` |
-| **UserPromptSubmit hook** (`ib hook-mark-running`) | Input arrives (incl. `tmux send-keys` from another agent) | `running` (guarded — bails if current state is `complete` or `stopped`) |
+| **UserPromptSubmit hook** (`ib hook-mark-running`; codex: `ib hooks codex-user-prompt-submit`) | Input arrives (incl. `tmux send-keys` from another agent) | `running` (guarded — bails only if current state is `stopped`) |
 | **`ib send`** | Message sent to agent | `running` |
 | **`ib resume`** | Agent resumed from stopped | `running` |
 
@@ -163,7 +163,9 @@ The stop hook is the primary state authority. Its detection logic:
 
 The stop hook does NOT parse tmux output for state detection. Tmux parsing for `rate_limited` and `compacting` is done only by state consumers at read time.
 
-**Atomic writes**: State updates to meta.json use atomic write (write temp file, rename) to prevent partial reads. The `state` field is added alongside existing meta.json fields — all other fields remain unchanged.
+**Atomic writes**: State updates to meta.json use atomic write (write temp file, rename) to prevent partial reads. The `state` field is added alongside existing meta.json fields — all other fields remain unchanged, except `ack` (§8.5.2).
+
+**Ack invalidation**: all of these actors (and the codex/agy hooks) write through `writeAgentState`, which deletes a manager's `ack` (§8.5.2) in the same locked write whenever the stored state CHANGES. Rewriting the same state keeps it.
 
 ### 1.3.2 Legacy State Detection (parseState)
 
@@ -416,6 +418,8 @@ When a top-level agent (no manager of its own) with `canSpawnChildren: true` sig
 
 Specifically, it looks for children — agents in `.ittybitty/agents/` whose `meta.json` `manager` field matches the completing agent's ID. If any exist, the agent receives a nudge message listing them and instructing it to merge or retire each one before completing.
 
+A child the agent acknowledged with `ib ack` (§8.5.2) is still unfinished: it is open on purpose, for human review. When any are listed, the nudge also names them and tells the agent it cannot complete while they are open and must end its turn with `WAITING` instead.
+
 ### 2.6 Agent Type File Format
 
 Agent type files are markdown files with YAML frontmatter:
@@ -659,6 +663,8 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 
 **[^note]** The TypeScript `acknowledgeQuestion` is only called from the TUI dashboard (always user-level), so it omits the `is_running_as_agent()` guard.
 
+**[^callout]** `ack` is not an alias of `ib acknowledge` in TypeScript: `ib ack <agent-id>` is the manager's sub-agent acknowledgement (§8.5.2). Questions are acknowledged with `ib acknowledge <question-id>` only.
+
 ---
 
 ## 5. Worktree / Agent Directory Structure
@@ -753,6 +759,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 | `watchdog_pid` | string | PID of the watchdog process (appended to meta.json after watchdog spawns — not present in the initial write; see §8.5) |
 | `state` | string \| undefined | Deterministic agent state written by the stop hook, `ib send`, or `ib resume`. Values: `"running"`, `"waiting"`, `"complete"`. Absent on legacy agents or before the first stop hook fires (treated as `"running"` if agent is older than 6s). See §1.3.1. |
 | `state_updated_at` | number \| undefined | Unix epoch seconds when `state` was last written. Used for debugging. |
+| `ack` | object \| undefined | `{state, by, at}` written by the manager's `ib ack` (§8.5.2). Current only while `state` equals the stored `state` and `by` equals `manager`; removed by any state change. |
 | `coordinator` | boolean \| undefined | `true` for per-repo coordinators (§12.2.2). Absent for regular agents. |
 | `paths` | object \| undefined | Resolved, repo-anchored filesystem policy (`allowRead` / `allowWrite` / `deny`) from the agent type's `paths:` frontmatter, canonicalized to absolute paths at creation and frozen here. A **missing** key equals empty lists equals **strict** (worktree + runtime roots only). Replaced the retired `allowedPaths`. See §6.1. |
 | `sandbox` | object \| undefined | Resolved kernel policy (`enabled`, `rawAllow`, `domains`), frozen at spawn. Enablement uses the most specific explicit type/layer value; only literal false disables and omission defaults true. Enabled launches require valid frozen paths, seal, profile, and proxy; setup errors fail closed. Disabled launches omit the itsybitsy kernel wrapper, proxy, and collector and restore the pre-sandbox CLI launch configuration. Hooks remain active and resolve all tool approvals without user prompts in both modes. Operator refresh applies edited type policy. |
@@ -877,9 +884,11 @@ The stop hook does **not** parse tmux output for state detection. It relies sole
 | `running` | Background tasks active (shared footer detector, §8.5.1) | No action (agent is working via background tasks) |
 | `running` | No background tasks | **Nudge** — debounced (5s), sends "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL'" via tmux |
 | `complete` | Uncommitted changes | **Remind commit** — sends message telling agent to commit |
+| `complete` | Has manager, and the manager acknowledged this `complete` state (`ib ack`, §8.5.2) | No action; logged to `agent.log` |
 | `complete` | Has manager | **Notify manager** — sends "[hook]: Your subtask <id> just completed" to manager's tmux [^notify-mechanism] |
-| `complete` | No manager, unfinished children | **Remind children** — tells agent to merge/retire all sub-agents |
+| `complete` | No manager, unfinished children | **Remind children** — tells agent to merge/retire all sub-agents; acknowledged children are named with an instruction to stay `WAITING` (§2.5) |
 | `complete` | No manager, no children | No action |
+| `waiting` | Has manager, and the manager acknowledged this `waiting` state (`ib ack`, §8.5.2) | No action; logged to `agent.log` |
 | `waiting` | Has manager, background tasks active (shared footer detector, §8.5.1) | No action (agent is working via background tasks — see §8.5.1) |
 | `waiting` | Has manager, no background tasks, at least one direct child with `meta.state === "running"` OR `isRecentlyCreated(created_epoch)` | No action (child still working — see §8.5.1) |
 | `waiting` | Has manager, no background tasks, no active children | **Notify manager** — sends "[hook]: Your subtask <id> is now waiting for input" |
@@ -997,7 +1006,9 @@ This is the defense-in-depth fallback if a request reaches Claude's native permi
 
 Writes `state: "running"` to the agent's `meta.json` the instant input arrives. This covers the case where another agent sends a message via `tmux send-keys` (e.g. a `notify_manager` from a child) — without this hook the recipient would stay labeled `waiting` until its next Stop hook fires. PreToolUse covers the post-background-tool case (see §6.1).
 
-**Terminal-state guard**: Reads the current `state` from `meta.json` first; bails if it is `complete` or `stopped`. UserPromptSubmit can in theory fire after Stop, and we never want to resurrect a terminal state. No-op when `meta.json` is missing or unparseable. No logging.
+**Stopped guard**: Reads the current `state` from `meta.json` first and bails only if it is `stopped`: a stopped agent has no live session, and `ib resume` writes `running` itself, so a prompt event on a stopped record is stale. A `complete` agent is written `running`: UserPromptSubmit runs before the prompt is processed, so it always starts a new turn (a human typing into a finished agent), and PreToolUse and `ib send` already write `running` over `complete`. (An earlier guard also skipped `complete`, against a UserPromptSubmit firing after Stop, which cannot happen.) The write also ends a manager's `ack` (§8.5.2). No-op when `meta.json` is missing or unparseable. No logging.
+
+**Codex**: codex agents get the same rule from their own UserPromptSubmit hook, `ib hooks codex-user-prompt-submit <id>` (§18.5; `markRunningOnPrompt` is shared). It prints `{}`: codex parses this event's output as JSON, like Stop's.
 
 ### 6.6.1 Inject Timestamp Hook (PostToolUse)
 
@@ -1258,8 +1269,8 @@ Per-agent watchdogs do not use a watchdog lock file for state detection, and the
 
 | State | Action |
 |-------|--------|
-| `waiting` | Increment waiting counter unless (a) tmux shows background shells OR (b) the agent has at least one direct child with `meta.state === "running"` OR `isRecentlyCreated(created_epoch)` — in which case suppress BOTH `notifyManager` AND `notifySpawner` and pause the counter (neither increment nor reset; `notifyInterval` is preserved). Otherwise, when counter reaches the notification threshold, notify manager: "[watchdog]: Your subtask <id> recently started waiting for input (reminder X/5)". The Stop hook sends the initial waiting notice immediately; watchdog reminders then use exponential backoff at 4, 8, 16, 32, and 64 minutes between notices. After that single 64-minute interval, `MAX_MANAGER_NOTIFICATIONS` (5) has been reached and the watchdog goes silent for that waiting episode. Each reminder carries an `(reminder X/5)` counter, and the count resets when the agent leaves the backoff states. See §8.5.1. |
-| `complete` | Reset waiting counter and notification interval. The watchdog notifies the manager (or spawner) "[watchdog]: Your subtask <id> recently completed" as a **delayed fallback**: only after the agent has been continuously in `complete` state for `COMPLETE_FALLBACK_DELAY_TICKS` (30s; 6 polls). This is a safety-net for a missed or undelivered agent-status Stop-hook "just completed" — which fires immediately on completion (see the §8 Stop-hook "Actions by state" table / hooks) — rather than a duplicate of it. In the common case an active manager reacts to the hook's "just completed" (ib merge / ib retire / ib send) within that window, moving the child off `complete`, so the redundant watchdog notification never fires. A dedicated per-agent `completeCounter` times the delay (the waiting counter can't be reused — `complete` is not a backoff state, so that counter is reset every complete tick). The one-shot `completionNotified` flag then prevents duplicate notifications; both the flag and `completeCounter` reset if the agent returns to `running`, and `completeCounter` also resets on a fresh entry into `complete`. |
+| `waiting` | Increment waiting counter unless (a) tmux shows background shells OR (b) the agent has at least one direct child with `meta.state === "running"` OR `isRecentlyCreated(created_epoch)` — in which case suppress BOTH `notifyManager` AND `notifySpawner` and pause the counter (neither increment nor reset; `notifyInterval` is preserved). Otherwise, when counter reaches the notification threshold, notify manager: "[watchdog]: Your subtask <id> recently started waiting for input (reminder X/5)". The Stop hook sends the initial waiting notice immediately; watchdog reminders then use exponential backoff at 4, 8, 16, 32, and 64 minutes between notices. After that single 64-minute interval, `MAX_MANAGER_NOTIFICATIONS` (5) has been reached and the watchdog goes silent for that waiting episode. Each reminder carries an `(reminder X/5)` counter, and the count resets when the agent leaves the backoff states. See §8.5.1. No reminders while the manager's `ib ack` covers this `waiting` state; the schedule restarts when the ack goes (§8.5.2). |
+| `complete` | Reset waiting counter and notification interval. The watchdog notifies the manager (or spawner) "[watchdog]: Your subtask <id> recently completed" as a **delayed fallback**: only after the agent has been continuously in `complete` state for `COMPLETE_FALLBACK_DELAY_TICKS` (30s; 6 polls). This is a safety-net for a missed or undelivered agent-status Stop-hook "just completed" — which fires immediately on completion (see the §8 Stop-hook "Actions by state" table / hooks) — rather than a duplicate of it. In the common case an active manager reacts to the hook's "just completed" (ib merge / ib retire / ib send) within that window, moving the child off `complete`, so the redundant watchdog notification never fires. A dedicated per-agent `completeCounter` times the delay (the waiting counter can't be reused — `complete` is not a backoff state, so that counter is reset every complete tick). The one-shot `completionNotified` flag then prevents duplicate notifications; both the flag and `completeCounter` reset if the agent returns to `running`, and `completeCounter` also resets on a fresh entry into `complete`. No fallback while the manager's `ib ack` covers this `complete` state; both reset when the ack goes (§8.5.2). |
 | `rate_limited` | Attempt to bypass the rate limit dialog (3-attempt retry loop with 2s sleeps between attempts; checks tmux output for rate limit patterns after each Enter to verify dismissal). Then poll Claude's usage API; when a **live** reading shows session usage below 5%, send nudge: "[watchdog]: Usage has refreshed (<pct>%). Please continue your task." A reading flagged `error: true` (the API is failing and `fetchUsage` is serving its last good response during backoff) never nudges — stale numbers say nothing about the live limit. The usage fetch ranks the OAuth tokens found in `~/.claude/.credentials.json` and the macOS Keychain by expiry and tries them in turn, so a stale copy in one store cannot mask the refreshed token in the other. Reset waiting counter and notification interval. |
 | `running` | Reset waiting counter, notification interval, and `rateLimitBypassed` flag. Clear the completion flag (`completionNotified`) and the complete-state fallback counter (`completeCounter`) if previously set, so a later completion re-arms the 30s delay from scratch. |
 | `creating` | Treat as running — reset waiting counter, notification interval, and `rateLimitBypassed` flag. |
@@ -1283,6 +1294,21 @@ We suppress upward notification of a waiting agent when that agent has work in f
 2. **Direct active child** — the agent has at least one immediate child (`meta.manager === parentId`) whose `meta.state === "running"` OR which is within the `isRecentlyCreated` grace period (i.e., still `creating`).
 
 "Transitive" suppression is bounded to this one-level walk. We do NOT recurse into grandchildren to determine a parent's suppression status; the `running`/`creating` check on direct children is sufficient because each layer's watchdog independently applies this guard. If a grandchild is running, the child-manager will have its own direct active child and suppress its own notification; that upward silence propagates naturally without the parent ever needing to look past its immediate children. Critically, `waiting` and `complete` children are **not** "work in flight" — the top of a parked chain must still be told, and `complete` children need user merge/retire.
+
+### 8.5.2 Manager acknowledgement (`ib ack`)
+
+`ib ack <agent-id>` lets a manager keep a direct sub-agent that is `waiting` or `complete` open for human review, without automatic notices about it. It does not merge, retire, or restart the sub-agent.
+
+- **Who**: only the child's current manager (`meta.manager`), from its own agent session. `ackAgent` (`src/ib-commands.ts`) resolves the caller with the resolver `ib new-agent` uses (an unverifiable caller is refused) and needs the child to be in the caller's repository. A human shell, a spawner that is not the manager, and a coordinator that is not the manager are refused. The PreToolUse hook lists `ack` with the manager-only commands, but with no spawner access and no coordinator bypass (`checkManagerCommandAccess`); codex and agy use the same check.
+- **Record**: `ack: {state, by, at}` in the child's meta.json. `state` is the child's stored state, which must be `waiting` or `complete` (anything else, including a missing state, is refused); `by` is the manager; `at` is epoch seconds. The write goes through `mutateAgentMeta`, and the manager and state checks run again inside its lock. The child's `state`, `state_updated_at`, tmux session, and worktree do not change. Acknowledging an already acknowledged state changes nothing and succeeds.
+- **Current**: an ack counts only while `ack.state` equals the stored `state` and `ack.by` equals `manager` (`currentAck`, `src/agents.ts`). Reassigning the child ends it.
+- **Invalidation**: `writeAgentState` removes `ack` in the same locked write when the stored state changes (§1.3.1). A `waiting → running → waiting` change between two watchdog polls therefore leaves no ack. A Stop hook that writes the same state again keeps it. A prompt to the agent — a human typing in the pane, or `ib send` — also ends it: the UserPromptSubmit hook of Claude and of codex writes `running` (§6.6), including over `complete`. agy's PreInvocation hook writes `running` at the start of every turn.
+- **Stop hook** (§6.2): when a current ack covers the state the hook just wrote, the `notify_manager` for `waiting` or `complete` is not sent, and a line goes to the child's `agent.log`. The commit reminder is not affected.
+- **Watchdog** (§8.5): `handleWaiting` and `handleComplete` read the ack from meta.json on each tick (so it survives a watchdog restart), and send nothing while it covers the current state. When a tick finds that an ack the watchdog saw before is gone, a new episode started, maybe between two polls. The watchdog then restarts that episode's schedule: reminders from `1/5` at the first interval, and the 30 s complete fallback. Until an ack is written, timings do not change. There is no ack for `unknown`.
+- **Queued notices**: an ack stops notices created after it. A notice already in the manager's outbox is delivered as usual.
+- **Manager completion**: an acknowledged child is still unfinished (§2.5). The manager is told to end its turn with `WAITING`.
+- **Sandbox**: `ib ack` reads the registry and `<repo>/.ittybitty/agents`, and writes only in the child's agent directory (`meta.json`, its lock and temp file, `agent.log`). A spawner's kernel profile grants write on `<repo>/.ittybitty/agents`, and it needs neither the main repo root nor the archive, so a sandboxed manager runs it directly, without the watchdog broker. The opt-in live test in `src/ib-ack.test.ts` (`IB_LIVE_ACK=1`) runs the compiled `ib ack` under a real manager profile.
+- **Dashboard**: not changed.
 
 ### 8.6 Root Repo Resolution
 
@@ -3067,6 +3093,7 @@ codex -m <MODEL> -a never -s danger-full-access \
       --dangerously-bypass-hook-trust \
       -c 'hooks.PreToolUse=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-pre-tool-use <agentId>",timeout=30}]}]' \
       -c 'hooks.SessionStart=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-session-start <agentId>",timeout=30,additionalContextLimit=0}]}]' \
+      -c 'hooks.UserPromptSubmit=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-user-prompt-submit <agentId>",timeout=30}]}]' \
       -c 'hooks.Stop=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-stop <agentId>",timeout=30}]}]' \
       "<prompt>"
 ```
@@ -3090,15 +3117,16 @@ At spawn and resume, Codex/Fugu always use `-a never`, so native approval UI is 
 
 ### 18.5 Hook Architecture (Codex side)
 
-Three codex-side hook handlers, all dispatched through a fail-open-safe wrapper:
+Four codex-side hook handlers, all dispatched through a fail-open-safe wrapper:
 
 | Hook | Subcommand | Handler | Purpose |
 |---|---|---|---|
 | **PreToolUse** | `ib hooks codex-pre-tool-use <agentId>` | `src/hooks/codex-pre-tool-use.ts` | Allow/deny + path-isolation for `Bash` AND `apply_patch`. Default: deny. |
 | **SessionStart** | `ib hooks codex-session-start <agentId>` | `src/hooks/codex-session-start.ts` | Writes `state: "running"` to `meta.json`; captures `meta.codex_session_id` on first firing (defensive snake_case/camelCase read); returns the agent's role text as `additionalContext` (§18.6). |
+| **UserPromptSubmit** | `ib hooks codex-user-prompt-submit <agentId>` | `src/hooks/codex-user-prompt-submit.ts` | Writes `state: "running"` when a prompt is submitted (a human typing in the pane, or `ib send`), except for `stopped` — the same rule as Claude's (§6.6). This is codex's only turn-start state write after SessionStart, and it ends a manager's `ib ack` (§8.5.2). Prints `{}` (codex parses this event's output as JSON). Running codex agents pick it up only after a respawn (codex has no hook hot-reload). |
 | **Stop** | `ib hooks codex-stop <agentId>` | `src/hooks/codex-stop.ts` | Writes `state: "waiting"` / `"complete"` to `meta.json` (deterministic state — no tmux scraping). |
 
-**Dispatcher pattern (`src/hooks/codex-dispatcher.ts`):** all three handlers are invoked through a single dispatcher that NEVER throws and ALWAYS exits 0 in the production path. Codex's documented hook failure mode is **FAIL-OPEN** (a hook that crashes, emits malformed JSON, or returns an unsupported `permissionDecision` is marked failed and the tool call PROCEEDS per `developers.openai.com/codex/hooks`). The dispatcher is the defense:
+**Dispatcher pattern (`src/hooks/codex-dispatcher.ts`):** all four handlers are invoked through a single dispatcher that NEVER throws and ALWAYS exits 0 in the production path. Codex's documented hook failure mode is **FAIL-OPEN** (a hook that crashes, emits malformed JSON, or returns an unsupported `permissionDecision` is marked failed and the tool call PROCEEDS per `developers.openai.com/codex/hooks`). The dispatcher is the defense:
 
 - Wraps all handler logic in try/catch; emits a deny payload on any uncaught exception.
 - Validates `<agentId>` as the first argv before doing any other work; emits deny + `exit 0` on parse failure.
@@ -3205,7 +3233,7 @@ The subcommand routes through `mutateAgentMeta()` in `src/agents.ts` so concurre
 Per the mandated `AGENTS.md` Cross-Cutting Review Checklist:
 
 1. **General agent functionality** — **affected.** New spawn (§18.6) and resume (§18.7) paths branch on a new CLI discriminator derived from `meta.model`. Codex agents skip the claude-side `settings.local.json` write entirely and instead get their role instructions from the codex SessionStart hook's `additionalContext`, as Claude does (nothing written into the worktree) + a `.codex/` gitignore entry. One new optional meta field (`codex_session_id`, §18.10). One new mutate-meta-from-shell subcommand (`ib write-pid`, §18.11) used by spawn scripts of BOTH CLIs.
-2. **Hooks** — **affected.** Three new codex-side hook handlers (PreToolUse, SessionStart, Stop) dispatched through a fail-open-safe dispatcher with `--dry-run` support (§18.5). All three are registered via inline `-c` flags at spawn time (no on-disk codex config is written). Claude-side hooks are unchanged.
+2. **Hooks** — **affected.** Four codex-side hook handlers (PreToolUse, SessionStart, UserPromptSubmit, Stop) dispatched through a fail-open-safe dispatcher with `--dry-run` support (§18.5). All four are registered via inline `-c` flags at spawn time (no on-disk codex config is written). Claude-side hooks are unchanged.
 3. **Watchdog** — **affected.** Three Claude-specific behaviors (`handleRateLimited`, `handleApiError`, permission auto-accept) are gated behind `classifyAgentCli(meta)` (§18.8). The outbox drain, `fs.watch` coalescing, `runSessionExclusive` mutex, nudge timing, and notification routing stay CLI-agnostic.
 4. **`ib watch` / dashboard** — **largely unaffected.** Info-panel and agent-tree render `meta.model` verbatim (D8), so `codex:<model>` displays correctly with no special split required. No new modes, no new panels, no new layout fields. (State detection in the dashboard for codex's override states is deferred — §18.9.)
 

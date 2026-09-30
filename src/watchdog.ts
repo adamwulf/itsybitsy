@@ -12,8 +12,8 @@
 import { join } from "path";
 import { mkdirSync } from "fs";
 import { watch, type FSWatcher } from "node:fs";
-import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, isApiError, isApiErrorRateLimited, isApiTerms, isApiSafeguard, readAgentState, hasBackgroundTasks, anyChildActive, readAgentTransient, updateAgentTransient, mutateAgentMeta } from "./agents";
-import type { Agent } from "./agents";
+import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, isApiError, isApiErrorRateLimited, isApiTerms, isApiSafeguard, readAgentState, hasBackgroundTasks, anyChildActive, readAgentTransient, updateAgentTransient, mutateAgentMeta, readAgentAck, agentStorageDir } from "./agents";
+import type { Agent, AgentAck } from "./agents";
 import {
   captureTmuxOutput,
   captureTmuxOutputResult,
@@ -92,6 +92,13 @@ export interface AgentTracker {
    * (alongside `completionNotified`) and on a fresh entry into `complete`.
    */
   completeCounter: number;
+  /**
+   * True when the last waiting/complete tick saw a current `ib ack`
+   * (SPEC §8.5.2). If a later waiting/complete tick finds the ack gone, the
+   * state changed in between — maybe between two polls — so the episode's
+   * notification schedule restarts (see ackSuppresses).
+   */
+  acked: boolean;
   rateLimitBypassed: boolean;
   compactState: CompactState;
   lastCompactCheckMs: number;
@@ -271,6 +278,19 @@ export function resetWatchdogReadConfig(): void {
   readConfigFn = readConfig;
 }
 
+/** Overridable ack reader for testing. */
+let readAckFn: (agentDir: string) => Promise<AgentAck | null> = readAgentAck;
+
+/** Override the `ib ack` reader for testing. */
+export function setWatchdogReadAck(fn: (agentDir: string) => Promise<AgentAck | null>): void {
+  readAckFn = fn;
+}
+
+/** Reset the `ib ack` reader to default. */
+export function resetWatchdogReadAck(): void {
+  readAckFn = readAgentAck;
+}
+
 /** Overridable Date.now for testing. */
 let nowFn: () => number = () => Date.now();
 
@@ -306,6 +326,7 @@ export function createTracker(): AgentTracker {
     notifyCount: 0,
     completionNotified: false,
     completeCounter: 0,
+    acked: false,
     rateLimitBypassed: false,
     compactState: { compactSent: false },
     lastCompactCheckMs: nowFn(),
@@ -564,6 +585,40 @@ async function sendTmuxCompactCancel(tmuxSession: string): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 /**
+ * `ib ack` (SPEC §8.5.2): true when the agent's manager acknowledged its
+ * current `state`, so the handler must send no notice. The ack is read fresh
+ * from meta.json on every waiting/complete tick: this watchdog's `agent.meta`
+ * is the copy read at startup, and an ack survives a watchdog restart because
+ * it lives on disk.
+ *
+ * Re-arm: only a state change removes an ack (writeAgentState drops it in the
+ * same locked write). So when a tick finds an ack this tracker saw earlier is
+ * gone, a new episode began, possibly between two polls (waiting → running →
+ * waiting shows here as waiting throughout). Restart that episode's schedule:
+ * reminders from 1/5 at the first interval, and the 30s complete fallback.
+ */
+async function ackSuppresses(
+  agent: Agent,
+  tracker: AgentTracker,
+  state: "waiting" | "complete",
+): Promise<boolean> {
+  let ack: AgentAck | null = null;
+  try {
+    ack = await readAckFn(agentStorageDir(agent));
+  } catch { /* unreadable → not acknowledged; notices keep their schedule */ }
+  const covered = ack?.state === state;
+  if (tracker.acked && !covered) {
+    tracker.waitCounter = 0;
+    tracker.notifyInterval = INITIAL_NOTIFY_TICKS;
+    tracker.notifyCount = 0;
+    tracker.completionNotified = false;
+    tracker.completeCounter = 0;
+  }
+  tracker.acked = covered;
+  return covered;
+}
+
+/**
  * Handler for "waiting" state.
  * Increments wait counter. After threshold, notifies manager with exponential backoff.
  * Backoff: 4m -> 8m -> 16m -> 32m -> 64m, then stop.
@@ -603,6 +658,9 @@ async function handleWaiting(agent: Agent, tracker: AgentTracker, getAllAgents: 
   // walk or the CLI watchdog path will silently break.
   const allAgents = await getAllAgents();
   if (anyChildActive(agent.id, allAgents)) return;
+
+  // Acknowledged by the manager: no reminders for this waiting episode.
+  if (await ackSuppresses(agent, tracker, "waiting")) return;
 
   tracker.waitCounter++;
 
@@ -779,6 +837,9 @@ async function handleComplete(agent: Agent, tracker: AgentTracker, getAllAgents:
   if (tracker.previousState !== "complete") {
     tracker.completeCounter = 0;
   }
+
+  // Acknowledged by the manager: no fallback for this complete episode.
+  if (await ackSuppresses(agent, tracker, "complete")) return;
 
   if (!tracker.completionNotified) {
     // Advance the countdown while still un-notified. Only fire the fallback

@@ -71,8 +71,11 @@ import {
   COMPACT_CANCEL_ESCAPE_GAP_MS,
   setWatchdogSandboxProxyFns,
   resetWatchdogSandboxProxyFns,
+  setWatchdogReadAck,
+  resetWatchdogReadAck,
   type AgentTracker,
 } from "./watchdog";
+import { writeAgentState, type AgentAck } from "./agents";
 import {
   setSendSpawnRunner,
   resetSendSpawnRunner,
@@ -1670,6 +1673,147 @@ describe("watchdog", () => {
         c.args.some((a: string) => typeof a === "string" && a.includes("send-keys"))
       );
       expect(sendKeysCalls.length).toBe(0);
+    });
+  });
+
+  describe("ib ack suppression (SPEC §8.5.2)", () => {
+    /** Current ack per agent id, served by the injected reader. */
+    let acks: Map<string, AgentAck>;
+
+    beforeEach(() => {
+      acks = new Map();
+      setWatchdogReadAck(async (agentDir) => acks.get(agentDir.split("/").pop()!) ?? null);
+      setWatchdogCaptureTmux(async () => "no shells");
+    });
+
+    afterEach(() => {
+      resetWatchdogReadAck();
+    });
+
+    function sends(substr: string): number {
+      return spawnMock.calls.filter((c) =>
+        c.args.includes("send-keys") &&
+        c.args.some((a: any) => typeof a === "string" && a.includes(substr))
+      ).length;
+    }
+
+    /** Make the next tick an eligible waiting-reminder tick, then run it. */
+    async function eligibleTick(agents: Agent[], id: string): Promise<void> {
+      const tracker = getTracker(id);
+      tracker.waitCounter = tracker.notifyInterval;
+      await tick(agents);
+    }
+
+    test("an acknowledged waiting agent gets no reminders, however long it waits", async () => {
+      const agents = [agent("mgr", "running"), agent("a1", "waiting", "mgr")];
+      acks.set("a1", { state: "waiting", by: "mgr", at: 1 });
+
+      for (let i = 0; i < MAX_MANAGER_NOTIFICATIONS + 3; i++) await eligibleTick(agents, "a1");
+
+      expect(sends("recently started waiting")).toBe(0);
+      expect(getTracker("a1").notifyCount).toBe(0);
+      expect(getTracker("a1").acked).toBe(true);
+    });
+
+    test("an ack stops reminders mid-episode; before it, the normal schedule ran", async () => {
+      const agents = [agent("mgr", "running"), agent("a1", "waiting", "mgr")];
+      await eligibleTick(agents, "a1");
+      expect(sends("(reminder 1/5)")).toBe(1);
+
+      acks.set("a1", { state: "waiting", by: "mgr", at: 1 });
+      for (let i = 0; i < 3; i++) await eligibleTick(agents, "a1");
+      expect(sends("recently started waiting")).toBe(1);
+    });
+
+    test("re-arm: a waiting → running → waiting flip between polls restarts the reminder schedule at 1/5", async () => {
+      const agents = [agent("mgr", "running"), agent("a1", "waiting", "mgr")];
+      // Two reminders in the first episode, then the manager acks.
+      await eligibleTick(agents, "a1");
+      await eligibleTick(agents, "a1");
+      expect(getTracker("a1").notifyCount).toBe(2);
+      acks.set("a1", { state: "waiting", by: "mgr", at: 1 });
+      await eligibleTick(agents, "a1");
+
+      // The child ran and parked again between two polls: the watchdog saw
+      // `waiting` throughout, but the state write dropped the ack.
+      acks.delete("a1");
+      await tick(agents);
+      const tracker = getTracker("a1");
+      expect(tracker.acked).toBe(false);
+      expect(tracker.notifyCount).toBe(0);
+      expect(tracker.notifyInterval).toBe(INITIAL_NOTIFY_TICKS);
+      expect(tracker.waitCounter).toBe(1);
+
+      // The next reminder comes at the INITIAL interval and is numbered 1/5 again.
+      for (let i = 1; i < INITIAL_NOTIFY_TICKS - 1; i++) await tick(agents);
+      expect(sends("(reminder 1/5)")).toBe(1); // only the first episode's
+      await tick(agents);
+      expect(sends("(reminder 1/5)")).toBe(2);
+      expect(sends("(reminder 3/5)")).toBe(0);
+    });
+
+    test("an acknowledged complete agent gets no delayed fallback", async () => {
+      const agents = [agent("mgr", "running"), agent("w1", "complete", "mgr")];
+      acks.set("w1", { state: "complete", by: "mgr", at: 1 });
+
+      for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS * 3; i++) await tick(agents);
+
+      expect(sends("recently completed")).toBe(0);
+      expect(getTracker("w1").completionNotified).toBe(false);
+    });
+
+    test("re-arm: a complete → running → complete flip between polls re-arms the 30s fallback", async () => {
+      const agents = [agent("mgr", "running"), agent("w1", "complete", "mgr")];
+      // Episode 1: the fallback fires, then the manager acks.
+      for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS; i++) await tick(agents);
+      expect(sends("recently completed")).toBe(1);
+      acks.set("w1", { state: "complete", by: "mgr", at: 1 });
+      for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS; i++) await tick(agents);
+
+      // Episode 2 began between polls (the watchdog saw `complete` throughout).
+      acks.delete("w1");
+      for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS - 1; i++) await tick(agents);
+      expect(sends("recently completed")).toBe(1);
+      await tick(agents);
+      expect(sends("recently completed")).toBe(2);
+    });
+
+    test("an ack for a different state does not suppress", async () => {
+      const agents = [agent("mgr", "running"), agent("w1", "complete", "mgr")];
+      acks.set("w1", { state: "waiting", by: "mgr", at: 1 });
+      for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS; i++) await tick(agents);
+      expect(sends("recently completed")).toBe(1);
+    });
+
+    test("persists on disk: survives a watchdog restart, and a real state write re-arms it", async () => {
+      resetWatchdogReadAck(); // the real meta.json reader
+      const repo = mkdtempSync(join(tmpdir(), "ib-watchdog-ack-"));
+      try {
+        const agentDir = join(repo, ".ittybitty", "agents", "a1");
+        mkdirSync(agentDir, { recursive: true });
+        const a1: Agent = { ...agent("a1", "waiting", "mgr"), repoPath: repo };
+        writeFileSync(join(agentDir, "meta.json"), JSON.stringify({
+          ...a1.meta,
+          state: "waiting",
+          ack: { state: "waiting", by: "mgr", at: 1 },
+        }));
+        const agents = [agent("mgr", "running"), a1];
+
+        await eligibleTick(agents, "a1");
+        clearTrackers(); // a new watchdog process starts with a fresh tracker
+        await eligibleTick(agents, "a1");
+        expect(sends("recently started waiting")).toBe(0);
+
+        // waiting → running → waiting through the shared state writer, all
+        // between two polls.
+        await writeAgentState(agentDir, "running");
+        await writeAgentState(agentDir, "waiting");
+        await tick(agents); // sees the ack gone: new episode
+        await eligibleTick(agents, "a1");
+        expect(sends("(reminder 1/5)")).toBe(1);
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
     });
   });
 
@@ -3621,6 +3765,72 @@ describe("lazy allAgents loading via runPerAgentWatchdog", () => {
     expect(a).toBe(b);
     expect(b).toBe(c);
     expect(readAllAgentsCalls).toBe(1);
+  });
+});
+
+// ── ib ack in the live per-agent loop ───────────────────────────────────────
+
+describe("runPerAgentWatchdog — ib ack", () => {
+  afterEach(() => {
+    resetPerAgentExistsSync();
+    resetPerAgentCaptureTmux();
+    resetPerAgentVisibleCaptureTmux();
+    resetPerAgentProbeTmuxPane();
+    resetPerAgentReadMeta();
+    resetPerAgentReadState();
+    resetPerAgentSleep();
+    resetPerAgentDrain();
+    resetPerAgentSpawnBroker();
+    resetWatchdogReadAck();
+    resetWatchdogReadConfig();
+    resetWatchdogListRepos();
+    resetWatchdogReadAllAgents();
+    resetSendSpawnRunner();
+    clearAllAgentsCache();
+  });
+
+  test("reads the ack from the agent dir each poll: no fallback while acked, 30s fallback once it is gone", async () => {
+    let poll = 0;
+    const ackDirs = new Set<string>();
+    const sendPolls: number[] = [];
+    const spawn = mockSpawnRunner();
+    setSendSpawnRunner(((args: any[], opts?: any) => {
+      if (args.includes("send-keys") && args.some((a: any) => typeof a === "string" && a.includes("recently completed"))) {
+        sendPolls.push(poll);
+      }
+      return spawn.runner(args, opts);
+    }) as any);
+    setPerAgentExistsSync(() => poll < 20);
+    setPerAgentCaptureTmux(async () => { poll++; return "no shells"; });
+    setPerAgentVisibleCaptureTmux(async () => "no shells");
+    setPerAgentProbeTmuxPane(async () => ({ status: "live" }));
+    setPerAgentReadMeta(async () => ({ meta: { ...agent("agent-test1", "complete", "agent-mgr").meta } }));
+    setPerAgentReadState(async () => "complete");
+    // Acked for polls 1-8; from poll 9 the ack is gone (the state changed and
+    // came back to complete between two polls).
+    setWatchdogReadAck(async (dir) => {
+      ackDirs.add(dir);
+      return poll <= 8 ? { state: "complete", by: "agent-mgr", at: 1 } : null;
+    });
+    setPerAgentSleep(async () => {});
+    setPerAgentDrain(async () => {});
+    setPerAgentSpawnBroker({ setup: async () => null, process: async () => {} });
+    setWatchdogReadConfig(async () => ({} as any));
+    setWatchdogListRepos(async () => [{ path: "/tmp/test", name: "test" }]);
+    setWatchdogReadAllAgents(async () => ({
+      agents: [agent("agent-mgr", "running")],
+      errors: [],
+      orphanedTmuxSessions: [],
+      liveTmuxSessions: new Set(),
+    }));
+    clearAllAgentsCache();
+
+    await runPerAgentWatchdog("agent-test1", "/tmp/test");
+
+    expect([...ackDirs]).toEqual(["/tmp/test/.ittybitty/agents/agent-test1"]);
+    // Polls 1-8 are acked (well past the 6-poll delay) and send nothing. Poll 9
+    // re-arms the countdown, so the fallback fires on its 6th poll: poll 14.
+    expect(sendPolls).toEqual([14]);
   });
 });
 

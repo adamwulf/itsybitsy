@@ -5,8 +5,9 @@
  * config layer that itsybitsy uses: per the Phase 2 spike, the only reliable
  * way to register a PreToolUse hook in a per-agent worktree is via inline
  * `-c hooks.PreToolUse=[...]` CLI overrides. This module emits exactly those
- * `-c` flags for the three events itsybitsy wires (PreToolUse, SessionStart,
- * Stop), each pointing at an `ib hooks codex-<event> <agentId>` dispatcher.
+ * `-c` flags for the four events itsybitsy wires (PreToolUse, SessionStart,
+ * UserPromptSubmit, Stop), each pointing at an `ib hooks codex-<event>
+ * <agentId>` dispatcher.
  *
  * This module is INTENTIONALLY scoped to launch-flag construction. The
  * mandatory `--dangerously-bypass-hook-trust` flag, the model flags
@@ -20,7 +21,7 @@ import { isValidAgentId } from "./validation";
 import { getCoordinatorHome } from "./coordinator";
 
 /** Hook events codex fires that itsybitsy registers a handler for. */
-export type CodexHookEvent = "PreToolUse" | "SessionStart" | "Stop";
+export type CodexHookEvent = "PreToolUse" | "SessionStart" | "UserPromptSubmit" | "Stop";
 
 /** Default hook timeout in seconds; matches the Phase 2 spike's verified value. */
 export const DEFAULT_CODEX_HOOK_TIMEOUT_SECS = 30;
@@ -29,17 +30,19 @@ export const DEFAULT_CODEX_HOOK_TIMEOUT_SECS = 30;
 const HOOK_DISPATCHER: Record<CodexHookEvent, string> = {
   PreToolUse: "codex-pre-tool-use",
   SessionStart: "codex-session-start",
+  UserPromptSubmit: "codex-user-prompt-submit",
   Stop: "codex-stop",
 };
 
 /**
  * Hook events registered on every codex agent spawn, in stable order.
- * The order is documented (PreToolUse first, then state hooks) so the
- * resulting CLI line is deterministic across runs.
+ * The order is documented (PreToolUse first, then state hooks in turn
+ * order) so the resulting CLI line is deterministic across runs.
  */
 export const CODEX_REGISTERED_EVENTS: readonly CodexHookEvent[] = [
   "PreToolUse",
   "SessionStart",
+  "UserPromptSubmit",
   "Stop",
 ];
 

@@ -20,8 +20,9 @@ import {
 } from "fs/promises";
 import { realpathSync } from "fs";
 import { userHome } from "./home";
-import type { Agent, AgentMeta, SpawnedBy, AgentOperationKind } from "./agents";
+import type { Agent, AgentAck, AgentMeta, SpawnedBy, AgentOperationKind } from "./agents";
 import {
+  currentAck,
   writeAgentState,
   isRecentlyCreated,
   isPidAliveCtx,
@@ -1880,7 +1881,7 @@ export async function resumeAgent(
       //
       // On precheck failure: refuse the resume cleanly. Do NOT touch the
       // worktree — it is the user's existing agent state, not ours to nuke.
-      const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-stop"];
+      const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-user-prompt-submit", "codex-stop"];
       for (const event of codexPrecheckEvents) {
         // Route through dispatcherDryRunSpawnCtx with cwd=workPath so the dry-run
         // subprocess's process.cwd() lands inside the agent's worktree —
@@ -3104,6 +3105,84 @@ export async function reassignAgent(agent: Agent, newManager: string | null): Pr
     ok: true,
     exitCode: 0,
     stdout: `Reassigned ${agent.id} from ${oldLabel} to ${newLabel}`,
+    stderr: "",
+  };
+}
+
+export interface AckAgentOptions {
+  /** Caller cwd override for tests; defaults to process.cwd(). */
+  _cwd?: string;
+}
+
+/**
+ * `ib ack <agent-id>` — the child's current manager acknowledges the child's
+ * current waiting or complete episode (SPEC §8.5.2). The Stop hook and the
+ * watchdog then send no automatic notices about that episode, and the child
+ * stays open (unmerged) for human review.
+ *
+ * Writes only `ack` into the child's meta.json. The child's state, session,
+ * tmux pane and worktree are not touched, so a sandboxed manager needs no
+ * broker: its profile grants write on `<repo>/.ittybitty/agents`.
+ *
+ * The owner gate is checked again inside the meta.json lock, against the
+ * record `writeAgentState` also writes under that lock: a child that changed
+ * state or manager since it was listed is refused, never acked.
+ */
+export async function ackAgent(agent: Agent, opts: AckAgentOptions = {}): Promise<IbCommandResult> {
+  const fail = (stderr: string): IbCommandResult => ({ ok: false, exitCode: 1, stdout: "", stderr });
+
+  let caller: ResolvedCallerContext | null;
+  try {
+    caller = await readCallerMetaFromCwd(opts._cwd ?? process.cwd());
+  } catch (err) {
+    return fail(`Error: cannot verify the caller of 'ib ack': ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const callerId = caller && typeof caller.meta.id === "string" ? caller.meta.id : "";
+  const sameRepo = !!caller?.repoPath && resolve(caller.repoPath) === resolve(agent.repoPath);
+  if (!callerId || !sameRepo || agent.archived || agent.meta.manager !== callerId) {
+    return fail(
+      agent.meta.manager
+        ? `Error: only ${agent.id}'s manager (${agent.meta.manager}) can acknowledge it, from its own agent session`
+        : `Error: ${agent.id} has no manager; 'ib ack' is for a manager acknowledging its own sub-agent`,
+    );
+  }
+
+  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  let refusal = "";
+  let ackedState = "";
+  let already = false;
+  const wrote = await mutateAgentMeta(agentDir, (meta) => {
+    if (meta.manager !== callerId) {
+      refusal = `Error: ${agent.id} is no longer managed by ${callerId}`;
+      return null;
+    }
+    const state = meta.state;
+    if (state !== "waiting" && state !== "complete") {
+      refusal =
+        `Error: ${agent.id} is ${typeof state === "string" ? state : "running"}; ` +
+        "'ib ack' only acknowledges a sub-agent that is waiting or complete";
+      return null;
+    }
+    ackedState = state;
+    if (currentAck(meta)) {
+      already = true;
+      return null;
+    }
+    meta.ack = { state, by: callerId, at: Math.floor(Date.now() / 1000) } satisfies AgentAck;
+  });
+  if (refusal) return fail(refusal);
+  if (already) {
+    return { ok: true, exitCode: 0, stdout: `${agent.id} is already acknowledged (${ackedState}); nothing changed`, stderr: "" };
+  }
+  if (!wrote) return fail(`Error: could not update meta.json for '${agent.id}'`);
+
+  await logAgent(agentDir, `[ack] ${callerId} acknowledged the ${ackedState} state; automatic manager notices are off until the state changes`);
+  return {
+    ok: true,
+    exitCode: 0,
+    stdout:
+      `Acknowledged ${agent.id} (${ackedState}). No automatic notices about it until its state changes; ` +
+      "it stays open for human review, so stay WAITING rather than completing while it is open.",
     stderr: "",
   };
 }
@@ -7056,7 +7135,7 @@ export async function newAgent(
       // creating the tmux session. On failure we reuse `cleanupOnFailure()`
       // (see MED 2 from the Phase 4 review) so any future cleanup additions
       // (e.g. tmux session kill) are inherited automatically.
-      const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-stop"];
+      const codexPrecheckEvents = ["codex-pre-tool-use", "codex-session-start", "codex-user-prompt-submit", "codex-stop"];
       for (const event of codexPrecheckEvents) {
         // Route through dispatcherDryRunSpawnCtx with cwd=workPath so the dry-run
         // subprocess's process.cwd() lands inside the agent's worktree. The

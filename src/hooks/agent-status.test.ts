@@ -1629,3 +1629,129 @@ describe("processStopHook — waiting-branch suppression", () => {
     expect(result.action).toBe("notify_manager");
   });
 });
+
+// ── processStopHook — `ib ack` (SPEC §8.5.2) ─────────────────────────────────
+
+describe("processStopHook — ib ack suppression", () => {
+  let ctx: Awaited<ReturnType<typeof createTempAgentDir>>;
+  const oldEpoch = Math.floor(Date.now() / 1000) - 3600;
+
+  beforeEach(async () => {
+    ctx = await createTempAgentDir();
+    const managerDir = join(ctx.agentsDir, "manager-001");
+    await mkdir(managerDir, { recursive: true });
+    await writeMeta(managerDir, { tmux_session: "ib-manager" });
+    await mkdir(join(ctx.agentDir, "repo"), { recursive: true });
+  });
+
+  afterEach(async () => {
+    await ctx.cleanup();
+  });
+
+  const acked = (state: "waiting" | "complete", by = "manager-001") => ({
+    tmux_session: "ib-test",
+    manager: "manager-001",
+    state,
+    ack: { state, by, at: 1 },
+  });
+  const readChildMeta = async () => JSON.parse(await readFile(join(ctx.agentDir, "meta.json"), "utf-8"));
+
+  test("a Stop hook that rewrites the acknowledged waiting state sends no notice and keeps the ack", async () => {
+    await writeMeta(ctx.agentDir, acked("waiting"));
+    const result = await processStopHook(ctx.agentId, "still parked\nWAITING", ctx.agentDir, ctx.agentsDir, {
+      captureOutput: async () => null,
+    });
+    expect(result).toEqual({ state: "waiting", action: "none" });
+    expect((await readChildMeta()).ack).toEqual({ state: "waiting", by: "manager-001", at: 1 });
+    const log = await readFile(join(ctx.agentDir, "agent.log"), "utf-8");
+    expect(log).toContain("waiting notice to manager-001 suppressed: acknowledged with ib ack");
+  });
+
+  test("a Stop hook that rewrites the acknowledged complete state sends no notice", async () => {
+    await writeMeta(ctx.agentDir, acked("complete"));
+    const result = await processStopHook(ctx.agentId, "done\nI HAVE COMPLETED THE GOAL", ctx.agentDir, ctx.agentsDir, {
+      checkGitStatus: async () => "",
+    });
+    expect(result).toEqual({ state: "complete", action: "none" });
+  });
+
+  test("re-arm: a state change drops the ack, so the next episode notifies again", async () => {
+    // waiting (acked) → complete: the write changes the state, so the manager
+    // gets the normal "just completed".
+    await writeMeta(ctx.agentDir, acked("waiting"));
+    const completed = await processStopHook(ctx.agentId, "done\nI HAVE COMPLETED THE GOAL", ctx.agentDir, ctx.agentsDir, {
+      checkGitStatus: async () => "",
+    });
+    expect(completed.action).toBe("notify_manager");
+    expect((await readChildMeta()).ack).toBeUndefined();
+
+    // waiting (acked) → running (nudge turn) → waiting: the "is now waiting"
+    // notice fires for the new episode.
+    await writeMeta(ctx.agentDir, acked("waiting"));
+    const running = await processStopHook(ctx.agentId, "no sentinel", ctx.agentDir, ctx.agentsDir, {
+      captureOutput: async () => null,
+      now: 1000,
+    });
+    expect(running.state).toBe("running");
+    const waitingAgain = await processStopHook(ctx.agentId, "parked\nWAITING", ctx.agentDir, ctx.agentsDir, {
+      captureOutput: async () => null,
+    });
+    expect(waitingAgain.action).toBe("notify_manager");
+    expect(waitingAgain.message).toContain("is now waiting for input");
+  });
+
+  test("an ack written by a previous manager does not suppress the current manager's notice", async () => {
+    await writeMeta(ctx.agentDir, acked("waiting", "old-manager"));
+    const result = await processStopHook(ctx.agentId, "parked\nWAITING", ctx.agentDir, ctx.agentsDir, {
+      captureOutput: async () => null,
+    });
+    expect(result.action).toBe("notify_manager");
+  });
+
+  test("a manager with an acknowledged open child cannot complete and is told to stay WAITING", async () => {
+    await writeMeta(ctx.agentDir, { tmux_session: "ib-test" }); // top-level manager
+    const ackedChild = join(ctx.agentsDir, "child-acked");
+    await mkdir(ackedChild, { recursive: true });
+    await writeMeta(ackedChild, {
+      tmux_session: "ib-child-a",
+      manager: ctx.agentId,
+      state: "complete",
+      created_epoch: oldEpoch,
+      ack: { state: "complete", by: ctx.agentId, at: 1 },
+    });
+    const plainChild = join(ctx.agentsDir, "child-plain");
+    await mkdir(plainChild, { recursive: true });
+    await writeMeta(plainChild, {
+      tmux_session: "ib-child-p",
+      manager: ctx.agentId,
+      state: "waiting",
+      created_epoch: oldEpoch,
+    });
+
+    const result = await processStopHook(ctx.agentId, "done\nI HAVE COMPLETED THE GOAL", ctx.agentDir, ctx.agentsDir, {
+      checkGitStatus: async () => "",
+      getChildState: async (session) => (session === "ib-child-a" ? "complete" : "waiting"),
+    });
+    expect(result.action).toBe("remind_children");
+    expect(result.message).toContain("2 unfinished sub-agent(s)");
+    expect(result.message).toContain(
+      "You acknowledged child-acked with 'ib ack' to keep it open for human review, so you cannot complete while it is open: end your turn with WAITING instead.",
+    );
+    expect(result.message).not.toContain("acknowledged child-plain");
+  });
+
+  test("without an acknowledged child the remind_children message is unchanged", async () => {
+    await writeMeta(ctx.agentDir, { tmux_session: "ib-test" });
+    const childDir = join(ctx.agentsDir, "child-plain");
+    await mkdir(childDir, { recursive: true });
+    await writeMeta(childDir, { tmux_session: "ib-child-p", manager: ctx.agentId, state: "complete" });
+
+    const result = await processStopHook(ctx.agentId, "done\nI HAVE COMPLETED THE GOAL", ctx.agentDir, ctx.agentsDir, {
+      checkGitStatus: async () => "",
+      getChildState: async () => "complete",
+    });
+    expect(result.message).toBe(
+      "You have 1 unfinished sub-agent(s) that need attention: child-plain. Before you can complete, you must merge or retire each sub-agent using 'ib merge <id>' or 'ib retire <id>'. Use 'ib list' to check their status, 'ib look <id>' to see their output, 'ib status <id>' for their commits, and 'ib diff <id>' to review their changes.",
+    );
+  });
+});

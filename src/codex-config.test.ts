@@ -108,6 +108,11 @@ describe("renderCodexHookFlagPayload", () => {
     const ss = renderCodexHookFlagPayload("SessionStart", "/bin/ib", "agent-abc123", 30);
     expect(ss).toContain('command="/bin/ib hooks codex-session-start agent-abc123"');
 
+    const prompt = renderCodexHookFlagPayload("UserPromptSubmit", "/bin/ib", "agent-abc123", 30);
+    expect(prompt).toBe(
+      'hooks.UserPromptSubmit=[{matcher=".*",hooks=[{type="command",command="/bin/ib hooks codex-user-prompt-submit agent-abc123",timeout=30}]}]',
+    );
+
     const stop = renderCodexHookFlagPayload("Stop", "/bin/ib", "agent-abc123", 30);
     expect(stop).toContain('command="/bin/ib hooks codex-stop agent-abc123"');
   });
@@ -158,7 +163,8 @@ describe("buildCodexLaunchArgs — well-formedness", () => {
     }
     expect(flags[1]).toContain("hooks.PreToolUse=");
     expect(flags[3]).toContain("hooks.SessionStart=");
-    expect(flags[5]).toContain("hooks.Stop=");
+    expect(flags[5]).toContain("hooks.UserPromptSubmit=");
+    expect(flags[7]).toContain("hooks.Stop=");
   });
 
   test("each hook payload contains <abs ib> and <agentId>", () => {

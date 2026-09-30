@@ -14,7 +14,7 @@
  * agent's WATCHDOG runs unsandboxed, so the sandboxed command hands it the
  * request and waits. The queue, the file format and the at-most-once handling
  * are the spawn broker's; a request that carries an `op` field is a lifecycle
- * request and is dispatched here.
+ * request and is dispatched here (except `op: "ask"`, which is ask-broker.ts).
  *
  *   sandboxed `ib retire <id>`  ──request.json──▶  the caller's own watchdog
  *        (client, this file)                        (server, this file)
@@ -74,10 +74,9 @@ import {
   type ResolvedCallerContext,
 } from "./ib-commands";
 import { listRepos, repoDisplayName } from "./registry";
-import { resolveSandboxEnabled } from "./sandbox";
-import { isSandboxedProcess } from "./sandbox-detect";
 import {
   brokerFail,
+  resolveRoutedCaller,
   submitWatchdogRequest,
   verifyBrokerRequester,
   type SpawnClientDeps,
@@ -229,35 +228,16 @@ export async function requestLifecycleViaWatchdog(
  * The lifecycle-command entry point. Returns null when the caller must run the
  * command directly, exactly as before this broker existed. Only one kind of
  * caller is routed to the watchdog: a worktree agent inside its own itsybitsy
- * sandbox. Everyone else keeps the direct path:
- *   - a process that is not sandboxed;
- *   - a sandboxed shell that is not (or cannot be shown to be) an agent;
- *   - a `worktree:false` agent — its profile grants the repo root, so the
- *     direct path works, and its per-agent watchdog exits at once (there is no
- *     `<agentDir>/repo`), so there is nobody to ask;
- *   - an agent whose itsybitsy sandbox is disabled. `isSandboxedProcess()` is
- *     still true for a codex agent there (codex's own sandbox), which grants
- *     what these commands need; and such an agent has no seal to verify.
- * This only ROUTES. A caller that lies in its own meta.json to get the direct
- * path runs the command inside its real sandbox, where it fails as before.
+ * sandbox (`resolveRoutedCaller` in spawn-broker.ts has the rule and the list
+ * of callers that keep the direct path).
  */
 export async function routeLifecycleThroughWatchdog(
   command: LifecycleCommand,
   deps: SpawnClientDeps = {},
 ): Promise<IbCommandResult | null> {
-  if (!isSandboxedProcess()) return null;
-  let caller: ResolvedCallerContext | null;
-  try {
-    caller = await (deps.resolveCaller ?? resolveCallerAgentContext)(deps.cwd ?? process.cwd());
-  } catch {
-    return null;
-  }
-  if (!caller || !caller.agentDir) return null;
-  if (caller.meta.worktree === false) return null;
-  const sandbox = caller.meta.sandbox as { enabled?: unknown } | undefined;
-  if (!resolveSandboxEnabled(sandbox?.enabled)) return null;
-  const resolved = caller;
-  return requestLifecycleViaWatchdog(command, { ...deps, resolveCaller: async () => resolved });
+  const caller = await resolveRoutedCaller(deps);
+  if (!caller) return null;
+  return requestLifecycleViaWatchdog(command, { ...deps, resolveCaller: async () => caller });
 }
 
 // ── Server (runs in the unsandboxed watchdog) ────────────────────────────────

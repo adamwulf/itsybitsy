@@ -1154,7 +1154,8 @@ atomic writes, at-most-once handling, result clipping and pruning are the spawn
 broker's. `src/lifecycle-broker.ts` adds:
 
 - **Request** — `{v:1, id, op, target, keep?}`, `op` = `retire` | `merge` |
-  `rehire`. A request that has an `op` field is a lifecycle request; one without is a spawn.
+  `rehire`. A request that has an `op` field is a lifecycle request (except
+  `op: "ask"`, §4C.8); one without is a spawn.
   `target` must be a plain agent id (it becomes a path segment). `keep` (`ib
   merge --keep`) is accepted for `merge` only. Any other field is rejected — in
   particular there is no way to name a directory.
@@ -1347,6 +1348,71 @@ in place of its worktree) — each against files on disk.
    code; the race was not run). There is no atomic fix by path. It adds little
    to limitation 2, under which the same requester's git hooks already run
    outside the sandbox during that merge.
+
+### 4C.8 Sandboxed `ib ask`: the same broker (2026-09-30)
+
+**Problem.** `ib ask "question"` from a sandboxed worktree agent did not reach
+the user. `askQuestion()` appends the question to
+`<repo>/.ittybitty/user-questions.json`. A worktree agent's profile grants
+`AGENTDIR`, `WORKTREE`, `GITDIR` and `REPOAGENTS` (§4C.1) — `REPOAGENTS` is
+`<repo>/.ittybitty/agents`, not `<repo>/.ittybitty` — so the questions file is
+outside its write roots and the write is refused. The notifications that follow
+the write (`say`, Telegram) are never reached. A write grant on that file would
+let every agent rewrite any pending question in the repo, so the command leaves
+the sandbox instead.
+
+**Design.** The same route as a spawn (§4C.6) and a lifecycle command (§4C.7):
+the sandboxed command hands the request to the caller's own unsandboxed
+watchdog and waits. Queue, file names, atomic writes, at-most-once handling,
+result clipping and pruning are the spawn broker's. `src/ask-broker.ts` adds:
+
+- **Request** — `{v:1, id, op:"ask", question}`. In the queue, a request with
+  `op: "ask"` is a question, one with any other `op` is a lifecycle request,
+  and one without `op` is a spawn. The request carries the question TEXT only.
+  Any other field is rejected — there is no way to name an agent, a repo or a
+  file, and no way to mark the question as a harness question (SPEC.md §4.2).
+  A question over 1 MiB (`SPAWN_MAX_PROMPT_BYTES`) is refused.
+- **Client** — `routeAskThroughWatchdog`, called from the `ask` case in
+  `src/index.ts` after the question text is known and before any repo lookup.
+  It routes the same callers as the lifecycle broker and no others
+  (`resolveRoutedCaller` in `src/spawn-broker.ts`, the rule of §4C.7): only a
+  worktree agent inside its own itsybitsy sandbox. For every other caller it
+  returns null and `ib ask` runs directly, exactly as before. A routed caller
+  asks only as itself: `--id` for another agent is refused. It fails at once
+  when the watchdog has no fresh heartbeat, writes the request and waits at
+  most **30 seconds** (`SPAWN_CLIENT_TIMEOUT_MS`). On timeout it withdraws an
+  unclaimed request; a question the watchdog already took may still reach the
+  user, and the message says so.
+- **Server** — `handleAskRequest`, reached from `processSpawnRequests`. The
+  requester is the watchdog's own agent, verified against its sealed record
+  exactly as for a spawn. The watchdog then runs the normal
+  `askQuestion(repo, agentId, question)` with its OWN agent id, so the
+  top-level rule, the `allowAgentQuestions` check, the stale-question cleanup,
+  the `agent.log` line and the notifications (`say`, Telegram) all apply
+  unchanged — and the notifications now run outside the sandbox.
+- **Old watchdogs** answer `unsupported field 'op'` (no lifecycle broker) or
+  `unsupported field 'question'` (lifecycle broker only); the client turns both
+  into "restart this agent so its watchdog picks up the feature".
+
+**Verified.** Unit tests only (`src/ask-broker.test.ts`): the parser, the queue
+handler with the real `askQuestion()` against files on disk (question recorded
+under the requester's id, top-level rule, config check), the client round trip,
+and the routing of each caller that keeps the direct path. **Not run live:**
+the compiled `ib` inside a real agent profile.
+
+**Known limitations.**
+1. The top-level rule reads `manager` from the requester's own `meta.json`,
+   which the agent can write and the seal does not cover. A sub-agent that
+   removes the field can ask the user. This is the same for a direct `ib ask`;
+   the rule is a convention for who talks to the user, not a boundary.
+2. The harness question of the session-start hook (SPEC.md §6.3.1, "Size flag")
+   is NOT brokered. The hook calls `askQuestion()` in the sandboxed agent
+   process, so a sandboxed worktree agent still gets the log line only.
+3. `worktree:false` agents and agents with the itsybitsy sandbox off keep the
+   direct path (§4C.7 limitation 3). It was not run live for this section.
+4. Requests are handled one at a time per agent, so a question queued behind a
+   long brokered merge or teardown can time out on the client while it is
+   still queued. It is then withdrawn, and the agent can ask again.
 
 ## 5. Shipped components
 

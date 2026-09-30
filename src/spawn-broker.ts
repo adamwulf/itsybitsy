@@ -30,9 +30,11 @@
  * Only a fixed allowlist of fields is honored; `model`, `repo` and `spawnedBy`
  * are never accepted.
  *
- * The same queue also carries the lifecycle commands a sandboxed agent cannot
- * run itself: a request with an `op` field is handed to lifecycle-broker.ts,
- * which shares the transport and the requester check defined here.
+ * The same queue also carries the other commands a sandboxed agent cannot run
+ * itself. A request with an `op` field is not a spawn: `op: "ask"` (`ib ask`)
+ * is handed to ask-broker.ts and every other op (the lifecycle commands) to
+ * lifecycle-broker.ts. Both share the transport, the routing rule and the
+ * requester check defined here.
  *
  * Known limitation (SPEC-SANDBOX §4C.6): while a spawner still holds a WRITE
  * grant on `.ittybitty/agents` it can write another agent's request directory in
@@ -55,6 +57,7 @@ import {
 } from "./ib-commands";
 import type { SealVerification } from "./agent-seal";
 import type { LifecycleServerDeps } from "./lifecycle-broker";
+import { resolveSandboxEnabled } from "./sandbox";
 import { isSandboxedProcess } from "./sandbox-detect";
 
 export const SPAWN_REQUEST_DIRNAME = "spawn-requests";
@@ -295,6 +298,40 @@ export async function routeNewAgentThroughWatchdog(
   return requestSpawnViaWatchdog(prompt, opts, deps);
 }
 
+/**
+ * The routing rule for the commands that keep a direct path (the lifecycle
+ * commands and `ib ask`). Returns the caller to route to its watchdog, or null
+ * when the caller must run the command directly, exactly as before the brokers
+ * existed. Only one kind of caller is routed: a worktree agent inside its own
+ * itsybitsy sandbox. Everyone else keeps the direct path:
+ *   - a process that is not sandboxed;
+ *   - a sandboxed shell that is not (or cannot be shown to be) an agent;
+ *   - a `worktree:false` agent — its profile grants the repo root, so the
+ *     direct path works, and its per-agent watchdog exits at once (there is no
+ *     `<agentDir>/repo`), so there is nobody to ask;
+ *   - an agent whose itsybitsy sandbox is disabled. `isSandboxedProcess()` is
+ *     still true for a codex agent there (codex's own sandbox), which grants
+ *     what these commands need; and such an agent has no seal to verify.
+ * This only ROUTES. A caller that lies in its own meta.json to get the direct
+ * path runs the command inside its real sandbox, where it fails as before.
+ */
+export async function resolveRoutedCaller(
+  deps: Pick<SpawnClientDeps, "cwd" | "resolveCaller"> = {},
+): Promise<ResolvedCallerContext | null> {
+  if (!isSandboxedProcess()) return null;
+  let caller: ResolvedCallerContext | null;
+  try {
+    caller = await (deps.resolveCaller ?? resolveCallerAgentContext)(deps.cwd ?? process.cwd());
+  } catch {
+    return null;
+  }
+  if (!caller || !caller.agentDir) return null;
+  if (caller.meta.worktree === false) return null;
+  const sandbox = caller.meta.sandbox as { enabled?: unknown } | undefined;
+  if (!resolveSandboxEnabled(sandbox?.enabled)) return null;
+  return caller;
+}
+
 // ── Server (runs in the unsandboxed watchdog) ────────────────────────────────
 
 export interface SpawnServerDeps {
@@ -309,6 +346,8 @@ export interface SpawnServerDeps {
   now?: () => number;
   /** Seams for the lifecycle commands handled by lifecycle-broker.ts. */
   lifecycle?: LifecycleServerDeps;
+  /** Seam for the `ib ask` request handled by ask-broker.ts. */
+  askQuestion?: (repoPath: string, agentId: string, question: string) => Promise<IbCommandResult>;
 }
 
 type ParsedRequest = { ok: true; request: SpawnRequest } | { ok: false; error: string };
@@ -504,14 +543,19 @@ export async function verifyBrokerRequester(
   return { ok: true, meta };
 }
 
-/** A request that names an `op` is a lifecycle command (lifecycle-broker.ts), not a spawn. */
-function isLifecycleRequest(text: string): boolean {
+/**
+ * The `op` field of a request. A request that names an `op` is not a spawn:
+ * `"ask"` is a question (ask-broker.ts), and every other value is left to the
+ * lifecycle broker (lifecycle-broker.ts), which refuses the ones it does not know.
+ */
+function requestOp(text: string): { present: false } | { present: true; op: unknown } {
   try {
     const raw: unknown = JSON.parse(text);
-    return !!raw && typeof raw === "object" && !Array.isArray(raw) && "op" in raw;
-  } catch {
-    return false;
-  }
+    if (!!raw && typeof raw === "object" && !Array.isArray(raw) && "op" in raw) {
+      return { present: true, op: (raw as Record<string, unknown>).op };
+    }
+  } catch { /* not JSON: the spawn parser reports it */ }
+  return { present: false };
 }
 
 async function handleOneRequest(
@@ -522,8 +566,13 @@ async function handleOneRequest(
   text: string,
   deps: SpawnServerDeps,
 ): Promise<IbCommandResult> {
-  if (isLifecycleRequest(text)) {
-    // Lazy import: lifecycle-broker.ts imports this module.
+  const named = requestOp(text);
+  if (named.present) {
+    // Lazy imports: both modules import this one.
+    if (named.op === "ask") {
+      const { handleAskRequest } = await import("./ask-broker");
+      return handleAskRequest({ agentId, repoPath, agentDir, id, text }, deps);
+    }
     const { handleLifecycleRequest } = await import("./lifecycle-broker");
     return handleLifecycleRequest({ agentId, repoPath, agentDir, id, text }, deps);
   }

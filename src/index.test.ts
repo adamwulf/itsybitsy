@@ -1076,16 +1076,16 @@ describe("CLI arg parsing", () => {
     expect(exitCode).toBe(1);
   });
 
-  test("ack is the sub-agent command, not a question alias: usage names both", async () => {
+  test("bare ack requires a manager session", async () => {
     const { stderr, exitCode } = await runCli(["ack"]);
-    expect(stderr).toContain("Usage: ib ack <agent-id>");
-    expect(stderr).toContain("ib acknowledge <question-id>");
+    expect(stderr).toContain("manager's own agent session");
     expect(exitCode).toBe(1);
   });
 
   test("ack --help prints the ack help, not the question help", async () => {
     const { stdout } = await runCli(["ack", "--help"]);
-    expect(stdout).toContain("Usage: ib ack <agent-id>");
+    expect(stdout).toContain("Usage: ib ack [agent-id]");
+    expect(stdout).toContain("Omit agent-id");
     expect(stdout).not.toContain("question-id");
   });
 

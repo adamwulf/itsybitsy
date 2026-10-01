@@ -26,6 +26,7 @@ import {
 } from "./sandbox";
 import {
   ackAgent,
+  ackAllSubagents,
   setNewAgentNoWorktreeCallerResolver,
   resetNewAgentNoWorktreeCallerResolver,
 } from "./ib-commands";
@@ -67,6 +68,78 @@ beforeEach(async () => {
 afterEach(async () => {
   resetNewAgentNoWorktreeCallerResolver();
   await rm(root, { recursive: true, force: true });
+});
+
+describe("ackAllSubagents — manager shortcut", () => {
+  test("acknowledges waiting and complete direct children only, across repeated calls", async () => {
+    await writeAgent("repo", "done", { manager: "mgr", state: "complete" });
+    await writeAgent("repo", "busy", { manager: "mgr", state: "running" });
+    await writeAgent("repo", "unknown", { manager: "mgr", state: "unknown" });
+    await writeAgent("repo", "missing", { manager: "mgr" });
+    await writeAgent("repo", "grandchild", { manager: "child", state: "waiting" });
+    await writeAgent("repo", "unrelated", { manager: "other-mgr", state: "waiting" });
+    await writeAgent("other", "foreign", { manager: "mgr", state: "waiting" });
+    const archiveDir = join(root, "repo", ".ittybitty", "archive", "retired");
+    await mkdir(archiveDir, { recursive: true });
+    await writeFile(join(archiveDir, "meta.json"), JSON.stringify({ id: "retired", manager: "mgr", state: "complete" }));
+
+    const opts = { _cwd: sessionOf("repo", "mgr") };
+    const first = await ackAllSubagents(opts);
+    expect(first.ok).toBe(true);
+    expect(first.stdout).toContain("Acknowledged child (waiting)");
+    expect(first.stdout).toContain("Acknowledged done (complete)");
+    expect(first.stdout).toContain("Skipped 3");
+    const child = await readMeta("repo", "child");
+    const done = await readMeta("repo", "done");
+    expect(child.ack).toMatchObject({ by: "mgr", state: "waiting" });
+    expect(done.ack).toMatchObject({ by: "mgr", state: "complete" });
+    for (const id of ["mgr", "busy", "unknown", "missing", "grandchild", "unrelated"]) {
+      expect((await readMeta("repo", id)).ack).toBeUndefined();
+    }
+    expect((await readMeta("other", "foreign")).ack).toBeUndefined();
+    expect(JSON.parse(await readFile(join(archiveDir, "meta.json"), "utf-8")).ack).toBeUndefined();
+
+    const again = await ackAllSubagents(opts);
+    expect(again.ok).toBe(true);
+    expect(again.stdout).toContain("child is already acknowledged");
+    expect(again.stdout).toContain("done is already acknowledged");
+    expect(await readMeta("repo", "child")).toEqual(child);
+    expect(await readMeta("repo", "done")).toEqual(done);
+  });
+
+  test("no children succeeds without changing another manager's children", async () => {
+    await writeAgent("repo", "child", { manager: "someone-else", state: "waiting" });
+    const result = await ackAllSubagents({ _cwd: sessionOf("repo", "mgr") });
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe("No direct sub-agents to acknowledge.");
+    expect((await readMeta("repo", "child")).ack).toBeUndefined();
+  });
+
+  test("human and unverifiable callers are refused", async () => {
+    const human = await ackAllSubagents({ _cwd: join(root, "repo") });
+    expect(human.ok).toBe(false);
+    expect(human.stderr).toContain("manager's own agent session");
+    setNewAgentNoWorktreeCallerResolver(async () => { throw new Error("ambiguous agent records"); });
+    const unverified = await ackAllSubagents({ _cwd: sessionOf("repo", "mgr") });
+    expect(unverified.ok).toBe(false);
+    expect(unverified.stderr).toContain("cannot verify the caller");
+    expect((await readMeta("repo", "child")).ack).toBeUndefined();
+  });
+
+  test("the CLI dispatches bare ack from a manager session", async () => {
+    const proc = Bun.spawn({
+      cmd: [process.execPath, join(import.meta.dir, "..", "index.ts"), "ack"],
+      cwd: sessionOf("repo", "mgr"),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+    expect(await proc.exited).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("Acknowledged child (waiting)");
+    expect((await readMeta("repo", "child")).ack).toMatchObject({ by: "mgr", state: "waiting" });
+  });
 });
 
 describe("ackAgent — owner gate", () => {

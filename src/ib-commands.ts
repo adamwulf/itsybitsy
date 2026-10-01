@@ -32,6 +32,7 @@ import {
   clearAgentOperation,
   TRANSIENT_FRESH_MS,
   readAllAgents,
+  readRepoAgents,
   detectAgentStates,
   mutateAgentMeta,
   agentWorktreePath,
@@ -3112,6 +3113,37 @@ export async function reassignAgent(agent: Agent, newManager: string | null): Pr
 export interface AckAgentOptions {
   /** Caller cwd override for tests; defaults to process.cwd(). */
   _cwd?: string;
+}
+
+/** `ib ack` — acknowledge all eligible direct children in the caller's repo. */
+export async function ackAllSubagents(opts: AckAgentOptions = {}): Promise<IbCommandResult> {
+  let caller: ResolvedCallerContext | null;
+  try {
+    caller = await readCallerMetaFromCwd(opts._cwd ?? process.cwd());
+  } catch (err) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: cannot verify the caller of 'ib ack': ${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (!caller?.repoPath || typeof caller.meta.id !== "string" || !caller.meta.id) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Error: 'ib ack' without an agent id must run from a manager's own agent session" };
+  }
+
+  const { agents, errors } = await readRepoAgents(caller.repoPath, basename(caller.repoPath), false);
+  const children = agents.filter((agent) => agent.meta.manager === caller.meta.id);
+  const stdout: string[] = [];
+  const stderr = errors.map(({ agentDir, error }) => `Error: ${agentDir}: ${error}`);
+  let skipped = 0;
+  for (const child of children) {
+    if (child.meta.state !== "waiting" && child.meta.state !== "complete") {
+      skipped++;
+      continue;
+    }
+    const result = await ackAgent(child, opts);
+    if (result.stdout) stdout.push(result.stdout);
+    if (result.stderr) stderr.push(result.stderr);
+  }
+  if (children.length === 0) stdout.push("No direct sub-agents to acknowledge.");
+  if (skipped) stdout.push(`Skipped ${skipped} sub-agent(s) that are neither waiting nor complete.`);
+  return { ok: stderr.length === 0, exitCode: stderr.length ? 1 : 0, stdout: stdout.join("\n"), stderr: stderr.join("\n") };
 }
 
 /**

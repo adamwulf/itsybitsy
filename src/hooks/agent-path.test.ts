@@ -1679,6 +1679,11 @@ describe("checkIbCommandAccess", () => {
     expect(await checkIbCommandAccess("ib retire agent-target1", "agent-spawner1", agentsDir)).toBeNull();
   });
 
+  test("bare ib ack reaches the CLI's caller and direct-child ownership checks", async () => {
+    expect(await checkIbCommandAccess("ib ack", "agent-manager1", agentsDir)).toBeNull();
+    expect(await checkIbCommandAccess("ib ack ", "agent-manager1", agentsDir)).toBeNull();
+  });
+
   test("denies agent-issued sandbox refresh, including refresh all", async () => {
     expect((await checkIbCommandAccess("ib sandbox refresh agent-target1", "agent-caller1", agentsDir))?.decision).toBe("deny");
     expect((await checkIbCommandAccess("ib sandbox refresh --all", "agent-caller1", agentsDir))?.decision).toBe("deny");

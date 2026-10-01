@@ -757,8 +757,10 @@ const COMMAND_HELP: Record<string, string> = {
     "  Acknowledge a pending agent question by id. (`ib ack` is a different\n" +
     "  command: it acknowledges a sub-agent.)",
   ack:
-    "Usage: ib ack <agent-id>\n" +
+    "Usage: ib ack [agent-id]\n" +
     "  Run by a manager on its own direct sub-agent that is waiting or complete.\n" +
+    "  Omit agent-id to acknowledge all such direct sub-agents in its repository;\n" +
+    "  sub-agents in other states are skipped.\n" +
     "  Stops the automatic 'waiting' / 'completed' notices about that state and\n" +
     "  keeps the sub-agent open (unmerged) for human review. The sub-agent's state,\n" +
     "  session and worktree are not changed. Any change of its state ends the\n" +
@@ -1063,7 +1065,7 @@ function printUsage(): void {
   console.log("  nuke <id>           Kill and archive an agent");
   console.log("  merge <id> [--keep] Merge agent's work and close it (--keep: land commits, leave it running)");
   console.log("  merge-check <id>    Check if agent is ready to merge");
-  console.log("  ack <id>            Manager: stop notices about a waiting/complete sub-agent, keep it open for review");
+  console.log("  ack [id]            Manager: stop notices about one or all waiting/complete sub-agents, keep them open for review");
   console.log("  resume <id>         Resume a stopped agent");
   console.log("  respawn [id]        Restart an agent's Claude session in-place (alias: restart)");
   console.log("                      No-arg form infers the agent from cwd — used by the /respawn slash command");
@@ -2562,15 +2564,14 @@ export async function main() {
       break;
     }
     case "ack": {
-      // `ib ack <agent-id>`: a manager acknowledges its direct sub-agent's
-      // waiting/complete state (SPEC §8.5.2). Not the question command below.
+      // Omit the id to acknowledge all eligible direct children (SPEC §8.5.2).
+      const { ackAgent, ackAllSubagents } = await import("./ib-commands");
       if (!args[1]) {
-        console.error("Usage: ib ack <agent-id>  (to acknowledge a question, use: ib acknowledge <question-id>)");
-        process.exit(1);
+        await printAndExit(await ackAllSubagents());
+        break;
       }
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
-      const { ackAgent } = await import("./ib-commands");
       await printAndExit(await ackAgent(agent));
       break;
     }

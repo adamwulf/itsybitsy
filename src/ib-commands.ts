@@ -3124,7 +3124,7 @@ export async function ackAllSubagents(opts: AckAgentOptions = {}): Promise<IbCom
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: cannot verify the caller of 'ib ack': ${err instanceof Error ? err.message : String(err)}` };
   }
   if (!caller?.repoPath || typeof caller.meta.id !== "string" || !caller.meta.id) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: "Error: 'ib ack' without an agent id must run from a manager's own agent session" };
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Error: 'ib ack' without an agent id must run from a manager's own agent session (to acknowledge a question, use: ib acknowledge <question-id>)" };
   }
 
   const { agents, errors } = await readRepoAgents(caller.repoPath, basename(caller.repoPath), false);
@@ -3137,7 +3137,7 @@ export async function ackAllSubagents(opts: AckAgentOptions = {}): Promise<IbCom
       skipped++;
       continue;
     }
-    const result = await ackAgent(child, opts);
+    const result = await ackAgentForCaller(child, caller, true);
     if (result.stdout) stdout.push(result.stdout);
     if (result.stderr) stderr.push(result.stderr);
   }
@@ -3169,6 +3169,12 @@ export async function ackAgent(agent: Agent, opts: AckAgentOptions = {}): Promis
   } catch (err) {
     return fail(`Error: cannot verify the caller of 'ib ack': ${err instanceof Error ? err.message : String(err)}`);
   }
+  return ackAgentForCaller(agent, caller);
+}
+
+/** Share the verified caller across a batch; child checks still run under its lock. */
+async function ackAgentForCaller(agent: Agent, caller: ResolvedCallerContext | null, skipUnavailable = false): Promise<IbCommandResult> {
+  const fail = (stderr: string): IbCommandResult => ({ ok: false, exitCode: 1, stdout: "", stderr });
   const callerId = caller && typeof caller.meta.id === "string" ? caller.meta.id : "";
   const sameRepo = !!caller?.repoPath && resolve(caller.repoPath) === resolve(agent.repoPath);
   if (!callerId || !sameRepo || agent.archived || agent.meta.manager !== callerId) {
@@ -3202,7 +3208,12 @@ export async function ackAgent(agent: Agent, opts: AckAgentOptions = {}): Promis
     }
     meta.ack = { state, by: callerId, at: Math.floor(Date.now() / 1000) } satisfies AgentAck;
   });
-  if (refusal) return fail(refusal);
+  if (refusal) {
+    if (skipUnavailable) {
+      return { ok: true, exitCode: 0, stdout: `Skipped ${agent.id}: ${refusal.replace(/^Error: /, "")}`, stderr: "" };
+    }
+    return fail(refusal);
+  }
   if (already) {
     return { ok: true, exitCode: 0, stdout: `${agent.id} is already acknowledged (${ackedState}); nothing changed`, stderr: "" };
   }

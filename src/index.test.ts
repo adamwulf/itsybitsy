@@ -1077,9 +1077,23 @@ describe("CLI arg parsing", () => {
   });
 
   test("bare ack requires a manager session", async () => {
-    const { stderr, exitCode } = await runCli(["ack"]);
-    expect(stderr).toContain("manager's own agent session");
-    expect(exitCode).toBe(1);
+    const cwd = await mkdtemp(join(tmpdir(), "ib-ack-human-"));
+    try {
+      // Keep this mutation command away from live agents, including any
+      // registered worktree:false ancestor of the test runner.
+      const script = join(cwd, "cli.ts");
+      await Bun.write(script,
+        `import { setNewAgentNoWorktreeCallerResolver } from ${JSON.stringify(join(import.meta.dir, "ib-commands.ts"))};\n` +
+        `import { main } from ${JSON.stringify(join(import.meta.dir, "index.ts"))};\n` +
+        "setNewAgentNoWorktreeCallerResolver(async () => null);\nawait main();\n");
+      const proc = Bun.spawn([process.execPath, script, "ack"], { cwd, stdout: "pipe", stderr: "pipe" });
+      const stderr = await new Response(proc.stderr).text();
+      expect(await proc.exited).toBe(1);
+      expect(stderr).toContain("manager's own agent session");
+      expect(stderr).toContain("ib acknowledge <question-id>");
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 
   test("ack --help prints the ack help, not the question help", async () => {

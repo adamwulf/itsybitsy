@@ -5,7 +5,7 @@
  */
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile, utimes } from "fs/promises";
 import { homedir, tmpdir } from "os";
 import { makeAgent } from "./test-utils";
 import type { Agent } from "./agents";
@@ -126,9 +126,50 @@ describe("ackAllSubagents — manager shortcut", () => {
     expect((await readMeta("repo", "child")).ack).toBeUndefined();
   });
 
+  test("a read failure is reported while successful acknowledgements are kept", async () => {
+    const brokenDir = await writeAgent("repo", "broken", { manager: "mgr", state: "waiting" });
+    await writeFile(join(brokenDir, "meta.json"), "{broken JSON");
+    // Newly created records are omitted as possible in-progress spawns.
+    await utimes(brokenDir, new Date(0), new Date(0));
+    let resolutions = 0;
+    setNewAgentNoWorktreeCallerResolver(async () => {
+      resolutions++;
+      return null;
+    });
+    const result = await ackAllSubagents({ _cwd: sessionOf("repo", "mgr") });
+    expect(result.ok).toBe(false);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("broken");
+    expect(result.stdout).toContain("Acknowledged child (waiting)");
+    expect((await readMeta("repo", "child")).ack).toMatchObject({ by: "mgr", state: "waiting" });
+    expect(resolutions).toBe(1);
+  });
+
+  test("a child starting a new turn during a batch is skipped successfully", async () => {
+    const childDir = join(root, "repo", ".ittybitty", "agents", "child");
+    for (let i = 0; i < 10; i++) {
+      await writeAgent("repo", "child", { manager: "mgr", state: "waiting" });
+      const [result] = await Promise.all([
+        ackAllSubagents({ _cwd: sessionOf("repo", "mgr") }),
+        writeAgentState(childDir, "running"),
+      ]);
+      expect(result.ok).toBe(true);
+      expect(result.stderr).toBe("");
+      expect((await readMeta("repo", "child")).state).toBe("running");
+      expect(await readAgentAck(childDir)).toBeNull();
+    }
+  });
+
   test("the CLI dispatches bare ack from a manager session", async () => {
+    // Inject the resolver override in the subprocess too, so process ancestry
+    // can never select a real registered worktree:false agent for this test.
+    const script = join(root, "cli.ts");
+    await Bun.write(script,
+      `import { setNewAgentNoWorktreeCallerResolver } from ${JSON.stringify(join(import.meta.dir, "ib-commands.ts"))};\n` +
+      `import { main } from ${JSON.stringify(join(import.meta.dir, "index.ts"))};\n` +
+      "setNewAgentNoWorktreeCallerResolver(async () => null);\nawait main();\n");
     const proc = Bun.spawn({
-      cmd: [process.execPath, join(import.meta.dir, "..", "index.ts"), "ack"],
+      cmd: [process.execPath, script, "ack"],
       cwd: sessionOf("repo", "mgr"),
       stdout: "pipe",
       stderr: "pipe",

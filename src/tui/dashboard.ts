@@ -47,7 +47,7 @@ import type { ChromeSlice } from "./wrap";
 import { fetchCodexUsage, fetchGeminiUsage, fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
-import { AgentTreeComponent, nextRepoFilter } from "./agent-tree";
+import { AgentTreeComponent, nextRepoFilter, agentDisplayName } from "./agent-tree";
 import { TeamsTreeComponent, flattenTeamsTree } from "./teams-tree";
 import { ChannelPaneComponent } from "./channel-pane";
 import { TeamLogPaneComponent } from "./team-log-pane";
@@ -1045,6 +1045,9 @@ export class DashboardComponent implements Component {
     if (layout.pinnedRepoPaths !== undefined) {
       this.agentTree.pinnedRepoPaths = new Set(layout.pinnedRepoPaths);
     }
+    if (layout.favoriteAgentIds !== undefined) {
+      this.agentTree.favoriteAgentIds = new Set(layout.favoriteAgentIds);
+    }
     // §7.7 load-time safety net: use process.stdout.rows as a proxy for displayHeight to
     // reject grossly invalid offsets from corrupted or oversized-terminal layout files.
     // computeSidebarHeights needs actual displayHeight, but we don't have it yet, so use
@@ -1063,6 +1066,7 @@ export class DashboardComponent implements Component {
       heightOffsets: { ...this.sidebar.heightOffsets },
       repoCoordinatorHeightOffset: this.rightPane.repoCoordinatorHeightOffset,
       pinnedRepoPaths: Array.from(this.agentTree.pinnedRepoPaths),
+      favoriteAgentIds: Array.from(this.agentTree.favoriteAgentIds),
     });
   }
 
@@ -2775,18 +2779,29 @@ export class DashboardComponent implements Component {
       this.setNotice(notice, "info");
       this.tui?.requestRender();
     }
-    // . — toggle pin on the selected repo (pinned repos stay visible under V)
+    // . — on an agent, toggle it as a favorite (★, Favorites tab); on a repo
+    // header, toggle its pin (pinned repos stay visible under V). Acts on the
+    // EFFECTIVE selection (`activeSelectionSource`), so a team member selected
+    // in the Teams tree is favorited too.
     else if (data === ".") {
-      const repoPath = this.agentTree.selectedRepoPath;
-      if (repoPath !== null) {
-        const nowPinned = this.agentTree.togglePinnedRepo(repoPath);
-        const name = this.agentTree.selectedRepoHeader ?? repoPath;
-        this.setNotice(nowPinned ? `Pinned ${name}` : `Unpinned ${name}`, "info");
+      const sel = this.activeSelectionSource === "teams"
+        ? this.teamsTree.selection
+        : this.agentTree.selection;
+      if (sel?.kind === "agent") {
+        const nowFavorite = this.agentTree.toggleFavorite(sel.agent.id);
+        const name = agentDisplayName(sel.agent);
+        this.setNotice(nowFavorite ? `Favorited ${name}` : `Unfavorited ${name}`, "info");
+        // Persist so favorites survive an `ib watch` restart.
+        this.persistLayout();
+        this.tui?.requestRender();
+      } else if (sel?.kind === "repo-header") {
+        const nowPinned = this.agentTree.togglePinnedRepo(sel.repoPath);
+        this.setNotice(nowPinned ? `Pinned ${sel.repoName}` : `Unpinned ${sel.repoName}`, "info");
         // Persist the pin change so it survives an `ib watch` restart.
         this.persistLayout();
         this.tui?.requestRender();
       } else {
-        this.setNotice("Select a repo header to pin", "info");
+        this.setNotice("Select an agent or repo header", "info");
       }
     }
     // Fix resolvable health warnings (REPO mode only)

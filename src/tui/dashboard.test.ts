@@ -4365,6 +4365,117 @@ describe("applyLayout", () => {
 
     cancelPendingSave();
   });
+
+  test("applyLayout restores favoriteAgentIds; a layout without them leaves existing favorites", () => {
+    const dashboard = makeDashboard();
+    dashboard.applyLayout({
+      sidebarWidth: 60,
+      splitPaneLeftWidth: 80,
+      heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+      favoriteAgentIds: ["agent-1", "agent-2"],
+    });
+    expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(["agent-1", "agent-2"]);
+    dashboard.applyLayout({
+      sidebarWidth: 60,
+      splitPaneLeftWidth: 80,
+      heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+    });
+    expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(["agent-1", "agent-2"]);
+  });
+
+  test("'.' on an agent toggles it as a favorite, persists it, and applyLayout(loadLayout()) restores it", async () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-star", "/repos/test");
+    dashboard.onUpdate([agent], [makeFlatRepoHeader("test", "/repos/test", true, true, true), makeFlatAgent(agent)], [], []);
+    expect(dashboard.agentTree.selectAgentById("agent-star")).toBe(true);
+    dashboard.handleInput(".");
+    expect(dashboard.agentTree.favoriteAgentIds.has("agent-star")).toBe(true);
+    expect(dashboard.notice).toBe("Favorited agent-star");
+    // The repo is not pinned — '.' on an agent never pins.
+    expect(dashboard.agentTree.pinnedRepoPaths.size).toBe(0);
+
+    await flushPendingSave();
+    const saved = await loadLayout();
+    expect(saved!.favoriteAgentIds).toEqual(["agent-star"]);
+    const restored = makeDashboard();
+    restored.applyLayout(saved!);
+    expect(restored.agentTree.favoriteAgentIds.has("agent-star")).toBe(true);
+
+    // Second press unfavorites and persists the removal.
+    dashboard.handleInput(".");
+    expect(dashboard.agentTree.favoriteAgentIds.has("agent-star")).toBe(false);
+    expect(dashboard.notice).toBe("Unfavorited agent-star");
+    await flushPendingSave();
+    expect((await loadLayout())!.favoriteAgentIds).toEqual([]);
+
+    cancelPendingSave();
+  });
+
+  test("'.' notice uses the agent's nickname", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-nick", "/repos/test");
+    agent.meta.nickname = "builder";
+    dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
+    dashboard.agentTree.selectAgentById("agent-nick");
+    dashboard.handleInput(".");
+    expect(dashboard.notice).toBe("Favorited builder");
+  });
+
+  test("'.' on a team member in the Teams tree favorites that agent", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-member", "/repos/test");
+    dashboard.agentTree.setFlatList([makeFlatAgent(agent)]);
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "backend", memberCount: 1, createdEpoch: 1, createdBy: "@system" },
+      { kind: "team-member", teamName: "backend", agent, connector: "  " },
+    ]);
+    dashboard.handleInput("2");
+    dashboard.handleInput("j"); // team header
+    dashboard.handleInput("j"); // member
+    expect(dashboard.activeSelectionSource).toBe("teams");
+    dashboard.handleInput(".");
+    expect(dashboard.agentTree.favoriteAgentIds.has("agent-member")).toBe(true);
+    expect(dashboard.notice).toBe("Favorited agent-member");
+  });
+
+  test("'.' on a team anchor or the system coordinator changes nothing and shows a hint", () => {
+    const dashboard = makeDashboard();
+    dashboard.onUpdate([], [makeFlatSystemCoordinator()], []);
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    dashboard.handleInput(".");
+    expect(dashboard.notice).toBe("Select an agent or repo header");
+    expect(dashboard.agentTree.favoriteAgentIds.size).toBe(0);
+    expect(dashboard.agentTree.pinnedRepoPaths.size).toBe(0);
+
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    dashboard.handleInput("2");
+    dashboard.handleInput("j");
+    expect(dashboard.activeSelectionSource).toBe("teams");
+    dashboard.setNotice("reset", "info");
+    dashboard.handleInput(".");
+    expect(dashboard.notice).toBe("Select an agent or repo header");
+    expect(dashboard.agentTree.favoriteAgentIds.size).toBe(0);
+  });
+
+  test("'.' in the Favorites tab keeps the unfavorited agent visible until the selection moves", () => {
+    const dashboard = makeDashboard();
+    const a = makeAgent("agent-a", "/repos/test");
+    const b = makeAgent("agent-b", "/repos/test");
+    dashboard.onUpdate([a, b], [makeFlatAgent(a), makeFlatAgent(b)], []);
+    dashboard.agentTree.toggleFavorite("agent-a");
+    dashboard.agentTree.toggleFavorite("agent-b");
+    dashboard.handleInput("3");
+    dashboard.agentTree.selectAgentById("agent-b");
+    dashboard.handleInput(".");
+    expect(dashboard.agentTree.favoriteAgentIds.has("agent-b")).toBe(false);
+    expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-b");
+    dashboard.handleInput("k");
+    expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-a");
+    expect(dashboard.agentTree.visibleList.length).toBe(1);
+    cancelPendingSave();
+  });
 });
 
 describe("sidebar height resize ({/} keys)", () => {

@@ -262,6 +262,44 @@ describe("layout persistence", () => {
     expect(loadedB!.pinnedRepoPaths).toBeUndefined();
   });
 
+  test("favoriteAgentIds round-trips through save then load", async () => {
+    await saveLayout({ ...sampleLayout, favoriteAgentIds: ["agent-1", "mgr"] });
+    const loaded = await loadLayout();
+    expect(loaded).not.toBeNull();
+    expect(loaded!.favoriteAgentIds).toEqual(["agent-1", "mgr"]);
+  });
+
+  test("loadLayout tolerates a MISSING favoriteAgentIds (rest of layout preserved)", async () => {
+    await Bun.write(join(tmpDir, "layout.json"), JSON.stringify({
+      sidebarWidth: 65,
+      splitPaneLeftWidth: 85,
+      heightOffsets: { tree: 1, info: 0, coordinator: 0 },
+      pinnedRepoPaths: ["/repos/alpha"],
+    }));
+    const loaded = await loadLayout();
+    expect(loaded).not.toBeNull();
+    expect(loaded!.sidebarWidth).toBe(65);
+    expect(loaded!.pinnedRepoPaths).toEqual(["/repos/alpha"]);
+    expect(loaded!.favoriteAgentIds).toBeUndefined();
+  });
+
+  test("loadLayout drops a MALFORMED favoriteAgentIds without discarding the layout", async () => {
+    for (const bad of ["agent-1", ["agent-1", 7], { id: "agent-1" }, null]) {
+      await Bun.write(join(tmpDir, "layout.json"), JSON.stringify({
+        sidebarWidth: 60,
+        splitPaneLeftWidth: 80,
+        heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+        pinnedRepoPaths: ["/repos/ok"],
+        favoriteAgentIds: bad,
+      }));
+      const loaded = await loadLayout();
+      expect(loaded).not.toBeNull();
+      expect(loaded!.sidebarWidth).toBe(60);
+      expect(loaded!.pinnedRepoPaths).toEqual(["/repos/ok"]);
+      expect(loaded!.favoriteAgentIds).toBeUndefined();
+    }
+  });
+
   test("getSavedSidebarWidth returns default when no layout saved", async () => {
     const width = await getSavedSidebarWidth();
     expect(width).toBe(60);

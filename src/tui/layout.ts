@@ -34,6 +34,13 @@ export interface LayoutState {
    * the layout (see loadLayout).
    */
   pinnedRepoPaths?: string[];
+  /**
+   * Agent ids the user has favorited via '.' in the dashboard tree (the ★ and
+   * the Favorites sidebar tab). Persisted so favorites survive an `ib watch`
+   * restart. Optional and validated exactly like pinnedRepoPaths. Ids of
+   * agents that no longer exist are kept as-is (no pruning).
+   */
+  favoriteAgentIds?: string[];
 }
 
 // Under `bun test` (which sets NODE_ENV=test), the default path must NOT be
@@ -104,6 +111,13 @@ export async function loadLayout(): Promise<LayoutState | null> {
       data.pinnedRepoPaths.every((p: unknown) => typeof p === "string")
     ) {
       result.pinnedRepoPaths = data.pinnedRepoPaths;
+    }
+    // Optional: favoriteAgentIds — same rule as pinnedRepoPaths.
+    if (
+      Array.isArray(data.favoriteAgentIds) &&
+      data.favoriteAgentIds.every((id: unknown) => typeof id === "string")
+    ) {
+      result.favoriteAgentIds = data.favoriteAgentIds;
     }
     return result;
   } catch {

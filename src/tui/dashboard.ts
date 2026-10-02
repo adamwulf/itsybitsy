@@ -2495,37 +2495,6 @@ export class DashboardComponent implements Component {
       return;
     }
 
-    // §17.1 (Phase 3 three-axis model): '1' / '2' / '3' switch the sidebar
-    // tab (`sidebarMode`: Agents / Teams / Favorites). They do NOT change the
-    // GLOBAL selection (`activeSelectionSource`, set by j/k navigation). Focus
-    // moves only when the current focus target would not exist in the new
-    // cycle: entering teams moves `agent-tree` and `repo-coordinator`
-    // (agents-only) to `teams-tree`; entering agents or favorites (both use
-    // the agents cycle) moves `teams-tree` to `agent-tree`. Other targets
-    // (`info` / `active-agent` / `right-pane`) are present in BOTH orders, so
-    // focus stays where it is. We also mirror the active selection into the
-    // newly-visible tree (visual only — `activeSelectionSource` is unchanged)
-    // and re-run selection sync so the info / main / right panes update
-    // immediately instead of waiting a tmux-poll tick. Gated by the
-    // dialog/input-field returns above.
-    const tabMode: SidebarMode | null =
-      data === "1" ? "agents" : data === "2" ? "teams" : data === "3" ? "favorites" : null;
-    if (tabMode !== null) {
-      this.setSidebarMode(tabMode);
-      const focus = this.focusManager.current();
-      if (tabMode === "teams") {
-        if (focus === "agent-tree" || focus === "repo-coordinator") {
-          this.focusManager.setFocus("teams-tree");
-        }
-      } else if (focus === "teams-tree") {
-        this.focusManager.setFocus("agent-tree");
-      }
-      // syncSelectedAgent() runs the inactive-tree mirror at its top.
-      this.syncSelectedAgent();
-      this.tui?.requestRender();
-      return;
-    }
-
     // Info panel: Default Agent Type cycle/clear when the row is the focused
     // sub-field. selectedRepoHeader != null implies neither agent nor
     // system-coordinator is selected (discriminated union in agent-tree).
@@ -2558,6 +2527,38 @@ export class DashboardComponent implements Component {
           return;
         }
       }
+    }
+
+    // §17.1 (Phase 3 three-axis model): '1' / '2' / '3' switch the sidebar
+    // tab (`sidebarMode`: Agents / Teams / Favorites). They do NOT change the
+    // GLOBAL selection (`activeSelectionSource`, set by j/k navigation). Focus
+    // moves only when the current focus target would not exist in the new
+    // cycle: entering teams moves `agent-tree` and `repo-coordinator`
+    // (agents-only) to `teams-tree`; entering agents or favorites (both use
+    // the agents cycle) moves `teams-tree` to `agent-tree`. Other targets
+    // (`info` / `active-agent` / `right-pane`) are present in BOTH orders, so
+    // focus stays where it is. We also mirror the active selection into the
+    // newly-visible tree (visual only — `activeSelectionSource` is unchanged)
+    // and re-run selection sync so the info / main / right panes update
+    // immediately instead of waiting a tmux-poll tick. Gated by the
+    // dialog/input-field returns above AND placed after the info-panel notes
+    // editor, so digits typed into repo notes reach the editor first.
+    const tabMode: SidebarMode | null =
+      data === "1" ? "agents" : data === "2" ? "teams" : data === "3" ? "favorites" : null;
+    if (tabMode !== null) {
+      this.setSidebarMode(tabMode);
+      const focus = this.focusManager.current();
+      if (tabMode === "teams") {
+        if (focus === "agent-tree" || focus === "repo-coordinator") {
+          this.focusManager.setFocus("teams-tree");
+        }
+      } else if (focus === "teams-tree") {
+        this.focusManager.setFocus("agent-tree");
+      }
+      // syncSelectedAgent() runs the inactive-tree mirror at its top.
+      this.syncSelectedAgent();
+      this.tui?.requestRender();
+      return;
     }
 
     // Navigation. §17.1 (Phase 2 three-axis model): j/k and shift+j/k navigate

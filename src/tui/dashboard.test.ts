@@ -3135,6 +3135,24 @@ describe("focus cycling", () => {
     expect(dashboard.focus).toBe("active-agent");
     expect(dashboard.sidebarMode).toBe("agents");
   });
+
+  test("'1' / '2' / '3' typed into the repo notes editor stay in the notes", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-notes", "/repos/test");
+    dashboard.onUpdate([agent], [makeFlatRepoHeader("test", "/repos/test", true, true, true), makeFlatAgent(agent)], [], []);
+    expect(dashboard.agentTree.selectByRepoPath("/repos/test")).toBe(true);
+    dashboard.syncSelectedAgent();
+    dashboard.handleInput("\t"); // agent-tree → info
+    dashboard.handleInput("\t"); // info default-type → notes sub-field
+    expect(dashboard.focus).toBe("info");
+    expect(dashboard.infoPanel.subField).toBe("notes");
+
+    for (const ch of "x123y") dashboard.handleInput(ch);
+    expect(dashboard.infoPanel.notesEditor.getText()).toBe("x123y");
+    expect(dashboard.sidebarMode).toBe("agents");
+    expect(dashboard.agentTree.favoritesOnly).toBe(false);
+    expect(dashboard.focus).toBe("info");
+  });
 });
 
 describe("colorizeDiff", () => {

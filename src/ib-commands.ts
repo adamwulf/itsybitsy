@@ -32,6 +32,7 @@ import {
   clearAgentOperation,
   TRANSIENT_FRESH_MS,
   readAllAgents,
+  readRepoAgents,
   detectAgentStates,
   mutateAgentMeta,
   agentWorktreePath,
@@ -3114,6 +3115,37 @@ export interface AckAgentOptions {
   _cwd?: string;
 }
 
+/** `ib ack` — acknowledge all eligible direct children in the caller's repo. */
+export async function ackAllSubagents(opts: AckAgentOptions = {}): Promise<IbCommandResult> {
+  let caller: ResolvedCallerContext | null;
+  try {
+    caller = await readCallerMetaFromCwd(opts._cwd ?? process.cwd());
+  } catch (err) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Error: cannot verify the caller of 'ib ack': ${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (!caller?.repoPath || typeof caller.meta.id !== "string" || !caller.meta.id) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: "Error: 'ib ack' without an agent id must run from a manager's own agent session (to acknowledge a question, use: ib acknowledge <question-id>)" };
+  }
+
+  const { agents, errors } = await readRepoAgents(caller.repoPath, basename(caller.repoPath), false);
+  const children = agents.filter((agent) => agent.meta.manager === caller.meta.id);
+  const stdout: string[] = [];
+  const stderr = errors.map(({ agentDir, error }) => `Error: ${agentDir}: ${error}`);
+  let skipped = 0;
+  for (const child of children) {
+    if (child.meta.state !== "waiting" && child.meta.state !== "complete") {
+      skipped++;
+      continue;
+    }
+    const result = await ackAgentForCaller(child, caller, true);
+    if (result.stdout) stdout.push(result.stdout);
+    if (result.stderr) stderr.push(result.stderr);
+  }
+  if (children.length === 0) stdout.push("No direct sub-agents to acknowledge.");
+  if (skipped) stdout.push(`Skipped ${skipped} sub-agent(s) that are neither waiting nor complete.`);
+  return { ok: stderr.length === 0, exitCode: stderr.length ? 1 : 0, stdout: stdout.join("\n"), stderr: stderr.join("\n") };
+}
+
 /**
  * `ib ack <agent-id>` — the child's current manager acknowledges the child's
  * current waiting or complete episode (SPEC §8.5.2). The Stop hook and the
@@ -3137,6 +3169,12 @@ export async function ackAgent(agent: Agent, opts: AckAgentOptions = {}): Promis
   } catch (err) {
     return fail(`Error: cannot verify the caller of 'ib ack': ${err instanceof Error ? err.message : String(err)}`);
   }
+  return ackAgentForCaller(agent, caller);
+}
+
+/** Share the verified caller across a batch; child checks still run under its lock. */
+async function ackAgentForCaller(agent: Agent, caller: ResolvedCallerContext | null, skipUnavailable = false): Promise<IbCommandResult> {
+  const fail = (stderr: string): IbCommandResult => ({ ok: false, exitCode: 1, stdout: "", stderr });
   const callerId = caller && typeof caller.meta.id === "string" ? caller.meta.id : "";
   const sameRepo = !!caller?.repoPath && resolve(caller.repoPath) === resolve(agent.repoPath);
   if (!callerId || !sameRepo || agent.archived || agent.meta.manager !== callerId) {
@@ -3170,7 +3208,12 @@ export async function ackAgent(agent: Agent, opts: AckAgentOptions = {}): Promis
     }
     meta.ack = { state, by: callerId, at: Math.floor(Date.now() / 1000) } satisfies AgentAck;
   });
-  if (refusal) return fail(refusal);
+  if (refusal) {
+    if (skipUnavailable) {
+      return { ok: true, exitCode: 0, stdout: `Skipped ${agent.id}: ${refusal.replace(/^Error: /, "")}`, stderr: "" };
+    }
+    return fail(refusal);
+  }
   if (already) {
     return { ok: true, exitCode: 0, stdout: `${agent.id} is already acknowledged (${ackedState}); nothing changed`, stderr: "" };
   }

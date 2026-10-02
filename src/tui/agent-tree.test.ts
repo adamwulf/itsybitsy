@@ -8,6 +8,8 @@ import {
   nextRepoFilter,
 } from "./agent-tree";
 import { isRunningState, isVisibleUnderRunningFilter, type Agent, type FlatEntry } from "../agents";
+import { RED, RESET, REVERSE, YELLOW } from "./colors";
+import { visibleWidth } from "@mariozechner/pi-tui";
 
 function makeAgent(id: string, state: string = "running", overrides: Partial<Agent> = {}): Agent {
   return {
@@ -1308,6 +1310,51 @@ describe("agent-tree helpers", () => {
   test("formatAgentRow renders the id", () => {
     const row = formatAgentRow(makeAgent("agent-x"), "", false, 80, 20);
     expect(row).toContain("agent-x");
+  });
+
+  test("formatAgentRow puts a yellow ★ between the icon and the name for a favorite only", () => {
+    const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+    const fav = formatAgentRow(makeAgent("agent-x"), "├── ", false, 60, 20, 8, false, true);
+    expect(plain(fav).startsWith("├── ◆ ★ agent-x")).toBe(true);
+    expect(fav).toContain(`${YELLOW}★${RESET} agent-x`);
+    const notFav = formatAgentRow(makeAgent("agent-x"), "├── ", false, 60, 20);
+    expect(plain(notFav).startsWith("├── ◆ agent-x")).toBe(true);
+    expect(notFav).not.toContain("★");
+  });
+
+  test("the star keeps the question-red name and works on a selected row", () => {
+    const row = formatAgentRow(makeAgent("agent-x"), "", true, 40, 20, 8, true, true);
+    // Selected: starts REVERSE, the star's RESET re-enters REVERSE, full width.
+    expect(row.startsWith(REVERSE)).toBe(true);
+    expect(row).toContain(`★${RESET}${REVERSE} ${RED}agent-x`);
+    expect(row.endsWith(RESET)).toBe(true);
+    expect(visibleWidth(row)).toBe(40);
+  });
+
+  test("tree render keeps the state column aligned between favorite and non-favorite rows", () => {
+    const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlat([makeAgent("agent-fav"), makeAgent("agent-plain")]));
+    tree.favoriteAgentIds.add("agent-fav");
+    for (const width of [50, 100]) {
+      const lines = tree.render(width).map(plain);
+      const favLine = lines.find((l) => l.includes("agent-fav"))!;
+      const plainLine = lines.find((l) => l.includes("agent-plain"))!;
+      expect(favLine).toContain("◆ ★ agent-fav");
+      expect(plainLine).not.toContain("★");
+      expect(favLine.indexOf("running")).toBe(plainLine.indexOf("running"));
+    }
+  });
+
+  test("a selected favorite row in the tree is reversed across its full width", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlat([makeAgent("agent-fav"), makeAgent("agent-plain")]));
+    tree.toggleFavorite("agent-fav");
+    tree.moveSelection(1);
+    const line = tree.render(50).find((l) => l.includes("agent-fav"))!;
+    expect(line.startsWith(REVERSE)).toBe(true);
+    expect(line).toContain(`★${RESET}${REVERSE}`);
+    expect(visibleWidth(line)).toBe(50);
   });
 
   test("MAX_TREE_HEIGHT is 7", () => {

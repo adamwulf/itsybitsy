@@ -7,6 +7,8 @@ import {
   type TeamFlatEntry,
 } from "./teams-tree";
 import { MAX_TREE_HEIGHT } from "./agent-tree";
+import { RESET, REVERSE, YELLOW } from "./colors";
+import { visibleWidth } from "@mariozechner/pi-tui";
 import type { Agent } from "../agents";
 import type { Team } from "../teams";
 
@@ -281,5 +283,37 @@ describe("teams-tree row formatters", () => {
     expect(row).toContain("waiting");
     // Full mode (width=80) appends the model column after age.
     expect(row).toContain("opus");
+  });
+});
+
+describe("teams-tree favorite star", () => {
+  const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+
+  test("formatTeamMemberRow puts a yellow ★ between the icon and <repo>/<id> for a favorite", () => {
+    const agent = makeAgent("a1", "api");
+    const row = formatTeamMemberRow(agent, "  ", false, 60, 20, 8, true);
+    expect(plain(row).startsWith("  ◆ ★ api/a1")).toBe(true);
+    expect(row).toContain(`${YELLOW}★${RESET} api/a1`);
+    expect(formatTeamMemberRow(agent, "  ", false, 60, 20)).not.toContain("★");
+  });
+
+  test("member rows keep the state column aligned between favorite and non-favorite", () => {
+    const { tree } = fixture();
+    tree.favoriteAgentIds = new Set(["a1"]);
+    const lines = tree.render(60).map(plain);
+    const favLine = lines.find((l) => l.includes("api/a1"))!;
+    const plainLine = lines.find((l) => l.includes("web/a2"))!;
+    expect(favLine).toContain("◆ ★ api/a1");
+    expect(plainLine).not.toContain("★");
+    expect(favLine.indexOf("running")).toBe(plainLine.indexOf("running"));
+  });
+
+  test("a selected favorite member row stays reversed across the star and fills the width", () => {
+    const agent = makeAgent("a1", "api");
+    const row = formatTeamMemberRow(agent, "  ", true, 40, 20, 8, true);
+    expect(row.startsWith(REVERSE)).toBe(true);
+    expect(row).toContain(`★${RESET}${REVERSE}`);
+    expect(row.endsWith(RESET)).toBe(true);
+    expect(visibleWidth(row)).toBe(40);
   });
 });

@@ -4411,6 +4411,30 @@ describe("applyLayout", () => {
     cancelPendingSave();
   });
 
+  test("after '.', the ★ renders in the Agents tree and the Teams tree, and reaches the right pane", () => {
+    const origRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    try {
+      const dashboard = makeDashboard();
+      const agent = makeAgent("agent-star", "/repos/test");
+      dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
+      dashboard.teamsTree.setFlatList([
+        { kind: "team-header", teamName: "backend", memberCount: 1, createdEpoch: 1, createdBy: "@system" },
+        { kind: "team-member", teamName: "backend", agent, connector: "  " },
+      ]);
+      dashboard.agentTree.selectAgentById("agent-star");
+      expect(stripAnsi(dashboard.render(160).join("\n"))).not.toContain("★");
+      dashboard.handleInput(".");
+      expect(stripAnsi(dashboard.render(160).join("\n"))).toMatch(/★ agent-star/);
+      expect(dashboard.rightPane.favoriteAgentIds.has("agent-star")).toBe(true);
+      dashboard.handleInput("2");
+      expect(stripAnsi(dashboard.render(160).join("\n"))).toMatch(/★ \S*agent-star/);
+      cancelPendingSave();
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+    }
+  });
+
   test("'.' notice uses the agent's nickname", () => {
     const dashboard = makeDashboard();
     const agent = makeAgent("agent-nick", "/repos/test");

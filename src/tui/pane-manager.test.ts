@@ -662,6 +662,43 @@ describe("formatAgentRow uses coordinator icon", () => {
   });
 });
 
+describe("formatAgentRow favorite star", () => {
+  const { formatAgentRow: pmFormatAgentRow } = require("./pane-manager");
+
+  test("a favorite gets a yellow ★ between the icon and the id", () => {
+    const row: string = pmFormatAgentRow(makeAgent({ id: "fav-1" }), "├── ", 8, true);
+    expect(stripAnsi(row).startsWith("├── ◆ ★ fav-1  ")).toBe(true);
+    expect(row).toContain(`${YELLOW}★${RESET} fav-1`);
+  });
+
+  test("a non-favorite has no star", () => {
+    const row: string = pmFormatAgentRow(makeAgent({ id: "plain-1" }), "", 8);
+    expect(stripAnsi(row).startsWith("◆ plain-1  ")).toBe(true);
+    expect(row).not.toContain("★");
+  });
+
+  test("TREE and REPO rows star the favorites only (no filtering)", () => {
+    const fav = makeAgent({ id: "fav-1", repoName: "my-repo" });
+    const plain = makeAgent({ id: "plain-1", repoName: "my-repo" });
+    const rp = new RightPaneComponent();
+    rp.displayHeight = 20;
+    rp.allAgents = [
+      { kind: "repo-header", repoName: "my-repo", repoPath: "/repos/my-repo", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "agent", agent: fav, depth: 0, connector: "├── " },
+      { kind: "agent", agent: plain, depth: 0, connector: "└── " },
+    ];
+    rp.favoriteAgentIds = new Set(["fav-1"]);
+    rp.selectedRepoHeader = "my-repo";
+    for (const mode of ["TREE", "REPO"] as const) {
+      rp.setMode(mode);
+      const text = rp.render(80).map(stripAnsi);
+      expect(text.some((l) => l.includes("◆ ★ fav-1"))).toBe(true);
+      expect(text.some((l) => l.includes("◆ plain-1"))).toBe(true);
+      expect(text.some((l) => l.includes("★ plain-1"))).toBe(false);
+    }
+  });
+});
+
 describe("closeOsc8", () => {
   test("returns line unchanged when no OSC 8 present", () => {
     expect(closeOsc8("hello world")).toBe("hello world");

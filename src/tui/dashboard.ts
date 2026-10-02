@@ -1562,6 +1562,7 @@ export class DashboardComponent implements Component {
     this.systemDashboard.flatList = flatList;
     this.rightPane.questions = questions;
     this.rightPane.allAgents = flatList;
+    this.rightPane.favoriteAgentIds = this.agentTree.favoriteAgentIds;
     this.rightPane.orphanedTmuxSessions = orphanedTmuxSessions;
     this.statusBar.pendingQuestions = questions.length;
     this.statusBar.errorCount = this.rightPane.errors.length + orphanedTmuxSessions.length;
@@ -2791,6 +2792,10 @@ export class DashboardComponent implements Component {
         const nowFavorite = this.agentTree.toggleFavorite(sel.agent.id);
         const name = agentDisplayName(sel.agent);
         this.setNotice(nowFavorite ? `Favorited ${name}` : `Unfavorited ${name}`, "info");
+        // The REPO/TREE pane rows carry the ★ too — rebuild them now rather
+        // than on the next refresh tick.
+        this.rightPane.favoriteAgentIds = this.agentTree.favoriteAgentIds;
+        this.rightPane.updateContent();
         // Persist so favorites survive an `ib watch` restart.
         this.persistLayout();
         this.tui?.requestRender();
@@ -3176,6 +3181,8 @@ export class DashboardComponent implements Component {
     // sub-state.
     this.agentTree.suppressSelection = this._questionsFocused;
     this.teamsTree.suppressSelection = false;
+    // Team-member rows show the ★ for favorites; the Agents tree owns the set.
+    this.teamsTree.favoriteAgentIds = this.agentTree.favoriteAgentIds;
     // In TREE mode the full tree renders in the main area, so hide the
     // sidebar tree to avoid duplication and let the info panel take all space.
     this.sidebar.hideTree = isTreeMode;

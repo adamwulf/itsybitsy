@@ -8,7 +8,7 @@ import { resolveAgentIcon, isVisibleUnderRunningFilter, subtreeHasNonStopped, ty
 import type { RepoHealthReport } from "../health-check";
 import type { Selection } from "./selection";
 import { getStateColors } from "./color-scheme";
-import { RESET, BOLD, DIM, REVERSE, RED, UNDERLINE } from "./colors";
+import { RESET, BOLD, DIM, REVERSE, RED, UNDERLINE, YELLOW } from "./colors";
 
 export const MAX_TREE_HEIGHT = 7;
 const MIN_STATE_COL_WIDTH = 8; // minimum: length of "complete"
@@ -67,19 +67,32 @@ export function agentDisplayName(agent: Agent): string {
   return agent.meta.nickname ?? agent.id;
 }
 
-/** Compute the visible width of the name prefix (connector + icon + repo/id) for an agent row */
-function agentNamePrefixWidth(agent: Agent, connector: string): number {
+/**
+ * The yellow ★ (plus its trailing space) that marks a favorite agent. Every
+ * agent-row renderer (this tree, the Teams tree's member rows, and the
+ * pane-manager TREE/REPO rows) puts it between the icon and the name —
+ * `<icon> ★ <name>` — and includes it in its width math. Empty for a
+ * non-favorite.
+ */
+export function favoriteStar(isFavorite: boolean): string {
+  return isFavorite ? `${YELLOW}★${RESET} ` : "";
+}
+
+/** Compute the visible width of the name prefix (connector + icon + star + repo/id) for an agent row */
+function agentNamePrefixWidth(agent: Agent, connector: string, isFavorite: boolean): number {
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = agentIcon(agent);
-  return visibleWidth(`${connector}${orphanedPrefix}${icon} ${agentDisplayName(agent)}`);
+  return visibleWidth(`${connector}${orphanedPrefix}${icon} ${favoriteStar(isFavorite)}${agentDisplayName(agent)}`);
 }
 
 /** Width threshold at or below which compact mode is used */
 export const COMPACT_WIDTH_THRESHOLD = 60;
 
 /** Format agent row for the tree.
- *  Compact mode (width <= COMPACT_WIDTH_THRESHOLD): icon agent-id  state  age
- *  Full mode: icon agent-id  state  age  model  prompt/summary
+ *  Compact mode (width <= COMPACT_WIDTH_THRESHOLD): icon [★] agent-id  state  age
+ *  Full mode: icon [★] agent-id  state  age  model  prompt/summary
+ *  The yellow ★ appears only for a favorite (`isFavorite`); nameColWidth must
+ *  come from agentNamePrefixWidth with the same flag so the columns align.
  */
 export function formatAgentRow(
   agent: Agent,
@@ -88,7 +101,8 @@ export function formatAgentRow(
   width: number,
   nameColWidth: number,
   stateColWidth: number = MIN_STATE_COL_WIDTH,
-  hasQuestion: boolean = false
+  hasQuestion: boolean = false,
+  isFavorite: boolean = false,
 ): string {
   const compact = width <= COMPACT_WIDTH_THRESHOLD;
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
@@ -98,7 +112,7 @@ export function formatAgentRow(
 
   const nameColor = hasQuestion ? RED : "";
   const nameEnd = hasQuestion ? RESET : "";
-  const namePrefix = `${connector}${orphanedPrefix}${icon} ${nameColor}${agentDisplayName(agent)}${nameEnd}`;
+  const namePrefix = `${connector}${orphanedPrefix}${icon} ${favoriteStar(isFavorite)}${nameColor}${agentDisplayName(agent)}${nameEnd}`;
   const namePad = Math.max(0, nameColWidth - visibleWidth(namePrefix));
   const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, stateColWidth - state.length))}`;
   const paddedAge = agent.age.padStart(AGE_COL_WIDTH);
@@ -1051,7 +1065,8 @@ export class AgentTreeComponent implements Component {
     let maxNameWidth = 0;
     for (const item of visible) {
       if (item.kind === "agent") {
-        maxNameWidth = Math.max(maxNameWidth, agentNamePrefixWidth(item.agent, repoIndent + item.connector));
+        const isFavorite = this.favoriteAgentIds.has(item.agent.id);
+        maxNameWidth = Math.max(maxNameWidth, agentNamePrefixWidth(item.agent, repoIndent + item.connector, isFavorite));
       } else if (item.kind === "system-coordinator") {
         maxNameWidth = Math.max(maxNameWidth, visibleWidth("◆ coordinator"));
       }
@@ -1102,7 +1117,8 @@ export class AgentTreeComponent implements Component {
         // Indent the whole agent row with its repo subtree when grouping is
         // active (prefix the box-drawing connector), so agents render UNDER
         // their repo-header instead of left of it.
-        lines.push(formatAgentRow(item.agent, repoIndent + item.connector, selectionActive && i === this.selectedIndex, width, maxNameWidth, stateColWidth, hasQ));
+        const isFavorite = this.favoriteAgentIds.has(item.agent.id);
+        lines.push(formatAgentRow(item.agent, repoIndent + item.connector, selectionActive && i === this.selectedIndex, width, maxNameWidth, stateColWidth, hasQ, isFavorite));
       }
     }
 

@@ -1016,7 +1016,16 @@ export class AgentTreeComponent implements Component {
   render(width: number): string[] {
     const visible = this.visibleList;
     if (visible.length === 0) {
-      const hint = this.favoritesOnly ? "No favorites — press . on an agent" : "No agents found";
+      let hint = "No agents found";
+      if (this.favoritesOnly) {
+        // A favorite that is in the list can only be hidden here by the V
+        // filter (the favorites pass always keeps it); otherwise there is no
+        // favorite to show at all (none set, or only ids of gone agents).
+        const hasFavoriteAgent = this._flatList.some(
+          (f) => f.kind === "agent" && !f.agent.archived && this.favoriteAgentIds.has(f.agent.id),
+        );
+        hint = hasFavoriteAgent ? "No favorites match the V filter" : "No favorites — press . on an agent";
+      }
       return [truncateToWidth(`${DIM}  ${hint}${RESET}`, width, "")];
     }
 

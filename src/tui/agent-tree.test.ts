@@ -1294,6 +1294,29 @@ describe("AgentTreeComponent favorites view", () => {
     tree.setFlatList([]);
     expect(tree.render(60).join("\n")).toContain("No agents found");
   });
+
+  test("an empty view says the V filter hides the favorites when favorites exist", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFixture({ mgr: "stopped", child: "stopped", grandchild: "stopped", "x-child": "stopped" }));
+    tree.toggleFavorite("mgr");
+    tree.setFavoritesOnly(true);
+    tree.setRepoFilter("running-only");
+    expect(tree.visibleList).toEqual([]);
+    const text = tree.render(60).join("\n");
+    expect(text).toContain("No favorites match the V filter");
+    expect(text).not.toContain("press . on an agent");
+  });
+
+  test("an empty view with only ids of gone agents shows the press-'.' hint", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFixture());
+    tree.toggleFavorite("agent-that-is-gone");
+    tree.setFavoritesOnly(true);
+    tree.setRepoFilter("running-only");
+    const text = tree.render(60).join("\n");
+    expect(text).toContain("No favorites — press . on an agent");
+    expect(text).not.toContain("V filter");
+  });
 });
 
 describe("agent-tree helpers", () => {

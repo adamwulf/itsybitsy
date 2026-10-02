@@ -318,6 +318,27 @@ export class AgentTreeComponent implements Component {
    * session-only.) */
   pinnedRepoPaths: Set<string> = new Set();
 
+  /** Agent ids the user has favorited via '.' (keyed by bare agent id, like
+   * selection). Drives the Favorites view filter below and the yellow ★ on
+   * agent rows in every tab. Persisted across sessions in
+   * ~/.itsybitsy/layout.json (LayoutState.favoriteAgentIds) — the dashboard
+   * restores it in applyLayout() and writes it in persistLayout() after each
+   * toggle. Ids of agents that no longer exist are kept (never pruned). */
+  favoriteAgentIds: Set<string> = new Set();
+
+  /**
+   * Favorites view (sidebarMode === "favorites", SPEC §17.1). The Favorites
+   * tab is a VIEW of this same tree, not a separate tree: selection and focus
+   * are shared with the Agents tab. When on, visibleList shows only favorite
+   * agents and every descendant of a favorite (walking meta.manager across
+   * repos), the repo headers that still have a shown agent, and their
+   * parent-headers; the system coordinator and favoriteless repos (pinned or
+   * not) are hidden. The selected row is always kept visible until the
+   * selection moves away. Composes with repoFilter: favorites first, then V.
+   * Set via setFavoritesOnly() so the selection re-resolves.
+   */
+  favoritesOnly = false;
+
   get flatList(): FlatEntry[] {
     return this._flatList;
   }
@@ -350,12 +371,92 @@ export class AgentTreeComponent implements Component {
     const base = this.flatList.filter((f) =>
       f.kind === "repo-header" || f.kind === "system-coordinator" || f.kind === "parent-header" || !f.agent.archived
     );
-    if (this.repoFilter === "all") return base;
+    if (this.repoFilter === "all" && !this.favoritesOnly) return base;
+    // Favorites first, then the V filter (they compose).
+    let entries = this.favoritesOnly ? this.applyFavoritesFilter(base) : base;
+    if (this.repoFilter !== "all") entries = this.applyRepoFilter(entries);
+    if (this.favoritesOnly) entries = this.dropAgentlessRepoHeaders(entries);
+    entries = this.pruneEmptyParentHeaders(entries);
+    if (this.repoFilter !== "running-only" && !this.favoritesOnly) return entries;
+    // Running-only and the Favorites view can hide intermediate agents. The
+    // precomputed connectors reference those hidden ancestors, so rebuild them
+    // against only the visible subset.
+    const allAgents = new Map<string, Agent>();
+    for (const e of this._flatList) {
+      if (e.kind === "agent") allAgents.set(e.agent.id, e.agent);
+    }
+    return recomputeConnectorsForVisible(entries, allAgents);
+  }
+
+  /**
+   * Favorites view, first pass: keep an agent iff it is a favorite, has a
+   * favorite ancestor, or is the selected row; keep the system coordinator
+   * only while it is selected. Headers pass through — dropAgentlessRepoHeaders
+   * and pruneEmptyParentHeaders remove the empty ones after the V filter ran.
+   */
+  private applyFavoritesFilter(entries: FlatEntry[]): FlatEntry[] {
+    const byId = new Map<string, Agent>();
+    for (const e of this._flatList) {
+      if (e.kind === "agent") byId.set(e.agent.id, e.agent);
+    }
+    const selectedId = this.hasSelection ? this.selectedId : null;
+    return entries.filter((f) => {
+      if (f.kind === "system-coordinator") return selectedId === SYSTEM_COORDINATOR_ID;
+      if (f.kind !== "agent") return true;
+      return f.agent.id === selectedId || this.hasFavoriteInChain(f.agent, byId);
+    });
+  }
+
+  /**
+   * True if `agent` or any ancestor in its meta.manager chain is a favorite.
+   * The walk crosses repos (byId holds every agent in the flat list) and stops
+   * at a manager that is not in the list. A visited set guards against
+   * meta.manager cycles, as in recomputeConnectorsForVisible.
+   */
+  private hasFavoriteInChain(agent: Agent, byId: Map<string, Agent>): boolean {
+    if (this.favoriteAgentIds.has(agent.id)) return true;
+    const visited = new Set<string>([agent.id]);
+    let mgr = agent.meta.manager;
+    while (mgr) {
+      if (visited.has(mgr)) return false;
+      visited.add(mgr);
+      if (this.favoriteAgentIds.has(mgr)) return true;
+      const parent = byId.get(mgr);
+      if (!parent) return false;
+      mgr = parent.meta.manager;
+    }
+    return false;
+  }
+
+  /**
+   * Favorites view, last pass: drop a repo header that has no shown agent
+   * beneath it. A repo's agents follow its header contiguously, so the header
+   * has a shown agent iff the next entry is an agent. The selected header is
+   * kept (selected-row carve-out). Pins do not apply here — they are a V-filter
+   * concept, so a pinned favoriteless repo is hidden too.
+   */
+  private dropAgentlessRepoHeaders(entries: FlatEntry[]): FlatEntry[] {
+    const selectedHeaderId = this.hasSelection && this.selectedId?.startsWith("repopath:")
+      ? this.selectedId
+      : null;
+    return entries.filter((f, i) => {
+      if (f.kind !== "repo-header") return true;
+      if (selectedHeaderId === `repopath:${f.repoPath}`) return true;
+      return entries[i + 1]?.kind === "agent";
+    });
+  }
+
+  /**
+   * The V filter (repoFilter "non-empty" / "running-only") over `entries`.
+   * Callers skip it for "all". Parent-header pruning and connector rebuilds
+   * happen in visibleList after every filter pass.
+   */
+  private applyRepoFilter(entries: FlatEntry[]): FlatEntry[] {
     const sticky = this._stickyRevealedRepoPath;
     const selectedAgentId = this.hasSelection && this.selectedId !== null && !this.selectedId.startsWith("repopath:") && this.selectedId !== SYSTEM_COORDINATOR_ID
       ? this.selectedId
       : null;
-    const filtered = base.filter((f) => {
+    return entries.filter((f) => {
       if (f.kind === "system-coordinator") return true;
       // Parent-directory group headers are a pure display device — they carry
       // no running/stopped semantics and are never hidden by the V-filter.
@@ -380,15 +481,6 @@ export class AgentTreeComponent implements Component {
       // filter flip doesn't yank the selection out from under the user.
       return selectedAgentId !== null && f.agent.id === selectedAgentId;
     });
-    if (this.repoFilter !== "running-only") return this.pruneEmptyParentHeaders(filtered);
-    // In running-only mode, intermediate agents in the original tree may now be
-    // hidden. The precomputed connectors reference those hidden ancestors, so
-    // rebuild them against only the visible subset.
-    const allAgents = new Map<string, Agent>();
-    for (const e of this._flatList) {
-      if (e.kind === "agent") allAgents.set(e.agent.id, e.agent);
-    }
-    return recomputeConnectorsForVisible(this.pruneEmptyParentHeaders(filtered), allAgents);
   }
 
   /**
@@ -468,15 +560,7 @@ export class AgentTreeComponent implements Component {
     if (this.repoFilter === value) return;
     this.repoFilter = value;
     this.updateStickyReveal();
-    if (this.hasSelection) {
-      this.resolveSelection();
-    } else {
-      // Clamp scrollOffset/index so the render math stays valid even with no
-      // active selection (regardless of whether visibleList is empty now).
-      const len = this.visibleList.length;
-      this.selectedIndex = len > 0 ? Math.min(this.selectedIndex, len - 1) : 0;
-      this.scrollOffset = len > 0 ? Math.min(this.scrollOffset, len - 1) : 0;
-    }
+    this.resyncAfterFilterChange();
   }
 
   /** Toggle whether the repo at repoPath is pinned (always-visible under V). */
@@ -486,6 +570,33 @@ export class AgentTreeComponent implements Component {
     else this.pinnedRepoPaths.delete(repoPath);
     // Selection indices are computed against visibleList, which just changed
     // for this repo; re-resolve so selectedIndex stays consistent.
+    this.resyncAfterFilterChange();
+    return nowPinned;
+  }
+
+  /** Turn the Favorites view on or off (see `favoritesOnly`). */
+  setFavoritesOnly(value: boolean): void {
+    if (this.favoritesOnly === value) return;
+    this.favoritesOnly = value;
+    this.resyncAfterFilterChange();
+  }
+
+  /** Toggle whether the agent is a favorite. Returns the new state. */
+  toggleFavorite(agentId: string): boolean {
+    const nowFavorite = !this.favoriteAgentIds.has(agentId);
+    if (nowFavorite) this.favoriteAgentIds.add(agentId);
+    else this.favoriteAgentIds.delete(agentId);
+    // In the Favorites view this adds or removes rows (the selected row stays
+    // by the carve-out), so re-resolve like a pin toggle.
+    this.resyncAfterFilterChange();
+    return nowFavorite;
+  }
+
+  /**
+   * Keep selectedIndex/scrollOffset consistent after visibleList changed shape
+   * (a filter flip, a pin, or a favorite toggle).
+   */
+  private resyncAfterFilterChange(): void {
     if (this.hasSelection) {
       this.resolveSelection();
     } else {
@@ -495,7 +606,6 @@ export class AgentTreeComponent implements Component {
       this.selectedIndex = len > 0 ? Math.min(this.selectedIndex, len - 1) : 0;
       this.scrollOffset = len > 0 ? Math.min(this.scrollOffset, len - 1) : 0;
     }
-    return nowPinned;
   }
 
   /** Discriminated union selection — the canonical way to query what is selected */
@@ -892,7 +1002,8 @@ export class AgentTreeComponent implements Component {
   render(width: number): string[] {
     const visible = this.visibleList;
     if (visible.length === 0) {
-      return [truncateToWidth(`${DIM}  No agents found${RESET}`, width, "")];
+      const hint = this.favoritesOnly ? "No favorites — press . on an agent" : "No agents found";
+      return [truncateToWidth(`${DIM}  ${hint}${RESET}`, width, "")];
     }
 
     const lines: string[] = [];

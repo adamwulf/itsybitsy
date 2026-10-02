@@ -322,7 +322,7 @@ export class TeamsTreeComponent implements Component {
    * under multiple teams, the first occurrence wins (the team registry order
    * from `listTeams()` is stable). Returns true on a hit, false otherwise.
    *
-   * Used by the dashboard's `mirrorSelectionToVisibleTree()` so a `0`/`1`
+   * Used by the dashboard's `mirrorSelectionToVisibleTree()` so a `1`/`2`/`3`
    * sidebar toggle visually highlights the active agent in the newly visible
    * tree when possible.
    */

@@ -52,7 +52,7 @@ import { TeamsTreeComponent, flattenTeamsTree } from "./teams-tree";
 import { ChannelPaneComponent } from "./channel-pane";
 import { TeamLogPaneComponent } from "./team-log-pane";
 import { SidebarComponent, SIDEBAR_WIDTH, computeSidebarHeights, clampSidebarOffsets } from "./sidebar";
-import type { SidebarMode } from "./sidebar";
+import type { SidebarMode, SelectionSource } from "./sidebar";
 import { InfoPanelComponent } from "./info-panel";
 import { listTeams, getTeam } from "../teams";
 import type { Team } from "../teams";
@@ -704,33 +704,34 @@ export class DashboardComponent implements Component {
   /** Dynamic sidebar width — adjustable via [ ] when sidebar panel is focused */
   sidebarWidth = SIDEBAR_WIDTH;
   /**
-   * Which tree the sidebar renders in its tree region — Phase 1 of the
+   * Which tab the sidebar renders in its tree region — Phase 1 of the
    * three-axis model (see SPEC §17.1). Independent of focus and of the global
-   * selection (Phase 2). Toggled exclusively by the `0` (teams) and `1`
-   * (agents) keys; Tab cycling never changes it. Phase 3 makes Tab cycling
-   * depend on `sidebarMode` — the dashboard mirrors this field into
-   * `focusManager.sidebarMode` whenever it changes, so `FocusManager.cycle()`
-   * picks the correct order (agents | teams).
+   * selection (Phase 2). Switched by the `1` (agents), `2` (teams) and `3`
+   * (favorites) keys; Tab cycling never changes it. Write it through
+   * `setSidebarMode`, which also mirrors it into `focusManager.sidebarMode`
+   * (Phase 3: Tab cycling depends on it) and turns the Agents tree's
+   * Favorites view on or off.
    */
   sidebarMode: SidebarMode = "agents";
   /**
    * Which tree owns the GLOBAL selection — Phase 2 of the three-axis model
    * (see SPEC §17.1). Independent of `sidebarMode`. Updated whenever the user
    * navigates the visible tree (j/k/J/K) so that the navigated tree becomes
-   * the active source. `0`/`1` (sidebar toggles) NEVER change this — the
+   * the active source (the Favorites tab navigates the Agents tree, so it
+   * sets `"agents"`). `1`/`2`/`3` (sidebar tabs) NEVER change this — the
    * global selection persists across visibility flips.
    *
    * `syncSelectedAgent` reads selection from whichever tree this names; the
    * info / main / right panes therefore follow the global selection rather
    * than the visible tree.
    *
-   * Mirroring: on a `0`/`1` flip, the dashboard tries to mirror the agent
+   * Mirroring: on a tab switch, the dashboard tries to mirror the agent
    * selection across trees for visual continuity (see
    * `mirrorSelectionToVisibleTree`). That is a VISUAL mirror only — it does
    * NOT change `activeSelectionSource`. The active source flips only when
    * the user navigates the visible tree.
    */
-  activeSelectionSource: SidebarMode = "agents";
+  activeSelectionSource: SelectionSource = "agents";
   /**
    * When true, run the one-time re-pin migration on the next populated onUpdate:
    * resize every existing agent + coordinator tmux window to PINNED_TMUX_WIDTH.
@@ -1642,14 +1643,14 @@ export class DashboardComponent implements Component {
     // same effective selection whenever possible, so the render layer can
     // highlight matched-mirror rows in BOTH trees without a separate
     // suppression flag. Called here (the single dashboard-wide "selection
-    // changed" chokepoint) so every entry point — j/k, 0/1, @-fuzzy, g-go-
+    // changed" chokepoint) so every entry point — j/k, 1/2/3, @-fuzzy, g-go-
     // to-question — re-mirrors automatically.
     this.mirrorSelectionToVisibleTree();
     // §17.3: effective-selection resolver. Phase 2 of the three-axis model
     // (SPEC §17.1): the EFFECTIVE selection is sourced from whichever tree
     // owns the GLOBAL selection (`activeSelectionSource === "teams"` → Teams
     // tree, otherwise the Agents tree). This is INDEPENDENT of `sidebarMode`
-    // (which tree is currently visible). Toggling `0`/`1` flips visibility but
+    // (which tree is currently visible). Switching tabs (`1`/`2`/`3`) flips visibility but
     // not selection; navigating the visible tree (j/k) flips active source to
     // that tree. The downstream routing runs on this single effective
     // selection — so a `{ kind: "agent" }` selected in the Teams tree (a team
@@ -1921,25 +1922,30 @@ export class DashboardComponent implements Component {
    * `this` is preserved when invoked through the ctx. They write to the
    * dashboard's `activeSelectionSource` / `sidebarMode` fields and are used
    * by the `@`-fuzzy jump and `g`-go-to-question-agent handlers (which need
-   * to force the Agents tree into the active-selection role + visible).
+   * to force the Agents tree into the active-selection role + visible — the
+   * Favorites tab already shows the Agents tree, so it is kept). The
+   * `1`/`2`/`3` keys also write `sidebarMode` through `setSidebarMode`.
    */
-  setActiveSelectionSource = (source: SidebarMode): void => {
+  setActiveSelectionSource = (source: SelectionSource): void => {
     this.activeSelectionSource = source;
   };
 
   setSidebarMode = (mode: SidebarMode): void => {
     this.sidebarMode = mode;
     // §17.1 Phase 3: keep the FocusManager's sidebarMode in sync so Tab
-    // cycling picks the correct order. The `0`/`1` handlers do this too;
-    // mirroring it here covers the `@`-fuzzy jump and `g`-go-to-question-agent
-    // paths that flip sidebarMode through this setter.
+    // cycling picks the correct order. Every writer goes through this setter:
+    // the `1`/`2`/`3` keys, the `@`-fuzzy jump and `g`-go-to-question-agent.
     this.focusManager.sidebarMode = mode;
+    // The Favorites tab is a view of the Agents tree. Flip the filter here
+    // (not at render time) so j/k right after the key press already walk the
+    // filtered list; setFavoritesOnly re-resolves the selection.
+    this.agentTree.setFavoritesOnly(mode === "favorites");
   };
 
   /**
    * §17.1 Phase 2 mirror — visual continuity across a sidebar toggle.
    *
-   * When the user flips `sidebarMode` (`0`/`1`), the global selection
+   * When the user switches `sidebarMode` (`1`/`2`/`3`), the global selection
    * (`activeSelectionSource`) is preserved unchanged. To keep the user
    * oriented, we ALSO try to mirror the active agent into the newly visible
    * tree so it lights up the same row visually. The active selection itself
@@ -1962,7 +1968,7 @@ export class DashboardComponent implements Component {
    *    the Agents tree; the inactive Teams tree is `deselect()`ed.
    *  - Null active selection: deselect the inactive tree too.
    *
-   * Called from BOTH the `0`/`1` sidebar-toggle handlers AND the j/k/J/K
+   * Called from BOTH the `1`/`2`/`3` sidebar-tab handlers AND the j/k/J/K
    * navigation handlers — every path that changes the effective selection
    * re-mirrors so the inactive tree never holds a stale pointer (which used
    * to be papered over by suppressing its highlight; now we keep the trees
@@ -2484,34 +2490,29 @@ export class DashboardComponent implements Component {
       return;
     }
 
-    // §17.1 (Phase 3 three-axis model): '0' / '1' switch the sidebar tree
-    // visibility (`sidebarMode`). They do NOT change the GLOBAL selection
-    // (`activeSelectionSource`, set by j/k navigation). Focus moves only when
-    // the current focus target is the HEAD of one cycle and would not exist
-    // in the other cycle: `agent-tree` ↔ `teams-tree` (natural mirror), and
-    // `repo-coordinator` (agents-only) → `teams-tree` when entering teams
-    // mode. Other targets (`info` / `active-agent` / `right-pane`) are
-    // present in BOTH orders, so focus stays where it is. We also mirror the
-    // active selection into the newly-visible tree (visual only —
-    // `activeSelectionSource` is unchanged) and re-run selection sync so the
-    // info / main / right panes update immediately instead of waiting a
-    // tmux-poll tick. Gated by the dialog/input-field returns above.
-    if (data === "0") {
-      this.sidebarMode = "teams";
-      this.focusManager.sidebarMode = "teams";
+    // §17.1 (Phase 3 three-axis model): '1' / '2' / '3' switch the sidebar
+    // tab (`sidebarMode`: Agents / Teams / Favorites). They do NOT change the
+    // GLOBAL selection (`activeSelectionSource`, set by j/k navigation). Focus
+    // moves only when the current focus target would not exist in the new
+    // cycle: entering teams moves `agent-tree` and `repo-coordinator`
+    // (agents-only) to `teams-tree`; entering agents or favorites (both use
+    // the agents cycle) moves `teams-tree` to `agent-tree`. Other targets
+    // (`info` / `active-agent` / `right-pane`) are present in BOTH orders, so
+    // focus stays where it is. We also mirror the active selection into the
+    // newly-visible tree (visual only — `activeSelectionSource` is unchanged)
+    // and re-run selection sync so the info / main / right panes update
+    // immediately instead of waiting a tmux-poll tick. Gated by the
+    // dialog/input-field returns above.
+    const tabMode: SidebarMode | null =
+      data === "1" ? "agents" : data === "2" ? "teams" : data === "3" ? "favorites" : null;
+    if (tabMode !== null) {
+      this.setSidebarMode(tabMode);
       const focus = this.focusManager.current();
-      if (focus === "agent-tree" || focus === "repo-coordinator") {
-        this.focusManager.setFocus("teams-tree");
-      }
-      // syncSelectedAgent() runs the inactive-tree mirror at its top.
-      this.syncSelectedAgent();
-      this.tui?.requestRender();
-      return;
-    }
-    if (data === "1") {
-      this.sidebarMode = "agents";
-      this.focusManager.sidebarMode = "agents";
-      if (this.focusManager.current() === "teams-tree") {
+      if (tabMode === "teams") {
+        if (focus === "agent-tree" || focus === "repo-coordinator") {
+          this.focusManager.setFocus("teams-tree");
+        }
+      } else if (focus === "teams-tree") {
         this.focusManager.setFocus("agent-tree");
       }
       // syncSelectedAgent() runs the inactive-tree mirror at its top.
@@ -2555,21 +2556,22 @@ export class DashboardComponent implements Component {
     }
 
     // Navigation. §17.1 (Phase 2 three-axis model): j/k and shift+j/k navigate
-    // whichever tree is currently VISIBLE in the sidebar (`sidebarMode`). After
-    // any navigation, the navigated tree becomes the active selection source
-    // (`activeSelectionSource = sidebarMode`) — the user just declared what they
-    // are selecting by moving the cursor in this tree. QUESTIONS-mode j/k
-    // retains its agent-tree-only special case below and does NOT touch
-    // activeSelectionSource (it's a right-pane question selector, not a
-    // sidebar-tree navigation).
+    // whichever tree is currently VISIBLE in the sidebar (`sidebarMode`; the
+    // Favorites tab shows the Agents tree). After any navigation, the
+    // navigated tree becomes the active selection source — the user just
+    // declared what they are selecting by moving the cursor in this tree.
+    // QUESTIONS-mode j/k retains its agent-tree-only special case below and
+    // does NOT touch activeSelectionSource (it's a right-pane question
+    // selector, not a sidebar-tree navigation).
     const navigatesTeams = this.sidebarMode === "teams";
+    const navigatedSource: SelectionSource = navigatesTeams ? "teams" : "agents";
     if (data === "J") {
       if (navigatesTeams) {
         this.teamsTree.navigateAnchor(1);
       } else {
         this.agentTree.moveToRepo(1);
       }
-      this.activeSelectionSource = this.sidebarMode;
+      this.activeSelectionSource = navigatedSource;
       this.syncSelectedAgent();
       this.tui?.requestRender();
     } else if (data === "K") {
@@ -2578,7 +2580,7 @@ export class DashboardComponent implements Component {
       } else {
         this.agentTree.moveToRepo(-1);
       }
-      this.activeSelectionSource = this.sidebarMode;
+      this.activeSelectionSource = navigatedSource;
       this.syncSelectedAgent();
       this.tui?.requestRender();
     } else if (matchesKey(data, Key.down) || data === "j") {
@@ -2595,7 +2597,7 @@ export class DashboardComponent implements Component {
         } else {
           this.agentTree.moveSelection(1);
         }
-        this.activeSelectionSource = this.sidebarMode;
+        this.activeSelectionSource = navigatedSource;
         this.syncSelectedAgent();
         this.tui?.requestRender();
       }
@@ -2610,7 +2612,7 @@ export class DashboardComponent implements Component {
         } else {
           this.agentTree.moveSelection(-1);
         }
-        this.activeSelectionSource = this.sidebarMode;
+        this.activeSelectionSource = navigatedSource;
         this.syncSelectedAgent();
         this.tui?.requestRender();
       }

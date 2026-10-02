@@ -182,10 +182,11 @@ export interface ActionCtx {
     setFocus(target: import("./focus").FocusTarget): void;
   };
   /**
-   * §17.1 (Phase 1 three-axis model): which tree the sidebar currently shows.
+   * §17.1 (Phase 1 three-axis model): which tab the sidebar currently shows.
    * Independent of focus and of the active selection. The source of truth for
    * "is the Teams panel visible in the sidebar?". The `@`-fuzzy jump writes
-   * this back to "agents" so the user sees the agent it just jumped to.
+   * this back to "agents" when the Teams tab is showing, so the user sees the
+   * agent it just jumped to (the Favorites tab already shows the Agents tree).
    */
   sidebarMode: import("./sidebar").SidebarMode;
   /**
@@ -195,16 +196,16 @@ export interface ActionCtx {
    * target. The `@`-fuzzy jump writes this back to "agents" so the jumped-to
    * agent becomes the active selection.
    */
-  activeSelectionSource: import("./sidebar").SidebarMode;
+  activeSelectionSource: import("./sidebar").SelectionSource;
   /**
    * §17.1 Phase 2: setter — flips `activeSelectionSource` on the host
    * dashboard. The `@`-fuzzy jump uses this; tests inject a recording stub.
    */
-  setActiveSelectionSource: (source: import("./sidebar").SidebarMode) => void;
+  setActiveSelectionSource: (source: import("./sidebar").SelectionSource) => void;
   /**
    * §17.1 Phase 2: setter — flips `sidebarMode` on the host dashboard. Used by
-   * the `@`-fuzzy jump (forces visibility to "agents" so the user sees the
-   * jumped-to agent in the visible tree). Tests inject a recording stub.
+   * the `@`-fuzzy jump (switches the Teams tab to "agents" so the user sees
+   * the jumped-to agent in the visible tree). Tests inject a recording stub.
    */
   setSidebarMode: (mode: import("./sidebar").SidebarMode) => void;
   /**
@@ -1818,9 +1819,11 @@ export function handleGoToQuestionAgent(ctx: ActionCtx) {
   if (ctx.agentTree.selectAgentById(q.agent)) {
     // §17.1 Phase 2: jumping from the QUESTIONS pane to an agent is an
     // Agents-panel operation — make the Agents tree the active source and
-    // ensure the sidebar shows it (parallel to the @-fuzzy jump).
+    // ensure the sidebar shows it (parallel to the @-fuzzy jump). The
+    // Favorites tab already shows the Agents tree (its selected-row carve-out
+    // keeps a non-favorite target visible), so only Teams switches.
     ctx.setActiveSelectionSource("agents");
-    ctx.setSidebarMode("agents");
+    if (ctx.sidebarMode === "teams") ctx.setSidebarMode("agents");
     ctx.syncSelectedAgent();
     ctx.jumpToMode("AGENT LOG");
     ctx.tui?.requestRender();
@@ -1870,11 +1873,11 @@ export function handleFuzzyAgent(ctx: ActionCtx) {
       ctx.focusManager.setFocus("agent-tree");
       // §17.1 Phase 2: the @-jump is the canonical Agents-panel operation —
       // it makes the Agents tree the active selection source AND flips the
-      // sidebar to "agents" so the user sees the agent it just jumped to.
-      // Both axes are written explicitly so the routing is unambiguous (the
-      // user spec: "yes, flip sidebarMode to agents on @-jump").
+      // sidebar from Teams to "agents" so the user sees the agent it just
+      // jumped to (the user spec: "yes, flip sidebarMode to agents on
+      // @-jump"). The Favorites tab already shows the Agents tree, so it stays.
       ctx.setActiveSelectionSource("agents");
-      ctx.setSidebarMode("agents");
+      if (ctx.sidebarMode === "teams") ctx.setSidebarMode("agents");
       if (selected.kind === "repo") {
         ctx.agentTree.selectByRepoPath(selected.entry.repoPath);
         ctx.syncSelectedAgent();
@@ -2074,7 +2077,7 @@ export function handleHelp(ctx: ActionCtx) {
     lines: [
       header("Navigation"),
       row("j / k / ↑↓", "select agent"),
-      row("0 / 1", "switch sidebar (Teams / Agents)"),
+      row("1 / 2 / 3", "switch sidebar (Agents / Teams / Favorites)"),
       row("@", "fuzzy jump to agent/repo"),
       row("/", "fuzzy mode picker"),
       "",

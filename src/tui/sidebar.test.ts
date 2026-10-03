@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { SidebarComponent, SIDEBAR_WIDTH, computeSidebarHeights } from "./sidebar";
+import { SidebarComponent, SIDEBAR_WIDTH, MIN_SIDEBAR, computeSidebarHeights } from "./sidebar";
 import { AgentTreeComponent } from "./agent-tree";
 import { InfoPanelComponent } from "./info-panel";
 import { InputFieldComponent } from "./input-field";
@@ -366,7 +366,7 @@ describe("SidebarComponent — §17 Teams panel rendering", () => {
   });
 
   test("Teams tab is highlighted when sidebarMode=teams even if focus is on agent-tree (Phase 1 independence)", () => {
-    // Realistic Phase-1 scenario: the user presses `0` (sidebarMode → teams)
+    // Realistic Phase-1 scenario: the user presses `2` (sidebarMode → teams)
     // but focus does NOT move (it stays on agent-tree). The Teams tab header
     // MUST still highlight Teams — it tracks visibility, not focus.
     const sidebar = makeSidebar();
@@ -434,5 +434,52 @@ describe("SidebarComponent — §17 Teams panel rendering", () => {
     expect(text).toContain("agent-y");
     // And the no-teams hint should be GONE (Teams tree no longer rendering).
     expect(text).not.toContain("No teams");
+  });
+});
+
+describe("SidebarComponent — Favorites tab", () => {
+  test("sidebarMode=favorites renders the Agents tree (filtered) and highlights the Favorites tab", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.sidebarMode = "favorites";
+    const fav = makeAgent({ id: "agent-fav" });
+    const plain = makeAgent({ id: "agent-plain" });
+    sidebar.agentTree.setFlatList([makeFlatAgent(fav), makeFlatAgent(plain)]);
+    // The dashboard turns the tree's filter on with the mode (setSidebarMode).
+    sidebar.agentTree.toggleFavorite("agent-fav");
+    sidebar.agentTree.setFavoritesOnly(true);
+
+    const lines = sidebar.render(SIDEBAR_WIDTH);
+    const text = lines.map(stripAnsi).join("\n");
+    expect(text).toContain("agent-fav");
+    expect(text).not.toContain("agent-plain");
+    expect(text).not.toContain("No teams");
+    // REVERSE marks the Favorites tab: it sits between the Teams and Favorites labels.
+    const header = lines[0]!;
+    const teamsIdx = header.indexOf("Teams");
+    const favIdx = header.indexOf("Favorites");
+    expect(favIdx).toBeGreaterThan(teamsIdx);
+    expect(header.slice(teamsIdx + "Teams".length, favIdx)).toContain(REVERSE);
+    expect(header.slice(0, teamsIdx)).not.toContain(REVERSE);
+  });
+
+  test("an empty Favorites view shows the favorites hint", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.sidebarMode = "favorites";
+    sidebar.agentTree.setFlatList([makeFlatAgent(makeAgent({ id: "agent-plain" }))]);
+    sidebar.agentTree.setFavoritesOnly(true);
+    const text = sidebar.render(SIDEBAR_WIDTH).map(stripAnsi).join("\n");
+    expect(text).toContain("No favorites — press . on an agent");
+  });
+
+  test("the tab line shows all three labels at the minimum sidebar width", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    const header = stripAnsi(sidebar.render(MIN_SIDEBAR)[0]!);
+    expect(header).toContain("Agents");
+    expect(header).toContain("Teams");
+    expect(header).toContain("Favorites");
+    expect(header.length).toBe(MIN_SIDEBAR);
   });
 });

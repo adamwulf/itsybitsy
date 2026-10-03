@@ -156,7 +156,7 @@ Set a bot token (`ib config set channels.telegram.bot_token <token>`) and allow 
 
 ## The dashboard
 
-`ib watch` is a full-screen TUI: a sidebar tree of every repo and agent (with a Teams view on `0`/`1`), a live view of the selected agent's terminal, an info panel, a chat pane for the system coordinator, and a right pane that cycles between diff, git status, errors, and pending questions.
+`ib watch` is a full-screen TUI: a sidebar tree of every repo and agent (with Agents / Teams / Favorites tabs on `1`/`2`/`3`), a live view of the selected agent's terminal, an info panel, a chat pane for the system coordinator, and a right pane that cycles between diff, git status, errors, and pending questions.
 
 ### Keybindings
 
@@ -165,7 +165,7 @@ Press `?` in the dashboard for this list.
 | Group | Key | Action |
 |---|---|---|
 | Navigate | `j` / `k` / `↑↓` | Select agent |
-| | `0` / `1` | Switch sidebar (Teams / Agents) |
+| | `1` / `2` / `3` | Switch sidebar (Agents / Teams / Favorites) |
 | | `@` | Fuzzy jump to agent/repo |
 | | `/` | Fuzzy mode picker |
 | Panes | `p` / `n` / `←→` | Cycle right pane mode |
@@ -180,12 +180,13 @@ Press `?` in the dashboard for this list.
 | | `r` / `N` | Reassign manager / nickname |
 | | `b` | Add permission; `Tab` toggles sub-agent spawning |
 | | `T` / `t` | Create team / add agent to team |
+| | `.` | Favorite / unfavorite agent (★, Favorites tab) |
 | Repos | `+` / `A` | Add repo |
 | | `x` / `D` | Remove repo (on a repo header) |
 | | `r` | Rename repo (on a repo header) |
 | | `f` | Fix resolvable health warnings |
 | | `V` | Cycle filter: all / non-empty / running-only |
-| | `.` | Pin repo (stays visible under `V`) |
+| | `.` | Pin repo (on a repo header; stays visible under `V`) |
 | Open | `w` / `o` / `O` | Worktree in Finder / external diff / diff vs manager |
 | | `G` / `C` | Ghostty: repo worktree / agent's tmux session |
 | | `S` | Save debug snapshot |

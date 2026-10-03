@@ -15,7 +15,7 @@ import { wrapLines, wordWrapLines, WordWrapCache, computeChromeSlice } from "./w
 import type { ChromeSlice } from "./wrap";
 import { isCodexBackedCli, parseModel } from "../agent-cli";
 import { getStateColors } from "./color-scheme";
-import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
+import { displayState, computeStateColWidth, AGE_COL_WIDTH, favoriteStar } from "./agent-tree";
 import { buildFocusSeparator } from "./focus";
 import { RESET, BOLD, DIM, RED, GREEN, CYAN, REVERSE, DIM_GRAY, YELLOW } from "./colors";
 import { formatSandboxDisplay } from "./sandbox-format";
@@ -84,9 +84,10 @@ export function colorizeLog(lines: string[]): string[] {
   });
 }
 
-/** Format a single agent row for TREE/REPO display */
+/** Format a single agent row for TREE/REPO display. A favorite gets the
+ *  yellow ★ between its icon and id (`<icon> ★ <id>`). */
 export function formatAgentRow(
-  agent: Agent, connector: string, stateColWidth: number,
+  agent: Agent, connector: string, stateColWidth: number, isFavorite: boolean = false,
 ): string {
   const icon = resolveAgentIcon(agent.meta);
   const state = displayState(agent.state);
@@ -94,7 +95,7 @@ export function formatAgentRow(
   const promptText = (agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");
   const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, stateColWidth - state.length))}`;
   const paddedAge = agent.age.padStart(AGE_COL_WIDTH);
-  return `${connector}${icon} ${agent.id}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;
+  return `${connector}${icon} ${favoriteStar(isFavorite)}${agent.id}  ${coloredState}  ${paddedAge}  ${agent.meta.model}  ${promptText}`;
 }
 
 /**
@@ -124,6 +125,9 @@ export class RightPaneComponent implements Component {
   selectedRepoHeader: string | null = null;
   questions: PendingQuestion[] = [];
   allAgents: FlatEntry[] = [];
+  /** Favorite agent ids — the TREE/REPO rows show a ★ for these (no
+   *  filtering here). The dashboard hands over the Agents tree's set. */
+  favoriteAgentIds: ReadonlySet<string> = new Set();
   scrollOffset = 0;
   displayHeight = 20;
   agentLogContent: string[] | null = null;
@@ -331,7 +335,7 @@ export class RightPaneComponent implements Component {
         const treeStateColWidth = computeStateColWidth(this.allAgents);
         this.content = this.allAgents
           .filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent")
-          .map(({ agent, connector }) => formatAgentRow(agent, connector, treeStateColWidth));
+          .map(({ agent, connector }) => formatAgentRow(agent, connector, treeStateColWidth, this.favoriteAgentIds.has(agent.id)));
         if (this.content.length === 0) this.content = [`${DIM}No agents${RESET}`];
         break;
       }
@@ -386,7 +390,7 @@ export class RightPaneComponent implements Component {
         } else {
           const repoStateColWidth = computeStateColWidth(this.allAgents);
           for (const { agent, connector } of repoAgents) {
-            this.content.push(formatAgentRow(agent, connector, repoStateColWidth));
+            this.content.push(formatAgentRow(agent, connector, repoStateColWidth, this.favoriteAgentIds.has(agent.id)));
           }
         }
         // Health check section

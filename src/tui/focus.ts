@@ -7,6 +7,7 @@
 
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import { RESET, BOLD, DIM, DIM_GRAY, REVERSE, UNDERLINE } from "./colors";
+import type { SidebarMode } from "./sidebar";
 
 /** The focusable panels in the dashboard. */
 export type FocusTarget =
@@ -21,8 +22,8 @@ export type FocusTarget =
 /** Sub-focus states for panels with input fields (active-agent, coordinator). */
 export type SubFocus = "pane" | "input" | "send";
 
-/** Ordered list of focus targets for cycling when `sidebarMode === "agents"`.
- *  In agents mode, the sidebar shows the Agents tree, so `agent-tree` is the
+/** Ordered list of focus targets for cycling when `sidebarMode` is `"agents"`
+ *  or `"favorites"`. Both tabs show the Agents tree, so `agent-tree` is the
  *  head of the cycle (§17.1). `teams-tree` is NOT in this order. */
 const FOCUS_ORDER: readonly FocusTarget[] = [
   "agent-tree",
@@ -70,11 +71,12 @@ export class FocusManager {
   /** When true, only cycle between agent-tree and coordinator. Trumps
    *  `sidebarMode` — coordinator mode wins. */
   coordinatorMode = false;
-  /** Which sidebar tree is visible. Determines which Tab cycling order is
+  /** Which sidebar tab is visible. Determines which Tab cycling order is
    *  active when not in coordinator mode. Mirrors `DashboardComponent.sidebarMode`
-   *  (§17.1 Phase 3) — the dashboard writes this whenever it flips sidebar
-   *  visibility (`0`/`1` keys). Defaults to `"agents"`. */
-  sidebarMode: "agents" | "teams" = "agents";
+   *  (§17.1 Phase 3) — the dashboard writes this whenever it switches the
+   *  sidebar tab (`1`/`2`/`3` keys). `"favorites"` shows the Agents tree, so it
+   *  uses the agents order. Defaults to `"agents"`. */
+  sidebarMode: SidebarMode = "agents";
   /** Targets to skip when cycling (e.g., repo-coordinator when not in REPO mode) */
   skipTargets: Set<FocusTarget> = new Set(["repo-coordinator"]);
 
@@ -101,7 +103,8 @@ export class FocusManager {
    *  Mode precedence (§17.1 Phase 3): coordinator > teams > agents. When
    *  `coordinatorMode === true`, uses `COORDINATOR_FOCUS_ORDER` regardless of
    *  `sidebarMode`. Otherwise, `sidebarMode === "teams"` uses
-   *  `TEAMS_FOCUS_ORDER`; the agents-mode `FOCUS_ORDER` is the default. */
+   *  `TEAMS_FOCUS_ORDER`; the agents-mode `FOCUS_ORDER` is the default (also
+   *  used by `"favorites"`). */
   cycle(delta: 1 | -1): void {
     const order = this.coordinatorMode
       ? COORDINATOR_FOCUS_ORDER
@@ -166,7 +169,10 @@ export function buildFocusSeparator(
  * Render a tabbed section separator line with multiple labels side-by-side.
  *
  * Layout: 4-dash left pad, then each tab as ` label ` separated by a single
- * dash, with remaining dashes filling to `width`.
+ * dash, with remaining dashes filling to `width`. When the tabs would not fit,
+ * the left pad shrinks (down to 1 dash) before any label is truncated — so the
+ * three sidebar tabs (Agents / Teams / Favorites, 28 columns) still fit whole
+ * at the 30-column minimum sidebar width.
  *
  * The `focused` flag on each tab marks which tab is currently SELECTED (the
  * tree being shown). The `paneFocused` argument indicates whether the
@@ -188,15 +194,16 @@ export function buildTabbedFocusSeparator(
   width: number,
   paneFocused: boolean = true,
 ): string {
-  const leftPad = 4;
   // Each tab string takes ` label `. Between tabs we render a single dash.
-  // Compute consumed width: leftPad + sum(tab widths) + (tabs.length-1) separators.
-  let consumed = leftPad;
+  // Tabs width: sum(tab widths) + (tabs.length-1) separators.
+  let tabsWidth = 0;
   for (let i = 0; i < tabs.length; i++) {
-    consumed += tabs[i]!.label.length + 2; // ` label `
-    if (i < tabs.length - 1) consumed += 1; // separator dash
+    tabsWidth += tabs[i]!.label.length + 2; // ` label `
+    if (i < tabs.length - 1) tabsWidth += 1; // separator dash
   }
-  const rightPad = Math.max(1, width - consumed);
+  // Up to 4 dashes on the left, leaving at least 1 dash on the right.
+  const leftPad = Math.max(1, Math.min(4, width - tabsWidth - 1));
+  const rightPad = Math.max(1, width - leftPad - tabsWidth);
 
   // Dashes are DIM_GRAY, with DIM added per-segment when the pane is
   // unfocused (parity with the unfocused buildFocusSeparator look). DIM must

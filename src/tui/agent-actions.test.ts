@@ -14,7 +14,7 @@ import type { StagedSendOptions, StagedTeamSendOptions } from "./message-send";
 import {
   handleRetire, handleNuke, handleNukeAll, handleResume, handlePause,
   handleSend, handleNewAgent, handleScrollUp, handleScrollDown,
-  handleHelp, handleResizeLeft, handleFuzzyAgent, handleRename,
+  handleHelp, handleResizeLeft, handleFuzzyAgent, handleGoToQuestionAgent, handleRename,
   handleSnapshot,
   handleOpenDiffTool, handleOpenDiffToolVsManager, getActiveDiffProc, setActiveDiffProc, killActiveDiffProc,
   getDiffToolLaunching, setDiffToolLaunching,
@@ -102,7 +102,7 @@ function makeMockCtx(overrides?: {
   /** §17.1 Phase 1: sidebar mode — defaults to "agents". */
   sidebarMode?: import("./sidebar").SidebarMode;
   /** §17.1 Phase 2: active selection source — defaults to "agents". */
-  activeSelectionSource?: import("./sidebar").SidebarMode;
+  activeSelectionSource?: import("./sidebar").SelectionSource;
   /** §17: teams-tree selection — defaults to null. */
   teamsSelection?: import("./selection").Selection;
   /** §17: teamSend stub override. */
@@ -124,7 +124,7 @@ function makeMockCtx(overrides?: {
   /** §17: teamSend invocations the handler made. */
   teamSendCalls: Array<{ teamName: string; members: Agent[]; message: string; fromAgent: string | undefined }>;
   /** §17.1 Phase 2: activeSelectionSource values passed to the ctx setter. */
-  setActiveSelectionSourceCalls: import("./sidebar").SidebarMode[];
+  setActiveSelectionSourceCalls: import("./sidebar").SelectionSource[];
   /** §17.1 Phase 2: sidebarMode values passed to the ctx setter. */
   setSidebarModeCalls: import("./sidebar").SidebarMode[];
   /** Await every executeAndRefresh action kicked off so far — deterministic
@@ -140,11 +140,11 @@ function makeMockCtx(overrides?: {
   const pendingActions: Promise<void>[] = [];
   const setFocusCalls: import("./focus").FocusTarget[] = [];
   const teamSendCalls: Array<{ teamName: string; members: Agent[]; message: string; fromAgent: string | undefined }> = [];
-  const setActiveSelectionSourceCalls: import("./sidebar").SidebarMode[] = [];
+  const setActiveSelectionSourceCalls: import("./sidebar").SelectionSource[] = [];
   const setSidebarModeCalls: import("./sidebar").SidebarMode[] = [];
   let currentFocus: import("./focus").FocusTarget = overrides?.focus ?? "agent-tree";
   let currentSidebarMode: import("./sidebar").SidebarMode = overrides?.sidebarMode ?? "agents";
-  let currentActiveSelectionSource: import("./sidebar").SidebarMode =
+  let currentActiveSelectionSource: import("./sidebar").SelectionSource =
     overrides?.activeSelectionSource ?? "agents";
   let leftWidth = overrides?.leftWidth ?? 60;
 
@@ -1947,6 +1947,49 @@ describe("handleFuzzyAgent — §17.3 @-jump force-select in Agents panel", () =
     const d = assertDialog(dialogs[0]!, "fuzzy");
     d.onSelect(0);
     expect(setSidebarModeCalls).toEqual(["agents"]);
+    expect(setActiveSelectionSourceCalls).toEqual(["agents"]);
+  });
+
+  // The Favorites tab already shows the Agents tree, so the @-jump keeps it
+  // (the selected-row carve-out keeps the target visible); only Teams flips.
+  test("@-jump from the Favorites tab keeps sidebarMode and makes Agents the active source", () => {
+    const agent = makeAgent({ id: "agent-fav-jump" });
+    const { ctx, dialogs, setSidebarModeCalls, setActiveSelectionSourceCalls } = makeMockCtx({
+      sidebarMode: "favorites",
+      activeSelectionSource: "teams",
+      flatList: [makeFlatAgent(agent)],
+    });
+    handleFuzzyAgent(ctx);
+    const d = assertDialog(dialogs[0]!, "fuzzy");
+    d.onSelect(0);
+    expect(setSidebarModeCalls).toEqual([]);
+    expect(ctx.sidebarMode).toBe("favorites");
+    expect(setActiveSelectionSourceCalls).toEqual(["agents"]);
+  });
+});
+
+describe("handleGoToQuestionAgent — sidebar tab", () => {
+  const question: PendingQuestion = { id: "q1", agent: "agent-q", question: "?", timestamp: "2026-01-01T00:00:00Z", status: "pending" };
+
+  test("from the Teams tab: switches to Agents and makes Agents the active source", () => {
+    const { ctx, setSidebarModeCalls, setActiveSelectionSourceCalls } = makeMockCtx({
+      sidebarMode: "teams",
+      activeSelectionSource: "teams",
+      questions: [question],
+    });
+    handleGoToQuestionAgent(ctx);
+    expect(setSidebarModeCalls).toEqual(["agents"]);
+    expect(setActiveSelectionSourceCalls).toEqual(["agents"]);
+  });
+
+  test("from the Favorites tab: stays in Favorites", () => {
+    const { ctx, setSidebarModeCalls, setActiveSelectionSourceCalls } = makeMockCtx({
+      sidebarMode: "favorites",
+      questions: [question],
+    });
+    handleGoToQuestionAgent(ctx);
+    expect(setSidebarModeCalls).toEqual([]);
+    expect(ctx.sidebarMode).toBe("favorites");
     expect(setActiveSelectionSourceCalls).toEqual(["agents"]);
   });
 });

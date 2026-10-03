@@ -14,7 +14,7 @@ describe("FocusManager", () => {
   });
 
   test("cycle(+1) moves forward through focus order", () => {
-    // §17.1: teams-tree is NOT in the cycle — reachable only via the '0' key.
+    // §17.1: teams-tree is NOT in the agents cycle — it heads the teams cycle ('2' key).
     const fm = new FocusManager("agent-tree");
     fm.cycle(1);
     expect(fm.current()).toBe("info");
@@ -31,7 +31,7 @@ describe("FocusManager", () => {
   });
 
   test("cycle(-1) moves backward through focus order", () => {
-    // §17.1: teams-tree is NOT in the cycle — reachable only via the '0' key.
+    // §17.1: teams-tree is NOT in the agents cycle — it heads the teams cycle ('2' key).
     const fm = new FocusManager("right-pane");
     fm.cycle(-1);
     expect(fm.current()).toBe("active-agent");
@@ -139,8 +139,8 @@ describe("FocusManager", () => {
   });
 
   test("teams-tree is NOT in cycle but is reachable via setFocus (§17.1)", () => {
-    // §17.1: teams-tree was removed from FOCUS_ORDER; the '0' key (handled at
-    // the dashboard level) is the only entry point. setFocus must still work.
+    // §17.1: teams-tree was removed from FOCUS_ORDER; the '2' key (handled at
+    // the dashboard level) is the entry point. setFocus must still work.
     const fm = new FocusManager();
     fm.setFocus("teams-tree");
     expect(fm.current()).toBe("teams-tree");
@@ -319,6 +319,30 @@ describe("FocusManager", () => {
     const fm = new FocusManager();
     expect(fm.sidebarMode).toBe("agents");
   });
+
+  // The Favorites tab shows the Agents tree, so it uses the agents cycle.
+  test("sidebarMode='favorites' uses the agents cycle", () => {
+    const fm = new FocusManager("agent-tree");
+    fm.sidebarMode = "favorites";
+    fm.skipTargets = new Set();
+    const seen: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      fm.cycle(1);
+      seen.push(fm.current());
+    }
+    expect(seen).toEqual(["info", "active-agent", "right-pane", "repo-coordinator", "agent-tree"]);
+    fm.cycle(-1);
+    expect(fm.current()).toBe("repo-coordinator");
+  });
+
+  test("sidebarMode='favorites' never lands on teams-tree", () => {
+    const fm = new FocusManager("agent-tree");
+    fm.sidebarMode = "favorites";
+    for (let i = 0; i < 20; i++) {
+      fm.cycle(1);
+      expect(fm.current()).not.toBe("teams-tree");
+    }
+  });
 });
 
 describe("buildFocusSeparator", () => {
@@ -494,5 +518,23 @@ describe("buildTabbedFocusSeparator", () => {
       true,
     );
     expect(typeof sep).toBe("string");
+  });
+
+  // The sidebar's three tabs take 28 columns; at the 30-column minimum
+  // sidebar width the left pad shrinks so no label is cut.
+  test("three sidebar tabs fit whole at the 30-column minimum width", () => {
+    const tabs = [
+      { label: "Agents", focused: false },
+      { label: "Teams", focused: false },
+      { label: "Favorites", focused: true },
+    ];
+    const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+    const narrow = plain(buildTabbedFocusSeparator(tabs, 30, true));
+    expect(narrow).toBe("─ Agents ─ Teams ─ Favorites ─");
+    expect(narrow.length).toBe(30);
+    // Wide enough: the usual 4-dash left pad.
+    const wide = plain(buildTabbedFocusSeparator(tabs, 60, true));
+    expect(wide.startsWith("──── Agents ")).toBe(true);
+    expect(wide.length).toBe(60);
   });
 });

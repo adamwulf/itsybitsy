@@ -15,11 +15,20 @@ import { buildFocusSeparator, buildTabbedFocusSeparator } from "./focus";
 import type { FocusTarget } from "./focus";
 
 /**
- * Which tree the sidebar renders in its tree region. Independent of focus
- * (Phase 1 of the three-axis model — see SPEC §17.1). Controlled exclusively
- * by the `0` / `1` keys at the dashboard level; Tab cycling never changes it.
+ * Which tab the sidebar shows in its tree region. Independent of focus
+ * (Phase 1 of the three-axis model — see SPEC §17.1). Controlled by the
+ * `1` / `2` / `3` keys at the dashboard level; Tab cycling never changes it.
+ * `"favorites"` is a VIEW of the Agents tree (the same `AgentTreeComponent`
+ * with its favorites filter on), not a separate tree.
  */
-export type SidebarMode = "agents" | "teams";
+export type SidebarMode = "agents" | "teams" | "favorites";
+
+/**
+ * Which tree owns the GLOBAL selection (SPEC §17.1 axis 3). Only two trees
+ * exist — the Favorites tab navigates the Agents tree, so it maps to
+ * `"agents"`.
+ */
+export type SelectionSource = "agents" | "teams";
 
 export const SIDEBAR_WIDTH = 60;
 
@@ -75,9 +84,9 @@ export class SidebarComponent implements Component {
   /**
    * Teams tree component (§17.1). Shares the SAME tree region with `agentTree`
    * — only one renders at a time, chosen by `sidebarMode` (Phase 1 three-axis
-   * model). The two panels hold independent selection state (§17.1
-   * independent-selection invariant); the sidebar never resets either when
-   * `sidebarMode` toggles.
+   * model; the Agents and Favorites tabs both render `agentTree`). The two
+   * trees hold independent selection state (§17.1 independent-selection
+   * invariant); the sidebar never resets either when `sidebarMode` toggles.
    */
   teamsTree: TeamsTreeComponent;
   infoPanel: InfoPanelComponent;
@@ -90,9 +99,11 @@ export class SidebarComponent implements Component {
   /** Which panel currently has focus (set by dashboard before render) */
   focusTarget: FocusTarget = "agent-tree";
   /**
-   * Which tree to render in the sidebar tree region (Phase 1 of the three-axis
-   * model — see SPEC §17.1). Independent of focus; controlled by the `0`/`1`
-   * keys at the dashboard level. Set by the dashboard before render.
+   * Which tab to render in the sidebar tree region (Phase 1 of the three-axis
+   * model — see SPEC §17.1). Independent of focus; controlled by the
+   * `1`/`2`/`3` keys at the dashboard level. Set by the dashboard before
+   * render. The dashboard also turns `agentTree.favoritesOnly` on for
+   * `"favorites"` — this component only picks which tree renders.
    */
   sidebarMode: SidebarMode = "agents";
   /** Height offsets for sidebar panels — positive grows, negative shrinks */
@@ -134,8 +145,9 @@ export class SidebarComponent implements Component {
     }
 
     // §17.1 (Phase 1 three-axis model): which tree renders is driven by
-    // `sidebarMode` (toggled by `0`/`1`), NOT by focus. The two panels share
-    // the same height budget — only one is visible at a time.
+    // `sidebarMode` (switched by `1`/`2`/`3`), NOT by focus. The trees share
+    // the same height budget — only one is visible at a time. The Favorites
+    // tab renders the Agents tree with its favorites filter on.
     const showTeams = this.sidebarMode === "teams";
     const treeItemCount = showTeams
       ? this.teamsTree.flatList.length
@@ -163,20 +175,21 @@ export class SidebarComponent implements Component {
       }
     }
 
-    // Tree section header: a side-by-side Agents/Teams tab line. The active
-    // tab (matching `sidebarMode`) is always marked; the inactive tab is DIM.
-    // Only ONE tree (the active one) renders below — the header reflects which
-    // tree is currently VISIBLE (i.e., `sidebarMode`), not which panel has
-    // focus. After Phase 1 (§17.1) focus and sidebar visibility are
-    // independent axes. The `paneFocused` flag drives the active tab's
-    // contrast: REVERSE+BOLD when the tree pane holds keyboard focus,
-    // underline otherwise — so the dark high-contrast highlight follows
-    // the focus, while the Agents/Teams selection stays visible.
+    // Tree section header: a side-by-side Agents/Teams/Favorites tab line. The
+    // active tab (matching `sidebarMode`) is always marked; inactive tabs are
+    // DIM. Only ONE tree renders below — the header reflects which tab is
+    // currently VISIBLE (i.e., `sidebarMode`), not which panel has focus.
+    // After Phase 1 (§17.1) focus and sidebar visibility are independent
+    // axes. The `paneFocused` flag drives the active tab's contrast:
+    // REVERSE+BOLD when the tree pane holds keyboard focus, underline
+    // otherwise — so the dark high-contrast highlight follows the focus,
+    // while the selected tab stays visible.
     const treePaneFocused =
       this.focusTarget === "agent-tree" || this.focusTarget === "teams-tree";
     const tabs = [
       { label: "Agents", focused: this.sidebarMode === "agents" },
       { label: "Teams", focused: this.sidebarMode === "teams" },
+      { label: "Favorites", focused: this.sidebarMode === "favorites" },
     ];
     lines.push(buildTabbedFocusSeparator(tabs, w, treePaneFocused));
     if (showTeams) {

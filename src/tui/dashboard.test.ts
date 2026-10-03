@@ -2802,7 +2802,7 @@ describe("DashboardComponent right pane and navigation features", () => {
 
 describe("focus cycling", () => {
   test("Tab cycles focus forward through all targets (no coordinator in normal mode)", () => {
-    // §17.1: teams-tree is NOT in the cycle — reachable only via '0'.
+    // §17.1: teams-tree is NOT in the agents cycle — reachable via '2'.
     const dashboard = makeDashboard();
     expect(dashboard.focus).toBe("agent-tree");
     dashboard.handleInput("\t");
@@ -2816,7 +2816,7 @@ describe("focus cycling", () => {
   });
 
   test("Shift+Tab cycles focus backward through all targets (no coordinator in normal mode)", () => {
-    // §17.1: teams-tree is NOT in the cycle — reachable only via '0'.
+    // §17.1: teams-tree is NOT in the agents cycle — reachable via '2'.
     const dashboard = makeDashboard();
     expect(dashboard.focus).toBe("agent-tree");
     dashboard.handleInput("\x1b[Z"); // Shift+Tab
@@ -2868,35 +2868,71 @@ describe("focus cycling", () => {
     }
   });
 
-  // §17.1 Phase 3 three-axis model: `0` / `1` switch sidebar visibility. Focus
-  // moves only when the current target is the HEAD of one cycle and is not in
-  // the other cycle: `agent-tree` ↔ `teams-tree`. Shared targets stay put.
-  test("'0' from agent-tree focus moves focus to teams-tree (§17.1 Phase 3)", () => {
+  // §17.1 Phase 3 three-axis model: `1` / `2` / `3` switch the sidebar tab
+  // (Agents / Teams / Favorites). Focus moves only when the current target
+  // would not exist in the new cycle: `agent-tree` ↔ `teams-tree` (Favorites
+  // uses the agents cycle). Shared targets stay put.
+  test("'1' / '2' / '3' set sidebarMode to agents / teams / favorites", () => {
+    const dashboard = makeDashboard();
+    expect(dashboard.sidebarMode).toBe("agents");
+    dashboard.handleInput("3");
+    expect(dashboard.sidebarMode).toBe("favorites");
+    expect(dashboard.focusManager.sidebarMode).toBe("favorites");
+    expect(dashboard.agentTree.favoritesOnly).toBe(true);
+    dashboard.handleInput("2");
+    expect(dashboard.sidebarMode as string).toBe("teams");
+    expect(dashboard.focusManager.sidebarMode as string).toBe("teams");
+    expect(dashboard.agentTree.favoritesOnly).toBe(false);
+    dashboard.handleInput("1");
+    expect(dashboard.sidebarMode as string).toBe("agents");
+    expect(dashboard.focusManager.sidebarMode as string).toBe("agents");
+    expect(dashboard.agentTree.favoritesOnly).toBe(false);
+  });
+
+  test("'0' no longer switches the sidebar tab", () => {
+    const dashboard = makeDashboard();
+    dashboard.handleInput("0");
+    expect(dashboard.sidebarMode).toBe("agents");
+    expect(dashboard.focus).toBe("agent-tree");
+    dashboard.handleInput("2");
+    dashboard.handleInput("0");
+    expect(dashboard.sidebarMode as string).toBe("teams");
+    expect(dashboard.focus).toBe("teams-tree");
+  });
+
+  test("'2' from agent-tree focus moves focus to teams-tree (§17.1 Phase 3)", () => {
     const dashboard = makeDashboard();
     expect(dashboard.focus).toBe("agent-tree");
     expect(dashboard.sidebarMode).toBe("agents");
-    dashboard.handleInput("0");
+    dashboard.handleInput("2");
     expect(dashboard.sidebarMode).toBe("teams");
     // Phase 3: focus mirrors agent-tree → teams-tree.
     expect(dashboard.focus).toBe("teams-tree");
   });
 
-  test("'0' from a shared focus target leaves focus alone (§17.1 Phase 3)", () => {
+  test("'2' from a shared focus target leaves focus alone (§17.1 Phase 3)", () => {
     const dashboard = makeDashboard();
     // Move focus to a target that exists in BOTH FOCUS_ORDER and
     // TEAMS_FOCUS_ORDER (info / active-agent / right-pane). Tab once → info.
     dashboard.handleInput("\t");
     expect(dashboard.focus).toBe("info");
-    dashboard.handleInput("0");
+    dashboard.handleInput("2");
     expect(dashboard.sidebarMode).toBe("teams");
     // Focus unchanged because info is in BOTH cycles.
     expect(dashboard.focus).toBe("info");
   });
 
+  test("'2' from repo-coordinator focus moves focus to teams-tree", () => {
+    const dashboard = makeDashboard();
+    dashboard.focusManager.setFocus("repo-coordinator");
+    dashboard.handleInput("2");
+    expect(dashboard.focus).toBe("teams-tree");
+  });
+
   test("'1' from teams-tree focus moves focus to agent-tree (§17.1 Phase 3)", () => {
     const dashboard = makeDashboard();
-    // Set up: sidebarMode=teams + focus on teams-tree (the natural state after `0`).
-    dashboard.handleInput("0");
+    // Set up: sidebarMode=teams + focus on teams-tree (the natural state after `2`).
+    dashboard.handleInput("2");
     expect(dashboard.sidebarMode).toBe("teams");
     expect(dashboard.focus).toBe("teams-tree");
     dashboard.handleInput("1");
@@ -2907,13 +2943,98 @@ describe("focus cycling", () => {
 
   test("'1' from a shared focus target leaves focus alone (§17.1 Phase 3)", () => {
     const dashboard = makeDashboard();
-    dashboard.handleInput("0"); // sidebarMode=teams, focus=teams-tree
+    dashboard.handleInput("2"); // sidebarMode=teams, focus=teams-tree
     dashboard.handleInput("\t"); // teams-tree → info (teams cycle)
     expect(dashboard.focus).toBe("info");
     dashboard.handleInput("1");
     expect(dashboard.sidebarMode as string).toBe("agents");
     // Focus unchanged because info is in BOTH cycles.
     expect(dashboard.focus).toBe("info");
+  });
+
+  test("'3' from teams-tree focus moves focus to agent-tree", () => {
+    const dashboard = makeDashboard();
+    dashboard.handleInput("2");
+    expect(dashboard.focus).toBe("teams-tree");
+    dashboard.handleInput("3");
+    expect(dashboard.sidebarMode as string).toBe("favorites");
+    expect(dashboard.focus).toBe("agent-tree");
+  });
+
+  test("'3' keeps agent-tree and shared focus targets", () => {
+    const dashboard = makeDashboard();
+    dashboard.handleInput("3");
+    expect(dashboard.focus).toBe("agent-tree");
+    dashboard.handleInput("1");
+    dashboard.focusManager.setFocus("info");
+    dashboard.handleInput("3");
+    expect(dashboard.focus).toBe("info");
+  });
+
+  test("'2' from the Favorites tab moves agent-tree focus to teams-tree", () => {
+    const dashboard = makeDashboard();
+    dashboard.handleInput("3");
+    expect(dashboard.focus).toBe("agent-tree");
+    dashboard.handleInput("2");
+    expect(dashboard.sidebarMode as string).toBe("teams");
+    expect(dashboard.focus).toBe("teams-tree");
+  });
+
+  test("Tab in favorites mode uses the agents cycle", () => {
+    const dashboard = makeDashboard();
+    dashboard.handleInput("3");
+    expect(dashboard.focus).toBe("agent-tree");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("info");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("active-agent");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("right-pane");
+    dashboard.handleInput("\t");
+    // repo-coordinator is skipped outside REPO mode; wraps to agent-tree.
+    expect(dashboard.focus).toBe("agent-tree");
+  });
+
+  test("j/k in favorites mode navigate the filtered Agents tree and keep activeSelectionSource 'agents'", () => {
+    const dashboard = makeDashboard();
+    const fav = makeAgent("agent-fav", "/repos/test");
+    const plain = makeAgent("agent-plain", "/repos/test");
+    dashboard.agentTree.setFlatList([makeFlatAgent(fav), makeFlatAgent(plain)]);
+    dashboard.agentTree.toggleFavorite("agent-fav");
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "t1", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    // Make the Teams tree the active source first, so j/k must flip it back.
+    dashboard.handleInput("2");
+    dashboard.handleInput("j");
+    expect(dashboard.activeSelectionSource).toBe("teams");
+    dashboard.handleInput("3");
+    dashboard.handleInput("j");
+    expect(dashboard.activeSelectionSource).toBe("agents");
+    expect(dashboard.infoPanel.agent?.id).toBe("agent-fav");
+    // The non-favorite is not in the view, so j wraps back to the favorite.
+    dashboard.handleInput("j");
+    expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-fav");
+    dashboard.handleInput("K");
+    expect(dashboard.activeSelectionSource).toBe("agents");
+    expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-fav");
+  });
+
+  test("'3' keeps the selected non-favorite agent as the selection", () => {
+    const dashboard = makeDashboard();
+    const fav = makeAgent("agent-fav", "/repos/test");
+    const plain = makeAgent("agent-plain", "/repos/test");
+    dashboard.onUpdate([fav, plain], [makeFlatAgent(fav), makeFlatAgent(plain)], []);
+    dashboard.agentTree.toggleFavorite("agent-fav");
+    expect(dashboard.agentTree.selectAgentById("agent-plain")).toBe(true);
+    dashboard.syncSelectedAgent();
+    dashboard.handleInput("3");
+    expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-plain");
+    expect(dashboard.infoPanel.agent?.id).toBe("agent-plain");
+    // Moving away drops the non-favorite out of the view.
+    dashboard.handleInput("k");
+    expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-fav");
+    expect(dashboard.agentTree.visibleList.length).toBe(1);
   });
 
   test("Tab in agents mode never reaches teams-tree (§17.1 Phase 3)", () => {
@@ -2932,7 +3053,7 @@ describe("focus cycling", () => {
 
   test("Tab in teams mode cycles teams-tree → info → active-agent → right-pane → teams-tree (§17.1 Phase 3)", () => {
     const dashboard = makeDashboard();
-    dashboard.handleInput("0"); // sidebarMode=teams, focus=teams-tree
+    dashboard.handleInput("2"); // sidebarMode=teams, focus=teams-tree
     expect(dashboard.sidebarMode).toBe("teams");
     expect(dashboard.focus).toBe("teams-tree");
     dashboard.handleInput("\t");
@@ -2948,7 +3069,7 @@ describe("focus cycling", () => {
 
   test("Shift+Tab in teams mode cycles teams-tree backward through right-pane (§17.1 Phase 3)", () => {
     const dashboard = makeDashboard();
-    dashboard.handleInput("0"); // sidebarMode=teams, focus=teams-tree
+    dashboard.handleInput("2"); // sidebarMode=teams, focus=teams-tree
     expect(dashboard.focus).toBe("teams-tree");
     dashboard.handleInput("\x1b[Z"); // Shift+Tab → right-pane (wrap)
     expect(dashboard.focus).toBe("right-pane");
@@ -2968,11 +3089,11 @@ describe("focus cycling", () => {
     expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
     expect(dashboard.focusManager.coordinatorMode).toBe(true);
     // Flip sidebarMode to teams — coordinator mode should still trump it.
-    dashboard.handleInput("0");
+    dashboard.handleInput("2");
     expect(dashboard.sidebarMode).toBe("teams");
     expect(dashboard.focusManager.coordinatorMode).toBe(true);
     // Tab cycles agent-tree → info → coordinator → agent-tree (coordinator order).
-    // Note: '0' from agent-tree moved focus to teams-tree, but the next Tab
+    // Note: '2' from agent-tree moved focus to teams-tree, but the next Tab
     // resolves cycle() against COORDINATOR_FOCUS_ORDER. teams-tree is not in
     // that order, so it falls through to index 0 (agent-tree) + 1 = info.
     dashboard.handleInput("\t");
@@ -2990,7 +3111,7 @@ describe("focus cycling", () => {
     }
   });
 
-  test("'0' does not fire when typing in active-agent input field (§17.1)", () => {
+  test("'1' / '2' / '3' do not fire when typing in active-agent input field (§17.1)", () => {
     const dashboard = makeDashboard();
     const agent = makeAgent("agent-a", "/repos/test");
     dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
@@ -3001,15 +3122,36 @@ describe("focus cycling", () => {
     expect(dashboard.focus).toBe("active-agent");
     expect(dashboard.subFocus).toBe("input");
 
-    // '0' should be captured by the input field, not switch focus to teams-tree.
-    dashboard.handleInput("0");
-    expect(dashboard.inputField.getText()).toBe("0");
+    // '2' should be captured by the input field, not switch focus to teams-tree.
+    dashboard.handleInput("2");
+    expect(dashboard.inputField.getText()).toBe("2");
     expect(dashboard.focus).toBe("active-agent");
+    expect(dashboard.sidebarMode).toBe("agents");
 
-    // '1' likewise.
+    // '1' and '3' likewise.
     dashboard.handleInput("1");
-    expect(dashboard.inputField.getText()).toBe("01");
+    dashboard.handleInput("3");
+    expect(dashboard.inputField.getText()).toBe("213");
     expect(dashboard.focus).toBe("active-agent");
+    expect(dashboard.sidebarMode).toBe("agents");
+  });
+
+  test("'1' / '2' / '3' typed into the repo notes editor stay in the notes", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-notes", "/repos/test");
+    dashboard.onUpdate([agent], [makeFlatRepoHeader("test", "/repos/test", true, true, true), makeFlatAgent(agent)], [], []);
+    expect(dashboard.agentTree.selectByRepoPath("/repos/test")).toBe(true);
+    dashboard.syncSelectedAgent();
+    dashboard.handleInput("\t"); // agent-tree → info
+    dashboard.handleInput("\t"); // info default-type → notes sub-field
+    expect(dashboard.focus).toBe("info");
+    expect(dashboard.infoPanel.subField).toBe("notes");
+
+    for (const ch of "x123y") dashboard.handleInput(ch);
+    expect(dashboard.infoPanel.notesEditor.getText()).toBe("x123y");
+    expect(dashboard.sidebarMode).toBe("agents");
+    expect(dashboard.agentTree.favoritesOnly).toBe(false);
+    expect(dashboard.focus).toBe("info");
   });
 });
 
@@ -4239,6 +4381,141 @@ describe("applyLayout", () => {
     restored.applyLayout(saved!);
     expect(restored.agentTree.pinnedRepoPaths.has("/repos/test")).toBe(true);
 
+    cancelPendingSave();
+  });
+
+  test("applyLayout restores favoriteAgentIds; a layout without them leaves existing favorites", () => {
+    const dashboard = makeDashboard();
+    dashboard.applyLayout({
+      sidebarWidth: 60,
+      splitPaneLeftWidth: 80,
+      heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+      favoriteAgentIds: ["agent-1", "agent-2"],
+    });
+    expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(["agent-1", "agent-2"]);
+    dashboard.applyLayout({
+      sidebarWidth: 60,
+      splitPaneLeftWidth: 80,
+      heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+    });
+    expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(["agent-1", "agent-2"]);
+  });
+
+  test("'.' on an agent toggles it as a favorite, persists it, and applyLayout(loadLayout()) restores it", async () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-star", "/repos/test");
+    dashboard.onUpdate([agent], [makeFlatRepoHeader("test", "/repos/test", true, true, true), makeFlatAgent(agent)], [], []);
+    expect(dashboard.agentTree.selectAgentById("agent-star")).toBe(true);
+    dashboard.handleInput(".");
+    expect(dashboard.agentTree.favoriteAgentIds.has("agent-star")).toBe(true);
+    expect(dashboard.notice).toBe("Favorited agent-star");
+    // The repo is not pinned — '.' on an agent never pins.
+    expect(dashboard.agentTree.pinnedRepoPaths.size).toBe(0);
+
+    await flushPendingSave();
+    const saved = await loadLayout();
+    expect(saved!.favoriteAgentIds).toEqual(["agent-star"]);
+    const restored = makeDashboard();
+    restored.applyLayout(saved!);
+    expect(restored.agentTree.favoriteAgentIds.has("agent-star")).toBe(true);
+
+    // Second press unfavorites and persists the removal.
+    dashboard.handleInput(".");
+    expect(dashboard.agentTree.favoriteAgentIds.has("agent-star")).toBe(false);
+    expect(dashboard.notice).toBe("Unfavorited agent-star");
+    await flushPendingSave();
+    expect((await loadLayout())!.favoriteAgentIds).toEqual([]);
+
+    cancelPendingSave();
+  });
+
+  test("after '.', the ★ renders in the Agents tree and the Teams tree, and reaches the right pane", () => {
+    const origRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+    try {
+      const dashboard = makeDashboard();
+      const agent = makeAgent("agent-star", "/repos/test");
+      dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
+      dashboard.teamsTree.setFlatList([
+        { kind: "team-header", teamName: "backend", memberCount: 1, createdEpoch: 1, createdBy: "@system" },
+        { kind: "team-member", teamName: "backend", agent, connector: "  " },
+      ]);
+      dashboard.agentTree.selectAgentById("agent-star");
+      expect(stripAnsi(dashboard.render(160).join("\n"))).not.toContain("★");
+      dashboard.handleInput(".");
+      expect(stripAnsi(dashboard.render(160).join("\n"))).toMatch(/★ agent-star/);
+      expect(dashboard.rightPane.favoriteAgentIds.has("agent-star")).toBe(true);
+      dashboard.handleInput("2");
+      expect(stripAnsi(dashboard.render(160).join("\n"))).toMatch(/★ \S*agent-star/);
+      cancelPendingSave();
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+    }
+  });
+
+  test("'.' notice uses the agent's nickname", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-nick", "/repos/test");
+    agent.meta.nickname = "builder";
+    dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
+    dashboard.agentTree.selectAgentById("agent-nick");
+    dashboard.handleInput(".");
+    expect(dashboard.notice).toBe("Favorited builder");
+  });
+
+  test("'.' on a team member in the Teams tree favorites that agent", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-member", "/repos/test");
+    dashboard.agentTree.setFlatList([makeFlatAgent(agent)]);
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "backend", memberCount: 1, createdEpoch: 1, createdBy: "@system" },
+      { kind: "team-member", teamName: "backend", agent, connector: "  " },
+    ]);
+    dashboard.handleInput("2");
+    dashboard.handleInput("j"); // team header
+    dashboard.handleInput("j"); // member
+    expect(dashboard.activeSelectionSource).toBe("teams");
+    dashboard.handleInput(".");
+    expect(dashboard.agentTree.favoriteAgentIds.has("agent-member")).toBe(true);
+    expect(dashboard.notice).toBe("Favorited agent-member");
+  });
+
+  test("'.' on a team anchor or the system coordinator changes nothing and shows a hint", () => {
+    const dashboard = makeDashboard();
+    dashboard.onUpdate([], [makeFlatSystemCoordinator()], []);
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    dashboard.handleInput(".");
+    expect(dashboard.notice).toBe("Select an agent or repo header");
+    expect(dashboard.agentTree.favoriteAgentIds.size).toBe(0);
+    expect(dashboard.agentTree.pinnedRepoPaths.size).toBe(0);
+
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    dashboard.handleInput("2");
+    dashboard.handleInput("j");
+    expect(dashboard.activeSelectionSource).toBe("teams");
+    dashboard.setNotice("reset", "info");
+    dashboard.handleInput(".");
+    expect(dashboard.notice).toBe("Select an agent or repo header");
+    expect(dashboard.agentTree.favoriteAgentIds.size).toBe(0);
+  });
+
+  test("'.' in the Favorites tab keeps the unfavorited agent visible until the selection moves", () => {
+    const dashboard = makeDashboard();
+    const a = makeAgent("agent-a", "/repos/test");
+    const b = makeAgent("agent-b", "/repos/test");
+    dashboard.onUpdate([a, b], [makeFlatAgent(a), makeFlatAgent(b)], []);
+    dashboard.agentTree.toggleFavorite("agent-a");
+    dashboard.agentTree.toggleFavorite("agent-b");
+    dashboard.handleInput("3");
+    dashboard.agentTree.selectAgentById("agent-b");
+    dashboard.handleInput(".");
+    expect(dashboard.agentTree.favoriteAgentIds.has("agent-b")).toBe(false);
+    expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-b");
+    dashboard.handleInput("k");
+    expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-a");
+    expect(dashboard.agentTree.visibleList.length).toBe(1);
     cancelPendingSave();
   });
 });
@@ -5759,7 +6036,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
     expect(dashboard.agentTree.selection).not.toBeNull();
     expect(dashboard.teamsTree.selection).not.toBeNull();
 
-    // Switch focus to teams-tree (via setFocus — equivalent to pressing '0')
+    // Switch focus to teams-tree (via setFocus — the focus move pressing '2' makes)
     dashboard.focusManager.setFocus("teams-tree");
     // Each panel's selection is preserved
     expect(dashboard.agentTree.selection).not.toBeNull();
@@ -5824,18 +6101,19 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
   });
 
   // §17.1 Phase 2 — global-selection axis is independent of sidebar visibility.
-  // These tests pin the three-axis model behavior: `0`/`1` flip the sidebar
-  // tree but NEVER move the active selection; j/k flip the active source to
-  // whichever tree is visible (the user just declared what they're selecting).
+  // These tests pin the three-axis model behavior: `1`/`2`/`3` flip the
+  // sidebar tab but NEVER move the active selection; j/k flip the active
+  // source to whichever tree is visible (the user just declared what they're
+  // selecting).
   describe("§17.1 Phase 2 — global selection independent of sidebar mode", () => {
-    test("'0' toggles sidebarMode without changing activeSelectionSource", () => {
+    test("'2' toggles sidebarMode without changing activeSelectionSource", () => {
       const dashboard = makeDashboard();
       const a = makeAgent("agent-glob1", "/tmp/repo-glob");
       dashboard.agentTree.setFlatList([makeFlatAgent(a)]);
       dashboard.agentTree.selectFirstRow();
       expect(dashboard.sidebarMode).toBe("agents");
       expect(dashboard.activeSelectionSource).toBe("agents");
-      dashboard.handleInput("0");
+      dashboard.handleInput("2");
       expect(dashboard.sidebarMode).toBe("teams");
       // The agent is still the active selection — Phase 2 invariant.
       expect(dashboard.activeSelectionSource).toBe("agents");
@@ -5848,8 +6126,8 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       dashboard.teamsTree.setFlatList([
         { kind: "team-header", teamName: "t1", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
       ]);
-      // User pressed '0' then j to make team t1 active.
-      dashboard.handleInput("0");
+      // User pressed '2' then j to make team t1 active.
+      dashboard.handleInput("2");
       dashboard.handleInput("j");
       expect(dashboard.activeSelectionSource).toBe("teams");
       // Now press '1' — sidebar shows Agents, but team stays active.
@@ -5857,6 +6135,11 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       expect(dashboard.sidebarMode).toBe("agents");
       expect(dashboard.activeSelectionSource).toBe("teams");
       // Main / info pane STILL drives the team channel.
+      expect(dashboard.channelPane.teamName).toBe("t1");
+      // '3' likewise leaves the team as the active selection.
+      dashboard.handleInput("3");
+      expect(dashboard.sidebarMode as string).toBe("favorites");
+      expect(dashboard.activeSelectionSource).toBe("teams");
       expect(dashboard.channelPane.teamName).toBe("t1");
     });
 
@@ -5871,8 +6154,8 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       dashboard.handleInput("j");
       expect(dashboard.activeSelectionSource).toBe("agents");
       expect(dashboard.infoPanel.agent?.id).toBe("agent-jk");
-      // Press '0' to flip sidebar to teams — active source stays "agents".
-      dashboard.handleInput("0");
+      // Press '2' to flip sidebar to teams — active source stays "agents".
+      dashboard.handleInput("2");
       expect(dashboard.activeSelectionSource).toBe("agents");
       // Press j — navigates Teams (visible) tree, active source flips to "teams".
       dashboard.handleInput("j");
@@ -5880,7 +6163,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       expect(dashboard.channelPane.teamName).toBe("t1");
     });
 
-    test("'0' mirrors active agent into the Teams tree when it's a team member", () => {
+    test("'2' mirrors active agent into the Teams tree when it's a team member", () => {
       const dashboard = makeDashboard();
       const a = makeAgent("agent-member", "/tmp/r");
       dashboard.agentTree.setFlatList([makeFlatAgent(a)]);
@@ -5891,13 +6174,13 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       dashboard.agentTree.selectFirstRow();
       // User flips to Teams panel — the active agent should mirror into the
       // Teams tree's member row for visual continuity.
-      dashboard.handleInput("0");
+      dashboard.handleInput("2");
       const sel = dashboard.teamsTree.selection;
       expect(sel?.kind).toBe("agent");
       if (sel?.kind === "agent") expect(sel.agent.id).toBe("agent-member");
     });
 
-    test("'0' leaves Teams tree in no-selection when active agent is not a team member", () => {
+    test("'2' leaves Teams tree in no-selection when active agent is not a team member", () => {
       const dashboard = makeDashboard();
       const a = makeAgent("agent-loner", "/tmp/r");
       dashboard.agentTree.setFlatList([makeFlatAgent(a)]);
@@ -5905,7 +6188,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
         { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
       ]);
       dashboard.agentTree.selectFirstRow();
-      dashboard.handleInput("0");
+      dashboard.handleInput("2");
       // The agent is not a member — Teams tree should NOT have a selection.
       expect(dashboard.teamsTree.selection).toBeNull();
       // But the Agents tree's selection is intact — agents tree remains the source.
@@ -5941,7 +6224,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       dashboard.teamsTree.setFlatList([
         { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
       ]);
-      dashboard.handleInput("0"); // sidebar -> teams
+      dashboard.handleInput("2"); // sidebar -> teams
       dashboard.handleInput("j"); // select team anchor; active=teams
       expect(dashboard.activeSelectionSource).toBe("teams");
       dashboard.handleInput("1"); // sidebar -> agents
@@ -6029,7 +6312,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       dashboard.teamsTree.setFlatList([
         { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
       ]);
-      dashboard.handleInput("0"); // sidebarMode -> teams; coord still selected in agentTree
+      dashboard.handleInput("2"); // sidebarMode -> teams; coord still selected in agentTree
       dashboard.handleInput("j"); // navigate teams; activeSelectionSource -> teams
 
       expect(dashboard.activeSelectionSource).toBe("teams");
@@ -6069,7 +6352,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       dashboard.teamsTree.setFlatList([
         { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
       ]);
-      dashboard.handleInput("0"); // sidebarMode -> teams
+      dashboard.handleInput("2"); // sidebarMode -> teams
       dashboard.handleInput("j"); // navigate to the team header
       expect(dashboard.activeSelectionSource).toBe("teams");
       expect(dashboard.channelPane.teamName).toBe("backend");
@@ -6119,7 +6402,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
         dashboard.teamsTree.setFlatList([
           { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
         ]);
-        dashboard.handleInput("0");
+        dashboard.handleInput("2");
         dashboard.handleInput("j");
         expect(dashboard.activeSelectionSource).toBe("teams");
         expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(false);

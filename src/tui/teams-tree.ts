@@ -30,6 +30,7 @@ import {
   AGE_COL_WIDTH,
   displayState,
   agentDisplayName,
+  favoriteStar,
 } from "./agent-tree";
 import { RESET, BOLD, DIM, REVERSE } from "./colors";
 
@@ -102,11 +103,11 @@ function repoQualifiedName(agent: Agent): string {
   return `${agent.repoName}/${agentDisplayName(agent)}`;
 }
 
-/** Width of the member row name prefix (connector + icon + repo/display-name). */
-function memberNamePrefixWidth(agent: Agent, connector: string): number {
+/** Width of the member row name prefix (connector + icon + star + repo/display-name). */
+function memberNamePrefixWidth(agent: Agent, connector: string, isFavorite: boolean): number {
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
   const icon = resolveAgentIcon(agent.meta);
-  return visibleWidth(`${connector}${orphanedPrefix}${icon} ${repoQualifiedName(agent)}`);
+  return visibleWidth(`${connector}${orphanedPrefix}${icon} ${favoriteStar(isFavorite)}${repoQualifiedName(agent)}`);
 }
 
 /**
@@ -117,9 +118,10 @@ function memberNamePrefixWidth(agent: Agent, connector: string): number {
  * as the Agents tree, instead of being bundled with the repo.
  *
  * Compact mode (width <= COMPACT_WIDTH_THRESHOLD):
- *   `<connector><icon> <repo>/<id>  <state>  <age>`
+ *   `<connector><icon> [★ ]<repo>/<id>  <state>  <age>`
  * Full mode (wider): additionally appends the model and prompt/summary, in
- * the same order as `formatAgentRow`.
+ * the same order as `formatAgentRow`. A favorite gets the yellow ★ between
+ * the icon and the name, like the Agents tree.
  */
 export function formatTeamMemberRow(
   agent: Agent,
@@ -128,6 +130,7 @@ export function formatTeamMemberRow(
   width: number,
   nameColWidth: number,
   stateColWidth: number = MIN_STATE_COL_WIDTH,
+  isFavorite: boolean = false,
 ): string {
   const compact = width <= COMPACT_WIDTH_THRESHOLD;
   const orphanedPrefix = agent.orphaned ? "⚠ " : "";
@@ -135,7 +138,7 @@ export function formatTeamMemberRow(
   const state = displayState(agent.state);
   const stateColor = getStateColors()[state] ?? getStateColors().unknown;
 
-  const namePrefix = `${connector}${orphanedPrefix}${icon} ${repoQualifiedName(agent)}`;
+  const namePrefix = `${connector}${orphanedPrefix}${icon} ${favoriteStar(isFavorite)}${repoQualifiedName(agent)}`;
   const namePad = Math.max(0, nameColWidth - visibleWidth(namePrefix));
   const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, stateColWidth - state.length))}`;
   const paddedAge = agent.age.padStart(AGE_COL_WIDTH);
@@ -198,6 +201,9 @@ export class TeamsTreeComponent implements Component {
   private hasSelection = false;
   /** Focus-driven dimming, matching AgentTreeComponent.suppressSelection. */
   suppressSelection = false;
+  /** Favorite agent ids — member rows show a ★ for these. Set by the
+   *  dashboard before render (the Agents tree owns the set). */
+  favoriteAgentIds: ReadonlySet<string> = new Set();
 
   get flatList(): TeamFlatEntry[] {
     return this._flatList;
@@ -316,7 +322,7 @@ export class TeamsTreeComponent implements Component {
    * under multiple teams, the first occurrence wins (the team registry order
    * from `listTeams()` is stable). Returns true on a hit, false otherwise.
    *
-   * Used by the dashboard's `mirrorSelectionToVisibleTree()` so a `0`/`1`
+   * Used by the dashboard's `mirrorSelectionToVisibleTree()` so a `1`/`2`/`3`
    * sidebar toggle visually highlights the active agent in the newly visible
    * tree when possible.
    */
@@ -399,7 +405,8 @@ export class TeamsTreeComponent implements Component {
     let maxNameWidth = 0;
     for (const item of list) {
       if (item.kind === "team-member") {
-        maxNameWidth = Math.max(maxNameWidth, memberNamePrefixWidth(item.agent, item.connector));
+        const isFavorite = this.favoriteAgentIds.has(item.agent.id);
+        maxNameWidth = Math.max(maxNameWidth, memberNamePrefixWidth(item.agent, item.connector, isFavorite));
       }
     }
     const stateColWidth = computeTeamStateColWidth(list);
@@ -414,7 +421,8 @@ export class TeamsTreeComponent implements Component {
       if (item.kind === "team-header") {
         lines.push(formatTeamHeaderRow(item.teamName, item.memberCount, selected, width));
       } else {
-        lines.push(formatTeamMemberRow(item.agent, item.connector, selected, width, maxNameWidth, stateColWidth));
+        const isFavorite = this.favoriteAgentIds.has(item.agent.id);
+        lines.push(formatTeamMemberRow(item.agent, item.connector, selected, width, maxNameWidth, stateColWidth, isFavorite));
       }
     }
 

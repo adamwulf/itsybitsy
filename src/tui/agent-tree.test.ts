@@ -7,7 +7,7 @@ import {
   MAX_TREE_HEIGHT,
   nextRepoFilter,
 } from "./agent-tree";
-import { isRunningState, isVisibleUnderRunningFilter, type Agent, type FlatEntry } from "../agents";
+import { isRunningState, isVisibleUnderRunningFilter, buildAgentTree, flattenAgentTree, type Agent, type FlatEntry } from "../agents";
 import { RED, RESET, REVERSE, YELLOW } from "./colors";
 import { visibleWidth } from "@mariozechner/pi-tui";
 
@@ -1070,31 +1070,27 @@ describe("AgentTreeComponent favorites view", () => {
   }
 
   /**
-   * coordinator, then:
-   *   alpha: mgr → child → grandchild, plus an unrelated root `other`
-   *   beta:  x-child (meta.manager = mgr in alpha), plus an unrelated `beta-solo`
+   * Built with the real buildAgentTree + flattenAgentTree: coordinator, then
+   *   alpha: mgr → child → grandchild (meta.manager), plus an unrelated root `other`
+   *   beta:  x-spawned (spawned by mgr from alpha via `ib new-agent --repo`:
+   *          meta.spawned_by only, no meta.manager), plus an unrelated `beta-solo`
    *   gamma: empty repo
    */
   function makeFixture(states: Record<string, string> = {}): FlatEntry[] {
     const s = (id: string) => states[id] ?? "running";
-    const mgr = agentIn("mgr", "alpha", null, s("mgr"));
-    const child = agentIn("child", "alpha", "mgr", s("child"));
-    const grandchild = agentIn("grandchild", "alpha", "child", s("grandchild"));
-    const other = agentIn("other", "alpha", null, s("other"));
-    const xChild = agentIn("x-child", "beta", "mgr", s("x-child"));
-    const betaSolo = agentIn("beta-solo", "beta", null, s("beta-solo"));
-    return [
-      { kind: "system-coordinator", state: "running", age: "1m" },
-      header("alpha", [mgr, child, grandchild, other]),
-      row(mgr, "├── "),
-      row(child, "│   └── "),
-      row(grandchild, "│       └── "),
-      row(other, "└── "),
-      header("beta", [xChild, betaSolo]),
-      row(xChild, "├── "),
-      row(betaSolo, "└── "),
-      header("gamma", []),
+    const agents = [
+      agentIn("mgr", "alpha", null, s("mgr")),
+      agentIn("child", "alpha", "mgr", s("child")),
+      agentIn("grandchild", "alpha", "child", s("grandchild")),
+      agentIn("other", "alpha", null, s("other")),
+      agentIn("x-spawned", "beta", null, s("x-spawned")),
+      agentIn("beta-solo", "beta", null, s("beta-solo")),
     ];
+    // Distinct creation times keep sibling order deterministic (oldest first).
+    agents.forEach((a, i) => { a.meta.created_epoch = 1735689600 + i; });
+    agents[4]!.meta.spawned_by = { agent_id: "mgr", repo_path: "/repos/alpha" };
+    const repos = ["alpha", "beta", "gamma"].map((name) => ({ name, path: `/repos/${name}` }));
+    return flattenAgentTree(buildAgentTree(agents), repos, { state: "running", age: "1m" });
   }
 
   const agentIds = (tree: AgentTreeComponent) =>
@@ -1106,17 +1102,45 @@ describe("AgentTreeComponent favorites view", () => {
   const connectorOf = (tree: AgentTreeComponent, id: string) =>
     tree.visibleList.find((f): f is AgentEntry => f.kind === "agent" && f.agent.id === id)?.connector;
 
-  test("shows a favorite and all its descendants, recursively and across repos", () => {
+  test("shows a favorite and all its same-repo descendants, recursively", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());
     tree.toggleFavorite("mgr");
     tree.setFavoritesOnly(true);
-    expect(agentIds(tree)).toEqual(["mgr", "child", "grandchild", "x-child"]);
-    // Repo headers only for repos with a shown agent; the cross-repo child
-    // keeps its own (beta) header.
-    expect(repoPaths(tree)).toEqual(["/repos/alpha", "/repos/beta"]);
+    expect(agentIds(tree)).toEqual(["mgr", "child", "grandchild"]);
+    // Repo headers only for repos with a shown agent.
+    expect(repoPaths(tree)).toEqual(["/repos/alpha"]);
     // The system coordinator is hidden.
     expect(tree.visibleList.some((f) => f.kind === "system-coordinator")).toBe(false);
+  });
+
+  test("an agent a favorite spawned in another repo (meta.spawned_by only) is not shown", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFixture());
+    tree.toggleFavorite("mgr");
+    tree.toggleFavorite("beta-solo");
+    tree.setFavoritesOnly(true);
+    expect(agentIds(tree)).toEqual(["mgr", "child", "grandchild", "beta-solo"]);
+    expect(agentIds(tree)).not.toContain("x-spawned");
+    // Favoriting it directly does show it.
+    tree.toggleFavorite("x-spawned");
+    expect(agentIds(tree)).toContain("x-spawned");
+  });
+
+  test("the ancestor walk stops at a manager in another repo", () => {
+    // Defensive: meta.manager is never cross-repo in practice, but if it were,
+    // buildAgentTree would nest the agent under its manager — the same-repo
+    // rule still keeps it out of the manager's favorites view.
+    const mgr = agentIn("mgr", "alpha", null);
+    const foreign = agentIn("foreign", "beta", "mgr");
+    foreign.meta.created_epoch = mgr.meta.created_epoch + 1;
+    const repos = ["alpha", "beta"].map((name) => ({ name, path: `/repos/${name}` }));
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(flattenAgentTree(buildAgentTree([mgr, foreign]), repos));
+    expect(tree.visibleList.some((f) => f.kind === "agent" && f.agent.id === "foreign")).toBe(true);
+    tree.toggleFavorite("mgr");
+    tree.setFavoritesOnly(true);
+    expect(agentIds(tree)).toEqual(["mgr"]);
   });
 
   test("a favorite descendant does not bring in its ancestors or siblings", () => {
@@ -1149,7 +1173,7 @@ describe("AgentTreeComponent favorites view", () => {
     tree.toggleFavorite("mgr");
     tree.setFavoritesOnly(true);
     tree.setFavoritesOnly(false);
-    expect(agentIds(tree)).toEqual(["mgr", "child", "grandchild", "other", "x-child", "beta-solo"]);
+    expect(agentIds(tree)).toEqual(["mgr", "child", "grandchild", "other", "x-spawned", "beta-solo"]);
     expect(repoPaths(tree)).toEqual(["/repos/alpha", "/repos/beta", "/repos/gamma"]);
     expect(tree.visibleList[0]!.kind).toBe("system-coordinator");
   });
@@ -1158,16 +1182,17 @@ describe("AgentTreeComponent favorites view", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());
     tree.toggleFavorite("mgr");
+    tree.toggleFavorite("beta-solo");
     expect(tree.selectAgentById("other")).toBe(true);
     tree.setFavoritesOnly(true);
     // Switching to the view never changes the selection.
     expect(tree.selectedAgent?.id).toBe("other");
-    expect(agentIds(tree)).toEqual(["mgr", "child", "grandchild", "other", "x-child"]);
+    expect(agentIds(tree)).toEqual(["mgr", "child", "grandchild", "other", "beta-solo"]);
     // j moves to the next visible row (the beta header); `other` then drops out
     // and the index re-resolves against the shorter list.
     tree.moveSelection(1);
     expect(tree.selectedRepoPath).toBe("/repos/beta");
-    expect(agentIds(tree)).toEqual(["mgr", "child", "grandchild", "x-child"]);
+    expect(agentIds(tree)).toEqual(["mgr", "child", "grandchild", "beta-solo"]);
     tree.moveSelection(-1);
     expect(tree.selectedAgent?.id).toBe("grandchild");
   });
@@ -1179,10 +1204,10 @@ describe("AgentTreeComponent favorites view", () => {
     expect(tree.selectByRepoPath("/repos/gamma")).toBe(true);
     tree.setFavoritesOnly(true);
     expect(tree.selectedRepoPath).toBe("/repos/gamma");
-    expect(repoPaths(tree)).toEqual(["/repos/alpha", "/repos/beta", "/repos/gamma"]);
+    expect(repoPaths(tree)).toEqual(["/repos/alpha", "/repos/gamma"]);
     tree.moveSelection(-1);
-    expect(tree.selectedAgent?.id).toBe("x-child");
-    expect(repoPaths(tree)).toEqual(["/repos/alpha", "/repos/beta"]);
+    expect(tree.selectedAgent?.id).toBe("grandchild");
+    expect(repoPaths(tree)).toEqual(["/repos/alpha"]);
   });
 
   test("a selected system coordinator stays visible until the selection moves away", () => {
@@ -1212,13 +1237,14 @@ describe("AgentTreeComponent favorites view", () => {
 
   test("composes with running-only: favorites first, then the V filter", () => {
     const tree = new AgentTreeComponent();
-    tree.setFlatList(makeFixture({ grandchild: "stopped", "x-child": "stopped" }));
+    tree.setFlatList(makeFixture({ grandchild: "stopped", "x-spawned": "stopped" }));
     tree.toggleFavorite("mgr");
+    tree.toggleFavorite("x-spawned");
     tree.setFavoritesOnly(true);
     tree.setRepoFilter("running-only");
     expect(agentIds(tree)).toEqual(["mgr", "child"]);
     // beta still has a running agent (beta-solo), so the V filter alone would
-    // keep its header — but no favorite of beta survived, so it is hidden.
+    // keep its header — but beta's only favorite is stopped, so it is hidden.
     expect(repoPaths(tree)).toEqual(["/repos/alpha"]);
   });
 
@@ -1297,7 +1323,7 @@ describe("AgentTreeComponent favorites view", () => {
 
   test("an empty view says the V filter hides the favorites when favorites exist", () => {
     const tree = new AgentTreeComponent();
-    tree.setFlatList(makeFixture({ mgr: "stopped", child: "stopped", grandchild: "stopped", "x-child": "stopped" }));
+    tree.setFlatList(makeFixture({ mgr: "stopped", child: "stopped", grandchild: "stopped" }));
     tree.toggleFavorite("mgr");
     tree.setFavoritesOnly(true);
     tree.setRepoFilter("running-only");

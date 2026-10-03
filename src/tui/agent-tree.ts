@@ -344,8 +344,9 @@ export class AgentTreeComponent implements Component {
    * Favorites view (sidebarMode === "favorites", SPEC §17.1). The Favorites
    * tab is a VIEW of this same tree, not a separate tree: selection and focus
    * are shared with the Agents tab. When on, visibleList shows only favorite
-   * agents and every descendant of a favorite (walking meta.manager across
-   * repos), the repo headers that still have a shown agent, and their
+   * agents and every same-repo descendant of a favorite (walking
+   * meta.manager; agents it spawned in other repos are not shown), the repo
+   * headers that still have a shown agent, and their
    * parent-headers; the system coordinator and favoriteless repos (pinned or
    * not) are hidden. The selected row is always kept visible until the
    * selection moves away. Composes with repoFilter: favorites first, then V.
@@ -422,10 +423,12 @@ export class AgentTreeComponent implements Component {
   }
 
   /**
-   * True if `agent` or any ancestor in its meta.manager chain is a favorite.
-   * The walk crosses repos (byId holds every agent in the flat list) and stops
-   * at a manager that is not in the list. A visited set guards against
-   * meta.manager cycles, as in recomputeConnectorsForVisible.
+   * True if `agent` or any ancestor in its meta.manager chain IN THE SAME REPO
+   * is a favorite. The walk stops at a manager that is not in the flat list or
+   * that lives in another repo (the same-repoName rule as
+   * recomputeConnectorsForVisible). Agents a favorite spawns in other repos
+   * record only meta.spawned_by, never meta.manager, and are not followed. A
+   * visited set guards against meta.manager cycles.
    */
   private hasFavoriteInChain(agent: Agent, byId: Map<string, Agent>): boolean {
     if (this.favoriteAgentIds.has(agent.id)) return true;
@@ -434,9 +437,9 @@ export class AgentTreeComponent implements Component {
     while (mgr) {
       if (visited.has(mgr)) return false;
       visited.add(mgr);
-      if (this.favoriteAgentIds.has(mgr)) return true;
       const parent = byId.get(mgr);
-      if (!parent) return false;
+      if (!parent || parent.repoName !== agent.repoName) return false;
+      if (this.favoriteAgentIds.has(mgr)) return true;
       mgr = parent.meta.manager;
     }
     return false;

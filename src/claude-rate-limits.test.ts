@@ -166,6 +166,22 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
     expect(result.data?.sessionReset).toBe("1h 0m");
   });
 
+  test("a new window's report wins over a higher report of the window that just reset", async () => {
+    // After a limit reset: the limited agent still holds 100% for the old
+    // window, and another agent has started the new window at 2%. The old
+    // window's usage must not count, or the watchdog never nudges.
+    await recordClaudeRateLimits("agent-limited", {
+      five_hour: { used_percentage: 100, resets_at: NOW_S - 60 },
+    }, NOW_MS - 120_000);
+    await recordClaudeRateLimits("agent-fresh", {
+      five_hour: { used_percentage: 2, resets_at: NOW_S + 5 * 3600 - 300 },
+    }, NOW_MS - 300_000);
+
+    const result = await readClaudeUsage(new Date(NOW_MS));
+    expect(result.data?.sessionPct).toBe(2);
+    expect(result.data?.sessionReset).toBe("4h 55m");
+  });
+
   test("reports of one window with slightly different reset times are combined", async () => {
     await recordClaudeRateLimits("agent-a", {
       five_hour: { used_percentage: 90, resets_at: NOW_S + 3600 },

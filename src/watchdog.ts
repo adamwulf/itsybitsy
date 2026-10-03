@@ -941,12 +941,12 @@ export const RATE_LIMIT_RETRY_DELAY_MS = 2_000;
 /**
  * Handler for "rate_limited" state.
  * - 3-attempt retry loop: send Enter, wait 2s, check state, repeat if still rate_limited
- * - Check usage API; when session usage drops below threshold, nudge agent
+ * - Read Claude plan usage; when session usage drops below threshold, nudge agent
  */
 async function handleRateLimited(agent: Agent, tracker: AgentTracker, _getAllAgents: GetAllAgents): Promise<void> {
-  // Phase 6: codex has its own rate-limit UX (no "Esc to dismiss" dialog +
-  // no Anthropic usage API). The bypass loop's `parseState` matchers and the
-  // `fetchUsage()` call are both claude-specific; skip the handler entirely
+  // Phase 6: codex has its own rate-limit UX (no "Esc to dismiss" dialog), and
+  // the Claude plan usage reading comes from Claude statuslines. The bypass
+  // loop's `parseState` matchers and that reading are both claude-specific; skip the handler entirely
   // for non-claude agents. agy (SPEC-ANTIGRAVITY-CLI.md D10) is covered by the
   // same `!== "claude"` gate — its rate-limit strings aren't captured yet, so
   // rate_limited stays `unknown` for agy and this recovery path is a no-op.

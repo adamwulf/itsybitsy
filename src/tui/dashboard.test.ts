@@ -98,6 +98,19 @@ function makeDashboard(): DashboardComponent {
 }
 
 /**
+ * startPolling() runs the status-bar usage fetchers, which read the real
+ * ~/.itsybitsy and ~/.codex (and fetchGeminiUsage can run agy). Every test
+ * starts with inert ones; a usage-polling test installs its own in its body.
+ */
+beforeEach(() => {
+  usageFetchCtx.set({
+    readClaudeUsage: async () => ({ data: null, error: false }),
+    fetchGeminiUsage: async () => ({ data: null, error: false }),
+    fetchCodexUsage: async () => ({ data: null, error: false }),
+  });
+});
+
+/**
  * Stop everything the finished test left running. Runs after EVERY test in this
  * file — including one that failed or timed out, which is the case that matters.
  *
@@ -126,6 +139,7 @@ afterEach(() => {
   for (const d of dashboardsThisTest.splice(0)) {
     d.stopPolling();
   }
+  usageFetchCtx.reset();
   // persistLayout() debounces a 500ms write in ./layout module state. A test
   // that pressed a resize key leaves that timer armed; cancel it so the write
   // cannot land during an unrelated later test. Tests that need the write to

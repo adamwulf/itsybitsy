@@ -1349,6 +1349,24 @@ describe("AgentTreeComponent favorites view", () => {
     expect(text).not.toContain("press . on an agent");
   });
 
+  test("an empty view says the V filter hides the stopped orphans of a gone favorite manager", () => {
+    // `mgr` is gone from the flat list but still a favorite; its orphan
+    // `child` counts as a favorite row, and running-only hides it.
+    const child = agentIn("child", "alpha", "mgr", "stopped");
+    const unrelated = agentIn("unrelated", "alpha", null);
+    unrelated.meta.created_epoch = child.meta.created_epoch + 1;
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(flattenAgentTree(buildAgentTree([child, unrelated]), [{ name: "alpha", path: "/repos/alpha" }]));
+    tree.toggleFavorite("mgr");
+    tree.setFavoritesOnly(true);
+    expect(agentIds(tree)).toEqual(["child"]);
+    tree.setRepoFilter("running-only");
+    expect(tree.visibleList).toEqual([]);
+    const text = tree.render(60).join("\n");
+    expect(text).toContain("No favorites match the V filter");
+    expect(text).not.toContain("press . on an agent");
+  });
+
   test("an empty view with only ids of gone agents shows the press-'.' hint", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());

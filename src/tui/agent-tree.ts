@@ -392,12 +392,7 @@ export class AgentTreeComponent implements Component {
     // ancestor walk and the connector rebuild). Build it once per read —
     // visibleList is read many times per render.
     const needsLookup = this.favoritesOnly || this.repoFilter === "running-only";
-    const allAgents = new Map<string, Agent>();
-    if (needsLookup) {
-      for (const e of this._flatList) {
-        if (e.kind === "agent") allAgents.set(e.agent.id, e.agent);
-      }
-    }
+    const allAgents = needsLookup ? this.buildAgentLookup() : new Map<string, Agent>();
     // Favorites first, then the V filter (they compose).
     let entries = this.favoritesOnly ? this.applyFavoritesFilter(base, allAgents) : base;
     if (this.repoFilter !== "all") entries = this.applyRepoFilter(entries);
@@ -407,6 +402,15 @@ export class AgentTreeComponent implements Component {
     // The precomputed connectors reference hidden ancestors, so rebuild them
     // against only the visible subset.
     return recomputeConnectorsForVisible(entries, allAgents);
+  }
+
+  /** Map every agent id in the flat list to its agent. */
+  private buildAgentLookup(): Map<string, Agent> {
+    const byId = new Map<string, Agent>();
+    for (const e of this._flatList) {
+      if (e.kind === "agent") byId.set(e.agent.id, e.agent);
+    }
+    return byId;
   }
 
   /**
@@ -1028,13 +1032,15 @@ export class AgentTreeComponent implements Component {
     if (visible.length === 0) {
       let hint = "No agents found";
       if (this.favoritesOnly) {
-        // A favorite that is in the list can only be hidden here by the V
-        // filter (the favorites pass always keeps it); otherwise there is no
-        // favorite to show at all (none set, or only ids of gone agents).
-        const hasFavoriteAgent = this._flatList.some(
-          (f) => f.kind === "agent" && !f.agent.archived && this.favoriteAgentIds.has(f.agent.id),
+        // Same rule as the favorites pass (hasFavoriteInChain over the
+        // non-archived agents). If any agent passes it, only the V filter can
+        // have hidden it; otherwise the favorites pass has nothing to show (no
+        // favorites, or only ids of gone agents with no orphans left here).
+        const byId = this.buildAgentLookup();
+        const hasFavoriteRow = this._flatList.some(
+          (f) => f.kind === "agent" && !f.agent.archived && this.hasFavoriteInChain(f.agent, byId),
         );
-        hint = hasFavoriteAgent ? "No favorites match the V filter" : "No favorites — press . on an agent";
+        hint = hasFavoriteRow ? "No favorites match the V filter" : "No favorites — press . on an agent";
       }
       return [truncateToWidth(`${DIM}  ${hint}${RESET}`, width, "")];
     }

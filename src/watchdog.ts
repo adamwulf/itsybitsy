@@ -986,7 +986,7 @@ async function handleRateLimited(agent: Agent, tracker: AgentTracker, _getAllAge
   }
 
   // Check Claude plan usage to see if it has dropped enough to resume. The
-  // reading is the newest rate-limit record from any agent's statusline
+  // reading combines every agent's statusline rate-limit record
   // (src/claude-rate-limits.ts); once the 5-hour window's reset time passes,
   // it reads as 0%, so the agent is nudged when its limit resets.
   const usageResult = await fetchUsageFn();

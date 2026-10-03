@@ -5,8 +5,8 @@
  * after the session's first API response). Every Claude session ib launches
  * runs `ib hooks statusline <id>` (src/hooks/statusline.ts), which records the
  * two windows here in `~/.itsybitsy/agents/<id>/claude-rate-limits.json`. The
- * `ib watch` status bar and the watchdog's rate-limit recovery read the newest
- * record across all agents.
+ * `ib watch` status bar and the watchdog's rate-limit recovery combine the
+ * records of all agents (see `combineWindows`).
  *
  * ib used to call the Anthropic usage API with the OAuth token from the macOS
  * keychain (`security find-generic-password`). On recent macOS a keychain read
@@ -15,7 +15,7 @@
  */
 
 import { join } from "path";
-import { mkdir, readdir, rename } from "fs/promises";
+import { mkdir, readdir, rename, unlink } from "fs/promises";
 import { getCoordinatorHome } from "./coordinator";
 import { agentOutboxDir } from "./outbox";
 import { formatResetTime } from "./usage";
@@ -38,9 +38,17 @@ export interface ClaudeRateLimits {
 }
 
 export interface ClaudeRateLimitsRecord extends ClaudeRateLimits {
-  /** Epoch seconds of the statusline run that last wrote this record. */
+  /** Epoch seconds when this record's windows last changed (diagnostic only). */
   updatedAt: number;
 }
+
+/**
+ * Two reports of one window can carry slightly different `resets_at` values.
+ * Distinct windows are at least 5 hours apart (a new 5-hour window starts at
+ * the first request after the old one resets), so reports within an hour of
+ * each other are the same window.
+ */
+const SAME_WINDOW_SECONDS = 3600;
 
 function parseWindow(value: unknown): RateLimitWindow | undefined {
   const w = value as { used_percentage?: unknown; resets_at?: unknown } | null | undefined;
@@ -95,16 +103,64 @@ export async function recordClaudeRateLimits(
   const dir = agentOutboxDir(agentId);
   const path = join(dir, CLAUDE_RATE_LIMITS_FILE);
   const previous = await readRecord(path);
-  const record: ClaudeRateLimitsRecord = {
-    updatedAt: Math.floor(now / 1000),
+  const merged: ClaudeRateLimits = {
     ...(previous?.five_hour ? { five_hour: previous.five_hour } : {}),
     ...(previous?.seven_day ? { seven_day: previous.seven_day } : {}),
     ...windows,
   };
+  // Most statusline runs repeat the session's last reading; skip the write.
+  if (previous && sameWindow(previous.five_hour, merged.five_hour) && sameWindow(previous.seven_day, merged.seven_day)) {
+    return;
+  }
+  const record: ClaudeRateLimitsRecord = { updatedAt: Math.floor(now / 1000), ...merged };
   await mkdir(dir, { recursive: true });
   const tmpPath = `${path}.tmp.${process.pid}`;
   await Bun.write(tmpPath, JSON.stringify(record));
   await rename(tmpPath, path);
+}
+
+function sameWindow(a: RateLimitWindow | undefined, b: RateLimitWindow | undefined): boolean {
+  if (!a || !b) return a === b;
+  return a.used_percentage === b.used_percentage && a.resets_at === b.resets_at;
+}
+
+/**
+ * Delete an agent's record (and any temp file a killed statusline run left)
+ * from its folder at teardown, so `deleteAgentOutbox` can remove the folder.
+ */
+export async function deleteClaudeRateLimits(dir: string): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.startsWith(CLAUDE_RATE_LIMITS_FILE)) continue;
+    try {
+      await unlink(join(dir, entry));
+    } catch {
+      // Best effort, like the rest of teardown.
+    }
+  }
+}
+
+/**
+ * The account's current window from all agents' reports of it. Each session
+ * reports the last values it saw, and an idle session keeps reporting old
+ * ones, so the record's write time says nothing about which report is
+ * current. The current window is the one that resets last; within it, usage
+ * only grows, so the highest reported percentage is the latest.
+ */
+export function combineWindows(windows: Array<RateLimitWindow | undefined>): RateLimitWindow | undefined {
+  const reports = windows.filter((w): w is RateLimitWindow => w !== undefined);
+  if (reports.length === 0) return undefined;
+  const latestReset = Math.max(...reports.map((w) => w.resets_at));
+  const current = reports.filter((w) => latestReset - w.resets_at < SAME_WINDOW_SECONDS);
+  return {
+    used_percentage: Math.max(...current.map((w) => w.used_percentage)),
+    resets_at: latestReset,
+  };
 }
 
 /**
@@ -133,10 +189,10 @@ export function claudeUsageFromRecord(record: ClaudeRateLimitsRecord, now: Date 
 }
 
 /**
- * Claude plan usage from the newest record that any agent's statusline wrote.
- * All agents share one account, so the newest record is the best reading.
- * `data` is null (and `error` false) when no Claude session has recorded
- * rate limits yet — nothing failed, there is just no reading.
+ * Claude plan usage from the records of every agent's statusline. All agents
+ * share one account, so each window is combined across records
+ * (`combineWindows`). `data` is null (and `error` false) when no Claude
+ * session has recorded rate limits yet — nothing failed, there is no reading.
  */
 export async function readClaudeUsage(now: Date = new Date()): Promise<UsageResult> {
   const agentsDir = join(getCoordinatorHome(), "agents");
@@ -146,13 +202,16 @@ export async function readClaudeUsage(now: Date = new Date()): Promise<UsageResu
   } catch {
     return { data: null, error: false };
   }
-  const records = await Promise.all(
+  const records = (await Promise.all(
     entries.map((entry) => readRecord(join(agentsDir, entry, CLAUDE_RATE_LIMITS_FILE))),
-  );
-  let newest: ClaudeRateLimitsRecord | null = null;
-  for (const record of records) {
-    if (record && (!newest || record.updatedAt > newest.updatedAt)) newest = record;
-  }
-  if (!newest) return { data: null, error: false };
-  return { data: claudeUsageFromRecord(newest, now), error: false };
+  )).filter((record): record is ClaudeRateLimitsRecord => record !== null);
+  if (records.length === 0) return { data: null, error: false };
+  const fiveHour = combineWindows(records.map((r) => r.five_hour));
+  const sevenDay = combineWindows(records.map((r) => r.seven_day));
+  const combined: ClaudeRateLimitsRecord = {
+    updatedAt: Math.max(...records.map((r) => r.updatedAt)),
+    ...(fiveHour ? { five_hour: fiveHour } : {}),
+    ...(sevenDay ? { seven_day: sevenDay } : {}),
+  };
+  return { data: claudeUsageFromRecord(combined, now), error: false };
 }

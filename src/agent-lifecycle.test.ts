@@ -224,6 +224,33 @@ describe("agent-lifecycle", () => {
         await rm(dir, { recursive: true, force: true });
       }
     });
+
+    test("removes the per-agent folder after a statusline rate-limit record was written", async () => {
+      const dir = await makeTempDir();
+      const agentDir = join(dir, ".ittybitty", "agents", "agent-test");
+      await mkdir(agentDir, { recursive: true });
+      const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
+      const { agentOutboxDir } = await import("./outbox");
+      const { recordClaudeRateLimits, CLAUDE_RATE_LIMITS_FILE } = await import("./claude-rate-limits");
+      setCoordinatorHome(join(dir, ".itsybitsy"));
+      const queueDir = agentOutboxDir("agent-test");
+
+      try {
+        await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-test"}');
+        await recordClaudeRateLimits("agent-test", { five_hour: { used_percentage: 9, resets_at: 1_900_000_000 } });
+        // A statusline run killed between its temp write and the rename.
+        await Bun.write(join(queueDir, `${CLAUDE_RATE_LIMITS_FILE}.tmp.12345`), "{}");
+
+        await archiveAgent(dir, "agent-test", agentDir);
+
+        // Without the record removed first, the rmdir fails and the folder
+        // stays for good (and every usage read scans it).
+        expect(await readdir(join(dir, ".itsybitsy", "agents"))).toEqual([]);
+      } finally {
+        resetCoordinatorHome();
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("retirement manifest and archive discovery", () => {

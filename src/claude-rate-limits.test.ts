@@ -1,10 +1,11 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import {
   CLAUDE_RATE_LIMITS_FILE,
   claudeUsageFromRecord,
+  deleteClaudeRateLimits,
   parseStatuslineRateLimits,
   readClaudeUsage,
   recordClaudeRateLimits,
@@ -126,22 +127,78 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
     expect(result.data?.weeklyPct).toBe(51);
   });
 
-  test("reads the newest record across all agents", async () => {
-    await recordClaudeRateLimits("agent-old", {
-      five_hour: { used_percentage: 70, resets_at: NOW_S + 3600 },
-    }, NOW_MS - 600_000);
-    await recordClaudeRateLimits("agent-new", {
+  test("combines the windows of all agents: the current window, its highest usage", async () => {
+    await recordClaudeRateLimits("agent-a", {
       five_hour: { used_percentage: 20, resets_at: NOW_S + 3600 },
-    }, NOW_MS - 60_000);
-    await recordClaudeRateLimits("@system", {
-      five_hour: { used_percentage: 50, resets_at: NOW_S + 3600 },
+      seven_day: { used_percentage: 40, resets_at: NOW_S + 86_400 },
+    }, NOW_MS - 600_000);
+    await recordClaudeRateLimits("agent-b", {
+      five_hour: { used_percentage: 70, resets_at: NOW_S + 3600 },
     }, NOW_MS - 300_000);
+    await recordClaudeRateLimits("@system", {
+      seven_day: { used_percentage: 45, resets_at: NOW_S + 86_400 },
+    }, NOW_MS - 60_000);
 
     const result = await readClaudeUsage(new Date(NOW_MS));
     expect(result).toEqual({
-      data: { sessionPct: 20, weeklyPct: null, sessionReset: "1h 0m", weeklyReset: null },
+      data: { sessionPct: 70, weeklyPct: 45, sessionReset: "1h 0m", weeklyReset: "1d 0h" },
       error: false,
     });
+  });
+
+  test("an idle session's later write of old values does not win", async () => {
+    // The account is at 100% in the current window (agent-busy). An idle
+    // session last saw the previous window and a lower value in this one;
+    // its statusline runs later (a mode toggle, a refreshInterval) and so
+    // its record is the most recently written. The reading must stay 100%.
+    await recordClaudeRateLimits("agent-busy", {
+      five_hour: { used_percentage: 100, resets_at: NOW_S + 3600 },
+    }, NOW_MS - 600_000);
+    await recordClaudeRateLimits("agent-idle-old-window", {
+      five_hour: { used_percentage: 3, resets_at: NOW_S - 14_400 },
+    }, NOW_MS - 10_000);
+    await recordClaudeRateLimits("agent-idle-same-window", {
+      five_hour: { used_percentage: 2, resets_at: NOW_S + 3600 },
+    }, NOW_MS - 5_000);
+
+    const result = await readClaudeUsage(new Date(NOW_MS));
+    expect(result.data?.sessionPct).toBe(100);
+    expect(result.data?.sessionReset).toBe("1h 0m");
+  });
+
+  test("reports of one window with slightly different reset times are combined", async () => {
+    await recordClaudeRateLimits("agent-a", {
+      five_hour: { used_percentage: 90, resets_at: NOW_S + 3600 },
+    }, NOW_MS);
+    await recordClaudeRateLimits("agent-b", {
+      five_hour: { used_percentage: 4, resets_at: NOW_S + 3630 },
+    }, NOW_MS);
+
+    const result = await readClaudeUsage(new Date(NOW_MS));
+    expect(result.data?.sessionPct).toBe(90);
+    expect(result.data?.sessionReset).toBe("1h 0m");
+  });
+
+  test("does not rewrite the record when the windows are unchanged", async () => {
+    const windows = { five_hour: { used_percentage: 9, resets_at: NOW_S + 3600 } };
+    await recordClaudeRateLimits("agent-a", windows, NOW_MS);
+    await recordClaudeRateLimits("agent-a", windows, NOW_MS + 60_000);
+    expect((await Bun.file(recordPath("agent-a")).json()).updatedAt).toBe(NOW_S);
+
+    await recordClaudeRateLimits("agent-a", { five_hour: { used_percentage: 10, resets_at: NOW_S + 3600 } }, NOW_MS + 120_000);
+    expect((await Bun.file(recordPath("agent-a")).json()).updatedAt).toBe(NOW_S + 120);
+  });
+
+  test("deleteClaudeRateLimits removes the record and temp files only", async () => {
+    await recordClaudeRateLimits("agent-a", { five_hour: { used_percentage: 9, resets_at: NOW_S + 3600 } }, NOW_MS);
+    const dir = join(home, "agents", "agent-a");
+    await writeFile(join(dir, `${CLAUDE_RATE_LIMITS_FILE}.tmp.4242`), "{}");
+    await writeFile(join(dir, "outbox.jsonl"), "");
+
+    await deleteClaudeRateLimits(dir);
+
+    expect((await readdir(dir)).sort()).toEqual(["outbox.jsonl"]);
+    await deleteClaudeRateLimits(join(home, "agents", "missing")); // no folder: no error
   });
 
   test("skips unreadable records and folders without one", async () => {

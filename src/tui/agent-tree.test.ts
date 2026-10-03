@@ -1143,6 +1143,22 @@ describe("AgentTreeComponent favorites view", () => {
     expect(agentIds(tree)).toEqual(["mgr"]);
   });
 
+  test("orphans of a gone favorite manager still show", () => {
+    // `mgr` was retired/merged (not in the flat list) while still a favorite;
+    // ib does not cascade, so its children live on as orphans in the repo.
+    const child = agentIn("child", "alpha", "mgr");
+    const grandchild = agentIn("grandchild", "alpha", "child");
+    const unrelated = agentIn("unrelated", "alpha", null);
+    grandchild.meta.created_epoch = child.meta.created_epoch + 1;
+    unrelated.meta.created_epoch = child.meta.created_epoch + 2;
+    const repos = [{ name: "alpha", path: "/repos/alpha" }];
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(flattenAgentTree(buildAgentTree([child, grandchild, unrelated]), repos));
+    tree.toggleFavorite("mgr");
+    tree.setFavoritesOnly(true);
+    expect(agentIds(tree)).toEqual(["child", "grandchild"]);
+  });
+
   test("a favorite descendant does not bring in its ancestors or siblings", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());

@@ -424,11 +424,14 @@ export class AgentTreeComponent implements Component {
 
   /**
    * True if `agent` or any ancestor in its meta.manager chain IN THE SAME REPO
-   * is a favorite. The walk stops at a manager that is not in the flat list or
-   * that lives in another repo (the same-repoName rule as
-   * recomputeConnectorsForVisible). Agents a favorite spawns in other repos
-   * record only meta.spawned_by, never meta.manager, and are not followed. A
-   * visited set guards against meta.manager cycles.
+   * is a favorite. The walk stops at a manager that lives in another repo (the
+   * same-repoName rule as recomputeConnectorsForVisible). A manager that is
+   * gone from the flat list (retired/merged — ib does not cascade) still
+   * counts if its id is a favorite, so the orphans of a gone favorite manager
+   * keep showing; the walk ends there because the gone manager's own manager
+   * is unknown. Agents a favorite spawns in other repos record only
+   * meta.spawned_by, never meta.manager, and are not followed. A visited set
+   * guards against meta.manager cycles.
    */
   private hasFavoriteInChain(agent: Agent, byId: Map<string, Agent>): boolean {
     if (this.favoriteAgentIds.has(agent.id)) return true;
@@ -438,8 +441,9 @@ export class AgentTreeComponent implements Component {
       if (visited.has(mgr)) return false;
       visited.add(mgr);
       const parent = byId.get(mgr);
-      if (!parent || parent.repoName !== agent.repoName) return false;
+      if (parent && parent.repoName !== agent.repoName) return false;
       if (this.favoriteAgentIds.has(mgr)) return true;
+      if (!parent) return false;
       mgr = parent.meta.manager;
     }
     return false;

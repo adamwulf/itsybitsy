@@ -616,12 +616,44 @@ async function handleGeminiFailure(cache: GeminiCacheFile | null, now: number): 
 
 export const AGY_USAGE_TIMEOUT_MS = 10_000;
 
+/** Output that means agy wants the user to log in before it answers. */
+const AGY_LOGIN_MESSAGE = /\b(?:not logged in|not signed in|sign in|log in)\b/i;
+
+export interface GeminiUsageResult extends UsageResult {
+  /**
+   * True when the `agy` run looks like it is waiting on a login: it timed out
+   * (agy's OAuth flow blocks while it waits on the browser), or it failed with
+   * a login message in its output. Each new run opens another browser login
+   * window, so the caller should stop polling.
+   */
+  authFailed?: boolean;
+}
+
+/**
+ * Handle an agy run that finished without usage data. A login message in its
+ * output marks the failure as `authFailed`; any other failure only backs off.
+ */
+async function geminiFailure(
+  cache: GeminiCacheFile | null,
+  now: number,
+  output: { stdout: string; stderr: string } | null,
+): Promise<GeminiUsageResult> {
+  const result = await handleGeminiFailure(cache, now);
+  if (output && AGY_LOGIN_MESSAGE.test(`${output.stdout}\n${output.stderr}`)) {
+    return { ...result, authFailed: true };
+  }
+  return result;
+}
+
 /**
  * Fetch Gemini usage from `agy -p "/usage"`.
  * Caches at ~/.itsybitsy/gemini-usage-cache.json with 3-minute TTL.
  * Uses a lock file to rate-limit calls to once per 30s across processes.
  */
-export async function fetchGeminiUsage(nowDate?: Date): Promise<UsageResult> {
+export async function fetchGeminiUsage(
+  nowDate?: Date,
+  timeoutMs = AGY_USAGE_TIMEOUT_MS,
+): Promise<GeminiUsageResult> {
   await mkdir(ITSYBITSY_DIR, { recursive: true });
   const cache = await readGeminiCache();
   const now = Date.now();
@@ -646,29 +678,39 @@ export async function fetchGeminiUsage(nowDate?: Date): Promise<UsageResult> {
     return handleGeminiFailure(cache, now);
   }
 
-  const drain: Promise<{ stdout: string; exitCode: number } | null> = (async () => {
-    const stdout = proc.stdout ? await new Response(proc.stdout).text() : "";
+  const drain: Promise<{ stdout: string; stderr: string; exitCode: number } | null> = (async () => {
+    const [stdout, stderr] = await Promise.all([
+      proc.stdout ? new Response(proc.stdout).text() : "",
+      proc.stderr ? new Response(proc.stderr).text() : "",
+    ]);
     const exitCode = await proc.exited;
-    return { stdout, exitCode };
+    return { stdout, stderr, exitCode };
   })().catch(() => null);
 
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<null>((resolve) => {
-    timer = setTimeout(() => resolve(null), AGY_USAGE_TIMEOUT_MS);
+  const timeout = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), timeoutMs);
   });
 
   try {
     const res = await Promise.race([drain, timeout]);
     if (timer) clearTimeout(timer);
 
+    if (res === "timeout") {
+      // agy's OAuth flow blocks while it waits on the browser, so a hung run
+      // has most likely opened a login window already.
+      try { proc.kill?.(); } catch {}
+      return { ...(await handleGeminiFailure(cache, now)), authFailed: true };
+    }
+
     if (!res || res.exitCode !== 0) {
       try { proc.kill?.(); } catch {}
-      return handleGeminiFailure(cache, now);
+      return geminiFailure(cache, now, res);
     }
 
     const data = parseGeminiUsage(res.stdout, nowDate ?? new Date(now));
     if (data.sessionPct === null && data.weeklyPct === null) {
-      return handleGeminiFailure(cache, now);
+      return geminiFailure(cache, now, res);
     }
 
     await writeGeminiCache({ timestamp: Math.floor(now / 1000), data, nextBackoffMs: 60_000 });

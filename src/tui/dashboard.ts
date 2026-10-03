@@ -46,6 +46,7 @@ import { wordWrapLines, padLines, WordWrapCache, computeChromeSlice } from "./wr
 import type { ChromeSlice } from "./wrap";
 import { fetchCodexUsage, fetchGeminiUsage, fetchUsage } from "../usage";
 import type { UsageData } from "../usage";
+import { InjectionContext } from "../types";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
 import { AgentTreeComponent, nextRepoFilter, agentDisplayName } from "./agent-tree";
 import { TeamsTreeComponent, flattenTeamsTree } from "./teams-tree";
@@ -103,6 +104,12 @@ export type { Selection } from "./selection";
 
 const DIALOG_WIDTH = 80;
 const LEFT_WIDTH_STEP = 5;
+
+/**
+ * The usage fetchers behind the status-bar poll. Tests swap them so that a
+ * dashboard test never runs `agy`, reads the keychain, or calls the usage API.
+ */
+export const usageFetchCtx = new InjectionContext({ fetchUsage, fetchGeminiUsage, fetchCodexUsage });
 
 // findLastTwoSeparators moved to wrap.ts — re-exported for external consumers
 export { findLastTwoSeparators } from "./wrap";
@@ -339,6 +346,14 @@ function isAgyAgent(agent: Agent | null): boolean {
     return false;
   }
 }
+
+/**
+ * Whether the agent is an agy agent that is not stopped or archived — the
+ * only case in which the status bar polls `agy -p /usage`.
+ */
+function isLiveAgyAgent(agent: Agent): boolean {
+  return !agent.archived && agent.state !== "stopped" && isAgyAgent(agent);
+}
 // Codex input-chrome detection moved to wrap.ts (findCodexInputChromeLogical,
 // used by computeChromeSlice) — it now runs on UNWRAPPED logical lines.
 
@@ -377,6 +392,8 @@ class StatusBarComponent implements Component {
   claudeUsageError = false;
   geminiUsage: UsageData | null = null;
   geminiUsageError = false;
+  /** An agy usage run looked like a login prompt; gemini polling is off until restart. */
+  geminiLoginNeeded = false;
   codexUsage: UsageData | null = null;
   codexUsageError = false;
   version = "";
@@ -393,7 +410,9 @@ class StatusBarComponent implements Component {
       ? `  ${BOLD}${RED}[${this.errorCount} errors]${RESET}${DIM}`
       : "";
     const claudeUsageStr = this.formatUsage("claude", this.claudeUsage, this.claudeUsageError);
-    const geminiUsageStr = this.formatUsage("gemini", this.geminiUsage, this.geminiUsageError);
+    const geminiUsageStr = this.geminiLoginNeeded
+      ? `${YELLOW}⚠️  gemini: agy login needed${RESET}`
+      : this.formatUsage("gemini", this.geminiUsage, this.geminiUsageError);
     const codexUsageStr = this.formatUsage("codex", this.codexUsage, this.codexUsageError);
     const now = new Date();
     const timeStr = now.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -663,6 +682,15 @@ export class DashboardComponent implements Component {
   private lastSentNotice: string | null = null;
   private lastSentNoticeKind: "info" | "error" = "info";
   private usageTimer: ReturnType<typeof setInterval> | null = null;
+  /** Whether the latest agent update had a live agy agent; gates the agy usage poll. */
+  private hasLiveAgyAgent = false;
+  /**
+   * Set when an agy usage run looks like a login prompt. Each such run opens
+   * another browser login window, so agy usage polling stays off until
+   * `ib watch` restarts. Per process only.
+   */
+  private agyUsageAuthLatched = false;
+  private geminiUsageInFlight = false;
   /**
    * Periodic channel-pane refresh timer (§17.4). Mirrors the TmuxPoller cadence
    * (~1s): when a team is selected (channelPane.teamName !== null) the timer
@@ -1258,7 +1286,8 @@ export class DashboardComponent implements Component {
   }
 
   private refreshUsage() {
-    fetchUsage()
+    const fetchers = usageFetchCtx.fn;
+    fetchers.fetchUsage()
       .then((result) => {
         this.statusBar.claudeUsage = result.data;
         this.statusBar.claudeUsageError = result.error;
@@ -1269,18 +1298,9 @@ export class DashboardComponent implements Component {
         this.tui?.requestRender();
       });
 
-    fetchGeminiUsage()
-      .then((result) => {
-        this.statusBar.geminiUsage = result.data;
-        this.statusBar.geminiUsageError = result.error;
-        this.tui?.requestRender();
-      })
-      .catch(() => {
-        this.statusBar.geminiUsageError = true;
-        this.tui?.requestRender();
-      });
+    this.refreshGeminiUsage();
 
-    fetchCodexUsage()
+    fetchers.fetchCodexUsage()
       .then((result) => {
         this.statusBar.codexUsage = result.data;
         this.statusBar.codexUsageError = result.error;
@@ -1289,6 +1309,44 @@ export class DashboardComponent implements Component {
       .catch(() => {
         this.statusBar.codexUsageError = true;
         this.tui?.requestRender();
+      });
+  }
+
+  /**
+   * Poll agy usage, but only while a live agy agent exists: each `agy -p /usage`
+   * run can open a browser login window when agy cannot read its stored token.
+   * After a run that looks like a login prompt, the auth latch stops all later
+   * polls and the status bar shows "agy login needed" until `ib watch` restarts.
+   */
+  private refreshGeminiUsage() {
+    if (this.agyUsageAuthLatched) return;
+    if (!this.hasLiveAgyAgent) {
+      this.statusBar.geminiUsage = null;
+      this.statusBar.geminiUsageError = false;
+      this.tui?.requestRender();
+      return;
+    }
+    if (this.geminiUsageInFlight) return;
+    this.geminiUsageInFlight = true;
+    usageFetchCtx.fn.fetchGeminiUsage()
+      .then((result) => {
+        if (result.authFailed) {
+          this.agyUsageAuthLatched = true;
+          this.statusBar.geminiUsage = null;
+          this.statusBar.geminiUsageError = false;
+          this.statusBar.geminiLoginNeeded = true;
+        } else if (this.hasLiveAgyAgent) {
+          this.statusBar.geminiUsage = result.data;
+          this.statusBar.geminiUsageError = result.error;
+        }
+        this.tui?.requestRender();
+      })
+      .catch(() => {
+        if (this.hasLiveAgyAgent) this.statusBar.geminiUsageError = true;
+        this.tui?.requestRender();
+      })
+      .finally(() => {
+        this.geminiUsageInFlight = false;
       });
   }
 
@@ -1581,6 +1639,16 @@ export class DashboardComponent implements Component {
     const repoByAgent = new Map<string, string>();
     for (const agent of agents) repoByAgent.set(agent.id, agent.repoName);
     this.channelPane.agentRepoById = repoByAgent;
+
+    // The agy usage poll runs only while a live agy agent exists. startPolling()
+    // fires its first usage poll before the watcher's first update, so on a
+    // change re-poll now instead of on the next 4-minute tick (and clear the
+    // gemini status as soon as the last agy agent goes away).
+    const hasLiveAgyAgent = agents.some(isLiveAgyAgent);
+    if (hasLiveAgyAgent !== this.hasLiveAgyAgent) {
+      this.hasLiveAgyAgent = hasLiveAgyAgent;
+      if (this.usageTimer) this.refreshGeminiUsage();
+    }
 
     // Wire health reports to agent tree
     if (this.watcher) {

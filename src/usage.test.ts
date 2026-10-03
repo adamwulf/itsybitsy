@@ -1071,5 +1071,90 @@ describe("fetchGeminiUsage", () => {
     expect(result.error).toBe(true);
     expect(result.data?.sessionPct).toBe(7);
   });
+
+  function mockAgySpawnWithStderr(stdout: string, stderr: string, exitCode: number): void {
+    spawnCtx.set(() => ({
+      stdout: new Blob([stdout]).stream(),
+      stderr: new Blob([stderr]).stream(),
+      exited: Promise.resolve(exitCode),
+    }));
+  }
+
+  test("a successful run does not report authFailed", async () => {
+    mockAgySpawn(sampleAgyOutput, 0);
+
+    const result = await fetchGeminiUsage();
+    expect(result.error).toBe(false);
+    expect(result.authFailed).toBeUndefined();
+  });
+
+  test("a run that times out reports authFailed and is killed", async () => {
+    // agy's OAuth flow blocks while it waits on the browser: the run never
+    // exits on its own. kill() ends it so no stream is left open.
+    let killed = false;
+    spawnCtx.set(() => {
+      let closeStdout = () => {};
+      let closeStderr = () => {};
+      let exit = (_code: number) => {};
+      return {
+        stdout: new ReadableStream({ start(c) { closeStdout = () => c.close(); } }),
+        stderr: new ReadableStream({ start(c) { closeStderr = () => c.close(); } }),
+        exited: new Promise<number>((resolve) => { exit = resolve; }),
+        kill: () => {
+          killed = true;
+          closeStdout();
+          closeStderr();
+          exit(143);
+        },
+      };
+    });
+
+    const result = await fetchGeminiUsage(undefined, 20);
+    expect(result.authFailed).toBe(true);
+    expect(result.error).toBe(true);
+    expect(result.data).toBeNull();
+    expect(killed).toBe(true);
+  });
+
+  test("a failed run with a login message on stderr reports authFailed", async () => {
+    mockAgySpawnWithStderr("", "Error: not signed in. Run agy and sign in first.", 1);
+
+    const result = await fetchGeminiUsage();
+    expect(result.authFailed).toBe(true);
+    expect(result.error).toBe(true);
+  });
+
+  test("a run with a login message on stdout and no usage reports authFailed", async () => {
+    mockAgySpawnWithStderr("You are not logged in. Please Log In to continue.", "", 0);
+
+    const result = await fetchGeminiUsage();
+    expect(result.authFailed).toBe(true);
+    expect(result.error).toBe(true);
+  });
+
+  test("a non-zero exit without a login message does not report authFailed", async () => {
+    mockAgySpawnWithStderr("", "error: quota service unavailable (design in progress)", 1);
+
+    const result = await fetchGeminiUsage();
+    expect(result.error).toBe(true);
+    expect(result.authFailed).toBeUndefined();
+  });
+
+  test("a login message keeps the stale cache as the result", async () => {
+    const oldTimestamp = Math.floor((Date.now() - 240_000) / 1000);
+    await writeFile(
+      join(tmpDir, "gemini-usage-cache.json"),
+      JSON.stringify({
+        timestamp: oldTimestamp,
+        data: { sessionPct: 7, weeklyPct: 3, sessionReset: "1h", weeklyReset: "4d" },
+      }),
+    );
+    mockAgySpawnWithStderr("", "not logged in", 1);
+
+    const result = await fetchGeminiUsage();
+    expect(result.authFailed).toBe(true);
+    expect(result.error).toBe(true);
+    expect(result.data?.sessionPct).toBe(7);
+  });
 });
 

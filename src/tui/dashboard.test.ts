@@ -6,7 +6,8 @@ import { readAgentLog, readAgentLogWindow, readAgentPrompt, parseDenials } from 
 import type { Agent, AgentMeta, FlatEntry, PendingQuestion } from "../agents";
 import { stripAnsi } from "../parse-state";
 import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult, waitFor } from "../test-utils";
-import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow } from "./dashboard";
+import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow, usageFetchCtx } from "./dashboard";
+import type { GeminiUsageResult } from "../usage";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setNewAgentCallerMetaReader, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner, sealAgentRecord } from "../ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
@@ -4281,6 +4282,166 @@ describe("usage error indicator", () => {
     const lines = dashboard.render(160);
     const statusRows = lines.slice(-2).map(l => stripAnsi(l));
     expect(statusRows[1]).toContain("⚠️  gemini usage unavailable");
+  });
+});
+
+describe("agy usage polling", () => {
+  // Every `agy -p /usage` run can open a browser login window when agy cannot
+  // read its stored token, so the dashboard polls agy only while a live agy
+  // agent exists, and stops for good after a run that looks like a login prompt.
+  const GEMINI_DATA = { sessionPct: 5, weeklyPct: 10, sessionReset: "4h 0m", weeklyReset: "6d 0h" };
+
+  afterEach(() => {
+    usageFetchCtx.reset();
+  });
+
+  function makeAgyAgent(id: string, state = "running"): Agent {
+    const agent = makeAgent(id, "/repos/a");
+    agent.meta.model = "agy:gemini-3.7-flash-low";
+    setAgentState(agent, state);
+    return agent;
+  }
+
+  /**
+   * Install inert Claude/Codex fetchers and a gemini fetcher that returns
+   * `results` in order (the last one repeats). The returned object counts the
+   * gemini calls; the fetch is counted synchronously when it is called.
+   */
+  function installUsageFetchers(results: GeminiUsageResult[]): { gemini: number } {
+    const calls = { gemini: 0 };
+    usageFetchCtx.set({
+      fetchUsage: async () => ({ data: null, error: false }),
+      fetchCodexUsage: async () => ({ data: null, error: false }),
+      fetchGeminiUsage: async () => {
+        const result = results[Math.min(calls.gemini, results.length - 1)]!;
+        calls.gemini++;
+        return result;
+      },
+    });
+    return calls;
+  }
+
+  function update(dashboard: DashboardComponent, agents: Agent[]): void {
+    const flatList: FlatEntry[] = [
+      makeFlatRepoHeader("a", "/repos/a", agents.length > 0),
+      ...agents.map((a) => makeFlatAgent(a)),
+    ];
+    dashboard.onUpdate(agents, flatList, []);
+  }
+
+  function statusRows(dashboard: DashboardComponent): string[] {
+    return dashboard.render(180).slice(-2).map((l) => stripAnsi(l));
+  }
+
+  async function waitForGeminiIdle(dashboard: DashboardComponent): Promise<void> {
+    await waitFor(() => (dashboard as any).geminiUsageInFlight === false, {
+      timeoutMs: WAIT_TIMEOUT_MS,
+      message: "gemini usage fetch to settle",
+    });
+  }
+
+  test("does not poll agy usage when no agy agent exists", () => {
+    const calls = installUsageFetchers([{ data: GEMINI_DATA, error: false }]);
+    const dashboard = makeDashboard();
+    dashboard.startPolling();
+    update(dashboard, [makeAgent("agent-1", "/repos/a")]);
+    (dashboard as any).refreshUsage();
+
+    expect(calls.gemini).toBe(0);
+    expect((dashboard as any).statusBar.geminiUsage).toBeNull();
+    expect((dashboard as any).statusBar.geminiUsageError).toBe(false);
+    expect(statusRows(dashboard)[1]).not.toContain("gemini");
+  });
+
+  test("does not poll agy usage for stopped or archived agy agents", () => {
+    const calls = installUsageFetchers([{ data: GEMINI_DATA, error: false }]);
+    const dashboard = makeDashboard();
+    dashboard.startPolling();
+    const archived = makeAgyAgent("agy-archived");
+    archived.archived = true;
+    update(dashboard, [makeAgyAgent("agy-stopped", "stopped"), archived]);
+    (dashboard as any).refreshUsage();
+
+    expect(calls.gemini).toBe(0);
+    expect(statusRows(dashboard)[1]).not.toContain("gemini");
+  });
+
+  test("polls agy usage when a live agy agent exists", async () => {
+    const calls = installUsageFetchers([{ data: GEMINI_DATA, error: false }]);
+    const dashboard = makeDashboard();
+    dashboard.startPolling();
+    // startPolling's first usage poll runs before the watcher reports any agent.
+    expect(calls.gemini).toBe(0);
+
+    // The first update with a live agy agent polls at once, not on the next tick.
+    update(dashboard, [makeAgyAgent("agy-1", "waiting")]);
+    expect(calls.gemini).toBe(1);
+    await waitForGeminiIdle(dashboard);
+    expect(statusRows(dashboard)[1]).toContain("gemini session:5%");
+
+    // Each later tick polls again.
+    (dashboard as any).refreshUsage();
+    expect(calls.gemini).toBe(2);
+  });
+
+  test("clears the gemini status when the last live agy agent stops", async () => {
+    const calls = installUsageFetchers([{ data: GEMINI_DATA, error: false }]);
+    const dashboard = makeDashboard();
+    dashboard.startPolling();
+    update(dashboard, [makeAgyAgent("agy-1")]);
+    await waitForGeminiIdle(dashboard);
+    expect(statusRows(dashboard)[1]).toContain("gemini session:5%");
+
+    update(dashboard, [makeAgyAgent("agy-1", "stopped")]);
+    expect((dashboard as any).statusBar.geminiUsage).toBeNull();
+    expect((dashboard as any).statusBar.geminiUsageError).toBe(false);
+    expect(statusRows(dashboard)[1]).not.toContain("gemini");
+    expect(calls.gemini).toBe(1);
+  });
+
+  test("an auth failure stops agy polling and shows a login warning", async () => {
+    const calls = installUsageFetchers([
+      { data: null, error: true, authFailed: true },
+      { data: GEMINI_DATA, error: false },
+    ]);
+    const dashboard = makeDashboard();
+    dashboard.startPolling();
+    update(dashboard, [makeAgyAgent("agy-1")]);
+    expect(calls.gemini).toBe(1);
+    await waitForGeminiIdle(dashboard);
+
+    // Later ticks do not run agy again.
+    (dashboard as any).refreshUsage();
+    (dashboard as any).refreshUsage();
+    expect(calls.gemini).toBe(1);
+
+    // Neither does a new live agy agent.
+    update(dashboard, []);
+    update(dashboard, [makeAgyAgent("agy-2")]);
+    expect(calls.gemini).toBe(1);
+
+    const rows = statusRows(dashboard);
+    expect(rows[1]).toContain("⚠️  gemini: agy login needed");
+    expect(rows[1]).not.toContain("gemini usage unavailable");
+  });
+
+  test("a failure that is not an auth failure keeps polling", async () => {
+    const calls = installUsageFetchers([
+      { data: null, error: true },
+      { data: GEMINI_DATA, error: false },
+    ]);
+    const dashboard = makeDashboard();
+    dashboard.startPolling();
+    update(dashboard, [makeAgyAgent("agy-1")]);
+    await waitForGeminiIdle(dashboard);
+    expect(statusRows(dashboard)[1]).toContain("⚠️  gemini usage unavailable");
+
+    (dashboard as any).refreshUsage();
+    expect(calls.gemini).toBe(2);
+    await waitForGeminiIdle(dashboard);
+    const row = statusRows(dashboard)[1];
+    expect(row).toContain("gemini session:5%");
+    expect(row).not.toContain("agy login needed");
   });
 });
 

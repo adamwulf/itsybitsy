@@ -387,19 +387,25 @@ export class AgentTreeComponent implements Component {
       f.kind === "repo-header" || f.kind === "system-coordinator" || f.kind === "parent-header" || !f.agent.archived
     );
     if (this.repoFilter === "all" && !this.favoritesOnly) return base;
+    // Running-only and the Favorites view can hide intermediate agents, so
+    // they need an id → agent lookup over the whole flat list (the favorites
+    // ancestor walk and the connector rebuild). Build it once per read —
+    // visibleList is read many times per render.
+    const needsLookup = this.favoritesOnly || this.repoFilter === "running-only";
+    const allAgents = new Map<string, Agent>();
+    if (needsLookup) {
+      for (const e of this._flatList) {
+        if (e.kind === "agent") allAgents.set(e.agent.id, e.agent);
+      }
+    }
     // Favorites first, then the V filter (they compose).
-    let entries = this.favoritesOnly ? this.applyFavoritesFilter(base) : base;
+    let entries = this.favoritesOnly ? this.applyFavoritesFilter(base, allAgents) : base;
     if (this.repoFilter !== "all") entries = this.applyRepoFilter(entries);
     if (this.favoritesOnly) entries = this.dropAgentlessRepoHeaders(entries);
     entries = this.pruneEmptyParentHeaders(entries);
-    if (this.repoFilter !== "running-only" && !this.favoritesOnly) return entries;
-    // Running-only and the Favorites view can hide intermediate agents. The
-    // precomputed connectors reference those hidden ancestors, so rebuild them
+    if (!needsLookup) return entries;
+    // The precomputed connectors reference hidden ancestors, so rebuild them
     // against only the visible subset.
-    const allAgents = new Map<string, Agent>();
-    for (const e of this._flatList) {
-      if (e.kind === "agent") allAgents.set(e.agent.id, e.agent);
-    }
     return recomputeConnectorsForVisible(entries, allAgents);
   }
 
@@ -408,12 +414,9 @@ export class AgentTreeComponent implements Component {
    * favorite ancestor, or is the selected row; keep the system coordinator
    * only while it is selected. Headers pass through — dropAgentlessRepoHeaders
    * and pruneEmptyParentHeaders remove the empty ones after the V filter ran.
+   * `byId` maps every agent id in the flat list to its agent.
    */
-  private applyFavoritesFilter(entries: FlatEntry[]): FlatEntry[] {
-    const byId = new Map<string, Agent>();
-    for (const e of this._flatList) {
-      if (e.kind === "agent") byId.set(e.agent.id, e.agent);
-    }
+  private applyFavoritesFilter(entries: FlatEntry[], byId: Map<string, Agent>): FlatEntry[] {
     const selectedId = this.hasSelection ? this.selectedId : null;
     return entries.filter((f) => {
       if (f.kind === "system-coordinator") return selectedId === SYSTEM_COORDINATOR_ID;

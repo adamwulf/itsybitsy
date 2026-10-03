@@ -4310,7 +4310,7 @@ describe("agy usage polling", () => {
   function installUsageFetchers(results: GeminiUsageResult[]): { gemini: number } {
     const calls = { gemini: 0 };
     usageFetchCtx.set({
-      fetchUsage: async () => ({ data: null, error: false }),
+      readClaudeUsage: async () => ({ data: null, error: false }),
       fetchCodexUsage: async () => ({ data: null, error: false }),
       fetchGeminiUsage: async () => {
         const result = results[Math.min(calls.gemini, results.length - 1)]!;
@@ -4340,7 +4340,7 @@ describe("agy usage polling", () => {
   function installDeferredGeminiFetcher(): { calls: number; resolve: (result: GeminiUsageResult) => void } {
     const state = { calls: 0, resolve: (_result: GeminiUsageResult) => {} };
     usageFetchCtx.set({
-      fetchUsage: async () => ({ data: null, error: false }),
+      readClaudeUsage: async () => ({ data: null, error: false }),
       fetchCodexUsage: async () => ({ data: null, error: false }),
       fetchGeminiUsage: () => {
         state.calls++;

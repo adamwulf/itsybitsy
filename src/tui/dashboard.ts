@@ -44,8 +44,9 @@ import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { installTerminalCleanup } from "./terminal-cleanup";
 import { wordWrapLines, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
 import type { ChromeSlice } from "./wrap";
-import { fetchCodexUsage, fetchGeminiUsage, fetchUsage } from "../usage";
+import { fetchCodexUsage, fetchGeminiUsage } from "../usage";
 import type { UsageData } from "../usage";
+import { readClaudeUsage } from "../claude-rate-limits";
 import { InjectionContext } from "../types";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
 import { AgentTreeComponent, nextRepoFilter, agentDisplayName } from "./agent-tree";
@@ -107,9 +108,9 @@ const LEFT_WIDTH_STEP = 5;
 
 /**
  * The usage fetchers behind the status-bar poll. Tests swap them so that a
- * dashboard test never runs `agy`, reads the keychain, or calls the usage API.
+ * dashboard test never runs `agy` or reads the real ~/.itsybitsy and ~/.codex.
  */
-export const usageFetchCtx = new InjectionContext({ fetchUsage, fetchGeminiUsage, fetchCodexUsage });
+export const usageFetchCtx = new InjectionContext({ readClaudeUsage, fetchGeminiUsage, fetchCodexUsage });
 
 // findLastTwoSeparators moved to wrap.ts — re-exported for external consumers
 export { findLastTwoSeparators } from "./wrap";
@@ -1287,7 +1288,7 @@ export class DashboardComponent implements Component {
 
   private refreshUsage() {
     const fetchers = usageFetchCtx.fn;
-    fetchers.fetchUsage()
+    fetchers.readClaudeUsage()
       .then((result) => {
         this.statusBar.claudeUsage = result.data;
         this.statusBar.claudeUsageError = result.error;

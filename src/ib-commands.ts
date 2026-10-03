@@ -80,10 +80,12 @@ import { isCodexBackedCli, parseModel, mapEffortForCodex, type AgentCli } from "
 import { claudeProjectDirFor, claudeScratchpadDirFor, agyStateDirFor } from "./hooks/paths-table";
 import {
   buildHooksBlock,
+  buildStatusLine,
   COORDINATOR_INTERCEPT_MATCHER,
   REGULAR_AGENT_DEFAULT_ALLOW,
   REGULAR_AGENT_DEFAULT_DENY,
   REGULAR_AGENT_INTERCEPT_MATCHER,
+  resolveUserStatusLine,
 } from "./settings-builder";
 import { listRepos, repoDisplayName, type RepoEntry } from "./registry";
 import { resolveNoWorktreeCaller, type NoWorktreeCaller } from "./no-worktree-caller";
@@ -5822,6 +5824,7 @@ async function buildAgentSettings(
       identityDependentHooksIncludeAgentId: opts.explicitAgentIdentity === true,
       includeTimestamp: true,
     }),
+    statusLine: buildStatusLine(agentId, await resolveUserStatusLine(repoPath)),
   };
 
   return JSON.stringify(result, null, 2);
@@ -5858,6 +5861,7 @@ async function ensureIsolatedClaudeSettings(
         sessionStartIncludesAgentId: true,
         identityDependentHooksIncludeAgentId: true,
       }),
+      statusLine: buildStatusLine(agentId, await resolveUserStatusLine(repoPath)),
     }, null, 2);
   } else {
     // This is the same legacy fallback used by detectRole/metaCanSpawnChildren:
@@ -7371,6 +7375,7 @@ export async function newAgent(
           sessionStartIncludesAgentId: true,
           identityDependentHooksIncludeAgentId: true,
         }),
+        statusLine: buildStatusLine(id, await resolveUserStatusLine(rootRepoPath)),
       };
       await mkdir(join(agentDir, ".claude"), { recursive: true });
       await Bun.write(

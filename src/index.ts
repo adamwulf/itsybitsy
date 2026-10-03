@@ -3064,6 +3064,18 @@ export async function main() {
           await withHookLogging("inject-timestamp", agentDir, stdin, () => hookInjectTimestamp(stdin, undefined, agentIdArg));
           break;
         }
+        case "statusline": {
+          // Claude Code statusLine command, not a hook event: it runs on every
+          // statusline update, so it skips withHookLogging. It records the
+          // input's rate_limits, then prints the user's own statusline.
+          const { hookStatusline } = await import("./hooks/statusline");
+          const stdin = await new Response(Bun.stdin.stream()).text();
+          const { output, exitCode } = await hookStatusline(stdin, args[2]);
+          // Bun.write (not console.log): the output is passed through
+          // byte-for-byte, with no added newline, and is flushed before exit.
+          if (output) await Bun.write(Bun.stdout, output);
+          process.exit(exitCode);
+        }
         case "codex-pre-tool-use":
         case "codex-session-start":
         case "codex-user-prompt-submit":

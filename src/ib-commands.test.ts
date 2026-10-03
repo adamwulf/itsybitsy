@@ -10577,6 +10577,26 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(settings.spinnerTipsEnabled).toBe(false);
   });
 
+  test("wraps the project's statusLine in ib's statusline command", async () => {
+    // `ib hooks statusline <id>` records Claude Code's rate_limits for the
+    // usage display, then runs the project's statusline; its display keys stay.
+    await mkdir(join(tempDir, ".claude"), { recursive: true });
+    await Bun.write(join(tempDir, ".claude", "settings.json"), JSON.stringify({
+      statusLine: { type: "command", command: "./project-statusline.sh", padding: 2 },
+    }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-statusline" });
+
+    const settingsPath = join(agentsDir, "test-statusline", "repo", ".claude", "settings.local.json");
+    const settings = await Bun.file(settingsPath).json();
+    expect(settings.statusLine).toEqual({
+      type: "command",
+      command: "ib hooks statusline test-statusline",
+      padding: 2,
+    });
+  });
+
   test("does not inherit deny list from base settings.json", async () => {
     // Even if settings.json has a restrictive deny list, agents should not inherit it
     await mkdir(join(tempDir, ".claude"), { recursive: true });

@@ -532,6 +532,11 @@ describe("ensureSystemCoordinator", () => {
 
     expect(settings.spinnerTipsEnabled).toBe(false);
 
+    // The statusline records Claude plan usage for `ib watch`, then runs the
+    // user's own statusline (src/hooks/statusline.ts).
+    expect(settings.statusLine.type).toBe("command");
+    expect(settings.statusLine.command).toBe("ib hooks statusline @system");
+
     // Stop hook is intentionally absent — system coordinator has its own
     // state detection in detectSystemCoordinatorState.
     expect(settings.hooks.Stop).toBeUndefined();

@@ -1081,7 +1081,9 @@ describe("fetchGeminiUsage", () => {
   }
 
   test("a successful run does not report authFailed", async () => {
-    mockAgySpawn(sampleAgyOutput, 0);
+    // Login words in a run that parses must not flag it: the login check runs
+    // only when the run gives no usage data.
+    mockAgySpawn(`${sampleAgyOutput}\nTo switch accounts, log in again.`, 0);
 
     const result = await fetchGeminiUsage();
     expect(result.error).toBe(false);

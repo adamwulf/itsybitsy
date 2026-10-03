@@ -4333,6 +4333,25 @@ describe("agy usage polling", () => {
     return dashboard.render(180).slice(-2).map((l) => stripAnsi(l));
   }
 
+  /**
+   * Like installUsageFetchers, but each gemini fetch stays pending until the
+   * test calls `resolve` (which settles the most recent fetch).
+   */
+  function installDeferredGeminiFetcher(): { calls: number; resolve: (result: GeminiUsageResult) => void } {
+    const state = { calls: 0, resolve: (_result: GeminiUsageResult) => {} };
+    usageFetchCtx.set({
+      fetchUsage: async () => ({ data: null, error: false }),
+      fetchCodexUsage: async () => ({ data: null, error: false }),
+      fetchGeminiUsage: () => {
+        state.calls++;
+        return new Promise<GeminiUsageResult>((resolve) => {
+          state.resolve = resolve;
+        });
+      },
+    });
+    return state;
+  }
+
   async function waitForGeminiIdle(dashboard: DashboardComponent): Promise<void> {
     await waitFor(() => (dashboard as any).geminiUsageInFlight === false, {
       timeoutMs: WAIT_TIMEOUT_MS,
@@ -4397,6 +4416,45 @@ describe("agy usage polling", () => {
     expect((dashboard as any).statusBar.geminiUsageError).toBe(false);
     expect(statusRows(dashboard)[1]).not.toContain("gemini");
     expect(calls.gemini).toBe(1);
+  });
+
+  test("drops a result that arrives after the last live agy agent stopped", async () => {
+    const pending = installDeferredGeminiFetcher();
+    const dashboard = makeDashboard();
+    dashboard.startPolling();
+    update(dashboard, [makeAgyAgent("agy-1")]);
+    expect(pending.calls).toBe(1);
+
+    update(dashboard, [makeAgyAgent("agy-1", "stopped")]);
+    pending.resolve({ data: GEMINI_DATA, error: false });
+    await waitForGeminiIdle(dashboard);
+
+    expect((dashboard as any).statusBar.geminiUsage).toBeNull();
+    expect((dashboard as any).statusBar.geminiUsageError).toBe(false);
+    expect(statusRows(dashboard)[1]).not.toContain("gemini");
+  });
+
+  test("does not start a second agy run while one is in flight", async () => {
+    const pending = installDeferredGeminiFetcher();
+    const dashboard = makeDashboard();
+    dashboard.startPolling();
+    update(dashboard, [makeAgyAgent("agy-1")]);
+    expect(pending.calls).toBe(1);
+
+    // A tick and a live-agy flip while the first run is pending start no run.
+    (dashboard as any).refreshUsage();
+    update(dashboard, []);
+    update(dashboard, [makeAgyAgent("agy-2")]);
+    expect(pending.calls).toBe(1);
+
+    // A live agy agent exists again, so the pending result is shown.
+    pending.resolve({ data: GEMINI_DATA, error: false });
+    await waitForGeminiIdle(dashboard);
+    expect(statusRows(dashboard)[1]).toContain("gemini session:5%");
+
+    // Once the run settles, the next tick polls again.
+    (dashboard as any).refreshUsage();
+    expect(pending.calls).toBe(2);
   });
 
   test("an auth failure stops agy polling and shows a login warning", async () => {

@@ -72,10 +72,12 @@ export function agentDisplayName(agent: Agent): string {
  * agent-row renderer (this tree, the Teams tree's member rows, and the
  * pane-manager TREE/REPO rows) puts it between the icon and the name —
  * `<icon> ★ <name>` — and includes it in its width math. Empty for a
- * non-favorite.
+ * non-favorite. On a selected (REVERSE) row the star is uncolored: reversed
+ * yellow would paint a gold cell, so it takes the row's own colors instead.
  */
-export function favoriteStar(isFavorite: boolean): string {
-  return isFavorite ? `${YELLOW}★${RESET} ` : "";
+export function favoriteStar(isFavorite: boolean, selected: boolean = false): string {
+  if (!isFavorite) return "";
+  return selected ? "★ " : `${YELLOW}★${RESET} `;
 }
 
 /** Compute the visible width of the name prefix (connector + icon + star + repo/id) for an agent row */
@@ -112,7 +114,7 @@ export function formatAgentRow(
 
   const nameColor = hasQuestion ? RED : "";
   const nameEnd = hasQuestion ? RESET : "";
-  const namePrefix = `${connector}${orphanedPrefix}${icon} ${favoriteStar(isFavorite)}${nameColor}${agentDisplayName(agent)}${nameEnd}`;
+  const namePrefix = `${connector}${orphanedPrefix}${icon} ${favoriteStar(isFavorite, selected)}${nameColor}${agentDisplayName(agent)}${nameEnd}`;
   const namePad = Math.max(0, nameColWidth - visibleWidth(namePrefix));
   const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, stateColWidth - state.length))}`;
   const paddedAge = agent.age.padStart(AGE_COL_WIDTH);

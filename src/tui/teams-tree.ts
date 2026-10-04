@@ -138,7 +138,7 @@ export function formatTeamMemberRow(
   const state = displayState(agent.state);
   const stateColor = getStateColors()[state] ?? getStateColors().unknown;
 
-  const namePrefix = `${connector}${orphanedPrefix}${icon} ${favoriteStar(isFavorite)}${repoQualifiedName(agent)}`;
+  const namePrefix = `${connector}${orphanedPrefix}${icon} ${favoriteStar(isFavorite, selected)}${repoQualifiedName(agent)}`;
   const namePad = Math.max(0, nameColWidth - visibleWidth(namePrefix));
   const coloredState = `${stateColor}${state}${RESET}${" ".repeat(Math.max(0, stateColWidth - state.length))}`;
   const paddedAge = agent.age.padStart(AGE_COL_WIDTH);

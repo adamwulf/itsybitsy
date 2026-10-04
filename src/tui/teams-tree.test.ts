@@ -308,11 +308,13 @@ describe("teams-tree favorite star", () => {
     expect(favLine.indexOf("running")).toBe(plainLine.indexOf("running"));
   });
 
-  test("a selected favorite member row stays reversed across the star and fills the width", () => {
+  test("a selected favorite member row has an uncolored star and fills the width", () => {
     const agent = makeAgent("a1", "api");
     const row = formatTeamMemberRow(agent, "  ", true, 40, 20, 8, true);
     expect(row.startsWith(REVERSE)).toBe(true);
-    expect(row).toContain(`★${RESET}${REVERSE}`);
+    // No yellow under REVERSE (that paints a gold cell) — the star takes the row colors.
+    expect(row).toContain("◆ ★ api/a1");
+    expect(row).not.toContain(YELLOW);
     expect(row.endsWith(RESET)).toBe(true);
     expect(visibleWidth(row)).toBe(40);
   });

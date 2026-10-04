@@ -1407,9 +1407,10 @@ describe("agent-tree helpers", () => {
 
   test("the star keeps the question-red name and works on a selected row", () => {
     const row = formatAgentRow(makeAgent("agent-x"), "", true, 40, 20, 8, true, true);
-    // Selected: starts REVERSE, the star's RESET re-enters REVERSE, full width.
+    // Selected: starts REVERSE, the star is uncolored (no yellow under REVERSE), full width.
     expect(row.startsWith(REVERSE)).toBe(true);
-    expect(row).toContain(`★${RESET}${REVERSE} ${RED}agent-x`);
+    expect(row).toContain(`★ ${RED}agent-x`);
+    expect(row).not.toContain(YELLOW);
     expect(row.endsWith(RESET)).toBe(true);
     expect(visibleWidth(row)).toBe(40);
   });
@@ -1436,7 +1437,8 @@ describe("agent-tree helpers", () => {
     tree.moveSelection(1);
     const line = tree.render(50).find((l) => l.includes("agent-fav"))!;
     expect(line.startsWith(REVERSE)).toBe(true);
-    expect(line).toContain(`★${RESET}${REVERSE}`);
+    expect(line).toContain("◆ ★ agent-fav");
+    expect(line).not.toContain(YELLOW);
     expect(visibleWidth(line)).toBe(50);
   });
 

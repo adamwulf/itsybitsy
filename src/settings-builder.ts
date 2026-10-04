@@ -6,7 +6,9 @@
  * three callers honest about what's actually different.
  */
 
+import { join } from "path";
 import { ensureAgentTypesDir, loadAgentType } from "./agent-types";
+import { userHome } from "./home";
 import { ensureSlashCommands } from "./slash-commands";
 
 export interface PermissionLayer {
@@ -194,6 +196,64 @@ export function buildHooksBlock(opts: {
     hooks.SessionStart = [{ hooks: [{ type: "command", command: sessionStartCmd }] }];
   }
   return hooks;
+}
+
+/** The command prefix of ib's statusLine wrapper (src/hooks/statusline.ts). */
+export const STATUSLINE_HOOK_COMMAND = "ib hooks statusline";
+
+/** A Claude Code `statusLine` setting of type "command" (plus display keys such as `padding`). */
+export interface CommandStatusLine {
+  type: "command";
+  command: string;
+  [key: string]: unknown;
+}
+
+/**
+ * A `statusLine` setting value as a command statusline, or null when it is
+ * not one. ib's own wrapper is also null, so it can never run itself.
+ */
+export function parseCommandStatusLine(value: unknown): CommandStatusLine | null {
+  const setting = value as Record<string, unknown> | null | undefined;
+  if (!setting || typeof setting !== "object") return null;
+  if (setting.type !== "command" || typeof setting.command !== "string") return null;
+  if (setting.command.trim() === "" || setting.command.includes(STATUSLINE_HOOK_COMMAND)) return null;
+  return setting as CommandStatusLine;
+}
+
+/**
+ * The statusLine a Claude session in `projectDir` would use without ib: the
+ * project's `.claude/settings.json` statusLine, else the user's
+ * `~/.claude/settings.json` one. `.claude/settings.local.json` is skipped for
+ * the reason buildAgentSettings skips it (it can belong to a coordinator).
+ */
+export async function resolveUserStatusLine(projectDir: string | null): Promise<CommandStatusLine | null> {
+  const paths = [
+    ...(projectDir ? [join(projectDir, ".claude", "settings.json")] : []),
+    join(userHome(), ".claude", "settings.json"),
+  ];
+  for (const path of paths) {
+    try {
+      const file = Bun.file(path);
+      if (!(await file.exists())) continue;
+      const settings = (await file.json()) as { statusLine?: unknown } | null;
+      if (settings?.statusLine === undefined) continue;
+      return parseCommandStatusLine(settings.statusLine);
+    } catch {
+      // Unreadable or invalid settings: try the next layer.
+    }
+  }
+  return null;
+}
+
+/**
+ * The `statusLine` of every Claude session ib launches. `ib hooks statusline`
+ * records Claude Code's `rate_limits` for ib's usage display
+ * (src/claude-rate-limits.ts), then runs `inner` — the statusline the session
+ * would show without ib — so the footer looks the same. The display keys of
+ * `inner` (`padding`, `refreshInterval`, ...) are kept for the same reason.
+ */
+export function buildStatusLine(agentId: string, inner: CommandStatusLine | null): Record<string, unknown> {
+  return { ...(inner ?? {}), type: "command", command: `${STATUSLINE_HOOK_COMMAND} ${agentId}` };
 }
 
 /** Intercept-task matcher for coordinators (system + per-repo) — Bash is included

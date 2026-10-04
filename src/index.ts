@@ -837,6 +837,7 @@ const COMMAND_HELP: Record<string, string> = {
     "\n" +
     "Internal hook entrypoints (invoked by Claude Code, not directly by users):\n" +
     "  intercept-task, session-start, main-path, inject-status, inject-timestamp,\n" +
+    "  statusline,\n" +
     "  codex-pre-tool-use, codex-session-start, codex-user-prompt-submit, codex-stop,\n" +
     "  agy-pre-tool-use, agy-pre-invocation, agy-stop",
   "hooks install":
@@ -876,6 +877,11 @@ const COMMAND_HELP: Record<string, string> = {
   "hooks inject-timestamp":
     "Usage: ib hooks inject-timestamp\n" +
     "  Internal: hook entrypoint that injects a current-timestamp marker.",
+  "hooks statusline":
+    "Usage: ib hooks statusline <agent-id>\n" +
+    "  Internal: Claude Code statusLine command for sessions ib launches. Records\n" +
+    "  the input's rate_limits for the ib watch usage display, then prints the\n" +
+    "  user's own statusline.",
   "hooks codex-pre-tool-use":
     "Usage: ib hooks codex-pre-tool-use <agent-id> [--dry-run]\n" +
     "  Internal: codex PreToolUse hook entrypoint. --dry-run is used by the\n" +
@@ -3064,6 +3070,18 @@ export async function main() {
           await withHookLogging("inject-timestamp", agentDir, stdin, () => hookInjectTimestamp(stdin, undefined, agentIdArg));
           break;
         }
+        case "statusline": {
+          // Claude Code statusLine command, not a hook event: it runs on every
+          // statusline update, so it skips withHookLogging. It records the
+          // input's rate_limits, then prints the user's own statusline.
+          const { hookStatusline } = await import("./hooks/statusline");
+          const stdin = await new Response(Bun.stdin.stream()).text();
+          const { output, exitCode } = await hookStatusline(stdin, args[2]);
+          // Bun.write (not console.log): the output is passed through
+          // byte-for-byte, with no added newline, and is flushed before exit.
+          if (output) await Bun.write(Bun.stdout, output);
+          process.exit(exitCode);
+        }
         case "codex-pre-tool-use":
         case "codex-session-start":
         case "codex-user-prompt-submit":
@@ -3134,7 +3152,7 @@ export async function main() {
         }
         default:
           console.error(`Unknown hooks subcommand: ${subcommand}`);
-          console.error("Available: intercept-task, session-start, main-path, inject-status, inject-timestamp, codex-pre-tool-use, codex-session-start, codex-user-prompt-submit, codex-stop, agy-pre-tool-use, agy-pre-invocation, agy-stop, install, uninstall, status, intercept-install, intercept-uninstall, intercept-status");
+          console.error("Available: intercept-task, session-start, main-path, inject-status, inject-timestamp, statusline, codex-pre-tool-use, codex-session-start, codex-user-prompt-submit, codex-stop, agy-pre-tool-use, agy-pre-invocation, agy-stop, install, uninstall, status, intercept-install, intercept-uninstall, intercept-status");
           process.exit(1);
       }
       break;

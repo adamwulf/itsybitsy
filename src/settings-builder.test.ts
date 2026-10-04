@@ -1,5 +1,74 @@
-import { test, expect, describe } from "bun:test";
-import { buildHooksBlock, COORDINATOR_INTERCEPT_MATCHER, REGULAR_AGENT_INTERCEPT_MATCHER } from "./settings-builder";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { join } from "path";
+import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import {
+  buildHooksBlock,
+  buildStatusLine,
+  COORDINATOR_INTERCEPT_MATCHER,
+  parseCommandStatusLine,
+  REGULAR_AGENT_INTERCEPT_MATCHER,
+  resolveUserStatusLine,
+} from "./settings-builder";
+import { setUserHome, resetUserHome } from "./home";
+
+describe("statusLine wrapper", () => {
+  test("buildStatusLine runs ib's wrapper and keeps the user's display keys", () => {
+    const inner = { type: "command" as const, command: "~/.claude/statusline-command.sh", padding: 0, refreshInterval: 5 };
+    expect(buildStatusLine("agent-a", inner)).toEqual({
+      type: "command",
+      command: "ib hooks statusline agent-a",
+      padding: 0,
+      refreshInterval: 5,
+    });
+    expect(buildStatusLine("@system", null)).toEqual({ type: "command", command: "ib hooks statusline @system" });
+  });
+
+  test("parseCommandStatusLine accepts only a non-empty command that is not ib's wrapper", () => {
+    expect(parseCommandStatusLine({ type: "command", command: "my-statusline" })).toEqual({ type: "command", command: "my-statusline" });
+    expect(parseCommandStatusLine({ type: "command", command: "ib hooks statusline agent-a" })).toBeNull();
+    expect(parseCommandStatusLine({ type: "command", command: "  " })).toBeNull();
+    expect(parseCommandStatusLine({ type: "static", command: "x" })).toBeNull();
+    expect(parseCommandStatusLine("my-statusline")).toBeNull();
+    expect(parseCommandStatusLine(undefined)).toBeNull();
+  });
+
+  describe("resolveUserStatusLine", () => {
+    let home: string;
+    let projectDir: string;
+
+    beforeEach(async () => {
+      home = await mkdtemp(join(tmpdir(), "statusline-resolve-test-"));
+      projectDir = join(home, "project");
+      await mkdir(join(projectDir, ".claude"), { recursive: true });
+      await mkdir(join(home, ".claude"), { recursive: true });
+      setUserHome(home);
+    });
+
+    afterEach(async () => {
+      resetUserHome();
+      await rm(home, { recursive: true, force: true });
+    });
+
+    test("uses the project's statusLine before the user's", async () => {
+      await writeFile(join(home, ".claude", "settings.json"), JSON.stringify({ statusLine: { type: "command", command: "user" } }));
+      await writeFile(join(projectDir, ".claude", "settings.json"), JSON.stringify({ statusLine: { type: "command", command: "project" } }));
+      expect((await resolveUserStatusLine(projectDir))?.command).toBe("project");
+      expect((await resolveUserStatusLine(null))?.command).toBe("user");
+    });
+
+    test("falls back to the user's statusLine when the project sets none", async () => {
+      await writeFile(join(home, ".claude", "settings.json"), JSON.stringify({ statusLine: { type: "command", command: "user" } }));
+      await writeFile(join(projectDir, ".claude", "settings.json"), JSON.stringify({ permissions: {} }));
+      expect((await resolveUserStatusLine(projectDir))?.command).toBe("user");
+    });
+
+    test("ignores settings.local.json and returns null when no statusLine is set", async () => {
+      await writeFile(join(projectDir, ".claude", "settings.local.json"), JSON.stringify({ statusLine: { type: "command", command: "local" } }));
+      expect(await resolveUserStatusLine(projectDir)).toBeNull();
+    });
+  });
+});
 
 describe("buildHooksBlock — byte-identical with prior inline literals", () => {
   test("system coordinator (no Stop, intercept w/ Bash, sessionStart w/ agentId)", () => {

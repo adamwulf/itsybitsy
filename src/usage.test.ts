@@ -1,9 +1,8 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { formatResetTime, parseUsageResponse, parseCodexRateLimits, parseGeminiUsage, fetchCodexUsage, fetchGeminiUsage, fetchUsage, rankTokenCandidates, setTestDir, resetTestDir, fetchCtx, spawnCtx, type UsageResult } from "./usage";
+import { formatResetTime, parseCodexRateLimits, parseGeminiUsage, fetchCodexUsage, fetchGeminiUsage, setTestDir, resetTestDir, spawnCtx } from "./usage";
 import { join } from "path";
 import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
-import { mockFetch as createMockFetch } from "./test-utils";
 
 describe("formatResetTime", () => {
   const now = new Date("2025-12-12T16:15:00Z");
@@ -34,68 +33,6 @@ describe("formatResetTime", () => {
 
   test("formats exactly 1 hour", () => {
     expect(formatResetTime("2025-12-12T17:15:00Z", now)).toBe("1h 0m");
-  });
-});
-
-describe("parseUsageResponse", () => {
-  const now = new Date("2025-12-12T16:15:00Z");
-
-  test("parses full response", () => {
-    const result = parseUsageResponse(
-      {
-        five_hour: { utilization: 57.3, resets_at: "2025-12-12T16:59:00Z" },
-        seven_day: { utilization: 35.1, resets_at: "2025-12-15T00:00:00Z" },
-      },
-      now,
-    );
-    expect(result).toEqual({
-      sessionPct: 57,
-      weeklyPct: 35,
-      sessionReset: "44m",
-      weeklyReset: "2d 7h",
-    });
-  });
-
-  test("rounds utilization to integer", () => {
-    const result = parseUsageResponse(
-      {
-        five_hour: { utilization: 99.9, resets_at: "2025-12-12T17:00:00Z" },
-        seven_day: { utilization: 0.4, resets_at: "2025-12-15T00:00:00Z" },
-      },
-      now,
-    );
-    expect(result.sessionPct).toBe(100);
-    expect(result.weeklyPct).toBe(0);
-  });
-
-  test("handles missing five_hour", () => {
-    const result = parseUsageResponse(
-      { seven_day: { utilization: 50, resets_at: "2025-12-15T00:00:00Z" } },
-      now,
-    );
-    expect(result.sessionPct).toBeNull();
-    expect(result.sessionReset).toBeNull();
-    expect(result.weeklyPct).toBe(50);
-  });
-
-  test("handles missing seven_day", () => {
-    const result = parseUsageResponse(
-      { five_hour: { utilization: 50, resets_at: "2025-12-12T17:00:00Z" } },
-      now,
-    );
-    expect(result.weeklyPct).toBeNull();
-    expect(result.weeklyReset).toBeNull();
-    expect(result.sessionPct).toBe(50);
-  });
-
-  test("handles empty response", () => {
-    const result = parseUsageResponse({}, now);
-    expect(result).toEqual({
-      sessionPct: null,
-      weeklyPct: null,
-      sessionReset: null,
-      weeklyReset: null,
-    });
   });
 });
 
@@ -171,312 +108,6 @@ describe("parseCodexRateLimits", () => {
   });
 });
 
-describe("fetchUsage", () => {
-  let tmpDir: string;
-
-  const apiResponse = {
-    five_hour: { utilization: 42.0, resets_at: "2025-12-12T20:00:00Z" },
-    seven_day: { utilization: 25.0, resets_at: "2025-12-18T00:00:00Z" },
-  };
-
-  beforeEach(async () => {
-    tmpDir = await mkdtemp(join(tmpdir(), "usage-test-"));
-    setTestDir(tmpDir);
-    // The credential reader always consults the Keychain too. Keep these
-    // tests hermetic: no real `security` lookups on the developer's Mac.
-    spawnCtx.set(() => {
-      throw new Error("keychain unavailable in test");
-    });
-  });
-
-  afterEach(async () => {
-    resetTestDir();
-    fetchCtx.reset();
-    spawnCtx.reset();
-    await rm(tmpDir, { recursive: true, force: true });
-  });
-
-  /** Write a credentials file so readAccessTokens succeeds. */
-  async function writeCredentials(token = "test-token"): Promise<void> {
-    const credPath = join(tmpDir, "credentials.json");
-    await Bun.write(credPath, JSON.stringify({ claudeAiOauth: { accessToken: token } }));
-  }
-
-  /** Write a cache file with the given timestamp (epoch seconds). */
-  async function writeTestCache(
-    timestampSec: number,
-    response = apiResponse,
-    nextBackoffMs?: number,
-    failedAt?: number,
-  ): Promise<void> {
-    const cachePath = join(tmpDir, "usage-cache.json");
-    const cache: any = { timestamp: timestampSec, response };
-    if (nextBackoffMs !== undefined) cache.nextBackoffMs = nextBackoffMs;
-    if (failedAt !== undefined) cache.failedAt = failedAt;
-    await Bun.write(cachePath, JSON.stringify(cache));
-  }
-
-  function mockFetch(response: unknown, ok = true, status = 200): void {
-    fetchCtx.set(createMockFetch(response, ok, status));
-  }
-
-  test("returns cached response when cache is fresh", async () => {
-    const nowSec = Math.floor(Date.now() / 1000);
-    await writeTestCache(nowSec, apiResponse);
-    // No credentials needed — should return from cache without API call
-    let fetchCalled = false;
-    fetchCtx.set((async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; }) as any);
-
-    const result = await fetchUsage();
-
-    expect(fetchCalled).toBe(false);
-    expect(result.error).toBe(false);
-    expect(result.data).not.toBeNull();
-    expect(result.data!.sessionPct).toBe(42);
-    expect(result.data!.weeklyPct).toBe(25);
-  });
-
-  test("cache is still fresh at 2 minutes (within 3-minute TTL)", async () => {
-    // Cache timestamp 2 minutes ago — should still be fresh with 180s TTL
-    const twoMinAgo = Math.floor(Date.now() / 1000) - 120;
-    await writeTestCache(twoMinAgo, apiResponse);
-    let fetchCalled = false;
-    fetchCtx.set((async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; }) as any);
-
-    const result = await fetchUsage();
-
-    expect(fetchCalled).toBe(false);
-    expect(result.error).toBe(false);
-    expect(result.data).not.toBeNull();
-    expect(result.data!.sessionPct).toBe(42);
-  });
-
-  test("fetches from API when cache is stale", async () => {
-    // Cache timestamp 4 minutes ago (stale, since TTL is 180s)
-    const staleSec = Math.floor(Date.now() / 1000) - 240;
-    await writeTestCache(staleSec, apiResponse);
-    await writeCredentials();
-
-    const freshResponse = {
-      five_hour: { utilization: 80.0, resets_at: "2025-12-12T22:00:00Z" },
-      seven_day: { utilization: 50.0, resets_at: "2025-12-19T00:00:00Z" },
-    };
-    mockFetch(freshResponse);
-
-    const result = await fetchUsage();
-
-    expect(result.error).toBe(false);
-    expect(result.data).not.toBeNull();
-    expect(result.data!.sessionPct).toBe(80);
-    expect(result.data!.weeklyPct).toBe(50);
-  });
-
-  test("returns error when no token available and no cache", async () => {
-    // No credentials file, no cache
-    fetchCtx.set((async () => { throw new Error("should not be called"); }) as any);
-
-    const result = await fetchUsage();
-    expect(result.data).toBeNull();
-    expect(result.error).toBe(true);
-  });
-
-  test("returns stale cache when locked", async () => {
-    const staleSec = Math.floor(Date.now() / 1000) - 240;
-    await writeTestCache(staleSec, apiResponse);
-    await writeCredentials();
-    // Create a fresh lock file
-    await writeFile(join(tmpDir, "usage.lock"), "");
-
-    let fetchCalled = false;
-    fetchCtx.set((async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; }) as any);
-
-    const result = await fetchUsage();
-
-    expect(fetchCalled).toBe(false);
-    expect(result.error).toBe(false);
-    expect(result.data).not.toBeNull();
-    expect(result.data!.sessionPct).toBe(42);
-  });
-
-  test("returns error when locked and no cache", async () => {
-    await writeCredentials();
-    await writeFile(join(tmpDir, "usage.lock"), "");
-
-    const result = await fetchUsage();
-    expect(result.data).toBeNull();
-    expect(result.error).toBe(true);
-  });
-
-  test("handles non-ok response with existing cache (backoff)", async () => {
-    const staleSec = Math.floor(Date.now() / 1000) - 240;
-    await writeTestCache(staleSec, apiResponse);
-    await writeCredentials();
-    mockFetch({}, false, 500);
-
-    const result = await fetchUsage();
-
-    // Should return stale cache data with error flag
-    expect(result.error).toBe(true);
-    expect(result.data).not.toBeNull();
-    expect(result.data!.sessionPct).toBe(42);
-
-    // Verify cache was rewritten with backoff timestamp
-    const cacheFile = Bun.file(join(tmpDir, "usage-cache.json"));
-    const updatedCache = await cacheFile.json();
-    expect(updatedCache.nextBackoffMs).toBeDefined();
-    // Retry timestamp should be in the future
-    expect(updatedCache.timestamp).toBeGreaterThan(staleSec);
-    // The placeholder is marked so later reads report it as stale
-    expect(updatedCache.failedAt).toBeGreaterThanOrEqual(staleSec + 240);
-  });
-
-  test("reports a backoff placeholder as error until its retry time", async () => {
-    // A failed refresh leaves the last good response with a future timestamp
-    // and failedAt set. Serving it must keep error:true — the dashboard shows
-    // the ⚠️ marker and the watchdog does not trust the stale numbers.
-    const nowSec = Math.floor(Date.now() / 1000);
-    await writeTestCache(nowSec + 400, apiResponse, 600_000, nowSec - 20);
-    let fetchCalled = false;
-    fetchCtx.set((async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; }) as any);
-
-    const result = await fetchUsage();
-
-    expect(fetchCalled).toBe(false);
-    expect(result.error).toBe(true);
-    expect(result.data).not.toBeNull();
-    expect(result.data!.sessionPct).toBe(42);
-  });
-
-  test("reports a backoff placeholder as error when locked", async () => {
-    const staleSec = Math.floor(Date.now() / 1000) - 240;
-    await writeTestCache(staleSec, apiResponse, 120_000, staleSec);
-    await writeCredentials();
-    await writeFile(join(tmpDir, "usage.lock"), "");
-    fetchCtx.set((async () => { throw new Error("should not be called"); }) as any);
-
-    const result = await fetchUsage();
-
-    expect(result.error).toBe(true);
-    expect(result.data!.sessionPct).toBe(42);
-  });
-
-  test("a successful refresh after backoff clears the failure marker", async () => {
-    const staleSec = Math.floor(Date.now() / 1000) - 240;
-    await writeTestCache(staleSec, apiResponse, 600_000, staleSec);
-    await writeCredentials();
-    const freshResponse = {
-      five_hour: { utilization: 5.0, resets_at: "2025-12-12T22:00:00Z" },
-      seven_day: { utilization: 2.0, resets_at: "2025-12-19T00:00:00Z" },
-    };
-    mockFetch(freshResponse);
-
-    const result = await fetchUsage();
-
-    expect(result.error).toBe(false);
-    expect(result.data!.sessionPct).toBe(5);
-    expect(result.data!.weeklyPct).toBe(2);
-    const cache = await Bun.file(join(tmpDir, "usage-cache.json")).json();
-    expect(cache.failedAt).toBeUndefined();
-    expect(cache.nextBackoffMs).toBe(60_000);
-  });
-
-  test("returns error on non-ok response with no cache", async () => {
-    await writeCredentials();
-    mockFetch({}, false, 500);
-
-    const result = await fetchUsage();
-    expect(result.data).toBeNull();
-    expect(result.error).toBe(true);
-  });
-
-  test("handles API error field in response body", async () => {
-    const staleSec = Math.floor(Date.now() / 1000) - 240;
-    await writeTestCache(staleSec, apiResponse);
-    await writeCredentials();
-    mockFetch({ error: "something went wrong" });
-
-    const result = await fetchUsage();
-
-    // Should return stale cache with error flag
-    expect(result.error).toBe(true);
-    expect(result.data).not.toBeNull();
-    expect(result.data!.sessionPct).toBe(42);
-  });
-
-  test("handles network error with stale cache", async () => {
-    const staleSec = Math.floor(Date.now() / 1000) - 240;
-    await writeTestCache(staleSec, apiResponse);
-    await writeCredentials();
-    fetchCtx.set((async () => { throw new Error("network error"); }) as any);
-
-    const result = await fetchUsage();
-
-    expect(result.error).toBe(true);
-    expect(result.data).not.toBeNull();
-    expect(result.data!.sessionPct).toBe(42);
-  });
-
-  test("returns error on network error with no cache", async () => {
-    await writeCredentials();
-    fetchCtx.set((async () => { throw new Error("network error"); }) as any);
-
-    const result = await fetchUsage();
-    expect(result.data).toBeNull();
-    expect(result.error).toBe(true);
-  });
-
-  test("successful fetch writes cache and cleans up lock", async () => {
-    await writeCredentials();
-    mockFetch(apiResponse);
-
-    const result = await fetchUsage();
-
-    expect(result.error).toBe(false);
-    expect(result.data).not.toBeNull();
-    expect(result.data!.sessionPct).toBe(42);
-
-    // Cache should exist
-    const cacheFile = Bun.file(join(tmpDir, "usage-cache.json"));
-    expect(await cacheFile.exists()).toBe(true);
-    const cache = await cacheFile.json();
-    expect(cache.response).toEqual(apiResponse);
-    expect(cache.nextBackoffMs).toBe(60_000);
-    expect(cache.failedAt).toBeUndefined();
-
-    // Lock should be released
-    const lockFile = Bun.file(join(tmpDir, "usage.lock"));
-    expect(await lockFile.exists()).toBe(false);
-  });
-
-  test("backoff increases on repeated errors", async () => {
-    const staleSec = Math.floor(Date.now() / 1000) - 240;
-    // Simulate prior backoff of 120s
-    await writeTestCache(staleSec, apiResponse, 120_000);
-    await writeCredentials();
-    mockFetch({}, false, 500);
-
-    await fetchUsage();
-
-    const cache = await Bun.file(join(tmpDir, "usage-cache.json")).json();
-    // nextBackoffMs should be 120_000 + 60_000 = 180_000
-    expect(cache.nextBackoffMs).toBe(180_000);
-  });
-
-  test("backoff caps at MAX_BACKOFF_MS (10 minutes)", async () => {
-    const staleSec = Math.floor(Date.now() / 1000) - 240;
-    // Already at max backoff
-    await writeTestCache(staleSec, apiResponse, 600_000);
-    await writeCredentials();
-    mockFetch({}, false, 500);
-
-    await fetchUsage();
-
-    const cache = await Bun.file(join(tmpDir, "usage-cache.json")).json();
-    // Should cap at 600_000 (10 minutes)
-    expect(cache.nextBackoffMs).toBe(600_000);
-  });
-});
-
 describe("fetchCodexUsage", () => {
   let tmpDir: string;
 
@@ -533,378 +164,6 @@ describe("fetchCodexUsage", () => {
     const result = await fetchCodexUsage();
 
     expect(result.error).toBe(true);
-    expect(result.data).toBeNull();
-  });
-});
-
-describe("rankTokenCandidates", () => {
-  const now = 1_000_000;
-
-  test("puts an unexpired token ahead of an expired one regardless of source order", () => {
-    // Stale credentials file first (the real-world stuck-footer case): the
-    // file token expired days ago while the Keychain holds the refreshed one.
-    const ranked = rankTokenCandidates([
-      { token: "file-expired", expiresAt: now - 1 },
-      { token: "keychain-fresh", expiresAt: now + 60_000 },
-    ], now);
-    expect(ranked).toEqual(["keychain-fresh", "file-expired"]);
-  });
-
-  test("orders unexpired tokens by latest expiry first", () => {
-    const ranked = rankTokenCandidates([
-      { token: "soon", expiresAt: now + 1_000 },
-      { token: "later", expiresAt: now + 5_000 },
-    ], now);
-    expect(ranked).toEqual(["later", "soon"]);
-  });
-
-  test("ranks a token with unknown expiry below a fresh one and above an expired one", () => {
-    const ranked = rankTokenCandidates([
-      { token: "expired", expiresAt: now - 5 },
-      { token: "unknown", expiresAt: null },
-      { token: "fresh", expiresAt: now + 5 },
-    ], now);
-    expect(ranked).toEqual(["fresh", "unknown", "expired"]);
-  });
-
-  test("keeps source order among tokens with unknown expiry", () => {
-    const ranked = rankTokenCandidates([
-      { token: "file", expiresAt: null },
-      { token: "keychain", expiresAt: null },
-    ], now);
-    expect(ranked).toEqual(["file", "keychain"]);
-  });
-
-  test("orders expired tokens by latest expiry first", () => {
-    const ranked = rankTokenCandidates([
-      { token: "older", expiresAt: now - 5_000 },
-      { token: "newer", expiresAt: now - 1_000 },
-    ], now);
-    expect(ranked).toEqual(["newer", "older"]);
-  });
-
-  test("drops null candidates and duplicate tokens", () => {
-    const ranked = rankTokenCandidates([
-      null,
-      { token: "same", expiresAt: now + 5 },
-      { token: "same", expiresAt: null },
-      null,
-    ], now);
-    expect(ranked).toEqual(["same"]);
-  });
-
-  test("returns an empty list when no candidate is available", () => {
-    expect(rankTokenCandidates([null, null], now)).toEqual([]);
-  });
-});
-
-describe("readAccessToken keychain fallback", () => {
-  let tmpDir: string;
-
-  const apiResponse = {
-    five_hour: { utilization: 42.0, resets_at: "2025-12-12T20:00:00Z" },
-    seven_day: { utilization: 25.0, resets_at: "2025-12-18T00:00:00Z" },
-  };
-
-  beforeEach(async () => {
-    tmpDir = await mkdtemp(join(tmpdir(), "usage-keychain-"));
-    setTestDir(tmpDir);
-  });
-
-  afterEach(async () => {
-    resetTestDir();
-    fetchCtx.reset();
-    spawnCtx.reset();
-    await rm(tmpDir, { recursive: true, force: true });
-  });
-
-  function mockFetch(response: unknown, ok = true): void {
-    fetchCtx.set(createMockFetch(response, ok, ok ? 200 : 500));
-  }
-
-  /** Create a mock spawn that simulates keychain output. */
-  function mockSpawn(stdout: string, exitCode: number): void {
-    spawnCtx.set(() => {
-      const stdoutBlob = new Blob([stdout]);
-      return {
-        stdout: stdoutBlob.stream(),
-        stderr: new Blob([]).stream(),
-        exited: Promise.resolve(exitCode),
-      };
-    });
-  }
-
-  test("uses keychain token when credentials file missing", async () => {
-    // No credentials file — triggers keychain fallback
-    const keychainJson = JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token" } });
-    mockSpawn(keychainJson, 0);
-    mockFetch(apiResponse);
-
-    const result = await fetchUsage();
-
-    expect(result.data).not.toBeNull();
-    expect(result.data!.sessionPct).toBe(42);
-  });
-
-  test("uses raw keychain value as token when not JSON", async () => {
-    // No credentials file; keychain returns a plain string (not JSON)
-    mockSpawn("raw-access-token-value", 0);
-    mockFetch(apiResponse);
-
-    const result = await fetchUsage();
-
-    expect(result.data).not.toBeNull();
-    expect(result.data!.sessionPct).toBe(42);
-  });
-
-  test("uses raw keychain value as token when JSON is malformed", async () => {
-    // No credentials file; keychain returns invalid JSON — falls through to
-    // "not JSON — use raw value as token" path
-    mockSpawn("{invalid json", 0);
-    mockFetch(apiResponse);
-
-    const result = await fetchUsage();
-
-    // The raw string "{invalid json" is used as token, so API call proceeds
-    expect(result.data).not.toBeNull();
-    expect(result.data!.sessionPct).toBe(42);
-  });
-
-  test("returns null when keychain command fails (non-zero exit)", async () => {
-    // No credentials file; keychain command exits with error
-    mockSpawn("", 44); // security returns 44 when item not found
-
-    const result = await fetchUsage();
-
-    expect(result.data).toBeNull();
-  });
-
-  test("returns null when keychain returns JSON without token field", async () => {
-    // No credentials file; keychain returns valid JSON but missing accessToken
-    const noTokenJson = JSON.stringify({ someOtherField: "value" });
-    mockSpawn(noTokenJson, 0);
-
-    const result = await fetchUsage();
-
-    // JSON parsed OK but no claudeAiOauth.accessToken, so token is undefined → null
-    expect(result.data).toBeNull();
-  });
-
-  test("returns null when keychain returns empty output", async () => {
-    // No credentials file; keychain returns empty string
-    mockSpawn("", 0);
-
-    const result = await fetchUsage();
-
-    expect(result.data).toBeNull();
-  });
-
-  test("returns null when spawn throws (keychain not available)", async () => {
-    // No credentials file; spawn itself throws
-    spawnCtx.set(() => {
-      throw new Error("spawn failed");
-    });
-
-    const result = await fetchUsage();
-
-    expect(result.data).toBeNull();
-  });
-
-  /**
-   * Fetch mock that records the bearer token of every call and accepts only
-   * `accepted`; every other token gets the 429 the real endpoint returns for
-   * a dead token.
-   */
-  function mockFetchAccepting(accepted: string, response: unknown = apiResponse): string[] {
-    const tokens: string[] = [];
-    fetchCtx.set((async (_url: unknown, init?: RequestInit) => {
-      const headers = (init?.headers ?? {}) as Record<string, string>;
-      tokens.push(String(headers.Authorization ?? "").replace(/^Bearer /, ""));
-      if (tokens[tokens.length - 1] === accepted) {
-        return { ok: true, status: 200, json: async () => response };
-      }
-      return {
-        ok: false,
-        status: 429,
-        json: async () => ({ error: { type: "rate_limit_error", message: "Rate limited." } }),
-      };
-    }) as any);
-    return tokens;
-  }
-
-  test("tries the credentials file token before the keychain token when neither records an expiry", async () => {
-    await Bun.write(join(tmpDir, "credentials.json"),
-      JSON.stringify({ claudeAiOauth: { accessToken: "file-token" } }));
-    mockSpawn(JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token" } }), 0);
-    const tokens = mockFetchAccepting("file-token");
-
-    const result = await fetchUsage();
-
-    expect(tokens).toEqual(["file-token"]);
-    expect(result.error).toBe(false);
-    expect(result.data!.sessionPct).toBe(42);
-  });
-
-  test("prefers the keychain token when the credentials file token has expired", async () => {
-    // The stuck-footer bug: ~/.claude/.credentials.json is a stale copy whose
-    // token expired days ago, while Claude Code kept refreshing the Keychain
-    // entry. The expired token must not be tried first.
-    const now = Date.now();
-    await Bun.write(join(tmpDir, "credentials.json"),
-      JSON.stringify({ claudeAiOauth: { accessToken: "file-token", expiresAt: now - 4 * 86_400_000 } }));
-    mockSpawn(JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token", expiresAt: now + 6 * 3_600_000 } }), 0);
-    const tokens = mockFetchAccepting("keychain-token");
-
-    const result = await fetchUsage();
-
-    expect(tokens).toEqual(["keychain-token"]);
-    expect(result.error).toBe(false);
-    expect(result.data!.sessionPct).toBe(42);
-  });
-
-  test("prefers the credentials file token when the keychain token has expired", async () => {
-    const now = Date.now();
-    await Bun.write(join(tmpDir, "credentials.json"),
-      JSON.stringify({ claudeAiOauth: { accessToken: "file-token", expiresAt: now + 3_600_000 } }));
-    mockSpawn(JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token", expiresAt: now - 3_600_000 } }), 0);
-    const tokens = mockFetchAccepting("file-token");
-
-    const result = await fetchUsage();
-
-    expect(tokens).toEqual(["file-token"]);
-    expect(result.error).toBe(false);
-  });
-
-  test("falls back to the next token when the API rejects the first", async () => {
-    // Neither store records an expiry, so the file token is tried first; the
-    // API rejects it and the keychain token must be tried before giving up.
-    await Bun.write(join(tmpDir, "credentials.json"),
-      JSON.stringify({ claudeAiOauth: { accessToken: "file-token" } }));
-    mockSpawn(JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token" } }), 0);
-    const tokens = mockFetchAccepting("keychain-token");
-
-    const result = await fetchUsage();
-
-    expect(tokens).toEqual(["file-token", "keychain-token"]);
-    expect(result.error).toBe(false);
-    expect(result.data!.sessionPct).toBe(42);
-
-    // Success path: cache written cleanly, lock released
-    const cache = await Bun.file(join(tmpDir, "usage-cache.json")).json();
-    expect(cache.failedAt).toBeUndefined();
-    expect(await Bun.file(join(tmpDir, "usage.lock")).exists()).toBe(false);
-  });
-
-  test("falls back to the next token when the first response carries an error body", async () => {
-    await Bun.write(join(tmpDir, "credentials.json"),
-      JSON.stringify({ claudeAiOauth: { accessToken: "file-token" } }));
-    mockSpawn(JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token" } }), 0);
-    const tokens: string[] = [];
-    fetchCtx.set((async (_url: unknown, init?: RequestInit) => {
-      const headers = (init?.headers ?? {}) as Record<string, string>;
-      const token = String(headers.Authorization ?? "").replace(/^Bearer /, "");
-      tokens.push(token);
-      return {
-        ok: true,
-        status: 200,
-        json: async () => (token === "keychain-token" ? apiResponse : { error: "expired" }),
-      };
-    }) as any);
-
-    const result = await fetchUsage();
-
-    expect(tokens).toEqual(["file-token", "keychain-token"]);
-    expect(result.error).toBe(false);
-    expect(result.data!.sessionPct).toBe(42);
-  });
-
-  test("reports failure when the API rejects every token", async () => {
-    await Bun.write(join(tmpDir, "credentials.json"),
-      JSON.stringify({ claudeAiOauth: { accessToken: "file-token" } }));
-    mockSpawn(JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token" } }), 0);
-    const tokens = mockFetchAccepting("no-such-token");
-
-    const result = await fetchUsage();
-
-    expect(tokens).toEqual(["file-token", "keychain-token"]);
-    expect(result.error).toBe(true);
-    expect(result.data).toBeNull();
-    expect(await Bun.file(join(tmpDir, "usage.lock")).exists()).toBe(false);
-  });
-
-  test("makes a single request when both stores hold the same token", async () => {
-    await Bun.write(join(tmpDir, "credentials.json"),
-      JSON.stringify({ claudeAiOauth: { accessToken: "shared-token" } }));
-    mockSpawn(JSON.stringify({ claudeAiOauth: { accessToken: "shared-token" } }), 0);
-    const tokens = mockFetchAccepting("no-such-token");
-
-    const result = await fetchUsage();
-
-    expect(tokens).toEqual(["shared-token"]);
-    expect(result.error).toBe(true);
-  });
-
-  test("falls through to keychain when credentials file has empty token", async () => {
-    // Write credentials with empty token
-    await Bun.write(join(tmpDir, "credentials.json"),
-      JSON.stringify({ claudeAiOauth: { accessToken: "" } }));
-
-    const keychainJson = JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token" } });
-    mockSpawn(keychainJson, 0);
-    mockFetch(apiResponse);
-
-    const result = await fetchUsage();
-
-    expect(result.data).not.toBeNull();
-    expect(result.data!.sessionPct).toBe(42);
-  });
-
-  test("falls through to keychain when credentials file has no claudeAiOauth field", async () => {
-    // Credentials file exists but missing the claudeAiOauth key
-    await Bun.write(join(tmpDir, "credentials.json"),
-      JSON.stringify({ someOtherKey: "value" }));
-
-    const keychainJson = JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token" } });
-    mockSpawn(keychainJson, 0);
-    mockFetch(apiResponse);
-
-    const result = await fetchUsage();
-
-    expect(result.data).not.toBeNull();
-    expect(result.data!.sessionPct).toBe(42);
-  });
-
-  test("falls through to keychain when credentials file has non-string accessToken", async () => {
-    // accessToken is a number instead of string — typeof check fails
-    await Bun.write(join(tmpDir, "credentials.json"),
-      JSON.stringify({ claudeAiOauth: { accessToken: 12345 } }));
-
-    const keychainJson = JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token" } });
-    mockSpawn(keychainJson, 0);
-    mockFetch(apiResponse);
-
-    const result = await fetchUsage();
-
-    expect(result.data).not.toBeNull();
-    expect(result.data!.sessionPct).toBe(42);
-  });
-
-  test("returns null when keychain returns JSON with empty accessToken", async () => {
-    // No credentials file; keychain returns valid JSON but token is empty string
-    const emptyTokenJson = JSON.stringify({ claudeAiOauth: { accessToken: "" } });
-    mockSpawn(emptyTokenJson, 0);
-
-    const result = await fetchUsage();
-
-    expect(result.data).toBeNull();
-  });
-
-  test("returns null when keychain returns whitespace-only output", async () => {
-    // No credentials file; keychain output trims to empty string
-    mockSpawn("   \n  \t  ", 0);
-
-    const result = await fetchUsage();
-
     expect(result.data).toBeNull();
   });
 });
@@ -1068,6 +327,93 @@ describe("fetchGeminiUsage", () => {
     mockAgySpawn("network failure", 1);
 
     const result = await fetchGeminiUsage();
+    expect(result.error).toBe(true);
+    expect(result.data?.sessionPct).toBe(7);
+  });
+
+  function mockAgySpawnWithStderr(stdout: string, stderr: string, exitCode: number): void {
+    spawnCtx.set(() => ({
+      stdout: new Blob([stdout]).stream(),
+      stderr: new Blob([stderr]).stream(),
+      exited: Promise.resolve(exitCode),
+    }));
+  }
+
+  test("a successful run does not report authFailed", async () => {
+    // Login words in a run that parses must not flag it: the login check runs
+    // only when the run gives no usage data.
+    mockAgySpawn(`${sampleAgyOutput}\nTo switch accounts, log in again.`, 0);
+
+    const result = await fetchGeminiUsage();
+    expect(result.error).toBe(false);
+    expect(result.authFailed).toBeUndefined();
+  });
+
+  test("a run that times out reports authFailed and is killed", async () => {
+    // agy's OAuth flow blocks while it waits on the browser: the run never
+    // exits on its own. kill() ends it so no stream is left open.
+    let killed = false;
+    spawnCtx.set(() => {
+      let closeStdout = () => {};
+      let closeStderr = () => {};
+      let exit = (_code: number) => {};
+      return {
+        stdout: new ReadableStream({ start(c) { closeStdout = () => c.close(); } }),
+        stderr: new ReadableStream({ start(c) { closeStderr = () => c.close(); } }),
+        exited: new Promise<number>((resolve) => { exit = resolve; }),
+        kill: () => {
+          killed = true;
+          closeStdout();
+          closeStderr();
+          exit(143);
+        },
+      };
+    });
+
+    const result = await fetchGeminiUsage(undefined, 20);
+    expect(result.authFailed).toBe(true);
+    expect(result.error).toBe(true);
+    expect(result.data).toBeNull();
+    expect(killed).toBe(true);
+  });
+
+  test("a failed run with a login message on stderr reports authFailed", async () => {
+    mockAgySpawnWithStderr("", "Error: not signed in. Run agy and sign in first.", 1);
+
+    const result = await fetchGeminiUsage();
+    expect(result.authFailed).toBe(true);
+    expect(result.error).toBe(true);
+  });
+
+  test("a run with a login message on stdout and no usage reports authFailed", async () => {
+    mockAgySpawnWithStderr("You are not logged in. Please Log In to continue.", "", 0);
+
+    const result = await fetchGeminiUsage();
+    expect(result.authFailed).toBe(true);
+    expect(result.error).toBe(true);
+  });
+
+  test("a non-zero exit without a login message does not report authFailed", async () => {
+    mockAgySpawnWithStderr("", "error: quota service unavailable (design in progress)", 1);
+
+    const result = await fetchGeminiUsage();
+    expect(result.error).toBe(true);
+    expect(result.authFailed).toBeUndefined();
+  });
+
+  test("a login message keeps the stale cache as the result", async () => {
+    const oldTimestamp = Math.floor((Date.now() - 240_000) / 1000);
+    await writeFile(
+      join(tmpDir, "gemini-usage-cache.json"),
+      JSON.stringify({
+        timestamp: oldTimestamp,
+        data: { sessionPct: 7, weeklyPct: 3, sessionReset: "1h", weeklyReset: "4d" },
+      }),
+    );
+    mockAgySpawnWithStderr("", "not logged in", 1);
+
+    const result = await fetchGeminiUsage();
+    expect(result.authFailed).toBe(true);
     expect(result.error).toBe(true);
     expect(result.data?.sessionPct).toBe(7);
   });

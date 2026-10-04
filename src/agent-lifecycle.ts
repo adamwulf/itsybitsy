@@ -29,6 +29,7 @@ import {
   type AgentMeta,
 } from "./agents";
 import { deleteAgentOutbox, agentOutboxDir } from "./outbox";
+import { deleteClaudeRateLimits } from "./claude-rate-limits";
 import { pruneAgentFromAllTeams } from "./teams";
 import { logWarning } from "./watch-log";
 
@@ -772,7 +773,10 @@ export async function archiveAgent(
   // torn down, so there is no live tmux session to deliver to. The outbox
   // now lives under the CENTRAL coordinator-home root (agentOutboxDir), not
   // beside meta.json in the per-worktree agent dir; deleteAgentOutbox also
-  // best-effort rmdir's the per-agent outbox subdir.
+  // best-effort rmdir's the per-agent outbox subdir. The statusline's Claude
+  // rate-limit record lives in the same folder and must go first, or the
+  // rmdir fails and the folder stays for good.
+  await deleteClaudeRateLimits(agentOutboxDir(agentId));
   await deleteAgentOutbox(agentOutboxDir(agentId));
 
   return { archivePath: archiveFolder, prunedTeams };

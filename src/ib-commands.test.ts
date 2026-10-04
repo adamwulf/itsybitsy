@@ -6511,6 +6511,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(isolated.permissions.allow).toContain("Bash(ib:*)");
     expect(isolated.permissions.deny).toContain("EnterPlanMode");
     expect(JSON.stringify(isolated.hooks)).toContain(`hook-check-path ${id}`);
+    expect(isolated.statusLine.command).toBe(`ib hooks statusline ${id}`);
 
     // Simulate a legacy worktree:false agent created before isolated settings.
     await rm(isolatedSettingsPath);
@@ -6586,6 +6587,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       const isolated = await Bun.file(join(agentDir, ".claude", "settings.local.json")).json();
       expect(isolated.permissions.allow).toContain(roleTool);
       expect(isolated.hooks.SessionStart[0].hooks[0].command).toBe(`ib hooks session-start ${id}`);
+      expect(isolated.statusLine.command).toBe(`ib hooks statusline ${id}`);
       expect(await Bun.file(sharedSettingsPath).text()).toBe(sharedBefore);
     });
   }
@@ -6825,6 +6827,36 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const settings = await Bun.file(join(agentDir, ".claude", "settings.local.json")).json();
     expect(settings.permissions.defaultMode).toBe("bypassPermissions");
     expect(JSON.stringify(settings.hooks)).toContain("hook-check-path");
+  });
+
+  test("coordinator resume without isolated settings builds them with ib's statusline", async () => {
+    const id = "coordinator-resume-statusline";
+    const agentDir = join(agentsDir, id);
+    await mkdir(agentDir, { recursive: true });
+    const meta: Partial<AgentMeta> = {
+      id,
+      state: "stopped",
+      model: "claude:sonnet",
+      agentType: "coordinator",
+      tmux_session: "",
+      session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      sandbox: { enabled: false, rawAllow: [], domains: [] },
+      paths: { allowRead: [tempDir], allowWrite: [tempDir], deny: [] },
+    };
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+    setNukeResumeSpawnRunner(cleanWorktreeRunner());
+    setSendSpawnRunner(() => makeSpawnResult("", 0));
+    let result;
+    try {
+      result = await resumeAgent(makeAgent(id, tempDir, "stopped", meta), { resetCoordinator: false });
+    } finally {
+      resetSendSpawnRunner();
+    }
+
+    expect(result.ok).toBe(true);
+    const settings = await Bun.file(join(agentDir, ".claude", "settings.local.json")).json();
+    expect(JSON.stringify(settings.hooks)).toContain(`hook-check-path ${id}`);
+    expect(settings.statusLine.command).toBe(`ib hooks statusline ${id}`);
   });
 
   test("sandbox-enabled Codex spawn uses danger-full-access inside our wrapper and proxy", async () => {
@@ -10577,6 +10609,26 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(settings.spinnerTipsEnabled).toBe(false);
   });
 
+  test("wraps the project's statusLine in ib's statusline command", async () => {
+    // `ib hooks statusline <id>` records Claude Code's rate_limits for the
+    // usage display, then runs the project's statusline; its display keys stay.
+    await mkdir(join(tempDir, ".claude"), { recursive: true });
+    await Bun.write(join(tempDir, ".claude", "settings.json"), JSON.stringify({
+      statusLine: { type: "command", command: "./project-statusline.sh", padding: 2 },
+    }));
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    await callNewAgent("task", { name: "test-statusline" });
+
+    const settingsPath = join(agentsDir, "test-statusline", "repo", ".claude", "settings.local.json");
+    const settings = await Bun.file(settingsPath).json();
+    expect(settings.statusLine).toEqual({
+      type: "command",
+      command: "ib hooks statusline test-statusline",
+      padding: 2,
+    });
+  });
+
   test("does not inherit deny list from base settings.json", async () => {
     // Even if settings.json has a restrictive deny list, agents should not inherit it
     await mkdir(join(tempDir, ".claude"), { recursive: true });
@@ -10756,6 +10808,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const settingsPath = join(agentsDir, coordId, ".claude", "settings.local.json");
     const settings = await Bun.file(settingsPath).json();
     expect(settings.permissions.allow).not.toContain("Bash(worker-only-tool:*)");
+    expect(settings.statusLine.command).toBe(`ib hooks statusline ${coordId}`);
   });
 
   test("rejects spawning a non-spawnable type (_all)", async () => {

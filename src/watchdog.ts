@@ -30,7 +30,7 @@ import { parseState } from "./parse-state";
 import type { AgentState } from "./parse-state";
 import type { MetaState } from "./agents";
 import { sendMessage } from "./ib-commands";
-import { fetchUsage } from "./usage";
+import { readClaudeUsage } from "./claude-rate-limits";
 import type { UsageResult } from "./usage";
 import { SpawnContext } from "./types";
 import type { SpawnFn } from "./types";
@@ -251,17 +251,17 @@ export function resetWatchdogSpawnRunner(): void {
   spawnCtx.reset();
 }
 
-/** Overridable fetchUsage for testing. */
-let fetchUsageFn: () => Promise<UsageResult> = fetchUsage;
+/** Overridable Claude usage reader (readClaudeUsage) for testing. */
+let fetchUsageFn: () => Promise<UsageResult> = () => readClaudeUsage();
 
-/** Override fetchUsage for testing. */
+/** Override the Claude usage reader for testing. */
 export function setWatchdogFetchUsage(fn: () => Promise<UsageResult>): void {
   fetchUsageFn = fn;
 }
 
-/** Reset fetchUsage to default. */
+/** Reset the Claude usage reader to default. */
 export function resetWatchdogFetchUsage(): void {
-  fetchUsageFn = fetchUsage;
+  fetchUsageFn = () => readClaudeUsage();
 }
 
 /** Overridable readConfig for testing. */
@@ -941,12 +941,12 @@ export const RATE_LIMIT_RETRY_DELAY_MS = 2_000;
 /**
  * Handler for "rate_limited" state.
  * - 3-attempt retry loop: send Enter, wait 2s, check state, repeat if still rate_limited
- * - Check usage API; when session usage drops below threshold, nudge agent
+ * - Read Claude plan usage; when session usage drops below threshold, nudge agent
  */
 async function handleRateLimited(agent: Agent, tracker: AgentTracker, _getAllAgents: GetAllAgents): Promise<void> {
-  // Phase 6: codex has its own rate-limit UX (no "Esc to dismiss" dialog +
-  // no Anthropic usage API). The bypass loop's `parseState` matchers and the
-  // `fetchUsage()` call are both claude-specific; skip the handler entirely
+  // Phase 6: codex has its own rate-limit UX (no "Esc to dismiss" dialog), and
+  // the Claude plan usage reading comes from Claude statuslines. The bypass
+  // loop's `parseState` matchers and that reading are both claude-specific; skip the handler entirely
   // for non-claude agents. agy (SPEC-ANTIGRAVITY-CLI.md D10) is covered by the
   // same `!== "claude"` gate — its rate-limit strings aren't captured yet, so
   // rate_limited stays `unknown` for agy and this recovery path is a no-op.
@@ -985,10 +985,10 @@ async function handleRateLimited(agent: Agent, tracker: AgentTracker, _getAllAge
     tracker.rateLimitBypassed = true;
   }
 
-  // Check usage API to see if usage has dropped enough to resume. Only a live
-  // reading counts: while the API is failing, fetchUsage serves the last good
-  // response flagged `error: true`, and a stale low percentage would nudge the
-  // agent straight back into the rate-limit dialog.
+  // Check Claude plan usage to see if it has dropped enough to resume. The
+  // reading combines every agent's statusline rate-limit record
+  // (src/claude-rate-limits.ts); once the 5-hour window's reset time passes,
+  // it reads as 0%, so the agent is nudged when its limit resets.
   const usageResult = await fetchUsageFn();
   const usage = usageResult.data;
   if (!usageResult.error && usage && usage.sessionPct !== null && usage.sessionPct < RATE_LIMIT_RECOVERY_THRESHOLD) {

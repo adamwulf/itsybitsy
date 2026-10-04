@@ -20,7 +20,9 @@ import { loadAgentType } from "./agent-types";
 import {
   buildHooksBlock,
   buildLayeredPermissions,
+  buildStatusLine,
   COORDINATOR_INTERCEPT_MATCHER,
+  resolveUserStatusLine,
 } from "./settings-builder";
 
 /**
@@ -799,6 +801,8 @@ async function writeCoordinatorFiles(): Promise<void> {
       // Re-arms ~5s of indicator visibility; decays naturally on idle (no Stop).
       includeTelegramTyping: true,
     }),
+    // Records Claude plan usage for `ib watch`, then runs the user's statusline.
+    statusLine: buildStatusLine("@system", await resolveUserStatusLine(home)),
   };
   await Bun.write(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 }

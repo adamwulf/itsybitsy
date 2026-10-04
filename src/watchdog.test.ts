@@ -2131,9 +2131,9 @@ describe("watchdog", () => {
     });
 
     test("does not nudge on a stale usage reading (error: true)", async () => {
-      // While the usage API is failing, fetchUsage serves the last good
-      // response flagged error:true. A stale low percentage says nothing
-      // about the live limit, so it must not trigger the "refreshed" nudge.
+      // A reading flagged error:true is not a live reading, so its low
+      // percentage must not trigger the "refreshed" nudge. readClaudeUsage
+      // never flags one today; this keeps the handler's gate honest.
       setWatchdogFetchUsage(async () => ({ data: { sessionPct: 3, weeklyPct: 30, sessionReset: "now", weeklyReset: "2d" }, error: true }));
 
       const a1 = agent("a1", "rate_limited");

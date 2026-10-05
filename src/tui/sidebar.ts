@@ -65,24 +65,26 @@ export function computeSidebarHeights(
 }
 
 /**
- * Clamp sidebar height offsets so no panel drops below 1 row.
+ * Clamp sidebar height offsets so no panel drops below 1 row. The `{`/`}`
+ * resize moves a row between the tree and info, so the offsets are a pair
+ * (info = -tree): the clamp bounds the tree offset from both sides (the tree
+ * keeps ≥ 1 row, and info keeps ≥ 1 row when it has room at all) and sets
+ * info to match. That also mends an unpaired pair from an old layout.json.
  * Mutates `offsets` in place. render() clamps a COPY: `base` changes with the
  * visible tab's row count and the terminal height, so writing the clamp back
  * would lose the user's resize (a tree shrunk in the Agents tab would come
  * back taller after a visit to a short Favorites view). The `{`/`}` resize
- * clamps the real offsets first, so each keypress changes the rendered
- * height at once.
+ * also works on a clamped copy, so each keypress changes the rendered height
+ * at once, and stores it only when the key changes a height.
  */
 export function clampSidebarOffsets(
   base: { treeHeight: number; infoHeight: number; coordinatorHeight: number },
   offsets: { tree: number; info: number; coordinator: number },
 ): void {
-  if (base.treeHeight + offsets.tree < 1) {
-    offsets.tree = 1 - base.treeHeight;
-  }
-  if (base.infoHeight > 0 && base.infoHeight + offsets.info < 1) {
-    offsets.info = 1 - base.infoHeight;
-  }
+  const minTree = 1 - base.treeHeight;
+  const maxTree = base.infoHeight > 0 ? base.infoHeight - 1 : 0;
+  offsets.tree = Math.min(maxTree, Math.max(minTree, offsets.tree));
+  offsets.info = -offsets.tree;
 }
 
 export class SidebarComponent implements Component {
@@ -145,6 +147,11 @@ export class SidebarComponent implements Component {
     return mode === "teams" ? this.teamsTree.flatList.length : this.agentTree.renderRowCount;
   }
 
+  /** The base heights render() uses for `mode`'s tab, before the user's offsets. */
+  baseHeights(mode: SidebarMode): ReturnType<typeof computeSidebarHeights> {
+    return computeSidebarHeights(this.displayHeight, this.treeItemCount(mode));
+  }
+
   /** Normal two-section layout: tree + info */
   private renderNormalLayout(width: number): string[] {
     const w = width;
@@ -165,7 +172,7 @@ export class SidebarComponent implements Component {
     // the same height budget — only one is visible at a time. The Favorites
     // tab renders the Agents tree with its favorites filter on.
     const showTeams = this.sidebarMode === "teams";
-    const base = computeSidebarHeights(this.displayHeight, this.treeItemCount(this.sidebarMode));
+    const base = this.baseHeights(this.sidebarMode);
     // Apply height offsets: grow focused panel, shrink the other.
     // Render-path clamping (BUG-3/§7.7): normalize a copy of the offsets so
     // they stay valid for the current terminal size and row count, without

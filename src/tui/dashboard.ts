@@ -1059,7 +1059,7 @@ export class DashboardComponent implements Component {
     this.tui = tui;
   }
 
-  /** Apply a saved layout state to restore panel sizes, clamping to valid ranges. */
+  /** Apply a saved layout state to restore panel sizes, clamping the widths to valid ranges. */
   applyLayout(layout: LayoutState) {
     this.sidebarWidth = clampSidebarWidth(layout.sidebarWidth);
     // No coordinator tmux resize here: the system coordinator's window is pinned
@@ -1079,23 +1079,25 @@ export class DashboardComponent implements Component {
     }
     // No load-time clamp of heightOffsets: the base heights are not known yet
     // (they depend on the tab's row count), and a clamp against a guess would
-    // undo a saved tree shrink. The sidebar render clamps a copy every frame
-    // and the `{`/`}` resize clamps first (clampedSidebarBase), so an
-    // out-of-range offset from layout.json is harmless.
+    // undo a saved tree shrink. The sidebar render and the `{`/`}` resize
+    // both clamp a copy (clampedSidebarHeights), so an offset from
+    // layout.json never drops a panel below 1 row.
     this.pendingTmuxResize = true;
   }
 
   /**
    * The sidebar's base heights for the tab it shows — the same base its
-   * render() uses — with `sidebar.heightOffsets` clamped to that base. The
-   * `{`/`}` resize calls this first: render() clamps only a copy, so without
-   * it the guards could act on an offset past the clamp and a keypress would
-   * change nothing on screen.
+   * render() uses — and a copy of `sidebar.heightOffsets` clamped to that
+   * base, as render() clamps it. The `{`/`}` resize computes its guards from
+   * these, so a keypress always changes the rendered height, and stores the
+   * copy only when the key changes a height: a key the guard stops leaves the
+   * user's offsets alone.
    */
-  private clampedSidebarBase(): ReturnType<typeof computeSidebarHeights> {
-    const base = computeSidebarHeights(this.sidebar.displayHeight, this.sidebar.treeItemCount(this.sidebarMode));
-    clampSidebarOffsets(base, this.sidebar.heightOffsets);
-    return base;
+  private clampedSidebarHeights(): { base: ReturnType<typeof computeSidebarHeights>; offsets: SidebarComponent["heightOffsets"] } {
+    const base = this.sidebar.baseHeights(this.sidebarMode);
+    const offsets = { ...this.sidebar.heightOffsets };
+    clampSidebarOffsets(base, offsets);
+    return { base, offsets };
   }
 
   /** Persist current layout via debounced write. */
@@ -2927,38 +2929,26 @@ export class DashboardComponent implements Component {
     else if (data === "{" || data === "}") {
       const delta = data === "}" ? 1 : -1;
       const focus = this.focusManager.current();
-      if (focus === "agent-tree" || focus === "teams-tree") {
-        // Grow tree, shrink info; give back to info when shrinking.
-        // teams-tree shares the sidebar tree region (and heightOffsets.tree)
-        // with agent-tree (§17.3), so height changes behave identically.
-        const base = this.clampedSidebarBase();
-        const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
-        if (delta > 0) {
-          // Growing tree: steal from info (§7.7 guard: donor must stay ≥ 1)
-          if (effectiveInfo > 1) {
-            this.sidebar.heightOffsets.tree += delta;
-            this.sidebar.heightOffsets.info -= delta;
-          }
+      if (focus === "agent-tree" || focus === "teams-tree" || focus === "info") {
+        const { base, offsets } = this.clampedSidebarHeights();
+        const effectiveInfo = Math.max(0, base.infoHeight + offsets.info);
+        const effectiveTree = Math.max(1, base.treeHeight + offsets.tree);
+        // Rows the tree gains from info (negative: gives back to info).
+        // §7.7 guard: the donor must stay ≥ 1.
+        let treeDelta = 0;
+        if (focus === "info") {
+          // Grow info, shrink tree; give back to tree when shrinking.
+          if (delta > 0 && effectiveTree > 1) treeDelta = -delta;
+          else if (delta < 0 && effectiveInfo > 1) treeDelta = -delta;
         } else {
-          // Shrinking tree: give back to info
-          const effectiveTree = Math.max(1, base.treeHeight + this.sidebar.heightOffsets.tree);
-          if (effectiveTree > 1) {
-            this.sidebar.heightOffsets.tree += delta;
-            this.sidebar.heightOffsets.info -= delta;
-          }
+          // Grow tree, shrink info; give back to info when shrinking.
+          // teams-tree shares the sidebar tree region (and heightOffsets.tree)
+          // with agent-tree (§17.3), so height changes behave identically.
+          if (delta > 0 && effectiveInfo > 1) treeDelta = delta;
+          else if (delta < 0 && effectiveTree > 1) treeDelta = delta;
         }
-        this.tui?.requestRender();
-      } else if (focus === "info") {
-        // Grow info, shrink tree; give back to tree when shrinking (§7.7 guard: donor must stay ≥ 1)
-        const base = this.clampedSidebarBase();
-        const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
-        const effectiveTree = Math.max(1, base.treeHeight + this.sidebar.heightOffsets.tree);
-        if (delta > 0 && effectiveTree > 1) {
-          this.sidebar.heightOffsets.info += delta;
-          this.sidebar.heightOffsets.tree -= delta;
-        } else if (delta < 0 && effectiveInfo > 1) {
-          this.sidebar.heightOffsets.info += delta;
-          this.sidebar.heightOffsets.tree -= delta;
+        if (treeDelta !== 0) {
+          this.sidebar.heightOffsets = { ...offsets, tree: offsets.tree + treeDelta, info: offsets.info - treeDelta };
         }
         this.tui?.requestRender();
       }

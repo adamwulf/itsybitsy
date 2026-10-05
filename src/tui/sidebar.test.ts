@@ -302,20 +302,6 @@ describe("SidebarComponent", () => {
     expect(sidebar.treeItemCount("teams")).toBe(1);
   });
 
-  test("render-path clamping: coordinator offset that would cause zero-height is normalized (BUG-3)", () => {
-    const sidebar = makeSidebar();
-    sidebar.displayHeight = 25;
-    sidebar.agentTree.setFlatList([]);
-    const base = computeSidebarHeights(25, 0);
-    // Force coordinator offset so that base.coordinatorHeight + offset = 0
-    sidebar.heightOffsets.coordinator = -base.coordinatorHeight;
-    sidebar.render(SIDEBAR_WIDTH);
-    // After render, offset must be normalized so effective height = 1
-    if (base.coordinatorHeight > 0) {
-      expect(base.coordinatorHeight + sidebar.heightOffsets.coordinator).toBe(1);
-    }
-  });
-
   test("render-path clamping: panels remain fully visible after clamping (BUG-3)", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;

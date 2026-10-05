@@ -2075,7 +2075,7 @@ Width changes apply in increments (e.g., 5 columns per keypress). Sidebar width 
 
 Only meaningful for sidebar panels (agent tree, info). Growing one sidebar panel shrinks the other. `{`/`}` when `agent-tree` is focused grows/shrinks the tree by stealing from/giving to info. `{`/`}` when `info` is focused grows/shrinks info by stealing from/giving to tree.
 
-The user's resize is stored as offsets (`heightOffsets.tree` / `.info`, persisted in `layout.json`) from base heights that follow the row count of the tab the sidebar shows (`SidebarComponent.treeItemCount`: the Agents tree's rows plus the Favorites hint row, or the Teams tree's rows) and the terminal height. The sidebar render clamps a copy of the offsets so no panel drops below 1 row, and never writes the clamp back, so a tree shrunk in one tab keeps its size after a visit to a shorter tab or a restart. The `{`/`}` keys compute the same base and clamp the stored offsets to it first, so each keypress changes the rendered height at once.
+The user's resize is stored as offsets (`heightOffsets.tree` / `.info`, persisted in `layout.json`) from base heights that follow the row count of the tab the sidebar shows (`SidebarComponent.treeItemCount`: the Agents tree's rows plus the Favorites hint row, or the Teams tree's rows) and the terminal height. Each keypress moves one row between the tree and info, so the offsets are a pair (`info = -tree`). `clampSidebarOffsets` bounds the tree offset so the tree keeps ≥ 1 row and info keeps ≥ 1 row (when the terminal has room for an info panel at all), and sets info to match — this also mends an unpaired pair from an older `layout.json`. The sidebar render clamps a copy and never writes it back, so a tree shrunk in one tab keeps its size after a visit to a shorter tab, a smaller terminal, or a restart (`heightOffsets` load as saved). The `{`/`}` keys compute the same base (`SidebarComponent.baseHeights`) and the same clamped copy, so each keypress changes the rendered height at once; they store the copy only when the key changes a height, so a key the 1-row guard stops leaves the saved offsets alone.
 
 ### 13.4 Input Field
 
@@ -2147,7 +2147,7 @@ Panel sizes are persisted across `ib watch` sessions via `~/.itsybitsy/layout.js
 
 - **Optional lists**: `pinnedRepoPaths` (repo headers pinned with `.`) and `favoriteAgentIds` (agents favorited with `.`, §17.1 Favorites tab) are `string[]` fields. A missing or malformed list (not an array, or an array with a non-string) is dropped on load without rejecting the rest of the layout.
 - **Save**: Debounced (500ms) write after any resize operation, pin toggle, or favorite toggle. The debounce prevents excessive disk writes during rapid resizing.
-- **Restore**: On startup, the saved layout is loaded and applied with validation: NaN and Infinity values are rejected, and all values are clamped to valid ranges (sidebar width [30, 120], etc.).
+- **Restore**: On startup, the saved layout is loaded and applied with validation: NaN and Infinity values are rejected, and the widths are clamped to valid ranges (sidebar width [30, 120], etc.). `heightOffsets` load as saved (rounded to integers): their valid range depends on the tab's row count and the terminal height, so the sidebar render clamps a copy instead (§13.3.1).
 - **Missing file**: If `layout.json` doesn't exist or is invalid, defaults are used (sidebar 60 cols, default split-pane position, zero height offsets).
 
 ### 13.8 Tmux Width Model — PINNED WIDE

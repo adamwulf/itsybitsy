@@ -151,7 +151,7 @@ export class SidebarComponent implements Component {
     const showTeams = this.sidebarMode === "teams";
     const treeItemCount = showTeams
       ? this.teamsTree.flatList.length
-      : this.agentTree.visibleList.length;
+      : this.agentTree.renderRowCount;
     const base = computeSidebarHeights(this.displayHeight, treeItemCount);
     // Apply height offsets: grow focused panel, shrink the other.
     // Render-path clamping (BUG-3/§7.7): normalize offsets so they stay valid

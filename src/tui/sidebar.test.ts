@@ -4,7 +4,7 @@ import { AgentTreeComponent } from "./agent-tree";
 import { InfoPanelComponent } from "./info-panel";
 import { InputFieldComponent } from "./input-field";
 import { TmuxPaneComponent } from "./dashboard";
-import { makeAgent, makeFlatAgent, makeFlatRepoHeader } from "../test-utils";
+import { makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator } from "../test-utils";
 import { stripAnsi } from "../parse-state";
 import type { FlatEntry } from "../agents";
 import { REVERSE, DIM, UNDERLINE } from "./colors";
@@ -471,6 +471,33 @@ describe("SidebarComponent — Favorites tab", () => {
     sidebar.agentTree.setFavoritesOnly(true);
     const text = sidebar.render(SIDEBAR_WIDTH).map(stripAnsi).join("\n");
     expect(text).toContain("No favorites — press . on an agent");
+  });
+
+  test("with no favorites the tree has room for the hint under the system coordinator", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.sidebarMode = "favorites";
+    sidebar.agentTree.setFlatList([makeFlatSystemCoordinator(), makeFlatAgent(makeAgent({ id: "agent-plain" }))]);
+    sidebar.agentTree.setFavoritesOnly(true);
+    const lines = sidebar.render(SIDEBAR_WIDTH).map(stripAnsi);
+    // Tab line, coordinator, hint, then the Info separator.
+    expect(lines[1]).toContain("coordinator");
+    expect(lines[2]).toContain("No favorites — press . on an agent");
+    expect(lines[3]).toContain("Info");
+  });
+
+  test("with favorites hidden by V the hint under the coordinator names the V filter", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.sidebarMode = "favorites";
+    const stopped = makeAgent({ id: "agent-stopped", state: "stopped" });
+    sidebar.agentTree.setFlatList([makeFlatSystemCoordinator(), makeFlatAgent(stopped)]);
+    sidebar.agentTree.toggleFavorite("agent-stopped");
+    sidebar.agentTree.setFavoritesOnly(true);
+    sidebar.agentTree.setRepoFilter("running-only");
+    const lines = sidebar.render(SIDEBAR_WIDTH).map(stripAnsi);
+    expect(lines[1]).toContain("coordinator");
+    expect(lines[2]).toContain("No favorites match the V filter");
   });
 
   test("the tab line shows all three labels at the minimum sidebar width", () => {

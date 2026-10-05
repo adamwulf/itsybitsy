@@ -1353,9 +1353,13 @@ describe("AgentTreeComponent favorites view", () => {
     expect(lines).toHaveLength(2);
     expect(lines[0]).toContain("coordinator");
     expect(lines[1]).toContain("No favorites — press . on an agent");
+    // The sidebar sizes the tree from renderRowCount, which counts the hint row.
+    expect(tree.renderRowCount).toBe(2);
     tree.toggleFavorite("mgr");
     expect(tree.render(60).join("\n")).not.toContain("No favorites");
-    // No room for the hint in a one-row tree: the coordinator row only.
+    expect(tree.renderRowCount).toBe(tree.visibleList.length);
+    // A tree forced to one row (the user shrank it with `{`) keeps the
+    // coordinator row only.
     tree.toggleFavorite("mgr");
     tree.maxHeight = 1;
     expect(tree.render(60).map(plain)).toHaveLength(1);

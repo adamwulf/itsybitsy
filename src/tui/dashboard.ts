@@ -2920,7 +2920,7 @@ export class DashboardComponent implements Component {
         // Grow tree, shrink info; give back to info when shrinking.
         // teams-tree shares the sidebar tree region (and heightOffsets.tree)
         // with agent-tree (§17.3), so height changes behave identically.
-        const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.visibleList.length);
+        const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.renderRowCount);
         const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
         if (delta > 0) {
           // Growing tree: steal from info (§7.7 guard: donor must stay ≥ 1)
@@ -2939,7 +2939,7 @@ export class DashboardComponent implements Component {
         this.tui?.requestRender();
       } else if (focus === "info") {
         // Grow info, shrink tree; give back to tree when shrinking (§7.7 guard: donor must stay ≥ 1)
-        const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.visibleList.length);
+        const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.renderRowCount);
         const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
         const effectiveTree = Math.max(1, base.treeHeight + this.sidebar.heightOffsets.tree);
         if (delta > 0 && effectiveTree > 1) {

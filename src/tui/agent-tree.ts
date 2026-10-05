@@ -1143,13 +1143,30 @@ export class AgentTreeComponent implements Component {
       lines.push(truncateToWidth(`${DIM}${repoIndent}  ▼ ${remaining} more${RESET}`, width, ""));
     }
 
-    // The Favorites view always shows the system coordinator, so it is rarely
-    // empty: put the hint under the rows when no agent row shows.
-    if (this.favoritesOnly && lines.length < this.maxHeight && !visible.some((f) => f.kind === "agent")) {
+    if (this.hasFavoritesHintRow(visible) && lines.length < this.maxHeight) {
       lines.push(truncateToWidth(`${DIM}  ${this.favoritesEmptyHint()}${RESET}`, width, ""));
     }
 
     return lines;
+  }
+
+  /**
+   * The Favorites view always shows the system coordinator, so it is rarely
+   * empty: when rows show but none is an agent, render() puts the hint in an
+   * extra row under them.
+   */
+  private hasFavoritesHintRow(visible: FlatEntry[]): boolean {
+    return this.favoritesOnly && visible.length > 0 && !visible.some((f) => f.kind === "agent");
+  }
+
+  /**
+   * The rows render() wants: the visible entries plus the favorites hint row.
+   * The sidebar and the dashboard's `{`/`}` resize size the tree from this,
+   * so the hint row gets room.
+   */
+  get renderRowCount(): number {
+    const visible = this.visibleList;
+    return visible.length + (this.hasFavoritesHintRow(visible) ? 1 : 0);
   }
 
   /**

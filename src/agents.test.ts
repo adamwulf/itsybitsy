@@ -3950,6 +3950,341 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
   });
 });
 
+// ── detectAgentStates — reap-pass memo ──────────────────────────────────────
+// Every watcher tick used to re-run reapOrphanedClaude for every stopped agent:
+// lifecycle lock (write + link + unlink), meta.json and meta.transient.json
+// re-reads, and a blocking `ps` for any claude_pid that was recycled. A pass
+// that found nothing to do is now memoized per generation + watchdog.
+//
+// "No transient read" is proven through the lock counter: the reap reads
+// meta.json and meta.transient.json only after it holds the lock, so a pass
+// that never asks for the lock never reads either.
+
+describe("detectAgentStates — reap-pass memo", () => {
+  const PID_WRITE_EPOCH = 1_700_000_000;
+  // A start a day after the PID write: the numeric PID now names an unrelated
+  // process, which is the case that paid a blocking `ps` on every tick.
+  const RECYCLED_START = PID_WRITE_EPOCH + 86_400;
+
+  let tmpLogDir: string;
+  let logPath: string;
+  let repoTmp: string;
+  let lockCalls: number;
+  let metaReads: number;
+  let killCalls: Array<{ pid: number; signal: NodeJS.Signals | number }>;
+  let killSessionCalls: string[];
+
+  beforeEach(async () => {
+    tmpLogDir = await mkdtemp(join(tmpdir(), "reap-memo-log-"));
+    logPath = join(tmpLogDir, "watch.log");
+    repoTmp = await mkdtemp(join(tmpdir(), "reap-memo-repo-"));
+    resetReapedTmuxSessions();
+    const { setWatchLogPath } = await import("./watch-log");
+    setWatchLogPath(logPath);
+
+    lockCalls = 0;
+    metaReads = 0;
+    killCalls = [];
+    killSessionCalls = [];
+    acquireAgentLifecycleLockCtx.set(async () => {
+      lockCalls++;
+      return { release: async () => {} };
+    });
+    reapReadAgentMetaCtx.set(async (_agentDir, agent) => {
+      metaReads++;
+      return agent.meta;
+    });
+    killPidCtx.set((pid, signal) => {
+      killCalls.push({ pid, signal });
+      return true;
+    });
+    liveTmuxSessionsCtx.set(async () => new Set());
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      if (args[0] === "tmux" && args[1] === "kill-session") killSessionCalls.push(String(args[3]));
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+  });
+
+  afterEach(async () => {
+    classifySpawnLogCtx.reset();
+    isPidAliveCtx.reset();
+    killPidCtx.reset();
+    liveTmuxSessionsCtx.reset();
+    tmuxPollerSpawnCtx.reset();
+    resetReapedTmuxSessions();
+    const { resetWatchLogPath } = await import("./watch-log");
+    resetWatchLogPath();
+    await rm(tmpLogDir, { recursive: true, force: true });
+    await rm(repoTmp, { recursive: true, force: true });
+  });
+
+  /** A long-stopped agent on disk whose claude_pid gate resolves `stopped`. */
+  async function makeStoppedAgent(id: string, meta: Partial<AgentMeta> = {}): Promise<Agent> {
+    await mkdir(join(repoTmp, ".ittybitty", "agents", id), { recursive: true });
+    return makeAgent({
+      id,
+      repoPath: repoTmp,
+      meta: {
+        state: "running",
+        tmux_session: `ib-${id}`,
+        claude_pid: "18825",
+        claude_pid_epoch: PID_WRITE_EPOCH,
+        created_epoch: PID_WRITE_EPOCH - 3600,
+        ...meta,
+      } as Partial<AgentMeta> as AgentMeta,
+    });
+  }
+
+  async function writeTransient(agent: Agent, fields: Partial<TransientState>): Promise<void> {
+    const transient: TransientState = {
+      tmux_compacting: false,
+      tmux_rate_limited: false,
+      tmux_api_error: false,
+      tmux_api_terms: false,
+      tmux_api_safeguard: false,
+      has_background_tasks: false,
+      updated_at_ms: 0, // stale on purpose: the transient fast-path never applies
+      watchdog_pid: 0,
+      ...fields,
+    };
+    await writeFile(
+      join(repoTmp, ".ittybitty", "agents", agent.id, "meta.transient.json"),
+      JSON.stringify(transient)
+    );
+  }
+
+  async function passes(agent: Agent, count: number): Promise<void> {
+    for (let i = 0; i < count; i++) {
+      await detectAgentStates([agent], { reap: true });
+      expect(agent.state).toBe("stopped");
+    }
+  }
+
+  test("later passes over a reaped stopped agent take no lock and read nothing", async () => {
+    isPidAliveCtx.set(() => false); // claude and watchdog both long gone
+    const a = await makeStoppedAgent("agent-memo-dead");
+    await writeTransient(a, { watchdog_pid: 67890, watchdog_pid_epoch: PID_WRITE_EPOCH });
+
+    await passes(a, 1);
+    expect(lockCalls).toBe(1);
+    expect(metaReads).toBe(1);
+
+    await passes(a, 5);
+    expect(lockCalls).toBe(1);
+    expect(metaReads).toBe(1);
+    expect(killCalls).toEqual([]);
+    expect(killSessionCalls).toEqual([]);
+  });
+
+  test("a recycled claude_pid costs no blocking process-start lookup after the first pass", async () => {
+    // Real guards: the gate's uncached re-probe and the reap's veto each spawn
+    // a synchronous `ps` for a live PID. Only the async batch primer may run.
+    isPidAliveSinceCtx.reset();
+    isPidIdentityCurrentCtx.reset();
+    isPidAliveCtx.set(() => true); // the numeric PID is alive — someone else's now
+    let syncStartCalls = 0;
+    processStartEpochSecondsCtx.set(() => {
+      syncStartCalls++;
+      return RECYCLED_START;
+    });
+    batchProcessStartRawCtx.set(async (pids) =>
+      pids.map((pid) => `${pid} ${new Date(RECYCLED_START * 1000).toUTCString()}`).join("\n") + "\n"
+    );
+    const a = await makeStoppedAgent("agent-memo-recycled");
+
+    await passes(a, 1);
+    expect(syncStartCalls).toBeGreaterThan(0);
+    const afterFirstPass = syncStartCalls;
+
+    await passes(a, 5);
+    expect(syncStartCalls).toBe(afterFirstPass);
+    expect(lockCalls).toBe(1);
+    expect(metaReads).toBe(1);
+    expect(killCalls).toEqual([]); // a recycled PID is never signalled
+
+    // Read-only callers never consult the memo, so they keep confirming the
+    // dead verdict uncached exactly as before.
+    await detectAgentStates([a]);
+    expect(a.state).toBe("stopped");
+    expect(syncStartCalls).toBe(afterFirstPass + 1);
+  });
+
+  test.each([
+    ["tmux_session", { tmux_session: "ib-agent-memo-next" }],
+    ["claude_pid", { claude_pid: "18826" }],
+    ["claude_pid_epoch", { claude_pid_epoch: PID_WRITE_EPOCH + 1 }],
+    ["created_epoch", { created_epoch: PID_WRITE_EPOCH - 1800 }],
+  ] as const)("a changed %s misses the memo and reaps again", async (_field, change) => {
+    isPidAliveCtx.set(() => false);
+    const a = await makeStoppedAgent("agent-memo-key");
+
+    await passes(a, 2);
+    expect(lockCalls).toBe(1);
+
+    a.meta = { ...a.meta, ...change };
+    await passes(a, 1);
+    expect(lockCalls).toBe(2);
+    expect(metaReads).toBe(2);
+
+    // The new generation memoizes in its own right.
+    await passes(a, 2);
+    expect(lockCalls).toBe(2);
+  });
+
+  test("a watchdog written after the memo misses it and is reaped", async () => {
+    const NEW_WATCHDOG = 67891;
+    isPidAliveCtx.set((pid) => pid === NEW_WATCHDOG); // only the new watchdog lives
+    const a = await makeStoppedAgent("agent-memo-watchdog");
+
+    await passes(a, 2); // no transient yet: memoized with no watchdog
+    expect(lockCalls).toBe(1);
+
+    await writeTransient(a, { watchdog_pid: NEW_WATCHDOG, watchdog_pid_epoch: PID_WRITE_EPOCH + 60 });
+    await passes(a, 1);
+    expect(lockCalls).toBe(2);
+    expect(killCalls).toEqual([{ pid: NEW_WATCHDOG, signal: "SIGTERM" }]);
+  });
+
+  test("a lock-unavailable pass does not memoize", async () => {
+    isPidAliveCtx.set(() => false);
+    let lockAvailable = false;
+    acquireAgentLifecycleLockCtx.set(async () => {
+      lockCalls++;
+      return lockAvailable ? { release: async () => {} } : null;
+    });
+    const a = await makeStoppedAgent("agent-memo-locked");
+
+    await passes(a, 1);
+    expect(lockCalls).toBe(1);
+    expect(metaReads).toBe(0);
+
+    lockAvailable = true;
+    await passes(a, 1);
+    expect(lockCalls).toBe(2);
+    expect(metaReads).toBe(1);
+
+    await passes(a, 1);
+    expect(lockCalls).toBe(2);
+  });
+
+  test("a vetoed pass does not memoize", async () => {
+    isPidAliveCtx.set(() => true);
+    isPidAliveSinceCtx.set(() => false); // the gate believes the pid is gone
+    isPidIdentityCurrentCtx.set(() => true); // the OS says otherwise
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-agent-memo-veto"]));
+    const a = await makeStoppedAgent("agent-memo-veto");
+
+    await passes(a, 3);
+    expect(lockCalls).toBe(3);
+    expect(metaReads).toBe(3);
+    expect(killCalls).toEqual([]);
+    expect(killSessionCalls).toEqual([]);
+    const { readFile } = await import("fs/promises");
+    expect(await readFile(logPath, "utf8")).toContain("teardown skipped");
+  });
+
+  test("an operation-marker pass does not memoize", async () => {
+    // No tmux_session: this branch reads no transient before the reap, so the
+    // marker is first seen by the reap's own revalidation.
+    classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
+    isPidAliveCtx.set(() => false);
+    const a = await makeStoppedAgent("agent-memo-op", { tmux_session: "" });
+    await writeTransient(a, {
+      operation: { kind: "restarting", pid: 4242, started_at_ms: Date.now() },
+    });
+
+    await passes(a, 2);
+    expect(lockCalls).toBe(2);
+    expect(metaReads).toBe(2);
+    const { readFile } = await import("fs/promises");
+    expect(await readFile(logPath, "utf8")).toContain("operation began before teardown");
+
+    // Once the marker is gone the next pass memoizes, with no observed
+    // transient needed: no watchdog can start without a tmux_session.
+    await writeTransient(a, {});
+    await passes(a, 3);
+    expect(lockCalls).toBe(3);
+  });
+
+  test.each([
+    ["signalled", true],
+    ["unverifiable", false],
+  ] as const)("a pass that meets a live %s watchdog does not memoize", async (_label, identityCurrent) => {
+    const WATCHDOG = 67890;
+    isPidAliveCtx.set((pid) => pid === WATCHDOG);
+    // Keyed on the watchdog: a current claude_pid would fire the veto instead.
+    isPidIdentityCurrentCtx.set((pid) => identityCurrent && pid === WATCHDOG);
+    const a = await makeStoppedAgent("agent-memo-live-watchdog");
+    await writeTransient(a, { watchdog_pid: WATCHDOG, watchdog_pid_epoch: PID_WRITE_EPOCH });
+
+    await passes(a, 2);
+    expect(lockCalls).toBe(2);
+    expect(metaReads).toBe(2);
+    expect(killCalls).toEqual(
+      identityCurrent
+        ? [{ pid: WATCHDOG, signal: "SIGTERM" }, { pid: WATCHDOG, signal: "SIGTERM" }]
+        : []
+    );
+  });
+
+  test("a pass that attempts a kill-session does not memoize; the kill is not retried", async () => {
+    isPidAliveCtx.set(() => false);
+    liveTmuxSessionsCtx.set(async () => new Set(["ib-agent-memo-husk"]));
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      const isKill = args[0] === "tmux" && args[1] === "kill-session";
+      if (isKill) killSessionCalls.push(String(args[3]));
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({
+          start(c) {
+            if (isKill) c.enqueue(new TextEncoder().encode("error connecting to /tmp/tmux-501/default"));
+            c.close();
+          },
+        }),
+        exited: Promise.resolve(isKill ? 1 : 0),
+      };
+    }) as any);
+    const a = await makeStoppedAgent("agent-memo-husk");
+
+    await passes(a, 1);
+    expect(killSessionCalls).toHaveLength(1);
+    expect(lockCalls).toBe(1);
+
+    // reapedTmuxSessions already holds the session, so this pass does nothing
+    // and is the one that memoizes.
+    await passes(a, 1);
+    expect(lockCalls).toBe(2);
+
+    await passes(a, 3);
+    expect(lockCalls).toBe(2);
+    expect(killSessionCalls).toHaveLength(1);
+  });
+
+  test("observing the session alive again clears the memo", async () => {
+    let alive = false;
+    isPidAliveCtx.set(() => alive);
+    liveTmuxSessionsCtx.set(async () => (alive ? new Set(["ib-agent-memo-revived"]) : new Set()));
+    captureTmuxOutputResultCtx.set(async () => ({ status: "ok", output: "ordinary output\n" }));
+    const a = await makeStoppedAgent("agent-memo-revived");
+
+    await passes(a, 2);
+    expect(lockCalls).toBe(1);
+
+    // Same generation observed live (clearReapedTmuxSession runs here).
+    alive = true;
+    await detectAgentStates([a], { reap: true });
+    expect(a.state).toBe("running");
+
+    alive = false;
+    await passes(a, 1);
+    expect(lockCalls).toBe(2);
+  });
+});
+
 // ── detectAgentStates — claude_pid liveness gate (dead-claude detection) ────
 
 describe("detectAgentStates — claude_pid liveness gate", () => {

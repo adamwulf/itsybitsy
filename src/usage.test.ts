@@ -1,7 +1,7 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { formatResetTime, parseCodexRateLimits, parseGeminiUsage, fetchCodexUsage, fetchGeminiUsage, setTestDir, resetTestDir, spawnCtx } from "./usage";
+import { formatResetTime, parseCodexRateLimits, parseGeminiUsage, fetchCodexUsage, fetchGeminiUsage, setTestDir, resetTestDir, spawnCtx, CODEX_TAIL_CHUNK_BYTES } from "./usage";
 import { join } from "path";
-import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 
 describe("formatResetTime", () => {
@@ -121,37 +121,62 @@ describe("fetchCodexUsage", () => {
     await rm(tmpDir, { recursive: true, force: true });
   });
 
-  test("reads newest Codex rate limits from session jsonl", async () => {
+  /** A token_count line with usage. `extra` adds payload fields after rate_limits. */
+  function usageLine(
+    sessionPct: number,
+    weeklyPct: number,
+    timestamp = "2026-05-31T20:00:00.000Z",
+    extra: Record<string, unknown> = {},
+  ): string {
+    return JSON.stringify({
+      timestamp,
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        rate_limits: {
+          primary: { used_percent: sessionPct, window_minutes: 300, resets_at: 1780275600 },
+          secondary: { used_percent: weeklyPct, window_minutes: 10080, resets_at: 1780779600 },
+        },
+        ...extra,
+      },
+    });
+  }
+
+  /** A token_count line whose rate_limits is null: it has the marker text but no usage. */
+  const nullUsageLine = JSON.stringify({
+    timestamp: "2026-05-31T20:00:00.000Z",
+    type: "event_msg",
+    payload: { type: "token_count", rate_limits: null },
+  });
+
+  /** A line without usage, padded with `padding` characters. */
+  function otherLine(padding = 0): string {
+    return JSON.stringify({
+      timestamp: "2026-05-31T20:00:00.000Z",
+      type: "response_item",
+      payload: { type: "message", text: "a".repeat(padding) },
+    });
+  }
+
+  function jsonl(lines: string[]): string {
+    return lines.join("\n") + "\n";
+  }
+
+  /** Write a session log with the given mtime (in seconds) and return its path. */
+  async function writeSession(name: string, content: string, mtimeSeconds: number): Promise<string> {
     const sessionsDir = join(tmpDir, "codex-sessions", "2026", "05", "31");
     await mkdir(sessionsDir, { recursive: true });
-    await writeFile(
-      join(sessionsDir, "rollout-old.jsonl"),
-      JSON.stringify({
-        timestamp: "2026-05-31T19:00:00.000Z",
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          rate_limits: {
-            primary: { used_percent: 12, window_minutes: 300, resets_at: 1780275600 },
-            secondary: { used_percent: 3, window_minutes: 10080, resets_at: 1780779600 },
-          },
-        },
-      }) + "\n",
-    );
-    await writeFile(
-      join(sessionsDir, "rollout-new.jsonl"),
-      JSON.stringify({
-        timestamp: "2026-05-31T20:00:00.000Z",
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          rate_limits: {
-            primary: { used_percent: 42, window_minutes: 300, resets_at: 1780275600 },
-            secondary: { used_percent: 9, window_minutes: 10080, resets_at: 1780779600 },
-          },
-        },
-      }) + "\n",
-    );
+    const path = join(sessionsDir, name);
+    await writeFile(path, content);
+    await utimes(path, mtimeSeconds, mtimeSeconds);
+    return path;
+  }
+
+  test("returns the newest file's usage and does not use an older file", async () => {
+    // The older file sorts after by name and has the later record timestamp,
+    // so only the mtime can make the newer file win.
+    await writeSession("rollout-b.jsonl", jsonl([usageLine(12, 3, "2026-05-31T23:00:00.000Z")]), 1_780_000_000);
+    await writeSession("rollout-a.jsonl", jsonl([usageLine(42, 9, "2026-05-31T19:00:00.000Z")]), 1_780_000_100);
 
     const result = await fetchCodexUsage();
 
@@ -160,7 +185,95 @@ describe("fetchCodexUsage", () => {
     expect(result.data?.weeklyPct).toBe(9);
   });
 
+  test("uses the next older file when the newest file has no usage", async () => {
+    await writeSession("rollout-oldest.jsonl", jsonl([usageLine(11, 1)]), 1_780_000_000);
+    // No trailing newline: the last line ends at the end of the file.
+    await writeSession("rollout-middle.jsonl", otherLine() + "\n" + usageLine(55, 7), 1_780_000_100);
+    await writeSession("rollout-newest.jsonl", jsonl([otherLine(), nullUsageLine]), 1_780_000_200);
+
+    const result = await fetchCodexUsage();
+
+    expect(result.error).toBe(false);
+    expect(result.data?.sessionPct).toBe(55);
+    expect(result.data?.weeklyPct).toBe(7);
+  });
+
+  test("finds usage more than one chunk before the end of a large file", async () => {
+    const filler = Array.from({ length: 300 }, () => otherLine(1000));
+    const path = await writeSession(
+      "rollout-large.jsonl",
+      jsonl([usageLine(20, 4), usageLine(33, 5), ...filler]),
+      1_780_000_000,
+    );
+    expect(Bun.file(path).size).toBeGreaterThan(3 * CODEX_TAIL_CHUNK_BYTES);
+
+    const result = await fetchCodexUsage();
+
+    expect(result.error).toBe(false);
+    expect(result.data?.sessionPct).toBe(33);
+    expect(result.data?.weeklyPct).toBe(5);
+  });
+
+  test("reads a usage line that a chunk boundary splits inside the marker text", async () => {
+    const before = otherLine();
+    const marker = usageLine(61, 8);
+    // The first chunk read from the end starts 4 bytes into "rate_limits".
+    const splitAt = before.length + 1 + marker.indexOf("rate_limits") + 4;
+    const fillerBytes = CODEX_TAIL_CHUNK_BYTES - (before.length + 1 + marker.length + 1 - splitAt);
+    const filler = otherLine(fillerBytes - 1 - otherLine().length);
+    const path = await writeSession("rollout-split.jsonl", jsonl([before, marker, filler]), 1_780_000_000);
+    expect(Bun.file(path).size - CODEX_TAIL_CHUNK_BYTES).toBe(splitAt);
+
+    const result = await fetchCodexUsage();
+
+    expect(result.error).toBe(false);
+    expect(result.data?.sessionPct).toBe(61);
+    expect(result.data?.weeklyPct).toBe(8);
+  });
+
+  test("reads a usage line longer than several chunks", async () => {
+    const longMarker = usageLine(72, 6, undefined, { note: "x".repeat(3 * CODEX_TAIL_CHUNK_BYTES) });
+    await writeSession("rollout-long.jsonl", jsonl([otherLine(), longMarker, otherLine(), otherLine()]), 1_780_000_000);
+
+    const result = await fetchCodexUsage();
+
+    expect(result.error).toBe(false);
+    expect(result.data?.sessionPct).toBe(72);
+    expect(result.data?.weeklyPct).toBe(6);
+  });
+
+  test("returns the last usage line in a file, not the one with the latest timestamp", async () => {
+    await writeSession(
+      "rollout-many.jsonl",
+      jsonl([
+        usageLine(10, 1, "2026-05-31T23:00:00.000Z"),
+        usageLine(20, 2, "2026-05-31T21:00:00.000Z"),
+        usageLine(30, 3, "2026-05-31T19:00:00.000Z"),
+        otherLine(),
+        nullUsageLine,
+      ]),
+      1_780_000_000,
+    );
+
+    const result = await fetchCodexUsage();
+
+    expect(result.error).toBe(false);
+    expect(result.data?.sessionPct).toBe(30);
+    expect(result.data?.weeklyPct).toBe(3);
+  });
+
   test("returns an error when no Codex usage payload exists", async () => {
+    const result = await fetchCodexUsage();
+
+    expect(result.error).toBe(true);
+    expect(result.data).toBeNull();
+  });
+
+  test("returns an error when the session files have no usage", async () => {
+    await writeSession("rollout-a.jsonl", jsonl([otherLine(), nullUsageLine]), 1_780_000_000);
+    await writeSession("rollout-b.jsonl", jsonl([otherLine(200_000)]), 1_780_000_100);
+    await writeSession("rollout-empty.jsonl", "", 1_780_000_200);
+
     const result = await fetchCodexUsage();
 
     expect(result.error).toBe(true);

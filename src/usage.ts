@@ -10,7 +10,7 @@
 
 import { userHome } from "./home";
 import { join } from "node:path";
-import { rename, mkdir, stat, writeFile, unlink, readdir, readFile } from "node:fs/promises";
+import { rename, mkdir, stat, writeFile, unlink, readdir, open } from "node:fs/promises";
 
 import { SpawnContext } from "./types";
 
@@ -62,11 +62,6 @@ interface CodexRateLimitWindow {
 interface CodexRateLimits {
   primary?: CodexRateLimitWindow;
   secondary?: CodexRateLimitWindow;
-}
-
-interface CodexUsageCandidate {
-  data: UsageData;
-  timestamp: number;
 }
 
 /** Format a duration from now to a future ISO date as human-readable. */
@@ -223,7 +218,18 @@ export function parseGeminiUsage(output: string, now?: Date): UsageData {
   return data;
 }
 
-async function collectJsonlFiles(dir: string, depth = 0): Promise<string[]> {
+/** Bytes read per step when a Codex session log is read from its end. */
+export const CODEX_TAIL_CHUNK_BYTES = 64 * 1024;
+
+/** Only a line that contains this text can carry usage, so only such lines are JSON-parsed. */
+const CODEX_USAGE_MARKER = "rate_limits";
+
+interface JsonlFile {
+  path: string;
+  mtimeMs: number;
+}
+
+async function collectJsonlFiles(dir: string, depth = 0): Promise<JsonlFile[]> {
   if (depth > 5) return [];
   let entries;
   try {
@@ -232,19 +238,23 @@ async function collectJsonlFiles(dir: string, depth = 0): Promise<string[]> {
     return [];
   }
 
-  const files: string[] = [];
+  const files: JsonlFile[] = [];
   for (const entry of entries) {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) {
       files.push(...(await collectJsonlFiles(path, depth + 1)));
     } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-      files.push(path);
+      try {
+        files.push({ path, mtimeMs: (await stat(path)).mtimeMs });
+      } catch {
+        // The file went away after readdir.
+      }
     }
   }
   return files;
 }
 
-function parseCodexUsageLine(line: string): CodexUsageCandidate | null {
+function parseCodexUsageLine(line: string): UsageData | null {
   let record: any;
   try {
     record = JSON.parse(line);
@@ -263,35 +273,74 @@ function parseCodexUsageLine(line: string): CodexUsageCandidate | null {
   ) {
     return null;
   }
-
-  const timestamp = typeof record?.timestamp === "string"
-    ? new Date(record.timestamp).getTime()
-    : 0;
-  return { data, timestamp: Number.isFinite(timestamp) ? timestamp : 0 };
+  return data;
 }
 
-/** Read the newest Codex usage payload from local Codex session JSONL logs. */
+/** Parse one log line, given as its byte pieces in file order. */
+function parseCodexUsagePieces(pieces: Buffer[]): UsageData | null {
+  const line = pieces.length === 1 ? pieces[0]! : Buffer.concat(pieces);
+  if (!line.includes(CODEX_USAGE_MARKER)) return null;
+  return parseCodexUsageLine(line.toString("utf8"));
+}
+
+/**
+ * Find the last usage payload in one Codex session log. The file is read from
+ * its end in CODEX_TAIL_CHUNK_BYTES steps, and reading stops at the line
+ * closest to the end that has usage, so a large file is never read whole.
+ */
+async function readLastCodexUsage(path: string): Promise<UsageData | null> {
+  let handle;
+  try {
+    handle = await open(path, "r");
+  } catch {
+    return null;
+  }
+  try {
+    let position = (await handle.stat()).size;
+    // The pieces, in file order, of the line that the chunks read so far start inside.
+    let pending: Buffer[] = [];
+    while (position > 0) {
+      const length = Math.min(CODEX_TAIL_CHUNK_BYTES, position);
+      position -= length;
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, position);
+      const chunk = buffer.subarray(0, bytesRead);
+
+      let end = chunk.length;
+      while (end > 0) {
+        const newline = chunk.lastIndexOf(0x0a, end - 1);
+        if (newline < 0) break;
+        const data = parseCodexUsagePieces([chunk.subarray(newline + 1, end), ...pending]);
+        if (data) return data;
+        pending = [];
+        end = newline;
+      }
+      pending.unshift(chunk.subarray(0, end));
+    }
+    // The first line of the file has no newline before it.
+    return parseCodexUsagePieces(pending);
+  } catch {
+    return null;
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Read the newest Codex usage payload from local Codex session JSONL logs.
+ * Logs are searched newest mtime first, and the first log that has a usage
+ * line answers, so older logs are not read.
+ */
 export async function fetchCodexUsage(): Promise<UsageResult> {
   const files = await collectJsonlFiles(CODEX_SESSIONS_DIR);
-  let newest: CodexUsageCandidate | null = null;
+  // Equal mtimes fall back to the path: rollout-<start time> names sort by age.
+  files.sort((a, b) => b.mtimeMs - a.mtimeMs || b.path.localeCompare(a.path));
 
   for (const file of files) {
-    let text: string;
-    try {
-      text = await readFile(file, "utf8");
-    } catch {
-      continue;
-    }
-    for (const line of text.split("\n")) {
-      if (line.trim().length === 0) continue;
-      const candidate = parseCodexUsageLine(line);
-      if (!candidate) continue;
-      if (!newest || candidate.timestamp >= newest.timestamp) newest = candidate;
-    }
+    const data = await readLastCodexUsage(file.path);
+    if (data) return { data, error: false };
   }
-
-  if (!newest) return { data: null, error: true };
-  return { data: newest.data, error: false };
+  return { data: null, error: true };
 }
 
 interface GeminiCacheFile {

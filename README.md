@@ -152,7 +152,7 @@ Models are selected as `<cli>:<model>` — for example `claude:opus` or `codex:g
 
 ### Telegram (optional)
 
-Set a bot token (`ib config set channels.telegram.bot_token <token>`) and allow your chat (`ib tgallow <chat_id>`), and itsybitsy becomes a two-way bridge: messages from your phone are delivered to the system coordinator, and agents can reply with `ib tgsend`, react with `ib tgreact`, and send files with `ib tgsendfile`. Attachments, reactions, and a few slash commands (`/restart`, `/context`, `/compact`) work in both directions.
+Set a bot token (`ib config set channels.telegram.bot_token <token>`) and allow your chat (`ib tgallow <chat_id>`), and itsybitsy becomes a two-way bridge: messages from your phone are delivered to the system coordinator, and the system coordinator can reply with `ib tgsend`, react with `ib tgreact`, and send files with `ib tgsendfile`. Other agents cannot use these three commands. Attachments, reactions, and a few slash commands (`/restart`, `/context`, `/compact`) work in both directions.
 
 ## The dashboard
 

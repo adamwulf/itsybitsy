@@ -1925,6 +1925,27 @@ describe("checkIbCommandAccess", () => {
     expect(result!.reason).toContain("user-only");
   });
 
+  test("denies outbound Telegram commands to a regular agent — system coordinator only", async () => {
+    for (const command of [
+      "ib tgsend hello",
+      "ib tgsendfile /tmp/report.png caption --photo",
+      "ib tgreact 👍 --message-id 12",
+      "ib tgreact --clear",
+      "/usr/local/bin/ib tgsend hello",
+      "ib tgsend <<'EOF'\nhello\nEOF",
+    ]) {
+      const result = await checkIbCommandAccess(command, "agent-manager1", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result!.reason).toContain("system coordinator only");
+    }
+  });
+
+  test("a message that only mentions ib tgsend is not a Telegram send", async () => {
+    await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
+    expect(await checkIbCommandAccess('ib send agent-target1 "use ib tgsend to reply"', "agent-manager1", agentsDir)).toBeNull();
+    expect(await checkIbCommandAccess("ib send agent-target1 <<'EOF'\nib tgsend hello\nEOF", "agent-manager1", agentsDir)).toBeNull();
+  });
+
   test("merge-check is unrestricted — returns null even for non-manager", async () => {
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
     const result = await checkIbCommandAccess("ib merge-check agent-target1", "agent-other111", agentsDir);
@@ -2004,6 +2025,15 @@ describe("checkIbCommandAccess", () => {
     expect(result!.reason).toContain("user-only");
   });
 
+  test("per-repo coordinator CANNOT send to Telegram — system coordinator only", async () => {
+    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
+    for (const command of ["ib tgsend hello", "ib tgsendfile /tmp/a.txt", "ib tgreact 👍"]) {
+      const result = await checkIbCommandAccess(command, "itsybitsy", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result!.reason).toContain("system coordinator only");
+    }
+  });
+
   test("per-repo coordinator CANNOT merge a non-child regular agent", async () => {
     await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-someone" });
@@ -2049,6 +2079,12 @@ describe("checkIbCommandAccess", () => {
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
     const result = await checkIbCommandAccess("ib merge agent-target1 --force", "@system", agentsDir);
     expect(result).toBeNull();
+  });
+
+  test("@system can send, send files, and react on Telegram", async () => {
+    for (const command of ["ib tgsend hello", "ib tgsendfile /tmp/a.txt", "ib tgreact 👍", "ib tgreact --clear"]) {
+      expect(await checkIbCommandAccess(command, "@system", agentsDir)).toBeNull();
+    }
   });
 
   test("@system is also denied nuke — nuke is user-only, not even @system may run it", async () => {

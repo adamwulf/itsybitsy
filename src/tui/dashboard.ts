@@ -1077,14 +1077,25 @@ export class DashboardComponent implements Component {
     if (layout.favoriteAgentIds !== undefined) {
       this.agentTree.favoriteAgentIds = new Set(layout.favoriteAgentIds);
     }
-    // §7.7 load-time safety net: use process.stdout.rows as a proxy for displayHeight to
-    // reject grossly invalid offsets from corrupted or oversized-terminal layout files.
-    // computeSidebarHeights needs actual displayHeight, but we don't have it yet, so use
-    // terminal rows as an approximation (slightly higher than actual displayHeight).
-    const approxHeight = process.stdout.rows ?? 24;
-    const approxBase = computeSidebarHeights(approxHeight, 1);
-    clampSidebarOffsets(approxBase, this.sidebar.heightOffsets);
+    // No load-time clamp of heightOffsets: the base heights are not known yet
+    // (they depend on the tab's row count), and a clamp against a guess would
+    // undo a saved tree shrink. The sidebar render clamps a copy every frame
+    // and the `{`/`}` resize clamps first (clampedSidebarBase), so an
+    // out-of-range offset from layout.json is harmless.
     this.pendingTmuxResize = true;
+  }
+
+  /**
+   * The sidebar's base heights for the tab it shows — the same base its
+   * render() uses — with `sidebar.heightOffsets` clamped to that base. The
+   * `{`/`}` resize calls this first: render() clamps only a copy, so without
+   * it the guards could act on an offset past the clamp and a keypress would
+   * change nothing on screen.
+   */
+  private clampedSidebarBase(): ReturnType<typeof computeSidebarHeights> {
+    const base = computeSidebarHeights(this.sidebar.displayHeight, this.sidebar.treeItemCount(this.sidebarMode));
+    clampSidebarOffsets(base, this.sidebar.heightOffsets);
+    return base;
   }
 
   /** Persist current layout via debounced write. */
@@ -2920,7 +2931,7 @@ export class DashboardComponent implements Component {
         // Grow tree, shrink info; give back to info when shrinking.
         // teams-tree shares the sidebar tree region (and heightOffsets.tree)
         // with agent-tree (§17.3), so height changes behave identically.
-        const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.renderRowCount);
+        const base = this.clampedSidebarBase();
         const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
         if (delta > 0) {
           // Growing tree: steal from info (§7.7 guard: donor must stay ≥ 1)
@@ -2939,7 +2950,7 @@ export class DashboardComponent implements Component {
         this.tui?.requestRender();
       } else if (focus === "info") {
         // Grow info, shrink tree; give back to tree when shrinking (§7.7 guard: donor must stay ≥ 1)
-        const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.renderRowCount);
+        const base = this.clampedSidebarBase();
         const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
         const effectiveTree = Math.max(1, base.treeHeight + this.sidebar.heightOffsets.tree);
         if (delta > 0 && effectiveTree > 1) {

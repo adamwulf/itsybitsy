@@ -1522,7 +1522,7 @@ The `ib watch` TUI uses a three-column layout:
 
 The input field location depends on which panel has focus: when the coordinator has focus and is selected (TMUX view in main area), the input field appears at the bottom of the coordinator tmux pane in the main area; when the active agent pane has focus, it appears at the bottom of the tmux pane in the main area (see §13.4).
 
-The left sidebar defaults to 60 columns (resizable via `[`/`]` when a sidebar panel has focus, range 30–120). It is a vertical stack containing two sections: agent tree (top) and info panel (bottom). The system coordinator is never shown in the sidebar — when the coordinator is selected in the agent tree, the main area shows its tmux output at full width. The main area to the right of the sidebar retains the existing split-pane layout: tmux output on the left and cycling right pane on the right.
+The left sidebar defaults to 60 columns (resizable via `[`/`]` when a sidebar panel has focus, range 30–120). It is a vertical stack containing two sections: agent tree (top) and info panel (bottom). The system coordinator has no sidebar section of its own — it is a row in the agent tree (first, in the Agents and Favorites tabs), and when that row is selected the main area shows its tmux output at full width. The main area to the right of the sidebar retains the existing split-pane layout: tmux output on the left and cycling right pane on the right.
 
 ### 11.2 Left Sidebar
 
@@ -1653,7 +1653,7 @@ Per-repo coordinators are not shown as tree rows (see §12.2.5) — they are sur
 
 **Layout when system coordinator is selected**: When the system coordinator is selected in the agent tree, the layout changes:
 
-- **Sidebar** shows the normal two-section layout: agent tree (top) + info panel (bottom). The coordinator is never shown in the sidebar.
+- **Sidebar** shows the normal two-section layout: agent tree (top) + info panel (bottom). The coordinator's only sidebar presence is its row in the agent tree; its tmux output never shows in the sidebar.
 - **Main area** (middle + right panes) merge into a **single full-width view** that toggles between two modes via `n`/`p`:
   - **TMUX view** (default): Live coordinator tmux output at full width, with input field at the bottom when the coordinator panel has focus (see §13.4). Supports scrollback via `;`/`l` keys.
   - **DASHBOARD view**: A scrollable, read-only system dashboard showing a detailed agent overview table.
@@ -2074,6 +2074,8 @@ Width changes apply in increments (e.g., 5 columns per keypress). Sidebar width 
 **Height resizing (`{` / `}`):**
 
 Only meaningful for sidebar panels (agent tree, info). Growing one sidebar panel shrinks the other. `{`/`}` when `agent-tree` is focused grows/shrinks the tree by stealing from/giving to info. `{`/`}` when `info` is focused grows/shrinks info by stealing from/giving to tree.
+
+The user's resize is stored as offsets (`heightOffsets.tree` / `.info`, persisted in `layout.json`) from base heights that follow the row count of the tab the sidebar shows (`SidebarComponent.treeItemCount`: the Agents tree's rows plus the Favorites hint row, or the Teams tree's rows) and the terminal height. The sidebar render clamps a copy of the offsets so no panel drops below 1 row, and never writes the clamp back, so a tree shrunk in one tab keeps its size after a visit to a shorter tab or a restart. The `{`/`}` keys compute the same base and clamp the stored offsets to it first, so each keypress changes the rendered height at once.
 
 ### 13.4 Input Field
 

@@ -242,7 +242,7 @@ describe("SidebarComponent", () => {
     expect(text).toContain("Info");
   });
 
-  test("render-path clamping: tree offset that would cause zero-height is normalized (BUG-3)", () => {
+  test("render-path clamping: a tree offset that would cause zero-height renders a 1-row tree (BUG-3)", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
     sidebar.agentTree.setFlatList([]);
@@ -250,23 +250,56 @@ describe("SidebarComponent", () => {
     const base = computeSidebarHeights(25, 0);
     // Set offset so that base.treeHeight + offset = -5 (way below 1)
     sidebar.heightOffsets.tree = -(base.treeHeight + 5);
-    sidebar.render(SIDEBAR_WIDTH);
-    // After render, offset must be normalized so effective height = 1
-    expect(base.treeHeight + sidebar.heightOffsets.tree).toBe(1);
+    const lines = sidebar.render(SIDEBAR_WIDTH).map(stripAnsi);
+    // Tab line, one tree row, then the Info separator.
+    expect(lines[2]).toContain("Info");
+    // Render clamps a copy: the offset itself is left alone.
+    expect(sidebar.heightOffsets.tree).toBe(-(base.treeHeight + 5));
   });
 
-  test("render-path clamping: info offset that would cause zero-height is normalized (BUG-3)", () => {
+  test("render-path clamping: an info offset that would cause zero-height still renders the info panel (BUG-3)", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
     sidebar.agentTree.setFlatList([]);
     const base = computeSidebarHeights(25, 0);
     // Force info offset so that base.infoHeight + offset = 0
     sidebar.heightOffsets.info = -base.infoHeight;
-    sidebar.render(SIDEBAR_WIDTH);
-    // After render, offset must be normalized so effective height = 1
-    if (base.infoHeight > 0) {
-      expect(base.infoHeight + sidebar.heightOffsets.info).toBe(1);
-    }
+    const lines = sidebar.render(SIDEBAR_WIDTH).map(stripAnsi);
+    expect(lines.some((l) => l.includes("Info"))).toBe(true);
+    // Render clamps a copy: the offset itself is left alone.
+    expect(sidebar.heightOffsets.info).toBe(-base.infoHeight);
+  });
+
+  test("a tree shrunk in the Agents tab keeps its offset after a visit to a short Favorites view", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    const agents = ["a1", "a2", "a3", "a4", "a5", "a6", "a7"].map((id) => makeAgent({ id }));
+    sidebar.agentTree.setFlatList(agents.map((a) => makeFlatAgent(a)));
+    // 7 rows → base tree height 7; the user shrank it to 3.
+    sidebar.heightOffsets.tree = -4;
+    sidebar.heightOffsets.info = 4;
+    const treeRows = () => sidebar.render(SIDEBAR_WIDTH).map(stripAnsi).findIndex((l) => l.includes("Info")) - 1;
+    expect(treeRows()).toBe(3);
+    // Favorites with one favorite: base 1, the tree clamps to 1 row on screen.
+    sidebar.agentTree.toggleFavorite("a1");
+    sidebar.agentTree.setFavoritesOnly(true);
+    sidebar.sidebarMode = "favorites";
+    expect(treeRows()).toBe(1);
+    // Back on Agents the shrink is still there.
+    sidebar.agentTree.setFavoritesOnly(false);
+    sidebar.sidebarMode = "agents";
+    expect(treeRows()).toBe(3);
+    expect(sidebar.heightOffsets).toEqual({ tree: -4, info: 4, coordinator: 0 });
+  });
+
+  test("treeItemCount counts the rows of the tab's tree", () => {
+    const sidebar = makeSidebar();
+    sidebar.agentTree.setFlatList([makeFlatAgent(makeAgent({ id: "a1" })), makeFlatAgent(makeAgent({ id: "a2" }))]);
+    sidebar.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    expect(sidebar.treeItemCount("agents")).toBe(2);
+    expect(sidebar.treeItemCount("teams")).toBe(1);
   });
 
   test("render-path clamping: coordinator offset that would cause zero-height is normalized (BUG-3)", () => {

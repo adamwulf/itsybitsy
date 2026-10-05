@@ -4936,6 +4936,45 @@ describe("sidebar height resize ({/} keys)", () => {
     expect(dashboard.sidebar.heightOffsets.tree).toBe(afterGrow.tree - 1);
     expect(dashboard.sidebar.heightOffsets.info).toBe(afterGrow.info + 1);
   });
+
+  test("{ in the Teams tab sizes from the Teams tree, as the sidebar render does", () => {
+    const dashboard = makeDashboard();
+    dashboard.sidebar.displayHeight = 30;
+    const agents = ["a1", "a2", "a3", "a4", "a5", "a6", "a7"].map((id) => makeAgent(id, "/repos/test"));
+    dashboard.agentTree.setFlatList(agents.map((a) => makeFlatAgent(a)));
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    dashboard.handleInput("2");
+    expect(dashboard.focus).toBe("teams-tree");
+    // The Teams tree is one row, so the tree region is already at its 1-row
+    // minimum: { must not shrink it (the 7-row Agents tree would allow it).
+    const before = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("{");
+    expect(dashboard.sidebar.heightOffsets).toEqual(before);
+  });
+
+  test("} acts at once on a tree offset past the clamp", () => {
+    const dashboard = makeDashboard();
+    dashboard.sidebar.displayHeight = 30;
+    const agent = makeAgent("agent-a", "/repos/test");
+    dashboard.agentTree.setFlatList([makeFlatAgent(agent)]);
+    // Base tree height 1; an offset of -10 left over from a taller tab.
+    dashboard.sidebar.heightOffsets.tree = -10;
+    dashboard.handleInput("}");
+    // Clamped to 0 (1 row), then grown by 1: the tree is 2 rows now.
+    expect(dashboard.sidebar.heightOffsets.tree).toBe(1);
+  });
+
+  test("applyLayout keeps a saved tree shrink", () => {
+    const dashboard = makeDashboard();
+    dashboard.applyLayout({
+      sidebarWidth: 60,
+      splitPaneLeftWidth: 80,
+      heightOffsets: { tree: -3, info: 3, coordinator: 0 },
+    });
+    expect(dashboard.sidebar.heightOffsets).toEqual({ tree: -3, info: 3, coordinator: 0 });
+  });
 });
 
 describe("input field integration", () => {

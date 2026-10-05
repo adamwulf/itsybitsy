@@ -1295,6 +1295,30 @@ function containsInternalIbInvocation(command: string): boolean {
 }
 
 /**
+ * Outbound Telegram commands. Only the system coordinator receives Telegram
+ * messages, so it is the only agent that may reply, react, or send files.
+ */
+const IB_TELEGRAM_OUTBOUND_COMMANDS = new Set(["tgsend", "tgsendfile", "tgreact"]);
+
+/**
+ * Detect an `ib tgsend` / `ib tgsendfile` / `ib tgreact` invocation. Same
+ * token scan as containsInternalIbInvocation: quoted words and heredoc bodies
+ * are data, so a message that only mentions `ib tgsend` is not a match. An
+ * untokenizable command never gets here — containsInternalIbInvocation has
+ * already denied it.
+ */
+function containsIbTelegramOutboundInvocation(command: string): boolean {
+  const tokens = tokenizeBashPaths(maskHeredocBodies(command));
+  if (!tokens) return false;
+  for (let i = 0; i + 1 < tokens.length; i++) {
+    const executable = stripBashSurroundingQuotes(tokens[i]!);
+    if (basename(executable) !== "ib") continue;
+    if (IB_TELEGRAM_OUTBOUND_COMMANDS.has(stripBashSurroundingQuotes(tokens[i + 1]!))) return true;
+  }
+  return false;
+}
+
+/**
  * True when this process is inside the kernel sandbox AND that sandbox hides
  * `<repo>/.ittybitty/archive` from it. A worktree agent's profile does not
  * grant the archive; a worktree:false agent (whose worktree IS the repo root)
@@ -1379,6 +1403,16 @@ export async function checkIbCommandAccess(
   // internal lifecycle entry points above through its Bash tool. Legitimate
   // launch helpers call those commands directly and never enter PreToolUse.
   if (callingAgentId === SYSTEM_AGENT_ID) return null;
+
+  // Outbound Telegram belongs to @system alone: it is the only agent that
+  // receives Telegram messages, so it is the only one that replies. Every
+  // other agent — worker, manager, per-repo coordinator — is denied here.
+  if (containsIbTelegramOutboundInvocation(normalizedCommand)) {
+    return {
+      decision: "deny",
+      reason: "Access denied: 'ib tgsend', 'ib tgsendfile' and 'ib tgreact' are for the system coordinator only — it is the only agent that receives Telegram messages. Report to your manager (or to the user, if you have no manager) instead",
+    };
+  }
 
   // Bash(ib:*) must represent one shell command.  Otherwise a permitted
   // `ib send ...` can append a second lifecycle/internal command after `;`,

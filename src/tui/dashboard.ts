@@ -53,7 +53,7 @@ import { AgentTreeComponent, nextRepoFilter, agentDisplayName } from "./agent-tr
 import { TeamsTreeComponent, flattenTeamsTree } from "./teams-tree";
 import { ChannelPaneComponent } from "./channel-pane";
 import { TeamLogPaneComponent } from "./team-log-pane";
-import { SidebarComponent, SIDEBAR_WIDTH, computeSidebarHeights, clampSidebarOffsets } from "./sidebar";
+import { SidebarComponent, SIDEBAR_WIDTH } from "./sidebar";
 import type { SidebarMode, SelectionSource } from "./sidebar";
 import { InfoPanelComponent } from "./info-panel";
 import { listTeams, getTeam } from "../teams";
@@ -1059,7 +1059,7 @@ export class DashboardComponent implements Component {
     this.tui = tui;
   }
 
-  /** Apply a saved layout state to restore panel sizes, clamping to valid ranges. */
+  /** Apply a saved layout state to restore panel sizes, clamping the widths to valid ranges. */
   applyLayout(layout: LayoutState) {
     this.sidebarWidth = clampSidebarWidth(layout.sidebarWidth);
     // No coordinator tmux resize here: the system coordinator's window is pinned
@@ -1077,13 +1077,11 @@ export class DashboardComponent implements Component {
     if (layout.favoriteAgentIds !== undefined) {
       this.agentTree.favoriteAgentIds = new Set(layout.favoriteAgentIds);
     }
-    // §7.7 load-time safety net: use process.stdout.rows as a proxy for displayHeight to
-    // reject grossly invalid offsets from corrupted or oversized-terminal layout files.
-    // computeSidebarHeights needs actual displayHeight, but we don't have it yet, so use
-    // terminal rows as an approximation (slightly higher than actual displayHeight).
-    const approxHeight = process.stdout.rows ?? 24;
-    const approxBase = computeSidebarHeights(approxHeight, 1);
-    clampSidebarOffsets(approxBase, this.sidebar.heightOffsets);
+    // No load-time clamp of heightOffsets: the base heights are not known yet
+    // (they depend on the tab's row count), and a clamp against a guess would
+    // undo a saved tree shrink. The sidebar render and the `{`/`}` resize
+    // both use a clamped copy (SidebarComponent.clampedHeights), so an offset
+    // from layout.json never drops a panel below 1 row.
     this.pendingTmuxResize = true;
   }
 
@@ -2916,38 +2914,19 @@ export class DashboardComponent implements Component {
     else if (data === "{" || data === "}") {
       const delta = data === "}" ? 1 : -1;
       const focus = this.focusManager.current();
-      if (focus === "agent-tree" || focus === "teams-tree") {
-        // Grow tree, shrink info; give back to info when shrinking.
-        // teams-tree shares the sidebar tree region (and heightOffsets.tree)
-        // with agent-tree (§17.3), so height changes behave identically.
-        const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.visibleList.length);
-        const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
-        if (delta > 0) {
-          // Growing tree: steal from info (§7.7 guard: donor must stay ≥ 1)
-          if (effectiveInfo > 1) {
-            this.sidebar.heightOffsets.tree += delta;
-            this.sidebar.heightOffsets.info -= delta;
-          }
-        } else {
-          // Shrinking tree: give back to info
-          const effectiveTree = Math.max(1, base.treeHeight + this.sidebar.heightOffsets.tree);
-          if (effectiveTree > 1) {
-            this.sidebar.heightOffsets.tree += delta;
-            this.sidebar.heightOffsets.info -= delta;
-          }
-        }
-        this.tui?.requestRender();
-      } else if (focus === "info") {
-        // Grow info, shrink tree; give back to tree when shrinking (§7.7 guard: donor must stay ≥ 1)
-        const base = computeSidebarHeights(this.sidebar.displayHeight, this.agentTree.visibleList.length);
-        const effectiveInfo = Math.max(0, base.infoHeight + this.sidebar.heightOffsets.info);
-        const effectiveTree = Math.max(1, base.treeHeight + this.sidebar.heightOffsets.tree);
-        if (delta > 0 && effectiveTree > 1) {
-          this.sidebar.heightOffsets.info += delta;
-          this.sidebar.heightOffsets.tree -= delta;
-        } else if (delta < 0 && effectiveInfo > 1) {
-          this.sidebar.heightOffsets.info += delta;
-          this.sidebar.heightOffsets.tree -= delta;
+      if (focus === "agent-tree" || focus === "teams-tree" || focus === "info") {
+        // `}` grows the focused panel by one row taken from the other, `{`
+        // gives one back. teams-tree shares the sidebar tree region (and
+        // heightOffsets.tree) with agent-tree (§17.3).
+        const treeDelta = focus === "info" ? -delta : delta;
+        // Guards and the stored result use the clamped copy the render lays
+        // out from, so a keypress always moves the rendered height, and a key
+        // the guard stops leaves the stored offsets alone.
+        const { base, offsets } = this.sidebar.clampedHeights(this.sidebarMode);
+        // §7.7 guard: the donor (info when the tree grows, else the tree) must stay ≥ 1.
+        const donorHeight = treeDelta > 0 ? base.infoHeight + offsets.info : base.treeHeight + offsets.tree;
+        if (donorHeight > 1) {
+          this.sidebar.heightOffsets = { ...offsets, tree: offsets.tree + treeDelta, info: offsets.info - treeDelta };
         }
         this.tui?.requestRender();
       }
@@ -3270,8 +3249,8 @@ export class DashboardComponent implements Component {
       this.infoPanel.subField = "default-type";
     }
     // Coordinator input field activation is handled in the TMUX render branch above
-    // when coordinator is in the main area. For sidebar rendering, only activate when
-    // coordinator is NOT selected (i.e., shown in sidebar's coordinator section).
+    // when the coordinator view is in the main area. Outside that view, it is
+    // active only while the coordinator panel has focus past its pane sub-focus.
     if (!isCoordinatorView) {
       const isCoordFocused = this.focusManager.current() === "coordinator";
       const coordSf = this.focusManager.subFocus;

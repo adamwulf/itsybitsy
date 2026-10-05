@@ -4,7 +4,7 @@ import { AgentTreeComponent } from "./agent-tree";
 import { InfoPanelComponent } from "./info-panel";
 import { InputFieldComponent } from "./input-field";
 import { TmuxPaneComponent } from "./dashboard";
-import { makeAgent, makeFlatAgent, makeFlatRepoHeader } from "../test-utils";
+import { makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator } from "../test-utils";
 import { stripAnsi } from "../parse-state";
 import type { FlatEntry } from "../agents";
 import { REVERSE, DIM, UNDERLINE } from "./colors";
@@ -242,7 +242,7 @@ describe("SidebarComponent", () => {
     expect(text).toContain("Info");
   });
 
-  test("render-path clamping: tree offset that would cause zero-height is normalized (BUG-3)", () => {
+  test("render-path clamping: a tree offset that would cause zero-height renders a 1-row tree (BUG-3)", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
     sidebar.agentTree.setFlatList([]);
@@ -250,37 +250,56 @@ describe("SidebarComponent", () => {
     const base = computeSidebarHeights(25, 0);
     // Set offset so that base.treeHeight + offset = -5 (way below 1)
     sidebar.heightOffsets.tree = -(base.treeHeight + 5);
-    sidebar.render(SIDEBAR_WIDTH);
-    // After render, offset must be normalized so effective height = 1
-    expect(base.treeHeight + sidebar.heightOffsets.tree).toBe(1);
+    const lines = sidebar.render(SIDEBAR_WIDTH).map(stripAnsi);
+    // Tab line, one tree row, then the Info separator.
+    expect(lines[2]).toContain("Info");
+    // Render clamps a copy: the offset itself is left alone.
+    expect(sidebar.heightOffsets.tree).toBe(-(base.treeHeight + 5));
   });
 
-  test("render-path clamping: info offset that would cause zero-height is normalized (BUG-3)", () => {
+  test("render-path clamping: an info offset that would cause zero-height still renders the info panel (BUG-3)", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
     sidebar.agentTree.setFlatList([]);
     const base = computeSidebarHeights(25, 0);
     // Force info offset so that base.infoHeight + offset = 0
     sidebar.heightOffsets.info = -base.infoHeight;
-    sidebar.render(SIDEBAR_WIDTH);
-    // After render, offset must be normalized so effective height = 1
-    if (base.infoHeight > 0) {
-      expect(base.infoHeight + sidebar.heightOffsets.info).toBe(1);
-    }
+    const lines = sidebar.render(SIDEBAR_WIDTH).map(stripAnsi);
+    expect(lines.some((l) => l.includes("Info"))).toBe(true);
+    // Render clamps a copy: the offset itself is left alone.
+    expect(sidebar.heightOffsets.info).toBe(-base.infoHeight);
   });
 
-  test("render-path clamping: coordinator offset that would cause zero-height is normalized (BUG-3)", () => {
+  test("a tree shrunk in the Agents tab keeps its offset after a visit to a short Favorites view", () => {
     const sidebar = makeSidebar();
     sidebar.displayHeight = 25;
-    sidebar.agentTree.setFlatList([]);
-    const base = computeSidebarHeights(25, 0);
-    // Force coordinator offset so that base.coordinatorHeight + offset = 0
-    sidebar.heightOffsets.coordinator = -base.coordinatorHeight;
-    sidebar.render(SIDEBAR_WIDTH);
-    // After render, offset must be normalized so effective height = 1
-    if (base.coordinatorHeight > 0) {
-      expect(base.coordinatorHeight + sidebar.heightOffsets.coordinator).toBe(1);
-    }
+    const agents = ["a1", "a2", "a3", "a4", "a5", "a6", "a7"].map((id) => makeAgent({ id }));
+    sidebar.agentTree.setFlatList(agents.map((a) => makeFlatAgent(a)));
+    // 7 rows → base tree height 7; the user shrank it to 3.
+    sidebar.heightOffsets.tree = -4;
+    sidebar.heightOffsets.info = 4;
+    const treeRows = () => sidebar.render(SIDEBAR_WIDTH).map(stripAnsi).findIndex((l) => l.includes("Info")) - 1;
+    expect(treeRows()).toBe(3);
+    // Favorites with one favorite: base 1, the tree clamps to 1 row on screen.
+    sidebar.agentTree.toggleFavorite("a1");
+    sidebar.agentTree.setFavoritesOnly(true);
+    sidebar.sidebarMode = "favorites";
+    expect(treeRows()).toBe(1);
+    // Back on Agents the shrink is still there.
+    sidebar.agentTree.setFavoritesOnly(false);
+    sidebar.sidebarMode = "agents";
+    expect(treeRows()).toBe(3);
+    expect(sidebar.heightOffsets).toEqual({ tree: -4, info: 4, coordinator: 0 });
+  });
+
+  test("treeItemCount counts the rows of the tab's tree", () => {
+    const sidebar = makeSidebar();
+    sidebar.agentTree.setFlatList([makeFlatAgent(makeAgent({ id: "a1" })), makeFlatAgent(makeAgent({ id: "a2" }))]);
+    sidebar.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    expect(sidebar.treeItemCount("agents")).toBe(2);
+    expect(sidebar.treeItemCount("teams")).toBe(1);
   });
 
   test("render-path clamping: panels remain fully visible after clamping (BUG-3)", () => {
@@ -471,6 +490,33 @@ describe("SidebarComponent — Favorites tab", () => {
     sidebar.agentTree.setFavoritesOnly(true);
     const text = sidebar.render(SIDEBAR_WIDTH).map(stripAnsi).join("\n");
     expect(text).toContain("No favorites — press . on an agent");
+  });
+
+  test("with no favorites the tree has room for the hint under the system coordinator", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.sidebarMode = "favorites";
+    sidebar.agentTree.setFlatList([makeFlatSystemCoordinator(), makeFlatAgent(makeAgent({ id: "agent-plain" }))]);
+    sidebar.agentTree.setFavoritesOnly(true);
+    const lines = sidebar.render(SIDEBAR_WIDTH).map(stripAnsi);
+    // Tab line, coordinator, hint, then the Info separator.
+    expect(lines[1]).toContain("coordinator");
+    expect(lines[2]).toContain("No favorites — press . on an agent");
+    expect(lines[3]).toContain("Info");
+  });
+
+  test("with favorites hidden by V the hint under the coordinator names the V filter", () => {
+    const sidebar = makeSidebar();
+    sidebar.displayHeight = 25;
+    sidebar.sidebarMode = "favorites";
+    const stopped = makeAgent({ id: "agent-stopped", state: "stopped" });
+    sidebar.agentTree.setFlatList([makeFlatSystemCoordinator(), makeFlatAgent(stopped)]);
+    sidebar.agentTree.toggleFavorite("agent-stopped");
+    sidebar.agentTree.setFavoritesOnly(true);
+    sidebar.agentTree.setRepoFilter("running-only");
+    const lines = sidebar.render(SIDEBAR_WIDTH).map(stripAnsi);
+    expect(lines[1]).toContain("coordinator");
+    expect(lines[2]).toContain("No favorites match the V filter");
   });
 
   test("the tab line shows all three labels at the minimum sidebar width", () => {

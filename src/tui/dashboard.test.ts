@@ -4734,6 +4734,22 @@ describe("applyLayout", () => {
     expect(dashboard.agentTree.favoriteAgentIds.size).toBe(0);
   });
 
+  test("the Favorites tab always lists the system coordinator, which '.' cannot favorite", () => {
+    const dashboard = makeDashboard();
+    const a = makeAgent("agent-a", "/repos/test");
+    dashboard.onUpdate([a], [makeFlatSystemCoordinator(), makeFlatAgent(a)], []);
+    dashboard.handleInput("3");
+    expect(dashboard.agentTree.visibleList.map((f) => f.kind)).toEqual(["system-coordinator"]);
+    dashboard.agentTree.selectFirstRow();
+    dashboard.handleInput(".");
+    expect(dashboard.notice).toBe("Select an agent or repo header");
+    expect(dashboard.agentTree.favoriteAgentIds.size).toBe(0);
+    dashboard.agentTree.toggleFavorite("agent-a");
+    dashboard.handleInput("j");
+    expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-a");
+    expect(dashboard.agentTree.visibleList[0]!.kind).toBe("system-coordinator");
+  });
+
   test("'.' in the Favorites tab keeps the unfavorited agent visible until the selection moves", () => {
     const dashboard = makeDashboard();
     const a = makeAgent("agent-a", "/repos/test");
@@ -4774,8 +4790,9 @@ describe("sidebar height resize ({/} keys)", () => {
 
   test("} when info focused grows info by stealing from tree", () => {
     const dashboard = makeDashboard();
-    // Give tree some extra height so it can be stolen from (tree min is 1)
-    dashboard.sidebar.heightOffsets.tree = 3;
+    // Give tree some extra height so it can be stolen from (tree min is 1).
+    // The offsets are a pair: each row the tree gains, info loses.
+    dashboard.sidebar.heightOffsets = { tree: 3, info: -3, coordinator: 0 };
     dashboard.handleInput("\t"); // move to info
     expect(dashboard.focus).toBe("info");
     const before = { ...dashboard.sidebar.heightOffsets };
@@ -4787,7 +4804,7 @@ describe("sidebar height resize ({/} keys)", () => {
   test("{ when info focused shrinks info and gives back to tree", () => {
     const dashboard = makeDashboard();
     // Give tree some extra height, then grow info to have room to shrink
-    dashboard.sidebar.heightOffsets.tree = 3;
+    dashboard.sidebar.heightOffsets = { tree: 3, info: -3, coordinator: 0 };
     dashboard.handleInput("\t"); // move to info
     dashboard.handleInput("}"); // grow info, steal from tree
     const before = { ...dashboard.sidebar.heightOffsets };
@@ -4798,8 +4815,9 @@ describe("sidebar height resize ({/} keys)", () => {
 
   test("} when agent-tree focused does nothing if info height is at minimum", () => {
     const dashboard = makeDashboard();
-    // Force info to 1 (minimum) by shrinking it
-    dashboard.sidebar.heightOffsets.info = -999; // force effective info to ≤ 1
+    // Grow the tree until info is at its 1-row minimum (the offsets are a pair).
+    const base = computeSidebarHeights(dashboard.sidebar.displayHeight, 0);
+    dashboard.sidebar.heightOffsets = { tree: base.infoHeight - 1, info: 1 - base.infoHeight, coordinator: 0 };
     const before = { ...dashboard.sidebar.heightOffsets };
     dashboard.handleInput("}");
     // tree should not grow since info is at minimum (§7.7 guard: donor must stay ≥ 1)
@@ -4919,6 +4937,83 @@ describe("sidebar height resize ({/} keys)", () => {
     dashboard.handleInput("{");
     expect(dashboard.sidebar.heightOffsets.tree).toBe(afterGrow.tree - 1);
     expect(dashboard.sidebar.heightOffsets.info).toBe(afterGrow.info + 1);
+  });
+
+  test("{ in the Teams tab sizes from the Teams tree, as the sidebar render does", () => {
+    const dashboard = makeDashboard();
+    dashboard.sidebar.displayHeight = 30;
+    const agents = ["a1", "a2", "a3", "a4", "a5", "a6", "a7"].map((id) => makeAgent(id, "/repos/test"));
+    dashboard.agentTree.setFlatList(agents.map((a) => makeFlatAgent(a)));
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "backend", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    dashboard.handleInput("2");
+    expect(dashboard.focus).toBe("teams-tree");
+    // The Teams tree is one row, so the tree region is already at its 1-row
+    // minimum: { must not shrink it (the 7-row Agents tree would allow it).
+    const before = { ...dashboard.sidebar.heightOffsets };
+    dashboard.handleInput("{");
+    expect(dashboard.sidebar.heightOffsets).toEqual(before);
+  });
+
+  test("} acts at once on a tree offset past the clamp", () => {
+    const dashboard = makeDashboard();
+    dashboard.sidebar.displayHeight = 30;
+    const agent = makeAgent("agent-a", "/repos/test");
+    dashboard.agentTree.setFlatList([makeFlatAgent(agent)]);
+    // Base tree height 1; a shrink of 6 rows left over from a taller tab.
+    dashboard.sidebar.heightOffsets = { tree: -6, info: 6, coordinator: 0 };
+    dashboard.handleInput("}");
+    // Clamped to 0 (1 row), then grown by 1: the tree is 2 rows now.
+    expect(dashboard.sidebar.heightOffsets).toEqual({ tree: 1, info: -1, coordinator: 0 });
+  });
+
+  test("} held in a tall tab stops with info at 1 row after a key in a short tab", () => {
+    const dashboard = makeDashboard();
+    dashboard.sidebar.displayHeight = 30;
+    const agents = Array.from({ length: 10 }, (_, i) => makeAgent(`a${i}`, "/repos/test"));
+    dashboard.agentTree.setFlatList(agents.map((a) => makeFlatAgent(a)));
+    dashboard.agentTree.toggleFavorite("a0");
+    for (let i = 0; i < 4; i++) dashboard.handleInput("{"); // Agents tree 7 → 3 rows
+    dashboard.handleInput("3");
+    dashboard.handleInput("}"); // Favorites (base 1): clamped, then grown
+    dashboard.handleInput("1");
+    for (let i = 0; i < 40; i++) dashboard.handleInput("}");
+    // Agents base: tree 7, info 30 - 1 - 7 - 1 = 21. Info stops at 1 row.
+    expect(dashboard.sidebar.heightOffsets).toEqual({ tree: 20, info: -20, coordinator: 0 });
+    dashboard.sidebar.sidebarMode = "agents";
+    const lines = dashboard.sidebar.render(60).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+    const infoAt = lines.findIndex((l) => l.includes("Info"));
+    expect(infoAt).toBe(1 + 27); // tab line + 27 tree rows
+    expect(lines.length - infoAt - 1).toBe(1); // 1 info row
+  });
+
+  test("{ that the guard stops leaves a shrink made in a taller tab alone", () => {
+    const dashboard = makeDashboard();
+    dashboard.sidebar.displayHeight = 30;
+    const agents = ["a1", "a2", "a3", "a4", "a5", "a6", "a7"].map((id) => makeAgent(id, "/repos/test"));
+    dashboard.agentTree.setFlatList(agents.map((a) => makeFlatAgent(a)));
+    // Agents (base 7) shrunk to 5 rows.
+    dashboard.sidebar.heightOffsets = { tree: -2, info: 2, coordinator: 0 };
+    dashboard.agentTree.toggleFavorite("a1");
+    dashboard.agentTree.toggleFavorite("a2");
+    dashboard.handleInput("3");
+    // Favorites (base 2) shows the tree at its 1-row minimum: { can't shrink it.
+    dashboard.handleInput("{");
+    expect(dashboard.sidebar.heightOffsets).toEqual({ tree: -2, info: 2, coordinator: 0 });
+    // } grows it at once from the clamped 1 row, and stores that.
+    dashboard.handleInput("}");
+    expect(dashboard.sidebar.heightOffsets).toEqual({ tree: 0, info: 0, coordinator: 0 });
+  });
+
+  test("applyLayout keeps a saved tree shrink", () => {
+    const dashboard = makeDashboard();
+    dashboard.applyLayout({
+      sidebarWidth: 60,
+      splitPaneLeftWidth: 80,
+      heightOffsets: { tree: -3, info: 3, coordinator: 0 },
+    });
+    expect(dashboard.sidebar.heightOffsets).toEqual({ tree: -3, info: 3, coordinator: 0 });
   });
 });
 

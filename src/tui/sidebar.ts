@@ -1,8 +1,8 @@
 /**
  * SidebarComponent — resizable vertical stack (default 60 columns, range 30–120)
  * with two sections: agent tree (top), info panel (bottom).
- * The system coordinator is never shown in the sidebar — it only appears in the main
- * area when selected in the agent tree.
+ * The system coordinator has no section of its own: it is a row in the agent
+ * tree, and its tmux output shows in the main area when that row is selected.
  */
 
 import type { Component } from "@mariozechner/pi-tui";
@@ -41,10 +41,11 @@ export const MAX_SIDEBAR = 120;
 /**
  * Compute sidebar section heights.
  * The sidebar has two sections: tree (top) and info (bottom).
- * coordinatorHeight is always 0 — the coordinator is shown in the main area, not the sidebar.
+ * coordinatorHeight is always 0 — the coordinator has no sidebar section (it is
+ * a tree row; its tmux output shows in the main area).
  *
  * @param available - total rows available for the sidebar content
- * @param itemCount - number of visible items in the agent tree (agents + repo headers)
+ * @param itemCount - rows the visible tab's tree wants (SidebarComponent.treeItemCount)
  */
 export function computeSidebarHeights(
   available: number,
@@ -64,19 +65,27 @@ export function computeSidebarHeights(
 }
 
 /**
- * Clamp sidebar height offsets so no panel drops below 1 row.
- * Mutates `offsets` in place. Safe to call at both load time and render time.
+ * Clamp sidebar height offsets so no panel drops below 1 row. The `{`/`}`
+ * resize moves a row between the tree and info, so the offsets are a pair
+ * (info = -tree): the clamp bounds the tree offset from both sides (the tree
+ * keeps ≥ 1 row, and info keeps ≥ 1 row when it has room at all) and sets
+ * info to match. That also mends an unpaired pair from an old layout.json.
+ * Mutates `offsets` in place. render() clamps a COPY: `base` changes with the
+ * visible tab's row count and the terminal height, so writing the clamp back
+ * would lose the user's resize (a tree shrunk in the Agents tab would come
+ * back taller after a visit to a short Favorites view). The `{`/`}` resize
+ * also works on the clamped copy (SidebarComponent.clampedHeights), so each
+ * keypress changes the rendered height at once, and stores it only when the
+ * key changes a height.
  */
 export function clampSidebarOffsets(
   base: { treeHeight: number; infoHeight: number; coordinatorHeight: number },
   offsets: { tree: number; info: number; coordinator: number },
 ): void {
-  if (base.treeHeight + offsets.tree < 1) {
-    offsets.tree = 1 - base.treeHeight;
-  }
-  if (base.infoHeight > 0 && base.infoHeight + offsets.info < 1) {
-    offsets.info = 1 - base.infoHeight;
-  }
+  const minTree = 1 - base.treeHeight;
+  const maxTree = base.infoHeight > 0 ? base.infoHeight - 1 : 0;
+  offsets.tree = Math.min(maxTree, Math.max(minTree, offsets.tree));
+  offsets.info = -offsets.tree;
 }
 
 export class SidebarComponent implements Component {
@@ -129,6 +138,32 @@ export class SidebarComponent implements Component {
     return this.renderNormalLayout(width);
   }
 
+  /**
+   * The rows the tree region wants for `mode`'s tab: the Agents tree's rows
+   * (with the Favorites hint row) for Agents and Favorites, the Teams tree's
+   * rows for Teams. render() sizes the tree from it, and the dashboard's
+   * `{`/`}` resize uses it too so its guards match what renders.
+   */
+  treeItemCount(mode: SidebarMode): number {
+    return mode === "teams" ? this.teamsTree.flatList.length : this.agentTree.renderRowCount;
+  }
+
+  /**
+   * The base heights for `mode`'s tab and a COPY of `heightOffsets` clamped
+   * to them (see clampSidebarOffsets). render() lays out from these, and the
+   * dashboard's `{`/`}` resize computes its guards from them, so the two
+   * always agree. The stored offsets are left alone.
+   */
+  clampedHeights(mode: SidebarMode): {
+    base: ReturnType<typeof computeSidebarHeights>;
+    offsets: SidebarComponent["heightOffsets"];
+  } {
+    const base = computeSidebarHeights(this.displayHeight, this.treeItemCount(mode));
+    const offsets = { ...this.heightOffsets };
+    clampSidebarOffsets(base, offsets);
+    return { base, offsets };
+  }
+
   /** Normal two-section layout: tree + info */
   private renderNormalLayout(width: number): string[] {
     const w = width;
@@ -149,16 +184,13 @@ export class SidebarComponent implements Component {
     // the same height budget — only one is visible at a time. The Favorites
     // tab renders the Agents tree with its favorites filter on.
     const showTeams = this.sidebarMode === "teams";
-    const treeItemCount = showTeams
-      ? this.teamsTree.flatList.length
-      : this.agentTree.visibleList.length;
-    const base = computeSidebarHeights(this.displayHeight, treeItemCount);
     // Apply height offsets: grow focused panel, shrink the other.
-    // Render-path clamping (BUG-3/§7.7): normalize offsets so they stay valid
-    // for the current terminal size and agent count.
-    clampSidebarOffsets(base, this.heightOffsets);
-    let treeHeight = Math.max(1, base.treeHeight + this.heightOffsets.tree);
-    let infoHeight = Math.max(0, base.infoHeight + this.heightOffsets.info);
+    // Render-path clamping (BUG-3/§7.7): lay out from a clamped copy of the
+    // offsets so they stay valid for the current terminal size and row count,
+    // without losing the user's resize (see clampSidebarOffsets).
+    const { base, offsets } = this.clampedHeights(this.sidebarMode);
+    let treeHeight = Math.max(1, base.treeHeight + offsets.tree);
+    let infoHeight = Math.max(0, base.infoHeight + offsets.info);
 
     // Clamp so total content + headers fits within displayHeight.
     // Headers: 1 (tree title) + 1 (Info, if shown)

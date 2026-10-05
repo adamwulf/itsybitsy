@@ -2346,6 +2346,122 @@ export function resetListTmuxSessionsCache(): void {
  */
 const reapedTmuxSessions = new Set<string>();
 
+/**
+ * Memo of stopped agents whose last reap pass found NOTHING left to do, keyed
+ * by agent dir. detectAgentStates() calls reapOrphanedClaude for every
+ * non-archived stopped agent on every watcher tick, forever, and each call
+ * takes the lifecycle lock (staging write + link + unlink), re-reads meta.json
+ * and meta.transient.json, and — for a claude_pid that is alive because the
+ * PID was recycled — spawns a blocking `ps` for the veto's fresh identity
+ * probe. reapedTmuxSessions only skips the kill-session; this skips the whole
+ * pass: no lock, no reads, no `ps`.
+ *
+ * An entry is written only at the end of a pass that held the lock, saw
+ * unchanged metadata and no operation marker, was not vetoed, sent no signal,
+ * skipped no signal for a live PID, and attempted no kill-session. That pass
+ * was a no-op, and a later pass over the same inputs is the same no-op:
+ *  - The generation fields are exactly the ones the pass revalidates from
+ *    meta.json (tmux_session, claude_pid, claude_pid_epoch, created_epoch).
+ *    Resume, respawn, rehire and recreate each change at least one, so a new
+ *    lifecycle always misses and reaps normally. skipClaudePid and
+ *    verdictFromClaudePid are part of the key too, so a pass that never looked
+ *    at claude_pid cannot vouch for one that would signal it.
+ *  - The watchdog PID lives in meta.transient.json, outside the generation. A
+ *    hit therefore also requires the transient detectAgentStates ALREADY read
+ *    this pass (for the op-branch) to name the same watchdog pid + epoch the
+ *    memo pass saw. A watchdog started after the memo is the one new thing that
+ *    file can add for a stopped generation; it misses and is reaped, at no
+ *    extra I/O. The branch with no tmux_session reads no transient and needs
+ *    none: runPerAgentWatchdog refuses to start without meta.tmux_session, and
+ *    setting one changes the generation.
+ *  - PIDs that were dead when the memo was written cannot come back as the
+ *    same process; a recycled one fails the identity check before any signal,
+ *    so all a hit suppresses there is the rate-limited "signal skipped" line.
+ *  - The kill-session stays governed by reapedTmuxSessions. A memo pass either
+ *    found the session not live or already in that set, and both memos are
+ *    cleared together (clearReapedTmuxSession / resetReapedTmuxSessions), so a
+ *    hit never skips a kill the older memo would have allowed.
+ *
+ * A hit is never more destructive than the pass it replaces: it does nothing.
+ * An observation older than meta.json still keys on the old generation and can
+ * hit; the pass it replaces would have aborted on "metadata changed".
+ *
+ * Bounded to one entry per agent dir and trimmed at the tmux-observation cap.
+ * Eviction costs one ordinary pass.
+ */
+interface ReapPassMemo {
+  tmuxSession: string;
+  claudePid: string;
+  claudePidEpoch: number | undefined;
+  createdEpoch: number;
+  skipClaudePid: boolean;
+  verdictFromClaudePid: boolean;
+  /** null when the memo pass found no meta.transient.json. */
+  watchdogPid: number | null;
+  watchdogPidEpoch: number | undefined;
+}
+const reapPassMemos = new Map<string, ReapPassMemo>();
+
+/** Options that shape one reapOrphanedClaude pass. */
+interface ReapPassOptions {
+  skipClaudePid?: boolean;
+  verdictFromClaudePid?: boolean;
+  /** meta.transient.json as detectAgentStates read it this pass. Omitted only
+   *  by the no-tmux_session branch, which reads no transient. */
+  observedTransient?: TransientState | null;
+}
+
+/** True when a stopped agent's reap pass is memoized as a no-op for exactly
+ *  this generation, pass shape and watchdog. See reapPassMemos. */
+function isReapPassMemoized(
+  agentDir: string,
+  meta: AgentMeta,
+  opts: ReapPassOptions
+): boolean {
+  const memo = reapPassMemos.get(agentDir);
+  if (!memo) return false;
+  if (
+    memo.tmuxSession !== meta.tmux_session ||
+    memo.claudePid !== meta.claude_pid ||
+    memo.claudePidEpoch !== meta.claude_pid_epoch ||
+    memo.createdEpoch !== meta.created_epoch ||
+    memo.skipClaudePid !== (opts.skipClaudePid === true) ||
+    memo.verdictFromClaudePid !== (opts.verdictFromClaudePid === true)
+  ) {
+    return false;
+  }
+  const observed = opts.observedTransient;
+  if (observed === undefined) {
+    // No transient was read this pass. Safe only when no watchdog can exist
+    // for this generation — see reapPassMemos.
+    return !meta.tmux_session;
+  }
+  return (
+    (observed?.watchdog_pid ?? null) === memo.watchdogPid &&
+    observed?.watchdog_pid_epoch === memo.watchdogPidEpoch
+  );
+}
+
+function recordReapPassMemo(
+  agentDir: string,
+  meta: AgentMeta,
+  opts: ReapPassOptions,
+  transient: TransientState | null
+): void {
+  reapPassMemos.delete(agentDir);
+  reapPassMemos.set(agentDir, {
+    tmuxSession: meta.tmux_session,
+    claudePid: meta.claude_pid,
+    claudePidEpoch: meta.claude_pid_epoch,
+    createdEpoch: meta.created_epoch,
+    skipClaudePid: opts.skipClaudePid === true,
+    verdictFromClaudePid: opts.verdictFromClaudePid === true,
+    watchdogPid: transient?.watchdog_pid ?? null,
+    watchdogPidEpoch: transient?.watchdog_pid_epoch,
+  });
+  trimOldestMapEntries(reapPassMemos);
+}
+
 /** A destructive watcher pass requires two consecutive, affirmative
  * `tmux has-session` misses. One-shot lifecycle commands classify a confirmed
  * miss immediately even though they DO reap (src/index.ts passes reap: true at
@@ -2418,6 +2534,11 @@ function trimOldestMapEntries<K, V>(map: Map<K, V>): void {
 function clearReapedTmuxSession(tmuxSession: string): void {
   if (!tmuxSession) return;
   reapedTmuxSessions.delete(tmuxSession);
+  // Session names are unique per agent, so this drops at most one entry. The
+  // scan is over stopped agents only and runs in memory.
+  for (const [agentDir, memo] of reapPassMemos) {
+    if (memo.tmuxSession === tmuxSession) reapPassMemos.delete(agentDir);
+  }
   clearTmuxMissingObservation(tmuxSession);
   clearTmuxObservationLogs(tmuxSession, SESSION_LIVENESS_OBSERVATION_OPERATIONS);
 }
@@ -2429,9 +2550,11 @@ function clearReadTmuxObservation(tmuxSession: string): void {
   clearTmuxObservationLogs(tmuxSession, PANE_READ_OBSERVATION_OPERATIONS);
 }
 
-/** Reset the reaped-tmux-session memo. Exported for tests. */
+/** Reset the reaped-tmux-session memo and the reap-pass memo. Exported for
+ *  tests. */
 export function resetReapedTmuxSessions(): void {
   reapedTmuxSessions.clear();
+  reapPassMemos.clear();
 }
 
 /** Reset tmux observation state. Exported for deterministic tests. */
@@ -2756,7 +2879,9 @@ export const CLAUDE_PID_START_MARGIN_SECONDS = 60;
  *    the tmux session alike).
  *  - isPidAliveSinceUncached: confirming a dead verdict in the claude_pid gate
  *    before the reap, and both lifecycle-lock gates (stepping over a reclaim
- *    claim, reclaiming an owner's lock).
+ *    claim, reclaiming an owner's lock). The gate skips it only when the reap
+ *    is memoized as a no-op (reapPassMemos) — then no teardown follows and the
+ *    cached read only renders.
  *
  * The rule the split encodes: a cached process-start read may RENDER a state,
  * never AUTHORIZE a teardown. A new caller that only labels something belongs
@@ -3241,7 +3366,8 @@ export async function terminateProcess(
 /**
  * Lifecycle diagnostics repeat for as long as their condition holds, and the
  * paths that emit them run on every watcher pass for every agent (2s
- * pollStates plus the 10s refresh) — only the kill-session is memoized.
+ * pollStates plus the 10s refresh) — a pass that emits one is never memoized
+ * (see reapPassMemos).
  * Rate-limit identical lines on the same interval the tmux observation log
  * uses, for the same reason: watch.log is 1 MB active across 3 files, so one
  * repeating line rotates away the lifecycle history needed for diagnosis in
@@ -3321,6 +3447,10 @@ function isMissingTmuxSessionError(error: string | undefined): boolean {
  *
  * Best-effort: failures are swallowed (logged to watch.log); state detection
  * must never block on a kill.
+ *
+ * A stopped agent whose previous pass had nothing to do is skipped outright,
+ * before the lock, until its generation or watchdog changes — see
+ * reapPassMemos for what a memo hit proves.
  */
 async function reapOrphanedClaude(
   agent: Agent,
@@ -3328,9 +3458,10 @@ async function reapOrphanedClaude(
   resolvedState: AgentState,
   reason: string,
   getLiveTmuxSessions: () => Promise<Set<string>>,
-  opts: { skipClaudePid?: boolean; verdictFromClaudePid?: boolean } = {}
+  opts: ReapPassOptions = {}
 ): Promise<void> {
   if (resolvedState === "creating") return;
+  if (resolvedState === "stopped" && isReapPassMemoized(agentDir, agent.meta, opts)) return;
 
   const repoTag = agent.repoName ? `${agent.repoName}/` : "";
   const tmuxLabel = agent.meta.tmux_session || "<none>";
@@ -3412,9 +3543,9 @@ async function reapOrphanedClaude(
   // uncached re-probe to have said dead, so the two can only disagree if that
   // gate regresses — which is the point of a backstop.
   //
-  // Returning here also leaves reapedTmuxSessions untouched: a vetoed pass must
-  // not memoize this session as reaped, or a later genuine stop would find the
-  // husk already "handled" and leak it.
+  // Returning here also leaves reapedTmuxSessions and reapPassMemos untouched:
+  // a vetoed pass must not memoize this session as reaped, or a later genuine
+  // stop would find the husk already "handled" and leak it.
   const vetoClaudePid = parseInt(latestMeta.claude_pid, 10);
   if (
     opts.verdictFromClaudePid === true &&
@@ -3430,17 +3561,20 @@ async function reapOrphanedClaude(
     return;
   }
 
+  // Returns true when the PID was alive, whether a signal was sent or withheld:
+  // either way a later pass may have something to do, so the pass is not
+  // memoized (see reapPassMemos).
   const reap = (
     kind: "claude" | "watchdog",
     pid: number,
     pidEpoch: number | undefined,
-  ): void => {
-    if (!Number.isFinite(pid) || pid <= 0) return;
+  ): boolean => {
+    if (!Number.isFinite(pid) || pid <= 0) return false;
     // An affirmatively DEAD pid is the overwhelmingly common case here — every
     // pass over an already-stopped agent hits it — and there is nothing to
     // report: no signal was withheld from a live process. Return silently, as
     // this branch did before the identity guard was added.
-    if (!isPidAliveCtx.fn(pid)) return;
+    if (!isPidAliveCtx.fn(pid)) return false;
     if (!isPidIdentityCurrentCtx.fn(pid, pidEpoch)) {
       // Alive, but the identity could not be affirmed. Three genuinely
       // informative shapes: no recorded epoch (record written by an older
@@ -3457,7 +3591,7 @@ async function reapOrphanedClaude(
         `[orphan-kill] signal skipped kind=${kind} pid=${pid} agent=${repoTag}${agent.id} ` +
         `tmux=${tmuxLabel} state=${resolvedState} reason=${detail}`
       );
-      return;
+      return true;
     }
     const ok = killPidCtx.fn(pid, "SIGTERM");
     const status = ok ? "SIGTERM sent" : "SIGTERM failed";
@@ -3465,15 +3599,21 @@ async function reapOrphanedClaude(
       `[orphan-kill] ${status} kind=${kind} pid=${pid} agent=${repoTag}${agent.id} ` +
       `tmux=${tmuxLabel} state=${resolvedState} reason=${reason}`
     );
+    return true;
   };
 
+  let acted = false;
   if (!opts.skipClaudePid) {
-    reap("claude", parseInt(latestMeta.claude_pid, 10), latestMeta.claude_pid_epoch);
+    if (reap("claude", parseInt(latestMeta.claude_pid, 10), latestMeta.claude_pid_epoch)) {
+      acted = true;
+    }
   }
 
   // Watchdog PID lives in meta.transient.json, not meta.json.
   if (transient) {
-    reap("watchdog", transient.watchdog_pid, transient.watchdog_pid_epoch);
+    if (reap("watchdog", transient.watchdog_pid, transient.watchdog_pid_epoch)) {
+      acted = true;
+    }
   }
 
   // Tear down the husk tmux session for stopped agents. Best-effort: a kill
@@ -3501,24 +3641,35 @@ async function reapOrphanedClaude(
     // live husk (e.g. a dead-pane session still in the live set) still tears
     // down below exactly once.
     const liveSessions = await getLiveTmuxSessions();
-    if (!liveSessions.has(agent.meta.tmux_session)) {
-      // Nothing to kill and nothing to log — the session is already gone.
-      return;
+    // A session that is not live needs nothing killed and nothing logged — it
+    // is already gone.
+    if (liveSessions.has(agent.meta.tmux_session)) {
+      acted = true;
+      const result = await killTmuxSessionResult(agent.meta.tmux_session);
+      const alreadyGone = !result.ok && isMissingTmuxSessionError(result.error);
+      const outcome = result.ok
+        ? "kill-session sent"
+        : alreadyGone
+          ? "kill-session already gone"
+          : "kill-session failed";
+      const detail = result.error
+        ? ` error=${JSON.stringify(result.error.slice(0, 500))} exit=${result.exitCode ?? "spawn"}`
+        : "";
+      logToWatchLog(
+        `[orphan-kill] tmux ${outcome} ` +
+        `agent=${repoTag}${agent.id} tmux=${tmuxLabel} state=${resolvedState} reason=${reason}${detail}`
+      );
     }
-    const result = await killTmuxSessionResult(agent.meta.tmux_session);
-    const alreadyGone = !result.ok && isMissingTmuxSessionError(result.error);
-    const outcome = result.ok
-      ? "kill-session sent"
-      : alreadyGone
-        ? "kill-session already gone"
-        : "kill-session failed";
-    const detail = result.error
-      ? ` error=${JSON.stringify(result.error.slice(0, 500))} exit=${result.exitCode ?? "spawn"}`
-      : "";
-    logToWatchLog(
-      `[orphan-kill] tmux ${outcome} ` +
-      `agent=${repoTag}${agent.id} tmux=${tmuxLabel} state=${resolvedState} reason=${reason}${detail}`
-    );
+  }
+
+  // Nothing was signalled, withheld, or killed: this pass was a no-op, and so
+  // is every later pass over the same generation and watchdog. Not reached by
+  // an aborted, vetoed, or operation-marked pass — each returns above. A pass
+  // that attempted a kill-session (even a failed one) is not memoized here;
+  // the next pass finds the session in reapedTmuxSessions, which does not
+  // retry it, and memoizes then.
+  if (!acted && resolvedState === "stopped") {
+    recordReapPassMemo(agentDir, agent.meta, opts, transient);
   }
   } finally {
     await lifecycleLock.release();
@@ -3680,12 +3831,35 @@ export async function detectAgentStates(
       // on — the same discipline isPidIdentityCurrent applies before SIGTERM.
       // Ordered last so it runs only on the cold path (a verdict that already
       // says dead), leaving the cache serving every ordinary pass.
+      //
+      // The re-probe is skipped when that reap is memoized as a no-op for this
+      // exact generation and watchdog (reapPassMemos): no teardown can follow,
+      // and a cached read may RENDER. For a dead PID the re-probe costs nothing
+      // (signal-0 short-circuits), but for a RECYCLED one it is a blocking `ps`
+      // on every tick, forever. The cached entry it would replace is refreshed
+      // by the async batch primer every PROCESS_START_CACHE_TTL_MS.
+      // reapOrphanedClaude checks the same memo before its first await, so the
+      // two decisions cannot diverge; if they ever did, its veto re-probes
+      // uncached before anything is destroyed.
       const claudePid = parseInt(agent.meta.claude_pid, 10);
+      const claudePidReapOpts: ReapPassOptions = {
+        // verdictFromClaudePid: this branch — and only this branch —
+        // concluded `stopped` by reading the PID, so the husk teardown
+        // must re-check that PID before destroying the session. Every
+        // other caller resolves from tmux evidence, which no PID cache can
+        // corrupt.
+        skipClaudePid: true,
+        verdictFromClaudePid: true,
+        observedTransient: transient,
+      };
       if (
         claudePid > 0 &&
         !isPidAliveSinceCtx.fn(claudePid, agent.meta.claude_pid_epoch) &&
         !isRecentlyCreated(agent.meta.created_epoch) &&
-        !isPidAliveSinceUncached(claudePid, agent.meta.claude_pid_epoch)
+        (
+          (shouldReap && isReapPassMemoized(agentDir, agent.meta, claudePidReapOpts)) ||
+          !isPidAliveSinceUncached(claudePid, agent.meta.claude_pid_epoch)
+        )
       ) {
         agent.state = "stopped";
         if (shouldReap) {
@@ -3699,12 +3873,7 @@ export async function detectAgentStates(
             "stopped",
             "claude_pid not alive",
             getLiveTmuxSessions,
-            // verdictFromClaudePid: this branch — and only this branch —
-            // concluded `stopped` by reading the PID, so the husk teardown
-            // must re-check that PID before destroying the session. Every
-            // other caller resolves from tmux evidence, which no PID cache can
-            // corrupt.
-            { skipClaudePid: true, verdictFromClaudePid: true }
+            claudePidReapOpts
           );
         }
         return;
@@ -3736,7 +3905,14 @@ export async function detectAgentStates(
         if (tmuxObservation === "missing") {
           agent.state = "stopped";
           if (shouldReap) {
-            await reapOrphanedClaude(agent, agentDir, "stopped", "complete agent: tmux session gone", getLiveTmuxSessions);
+            await reapOrphanedClaude(
+              agent,
+              agentDir,
+              "stopped",
+              "complete agent: tmux session gone",
+              getLiveTmuxSessions,
+              { observedTransient: transient }
+            );
           }
           return;
         }
@@ -3838,7 +4014,14 @@ export async function detectAgentStates(
         const resolved: AgentState = isRecentlyCreated(agent.meta.created_epoch) ? "creating" : "stopped";
         agent.state = resolved;
         if (shouldReap) {
-          await reapOrphanedClaude(agent, agentDir, resolved, "tmux session not live", getLiveTmuxSessions);
+          await reapOrphanedClaude(
+            agent,
+            agentDir,
+            resolved,
+            "tmux session not live",
+            getLiveTmuxSessions,
+            { observedTransient: transient }
+          );
         }
         return;
       }
@@ -3869,7 +4052,14 @@ export async function detectAgentStates(
           // so a freshly-spawning agent that briefly shows a dead pane during
           // startup is not torn down.
           if (shouldReap) {
-            await reapOrphanedClaude(agent, agentDir, resolved, "tmux pane is dead", getLiveTmuxSessions);
+            await reapOrphanedClaude(
+              agent,
+              agentDir,
+              resolved,
+              "tmux pane is dead",
+              getLiveTmuxSessions,
+              { observedTransient: transient }
+            );
           }
           return;
         }

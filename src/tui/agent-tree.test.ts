@@ -1110,8 +1110,8 @@ describe("AgentTreeComponent favorites view", () => {
     expect(agentIds(tree)).toEqual(["mgr", "child", "grandchild"]);
     // Repo headers only for repos with a shown agent.
     expect(repoPaths(tree)).toEqual(["/repos/alpha"]);
-    // The system coordinator is hidden.
-    expect(tree.visibleList.some((f) => f.kind === "system-coordinator")).toBe(false);
+    // The system coordinator always shows, first.
+    expect(tree.visibleList[0]!.kind).toBe("system-coordinator");
   });
 
   test("an agent a favorite spawned in another repo (meta.spawned_by only) is not shown", () => {
@@ -1226,18 +1226,24 @@ describe("AgentTreeComponent favorites view", () => {
     expect(repoPaths(tree)).toEqual(["/repos/alpha"]);
   });
 
-  test("a selected system coordinator stays visible until the selection moves away", () => {
+  test("the system coordinator always shows, selected or not, with or without favorites", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());
+    tree.setFavoritesOnly(true);
+    // No favorites: the coordinator is the only row.
+    expect(tree.visibleList.map((f) => f.kind)).toEqual(["system-coordinator"]);
     tree.toggleFavorite("mgr");
     tree.selectFirstRow();
     expect(tree.isSystemCoordinatorSelected).toBe(true);
-    tree.setFavoritesOnly(true);
-    expect(tree.isSystemCoordinatorSelected).toBe(true);
     tree.moveSelection(1);
     expect(tree.selectedRepoPath).toBe("/repos/alpha");
-    expect(tree.visibleList.some((f) => f.kind === "system-coordinator")).toBe(false);
-    expect(tree.visibleList[0]!.kind).toBe("repo-header");
+    expect(tree.visibleList[0]!.kind).toBe("system-coordinator");
+    // It also shows under the V filter.
+    tree.setRepoFilter("running-only");
+    expect(tree.visibleList[0]!.kind).toBe("system-coordinator");
+    // j/k reach it from the favorites.
+    tree.moveSelection(-1);
+    expect(tree.isSystemCoordinatorSelected).toBe(true);
   });
 
   test("connectors are rebuilt when a non-favorite manager is hidden", () => {
@@ -1268,13 +1274,14 @@ describe("AgentTreeComponent favorites view", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());
     tree.setFavoritesOnly(true);
-    expect(tree.visibleList).toEqual([]);
+    const kinds = () => tree.visibleList.map((f) => f.kind);
+    expect(kinds()).toEqual(["system-coordinator"]);
     expect(tree.toggleFavorite("beta-solo")).toBe(true);
     expect(tree.favoriteAgentIds.has("beta-solo")).toBe(true);
     expect(agentIds(tree)).toEqual(["beta-solo"]);
     expect(tree.toggleFavorite("beta-solo")).toBe(false);
     expect(tree.favoriteAgentIds.has("beta-solo")).toBe(false);
-    expect(tree.visibleList).toEqual([]);
+    expect(kinds()).toEqual(["system-coordinator"]);
   });
 
   test("unfavoriting the selected agent keeps it visible until the selection moves away", () => {
@@ -1337,13 +1344,30 @@ describe("AgentTreeComponent favorites view", () => {
     expect(tree.render(60).join("\n")).toContain("No agents found");
   });
 
+  test("the hint renders under the coordinator row, and goes away once a favorite shows", () => {
+    const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFixture());
+    tree.setFavoritesOnly(true);
+    const lines = tree.render(60).map(plain);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("coordinator");
+    expect(lines[1]).toContain("No favorites — press . on an agent");
+    tree.toggleFavorite("mgr");
+    expect(tree.render(60).join("\n")).not.toContain("No favorites");
+    // No room for the hint in a one-row tree: the coordinator row only.
+    tree.toggleFavorite("mgr");
+    tree.maxHeight = 1;
+    expect(tree.render(60).map(plain)).toHaveLength(1);
+  });
+
   test("an empty view says the V filter hides the favorites when favorites exist", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture({ mgr: "stopped", child: "stopped", grandchild: "stopped" }));
     tree.toggleFavorite("mgr");
     tree.setFavoritesOnly(true);
     tree.setRepoFilter("running-only");
-    expect(tree.visibleList).toEqual([]);
+    expect(tree.visibleList.map((f) => f.kind)).toEqual(["system-coordinator"]);
     const text = tree.render(60).join("\n");
     expect(text).toContain("No favorites match the V filter");
     expect(text).not.toContain("press . on an agent");

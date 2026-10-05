@@ -4734,6 +4734,22 @@ describe("applyLayout", () => {
     expect(dashboard.agentTree.favoriteAgentIds.size).toBe(0);
   });
 
+  test("the Favorites tab always lists the system coordinator, which '.' cannot favorite", () => {
+    const dashboard = makeDashboard();
+    const a = makeAgent("agent-a", "/repos/test");
+    dashboard.onUpdate([a], [makeFlatSystemCoordinator(), makeFlatAgent(a)], []);
+    dashboard.handleInput("3");
+    expect(dashboard.agentTree.visibleList.map((f) => f.kind)).toEqual(["system-coordinator"]);
+    dashboard.agentTree.selectFirstRow();
+    dashboard.handleInput(".");
+    expect(dashboard.notice).toBe("Select an agent or repo header");
+    expect(dashboard.agentTree.favoriteAgentIds.size).toBe(0);
+    dashboard.agentTree.toggleFavorite("agent-a");
+    dashboard.handleInput("j");
+    expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-a");
+    expect(dashboard.agentTree.visibleList[0]!.kind).toBe("system-coordinator");
+  });
+
   test("'.' in the Favorites tab keeps the unfavorited agent visible until the selection moves", () => {
     const dashboard = makeDashboard();
     const a = makeAgent("agent-a", "/repos/test");

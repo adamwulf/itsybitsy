@@ -349,9 +349,10 @@ export class AgentTreeComponent implements Component {
    * agents and every same-repo descendant of a favorite (walking
    * meta.manager; agents it spawned in other repos are not shown), the repo
    * headers that still have a shown agent, and their
-   * parent-headers; the system coordinator and favoriteless repos (pinned or
-   * not) are hidden. The selected row is always kept visible until the
-   * selection moves away. Composes with repoFilter: favorites first, then V.
+   * parent-headers; favoriteless repos (pinned or not) are hidden. The system
+   * coordinator always shows (it cannot be a favorite). The selected row is
+   * always kept visible until the selection moves away. Composes with
+   * repoFilter: favorites first, then V.
    * Set via setFavoritesOnly() so the selection re-resolves.
    */
   favoritesOnly = false;
@@ -417,15 +418,14 @@ export class AgentTreeComponent implements Component {
 
   /**
    * Favorites view, first pass: keep an agent iff it is a favorite, has a
-   * favorite ancestor, or is the selected row; keep the system coordinator
-   * only while it is selected. Headers pass through — dropAgentlessRepoHeaders
-   * and pruneEmptyParentHeaders remove the empty ones after the V filter ran.
+   * favorite ancestor, or is the selected row. The system coordinator and the
+   * headers pass through — dropAgentlessRepoHeaders and
+   * pruneEmptyParentHeaders remove the empty headers after the V filter ran.
    * `byId` maps every agent id in the flat list to its agent.
    */
   private applyFavoritesFilter(entries: FlatEntry[], byId: Map<string, Agent>): FlatEntry[] {
     const selectedId = this.hasSelection ? this.selectedId : null;
     return entries.filter((f) => {
-      if (f.kind === "system-coordinator") return selectedId === SYSTEM_COORDINATOR_ID;
       if (f.kind !== "agent") return true;
       return f.agent.id === selectedId || this.hasFavoriteInChain(f.agent, byId);
     });
@@ -1032,18 +1032,7 @@ export class AgentTreeComponent implements Component {
   render(width: number): string[] {
     const visible = this.visibleList;
     if (visible.length === 0) {
-      let hint = "No agents found";
-      if (this.favoritesOnly) {
-        // Same rule as the favorites pass (hasFavoriteInChain over the
-        // non-archived agents). If any agent passes it, only the V filter can
-        // have hidden it; otherwise the favorites pass has nothing to show (no
-        // favorites, or only ids of gone agents with no orphans left here).
-        const byId = this.buildAgentLookup();
-        const hasFavoriteRow = this._flatList.some(
-          (f) => f.kind === "agent" && !f.agent.archived && this.hasFavoriteInChain(f.agent, byId),
-        );
-        hint = hasFavoriteRow ? "No favorites match the V filter" : "No favorites — press . on an agent";
-      }
+      const hint = this.favoritesOnly ? this.favoritesEmptyHint() : "No agents found";
       return [truncateToWidth(`${DIM}  ${hint}${RESET}`, width, "")];
     }
 
@@ -1154,6 +1143,27 @@ export class AgentTreeComponent implements Component {
       lines.push(truncateToWidth(`${DIM}${repoIndent}  ▼ ${remaining} more${RESET}`, width, ""));
     }
 
+    // The Favorites view always shows the system coordinator, so it is rarely
+    // empty: put the hint under the rows when no agent row shows.
+    if (this.favoritesOnly && lines.length < this.maxHeight && !visible.some((f) => f.kind === "agent")) {
+      lines.push(truncateToWidth(`${DIM}  ${this.favoritesEmptyHint()}${RESET}`, width, ""));
+    }
+
     return lines;
+  }
+
+  /**
+   * The hint for a Favorites view with no agent row. Same rule as the
+   * favorites pass (hasFavoriteInChain over the non-archived agents): if any
+   * agent passes it, only the V filter can have hidden it; otherwise the
+   * favorites pass has nothing to show (no favorites, or only ids of gone
+   * agents with no orphans left here).
+   */
+  private favoritesEmptyHint(): string {
+    const byId = this.buildAgentLookup();
+    const hasFavoriteRow = this._flatList.some(
+      (f) => f.kind === "agent" && !f.agent.archived && this.hasFavoriteInChain(f.agent, byId),
+    );
+    return hasFavoriteRow ? "No favorites match the V filter" : "No favorites — press . on an agent";
   }
 }

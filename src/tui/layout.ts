@@ -17,7 +17,7 @@ export interface LayoutState {
   heightOffsets: {
     tree: number;
     info: number;
-    /** @deprecated Coordinator is no longer shown in the sidebar. Preserved for backward compatibility with existing layout.json files. */
+    /** @deprecated The sidebar has no coordinator section (the coordinator is a tree row). Preserved for backward compatibility with existing layout.json files. */
     coordinator: number;
   };
   /**

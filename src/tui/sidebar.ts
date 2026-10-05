@@ -74,8 +74,9 @@ export function computeSidebarHeights(
  * visible tab's row count and the terminal height, so writing the clamp back
  * would lose the user's resize (a tree shrunk in the Agents tab would come
  * back taller after a visit to a short Favorites view). The `{`/`}` resize
- * also works on a clamped copy, so each keypress changes the rendered height
- * at once, and stores it only when the key changes a height.
+ * also works on the clamped copy (SidebarComponent.clampedHeights), so each
+ * keypress changes the rendered height at once, and stores it only when the
+ * key changes a height.
  */
 export function clampSidebarOffsets(
   base: { treeHeight: number; infoHeight: number; coordinatorHeight: number },
@@ -147,9 +148,20 @@ export class SidebarComponent implements Component {
     return mode === "teams" ? this.teamsTree.flatList.length : this.agentTree.renderRowCount;
   }
 
-  /** The base heights render() uses for `mode`'s tab, before the user's offsets. */
-  baseHeights(mode: SidebarMode): ReturnType<typeof computeSidebarHeights> {
-    return computeSidebarHeights(this.displayHeight, this.treeItemCount(mode));
+  /**
+   * The base heights for `mode`'s tab and a COPY of `heightOffsets` clamped
+   * to them (see clampSidebarOffsets). render() lays out from these, and the
+   * dashboard's `{`/`}` resize computes its guards from them, so the two
+   * always agree. The stored offsets are left alone.
+   */
+  clampedHeights(mode: SidebarMode): {
+    base: ReturnType<typeof computeSidebarHeights>;
+    offsets: SidebarComponent["heightOffsets"];
+  } {
+    const base = computeSidebarHeights(this.displayHeight, this.treeItemCount(mode));
+    const offsets = { ...this.heightOffsets };
+    clampSidebarOffsets(base, offsets);
+    return { base, offsets };
   }
 
   /** Normal two-section layout: tree + info */
@@ -172,13 +184,11 @@ export class SidebarComponent implements Component {
     // the same height budget — only one is visible at a time. The Favorites
     // tab renders the Agents tree with its favorites filter on.
     const showTeams = this.sidebarMode === "teams";
-    const base = this.baseHeights(this.sidebarMode);
     // Apply height offsets: grow focused panel, shrink the other.
-    // Render-path clamping (BUG-3/§7.7): normalize a copy of the offsets so
-    // they stay valid for the current terminal size and row count, without
-    // losing the user's resize (see clampSidebarOffsets).
-    const offsets = { ...this.heightOffsets };
-    clampSidebarOffsets(base, offsets);
+    // Render-path clamping (BUG-3/§7.7): lay out from a clamped copy of the
+    // offsets so they stay valid for the current terminal size and row count,
+    // without losing the user's resize (see clampSidebarOffsets).
+    const { base, offsets } = this.clampedHeights(this.sidebarMode);
     let treeHeight = Math.max(1, base.treeHeight + offsets.tree);
     let infoHeight = Math.max(0, base.infoHeight + offsets.info);
 

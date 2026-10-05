@@ -53,7 +53,7 @@ import { AgentTreeComponent, nextRepoFilter, agentDisplayName } from "./agent-tr
 import { TeamsTreeComponent, flattenTeamsTree } from "./teams-tree";
 import { ChannelPaneComponent } from "./channel-pane";
 import { TeamLogPaneComponent } from "./team-log-pane";
-import { SidebarComponent, SIDEBAR_WIDTH, computeSidebarHeights, clampSidebarOffsets } from "./sidebar";
+import { SidebarComponent, SIDEBAR_WIDTH } from "./sidebar";
 import type { SidebarMode, SelectionSource } from "./sidebar";
 import { InfoPanelComponent } from "./info-panel";
 import { listTeams, getTeam } from "../teams";
@@ -1080,24 +1080,9 @@ export class DashboardComponent implements Component {
     // No load-time clamp of heightOffsets: the base heights are not known yet
     // (they depend on the tab's row count), and a clamp against a guess would
     // undo a saved tree shrink. The sidebar render and the `{`/`}` resize
-    // both clamp a copy (clampedSidebarHeights), so an offset from
-    // layout.json never drops a panel below 1 row.
+    // both use a clamped copy (SidebarComponent.clampedHeights), so an offset
+    // from layout.json never drops a panel below 1 row.
     this.pendingTmuxResize = true;
-  }
-
-  /**
-   * The sidebar's base heights for the tab it shows — the same base its
-   * render() uses — and a copy of `sidebar.heightOffsets` clamped to that
-   * base, as render() clamps it. The `{`/`}` resize computes its guards from
-   * these, so a keypress always changes the rendered height, and stores the
-   * copy only when the key changes a height: a key the guard stops leaves the
-   * user's offsets alone.
-   */
-  private clampedSidebarHeights(): { base: ReturnType<typeof computeSidebarHeights>; offsets: SidebarComponent["heightOffsets"] } {
-    const base = this.sidebar.baseHeights(this.sidebarMode);
-    const offsets = { ...this.sidebar.heightOffsets };
-    clampSidebarOffsets(base, offsets);
-    return { base, offsets };
   }
 
   /** Persist current layout via debounced write. */
@@ -2930,24 +2915,17 @@ export class DashboardComponent implements Component {
       const delta = data === "}" ? 1 : -1;
       const focus = this.focusManager.current();
       if (focus === "agent-tree" || focus === "teams-tree" || focus === "info") {
-        const { base, offsets } = this.clampedSidebarHeights();
-        const effectiveInfo = Math.max(0, base.infoHeight + offsets.info);
-        const effectiveTree = Math.max(1, base.treeHeight + offsets.tree);
-        // Rows the tree gains from info (negative: gives back to info).
-        // §7.7 guard: the donor must stay ≥ 1.
-        let treeDelta = 0;
-        if (focus === "info") {
-          // Grow info, shrink tree; give back to tree when shrinking.
-          if (delta > 0 && effectiveTree > 1) treeDelta = -delta;
-          else if (delta < 0 && effectiveInfo > 1) treeDelta = -delta;
-        } else {
-          // Grow tree, shrink info; give back to info when shrinking.
-          // teams-tree shares the sidebar tree region (and heightOffsets.tree)
-          // with agent-tree (§17.3), so height changes behave identically.
-          if (delta > 0 && effectiveInfo > 1) treeDelta = delta;
-          else if (delta < 0 && effectiveTree > 1) treeDelta = delta;
-        }
-        if (treeDelta !== 0) {
+        // `}` grows the focused panel by one row taken from the other, `{`
+        // gives one back. teams-tree shares the sidebar tree region (and
+        // heightOffsets.tree) with agent-tree (§17.3).
+        const treeDelta = focus === "info" ? -delta : delta;
+        // Guards and the stored result use the clamped copy the render lays
+        // out from, so a keypress always moves the rendered height, and a key
+        // the guard stops leaves the stored offsets alone.
+        const { base, offsets } = this.sidebar.clampedHeights(this.sidebarMode);
+        // §7.7 guard: the donor (info when the tree grows, else the tree) must stay ≥ 1.
+        const donorHeight = treeDelta > 0 ? base.infoHeight + offsets.info : base.treeHeight + offsets.tree;
+        if (donorHeight > 1) {
           this.sidebar.heightOffsets = { ...offsets, tree: offsets.tree + treeDelta, info: offsets.info - treeDelta };
         }
         this.tui?.requestRender();
@@ -3271,8 +3249,8 @@ export class DashboardComponent implements Component {
       this.infoPanel.subField = "default-type";
     }
     // Coordinator input field activation is handled in the TMUX render branch above
-    // when coordinator is in the main area. For sidebar rendering, only activate when
-    // coordinator is NOT selected (i.e., shown in sidebar's coordinator section).
+    // when the coordinator view is in the main area. Outside that view, it is
+    // active only while the coordinator panel has focus past its pane sub-focus.
     if (!isCoordinatorView) {
       const isCoordFocused = this.focusManager.current() === "coordinator";
       const coordSf = this.focusManager.subFocus;

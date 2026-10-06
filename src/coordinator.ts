@@ -552,7 +552,7 @@ async function sendCoordinatorKeys(keys: string[]): Promise<boolean> {
  * ~3s per message), we do NOT send the Enter: firing it unlocked would race the
  * drain's chunked send-keys and risk a half-typed message landing in the
  * coordinator, exactly the interleave the lock exists to prevent. We skip and
- * return false — both callers (the 2s state poll and the 500ms ready-poll)
+ * return false — both callers (the 2s watcher refresh and the 500ms ready-poll)
  * retry, so a dropped tick is harmless and the prompt is re-attempted next tick.
  */
 export async function autoAcceptCoordinatorPrompt(output: string): Promise<boolean> {
@@ -586,8 +586,8 @@ export async function autoAcceptCoordinatorPrompt(output: string): Promise<boole
   return true;
 }
 
-// Edge-triggered logging state for the periodic pane-condition log. The state
-// poll runs every ~2s; a persistent api-error / safeguard banner would flood the
+// Edge-triggered logging state for the periodic pane-condition log. The watcher
+// refresh runs every ~2s; a persistent api-error / safeguard banner would flood the
 // watch log if logged level-triggered, so each condition is logged only on its
 // false→true transition and re-armed when it clears (or the session stops).
 let coordPromptConditionLogged = false;

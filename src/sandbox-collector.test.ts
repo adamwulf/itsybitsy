@@ -628,21 +628,100 @@ darwinTest("attach gives up after 4 starts in a row that never answer", async ()
   expect(await text(a.agentLog)).toContain("shared collector did not stay up after 4 starts");
 });
 
-darwinTest("an acknowledged start resets the start count, so a long launch survives many restarts", async () => {
+darwinTest("every acknowledged start resets the start count, so a long launch survives many restarts", async () => {
   const home = await tempHome();
   const a = await launchDir(home, "a");
   let starts = 0;
-  // The first 6 daemons acknowledge the launch, then die; later ones die at once.
+  // Three cycles of: two daemons die unanswered, the third acknowledges and then
+  // dies. After that, every daemon dies unanswered. The first cycle is the
+  // first registration; the other two are restarts from the registered loop.
   const code = await attachSandboxLaunch({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, pollMs: 20,
     startCollector: fd => {
       starts++;
-      if (starts <= 6) writeFileSync(join(a.dir, "ready"), a.name);
+      if (starts <= 9 && starts % 3 === 0) writeFileSync(join(a.dir, "ready"), a.name);
       closeSync(fd);
     } });
   expect(code).toBe(1);
-  expect(starts).toBe(6 + 4); // without the reset it would have stopped at 4
-  expect(count(await text(a.agentLog), "shared collector stopped; starting a new one")).toBe(6);
+  // 3 + 3 + 3 + 4. Without the reset after the first `ready` the 5th start
+  // would be refused (4 calls); without the reset after a restart's `ready`,
+  // the 8th (7 calls).
+  expect(starts).toBe(13);
+  expect(count(await text(a.agentLog), "shared collector stopped; starting a new one")).toBe(3);
 }, 20000);
+
+darwinTest("a registered attach returns when a daemon rejects its launch while holding the role", async () => {
+  const home = await tempHome();
+  const paths = sandboxCollectorPaths(home);
+  await mkdir(paths.inbox, { recursive: true, mode: 0o700 });
+  const a = await launchDir(home, "a");
+  // Stand in for a live daemon: hold the role, acknowledge, then reject.
+  const role = tryCollectorLock(paths.daemonLock)!;
+  cleanups.push(async () => closeSync(role));
+  let starts = 0;
+  const attached = attachSandboxLaunch({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, pollMs: 20,
+    startCollector: fd => { starts++; closeSync(fd); } });
+  await until(() => existsSync(join(paths.inbox, a.name)));
+  writeFileSync(join(a.dir, "ready"), a.name);
+  await Bun.sleep(100); // now in the registered loop, the role still held
+  writeFileSync(join(a.dir, "failed"), "");
+  writeFileSync(join(a.dir, "done"), "rejected");
+  expect(await attached).toBe(1); // before the fix it polled forever
+  expect(starts).toBe(0);
+  expect(await text(a.agentLog)).toContain("shared collector rejected this launch");
+});
+
+darwinTest("a successor's re-adopt scan rejects a launch whose owner just exited; its attach returns", async () => {
+  const home = await tempHome();
+  const stream = await fakeStream(home);
+  const paths = sandboxCollectorPaths(home);
+  const daemons: Promise<number>[] = [];
+  const startCollector = (lockFd: number) => { daemons.push(startDaemon(home, stream, lockFd)); };
+  // M: a launch whose owner (this process) stays alive; its attach is fast.
+  const m = await launchDir(home, "m");
+  const attachedM = attachSandboxLaunch({ dir: m.dir, owner: process.pid, agentLog: m.agentLog, home, startCollector, pollMs: 20 });
+  await until(() => Bun.file(join(m.dir, "ready")).exists());
+  await registerRoot(m, sleeper().pid);
+  await until(() => Bun.file(join(m.dir, "root-ready")).exists());
+  // L: its attach runs under a disposable owner shell, so the owner can exit
+  // while the attach lives on. It ends by itself if the temp home disappears.
+  const l = await launchDir(home, "l");
+  const release = join(home, "release-owner");
+  const exitFile = join(home, "l-exit");
+  const script = join(home, "attach-l.ts");
+  await writeFile(script, `
+    import { appendFileSync, closeSync, existsSync, writeFileSync } from "node:fs";
+    import { attachSandboxLaunch } from ${MODULE};
+    setInterval(() => { if (!existsSync(${JSON.stringify(home)})) process.exit(9); }, 100);
+    const code = await attachSandboxLaunch({ dir: ${JSON.stringify(l.dir)}, owner: process.ppid,
+      agentLog: ${JSON.stringify(l.agentLog)}, home: ${JSON.stringify(home)},
+      startCollector: fd => { appendFileSync(${JSON.stringify(join(home, "l-starts"))}, "x"); closeSync(fd); } });
+    writeFileSync(${JSON.stringify(exitFile)}, String(code));
+    process.exit(code);
+  `);
+  const owner = Bun.spawn(["/bin/sh", "-c", `"${process.execPath}" '${script}' & while [ ! -f '${release}' ]; do sleep 0.02; done`],
+    { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  cleanups.push(async () => { await writeFile(release, "").catch(() => {}); await owner.exited; });
+  await until(() => Bun.file(join(l.dir, "ready")).exists(), 8000);
+  // L's owner exits, and the daemon is replaced before it finishes L (1 s drain).
+  await writeFile(release, "");
+  await owner.exited;
+  expect(restartSandboxCollector(home)).toBe(true);
+  expect(await daemons[0]).toBe(0);
+  // M's attach starts the successor; its scan adopts M and rejects L.
+  await until(() => existsSync(exitFile), 8000);
+  expect(await text(exitFile)).toBe("0"); // the owner is gone: L ends quietly
+  expect(await text(join(l.dir, "done"))).toBe("rejected");
+  expect(existsSync(join(l.dir, "failed"))).toBe(true);
+  expect(await text(paths.log)).toContain(`launch ${l.name} not adopted: Error: launch owner is not running`);
+  expect(existsSync(join(home, "l-starts"))).toBe(false);
+  expect(daemons.length).toBe(2);
+  await until(async () => (await text(m.agentLog)).includes("shared collector resumed"));
+  // With L's attach gone, the successor exits once M ends.
+  await writeFile(join(m.dir, "stop"), "stop\n");
+  expect(await attachedM).toBe(0);
+  expect(await daemons[1]).toBe(0);
+  expect(sandboxCollectorRunning(paths)).toBe(false);
+}, 30000);
 
 async function attachedPair(home: string, stream: Stream) {
   const daemons: Promise<number>[] = [];

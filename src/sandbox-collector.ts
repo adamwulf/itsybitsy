@@ -13,10 +13,13 @@
  *   process that may run a daemon; an attach that wins it hands the locked fd to
  *   the daemon it spawns (fd 3), so the role never has a free gap. The kernel
  *   frees it on any exit, SIGKILL included: a free lock means no daemon.
- * - `clients.lock` LOCK_SH is held by every attach for its whole life. The daemon
- *   exits only once it can take LOCK_EX there (no attach alive) with no launch
- *   left, and gives up `daemon.lock` while still holding it, so no attach can
- *   register with a daemon that is exiting.
+ * - `clients.lock` LOCK_SH is held by every attach for its whole life. The idle
+ *   exit happens only once the daemon can take LOCK_EX there (no attach alive)
+ *   with no launch left, and gives up `daemon.lock` while still holding it, so
+ *   no attach can register with a daemon that is exiting.
+ * - The other exits: `restart` / SIGTERM / SIGINT and a stream failure leave
+ *   every launch WITHOUT `done` and give up the role first (attaches start a
+ *   successor that re-adopts); `stop` finishes every launch (`done`) first.
  */
 import { dlopen, FFIType } from "bun:ffi";
 import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync,
@@ -722,6 +725,11 @@ export async function attachSandboxLaunch(opts: AttachOptions): Promise<number> 
     let stopSent = false;
     while (true) {
       if (done()) return 0;
+      // A daemon that FAILED this launch writes our token to `done` (handled
+      // above). `failed` without it, or a foreign `done`, is a rejection, for
+      // example by a successor's re-adopt scan after the owner exited. Final:
+      // that daemon holds the role, so waiting for a free lock would never end.
+      if (existsSync(file("failed")) || existsSync(file("done"))) return ownerAlive() ? refused("rejected") : 0;
       if (terminating && !stopSent) {
         // The directory stays reserved until we return, so its path is safe.
         try { appendAgentLog(file("stop"), "stop\n"); } catch { /* removed */ }

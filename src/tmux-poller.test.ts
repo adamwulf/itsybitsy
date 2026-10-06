@@ -430,17 +430,20 @@ describe("TmuxPoller", () => {
     // Now give the stale poll a full chance to deliver: let its exit settle,
     // then drive one more poll all the way to its callback. Anything the stale
     // poll was going to emit would have been emitted before that later output.
+    // The later poll returns NEW text: the poller does not re-deliver output
+    // that is unchanged since its last delivery.
     releaseStale();
     await waitFor(() => staleSettled, { message: "the stale poll's tmux exit to settle" });
+    mockSpawn("later-output\n", 0);
     clock.tick();
     await waitFor(
-      () => outputs.filter((o) => o === "fresh-output\n").length >= 2,
+      () => outputs.includes("later-output\n"),
       { message: "a later poll to complete after the stale one settled" },
     );
 
     // The stale "stale-output" should have been discarded
     expect(outputs).not.toContain("stale-output\n");
-    expect(outputs).toContain("fresh-output\n");
+    expect(outputs).toEqual(["fresh-output\n", "later-output\n"]);
   });
 
   test("onOutput called with empty strings when tmux exits non-zero (session not found)", async () => {
@@ -917,6 +920,132 @@ describe("TmuxPoller", () => {
     clock.tick();
     await giveASpuriousPollAChance();
     expect(captureCalls).toBe(0);
+  });
+
+  // -----------------------------------------------------------------
+  // Delivery dedupe — every onOutput costs the dashboard a full render, so
+  // a capture equal to the last one delivered for the session is skipped.
+  // -----------------------------------------------------------------
+
+  /** A pane whose capture text / exit code a test can change between ticks. */
+  function installPane(initial: { out: string; exit: number }) {
+    const pane = { ...initial, captures: 0 };
+    spawnCtx.set((cmd: string[], _opts?: any) => {
+      if (cmd.includes("capture-pane")) pane.captures++;
+      return { stdout: streamOf(pane.out), stderr: emptyStream(), exited: Promise.resolve(pane.exit) };
+    });
+    return pane;
+  }
+
+  test("identical output on later ticks is not re-delivered", async () => {
+    const pane = installPane({ out: "same\n", exit: 0 });
+    const outputs: string[] = [];
+    poller = new TmuxPoller({ onOutput(raw) { outputs.push(raw); } });
+    poller.start();
+    poller.setAgent("session-A");
+    await waitFor(() => outputs.length === 1, { message: "the first capture's delivery" });
+
+    clock.tick();
+    clock.tick();
+    await waitFor(() => pane.captures === 3, { message: "the captures from two ticks" });
+    await giveASpuriousPollAChance();
+
+    expect(outputs).toEqual(["same\n"]);
+  });
+
+  test("output that changed since the last delivery is delivered", async () => {
+    const pane = installPane({ out: "first\n", exit: 0 });
+    const outputs: string[] = [];
+    poller = new TmuxPoller({ onOutput(raw) { outputs.push(raw); } });
+    poller.start();
+    poller.setAgent("session-A");
+    await waitFor(() => outputs.length === 1, { message: "the first capture's delivery" });
+
+    pane.out = "second\n";
+    clock.tick();
+    await waitFor(() => outputs.length === 2, { message: "the changed capture's delivery" });
+
+    expect(outputs).toEqual(["first\n", "second\n"]);
+  });
+
+  test("a session change delivers the first capture even when it matches the last delivery", async () => {
+    installPane({ out: "same\n", exit: 0 });
+    const outputs: string[] = [];
+    poller = new TmuxPoller({ onOutput(raw) { outputs.push(raw); } });
+    poller.start();
+    poller.setAgent("session-A");
+    await waitFor(() => outputs.length === 1, { message: "session-A's first capture" });
+
+    poller.setAgent("session-B");
+    await waitFor(() => outputs.length === 2, { message: "session-B's first capture" });
+
+    // Back to A: still a session change, so A is delivered again.
+    poller.setAgent("session-A");
+    await waitFor(() => outputs.length === 3, { message: "session-A's first capture after switching back" });
+
+    expect(outputs).toEqual(["same\n", "same\n", "same\n"]);
+  });
+
+  test("resume after stop delivers the first capture even when it is unchanged", async () => {
+    installPane({ out: "same\n", exit: 0 });
+    const outputs: string[] = [];
+    poller = new TmuxPoller({ onOutput(raw) { outputs.push(raw); } });
+    poller.start();
+    poller.setAgent("session-A");
+    await waitFor(() => outputs.length === 1, { message: "the first capture's delivery" });
+
+    poller.stop();
+    poller.resume();
+    await waitFor(() => outputs.length === 2, { message: "the delivery from resume()'s immediate poll" });
+
+    expect(outputs).toEqual(["same\n", "same\n"]);
+  });
+
+  test("a failed capture is delivered once, and again only after the output changes", async () => {
+    const pane = installPane({ out: "", exit: 1 });
+    const outputs: string[] = [];
+    poller = new TmuxPoller({ onOutput(raw, stripped) { outputs.push(`${raw}|${stripped}`); } });
+    poller.start();
+    poller.setAgent("dead-session");
+    await waitFor(() => outputs.length === 1, { message: "the failed capture's delivery" });
+
+    // Still failing: not re-delivered.
+    clock.tick();
+    clock.tick();
+    await waitFor(() => pane.captures === 3, { message: "the captures from two ticks" });
+    await giveASpuriousPollAChance();
+    expect(outputs).toEqual(["|"]);
+
+    // The session comes back, then goes away again: both changes are delivered.
+    pane.out = "back\n";
+    pane.exit = 0;
+    clock.tick();
+    await waitFor(() => outputs.length === 2, { message: "the live capture's delivery" });
+    pane.out = "";
+    pane.exit = 1;
+    clock.tick();
+    await waitFor(() => outputs.length === 3, { message: "the second failure's delivery" });
+
+    expect(outputs).toEqual(["|", "back\n|back\n", "|"]);
+  });
+
+  test("redeliverNext() delivers the next capture even when it is unchanged", async () => {
+    const pane = installPane({ out: "same\n", exit: 0 });
+    const outputs: string[] = [];
+    poller = new TmuxPoller({ onOutput(raw) { outputs.push(raw); } });
+    poller.start();
+    poller.setAgent("session-A");
+    await waitFor(() => outputs.length === 1, { message: "the first capture's delivery" });
+
+    poller.redeliverNext();
+    clock.tick();
+    await waitFor(() => outputs.length === 2, { message: "the re-delivered capture" });
+
+    // Only that one capture: the next unchanged tick is skipped again.
+    clock.tick();
+    await waitFor(() => pane.captures === 3, { message: "the capture from the next tick" });
+    await giveASpuriousPollAChance();
+    expect(outputs).toEqual(["same\n", "same\n"]);
   });
 });
 

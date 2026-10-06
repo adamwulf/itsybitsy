@@ -12,7 +12,12 @@ import { tmuxSessionTarget } from "./validation";
 export const spawnCtx = new SpawnContext();
 
 export interface TmuxPollerEvents {
-  /** Raw tmux output (with ANSI, tabs expanded) for display */
+  /**
+   * Raw tmux output (with ANSI, tabs expanded) for display. Called only when the
+   * capture differs from the last one delivered for the current session — the
+   * first capture after setAgent()/start()/resume()/redeliverNext() is always
+   * delivered. A failed capture is delivered as ("", "").
+   */
   onOutput: (raw: string, stripped: string) => void;
   onWidth?: (width: number) => void;
   onError?: (error: Error) => void;
@@ -50,6 +55,13 @@ export class TmuxPoller {
   private running = false;
   private events: TmuxPollerEvents;
   private lines: number;
+  /**
+   * Raw output last passed to onOutput for the current session, or null when
+   * nothing has been delivered since the session was set or polling (re)started.
+   * poll() skips onOutput when a capture equals it: every delivery costs the
+   * dashboard a full render, and an idle pane captures the same text every tick.
+   */
+  private lastDelivered: string | null = null;
 
   constructor(events: TmuxPollerEvents, lines = 200) {
     this.events = events;
@@ -78,6 +90,7 @@ export class TmuxPoller {
     // when the user hasn't switched agents.
     if (this.tmuxSession === tmuxSession) return;
     this.tmuxSession = tmuxSession;
+    this.lastDelivered = null;
     // Immediately poll on agent change, and query the tmux window width once
     // for this session. Width only changes on terminal resize or our own
     // resizeTmuxWindow() calls, so polling it every tick wastes posix_spawn.
@@ -98,6 +111,9 @@ export class TmuxPoller {
 
   start(): void {
     this.running = true;
+    // The consumer may have dropped its copy while polling was stopped, so the
+    // first capture after a (re)start is always delivered.
+    this.lastDelivered = null;
     this.timer = setInterval(() => {
       if (this.running && this.tmuxSession) {
         this.poll();
@@ -131,6 +147,16 @@ export class TmuxPoller {
     }
   }
 
+  /**
+   * Deliver the next capture even if it equals the last one. Call this when the
+   * consumer clears its copy of the output while the session stays the same
+   * (e.g. a pane reset after a coordinator restart) — otherwise an unchanged
+   * capture would never refill it.
+   */
+  redeliverNext(): void {
+    this.lastDelivered = null;
+  }
+
   private async poll(): Promise<void> {
     // Snapshot the session before async work to detect agent switches
     const targetSession = this.tmuxSession;
@@ -154,12 +180,16 @@ export class TmuxPoller {
       if (this.tmuxSession !== targetSession) return;
 
       if (exitCode !== 0) {
-        // tmux session doesn't exist
+        // tmux session doesn't exist. Delivered once, like any unchanged output.
+        if (this.lastDelivered === "") return;
+        this.lastDelivered = "";
         this.events.onOutput("", "");
         return;
       }
 
       const expanded = expandTabs(raw);
+      if (expanded === this.lastDelivered) return;
+      this.lastDelivered = expanded;
       const stripped = stripAnsi(expanded);
       this.events.onOutput(expanded, stripped);
       // Note: window width is queried once in setAgent() rather than on every

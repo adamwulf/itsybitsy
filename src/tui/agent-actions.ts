@@ -56,6 +56,7 @@ import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
 import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, restartSystemCoordinatorFresh, isCoordinatorRestartCommand, checkCoordinatorExists, getLastCoordinatorSpawnMode, discardSystemCoordinator } from "../coordinator";
 import { isValidToolList } from "../validation";
 import { listTeams, getTeam } from "../teams";
+import { collectorHealthDetail, type CollectorHealth } from "../sandbox-collector-light";
 
 const SCROLL_STEP = 10;
 
@@ -271,6 +272,8 @@ export interface ActionCtx {
    * dashboard implements it; tests may inject a recording stub or omit it.
    */
   onConfigChange?: (key: string, value: unknown) => void;
+  /** Latest shared sandbox denial collector probe; the help panel shows it. */
+  collectorStatus?: CollectorHealth | null;
   pendingSelectNewestInRepo: string | null;
   showDialog(dialog: NonNullable<DialogState>): void;
   closeDialog(): void;
@@ -2075,6 +2078,10 @@ export function handleHelp(ctx: ActionCtx) {
   ctx.showDialog({
     type: "help",
     lines: [
+      // The top-bar Collector light's details, first so a short terminal never clips them.
+      ...(ctx.collectorStatus
+        ? [header("Status"), row("Collector", collectorHealthDetail(ctx.collectorStatus)), ""]
+        : []),
       header("Navigation"),
       row("j / k / ↑↓", "select agent"),
       row("1 / 2 / 3", "switch sidebar (Agents / Teams / Favorites)"),

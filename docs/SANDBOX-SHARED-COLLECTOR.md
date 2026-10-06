@@ -59,7 +59,7 @@ exec sandbox-exec ... CLI               (unchanged)
 | `daemon.lock` | LOCK_EX = the daemon role (§3). |
 | `clients.lock` | LOCK_SH held by every live `attach` (§3). |
 | `inbox/<launch>` | registration request (temp file + rename); content: the launch directory path. |
-| `heartbeat.json` | written every second for `ib sandbox-collector status`; no decision reads it. |
+| `heartbeat.json` | written every second for `ib sandbox-collector status` and the `ib watch` Collector light; no lifecycle decision reads it. |
 | `collector.log` | daemon diagnostics and rejected registrations (size-capped at start). |
 | `stop` | written by `ib sandbox-collector stop`: end collection for every launch (§6). |
 | `restart` | written by `ib sandbox-collector restart`: replace the daemon, keep collecting (§6). |
@@ -302,8 +302,13 @@ collecting), `stop` (end collection for every running launch).
 2. **Hooks** — `sandbox-collector` replaces `sandbox-log-watch` in the
    internal-verb deny list; the sealed-tree floor deny is unchanged.
 3. **Watchdog** — not involved: it neither starts nor restarts the daemon.
-4. **`ib watch`** — unchanged: the same `[Sandbox]` and `[SandboxCollector]`
-   records reach the DENIALS parser.
+4. **`ib watch`** — the same `[Sandbox]` and `[SandboxCollector]` records reach
+   the DENIALS parser. The top bar shows a "Collector" stoplight left of
+   "Telegram" (`src/sandbox-collector-light.ts`): grey = off or idle, green =
+   daemon with a fresh heartbeat, yellow = no heartbeat yet, a heartbeat older
+   than 10 s, or launches attached with no daemon on one probe, red = the same
+   on two probes in a row. It probes in process every 5 s (only while the switch
+   is on) with non-blocking, immediately released locks; `?` help shows details.
 
 Decisions taken with the recommended defaults (the user may revisit): the daemon
 exits when no launch remains (by lock, not a timer); a stuck daemon is reported,

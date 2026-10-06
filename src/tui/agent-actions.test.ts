@@ -51,6 +51,7 @@ import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxSpawnCtx } from "../tmux-poller";
 import type { SpawnResult } from "../types";
 import { setUserHome, resetUserHome } from "../home";
+import { stripAnsi } from "../parse-state";
 
 // These tests do REAL subprocess work: `git init`/`commit`/`branch` in the
 // diff-tool fixtures, `mkdir -p` via Bun.$ inside handleSnapshot, and a real
@@ -1032,6 +1033,19 @@ describe("handleHelp", () => {
     const d = assertDialog(dialogs[0]!, "help");
     const text = d.lines.join("\n");
     expect(text).toContain("nickname agent");
+  });
+
+  test("help shows the collector light's details first, only when probed", () => {
+    const { ctx, dialogs } = makeMockCtx();
+    handleHelp(ctx);
+    expect(assertDialog(dialogs[0]!, "help").lines.join("\n")).not.toContain("Collector");
+
+    ctx.collectorStatus = { light: "green", state: "ok", pid: 4242, heartbeatAgeMs: 2000, launches: 1 };
+    handleHelp(ctx);
+    const lines = assertDialog(dialogs[1]!, "help").lines.map(stripAnsi);
+    expect(lines[0]).toBe("Status");
+    expect(lines[1]).toContain("Collector");
+    expect(lines[1]).toContain("ok: pid 4242, heartbeat 2s ago, 1 launch");
   });
 });
 

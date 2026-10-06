@@ -9,6 +9,7 @@ import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSys
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow, formatFooterClock, usageFetchCtx } from "./dashboard";
 import type { GeminiUsageResult } from "../usage";
 import { visibleWidth } from "@mariozechner/pi-tui";
+import type { CollectorHealth } from "../sandbox-collector-light";
 import type { TUI } from "@mariozechner/pi-tui";
 import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setNewAgentCallerMetaReader, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner, sealAgentRecord } from "../ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
@@ -6213,6 +6214,66 @@ describe("Telegram header indicator", () => {
   });
 });
 
+function collectorHealth(light: CollectorHealth["light"], heartbeatAgeMs: number | null = null): CollectorHealth {
+  const state = ({ grey: "idle", green: "ok", yellow: "stale", red: "broken" } as const)[light];
+  return { light, state, pid: null, heartbeatAgeMs, launches: null };
+}
+
+describe("Collector header indicator", () => {
+  let dashboard: DashboardComponent;
+  let origRows: number | undefined;
+
+  beforeEach(() => {
+    dashboard = makeDashboard();
+    origRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+  });
+
+  test("header hides the indicator until a status is set", () => {
+    expect(stripAnsi(dashboard.render(160)[0]!)).not.toContain("Collector");
+  });
+
+  test("renders to the left of Telegram, right-aligned with it", () => {
+    dashboard.setCollectorStatus(collectorHealth("green"));
+    dashboard.setTelegramStatus("green");
+    const width = 160;
+    const header = dashboard.render(width)[0]!;
+    const text = stripAnsi(header).trimEnd();
+    expect(text.endsWith("● Collector  ● Telegram")).toBe(true);
+    expect(visibleWidth(header)).toBe(width - 1);
+  });
+
+  test("without Telegram it right-aligns on its own", () => {
+    dashboard.setCollectorStatus(collectorHealth("green"));
+    const header = dashboard.render(160)[0]!;
+    expect(stripAnsi(header).trimEnd().endsWith("● Collector")).toBe(true);
+    expect(visibleWidth(header)).toBe(159);
+  });
+
+  test("each light uses the stoplight color; grey dims the whole indicator", () => {
+    const header = (light: CollectorHealth["light"]) => {
+      dashboard.setCollectorStatus(collectorHealth(light));
+      return dashboard.render(160)[0]!;
+    };
+    expect(header("green")).toContain("\x1b[32m●\x1b[0m Collector");
+    expect(header("yellow")).toContain("\x1b[33m●\x1b[0m Collector");
+    expect(header("red")).toContain("\x1b[31m●\x1b[0m Collector");
+    expect(header("grey")).toContain("\x1b[90m●\x1b[0m \x1b[2mCollector\x1b[0m");
+  });
+
+  test("narrow width keeps both indicators inside the line", () => {
+    dashboard.setCollectorStatus(collectorHealth("yellow"));
+    dashboard.setTelegramStatus("green");
+    const header = dashboard.render(140)[0]!;
+    expect(visibleWidth(header)).toBeLessThanOrEqual(140);
+    expect(stripAnsi(header).trimEnd().endsWith("● Collector  ● Telegram")).toBe(true);
+  });
+});
+
 describe("DashboardComponent — §17 Teams panel wiring", () => {
   let coordHome: string;
 
@@ -7304,6 +7365,23 @@ describe("idle render checks", () => {
     expect(counter.renders()).toBe(1);
 
     dashboard.setTelegramStatus("red");
+    expect(counter.renders()).toBe(2);
+  });
+
+  test("setCollectorStatus renders only when the light changes", () => {
+    const dashboard = makeDashboard();
+    const counter = countingTui();
+    dashboard.setTui(counter.tui);
+
+    dashboard.setCollectorStatus(collectorHealth("green", 900));
+    // Every 5s probe sees a new heartbeat age; the light is unchanged.
+    dashboard.setCollectorStatus(collectorHealth("green", 1100));
+    dashboard.setCollectorStatus(collectorHealth("green", 700));
+    expect(counter.renders()).toBe(1);
+    // The newest probe is kept for the help panel even without a render.
+    expect(dashboard.collectorStatus?.heartbeatAgeMs).toBe(700);
+
+    dashboard.setCollectorStatus(collectorHealth("yellow", 12_000));
     expect(counter.renders()).toBe(2);
   });
 

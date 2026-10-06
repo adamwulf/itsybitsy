@@ -91,6 +91,8 @@ import type { StagedTeamSendOptions, TeamSendResult } from "./message-send";
 import { promptAndStageAttachmentsIfNeeded } from "./attachment-prompt";
 import { getResolvableWarnings } from "../health-check";
 import { logToWatchLog, logWarning, setWatchRunning } from "../watch-log";
+import { sandboxCollectorHealth, type CollectorHealth } from "../sandbox-collector-light";
+import { SANDBOX_DENIAL_COLLECTOR_ENABLED } from "../sandbox-log-launch";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
@@ -751,6 +753,9 @@ export class DashboardComponent implements Component {
   private clockTimer: ReturnType<typeof setTimeout> | null = null;
   private telegramStatus: "red" | "yellow" | "green" | null = null;
   telegramStatusTimer: ReturnType<typeof setInterval> | null = null;
+  /** Latest shared sandbox denial collector probe (top bar + help panel). */
+  collectorStatus: CollectorHealth | null = null;
+  collectorStatusTimer: ReturnType<typeof setInterval> | null = null;
   /** Tracks in-flight executeAndRefresh promises — used by tests to await completion */
   private _pendingActions: Set<Promise<void>> = new Set();
   pendingSelectNewestInRepo: string | null = null;
@@ -1220,6 +1225,10 @@ export class DashboardComponent implements Component {
       clearInterval(this.telegramStatusTimer);
       this.telegramStatusTimer = null;
     }
+    if (this.collectorStatusTimer) {
+      clearInterval(this.collectorStatusTimer);
+      this.collectorStatusTimer = null;
+    }
     // Watchdog runs as standalone process — do NOT stop it when TUI closes
   }
 
@@ -1470,6 +1479,14 @@ export class DashboardComponent implements Component {
     if (this.telegramStatus === status) return;
     this.telegramStatus = status;
     this.tui?.requestRender();
+  }
+
+  setCollectorStatus(status: CollectorHealth): void {
+    // The 5s probe re-sends the same light (its heartbeat age always moves);
+    // only a new color needs a render. The label never changes.
+    const changed = this.collectorStatus?.light !== status.light;
+    this.collectorStatus = status;
+    if (changed) this.tui?.requestRender();
   }
 
   /** Add an error to the errors list (called from watcher onError).
@@ -3064,12 +3081,24 @@ export class DashboardComponent implements Component {
       ? `${DIM}—${RESET} ${noticeColor}${this.lastSentNotice}${RESET}`
       : `${DIM}— agent dashboard${RESET}`;
     const left = `${BOLD}ib${RESET} ${subtitle}`;
+    const indicators: string[] = [];
+    if (this.collectorStatus) {
+      // Shared sandbox denial collector (src/sandbox-collector-light.ts). Grey
+      // (off or idle) dims the whole indicator.
+      const light = this.collectorStatus.light;
+      indicators.push(light === "grey"
+        ? `${DIM_GRAY}●${RESET} ${DIM}Collector${RESET}`
+        : `${light === "green" ? GREEN : light === "yellow" ? YELLOW : RED}●${RESET} Collector`);
+    }
     if (this.telegramStatus) {
       const tgColor =
         this.telegramStatus === "green" ? GREEN
         : this.telegramStatus === "yellow" ? YELLOW
         : RED;
-      const right = `${tgColor}●${RESET} Telegram`;
+      indicators.push(`${tgColor}●${RESET} Telegram`);
+    }
+    if (indicators.length > 0) {
+      const right = indicators.join("  ");
       const pad = Math.max(1, width - visibleWidth(left) - visibleWidth(right) - 1);
       lines.push(truncateToWidth(left + " ".repeat(pad) + right, width, ""));
     } else {
@@ -3616,6 +3645,16 @@ export async function launchDashboard(): Promise<void> {
       } else {
         dashboard.setTelegramStatus("red");
       }
+    }, 5_000);
+  }
+  // Shared sandbox denial collector stoplight: in-process lock probes and a
+  // heartbeat read (src/sandbox-collector-light.ts), never a spawned
+  // `ib sandbox-collector status`. While collection is switched off in this
+  // build nothing can change, so it stays grey with no timer.
+  dashboard.setCollectorStatus(sandboxCollectorHealth());
+  if (SANDBOX_DENIAL_COLLECTOR_ENABLED) {
+    dashboard.collectorStatusTimer = setInterval(() => {
+      dashboard.setCollectorStatus(sandboxCollectorHealth({ previous: dashboard.collectorStatus }));
     }, 5_000);
   }
   tui.addChild(dashboard);

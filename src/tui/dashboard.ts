@@ -137,6 +137,12 @@ export class TmuxPaneComponent implements Component {
   /** When true, render output without requiring an agent (used for coordinator) */
   agentless = false;
   /**
+   * Called by resetForAgent(). The dashboard points it at the feeding poller's
+   * redeliverNext(): the poller only delivers changed output, so after a reset
+   * on the same session it must re-deliver an unchanged capture.
+   */
+  onReset?: () => void;
+  /**
    * Memoized word-wrap keyed on (raw identity, width). The raw we wrap is the
    * chrome-SLICED transcript (input-box chrome removed on the UNWRAPPED logical
    * lines first — see chromeSlice), not the full capture, so wrapping never sees
@@ -194,6 +200,7 @@ export class TmuxPaneComponent implements Component {
     this.clientAttached = false;
     this.wrapCache.reset();
     this.chromeCache = null;
+    this.onReset?.();
   }
 
   scrollUp(amount = 1) {
@@ -385,6 +392,30 @@ function padToWidth(str: string, width: number): string {
   return str + (needsReset ? RESET : "") + " ".repeat(width - vw);
 }
 
+/**
+ * Footer clock format: 24-hour HH:MM. Built once and reused — toLocaleTimeString()
+ * builds a new formatter on every call, which was ~5% of an idle `ib watch`
+ * profile. No seconds, so the clock only needs a render once a minute
+ * (DashboardComponent.scheduleClockRender). hourCycle "h23" keeps midnight at 00.
+ */
+const FOOTER_CLOCK_FORMAT = new Intl.DateTimeFormat("en-US", {
+  hourCycle: "h23",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+
+/** Footer clock text for `date` (HH:MM, 24-hour). */
+export function formatFooterClock(date: Date): string {
+  return FOOTER_CLOCK_FORMAT.format(date);
+}
+
+/** True when two usage readings render the same status-bar text. */
+function sameUsage(a: UsageData | null, b: UsageData | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.sessionPct === b.sessionPct && a.weeklyPct === b.weeklyPct
+    && a.sessionReset === b.sessionReset && a.weeklyReset === b.weeklyReset;
+}
+
 /** Status bar component */
 class StatusBarComponent implements Component {
   pendingQuestions = 0;
@@ -415,8 +446,7 @@ class StatusBarComponent implements Component {
       ? `${YELLOW}⚠️  gemini: agy login needed${RESET}`
       : this.formatUsage("gemini", this.geminiUsage, this.geminiUsageError);
     const codexUsageStr = this.formatUsage("codex", this.codexUsage, this.codexUsageError);
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const timeStr = formatFooterClock(new Date());
     const versionStr = this.version ? `v${this.version}` : "";
     const rightUsage = this.composeRight(geminiUsageStr, codexUsageStr);
     const row2Right = this.composeRight(rightUsage, versionStr ? `${DIM}${versionStr}${RESET}` : "");
@@ -713,6 +743,12 @@ export class DashboardComponent implements Component {
   private gitStatusTimer: ReturnType<typeof setInterval> | null = null;
   /** In-flight guard so a slow `git status` never stacks up behind itself. */
   private gitStatusInFlight = false;
+  /**
+   * One-shot timer for the next wall-clock minute boundary (see
+   * scheduleClockRender). Renders are otherwise driven only by input and data
+   * changes, so without it the HH:MM footer clock would stall while idle.
+   */
+  private clockTimer: ReturnType<typeof setTimeout> | null = null;
   private telegramStatus: "red" | "yellow" | "green" | null = null;
   telegramStatusTimer: ReturnType<typeof setInterval> | null = null;
   /** Tracks in-flight executeAndRefresh promises — used by tests to await completion */
@@ -1053,6 +1089,13 @@ export class DashboardComponent implements Component {
         this.tui?.requestRender();
       },
     });
+
+    // The pollers deliver only changed output. A pane reset that keeps the same
+    // session (e.g. resetForAgent() after a coordinator restart) must still get
+    // the next capture, or the pane waits until the output changes. The repo
+    // coordinator pane is only reset together with a session change.
+    this.tmuxPane.onReset = () => this.tmuxPoller.redeliverNext();
+    this.coordinatorPane.onReset = () => this.coordinatorPoller.redeliverNext();
   }
 
   setTui(tui: TUI) {
@@ -1128,6 +1171,21 @@ export class DashboardComponent implements Component {
     this.gitStatusTimer = setInterval(() => {
       void this.refreshGitStatus();
     }, 3000);
+    this.scheduleClockRender();
+  }
+
+  /**
+   * Render once at the next wall-clock minute boundary, then re-arm. The footer
+   * clock shows HH:MM, so this is the only render it needs. One timeout per
+   * minute instead of an interval: each delay is measured from the real clock,
+   * so the render cannot drift away from the boundary.
+   */
+  private scheduleClockRender(): void {
+    const msToNextMinute = 60_000 - (Date.now() % 60_000);
+    this.clockTimer = setTimeout(() => {
+      this.tui?.requestRender();
+      this.scheduleClockRender();
+    }, msToNextMinute);
   }
 
   stopPolling() {
@@ -1145,6 +1203,10 @@ export class DashboardComponent implements Component {
     if (this.gitStatusTimer) {
       clearInterval(this.gitStatusTimer);
       this.gitStatusTimer = null;
+    }
+    if (this.clockTimer) {
+      clearTimeout(this.clockTimer);
+      this.clockTimer = null;
     }
     if (this.clientCheckTimer) {
       clearInterval(this.clientCheckTimer);
@@ -1286,13 +1348,16 @@ export class DashboardComponent implements Component {
 
   private refreshUsage() {
     const fetchers = usageFetchCtx.fn;
+    // Each update renders only when the status bar would change.
     fetchers.readClaudeUsage()
       .then((result) => {
+        if (sameUsage(this.statusBar.claudeUsage, result.data) && this.statusBar.claudeUsageError === result.error) return;
         this.statusBar.claudeUsage = result.data;
         this.statusBar.claudeUsageError = result.error;
         this.tui?.requestRender();
       })
       .catch(() => {
+        if (this.statusBar.claudeUsageError) return;
         this.statusBar.claudeUsageError = true;
         this.tui?.requestRender();
       });
@@ -1301,11 +1366,13 @@ export class DashboardComponent implements Component {
 
     fetchers.fetchCodexUsage()
       .then((result) => {
+        if (sameUsage(this.statusBar.codexUsage, result.data) && this.statusBar.codexUsageError === result.error) return;
         this.statusBar.codexUsage = result.data;
         this.statusBar.codexUsageError = result.error;
         this.tui?.requestRender();
       })
       .catch(() => {
+        if (this.statusBar.codexUsageError) return;
         this.statusBar.codexUsageError = true;
         this.tui?.requestRender();
       });
@@ -1320,6 +1387,7 @@ export class DashboardComponent implements Component {
   private refreshGeminiUsage() {
     if (this.agyUsageAuthLatched) return;
     if (!this.hasLiveAgyAgent) {
+      if (this.statusBar.geminiUsage === null && !this.statusBar.geminiUsageError) return;
       this.statusBar.geminiUsage = null;
       this.statusBar.geminiUsageError = false;
       this.tui?.requestRender();
@@ -1335,13 +1403,15 @@ export class DashboardComponent implements Component {
           this.statusBar.geminiUsageError = false;
           this.statusBar.geminiLoginNeeded = true;
         } else if (this.hasLiveAgyAgent) {
+          if (sameUsage(this.statusBar.geminiUsage, result.data) && this.statusBar.geminiUsageError === result.error) return;
           this.statusBar.geminiUsage = result.data;
           this.statusBar.geminiUsageError = result.error;
         }
         this.tui?.requestRender();
       })
       .catch(() => {
-        if (this.hasLiveAgyAgent) this.statusBar.geminiUsageError = true;
+        if (!this.hasLiveAgyAgent || this.statusBar.geminiUsageError) return;
+        this.statusBar.geminiUsageError = true;
         this.tui?.requestRender();
       })
       .finally(() => {
@@ -1396,6 +1466,8 @@ export class DashboardComponent implements Component {
   }
 
   setTelegramStatus(status: "red" | "yellow" | "green" | null): void {
+    // The 5s health tick re-sends the same status; only a change needs a render.
+    if (this.telegramStatus === status) return;
     this.telegramStatus = status;
     this.tui?.requestRender();
   }
@@ -2085,9 +2157,13 @@ export class DashboardComponent implements Component {
       for (const a of agents) agentsById.set(a.id, a);
       const list = flattenTeamsTree(teams, agentsById);
       this.teamsTree.setFlatList(list);
-      // If we currently render the Teams panel, request a re-render so the
-      // refreshed list shows up immediately. (Cheap no-op when not focused.)
-      this.tui?.requestRender();
+      // Render only when the Teams tree can be on screen: the Teams tab is
+      // visible, or the Teams tree owns the selection (the main area reads its
+      // selection). Otherwise nothing visible changed — this runs after every
+      // watcher update — and switching to the Teams tab renders the new list.
+      if (this.sidebarMode === "teams" || this.activeSelectionSource === "teams") {
+        this.tui?.requestRender();
+      }
     } catch {
       // Best-effort: a teams-registry read failure must never break the dashboard
       // refresh loop. Leave the tree's last list in place.
@@ -2124,6 +2200,11 @@ export class DashboardComponent implements Component {
           break;
         }
       }
+      // This runs after every watcher update while a team is selected; skip
+      // the render when the info panel would show the same values.
+      const prev = this.infoPanel.selectedTeam;
+      if (prev && prev.name === teamName && prev.createdEpoch === team.created_epoch &&
+          prev.createdBy === team.created_by && prev.memberCount === liveCount) return;
       this.infoPanel.selectedTeam = {
         name: teamName,
         createdEpoch: team.created_epoch,
@@ -2131,6 +2212,7 @@ export class DashboardComponent implements Component {
         memberCount: liveCount,
       };
     } else {
+      if (this.infoPanel.selectedTeam === null) return;
       this.infoPanel.selectedTeam = null;
     }
     this.tui?.requestRender();

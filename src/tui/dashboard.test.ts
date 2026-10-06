@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout, setSystemTime } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
@@ -6,9 +6,10 @@ import { readAgentLog, readAgentLogWindow, readAgentPrompt, parseDenials } from 
 import type { Agent, AgentMeta, FlatEntry, PendingQuestion } from "../agents";
 import { stripAnsi } from "../parse-state";
 import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult, waitFor } from "../test-utils";
-import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow, usageFetchCtx } from "./dashboard";
+import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow, formatFooterClock, usageFetchCtx } from "./dashboard";
 import type { GeminiUsageResult } from "../usage";
 import { visibleWidth } from "@mariozechner/pi-tui";
+import type { TUI } from "@mariozechner/pi-tui";
 import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setNewAgentCallerMetaReader, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner, sealAgentRecord } from "../ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxPollerSpawnCtx } from "../tmux-poller";
@@ -4237,7 +4238,7 @@ describe("usage error indicator", () => {
 
     const lines = dashboard.render(160);
     const statusRows = lines.slice(-2).map(l => stripAnsi(l));
-    expect(statusRows[1]).toMatch(/^\d{2}:\d{2}:\d{2}  @: jump/);
+    expect(statusRows[1]).toMatch(/^\d{2}:\d{2}  @: jump/);
     expect(statusRows[1]).toContain("codex session:4%");
     expect(statusRows[1]).toContain("weekly:1%");
   });
@@ -7216,5 +7217,184 @@ describe("Git Status commit count (§11.4)", () => {
       message: "the second agent's commit count",
     });
     expect(ranges).toEqual(["main..HEAD", "agent/agent-mgr..HEAD"]);
+  });
+});
+
+/** A TUI stand-in that only counts requestRender() calls. */
+function countingTui(): { tui: TUI; renders: () => number } {
+  let renders = 0;
+  const tui = { requestRender: () => { renders++; } } as unknown as TUI;
+  return { tui, renders: () => renders };
+}
+
+describe("footer clock", () => {
+  afterEach(() => {
+    setSystemTime();
+  });
+
+  test("formats 24-hour HH:MM with no seconds", () => {
+    expect(formatFooterClock(new Date(2026, 9, 5, 0, 7, 59))).toBe("00:07");
+    expect(formatFooterClock(new Date(2026, 9, 5, 9, 5, 0))).toBe("09:05");
+    expect(formatFooterClock(new Date(2026, 9, 5, 23, 59, 30))).toBe("23:59");
+  });
+
+  test("the status bar shows HH:MM", () => {
+    setSystemTime(new Date(2026, 9, 5, 14, 3, 27));
+    const dashboard = makeDashboard();
+    const rows = (dashboard as any).statusBar.render(160).map((l: string) => stripAnsi(l));
+    expect(rows[1]).toStartWith("14:03  @: jump");
+  });
+
+  test("startPolling renders at the next minute boundary, then re-arms for the following one", () => {
+    // Hand the timeouts to the test (the poller tests do the same for
+    // setInterval), so the boundary render fires without waiting a minute.
+    const g = globalThis as unknown as {
+      setTimeout: (fn: () => void, ms?: number) => unknown;
+      clearTimeout: (handle?: unknown) => void;
+    };
+    const realSetTimeout = g.setTimeout;
+    const realClearTimeout = g.clearTimeout;
+    const armed: { fn: () => void; ms: number; handle: object }[] = [];
+    g.setTimeout = (fn: () => void, ms = 0) => {
+      const handle = {};
+      armed.push({ fn, ms, handle });
+      return handle;
+    };
+    g.clearTimeout = (handle?: unknown) => {
+      const i = armed.findIndex((a) => a.handle === handle);
+      if (i !== -1) armed.splice(i, 1);
+      else realClearTimeout(handle);
+    };
+    try {
+      const dashboard = makeDashboard();
+      const counter = countingTui();
+      dashboard.setTui(counter.tui);
+      setSystemTime(new Date(2026, 9, 5, 14, 3, 27, 250));
+      dashboard.startPolling();
+
+      // 32.75s to 14:04:00.000.
+      const first = armed.find((a) => a.ms === 32_750);
+      expect(first).toBeDefined();
+      const before = counter.renders();
+
+      setSystemTime(new Date(2026, 9, 5, 14, 4, 0, 10));
+      first!.fn();
+      expect(counter.renders()).toBe(before + 1);
+      // Re-armed from the real clock: 59.99s to 14:05:00.000.
+      expect(armed.some((a) => a.ms === 59_990)).toBe(true);
+
+      dashboard.stopPolling();
+      expect(armed.some((a) => a.ms === 59_990)).toBe(false);
+    } finally {
+      g.setTimeout = realSetTimeout;
+      g.clearTimeout = realClearTimeout;
+    }
+  });
+});
+
+describe("idle render checks", () => {
+  test("setTelegramStatus renders only when the status changes", () => {
+    const dashboard = makeDashboard();
+    const counter = countingTui();
+    dashboard.setTui(counter.tui);
+
+    dashboard.setTelegramStatus("green");
+    dashboard.setTelegramStatus("green");
+    dashboard.setTelegramStatus("green");
+    expect(counter.renders()).toBe(1);
+
+    dashboard.setTelegramStatus("red");
+    expect(counter.renders()).toBe(2);
+  });
+
+  test("a refreshed Teams tree renders only when the Teams tree can be on screen", async () => {
+    const tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-teams-render-"));
+    setUserHome(tempHome);
+    try {
+      const dashboard = makeDashboard();
+      const counter = countingTui();
+      dashboard.setTui(counter.tui);
+
+      // Agents tab, Agents selection: the Teams tree is not drawn.
+      await (dashboard as any).refreshTeamsTree([]);
+      expect(counter.renders()).toBe(0);
+
+      // Teams tab visible: the refreshed list must show.
+      dashboard.setSidebarMode("teams");
+      await (dashboard as any).refreshTeamsTree([]);
+      expect(counter.renders()).toBe(1);
+
+      // Agents tab again, but the Teams tree owns the selection (main area).
+      dashboard.setSidebarMode("agents");
+      dashboard.setActiveSelectionSource("teams");
+      await (dashboard as any).refreshTeamsTree([]);
+      expect(counter.renders()).toBe(2);
+    } finally {
+      resetUserHome();
+      await rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  test("an unchanged usage reading does not render", async () => {
+    const reading = { sessionPct: 10, weeklyPct: 20, sessionReset: "1h", weeklyReset: "2d" };
+    let current = { ...reading };
+    usageFetchCtx.set({
+      readClaudeUsage: async () => ({ data: { ...current }, error: false }),
+      fetchGeminiUsage: async () => ({ data: null, error: false }),
+      fetchCodexUsage: async () => ({ data: null, error: false }),
+    });
+    const dashboard = makeDashboard();
+    const counter = countingTui();
+    dashboard.setTui(counter.tui);
+
+    (dashboard as any).refreshUsage();
+    await waitFor(() => (dashboard as any).statusBar.claudeUsage !== null, {
+      timeoutMs: WAIT_TIMEOUT_MS,
+      message: "the first claude usage reading",
+    });
+    expect(counter.renders()).toBe(1);
+
+    // Same values in a new object: no render.
+    (dashboard as any).refreshUsage();
+    await Bun.sleep(25);
+    expect(counter.renders()).toBe(1);
+
+    current = { ...reading, sessionPct: 11 };
+    (dashboard as any).refreshUsage();
+    await waitFor(() => (dashboard as any).statusBar.claudeUsage.sessionPct === 11, {
+      timeoutMs: WAIT_TIMEOUT_MS,
+      message: "the changed claude usage reading",
+    });
+    expect(counter.renders()).toBe(2);
+  });
+
+  test("a coordinator pane reset is refilled by the next poll even when the capture is unchanged", async () => {
+    // The pollers deliver only changed output. resetForAgent() (run after a
+    // coordinator restart) clears the pane on the SAME session, so without a
+    // re-delivery a still-dead coordinator would sit on "Waiting for output..."
+    // instead of "Session stopped".
+    tmuxPollerSpawnCtx.set(() => makeSpawnResult(1));
+    try {
+      const dashboard = makeDashboard();
+      dashboard.startPolling();
+      dashboard.onUpdate([], [makeFlatSystemCoordinator()], []);
+      expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+      await waitFor(() => dashboard.coordinatorPane.hasPolled, {
+        timeoutMs: WAIT_TIMEOUT_MS,
+        message: "the coordinator pane's first (failed) capture",
+      });
+      expect(dashboard.coordinatorPane.rawOutput).toBe("");
+
+      dashboard.coordinatorPane.resetForAgent();
+      expect(dashboard.coordinatorPane.hasPolled).toBe(false);
+      // The next 1s tick captures the same failure and must deliver it.
+      await waitFor(() => dashboard.coordinatorPane.hasPolled, {
+        timeoutMs: WAIT_TIMEOUT_MS,
+        message: "the capture after the pane reset",
+      });
+      expect(dashboard.coordinatorPane.rawOutput).toBe("");
+    } finally {
+      tmuxPollerSpawnCtx.reset();
+    }
   });
 });

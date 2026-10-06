@@ -55,7 +55,8 @@ describe("buildAgyStartContent — launch line", () => {
     const content = buildAgyStartContent({ ...baseInput(),
       sandboxScriptPreamble: sandboxDenialScriptPreamble("/tmp/test", undefined, true),
       sandboxExecPrefix: sandboxDenialExecPrefix("/usr/bin/sandbox-exec -f /tmp/test/sandbox.sb", true) });
-    expect(content.indexOf("ib sandbox-log-watch")).toBeLessThan(content.indexOf("setsid /bin/sh -c"));
+    expect(content.indexOf("ib sandbox-collector attach")).toBeGreaterThan(-1);
+    expect(content.indexOf("ib sandbox-collector attach")).toBeLessThan(content.indexOf("setsid /bin/sh -c"));
     expect(content.match(/sandbox-log-gate \/usr\/bin\/sandbox-exec[^\n]* agy /g)?.length).toBe(2);
   });
 
@@ -198,7 +199,8 @@ describe("buildAgyResumeContent — launch line", () => {
     const content = buildAgyResumeContent({ ...baseInput(),
       sandboxScriptPreamble: sandboxDenialScriptPreamble("/tmp/test", undefined, true),
       sandboxExecPrefix: sandboxDenialExecPrefix("/usr/bin/sandbox-exec -f /tmp/test/sandbox.sb", true) });
-    expect(content.indexOf("ib sandbox-log-watch")).toBeLessThan(content.indexOf("setsid /bin/sh -c"));
+    expect(content.indexOf("ib sandbox-collector attach")).toBeGreaterThan(-1);
+    expect(content.indexOf("ib sandbox-collector attach")).toBeLessThan(content.indexOf("setsid /bin/sh -c"));
     expect(content.match(/sandbox-log-gate \/usr\/bin\/sandbox-exec[^\n]* agy /g)?.length).toBe(2);
   });
 
@@ -341,7 +343,7 @@ describe("buildAgy{Start,Resume}Content — optional sandbox wrapper", () => {
       expect(content).toContain("agy --dangerously-skip-permissions --mode=accept-edits");
       expect(content).not.toContain("sandbox-exec");
       expect(content).not.toContain("sandbox-proxy-launch");
-      expect(content).not.toContain("sandbox-log-watch");
+      expect(content).not.toContain("sandbox-collector");
       expect(content).not.toContain("export http_proxy=");
     }
   });

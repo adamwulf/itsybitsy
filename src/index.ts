@@ -985,9 +985,14 @@ const COMMAND_HELP: Record<string, string> = {
     "  current repo (id order), continuing on error. Coordinators are refused\n" +
     "  (reset them with the dashboard R key instead). Run from an unsandboxed\n" +
     "  session so the sealed record can be re-written.",
-  "sandbox-log-watch":
-    "Usage: ib sandbox-log-watch --dir <launch-directory> --owner <pid> --agent-log <file>\n" +
-    "  Internal: collect kernel denials outside Seatbelt for one start.sh/resume.sh launch.",
+  "sandbox-collector":
+    "Usage: ib sandbox-collector attach --dir <launch-directory> --owner <pid> --agent-log <file>\n" +
+    "       ib sandbox-collector serve [--lock-fd <fd>] | status | stop\n" +
+    "  attach: internal, run by start.sh/resume.sh outside Seatbelt: register one launch\n" +
+    "    with the shared kernel-denial collector, starting one when none is running.\n" +
+    "  serve: internal, the shared collector (one per user, one log stream); --lock-fd is\n" +
+    "    the daemon.lock fd an attach won and handed over.\n" +
+    "  status: show whether the shared collector runs. stop: ask it to finish and exit.",
   "sandbox-log-stream":
     "Usage: ib sandbox-log-stream --predicate <predicate>\n" +
     "  Internal: own a log stream in a detached session with a collector lifeline pipe.",
@@ -1582,18 +1587,39 @@ export async function main() {
       process.exitCode = await runSandboxLogStream(sandboxLogStreamArgv(predicate));
       return;
     }
-    case "sandbox-log-watch": {
+    case "sandbox-collector": {
+      const collector = await import("./sandbox-collector");
+      const action = args[1];
+      if (action === "serve") {
+        // --lock-fd: the daemon.lock fd an attach won and handed over (fd 3).
+        const lockFdText = args.includes("--lock-fd") ? args[args.indexOf("--lock-fd") + 1] : undefined;
+        if (lockFdText !== undefined && !/^[3-9]$/.test(lockFdText)) {
+          console.error(COMMAND_HELP["sandbox-collector"]);
+          process.exitCode = 1;
+          return;
+        }
+        process.exitCode = await collector.serveSandboxCollector({ lockFd: lockFdText === undefined ? undefined : Number(lockFdText) });
+        return;
+      }
+      if (action === "status") {
+        console.log(collector.sandboxCollectorStatus());
+        return;
+      }
+      if (action === "stop") {
+        console.log(collector.stopSandboxCollector() ? "Stop requested." : "The shared collector is not running.");
+        return;
+      }
       const dir = args[args.indexOf("--dir") + 1];
       const ownerText = args[args.indexOf("--owner") + 1];
       const agentLog = args[args.indexOf("--agent-log") + 1];
-      if (!args.includes("--dir") || !args.includes("--owner") || !args.includes("--agent-log") ||
+      if (action !== "attach" || !args.includes("--dir") || !args.includes("--owner") || !args.includes("--agent-log") ||
           !dir?.startsWith("/") || !/\/sandbox-log\.[a-zA-Z0-9]+$/.test(dir) ||
           !agentLog?.startsWith("/") || !ownerText || !/^[1-9]\d{0,9}$/.test(ownerText) || Number(ownerText) > 2147483647) {
-        console.error("Usage: ib sandbox-log-watch --dir <launch-directory> --owner <pid> --agent-log <file>");
+        console.error(COMMAND_HELP["sandbox-collector"]);
         process.exitCode = 1;
         return;
       }
-      process.exitCode = await (await import("./sandbox-log-watch")).watchSandboxLog({ dir, owner: Number(ownerText), agentLog });
+      process.exitCode = await collector.attachSandboxLaunch({ dir, owner: Number(ownerText), agentLog });
       return;
     }
     case "sandbox-proxy":

@@ -26,6 +26,7 @@ export function openSandboxProcessReader() {
   const system = dlopen("/usr/lib/libSystem.B.dylib", {
     mach_continuous_time: { args: [], returns: FFIType.u64 },
     sysctlbyname: { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
+    sandbox_check: { args: [FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
   });
   // Unified-log machTimestamp advances through system sleep. Absolute time
   // does not: mixing those domains made every interval miss on a slept host.
@@ -58,5 +59,8 @@ export function openSandboxProcessReader() {
     const count = proc.symbols.proc_listchildpids(pid, ptr(b), b.byteLength);
     return decodeSandboxChildPids(b, count);
   };
-  return { boot, clock, read, children, close: () => { proc.close(); system.close(); } };
+  // The kernel's answer for any process of this user: 0 = unsandboxed. Errors
+  // (no such process) are non-zero too, so callers that require 0 fail closed.
+  const sandboxed = (pid: number): boolean => system.symbols.sandbox_check(pid, null, 0) !== 0;
+  return { boot, clock, read, children, sandboxed, close: () => { proc.close(); system.close(); } };
 }

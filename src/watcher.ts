@@ -4,9 +4,9 @@
  * watch() call in setupWatchersAsync (recursive watching pegged fseventsd at
  * ~100% CPU and cost ~27s at startup). NOTE: on Bun 1.3.10 / macOS a
  * non-recursive DIRECTORY watch does not fire on entry changes, so the way the
- * dashboard actually stays current is the polling below: a 3s structural refresh
- * (readAllAgents — catches spawn / retire and out-of-band meta.json edits) plus a
- * 2s state poll. The agents/ watch is kept as a cheap, dormant fast-path for
+ * dashboard actually stays current is the single 2s refresh below (readAllAgents
+ * — catches spawn / retire and out-of-band meta.json edits — plus state
+ * detection). The agents/ watch is kept as a cheap, dormant fast-path for
  * platforms / Bun versions that do dispatch directory events; dashboard-initiated
  * edits refresh immediately via executeAndRefresh regardless.
  * Captures tmux output and feeds it through parseState() for each active agent.
@@ -91,15 +91,12 @@ export class AgentWatcher {
   private events: WatcherEvents;
   private watchers: FSWatcher[] = [];
   private pollTimer: ReturnType<typeof setInterval> | null = null;
-  private stateTimer: ReturnType<typeof setInterval> | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
-  private polling = false;
   private refreshing = false;
   private refreshQueued = false;
   private hasCompletedInitialRefresh = false;
   private _lastAgents: Agent[] = [];
-  private lastOrphanedSessions: string[] = [];
   private _lastLiveTmuxSessions: Set<string> = new Set();
   /** Cached coordinator tmux session_created epoch — immutable for the session
    * lifetime, so we query tmux display-message once and reuse. Cleared when
@@ -109,9 +106,9 @@ export class AgentWatcher {
   /**
    * Whether flattenAgentTree groups repos under a shared parent-directory
    * header (the `tree.groupByParent` display preference). Owned here so the
-   * flag flows into every flatten call (both refresh() and pollStates()); the
-   * dashboard flips it live via setGroupByParent(), which re-flattens on the
-   * next refresh with NO `ib watch` restart required.
+   * flag flows into the flatten call in refresh(); the dashboard flips it live
+   * via setGroupByParent(), which re-flattens on the next refresh with NO
+   * `ib watch` restart required.
    */
   private groupByParent = false;
 
@@ -149,21 +146,22 @@ export class AgentWatcher {
     // Set up fs.watch on each repo's .ittybitty/agents/, archive/, and user-questions.json
     this.setupWatchers();
 
-    // Structural poll every 3s. On Bun 1.3.10 / macOS the non-recursive agents/
+    // The one periodic pass. On Bun 1.3.10 / macOS the non-recursive agents/
     // watch does not fire on spawn/retire, so this refresh() is the primary way
     // new and removed agents (and out-of-band meta.json edits) reach the
-    // dashboard. Shortened from 10s to keep that responsive without the recursive
-    // watch. readAllAgents is cheap (~30ms), and refresh() is serialized with the
-    // 2s state poll below (the refreshing/polling flags) so the two never overlap.
+    // dashboard, and it is also what keeps agent states fresh. It replaced a 3s
+    // structural refresh plus a separate 2s state-only poll: together those ran
+    // ~50 detection passes/min, each one a coordinator capture-pane, a transient
+    // read per agent, a questions read per repo and a dashboard render.
+    // readAllAgents is cheap (~30ms). A tick that lands while a refresh is
+    // running is queued (refreshQueued), never run concurrently.
     this.pollTimer = setInterval(() => {
       if (this.running) this.refresh();
-    }, 3_000);
-
-    // Background state poll every 2s — keeps agent states fresh between fs.watch events
-    this.stateTimer = setInterval(() => {
-      if (this.running) this.pollStates();
-    }, 2_000);
+    }, AgentWatcher.REFRESH_INTERVAL_MS);
   }
+
+  /** Interval of the periodic refresh() pass — the watcher's only timer. */
+  static readonly REFRESH_INTERVAL_MS = 2_000;
 
   /** Cooldown period for health checks (5 min) — avoids re-running on every
    *  fs.watch event. Raised from 30s: each pass fans out 3 `git` spawns per
@@ -220,17 +218,13 @@ export class AgentWatcher {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
-    if (this.stateTimer) {
-      clearInterval(this.stateTimer);
-      this.stateTimer = null;
-    }
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
     }
   }
 
-  /** Replace the repos list and reset fs.watch watchers (poll timers keep running) */
+  /** Replace the repos list and reset fs.watch watchers (the poll timer keeps running) */
   updateRepos(repos: RepoEntry[]): void {
     this.repos = repos;
     this.teardownWatchers();
@@ -301,9 +295,9 @@ export class AgentWatcher {
       // isolated probe. So on this platform THIS WATCH DOES NOT FIRE on
       // spawn / retire. We keep it because it is cheap, harmless when dormant, and
       // correct on platforms / Bun versions that do dispatch directory events.
-      // What actually keeps the dashboard current here is the polling below:
-      // the structural refresh (readAllAgents re-reads the agent dirs — catches
-      // spawn / retire and out-of-band meta.json edits) and the 2s state poll.
+      // What actually keeps the dashboard current here is the 2s periodic
+      // refresh (readAllAgents re-reads the agent dirs — catches spawn / retire
+      // and out-of-band meta.json edits — and state detection runs on them).
       // Dashboard-initiated mutations (rename / model change / retire / etc.)
       // refresh immediately on their own via executeAndRefresh, independent of
       // this watch.
@@ -387,50 +381,16 @@ export class AgentWatcher {
     }
   }
 
-  /** Poll states for all known agents without re-reading from disk */
-  private async pollStates(): Promise<void> {
-    const agents = this._lastAgents;
-    if (agents.length === 0 || this.polling || this.refreshing) return;
-    this.polling = true;
-    try {
-      const agentsApi = agentsCtx.fn;
-      // Lifecycle path: the watcher tick is authorized to reap orphan PIDs
-      // and tear down husk tmux sessions for agents detected as stopped.
-      const [, coordinatorInfo] = await Promise.all([
-        agentsApi.detectAgentStates(agents, {
-          reap: true,
-          confirmTmuxMissingAcrossPolls: true,
-        }),
-        this.getCoordinatorInfo(),
-      ]);
-      // If refresh() swapped lastAgents while we were awaiting, discard stale results
-      if (agents !== this._lastAgents) return;
-      const roots = agentsApi.buildAgentTree(agents);
-      const repoInfos = this.repos.map((r) => ({ name: repoDisplayName(r), path: r.path }));
-      const flatList = agentsApi.flattenAgentTree(roots, repoInfos, coordinatorInfo, this.groupByParent);
-      const questionResults = await Promise.all(
-        this.repos.map((r) => agentsApi.readPendingQuestions(r.path))
-      );
-      const questions = questionResults.flat();
-      if (!this.running) return;
-      this.events.onUpdate(agents, flatList, questions, this.lastOrphanedSessions);
-    } catch (err) {
-      this.events.onError?.(err instanceof Error ? err : new Error(String(err)));
-    } finally {
-      this.polling = false;
-      if (this.refreshQueued && !this.refreshing) {
-        this.refreshQueued = false;
-        void this.refresh();
-      }
-    }
-  }
-
   /** Read all agents, detect states, and emit update */
   async refresh(): Promise<void> {
-    // State detection has destructive authority in both paths. Serialize
-    // refresh with the lightweight polling pass so one temporal observation
-    // cannot be counted twice and a stale pass cannot race a refresh.
-    if (this.refreshing || this.polling) {
+    // State detection has destructive authority (reaping). Serialize refreshes
+    // — the 2s tick, the fs.watch debounce, setGroupByParent, recheckHealth and
+    // executeAndRefresh all land here — so two passes never overlap: a stale
+    // pass cannot race a newer one, and one temporal observation cannot be
+    // counted twice. A request that arrives mid-pass sets refreshQueued and
+    // runs once when the current pass finishes; any further requests in that
+    // window coalesce into the same queued pass.
+    if (this.refreshing) {
       this.refreshQueued = true;
       return;
     }
@@ -452,9 +412,8 @@ export class AgentWatcher {
         this.events.onError?.(new Error(err.error));
       }
 
-      // Save agents and orphaned sessions for background state polling
+      // Expose the latest agents and live tmux sessions to the dashboard
       this._lastAgents = agents;
-      this.lastOrphanedSessions = orphanedTmuxSessions;
       this._lastLiveTmuxSessions = liveTmuxSessions;
 
       // Detect state for each agent via tmux capture + parseState, and get coordinator info.

@@ -3448,8 +3448,8 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
   // Regression: the identity guard logged "signal skipped" whenever
   // _isPidIdentityCurrent returned false — including for a merely DEAD pid,
   // where the pre-guard code returned silently. reapOrphanedClaude runs on
-  // every watcher pass for every already-stopped agent (2s pollStates plus the
-  // 10s refresh) and only the kill-session is memoized, so ten stopped agents
+  // every watcher pass for every already-stopped agent (then a 2s state poll
+  // plus a 10s refresh) and only the kill-session is memoized, so ten stopped agents
   // produced ~300 lines/min and rotated the whole 1 MB x 3 audit trail away in
   // about 20 minutes — exactly the harm TMUX_OBSERVATION_LOG_INTERVAL_MS was
   // added to prevent, reintroduced on the PID side.
@@ -5091,7 +5091,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
       } as Partial<AgentMeta> as AgentMeta,
     });
 
-    // Three consecutive pollStates ticks over the same stopped agent.
+    // Three consecutive watcher ticks over the same stopped agent.
     await detectAgentStates([a], { reap: true });
     await detectAgentStates([a], { reap: true });
     await detectAgentStates([a], { reap: true });
@@ -6853,8 +6853,8 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
 
   test("re-reads disk snapshot every call (no in-memory caching of transient state)", async () => {
     // detectAgentStates was previously refactored to prefer a preloaded
-    // `agent.transient` field over the disk read. That broke pollStates'
-    // 2s polling cadence: the watcher reuses _lastAgents from a 10s-old
+    // `agent.transient` field over the disk read. That broke the watcher's
+    // then-separate 2s state poll, which reused _lastAgents from a 10s-old
     // refresh() while the watchdog writes fresh disk snapshots every 5s,
     // so the in-memory copy aged out of the freshness window before disk
     // staleness ever became an issue. The fix removed Agent.transient

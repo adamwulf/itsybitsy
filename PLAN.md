@@ -108,9 +108,8 @@ itsybitsy
 │   ├── usage.test.ts         # Usage fetch/parse tests
 │   ├── config.ts             # Config reading/writing for ~/.itsybitsy/config.json (user-wide)
 │   ├── config.test.ts        # Config tests
-│   ├── watcher.ts            # fs.watch({ recursive: true }) on agents/, archive/,
-│   │                         # user-questions.json; 10s fallback poll; debounced refresh;
-│   │                         # 2s stateTimer for between-refresh state polling
+│   ├── watcher.ts            # non-recursive fs.watch on agents/ and user-questions.json;
+│   │                         # debounced refresh; one 2s periodic refresh (read + state)
 │   ├── watcher.test.ts       # Watcher tests
 │   ├── tmux-poller.ts        # Polls tmux capture-pane for the selected agent (~1s, 500 lines);
 │   │                         # also exports captureTmuxOutput() for one-shot state detection (500 lines)
@@ -159,7 +158,7 @@ itsybitsy
 
 Note: `watcher.ts` and `tmux-poller.ts` are split by concern — `watcher.ts` handles structural changes (agents added/removed/changed via `fs.watch` on `agents/`, `archive/`, `user-questions.json`) and detects state for ALL agents on each refresh; `tmux-poller.ts` handles live output capture for the SELECTED agent only (~1s poll). Different consumers, different error modes, different trigger conditions.
 
-`watcher.ts` runs three timers: (1) `fs.watch` debounced 200ms for instant structural changes, (2) 10s fallback poll for FSEvents misses, (3) 2s `stateTimer` that calls `detectAgentStates()` on cached agents to keep state fresh between structural refreshes without re-reading disk.
+`watcher.ts` refreshes on two triggers: (1) `fs.watch` debounced 200ms for instant structural changes, (2) one 2s periodic `refresh()` that re-reads agents from disk and calls `detectAgentStates()` on them. On Bun 1.3.10 / macOS a non-recursive directory watch does not fire, so the 2s refresh is what keeps both structure and state current. (It replaced a structural poll plus a separate 2s state-only `stateTimer`.)
 
 Also: `src/usage.ts` — fetches Claude API session+weekly utilization from `GET https://api.anthropic.com/api/oauth/usage`, caches at `~/.claude/usage-cache.json` (10s TTL), reads credentials from `~/.claude/.credentials.json` or macOS Keychain. Dashboard footer refreshes every 30s and color-codes >80% yellow, >90% red.
 

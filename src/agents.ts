@@ -1657,8 +1657,8 @@ export interface AgentReadError {
  * Cache stores a single canonical reference; readers receive an isolated copy
  * via copyAgentMeta() so caller mutations cannot pollute the cache. We do NOT
  * use structuredClone() — it was the 2nd-biggest CPU cost in profiling because
- * it deep-clones every meta on every read, every refresh + every 2s pollStates
- * tick × every agent. AgentMeta is flat primitives/strings except for the one
+ * it deep-clones every meta on every read — every 2s watcher refresh × every
+ * agent. AgentMeta is flat primitives/strings except for the one
  * nested mutable object `spawned_by`, so a shallow spread plus a fresh copy of
  * spawned_by is dramatically cheaper while preserving the same isolation
  * guarantee. See copyAgentMeta().
@@ -3365,8 +3365,8 @@ export async function terminateProcess(
 
 /**
  * Lifecycle diagnostics repeat for as long as their condition holds, and the
- * paths that emit them run on every watcher pass for every agent (2s
- * pollStates plus the 10s refresh) — a pass that emits one is never memoized
+ * paths that emit them run on every watcher pass for every agent (the 2s
+ * refresh) — a pass that emits one is never memoized
  * (see reapPassMemos).
  * Rate-limit identical lines on the same interval the tmux observation log
  * uses, for the same reason: watch.log is 1 MB active across 3 files, so one
@@ -3927,13 +3927,13 @@ export async function detectAgentStates(
       //
       // Reuses the `transient` read hoisted above the claude_pid gate (for the
       // op-branch) — no second disk read. The disk read is from disk, not a
-      // preloaded `agent.transient`, deliberately: the watcher calls
-      // pollStates() every 2s using cached _lastAgents from a refresh() that
-      // runs every 10s, so a preloaded snapshot would age in memory while the
-      // watchdog keeps writing fresh data to disk — we'd hit the staleness
-      // threshold and fall back to live capture even when fresh data was on
-      // disk. One stat + a small JSON parse is cheap vs. the tmux spawn we
-      // avoid.
+      // preloaded `agent.transient`, deliberately: a preloaded snapshot can
+      // only be older than disk, and it went stale in practice when the
+      // watcher ran a separate 2s state poll over agents cached by a 10s
+      // refresh — the snapshot aged in memory while the watchdog kept writing
+      // fresh data to disk, so we hit the staleness threshold and fell back to
+      // live capture even when fresh data was on disk. One stat + a small JSON
+      // parse is cheap vs. the tmux spawn we avoid.
       // The watchdog records its own PID epoch in the transient, so the same
       // identity rule that guards destructive signalling applies here: a bare
       // liveness check lets a RECYCLED PID authorize this snapshot for up to

@@ -3436,9 +3436,9 @@ describe("resumeAgent (native)", () => {
     // fallback when setsid is absent — the inherited SIG_IGN still covers that.
     expect(resumeScript).toContain("command -v setsid");
     // Mandatory sandbox: claude is wrapped by the sandbox-exec prefix on both arms.
-    expect(resumeScript).toMatch(/setsid \/bin\/sh -c [^\n]* sandbox-log-gate \S*sandbox-exec\S* .* claude --resume/);
+    expect(resumeScript).toMatch(/setsid \S*sandbox-exec\S* .* claude --resume/);
     // Fallback bare launch is still present for hosts without setsid.
-    expect(resumeScript).toMatch(/^ *\/bin\/sh -c [^\n]* sandbox-log-gate \S*sandbox-exec\S* .* claude --resume "/m);
+    expect(resumeScript).toMatch(/^ *\S*sandbox-exec\S* .* claude --resume "/m);
 
     // ORDERING (the subtle part): `trap '' HUP` must be installed BEFORE claude
     // is forked so the SIG_IGN disposition is inherited by the child. If the
@@ -3955,8 +3955,8 @@ describe("resumeAgent (native)", () => {
       if (result.ok) {
         expect(result.stdout).toContain("Reset coordinator");
         const start = await Bun.file(join(coordDir, "start.sh")).text();
-        expect(start).toContain("ib sandbox-log-watch");
-        expect(start).toContain("sandbox-log-gate '/usr/bin/sandbox-exec'");
+        expect(start).not.toContain("ib sandbox-log-watch");
+        expect(start).toContain("/usr/bin/sandbox-exec");
       } else {
         expect(result.stderr).toContain("respawn");
       }
@@ -4090,7 +4090,7 @@ describe("resumeAgent (native)", () => {
     // Mandatory sandbox: codex resume runs danger-full-access inside our wrapper.
     expect(resumeScript).toContain("-s danger-full-access");
     expect(resumeScript).not.toContain("-s workspace-write");
-    expect(resumeScript).toMatch(/setsid \/bin\/sh -c [^\n]* sandbox-log-gate \S*sandbox-exec\S* .* codex resume/);
+    expect(resumeScript).toMatch(/setsid \S*sandbox-exec\S* .* codex resume/);
     // Must NOT use claude --resume.
     expect(resumeScript).not.toContain("claude --resume");
 
@@ -6718,7 +6718,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(meta.sandbox.enabled).toBe(true);
     expect(start).toContain("sandbox-exec");
     expect(start).toContain("sandbox-proxy-launch");
-    expect(start).toContain("sandbox-log-watch");
+    expect(start).not.toContain("sandbox-log-watch");
   });
 
   test("resume refuses legacy enabled sandbox metadata with no paths block", async () => {
@@ -7004,8 +7004,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // GROUP 1: claude skips its own permission prompts only under the kernel.
     // The flag must sit inside the sandbox-exec-wrapped launch (after the
     // `sandbox-exec -f … claude` prefix), on both the setsid and fallback arms.
-    expect(start).toMatch(/setsid \/bin\/sh -c [^\n]* sandbox-log-gate \S*sandbox-exec\S* -f[^\n]*claude --session-id[^\n]*--dangerously-skip-permissions/);
-    expect(start).toMatch(/\n {4}\/bin\/sh -c [^\n]* sandbox-log-gate \S*sandbox-exec\S* -f[^\n]*claude --session-id[^\n]*--dangerously-skip-permissions/);
+    expect(start).toMatch(/setsid \S*sandbox-exec\S* -f[^\n]*claude --session-id[^\n]*--dangerously-skip-permissions/);
+    expect(start).toMatch(/\n {4}\S*sandbox-exec\S* -f[^\n]*claude --session-id[^\n]*--dangerously-skip-permissions/);
     expect(meta.sandbox.enabled).toBe(true);
     expect(meta.paths.allowRead).toContain(canonicalizeSandboxPath(tempDir));
     expect(meta.paths.allowWrite).toContain(canonicalizeSandboxPath(tempDir));
@@ -7194,8 +7194,57 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // GROUP 1: the resume launch gains --dangerously-skip-permissions only under
     // the kernel, inside the sandbox-exec-wrapped claude --resume line, on both
     // the setsid and fallback arms.
-    expect(resumeScript).toMatch(/setsid \/bin\/sh -c [^\n]* sandbox-log-gate \S*sandbox-exec\S* -f[^\n]*claude --resume[^\n]*--dangerously-skip-permissions/);
-    expect(resumeScript).toMatch(/\n {4}\/bin\/sh -c [^\n]* sandbox-log-gate \S*sandbox-exec\S* -f[^\n]*claude --resume[^\n]*--dangerously-skip-permissions/);
+    expect(resumeScript).toMatch(/setsid \S*sandbox-exec\S* -f[^\n]*claude --resume[^\n]*--dangerously-skip-permissions/);
+    expect(resumeScript).toMatch(/\n {4}\S*sandbox-exec\S* -f[^\n]*claude --resume[^\n]*--dangerously-skip-permissions/);
+  });
+
+  test("denial collector is off: sandboxed start.sh and resume.sh keep sandbox-exec and the proxy but start no collector", async () => {
+    await writeSandboxType();
+    const ports = [43132, 43133];
+    setSandboxPortAllocatorForTesting(() => ports.shift()!);
+    setSandboxPortCheckForTesting(() => {});
+    setNewAgentSpawnRunner(sandboxSpawnRunner());
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99994 }));
+    const spawned = await callNewAgent("collector off", { name: "sandbox-no-collector", type: "sandboxed" });
+    expect(spawned.ok).toBe(true);
+
+    const agentDir = join(agentsDir, "sandbox-no-collector");
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
+    let createdSession = false;
+    setNukeResumeSpawnRunner((cmd: string[]) => {
+      const cmdStr = cmd.join(" ");
+      if (cmd[0] === "which" && cmd[1] === "sandbox-exec") return makeSpawnResult("/usr/bin/sandbox-exec", 0);
+      if (cmd[0] === "/usr/bin/sandbox-exec") return makeSpawnResult("", 0);
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("tmux has-session")) return makeSpawnResult("", createdSession ? 0 : 1);
+      if (cmdStr.includes("tmux new-session")) { createdSession = true; return makeSpawnResult("", 0); }
+      if (cmdStr.includes("capture-pane")) return makeSpawnResult("Claude Code v1.0", 0);
+      return makeSpawnResult("", 0);
+    });
+    setSendSpawnRunner(() => makeSpawnResult("", 0));
+    try {
+      const resumed = await resumeAgent(makeAgent("sandbox-no-collector", tempDir, "stopped", meta));
+      expect(resumed.ok).toBe(true);
+    } finally {
+      resetSendSpawnRunner();
+    }
+
+    const start = await Bun.file(join(agentDir, "start.sh")).text();
+    const resume = await Bun.file(join(agentDir, "resume.sh")).text();
+    for (const script of [start, resume]) {
+      // Kernel sandbox and proxy unchanged: both launch arms exec sandbox-exec directly.
+      expect(script).toContain("setsid '/usr/bin/sandbox-exec' -f");
+      expect(script).toContain("\n    '/usr/bin/sandbox-exec' -f");
+      expect(script).toContain("sandbox-proxy-launch");
+      expect(script).toContain("trap cleanup_sandbox_proxy EXIT");
+      // No collector, no readiness handshake, no launch gate.
+      for (const piece of ["sandbox-log-watch", "sandbox-log-gate", "IB_SANDBOX_LOG", "root-request", "root-ready", "collector_wait", "cleanup_sandbox_log"]) {
+        expect(script).not.toContain(piece);
+      }
+    }
   });
 
   test("sandbox resume fail-hard leaves no tmux session or resume script", async () => {
@@ -7364,7 +7413,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(refreshedMeta.sandbox_proxy_port).toBe(43202);
     expect(resume).toContain("sandbox-exec");
     expect(resume).toContain("sandbox-proxy-launch");
-    expect(resume).toContain("sandbox-log-watch");
+    expect(resume).not.toContain("sandbox-log-watch");
     expect(resume).toContain("--dangerously-skip-permissions");
     expect(resume).not.toContain("--permission-mode");
     expect(resumeCalls.some((cmd) => cmd[0] === "/usr/bin/sandbox-exec")).toBe(true);
@@ -9881,8 +9930,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // setsid defense-in-depth with a graceful fallback to a bare launch.
     // Mandatory sandbox: claude is wrapped by the sandbox-exec prefix on both arms.
     expect(startSh).toContain("command -v setsid");
-    expect(startSh).toMatch(/setsid \/bin\/sh -c [^\n]* sandbox-log-gate \S*sandbox-exec\S* .* claude --session-id/);
-    expect(startSh).toMatch(/^ *\/bin\/sh -c [^\n]* sandbox-log-gate \S*sandbox-exec\S* .* claude --session-id "/m);
+    expect(startSh).toMatch(/setsid \S*sandbox-exec\S* .* claude --session-id/);
+    expect(startSh).toMatch(/^ *\S*sandbox-exec\S* .* claude --session-id "/m);
 
     // ORDERING + UNCONDITIONAL: `trap '' HUP` must precede the claude launch
     // (so SIG_IGN is inherited by the child) AND precede the `command -v setsid`
@@ -10164,9 +10213,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const result = await newAgent(coordRepo, "start", { type: "coordinator", _cwd: coordRepo });
     expect(result.ok).toBe(true);
     const coordinatorStart = await Bun.file(join(coordRepo, ".ittybitty", "agents", "myrepo", "start.sh")).text();
-    expect(coordinatorStart.indexOf("ib sandbox-log-watch")).toBeGreaterThan(0);
-    expect(coordinatorStart.indexOf("ib sandbox-log-watch")).toBeLessThan(coordinatorStart.indexOf("setsid /bin/sh -c"));
-    expect(coordinatorStart.match(/sandbox-log-gate/g)?.length).toBe(2);
+    expect(coordinatorStart).not.toContain("ib sandbox-log-watch");
+    expect(coordinatorStart).not.toContain("sandbox-log-gate");
+    expect(coordinatorStart.match(/exec '\\''\/usr\/bin\/sandbox-exec'\\'' -f/g)?.length).toBe(2);
 
     const coordId = result.stdout.trim();
     const meta = await Bun.file(join(coordRepo, ".ittybitty", "agents", coordId, "meta.json")).json();
@@ -11582,7 +11631,7 @@ body`,
       const startSh = await Bun.file(join(agentsDir, "codex-agent-1", "start.sh")).text();
       // Canonical §3.3 launch line components, model is shell-quoted. Mandatory
       // sandbox: codex is wrapped by sandbox-exec and runs -s danger-full-access.
-      expect(startSh).toMatch(/setsid \/bin\/sh -c [^\n]* sandbox-log-gate \S*sandbox-exec\S* .* codex -m 'gpt-5.4-mini'/);
+      expect(startSh).toMatch(/setsid \S*sandbox-exec\S* .* codex -m 'gpt-5.4-mini'/);
       expect(startSh).toContain("-a never");
       expect(startSh).toContain("-s danger-full-access");
       expect(startSh).not.toContain("-s workspace-write");
@@ -11806,7 +11855,7 @@ body`,
       expect(settings.length).toBeGreaterThan(0);
       // Claude start.sh launches claude, not codex (sandbox-wrapped on both).
       const startSh = await Bun.file(join(agentsDir, "claude-regression-guard", "start.sh")).text();
-      expect(startSh).toMatch(/setsid \/bin\/sh -c [^\n]* sandbox-log-gate \S*sandbox-exec\S* .* claude/);
+      expect(startSh).toMatch(/setsid \S*sandbox-exec\S* .* claude/);
       expect(startSh).not.toMatch(/sandbox-exec .* codex/);
       expect(startSh).toContain("--session-id");
       // No codex artifacts in the worktree
@@ -11900,7 +11949,7 @@ body`,
       });
       expect(result.ok).toBe(true);
       const startSh = await Bun.file(join(agentsDir, "codex-new-model", "start.sh")).text();
-      expect(startSh).toMatch(/setsid \/bin\/sh -c [^\n]* sandbox-log-gate \S*sandbox-exec\S* .* codex -m 'gpt-9-future'/);
+      expect(startSh).toMatch(/setsid \S*sandbox-exec\S* .* codex -m 'gpt-9-future'/);
     });
 
     // Round-2 review HIGH: the codex `-s workspace-write` sandbox is granted

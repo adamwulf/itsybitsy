@@ -35,10 +35,10 @@ while [ ! -s "$dir/stop" ]; do sleep 0.01; done
     await writeFile(script, `#!/bin/bash
 AGENT_LOG=${shellQuote(join(dir, "agent.log"))}
 cleanup_sandbox_proxy() { printf 'cleanup\\n' >> ${shellQuote(join(dir, "proxy-cleanup"))}; }
-${sandboxDenialScriptPreamble(dir, dir)}
+${sandboxDenialScriptPreamble(dir, dir, true)}
 printf '%s' "$IB_SANDBOX_LOG_DIR" > ${shellQuote(join(dir, `${name}-dir.tmp`))}
 mv -f ${shellQuote(join(dir, `${name}-dir.tmp`))} ${shellQuote(join(dir, `${name}-dir`))}
-${sandboxDenialExecPrefix(shellQuote(wrapper))} ${cliCommand} &
+${sandboxDenialExecPrefix(shellQuote(wrapper), true)} ${cliCommand} &
 cli=$!
 wait "$cli"
 `);
@@ -109,7 +109,7 @@ test("late old-launch cleanup does not stop a replacement or remove its artifact
 });
 
 test("gate preserves arguments and wrapper exit status when collection is unavailable", async () => {
-  const prefix = sandboxDenialExecPrefix("/bin/sh -c 'test \"$1\" = \"a b\" && exit 23' wrapper");
+  const prefix = sandboxDenialExecPrefix("/bin/sh -c 'test \"$1\" = \"a b\" && exit 23' wrapper", true);
   const child = Bun.spawn(["/bin/sh", "-c", `${prefix} 'a b'`], {
     env: { ...process.env, IB_SANDBOX_LOG_DIR: "" }, stdout: "pipe", stderr: "pipe",
   });
@@ -160,7 +160,7 @@ test("supervisor removes its reserved directory after collector SIGKILL and repo
 test("SIGHUP during collector readiness does not abort the launch", async () => {
   const f = await fixture("slow-ready");
   try {
-    const preamble = sandboxDenialScriptPreamble(f.dir, f.dir);
+    const preamble = sandboxDenialScriptPreamble(f.dir, f.dir, true);
     expect(preamble.indexOf("trap '' HUP")).toBeLessThan(preamble.indexOf("collector_wait=0"));
     const child = await f.start("start", 0);
     await until(() => Bun.file(join(f.dir, "collector-entered")).exists());

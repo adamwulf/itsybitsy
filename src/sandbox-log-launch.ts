@@ -2,8 +2,20 @@ import { dirname, join } from "node:path";
 import { shellQuote } from "./validation";
 import { sandboxLogParent } from "./sandbox-log-paths";
 
+/**
+ * The kernel denial collector is OFF for now. Each sandboxed spawn/resume started
+ * its own `log stream --level debug`; with 10 agents that cost about 3-4 cores
+ * (each `log` ~17-26% plus diagnosticd ~150%), only to copy `[Sandbox]` lines into
+ * agent.log for the DENIALS pane. Seatbelt enforcement and the proxy do not depend
+ * on it. While off, both helpers below add nothing: no collector, no readiness
+ * handshake, the plain sandbox-exec prefix. Set to true to collect again on new
+ * spawns and resumes.
+ */
+export const SANDBOX_DENIAL_COLLECTOR_ENABLED = false;
+
 /** Append AFTER the proxy preamble, which installs cleanup_sandbox_proxy. */
-export function sandboxDenialScriptPreamble(agentDir: string, home?: string): string {
+export function sandboxDenialScriptPreamble(agentDir: string, home?: string, enabled = SANDBOX_DENIAL_COLLECTOR_ENABLED): string {
+  if (!enabled) return "";
   const parent = sandboxLogParent(agentDir, home);
   return `
 # This launch owns its collector outside Seatbelt, independent of watch/watchdog.
@@ -64,7 +76,8 @@ fi
  * The collector is diagnostic: a failed/timed-out gate still execs the exact
  * required Seatbelt wrapper, never the CLI alone.
  */
-export function sandboxDenialExecPrefix(sandboxPrefix: string): string {
+export function sandboxDenialExecPrefix(sandboxPrefix: string, enabled = SANDBOX_DENIAL_COLLECTOR_ENABLED): string {
+  if (!enabled) return sandboxPrefix;
   const gate = `if [ -n "$IB_SANDBOX_LOG_DIR" ] && [ -d "$IB_SANDBOX_LOG_DIR" ]; then
     printf '%s\\n' "$$" > "$IB_SANDBOX_LOG_DIR/root-request.tmp" && mv -f "$IB_SANDBOX_LOG_DIR/root-request.tmp" "$IB_SANDBOX_LOG_DIR/root-request";
     n=0;

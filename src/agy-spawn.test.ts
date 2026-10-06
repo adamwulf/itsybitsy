@@ -53,8 +53,8 @@ describe("buildAgyStartContent — launch line", () => {
 
   test("starts collection before both gated agy launch arms", () => {
     const content = buildAgyStartContent({ ...baseInput(),
-      sandboxScriptPreamble: sandboxDenialScriptPreamble("/tmp/test"),
-      sandboxExecPrefix: sandboxDenialExecPrefix("/usr/bin/sandbox-exec -f /tmp/test/sandbox.sb") });
+      sandboxScriptPreamble: sandboxDenialScriptPreamble("/tmp/test", undefined, true),
+      sandboxExecPrefix: sandboxDenialExecPrefix("/usr/bin/sandbox-exec -f /tmp/test/sandbox.sb", true) });
     expect(content.indexOf("ib sandbox-log-watch")).toBeLessThan(content.indexOf("setsid /bin/sh -c"));
     expect(content.match(/sandbox-log-gate \/usr\/bin\/sandbox-exec[^\n]* agy /g)?.length).toBe(2);
   });
@@ -196,8 +196,8 @@ describe("buildAgyResumeContent — launch line", () => {
 
   test("resumes collection before both gated agy launch arms", () => {
     const content = buildAgyResumeContent({ ...baseInput(),
-      sandboxScriptPreamble: sandboxDenialScriptPreamble("/tmp/test"),
-      sandboxExecPrefix: sandboxDenialExecPrefix("/usr/bin/sandbox-exec -f /tmp/test/sandbox.sb") });
+      sandboxScriptPreamble: sandboxDenialScriptPreamble("/tmp/test", undefined, true),
+      sandboxExecPrefix: sandboxDenialExecPrefix("/usr/bin/sandbox-exec -f /tmp/test/sandbox.sb", true) });
     expect(content.indexOf("ib sandbox-log-watch")).toBeLessThan(content.indexOf("setsid /bin/sh -c"));
     expect(content.match(/sandbox-log-gate \/usr\/bin\/sandbox-exec[^\n]* agy /g)?.length).toBe(2);
   });

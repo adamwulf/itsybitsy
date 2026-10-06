@@ -74,8 +74,8 @@ describe("buildCodexStartContent — launch line", () => {
 
   test.each([false, true])("start owns collection before both CLI launch arms (fugu=%p)", fugu => {
     const content = buildCodexStartContent({ ...baseInput(), fugu,
-      sandboxScriptPreamble: SANDBOX_PREAMBLE + sandboxDenialScriptPreamble("/tmp/test"),
-      sandboxExecPrefix: sandboxDenialExecPrefix(SANDBOX_PREFIX) });
+      sandboxScriptPreamble: SANDBOX_PREAMBLE + sandboxDenialScriptPreamble("/tmp/test", undefined, true),
+      sandboxExecPrefix: sandboxDenialExecPrefix(SANDBOX_PREFIX, true) });
     expect(content.indexOf("ib sandbox-log-watch")).toBeLessThan(content.indexOf("setsid /bin/sh -c"));
     expect(content.match(/sandbox-log-gate sandbox-exec[^\n]* codex -m/g)?.length).toBe(2);
     expect(content).toContain("trap 'cleanup_sandbox_log; cleanup_sandbox_proxy' EXIT");
@@ -392,8 +392,8 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
 
   test.each([false, true])("resume owns collection before both CLI launch arms (fugu=%p)", fugu => {
     const content = buildCodexResumeContent({ ...baseInput(), fugu,
-      sandboxScriptPreamble: SANDBOX_PREAMBLE + sandboxDenialScriptPreamble("/tmp/test"),
-      sandboxExecPrefix: sandboxDenialExecPrefix(SANDBOX_PREFIX) });
+      sandboxScriptPreamble: SANDBOX_PREAMBLE + sandboxDenialScriptPreamble("/tmp/test", undefined, true),
+      sandboxExecPrefix: sandboxDenialExecPrefix(SANDBOX_PREFIX, true) });
     expect(content.indexOf("ib sandbox-log-watch")).toBeLessThan(content.indexOf("setsid /bin/sh -c"));
     expect(content.match(/sandbox-log-gate sandbox-exec[^\n]* codex resume/g)?.length).toBe(2);
   });

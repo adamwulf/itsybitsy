@@ -56,6 +56,20 @@ export interface BoundHookAgentContext extends RegisteredAgentContext {
   worktreePath: string;
 }
 
+/**
+ * Errors that mean a registered repo is unreachable from this process: removed
+ * (ENOENT), or blocked by file modes or macOS privacy protection (EACCES/EPERM —
+ * e.g. a repo inside another app's ~/Library/Containers after a migration to a
+ * new machine). Such a repo holds no agent this hook can serve, so it is skipped
+ * rather than failing the lookup of every agent in every other repo. Agents in
+ * the skipped repo still fail closed: they resolve to no registered record.
+ */
+const UNREACHABLE_REPO_ERROR_CODES = new Set(["ENOENT", "EACCES", "EPERM"]);
+
+function isUnreachableRepoError(error: unknown): boolean {
+  return UNREACHABLE_REPO_ERROR_CODES.has((error as NodeJS.ErrnoException).code ?? "");
+}
+
 async function registeredRepoRoots(registryHome: string): Promise<string[]> {
   const registryFile = Bun.file(join(registryHome, ".itsybitsy", "repos.json"));
   if (!(await registryFile.exists())) return [];
@@ -87,7 +101,7 @@ async function registeredRepoRoots(registryHome: string): Promise<string[]> {
     try {
       roots.add(await realpath((entry as { path: string }).path));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if (!isUnreachableRepoError(error)) throw error;
     }
   }
   return [...roots];
@@ -131,7 +145,7 @@ async function registeredAgentCandidatesById(
     try {
       repoRoot = await realpath(rawRepoRoot);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      if (isUnreachableRepoError(error)) continue;
       throw error;
     }
     const candidateAgentsDir = join(repoRoot, ".ittybitty", "agents");

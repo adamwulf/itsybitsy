@@ -3385,7 +3385,9 @@ describe("hookCheckPath — deny by default (missing meta, malformed stdin)", ()
     await hookCheckPath("agent-test77", stdin);
     const decision = JSON.parse(logged[0]!);
     expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
-    expect(decision.hookSpecificOutput.permissionDecisionReason).toBe(META_UNREADABLE_DENY_REASON);
+    expect(decision.hookSpecificOutput.permissionDecisionReason).toBe(
+      `${META_UNREADABLE_DENY_REASON} (Cannot authenticate hook agent 'agent-test77': no registered record)`,
+    );
   });
 
   test("with meta present, a path outside the worktree → DENY (deny by default)", async () => {

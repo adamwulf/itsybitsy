@@ -23,7 +23,11 @@ environment-dependent.
 - **§12 — Real-preamble validation + Defect 3 fix** (`d198c4d`): the REAL
   `sandboxDenialScriptPreamble` run verbatim in `start.sh`/`resume.sh` fixtures,
   the Defect 3 fix verified live, collector/stream topology, and collector-SIGKILL
-  residual/orphan behavior. This is the most current collector validation.
+  residual/orphan behavior.
+- **§13 — Stream level `--level default`** (2026-10-06): the stream moved from
+  `--level debug` to `--level default`; capture re-validated live and the CPU
+  of one `log stream` measured at both levels. This is the most current
+  collector validation.
 
 None of this is a full acceptance pass: single host, synthetic sandboxed offenders
 (not the real CLIs/proxy). §12 runs the real preamble/gate verbatim, but still in a
@@ -541,3 +545,86 @@ exercised (birth identity guards it in-algorithm); the immediate-child drop
 boundary is timing-dependent. The `start.sh`/`resume.sh` fixtures here embed the
 real preamble/gate but are still minimized harnesses (no proxy, no real CLI), and
 the surrounding production `start.sh`/`resume.sh` bodies were not executed whole.
+
+## 13. Stream level `--level default` (2026-10-06)
+
+Author: worker `log-level-default` (branch `agent/log-level-default`, base
+`467acb5`). Host: Darwin 27.2.0 (arm64), one host, one boot. The itsybitsy kernel
+sandbox was OFF for this worker, so it could apply Seatbelt profiles and read the
+unified log.
+
+**Change.** The stream helper now runs `/usr/bin/log stream --style ndjson
+--level default --predicate …` (`sandboxLogStreamArgv` in
+`src/sandbox-log-stream.ts`, also used by `scripts/probe-sandbox-denials.ts`).
+Before this change it used `--level debug`. The predicate, the collector
+topology (one stream per launch) and the attribution logic did not change.
+
+**Why this level is enough.** §4 found that kernel denials arrive only as
+`Sandbox.kext` free-text lines with `messageType` **Error**, and that the
+structured `com.apple.sandbox.reporting` clause matched nothing. The readiness
+marker comes from `/usr/bin/logger` (syslog `user.notice`, a Default-level
+event). `--level default` streams Default, Error and Fault events, so it streams
+both. `--level debug` added every Info and Debug event on the host, which the
+predicate then discarded.
+
+### Live capture with the changed build
+
+Method: the compiled `ib` from this branch (`bun run build`, not installed),
+reached by the collector through a temporary `PATH` shim. A temporary bash
+fixture embedded the REAL `sandboxDenialScriptPreamble` and
+`sandboxDenialExecPrefix` verbatim (with `HOME` and `AGENT_LOG` pointed into a
+disposable directory). The gate wrapped a real `/usr/bin/sandbox-exec` with the
+profile generated from the shipped `_all.md` floor plus a deny on a disposable
+`forbidden/` directory. The CLI root (`/bin/sh`) did a denied read
+(`read x < forbidden/read.txt`) and a denied write (`printf x >
+forbidden/write.txt`) with shell builtins, so the root process itself was the
+offender, then stayed alive for 1.5 s. Three consecutive launches.
+
+| Check | Result (3 of 3 launches) |
+|---|---|
+| Live argv of the collector's `log` process (`ps`) | `/usr/bin/log stream --style ndjson --level default --predicate (subsystem == "com.apple.sandbox.reporting" AND category == "violation") OR (eventMessage CONTAINS "Sandbox:") OR (eventMessage CONTAINS "IBSandboxReady-sandbox-log.…")` |
+| Readiness marker observed | `[SandboxCollector] INFO: launch=… stream ready; …` in `agent.log` for every launch |
+| Denied read captured and attributed | `[Sandbox] file-read-data process="bash" pid=<root> birth=… target=".../forbidden/read.txt" launch=…` |
+| Denied write captured and attributed | `[Sandbox] file-write-create process="bash" pid=<root> birth=… target=".../forbidden/write.txt" launch=…` |
+| Enforcement | both EPERM (`Operation not permitted`); `write.txt` never created |
+| Teardown | `collector stopped` for every launch; no residual launch directory; no residual collector, helper or `log` process |
+
+Each record carried the root's PID, which the fixture printed as `cli=$!`
+(for example `pid=69135` in the first launch), and the kernel `mach` value. A
+fourth launch held for 40 s (below) captured the same two records.
+
+### CPU of one `log stream` process: debug vs default
+
+Method: the measuring process spawned `/usr/bin/log stream --style ndjson
+--level <L> --predicate <the production predicate, with a fixed marker>` as its
+own child, drained stdout, stopped it with SIGTERM after 60 s and read the
+child's rusage (Bun `Subprocess.resourceUsage()`). Four windows back to back,
+alternating the order (debug, default, default, debug) so that host load drift
+affects both levels equally. Other agents' collectors ran during all four
+windows: at 17:14 CDT `ps` showed seven other `log stream --level debug`
+processes (25–27% CPU each in `ps`, about six minutes of CPU time each) and
+`diagnosticd` at 113%.
+
+| Window | Level | CPU (user + sys) | Share of one core |
+|---|---|---|---|
+| 1 | debug | 5.063 + 4.266 = 9.329 s | 15.55% |
+| 2 | default | 0.542 + 0.401 = 0.943 s | 1.57% |
+| 3 | default | 0.664 + 0.495 = 1.159 s | 1.93% |
+| 4 | debug | 4.742 + 3.905 = 8.647 s | 14.41% |
+| **total** | **debug** | **17.976 s / 120 s** | **14.98%** |
+| **total** | **default** | **2.102 s / 120 s** | **1.75%** |
+
+`--level default` used about 8.6 times less CPU in the `log` process. The `ps`
+values of the long-running debug streams (25–27%) are higher than the 15% of
+the fresh debug child measured here. `ps` %CPU is a decaying average and those
+streams started at other times, so the two numbers come from different methods.
+Both put debug far above default. A separate
+40 s launch through the real preamble (30 s window, `ps` CPU time) measured the
+collector's `log` process at 1.67%, its stream helper at 0.07%, and the collector
+Bun process itself at 3.50% (20 ms sampling loop, a two-process tree).
+
+**`diagnosticd` was not measured.** It is shared by every `log` client on the
+host, and during this work it served seven other `--level debug` streams from
+running agents at 113–150% CPU. The effect of one measurement stream would be
+lost in that load. The manager will measure `diagnosticd` after the change is
+deployed to those agents.

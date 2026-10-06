@@ -3,6 +3,12 @@ import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { closeSandboxLogStream } from "./sandbox-log-watch";
+import { sandboxLogStreamArgv } from "./sandbox-log-stream";
+
+test("log stream runs at default level, never debug", () => {
+  expect(sandboxLogStreamArgv("P")).toEqual(
+    ["/usr/bin/log", "stream", "--style", "ndjson", "--level", "default", "--predicate", "P"]);
+});
 
 async function until(predicate: () => Promise<boolean>, timeout = 4000) {
   const deadline = Date.now() + timeout;

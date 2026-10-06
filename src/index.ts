@@ -1578,8 +1578,8 @@ export async function main() {
         process.exitCode = 1;
         return;
       }
-      process.exitCode = await (await import("./sandbox-log-stream")).runSandboxLogStream(
-        ["/usr/bin/log", "stream", "--style", "ndjson", "--level", "debug", "--predicate", predicate]);
+      const { runSandboxLogStream, sandboxLogStreamArgv } = await import("./sandbox-log-stream");
+      process.exitCode = await runSandboxLogStream(sandboxLogStreamArgv(predicate));
       return;
     }
     case "sandbox-log-watch": {

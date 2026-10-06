@@ -14,6 +14,7 @@ import {
   type PathsConfig, type SandboxConfig, type SandboxProfileParams,
 } from "../src/sandbox";
 import { sandboxDefinitionArgs } from "../src/sandbox-launch";
+import { sandboxLogStreamArgv } from "../src/sandbox-log-stream";
 
 const root = canonicalizeSandboxPath(await mkdtemp(join(tmpdir(), "ib-denial-probe-")));
 const denied = join(root, "forbidden");
@@ -37,7 +38,7 @@ await writeFile(profile, generateProfile(baseline.sandbox as SandboxConfig, path
 const prefix = ["/usr/bin/sandbox-exec", "-f", profile,
   ...sandboxDefinitionArgs(sandboxProfileParameterValues(paths, params))];
 const predicate = '(subsystem == "com.apple.sandbox.reporting" AND category == "violation") OR (eventMessage CONTAINS "Sandbox:")';
-const streamArgv = ["/usr/bin/log", "stream", "--style", "ndjson", "--level", "debug", "--predicate", predicate];
+const streamArgv = sandboxLogStreamArgv(predicate);
 const cases = [
   { name: "sandbox-capability", argv: ["/usr/bin/sandbox-exec", "-p", "(version 1) (allow default)", "/usr/bin/true"] },
   { name: "generated-profile-boot", argv: [...prefix, "/usr/bin/true"] },

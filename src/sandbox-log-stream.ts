@@ -1,5 +1,14 @@
 import { fstatSync } from "node:fs";
 
+/** Kernel Sandbox.kext denials are Error-level and the `/usr/bin/logger`
+ * readiness marker is Default-level, so `--level default` streams both.
+ * `--level debug` also pulled every Info/Debug event on the host through
+ * diagnosticd: one stream measured ~15% of a core, against ~1.75% here.
+ */
+export function sandboxLogStreamArgv(predicate: string): string[] {
+  return ["/usr/bin/log", "stream", "--style", "ndjson", "--level", "default", "--predicate", predicate];
+}
+
 /** A detached session owns the stream. The collector owns only the write end
  * of our stdin pipe. EOF survives collector SIGKILL; kill(0) targets this live
  * session's process group, never a stored/reusable PID or process-group number.

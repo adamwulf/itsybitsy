@@ -176,8 +176,11 @@ The daemon checks every registration (inbox entry or re-adopted directory):
    sampling its tree**.
 5. **Rejections** go to `collector.log`, never to the unverified `agent.log`
    path. If the launch directory itself passed rule 1, the daemon also writes
-   `failed` and `done` (`rejected`) there, and a live `attach` logs a visible
-   ERROR in its own `agent.log`.
+   `failed` and `done` (`rejected`) there. The launch's `attach` treats that as
+   final, whether it is still registering or already registered (a successor's
+   re-adopt scan can reject a launch whose owner just exited), and returns; if
+   the launch's owner is still alive it first logs a visible ERROR in its own
+   `agent.log` (a launch whose owner already exited ends quietly).
 6. **No channel from inside the sandbox**: no socket and no writable path reach
    the daemon. The hooks deny `ib sandbox-collector` to agents
    (`containsInternalIbInvocation`) as defense in depth.
@@ -224,7 +227,7 @@ mandatory `sandbox-exec` wrapper. Every failure is diagnostic and visible in
 | No daemon at launch | The `attach` that wins `daemon.lock` starts one. If none answers within the preamble's 5 s, the CLI starts under the wrapper with today's ERROR. |
 | Daemon SIGKILL (live) | Lock free at once; the helper reads lifeline EOF and the old stream ends. The first `attach` to win the lock starts a daemon, which re-adopts every live launch: WARNING "shared collector resumed; reports while it was down were not collected". Live descendants are found again from the root; only orphans re-parented during the gap are lost. |
 | `log stream` dies (live) | Daemon writes ERROR to every launch, gives up the role at once, exits 1; the next daemon starts and re-adopts as above. |
-| Registration rejected | Reason in `collector.log`; `failed` and `done` (`rejected`) in the launch directory; `attach` logs ERROR. |
+| Registration rejected (tested, including by a successor's re-adopt scan while the launch's attach is still registered) | Reason in `collector.log`; `failed` and `done` (`rejected`) in the launch directory. The launch's `attach` returns at its next check: with an ERROR in `agent.log` if its owner is alive, quietly if the owner already exited. It never waits on a daemon that holds the role. |
 | One launch's `agent.log` unwritable, a FIFO or a symlink (tested) | Writes fail at once (never block, never follow); that launch only is dropped; the others keep their records. |
 | One tree exceeds 4,096 processes | ERROR to that launch; that launch only is dropped. |
 | `ib sandbox-collector restart`, or SIGTERM to the daemon (tested) | The daemon logs a WARNING to each launch, drops them WITHOUT `done`, gives up the role, then tears down its stream. The attaches start a new daemon, which re-adopts every launch. Collection continues. |
@@ -310,7 +313,7 @@ socket with peer credentials.
 
 ## 12. Validation
 
-**Unit tests** (`src/sandbox-collector.test.ts`, 21 tests, real processes and
+**Unit tests** (`src/sandbox-collector.test.ts`, 23 tests, real processes and
 real flocks; the stream is a controlled peer, not `/usr/bin/log`):
 
 - Registration validation: accept; reject forged name, outside namespace, other
@@ -341,8 +344,15 @@ real flocks; the stream is a controlled peer, not `/usr/bin/log`):
   `done`, and not re-examined by the next daemon.
 - `attach`: a new daemon after a stream failure re-adopting a launch whose
   registrar never noticed; giving up after exactly 4 unanswered starts; the
-  start count resetting after each acknowledgement (10 starts: 6 acknowledged,
-  then 4); `stop` (every launch `done`, every attach returns, role freed);
+  start count resetting after EVERY acknowledgement, at first registration and
+  after a restart (13 starts: three cycles of two unanswered and one
+  acknowledged, then 4; removing either reset gives 4 or 7, checked by
+  mutation); a registered attach returning when a daemon that holds the role
+  rejects its launch (ERROR logged, owner alive); a successor's re-adopt scan
+  rejecting a launch whose owner just exited, with that launch's attach (in its
+  own process) returning and the successor exiting after the other launch ends
+  (both fail without the fix, checked by mutation); `stop` (every launch `done`,
+  every attach returns, role freed);
   `restart` (no `done`, a new daemon re-adopts both launches); SIGTERM to a
   daemon running as a separate process (same as `restart`, through the real fd 3
   hand-over).

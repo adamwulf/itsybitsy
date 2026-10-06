@@ -34,19 +34,31 @@ import { openSandboxProcessReader } from "./sandbox-processes";
 
 const LAUNCH_NAME = /^sandbox-log\.[a-zA-Z0-9]+$/;
 const PROTOCOL = 1;
-/** Daemon starts one attach may make (first start + restarts): a daemon that
- * dies at once on every start must not turn into a spawn loop. */
+/** Daemon starts one attach may make in a row without an acknowledgement in
+ * between: a daemon that dies at once on every start must not become a spawn
+ * loop. Every `ready` resets the count, so a long launch survives any number of
+ * restarts that each worked. */
 const MAX_STARTS = 4;
 const LOCK_SH = 1, LOCK_EX = 2, LOCK_NB = 4;
+/** Cadences, not deadlines: how often state is re-read, never a decision made
+ * because time passed. Tree sampling stays at 20 ms (it sets how early a
+ * short-lived child must be seen to be attributed); everything else is 250 ms. */
+const SAMPLE_MS = 20;
+const MARKER_MS = 50;
+const CHECK_MS = 250;
+/** `status` only: a heartbeat this old means the daemon loop is not running. */
+const STALE_HEARTBEAT_MS = 5000;
 
 export interface SandboxCollectorPaths {
-  root: string; daemonLock: string; clientsLock: string; inbox: string; heartbeat: string; log: string; stop: string;
+  root: string; daemonLock: string; clientsLock: string; inbox: string; heartbeat: string; log: string;
+  stop: string; restart: string;
 }
 
 export function sandboxCollectorPaths(home?: string): SandboxCollectorPaths {
   const root = join(sealDir(home), "sandbox-collector");
   return { root, daemonLock: join(root, "daemon.lock"), clientsLock: join(root, "clients.lock"), inbox: join(root, "inbox"),
-    heartbeat: join(root, "heartbeat.json"), log: join(root, "collector.log"), stop: join(root, "stop") };
+    heartbeat: join(root, "heartbeat.json"), log: join(root, "collector.log"), stop: join(root, "stop"),
+    restart: join(root, "restart") };
 }
 
 function ensureCollectorDirs(paths: SandboxCollectorPaths): void {
@@ -127,9 +139,15 @@ function readPrivateFile(path: string, limit: number): string {
 }
 
 export interface CollectorReader {
+  /** The running kernel boot session (kern.bootsessionuuid). */
+  boot: string;
   read(pid: number): ProcessObservation | null;
   sandboxed(pid: number): boolean;
 }
+
+/** A process as registration.json names it: PID alone can be reused after a
+ * crash or reboot, PID + birth within one boot cannot. */
+export interface RegisteredProcess { pid: number; birth: string }
 
 export interface AcceptedRegistration {
   name: string;
@@ -144,6 +162,9 @@ export interface AcceptedRegistration {
 
 const isPid = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 2147483647;
+const isRegisteredProcess = (value: unknown): value is RegisteredProcess =>
+  !!value && typeof value === "object" && isPid((value as RegisteredProcess).pid) &&
+  typeof (value as RegisteredProcess).birth === "string" && /^\d{1,20}:\d{1,6}$/.test((value as RegisteredProcess).birth);
 
 /** A private directory of this user in the sealed launch namespace; only such a
  * directory is ever written to (including `failed` for a rejected launch). */
@@ -160,36 +181,46 @@ export function checkLaunchDirectory(entryName: string, entryText: string, home?
 }
 
 /** Accept a registration only from a private launch directory in the sealed
- * namespace, naming the agent.log bound to that namespace, from a live and
- * unsandboxed registrar that descends from the unsandboxed launch owner. */
+ * namespace, written in this boot, naming the agent.log bound to that
+ * namespace, by the exact live registrar process (PID + birth) it names, which
+ * descends from the exact launch owner process it names; both unsandboxed. */
 export function validateRegistration(entryName: string, entryText: string, reader: CollectorReader, home?: string): AcceptedRegistration {
   const dir = checkLaunchDirectory(entryName, entryText, home);
   const registration = JSON.parse(readPrivateFile(join(dir, "registration.json"), 8192));
   if (registration?.v !== PROTOCOL) throw new Error(`unsupported registration protocol ${String(registration?.v)}`);
-  const { agentLog, owner, registrar, token } = registration;
+  const { agentLog, owner, registrar, token, boot } = registration;
   // Unchanged rule: a launch directory may only name the agent.log of the agent
   // directory whose hash names its namespace.
   if (typeof agentLog !== "string" || !isAbsolute(agentLog) || sandboxLogParent(dirname(agentLog), home) !== dirname(dir)) {
     throw new Error("agent log is not bound to this launch namespace");
   }
-  if (typeof token !== "string" || !/^[0-9a-f]{32}$/.test(token) || !isPid(owner) || !isPid(registrar)) {
+  if (typeof token !== "string" || !/^[0-9a-f]{32}$/.test(token) || typeof boot !== "string" ||
+      !isRegisteredProcess(owner) || !isRegisteredProcess(registrar)) {
     throw new Error("malformed registration");
   }
-  const ownerProcess = reader.read(owner);
-  const registrarProcess = reader.read(registrar);
-  if (!ownerProcess || !registrarProcess) throw new Error("launch owner or registrar is not running");
+  // A launch directory outlives a crash or reboot; its PIDs may now name
+  // unrelated processes. Only the same boot and the same birth are accepted.
+  if (boot !== reader.boot) throw new Error("registration is from another boot");
+  const ownerProcess = reader.read(owner.pid);
+  if (!ownerProcess || processIdentity(ownerProcess) !== processIdentity(owner)) {
+    throw new Error("launch owner is not running (or its PID now names another process)");
+  }
+  const registrarProcess = reader.read(registrar.pid);
+  if (!registrarProcess || processIdentity(registrarProcess) !== processIdentity(registrar)) {
+    throw new Error("registrar is not running (or its PID now names another process)");
+  }
   // The per-launch collector proved the owner was ITS ancestor. The shared
   // daemon is nobody's descendant, so prove it of the live registrar instead.
   const registrarAncestors = new Set<number>();
   let ancestor: ProcessObservation | null = registrarProcess;
-  for (let depth = 0; ancestor && depth < 64 && ancestor.pid !== owner; depth++) {
+  for (let depth = 0; ancestor && depth < 64 && ancestor.pid !== owner.pid; depth++) {
     registrarAncestors.add(ancestor.pid);
     ancestor = reader.read(ancestor.ppid);
   }
   if (!ancestor || processIdentity(ancestor) !== processIdentity(ownerProcess)) {
     throw new Error("launch owner is not an ancestor of the registrar");
   }
-  if (reader.sandboxed(owner) || reader.sandboxed(registrar)) throw new Error("launch owner or registrar is sandboxed");
+  if (reader.sandboxed(owner.pid) || reader.sandboxed(registrar.pid)) throw new Error("launch owner or registrar is sandboxed");
   return { name: entryName, dir, agentLog, token, owner: ownerProcess, registrar: registrarProcess, registrarAncestors };
 }
 
@@ -200,6 +231,8 @@ interface Launch extends AcceptedRegistration {
   markerNext: number;
   markerDeadline: number;
   ready: boolean;
+  /** When stop file, owner and registrar are next re-read (every CHECK_MS). */
+  nextCheck: number;
   /** A re-registration after a daemon restart: its root may already exist. */
   resumed: boolean;
   attribution?: SandboxAttribution;
@@ -233,9 +266,20 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
   ensureCollectorDirs(paths);
   let lockFd: number | null;
   if (opts.lockFd !== undefined) {
-    // Re-locking through the inherited open file description succeeds only if
-    // the handed-over fd really holds the role.
-    if (flock(opts.lockFd, LOCK_EX | LOCK_NB) !== 0) return 1;
+    // The handed-over fd must BE daemon.lock (flock on any other file would
+    // succeed too), and LOCK_EX on it must succeed: through the inherited open
+    // file description that holds the role, or because the role is free. It
+    // fails while another description holds daemon.lock.
+    let sameFile = false;
+    try {
+      const held = fstatSync(opts.lockFd);
+      const path = lstatSync(paths.daemonLock);
+      sameFile = path.isFile() && held.dev === path.dev && held.ino === path.ino;
+    } catch { /* not an open file, or no lock file */ }
+    if (!sameFile || flock(opts.lockFd, LOCK_EX | LOCK_NB) !== 0) {
+      try { closeSync(opts.lockFd); } catch { /* not open */ }
+      return 1;
+    }
     lockFd = opts.lockFd;
   } else {
     lockFd = tryCollectorLock(paths.daemonLock);
@@ -249,7 +293,8 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
     try { appendAgentLog(launch.agentLog, line); } catch { note(`agent.log unwritable: ${line.trim()}`); }
   };
   try { if (statSync(paths.log).size > 1024 * 1024) writeFileSync(paths.log, ""); } catch { /* no log yet */ }
-  try { unlinkSync(paths.stop); } catch { /* a stale stop must not end this instance */ }
+  // A stale request must not end this instance.
+  for (const request of [paths.stop, paths.restart]) { try { unlinkSync(request); } catch { /* none */ } }
   const nonce = randomBytes(16).toString("hex");
   const markerPrefix = `IBSandboxReady-${nonce}`;
   const emitMarker = opts.emitMarker ?? ((marker: string) => {
@@ -267,10 +312,13 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
   let errors: Promise<void> | undefined;
   let stderr = "";
   let failed: unknown;
-  let stopping = false;
-  const stop = () => { stopping = true; };
+  /** stop: finish every launch (`done`), so every attach returns, then exit.
+   * restart: leave like a crash, WITHOUT `done` and giving up the role first,
+   * so the attaches start a new daemon that re-adopts their launches. */
+  let leaving: "stop" | "restart" | undefined;
+  const restartOnSignal = () => { leaving ??= "restart"; };
   const hup = () => {};
-  process.on("SIGTERM", stop); process.on("SIGINT", stop); process.on("SIGHUP", hup);
+  process.on("SIGTERM", restartOnSignal); process.on("SIGINT", restartOnSignal); process.on("SIGHUP", hup);
   const drop = (launch: Launch) => {
     try { closeSync(launch.stopFd); } catch { /* already closed */ }
     launches.delete(launch.name);
@@ -347,16 +395,21 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
       let accepted: AcceptedRegistration;
       try {
         accepted = validateRegistration(name, dirText,
-          { read: pid => reader!.read(pid), sandboxed: opts.sandboxed ?? (pid => reader!.sandboxed(pid)) }, opts.home);
+          { boot: reader!.boot, read: pid => reader!.read(pid), sandboxed: opts.sandboxed ?? (pid => reader!.sandboxed(pid)) }, opts.home);
       } catch (error) {
         // Tell the registrar through its own private directory, never through
-        // the unverified agent.log path.
-        try { writeFileSync(join(checkLaunchDirectory(name, dirText, opts.home), "failed"), ""); } catch { /* not ours to mark */ }
+        // the unverified agent.log path. `done` (not the registration's token)
+        // also keeps a stale directory from being re-examined on every start.
+        try {
+          const dir = checkLaunchDirectory(name, dirText, opts.home);
+          writeFileSync(join(dir, "failed"), "");
+          writeFileSync(join(dir, "done"), "rejected");
+        } catch { /* not ours to mark */ }
         throw error;
       }
       const stopFd = openSync(join(accepted.dir, "stop"), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       launches.set(name, { ...accepted, stopFd, marker: `${markerPrefix} ${name} ready`, markerSeen: false,
-        markerNext: now, markerDeadline: now + 3000, ready: false,
+        markerNext: now, markerDeadline: now + 3000, ready: false, nextCheck: now,
         resumed: existsSync(join(accepted.dir, "root-request")),
         active: [], budget: new SandboxOutputBudget(), overflow: 0, ambiguous: 0, lastSummary: now });
     };
@@ -397,10 +450,14 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
     const tick = (launch: Launch, now: number) => {
       const currentRoot = launch.attribution && reader!.read(launch.attribution.root.pid);
       const rootAlive = !!launch.attribution && sameProcess(currentRoot, launch.attribution.root);
-      if (stopping || fstatSync(launch.stopFd).size > 0 || !sameProcess(reader!.read(launch.owner.pid), launch.owner) ||
-          !sameProcess(reader!.read(launch.registrar.pid), launch.registrar)) {
-        if (launch.stopAt === undefined && rootAlive) status(launch, "WARNING", "collection stopping before the registered CLI exits; coverage reduced");
-        launch.stopAt ??= now + 1000;
+      // The 1 s drain makes a finer check of these pointless.
+      if (now >= launch.nextCheck) {
+        launch.nextCheck = now + CHECK_MS;
+        if (leaving === "stop" || fstatSync(launch.stopFd).size > 0 || !sameProcess(reader!.read(launch.owner.pid), launch.owner) ||
+            !sameProcess(reader!.read(launch.registrar.pid), launch.registrar)) {
+          if (launch.stopAt === undefined && rootAlive) status(launch, "WARNING", "collection stopping before the registered CLI exits; coverage reduced");
+          launch.stopAt ??= now + 1000;
+        }
       }
       if (launch.attribution && !rootAlive) launch.stopAt ??= now + 1000;
       if (launch.stopAt !== undefined && now >= launch.stopAt) { finish(launch); return; }
@@ -440,17 +497,45 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
     };
 
     let lastBeat = -Infinity; // performance.now() starts near 0: beat at once
+    let nextControl = 0;
+    let nextAccept = 0;
+    let inboxMtime: bigint | undefined;
+    /** A directory's mtime changes when an entry is added or removed. A stat
+     * is far cheaper than a readdir; the CHECK_MS fallback covers anything a
+     * timestamp could miss. */
+    const inboxChanged = () => {
+      try {
+        const mtime = statSync(paths.inbox, { bigint: true }).mtimeNs;
+        if (mtime !== inboxMtime) { inboxMtime = mtime; return true; }
+      } catch { /* no inbox yet */ }
+      return false;
+    };
     while (true) {
       const now = performance.now();
-      if (!stopping && existsSync(paths.stop)) {
-        stopping = true;
-        try { unlinkSync(paths.stop); } catch { /* removed */ }
-        note("stop requested");
+      if (now >= nextControl) {
+        nextControl = now + CHECK_MS;
+        if (existsSync(paths.restart)) { leaving ??= "restart"; try { unlinkSync(paths.restart); } catch { /* removed */ } }
+        if (existsSync(paths.stop)) { leaving ??= "stop"; try { unlinkSync(paths.stop); } catch { /* removed */ } }
+      }
+      if (leaving === "restart") {
+        note("restart requested; leaving every launch to the next daemon");
+        for (const launch of [...launches.values()]) {
+          status(launch, "WARNING", "shared collector restarting on request; reports until the next one is ready are not collected");
+          drop(launch);
+        }
+        // Give up the role before the stream teardown, so a registrar can
+        // start the next daemon at once.
+        closeSync(lockFd);
+        lockFd = null;
+        break;
       }
       if (sandboxStreamExited(stream) || failed) {
         throw new Error(`log stream stopped unexpectedly (exit=${stream.exitCode}, signal=${stream.signalCode}): ${(stderr || String(failed ?? "no output")).trim()}`);
       }
-      if (!stopping) accept(now);
+      if (!leaving && (inboxChanged() || now >= nextAccept)) {
+        accept(now);
+        nextAccept = now + CHECK_MS;
+      }
       for (const launch of [...launches.values()]) {
         try { tick(launch, now); } catch (error) { fail(launch, error); }
       }
@@ -486,7 +571,7 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
         lastBeat = now;
       }
       if (launches.size === 0) {
-        if (stopping) break;
+        if (leaving === "stop") break;
         let waiting = 1;
         try { waiting = readdirSync(paths.inbox).filter(name => !name.endsWith(".tmp")).length; } catch { /* keep serving */ }
         // Every attach holds clients.lock shared for its whole life, so LOCK_EX
@@ -501,9 +586,14 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
           break;
         }
       }
-      await Bun.sleep(20);
+      // Tree sampling needs 20 ms only while a root is registered; a launch
+      // waiting for its readiness marker needs it seen soon; otherwise idle.
+      const values = [...launches.values()];
+      await Bun.sleep(values.some(launch => launch.attribution) ? SAMPLE_MS
+        : values.some(launch => !launch.ready) ? MARKER_MS : CHECK_MS);
     }
-    note(stopping ? "collector stopped on request" : "no launches and no registrars left; exiting");
+    note(leaving === "stop" ? "collector stopped on request" : leaving === "restart" ? "collector left for a restart"
+      : "no launches and no registrars left; exiting");
     return 0;
   } catch (error) {
     note(`ERROR: ${String(error)}`);
@@ -524,7 +614,7 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
     try {
       if (JSON.parse(readFileSync(paths.heartbeat, "utf8")).pid === process.pid) unlinkSync(paths.heartbeat);
     } catch { /* none */ }
-    process.off("SIGTERM", stop); process.off("SIGINT", stop); process.off("SIGHUP", hup);
+    process.off("SIGTERM", restartOnSignal); process.off("SIGINT", restartOnSignal); process.off("SIGHUP", hup);
     if (lockFd !== null) closeSync(lockFd); // gives up the daemon role
   }
 }
@@ -553,6 +643,8 @@ export interface AttachOptions {
   home?: string;
   /** Test seam: start a daemon that takes ownership of the won `daemon.lock` fd. */
   startCollector?: (lockFd: number) => void;
+  /** Test seam: how often a registered attach re-reads `done` and the lock. */
+  pollMs?: number;
 }
 
 /** One per launch. The supervisor subshell removes the launch directory after
@@ -581,11 +673,18 @@ export async function attachSandboxLaunch(opts: AttachOptions): Promise<number> 
     // Held for our whole life: while any attach holds it, no daemon exits.
     clientFd = holdCollectorClient(paths);
     const token = randomBytes(16).toString("hex");
-    writeAtomic(join(opts.dir, "registration.json"),
-      JSON.stringify({ v: PROTOCOL, agentLog: opts.agentLog, owner: opts.owner, registrar: process.pid, token }));
+    const registrar = reader.read(process.pid);
+    if (!registrar) throw new Error("registrar identity unavailable");
+    // PID + birth + boot: a directory left by a crash or reboot can never be
+    // adopted on behalf of a process that merely reuses one of these PIDs.
+    writeAtomic(join(opts.dir, "registration.json"), JSON.stringify({ v: PROTOCOL, agentLog: opts.agentLog, boot: reader.boot,
+      owner: { pid: owner.pid, birth: owner.birth }, registrar: { pid: registrar.pid, birth: registrar.birth }, token }));
     const startCollector = opts.startCollector ?? ((fd: number) => spawnSandboxCollector(paths, fd));
     const file = (name: string) => join(opts.dir, name);
-    const done = () => { try { return readFileSync(file("done"), "utf8") === token; } catch { return false; } };
+    const done = () => {
+      if (!existsSync(file("done"))) return false;
+      try { return readFileSync(file("done"), "utf8") === token; } catch { return false; }
+    };
     const ownerAlive = () => sameProcess(reader!.read(owner.pid), owner);
     let starts = 0;
     /** A free `daemon.lock` means no daemon: winning it makes us the one
@@ -619,6 +718,7 @@ export async function attachSandboxLaunch(opts: AttachOptions): Promise<number> 
     let answer = await register();
     if (answer === "ended") return 0;
     if (answer !== "ready") return refused(answer);
+    starts = 0; // an acknowledged start worked
     let stopSent = false;
     while (true) {
       if (done()) return 0;
@@ -637,9 +737,10 @@ export async function attachSandboxLaunch(opts: AttachOptions): Promise<number> 
         answer = await register();
         if (answer === "ended") return 0;
         if (answer !== "ready") return refused(answer);
+        starts = 0;
         continue;
       }
-      await Bun.sleep(250);
+      await Bun.sleep(opts.pollMs ?? 1000);
     }
   } catch (error) {
     status("ERROR", `${String(error)}; kernel enforcement remains required`);
@@ -652,17 +753,41 @@ export async function attachSandboxLaunch(opts: AttachOptions): Promise<number> 
   }
 }
 
-export function sandboxCollectorStatus(home?: string): string {
+export function sandboxCollectorStatus(home?: string, now = Date.now()): string {
   const paths = sandboxCollectorPaths(home);
-  let heartbeat = "none";
-  try { heartbeat = readFileSync(paths.heartbeat, "utf8"); } catch { /* none */ }
-  return `running: ${sandboxCollectorRunning(paths) ? "yes" : "no"}\nheartbeat: ${heartbeat}\nstate: ${paths.root}`;
+  const running = sandboxCollectorRunning(paths);
+  const lines = [`running: ${running ? "yes" : "no"}`];
+  try {
+    const heartbeat = JSON.parse(readFileSync(paths.heartbeat, "utf8"));
+    const age = now - Number(heartbeat.updatedAt);
+    const stale = running && !(age <= STALE_HEARTBEAT_MS);
+    lines.push(`pid: ${heartbeat.pid}`, `launches: ${heartbeat.launches}`,
+      `heartbeat age: ${(age / 1000).toFixed(1)} s${stale ? " (STALE)" : ""}`);
+    if (stale) {
+      lines.push(`The daemon holds its lock but its loop has not run for ${Math.round(age / 1000)} s.`,
+        `End it with: kill -9 ${heartbeat.pid}  (each running launch then starts a new daemon, which re-adopts it)`);
+    }
+  } catch { lines.push("heartbeat: none"); }
+  lines.push(`state: ${paths.root}`);
+  return lines.join("\n");
 }
 
-/** Ask a running daemon to finish every launch (1 s drain) and exit. */
+/** End collection for EVERY running launch: each gets `collector stopped` and
+ * `done`, so its attach exits; then the daemon exits. Running agents are not
+ * collected again until they are resumed. */
 export function stopSandboxCollector(home?: string): boolean {
   const paths = sandboxCollectorPaths(home);
   if (!sandboxCollectorRunning(paths)) return false;
   writeAtomic(paths.stop, "stop\n");
+  return true;
+}
+
+/** Replace the daemon without ending collection: it leaves every launch to the
+ * next daemon (no `done`) and gives up the role; a running attach then starts a
+ * new daemon, which re-adopts every launch. SIGTERM does the same. */
+export function restartSandboxCollector(home?: string): boolean {
+  const paths = sandboxCollectorPaths(home);
+  if (!sandboxCollectorRunning(paths)) return false;
+  writeAtomic(paths.restart, "restart\n");
   return true;
 }

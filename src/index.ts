@@ -987,12 +987,17 @@ const COMMAND_HELP: Record<string, string> = {
     "  session so the sealed record can be re-written.",
   "sandbox-collector":
     "Usage: ib sandbox-collector attach --dir <launch-directory> --owner <pid> --agent-log <file>\n" +
-    "       ib sandbox-collector serve [--lock-fd <fd>] | status | stop\n" +
+    "       ib sandbox-collector serve [--lock-fd <fd>] | status | restart | stop\n" +
     "  attach: internal, run by start.sh/resume.sh outside Seatbelt: register one launch\n" +
     "    with the shared kernel-denial collector, starting one when none is running.\n" +
     "  serve: internal, the shared collector (one per user, one log stream); --lock-fd is\n" +
     "    the daemon.lock fd an attach won and handed over.\n" +
-    "  status: show whether the shared collector runs. stop: ask it to finish and exit.",
+    "  status: whether it runs, its pid, launch count and heartbeat age (STALE when its\n" +
+    "    loop has stopped; then end it with kill -9 <pid> and launches start a new one).\n" +
+    "  restart: replace the collector; running launches start a new one, which re-adopts\n" +
+    "    them (SIGTERM to the collector does the same).\n" +
+    "  stop: end collection for every running launch; they are not collected again until\n" +
+    "    their agents are resumed.",
   "sandbox-log-stream":
     "Usage: ib sandbox-log-stream --predicate <predicate>\n" +
     "  Internal: own a log stream in a detached session with a collector lifeline pipe.",
@@ -1606,7 +1611,15 @@ export async function main() {
         return;
       }
       if (action === "stop") {
-        console.log(collector.stopSandboxCollector() ? "Stop requested." : "The shared collector is not running.");
+        console.log(collector.stopSandboxCollector()
+          ? "Stop requested: every running launch stops collecting until its agent is resumed."
+          : "The shared collector is not running.");
+        return;
+      }
+      if (action === "restart") {
+        console.log(collector.restartSandboxCollector()
+          ? "Restart requested: running launches start a new collector, which re-adopts them."
+          : "The shared collector is not running.");
         return;
       }
       const dir = args[args.indexOf("--dir") + 1];

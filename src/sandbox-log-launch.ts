@@ -4,9 +4,12 @@ import { sandboxLogParent } from "./sandbox-log-paths";
 
 /**
  * The kernel denial collector is OFF for now. Each sandboxed spawn/resume started
- * its own `log stream --level debug`; with 10 agents that cost about 3-4 cores
- * (each `log` ~17-26% plus diagnosticd ~150%), only to copy `[Sandbox]` lines into
- * agent.log for the DENIALS pane. Seatbelt enforcement and the proxy do not depend
+ * its own `log stream`, then at `--level debug`; with 10 agents that cost about
+ * 3-4 cores (each `log` ~17-26% plus diagnosticd ~150%), only to copy `[Sandbox]`
+ * lines into agent.log for the DENIALS pane. The stream now runs at
+ * `--level default` (~1.75% each, `sandboxLogStreamArgv`); docs/
+ * SANDBOX-SHARED-COLLECTOR.md plans one shared stream before this is turned
+ * back on. Seatbelt enforcement and the proxy do not depend
  * on it. While off, both helpers below add nothing: no collector, no readiness
  * handshake, the plain sandbox-exec prefix. Set to true to collect again on new
  * spawns and resumes.

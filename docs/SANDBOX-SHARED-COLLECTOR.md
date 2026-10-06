@@ -1,10 +1,12 @@
 # Shared sandbox denial collector — design proposal
 
 Status: **proposal for review, not implemented** (2026-10-06, worker
-`log-level-default`). Denial collection is currently turned off by the gate that
-the `disable-denial-collector` agent adds to `src/sandbox-log-launch.ts`. This
-document plans how to turn it back on with ONE `log stream` for all sandboxed
-agents, instead of one per launch.
+`log-level-default`). Denial collection is currently turned off by
+`SANDBOX_DENIAL_COLLECTOR_ENABLED = false` in `src/sandbox-log-launch.ts`
+(commit `f1bc5af`): while it is false, `sandboxDenialScriptPreamble()` returns
+`""` and `sandboxDenialExecPrefix()` returns the plain `sandbox-exec` prefix.
+This document plans how to turn it back on with ONE `log stream` for all
+sandboxed agents, instead of one per launch.
 
 Background: `docs/SANDBOX-ROLLOUT.md` (current collector),
 `docs/sandbox-denial-probe-evidence.md` (live evidence, §13 for CPU),
@@ -244,12 +246,14 @@ before it ships.
 
 ## 9. Turning collection back on (behind the gate)
 
-The gate from `disable-denial-collector` stays the one switch.
+`SANDBOX_DENIAL_COLLECTOR_ENABLED` stays the one switch. Both helpers already
+take an `enabled` override, so tests can exercise the collector path while the
+switch is off.
 
 1. Add `ib sandbox-collector serve | register | status | stop | restart`
    (new `src/sandbox-collector.ts`), reusing the attribution, process-tree,
    process-reader and stream-helper modules without changes.
-2. When the gate is on, `sandboxDenialScriptPreamble` emits the §5 preamble.
+2. When the switch is on, `sandboxDenialScriptPreamble` emits the §5 preamble.
    `sandboxDenialExecPrefix` does not change (same handshake files).
 3. Remove `ib sandbox-log-watch` once the shared path passes live validation
    (open question 4).
@@ -259,7 +263,7 @@ The gate from `disable-denial-collector` stays the one switch.
    re-adopt; stream SIGKILL; idle exit racing a new registration; a forged
    registration from inside a sandbox (expect EPERM on the sealed path); CPU of
    the daemon, `log` and `diagnosticd` with ten agents.
-6. Turn the gate on.
+6. Set `SANDBOX_DENIAL_COLLECTOR_ENABLED = true`.
 
 ## 10. Cross-cutting checklist (AGENTS.md)
 

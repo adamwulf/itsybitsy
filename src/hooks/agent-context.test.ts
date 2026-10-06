@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { join } from "path";
-import { mkdir, mkdtemp, realpath, rm } from "fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm } from "fs/promises";
 import { tmpdir } from "os";
 import {
   findNoWorktreeAgentsDir,
@@ -140,6 +140,27 @@ describe("registered hook agent binding", () => {
     setBoundNoWorktreeCallerResolver(async () => null);
 
     await expect(resolveBoundHookAgent("agent-duplicate", await makeRepo())).rejects.toThrow();
+  });
+
+  test("an unreadable registered repo is skipped, not fatal to other repos' agents", async () => {
+    // Mirrors a repo inside another app's ~/Library/Containers after a machine
+    // migration: realpath on it fails with EPERM/EACCES, not ENOENT.
+    const repo = await realpath(await makeRepo());
+    const agent = await writeAgent(repo, "agent-worktree", true);
+    const lockedParent = join(repo, "locked");
+    const lockedRepo = join(lockedParent, "repo");
+    await mkdir(lockedRepo, { recursive: true });
+    await Bun.write(join(repo, "home", ".itsybitsy", "repos.json"), JSON.stringify({
+      repos: [{ path: lockedRepo, name: "locked" }, { path: repo, name: "readable" }],
+    }));
+    await chmod(lockedParent, 0o000);
+    try {
+      await expect(
+        resolveBoundHookAgent("agent-worktree", agent.worktreePath, { registryHome: join(repo, "home") }),
+      ).resolves.toMatchObject({ agentDir: agent.agentDir, worktreePath: agent.worktreePath });
+    } finally {
+      await chmod(lockedParent, 0o755);
+    }
   });
 
   test("an unregistered standalone same-id tree supplies no authority", async () => {

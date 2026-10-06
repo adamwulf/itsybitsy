@@ -1818,11 +1818,15 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
     let boundContext;
     try {
       boundContext = await resolveBoundHookAgent(agentId, cwd);
-    } catch {
+    } catch (error) {
+      // Name the resolver's cause: a missing record, a cwd outside the
+      // worktree, and an unreadable registered repo all land here, and the bare
+      // reason alone sends the operator looking at a meta.json that is fine.
       const fallbackAgentDir = join(cwd, ".ittybitty", "agents", agentId);
+      const cause = error instanceof Error ? error.message : String(error);
       await emitPathDecision(fallbackAgentDir, toolName, toolInput, {
         decision: "deny",
-        reason: META_UNREADABLE_DENY_REASON,
+        reason: `${META_UNREADABLE_DENY_REASON} (${cause})`,
       }, isCoordinator);
       return;
     }

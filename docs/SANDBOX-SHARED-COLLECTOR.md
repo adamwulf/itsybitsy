@@ -61,7 +61,8 @@ exec sandbox-exec ... CLI               (unchanged)
 | `inbox/<launch>` | registration request (temp file + rename); content: the launch directory path. |
 | `heartbeat.json` | written every second for `ib sandbox-collector status`; no decision reads it. |
 | `collector.log` | daemon diagnostics and rejected registrations (size-capped at start). |
-| `stop` | written by `ib sandbox-collector stop` to end the daemon. |
+| `stop` | written by `ib sandbox-collector stop`: end collection for every launch (§6). |
+| `restart` | written by `ib sandbox-collector restart`: replace the daemon, keep collecting (§6). |
 
 **Per-launch artifacts stay where they were**:
 `~/.itsybitsy/sealed/sandbox-logs/<sha256(agentDir)>/sandbox-log.XXXXXXXX/` with
@@ -81,13 +82,16 @@ PID and no PID signal anywhere.
   is no daemon, and it is now the one process allowed to start one: it spawns
   `serve --lock-fd 3` with the locked fd as the child's fd 3 and closes its own
   copy. The role passes over through the shared open file description, so it is
-  never free in between. `serve` re-locks fd 3 (succeeds only through that same
-  description) to check the hand-over. If it loses, a daemon (or a starter) holds
-  the role and it only registers. There is no retry loop: two launches never
-  both start a daemon.
+  never free in between. `serve` checks the hand-over in two steps: fd 3 must be
+  `daemon.lock` itself (same device and inode; `flock` alone would succeed on
+  any other file too), and LOCK_EX on it must succeed (through the inherited
+  description, or because the role is free; it fails while another description
+  holds it). Otherwise it refuses to serve. If the `attach` loses, a daemon (or a
+  starter) holds the role and it only registers. There is no retry loop: two
+  launches never both start a daemon.
 - **Death.** When the daemon dies, its lock is free at once (measured: the
   daemon's own children do not inherit fd 3, so they cannot keep it). Each
-  `attach` checks `daemon.lock` every 250 ms; the first that wins it starts the
+  `attach` checks `daemon.lock` every second; the first that wins it starts the
   next daemon. That daemon **re-adopts every live launch** by scanning the sealed
   launch directories, so a launch whose `attach` did not notice the gap is still
   collected (this was a real failure in the first live run).
@@ -99,9 +103,18 @@ PID and no PID signal anywhere.
   LOCK_SH, then finds `daemon.lock` free and starts a new daemon; it can never
   register with a daemon that is exiting. Measured: the daemon exited 0.2 s after
   the last launch ended. No idle timer.
-- **Bounded starts.** One `attach` starts at most 4 daemons (first start plus 3
-  restarts), so a daemon that dies at once on every start (for example, `log
-  stream` refuses to run) is not respawned in a loop.
+- **Bounded starts.** One `attach` starts at most 4 daemons in a row that never
+  acknowledge its launch, so a daemon that dies at once on every start (for
+  example, `log stream` refuses to run) is not respawned in a loop. Every
+  acknowledgement (`ready`) resets the count, so a launch that lives for days
+  survives any number of restarts that each worked.
+- **Cadences, not deadlines.** The daemon samples registered trees every 20 ms
+  (attribution coverage), re-reads each launch's `stop` file, owner and
+  registrar and its own `stop`/`restart` requests every 250 ms (the 1 s drain
+  makes a finer check pointless), and reads the inbox only when the directory's
+  mtime changes (with a 250 ms fallback). With no registered root it sleeps
+  250 ms per loop (50 ms while a launch waits for its readiness marker). A
+  registered `attach` checks `done` and the lock every second.
 
 **Waits that remain time-bounded**, and why no lock can replace them:
 
@@ -143,15 +156,19 @@ The daemon checks every registration (inbox entry or re-adopted directory):
    dirname(launchDir)` — a launch may only name the `agent.log` of the agent
    directory whose hash names its namespace.
 3. **Owner proof** (replaces "the owner is my ancestor", which a shared daemon
-   cannot prove of itself): `registration.json` names the owner (`$$` of
-   start.sh/resume.sh) and the registrar (the `attach` pid). The registrar must be
-   alive, the owner must be its ancestor within 64 levels (the supervisor
-   subshell sits between them) with matching birth identity, and the kernel must
-   report both unsandboxed (`sandbox_check(pid, NULL, 0) == 0`; verified live
-   that it answers for other processes, and that an unknown pid is non-zero, so
-   the check fails closed). `attach` lives as long as the launch, so the daemon
-   ends a launch whose registrar dies, and a stale directory from a dead launch
-   is never adopted.
+   cannot prove of itself): `registration.json` names the boot session
+   (`kern.bootsessionuuid`) and two exact processes, each as PID + birth: the
+   owner (`$$` of start.sh/resume.sh) and the registrar (the `attach` process).
+   The daemon requires the same boot, a live process at each PID with exactly
+   that birth (so a PID reused after a crash or reboot is rejected), the owner
+   as the registrar's ancestor within 64 levels (the supervisor subshell sits
+   between them), and the kernel reporting both unsandboxed
+   (`sandbox_check(pid, NULL, 0) == 0`; a test with the real binding shows a
+   reaped PID reads as sandboxed, so the check fails closed). `attach` lives as
+   long as the launch, so the daemon ends a launch whose registrar dies. A stale
+   directory (dead or reused registrar, other boot) is rejected and marked
+   `done` = `rejected`, so later daemon starts skip it instead of re-examining
+   it every time.
 4. **Root acknowledgement**: the gate (still unsandboxed) writes `root-request` =
    its `$$`. The daemon requires `root.ppid === owner`, a root that is not the
    registrar or one of its ancestors, and a root identity no other launch holds.
@@ -159,7 +176,8 @@ The daemon checks every registration (inbox entry or re-adopted directory):
    sampling its tree**.
 5. **Rejections** go to `collector.log`, never to the unverified `agent.log`
    path. If the launch directory itself passed rule 1, the daemon also writes
-   `failed` there, and `attach` logs a visible ERROR in its own `agent.log`.
+   `failed` and `done` (`rejected`) there, and a live `attach` logs a visible
+   ERROR in its own `agent.log`.
 6. **No channel from inside the sandbox**: no socket and no writable path reach
    the daemon. The hooks deny `ib sandbox-collector` to agents
    (`containsInternalIbInvocation`) as defense in depth.
@@ -206,10 +224,12 @@ mandatory `sandbox-exec` wrapper. Every failure is diagnostic and visible in
 | No daemon at launch | The `attach` that wins `daemon.lock` starts one. If none answers within the preamble's 5 s, the CLI starts under the wrapper with today's ERROR. |
 | Daemon SIGKILL (live) | Lock free at once; the helper reads lifeline EOF and the old stream ends. The first `attach` to win the lock starts a daemon, which re-adopts every live launch: WARNING "shared collector resumed; reports while it was down were not collected". Live descendants are found again from the root; only orphans re-parented during the gap are lost. |
 | `log stream` dies (live) | Daemon writes ERROR to every launch, gives up the role at once, exits 1; the next daemon starts and re-adopts as above. |
-| Registration rejected | Reason in `collector.log`; `failed` in the launch directory; `attach` logs ERROR. |
-| One launch's `agent.log` unwritable or not a regular file | That launch only is dropped. |
+| Registration rejected | Reason in `collector.log`; `failed` and `done` (`rejected`) in the launch directory; `attach` logs ERROR. |
+| One launch's `agent.log` unwritable, a FIFO or a symlink (tested) | Writes fail at once (never block, never follow); that launch only is dropped; the others keep their records. |
 | One tree exceeds 4,096 processes | ERROR to that launch; that launch only is dropped. |
-| Daemon alive but stuck (no ticks) | Not detectable by a lock: the lock stays held. `ib sandbox-collector status` shows the heartbeat and pid; the user can stop it by hand. No automatic PID kill (unchanged rule). |
+| `ib sandbox-collector restart`, or SIGTERM to the daemon (tested) | The daemon logs a WARNING to each launch, drops them WITHOUT `done`, gives up the role, then tears down its stream. The attaches start a new daemon, which re-adopts every launch. Collection continues. |
+| `ib sandbox-collector stop` (tested) | Ends collection for every running launch: each gets `collector stopped` and `done`, each attach returns, the daemon exits. Use it to stop collection now (for example after turning the switch off); running agents are not collected again until resumed. |
+| Daemon alive but stuck (no loop) | A lock cannot show it: the lock stays held. `ib sandbox-collector status` prints the heartbeat age and marks it STALE after 5 s, with the fix: `kill -9 <pid>` (from the heartbeat). The lock then frees and the attaches start a new daemon that re-adopts every launch. Nothing kills it automatically (unchanged rule). |
 | `ib` rebuilt while a daemon runs | The daemon keeps its binary until it exits (when no launch remains). `registration.json` carries protocol `v`; an unknown version is rejected visibly. |
 
 **Blast radius**: one daemon failure touches every agent at once (before: one
@@ -236,21 +256,30 @@ the shared stream and a standalone one measured at the same time.
 |---|---|---|
 | `log stream` | N × 1.75–8.6% | 1 × 1.75–8.6% |
 | stream helper | N × ~0.1% | 1 × ~0.1% |
-| collector loop | N × ~3.5% (one per launch) | 1 daemon: 2.1% with no launch, ~7.5% with 1–4 launches (flat) |
-| per-launch `attach` | — | N × ~0.45% |
+| collector loop | N × ~3.5% (one per launch) | 1 daemon: 0.6% with no launch, 4.6% with 1 launch, 5.0% with 4 |
+| per-launch `attach` | — | N × 0.10–0.15% (measured live; polls once a second) |
 | `diagnosticd` | one client per launch | one client (not measured) |
 
-The daemon's cost is dominated by `proc_listchildpids` (a kernel process-table
-walk; only the first walk per 20 ms tick is expensive, so extra trees add about
-0.2% each) and the 50 Hz inbox `readdir`. Possible follow-ups, not done here:
-replace the inbox `readdir` with a directory-change check, or revisit the 20 ms
-cadence (it sets how early a short-lived child must be seen to be attributed, so
-it is a coverage decision).
+Daemon loop, in-process CPU over 15 s with quiet launches and a silent stream:
+
+| Launches | Before review round 1 | After (250 ms checks, inbox on change, idle sleep) |
+|---|---|---|
+| 0 | 2.10–2.15% | 0.60% |
+| 1 | 7.16–8.01% | 4.55% |
+| 4 | 7.41–8.11% | 5.02% |
+
+What remains is mostly `proc_listchildpids` at 50 Hz (a kernel process-table
+walk; only the first walk per 20 ms tick is expensive, so extra trees add little).
+Follow-up, not done: one shared children map per tick for all trees, or a
+different sampling cadence (the 20 ms sets how early a short-lived child must be
+seen to be attributed, so it is a coverage decision).
 
 ## 9. Commands
 
 `ib sandbox-collector attach --dir D --owner PID --agent-log F` (internal, run by
-the preamble), `serve [--lock-fd 3]` (internal, the daemon), `status`, `stop`.
+the preamble), `serve [--lock-fd 3]` (internal, the daemon), `status` (running,
+pid, launches, heartbeat age, STALE mark), `restart` (replace the daemon, keep
+collecting), `stop` (end collection for every running launch).
 `ib sandbox-log-watch` is removed; `sandboxStreamExited` and
 `closeSandboxLogStream` moved to `src/sandbox-log-stream.ts`.
 
@@ -281,19 +310,42 @@ socket with peer credentials.
 
 ## 12. Validation
 
-**Unit tests** (`src/sandbox-collector.test.ts`, real processes and real flocks;
-the stream is a controlled peer, not `/usr/bin/log`): registration validation
-(accept, and reject forged name, outside namespace, other launch's directory,
-redirected `agent.log`, protocol, malformed token, dead registrar,
-non-descendant registrar, sandboxed owner or registrar, mode 0755, symlinked
-directory, symlinked `registration.json`); daemon role exclusivity and shared
-client locks; locked-fd hand-over surviving the parent and dying with the daemon
-but not with its children; one daemon routing two launches' reports to their own
-logs only; a duplicate root rejected; per-launch stop and registrar death; the
-daemon staying up while a client lock is held and exiting when it is released;
-a redirected registration rejected with `failed` and no write to the victim log;
-`attach` starting a new daemon after a stream failure, and the new daemon
-re-adopting a launch whose registrar never noticed.
+**Unit tests** (`src/sandbox-collector.test.ts`, 21 tests, real processes and
+real flocks; the stream is a controlled peer, not `/usr/bin/log`):
+
+- Registration validation: accept; reject forged name, outside namespace, other
+  launch's directory, redirected `agent.log`, protocol, malformed token, a bare
+  PID, another boot, dead registrar, owner or registrar PID reused (other birth),
+  non-descendant registrar, sandboxed owner or registrar, mode 0755, symlinked
+  directory, symlinked `registration.json`.
+- `appendAgentLog`: a symlinked `agent.log` is not followed (victim unchanged); a
+  FIFO fails at once with no reader and with a reader, and nothing is written.
+  Daemon level: a launch with a FIFO `agent.log` fails alone while another
+  launch still gets its `[Sandbox]` record.
+- The real `sandbox_check` binding: a reaped PID reads as sandboxed (fails
+  closed), and the reader agrees with `isSandboxedProcess()` for the test itself.
+- `status`: heartbeat age shown; marked STALE with the `kill -9 <pid>` fix once
+  the loop has not run for more than 5 s while the lock is held.
+- Locks: role exclusivity and shared client locks; the fd 3 hand-over surviving
+  the parent and dying with the daemon but not its children; `serve` refusing a
+  locked fd on another file; exit-versus-register (with `daemon.lock` and
+  `clients.lock` held exclusively, an `attach` in another process writes
+  nothing; after both close, it starts exactly one daemon, with an fd that is
+  `daemon.lock`).
+- Daemon: two launches routed to their own logs only; a duplicate root refused;
+  a root whose parent is not the owner, and a root that is the registrar,
+  refused (`failed` + `done`, no `root-ready`); per-launch stop and registrar
+  death; staying up while a client lock is held and exiting when it is released;
+  a redirected registration rejected with `failed` + `done` and no write to the
+  victim log; stale directories (dead and reused registrar) rejected, marked
+  `done`, and not re-examined by the next daemon.
+- `attach`: a new daemon after a stream failure re-adopting a launch whose
+  registrar never noticed; giving up after exactly 4 unanswered starts; the
+  start count resetting after each acknowledgement (10 starts: 6 acknowledged,
+  then 4); `stop` (every launch `done`, every attach returns, role freed);
+  `restart` (no `done`, a new daemon re-adopts both launches); SIGTERM to a
+  daemon running as a separate process (same as `restart`, through the real fd 3
+  hand-over).
 
 **Live** (2026-10-06, compiled build via a `PATH` shim, the real preamble and gate
 with the `enabled` override, real `sandbox-exec` with the `_all.md` floor plus a
@@ -309,3 +361,12 @@ disposable deny, real `log stream` and `logger`; two concurrent launches A and B
 | CLI exit | `collector stopped` in both logs; launch directories removed |
 | Daemon exit | 0.2 s after the last launch ended; no stream, helper, heartbeat or process left |
 | CPU (30 s, two quiet launches, noisy host) | daemon 7.07%, `log stream` 8.63% (standalone at the same time: 8.56%), helper 0.13%, each `attach` 0.43–0.47% |
+
+**Live re-check after review round 1** (same harness, new build): `registration.json`
+carries `boot` and the owner and registrar as PID + birth; `status` showed the pid,
+launch count and heartbeat age; both launches' denied reads and writes were
+attributed; `ib sandbox-collector restart` through the real binary left both
+launches to a new daemon that re-adopted them within 0.7 s (no `done`); a daemon
+SIGKILL recovered within 1.1 s; later denials were attributed after both; the
+daemon exited once both launches ended and nothing was left. CPU over 20 s with
+two quiet launches: daemon 5.30%, `log stream` 6.55%, each `attach` 0.10–0.15%.

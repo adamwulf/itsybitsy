@@ -16,9 +16,6 @@ export interface SandboxReport {
 }
 
 const SANDBOX_KEXT = "/System/Library/Extensions/Sandbox.kext/Contents/MacOS/Sandbox";
-/** The kernel keeps the first 1008 bytes of a long report and appends this. The
- * tag is last, so it is the first text lost: a cut report is never attributed. */
-export const SANDBOX_REPORT_TRUNCATED = "<…>";
 const TIMESTAMP = /^\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-]\d\d:?\d\d)$/;
 
 /** Parse one NDJSON line of the live stream. Only a real kernel report passes:
@@ -34,8 +31,11 @@ export function parseSandboxReport(line: string): SandboxReport | null {
     if (typeof r.timestamp !== "string" || !TIMESTAMP.test(r.timestamp)) return null;
     if (!Number.isSafeInteger(r.machTimestamp) || r.machTimestamp <= 0) return null;
     const message = r.eventMessage;
-    if (typeof message !== "string" || message.endsWith(SANDBOX_REPORT_TRUNCATED)) return null;
-    // A path may contain newlines; the tag is always the very last line.
+    if (typeof message !== "string") return null;
+    // A path may contain newlines; the tag is always the very last line. The
+    // kernel keeps only the first 1008 bytes of a long report and appends `<…>`,
+    // so a cut report's last line is path text or a cut tag ending in `<…>`:
+    // never a registered tag.
     const lastNewline = message.lastIndexOf("\n");
     if (lastNewline < 0) return null;
     const summary = /^([1-9]\d{0,8}) duplicate reports? for Sandbox: /.exec(message);

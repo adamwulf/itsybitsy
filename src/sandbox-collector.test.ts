@@ -453,6 +453,8 @@ darwinTest("one daemon serves two launches and routes each report to its own lau
   await stream.report(b.tag, 104, "file-read-data", `/tmp/x\n${a.tag}`);
   // A's tag in the middle of the last line is not A's tag.
   await stream.report(`${a.tag} `, 105, "file-read-data");
+  // A report the kernel cut inside A's tag.
+  await stream.report(`${a.tag.slice(0, 20)}<…>`, 107, "file-read-data");
   await until(async () => (await text(a.agentLog)).includes("[Sandbox]") && count(await text(b.agentLog), "[Sandbox]") === 2);
   await Bun.sleep(300); // nothing else may arrive
   const logA = await text(a.agentLog);
@@ -464,6 +466,7 @@ darwinTest("one daemon serves two launches and routes each report to its own lau
   for (const log of [logA, logB]) {
     expect(log).not.toContain("pid=103");
     expect(log).not.toContain("pid=105");
+    expect(log).not.toContain("pid=107");
   }
   // agent.log is readable by other agents: the collector never writes a launch's
   // own tag there (B's log shows A's tag only as the path text above).

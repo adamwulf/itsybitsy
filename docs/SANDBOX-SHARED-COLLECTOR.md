@@ -263,15 +263,16 @@ For each line of the stream, in the pump, as it arrives
    `messageType` Error, a valid `timestamp` and `machTimestamp`, and an
    `eventMessage` that starts with `Sandbox: ` or `N duplicate report(s) for
    Sandbox: ` (N ≥ 1). Anything else is ignored.
-2. **Not truncated**: the kernel keeps the first 1008 bytes of a long report and
-   appends `<…>`. The tag is last, so it is the first text lost; a report that
-   ends in `<…>` is never attributed. With the 41-byte tag, a path of about 850
-   bytes or less keeps it.
-3. **The tag is the text after the LAST `\n`.** It must equal a registered
+2. **The tag is the text after the LAST `\n`.** It must equal a registered
    launch's tag exactly (a map lookup). There is no substring search anywhere,
    because path and process-name text can contain `ib-agent:` lines. A report
    with no newline (a rule without our message), or with an unknown tag, is
    unattributed.
+3. **Truncation needs no extra check**: the kernel keeps the first 1008 bytes of
+   a long report and appends `<…>`. The tag is last, so it is the first text
+   lost; a cut report's last line is path text or a cut tag ending in `<…>`,
+   never a registered tag, so the exact lookup drops it. With the 41-byte tag, a
+   path of about 850 bytes or less keeps it.
 4. **The record**: the offender is split from the text before the tag,
    `<name>(<pid>) deny(<n>) <operation> [<target>]`. Kernel p_name is at most
    32 unsanitized bytes, so every feasible delimiter is examined and only an
@@ -433,7 +434,8 @@ untagged (older) launch is rejected rather than tracked by a fallback.
   the nonce, and a resume keeps the rules under a new tag.
 - `src/sandbox-denials.test.ts`: a real kernel report → its tag and offender; a
   coalesced summary keeps its count; `\nib-agent:<other>` in a path with the
-  real tag last → the real tag only; a truncated report → rejected; forged
+  real tag last → the real tag only; a truncated report's last line is never a
+  tag (and the daemon test drops one cut inside a registered tag); forged
   `logger`-style, wrong processID / image / sender / messageType, sandboxd →
   rejected; an ambiguous process name → offender null, tag kept; the record
   never holds the tag.

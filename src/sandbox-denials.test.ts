@@ -41,11 +41,15 @@ describe("kernel report parsing", () => {
     expect(parseSandboxReport(raw({ eventMessage: `Sandbox: cat(1) deny(1) file-read-data /tmp/y\n${OTHER}` }))!.tag).toBe(OTHER);
   });
 
-  test("a truncated report has lost its tag and is never attributed", () => {
-    const cut = `Sandbox: cat(1) deny(1) file-read-data /${"a".repeat(990)}<…>`;
-    expect(parseSandboxReport(raw({ eventMessage: cut }))).toBeNull();
-    // Even when the cut lands right after a forged tag line.
-    expect(parseSandboxReport(raw({ eventMessage: `Sandbox: cat(1) deny(1) file-read-data /x\n${OTHER}<…>` }))).toBeNull();
+  test("a truncated report has lost its tag: its last line can never equal a tag", () => {
+    // The cut removed the whole tag line: no newline is left.
+    expect(parseSandboxReport(raw({ eventMessage: `Sandbox: cat(1) deny(1) file-read-data /${"a".repeat(990)}<…>` }))).toBeNull();
+    // The cut lands inside the tag, or right after a forged tag line in a path.
+    for (const cut of [`${TAG.slice(0, 20)}<…>`, `${OTHER}<…>`]) {
+      const report = parseSandboxReport(raw({ eventMessage: `Sandbox: cat(1) deny(1) file-read-data /x\n${cut}` }))!;
+      expect(report.tag).toBe(cut);
+      expect(report.tag).not.toMatch(/^ib-agent:[0-9a-f]{32}$/);
+    }
   });
 
   test("a crafted process name makes the offender ambiguous, never the tag", () => {

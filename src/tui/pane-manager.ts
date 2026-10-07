@@ -9,7 +9,7 @@ import type { InputFieldComponent } from "./input-field";
 import type { Agent, FlatEntry, PendingQuestion, DenialEntry } from "../agents";
 import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings } from "../health-check";
-import { readAgentLog, readAgentLogWindow, statAgentLogSize, readAgentPrompt, parseDenials, resolveAgentIcon } from "../agents";
+import { readAgentLog, readAgentFileWindow, statAgentLogSize, statAgentFileSize, readAgentPrompt, parseDenials, resolveAgentIcon } from "../agents";
 import { diffAgent, statusAgent } from "../ib-commands";
 import { wrapLines, wordWrapLines, WordWrapCache, computeChromeSlice } from "./wrap";
 import type { ChromeSlice } from "./wrap";
@@ -20,15 +20,62 @@ import { buildFocusSeparator } from "./focus";
 import { RESET, BOLD, DIM, RED, GREEN, CYAN, REVERSE, DIM_GRAY, YELLOW } from "./colors";
 import { formatSandboxDisplay } from "./sandbox-format";
 
-// Right pane modes
+// Right pane modes. `p` cycles forward (+1) and `n` backward (-1), so from the
+// startup AGENT LOG pane `n` reaches WATCHDOG LOG then PROXY LOG and `p`
+// reaches INITIAL PROMPT. AGENT LOG is therefore NOT index 0 — start from
+// DEFAULT_MODE_INDEX, never a literal 0.
 export const PANE_MODES = [
-  "AGENT LOG", "INITIAL PROMPT", "DENIALS", "TREE", "ERRORS", "DIFF", "QUESTIONS", "STATUS", "REPO",
+  "PROXY LOG", "WATCHDOG LOG", "AGENT LOG", "INITIAL PROMPT", "DENIALS", "TREE", "ERRORS", "DIFF", "QUESTIONS", "STATUS", "REPO",
 ] as const;
 export type PaneMode = (typeof PANE_MODES)[number];
 
+/** modeIndex of the startup pane (AGENT LOG). */
+export const DEFAULT_MODE_INDEX: number = PANE_MODES.indexOf("AGENT LOG");
+
 export const FULL_WIDTH_MODES: Set<PaneMode> = new Set(["DENIALS", "ERRORS", "DIFF", "QUESTIONS", "REPO"]);
 export const TOP_ANCHORED_MODES: Set<PaneMode> = new Set(["DIFF", "ERRORS", "STATUS", "QUESTIONS", "REPO"]);
-const AGENT_SPECIFIC_MODES: Set<PaneMode> = new Set(["AGENT LOG", "INITIAL PROMPT", "DENIALS", "DIFF", "STATUS"]);
+const AGENT_SPECIFIC_MODES: Set<PaneMode> = new Set(["AGENT LOG", "WATCHDOG LOG", "PROXY LOG", "INITIAL PROMPT", "DENIALS", "DIFF", "STATUS"]);
+
+/**
+ * A tail-windowed log pane mode: the file it shows and the RightPaneComponent
+ * fields that hold its loaded window. Each mode has its own fields so the log
+ * modes never show each other's content.
+ */
+interface TailLogSlot {
+  /** File name in the agent's storage dir */
+  fileName: string;
+  contentKey: "agentLogContent" | "watchdogLogContent" | "proxyLogContent";
+  windowKey: "loadedLogWindow" | "loadedWatchdogLogWindow" | "loadedProxyLogWindow";
+  loadingKey: "agentLogLoading" | "watchdogLogLoading" | "proxyLogLoading";
+}
+
+/** Bottom-anchored, word-wrapped log modes that share loadTailLog. */
+export type TailLogMode = "AGENT LOG" | "WATCHDOG LOG" | "PROXY LOG";
+
+const TAIL_LOG_SLOTS: Record<TailLogMode, TailLogSlot> = {
+  "AGENT LOG": {
+    fileName: "agent.log",
+    contentKey: "agentLogContent",
+    windowKey: "loadedLogWindow",
+    loadingKey: "agentLogLoading",
+  },
+  "WATCHDOG LOG": {
+    fileName: "watchdog.log",
+    contentKey: "watchdogLogContent",
+    windowKey: "loadedWatchdogLogWindow",
+    loadingKey: "watchdogLogLoading",
+  },
+  "PROXY LOG": {
+    fileName: "sandbox-proxy.log",
+    contentKey: "proxyLogContent",
+    windowKey: "loadedProxyLogWindow",
+    loadingKey: "proxyLogLoading",
+  },
+};
+
+export function isTailLogMode(mode: PaneMode): mode is TailLogMode {
+  return Object.hasOwn(TAIL_LOG_SLOTS, mode);
+}
 
 /** Escape a string for use in a RegExp */
 function escapeForRegex(s: string): string {
@@ -99,8 +146,10 @@ export function formatAgentRow(
 }
 
 /**
- * Tracks the tail-window of agent.log currently loaded into RightPaneComponent.agentLogContent.
- * Used by loadAgentLog() to skip re-reads when the cached window already covers the requested view.
+ * Tracks the tail-window of a log file currently loaded into RightPaneComponent
+ * (agent.log → agentLogContent, watchdog.log → watchdogLogContent,
+ * sandbox-proxy.log → proxyLogContent).
+ * Used by loadTailLog() to skip re-reads when the cached window already covers the requested view.
  */
 export interface LoadedLogWindow {
   agentId: string;
@@ -108,7 +157,7 @@ export interface LoadedLogWindow {
   fileSize: number;
   /** True if the read started at byte 0 — entire file is in memory, no further reads needed */
   atTop: boolean;
-  /** Number of lines currently held in agentLogContent */
+  /** Number of lines currently held in the matching content field */
   loadedLineCount: number;
   /** displayHeight at the time of the last read (used to detect resize-driven reloads) */
   displayHeight: number;
@@ -138,6 +187,14 @@ export class RightPaneComponent implements Component {
   loadedLogWindow: LoadedLogWindow | null = null;
   /** Guard so concurrent loadAgentLog calls don't stomp on each other */
   agentLogLoading = false;
+  /** WATCHDOG LOG counterparts of agentLogContent / loadedLogWindow / agentLogLoading (watchdog.log) */
+  watchdogLogContent: string[] | null = null;
+  loadedWatchdogLogWindow: LoadedLogWindow | null = null;
+  watchdogLogLoading = false;
+  /** PROXY LOG counterparts of agentLogContent / loadedLogWindow / agentLogLoading (sandbox-proxy.log) */
+  proxyLogContent: string[] | null = null;
+  loadedProxyLogWindow: LoadedLogWindow | null = null;
+  proxyLogLoading = false;
   promptContent: string[] | null = null;
   denialsContent: DenialEntry[] | null = null;
   denialsLoading = false;
@@ -215,6 +272,20 @@ export class RightPaneComponent implements Component {
     this.repoCoordinatorWrapCache.reset();
     this.repoCoordinatorChromeCache = null;
     this.repoCoordinatorStatusLines = [];
+  }
+
+  /** Clear every tail-log mode's content, cached window and loading flag (agent selection changed). */
+  resetTailLogs(): void {
+    for (const slot of Object.values(TAIL_LOG_SLOTS)) {
+      this[slot.contentKey] = null;
+      this[slot.windowKey] = null;
+      this[slot.loadingKey] = false;
+    }
+  }
+
+  /** Drop a tail-log mode's cached window so its next load re-reads (e.g. after a resize). */
+  invalidateTailLogWindow(mode: TailLogMode): void {
+    this[TAIL_LOG_SLOTS[mode].windowKey] = null;
   }
 
   /**
@@ -307,11 +378,15 @@ export class RightPaneComponent implements Component {
 
     switch (this.mode) {
       case "AGENT LOG":
-        this.content = this.agentLogContent
+      case "WATCHDOG LOG":
+      case "PROXY LOG": {
+        const slot = TAIL_LOG_SLOTS[this.mode];
+        this.content = this[slot.contentKey]
           ?? (this.agent
-            ? [`${DIM}Loading agent.log...${RESET}`]
+            ? [`${DIM}Loading ${slot.fileName}...${RESET}`]
             : [`${DIM}No agent selected${RESET}`]);
         break;
+      }
       case "INITIAL PROMPT":
         if (!this.agent) { this.content = [`${DIM}No agent selected${RESET}`]; }
         else if (this.promptContent) { this.content = [`${BOLD}Prompt:${RESET}`, "", ...this.promptContent]; }
@@ -615,15 +690,16 @@ export class RightPaneComponent implements Component {
       start = Math.max(0, this.content.length - available - this.scrollOffset);
     }
     const visible = this.content.slice(start, start + available);
-    if (this.mode === "QUESTIONS" || this.mode === "AGENT LOG" || this.mode === "INITIAL PROMPT" || this.mode === "ERRORS") {
+    if (this.mode === "QUESTIONS" || isTailLogMode(this.mode) || this.mode === "INITIAL PROMPT" || this.mode === "ERRORS") {
       for (const line of visible) {
         if (lines.length >= this.displayHeight) break;
         const isQ = this.mode === "QUESTIONS";
         // QUESTIONS keeps character-wrap (wrapLines): it carries OSC8 hyperlink
-        // handling and a 3-space continuation indent (below). AGENT LOG /
-        // INITIAL PROMPT / ERRORS are agent prose — word-wrap them (break
-        // at spaces, hard-wrap only over-width tokens) so words aren't split
-        // mid-token, matching the team-log / center tmux pane.
+        // handling and a 3-space continuation indent (below). The tail-log
+        // modes (AGENT LOG / WATCHDOG LOG / PROXY LOG) / INITIAL PROMPT /
+        // ERRORS are agent prose — word-wrap them (break at spaces, hard-wrap
+        // only over-width tokens) so words aren't split mid-token, matching
+        // the team-log / center tmux pane.
         const wrapped = isQ ? wrapLines(line, innerWidth - 2) : wordWrapLines(line, innerWidth);
         for (let wi = 0; wi < wrapped.length; wi++) {
           if (lines.length >= this.displayHeight) break;
@@ -750,14 +826,20 @@ export function triggerAsyncLoadIfNeeded(ctx: PaneCtx, forceRefresh = false) {
     loadStatus(ctx, agent, forceRefresh);
   } else if (mode === "DENIALS") {
     loadDenials(ctx, agent, forceRefresh);
+  } else if (mode === "WATCHDOG LOG" || mode === "PROXY LOG") {
+    // Entering the mode, selection changes and every dashboard sync land here;
+    // the stat-based cache in loadTailLog makes repeat calls free until the
+    // log grows (same live-growth path as DENIALS). AGENT LOG is loaded
+    // directly on selection change instead.
+    loadTailLog(ctx, agent, mode);
   }
 }
 
 /**
- * Decide whether the currently-cached AGENT LOG window is still adequate for
+ * Decide whether the currently-cached tail-log window is still adequate for
  * the requested view, or whether a fresh tail-read is required.
  *
- * `currentFileSize` is the live size of agent.log on disk, or null if the
+ * `currentFileSize` is the live size of the log file on disk, or null if the
  * caller could not stat it. When the file has grown since the last read, the
  * cache is invalidated so that newly-appended lines from active agents are
  * picked up.
@@ -791,12 +873,23 @@ function logCacheCovers(
   return requiredCoverage <= loaded.loadedLineCount;
 }
 
-export async function loadAgentLog(ctx: PaneCtx, agent: Agent) {
+/** Load the AGENT LOG tail-window (agent.log) into agentLogContent. */
+export function loadAgentLog(ctx: PaneCtx, agent: Agent): Promise<void> {
+  return loadTailLog(ctx, agent, "AGENT LOG");
+}
+
+/**
+ * Read the tail-window of `mode`'s log file that the right pane needs, or skip
+ * the read when the mode's cached window still covers the view (see
+ * logCacheCovers). Writes only that mode's own slot fields (TAIL_LOG_SLOTS).
+ */
+export async function loadTailLog(ctx: PaneCtx, agent: Agent, mode: TailLogMode) {
+  const slot = TAIL_LOG_SLOTS[mode];
   // Avoid concurrent reads stomping on each other. Set the guard
   // synchronously BEFORE the stat — otherwise two callers can both pass the
   // early-exit before either flips it true, and we pay duplicate I/O.
-  if (ctx.rightPane.agentLogLoading) return;
-  ctx.rightPane.agentLogLoading = true;
+  if (ctx.rightPane[slot.loadingKey]) return;
+  ctx.rightPane[slot.loadingKey] = true;
 
   // Capture the agent id we started with so a stale finally can detect that
   // a newer load owns the flag and decline to clear it.
@@ -809,22 +902,22 @@ export async function loadAgentLog(ctx: PaneCtx, agent: Agent) {
 
     // Stat the file before deciding on cache coverage so growing logs from
     // active agents trigger a re-read instead of being served stale forever.
-    const currentFileSize = await statAgentLogSize(agent);
+    const currentFileSize = await statAgentFileSize(agent, slot.fileName);
     if (ctx.currentAgentId !== startedForAgentId) return;
 
     // Cache hit: the loaded window already covers the visible area for this agent.
-    if (logCacheCovers(ctx.rightPane.loadedLogWindow, agent.id, displayHeight, scrollOffset, bufferRows, currentFileSize)) {
+    if (logCacheCovers(ctx.rightPane[slot.windowKey], agent.id, displayHeight, scrollOffset, bufferRows, currentFileSize)) {
       return;
     }
 
-    const window = await readAgentLogWindow(agent, {
+    const window = await readAgentFileWindow(agent, slot.fileName, {
       rows: displayHeight,
       scrollOffset,
       bufferRows,
     });
     if (ctx.currentAgentId !== startedForAgentId) return;
-    ctx.rightPane.agentLogContent = colorizeLog(window.lines);
-    ctx.rightPane.loadedLogWindow = window.isPlaceholder ? null : {
+    ctx.rightPane[slot.contentKey] = colorizeLog(window.lines);
+    ctx.rightPane[slot.windowKey] = window.isPlaceholder ? null : {
       agentId: agent.id,
       fileSize: window.fileSize,
       atTop: window.atTop,
@@ -838,9 +931,9 @@ export async function loadAgentLog(ctx: PaneCtx, agent: Agent) {
   } finally {
     // Only clear the loading flag if this load is still the active one for
     // the currently-selected agent — otherwise leave it alone so we don't
-    // clobber a newer load's agentLogLoading=true (mirrors loadDenials).
+    // clobber a newer load's loading=true (mirrors loadDenials).
     if (ctx.currentAgentId === startedForAgentId) {
-      ctx.rightPane.agentLogLoading = false;
+      ctx.rightPane[slot.loadingKey] = false;
     }
   }
 }

@@ -2815,6 +2815,62 @@ describe("DashboardComponent right pane and navigation features", () => {
     expect(dashboard.selectedAgent?.id).toBe("agent-b");
     expect(dashboard.currentMode).toBe("AGENT LOG");
   });
+
+  test("a fresh dashboard starts on AGENT LOG (not PANE_MODES[0])", () => {
+    dashboard = makeDashboard();
+    expect(dashboard.currentMode).toBe("AGENT LOG");
+    expect(dashboard.rightPane.mode).toBe("AGENT LOG");
+    setupDashboard();
+    expect(dashboard.currentMode).toBe("AGENT LOG");
+  });
+
+  test("n from AGENT LOG goes to WATCHDOG LOG then PROXY LOG; p from AGENT LOG goes to INITIAL PROMPT", () => {
+    setupDashboard();
+    dashboard.handleInput("n");
+    expect(dashboard.currentMode).toBe("WATCHDOG LOG");
+    dashboard.handleInput("n");
+    expect(dashboard.currentMode).toBe("PROXY LOG");
+    dashboard.handleInput("p");
+    dashboard.handleInput("p");
+    expect(dashboard.currentMode).toBe("AGENT LOG");
+    dashboard.handleInput("p");
+    expect(dashboard.currentMode).toBe("INITIAL PROMPT");
+  });
+
+  test("selecting another agent drops every log mode's content and cached window", () => {
+    dashboard = makeDashboard();
+    const agent1 = makeAgent("agent-a", "/repos/test");
+    const agent2 = makeAgent("agent-b", "/repos/test");
+    const flatList: FlatEntry[] = [
+      makeFlatAgent(agent1, { connector: "├── " }),
+      makeFlatAgent(agent2, { connector: "└── " }),
+    ];
+    dashboard.onUpdate([agent1, agent2], flatList, []);
+    dashboard.jumpToMode("WATCHDOG LOG");
+    const staleWindow = {
+      agentId: "agent-a", fileSize: 1, atTop: true, loadedLineCount: 1,
+      displayHeight: 10, scrollOffset: 0, bufferRows: 20,
+    };
+    const rp = dashboard.rightPane;
+    rp.agentLogContent = ["stale agent.log"];
+    rp.watchdogLogContent = ["stale watchdog.log"];
+    rp.proxyLogContent = ["stale sandbox-proxy.log"];
+    rp.loadedLogWindow = staleWindow;
+    rp.loadedWatchdogLogWindow = staleWindow;
+    rp.loadedProxyLogWindow = staleWindow;
+
+    dashboard.handleInput("j"); // move to agent-b
+    expect(dashboard.selectedAgent?.id).toBe("agent-b");
+    expect(dashboard.currentMode).toBe("WATCHDOG LOG");
+    // The reloads for agent-b are async; synchronously the stale agent-a
+    // content and windows must already be gone.
+    expect(rp.agentLogContent).toBeNull();
+    expect(rp.watchdogLogContent).toBeNull();
+    expect(rp.proxyLogContent).toBeNull();
+    expect(rp.loadedLogWindow).toBeNull();
+    expect(rp.loadedWatchdogLogWindow).toBeNull();
+    expect(rp.loadedProxyLogWindow).toBeNull();
+  });
 });
 
 describe("focus cycling", () => {

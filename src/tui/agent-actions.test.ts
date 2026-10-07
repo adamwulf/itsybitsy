@@ -119,7 +119,8 @@ function makeMockCtx(overrides?: {
   refreshCalls: number[];
   scrollUpCalls: number[];
   scrollDownCalls: number[];
-  loadAgentLogIfNeededCalls: number[];
+  /** Modes passed to loadTailLogIfNeeded, in order. */
+  loadTailLogIfNeededCalls: import("./pane-manager").TailLogMode[];
   /** §17: focus targets passed to focusManager.setFocus, in order. */
   setFocusCalls: import("./focus").FocusTarget[];
   /** §17: teamSend invocations the handler made. */
@@ -137,7 +138,7 @@ function makeMockCtx(overrides?: {
   const refreshCalls: number[] = [];
   const scrollUpCalls: number[] = [];
   const scrollDownCalls: number[] = [];
-  const loadAgentLogIfNeededCalls: number[] = [];
+  const loadTailLogIfNeededCalls: import("./pane-manager").TailLogMode[] = [];
   const pendingActions: Promise<void>[] = [];
   const setFocusCalls: import("./focus").FocusTarget[] = [];
   const teamSendCalls: Array<{ teamName: string; members: Agent[]; message: string; fromAgent: string | undefined }> = [];
@@ -246,15 +247,15 @@ function makeMockCtx(overrides?: {
     },
     syncSelectedAgent: () => {},
     jumpToMode: () => {},
-    loadAgentLogIfNeeded: () => {
-      loadAgentLogIfNeededCalls.push(1);
+    loadTailLogIfNeeded: (mode) => {
+      loadTailLogIfNeededCalls.push(mode);
     },
     setQuestionsFocused: () => {},
     healthReport: undefined,
     getSnapshotPaneWidth: () => leftWidth,
   };
   const flushActions = async () => { await Promise.all(pendingActions); };
-  return { ctx, dialogs, notices, refreshCalls, scrollUpCalls, scrollDownCalls, loadAgentLogIfNeededCalls, setFocusCalls, teamSendCalls, setActiveSelectionSourceCalls, setSidebarModeCalls, flushActions };
+  return { ctx, dialogs, notices, refreshCalls, scrollUpCalls, scrollDownCalls, loadTailLogIfNeededCalls, setFocusCalls, teamSendCalls, setActiveSelectionSourceCalls, setSidebarModeCalls, flushActions };
 }
 
 // Per-test isolated repo root + coordinator home. sendMessage now writes a
@@ -999,22 +1000,25 @@ describe("handleScrollUp / handleScrollDown", () => {
     expect(scrollDownCalls).toHaveLength(1);
   });
 
-  test("scrollUp triggers loadAgentLogIfNeeded when in AGENT LOG mode", () => {
-    const { ctx, loadAgentLogIfNeededCalls } = makeMockCtx({ mode: "AGENT LOG" });
-    handleScrollUp(ctx);
-    expect(loadAgentLogIfNeededCalls).toHaveLength(1);
-  });
+  for (const mode of ["AGENT LOG", "WATCHDOG LOG", "PROXY LOG"] as const) {
+    test(`scrollUp triggers loadTailLogIfNeeded("${mode}") when in ${mode} mode`, () => {
+      const { ctx, loadTailLogIfNeededCalls } = makeMockCtx({ mode });
+      handleScrollUp(ctx);
+      expect(loadTailLogIfNeededCalls).toEqual([mode]);
+    });
 
-  test("scrollDown triggers loadAgentLogIfNeeded when in AGENT LOG mode", () => {
-    const { ctx, loadAgentLogIfNeededCalls } = makeMockCtx({ mode: "AGENT LOG" });
+    test(`scrollDown triggers loadTailLogIfNeeded("${mode}") when in ${mode} mode`, () => {
+      const { ctx, loadTailLogIfNeededCalls } = makeMockCtx({ mode });
+      handleScrollDown(ctx);
+      expect(loadTailLogIfNeededCalls).toEqual([mode]);
+    });
+  }
+
+  test("scrollUp/scrollDown do NOT trigger loadTailLogIfNeeded outside the tail-log modes", () => {
+    const { ctx, loadTailLogIfNeededCalls } = makeMockCtx({ mode: "DENIALS" });
+    handleScrollUp(ctx);
     handleScrollDown(ctx);
-    expect(loadAgentLogIfNeededCalls).toHaveLength(1);
-  });
-
-  test("scrollUp does NOT trigger loadAgentLogIfNeeded when not in AGENT LOG mode", () => {
-    const { ctx, loadAgentLogIfNeededCalls } = makeMockCtx({ mode: "DENIALS" });
-    handleScrollUp(ctx);
-    expect(loadAgentLogIfNeededCalls).toHaveLength(0);
+    expect(loadTailLogIfNeededCalls).toHaveLength(0);
   });
 });
 

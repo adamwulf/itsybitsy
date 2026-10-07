@@ -66,11 +66,11 @@ import {
 } from "./dialog-handler";
 import {
   RightPaneComponent, colorizeDiff, colorizeLog,
-  PANE_MODES, FULL_WIDTH_MODES,
+  PANE_MODES, FULL_WIDTH_MODES, DEFAULT_MODE_INDEX,
   cyclePaneMode, jumpToMode, triggerAsyncLoadIfNeeded,
-  loadAgentLog, loadAgentPrompt,
+  loadAgentLog, loadTailLog, isTailLogMode, loadAgentPrompt,
 } from "./pane-manager";
-import type { PaneMode } from "./pane-manager";
+import type { PaneMode, TailLogMode } from "./pane-manager";
 import * as agentActions from "./agent-actions";
 import { RESET, BOLD, DIM, RED, GREEN, YELLOW, DIM_GRAY, REVERSE } from "./colors";
 import { FocusManager } from "./focus";
@@ -680,8 +680,8 @@ export class DashboardComponent implements Component {
   infoPanel: InfoPanelComponent;
   private statusBar: StatusBarComponent;
   tui: TUI | null = null;
-  modeIndex = 0;
-  savedModeIndex = 0;
+  modeIndex = DEFAULT_MODE_INDEX;
+  savedModeIndex = DEFAULT_MODE_INDEX;
   private tmuxPoller: TmuxPoller;
   coordinatorPane: TmuxPaneComponent;
   private coordinatorPoller: TmuxPoller;
@@ -1614,11 +1614,11 @@ export class DashboardComponent implements Component {
     this.updatePollerVisibility();
   }
 
-  /** Reload AGENT LOG tail-window (or skip via cache) — called from scroll/resize handlers. */
-  loadAgentLogIfNeeded() {
+  /** Reload a tail-log mode's window (or skip via cache) — called from scroll/resize handlers. */
+  loadTailLogIfNeeded(mode: TailLogMode) {
     const agent = this.agentTree.selectedAgent;
     if (!agent) return;
-    void loadAgentLog(this, agent);
+    void loadTailLog(this, agent, mode);
   }
 
   private cyclePaneMode(delta: number) {
@@ -1635,6 +1635,8 @@ export class DashboardComponent implements Component {
     type Command = { label: string; action: () => void };
     const commands: Command[] = [
       { label: "AGENT LOG — show agent log", action: () => this.jumpToMode("AGENT LOG") },
+      { label: "WATCHDOG LOG — show watchdog log", action: () => this.jumpToMode("WATCHDOG LOG") },
+      { label: "PROXY LOG — show sandbox proxy log", action: () => this.jumpToMode("PROXY LOG") },
       { label: "INITIAL PROMPT — show initial prompt", action: () => this.jumpToMode("INITIAL PROMPT") },
       { label: "DENIALS — show tool denials", action: () => this.jumpToMode("DENIALS") },
       { label: "TREE — show full agent tree", action: () => this.jumpToMode("TREE") },
@@ -2003,9 +2005,7 @@ export class DashboardComponent implements Component {
       this.tmuxPane.resetForAgent();
       this.inputField.switchAgent(newId);
       this.coordinatorInputField.switchAgent(isCoordinator ? "__coordinator__" : null);
-      this.rightPane.agentLogContent = null;
-      this.rightPane.loadedLogWindow = null;
-      this.rightPane.agentLogLoading = false;
+      this.rightPane.resetTailLogs();
       this.rightPane.promptContent = null;
       this.rightPane.denialsContent = null;
       this.rightPane.loadedDenialsLog = null;
@@ -3818,14 +3818,16 @@ export async function launchDashboard(): Promise<void> {
   process.stdout.on("resize", () => {
     // displayHeight is recomputed inside render() — at the moment the resize
     // event fires it still holds the pre-resize value, so a cache check now
-    // would falsely hit. Drop the cached window so loadAgentLogIfNeeded is
-    // forced to re-read once render has updated displayHeight; defer the
-    // call via setImmediate so it runs after the next render tick.
-    if (dashboard.rightPane.mode === "AGENT LOG") {
-      dashboard.rightPane.loadedLogWindow = null;
+    // would falsely hit. Drop the active tail-log mode's cached window so
+    // loadTailLogIfNeeded is forced to re-read once render has updated
+    // displayHeight; defer the call via setImmediate so it runs after the next
+    // render tick.
+    const logMode = dashboard.rightPane.mode;
+    if (isTailLogMode(logMode)) {
+      dashboard.rightPane.invalidateTailLogWindow(logMode);
       setImmediate(() => {
-        if (dashboard.rightPane.mode === "AGENT LOG") {
-          dashboard.loadAgentLogIfNeeded();
+        if (dashboard.rightPane.mode === logMode) {
+          dashboard.loadTailLogIfNeeded(logMode);
         }
       });
     }

@@ -72,6 +72,10 @@ import {
   _isPidAliveForTests,
   terminateProcess,
   sleepMsCtx,
+  readAgentFileWindow,
+  statAgentFileSize,
+  readAgentLogWindow,
+  statAgentLogSize,
 } from "./agents";
 import type { TransientState, AgentOperation } from "./agents";
 import { stripAnsi } from "./parse-state";
@@ -1389,6 +1393,76 @@ describe("readAgentMeta", () => {
     const { meta } = await readAgentMeta(tempDir);
     expect(meta).not.toBeNull();
     expect(meta!.nickname).toBeUndefined();
+  });
+});
+
+describe("readAgentFileWindow / statAgentFileSize (per-file log tail reads)", () => {
+  let tempDir: string;
+  let agentDir: string;
+  let agent: Agent;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "itsybitsy-filewindow-test-"));
+    agentDir = join(tempDir, ".ittybitty", "agents", "agent-fw");
+    await mkdir(agentDir, { recursive: true });
+    agent = makeAgent({ id: "agent-fw", repoPath: tempDir });
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  for (const fileName of ["watchdog.log", "sandbox-proxy.log"]) {
+    test(`missing ${fileName}: placeholder names the file, size is null`, async () => {
+      const win = await readAgentFileWindow(agent, fileName, { rows: 20, scrollOffset: 0 });
+      expect(win.lines).toEqual([`No ${fileName} found`]);
+      expect(win.isPlaceholder).toBe(true);
+      expect(await statAgentFileSize(agent, fileName)).toBeNull();
+    });
+
+    test(`empty ${fileName}: placeholder names the file`, async () => {
+      await Bun.write(join(agentDir, fileName), "");
+      const win = await readAgentFileWindow(agent, fileName, { rows: 20, scrollOffset: 0 });
+      expect(win.lines).toEqual([`${fileName} is empty`]);
+      expect(win.isPlaceholder).toBe(true);
+      expect(await statAgentFileSize(agent, fileName)).toBe(0);
+    });
+
+    test(`large ${fileName}: reads only a tail window of whole lines`, async () => {
+      const filler = "y".repeat(240);
+      const lines = Array.from({ length: 3000 }, (_, i) => `entry${String(i).padStart(4, "0")}-${filler}`);
+      const text = lines.join("\n");
+      await Bun.write(join(agentDir, fileName), text);
+      const win = await readAgentFileWindow(agent, fileName, { rows: 10, scrollOffset: 0 });
+      expect(win.isPlaceholder).toBe(false);
+      expect(win.atTop).toBe(false);
+      expect(win.fileSize).toBe(text.length);
+      expect(win.lines.length).toBeLessThan(lines.length);
+      // Newest line last; every line whole (the partial first line is dropped).
+      expect(win.lines[win.lines.length - 1]).toBe(lines[lines.length - 1]!);
+      for (const line of win.lines) expect(lines).toContain(line);
+      expect(await statAgentFileSize(agent, fileName)).toBe(text.length);
+    });
+  }
+
+  test("reads the named file only — agent.log and watchdog.log stay separate", async () => {
+    await Bun.write(join(agentDir, "agent.log"), "agent line");
+    await Bun.write(join(agentDir, "watchdog.log"), "watchdog line\nsecond");
+    const wd = await readAgentFileWindow(agent, "watchdog.log", { rows: 20, scrollOffset: 0 });
+    expect(wd.lines).toEqual(["watchdog line", "second"]);
+    expect(wd.atTop).toBe(true);
+    const px = await readAgentFileWindow(agent, "sandbox-proxy.log", { rows: 20, scrollOffset: 0 });
+    expect(px.lines).toEqual(["No sandbox-proxy.log found"]);
+  });
+
+  test("agent.log wrappers keep their signatures and agent.log placeholders", async () => {
+    const missing = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    expect(missing.lines).toEqual(["No agent.log found"]);
+    expect(await statAgentLogSize(agent)).toBeNull();
+    await Bun.write(join(agentDir, "agent.log"), "a1\na2");
+    const win = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    expect(win.lines).toEqual(["a1", "a2"]);
+    expect(await statAgentLogSize(agent)).toBe("a1\na2".length);
   });
 });
 

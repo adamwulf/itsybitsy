@@ -19,8 +19,6 @@ done
 ${mode === "startup-failure" ? "exit 27" : ""}
 ${mode === "slow-ready" ? `: > ${shellQuote(join(dir, "collector-entered"))}; sleep 0.5` : ""}
 : > "$dir/ready"
-while [ ! -f "$dir/root-request" ] && [ ! -s "$dir/stop" ]; do sleep 0.01; done
-: > "$dir/root-ready"
 ${mode === "runtime-failure" ? "sleep 0.15; exit 31" : ""}
 ${mode === "collector-sigkill" ? 'sleep 0.15; kill -KILL "$$"' : ""}
 while [ ! -s "$dir/stop" ]; do sleep 0.01; done
@@ -113,15 +111,15 @@ test("switched off, the helpers add no collector block and keep the exact sandbo
   expect(sandboxDenialScriptPreamble("/tmp/test", "/tmp/home", false)).toBe("");
   const prefix = "'/usr/bin/sandbox-exec' -f '/tmp/test/sandbox.sb' -D 'AGENTDIR=/tmp/test'";
   expect(sandboxDenialExecPrefix(prefix, false)).toBe(prefix);
-  // On, the same prefix runs behind the registration gate, unchanged at its end.
-  expect(sandboxDenialExecPrefix(prefix, true).endsWith(` sandbox-log-gate ${prefix}`)).toBe(true);
+  // On, the same prefix runs behind the fd 9 gate, unchanged at its end; the
+  // gate waits for nothing and names no collector file.
+  const gated = sandboxDenialExecPrefix(prefix, true);
+  expect(gated).toBe(`/bin/sh -c 'exec 9>&-; exec "$@"' sandbox-log-gate ${prefix}`);
 });
 
-test("gate preserves arguments and wrapper exit status when collection is unavailable", async () => {
+test("gate preserves arguments and wrapper exit status", async () => {
   const prefix = sandboxDenialExecPrefix("/bin/sh -c 'test \"$1\" = \"a b\" && exit 23' wrapper", true);
-  const child = Bun.spawn(["/bin/sh", "-c", `${prefix} 'a b'`], {
-    env: { ...process.env, IB_SANDBOX_LOG_DIR: "" }, stdout: "pipe", stderr: "pipe",
-  });
+  const child = Bun.spawn(["/bin/sh", "-c", `${prefix} 'a b'`], { stdout: "pipe", stderr: "pipe" });
   expect(await child.exited).toBe(23);
 });
 

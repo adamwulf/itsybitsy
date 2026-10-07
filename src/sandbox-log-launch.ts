@@ -5,12 +5,12 @@ import { sandboxLogParent } from "./sandbox-log-paths";
 /**
  * The kernel denial collector is ON, through ONE shared per-user collector: each
  * sandboxed spawn/resume runs `ib sandbox-collector attach`, which registers the
- * launch with `ib sandbox-collector serve` and its single `log stream --level
- * default` (docs/SANDBOX-SHARED-COLLECTOR.md). It copies `[Sandbox]` lines into
- * agent.log for the DENIALS pane. It was off for a while because the earlier
- * design ran one `log stream --level debug` per launch: with 10 agents that cost
- * about 3-4 cores (each `log` ~17-26% plus diagnosticd ~150%). Seatbelt
- * enforcement and the proxy do not depend on it.
+ * launch and its profile's attribution tag with `ib sandbox-collector serve` and
+ * its single `log stream --level default` (docs/SANDBOX-SHARED-COLLECTOR.md). It
+ * copies `[Sandbox]` lines into agent.log for the DENIALS pane. It was off for a
+ * while because the earlier design ran one `log stream --level debug` per
+ * launch: with 10 agents that cost about 3-4 cores (each `log` ~17-26% plus
+ * diagnosticd ~150%). Seatbelt enforcement and the proxy do not depend on it.
  *
  * To turn it off, set this to false: both helpers below then add nothing (no
  * collector, no readiness handshake, the plain sandbox-exec prefix) to new spawns
@@ -39,8 +39,6 @@ else
     if [[ -n "$IB_SANDBOX_LOG_DIR" ]]; then rmdir "$IB_SANDBOX_LOG_DIR" 2>/dev/null; fi
     IB_SANDBOX_LOG_DIR=""
 fi
-export IB_SANDBOX_LOG_DIR
-export IB_SANDBOX_LOG_AGENT_LOG="$AGENT_LOG"
 cleanup_sandbox_log() {
     if [[ "$IB_SANDBOX_LOG_STOP_OPEN" == 1 ]]; then
         printf 'stop\\n' >&9
@@ -73,30 +71,16 @@ fi
 if [[ -z "$IB_SANDBOX_LOG_DIR" || ! -f "$IB_SANDBOX_LOG_DIR/ready" ]]; then
     printf '[%s] [SandboxCollector] ERROR: collector unavailable before CLI launch; kernel enforcement remains required\\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$AGENT_LOG"
     cleanup_sandbox_log
-    IB_SANDBOX_LOG_DIR=""
 fi
 `;
 }
 
-/** Register a gated process before exec preserves $! across sandbox-exec and CLI.
- * The collector is diagnostic: a failed/timed-out gate still execs the exact
- * required Seatbelt wrapper, never the CLI alone.
+/** The gate in front of the CLI closes fd 9 (this launch's `stop` file) so the
+ * sandboxed CLI cannot end its own collection, then execs the exact required
+ * Seatbelt wrapper, never the CLI alone. Attribution needs nothing from it: the
+ * profile's tag marks every denial of the CLI and all its descendants.
  */
 export function sandboxDenialExecPrefix(sandboxPrefix: string, enabled = SANDBOX_DENIAL_COLLECTOR_ENABLED): string {
   if (!enabled) return sandboxPrefix;
-  const gate = `if [ -n "$IB_SANDBOX_LOG_DIR" ] && [ -d "$IB_SANDBOX_LOG_DIR" ]; then
-    printf '%s\\n' "$$" > "$IB_SANDBOX_LOG_DIR/root-request.tmp" && mv -f "$IB_SANDBOX_LOG_DIR/root-request.tmp" "$IB_SANDBOX_LOG_DIR/root-request";
-    n=0;
-    while [ ! -f "$IB_SANDBOX_LOG_DIR/root-ready" ] && [ -d "$IB_SANDBOX_LOG_DIR" ] && [ "$n" -lt 100 ]; do
-        sleep 0.02;
-        n=$((n + 1));
-    done;
-    if [ ! -f "$IB_SANDBOX_LOG_DIR/root-ready" ]; then
-        printf '[%s] [SandboxCollector] ERROR: CLI identity registration unavailable; kernel enforcement remains required\\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$IB_SANDBOX_LOG_AGENT_LOG";
-    fi;
-fi;
-exec 9>&-;
-unset IB_SANDBOX_LOG_DIR IB_SANDBOX_LOG_AGENT_LOG IB_SANDBOX_LOG_STOP_OPEN;
-exec "$@"`.replace(/\n\s*/g, " ");
-  return `/bin/sh -c ${shellQuote(gate)} sandbox-log-gate ${sandboxPrefix}`;
+  return `/bin/sh -c ${shellQuote('exec 9>&-; exec "$@"')} sandbox-log-gate ${sandboxPrefix}`;
 }

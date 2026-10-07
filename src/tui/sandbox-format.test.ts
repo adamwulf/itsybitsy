@@ -4,7 +4,14 @@ import { CYAN, GREEN, RESET, YELLOW } from "./colors";
 import { formatSandboxDisplay } from "./sandbox-format";
 import { colorizeLog } from "./pane-manager";
 
-const details = ' pid=231 birth=1788734201:288565 target="/Users/adamwulf/Developer/bun/itsybitsy/ib" launch=sandbox-log.example boot=4b6eeaea-892f-42ef-9b91-9c5a90948f32 mach=386203056017';
+const details = ' pid=231 target="/Users/adamwulf/Developer/bun/itsybitsy/ib" launch=sandbox-log.example boot=4b6eeaea-892f-42ef-9b91-9c5a90948f32 mach=386203056017';
+
+test("an OS-coalesced record keeps its duplicate count; an older record with birth= still compacts", () => {
+  const coalesced = formatSandboxDisplay(`[Sandbox] file-read-data process="bash"${details} duplicates=29`);
+  expect(stripAnsi(coalesced)).toBe('[Sandbox] file-read process="bash" path="/Users/adamwulf/Developer/bun/itsybitsy/ib" duplicates=29');
+  const older = formatSandboxDisplay(`[Sandbox] file-read-data process="ib" pid=231 birth=1788734201:288565${details.slice(" pid=231".length)}`);
+  expect(stripAnsi(older)).toBe('[Sandbox] file-read process="ib" path="/Users/adamwulf/Developer/bun/itsybitsy/ib"');
+});
 
 test("file denials display compact categories and colored quoted values", () => {
   for (const [operation, kind] of [

@@ -1283,7 +1283,7 @@ function containsInternalIbInvocation(command: string): boolean {
     const executable = stripBashSurroundingQuotes(tokens[i]!);
     if (basename(executable) !== "ib") continue;
     const verb = stripBashSurroundingQuotes(tokens[i + 1]!);
-    if (verb === "hooks" || /^(?:hook-check-path|hook-status|hook-permission-denied|hook-mark-running|write-pid|write-proxy-pid|sandbox-log-watch|sandbox-log-stream|sandbox-proxy|sandbox-proxy-launch)$/.test(verb)) {
+    if (verb === "hooks" || /^(?:hook-check-path|hook-status|hook-permission-denied|hook-mark-running|write-pid|write-proxy-pid|sandbox-collector|sandbox-log-stream|sandbox-proxy|sandbox-proxy-launch)$/.test(verb)) {
       return true;
     }
     if (verb === "sandbox") {

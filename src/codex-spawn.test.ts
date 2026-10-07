@@ -76,7 +76,8 @@ describe("buildCodexStartContent — launch line", () => {
     const content = buildCodexStartContent({ ...baseInput(), fugu,
       sandboxScriptPreamble: SANDBOX_PREAMBLE + sandboxDenialScriptPreamble("/tmp/test", undefined, true),
       sandboxExecPrefix: sandboxDenialExecPrefix(SANDBOX_PREFIX, true) });
-    expect(content.indexOf("ib sandbox-log-watch")).toBeLessThan(content.indexOf("setsid /bin/sh -c"));
+    expect(content.indexOf("ib sandbox-collector attach")).toBeGreaterThan(-1);
+    expect(content.indexOf("ib sandbox-collector attach")).toBeLessThan(content.indexOf("setsid /bin/sh -c"));
     expect(content.match(/sandbox-log-gate sandbox-exec[^\n]* codex -m/g)?.length).toBe(2);
     expect(content).toContain("trap 'cleanup_sandbox_log; cleanup_sandbox_proxy' EXIT");
   });
@@ -105,7 +106,7 @@ describe("buildCodexStartContent — launch line", () => {
     expect(content).toContain("hooks.PreToolUse");
     expect(content).not.toContain("sandbox-exec");
     expect(content).not.toContain("sandbox-proxy-launch");
-    expect(content).not.toContain("sandbox-log-watch");
+    expect(content).not.toContain("sandbox-collector");
     expect(content).not.toContain("export http_proxy=");
   });
 
@@ -394,7 +395,8 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     const content = buildCodexResumeContent({ ...baseInput(), fugu,
       sandboxScriptPreamble: SANDBOX_PREAMBLE + sandboxDenialScriptPreamble("/tmp/test", undefined, true),
       sandboxExecPrefix: sandboxDenialExecPrefix(SANDBOX_PREFIX, true) });
-    expect(content.indexOf("ib sandbox-log-watch")).toBeLessThan(content.indexOf("setsid /bin/sh -c"));
+    expect(content.indexOf("ib sandbox-collector attach")).toBeGreaterThan(-1);
+    expect(content.indexOf("ib sandbox-collector attach")).toBeLessThan(content.indexOf("setsid /bin/sh -c"));
     expect(content.match(/sandbox-log-gate sandbox-exec[^\n]* codex resume/g)?.length).toBe(2);
   });
 
@@ -422,7 +424,7 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     expect(content).toContain("hooks.PreToolUse");
     expect(content).not.toContain("sandbox-exec");
     expect(content).not.toContain("sandbox-proxy-launch");
-    expect(content).not.toContain("sandbox-log-watch");
+    expect(content).not.toContain("sandbox-collector");
     expect(content).not.toContain("export http_proxy=");
   });
 

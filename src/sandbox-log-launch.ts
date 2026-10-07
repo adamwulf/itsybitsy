@@ -4,9 +4,12 @@ import { sandboxLogParent } from "./sandbox-log-paths";
 
 /**
  * The kernel denial collector is OFF for now. Each sandboxed spawn/resume started
- * its own `log stream --level debug`; with 10 agents that cost about 3-4 cores
- * (each `log` ~17-26% plus diagnosticd ~150%), only to copy `[Sandbox]` lines into
- * agent.log for the DENIALS pane. Seatbelt enforcement and the proxy do not depend
+ * its own `log stream`, then at `--level debug`; with 10 agents that cost about
+ * 3-4 cores (each `log` ~17-26% plus diagnosticd ~150%), only to copy `[Sandbox]`
+ * lines into agent.log for the DENIALS pane. The stream now runs at
+ * `--level default` (~1.75% each, `sandboxLogStreamArgv`), and launches now
+ * attach to ONE shared collector and stream (`ib sandbox-collector`, docs/
+ * SANDBOX-SHARED-COLLECTOR.md). Seatbelt enforcement and the proxy do not depend
  * on it. While off, both helpers below add nothing: no collector, no readiness
  * handshake, the plain sandbox-exec prefix. Set to true to collect again on new
  * spawns and resumes.
@@ -18,8 +21,8 @@ export function sandboxDenialScriptPreamble(agentDir: string, home?: string, ena
   if (!enabled) return "";
   const parent = sandboxLogParent(agentDir, home);
   return `
-# This launch owns its collector outside Seatbelt, independent of watch/watchdog.
-# Each invocation allocates new artifacts, including when the script is reused.
+# This launch attaches to the shared collector outside Seatbelt, independent of
+# watch/watchdog. Each invocation allocates new artifacts, even on script reuse.
 trap '' HUP
 IB_SANDBOX_LOG_DIR=""
 IB_SANDBOX_LOG_STOP_OPEN=0
@@ -46,7 +49,7 @@ trap 'cleanup_sandbox_log; cleanup_sandbox_proxy' EXIT
 if [[ -n "$IB_SANDBOX_LOG_DIR" ]]; then
     (
         trap '' HUP
-        ib sandbox-log-watch --dir "$IB_SANDBOX_LOG_DIR" --owner "$$" --agent-log "$AGENT_LOG" </dev/null 9>&-
+        ib sandbox-collector attach --dir "$IB_SANDBOX_LOG_DIR" --owner "$$" --agent-log "$AGENT_LOG" </dev/null 9>&-
         collector_exit=$?
         if [[ "$collector_exit" -ne 0 ]]; then
             printf '[%s] [SandboxCollector] ERROR: launch=%s collector exited %s; kernel enforcement remains required\\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "\${IB_SANDBOX_LOG_DIR##*/}" "$collector_exit" >> "$AGENT_LOG"

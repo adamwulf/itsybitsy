@@ -3955,7 +3955,7 @@ describe("resumeAgent (native)", () => {
       if (result.ok) {
         expect(result.stdout).toContain("Reset coordinator");
         const start = await Bun.file(join(coordDir, "start.sh")).text();
-        expect(start).not.toContain("ib sandbox-log-watch");
+        expect(start).not.toContain("ib sandbox-collector");
         expect(start).toContain("/usr/bin/sandbox-exec");
       } else {
         expect(result.stderr).toContain("respawn");
@@ -6465,7 +6465,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const meta = await Bun.file(join(agentsDir, "sandbox-disabled", "meta.json")).json();
     expect(start).not.toContain("sandbox-exec");
     expect(start).not.toContain("sandbox-proxy-launch");
-    expect(start).not.toContain("sandbox-log-watch");
+    expect(start).not.toContain("sandbox-collector");
     expect(start).not.toContain("export http_proxy=");
     expect(start).not.toContain("--dangerously-skip-permissions");
     expect(start).not.toContain("--permission-mode");
@@ -6718,7 +6718,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(meta.sandbox.enabled).toBe(true);
     expect(start).toContain("sandbox-exec");
     expect(start).toContain("sandbox-proxy-launch");
-    expect(start).not.toContain("sandbox-log-watch");
+    expect(start).not.toContain("sandbox-collector");
   });
 
   test("resume refuses legacy enabled sandbox metadata with no paths block", async () => {
@@ -6785,7 +6785,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     expect(resume).not.toContain("sandbox-exec");
     expect(resume).not.toContain("sandbox-proxy-launch");
-    expect(resume).not.toContain("sandbox-log-watch");
+    expect(resume).not.toContain("sandbox-collector");
     expect(resume).not.toContain("--dangerously-skip-permissions");
     expect(spawnCalls.some((cmd) => cmd[0] === "/usr/bin/sandbox-exec")).toBe(false);
     expect(spawnCalls.some((cmd) => cmd[0] === "which" && cmd[1] === "sandbox-exec")).toBe(false);
@@ -6913,7 +6913,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(start).toContain("hooks.PreToolUse");
     expect(start).not.toContain("sandbox-exec");
     expect(start).not.toContain("sandbox-proxy-launch");
-    expect(start).not.toContain("sandbox-log-watch");
+    expect(start).not.toContain("sandbox-collector");
     expect(spawnCalls.some((cmd) => cmd[0] === "which" && cmd[1] === "sandbox-exec")).toBe(false);
   });
 
@@ -7241,7 +7241,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       expect(script).toContain("sandbox-proxy-launch");
       expect(script).toContain("trap cleanup_sandbox_proxy EXIT");
       // No collector, no readiness handshake, no launch gate.
-      for (const piece of ["sandbox-log-watch", "sandbox-log-gate", "IB_SANDBOX_LOG", "root-request", "root-ready", "collector_wait", "cleanup_sandbox_log"]) {
+      for (const piece of ["sandbox-collector", "sandbox-log-gate", "IB_SANDBOX_LOG", "root-request", "root-ready", "collector_wait", "cleanup_sandbox_log"]) {
         expect(script).not.toContain(piece);
       }
     }
@@ -7354,7 +7354,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(text).toContain("The itsybitsy kernel sandbox is OFF");
     expect(resume).not.toContain("sandbox-exec");
     expect(resume).not.toContain("sandbox-proxy-launch");
-    expect(resume).not.toContain("sandbox-log-watch");
+    expect(resume).not.toContain("sandbox-collector");
     expect(resume).toContain("-a never -s workspace-write --dangerously-bypass-hook-trust");
     expect(resume).not.toContain("-s danger-full-access");
     expect(resume).toContain("hooks.PreToolUse");
@@ -7413,7 +7413,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(refreshedMeta.sandbox_proxy_port).toBe(43202);
     expect(resume).toContain("sandbox-exec");
     expect(resume).toContain("sandbox-proxy-launch");
-    expect(resume).not.toContain("sandbox-log-watch");
+    expect(resume).not.toContain("sandbox-collector");
     expect(resume).toContain("--dangerously-skip-permissions");
     expect(resume).not.toContain("--permission-mode");
     expect(resumeCalls.some((cmd) => cmd[0] === "/usr/bin/sandbox-exec")).toBe(true);
@@ -7458,7 +7458,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     expect(resume).not.toContain("sandbox-exec");
     expect(resume).not.toContain("sandbox-proxy-launch");
-    expect(resume).not.toContain("sandbox-log-watch");
+    expect(resume).not.toContain("sandbox-collector");
     expect(resume).not.toContain("--dangerously-skip-permissions");
     expect(resume).not.toContain("--permission-mode");
     expect(await Bun.file(settingsPath).text()).toBe(settingsBefore);
@@ -7521,7 +7521,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(start).toContain("agy --dangerously-skip-permissions --mode=accept-edits --model 'gemini-3.7-flash-low'");
     expect(start).not.toContain("sandbox-exec");
     expect(start).not.toContain("sandbox-proxy-launch");
-    expect(start).not.toContain("sandbox-log-watch");
+    expect(start).not.toContain("sandbox-collector");
     expect(hooks).toContain("agy-pre-tool-use");
     expect(spawnCalls.some((cmd) => cmd[0] === "which" && cmd[1] === "sandbox-exec")).toBe(false);
   });
@@ -10213,7 +10213,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const result = await newAgent(coordRepo, "start", { type: "coordinator", _cwd: coordRepo });
     expect(result.ok).toBe(true);
     const coordinatorStart = await Bun.file(join(coordRepo, ".ittybitty", "agents", "myrepo", "start.sh")).text();
-    expect(coordinatorStart).not.toContain("ib sandbox-log-watch");
+    expect(coordinatorStart).not.toContain("ib sandbox-collector");
     expect(coordinatorStart).not.toContain("sandbox-log-gate");
     expect(coordinatorStart.match(/exec '\\''\/usr\/bin\/sandbox-exec'\\'' -f/g)?.length).toBe(2);
 

@@ -110,6 +110,23 @@ collector observes its own unique `logger` marker in the live unified-log stream
 before releasing a CLI registration gate. The gate then execs the original
 mandatory `sandbox-exec` command, retaining the PID used by lifecycle code.
 
+The stream is `/usr/bin/log stream --style ndjson --level default` (argv built
+by `sandboxLogStreamArgv` in `src/sandbox-log-stream.ts`). Kernel `Sandbox.kext`
+denials are Error-level events and the `logger` marker is a Default-level event,
+so both stream at `--level default`. Until 2026-10-06 the stream used
+`--level debug`, which also pulled every Info and Debug event through
+`diagnosticd`: one stream measured 15.0% of a core, against 1.75% at
+`--level default`. Live evidence for this change is in
+`docs/sandbox-denial-probe-evidence.md` §13.
+
+**Update (2026-10-06):** collection is currently off
+(`SANDBOX_DENIAL_COLLECTOR_ENABLED = false`), and the per-launch
+`ib sandbox-log-watch` described here is replaced by ONE shared per-user
+collector (`ib sandbox-collector serve`) that every launch registers with through
+`ib sandbox-collector attach`, with a flock-based lifecycle. Design, trust model
+and live evidence: `docs/SANDBOX-SHARED-COLLECTOR.md`. The attribution rules
+below are unchanged.
+
 Attribution uses proc_pidinfo birth identity and independently observed descendant ancestry, with mach_continuous_time observations bracketing each report timestamp. A new parent-child edge requires the same parent PID/birth identity on both sides of the child read; a reused or unavailable parent drops that edge. The collector never extends an observed interval backwards to birth or forwards to estimated exit. Unknown or previously unobserved reparented children, events outside observed intervals, ambiguous reports, and OS duplicate summaries are omitted. Empty live-stream bootUUID uses the independently obtained running boot identity; persisted or replayed records are not consumed. History is capped at 4,096 instances and 30 seconds, pending reports at 512 entries and 500 milliseconds, with 20 ms polling.
 
 Verified reports append `[Sandbox]` entries with the original timestamp,
@@ -293,7 +310,8 @@ command. On an authorized macOS host, run:
 bun scripts/probe-sandbox-denials.ts --run
 ```
 
-The probe starts an independent `log stream`, then exercises the allow-default
+The probe starts an independent `log stream` (the production argv from
+`sandboxLogStreamArgv`, so `--level default`), then exercises the allow-default
 capability check, generated-profile boot, immediate denied read, and short-lived
 read/write subprocesses. It retains raw NDJSON, stderr, command arguments,
 timestamps and observed PIDs in the printed temporary directory. Each captured

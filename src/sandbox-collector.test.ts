@@ -391,10 +391,13 @@ darwinTest("the daemon loop runs once a second; readiness comes from the pump, n
     emitMarker: marker => { emitted.push({ at: performance.now(), marker }); } });
   cleanups.push(async () => { await writeFile(paths.stop, "stop\n").catch(() => {}); await served; });
 
-  // A's markers never come back: one per pass, then the 3 s deadline fails it.
+  // A's markers never come back: one per pass, then the 3 s deadline fails it,
+  // inside the preamble's 5 s bound (at most one pass to admit + 3 s).
   const a = await launchDir(home, "a");
+  const registered = performance.now();
   const tokenA = await register(home, a, sleeper().pid);
   await until(async () => (await text(join(a.dir, "done"))) === tokenA, 8000);
+  expect(performance.now() - registered).toBeLessThan(4500);
   expect(await text(a.agentLog)).toContain("readiness marker was not observed within 3 seconds");
   const passes = emitted.map(e => e.at);
   expect(passes.length).toBe(3);
@@ -424,6 +427,33 @@ darwinTest("the daemon loop runs once a second; readiness comes from the pump, n
   registrars.release();
   await writeFile(join(b.dir, "stop"), "stop\n");
   expect(await served).toBe(0);
+}, 20000);
+
+darwinTest("a cold start whose first marker is lost is ready on the next 1 s pass, inside the 5 s bound", async () => {
+  const home = await tempHome();
+  const stream = await fakeStream(home);
+  const paths = sandboxCollectorPaths(home);
+  let emitted = 0;
+  const daemons: Promise<number>[] = [];
+  // The attach starts a daemon at the real cadence; its stream is cold, so the
+  // first marker never comes back.
+  const startCollector = (lockFd: number) => {
+    const served = serveSandboxCollector({ home, lockFd, spawnStream: stream.spawnStream, sandboxed: () => false,
+      emitMarker: marker => { if (++emitted > 1) stream.emitMarker(marker); } });
+    cleanups.push(async () => { await writeFile(paths.stop, "stop\n").catch(() => {}); await served; });
+    daemons.push(served);
+  };
+  const a = await launchDir(home, "a");
+  const registered = performance.now();
+  const attached = attachSandboxLaunch({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, startCollector, pollMs: 50 });
+  await until(() => existsSync(join(a.dir, "ready")), 5000);
+  const elapsed = performance.now() - registered;
+  expect(emitted).toBe(2);
+  expect(elapsed).toBeGreaterThanOrEqual(900); // it waited for the next pass
+  expect(elapsed).toBeLessThan(2500);
+  await writeFile(join(a.dir, "stop"), "stop\n");
+  expect(await attached).toBe(0);
+  expect(await daemons[0]).toBe(0);
 }, 20000);
 
 darwinTest("one daemon serves two launches and routes each report to its own launch only, by exact tag", async () => {
@@ -634,6 +664,35 @@ darwinTest("attach registers its profile's tag; a raw profile without one is ref
   expect(await text(b.agentLog)).toContain("the launch profile carries no attribution tag");
   expect(existsSync(join(b.dir, "registration.json"))).toBe(false);
 });
+
+darwinTest("upgrade: a launch registered before tags (protocol 1) is rejected by the new daemon's scan; its attach returns", async () => {
+  const home = await tempHome();
+  const stream = await fakeStream(home);
+  const paths = sandboxCollectorPaths(home);
+  const daemons: Promise<number>[] = [];
+  const startCollector = (lockFd: number) => { daemons.push(startDaemon(home, stream, lockFd)); };
+  const a = await launchDir(home, "a");
+  const attached = attachSandboxLaunch({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, startCollector, pollMs: 50 });
+  await until(() => Bun.file(join(a.dir, "ready")).exists());
+  // What an older `ib` wrote for this launch: no tag.
+  const { tag: _tag, ...older } = JSON.parse(await text(join(a.dir, "registration.json")));
+  await writeFile(join(a.dir, "registration.json"), JSON.stringify({ ...older, v: 1 }));
+  // The daemon is replaced (as by `ib sandbox-collector restart` after the upgrade).
+  expect(restartSandboxCollector(home)).toBe(true);
+  expect(await daemons[0]).toBe(0);
+  // The successor's startup scan rejects it in the launch's own directory...
+  await until(async () => (await text(join(a.dir, "done"))) === "rejected", 6000);
+  expect(existsSync(join(a.dir, "failed"))).toBe(true);
+  expect(await text(paths.log)).toContain(`launch ${a.name} not adopted: Error: unsupported registration protocol 1`);
+  // ...and its attach returns with a visible ERROR instead of waiting.
+  expect(await attached).toBe(1);
+  expect(await text(a.agentLog)).toContain("shared collector rejected this launch");
+  expect(existsSync(join(a.dir, "ready"))).toBe(false);
+  // With that attach gone, the successor has nothing to serve and exits.
+  expect(daemons.length).toBe(2);
+  expect(await daemons[1]).toBe(0);
+  expect(sandboxCollectorRunning(paths)).toBe(false);
+}, 20000);
 
 darwinTest("attach starts a new daemon after a stream failure and the new one re-adopts every live launch", async () => {
   const home = await tempHome();

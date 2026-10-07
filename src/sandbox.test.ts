@@ -430,7 +430,11 @@ describe("sandbox profile emission", () => {
     for (const entry of [
       '(if (param "X") (deny file-read*))',
       "(deny file-read* (with message \"mine\"))",
+      // A symbol also ends at a quote or a `;`: no space needed.
+      "(deny file-read* (with message\"mine\"))",
+      "(deny file-read* (with message;c\n \"mine\"))",
       "(begin (allow process*) (deny network*))",
+      '(if (param "X") (deny"x"))',
     ]) {
       expect(() => generateProfile(config({ rawAllow: [entry] }), EMPTY_PATHS, PARAMS)).toThrow("must be one top-level");
       expect(validateSandboxFrontmatter({ rawAllow: [entry] }).errors.join("\n")).toContain("must be one top-level");

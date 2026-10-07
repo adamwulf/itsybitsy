@@ -61,11 +61,12 @@ function denyRule(body: string, tag: string): string {
  * refused: no untagged deny can reach a profile.
  */
 function tagRawRule(entry: string, tag: string): string {
-  // String and regex literals may hold any text; only code can be a rule.
+  // String and regex literals may hold any text; only code can be a rule. A
+  // symbol ends at whitespace, a paren, a quote or a `;` comment.
   const code = entry.trim().replace(/#?"(?:[^"\\]|\\.)*"/g, '""');
-  const denies = code.match(/\(\s*deny(?=[\s()])/g)?.length ?? 0;
+  const denies = code.match(/\(\s*deny(?=[\s()";])/g)?.length ?? 0;
   if (denies === 0) return entry;
-  if (denies > 1 || !/^\(\s*deny\s/.test(code) || /\(\s*with\s+message(?=[\s()])/.test(code)) {
+  if (denies > 1 || !/^\(\s*deny\s/.test(code) || /\(\s*with\s+message(?=[\s()";])/.test(code)) {
     throw new Error(`a deny in rawAllow must be one top-level (deny …) rule without its own message: ${entry}`);
   }
   return denyRule(entry.trim().replace(/^\(\s*deny\s+/, "").slice(0, -1).trimEnd(), tag);

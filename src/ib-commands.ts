@@ -144,7 +144,7 @@ import {
   sandboxProxyScriptPreamble,
 } from "./sandbox-launch";
 import { sandboxDenialScriptPreamble, sandboxDenialExecPrefix } from "./sandbox-log-launch";
-import { sandboxProfilePath } from "./sandbox-log-paths";
+import { removeSandboxProfile, sandboxProfilePath } from "./sandbox-log-paths";
 import {
   writeSealRecordDirect,
   readSealRecordStrict,
@@ -505,6 +505,7 @@ export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
           ? agent.meta as unknown as Record<string, unknown>
           : undefined,
       );
+      removeSandboxProfile(agentDir);
     });
   } catch (err) {
     return {
@@ -1433,6 +1434,7 @@ async function nukeAgentList(
               ? fullMeta
               : undefined,
           );
+          removeSandboxProfile(agentDir);
         },
       );
       allPruned.push(...prunedTeams);
@@ -3793,6 +3795,7 @@ export async function mergeAgent(
         stderr: `Merge completed, but sealed-record cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
+    removeSandboxProfile(agentDir);
 
     // 14-16. Copy settings, remove worktree, delete branch
     await timed("merge", "worktree-cleanup", async () => {
@@ -6990,6 +6993,7 @@ export async function newAgent(
     } catch (err) {
       await logSpawn(agentDir, spawnerAgentDir, id, `spawn cleanup warning: could not remove seal: ${err instanceof Error ? err.message : String(err)}`);
     }
+    removeSandboxProfile(agentDir);
     await rm(agentDir, { recursive: true, force: true });
     if (useWorktree) {
       await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
@@ -7064,6 +7068,7 @@ export async function newAgent(
         } catch (err) {
           await logSpawn(agentDir, spawnerAgentDir, id, `spawn cleanup warning: could not remove seal: ${err instanceof Error ? err.message : String(err)}`);
         }
+        removeSandboxProfile(agentDir);
         await rm(agentDir, { recursive: true, force: true });
         return {
           ok: false,

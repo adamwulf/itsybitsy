@@ -13,7 +13,7 @@ import {
   lstat,
 } from "fs/promises";
 import { tmpdir } from "os";
-import { chmodSync, realpathSync, symlinkSync } from "fs";
+import { chmodSync, existsSync, realpathSync, symlinkSync } from "fs";
 import type { Agent, AgentMeta } from "./agents";
 import {
   isPidAliveCtx,
@@ -1815,6 +1815,9 @@ describe("retireAgent (native)", () => {
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(agent.meta));
     const repoId = await getRepoId(tempDir);
     await writeSealRecordDirect(repoId, id, agent.meta as unknown as Record<string, unknown>, sealHome);
+    const profilePath = sandboxProfilePath(agentDir);
+    await mkdir(join(profilePath, ".."), { recursive: true });
+    await Bun.write(profilePath, "(version 1)\n");
     setSealDeleteForTesting(async () => {
       throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
     });
@@ -1833,6 +1836,9 @@ describe("retireAgent (native)", () => {
       const result = await retireAgent(agent);
       expect(result.ok).toBe(true);
       expect(await readSealRecord(repoId, id, sealHome)).toBeNull();
+      // The tagged profile and its empty sealed namespace go with the agent.
+      expect(existsSync(profilePath)).toBe(false);
+      expect(existsSync(join(profilePath, ".."))).toBe(false);
       expect(tmuxCalls.some((cmd) => cmd[0] === "tmux" && cmd[1] === "run-shell")).toBe(true);
     } finally {
       setSealDeleteForTesting(null);
@@ -8583,7 +8589,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(await readSealRecord(repoId, id, process.env.HOME!)).not.toBeNull();
   });
 
-  test("A4 G3: nuke deletes the sealed record", async () => {
+  test("A4 G3: nuke deletes the sealed record and the tagged profile", async () => {
     await writeSandboxType("seal-nuke");
     setSandboxPortAllocatorForTesting(() => 43154);
     setSandboxPortCheckForTesting(() => {});
@@ -8595,6 +8601,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     const repoId = await getRepoId(tempDir);
     expect(await readSealRecord(repoId, "seal-nuke", process.env.HOME!)).not.toBeNull();
+    const profilePath = sandboxProfilePath(join(agentsDir, "seal-nuke"));
+    expect(existsSync(profilePath)).toBe(true);
 
     setSealDeleteForTesting(async () => {
       throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
@@ -8619,6 +8627,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       const nuked = await nukeAgent(makeAgent("seal-nuke", tempDir, "running", await Bun.file(join(agentsDir, "seal-nuke", "meta.json")).json()));
       expect(nuked.ok).toBe(true);
       expect(await readSealRecord(repoId, "seal-nuke", process.env.HOME!)).toBeNull();
+      // The profile and its (now empty) sealed namespace go with the agent.
+      expect(existsSync(profilePath)).toBe(false);
+      expect(existsSync(join(profilePath, ".."))).toBe(false);
       expect(nukeCalls.some((cmd) => cmd[0] === "tmux" && cmd[1] === "run-shell")).toBe(true);
     } finally {
       setSealDeleteForTesting(null);

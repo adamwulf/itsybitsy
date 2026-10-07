@@ -325,9 +325,12 @@ see its marker.
   so a reused name cannot end the wrong launch) → `attach` returns → the
   subshell removes the directory. A WARNING says when collection stops while the
   owner still runs (`stop` request, or the registrar died).
-- **Per agent**: `<namespace>/sandbox.sb` stays after the agent ends, like the
-  namespace directory itself; the next spawn or resume of that agent directory
-  overwrites it. Its tag belongs to no live launch.
+- **Per agent**: each spawn and resume overwrites `<namespace>/sandbox.sb`. The
+  teardowns that delete the agent's seal (retire, merge, nuke, and the cleanup
+  of a failed spawn) also delete the profile, and then the namespace directory
+  once no launch directory is left in it (`removeSandboxProfile`). That is best
+  effort: a teardown never fails on it, and a leftover profile's tag belongs to
+  no live launch.
 - **Daemon**: exits when no launch and no `attach` remain (§3); its lifeline
   closes, so the helper and `log stream` end with it; it removes its heartbeat.
 

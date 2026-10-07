@@ -2,7 +2,7 @@ import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout, setSy
 import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
-import { readAgentLog, readAgentLogWindow, readAgentPrompt, parseDenials } from "../agents";
+import { readAgentLog, readAgentFileWindow, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, AgentMeta, FlatEntry, PendingQuestion } from "../agents";
 import { stripAnsi } from "../parse-state";
 import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult, waitFor } from "../test-utils";
@@ -202,7 +202,7 @@ describe("readAgentLog", () => {
   });
 });
 
-describe("readAgentLogWindow", () => {
+describe("readAgentFileWindow (agent.log)", () => {
   let tmpDir: string;
 
   beforeEach(async () => {
@@ -219,7 +219,7 @@ describe("readAgentLogWindow", () => {
     await Bun.write(join(agentDir, "agent.log"), "line one\nline two\nline three");
 
     const agent = makeAgent("agent-small", tmpDir, false);
-    const win = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    const win = await readAgentFileWindow(agent, "agent.log", { rows: 20, scrollOffset: 0 });
     expect(win.atTop).toBe(true);
     expect(win.isPlaceholder).toBe(false);
     expect(win.lines).toEqual(["line one", "line two", "line three"]);
@@ -238,7 +238,7 @@ describe("readAgentLogWindow", () => {
 
     const agent = makeAgent("agent-big", tmpDir, false);
     // rows=20, scrollOffset=0 → desiredLines=60, desiredBytes=12000 → much smaller than file
-    const win = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    const win = await readAgentFileWindow(agent, "agent.log", { rows: 20, scrollOffset: 0 });
     expect(win.atTop).toBe(false);
     expect(win.isPlaceholder).toBe(false);
     // Last line of the window must be the last line of the file (lines are newest-last).
@@ -265,8 +265,8 @@ describe("readAgentLogWindow", () => {
     await Bun.write(join(agentDir, "agent.log"), lines.join("\n"));
 
     const agent = makeAgent("agent-scroll", tmpDir, false);
-    const small = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
-    const large = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 200 });
+    const small = await readAgentFileWindow(agent, "agent.log", { rows: 20, scrollOffset: 0 });
+    const large = await readAgentFileWindow(agent, "agent.log", { rows: 20, scrollOffset: 200 });
     // Bigger scrollOffset must produce a larger window (or atTop)
     expect(large.lines.length).toBeGreaterThan(small.lines.length);
     // Both should still end at the last line
@@ -278,7 +278,7 @@ describe("readAgentLogWindow", () => {
     const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-missing");
     await mkdir(agentDir, { recursive: true });
     const agent = makeAgent("agent-missing", tmpDir, false);
-    const win = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    const win = await readAgentFileWindow(agent, "agent.log", { rows: 20, scrollOffset: 0 });
     expect(win.isPlaceholder).toBe(true);
     expect(win.fileSize).toBe(0);
     expect(win.atTop).toBe(true);
@@ -290,7 +290,7 @@ describe("readAgentLogWindow", () => {
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "agent.log"), "");
     const agent = makeAgent("agent-empty2", tmpDir, false);
-    const win = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    const win = await readAgentFileWindow(agent, "agent.log", { rows: 20, scrollOffset: 0 });
     expect(win.isPlaceholder).toBe(true);
     expect(win.fileSize).toBe(0);
     expect(win.lines[0]).toContain("empty");
@@ -301,7 +301,7 @@ describe("readAgentLogWindow", () => {
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "agent.log"), "old line one\nold line two");
     const agent = makeAgent("agent-arc", tmpDir, true);
-    const win = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    const win = await readAgentFileWindow(agent, "agent.log", { rows: 20, scrollOffset: 0 });
     expect(win.atTop).toBe(true);
     expect(win.lines).toEqual(["old line one", "old line two"]);
   });
@@ -317,9 +317,11 @@ describe("readAgentLogWindow", () => {
     await Bun.write(join(agentDir, "agent.log"), `prefix-line\n${huge}`);
     const agent = makeAgent("agent-bigline", tmpDir, false);
     // Tiny rows/buffer → desiredBytes = 8192 < 50KB → tail starts mid-huge-line.
-    const win = await readAgentLogWindow(agent, { rows: 5, scrollOffset: 0, bufferRows: 5 });
+    const win = await readAgentFileWindow(agent, "agent.log", { rows: 5, scrollOffset: 0, bufferRows: 5 });
     expect(win.atTop).toBe(false);
     expect(win.isPlaceholder).toBe(true);
+    // Not a stable missing/empty state, so callers must not cache it.
+    expect(win.fileState).toBeUndefined();
     expect(win.lines[0]).toContain("line too long");
   });
 });
@@ -2814,6 +2816,62 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.handleInput("g"); // go to agent-b (already selected, switches to AGENT LOG)
     expect(dashboard.selectedAgent?.id).toBe("agent-b");
     expect(dashboard.currentMode).toBe("AGENT LOG");
+  });
+
+  test("a fresh dashboard starts on AGENT LOG (not PANE_MODES[0])", () => {
+    dashboard = makeDashboard();
+    expect(dashboard.currentMode).toBe("AGENT LOG");
+    expect(dashboard.rightPane.mode).toBe("AGENT LOG");
+    setupDashboard();
+    expect(dashboard.currentMode).toBe("AGENT LOG");
+  });
+
+  test("n from AGENT LOG goes to WATCHDOG LOG then PROXY LOG; p from AGENT LOG goes to INITIAL PROMPT", () => {
+    setupDashboard();
+    dashboard.handleInput("n");
+    expect(dashboard.currentMode).toBe("WATCHDOG LOG");
+    dashboard.handleInput("n");
+    expect(dashboard.currentMode).toBe("PROXY LOG");
+    dashboard.handleInput("p");
+    dashboard.handleInput("p");
+    expect(dashboard.currentMode).toBe("AGENT LOG");
+    dashboard.handleInput("p");
+    expect(dashboard.currentMode).toBe("INITIAL PROMPT");
+  });
+
+  test("selecting another agent drops every log mode's content and cached window", () => {
+    dashboard = makeDashboard();
+    const agent1 = makeAgent("agent-a", "/repos/test");
+    const agent2 = makeAgent("agent-b", "/repos/test");
+    const flatList: FlatEntry[] = [
+      makeFlatAgent(agent1, { connector: "├── " }),
+      makeFlatAgent(agent2, { connector: "└── " }),
+    ];
+    dashboard.onUpdate([agent1, agent2], flatList, []);
+    dashboard.jumpToMode("WATCHDOG LOG");
+    const staleWindow = {
+      agentId: "agent-a", fileSize: 1, atTop: true, loadedLineCount: 1,
+      displayHeight: 10, scrollOffset: 0, bufferRows: 20,
+    };
+    const rp = dashboard.rightPane;
+    rp.agentLogContent = ["stale agent.log"];
+    rp.watchdogLogContent = ["stale watchdog.log"];
+    rp.proxyLogContent = ["stale sandbox-proxy.log"];
+    rp.loadedLogWindow = staleWindow;
+    rp.loadedWatchdogLogWindow = staleWindow;
+    rp.loadedProxyLogWindow = staleWindow;
+
+    dashboard.handleInput("j"); // move to agent-b
+    expect(dashboard.selectedAgent?.id).toBe("agent-b");
+    expect(dashboard.currentMode).toBe("WATCHDOG LOG");
+    // The reloads for agent-b are async; synchronously the stale agent-a
+    // content and windows must already be gone.
+    expect(rp.agentLogContent).toBeNull();
+    expect(rp.watchdogLogContent).toBeNull();
+    expect(rp.proxyLogContent).toBeNull();
+    expect(rp.loadedLogWindow).toBeNull();
+    expect(rp.loadedWatchdogLogWindow).toBeNull();
+    expect(rp.loadedProxyLogWindow).toBeNull();
   });
 });
 

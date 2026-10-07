@@ -38,7 +38,8 @@ import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../
 import type { ConfigResult } from "../config";
 import { fuzzyFilterIndices } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
-import type { PaneMode } from "./pane-manager";
+import type { PaneMode, TailLogMode } from "./pane-manager";
+import { isTailLogMode } from "./pane-manager";
 import { RESET, BOLD, DIM, RED } from "./colors";
 
 function classifyAgentCli(model: string | undefined | null): AgentCli {
@@ -282,11 +283,12 @@ export interface ActionCtx {
   syncSelectedAgent(): void;
   jumpToMode(mode: PaneMode, forceRefresh?: boolean): void;
   /**
-   * Reload the AGENT LOG tail-window for the currently selected agent if the
-   * cached window no longer covers the visible area (after scrolling, agent
-   * change, or terminal resize). Cache hits short-circuit without I/O.
+   * Reload a tail-log mode's window (AGENT LOG / WATCHDOG LOG / PROXY LOG) for
+   * the currently selected agent if the cached window no longer covers the
+   * visible area (after scrolling, agent change, or terminal resize). Cache
+   * hits short-circuit without I/O.
    */
-  loadAgentLogIfNeeded(): void;
+  loadTailLogIfNeeded(mode: TailLogMode): void;
   setQuestionsFocused(value: boolean): void;
   healthReport: RepoHealthReport | undefined;
   /**
@@ -1905,10 +1907,11 @@ export function handleScrollUp(ctx: ActionCtx) {
   ctx.rightPane.repoCoordinatorScrollBack += SCROLL_STEP;
   ctx.systemDashboard.scrollUp(SCROLL_STEP);
   ctx.rightPane.updateContent();
-  // In AGENT LOG mode, scrolling up may reveal lines beyond the cached window.
+  // In a tail-log mode, scrolling up may reveal lines beyond the cached window.
   // The loader's cache check short-circuits when no read is needed.
-  if (ctx.rightPane.mode === "AGENT LOG") {
-    ctx.loadAgentLogIfNeeded();
+  const mode = ctx.rightPane.mode;
+  if (isTailLogMode(mode)) {
+    ctx.loadTailLogIfNeeded(mode);
   }
   ctx.tui?.requestRender();
 }
@@ -1924,8 +1927,9 @@ export function handleScrollDown(ctx: ActionCtx) {
   ctx.rightPane.updateContent();
   // Scrolling down typically uses cached content but call for symmetry —
   // cache hit makes this free.
-  if (ctx.rightPane.mode === "AGENT LOG") {
-    ctx.loadAgentLogIfNeeded();
+  const mode = ctx.rightPane.mode;
+  if (isTailLogMode(mode)) {
+    ctx.loadTailLogIfNeeded(mode);
   }
   ctx.tui?.requestRender();
 }

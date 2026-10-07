@@ -1395,6 +1395,8 @@ The `ib watch` TUI supports the following keyboard navigation for the agent tree
 - **Repo header selected**: `J` moves to the next repo header; `K` moves to the previous repo header. Wraps around.
 - **Agent selected**: `J` jumps to the first agent of the next repo that has agents, skipping any repos with no agents. `K` jumps to the last agent of the previous repo that has agents, skipping any repos with no agents. The selection always stays on an agent — repos with no visible agents are skipped entirely. Wraps around.
 
+**Right pane modes (`p`/`n`):** `p` steps forward and `n` backward through the modes PROXY LOG, WATCHDOG LOG, AGENT LOG, INITIAL PROMPT, DENIALS, TREE, ERRORS, DIFF, QUESTIONS, STATUS, REPO, wrapping around (REPO is always skipped; ERRORS and QUESTIONS are skipped when empty). The dashboard starts on AGENT LOG, so `n` reaches WATCHDOG LOG then PROXY LOG and `p` reaches INITIAL PROMPT. The three log modes show the tail of the selected agent's `agent.log`, `watchdog.log` and `sandbox-proxy.log` respectively — bottom-anchored, word-wrapped, each with its own cached content — and name the file when it is missing (`No sandbox-proxy.log found` is normal when the sandbox is off). All three reload on selection change, scroll and resize; WATCHDOG LOG and PROXY LOG also pick up new lines while they are shown.
+
 ### 8.11 Repo Info Panel
 
 When a repo header is selected, the dashboard auto-switches the pane mode to **REPO** (a full-width mode in `FULL_WIDTH_MODES` — see §8.13). REPO mode renders across the entire main area at `mainWidth` (the same width the system coordinator and per-repo coordinators use — see §13.8), not just the right pane. The previous pane mode is saved; selecting an agent or coordinator afterward restores it. If the saved mode would render empty content (ERRORS with no errors, QUESTIONS with no questions), it falls back to AGENT LOG instead. REPO mode is skipped during `p`/`n` pane cycling, so the only way to reach it is via repo-header selection.
@@ -1407,7 +1409,7 @@ The repo info content shown in REPO mode (and in the sidebar info panel below th
 
 The path is sourced from the `repoPath` field on the `repo-header` FlatEntry, which is always available regardless of whether agents exist.
 
-**OSC 8 truncation safety:** Because `truncateToWidth` may drop the closing OSC 8 sequence when truncating long lines, all lines in the non-wrapping render branch pass through `closeOsc8()`, which detects unclosed hyperlinks and either appends the close tag or strips partial OSC sequences left by mid-URI truncation. The wrapping render branch (AGENT LOG, QUESTIONS, etc.) also applies this fix.
+**OSC 8 truncation safety:** Because `truncateToWidth` may drop the closing OSC 8 sequence when truncating long lines, all lines in the non-wrapping render branch pass through `closeOsc8()`, which detects unclosed hyperlinks and either appends the close tag or strips partial OSC sequences left by mid-URI truncation. The wrapping render branch (AGENT LOG, WATCHDOG LOG, PROXY LOG, QUESTIONS, etc.) also applies this fix.
 
 ### 8.12 Ghostty Integration
 

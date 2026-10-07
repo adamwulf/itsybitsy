@@ -315,17 +315,21 @@ Three-column layout: resizable sidebar (default 60 cols, range 30–120) with ag
 
 ### Right Pane Modes (cycle with `p`/`n`)
 
+`p` cycles forward (+1), `n` backward (-1). The startup pane is AGENT LOG (index 2, `DEFAULT_MODE_INDEX`): `n` from it reaches WATCHDOG LOG then PROXY LOG, `p` reaches INITIAL PROMPT.
+
 | Mode | Content |
 |---|---|
-| 0 — AGENT LOG | `agent.log` read directly |
-| 1 — INITIAL PROMPT | Full prompt from `prompt.txt` |
-| 2 — DENIALS | Tool denials log (parsed from `agent.log` — look for lines containing `denied`/`not allowed`/`permission denied`/`PreToolUse` hook output) |
-| 3 — TREE | Full agent tree (all repos) |
-| 4 — ERRORS | Agent creation/async errors |
-| 5 — DIFF | `ib diff` output |
-| 6 — QUESTIONS | Pending questions from `user-questions.json` |
-| 7 — STATUS | `ib status` output (commits + changes) |
-| 8 — REPO | Repo action hints (available `ib` commands for the selected repo) — full-width, top-anchored |
+| 0 — PROXY LOG | `sandbox-proxy.log` tail (same reader/cache as AGENT LOG; "No sandbox-proxy.log found" when the sandbox is off) |
+| 1 — WATCHDOG LOG | `watchdog.log` tail (same reader/cache as AGENT LOG) |
+| 2 — AGENT LOG | `agent.log` read directly (startup pane) |
+| 3 — INITIAL PROMPT | Full prompt from `prompt.txt` |
+| 4 — DENIALS | Tool denials log (parsed from `agent.log` — look for lines containing `denied`/`not allowed`/`permission denied`/`PreToolUse` hook output) |
+| 5 — TREE | Full agent tree (all repos) |
+| 6 — ERRORS | Agent creation/async errors |
+| 7 — DIFF | `ib diff` output |
+| 8 — QUESTIONS | Pending questions from `user-questions.json` |
+| 9 — STATUS | `ib status` output (commits + changes) |
+| 10 — REPO | Repo action hints (available `ib` commands for the selected repo) — full-width, top-anchored |
 
 ### Key Bindings
 
@@ -342,7 +346,7 @@ Matching `ib watch` keybindings exactly where possible; new keys noted.
 - `g` — jump to STATUS pane when in normal context; "go to agent" when in QUESTIONS pane (navigates to the agent that asked the selected question). Note: ib watch's help claims `g` = status jump but it's dead code in the bash implementation — itsybitsy intentionally implements both behaviors correctly
 - `e` — jump directly to ERRORS pane
 - `q` — jump directly to QUESTIONS pane
-- `t` — cycle denials time filter (only active in DENIALS pane, mode 2); 3 filter levels
+- `t` — cycle denials time filter (only active in DENIALS pane, mode 4); 3 filter levels
 - `;` — scroll pane down (show older content)
 - `l` — scroll pane up (toward bottom / newer content)
 - `[` / `]` — resize focused panel width (sidebar width when sidebar panel focused; split-pane position when agent/right-pane focused)

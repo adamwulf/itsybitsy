@@ -1,17 +1,17 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, mkdir } from "fs/promises";
+import { mkdtemp, rm, mkdir, chmod } from "fs/promises";
 import { tmpdir } from "os";
 import { makeAgent } from "../test-utils";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import {
-  RightPaneComponent, PANE_MODES, FULL_WIDTH_MODES,
+  RightPaneComponent, PANE_MODES, FULL_WIDTH_MODES, TOP_ANCHORED_MODES, DEFAULT_MODE_INDEX,
   cyclePaneMode, jumpToMode, triggerAsyncLoadIfNeeded,
   colorizeDiff, colorizeLog,
   closeOsc8, OSC8_OPEN, OSC8_CLOSE,
-  loadAgentLog, loadDenials,
+  loadAgentLog, loadTailLog, loadDenials,
 } from "./pane-manager";
-import type { PaneCtx, PaneMode } from "./pane-manager";
+import type { PaneCtx, PaneMode, TailLogMode } from "./pane-manager";
 import { stripAnsi } from "../parse-state";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { parseDenials } from "../agents";
@@ -33,8 +33,8 @@ function makePaneCtx(overrides?: {
     rightPane: rp,
     agentTree: { selectedAgent: overrides?.agent ?? null },
     splitPane: { fullWidth: false },
-    modeIndex: 0,
-    savedModeIndex: 0,
+    modeIndex: DEFAULT_MODE_INDEX,
+    savedModeIndex: DEFAULT_MODE_INDEX,
     currentAgentId: overrides?.agent?.id ?? null,
     tui: { requestRender: () => renderCalls.push(1) },
     setQuestionsFocused: () => {},
@@ -43,7 +43,33 @@ function makePaneCtx(overrides?: {
 }
 
 describe("cyclePaneMode", () => {
-  test("cycles forward through modes", () => {
+  /** Put ctx on `mode` without triggering loads. */
+  function setCtxMode(ctx: PaneCtx, mode: PaneMode) {
+    ctx.modeIndex = PANE_MODES.indexOf(mode);
+    ctx.rightPane.setMode(mode);
+  }
+
+  test("a fresh ctx and RightPaneComponent start on AGENT LOG", () => {
+    // AGENT LOG is not index 0 (the log modes sit before it so `n` reaches
+    // them), so the startup index must come from DEFAULT_MODE_INDEX.
+    expect(PANE_MODES[DEFAULT_MODE_INDEX]).toBe("AGENT LOG");
+    const ctx = makePaneCtx();
+    expect(PANE_MODES[ctx.modeIndex]).toBe("AGENT LOG");
+    expect(PANE_MODES[ctx.savedModeIndex]).toBe("AGENT LOG");
+    expect(ctx.rightPane.mode).toBe("AGENT LOG");
+  });
+
+  test("n (delta -1) from AGENT LOG goes to WATCHDOG LOG, then PROXY LOG", () => {
+    const ctx = makePaneCtx();
+    cyclePaneMode(ctx, -1);
+    expect(PANE_MODES[ctx.modeIndex]).toBe("WATCHDOG LOG");
+    expect(ctx.rightPane.mode).toBe("WATCHDOG LOG");
+    cyclePaneMode(ctx, -1);
+    expect(PANE_MODES[ctx.modeIndex]).toBe("PROXY LOG");
+    expect(ctx.rightPane.mode).toBe("PROXY LOG");
+  });
+
+  test("p (delta +1) from AGENT LOG goes to INITIAL PROMPT, then DENIALS", () => {
     const ctx = makePaneCtx({ errors: ["err"], questions: [{ id: "q1", agent: "a", question: "?", timestamp: "t", status: "pending" as const }] });
     expect(PANE_MODES[ctx.modeIndex]).toBe("AGENT LOG");
     cyclePaneMode(ctx, 1);
@@ -52,40 +78,52 @@ describe("cyclePaneMode", () => {
     expect(PANE_MODES[ctx.modeIndex]).toBe("DENIALS");
   });
 
+  test("p (delta +1) walks PROXY LOG -> WATCHDOG LOG -> AGENT LOG", () => {
+    const ctx = makePaneCtx();
+    setCtxMode(ctx, "PROXY LOG");
+    cyclePaneMode(ctx, 1);
+    expect(PANE_MODES[ctx.modeIndex]).toBe("WATCHDOG LOG");
+    cyclePaneMode(ctx, 1);
+    expect(PANE_MODES[ctx.modeIndex]).toBe("AGENT LOG");
+  });
+
   test("cycles backward through modes", () => {
     const ctx = makePaneCtx({ errors: ["err"], questions: [{ id: "q1", agent: "a", question: "?", timestamp: "t", status: "pending" as const }] });
-    ctx.modeIndex = 2; // DENIALS
-    ctx.rightPane.setMode(PANE_MODES[2]!);
+    setCtxMode(ctx, "DENIALS");
     cyclePaneMode(ctx, -1);
     expect(PANE_MODES[ctx.modeIndex]).toBe("INITIAL PROMPT");
   });
 
   test("skips ERRORS when no errors", () => {
     const ctx = makePaneCtx({ errors: [], questions: [{ id: "q1", agent: "a", question: "?", timestamp: "t", status: "pending" as const }] });
-    // ERRORS is index 4 — cycle to it
-    ctx.modeIndex = 3; // TREE
-    ctx.rightPane.setMode(PANE_MODES[3]!);
+    // ERRORS follows TREE — cycle to it
+    setCtxMode(ctx, "TREE");
     cyclePaneMode(ctx, 1);
-    // Should skip ERRORS (index 4) and land on DIFF (index 5)
-    expect(PANE_MODES[ctx.modeIndex]).not.toBe("ERRORS");
+    // Should skip ERRORS and land on DIFF
+    expect(PANE_MODES[ctx.modeIndex]).toBe("DIFF");
   });
 
   test("skips QUESTIONS when no questions", () => {
     const ctx = makePaneCtx({ errors: ["err"], questions: [] });
-    // QUESTIONS is index 6 — cycle to it
-    ctx.modeIndex = 5; // DIFF
-    ctx.rightPane.setMode(PANE_MODES[5]!);
+    // QUESTIONS follows DIFF — cycle to it
+    setCtxMode(ctx, "DIFF");
     cyclePaneMode(ctx, 1);
-    // Should skip QUESTIONS (index 6) and land on STATUS (index 7)
-    expect(PANE_MODES[ctx.modeIndex]).not.toBe("QUESTIONS");
+    // Should skip QUESTIONS and land on STATUS
+    expect(PANE_MODES[ctx.modeIndex]).toBe("STATUS");
   });
 
-  test("wraps around forward", () => {
+  test("wraps around forward (STATUS -> skips REPO -> PROXY LOG)", () => {
     const ctx = makePaneCtx({ errors: ["err"], questions: [{ id: "q1", agent: "a", question: "?", timestamp: "t", status: "pending" as const }] });
-    ctx.modeIndex = PANE_MODES.length - 1; // STATUS
-    ctx.rightPane.setMode(PANE_MODES[ctx.modeIndex]!);
+    setCtxMode(ctx, "STATUS");
     cyclePaneMode(ctx, 1);
-    expect(PANE_MODES[ctx.modeIndex]).toBe("AGENT LOG");
+    expect(PANE_MODES[ctx.modeIndex]).toBe("PROXY LOG");
+  });
+
+  test("wraps around backward (PROXY LOG -> skips REPO -> STATUS)", () => {
+    const ctx = makePaneCtx({ errors: ["err"], questions: [{ id: "q1", agent: "a", question: "?", timestamp: "t", status: "pending" as const }] });
+    setCtxMode(ctx, "PROXY LOG");
+    cyclePaneMode(ctx, -1);
+    expect(PANE_MODES[ctx.modeIndex]).toBe("STATUS");
   });
 });
 
@@ -205,6 +243,56 @@ describe("RightPaneComponent", () => {
       expect(visibleWidth(r)).toBeLessThanOrEqual(width);
     }
   });
+
+  test("WATCHDOG LOG / PROXY LOG are agent-specific, bottom-anchored, split-width modes", () => {
+    for (const mode of ["WATCHDOG LOG", "PROXY LOG"] as const) {
+      expect(FULL_WIDTH_MODES.has(mode)).toBe(false);
+      expect(TOP_ANCHORED_MODES.has(mode)).toBe(false);
+      // Agent-specific: with a repo header (no agent) selected the pane shows
+      // the repo summary instead of the log.
+      const rp = new RightPaneComponent();
+      rp.selectedRepoHeader = "my-repo";
+      rp.setMode(mode);
+      expect(rp.render(40).map(stripAnsi).join("\n")).toContain("my-repo");
+    }
+  });
+
+  for (const [mode, field] of [["WATCHDOG LOG", "watchdogLogContent"], ["PROXY LOG", "proxyLogContent"]] as const) {
+    test(`${mode} word-wraps at word boundaries like AGENT LOG`, () => {
+      const words = ["antidisestablish", "reflow", "keeps", "whole", "words", "intact", "across", "boundaries"];
+      const rp = new RightPaneComponent();
+      rp.displayHeight = 20;
+      rp[field] = [words.join(" ")];
+      rp.setMode(mode);
+      const width = 24;
+      const rows = rp.render(width).map(stripAnsi);
+      const contentRows = rows.filter((r) => r.trim().length > 0);
+      expect(contentRows.length).toBeGreaterThan(1);
+      for (const word of words) {
+        expect(contentRows.some((r) => r.includes(word))).toBe(true);
+      }
+      for (const r of rows) {
+        expect(visibleWidth(r)).toBeLessThanOrEqual(width);
+      }
+    });
+
+    test(`${mode} is bottom-anchored (newest line on the last row)`, () => {
+      const rp = new RightPaneComponent();
+      rp.displayHeight = 5;
+      rp[field] = Array.from({ length: 12 }, (_, i) => `entry${i}`);
+      rp.setMode(mode);
+      const rows = rp.render(40).map((r) => stripAnsi(r).trim());
+      expect(rows).toEqual(["entry7", "entry8", "entry9", "entry10", "entry11"]);
+    });
+
+    test(`${mode} shows a loading placeholder naming its file before the first read`, () => {
+      const rp = new RightPaneComponent();
+      rp.agent = makeAgent({ id: "agent-placeholder" });
+      rp.setMode(mode);
+      const fileName = mode === "WATCHDOG LOG" ? "watchdog.log" : "sandbox-proxy.log";
+      expect(rp.render(60).map(stripAnsi).join("\n")).toContain(`Loading ${fileName}...`);
+    });
+  }
 
   test("DENIALS word-wraps with a 2-space hanging indent (first row flush, tails hang +2)", () => {
     // The DENIALS pane routes through the same word-wrap path as AGENT LOG, plus a
@@ -932,6 +1020,300 @@ describe("loadAgentLog (windowed)", () => {
     expect(secondLoaded).not.toBe(firstLoaded);
     expect(secondLoaded.fileSize).toBe(grown.length);
     expect(ctx.rightPane.agentLogContent).not.toBe(firstContent);
+  });
+});
+
+describe("loadTailLog (WATCHDOG LOG / PROXY LOG)", () => {
+  // chmod 000 does not stop root from reading.
+  const unreadableTest = process.getuid?.() === 0 ? test.skip : test;
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "itsybitsy-taillog-"));
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  /** Create the agent's storage dir and return [agent, agentDir]. */
+  async function makeAgentDir(agentId: string): Promise<[Agent, string]> {
+    const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+    await mkdir(agentDir, { recursive: true });
+    return [makeAgent({ id: agentId, repoPath: tmpDir }), agentDir];
+  }
+
+  /** Poll (bounded) until `done()` holds — for fire-and-forget loads. */
+  async function waitFor(done: () => boolean) {
+    for (let i = 0; i < 50 && !done(); i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  }
+
+  const MODES = [
+    { mode: "WATCHDOG LOG", fileName: "watchdog.log", content: "watchdogLogContent", window: "loadedWatchdogLogWindow", loading: "watchdogLogLoading" },
+    { mode: "PROXY LOG", fileName: "sandbox-proxy.log", content: "proxyLogContent", window: "loadedProxyLogWindow", loading: "proxyLogLoading" },
+  ] as const;
+
+  for (const m of MODES) {
+    test(`${m.mode}: missing ${m.fileName} shows a placeholder naming the file`, async () => {
+      const [agent] = await makeAgentDir(`agent-missing-${m.fileName}`);
+      const ctx = makePaneCtx({ agent });
+      await loadTailLog(ctx, agent, m.mode);
+      expect(ctx.rightPane[m.content]).toEqual([`No ${m.fileName} found`]);
+      // The missing state is cached keyed on fileSize null (see the
+      // "unchanged missing file" test below).
+      expect(ctx.rightPane[m.window]!.fileSize).toBeNull();
+      expect(ctx.rightPane[m.loading]).toBe(false);
+      ctx.rightPane.agent = agent;
+      ctx.rightPane.setMode(m.mode);
+      expect(ctx.rightPane.render(60).map(stripAnsi).join("\n")).toContain(`No ${m.fileName} found`);
+    });
+
+    test(`${m.mode}: empty ${m.fileName} shows "${m.fileName} is empty"`, async () => {
+      const [agent, agentDir] = await makeAgentDir(`agent-empty-${m.fileName}`);
+      await Bun.write(join(agentDir, m.fileName), "");
+      const ctx = makePaneCtx({ agent });
+      await loadTailLog(ctx, agent, m.mode);
+      expect(ctx.rightPane[m.content]).toEqual([`${m.fileName} is empty`]);
+    });
+
+    test(`${m.mode}: reads only the tail window of a large ${m.fileName}`, async () => {
+      const [agent, agentDir] = await makeAgentDir(`agent-tail-${m.fileName}`);
+      const filler = "x".repeat(240);
+      const lines = Array.from({ length: 5000 }, (_, i) => `line${String(i).padStart(5, "0")}-${filler}`);
+      await Bun.write(join(agentDir, m.fileName), lines.join("\n"));
+      const ctx = makePaneCtx({ agent });
+      ctx.rightPane.displayHeight = 10;
+      await loadTailLog(ctx, agent, m.mode);
+      const loaded = ctx.rightPane[m.window]!;
+      expect(loaded.agentId).toBe(agent.id);
+      expect(loaded.atTop).toBe(false);
+      expect(loaded.loadedLineCount).toBeLessThan(lines.length);
+      const content = ctx.rightPane[m.content]!.map(stripAnsi);
+      expect(content.length).toBe(loaded.loadedLineCount);
+      expect(content[content.length - 1]).toBe(lines[lines.length - 1]!);
+      expect(content).not.toContain(lines[0]!);
+    });
+
+    test(`${m.mode}: growth of ${m.fileName} invalidates the cache`, async () => {
+      const [agent, agentDir] = await makeAgentDir(`agent-grow-${m.fileName}`);
+      const logPath = join(agentDir, m.fileName);
+      const initial = ["line0", "line1", "line2"].join("\n");
+      await Bun.write(logPath, initial);
+      const ctx = makePaneCtx({ agent });
+      ctx.rightPane.displayHeight = 10;
+      await loadTailLog(ctx, agent, m.mode);
+      const firstLoaded = ctx.rightPane[m.window]!;
+      expect(firstLoaded.fileSize).toBe(initial.length);
+
+      // Unchanged file: cache hit, same window object.
+      await loadTailLog(ctx, agent, m.mode);
+      expect(ctx.rightPane[m.window]).toBe(firstLoaded);
+
+      const grown = initial + "\nline3\nline4";
+      await Bun.write(logPath, grown);
+      await loadTailLog(ctx, agent, m.mode);
+      const secondLoaded = ctx.rightPane[m.window]!;
+      expect(secondLoaded).not.toBe(firstLoaded);
+      expect(secondLoaded.fileSize).toBe(grown.length);
+      expect(ctx.rightPane[m.content]!.map(stripAnsi)).toContain("line4");
+    });
+
+    test(`${m.mode}: triggerAsyncLoadIfNeeded loads on mode entry and picks up growth while viewed`, async () => {
+      const [agent, agentDir] = await makeAgentDir(`agent-trigger-${m.fileName}`);
+      const logPath = join(agentDir, m.fileName);
+      await Bun.write(logPath, "first entry");
+      const ctx = makePaneCtx({ agent });
+      ctx.rightPane.agent = agent;
+
+      jumpToMode(ctx, m.mode);
+      await waitFor(() => ctx.rightPane[m.content] !== null && !ctx.rightPane[m.loading]);
+      expect(ctx.rightPane[m.content]!.map(stripAnsi)).toEqual(["first entry"]);
+
+      // A dashboard sync calls triggerAsyncLoadIfNeeded again; the stat-based
+      // cache re-reads only because the file grew.
+      await Bun.write(logPath, "first entry\nsecond entry");
+      triggerAsyncLoadIfNeeded(ctx);
+      await waitFor(() => (ctx.rightPane[m.content]?.length ?? 0) > 1 && !ctx.rightPane[m.loading]);
+      expect(ctx.rightPane[m.content]!.map(stripAnsi)).toEqual(["first entry", "second entry"]);
+      expect(ctx.rightPane.render(60).map(stripAnsi).join("\n")).toContain("second entry");
+    });
+
+    test(`${m.mode}: unchanged missing ${m.fileName} is a cache hit (no re-read, no re-render) until the file appears`, async () => {
+      const [agent, agentDir] = await makeAgentDir(`agent-cache-missing-${m.fileName}`);
+      const ctx = makePaneCtx({ agent });
+      ctx.rightPane.agent = agent;
+      jumpToMode(ctx, m.mode);
+      await waitFor(() => ctx.rightPane[m.content] !== null && !ctx.rightPane[m.loading]);
+      expect(ctx.rightPane[m.content]).toEqual([`No ${m.fileName} found`]);
+      const cachedWindow = ctx.rightPane[m.window];
+      const cachedContent = ctx.rightPane[m.content];
+      const renders = ctx.renderCalls.length;
+
+      // Dashboard syncs while the file is still missing: every one is a hit.
+      for (let i = 0; i < 3; i++) {
+        triggerAsyncLoadIfNeeded(ctx);
+        await waitFor(() => !ctx.rightPane[m.loading]);
+      }
+      expect(ctx.rightPane[m.window]).toBe(cachedWindow);
+      expect(ctx.rightPane[m.content]).toBe(cachedContent);
+      expect(ctx.renderCalls.length).toBe(renders);
+
+      // The file appears: the next sync's stat no longer matches, so it loads.
+      await Bun.write(join(agentDir, m.fileName), "now it exists");
+      triggerAsyncLoadIfNeeded(ctx);
+      await waitFor(() => ctx.rightPane[m.content] !== cachedContent && !ctx.rightPane[m.loading]);
+      expect(ctx.rightPane[m.content]!.map(stripAnsi)).toEqual(["now it exists"]);
+      expect(ctx.rightPane[m.window]!.fileSize).toBe("now it exists".length);
+      expect(ctx.renderCalls.length).toBeGreaterThan(renders);
+    });
+
+    test(`${m.mode}: unchanged empty ${m.fileName} is a cache hit until it grows`, async () => {
+      const [agent, agentDir] = await makeAgentDir(`agent-cache-empty-${m.fileName}`);
+      const logPath = join(agentDir, m.fileName);
+      await Bun.write(logPath, "");
+      const ctx = makePaneCtx({ agent });
+      await loadTailLog(ctx, agent, m.mode);
+      expect(ctx.rightPane[m.content]).toEqual([`${m.fileName} is empty`]);
+      const cachedWindow = ctx.rightPane[m.window]!;
+      expect(cachedWindow.fileSize).toBe(0);
+      const renders = ctx.renderCalls.length;
+
+      await loadTailLog(ctx, agent, m.mode);
+      expect(ctx.rightPane[m.window]).toBe(cachedWindow);
+      expect(ctx.renderCalls.length).toBe(renders);
+
+      await Bun.write(logPath, "first line");
+      await loadTailLog(ctx, agent, m.mode);
+      expect(ctx.rightPane[m.content]!.map(stripAnsi)).toEqual(["first line"]);
+      expect(ctx.rightPane[m.window]!.fileSize).toBe("first line".length);
+    });
+
+    test(`${m.mode}: cached content re-reads when ${m.fileName} vanishes`, async () => {
+      // Real content cached, then the file is deleted: stat null !== cached
+      // size, so the placeholder replaces the stale lines.
+      const [agent, agentDir] = await makeAgentDir(`agent-vanish-${m.fileName}`);
+      const logPath = join(agentDir, m.fileName);
+      await Bun.write(logPath, "here for now");
+      const ctx = makePaneCtx({ agent });
+      await loadTailLog(ctx, agent, m.mode);
+      expect(ctx.rightPane[m.content]!.map(stripAnsi)).toEqual(["here for now"]);
+      await rm(logPath);
+      await loadTailLog(ctx, agent, m.mode);
+      expect(ctx.rightPane[m.content]).toEqual([`No ${m.fileName} found`]);
+      expect(ctx.rightPane[m.window]!.fileSize).toBeNull();
+    });
+
+    unreadableTest(`${m.mode}: a "Failed to read" placeholder is never cached`, async () => {
+      const [agent, agentDir] = await makeAgentDir(`agent-unreadable-${m.fileName}`);
+      const logPath = join(agentDir, m.fileName);
+      await Bun.write(logPath, "secret");
+      await chmod(logPath, 0o000);
+      try {
+        const ctx = makePaneCtx({ agent });
+        await loadTailLog(ctx, agent, m.mode);
+        expect(ctx.rightPane[m.content]).toEqual([`Failed to read ${m.fileName}`]);
+        expect(ctx.rightPane[m.window]).toBeNull();
+        const renders = ctx.renderCalls.length;
+        // Not cached: the next load reads (and renders) again.
+        await loadTailLog(ctx, agent, m.mode);
+        expect(ctx.rightPane[m.window]).toBeNull();
+        expect(ctx.renderCalls.length).toBe(renders + 1);
+      } finally {
+        await chmod(logPath, 0o644);
+      }
+    });
+
+    test(`${m.mode}: stale load (agent switched mid-await) writes nothing and keeps the new load's flag`, async () => {
+      const [agent, agentDir] = await makeAgentDir(`agent-stale-${m.fileName}`);
+      await Bun.write(join(agentDir, m.fileName), "stale line");
+      const ctx = makePaneCtx({ agent });
+      const p = loadTailLog(ctx, agent, m.mode);
+      expect(ctx.rightPane[m.loading]).toBe(true);
+      ctx.currentAgentId = "agent-other";
+      await p;
+      expect(ctx.rightPane[m.content]).toBeNull();
+      expect(ctx.rightPane[m.window]).toBeNull();
+      expect(ctx.rightPane[m.loading]).toBe(true);
+    });
+  }
+
+  test("triggerAsyncLoadIfNeeded in AGENT LOG mode loads neither watchdog.log nor sandbox-proxy.log", async () => {
+    const [agent, agentDir] = await makeAgentDir("agent-trigger-agentlog");
+    await Bun.write(join(agentDir, "watchdog.log"), "wd");
+    await Bun.write(join(agentDir, "sandbox-proxy.log"), "px");
+    const ctx = makePaneCtx({ agent });
+    jumpToMode(ctx, "AGENT LOG");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(ctx.rightPane.watchdogLogContent).toBeNull();
+    expect(ctx.rightPane.proxyLogContent).toBeNull();
+  });
+
+  test("the three log modes keep separate content — switching modes never mixes files", async () => {
+    const [agent, agentDir] = await makeAgentDir("agent-nomix");
+    await Bun.write(join(agentDir, "agent.log"), "from agent.log");
+    await Bun.write(join(agentDir, "watchdog.log"), "from watchdog.log");
+    await Bun.write(join(agentDir, "sandbox-proxy.log"), "from sandbox-proxy.log");
+    const ctx = makePaneCtx({ agent });
+    ctx.rightPane.agent = agent;
+
+    const expected: Record<TailLogMode, string> = {
+      "AGENT LOG": "from agent.log",
+      "WATCHDOG LOG": "from watchdog.log",
+      "PROXY LOG": "from sandbox-proxy.log",
+    };
+    // Load in an interleaved order, then flip between the modes twice.
+    for (const mode of ["WATCHDOG LOG", "AGENT LOG", "PROXY LOG"] as const) {
+      await loadTailLog(ctx, agent, mode);
+    }
+    expect(ctx.rightPane.agentLogContent!.map(stripAnsi)).toEqual(["from agent.log"]);
+    expect(ctx.rightPane.watchdogLogContent!.map(stripAnsi)).toEqual(["from watchdog.log"]);
+    expect(ctx.rightPane.proxyLogContent!.map(stripAnsi)).toEqual(["from sandbox-proxy.log"]);
+    for (const mode of ["AGENT LOG", "WATCHDOG LOG", "PROXY LOG", "WATCHDOG LOG", "AGENT LOG"] as const) {
+      ctx.rightPane.setMode(mode);
+      const shown = ctx.rightPane.render(60).map(stripAnsi).join("\n");
+      expect(shown).toContain(expected[mode]);
+      for (const other of Object.values(expected).filter((t) => t !== expected[mode])) {
+        expect(shown).not.toContain(other);
+      }
+    }
+  });
+
+  test("resetTailLogs clears every log mode's content, window and loading flag", async () => {
+    const [agent, agentDir] = await makeAgentDir("agent-reset");
+    for (const f of ["agent.log", "watchdog.log", "sandbox-proxy.log"]) {
+      await Bun.write(join(agentDir, f), `from ${f}`);
+    }
+    const ctx = makePaneCtx({ agent });
+    for (const mode of ["AGENT LOG", "WATCHDOG LOG", "PROXY LOG"] as const) {
+      await loadTailLog(ctx, agent, mode);
+    }
+    ctx.rightPane.agentLogLoading = true;
+    ctx.rightPane.watchdogLogLoading = true;
+    ctx.rightPane.proxyLogLoading = true;
+    ctx.rightPane.resetTailLogs();
+    const rp = ctx.rightPane;
+    expect([rp.agentLogContent, rp.watchdogLogContent, rp.proxyLogContent]).toEqual([null, null, null]);
+    expect([rp.loadedLogWindow, rp.loadedWatchdogLogWindow, rp.loadedProxyLogWindow]).toEqual([null, null, null]);
+    expect([rp.agentLogLoading, rp.watchdogLogLoading, rp.proxyLogLoading]).toEqual([false, false, false]);
+  });
+
+  test("invalidateTailLogWindow drops only that mode's cached window", async () => {
+    const [agent, agentDir] = await makeAgentDir("agent-invalidate");
+    for (const f of ["agent.log", "watchdog.log", "sandbox-proxy.log"]) {
+      await Bun.write(join(agentDir, f), `from ${f}`);
+    }
+    const ctx = makePaneCtx({ agent });
+    for (const mode of ["AGENT LOG", "WATCHDOG LOG", "PROXY LOG"] as const) {
+      await loadTailLog(ctx, agent, mode);
+    }
+    ctx.rightPane.invalidateTailLogWindow("WATCHDOG LOG");
+    expect(ctx.rightPane.loadedWatchdogLogWindow).toBeNull();
+    expect(ctx.rightPane.loadedLogWindow).not.toBeNull();
+    expect(ctx.rightPane.loadedProxyLogWindow).not.toBeNull();
+    // Content stays on screen until the re-read replaces it.
+    expect(ctx.rightPane.watchdogLogContent).not.toBeNull();
   });
 });
 

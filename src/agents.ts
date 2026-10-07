@@ -4187,11 +4187,21 @@ export async function readAgentLog(agent: Agent): Promise<string[]> {
 
 /**
  * Stat the agent.log file and return its current size, or null if it does
- * not exist. Used by the AGENT LOG cache layer to detect whether the file
- * has grown since the last tail read.
+ * not exist. Used by the DENIALS loader to skip re-parsing an unchanged
+ * agent.log.
  */
 export async function statAgentLogSize(agent: Agent): Promise<number | null> {
-  const logPath = join(agentStorageDir(agent), "agent.log");
+  return statAgentFileSize(agent, "agent.log");
+}
+
+/**
+ * Stat a log file in the agent's storage dir (e.g. "agent.log",
+ * "watchdog.log") and return its current size, or null if it does not exist.
+ * Used by the tail-log pane cache layer to detect whether the file has grown
+ * since the last tail read.
+ */
+export async function statAgentFileSize(agent: Agent, fileName: string): Promise<number | null> {
+  const logPath = join(agentStorageDir(agent), fileName);
   try {
     const file = Bun.file(logPath);
     if (!(await file.exists())) return null;
@@ -4201,7 +4211,7 @@ export async function statAgentLogSize(agent: Agent): Promise<number | null> {
   }
 }
 
-/** Tail-window snapshot of an agent.log */
+/** Tail-window snapshot of an agent log file (agent.log, watchdog.log, sandbox-proxy.log) */
 export interface LogWindow {
   /** Lines in chronological order (newest-last). If start > 0, the partial first line is dropped. */
   lines: string[];
@@ -4214,6 +4224,12 @@ export interface LogWindow {
    * rather than real log content. Callers can use this to skip the cache.
    */
   isPlaceholder: boolean;
+  /**
+   * Set only on the "No <file> found" / "<file> is empty" placeholders: a
+   * stable file state a caller may cache until the file's size changes. Read
+   * errors and the "line too long" placeholder leave it unset.
+   */
+  fileState?: "missing" | "empty";
 }
 
 export interface ReadLogWindowOpts {
@@ -4231,25 +4247,28 @@ const BYTES_PER_LINE_ESTIMATE = 200;
 const MIN_TAIL_BYTES = 8192;
 
 /**
- * Read only the tail of agent.log needed to display the requested window.
+ * Read only the tail of a log file in the agent's storage dir (e.g.
+ * "agent.log", "watchdog.log") needed to display the requested window.
+ * Placeholder lines name `fileName`.
  *
  * The window covers `rows + scrollOffset + bufferRows` lines back from the end
  * of the file. To guarantee we land on a line boundary, the first (potentially
  * partial) line is dropped whenever the read started past byte 0.
  */
-export async function readAgentLogWindow(
+export async function readAgentFileWindow(
   agent: Agent,
+  fileName: string,
   opts: ReadLogWindowOpts,
 ): Promise<LogWindow> {
-  const logPath = join(agentStorageDir(agent), "agent.log");
+  const logPath = join(agentStorageDir(agent), fileName);
   try {
     const file = Bun.file(logPath);
     if (!(await file.exists())) {
-      return { lines: [`No agent.log found`], fileSize: 0, atTop: true, isPlaceholder: true };
+      return { lines: [`No ${fileName} found`], fileSize: 0, atTop: true, isPlaceholder: true, fileState: "missing" };
     }
     const fileSize = file.size;
     if (fileSize === 0) {
-      return { lines: [`agent.log is empty`], fileSize: 0, atTop: true, isPlaceholder: true };
+      return { lines: [`${fileName} is empty`], fileSize: 0, atTop: true, isPlaceholder: true, fileState: "empty" };
     }
 
     const rows = Math.max(1, opts.rows);
@@ -4259,7 +4278,7 @@ export async function readAgentLogWindow(
     const start = Math.max(0, fileSize - desiredBytes);
     const text = await file.slice(start, fileSize).text();
     if (!text) {
-      return { lines: [`agent.log is empty`], fileSize, atTop: true, isPlaceholder: true };
+      return { lines: [`${fileName} is empty`], fileSize, atTop: true, isPlaceholder: true };
     }
 
     let lines = text.split("\n");
@@ -4273,10 +4292,10 @@ export async function readAgentLogWindow(
       // The tail window covered exactly one partial line, which we then dropped.
       // The file is non-empty but the last line is longer than the read window —
       // surface that explicitly rather than claiming the file is empty.
-      return { lines: [`agent.log line too long to window`], fileSize, atTop, isPlaceholder: true };
+      return { lines: [`${fileName} line too long to window`], fileSize, atTop, isPlaceholder: true };
     }
     return { lines, fileSize, atTop, isPlaceholder: false };
   } catch {
-    return { lines: [`Failed to read agent.log`], fileSize: 0, atTop: true, isPlaceholder: true };
+    return { lines: [`Failed to read ${fileName}`], fileSize: 0, atTop: true, isPlaceholder: true };
   }
 }

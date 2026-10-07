@@ -49,8 +49,6 @@ else
     if [[ -n "$IB_SANDBOX_LOG_DIR" ]]; then rmdir "$IB_SANDBOX_LOG_DIR" 2>/dev/null; fi
     IB_SANDBOX_LOG_DIR=""
 fi
-export IB_SANDBOX_LOG_DIR
-export IB_SANDBOX_LOG_AGENT_LOG="$AGENT_LOG"
 cleanup_sandbox_log() {
     if [[ "$IB_SANDBOX_LOG_STOP_OPEN" == 1 ]]; then
         printf 'stop\n' >&9
@@ -83,7 +81,6 @@ fi
 if [[ -z "$IB_SANDBOX_LOG_DIR" || ! -f "$IB_SANDBOX_LOG_DIR/ready" ]]; then
     printf '[%s] [SandboxCollector] ERROR: collector unavailable before CLI launch; kernel enforcement remains required\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$AGENT_LOG"
     cleanup_sandbox_log
-    IB_SANDBOX_LOG_DIR=""
 fi
 
 
@@ -118,9 +115,9 @@ else
     SETSID=none
 fi
 if [[ "$SETSID" == "setsid" ]]; then
-    setsid /bin/sh -c 'if [ -n "$IB_SANDBOX_LOG_DIR" ] && [ -d "$IB_SANDBOX_LOG_DIR" ]; then printf '\''%s\n'\'' "$$" > "$IB_SANDBOX_LOG_DIR/root-request.tmp" && mv -f "$IB_SANDBOX_LOG_DIR/root-request.tmp" "$IB_SANDBOX_LOG_DIR/root-request"; n=0; while [ ! -f "$IB_SANDBOX_LOG_DIR/root-ready" ] && [ -d "$IB_SANDBOX_LOG_DIR" ] && [ "$n" -lt 100 ]; do sleep 0.02; n=$((n + 1)); done; if [ ! -f "$IB_SANDBOX_LOG_DIR/root-ready" ]; then printf '\''[%s] [SandboxCollector] ERROR: CLI identity registration unavailable; kernel enforcement remains required\n'\'' "$(date -u '\''+%Y-%m-%dT%H:%M:%SZ'\'')" >> "$IB_SANDBOX_LOG_AGENT_LOG"; fi; fi; exec 9>&-; unset IB_SANDBOX_LOG_DIR IB_SANDBOX_LOG_AGENT_LOG IB_SANDBOX_LOG_STOP_OPEN; exec "$@"' sandbox-log-gate '/usr/bin/sandbox-exec' -f '<PROFILE>' -D 'SCRATCHPAD=<VALUE>' -D 'PARENTCLAUDE=<VALUE>' -D 'REPOAGENTS=<VALUE>' -D 'REPOID=<VALUE>' -D 'AGENTDIR=<VALUE>' -D 'WORKTREE=<VALUE>' -D 'PROJECTDIR=<VALUE>' -D 'GITDIR=<VALUE>' claude --session-id "<SESSION-UUID>" --model sonnet --effort xhigh --dangerously-skip-permissions "$(cat '<AGENTSDIR>/claude-snapshot/prompt.txt')" 2> "$STDERR_LOG" &
+    setsid /bin/sh -c 'exec 9>&-; exec "$@"' sandbox-log-gate '/usr/bin/sandbox-exec' -f '<PROFILE>' -D 'SCRATCHPAD=<VALUE>' -D 'PARENTCLAUDE=<VALUE>' -D 'REPOAGENTS=<VALUE>' -D 'REPOID=<VALUE>' -D 'AGENTDIR=<VALUE>' -D 'WORKTREE=<VALUE>' -D 'PROJECTDIR=<VALUE>' -D 'GITDIR=<VALUE>' claude --session-id "<SESSION-UUID>" --model sonnet --effort xhigh --dangerously-skip-permissions "$(cat '<AGENTSDIR>/claude-snapshot/prompt.txt')" 2> "$STDERR_LOG" &
 else
-    /bin/sh -c 'if [ -n "$IB_SANDBOX_LOG_DIR" ] && [ -d "$IB_SANDBOX_LOG_DIR" ]; then printf '\''%s\n'\'' "$$" > "$IB_SANDBOX_LOG_DIR/root-request.tmp" && mv -f "$IB_SANDBOX_LOG_DIR/root-request.tmp" "$IB_SANDBOX_LOG_DIR/root-request"; n=0; while [ ! -f "$IB_SANDBOX_LOG_DIR/root-ready" ] && [ -d "$IB_SANDBOX_LOG_DIR" ] && [ "$n" -lt 100 ]; do sleep 0.02; n=$((n + 1)); done; if [ ! -f "$IB_SANDBOX_LOG_DIR/root-ready" ]; then printf '\''[%s] [SandboxCollector] ERROR: CLI identity registration unavailable; kernel enforcement remains required\n'\'' "$(date -u '\''+%Y-%m-%dT%H:%M:%SZ'\'')" >> "$IB_SANDBOX_LOG_AGENT_LOG"; fi; fi; exec 9>&-; unset IB_SANDBOX_LOG_DIR IB_SANDBOX_LOG_AGENT_LOG IB_SANDBOX_LOG_STOP_OPEN; exec "$@"' sandbox-log-gate '/usr/bin/sandbox-exec' -f '<PROFILE>' -D 'SCRATCHPAD=<VALUE>' -D 'PARENTCLAUDE=<VALUE>' -D 'REPOAGENTS=<VALUE>' -D 'REPOID=<VALUE>' -D 'AGENTDIR=<VALUE>' -D 'WORKTREE=<VALUE>' -D 'PROJECTDIR=<VALUE>' -D 'GITDIR=<VALUE>' claude --session-id "<SESSION-UUID>" --model sonnet --effort xhigh --dangerously-skip-permissions "$(cat '<AGENTSDIR>/claude-snapshot/prompt.txt')" 2> "$STDERR_LOG" &
+    /bin/sh -c 'exec 9>&-; exec "$@"' sandbox-log-gate '/usr/bin/sandbox-exec' -f '<PROFILE>' -D 'SCRATCHPAD=<VALUE>' -D 'PARENTCLAUDE=<VALUE>' -D 'REPOAGENTS=<VALUE>' -D 'REPOID=<VALUE>' -D 'AGENTDIR=<VALUE>' -D 'WORKTREE=<VALUE>' -D 'PROJECTDIR=<VALUE>' -D 'GITDIR=<VALUE>' claude --session-id "<SESSION-UUID>" --model sonnet --effort xhigh --dangerously-skip-permissions "$(cat '<AGENTSDIR>/claude-snapshot/prompt.txt')" 2> "$STDERR_LOG" &
 fi
 CLAUDE_PID=$!
 log "Claude PID: $CLAUDE_PID (setsid=$SETSID)"

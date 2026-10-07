@@ -49,11 +49,18 @@ const PROTOCOL = 2;
  * restarts that each worked. */
 const MAX_STARTS = 4;
 const LOCK_SH = 1, LOCK_EX = 2, LOCK_NB = 4;
-/** The daemon loop's cadence: inbox, control files, owner and registrar checks,
- * readiness-marker re-emission. A cadence, never a decision made because time
- * passed. Stream events never wait for it: the pump handles each report and
- * marker as it arrives. */
-const LOOP_MS = 250;
+/** The daemon loop's one cadence: inbox, control files, owner and registrar
+ * checks, readiness-marker re-emission and the heartbeat. A cadence, never a
+ * decision made because time passed. Stream events never wait for it: the pump
+ * handles each report, and each readiness marker, as it arrives.
+ *
+ * Readiness needs no faster loop. A registration waits at most one loop to be
+ * admitted, which emits the first marker; the pump writes `ready` as soon as a
+ * marker comes back. A cold stream can lose the first marker; the next loop
+ * emits another. So a launch is ready about 1-2 s after it registers, and one
+ * whose markers never come back fails at the 3 s marker deadline, about 4 s
+ * after it registers: both inside the preamble's 5 s bound. */
+const LOOP_MS = 1000;
 /** `status` and the `ib watch` Collector light only: a heartbeat this old
  * means the daemon loop is not running. */
 export const STALE_HEARTBEAT_MS = 5000;
@@ -250,11 +257,13 @@ export interface ServeOptions {
    * that won the role. Without it, serve tries the lock once and defers to a
    * running daemon. */
   lockFd?: number;
-  /** Test seams: the stream helper, the readiness-marker emitter, and the
-   * kernel sandbox check (a test suite may itself run inside a sandbox). */
+  /** Test seams: the stream helper, the readiness-marker emitter, the kernel
+   * sandbox check (a test suite may itself run inside a sandbox), and the loop
+   * cadence (LOOP_MS). */
   spawnStream?: (predicate: string) => Bun.Subprocess<"pipe", "pipe", "pipe">;
   emitMarker?: (marker: string) => void;
   sandboxed?: (pid: number) => boolean;
+  loopMs?: number;
 }
 
 const sameProcess = (current: ProcessObservation | null | undefined, expected: ProcessObservation) =>
@@ -484,7 +493,6 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
       if (now - launch.lastSummary >= 60000) { summary(launch); launch.lastSummary = now; }
     };
 
-    let lastBeat = -Infinity; // performance.now() starts near 0: beat at once
     while (true) {
       const now = performance.now();
       if (existsSync(paths.restart)) { leaving ??= "restart"; try { unlinkSync(paths.restart); } catch { /* removed */ } }
@@ -508,13 +516,10 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
       for (const launch of [...launches.values()]) {
         try { tick(launch, now); } catch (error) { fail(launch, error); }
       }
-      if (now - lastBeat >= 1000) {
-        try {
-          writeAtomic(paths.heartbeat, JSON.stringify({ v: PROTOCOL, pid: process.pid, nonce: nonce.slice(0, 8),
-            updatedAt: Date.now(), launches: launches.size }));
-        } catch (error) { note(`heartbeat failed: ${String(error)}`); }
-        lastBeat = now;
-      }
+      try {
+        writeAtomic(paths.heartbeat, JSON.stringify({ v: PROTOCOL, pid: process.pid, nonce: nonce.slice(0, 8),
+          updatedAt: Date.now(), launches: launches.size }));
+      } catch (error) { note(`heartbeat failed: ${String(error)}`); }
       if (launches.size === 0) {
         if (leaving === "stop") break;
         let waiting = 1;
@@ -531,7 +536,7 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
           break;
         }
       }
-      await Bun.sleep(LOOP_MS);
+      await Bun.sleep(opts.loopMs ?? LOOP_MS);
     }
     note(leaving === "stop" ? "collector stopped on request" : leaving === "restart" ? "collector left for a restart"
       : "no launches and no registrars left; exiting");

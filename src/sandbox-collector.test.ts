@@ -371,11 +371,60 @@ async function client(home: string): Promise<{ release: () => void }> {
 }
 
 type Stream = Awaited<ReturnType<typeof fakeStream>>;
+/** A daemon with a fast loop, so lifecycle tests do not wait out the 1 s
+ * cadence; "the daemon loop runs once a second" checks the real one. */
 function startDaemon(home: string, stream: Stream, lockFd?: number): Promise<number> {
-  const served = serveSandboxCollector({ home, lockFd, spawnStream: stream.spawnStream, emitMarker: stream.emitMarker, sandboxed: () => false });
+  const served = serveSandboxCollector({ home, lockFd, spawnStream: stream.spawnStream, emitMarker: stream.emitMarker,
+    sandboxed: () => false, loopMs: 100 });
   cleanups.push(async () => { await writeFile(sandboxCollectorPaths(home).stop, "stop\n").catch(() => {}); await served; });
   return served;
 }
+
+darwinTest("the daemon loop runs once a second; readiness comes from the pump, not the loop", async () => {
+  const home = await tempHome();
+  const stream = await fakeStream(home);
+  const paths = sandboxCollectorPaths(home);
+  const registrars = await client(home);
+  // The test decides which markers come back; none reach the stream by themselves.
+  const emitted: { at: number; marker: string }[] = [];
+  const served = serveSandboxCollector({ home, spawnStream: stream.spawnStream, sandboxed: () => false,
+    emitMarker: marker => { emitted.push({ at: performance.now(), marker }); } });
+  cleanups.push(async () => { await writeFile(paths.stop, "stop\n").catch(() => {}); await served; });
+
+  // A's markers never come back: one per pass, then the 3 s deadline fails it.
+  const a = await launchDir(home, "a");
+  const tokenA = await register(home, a, sleeper().pid);
+  await until(async () => (await text(join(a.dir, "done"))) === tokenA, 8000);
+  expect(await text(a.agentLog)).toContain("readiness marker was not observed within 3 seconds");
+  const passes = emitted.map(e => e.at);
+  expect(passes.length).toBe(3);
+  for (let i = 1; i < passes.length; i++) {
+    expect(passes[i]! - passes[i - 1]!).toBeGreaterThanOrEqual(990);
+    expect(passes[i]! - passes[i - 1]!).toBeLessThan(1500);
+  }
+  // The heartbeat is written by the same pass.
+  const first = JSON.parse(await text(paths.heartbeat)).updatedAt;
+  await until(async () => JSON.parse(await text(paths.heartbeat)).updatedAt !== first, 3000);
+  expect(JSON.parse(await text(paths.heartbeat)).updatedAt - first).toBeGreaterThanOrEqual(990);
+
+  // B's first marker comes back: `ready` follows at once, not at the next pass.
+  const b = await launchDir(home, "b");
+  await register(home, b, sleeper().pid);
+  await until(() => emitted.length === 4, 3000);
+  const returned = performance.now();
+  await appendFile(stream.feed, `${JSON.stringify({ processImagePath: "/usr/bin/logger", eventMessage: emitted[3]!.marker })}\n`);
+  await until(() => existsSync(join(b.dir, "ready")), 3000);
+  expect(performance.now() - returned).toBeLessThan(500);
+  expect(emitted.length).toBe(4);
+  // And so is a report: B's record arrives between passes too.
+  const reported = performance.now();
+  await stream.report(b.tag, 101, "file-read-data");
+  await until(async () => (await text(b.agentLog)).includes("pid=101"), 3000);
+  expect(performance.now() - reported).toBeLessThan(500);
+  registrars.release();
+  await writeFile(join(b.dir, "stop"), "stop\n");
+  expect(await served).toBe(0);
+}, 20000);
 
 darwinTest("one daemon serves two launches and routes each report to its own launch only, by exact tag", async () => {
   const home = await tempHome();
@@ -869,7 +918,7 @@ darwinTest("SIGTERM to a daemon process restarts it like `restart`, through the 
   await writeFile(daemonScript, `
     import { appendFile } from "node:fs/promises";
     import { serveSandboxCollector } from ${MODULE};
-    process.exit(await serveSandboxCollector({ home: ${JSON.stringify(home)}, lockFd: 3, sandboxed: () => false,
+    process.exit(await serveSandboxCollector({ home: ${JSON.stringify(home)}, lockFd: 3, sandboxed: () => false, loopMs: 100,
       spawnStream: () => Bun.spawn([process.execPath, ${JSON.stringify(stream.script)}], { stdin: "pipe", stdout: "pipe", stderr: "pipe" }),
       emitMarker: m => { void appendFile(${JSON.stringify(stream.feed)}, JSON.stringify({ processImagePath: "/usr/bin/logger", eventMessage: m }) + "\\n"); } }));
   `);

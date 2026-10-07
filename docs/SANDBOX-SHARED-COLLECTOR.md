@@ -21,7 +21,7 @@ the cost grew with the number of agents (N). With about ten agents at
 
 Now: ONE daemon and ONE `log stream --level default` serve every launch. The
 per-launch helper, stream and Bun collector are gone; each launch keeps only a
-small `attach` process (about 0.45% CPU) that registers it and supervises it.
+small `attach` process (about 0.10–0.15% CPU) that registers it and supervises it.
 
 ## 2. Topology
 
@@ -353,8 +353,10 @@ real flocks; the stream is a controlled peer, not `/usr/bin/log`):
   the attach is frozen so its next check sees both, and the old check order
   fails it); a successor's re-adopt scan
   rejecting a launch whose owner just exited, with that launch's attach (in its
-  own process) returning and the successor exiting after the other launch ends
-  (both fail without the fix, checked by mutation); `stop` (every launch `done`,
+  own process, frozen across the replacement so it cannot win the freed lock)
+  returning once the successor holds the role, and the successor exiting after
+  the other launch ends (both fail without the fix, every run, checked by
+  mutation); `stop` (every launch `done`,
   every attach returns, role freed);
   `restart` (no `done`, a new daemon re-adopts both launches); SIGTERM to a
   daemon running as a separate process (same as `restart`, through the real fd 3

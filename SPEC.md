@@ -67,7 +67,7 @@ When a new agent is created (`ib new-agent "prompt"`):
 
 11. **Write start.sh**: A bash script that:
     - Clears `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` env vars (allows nesting)
-    - When kernel sandboxing is enabled, starts a launch-owned denial collector outside Seatbelt, confirms readiness, and registers CLI identity before the wrapper runs. Disabled mode omits these itsybitsy components and restores the pre-sandbox launch path; tool authorization remains hook-driven and prompt-free. Global `@system` remains deferred.
+    - When kernel sandboxing is enabled and the denial-collector switch is on (currently off; see **Logging** in §6.1), attaches the launch to the shared per-user collector outside Seatbelt (`ib sandbox-collector attach`), confirms readiness, and registers CLI identity before the wrapper runs. Disabled mode omits these itsybitsy components and restores the pre-sandbox launch path; tool authorization remains hook-driven and prompt-free. Global `@system` remains deferred.
     - Starts `claude --session-id <uuid> <args> "$(cat prompt.txt)"` in background
     - Captures the Claude PID into `meta.json`
     - Runs `exit-check.sh` after Claude exits
@@ -240,7 +240,7 @@ Resume (`ib resume <id>`) restarts a stopped agent:
 Before any resume mutation, a non-Claude agent whose metadata has `worktree: false` is rejected as unsupported. Only Claude has a no-worktree resume path.
 
 1. Read `session_id` from `meta.json` (required for Claude `--resume`)
-2. Write `resume.sh` with `claude --resume <session-id>` command and a fresh launch-owned denial collector using the same readiness, identity-registration, and cleanup protocol as `start.sh` (other CLIs use their corresponding resume command)
+2. Write `resume.sh` with `claude --resume <session-id>` command (other CLIs use their corresponding resume command). When kernel sandboxing is enabled and the denial-collector switch is on (currently off), it attaches the new launch to the shared per-user collector (`ib sandbox-collector attach`) with the same readiness, identity-registration, and cleanup protocol as `start.sh`
 3. Start new tmux session running `resume.sh`
 4. Auto-accept workspace trust
 5. Send resume nudge message: "Resume your work, or end with 'WAITING' or 'I HAVE COMPLETED THE GOAL' as your final line."

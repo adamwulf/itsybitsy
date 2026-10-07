@@ -27,7 +27,8 @@ environment-dependent.
 - **§13 — Stream level `--level default`** (2026-10-06): the stream moved from
   `--level debug` to `--level default`; capture re-validated live and the CPU
   of one `log stream` measured at both levels. This is the most current
-  collector validation.
+  validation of the per-launch collector; the shared collector that replaced
+  it is validated in `docs/SANDBOX-SHARED-COLLECTOR.md` §12.
 
 None of this is a full acceptance pass: single host, synthetic sandboxed offenders
 (not the real CLIs/proxy). §12 runs the real preamble/gate verbatim, but still in a
@@ -558,6 +559,8 @@ unified log.
 `src/sandbox-log-stream.ts`, also used by `scripts/probe-sandbox-denials.ts`).
 Before this change it used `--level debug`. The predicate, the collector
 topology (one stream per launch) and the attribution logic did not change.
+(Later the same day one shared collector replaced the per-launch topology; its
+current validation is in `docs/SANDBOX-SHARED-COLLECTOR.md` §12.)
 
 **Why this level is enough.** §4 found that kernel denials arrive only as
 `Sandbox.kext` free-text lines with `messageType` **Error**, and that the

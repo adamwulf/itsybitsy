@@ -1836,7 +1836,10 @@ describe("retireAgent (native)", () => {
       const result = await retireAgent(agent);
       expect(result.ok).toBe(true);
       expect(await readSealRecord(repoId, id, sealHome)).toBeNull();
-      // The tagged profile and its empty sealed namespace go with the agent.
+      // Only the seal delete is made to fail as for a sandboxed caller; this
+      // process can write the sealed tree, so the profile and its empty
+      // namespace go with the agent. (A really sandboxed caller would leave
+      // them; the tag is dead either way.)
       expect(existsSync(profilePath)).toBe(false);
       expect(existsSync(join(profilePath, ".."))).toBe(false);
       expect(tmuxCalls.some((cmd) => cmd[0] === "tmux" && cmd[1] === "run-shell")).toBe(true);
@@ -4652,6 +4655,9 @@ describe("mergeAgent (native)", () => {
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(agent.meta));
     const repoId = await getRepoId(tempDir);
     await writeSealRecordDirect(repoId, agent.id, agent.meta as unknown as Record<string, unknown>, sealHome);
+    const profilePath = sandboxProfilePath(agentDir);
+    await mkdir(join(profilePath, ".."), { recursive: true });
+    await Bun.write(profilePath, "(version 1)\n");
 
     const runner = makeMergeMock();
     lifecycleSpawnCtx.set(runner);
@@ -4675,6 +4681,9 @@ describe("mergeAgent (native)", () => {
 
     expect(result.ok).toBe(true);
     expect(await readSealRecord(repoId, agent.id, sealHome)).toBeNull();
+    // The tagged profile and its empty sealed namespace go with the agent.
+    expect(existsSync(profilePath)).toBe(false);
+    expect(existsSync(join(profilePath, ".."))).toBe(false);
     expect(sealHelperCalls.some((cmd) => cmd[0] === "tmux" && cmd[1] === "run-shell")).toBe(true);
     // A merge with commits reports the target branch + full 40-char merge SHA.
     expect(result.stdout).toBe(`Closed agent: agent-abc (merged to main at ${MERGE_HEAD_SHA})`);
@@ -6733,6 +6742,26 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(start).toContain("ib sandbox-collector attach");
   });
 
+  test("a sandboxed spawn that fails after its profile was written removes the profile", async () => {
+    await writeSandboxType("sandbox-spawn-cleanup");
+    setSandboxPortAllocatorForTesting(() => 43119);
+    setSandboxPortCheckForTesting(() => {});
+    const inner = sandboxSpawnRunner();
+    setNewAgentSpawnRunner((cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) =>
+      cmd[0] === "tmux" && cmd[1] === "new-session" ? makeSpawnResult("no server", 1) : inner(cmd, opts));
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99985 }));
+
+    const result = await callNewAgent("fails late", { name: "sandbox-spawn-cleanup", type: "sandbox-spawn-cleanup" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("could not create tmux session");
+    const agentDir = join(agentsDir, "sandbox-spawn-cleanup");
+    expect(existsSync(agentDir)).toBe(false);
+    // prepareSandbox had written it; the failed-spawn cleanup removed it and its namespace.
+    expect(existsSync(sandboxProfilePath(agentDir))).toBe(false);
+    expect(existsSync(join(sandboxProfilePath(agentDir), ".."))).toBe(false);
+  });
+
   test("resume refuses legacy enabled sandbox metadata with no paths block", async () => {
     const id = "legacy-enabled-no-paths";
     const agentDir = join(agentsDir, id);
@@ -8627,7 +8656,10 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       const nuked = await nukeAgent(makeAgent("seal-nuke", tempDir, "running", await Bun.file(join(agentsDir, "seal-nuke", "meta.json")).json()));
       expect(nuked.ok).toBe(true);
       expect(await readSealRecord(repoId, "seal-nuke", process.env.HOME!)).toBeNull();
-      // The profile and its (now empty) sealed namespace go with the agent.
+      // Only the seal delete is made to fail as for a sandboxed caller; this
+      // process can write the sealed tree, so the profile and its (now empty)
+      // namespace go with the agent. (A really sandboxed caller would leave
+      // them; the tag is dead either way.)
       expect(existsSync(profilePath)).toBe(false);
       expect(existsSync(join(profilePath, ".."))).toBe(false);
       expect(nukeCalls.some((cmd) => cmd[0] === "tmux" && cmd[1] === "run-shell")).toBe(true);

@@ -391,13 +391,17 @@ keep their current scripts until resumed or respawned with the rebuilt `ib`.
 **Deploying tag attribution** (once): install the rebuilt `ib`, then run
 `ib sandbox-collector stop`. A daemon from the older `ib` would otherwise keep
 running and reject every protocol-2 registration. With `stop`, the old daemon
-finishes the running (untagged) launches, their attaches return quietly, and it
-exits; the next new launch starts a daemon from the new `ib`. `restart` also
-works, but the new daemon then rejects each old launch's protocol-1
-registration when it re-adopts it, which adds WARNING and ERROR lines to every
-old agent's `agent.log` (tested). Either way, agents started by the older `ib`
-stay uncollected until their next resume or respawn. No compatibility path
-exists for untagged launches.
+finishes the running (untagged) launches and exits, and the next new launch
+starts a daemon from the new `ib`. Each running old agent gets one coverage
+WARNING ("collection stopping before the registered CLI exits; coverage
+reduced") and "INFO collector stopped" in its `agent.log`, and no ERROR.
+`restart` also works, but the new daemon then rejects each old launch's
+protocol-1 registration when it re-adopts it (tested): each old agent gets up
+to two WARNINGs (the restart, and "starting a new one" in the one attach that
+starts the successor) and two ERRORs (the rejection, and "collector exited 1"
+from its supervisor). Either way, agents started by the older `ib` stay
+uncollected until their next resume or respawn. No compatibility path exists
+for untagged launches.
 
 To turn collection off:
 

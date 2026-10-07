@@ -16,6 +16,7 @@
 import { join, basename } from "path";
 import { userHome } from "./home";
 import { readdir, rm } from "fs/promises";
+import { removeSandboxProfile } from "./sandbox-log-paths";
 import { SpawnContext } from "./types";
 import { isValidAgentId, tmuxSessionTarget } from "./validation";
 
@@ -665,10 +666,11 @@ async function resolveLeakedHooks(w: RepoHealthWarning): Promise<void> {
   }
 }
 
-/** Remove a stale agent directory */
+/** Remove a stale agent directory, and its tagged profile in the sealed tree */
 async function resolveOrphanedDir(w: RepoHealthWarning): Promise<void> {
   if (!w.agentId) return;
   const agentDir = join(w.repoPath, ".ittybitty", "agents", w.agentId);
+  removeSandboxProfile(agentDir);
   await rm(agentDir, { recursive: true, force: true });
 }
 

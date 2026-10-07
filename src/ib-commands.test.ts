@@ -134,7 +134,13 @@ import { setUserHome, resetUserHome } from "./home";
 import { setUserConfigPath, resetUserConfigPath } from "./config";
 import type { AgentState } from "./parse-state";
 import type { SpawnFn, SpawnResult } from "./types";
-import { canonicalizeSandboxPath, SEAL_HELPER_RESULT_PREFIX, SEAL_HELPER_RESULT_ROOT } from "./sandbox";
+import { canonicalizeSandboxPath, sandboxProfileTag, SEAL_HELPER_RESULT_PREFIX, SEAL_HELPER_RESULT_ROOT } from "./sandbox";
+import { sandboxProfilePath } from "./sandbox-log-paths";
+
+/** A profile with its per-launch tag replaced, to compare the rules of two launches. */
+function untagged(profile: string): string {
+  return profile.replaceAll(sandboxProfileTag(profile)!, "ib-agent:TAG");
+}
 import { claudeProjectDirFor, claudeScratchpadDirFor } from "./hooks/paths-table";
 
 // The "retire → rehire recovery" describes drive real `git` subprocesses — a
@@ -6751,7 +6757,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(result).toEqual({ ok: false, exitCode: 1, stdout: "", stderr: message });
     expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain(message);
     expect((await Bun.file(join(agentDir, "meta.json")).json()).state).toBe("stopped");
-    expect(await Bun.file(join(agentDir, "sandbox.sb")).exists()).toBe(false);
+    expect(await Bun.file(sandboxProfilePath(agentDir)).exists()).toBe(false);
     expect(resumeCommands.some((cmd) => cmd[0] === "/usr/bin/sandbox-exec")).toBe(false);
   });
 
@@ -6781,7 +6787,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     }
 
     expect(resumed.ok).toBe(true);
-    expect(await Bun.file(join(agentDir, "sandbox.sb")).exists()).toBe(false);
+    expect(await Bun.file(sandboxProfilePath(agentDir)).exists()).toBe(false);
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     expect(resume).not.toContain("sandbox-exec");
     expect(resume).not.toContain("sandbox-proxy-launch");
@@ -6871,7 +6877,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(result.ok).toBe(true);
     const agentDir = join(agentsDir, "sandbox-codex");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
-    const profile = await Bun.file(join(agentDir, "sandbox.sb")).text();
+    const profile = await Bun.file(sandboxProfilePath(agentDir)).text();
     // The role text comes from the SessionStart hook; nothing is written
     // into the worktree.
     const instructions = await codexHookRoleText("sandbox-codex", agentDir);
@@ -6930,7 +6936,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     const id = "sandbox-codex-resume";
     const agentDir = join(agentsDir, id);
-    const spawnProfile = await Bun.file(join(agentDir, "sandbox.sb")).text();
+    const spawnProfile = await Bun.file(sandboxProfilePath(agentDir)).text();
     const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
     meta.state = "stopped";
     meta.codex_session_id = "019e7b21-cb7d-7f23-8674-11036ed141ef";
@@ -6955,10 +6961,12 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       resetSendSpawnRunner();
     }
 
-    const resumeProfile = await Bun.file(join(agentDir, "sandbox.sb")).text();
+    const resumeProfile = await Bun.file(sandboxProfilePath(agentDir)).text();
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     const resumedMeta = await Bun.file(join(agentDir, "meta.json")).json();
-    expect(resumeProfile).toBe(spawnProfile);
+    // The same rules, under a new attribution tag for the new launch.
+    expect(untagged(resumeProfile)).toBe(untagged(spawnProfile));
+    expect(sandboxProfileTag(resumeProfile)).not.toBe(sandboxProfileTag(spawnProfile));
     for (const profile of [spawnProfile, resumeProfile]) {
       expect(profile).toContain('(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-');
     }
@@ -6984,7 +6992,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(result.ok).toBe(true);
     const agentDir = join(agentsDir, "sandbox-wiring");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
-    const profile = await Bun.file(join(agentDir, "sandbox.sb")).text();
+    const profile = await Bun.file(sandboxProfilePath(agentDir)).text();
     const meta = await Bun.file(join(agentDir, "meta.json")).json();
     const domains = await Bun.file(join(agentDir, "sandbox-domains.txt")).text();
 
@@ -7151,7 +7159,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(spawned.ok).toBe(true);
 
     const agentDir = join(agentsDir, "sandbox-resume");
-    const spawnProfile = await Bun.file(join(agentDir, "sandbox.sb")).text();
+    const spawnProfile = await Bun.file(sandboxProfilePath(agentDir)).text();
     const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
     const frozenPaths = structuredClone(meta.paths);
     await writeSandboxType("sandbox-resume", {
@@ -7181,10 +7189,10 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       resetSendSpawnRunner();
     }
 
-    const resumeProfile = await Bun.file(join(agentDir, "sandbox.sb")).text();
+    const resumeProfile = await Bun.file(sandboxProfilePath(agentDir)).text();
     const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
     const resumedMeta = await Bun.file(join(agentDir, "meta.json")).json();
-    expect(resumeProfile).toBe(spawnProfile);
+    expect(untagged(resumeProfile)).toBe(untagged(spawnProfile));
     expect(resumedMeta.paths).toEqual(frozenPaths);
     expect(resumedMeta.sandbox_proxy_port).toBe(43131);
     expect(resumeScript).toContain(`setsid ${sandboxDenialExecPrefix("'/usr/bin/sandbox-exec' -f")}`);
@@ -7253,6 +7261,19 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       expect(script.match(/sandbox-log-gate '\/usr\/bin\/sandbox-exec' -f/g)?.length).toBe(2);
       // The removed per-launch collector is never started.
       expect(script).not.toContain("sandbox-log-watch");
+    }
+    // The profile, with its secret attribution tag, is in the sealed tree; no
+    // file in the agent directory (which other agents can read) holds the tag.
+    const profilePath = sandboxProfilePath(agentDir);
+    expect(profilePath.startsWith(join(process.env.HOME!, ".itsybitsy", "sealed") + "/")).toBe(true);
+    expect((await lstat(profilePath)).mode & 0o777).toBe(0o600);
+    const tag = sandboxProfileTag(await Bun.file(profilePath).text())!;
+    expect(tag).toMatch(/^ib-agent:[0-9a-f]{32}$/);
+    expect(start).toContain(`-f '${profilePath}'`);
+    for (const name of await readdir(agentDir, { recursive: true })) {
+      const path = join(agentDir, name);
+      if (!(await lstat(path)).isFile()) continue;
+      expect(await Bun.file(path).text(), path).not.toContain(tag.slice("ib-agent:".length));
     }
   });
 
@@ -7585,7 +7606,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     }
 
     const refreshedMeta = await Bun.file(join(agentDir, "meta.json")).json();
-    const refreshedProfile = await Bun.file(join(agentDir, "sandbox.sb")).text();
+    const refreshedProfile = await Bun.file(sandboxProfilePath(agentDir)).text();
     // The frozen block now reflects the edited type file — new entries appear
     // that were NOT in the pre-refresh block.
     expect(refreshedMeta.paths.allowRead).toContain(canonicalizeSandboxPath(refreshedDir));

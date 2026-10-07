@@ -9,9 +9,10 @@ import {
   canonicalizePathsConfig,
   canonicalizeSandboxPath,
   compileSandboxPath,
-  generateProfile,
+  generateProfile as generateTaggedProfile,
   globToSandboxRegex,
   isBalancedSandboxExpression,
+  newSandboxTag,
   normalizePathsConfig,
   prepareAccessTable,
   resolvePathAccess,
@@ -20,6 +21,7 @@ import {
   resolveSandboxConfig,
   sandboxPathAccessTable,
   sandboxProfileParameterValues,
+  sandboxProfileTag,
   SEAL_HELPER_RESULT_PREFIX,
   validatePathsFrontmatter,
   validateSandboxFrontmatter,
@@ -52,6 +54,18 @@ const PARAMS: SandboxProfileParams = {
   canSpawnChildren: false,
   HOME: "/Users/sandbox-test-user",
 };
+
+const TAG = "ib-agent:0123456789abcdef0123456789abcdef";
+
+/** Most tests here are about rules, not tags: one fixed tag for all of them. */
+function generateProfile(config: SandboxConfig, paths: PathsConfig, params: SandboxProfileParams): string {
+  return generateTaggedProfile(config, paths, params, TAG);
+}
+
+/** A deny rule as the generator emits it: the tag is its last modifier. */
+function tagged(rule: string, tag = TAG): string {
+  return `${rule.slice(0, -1)} (with message "${tag}"))`;
+}
 
 function config(overrides: Partial<SandboxConfig> = {}): SandboxConfig {
   return {
@@ -204,20 +218,20 @@ describe("sandbox glob to regex", () => {
 describe("sandbox profile emission", () => {
   test("starts with version and deny-default before every permission", () => {
     const profile = generateProfile(EMPTY_CONFIG, EMPTY_PATHS, PARAMS);
-    expect(profile.split("\n").slice(0, 2)).toEqual(["(version 1)", "(deny default)"]);
-    expect(profile.indexOf("(deny default)")).toBeLessThan(profile.indexOf("(allow "));
+    expect(profile.split("\n").slice(0, 2)).toEqual(["(version 1)", tagged("(deny default)")]);
+    expect(profile.indexOf("(deny default")).toBeLessThan(profile.indexOf("(allow "));
   });
 
   test("emits the sorted runtime roots and the non-spawner tmux deny (canSpawnChildren false)", () => {
     const lines = generateProfile(EMPTY_CONFIG, EMPTY_PATHS, PARAMS).trimEnd().split("\n");
     expect(lines).toEqual([
       "(version 1)",
-      "(deny default)",
+      tagged("(deny default)"),
       '(allow file-read* (subpath (param "AGENTDIR")))',
       '(allow file-write* (subpath (param "AGENTDIR")))',
       // REPOAGENTS is a READ root for a non-spawner, so its write is denied.
       '(allow file-read* (subpath (param "REPOAGENTS")))',
-      '(deny file-write* (subpath (param "REPOAGENTS")))',
+      tagged('(deny file-write* (subpath (param "REPOAGENTS")))'),
       '(allow file-read* (subpath (param "GITDIR")))',
       '(allow file-write* (subpath (param "GITDIR")))',
       '(allow file-read* (subpath (param "WORKTREE")))',
@@ -226,11 +240,11 @@ describe("sandbox profile emission", () => {
       // non-spawner: a file deny (both ops) AND a network-outbound unix-socket
       // deny (the connect the file deny does not stop), after rawAllow so it
       // last-match-wins over _all.md's blanket unix-socket allow.
-      '(deny file-read* (subpath (param "TMUXSOCK")))',
-      '(deny file-write* (subpath (param "TMUXSOCK")))',
-      '(deny network-outbound (remote unix-socket (subpath (param "TMUXSOCK"))))',
-      '(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))',
-      '(deny file-link (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))',
+      tagged('(deny file-read* (subpath (param "TMUXSOCK")))'),
+      tagged('(deny file-write* (subpath (param "TMUXSOCK")))'),
+      tagged('(deny network-outbound (remote unix-socket (subpath (param "TMUXSOCK"))))'),
+      tagged('(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
+      tagged('(deny file-link (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
     ]);
   });
 
@@ -239,7 +253,7 @@ describe("sandbox profile emission", () => {
     const lines = generateProfile(EMPTY_CONFIG, EMPTY_PATHS, spawner).trimEnd().split("\n");
     expect(lines).toEqual([
       "(version 1)",
-      "(deny default)",
+      tagged("(deny default)"),
       '(allow file-read* (subpath (param "AGENTDIR")))',
       '(allow file-write* (subpath (param "AGENTDIR")))',
       // REPOAGENTS is now a WRITE root (no write deny).
@@ -254,8 +268,8 @@ describe("sandbox profile emission", () => {
       // deny for a spawner.
       '(allow file-read* (subpath (param "PARENTCLAUDE")))',
       '(allow file-write* (subpath (param "PARENTCLAUDE")))',
-      '(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))',
-      '(deny file-link (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))',
+      tagged('(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
+      tagged('(deny file-link (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
     ]);
   });
 
@@ -271,7 +285,7 @@ describe("sandbox profile emission", () => {
 
     const spawnerProfile = generateProfile(EMPTY_CONFIG, EMPTY_PATHS, spawner);
     expect(spawnerProfile).toContain('(allow file-read* (subpath (param "REPOID")))');
-    expect(spawnerProfile).toContain('(deny file-write* (subpath (param "REPOID")))');
+    expect(spawnerProfile).toContain(tagged('(deny file-write* (subpath (param "REPOID")))'));
     expect(spawnerProfile).not.toContain('(allow file-write* (subpath (param "REPOID")))');
 
     const spawnerValues = sandboxProfileParameterValues(EMPTY_PATHS, spawner);
@@ -327,10 +341,10 @@ describe("sandbox profile emission", () => {
     const onlyInSpawner = spawner.filter((line) => !nonSpawner.includes(line));
 
     expect(onlyInNonSpawner.sort()).toEqual([
-      '(deny file-read* (subpath (param "TMUXSOCK")))',
-      '(deny file-write* (subpath (param "REPOAGENTS")))',
-      '(deny file-write* (subpath (param "TMUXSOCK")))',
-      '(deny network-outbound (remote unix-socket (subpath (param "TMUXSOCK"))))',
+      tagged('(deny file-read* (subpath (param "TMUXSOCK")))'),
+      tagged('(deny file-write* (subpath (param "REPOAGENTS")))'),
+      tagged('(deny file-write* (subpath (param "TMUXSOCK")))'),
+      tagged('(deny network-outbound (remote unix-socket (subpath (param "TMUXSOCK"))))'),
     ]);
     expect(onlyInSpawner.sort()).toEqual([
       '(allow file-read* (subpath (param "PARENTCLAUDE")))',
@@ -382,7 +396,7 @@ describe("sandbox profile emission", () => {
     expect(profile.lastIndexOf("(deny file-write*")).toBeGreaterThan(lastAllow);
   });
 
-  test("rawAllow is verbatim and ordered before config denies", () => {
+  test("rawAllow is verbatim except for the tag on its denies, and ordered before config denies", () => {
     const networkDeny = "(deny network*)";
     const localhost = '(allow network-outbound (remote ip "localhost:*"))';
     const profile = generateProfile(
@@ -390,8 +404,48 @@ describe("sandbox profile emission", () => {
       paths({ deny: ["**/.env"] }),
       PARAMS,
     );
-    expect(profile).toContain(`${networkDeny}\n${localhost}\n`);
+    expect(profile).toContain(`${tagged(networkDeny)}\n${localhost}\n`);
     expect(profile.indexOf(localhost)).toBeLessThan(profile.indexOf("(deny file-read*"));
+  });
+
+  test("every deny carries the tag: default, generated rules, read-only roots and rawAllow denies", () => {
+    const profile = generateProfile(
+      config({ rawAllow: ["(allow process*)", "(deny network*)", ' ( deny  file-read* (literal "/x (deny y)") ) '] }),
+      paths({ allowRead: ["/tmp/read-only"], allowWrite: ["/tmp/shared"], deny: ["/tmp/shared/secret", "**/.env"] }),
+      { ...PARAMS, REPOID: "/tmp/itsybitsy-repo/.ittybitty/repo-id", canSpawnChildren: true },
+    );
+    const denies = profile.trimEnd().split("\n").filter((line) => line.startsWith("(deny"));
+    // default, 2 read-only write denies (/tmp/read-only, REPOID), 2 raw, 2 per
+    // config deny, 2 seal-helper denies.
+    expect(denies.length).toBe(11);
+    for (const line of denies) expect(line.endsWith(` (with message "${TAG}"))`)).toBe(true);
+    // A string that merely contains "(deny" is not a second rule.
+    expect(profile).toContain(tagged('(deny file-read* (literal "/x (deny y)"))'));
+    // Exactly one tag per deny rule, and none anywhere else.
+    expect(profile.split(`(with message "${TAG}")`).length - 1).toBe(denies.length);
+    expect(sandboxProfileTag(profile)).toBe(TAG);
+  });
+
+  test("a rawAllow deny that cannot be tagged is refused by generation and by validation", () => {
+    for (const entry of [
+      '(if (param "X") (deny file-read*))',
+      "(deny file-read* (with message \"mine\"))",
+      "(begin (allow process*) (deny network*))",
+    ]) {
+      expect(() => generateProfile(config({ rawAllow: [entry] }), EMPTY_PATHS, PARAMS)).toThrow("must be one top-level");
+      expect(validateSandboxFrontmatter({ rawAllow: [entry] }).errors.join("\n")).toContain("must be one top-level");
+    }
+    expect(validateSandboxFrontmatter({ rawAllow: ["(deny network*)"] }).errors).toEqual([]);
+  });
+
+  test("a tag is a 128-bit nonce per call, and a malformed tag is refused", () => {
+    const a = newSandboxTag();
+    expect(a).toMatch(/^ib-agent:[0-9a-f]{32}$/);
+    expect(newSandboxTag()).not.toBe(a);
+    expect(sandboxProfileTag(generateTaggedProfile(EMPTY_CONFIG, EMPTY_PATHS, PARAMS, a))).toBe(a);
+    for (const bad of ["", "ib-agent:short", `${TAG}"))(allow default)("`, `ib-agent:${"A".repeat(32)}`]) {
+      expect(() => generateTaggedProfile(EMPTY_CONFIG, EMPTY_PATHS, PARAMS, bad)).toThrow("invalid sandbox attribution tag");
+    }
   });
 
   test("domains do not create a baked-in profile permission", () => {
@@ -648,9 +702,11 @@ function unescapeSbpl(value: string): string {
 }
 
 function evaluatorMatcher(
-  line: string,
+  taggedLine: string,
   definitions: Record<string, string>,
 ): { decision: AccessDecision; op: PathOperation; matches: (path: string) => boolean } | null {
+  // The attribution tag is a report modifier; it does not change what matches.
+  const line = taggedLine.replace(/ \(with message "[^"]*"\)\)$/, ")");
   const header = line.match(/^\((allow|deny) file-(read|write)\* /);
   if (!header) return null;
   const decision = header[1] as AccessDecision;
@@ -697,7 +753,7 @@ function evaluateProfileAccess(
 ): AccessDecision {
   let result: AccessDecision = "deny";
   for (const line of profile.split("\n")) {
-    if (line === "(deny default)") {
+    if (line.startsWith("(deny default")) {
       result = "deny";
       continue;
     }

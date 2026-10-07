@@ -18,7 +18,7 @@ import {
   readlink,
   symlink,
 } from "fs/promises";
-import { realpathSync } from "fs";
+import { mkdirSync, realpathSync, writeFileSync } from "fs";
 import { userHome } from "./home";
 import type { Agent, AgentAck, AgentMeta, SpawnedBy, AgentOperationKind } from "./agents";
 import {
@@ -114,6 +114,7 @@ import {
   anchorRelativePaths,
   findRelativeEscapes,
   generateProfile,
+  newSandboxTag,
   SEAL_HELPER_RESULT_PREFIX,
   SEAL_HELPER_RESULT_ROOT,
   canonicalizePathsConfig,
@@ -143,6 +144,7 @@ import {
   sandboxProxyScriptPreamble,
 } from "./sandbox-launch";
 import { sandboxDenialScriptPreamble, sandboxDenialExecPrefix } from "./sandbox-log-launch";
+import { sandboxProfilePath } from "./sandbox-log-paths";
 import {
   writeSealRecordDirect,
   readSealRecordStrict,
@@ -1251,11 +1253,15 @@ async function prepareSandbox(
     // for cli==="agy", so the kernel profile and the hook agree from one helper.
     params.AGYSTATEDIR = agyStateDirFor(userHome());
   }
-  const profile = generateProfile(config, paths, params);
+  // A new attribution tag for every spawn and resume. Its nonce must stay
+  // secret from other agents, so the profile goes to the sealed tree, never
+  // the agent directory, and the tag never appears on a command line.
+  const profile = generateProfile(config, paths, params, newSandboxTag());
   const parameterValues = sandboxProfileParameterValues(paths, params);
-  const profilePath = join(agentDir, "sandbox.sb");
+  const profilePath = sandboxProfilePath(agentDir);
   const domainsPath = join(agentDir, "sandbox-domains.txt");
-  await Bun.write(profilePath, profile);
+  mkdirSync(dirname(profilePath), { recursive: true, mode: 0o700 });
+  writeFileSync(profilePath, profile, { mode: 0o600 });
   await Bun.write(domainsPath, config.domains.length > 0 ? `${config.domains.join("\n")}\n` : "");
 
   const proxyPort = (sandboxPortAllocatorOverride ?? allocateSandboxProxyPort)();

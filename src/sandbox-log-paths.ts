@@ -10,3 +10,10 @@ export function sandboxLogParent(agentDir: string, home?: string): string {
   const key = createHash("sha256").update(resolve(agentDir)).digest("hex");
   return join(sealDir(home), "sandbox-logs", key);
 }
+
+/** The agent's tagged Seatbelt profile. Its attribution tag holds a secret
+ * nonce, so it lives in the agent's sealed namespace: no sandboxed agent can read
+ * it, while the unsandboxed launcher and `sandbox-exec` can. */
+export function sandboxProfilePath(agentDir: string, home?: string): string {
+  return join(sandboxLogParent(agentDir, home), "sandbox.sb");
+}

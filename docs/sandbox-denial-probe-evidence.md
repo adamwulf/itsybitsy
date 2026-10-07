@@ -631,3 +631,247 @@ host, and during this work it served seven other `--level debug` streams from
 running agents at 113–150% CPU. The effect of one measurement stream would be
 lost in that load. The manager will measure `diagnosticd` after the change is
 deployed to those agents.
+
+## 14. Per-agent tag with SBPL `(with message …)` (2026-10-06)
+
+Author: worker `sbpl-message-probe` (branch `agent/sbpl-message-probe`, base
+`6b37bc6`). Host: Darwin 27.2.0 (arm64), one host, one boot. The itsybitsy
+kernel sandbox was OFF for this worker. Research only: no production code
+changed. The scripts and raw captures were in the worker scratchpad and were
+removed after the run.
+
+**Question.** If the profile of each agent puts `(with message
+"ib-agent:<id>")` on its deny rules, does the kernel denial report carry that
+text? If yes, the collector can attribute a denial by its tag, with no process
+tracking.
+
+### Method
+
+A Bun harness (scratchpad, not committed) started its own `/usr/bin/log stream
+--style ndjson --level default --predicate '(eventMessage CONTAINS "Sandbox:")
+OR (eventMessage CONTAINS "ib-agent:") OR …'`. In round 1 it also started a
+second stream at `--level debug`. It made each stream warm with a `logger`
+marker, then ran each case as `/usr/bin/sandbox-exec -f <profile> …`. Each case
+had its own tag, `ib-agent:<case>-<nonce>`. Profiles:
+
+- `(version 1) (allow default) (deny file-read* (subpath "<fixture>/forbidden")
+  (with message "<tag>"))`, and the same shape for `file-write*` and for
+  `network-outbound (remote ip "*:9")`.
+- The REAL generated profile: `generateProfile` with the shipped `_all.md`
+  floor plus a deny on `<fixture>/forbidden` (the same inputs as
+  `scripts/probe-sandbox-denials.ts`). A text pass changed `(deny default)` to
+  `(deny default (with message "ib-agent:Edef-…"))`. It added `(with message
+  "ib-agent:Erule-…")` before the last `)` of every other line that starts with
+  `(deny `: the generator rules AND the verbatim rawAllow `(deny network*)`.
+
+Three rounds ran: 20 cases, 16 cases and 3 cases.
+
+### Compile and enforcement (question 1)
+
+| Profile | `sandbox-exec … /usr/bin/true` |
+|---|---|
+| specific deny + `(with message "ib-agent:probe-123")` | exit 0 |
+| `(deny default (with message "…"))` | exit 0 |
+| `(deny default (with telemetry) (with message "…"))` | exit 0 |
+| control: `(with bogus-modifier "zzz")` | exit 65, `unbound variable: bogus-modifier` |
+
+The compiler knows the modifier. Apple's own profiles also put it on the default
+rule, for example `(deny default (with telemetry) (with message
+"spotlight-import.sb"))` in `/System/Library/Sandbox/Profiles/spotlight-import.sb`.
+`man sandbox-exec` does not give SBPL syntax. Every tagged deny was enforced:
+reads and writes got EPERM (`Operation not permitted`), no denied write made a
+file, and `nc` failed (exit 1, kernel deny report below).
+
+### Where the text goes (question 2)
+
+The kernel adds the message to the SAME event, as a new last line of
+`eventMessage`, after the path. There is no second event, and no other field
+holds the text. The event fields do not change (`formatString` is `"%s"`). Raw
+event (fixture root shortened to `<ROOT>`, nothing else changed):
+
+```json
+{"timezoneName":"","messageType":"Error","eventType":"logEvent","source":null,"launchPersonaName":"","formatString":"%s","userID":0,"activityIdentifier":0,"subsystem":"","category":"","personaType":0,"threadID":1699660,"launchPersonaType":0,"senderImageUUID":"A0949093-3674-33FF-9D98-B0EF588C9B88","launchPersonaID":4294967295,"backtrace":{"frames":[{"imageOffset":177424,"imageUUID":"A0949093-3674-33FF-9D98-B0EF588C9B88"}]},"bootUUID":"","processImagePath":"/kernel","senderImagePath":"/System/Library/Extensions/Sandbox.kext/Contents/MacOS/Sandbox","personaID":4294967295,"timestamp":"2026-10-06 23:08:10.552171-0500","machTimestamp":571524314971,"personaName":"","eventMessage":"Sandbox: cat(80947) deny(1) file-read-data <ROOT>/forbidden/x\nib-agent:A-74f864a0","processImageUUID":"DB9F0C5E-156E-3B68-9C42-1F8702FAD66B","traceID":18476983390212,"processID":0,"senderProgramCounter":177424,"parentActivityIdentifier":0}
+```
+
+Control (the same rule with no message): `"Sandbox: cat(80945) deny(1)
+file-read-data <ROOT>/forbidden/x"`, one line, no tag. All 45 tagged kernel
+events of round 1 had the same field values: `processID` 0, `userID` 0,
+`processImagePath` `/kernel`, `senderImagePath` = the Sandbox.kext path,
+`messageType` Error, `subsystem` and `category` empty.
+
+The `--level debug` stream had no additional event for any probe denial. Its 39
+additional matching lines were Security.framework Debug lines about the G4
+binary below. `log show` returned `{"count":0,"finished":1}` for every query in
+this worker's context, also for an unscoped `--last 1m`, so the persisted store
+was not checked.
+
+### Cases (question 3)
+
+Shortened: `<ROOT>` = fixture root, `<WT>` = this worktree, `…` = run nonce.
+
+| Case | Profile | Offender | `eventMessage` of the kernel event |
+|---|---|---|---|
+| A read | allow-default + tagged read deny | `cat` | `Sandbox: cat(80947) deny(1) file-read-data <ROOT>/forbidden/x\nib-agent:A-…` |
+| B short-lived child | same | `sh -c '/bin/cat … & wait'`: the child | `Sandbox: cat(80955) deny(1) file-read-data <ROOT>/forbidden/x\nib-agent:B-…` |
+| B2 20 children | same | 20 sequential `cat` children | 20/20 events, 20 distinct pids, all tagged |
+| C write | tagged `file-write*` deny | shell builtin, then a `touch` child | `Sandbox: bash(80987) deny(1) file-write-create <ROOT>/forbidden-w/w\nib-agent:C-…` and `Sandbox: touch(80988) deny(1) file-write-create <ROOT>/forbidden-w/w2\nib-agent:C-…` |
+| D network | tagged `network-outbound` deny | `nc -z -G 1 192.0.2.1 9` | `Sandbox: nc(81020) deny(1) network-outbound remote:*:9\nib-agent:D-…` |
+| E0 boot | tagged generated | `/usr/bin/true` | no denial |
+| E1 explicit deny rule | tagged generated | `cat <ROOT>/forbidden/x` | `Sandbox: cat(81049) deny(1) file-read-data <ROOT>/forbidden/x\nib-agent:Erule-…` |
+| E2 default deny, read | tagged generated | `cat <WT>/package.json` | `Sandbox: cat(81053) deny(1) file-read-data <WT>/package.json\nib-agent:Edef-…` |
+| E3 default deny, write | tagged generated | shell builtin | `Sandbox: bash(81056) deny(1) file-write-create <WT>/sbpl-probe-should-not-exist-….txt\nib-agent:Edef-…` |
+| E4 rawAllow `(deny network*)` | tagged generated | `nc` | `Sandbox: nc(81059) deny(1) network-outbound remote:*:9\nib-agent:Erule-…`, plus the startup default denials of `nc` (`ipc-posix-shm-read-data`, `file-read-data ~/.CFUserTextEncoding`, `system-info net.link.addr`), all with `\nib-agent:Edef-…` |
+| E5 short-lived child, default deny | tagged generated | `cat` child | `Sandbox: cat(81065) deny(1) file-read-data <WT>/package.json\nib-agent:Edef-…` |
+| R write to a read-only root | tagged generated | shell builtin, `/Library/…` | `Sandbox: bash(97487) deny(1) file-write-create /Library/sbpl-probe-should-not-exist-…\nib-agent:Erule-…` |
+| O orphan | tagged generated | grandchild re-parented to pid 1 (`orphan-ppid=1`), denies 300 ms later | `Sandbox: cat(97161) deny(1) file-read-data <ROOT>/forbidden/x\nib-agent:Erule-…` |
+| S burst | tagged generated | 200 `cat` children in a tight loop, no wait | 200/200 events, 200 distinct pids, all tagged, none coalesced |
+
+### Coalescing (question 4)
+
+The OS still coalesces repeats from the same process with the same operation and
+path. The message stays on the summary line. One shell did 30 builtin reads of
+the same path:
+
+```
+"Sandbox: bash(81072) deny(1) file-read-data <ROOT>/forbidden/x\nib-agent:F-74f864a0"
+"29 duplicate reports for Sandbox: bash(81072) deny(1) file-read-data <ROOT>/forbidden/x\nib-agent:F-74f864a0"
+```
+
+```json
+{"timezoneName":"","messageType":"Error","eventType":"logEvent","source":null,"launchPersonaName":"","formatString":"%s","userID":0,"activityIdentifier":0,"subsystem":"","category":"","personaType":0,"threadID":7457,"launchPersonaType":0,"senderImageUUID":"A0949093-3674-33FF-9D98-B0EF588C9B88","launchPersonaID":4294967295,"backtrace":{"frames":[{"imageOffset":177424,"imageUUID":"A0949093-3674-33FF-9D98-B0EF588C9B88"}]},"bootUUID":"","processImagePath":"/kernel","senderImagePath":"/System/Library/Extensions/Sandbox.kext/Contents/MacOS/Sandbox","personaID":4294967295,"timestamp":"2026-10-06 23:08:16.144106-0500","machTimestamp":571658521208,"personaName":"","eventMessage":"29 duplicate reports for Sandbox: bash(81072) deny(1) file-read-data <ROOT>/forbidden/x\nib-agent:F-74f864a0","processImageUUID":"DB9F0C5E-156E-3B68-9C42-1F8702FAD66B","traceID":18476983390212,"processID":0,"senderProgramCounter":177424,"parentActivityIdentifier":0}
+```
+
+The first denial came at once. The summary line came 0.97 s later in round 1 and
+0.43 s later in round 2. In round 2 the same shell then slept 3 s and did 5 more
+reads: a new `Sandbox:` line, then `4 duplicate reports for …` 0.14 s later,
+both tagged. Under the generated profile, `nc` gave `5 duplicate reports for …`
+and `105 duplicate reports for …`, both with `\nib-agent:Edef-…`.
+
+### Truncation: a long report loses the tag
+
+The kernel cuts a long report. It keeps the first 1008 bytes and adds `<…>`
+(5 bytes). The tag is the last line, so it is the first text that is lost.
+
+| Case | Path bytes | Tag bytes | `eventMessage` bytes | Last line |
+|---|---|---|---|---|
+| long path | 299 | 19 | 362 | real tag |
+| long path | 599 | 19 | 662 | real tag |
+| long path | 899 | 19 | 962 | real tag |
+| long path | 999 | 19 | 1013 (cut) | `aaa…<…>`, no tag |
+| long path | 1014 | 19 | 1013 (cut) | `aaa…<…>`, no tag |
+| 200-byte tag | ~170 | 200 | 418 | real tag |
+| 200-byte tag | 1014 | 200 | 1013 (cut) | `aaa…<…>`, no tag |
+| 1000-byte tag | ~170 | 1000 | 1013 (cut) | `ib-agent:L1000-…:UUU…<…>`, tag cut |
+
+The fixed text before the path (`Sandbox: <comm>(<pid>) deny(1) <op> `) is at
+most about 90 bytes with a 32-byte comm, plus about 25 bytes for an `N duplicate
+reports for ` prefix. With a 40-byte tag, a path of about 850 bytes or less
+always keeps the tag. Every cut report ended with `<…>`.
+
+### Forgery (question 5)
+
+1. **`logger` from inside the sandbox.** The line goes into the log, but its
+   fields are different from a kernel report:
+
+   ```json
+   {"timezoneName":"","messageType":"Default","eventType":"logEvent","source":null,"launchPersonaName":"","formatString":"%s","userID":501,"activityIdentifier":0,"subsystem":"","category":"","personaType":0,"threadID":1699970,"launchPersonaType":0,"senderImageUUID":"F4D42CE2-D877-317E-9CE2-CE5F5B509CC5","launchPersonaID":4294967295,"backtrace":{"frames":[{"imageOffset":1760,"imageUUID":"F4D42CE2-D877-317E-9CE2-CE5F5B509CC5"}]},"bootUUID":"","processImagePath":"/usr/bin/logger","senderImagePath":"/usr/bin/logger","personaID":4294967295,"timestamp":"2026-10-06 23:08:15.586481-0500","machTimestamp":571645138225,"personaName":"","eventMessage":"Sandbox: cat(4242) deny(1) file-read-data /private/tmp/forged ib-agent:FORGED-74f864a0","processImageUUID":"F4D42CE2-D877-317E-9CE2-CE5F5B509CC5","traceID":13421789708292,"processID":81076,"senderProgramCounter":1760,"parentActivityIdentifier":0}
+   ```
+
+   `logger -t kernel …` and `logger -p kern.err` with an embedded `\n<tag>` gave
+   the same: `messageType` Default, `processImagePath` and `senderImagePath`
+   `/usr/bin/logger`, `processID` = the logger pid, `userID` 501. Other kernel
+   lines also have `processID` 0 and `processImagePath` `/kernel` (the AMFI and
+   ASP lines of G4 below), but their `senderImagePath` is a different kext. So
+   the check must include `senderImagePath`.
+2. **Nested profile.** A sandboxed process cannot apply a second profile with a
+   different tag. `sandbox-exec -p '<inner profile tagged ib-agent:NESTED-…>'
+   /bin/cat …`, run inside an allow-default outer profile and inside the tagged
+   generated profile, gave exit 71 `sandbox-exec: sandbox_apply: Operation not
+   permitted` both times. No event had the NESTED tag.
+3. **Path text.** The path goes into the report verbatim, with spaces and
+   newlines. A file named `z\nSandbox: cat(4242) deny(1) file-read-data FAKE
+   ib-agent:victim2-…` gave `"Sandbox: cat(81157) deny(1) file-read-data
+   <ROOT>/forbidden/z\nSandbox: cat(4242) deny(1) file-read-data FAKE
+   ib-agent:victim2-74f864a0\nib-agent:G-74f864a0"`. The fake text is in the
+   middle and the real tag is still the last line. The long paths above ended
+   in `f\nib-agent:victimL<n>-…`: up to 899 bytes the real tag was last (`…/f\nib-agent:victimL900-…\nib-agent:G-…`);
+   at 999 bytes and more the report was cut and had no tag at all. A read of a
+   file that does not exist (newline name in a denied subpath, under the default
+   deny, and in `/Library/Application Support/com.apple.TCC/` and `~/Library/Mail/`)
+   gave ENOENT and no report.
+4. **Process name.** A copy of `/bin/cat` named `ib-agent:victim3-…` was killed
+   by AMFI before it ran (`Launch Constraint Violation`, exit 137), so the comm
+   field was not tested again here. The review annotation at the top of this
+   document already records that it is up to 32 unsanitized bytes. It comes
+   before the path, so it cannot become the last line.
+5. **Who CAN choose the tag.** Any process that is NOT sandboxed can apply its
+   own profile with any tag and cause real kernel reports with it. This probe
+   did exactly that: an unsandboxed process made kernel events with arbitrary
+   `ib-agent:` text. In itsybitsy this includes the launcher, the tmux server,
+   an agent with the sandbox off, and a sandboxed spawner through its tmux
+   escape (SPEC-SANDBOX.md 4C.3). Those processes can already write any
+   `agent.log`, so the tag gives them no new capability.
+
+**Not tested: untagged reports from other processes.** A report from a rule
+WITHOUT our message ends with the path, so its last line is path text. Our
+profile has no such rule when every deny is tagged. But a different sandboxed
+process on the host (for example a system daemon that opens a path that an
+agent gives it) can make an untagged report. If that path ends in
+`\nib-agent:<other-id>`, a last-line parser reads a forged tag. This probe did
+not find or try such a daemon. A per-launch random token in the tag
+(`ib-agent:<id>:<token>`) stops this only if no other agent can read the token.
+Today `sandbox.sb` is in `AGENTDIR`, and `REPOAGENTS` is a read root for every
+non-spawner, so every agent in a repo can read every profile of that repo.
+
+Disclosure note: the predicate also matched untagged denials of other host
+processes (79 in round 1, 171 in round 2, for example other agents' `ib` and
+`git`). They are not part of the probe and are not shown.
+
+### Cleanup
+
+No probe process stayed after the runs (no process with a probe nonce in `ps`).
+The denied writes made no file (`<WT>/sbpl-probe-should-not-exist-….txt`,
+`/Library/sbpl-probe-should-not-exist-…`, `forbidden-w/w`, `forbidden-w/w2`).
+The fixture and capture directories were removed from the scratchpad. One side
+effect stayed: after the G4 AMFI kill, ReportCrash wrote
+`~/Library/Logs/DiagnosticReports/ib-agent:victim3-74f864a0-2026-10-06-230818.ips`.
+The path isolation of this worker blocks that directory, so the file was
+reported to the manager for removal.
+
+### Verdict
+
+YES, with three conditions. A per-agent tag in the profile attributes kernel
+denials with no process tracking. It also works where tracking fails: children
+that exit in milliseconds (B, B2, E5, and 200/200 in a burst) and descendants
+that left the agent's process tree (O, re-parented to pid 1). Every descendant
+inherits the profile, so the attribution does not need the pid.
+
+1. Tag EVERY deny: `(deny default (with message T))`, every deny that the
+   generator emits, and every rawAllow entry that is a deny (the `_all.md`
+   floor has `(deny network*)`). An untagged rule gives a report whose last
+   line is path text.
+2. Accept an event only when `processID` is 0, `processImagePath` is
+   `/kernel`, `senderImagePath` is the Sandbox.kext path, `messageType` is
+   Error, and the message starts with `Sandbox: ` or `<N> duplicate report(s)
+   for Sandbox: `.
+3. Read the tag ONLY as the text after the LAST `\n`, and require an exact
+   known tag. Treat a report that ends with `<…>` (cut) as unattributed. Never
+   find the tag with a CONTAINS search, because path and comm text can contain
+   `ib-agent:` lines.
+
+### Collector outline (not implemented)
+
+- Profile: `generateProfile` gets the agent's tag and adds `(with message
+  "<tag>")` to `(deny default)`, to each deny it emits, and to rawAllow denies.
+  The tag is `ib-agent:<agent-id>`, optionally with `:<launch-nonce>` so that a
+  reused agent id does not get orphans of an earlier launch.
+- Collector: keep the one shared `log stream` (same predicate, `--level
+  default`) and the readiness marker. Remove the 20 ms process-tree sampling,
+  the root-request/root-ready registration and the pid/birth/mach interval
+  match. For each event: do the field checks above, take the last line, map
+  tag → agent (from the agent directories, or from a tag file that the launcher
+  writes), and append the `[Sandbox]` record to the log of that agent. Keep the
+  `N duplicate reports` count.
+- Unattributed: cut (`<…>`) reports, reports with an unknown tag, and reports
+  from agents that started before the change (their profiles have no tag) until
+  they launch again.

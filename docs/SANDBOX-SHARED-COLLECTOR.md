@@ -313,7 +313,7 @@ socket with peer credentials.
 
 ## 12. Validation
 
-**Unit tests** (`src/sandbox-collector.test.ts`, 23 tests, real processes and
+**Unit tests** (`src/sandbox-collector.test.ts`, 24 tests, real processes and
 real flocks; the stream is a controlled peer, not `/usr/bin/log`):
 
 - Registration validation: accept; reject forged name, outside namespace, other
@@ -348,7 +348,10 @@ real flocks; the stream is a controlled peer, not `/usr/bin/log`):
   after a restart (13 starts: three cycles of two unanswered and one
   acknowledged, then 4; removing either reset gives 4 or 7, checked by
   mutation); a registered attach returning when a daemon that holds the role
-  rejects its launch (ERROR logged, owner alive); a successor's re-adopt scan
+  rejects its launch (ERROR logged, owner alive); a still-registering attach
+  whose owner is gone when the rejection appears ending quietly (0, no ERROR;
+  the attach is frozen so its next check sees both, and the old check order
+  fails it); a successor's re-adopt scan
   rejecting a launch whose owner just exited, with that launch's attach (in its
   own process) returning and the successor exiting after the other launch ends
   (both fail without the fix, checked by mutation); `stop` (every launch `done`,

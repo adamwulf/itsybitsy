@@ -3,18 +3,21 @@ import { shellQuote } from "./validation";
 import { sandboxLogParent } from "./sandbox-log-paths";
 
 /**
- * The kernel denial collector is OFF for now. Each sandboxed spawn/resume started
- * its own `log stream`, then at `--level debug`; with 10 agents that cost about
- * 3-4 cores (each `log` ~17-26% plus diagnosticd ~150%), only to copy `[Sandbox]`
- * lines into agent.log for the DENIALS pane. The stream now runs at
- * `--level default` (~1.75% each, `sandboxLogStreamArgv`), and launches now
- * attach to ONE shared collector and stream (`ib sandbox-collector`, docs/
- * SANDBOX-SHARED-COLLECTOR.md). Seatbelt enforcement and the proxy do not depend
- * on it. While off, both helpers below add nothing: no collector, no readiness
- * handshake, the plain sandbox-exec prefix. Set to true to collect again on new
- * spawns and resumes.
+ * The kernel denial collector is ON, through ONE shared per-user collector: each
+ * sandboxed spawn/resume runs `ib sandbox-collector attach`, which registers the
+ * launch with `ib sandbox-collector serve` and its single `log stream --level
+ * default` (docs/SANDBOX-SHARED-COLLECTOR.md). It copies `[Sandbox]` lines into
+ * agent.log for the DENIALS pane. It was off for a while because the earlier
+ * design ran one `log stream --level debug` per launch: with 10 agents that cost
+ * about 3-4 cores (each `log` ~17-26% plus diagnosticd ~150%). Seatbelt
+ * enforcement and the proxy do not depend on it.
+ *
+ * To turn it off, set this to false: both helpers below then add nothing (no
+ * collector, no readiness handshake, the plain sandbox-exec prefix) to new spawns
+ * and resumes. Running agents keep their scripts until resumed; `ib
+ * sandbox-collector stop` ends collection for them now.
  */
-export const SANDBOX_DENIAL_COLLECTOR_ENABLED = false;
+export const SANDBOX_DENIAL_COLLECTOR_ENABLED = true;
 
 /** Append AFTER the proxy preamble, which installs cleanup_sandbox_proxy. */
 export function sandboxDenialScriptPreamble(agentDir: string, home?: string, enabled = SANDBOX_DENIAL_COLLECTOR_ENABLED): string {

@@ -119,13 +119,13 @@ so both stream at `--level default`. Until 2026-10-06 the stream used
 `--level default`. Live evidence for this change is in
 `docs/sandbox-denial-probe-evidence.md` §13.
 
-**Update (2026-10-06):** collection is currently off
-(`SANDBOX_DENIAL_COLLECTOR_ENABLED = false`), and the per-launch
-`ib sandbox-log-watch` described here is replaced by ONE shared per-user
-collector (`ib sandbox-collector serve`) that every launch registers with through
-`ib sandbox-collector attach`, with a flock-based lifecycle. Design, trust model
-and live evidence: `docs/SANDBOX-SHARED-COLLECTOR.md`. The attribution rules
-below are unchanged.
+**Update (2026-10-06):** the per-launch `ib sandbox-log-watch` described here is
+replaced by ONE shared per-user collector (`ib sandbox-collector serve`) that
+every launch registers with through `ib sandbox-collector attach`, with a
+flock-based lifecycle. Collection was off for a while and is ON again through
+the shared collector (`SANDBOX_DENIAL_COLLECTOR_ENABLED = true`). Design, trust
+model, live evidence and how to turn it off: `docs/SANDBOX-SHARED-COLLECTOR.md`.
+The attribution rules below are unchanged.
 
 Attribution uses proc_pidinfo birth identity and independently observed descendant ancestry, with mach_continuous_time observations bracketing each report timestamp. A new parent-child edge requires the same parent PID/birth identity on both sides of the child read; a reused or unavailable parent drops that edge. The collector never extends an observed interval backwards to birth or forwards to estimated exit. Unknown or previously unobserved reparented children, events outside observed intervals, ambiguous reports, and OS duplicate summaries are omitted. Empty live-stream bootUUID uses the independently obtained running boot identity; persisted or replayed records are not consumed. History is capped at 4,096 instances and 30 seconds, pending reports at 512 entries and 500 milliseconds, with 20 ms polling.
 

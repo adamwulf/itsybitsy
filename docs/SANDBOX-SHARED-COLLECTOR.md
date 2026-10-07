@@ -1,11 +1,11 @@
 # Shared sandbox denial collector
 
-Status (2026-10-06, worker `log-level-default`): **implemented behind
-`SANDBOX_DENIAL_COLLECTOR_ENABLED`, which stays `false`**
-(`src/sandbox-log-launch.ts`). While it is false, `sandboxDenialScriptPreamble()`
-returns `""` and `sandboxDenialExecPrefix()` returns the plain `sandbox-exec`
-prefix, so no launch starts any collector. Turning it on is a separate decision
-(§10). Code: `src/sandbox-collector.ts`; live evidence: §12.
+Status (2026-10-06, worker `enable-collector`): **ON**.
+`SANDBOX_DENIAL_COLLECTOR_ENABLED` is `true` (`src/sandbox-log-launch.ts`), so
+every new sandboxed spawn and resume attaches to the shared collector. Agents
+that were already running start collecting only after their next resume or
+respawn with the rebuilt `ib`. To turn it off again, see §10. Code:
+`src/sandbox-collector.ts`; live evidence: §12.
 
 Background: `docs/SANDBOX-ROLLOUT.md` (the earlier per-launch collector),
 `docs/sandbox-denial-probe-evidence.md` (§13: `--level default`),
@@ -286,19 +286,29 @@ collecting), `stop` (end collection for every running launch).
 `ib sandbox-log-watch` is removed; `sandboxStreamExited` and
 `closeSandboxLogStream` moved to `src/sandbox-log-stream.ts`.
 
-## 10. Turning collection on
+## 10. Turning collection on and off
 
-1. Review this design and the code.
-2. Set `SANDBOX_DENIAL_COLLECTOR_ENABLED = true`. New spawns and resumes then
-   attach; running agents keep their current scripts until resumed.
-3. Measure `diagnosticd` and the daemon with the real agent count.
+Collection is on (2026-10-06): the design and code were reviewed over 4 rounds,
+then `SANDBOX_DENIAL_COLLECTOR_ENABLED` was set to `true`. New spawns and
+resumes attach; running agents keep their current scripts until resumed or
+respawned with the rebuilt `ib`. Still to do: measure `diagnosticd` and the
+daemon with the real agent count.
+
+To turn it off:
+
+1. Set `SANDBOX_DENIAL_COLLECTOR_ENABLED = false` and rebuild `ib`. Then
+   `sandboxDenialScriptPreamble()` returns `""` and `sandboxDenialExecPrefix()`
+   returns the plain `sandbox-exec` prefix, so new spawns and resumes start no
+   collector, no readiness handshake and no gate.
+2. Run `ib sandbox-collector stop` to end collection for launches that are
+   already running (§6). They are not collected again until resumed.
 
 ## 11. Cross-cutting checklist (AGENTS.md)
 
-1. **Agent lifecycle** — when enabled, `start.sh`/`resume.sh` run `attach` in the
-   supervisor subshell (all CLIs, per-repository coordinators); `meta.json`
-   unchanged; `@system` stays unsandboxed with no collector. While the switch is
-   false, launch scripts are byte-identical to main.
+1. **Agent lifecycle** — with the switch on (now), `start.sh`/`resume.sh` run
+   `attach` in the supervisor subshell (all CLIs, per-repository coordinators);
+   `meta.json` unchanged; `@system` stays unsandboxed with no collector. With
+   the switch false, launch scripts have no collector block and no gate.
 2. **Hooks** — `sandbox-collector` replaces `sandbox-log-watch` in the
    internal-verb deny list; the sealed-tree floor deny is unchanged.
 3. **Watchdog** — not involved: it neither starts nor restarts the daemon.

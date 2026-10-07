@@ -705,8 +705,10 @@ export async function attachSandboxLaunch(opts: AttachOptions): Promise<number> 
       writeAtomic(entry, opts.dir);
       while (true) {
         if (existsSync(file("ready"))) return "ready";
-        if (existsSync(file("failed")) || done()) return "rejected";
+        // A launch that already ended ends quietly, even if a daemon rejected
+        // it meanwhile (as in the registered loop below).
         if (terminating || !ownerAlive()) return "ended";
+        if (existsSync(file("failed")) || done()) return "rejected";
         const fd = winDaemonRole();
         if (fd !== null && !start(fd)) return "exhausted";
         await Bun.sleep(50);

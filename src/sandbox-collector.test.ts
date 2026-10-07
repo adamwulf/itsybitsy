@@ -668,8 +668,9 @@ darwinTest("a registered attach returns when a daemon rejects its launch while h
   writeFileSync(join(a.dir, "done"), "rejected");
   const outcome = await Promise.race([attached, Bun.sleep(3000).then(() => "timeout" as const)]);
   if (outcome === "timeout") {
-    // Free the role so the attach ends here (it then runs out of starts),
-    // not after this test's cleanup removed its directory.
+    // Free the role so the attach ends here, not after this test's cleanup
+    // removed its directory: it starts a daemon once, and register() then sees
+    // the rejection (code 1, one start).
     releaseRole();
     await attached;
     throw new Error("attach did not return after rejection");
@@ -738,11 +739,13 @@ darwinTest("a successor's re-adopt scan rejects a launch whose owner just exited
   const l = await launchDir(home, "l");
   const release = join(home, "release-owner");
   const exitFile = join(home, "l-exit");
+  const pidFile = join(home, "l-pid");
   const script = join(home, "attach-l.ts");
   await writeFile(script, `
     import { appendFileSync, closeSync, existsSync, writeFileSync } from "node:fs";
     import { attachSandboxLaunch } from ${MODULE};
     setInterval(() => { if (!existsSync(${JSON.stringify(home)})) process.exit(9); }, 100);
+    writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
     const code = await attachSandboxLaunch({ dir: ${JSON.stringify(l.dir)}, owner: process.ppid,
       agentLog: ${JSON.stringify(l.agentLog)}, home: ${JSON.stringify(home)},
       startCollector: fd => { appendFileSync(${JSON.stringify(join(home, "l-starts"))}, "x"); closeSync(fd); } });
@@ -753,19 +756,25 @@ darwinTest("a successor's re-adopt scan rejects a launch whose owner just exited
     { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
   cleanups.push(async () => { await writeFile(release, "").catch(() => {}); await owner.exited; });
   await until(() => Bun.file(join(l.dir, "ready")).exists(), 8000);
-  // L's owner exits, and the daemon is replaced before it finishes L (1 s drain).
-  await writeFile(release, "");
-  await owner.exited;
-  expect(restartSandboxCollector(home)).toBe(true);
-  expect(await daemons[0]).toBe(0);
-  // M's attach starts the successor; its scan adopts M and rejects L. (If L's
-  // slower poll wins the freed lock first, L returns 0 through the free-lock
-  // path and the successor rejects it afterwards, so wait for each result.)
-  await until(() => existsSync(exitFile), 8000);
+  // Freeze L's attach across the replacement, as when its once-a-second poll
+  // misses the short gap: it cannot win the freed lock, so when it runs again
+  // the successor holds the role, and only the rejection can end its wait.
+  const lPid = Number(await text(pidFile));
+  process.kill(lPid, "SIGSTOP");
+  try {
+    // L's owner exits, and the daemon is replaced before it finishes L (1 s drain).
+    await writeFile(release, "");
+    await owner.exited;
+    expect(restartSandboxCollector(home)).toBe(true);
+    expect(await daemons[0]).toBe(0);
+    // M's attach starts the successor; its scan adopts M and rejects L.
+    await until(async () => (await text(join(l.dir, "done"))) === "rejected", 8000);
+    expect(existsSync(join(l.dir, "failed"))).toBe(true);
+    await until(async () => (await text(paths.log)).includes(`launch ${l.name} not adopted: Error: launch owner is not running`), 8000);
+    expect(sandboxCollectorRunning(paths)).toBe(true); // the successor holds the role
+  } finally { process.kill(lPid, "SIGCONT"); }
+  await until(() => existsSync(exitFile), 8000); // without the fix: never
   expect(await text(exitFile)).toBe("0"); // the owner is gone: L ends quietly
-  await until(async () => (await text(join(l.dir, "done"))) === "rejected", 8000);
-  expect(existsSync(join(l.dir, "failed"))).toBe(true);
-  await until(async () => (await text(paths.log)).includes(`launch ${l.name} not adopted: Error: launch owner is not running`), 8000);
   expect(existsSync(join(home, "l-starts"))).toBe(false);
   await until(async () => (await text(m.agentLog)).includes("shared collector resumed"), 8000);
   expect(daemons.length).toBe(2);

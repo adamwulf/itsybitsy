@@ -171,7 +171,7 @@ const isRegisteredProcess = (value: unknown): value is RegisteredProcess =>
 
 /** A private directory of this user in the sealed launch namespace; only such a
  * directory is ever written to (including `failed` for a rejected launch). */
-export function checkLaunchDirectory(entryName: string, entryText: string, home?: string): string {
+function checkLaunchDirectory(entryName: string, entryText: string, home?: string): string {
   if (!LAUNCH_NAME.test(entryName)) throw new Error("invalid registration name");
   const dir = entryText.trim();
   if (!isAbsolute(dir) || basename(dir) !== entryName || dirname(dirname(dir)) !== join(sealDir(home), "sandbox-logs") ||
@@ -625,7 +625,7 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
 /** Start the daemon outside any pane session, with none of the launch's state.
  * Takes ownership of `lockFd` (the won daemon role): the child inherits it as
  * fd 3 and our copy is closed, so the role passes over without a free gap. */
-export function spawnSandboxCollector(paths: SandboxCollectorPaths, lockFd: number): void {
+function spawnSandboxCollector(paths: SandboxCollectorPaths, lockFd: number): void {
   const env = { ...process.env };
   for (const key of ["AGENT_LOG", "IB_SANDBOX_LOG_DIR", "IB_SANDBOX_LOG_AGENT_LOG", "IB_SANDBOX_LOG_STOP_OPEN"]) delete env[key];
   let logFd: number | undefined;

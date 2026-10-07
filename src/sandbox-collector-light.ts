@@ -9,7 +9,8 @@
  * probe means launches are attached. Every fd opened here is closed here.
  */
 import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
-import { sandboxCollectorPaths, sandboxCollectorRunning, tryCollectorLock, type SandboxCollectorPaths } from "./sandbox-collector";
+import { STALE_HEARTBEAT_MS, sandboxCollectorPaths, sandboxCollectorRunning, tryCollectorLock,
+  type SandboxCollectorPaths } from "./sandbox-collector";
 import { SANDBOX_DENIAL_COLLECTOR_ENABLED } from "./sandbox-log-launch";
 
 export type CollectorLight = "grey" | "green" | "yellow" | "red";
@@ -22,10 +23,6 @@ export type CollectorState =
   | "stale"      // yellow: a daemon holds the role but its heartbeat is old (stuck but alive)
   | "no-daemon"  // yellow: launches are attached and no daemon holds the role (first sighting)
   | "broken";    // red: launches are attached and no daemon held the role on two probes in a row
-
-/** The daemon rewrites its heartbeat about every second; older than this means
- * it holds its role but no longer ticks. */
-export const COLLECTOR_HEARTBEAT_STALE_MS = 10_000;
 
 export interface CollectorHealth {
   light: CollectorLight;
@@ -93,7 +90,8 @@ export function sandboxCollectorHealth(opts: CollectorHealthOptions = {}): Colle
     const now = opts.now ?? Date.now();
     const beat = readHeartbeat(paths.heartbeat);
     if (!beat) return health("starting");
-    return health(now - beat.updatedAt > COLLECTOR_HEARTBEAT_STALE_MS ? "stale" : "ok", beat, now);
+    // The same limit `ib sandbox-collector status` marks STALE.
+    return health(now - beat.updatedAt > STALE_HEARTBEAT_MS ? "stale" : "ok", beat, now);
   }
   if (!launchesAttached(paths)) return health("idle");
   const previous = opts.previous?.state;

@@ -3,8 +3,9 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { closeSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { holdCollectorClient, sandboxCollectorPaths, tryCollectorLock, type SandboxCollectorPaths } from "./sandbox-collector";
-import { COLLECTOR_HEARTBEAT_STALE_MS, collectorHealthDetail, sandboxCollectorHealth } from "./sandbox-collector-light";
+import { STALE_HEARTBEAT_MS, holdCollectorClient, sandboxCollectorPaths, sandboxCollectorStatus, tryCollectorLock,
+  type SandboxCollectorPaths } from "./sandbox-collector";
+import { collectorHealthDetail, sandboxCollectorHealth } from "./sandbox-collector-light";
 
 const darwinTest = process.platform === "darwin" ? test : test.skip;
 const cleanups: (() => Promise<void>)[] = [];
@@ -66,15 +67,17 @@ darwinTest("running with a fresh heartbeat: green, with the heartbeat's pid, age
   expect(collectorHealthDetail(status)).toBe("ok: pid 4242, heartbeat 1s ago, 2 launches");
 });
 
-darwinTest("running with a stale heartbeat: yellow (stuck but alive)", async () => {
+darwinTest("running with a heartbeat `status` calls STALE: yellow (stuck but alive)", async () => {
   const { home, paths } = await collectorHome();
   holdDaemonRole(paths);
-  await beat(paths, NOW - COLLECTOR_HEARTBEAT_STALE_MS);
+  await beat(paths, NOW - STALE_HEARTBEAT_MS);
   expect(sandboxCollectorHealth({ home, enabled: true, now: NOW }).light).toBe("green"); // at the limit
-  await beat(paths, NOW - COLLECTOR_HEARTBEAT_STALE_MS - 1);
+  expect(sandboxCollectorStatus(home, NOW)).not.toContain("STALE");
+  await beat(paths, NOW - STALE_HEARTBEAT_MS - 1);
   const status = sandboxCollectorHealth({ home, enabled: true, now: NOW });
-  expect(status).toMatchObject({ light: "yellow", state: "stale", heartbeatAgeMs: COLLECTOR_HEARTBEAT_STALE_MS + 1 });
-  expect(collectorHealthDetail(status)).toBe("stale: pid 4242, heartbeat 10s ago, 2 launches");
+  expect(status).toMatchObject({ light: "yellow", state: "stale", heartbeatAgeMs: STALE_HEARTBEAT_MS + 1 });
+  expect(sandboxCollectorStatus(home, NOW)).toContain("STALE");
+  expect(collectorHealthDetail(status)).toBe("stale: pid 4242, heartbeat 5s ago, 2 launches");
 });
 
 darwinTest("running before its first heartbeat (or an unreadable one): yellow", async () => {

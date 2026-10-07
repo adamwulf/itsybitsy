@@ -305,8 +305,9 @@ collecting), `stop` (end collection for every running launch).
 4. **`ib watch`** — the same `[Sandbox]` and `[SandboxCollector]` records reach
    the DENIALS parser. The top bar shows a "Collector" stoplight left of
    "Telegram" (`src/sandbox-collector-light.ts`): grey = off or idle, green =
-   daemon with a fresh heartbeat, yellow = no heartbeat yet, a heartbeat older
-   than 10 s, or launches attached with no daemon on one probe, red = the same
+   daemon with a fresh heartbeat, yellow = no heartbeat yet, a heartbeat that
+   `status` calls STALE (over 5 s), or launches attached with no daemon on one
+   probe, red = the same
    on two probes in a row. It probes in process every 5 s (only while the switch
    is on) with non-blocking, immediately released locks; `?` help shows details.
 

@@ -49,8 +49,9 @@ const LOCK_SH = 1, LOCK_EX = 2, LOCK_NB = 4;
 const SAMPLE_MS = 20;
 const MARKER_MS = 50;
 const CHECK_MS = 250;
-/** `status` only: a heartbeat this old means the daemon loop is not running. */
-const STALE_HEARTBEAT_MS = 5000;
+/** `status` and the `ib watch` Collector light only: a heartbeat this old
+ * means the daemon loop is not running. */
+export const STALE_HEARTBEAT_MS = 5000;
 
 export interface SandboxCollectorPaths {
   root: string; daemonLock: string; clientsLock: string; inbox: string; heartbeat: string; log: string;

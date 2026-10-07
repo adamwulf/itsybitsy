@@ -71,6 +71,9 @@ if [[ -n "$IB_SANDBOX_LOG_DIR" ]]; then
         if [[ "$IB_SANDBOX_LOG_DIR" == '<SANDBOX-LOG-ROOT>/<AGENT-HASH>'"/sandbox-log."* && "${IB_SANDBOX_LOG_DIR##*/}" =~ ^sandbox-log\.[a-zA-Z0-9]+$ ]]; then
             rm -rf -- "$IB_SANDBOX_LOG_DIR"
         fi
+        # The namespace holds the agent's profile while the agent exists, so this
+        # succeeds only after a teardown removed it.
+        rmdir '<SANDBOX-LOG-ROOT>/<AGENT-HASH>' 2>/dev/null
     ) </dev/null >/dev/null 2>>"$AGENT_LOG" &
     collector_wait=0
     while [[ ! -f "$IB_SANDBOX_LOG_DIR/ready" && ! -f "$IB_SANDBOX_LOG_DIR/failed" && -d "$IB_SANDBOX_LOG_DIR" && "$collector_wait" -lt 100 ]]; do

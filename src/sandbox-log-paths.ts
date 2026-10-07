@@ -19,10 +19,13 @@ export function sandboxProfilePath(agentDir: string, home?: string): string {
   return join(sandboxLogParent(agentDir, home), "sandbox.sb");
 }
 
-/** Agent teardown: remove the profile, then its namespace directory once no
- * launch directory is left in it (a launch's supervisor removes its own).
+/** Agent teardown: remove the profile, then the namespace directory if it is
+ * empty. A launch whose supervisor has not removed its own directory yet keeps
+ * the namespace; that supervisor removes it after its directory (preamble).
  * Best effort: the tag belongs to no live launch any more, and a leftover file
- * must never fail a teardown. */
+ * must never fail a teardown. A sandboxed caller (for example a `--no-worktree`
+ * sandboxed manager that runs a teardown directly) cannot write sealed/, so its
+ * agent's profile stays, harmless. */
 export function removeSandboxProfile(agentDir: string, home?: string): void {
   const profile = sandboxProfilePath(agentDir, home);
   try { rmSync(profile, { force: true }); } catch { /* unwritable here: leave it */ }

@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, chmod } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-log-launch";
 import { shellQuote } from "./validation";
-import { sandboxLogParent } from "./sandbox-log-paths";
+import { removeSandboxProfile, sandboxLogParent, sandboxProfilePath } from "./sandbox-log-paths";
 
 async function fixture(mode: "success" | "startup-failure" | "runtime-failure" | "collector-sigkill" | "slow-ready") {
   const dir = await mkdtemp(join(tmpdir(), "sandbox-launch-test-"));
@@ -24,6 +25,9 @@ ${mode === "collector-sigkill" ? 'sleep 0.15; kill -KILL "$$"' : ""}
 while [ ! -s "$dir/stop" ]; do sleep 0.01; done
 `);
   await chmod(join(bin, "ib"), 0o755);
+  // The launcher writes the agent's profile into its namespace before any launch.
+  await mkdir(sandboxLogParent(dir, dir), { recursive: true });
+  await writeFile(sandboxProfilePath(dir, dir), "(version 1)\n");
   const wrapper = join(bin, "required-wrapper");
   await writeFile(wrapper, `#!/bin/sh\nprintf 'wrapped\\n' >> ${shellQuote(join(dir, "enforcement"))}\nexec "$@"\n`);
   await chmod(wrapper, 0o755);
@@ -103,6 +107,31 @@ test("late old-launch cleanup does not stop a replacement or remove its artifact
     expect(await Bun.file(join(newDir, "ready")).exists()).toBe(true);
     expect(replacement.exitCode).toBeNull();
     expect(await replacement.exited).toBe(0);
+  } finally { await f.cleanup(); }
+});
+
+test("the supervisor removes the agent's namespace after its launch, but only once the profile is gone", async () => {
+  const f = await fixture("success");
+  try {
+    const parent = sandboxLogParent(f.dir, f.dir);
+    const profile = sandboxProfilePath(f.dir, f.dir);
+    // While the agent exists, its profile keeps the namespace.
+    const kept = await f.start("kept", 0);
+    await until(() => Bun.file(join(f.dir, "kept-dir")).exists());
+    const keptDir = await readFile(join(f.dir, "kept-dir"), "utf8");
+    expect(await kept.exited).toBe(0);
+    await until(async () => !existsSync(keptDir));
+    await Bun.sleep(100);
+    expect(existsSync(profile)).toBe(true);
+    // A teardown while a launch still runs removes the profile, but the launch
+    // directory keeps the namespace; its supervisor removes both afterwards.
+    const running = await f.start("running", 0.5);
+    await until(() => Bun.file(join(f.dir, "running-dir")).exists());
+    removeSandboxProfile(f.dir, f.dir);
+    expect(existsSync(profile)).toBe(false);
+    expect(existsSync(parent)).toBe(true);
+    expect(await running.exited).toBe(0);
+    await until(async () => !existsSync(parent));
   } finally { await f.cleanup(); }
 });
 

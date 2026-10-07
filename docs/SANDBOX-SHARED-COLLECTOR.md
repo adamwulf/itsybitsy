@@ -338,10 +338,15 @@ see its marker.
   owner still runs (`stop` request, or the registrar died).
 - **Per agent**: each spawn and resume overwrites `<namespace>/sandbox.sb`. The
   teardowns that delete the agent's seal (retire, merge, nuke, and the cleanup
-  of a failed spawn) also delete the profile, and then the namespace directory
-  once no launch directory is left in it (`removeSandboxProfile`). That is best
-  effort: a teardown never fails on it, and a leftover profile's tag belongs to
-  no live launch.
+  of a failed spawn), and the orphaned-directory repair of the health check,
+  also delete the profile (`removeSandboxProfile`), and then the namespace
+  directory if it is empty. A launch still running at teardown keeps the
+  namespace through its launch directory; its supervisor runs `rmdir` on the
+  namespace right after removing that directory, which succeeds only once the
+  profile is gone. This is best effort: a teardown never fails on it, and a
+  leftover profile's tag belongs to no live launch. A sandboxed caller that runs
+  a teardown directly cannot write the sealed tree, so its agent's profile
+  stays.
 - **Daemon**: exits when no launch and no `attach` remain (§3); its lifeline
   closes, so the helper and `log stream` end with it; it removes its heartbeat.
 

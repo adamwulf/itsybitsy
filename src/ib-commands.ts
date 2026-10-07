@@ -1774,9 +1774,10 @@ export async function resumeAgent(
       try {
         const frozenPaths = resolvePathsConfig(agent.meta.paths);
         // Re-derive the spawn capability from meta (per-agent override, then
-        // the type), so an unchanged agent replays a byte-identical profile
-        // while a meta.canSpawnChildren toggle flips exactly the REPOAGENTS op,
-        // the PARENTCLAUDE root, and the tmux deny on resume.
+        // the type), so an unchanged agent replays the same rules (only the
+        // attribution tag changes) while a meta.canSpawnChildren toggle flips
+        // exactly the REPOAGENTS op, the PARENTCLAUDE root, and the tmux deny
+        // on resume.
         const resumeCanSpawnChildren = await metaCanSpawnChildren(
           agent.meta as unknown as Record<string, unknown>,
         );

@@ -394,7 +394,8 @@ running and reject every protocol-2 registration. With `stop`, the old daemon
 finishes the running (untagged) launches and exits, and the next new launch
 starts a daemon from the new `ib`. Each running old agent gets one coverage
 WARNING ("collection stopping before the registered CLI exits; coverage
-reduced") and "INFO collector stopped" in its `agent.log`, and no ERROR.
+reduced"; two if that launch had suppressed output since its last summary)
+and "INFO collector stopped" in its `agent.log`, and no ERROR.
 `restart` also works, but the new daemon then rejects each old launch's
 protocol-1 registration when it re-adopts it (tested): each old agent gets up
 to two WARNINGs (the restart, and "starting a new one" in the one attach that
@@ -456,8 +457,11 @@ untagged (older) launch is rejected rather than tracked by a fallback.
   a launch directory still in it.
 - `src/ib-commands.test.ts`: spawn and resume write the profile to the sealed
   namespace (0600), `start.sh` names it, no file in the agent directory holds
-  the nonce, and a resume keeps the rules under a new tag; retire and nuke
-  remove the profile and its namespace.
+  the nonce, and a resume keeps the rules under a new tag; retire, nuke and
+  merge remove the profile and its namespace, and so does the cleanup of a
+  sandboxed spawn that fails after its profile was written.
+- `src/health-check.test.ts`: the orphaned-directory repair removes the
+  profile and its namespace with the agent directory.
 - `src/sandbox-denials.test.ts`: a real kernel report → its tag and offender; a
   coalesced summary keeps its count; `\nib-agent:<other>` in a path with the
   real tag last → the real tag only; a truncated report's last line is never a
@@ -478,12 +482,14 @@ untagged (older) launch is rejected rather than tracked by a fallback.
   0.9–2.5 s after registering (a 2 s loop fails the first, checked by
   mutation); `attach` registers its profile's tag and refuses an untagged
   profile; a protocol-1 launch is rejected by a new daemon's startup scan, its
-  attach returns with an ERROR and the daemon then exits; restart and a stream failure leave both launches
-  to a successor that re-adopts them and attributes their tags again; plus the
-  registration, lock, hand-over, FIFO, stale-directory, start-count and stop
-  tests of the previous design.
+  attach returns with an ERROR and the daemon then exits; restart and a stream
+  failure leave both launches to a successor that re-adopts them and
+  attributes their tags again; plus the registration, lock, hand-over, FIFO,
+  stale-directory, start-count and stop tests of the previous design.
 - `src/sandbox-log-launch.test.ts`: the gate is exactly `exec 9>&-; exec "$@"`
-  in front of the wrapper; the CLI inherits no collector variable and no fd 9.
+  in front of the wrapper; the CLI inherits no collector variable and no fd 9;
+  the supervisor keeps the namespace while the profile is there, and removes it
+  after its launch once a teardown during that launch removed the profile.
 
 **Live** (2026-10-07, this host, kernel sandbox off for the worker): a scratch
 `ib` shim dispatching `sandbox-collector attach|serve` and `sandbox-log-stream`

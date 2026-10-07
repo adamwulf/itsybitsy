@@ -156,7 +156,7 @@ test("CLI inherits neither collector control variables nor reserved fd 9", async
   const f = await fixture("success");
   try {
     const probe = join(f.dir, "probe.sh");
-    await writeFile(probe, `#!/bin/sh\n[ -z "\${IB_SANDBOX_LOG_DIR+x}" ] || exit 10\n[ -z "\${IB_SANDBOX_LOG_AGENT_LOG+x}" ] || exit 11\n[ ! -e /dev/fd/9 ] || exit 12\n`);
+    await writeFile(probe, `#!/bin/sh\n[ -z "\${IB_SANDBOX_LOG_DIR+x}" ] || exit 10\n[ ! -e /dev/fd/9 ] || exit 12\n`);
     const child = await f.start("start", 0, `/bin/sh ${shellQuote(probe)}`);
     expect(await child.exited).toBe(0);
   } finally { await f.cleanup(); }

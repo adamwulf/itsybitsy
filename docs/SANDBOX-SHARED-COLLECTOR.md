@@ -245,13 +245,23 @@ The daemon checks every registration (inbox entry or re-adopted directory):
   profile, acting on a path an agent chose) ends with path text. A path ending in
   `\nib-agent:<tag>` would be read as that tag, so the forger needs a secret
   128-bit nonce it cannot read.
-- A report the kernel truncated (§5) is never attributed, so a cut that leaves a
-  forged line last does not count.
+- A report the kernel truncated ends in `<…>` (§5), so a cut can never leave a
+  forged tag as the whole last line.
 
 **Residual.** Unsandboxed processes of the user (the user, `@system`, agents
 with `sandbox: false`, and a sandboxed spawner through its tmux escape,
 SPEC-SANDBOX.md 4C.3) can read the sealed tree, learn a tag, and cause tagged
 reports; they can already write any `agent.log` directly.
+
+**Depends on the unified log store.** Tag secrecy also depends on macOS not
+persisting kernel Sandbox reports in the unified log store (today it does not;
+review round 1 checked). If a logging profile raised their persistence, every
+tag would land in the world-readable tracev3 files under
+`/private/var/db/diagnostics`, inside the floor's `/private/var` read root.
+
+**An agent can hide its own denials** with very long names: a report over 1008
+bytes is cut and loses its tag (§5), so it is not recorded. Enforcement is not
+affected; only the DENIALS view of that agent is incomplete.
 
 ## 5. Attribution
 
@@ -313,7 +323,7 @@ mandatory `sandbox-exec` wrapper. Every failure is diagnostic and visible in
 | `ib sandbox-collector restart`, or SIGTERM to the daemon (tested) | The daemon logs a WARNING to each launch, drops them WITHOUT `done`, gives up the role, then tears down its stream. The attaches start a new daemon, which re-adopts every launch with its tag. Collection continues. |
 | `ib sandbox-collector stop` (tested) | Ends collection for every running launch: each gets `collector stopped` and `done`, each attach returns, the daemon exits. Running agents are not collected again until resumed. |
 | Daemon alive but stuck (no loop) | A lock cannot show it: the lock stays held. `ib sandbox-collector status` prints the heartbeat age and marks it STALE after 5 s, with the fix: `kill -9 <pid>` (from the heartbeat). The lock then frees and the attaches start a new daemon that re-adopts every launch. Nothing kills it automatically. |
-| `ib` rebuilt while a daemon runs | The daemon keeps its binary until it exits (when no launch remains). `registration.json` carries protocol `v`; an unknown version is rejected visibly. After an `ib` that changes the protocol (as tag attribution did, 1 → 2), run `ib sandbox-collector restart` once so new launches register with a new daemon. |
+| `ib` rebuilt while a daemon runs | The daemon keeps its binary until it exits (when no launch remains). `registration.json` carries protocol `v`; an unknown version is rejected visibly. After an `ib` that changes the protocol (as tag attribution did, 1 → 2), run `ib sandbox-collector stop` once so the next new launch starts a new daemon (§10). |
 
 **Blast radius**: one daemon failure touches every agent at once (before: one
 launch). Restart plus re-adopt bounds the gap to the time to start a daemon and
@@ -374,11 +384,15 @@ Collection is on (2026-10-06). New spawns and resumes attach; running agents
 keep their current scripts until resumed or respawned with the rebuilt `ib`.
 
 **Deploying tag attribution** (once): install the rebuilt `ib`, then run
-`ib sandbox-collector restart`. A daemon from the older `ib` would otherwise keep
-running and reject every protocol-2 registration. The new daemon rejects the
-older launches' protocol-1 registrations when it re-adopts them (a visible ERROR
-in their `agent.log`); those agents stay unattributed until their next resume or
-respawn. No compatibility path exists for untagged launches.
+`ib sandbox-collector stop`. A daemon from the older `ib` would otherwise keep
+running and reject every protocol-2 registration. With `stop`, the old daemon
+finishes the running (untagged) launches, their attaches return quietly, and it
+exits; the next new launch starts a daemon from the new `ib`. `restart` also
+works, but the new daemon then rejects each old launch's protocol-1
+registration when it re-adopts it, which adds WARNING and ERROR lines to every
+old agent's `agent.log` (tested). Either way, agents started by the older `ib`
+stay uncollected until their next resume or respawn. No compatibility path
+exists for untagged launches.
 
 To turn collection off:
 
@@ -428,10 +442,13 @@ untagged (older) launch is rejected rather than tracked by a fallback.
   validation; tags are 128-bit, new per call, malformed tags refused; the
   live macOS `sandbox-exec` probe compiles and enforces the tagged profile.
 - `src/sandbox-log-paths.test.ts`: the shipped floor denies the profile path
-  (read and write) for spawners and non-spawners, also with broad access.
+  (read and write) for spawners and non-spawners, also with broad access;
+  `removeSandboxProfile` removes the profile and the empty namespace but never
+  a launch directory still in it.
 - `src/ib-commands.test.ts`: spawn and resume write the profile to the sealed
   namespace (0600), `start.sh` names it, no file in the agent directory holds
-  the nonce, and a resume keeps the rules under a new tag.
+  the nonce, and a resume keeps the rules under a new tag; retire and nuke
+  remove the profile and its namespace.
 - `src/sandbox-denials.test.ts`: a real kernel report → its tag and offender; a
   coalesced summary keeps its count; `\nib-agent:<other>` in a path with the
   real tag last → the real tag only; a truncated report's last line is never a
@@ -439,15 +456,20 @@ untagged (older) launch is rejected rather than tracked by a fallback.
   `logger`-style, wrong processID / image / sender / messageType, sandboxd →
   rejected; an ambiguous process name → offender null, tag kept; the record
   never holds the tag.
-- `src/sandbox-collector.test.ts` (26 tests, real processes and flocks; the
+- `src/sandbox-collector.test.ts` (28 tests, real processes and flocks; the
   stream is a controlled peer, not `/usr/bin/log`): two launches each get only
   their own records, by exact tag (an unknown tag, a tag followed by a space,
-  and another launch's tag in a path are not attributed); a duplicate tag is
-  rejected; a finished launch's tag no longer matches; duplicate counts and the
-  ambiguous-name summary; the daemon loop runs once a second (one marker and
-  one heartbeat per pass, the 3 s marker deadline) while a returned marker and
-  a report are handled between passes; `attach` registers its profile's tag and
-  refuses an untagged profile; restart and a stream failure leave both launches
+  a report cut inside a tag, and another launch's tag in a path are not
+  attributed); a duplicate tag is rejected; a finished launch's tag no longer
+  matches; duplicate counts and the ambiguous-name summary; the daemon loop
+  runs once a second (one marker and one heartbeat per pass) while a returned
+  marker and a report are handled between passes; the 5 s preamble bound at
+  the real cadence: a launch whose markers never return is `done` within 4.5 s,
+  and a cold start that loses its first marker is ready on the next pass,
+  0.9–2.5 s after registering (a 2 s loop fails the first, checked by
+  mutation); `attach` registers its profile's tag and refuses an untagged
+  profile; a protocol-1 launch is rejected by a new daemon's startup scan, its
+  attach returns with an ERROR and the daemon then exits; restart and a stream failure leave both launches
   to a successor that re-adopts them and attributes their tags again; plus the
   registration, lock, hand-over, FIFO, stale-directory, start-count and stop
   tests of the previous design.

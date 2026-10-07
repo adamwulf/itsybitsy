@@ -69,7 +69,10 @@ function tagRawRule(entry: string, tag: string): string {
   if (denies > 1 || !/^\(\s*deny\s/.test(code) || /\(\s*with\s+message(?=[\s()";])/.test(code)) {
     throw new Error(`a deny in rawAllow must be one top-level (deny …) rule without its own message: ${entry}`);
   }
-  return denyRule(entry.trim().replace(/^\(\s*deny\s+/, "").slice(0, -1).trimEnd(), tag);
+  const body = entry.trim().replace(/^\(\s*deny\s+/, "").slice(0, -1).trimEnd();
+  // A `;` comment runs to the end of its line: start the tag on a new one, or
+  // the comment would hide it and the closing paren.
+  return denyRule(code.includes(";") ? `${body}\n` : body, tag);
 }
 
 /** The tag of a generated profile: its second line is always the tagged default deny. */

@@ -426,6 +426,22 @@ describe("sandbox profile emission", () => {
     expect(sandboxProfileTag(profile)).toBe(TAG);
   });
 
+  test("a rawAllow deny ending in a ; comment keeps its tag and its closing paren", () => {
+    const entry = '(deny file-read*\n  (literal "/tmp/x") ; trailing comment\n)';
+    expect(validateSandboxFrontmatter({ rawAllow: [entry] }).errors).toEqual([]);
+    const profile = generateProfile(config({ rawAllow: [entry, "(allow process*)"] }), EMPTY_PATHS, PARAMS);
+    const rule = '(deny file-read*\n  (literal "/tmp/x") ; trailing comment\n (with message "' + TAG + '"))';
+    // The tag and the paren that closes the rule start a new line, after the comment.
+    expect(profile).toContain(`${rule}\n(allow process*)\n`);
+    const sandboxExec = Bun.which("sandbox-exec");
+    if (process.platform !== "darwin" || !sandboxExec) return;
+    // The real compiler agrees: without the new line, the comment would swallow
+    // the paren and the rule would stay open.
+    const compiled = Bun.spawnSync({ cmd: [sandboxExec, "-p", `(version 1)\n(allow default)\n${rule}\n`, "/usr/bin/true"], stderr: "pipe" });
+    if (compiled.stderr.toString().includes("sandbox_apply: Operation not permitted")) return; // nested sandbox
+    expect(compiled.exitCode).toBe(0);
+  });
+
   test("a rawAllow deny that cannot be tagged is refused by generation and by validation", () => {
     for (const entry of [
       '(if (param "X") (deny file-read*))',

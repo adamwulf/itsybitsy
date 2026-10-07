@@ -153,8 +153,11 @@ export function formatAgentRow(
  */
 export interface LoadedLogWindow {
   agentId: string;
-  /** Total file size at the time of the last read (cache invalidation key) */
-  fileSize: number;
+  /**
+   * Total file size at the time of the last read (cache invalidation key);
+   * null when the cached content is the "No <file> found" placeholder.
+   */
+  fileSize: number | null;
   /** True if the read started at byte 0 — entire file is in memory, no further reads needed */
   atTop: boolean;
   /** Number of lines currently held in the matching content field */
@@ -842,7 +845,8 @@ export function triggerAsyncLoadIfNeeded(ctx: PaneCtx, forceRefresh = false) {
  * `currentFileSize` is the live size of the log file on disk, or null if the
  * caller could not stat it. When the file has grown since the last read, the
  * cache is invalidated so that newly-appended lines from active agents are
- * picked up.
+ * picked up. A cached missing (null) or empty (0) placeholder stays a hit
+ * until the stat result changes.
  *
  * Returns true when the cache is up-to-date and covers the requested window
  * with no need for new I/O.
@@ -857,9 +861,10 @@ function logCacheCovers(
 ): boolean {
   if (!loaded) return false;
   if (loaded.agentId !== agentId) return false;
-  // The file has changed on disk (grew, shrank, or vanished) — re-read so
-  // active agents see new lines and orphaned-file errors surface promptly.
-  if (currentFileSize === null || currentFileSize !== loaded.fileSize) return false;
+  // The file has changed on disk (appeared, grew, shrank, or vanished) —
+  // re-read so active agents see new lines and orphaned-file errors surface
+  // promptly.
+  if (currentFileSize !== loaded.fileSize) return false;
   // If we already have the whole file, nothing more to read.
   if (loaded.atTop) return true;
   // Resize → reload (need to compute a different window size)
@@ -917,9 +922,12 @@ export async function loadTailLog(ctx: PaneCtx, agent: Agent, mode: TailLogMode)
     });
     if (ctx.currentAgentId !== startedForAgentId) return;
     ctx.rightPane[slot.contentKey] = colorizeLog(window.lines);
-    ctx.rightPane[slot.windowKey] = window.isPlaceholder ? null : {
+    // Cache real content and the missing/empty placeholders (keyed on the
+    // stat result null / 0, so the file appearing or growing re-reads). Never
+    // cache a read-error or "line too long" placeholder.
+    ctx.rightPane[slot.windowKey] = window.isPlaceholder && !window.fileState ? null : {
       agentId: agent.id,
-      fileSize: window.fileSize,
+      fileSize: window.fileState === "missing" ? null : window.fileSize,
       atTop: window.atTop,
       loadedLineCount: window.lines.length,
       displayHeight,

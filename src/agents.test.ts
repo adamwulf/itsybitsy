@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, mkdir, readdir, unlink, utimes, writeFile, open } from "fs/promises";
+import { mkdtemp, rm, mkdir, readdir, unlink, utimes, writeFile, open, chmod } from "fs/promises";
 import { tmpdir } from "os";
 import {
   computeAge,
@@ -74,7 +74,6 @@ import {
   sleepMsCtx,
   readAgentFileWindow,
   statAgentFileSize,
-  readAgentLogWindow,
   statAgentLogSize,
 } from "./agents";
 import type { TransientState, AgentOperation } from "./agents";
@@ -1397,6 +1396,8 @@ describe("readAgentMeta", () => {
 });
 
 describe("readAgentFileWindow / statAgentFileSize (per-file log tail reads)", () => {
+  // chmod 000 does not stop root from reading.
+  const unreadableTest = process.getuid?.() === 0 ? test.skip : test;
   let tempDir: string;
   let agentDir: string;
   let agent: Agent;
@@ -1417,6 +1418,7 @@ describe("readAgentFileWindow / statAgentFileSize (per-file log tail reads)", ()
       const win = await readAgentFileWindow(agent, fileName, { rows: 20, scrollOffset: 0 });
       expect(win.lines).toEqual([`No ${fileName} found`]);
       expect(win.isPlaceholder).toBe(true);
+      expect(win.fileState).toBe("missing");
       expect(await statAgentFileSize(agent, fileName)).toBeNull();
     });
 
@@ -1425,7 +1427,22 @@ describe("readAgentFileWindow / statAgentFileSize (per-file log tail reads)", ()
       const win = await readAgentFileWindow(agent, fileName, { rows: 20, scrollOffset: 0 });
       expect(win.lines).toEqual([`${fileName} is empty`]);
       expect(win.isPlaceholder).toBe(true);
+      expect(win.fileState).toBe("empty");
       expect(await statAgentFileSize(agent, fileName)).toBe(0);
+    });
+
+    unreadableTest(`unreadable ${fileName}: "Failed to read" placeholder has no fileState`, async () => {
+      const logPath = join(agentDir, fileName);
+      await Bun.write(logPath, "secret");
+      await chmod(logPath, 0o000);
+      try {
+        const win = await readAgentFileWindow(agent, fileName, { rows: 20, scrollOffset: 0 });
+        expect(win.lines).toEqual([`Failed to read ${fileName}`]);
+        expect(win.isPlaceholder).toBe(true);
+        expect(win.fileState).toBeUndefined();
+      } finally {
+        await chmod(logPath, 0o644);
+      }
     });
 
     test(`large ${fileName}: reads only a tail window of whole lines`, async () => {
@@ -1435,6 +1452,7 @@ describe("readAgentFileWindow / statAgentFileSize (per-file log tail reads)", ()
       await Bun.write(join(agentDir, fileName), text);
       const win = await readAgentFileWindow(agent, fileName, { rows: 10, scrollOffset: 0 });
       expect(win.isPlaceholder).toBe(false);
+      expect(win.fileState).toBeUndefined();
       expect(win.atTop).toBe(false);
       expect(win.fileSize).toBe(text.length);
       expect(win.lines.length).toBeLessThan(lines.length);
@@ -1455,14 +1473,15 @@ describe("readAgentFileWindow / statAgentFileSize (per-file log tail reads)", ()
     expect(px.lines).toEqual(["No sandbox-proxy.log found"]);
   });
 
-  test("agent.log wrappers keep their signatures and agent.log placeholders", async () => {
-    const missing = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+  test("agent.log: placeholders name agent.log; statAgentLogSize matches statAgentFileSize", async () => {
+    const missing = await readAgentFileWindow(agent, "agent.log", { rows: 20, scrollOffset: 0 });
     expect(missing.lines).toEqual(["No agent.log found"]);
     expect(await statAgentLogSize(agent)).toBeNull();
     await Bun.write(join(agentDir, "agent.log"), "a1\na2");
-    const win = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    const win = await readAgentFileWindow(agent, "agent.log", { rows: 20, scrollOffset: 0 });
     expect(win.lines).toEqual(["a1", "a2"]);
     expect(await statAgentLogSize(agent)).toBe("a1\na2".length);
+    expect(await statAgentFileSize(agent, "agent.log")).toBe("a1\na2".length);
   });
 });
 

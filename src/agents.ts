@@ -4187,8 +4187,8 @@ export async function readAgentLog(agent: Agent): Promise<string[]> {
 
 /**
  * Stat the agent.log file and return its current size, or null if it does
- * not exist. Used by the AGENT LOG cache layer to detect whether the file
- * has grown since the last tail read.
+ * not exist. Used by the DENIALS loader to skip re-parsing an unchanged
+ * agent.log.
  */
 export async function statAgentLogSize(agent: Agent): Promise<number | null> {
   return statAgentFileSize(agent, "agent.log");
@@ -4211,7 +4211,7 @@ export async function statAgentFileSize(agent: Agent, fileName: string): Promise
   }
 }
 
-/** Tail-window snapshot of an agent log file (agent.log, watchdog.log) */
+/** Tail-window snapshot of an agent log file (agent.log, watchdog.log, sandbox-proxy.log) */
 export interface LogWindow {
   /** Lines in chronological order (newest-last). If start > 0, the partial first line is dropped. */
   lines: string[];
@@ -4224,6 +4224,12 @@ export interface LogWindow {
    * rather than real log content. Callers can use this to skip the cache.
    */
   isPlaceholder: boolean;
+  /**
+   * Set only on the "No <file> found" / "<file> is empty" placeholders: a
+   * stable file state a caller may cache until the file's size changes. Read
+   * errors and the "line too long" placeholder leave it unset.
+   */
+  fileState?: "missing" | "empty";
 }
 
 export interface ReadLogWindowOpts {
@@ -4239,17 +4245,6 @@ export interface ReadLogWindowOpts {
 const BYTES_PER_LINE_ESTIMATE = 200;
 /** Minimum bytes to read even for very small windows */
 const MIN_TAIL_BYTES = 8192;
-
-/**
- * Read only the tail of agent.log needed to display the requested window.
- * See readAgentFileWindow.
- */
-export async function readAgentLogWindow(
-  agent: Agent,
-  opts: ReadLogWindowOpts,
-): Promise<LogWindow> {
-  return readAgentFileWindow(agent, "agent.log", opts);
-}
 
 /**
  * Read only the tail of a log file in the agent's storage dir (e.g.
@@ -4269,11 +4264,11 @@ export async function readAgentFileWindow(
   try {
     const file = Bun.file(logPath);
     if (!(await file.exists())) {
-      return { lines: [`No ${fileName} found`], fileSize: 0, atTop: true, isPlaceholder: true };
+      return { lines: [`No ${fileName} found`], fileSize: 0, atTop: true, isPlaceholder: true, fileState: "missing" };
     }
     const fileSize = file.size;
     if (fileSize === 0) {
-      return { lines: [`${fileName} is empty`], fileSize: 0, atTop: true, isPlaceholder: true };
+      return { lines: [`${fileName} is empty`], fileSize: 0, atTop: true, isPlaceholder: true, fileState: "empty" };
     }
 
     const rows = Math.max(1, opts.rows);

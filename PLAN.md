@@ -346,7 +346,7 @@ Matching `ib watch` keybindings exactly where possible; new keys noted.
 - `g` — jump to STATUS pane when in normal context; "go to agent" when in QUESTIONS pane (navigates to the agent that asked the selected question). Note: ib watch's help claims `g` = status jump but it's dead code in the bash implementation — itsybitsy intentionally implements both behaviors correctly
 - `e` — jump directly to ERRORS pane
 - `q` — jump directly to QUESTIONS pane
-- `t` — cycle denials time filter (only active in DENIALS pane, mode 2); 3 filter levels
+- `t` — cycle denials time filter (only active in DENIALS pane, mode 4); 3 filter levels
 - `;` — scroll pane down (show older content)
 - `l` — scroll pane up (toward bottom / newer content)
 - `[` / `]` — resize focused panel width (sidebar width when sidebar panel focused; split-pane position when agent/right-pane focused)

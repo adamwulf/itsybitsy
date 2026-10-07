@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, mkdir } from "fs/promises";
+import { mkdtemp, rm, mkdir, chmod } from "fs/promises";
 import { tmpdir } from "os";
 import { makeAgent } from "../test-utils";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
@@ -1024,6 +1024,8 @@ describe("loadAgentLog (windowed)", () => {
 });
 
 describe("loadTailLog (WATCHDOG LOG / PROXY LOG)", () => {
+  // chmod 000 does not stop root from reading.
+  const unreadableTest = process.getuid?.() === 0 ? test.skip : test;
   let tmpDir: string;
 
   beforeEach(async () => {
@@ -1059,8 +1061,9 @@ describe("loadTailLog (WATCHDOG LOG / PROXY LOG)", () => {
       const ctx = makePaneCtx({ agent });
       await loadTailLog(ctx, agent, m.mode);
       expect(ctx.rightPane[m.content]).toEqual([`No ${m.fileName} found`]);
-      // Placeholders are not cached, so the file is picked up once it appears.
-      expect(ctx.rightPane[m.window]).toBeNull();
+      // The missing state is cached keyed on fileSize null (see the
+      // "unchanged missing file" test below).
+      expect(ctx.rightPane[m.window]!.fileSize).toBeNull();
       expect(ctx.rightPane[m.loading]).toBe(false);
       ctx.rightPane.agent = agent;
       ctx.rightPane.setMode(m.mode);
@@ -1135,6 +1138,91 @@ describe("loadTailLog (WATCHDOG LOG / PROXY LOG)", () => {
       await waitFor(() => (ctx.rightPane[m.content]?.length ?? 0) > 1 && !ctx.rightPane[m.loading]);
       expect(ctx.rightPane[m.content]!.map(stripAnsi)).toEqual(["first entry", "second entry"]);
       expect(ctx.rightPane.render(60).map(stripAnsi).join("\n")).toContain("second entry");
+    });
+
+    test(`${m.mode}: unchanged missing ${m.fileName} is a cache hit (no re-read, no re-render) until the file appears`, async () => {
+      const [agent, agentDir] = await makeAgentDir(`agent-cache-missing-${m.fileName}`);
+      const ctx = makePaneCtx({ agent });
+      ctx.rightPane.agent = agent;
+      jumpToMode(ctx, m.mode);
+      await waitFor(() => ctx.rightPane[m.content] !== null && !ctx.rightPane[m.loading]);
+      expect(ctx.rightPane[m.content]).toEqual([`No ${m.fileName} found`]);
+      const cachedWindow = ctx.rightPane[m.window];
+      const cachedContent = ctx.rightPane[m.content];
+      const renders = ctx.renderCalls.length;
+
+      // Dashboard syncs while the file is still missing: every one is a hit.
+      for (let i = 0; i < 3; i++) {
+        triggerAsyncLoadIfNeeded(ctx);
+        await waitFor(() => !ctx.rightPane[m.loading]);
+      }
+      expect(ctx.rightPane[m.window]).toBe(cachedWindow);
+      expect(ctx.rightPane[m.content]).toBe(cachedContent);
+      expect(ctx.renderCalls.length).toBe(renders);
+
+      // The file appears: the next sync's stat no longer matches, so it loads.
+      await Bun.write(join(agentDir, m.fileName), "now it exists");
+      triggerAsyncLoadIfNeeded(ctx);
+      await waitFor(() => ctx.rightPane[m.content] !== cachedContent && !ctx.rightPane[m.loading]);
+      expect(ctx.rightPane[m.content]!.map(stripAnsi)).toEqual(["now it exists"]);
+      expect(ctx.rightPane[m.window]!.fileSize).toBe("now it exists".length);
+      expect(ctx.renderCalls.length).toBeGreaterThan(renders);
+    });
+
+    test(`${m.mode}: unchanged empty ${m.fileName} is a cache hit until it grows`, async () => {
+      const [agent, agentDir] = await makeAgentDir(`agent-cache-empty-${m.fileName}`);
+      const logPath = join(agentDir, m.fileName);
+      await Bun.write(logPath, "");
+      const ctx = makePaneCtx({ agent });
+      await loadTailLog(ctx, agent, m.mode);
+      expect(ctx.rightPane[m.content]).toEqual([`${m.fileName} is empty`]);
+      const cachedWindow = ctx.rightPane[m.window]!;
+      expect(cachedWindow.fileSize).toBe(0);
+      const renders = ctx.renderCalls.length;
+
+      await loadTailLog(ctx, agent, m.mode);
+      expect(ctx.rightPane[m.window]).toBe(cachedWindow);
+      expect(ctx.renderCalls.length).toBe(renders);
+
+      await Bun.write(logPath, "first line");
+      await loadTailLog(ctx, agent, m.mode);
+      expect(ctx.rightPane[m.content]!.map(stripAnsi)).toEqual(["first line"]);
+      expect(ctx.rightPane[m.window]!.fileSize).toBe("first line".length);
+    });
+
+    test(`${m.mode}: cached content re-reads when ${m.fileName} vanishes`, async () => {
+      // Real content cached, then the file is deleted: stat null !== cached
+      // size, so the placeholder replaces the stale lines.
+      const [agent, agentDir] = await makeAgentDir(`agent-vanish-${m.fileName}`);
+      const logPath = join(agentDir, m.fileName);
+      await Bun.write(logPath, "here for now");
+      const ctx = makePaneCtx({ agent });
+      await loadTailLog(ctx, agent, m.mode);
+      expect(ctx.rightPane[m.content]!.map(stripAnsi)).toEqual(["here for now"]);
+      await rm(logPath);
+      await loadTailLog(ctx, agent, m.mode);
+      expect(ctx.rightPane[m.content]).toEqual([`No ${m.fileName} found`]);
+      expect(ctx.rightPane[m.window]!.fileSize).toBeNull();
+    });
+
+    unreadableTest(`${m.mode}: a "Failed to read" placeholder is never cached`, async () => {
+      const [agent, agentDir] = await makeAgentDir(`agent-unreadable-${m.fileName}`);
+      const logPath = join(agentDir, m.fileName);
+      await Bun.write(logPath, "secret");
+      await chmod(logPath, 0o000);
+      try {
+        const ctx = makePaneCtx({ agent });
+        await loadTailLog(ctx, agent, m.mode);
+        expect(ctx.rightPane[m.content]).toEqual([`Failed to read ${m.fileName}`]);
+        expect(ctx.rightPane[m.window]).toBeNull();
+        const renders = ctx.renderCalls.length;
+        // Not cached: the next load reads (and renders) again.
+        await loadTailLog(ctx, agent, m.mode);
+        expect(ctx.rightPane[m.window]).toBeNull();
+        expect(ctx.renderCalls.length).toBe(renders + 1);
+      } finally {
+        await chmod(logPath, 0o644);
+      }
     });
 
     test(`${m.mode}: stale load (agent switched mid-await) writes nothing and keeps the new load's flag`, async () => {

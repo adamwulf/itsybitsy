@@ -2,7 +2,7 @@ import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout, setSy
 import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
-import { readAgentLog, readAgentLogWindow, readAgentPrompt, parseDenials } from "../agents";
+import { readAgentLog, readAgentFileWindow, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, AgentMeta, FlatEntry, PendingQuestion } from "../agents";
 import { stripAnsi } from "../parse-state";
 import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult, waitFor } from "../test-utils";
@@ -202,7 +202,7 @@ describe("readAgentLog", () => {
   });
 });
 
-describe("readAgentLogWindow", () => {
+describe("readAgentFileWindow (agent.log)", () => {
   let tmpDir: string;
 
   beforeEach(async () => {
@@ -219,7 +219,7 @@ describe("readAgentLogWindow", () => {
     await Bun.write(join(agentDir, "agent.log"), "line one\nline two\nline three");
 
     const agent = makeAgent("agent-small", tmpDir, false);
-    const win = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    const win = await readAgentFileWindow(agent, "agent.log", { rows: 20, scrollOffset: 0 });
     expect(win.atTop).toBe(true);
     expect(win.isPlaceholder).toBe(false);
     expect(win.lines).toEqual(["line one", "line two", "line three"]);
@@ -238,7 +238,7 @@ describe("readAgentLogWindow", () => {
 
     const agent = makeAgent("agent-big", tmpDir, false);
     // rows=20, scrollOffset=0 → desiredLines=60, desiredBytes=12000 → much smaller than file
-    const win = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    const win = await readAgentFileWindow(agent, "agent.log", { rows: 20, scrollOffset: 0 });
     expect(win.atTop).toBe(false);
     expect(win.isPlaceholder).toBe(false);
     // Last line of the window must be the last line of the file (lines are newest-last).
@@ -265,8 +265,8 @@ describe("readAgentLogWindow", () => {
     await Bun.write(join(agentDir, "agent.log"), lines.join("\n"));
 
     const agent = makeAgent("agent-scroll", tmpDir, false);
-    const small = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
-    const large = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 200 });
+    const small = await readAgentFileWindow(agent, "agent.log", { rows: 20, scrollOffset: 0 });
+    const large = await readAgentFileWindow(agent, "agent.log", { rows: 20, scrollOffset: 200 });
     // Bigger scrollOffset must produce a larger window (or atTop)
     expect(large.lines.length).toBeGreaterThan(small.lines.length);
     // Both should still end at the last line
@@ -278,7 +278,7 @@ describe("readAgentLogWindow", () => {
     const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-missing");
     await mkdir(agentDir, { recursive: true });
     const agent = makeAgent("agent-missing", tmpDir, false);
-    const win = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    const win = await readAgentFileWindow(agent, "agent.log", { rows: 20, scrollOffset: 0 });
     expect(win.isPlaceholder).toBe(true);
     expect(win.fileSize).toBe(0);
     expect(win.atTop).toBe(true);
@@ -290,7 +290,7 @@ describe("readAgentLogWindow", () => {
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "agent.log"), "");
     const agent = makeAgent("agent-empty2", tmpDir, false);
-    const win = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    const win = await readAgentFileWindow(agent, "agent.log", { rows: 20, scrollOffset: 0 });
     expect(win.isPlaceholder).toBe(true);
     expect(win.fileSize).toBe(0);
     expect(win.lines[0]).toContain("empty");
@@ -301,7 +301,7 @@ describe("readAgentLogWindow", () => {
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "agent.log"), "old line one\nold line two");
     const agent = makeAgent("agent-arc", tmpDir, true);
-    const win = await readAgentLogWindow(agent, { rows: 20, scrollOffset: 0 });
+    const win = await readAgentFileWindow(agent, "agent.log", { rows: 20, scrollOffset: 0 });
     expect(win.atTop).toBe(true);
     expect(win.lines).toEqual(["old line one", "old line two"]);
   });
@@ -317,9 +317,11 @@ describe("readAgentLogWindow", () => {
     await Bun.write(join(agentDir, "agent.log"), `prefix-line\n${huge}`);
     const agent = makeAgent("agent-bigline", tmpDir, false);
     // Tiny rows/buffer → desiredBytes = 8192 < 50KB → tail starts mid-huge-line.
-    const win = await readAgentLogWindow(agent, { rows: 5, scrollOffset: 0, bufferRows: 5 });
+    const win = await readAgentFileWindow(agent, "agent.log", { rows: 5, scrollOffset: 0, bufferRows: 5 });
     expect(win.atTop).toBe(false);
     expect(win.isPlaceholder).toBe(true);
+    // Not a stable missing/empty state, so callers must not cache it.
+    expect(win.fileState).toBeUndefined();
     expect(win.lines[0]).toContain("line too long");
   });
 });

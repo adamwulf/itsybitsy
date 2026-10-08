@@ -20,7 +20,7 @@ type DialogCommon = { width?: number };
 
 // Dialog types for agent actions
 export type DialogState =
-  | ({ type: "confirm"; prompt: string; confirmLabel: string; focusedButton: "confirm" | "cancel"; confirmColor?: string; onYes: () => void } & DialogCommon)
+  | ({ type: "confirm"; prompt: string; confirmLabel: string; focusedButton: "confirm" | "cancel" | "checkbox"; confirmColor?: string; checkbox?: { label: string; checked: boolean }; onYes: () => void } & DialogCommon)
   | ({ type: "input"; prompt: string; value: string; onSubmit: (value: string) => void; sanitize?: (text: string) => string;
       /** Set true while an acceptance-gated send launched from this dialog is in
        *  flight. The dialog is frozen (no re-submit, no cancel) until the send
@@ -225,12 +225,20 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
 
   if (dialog.type === "confirm") {
     if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left) || matchesKey(data, Key.right)) {
-      dialog.focusedButton = dialog.focusedButton === "confirm" ? "cancel" : "confirm";
+      const controls = dialog.checkbox
+        ? ["cancel", "confirm", "checkbox"] as const
+        : ["cancel", "confirm"] as const;
+      const backwards = matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left);
+      const index = controls.findIndex(control => control === dialog.focusedButton);
+      dialog.focusedButton = controls[(index + (backwards ? -1 : 1) + controls.length) % controls.length]!;
+      ctx.tui?.requestRender();
+    } else if (data === " " && dialog.focusedButton === "checkbox" && dialog.checkbox) {
+      dialog.checkbox.checked = !dialog.checkbox.checked;
       ctx.tui?.requestRender();
     } else if (matchesKey(data, Key.enter)) {
       if (dialog.focusedButton === "confirm") {
         dialog.onYes();
-      } else {
+      } else if (dialog.focusedButton === "cancel") {
         ctx.closeDialog();
       }
     }

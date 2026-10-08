@@ -25,7 +25,7 @@ import { readConfig, checkDeprecatedConfigKeys } from "../config";
 import { validateAllAgentTypes, ensureAgentTypesDir, listSpawnableTypeNamesSync } from "../agent-types";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
-import { TmuxPoller, hasAttachedClient, resizeTmuxWindow } from "../tmux-poller";
+import { TmuxPoller, hasAttachedClient, resizeTmuxWindow, expandTabs } from "../tmux-poller";
 import { isCodexBackedCli, parseModel } from "../agent-cli";
 import {
   IB_COORDINATOR_SESSION,
@@ -536,7 +536,8 @@ class DialogOverlayComponent implements Component {
     }
 
     lines.push(`└${"─".repeat(width - 2)}┘`);
-    return lines;
+    // The dialog is the overlay itself; see DashboardComponent.render's return.
+    return lines.map(expandTabs);
   }
 
   private buildContent(dialog: NonNullable<DialogState>, innerWidth: number): { title: string; contentLines: string[] } {
@@ -3392,7 +3393,13 @@ export class DashboardComponent implements Component {
     const statusLines = this.statusBar.render(width);
     lines.push(...statusLines);
 
-    return lines;
+    // Text from files, logs and prompts can carry tabs. pi-tui's visibleWidth()
+    // counts a tab as 3 columns, but the slicing that composites an overlay onto
+    // a row counts it as 0, so a row with a tab under an overlay comes out wider
+    // than the terminal and doRender throws. visibleWidth() measures a tab as
+    // exactly 3 spaces, so expanding here, after layout, changes no width.
+    // This and DialogOverlayComponent.render are the only roots pi-tui draws.
+    return lines.map(expandTabs);
   }
 
   /** Build titled separator at the top of the main area showing agent-id and pane-mode */

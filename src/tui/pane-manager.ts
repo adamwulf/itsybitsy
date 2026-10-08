@@ -19,7 +19,6 @@ import { displayState, computeStateColWidth, AGE_COL_WIDTH, favoriteStar } from 
 import { buildFocusSeparator } from "./focus";
 import { RESET, BOLD, DIM, RED, GREEN, CYAN, REVERSE, DIM_GRAY, YELLOW } from "./colors";
 import { formatSandboxDisplay } from "./sandbox-format";
-import { expandTabs } from "../tmux-poller";
 
 // Right pane modes. `p` cycles forward (+1) and `n` backward (-1), so from the
 // startup AGENT LOG pane `n` reaches WATCHDOG LOG then PROXY LOG and `p`
@@ -372,16 +371,6 @@ export class RightPaneComponent implements Component {
   }
 
   updateContent() {
-    this.buildContent();
-    // Every view's lines pass through here. File and command text (logs,
-    // prompt, denials, diff, status, errors) can carry literal tabs, which
-    // pi-tui measures as 3 columns but slices as 0 — a row with a tab under an
-    // overlay comes out wider than the terminal. See expandTabs().
-    this.content = this.content.map(expandTabs);
-  }
-
-  /** Fill this.content for the current mode (tabs are expanded by updateContent). */
-  private buildContent() {
     // When a repo header is selected, show repo summary for agent-specific modes
     if (this.selectedRepoHeader && !this.agent) {
       if (AGENT_SPECIFIC_MODES.has(this.mode)) {

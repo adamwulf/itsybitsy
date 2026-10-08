@@ -18,7 +18,7 @@ import { IB_COORDINATOR_SESSION } from "../coordinator";
 import { setUserConfigPath, resetUserConfigPath } from "../config";
 import { setUserHome, resetUserHome } from "../home";
 import type { SpawnResult } from "../types";
-import { PANE_MODES, type PaneMode } from "./pane-manager";
+import { PANE_MODES, FULL_WIDTH_MODES, type PaneMode } from "./pane-manager";
 import { computeSidebarHeights } from "./sidebar";
 import { assertDialog } from "./test-helpers";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
@@ -7534,20 +7534,22 @@ describe("idle render checks", () => {
   });
 });
 
-describe("tabs in right-pane text under an overlay", () => {
+describe("tabs on screen under an overlay", () => {
   // pi-tui's visibleWidth() counts \t as 3 columns, but the slicing it uses to
-  // composite an overlay onto a row counts it as 0 (see expandTabs() in
-  // ../tmux-poller). A tab on a row under the command palette made that row 3
-  // columns too wide, and doRender threw "Rendered line N exceeds terminal
-  // width". Seen live: AGENT LOG showing a codex stderr Ruby backtrace.
+  // composite an overlay onto a row counts it as 0. A tab on a row under an
+  // overlay (or inside the overlay) made that row 3 columns too wide, and
+  // doRender threw "Rendered line N exceeds terminal width". Seen live: the
+  // command palette over AGENT LOG showing a codex stderr Ruby backtrace.
   const WIDTH = 160;
   const ROWS = 30;
-  // The live case is a tab-first backtrace line. A tab in the columns the
-  // palette covers is cut out with them, so the lines move the tab along the
-  // row (0, 5, ... 95 columns in): some always land beside the palette, in the
-  // narrow right pane and in the full-width views alike.
-  const tabLines = (): string[] => Array.from({ length: 60 }, (_, i) =>
-    `${"word ".repeat(i % 20)}\tfrom /opt/homebrew/lib/ruby/3.4.0/net/http.rb:${i}:in 'Net::HTTP#connect'`);
+  // At 160x30 the 80-column command palette covers columns 40-119 of rows
+  // 10-18. A tab in those columns is cut out with them; a tab left or right of
+  // them on a palette row overflows that row. Every fixture below places its
+  // tabs so (checked with the fix reverted): each case overflows 5-9 rows.
+  // The narrow right pane starts at column 142: a tab-first line, one row each.
+  const narrowLines = (): string[] => Array.from({ length: 40 }, (_, i) => `\tfrom x.rb:${i}`);
+  // Full-width views start their text at column 62: the tab is 60 columns in.
+  const wideLines = (): string[] => Array.from({ length: 40 }, (_, i) => `${"x".repeat(60)}\tfrom x.rb:${i}`);
 
   /**
    * A real pi-tui TUI over an inert terminal. It is stopped, so the render
@@ -7579,45 +7581,84 @@ describe("tabs in right-pane text under an overlay", () => {
     Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
   });
 
+  /** A dashboard on the overlay TUI, with `agents` in the tree (the first selected). */
+  function dashboardWith(agents: Agent[]): { dashboard: DashboardComponent; composite: (lines: string[]) => string[] } {
+    const dashboard = makeDashboard();
+    const { tui, composite } = overlayTui();
+    dashboard.setTui(tui);
+    dashboard.onUpdate(agents, agents.map((agent) => makeFlatAgent(agent)), []);
+    return { dashboard, composite };
+  }
+
+  /** Render, composite the open overlay, and check no row overflows and no tab reaches the screen. */
+  function expectRowsFit(dashboard: DashboardComponent, composite: (lines: string[]) => string[], overlayTitle: string) {
+    const rendered = dashboard.render(WIDTH);
+    expect(stripAnsi(rendered.join("\n"))).toContain("from x.rb");
+    const rows = composite(rendered);
+    expect(stripAnsi(rows.join("\n"))).toContain(overlayTitle);
+    const overWidth = rows.map((row, i) => ({ i, width: visibleWidth(row) })).filter((r) => r.width > WIDTH);
+    expect(overWidth).toEqual([]);
+    expect(rows.filter((row) => row.includes("\t"))).toEqual([]);
+  }
+
+  test("witness: pi-tui overflows a row whose tab is beside an overlay", () => {
+    // No expansion anywhere: this proves the harness reproduces pi-tui's bug,
+    // and fails loudly if an upgrade changes how pi-tui slices a tab.
+    const { tui, composite } = overlayTui();
+    tui.showOverlay({ render: (width: number) => ["#".repeat(width)], invalidate() {} }, { width: 80, anchor: "center" });
+    const base = Array.from({ length: ROWS }, () => `${"a".repeat(130)}\t${"b".repeat(27)}`);
+    expect(visibleWidth(base[0]!)).toBe(WIDTH);
+    expect(composite(base).map((row) => visibleWidth(row)).filter((width) => width > WIDTH)).toEqual([WIDTH + 3]);
+  });
+
   // Every right-pane view that shows file or command text. DIFF / STATUS are
   // filled before jumpToMode so it does not spawn `ib diff` / `ib status`.
-  const views: { mode: PaneMode; fill: (rp: RightPaneComponent) => void }[] = [
-    { mode: "AGENT LOG", fill: (rp) => { rp.agentLogContent = tabLines(); } },
-    { mode: "WATCHDOG LOG", fill: (rp) => { rp.watchdogLogContent = tabLines(); } },
-    { mode: "PROXY LOG", fill: (rp) => { rp.proxyLogContent = tabLines(); } },
-    { mode: "INITIAL PROMPT", fill: (rp) => { rp.promptContent = tabLines(); } },
-    { mode: "DENIALS", fill: (rp) => {
-      rp.denialsContent = tabLines().map((line) => ({ timestamp: "13:00:00", epoch: 0, line: `[13:00:00] ${line}` }));
+  const views: { mode: PaneMode; fill: (rp: RightPaneComponent, lines: string[]) => void }[] = [
+    { mode: "AGENT LOG", fill: (rp, lines) => { rp.agentLogContent = lines; } },
+    { mode: "WATCHDOG LOG", fill: (rp, lines) => { rp.watchdogLogContent = lines; } },
+    { mode: "PROXY LOG", fill: (rp, lines) => { rp.proxyLogContent = lines; } },
+    { mode: "INITIAL PROMPT", fill: (rp, lines) => { rp.promptContent = lines; } },
+    { mode: "DENIALS", fill: (rp, lines) => {
+      rp.denialsContent = lines.map((line) => ({ timestamp: "13:00:00", epoch: 0, line: `[13:00:00] ${line}` }));
     } },
-    { mode: "ERRORS", fill: (rp) => { rp.errors = tabLines(); } },
-    { mode: "DIFF", fill: (rp) => { rp.diffContent = tabLines(); } },
-    { mode: "STATUS", fill: (rp) => { rp.statusContent = tabLines(); } },
-    { mode: "QUESTIONS", fill: (rp) => {
-      rp.questions = tabLines().map((question, i) => ({ id: `q${i}`, agent: "agent-a", question, timestamp: "", status: "pending" }));
+    { mode: "ERRORS", fill: (rp, lines) => { rp.errors = lines; } },
+    { mode: "DIFF", fill: (rp, lines) => { rp.diffContent = lines; } },
+    { mode: "STATUS", fill: (rp, lines) => { rp.statusContent = lines; } },
+    { mode: "QUESTIONS", fill: (rp, lines) => {
+      rp.questions = lines.map((question, i) => ({ id: `q${i}`, agent: "agent-a", question, timestamp: "", status: "pending" }));
     } },
   ];
 
   for (const { mode, fill } of views) {
     test(`${mode}: every row fits the terminal with the command palette open`, () => {
-      const dashboard = makeDashboard();
-      const { tui, composite } = overlayTui();
-      dashboard.setTui(tui);
-      const agent = makeAgent("agent-a", "/repos/test");
-      dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
-      fill(dashboard.rightPane);
+      const { dashboard, composite } = dashboardWith([makeAgent("agent-a", "/repos/test")]);
+      fill(dashboard.rightPane, FULL_WIDTH_MODES.has(mode) ? wideLines() : narrowLines());
       dashboard.jumpToMode(mode);
       dashboard.handleInput("/");
-      expect(dashboard.dialog?.type).toBe("fuzzy");
-
-      const rendered = dashboard.render(WIDTH);
-      expect(stripAnsi(rendered.join("\n"))).toContain("from");
-      const rows = composite(rendered);
-      expect(stripAnsi(rows.join("\n"))).toContain("Command palette");
-      const overWidth = rows.map((row, i) => ({ i, width: visibleWidth(row) })).filter((r) => r.width > WIDTH);
-      expect(overWidth).toEqual([]);
-      // Whether a tab overflows depends on where it falls relative to the
-      // palette; no tab reaching the screen is the layout-independent check.
-      expect(rendered.filter((row) => row.includes("\t"))).toEqual([]);
+      expectRowsFit(dashboard, composite, "Command palette");
     });
   }
+
+  // Tree rows and @-jump items show `meta.summary ?? meta.prompt` unexpanded.
+  const tabPromptAgents = (prompt: (i: number) => string): Agent[] => Array.from({ length: 20 }, (_, i) => {
+    const agent = makeAgent(`agent-${i}`, "/repos/test");
+    agent.meta.prompt = prompt(i);
+    return agent;
+  });
+
+  test("TREE: every row fits the terminal with the command palette open", () => {
+    // Each tree row's tab lands at column 129; the selected agent's sidebar
+    // Summary adds one at column 26.
+    const { dashboard, composite } = dashboardWith(tabPromptAgents((i) => `Fix the crash. Backtrace:\n\tfrom x.rb:${i}`));
+    dashboard.jumpToMode("TREE");
+    dashboard.handleInput("/");
+    expectRowsFit(dashboard, composite, "Command palette");
+  });
+
+  test("@ jump dialog: its own rows fit the terminal", () => {
+    // The dialog IS the overlay, so a tab in one of its items overflows at any column.
+    const { dashboard, composite } = dashboardWith(tabPromptAgents((i) => `\tfrom x.rb:${i}`));
+    dashboard.handleInput("@");
+    expectRowsFit(dashboard, composite, "Jump to agent or repo");
+  });
 });

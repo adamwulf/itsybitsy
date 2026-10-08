@@ -104,14 +104,6 @@ describe("buildDashboardRows", () => {
     const agents = rows.filter((r) => !r.isHeader);
     expect(agents[0]!.summary).toBe("do stuff");
   });
-
-  test("expands tabs in the summary", () => {
-    // pi-tui slices a tab as 0 columns when it composites an overlay, so a tab
-    // on screen overflows the row (see expandTabs in ../tmux-poller).
-    const agent = makeAgent({ id: "agent-tab", meta: { prompt: "fix this:\n\tfrom http.rb:1665" } as any });
-    const rows = buildDashboardRows([{ kind: "agent", agent, depth: 1, connector: "  " }]);
-    expect(rows[0]!.summary).toBe("fix this:    from http.rb:1665");
-  });
 });
 
 describe("formatDashboardRow", () => {

@@ -3738,6 +3738,48 @@ describe("hook decisions inside the kernel sandbox equal the opening hook's", ()
       .toEqual({ decision: "deny", reason: "Access denied: work in your worktree, not the main repo" });
   });
 
+  // Review round 2: a deny entry matches a LOWER prefix only in the typed case
+  // (<tmp>/**/WORK/**), so realpath runs on a higher prefix (<tmp>/WORK). The
+  // corrected `work` no longer matches the deny, so the lower components must be
+  // walked again, or REPO/src keep the typed case and the case-sensitive
+  // main-repo check misses them.
+  test("a deny entry that only the typed case matches does not stop the case correction", async () => {
+    const mainRepo = join(created, "work", "repo");
+    const agentsDirHere = join(mainRepo, ".ittybitty", "agents");
+    const agentDirHere = join(agentsDirHere, "agent-abc123");
+    const worktreeHere = join(agentDirHere, "repo");
+    await mkdir(join(mainRepo, "src"), { recursive: true });
+    await mkdir(join(mainRepo, ".git"), { recursive: true });
+    await mkdir(worktreeHere, { recursive: true });
+    await writeFile(join(mainRepo, "src", "main.ts"), "x");
+    if (!(await Bun.file(join(created, "WORK", "REPO", "src", "main.ts")).exists())) return; // case-sensitive volume
+
+    const build = (enabled: boolean) => buildAgentAccessTable({
+      meta: {
+        agentType: "worker", model: "codex:gpt-5.5", canSpawnChildren: false,
+        paths: canonicalizePathsConfig({ allowRead: [], allowWrite: ["**/*.ts"], deny: [`${created}/**/WORK/**`] }, home),
+        sandbox: { enabled, rawAllow: [], domains: [] },
+      },
+      agentDir: agentDirHere, worktreePath: worktreeHere, agentsDir: agentsDirHere, rootRepo: mainRepo, home,
+    });
+    const ctxHere = (access: PreparedAccessTable): PathCheckContext => ({
+      agentId: "agent-abc123", agentDir: agentDirHere, worktreePath: worktreeHere, agentsDir: agentsDirHere,
+      rootRepo: mainRepo, allowList: ["Read", "Write"], denyList: [], canSpawnChildren: false,
+      access, protectedWritePaths: agentProtectedWritePaths(agentDirHere),
+    });
+    const inSandbox = await build(true);
+    const opening = await build(false);
+    for (const leaf of ["main.ts", "new.ts"]) {
+      for (const call of fileCalls([join(created, "WORK", "REPO", "src", leaf)])) {
+        const expected = { decision: "deny" as const, reason: "Access denied: work in your worktree, not the main repo" };
+        expect(checkPathAccess({ ...call, cwd: worktreeHere }, ctxHere(opening)), `${call.toolName} ${leaf} opening`)
+          .toEqual(expected);
+        expect(checkPathAccess({ ...call, cwd: worktreeHere }, ctxHere(inSandbox)), `${call.toolName} ${leaf} in sandbox`)
+          .toEqual(expected);
+      }
+    }
+  });
+
   // Guards each call site (checkFilePath, the Bash scanner, the settings-write
   // guard, resolvePreparedAccess, pathDenialReason) against a revert to the
   // opening canonicalizer: realpath would correct `.SSH` to `.ssh`.

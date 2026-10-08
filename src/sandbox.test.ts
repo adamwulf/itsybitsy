@@ -1983,9 +1983,6 @@ describe("canonicalization without reading what the agent may not read", () => {
       };
       const opening = prepareAccessTable(table);
       const inSandbox = { ...prepareAccessTable(table), kernelSandboxed: true };
-      // Without the flag it IS canonicalizeSandboxPath.
-      expect(canonicalizeAccessPath(opening, join(root, "Real", "Sub", "Deep.txt")))
-        .toBe(canonicalizeSandboxPath(join(root, "Real", "Sub", "Deep.txt")));
       // Correctly spelled: the same canonical path as canonicalizeSandboxPath.
       for (const path of spellings(root)) {
         expect(canonicalizeAccessPath(inSandbox, path), path).toBe(canonicalizeSandboxPath(path));
@@ -1996,6 +1993,12 @@ describe("canonicalization without reading what the agent may not read", () => {
 
       const miscasedAllowed = join(root, "real", "file.txt");
       if (!existsSync(miscasedAllowed)) return; // case-sensitive volume
+      // Without the flag it IS canonicalizeSandboxPath, on a spelling where the
+      // two canonicalizers differ (the flagged one does not open under the deny).
+      const underDeny = join(root, "Real", "Sub", "DEEP.TXT");
+      expect(canonicalizeAccessPath(opening, underDeny)).toBe(canonicalizeSandboxPath(underDeny));
+      expect(canonicalizeAccessPath(opening, underDeny)).toBe(join(root, "Real", "Sub", "Deep.txt"));
+      expect(canonicalizeAccessPath(inSandbox, underDeny)).toBe(underDeny);
       // An allow entry matches regardless of case, so realpath corrects it.
       expect(canonicalizeAccessPath(inSandbox, miscasedAllowed)).toBe(join(root, "Real", "File.txt"));
       // A miscased spelling of the deny entry is still read and corrected, so

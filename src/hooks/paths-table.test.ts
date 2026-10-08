@@ -226,8 +226,20 @@ describe("buildAgentAccessTable", () => {
         ({ agentType: "worker", paths: { allowRead: [entry], allowWrite: [], deny: [] }, ...sandbox(enabled) });
       await expect(build(meta("~/data", true))).rejects.toThrow("Invalid canonical sandbox path");
       await expect(build(meta("./data", true))).rejects.toThrow("Invalid canonical sandbox path");
-      const outside = await build(meta("~/data", false));
-      expect(resolvePreparedAccess(outside, join(tmp, "data", "f"), "read")).toBe("allow");
+      // Outside the sandbox `~/data` is canonicalized as before. The home is
+      // outside the fixture agent dir (`tmp`, a write root), so only that entry
+      // can allow the path.
+      const home = await realpath(await mkdtemp(join(tmpdir(), "paths-table-home-")));
+      try {
+        const buildWithHome = (entries: string[]) => buildAgentAccessTable({
+          meta: { agentType: "worker", paths: { allowRead: entries, allowWrite: [], deny: [] }, ...sandbox(false) },
+          agentDir: tmp, worktreePath: join(tmp, "repo"), agentsDir: join(tmp, "agents"), rootRepo: tmp, home,
+        });
+        expect(resolvePreparedAccess(await buildWithHome(["~/data"]), join(home, "data", "f"), "read")).toBe("allow");
+        expect(resolvePreparedAccess(await buildWithHome([]), join(home, "data", "f"), "read")).toBe("deny");
+      } finally {
+        await rm(home, { recursive: true, force: true });
+      }
     });
 
     test.each([true, false])("the tmux socket dir is a deny root for a non-spawner only (sandbox on=%p)", async (enabled) => {

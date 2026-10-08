@@ -339,6 +339,9 @@ function metadataRealpath(absolute: string): string | null {
   return resolved;
 }
 
+/** Bounds canonicalizeSandboxPathWithin's passes; each pass corrects a component. */
+const MAX_CASE_PASSES = 64;
+
 /**
  * canonicalizeSandboxPath without reading what the agent may not read. Inside a
  * kernel sandbox, realpathSync opens its argument (a file-read-data check), and
@@ -351,12 +354,31 @@ function metadataRealpath(absolute: string): string | null {
  * gets the prefix and the full symlink-resolved path (prefix and the rest as
  * spelled). A `mayRead` that is always false gives a pure metadata
  * canonicalization.
+ *
+ * When realpathSync corrects a prefix ABOVE components that `mayRead` refused,
+ * the corrected case can change what `mayRead` decides for them (a deny entry
+ * that matched the typed case no longer does), so the walk runs again on the
+ * corrected path. Each such pass corrects at least one component.
  */
 export function canonicalizeSandboxPathWithin(
   input: string,
   mayRead: (prefix: string, fullPath: string) => boolean,
 ): string {
-  let candidate = resolve(input);
+  let path = resolve(input);
+  for (let pass = 0; pass < MAX_CASE_PASSES; pass += 1) {
+    const next = canonicalizeWithinOnce(path, mayRead, input);
+    if (next.done) return next.path;
+    path = next.path;
+  }
+  return path;
+}
+
+function canonicalizeWithinOnce(
+  path: string,
+  mayRead: (prefix: string, fullPath: string) => boolean,
+  input: string,
+): { path: string; done: boolean } {
+  let candidate = path;
   const remainder: string[] = [];
   let resolvedPrefix = metadataRealpath(candidate);
   while (resolvedPrefix === null) {
@@ -373,16 +395,23 @@ export function canonicalizeSandboxPathWithin(
   const unread: string[] = [];
   for (let readable = resolvedPrefix; readable !== "/"; readable = dirname(readable)) {
     if (mayRead(readable, fullPath)) {
+      let corrected: string;
       try {
-        return join(realpathSync(readable), ...unread, ...remainder);
+        corrected = realpathSync(readable);
       } catch {
         // Not readable after all (a rawAllow deny, file modes): keep walking up,
         // as canonicalizeSandboxPath does.
+        unread.unshift(basename(readable));
+        continue;
       }
+      return {
+        path: join(corrected, ...unread, ...remainder),
+        done: unread.length === 0 || corrected === readable,
+      };
     }
     unread.unshift(basename(readable));
   }
-  return join("/", ...unread, ...remainder);
+  return { path: join("/", ...unread, ...remainder), done: true };
 }
 
 /**
@@ -1099,10 +1128,12 @@ function canonicalizeWithoutOpeningDenied(prepared: PreparedAccessTable, absolut
  * realpathSync corrects the letter case of the longest existing prefix that an
  * allow entry matches, or that leads to a path an allow entry matches, in any
  * case, unless a deny entry matches the prefix as spelled. When no allow entry
- * matches the full path in any case, the path is denied whatever its case. The
- * one known difference in decisions is toward deny: a path spelled exactly like
- * a deny entry whose on-disk letter case differs stays denied (opening it would
- * correct the case first).
+ * matches the full path in any case, the path is denied whatever its case.
+ * Compared with canonicalizeSandboxPath where it may open everything, the one
+ * known difference in decisions is toward deny: a path spelled exactly like a
+ * deny entry whose on-disk letter case differs stays denied (opening it would
+ * correct the case first). Inside the sandbox canonicalizeSandboxPath could not
+ * resolve a symlink under a directory the agent may not read; this one does.
  */
 export function canonicalizeAccessPath(prepared: PreparedAccessTable, absolutePath: string): string {
   return prepared.kernelSandboxed

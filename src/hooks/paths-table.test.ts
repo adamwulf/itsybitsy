@@ -14,6 +14,7 @@ import {
   pathDenialReason,
 } from "./paths-table";
 import {
+  canonicalizeSandboxPath,
   generateProfile,
   prepareAccessTable,
   resolvePathAccess,
@@ -252,6 +253,21 @@ describe("buildAgentAccessTable", () => {
       }
       expect(resolvePreparedAccess(worker, sock, "write")).toBe("deny");
       expect(resolvePreparedAccess(worker, sock, "read")).toBe("deny");
+    });
+
+    // The builders canonicalize the tmux dir themselves, so the raw spelling
+    // (tmuxSocketDirPath) and the canonical one (resolveTmuxSocketDir, which is
+    // canonicalizeSandboxPath of it) give the same deny root, with stored paths
+    // (sandbox on) or not.
+    test.each([true, false])("the raw and the canonical tmux dir give the same deny root (storedPaths=%p)", (storedPaths) => {
+      const rootsFor = (tmuxSock: string) => agentPathAccessTable({
+        paths: { allowRead: [], allowWrite: [], deny: [] },
+        agentDir: AGENT_DIR, worktreePath: WORKTREE, agentsDir: AGENTS_DIR, rootRepo: ROOT_REPO,
+        gitDir: "/repo/.git", tmuxSock, canSpawnChildren: false, storedPaths,
+      }).runtimeDenyRoots;
+      const raw = `/tmp/tmux-${UID}`;
+      expect(rootsFor(raw)).toEqual(rootsFor(canonicalizeSandboxPath(raw)));
+      expect(rootsFor(raw)).toEqual([{ path: `/private/tmp/tmux-${UID}`, op: "read" }]);
     });
 
     // Guards against a revert to resolveTmuxSocketDir/canonicalizeSandboxPath:

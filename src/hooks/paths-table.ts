@@ -15,8 +15,8 @@
  *
  * Kept deliberately light: it imports src/sandbox.ts and src/agent-types.ts
  * (both already in every hook's dependency graph) but NOT the heavy
- * src/ib-commands.ts. `resolveTmuxSocketDir` was moved into src/sandbox.ts for
- * exactly this reason.
+ * src/ib-commands.ts. `tmuxSocketDirPath` / `resolveTmuxSocketDir` live in
+ * src/sandbox.ts for exactly this reason.
  */
 
 import { join, resolve } from "path";
@@ -32,7 +32,6 @@ import {
   prepareAccessTable,
   metaKernelSandboxed,
   resolvePathsConfig,
-  resolveTmuxSocketDir,
   sandboxPathAccessTable,
   storedPathAccessTable,
   tmuxSocketDirPath,
@@ -105,7 +104,10 @@ export interface AgentAccessTableParams {
   rootRepo: string;
   /** The git common dir (resolved via `git rev-parse --git-common-dir`). */
   gitDir: string;
-  /** The tmux socket DIRECTORY (resolveTmuxSocketDir) — a deny root for non-spawners. */
+  /**
+   * The tmux socket DIRECTORY (tmuxSocketDirPath) — a deny root for
+   * non-spawners. The builder canonicalizes it like every runtime root.
+   */
   tmuxSock: string;
   canSpawnChildren: boolean;
   /** Defaults to Claude for legacy callers without a model. */
@@ -219,7 +221,7 @@ export async function buildAgentAccessTable(input: {
     agentsDir: input.agentsDir,
     rootRepo: input.rootRepo,
     gitDir,
-    tmuxSock: kernelSandboxed ? tmuxSocketDirPath(uid) : resolveTmuxSocketDir(uid),
+    tmuxSock: tmuxSocketDirPath(uid),
     canSpawnChildren: await metaCanSpawnChildren(input.meta),
     cli: metadataCli(input.meta.model) ?? null,
     home: input.home ?? userHome(),
@@ -270,7 +272,7 @@ export async function buildSystemAccessTable(home: string): Promise<PreparedAcce
     agentsDir: join(itsyHome, "agents"),
     rootRepo: itsyHome,
     gitDir: itsyHome,
-    tmuxSock: resolveTmuxSocketDir(uid),
+    tmuxSock: tmuxSocketDirPath(uid),
     canSpawnChildren: true,
     home,
   });

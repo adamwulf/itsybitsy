@@ -13,7 +13,6 @@ import {
   canonicalizeSandboxPath,
   prepareAccessTable,
   resolvePreparedAccess,
-  resolveTmuxSocketDir,
   type PathsConfig,
   type PreparedAccessTable,
 } from "../sandbox";
@@ -3808,24 +3807,41 @@ describe("hook decisions inside the kernel sandbox equal the opening hook's", ()
         },
         agentDir: agentDirHere, worktreePath: worktreeHere, agentsDir: agentsDirHere, rootRepo: mainRepo, home,
       });
+      // Built before any test refuses opens, as the hook builds it first.
+      const protectedWritePaths = agentProtectedWritePaths(agentDirHere);
+      // `target` is a file path, or the command line for Bash.
       const decide = (prepared: PreparedAccessTable, toolName: string, target: string) => checkPathAccess(
-        { toolName, toolInput: { file_path: target }, cwd: worktreeHere },
+        { toolName, toolInput: toolName === "Bash" ? { command: target } : { file_path: target }, cwd: worktreeHere },
         {
           agentId: "agent-abc123", agentDir: agentDirHere, worktreePath: worktreeHere, agentsDir: agentsDirHere,
-          rootRepo: mainRepo, allowList: ["Read", "Write"], denyList: [], canSpawnChildren: false,
-          access: prepared, protectedWritePaths: agentProtectedWritePaths(agentDirHere),
+          rootRepo: mainRepo, allowList: ["Read", "Write", "Bash"], denyList: [], canSpawnChildren: false,
+          access: prepared, protectedWritePaths,
         },
       );
-      return { mainRepo, agentDirHere, access, decide };
+      return { mainRepo, agentsDirHere, agentDirHere, worktreeHere, access, decide };
     }
 
-    /** The kernel refusing to open the main repo and everything outside the agent dir. */
+    const eperm = (path: string) =>
+      Object.assign(new Error(`EPERM: operation not permitted, realpath '${path}'`), { code: "EPERM" });
+
+    /**
+     * The kernel refusing to open anything outside the agent dir. It decides on
+     * the real (vnode) path, as Seatbelt does.
+     */
     function refuseOutside(agentDir: string) {
       const real = fs.realpathSync;
       return spyOn(fs, "realpathSync").mockImplementation(((path: string) => {
-        if (path === agentDir || String(path).startsWith(`${agentDir}/`)) return real(path);
-        throw Object.assign(new Error(`EPERM: operation not permitted, realpath '${path}'`), { code: "EPERM" });
+        const resolved = real(path);
+        if (resolved === agentDir || resolved.startsWith(`${agentDir}/`)) return resolved;
+        throw eperm(path);
       }) as typeof fs.realpathSync);
+    }
+
+    /** No open succeeds: the canonicalizer keeps every typed spelling. */
+    function refuseAll() {
+      return spyOn(fs, "realpathSync").mockImplementation(((path: string) => {
+        throw eperm(path);
+      }) as unknown as typeof fs.realpathSync);
     }
 
     test("a: a Unicode-folded spelling (ſ for s) of the main repo", async () => {
@@ -3894,6 +3910,67 @@ describe("hook decisions inside the kernel sandbox equal the opening hook's", ()
       const spy = refuseOutside(agentDirHere);
       try {
         expect(decide(prepared, "Write", target)).toEqual(MAIN_REPO_DENY);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    // Each structural call site compares the identity path: step 6 (file
+    // tools), the redirect/sed guard, the Bash path scanner, and step 10/11.
+    // Every open is refused, so only identity can see through the spelling.
+    // WORK/REPO is miscased in the Bash commands so the literal needle scans
+    // (which compare spellings) do not decide first.
+    test("each structural call site denies a miscased spelling it can only see by identity", async () => {
+      const { agentsDirHere, agentDirHere, access, decide } = await mainRepoAgent("repo");
+      if (!fs.existsSync(join(created, "WORK", "REPO"))) return; // case-sensitive volume
+      await writeFile(join(agentDirHere, "meta.json"), "{}");
+      await mkdir(join(agentsDirHere, "other"), { recursive: true });
+      await writeFile(join(agentsDirHere, "other", "f"), "x");
+      await writeFile(join(created, "work", "repo", "src", "main.ts"), "x");
+      const prepared = await access({ allowRead: [], allowWrite: ["**/*.ts"], deny: [] }, true);
+      const typedAgents = join(created, "WORK", "REPO", ".ITTYBITTY", "AGENTS");
+      const OTHER_AGENT_DENY = { decision: "deny" as const, reason: "Access denied: cannot access other agents' files" };
+      const spy = refuseAll();
+      try {
+        const meta = join(agentDirHere, "META.JSON");
+        expect(decide(prepared, "Write", meta), "step 6").toEqual({ decision: "deny", reason: META_WRITE_DENY_REASON });
+        expect(decide(prepared, "Bash", `echo x > ${meta}`), "redirect guard")
+          .toEqual({ decision: "deny", reason: META_WRITE_DENY_REASON });
+        expect(decide(prepared, "Read", join(typedAgents, "other", "f")), "step 10").toEqual(OTHER_AGENT_DENY);
+        expect(decide(prepared, "Bash", `cat ${join(typedAgents, "other", "f")}`), "scanner, other agent")
+          .toEqual(OTHER_AGENT_DENY);
+        expect(decide(prepared, "Bash", `cat ${join(created, "WORK", "REPO", "src", "main.ts")}`), "scanner, main repo")
+          .toEqual(MAIN_REPO_DENY);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    // Identity takes the DEEPEST anchor: a miscased worktree path is in the
+    // worktree, not the main repo, and the own agent.log stays the own log.
+    test("a miscased worktree path and a miscased own agent.log stay allowed", async () => {
+      const { agentDirHere, worktreeHere, access, decide } = await mainRepoAgent("repo");
+      if (!fs.existsSync(join(created, "WORK", "REPO"))) return; // case-sensitive volume
+      await writeFile(join(worktreeHere, "x.ts"), "x");
+      await writeFile(join(agentDirHere, "agent.log"), "x");
+      const prepared = await access({ allowRead: [], allowWrite: ["**/*.ts"], deny: [] }, true);
+      const typedAgentDir = join(created, "WORK", "REPO", ".ITTYBITTY", "AGENTS", "AGENT-ABC123");
+      const typedWorktreeFile = join(typedAgentDir, "REPO", "x.ts"); // the leaf as the **/*.ts entry spells it
+      // Every open refused: only identity places it in the worktree.
+      let spy = refuseAll();
+      try {
+        for (const tool of ["Read", "Write"]) {
+          expect(decide(prepared, tool, typedWorktreeFile).decision, tool).toBe("allow");
+        }
+        expect(decide(prepared, "Bash", `cat ${typedWorktreeFile}`).decision).toBe("allow");
+      } finally {
+        spy.mockRestore();
+      }
+      // The agent dir readable, as in the real sandbox.
+      spy = refuseOutside(agentDirHere);
+      try {
+        expect(decide(prepared, "Read", join(typedAgentDir, "AGENT.LOG")).decision).toBe("allow");
+        expect(decide(prepared, "Read", typedWorktreeFile).decision).toBe("allow");
       } finally {
         spy.mockRestore();
       }

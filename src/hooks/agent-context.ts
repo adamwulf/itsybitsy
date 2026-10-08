@@ -11,8 +11,8 @@
  * without copy-paste; codex behaviour is byte-identical.
  */
 
-import { isAbsolute, join, resolve } from "path";
-import { realpath } from "fs/promises";
+import { dirname, isAbsolute, join, resolve } from "path";
+import { lstat, realpath } from "fs/promises";
 import { userInfo } from "os";
 import { isValidAgentId } from "../validation";
 import { resolveNoWorktreeCaller, type NoWorktreeCaller } from "../no-worktree-caller";
@@ -70,6 +70,11 @@ function isUnreachableRepoError(error: unknown): boolean {
   return UNREACHABLE_REPO_ERROR_CODES.has((error as NodeJS.ErrnoException).code ?? "");
 }
 
+/**
+ * The registered repo roots as written in repos.json (absolute, not resolved).
+ * They are not realpath'd here: inside an agent's kernel sandbox a repo root is
+ * not readable, and realpath opens it (see locateRegisteredAgentDir).
+ */
 async function registeredRepoRoots(registryHome: string): Promise<string[]> {
   const registryFile = Bun.file(join(registryHome, ".itsybitsy", "repos.json"));
   if (!(await registryFile.exists())) return [];
@@ -98,13 +103,61 @@ async function registeredRepoRoots(registryHome: string): Promise<string[]> {
     ) {
       throw new Error("Cannot resolve no-worktree agent: invalid registered repository path");
     }
-    try {
-      roots.add(await realpath((entry as { path: string }).path));
-    } catch (error) {
-      if (!isUnreachableRepoError(error)) throw error;
-    }
+    roots.add((entry as { path: string }).path);
   }
   return [...roots];
+}
+
+/** realpath errors that mean "no agent dir here that this process can use". */
+const ABSENT_AGENT_DIR_ERROR_CODES = new Set(["ENOENT", "ENOTDIR", "EACCES", "EPERM"]);
+
+/**
+ * Canonical paths of `<repoRoot>/.ittybitty/agents/<agentId>`, or null when the
+ * registered repo has no such agent dir or this process cannot reach it.
+ *
+ * realpath runs on the agent dir, not on the repo root. Inside an agent's
+ * kernel sandbox the agent dir is a runtime root (readable) but the repo root
+ * is not, so realpath(repoRoot) failed with EPERM — a kernel denial for every
+ * registered repo on every hook call, and no record for the agent itself, so
+ * every tool call was denied. For the layout ib creates (`.ittybitty`,
+ * `agents` and `<id>` are real directories, not symlinks — checked with lstat,
+ * which is metadata only — with exactly those names on disk — checked by the
+ * suffix), realpath(agent dir) is exactly realpath(repoRoot) +
+ * "/.ittybitty/agents/<id>", so this returns the same three paths
+ * realpath(repoRoot) gave. Any other layout (a symlinked `.ittybitty` or
+ * `agents`, an id dir in a different letter case) falls back to
+ * realpath(repoRoot), exactly as before.
+ */
+async function locateRegisteredAgentDir(
+  rawRepoRoot: string,
+  agentId: string,
+): Promise<{ agentDir: string; agentsDir: string; repoPath: string } | null> {
+  const rawAgentDir = join(rawRepoRoot, ".ittybitty", "agents", agentId);
+  let agentDir: string;
+  try {
+    agentDir = await realpath(rawAgentDir);
+  } catch (error) {
+    if (ABSENT_AGENT_DIR_ERROR_CODES.has((error as NodeJS.ErrnoException).code ?? "")) return null;
+    throw error;
+  }
+  const suffix = `/.ittybitty/agents/${agentId}`;
+  const layoutLinks = await Promise.all(
+    [dirname(dirname(rawAgentDir)), dirname(rawAgentDir), rawAgentDir]
+      .map(async (path) => (await lstat(path)).isSymbolicLink()),
+  );
+  let repoPath: string;
+  if (agentDir.endsWith(suffix) && !layoutLinks.includes(true)) {
+    repoPath = agentDir.slice(0, -suffix.length) || "/";
+  } else {
+    try {
+      repoPath = await realpath(rawRepoRoot);
+    } catch (error) {
+      if (isUnreachableRepoError(error)) return null;
+      throw error;
+    }
+  }
+  const agentsDir = join(repoPath, ".ittybitty", "agents");
+  return { agentDir: join(agentsDir, agentId), agentsDir, repoPath };
 }
 
 /**
@@ -137,19 +190,17 @@ async function registeredAgentCandidatesById(
     : noWorktreeRepoRootsLoaderOverride !== null
       ? await noWorktreeRepoRootsLoaderOverride()
       : await registeredRepoRoots(userInfo().homedir);
+  // One repo registered under two spellings (a symlink and its target) is one
+  // candidate, as when the roots were deduplicated by realpath.
+  const seenAgentDirs = new Set<string>();
   for (const rawRepoRoot of repoRoots) {
     if (!isAbsolute(rawRepoRoot)) {
       throw new Error("Cannot resolve no-worktree agent: invalid registered repository path");
     }
-    let repoRoot: string;
-    try {
-      repoRoot = await realpath(rawRepoRoot);
-    } catch (error) {
-      if (isUnreachableRepoError(error)) continue;
-      throw error;
-    }
-    const candidateAgentsDir = join(repoRoot, ".ittybitty", "agents");
-    const agentDir = join(candidateAgentsDir, agentId);
+    const located = await locateRegisteredAgentDir(rawRepoRoot, agentId);
+    if (!located || seenAgentDirs.has(located.agentDir)) continue;
+    seenAgentDirs.add(located.agentDir);
+    const { agentDir, agentsDir: candidateAgentsDir, repoPath: repoRoot } = located;
     const candidateMeta = Bun.file(join(agentDir, "meta.json"));
     try {
       if (!(await candidateMeta.exists())) continue;

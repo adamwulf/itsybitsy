@@ -3524,6 +3524,52 @@ describe("hookCheckPath — denied wait attempts point at WAITING", () => {
   });
 });
 
+// Inside an agent's kernel sandbox its repo root is not readable (only its own
+// agent dir, worktree, git dir and the agents dir are). The registered-agent
+// lookup used to realpath the repo root, failed, and denied every tool call.
+// A repo root without read permission reproduces that for this test process.
+describe("hookCheckPath when the agent cannot read its repo root", () => {
+  let tempDir: string;
+  let worktreeCwd: string;
+  let logged: string[] = [];
+  const originalLog = console.log;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "hook-unreadable-root-"));
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-test77");
+    worktreeCwd = join(agentDir, "repo");
+    await mkdir(join(worktreeCwd, ".claude"), { recursive: true });
+    await writeFile(
+      join(worktreeCwd, ".claude", "settings.local.json"),
+      JSON.stringify({ permissions: { allow: ["Read"], deny: [] } }),
+    );
+    await writeFile(join(worktreeCwd, "file.txt"), "x");
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-test77", worker: true }));
+    setNoWorktreeRepoRootsLoader(async () => [tempDir]);
+    logged = [];
+    console.log = (msg: string) => { logged.push(msg); };
+    await chmod(tempDir, 0o311);
+  });
+
+  afterEach(async () => {
+    await chmod(tempDir, 0o755);
+    console.log = originalLog;
+    resetNoWorktreeRepoRootsLoader();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("binds to its own agent: a worktree Read is allowed, not denied as unregistered", async () => {
+    await hookCheckPath("agent-test77", JSON.stringify({
+      tool_name: "Read",
+      tool_input: { file_path: join(worktreeCwd, "file.txt") },
+      cwd: worktreeCwd,
+    }));
+    const out = JSON.parse(logged[0]!).hookSpecificOutput as Record<string, string>;
+    expect(out.permissionDecisionReason).not.toContain(META_UNREADABLE_DENY_REASON);
+    expect(out.permissionDecision).toBe("allow");
+  });
+});
+
 // The hook builds its table from the canonical meta.paths spawn stored and
 // canonicalizes candidates without opening what the agent may not read (inside
 // the kernel sandbox each such open was a denial). Every decision must equal the

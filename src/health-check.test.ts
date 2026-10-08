@@ -22,6 +22,9 @@ import {
   resolveHealthWarnings,
 } from "./health-check";
 import type { RepoHealthWarning } from "./health-check";
+import { existsSync } from "fs";
+import { resetUserHome, setUserHome } from "./home";
+import { sandboxProfilePath } from "./sandbox-log-paths";
 
 let tmpDir: string;
 
@@ -668,10 +671,15 @@ describe("resolveHealthWarnings", () => {
     expect(updated.hooks).toBeUndefined();
   });
 
-  test("resolves orphaned-dir by removing directory", async () => {
+  test("resolves orphaned-dir by removing directory and its sealed profile", async () => {
     const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-stale2");
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-stale2" }));
+    // The test home seam keeps the sealed tree inside tmpDir.
+    setUserHome(tmpDir);
+    const profile = sandboxProfilePath(agentDir);
+    await mkdir(join(profile, ".."), { recursive: true });
+    await writeFile(profile, "(version 1)\n");
 
     const warnings: RepoHealthWarning[] = [{
       repoPath: tmpDir,
@@ -681,11 +689,15 @@ describe("resolveHealthWarnings", () => {
       agentId: "agent-stale2",
     }];
 
-    const result = await resolveHealthWarnings(warnings);
-    expect(result.resolved).toBe(1);
+    try {
+      const result = await resolveHealthWarnings(warnings);
+      expect(result.resolved).toBe(1);
+    } finally { resetUserHome(); }
 
     const exists = await Bun.file(join(agentDir, "meta.json")).exists();
     expect(exists).toBe(false);
+    expect(existsSync(profile)).toBe(false);
+    expect(existsSync(join(profile, ".."))).toBe(false);
   });
 
   test("resolves orphaned-dir with missing meta.json (error severity)", async () => {

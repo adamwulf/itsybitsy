@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAgentTypeFile } from "../src/agent-types";
 import {
-  canonicalizeSandboxPath, generateProfile, sandboxProfileParameterValues,
+  canonicalizeSandboxPath, generateProfile, newSandboxTag, sandboxProfileParameterValues,
   type PathsConfig, type SandboxConfig, type SandboxProfileParams,
 } from "../src/sandbox";
 import { sandboxDefinitionArgs } from "../src/sandbox-launch";
@@ -34,7 +34,7 @@ const params: SandboxProfileParams = {
   TMUXSOCK: join(root, "tmux"), canSpawnChildren: false, HOME: root,
 };
 const profile = join(root, "sandbox.sb");
-await writeFile(profile, generateProfile(baseline.sandbox as SandboxConfig, paths, params));
+await writeFile(profile, generateProfile(baseline.sandbox as SandboxConfig, paths, params, newSandboxTag()));
 const prefix = ["/usr/bin/sandbox-exec", "-f", profile,
   ...sandboxDefinitionArgs(sandboxProfileParameterValues(paths, params))];
 const predicate = '(subsystem == "com.apple.sandbox.reporting" AND category == "violation") OR (eventMessage CONTAINS "Sandbox:")';

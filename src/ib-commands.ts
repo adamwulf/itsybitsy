@@ -18,7 +18,7 @@ import {
   readlink,
   symlink,
 } from "fs/promises";
-import { realpathSync } from "fs";
+import { mkdirSync, realpathSync, writeFileSync } from "fs";
 import { userHome } from "./home";
 import type { Agent, AgentAck, AgentMeta, SpawnedBy, AgentOperationKind } from "./agents";
 import {
@@ -114,6 +114,7 @@ import {
   anchorRelativePaths,
   findRelativeEscapes,
   generateProfile,
+  newSandboxTag,
   SEAL_HELPER_RESULT_PREFIX,
   SEAL_HELPER_RESULT_ROOT,
   canonicalizePathsConfig,
@@ -143,6 +144,7 @@ import {
   sandboxProxyScriptPreamble,
 } from "./sandbox-launch";
 import { sandboxDenialScriptPreamble, sandboxDenialExecPrefix } from "./sandbox-log-launch";
+import { removeSandboxProfile, sandboxProfilePath } from "./sandbox-log-paths";
 import {
   writeSealRecordDirect,
   readSealRecordStrict,
@@ -503,6 +505,7 @@ export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
           ? agent.meta as unknown as Record<string, unknown>
           : undefined,
       );
+      removeSandboxProfile(agentDir);
     });
   } catch (err) {
     return {
@@ -1251,11 +1254,15 @@ async function prepareSandbox(
     // for cli==="agy", so the kernel profile and the hook agree from one helper.
     params.AGYSTATEDIR = agyStateDirFor(userHome());
   }
-  const profile = generateProfile(config, paths, params);
+  // A new attribution tag for every spawn and resume. Its nonce must stay
+  // secret from other agents, so the profile goes to the sealed tree, never
+  // the agent directory, and the tag never appears on a command line.
+  const profile = generateProfile(config, paths, params, newSandboxTag());
   const parameterValues = sandboxProfileParameterValues(paths, params);
-  const profilePath = join(agentDir, "sandbox.sb");
+  const profilePath = sandboxProfilePath(agentDir);
   const domainsPath = join(agentDir, "sandbox-domains.txt");
-  await Bun.write(profilePath, profile);
+  mkdirSync(dirname(profilePath), { recursive: true, mode: 0o700 });
+  writeFileSync(profilePath, profile, { mode: 0o600 });
   await Bun.write(domainsPath, config.domains.length > 0 ? `${config.domains.join("\n")}\n` : "");
 
   const proxyPort = (sandboxPortAllocatorOverride ?? allocateSandboxProxyPort)();
@@ -1427,6 +1434,7 @@ async function nukeAgentList(
               ? fullMeta
               : undefined,
           );
+          removeSandboxProfile(agentDir);
         },
       );
       allPruned.push(...prunedTeams);
@@ -1766,9 +1774,10 @@ export async function resumeAgent(
       try {
         const frozenPaths = resolvePathsConfig(agent.meta.paths);
         // Re-derive the spawn capability from meta (per-agent override, then
-        // the type), so an unchanged agent replays a byte-identical profile
-        // while a meta.canSpawnChildren toggle flips exactly the REPOAGENTS op,
-        // the PARENTCLAUDE root, and the tmux deny on resume.
+        // the type), so an unchanged agent replays the same rules (only the
+        // attribution tag changes) while a meta.canSpawnChildren toggle flips
+        // exactly the REPOAGENTS op, the PARENTCLAUDE root, and the tmux deny
+        // on resume.
         const resumeCanSpawnChildren = await metaCanSpawnChildren(
           agent.meta as unknown as Record<string, unknown>,
         );
@@ -3787,6 +3796,7 @@ export async function mergeAgent(
         stderr: `Merge completed, but sealed-record cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
+    removeSandboxProfile(agentDir);
 
     // 14-16. Copy settings, remove worktree, delete branch
     await timed("merge", "worktree-cleanup", async () => {
@@ -6984,6 +6994,7 @@ export async function newAgent(
     } catch (err) {
       await logSpawn(agentDir, spawnerAgentDir, id, `spawn cleanup warning: could not remove seal: ${err instanceof Error ? err.message : String(err)}`);
     }
+    removeSandboxProfile(agentDir);
     await rm(agentDir, { recursive: true, force: true });
     if (useWorktree) {
       await newAgentSpawnCtx.run(["git", "-C", rootRepoPath, "worktree", "remove", join(agentDir, "repo"), "--force"]);
@@ -7058,6 +7069,7 @@ export async function newAgent(
         } catch (err) {
           await logSpawn(agentDir, spawnerAgentDir, id, `spawn cleanup warning: could not remove seal: ${err instanceof Error ? err.message : String(err)}`);
         }
+        removeSandboxProfile(agentDir);
         await rm(agentDir, { recursive: true, force: true });
         return {
           ok: false,

@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, chmod } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-log-launch";
 import { shellQuote } from "./validation";
-import { sandboxLogParent } from "./sandbox-log-paths";
+import { removeSandboxProfile, sandboxLogParent, sandboxProfilePath } from "./sandbox-log-paths";
 
 async function fixture(mode: "success" | "startup-failure" | "runtime-failure" | "collector-sigkill" | "slow-ready") {
   const dir = await mkdtemp(join(tmpdir(), "sandbox-launch-test-"));
@@ -19,13 +20,14 @@ done
 ${mode === "startup-failure" ? "exit 27" : ""}
 ${mode === "slow-ready" ? `: > ${shellQuote(join(dir, "collector-entered"))}; sleep 0.5` : ""}
 : > "$dir/ready"
-while [ ! -f "$dir/root-request" ] && [ ! -s "$dir/stop" ]; do sleep 0.01; done
-: > "$dir/root-ready"
 ${mode === "runtime-failure" ? "sleep 0.15; exit 31" : ""}
 ${mode === "collector-sigkill" ? 'sleep 0.15; kill -KILL "$$"' : ""}
 while [ ! -s "$dir/stop" ]; do sleep 0.01; done
 `);
   await chmod(join(bin, "ib"), 0o755);
+  // The launcher writes the agent's profile into its namespace before any launch.
+  await mkdir(sandboxLogParent(dir, dir), { recursive: true });
+  await writeFile(sandboxProfilePath(dir, dir), "(version 1)\n");
   const wrapper = join(bin, "required-wrapper");
   await writeFile(wrapper, `#!/bin/sh\nprintf 'wrapped\\n' >> ${shellQuote(join(dir, "enforcement"))}\nexec "$@"\n`);
   await chmod(wrapper, 0o755);
@@ -108,20 +110,45 @@ test("late old-launch cleanup does not stop a replacement or remove its artifact
   } finally { await f.cleanup(); }
 });
 
+test("the supervisor removes the agent's namespace after its launch, but only once the profile is gone", async () => {
+  const f = await fixture("success");
+  try {
+    const parent = sandboxLogParent(f.dir, f.dir);
+    const profile = sandboxProfilePath(f.dir, f.dir);
+    // While the agent exists, its profile keeps the namespace.
+    const kept = await f.start("kept", 0);
+    await until(() => Bun.file(join(f.dir, "kept-dir")).exists());
+    const keptDir = await readFile(join(f.dir, "kept-dir"), "utf8");
+    expect(await kept.exited).toBe(0);
+    await until(async () => !existsSync(keptDir));
+    await Bun.sleep(100);
+    expect(existsSync(profile)).toBe(true);
+    // A teardown while a launch still runs removes the profile, but the launch
+    // directory keeps the namespace; its supervisor removes both afterwards.
+    const running = await f.start("running", 0.5);
+    await until(() => Bun.file(join(f.dir, "running-dir")).exists());
+    removeSandboxProfile(f.dir, f.dir);
+    expect(existsSync(profile)).toBe(false);
+    expect(existsSync(parent)).toBe(true);
+    expect(await running.exited).toBe(0);
+    await until(async () => !existsSync(parent));
+  } finally { await f.cleanup(); }
+});
+
 test("switched off, the helpers add no collector block and keep the exact sandbox-exec prefix", () => {
   // The switch-off path: launch scripts then match the plain sandbox-exec launch.
   expect(sandboxDenialScriptPreamble("/tmp/test", "/tmp/home", false)).toBe("");
   const prefix = "'/usr/bin/sandbox-exec' -f '/tmp/test/sandbox.sb' -D 'AGENTDIR=/tmp/test'";
   expect(sandboxDenialExecPrefix(prefix, false)).toBe(prefix);
-  // On, the same prefix runs behind the registration gate, unchanged at its end.
-  expect(sandboxDenialExecPrefix(prefix, true).endsWith(` sandbox-log-gate ${prefix}`)).toBe(true);
+  // On, the same prefix runs behind the fd 9 gate, unchanged at its end; the
+  // gate waits for nothing and names no collector file.
+  const gated = sandboxDenialExecPrefix(prefix, true);
+  expect(gated).toBe(`/bin/sh -c 'exec 9>&-; exec "$@"' sandbox-log-gate ${prefix}`);
 });
 
-test("gate preserves arguments and wrapper exit status when collection is unavailable", async () => {
+test("gate preserves arguments and wrapper exit status", async () => {
   const prefix = sandboxDenialExecPrefix("/bin/sh -c 'test \"$1\" = \"a b\" && exit 23' wrapper", true);
-  const child = Bun.spawn(["/bin/sh", "-c", `${prefix} 'a b'`], {
-    env: { ...process.env, IB_SANDBOX_LOG_DIR: "" }, stdout: "pipe", stderr: "pipe",
-  });
+  const child = Bun.spawn(["/bin/sh", "-c", `${prefix} 'a b'`], { stdout: "pipe", stderr: "pipe" });
   expect(await child.exited).toBe(23);
 });
 
@@ -129,7 +156,7 @@ test("CLI inherits neither collector control variables nor reserved fd 9", async
   const f = await fixture("success");
   try {
     const probe = join(f.dir, "probe.sh");
-    await writeFile(probe, `#!/bin/sh\n[ -z "\${IB_SANDBOX_LOG_DIR+x}" ] || exit 10\n[ -z "\${IB_SANDBOX_LOG_AGENT_LOG+x}" ] || exit 11\n[ ! -e /dev/fd/9 ] || exit 12\n`);
+    await writeFile(probe, `#!/bin/sh\n[ -z "\${IB_SANDBOX_LOG_DIR+x}" ] || exit 10\n[ ! -e /dev/fd/9 ] || exit 12\n`);
     const child = await f.start("start", 0, `/bin/sh ${shellQuote(probe)}`);
     expect(await child.exited).toBe(0);
   } finally { await f.cleanup(); }

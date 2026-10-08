@@ -13,7 +13,7 @@ import {
   lstat,
 } from "fs/promises";
 import { tmpdir } from "os";
-import { chmodSync, realpathSync, symlinkSync } from "fs";
+import { chmodSync, existsSync, realpathSync, symlinkSync } from "fs";
 import type { Agent, AgentMeta } from "./agents";
 import {
   isPidAliveCtx,
@@ -134,7 +134,13 @@ import { setUserHome, resetUserHome } from "./home";
 import { setUserConfigPath, resetUserConfigPath } from "./config";
 import type { AgentState } from "./parse-state";
 import type { SpawnFn, SpawnResult } from "./types";
-import { canonicalizeSandboxPath, SEAL_HELPER_RESULT_PREFIX, SEAL_HELPER_RESULT_ROOT } from "./sandbox";
+import { canonicalizeSandboxPath, sandboxProfileTag, SEAL_HELPER_RESULT_PREFIX, SEAL_HELPER_RESULT_ROOT } from "./sandbox";
+import { sandboxProfilePath } from "./sandbox-log-paths";
+
+/** A profile with its per-launch tag replaced, to compare the rules of two launches. */
+function untagged(profile: string): string {
+  return profile.replaceAll(sandboxProfileTag(profile)!, "ib-agent:TAG");
+}
 import { claudeProjectDirFor, claudeScratchpadDirFor } from "./hooks/paths-table";
 
 // The "retire → rehire recovery" describes drive real `git` subprocesses — a
@@ -1809,6 +1815,9 @@ describe("retireAgent (native)", () => {
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(agent.meta));
     const repoId = await getRepoId(tempDir);
     await writeSealRecordDirect(repoId, id, agent.meta as unknown as Record<string, unknown>, sealHome);
+    const profilePath = sandboxProfilePath(agentDir);
+    await mkdir(join(profilePath, ".."), { recursive: true });
+    await Bun.write(profilePath, "(version 1)\n");
     setSealDeleteForTesting(async () => {
       throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
     });
@@ -1827,6 +1836,12 @@ describe("retireAgent (native)", () => {
       const result = await retireAgent(agent);
       expect(result.ok).toBe(true);
       expect(await readSealRecord(repoId, id, sealHome)).toBeNull();
+      // Only the seal delete is made to fail as for a sandboxed caller; this
+      // process can write the sealed tree, so the profile and its empty
+      // namespace go with the agent. (A really sandboxed caller would leave
+      // them; the tag is dead either way.)
+      expect(existsSync(profilePath)).toBe(false);
+      expect(existsSync(join(profilePath, ".."))).toBe(false);
       expect(tmuxCalls.some((cmd) => cmd[0] === "tmux" && cmd[1] === "run-shell")).toBe(true);
     } finally {
       setSealDeleteForTesting(null);
@@ -4640,6 +4655,9 @@ describe("mergeAgent (native)", () => {
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(agent.meta));
     const repoId = await getRepoId(tempDir);
     await writeSealRecordDirect(repoId, agent.id, agent.meta as unknown as Record<string, unknown>, sealHome);
+    const profilePath = sandboxProfilePath(agentDir);
+    await mkdir(join(profilePath, ".."), { recursive: true });
+    await Bun.write(profilePath, "(version 1)\n");
 
     const runner = makeMergeMock();
     lifecycleSpawnCtx.set(runner);
@@ -4663,6 +4681,9 @@ describe("mergeAgent (native)", () => {
 
     expect(result.ok).toBe(true);
     expect(await readSealRecord(repoId, agent.id, sealHome)).toBeNull();
+    // The tagged profile and its empty sealed namespace go with the agent.
+    expect(existsSync(profilePath)).toBe(false);
+    expect(existsSync(join(profilePath, ".."))).toBe(false);
     expect(sealHelperCalls.some((cmd) => cmd[0] === "tmux" && cmd[1] === "run-shell")).toBe(true);
     // A merge with commits reports the target branch + full 40-char merge SHA.
     expect(result.stdout).toBe(`Closed agent: agent-abc (merged to main at ${MERGE_HEAD_SHA})`);
@@ -6721,6 +6742,26 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(start).toContain("ib sandbox-collector attach");
   });
 
+  test("a sandboxed spawn that fails after its profile was written removes the profile", async () => {
+    await writeSandboxType("sandbox-spawn-cleanup");
+    setSandboxPortAllocatorForTesting(() => 43119);
+    setSandboxPortCheckForTesting(() => {});
+    const inner = sandboxSpawnRunner();
+    setNewAgentSpawnRunner((cmd: string[], opts?: { stdout: "pipe"; stderr: "pipe" }) =>
+      cmd[0] === "tmux" && cmd[1] === "new-session" ? makeSpawnResult("no server", 1) : inner(cmd, opts));
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99985 }));
+
+    const result = await callNewAgent("fails late", { name: "sandbox-spawn-cleanup", type: "sandbox-spawn-cleanup" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("could not create tmux session");
+    const agentDir = join(agentsDir, "sandbox-spawn-cleanup");
+    expect(existsSync(agentDir)).toBe(false);
+    // prepareSandbox had written it; the failed-spawn cleanup removed it and its namespace.
+    expect(existsSync(sandboxProfilePath(agentDir))).toBe(false);
+    expect(existsSync(join(sandboxProfilePath(agentDir), ".."))).toBe(false);
+  });
+
   test("resume refuses legacy enabled sandbox metadata with no paths block", async () => {
     const id = "legacy-enabled-no-paths";
     const agentDir = join(agentsDir, id);
@@ -6751,7 +6792,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(result).toEqual({ ok: false, exitCode: 1, stdout: "", stderr: message });
     expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain(message);
     expect((await Bun.file(join(agentDir, "meta.json")).json()).state).toBe("stopped");
-    expect(await Bun.file(join(agentDir, "sandbox.sb")).exists()).toBe(false);
+    expect(await Bun.file(sandboxProfilePath(agentDir)).exists()).toBe(false);
     expect(resumeCommands.some((cmd) => cmd[0] === "/usr/bin/sandbox-exec")).toBe(false);
   });
 
@@ -6781,7 +6822,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     }
 
     expect(resumed.ok).toBe(true);
-    expect(await Bun.file(join(agentDir, "sandbox.sb")).exists()).toBe(false);
+    expect(await Bun.file(sandboxProfilePath(agentDir)).exists()).toBe(false);
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     expect(resume).not.toContain("sandbox-exec");
     expect(resume).not.toContain("sandbox-proxy-launch");
@@ -6871,7 +6912,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(result.ok).toBe(true);
     const agentDir = join(agentsDir, "sandbox-codex");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
-    const profile = await Bun.file(join(agentDir, "sandbox.sb")).text();
+    const profile = await Bun.file(sandboxProfilePath(agentDir)).text();
     // The role text comes from the SessionStart hook; nothing is written
     // into the worktree.
     const instructions = await codexHookRoleText("sandbox-codex", agentDir);
@@ -6930,7 +6971,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     const id = "sandbox-codex-resume";
     const agentDir = join(agentsDir, id);
-    const spawnProfile = await Bun.file(join(agentDir, "sandbox.sb")).text();
+    const spawnProfile = await Bun.file(sandboxProfilePath(agentDir)).text();
     const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
     meta.state = "stopped";
     meta.codex_session_id = "019e7b21-cb7d-7f23-8674-11036ed141ef";
@@ -6955,10 +6996,12 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       resetSendSpawnRunner();
     }
 
-    const resumeProfile = await Bun.file(join(agentDir, "sandbox.sb")).text();
+    const resumeProfile = await Bun.file(sandboxProfilePath(agentDir)).text();
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     const resumedMeta = await Bun.file(join(agentDir, "meta.json")).json();
-    expect(resumeProfile).toBe(spawnProfile);
+    // The same rules, under a new attribution tag for the new launch.
+    expect(untagged(resumeProfile)).toBe(untagged(spawnProfile));
+    expect(sandboxProfileTag(resumeProfile)).not.toBe(sandboxProfileTag(spawnProfile));
     for (const profile of [spawnProfile, resumeProfile]) {
       expect(profile).toContain('(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-');
     }
@@ -6984,7 +7027,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(result.ok).toBe(true);
     const agentDir = join(agentsDir, "sandbox-wiring");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
-    const profile = await Bun.file(join(agentDir, "sandbox.sb")).text();
+    const profile = await Bun.file(sandboxProfilePath(agentDir)).text();
     const meta = await Bun.file(join(agentDir, "meta.json")).json();
     const domains = await Bun.file(join(agentDir, "sandbox-domains.txt")).text();
 
@@ -7151,7 +7194,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(spawned.ok).toBe(true);
 
     const agentDir = join(agentsDir, "sandbox-resume");
-    const spawnProfile = await Bun.file(join(agentDir, "sandbox.sb")).text();
+    const spawnProfile = await Bun.file(sandboxProfilePath(agentDir)).text();
     const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
     const frozenPaths = structuredClone(meta.paths);
     await writeSandboxType("sandbox-resume", {
@@ -7181,10 +7224,10 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       resetSendSpawnRunner();
     }
 
-    const resumeProfile = await Bun.file(join(agentDir, "sandbox.sb")).text();
+    const resumeProfile = await Bun.file(sandboxProfilePath(agentDir)).text();
     const resumeScript = await Bun.file(join(agentDir, "resume.sh")).text();
     const resumedMeta = await Bun.file(join(agentDir, "meta.json")).json();
-    expect(resumeProfile).toBe(spawnProfile);
+    expect(untagged(resumeProfile)).toBe(untagged(spawnProfile));
     expect(resumedMeta.paths).toEqual(frozenPaths);
     expect(resumedMeta.sandbox_proxy_port).toBe(43131);
     expect(resumeScript).toContain(`setsid ${sandboxDenialExecPrefix("'/usr/bin/sandbox-exec' -f")}`);
@@ -7253,6 +7296,19 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       expect(script.match(/sandbox-log-gate '\/usr\/bin\/sandbox-exec' -f/g)?.length).toBe(2);
       // The removed per-launch collector is never started.
       expect(script).not.toContain("sandbox-log-watch");
+    }
+    // The profile, with its secret attribution tag, is in the sealed tree; no
+    // file in the agent directory (which other agents can read) holds the tag.
+    const profilePath = sandboxProfilePath(agentDir);
+    expect(profilePath.startsWith(join(process.env.HOME!, ".itsybitsy", "sealed") + "/")).toBe(true);
+    expect((await lstat(profilePath)).mode & 0o777).toBe(0o600);
+    const tag = sandboxProfileTag(await Bun.file(profilePath).text())!;
+    expect(tag).toMatch(/^ib-agent:[0-9a-f]{32}$/);
+    expect(start).toContain(`-f '${profilePath}'`);
+    for (const name of await readdir(agentDir, { recursive: true })) {
+      const path = join(agentDir, name);
+      if (!(await lstat(path)).isFile()) continue;
+      expect(await Bun.file(path).text(), path).not.toContain(tag.slice("ib-agent:".length));
     }
   });
 
@@ -7585,7 +7641,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     }
 
     const refreshedMeta = await Bun.file(join(agentDir, "meta.json")).json();
-    const refreshedProfile = await Bun.file(join(agentDir, "sandbox.sb")).text();
+    const refreshedProfile = await Bun.file(sandboxProfilePath(agentDir)).text();
     // The frozen block now reflects the edited type file — new entries appear
     // that were NOT in the pre-refresh block.
     expect(refreshedMeta.paths.allowRead).toContain(canonicalizeSandboxPath(refreshedDir));
@@ -8562,7 +8618,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(await readSealRecord(repoId, id, process.env.HOME!)).not.toBeNull();
   });
 
-  test("A4 G3: nuke deletes the sealed record", async () => {
+  test("A4 G3: nuke deletes the sealed record and the tagged profile", async () => {
     await writeSandboxType("seal-nuke");
     setSandboxPortAllocatorForTesting(() => 43154);
     setSandboxPortCheckForTesting(() => {});
@@ -8574,6 +8630,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     const repoId = await getRepoId(tempDir);
     expect(await readSealRecord(repoId, "seal-nuke", process.env.HOME!)).not.toBeNull();
+    const profilePath = sandboxProfilePath(join(agentsDir, "seal-nuke"));
+    expect(existsSync(profilePath)).toBe(true);
 
     setSealDeleteForTesting(async () => {
       throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
@@ -8598,6 +8656,12 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       const nuked = await nukeAgent(makeAgent("seal-nuke", tempDir, "running", await Bun.file(join(agentsDir, "seal-nuke", "meta.json")).json()));
       expect(nuked.ok).toBe(true);
       expect(await readSealRecord(repoId, "seal-nuke", process.env.HOME!)).toBeNull();
+      // Only the seal delete is made to fail as for a sandboxed caller; this
+      // process can write the sealed tree, so the profile and its (now empty)
+      // namespace go with the agent. (A really sandboxed caller would leave
+      // them; the tag is dead either way.)
+      expect(existsSync(profilePath)).toBe(false);
+      expect(existsSync(join(profilePath, ".."))).toBe(false);
       expect(nukeCalls.some((cmd) => cmd[0] === "tmux" && cmd[1] === "run-shell")).toBe(true);
     } finally {
       setSealDeleteForTesting(null);

@@ -168,6 +168,7 @@ export http_proxy=http://localhost:$PORT https_proxy=http://localhost:$PORT
 export HTTP_PROXY=$http_proxy HTTPS_PROXY=$https_proxy
 export no_proxy=localhost,127.0.0.1,::1 NO_PROXY=localhost,127.0.0.1,::1
 # NO NODE_OPTIONS — the spike confirmed claude honors HTTPS_PROXY natively (dead item, removed).
+# (Shipped: the profile is in the agent's sealed namespace, not $AGENT_DIR; §5.1.)
 setsid sandbox-exec -f "$AGENT_DIR/sandbox.sb" \
   -D "WORKTREE=$WORKTREE" -D "GITDIR=$GITDIR" -D "AGENTDIR=$AGENTDIR" \
   claude --session-id "$UUID" $ARGS "$(cat $PROMPT)" &
@@ -1437,9 +1438,22 @@ the compiled `ib` inside a real agent profile.
 
 ### 5.1 Profile generator — `src/sandbox.ts`
 
-Pure function: `(SandboxConfig, SandboxProfileParams) → string`
-producing the `.sb` text. Writes `sandbox.sb` into the agent dir next to
-`start.sh`/`meta.json`. **⚠️ Deny-by-default (Model B) — the profile skeleton is
+Pure function: `(SandboxConfig, PathsConfig, SandboxProfileParams, tag) → string`
+producing the `.sb` text. **Attribution tag (2026-10-07):** every deny the
+generator emits — `(deny default)`, each read-only write deny, each configured
+and runtime deny, the seal-helper denies, and each `(deny …)` in `rawAllow` —
+ends with `(with message "<tag>")`, written by one helper (`denyRule`). The
+kernel appends that text as the last line of each denial report, which is how
+the shared collector attributes a report to its launch
+(`docs/SANDBOX-SHARED-COLLECTOR.md` §5). The tag is `ib-agent:<128-bit nonce>`,
+new for every spawn and resume. A `rawAllow` deny that cannot be tagged (nested
+in another form, or with its own message) is refused by generation and by type
+validation. Because the nonce must stay secret, `prepareSandbox` writes the
+profile into the agent's sealed namespace,
+`~/.itsybitsy/sealed/sandbox-logs/<sha256(agentDir)>/sandbox.sb` (mode 0600),
+not the agent dir: the `_all.md` floor denies `~/.itsybitsy/sealed` to every
+sandboxed agent (deny wins over every layer), while `sandbox-exec` runs
+unsandboxed and reads it by path. **⚠️ Deny-by-default (Model B) — the profile skeleton is
 `(deny default)`, the INVERSE of the reference's `(allow default)`.** SBPL uses
 last-matching-rule-wins, so the structure is: deny everything → emit the single
 specificity-sorted config+runtime table → emit raw rules → re-deny the config
@@ -1460,6 +1474,7 @@ NOT a generator constant.
 ```
 (version 1)
 (deny default)                                   ;; unconditional deny floor
+;; (shown untagged; the generator ends every deny with (with message "<tag>"))
 
 ;; ---- one table: authored paths + resolved runtime roots, sorted by §4A.8 ----
 ;; A read row always carries an explicit write deny:
@@ -2026,7 +2041,8 @@ with no spawn required.
   `AgentMeta`, coerced, and deep-copied. `meta.paths` is present even when
   sandboxing is disabled.
 - Legacy meta with no `sandbox` → unsandboxed resume.
-- Same inputs at spawn and resume → **byte-identical `sandbox.sb`** (C2 freeze).
+- Same inputs at spawn and resume → **the same `sandbox.sb` rules** (C2 freeze);
+  only the attribution tag differs, because each launch gets a new one.
 
 **F. Fail-hard preconditions (§5.5), each a test:** `sandbox-exec` absent → refuse;
 profile lint failure → refuse; port occupied → refuse; non-macOS → refuse. In

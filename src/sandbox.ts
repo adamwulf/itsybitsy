@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto";
 import { realpathSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { userHome } from "./home";
@@ -33,6 +34,52 @@ export const SEAL_HELPER_RESULT_ROOT = "/private/tmp";
 export const SEAL_HELPER_RESULT_PREFIX = ".ib-seal-helper-";
 const SEAL_HELPER_RESULT_MATCHER =
   '(regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$")';
+
+/**
+ * The attribution tag of one launch's profile. Every deny in the profile carries
+ * it as `(with message "<tag>")`, and the kernel then appends it as the LAST line
+ * of each denial report, so the shared collector attributes a report by its tag
+ * alone (docs/SANDBOX-SHARED-COLLECTOR.md). The 128-bit nonce is new for every
+ * spawn and resume; the tagged profile lives in the sealed tree, which no
+ * sandboxed agent can read, so another process cannot forge a known tag.
+ */
+export const SANDBOX_TAG = /^ib-agent:[0-9a-f]{32}$/;
+
+export function newSandboxTag(): string {
+  return `ib-agent:${randomBytes(16).toString("hex")}`;
+}
+
+/** The one way a deny rule enters a profile: always with the launch's tag. */
+function denyRule(body: string, tag: string): string {
+  return `(deny ${body} (with message "${tag}"))`;
+}
+
+/**
+ * rawAllow is verbatim SBPL, so its denies get the tag here. A top-level
+ * `(deny …)` is re-emitted through denyRule. A deny anywhere else (nested in
+ * another form, or already carrying a message) cannot be tagged, so it is
+ * refused: no untagged deny can reach a profile.
+ */
+function tagRawRule(entry: string, tag: string): string {
+  // String and regex literals may hold any text; only code can be a rule. A
+  // symbol ends at whitespace, a paren, a quote or a `;` comment.
+  const code = entry.trim().replace(/#?"(?:[^"\\]|\\.)*"/g, '""');
+  const denies = code.match(/\(\s*deny(?=[\s()";])/g)?.length ?? 0;
+  if (denies === 0) return entry;
+  if (denies > 1 || !/^\(\s*deny\s/.test(code) || /\(\s*with\s+message(?=[\s()";])/.test(code)) {
+    throw new Error(`a deny in rawAllow must be one top-level (deny …) rule without its own message: ${entry}`);
+  }
+  const body = entry.trim().replace(/^\(\s*deny\s+/, "").slice(0, -1).trimEnd();
+  // A `;` comment runs to the end of its line: start the tag on a new one, or
+  // the comment would hide it and the closing paren.
+  return denyRule(code.includes(";") ? `${body}\n` : body, tag);
+}
+
+/** The tag of a generated profile: its second line is always the tagged default deny. */
+export function sandboxProfileTag(profile: string): string | null {
+  const match = /^\(deny default \(with message "([^"]*)"\)\)$/.exec(profile.split("\n", 2)[1] ?? "");
+  return match && SANDBOX_TAG.test(match[1]!) ? match[1]! : null;
+}
 
 export interface RuntimePathRoot {
   /** Canonical absolute path used for specificity and resolver matching. */
@@ -1007,8 +1054,15 @@ export function validateSandboxFrontmatter(value: unknown): SandboxValidationRes
       if (typeof entry !== "string") return;
       if (!isBalancedSandboxExpression(entry)) {
         errors.push(`sandbox.rawAllow[${index}] must be a balanced parenthesized s-expression`);
-      } else if (isCatchAllRawAllow(entry)) {
+        return;
+      }
+      if (isCatchAllRawAllow(entry)) {
         warnings.push(`sandbox.rawAllow[${index}] is a catch-all rule that defeats deny-by-default sandboxing: ${entry}`);
+      }
+      try {
+        tagRawRule(entry, newSandboxTag());
+      } catch (err) {
+        errors.push(`sandbox.rawAllow[${index}]: ${err instanceof Error ? err.message : String(err)}`);
       }
     });
   }
@@ -1093,33 +1147,38 @@ export function validatePathsFrontmatter(
 
 /**
  * Generate a deny-by-default Seatbelt profile without adding static baseline
- * permissions. All non-runtime holes come only from the resolved config.
+ * permissions. All non-runtime holes come only from the resolved config. Every
+ * deny, including the default deny and the denies in rawAllow, carries `tag`
+ * (see SANDBOX_TAG).
  */
 export function generateProfile(
   config: SandboxConfig,
   paths: PathsConfig,
   params: SandboxProfileParams,
+  tag: string,
 ): string {
+  if (!SANDBOX_TAG.test(tag)) throw new Error(`invalid sandbox attribution tag: ${tag}`);
   const allowRoots = profileRuntimeAllowRoots(params);
   const denyRoots = profileRuntimeDenyRoots(params);
   const table = sandboxPathAccessTable(paths, params);
   const lines = [
     "(version 1)",
-    "(deny default)",
+    denyRule("default", tag),
   ];
 
   sortedAllowEntries(table, allowRoots).forEach((entry, index) => {
     const matcher = profileMatcher(entry, `ALLOW_${index}`);
     lines.push(`(allow file-read* ${matcher})`);
-    lines.push(`(${entry.op === "write" ? "allow" : "deny"} file-write* ${matcher})`);
+    lines.push(entry.op === "write" ? `(allow file-write* ${matcher})` : denyRule(`file-write* ${matcher}`, tag));
   });
 
   config.rawAllow.forEach((entry, index) => {
     if (!isBalancedSandboxExpression(entry)) {
       throw new Error(`sandbox.rawAllow[${index}] must be a balanced parenthesized s-expression`);
     }
-    // rawAllow is intentionally the one verbatim SBPL escape hatch.
-    lines.push(entry);
+    // rawAllow is intentionally the one verbatim SBPL escape hatch; only its
+    // denies change, to carry the tag.
+    lines.push(tagRawRule(entry, tag));
   });
 
   // Configured filesystem denies plus the runtime tmux-socket deny are always
@@ -1127,8 +1186,8 @@ export function generateProfile(
   // cannot re-open.
   sortedDenyEntries(table, denyRoots).forEach((entry, index) => {
     const matcher = profileMatcher(entry, `DENY_${index}`);
-    lines.push(`(deny file-read* ${matcher})`);
-    lines.push(`(deny file-write* ${matcher})`);
+    lines.push(denyRule(`file-read* ${matcher}`, tag));
+    lines.push(denyRule(`file-write* ${matcher}`, tag));
   });
 
   // A runtime deny root (the tmux socket) must ALSO block a unix-socket
@@ -1140,18 +1199,18 @@ export function generateProfile(
   // above stays (it blocks reads/writes of files inside the socket dir). This
   // form was verified LIVE to compile and block (src/sandbox.test.ts).
   denyRoots.forEach((root) => {
-    lines.push(`(deny network-outbound (remote unix-socket (subpath (param "${root.parameterName}"))))`);
+    lines.push(denyRule(`network-outbound (remote unix-socket (subpath (param "${root.parameterName}")))`, tag));
   });
 
   // The ordinary /private/tmp floor lets the parent read the helper's
   // atomically-published status/output, but it must never be able to forge or
   // remove them. Keep this write-only deny last so even rawAllow and a broad
   // authored /private/tmp allow cannot reopen mutation access.
-  lines.push(`(deny file-write* ${SEAL_HELPER_RESULT_MATCHER})`);
+  lines.push(denyRule(`file-write* ${SEAL_HELPER_RESULT_MATCHER}`, tag));
   // Seatbelt treats hard/symbolic-link creation as a distinct operation from
   // file-write*. Deny it explicitly so a protected inode cannot be aliased
   // into an ordinary writable /private/tmp pathname.
-  lines.push(`(deny file-link ${SEAL_HELPER_RESULT_MATCHER})`);
+  lines.push(denyRule(`file-link ${SEAL_HELPER_RESULT_MATCHER}`, tag));
 
   return `${lines.join("\n")}\n`;
 }

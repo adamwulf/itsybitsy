@@ -7,10 +7,10 @@ import { randomBytes } from "node:crypto";
 import { appendAgentLog, attachSandboxLaunch, holdCollectorClient, restartSandboxCollector, sandboxCollectorPaths,
   sandboxCollectorRunning, sandboxCollectorStatus, serveSandboxCollector, stopSandboxCollector, tryCollectorLock, validateRegistration,
   type CollectorReader, type RegisteredProcess } from "./sandbox-collector";
-import { sandboxLogParent } from "./sandbox-log-paths";
-import { openSandboxProcessReader } from "./sandbox-processes";
+import { newSandboxTag } from "./sandbox";
+import { sandboxLogParent, sandboxProfilePath } from "./sandbox-log-paths";
+import { openSandboxProcessReader, type ProcessObservation } from "./sandbox-processes";
 import { isSandboxedProcess } from "./sandbox-detect";
-import type { ProcessObservation } from "./sandbox-denials";
 
 const darwinTest = process.platform === "darwin" ? test : test.skip;
 const MODULE = JSON.stringify(join(import.meta.dir, "sandbox-collector.ts"));
@@ -35,25 +35,27 @@ async function tempHome(): Promise<string> {
   return home;
 }
 
-type LaunchFixture = { agentDir: string; agentLog: string; dir: string; name: string };
+type LaunchFixture = { agentDir: string; agentLog: string; dir: string; name: string; tag: string };
 
-/** The same artifacts the launch preamble creates, in a private namespace. */
+/** The same artifacts the launcher and the launch preamble create, in a private
+ * namespace: the agent's tagged profile and one launch directory. */
 async function launchDir(home: string, agent: string): Promise<LaunchFixture> {
   const agentDir = join(home, "agents", agent);
   await mkdir(agentDir, { recursive: true });
   const parent = sandboxLogParent(agentDir, home);
   await mkdir(parent, { recursive: true, mode: 0o700 });
+  const tag = newSandboxTag();
+  await writeFile(sandboxProfilePath(agentDir, home), `(version 1)\n(deny default (with message "${tag}"))\n`, { mode: 0o600 });
   const dir = mkdtempSync(join(parent, "sandbox-log."));
   await chmod(dir, 0o700);
   await writeFile(join(dir, "stop"), "");
-  return { agentDir, agentLog: join(agentDir, "agent.log"), dir, name: dir.split("/").pop()! };
+  return { agentDir, agentLog: join(agentDir, "agent.log"), dir, name: dir.split("/").pop()!, tag };
 }
 
 // ---- pure validation with a fake reader ----
 
 const FAKE_BOOT = "00000000-0000-0000-0000-000000000000";
-const observation = (pid: number, ppid: number, birth = `1700000000:${pid}`): ProcessObservation =>
-  ({ pid, ppid, birth, before: 1n, after: 1n });
+const observation = (pid: number, ppid: number, birth = `1700000000:${pid}`): ProcessObservation => ({ pid, ppid, birth });
 const named = (p: ProcessObservation): RegisteredProcess => ({ pid: p.pid, birth: p.birth });
 
 function fakeReader(processes: ProcessObservation[], sandboxed: number[] = []): CollectorReader {
@@ -62,21 +64,21 @@ function fakeReader(processes: ProcessObservation[], sandboxed: number[] = []): 
 }
 
 async function registration(dir: string, fields: Record<string, unknown>): Promise<void> {
-  await writeFile(join(dir, "registration.json"), JSON.stringify({ v: 1, boot: FAKE_BOOT,
+  await writeFile(join(dir, "registration.json"), JSON.stringify({ v: 2, boot: FAKE_BOOT,
     owner: named(observation(100, 1)), registrar: named(observation(300, 200)),
-    token: randomBytes(16).toString("hex"), ...fields }));
+    token: randomBytes(16).toString("hex"), tag: newSandboxTag(), ...fields }));
 }
 
 test("validateRegistration accepts a private launch from the exact registrar and owner it names", async () => {
   const home = await tempHome();
   const launch = await launchDir(home, "a");
-  await registration(launch.dir, { agentLog: launch.agentLog });
+  await registration(launch.dir, { agentLog: launch.agentLog, tag: launch.tag });
   const reader = fakeReader([observation(100, 1), observation(200, 100), observation(300, 200)]);
   const accepted = validateRegistration(launch.name, `${launch.dir}\n`, reader, home);
   expect(accepted.dir).toBe(launch.dir);
   expect(accepted.agentLog).toBe(launch.agentLog);
   expect(accepted.owner.pid).toBe(100);
-  expect([...accepted.registrarAncestors].sort()).toEqual([200, 300]);
+  expect(accepted.tag).toBe(launch.tag);
 });
 
 test("validateRegistration rejects forged, redirected, stale, unprivate and unproven registrations", async () => {
@@ -92,8 +94,11 @@ test("validateRegistration rejects forged, redirected, stale, unprivate and unpr
   await reject({}, "outside the sealed launch namespace", { entry: join(home, "elsewhere", launch.name) });
   await reject({}, "outside the sealed launch namespace", { name: other.name, entry: launch.dir });
   await reject({ agentLog: other.agentLog }, "agent log is not bound");
-  await reject({ v: 2 }, "unsupported registration protocol");
+  await reject({ v: 1 }, "unsupported registration protocol"); // before tags: no tag to attribute by
   await reject({ token: "short" }, "malformed registration");
+  await reject({ tag: undefined }, "malformed registration");
+  await reject({ tag: "ib-agent:short" }, "malformed registration");
+  await reject({ tag: `ib-agent:${"0".repeat(32)}\nib-agent:${"1".repeat(32)}` }, "malformed registration");
   await reject({ owner: 100 }, "malformed registration"); // a bare PID is not an identity
   await reject({ boot: "11111111-1111-1111-1111-111111111111" }, "registration is from another boot");
   await reject({ registrar: { pid: 999, birth: "1700000000:999" } }, "registrar is not running");
@@ -113,7 +118,7 @@ test("validateRegistration rejects forged, redirected, stale, unprivate and unpr
   await reject({}, "not a private directory", { name: "sandbox-log.linked", entry: linked });
 
   await rm(join(launch.dir, "registration.json"));
-  await writeFile(join(other.dir, "registration.json"), JSON.stringify({ v: 1 }));
+  await writeFile(join(other.dir, "registration.json"), JSON.stringify({ v: 2 }));
   await symlink(join(other.dir, "registration.json"), join(launch.dir, "registration.json"));
   expect(() => validateRegistration(launch.name, launch.dir, fakeReader(tree), home)).toThrow();
 });
@@ -301,25 +306,29 @@ async function fakeStream(home: string) {
     for (const s of streams) if (s.exitCode === null && s.signalCode === null) s.kill();
     await Promise.all(streams.map(s => s.exited));
   });
-  const clock = openSandboxProcessReader();
-  cleanups.push(async () => clock.close());
+  let mach = 1000;
+  const markers: number[] = [];
   return {
     feed,
     script,
     exitFile,
+    /** performance.now() of every marker the daemon emitted. */
+    markers,
     spawnStream: (_predicate: string) => {
       const s = Bun.spawn([process.execPath, script], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
       streams.push(s);
       return s;
     },
     emitMarker: (marker: string) => {
+      markers.push(performance.now());
       void appendFile(feed, `${JSON.stringify({ processImagePath: "/usr/bin/logger", eventMessage: marker })}\n`);
     },
-    report: (pid: number, operation: string) => appendFile(feed, `${JSON.stringify({
+    /** A kernel report as the stream delivers it: the profile's tag is the last line. */
+    report: (tag: string, pid: number, operation: string, path = "/private/tmp/forbidden") => appendFile(feed, `${JSON.stringify({
       messageType: "Error", subsystem: "", category: "", processID: 0, processImagePath: "/kernel",
       senderImagePath: "/System/Library/Extensions/Sandbox.kext/Contents/MacOS/Sandbox", bootUUID: "",
-      timestamp: "2026-10-06 17:00:00.000000-0500", machTimestamp: Number(clock.clock()),
-      eventMessage: `Sandbox: sleep(${pid}) deny(1) ${operation} /private/tmp/forbidden`,
+      timestamp: "2026-10-06 17:00:00.000000-0500", machTimestamp: ++mach,
+      eventMessage: `Sandbox: sleep(${pid}) deny(1) ${operation} ${path}\n${tag}`,
     })}\n`),
   };
 }
@@ -339,15 +348,15 @@ const identity = (pid: number): RegisteredProcess => {
 };
 
 /** Write what attach writes, for a registrar the test controls. */
-async function writeRegistration(launch: LaunchFixture, registrar: RegisteredProcess): Promise<string> {
+async function writeRegistration(launch: LaunchFixture, registrar: RegisteredProcess, tag = launch.tag): Promise<string> {
   const token = randomBytes(16).toString("hex");
-  await writeFile(join(launch.dir, "registration.json"), JSON.stringify({ v: 1, agentLog: launch.agentLog,
-    boot: realReader.boot, owner: identity(process.pid), registrar, token }));
+  await writeFile(join(launch.dir, "registration.json"), JSON.stringify({ v: 2, agentLog: launch.agentLog,
+    boot: realReader.boot, owner: identity(process.pid), registrar, token, tag }));
   return token;
 }
 
-async function register(home: string, launch: LaunchFixture, registrarPid: number): Promise<string> {
-  const token = await writeRegistration(launch, identity(registrarPid));
+async function register(home: string, launch: LaunchFixture, registrarPid: number, tag = launch.tag): Promise<string> {
+  const token = await writeRegistration(launch, identity(registrarPid), tag);
   await writeFile(join(sandboxCollectorPaths(home).inbox, launch.name), launch.dir);
   return token;
 }
@@ -362,17 +371,92 @@ async function client(home: string): Promise<{ release: () => void }> {
 }
 
 type Stream = Awaited<ReturnType<typeof fakeStream>>;
+/** A daemon with a fast loop, so lifecycle tests do not wait out the 1 s
+ * cadence; "the daemon loop runs once a second" checks the real one. */
 function startDaemon(home: string, stream: Stream, lockFd?: number): Promise<number> {
-  const served = serveSandboxCollector({ home, lockFd, spawnStream: stream.spawnStream, emitMarker: stream.emitMarker, sandboxed: () => false });
+  const served = serveSandboxCollector({ home, lockFd, spawnStream: stream.spawnStream, emitMarker: stream.emitMarker,
+    sandboxed: () => false, loopMs: 100 });
   cleanups.push(async () => { await writeFile(sandboxCollectorPaths(home).stop, "stop\n").catch(() => {}); await served; });
   return served;
 }
 
-async function registerRoot(launch: LaunchFixture, pid: number): Promise<void> {
-  await writeFile(join(launch.dir, "root-request"), `${pid}\n`);
-}
+darwinTest("the daemon loop runs once a second; readiness comes from the pump, not the loop", async () => {
+  const home = await tempHome();
+  const stream = await fakeStream(home);
+  const paths = sandboxCollectorPaths(home);
+  const registrars = await client(home);
+  // The test decides which markers come back; none reach the stream by themselves.
+  const emitted: { at: number; marker: string }[] = [];
+  const served = serveSandboxCollector({ home, spawnStream: stream.spawnStream, sandboxed: () => false,
+    emitMarker: marker => { emitted.push({ at: performance.now(), marker }); } });
+  cleanups.push(async () => { await writeFile(paths.stop, "stop\n").catch(() => {}); await served; });
 
-darwinTest("one daemon serves two launches and routes each report to its own launch only", async () => {
+  // A's markers never come back: one per pass, then the 3 s deadline fails it,
+  // inside the preamble's 5 s bound (at most one pass to admit + 3 s).
+  const a = await launchDir(home, "a");
+  const registered = performance.now();
+  const tokenA = await register(home, a, sleeper().pid);
+  await until(async () => (await text(join(a.dir, "done"))) === tokenA, 8000);
+  expect(performance.now() - registered).toBeLessThan(4500);
+  expect(await text(a.agentLog)).toContain("readiness marker was not observed within 3 seconds");
+  const passes = emitted.map(e => e.at);
+  expect(passes.length).toBe(3);
+  for (let i = 1; i < passes.length; i++) {
+    expect(passes[i]! - passes[i - 1]!).toBeGreaterThanOrEqual(990);
+    expect(passes[i]! - passes[i - 1]!).toBeLessThan(1500);
+  }
+  // The heartbeat is written by the same pass.
+  const first = JSON.parse(await text(paths.heartbeat)).updatedAt;
+  await until(async () => JSON.parse(await text(paths.heartbeat)).updatedAt !== first, 3000);
+  expect(JSON.parse(await text(paths.heartbeat)).updatedAt - first).toBeGreaterThanOrEqual(990);
+
+  // B's first marker comes back: `ready` follows at once, not at the next pass.
+  const b = await launchDir(home, "b");
+  await register(home, b, sleeper().pid);
+  await until(() => emitted.length === 4, 3000);
+  const returned = performance.now();
+  await appendFile(stream.feed, `${JSON.stringify({ processImagePath: "/usr/bin/logger", eventMessage: emitted[3]!.marker })}\n`);
+  await until(() => existsSync(join(b.dir, "ready")), 3000);
+  expect(performance.now() - returned).toBeLessThan(500);
+  expect(emitted.length).toBe(4);
+  // And so is a report: B's record arrives between passes too.
+  const reported = performance.now();
+  await stream.report(b.tag, 101, "file-read-data");
+  await until(async () => (await text(b.agentLog)).includes("pid=101"), 3000);
+  expect(performance.now() - reported).toBeLessThan(500);
+  registrars.release();
+  await writeFile(join(b.dir, "stop"), "stop\n");
+  expect(await served).toBe(0);
+}, 20000);
+
+darwinTest("a cold start whose first marker is lost is ready on the next 1 s pass, inside the 5 s bound", async () => {
+  const home = await tempHome();
+  const stream = await fakeStream(home);
+  const paths = sandboxCollectorPaths(home);
+  let emitted = 0;
+  const daemons: Promise<number>[] = [];
+  // The attach starts a daemon at the real cadence; its stream is cold, so the
+  // first marker never comes back.
+  const startCollector = (lockFd: number) => {
+    const served = serveSandboxCollector({ home, lockFd, spawnStream: stream.spawnStream, sandboxed: () => false,
+      emitMarker: marker => { if (++emitted > 1) stream.emitMarker(marker); } });
+    cleanups.push(async () => { await writeFile(paths.stop, "stop\n").catch(() => {}); await served; });
+    daemons.push(served);
+  };
+  const a = await launchDir(home, "a");
+  const registered = performance.now();
+  const attached = attachSandboxLaunch({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, startCollector, pollMs: 50 });
+  await until(() => existsSync(join(a.dir, "ready")), 5000);
+  const elapsed = performance.now() - registered;
+  expect(emitted).toBe(2);
+  expect(elapsed).toBeGreaterThanOrEqual(900); // it waited for the next pass
+  expect(elapsed).toBeLessThan(2500);
+  await writeFile(join(a.dir, "stop"), "stop\n");
+  expect(await attached).toBe(0);
+  expect(await daemons[0]).toBe(0);
+}, 20000);
+
+darwinTest("one daemon serves two launches and routes each report to its own launch only, by exact tag", async () => {
   const home = await tempHome();
   const stream = await fakeStream(home);
   const paths = sandboxCollectorPaths(home);
@@ -391,46 +475,55 @@ darwinTest("one daemon serves two launches and routes each report to its own lau
   await until(async () => await Bun.file(join(a.dir, "ready")).exists() && await Bun.file(join(b.dir, "ready")).exists());
   expect(await text(a.agentLog)).toContain(`launch=${a.name} stream ready`);
 
-  const rootA = sleeper();
-  const rootB = sleeper();
-  await registerRoot(a, rootA.pid);
-  await registerRoot(b, rootB.pid);
-  await until(async () => await Bun.file(join(a.dir, "root-ready")).exists() && await Bun.file(join(b.dir, "root-ready")).exists());
-
-  await Bun.sleep(30);
-  await stream.report(rootA.pid, "file-read-data");
-  await stream.report(rootB.pid, "file-write-create");
-  await stream.report(registrarA.pid, "file-read-data"); // in no registered tree
-  await until(async () => (await text(a.agentLog)).includes("[Sandbox]") && (await text(b.agentLog)).includes("[Sandbox]"));
-  await Bun.sleep(600); // past the pending window: nothing else may arrive
+  // Any pid: a report belongs to the launch whose tag is its last line.
+  await stream.report(a.tag, 101, "file-read-data");
+  await stream.report(b.tag, 102, "file-write-create");
+  await stream.report(newSandboxTag(), 103, "file-read-data"); // an unknown tag
+  // Path text naming A's tag, but B's real tag last: B's only.
+  await stream.report(b.tag, 104, "file-read-data", `/tmp/x\n${a.tag}`);
+  // A's tag in the middle of the last line is not A's tag.
+  await stream.report(`${a.tag} `, 105, "file-read-data");
+  // A report the kernel cut inside A's tag.
+  await stream.report(`${a.tag.slice(0, 20)}<…>`, 107, "file-read-data");
+  await until(async () => (await text(a.agentLog)).includes("[Sandbox]") && count(await text(b.agentLog), "[Sandbox]") === 2);
+  await Bun.sleep(300); // nothing else may arrive
   const logA = await text(a.agentLog);
   const logB = await text(b.agentLog);
-  expect(logA).toContain(`[Sandbox] file-read-data process="sleep" pid=${rootA.pid} `);
-  expect(logA).toContain(`launch=${a.name}`);
-  expect(logA).not.toContain(`pid=${rootB.pid}`);
-  expect(logA).not.toContain(`pid=${registrarA.pid} `);
-  expect(logB).toContain(`[Sandbox] file-write-create process="sleep" pid=${rootB.pid} `);
-  expect(logB).not.toContain(`pid=${rootA.pid}`);
+  expect(count(logA, "[Sandbox]")).toBe(1);
+  expect(logA).toContain(`[Sandbox] file-read-data process="sleep" pid=101 target="/private/tmp/forbidden" launch=${a.name} `);
+  expect(logB).toContain(`[Sandbox] file-write-create process="sleep" pid=102 `);
+  expect(logB).toContain(`[Sandbox] file-read-data process="sleep" pid=104 `);
+  for (const log of [logA, logB]) {
+    expect(log).not.toContain("pid=103");
+    expect(log).not.toContain("pid=105");
+    expect(log).not.toContain("pid=107");
+  }
+  // agent.log is readable by other agents: the collector never writes a launch's
+  // own tag there (B's log shows A's tag only as the path text above).
+  expect(logA).not.toContain(a.tag.slice("ib-agent:".length));
+  expect(logB).not.toContain(b.tag.slice("ib-agent:".length));
 
-  // A third launch cannot claim a root another launch already registered.
+  // A third launch cannot register a tag another launch already holds.
   const c = await launchDir(home, "c");
-  const registrarC = sleeper();
-  await register(home, c, registrarC.pid);
-  await until(() => Bun.file(join(c.dir, "ready")).exists());
-  await registerRoot(c, rootA.pid);
-  await until(() => Bun.file(join(c.dir, "failed")).exists());
-  expect(await text(c.agentLog)).toContain("already registered by another launch");
+  await register(home, c, sleeper().pid, a.tag);
+  await until(async () => (await text(join(c.dir, "done"))) === "rejected");
+  expect(existsSync(join(c.dir, "failed"))).toBe(true);
+  expect(await text(paths.log)).toContain("attribution tag is already registered by another launch");
 
-  // The launch's own stop file ends only that launch, with a visible warning.
+  // The launch's own stop file ends only that launch.
   await writeFile(join(a.dir, "stop"), "stop\n");
   await until(async () => (await text(join(a.dir, "done"))) === tokenA);
-  expect(await text(a.agentLog)).toContain("collection stopping before the registered CLI exits");
   expect(await text(a.agentLog)).toContain(`launch=${a.name} collector stopped`);
   expect(await Bun.file(join(b.dir, "done")).exists()).toBe(false);
+  // Its tag is no longer registered.
+  await stream.report(a.tag, 106, "file-read-data");
+  await Bun.sleep(300);
+  expect(await text(a.agentLog)).not.toContain("pid=106");
 
-  // A dead registrar ends its launch too.
+  // A dead registrar ends its launch too, with a warning while the owner lives.
   registrarB.kill();
   await until(async () => (await text(join(b.dir, "done"))) === tokenB);
+  expect(await text(b.agentLog)).toContain("collection stopping before the launch ends; coverage reduced");
 
   // No launch left, but a registrar still holds its client lock: keep serving.
   await Bun.sleep(300);
@@ -441,35 +534,27 @@ darwinTest("one daemon serves two launches and routes each report to its own lau
   expect(sandboxCollectorRunning(paths)).toBe(false);
 }, 20000);
 
-darwinTest("a root that is not the owner's child, or is the registrar itself, is refused", async () => {
+darwinTest("a coalesced summary keeps its count; an ambiguous process name is counted, not recorded", async () => {
   const home = await tempHome();
   const stream = await fakeStream(home);
   const registrars = await client(home);
   const served = startDaemon(home, stream);
-  // X: the root's parent is a shell, not the launch owner.
-  const x = await launchDir(home, "x");
-  const tokenX = await register(home, x, sleeper().pid);
-  // Y: the root is the registrar (an ancestor below the owner, like the supervisor subshell).
-  const y = await launchDir(home, "y");
-  const registrarY = sleeper();
-  const tokenY = await register(home, y, registrarY.pid);
-  await until(async () => await Bun.file(join(x.dir, "ready")).exists() && await Bun.file(join(y.dir, "ready")).exists());
-  const shell = Bun.spawn(["/bin/sh", "-c", `( while [ -d '${home}' ]; do sleep 0.05; done ) & echo $!; wait`],
-    { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-  // The background loop ends by itself once the temp home is removed.
-  cleanups.push(async () => { if (shell.exitCode === null && shell.signalCode === null) shell.kill(); await shell.exited; });
-  const reader = shell.stdout.getReader();
-  const grandchild = Number(new TextDecoder().decode((await reader.read()).value).trim());
-  reader.releaseLock();
-  expect(realReader.read(grandchild)?.ppid).toBe(shell.pid);
-  await registerRoot(x, grandchild);
-  await registerRoot(y, registrarY.pid);
-  for (const [launch, token] of [[x, tokenX], [y, tokenY]] as const) {
-    await until(async () => (await text(join(launch.dir, "done"))) === token);
-    expect(existsSync(join(launch.dir, "failed"))).toBe(true);
-    expect(existsSync(join(launch.dir, "root-ready"))).toBe(false);
-    expect(await text(launch.agentLog)).toContain("CLI root registration could not verify launch ancestry");
-  }
+  const a = await launchDir(home, "a");
+  await register(home, a, sleeper().pid);
+  await until(() => Bun.file(join(a.dir, "ready")).exists());
+  await appendFile(stream.feed, `${JSON.stringify({
+    messageType: "Error", processID: 0, processImagePath: "/kernel", bootUUID: "",
+    senderImagePath: "/System/Library/Extensions/Sandbox.kext/Contents/MacOS/Sandbox",
+    timestamp: "2026-10-06 17:00:00.000000-0500", machTimestamp: 77,
+    eventMessage: `29 duplicate reports for Sandbox: bash(81072) deny(1) file-read-data /x\n${a.tag}`,
+  })}\n`);
+  await stream.report(a.tag, 0, "file-read-data", "/y"); // "sleep(0)": no valid split
+  await until(async () => (await text(a.agentLog)).includes("duplicates=29"));
+  expect(await text(a.agentLog)).toContain('[Sandbox] file-read-data process="bash" pid=81072 target="/x"');
+  // The ambiguous count reaches the launch's summary when it ends.
+  await writeFile(join(a.dir, "stop"), "stop\n");
+  await until(() => Bun.file(join(a.dir, "done")).exists());
+  expect(await text(a.agentLog)).toContain("ambiguous process names omitted=1");
   registrars.release();
   expect(await served).toBe(0);
 }, 20000);
@@ -486,15 +571,9 @@ darwinTest("a FIFO agent.log fails only its own launch; another launch still get
   const tokenA = await register(home, a, sleeper().pid);
   const tokenB = await register(home, b, sleeper().pid);
   await until(async () => await Bun.file(join(a.dir, "ready")).exists() && await Bun.file(join(b.dir, "ready")).exists());
-  const rootA = sleeper();
-  const rootB = sleeper();
-  await registerRoot(a, rootA.pid);
-  await registerRoot(b, rootB.pid);
-  await until(async () => await Bun.file(join(a.dir, "root-ready")).exists() && await Bun.file(join(b.dir, "root-ready")).exists());
-  await Bun.sleep(30);
-  await stream.report(rootA.pid, "file-read-data");
-  await stream.report(rootB.pid, "file-write-create");
-  await until(async () => (await text(b.agentLog)).includes(`[Sandbox] file-write-create process="sleep" pid=${rootB.pid} `));
+  await stream.report(a.tag, 101, "file-read-data");
+  await stream.report(b.tag, 102, "file-write-create");
+  await until(async () => (await text(b.agentLog)).includes(`[Sandbox] file-write-create process="sleep" pid=102 `));
   await until(async () => (await text(join(a.dir, "done"))) === tokenA);
   expect(existsSync(join(a.dir, "failed"))).toBe(true);
   expect(await text(paths.log)).toContain("agent.log unwritable");
@@ -514,8 +593,8 @@ darwinTest("the daemon rejects a registration redirected to another agent's log"
   const a = await launchDir(home, "a");
   const victim = await launchDir(home, "victim");
   const registrar = sleeper();
-  await writeFile(join(a.dir, "registration.json"), JSON.stringify({ v: 1, agentLog: victim.agentLog, boot: realReader.boot,
-    owner: identity(process.pid), registrar: identity(registrar.pid), token: randomBytes(16).toString("hex") }));
+  await writeFile(join(a.dir, "registration.json"), JSON.stringify({ v: 2, agentLog: victim.agentLog, boot: realReader.boot,
+    owner: identity(process.pid), registrar: identity(registrar.pid), token: randomBytes(16).toString("hex"), tag: a.tag }));
   await writeFile(join(paths.inbox, a.name), a.dir);
   await until(async () => (await text(paths.log)).includes(`registration ${a.name} rejected: Error: agent log is not bound`));
   // The registrar hears it through its own private directory only.
@@ -565,7 +644,28 @@ darwinTest("a stale directory with a dead or reused registrar is never adopted, 
 
 // ---- attach ----
 
-darwinTest("attach starts a new daemon after a stream failure and the new one re-adopts every live root", async () => {
+darwinTest("attach registers its profile's tag; a raw profile without one is refused", async () => {
+  const home = await tempHome();
+  const paths = sandboxCollectorPaths(home);
+  await mkdir(paths.inbox, { recursive: true, mode: 0o700 });
+  const a = await launchDir(home, "a");
+  // A daemon that holds the role and never answers: the registration stays.
+  const role = tryCollectorLock(paths.daemonLock)!;
+  cleanups.push(async () => closeSync(role));
+  const attached = attachSandboxLaunch({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, pollMs: 20 });
+  await until(() => existsSync(join(paths.inbox, a.name)));
+  expect(JSON.parse(await text(join(a.dir, "registration.json"))).tag).toBe(a.tag);
+  writeFileSync(join(a.dir, "failed"), "");
+  expect(await attached).toBe(1);
+
+  const b = await launchDir(home, "b");
+  await writeFile(sandboxProfilePath(b.agentDir, home), "(version 1)\n(deny default)\n");
+  expect(await attachSandboxLaunch({ dir: b.dir, owner: process.pid, agentLog: b.agentLog, home, pollMs: 20 })).toBe(1);
+  expect(await text(b.agentLog)).toContain("the launch profile carries no attribution tag");
+  expect(existsSync(join(b.dir, "registration.json"))).toBe(false);
+});
+
+darwinTest("upgrade: a launch registered before tags (protocol 1) is rejected by the new daemon's scan; its attach returns", async () => {
   const home = await tempHome();
   const stream = await fakeStream(home);
   const paths = sandboxCollectorPaths(home);
@@ -574,23 +674,46 @@ darwinTest("attach starts a new daemon after a stream failure and the new one re
   const a = await launchDir(home, "a");
   const attached = attachSandboxLaunch({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, startCollector, pollMs: 50 });
   await until(() => Bun.file(join(a.dir, "ready")).exists());
-  const root = sleeper();
-  await registerRoot(a, root.pid);
-  await until(() => Bun.file(join(a.dir, "root-ready")).exists());
+  // What an older `ib` wrote for this launch: no tag.
+  const { tag: _tag, ...older } = JSON.parse(await text(join(a.dir, "registration.json")));
+  await writeFile(join(a.dir, "registration.json"), JSON.stringify({ ...older, v: 1 }));
+  // The daemon is replaced (as by `ib sandbox-collector restart` after the upgrade).
+  expect(restartSandboxCollector(home)).toBe(true);
+  expect(await daemons[0]).toBe(0);
+  // The successor's startup scan rejects it in the launch's own directory...
+  await until(async () => (await text(join(a.dir, "done"))) === "rejected", 6000);
+  expect(existsSync(join(a.dir, "failed"))).toBe(true);
+  expect(await text(paths.log)).toContain(`launch ${a.name} not adopted: Error: unsupported registration protocol 1`);
+  // ...and its attach returns with a visible ERROR instead of waiting.
+  expect(await attached).toBe(1);
+  expect(await text(a.agentLog)).toContain("shared collector rejected this launch");
+  expect(existsSync(join(a.dir, "ready"))).toBe(false);
+  // With that attach gone, the successor has nothing to serve and exits.
+  expect(daemons.length).toBe(2);
+  expect(await daemons[1]).toBe(0);
+  expect(sandboxCollectorRunning(paths)).toBe(false);
+}, 20000);
+
+darwinTest("attach starts a new daemon after a stream failure and the new one re-adopts every live launch", async () => {
+  const home = await tempHome();
+  const stream = await fakeStream(home);
+  const paths = sandboxCollectorPaths(home);
+  const daemons: Promise<number>[] = [];
+  const startCollector = (lockFd: number) => { daemons.push(startDaemon(home, stream, lockFd)); };
+  const a = await launchDir(home, "a");
+  const attached = attachSandboxLaunch({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, startCollector, pollMs: 50 });
+  await until(() => Bun.file(join(a.dir, "ready")).exists());
   // B's registrar never notices a restart; the new daemon must adopt it anyway.
   const b = await launchDir(home, "b");
   const registrarB = sleeper();
   await register(home, b, registrarB.pid);
   await until(() => Bun.file(join(b.dir, "ready")).exists());
-  const rootB = sleeper();
-  await registerRoot(b, rootB.pid);
-  await until(() => Bun.file(join(b.dir, "root-ready")).exists());
 
   // The stream dies: the daemon reports it and exits without `done`.
   await writeFile(stream.exitFile, "");
   expect(await daemons[0]).toBe(1);
   await rm(stream.exitFile);
-  await until(async () => (await text(a.agentLog)).includes("shared collector resumed") &&
+  await until(async () => count(await text(a.agentLog), "stream ready") === 2 &&
     (await text(b.agentLog)).includes("shared collector resumed"), 6000);
   const log = await text(a.agentLog);
   expect(log).toContain("shared collector failed: Error: log stream stopped unexpectedly");
@@ -598,16 +721,15 @@ darwinTest("attach starts a new daemon after a stream failure and the new one re
   expect(await text(b.agentLog)).not.toContain("starting a new one");
   expect(daemons.length).toBe(2);
 
-  await Bun.sleep(30);
-  await stream.report(root.pid, "file-read-data");
-  await stream.report(rootB.pid, "file-write-create");
-  await until(async () => (await text(a.agentLog)).includes(`[Sandbox] file-read-data process="sleep" pid=${root.pid} `) &&
-    (await text(b.agentLog)).includes(`[Sandbox] file-write-create process="sleep" pid=${rootB.pid} `));
+  await stream.report(a.tag, 101, "file-read-data");
+  await stream.report(b.tag, 102, "file-write-create");
+  await until(async () => (await text(a.agentLog)).includes(`[Sandbox] file-read-data process="sleep" pid=101 `) &&
+    (await text(b.agentLog)).includes(`[Sandbox] file-write-create process="sleep" pid=102 `));
   registrarB.kill();
   await until(() => Bun.file(join(b.dir, "done")).exists());
 
-  // Root exit ends the launch; attach returns once the daemon wrote `done`.
-  root.kill();
+  // The launch's stop ends it; attach returns once the daemon wrote `done`.
+  await writeFile(join(a.dir, "stop"), "stop\n");
   expect(await attached).toBe(0);
   expect(await text(a.agentLog)).toContain(`launch=${a.name} collector stopped`);
   expect(await Bun.file(join(paths.inbox, a.name)).exists()).toBe(false);
@@ -732,8 +854,6 @@ darwinTest("a successor's re-adopt scan rejects a launch whose owner just exited
   const m = await launchDir(home, "m");
   const attachedM = attachSandboxLaunch({ dir: m.dir, owner: process.pid, agentLog: m.agentLog, home, startCollector, pollMs: 20 });
   await until(() => Bun.file(join(m.dir, "ready")).exists());
-  await registerRoot(m, sleeper().pid);
-  await until(() => Bun.file(join(m.dir, "root-ready")).exists());
   // L: its attach runs under a disposable owner shell, so the owner can exit
   // while the attach lives on. It ends by itself if the temp home disappears.
   const l = await launchDir(home, "l");
@@ -776,7 +896,8 @@ darwinTest("a successor's re-adopt scan rejects a launch whose owner just exited
   await until(() => existsSync(exitFile), 8000); // without the fix: never
   expect(await text(exitFile)).toBe("0"); // the owner is gone: L ends quietly
   expect(existsSync(join(home, "l-starts"))).toBe(false);
-  await until(async () => (await text(m.agentLog)).includes("shared collector resumed"), 8000);
+  await until(async () => count(await text(m.agentLog), "stream ready") === 2, 8000);
+  expect(await text(m.agentLog)).toContain("shared collector stopped; starting a new one");
   expect(daemons.length).toBe(2);
   // With L's attach gone, the successor exits once M ends.
   await writeFile(join(m.dir, "stop"), "stop\n");
@@ -793,8 +914,6 @@ async function attachedPair(home: string, stream: Stream) {
     const launch = await launchDir(home, name);
     const attached = attachSandboxLaunch({ dir: launch.dir, owner: process.pid, agentLog: launch.agentLog, home, startCollector, pollMs: 50 });
     await until(() => Bun.file(join(launch.dir, "ready")).exists());
-    await registerRoot(launch, sleeper().pid);
-    await until(() => Bun.file(join(launch.dir, "root-ready")).exists());
     launches.push({ launch, attached });
   }
   return { daemons, launches };
@@ -809,7 +928,7 @@ darwinTest("stop ends every launch: each gets done, each attach returns, the dae
   expect(stopSandboxCollector(home)).toBe(true);
   for (const { launch, attached } of launches) {
     expect(await attached).toBe(0);
-    expect(await text(launch.agentLog)).toContain("collection stopping before the registered CLI exits");
+    expect(await text(launch.agentLog)).toContain("collection stopping before the launch ends; coverage reduced");
     expect(await text(launch.agentLog)).toContain(`launch=${launch.name} collector stopped`);
     expect(existsSync(join(launch.dir, "done"))).toBe(true);
   }
@@ -825,14 +944,27 @@ darwinTest("restart leaves every launch to a new daemon: no done, and the new on
   const { daemons, launches } = await attachedPair(home, stream);
   expect(restartSandboxCollector(home)).toBe(true);
   expect(await daemons[0]).toBe(0);
+  // The attach that wins the freed role says so and starts the successor; the
+  // successor re-adopts the other launch, whose attach did not notice.
+  const restarted = (log: string) => log.includes("starting a new one") ? count(log, "stream ready") === 2 : log.includes("shared collector resumed");
   await until(async () => {
-    for (const { launch } of launches) if (!(await text(launch.agentLog)).includes("shared collector resumed")) return false;
+    for (const { launch } of launches) if (!restarted(await text(launch.agentLog))) return false;
     return true;
   }, 6000);
   expect(daemons.length).toBe(2);
+  let starters = 0;
   for (const { launch } of launches) {
-    expect(await text(launch.agentLog)).toContain("shared collector restarting on request");
+    const log = await text(launch.agentLog);
+    expect(log).toContain("shared collector restarting on request");
+    if (log.includes("starting a new one")) starters++;
     expect(existsSync(join(launch.dir, "done"))).toBe(false);
+  }
+  expect(starters).toBe(1);
+  // Re-adopted with their tags: the new daemon attributes both again.
+  for (const [index, { launch }] of launches.entries()) await stream.report(launch.tag, 200 + index, "file-read-data");
+  for (const [index, { launch }] of launches.entries()) {
+    await until(async () => (await text(launch.agentLog)).includes(`pid=${200 + index} `));
+    expect(await text(launch.agentLog)).not.toContain(`pid=${201 - index} `);
   }
   for (const { launch } of launches) await writeFile(join(launch.dir, "stop"), "stop\n");
   for (const { attached } of launches) expect(await attached).toBe(0);
@@ -848,7 +980,7 @@ darwinTest("SIGTERM to a daemon process restarts it like `restart`, through the 
   await writeFile(daemonScript, `
     import { appendFile } from "node:fs/promises";
     import { serveSandboxCollector } from ${MODULE};
-    process.exit(await serveSandboxCollector({ home: ${JSON.stringify(home)}, lockFd: 3, sandboxed: () => false,
+    process.exit(await serveSandboxCollector({ home: ${JSON.stringify(home)}, lockFd: 3, sandboxed: () => false, loopMs: 100,
       spawnStream: () => Bun.spawn([process.execPath, ${JSON.stringify(stream.script)}], { stdin: "pipe", stdout: "pipe", stderr: "pipe" }),
       emitMarker: m => { void appendFile(${JSON.stringify(stream.feed)}, JSON.stringify({ processImagePath: "/usr/bin/logger", eventMessage: m }) + "\\n"); } }));
   `);
@@ -864,14 +996,13 @@ darwinTest("SIGTERM to a daemon process restarts it like `restart`, through the 
   const a = await launchDir(home, "a");
   const attached = attachSandboxLaunch({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, startCollector, pollMs: 50 });
   await until(() => Bun.file(join(a.dir, "ready")).exists(), 8000);
-  await registerRoot(a, sleeper().pid);
-  await until(() => Bun.file(join(a.dir, "root-ready")).exists());
   children[0]!.kill("SIGTERM");
   expect(await children[0]!.exited).toBe(0);
   expect(existsSync(join(a.dir, "done"))).toBe(false);
-  await until(async () => (await text(a.agentLog)).includes("shared collector resumed"), 8000);
+  await until(async () => count(await text(a.agentLog), "stream ready") === 2, 8000);
   expect(children.length).toBe(2);
   expect(await text(a.agentLog)).toContain("shared collector restarting on request");
+  expect(await text(a.agentLog)).toContain("shared collector stopped; starting a new one");
   await writeFile(join(a.dir, "stop"), "stop\n");
   expect(await attached).toBe(0);
   expect(await children[1]!.exited).toBe(0);

@@ -16,6 +16,7 @@ import {
   canonicalizePathsConfig,
   canonicalizeSandboxPath,
   generateProfile,
+  newSandboxTag,
   resolvePathsConfig,
   resolveSandboxConfig,
   resolveTmuxSocketDir,
@@ -397,7 +398,7 @@ describe("LIVE: ib ack inside a manager's kernel sandbox", () => {
       };
       const runner = async (profileParams: SandboxProfileParams) => {
         const profilePath = join(scratch, `mgr-${profileParams.canSpawnChildren}.sb`);
-        await writeFile(profilePath, generateProfile(config, paths, profileParams));
+        await writeFile(profilePath, generateProfile(config, paths, profileParams, newSandboxTag()));
         const defArgs = Object.entries(sandboxProfileParameterValues(paths, profileParams)).flatMap(([k, v]) => ["-D", `${k}=${v}`]);
         return (cmd: string[]) => {
           const out = Bun.spawnSync({

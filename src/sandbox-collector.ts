@@ -1,12 +1,17 @@
 /** One unsandboxed collector per user owns ONE `log stream` for every sandboxed
  * launch (docs/SANDBOX-SHARED-COLLECTOR.md). Launches register only through the
- * sealed tree, which the shipped floor denies to every sandboxed agent. Per-launch
- * attribution is unchanged (sandbox-denials.ts, sandbox-process-tree.ts).
+ * sealed tree, which the shipped floor denies to every sandboxed agent.
+ *
+ * Attribution is by tag: every deny in a launch's profile carries
+ * `ib-agent:<secret nonce>`, the kernel appends it as the last line of each
+ * denial report, and a report goes to the launch whose registered tag equals
+ * that line exactly (sandbox-denials.ts). No process is tracked.
  *
  * `serve`  — the daemon: the stream and every launch's state.
  * `attach` — one per launch, run by the start.sh/resume.sh supervisor subshell:
- *            registers the launch, waits for the daemon's acknowledgement, and
- *            starts a daemon whenever none is running while the launch is alive.
+ *            registers the launch and its tag, waits for the daemon's
+ *            acknowledgement, and starts a daemon whenever none is running
+ *            while the launch is alive.
  *
  * Lifecycle is decided by kernel flocks, never by elapsed time:
  * - `daemon.lock` LOCK_EX is the daemon role. Whoever takes it is the one
@@ -28,27 +33,34 @@ import { randomBytes } from "node:crypto";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { sealDir } from "./agent-seal";
-import { SandboxAttribution, SandboxLogFramer, SandboxOutputBudget, formatSandboxRecord,
-  parseSandboxReport, processIdentity, type ProcessObservation, type SandboxReport } from "./sandbox-denials";
-import { sandboxLogParent } from "./sandbox-log-paths";
+import { SANDBOX_TAG, sandboxProfileTag } from "./sandbox";
+import { SandboxLogFramer, SandboxOutputBudget, formatSandboxRecord, parseSandboxReport,
+  type SandboxReport } from "./sandbox-denials";
+import { sandboxLogParent, sandboxProfilePath } from "./sandbox-log-paths";
 import { closeSandboxLogStream, sandboxStreamExited } from "./sandbox-log-stream";
-import { sampleSandboxTree } from "./sandbox-process-tree";
-import { openSandboxProcessReader } from "./sandbox-processes";
+import { openSandboxProcessReader, processIdentity, type ProcessObservation } from "./sandbox-processes";
 
 const LAUNCH_NAME = /^sandbox-log\.[a-zA-Z0-9]+$/;
-const PROTOCOL = 1;
+/** 2: the registration names the launch's attribution tag. */
+const PROTOCOL = 2;
 /** Daemon starts one attach may make in a row without an acknowledgement in
  * between: a daemon that dies at once on every start must not become a spawn
  * loop. Every `ready` resets the count, so a long launch survives any number of
  * restarts that each worked. */
 const MAX_STARTS = 4;
 const LOCK_SH = 1, LOCK_EX = 2, LOCK_NB = 4;
-/** Cadences, not deadlines: how often state is re-read, never a decision made
- * because time passed. Tree sampling stays at 20 ms (it sets how early a
- * short-lived child must be seen to be attributed); everything else is 250 ms. */
-const SAMPLE_MS = 20;
-const MARKER_MS = 50;
-const CHECK_MS = 250;
+/** The daemon loop's one cadence: inbox, control files, owner and registrar
+ * checks, readiness-marker re-emission and the heartbeat. A cadence, never a
+ * decision made because time passed. Stream events never wait for it: the pump
+ * handles each report, and each readiness marker, as it arrives.
+ *
+ * Readiness needs no faster loop. A registration waits at most one loop to be
+ * admitted, which emits the first marker; the pump writes `ready` as soon as a
+ * marker comes back. A cold stream can lose the first marker; the next loop
+ * emits another. So a launch is ready about 1-2 s after it registers, and one
+ * whose markers never come back fails at the 3 s marker deadline, about 4 s
+ * after it registers: both inside the preamble's 5 s bound. */
+const LOOP_MS = 1000;
 /** `status` and the `ib watch` Collector light only: a heartbeat this old
  * means the daemon loop is not running. */
 export const STALE_HEARTBEAT_MS = 5000;
@@ -158,10 +170,10 @@ export interface AcceptedRegistration {
   dir: string;
   agentLog: string;
   token: string;
+  /** The launch's attribution tag; a report whose last line equals it is this launch's. */
+  tag: string;
   owner: ProcessObservation;
   registrar: ProcessObservation;
-  /** The registrar and its ancestors below the owner; a CLI root may not be one. */
-  registrarAncestors: Set<number>;
 }
 
 const isPid = (value: unknown): value is number =>
@@ -186,20 +198,21 @@ function checkLaunchDirectory(entryName: string, entryText: string, home?: strin
 
 /** Accept a registration only from a private launch directory in the sealed
  * namespace, written in this boot, naming the agent.log bound to that
- * namespace, by the exact live registrar process (PID + birth) it names, which
- * descends from the exact launch owner process it names; both unsandboxed. */
+ * namespace and a well-formed tag, by the exact live registrar process (PID +
+ * birth) it names, which descends from the exact launch owner process it names;
+ * both unsandboxed. */
 export function validateRegistration(entryName: string, entryText: string, reader: CollectorReader, home?: string): AcceptedRegistration {
   const dir = checkLaunchDirectory(entryName, entryText, home);
   const registration = JSON.parse(readPrivateFile(join(dir, "registration.json"), 8192));
   if (registration?.v !== PROTOCOL) throw new Error(`unsupported registration protocol ${String(registration?.v)}`);
-  const { agentLog, owner, registrar, token, boot } = registration;
-  // Unchanged rule: a launch directory may only name the agent.log of the agent
-  // directory whose hash names its namespace.
+  const { agentLog, owner, registrar, token, boot, tag } = registration;
+  // A launch directory may only name the agent.log of the agent directory
+  // whose hash names its namespace.
   if (typeof agentLog !== "string" || !isAbsolute(agentLog) || sandboxLogParent(dirname(agentLog), home) !== dirname(dir)) {
     throw new Error("agent log is not bound to this launch namespace");
   }
   if (typeof token !== "string" || !/^[0-9a-f]{32}$/.test(token) || typeof boot !== "string" ||
-      !isRegisteredProcess(owner) || !isRegisteredProcess(registrar)) {
+      typeof tag !== "string" || !SANDBOX_TAG.test(tag) || !isRegisteredProcess(owner) || !isRegisteredProcess(registrar)) {
     throw new Error("malformed registration");
   }
   // A launch directory outlives a crash or reboot; its PIDs may now name
@@ -213,36 +226,26 @@ export function validateRegistration(entryName: string, entryText: string, reade
   if (!registrarProcess || processIdentity(registrarProcess) !== processIdentity(registrar)) {
     throw new Error("registrar is not running (or its PID now names another process)");
   }
-  // The per-launch collector proved the owner was ITS ancestor. The shared
-  // daemon is nobody's descendant, so prove it of the live registrar instead.
-  const registrarAncestors = new Set<number>();
+  // The shared daemon is nobody's descendant, so it proves the owner is the
+  // live registrar's ancestor (the supervisor subshell sits between them).
   let ancestor: ProcessObservation | null = registrarProcess;
-  for (let depth = 0; ancestor && depth < 64 && ancestor.pid !== owner.pid; depth++) {
-    registrarAncestors.add(ancestor.pid);
-    ancestor = reader.read(ancestor.ppid);
-  }
+  for (let depth = 0; ancestor && depth < 64 && ancestor.pid !== owner.pid; depth++) ancestor = reader.read(ancestor.ppid);
   if (!ancestor || processIdentity(ancestor) !== processIdentity(ownerProcess)) {
     throw new Error("launch owner is not an ancestor of the registrar");
   }
   if (reader.sandboxed(owner.pid) || reader.sandboxed(registrar.pid)) throw new Error("launch owner or registrar is sandboxed");
-  return { name: entryName, dir, agentLog, token, owner: ownerProcess, registrar: registrarProcess, registrarAncestors };
+  return { name: entryName, dir, agentLog, token, tag, owner: ownerProcess, registrar: registrarProcess };
 }
 
 interface Launch extends AcceptedRegistration {
   stopFd: number;
   marker: string;
-  markerSeen: boolean;
-  markerNext: number;
   markerDeadline: number;
   ready: boolean;
-  /** When stop file, owner and registrar are next re-read (every CHECK_MS). */
-  nextCheck: number;
-  /** A re-registration after a daemon restart: its root may already exist. */
+  /** Re-adopted after a daemon restart (its `ready` is still there): the CLI
+   * already runs, and reports while no daemon ran were lost. */
   resumed: boolean;
-  attribution?: SandboxAttribution;
-  active: ProcessObservation[];
   budget: SandboxOutputBudget;
-  overflow: number;
   ambiguous: number;
   lastSummary: number;
   stopAt?: number;
@@ -254,11 +257,13 @@ export interface ServeOptions {
    * that won the role. Without it, serve tries the lock once and defers to a
    * running daemon. */
   lockFd?: number;
-  /** Test seams: the stream helper, the readiness-marker emitter, and the
-   * kernel sandbox check (a test suite may itself run inside a sandbox). */
+  /** Test seams: the stream helper, the readiness-marker emitter, the kernel
+   * sandbox check (a test suite may itself run inside a sandbox), and the loop
+   * cadence (LOOP_MS). */
   spawnStream?: (predicate: string) => Bun.Subprocess<"pipe", "pipe", "pipe">;
   emitMarker?: (marker: string) => void;
   sandboxed?: (pid: number) => boolean;
+  loopMs?: number;
 }
 
 const sameProcess = (current: ProcessObservation | null | undefined, expected: ProcessObservation) =>
@@ -307,7 +312,7 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
     void child.exited.then(() => clearTimeout(timer));
   });
   const launches = new Map<string, Launch>();
-  const roots = new Map<string, string>(); // root identity -> launch name
+  const byTag = new Map<string, Launch>();
   let reader: ReturnType<typeof openSandboxProcessReader> | undefined;
   let stream: Bun.Subprocess<"pipe", "pipe", "pipe"> | undefined;
   let outputReader: ReturnType<ReadableStream<Uint8Array>["getReader"]> | undefined;
@@ -326,13 +331,13 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
   const drop = (launch: Launch) => {
     try { closeSync(launch.stopFd); } catch { /* already closed */ }
     launches.delete(launch.name);
-    if (launch.attribution) roots.delete(processIdentity(launch.attribution.root));
+    if (byTag.get(launch.tag) === launch) byTag.delete(launch.tag);
   };
   const summary = (launch: Launch) => {
-    if (launch.budget.suppressed || launch.overflow || launch.ambiguous) {
-      status(launch, "WARNING", `output suppressed=${launch.budget.suppressed}; system stream queue overflow=${launch.overflow}; ambiguous reports omitted=${launch.ambiguous}; coverage reduced`);
+    if (launch.budget.suppressed || launch.ambiguous) {
+      status(launch, "WARNING", `output suppressed=${launch.budget.suppressed}; ambiguous process names omitted=${launch.ambiguous}; coverage reduced`);
     }
-    launch.budget.suppressed = 0; launch.overflow = 0; launch.ambiguous = 0;
+    launch.budget.suppressed = 0; launch.ambiguous = 0;
   };
   const finish = (launch: Launch) => {
     summary(launch);
@@ -346,15 +351,30 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
     try { writeFileSync(join(launch.dir, "done"), launch.token); } catch { /* removed */ }
     drop(launch);
   };
+  /** The launch's marker came back through the stream: it is warm, and every
+   * report of this launch from now on reaches the pump. */
+  const markReady = (launch: Launch) => {
+    writeFileSync(join(launch.dir, "ready"), launch.name);
+    launch.ready = true;
+    if (launch.resumed) status(launch, "WARNING", "shared collector resumed; reports while it was down were not collected; coverage reduced");
+    else status(launch, "INFO", "stream ready; denials carrying this launch's tag are recorded; a report the kernel truncated loses its tag and is omitted");
+  };
+  const record = (launch: Launch, report: SandboxReport) => {
+    if (!report.offender) { launch.ambiguous++; return; }
+    if (!launch.budget.accept(report, performance.now())) return;
+    try { appendAgentLog(launch.agentLog, `${formatSandboxRecord(report, launch.name, reader!.boot)}\n`); }
+    catch (error) { fail(launch, error); }
+  };
   try {
     reader = openSandboxProcessReader();
-    const predicate = `(subsystem == "com.apple.sandbox.reporting" AND category == "violation") OR (eventMessage CONTAINS "Sandbox:") OR (eventMessage CONTAINS "${markerPrefix}")`;
+    // Only tagged kernel reports (and our markers) leave diagnosticd: the
+    // daemon never sees the rest of the host's sandbox denials.
+    const predicate = `(eventMessage CONTAINS "Sandbox:" AND eventMessage CONTAINS "ib-agent:") OR (eventMessage CONTAINS "${markerPrefix}")`;
     stream = opts.spawnStream?.(predicate) ?? Bun.spawn(["ib", "sandbox-log-stream", "--predicate", predicate],
       { stdin: "pipe", stdout: "pipe", stderr: "pipe", detached: true });
     outputReader = stream.stdout.getReader();
     errorReader = stream.stderr.getReader();
     const framer = new SandboxLogFramer();
-    const pending: { report: SandboxReport; received: number }[] = [];
     pumping = (async () => {
       const decoder = new TextDecoder();
       while (true) {
@@ -365,16 +385,18 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
             try {
               const event = JSON.parse(line);
               if (typeof event.eventMessage === "string" && event.processImagePath === "/usr/bin/logger") {
-                for (const launch of launches.values()) if (event.eventMessage.includes(launch.marker)) launch.markerSeen = true;
+                for (const launch of [...launches.values()]) {
+                  if (launch.ready || !event.eventMessage.includes(launch.marker)) continue;
+                  try { markReady(launch); } catch (error) { fail(launch, error); }
+                }
               }
             } catch { /* log stream's non-JSON banner is not an event */ }
           }
-          const report = parseSandboxReport(line, reader!.boot, { liveStream: true,
-            onAmbiguous: () => { for (const launch of launches.values()) launch.ambiguous++; } });
-          if (report) {
-            if (pending.length < 512) pending.push({ report, received: performance.now() });
-            else for (const launch of launches.values()) launch.overflow++;
-          }
+          // Exact equality with a registered tag; never a substring search,
+          // because path text can contain `ib-agent:` lines.
+          const report = parseSandboxReport(line);
+          const launch = report && byTag.get(report.tag);
+          if (launch) record(launch, report);
         }
       }
     })().catch(error => { failed = error; });
@@ -400,6 +422,7 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
       try {
         accepted = validateRegistration(name, dirText,
           { boot: reader!.boot, read: pid => reader!.read(pid), sandboxed: opts.sandboxed ?? (pid => reader!.sandboxed(pid)) }, opts.home);
+        if (byTag.has(accepted.tag)) throw new Error("attribution tag is already registered by another launch");
       } catch (error) {
         // Tell the registrar through its own private directory, never through
         // the unverified agent.log path. `done` (not the registration's token)
@@ -412,10 +435,11 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
         throw error;
       }
       const stopFd = openSync(join(accepted.dir, "stop"), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-      launches.set(name, { ...accepted, stopFd, marker: `${markerPrefix} ${name} ready`, markerSeen: false,
-        markerNext: now, markerDeadline: now + 3000, ready: false, nextCheck: now,
-        resumed: existsSync(join(accepted.dir, "root-request")),
-        active: [], budget: new SandboxOutputBudget(), overflow: 0, ambiguous: 0, lastSummary: now });
+      const launch: Launch = { ...accepted, stopFd, marker: `${markerPrefix} ${name} ready`, markerDeadline: now + 3000,
+        ready: false, resumed: existsSync(join(accepted.dir, "ready")), budget: new SandboxOutputBudget(), ambiguous: 0,
+        lastSummary: now };
+      launches.set(name, launch);
+      byTag.set(launch.tag, launch);
     };
     const accept = (now: number) => {
       let names: string[];
@@ -452,75 +476,27 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
     }
 
     const tick = (launch: Launch, now: number) => {
-      const currentRoot = launch.attribution && reader!.read(launch.attribution.root.pid);
-      const rootAlive = !!launch.attribution && sameProcess(currentRoot, launch.attribution.root);
-      // The 1 s drain makes a finer check of these pointless.
-      if (now >= launch.nextCheck) {
-        launch.nextCheck = now + CHECK_MS;
-        if (leaving === "stop" || fstatSync(launch.stopFd).size > 0 || !sameProcess(reader!.read(launch.owner.pid), launch.owner) ||
-            !sameProcess(reader!.read(launch.registrar.pid), launch.registrar)) {
-          if (launch.stopAt === undefined && rootAlive) status(launch, "WARNING", "collection stopping before the registered CLI exits; coverage reduced");
-          launch.stopAt ??= now + 1000;
+      if (launch.stopAt === undefined) {
+        const ownerAlive = sameProcess(reader!.read(launch.owner.pid), launch.owner);
+        const registrarAlive = sameProcess(reader!.read(launch.registrar.pid), launch.registrar);
+        if (leaving === "stop" || fstatSync(launch.stopFd).size > 0 || !ownerAlive || !registrarAlive) {
+          if (ownerAlive && (leaving === "stop" || !registrarAlive)) status(launch, "WARNING", "collection stopping before the launch ends; coverage reduced");
+          // Kernel reports reach the stream asynchronously: drain for 1 s.
+          launch.stopAt = now + 1000;
         }
       }
-      if (launch.attribution && !rootAlive) launch.stopAt ??= now + 1000;
       if (launch.stopAt !== undefined && now >= launch.stopAt) { finish(launch); return; }
       if (!launch.ready) {
-        if (launch.markerSeen) {
-          writeFileSync(join(launch.dir, "ready"), launch.name);
-          launch.ready = true;
-          if (launch.resumed) status(launch, "WARNING", "shared collector resumed; reports while it was down were not collected; coverage reduced");
-          else status(launch, "INFO", "stream ready; coverage limited to verified observed process lifetimes; unknown and OS-coalesced reports omitted");
-        } else if (now >= launch.markerDeadline) {
-          throw new Error("log stream readiness marker was not observed within 3 seconds");
-        } else {
-          if (now >= launch.markerNext) { emitMarker(launch.marker); launch.markerNext = now + 100; }
-          return;
-        }
-      }
-      if (!launch.attribution && launch.stopAt === undefined && existsSync(join(launch.dir, "root-request"))) {
-        const pidText = readPrivateFile(join(launch.dir, "root-request"), 64).trim();
-        const root = /^[1-9]\d{0,9}$/.test(pidText) ? reader!.read(Number(pidText)) : null;
-        // The gate is a direct child of start.sh/resume.sh (setsid execs it).
-        if (!root || root.ppid !== launch.owner.pid || launch.registrarAncestors.has(root.pid)) {
-          throw new Error("CLI root registration could not verify launch ancestry");
-        }
-        if (roots.has(processIdentity(root))) throw new Error("CLI root is already registered by another launch");
-        roots.set(processIdentity(root), launch.name);
-        launch.attribution = new SandboxAttribution(root);
-        launch.attribution.observe([root], now);
-        launch.active = [root];
-        writeFileSync(join(launch.dir, "root-ready"), launch.name);
-      }
-      if (launch.attribution) {
-        const samples = sampleSandboxTree(reader!, launch.attribution.root, launch.active, currentRoot);
-        launch.attribution.observe(samples, now);
-        launch.active = samples;
+        if (now >= launch.markerDeadline) throw new Error("log stream readiness marker was not observed within 3 seconds");
+        emitMarker(launch.marker);
       }
       if (now - launch.lastSummary >= 60000) { summary(launch); launch.lastSummary = now; }
     };
 
-    let lastBeat = -Infinity; // performance.now() starts near 0: beat at once
-    let nextControl = 0;
-    let nextAccept = 0;
-    let inboxMtime: bigint | undefined;
-    /** A directory's mtime changes when an entry is added or removed. A stat
-     * is far cheaper than a readdir; the CHECK_MS fallback covers anything a
-     * timestamp could miss. */
-    const inboxChanged = () => {
-      try {
-        const mtime = statSync(paths.inbox, { bigint: true }).mtimeNs;
-        if (mtime !== inboxMtime) { inboxMtime = mtime; return true; }
-      } catch { /* no inbox yet */ }
-      return false;
-    };
     while (true) {
       const now = performance.now();
-      if (now >= nextControl) {
-        nextControl = now + CHECK_MS;
-        if (existsSync(paths.restart)) { leaving ??= "restart"; try { unlinkSync(paths.restart); } catch { /* removed */ } }
-        if (existsSync(paths.stop)) { leaving ??= "stop"; try { unlinkSync(paths.stop); } catch { /* removed */ } }
-      }
+      if (existsSync(paths.restart)) { leaving ??= "restart"; try { unlinkSync(paths.restart); } catch { /* removed */ } }
+      if (existsSync(paths.stop)) { leaving ??= "stop"; try { unlinkSync(paths.stop); } catch { /* removed */ } }
       if (leaving === "restart") {
         note("restart requested; leaving every launch to the next daemon");
         for (const launch of [...launches.values()]) {
@@ -536,44 +512,14 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
       if (sandboxStreamExited(stream) || failed) {
         throw new Error(`log stream stopped unexpectedly (exit=${stream.exitCode}, signal=${stream.signalCode}): ${(stderr || String(failed ?? "no output")).trim()}`);
       }
-      if (!leaving && (inboxChanged() || now >= nextAccept)) {
-        accept(now);
-        nextAccept = now + CHECK_MS;
-      }
+      if (!leaving) accept(now);
       for (const launch of [...launches.values()]) {
         try { tick(launch, now); } catch (error) { fail(launch, error); }
       }
-      const attributing = [...launches.values()].filter(launch => launch.attribution);
-      if (attributing.length === 0) pending.length = 0; // nobody registered: all reports are unrelated
-      for (let index = 0; index < pending.length;) {
-        const item = pending[index]!;
-        const matches: { launch: Launch; identity: ProcessObservation }[] = [];
-        for (const launch of attributing) {
-          if (!launches.has(launch.name)) continue; // failed earlier in this tick
-          const identity = launch.attribution!.attribute(item.report);
-          if (identity) matches.push({ launch, identity });
-        }
-        if (matches.length === 1) {
-          const { launch, identity } = matches[0]!;
-          if (launch.budget.accept(item.report, identity, now)) {
-            try { appendAgentLog(launch.agentLog, `${formatSandboxRecord(item.report, identity, launch.name)}\n`); }
-            catch (error) { fail(launch, error); }
-          }
-          pending.splice(index, 1);
-        } else if (matches.length > 1) {
-          // Two launches claim one process instance: never guess between them.
-          for (const { launch } of matches) launch.ambiguous++;
-          pending.splice(index, 1);
-        } else if (now - item.received > 500) pending.splice(index, 1);
-        else index++;
-      }
-      if (now - lastBeat >= 1000) {
-        try {
-          writeAtomic(paths.heartbeat, JSON.stringify({ v: PROTOCOL, pid: process.pid, nonce: nonce.slice(0, 8),
-            updatedAt: Date.now(), launches: launches.size }));
-        } catch (error) { note(`heartbeat failed: ${String(error)}`); }
-        lastBeat = now;
-      }
+      try {
+        writeAtomic(paths.heartbeat, JSON.stringify({ v: PROTOCOL, pid: process.pid, nonce: nonce.slice(0, 8),
+          updatedAt: Date.now(), launches: launches.size }));
+      } catch (error) { note(`heartbeat failed: ${String(error)}`); }
       if (launches.size === 0) {
         if (leaving === "stop") break;
         let waiting = 1;
@@ -590,11 +536,7 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
           break;
         }
       }
-      // Tree sampling needs 20 ms only while a root is registered; a launch
-      // waiting for its readiness marker needs it seen soon; otherwise idle.
-      const values = [...launches.values()];
-      await Bun.sleep(values.some(launch => launch.attribution) ? SAMPLE_MS
-        : values.some(launch => !launch.ready) ? MARKER_MS : CHECK_MS);
+      await Bun.sleep(opts.loopMs ?? LOOP_MS);
     }
     note(leaving === "stop" ? "collector stopped on request" : leaving === "restart" ? "collector left for a restart"
       : "no launches and no registrars left; exiting");
@@ -628,7 +570,7 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
  * fd 3 and our copy is closed, so the role passes over without a free gap. */
 function spawnSandboxCollector(paths: SandboxCollectorPaths, lockFd: number): void {
   const env = { ...process.env };
-  for (const key of ["AGENT_LOG", "IB_SANDBOX_LOG_DIR", "IB_SANDBOX_LOG_AGENT_LOG", "IB_SANDBOX_LOG_STOP_OPEN"]) delete env[key];
+  delete env.AGENT_LOG;
   let logFd: number | undefined;
   try {
     logFd = openSync(paths.log, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
@@ -670,6 +612,10 @@ export async function attachSandboxLaunch(opts: AttachOptions): Promise<number> 
   try {
     if (dirname(opts.dir) !== sandboxLogParent(dirname(opts.agentLog), opts.home) || !LAUNCH_NAME.test(launch) ||
         !lstatSync(opts.dir).isDirectory()) throw new Error("invalid launch artifact directory");
+    // The tag of the profile the launcher wrote for this spawn or resume, in
+    // the same sealed namespace as this launch directory.
+    const tag = sandboxProfileTag(readPrivateFile(sandboxProfilePath(dirname(opts.agentLog), opts.home), 1024 * 1024));
+    if (!tag) throw new Error("the launch profile carries no attribution tag");
     reader = openSandboxProcessReader();
     const owner = reader.read(opts.owner);
     if (!owner) throw new Error("launch owner identity unavailable");
@@ -682,7 +628,7 @@ export async function attachSandboxLaunch(opts: AttachOptions): Promise<number> 
     // PID + birth + boot: a directory left by a crash or reboot can never be
     // adopted on behalf of a process that merely reuses one of these PIDs.
     writeAtomic(join(opts.dir, "registration.json"), JSON.stringify({ v: PROTOCOL, agentLog: opts.agentLog, boot: reader.boot,
-      owner: { pid: owner.pid, birth: owner.birth }, registrar: { pid: registrar.pid, birth: registrar.birth }, token }));
+      owner: { pid: owner.pid, birth: owner.birth }, registrar: { pid: registrar.pid, birth: registrar.birth }, token, tag }));
     const startCollector = opts.startCollector ?? ((fd: number) => spawnSandboxCollector(paths, fd));
     const file = (name: string) => join(opts.dir, name);
     const done = () => {

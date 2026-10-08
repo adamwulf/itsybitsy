@@ -86,7 +86,9 @@ Restarting the global `@system` coordinator does not sandbox it in this version.
 
 Keep the last working binary and configuration backup until rollout is verified. Enabled setup failures never silently disable the sandbox. Correct the reported configuration or deliberately change the type override, then run the supported operator refresh or restart path. Refresh reports transition/rollback failures; retry the documented recovery after resolving the underlying error. Reverting the installed binary restores that version of enforcement.
 
-The hook scanner provides early errors and denial-log entries for recognizable operations. It is not a complete shell parser. The kernel-denial collector adds reports whose process identity and lifetime can be established; absent or unattributable kernel-only events still may not appear in DENIALS.
+The hook scanner provides early errors and denial-log entries for recognizable operations. It is not a complete shell parser. The kernel-denial collector adds every kernel report that carries the launch's profile tag, including reports from short-lived and re-parented descendants. Reports the kernel truncated (the tag is lost), reports while no collector ran, and reports of launches started before tag attribution (until their next resume or respawn) do not appear in DENIALS.
+
+**Deploying tag attribution (2026-10-07):** registrations now carry the tag (protocol 2). A collector daemon from an older `ib` keeps running until no launch remains, and it rejects protocol-2 registrations visibly. After installing the new `ib`, run `ib sandbox-collector stop` once: the old daemon ends collection for the running (untagged) launches and exits, and the next new launch starts a daemon from the new `ib`. Each running old agent gets one coverage WARNING ("collection stopping before the registered CLI exits; coverage reduced"; two if that launch had suppressed output since its last summary) and "INFO collector stopped" in its `agent.log`, and no ERROR. (`restart` works too, but the new daemon then rejects each old launch's protocol-1 registration: up to two WARNINGs and two ERRORs per old agent.) Either way, agents started by the older `ib` stay uncollected until their next resume or respawn.
 
 Spawning agents retain access to the tmux server for lifecycle operations. This is an existing escape from process confinement: they can ask that server to run commands outside their inherited profile. Kernel wrapping does not close that boundary. Non-spawners have the corresponding socket denied.
 
@@ -125,18 +127,27 @@ every launch registers with through `ib sandbox-collector attach`, with a
 flock-based lifecycle. Collection was off for a while and is ON again through
 the shared collector (`SANDBOX_DENIAL_COLLECTOR_ENABLED = true`). Design, trust
 model, live evidence and how to turn it off: `docs/SANDBOX-SHARED-COLLECTOR.md`.
-The attribution rules below are unchanged.
 
-Attribution uses proc_pidinfo birth identity and independently observed descendant ancestry, with mach_continuous_time observations bracketing each report timestamp. A new parent-child edge requires the same parent PID/birth identity on both sides of the child read; a reused or unavailable parent drops that edge. The collector never extends an observed interval backwards to birth or forwards to estimated exit. Unknown or previously unobserved reparented children, events outside observed intervals, ambiguous reports, and OS duplicate summaries are omitted. Empty live-stream bootUUID uses the independently obtained running boot identity; persisted or replayed records are not consumed. History is capped at 4,096 instances and 30 seconds, pending reports at 512 entries and 500 milliseconds, with 20 ms polling.
+**Update (2026-10-07):** the attribution rules in the next paragraph, and the
+root request in the gate, are replaced by tag attribution. Every deny in a
+launch's profile carries `(with message "ib-agent:<secret nonce>")`; the kernel
+appends it as the last line of each report, and the collector appends a report
+to the launch whose registered tag equals that line exactly. No process is
+tracked, so the birth/ancestry/interval rules, the 20 ms polling, the pending
+queue and the root request below no longer exist. Records no longer carry
+`birth=`; OS-coalesced summaries are recorded with `duplicates=N`. Details:
+`docs/SANDBOX-SHARED-COLLECTOR.md` §5.
 
-Verified reports append `[Sandbox]` entries with the original timestamp,
-operation, offender name/PID/birth, target when present, launch, boot, and
+Historical: attribution used proc_pidinfo birth identity and independently observed descendant ancestry, with mach_continuous_time observations bracketing each report timestamp. A new parent-child edge requires the same parent PID/birth identity on both sides of the child read; a reused or unavailable parent drops that edge. The collector never extends an observed interval backwards to birth or forwards to estimated exit. Unknown or previously unobserved reparented children, events outside observed intervals, ambiguous reports, and OS duplicate summaries are omitted. Empty live-stream bootUUID uses the independently obtained running boot identity; persisted or replayed records are not consumed. History is capped at 4,096 instances and 30 seconds, pending reports at 512 entries and 500 milliseconds, with 20 ms polling.
+
+Attributed reports append `[Sandbox]` entries with the original timestamp,
+operation, offender name/PID, target when present, launch, boot, and
 monotonic event identity. Output is capped at 60 entries per minute per launch
 and 3 per process/operation/target per minute, with a 2,048-event deduplication
 cache. Suppression and collector errors use `[SandboxCollector]` records; errors
 and warnings also appear in DENIALS alongside unchanged hook denials.
 
-Every invocation allocates a fresh sandbox-log.XXXXXXXX directory beneath \~/.itsybitsy/sealed/sandbox-logs/<agent-directory-hash>/. The shipped floor denies this tree even when AGENTDIR is writable. Creation happens in the unsandboxed script. An initially empty stop file is opened once by both script and collector; the EXIT trap writes through reserved fd 9, so a late EXIT cannot touch a reused pathname. The gate atomically renames its root request, then closes fd 9 and clears control variables before exec. Only the supervisor removes the reserved directory after the collector returns, including collector crashes. Owner or CLI birth-identity disappearance still ends collection with a one-second drain. Stopping while the registered CLI remains alive produces a visible coverage WARNING. Diagnostic failure never removes the mandatory Seatbelt wrapper.
+Every invocation allocates a fresh sandbox-log.XXXXXXXX directory beneath \~/.itsybitsy/sealed/sandbox-logs/<agent-directory-hash>/. The shipped floor denies this tree even when AGENTDIR is writable. Creation happens in the unsandboxed script. An initially empty stop file is opened once by both script and collector; the EXIT trap writes through reserved fd 9, so a late EXIT cannot touch a reused pathname. The gate closes fd 9 before exec (until 2026-10-07 it also wrote a root request and waited for the collector to acknowledge it). Only the supervisor removes the reserved directory after the collector returns, including collector crashes. Owner or registrar disappearance, or a `stop` write, ends collection with a 1 s drain; an `ib sandbox-collector stop`, or a registrar that dies, while the owner still runs gives a coverage WARNING. Diagnostic failure never removes the mandatory Seatbelt wrapper.
 
 Historical candidate checks before independent review: 5,657 reported bun test passes, zero failures, 29,486 assertions across 115 files; TypeScript, build, CLI table and command-help smoke passed. After rebasing onto main eb5bfa0, candidate a28e0dd reported 5,720 passes, zero failures, 29,723 assertions across 117 files, plus successful TypeScript/build/smoke. Both totals include the kernel capability and opt-in Claude boot early-return skips described below; neither is a live enforcement/capture pass. The authorized live worker tested corrected candidate d198c4d with the actual shared preamble and gate, generated floor, and synthetic sandboxed shells. Those historical fixtures did not run whole production scripts, model CLIs, the proxy, or a controlling terminal. The review fixes changed production source after that live evidence and required the later fresh validation recorded below. Claude, Codex/fugu, agy, and per-repository coordinator generation remains covered by lifecycle tests.
 

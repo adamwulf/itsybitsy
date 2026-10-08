@@ -107,7 +107,7 @@ sandbox:
     - example.com
 ```
 
-The most specific explicit value wins: `_all.md` → `_non_coordinator.md` (except coordinators) → oldest ancestor → child type. A child can turn sandboxing off or back on. Omitting `sandbox` or adding only sandbox lists inherits the existing setting. The `rawAllow` and `domains` lists continue to union across all applicable files, including when a boolean shorthand overrides enablement.
+The most specific explicit value wins: `_all.md` → `_non_coordinator.md` (except coordinators) → oldest ancestor → child type. A child can turn sandboxing off or back on. Omitting `sandbox` or adding only sandbox lists inherits the existing setting. The `rawAllow` and `domains` lists continue to union across all applicable files, including when a boolean shorthand overrides enablement. A deny in `rawAllow` must be one top-level `(deny …)` rule without its own `(with message …)`: itsybitsy adds the launch's attribution tag to every deny, so the kernel-denial collector can attribute its reports. A deny nested in another form is a validation error.
 
 When enabled, repository agents and per-repository coordinators run inside the itsybitsy `sandbox-exec` profile and egress proxy; the resolved path configuration supplies the coarse kernel rules, while hooks enforce agent-type tool permissions and fine-grained paths. Failure to establish the enabled wrapper or proxy stops launch. With explicit `false`, only the itsybitsy wrapper, proxy, and kernel-denial collector are skipped, restoring pre-sandbox process behavior. Hooks remain active and resolve every tool allow/deny without native user prompts in both modes.
 

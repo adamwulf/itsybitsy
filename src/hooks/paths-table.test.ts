@@ -361,9 +361,11 @@ describe("generateProfile — optional PROJECTDIR/SCRATCHPAD roots", () => {
     canSpawnChildren: false,
   };
 
+  const tag = "ib-agent:0123456789abcdef0123456789abcdef";
+
   test("output is byte-identical whether the fields are absent or explicitly undefined", () => {
     const withUndefined: SandboxProfileParams = { ...base, PROJECTDIR: undefined, SCRATCHPAD: undefined };
-    expect(generateProfile(config, paths, withUndefined)).toBe(generateProfile(config, paths, base));
+    expect(generateProfile(config, paths, withUndefined, tag)).toBe(generateProfile(config, paths, base, tag));
   });
 
   test("present roots add rows and are emitted like the other params", () => {
@@ -372,8 +374,8 @@ describe("generateProfile — optional PROJECTDIR/SCRATCHPAD roots", () => {
       PROJECTDIR: "/some/project",
       SCRATCHPAD: "/private/tmp/claude-501/x",
     };
-    const out = generateProfile(config, paths, withRoots);
-    expect(out).not.toBe(generateProfile(config, paths, base));
+    const out = generateProfile(config, paths, withRoots, tag);
+    expect(out).not.toBe(generateProfile(config, paths, base, tag));
     expect(out).toContain('param "PROJECTDIR"');
     expect(out).toContain('param "SCRATCHPAD"');
   });

@@ -1745,8 +1745,9 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
             const result = await newAgent(repo.path, processedPrompt, opts);
             if (result.ok) {
               ctx.closeDialog();
-              // newAgent's stdout is the new agent's id.
-              if (favoriteOnCreate) ctx.addFavorite(result.stdout.trim());
+              // newAgent's stdout is the new agent's id. A coordinator has no
+              // row in the Agents tree, so `.` could never unfavorite it.
+              if (favoriteOnCreate && agentType !== "coordinator") ctx.addFavorite(result.stdout.trim());
               ctx.pendingSelectNewestInRepo = repo.path;
               ctx.setNotice(`Created new agent in ${repoDisplayName(repo)}`, "info");
             } else {

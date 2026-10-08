@@ -10,7 +10,7 @@ import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeCom
 import type { GeminiUsageResult } from "../usage";
 import { TUI, visibleWidth } from "@mariozechner/pi-tui";
 import type { CollectorHealth } from "../sandbox-collector-light";
-import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setNewAgentCallerMetaReader, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner, sealAgentRecord } from "../ib-commands";
+import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setNewAgentCallerMetaReader, resetNewAgentCallerMetaReader, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner, sealAgentRecord } from "../ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxPollerSpawnCtx } from "../tmux-poller";
 import { gitStatusSpawnCtx } from "../git-status";
@@ -2102,13 +2102,15 @@ describe("DashboardComponent dialog and action handlers", () => {
   });
 
   // SPEC §17.1 Favorites tab: an agent made from the Favorites tab becomes a
-  // favorite (and is persisted); one made from the Agents or Teams tab does not.
-  for (const [tabKey, tab, expectFavorite] of [
-    ["3", "favorites", true],
-    ["1", "agents", false],
-    ["2", "teams", false],
+  // favorite (and is persisted); one made from the Agents or Teams tab does not,
+  // and neither does a coordinator (it has no Agents-tree row).
+  for (const [tabKey, tab, agentType, expectFavorite] of [
+    ["3", "favorites", "manager", true],
+    ["1", "agents", "manager", false],
+    ["2", "teams", "manager", false],
+    ["3", "favorites", "coordinator", false],
   ] as const) {
-    test(`new-agent form: an agent made from the ${tab} tab ${expectFavorite ? "is" : "is not"} a favorite`, async () => {
+    test(`new-agent form: a ${agentType} made from the ${tab} tab ${expectFavorite ? "is" : "is not"} a favorite`, async () => {
       const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-fav-"));
       await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
       await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
@@ -2162,6 +2164,7 @@ describe("DashboardComponent dialog and action handlers", () => {
         dashboard.handleInput(tabKey);
         expect(dashboard.sidebarMode).toBe(tab);
         dashboard.handleInput("a");
+        assertDialog(dashboard.dialog, "new-agent-form").agentType = agentType;
         for (const ch of "fav-agent") dashboard.handleInput(ch);
         dashboard.handleInput("\t");
         dashboard.handleInput("\t");
@@ -2172,18 +2175,25 @@ describe("DashboardComponent dialog and action handlers", () => {
 
         await dashboard.flushPendingActions();
 
-        const meta = await Bun.file(join(newAgentTempDir, ".ittybitty", "agents", "fav-agent", "meta.json")).json();
-        expect(meta.id).toBe("fav-agent");
+        // A coordinator's id is derived from the repo, not the Name field.
+        const agentsDir = join(newAgentTempDir, ".ittybitty", "agents");
+        const { readdir: rd } = await import("fs/promises");
+        const agentDirs = (await rd(agentsDir, { withFileTypes: true })).filter(e => e.isDirectory());
+        expect(agentDirs.length).toBe(1);
+        const meta = await Bun.file(join(agentsDir, agentDirs[0]!.name, "meta.json")).json();
+        expect(meta.agentType).toBe(agentType);
+        if (agentType !== "coordinator") expect(meta.id).toBe("fav-agent");
         // meta.json is written before the late spawn steps — only the notice
         // shows that newAgent returned ok.
         expect(dashboard.notice).toBe("Created new agent in only-repo");
-        expect(dashboard.agentTree.favoriteAgentIds.has("fav-agent")).toBe(expectFavorite);
+        expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(expectFavorite ? [meta.id] : []);
         if (expectFavorite) {
           await flushPendingSave();
           expect((await loadLayout())!.favoriteAgentIds).toEqual(["fav-agent"]);
         }
       } finally {
         cancelPendingSave();
+        resetNewAgentCallerMetaReader();
         resetNewAgentSpawnRunner();
         lifecycleSpawnCtx.reset();
         resetUserConfigPath();

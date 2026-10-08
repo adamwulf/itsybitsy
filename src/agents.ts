@@ -4148,11 +4148,13 @@ export interface DenialEntry {
 /**
  * Parse agent.log for tool denial lines.
  * Format: [YYYY-MM-DD HH:MM:SS] [PreToolUse] Permission denied: ...
+ * The [Sandbox], [SandboxProxy] and [SandboxCollector] lines use the same local
+ * stamp; lines written before that carry a zoned or UTC ISO stamp, still accepted.
  */
 export function parseDenials(logLines: string[]): DenialEntry[] {
   const denials: DenialEntry[] = [];
   const pattern = /^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] \[PreToolUse\] Permission denied:/;
-  const sandboxPattern = /^\[(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2}))\] (?:\[Sandbox\] [a-z][a-z0-9*-]* process=|\[SandboxProxy\] denied |\[SandboxCollector\] (?:ERROR|WARNING):)/;
+  const sandboxPattern = /^\[(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2})?)\] (?:\[Sandbox\] [a-z][a-z0-9*-]* process=|\[SandboxProxy\] denied |\[SandboxCollector\] (?:ERROR|WARNING):)/;
   for (const line of logLines) {
     const match = pattern.exec(line) ?? sandboxPattern.exec(line);
     if (match) {

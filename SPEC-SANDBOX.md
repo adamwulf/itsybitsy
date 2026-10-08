@@ -1632,7 +1632,8 @@ matching wildcard. This is a baseline watch item, not implicit proxy behavior.
   `<agentDir>/sandbox-proxy.log` (the `--log` file): `[proxy] allowed`,
   `[proxy] denied … reason="not in allowlist"`, or `[proxy] failed …
   reason="upstream unreachable"`. Allowlist-**denied** attempts ALSO append one
-  `[<ISO8601>] [SandboxProxy] denied network-outbound target="host:port"` line to
+  `[YYYY-MM-DD HH:MM:SS] [SandboxProxy] denied network-outbound target="host:port"`
+  line (local time, the stamp of every agent.log line) to
   the agent's `agent.log` (the `--agent-log` file, wired from the start.sh/
   resume.sh preamble), where `parseDenials` picks it up so it surfaces in the
   DENIALS pane beside the kernel denials (only the `denied` verb matches; any

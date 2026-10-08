@@ -33,6 +33,7 @@ import { randomBytes } from "node:crypto";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { sealDir } from "./agent-seal";
+import { formatLogTimestamp } from "./log-timestamp";
 import { SANDBOX_TAG, sandboxProfileTag } from "./sandbox";
 import { SandboxLogFramer, SandboxOutputBudget, formatSandboxRecord, parseSandboxReport,
   type SandboxReport } from "./sandbox-denials";
@@ -135,8 +136,9 @@ export function appendAgentLog(path: string, text: string): void {
   } finally { closeSync(fd); }
 }
 
-function collectorLine(level: string, launch: string, message: string): string {
-  return `[${new Date().toISOString()}] [SandboxCollector] ${level}: launch=${launch} ${message.replace(/[\r\n\x00-\x1f\x7f]/g, " ")}\n`;
+/** One `[SandboxCollector]` status line for a launch's agent.log. */
+export function collectorLine(level: string, launch: string, message: string): string {
+  return `[${formatLogTimestamp()}] [SandboxCollector] ${level}: launch=${launch} ${message.replace(/[\r\n\x00-\x1f\x7f]/g, " ")}\n`;
 }
 
 function writeAtomic(path: string, text: string): void {

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setSystemTime, test } from "bun:test";
 import { join } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -15,6 +15,7 @@ import {
   sandboxDomainMatches,
   startSandboxProxyServer,
 } from "./sandbox-proxy";
+import { withTimeZone } from "./test-utils";
 
 async function proxyExchange(
   port: number,
@@ -507,11 +508,19 @@ describe("sandbox proxy connection logging", () => {
     }
   });
 
+  test("the agent.log denial uses agent.log's local [YYYY-MM-DD HH:MM:SS] stamp, not UTC", () => {
+    setSystemTime(new Date("2026-10-08T18:10:29.766Z"));
+    try {
+      expect(withTimeZone("America/Chicago", () => formatAgentDenial("denied.example", 443)))
+        .toBe('[2026-10-08 13:10:29] [SandboxProxy] denied network-outbound target="denied.example:443"\n');
+    } finally { setSystemTime(); }
+  });
+
   test("a host with control characters / a quote cannot forge a second log line", () => {
     // new URL() sanitizes CONNECT hosts before they reach the formatter, so the
     // JSON quoting is the anti-forgery boundary — exercise it directly with a
     // host carrying a newline and a double quote.
-    const forged = formatAgentDenial(`evil.example:443"\n[2026-01-01T00:00:00.000Z] [SandboxProxy] denied network-outbound target="pwned`, 443);
+    const forged = formatAgentDenial(`evil.example:443"\n[2026-01-01 00:00:00] [SandboxProxy] denied network-outbound target="pwned`, 443);
     expect(forged.endsWith("\n")).toBe(true);
     // Exactly one physical line of content: the injected newline is escaped.
     expect(forged.trimEnd().split("\n")).toHaveLength(1);

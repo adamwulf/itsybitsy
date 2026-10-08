@@ -404,7 +404,7 @@ export class RightPaneComponent implements Component {
           this.content = [`${DIM}${denials.length - alerts} denial(s)${alerts ? `, ${alerts} collector alert(s)` : ""}${RESET}`];
           if (denials.length === 0) { this.content.push(`${DIM}No denials found${RESET}`); }
           else { for (const d of denials) {
-            const stripped = formatSandboxDisplay(d.line.replace(/^\[.*?\] /, "").replace(/^\[PreToolUse\] /, ""));
+            const stripped = formatSandboxDisplay(d.line.replace(/^\[.*?\] /, ""));
             this.content.push(`${DIM}[${d.timestamp}]${RESET} ${stripped}`);
           } }
         }

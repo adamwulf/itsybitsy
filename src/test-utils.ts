@@ -136,3 +136,20 @@ export async function waitForValue<T>(
     await Bun.sleep(intervalMs);
   }
 }
+
+/**
+ * Run `fn` with the process's local time zone set to `zone`, then restore it.
+ * `bun test` runs in UTC, where a local timestamp and a UTC one read alike, so
+ * a test that must tell them apart uses a zone that is not UTC.
+ */
+export function withTimeZone<T>(zone: string, fn: () => T): T {
+  const before = process.env.TZ;
+  process.env.TZ = zone;
+  try {
+    return fn();
+  } finally {
+    // Bun applies each TZ assignment at once. Unset TZ means the runner's UTC;
+    // never delete TZ: after a delete Bun stops applying later assignments.
+    process.env.TZ = before ?? "Etc/UTC";
+  }
+}

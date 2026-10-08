@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-log-launch";
 import { shellQuote } from "./validation";
 import { removeSandboxProfile, sandboxLogParent, sandboxProfilePath } from "./sandbox-log-paths";
+import { withTimeZone } from "./test-utils";
 
 async function fixture(mode: "success" | "startup-failure" | "runtime-failure" | "collector-sigkill" | "slow-ready") {
   const dir = await mkdtemp(join(tmpdir(), "sandbox-launch-test-"));
@@ -44,7 +45,9 @@ ${sandboxDenialExecPrefix(shellQuote(wrapper), true)} ${cliCommand} &
 cli=$!
 wait "$cli"
 `);
-    const child = Bun.spawn(["/bin/bash", script], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, stdout: "ignore", stderr: "ignore" });
+    // A zone that is not UTC, so the agent.log stamps show local time is used.
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, TZ: "America/Chicago" };
+    const child = Bun.spawn(["/bin/bash", script], { env, stdout: "ignore", stderr: "ignore" });
     children.push(child);
     return child;
   };
@@ -75,6 +78,14 @@ test("collector startup failure is visible and the required wrapper still execut
     const log = await readFile(join(f.dir, "agent.log"), "utf8");
     expect(log).toContain("collector exited 27");
     expect(log).toContain("collector unavailable before CLI launch");
+    // Both lines carry agent.log's local [YYYY-MM-DD HH:MM:SS] stamp: read as
+    // the script's local time it is now, which a UTC stamp is not.
+    const stamps = [...log.matchAll(/^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\] \[SandboxCollector\] ERROR: /gm)].map(m => m[1]!);
+    expect(stamps).toHaveLength(2);
+    for (const stamp of stamps) {
+      const at = withTimeZone("America/Chicago", () => new Date(stamp.replace(" ", "T")).getTime());
+      expect(Math.abs(at - Date.now())).toBeLessThan(60_000);
+    }
   } finally { await f.cleanup(); }
 });
 

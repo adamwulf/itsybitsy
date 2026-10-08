@@ -1,16 +1,17 @@
-import { afterAll, afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, setSystemTime, test } from "bun:test";
 import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, chmod, appendFile } from "node:fs/promises";
 import { closeSync, constants, existsSync, mkdtempSync, openSync, readSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
-import { appendAgentLog, attachSandboxLaunch, holdCollectorClient, restartSandboxCollector, sandboxCollectorPaths,
+import { appendAgentLog, attachSandboxLaunch, collectorLine, holdCollectorClient, restartSandboxCollector, sandboxCollectorPaths,
   sandboxCollectorRunning, sandboxCollectorStatus, serveSandboxCollector, stopSandboxCollector, tryCollectorLock, validateRegistration,
   type CollectorReader, type RegisteredProcess } from "./sandbox-collector";
 import { newSandboxTag } from "./sandbox";
 import { sandboxLogParent, sandboxProfilePath } from "./sandbox-log-paths";
 import { openSandboxProcessReader, type ProcessObservation } from "./sandbox-processes";
 import { isSandboxedProcess } from "./sandbox-detect";
+import { withTimeZone } from "./test-utils";
 
 const darwinTest = process.platform === "darwin" ? test : test.skip;
 const MODULE = JSON.stringify(join(import.meta.dir, "sandbox-collector.ts"));
@@ -124,6 +125,14 @@ test("validateRegistration rejects forged, redirected, stale, unprivate and unpr
 });
 
 // ---- the only writer into agent-writable directories ----
+
+test("a status line uses agent.log's local [YYYY-MM-DD HH:MM:SS] stamp, not UTC", () => {
+  setSystemTime(new Date("2026-10-08T18:10:28.777Z"));
+  try {
+    expect(withTimeZone("America/Chicago", () => collectorLine("ERROR", "sandbox-log.ABC", "log stream failed\nforged")))
+      .toBe("[2026-10-08 13:10:28] [SandboxCollector] ERROR: launch=sandbox-log.ABC log stream failed forged\n");
+  } finally { setSystemTime(); }
+});
 
 test("appendAgentLog never follows a symlinked agent.log", async () => {
   const home = await tempHome();

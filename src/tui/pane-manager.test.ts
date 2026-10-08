@@ -383,6 +383,24 @@ describe("RightPaneComponent", () => {
     expect(rendered).toContain(`${CYAN}[SandboxProxy]${RESET} ${YELLOW}denied network-outbound${RESET}`);
   });
 
+  test("DENIALS shows every line's source tag, [PreToolUse] included", () => {
+    const rp = new RightPaneComponent();
+    rp.agent = makeAgent({ id: "agent-denial-tags" });
+    rp.denialsContent = parseDenials([
+      "[2026-10-08 13:09:31] [PreToolUse] Permission denied: Bash (command: ls)",
+      '[2026-10-08 13:09:32] [Sandbox] file-read-data process="cat" pid=42 target="/private/tmp/denied" launch=sandbox-log.ABC boot=B mach=1',
+      '[2026-10-08 13:09:33] [SandboxProxy] denied network-outbound target="denied.example:443"',
+      "[2026-10-08 13:09:34] [SandboxCollector] ERROR: launch=sandbox-log.ABC collector unavailable",
+    ]);
+    rp.setMode("DENIALS");
+    const shown = rp.render(500).map(stripAnsi).join("\n");
+    expect(shown).toContain("3 denial(s), 1 collector alert(s)");
+    expect(shown).toContain("[2026-10-08 13:09:31] [PreToolUse] Permission denied: Bash (command: ls)");
+    expect(shown).toContain('[2026-10-08 13:09:32] [Sandbox] file-read process="cat" path="/private/tmp/denied"');
+    expect(shown).toContain('[2026-10-08 13:09:33] [SandboxProxy] denied network-outbound target="denied.example:443"');
+    expect(shown).toContain("[2026-10-08 13:09:34] [SandboxCollector] ERROR: launch=sandbox-log.ABC collector unavailable");
+  });
+
   test("filteredQuestions returns all when no agent", () => {
     const rp = new RightPaneComponent();
     rp.questions = [

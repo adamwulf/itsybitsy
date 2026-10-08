@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { parseDenials } from "./agents";
 import { SandboxLogFramer, SandboxOutputBudget, formatSandboxRecord, parseSandboxReport } from "./sandbox-denials";
+import { formatLogTimestamp } from "./log-timestamp";
+import { withTimeZone } from "./test-utils";
 
 const boot = "7908f0d7-1111-2222-3333-444444444444";
 const TAG = "ib-agent:74f864a0c0ffee0123456789abcdef01";
@@ -82,6 +84,7 @@ describe("kernel report parsing", () => {
     ["not a report", raw({ eventMessage: `log show --predicate Sandbox: cat(42) deny(1) file-read-data /x\n${TAG}` })],
     ["zero duplicates", raw({ eventMessage: `0 duplicate report for Sandbox: cat(42) deny(1) file-read-data /x\n${TAG}` })],
     ["timestamp", raw({ timestamp: "2026-09-05 23:01:34" })],
+    ["impossible date", raw({ timestamp: "2026-13-45 23:01:34.000000-0500" })],
     ["mach", raw({ machTimestamp: 0 })],
     ["mach range", raw({ machTimestamp: Number.MAX_SAFE_INTEGER + 1 })],
     ["JSON", "broken JSON"], ["null", "null"], ["array", "[]"],
@@ -120,13 +123,21 @@ describe("bounded output and display", () => {
 
   test("the record names the launch, never the tag, and keeps a duplicate count", () => {
     const line = formatSandboxRecord(parseSandboxReport(raw())!, "sandbox-log.ABC", boot);
-    expect(line).toBe(`[2026-10-06 23:08:10.552171-0500] [Sandbox] file-read-data process="cat" pid=80947 target="/private/tmp/a b" launch=sandbox-log.ABC boot=${boot} mach=571524314971`);
+    // The report's 23:08:10.552171-0500 event, to the second, in local time.
+    const local = formatLogTimestamp(new Date("2026-10-07T04:08:10Z"));
+    expect(line).toBe(`[${local}] [Sandbox] file-read-data process="cat" pid=80947 target="/private/tmp/a b" launch=sandbox-log.ABC boot=${boot} mach=571524314971`);
     expect(line).not.toContain(TAG.slice("ib-agent:".length));
     const summary = parseSandboxReport(raw({ eventMessage: `29 duplicate reports for Sandbox: bash(9) deny(1) file-read-data /x\n${TAG}` }))!;
     expect(formatSandboxRecord(summary, "sandbox-log.ABC", boot)).toEndWith(" duplicates=29");
     // Newlines in a path stay inside the JSON string: one record, one line.
     const multiline = parseSandboxReport(raw({ eventMessage: `Sandbox: cat(1) deny(1) file-read-data /x\n[Sandbox] forged\n${TAG}` }))!;
     expect(formatSandboxRecord(multiline, "sandbox-log.ABC", boot)).not.toContain("\n");
+  });
+
+  test("the record's bracket is the event time in agent.log's local [YYYY-MM-DD HH:MM:SS] stamp", () => {
+    // The report's 2026-10-06 23:08:10.552171-0500, on a machine in Tokyo.
+    const line = withTimeZone("Asia/Tokyo", () => formatSandboxRecord(parseSandboxReport(raw())!, "sandbox-log.ABC", boot));
+    expect(line).toStartWith("[2026-10-07 13:08:10] [Sandbox] file-read-data ");
   });
 
   test("DENIALS includes kernel denials and collector failures while preserving hook entries", () => {
@@ -136,7 +147,24 @@ describe("bounded output and display", () => {
     const lines = [hook, line, failure, "[2026-09-06T04:00:00Z] [SandboxCollector] INFO: ready"];
     const result = parseDenials(lines);
     expect(result.map(d => d.line)).toEqual([hook, line, failure]);
-    expect(result[1]!.epoch).toBeCloseTo(Date.parse("2026-10-07T04:08:10.552Z") / 1000, 3);
+    expect(result[1]!.epoch).toBe(Date.parse("2026-10-07T04:08:10Z") / 1000);
+  });
+
+  test("parseDenials reads the local stamp every writer now uses, and the stamps of older lines", () => {
+    const lines = [
+      // Every writer now: local time.
+      "[2026-10-08 13:09:31] [PreToolUse] Permission denied: Bash (command: ls)",
+      '[2026-10-08 13:09:31] [Sandbox] file-read-data process="cat" pid=42 target="/x" launch=sandbox-log.ABC boot=B mach=1',
+      '[2026-10-08 13:09:31] [SandboxProxy] denied network-outbound target="denied.example:443"',
+      "[2026-10-08 13:09:31] [SandboxCollector] ERROR: launch=sandbox-log.ABC collector exited 1",
+      // Lines written before: a zoned kernel stamp, UTC proxy and collector stamps.
+      '[2026-10-08 13:09:31.560480-0500] [Sandbox] file-read-data process="cat" pid=42 target="/x" launch=sandbox-log.ABC boot=B mach=1',
+      '[2026-10-08T18:09:31.766Z] [SandboxProxy] denied network-outbound target="denied.example:443"',
+      "[2026-10-08T18:09:31.777Z] [SandboxCollector] ERROR: launch=sandbox-log.ABC collector exited 1",
+    ];
+    const denials = withTimeZone("America/Chicago", () => parseDenials(lines));
+    expect(denials.map(d => d.line)).toEqual(lines);
+    expect(denials.map(d => Math.floor(d.epoch))).toEqual(lines.map(() => Date.parse("2026-10-08T18:09:31Z") / 1000));
   });
 
   test("DENIALS captures [SandboxProxy] network denials with the correct timestamp/epoch", () => {

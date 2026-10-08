@@ -1971,16 +1971,9 @@ describe("canonicalization without reading what the agent may not read", () => {
     }
   });
 
-  test("canonicalizeAccessPath reads only inside the table's readable entries, decisions as before", async () => {
+  test("canonicalizeAccessPath opens only where the table may allow a read (kernelSandboxed)", async () => {
     const root = await fixture();
     try {
-      const prepared = prepareAccessTable({
-        allowRead: [join(root, "Real")],
-        allowWrite: [],
-        deny: [join(root, "Real", "Sub")],
-        runtimeRoots: [],
-        runtimeDenyRoots: [],
-      });
       const table: PathAccessTable = {
         allowRead: [join(root, "Real")],
         allowWrite: [],
@@ -1988,35 +1981,91 @@ describe("canonicalization without reading what the agent may not read", () => {
         runtimeRoots: [],
         runtimeDenyRoots: [],
       };
+      const opening = prepareAccessTable(table);
+      const inSandbox = { ...prepareAccessTable(table), kernelSandboxed: true };
+      // Without the flag it IS canonicalizeSandboxPath.
+      expect(canonicalizeAccessPath(opening, join(root, "Real", "Sub", "Deep.txt")))
+        .toBe(canonicalizeSandboxPath(join(root, "Real", "Sub", "Deep.txt")));
       // Correctly spelled: the same canonical path as canonicalizeSandboxPath.
       for (const path of spellings(root)) {
-        expect(canonicalizeAccessPath(prepared, path), path).toBe(canonicalizeSandboxPath(path));
+        expect(canonicalizeAccessPath(inSandbox, path), path).toBe(canonicalizeSandboxPath(path));
       }
-      expect(resolvePreparedAccess(prepared, join(root, "abs-link", "File.txt"), "read")).toBe("allow");
-      expect(resolvePreparedAccess(prepared, join(root, "rel-link", "Deep.txt"), "read")).toBe("deny");
-      expect(resolvePreparedAccess(prepared, join(root, "Outside", "F.txt"), "read")).toBe("deny");
+      expect(resolvePreparedAccess(inSandbox, join(root, "abs-link", "File.txt"), "read")).toBe("allow");
+      expect(resolvePreparedAccess(inSandbox, join(root, "rel-link", "Deep.txt"), "read")).toBe("deny");
+      expect(resolvePreparedAccess(inSandbox, join(root, "Outside", "F.txt"), "read")).toBe("deny");
 
       const miscasedAllowed = join(root, "real", "file.txt");
       if (!existsSync(miscasedAllowed)) return; // case-sensitive volume
       // An allow entry matches regardless of case, so realpath corrects it.
-      expect(canonicalizeAccessPath(prepared, miscasedAllowed)).toBe(join(root, "Real", "File.txt"));
-      expect(resolvePreparedAccess(prepared, miscasedAllowed, "read")).toBe("allow");
+      expect(canonicalizeAccessPath(inSandbox, miscasedAllowed)).toBe(join(root, "Real", "File.txt"));
       // A miscased spelling of the deny entry is still read and corrected, so
       // the deny still matches.
-      expect(canonicalizeAccessPath(prepared, join(root, "Real", "sub", "deep.txt"))).toBe(
+      expect(canonicalizeAccessPath(inSandbox, join(root, "Real", "sub", "deep.txt"))).toBe(
         join(root, "Real", "Sub", "Deep.txt"),
       );
-      expect(resolvePreparedAccess(prepared, join(root, "Real", "sub", "deep.txt"), "read")).toBe("deny");
       // Under the deny entry as spelled, and outside every allow entry, nothing
       // is opened: the spelled case stays, and the decision is deny either way.
-      expect(canonicalizeAccessPath(prepared, join(root, "Real", "Sub", "DEEP.TXT"))).toBe(
+      expect(canonicalizeAccessPath(inSandbox, join(root, "Real", "Sub", "DEEP.TXT"))).toBe(
         join(root, "Real", "Sub", "DEEP.TXT"),
       );
-      expect(canonicalizeAccessPath(prepared, join(root, "outside", "f.txt"))).toBe(join(root, "outside", "f.txt"));
-      for (const path of [join(root, "Real", "Sub", "DEEP.TXT"), join(root, "outside", "f.txt")]) {
-        expect(resolvePreparedAccess(prepared, path, "read"), path).toBe("deny");
-        expect(resolvePathAccess(canonicalizeSandboxPath(path), "read", table), path).toBe("deny");
+      expect(canonicalizeAccessPath(inSandbox, join(root, "outside", "f.txt"))).toBe(join(root, "outside", "f.txt"));
+      for (const path of [
+        miscasedAllowed, join(root, "Real", "sub", "deep.txt"), join(root, "Real", "Sub", "DEEP.TXT"),
+        join(root, "outside", "f.txt"),
+      ]) {
+        expect(resolvePreparedAccess(inSandbox, path, "read"), path).toBe(resolvePreparedAccess(opening, path, "read"));
       }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // Review round 1: an allow entry deeper than the existing prefix (a glob, or
+  // a new leaf) must still get the case corrected, or a deny entry (on-disk
+  // case) misses the typed spelling.
+  test("kernelSandboxed decisions on miscased spellings equal the opening canonicalizer's", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "ib-canon-case-")));
+    try {
+      for (const dir of ["Data/Secret", "Secret/build", "proj/build", "other"]) {
+        await mkdir(join(root, dir), { recursive: true });
+      }
+      for (const file of [
+        "Data/file.txt", "Data/Secret/old.log", "Secret/old.log", "Secret/build/x", "proj/build/x", "other/old.log",
+      ]) await writeFile(join(root, file), "x");
+      if (!existsSync(join(root, "DATA"))) return; // case-sensitive volume: no case to correct
+
+      const tables = [
+        { name: "plain", allowWrite: [join(root, "Data")], deny: [join(root, "Data", "Secret")] },
+        { name: "glob", allowWrite: [`${root}/**/*.log`], deny: [join(root, "Secret")] },
+        { name: "**/ glob", allowWrite: ["**/build/**"], deny: [join(root, "Secret")] },
+      ];
+      const spellings = [
+        // existing leaves
+        "DATA/FILE.TXT", "data/secret/OLD.LOG", "DATA/Secret/old.log", "SECRET/OLD.LOG", "secret/build/X",
+        "PROJ/BUILD/x", "OTHER/OLD.LOG",
+        // new leaves
+        "DATA/new.txt", "data/SECRET/new.log", "SECRET/new.log", "secret/BUILD/new", "proj/BUILD/new",
+        "OTHER/new.log", "Other/NEW.LOG",
+      ];
+      let denied = 0;
+      for (const { name, allowWrite, deny } of tables) {
+        const table: PathAccessTable = { allowRead: [], allowWrite, deny, runtimeRoots: [], runtimeDenyRoots: [] };
+        const opening = prepareAccessTable(table);
+        const inSandbox = { ...prepareAccessTable(table), kernelSandboxed: true };
+        for (const spelling of spellings) {
+          for (const op of ["read", "write"] as const) {
+            const expected = resolvePreparedAccess(opening, join(root, spelling), op);
+            if (expected === "deny") denied += 1;
+            expect(resolvePreparedAccess(inSandbox, join(root, spelling), op), `${name} ${op} ${spelling}`)
+              .toBe(expected);
+          }
+        }
+      }
+      // The reviewer's probe: allowWrite <root>/**/*.log, deny <root>/Secret.
+      const probe = { allowRead: [], allowWrite: [`${root}/**/*.log`], deny: [join(root, "Secret")], runtimeRoots: [], runtimeDenyRoots: [] };
+      expect(resolvePreparedAccess({ ...prepareAccessTable(probe), kernelSandboxed: true }, join(root, "SECRET", "new.log"), "write"))
+        .toBe("deny");
+      expect(denied).toBeGreaterThan(0);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

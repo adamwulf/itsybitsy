@@ -224,6 +224,19 @@ export function resolveSandboxEnabled(enabled: unknown): boolean {
   return enabled !== false;
 }
 
+/**
+ * Does the agent with this meta.json run inside the itsybitsy kernel sandbox?
+ * Its frozen `meta.sandbox` policy, by the launch's own rule (only a literal
+ * false opts out; the sandbox exists only on macOS). The hooks use this, not
+ * the kernel check isSandboxedProcess(): that loads bun:ffi, whose compiler
+ * opens the macOS SDK directory — itself a kernel denial on every call. The
+ * answer only chooses how the hooks canonicalize paths (canonicalizeAccessPath).
+ */
+export function metaKernelSandboxed(meta: Record<string, unknown>): boolean {
+  const sandbox = meta.sandbox as { enabled?: unknown } | undefined;
+  return process.platform === "darwin" && resolveSandboxEnabled(sandbox?.enabled);
+}
+
 export function resolveSandboxConfig(source: SandboxConfigSource): SandboxConfig {
   return {
     enabled: resolveSandboxEnabled(source.sandbox?.enabled),
@@ -334,12 +347,14 @@ function metadataRealpath(absolute: string): string | null {
  * resolves the symlinks and the longest existing prefix with lstat/readlink only,
  * and calls realpathSync only on the longest resolved prefix `mayRead` admits,
  * where it corrects the letter case exactly as canonicalizeSandboxPath does.
- * Components below that prefix keep the case they were spelled with. A `mayRead`
- * that is always false gives a pure metadata canonicalization.
+ * Components below that prefix keep the case they were spelled with. `mayRead`
+ * gets the prefix and the full symlink-resolved path (prefix and the rest as
+ * spelled). A `mayRead` that is always false gives a pure metadata
+ * canonicalization.
  */
 export function canonicalizeSandboxPathWithin(
   input: string,
-  mayRead: (path: string) => boolean,
+  mayRead: (prefix: string, fullPath: string) => boolean,
 ): string {
   let candidate = resolve(input);
   const remainder: string[] = [];
@@ -354,9 +369,10 @@ export function canonicalizeSandboxPathWithin(
     resolvedPrefix = metadataRealpath(candidate);
   }
 
+  const fullPath = join(resolvedPrefix, ...remainder);
   const unread: string[] = [];
   for (let readable = resolvedPrefix; readable !== "/"; readable = dirname(readable)) {
-    if (mayRead(readable)) {
+    if (mayRead(readable, fullPath)) {
       try {
         return join(realpathSync(readable), ...unread, ...remainder);
       } catch {
@@ -919,19 +935,22 @@ function runtimeRootRows(
 }
 
 /**
- * The table sandboxPathAccessTable builds, from paths that are ALREADY the
- * canonical forms spawn stored in meta.json (canonicalizePathsConfig ran,
- * unsandboxed, when the profile was generated) — for the PreToolUse hooks,
- * which run inside the agent's sandbox. The stored entries are used as they
- * are: re-canonicalizing a deny entry such as `~/.ssh` there opens it and every
- * denied ancestor, a kernel denial each, on every tool call. prepareAccessTable
- * still compiles each entry with compileCanonicalPath, so an entry that is not
- * canonical (`~/x`, a relative path) throws and the hook fails closed.
+ * The table sandboxPathAccessTable builds, for a PreToolUse hook running inside
+ * the agent's kernel sandbox, from the `paths` stored in meta.json. Spawn and
+ * `ib sandbox refresh` store canonicalizePathsConfig output, made unsandboxed:
+ * the forms their profile was built from (a resume canonicalizes them again
+ * when it rebuilds the profile). The stored entries are used as they are:
+ * re-canonicalizing a deny entry such as `~/.ssh` in the sandbox opens it and
+ * every denied ancestor, a kernel denial each, on every tool call.
+ * prepareAccessTable compiles each entry with compileCanonicalPath: an entry
+ * that is not absolute (`~/x`, `./x`) throws and the hook denies; an absolute
+ * entry is used as written (one that is not canonical, such as `/tmp/x`,
+ * matches no canonical path).
  *
  * The runtime roots are canonicalized without opening what the agent may not
- * read: first by metadata only, then by canonicalizeAccessPath against that
- * provisional table. An allow root is readable by definition, so it gets the
- * same realpathSync as in the profile; the tmux deny root is never opened.
+ * read: first by metadata only, then against that provisional table. An allow
+ * root is readable by definition, so it gets the same realpathSync as in the
+ * profile; the tmux deny root is never opened.
  */
 export function storedPathAccessTable(
   paths: PathsConfig,
@@ -944,7 +963,7 @@ export function storedPathAccessTable(
   });
   return {
     ...stored,
-    ...runtimeRootRows(params, (path) => canonicalizeAccessPath(provisional, path)),
+    ...runtimeRootRows(params, (path) => canonicalizeWithoutOpeningDenied(provisional, path)),
   };
 }
 
@@ -1010,6 +1029,12 @@ export function orderedEntryMatches(entry: OrderedPathEntry, absolutePath: strin
 export interface PreparedAccessTable {
   allow: OrderedPathEntry[];
   deny: OrderedPathEntry[];
+  /**
+   * Set when the resolving process runs inside the agent's kernel sandbox (the
+   * PreToolUse hooks): paths are then canonicalized without opening what the
+   * profile denies (canonicalizeAccessPath). Unset: canonicalizeSandboxPath.
+   */
+  kernelSandboxed?: boolean;
 }
 
 /**
@@ -1038,31 +1063,51 @@ function orderedEntryMatchesIgnoringCase(entry: OrderedPathEntry, absolutePath: 
 }
 
 /**
- * May the profile generated from `prepared` let the agent read `path`? It only
- * decides whether canonicalizeAccessPath calls realpathSync (a file-read-data
- * check in the kernel) on a symlink-free path whose letter case is not yet
- * corrected, so an allow entry matches regardless of case, and a deny entry
- * only as spelled. A path no allow entry can match in any case is denied by the
- * profile, so realpath could only produce a kernel denial there.
+ * Should canonicalization call realpathSync (a file-read-data check in the
+ * kernel) on `prefix`, a symlink-free existing prefix of `fullPath` whose letter
+ * case is not corrected yet? Not when a deny entry matches the prefix as
+ * spelled. Otherwise yes when an allow entry matches the prefix or the full path
+ * in any letter case: only then can the corrected case change the decision.
  */
-function mayReadForCanonicalization(prepared: PreparedAccessTable, path: string): boolean {
-  if (prepared.deny.some((entry) => orderedEntryMatches(entry, path))) return false;
-  return prepared.allow.some((entry) => orderedEntryMatchesIgnoringCase(entry, path));
+function mayReadForCanonicalization(
+  prepared: PreparedAccessTable,
+  prefix: string,
+  fullPath: string,
+): boolean {
+  if (prepared.deny.some((entry) => orderedEntryMatches(entry, prefix))) return false;
+  return prepared.allow.some((entry) =>
+    orderedEntryMatchesIgnoringCase(entry, prefix) || orderedEntryMatchesIgnoringCase(entry, fullPath));
+}
+
+/** canonicalizeSandboxPathWithin, opening only where `prepared` may allow a read. */
+function canonicalizeWithoutOpeningDenied(prepared: PreparedAccessTable, absolutePath: string): string {
+  return canonicalizeSandboxPathWithin(
+    absolutePath,
+    (prefix, fullPath) => mayReadForCanonicalization(prepared, prefix, fullPath),
+  );
 }
 
 /**
- * Canonicalize a path for resolution against `prepared` without opening what
- * the agent may not read (canonicalizeSandboxPathWithin). Symlinks resolve as
- * with canonicalizeSandboxPath; realpathSync corrects the letter case only of
- * the longest prefix the table lets the agent read. Below that prefix the case
- * as spelled can only deny: either no allow entry matches there in any case, or
- * a deny entry matches as spelled.
+ * Canonicalize a path for resolution against `prepared`.
+ *
+ * Unless `prepared.kernelSandboxed` is set this is canonicalizeSandboxPath:
+ * outside a kernel sandbox opening a path costs no denial, and the decisions
+ * stay exactly what they were.
+ *
+ * Inside the sandbox it opens no path the agent may not read
+ * (canonicalizeSandboxPathWithin): symlinks resolve by lstat/readlink, and
+ * realpathSync corrects the letter case of the longest existing prefix that an
+ * allow entry matches, or that leads to a path an allow entry matches, in any
+ * case, unless a deny entry matches the prefix as spelled. When no allow entry
+ * matches the full path in any case, the path is denied whatever its case. The
+ * one known difference in decisions is toward deny: a path spelled exactly like
+ * a deny entry whose on-disk letter case differs stays denied (opening it would
+ * correct the case first).
  */
 export function canonicalizeAccessPath(prepared: PreparedAccessTable, absolutePath: string): string {
-  return canonicalizeSandboxPathWithin(
-    absolutePath,
-    (path) => mayReadForCanonicalization(prepared, path),
-  );
+  return prepared.kernelSandboxed
+    ? canonicalizeWithoutOpeningDenied(prepared, absolutePath)
+    : canonicalizeSandboxPath(absolutePath);
 }
 
 /**

@@ -308,6 +308,18 @@ export const META_UNREADABLE_DENY_REASON =
   "Access denied: meta.json is missing or unreadable — cannot resolve the agent's path lists";
 
 /**
+ * Deny reason when meta.json was read but the access table cannot be built from
+ * it, for example a stored `meta.paths` entry that is not absolute. Names the
+ * error and the fix: refresh re-derives and re-stores the paths. Shared by the
+ * claude, codex and agy PreToolUse hooks.
+ */
+export function accessTableDenyReason(agentId: string, error: unknown): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  return `Access denied: cannot build the path table from meta.json (${detail}); ` +
+    `run \`ib sandbox refresh ${agentId}\` from an unsandboxed session`;
+}
+
+/**
  * Classify a write target as a PROTECTED worktree file that agents must not
  * rewrite — either `.claude/settings*.json` (permission self-escalation) or an
  * agy boundary file (`.agents/hooks.json` / the always-on rule file, whose
@@ -1903,10 +1915,10 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
         rootRepo,
         home: userHome(),
       });
-    } catch {
+    } catch (error) {
       await emitPathDecision(agentDir, toolName, toolInput, {
         decision: "deny",
-        reason: META_UNREADABLE_DENY_REASON,
+        reason: accessTableDenyReason(agentId, error),
       }, isCoordinator);
       return;
     }

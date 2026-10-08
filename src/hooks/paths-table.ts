@@ -30,6 +30,7 @@ import {
   canonicalizeSandboxPath,
   orderedEntryMatches,
   prepareAccessTable,
+  metaKernelSandboxed,
   resolvePathsConfig,
   resolveTmuxSocketDir,
   sandboxPathAccessTable,
@@ -111,10 +112,11 @@ export interface AgentAccessTableParams {
   cli?: AgentCli | null;
   home?: string;
   /**
-   * `paths` are the canonical forms spawn stored in meta.json: use them as
-   * stored and canonicalize the runtime roots without opening what the agent
-   * may not read (storedPathAccessTable). Otherwise `paths` are authored
-   * entries, canonicalized exactly as for the profile (sandboxPathAccessTable).
+   * `paths` are the forms stored in meta.json and the caller runs inside the
+   * agent's kernel sandbox: use them as stored and canonicalize the runtime
+   * roots without opening what the agent may not read (storedPathAccessTable).
+   * Otherwise `paths` are canonicalized exactly as for the profile
+   * (sandboxPathAccessTable).
    */
   storedPaths?: boolean;
 }
@@ -189,11 +191,14 @@ async function resolveGitCommonDir(worktreePath: string, rootRepo: string): Prom
  * REPOAGENTS write root, the PARENTCLAUDE root and the tmux deny match the
  * kernel exactly.
  *
- * `meta.paths` holds the canonical forms spawn/refresh stored
- * (canonicalizePathsConfig, unsandboxed — the same forms the profile was built
- * from), so they are used as stored (`storedPaths`). The hook runs inside the
- * agent's sandbox: re-canonicalizing the deny entries and the tmux socket dir
- * here opened them and their denied ancestors — kernel denials on every call.
+ * Inside the agent's kernel sandbox (metaKernelSandboxed) the hook must not open
+ * paths the agent may not read: each such open is a kernel denial in the
+ * agent's DENIALS view. There `meta.paths` is used as stored (`storedPaths`:
+ * the canonicalizePathsConfig output spawn and `ib sandbox refresh` wrote, made
+ * unsandboxed), the tmux socket dir is canonicalized without opening it, and
+ * the table is marked `kernelSandboxed` so candidate paths are too. Outside a
+ * kernel sandbox nothing changes: the table and every path are canonicalized
+ * as they always were.
  */
 export async function buildAgentAccessTable(input: {
   meta: Record<string, unknown>;
@@ -203,6 +208,7 @@ export async function buildAgentAccessTable(input: {
   rootRepo: string;
   home?: string;
 }): Promise<PreparedAccessTable> {
+  const kernelSandboxed = metaKernelSandboxed(input.meta);
   const paths = resolvePathsConfig(input.meta.paths as PathsConfig | undefined);
   const gitDir = await resolveGitCommonDir(input.worktreePath, input.rootRepo);
   const uid = process.getuid?.() ?? 0;
@@ -213,14 +219,13 @@ export async function buildAgentAccessTable(input: {
     agentsDir: input.agentsDir,
     rootRepo: input.rootRepo,
     gitDir,
-    // storedPathAccessTable canonicalizes this deny root without opening it.
-    tmuxSock: tmuxSocketDirPath(uid),
+    tmuxSock: kernelSandboxed ? tmuxSocketDirPath(uid) : resolveTmuxSocketDir(uid),
     canSpawnChildren: await metaCanSpawnChildren(input.meta),
     cli: metadataCli(input.meta.model) ?? null,
     home: input.home ?? userHome(),
-    storedPaths: true,
+    storedPaths: kernelSandboxed,
   });
-  return prepareAccessTable(table);
+  return kernelSandboxed ? { ...prepareAccessTable(table), kernelSandboxed } : prepareAccessTable(table);
 }
 
 /**

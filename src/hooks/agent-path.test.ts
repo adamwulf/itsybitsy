@@ -1,8 +1,9 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
+import * as fs from "fs";
 import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, checkManagerCommandAccess, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON, SEAL_HELPER_RESULT_WRITE_DENY_REASON, agentProtectedWritePaths, systemProtectedWritePaths, protectedConfigWriteDenyReason, matchProtectedWrite } from "./agent-path";
 import type { PathCheckInput, PathCheckContext } from "./agent-path";
 import { join } from "path";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile, symlink } from "fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import { setUserHome, resetUserHome } from "../home";
 import { setSandboxedProcessOverride } from "../sandbox-detect";
@@ -3570,86 +3571,209 @@ describe("hookCheckPath when the agent cannot read its repo root", () => {
   });
 });
 
-// The hook builds its table from the canonical meta.paths spawn stored and
-// canonicalizes candidates without opening what the agent may not read (inside
-// the kernel sandbox each such open was a denial). Every decision must equal the
-// one from the table built the profile's way from the authored entries.
-describe("stored meta.paths table: same decisions as the profile-built table", () => {
-  let created: string;
+describe("hookCheckPath when the access table cannot be built from meta.json", () => {
+  let tempDir: string;
+  let worktreeCwd: string;
+  let logged: string[] = [];
+  const originalLog = console.log;
+
   beforeEach(async () => {
-    // tmpdir() is /var/folders/… (canonical form /private/var/folders/…).
-    created = await mkdtemp(join(tmpdir(), "ib-stored-decisions-"));
-    setUserHome(join(created, "home"));
+    tempDir = await mkdtemp(join(tmpdir(), "hook-bad-paths-"));
+    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-test88");
+    worktreeCwd = join(agentDir, "repo");
+    await mkdir(join(worktreeCwd, ".claude"), { recursive: true });
+    await writeFile(
+      join(worktreeCwd, ".claude", "settings.local.json"),
+      JSON.stringify({ permissions: { allow: ["Read"], deny: [] } }),
+    );
+    // Not a stored canonical form: spawn never writes `~`. The kernel sandbox
+    // is on, so the stored entries are used as stored.
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-test88", worker: true, paths: { allowRead: ["~/x"], allowWrite: [], deny: [] },
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+    }));
+    setNoWorktreeRepoRootsLoader(async () => [tempDir]);
+    logged = [];
+    console.log = (msg: string) => { logged.push(msg); };
+  });
+
+  afterEach(async () => {
+    console.log = originalLog;
+    resetNoWorktreeRepoRootsLoader();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("denies with the build error and tells the operator to refresh", async () => {
+    await hookCheckPath("agent-test88", JSON.stringify({
+      tool_name: "Read", tool_input: { file_path: join(worktreeCwd, "f") }, cwd: worktreeCwd,
+    }));
+    const out = JSON.parse(logged[0]!).hookSpecificOutput as Record<string, string>;
+    expect(out.permissionDecision).toBe("deny");
+    expect(out.permissionDecisionReason).toContain('Invalid canonical sandbox path "~/x"');
+    expect(out.permissionDecisionReason).toContain("ib sandbox refresh agent-test88");
+    expect(out.permissionDecisionReason).not.toContain(META_UNREADABLE_DENY_REASON);
+  });
+});
+
+// Inside the agent's kernel sandbox the hook builds its table from the stored
+// meta.paths and canonicalizes paths without opening what the agent may not
+// read (each such open was a kernel denial). Every decision must equal the one
+// the hook made before: the table built the profile's way from the authored
+// entries, with every path canonicalized by the opening canonicalizeSandboxPath.
+describe("hook decisions inside the kernel sandbox equal the opening hook's", () => {
+  let created: string;
+  let home: string;
+  let repo: string;
+  let agentsDir: string;
+  let agentDir: string;
+  let worktreePath: string;
+  const authored: PathsConfig = {
+    allowRead: ["~/.claude", "~/.itsybitsy", "/usr"],
+    allowWrite: ["~/.claude", "~/.itsybitsy/agents", "/private/tmp", "**/*.ts"],
+    deny: ["~/.ssh", "~/.aws", "**/.env", "~/.itsybitsy/sealed"],
+  };
+
+  beforeEach(async () => {
+    created = await realpath(await mkdtemp(join(tmpdir(), "ib-stored-decisions-")));
+    home = join(created, "home");
+    repo = join(created, "repo");
+    agentsDir = join(repo, ".ittybitty", "agents");
+    agentDir = join(agentsDir, "agent-abc123");
+    worktreePath = join(agentDir, "repo");
+    setUserHome(home);
+    for (const dir of [
+      join(worktreePath, "src"), join(home, ".ssh"), join(home, "Downloads"), join(home, ".claude"),
+      join(home, ".itsybitsy", "sealed"), join(home, ".itsybitsy", "agent-types"), join(repo, ".git"),
+      join(repo, "src"),
+    ]) await mkdir(dir, { recursive: true });
+    for (const file of [
+      join(worktreePath, "src", "x.ts"), join(worktreePath, ".env"), join(home, ".ssh", "id_rsa"),
+      join(home, "Downloads", "f"), join(home, ".claude", "x"), join(home, ".itsybitsy", "sealed", "s"),
+      join(home, ".itsybitsy", "agent-types", "t.md"), join(repo, "src", "main.ts"),
+    ]) await writeFile(file, "x");
   });
   afterEach(async () => {
     resetUserHome();
     await rm(created, { recursive: true, force: true });
   });
 
-  test("allowed, denied and deny-listed paths", async () => {
-    const home = join(created, "home");
-    const repo = join(created, "repo");
-    const agentsDir = join(repo, ".ittybitty", "agents");
-    const agentDir = join(agentsDir, "agent-abc123");
-    const worktreePath = join(agentDir, "repo");
-    for (const dir of [
-      join(worktreePath, "src"), join(home, ".ssh"), join(home, "Downloads"), join(home, ".claude"),
-      join(home, ".itsybitsy", "sealed"), join(home, ".itsybitsy", "agent-types"), join(repo, ".git"),
-    ]) await mkdir(dir, { recursive: true });
-    for (const file of [
-      join(worktreePath, "src", "x.ts"), join(worktreePath, ".env"), join(home, ".ssh", "id_rsa"),
-      join(home, "Downloads", "f"), join(home, ".claude", "x"), join(home, ".itsybitsy", "sealed", "s"),
-      join(home, ".itsybitsy", "agent-types", "t.md"),
-    ]) await writeFile(file, "x");
+  const ctxFor = (access: PreparedAccessTable): PathCheckContext => ({
+    agentId: "agent-abc123", agentDir, worktreePath, agentsDir, rootRepo: repo,
+    allowList: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"], denyList: [], canSpawnChildren: false,
+    access, protectedWritePaths: agentProtectedWritePaths(agentDir),
+  });
 
-    const authored: PathsConfig = {
-      allowRead: ["~/.claude", "~/.itsybitsy", "/usr"],
-      allowWrite: ["~/.claude", "~/.itsybitsy/agents", "/private/tmp"],
-      deny: ["~/.ssh", "~/.aws", "**/.env", "~/.itsybitsy/sealed"],
-    };
-    const stored = canonicalizePathsConfig(authored, home);
-    const storedAccess = await buildAgentAccessTable({
-      meta: { agentType: "worker", model: "codex:gpt-5.5", canSpawnChildren: false, paths: stored },
+  /**
+   * The hook's table for the same agent with its kernel sandbox on (stored
+   * meta.paths, nothing denied opened) and off (canonicalized as before).
+   */
+  async function tables(): Promise<{ inSandbox: PreparedAccessTable; opening: PreparedAccessTable }> {
+    const build = (enabled: boolean) => buildAgentAccessTable({
+      meta: {
+        agentType: "worker", model: "codex:gpt-5.5", canSpawnChildren: false,
+        paths: canonicalizePathsConfig(authored, home), sandbox: { enabled, rawAllow: [], domains: [] },
+      },
       agentDir, worktreePath, agentsDir, rootRepo: repo, home,
     });
-    const profileAccess = prepareAccessTable(agentPathAccessTable({
-      paths: authored, agentDir, worktreePath, agentsDir, rootRepo: repo,
-      gitDir: canonicalizeSandboxPath(join(repo, ".git")),
-      tmuxSock: resolveTmuxSocketDir(UID), canSpawnChildren: false, cli: "codex", home,
-    }));
-    const ctxFor = (access: PreparedAccessTable): PathCheckContext => ({
-      agentId: "agent-abc123", agentDir, worktreePath, agentsDir, rootRepo: repo,
-      allowList: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"], denyList: [], canSpawnChildren: false,
-      access, protectedWritePaths: agentProtectedWritePaths(agentDir),
-    });
+    const inSandbox = await build(true);
+    const opening = await build(false);
+    expect(inSandbox.kernelSandboxed).toBe(true);
+    expect(opening.kernelSandboxed).toBeUndefined();
+    return { inSandbox, opening };
+  }
 
-    const calls: PathCheckInput[] = [];
-    for (const path of [
-      join(worktreePath, "src", "x.ts"), join(worktreePath, ".env"), join(worktreePath, "new", "f"),
-      join(home, ".ssh", "id_rsa"), join(home, ".aws", "credentials"), join(home, "Downloads"),
-      join(home, "Downloads", "f"), join(home, ".claude", "x"), join(home, ".itsybitsy", "sealed", "s"),
-      join(home, ".itsybitsy", "agent-types", "t.md"), join(home, ".itsybitsy", "agents", "x"),
-      "/etc/passwd", "/tmp/ib-stored-decisions-x", join(repo, "README.md"), join(agentsDir, "other", "f"),
-    ]) {
-      calls.push({ toolName: "Read", toolInput: { file_path: path }, cwd: worktreePath });
-      calls.push({ toolName: "Write", toolInput: { file_path: path }, cwd: worktreePath });
-    }
-    for (const command of [
-      "ls ~/Downloads", "cat ~/.ssh/id_rsa", "echo x > ~/.itsybitsy/sealed/s", "ls ~/.claude",
-      "cat /etc/hosts", "cat .env", "touch /tmp/ib-stored-decisions-y", "cd ~", "ls $HOME/.aws",
-    ]) calls.push({ toolName: "Bash", toolInput: { command }, cwd: worktreePath });
+  const fileCalls = (paths: string[]): PathCheckInput[] => paths.flatMap((path) => [
+    { toolName: "Read", toolInput: { file_path: path }, cwd: worktreePath },
+    { toolName: "Write", toolInput: { file_path: path }, cwd: worktreePath },
+  ]);
+  const bashCalls = (commands: string[]): PathCheckInput[] =>
+    commands.map((command) => ({ toolName: "Bash", toolInput: { command }, cwd: worktreePath }));
 
+  test("allowed, denied and deny-listed paths: same decision and reason", async () => {
+    const { inSandbox, opening } = await tables();
+    const calls = [
+      ...fileCalls([
+        join(worktreePath, "src", "x.ts"), join(worktreePath, ".env"), join(worktreePath, "new", "f"),
+        join(home, ".ssh", "id_rsa"), join(home, ".aws", "credentials"), join(home, "Downloads"),
+        join(home, "Downloads", "f"), join(home, ".claude", "x"), join(home, ".itsybitsy", "sealed", "s"),
+        join(home, ".itsybitsy", "agent-types", "t.md"), join(home, ".itsybitsy", "agents", "x"),
+        "/etc/passwd", "/tmp/ib-stored-decisions-x", join(repo, "README.md"), join(repo, "src", "new.ts"),
+        join(agentsDir, "other", "f"),
+      ]),
+      ...bashCalls([
+        "ls ~/Downloads", "cat ~/.ssh/id_rsa", "echo x > ~/.itsybitsy/sealed/s", "ls ~/.claude",
+        "cat /etc/hosts", "cat .env", "touch /tmp/ib-stored-decisions-y", "cd ~", "ls $HOME/.aws",
+      ]),
+    ];
     for (const call of calls) {
-      const label = `${call.toolName} ${JSON.stringify(call.toolInput)}`;
-      expect(checkPathAccess(call, ctxFor(storedAccess)), label)
-        .toEqual(checkPathAccess(call, ctxFor(profileAccess)));
+      expect(checkPathAccess(call, ctxFor(inSandbox)), `${call.toolName} ${JSON.stringify(call.toolInput)}`)
+        .toEqual(checkPathAccess(call, ctxFor(opening)));
     }
+    expect(checkPathAccess(calls[0]!, ctxFor(inSandbox)).decision).toBe("allow");
+    expect(checkPathAccess(bashCalls(["ls ~/Downloads"])[0]!, ctxFor(inSandbox)))
+      .toEqual({ decision: "deny", reason: `Access denied: read ${home}/Downloads is not in paths.allowRead/allowWrite` });
+    expect(checkPathAccess(fileCalls([join(home, ".ssh", "id_rsa")])[0]!, ctxFor(inSandbox)))
+      .toEqual({ decision: "deny", reason: `Access denied: read ${home}/.ssh/id_rsa matches a paths.deny entry` });
+  });
 
-    const canonicalHome = canonicalizeSandboxPath(home);
-    expect(checkPathAccess(calls[0]!, ctxFor(storedAccess)).decision).toBe("allow");
-    expect(checkPathAccess({ toolName: "Bash", toolInput: { command: "ls ~/Downloads" }, cwd: worktreePath }, ctxFor(storedAccess)))
-      .toEqual({ decision: "deny", reason: `Access denied: read ${canonicalHome}/Downloads is not in paths.allowRead/allowWrite` });
-    expect(checkPathAccess({ toolName: "Read", toolInput: { file_path: join(home, ".ssh", "id_rsa") }, cwd: worktreePath }, ctxFor(storedAccess)))
-      .toEqual({ decision: "deny", reason: `Access denied: read ${canonicalHome}/.ssh/id_rsa matches a paths.deny entry` });
+  test("miscased spellings: same decision (existing and new leaves, plain and glob allows)", async () => {
+    const { inSandbox, opening } = await tables();
+    if (!(await Bun.file(join(created, "REPO", "SRC", "MAIN.TS")).exists())) return; // case-sensitive volume
+    const calls = [
+      ...fileCalls([
+        join(worktreePath, "SRC", "X.TS"), join(worktreePath, "SRC", "NEW.ts"), join(worktreePath, ".ENV"),
+        join(home, ".Claude", "x"), join(home, ".CLAUDE", "new"), join(home, ".ITSYBITSY", "SEALED", "s"),
+        join(home, ".itsybitsy", "Sealed", "new.ts"), join(home, ".SSH", "id_rsa"), join(home, "DOWNLOADS", "f"),
+        // A new file in a miscased main-repo dir: only the **/*.ts glob matches,
+        // and only the full path, so the case is corrected through it.
+        join(created, "REPO", "SRC", "new.ts"), join(created, "REPO", "SRC", "MAIN.TS"),
+      ]),
+      ...bashCalls(["cat ~/.SSH/id_rsa", "ls ~/DOWNLOADS", "echo x > ~/.ITSYBITSY/SEALED/s"]),
+    ];
+    for (const call of calls) {
+      expect(checkPathAccess(call, ctxFor(inSandbox)).decision, `${call.toolName} ${JSON.stringify(call.toolInput)}`)
+        .toBe(checkPathAccess(call, ctxFor(opening)).decision);
+    }
+    expect(checkPathAccess(fileCalls([join(created, "REPO", "SRC", "new.ts")])[1]!, ctxFor(inSandbox)))
+      .toEqual({ decision: "deny", reason: "Access denied: work in your worktree, not the main repo" });
+  });
+
+  // Guards each call site (checkFilePath, the Bash scanner, the settings-write
+  // guard, resolvePreparedAccess, pathDenialReason) against a revert to the
+  // opening canonicalizer: realpath would correct `.SSH` to `.ssh`.
+  test("where nothing may be opened the reason keeps the spelled case", async () => {
+    const { inSandbox, opening } = await tables();
+    if (!(await Bun.file(join(home, ".SSH", "id_rsa")).exists())) return; // case-sensitive volume
+    expect(checkPathAccess(fileCalls([join(home, ".SSH", "id_rsa")])[0]!, ctxFor(inSandbox)))
+      .toEqual({ decision: "deny", reason: `Access denied: read ${home}/.SSH/id_rsa is not in paths.allowRead/allowWrite` });
+    expect(checkPathAccess(bashCalls(["cat ~/.SSH/id_rsa"])[0]!, ctxFor(inSandbox)))
+      .toEqual({ decision: "deny", reason: `Access denied: read ${home}/.SSH/id_rsa is not in paths.allowRead/allowWrite` });
+    expect(checkPathAccess(bashCalls(["echo x > ~/.SSH/new"])[0]!, ctxFor(inSandbox)))
+      .toEqual({ decision: "deny", reason: `Access denied: write ${home}/.SSH/new is not in paths.allowRead/allowWrite` });
+    expect(checkPathAccess(fileCalls([join(home, ".SSH", "id_rsa")])[0]!, ctxFor(opening)))
+      .toEqual({ decision: "deny", reason: `Access denied: read ${home}/.ssh/id_rsa matches a paths.deny entry` });
+  });
+
+  test("no call site realpaths a path the agent may not read", async () => {
+    const { inSandbox, opening } = await tables();
+    const calls = [
+      ...fileCalls([join(home, ".ssh", "id_rsa"), join(home, "Downloads", "f"), join(home, "Downloads", "new")]),
+      ...bashCalls(["ls ~/Downloads", "cat ~/.ssh/id_rsa", "echo x > ~/Downloads/new", "sed -i s/a/b/ ~/Downloads/f"]),
+    ];
+    const opened: string[] = [];
+    const realRealpathSync = fs.realpathSync;
+    const spy = spyOn(fs, "realpathSync").mockImplementation(((path: string) => {
+      opened.push(String(path));
+      return realRealpathSync(path);
+    }) as typeof fs.realpathSync);
+    try {
+      for (const call of calls) checkPathAccess(call, ctxFor(inSandbox));
+      expect(opened.filter((path) => path === home || path.startsWith(`${home}/`))).toEqual([]);
+      // The spy does see the opening canonicalizer's calls.
+      checkPathAccess(fileCalls([join(home, "Downloads", "f")])[0]!, ctxFor(opening));
+      expect(opened).toContain(join(home, "Downloads", "f"));
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

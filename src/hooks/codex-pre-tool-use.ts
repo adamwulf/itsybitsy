@@ -46,6 +46,7 @@ import {
   loadMergedAgentTypePermissions,
 } from "./shared";
 import {
+  accessTableDenyReason,
   agentProtectedWritePaths,
   checkPathAccess,
   checkIbCommandAccess,
@@ -320,6 +321,7 @@ export async function hookCodexPreToolUse(
       ctxResolved.worktreePath,
     );
 
+    let buildError: unknown;
     const access = await buildAgentAccessTable({
       meta: ctxResolved.meta,
       agentDir: ctxResolved.agentDir,
@@ -327,13 +329,14 @@ export async function hookCodexPreToolUse(
       agentsDir: ctxResolved.agentsDir,
       rootRepo: ctxResolved.rootRepo,
       home: userHome(),
-    }).catch(() => null);
+    }).catch((error: unknown) => {
+      buildError = error;
+      return null;
+    });
     if (!access) {
-      await logAgent(
-        ctxResolved.agentDir,
-        `[PreToolUse] Permission denied: ${toolName} — ${META_UNREADABLE_DENY_REASON}`,
-      );
-      write(buildCodexDenyOutput(META_UNREADABLE_DENY_REASON));
+      const reason = accessTableDenyReason(agentId, buildError);
+      await logAgent(ctxResolved.agentDir, `[PreToolUse] Permission denied: ${toolName} — ${reason}`);
+      write(buildCodexDenyOutput(reason));
       return;
     }
 

@@ -3738,12 +3738,18 @@ describe("hook decisions inside the kernel sandbox equal the opening hook's", ()
       .toEqual({ decision: "deny", reason: "Access denied: work in your worktree, not the main repo" });
   });
 
-  // Review round 2: a deny entry matches a LOWER prefix only in the typed case
-  // (<tmp>/**/WORK/**), so realpath runs on a higher prefix (<tmp>/WORK). The
-  // corrected `work` no longer matches the deny, so the lower components must be
-  // walked again, or REPO/src keep the typed case and the case-sensitive
-  // main-repo check misses them.
-  test("a deny entry that only the typed case matches does not stop the case correction", async () => {
+  // A deny entry that matches a component only as typed refuses opening it, so
+  // its case (and the case below it) must still be corrected, or the
+  // case-sensitive main-repo check misses the main repo (on disk work/repo).
+  // Round 2: the deny matched LOWER prefixes (<tmp>/**/WORK/**) and realpath of
+  // a higher one corrected `work`. Round 3: an end-anchored glob (**/REPO) or a
+  // wildcard (<tmp>/work/*) matches the last existing component only, so its
+  // spelling comes from a listing of the admitted parent.
+  test.each([
+    { name: "round 2: <tmp>/**/WORK/**", deny: (c: string) => [`${c}/**/WORK/**`], dir: ["WORK", "REPO", "src"] },
+    { name: "round 3a: **/REPO", deny: () => ["**/REPO"], dir: ["work", "REPO"] },
+    { name: "round 3 wildcard: <tmp>/work/*", deny: (c: string) => [`${c}/work/*`], dir: ["work", "Repo"] },
+  ])("a typed-case deny does not stop the case correction ($name)", async ({ deny, dir }) => {
     const mainRepo = join(created, "work", "repo");
     const agentsDirHere = join(mainRepo, ".ittybitty", "agents");
     const agentDirHere = join(agentsDirHere, "agent-abc123");
@@ -3752,12 +3758,13 @@ describe("hook decisions inside the kernel sandbox equal the opening hook's", ()
     await mkdir(join(mainRepo, ".git"), { recursive: true });
     await mkdir(worktreeHere, { recursive: true });
     await writeFile(join(mainRepo, "src", "main.ts"), "x");
+    await writeFile(join(mainRepo, "main.ts"), "x");
     if (!(await Bun.file(join(created, "WORK", "REPO", "src", "main.ts")).exists())) return; // case-sensitive volume
 
     const build = (enabled: boolean) => buildAgentAccessTable({
       meta: {
         agentType: "worker", model: "codex:gpt-5.5", canSpawnChildren: false,
-        paths: canonicalizePathsConfig({ allowRead: [], allowWrite: ["**/*.ts"], deny: [`${created}/**/WORK/**`] }, home),
+        paths: canonicalizePathsConfig({ allowRead: [], allowWrite: ["**/*.ts"], deny: deny(created) }, home),
         sandbox: { enabled, rawAllow: [], domains: [] },
       },
       agentDir: agentDirHere, worktreePath: worktreeHere, agentsDir: agentsDirHere, rootRepo: mainRepo, home,
@@ -3770,7 +3777,7 @@ describe("hook decisions inside the kernel sandbox equal the opening hook's", ()
     const inSandbox = await build(true);
     const opening = await build(false);
     for (const leaf of ["main.ts", "new.ts"]) {
-      for (const call of fileCalls([join(created, "WORK", "REPO", "src", leaf)])) {
+      for (const call of fileCalls([join(created, ...dir, leaf)])) {
         const expected = { decision: "deny" as const, reason: "Access denied: work in your worktree, not the main repo" };
         expect(checkPathAccess({ ...call, cwd: worktreeHere }, ctxHere(opening)), `${call.toolName} ${leaf} opening`)
           .toEqual(expected);

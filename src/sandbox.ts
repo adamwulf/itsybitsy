@@ -1,5 +1,5 @@
 import { randomBytes } from "crypto";
-import { lstatSync, readlinkSync, realpathSync } from "fs";
+import { lstatSync, readdirSync, readlinkSync, realpathSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { userHome } from "./home";
 
@@ -339,9 +339,6 @@ function metadataRealpath(absolute: string): string | null {
   return resolved;
 }
 
-/** Bounds canonicalizeSandboxPathWithin's passes; each pass corrects a component. */
-const MAX_CASE_PASSES = 64;
-
 /**
  * canonicalizeSandboxPath without reading what the agent may not read. Inside a
  * kernel sandbox, realpathSync opens its argument (a file-read-data check), and
@@ -350,27 +347,58 @@ const MAX_CASE_PASSES = 64;
  * resolves the symlinks and the longest existing prefix with lstat/readlink only,
  * and calls realpathSync only on the longest resolved prefix `mayRead` admits,
  * where it corrects the letter case exactly as canonicalizeSandboxPath does.
- * Components below that prefix keep the case they were spelled with. `mayRead`
- * gets the prefix and the full symlink-resolved path (prefix and the rest as
- * spelled). A `mayRead` that is always false gives a pure metadata
+ * `mayRead` gets the prefix and the full symlink-resolved path (prefix and the
+ * rest as spelled). A `mayRead` that is always false gives a pure metadata
  * canonicalization.
  *
- * When realpathSync corrects a prefix ABOVE components that `mayRead` refused,
- * the corrected case can change what `mayRead` decides for them (a deny entry
- * that matched the typed case no longer does), so the walk runs again on the
- * corrected path. Each such pass corrects at least one component.
+ * Components between that prefix and the longest existing prefix were refused
+ * by `mayRead` (a deny entry matched them as typed). The first one takes its
+ * on-disk spelling from a listing of the prefix realpath just opened (so the
+ * listing is allowed too), and the walk runs again: the corrected spelling can
+ * change what a deny entry matches. Every pass but the last changes at least
+ * one component to its on-disk spelling, and an on-disk spelling never changes
+ * again, so there are at most as many passes as components. More means the
+ * filesystem did not return stable names: throw (the hooks then deny).
  */
 export function canonicalizeSandboxPathWithin(
   input: string,
   mayRead: (prefix: string, fullPath: string) => boolean,
 ): string {
-  let path = resolve(input);
-  for (let pass = 0; pass < MAX_CASE_PASSES; pass += 1) {
-    const next = canonicalizeWithinOnce(path, mayRead, input);
-    if (next.done) return next.path;
-    path = next.path;
+  let next = canonicalizeWithinOnce(resolve(input), mayRead, input);
+  // After the first pass the path has no symlinks, so its depth is fixed.
+  let passesLeft = next.path.split("/").filter((part) => part.length > 0).length;
+  while (!next.done) {
+    if (passesLeft-- === 0) throw new Error(`Sandbox path case did not settle: "${input}"`);
+    next = canonicalizeWithinOnce(next.path, mayRead, input);
   }
-  return path;
+  return next.path;
+}
+
+/**
+ * The entry of `dir` that `name` opens, in its on-disk spelling: on a
+ * case-insensitive volume the spelling can differ from `name`. Only the same
+ * file (same inode) with a name equal ignoring case counts.
+ */
+function onDiskName(dir: string, name: string): string | undefined {
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return undefined;
+  }
+  if (entries.includes(name)) return name;
+  const folded = name.normalize("NFC").toLowerCase();
+  try {
+    const target = lstatSync(join(dir, name));
+    const matches = entries.filter((entry) => {
+      if (entry.normalize("NFC").toLowerCase() !== folded) return false;
+      const stats = lstatSync(join(dir, entry));
+      return stats.ino === target.ino && stats.dev === target.dev;
+    });
+    return matches.length === 1 ? matches[0] : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function canonicalizeWithinOnce(
@@ -404,10 +432,11 @@ function canonicalizeWithinOnce(
         unread.unshift(basename(readable));
         continue;
       }
-      return {
-        path: join(corrected, ...unread, ...remainder),
-        done: unread.length === 0 || corrected === readable,
-      };
+      if (unread.length === 0) return { path: join(corrected, ...remainder), done: true };
+      const name = onDiskName(corrected, unread[0]!) ?? unread[0]!;
+      const changed = corrected !== readable || name !== unread[0];
+      unread[0] = name;
+      return { path: join(corrected, ...unread, ...remainder), done: !changed };
     }
     unread.unshift(basename(readable));
   }
@@ -1127,13 +1156,13 @@ function canonicalizeWithoutOpeningDenied(prepared: PreparedAccessTable, absolut
  * (canonicalizeSandboxPathWithin): symlinks resolve by lstat/readlink, and
  * realpathSync corrects the letter case of the longest existing prefix that an
  * allow entry matches, or that leads to a path an allow entry matches, in any
- * case, unless a deny entry matches the prefix as spelled. When no allow entry
- * matches the full path in any case, the path is denied whatever its case.
- * Compared with canonicalizeSandboxPath where it may open everything, the one
- * known difference in decisions is toward deny: a path spelled exactly like a
- * deny entry whose on-disk letter case differs stays denied (opening it would
- * correct the case first). Inside the sandbox canonicalizeSandboxPath could not
- * resolve a symlink under a directory the agent may not read; this one does.
+ * case, unless a deny entry matches the prefix as spelled; such a refused
+ * component takes its on-disk spelling from a listing of its opened parent.
+ * Decisions on the result are those on canonicalizeSandboxPath's result,
+ * except below a directory it may not open (one a deny entry matches as typed,
+ * or the kernel profile does not let the agent read): there a component keeps
+ * the typed case, as with canonicalizeSandboxPath inside the sandbox, which
+ * also kept a symlink there unresolved; this one resolves it.
  */
 export function canonicalizeAccessPath(prepared: PreparedAccessTable, absolutePath: string): string {
   return prepared.kernelSandboxed

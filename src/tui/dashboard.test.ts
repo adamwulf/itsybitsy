@@ -8,9 +8,8 @@ import { stripAnsi } from "../parse-state";
 import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult, waitFor } from "../test-utils";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow, formatFooterClock, usageFetchCtx } from "./dashboard";
 import type { GeminiUsageResult } from "../usage";
-import { visibleWidth } from "@mariozechner/pi-tui";
+import { TUI, visibleWidth } from "@mariozechner/pi-tui";
 import type { CollectorHealth } from "../sandbox-collector-light";
-import type { TUI } from "@mariozechner/pi-tui";
 import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setNewAgentCallerMetaReader, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner, sealAgentRecord } from "../ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxPollerSpawnCtx } from "../tmux-poller";
@@ -19,7 +18,7 @@ import { IB_COORDINATOR_SESSION } from "../coordinator";
 import { setUserConfigPath, resetUserConfigPath } from "../config";
 import { setUserHome, resetUserHome } from "../home";
 import type { SpawnResult } from "../types";
-import { PANE_MODES } from "./pane-manager";
+import { PANE_MODES, type PaneMode } from "./pane-manager";
 import { computeSidebarHeights } from "./sidebar";
 import { assertDialog } from "./test-helpers";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
@@ -7533,4 +7532,92 @@ describe("idle render checks", () => {
       tmuxPollerSpawnCtx.reset();
     }
   });
+});
+
+describe("tabs in right-pane text under an overlay", () => {
+  // pi-tui's visibleWidth() counts \t as 3 columns, but the slicing it uses to
+  // composite an overlay onto a row counts it as 0 (see expandTabs() in
+  // ../tmux-poller). A tab on a row under the command palette made that row 3
+  // columns too wide, and doRender threw "Rendered line N exceeds terminal
+  // width". Seen live: AGENT LOG showing a codex stderr Ruby backtrace.
+  const WIDTH = 160;
+  const ROWS = 30;
+  // The live case is a tab-first backtrace line. A tab in the columns the
+  // palette covers is cut out with them, so the lines move the tab along the
+  // row (0, 5, ... 95 columns in): some always land beside the palette, in the
+  // narrow right pane and in the full-width views alike.
+  const tabLines = (): string[] => Array.from({ length: 60 }, (_, i) =>
+    `${"word ".repeat(i % 20)}\tfrom /opt/homebrew/lib/ruby/3.4.0/net/http.rb:${i}:in 'Net::HTTP#connect'`);
+
+  /**
+   * A real pi-tui TUI over an inert terminal. It is stopped, so the render
+   * that showOverlay() schedules never reaches doRender() (which writes a
+   * crash log under the real home on an over-width row); the test runs
+   * compositeOverlays() itself — the exact step doRender takes between
+   * render() and its width check. compositeOverlays is private in the typings.
+   */
+  function overlayTui(): { tui: TUI; composite: (lines: string[]) => string[] } {
+    const terminal = {
+      start() {}, stop() {}, async drainInput() {}, write() {},
+      get columns() { return WIDTH; }, get rows() { return ROWS; },
+      get kittyProtocolActive() { return false; },
+      moveBy() {}, hideCursor() {}, showCursor() {},
+      clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {},
+    };
+    const tui = new TUI(terminal);
+    tui.stop();
+    const internals = tui as unknown as { compositeOverlays(lines: string[], width: number, height: number): string[] };
+    return { tui, composite: (lines) => internals.compositeOverlays(lines, WIDTH, ROWS) };
+  }
+
+  let origRows: number;
+  beforeEach(() => {
+    origRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: ROWS, writable: true, configurable: true });
+  });
+  afterEach(() => {
+    Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+  });
+
+  // Every right-pane view that shows file or command text. DIFF / STATUS are
+  // filled before jumpToMode so it does not spawn `ib diff` / `ib status`.
+  const views: { mode: PaneMode; fill: (rp: RightPaneComponent) => void }[] = [
+    { mode: "AGENT LOG", fill: (rp) => { rp.agentLogContent = tabLines(); } },
+    { mode: "WATCHDOG LOG", fill: (rp) => { rp.watchdogLogContent = tabLines(); } },
+    { mode: "PROXY LOG", fill: (rp) => { rp.proxyLogContent = tabLines(); } },
+    { mode: "INITIAL PROMPT", fill: (rp) => { rp.promptContent = tabLines(); } },
+    { mode: "DENIALS", fill: (rp) => {
+      rp.denialsContent = tabLines().map((line) => ({ timestamp: "13:00:00", epoch: 0, line: `[13:00:00] ${line}` }));
+    } },
+    { mode: "ERRORS", fill: (rp) => { rp.errors = tabLines(); } },
+    { mode: "DIFF", fill: (rp) => { rp.diffContent = tabLines(); } },
+    { mode: "STATUS", fill: (rp) => { rp.statusContent = tabLines(); } },
+    { mode: "QUESTIONS", fill: (rp) => {
+      rp.questions = tabLines().map((question, i) => ({ id: `q${i}`, agent: "agent-a", question, timestamp: "", status: "pending" }));
+    } },
+  ];
+
+  for (const { mode, fill } of views) {
+    test(`${mode}: every row fits the terminal with the command palette open`, () => {
+      const dashboard = makeDashboard();
+      const { tui, composite } = overlayTui();
+      dashboard.setTui(tui);
+      const agent = makeAgent("agent-a", "/repos/test");
+      dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
+      fill(dashboard.rightPane);
+      dashboard.jumpToMode(mode);
+      dashboard.handleInput("/");
+      expect(dashboard.dialog?.type).toBe("fuzzy");
+
+      const rendered = dashboard.render(WIDTH);
+      expect(stripAnsi(rendered.join("\n"))).toContain("from");
+      const rows = composite(rendered);
+      expect(stripAnsi(rows.join("\n"))).toContain("Command palette");
+      const overWidth = rows.map((row, i) => ({ i, width: visibleWidth(row) })).filter((r) => r.width > WIDTH);
+      expect(overWidth).toEqual([]);
+      // Whether a tab overflows depends on where it falls relative to the
+      // palette; no tab reaching the screen is the layout-independent check.
+      expect(rendered.filter((row) => row.includes("\t"))).toEqual([]);
+    });
+  }
 });

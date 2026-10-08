@@ -115,6 +115,46 @@ describe("confirm dialog", () => {
     handleDialogInput(ctx, "\r");
     expect(ctx.closed).toHaveLength(1);
   });
+
+  test("optional checkbox follows both buttons in forward and reverse focus order", () => {
+    const state = makeConfirm();
+    const dialog = assertDialog(state.dialog, "confirm");
+    dialog.checkbox = { label: "Keep agent after merge", checked: false };
+    for (const focus of ["confirm", "checkbox", "cancel"] as const) {
+      handleDialogInput(state.ctx, "\t");
+      expect(dialog.focusedButton).toBe(focus);
+    }
+    for (const focus of ["checkbox", "confirm", "cancel"] as const) {
+      handleDialogInput(state.ctx, "\x1b[Z");
+      expect(dialog.focusedButton).toBe(focus);
+    }
+    handleDialogInput(state.ctx, "\x1b[D");
+    expect(dialog.focusedButton).toBe("checkbox");
+    handleDialogInput(state.ctx, "\x1b[C");
+    expect(dialog.focusedButton).toBe("cancel");
+  });
+
+  test("Space toggles only the focused checkbox without submitting or closing", () => {
+    const state = makeConfirm();
+    const dialog = assertDialog(state.dialog, "confirm");
+    dialog.checkbox = { label: "Keep agent after merge", checked: false };
+    handleDialogInput(state.ctx, " ");
+    expect(dialog.checkbox.checked).toBe(false);
+    handleDialogInput(state.ctx, "\t");
+    handleDialogInput(state.ctx, " ");
+    expect(dialog.checkbox.checked).toBe(false);
+    handleDialogInput(state.ctx, "\t");
+    handleDialogInput(state.ctx, " ");
+    expect(dialog.checkbox.checked).toBe(true);
+    handleDialogInput(state.ctx, "\r");
+    expect(state.yesCalled).toBe(false);
+    expect(state.ctx.closed).toHaveLength(0);
+    handleDialogInput(state.ctx, " ");
+    expect(dialog.checkbox.checked).toBe(false);
+    handleDialogInput(state.ctx, "\x1b");
+    expect(state.ctx.closed).toHaveLength(1);
+    expect(state.yesCalled).toBe(false);
+  });
 });
 
 // ─── input dialog ───────────────────────────────────────

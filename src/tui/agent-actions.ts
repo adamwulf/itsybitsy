@@ -1185,17 +1185,24 @@ export function handleMerge(ctx: ActionCtx) {
       ctx.setNotice(`Merge-check failed for ${agent.id}: ${checkOutput}`, "error");
       return;
     }
+    const checkbox = { label: "Keep agent after merge", checked: false };
     ctx.showDialog({
       type: "confirm",
       prompt: `Merge ${agent.id}?\n${checkOutput}`,
       confirmLabel: "Merge",
       focusedButton: "cancel",
+      checkbox,
       onYes: () => {
+        const keep = checkbox.checked;
         ctx.closeDialog();
         ctx.executeAndRefresh(async () => {
-          const result = await mergeAgent(agent, agent.repoPath);
-          if (result.ok) ctx.setNotice(`Merged ${agent.id}`, "info");
-          else ctx.setNotice(`Merge failed: ${result.stderr || result.stdout}`, "error");
+          const result = await mergeAgent(agent, agent.repoPath, { keep });
+          if (result.ok) {
+            const notice = keep
+              ? `${agent.id} kept running: ${result.stdout.startsWith("Nothing to merge:") ? "nothing to merge" : "merge complete"}`
+              : `Merged ${agent.id}`;
+            ctx.setNotice(notice, "info");
+          } else ctx.setNotice(`Merge failed: ${result.stderr || result.stdout}`, "error");
         });
       },
     });

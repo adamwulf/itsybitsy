@@ -547,7 +547,13 @@ class DialogOverlayComponent implements Component {
         const btnColor = dialog.confirmColor ?? GREEN;
         const confirmBtn = dialog.focusedButton === "confirm" ? `${BOLD}${btnColor}[ ${dialog.confirmLabel} ]${RESET}` : `[ ${dialog.confirmLabel} ]`;
         const cancelBtn = dialog.focusedButton === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `[ Cancel ]`;
-        return { title: "Confirm", contentLines: [...wrapped, "", `  ${cancelBtn}   ${confirmBtn}`] };
+        const contentLines = [...wrapped, "", `  ${cancelBtn}   ${confirmBtn}`];
+        if (dialog.checkbox) {
+          const label = `[${dialog.checkbox.checked ? "x" : " "}] ${dialog.checkbox.label}`;
+          const checkbox = dialog.focusedButton === "checkbox" ? `${BOLD}${REVERSE}${label}${RESET}` : label;
+          contentLines.push("", `  ${checkbox}  ${DIM}(Space to toggle)${RESET}`);
+        }
+        return { title: "Confirm", contentLines };
       }
       case "input": {
         return {

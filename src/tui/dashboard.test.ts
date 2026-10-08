@@ -986,6 +986,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     // them inline (no live watchdog in test setup), inflating sentMessages.
     const { setCoordinatorHome } = await import("../coordinator");
     setCoordinatorHome(join(configTempDir, "coord-home"));
+    // Agent seals belong to the fixture, not the developer's home directory.
+    setUserHome(configTempDir);
+    await (await import("../agent-types")).ensureAgentTypesDir();
   });
 
   async function setupDashboardWithAgent(state = "running") {
@@ -1063,10 +1066,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetMergeSpawnRunner();
     resetNewAgentSpawnRunner();
     resetUserConfigPath();
-    // Failure-safety net for the new-agent tests below, which override the home
-    // dir via setUserHome: if one throws before its inline
-    // resetUserHome(), clear the override here so it cannot bleed into a
-    // later test's home resolution.
+    // Reset the fixture home installed in beforeEach, including any override
+    // made by individual new-agent tests, so it cannot leak into later tests.
     resetUserHome();
     const { resetCoordinatorHome } = await import("../coordinator");
     resetCoordinatorHome();
@@ -1087,6 +1088,10 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.prompt).toContain("agent-test");
     expect(d.confirmLabel).toBe("Retire");
     expect(d.focusedButton).toBe("cancel");
+    const rendered = stripAnsi((dashboard as any).dialogOverlay.render(80).join("\n"));
+    expect(rendered).toContain("[ Cancel ]   [ Retire ]");
+    expect(rendered).not.toContain("[ ]");
+    expect(rendered).not.toContain("Space to toggle");
   });
 
   test("retire confirm dialog: Enter on Retire button executes retire", async () => {
@@ -1648,6 +1653,69 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("m");
     await dashboard.flushPendingActions();
     expect(assertDialog(dashboard.dialog, 'confirm').prompt).toContain("Merge agent-test");
+    const dialog = assertDialog(dashboard.dialog, "confirm");
+    expect(dialog.focusedButton).toBe("cancel");
+    expect(dialog.checkbox).toEqual({ label: "Keep agent after merge", checked: false });
+    const overlay = (dashboard as any).dialogOverlay;
+    expect(stripAnsi(overlay.render(80).join("\n"))).toContain("[ ] Keep agent after merge");
+    expect(stripAnsi(overlay.render(80).join("\n"))).toContain("Space to toggle");
+    dashboard.handleInput("\x1b[Z");
+    expect(dialog.focusedButton).toBe("checkbox");
+    expect(overlay.render(80).join("\n")).toContain("\x1b[7m[ ] Keep agent after merge");
+    dashboard.handleInput(" ");
+    expect(stripAnsi(overlay.render(80).join("\n"))).toContain("[x] Keep agent after merge");
+    dashboard.handleInput("\x1b");
+    dashboard.handleInput("m");
+    await dashboard.flushPendingActions();
+    expect(assertDialog(dashboard.dialog, "confirm").checkbox?.checked).toBe(false);
+  });
+
+  for (const keep of [false, true]) {
+    test(`merge confirmation ${keep ? "keeps the agent when checked" : "closes the agent by default"}`, async () => {
+      await setupDashboardWithAgent();
+      const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+      await mkdir(join(agentDir, "repo"), { recursive: true });
+      const commands: string[][] = [];
+      setMergeSpawnRunner((cmd: string[]) => {
+        commands.push(cmd);
+        if (cmd.includes("log") && cmd.includes("--oneline")) return makeSpawnResult(0, "abc123 Agent change\n");
+        if (cmd.includes("rev-parse") && cmd.includes("HEAD")) return makeSpawnResult(0, "a".repeat(40) + "\n");
+        return makeSpawnResult();
+      });
+      dashboard.handleInput("m");
+      await dashboard.flushPendingActions();
+      if (keep) {
+        dashboard.handleInput("\x1b[Z");
+        dashboard.handleInput(" ");
+        dashboard.handleInput("\x1b[Z");
+      } else {
+        dashboard.handleInput("\t");
+      }
+      dashboard.handleInput("\r");
+      await dashboard.flushPendingActions();
+      expect(dashboard.dialog).toBeNull();
+      expect(dashboard.notice).toBe(keep
+        ? "agent-test kept running: merge complete"
+        : "Merged agent-test");
+      expect(commands.some(cmd => cmd.includes("merge"))).toBe(true);
+      expect(commands.some(cmd => cmd.includes("kill-session"))).toBe(!keep);
+      expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(keep);
+    });
+  }
+
+  test("keep merge with no new commits reports nothing to merge", async () => {
+    await setupDashboardWithAgent();
+    const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    dashboard.handleInput("m");
+    await dashboard.flushPendingActions();
+    dashboard.handleInput("\x1b[Z");
+    dashboard.handleInput(" ");
+    dashboard.handleInput("\x1b[Z");
+    dashboard.handleInput("\r");
+    await dashboard.flushPendingActions();
+    expect(dashboard.notice).toBe("agent-test kept running: nothing to merge");
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true);
   });
 
   test("merge: merge-check failure shows error message", async () => {

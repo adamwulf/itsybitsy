@@ -73,6 +73,11 @@ sandbox:
   rawAllow:
     - (allow process*)
     - (allow sysctl-read)
+    # Free-disk-space queries (statfs), which git, codex and df make many times
+    # a minute; the kernel reports a denied one as `system-info vfs.disk-space`.
+    # info-type limits the allow to that one query (Apple's own profiles use the
+    # same rule): it shows volume sizes, no file names or data.
+    - (allow system-info (info-type "vfs.disk-space"))
     - (allow file-read-metadata)
     # Mandatory root-directory listing (docs/SANDBOX-BASELINE-MINIMAL.md §(a)):
     # bisection proved Bun/Node readdir the "/" node at init; without this line

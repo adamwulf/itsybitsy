@@ -2096,6 +2096,20 @@ describe("canonicalization without reading what the agent may not read", () => {
   });
 });
 
+describe("system-info in the _all floor", () => {
+  // git, codex and df query free disk space many times a minute; denied, each
+  // query is a `system-info vfs.disk-space` kernel denial.
+  test("allows the free-disk-space query and no other system-info", async () => {
+    const floor = parseAgentTypeFile(
+      await Bun.file(join(import.meta.dir, "../docs/agent-types/_all.md")).text(),
+    ).frontmatter.sandbox as SandboxConfig;
+    const systemInfo = floor.rawAllow.filter((rule) => /system-info/.test(rule));
+    expect(systemInfo).toEqual(['(allow system-info (info-type "vfs.disk-space"))']);
+    const profile = generateProfile(floor, resolvePathsConfig(), PARAMS);
+    expect(profile).toContain('\n(allow system-info (info-type "vfs.disk-space"))\n');
+  });
+});
+
 describe("sandbox frontmatter validation", () => {
   test("accepts the complete flat schema (rawAllow + domains, no enabled)", () => {
     expect(validateSandboxFrontmatter({ rawAllow: [], domains: [] })).toEqual({

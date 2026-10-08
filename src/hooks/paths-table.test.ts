@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "fs/promises";
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 import { setUserHome, resetUserHome } from "../home";
@@ -17,6 +17,7 @@ import {
   prepareAccessTable,
   resolvePathAccess,
   resolvePreparedAccess,
+  resolveTmuxSocketDir,
   type PathsConfig,
   type SandboxConfig,
   type SandboxProfileParams,
@@ -186,6 +187,49 @@ describe("buildAgentAccessTable", () => {
     expect(resolvePreparedAccess(prepared, join(agyDir, "antigravity-cli", "settings.json"), "write")).toBe("allow");
     expect(resolvePreparedAccess(prepared, join(agyDir, "config", "config.json"), "write")).toBe("deny");
     expect(resolvePreparedAccess(prepared, join(agyDir, "config", "config.json"), "read")).toBe("deny");
+  });
+
+  // meta.paths holds the canonical forms spawn stored; the hook (inside the
+  // agent's sandbox) uses them as stored instead of re-resolving them.
+  test("meta.paths entries are used as stored, not re-resolved", async () => {
+    // Outside the fixture agent dir (`tmp`, a write root).
+    const root = await realpath(await mkdtemp(join(tmpdir(), "paths-table-stored-")));
+    try {
+      await mkdir(join(root, "target"));
+      await symlink(join(root, "target"), join(root, "link"));
+      // As if `link` became a symlink after spawn stored the entry.
+      const prepared = await build({
+        agentType: "worker",
+        paths: { allowRead: [join(root, "link")], allowWrite: [], deny: [] },
+      });
+      expect(resolvePreparedAccess(prepared, join(root, "target", "f"), "read")).toBe("deny");
+      const reCanonicalized = await build({
+        agentType: "worker",
+        paths: { allowRead: [join(root, "target")], allowWrite: [], deny: [] },
+      });
+      expect(resolvePreparedAccess(reCanonicalized, join(root, "link", "f"), "read")).toBe("allow");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a meta.paths entry that is not a stored canonical form fails closed", async () => {
+    await expect(build({ agentType: "worker", paths: { allowRead: ["~/data"], allowWrite: [], deny: [] } }))
+      .rejects.toThrow();
+    await expect(build({ agentType: "worker", paths: { allowRead: ["./data"], allowWrite: [], deny: [] } }))
+      .rejects.toThrow();
+  });
+
+  test("the tmux socket dir is still a deny root for a non-spawner only", async () => {
+    const sock = join(resolveTmuxSocketDir(UID), "default");
+    const paths = { allowRead: [], allowWrite: ["/private/tmp"], deny: [] };
+    const worker = await build({ agentType: "worker", canSpawnChildren: false, paths });
+    const spawner = await build({ agentType: "worker", canSpawnChildren: true, paths });
+    if (sock.startsWith("/private/tmp/")) {
+      expect(resolvePreparedAccess(spawner, sock, "write")).toBe("allow");
+    }
+    expect(resolvePreparedAccess(worker, sock, "write")).toBe("deny");
+    expect(resolvePreparedAccess(worker, sock, "read")).toBe("deny");
   });
 });
 

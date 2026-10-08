@@ -22,7 +22,13 @@ import {
   claudeProjectDirFor,
   pathDenialReason,
 } from "./paths-table";
-import { canonicalizeSandboxPath, resolvePreparedAccess, type PathOperation, type PreparedAccessTable } from "../sandbox";
+import {
+  canonicalizeAccessPath,
+  canonicalizeSandboxPath,
+  resolvePreparedAccess,
+  type PathOperation,
+  type PreparedAccessTable,
+} from "../sandbox";
 import { findShellMetachar } from "./shell-metachar";
 import { resolveBoundHookAgent } from "./agent-context";
 import { metaCanSpawnChildren } from "../agent-types";
@@ -455,7 +461,8 @@ export const SETTINGS_WRITE_DENY_REASON =
  * from `ib` writing the file, because it sees the command; the kernel cannot.
  *
  * Each candidate write-target token is RESOLVED against cwd (join + resolve +
- * longest-existing-prefix canonicalization, as checkFilePath does) and compared with
+ * longest-existing-prefix canonicalization against `access`, as checkFilePath
+ * does) and compared with
  * the resolved protected files via `worktreeProtectedFileKind` and
  * `matchProtectedWrite`, rather than literal-matching the raw token. That closes
  * obfuscated spellings the old regex missed — `.agents/rules/../hooks.json`,
@@ -470,7 +477,8 @@ function checkBashSettingsWrite(
   command: string,
   cwd: string,
   worktreePath: string,
-  protectedWritePaths: ProtectedWritePath[]
+  protectedWritePaths: ProtectedWritePath[],
+  access: PreparedAccessTable,
 ): HookDecision | null {
   // Resolve one candidate write-target token and deny if it lands on a protected
   // file. Strips one layer of surrounding quotes first.
@@ -494,7 +502,7 @@ function checkBashSettingsWrite(
     // Resolve the longest existing parent as well as the leaf. Redirect
     // targets commonly do not exist yet, and on macOS /var aliases
     // /private/var; exact-only realpath would leave that spelling mismatch.
-    const resolved = canonicalizeSandboxPath(absolute);
+    const resolved = canonicalizeAccessPath(access, absolute);
     const kind = worktreeProtectedFileKind(resolved, worktreePath);
     if (kind === "settings") return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
     if (kind === "agy") return { decision: "deny", reason: AGY_BOUNDARY_WRITE_DENY_REASON };
@@ -885,7 +893,7 @@ function scanBashCommandPaths(
       // Literal needles cannot see a symlink alias into the main checkout or
       // another agent. Apply the same structural boundary as file tools after
       // resolving the candidate, before an authored allow can grant it.
-      const canonical = canonicalizeSandboxPath(abs);
+      const canonical = canonicalizeAccessPath(ctx.access, abs);
       const boundaryDenial = checkWorktreeBoundary(canonical, ctx);
       if (boundaryDenial) return boundaryDenial;
       if (op === "write") {
@@ -1020,7 +1028,7 @@ function checkBashCommandPaths(
   // agent's own meta.json, or @system's config/agent-types/sealed) — agents must
   // not grant themselves new permissions, disable their own hook gate, or rewrite
   // the files the hook and harness read their configuration from.
-  const settingsDenial = checkBashSettingsWrite(command, cwd, worktreePath, ctx.protectedWritePaths);
+  const settingsDenial = checkBashSettingsWrite(command, cwd, worktreePath, ctx.protectedWritePaths, ctx.access);
   if (settingsDenial) return settingsDenial;
 
   // Check for references to other agents' directories
@@ -1093,7 +1101,9 @@ function checkFilePath(
 
   // 5. Resolve symlink parents even when a file is being created. Structural
   // checks and the access-table resolver must inspect the same canonical path.
-  filePath = canonicalizeSandboxPath(resolve(filePath));
+  // canonicalizeAccessPath never opens what the agent may not read: inside the
+  // kernel sandbox each such open is a denial in the agent's DENIALS view.
+  filePath = canonicalizeAccessPath(ctx.access, resolve(filePath));
 
   // The structural steps (6, 10, 11) run BEFORE the resolver so the hook stays
   // STRICTER than the kernel inside the agent dir and the main repo: the

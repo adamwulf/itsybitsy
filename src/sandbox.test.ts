@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "fs";
 import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from "fs/promises";
 import { homedir, tmpdir } from "os";
 import { dirname, join } from "path";
@@ -6,8 +7,10 @@ import { parseAgentTypeFile } from "./agent-types";
 import {
   anchorRelativePaths,
   findRelativeEscapes,
+  canonicalizeAccessPath,
   canonicalizePathsConfig,
   canonicalizeSandboxPath,
+  canonicalizeSandboxPathWithin,
   compileSandboxPath,
   generateProfile as generateTaggedProfile,
   globToSandboxRegex,
@@ -23,6 +26,7 @@ import {
   sandboxProfileParameterValues,
   sandboxProfileTag,
   SEAL_HELPER_RESULT_PREFIX,
+  storedPathAccessTable,
   validatePathsFrontmatter,
   validateSandboxFrontmatter,
   type PathsConfig,
@@ -1865,6 +1869,230 @@ describe("sandbox path canonicalization", () => {
   test("canonicalizes through the longest existing prefix for a missing directory", () => {
     const missing = `/tmp/itsybitsy-never-created-${crypto.randomUUID()}/child`;
     expect(canonicalizeSandboxPath(missing)).toBe(missing.replace("/tmp/", "/private/tmp/"));
+  });
+});
+
+// The PreToolUse hooks run inside the agent's kernel sandbox, where realpathSync
+// opens its argument (file-read-data) and every denied open is a kernel denial.
+// canonicalizeSandboxPathWithin resolves symlinks with lstat/readlink only and
+// calls realpathSync only where `mayRead` admits it.
+describe("canonicalization without reading what the agent may not read", () => {
+  async function fixture(): Promise<string> {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "ib-canon-within-")));
+    await mkdir(join(root, "Real", "Sub"), { recursive: true });
+    await writeFile(join(root, "Real", "File.txt"), "x");
+    await writeFile(join(root, "Real", "Sub", "Deep.txt"), "x");
+    await mkdir(join(root, "Outside"));
+    await writeFile(join(root, "Outside", "F.txt"), "x");
+    await symlink(join(root, "Real"), join(root, "abs-link"));
+    await symlink("Real/../Real/Sub", join(root, "rel-link"));
+    await symlink("abs-link", join(root, "chain-link"));
+    await symlink(join(root, "missing", "x"), join(root, "dangling"));
+    await symlink("loop-b", join(root, "loop-a"));
+    await symlink("loop-a", join(root, "loop-b"));
+    await symlink(join(root, "Real", "File.txt"), join(root, "file-link"));
+    await symlink("File.txt/", join(root, "Real", "file-slash-link"));
+    await symlink("/tmp", join(root, "tmp-link"));
+    return root;
+  }
+
+  const spellings = (root: string): string[] => [
+    "/",
+    root,
+    join(root, "Real"),
+    join(root, "Real", "File.txt"),
+    join(root, "Real", "new", "deeper"),
+    join(root, "Real", "File.txt", "x"),
+    join(root, "abs-link", "File.txt"),
+    join(root, "abs-link", "new"),
+    join(root, "rel-link"),
+    join(root, "rel-link", "x"),
+    join(root, "chain-link", "Sub", "Deep.txt"),
+    join(root, "dangling"),
+    join(root, "dangling", "x"),
+    join(root, "loop-a", "x"),
+    join(root, "file-link"),
+    join(root, "file-link", "x"),
+    join(root, "Real", "file-slash-link"),
+    join(root, "tmp-link", "itsybitsy-within-x"),
+    "/tmp/itsybitsy-within-x/y",
+  ];
+
+  test("reading every prefix gives exactly canonicalizeSandboxPath", async () => {
+    const root = await fixture();
+    try {
+      for (const path of spellings(root)) {
+        expect(canonicalizeSandboxPathWithin(path, () => true), path).toBe(canonicalizeSandboxPath(path));
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("reading no prefix still resolves symlinks and the existing prefix the same way", async () => {
+    const root = await fixture();
+    try {
+      for (const path of spellings(root)) {
+        expect(canonicalizeSandboxPathWithin(path, () => false), path).toBe(canonicalizeSandboxPath(path));
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("mayRead is asked about symlink-resolved prefixes, longest first", async () => {
+    const root = await fixture();
+    try {
+      const asked: string[] = [];
+      canonicalizeSandboxPathWithin(join(root, "chain-link", "File.txt", "missing"), (path) => {
+        asked.push(path);
+        return false;
+      });
+      expect(asked.slice(0, 3)).toEqual([join(root, "Real", "File.txt"), join(root, "Real"), root]);
+      expect(asked).not.toContain("/");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("letter case is corrected only below a prefix mayRead admits", async () => {
+    const root = await fixture();
+    try {
+      const miscased = join(root, "real", "FILE.TXT");
+      if (!existsSync(miscased)) return; // case-sensitive volume: nothing to correct
+      expect(canonicalizeSandboxPathWithin(miscased, () => true)).toBe(join(root, "Real", "File.txt"));
+      expect(canonicalizeSandboxPathWithin(miscased, () => false)).toBe(miscased);
+      expect(canonicalizeSandboxPathWithin(miscased, (path) => path === root)).toBe(miscased);
+      expect(canonicalizeSandboxPathWithin(miscased, (path) => path === join(root, "real"))).toBe(
+        join(root, "Real", "FILE.TXT"),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("canonicalizeAccessPath reads only inside the table's readable entries, decisions as before", async () => {
+    const root = await fixture();
+    try {
+      const prepared = prepareAccessTable({
+        allowRead: [join(root, "Real")],
+        allowWrite: [],
+        deny: [join(root, "Real", "Sub")],
+        runtimeRoots: [],
+        runtimeDenyRoots: [],
+      });
+      const table: PathAccessTable = {
+        allowRead: [join(root, "Real")],
+        allowWrite: [],
+        deny: [join(root, "Real", "Sub")],
+        runtimeRoots: [],
+        runtimeDenyRoots: [],
+      };
+      // Correctly spelled: the same canonical path as canonicalizeSandboxPath.
+      for (const path of spellings(root)) {
+        expect(canonicalizeAccessPath(prepared, path), path).toBe(canonicalizeSandboxPath(path));
+      }
+      expect(resolvePreparedAccess(prepared, join(root, "abs-link", "File.txt"), "read")).toBe("allow");
+      expect(resolvePreparedAccess(prepared, join(root, "rel-link", "Deep.txt"), "read")).toBe("deny");
+      expect(resolvePreparedAccess(prepared, join(root, "Outside", "F.txt"), "read")).toBe("deny");
+
+      const miscasedAllowed = join(root, "real", "file.txt");
+      if (!existsSync(miscasedAllowed)) return; // case-sensitive volume
+      // An allow entry matches regardless of case, so realpath corrects it.
+      expect(canonicalizeAccessPath(prepared, miscasedAllowed)).toBe(join(root, "Real", "File.txt"));
+      expect(resolvePreparedAccess(prepared, miscasedAllowed, "read")).toBe("allow");
+      // A miscased spelling of the deny entry is still read and corrected, so
+      // the deny still matches.
+      expect(canonicalizeAccessPath(prepared, join(root, "Real", "sub", "deep.txt"))).toBe(
+        join(root, "Real", "Sub", "Deep.txt"),
+      );
+      expect(resolvePreparedAccess(prepared, join(root, "Real", "sub", "deep.txt"), "read")).toBe("deny");
+      // Under the deny entry as spelled, and outside every allow entry, nothing
+      // is opened: the spelled case stays, and the decision is deny either way.
+      expect(canonicalizeAccessPath(prepared, join(root, "Real", "Sub", "DEEP.TXT"))).toBe(
+        join(root, "Real", "Sub", "DEEP.TXT"),
+      );
+      expect(canonicalizeAccessPath(prepared, join(root, "outside", "f.txt"))).toBe(join(root, "outside", "f.txt"));
+      for (const path of [join(root, "Real", "Sub", "DEEP.TXT"), join(root, "outside", "f.txt")]) {
+        expect(resolvePreparedAccess(prepared, path, "read"), path).toBe("deny");
+        expect(resolvePathAccess(canonicalizeSandboxPath(path), "read", table), path).toBe("deny");
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("storedPathAccessTable on the stored canonical forms equals sandboxPathAccessTable", async () => {
+    const created = await mkdtemp(join(tmpdir(), "ib-stored-table-"));
+    try {
+      // tmpdir() is /var/folders/… (not canonical), like an uncanonicalized root.
+      const home = join(created, "home");
+      const agentDir = join(created, "repo", ".ittybitty", "agents", "a1");
+      await mkdir(join(agentDir, "repo"), { recursive: true });
+      await mkdir(join(home, ".ssh"), { recursive: true });
+      await mkdir(join(created, "repo", ".git"), { recursive: true });
+      const authored: PathsConfig = {
+        allowRead: ["~/.claude", "/tmp/itsybitsy-stored-ro", "/usr"],
+        allowWrite: ["~/.claude/projects/*/memory/**", "/private/tmp"],
+        deny: ["~/.ssh", "~/.aws", "**/.env", "~/.itsybitsy/sealed"],
+      };
+      for (const canSpawnChildren of [false, true]) {
+        const params: SandboxProfileParams = {
+          AGENTDIR: agentDir,
+          WORKTREE: join(agentDir, "repo"),
+          GITDIR: join(created, "repo", ".git"),
+          REPOAGENTS: join(created, "repo", ".ittybitty", "agents"),
+          PARENTCLAUDE: join(created, "repo", ".claude"),
+          REPOID: join(created, "repo", ".ittybitty", "repo-id"),
+          TMUXSOCK: "/tmp/tmux-stored-table-test",
+          canSpawnChildren,
+          PROJECTDIR: join(home, ".claude", "projects", "x"),
+          SCRATCHPAD: "/tmp/claude-stored-table-test/x",
+          HOME: home,
+        };
+        const stored = canonicalizePathsConfig(authored, home);
+        expect(storedPathAccessTable(stored, params)).toEqual(sandboxPathAccessTable(authored, params));
+      }
+    } finally {
+      await rm(created, { recursive: true, force: true });
+    }
+  });
+
+  test("storedPathAccessTable uses entries as stored and rejects a non-canonical one", async () => {
+    const created = await realpath(await mkdtemp(join(tmpdir(), "ib-stored-verbatim-")));
+    try {
+      await mkdir(join(created, "target"));
+      await symlink(join(created, "target"), join(created, "link"));
+      const params: SandboxProfileParams = {
+        AGENTDIR: join(created, "agent"),
+        WORKTREE: join(created, "agent", "repo"),
+        GITDIR: join(created, ".git"),
+        REPOAGENTS: join(created, "agents"),
+        PARENTCLAUDE: join(created, ".claude"),
+        TMUXSOCK: join(created, "tmux"),
+        canSpawnChildren: false,
+        HOME: created,
+      };
+      // A stored entry is never re-resolved (it is what the profile was built
+      // from), so a symlink that appears at it later does not move it.
+      const stored = prepareAccessTable(storedPathAccessTable(
+        { allowRead: [join(created, "link")], allowWrite: [], deny: [] },
+        params,
+      ));
+      expect(resolvePreparedAccess(stored, join(created, "target", "f"), "read")).toBe("deny");
+      expect(resolvePathAccess(
+        join(created, "target", "f"),
+        "read",
+        sandboxPathAccessTable({ allowRead: [join(created, "link")], allowWrite: [], deny: [] }, params),
+      )).toBe("allow");
+      // A home-relative entry is authored, not stored: fail closed.
+      expect(() => prepareAccessTable(storedPathAccessTable(
+        { allowRead: ["~/x"], allowWrite: [], deny: [] },
+        params,
+      ))).toThrow();
+    } finally {
+      await rm(created, { recursive: true, force: true });
+    }
   });
 });
 

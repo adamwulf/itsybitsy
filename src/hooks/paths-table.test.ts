@@ -1,5 +1,6 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "fs/promises";
+import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
+import * as fs from "fs";
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 import { setUserHome, resetUserHome } from "../home";
@@ -13,10 +14,13 @@ import {
   pathDenialReason,
 } from "./paths-table";
 import {
+  canonicalizeSandboxPath,
   generateProfile,
   prepareAccessTable,
   resolvePathAccess,
   resolvePreparedAccess,
+  resolveTmuxSocketDir,
+  tmuxSocketDirPath,
   type PathsConfig,
   type SandboxConfig,
   type SandboxProfileParams,
@@ -28,6 +32,7 @@ const WORKTREE = `${AGENT_DIR}/repo`;
 const AGENTS_DIR = "/repo/.ittybitty/agents";
 const ROOT_REPO = "/repo";
 const UID = process.getuid?.() ?? 0;
+const realRealpathSync = fs.realpathSync;
 
 /** Build a raw PathAccessTable for the fixture agent from a partial paths config. */
 function table(
@@ -186,6 +191,111 @@ describe("buildAgentAccessTable", () => {
     expect(resolvePreparedAccess(prepared, join(agyDir, "antigravity-cli", "settings.json"), "write")).toBe("allow");
     expect(resolvePreparedAccess(prepared, join(agyDir, "config", "config.json"), "write")).toBe("deny");
     expect(resolvePreparedAccess(prepared, join(agyDir, "config", "config.json"), "read")).toBe("deny");
+  });
+
+  // Inside the agent's kernel sandbox (its frozen meta.sandbox policy) the hook
+  // uses meta.paths as stored and opens nothing the agent may not read;
+  // outside it nothing changed.
+  describe("inside vs outside the kernel sandbox", () => {
+    const sandbox = (enabled: boolean) => ({ sandbox: { enabled, rawAllow: [], domains: [] } });
+
+    test("the table is marked kernelSandboxed only when the agent's sandbox is on", async () => {
+      expect((await build({ agentType: "worker", ...sandbox(true) })).kernelSandboxed).toBe(true);
+      expect((await build({ agentType: "worker" })).kernelSandboxed).toBe(true); // default on, as the launch
+      expect((await build({ agentType: "worker", ...sandbox(false) })).kernelSandboxed).toBeUndefined();
+    });
+
+    test("meta.paths entries are used as stored inside the sandbox, re-resolved outside", async () => {
+      // Outside the fixture agent dir (`tmp`, a write root).
+      const root = await realpath(await mkdtemp(join(tmpdir(), "paths-table-stored-")));
+      try {
+        await mkdir(join(root, "target"));
+        await symlink(join(root, "target"), join(root, "link"));
+        // As if `link` became a symlink after spawn stored the entry.
+        const paths = { allowRead: [join(root, "link")], allowWrite: [], deny: [] };
+        const inside = await build({ agentType: "worker", paths, ...sandbox(true) });
+        expect(resolvePreparedAccess(inside, join(root, "target", "f"), "read")).toBe("deny");
+        const outside = await build({ agentType: "worker", paths, ...sandbox(false) });
+        expect(resolvePreparedAccess(outside, join(root, "target", "f"), "read")).toBe("allow");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("a meta.paths entry that is not absolute denies inside the sandbox, as before outside", async () => {
+      const meta = (entry: string, enabled: boolean) =>
+        ({ agentType: "worker", paths: { allowRead: [entry], allowWrite: [], deny: [] }, ...sandbox(enabled) });
+      await expect(build(meta("~/data", true))).rejects.toThrow("Invalid canonical sandbox path");
+      await expect(build(meta("./data", true))).rejects.toThrow("Invalid canonical sandbox path");
+      // Outside the sandbox `~/data` is canonicalized as before. The home is
+      // outside the fixture agent dir (`tmp`, a write root), so only that entry
+      // can allow the path.
+      const home = await realpath(await mkdtemp(join(tmpdir(), "paths-table-home-")));
+      try {
+        const buildWithHome = (entries: string[]) => buildAgentAccessTable({
+          meta: { agentType: "worker", paths: { allowRead: entries, allowWrite: [], deny: [] }, ...sandbox(false) },
+          agentDir: tmp, worktreePath: join(tmp, "repo"), agentsDir: join(tmp, "agents"), rootRepo: tmp, home,
+        });
+        expect(resolvePreparedAccess(await buildWithHome(["~/data"]), join(home, "data", "f"), "read")).toBe("allow");
+        expect(resolvePreparedAccess(await buildWithHome([]), join(home, "data", "f"), "read")).toBe("deny");
+      } finally {
+        await rm(home, { recursive: true, force: true });
+      }
+    });
+
+    test.each([true, false])("the tmux socket dir is a deny root for a non-spawner only (sandbox on=%p)", async (enabled) => {
+      const sock = join(resolveTmuxSocketDir(UID), "default");
+      const paths = { allowRead: [], allowWrite: ["/private/tmp"], deny: [] };
+      const worker = await build({ agentType: "worker", canSpawnChildren: false, paths, ...sandbox(enabled) });
+      const spawner = await build({ agentType: "worker", canSpawnChildren: true, paths, ...sandbox(enabled) });
+      if (sock.startsWith("/private/tmp/")) {
+        expect(resolvePreparedAccess(spawner, sock, "write")).toBe("allow");
+      }
+      expect(resolvePreparedAccess(worker, sock, "write")).toBe("deny");
+      expect(resolvePreparedAccess(worker, sock, "read")).toBe("deny");
+    });
+
+    // The builders canonicalize the tmux dir themselves, so the raw spelling
+    // (tmuxSocketDirPath) and the canonical one (resolveTmuxSocketDir, which is
+    // canonicalizeSandboxPath of it) give the same deny root, with stored paths
+    // (sandbox on) or not.
+    test.each([true, false])("the raw and the canonical tmux dir give the same deny root (storedPaths=%p)", (storedPaths) => {
+      const rootsFor = (tmuxSock: string) => agentPathAccessTable({
+        paths: { allowRead: [], allowWrite: [], deny: [] },
+        agentDir: AGENT_DIR, worktreePath: WORKTREE, agentsDir: AGENTS_DIR, rootRepo: ROOT_REPO,
+        gitDir: "/repo/.git", tmuxSock, canSpawnChildren: false, storedPaths,
+      }).runtimeDenyRoots;
+      const raw = `/tmp/tmux-${UID}`;
+      expect(rootsFor(raw)).toEqual(rootsFor(canonicalizeSandboxPath(raw)));
+      expect(rootsFor(raw)).toEqual([{ path: `/private/tmp/tmux-${UID}`, op: "read" }]);
+    });
+
+    // Guards against a revert to resolveTmuxSocketDir/canonicalizeSandboxPath:
+    // realpath opens its argument, a kernel denial on the tmux deny root.
+    test("inside the sandbox the tmux socket dir and the stored deny entries are never realpath'd", async () => {
+      const sockDir = resolveTmuxSocketDir(UID);
+      const rawSockDir = tmuxSocketDirPath(UID);
+      const deny = join(tmp, "home", ".ssh");
+      const meta = { agentType: "worker", canSpawnChildren: false, paths: { allowRead: [], allowWrite: [], deny: [deny] } };
+      const opened: string[] = [];
+      const spy = spyOn(fs, "realpathSync").mockImplementation(((path: string) => {
+        opened.push(String(path));
+        return realRealpathSync(path);
+      }) as typeof fs.realpathSync);
+      const touchesDenied = () => opened.filter((path) =>
+        path === sockDir || path.startsWith(`${sockDir}/`) || path === rawSockDir ||
+        path === deny || path.startsWith(`${deny}/`));
+      try {
+        await build({ ...meta, ...sandbox(true) });
+        expect(opened.length).toBeGreaterThan(0); // the spy sees sandbox.ts's calls
+        expect(touchesDenied()).toEqual([]);
+        // Outside the sandbox the table is built as before, which does open them.
+        await build({ ...meta, ...sandbox(false) });
+        expect(touchesDenied().length).toBeGreaterThan(0);
+      } finally {
+        spy.mockRestore();
+      }
+    });
   });
 });
 

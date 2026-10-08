@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { join } from "path";
-import { chmod, mkdir, mkdtemp, realpath, rm } from "fs/promises";
+import * as fsPromises from "fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import {
   findNoWorktreeAgentsDir,
@@ -183,5 +184,171 @@ describe("registered hook agent binding", () => {
       join(await realpath(registeredRepo), ".ittybitty", "agents"),
     );
     expect(fake.agentDir).not.toBe(registered.agentDir);
+  });
+});
+
+// Inside an agent's kernel sandbox the agent may read its own agent dir (a
+// runtime root) but not its repo root. realpath(repo root) used to fail there,
+// so the hook found no record and denied every call. A repo root without read
+// permission (search only) reproduces that for an unsandboxed test process.
+describe("registered hook agent binding when the repo root is not readable", () => {
+  async function registryFor(repoPaths: string[]): Promise<string> {
+    const home = await makeRepo();
+    await Bun.write(join(home, ".itsybitsy", "repos.json"), JSON.stringify({
+      repos: repoPaths.map((path, index) => ({ path, name: `repo-${index}` })),
+    }));
+    return home;
+  }
+
+  async function withUnreadableRoot<T>(repo: string, run: () => Promise<T>): Promise<T> {
+    await chmod(repo, 0o311);
+    try {
+      return await run();
+    } finally {
+      await chmod(repo, 0o755);
+    }
+  }
+
+  test("a sandboxed worktree agent binds to its own agent (no deny-all)", async () => {
+    const repo = await realpath(await makeRepo());
+    const agent = await writeAgent(repo, "agent-worktree", true);
+    await writeAgent(repo, "agent-sibling", true);
+    const registryHome = await registryFor([repo]);
+    const bound = await withUnreadableRoot(repo, () =>
+      resolveBoundHookAgent("agent-worktree", agent.worktreePath, { registryHome }));
+    expect(bound).toMatchObject({
+      agentDir: agent.agentDir,
+      agentsDir: join(repo, ".ittybitty", "agents"),
+      repoPath: repo,
+      worktreePath: agent.worktreePath,
+    });
+  });
+
+  test("a sandboxed shared-repo agent binds through its verified process", async () => {
+    const repo = await realpath(await makeRepo());
+    const agent = await writeAgent(repo, "agent-shared", false);
+    setBoundNoWorktreeCallerResolver(async () => ({ meta: agent.meta, agentDir: agent.agentDir, repoPath: repo }));
+    const registryHome = await registryFor([repo]);
+    const bound = await withUnreadableRoot(repo, () =>
+      resolveBoundHookAgent("agent-shared", repo, { registryHome }));
+    expect(bound).toMatchObject({ agentDir: agent.agentDir, repoPath: repo, worktreePath: repo });
+  });
+
+  // The real caller resolver (process ancestry through ps), not a mock. Inside
+  // the sandbox it must search only the repo of the record already found: no
+  // other registered repo is readable there, and each realpath of one is a
+  // kernel denial.
+  test("a sandboxed shared-repo agent binds through the real caller resolver, touching no other repo", async () => {
+    const repo = await realpath(await makeRepo());
+    const other = await realpath(await makeRepo());
+    const lstart = Bun.spawnSync(["/bin/ps", "-o", "lstart=", "-p", String(process.pid)], {
+      env: { LC_ALL: "C", LC_TIME: "C" },
+    }).stdout.toString().trim();
+    const agentDir = join(repo, ".ittybitty", "agents", "agent-shared");
+    await mkdir(agentDir, { recursive: true });
+    const writeMeta = (sandboxEnabled: boolean) => Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-shared", worktree: false,
+      claude_pid: String(process.pid), claude_pid_epoch: Date.parse(lstart) / 1000,
+      sandbox: { enabled: sandboxEnabled, rawAllow: [], domains: [] },
+    }));
+    const registryHome = await registryFor([other, repo]);
+    const touched: string[] = [];
+    const realRealpath = fsPromises.realpath;
+    const realReaddir = fsPromises.readdir;
+    const realpathSpy = spyOn(fsPromises, "realpath").mockImplementation(((path: string, ...rest: unknown[]) => {
+      touched.push(String(path));
+      return (realRealpath as (...args: unknown[]) => unknown)(path, ...rest);
+    }) as typeof fsPromises.realpath);
+    const readdirSpy = spyOn(fsPromises, "readdir").mockImplementation(((path: string, ...rest: unknown[]) => {
+      touched.push(String(path));
+      return (realReaddir as (...args: unknown[]) => unknown)(path, ...rest);
+    }) as typeof fsPromises.readdir);
+    try {
+      await writeMeta(true);
+      const bound = await resolveBoundHookAgent("agent-shared", repo, { registryHome });
+      expect(bound).toMatchObject({ agentDir, repoPath: repo, worktreePath: repo });
+      // Only the candidate lookup's own agent dir path in the other repo (it
+      // does not exist: ENOENT comes before any access check, no denial); never
+      // its root nor its agents dir.
+      expect(touched.filter((path) => path === other || path.startsWith(`${other}/`)))
+        .toEqual([join(other, ".ittybitty", "agents", "agent-shared")]);
+      // With the agent's kernel sandbox off the search is unchanged: every
+      // registered repo.
+      await writeMeta(false);
+      touched.length = 0;
+      await expect(resolveBoundHookAgent("agent-shared", repo, { registryHome }))
+        .resolves.toMatchObject({ agentDir, repoPath: repo });
+      expect(touched).toContain(other);
+    } finally {
+      realpathSpy.mockRestore();
+      readdirSpy.mockRestore();
+    }
+  });
+
+  test("a path or id that belongs to no registered agent still resolves to none", async () => {
+    const repo = await realpath(await makeRepo());
+    const agent = await writeAgent(repo, "agent-worktree", true);
+    const fakeRepo = await makeRepo();
+    const fake = await writeAgent(fakeRepo, "agent-fake", true);
+    const registryHome = await registryFor([repo]);
+    await withUnreadableRoot(repo, async () => {
+      // The repo root itself cannot even be resolved as a cwd.
+      await expect(resolveBoundHookAgent("agent-worktree", repo, { registryHome }))
+        .rejects.toThrow("invalid worktree context");
+      await expect(resolveBoundHookAgent("agent-worktree", join(agent.agentDir, "outbox"), { registryHome }))
+        .rejects.toThrow();
+      await expect(resolveBoundHookAgent("agent-worktree", fake.worktreePath, { registryHome }))
+        .rejects.toThrow("outside its worktree");
+      await expect(resolveBoundHookAgent("agent-fake", fake.worktreePath, { registryHome }))
+        .rejects.toThrow("no registered record");
+      await expect(resolveBoundHookAgent("agent-missing", agent.worktreePath, { registryHome }))
+        .rejects.toThrow("no registered record");
+    });
+  });
+});
+
+describe("registered hook agent binding for an unsandboxed caller is unchanged", () => {
+  test("a repo registered through a symlink binds to realpath(repo root) paths", async () => {
+    const repo = await realpath(await makeRepo());
+    const agent = await writeAgent(repo, "agent-worktree", true);
+    const links = await realpath(await makeRepo());
+    await symlink(repo, join(links, "repo-link"));
+    // The same repo under two spellings is still ONE candidate.
+    setNoWorktreeRepoRootsLoader(async () => [join(links, "repo-link"), repo]);
+    await expect(resolveBoundHookAgent("agent-worktree", join(links, "repo-link", ".ittybitty", "agents", "agent-worktree", "repo")))
+      .resolves.toMatchObject({
+        agentDir: agent.agentDir,
+        agentsDir: join(repo, ".ittybitty", "agents"),
+        repoPath: repo,
+        worktreePath: agent.worktreePath,
+      });
+  });
+
+  test("a repo registered in a different letter case binds to the on-disk spelling", async () => {
+    const repo = await realpath(await makeRepo());
+    const agent = await writeAgent(repo, "agent-worktree", true);
+    const miscased = repo.replace(/bound-hook-agent-/, "BOUND-HOOK-AGENT-");
+    if (!(await Bun.file(join(miscased, ".ittybitty", "agents", "agent-worktree", "meta.json")).exists())) {
+      return; // case-sensitive volume: the miscased root is a different path
+    }
+    setNoWorktreeRepoRootsLoader(async () => [miscased]);
+    await expect(resolveBoundHookAgent("agent-worktree", agent.worktreePath)).resolves.toMatchObject({
+      agentDir: agent.agentDir,
+      repoPath: repo,
+    });
+  });
+
+  test("a symlinked .ittybitty keeps the realpath(repo root) paths, as before", async () => {
+    const repo = await realpath(await makeRepo());
+    const elsewhere = await realpath(await makeRepo());
+    const real = await writeAgent(elsewhere, "agent-worktree", true);
+    await symlink(join(elsewhere, ".ittybitty"), join(repo, ".ittybitty"));
+    setNoWorktreeRepoRootsLoader(async () => [repo]);
+    await expect(resolveBoundHookAgent("agent-worktree", real.worktreePath)).resolves.toMatchObject({
+      agentDir: join(repo, ".ittybitty", "agents", "agent-worktree"),
+      agentsDir: join(repo, ".ittybitty", "agents"),
+      repoPath: repo,
+      worktreePath: real.worktreePath,
+    });
   });
 });

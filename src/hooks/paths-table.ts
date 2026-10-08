@@ -15,8 +15,8 @@
  *
  * Kept deliberately light: it imports src/sandbox.ts and src/agent-types.ts
  * (both already in every hook's dependency graph) but NOT the heavy
- * src/ib-commands.ts. `resolveTmuxSocketDir` was moved into src/sandbox.ts for
- * exactly this reason.
+ * src/ib-commands.ts. `tmuxSocketDirPath` / `resolveTmuxSocketDir` live in
+ * src/sandbox.ts for exactly this reason.
  */
 
 import { join, resolve } from "path";
@@ -26,12 +26,15 @@ import { metadataCli, type AgentCli } from "../agent-cli";
 import { encodeClaudeProjectPath } from "../auto-compact";
 import { metaCanSpawnChildren, loadAgentType, type AgentType } from "../agent-types";
 import {
+  canonicalizeAccessPath,
   canonicalizeSandboxPath,
   orderedEntryMatches,
   prepareAccessTable,
+  metaKernelSandboxed,
   resolvePathsConfig,
-  resolveTmuxSocketDir,
   sandboxPathAccessTable,
+  storedPathAccessTable,
+  tmuxSocketDirPath,
   type PathAccessTable,
   type PathOperation,
   type PathsConfig,
@@ -101,12 +104,23 @@ export interface AgentAccessTableParams {
   rootRepo: string;
   /** The git common dir (resolved via `git rev-parse --git-common-dir`). */
   gitDir: string;
-  /** The tmux socket DIRECTORY (resolveTmuxSocketDir) — a deny root for non-spawners. */
+  /**
+   * The tmux socket DIRECTORY (tmuxSocketDirPath) — a deny root for
+   * non-spawners. The builder canonicalizes it like every runtime root.
+   */
   tmuxSock: string;
   canSpawnChildren: boolean;
   /** Defaults to Claude for legacy callers without a model. */
   cli?: AgentCli | null;
   home?: string;
+  /**
+   * `paths` are the forms stored in meta.json and the caller runs inside the
+   * agent's kernel sandbox: use them as stored and canonicalize the runtime
+   * roots without opening what the agent may not read (storedPathAccessTable).
+   * Otherwise `paths` are canonicalized exactly as for the profile
+   * (sandboxPathAccessTable).
+   */
+  storedPaths?: boolean;
 }
 
 /**
@@ -141,7 +155,9 @@ export function agentPathAccessTable(p: AgentAccessTableParams): PathAccessTable
   } else if (p.cli === "agy") {
     params.AGYSTATEDIR = agyStateDirFor(p.home ?? userHome());
   }
-  return sandboxPathAccessTable(p.paths, params);
+  return p.storedPaths
+    ? storedPathAccessTable(p.paths, params)
+    : sandboxPathAccessTable(p.paths, params);
 }
 
 /**
@@ -176,6 +192,15 @@ async function resolveGitCommonDir(worktreePath: string, rootRepo: string): Prom
  * from the meta via the single source of truth `metaCanSpawnChildren`, so the
  * REPOAGENTS write root, the PARENTCLAUDE root and the tmux deny match the
  * kernel exactly.
+ *
+ * Inside the agent's kernel sandbox (metaKernelSandboxed) the hook must not open
+ * paths the agent may not read: each such open is a kernel denial in the
+ * agent's DENIALS view. There `meta.paths` is used as stored (`storedPaths`:
+ * the canonicalizePathsConfig output spawn and `ib sandbox refresh` wrote, made
+ * unsandboxed), the tmux socket dir is canonicalized without opening it, and
+ * the table is marked `kernelSandboxed` so candidate paths are too. Outside a
+ * kernel sandbox nothing changes: the table and every path are canonicalized
+ * as they always were.
  */
 export async function buildAgentAccessTable(input: {
   meta: Record<string, unknown>;
@@ -185,6 +210,7 @@ export async function buildAgentAccessTable(input: {
   rootRepo: string;
   home?: string;
 }): Promise<PreparedAccessTable> {
+  const kernelSandboxed = metaKernelSandboxed(input.meta);
   const paths = resolvePathsConfig(input.meta.paths as PathsConfig | undefined);
   const gitDir = await resolveGitCommonDir(input.worktreePath, input.rootRepo);
   const uid = process.getuid?.() ?? 0;
@@ -195,12 +221,13 @@ export async function buildAgentAccessTable(input: {
     agentsDir: input.agentsDir,
     rootRepo: input.rootRepo,
     gitDir,
-    tmuxSock: resolveTmuxSocketDir(uid),
+    tmuxSock: tmuxSocketDirPath(uid),
     canSpawnChildren: await metaCanSpawnChildren(input.meta),
     cli: metadataCli(input.meta.model) ?? null,
     home: input.home ?? userHome(),
+    storedPaths: kernelSandboxed,
   });
-  return prepareAccessTable(table);
+  return kernelSandboxed ? { ...prepareAccessTable(table), kernelSandboxed } : prepareAccessTable(table);
 }
 
 /**
@@ -245,7 +272,7 @@ export async function buildSystemAccessTable(home: string): Promise<PreparedAcce
     agentsDir: join(itsyHome, "agents"),
     rootRepo: itsyHome,
     gitDir: itsyHome,
-    tmuxSock: resolveTmuxSocketDir(uid),
+    tmuxSock: tmuxSocketDirPath(uid),
     canSpawnChildren: true,
     home,
   });
@@ -266,7 +293,7 @@ export function pathDenialReason(
   absolutePath: string,
   op: PathOperation,
 ): string {
-  const canonical = canonicalizeSandboxPath(absolutePath);
+  const canonical = canonicalizeAccessPath(prepared, absolutePath);
   if (prepared.deny.some((entry) => orderedEntryMatches(entry, canonical))) {
     return `Access denied: ${op} ${canonical} matches a paths.deny entry`;
   }

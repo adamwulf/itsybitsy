@@ -1,5 +1,5 @@
 import { randomBytes } from "crypto";
-import { realpathSync } from "fs";
+import { lstatSync, readdirSync, readlinkSync, realpathSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { userHome } from "./home";
 
@@ -208,6 +208,8 @@ export interface OrderedPathEntry {
    * resolver never rebuilds a RegExp per lookup. Undefined for plain entries.
    */
   regex?: RegExp;
+  /** The same glob matcher ignoring letter case (see mayReadForCanonicalization). */
+  regexIgnoreCase?: RegExp;
 }
 
 /**
@@ -220,6 +222,19 @@ export interface OrderedPathEntry {
 /** Only a literal false opts out; absent or malformed values keep the safe default. */
 export function resolveSandboxEnabled(enabled: unknown): boolean {
   return enabled !== false;
+}
+
+/**
+ * Does the agent with this meta.json run inside the itsybitsy kernel sandbox?
+ * Its frozen `meta.sandbox` policy, by the launch's own rule (only a literal
+ * false opts out; the sandbox exists only on macOS). The hooks use this, not
+ * the kernel check isSandboxedProcess(): that loads bun:ffi, whose compiler
+ * opens the macOS SDK directory — itself a kernel denial on every call. The
+ * answer only chooses how the hooks canonicalize paths (canonicalizeAccessPath).
+ */
+export function metaKernelSandboxed(meta: Record<string, unknown>): boolean {
+  const sandbox = meta.sandbox as { enabled?: unknown } | undefined;
+  return process.platform === "darwin" && resolveSandboxEnabled(sandbox?.enabled);
 }
 
 export function resolveSandboxConfig(source: SandboxConfigSource): SandboxConfig {
@@ -270,6 +285,180 @@ export function canonicalizeSandboxPath(input: string): string {
   }
 }
 
+/** macOS MAXSYMLINKS: realpath fails with ELOOP after this many link expansions. */
+const MAX_SYMLINK_EXPANSIONS = 32;
+
+/**
+ * realpath without opening anything: resolve every symlink of an absolute path
+ * with lstat and readlink only, which Seatbelt checks as file-read-metadata
+ * (allowed by the `_all.md` floor), never file-read-data. Returns null wherever
+ * realpathSync fails: a missing or non-directory component, a dangling link, a
+ * loop. Unlike realpathSync it keeps the letter case as spelled.
+ */
+function metadataRealpath(absolute: string): string | null {
+  const pending = absolute.split("/").filter((part) => part.length > 0);
+  let resolved = "/";
+  let isDirectory = true;
+  let expansions = 0;
+  while (pending.length > 0) {
+    const part = pending.shift()!;
+    if (!isDirectory) return null;
+    if (part === ".") continue;
+    if (part === "..") {
+      resolved = dirname(resolved);
+      continue;
+    }
+    const next = join(resolved, part);
+    let isLink: boolean;
+    try {
+      const stats = lstatSync(next);
+      isLink = stats.isSymbolicLink();
+      isDirectory = stats.isDirectory();
+    } catch {
+      return null;
+    }
+    if (!isLink) {
+      resolved = next;
+      continue;
+    }
+    if (++expansions > MAX_SYMLINK_EXPANSIONS) return null;
+    let target: string;
+    try {
+      target = readlinkSync(next);
+    } catch {
+      return null;
+    }
+    if (target.length === 0) return null;
+    const targetParts = target.split("/").filter((part) => part.length > 0);
+    // A trailing slash requires a directory, like a trailing "/." does.
+    if (target.endsWith("/")) targetParts.push(".");
+    pending.unshift(...targetParts);
+    if (target.startsWith("/")) resolved = "/";
+    isDirectory = true;
+  }
+  return resolved;
+}
+
+/**
+ * canonicalizeSandboxPath without reading what the agent may not read. Inside a
+ * kernel sandbox, realpathSync opens its argument (a file-read-data check), and
+ * the walk up to the longest existing prefix then retries each denied ancestor
+ * (`/Users/<you>`, `/Users`), so every attempt is a kernel denial. This version
+ * resolves the symlinks and the longest existing prefix with lstat/readlink only,
+ * and calls realpathSync only on the longest resolved prefix `mayRead` admits,
+ * where it corrects the letter case exactly as canonicalizeSandboxPath does.
+ * `mayRead` gets the prefix and the full symlink-resolved path (prefix and the
+ * rest as spelled). A `mayRead` that is always false gives a pure metadata
+ * canonicalization.
+ *
+ * Components between that prefix and the longest existing prefix were refused
+ * by `mayRead` (a deny entry matched them as typed). The first one takes its
+ * on-disk spelling from a listing of the prefix realpath just opened (so the
+ * listing is allowed too), and the walk runs again: the corrected spelling can
+ * change what a deny entry matches. Every pass but the last changes at least
+ * one component to its on-disk spelling, and an on-disk spelling never changes
+ * again, so there are at most as many passes as components. More means the
+ * filesystem did not return stable names: throw (the hooks then deny).
+ */
+export function canonicalizeSandboxPathWithin(
+  input: string,
+  mayRead: (prefix: string, fullPath: string) => boolean,
+): string {
+  let next = canonicalizeWithinOnce(resolve(input), mayRead, input);
+  // After the first pass the path has no symlinks, so its depth is fixed.
+  let passesLeft = next.path.split("/").filter((part) => part.length > 0).length;
+  while (!next.done) {
+    if (passesLeft-- === 0) throw new Error(`Sandbox path case did not settle: "${input}"`);
+    next = canonicalizeWithinOnce(next.path, mayRead, input);
+  }
+  return next.path;
+}
+
+/**
+ * The entry of `dir` that `name` opens, in its on-disk spelling: on a
+ * case- and normalization-insensitive volume (APFS also equates `ſ` and `s`)
+ * the spelling can differ from `name`. Matched by identity (same dev+ino; a
+ * directory has one name), narrowed by letter case only if several entries
+ * share it (hard links). If no single entry remains, throw: the typed spelling
+ * is never kept silently (the hooks deny on a throw).
+ */
+function onDiskName(dir: string, name: string): string {
+  const entries = readdirSync(dir);
+  if (entries.includes(name)) return name;
+  const identity = (entry: string) => {
+    const stats = lstatSync(join(dir, entry));
+    return `${stats.dev}:${stats.ino}`;
+  };
+  const target = identity(name);
+  let matches = entries.filter((entry) => identity(entry) === target);
+  if (matches.length > 1) {
+    const folded = name.normalize("NFC").toLowerCase();
+    matches = matches.filter((entry) => entry.normalize("NFC").toLowerCase() === folded);
+  }
+  if (matches.length !== 1) throw new Error(`No single on-disk name for "${name}" in "${dir}"`);
+  return matches[0]!;
+}
+
+function canonicalizeWithinOnce(
+  path: string,
+  mayRead: (prefix: string, fullPath: string) => boolean,
+  input: string,
+): { path: string; done: boolean } {
+  let candidate = path;
+  const remainder: string[] = [];
+  let resolvedPrefix = metadataRealpath(candidate);
+  while (resolvedPrefix === null) {
+    const parent = dirname(candidate);
+    if (parent === candidate) {
+      throw new Error(`Sandbox path has no resolvable prefix: "${input}"`);
+    }
+    remainder.unshift(basename(candidate));
+    candidate = parent;
+    resolvedPrefix = metadataRealpath(candidate);
+  }
+
+  const fullPath = join(resolvedPrefix, ...remainder);
+  const unread: string[] = [];
+  for (let readable = resolvedPrefix; readable !== "/"; readable = dirname(readable)) {
+    if (mayRead(readable, fullPath)) {
+      let corrected: string;
+      try {
+        corrected = realpathSync(readable);
+      } catch {
+        // Not readable after all (a rawAllow deny, file modes): keep walking up,
+        // as canonicalizeSandboxPath does.
+        unread.unshift(basename(readable));
+        continue;
+      }
+      if (unread.length === 0) return { path: join(corrected, ...remainder), done: true };
+      const name = onDiskName(corrected, unread[0]!);
+      const changed = corrected !== readable || name !== unread[0];
+      unread[0] = name;
+      return { path: join(corrected, ...unread, ...remainder), done: !changed };
+    }
+    unread.unshift(basename(readable));
+  }
+  return { path: join("/", ...unread, ...remainder), done: true };
+}
+
+/**
+ * The tmux server socket DIRECTORY as tmux derives it, NOT canonicalized: if
+ * `$TMUX` is set, the directory of its first comma-separated field; otherwise
+ * `${TMUX_TMPDIR:-/tmp}/tmux-<uid>`. resolveTmuxSocketDir canonicalizes it; the
+ * hook-side table builder canonicalizes it without opening it (it is a deny root).
+ */
+export function tmuxSocketDirPath(uid: number): string {
+  const tmux = process.env.TMUX;
+  if (tmux && tmux.length > 0) {
+    const socketPath = tmux.split(",")[0];
+    if (socketPath && socketPath.length > 0) return dirname(socketPath);
+  }
+  const base = process.env.TMUX_TMPDIR && process.env.TMUX_TMPDIR.length > 0
+    ? process.env.TMUX_TMPDIR
+    : "/tmp";
+  return join(base, `tmux-${uid}`);
+}
+
 /**
  * Resolve the tmux server socket DIRECTORY the way tmux itself does, canonical
  * (longest-existing-prefix), ready to hand to the sandbox as `TMUXSOCK`: if
@@ -285,18 +474,7 @@ export function canonicalizeSandboxPath(input: string): string {
  * existing callers keep working.
  */
 export function resolveTmuxSocketDir(uid: number): string {
-  const tmux = process.env.TMUX;
-  const raw = (() => {
-    if (tmux && tmux.length > 0) {
-      const socketPath = tmux.split(",")[0];
-      if (socketPath && socketPath.length > 0) return dirname(socketPath);
-    }
-    const base = process.env.TMUX_TMPDIR && process.env.TMUX_TMPDIR.length > 0
-      ? process.env.TMUX_TMPDIR
-      : "/tmp";
-    return join(base, `tmux-${uid}`);
-  })();
-  return canonicalizeSandboxPath(raw);
+  return canonicalizeSandboxPath(tmuxSocketDirPath(uid));
 }
 
 function expandHome(entry: string, home: string): string {
@@ -697,6 +875,7 @@ function orderedPathEntry(
     specificity: pathSpecificity(compiled),
     parameterName,
     regex: compiled.kind === "glob" ? new RegExp(compiled.value) : undefined,
+    regexIgnoreCase: compiled.kind === "glob" ? new RegExp(compiled.value, "i") : undefined,
   };
 }
 
@@ -708,28 +887,33 @@ function orderedPathEntry(
  * written) is added only for a spawner, as is the read-only REPOID
  * (`<repo>/.ittybitty/repo-id`). This table is extensible: a later root
  * (scratchpad, project dir) adds a row rather than a new emission phase.
+ * `canonicalize` is canonicalizeSandboxPath except for the in-sandbox hook
+ * table (storedPathAccessTable).
  */
-function profileRuntimeAllowRoots(params: SandboxProfileParams): ProfileRuntimePathRoot[] {
+function profileRuntimeAllowRoots(
+  params: SandboxProfileParams,
+  canonicalize: (path: string) => string = canonicalizeSandboxPath,
+): ProfileRuntimePathRoot[] {
   const roots: ProfileRuntimePathRoot[] = [
-    { path: canonicalizeSandboxPath(params.AGENTDIR), op: "write", parameterName: "AGENTDIR" },
-    { path: canonicalizeSandboxPath(params.WORKTREE), op: "write", parameterName: "WORKTREE" },
-    { path: canonicalizeSandboxPath(params.GITDIR), op: "write", parameterName: "GITDIR" },
+    { path: canonicalize(params.AGENTDIR), op: "write", parameterName: "AGENTDIR" },
+    { path: canonicalize(params.WORKTREE), op: "write", parameterName: "WORKTREE" },
+    { path: canonicalize(params.GITDIR), op: "write", parameterName: "GITDIR" },
     {
-      path: canonicalizeSandboxPath(params.REPOAGENTS),
+      path: canonicalize(params.REPOAGENTS),
       op: params.canSpawnChildren ? "write" : "read",
       parameterName: "REPOAGENTS",
     },
   ];
   if (params.canSpawnChildren) {
     roots.push({
-      path: canonicalizeSandboxPath(params.PARENTCLAUDE),
+      path: canonicalize(params.PARENTCLAUDE),
       op: "write",
       parameterName: "PARENTCLAUDE",
     });
     // The repo id the spawner reads to name and seal its child. Read-only.
     if (params.REPOID) {
       roots.push({
-        path: canonicalizeSandboxPath(params.REPOID),
+        path: canonicalize(params.REPOID),
         op: "read",
         parameterName: "REPOID",
       });
@@ -741,14 +925,14 @@ function profileRuntimeAllowRoots(params: SandboxProfileParams): ProfileRuntimeP
   // sort into the specificity table like any other runtime root.
   if (params.PROJECTDIR) {
     roots.push({
-      path: canonicalizeSandboxPath(params.PROJECTDIR),
+      path: canonicalize(params.PROJECTDIR),
       op: "write",
       parameterName: "PROJECTDIR",
     });
   }
   if (params.SCRATCHPAD) {
     roots.push({
-      path: canonicalizeSandboxPath(params.SCRATCHPAD),
+      path: canonicalize(params.SCRATCHPAD),
       op: "write",
       parameterName: "SCRATCHPAD",
     });
@@ -758,7 +942,7 @@ function profileRuntimeAllowRoots(params: SandboxProfileParams): ProfileRuntimeP
   // stays byte-identical.
   if (params.AGYSTATEDIR) {
     roots.push({
-      path: canonicalizeSandboxPath(params.AGYSTATEDIR),
+      path: canonicalize(params.AGYSTATEDIR),
       op: "write",
       parameterName: "AGYSTATEDIR",
     });
@@ -774,10 +958,13 @@ function profileRuntimeAllowRoots(params: SandboxProfileParams): ProfileRuntimeP
  * file deny does not); a spawner emits nothing here. The op is nominal — a file
  * deny row emits both read and write denies.
  */
-function profileRuntimeDenyRoots(params: SandboxProfileParams): ProfileRuntimePathRoot[] {
+function profileRuntimeDenyRoots(
+  params: SandboxProfileParams,
+  canonicalize: (path: string) => string = canonicalizeSandboxPath,
+): ProfileRuntimePathRoot[] {
   if (params.canSpawnChildren) return [];
   return [
-    { path: canonicalizeSandboxPath(params.TMUXSOCK), op: "read", parameterName: "TMUXSOCK" },
+    { path: canonicalize(params.TMUXSOCK), op: "read", parameterName: "TMUXSOCK" },
   ];
 }
 
@@ -789,8 +976,50 @@ export function sandboxPathAccessTable(
   const canonicalPaths = canonicalizePathsConfig(paths, sandboxHome(params.HOME));
   return {
     ...canonicalPaths,
-    runtimeRoots: profileRuntimeAllowRoots(params).map(({ path, op }) => ({ path, op })),
-    runtimeDenyRoots: profileRuntimeDenyRoots(params).map(({ path, op }) => ({ path, op })),
+    ...runtimeRootRows(params, canonicalizeSandboxPath),
+  };
+}
+
+function runtimeRootRows(
+  params: SandboxProfileParams,
+  canonicalize: (path: string) => string,
+): Pick<PathAccessTable, "runtimeRoots" | "runtimeDenyRoots"> {
+  return {
+    runtimeRoots: profileRuntimeAllowRoots(params, canonicalize).map(({ path, op }) => ({ path, op })),
+    runtimeDenyRoots: profileRuntimeDenyRoots(params, canonicalize).map(({ path, op }) => ({ path, op })),
+  };
+}
+
+/**
+ * The table sandboxPathAccessTable builds, for a PreToolUse hook running inside
+ * the agent's kernel sandbox, from the `paths` stored in meta.json. Spawn and
+ * `ib sandbox refresh` store canonicalizePathsConfig output, made unsandboxed:
+ * the forms their profile was built from (a resume canonicalizes them again
+ * when it rebuilds the profile). The stored entries are used as they are:
+ * re-canonicalizing a deny entry such as `~/.ssh` in the sandbox opens it and
+ * every denied ancestor, a kernel denial each, on every tool call.
+ * prepareAccessTable compiles each entry with compileCanonicalPath: an entry
+ * that is not absolute (`~/x`, `./x`) throws and the hook denies; an absolute
+ * entry is used as written (one that is not canonical, such as `/tmp/x`,
+ * matches no canonical path).
+ *
+ * The runtime roots are canonicalized without opening what the agent may not
+ * read: first by metadata only, then against that provisional table. An allow
+ * root is readable by definition, so it gets the same realpathSync as in the
+ * profile; the tmux deny root is never opened.
+ */
+export function storedPathAccessTable(
+  paths: PathsConfig,
+  params: SandboxProfileParams,
+): PathAccessTable {
+  const stored = resolvePathsConfig(paths);
+  const provisional = prepareAccessTable({
+    ...stored,
+    ...runtimeRootRows(params, (path) => canonicalizeSandboxPathWithin(path, () => false)),
+  });
+  return {
+    ...stored,
+    ...runtimeRootRows(params, (path) => canonicalizeWithoutOpeningDenied(provisional, path)),
   };
 }
 
@@ -856,6 +1085,12 @@ export function orderedEntryMatches(entry: OrderedPathEntry, absolutePath: strin
 export interface PreparedAccessTable {
   allow: OrderedPathEntry[];
   deny: OrderedPathEntry[];
+  /**
+   * Set when the resolving process runs inside the agent's kernel sandbox (the
+   * PreToolUse hooks): paths are then canonicalized without opening what the
+   * profile denies (canonicalizeAccessPath). Unset: canonicalizeSandboxPath.
+   */
+  kernelSandboxed?: boolean;
 }
 
 /**
@@ -874,14 +1109,76 @@ export function prepareAccessTable(
   };
 }
 
+/** orderedEntryMatches, ignoring letter case. */
+function orderedEntryMatchesIgnoringCase(entry: OrderedPathEntry, absolutePath: string): boolean {
+  if (entry.compiled.kind === "glob") return entry.regexIgnoreCase!.test(absolutePath);
+  const value = entry.compiled.value.toLowerCase();
+  const path = absolutePath.toLowerCase();
+  if (value === "/") return path.startsWith("/");
+  return path === value || path.startsWith(`${value}/`);
+}
+
+/**
+ * Should canonicalization call realpathSync (a file-read-data check in the
+ * kernel) on `prefix`, a symlink-free existing prefix of `fullPath` whose letter
+ * case is not corrected yet? Not when a deny entry matches the prefix as
+ * spelled. Otherwise yes when an allow entry matches the prefix or the full path
+ * in any letter case: only then can the corrected case change the decision.
+ */
+function mayReadForCanonicalization(
+  prepared: PreparedAccessTable,
+  prefix: string,
+  fullPath: string,
+): boolean {
+  if (prepared.deny.some((entry) => orderedEntryMatches(entry, prefix))) return false;
+  return prepared.allow.some((entry) =>
+    orderedEntryMatchesIgnoringCase(entry, prefix) || orderedEntryMatchesIgnoringCase(entry, fullPath));
+}
+
+/** canonicalizeSandboxPathWithin, opening only where `prepared` may allow a read. */
+function canonicalizeWithoutOpeningDenied(prepared: PreparedAccessTable, absolutePath: string): string {
+  return canonicalizeSandboxPathWithin(
+    absolutePath,
+    (prefix, fullPath) => mayReadForCanonicalization(prepared, prefix, fullPath),
+  );
+}
+
+/**
+ * Canonicalize a path for resolution against `prepared`.
+ *
+ * Unless `prepared.kernelSandboxed` is set this is canonicalizeSandboxPath:
+ * outside a kernel sandbox opening a path costs no denial, and the decisions
+ * stay exactly what they were.
+ *
+ * Inside the sandbox it opens no path the agent may not read
+ * (canonicalizeSandboxPathWithin): symlinks resolve by lstat/readlink, and
+ * realpathSync corrects the letter case of the longest existing prefix that an
+ * allow entry matches, or that leads to a path an allow entry matches, in any
+ * case, unless a deny entry matches the prefix as spelled; such a refused
+ * component takes its on-disk spelling from a listing of its opened parent.
+ * Decisions on the result are those on canonicalizeSandboxPath's result,
+ * except below a directory it may not open (one a deny entry matches as typed,
+ * or the kernel profile does not let the agent read): there a component can
+ * keep the typed case, as with canonicalizeSandboxPath inside the sandbox, which
+ * also kept a symlink there unresolved; this one resolves it. That can change
+ * TABLE decisions only, which the kernel enforces itself on the vnode path; the
+ * hook-only structural checks compare the existing prefixes of the path by
+ * identity (structuralPath in hooks/agent-path.ts), not by this spelling.
+ */
+export function canonicalizeAccessPath(prepared: PreparedAccessTable, absolutePath: string): string {
+  return prepared.kernelSandboxed
+    ? canonicalizeWithoutOpeningDenied(prepared, absolutePath)
+    : canonicalizeSandboxPath(absolutePath);
+}
+
 /**
  * Resolve access against an already-prepared table. The input must be absolute;
- * it is canonicalized here the same way table entries are (longest existing
- * prefix via canonicalizeSandboxPath), so a caller passing `/tmp/x` resolves
- * identically to `/private/tmp/x` and the canonical-input contract is enforced,
- * not merely documented. Deny wins at every depth. Read-only of `prepared`:
- * resolving never mutates the sorted entries, so one prepared table serves any
- * number of lookups.
+ * it is canonicalized here (canonicalizeAccessPath: symlinks and longest
+ * existing prefix, as canonicalizeSandboxPath does for table entries), so a
+ * caller passing `/tmp/x` resolves identically to `/private/tmp/x` and the
+ * canonical-input contract is enforced, not merely documented. Deny wins at
+ * every depth. Read-only of `prepared`: resolving never mutates the sorted
+ * entries, so one prepared table serves any number of lookups.
  */
 export function resolvePreparedAccess(
   prepared: PreparedAccessTable,
@@ -891,7 +1188,7 @@ export function resolvePreparedAccess(
   if (!absolutePath.startsWith("/")) {
     throw new Error(`resolvePreparedAccess requires an absolute path, got "${absolutePath}"`);
   }
-  const canonical = canonicalizeSandboxPath(absolutePath);
+  const canonical = canonicalizeAccessPath(prepared, absolutePath);
 
   if (prepared.deny.some((entry) => orderedEntryMatches(entry, canonical))) {
     return "deny";

@@ -2165,7 +2165,8 @@ describe("DashboardComponent dialog and action handlers", () => {
         expect(dashboard.sidebarMode).toBe(tab);
         dashboard.handleInput("a");
         assertDialog(dashboard.dialog, "new-agent-form").agentType = agentType;
-        for (const ch of "fav-agent") dashboard.handleInput(ch);
+        // Name left blank: the id is generated, so the favorite must be the id
+        // newAgent returned, not anything typed in the form.
         dashboard.handleInput("\t");
         dashboard.handleInput("\t");
         for (const ch of "do stuff") dashboard.handleInput(ch);
@@ -2175,21 +2176,19 @@ describe("DashboardComponent dialog and action handlers", () => {
 
         await dashboard.flushPendingActions();
 
-        // A coordinator's id is derived from the repo, not the Name field.
         const agentsDir = join(newAgentTempDir, ".ittybitty", "agents");
         const { readdir: rd } = await import("fs/promises");
         const agentDirs = (await rd(agentsDir, { withFileTypes: true })).filter(e => e.isDirectory());
         expect(agentDirs.length).toBe(1);
         const meta = await Bun.file(join(agentsDir, agentDirs[0]!.name, "meta.json")).json();
         expect(meta.agentType).toBe(agentType);
-        if (agentType !== "coordinator") expect(meta.id).toBe("fav-agent");
         // meta.json is written before the late spawn steps — only the notice
         // shows that newAgent returned ok.
         expect(dashboard.notice).toBe("Created new agent in only-repo");
         expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(expectFavorite ? [meta.id] : []);
         if (expectFavorite) {
           await flushPendingSave();
-          expect((await loadLayout())!.favoriteAgentIds).toEqual(["fav-agent"]);
+          expect((await loadLayout())!.favoriteAgentIds).toEqual([meta.id]);
         }
       } finally {
         cancelPendingSave();

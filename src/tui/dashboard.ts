@@ -551,7 +551,7 @@ class DialogOverlayComponent implements Component {
         if (dialog.checkbox) {
           const label = `[${dialog.checkbox.checked ? "x" : " "}] ${dialog.checkbox.label}`;
           const checkbox = dialog.focusedButton === "checkbox" ? `${BOLD}${REVERSE}${label}${RESET}` : label;
-          contentLines.push("", `  ${checkbox}`);
+          contentLines.push("", `  ${checkbox}  ${DIM}(Space to toggle)${RESET}`);
         }
         return { title: "Confirm", contentLines };
       }

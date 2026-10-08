@@ -988,6 +988,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     setCoordinatorHome(join(configTempDir, "coord-home"));
     // Agent seals belong to the fixture, not the developer's home directory.
     setUserHome(configTempDir);
+    await (await import("../agent-types")).ensureAgentTypesDir();
   });
 
   async function setupDashboardWithAgent(state = "running") {
@@ -1089,6 +1090,10 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(d.prompt).toContain("agent-test");
     expect(d.confirmLabel).toBe("Retire");
     expect(d.focusedButton).toBe("cancel");
+    const rendered = stripAnsi((dashboard as any).dialogOverlay.render(80).join("\n"));
+    expect(rendered).toContain("[ Cancel ]   [ Retire ]");
+    expect(rendered).not.toContain("[ ]");
+    expect(rendered).not.toContain("Space to toggle");
   });
 
   test("retire confirm dialog: Enter on Retire button executes retire", async () => {
@@ -1655,6 +1660,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(dialog.checkbox).toEqual({ label: "Keep agent after merge", checked: false });
     const overlay = (dashboard as any).dialogOverlay;
     expect(stripAnsi(overlay.render(80).join("\n"))).toContain("[ ] Keep agent after merge");
+    expect(stripAnsi(overlay.render(80).join("\n"))).toContain("Space to toggle");
     dashboard.handleInput("\x1b[Z");
     expect(dialog.focusedButton).toBe("checkbox");
     expect(overlay.render(80).join("\n")).toContain("\x1b[7m[ ] Keep agent after merge");
@@ -1689,12 +1695,29 @@ describe("DashboardComponent dialog and action handlers", () => {
       dashboard.handleInput("\r");
       await dashboard.flushPendingActions();
       expect(dashboard.dialog).toBeNull();
-      expect(dashboard.notice).toBe(`Merged agent-test${keep ? " (agent kept running)" : ""}`);
+      expect(dashboard.notice).toBe(keep
+        ? "Merged agent agent-test into main (1 commit(s), agent kept running)"
+        : "Merged agent-test");
       expect(commands.some(cmd => cmd.includes("merge"))).toBe(true);
       expect(commands.some(cmd => cmd.includes("kill-session"))).toBe(!keep);
       expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(keep);
     });
   }
+
+  test("keep merge with no new commits reports nothing to merge", async () => {
+    await setupDashboardWithAgent();
+    const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    dashboard.handleInput("m");
+    await dashboard.flushPendingActions();
+    dashboard.handleInput("\x1b[Z");
+    dashboard.handleInput(" ");
+    dashboard.handleInput("\x1b[Z");
+    dashboard.handleInput("\r");
+    await dashboard.flushPendingActions();
+    expect(dashboard.notice).toBe("Nothing to merge: agent/agent-test has no commits ahead of main (agent agent-test kept running)");
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true);
+  });
 
   test("merge: merge-check failure shows error message", async () => {
     await setupDashboardWithAgent();

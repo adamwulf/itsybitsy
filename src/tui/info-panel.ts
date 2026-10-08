@@ -19,6 +19,7 @@ import { NotesEditorComponent } from "./notes-editor";
 import { _formatTimestamp } from "../agent-lifecycle";
 import { kernelSandboxStatus } from "../agent-cli";
 import { resolvePathsConfig } from "../sandbox";
+import { expandTabs } from "../tmux-poller";
 
 /**
  * Team-mode payload for the info panel (SPEC §17.3c). Parallel to the
@@ -211,7 +212,9 @@ export class InfoPanelComponent implements Component {
     const text = agent.meta.summary ?? agent.meta.prompt;
     if (text) {
       lines.push(truncateToWidth(`${DIM}Summary:${RESET}`, width, ""));
-      const wrapped = wrapLines(text.replace(/\n/g, " "), width);
+      // The prompt is the INITIAL PROMPT pane's text and can carry tabs; see
+      // expandTabs() for why a tab must not reach the screen.
+      const wrapped = wrapLines(expandTabs(text).replace(/\n/g, " "), width);
       for (const wl of wrapped) {
         lines.push(truncateToWidth(wl, width, ""));
       }

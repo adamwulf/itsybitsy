@@ -11,6 +11,7 @@ import type { FlatEntry } from "../agents";
 import { displayState } from "./agent-tree";
 import { getStateColors } from "./color-scheme";
 import { RESET, BOLD, DIM } from "./colors";
+import { expandTabs } from "../tmux-poller";
 
 /** Abbreviate agent type for display — built-in types get short forms, custom types truncate to 5 chars */
 function abbreviateRole(agentType: string | undefined, isWorker: boolean | undefined): string {
@@ -81,7 +82,8 @@ export function buildDashboardRows(flatList: FlatEntry[]): SystemDashboardRow[] 
     const agent = entry.agent;
     const isCoordinator = agent.meta.agentType === "coordinator";
     const role = isCoordinator ? "coord" : abbreviateRole(agent.meta.agentType, agent.meta.worker);
-    const summary = (agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");
+    // The prompt can carry tabs; see expandTabs() for why one must not reach the screen.
+    const summary = expandTabs(agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");
 
     rows.push({
       repo: currentRepo,

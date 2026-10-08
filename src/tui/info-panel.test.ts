@@ -354,6 +354,20 @@ describe("InfoPanelComponent", () => {
     expect(lines.length).toBe(3);
   });
 
+  test("expands tabs in the prompt summary", () => {
+    // pi-tui slices a tab as 0 columns when it composites an overlay, so a tab
+    // on screen overflows the row (see expandTabs in ../tmux-poller).
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 20;
+    const agent = makeAgent({ id: "agent-tab" });
+    agent.meta.prompt = "fix this:\n\tfrom /opt/homebrew/lib/ruby/net/http.rb:1665";
+    panel.agent = agent;
+
+    const lines = panel.render(60);
+    expect(lines.filter((line) => line.includes("\t"))).toEqual([]);
+    expect(lines.map(stripAnsi).join("\n")).toContain("fix this:    from /opt/homebrew");
+  });
+
   test("claude PID alive shows green indicator (current PID)", () => {
     const panel = new InfoPanelComponent();
     panel.displayHeight = 5;

@@ -1197,8 +1197,12 @@ export function handleMerge(ctx: ActionCtx) {
         ctx.closeDialog();
         ctx.executeAndRefresh(async () => {
           const result = await mergeAgent(agent, agent.repoPath, { keep });
-          if (result.ok) ctx.setNotice(keep ? result.stdout : `Merged ${agent.id}`, "info");
-          else ctx.setNotice(`Merge failed: ${result.stderr || result.stdout}`, "error");
+          if (result.ok) {
+            const notice = keep
+              ? `${agent.id} kept running: ${result.stdout.startsWith("Nothing to merge:") ? "nothing to merge" : "merge complete"}`
+              : `Merged ${agent.id}`;
+            ctx.setNotice(notice, "info");
+          } else ctx.setNotice(`Merge failed: ${result.stderr || result.stdout}`, "error");
         });
       },
     });

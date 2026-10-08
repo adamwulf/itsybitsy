@@ -1066,10 +1066,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetMergeSpawnRunner();
     resetNewAgentSpawnRunner();
     resetUserConfigPath();
-    // Failure-safety net for the new-agent tests below, which override the home
-    // dir via setUserHome: if one throws before its inline
-    // resetUserHome(), clear the override here so it cannot bleed into a
-    // later test's home resolution.
+    // Reset the fixture home installed in beforeEach, including any override
+    // made by individual new-agent tests, so it cannot leak into later tests.
     resetUserHome();
     const { resetCoordinatorHome } = await import("../coordinator");
     resetCoordinatorHome();
@@ -1681,6 +1679,7 @@ describe("DashboardComponent dialog and action handlers", () => {
       setMergeSpawnRunner((cmd: string[]) => {
         commands.push(cmd);
         if (cmd.includes("log") && cmd.includes("--oneline")) return makeSpawnResult(0, "abc123 Agent change\n");
+        if (cmd.includes("rev-parse") && cmd.includes("HEAD")) return makeSpawnResult(0, "a".repeat(40) + "\n");
         return makeSpawnResult();
       });
       dashboard.handleInput("m");
@@ -1696,7 +1695,7 @@ describe("DashboardComponent dialog and action handlers", () => {
       await dashboard.flushPendingActions();
       expect(dashboard.dialog).toBeNull();
       expect(dashboard.notice).toBe(keep
-        ? "Merged agent agent-test into main (1 commit(s), agent kept running)"
+        ? "agent-test kept running: merge complete"
         : "Merged agent-test");
       expect(commands.some(cmd => cmd.includes("merge"))).toBe(true);
       expect(commands.some(cmd => cmd.includes("kill-session"))).toBe(!keep);
@@ -1715,7 +1714,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("\x1b[Z");
     dashboard.handleInput("\r");
     await dashboard.flushPendingActions();
-    expect(dashboard.notice).toBe("Nothing to merge: agent/agent-test has no commits ahead of main (agent agent-test kept running)");
+    expect(dashboard.notice).toBe("agent-test kept running: nothing to merge");
     expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true);
   });
 

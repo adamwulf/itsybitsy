@@ -1162,8 +1162,8 @@ function canonicalizeWithoutOpeningDenied(prepared: PreparedAccessTable, absolut
  * keep the typed case, as with canonicalizeSandboxPath inside the sandbox, which
  * also kept a symlink there unresolved; this one resolves it. That can change
  * TABLE decisions only, which the kernel enforces itself on the vnode path; the
- * hook-only structural checks compare by identity (structuralPath in
- * hooks/agent-path.ts), not by this spelling.
+ * hook-only structural checks compare the existing prefixes of the path by
+ * identity (structuralPath in hooks/agent-path.ts), not by this spelling.
  */
 export function canonicalizeAccessPath(prepared: PreparedAccessTable, absolutePath: string): string {
   return prepared.kernelSandboxed

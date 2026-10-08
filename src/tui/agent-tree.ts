@@ -622,6 +622,13 @@ export class AgentTreeComponent implements Component {
     return nowFavorite;
   }
 
+  /** Mark the agent as a favorite; a no-op when it already is one. */
+  addFavorite(agentId: string): void {
+    if (this.favoriteAgentIds.has(agentId)) return;
+    this.favoriteAgentIds.add(agentId);
+    this.resyncAfterFilterChange();
+  }
+
   /**
    * Keep selectedIndex/scrollOffset consistent after visibleList changed shape
    * (a filter flip, a pin, or a favorite toggle).

@@ -1140,6 +1140,26 @@ export class DashboardComponent implements Component {
     this.pendingTmuxResize = true;
   }
 
+  /**
+   * Mark an agent as a favorite (no toggle). The new-agent form calls this for
+   * an agent made while the Favorites tab shows (SPEC §17.1).
+   */
+  addFavorite(agentId: string) {
+    this.agentTree.addFavorite(agentId);
+    this.favoritesChanged();
+  }
+
+  /** Follow-up after the favorites set changed (the `.` key, addFavorite). */
+  private favoritesChanged() {
+    // The REPO/TREE pane rows carry the ★ too — rebuild them now rather
+    // than on the next refresh tick.
+    this.rightPane.favoriteAgentIds = this.agentTree.favoriteAgentIds;
+    this.rightPane.updateContent();
+    // Persist so favorites survive an `ib watch` restart.
+    this.persistLayout();
+    this.tui?.requestRender();
+  }
+
   /** Persist current layout via debounced write. */
   persistLayout() {
     saveLayoutDebounced({
@@ -2966,13 +2986,7 @@ export class DashboardComponent implements Component {
         const nowFavorite = this.agentTree.toggleFavorite(sel.agent.id);
         const name = agentDisplayName(sel.agent);
         this.setNotice(nowFavorite ? `Favorited ${name}` : `Unfavorited ${name}`, "info");
-        // The REPO/TREE pane rows carry the ★ too — rebuild them now rather
-        // than on the next refresh tick.
-        this.rightPane.favoriteAgentIds = this.agentTree.favoriteAgentIds;
-        this.rightPane.updateContent();
-        // Persist so favorites survive an `ib watch` restart.
-        this.persistLayout();
-        this.tui?.requestRender();
+        this.favoritesChanged();
       } else if (sel?.kind === "repo-header") {
         const nowPinned = this.agentTree.togglePinnedRepo(sel.repoPath);
         this.setNotice(nowPinned ? `Pinned ${sel.repoName}` : `Unpinned ${sel.repoName}`, "info");

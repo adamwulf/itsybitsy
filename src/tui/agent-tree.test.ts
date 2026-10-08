@@ -1284,6 +1284,19 @@ describe("AgentTreeComponent favorites view", () => {
     expect(kinds()).toEqual(["system-coordinator"]);
   });
 
+  test("addFavorite adds a row to the view and never unfavorites", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFixture());
+    tree.setFavoritesOnly(true);
+    tree.addFavorite("beta-solo");
+    expect(tree.favoriteAgentIds.has("beta-solo")).toBe(true);
+    expect(agentIds(tree)).toEqual(["beta-solo"]);
+    // A second call keeps it a favorite (unlike toggleFavorite).
+    tree.addFavorite("beta-solo");
+    expect(tree.favoriteAgentIds.has("beta-solo")).toBe(true);
+    expect(agentIds(tree)).toEqual(["beta-solo"]);
+  });
+
   test("unfavoriting the selected agent keeps it visible until the selection moves away", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());

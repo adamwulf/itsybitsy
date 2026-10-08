@@ -2121,6 +2121,33 @@ describe("canonicalization without reading what the agent may not read", () => {
     }
   });
 
+  // Review round 4: the refused component's on-disk name is found by identity
+  // (APFS also folds ſ to s, which toLowerCase does not), and with no single
+  // entry the canonicalization throws instead of keeping the typed name.
+  test("kernelSandboxed: a refused component's on-disk name is found by identity, or it throws", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "ib-canon-identity-")));
+    try {
+      await mkdir(join(root, "work", "repos"), { recursive: true });
+      const table: PathAccessTable = {
+        allowRead: [], allowWrite: ["**/*.ts"], deny: [`${root}/work/*`], runtimeRoots: [], runtimeDenyRoots: [],
+      };
+      const inSandbox = { ...prepareAccessTable(table), kernelSandboxed: true };
+      const folded = join(root, "work", "repoſ", "new.ts");
+      if (existsSync(join(root, "work", "repoſ"))) {
+        expect(canonicalizeAccessPath(inSandbox, folded)).toBe(join(root, "work", "repos", "new.ts"));
+      }
+      const spy = spyOn(fs, "readdirSync").mockImplementation((() => []) as unknown as typeof fs.readdirSync);
+      try {
+        expect(() => canonicalizeAccessPath(inSandbox, join(root, "work", "repos", "new.ts")))
+          .toThrow("No single on-disk name");
+      } finally {
+        spy.mockRestore();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   // At most one pass per component: a deep chain where every level needs its
   // own pass still settles (the old fixed bound of 64 returned a partly
   // corrected path), and names that never settle throw.

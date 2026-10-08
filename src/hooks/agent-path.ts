@@ -8,6 +8,7 @@
 
 import { join, resolve, dirname, basename } from "path";
 import { userHome } from "../home";
+import { lstatSync } from "fs";
 import { readdir, realpath, stat } from "fs/promises";
 import { logAgent } from "../agent-lifecycle";
 import { isSandboxedProcess } from "../sandbox-detect";
@@ -298,6 +299,46 @@ export function matchProtectedWrite(
   return null;
 }
 
+/** `dev:ino` of a path by lstat (metadata only), or undefined when it is missing. */
+function fileIdentity(path: string): string | undefined {
+  try {
+    const stats = lstatSync(path);
+    return `${stats.dev}:${stats.ino}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The path the hook-only structural checks (protected writes, other agents'
+ * dirs, the main repo) compare. They compare by spelling, and the kernel does
+ * not back them up. Inside the kernel sandbox the canonical path can keep a
+ * typed or aliased spelling where the hook may not open a directory: letter
+ * case, Unicode folding (APFS equates `ſ` and `s`), or a firmlink alias such as
+ * /System/Volumes/Data/.... So the deepest existing prefix that IS one of the
+ * anchors below (same dev+ino; lstat is metadata only: no open, no denial) takes
+ * that anchor's spelling. Stricter only: a path can only come to match an anchor
+ * it is under. Outside the kernel sandbox the canonical path is used as is.
+ */
+function structuralPath(ctx: PathCheckContext, canonical: string): string {
+  if (!ctx.access.kernelSandboxed) return canonical;
+  const anchors = new Map<string, string>();
+  for (const anchor of [
+    ctx.rootRepo, ctx.agentsDir, ctx.agentDir, ctx.worktreePath, join(ctx.worktreePath, ".claude"),
+    ...AGY_WORKTREE_FILES.map((rel) => join(ctx.worktreePath, rel)),
+    ...ctx.protectedWritePaths.map((entry) => entry.path),
+  ]) {
+    const id = anchor ? fileIdentity(anchor) : undefined;
+    if (id !== undefined && !anchors.has(id)) anchors.set(id, anchor);
+  }
+  for (let prefix = canonical; prefix !== "/"; prefix = dirname(prefix)) {
+    const id = fileIdentity(prefix);
+    const anchor = id === undefined ? undefined : anchors.get(id);
+    if (anchor !== undefined) return anchor + canonical.slice(prefix.length);
+  }
+  return canonical;
+}
+
 /**
  * Deny reason when `meta.json` is missing or unparseable. The hook builds its
  * access table from `meta.paths`; without a readable meta there is no table, so
@@ -488,9 +529,7 @@ export const SETTINGS_WRITE_DENY_REASON =
 function checkBashSettingsWrite(
   command: string,
   cwd: string,
-  worktreePath: string,
-  protectedWritePaths: ProtectedWritePath[],
-  access: PreparedAccessTable,
+  ctx: PathCheckContext,
 ): HookDecision | null {
   // Resolve one candidate write-target token and deny if it lands on a protected
   // file. Strips one layer of surrounding quotes first.
@@ -514,11 +553,11 @@ function checkBashSettingsWrite(
     // Resolve the longest existing parent as well as the leaf. Redirect
     // targets commonly do not exist yet, and on macOS /var aliases
     // /private/var; exact-only realpath would leave that spelling mismatch.
-    const resolved = canonicalizeAccessPath(access, absolute);
-    const kind = worktreeProtectedFileKind(resolved, worktreePath);
+    const resolved = structuralPath(ctx, canonicalizeAccessPath(ctx.access, absolute));
+    const kind = worktreeProtectedFileKind(resolved, ctx.worktreePath);
     if (kind === "settings") return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
     if (kind === "agy") return { decision: "deny", reason: AGY_BOUNDARY_WRITE_DENY_REASON };
-    const protectedReason = matchProtectedWrite(protectedWritePaths, resolved);
+    const protectedReason = matchProtectedWrite(ctx.protectedWritePaths, resolved);
     if (protectedReason) return { decision: "deny", reason: protectedReason };
     return null;
   };
@@ -906,10 +945,11 @@ function scanBashCommandPaths(
       // another agent. Apply the same structural boundary as file tools after
       // resolving the candidate, before an authored allow can grant it.
       const canonical = canonicalizeAccessPath(ctx.access, abs);
-      const boundaryDenial = checkWorktreeBoundary(canonical, ctx);
+      const structural = structuralPath(ctx, canonical);
+      const boundaryDenial = checkWorktreeBoundary(structural, ctx);
       if (boundaryDenial) return boundaryDenial;
       if (op === "write") {
-        const protectedReason = matchProtectedWrite(ctx.protectedWritePaths, canonical);
+        const protectedReason = matchProtectedWrite(ctx.protectedWritePaths, structural);
         if (protectedReason) return { decision: "deny", reason: protectedReason };
       }
       if (resolvePreparedAccess(ctx.access, canonical, op) === "deny") {
@@ -1040,7 +1080,7 @@ function checkBashCommandPaths(
   // agent's own meta.json, or @system's config/agent-types/sealed) — agents must
   // not grant themselves new permissions, disable their own hook gate, or rewrite
   // the files the hook and harness read their configuration from.
-  const settingsDenial = checkBashSettingsWrite(command, cwd, worktreePath, ctx.protectedWritePaths, ctx.access);
+  const settingsDenial = checkBashSettingsWrite(command, cwd, ctx);
   if (settingsDenial) return settingsDenial;
 
   // Check for references to other agents' directories
@@ -1114,8 +1154,10 @@ function checkFilePath(
   // 5. Resolve symlink parents even when a file is being created. Structural
   // checks and the access-table resolver must inspect the same canonical path.
   // canonicalizeAccessPath never opens what the agent may not read: inside the
-  // kernel sandbox each such open is a denial in the agent's DENIALS view.
+  // kernel sandbox each such open is a denial in the agent's DENIALS view. The
+  // structural steps compare `structural`: by identity, not by spelling.
   filePath = canonicalizeAccessPath(ctx.access, resolve(filePath));
+  const structural = structuralPath(ctx, filePath);
 
   // The structural steps (6, 10, 11) run BEFORE the resolver so the hook stays
   // STRICTER than the kernel inside the agent dir and the main repo: the
@@ -1132,14 +1174,14 @@ function checkFilePath(
   // @system the agent-types dir, config.json, repos.json, layout.json, sealed —
   // all self-widening). Reads are allowed; only mutation tools are blocked.
   if (WRITE_TOOLS.has(toolName)) {
-    const kind = worktreeProtectedFileKind(filePath, worktreePath);
+    const kind = worktreeProtectedFileKind(structural, worktreePath);
     if (kind === "settings") return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
     if (kind === "agy") return { decision: "deny", reason: AGY_BOUNDARY_WRITE_DENY_REASON };
-    const protectedReason = matchProtectedWrite(ctx.protectedWritePaths, filePath);
+    const protectedReason = matchProtectedWrite(ctx.protectedWritePaths, structural);
     if (protectedReason) return { decision: "deny", reason: protectedReason };
   }
 
-  const boundaryDenial = checkWorktreeBoundary(filePath, ctx, toolName);
+  const boundaryDenial = checkWorktreeBoundary(structural, ctx, toolName);
   if (boundaryDenial) return boundaryDenial;
 
   // Resolver: the worktree, own agent.log's dir, project dir, scratchpad and any

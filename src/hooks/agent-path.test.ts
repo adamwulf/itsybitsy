@@ -3787,6 +3787,119 @@ describe("hook decisions inside the kernel sandbox equal the opening hook's", ()
     }
   });
 
+  // Review round 4: the hook-only structural checks (main repo, other agents,
+  // protected writes) compare by identity (dev+ino of their anchors), not by
+  // spelling, when the kernel sandbox is on: a typed, Unicode-folded or
+  // firmlink-aliased spelling the canonicalizer could not correct still lands
+  // on the main repo. The main repo here is <tmp>/work/<name>.
+  describe("structural checks by identity", () => {
+    const MAIN_REPO_DENY = { decision: "deny" as const, reason: "Access denied: work in your worktree, not the main repo" };
+
+    async function mainRepoAgent(repoName: string) {
+      const mainRepo = join(created, "work", repoName);
+      const agentsDirHere = join(mainRepo, ".ittybitty", "agents");
+      const agentDirHere = join(agentsDirHere, "agent-abc123");
+      const worktreeHere = join(agentDirHere, "repo");
+      for (const dir of [join(mainRepo, "src"), join(mainRepo, ".git"), worktreeHere]) await mkdir(dir, { recursive: true });
+      const access = (paths: PathsConfig, enabled: boolean) => buildAgentAccessTable({
+        meta: {
+          agentType: "worker", model: "codex:gpt-5.5", canSpawnChildren: false,
+          paths: canonicalizePathsConfig(paths, home), sandbox: { enabled, rawAllow: [], domains: [] },
+        },
+        agentDir: agentDirHere, worktreePath: worktreeHere, agentsDir: agentsDirHere, rootRepo: mainRepo, home,
+      });
+      const decide = (prepared: PreparedAccessTable, toolName: string, target: string) => checkPathAccess(
+        { toolName, toolInput: { file_path: target }, cwd: worktreeHere },
+        {
+          agentId: "agent-abc123", agentDir: agentDirHere, worktreePath: worktreeHere, agentsDir: agentsDirHere,
+          rootRepo: mainRepo, allowList: ["Read", "Write"], denyList: [], canSpawnChildren: false,
+          access: prepared, protectedWritePaths: agentProtectedWritePaths(agentDirHere),
+        },
+      );
+      return { mainRepo, agentDirHere, access, decide };
+    }
+
+    /** The kernel refusing to open the main repo and everything outside the agent dir. */
+    function refuseOutside(agentDir: string) {
+      const real = fs.realpathSync;
+      return spyOn(fs, "realpathSync").mockImplementation(((path: string) => {
+        if (path === agentDir || String(path).startsWith(`${agentDir}/`)) return real(path);
+        throw Object.assign(new Error(`EPERM: operation not permitted, realpath '${path}'`), { code: "EPERM" });
+      }) as typeof fs.realpathSync);
+    }
+
+    test("a: a Unicode-folded spelling (ſ for s) of the main repo", async () => {
+      const { mainRepo, access, decide } = await mainRepoAgent("repos");
+      const typed = join(created, "work", "repoſ", "new.ts");
+      if (!fs.existsSync(join(created, "work", "repoſ"))) return; // the volume does not fold ſ
+      const paths = { allowRead: [], allowWrite: ["**/*.ts"], deny: [`${created}/work/*`] };
+      for (const enabled of [true, false]) {
+        const prepared = await access(paths, enabled);
+        for (const tool of ["Write", "Read"]) {
+          expect(decide(prepared, tool, typed), `${tool} sandbox=${enabled}`).toEqual(MAIN_REPO_DENY);
+        }
+      }
+      expect(mainRepo.endsWith("repos")).toBe(true);
+    });
+
+    test("b: two typed-case denies (**/work and **/REPO) above the main repo", async () => {
+      const { access, decide } = await mainRepoAgent("repo");
+      if (!fs.existsSync(join(created, "work", "REPO"))) return; // case-sensitive volume
+      const paths = { allowRead: [], allowWrite: [created], deny: ["**/work", "**/REPO"] };
+      for (const enabled of [true, false]) {
+        const prepared = await access(paths, enabled);
+        for (const tool of ["Write", "Read"]) {
+          expect(decide(prepared, tool, join(created, "work", "REPO", "new.txt")), `${tool} sandbox=${enabled}`)
+            .toEqual(MAIN_REPO_DENY);
+        }
+      }
+    });
+
+    test("c: the kernel refuses to open the main repo and its ancestors", async () => {
+      const { agentDirHere, access, decide } = await mainRepoAgent("repo");
+      if (!fs.existsSync(join(created, "work", "REPO"))) return; // case-sensitive volume
+      const prepared = await access({ allowRead: [], allowWrite: ["**/*.ts"], deny: [] }, true);
+      const spy = refuseOutside(agentDirHere);
+      try {
+        for (const tool of ["Write", "Read"]) {
+          for (const leaf of ["new.ts", "main.ts"]) {
+            expect(decide(prepared, tool, join(created, "work", "REPO", "src", leaf)), `${tool} ${leaf}`)
+              .toEqual(MAIN_REPO_DENY);
+          }
+        }
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test("d: the /System/Volumes/Data firmlink alias of the main repo", async () => {
+      const { mainRepo, agentDirHere, access, decide } = await mainRepoAgent("repo");
+      const alias = `/System/Volumes/Data${mainRepo}`;
+      const same = (a: string, b: string) => {
+        try {
+          const [x, y] = [fs.lstatSync(a), fs.lstatSync(b)];
+          return x.dev === y.dev && x.ino === y.ino;
+        } catch {
+          return false;
+        }
+      };
+      if (!same(alias, mainRepo)) return; // no firmlinked data volume here
+      const target = join(alias, "src", "new.ts");
+      for (const enabled of [true, false]) {
+        const prepared = await access({ allowRead: [], allowWrite: ["**/*.ts"], deny: [] }, enabled);
+        expect(decide(prepared, "Write", target), `sandbox=${enabled}`).toEqual(MAIN_REPO_DENY);
+      }
+      // Inside the sandbox realpath of the main repo fails, so the alias stays.
+      const prepared = await access({ allowRead: [], allowWrite: ["**/*.ts"], deny: [] }, true);
+      const spy = refuseOutside(agentDirHere);
+      try {
+        expect(decide(prepared, "Write", target)).toEqual(MAIN_REPO_DENY);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
   // Guards each call site (checkFilePath, the Bash scanner, the settings-write
   // guard, resolvePreparedAccess, pathDenialReason) against a revert to the
   // opening canonicalizer: realpath would correct `.SSH` to `.ssh`.

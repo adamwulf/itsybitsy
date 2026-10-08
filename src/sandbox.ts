@@ -376,29 +376,27 @@ export function canonicalizeSandboxPathWithin(
 
 /**
  * The entry of `dir` that `name` opens, in its on-disk spelling: on a
- * case-insensitive volume the spelling can differ from `name`. Only the same
- * file (same inode) with a name equal ignoring case counts.
+ * case- and normalization-insensitive volume (APFS also equates `ſ` and `s`)
+ * the spelling can differ from `name`. Matched by identity (same dev+ino; a
+ * directory has one name), narrowed by letter case only if several entries
+ * share it (hard links). If no single entry remains, throw: the typed spelling
+ * is never kept silently (the hooks deny on a throw).
  */
-function onDiskName(dir: string, name: string): string | undefined {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return undefined;
-  }
+function onDiskName(dir: string, name: string): string {
+  const entries = readdirSync(dir);
   if (entries.includes(name)) return name;
-  const folded = name.normalize("NFC").toLowerCase();
-  try {
-    const target = lstatSync(join(dir, name));
-    const matches = entries.filter((entry) => {
-      if (entry.normalize("NFC").toLowerCase() !== folded) return false;
-      const stats = lstatSync(join(dir, entry));
-      return stats.ino === target.ino && stats.dev === target.dev;
-    });
-    return matches.length === 1 ? matches[0] : undefined;
-  } catch {
-    return undefined;
+  const identity = (entry: string) => {
+    const stats = lstatSync(join(dir, entry));
+    return `${stats.dev}:${stats.ino}`;
+  };
+  const target = identity(name);
+  let matches = entries.filter((entry) => identity(entry) === target);
+  if (matches.length > 1) {
+    const folded = name.normalize("NFC").toLowerCase();
+    matches = matches.filter((entry) => entry.normalize("NFC").toLowerCase() === folded);
   }
+  if (matches.length !== 1) throw new Error(`No single on-disk name for "${name}" in "${dir}"`);
+  return matches[0]!;
 }
 
 function canonicalizeWithinOnce(
@@ -433,7 +431,7 @@ function canonicalizeWithinOnce(
         continue;
       }
       if (unread.length === 0) return { path: join(corrected, ...remainder), done: true };
-      const name = onDiskName(corrected, unread[0]!) ?? unread[0]!;
+      const name = onDiskName(corrected, unread[0]!);
       const changed = corrected !== readable || name !== unread[0];
       unread[0] = name;
       return { path: join(corrected, ...unread, ...remainder), done: !changed };
@@ -1160,9 +1158,12 @@ function canonicalizeWithoutOpeningDenied(prepared: PreparedAccessTable, absolut
  * component takes its on-disk spelling from a listing of its opened parent.
  * Decisions on the result are those on canonicalizeSandboxPath's result,
  * except below a directory it may not open (one a deny entry matches as typed,
- * or the kernel profile does not let the agent read): there a component keeps
- * the typed case, as with canonicalizeSandboxPath inside the sandbox, which
- * also kept a symlink there unresolved; this one resolves it.
+ * or the kernel profile does not let the agent read): there a component can
+ * keep the typed case, as with canonicalizeSandboxPath inside the sandbox, which
+ * also kept a symlink there unresolved; this one resolves it. That can change
+ * TABLE decisions only, which the kernel enforces itself on the vnode path; the
+ * hook-only structural checks compare by identity (structuralPath in
+ * hooks/agent-path.ts), not by this spelling.
  */
 export function canonicalizeAccessPath(prepared: PreparedAccessTable, absolutePath: string): string {
   return prepared.kernelSandboxed

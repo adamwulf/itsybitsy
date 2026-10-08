@@ -1,6 +1,8 @@
 /** Kernel denial report parsing, per-launch output limits and record format; no
  * OS access in this module. A report is attributed by the tag its profile put on
  * the deny (sandbox.ts SANDBOX_TAG), never by the offending process. */
+import { formatLogTimestamp } from "./log-timestamp";
+
 export interface SandboxReport {
   timestamp: string;
   mach: bigint;
@@ -28,7 +30,7 @@ export function parseSandboxReport(line: string): SandboxReport | null {
     const r = JSON.parse(line);
     if (r?.processID !== 0 || r.processImagePath !== "/kernel" || r.senderImagePath !== SANDBOX_KEXT ||
         r.messageType !== "Error") return null;
-    if (typeof r.timestamp !== "string" || !TIMESTAMP.test(r.timestamp)) return null;
+    if (typeof r.timestamp !== "string" || !TIMESTAMP.test(r.timestamp) || Number.isNaN(Date.parse(r.timestamp))) return null;
     if (!Number.isSafeInteger(r.machTimestamp) || r.machTimestamp <= 0) return null;
     const message = r.eventMessage;
     if (typeof message !== "string") return null;
@@ -94,11 +96,12 @@ export class SandboxOutputBudget {
 }
 
 /** The `[Sandbox]` line for agent.log. It never contains the tag: other agents
- * can read agent.log, and the tag's nonce must stay secret. */
+ * can read agent.log, and the tag's nonce must stay secret. The bracket is the
+ * kernel's event time in agent.log's local format; `mach=` keeps the precise time. */
 export function formatSandboxRecord(report: SandboxReport, launch: string, boot: string): string {
   const o = report.offender!;
   // JSON quoting keeps control characters/path newlines from forging log records.
-  return `[${report.timestamp}] [Sandbox] ${o.operation} process=${JSON.stringify(o.process)} pid=${o.pid} ` +
+  return `[${formatLogTimestamp(new Date(report.timestamp))}] [Sandbox] ${o.operation} process=${JSON.stringify(o.process)} pid=${o.pid} ` +
     `target=${JSON.stringify(o.target ?? null)} launch=${launch} boot=${boot} mach=${report.mach}` +
     (report.duplicates ? ` duplicates=${report.duplicates}` : "");
 }

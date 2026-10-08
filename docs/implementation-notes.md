@@ -225,6 +225,8 @@ Commands: `retireAgent`, `rehireAgent`, `nukeAgent`, `nukeAllAgents`, `pauseAgen
 
 Shared helpers used by multiple ib commands. Mirrors the bash ib teardown / archive / kill / utility functions. All subprocess calls go through `spawnCtx` (a `SpawnContext` from `types.ts`); tests inject a fake runner with `spawnCtx.set(fn)` and reset it with `spawnCtx.reset()`.
 
+`logAgent()` stamps agent.log lines with `formatLogTimestamp()` from the leaf module `src/log-timestamp.ts` (`YYYY-MM-DD HH:MM:SS`, local time). The sandbox proxy (`formatAgentDenial`) and the denial collector (`collectorLine`, `formatSandboxRecord`) use the same helper, and the shell writers (start.sh/resume.sh `log()`, the collector preamble in `src/sandbox-log-launch.ts`) use the same `date '+%Y-%m-%d %H:%M:%S'`, so every agent.log line has one stamp. `parseDenials()` still reads the zoned and UTC ISO stamps of older `[Sandbox*]` lines.
+
 Explicit retirement first creates a versioned recovery payload: a hidden Git
 ref retains HEAD, `worktree.patch` stores tracked changes, and safe non-ignored
 untracked files are copied. `archiveAgent()` writes `retirement.json` only for

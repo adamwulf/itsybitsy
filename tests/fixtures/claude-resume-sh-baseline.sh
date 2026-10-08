@@ -63,7 +63,7 @@ if [[ -n "$IB_SANDBOX_LOG_DIR" ]]; then
         ib sandbox-collector attach --dir "$IB_SANDBOX_LOG_DIR" --owner "$$" --agent-log "$AGENT_LOG" </dev/null 9>&-
         collector_exit=$?
         if [[ "$collector_exit" -ne 0 ]]; then
-            printf '[%s] [SandboxCollector] ERROR: launch=%s collector exited %s; kernel enforcement remains required\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${IB_SANDBOX_LOG_DIR##*/}" "$collector_exit" >> "$AGENT_LOG"
+            printf '[%s] [SandboxCollector] ERROR: launch=%s collector exited %s; kernel enforcement remains required\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${IB_SANDBOX_LOG_DIR##*/}" "$collector_exit" >> "$AGENT_LOG"
             if [[ -d "$IB_SANDBOX_LOG_DIR" ]]; then : > "$IB_SANDBOX_LOG_DIR/failed"; fi
         fi
         # Only the supervisor removes this directory. Until now it remains
@@ -82,7 +82,7 @@ if [[ -n "$IB_SANDBOX_LOG_DIR" ]]; then
     done
 fi
 if [[ -z "$IB_SANDBOX_LOG_DIR" || ! -f "$IB_SANDBOX_LOG_DIR/ready" ]]; then
-    printf '[%s] [SandboxCollector] ERROR: collector unavailable before CLI launch; kernel enforcement remains required\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$AGENT_LOG"
+    printf '[%s] [SandboxCollector] ERROR: collector unavailable before CLI launch; kernel enforcement remains required\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "$AGENT_LOG"
     cleanup_sandbox_log
 fi
 

@@ -288,9 +288,12 @@ For each line of the stream, in the pump, as it arrives
    32 unsanitized bytes, so every feasible delimiter is examined and only an
    unambiguous split is used; an ambiguous one is counted (`ambiguous process
    names omitted=N` in that launch's summary), not recorded. The record is
-   `[<timestamp>] [Sandbox] <operation> process="<name>" pid=<pid>
+   `[YYYY-MM-DD HH:MM:SS] [Sandbox] <operation> process="<name>" pid=<pid>
    target="<path>" launch=<launch> boot=<boot> mach=<mach>`, plus
-   ` duplicates=N` for an OS-coalesced summary. Strings are JSON-quoted, so a
+   ` duplicates=N` for an OS-coalesced summary. The bracket is the report's
+   event time in local time, to the second, like every agent.log line (the
+   `[SandboxCollector]` status lines too); `mach=` keeps the precise time.
+   Strings are JSON-quoted, so a
    path with newlines stays one line. The record never contains the tag.
 5. **Budget** (`SandboxOutputBudget`, one per launch): 60 records per minute and
    3 per pid/operation/target per minute, with a 2,048-event deduplication

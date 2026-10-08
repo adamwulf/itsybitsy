@@ -32,20 +32,12 @@ import { deleteAgentOutbox, agentOutboxDir } from "./outbox";
 import { deleteClaudeRateLimits } from "./claude-rate-limits";
 import { pruneAgentFromAllTeams } from "./teams";
 import { logWarning } from "./watch-log";
+import { formatLogTimestamp } from "./log-timestamp";
 
 /** Spawn context for agent lifecycle operations */
 export const spawnCtx = new SpawnContext();
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Format a date as YYYY-MM-DD HH:MM:SS in local time */
-function formatTimestamp(date: Date = new Date()): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return (
-    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
-    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
-  );
-}
 
 /** Format a date as YYYYMMDD-HHMMSS for archive folder names */
 function formatArchiveTimestamp(date: Date = new Date()): string {
@@ -415,7 +407,7 @@ export async function findRetiredAgentArchives(
 export async function logAgent(agentDir: string, message: string): Promise<void> {
   try {
     const logFile = join(agentDir, "agent.log");
-    const line = `[${formatTimestamp()}] ${message}\n`;
+    const line = `[${formatLogTimestamp()}] ${message}\n`;
     await appendFile(logFile, line);
   } catch { /* agent dir may not exist */ }
 }
@@ -1099,4 +1091,4 @@ export async function resolveGitRoot(repoPath: string): Promise<string | null> {
 // ── Exported for testing ─────────────────────────────────────────────────────
 
 /** @internal Exposed for testing only */
-export { formatTimestamp as _formatTimestamp, formatArchiveTimestamp as _formatArchiveTimestamp };
+export { formatLogTimestamp as _formatTimestamp, formatArchiveTimestamp as _formatArchiveTimestamp };

@@ -1,6 +1,7 @@
 import { isIP } from "node:net";
 import { appendFileSync, closeSync, openSync } from "node:fs";
 import { unlink } from "node:fs/promises";
+import { formatLogTimestamp } from "./log-timestamp";
 
 const MAX_HEADER_BYTES = 64 * 1024;
 export const SANDBOX_PROXY_HEALTH_PATH = "/__itsybitsy_sandbox_proxy_health";
@@ -81,7 +82,7 @@ export function formatProxyAttempt(
 
 /** One `agent.log` denial record in the DENIALS-pane `[SandboxProxy]` format. */
 export function formatAgentDenial(host: string, port: number): string {
-  return `[${new Date().toISOString()}] [SandboxProxy] denied network-outbound target=${formatTarget(host, port)}\n`;
+  return `[${formatLogTimestamp()}] [SandboxProxy] denied network-outbound target=${formatTarget(host, port)}\n`;
 }
 
 function normalizeHostname(value: string): string | null {

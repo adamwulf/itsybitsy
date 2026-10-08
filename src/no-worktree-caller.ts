@@ -12,6 +12,12 @@ export interface NoWorktreeCaller {
 
 interface CallerDeps {
   registryHome?: string;
+  /**
+   * Canonical repo roots to search instead of every registered repo. The hooks
+   * pass the repos of the agent records they already found when they run inside
+   * the agent's kernel sandbox, where no other registered repo is readable.
+   */
+  roots?: string[];
   pid?: number;
   readParents?: () => Map<number, number>;
   identityCurrent?: (pid: number, epoch: number | undefined) => boolean;
@@ -145,7 +151,8 @@ async function isRegisteredAgentWorktree(cwd: string, roots: string[]): Promise<
  *
  * Registered agent worktrees do not need process ancestry: their protected
  * metadata identifies the caller. Otherwise search canonical registered roots
- * independently of cwd so an unregistered forged tree cannot replace it.
+ * (or `deps.roots`, see CallerDeps) independently of cwd so an unregistered
+ * forged tree cannot replace it.
  * Multiple matching records are an error; filesystem order cannot choose which
  * caller policy wins.
  */
@@ -155,7 +162,7 @@ export async function resolveNoWorktreeCaller(
 ): Promise<NoWorktreeCaller | null> {
   const candidates: NoWorktreeCaller[] = [];
   // HOME is model-controlled. Resolve the operator home from the OS account.
-  const roots = await registeredRoots(deps.registryHome ?? userInfo().homedir);
+  const roots = deps.roots ?? await registeredRoots(deps.registryHome ?? userInfo().homedir);
   if (await isRegisteredAgentWorktree(cwd, roots)) return null;
   for (const repoPath of roots) {
     const agentsDir = join(repoPath, ".ittybitty", "agents");

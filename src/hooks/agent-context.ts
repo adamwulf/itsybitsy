@@ -16,6 +16,7 @@ import { lstat, realpath } from "fs/promises";
 import { userInfo } from "os";
 import { isValidAgentId } from "../validation";
 import { resolveNoWorktreeCaller, type NoWorktreeCaller } from "../no-worktree-caller";
+import { metaKernelSandboxed } from "../sandbox";
 
 export interface FindNoWorktreeAgentsDirDeps {
   /** OS-account home containing .itsybitsy/repos.json; test-only override. */
@@ -57,14 +58,15 @@ export interface BoundHookAgentContext extends RegisteredAgentContext {
 }
 
 /**
- * Errors that mean a registered repo is unreachable from this process: removed
- * (ENOENT), or blocked by file modes or macOS privacy protection (EACCES/EPERM —
+ * Errors that mean a registered repo (or its agent dir) is unreachable from this
+ * process: removed (ENOENT), a path through a file (ENOTDIR), or blocked by file
+ * modes, macOS privacy protection or the agent's kernel sandbox (EACCES/EPERM —
  * e.g. a repo inside another app's ~/Library/Containers after a migration to a
  * new machine). Such a repo holds no agent this hook can serve, so it is skipped
  * rather than failing the lookup of every agent in every other repo. Agents in
  * the skipped repo still fail closed: they resolve to no registered record.
  */
-const UNREACHABLE_REPO_ERROR_CODES = new Set(["ENOENT", "EACCES", "EPERM"]);
+const UNREACHABLE_REPO_ERROR_CODES = new Set(["ENOENT", "ENOTDIR", "EACCES", "EPERM"]);
 
 function isUnreachableRepoError(error: unknown): boolean {
   return UNREACHABLE_REPO_ERROR_CODES.has((error as NodeJS.ErrnoException).code ?? "");
@@ -108,9 +110,6 @@ async function registeredRepoRoots(registryHome: string): Promise<string[]> {
   return [...roots];
 }
 
-/** realpath errors that mean "no agent dir here that this process can use". */
-const ABSENT_AGENT_DIR_ERROR_CODES = new Set(["ENOENT", "ENOTDIR", "EACCES", "EPERM"]);
-
 /**
  * Canonical paths of `<repoRoot>/.ittybitty/agents/<agentId>`, or null when the
  * registered repo has no such agent dir or this process cannot reach it.
@@ -137,7 +136,7 @@ async function locateRegisteredAgentDir(
   try {
     agentDir = await realpath(rawAgentDir);
   } catch (error) {
-    if (ABSENT_AGENT_DIR_ERROR_CODES.has((error as NodeJS.ErrnoException).code ?? "")) return null;
+    if (isUnreachableRepoError(error)) return null;
     throw error;
   }
   const suffix = `/.ittybitty/agents/${agentId}`;
@@ -256,10 +255,22 @@ export async function resolveBoundHookAgent(
   // a shared-repo agent that enters a path resembling another registered
   // worktree cannot be rebound to that filesystem record.
   if (candidates.some((candidate) => candidate.meta.worktree === false)) {
+    // When these shared-repo agents run inside the kernel sandbox, search only
+    // the repos of the records found above. No other registered repo is
+    // readable there: the full search skipped each one only after a realpath
+    // that was a kernel denial, so the result is the same without one denial
+    // per registered repo. (Their frozen policy, not isSandboxedProcess(),
+    // whose bun:ffi load is itself a kernel denial.)
+    const sandboxed = candidates
+      .filter((candidate) => candidate.meta.worktree === false)
+      .every((candidate) => metaKernelSandboxed(candidate.meta));
+    const search = sandboxed
+      ? { roots: [...new Set(candidates.map((candidate) => candidate.repoPath))] }
+      : { registryHome: deps.registryHome };
     const caller = await (
       deps.noWorktreeCallerResolver ??
       boundNoWorktreeCallerResolverOverride ??
-      resolveNoWorktreeCaller
+      ((path: string) => resolveNoWorktreeCaller(path, search))
     )(cwd);
     if (caller && caller.meta.id === agentId) {
       let callerDir: string;

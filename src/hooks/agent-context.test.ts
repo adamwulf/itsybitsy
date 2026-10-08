@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { join } from "path";
+import * as fsPromises from "fs/promises";
 import { chmod, mkdir, mkdtemp, realpath, rm, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import {
@@ -231,6 +232,57 @@ describe("registered hook agent binding when the repo root is not readable", () 
     const bound = await withUnreadableRoot(repo, () =>
       resolveBoundHookAgent("agent-shared", repo, { registryHome }));
     expect(bound).toMatchObject({ agentDir: agent.agentDir, repoPath: repo, worktreePath: repo });
+  });
+
+  // The real caller resolver (process ancestry through ps), not a mock. Inside
+  // the sandbox it must search only the repo of the record already found: no
+  // other registered repo is readable there, and each realpath of one is a
+  // kernel denial.
+  test("a sandboxed shared-repo agent binds through the real caller resolver, touching no other repo", async () => {
+    const repo = await realpath(await makeRepo());
+    const other = await realpath(await makeRepo());
+    const lstart = Bun.spawnSync(["/bin/ps", "-o", "lstart=", "-p", String(process.pid)], {
+      env: { LC_ALL: "C", LC_TIME: "C" },
+    }).stdout.toString().trim();
+    const agentDir = join(repo, ".ittybitty", "agents", "agent-shared");
+    await mkdir(agentDir, { recursive: true });
+    const writeMeta = (sandboxEnabled: boolean) => Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id: "agent-shared", worktree: false,
+      claude_pid: String(process.pid), claude_pid_epoch: Date.parse(lstart) / 1000,
+      sandbox: { enabled: sandboxEnabled, rawAllow: [], domains: [] },
+    }));
+    const registryHome = await registryFor([other, repo]);
+    const touched: string[] = [];
+    const realRealpath = fsPromises.realpath;
+    const realReaddir = fsPromises.readdir;
+    const realpathSpy = spyOn(fsPromises, "realpath").mockImplementation(((path: string, ...rest: unknown[]) => {
+      touched.push(String(path));
+      return (realRealpath as (...args: unknown[]) => unknown)(path, ...rest);
+    }) as typeof fsPromises.realpath);
+    const readdirSpy = spyOn(fsPromises, "readdir").mockImplementation(((path: string, ...rest: unknown[]) => {
+      touched.push(String(path));
+      return (realReaddir as (...args: unknown[]) => unknown)(path, ...rest);
+    }) as typeof fsPromises.readdir);
+    try {
+      await writeMeta(true);
+      const bound = await resolveBoundHookAgent("agent-shared", repo, { registryHome });
+      expect(bound).toMatchObject({ agentDir, repoPath: repo, worktreePath: repo });
+      // Only the candidate lookup's own agent dir path in the other repo (it
+      // does not exist: ENOENT comes before any access check, no denial); never
+      // its root nor its agents dir.
+      expect(touched.filter((path) => path === other || path.startsWith(`${other}/`)))
+        .toEqual([join(other, ".ittybitty", "agents", "agent-shared")]);
+      // With the agent's kernel sandbox off the search is unchanged: every
+      // registered repo.
+      await writeMeta(false);
+      touched.length = 0;
+      await expect(resolveBoundHookAgent("agent-shared", repo, { registryHome }))
+        .resolves.toMatchObject({ agentDir, repoPath: repo });
+      expect(touched).toContain(other);
+    } finally {
+      realpathSpy.mockRestore();
+      readdirSpy.mockRestore();
+    }
   });
 
   test("a path or id that belongs to no registered agent still resolves to none", async () => {

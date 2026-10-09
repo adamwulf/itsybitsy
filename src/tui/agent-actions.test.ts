@@ -177,6 +177,7 @@ function makeMockCtx(overrides?: {
       setSidebarModeCalls.push(mode);
       currentSidebarMode = mode;
     },
+    addFavorite: () => {},
     teamsTree: {
       selection: overrides?.teamsSelection ?? null,
     },

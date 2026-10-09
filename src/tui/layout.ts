@@ -35,8 +35,9 @@ export interface LayoutState {
    */
   pinnedRepoPaths?: string[];
   /**
-   * Agent ids the user has favorited via '.' in the dashboard tree (the ★ and
-   * the Favorites sidebar tab). Persisted so favorites survive an `ib watch`
+   * Agent ids the user has favorited via '.' in the dashboard tree, plus agents
+   * made with the new-agent form from the Favorites tab (the ★ and the
+   * Favorites sidebar tab). Persisted so favorites survive an `ib watch`
    * restart. Optional and validated exactly like pinnedRepoPaths. Ids of
    * agents that no longer exist are kept as-is (no pruning).
    */

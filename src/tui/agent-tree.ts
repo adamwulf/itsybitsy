@@ -334,12 +334,13 @@ export class AgentTreeComponent implements Component {
    * session-only.) */
   pinnedRepoPaths: Set<string> = new Set();
 
-  /** Agent ids the user has favorited via '.' (keyed by bare agent id, like
-   * selection). Drives the Favorites view filter below and the yellow ★ on
-   * agent rows in every tab. Persisted across sessions in
-   * ~/.itsybitsy/layout.json (LayoutState.favoriteAgentIds) — the dashboard
-   * restores it in applyLayout() and writes it in persistLayout() after each
-   * toggle. Ids of agents that no longer exist are kept (never pruned). */
+  /** Agent ids the user has favorited via '.', plus agents made from the
+   * Favorites tab (keyed by bare agent id, like selection). Drives the
+   * Favorites view filter below and the yellow ★ on agent rows in every tab.
+   * Persisted across sessions in ~/.itsybitsy/layout.json
+   * (LayoutState.favoriteAgentIds) — the dashboard restores it in
+   * applyLayout() and writes it in persistLayout() after each change. Ids of
+   * agents that no longer exist are kept (never pruned). */
   favoriteAgentIds: Set<string> = new Set();
 
   /**
@@ -620,6 +621,13 @@ export class AgentTreeComponent implements Component {
     // by the carve-out), so re-resolve like a pin toggle.
     this.resyncAfterFilterChange();
     return nowFavorite;
+  }
+
+  /** Mark the agent as a favorite; a no-op when it already is one. */
+  addFavorite(agentId: string): void {
+    if (this.favoriteAgentIds.has(agentId)) return;
+    this.favoriteAgentIds.add(agentId);
+    this.resyncAfterFilterChange();
   }
 
   /**

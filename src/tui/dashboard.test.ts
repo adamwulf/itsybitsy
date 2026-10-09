@@ -10,7 +10,7 @@ import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeCom
 import type { GeminiUsageResult } from "../usage";
 import { TUI, visibleWidth } from "@mariozechner/pi-tui";
 import type { CollectorHealth } from "../sandbox-collector-light";
-import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setNewAgentCallerMetaReader, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner, sealAgentRecord } from "../ib-commands";
+import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setNewAgentCallerMetaReader, resetNewAgentCallerMetaReader, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner, sealAgentRecord } from "../ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxPollerSpawnCtx } from "../tmux-poller";
 import { gitStatusSpawnCtx } from "../git-status";
@@ -2100,6 +2100,108 @@ describe("DashboardComponent dialog and action handlers", () => {
     await rm(newAgentTempDir, { recursive: true, force: true });
     await rm(tempHome, { recursive: true, force: true });
   });
+
+  // SPEC §17.1 Favorites tab: an agent made from the Favorites tab becomes a
+  // favorite (and is persisted); one made from the Agents or Teams tab does not,
+  // and neither does a coordinator (it has no Agents-tree row).
+  for (const [tabKey, tab, agentType, expectFavorite] of [
+    ["3", "favorites", "manager", true],
+    ["1", "agents", "manager", false],
+    ["2", "teams", "manager", false],
+    ["3", "favorites", "coordinator", false],
+  ] as const) {
+    test(`new-agent form: a ${agentType} made from the ${tab} tab ${expectFavorite ? "is" : "is not"} a favorite`, async () => {
+      const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-fav-"));
+      await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
+      await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
+      setUserConfigPath(join(newAgentTempDir, "config.json"));
+      await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "claude:sonnet" }));
+
+      const tempHome = await mkdtemp(join(tmpdir(), "ib-na-fav-home-"));
+      setUserHome(tempHome);
+      await (await import("../agent-types")).ensureAgentTypesDir();
+
+      const spawnCalls: string[] = [];
+      const mockSpawn = (cmd: string[]): SpawnResult => {
+        const cmdStr = cmd.join(" ");
+        spawnCalls.push(cmdStr);
+        const makeResult = (s: string, c: number) => ({
+          stdout: new ReadableStream({ start(ctrl) { ctrl.enqueue(new TextEncoder().encode(s)); ctrl.close(); } }),
+          stderr: new ReadableStream({ start(ctrl) { ctrl.close(); } }),
+          exited: Promise.resolve(c),
+        });
+        // The kernel sandbox is on by default: answer its preflight (`which
+        // sandbox-exec` + the profile compile lint) so the spawn succeeds.
+        if (cmd[0] === "which" && cmd[1] === "sandbox-exec") return makeResult("/usr/bin/sandbox-exec\n", 0);
+        if (cmd[0] === "/usr/bin/sandbox-exec") return makeResult("", 0);
+        if (cmdStr.includes("tmux has-session")) {
+          const afterNew = spawnCalls.some(c => c.includes("tmux new-session"));
+          return makeResult("", afterNew ? 0 : 1);
+        }
+        if (cmdStr.includes("tmux start-server")) return makeResult("", 0);
+        if (cmdStr.includes("tmux new-session")) return makeResult("", 0);
+        if (cmdStr.includes("worktree add")) {
+          const repoIdx = cmd.indexOf("add") + 1;
+          if (repoIdx > 0 && repoIdx < cmd.length) require("fs").mkdirSync(cmd[repoIdx]!, { recursive: true });
+          return makeResult("", 0);
+        }
+        if (cmdStr.includes("--git-common-dir")) return makeResult(".git", 0);
+        if (cmdStr.includes("--show-toplevel")) return makeResult(newAgentTempDir, 0);
+        if (cmdStr.includes("--git-dir")) return makeResult(".git", 0);
+        if (cmdStr.includes("which gh")) return makeResult("", 1);
+        if (cmd[cmd.length-1] === "remote") return makeResult("", 0);
+        if (cmdStr.includes("capture-pane")) return makeResult("Claude Code v1.0", 0);
+        return makeResult("", 0);
+      };
+      setNewAgentSpawnRunner(mockSpawn);
+      setNewAgentCallerMetaReader(() => null);
+      lifecycleSpawnCtx.set(mockSpawn);
+
+      try {
+        dashboard = makeDashboard();
+        dashboard.setRepos([{ path: newAgentTempDir, name: "only-repo" }]);
+
+        dashboard.handleInput(tabKey);
+        expect(dashboard.sidebarMode).toBe(tab);
+        dashboard.handleInput("a");
+        assertDialog(dashboard.dialog, "new-agent-form").agentType = agentType;
+        // Name left blank: the id is generated, so the favorite must be the id
+        // newAgent returned, not anything typed in the form.
+        dashboard.handleInput("\t");
+        dashboard.handleInput("\t");
+        for (const ch of "do stuff") dashboard.handleInput(ch);
+        dashboard.handleInput("\t");
+        dashboard.handleInput("\t");
+        dashboard.handleInput("\r");
+
+        await dashboard.flushPendingActions();
+
+        const agentsDir = join(newAgentTempDir, ".ittybitty", "agents");
+        const { readdir: rd } = await import("fs/promises");
+        const agentDirs = (await rd(agentsDir, { withFileTypes: true })).filter(e => e.isDirectory());
+        expect(agentDirs.length).toBe(1);
+        const meta = await Bun.file(join(agentsDir, agentDirs[0]!.name, "meta.json")).json();
+        expect(meta.agentType).toBe(agentType);
+        // meta.json is written before the late spawn steps — only the notice
+        // shows that newAgent returned ok.
+        expect(dashboard.notice).toBe("Created new agent in only-repo");
+        expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(expectFavorite ? [meta.id] : []);
+        if (expectFavorite) {
+          await flushPendingSave();
+          expect((await loadLayout())!.favoriteAgentIds).toEqual([meta.id]);
+        }
+      } finally {
+        cancelPendingSave();
+        resetNewAgentCallerMetaReader();
+        resetNewAgentSpawnRunner();
+        lifecycleSpawnCtx.reset();
+        resetUserConfigPath();
+        resetUserHome();
+        await rm(newAgentTempDir, { recursive: true, force: true });
+        await rm(tempHome, { recursive: true, force: true });
+      }
+    });
+  }
 
   test("new-agent form: Create is no-op when prompt is empty", async () => {
     dashboard = makeDashboard();

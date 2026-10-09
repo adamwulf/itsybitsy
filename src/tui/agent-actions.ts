@@ -211,6 +211,11 @@ export interface ActionCtx {
    */
   setSidebarMode: (mode: import("./sidebar").SidebarMode) => void;
   /**
+   * §17.1 Favorites tab: mark an agent as a favorite (no toggle) and persist
+   * it. The new-agent form calls it for an agent made from the Favorites tab.
+   */
+  addFavorite(agentId: string): void;
+  /**
    * §17.3 / §17.3a: the Teams-tree handle. Lets `handleSend` read the team
    * anchor (`{ kind: "team", teamName }`) selected in the Teams panel, since
    * the team-target dialog and `teamSend` fan-out only fire on that selection.
@@ -1712,6 +1717,10 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
   // embedded defaults when the on-disk types directory is missing.
   const availableTypes = listSpawnableTypeNamesSync();
   const defaultType = resolveDefaultAgentType(repo.defaultAgentType, availableTypes);
+  // An agent made from the Favorites tab becomes a favorite, so it stays in
+  // that view (SPEC §17.1). Read when the form opens: the tab the user was
+  // looking at when they pressed `a`.
+  const favoriteOnCreate = ctx.sidebarMode === "favorites";
 
   ctx.showDialog({
     type: "new-agent-form",
@@ -1736,6 +1745,9 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
             const result = await newAgent(repo.path, processedPrompt, opts);
             if (result.ok) {
               ctx.closeDialog();
+              // newAgent's stdout is the new agent's id. A coordinator has no
+              // row in the Agents tree, so `.` could never unfavorite it.
+              if (favoriteOnCreate && agentType !== "coordinator") ctx.addFavorite(result.stdout.trim());
               ctx.pendingSelectNewestInRepo = repo.path;
               ctx.setNotice(`Created new agent in ${repoDisplayName(repo)}`, "info");
             } else {

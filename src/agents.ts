@@ -2721,6 +2721,25 @@ export const reapReadAgentMetaCtx = new InjectionContext<
 });
 
 /**
+ * Read every repo's agents from disk only. Unlike {@link readAllAgents} it
+ * starts no tmux client (no `list-sessions` orphan scan), so a caller that
+ * never reads the orphan list — the per-agent watchdog's notification
+ * snapshot — uses this.
+ */
+export async function readAgentsOfRepos(
+  repos: Array<{ path: string; name: string }>,
+  includeArchived: boolean
+): Promise<{ agents: Agent[]; errors: AgentReadError[] }> {
+  const results = await Promise.all(
+    repos.map((r) => readRepoAgents(r.path, r.name, includeArchived))
+  );
+  return {
+    agents: results.flatMap((r) => r.agents),
+    errors: results.flatMap((r) => r.errors),
+  };
+}
+
+/**
  * Read all agents across multiple repos.
  * Also detects orphaned tmux sessions (sessions matching ittybitty-* pattern
  * that don't correspond to any known agent). The tmux session list is cached
@@ -2741,13 +2760,10 @@ export async function readAllAgents(
   repos: Array<{ path: string; name: string }>,
   includeArchived: boolean
 ): Promise<ReadAgentsResult> {
-  const [results, tmuxSessions] = await Promise.all([
-    Promise.all(repos.map((r) => readRepoAgents(r.path, r.name, includeArchived))),
+  const [{ agents: allAgents, errors: allErrors }, tmuxSessions] = await Promise.all([
+    readAgentsOfRepos(repos, includeArchived),
     getCachedTmuxSessions(),
   ]);
-
-  const allAgents = results.flatMap((r) => r.agents);
-  const allErrors = results.flatMap((r) => r.errors);
 
   // Detect orphaned tmux sessions: sessions starting with "ittybitty-"
   // that don't match any known agent's tmux_session. The "ib-coordinator"

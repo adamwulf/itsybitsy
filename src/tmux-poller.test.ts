@@ -3,6 +3,7 @@ import {
   TmuxPoller,
   captureTmuxOutput,
   captureTmuxOutputResult,
+  captureTmuxWithPaneState,
   probeTmuxSession,
   probeTmuxPane,
   killTmuxSessionResult,
@@ -301,6 +302,142 @@ describe("probeTmuxPane", () => {
     mockSpawn("Pane is dead\n", 0);
     const malformed = await probeTmuxPane("my-session");
     expect(malformed.status).toBe("unknown");
+  });
+});
+
+describe("captureTmuxWithPaneState", () => {
+  /**
+   * Answer the one tmux call with stdout built from the call's own nonce (read
+   * from the list-panes -F format). The stdout shapes are the ones real tmux
+   * 3.6a printed for each case (see the captureTmuxWithPaneState comment).
+   */
+  function mockSequence(stdoutFor: (nonce: string) => string, exitCode = 0, stderr = "") {
+    const calls: string[][] = [];
+    spawnCtx.set((cmd: string[]) => {
+      calls.push(cmd);
+      const nonce = cmd[cmd.indexOf("-F") + 1]!.split(" ")[0]!;
+      return { stdout: streamOf(stdoutFor(nonce)), stderr: streamOf(stderr), exited: Promise.resolve(exitCode) };
+    });
+    return calls;
+  }
+
+  test("is one tmux client: list-panes -s, end marker, capture, split by ';'", async () => {
+    const calls = mockSequence((n) => `${n} 0\n${n} end\npane\n`);
+    await captureTmuxWithPaneState("my-session");
+
+    expect(calls).toHaveLength(1);
+    const cmd = calls[0]!;
+    const nonce = cmd[cmd.indexOf("-F") + 1]!.split(" ")[0]!;
+    expect(nonce).toMatch(/^[0-9a-f]{32}$/);
+    expect(cmd).toEqual([
+      "tmux",
+      "list-panes", "-s", "-t", "=my-session:", "-F", `${nonce} #{pane_dead}`, ";",
+      "display-message", "-p", "-t", "=my-session:", `${nonce} end`, ";",
+      "capture-pane", "-t", "=my-session:", "-p", "-J", "-S", "-5000", "-E", "-",
+    ]);
+  });
+
+  test("uses a fresh nonce on every call", async () => {
+    const calls = mockSequence((n) => `${n} 0\n${n} end\n`);
+    await captureTmuxWithPaneState("my-session");
+    await captureTmuxWithPaneState("my-session");
+    expect(calls[0]![6]).not.toBe(calls[1]![6]);
+  });
+
+  test("live session: capture after the end marker, pane live", async () => {
+    mockSequence((n) => `${n} 0\n${n} end\nhello live\n\n\n`);
+    expect(await captureTmuxWithPaneState("s")).toEqual({
+      capture: { status: "ok", output: "hello live\n\n\n" },
+      pane: { status: "live" },
+    });
+  });
+
+  test("remain-on-exit dead pane: capture still readable, pane dead", async () => {
+    mockSequence((n) => `${n} 1\n${n} end\nbye\n\nPane is dead (status 3, Mon Oct 12 02:43:50 2026)\n`);
+    expect(await captureTmuxWithPaneState("s")).toEqual({
+      capture: { status: "ok", output: "bye\n\nPane is dead (status 3, Mon Oct 12 02:43:50 2026)\n" },
+      pane: { status: "dead" },
+    });
+  });
+
+  test("multi-window session: live while any window has a live pane, dead when all are dead", async () => {
+    mockSequence((n) => `${n} 1\n${n} 0\n${n} end\nw0 exits\nPane is dead (status 0)\n`);
+    expect((await captureTmuxWithPaneState("s")).pane).toEqual({ status: "live" });
+
+    mockSequence((n) => `${n} 1\n${n} 1\n${n} end\nPane is dead (status 0)\n`);
+    expect((await captureTmuxWithPaneState("s")).pane).toEqual({ status: "dead" });
+  });
+
+  test("pane text that copies the nonce lines is pane text, never pane state", async () => {
+    // The agent printed "<nonce> 1" and "<nonce> end": they come after tmux's
+    // own end marker, so the live pane stays live.
+    mockSequence((n) => `${n} 0\n${n} end\n${n} 1\n${n} end\n\n`);
+    const result = await captureTmuxWithPaneState("s");
+    expect(result.pane).toEqual({ status: "live" });
+    expect(result.capture.status).toBe("ok");
+    if (result.capture.status === "ok") {
+      expect(result.capture.output).toMatch(/^[0-9a-f]{32} 1\n[0-9a-f]{32} end\n\n$/);
+    }
+  });
+
+  test("missing session: capture error with tmux's exact stderr, no pane state", async () => {
+    mockSequence(() => "", 1, "can't find session: s\n");
+    expect(await captureTmuxWithPaneState("s")).toEqual({
+      capture: { status: "error", error: "can't find session: s", exitCode: 1 },
+      pane: null,
+    });
+  });
+
+  test("a later command failing is a capture error, even with earlier output", async () => {
+    mockSequence((n) => `${n} 0\n${n} end\n`, 1, "can't find window: 999\n");
+    expect(await captureTmuxWithPaneState("s")).toEqual({
+      capture: { status: "error", error: "can't find window: 999", exitCode: 1 },
+      pane: null,
+    });
+  });
+
+  test("a spawn failure is a capture error", async () => {
+    spawnCtx.set(() => { throw new Error("posix_spawn tmux: EPERM"); });
+    expect(await captureTmuxWithPaneState("s")).toEqual({
+      capture: { status: "error", error: "posix_spawn tmux: EPERM", exitCode: null },
+      pane: null,
+    });
+  });
+
+  test("output without the end marker or with a foreign line is unknown pane state", async () => {
+    mockSequence((n) => `${n} 0\n`);
+    expect((await captureTmuxWithPaneState("s")).pane?.status).toBe("unknown");
+
+    mockSequence((n) => `0\n${n} end\npane\n`);
+    expect((await captureTmuxWithPaneState("s")).pane?.status).toBe("unknown");
+
+    mockSequence((n) => `${n} 2\n${n} end\npane\n`);
+    expect((await captureTmuxWithPaneState("s")).pane?.status).toBe("unknown");
+
+    mockSequence((n) => `${n} end\npane\n`);
+    expect((await captureTmuxWithPaneState("s")).pane?.status).toBe("unknown");
+  });
+
+  test("empty stdout, CRLF metadata lines, or an end marker without its LF is unknown pane state", async () => {
+    mockSequence(() => "");
+    expect((await captureTmuxWithPaneState("s")).pane?.status).toBe("unknown");
+
+    mockSequence((n) => `${n} 0\r\n${n} end\r\npane\r\n`);
+    expect((await captureTmuxWithPaneState("s")).pane?.status).toBe("unknown");
+
+    mockSequence((n) => `${n} 0\r\n${n} end\npane\n`);
+    expect((await captureTmuxWithPaneState("s")).pane?.status).toBe("unknown");
+
+    mockSequence((n) => `${n} 0\n${n} end`);
+    expect((await captureTmuxWithPaneState("s")).pane?.status).toBe("unknown");
+  });
+
+  test("capture text without a final newline is kept exactly", async () => {
+    mockSequence((n) => `${n} 0\n${n} end\nfirst line\nlast line, no newline  `);
+    expect(await captureTmuxWithPaneState("s")).toEqual({
+      capture: { status: "ok", output: "first line\nlast line, no newline  " },
+      pane: { status: "live" },
+    });
   });
 });
 

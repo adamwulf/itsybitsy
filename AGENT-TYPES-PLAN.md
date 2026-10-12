@@ -339,7 +339,7 @@ Phase 3 implementation is complete when:
 5. ✓ Built-in manager/worker types still work (backward compat)
 6. ✓ Permission inheritance: type frontmatter > config > defaults
 7. ✓ All tests pass: `bun test && bunx tsc --noEmit`
-8. ✓ Binary compiles: `bun build --compile index.ts --outfile ib`
+8. ✓ Binary compiles: `bun run build` (the AGENTS.md build command)
 
 ---
 

@@ -7,29 +7,44 @@ import { join } from "path";
 // EMPTY environment (no PATH → `Executable not found in $PATH: "tmux"`).
 // Measured under a real agent profile: default build 0 env vars, with these
 // flags all of them. A `.env` in an agent worktree must also not be able to
-// change ib's environment. See AGENTS.md "Building the `ib` binary".
-const REQUIRED_FLAGS = ["--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig"];
+// change ib's environment.
+//
+// `--bytecode` halves ib's startup CPU, which every hook call, statusline run
+// and `ib` command pays. `--format=esm` must come with it: `--bytecode` alone
+// switches the bundle to CommonJS, which runs in sloppy mode, while `bun test`
+// runs the source as strict-mode ESM. See AGENTS.md "Building the `ib` binary".
+const REQUIRED_FLAGS = [
+  "--no-compile-autoload-dotenv",
+  "--no-compile-autoload-bunfig",
+  "--bytecode",
+  "--format=esm",
+];
 const root = join(import.meta.dir, "..");
 
-async function agentsMdBuildCommand(): Promise<string> {
-  const text = await Bun.file(join(root, "AGENTS.md")).text();
+async function documentedBuildCommand(relativePath: string): Promise<string> {
+  const text = await Bun.file(join(root, relativePath)).text();
   const block = text.match(/```sh\n(bun build --compile[^\n]*)\n```/);
-  if (!block) throw new Error("AGENTS.md has no `bun build --compile` command block");
+  if (!block) throw new Error(`${relativePath} has no \`bun build --compile\` command block`);
   return block[1]!;
 }
 
 describe("ib build command", () => {
-  test("package.json build script disables dotenv and bunfig autoload", async () => {
+  test("package.json build script has every required flag", async () => {
     const pkg = await Bun.file(join(root, "package.json")).json();
     for (const flag of REQUIRED_FLAGS) expect(pkg.scripts.build).toContain(flag);
   });
 
   test("AGENTS.md documents exactly the package.json build script", async () => {
     const pkg = await Bun.file(join(root, "package.json")).json();
-    expect(await agentsMdBuildCommand()).toBe(pkg.scripts.build);
+    expect(await documentedBuildCommand("AGENTS.md")).toBe(pkg.scripts.build);
   });
 
-  test("build.sh disables dotenv and bunfig autoload", async () => {
+  test("docs/telegram-sanity-check.md documents exactly the package.json build script", async () => {
+    const pkg = await Bun.file(join(root, "package.json")).json();
+    expect(await documentedBuildCommand("docs/telegram-sanity-check.md")).toBe(pkg.scripts.build);
+  });
+
+  test("build.sh has every required flag", async () => {
     const script = await Bun.file(join(root, "build.sh")).text();
     const command = script.split("\n").find((line) => line.startsWith("bun build --compile"));
     expect(command).toBeDefined();

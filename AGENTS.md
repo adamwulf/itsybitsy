@@ -52,10 +52,18 @@ Run with `bun --hot ./index.ts`.
 ## Building the `ib` binary
 
 ```sh
-bun build --compile --minify --sourcemap --no-compile-autoload-dotenv --no-compile-autoload-bunfig index.ts --outfile ib
+bun build --compile --minify --sourcemap --bytecode --format=esm --no-compile-autoload-dotenv --no-compile-autoload-bunfig index.ts --outfile ib
 ```
 
 Produces a single `ib` binary with no runtime dependencies. Install to PATH (`sudo cp ib /usr/local/bin/ib`) or add the project dir to PATH. Hook commands like `ib hooks main-path` reference the binary by its installed name.
+
+`--bytecode` embeds precompiled bytecode, so `ib` does not parse its bundle at
+every start, a cost that every hook call, statusline run and `ib` command pays
+(measured 2026-10-12: `ib --version` 35.6 → 18.4 ms CPU, `ib list-types`
+41.5 → 23.8 ms, `ib hooks inject-timestamp` 41.7 → 23.7 ms; binary 61 → 71 MB).
+`--format=esm` must stay with it: `--bytecode` alone makes the bundle CommonJS,
+which runs in sloppy mode (a write to a frozen object is silently ignored
+instead of throwing), while `bun test` runs the source as strict-mode ESM.
 
 The two `--no-compile-autoload-*` flags are required, not cosmetic. By default a
 compiled Bun binary scans the ancestors of its working directory at startup for
@@ -66,7 +74,9 @@ gone, and `ib new-agent` fails with `Executable not found in $PATH: "tmux"`.
 Measured under a real agent profile: default build → 0 env vars, `tmux` not
 found; with the flags → all vars, `tmux` found. The flags also stop a `.env` in
 an agent's worktree from changing `ib`'s environment. `src/build-flags.test.ts`
-keeps this command, `package.json` and `build.sh` in step.
+keeps this command, `package.json`, `build.sh` and
+`docs/telegram-sanity-check.md` in step, and fails if any of them loses
+`--bytecode` or `--format=esm`.
 
 `bun run build` runs exactly this command — keep the two identical. The root
 `index.ts` is the authoritative entry point; it re-exports `src/index.ts` and

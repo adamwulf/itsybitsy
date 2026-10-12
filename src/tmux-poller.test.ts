@@ -417,6 +417,28 @@ describe("captureTmuxWithPaneState", () => {
     mockSequence((n) => `${n} end\npane\n`);
     expect((await captureTmuxWithPaneState("s")).pane?.status).toBe("unknown");
   });
+
+  test("empty stdout, CRLF metadata lines, or an end marker without its LF is unknown pane state", async () => {
+    mockSequence(() => "");
+    expect((await captureTmuxWithPaneState("s")).pane?.status).toBe("unknown");
+
+    mockSequence((n) => `${n} 0\r\n${n} end\r\npane\r\n`);
+    expect((await captureTmuxWithPaneState("s")).pane?.status).toBe("unknown");
+
+    mockSequence((n) => `${n} 0\r\n${n} end\npane\n`);
+    expect((await captureTmuxWithPaneState("s")).pane?.status).toBe("unknown");
+
+    mockSequence((n) => `${n} 0\n${n} end`);
+    expect((await captureTmuxWithPaneState("s")).pane?.status).toBe("unknown");
+  });
+
+  test("capture text without a final newline is kept exactly", async () => {
+    mockSequence((n) => `${n} 0\n${n} end\nfirst line\nlast line, no newline  `);
+    expect(await captureTmuxWithPaneState("s")).toEqual({
+      capture: { status: "ok", output: "first line\nlast line, no newline  " },
+      pane: { status: "live" },
+    });
+  });
 });
 
 describe("killTmuxSessionResult", () => {

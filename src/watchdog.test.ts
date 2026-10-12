@@ -4220,4 +4220,78 @@ describe("runPerAgentWatchdog — one tmux client per steady-state tick", () => 
     // Includes the first tick, whose cold agent snapshot is read from disk.
     expect(await tmuxClientsPerTick("waiting", 3)).toEqual([1, 1, 1]);
   });
+
+  /**
+   * A fake `tmux` whose one-client tick sequence fails as scripted and whose
+   * exact has-session probe answers as scripted (both through the real
+   * parsers). Every other command succeeds with no output.
+   */
+  function failingTmux(
+    sequence: { exitCode: number; stdout: (nonce: string) => string; stderr: string },
+    hasSession: { exitCode: number; stderr: string },
+  ) {
+    const spawns: string[][] = [];
+    const runner = (cmd: string[], _opts?: any): any => {
+      spawns.push([...cmd]);
+      let result = { exitCode: 0, stdout: "", stderr: "" };
+      if (cmd.includes("list-panes")) {
+        const nonce = cmd[cmd.indexOf("-F") + 1]!.split(" ")[0]!;
+        result = { exitCode: sequence.exitCode, stdout: sequence.stdout(nonce), stderr: sequence.stderr };
+      } else if (cmd[1] === "has-session") {
+        result = { exitCode: hasSession.exitCode, stdout: "", stderr: hasSession.stderr };
+      }
+      return { stdout: streamOf(result.stdout), stderr: streamOf(result.stderr), exited: Promise.resolve(result.exitCode) };
+    };
+    return { runner, spawns };
+  }
+
+  const noServer = "error connecting to /private/tmp/tmux-501/default (No such file or directory)";
+  const errorRouting = [
+    {
+      // The sequence's own stderr even claims absence: only has-session decides.
+      name: "list-panes fails, has-session live → preserve, no grace",
+      sequence: { exitCode: 1, stdout: () => "", stderr: "can't find session: tmux-test1" },
+      hasSession: { exitCode: 0, stderr: "" },
+      grace: false,
+    },
+    {
+      name: "no server, has-session unknown → preserve, no grace",
+      sequence: { exitCode: 1, stdout: () => "", stderr: noServer },
+      hasSession: { exitCode: 1, stderr: noServer },
+      grace: false,
+    },
+    {
+      name: "capture fails after a valid metadata prefix, has-session missing → grace starts",
+      sequence: { exitCode: 1, stdout: (n: string) => `${n} 0\n${n} end\n`, stderr: "can't find window: 0" },
+      hasSession: { exitCode: 1, stderr: "can't find session: tmux-test1" },
+      grace: true,
+    },
+  ];
+
+  for (const c of errorRouting) {
+    test(`combined-call error routing: ${c.name}`, async () => {
+      const tmux = failingTmux(c.sequence, c.hasSession);
+      tmuxPollerSpawnCtx.set(tmux.runner);
+      setWatchdogSpawnRunner(tmux.runner);
+      setPerAgentReadState(async () => "running");
+      let existsChecks = 0;
+      setPerAgentExistsSync(() => ++existsChecks <= 2);
+      setPerAgentSleep(async () => {});
+
+      await runPerAgentWatchdog("agent-test1", tempDir);
+
+      // Every tick: the one combined call failed, then the exact has-session probe.
+      expect(tmux.spawns.filter((cmd) => cmd.includes("list-panes")).length).toBe(2);
+      expect(tmux.spawns.filter((cmd) => cmd[1] === "has-session").length).toBe(2);
+      const log = await Bun.file(join(agentDir, "agent.log")).text();
+      if (c.grace) {
+        expect(log).toContain("tmux lifecycle ended — starting 10s grace period");
+        expect(log).toContain(`capture=${c.sequence.stderr}; probe=${c.hasSession.stderr}`);
+        expect(log).not.toContain("preserving watchdog");
+      } else {
+        expect(log).toContain(`tmux observation unavailable — preserving watchdog: capture=${c.sequence.stderr}`);
+        expect(log).not.toContain("grace period");
+      }
+    });
+  }
 });

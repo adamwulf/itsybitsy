@@ -168,6 +168,7 @@ darwinTest("collector SIGKILL closes lifeline despite a later marker child", asy
   try {
     const driver = join(f.dir, "collector.ts");
     await writeFile(driver, `
+      setTimeout(() => process.exit(1), 60000); // bounded life, as for the peer
       const h = Bun.spawn([${JSON.stringify(process.execPath)}, ${JSON.stringify(f.helper)}], {detached:true,stdin:"pipe",stdout:"ignore",stderr:"ignore"});
       while (!await Bun.file(${JSON.stringify(f.ready)}).exists()) await Bun.sleep(10);
       // A concurrent marker subprocess must not inherit the lifeline write end.
@@ -189,6 +190,7 @@ darwinTest("pane session leader exit does not HUP the detached stream during dra
   try {
     const collector = join(f.dir, "collector.ts");
     await writeFile(collector, `
+      setTimeout(() => process.exit(1), 60000); // bounded life, as for the peer
       const h = Bun.spawn([${JSON.stringify(process.execPath)}, ${JSON.stringify(f.helper)}], {detached:true,stdin:"pipe",stdout:"ignore",stderr:"ignore"});
       process.on("SIGHUP", () => {});
       while (!await Bun.file(${JSON.stringify(f.ready)}).exists()) await Bun.sleep(10);

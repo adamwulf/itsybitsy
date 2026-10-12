@@ -12,7 +12,7 @@
 import { join } from "path";
 import { mkdirSync } from "fs";
 import { watch, type FSWatcher } from "node:fs";
-import { readRepoAgents, readAllAgents, isCompacting, isRateLimited, isApiError, isApiErrorRateLimited, isApiTerms, isApiSafeguard, readAgentState, hasBackgroundTasks, anyChildActive, readAgentTransient, updateAgentTransient, mutateAgentMeta, readAgentAck, agentStorageDir } from "./agents";
+import { readRepoAgents, readAgentsOfRepos, isCompacting, isRateLimited, isApiError, isApiErrorRateLimited, isApiTerms, isApiSafeguard, readAgentState, hasBackgroundTasks, anyChildActive, readAgentTransient, updateAgentTransient, mutateAgentMeta, readAgentAck, agentStorageDir } from "./agents";
 import type { Agent, AgentAck } from "./agents";
 import {
   captureTmuxOutput,
@@ -221,11 +221,17 @@ const RATE_LIMIT_RECOVERY_THRESHOLD = 5;
  */
 export type GetAllAgents = () => Promise<Agent[]>;
 
-/** State handler function signature — called on each tick for each agent */
+/**
+ * State handler function signature — called on each tick for each agent.
+ * `tickOutput` is the pane capture the per-agent loop took THIS tick; a
+ * handler reads it instead of starting another tmux client. It is undefined
+ * on the test-only global `tick()` path, which takes no capture.
+ */
 export type StateHandler = (
   agent: Agent,
   tracker: AgentTracker,
   getAllAgents: GetAllAgents,
+  tickOutput?: string,
 ) => Promise<void>;
 
 /** Registry of state handlers keyed by AgentState */
@@ -636,14 +642,26 @@ async function ackSuppresses(
  *   This belt-and-braces check guards against a future refactor that
  *   removes the resolver override — do NOT delete it as dead code.
  *
+ *   The check reads the capture the per-agent loop took this tick
+ *   (`tickOutput`): a second capture here started one more tmux client every
+ *   waiting tick for the same answer. Only the test-only global `tick()`
+ *   path, which has no tick capture, captures here.
+ *
  *   Counter is checked BEFORE `waitCounter++` so suppression pauses the
  *   counter at its previous value; it resumes when suppression lifts,
  *   preserving any in-flight backoff (`notifyInterval`).
  */
-async function handleWaiting(agent: Agent, tracker: AgentTracker, getAllAgents: GetAllAgents): Promise<void> {
+async function handleWaiting(
+  agent: Agent,
+  tracker: AgentTracker,
+  getAllAgents: GetAllAgents,
+  tickOutput?: string,
+): Promise<void> {
   const tmuxSession = agent.meta.tmux_session;
   let bgActive = false;
-  if (tmuxSession && isValidTmuxSession(tmuxSession)) {
+  if (tickOutput !== undefined) {
+    bgActive = hasBackgroundTasks(tickOutput);
+  } else if (tmuxSession && isValidTmuxSession(tmuxSession)) {
     try {
       const output = await watchdogCaptureTmuxFn(tmuxSession);
       bgActive = output !== null && hasBackgroundTasks(output);
@@ -2074,7 +2092,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       if (handler) {
         try {
           const getAllAgents = makeLazyAllAgents();
-          await handler(agent, tracker, getAllAgents);
+          await handler(agent, tracker, getAllAgents, output);
         } catch { /* don't crash */ }
       }
 
@@ -2125,9 +2143,12 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
 export const ALL_AGENTS_TTL_MS = 10_000;
 
 type ListReposFn = typeof listRepos;
-type ReadAllAgentsFn = typeof readAllAgents;
+type ReadAllAgentsFn = typeof readAgentsOfRepos;
 let listReposFn: ListReposFn = listRepos;
-let readAllAgentsFn: ReadAllAgentsFn = readAllAgents;
+// Disk only. readAllAgents would also run `tmux list-sessions` for an orphan
+// list the watchdog never reads: one extra tmux client per snapshot refresh,
+// i.e. every ALL_AGENTS_TTL_MS for each waiting agent.
+let readAllAgentsFn: ReadAllAgentsFn = readAgentsOfRepos;
 
 export function setWatchdogListRepos(fn: ListReposFn): void {
   listReposFn = fn;
@@ -2142,7 +2163,7 @@ export function setWatchdogReadAllAgents(fn: ReadAllAgentsFn): void {
 }
 
 export function resetWatchdogReadAllAgents(): void {
-  readAllAgentsFn = readAllAgents;
+  readAllAgentsFn = readAgentsOfRepos;
 }
 
 /** TTL cache for the cross-repo agent snapshot. */

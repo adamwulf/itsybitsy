@@ -14,6 +14,7 @@ import {
   readRepoAgents,
   readPendingQuestions,
   readAllAgents,
+  readAgentsOfRepos,
   computeStateFromContent,
   readAgentMeta,
   isRecentlyCreated,
@@ -5547,6 +5548,37 @@ describe("readAllAgents — listTmuxSessions cache", () => {
     resetListTmuxSessionsCache();
     await readAllAgents([{ path: tempDir, name: "test-repo" }], false);
     expect(listCalls).toBe(2);
+  });
+
+  test("readAgentsOfRepos reads the same agents as readAllAgents with no tmux client", async () => {
+    const dir = join(tempDir, ".ittybitty", "agents", "agent-r1");
+    await mkdir(dir, { recursive: true });
+    await Bun.write(join(dir, "meta.json"), JSON.stringify({
+      id: "agent-r1", session_id: "s1", tmux_session: "t1",
+      prompt: "p1", manager: "mgr", created: "2026-03-05", created_epoch: Date.now() / 1000,
+      worktree: true, worker: false, model: "sonnet", claude_pid: "1", state: "running",
+    }));
+    const tmuxCalls: string[][] = [];
+    tmuxPollerSpawnCtx.set(((args: any[]) => {
+      tmuxCalls.push(args);
+      return {
+        stdout: new ReadableStream({ start(c) { c.close(); } }),
+        stderr: new ReadableStream({ start(c) { c.close(); } }),
+        exited: Promise.resolve(0),
+      };
+    }) as any);
+    const repos = [{ path: tempDir, name: "test-repo" }];
+
+    const diskOnly = await readAgentsOfRepos(repos, false);
+    expect(tmuxCalls).toEqual([]);
+
+    const full = await readAllAgents(repos, false);
+    expect(tmuxCalls.length).toBe(1); // readAllAgents' list-sessions
+    // `age` is computed from the clock at read time, so leave it out.
+    const withoutAge = (agents: typeof full.agents) => agents.map(({ age: _age, ...rest }) => rest);
+    expect(withoutAge(diskOnly.agents)).toEqual(withoutAge(full.agents));
+    expect(diskOnly.errors).toEqual(full.errors);
+    expect(diskOnly.agents.map((a) => a.id)).toEqual(["agent-r1"]);
   });
 });
 

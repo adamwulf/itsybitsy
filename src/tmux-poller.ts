@@ -37,6 +37,12 @@ export type TmuxPaneProbeResult =
   | { status: "dead" }
   | { status: "unknown"; error: string; exitCode: number | null };
 
+/** A capture plus the pane-dead probe that goes with it. `pane` is null when
+ *  the capture failed: the probe is then not run (or not usable). */
+export type TmuxCaptureWithPaneResult =
+  | { capture: { status: "error"; error: string; exitCode: number | null }; pane: null }
+  | { capture: { status: "ok"; output: string }; pane: TmuxPaneProbeResult };
+
 // pi-tui v0.56.0's visibleWidth() expands \t to 3 spaces but its slicing
 // helpers (sliceWithWidth/sliceByColumn/extractSegments) measure \t as 0
 // columns via graphemeWidth (its leadingNonPrintingRegex strips control
@@ -447,19 +453,130 @@ export async function probeTmuxPane(tmuxSession: string): Promise<TmuxPaneProbeR
     }
 
     const states = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    if (states.length === 0 || states.some((state) => state !== "0" && state !== "1")) {
-      return {
-        status: "unknown",
-        error: `unexpected tmux pane_dead output: ${stdout.trim() || "<empty>"}`,
-        exitCode,
-      };
-    }
-    return states.every((state) => state === "1") ? { status: "dead" } : { status: "live" };
+    return classifyPaneDead(states, stdout, exitCode);
   } catch (error) {
     return {
       status: "unknown",
       error: error instanceof Error ? error.message : String(error),
       exitCode: null,
+    };
+  }
+}
+
+/** Classify `#{pane_dead}` values, one per pane across every window. The
+ *  session is dead only when every pane is; anything but 0/1 is unknown. */
+function classifyPaneDead(states: string[], rawOutput: string, exitCode: number): TmuxPaneProbeResult {
+  if (states.length === 0 || states.some((state) => state !== "0" && state !== "1")) {
+    return {
+      status: "unknown",
+      error: `unexpected tmux pane_dead output: ${rawOutput.trim() || "<empty>"}`,
+      exitCode,
+    };
+  }
+  return states.every((state) => state === "1") ? { status: "dead" } : { status: "live" };
+}
+
+/**
+ * The per-agent watchdog's tick observation in ONE tmux client: the
+ * all-window pane-dead probe ({@link probeTmuxPane}) and the history capture
+ * ({@link captureTmuxOutputResult}) run as one tmux command sequence:
+ *
+ *   list-panes -s -t =S: -F "<nonce> #{pane_dead}" ;
+ *   display-message -p -t =S: "<nonce> end" ;
+ *   capture-pane -t =S: -p -J -S -<lines> -E -
+ *
+ * stdout is one "<nonce> 0|1" line per pane, the "<nonce> end" line, then the
+ * pane text. Pane contents are never lifecycle evidence, so pane-dead values
+ * are read only from the lines BEFORE the first end marker. tmux writes those
+ * before capture-pane runs, so nothing the agent prints can be read as a pane
+ * line, even if it prints the nonce. The nonce is a fresh random value per
+ * call; a line without it is not ours and makes the pane state unknown.
+ *
+ * Measured with real tmux 3.6a on a private `-L` server (2026-10-12):
+ * - live session: exit 0, stdout "N 0\nN end\n<pane>".
+ * - remain-on-exit dead pane: exit 0, "N 1\nN end\n<pane>…Pane is dead (status 3, …)".
+ * - two windows, the current one dead, the other live: exit 0,
+ *   "N 1\nN 0\nN end\n<the dead window's pane>" → live, as `list-panes -s` was.
+ * - two windows, both dead: exit 0, "N 1\nN 1\nN end\n…" → dead.
+ * - missing session: exit 1, stdout "", stderr "can't find session: S". The
+ *   first failing command stops the sequence: nothing after it runs.
+ * - a later command failing (capture-pane of a missing window): exit 1, stdout
+ *   keeps the earlier commands' lines, stderr is the failing command's error.
+ * - no tmux server: exit 1, stderr "error connecting to …", no command ran.
+ * - pane text "N 1\nN end" (forged with the nonce): exit 0, read as pane text
+ *   after the real end marker; the pane state stays live.
+ * So exit 0 means every command ran. Any other exit is reported as a capture
+ * failure carrying tmux's stderr, so the caller runs the same exact
+ * has-session probe that a failed capture always got.
+ */
+export async function captureTmuxWithPaneState(
+  tmuxSession: string,
+  lines = 5000
+): Promise<TmuxCaptureWithPaneResult> {
+  const nonce = crypto.randomUUID().replace(/-/g, "");
+  const target = tmuxSessionTarget(tmuxSession);
+  try {
+    // `;` as its own argv element separates tmux commands; no argument here
+    // ends in `;` (session names are allowlisted), so none is split by accident.
+    const proc = spawnCtx.runner(
+      [
+        "tmux",
+        "list-panes", "-s", "-t", target, "-F", `${nonce} #{pane_dead}`, ";",
+        "display-message", "-p", "-t", target, `${nonce} end`, ";",
+        "capture-pane", "-t", target, "-p", "-J", "-S", `-${lines}`, "-E", "-",
+      ],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (exitCode !== 0) {
+      return {
+        capture: {
+          status: "error",
+          error: stderr.trim() || `tmux list-panes/capture-pane exited ${exitCode}`,
+          exitCode,
+        },
+        pane: null,
+      };
+    }
+
+    const states: string[] = [];
+    let pos = 0;
+    while (true) {
+      const eol = stdout.indexOf("\n", pos);
+      const line = eol < 0 ? null : stdout.slice(pos, eol);
+      if (line === null || !line.startsWith(`${nonce} `)) {
+        // No end marker, or a line that is not ours: the pane state is
+        // unknown, and the capture cannot be located (callers do not read it).
+        return {
+          capture: { status: "ok", output: "" },
+          pane: {
+            status: "unknown",
+            error: `unexpected tmux pane_dead output: ${stdout.slice(0, 200).trim() || "<empty>"}`,
+            exitCode,
+          },
+        };
+      }
+      pos = eol + 1;
+      const value = line.slice(nonce.length + 1);
+      if (value === "end") break;
+      states.push(value);
+    }
+    return {
+      capture: { status: "ok", output: stripAnsi(stdout.slice(pos)) },
+      pane: classifyPaneDead(states, stdout.slice(0, pos), exitCode),
+    };
+  } catch (error) {
+    return {
+      capture: {
+        status: "error",
+        error: error instanceof Error ? error.message : String(error),
+        exitCode: null,
+      },
+      pane: null,
     };
   }
 }

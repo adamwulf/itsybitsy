@@ -17,11 +17,13 @@ import type { Agent, AgentAck } from "./agents";
 import {
   captureTmuxOutput,
   captureTmuxOutputResult,
+  captureTmuxWithPaneState,
   probeTmuxPane,
   probeTmuxSession,
 } from "./tmux-poller";
 import type {
   TmuxCaptureResult,
+  TmuxCaptureWithPaneResult,
   TmuxPaneProbeResult,
   TmuxSessionProbeResult,
 } from "./tmux-poller";
@@ -1299,14 +1301,33 @@ export function resetWatchdogCaptureTmux(): void {
   watchdogCaptureTmuxFn = captureTmuxOutput;
 }
 
-/** Detailed per-agent capture. Lifecycle code must retain stderr/failure
- * details rather than collapsing unavailable observations into absence. */
-let captureTmuxResultFn: (session: string) => Promise<TmuxCaptureResult> =
-  captureTmuxOutputResult;
+/**
+ * Test seams for the tick's capture and its pane-dead probe. Production runs
+ * both in ONE tmux client ({@link captureTmuxWithPaneState}). A test that
+ * overrides either one gets the two separate calls that client stands for,
+ * so lifecycle tests can script each result on its own.
+ */
+let perAgentCaptureOverride: ((session: string) => Promise<TmuxCaptureResult>) | null = null;
+let perAgentPaneProbeOverride: ((session: string) => Promise<TmuxPaneProbeResult>) | null = null;
+
+/**
+ * The tick's tmux observation: the history capture and, when it succeeded,
+ * the authoritative all-window pane state. Lifecycle code must retain
+ * stderr/failure details rather than collapsing unavailable observations
+ * into absence.
+ */
+async function observeTickTmux(session: string): Promise<TmuxCaptureWithPaneResult> {
+  if (!perAgentCaptureOverride && !perAgentPaneProbeOverride) {
+    return captureTmuxWithPaneState(session);
+  }
+  const capture = await (perAgentCaptureOverride ?? captureTmuxOutputResult)(session);
+  if (capture.status === "error") return { capture, pane: null };
+  return { capture, pane: await (perAgentPaneProbeOverride ?? probeTmuxPane)(session) };
+}
 
 /** Legacy-compatible capture override for tests. */
 export function setPerAgentCaptureTmux(fn: (session: string) => Promise<string | null>): void {
-  captureTmuxResultFn = async (session) => {
+  perAgentCaptureOverride = async (session) => {
     const output = await fn(session);
     return output === null
       ? { status: "error", error: "tmux capture returned null", exitCode: null }
@@ -1314,15 +1335,15 @@ export function setPerAgentCaptureTmux(fn: (session: string) => Promise<string |
   };
 }
 
-/** Reset captureTmuxOutput to default */
+/** Reset the tick capture to default */
 export function resetPerAgentCaptureTmux(): void {
-  captureTmuxResultFn = captureTmuxOutputResult;
+  perAgentCaptureOverride = null;
 }
 
 /**
  * Capture the CURRENT VISIBLE pane only (`-S 0 -E -`, no history) for the
  * authoritative pre-send re-check of a startup permission prompt. The tick
- * capture ({@link captureTmuxResultFn}) intentionally reads a large history
+ * capture ({@link observeTickTmux}) intentionally reads a large history
  * window for state detection, so a prompt that has already been answered and
  * scrolled into scrollback could still classify from it — this visible-only
  * capture cannot see that stale history, so it is what actually gates the send.
@@ -1373,18 +1394,15 @@ export function resetPerAgentProbeTmuxSession(): void {
   probeTmuxSessionFn = probeTmuxSession;
 }
 
-/** Authoritative all-window pane-state probe for retained sessions. */
-let probeTmuxPaneFn: (session: string) => Promise<TmuxPaneProbeResult> =
-  probeTmuxPane;
-
+/** Override the tick's authoritative all-window pane-state probe (tests). */
 export function setPerAgentProbeTmuxPane(
   fn: (session: string) => Promise<TmuxPaneProbeResult>
 ): void {
-  probeTmuxPaneFn = fn;
+  perAgentPaneProbeOverride = fn;
 }
 
 export function resetPerAgentProbeTmuxPane(): void {
-  probeTmuxPaneFn = probeTmuxPane;
+  perAgentPaneProbeOverride = null;
 }
 
 /** Injectable readAgentMeta for testing */
@@ -1832,14 +1850,16 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       }
     }
 
-    // Check tmux session. Capture and pane probes are independent evidence:
-    // capture failures require an exact has-session absence response, while a
-    // successful capture still needs authoritative pane metadata because a
-    // remain-on-exit pane can be readable after its process has ended.
-    const capture = await captureTmuxResultFn(tmuxSession);
+    // Check tmux session. One tmux client returns the capture AND the pane
+    // probe, and they stay independent evidence: capture failures require an
+    // exact has-session absence response, while a successful capture still
+    // needs authoritative pane metadata because a remain-on-exit pane can be
+    // readable after its process has ended.
+    const observation = await observeTickTmux(tmuxSession);
     let output: string | null;
     let missingDetail = "";
-    if (capture.status === "error") {
+    if (observation.pane === null) {
+      const { capture } = observation;
       const probe = await probeTmuxSessionFn(tmuxSession);
       if (probe.status !== "missing") {
         tmuxGoneSince = null;
@@ -1863,7 +1883,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
         `capture=${observationDetail(capture.error)}; ` +
         `probe=${observationDetail(probe.error)}`;
     } else {
-      const pane = await probeTmuxPaneFn(tmuxSession);
+      const { capture, pane } = observation;
       if (pane.status === "unknown") {
         tmuxGoneSince = null;
         if (!tmuxObservationUnavailable) {

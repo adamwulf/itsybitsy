@@ -75,7 +75,7 @@ import {
   resetWatchdogReadAck,
   type AgentTracker,
 } from "./watchdog";
-import { writeAgentState, type AgentAck } from "./agents";
+import { writeAgentState, resetListTmuxSessionsCache, type AgentAck } from "./agents";
 import {
   setSendSpawnRunner,
   resetSendSpawnRunner,
@@ -4076,5 +4076,148 @@ describe("runPerAgentWatchdog — meta.transient.json persistence", () => {
 
     expect(healthChecks).toBe(0);
     expect(await Bun.file(join(agentDir, "agent.log")).exists()).toBe(false);
+  });
+});
+
+// ── tmux clients per tick ───────────────────────────────────────────────────
+
+describe("runPerAgentWatchdog — one tmux client per steady-state tick", () => {
+  let tempDir: string;
+  let agentDir: string;
+
+  function streamOf(text: string): ReadableStream<Uint8Array> {
+    return new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(text));
+        c.close();
+      },
+    });
+  }
+
+  /**
+   * A fake `tmux` that records every spawn. It splits argv on ";" as tmux does
+   * and answers each command the way real tmux 3.x did when measured: list-panes
+   * prints its -F format once per pane (one live pane here), display-message -p
+   * prints its message, capture-pane -p prints the pane, list-sessions prints
+   * the session names. Both the old separate calls and a combined sequence get
+   * realistic output, so the count is the only thing that differs.
+   */
+  function fakeTmux(pane: string) {
+    const spawns: string[][] = [];
+    const runner = (cmd: string[], _opts?: any): any => {
+      spawns.push([...cmd]);
+      let stdout = "";
+      const commands: string[][] = [[]];
+      for (const arg of cmd.slice(1)) {
+        if (arg === ";") commands.push([]);
+        else commands[commands.length - 1]!.push(arg);
+      }
+      for (const c of commands) {
+        const fIdx = c.indexOf("-F");
+        const format = fIdx >= 0 ? c[fIdx + 1]! : "#{pane_dead}";
+        if (c[0] === "list-panes") stdout += format.replace("#{pane_dead}", "0") + "\n";
+        else if (c[0] === "display-message") stdout += c[c.length - 1] + "\n";
+        else if (c[0] === "capture-pane") stdout += pane;
+        else if (c[0] === "list-sessions") stdout += "tmux-test1\n";
+      }
+      return { stdout: streamOf(stdout), stderr: streamOf(""), exited: Promise.resolve(0) };
+    };
+    return { runner, spawns };
+  }
+
+  beforeEach(async () => {
+    const { mkdtemp } = await import("fs/promises");
+    tempDir = await mkdtemp(join(tmpdir(), "ib-wd-one-tmux-"));
+    agentDir = join(tempDir, ".ittybitty", "agents", "agent-test1");
+    mkdirSync(agentDir, { recursive: true });
+
+    // No capture / pane-probe overrides: the tick must use its real tmux path.
+    resetPerAgentCaptureTmux();
+    resetPerAgentProbeTmuxPane();
+    resetPerAgentProbeTmuxSession();
+    resetPerAgentVisibleCaptureTmux();
+    resetWatchdogCaptureTmux();
+    resetWatchdogReadAllAgents();
+    setPerAgentReadMeta(async () => ({
+      meta: {
+        id: "agent-test1",
+        session_id: "sid-123",
+        tmux_session: "tmux-test1",
+        prompt: "test",
+        manager: "agent-mgr",
+        created: "2026-03-05T00:00:00Z",
+        created_epoch: 1000,
+        worktree: true,
+        worker: false,
+        model: "claude:sonnet",
+        claude_pid: "999",
+      },
+    }));
+    setPerAgentDrain(async () => {});
+    setPerAgentSpawnBroker({ setup: async () => null, process: async () => {} });
+    setWatchdogReadAck(async () => null);
+    setWatchdogReadConfig(async () => ({} as any));
+    setWatchdogListRepos(async () => [{ path: tempDir, name: "repo" }]);
+    setSendSpawnRunner(() => ({ stdout: "", exitCode: 0 }) as any);
+    setWatchdogNow(() => 1_700_000_000_000);
+    clearAllAgentsCache();
+    resetListTmuxSessionsCache();
+  });
+
+  afterEach(async () => {
+    tmuxPollerSpawnCtx.reset();
+    resetWatchdogSpawnRunner();
+    resetPerAgentExistsSync();
+    resetPerAgentReadMeta();
+    resetPerAgentReadState();
+    resetPerAgentSleep();
+    resetPerAgentDrain();
+    resetPerAgentSpawnBroker();
+    resetWatchdogReadAck();
+    resetWatchdogReadConfig();
+    resetWatchdogListRepos();
+    resetSendSpawnRunner();
+    resetWatchdogNow();
+    clearAllAgentsCache();
+    resetListTmuxSessionsCache();
+    const { rm } = await import("fs/promises");
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  /** Run `ticks` full ticks for an agent whose stored state is `state`, and
+   *  return the number of tmux clients each tick started. */
+  async function tmuxClientsPerTick(state: "running" | "complete" | "waiting", ticks: number): Promise<number[]> {
+    const tmux = fakeTmux("Claude Code v1.0.0\n[USER TASK]\nno shells\n");
+    tmuxPollerSpawnCtx.set(tmux.runner);
+    setWatchdogSpawnRunner(tmux.runner);
+    setPerAgentReadState(async () => state);
+    let existsChecks = 0;
+    setPerAgentExistsSync(() => ++existsChecks <= ticks);
+    // The loop sleeps once at the end of every tick: count the spawns since
+    // the previous sleep.
+    const perTick: number[] = [];
+    let seen = 0;
+    setPerAgentSleep(async () => {
+      perTick.push(tmux.spawns.length - seen);
+      seen = tmux.spawns.length;
+    });
+
+    await runPerAgentWatchdog("agent-test1", tempDir);
+
+    expect(tmux.spawns.every((cmd) => cmd[0] === "tmux")).toBe(true);
+    return perTick;
+  }
+
+  test("a running agent starts exactly one tmux client per tick", async () => {
+    expect(await tmuxClientsPerTick("running", 3)).toEqual([1, 1, 1]);
+  });
+
+  test("a complete agent starts exactly one tmux client per tick", async () => {
+    expect(await tmuxClientsPerTick("complete", 3)).toEqual([1, 1, 1]);
+  });
+
+  test("a waiting agent starts exactly one tmux client per tick", async () => {
+    // Includes the first tick, whose cold agent snapshot is read from disk.
+    expect(await tmuxClientsPerTick("waiting", 3)).toEqual([1, 1, 1]);
   });
 });

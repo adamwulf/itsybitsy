@@ -29,6 +29,9 @@ async function until(predicate: () => Promise<boolean> | boolean, timeout = 4000
 
 const text = (path: string) => readFile(path, "utf8").catch(() => "");
 const count = (haystack: string, needle: string) => haystack.split(needle).length - 1;
+/** A shell wait loop that also ends after ~60 s: a run that cannot signal its
+ * children (a sandboxed agent) or that dies mid-test must not leave it spinning. */
+const boundedWait = (condition: string) => `i=0; while ${condition} && [ $i -lt 3000 ]; do sleep 0.02; i=$((i+1)); done`;
 
 async function tempHome(): Promise<string> {
   const home = await mkdtemp(join(tmpdir(), "sandbox-collector-test-"));
@@ -203,7 +206,7 @@ darwinTest("a handed-over daemon role outlives the parent and dies with the daem
     import { dlopen, FFIType } from "bun:ffi";
     const lib = dlopen("/usr/lib/libSystem.B.dylib", { flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } });
     if (lib.symbols.flock(3, 6) !== 0) process.exit(3); // fd 3 must hold LOCK_EX already
-    Bun.spawn(["/bin/sh", "-c", ${JSON.stringify(`while [ -d '${home}' ]; do sleep 0.02; done`)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    Bun.spawn(["/bin/sh", "-c", ${JSON.stringify(boundedWait(`[ -d '${home}' ]`))}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
     await Bun.write(${JSON.stringify(ready)}, "");
     await Bun.sleep(30000);
   `);
@@ -834,7 +837,7 @@ darwinTest("a registering attach whose owner is gone when the rejection appears 
     writeFileSync(${JSON.stringify(exitFile)}, String(code));
     process.exit(code);
   `);
-  const owner = Bun.spawn(["/bin/sh", "-c", `"${process.execPath}" '${script}' & while [ ! -f '${release}' ]; do sleep 0.02; done`],
+  const owner = Bun.spawn(["/bin/sh", "-c", `"${process.execPath}" '${script}' & ${boundedWait(`[ ! -f '${release}' ]`)}`],
     { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
   cleanups.push(async () => { await writeFile(release, "").catch(() => {}); await owner.exited; });
   await until(() => existsSync(join(paths.inbox, a.name)), 8000); // registering
@@ -881,7 +884,7 @@ darwinTest("a successor's re-adopt scan rejects a launch whose owner just exited
     writeFileSync(${JSON.stringify(exitFile)}, String(code));
     process.exit(code);
   `);
-  const owner = Bun.spawn(["/bin/sh", "-c", `"${process.execPath}" '${script}' & while [ ! -f '${release}' ]; do sleep 0.02; done`],
+  const owner = Bun.spawn(["/bin/sh", "-c", `"${process.execPath}" '${script}' & ${boundedWait(`[ ! -f '${release}' ]`)}`],
     { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
   cleanups.push(async () => { await writeFile(release, "").catch(() => {}); await owner.exited; });
   await until(() => Bun.file(join(l.dir, "ready")).exists(), 8000);

@@ -61,6 +61,9 @@ async function fixture() {
         await Bun.write(${JSON.stringify(done)}, "finished"); process.exit(0);
       }
     }, 10);
+    // Bounded life: a run that cannot signal (a sandboxed agent) or that dies
+    // mid-test must not leave this peer polling forever.
+    setTimeout(() => process.exit(0), 60000);
   `);
   await writeFile(helper, `
     import { runSandboxLogStream } from ${JSON.stringify(join(import.meta.dir, "sandbox-log-stream.ts"))};
@@ -197,7 +200,7 @@ darwinTest("pane session leader exit does not HUP the detached stream during dra
     `);
     const leader = join(f.dir, "leader.sh");
     // bash is the session leader under the pty; its exit sends foreground HUP.
-    await writeFile(leader, `#!/bin/bash\n(${JSON.stringify(process.execPath)} ${JSON.stringify(collector)}) &\nwhile [ ! -f ${JSON.stringify(join(f.dir, "collector-ready"))} ]; do sleep 0.01; done\nexit 0\n`);
+    await writeFile(leader, `#!/bin/bash\n(${JSON.stringify(process.execPath)} ${JSON.stringify(collector)}) &\ni=0; while [ ! -f ${JSON.stringify(join(f.dir, "collector-ready"))} ] && [ $i -lt 6000 ]; do sleep 0.01; i=$((i+1)); done\nexit 0\n`);
     const driver = join(f.dir, "pty_driver.py");
     await writeFile(driver, `import os, pty\npid, fd = pty.fork()\nif pid == 0:\n    os.execl('/bin/bash', 'bash', ${JSON.stringify(leader)})\nos.waitpid(pid, 0)\nos.close(fd)\n`);
     const p = Bun.spawn(["/usr/bin/python3", driver], {stdout:"ignore",stderr:"pipe"});

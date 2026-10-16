@@ -1198,6 +1198,22 @@ describe("AgentTreeComponent favorites view", () => {
     expect(lines[lines.length - 1]).toContain("▼");
   });
 
+  // Same, with no selection: a Teams team-anchor selection deselects the
+  // Agents tree (mirrorSelectionToVisibleTree) and leaves its offset behind.
+  test("with no selection, a Favorites list that fits and then grows still shows from its top", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlat(Array.from({ length: 20 }, (_, i) => makeAgent(`agent-${i}`))));
+    for (let i = 10; i < 15; i++) tree.toggleFavorite(`agent-${i}`);
+    tree.selectAgentById("agent-14");
+    tree.deselect();
+    tree.setFavoritesOnly(true);
+    for (let i = 15; i < 18; i++) tree.toggleFavorite(`agent-${i}`);
+    const lines = tree.render(80);
+    expect(lines[0]).toContain("agent-10");
+    expect(lines.join("\n")).not.toContain("▲");
+    expect(lines[lines.length - 1]).toContain("▼");
+  });
+
   test("an agent a favorite spawned in another repo (meta.spawned_by only) is not shown", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());

@@ -192,7 +192,7 @@ export function formatTeamHeaderRow(
 export class TeamsTreeComponent implements Component {
   private _flatList: TeamFlatEntry[] = [];
   private selectedIndex = 0;
-  maxHeight = MAX_TREE_HEIGHT;
+  private _maxHeight = MAX_TREE_HEIGHT;
   private scrollOffset = 0;
   /**
    * Whether the Teams panel currently has a selected row (§17.1, symmetric with
@@ -205,6 +205,21 @@ export class TeamsTreeComponent implements Component {
   /** Favorite agent ids — member rows show a ★ for these. Set by the
    *  dashboard before render (the Agents tree owns the set). */
   favoriteAgentIds: ReadonlySet<string> = new Set();
+
+  /**
+   * Lines this tree may render, set by the sidebar before each render. A
+   * change re-runs ensureSelectedVisible (mirror AgentTree) so the selected
+   * row stays in view when the pane gets shorter.
+   */
+  get maxHeight(): number {
+    return this._maxHeight;
+  }
+
+  set maxHeight(value: number) {
+    if (value === this._maxHeight) return;
+    this._maxHeight = value;
+    if (this.hasSelection) this.ensureSelectedVisible();
+  }
 
   get flatList(): TeamFlatEntry[] {
     return this._flatList;
@@ -383,8 +398,8 @@ export class TeamsTreeComponent implements Component {
     }
 
     const lines: string[] = [];
-    // Clamp here too, without storing it: the list or maxHeight can change
-    // with no selection move (a team shrinks, the pane grows).
+    // Clamp here too, without storing it: a shorter list (setFlatList) and,
+    // with no selection, a taller pane do not re-clamp the stored offset.
     let start = Math.min(this.scrollOffset, maxScrollOffset(list.length, this.maxHeight));
 
     // §17.1: no row renders in reverse video unless a selection actually exists.

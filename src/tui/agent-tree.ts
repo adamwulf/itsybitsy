@@ -290,7 +290,7 @@ function recomputeConnectorsForVisible(entries: FlatEntry[], allAgents: Map<stri
 export class AgentTreeComponent implements Component {
   private _flatList: FlatEntry[] = [];
   private selectedIndex = 0;
-  maxHeight = MAX_TREE_HEIGHT;
+  private _maxHeight = MAX_TREE_HEIGHT;
   private scrollOffset = 0;
   private selectedId: string | null = null;
   /**
@@ -367,6 +367,23 @@ export class AgentTreeComponent implements Component {
    * Set via setFavoritesOnly() so the selection re-resolves.
    */
   favoritesOnly = false;
+
+  /**
+   * Lines this tree may render. The dashboard sets it before each render: the
+   * sidebar tree height normally, the main-area height in TREE mode (where the
+   * sidebar hides the tree). A change re-runs ensureSelectedVisible so the
+   * stored offset fits the new height — otherwise an offset computed for the
+   * tall TREE-mode pane can hide the selected row in the sidebar.
+   */
+  get maxHeight(): number {
+    return this._maxHeight;
+  }
+
+  set maxHeight(value: number) {
+    if (value === this._maxHeight) return;
+    this._maxHeight = value;
+    if (this.hasSelection) this.ensureSelectedVisible();
+  }
 
   get flatList(): FlatEntry[] {
     return this._flatList;
@@ -650,9 +667,11 @@ export class AgentTreeComponent implements Component {
     } else {
       // Clamp scrollOffset/index so the render math stays valid even with no
       // active selection (regardless of whether visibleList is empty now).
+      // Same offset clamp as ensureSelectedVisible: a list that fits shows
+      // from its top, and still does after it grows past the pane.
       const len = this.visibleList.length;
       this.selectedIndex = len > 0 ? Math.min(this.selectedIndex, len - 1) : 0;
-      this.scrollOffset = len > 0 ? Math.min(this.scrollOffset, len - 1) : 0;
+      this.scrollOffset = Math.min(this.scrollOffset, maxScrollOffset(len, this.maxHeight));
     }
   }
 
@@ -1062,9 +1081,8 @@ export class AgentTreeComponent implements Component {
     }
 
     const lines: string[] = [];
-    // Clamp here too, without storing it: the list or maxHeight can change
-    // with no selection move (agents retire, the pane grows), and tree mode
-    // renders this tree twice per frame at two heights.
+    // Clamp here too, without storing it: with no selection, nothing
+    // re-clamps the stored offset when the list shrinks or the pane grows.
     let start = Math.min(this.scrollOffset, maxScrollOffset(visible.length, this.maxHeight));
 
     // §17.1: no row renders in reverse video unless the panel actually has a

@@ -297,6 +297,17 @@ describe("TeamsTreeComponent render", () => {
     expect(lines.length).toBe(flat.length);
     expect(lines.join("\n")).not.toContain("more");
   });
+
+  test("a pane that gets shorter keeps the selected row in view", () => {
+    const { tree, flat } = overflowingTree();
+    const last = flat[flat.length - 1]!;
+    if (last.kind !== "team-member") throw new Error("expected a member row last");
+    tree.maxHeight = flat.length + 5;
+    tree.navigate(-1); // no-selection -> last row; every row fits, so no scroll
+    tree.maxHeight = MAX_TREE_HEIGHT;
+    const lines = tree.render(80);
+    expect(lines[lines.length - 1]).toContain(last.agent.id);
+  });
 });
 
 describe("teams-tree row formatters", () => {

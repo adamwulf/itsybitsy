@@ -3851,7 +3851,7 @@ describe("AgentTreeComponent scroll indicators", () => {
   });
 
   test("selected item visible at lastIndex: n=maxHeight+2, selectedIndex=lastIndex", () => {
-    // n=9, h=7, lastIndex=8: scrollDown formula must produce scrollOffset≥4 to show item 8.
+    // n=9, h=7, lastIndex=8: the stored offset is maxScrollOffset(9, 7) = 3, which shows item 8.
     const tree = makeTree(9, 7, 0);
     (tree as any).selectedIndex = 7;
     tree.moveSelection(1); // selectedIndex → 8 (lastIndex)

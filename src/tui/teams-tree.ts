@@ -26,6 +26,7 @@ import type { Selection } from "./selection";
 import { getStateColors } from "./color-scheme";
 import {
   MAX_TREE_HEIGHT,
+  maxScrollOffset,
   COMPACT_WIDTH_THRESHOLD,
   AGE_COL_WIDTH,
   displayState,
@@ -368,6 +369,9 @@ export class TeamsTreeComponent implements Component {
     } else if (this.selectedIndex === lastIndex && this.selectedIndex >= effectiveScrollOffset + this.maxHeight - topSlot) {
       this.scrollOffset = Math.max(2, this.selectedIndex - this.maxHeight + 3);
     }
+
+    // Never scroll past the end: a list that fits the pane shows from its top.
+    this.scrollOffset = Math.min(this.scrollOffset, maxScrollOffset(this._flatList.length, this.maxHeight));
   }
 
   invalidate(): void {}
@@ -379,7 +383,9 @@ export class TeamsTreeComponent implements Component {
     }
 
     const lines: string[] = [];
-    let start = this.scrollOffset;
+    // Clamp here too, without storing it: the list or maxHeight can change
+    // with no selection move (a team shrinks, the pane grows).
+    let start = Math.min(this.scrollOffset, maxScrollOffset(list.length, this.maxHeight));
 
     // §17.1: no row renders in reverse video unless a selection actually exists.
     const selectionActive = this.hasSelection && !this.suppressSelection;

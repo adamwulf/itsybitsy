@@ -216,6 +216,26 @@ describe("AgentTreeComponent", () => {
     expect(joined).toContain("more");
   });
 
+  test("scrolled to the last row, the window ends at the last row and fills the pane", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlat(Array.from({ length: 20 }, (_, i) => makeAgent(`agent-${i}`))));
+    tree.selectAgentById("agent-19");
+    const lines = tree.render(80);
+    expect(lines.length).toBe(MAX_TREE_HEIGHT);
+    expect(lines[lines.length - 1]).toContain("agent-19");
+  });
+
+  test("a pane grown tall enough for the whole list renders it unscrolled", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlat(Array.from({ length: 20 }, (_, i) => makeAgent(`agent-${i}`))));
+    tree.selectAgentById("agent-19");
+    expect(tree.render(80).join("\n")).toContain("▲");
+    tree.maxHeight = 30;
+    const lines = tree.render(80);
+    expect(lines.length).toBe(20);
+    expect(lines.join("\n")).not.toContain("more");
+  });
+
   test("moveToRepo with no repo headers does nothing harmful", () => {
     const tree = new AgentTreeComponent();
     const agents = [makeAgent("agent-1"), makeAgent("agent-2")];
@@ -1112,6 +1132,26 @@ describe("AgentTreeComponent favorites view", () => {
     expect(repoPaths(tree)).toEqual(["/repos/alpha"]);
     // The system coordinator always shows, first.
     expect(tree.visibleList[0]!.kind).toBe("system-coordinator");
+  });
+
+  // The scroll offset is shared with the Agents tab. A Favorites list that
+  // fits the pane must render from its top, even when the Agents tab was
+  // scrolled far down to the selected row.
+  test("switching to a Favorites list that fits the pane shows it unscrolled", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlat(Array.from({ length: 20 }, (_, i) => makeAgent(`agent-${i}`))));
+    for (let i = 10; i < 15; i++) tree.toggleFavorite(`agent-${i}`);
+    tree.selectAgentById("agent-14");
+    expect(tree.render(80).join("\n")).toContain("▲");
+    tree.setFavoritesOnly(true);
+    const lines = tree.render(80);
+    expect(lines.length).toBe(5);
+    expect(lines.join("\n")).not.toContain("more");
+    expect(lines[0]).toContain("agent-10");
+    // Back on the Agents tab, the selected row is scrolled into view again.
+    tree.setFavoritesOnly(false);
+    const back = tree.render(80);
+    expect(back.some((l) => l.includes("agent-14") && l.includes(REVERSE))).toBe(true);
   });
 
   test("an agent a favorite spawned in another repo (meta.spawned_by only) is not shown", () => {

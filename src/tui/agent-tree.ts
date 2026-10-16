@@ -15,6 +15,16 @@ const MIN_STATE_COL_WIDTH = 8; // minimum: length of "complete"
 export const AGE_COL_WIDTH = 3; // max age length: e.g. "27m"
 
 /**
+ * The largest useful scroll offset for `rowCount` rows in a `maxHeight`-line
+ * tree: 0 when every row fits, else the offset whose window ends at the last
+ * row (a "▲ N more" line plus maxHeight - 1 rows). A larger offset only hides
+ * rows above and leaves blank lines below. Shared by the Agents and Teams trees.
+ */
+export function maxScrollOffset(rowCount: number, maxHeight: number): number {
+  return rowCount > maxHeight ? rowCount - maxHeight + 1 : 0;
+}
+
+/**
  * Tri-state filter for the agent tree, cycled by the V key:
  *  - "all"          — every repo header is shown
  *  - "non-empty"    — only repos that have at least one agent
@@ -1016,7 +1026,8 @@ export class AgentTreeComponent implements Component {
 
   /** Keep selected index within the visible scroll window with 1-row scroll buffer */
   private ensureSelectedVisible() {
-    const lastIndex = this.visibleList.length - 1;
+    const rowCount = this.visibleList.length;
+    const lastIndex = rowCount - 1;
 
     // Scroll up: keep at least 1 row above selected (unless selected is at very top of list)
     if (this.selectedIndex > 0 && this.selectedIndex - 1 < this.scrollOffset) {
@@ -1033,6 +1044,12 @@ export class AgentTreeComponent implements Component {
     } else if (this.selectedIndex === lastIndex && this.selectedIndex >= effectiveScrollOffset + this.maxHeight - topSlot) {
       this.scrollOffset = Math.max(2, this.selectedIndex - this.maxHeight + 3);
     }
+
+    // Never scroll past the end. scrollOffset is one value for every view of
+    // this tree (the Agents and Favorites tabs, the V filter), so the scroll-up
+    // rule above can leave an offset from a longer list: a Favorites list that
+    // fits the pane must still show from its top.
+    this.scrollOffset = Math.min(this.scrollOffset, maxScrollOffset(rowCount, this.maxHeight));
   }
 
   invalidate(): void {}
@@ -1045,7 +1062,10 @@ export class AgentTreeComponent implements Component {
     }
 
     const lines: string[] = [];
-    let start = this.scrollOffset;
+    // Clamp here too, without storing it: the list or maxHeight can change
+    // with no selection move (agents retire, the pane grows), and tree mode
+    // renders this tree twice per frame at two heights.
+    let start = Math.min(this.scrollOffset, maxScrollOffset(visible.length, this.maxHeight));
 
     // §17.1: no row renders in reverse video unless the panel actually has a
     // selection. suppressSelection (focus-driven dimming) still applies on top.

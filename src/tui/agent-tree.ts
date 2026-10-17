@@ -296,8 +296,8 @@ export class AgentTreeComponent implements Component {
   /**
    * Whether the Agents panel currently has a selected row (§17.1). The panel
    * STARTS in no-selection and only enters the selected state via j/k
-   * (moveSelection), shift+j/k (moveToRepo), selectAgentById (the @-jump), or
-   * selectByRepoPath. selectedIndex is kept as a non-negative value for the
+   * (moveSelection), shift+j/k (moveToRepo), selectAgentById (the @-jump),
+   * selectByRepoPath, or selectSystemCoordinator. selectedIndex is kept as a non-negative value for the
    * scroll math even when nothing is selected; hasSelection is the single
    * source of truth for "is anything selected". When false, `selection`
    * returns null and no row renders in reverse video.

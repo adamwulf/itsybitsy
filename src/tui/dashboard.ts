@@ -1686,7 +1686,7 @@ export class DashboardComponent implements Component {
       { label: "open in Ghostty (repo/worktree) — G", action: () => agentActions.handleOpenGhostty(this) },
       { label: "open in Ghostty (Claude tmux) — C", action: () => agentActions.handleOpenGhosttyTmux(this) },
       { label: "debug snapshot — S", action: () => agentActions.handleSnapshot(this) },
-      { label: "fuzzy jump to agent/repo — @", action: () => agentActions.handleFuzzyAgent(this) },
+      { label: "fuzzy jump to agent/repo/coordinator — @", action: () => agentActions.handleFuzzyAgent(this) },
       { label: "add repo — A", action: () => agentActions.handleAddRepo(this) },
       { label: "remove repo — D", action: () => this.executeAndRefresh(() => agentActions.handleRemoveRepoSafe(this)) },
       { label: "help — ?", action: () => agentActions.handleHelp(this) },

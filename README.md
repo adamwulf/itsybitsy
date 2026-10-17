@@ -166,7 +166,7 @@ Press `?` in the dashboard for this list.
 |---|---|---|
 | Navigate | `j` / `k` / `↑↓` | Select agent |
 | | `1` / `2` / `3` | Switch sidebar (Agents / Teams / Favorites) |
-| | `@` | Fuzzy jump to agent/repo |
+| | `@` | Fuzzy jump to agent/repo/coordinator |
 | | `/` | Fuzzy mode picker |
 | Panes | `p` / `n` / `←→` | Cycle right pane mode |
 | | `d` / `g` / `e` / `q` | Diff / status / errors / questions |

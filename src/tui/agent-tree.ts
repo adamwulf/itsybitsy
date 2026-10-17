@@ -296,8 +296,8 @@ export class AgentTreeComponent implements Component {
   /**
    * Whether the Agents panel currently has a selected row (§17.1). The panel
    * STARTS in no-selection and only enters the selected state via j/k
-   * (moveSelection), shift+j/k (moveToRepo), selectAgentById (the @-jump), or
-   * selectByRepoPath. selectedIndex is kept as a non-negative value for the
+   * (moveSelection), shift+j/k (moveToRepo), selectAgentById (the @-jump),
+   * selectByRepoPath, or selectSystemCoordinator. selectedIndex is kept as a non-negative value for the
    * scroll math even when nothing is selected; hasSelection is the single
    * source of truth for "is anything selected". When false, `selection`
    * returns null and no row renders in reverse video.
@@ -745,6 +745,21 @@ export class AgentTreeComponent implements Component {
     this.updateStickyReveal();
     const visible = this.visibleList;
     const idx = visible.findIndex((f) => f.kind === "repo-header" && f.repoPath === repoPath);
+    if (idx === -1) return false;
+    this.selectedIndex = idx;
+    this.ensureSelectedVisible();
+    return true;
+  }
+
+  /** Select the system coordinator row. Returns true if found. Force-selects (§17.1). */
+  selectSystemCoordinator(): boolean {
+    // No filter ever hides the coordinator row, so its repo-less selection
+    // just clears sticky-reveal before the index is found.
+    if (!this._flatList.some((f) => f.kind === "system-coordinator")) return false;
+    this.selectedId = SYSTEM_COORDINATOR_ID;
+    this.hasSelection = true;
+    this.updateStickyReveal();
+    const idx = this.visibleList.findIndex((f) => f.kind === "system-coordinator");
     if (idx === -1) return false;
     this.selectedIndex = idx;
     this.ensureSelectedVisible();

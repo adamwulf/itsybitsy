@@ -170,6 +170,7 @@ export interface ActionCtx {
     visibleList: FlatEntry[];
     selectAgentById(id: string): boolean;
     selectByRepoPath(repoPath: string): boolean;
+    selectSystemCoordinator(): boolean;
   };
   /**
    * §17.3a / §17.3: handlers that need to gate on the FOCUSED PANEL (the
@@ -1860,17 +1861,26 @@ export function handleFuzzyAgent(ctx: ActionCtx) {
   const visible = ctx.agentTree.visibleList;
   const agentEntries = visible.filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent");
   const repoEntries = visible.filter((f): f is Extract<FlatEntry, { kind: "repo-header" }> => f.kind === "repo-header");
-  if (agentEntries.length === 0 && repoEntries.length === 0) { ctx.setNotice("No agents to search", "error"); return; }
-  const fuzzyStateColWidth = computeStateColWidth(agentEntries);
-  // Build a mixed list: repo headers first, then agents
-  type FuzzyEntry = { kind: "agent"; entry: Extract<FlatEntry, { kind: "agent" }> } | { kind: "repo"; entry: Extract<FlatEntry, { kind: "repo-header" }> };
+  const coordEntries = visible.filter((f): f is Extract<FlatEntry, { kind: "system-coordinator" }> => f.kind === "system-coordinator");
+  if (agentEntries.length === 0 && repoEntries.length === 0 && coordEntries.length === 0) { ctx.setNotice("No agents to search", "error"); return; }
+  const fuzzyStateColWidth = computeStateColWidth([...coordEntries, ...agentEntries]);
+  // Build a mixed list: the system coordinator first (the tree's top row), then repo headers, then agents
+  type FuzzyEntry =
+    | { kind: "agent"; entry: Extract<FlatEntry, { kind: "agent" }> }
+    | { kind: "repo"; entry: Extract<FlatEntry, { kind: "repo-header" }> }
+    | { kind: "coordinator"; entry: Extract<FlatEntry, { kind: "system-coordinator" }> };
   const entries: FuzzyEntry[] = [
+    ...coordEntries.map((e) => ({ kind: "coordinator" as const, entry: e })),
     ...repoEntries.map((e) => ({ kind: "repo" as const, entry: e })),
     ...agentEntries.map((e) => ({ kind: "agent" as const, entry: e })),
   ];
   const allItems = entries.map((e) => {
     if (e.kind === "repo") {
       return `${e.entry.repoName}/  (repo)`;
+    }
+    if (e.kind === "coordinator") {
+      const state = displayState(e.entry.state);
+      return `coordinator  ${state.padEnd(fuzzyStateColWidth)}  ${e.entry.age.padStart(AGE_COL_WIDTH)}  (system coordinator)`;
     }
     const promptText = (e.entry.agent.meta.summary ?? e.entry.agent.meta.prompt).replace(/\n/g, " ");
     const state = displayState(e.entry.agent.state);
@@ -1881,7 +1891,7 @@ export function handleFuzzyAgent(ctx: ActionCtx) {
   });
   ctx.showDialog({
     type: "fuzzy",
-    prompt: "Jump to agent or repo",
+    prompt: "Jump to agent, repo, or coordinator",
     query: "",
     allItems,
     filteredIndices: allItems.map((_, i) => i),
@@ -1902,7 +1912,13 @@ export function handleFuzzyAgent(ctx: ActionCtx) {
       // @-jump"). The Favorites tab already shows the Agents tree, so it stays.
       ctx.setActiveSelectionSource("agents");
       if (ctx.sidebarMode === "teams") ctx.setSidebarMode("agents");
-      if (selected.kind === "repo") {
+      if (selected.kind === "coordinator") {
+        // syncSelectedAgent switches the main area to the coordinator's own
+        // full-width view, so no pane mode is set here.
+        ctx.agentTree.selectSystemCoordinator();
+        ctx.syncSelectedAgent();
+        ctx.tui?.requestRender();
+      } else if (selected.kind === "repo") {
         ctx.agentTree.selectByRepoPath(selected.entry.repoPath);
         ctx.syncSelectedAgent();
         ctx.jumpToMode("REPO");
@@ -2108,7 +2124,7 @@ export function handleHelp(ctx: ActionCtx) {
       header("Navigation"),
       row("j / k / ↑↓", "select agent"),
       row("1 / 2 / 3", "switch sidebar (Agents / Teams / Favorites)"),
-      row("@", "fuzzy jump to agent/repo"),
+      row("@", "fuzzy jump to agent/repo/coordinator"),
       row("/", "fuzzy mode picker"),
       "",
       header("Panes"),

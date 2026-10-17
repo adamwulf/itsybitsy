@@ -751,6 +751,21 @@ export class AgentTreeComponent implements Component {
     return true;
   }
 
+  /** Select the system coordinator row. Returns true if found. Force-selects (§17.1). */
+  selectSystemCoordinator(): boolean {
+    // No filter ever hides the coordinator row, so its repo-less selection
+    // just clears sticky-reveal before the index is found.
+    if (!this._flatList.some((f) => f.kind === "system-coordinator")) return false;
+    this.selectedId = SYSTEM_COORDINATOR_ID;
+    this.hasSelection = true;
+    this.updateStickyReveal();
+    const idx = this.visibleList.findIndex((f) => f.kind === "system-coordinator");
+    if (idx === -1) return false;
+    this.selectedIndex = idx;
+    this.ensureSelectedVisible();
+    return true;
+  }
+
   /**
    * Return the tree to the no-selection state (§17.1): `selection` becomes null
    * and no row renders in reverse video. selectedIndex/scrollOffset are kept as

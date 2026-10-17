@@ -2,11 +2,11 @@ import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from
 import { chmod, mkdtemp, readdir, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import { makeAgent, makeFlatAgent, makeFlatRepoHeader, makeSpawnResult, waitFor, waitForValue } from "../test-utils";
+import { makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, makeSpawnResult, waitFor, waitForValue } from "../test-utils";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
 import type { ActionCtx } from "./agent-actions";
-import type { DialogState } from "./dialog-handler";
+import { fuzzyFilterIndices, type DialogState } from "./dialog-handler";
 import type { PaneMode } from "./pane-manager";
 import { assertDialog } from "./test-helpers";
 import { setStagedSenderForTests, resetStagedSenderForTests } from "./message-send";
@@ -159,6 +159,7 @@ function makeMockCtx(overrides?: {
       visibleList: overrides?.flatList ?? [],
       selectAgentById: () => true,
       selectByRepoPath: () => true,
+      selectSystemCoordinator: () => true,
     },
     // §17 ActionCtx additions: a focus handle, a teams-tree selection handle,
     // and a teamSend ctx field. Defaults: focus on agent-tree, no teams
@@ -1074,6 +1075,49 @@ describe("handleFuzzyAgent nickname search", () => {
     handleFuzzyAgent(ctx);
     const d = assertDialog(dialogs[0]!, "fuzzy");
     expect(d.allItems.some((s) => s.includes("agent-fuzz2"))).toBe(true);
+  });
+});
+
+describe("handleFuzzyAgent system coordinator", () => {
+  test("lists the system coordinator first, and 'coor' matches it", () => {
+    const agent = makeAgent({ id: "agent-fuzz3" });
+    const { ctx, dialogs } = makeMockCtx({
+      flatList: [makeFlatSystemCoordinator("running", "5m"), makeFlatRepoHeader("/tmp/some/repo"), makeFlatAgent(agent)],
+    });
+    handleFuzzyAgent(ctx);
+    const d = assertDialog(dialogs[0]!, "fuzzy");
+    expect(d.allItems[0]).toContain("coordinator");
+    expect(d.allItems[0]).toContain("(system coordinator)");
+    expect(d.allItems[0]).toContain("running");
+    expect(fuzzyFilterIndices(d.allItems, "coor")).toContain(0);
+  });
+
+  test("opens with only the system coordinator in the list", () => {
+    const { ctx, dialogs, notices } = makeMockCtx({ flatList: [makeFlatSystemCoordinator()] });
+    handleFuzzyAgent(ctx);
+    expect(notices).toEqual([]);
+    expect(assertDialog(dialogs[0]!, "fuzzy").allItems).toHaveLength(1);
+  });
+
+  test("selecting it selects the coordinator row and syncs, without a pane-mode jump", () => {
+    const { ctx, dialogs, setFocusCalls, setSidebarModeCalls, setActiveSelectionSourceCalls } = makeMockCtx({
+      focus: "teams-tree",
+      sidebarMode: "teams",
+      activeSelectionSource: "teams",
+      flatList: [makeFlatSystemCoordinator(), makeFlatAgent(makeAgent({ id: "agent-fuzz4" }))],
+    });
+    const calls: string[] = [];
+    ctx.agentTree.selectAgentById = () => { calls.push("selectAgentById"); return true; };
+    ctx.agentTree.selectSystemCoordinator = () => { calls.push("selectSystemCoordinator"); return true; };
+    ctx.syncSelectedAgent = () => { calls.push("syncSelectedAgent"); };
+    ctx.jumpToMode = (mode) => { calls.push(`jumpToMode:${mode}`); };
+    handleFuzzyAgent(ctx);
+    const d = assertDialog(dialogs[0]!, "fuzzy");
+    d.onSelect(0);
+    expect(calls).toEqual(["selectSystemCoordinator", "syncSelectedAgent"]);
+    expect(setFocusCalls).toEqual(["agent-tree"]);
+    expect(setSidebarModeCalls).toEqual(["agents"]);
+    expect(setActiveSelectionSourceCalls).toEqual(["agents"]);
   });
 });
 

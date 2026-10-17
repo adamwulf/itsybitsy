@@ -1346,6 +1346,30 @@ describe("AgentTreeComponent favorites view", () => {
     expect(tree.isSystemCoordinatorSelected).toBe(true);
   });
 
+  test("selectSystemCoordinator force-selects the coordinator (the @-jump)", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFixture());
+    tree.toggleFavorite("mgr");
+    tree.setFavoritesOnly(true);
+    // From a sticky-revealed favoriteless header: the jump lands on the
+    // coordinator and the header drops out again.
+    expect(tree.selectByRepoPath("/repos/gamma")).toBe(true);
+    expect(tree.selectSystemCoordinator()).toBe(true);
+    expect(tree.isSystemCoordinatorSelected).toBe(true);
+    expect(repoPaths(tree)).toEqual(["/repos/alpha"]);
+    // From no-selection.
+    tree.deselect();
+    expect(tree.selectSystemCoordinator()).toBe(true);
+    expect(tree.isSystemCoordinatorSelected).toBe(true);
+  });
+
+  test("selectSystemCoordinator returns false when there is no coordinator row", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFixture().filter((f) => f.kind !== "system-coordinator"));
+    expect(tree.selectSystemCoordinator()).toBe(false);
+    expect(tree.selection).toBeNull();
+  });
+
   test("connectors are rebuilt when a non-favorite manager is hidden", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());

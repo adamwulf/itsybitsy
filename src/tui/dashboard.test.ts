@@ -7829,6 +7829,6 @@ describe("tabs on screen under an overlay", () => {
     // The dialog IS the overlay, so a tab in one of its items overflows at any column.
     const { dashboard, composite } = dashboardWith(tabPromptAgents((i) => `\tfrom x.rb:${i}`));
     dashboard.handleInput("@");
-    expectRowsFit(dashboard, composite, "Jump to agent or repo");
+    expectRowsFit(dashboard, composite, "Jump to agent, repo, or coordinator");
   });
 });

@@ -3258,11 +3258,11 @@ export class DashboardComponent implements Component {
       this.systemDashboard.displayHeight = availableHeight;
       mainLines = [mainTitleSep, ...this.systemDashboard.render(mainWidth)];
     } else if (isTreeMode) {
-      // TREE mode: full-height tree in the main area.
-      // IMPORTANT: The sidebar renders the same AgentTreeComponent in compact mode.
-      // The main area render below runs FIRST to set maxHeight for the full tree,
-      // then the sidebar render (inside mergeSidebarAndMain) resets maxHeight for compact.
-      // This order is safe because sidebar.render() sets agentTree.maxHeight internally.
+      // TREE mode: full-height tree in the main area. The sidebar hides its
+      // tree in this mode (sidebar.hideTree), so this tall maxHeight stays set
+      // until a later sidebar render sets the compact height. The maxHeight
+      // setter re-runs the selection scroll then, so the sidebar shows the
+      // selected row again.
       this.agentTree.maxHeight = availableHeight;
       mainLines = [mainTitleSep, ...this.agentTree.render(mainWidth)];
     } else {

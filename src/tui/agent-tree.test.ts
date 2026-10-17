@@ -216,6 +216,41 @@ describe("AgentTreeComponent", () => {
     expect(joined).toContain("more");
   });
 
+  test("scrolled to the last row, the window ends at the last row and fills the pane", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlat(Array.from({ length: 20 }, (_, i) => makeAgent(`agent-${i}`))));
+    tree.selectAgentById("agent-19");
+    const lines = tree.render(80);
+    expect(lines.length).toBe(MAX_TREE_HEIGHT);
+    expect(lines[lines.length - 1]).toContain("agent-19");
+  });
+
+  test("a pane grown tall enough for the whole list renders it unscrolled", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlat(Array.from({ length: 20 }, (_, i) => makeAgent(`agent-${i}`))));
+    tree.selectAgentById("agent-19");
+    expect(tree.render(80).join("\n")).toContain("▲");
+    tree.maxHeight = 30;
+    const lines = tree.render(80);
+    expect(lines.length).toBe(20);
+    expect(lines.join("\n")).not.toContain("more");
+  });
+
+  // TREE mode sets a tall maxHeight and the sidebar hides its tree, so list
+  // updates re-scroll the selection for the tall pane. Back in the sidebar,
+  // the selected row must be in view again.
+  test("the selected row is in view again after a tall-pane round trip", () => {
+    const tree = new AgentTreeComponent();
+    const flat = makeFlat(Array.from({ length: 20 }, (_, i) => makeAgent(`agent-${i}`)));
+    tree.setFlatList(flat);
+    tree.selectAgentById("agent-14");
+    tree.maxHeight = 40;
+    tree.setFlatList(flat); // a watcher update while in TREE mode
+    tree.maxHeight = MAX_TREE_HEIGHT;
+    const lines = tree.render(80);
+    expect(lines.some((l) => l.includes("agent-14") && l.includes(REVERSE))).toBe(true);
+  });
+
   test("moveToRepo with no repo headers does nothing harmful", () => {
     const tree = new AgentTreeComponent();
     const agents = [makeAgent("agent-1"), makeAgent("agent-2")];
@@ -1112,6 +1147,71 @@ describe("AgentTreeComponent favorites view", () => {
     expect(repoPaths(tree)).toEqual(["/repos/alpha"]);
     // The system coordinator always shows, first.
     expect(tree.visibleList[0]!.kind).toBe("system-coordinator");
+  });
+
+  // The scroll offset is shared with the Agents tab. A Favorites list that
+  // fits the pane must render from its top, even when the Agents tab was
+  // scrolled far down to the selected row.
+  test("switching to a Favorites list that fits the pane shows it unscrolled", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlat(Array.from({ length: 20 }, (_, i) => makeAgent(`agent-${i}`))));
+    for (let i = 10; i < 15; i++) tree.toggleFavorite(`agent-${i}`);
+    tree.selectAgentById("agent-14");
+    expect(tree.render(80).join("\n")).toContain("▲");
+    tree.setFavoritesOnly(true);
+    const lines = tree.render(80);
+    expect(lines.length).toBe(5);
+    expect(lines.join("\n")).not.toContain("more");
+    expect(lines[0]).toContain("agent-10");
+    // Back on the Agents tab, the selected row is scrolled into view again.
+    tree.setFavoritesOnly(false);
+    const back = tree.render(80);
+    expect(back.some((l) => l.includes("agent-14") && l.includes(REVERSE))).toBe(true);
+  });
+
+  // The sidebar sets each tab's maxHeight only at the next render. With the
+  // tree shrunk ({), Agents gets 5 lines and a 6-row Favorites list gets 4:
+  // the tab switch scrolls at height 5, the render draws at height 4.
+  test("switching to a Favorites list drawn at a smaller height keeps the selected row in view", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlat(Array.from({ length: 20 }, (_, i) => makeAgent(`agent-${i}`))));
+    for (let i = 10; i < 15; i++) tree.toggleFavorite(`agent-${i}`);
+    tree.maxHeight = 5;
+    tree.selectAgentById("agent-15"); // not a favorite: kept by the selected-row carve-out
+    tree.setFavoritesOnly(true);
+    tree.maxHeight = 4;
+    const lines = tree.render(80);
+    expect(lines.length).toBe(4);
+    expect(lines.some((l) => l.includes("agent-15") && l.includes(REVERSE))).toBe(true);
+  });
+
+  test("a Favorites list that fits and then grows past the pane still shows from its top", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlat(Array.from({ length: 20 }, (_, i) => makeAgent(`agent-${i}`))));
+    for (let i = 10; i < 15; i++) tree.toggleFavorite(`agent-${i}`);
+    tree.selectAgentById("agent-14");
+    tree.setFavoritesOnly(true);
+    for (let i = 15; i < 18; i++) tree.toggleFavorite(`agent-${i}`);
+    const lines = tree.render(80);
+    expect(lines[0]).toContain("agent-10");
+    expect(lines.join("\n")).not.toContain("▲");
+    expect(lines[lines.length - 1]).toContain("▼");
+  });
+
+  // Same, with no selection: a Teams team-anchor selection deselects the
+  // Agents tree (mirrorSelectionToVisibleTree) and leaves its offset behind.
+  test("with no selection, a Favorites list that fits and then grows still shows from its top", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(makeFlat(Array.from({ length: 20 }, (_, i) => makeAgent(`agent-${i}`))));
+    for (let i = 10; i < 15; i++) tree.toggleFavorite(`agent-${i}`);
+    tree.selectAgentById("agent-14");
+    tree.deselect();
+    tree.setFavoritesOnly(true);
+    for (let i = 15; i < 18; i++) tree.toggleFavorite(`agent-${i}`);
+    const lines = tree.render(80);
+    expect(lines[0]).toContain("agent-10");
+    expect(lines.join("\n")).not.toContain("▲");
+    expect(lines[lines.length - 1]).toContain("▼");
   });
 
   test("an agent a favorite spawned in another repo (meta.spawned_by only) is not shown", () => {

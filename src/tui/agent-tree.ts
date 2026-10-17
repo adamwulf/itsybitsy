@@ -15,6 +15,16 @@ const MIN_STATE_COL_WIDTH = 8; // minimum: length of "complete"
 export const AGE_COL_WIDTH = 3; // max age length: e.g. "27m"
 
 /**
+ * The largest useful scroll offset for `rowCount` rows in a `maxHeight`-line
+ * tree: 0 when every row fits, else the offset whose window ends at the last
+ * row (a "▲ N more" line plus maxHeight - 1 rows). A larger offset only hides
+ * rows above and leaves blank lines below. Shared by the Agents and Teams trees.
+ */
+export function maxScrollOffset(rowCount: number, maxHeight: number): number {
+  return rowCount > maxHeight ? rowCount - maxHeight + 1 : 0;
+}
+
+/**
  * Tri-state filter for the agent tree, cycled by the V key:
  *  - "all"          — every repo header is shown
  *  - "non-empty"    — only repos that have at least one agent
@@ -280,7 +290,7 @@ function recomputeConnectorsForVisible(entries: FlatEntry[], allAgents: Map<stri
 export class AgentTreeComponent implements Component {
   private _flatList: FlatEntry[] = [];
   private selectedIndex = 0;
-  maxHeight = MAX_TREE_HEIGHT;
+  private _maxHeight = MAX_TREE_HEIGHT;
   private scrollOffset = 0;
   private selectedId: string | null = null;
   /**
@@ -357,6 +367,23 @@ export class AgentTreeComponent implements Component {
    * Set via setFavoritesOnly() so the selection re-resolves.
    */
   favoritesOnly = false;
+
+  /**
+   * Lines this tree may render. The dashboard sets it before each render: the
+   * sidebar tree height normally, the main-area height in TREE mode (where the
+   * sidebar hides the tree). A change re-runs ensureSelectedVisible so the
+   * stored offset fits the new height — otherwise an offset computed for the
+   * tall TREE-mode pane can hide the selected row in the sidebar.
+   */
+  get maxHeight(): number {
+    return this._maxHeight;
+  }
+
+  set maxHeight(value: number) {
+    if (value === this._maxHeight) return;
+    this._maxHeight = value;
+    if (this.hasSelection) this.ensureSelectedVisible();
+  }
 
   get flatList(): FlatEntry[] {
     return this._flatList;
@@ -640,9 +667,11 @@ export class AgentTreeComponent implements Component {
     } else {
       // Clamp scrollOffset/index so the render math stays valid even with no
       // active selection (regardless of whether visibleList is empty now).
+      // Same offset clamp as ensureSelectedVisible: a list that fits shows
+      // from its top, and still does after it grows past the pane.
       const len = this.visibleList.length;
       this.selectedIndex = len > 0 ? Math.min(this.selectedIndex, len - 1) : 0;
-      this.scrollOffset = len > 0 ? Math.min(this.scrollOffset, len - 1) : 0;
+      this.scrollOffset = Math.min(this.scrollOffset, maxScrollOffset(len, this.maxHeight));
     }
   }
 
@@ -1016,7 +1045,8 @@ export class AgentTreeComponent implements Component {
 
   /** Keep selected index within the visible scroll window with 1-row scroll buffer */
   private ensureSelectedVisible() {
-    const lastIndex = this.visibleList.length - 1;
+    const rowCount = this.visibleList.length;
+    const lastIndex = rowCount - 1;
 
     // Scroll up: keep at least 1 row above selected (unless selected is at very top of list)
     if (this.selectedIndex > 0 && this.selectedIndex - 1 < this.scrollOffset) {
@@ -1033,6 +1063,12 @@ export class AgentTreeComponent implements Component {
     } else if (this.selectedIndex === lastIndex && this.selectedIndex >= effectiveScrollOffset + this.maxHeight - topSlot) {
       this.scrollOffset = Math.max(2, this.selectedIndex - this.maxHeight + 3);
     }
+
+    // Never scroll past the end. scrollOffset is one value for every view of
+    // this tree (the Agents and Favorites tabs, the V filter), so the scroll-up
+    // rule above can leave an offset from a longer list: a Favorites list that
+    // fits the pane must still show from its top.
+    this.scrollOffset = Math.min(this.scrollOffset, maxScrollOffset(rowCount, this.maxHeight));
   }
 
   invalidate(): void {}
@@ -1045,7 +1081,9 @@ export class AgentTreeComponent implements Component {
     }
 
     const lines: string[] = [];
-    let start = this.scrollOffset;
+    // Clamp here too, without storing it: with no selection, nothing
+    // re-clamps the stored offset when the list shrinks or the pane grows.
+    let start = Math.min(this.scrollOffset, maxScrollOffset(visible.length, this.maxHeight));
 
     // §17.1: no row renders in reverse video unless the panel actually has a
     // selection. suppressSelection (focus-driven dimming) still applies on top.

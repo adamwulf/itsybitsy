@@ -262,6 +262,52 @@ describe("TeamsTreeComponent render", () => {
     const joined = tree.render(80).join("\n");
     expect(joined).toContain("more");
   });
+
+  /** A tree whose rows (a header + one member per team) overflow the window. */
+  function overflowingTree(): { tree: TeamsTreeComponent; flat: TeamFlatEntry[] } {
+    const agents: Agent[] = [];
+    const teams: Array<{ name: string } & Team> = [];
+    for (let i = 0; i < MAX_TREE_HEIGHT + 5; i++) {
+      const id = `m${i}`;
+      agents.push(makeAgent(id, "api"));
+      teams.push(makeTeam(`team${i}`, [id]));
+    }
+    const tree = new TeamsTreeComponent();
+    const flat = flattenTeamsTree(teams, byId(agents));
+    tree.setFlatList(flat);
+    return { tree, flat };
+  }
+
+  test("scrolled to the last row, the window ends at the last row and fills the pane", () => {
+    const { tree, flat } = overflowingTree();
+    const last = flat[flat.length - 1]!;
+    if (last.kind !== "team-member") throw new Error("expected a member row last");
+    tree.navigate(-1); // no-selection -> last row
+    const lines = tree.render(80);
+    expect(lines.length).toBe(MAX_TREE_HEIGHT);
+    expect(lines[lines.length - 1]).toContain(last.agent.id);
+  });
+
+  test("a pane grown tall enough for every row renders them unscrolled", () => {
+    const { tree, flat } = overflowingTree();
+    tree.navigate(-1); // no-selection -> last row
+    expect(tree.render(80).join("\n")).toContain("▲");
+    tree.maxHeight = flat.length + 5;
+    const lines = tree.render(80);
+    expect(lines.length).toBe(flat.length);
+    expect(lines.join("\n")).not.toContain("more");
+  });
+
+  test("a pane that gets shorter keeps the selected row in view", () => {
+    const { tree, flat } = overflowingTree();
+    const last = flat[flat.length - 1]!;
+    if (last.kind !== "team-member") throw new Error("expected a member row last");
+    tree.maxHeight = flat.length + 5;
+    tree.navigate(-1); // no-selection -> last row; every row fits, so no scroll
+    tree.maxHeight = MAX_TREE_HEIGHT;
+    const lines = tree.render(80);
+    expect(lines[lines.length - 1]).toContain(last.agent.id);
+  });
 });
 
 describe("teams-tree row formatters", () => {

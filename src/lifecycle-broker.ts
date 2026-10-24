@@ -14,7 +14,8 @@
  * agent's WATCHDOG runs unsandboxed, so the sandboxed command hands it the
  * request and waits. The queue, the file format and the at-most-once handling
  * are the spawn broker's; a request that carries an `op` field is a lifecycle
- * request and is dispatched here (except `op: "ask"`, which is ask-broker.ts).
+ * request and is dispatched here (except `op: "ask"`, which is ask-broker.ts,
+ * and `op: "send"`, which is send-broker.ts).
  *
  *   sandboxed `ib retire <id>`  ──request.json──▶  the caller's own watchdog
  *        (client, this file)                        (server, this file)

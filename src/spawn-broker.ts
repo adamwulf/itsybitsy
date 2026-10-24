@@ -32,9 +32,9 @@
  *
  * The same queue also carries the other commands a sandboxed agent cannot run
  * itself. A request with an `op` field is not a spawn: `op: "ask"` (`ib ask`)
- * is handed to ask-broker.ts and every other op (the lifecycle commands) to
- * lifecycle-broker.ts. Both share the transport, the routing rule and the
- * requester check defined here.
+ * is handed to ask-broker.ts, `op: "send"` (`ib send`) to send-broker.ts, and
+ * every other op (the lifecycle commands) to lifecycle-broker.ts. They share
+ * the transport, the routing rule and the requester check defined here.
  *
  * Known limitation (SPEC-SANDBOX §4C.6): while a spawner still holds a WRITE
  * grant on `.ittybitty/agents` it can write another agent's request directory in
@@ -59,6 +59,7 @@ import type { SealVerification } from "./agent-seal";
 import type { LifecycleServerDeps } from "./lifecycle-broker";
 import { resolveSandboxEnabled } from "./sandbox";
 import { isSandboxedProcess } from "./sandbox-detect";
+import type { SendServerDeps } from "./send-broker";
 
 export const SPAWN_REQUEST_DIRNAME = "spawn-requests";
 export const SPAWN_RESULT_DIRNAME = "spawn-results";
@@ -300,7 +301,7 @@ export async function routeNewAgentThroughWatchdog(
 
 /**
  * The routing rule for the commands that keep a direct path (the lifecycle
- * commands and `ib ask`). Returns the caller to route to its watchdog, or null
+ * commands, `ib ask` and `ib send`). Returns the caller to route to its watchdog, or null
  * when the caller must run the command directly, exactly as before the brokers
  * existed. Only one kind of caller is routed: a worktree agent inside its own
  * itsybitsy sandbox. Everyone else keeps the direct path:
@@ -350,6 +351,8 @@ export interface SpawnServerDeps {
   lifecycle?: LifecycleServerDeps;
   /** Seam for the `ib ask` request handled by ask-broker.ts. */
   askQuestion?: (repoPath: string, agentId: string, question: string) => Promise<IbCommandResult>;
+  /** Seams for the `ib send` request handled by send-broker.ts. */
+  send?: SendServerDeps;
 }
 
 type ParsedRequest = { ok: true; request: SpawnRequest } | { ok: false; error: string };
@@ -547,8 +550,9 @@ export async function verifyBrokerRequester(
 
 /**
  * The `op` field of a request. A request that names an `op` is not a spawn:
- * `"ask"` is a question (ask-broker.ts), and every other value is left to the
- * lifecycle broker (lifecycle-broker.ts), which refuses the ones it does not know.
+ * `"ask"` is a question (ask-broker.ts), `"send"` is a message (send-broker.ts),
+ * and every other value is left to the lifecycle broker (lifecycle-broker.ts),
+ * which refuses the ones it does not know.
  */
 function requestOp(text: string): { present: false } | { present: true; op: unknown } {
   try {
@@ -570,10 +574,14 @@ async function handleOneRequest(
 ): Promise<IbCommandResult> {
   const named = requestOp(text);
   if (named.present) {
-    // Lazy imports: both modules import this one.
+    // Lazy imports: these modules import this one.
     if (named.op === "ask") {
       const { handleAskRequest } = await import("./ask-broker");
       return handleAskRequest({ agentId, repoPath, agentDir, id, text }, deps);
+    }
+    if (named.op === "send") {
+      const { handleSendRequest } = await import("./send-broker");
+      return handleSendRequest({ agentId, repoPath, agentDir, id, text }, deps);
     }
     const { handleLifecycleRequest } = await import("./lifecycle-broker");
     return handleLifecycleRequest({ agentId, repoPath, agentDir, id, text }, deps);

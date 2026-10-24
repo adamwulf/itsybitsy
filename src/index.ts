@@ -1906,11 +1906,26 @@ export async function main() {
       }
 
       // Resolve message content per precedence: inline > file > stdin.
-      const resolveMessageBody = async (): Promise<string> => {
+      const readMessageBody = async (): Promise<string> => {
         if (inlineMessage) return inlineMessage;
         if (fileContent !== undefined) return fileContent;
         return readStdinIfPiped();
       };
+      // Read at most once: the broker below may read it before the direct path does.
+      let messageBody: Promise<string> | undefined;
+      const resolveMessageBody = (): Promise<string> => (messageBody ??= readMessageBody());
+
+      // A sandboxed WORKTREE agent cannot list other repos' agents, so it asks
+      // its own — unsandboxed — watchdog to resolve the target and send. The
+      // message travels as text: the file and stdin are read here, inside the
+      // sandbox. Null for every other caller, and when the watchdog cannot take
+      // the request (not live, or older than the broker); those send directly
+      // as before. See routeSendThroughWatchdog.
+      {
+        const { routeSendThroughWatchdog } = await import("./send-broker");
+        const brokered = await routeSendThroughWatchdog({ target, fromAgent, readMessage: resolveMessageBody, usage });
+        if (brokered) await printAndExit(brokered);
+      }
 
       const { agent: resolvedAgent, isSystemCoordinator, team } = await resolveTarget(target, repos);
 

@@ -1053,6 +1053,38 @@ describe("sendMessage outbox integration", () => {
     expect(queued.length).toBe(1);
     expect(queued[0]!.message).toBe("keepme");
   });
+
+  // `tmux_session` comes from the recipient's own meta.json, which that agent
+  // can write. A name that is not a plain session name (here a pane target in
+  // another session) must never reach tmux.
+  test("an invalid tmux session name is refused: nothing queued, no tmux call", async () => {
+    const agent = _makeAgent({
+      id: "agent-abc",
+      repoPath: tempDir,
+      repoName: "r",
+      state: "running" as AgentState,
+      meta: { tmux_session: "other-session:0.1" } as AgentMeta,
+    });
+    const result = await sendMessage(agent, "hello", { cwd: "/" });
+    expect(result).toEqual({ ok: false, exitCode: 1, stdout: "", stderr: "Invalid tmux session name: other-session:0.1" });
+    expect(spawnCalls).toEqual([]);
+    const { readOutbox } = await import("./outbox");
+    expect(await readOutbox(queueDir)).toEqual([]);
+  });
+
+  test("deliverMessage refuses an invalid tmux session name before any tmux call", async () => {
+    const { deliverMessage } = await import("./ib-commands");
+    const agent = _makeAgent({
+      id: "agent-abc",
+      repoPath: tempDir,
+      repoName: "r",
+      state: "running" as AgentState,
+      meta: { tmux_session: "=victim:" } as AgentMeta,
+    });
+    const result = await deliverMessage(agent, { id: "m1", message: "hello", fromAgent: "", raw: false, enqueuedAtMs: 0 });
+    expect(result).toEqual({ ok: false, exitCode: 1, stdout: "", stderr: "Invalid tmux session name: =victim:" });
+    expect(spawnCalls).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------

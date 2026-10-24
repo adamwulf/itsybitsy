@@ -1488,8 +1488,8 @@ export function resetPerAgentDrain(): void {
  * cannot spawn a child itself, so it drops a request file in this agent's own
  * directory and this — unsandboxed — watchdog performs the spawn. The same
  * queue carries the lifecycle commands a sandboxed agent cannot run itself
- * (lifecycle-broker.ts) and its `ib ask` questions (ask-broker.ts); `process`
- * handles every kind. `setup` makes
+ * (lifecycle-broker.ts), its `ib ask` questions (ask-broker.ts) and its
+ * `ib send` messages (send-broker.ts); `process` handles every kind. `setup` makes
  * the queue directories and returns the request directory to watch (null = no
  * watch); `process` handles whatever is queued. Both are lazy imports for the
  * same cycle-avoidance reason as the outbox drain, and both are injectable so

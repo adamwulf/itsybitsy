@@ -4016,6 +4016,11 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
   if (!tmuxSession) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Agent has no tmux session" };
   }
+  // The name comes from the recipient's meta.json, which that agent can write.
+  // Never hand tmux a target that is not a plain session name.
+  if (!isValidTmuxSession(tmuxSession)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid tmux session name: ${tmuxSession}` };
+  }
 
   // Verify session exists
   const hasSessionProc = sendSpawnCtx.runner(
@@ -4317,6 +4322,11 @@ export async function sendMessage(
   if (!tmuxSession) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Agent has no tmux session" };
   }
+  // deliverMessage refuses it too; refusing here as well queues nothing that
+  // could never be delivered.
+  if (!isValidTmuxSession(tmuxSession)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid tmux session name: ${tmuxSession}` };
+  }
 
   // The outbox queue + lock live in `outboxDir` when provided (the system
   // coordinator has no agent dir, so its queue/lock live in the coordinator
@@ -4574,6 +4584,13 @@ export async function teamSend(
         attachmentBaseDir?: string;
         /** Members to skip (already accepted on a prior identical-draft attempt). */
         skipRecipientIds?: string[];
+        /**
+         * Internal (send broker): a recipient for which this returns true is
+         * dropped, like the sender. The sender is excluded by id only, and the
+         * id in a meta.json is its agent's own to write; the broker uses this
+         * to drop its requester by directory too. Never a CLI flag.
+         */
+        excludeRecipient?: (agent: Agent) => Promise<boolean>;
       }
     | undefined,
   repos: RepoEntry[],
@@ -4615,7 +4632,7 @@ export async function teamSend(
       }
       agent = lookupAgents.find((a) => a.id === id);
     }
-    if (agent) recipients.push(agent);
+    if (agent && !(await opts?.excludeRecipient?.(agent))) recipients.push(agent);
   }
 
   // Record ONE channel record per send to the shared team channel (§17.4) — the
@@ -4863,7 +4880,7 @@ async function resolveFullAgentId(
   partial: string,
   repos: RepoEntry[],
 ): Promise<{ id: string } | { error: string }> {
-  const { matchAgentById } = await import("./index");
+  const { matchAgentById } = await import("./resolve-target");
   const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
   const match = matchAgentById(partial, agents);
   if (!match) {

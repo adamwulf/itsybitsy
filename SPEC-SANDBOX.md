@@ -845,6 +845,9 @@ Required in the baseline:
 - **`ib list`/`ib look`** read every registered repo's `.ittybitty/agents/*/meta.json`
   (cross-repo reads). Decision: allow-read those trees in the `_all.md` baseline,
   or accept `ib list` degrading inside sandboxed agents. (Recommend read-allow.)
+  `ib send` resolves its target with the same cross-repo read; for a sandboxed
+  worktree agent it now goes through the watchdog instead (§4C.9). `ib list` and
+  `ib look` are unchanged.
 - **`ib new-agent` from a sandboxed manager** needs parent-repo `.ittybitty/`
   mkdir + `.claude/settings.local.json` write — exactly what
   `deriveCodexParentRepoRoots` grants codex today (`ib-commands.ts:4708-4724`).
@@ -1156,7 +1159,7 @@ broker's. `src/lifecycle-broker.ts` adds:
 
 - **Request** — `{v:1, id, op, target, keep?}`, `op` = `retire` | `merge` |
   `rehire`. A request that has an `op` field is a lifecycle request (except
-  `op: "ask"`, §4C.8); one without is a spawn.
+  `op: "ask"`, §4C.8, and `op: "send"`, §4C.9); one without is a spawn.
   `target` must be a plain agent id (it becomes a path segment). `keep` (`ib
   merge --keep`) is accepted for `merge` only. Any other field is rejected — in
   particular there is no way to name a directory.
@@ -1368,8 +1371,8 @@ watchdog and waits. Queue, file names, atomic writes, at-most-once handling,
 result clipping and pruning are the spawn broker's. `src/ask-broker.ts` adds:
 
 - **Request** — `{v:1, id, op:"ask", question}`. In the queue, a request with
-  `op: "ask"` is a question, one with any other `op` is a lifecycle request,
-  and one without `op` is a spawn. The request carries the question TEXT only.
+  `op: "ask"` is a question, one with `op: "send"` is a message (§4C.9), one
+  with any other `op` is a lifecycle request, and one without `op` is a spawn. The request carries the question TEXT only.
   Any other field is rejected — there is no way to name an agent, a repo or a
   file, and no way to mark the question as a harness question (SPEC.md §4.2).
   A question over 1 MiB (`SPAWN_MAX_PROMPT_BYTES`) is refused.
@@ -1433,6 +1436,161 @@ the compiled `ib` inside a real agent profile.
 4. Requests are handled one at a time per agent, so a question queued behind a
    long brokered merge or teardown can time out on the client while it is
    still queued. It is then withdrawn, and the agent can ask again.
+
+### 4C.9 Sandboxed `ib send`: the same broker (2026-10-24)
+
+**Problem.** `ib send <agent>` from a sandboxed worktree agent could not reach
+an agent in another repo: both `ib send cli-email-client ...` and
+`ib send @iris/cli-email-client ...` printed `Agent not found`, although the
+agent existed. For an agent target, writing the message was not the problem:
+agent outboxes are in `~/.itsybitsy/agents/<id>/` (§4C.1), which every agent
+can write. Finding the target was. (`@system` is different; see "New reach"
+below.) `resolveTarget` calls `readAllAgents`, which lists the
+`.ittybitty/agents` directory of every registered repo. A worktree agent's
+profile grants `REPOAGENTS` of its own repo only, so the other repos fail with
+`EPERM`; `readAllAgents` reports that in `errors`, and `resolveTarget` ignored
+it. A read grant on every repo's agents tree (the §4C.1 `ib list` decision)
+would widen every profile, so the command leaves the sandbox instead.
+
+**Design.** The same route as §4C.6–§4C.8: the sandboxed command hands the
+request to the caller's own unsandboxed watchdog and waits. Queue, file names,
+atomic writes, at-most-once handling, result clipping and pruning are the spawn
+broker's. `src/send-broker.ts` adds:
+
+- **Request** — `{v:1, id, op:"send", target, message}`. The target is any
+  text the CLI could resolve, at most 256 characters, with no control
+  characters; the message is the TEXT, at most 1 MiB
+  (`SPAWN_MAX_PROMPT_BYTES`), and only the empty string is refused (as on the
+  direct path). Any other field is rejected: there is no way to name a sender
+  (`from`), a directory or a file, and no way to ask for attachment staging.
+- **Client** — `routeSendThroughWatchdog`, called from the `send` case in
+  `src/index.ts` after the arguments are parsed and the `-f` file is read, and
+  before the target is resolved. It routes the same callers as the lifecycle
+  and ask brokers (`resolveRoutedCaller`, the rule of §4C.7): only a worktree
+  agent inside its own itsybitsy sandbox. For every other caller it returns
+  null and `ib send` runs directly, exactly as before. A routed caller sends
+  only as itself: `--from` for another agent is refused. The message is read
+  on the client, inside the sandbox — the `-f <path>` file and stdin as well —
+  so the watchdog never reads a path for the agent. `index.ts` reads the
+  message at most once (`messageBodyReader`), because the direct path may need
+  it after the broker read stdin. A send to the caller ITSELF is not routed: the
+  client resolves the target with the CLI's resolver over its own repo only
+  (`targetIsCaller`; a target that resolves to the caller always does so
+  there, and that repo is readable in the sandbox) and sends directly, which
+  works in the sandbox (own repo, own outbox).
+- **Server** — `handleSendRequest`, reached from `processSpawnRequests`. The
+  requester is the watchdog's own agent, verified against its sealed record
+  exactly as for a spawn. The target is resolved with the normal resolver
+  (`resolveSendTarget` in `src/resolve-target.ts`, moved out of `index.ts` so
+  the broker does not import the CLI), with the requester's worktree
+  (`<agentDir>/repo`) as the cwd, so `@coordinator` and the same-repo-first
+  search of a bare id mean the requester's repo, not the watchdog's cwd. Every
+  target form works: a bare id or nickname, `@repo/agent`, `@repo`,
+  `@coordinator`, `@system` and `@<team>`. The watchdog then runs the normal
+  `sendMessage`, `teamSend` or `sendToSystemCoordinator` with `fromAgent` set
+  to its OWN agent id (those functions otherwise detect the sender from the
+  cwd, which is the watchdog's). It never sets `stageAttachments`: send-time
+  attachment staging copies the files a message names, and outside the
+  sandbox that would let an agent copy any file the watchdog can read (a
+  `.env`, say) to where it can read it. A path in a brokered message is sent
+  as text.
+- **Never to the requester itself.** `sendMessage` takes the recipient's tmux
+  session from its `meta.json` and decides an inline drain from its
+  `meta.transient.json`; the seal covers neither, and every agent can write
+  both of its own. A brokered send to the requester would let a sandboxed
+  agent choose the text AND the tmux session its unsandboxed watchdog types it
+  into — the reason a non-spawner's profile denies the tmux socket. So the
+  server refuses a resolved agent that is the requester (`isAgentAt`: same id
+  in the same repo, or the same resolved directory, as §4C.7 does — `meta.id`
+  is agent-writable and a case variant opens the same directory), and a team
+  send drops it like the sender (`teamSend`'s internal `excludeRecipient`; its
+  own sender exclusion is by id only). An agent with the requester's id in
+  another repo is a different agent. As defence in depth, `deliverMessage` and
+  `sendMessage` refuse a `tmux_session` that is not a plain session name
+  (`isValidTmuxSession`), so a name can never carry a window or pane target.
+- **New reach: `@system`.** Before this broker a sandboxed worktree agent
+  could NOT message the system coordinator at all. `sendToSystemCoordinator`
+  first runs `tmux has-session`, and a non-spawner's profile denies the tmux
+  socket (§4C.3); and the coordinator's outbox and lock are in `~/.itsybitsy/`
+  itself, not under `~/.itsybitsy/agents/`, so they are outside the `_all.md`
+  write floor for every agent, spawner or not. Through the broker the watchdog
+  sends it, so a sandboxed agent now reaches `@system` the way an unsandboxed
+  agent does: the coordinator receives `[sent by agent <id>]: <message>`. That
+  is deliberate — it is the reach an unsandboxed agent already has. A sender is
+  always set, so the text is never sent raw and a leading `/` or `!` never runs
+  as a command there (SPEC.md §4.1, step 4).
+- **Fallback** — `ib send` must not work less well than before, and a
+  same-repo send works inside the sandbox. So the client sends directly, as
+  before, when the watchdog has no fresh heartbeat, when the watchdog predates
+  this broker, and when the target or message cannot travel in a request (too
+  long, or a control character in the target). Once a current watchdog has
+  taken the request it does not: a timeout or a failure is reported, because
+  the message may already be queued and a second send would deliver it twice.
+- **Old watchdogs** refuse the request before they act on it, with one of two
+  exact answers: `spawn request has unsupported field 'op'` (no op broker) or
+  `lifecycle request has unsupported field 'message'` (lifecycle broker, with
+  or without the ask broker: the field order `v, id, op, target, message` makes
+  `message` the first field such a parser does not know). The client sends
+  directly on either.
+- **Error text** — when a target is not found and the agents directory of a
+  searched repo could not be listed, the error now names it:
+  `Agent not found: <id> (could not read <dir>; a sandbox may block it)`. Only
+  directory-level failures of the searched repos count (for `@repo/agent`, that
+  repo only). This is what a routed agent sees when its watchdog is not live.
+
+**Verified.** Unit tests only (`src/send-broker.test.ts`,
+`src/resolve-target.test.ts`): the parser, the queue handler with the real
+resolver and the real `sendMessage` against files on disk (the message is
+queued for an agent in another repo with the requester as the sender, no tmux
+call), each target form, the refused `from` field, no attachment staging,
+`@coordinator` from the requester's worktree, the refusal of the requester as
+a target (by id, and by directory when its `meta.json` claims another id; a
+team skips it), the client's direct path for a send to itself, the client
+round trip, the direct fallback for a dead or old watchdog, no fallback after
+a timeout, and the routing of each caller that keeps the direct path. Without
+the requester check, the by-directory cases reached the inline tmux drain
+(checked by disabling it). **Not run live:** the compiled `ib` inside a real
+agent profile.
+
+**Known limitations.**
+1. EVERY `ib send`, from every caller, now runs `isSandboxedProcess()` first:
+   the routing check (`resolveRoutedCaller`) comes before anything else in the
+   `send` case, and its first step is the kernel `sandbox_check` through
+   `bun:ffi`. Outside the sandbox that costs about 1.2 ms wall time and 1.1 ms
+   CPU per send, about 3% (measured in review: 40 runs, compiled binaries).
+   Inside the sandbox, loading `bun:ffi` also opens the macOS SDK directory,
+   which is a kernel denial (see `metaKernelSandboxed` in `src/sandbox.ts`), so
+   a sandboxed agent's denial log gets one more line per send (from the code;
+   not measured). `ib ask` and the lifecycle commands pay the same, but run far
+   less often. Putting cheaper checks before the kernel check in
+   `resolveRoutedCaller` was considered and not done: it would change every
+   broker for about 1 ms.
+2. Requests are handled one at a time per agent (§4C.8 limitation 4). A send
+   queued behind a long brokered merge can time out on the client while it is
+   still queued; it is then withdrawn and the agent can send again. The
+   withdrawal is check-then-remove, as for every brokered command: a watchdog
+   that reads the request in that instant still sends it.
+3. When the target has no live watchdog, `sendMessage` delivers inline, in the
+   watchdog, with the length-scaled delays of SPEC.md §4.1. A very long message
+   (some hundreds of KB) can take more than the client's 30 s; the client then
+   reports a timeout although the message is still being delivered.
+4. `--from` for another agent is refused for a routed caller even when its
+   watchdog is not live and the send would go the direct way.
+5. Callers the broker does not serve keep the direct path (§4C.7 limitation 3):
+   a sandboxed `worktree:false` agent, or an agent with the itsybitsy sandbox
+   off, still cannot resolve a target in a repo its sandbox does not grant (from
+   the code; not run).
+6. A RECIPIENT other than the requester still chooses its own tmux session and
+   heartbeat: it can write its own `meta.json` and `meta.transient.json`. An
+   agent that claims no live watchdog and names another plain session (for
+   example the user's shell session `0`) gets a brokered send to it typed into
+   that session by the sender's watchdog, outside the sandbox. The text is the
+   SENDER's, after `[sent by agent <id>]: `, so the recipient chooses where it
+   goes but not what it says. This is not new: every unsandboxed `ib send`
+   (the user's, an unsandboxed agent's) already trusts the recipient's
+   `meta.json` the same way. Binding a session to its agent (the seal, or the
+   `ittybitty-<repoId>-<id>` naming) would close it for every sender and is out
+   of scope here (from the code; not run).
 
 ## 5. Shipped components
 

@@ -14,7 +14,8 @@
  * agent's WATCHDOG runs unsandboxed, so the sandboxed command hands it the
  * request and waits. The queue, the file format and the at-most-once handling
  * are the spawn broker's; a request that carries an `op` field is a lifecycle
- * request and is dispatched here (except `op: "ask"`, which is ask-broker.ts).
+ * request and is dispatched here (except `op: "ask"`, which is ask-broker.ts,
+ * and `op: "send"`, which is send-broker.ts).
  *
  *   sandboxed `ib retire <id>`  ──request.json──▶  the caller's own watchdog
  *        (client, this file)                        (server, this file)
@@ -60,7 +61,7 @@
  */
 
 import { randomBytes } from "crypto";
-import { lstat, realpath } from "fs/promises";
+import { lstat } from "fs/promises";
 import { basename, join, resolve } from "path";
 import { readAllAgents, type Agent } from "./agents";
 import {
@@ -76,6 +77,7 @@ import {
 import { listRepos, repoDisplayName } from "./registry";
 import {
   brokerFail,
+  isSameDirectory,
   resolveRoutedCaller,
   submitWatchdogRequest,
   verifyBrokerRequester,
@@ -296,16 +298,6 @@ async function findAgentInRepo(repoPath: string, agentId: string): Promise<Agent
   const { agents } = await readAllAgents([{ path: repoPath, name }], false);
   const directory = join(repoPath, ".ittybitty", "agents", agentId);
   return agents.find((agent) => agent.storageDir === directory && agent.id === agentId) ?? null;
-}
-
-/** Do two paths name the same directory? Unknown (either cannot be resolved) counts as yes. */
-async function isSameDirectory(a: string, b: string): Promise<boolean> {
-  try {
-    const [resolvedA, resolvedB] = await Promise.all([realpath(a), realpath(b)]);
-    return resolvedA === resolvedB;
-  } catch {
-    return true;
-  }
 }
 
 /**

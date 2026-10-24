@@ -19,6 +19,8 @@ import { tmpdir } from "node:os";
 import { rmSync } from "node:fs";
 
 const { resolveTarget, matchAgentById } = await import("./index");
+const { resolveSendTarget } = await import("./resolve-target");
+const { isRecentlyCreatedDirCtx, readAllAgents } = await import("./agents");
 
 // --- Temp directory management ---
 let _tempDirs: string[] = [];
@@ -534,5 +536,97 @@ describe("Group K: Cross-cutting edge cases", () => {
     addAgentToRepo(repoA.path, "agent-111");
     const result = await resolveTarget("agent-111", repos, repoA.path);
     expect(result.agent?.id).toBe("agent-111");
+  });
+});
+
+// ============================================================
+// Group L: not-found errors name an unreadable agents directory
+// ============================================================
+describe("Group L: unreadable agents directories in not-found errors", () => {
+  // Inside an itsybitsy sandbox another repo's `.ittybitty/agents` cannot be
+  // listed (EPERM). Any non-ENOENT readdir failure takes the same path in
+  // readAllAgents; a regular FILE where the directory should be (ENOTDIR) is
+  // used here because it fails the same way for every user, root included.
+  function makeAgentsDirUnreadable(repo: RepoEntry): string {
+    const agentsDir = join(repo.path, ".ittybitty", "agents");
+    rmSync(agentsDir, { recursive: true, force: true });
+    writeFileSync(agentsDir, "not a directory");
+    return agentsDir;
+  }
+
+  test("L1: a bare id names the repo directory that could not be read", async () => {
+    addAgentToRepo(repoA.path, "agent-111");
+    const unreadable = makeAgentsDirUnreadable(repoB);
+    const result = await resolveTarget("cli-email-client", repos, repoA.path);
+    expect(result.agent).toBeNull();
+    expect(errorOutput).toEqual([
+      `Agent not found: cli-email-client (could not read ${unreadable}; a sandbox may block it)`,
+    ]);
+  });
+
+  test("L2: @repo/agent names that repo's directory", async () => {
+    const unreadable = makeAgentsDirUnreadable(repoB);
+    const result = await resolveTarget("@libs/cli-email-client", repos, repoA.path);
+    expect(result.agent).toBeNull();
+    expect(errorOutput).toEqual([
+      `Agent not found: cli-email-client in repo libs (could not read ${unreadable}; a sandbox may block it)`,
+    ]);
+  });
+
+  test("L3: @repo/agent does not name another repo's unreadable directory", async () => {
+    makeAgentsDirUnreadable(repoB);
+    await resolveTarget("@app/cli-email-client", repos, repoA.path);
+    expect(errorOutput).toEqual(["Agent not found: cli-email-client in repo app"]);
+  });
+
+  test("L4: when every directory was read, the error is unchanged", async () => {
+    await resolveTarget("cli-email-client", repos, repoA.path);
+    expect(errorOutput).toEqual(["Agent not found: cli-email-client"]);
+  });
+
+  test("L5: an agent that is found is not affected by another unreadable repo", async () => {
+    addAgentToRepo(repoA.path, "agent-111");
+    makeAgentsDirUnreadable(repoB);
+    const result = await resolveTarget("agent-111", repos, repoA.path);
+    expect(result.agent?.id).toBe("agent-111");
+    expect(errorOutput).toEqual([]);
+  });
+
+  test("L6: an unreadable meta.json of one agent is not named", async () => {
+    const brokenDir = join(repoB.path, ".ittybitty", "agents", "agent-broken");
+    mkdirSync(brokenDir, { recursive: true });
+    writeFileSync(join(brokenDir, "meta.json"), "{oops");
+    // A new directory's read error is suppressed (spawn in progress); age it
+    // so readAllAgents really reports the broken meta.json.
+    isRecentlyCreatedDirCtx.set(async () => false);
+    try {
+      const { errors } = await readAllAgents(repos.map((r) => ({ path: r.path, name: r.name })), false);
+      expect(errors.map((e) => e.agentDir)).toEqual([brokenDir]);
+      await resolveTarget("cli-email-client", repos, repoA.path);
+    } finally {
+      isRecentlyCreatedDirCtx.reset();
+    }
+    expect(errorOutput).toEqual(["Agent not found: cli-email-client"]);
+  });
+
+  test("L7: more than three unreadable directories are counted, not listed", async () => {
+    const extra = [makeTempRepo("d"), makeTempRepo("e")];
+    const all = [...repos, ...extra];
+    const unreadable = all.map(makeAgentsDirUnreadable);
+    await resolveTarget("cli-email-client", all, "/tmp/outside");
+    expect(errorOutput).toEqual([
+      `Agent not found: cli-email-client (could not read ${unreadable.slice(0, 3).join(", ")} +2 more; a sandbox may block it)`,
+    ]);
+  });
+
+  test("L8: resolveSendTarget returns the error and prints nothing", async () => {
+    const unreadable = makeAgentsDirUnreadable(repoB);
+    const result = await resolveSendTarget("cli-email-client", repos, repoA.path);
+    expect(result).toEqual({
+      agent: null,
+      isSystemCoordinator: false,
+      error: `Agent not found: cli-email-client (could not read ${unreadable}; a sandbox may block it)`,
+    });
+    expect(errorOutput).toEqual([]);
   });
 });

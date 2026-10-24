@@ -434,8 +434,10 @@ describe("send broker", () => {
         expect(await outbox("decoy")).toEqual([]);
         expect((await outbox(TARGET_ID)).map((m) => [m.message, m.fromAgent, m.team])).toEqual([[MESSAGE, SENDER_ID, "backend"]]);
         expect(tmuxCalls).toEqual([]);
-        // teamSend's liveness check scanned sessions: the stub, not a tmux server.
-        expect(tmuxListCalls.length).toBeGreaterThan(0);
+        // teamSend's liveness check scans sessions, through the stub. Not
+        // asserted to happen: orphan-detection.test.ts replaces listTmuxSessions
+        // with a global mock.module, and when it ran earlier in the same
+        // process the scan never reaches spawnCtx (it is still no real tmux).
         expect(tmuxListCalls.every((cmd) => cmd.join(" ") === "tmux list-sessions -F #{session_name}")).toBe(true);
       });
 

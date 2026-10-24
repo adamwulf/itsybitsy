@@ -4016,6 +4016,11 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
   if (!tmuxSession) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Agent has no tmux session" };
   }
+  // The name comes from the recipient's meta.json, which that agent can write.
+  // Never hand tmux a target that is not a plain session name.
+  if (!isValidTmuxSession(tmuxSession)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid tmux session name: ${tmuxSession}` };
+  }
 
   // Verify session exists
   const hasSessionProc = sendSpawnCtx.runner(
@@ -4316,6 +4321,11 @@ export async function sendMessage(
   const tmuxSession = agent.meta.tmux_session;
   if (!tmuxSession) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Agent has no tmux session" };
+  }
+  // deliverMessage refuses it too; refusing here as well queues nothing that
+  // could never be delivered.
+  if (!isValidTmuxSession(tmuxSession)) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Invalid tmux session name: ${tmuxSession}` };
   }
 
   // The outbox queue + lock live in `outboxDir` when provided (the system

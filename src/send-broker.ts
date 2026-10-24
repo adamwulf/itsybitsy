@@ -1,12 +1,14 @@
 /**
  * Watchdog send broker — how a SANDBOXED agent sends to an agent in another repo.
  *
- * Writing the message is not the problem: outboxes live in
- * `~/.itsybitsy/agents/<id>/` (outbox.ts), which the sandbox grants. Finding
- * the target is. `ib send` resolves it with readAllAgents, which lists the
+ * For an agent target, writing the message is not the problem: agent outboxes
+ * live in `~/.itsybitsy/agents/<id>/` (outbox.ts), which the sandbox grants.
+ * Finding the target is. `ib send` resolves it by listing the
  * `.ittybitty/agents` directory of every registered repo. A worktree agent's
  * profile grants that directory for its own repo only, so every other repo
- * fails with EPERM and the target is reported as not found.
+ * fails with EPERM and the target is reported as not found. `@system` is new
+ * reach: its outbox is in `~/.itsybitsy/` itself and its delivery needs tmux,
+ * so a sandboxed agent could not message it before (SPEC-SANDBOX §4C.9).
  *
  * The answer is the one `ib ask`, the lifecycle commands and `ib new-agent`
  * already use (ask-broker.ts, lifecycle-broker.ts, spawn-broker.ts): the

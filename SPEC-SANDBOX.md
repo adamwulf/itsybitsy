@@ -1442,9 +1442,10 @@ the compiled `ib` inside a real agent profile.
 **Problem.** `ib send <agent>` from a sandboxed worktree agent could not reach
 an agent in another repo: both `ib send cli-email-client ...` and
 `ib send @iris/cli-email-client ...` printed `Agent not found`, although the
-agent existed. Writing the message was not the problem: outboxes are in
-`~/.itsybitsy/agents/<id>/` (§4C.1), which every agent can write. Finding the
-target was. `resolveTarget` calls `readAllAgents`, which lists the
+agent existed. For an agent target, writing the message was not the problem:
+agent outboxes are in `~/.itsybitsy/agents/<id>/` (§4C.1), which every agent
+can write. Finding the target was. (`@system` is different; see "New reach"
+below.) `resolveTarget` calls `readAllAgents`, which lists the
 `.ittybitty/agents` directory of every registered repo. A worktree agent's
 profile grants `REPOAGENTS` of its own repo only, so the other repos fail with
 `EPERM`; `readAllAgents` reports that in `errors`, and `resolveTarget` ignored
@@ -1489,6 +1490,17 @@ broker's. `src/send-broker.ts` adds:
   sandbox that would let an agent copy any file the watchdog can read (a
   `.env`, say) to where it can read it. A path in a brokered message is sent
   as text.
+- **New reach: `@system`.** Before this broker a sandboxed worktree agent
+  could NOT message the system coordinator at all. `sendToSystemCoordinator`
+  first runs `tmux has-session`, and a non-spawner's profile denies the tmux
+  socket (§4C.3); and the coordinator's outbox and lock are in `~/.itsybitsy/`
+  itself, not under `~/.itsybitsy/agents/`, so they are outside the `_all.md`
+  write floor for every agent, spawner or not. Through the broker the watchdog
+  sends it, so a sandboxed agent now reaches `@system` the way an unsandboxed
+  agent does: the coordinator receives `[sent by agent <id>]: <message>`. That
+  is deliberate — it is the reach an unsandboxed agent already has. A sender is
+  always set, so the text is never sent raw and a leading `/` or `!` never runs
+  as a command there (SPEC.md §4.1, step 4).
 - **Fallback** — `ib send` must not work less well than before, and a
   same-repo send works inside the sandbox. So the client sends directly, as
   before, when the watchdog has no fresh heartbeat, when the watchdog predates

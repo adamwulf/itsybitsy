@@ -1472,8 +1472,12 @@ broker's. `src/send-broker.ts` adds:
   only as itself: `--from` for another agent is refused. The message is read
   on the client, inside the sandbox — the `-f <path>` file and stdin as well —
   so the watchdog never reads a path for the agent. `index.ts` reads the
-  message at most once, because the direct path may need it after the broker
-  read stdin.
+  message at most once (`messageBodyReader`), because the direct path may need
+  it after the broker read stdin. A send to the caller ITSELF is not routed: the
+  client resolves the target with the CLI's resolver over its own repo only
+  (`targetIsCaller`; a target that resolves to the caller always does so
+  there, and that repo is readable in the sandbox) and sends directly, which
+  works in the sandbox (own repo, own outbox).
 - **Server** — `handleSendRequest`, reached from `processSpawnRequests`. The
   requester is the watchdog's own agent, verified against its sealed record
   exactly as for a spawn. The target is resolved with the normal resolver
@@ -1490,6 +1494,20 @@ broker's. `src/send-broker.ts` adds:
   sandbox that would let an agent copy any file the watchdog can read (a
   `.env`, say) to where it can read it. A path in a brokered message is sent
   as text.
+- **Never to the requester itself.** `sendMessage` takes the recipient's tmux
+  session from its `meta.json` and decides an inline drain from its
+  `meta.transient.json`; the seal covers neither, and every agent can write
+  both of its own. A brokered send to the requester would let a sandboxed
+  agent choose the text AND the tmux session its unsandboxed watchdog types it
+  into — the reason a non-spawner's profile denies the tmux socket. So the
+  server refuses a resolved agent that is the requester (`isAgentAt`: same id
+  in the same repo, or the same resolved directory, as §4C.7 does — `meta.id`
+  is agent-writable and a case variant opens the same directory), and a team
+  send drops it like the sender (`teamSend`'s internal `excludeRecipient`; its
+  own sender exclusion is by id only). An agent with the requester's id in
+  another repo is a different agent. As defence in depth, `deliverMessage` and
+  `sendMessage` refuse a `tmux_session` that is not a plain session name
+  (`isValidTmuxSession`), so a name can never carry a window or pane target.
 - **New reach: `@system`.** Before this broker a sandboxed worktree agent
   could NOT message the system coordinator at all. `sendToSystemCoordinator`
   first runs `tmux has-session`, and a non-spawner's profile denies the tmux
@@ -1525,10 +1543,14 @@ broker's. `src/send-broker.ts` adds:
 resolver and the real `sendMessage` against files on disk (the message is
 queued for an agent in another repo with the requester as the sender, no tmux
 call), each target form, the refused `from` field, no attachment staging,
-`@coordinator` from the requester's worktree, the client round trip, the
-direct fallback for a dead or old watchdog, no fallback after a timeout, and
-the routing of each caller that keeps the direct path. **Not run live:** the
-compiled `ib` inside a real agent profile.
+`@coordinator` from the requester's worktree, the refusal of the requester as
+a target (by id, and by directory when its `meta.json` claims another id; a
+team skips it), the client's direct path for a send to itself, the client
+round trip, the direct fallback for a dead or old watchdog, no fallback after
+a timeout, and the routing of each caller that keeps the direct path. Without
+the requester check, the by-directory cases reached the inline tmux drain
+(checked by disabling it). **Not run live:** the compiled `ib` inside a real
+agent profile.
 
 **Known limitations.**
 1. EVERY `ib send`, from every caller, now runs `isSandboxedProcess()` first:
@@ -1558,6 +1580,17 @@ compiled `ib` inside a real agent profile.
    a sandboxed `worktree:false` agent, or an agent with the itsybitsy sandbox
    off, still cannot resolve a target in a repo its sandbox does not grant (from
    the code; not run).
+6. A RECIPIENT other than the requester still chooses its own tmux session and
+   heartbeat: it can write its own `meta.json` and `meta.transient.json`. An
+   agent that claims no live watchdog and names another plain session (for
+   example the user's shell session `0`) gets a brokered send to it typed into
+   that session by the sender's watchdog, outside the sandbox. The text is the
+   SENDER's, after `[sent by agent <id>]: `, so the recipient chooses where it
+   goes but not what it says. This is not new: every unsandboxed `ib send`
+   (the user's, an unsandboxed agent's) already trusts the recipient's
+   `meta.json` the same way. Binding a session to its agent (the seal, or the
+   `ittybitty-<repoId>-<id>` naming) would close it for every sender and is out
+   of scope here (from the code; not run).
 
 ## 5. Shipped components
 

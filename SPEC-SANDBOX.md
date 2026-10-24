@@ -1531,12 +1531,18 @@ the routing of each caller that keeps the direct path. **Not run live:** the
 compiled `ib` inside a real agent profile.
 
 **Known limitations.**
-1. Every routed `ib send` runs `isSandboxedProcess()` first, as `ib ask` and
-   the lifecycle commands do. That loads `bun:ffi`, whose compiler opens the
-   macOS SDK directory, which is a kernel denial inside the sandbox (see
-   `metaKernelSandboxed` in `src/sandbox.ts`). `ib send` runs far more often
-   than those commands, so the denial log gets one more line per send (from
-   the code; not measured).
+1. EVERY `ib send`, from every caller, now runs `isSandboxedProcess()` first:
+   the routing check (`resolveRoutedCaller`) comes before anything else in the
+   `send` case, and its first step is the kernel `sandbox_check` through
+   `bun:ffi`. Outside the sandbox that costs about 1.2 ms wall time and 1.1 ms
+   CPU per send, about 3% (measured in review: 40 runs, compiled binaries).
+   Inside the sandbox, loading `bun:ffi` also opens the macOS SDK directory,
+   which is a kernel denial (see `metaKernelSandboxed` in `src/sandbox.ts`), so
+   a sandboxed agent's denial log gets one more line per send (from the code;
+   not measured). `ib ask` and the lifecycle commands pay the same, but run far
+   less often. Putting cheaper checks before the kernel check in
+   `resolveRoutedCaller` was considered and not done: it would change every
+   broker for about 1 ms.
 2. Requests are handled one at a time per agent (§4C.8 limitation 4). A send
    queued behind a long brokered merge can time out on the client while it is
    still queued; it is then withdrawn and the agent can send again. The

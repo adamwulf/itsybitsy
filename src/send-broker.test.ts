@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, readdir, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import type { Agent, AgentMeta } from "./agents";
+import { resetListTmuxSessionsCache, type Agent, type AgentMeta } from "./agents";
 import { resetUserHome, setUserHome } from "./home";
 import {
   resetMessageAttachmentStagerForTesting,
@@ -31,6 +31,7 @@ import {
   spawnResultDir,
   type SpawnServerDeps,
 } from "./spawn-broker";
+import { spawnCtx as tmuxPollerSpawnCtx } from "./tmux-poller";
 import type { SpawnFn } from "./types";
 
 const SENDER_ID = "cli-helper";
@@ -45,14 +46,26 @@ describe("send broker", () => {
   let targetRepo: string;
   let repos: RepoEntry[];
   let agentDir: string;
-  /** Every tmux command a send tried to run. Must stay empty: no test may reach tmux. */
+  /**
+   * No test may reach a real tmux server. Both places that start a tmux client
+   * are stubbed: the send path (`sendSpawnCtx`: has-session, send-keys) and
+   * readAllAgents' session scan (`tmux list-sessions` through tmux-poller's
+   * `spawnCtx`, reached by teamSend's liveness check). `tmuxCalls` is what a
+   * send tried to type and must stay empty; `tmuxListCalls` is the scans.
+   */
   let tmuxCalls: string[][];
+  let tmuxListCalls: string[][];
 
+  const closed = () => new ReadableStream<Uint8Array>({ start(c) { c.close(); } });
   /** Records the command and fails it, so nothing can be delivered by accident. */
   const recordingTmux: SpawnFn = (cmd) => {
     tmuxCalls.push(cmd);
-    const closed = () => new ReadableStream<Uint8Array>({ start(c) { c.close(); } });
     return { stdout: closed(), stderr: closed(), exited: Promise.resolve(1), kill: () => {} };
+  };
+  /** Records the scan and answers "no sessions". */
+  const recordingTmuxList: SpawnFn = (cmd) => {
+    tmuxListCalls.push(cmd);
+    return { stdout: closed(), stderr: closed(), exited: Promise.resolve(0), kill: () => {} };
   };
 
   beforeEach(async () => {
@@ -70,11 +83,17 @@ describe("send broker", () => {
     await writeAgent(senderRepo, SENDER_ID, {});
     await writeAgent(targetRepo, TARGET_ID, {});
     tmuxCalls = [];
+    tmuxListCalls = [];
     setSendSpawnRunner(recordingTmux);
+    tmuxPollerSpawnCtx.set(recordingTmuxList);
+    // A session list cached by an earlier test would hide a scan from this one.
+    resetListTmuxSessionsCache();
   });
   afterEach(async () => {
     setSandboxedProcessOverride(null);
     resetSendSpawnRunner();
+    tmuxPollerSpawnCtx.reset();
+    resetListTmuxSessionsCache();
     resetMessageAttachmentStagerForTesting();
     resetUserHome();
     await rm(senderRepo, { recursive: true, force: true });
@@ -248,10 +267,12 @@ describe("send broker", () => {
       // A sender is set, so stdout is empty (SPEC §4.1, step 7).
       expect(await result(ID_A)).toEqual({ v: 1, id: ID_A, ok: true, exitCode: 0, stdout: "", stderr: "" });
       expect(await readdir(spawnRequestDir(agentDir))).toEqual([]);
-      // A message is never treated as a spawn or a question, and reaches no tmux.
+      // A message is never treated as a spawn or a question, and reaches no tmux
+      // (target resolution reads agents from disk only).
       expect(spawned).toEqual([]);
       expect(asked).toEqual([]);
       expect(tmuxCalls).toEqual([]);
+      expect(tmuxListCalls).toEqual([]);
     });
 
     test("the sender is the verified agent: --from cannot be smuggled in the request", async () => {
@@ -413,6 +434,9 @@ describe("send broker", () => {
         expect(await outbox("decoy")).toEqual([]);
         expect((await outbox(TARGET_ID)).map((m) => [m.message, m.fromAgent, m.team])).toEqual([[MESSAGE, SENDER_ID, "backend"]]);
         expect(tmuxCalls).toEqual([]);
+        // teamSend's liveness check scanned sessions: the stub, not a tmux server.
+        expect(tmuxListCalls.length).toBeGreaterThan(0);
+        expect(tmuxListCalls.every((cmd) => cmd.join(" ") === "tmux list-sessions -F #{session_name}")).toBe(true);
       });
 
       test("an agent with the requester's id in another repo is not the requester", async () => {

@@ -4863,7 +4863,7 @@ async function resolveFullAgentId(
   partial: string,
   repos: RepoEntry[],
 ): Promise<{ id: string } | { error: string }> {
-  const { matchAgentById } = await import("./index");
+  const { matchAgentById } = await import("./resolve-target");
   const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
   const match = matchAgentById(partial, agents);
   if (!match) {

@@ -16,6 +16,7 @@ import {
   findAgentByIdInRepo,
   setSystemCoordinatorHasSessionFn,
   resetSystemCoordinatorHasSessionFn,
+  messageBodyReader,
 } from "./index";
 import { setSendSpawnRunner, resetSendSpawnRunner } from "./ib-commands";
 import { setUserConfigPath, resetUserConfigPath } from "./config";
@@ -1609,6 +1610,41 @@ describe("resolveTarget addressing", () => {
 });
 
 // ─── @system delivery (sendToSystemCoordinator) ──────────────────────────
+
+describe("messageBodyReader (ib send)", () => {
+  /** Like real stdin: the text on the first read, "" after it is consumed. */
+  function fakeStdin(text: string) {
+    let reads = 0;
+    return {
+      read: async (): Promise<string> => (reads++ === 0 ? text : ""),
+      reads: () => reads,
+    };
+  }
+
+  // The send broker reads the body first; when its watchdog cannot take the
+  // request, the direct path reads it again. Both must see the same text.
+  test("stdin is read once, and every call returns the same text", async () => {
+    const stdin = fakeStdin("from a heredoc");
+    const read = messageBodyReader("", undefined, stdin.read);
+    expect(await read()).toBe("from a heredoc");
+    expect(await read()).toBe("from a heredoc");
+    expect(stdin.reads()).toBe(1);
+  });
+
+  test("an inline message wins, and stdin is never read", async () => {
+    const stdin = fakeStdin("ignored");
+    const read = messageBodyReader("inline text", "file text", stdin.read);
+    expect(await read()).toBe("inline text");
+    expect(stdin.reads()).toBe(0);
+  });
+
+  test("a file body wins over stdin, even when it is empty", async () => {
+    const stdin = fakeStdin("ignored");
+    expect(await messageBodyReader("", "file text", stdin.read)()).toBe("file text");
+    expect(await messageBodyReader("", "", stdin.read)()).toBe("");
+    expect(stdin.reads()).toBe(0);
+  });
+});
 
 describe("buildSystemCoordinatorAgent", () => {
   test("uses /tmp as repoPath when cwd is not inside an agent worktree", () => {

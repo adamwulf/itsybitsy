@@ -222,6 +222,26 @@ export async function readStdinIfPiped(): Promise<string> {
 }
 
 /**
+ * `ib send`'s message body, read at most once, by precedence: inline > file >
+ * stdin. The send broker reads it before the direct path does, and the direct
+ * path still runs when the watchdog cannot take the request; a second stdin
+ * read would return "", so that fallback would print the usage and fail.
+ */
+export function messageBodyReader(
+  inlineMessage: string,
+  fileContent: string | undefined,
+  readStdin: () => Promise<string> = readStdinIfPiped,
+): () => Promise<string> {
+  let body: Promise<string> | undefined;
+  const read = async (): Promise<string> => {
+    if (inlineMessage) return inlineMessage;
+    if (fileContent !== undefined) return fileContent;
+    return readStdin();
+  };
+  return () => (body ??= read());
+}
+
+/**
  * Injectable check for whether the system-coordinator tmux session is running.
  * Default implementation calls `tmux has-session -t ib-coordinator`. Tests can
  * override via `setSystemCoordinatorHasSessionFn()` to avoid invoking tmux.
@@ -1905,15 +1925,9 @@ export async function main() {
         }
       }
 
-      // Resolve message content per precedence: inline > file > stdin.
-      const readMessageBody = async (): Promise<string> => {
-        if (inlineMessage) return inlineMessage;
-        if (fileContent !== undefined) return fileContent;
-        return readStdinIfPiped();
-      };
-      // Read at most once: the broker below may read it before the direct path does.
-      let messageBody: Promise<string> | undefined;
-      const resolveMessageBody = (): Promise<string> => (messageBody ??= readMessageBody());
+      // Resolve message content per precedence: inline > file > stdin, at most
+      // once: the broker below may read it before the direct path does.
+      const resolveMessageBody = messageBodyReader(inlineMessage, fileContent);
 
       // A sandboxed WORKTREE agent cannot list other repos' agents, so it asks
       // its own — unsandboxed — watchdog to resolve the target and send. The

@@ -77,8 +77,11 @@ export async function resolveSendTarget(
   repos: RepoEntry[],
   cwd: string = process.cwd(),
 ): Promise<ResolvedSendTarget & { error?: string }> {
-  const { readAllAgents } = await import("./agents");
+  const { readAgentsOfRepos } = await import("./agents");
   const { checkCoordinatorExists } = await import("./coordinator");
+  // From disk only: resolution never uses readAllAgents' tmux orphan scan, and
+  // `tmux list-sessions` is a kernel denial for a sandboxed non-spawner.
+  const readAgents = () => readAgentsOfRepos(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
 
   // @system → system coordinator
   if (target === "@system") {
@@ -112,7 +115,7 @@ export async function resolveSendTarget(
     }
     const coordResult = await checkCoordinatorExists(ownRepo.path);
     if (coordResult.exists && coordResult.isCoordinator) {
-      const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
+      const { agents } = await readAgents();
       const coordinator = agents.find((a) => a.id === coordResult.agentId);
       return { agent: coordinator || null, isSystemCoordinator: false };
     }
@@ -146,7 +149,7 @@ export async function resolveSendTarget(
           // Resolve each member id to a live Agent. Members that no longer
           // exist are simply skipped here — eager/lazy pruning happens at SEND
           // time (teamSend calls pruneDeadMembers), not during resolution.
-          const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
+          const { agents } = await readAgents();
           const byId = new Map(agents.map((a) => [a.id, a]));
           const members: Agent[] = [];
           for (const id of team.members) {
@@ -161,7 +164,7 @@ export async function resolveSendTarget(
 
     if (agentId) {
       // @<repo>/<agent-id> → agent in specific repo
-      const { agents, errors } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
+      const { agents, errors } = await readAgents();
       const repoAgents = agents.filter((a) => a.repoPath === repo.path);
       const match = matchAgentById(agentId, repoAgents);
       if (!match) {
@@ -177,7 +180,7 @@ export async function resolveSendTarget(
     // @<repo> → that repo's coordinator
     const coordResult = await checkCoordinatorExists(repo.path);
     if (coordResult.exists && coordResult.isCoordinator) {
-      const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
+      const { agents } = await readAgents();
       const coordinator = agents.find((a) => a.id === coordResult.agentId);
       return { agent: coordinator || null, isSystemCoordinator: false };
     }
@@ -185,7 +188,7 @@ export async function resolveSendTarget(
   }
 
   // <agent-id> (bare) → search same-repo first, then all repos
-  const { agents, errors } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
+  const { agents, errors } = await readAgents();
 
   // Try same-repo agents first (if we have an ownRepo)
   if (ownRepo) {

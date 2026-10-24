@@ -43,7 +43,7 @@
  */
 
 import { randomBytes } from "crypto";
-import { mkdir, readdir, rename, rm, stat } from "fs/promises";
+import { mkdir, readdir, realpath, rename, rm, stat } from "fs/promises";
 import { join } from "path";
 import { readAgentMeta, type AgentMeta } from "./agents";
 import {
@@ -122,6 +122,20 @@ async function writeJsonAtomic(dir: string, name: string, value: unknown): Promi
 
 export function brokerFail(stderr: string): IbCommandResult {
   return { ok: false, exitCode: 1, stdout: "", stderr };
+}
+
+/**
+ * Do two paths name the same directory? Unknown (either cannot be resolved)
+ * counts as yes. The brokers use it to tell an agent from its requester: on a
+ * case-insensitive volume `Agent-X` opens the directory of `agent-x`.
+ */
+export async function isSameDirectory(a: string, b: string): Promise<boolean> {
+  try {
+    const [resolvedA, resolvedB] = await Promise.all([realpath(a), realpath(b)]);
+    return resolvedA === resolvedB;
+  } catch {
+    return true;
+  }
 }
 
 /** The words that differ between the kinds of request a client can queue. */

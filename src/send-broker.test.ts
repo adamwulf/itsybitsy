@@ -349,7 +349,10 @@ describe("send broker", () => {
         );
         const { calls } = await sendTo("@backend");
         expect(calls).toEqual([
-          { kind: "team", args: ["backend", [TARGET_ID, OTHER_ID], MESSAGE, { fromAgent: SENDER_ID }, repos] },
+          {
+            kind: "team",
+            args: ["backend", [TARGET_ID, OTHER_ID], MESSAGE, { fromAgent: SENDER_ID, excludeRecipient: expect.any(Function) }, repos],
+          },
         ]);
       });
 
@@ -362,6 +365,63 @@ describe("send broker", () => {
       test("an unknown repo is reported back", async () => {
         const { written } = await sendTo("@nope/agent");
         expect(written.stderr).toBe("Error: no repo or team named: nope");
+      });
+    });
+
+    // The requester's tmux_session and heartbeat are files it can write. A send
+    // to itself would let it choose where the unsandboxed watchdog types.
+    describe("never to the requester itself", () => {
+      async function teamOf(members: string[]): Promise<void> {
+        await mkdir(join(home, ".itsybitsy"), { recursive: true });
+        await Bun.write(
+          join(home, ".itsybitsy", "teams.json"),
+          JSON.stringify({ teams: { backend: { created_epoch: 0, created_by: "", members } } }),
+        );
+      }
+
+      test("a target that is the requester is refused, and nothing is sent", async () => {
+        await writeAgent(senderRepo, SENDER_ID, { tmux_session: "0" });
+        const { deps } = server();
+        await queue(ID_A, sendRequest(ID_A, { target: SENDER_ID }));
+        await processSpawnRequests(SENDER_ID, senderRepo, deps);
+        expect(await result(ID_A)).toMatchObject({
+          ok: false,
+          stderr: `Error: '${SENDER_ID}' cannot send to itself through its watchdog; send directly`,
+        });
+        expect(await outbox(SENDER_ID)).toEqual([]);
+        expect(tmuxCalls).toEqual([]);
+      });
+
+      test("the requester is recognized by its directory when its meta.json claims another id", async () => {
+        // meta.json is the agent's own to write; the seal check (stubbed here)
+        // saw the right id a moment earlier.
+        await writeAgent(senderRepo, SENDER_ID, { id: "decoy", tmux_session: "0" });
+        const { deps } = server();
+        await queue(ID_A, sendRequest(ID_A, { target: "decoy" }));
+        await processSpawnRequests(SENDER_ID, senderRepo, deps);
+        expect((await result(ID_A)).stderr).toContain("cannot send to itself through its watchdog");
+        expect(await outbox("decoy")).toEqual([]);
+      });
+
+      test("a team drops the requester by its directory, and still reaches the others", async () => {
+        await writeAgent(senderRepo, SENDER_ID, { id: "decoy", tmux_session: "0" });
+        await teamOf(["decoy", TARGET_ID]);
+        const { deps } = server();
+        await queue(ID_A, sendRequest(ID_A, { target: "@backend" }));
+        await processSpawnRequests(SENDER_ID, senderRepo, deps);
+        expect(await result(ID_A)).toMatchObject({ ok: true, stdout: "Sent to 1 member(s) of @backend" });
+        expect(await outbox("decoy")).toEqual([]);
+        expect((await outbox(TARGET_ID)).map((m) => [m.message, m.fromAgent, m.team])).toEqual([[MESSAGE, SENDER_ID, "backend"]]);
+        expect(tmuxCalls).toEqual([]);
+      });
+
+      test("an agent with the requester's id in another repo is not the requester", async () => {
+        await writeAgent(targetRepo, SENDER_ID, {});
+        const { calls, seams } = recordingSends();
+        const { deps } = server({ send: seams });
+        await queue(ID_A, sendRequest(ID_A, { target: `@iris/${SENDER_ID}` }));
+        await processSpawnRequests(SENDER_ID, senderRepo, deps);
+        expect(calls.map((c) => c.args.slice(0, 2))).toEqual([[SENDER_ID, targetRepo]]);
       });
     });
 
@@ -540,6 +600,7 @@ describe("send broker", () => {
       target: TARGET_ID,
       readMessage: async () => { reads++; return MESSAGE; },
       usage: USAGE,
+      repos,
       ...over,
     });
     beforeEach(() => { reads = 0; });
@@ -593,6 +654,38 @@ describe("send broker", () => {
         watchdogLive: async (): Promise<boolean> => { throw new Error("the broker must not be asked"); },
       });
       expect(out).toEqual({ ok: false, exitCode: 1, stdout: "", stderr: USAGE });
+    });
+
+    // A send to itself stays direct: the agent can reach its own repo and
+    // outbox, and the watchdog refuses it. Nothing is read or queued.
+    test.each([
+      ["its id", SENDER_ID],
+      ["its nickname", "helper-nick"],
+      ["@repo/id of its own repo", `@hunch/${SENDER_ID}`],
+    ])("a send to itself by %s goes the direct way", async (_label, target) => {
+      setSandboxedProcessOverride(() => true);
+      await writeAgent(senderRepo, SENDER_ID, { nickname: "helper-nick" });
+      const out = await routeSendThroughWatchdog(command({ target }), {
+        resolveCaller: async () => caller(),
+        watchdogLive: async (): Promise<boolean> => { throw new Error("the broker must not be asked"); },
+      });
+      expect(out).toBeNull();
+      expect(reads).toBe(0);
+      await expect(readdir(spawnRequestDir(agentDir))).rejects.toThrow();
+    });
+
+    test("an agent with the caller's id in ANOTHER repo is not the caller: routed", async () => {
+      setSandboxedProcessOverride(() => true);
+      await writeAgent(targetRepo, SENDER_ID, {});
+      const { deps } = server();
+      const out = await routeSendThroughWatchdog(command({ target: `@iris/${SENDER_ID}` }), {
+        resolveCaller: async () => caller(),
+        watchdogLive: async () => true,
+        sleep: async () => { await processSpawnRequests(SENDER_ID, senderRepo, deps); },
+      });
+      expect(out?.ok).toBe(true);
+      // Queued for the iris agent (outboxes are keyed by id), from the caller.
+      expect((await outbox(SENDER_ID)).map((m) => [m.message, m.fromAgent])).toEqual([[MESSAGE, SENDER_ID]]);
     });
 
     test("a routed caller whose watchdog is not live sends directly (null)", async () => {

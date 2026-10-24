@@ -1923,7 +1923,7 @@ export async function main() {
       // as before. See routeSendThroughWatchdog.
       {
         const { routeSendThroughWatchdog } = await import("./send-broker");
-        const brokered = await routeSendThroughWatchdog({ target, fromAgent, readMessage: resolveMessageBody, usage });
+        const brokered = await routeSendThroughWatchdog({ target, fromAgent, readMessage: resolveMessageBody, usage, repos });
         if (brokered) await printAndExit(brokered);
       }
 

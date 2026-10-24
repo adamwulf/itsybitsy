@@ -4584,6 +4584,13 @@ export async function teamSend(
         attachmentBaseDir?: string;
         /** Members to skip (already accepted on a prior identical-draft attempt). */
         skipRecipientIds?: string[];
+        /**
+         * Internal (send broker): a recipient for which this returns true is
+         * dropped, like the sender. The sender is excluded by id only, and the
+         * id in a meta.json is its agent's own to write; the broker uses this
+         * to drop its requester by directory too. Never a CLI flag.
+         */
+        excludeRecipient?: (agent: Agent) => Promise<boolean>;
       }
     | undefined,
   repos: RepoEntry[],
@@ -4625,7 +4632,7 @@ export async function teamSend(
       }
       agent = lookupAgents.find((a) => a.id === id);
     }
-    if (agent) recipients.push(agent);
+    if (agent && !(await opts?.excludeRecipient?.(agent))) recipients.push(agent);
   }
 
   // Record ONE channel record per send to the shared team channel (§17.4) — the

@@ -34,7 +34,11 @@
  * path. The watchdog sends as its OWN agent (verified against the sealed
  * record, as for a spawn) and passes that id as `fromAgent`, so a request
  * cannot send in another agent's name; `--from` for another agent is refused
- * on the client. Files never cross: the client reads `-f <path>` and stdin
+ * on the client. The watchdog never delivers to the requester itself: a
+ * recipient's `tmux_session` and heartbeat are files that agent can write, so
+ * a send to itself would let it choose where the unsandboxed watchdog types
+ * its text. A send to itself therefore stays on the direct path (isAgentAt,
+ * targetIsCaller). Files never cross: the client reads `-f <path>` and stdin
  * inside the sandbox, and the watchdog never reads a path for the agent. It
  * also never sets `stageAttachments` (send-time attachment staging copies the
  * files a message names; outside the sandbox that would let an agent copy out
@@ -42,7 +46,7 @@
  */
 
 import { randomBytes } from "crypto";
-import { join } from "path";
+import { join, resolve } from "path";
 import type { Agent } from "./agents";
 import {
   hasLiveWatchdog,
@@ -58,6 +62,7 @@ import {
   SPAWN_CLIENT_TIMEOUT_MS,
   SPAWN_MAX_PROMPT_BYTES,
   brokerFail,
+  isSameDirectory,
   resolveRoutedCaller,
   submitWatchdogRequest,
   verifyBrokerRequester,
@@ -104,6 +109,29 @@ function isBrokerableTarget(target: unknown): target is string {
     target.length <= SEND_MAX_TARGET_CHARS &&
     !CONTROL_CHARS.test(target)
   );
+}
+
+/** Where an agent lives: its id, its repo and its own agent directory. */
+interface AgentLocation {
+  id: string;
+  repoPath: string;
+  agentDir: string;
+}
+
+/**
+ * Is `agent` the agent at `self`? By id within the same repo, and by resolved
+ * directory: the id in a meta.json is that agent's own to write (an agent can
+ * give itself another agent's id), and on a case-insensitive volume a case
+ * variant opens the same directory. Unknown counts as yes (isSameDirectory).
+ *
+ * Why it matters: a recipient's `tmux_session` and watchdog heartbeat come
+ * from files that agent can write, and the seal does not cover them. Sending
+ * to the requester itself would let a sandboxed agent choose both the text and
+ * the tmux session that its UNSANDBOXED watchdog types it into.
+ */
+async function isAgentAt(agent: Agent, self: AgentLocation): Promise<boolean> {
+  if (agent.id === self.id && resolve(agent.repoPath) === resolve(self.repoPath)) return true;
+  return isSameDirectory(agent.storageDir ?? join(agent.repoPath, ".ittybitty", "agents", agent.id), self.agentDir);
 }
 
 /** Strictly parse an untrusted request; only the allowlisted fields survive. */
@@ -205,14 +233,37 @@ export interface SendCommand {
   readMessage: () => Promise<string>;
   /** Printed when there is no message, as on the direct path. */
   usage: string;
+  /** The registered repos (`listRepos()`), to tell a send to the caller itself. */
+  repos: RepoEntry[];
+}
+
+/**
+ * Does `target` resolve to the caller itself? Resolved with the CLI's own
+ * resolver over the caller's repo only. That is enough: a target that resolves
+ * to the caller does so in its own repo (a bare id or nickname is looked up
+ * there first; `@<repo>/<id>`, `@<repo>` and `@coordinator` name that repo),
+ * and that repo is readable inside the sandbox while other repos are not.
+ */
+async function targetIsCaller(target: string, caller: ResolvedCallerContext, repos: RepoEntry[]): Promise<boolean> {
+  if (typeof caller.meta.id !== "string") return false;
+  const ownRepo = repos.filter((r) => resolve(r.path) === resolve(caller.repoPath));
+  if (ownRepo.length === 0) return false;
+  try {
+    const { agent } = await resolveSendTarget(target, ownRepo, join(caller.agentDir, "repo"));
+    return agent !== null && (await isAgentAt(agent, { id: caller.meta.id, repoPath: caller.repoPath, agentDir: caller.agentDir }));
+  } catch {
+    return false; // the watchdog refuses a send to its requester anyway
+  }
 }
 
 /**
  * The `ib send` entry point. Returns null when the caller must send directly,
  * exactly as before this broker existed: every caller that
- * `resolveRoutedCaller` does not route, and a routed caller whose watchdog
- * does not take the request (see requestSendViaWatchdog). A routed caller
- * sends only as itself: its watchdog serves its own agent and nobody else.
+ * `resolveRoutedCaller` does not route, a routed caller that sends to itself
+ * (its own repo and outbox are reachable in the sandbox, and the watchdog
+ * refuses it), and a routed caller whose watchdog does not take the request
+ * (see requestSendViaWatchdog). A routed caller sends only as itself: its
+ * watchdog serves its own agent and nobody else.
  */
 export async function routeSendThroughWatchdog(
   command: SendCommand,
@@ -225,6 +276,7 @@ export async function routeSendThroughWatchdog(
       "Error: --from for another agent is not supported inside the sandbox: a sandboxed agent sends only as itself, through its watchdog.",
     );
   }
+  if (await targetIsCaller(command.target, caller, command.repos)) return null;
   const message = await command.readMessage();
   if (!message) return brokerFail(command.usage);
   return requestSendViaWatchdog(command.target, message, { ...deps, resolveCaller: async () => caller });
@@ -245,7 +297,7 @@ export interface SendServerDeps {
     teamName: string,
     members: Agent[],
     message: string,
-    opts: { fromAgent: string },
+    opts: { fromAgent: string; excludeRecipient: (agent: Agent) => Promise<boolean> },
     repos: RepoEntry[],
   ) => Promise<IbCommandResult>;
   sendToSystemCoordinator?: (message: string, opts: { fromAgent: string; cwd: string }) => Promise<IbCommandResult>;
@@ -278,6 +330,7 @@ export async function handleSendRequest(
 
   const seams = deps.send ?? {};
   const fromAgent = ctx.agentId;
+  const self: AgentLocation = { id: ctx.agentId, repoPath: ctx.repoPath, agentDir: ctx.agentDir };
   // Where the requester "is": its own worktree, the cwd of a direct `ib send`
   // there. It decides `@coordinator` and the same-repo-first search of a bare
   // id; the watchdog's own cwd says nothing about the requester.
@@ -292,10 +345,22 @@ export async function handleSendRequest(
     if (resolved.isSystemCoordinator) {
       return await (seams.sendToSystemCoordinator ?? sendToSystemCoordinatorDefault)(message, { fromAgent, cwd: callerCwd });
     }
+    // Never deliver to the requester itself (see isAgentAt). A team drops it
+    // like the sender; a single target is refused.
+    const excludeRecipient = (agent: Agent): Promise<boolean> => isAgentAt(agent, self);
     if (resolved.team) {
-      return await (seams.teamSend ?? teamSend)(resolved.team.name, resolved.team.members, message, { fromAgent }, repos);
+      return await (seams.teamSend ?? teamSend)(
+        resolved.team.name,
+        resolved.team.members,
+        message,
+        { fromAgent, excludeRecipient },
+        repos,
+      );
     }
     if (!resolved.agent) return brokerFail(`Agent not found: ${target}`);
+    if (await excludeRecipient(resolved.agent)) {
+      return brokerFail(`Error: '${ctx.agentId}' cannot send to itself through its watchdog; send directly`);
+    }
     return await (seams.sendMessage ?? sendMessage)(resolved.agent, message, { fromAgent });
   } catch (err) {
     return brokerFail(`Error: send failed: ${err instanceof Error ? err.message : String(err)}`);

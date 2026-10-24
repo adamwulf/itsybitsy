@@ -7,9 +7,29 @@
  * `resolveTarget`, so direct callers see no change.
  */
 
-import type { Agent } from "./agents";
+import { join } from "path";
+import type { Agent, AgentReadError } from "./agents";
 import { repoDisplayName, resolveRepo, repoResolutionError, type RepoEntry } from "./registry";
 import { normalizeTeamName, getTeam } from "./teams";
+
+/** How many unreadable directories a not-found error names before "+N more". */
+const MAX_NAMED_UNREADABLE_DIRS = 3;
+
+/**
+ * The tail of an "Agent not found" error when the agents directory of a
+ * searched repo could not be listed. Inside an itsybitsy sandbox, another
+ * repo's `.ittybitty/agents` is not readable (EPERM), so an agent that exists
+ * there would otherwise look absent. Empty when every searched directory was
+ * read; a single unreadable `meta.json` is not named.
+ */
+function unreadableAgentsDirsNote(errors: AgentReadError[], searched: RepoEntry[]): string {
+  const agentsDirs = new Set(searched.map((r) => join(r.path, ".ittybitty", "agents")));
+  const unreadable = [...new Set(errors.map((e) => e.agentDir))].filter((dir) => agentsDirs.has(dir));
+  if (unreadable.length === 0) return "";
+  const named = unreadable.slice(0, MAX_NAMED_UNREADABLE_DIRS).join(", ");
+  const more = unreadable.length > MAX_NAMED_UNREADABLE_DIRS ? ` +${unreadable.length - MAX_NAMED_UNREADABLE_DIRS} more` : "";
+  return ` (could not read ${named}${more}; a sandbox may block it)`;
+}
 
 /**
  * Match an agent by ID (or nickname) from a pre-loaded list. Exact match only —
@@ -141,11 +161,15 @@ export async function resolveSendTarget(
 
     if (agentId) {
       // @<repo>/<agent-id> → agent in specific repo
-      const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
+      const { agents, errors } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
       const repoAgents = agents.filter((a) => a.repoPath === repo.path);
       const match = matchAgentById(agentId, repoAgents);
       if (!match) {
-        return { agent: null, isSystemCoordinator: false, error: `Agent not found: ${agentId} in repo ${repoName}` };
+        return {
+          agent: null,
+          isSystemCoordinator: false,
+          error: `Agent not found: ${agentId} in repo ${repoName}${unreadableAgentsDirsNote(errors, [repo])}`,
+        };
       }
       return { agent: match, isSystemCoordinator: false };
     }
@@ -161,7 +185,7 @@ export async function resolveSendTarget(
   }
 
   // <agent-id> (bare) → search same-repo first, then all repos
-  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
+  const { agents, errors } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
 
   // Try same-repo agents first (if we have an ownRepo)
   if (ownRepo) {
@@ -176,7 +200,7 @@ export async function resolveSendTarget(
   // Fall back to global search
   const globalMatch = matchAgentById(target, agents);
   if (!globalMatch) {
-    return { agent: null, isSystemCoordinator: false, error: `Agent not found: ${target}` };
+    return { agent: null, isSystemCoordinator: false, error: `Agent not found: ${target}${unreadableAgentsDirsNote(errors, repos)}` };
   }
 
   return { agent: globalMatch, isSystemCoordinator: false };

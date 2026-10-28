@@ -1098,8 +1098,16 @@ tmux-socket access from the requester.
   one at a time. Each request is deleted BEFORE it is acted on (at-most-once: a
   request that crashes the handler is never retried in a loop). The caller's
   identity comes from the agent's own `meta.json`, which the watchdog verifies
-  against the SEALED record (§4C.3, `verifyAgentSealChecked`): an agent cannot edit
-  `canSpawnChildren` into existence. The verified caller is passed to `newAgent()`
+  against the SEALED record (§4C.3, `verifyAgentSealChecked`): a sandbox-enabled
+  agent cannot edit `canSpawnChildren` into existence. Codex's native
+  `workspace-write` sandbox also routes spawning here when itsybitsy sandboxing
+  is disabled. For spawn requests only, explicit `meta.sandbox.enabled: false`
+  plus a genuinely missing seal is accepted, matching the disabled/no-seal
+  lifecycle contract. The seal check always runs: existing-seal mismatches,
+  corrupt records and read failures still refuse the request, even if metadata
+  says disabled. Disabled agents retain their hook-enforced policy rather than
+  gaining a sealed policy. Other broker operations retain their seal requirement
+  and disabled callers use their existing direct paths. The caller is passed to `newAgent()`
   as `_trustedCaller` (a cwd lookup cannot work from the watchdog: for a
   `worktree:false` agent it checks process ancestry, and the watchdog is not a
   descendant of the agent's CLI), so every ordinary caller gate — spawn

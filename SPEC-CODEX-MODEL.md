@@ -31,7 +31,11 @@ pre-sandbox Codex process boundary. Inline hooks and
 `--dangerously-bypass-hook-trust` remain in both modes. Any older literal launch
 line or phase ledger below that says `-a`/`-s` are omitted in disabled mode, or
 that presents one fixed sandbox mode for every launch, is superseded by this
-addendum.
+addendum. Native `workspace-write` still routes `ib new-agent` through the
+watchdog. The spawn broker accepts explicit `meta.sandbox.enabled: false` with
+a genuinely absent seal; it always checks for a seal first and rejects existing
+seal mismatches, corruption and read failures. Normal caller spawn-permission
+checks remain in force (SPEC-SANDBOX §4C.6).
 
 **Current worktree support restriction:** Codex and Fugu require a real agent
 worktree because their `.codex/` gitignore entry, inline-hook prechecks, and

@@ -24,6 +24,10 @@ must not cause a worktree caller to invoke `/bin/ps`. Other callers retain the
 no-worktree ancestry checks, and every resolved agent still passes the same
 `metaCanSpawnChildren` gate. Codex's native sandbox stays enabled when the
 itsybitsy wrapper is disabled; no escalation or hook execution bypass is used.
+Such callers still spawn through the watchdog. The spawn broker accepts an
+explicitly disabled sandbox with a genuinely absent seal, but rejects existing
+seal mismatches, corrupt records and read errors; normal caller permission
+gates remain in force (SPEC-SANDBOX §4C.6).
 
 When a new agent is created (`ib new-agent "prompt"`):
 

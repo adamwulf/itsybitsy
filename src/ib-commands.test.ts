@@ -9481,7 +9481,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     resetNewAgentCallerMetaReader();
   });
 
-  test("_trustedCaller (watchdog spawn broker) gates a worker even when the cwd resolves to nobody", async () => {
+  test.each([true, false])("_trustedCaller gates a worker even when cwd resolves to nobody (sandbox enabled: %s)", async (enabled) => {
     // The watchdog is not a descendant of the agent's CLI and its cwd is not the
     // agent's, so the cwd-based caller lookup would return null and the caller
     // would look like an unrestricted human. The broker passes the verified
@@ -9491,7 +9491,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       name: "should-not-exist-trusted",
       _cwd: tempDir, // not an agent worktree: cwd lookup alone finds no caller
       _trustedCaller: {
-        meta: { id: "trusted-worker", worker: true, agentType: "worker" },
+        meta: { id: "trusted-worker", worker: true, agentType: "worker", sandbox: { enabled } },
         agentDir: join(agentsDir, "trusted-worker"),
         repoPath: tempDir,
       },

@@ -335,6 +335,13 @@ describe("parseCodexState — real captured snapshots", () => {
 });
 
 describe("parseState codex dispatch", () => {
+  test("real retry-exhaustion capture is api_error through automatic and explicit dispatch", async () => {
+    const output = await Bun.file(new URL("../src/fixtures/codex-retry-limit.txt", import.meta.url)).text();
+    expect(parseState(output).state).toBe("api_error");
+    expect(parseStateForCli(output, "codex").state).toBe("api_error");
+    expect(parseStateForCli(output, "fugu").state).toBe("api_error");
+  });
+
   test("retry exhaustion overrides older sentinels and the idle prompt across parser entry points", () => {
     const output = "WAITING\nI HAVE COMPLETED THE GOAL\n■ exceeded retry limit\n\n›\n\nGPT-6.1-Sol high · Context 48% left · weekly 70% left";
     expect(parseCodexState(output).state).toBe("api_error");

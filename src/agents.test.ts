@@ -1990,6 +1990,14 @@ describe("isRateLimited", () => {
 describe("isApiError", () => {
   const codexChrome = "\n\n›\n\n  GPT-6.1-Sol high · Context 48% left · weekly 70% left\n";
 
+  test("real Codex v0.161.0 capture detects exhausted retries despite its idle placeholder", async () => {
+    // quality-app snapshot, 2026-10-26T19:25:12.843Z, unwrapped tail;
+    // original task text omitted. Preserve the comma, whitespace, and footer.
+    const output = await Bun.file(new URL("fixtures/codex-retry-limit.txt", import.meta.url)).text();
+    expect(isApiError(output)).toBe(true);
+    expect(isRateLimited(output)).toBe(false);
+  });
+
   test("Codex retry exhaustion is an API error, not a usage limit", () => {
     const output = "■ exceeded retry limit" + codexChrome;
     expect(isApiError(output)).toBe(true);
@@ -2001,6 +2009,15 @@ describe("isApiError", () => {
   test("Codex retry error supports wrapped details and supersedes old sentinels", () => {
     const output = "WAITING\nI HAVE COMPLETED THE GOAL\n■ exceeded retry limit: unexpected status 429 Too Many Requests\n  request id: example" + codexChrome;
     expect(isApiError(output)).toBe(true);
+  });
+
+  test("real retry banner punctuation is accepted", () => {
+    expect(isApiError("■ exceeded retry limit, last status: 429 Too Many Requests" + codexChrome)).toBe(true);
+  });
+
+  test("a Codex error sample in an idle Claude pane does not enable Claude recovery", () => {
+    const output = "⏺ The Codex error is:\n■ exceeded retry limit, last status: 429 Too Many Requests\n\n❯\n⏵⏵ accept edits on (shift+tab to cycle)";
+    expect(isApiError(output)).toBe(false);
   });
 
   test("idle composer placeholder or unsent draft does not clear the error", () => {

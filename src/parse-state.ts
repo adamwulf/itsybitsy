@@ -329,6 +329,7 @@ function hasAgyBarePromptBetweenSeparators(input: string): boolean {
  * bar that may show either cwd or context/quota telemetry on the last line.
  *
  * Priority order (mirrors claude's intent):
+ *   0. Current retry-exhaustion banner with Codex footer → api_error (newer activity clears it).
  *   1. Active work marker ("Working (... esc to interrupt)") in last 15 lines → running.
  *   2. Queue-message footer ("tab to queue message ...") on the last non-blank line → running.
  *   3. Completion sentinel ("I HAVE COMPLETED THE GOAL") in last 15 lines (excluding quoted) → complete.
@@ -425,7 +426,7 @@ export function parseCodexState(input: string): ParseStateResult {
 
 /**
  * Codex's terminal retry-exhaustion banner, observed on failed API turns:
- *   ■ exceeded retry limit
+ *   ■ exceeded retry limit, last status: 429 Too Many Requests
  * The error remains in scrollback after recovery. Only match a recent banner
  * with no newer turn/response/state signal below it; idle composer chrome does
  * not clear it. Shared with the watchdog/dashboard override in agents.ts so
@@ -433,18 +434,21 @@ export function parseCodexState(input: string): ParseStateResult {
  */
 export function isCodexRetryLimitError(input: string): boolean {
   const lines = stripTrailingBlanks(stripAnsi(input).split("\n")).slice(-STANDARD_WINDOW);
+  const last = lines[lines.length - 1] ?? "";
+  // This predicate also runs on Claude panes, where a displayed Codex error
+  // sample must not activate Claude's automatic retry handler.
+  if (!isCodexStatusLine(last)) return false;
   let errorIndex = -1;
   for (let i = 0; i < lines.length; i++) {
-    if (/^\s*■\s+exceeded retry limit(?:\s|$|:)/i.test(lines[i]!)) errorIndex = i;
+    if (/^\s*■\s+exceeded retry limit\b/i.test(lines[i]!)) errorIndex = i;
   }
   if (errorIndex < 0) return false;
 
-  const last = lines[lines.length - 1] ?? "";
   if (/^\s*tab to queue message\b/i.test(last)) return false;
   // The last prompt above the status footer is the composer: it may contain
   // placeholder text or an unsent draft. Only transcript prompts supersede an
   // error. Exclude the composer block, including any wrapped draft lines.
-  const promptIndex = isCodexStatusLine(last) ? findLastCodexPromptIndex(lines) : -1;
+  const promptIndex = findLastCodexPromptIndex(lines);
   const end = promptIndex > errorIndex ? promptIndex : lines.length;
   return !lines.slice(errorIndex + 1, end).some((line) =>
     // Submitted prompts and assistant/tool output mark a newer turn.

@@ -1,0 +1,7 @@
+
+■ exceeded retry limit, last status: 429 Too Many Requests
+ 
+ 
+› Ask Codex to do anything
+ 
+  GPT-6-Astra high · Context 100% left · weekly 70% left                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      ⚠ 4 warnings · f2 to view

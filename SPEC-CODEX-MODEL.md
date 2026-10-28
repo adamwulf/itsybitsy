@@ -96,10 +96,12 @@ flags in place of the old `-c sandbox_workspace_write.network_access=true`:
     profile id.
   - Only an explicit remote app-server endpoint drops these keys, and ib
     never uses one.
-- Residual risks. A writable admin dir lets an agent rewrite
-  `<gitDir>/commondir`, though the common dir was already writable. If the repo
-  path runs through a symlink, the canonical `<gitDir>` differs from the path
-  Codex resolves from the pointer, and commit still fails (fails closed).
+- Residual risk: a writable admin dir lets an agent rewrite
+  `<gitDir>/commondir`, though the common dir was already writable. The
+  `<gitDir>` entry only works if it matches, byte for byte, the path Codex
+  resolves from the worktree's `.git` pointer. Git writes the realpath into
+  that pointer, and ib realpaths `git rev-parse --git-dir`, so they should
+  match; live checks have not confirmed this.
 - Status: verified against the codex 0.165.0 source and covered by unit and
   integration tests. **Live checks have NOT passed yet.** Still to run: disabled
   spawn then `git commit`; a write outside the roots is denied; resume of a

@@ -81,8 +81,6 @@ Also exercise explicit false on each deployed CLI: confirm the absence of the it
 6. Resume an agent spawned BEFORE this change (its rollout ran under `-s workspace-write`), then commit. By source, the resume request's permission keys suppress the saved legacy policy. This check confirms it live.
 7. Optional isolated probe: in a disposable `git worktree`, run `codex sandbox macos` with the same `-c` flags, selecting `itsybitsy_agent` via its permission-profile option (confirm the exact flag name with `codex sandbox macos --help`), then `git add`/`git commit`.
 
-If the repository path runs through a symlink, step 2 may still fail, because Codex matches the admin dir by exact path. That failure is closed, not open; report it rather than widening grants.
-
 ## Install and migrate running agents
 
 Merging source does not replace the installed binary or change a running process. A Seatbelt profile takes effect at launch and is inherited by descendants.

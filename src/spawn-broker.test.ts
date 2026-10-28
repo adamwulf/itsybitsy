@@ -13,6 +13,7 @@ import {
   processSpawnRequests,
   requestSpawnViaWatchdog,
   routeNewAgentThroughWatchdog,
+  verifyBrokerRequester,
   spawnRequestDir,
   spawnResultDir,
   type SpawnServerDeps,
@@ -186,6 +187,48 @@ describe("spawn broker", () => {
       await processSpawnRequests(AGENT_ID, repo, deps);
       expect(calls).toHaveLength(0);
       expect((await result(ID_A)).stderr).toContain("ib sandbox refresh agent-spawner");
+    });
+
+    test.each([true, undefined, "false"])("a missing seal is refused unless sandbox.enabled is explicitly false (%s)", async (enabled) => {
+      const { deps, calls } = server({
+        readMeta: async () => ({ meta: meta({ sandbox: { enabled } }) }),
+        verifySeal: async () => ({ ok: false, field: "(missing)", reason: "not found" }),
+      });
+      await queue(ID_A, validRequest(ID_A));
+      await processSpawnRequests(AGENT_ID, repo, deps);
+      expect(calls).toHaveLength(0);
+      expect((await result(ID_A)).stderr).toContain("no sealed record");
+    });
+
+    test.each(["sandbox", "canSpawnChildren", "(corrupt)"])("disabled metadata cannot bypass a seal failure (%s)", async (field) => {
+      const { deps, calls } = server({
+        readMeta: async () => ({ meta: meta({ sandbox: { enabled: false } }) }),
+        verifySeal: async () => ({ ok: false, field, reason: "invalid seal" }),
+      });
+      await queue(ID_A, validRequest(ID_A));
+      await processSpawnRequests(AGENT_ID, repo, deps);
+      expect(calls).toHaveLength(0);
+      expect((await result(ID_A)).stderr).toContain(`does not match its sealed record (${field})`);
+    });
+
+    test("a disabled agent cannot bypass an unreadable seal store", async () => {
+      const { deps, calls } = server({
+        readMeta: async () => ({ meta: meta({ sandbox: { enabled: false } }) }),
+        verifySeal: async () => { throw new Error("seal store unreadable"); },
+      });
+      await queue(ID_A, validRequest(ID_A));
+      await processSpawnRequests(AGENT_ID, repo, deps);
+      expect(calls).toHaveLength(0);
+      expect((await result(ID_A)).stderr).toContain("seal store unreadable");
+    });
+
+    test.each(["ask", "send", "retire", "merge", "rehire"])("the disabled/no-seal exception does not apply to %s", async (verb) => {
+      const { deps } = server({
+        readMeta: async () => ({ meta: meta({ sandbox: { enabled: false } }) }),
+        verifySeal: async () => ({ ok: false, field: "(missing)", reason: "not found" }),
+      });
+      const out = await verifyBrokerRequester(AGENT_ID, repo, agentDir, verb, deps);
+      expect(out.ok).toBe(false);
     });
 
     test("a seal check that throws is an error result, not a crash", async () => {
@@ -410,6 +453,32 @@ describe("spawn broker", () => {
         sleep: async () => { await processSpawnRequests(AGENT_ID, repo, deps); },
       });
       expect(out).toEqual({ ok: true, exitCode: 0, stdout: "agent-child", stderr: "" });
+    });
+
+    test("Codex native sandbox routes an explicitly disabled, unsealed caller through the watchdog", async () => {
+      setSandboxedProcessOverride(() => true);
+      const disabledMeta = meta({ model: "codex:gpt-6-astra", sandbox: { enabled: false } });
+      let sealChecks = 0;
+      const { deps, calls } = server({
+        readMeta: async () => ({ meta: disabledMeta }),
+        verifySeal: async () => {
+          sealChecks++;
+          return { ok: false, field: "(missing)", reason: "not found" };
+        },
+      });
+      const out = await routeNewAgentThroughWatchdog("child task", { type: "worker" }, {}, {
+        resolveCaller: async () => ({ ...caller(), meta: { ...disabledMeta } }),
+        watchdogLive: async () => true,
+        sleep: async () => { await processSpawnRequests(AGENT_ID, repo, deps); },
+      });
+      expect(out).toEqual({ ok: true, exitCode: 0, stdout: "agent-child", stderr: "" });
+      expect(sealChecks).toBe(1);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.opts._trustedCaller?.meta).toEqual({ ...disabledMeta });
+      expect(calls[0]!.opts._cwd).toBe(join(agentDir, "repo"));
+      expect(calls[0]!.opts.type).toBe("worker");
+      expect(await readdir(spawnRequestDir(agentDir))).toEqual([]);
+      expect(await readdir(spawnResultDir(agentDir))).toEqual([]);
     });
   });
 });

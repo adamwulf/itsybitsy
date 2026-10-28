@@ -24,8 +24,10 @@
  *
  * Trust model: the request is untrusted DATA. The watchdog takes the caller's
  * identity from the agent's own meta.json, verifies that meta against its sealed
- * record (an agent cannot edit its way into `canSpawnChildren`), builds the
- * verified caller itself and hands it to newAgent() as `_trustedCaller`, so every
+ * record (enabled agents cannot edit their way into `canSpawnChildren`). An
+ * explicitly sandbox-disabled requester may have no seal, retaining its
+ * hook-enforced policy; Codex's native sandbox still needs this spawn broker.
+ * The watchdog hands the caller to newAgent() as `_trustedCaller`, so every
  * ordinary caller gate (canSpawnChildren, user-only --model, spawnedBy) applies.
  * Only a fixed allowlist of fields is honored; `model`, `repo` and `spawnedBy`
  * are never accepted.
@@ -519,8 +521,9 @@ export async function processSpawnRequests(
 
 /**
  * Establish WHO a request is from. Identity comes from the agent's own record,
- * never from the request, and that record is trusted only while it matches its
- * seal. `verb` names the refused action in the error ("spawn", "retire", ...).
+ * never from the request. Enabled agents must match their seal. A spawn from
+ * an explicitly sandbox-disabled agent may have no seal (Codex still needs
+ * the broker under its native sandbox). `verb` names the action ("spawn", ...).
  */
 export async function verifyBrokerRequester(
   agentId: string,
@@ -533,8 +536,8 @@ export async function verifyBrokerRequester(
   if (!meta || meta.id !== agentId) {
     return { ok: false, result: brokerFail(`Error: cannot read the metadata of '${agentId}'; refusing to ${verb} on its behalf`) };
   }
-  // meta.json is writable by the agent, so trust it only if it still matches the
-  // sealed record made at spawn (agentType / canSpawnChildren / paths / sandbox).
+  // Always check the protected record, even if writable meta says disabled:
+  // changing an enabled agent's metadata must not bypass its existing seal.
   let verification: SealVerification;
   try {
     verification = await (deps.verifySeal ?? verifyAgentSealChecked)(
@@ -549,7 +552,15 @@ export async function verifyBrokerRequester(
       result: brokerFail(`Error: could not verify the sealed record for '${agentId}': ${err instanceof Error ? err.message : String(err)}`),
     };
   }
-  if (!verification.ok) {
+  // Disabled agents deliberately have no seal. Like resume, accept only a
+  // genuine missing-record result in that mode; mismatches, corruption and
+  // read failures still fail closed. Other broker operations keep their
+  // existing seal requirement (disabled callers use their direct paths).
+  const unsealedDisabledSpawn = verb === "spawn"
+    && meta.sandbox?.enabled === false
+    && !verification.ok
+    && verification.field === "(missing)";
+  if (!verification.ok && !unsealedDisabledSpawn) {
     return {
       ok: false,
       result: brokerFail(

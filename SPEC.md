@@ -3285,7 +3285,7 @@ Everything else stays CLI-agnostic:
 
 The deterministic half landed in Phase 3: codex agents reach the canonical `MetaState` (`running` / `waiting` / `complete`) via the SessionStart and Stop hooks writing `state` to `meta.json` through `writeAgentState()`. `detectAgentStates()` reads `state` from meta.json with the same precedence as for claude agents.
 
-The override states (`compacting`, `rate_limited`, `api_error`) are **DEFERRED** to Phase 5 of `SPEC-CODEX-MODEL.md` — they need empirically-captured codex UI strings from real interactive sessions. In the interim, codex agents surface `unknown` for these overrides; the deterministic `running` / `waiting` / `complete` states from the hooks still work correctly. Capturing the codex UI strings synthetically risks chasing the wrong regex, so the parser waits until codex agents from Phases 6/7/8 have generated real transcripts.
+Codex transient overrides use the existing watchdog terminal capture even when no hook fires: the observed `■ exceeded retry limit` banner resolves to `api_error`, and the usage-limit message resolves to `rate_limited`. Retry exhaustion is matched in the last 15 logical lines after stripping ANSI and trailing blank padding; newer prompts, assistant/tool output, errors, activity markers, or completion/waiting sentinels clear the match. The same detector feeds live state reads, the existing `tmux_api_error` cache used by the dashboard, and the snapshot parser. Codex/Fugu recovery remains disabled: this change only detects the error, with no additional polling, hooks, or metadata fields. Compaction and other Codex API-error patterns remain deferred pending captured evidence (SPEC-CODEX-MODEL.md §5.6).
 
 ### 18.10 meta.json Additions
 

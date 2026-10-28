@@ -345,6 +345,12 @@ export function parseCodexState(input: string): ParseStateResult {
 
   const last15 = lastNLines(input, STANDARD_WINDOW);
 
+  // A failed turn can leave older WAITING/completion text on screen. The
+  // shared detector checks ordering, so a current error wins over that text.
+  if (isCodexRetryLimitError(input)) {
+    return { state: "api_error", reason: "codex exceeded retry limit in last 15 lines" };
+  }
+
   // Codex keeps its native input chrome visible while work is active. The
   // "Working (... esc to interrupt)" line must therefore win over the trailing
   // "›" prompt/status bar, otherwise active agents are misclassified as idle.
@@ -415,6 +421,37 @@ export function parseCodexState(input: string): ParseStateResult {
   }
 
   return { state: "unknown", reason: "no codex patterns matched" };
+}
+
+/**
+ * Codex's terminal retry-exhaustion banner, observed on failed API turns:
+ *   ■ exceeded retry limit
+ * The error remains in scrollback after recovery. Only match a recent banner
+ * with no newer turn/response/state signal below it; idle composer chrome does
+ * not clear it. Shared with the watchdog/dashboard override in agents.ts so
+ * detection does not depend on a Stop hook firing after the failed turn.
+ */
+export function isCodexRetryLimitError(input: string): boolean {
+  const lines = stripTrailingBlanks(stripAnsi(input).split("\n")).slice(-STANDARD_WINDOW);
+  let errorIndex = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*■\s+exceeded retry limit(?:\s|$|:)/i.test(lines[i]!)) errorIndex = i;
+  }
+  if (errorIndex < 0) return false;
+
+  const last = lines[lines.length - 1] ?? "";
+  if (/^\s*tab to queue message\b/i.test(last)) return false;
+  // The last prompt above the status footer is the composer: it may contain
+  // placeholder text or an unsent draft. Only transcript prompts supersede an
+  // error. Exclude the composer block, including any wrapped draft lines.
+  const promptIndex = isCodexStatusLine(last) ? findLastCodexPromptIndex(lines) : -1;
+  const end = promptIndex > errorIndex ? promptIndex : lines.length;
+  return !lines.slice(errorIndex + 1, end).some((line) =>
+    // Submitted prompts and assistant/tool output mark a newer turn.
+    /^\s*(?:›\s*\S|[•●■]\s|WAITING\s*$|I HAVE COMPLETED THE GOAL\s*$)/.test(line)
+    || /\b(?:esc|ctrl\+c) to interrupt\b/i.test(line)
+    || /^\s*tab to queue message\b/i.test(line)
+  );
 }
 
 function findLastCodexPromptIndex(lines: string[]): number {

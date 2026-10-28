@@ -335,6 +335,23 @@ describe("parseCodexState — real captured snapshots", () => {
 });
 
 describe("parseState codex dispatch", () => {
+  test("retry exhaustion overrides older sentinels and the idle prompt across parser entry points", () => {
+    const output = "WAITING\nI HAVE COMPLETED THE GOAL\n■ exceeded retry limit\n\n›\n\nGPT-6.1-Sol high · Context 48% left · weekly 70% left";
+    expect(parseCodexState(output).state).toBe("api_error");
+    expect(parseState(output).state).toBe("api_error");
+    expect(parseStateForCli(output, "codex").state).toBe("api_error");
+    expect(parseStateForCli(output, "fugu").state).toBe("api_error");
+  });
+
+  test.each([
+    ["• Working (1s • esc to interrupt)", "running"],
+    ["WAITING", "waiting"],
+    ["I HAVE COMPLETED THE GOAL", "complete"],
+  ] as const)("retry error yields to newer %s", (activity, state) => {
+    const output = `■ exceeded retry limit\n${activity}\n\n›\n\nGPT-6.1-Sol high · Context 48% left · weekly 70% left`;
+    expect(parseCodexState(output).state).toBe(state);
+  });
+
   test("real codex snapshot routed through parseState → waiting (not unknown)", () => {
     // This is the bug the task is fixing: the real captured snapshot was previously
     // landing as `state: "unknown"` because every claude-shaped pattern fell through.

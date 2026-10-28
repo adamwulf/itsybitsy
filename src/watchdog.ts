@@ -1100,9 +1100,9 @@ export const API_ERROR_RATE_LIMITED_START_INDEX = 2;
  */
 async function handleApiError(agent: Agent, tracker: AgentTracker, _getAllAgents: GetAllAgents): Promise<void> {
   // Phase 6: "please retry" is claude-specific UX (typed into claude's TUI in
-  // response to its api-error idle prompt). Codex surfaces transient errors
-  // differently and there's no equivalent retry-by-keypress affordance, so
-  // skip for non-claude agents. agy (D10) is covered by the same `!== "claude"`
+  // response to its api-error idle prompt). Codex retry-limit detection is
+  // display-only; automatic recovery is not enabled. Skip for non-claude
+  // agents. agy (D10) is covered by the same `!== "claude"`
   // gate — its api_error strings aren't captured yet, so api_error stays
   // `unknown` for agy and this retry path is a no-op.
   if (classifyAgentCli(agent.meta.model) !== "claude") return;

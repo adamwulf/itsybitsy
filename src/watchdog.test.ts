@@ -3627,6 +3627,14 @@ describe("resolveWatchdogState — waiting + background shell override", () => {
     expect(resolveWatchdogState(output, "running")).toBe("api_error");
   });
 
+  test("Codex retry exhaustion overrides stale running state without a Stop hook", () => {
+    const output = "■ exceeded retry limit\n\n›\n\nGPT-6.1-Sol high · Context 48% left · weekly 70% left";
+    expect(resolveWatchdogState(output, "running")).toBe("api_error");
+    expect(resolveWatchdogState(output, undefined)).toBe("api_error");
+    const recovered = output.replace("\n\n›", "\n• Working (1s • esc to interrupt)\n\n›");
+    expect(resolveWatchdogState(recovered, "running")).toBe("running");
+  });
+
   test("api_safeguard tmux marker overrides meta state (terminal, before api_error)", () => {
     const output = "narration\n⏺ API Error: Fable 5's safeguards flagged this message (https://www.anthropic.com/legal/aup). Claude Code can't respond to this message with Fable 5.";
     expect(resolveWatchdogState(output, "waiting")).toBe("api_safeguard");
@@ -3948,6 +3956,25 @@ describe("runPerAgentWatchdog — meta.transient.json persistence", () => {
       setPerAgentExistsSync(() => ++existsChecks <= 1);
       await runPerAgentWatchdog("agent-test1", tempDir);
       expect((await readAgentTransient(agentDir))?.has_background_tasks).toBe(active);
+    }
+  });
+
+  test("Codex retry error is persisted for dashboard readers and clears after recovery without hooks", async () => {
+    setPerAgentReadMeta(async () => ({ meta: {
+      ...makeAgent({ id: "agent-test1", state: "running" }).meta,
+      model: "codex:gpt-6.1-sol", tmux_session: "tmux-test1", manager: null,
+    } }));
+    const chrome = "\n\n›\n\nGPT-6.1-Sol high · Context 48% left · weekly 70% left";
+    const { readAgentTransient } = await import("./agents");
+    for (const failed of [true, false]) {
+      const output = "■ exceeded retry limit" + (failed ? "" : "\n• Working (1s • esc to interrupt)") + chrome;
+      setPerAgentCaptureTmux(async () => output);
+      let existsChecks = 0;
+      setPerAgentExistsSync(() => ++existsChecks <= 1);
+      await runPerAgentWatchdog("agent-test1", tempDir);
+      const written = await readAgentTransient(agentDir);
+      expect(written?.tmux_api_error).toBe(failed);
+      expect(written?.tmux_rate_limited).toBe(false);
     }
   });
 

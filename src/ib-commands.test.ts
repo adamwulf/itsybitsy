@@ -6362,6 +6362,43 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     };
   }
 
+  // A linked worktree's real Git layout: Git names the admin dir itself
+  // ("repo7", not the agent id), and the paths contain dots. The dirs exist so
+  // ib's realpath canonicalization resolves them; the expected values are
+  // canonical too (tempDir sits under a symlinked /var on macOS).
+  async function linkedWorktreeGitDirs(): Promise<{ commonDir: string; gitDir: string }> {
+    const commonDir = join(tempDir, "main.repo", ".git");
+    const gitDir = join(commonDir, "worktrees", "repo7");
+    await mkdir(gitDir, { recursive: true });
+    return { commonDir: realpathSync(commonDir), gitDir: realpathSync(gitDir) };
+  }
+
+  /** Answer `git -C <agent worktree> rev-parse --git-dir|--git-common-dir` with `dirs`. */
+  function answerWorktreeGitDirs<A extends unknown[]>(
+    id: string,
+    dirs: { commonDir: string; gitDir?: string; gitDirFails?: boolean },
+    inner: (cmd: string[], ...rest: A) => SpawnResult,
+  ): (cmd: string[], ...rest: A) => SpawnResult {
+    const worktree = join(agentsDir, id, "repo");
+    return (cmd: string[], ...rest: A) => {
+      if (cmd[0] === "git" && cmd[1] === "-C" && cmd[2] === worktree && cmd[3] === "rev-parse") {
+        if (cmd[4] === "--git-common-dir") return makeSpawnResult(dirs.commonDir, 0);
+        if (cmd[4] === "--git-dir") return dirs.gitDirFails ? makeSpawnResult("", 128) : makeSpawnResult(dirs.gitDir ?? "", 0);
+      }
+      return inner(cmd, ...rest);
+    };
+  }
+
+  /** The profile `-c` payload ib must emit for `dirs` (one inline table). */
+  function expectedProfileFilesystem(dirs: { commonDir: string; gitDir: string }): string {
+    return `'permissions.itsybitsy_agent.filesystem={"${dirs.gitDir}"="write","${dirs.commonDir}/objects"="write","${dirs.commonDir}/refs"="write","${dirs.commonDir}/logs"="write"}'`;
+  }
+
+  /** The shell-quoted permission-profile payloads in a launch script, in order. */
+  function profileFlagsIn(script: string): string[] {
+    return script.match(/'(?:default_permissions|permissions\.itsybitsy_agent)[^']*'/g) ?? [];
+  }
+
   function sandboxResumeWithTmuxHelperRunner() {
     const inner = sandboxResumeRunner();
     return (cmd: string[]): SpawnResult => {
@@ -6970,9 +7007,10 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(spawnCalls.some((call) => call[0] === "codex")).toBe(false);
   });
 
-  test("sandbox-disabled Codex spawn suppresses approvals, keeps workspace-write and hooks, and omits every kernel helper", async () => {
+  test("sandbox-disabled Codex spawn selects the permission profile with the worktree's exact Git dirs, keeps -a never and hooks, and omits -s and every kernel helper", async () => {
     await writeSandboxType("unsandboxed-codex", { enabled: false, model: "codex:gpt-5.4-mini" });
-    setNewAgentSpawnRunner(cleanWorktreeRunner());
+    const dirs = await linkedWorktreeGitDirs();
+    setNewAgentSpawnRunner(answerWorktreeGitDirs("unsandboxed-codex", dirs, cleanWorktreeRunner()));
     setNewAgentSummaryGenerator(async () => {});
     setWatchdogSpawnFn(() => ({ pid: 99986 }));
 
@@ -6980,14 +7018,83 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(result.ok).toBe(true);
     const agentDir = join(agentsDir, "unsandboxed-codex");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
-    expect(start).toContain("-a never -s workspace-write --dangerously-bypass-hook-trust");
+    expect(start).toContain("-a never --dangerously-bypass-hook-trust");
+    expect(start).toContain(`'default_permissions="itsybitsy_agent"'`);
+    expect(start).toContain(`'permissions.itsybitsy_agent.extends=":workspace"'`);
+    expect(start).toContain(`'permissions.itsybitsy_agent.network.enabled=true'`);
+    expect(start).toContain(expectedProfileFilesystem(dirs));
+    // The existing --add-dir grants stay: the common dir and parent-repo subdirs.
+    expect(start).toContain(`'--add-dir' '${dirs.commonDir}'`);
+    expect(start).toContain(`'--add-dir' '${realpathSync(join(tempDir, ".ittybitty"))}'`);
+    expect(start).not.toContain("-s workspace-write");
     expect(start).not.toContain("-s danger-full-access");
+    expect(start).not.toContain("sandbox_workspace_write");
     expect(start).not.toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(start).toContain("hooks.PreToolUse");
     expect(start).not.toContain("sandbox-exec");
     expect(start).not.toContain("sandbox-proxy-launch");
     expect(start).not.toContain("sandbox-collector");
     expect(spawnCalls.some((cmd) => cmd[0] === "which" && cmd[1] === "sandbox-exec")).toBe(false);
+  });
+
+  test("sandbox-disabled Codex spawn refuses to launch when the worktree's git dir cannot be resolved", async () => {
+    await writeSandboxType("unsandboxed-codex-nogitdir", { enabled: false, model: "codex:gpt-5.4-mini" });
+    const dirs = await linkedWorktreeGitDirs();
+    setNewAgentSpawnRunner(answerWorktreeGitDirs(
+      "unsandboxed-codex-nogitdir",
+      { commonDir: dirs.commonDir, gitDirFails: true },
+      cleanWorktreeRunner(),
+    ));
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99985 }));
+
+    const result = await callNewAgent("unsandboxed codex", { name: "unsandboxed-codex-nogitdir", type: "unsandboxed-codex-nogitdir" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("could not resolve git dir for codex permission profile");
+    expect(spawnCalls.some((cmd) => cmd.join(" ").includes("tmux new-session"))).toBe(false);
+  });
+
+  test("sandbox-disabled Codex resume re-passes the same permission profile and Git dirs as spawn", async () => {
+    const id = "unsandboxed-codex-resume";
+    await writeSandboxType(id, { enabled: false, model: "codex:gpt-5.4-mini" });
+    const dirs = await linkedWorktreeGitDirs();
+    setNewAgentSpawnRunner(answerWorktreeGitDirs(id, dirs, cleanWorktreeRunner()));
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99984 }));
+    expect((await callNewAgent("resume unsandboxed codex", { name: id, type: id })).ok).toBe(true);
+
+    const agentDir = join(agentsDir, id);
+    const start = await Bun.file(join(agentDir, "start.sh")).text();
+    const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    meta.state = "stopped";
+    meta.codex_session_id = "019e7b21-cb7d-7f23-8674-11036ed141ef";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
+    let createdSession = false;
+    setNukeResumeSpawnRunner(answerWorktreeGitDirs(id, dirs, (cmd: string[]) => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("tmux has-session")) return makeSpawnResult("", createdSession ? 0 : 1);
+      if (cmdStr.includes("tmux new-session")) { createdSession = true; return makeSpawnResult("", 0); }
+      if (cmdStr.includes("capture-pane")) return makeSpawnResult("OpenAI Codex", 0);
+      return makeSpawnResult("", 0);
+    }));
+    setSendSpawnRunner(() => makeSpawnResult("", 0));
+    try {
+      const result = await resumeAgent(makeAgent(id, tempDir, "stopped", meta));
+      expect(result.ok).toBe(true);
+    } finally {
+      resetSendSpawnRunner();
+    }
+
+    const resume = await Bun.file(join(agentDir, "resume.sh")).text();
+    expect(resume).toContain("-a never --dangerously-bypass-hook-trust");
+    expect(resume).toContain(expectedProfileFilesystem(dirs));
+    expect(profileFlagsIn(resume)).toHaveLength(8); // 4 payloads × 2 launch arms
+    expect(profileFlagsIn(resume)).toEqual(profileFlagsIn(start));
+    expect(resume).not.toContain("-s workspace-write");
+    expect(resume).not.toContain("-s danger-full-access");
+    expect(resume).not.toContain("sandbox_workspace_write");
+    expect(resume).toContain("hooks.PreToolUse");
+    expect(resume).not.toContain("sandbox-exec");
   });
 
   test("sandbox-enabled Codex resume reallocates proxy, preserves profile, and wraps both launch arms", async () => {
@@ -7410,7 +7517,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   });
 
   // ── A4 G2: ib sandbox refresh ──────────────────────────────────────────────
-  test("Codex refresh to disabled updates the SessionStart role text and keeps no-prompt workspace-write hooks", async () => {
+  test("Codex refresh to disabled updates the SessionStart role text and resumes no-prompt under the permission profile", async () => {
     const id = "codex-refresh-instructions";
     const oldRead = join(tempDir, "old-policy");
     const newRead = join(tempDir, "new-policy");
@@ -7435,15 +7542,16 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // Edit both paths and the toggle. Refresh must replace the frozen policy
     // (which the SessionStart hook reads) before resuming without kernel helpers.
     await writeSandboxType(id, { model: "codex:gpt-5.4-mini", enabled: false, allowRead: [newRead] });
+    const dirs = await linkedWorktreeGitDirs();
     let created = false;
-    setNukeResumeSpawnRunner((cmd: string[]) => {
+    setNukeResumeSpawnRunner(answerWorktreeGitDirs(id, dirs, (cmd: string[]) => {
       if (cmd[0] === "which" && cmd[1] === "sandbox-exec") return makeSpawnResult("/usr/bin/sandbox-exec", 0);
       if (cmd[0] === "/usr/bin/sandbox-exec") return makeSpawnResult("", 0);
       if (cmd.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
       if (cmd.includes("has-session")) return makeSpawnResult("", created ? 0 : 1);
       if (cmd.includes("new-session")) created = true;
       return makeSpawnResult("", 0);
-    });
+    }));
     const result = await refreshAgentSandbox(makeAgent(id, tempDir, "stopped", meta));
     expect(result.ok).toBe(true);
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
@@ -7452,8 +7560,12 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(resume).not.toContain("sandbox-exec");
     expect(resume).not.toContain("sandbox-proxy-launch");
     expect(resume).not.toContain("sandbox-collector");
-    expect(resume).toContain("-a never -s workspace-write --dangerously-bypass-hook-trust");
+    expect(resume).toContain("-a never --dangerously-bypass-hook-trust");
+    expect(resume).toContain(`'default_permissions="itsybitsy_agent"'`);
+    expect(resume).toContain(expectedProfileFilesystem(dirs));
+    expect(resume).not.toContain("-s workspace-write");
     expect(resume).not.toContain("-s danger-full-access");
+    expect(resume).not.toContain("sandbox_workspace_write");
     expect(resume).toContain("hooks.PreToolUse");
     const refreshedMeta = await Bun.file(join(agentDir, "meta.json")).json();
     // The role text does not print the path lists, so the refreshed paths are

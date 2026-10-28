@@ -21,21 +21,91 @@ matches enforcement. [SPEC.md §6.1](SPEC.md) and
 [SPEC-PATH-ALLOWLIST.md](SPEC-PATH-ALLOWLIST.md) are authoritative for this
 cross-CLI policy.
 
-**Current sandbox/approval addendum (2026-09-08):** Codex and Codex-backed
-Fugu always launch with `-a never`, at spawn and resume, so hooks decide every
-tool allow/deny without a native user prompt. With the itsybitsy kernel sandbox
-enabled they use `-s danger-full-access` inside the shared `sandbox-exec` and
-proxy wrapper. With it disabled they explicitly use `-s workspace-write` and
-omit the itsybitsy wrapper, proxy, and denial collector, restoring the
-pre-sandbox Codex process boundary. Inline hooks and
+**Current sandbox/approval addendum (2026-09-08, disabled mode revised
+2026-10-28):** Codex and Codex-backed Fugu always launch with `-a never`, at
+spawn and resume, so hooks decide every tool allow/deny without a native user
+prompt. With the itsybitsy kernel sandbox enabled they use
+`-s danger-full-access` inside the shared `sandbox-exec` and proxy wrapper.
+With it disabled they omit the itsybitsy wrapper, proxy, and denial collector,
+and keep Codex's own sandbox through the `itsybitsy_agent` native permission
+profile described in the next addendum (no `-s`). Inline hooks and
 `--dangerously-bypass-hook-trust` remain in both modes. Any older literal launch
-line or phase ledger below that says `-a`/`-s` are omitted in disabled mode, or
-that presents one fixed sandbox mode for every launch, is superseded by this
-addendum. Native `workspace-write` still routes `ib new-agent` through the
-watchdog. The spawn broker accepts explicit `meta.sandbox.enabled: false` with
-a genuinely absent seal; it always checks for a seal first and rejects existing
-seal mismatches, corruption and read failures. Normal caller spawn-permission
-checks remain in force (SPEC-SANDBOX §4C.6).
+line or phase ledger below that says `-a`/`-s` are omitted in disabled mode,
+that presents one fixed sandbox mode for every launch, or that says disabled
+mode uses `-s workspace-write`, is superseded by these addenda. Codex's native
+sandbox still routes `ib new-agent` through the watchdog. The spawn broker
+accepts explicit `meta.sandbox.enabled: false` with a genuinely absent seal; it
+always checks for a seal first and rejects existing seal mismatches, corruption
+and read failures. Normal caller spawn-permission checks remain in force
+(SPEC-SANDBOX §4C.6).
+
+**Current permission-profile addendum (2026-10-28):** with the itsybitsy kernel
+sandbox disabled, `git add`/`git commit` failed under `-s workspace-write`.
+Codex keeps the resolved `gitdir:` target of the worktree's `.git` pointer
+read-only, and on macOS also carves it out of the broader `--add-dir <commonDir>`
+root. That per-worktree Git admin dir holds `index.lock`, `logs/HEAD` and
+`COMMIT_EDITMSG`. Disabled spawn and resume (Codex and Fugu share the builders
+in `src/codex-spawn.ts`) therefore launch with no `-s`, and with these inline
+flags in place of the old `-c sandbox_workspace_write.network_access=true`:
+
+```
+-c 'default_permissions="itsybitsy_agent"'
+-c 'permissions.itsybitsy_agent.extends=":workspace"'
+-c 'permissions.itsybitsy_agent.network.enabled=true'
+-c 'permissions.itsybitsy_agent.filesystem={"<gitDir>"="write","<commonDir>/objects"="write","<commonDir>/refs"="write","<commonDir>/logs"="write"}'
+```
+
+- `<gitDir>` comes from `git rev-parse --git-dir` and `<commonDir>` from
+  `git rev-parse --git-common-dir`. Both run in the worktree, and the results
+  are canonicalized (realpath). The admin dir's name is Git's own
+  (e.g. `.git/worktrees/repo4`) and is never derived from the agent id. Codex
+  lifts its gitdir protection only for an entry with that exact path. Spawn and
+  resume share one resolver (`resolveCodexGitRoots` in `src/ib-commands.ts`).
+  A `--git-dir` failure refuses the launch.
+- `:workspace` writes the cwd, every `--add-dir` root and the temp dirs, keeps
+  `.git`/`.codex`/`.agents`/`.aws` under each root read-only, and has no
+  network. `network.enabled=true` restores the unrestricted network the legacy
+  key gave.
+- The `--add-dir` grants are unchanged: coordinator home, `~/Library/Caches`,
+  `<commonDir>`, and the parent repo's `.ittybitty`/`.claude`. The existing
+  `--add-dir <commonDir>` still grants the whole common dir (including
+  `hooks/` and `config`); the profile does not narrow it. The
+  `objects`/`refs`/`logs` entries are redundant with it and only make the
+  profile name every Git dir add/commit write. Only the `<gitDir>` entry is new
+  access.
+- No `-s` and no `sandbox_workspace_write.*` in disabled mode. Any `-s` makes
+  Codex use its legacy settings and ignore `default_permissions`, and Codex
+  rejects both overrides together. `sandbox_workspace_write.*` is ignored once
+  a profile is selected.
+- Codex splits a `-c` key on every `.`, so the paths sit inside ONE TOML
+  inline-table value, never in a key. Each path must be absolute and contain no
+  quote, backslash or control character.
+- No fallback: a disabled builder without the Git dirs throws. It never falls
+  back to `-s workspace-write` or `danger-full-access`. No Codex config file is
+  written: not `~/.codex/config.toml` and not a project `.codex/config.toml`.
+- Enabled mode is unchanged: `-s danger-full-access` inside our wrapper, the
+  legacy `sandbox_workspace_write.network_access=true` key, and no profile.
+- Resume re-passes the identical flags. From the codex rust-v0.165.0 source:
+  - The app-server restores a session's saved permissions (its saved profile
+    id, or its saved legacy policy) only when the resume request carries no
+    permission override.
+  - The TUI sends the command-line `default_permissions`, `permissions` and
+    `network` keys with the resume request, and that counts as an override.
+  - So resume uses `itsybitsy_agent` whether the session began under it or
+    under the pre-change `-s workspace-write`. A legacy session saved no
+    profile id.
+  - Only an explicit remote app-server endpoint drops these keys, and ib
+    never uses one.
+- Residual risk: a writable admin dir lets an agent rewrite
+  `<gitDir>/commondir`, though the common dir was already writable. The
+  `<gitDir>` entry only works if it matches, byte for byte, the path Codex
+  resolves from the worktree's `.git` pointer. Git writes the realpath into
+  that pointer, and ib realpaths `git rev-parse --git-dir`, so they should
+  match; live checks have not confirmed this.
+- Status: verified against the codex 0.165.0 source and covered by unit and
+  integration tests. **Live checks have NOT passed yet.** Still to run: disabled
+  spawn then `git commit`; a write outside the roots is denied; resume of a
+  post-change session and of a pre-change session, then `git commit`.
 
 **Current worktree support restriction:** Codex and Fugu require a real agent
 worktree because their `.codex/` gitignore entry, inline-hook prechecks, and
@@ -148,7 +218,7 @@ Authoritative reference: `SETTINGS-HOOKS-RESEARCH.md` (every claim evidence-tagg
 - **`-a never` is "never PROMPT", not "deny everything by default."** Without our PreToolUse hook a command would be ALLOWED (subject to sandbox); with the hook returning deny-by-default, denied commands return to the model rather than escalating to a human. The hook is what makes D4 true.
 - **Hash-pinned hook trust.** Codex hashes every hook command; any edit invalidates trust and the hook is **silently skipped** until re-trusted. [research §B4] ⇒ itsybitsy MUST pass `--dangerously-bypass-hook-trust` on every spawn (our hook source is first-party and vetted). Without it, regenerating the hook silently disables it — a permission-bypass disaster.
 - **No hot-reload.** Codex config + hooks require a fresh session to pick up edits (Claude reloads `permissions`/`hooks` live). [research §C] ⇒ Mutations require respawn.
-- **Permission model is 2D.** Codex: `-a {untrusted|on-request|never} × -s {read-only|workspace-write|danger-full-access}`. Claude: 1D `--permission-mode`. [research §C] The original pre-kernel mapping was `-a never -s workspace-write`; the current contract preserves that pair when the itsybitsy kernel is disabled and substitutes `danger-full-access` only inside our wrapper.
+- **Permission model is 2D.** Codex: `-a {untrusted|on-request|never} × -s {read-only|workspace-write|danger-full-access}`. Claude: 1D `--permission-mode`. [research §C] The original pre-kernel mapping was `-a never -s workspace-write`. The current contract keeps `-a never` in both modes, uses `-s danger-full-access` only inside our wrapper, and replaces `-s workspace-write` with the `itsybitsy_agent` permission profile (`:workspace` plus the Git admin dir) when the itsybitsy kernel is disabled.
 - **No `.local`-style override file and no on-disk per-worktree config is used.** Hooks are registered via inline `-c` at launch time (Phase 2 spike Q2); no per-worktree config.toml is written by itsybitsy. `<worktree>/.codex/hooks/` is added to `.gitignore` to cover any incidental files (e.g. hook logs).
 - **`CODEX_HOME` relocation breaks auth (Phase 2 spike B2).** Setting `CODEX_HOME=<per-agent-path>` triggers the first-time-login flow because `~/.codex/auth.json` isn't in the redirected home. **NOT pursued** (per user direction — no symlink workaround either). itsybitsy uses global `~/.codex/` for auth + sessions + memories; per-agent isolation comes from cwd + inline `-c` hooks + the worktree path-isolation matcher in the hook handler.
 - **Hook failure mode is FAIL-OPEN (Phase 2 spike B1).** Per the codex docs at `developers.openai.com/codex/hooks`: a hook that crashes, emits malformed JSON, or returns an unsupported `permissionDecision` is marked failed and the tool call PROCEEDS. The hook handler MUST wrap all logic in try/catch and emit a deny payload on exception. See §5.5 for the defense-in-depth requirements.
@@ -169,10 +239,12 @@ codex -m <MODEL> -a never -s <SANDBOX_MODE> \
 
 Where `<MODEL>` is the **model half** of the parsed `<cli>:<model>` (the `codex:` prefix is stripped), `<abs ib>` is the absolute path to the `ib` binary resolved at spawn time (NOT a bare `ib` — codex's spawn environment may have a different PATH; see §5.5), and `<agentId>` is the itsybitsy agent id (ASCII, regex-validated, safe to interpolate).
 
-`<SANDBOX_MODE>` is `danger-full-access` only when this entire command runs
-inside the enabled itsybitsy `sandbox-exec` wrapper. It is explicitly
-`workspace-write` when the itsybitsy kernel sandbox is disabled. `-a never` and
-the generated hooks are invariant across both modes.
+`-s <SANDBOX_MODE>` is `-s danger-full-access`, and it appears only when this
+entire command runs inside the enabled itsybitsy `sandbox-exec` wrapper. When
+the itsybitsy kernel sandbox is disabled there is no `-s`; the launch carries
+the `itsybitsy_agent` permission-profile `-c` flags instead (see the
+permission-profile addendum at the top). `-a never` and the generated hooks are
+invariant across both modes.
 
 **No on-disk config file is written.** Per Phase 2 spike Q2, the inline-`-c` registration bypasses codex's project-config-walk and trust gate entirely. No `<worktree>/.codex/config.toml` is created and no entry is added to `~/.codex/config.toml`.
 
@@ -262,7 +334,7 @@ In `newAgent()`, branch the generated `start.sh` on `parseModel(model).cli`:
 Permission mapping reference (for claude callers translating intent):
 | Claude `--permission-mode` | Codex equivalent |
 |---|---|
-| `acceptEdits` | `-a never`; pair with `-s danger-full-access` under the itsybitsy wrapper or `-s workspace-write` when that wrapper is disabled |
+| `acceptEdits` | `-a never`; pair with `-s danger-full-access` under the itsybitsy wrapper, or with the `itsybitsy_agent` permission profile (no `-s`) when that wrapper is disabled |
 | `plan` | `-a untrusted -s read-only` |
 | `bypassPermissions` / `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` (aka `--yolo`) |
 
@@ -278,7 +350,7 @@ At spawn (Phase 3), `buildCodexLaunchArgs()`:
    - `-c 'hooks.SessionStart=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-session-start <agentId>",timeout=30,additionalContextLimit=0}]}]'` (`additionalContextLimit=0` so codex does not cut the role text down to a preview; step 6)
    - `-c 'hooks.UserPromptSubmit=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-user-prompt-submit <agentId>",timeout=30}]}]'`
    - `-c 'hooks.Stop=[{matcher=".*",hooks=[{type="command",command="<abs ib> hooks codex-stop <agentId>",timeout=30}]}]'`
-4. `model` (`-m`), invariant approval policy (`-a never`), and mode-specific sandbox policy (`-s danger-full-access` under the itsybitsy wrapper; `-s workspace-write` without it) are passed as CLI flags, not via `-c`. Per-spawn fail-open hardening: the `command=` value above invokes `ib` directly with no shell wrapper, so any non-zero exit before our handler runs (binary missing, dispatcher crash, `<agentId>` argv parse failure) results in codex fail-open. Mitigation lives in §5.5 (handler-level try/catch + a spawn-time precheck).
+4. `model` (`-m`), invariant approval policy (`-a never`), and the enabled-mode sandbox policy (`-s danger-full-access` under the itsybitsy wrapper) are passed as CLI flags. Without the wrapper there is no `-s`; the `itsybitsy_agent` permission profile is defined and selected by inline `-c` flags (permission-profile addendum at the top). Per-spawn fail-open hardening: the `command=` value above invokes `ib` directly with no shell wrapper, so any non-zero exit before our handler runs (binary missing, dispatcher crash, `<agentId>` argv parse failure) results in codex fail-open. Mitigation lives in §5.5 (handler-level try/catch + a spawn-time precheck).
 5. (Phase 4) Adds `<worktree>/.codex/` to the worktree's `.gitignore` to cover any incidental files (hook logs, sentinel files, future per-agent scratch). No `.codex/config.toml` is created by itsybitsy; if codex itself drops anything there it's gitignored. Slid out of Phase 3 — see Phase 4 in §6.
 6. (Phase 4, revised 2026-09-24) Puts NO role text on the launch line. The codex SessionStart hook returns the role/session-start instructions (what `session-start.ts` injects for Claude, built by `buildAgentRoleBody()`) as `additionalContext`. Phase 4 originally wrote them to a per-agent `<worktree>/AGENTS.md`; that clobbered a repo-tracked `AGENTS.md`, so nothing is written into the worktree now (see the instructions addendum at the top).
 7. **`~/.codex/config.toml` is NEVER modified by itsybitsy.** The user's existing trust entries, model defaults, and other config are left untouched. (Closes Risk #10.)
@@ -287,7 +359,7 @@ At spawn (Phase 3), `buildCodexLaunchArgs()`:
 
 **Launch-line length:** three inline `-c` payloads with absolute paths is ~600–800 bytes. macOS `ARG_MAX` is ~1 MB so we have several orders of magnitude of headroom; not a concern.
 
-**Defense in depth:** Per Phase 2 follow-up, the hook fires for BOTH `Bash` AND `apply_patch` on v0.135.0 (issue #16732 appears resolved). The hook is the primary tool/path boundary in both modes. Enabled mode adds the itsybitsy Seatbelt profile with Codex set to `danger-full-access`; disabled mode restores Codex `workspace-write`, which is broader than the shared path table on macOS (`/tmp`, `$TMPDIR`, and `~/.codex/memories` are writable). See §5.5 for the authorization and path-extraction checks that gate both tool types.
+**Defense in depth:** Per Phase 2 follow-up, the hook fires for BOTH `Bash` AND `apply_patch` on v0.135.0 (issue #16732 appears resolved). The hook is the primary tool/path boundary in both modes. Enabled mode adds the itsybitsy Seatbelt profile with Codex set to `danger-full-access`. Disabled mode uses Codex's own sandbox through the `itsybitsy_agent` profile (`:workspace` plus the worktree's Git admin dir). That sandbox is broader than the shared path table on macOS: the temp dirs are writable, and `~/.codex/memories` was writable under the legacy `workspace-write`. See §5.5 for the authorization and path-extraction checks that gate both tool types.
 
 ### 5.5 Codex PreToolUse hook handler (D3 + D4)
 

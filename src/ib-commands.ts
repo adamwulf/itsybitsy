@@ -143,6 +143,7 @@ import {
   lintSandboxProfile,
   sandboxProxyScriptPreamble,
 } from "./sandbox-launch";
+import type { CodexGitRoots } from "./codex-config";
 import { sandboxDenialScriptPreamble, sandboxDenialExecPrefix } from "./sandbox-log-launch";
 import { removeSandboxProfile, sandboxProfilePath } from "./sandbox-log-paths";
 import {
@@ -1294,7 +1295,7 @@ async function stopSandboxProxyForAgent(agentDir: string, meta: AgentMeta): Prom
 
 /**
  * Derive the narrow set of parent-repo subdirectories codex agents need
- * write access to under `-s workspace-write`. Returns absolute, canonicalised
+ * write access to under Codex's own sandbox. Returns absolute, canonicalised
  * paths for `<parentRepo>/.ittybitty` and `<parentRepo>/.claude` (the only
  * two subdirs `ib new-agent` writes outside the worktree/gitdir/caches).
  *
@@ -1328,6 +1329,36 @@ async function deriveCodexParentRepoRoots(parentRepoPath: string): Promise<strin
     }
   }
   return out;
+}
+
+/**
+ * Resolve the Git directories a codex agent's worktree writes through.
+ * `commonDir` (shared objects/refs/logs) is always an `--add-dir` root. When
+ * `forPermissionProfile` is set (itsybitsy's kernel sandbox is off), the
+ * per-worktree admin dir from `git rev-parse --git-dir` is resolved too, and
+ * both are returned as `profileGitRoots` for the Codex permission profile. The
+ * enabled launch never asks for it, so its argv stays unchanged. Spawn and
+ * resume both call this so a resumed agent gets the grants it was spawned with.
+ */
+async function resolveCodexGitRoots(
+  runner: SandboxCommandRunner,
+  workPath: string,
+  forPermissionProfile: boolean,
+): Promise<{ ok: true; commonDir: string; profileGitRoots?: CodexGitRoots } | { ok: false; error: string }> {
+  const commonResult = await runner.run(["git", "-C", workPath, "rev-parse", "--git-common-dir"]);
+  if (commonResult.exitCode !== 0 || !commonResult.stdout.trim()) {
+    const errMsg = commonResult.stderr.trim() || `git rev-parse --git-common-dir failed with exit code ${commonResult.exitCode}`;
+    return { ok: false, error: `could not resolve git common dir for codex writable root: ${errMsg}` };
+  }
+  const commonDir = resolveGitRevParsePath(workPath, commonResult.stdout);
+  if (!forPermissionProfile) return { ok: true, commonDir };
+  const gitDirResult = await runner.run(["git", "-C", workPath, "rev-parse", "--git-dir"]);
+  if (gitDirResult.exitCode !== 0 || !gitDirResult.stdout.trim()) {
+    const errMsg = gitDirResult.stderr.trim() || `git rev-parse --git-dir failed with exit code ${gitDirResult.exitCode}`;
+    return { ok: false, error: `could not resolve git dir for codex permission profile: ${errMsg}` };
+  }
+  const gitDir = resolveGitRevParsePath(workPath, gitDirResult.stdout);
+  return { ok: true, commonDir, profileGitRoots: { gitDir, commonDir } };
 }
 
 /**
@@ -1915,17 +1946,14 @@ export async function resumeAgent(
         }
       }
 
-      const gitCommonDirResult = await nukeResumeSpawnCtx.run([
-        "git", "-C", workPath, "rev-parse", "--git-common-dir",
-      ]);
-      if (gitCommonDirResult.exitCode !== 0 || !gitCommonDirResult.stdout.trim()) {
-        const errMsg = gitCommonDirResult.stderr.trim() || `git rev-parse --git-common-dir failed with exit code ${gitCommonDirResult.exitCode}`;
-        await logAgent(agentDir, `[resume] could not resolve git common dir for codex writable root: ${errMsg}`);
+      const codexGitRoots = await resolveCodexGitRoots(nukeResumeSpawnCtx, workPath, !frozenConfig.enabled);
+      if (!codexGitRoots.ok) {
+        await logAgent(agentDir, `[resume] ${codexGitRoots.error}`);
         return {
           ok: false,
           exitCode: 1,
           stdout: "",
-          stderr: `Error: could not resolve git common dir for codex writable root: ${errMsg}`,
+          stderr: `Error: ${codexGitRoots.error}`,
         };
       }
       // Parent repo subdirs — granted as writable roots so `ib new-agent`
@@ -1942,7 +1970,7 @@ export async function resumeAgent(
       const resumeParentRepoPath = (await resolveGitRoot(agent.repoPath)) || agent.repoPath;
       const codexParentRepoSubdirs = await deriveCodexParentRepoRoots(resumeParentRepoPath);
       const codexExtraWritableRoots = [
-        resolveGitRevParsePath(workPath, gitCommonDirResult.stdout),
+        codexGitRoots.commonDir,
         ...codexParentRepoSubdirs,
       ];
 
@@ -1964,6 +1992,7 @@ export async function resumeAgent(
         absAgentLog: join(agentDir, "agent.log"),
         absStderrLog: join(agentDir, "claude.stderr.log"),
         extraWritableRoots: codexExtraWritableRoots,
+        gitRoots: codexGitRoots.profileGitRoots,
         fugu: resumeCli === "fugu",
         sandboxEnabled: frozenConfig.enabled,
         sandboxScriptPreamble: preparedResumeSandbox ? sandboxResumePreamble : undefined,
@@ -6909,6 +6938,7 @@ export async function newAgent(
   // Working directory defaults to root repo
   let workPath = rootRepoPath;
   let codexExtraWritableRoots: string[] = [];
+  let codexProfileGitRoots: CodexGitRoots | undefined;
 
   // Compute fields needed for the early meta.json write below. These were
   // previously computed just before the late meta.json write (post worktree-add),
@@ -7161,31 +7191,24 @@ export async function newAgent(
         await logSpawn(agentDir, spawnerAgentDir, id, `codex .gitignore append failed: ${(err as Error)?.message ?? String(err)}`);
       }
 
-      const gitCommonDirResult = await newAgentSpawnCtx.run([
-        "git", "-C", workPath, "rev-parse", "--git-common-dir",
-      ]);
-      if (gitCommonDirResult.exitCode !== 0 || !gitCommonDirResult.stdout.trim()) {
-        const errMsg = gitCommonDirResult.stderr.trim() || `git rev-parse --git-common-dir failed with exit code ${gitCommonDirResult.exitCode}`;
-        await logSpawn(
-          agentDir,
-          spawnerAgentDir,
-          id,
-          `spawn FAILED: could not resolve git common dir for codex writable root: ${errMsg}`,
-        );
+      const gitRoots = await resolveCodexGitRoots(newAgentSpawnCtx, workPath, !resolvedSandboxConfig.enabled);
+      if (!gitRoots.ok) {
+        await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: ${gitRoots.error}`);
         await cleanupOnFailure();
         return {
           ok: false,
           exitCode: 1,
           stdout: "",
-          stderr: `Error: could not resolve git common dir for codex writable root: ${errMsg}`,
+          stderr: `Error: ${gitRoots.error}`,
         };
       }
+      codexProfileGitRoots = gitRoots.profileGitRoots;
       // Parent repo subdirs — granted as writable roots so `ib new-agent`
       // from inside a codex agent can mkdir into <parentRepo>/.ittybitty/
       // (agents+archive subdirs) and write <parentRepo>/.claude/settings.local.json
-      // when spawning a claude sub-agent. These remain necessary for the
-      // ordinary `-s workspace-write` path; under our Seatbelt wrapper they
-      // are redundant but harmless and preserve disabled-mode behavior.
+      // when spawning a claude sub-agent. These remain necessary for Codex's
+      // own sandbox (the permission profile used when ours is off); under our
+      // Seatbelt wrapper they are redundant but harmless.
       //
       // We grant the .ittybitty and .claude SUBDIRS rather than the bare
       // parent repo so a misbehaving agent cannot reach src/, AGENTS.md,
@@ -7193,14 +7216,14 @@ export async function newAgent(
       // matcher in checkBashCommandPaths.
       const codexParentRepoSubdirs = await deriveCodexParentRepoRoots(rootRepoPath);
       codexExtraWritableRoots = [
-        resolveGitRevParsePath(workPath, gitCommonDirResult.stdout),
+        gitRoots.commonDir,
         ...codexParentRepoSubdirs,
       ];
       await logSpawn(
         agentDir,
         spawnerAgentDir,
         id,
-        `codex writable roots: git=${codexExtraWritableRoots[0]} parentRepoSubdirs=[${codexParentRepoSubdirs.join(",")}]`,
+        `codex writable roots: git=${codexExtraWritableRoots[0]}${codexProfileGitRoots ? ` gitDir=${codexProfileGitRoots.gitDir}` : ""} parentRepoSubdirs=[${codexParentRepoSubdirs.join(",")}]`,
       );
 
       // Codex hook-dispatcher precheck (SPEC §5.4 step 7 + §5.5 fail-open
@@ -7646,8 +7669,9 @@ echo ""
   if (isCodexBackedCli(agentCli)) {
     // Codex spawn branch — the builder owns Codex's native approval/sandbox
     // arguments in both kernel modes. Sandbox disablement removes only our
-    // Seatbelt wrapper; Codex keeps its native workspace-write sandbox while
-    // inline hooks remain the tool-policy authority. The path-safety and
+    // Seatbelt wrapper; Codex keeps its own sandbox through the itsybitsy
+    // permission profile (which also lets `git commit` write the worktree's
+    // Git dirs) while inline hooks remain the tool-policy authority. The path-safety and
     // dispatcher precheck guarantees ran above (we wouldn't be here on
     // failure). PID variable + meta-field stay
     // `CLAUDE_PID` / `claude_pid` so the watchdog and other readers don't break —
@@ -7668,6 +7692,7 @@ echo ""
       absAgentLog: join(agentDir, "agent.log"),
       absStderrLog: join(agentDir, "claude.stderr.log"),
       extraWritableRoots: codexExtraWritableRoots,
+      gitRoots: codexProfileGitRoots,
       sandboxEnabled: resolvedSandboxConfig.enabled,
       sandboxScriptPreamble: preparedSandbox ? sandboxStartPreamble : undefined,
       sandboxExecPrefix: preparedSandbox ? sandboxLaunchPrefix.trimEnd() : undefined,

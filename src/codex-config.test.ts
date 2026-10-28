@@ -3,6 +3,8 @@ import {
   buildCodexLaunchArgs,
   isCodexSafeBinaryPath,
   renderCodexHookFlagPayload,
+  renderCodexPermissionProfileOverrides,
+  CODEX_PERMISSION_PROFILE,
   CODEX_REGISTERED_EVENTS,
   DEFAULT_CODEX_HOOK_TIMEOUT_SECS,
   FUGU_CODEX_CONFIG_OVERRIDES,
@@ -453,6 +455,102 @@ describe("buildCodexLaunchArgs — disables codex's native multi-agent feature",
     expect(args).toContain('log_dir="/var/agents/agent-abc123/codex"');
     expect(args).toContain("tui.show_tooltips=false");
     expect(args).toContain('tui.status_line=["model-with-reasoning","context-remaining","five-hour-limit","weekly-limit"]');
+  });
+});
+
+describe("buildCodexLaunchArgs — permission profile (itsybitsy kernel sandbox off)", () => {
+  // Real-shaped linked-worktree paths: Git names the admin dir itself
+  // (`repo4`, not the agent id), and every path carries dots that a dotted
+  // `-c` key would split on.
+  const GIT_ROOTS = {
+    gitDir: "/Users/me/src/my.repo/.git/worktrees/repo4",
+    commonDir: "/Users/me/src/my.repo/.git",
+  };
+  const profileArgs = () => buildCodexLaunchArgs({
+    ibBinaryPath: "/usr/local/bin/ib",
+    agentId: "agent-abc123",
+    agentDir: "/var/agents/agent-abc123",
+    extraWritableRoots: [GIT_ROOTS.commonDir, "/Users/me/src/my.repo/.ittybitty"],
+    permissionProfileGitRoots: GIT_ROOTS,
+  }).args;
+  const configValues = (args: string[]) => args.flatMap((arg, i) => (args[i - 1] === "-c" ? [arg] : []));
+  const filesystemOverride = (args: string[]) =>
+    configValues(args).filter((value) => value.startsWith(`permissions.${CODEX_PERMISSION_PROFILE}.filesystem=`));
+
+  test("selects the profile, extends :workspace and enables network", () => {
+    const values = configValues(profileArgs());
+    expect(values).toContain(`default_permissions="${CODEX_PERMISSION_PROFILE}"`);
+    expect(values).toContain(`permissions.${CODEX_PERMISSION_PROFILE}.extends=":workspace"`);
+    expect(values).toContain(`permissions.${CODEX_PERMISSION_PROFILE}.network.enabled=true`);
+  });
+
+  test("grants the exact per-worktree gitdir and the common objects/refs/logs in ONE inline table", () => {
+    const filesystem = filesystemOverride(profileArgs());
+    expect(filesystem).toHaveLength(1);
+    const value = filesystem[0]!.slice(filesystem[0]!.indexOf("=") + 1);
+    // Parse the value as Codex does (TOML): the paths must stay whole keys, dots
+    // and all, and the gitdir key must match Git's path byte for byte.
+    const parsed = Bun.TOML.parse(`filesystem = ${value}`) as { filesystem: Record<string, string> };
+    expect(parsed.filesystem).toEqual({
+      "/Users/me/src/my.repo/.git/worktrees/repo4": "write",
+      "/Users/me/src/my.repo/.git/objects": "write",
+      "/Users/me/src/my.repo/.git/refs": "write",
+      "/Users/me/src/my.repo/.git/logs": "write",
+    });
+    expect(Object.keys(parsed.filesystem)[0]).toBe(GIT_ROOTS.gitDir);
+  });
+
+  test("no path ever lands in a -c key (Codex splits keys on every '.')", () => {
+    for (const value of renderCodexPermissionProfileOverrides(GIT_ROOTS)) {
+      const key = value.slice(0, value.indexOf("="));
+      expect(key).not.toContain("/");
+      expect(key).toMatch(/^[A-Za-z0-9_.]+$/);
+    }
+  });
+
+  test("drops the legacy sandbox_workspace_write key, which a selected profile ignores", () => {
+    const args = profileArgs();
+    expect(args.some((arg) => arg.startsWith("sandbox_workspace_write"))).toBe(false);
+    expect(args).not.toContain("-s");
+    expect(args).not.toContain("--sandbox");
+  });
+
+  test("keeps every existing --add-dir grant, hook and always-on flag", () => {
+    const args = profileArgs();
+    const addDirs = args.flatMap((arg, i) => (args[i - 1] === "--add-dir" ? [arg] : []));
+    expect(addDirs).toEqual([
+      FAKE_COORDINATOR_HOME,
+      FAKE_LIBRARY_CACHES,
+      GIT_ROOTS.commonDir,
+      "/Users/me/src/my.repo/.ittybitty",
+    ]);
+    for (const event of CODEX_REGISTERED_EVENTS) {
+      expect(args.some((arg) => arg.startsWith(`hooks.${event}=`))).toBe(true);
+    }
+    expect(args).toContain("features.multi_agent=false");
+    expect(args).toContain('commit_attribution=""');
+    expect(args).toContain("--no-alt-screen");
+  });
+
+  test("without git roots the legacy network key stays and no profile is defined", () => {
+    const { args } = buildCodexLaunchArgs({
+      ibBinaryPath: "/usr/local/bin/ib",
+      agentId: "agent-abc123",
+      agentDir: "/var/agents/agent-abc123",
+    });
+    expect(args).toContain("sandbox_workspace_write.network_access=true");
+    expect(args.some((arg) => arg.includes("default_permissions") || arg.startsWith("permissions."))).toBe(false);
+  });
+
+  test("rejects a relative or quote-unsafe git dir instead of emitting a broken profile", () => {
+    for (const gitRoots of [
+      { gitDir: ".git/worktrees/repo4", commonDir: GIT_ROOTS.commonDir },
+      { gitDir: GIT_ROOTS.gitDir, commonDir: "relative/.git" },
+      { gitDir: "/Users/me/it's/.git/worktrees/repo4", commonDir: GIT_ROOTS.commonDir },
+      { gitDir: GIT_ROOTS.gitDir, commonDir: '/Users/me/"q"/.git' },
+    ]) {
+      expect(() => renderCodexPermissionProfileOverrides(gitRoots)).toThrow(/Unsafe Git directory for the codex permission profile/);
+    }
   });
 });
 

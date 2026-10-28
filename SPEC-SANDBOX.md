@@ -8,9 +8,24 @@ The CLI launch contract is mode-specific only where process confinement changes:
 
 | CLI | Kernel enabled | Kernel disabled |
 |---|---|---|
-| Codex/Fugu | Always `-a never`; `-s danger-full-access` inside the itsybitsy wrapper. | Always `-a never`; explicit `-s workspace-write`; no itsybitsy wrapper/proxy/collector. |
+| Codex/Fugu | Always `-a never`; `-s danger-full-access` inside the itsybitsy wrapper. | Always `-a never`; no `-s`; the inline `itsybitsy_agent` permission profile (below); no itsybitsy wrapper/proxy/collector. |
 | Agy/Gemini | Always `--dangerously-skip-permissions --mode=accept-edits`; fail-closed hooks retained; runs inside the itsybitsy wrapper. | The same flags and fail-closed hooks; no itsybitsy wrapper/proxy/collector. |
 | Claude | Adds `--dangerously-skip-permissions` inside the itsybitsy wrapper. PreToolUse explicitly allows or denies before native permission resolution, with `permissions.deny` checked first. | Emits neither `--dangerously-skip-permissions` nor `--permission-mode`; no itsybitsy wrapper/proxy/collector. The same PreToolUse contract prevents prompts and rejects denied or unlisted calls. |
+
+**Disabled Codex/Fugu permission profile (2026-10-28).** This supersedes the explicit `-s workspace-write` that this table and every section below used to give for disabled Codex. Spawn and resume pass identical inline flags:
+
+- `-c 'default_permissions="itsybitsy_agent"'`
+- `-c 'permissions.itsybitsy_agent.extends=":workspace"'`
+- `-c 'permissions.itsybitsy_agent.network.enabled=true'`
+- `-c 'permissions.itsybitsy_agent.filesystem={"<gitDir>"="write","<commonDir>/objects"="write","<commonDir>/refs"="write","<commonDir>/logs"="write"}'`
+
+There is no `-s` and no `sandbox_workspace_write.*`: `-s` would make Codex ignore the profile.
+
+- **Paths.** `<gitDir>` and `<commonDir>` are the canonical `git rev-parse --git-dir` / `--git-common-dir` of the worktree, never the agent id. The exact `<gitDir>` entry lifts Codex's read-only protection of the worktree's Git admin dir (index, `logs/HEAD`, `COMMIT_EDITMSG`), so `git add`/`git commit` work.
+- **Unchanged grants.** The existing `--add-dir` roots, including `--add-dir <commonDir>`, are unchanged. That root already grants the whole common Git dir, including `hooks/` and `config`. The profile does not narrow it, and its `objects`/`refs`/`logs` entries are redundant.
+- **Invariants.** `-a never` and the hooks remain. No Codex config file is written. A launch without the Git dirs is refused rather than loosened.
+- **Resume.** Per the codex 0.165.0 source, the profile also applies when resuming sessions spawned before this change.
+- **Status.** Live checks have NOT passed yet. See [SPEC-CODEX-MODEL.md](SPEC-CODEX-MODEL.md) (permission-profile addendum) and [the rollout guide](docs/SANDBOX-ROLLOUT.md).
 
 For Claude `worktree: false` sessions (per-repository coordinators and regular
 `--no-worktree` agents), the generated settings live at the agent-local
@@ -743,9 +758,11 @@ the resolver predicts. Only the `paths` table is authoritative for
 
 ## 4B. Codex: disable its built-in sandbox, use ours (historical enabled-mode record)
 
-> **Superseded launch split:** the rationale below still explains enabled mode,
-> but disabled mode now restores `-s workspace-write`; `-a never` and hooks are
-> retained in both modes. The current table at the top of this file governs.
+> **Superseded launch split:** the rationale below still explains enabled mode.
+> Disabled mode first restored `-s workspace-write`, and since 2026-10-28 it
+> uses the `itsybitsy_agent` permission profile with no `-s`. `-a never` and the
+> hooks are retained in both modes. The current table and profile note at the
+> top of this file govern.
 
 **Decision (Adam, 2026-07-17): a sandboxed codex agent runs codex in its own
 "yolo"/no-sandbox mode so codex does NOT double-sandbox, and OUR seatbelt +
@@ -1099,9 +1116,10 @@ tmux-socket access from the requester.
   request that crashes the handler is never retried in a loop). The caller's
   identity comes from the agent's own `meta.json`, which the watchdog verifies
   against the SEALED record (§4C.3, `verifyAgentSealChecked`): a sandbox-enabled
-  agent cannot edit `canSpawnChildren` into existence. Codex's native
-  `workspace-write` sandbox also routes spawning here when itsybitsy sandboxing
-  is disabled. For spawn requests only, explicit `meta.sandbox.enabled: false`
+  agent cannot edit `canSpawnChildren` into existence. Codex's native sandbox
+  (the `itsybitsy_agent` permission profile; formerly `-s workspace-write`)
+  also routes spawning here when itsybitsy sandboxing is disabled. For spawn
+  requests only, explicit `meta.sandbox.enabled: false`
   plus a genuinely missing seal is accepted, matching the disabled/no-seal
   lifecycle contract. The seal check always runs: existing-seal mismatches,
   corrupt records and read failures still refuse the request, even if metadata
@@ -1185,8 +1203,9 @@ broker's. `src/lifecycle-broker.ts` adds:
     `<agentDir>/repo`, so it has no heartbeat and nobody to serve a request;
   - an agent whose itsybitsy sandbox is off (`meta.sandbox.enabled === false`).
     `isSandboxedProcess()` is still true for a codex agent in that mode — it
-    sits in codex's own `workspace-write` sandbox, which grants the git common
-    dir and `<repo>/.ittybitty` — and such an agent has no seal to verify.
+    sits in codex's own sandbox (the `itsybitsy_agent` permission profile),
+    which grants the git common dir, the worktree's Git admin dir and
+    `<repo>/.ittybitty` — and such an agent has no seal to verify.
 
   This only routes; it grants nothing. A caller that edits its own `meta.json`
   to get the direct path runs the command inside its real sandbox, where it

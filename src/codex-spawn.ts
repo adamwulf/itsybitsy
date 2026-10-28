@@ -359,10 +359,12 @@ export interface BuildCodexResumeContentInput {
  *   - Re-passes `-a never` in both modes so unattended resumes never prompt.
  *     Enabled mode uses `-s danger-full-access` beneath itsybitsy's outer
  *     Seatbelt profile; disabled mode re-passes the same permission profile
- *     flags as start.sh. Codex prefers the profile id saved in the rollout
- *     over `-c default_permissions` and has no CLI flag that outranks it; a
- *     session started under this profile saved the same id, so its rules are
- *     rebuilt from the flags passed here.
+ *     flags as start.sh. Codex restores a session's saved permissions only
+ *     when the resume request carries no permission override. The TUI sends
+ *     these `-c default_permissions`/`permissions.*` keys with the request,
+ *     which counts as one, so the profile defined here applies. That holds
+ *     whether the session began under it or under the old
+ *     `-s workspace-write` (codex 0.165.0 source; not run live).
  *
  * The PID variable is kept as `CLAUDE_PID` (and stored as `claude_pid` in
  * meta.json) intentionally — see `buildCodexStartContent` rationale.

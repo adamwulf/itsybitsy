@@ -22,8 +22,36 @@
  */
 
 import { shellQuote } from "./validation";
-import { buildCodexLaunchArgs, FUGU_CODEX_CONFIG_OVERRIDES, isCodexSafeBinaryPath } from "./codex-config";
+import {
+  buildCodexLaunchArgs,
+  FUGU_CODEX_CONFIG_OVERRIDES,
+  isCodexSafeBinaryPath,
+  type CodexGitRoots,
+} from "./codex-config";
 import { appendGitignoreEntries, type GitignoreEntryOutcome } from "./worktree-gitignore";
+
+/**
+ * Codex's native protection for one start or resume, shared so both select the
+ * same mode. Codex agents run unattended, so `-a never` suppresses native
+ * approval prompts in both modes while the generated hooks remain the
+ * permission boundary.
+ *   - Enabled: our outer Seatbelt replaces Codex's sandbox (`-s danger-full-access`).
+ *   - Disabled: Codex keeps its own sandbox through the itsybitsy permission
+ *     profile, which needs the worktree's Git dirs. There is no fallback: a
+ *     missing `gitRoots` refuses the launch instead of loosening it, and `-s`
+ *     is omitted because it would override the profile.
+ */
+function codexNativeProtection(
+  sandboxEnabled: boolean,
+  gitRoots: CodexGitRoots | undefined,
+  action: "launch" | "resume",
+): { flags: string; permissionProfileGitRoots?: CodexGitRoots } {
+  if (sandboxEnabled) return { flags: " -a never -s danger-full-access" };
+  if (!gitRoots) {
+    throw new Error(`Sandbox-disabled codex ${action} requires the worktree's Git dirs for its permission profile`);
+  }
+  return { flags: " -a never", permissionProfileGitRoots: gitRoots };
+}
 
 /**
  * Resolve the absolute path to the `ib` binary suitable for codex hook
@@ -79,6 +107,8 @@ export interface BuildCodexStartContentInput {
   absStderrLog: string;
   /** Extra directories passed to codex as `--add-dir` writable roots. */
   extraWritableRoots?: string[];
+  /** The worktree's Git dirs; required when `sandboxEnabled` is false. */
+  gitRoots?: CodexGitRoots;
   /** Configure Codex to use Sakana Fugu and load its key at launch. */
   fugu?: boolean;
   /** Whether itsybitsy's kernel sandbox wraps this launch. */
@@ -97,8 +127,8 @@ export interface BuildCodexStartContentInput {
  * skeleton (setsid + SIGHUP ignore + pid capture + meta-json write + wait
  * + exit-check) but launches codex with:
  *   - `-m <model> -a never --dangerously-bypass-hook-trust`, with `-s
- *     danger-full-access` beneath itsybitsy's Seatbelt profile and explicit
- *     `-s workspace-write` when that outer wrapper is disabled
+ *     danger-full-access` beneath itsybitsy's Seatbelt profile and, when that
+ *     outer wrapper is disabled, no `-s` but the itsybitsy permission profile
  *   - inline `-c 'hooks.<Event>=[...]'` flags from buildCodexLaunchArgs
  *   - the prompt as a positional `"$(cat <prompt-file>)"`
  *
@@ -116,12 +146,14 @@ export function buildCodexStartContent(input: BuildCodexStartContentInput): stri
     );
   }
 
+  const nativeProtection = codexNativeProtection(input.sandboxEnabled, input.gitRoots, "launch");
   const { args: hookFlags } = buildCodexLaunchArgs({
     ibBinaryPath: input.ibBinaryPath,
     agentId: input.agentId,
     agentDir: input.agentDir,
     effort: input.codexEffort,
     extraWritableRoots: input.extraWritableRoots,
+    permissionProfileGitRoots: nativeProtection.permissionProfileGitRoots,
   });
 
   // Shell-quote each codex argv element so the resulting `codex ... ` line is
@@ -141,20 +173,14 @@ export function buildCodexStartContent(input: BuildCodexStartContentInput): stri
   if (input.sandboxEnabled && (!input.sandboxScriptPreamble?.trim() || !input.sandboxExecPrefix?.trim())) {
     throw new Error("Sandbox-enabled codex launch requires the proxy preamble and sandbox-exec prefix");
   }
-  // Codex agents run unattended, so native approval prompts are suppressed in
-  // both modes while the generated hooks remain the permission boundary. Our
-  // outer Seatbelt wrapper replaces Codex's sandbox only when enabled; when it
-  // is disabled we explicitly retain Codex's native workspace-write sandbox.
-  const nativeProtectionOverrides = input.sandboxEnabled
-    ? " -a never -s danger-full-access"
-    : " -a never -s workspace-write";
+  const nativeProtectionOverrides = nativeProtection.flags;
   const sandboxPreamble = input.sandboxEnabled ? input.sandboxScriptPreamble! : "";
   const sandboxLaunchPrefix = input.sandboxEnabled ? `${input.sandboxExecPrefix} ` : "";
 
   // The launch line. Per SPEC §3.3:
-  //   codex -m <MODEL> -a never -s <danger-full-access|workspace-write> \
+  //   codex -m <MODEL> -a never [-s danger-full-access] \
   //         --dangerously-bypass-hook-trust \
-  //         <inline -c flags> "<prompt>"
+  //         <inline -c flags, incl. the permission profile when disabled> "<prompt>"
   // We log only the model + sentinel rather than the prompt content so a leak
   // of agent.log doesn't disclose the prompt.
   return `#!/bin/bash
@@ -300,6 +326,8 @@ export interface BuildCodexResumeContentInput {
   absStderrLog: string;
   /** Extra directories passed to codex as `--add-dir` writable roots. */
   extraWritableRoots?: string[];
+  /** The worktree's Git dirs; required when `sandboxEnabled` is false. */
+  gitRoots?: CodexGitRoots;
   /** Reconfigure Sakana Fugu for the resumed Codex session. */
   fugu?: boolean;
   /** Whether itsybitsy's kernel sandbox wraps this resume. */
@@ -317,7 +345,7 @@ export interface BuildCodexResumeContentInput {
  * Render the codex resume.sh body for an agent. Mirrors `buildCodexStartContent`
  * exactly (same setsid + SIGHUP ignore + pid capture + meta-json write + wait
  * + exit-check skeleton) but the launch line is:
- *   `codex resume "<UUID>" -a never -s <danger-full-access|workspace-write> --dangerously-bypass-hook-trust <inline -c flags>`
+ *   `codex resume "<UUID>" -a never [-s danger-full-access] --dangerously-bypass-hook-trust <inline -c flags>`
  *
  * Differences from start.sh:
  *   - Subcommand form (`codex resume <UUID>`), not the top-level `codex` invocation.
@@ -330,7 +358,11 @@ export interface BuildCodexResumeContentInput {
  *     it doesn't (without hooks every PreToolUse silently fail-opens).
  *   - Re-passes `-a never` in both modes so unattended resumes never prompt.
  *     Enabled mode uses `-s danger-full-access` beneath itsybitsy's outer
- *     Seatbelt profile; disabled mode explicitly retains `-s workspace-write`.
+ *     Seatbelt profile; disabled mode re-passes the same permission profile
+ *     flags as start.sh. Codex prefers the profile id saved in the rollout
+ *     over `-c default_permissions` and has no CLI flag that outranks it; a
+ *     session started under this profile saved the same id, so its rules are
+ *     rebuilt from the flags passed here.
  *
  * The PID variable is kept as `CLAUDE_PID` (and stored as `claude_pid` in
  * meta.json) intentionally — see `buildCodexStartContent` rationale.
@@ -345,12 +377,14 @@ export function buildCodexResumeContent(input: BuildCodexResumeContentInput): st
     );
   }
 
+  const nativeProtection = codexNativeProtection(input.sandboxEnabled, input.gitRoots, "resume");
   const { args: hookFlags } = buildCodexLaunchArgs({
     ibBinaryPath: input.ibBinaryPath,
     agentId: input.agentId,
     agentDir: input.agentDir,
     effort: input.codexEffort,
     extraWritableRoots: input.extraWritableRoots,
+    permissionProfileGitRoots: nativeProtection.permissionProfileGitRoots,
   });
 
   const qSessionId = shellQuote(input.codexSessionId);
@@ -365,9 +399,7 @@ export function buildCodexResumeContent(input: BuildCodexResumeContentInput): st
   if (input.sandboxEnabled && (!input.sandboxScriptPreamble?.trim() || !input.sandboxExecPrefix?.trim())) {
     throw new Error("Sandbox-enabled codex resume requires the proxy preamble and sandbox-exec prefix");
   }
-  const nativeProtectionOverrides = input.sandboxEnabled
-    ? " -a never -s danger-full-access"
-    : " -a never -s workspace-write";
+  const nativeProtectionOverrides = nativeProtection.flags;
   const sandboxPreamble = input.sandboxEnabled ? input.sandboxScriptPreamble! : "";
   const sandboxLaunchPrefix = input.sandboxEnabled ? `${input.sandboxExecPrefix} ` : "";
 

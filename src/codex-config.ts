@@ -75,12 +75,38 @@ export interface BuildCodexLaunchArgsInput {
    */
   effort?: string;
   /**
-   * Extra directories Codex should treat as writable while in workspace-write
-   * mode. Used for git worktrees: the working tree lives under the agent dir,
-   * but git metadata writes go through the resolved common git dir.
+   * Extra directories passed as `--add-dir` writable roots. Used for git
+   * worktrees: the working tree lives under the agent dir, but git metadata
+   * writes go through the resolved common git dir.
    */
   extraWritableRoots?: string[];
+  /**
+   * Present only when itsybitsy's kernel sandbox is off: select the
+   * `CODEX_PERMISSION_PROFILE` native profile, which grants these Git
+   * directories (see `renderCodexPermissionProfileOverrides`). Absent, the
+   * launch runs under our Seatbelt with `-s danger-full-access`.
+   */
+  permissionProfileGitRoots?: CodexGitRoots;
 }
+
+/**
+ * The Git directories a linked worktree writes for `git add` / `git commit`.
+ * Both are canonical absolute paths from `git rev-parse`, never derived from
+ * the agent id: the admin dir's name is Git's choice (e.g. `worktrees/repo4`).
+ */
+export interface CodexGitRoots {
+  /** `git rev-parse --git-dir`: the per-worktree index, HEAD, logs/HEAD, COMMIT_EDITMSG. */
+  gitDir: string;
+  /** `git rev-parse --git-common-dir`: the shared objects, refs and ref logs. */
+  commonDir: string;
+}
+
+/**
+ * Name of the native Codex permission profile used when itsybitsy's kernel
+ * sandbox is off. Defined entirely by inline `-c` flags on each launch; no
+ * Codex config file is written.
+ */
+export const CODEX_PERMISSION_PROFILE = "itsybitsy_agent";
 
 export interface CodexLaunchArgs {
   /** Final flat argv suffix (already includes the `-c flag` pairs). */
@@ -180,6 +206,50 @@ export function renderCodexHookFlagPayload(
 }
 
 /**
+ * Render the `-c` payloads (without the leading `-c` tokens) that define and
+ * select `CODEX_PERMISSION_PROFILE` for a launch outside itsybitsy's kernel
+ * sandbox. Verified against codex 0.165.0 source:
+ *   - `:workspace` writes the cwd, each `--add-dir` root and the temp dirs, but
+ *     keeps `.git` under each root read-only, as well as the resolved `gitdir:`
+ *     target of the worktree's `.git` file. That gitdir holds index.lock,
+ *     logs/HEAD and COMMIT_EDITMSG, so `git commit` fails without this profile.
+ *     An entry for that exact path removes the protection.
+ *   - The profile lists the common dir's objects/refs/logs too, so it names
+ *     every Git directory that add/commit write. `--add-dir <commonDir>`
+ *     already grants them.
+ *   - `:workspace` has no network. The legacy `sandbox_workspace_write.*` keys
+ *     are ignored once a profile is selected, so network is enabled here.
+ *   - `-s` would switch Codex back to the legacy settings, and Codex refuses
+ *     `-s` together with `default_permissions`, so the launch omits `-s`.
+ *   - Codex splits a `-c` key on every `.`, so paths (which contain `.git`,
+ *     `.itsybitsy`, ...) go in ONE inline-table value, never in the key.
+ */
+export function renderCodexPermissionProfileOverrides(git: CodexGitRoots): string[] {
+  const writeTargets = [
+    git.gitDir,
+    join(git.commonDir, "objects"),
+    join(git.commonDir, "refs"),
+    join(git.commonDir, "logs"),
+  ];
+  for (const target of writeTargets) {
+    // Each target becomes a TOML string key inside a shell single-quoted
+    // argument, so it gets the same quote-safety check as every other path.
+    if (!target.startsWith("/") || !isCodexSafeBinaryPath(target)) {
+      throw new Error(
+        `Unsafe Git directory for the codex permission profile: ${JSON.stringify(target)} must be absolute and contain no quotes, backslashes, or control characters.`,
+      );
+    }
+  }
+  const filesystem = writeTargets.map((target) => `"${target}"="write"`).join(",");
+  return [
+    `default_permissions="${CODEX_PERMISSION_PROFILE}"`,
+    `permissions.${CODEX_PERMISSION_PROFILE}.extends=":workspace"`,
+    `permissions.${CODEX_PERMISSION_PROFILE}.network.enabled=true`,
+    `permissions.${CODEX_PERMISSION_PROFILE}.filesystem={${filesystem}}`,
+  ];
+}
+
+/**
  * Build the `-c` flag array that codex consumes to register itsybitsy's
  * PreToolUse + SessionStart + Stop hooks for a given agent.
  *
@@ -221,7 +291,7 @@ export function buildCodexLaunchArgs(input: BuildCodexLaunchArgsInput): CodexLau
 
   const args: string[] = [];
   // Always grant the codex agent write access to the entire coordinator home
-  // (`~/.itsybitsy/`). Codex agents run with `-s workspace-write`, which only
+  // (`~/.itsybitsy/`). Outside our kernel sandbox Codex's own sandbox only
   // permits writes inside the worktree and explicit `--add-dir` roots — without
   // this, `ib send <other-agent> ...` (per-agent outbox under `agents/`),
   // `ib send @<team>` (team channels under `teams/`), and team membership writes
@@ -281,11 +351,19 @@ export function buildCodexLaunchArgs(input: BuildCodexLaunchArgsInput): CodexLau
   // side enforces this via the intercept-task hook; this is the codex
   // equivalent — codex's native tools cannot fire if the feature is off.
   args.push("-c", "features.multi_agent=false");
-  // Allow outbound network access under workspace-write. Claude agents already
-  // have unrestricted network; matching that for codex unblocks SwiftPM /
-  // package-manager fetches (e.g. xcodebuild resolving GitHub-hosted deps).
-  // Revisit when we add per-agent-type capability gating.
-  args.push("-c", "sandbox_workspace_write.network_access=true");
+  // Allow outbound network access. Claude agents already have unrestricted
+  // network; matching that for codex unblocks SwiftPM / package-manager
+  // fetches (e.g. xcodebuild resolving GitHub-hosted deps). Outside our kernel
+  // sandbox the permission profile carries both the network grant and the Git
+  // write grants. Under our Seatbelt (`-s danger-full-access`) the legacy key
+  // stays as it always was.
+  if (input.permissionProfileGitRoots) {
+    for (const override of renderCodexPermissionProfileOverrides(input.permissionProfileGitRoots)) {
+      args.push("-c", override);
+    }
+  } else {
+    args.push("-c", "sandbox_workspace_write.network_access=true");
+  }
   // Disable the "Co-authored-by: Codex <noreply@openai.com>" commit trailer.
   // codex's commit_attribution is a TOML string — an empty string in TOML
   // is `""` (two adjacent double quotes); when codex sees this it skips

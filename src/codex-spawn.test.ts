@@ -34,6 +34,18 @@ const sandboxFields = () => ({
   sandboxExecPrefix: SANDBOX_PREFIX,
 });
 
+// Disabled-mode fields: no wrapper, plus the worktree's Git dirs for the
+// permission profile. Shaped like a real linked worktree: Git names the admin
+// dir (`repo4`, not the agent id) and the paths contain dots.
+const GIT_ROOTS = { gitDir: "/repo/my.app/.git/worktrees/repo4", commonDir: "/repo/my.app/.git" };
+const disabledFields = () => ({ sandboxEnabled: false, gitRoots: GIT_ROOTS });
+// The two unwrapped codex launch arms (setsid and bare), not the log lines.
+const unwrappedLaunchLines = (content: string) =>
+  content.split("\n").filter((line) => /^\s*(setsid )?codex (-m|resume) /.test(line));
+// Every shell-quoted permission-profile `-c` payload, in order.
+const profileFlags = (content: string) =>
+  content.match(/'(?:default_permissions|permissions\.itsybitsy_agent)[^']*'/g) ?? [];
+
 describe("buildCodexStartContent — launch line", () => {
   const baseInput = () => ({
     agentId: "agent-abc12345",
@@ -93,33 +105,56 @@ describe("buildCodexStartContent — launch line", () => {
       .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
   });
 
-  test.each([false, true])("disabled launch keeps native workspace-write and hooks, and omits kernel helpers (fugu=%s)", (fugu) => {
+  test.each([false, true])("disabled launch selects the permission profile without -s, keeps hooks, and omits kernel helpers (fugu=%s)", (fugu) => {
     const content = buildCodexStartContent({
       ...baseInput(),
-      sandboxEnabled: false,
+      ...disabledFields(),
       fugu,
     });
-    expect(content.match(/codex -m [^\n]* -a never -s workspace-write --dangerously-bypass-hook-trust/g)?.length).toBe(2);
-    expect(content).toContain("--dangerously-bypass-hook-trust");
+    const launches = unwrappedLaunchLines(content);
+    expect(launches).toHaveLength(2);
+    for (const line of launches) {
+      expect(line).toContain("-a never --dangerously-bypass-hook-trust");
+      expect(line).toContain(`'default_permissions="itsybitsy_agent"'`);
+      expect(line).toContain(`'permissions.itsybitsy_agent.extends=":workspace"'`);
+      expect(line).toContain(`'permissions.itsybitsy_agent.network.enabled=true'`);
+      expect(line).toContain(`"${GIT_ROOTS.gitDir}"="write"`);
+      expect(line).toContain("hooks.PreToolUse");
+      // A legacy sandbox flag would make Codex ignore the profile.
+      expect(line).not.toMatch(/ (-s|--sandbox) /);
+      expect(line).not.toContain("sandbox_workspace_write");
+    }
+    expect(content).not.toContain("-s workspace-write");
     expect(content).not.toContain("-s danger-full-access");
     expect(content).not.toContain("--dangerously-bypass-approvals-and-sandbox");
-    expect(content).toContain("hooks.PreToolUse");
     expect(content).not.toContain("sandbox-exec");
     expect(content).not.toContain("sandbox-proxy-launch");
     expect(content).not.toContain("sandbox-collector");
     expect(content).not.toContain("export http_proxy=");
   });
 
+  test("REFUSES a disabled launch without the worktree's Git dirs (no legacy or full-access fallback)", () => {
+    expect(() => buildCodexStartContent({ ...baseInput(), sandboxEnabled: false }))
+      .toThrow(/Sandbox-disabled codex launch requires the worktree's Git dirs/);
+  });
+
+  test("enabled launch ignores git roots: no profile, the legacy network key stays", () => {
+    const content = buildCodexStartContent({ ...baseInput(), gitRoots: GIT_ROOTS });
+    expect(profileFlags(content)).toEqual([]);
+    expect(content).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
+    expect(content).toContain("'sandbox_workspace_write.network_access=true'");
+  });
+
   test("disabled launch ignores stale wrapper fields instead of partially enabling the kernel sandbox", () => {
     const content = buildCodexStartContent({
       ...baseInput(),
-      sandboxEnabled: false,
+      ...disabledFields(),
       sandboxScriptPreamble: "STALE-PREAMBLE",
       sandboxExecPrefix: "STALE-PREFIX",
     });
     expect(content).not.toContain("STALE-PREAMBLE");
     expect(content).not.toContain("STALE-PREFIX");
-    expect(content).toContain("-a never -s workspace-write");
+    expect(content).toContain("-a never --dangerously-bypass-hook-trust");
     expect(content).toContain("hooks.PreToolUse");
   });
 
@@ -411,33 +446,76 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
       .toThrow(/requires the proxy preamble and sandbox-exec prefix/);
   });
 
-  test.each([false, true])("disabled resume keeps native workspace-write and hooks, and omits kernel helpers (fugu=%s)", (fugu) => {
+  test.each([false, true])("disabled resume selects the permission profile without -s, keeps hooks, and omits kernel helpers (fugu=%s)", (fugu) => {
     const content = buildCodexResumeContent({
       ...baseInput(),
-      sandboxEnabled: false,
+      ...disabledFields(),
       fugu,
     });
-    expect(content.match(/codex resume [^\n]* -a never -s workspace-write --dangerously-bypass-hook-trust/g)?.length).toBe(2);
-    expect(content).toContain("--dangerously-bypass-hook-trust");
+    const launches = unwrappedLaunchLines(content);
+    expect(launches).toHaveLength(2);
+    for (const line of launches) {
+      expect(line).toContain("-a never --dangerously-bypass-hook-trust");
+      expect(line).toContain(`'default_permissions="itsybitsy_agent"'`);
+      expect(line).toContain(`"${GIT_ROOTS.gitDir}"="write"`);
+      expect(line).toContain("hooks.PreToolUse");
+      expect(line).not.toMatch(/ (-s|--sandbox) /);
+      expect(line).not.toContain("sandbox_workspace_write");
+    }
+    expect(content).not.toContain("-s workspace-write");
     expect(content).not.toContain("-s danger-full-access");
     expect(content).not.toContain("--dangerously-bypass-approvals-and-sandbox");
-    expect(content).toContain("hooks.PreToolUse");
     expect(content).not.toContain("sandbox-exec");
     expect(content).not.toContain("sandbox-proxy-launch");
     expect(content).not.toContain("sandbox-collector");
     expect(content).not.toContain("export http_proxy=");
   });
 
+  test.each([false, true])("disabled resume re-passes exactly the profile and --add-dir grants start.sh used (fugu=%s)", (fugu) => {
+    // Codex recompiles the rollout's saved profile id from the flags passed on
+    // resume, so resume must define the same profile as the original launch.
+    const shared = {
+      agentId: "agent-abc12345",
+      ibBinaryPath: "/usr/local/bin/ib",
+      agentDir: "/tmp/test",
+      absMetaJson: "/tmp/test/meta.json",
+      absExitScript: "/tmp/test/exit-check.sh",
+      absAgentLog: "/tmp/test/agent.log",
+      absStderrLog: "/tmp/test/claude.stderr.log",
+      extraWritableRoots: [GIT_ROOTS.commonDir, "/repo/my.app/.ittybitty"],
+      fugu,
+      ...disabledFields(),
+    };
+    const start = buildCodexStartContent({ ...shared, codexModel: "gpt-5.4-mini", absPromptFile: "/tmp/test/prompt.txt" });
+    const resume = buildCodexResumeContent({ ...shared, codexSessionId: "019e7b21-cb7d-7f23-8674-11036ed141ef" });
+    expect(profileFlags(start)).toHaveLength(8); // 4 payloads × 2 launch arms
+    expect(profileFlags(resume)).toEqual(profileFlags(start));
+    const addDirs = (content: string) => content.match(/'--add-dir' '[^']*'/g);
+    expect(addDirs(resume)).toEqual(addDirs(start));
+  });
+
+  test("REFUSES a disabled resume without the worktree's Git dirs (no legacy or full-access fallback)", () => {
+    expect(() => buildCodexResumeContent({ ...baseInput(), sandboxEnabled: false }))
+      .toThrow(/Sandbox-disabled codex resume requires the worktree's Git dirs/);
+  });
+
+  test("enabled resume ignores git roots: no profile, the legacy network key stays", () => {
+    const content = buildCodexResumeContent({ ...baseInput(), gitRoots: GIT_ROOTS });
+    expect(profileFlags(content)).toEqual([]);
+    expect(content).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
+    expect(content).toContain("'sandbox_workspace_write.network_access=true'");
+  });
+
   test("disabled resume ignores stale wrapper fields instead of partially enabling the kernel sandbox", () => {
     const content = buildCodexResumeContent({
       ...baseInput(),
-      sandboxEnabled: false,
+      ...disabledFields(),
       sandboxScriptPreamble: "STALE-PREAMBLE",
       sandboxExecPrefix: "STALE-PREFIX",
     });
     expect(content).not.toContain("STALE-PREAMBLE");
     expect(content).not.toContain("STALE-PREFIX");
-    expect(content).toContain("-a never -s workspace-write");
+    expect(content).toContain("-a never --dangerously-bypass-hook-trust");
     expect(content).toContain("hooks.PreToolUse");
   });
 

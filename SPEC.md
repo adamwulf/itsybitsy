@@ -3090,7 +3090,7 @@ The append is **best-effort** and uses the **same jsonl-append discipline as `ou
 
 ## 18. Codex CLI as Alternative Agent Model
 
-This section summarizes the design landed in Phases 0–4 + 6 + 7 of `SPEC-CODEX-MODEL.md` (the design source-of-truth). Phase 5 is partially implemented: usage limits and retry-exhaustion API errors are detected from terminal captures (§18.9); compaction and other API-error patterns remain deferred. Everything below is implemented and merged unless explicitly flagged otherwise.
+This section summarizes the design landed in Phases 0–4 + 6 + 7 of `SPEC-CODEX-MODEL.md` (the design source-of-truth). Phase 5 is partially implemented: usage limits, retry-exhaustion, and model-capacity API errors are detected from terminal captures (§18.9); compaction and other API-error patterns remain deferred. Everything below is implemented and merged unless explicitly flagged otherwise.
 
 ### 18.1 Goal
 

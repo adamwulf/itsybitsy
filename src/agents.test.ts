@@ -1988,6 +1988,72 @@ describe("isRateLimited", () => {
 });
 
 describe("isApiError", () => {
+  const codexChrome = "\n\n›\n\n  GPT-6.1-Sol high · Context 48% left · weekly 70% left\n";
+
+  test("real Codex v0.161.0 capture detects exhausted retries despite its idle placeholder", async () => {
+    // quality-app snapshot, 2026-10-26T19:25:12.843Z, unwrapped tail;
+    // original task text omitted. Preserve the comma, whitespace, and footer.
+    const output = await Bun.file(new URL("fixtures/codex-retry-limit.txt", import.meta.url)).text();
+    expect(isApiError(output)).toBe(true);
+    expect(isRateLimited(output)).toBe(false);
+  });
+
+  test("Codex retry exhaustion is an API error, not a usage limit", () => {
+    const output = "■ exceeded retry limit" + codexChrome;
+    expect(isApiError(output)).toBe(true);
+    expect(isRateLimited(output)).toBe(false);
+    expect(isApiErrorRateLimited(output)).toBe(false);
+    expect(isApiError("\u001b[31m■ exceeded retry limit\u001b[0m" + codexChrome + "\n".repeat(30))).toBe(true);
+  });
+
+  test("Codex retry error supports wrapped details and supersedes old sentinels", () => {
+    const output = "WAITING\nI HAVE COMPLETED THE GOAL\n■ exceeded retry limit: unexpected status 429 Too Many Requests\n  request id: example" + codexChrome;
+    expect(isApiError(output)).toBe(true);
+  });
+
+  test("real retry banner punctuation is accepted", () => {
+    expect(isApiError("■ exceeded retry limit, last status: 429 Too Many Requests" + codexChrome)).toBe(true);
+  });
+
+  test("a Codex error sample in an idle Claude pane does not enable Claude recovery", () => {
+    const output = "⏺ The Codex error is:\n■ exceeded retry limit, last status: 429 Too Many Requests\n\n❯\n⏵⏵ accept edits on (shift+tab to cycle)";
+    expect(isApiError(output)).toBe(false);
+  });
+
+  test("idle composer placeholder or unsent draft does not clear the error", () => {
+    for (const draft of ["Find and fix a bug in @filename", "please continue\nWAITING"]) {
+      expect(isApiError("■ exceeded retry limit" + codexChrome.replace("›", "› " + draft))).toBe(true);
+    }
+  });
+
+  test.each([
+    "› please continue",
+    "• Working (1s • esc to interrupt)",
+    "• Recovered and continuing the task.",
+    "WAITING",
+    "I HAVE COMPLETED THE GOAL",
+    "■ You've hit your usage limit. Try again later.",
+    "tab to queue message      48% context left",
+  ])("newer Codex activity clears the retry error: %s", (activity) => {
+    expect(isApiError("■ exceeded retry limit\n" + activity + codexChrome)).toBe(false);
+  });
+
+  test.each([
+    "The error was ■ exceeded retry limit",
+    "› detect ■ exceeded retry limit",
+    "> ■ exceeded retry limit",
+    "exceeded retry limit",
+    "■ exceeded retry limitations",
+    "■ unrelated error",
+    "■ exceeded retry limit\n" + "older output\n".repeat(16),
+  ])("ignores quoted, unrelated, or out-of-window retry errors: %s", (output) => {
+    expect(isApiError(output + codexChrome)).toBe(false);
+  });
+
+  test("a new retry failure after recovery starts another error episode", () => {
+    expect(isApiError("■ exceeded retry limit\n› please continue\n■ exceeded retry limit" + codexChrome)).toBe(true);
+  });
+
   test("detects Stream idle timeout (real example)", () => {
     const output = "line1\nline2\n  ⎿  API Error: Stream idle timeout - partial response received\nline4";
     expect(isApiError(output)).toBe(true);

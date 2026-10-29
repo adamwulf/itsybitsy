@@ -335,8 +335,8 @@ describe("parseCodexState — real captured snapshots", () => {
 });
 
 describe("parseState codex dispatch", () => {
-  test("real retry-exhaustion capture is api_error through automatic and explicit dispatch", async () => {
-    const output = await Bun.file(new URL("../src/fixtures/codex-retry-limit.txt", import.meta.url)).text();
+  test.each(["codex-retry-limit.txt", "codex-model-at-capacity.txt"])("real %s capture is api_error through automatic and explicit dispatch", async (fixture) => {
+    const output = await Bun.file(new URL(`../src/fixtures/${fixture}`, import.meta.url)).text();
     expect(parseState(output).state).toBe("api_error");
     expect(parseStateForCli(output, "codex").state).toBe("api_error");
     expect(parseStateForCli(output, "fugu").state).toBe("api_error");

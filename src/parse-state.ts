@@ -329,7 +329,7 @@ function hasAgyBarePromptBetweenSeparators(input: string): boolean {
  * bar that may show either cwd or context/quota telemetry on the last line.
  *
  * Priority order (mirrors claude's intent):
- *   0. Current retry-exhaustion banner with Codex footer → api_error (newer activity clears it).
+ *   0. Current API-error banner with Codex footer → api_error (newer activity clears it).
  *   1. Active work marker ("Working (... esc to interrupt)") in last 15 lines → running.
  *   2. Queue-message footer ("tab to queue message ...") on the last non-blank line → running.
  *   3. Completion sentinel ("I HAVE COMPLETED THE GOAL") in last 15 lines (excluding quoted) → complete.
@@ -348,8 +348,8 @@ export function parseCodexState(input: string): ParseStateResult {
 
   // A failed turn can leave older WAITING/completion text on screen. The
   // shared detector checks ordering, so a current error wins over that text.
-  if (isCodexRetryLimitError(input)) {
-    return { state: "api_error", reason: "codex exceeded retry limit in last 15 lines" };
+  if (isCodexApiError(input)) {
+    return { state: "api_error", reason: "codex API error in last 15 lines" };
   }
 
   // Codex keeps its native input chrome visible while work is active. The
@@ -425,14 +425,15 @@ export function parseCodexState(input: string): ParseStateResult {
 }
 
 /**
- * Codex's terminal retry-exhaustion banner, observed on failed API turns:
+ * Codex's observed terminal API-error banners:
  *   ■ exceeded retry limit, last status: 429 Too Many Requests
+ *   ■ Selected model is at capacity. Please try a different model.
  * The error remains in scrollback after recovery. Only match a recent banner
  * with no newer turn/response/state signal below it; idle composer chrome does
  * not clear it. Shared with the watchdog/dashboard override in agents.ts so
  * detection does not depend on a Stop hook firing after the failed turn.
  */
-export function isCodexRetryLimitError(input: string): boolean {
+export function isCodexApiError(input: string): boolean {
   const lines = stripTrailingBlanks(stripAnsi(input).split("\n")).slice(-STANDARD_WINDOW);
   const last = lines[lines.length - 1] ?? "";
   // This predicate also runs on Claude panes, where a displayed Codex error
@@ -440,7 +441,7 @@ export function isCodexRetryLimitError(input: string): boolean {
   if (!isCodexStatusLine(last)) return false;
   let errorIndex = -1;
   for (let i = 0; i < lines.length; i++) {
-    if (/^\s*■\s+exceeded retry limit\b/i.test(lines[i]!)) errorIndex = i;
+    if (/^\s*■\s+(?:exceeded retry limit\b|Selected model is at capacity\.)/i.test(lines[i]!)) errorIndex = i;
   }
   if (errorIndex < 0) return false;
 

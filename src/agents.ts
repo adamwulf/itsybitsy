@@ -7,7 +7,7 @@ import { join, dirname, basename } from "path";
 import { readdir, link, rename, stat, unlink, open } from "fs/promises";
 import { randomUUID } from "crypto";
 import type { AgentState } from "./parse-state";
-import { parseState, stripAnsi, stripTrailingBlanks, STARTUP_MARKERS, hasAgyBackgroundTasks, isCodexRetryLimitError } from "./parse-state";
+import { parseState, stripAnsi, stripTrailingBlanks, STARTUP_MARKERS, hasAgyBackgroundTasks, isCodexApiError } from "./parse-state";
 import {
   captureTmuxOutput,
   captureTmuxOutputResult,
@@ -1386,12 +1386,12 @@ export function isRateLimited(tmuxOutput: string): boolean {
  * watchdog nudge that quotes the phrase "API Error:" inside a sentence — both
  * variants stay anchored to a real Claude-rendered prefix.
  *
- * Codex's observed "■ exceeded retry limit" banner is detection-only: the
+ * Codex's observed retry-limit and model-at-capacity banners are detection-only: the
  * watchdog retains its Claude-only recovery gate. Other Codex API errors stay
  * unsupported until captured (SPEC-CODEX-MODEL.md §5.6).
  */
 export function isApiError(tmuxOutput: string): boolean {
-  if (isCodexRetryLimitError(tmuxOutput)) return true;
+  if (isCodexApiError(tmuxOutput)) return true;
   const stripped = stripAnsi(tmuxOutput);
   // Strip trailing blank padding rows before slicing (see isCompacting) so the
   // 15-line window measures real content, not the blanks + chrome tmux -E -

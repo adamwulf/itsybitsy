@@ -1989,6 +1989,40 @@ describe("isRateLimited", () => {
 
 describe("isApiError", () => {
   const codexChrome = "\n\n›\n\n  GPT-6.1-Sol high · Context 48% left · weekly 70% left\n";
+  const capacityBanner = "■ Selected model is at capacity. Please try a different model.";
+
+  test("real Codex capacity capture is an API error, not a usage limit", async () => {
+    // circle-ci-locally snapshot, 2026-10-29T22:28:20.392Z, unchanged
+    // unwrapped error/chrome tail; preceding task text omitted.
+    const output = await Bun.file(new URL("fixtures/codex-model-at-capacity.txt", import.meta.url)).text();
+    expect(isApiError(output)).toBe(true);
+    expect(isRateLimited(output)).toBe(false);
+    expect(isApiErrorRateLimited(output)).toBe(false);
+    expect(isApiError("WAITING\nI HAVE COMPLETED THE GOAL\n" + output)).toBe(true);
+    expect(isApiError("\u001b[31m" + capacityBanner + "\u001b[0m" + codexChrome + "\n".repeat(30))).toBe(true);
+  });
+
+  test("capacity detection requires a current Codex banner and preserves unsent drafts", () => {
+    expect(isApiError(capacityBanner)).toBe(false);
+    expect(isApiError(capacityBanner + "\n❯\n⏵⏵ accept edits on")).toBe(false);
+    for (const prefix of ["The error was ", "› detect ", "> "]) {
+      expect(isApiError(prefix + capacityBanner + codexChrome)).toBe(false);
+    }
+    expect(isApiError(capacityBanner + "\n" + "older output\n".repeat(16) + codexChrome)).toBe(false);
+    expect(isApiError(capacityBanner + codexChrome.replace("›", "› please continue\nWAITING"))).toBe(true);
+  });
+
+  test.each([
+    "› please continue",
+    "• Working (1s • esc to interrupt)",
+    "• Recovered and continuing the task.",
+    "WAITING",
+    "I HAVE COMPLETED THE GOAL",
+    "■ You've hit your usage limit. Try again later.",
+    "tab to queue message      48% context left",
+  ])("newer Codex activity clears the capacity error: %s", (activity) => {
+    expect(isApiError(capacityBanner + "\n" + activity + codexChrome)).toBe(false);
+  });
 
   test("real Codex v0.161.0 capture detects exhausted retries despite its idle placeholder", async () => {
     // quality-app snapshot, 2026-10-26T19:25:12.843Z, unwrapped tail;

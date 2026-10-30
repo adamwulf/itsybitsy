@@ -168,6 +168,44 @@ describe("resolveCodexPathGrants", () => {
     await expect(resolveCodexPathGrants(paths([p("projects/*/memory/**")], [p("projects")]))).rejects.toThrow("future matching names");
   });
 
+  test("plain write roots do not overlap siblings that only share a name prefix", async () => {
+    const database = await file("external/database/config.json");
+    const archive = await file("logs-archive/config.json");
+    const grants = await resolveCodexPathGrants(paths(
+      [p("external/database/*.json"), p("logs-archive/*.json")],
+      [p("external/data"), p("logs")],
+    ));
+    expect(grants).toEqual({ [database]: "read", [archive]: "read", [p("external/data")]: "write", [p("logs")]: "write" });
+  });
+
+  test.each(["projects/*/config/*.json", "projects/*/config/**/*.json"])("disjoint cache writes do not conflict with %s", async (pattern) => {
+    const config = await file("projects/one/config/settings.json");
+    await file("projects/one/cache/entry");
+    const grants = await resolveCodexPathGrants(paths(
+      [p(pattern)], [p("projects/*/cache/**")],
+    ));
+    expect(grants).toEqual({ [config]: "read", [p("projects/one/cache")]: "write" });
+  });
+
+  test("component wildcards distinguish incompatible names, including question marks", async () => {
+    const config = await file("projects/config1/settings.json");
+    await file("projects/cache2/entry");
+    expect(await resolveCodexPathGrants(paths(
+      [p("projects/config?/*.json")], [p("projects/cache?/**")],
+    ))).toEqual({ [config]: "read", [p("projects/cache2")]: "write" });
+  });
+
+  test("overlap detection retains real intersections across zero-depth and embedded globstars", async () => {
+    for (const [read, write] of [
+      ["projects/*/config/*.json", "projects/*/config/**"],
+      ["projects/**/config/*.json", "projects/**"],
+      ["projects/pre**/config/*.json", "projects/**"],
+      ["logs*/config/*.json", "logs"],
+    ] as const) {
+      await expect(resolveCodexPathGrants(paths([p(read)], [p(write)]))).rejects.toThrow("future matching names");
+    }
+  });
+
   test("read globs shadowed by later subtree writes are redundant", async () => {
     expect(await resolveCodexPathGrants(paths([p("files/*")], [p("files/**")]))).toEqual({ [p("files")]: "write" });
   });
@@ -253,6 +291,31 @@ describe("resolveCodexPathGrants", () => {
       await expect(resolveCodexPathGrants(paths([], [p("files/**/note")]))).rejects.toThrow("snapshot failed");
     } finally {
       await chmod(p("files/nested"), 0o700);
+    }
+  });
+
+  test.each(["projects/*/config/*.json", "projects/*/config/**/*.json", "projects/project?/config/**/settings.json"])(
+    "snapshot %s prunes unreadable directories whose descendants cannot match",
+    async (pattern) => {
+      const config = await file("projects/project1/config/settings.json");
+      await file("projects/project1/cache/secret");
+      await chmod(p("projects/project1/cache"), 0o000);
+      try {
+        expect(await resolveCodexPathGrants(paths([p(pattern)]))).toEqual({ [config]: "read" });
+      } finally {
+        await chmod(p("projects/project1/cache"), 0o700);
+      }
+    },
+  );
+
+  test("snapshot prunes incompatible wildcard components before opening them", async () => {
+    const config = await file("projects/project1/config/settings.json");
+    await file("projects/unrelated/config/settings.json");
+    await chmod(p("projects/unrelated"), 0o000);
+    try {
+      expect(await resolveCodexPathGrants(paths([p("projects/project?/config/*.json")]))).toEqual({ [config]: "read" });
+    } finally {
+      await chmod(p("projects/unrelated"), 0o700);
     }
   });
 

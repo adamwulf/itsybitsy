@@ -34,14 +34,113 @@ function scanRoot(pattern: string): string {
   return pattern.slice(0, pattern.lastIndexOf("/", firstGlob)) || "/";
 }
 
-function literalPrefix(entry: OrderedPathEntry): string {
-  return entry.kind === "plain" ? entry.canonical : entry.canonical.split(/[*?]/, 1)[0]!;
+type PatternEdge = { to: number; literal?: string; crossSlash?: boolean };
+type PatternState = { epsilon: number[]; edges: PatternEdge[] };
+type PatternMachine = { states: PatternState[]; accept: Set<number> };
+
+/**
+ * A small automaton for reachability, not permission decisions (those still
+ * use the shared resolver). Unlike a literal-prefix check it distinguishes
+ * sibling components even after wildcards. A globstar followed by a slash has
+ * a zero-directory branch;
+ * embedded ** retains the existing grammar's cross-directory behavior.
+ * Treating ** as including newlines is conservative for reachability only.
+ */
+function patternMachine(pattern: string, plain = false): PatternMachine {
+  const states: PatternState[] = [{ epsilon: [], edges: [] }];
+  let current = 0;
+  const state = () => states.push({ epsilon: [], edges: [] }) - 1;
+  const character = (literal: string) => {
+    const next = state();
+    states[current]!.edges.push({ to: next, literal });
+    current = next;
+  };
+  const star = (crossSlash: boolean) => {
+    const next = state();
+    states[current]!.epsilon.push(next);
+    states[current]!.edges.push({ to: current, crossSlash });
+    current = next;
+  };
+  for (let index = 0; index < pattern.length; index++) {
+    const char = pattern[index]!;
+    if (!plain && char === "*" && pattern[index + 1] === "*" && pattern[index + 2] === "/") {
+      const loop = state();
+      const next = state();
+      states[current]!.epsilon.push(loop, next);
+      states[loop]!.edges.push({ to: loop, crossSlash: true }, { to: next, literal: "/" });
+      current = next;
+      index += 2;
+    } else if (!plain && char === "*") {
+      const globstar = pattern[index + 1] === "*";
+      star(globstar);
+      if (globstar) index++;
+    } else if (!plain && char === "?") {
+      const next = state();
+      states[current]!.edges.push({ to: next, crossSlash: false });
+      current = next;
+    } else {
+      character(char);
+    }
+  }
+  const accept = new Set([current]);
+  if (plain) {
+    if (pattern !== "/") character("/");
+    star(true);
+    accept.add(current);
+  }
+  return { states, accept };
 }
 
-function mayOverlap(left: OrderedPathEntry, right: OrderedPathEntry): boolean {
-  const a = literalPrefix(left);
-  const b = literalPrefix(right);
-  return a.startsWith(b) || b.startsWith(a);
+function acceptsCharacter(edge: PatternEdge, character: string): boolean {
+  return edge.literal === undefined ? edge.crossSlash === true || character !== "/" : edge.literal === character;
+}
+
+/** Product-automaton search: is there any path accepted by both patterns? */
+function patternsOverlap(left: PatternMachine, right: PatternMachine): boolean {
+  const pending: [number, number][] = [[0, 0]];
+  const seen = new Set<number>();
+  while (pending.length) {
+    const [a, b] = pending.pop()!;
+    const key = a * right.states.length + b;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (left.accept.has(a) && right.accept.has(b)) return true;
+    const first = left.states[a]!;
+    const second = right.states[b]!;
+    for (const next of first.epsilon) pending.push([next, b]);
+    for (const next of second.epsilon) pending.push([a, next]);
+    for (const x of first.edges) for (const y of second.edges) {
+      if (x.literal !== undefined ? acceptsCharacter(y, x.literal)
+        : y.literal === undefined || acceptsCharacter(x, y.literal)) pending.push([x.to, y.to]);
+    }
+  }
+  return false;
+}
+
+function epsilonClosure(machine: PatternMachine, states: Set<number>): Set<number> {
+  const pending = [...states];
+  while (pending.length) {
+    for (const next of machine.states[pending.pop()!]!.epsilon) {
+      if (!states.has(next)) { states.add(next); pending.push(next); }
+    }
+  }
+  return states;
+}
+
+function mayMatchDescendant(machine: PatternMachine, directory: string): boolean {
+  let states = epsilonClosure(machine, new Set([0]));
+  const prefix = `${directory === "/" ? "" : directory}/`;
+  for (let index = 0; index < prefix.length; index++) {
+    const next = new Set<number>();
+    for (const current of states) for (const edge of machine.states[current]!.edges) {
+      if (acceptsCharacter(edge, prefix[index]!)) next.add(edge.to);
+    }
+    states = epsilonClosure(machine, next);
+    if (states.size === 0) return false;
+  }
+  // Every compiled state can reach an accepting state. A nonempty state set
+  // therefore means some suffix could match, even if it does not yet exist.
+  return states.size > 0;
 }
 
 function exactKey(path: string): string {
@@ -80,6 +179,8 @@ function isMissing(error: unknown): boolean {
  */
 export async function resolveCodexPathGrants(paths: PathsConfig): Promise<Record<string, Access>> {
   const prepared = prepareAccessTable({ ...paths, runtimeRoots: [], runtimeDenyRoots: [] });
+  const machines = new Map(prepared.allow.map((entry) => [entry, patternMachine(entry.canonical, entry.kind === "plain")]));
+  const mayOverlap = (left: OrderedPathEntry, right: OrderedPathEntry) => patternsOverlap(machines.get(left)!, machines.get(right)!);
   for (const entry of [...prepared.allow, ...prepared.deny]) {
     if (entry.canonical.split("/").some((part) => part === "." || part === "..")) {
       fail(entry.canonical, "expected canonical paths without . or .. components");
@@ -124,9 +225,9 @@ export async function resolveCodexPathGrants(paths: PathsConfig): Promise<Record
       allowRead: [subtreePattern], allowWrite: [], deny: [], runtimeRoots: [], runtimeDenyRoots: [],
     }).allow[0]!;
     const searchPattern = subtreePattern ?? pattern;
-    const depthLimit = searchPattern.includes("**") ? Infinity : searchPattern.slice(base === "/" ? 1 : base.length + 1).split("/").length;
+    const searchMachine = patternMachine(searchPattern);
 
-    async function walk(directory: string, depth: number): Promise<void> {
+    async function walk(directory: string): Promise<void> {
       // Recheck each traversed directory; never follow a directory symlink,
       // including one introduced in a frozen literal prefix since spawn.
       if (await realpath(directory) !== directory) fail(pattern, `snapshot directory changed canonical location: ${directory}`);
@@ -137,8 +238,8 @@ export async function resolveCodexPathGrants(paths: PathsConfig): Promise<Record
           if (deniedSubtree(path)) continue;
           if (directoryMatcher && orderedEntryMatches(directoryMatcher, path)) {
             if ((await lstat(path)).isDirectory() && await realpath(path) === path) candidates.set(exactKey(path), "subtree");
-          } else if (depth < depthLimit) {
-            await walk(path, depth + 1);
+          } else if (mayMatchDescendant(searchMachine, path)) {
+            await walk(path);
           }
         } else if (child.isFile() && orderedEntryMatches(entry, path) && !denied(path)) {
           // Recheck type/canonical name before materializing the file grant.
@@ -158,7 +259,7 @@ export async function resolveCodexPathGrants(paths: PathsConfig): Promise<Record
     }
     try {
       if (stat.isSymbolicLink()) fail(pattern, `snapshot root is now a symlink: ${base}`);
-      if (stat.isDirectory()) await walk(base, 1);
+      if (stat.isDirectory()) await walk(base);
     } catch (error) {
       fail(pattern, `snapshot failed: ${error instanceof Error ? error.message : String(error)}`);
     }

@@ -472,8 +472,10 @@ untagged (older) launch is rejected rather than tracked by a fallback.
   `logger`-style, wrong processID / image / sender / messageType, sandboxd →
   rejected; an ambiguous process name → offender null, tag kept; the record
   never holds the tag.
-- `src/sandbox-collector.test.ts` (28 tests, real processes and flocks; the
-  stream is a controlled peer, not `/usr/bin/log`): two launches each get only
+- `src/sandbox-collector.test.ts` (real files and flocks, with process
+  observations from a fixture table so that it also passes inside a sandbox; the
+  stream is a controlled peer, not `/usr/bin/log`; its `IB_LIVE_SANDBOX=1` probes
+  check the real reader, ancestry and `sandbox_check`): two launches each get only
   their own records, by exact tag (an unknown tag, a tag followed by a space,
   a report cut inside a tag, and another launch's tag in a path are not
   attributed); a duplicate tag is rejected; a finished launch's tag no longer

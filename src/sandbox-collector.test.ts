@@ -1,4 +1,4 @@
-import { afterAll, afterEach, expect, setSystemTime, test } from "bun:test";
+import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, chmod, appendFile } from "node:fs/promises";
 import { closeSync, constants, existsSync, mkdtempSync, openSync, readSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -6,17 +6,54 @@ import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { appendAgentLog, attachSandboxLaunch, collectorLine, holdCollectorClient, restartSandboxCollector, sandboxCollectorPaths,
   sandboxCollectorRunning, sandboxCollectorStatus, serveSandboxCollector, stopSandboxCollector, tryCollectorLock, validateRegistration,
-  type CollectorReader, type RegisteredProcess } from "./sandbox-collector";
+  type AttachOptions, type CollectorReader, type RegisteredProcess, type ServeOptions } from "./sandbox-collector";
 import { newSandboxTag } from "./sandbox";
 import { sandboxLogParent, sandboxProfilePath } from "./sandbox-log-paths";
 import { openSandboxProcessReader, type ProcessObservation } from "./sandbox-processes";
 import { isSandboxedProcess } from "./sandbox-detect";
+import { ALLOW_DEFAULT_PROFILE, SANDBOX_EXEC, assertSandboxExecApplies, liveSandboxProbes } from "./sandbox-live-probes";
 import { withTimeZone } from "./test-utils";
 
 const darwinTest = process.platform === "darwin" ? test : test.skip;
 const MODULE = JSON.stringify(join(import.meta.dir, "sandbox-collector.ts"));
+
+// ---- the kernel's view of processes, as fixture data ----
+
+// Every daemon and attach below reads this table instead of the kernel, so the
+// suite also passes inside a sandbox, where kern.bootsessionuuid is unreadable.
+// Files, flocks, the stream pipe and child processes stay real. Fixture PIDs are
+// above any macOS PID, so they can never name a real process; "killing" one only
+// removes its row. The LIVE probes at the end of this file check the real reader.
+const FAKE_BOOT = "00000000-0000-0000-0000-000000000000";
+const TEST_PROCESS_BIRTH = "1700000000:0";
+const table = new Map<number, ProcessObservation>();
+const resetTable = () => {
+  table.clear();
+  table.set(process.pid, { pid: process.pid, ppid: 1, birth: TEST_PROCESS_BIRTH });
+};
+resetTable();
+const processTable: ReturnType<typeof openSandboxProcessReader> =
+  { boot: FAKE_BOOT, read: pid => table.get(pid) ?? null, sandboxed: () => false, close: () => {} };
+const serve = (opts: ServeOptions) => serveSandboxCollector({ openProcessReader: () => processTable, ...opts });
+const attach = (opts: AttachOptions) => attachSandboxLaunch({ openProcessReader: () => processTable, ...opts });
+
+let fixtureCount = 0;
+/** A live process in the table, a child of the test process unless told otherwise. */
+function fixtureProcess(ppid = process.pid): { pid: number; kill: () => void } {
+  const pid = 2_000_000 + ++fixtureCount;
+  table.set(pid, { pid, ppid, birth: `1700000000:${fixtureCount}` });
+  return { pid, kill: () => { table.delete(pid); } };
+}
+
+/** The factory for a child process's script, which cannot see the table: every
+ * PID is alive, with the boot and birth the table gives the test process. */
+const childProcessReader = `() => ({ boot: ${JSON.stringify(FAKE_BOOT)}, read: pid => ({ pid, ppid: 1, birth: ${JSON.stringify(TEST_PROCESS_BIRTH)} }), sandboxed: () => false, close: () => {} })`;
+
 const cleanups: (() => Promise<void>)[] = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  resetTable();
+});
 
 async function until(predicate: () => Promise<boolean> | boolean, timeout = 4000): Promise<void> {
   const deadline = Date.now() + timeout;
@@ -58,8 +95,7 @@ async function launchDir(home: string, agent: string): Promise<LaunchFixture> {
 
 // ---- pure validation with a fake reader ----
 
-const FAKE_BOOT = "00000000-0000-0000-0000-000000000000";
-const observation = (pid: number, ppid: number, birth = `1700000000:${pid}`): ProcessObservation => ({ pid, ppid, birth });
+const observation =(pid: number, ppid: number, birth = `1700000000:${pid}`): ProcessObservation => ({ pid, ppid, birth });
 const named = (p: ProcessObservation): RegisteredProcess => ({ pid: p.pid, birth: p.birth });
 
 function fakeReader(processes: ProcessObservation[], sandboxed: number[] = []): CollectorReader {
@@ -161,17 +197,6 @@ darwinTest("appendAgentLog refuses a FIFO at once, with no reader and with a rea
   } finally { closeSync(reader); }
 });
 
-darwinTest("the real sandbox_check fails closed for a reaped process", async () => {
-  const reader = openSandboxProcessReader();
-  try {
-    const child = Bun.spawn(["/usr/bin/true"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-    await child.exited;
-    expect(reader.sandboxed(child.pid)).toBe(true);
-    // Same kernel call as the routing check, whether or not this suite is sandboxed.
-    expect(reader.sandboxed(process.pid)).toBe(isSandboxedProcess());
-  } finally { reader.close(); }
-});
-
 // ---- locks ----
 
 darwinTest("the daemon role is exclusive, and client locks block the daemon's exit lock", async () => {
@@ -248,7 +273,7 @@ darwinTest("serve refuses a handed-over fd that is not daemon.lock", async () =>
   await mkdir(paths.inbox, { recursive: true, mode: 0o700 });
   // An exclusively locked fd on ANOTHER file: flock alone would accept it.
   const decoy = tryCollectorLock(join(home, "decoy.lock"))!;
-  expect(await serveSandboxCollector({ home, lockFd: decoy })).toBe(1);
+  expect(await serve({ home, lockFd: decoy })).toBe(1);
   expect(sandboxCollectorRunning(paths)).toBe(false);
 });
 
@@ -270,6 +295,7 @@ darwinTest("exit-versus-register: an attach waits out an exiting daemon, then st
     await Bun.write(${JSON.stringify(reached)}, "");
     process.exit(await attachSandboxLaunch({ dir: ${JSON.stringify(launch.dir)}, owner: ${process.pid},
       agentLog: ${JSON.stringify(launch.agentLog)}, home: ${JSON.stringify(home)}, pollMs: 50,
+      openProcessReader: ${childProcessReader},
       startCollector: fd => {
         const a = fstatSync(fd), b = lstatSync(${JSON.stringify(paths.daemonLock)});
         appendFileSync(${JSON.stringify(calls)}, String(a.dev === b.dev && a.ino === b.ino) + "\\n");
@@ -345,25 +371,17 @@ async function fakeStream(home: string) {
   };
 }
 
-function sleeper(): Bun.Subprocess {
-  const child = Bun.spawn(["/bin/sleep", "30"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-  cleanups.push(async () => { if (child.exitCode === null && child.signalCode === null) child.kill(); await child.exited; });
-  return child;
-}
-
-const realReader = openSandboxProcessReader();
-afterAll(() => realReader.close());
-const identity = (pid: number): RegisteredProcess => {
-  const p = realReader.read(pid);
+const identity = (pid: number, reader: CollectorReader = processTable): RegisteredProcess => {
+  const p = reader.read(pid);
   if (!p) throw new Error(`no process ${pid}`);
   return { pid: p.pid, birth: p.birth };
 };
 
 /** Write what attach writes, for a registrar the test controls. */
-async function writeRegistration(launch: LaunchFixture, registrar: RegisteredProcess, tag = launch.tag): Promise<string> {
+async function writeRegistration(launch: LaunchFixture, registrar: RegisteredProcess, tag = launch.tag, reader: CollectorReader = processTable): Promise<string> {
   const token = randomBytes(16).toString("hex");
   await writeFile(join(launch.dir, "registration.json"), JSON.stringify({ v: 2, agentLog: launch.agentLog,
-    boot: realReader.boot, owner: identity(process.pid), registrar, token, tag }));
+    boot: reader.boot, owner: identity(process.pid, reader), registrar, token, tag }));
   return token;
 }
 
@@ -386,8 +404,7 @@ type Stream = Awaited<ReturnType<typeof fakeStream>>;
 /** A daemon with a fast loop, so lifecycle tests do not wait out the 1 s
  * cadence; "the daemon loop runs once a second" checks the real one. */
 function startDaemon(home: string, stream: Stream, lockFd?: number): Promise<number> {
-  const served = serveSandboxCollector({ home, lockFd, spawnStream: stream.spawnStream, emitMarker: stream.emitMarker,
-    sandboxed: () => false, loopMs: 100 });
+  const served = serve({ home, lockFd, spawnStream: stream.spawnStream, emitMarker: stream.emitMarker, loopMs: 100 });
   cleanups.push(async () => { await writeFile(sandboxCollectorPaths(home).stop, "stop\n").catch(() => {}); await served; });
   return served;
 }
@@ -399,7 +416,7 @@ darwinTest("the daemon loop runs once a second; readiness comes from the pump, n
   const registrars = await client(home);
   // The test decides which markers come back; none reach the stream by themselves.
   const emitted: { at: number; marker: string }[] = [];
-  const served = serveSandboxCollector({ home, spawnStream: stream.spawnStream, sandboxed: () => false,
+  const served = serve({ home, spawnStream: stream.spawnStream,
     emitMarker: marker => { emitted.push({ at: performance.now(), marker }); } });
   cleanups.push(async () => { await writeFile(paths.stop, "stop\n").catch(() => {}); await served; });
 
@@ -407,7 +424,7 @@ darwinTest("the daemon loop runs once a second; readiness comes from the pump, n
   // inside the preamble's 5 s bound (at most one pass to admit + 3 s).
   const a = await launchDir(home, "a");
   const registered = performance.now();
-  const tokenA = await register(home, a, sleeper().pid);
+  const tokenA = await register(home, a, fixtureProcess().pid);
   await until(async () => (await text(join(a.dir, "done"))) === tokenA, 8000);
   expect(performance.now() - registered).toBeLessThan(4500);
   expect(await text(a.agentLog)).toContain("readiness marker was not observed within 3 seconds");
@@ -424,7 +441,7 @@ darwinTest("the daemon loop runs once a second; readiness comes from the pump, n
 
   // B's first marker comes back: `ready` follows at once, not at the next pass.
   const b = await launchDir(home, "b");
-  await register(home, b, sleeper().pid);
+  await register(home, b, fixtureProcess().pid);
   await until(() => emitted.length === 4, 3000);
   const returned = performance.now();
   await appendFile(stream.feed, `${JSON.stringify({ processImagePath: "/usr/bin/logger", eventMessage: emitted[3]!.marker })}\n`);
@@ -450,14 +467,14 @@ darwinTest("a cold start whose first marker is lost is ready on the next 1 s pas
   // The attach starts a daemon at the real cadence; its stream is cold, so the
   // first marker never comes back.
   const startCollector = (lockFd: number) => {
-    const served = serveSandboxCollector({ home, lockFd, spawnStream: stream.spawnStream, sandboxed: () => false,
+    const served = serve({ home, lockFd, spawnStream: stream.spawnStream,
       emitMarker: marker => { if (++emitted > 1) stream.emitMarker(marker); } });
     cleanups.push(async () => { await writeFile(paths.stop, "stop\n").catch(() => {}); await served; });
     daemons.push(served);
   };
   const a = await launchDir(home, "a");
   const registered = performance.now();
-  const attached = attachSandboxLaunch({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, startCollector, pollMs: 50 });
+  const attached = attach({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, startCollector, pollMs: 50 });
   await until(() => existsSync(join(a.dir, "ready")), 5000);
   const elapsed = performance.now() - registered;
   expect(emitted).toBe(2);
@@ -476,12 +493,12 @@ darwinTest("one daemon serves two launches and routes each report to its own lau
   const served = startDaemon(home, stream);
   await until(() => sandboxCollectorRunning(paths));
   // A second daemon defers to the running one at once.
-  expect(await serveSandboxCollector({ home, spawnStream: stream.spawnStream, emitMarker: stream.emitMarker })).toBe(0);
+  expect(await serve({ home, spawnStream: stream.spawnStream, emitMarker: stream.emitMarker })).toBe(0);
 
   const a = await launchDir(home, "a");
   const b = await launchDir(home, "b");
-  const registrarA = sleeper();
-  const registrarB = sleeper();
+  const registrarA = fixtureProcess();
+  const registrarB = fixtureProcess();
   const tokenA = await register(home, a, registrarA.pid);
   const tokenB = await register(home, b, registrarB.pid);
   await until(async () => await Bun.file(join(a.dir, "ready")).exists() && await Bun.file(join(b.dir, "ready")).exists());
@@ -517,7 +534,7 @@ darwinTest("one daemon serves two launches and routes each report to its own lau
 
   // A third launch cannot register a tag another launch already holds.
   const c = await launchDir(home, "c");
-  await register(home, c, sleeper().pid, a.tag);
+  await register(home, c, fixtureProcess().pid, a.tag);
   await until(async () => (await text(join(c.dir, "done"))) === "rejected");
   expect(existsSync(join(c.dir, "failed"))).toBe(true);
   expect(await text(paths.log)).toContain("attribution tag is already registered by another launch");
@@ -552,7 +569,7 @@ darwinTest("a coalesced summary keeps its count; an ambiguous process name is co
   const registrars = await client(home);
   const served = startDaemon(home, stream);
   const a = await launchDir(home, "a");
-  await register(home, a, sleeper().pid);
+  await register(home, a, fixtureProcess().pid);
   await until(() => Bun.file(join(a.dir, "ready")).exists());
   await appendFile(stream.feed, `${JSON.stringify({
     messageType: "Error", processID: 0, processImagePath: "/kernel", bootUUID: "",
@@ -580,8 +597,8 @@ darwinTest("a FIFO agent.log fails only its own launch; another launch still get
   const a = await launchDir(home, "a");
   const b = await launchDir(home, "b");
   expect(Bun.spawnSync(["/usr/bin/mkfifo", a.agentLog]).exitCode).toBe(0); // no reader, ever
-  const tokenA = await register(home, a, sleeper().pid);
-  const tokenB = await register(home, b, sleeper().pid);
+  const tokenA = await register(home, a, fixtureProcess().pid);
+  const tokenB = await register(home, b, fixtureProcess().pid);
   await until(async () => await Bun.file(join(a.dir, "ready")).exists() && await Bun.file(join(b.dir, "ready")).exists());
   await stream.report(a.tag, 101, "file-read-data");
   await stream.report(b.tag, 102, "file-write-create");
@@ -604,8 +621,8 @@ darwinTest("the daemon rejects a registration redirected to another agent's log"
   const served = startDaemon(home, stream);
   const a = await launchDir(home, "a");
   const victim = await launchDir(home, "victim");
-  const registrar = sleeper();
-  await writeFile(join(a.dir, "registration.json"), JSON.stringify({ v: 2, agentLog: victim.agentLog, boot: realReader.boot,
+  const registrar = fixtureProcess();
+  await writeFile(join(a.dir, "registration.json"), JSON.stringify({ v: 2, agentLog: victim.agentLog, boot: FAKE_BOOT,
     owner: identity(process.pid), registrar: identity(registrar.pid), token: randomBytes(16).toString("hex"), tag: a.tag }));
   await writeFile(join(paths.inbox, a.name), a.dir);
   await until(async () => (await text(paths.log)).includes(`registration ${a.name} rejected: Error: agent log is not bound`));
@@ -625,14 +642,13 @@ darwinTest("a stale directory with a dead or reused registrar is never adopted, 
   const registrars = await client(home);
   // Dead: the registrar exited (a crashed supervisor).
   const dead = await launchDir(home, "dead");
-  const gone = Bun.spawn(["/bin/sleep", "30"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  const gone = fixtureProcess();
   const goneIdentity = identity(gone.pid);
   gone.kill();
-  await gone.exited;
   await writeRegistration(dead, goneIdentity);
   // Reused: the PID is alive but names another process (other birth).
   const reused = await launchDir(home, "reused");
-  await writeRegistration(reused, { pid: sleeper().pid, birth: "1000000000:1" });
+  await writeRegistration(reused, { pid: fixtureProcess().pid, birth: "1000000000:1" });
   const first = startDaemon(home, stream);
   await until(async () => (await text(paths.log)).includes(`launch ${dead.name} not adopted`) &&
     (await text(paths.log)).includes(`launch ${reused.name} not adopted`));
@@ -664,7 +680,7 @@ darwinTest("attach registers its profile's tag; a raw profile without one is ref
   // A daemon that holds the role and never answers: the registration stays.
   const role = tryCollectorLock(paths.daemonLock)!;
   cleanups.push(async () => closeSync(role));
-  const attached = attachSandboxLaunch({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, pollMs: 20 });
+  const attached = attach({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, pollMs: 20 });
   await until(() => existsSync(join(paths.inbox, a.name)));
   expect(JSON.parse(await text(join(a.dir, "registration.json"))).tag).toBe(a.tag);
   writeFileSync(join(a.dir, "failed"), "");
@@ -672,7 +688,7 @@ darwinTest("attach registers its profile's tag; a raw profile without one is ref
 
   const b = await launchDir(home, "b");
   await writeFile(sandboxProfilePath(b.agentDir, home), "(version 1)\n(deny default)\n");
-  expect(await attachSandboxLaunch({ dir: b.dir, owner: process.pid, agentLog: b.agentLog, home, pollMs: 20 })).toBe(1);
+  expect(await attach({ dir: b.dir, owner: process.pid, agentLog: b.agentLog, home, pollMs: 20 })).toBe(1);
   expect(await text(b.agentLog)).toContain("the launch profile carries no attribution tag");
   expect(existsSync(join(b.dir, "registration.json"))).toBe(false);
 });
@@ -684,7 +700,7 @@ darwinTest("upgrade: a launch registered before tags (protocol 1) is rejected by
   const daemons: Promise<number>[] = [];
   const startCollector = (lockFd: number) => { daemons.push(startDaemon(home, stream, lockFd)); };
   const a = await launchDir(home, "a");
-  const attached = attachSandboxLaunch({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, startCollector, pollMs: 50 });
+  const attached = attach({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, startCollector, pollMs: 50 });
   await until(() => Bun.file(join(a.dir, "ready")).exists());
   // What an older `ib` wrote for this launch: no tag.
   const { tag: _tag, ...older } = JSON.parse(await text(join(a.dir, "registration.json")));
@@ -713,11 +729,11 @@ darwinTest("attach starts a new daemon after a stream failure and the new one re
   const daemons: Promise<number>[] = [];
   const startCollector = (lockFd: number) => { daemons.push(startDaemon(home, stream, lockFd)); };
   const a = await launchDir(home, "a");
-  const attached = attachSandboxLaunch({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, startCollector, pollMs: 50 });
+  const attached = attach({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, startCollector, pollMs: 50 });
   await until(() => Bun.file(join(a.dir, "ready")).exists());
   // B's registrar never notices a restart; the new daemon must adopt it anyway.
   const b = await launchDir(home, "b");
-  const registrarB = sleeper();
+  const registrarB = fixtureProcess();
   await register(home, b, registrarB.pid);
   await until(() => Bun.file(join(b.dir, "ready")).exists());
 
@@ -755,7 +771,7 @@ darwinTest("attach gives up after 4 starts in a row that never answer", async ()
   const a = await launchDir(home, "a");
   let starts = 0;
   // Each "daemon" dies at once: its fd closes, the role is free again.
-  const code = await attachSandboxLaunch({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, pollMs: 20,
+  const code = await attach({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, pollMs: 20,
     startCollector: fd => { starts++; closeSync(fd); } });
   expect(code).toBe(1);
   expect(starts).toBe(4);
@@ -769,7 +785,7 @@ darwinTest("every acknowledged start resets the start count, so a long launch su
   // Three cycles of: two daemons die unanswered, the third acknowledges and then
   // dies. After that, every daemon dies unanswered. The first cycle is the
   // first registration; the other two are restarts from the registered loop.
-  const code = await attachSandboxLaunch({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, pollMs: 20,
+  const code = await attach({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, pollMs: 20,
     startCollector: fd => {
       starts++;
       if (starts <= 9 && starts % 3 === 0) writeFileSync(join(a.dir, "ready"), a.name);
@@ -793,7 +809,7 @@ darwinTest("a registered attach returns when a daemon rejects its launch while h
   const releaseRole = () => { if (role !== null) { closeSync(role); role = null; } };
   cleanups.push(async () => releaseRole());
   let starts = 0;
-  const attached = attachSandboxLaunch({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, pollMs: 20,
+  const attached = attach({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, pollMs: 20,
     startCollector: fd => { starts++; closeSync(fd); } });
   await until(() => existsSync(join(paths.inbox, a.name)));
   writeFileSync(join(a.dir, "ready"), a.name);
@@ -823,38 +839,19 @@ darwinTest("a registering attach whose owner is gone when the rejection appears 
   // registering loop.
   const role = tryCollectorLock(paths.daemonLock)!;
   cleanups.push(async () => closeSync(role));
-  const release = join(home, "release-owner");
-  const pidFile = join(home, "attach-pid");
-  const exitFile = join(home, "attach-exit");
-  const script = join(home, "attach.ts");
-  await writeFile(script, `
-    import { existsSync, writeFileSync } from "node:fs";
-    import { attachSandboxLaunch } from ${MODULE};
-    setInterval(() => { if (!existsSync(${JSON.stringify(home)})) process.exit(9); }, 100);
-    writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
-    const code = await attachSandboxLaunch({ dir: ${JSON.stringify(a.dir)}, owner: process.ppid,
-      agentLog: ${JSON.stringify(a.agentLog)}, home: ${JSON.stringify(home)}, startCollector: () => { process.exit(7); } });
-    writeFileSync(${JSON.stringify(exitFile)}, String(code));
-    process.exit(code);
-  `);
-  const owner = Bun.spawn(["/bin/sh", "-c", `"${process.execPath}" '${script}' & ${boundedWait(`[ ! -f '${release}' ]`)}`],
-    { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-  cleanups.push(async () => { await writeFile(release, "").catch(() => {}); await owner.exited; });
-  await until(() => existsSync(join(paths.inbox, a.name)), 8000); // registering
-  const attachPid = Number(await text(pidFile));
-  // Freeze it, so that its next check sees BOTH the owner gone and the
-  // rejection, in whichever order it checks them.
-  process.kill(attachPid, "SIGSTOP");
-  try {
-    await writeFile(release, "");
-    await owner.exited;
-    writeFileSync(join(a.dir, "failed"), "");
-    writeFileSync(join(a.dir, "done"), "rejected");
-  } finally { process.kill(attachPid, "SIGCONT"); }
-  await until(() => existsSync(exitFile), 8000);
-  expect(await text(exitFile)).toBe("0");
+  const owner = fixtureProcess();
+  let starts = 0;
+  const attached = attach({ dir: a.dir, owner: owner.pid, agentLog: a.agentLog, home, startCollector: () => { starts++; } });
+  await until(() => existsSync(join(paths.inbox, a.name))); // registering
+  // One synchronous step on the attach's event loop, so that its next check
+  // sees BOTH the owner gone and the rejection, in whichever order it checks them.
+  owner.kill();
+  writeFileSync(join(a.dir, "failed"), "");
+  writeFileSync(join(a.dir, "done"), "rejected");
+  expect(await attached).toBe(0);
+  expect(starts).toBe(0);
   expect(await text(a.agentLog)).not.toContain("rejected this launch");
-}, 20000);
+});
 
 darwinTest("a successor's re-adopt scan rejects a launch whose owner just exited; its attach returns", async () => {
   const home = await tempHome();
@@ -864,50 +861,32 @@ darwinTest("a successor's re-adopt scan rejects a launch whose owner just exited
   const startCollector = (lockFd: number) => { daemons.push(startDaemon(home, stream, lockFd)); };
   // M: a launch whose owner (this process) stays alive; its attach is fast.
   const m = await launchDir(home, "m");
-  const attachedM = attachSandboxLaunch({ dir: m.dir, owner: process.pid, agentLog: m.agentLog, home, startCollector, pollMs: 20 });
+  const attachedM = attach({ dir: m.dir, owner: process.pid, agentLog: m.agentLog, home, startCollector, pollMs: 20 });
   await until(() => Bun.file(join(m.dir, "ready")).exists());
-  // L: its attach runs under a disposable owner shell, so the owner can exit
-  // while the attach lives on. It ends by itself if the temp home disappears.
+  // L: this process is its registrar too, descending from an owner that can exit
+  // while the attach lives on.
   const l = await launchDir(home, "l");
-  const release = join(home, "release-owner");
-  const exitFile = join(home, "l-exit");
-  const pidFile = join(home, "l-pid");
-  const script = join(home, "attach-l.ts");
-  await writeFile(script, `
-    import { appendFileSync, closeSync, existsSync, writeFileSync } from "node:fs";
-    import { attachSandboxLaunch } from ${MODULE};
-    setInterval(() => { if (!existsSync(${JSON.stringify(home)})) process.exit(9); }, 100);
-    writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
-    const code = await attachSandboxLaunch({ dir: ${JSON.stringify(l.dir)}, owner: process.ppid,
-      agentLog: ${JSON.stringify(l.agentLog)}, home: ${JSON.stringify(home)},
-      startCollector: fd => { appendFileSync(${JSON.stringify(join(home, "l-starts"))}, "x"); closeSync(fd); } });
-    writeFileSync(${JSON.stringify(exitFile)}, String(code));
-    process.exit(code);
-  `);
-  const owner = Bun.spawn(["/bin/sh", "-c", `"${process.execPath}" '${script}' & ${boundedWait(`[ ! -f '${release}' ]`)}`],
-    { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-  cleanups.push(async () => { await writeFile(release, "").catch(() => {}); await owner.exited; });
+  const lOwner = fixtureProcess(1);
+  table.get(process.pid)!.ppid = lOwner.pid;
+  let lStarts = 0;
+  const attachedL = attach({ dir: l.dir, owner: lOwner.pid, agentLog: l.agentLog, home,
+    startCollector: fd => { lStarts++; closeSync(fd); } });
   await until(() => Bun.file(join(l.dir, "ready")).exists(), 8000);
-  // Freeze L's attach across the replacement, as when its once-a-second poll
-  // misses the short gap: it cannot win the freed lock, so when it runs again
-  // the successor holds the role, and only the rejection can end its wait.
-  const lPid = Number(await text(pidFile));
-  process.kill(lPid, "SIGSTOP");
-  try {
-    // L's owner exits, and the daemon is replaced before it finishes L (1 s drain).
-    await writeFile(release, "");
-    await owner.exited;
-    expect(restartSandboxCollector(home)).toBe(true);
-    expect(await daemons[0]).toBe(0);
-    // M's attach starts the successor; its scan adopts M and rejects L.
-    await until(async () => (await text(join(l.dir, "done"))) === "rejected", 8000);
-    expect(existsSync(join(l.dir, "failed"))).toBe(true);
-    await until(async () => (await text(paths.log)).includes(`launch ${l.name} not adopted: Error: launch owner is not running`), 8000);
-    expect(sandboxCollectorRunning(paths)).toBe(true); // the successor holds the role
-  } finally { process.kill(lPid, "SIGCONT"); }
-  await until(() => existsSync(exitFile), 8000); // without the fix: never
-  expect(await text(exitFile)).toBe("0"); // the owner is gone: L ends quietly
-  expect(existsSync(join(home, "l-starts"))).toBe(false);
+  await Bun.sleep(100); // now in the registered loop, asleep for most of its 1 s poll
+  // The poll misses the short gap in the replacement below (M's is 20 ms): L
+  // cannot win the freed lock, so when it runs again the successor holds the
+  // role, and only the rejection can end its wait.
+  // L's owner exits, and the daemon is replaced before it finishes L (1 s drain).
+  lOwner.kill();
+  expect(restartSandboxCollector(home)).toBe(true);
+  expect(await daemons[0]).toBe(0);
+  // M's attach starts the successor; its scan adopts M and rejects L.
+  await until(async () => (await text(join(l.dir, "done"))) === "rejected", 8000);
+  expect(existsSync(join(l.dir, "failed"))).toBe(true);
+  await until(async () => (await text(paths.log)).includes(`launch ${l.name} not adopted: Error: launch owner is not running`), 8000);
+  expect(sandboxCollectorRunning(paths)).toBe(true); // the successor holds the role
+  expect(await attachedL).toBe(0); // without the fix: never. The owner is gone: L ends quietly
+  expect(lStarts).toBe(0);
   await until(async () => count(await text(m.agentLog), "stream ready") === 2, 8000);
   expect(await text(m.agentLog)).toContain("shared collector stopped; starting a new one");
   expect(daemons.length).toBe(2);
@@ -924,7 +903,7 @@ async function attachedPair(home: string, stream: Stream) {
   const launches: { launch: LaunchFixture; attached: Promise<number> }[] = [];
   for (const name of ["a", "b"]) {
     const launch = await launchDir(home, name);
-    const attached = attachSandboxLaunch({ dir: launch.dir, owner: process.pid, agentLog: launch.agentLog, home, startCollector, pollMs: 50 });
+    const attached = attach({ dir: launch.dir, owner: process.pid, agentLog: launch.agentLog, home, startCollector, pollMs: 50 });
     await until(() => Bun.file(join(launch.dir, "ready")).exists());
     launches.push({ launch, attached });
   }
@@ -992,7 +971,8 @@ darwinTest("SIGTERM to a daemon process restarts it like `restart`, through the 
   await writeFile(daemonScript, `
     import { appendFile } from "node:fs/promises";
     import { serveSandboxCollector } from ${MODULE};
-    process.exit(await serveSandboxCollector({ home: ${JSON.stringify(home)}, lockFd: 3, sandboxed: () => false, loopMs: 100,
+    process.exit(await serveSandboxCollector({ home: ${JSON.stringify(home)}, lockFd: 3, loopMs: 100,
+      openProcessReader: ${childProcessReader},
       spawnStream: () => Bun.spawn([process.execPath, ${JSON.stringify(stream.script)}], { stdin: "pipe", stdout: "pipe", stderr: "pipe" }),
       emitMarker: m => { void appendFile(${JSON.stringify(stream.feed)}, JSON.stringify({ processImagePath: "/usr/bin/logger", eventMessage: m }) + "\\n"); } }));
   `);
@@ -1006,7 +986,7 @@ darwinTest("SIGTERM to a daemon process restarts it like `restart`, through the 
     closeSync(fd);
   };
   const a = await launchDir(home, "a");
-  const attached = attachSandboxLaunch({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, startCollector, pollMs: 50 });
+  const attached = attach({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, startCollector, pollMs: 50 });
   await until(() => Bun.file(join(a.dir, "ready")).exists(), 8000);
   children[0]!.kill("SIGTERM");
   expect(await children[0]!.exited).toBe(0);
@@ -1020,3 +1000,110 @@ darwinTest("SIGTERM to a daemon process restarts it like `restart`, through the 
   expect(await children[1]!.exited).toBe(0);
   expect(sandboxCollectorRunning(paths)).toBe(false);
 }, 30000);
+
+// ---- a missing process reader ----
+
+const cannotOpenReader = () => { throw new Error("cannot read kernel boot identity"); };
+
+darwinTest("a daemon that cannot open the process reader fails and frees the role", async () => {
+  const home = await tempHome();
+  const stream = await fakeStream(home);
+  const paths = sandboxCollectorPaths(home);
+  expect(await serve({ home, spawnStream: stream.spawnStream, emitMarker: stream.emitMarker, openProcessReader: cannotOpenReader })).toBe(1);
+  expect(sandboxCollectorRunning(paths)).toBe(false);
+  expect(await text(paths.log)).toContain("cannot read kernel boot identity");
+});
+
+darwinTest("an attach that cannot open the process reader says so in agent.log and registers nothing", async () => {
+  const home = await tempHome();
+  const a = await launchDir(home, "a");
+  expect(await attach({ dir: a.dir, owner: process.pid, agentLog: a.agentLog, home, openProcessReader: cannotOpenReader })).toBe(1);
+  expect(await text(a.agentLog)).toContain("cannot read kernel boot identity; kernel enforcement remains required");
+  expect(existsSync(join(a.dir, "registration.json"))).toBe(false);
+});
+
+// ---- LIVE: the real kernel, on a host outside any sandbox (sandbox-live-probes.ts) ----
+
+const liveTest = liveSandboxProbes("the real process reader, in an unsandboxed process", () => {
+  assertSandboxExecApplies();
+  const reader = openSandboxProcessReader();
+  try {
+    if (!reader.read(process.pid)) throw new Error("proc_pidinfo cannot read this process");
+    if (reader.sandboxed(process.pid)) throw new Error("this run is itself sandboxed");
+  } finally { reader.close(); }
+});
+
+function sleeper(prefix: string[] = []): Bun.Subprocess {
+  const child = Bun.spawn([...prefix, "/bin/sleep", "30"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  cleanups.push(async () => { if (child.exitCode === null && child.signalCode === null) child.kill(); await child.exited; });
+  return child;
+}
+
+liveTest("LIVE: the real sandbox_check fails closed for a reaped process", async () => {
+  const reader = openSandboxProcessReader();
+  try {
+    const child = Bun.spawn(["/usr/bin/true"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    await child.exited;
+    expect(reader.sandboxed(child.pid)).toBe(true);
+    // Same kernel call as the routing check.
+    expect(reader.sandboxed(process.pid)).toBe(isSandboxedProcess());
+  } finally { reader.close(); }
+});
+
+liveTest("LIVE: the real reader reports the boot, and each process's parent and stable birth until it is reaped", async () => {
+  const reader = openSandboxProcessReader();
+  try {
+    expect(reader.boot).toMatch(/^[a-f0-9-]{36}$/);
+    const self = reader.read(process.pid)!;
+    expect(self.ppid).toBe(process.ppid);
+    expect(self.birth).toMatch(/^\d+:\d+$/);
+    const child = sleeper();
+    const observed = reader.read(child.pid)!;
+    expect(observed.ppid).toBe(process.pid);
+    expect(reader.read(child.pid)).toEqual(observed);
+    child.kill();
+    await child.exited;
+    expect(reader.read(child.pid)).toBeNull();
+  } finally { reader.close(); }
+});
+
+liveTest("LIVE: a daemon on the real reader follows a real registrar and refuses what the kernel disproves", async () => {
+  const home = await tempHome();
+  const stream = await fakeStream(home);
+  const paths = sandboxCollectorPaths(home);
+  const registrars = await client(home);
+  const reader = openSandboxProcessReader();
+  cleanups.push(async () => reader.close());
+  const offer = async (launch: LaunchFixture, registrar: RegisteredProcess) => {
+    const token = await writeRegistration(launch, registrar, launch.tag, reader);
+    await writeFile(join(paths.inbox, launch.name), launch.dir);
+    return token;
+  };
+  const refused = async (name: string, registrar: RegisteredProcess, reason: string) => {
+    const launch = await launchDir(home, name);
+    await offer(launch, registrar);
+    await until(async () => (await text(paths.log)).includes(`registration ${launch.name} rejected: Error: ${reason}`));
+    expect(await text(join(launch.dir, "done"))).toBe("rejected");
+  };
+  const served = serveSandboxCollector({ home, spawnStream: stream.spawnStream, emitMarker: stream.emitMarker, loopMs: 100 });
+  cleanups.push(async () => { await writeFile(paths.stop, "stop\n").catch(() => {}); await served; });
+
+  // A real child of this process is adopted, and its real exit ends the launch.
+  const followed = await launchDir(home, "followed");
+  const registrar = sleeper();
+  const token = await offer(followed, identity(registrar.pid, reader));
+  await until(() => existsSync(join(followed.dir, "ready")));
+  registrar.kill();
+  await until(async () => (await text(join(followed.dir, "done"))) === token);
+  expect(await text(followed.agentLog)).toContain("collection stopping before the launch ends; coverage reduced");
+
+  // The kernel disproves each of these.
+  await refused("reused", { pid: sleeper().pid, birth: "1000000000:1" }, "registrar is not running (or its PID now names another process)");
+  await refused("unrelated", identity(process.ppid, reader), "launch owner is not an ancestor of the registrar");
+  const sandboxed = sleeper([SANDBOX_EXEC, "-p", ALLOW_DEFAULT_PROFILE]);
+  await until(() => reader.sandboxed(sandboxed.pid));
+  await refused("sandboxed", identity(sandboxed.pid, reader), "launch owner or registrar is sandboxed");
+
+  registrars.release();
+  expect(await served).toBe(0);
+}, 20000);

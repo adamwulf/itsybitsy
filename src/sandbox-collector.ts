@@ -259,12 +259,12 @@ export interface ServeOptions {
    * that won the role. Without it, serve tries the lock once and defers to a
    * running daemon. */
   lockFd?: number;
-  /** Test seams: the stream helper, the readiness-marker emitter, the kernel
-   * sandbox check (a test suite may itself run inside a sandbox), and the loop
-   * cadence (LOOP_MS). */
+  /** Test seams: the stream helper, the readiness-marker emitter, the kernel's
+   * view of processes (a test suite may itself run inside a sandbox, where it
+   * cannot read the boot identity), and the loop cadence (LOOP_MS). */
   spawnStream?: (predicate: string) => Bun.Subprocess<"pipe", "pipe", "pipe">;
   emitMarker?: (marker: string) => void;
-  sandboxed?: (pid: number) => boolean;
+  openProcessReader?: typeof openSandboxProcessReader;
   loopMs?: number;
 }
 
@@ -368,7 +368,7 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
     catch (error) { fail(launch, error); }
   };
   try {
-    reader = openSandboxProcessReader();
+    reader = (opts.openProcessReader ?? openSandboxProcessReader)();
     // Only tagged kernel reports (and our markers) leave diagnosticd: the
     // daemon never sees the rest of the host's sandbox denials.
     const predicate = `(eventMessage CONTAINS "Sandbox:" AND eventMessage CONTAINS "ib-agent:") OR (eventMessage CONTAINS "${markerPrefix}")`;
@@ -422,8 +422,7 @@ export async function serveSandboxCollector(opts: ServeOptions = {}): Promise<nu
       }
       let accepted: AcceptedRegistration;
       try {
-        accepted = validateRegistration(name, dirText,
-          { boot: reader!.boot, read: pid => reader!.read(pid), sandboxed: opts.sandboxed ?? (pid => reader!.sandboxed(pid)) }, opts.home);
+        accepted = validateRegistration(name, dirText, reader!, opts.home);
         if (byTag.has(accepted.tag)) throw new Error("attribution tag is already registered by another launch");
       } catch (error) {
         // Tell the registrar through its own private directory, never through
@@ -593,6 +592,8 @@ export interface AttachOptions {
   startCollector?: (lockFd: number) => void;
   /** Test seam: how often a registered attach re-reads `done` and the lock. */
   pollMs?: number;
+  /** Test seam: the kernel's view of processes, as in ServeOptions. */
+  openProcessReader?: typeof openSandboxProcessReader;
 }
 
 /** One per launch. The supervisor subshell removes the launch directory after
@@ -618,7 +619,7 @@ export async function attachSandboxLaunch(opts: AttachOptions): Promise<number> 
     // the same sealed namespace as this launch directory.
     const tag = sandboxProfileTag(readPrivateFile(sandboxProfilePath(dirname(opts.agentLog), opts.home), 1024 * 1024));
     if (!tag) throw new Error("the launch profile carries no attribution tag");
-    reader = openSandboxProcessReader();
+    reader = (opts.openProcessReader ?? openSandboxProcessReader)();
     const owner = reader.read(opts.owner);
     if (!owner) throw new Error("launch owner identity unavailable");
     ensureCollectorDirs(paths);

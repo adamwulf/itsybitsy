@@ -3627,8 +3627,8 @@ describe("resolveWatchdogState — waiting + background shell override", () => {
     expect(resolveWatchdogState(output, "running")).toBe("api_error");
   });
 
-  test("Codex retry exhaustion overrides stale running state without a Stop hook", async () => {
-    const output = await Bun.file(new URL("fixtures/codex-retry-limit.txt", import.meta.url)).text();
+  test.each(["codex-retry-limit.txt", "codex-model-at-capacity.txt"])("Codex %s overrides stale running state without a Stop hook", async (fixture) => {
+    const output = await Bun.file(new URL(`fixtures/${fixture}`, import.meta.url)).text();
     expect(resolveWatchdogState(output, "running")).toBe("api_error");
     expect(resolveWatchdogState(output, undefined)).toBe("api_error");
     const recovered = output.replace("›", "• Working (1s • esc to interrupt)\n\n›");
@@ -3959,12 +3959,12 @@ describe("runPerAgentWatchdog — meta.transient.json persistence", () => {
     }
   });
 
-  test("Codex retry error is persisted for dashboard readers and clears after recovery without hooks", async () => {
+  test.each(["codex-retry-limit.txt", "codex-model-at-capacity.txt"])("Codex %s is persisted for dashboard readers and clears after recovery without hooks", async (fixture) => {
     setPerAgentReadMeta(async () => ({ meta: {
       ...makeAgent({ id: "agent-test1", state: "running" }).meta,
       model: "codex:gpt-6.1-sol", tmux_session: "tmux-test1", manager: null,
     } }));
-    const captured = await Bun.file(new URL("fixtures/codex-retry-limit.txt", import.meta.url)).text();
+    const captured = await Bun.file(new URL(`fixtures/${fixture}`, import.meta.url)).text();
     const { readAgentTransient } = await import("./agents");
     for (const failed of [true, false]) {
       const output = failed ? captured : captured.replace("›", "• Working (1s • esc to interrupt)\n\n›");

@@ -136,7 +136,7 @@ export async function resolveCodexPathGrants(paths: PathsConfig): Promise<Record
         if (child.isDirectory()) {
           if (deniedSubtree(path)) continue;
           if (directoryMatcher && orderedEntryMatches(directoryMatcher, path)) {
-            candidates.set(exactKey(path), "subtree");
+            if ((await lstat(path)).isDirectory() && await realpath(path) === path) candidates.set(exactKey(path), "subtree");
           } else if (depth < depthLimit) {
             await walk(path, depth + 1);
           }

@@ -14,6 +14,8 @@ Two independent Codex reviewers assess this plan before implementation: one focu
 
 Inventory subprocess helpers and mutable external boundaries in the default suite, including direct spawning, watchdog requests, caller ancestry, account-home registry discovery, hooks, and generated shell commands. Focus on routes exercised by the suite, not a generic security framework.
 
+Convert the in-process self-merge test in `src/ib-commands.test.ts` to a temporary agent fixture with an explicit fixture caller cwd. It currently derives the actual agent from process.cwd(); mergeAgent acquires the lifecycle operation before rejecting self-merge, so even mocked spawning still writes the live agent's lock and transient merging state. Preserve the self-merge rejection assertion and production merge semantics. No full-suite execution until in-process lifecycle locks and metadata writes are fixture-only as well as subprocess mutations.
+
 Introduce a shared test-only CLI runner using an absolute worktree entry point, a per-test temporary cwd and HOME, and an explicit minimal environment. Account for account-home lookup and process ancestry: HOME and cwd alone are insufficient. Use explicit test dependencies or a dedicated test subprocess entry point/preload to supply fixture caller identity and external operations. Do not add an environment-variable bypass to production sandbox enforcement or a production test-mode switch.
 
 Unexpected attempts to mutate external state must fail loudly. Test-owned fixture queues and fake watchdog handlers may execute broker protocol behavior. Both direct and brokered command paths must remain covered. Keep real production entry-point smoke coverage for inert commands, including compiled binary dispatch where already required.
@@ -31,6 +33,8 @@ Success: the default suite is deterministic in this native Codex sandbox; privil
 ## Stage 4 Regression verification
 
 Add regression tests for the observed failure: an agent-shaped cwd and inherited harness context cannot make a CLI parsing test write to a non-fixture watchdog queue. Exercise both broker and direct mutation boundaries, including send/lifecycle operations where the shared runner reaches them. Use sentinel fixture state rather than the actual user's live queue to prove the boundary. Include negative checks proving unexpected operations fail rather than returning fabricated success.
+
+Require fixture-only in-process lifecycle metadata and lock writes, including the self-merge test, before this verification gate. Preserve the real hook caller-resolution algorithm while injecting parent-process and identity observations, and preserve collector readiness/routing coverage with a fake process reader; only the actual privileged OS observations move to live probes.
 
 Run targeted tests first, then the complete `bun test` suite with output captured to a file, then `bunx tsc --noEmit`. If either CLI entry point changes, rebuild using the required flags and verify the compiled list-types command produces a table with a temporary home. Record exact totals and any opt-in integration limits. Do not rerun the unsafe suite before Stage 2 is verified.
 
@@ -51,5 +55,6 @@ No migrations, backwards compatibility layers, new user-facing sandbox flags, or
 
 ## Progress
 
-- Plan drafted; awaiting two Codex reviews.
+- Architecture review approved by agent-d47b0c44; retired after reporting.
+- Isolation review by agent-213eea95 identified the live self-merge metadata mutation; the plan now explicitly includes its fixture conversion and blocks full-suite execution until it is safe. Revision awaiting confirmation.
 - Implementation and verification pending.

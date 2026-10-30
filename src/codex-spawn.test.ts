@@ -139,7 +139,8 @@ describe("buildCodexStartContent — launch line", () => {
   });
 
   test("enabled launch ignores git roots: no profile, the legacy network key stays", () => {
-    const content = buildCodexStartContent({ ...baseInput(), gitRoots: GIT_ROOTS });
+    const content = buildCodexStartContent({ ...baseInput(), gitRoots: GIT_ROOTS, pathGrants: { "unsafe'path": "write" } });
+    expect(content).toBe(buildCodexStartContent(baseInput()));
     expect(profileFlags(content)).toEqual([]);
     expect(content).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
     expect(content).toContain("'sandbox_workspace_write.network_access=true'");
@@ -483,6 +484,7 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
       absAgentLog: "/tmp/test/agent.log",
       absStderrLog: "/tmp/test/claude.stderr.log",
       extraWritableRoots: [GIT_ROOTS.commonDir, "/repo/my.app/.ittybitty"],
+      pathGrants: { "/external/read only": "read", "/external/write": "write", "/external/denied": "deny" } as const,
       fugu,
       ...disabledFields(),
     };
@@ -490,6 +492,19 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     const resume = buildCodexResumeContent({ ...shared, codexSessionId: "019e7b21-cb7d-7f23-8674-11036ed141ef" });
     expect(profileFlags(start)).toHaveLength(8); // 4 payloads × 2 launch arms
     expect(profileFlags(resume)).toEqual(profileFlags(start));
+    for (const content of [start, resume]) {
+      for (const line of unwrappedLaunchLines(content)) {
+        const maps = [...line.matchAll(/'permissions\.itsybitsy_agent\.filesystem=(\{[^']*\})'/g)];
+        expect(maps).toHaveLength(1);
+        const parsed = Bun.TOML.parse(`filesystem=${maps[0]![1]}`) as { filesystem: Record<string, string> };
+        expect(parsed.filesystem["/external/read only"]).toBe("read");
+        expect(parsed.filesystem["/external/write"]).toBe("write");
+        expect(parsed.filesystem["/external/denied"]).toBe("deny");
+        expect(parsed.filesystem[GIT_ROOTS.gitDir]).toBe("write");
+        expect(line).toContain('permissions.itsybitsy_agent.network.enabled=true');
+        expect(line).not.toContain("'--add-dir' '/external");
+      }
+    }
     const addDirs = (content: string) => content.match(/'--add-dir' '[^']*'/g);
     expect(addDirs(resume)).toEqual(addDirs(start));
   });
@@ -500,7 +515,8 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
   });
 
   test("enabled resume ignores git roots: no profile, the legacy network key stays", () => {
-    const content = buildCodexResumeContent({ ...baseInput(), gitRoots: GIT_ROOTS });
+    const content = buildCodexResumeContent({ ...baseInput(), gitRoots: GIT_ROOTS, pathGrants: { "unsafe'path": "write" } });
+    expect(content).toBe(buildCodexResumeContent(baseInput()));
     expect(profileFlags(content)).toEqual([]);
     expect(content).toContain("-a never -s danger-full-access --dangerously-bypass-hook-trust");
     expect(content).toContain("'sandbox_workspace_write.network_access=true'");

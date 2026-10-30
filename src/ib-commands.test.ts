@@ -6413,9 +6413,21 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     };
   }
 
-  /** The profile `-c` payload ib must emit for `dirs` (one inline table). */
-  function expectedProfileFilesystem(dirs: { commonDir: string; gitDir: string }): string {
-    return `'permissions.itsybitsy_agent.filesystem={"${dirs.gitDir}"="write","${dirs.commonDir}/objects"="write","${dirs.commonDir}/refs"="write","${dirs.commonDir}/logs"="write"}'`;
+  /** Parse both launch arms, requiring one identical inline filesystem map each. */
+  function profileFilesystemIn(script: string): Record<string, string> {
+    const maps = [...script.matchAll(/'permissions\.itsybitsy_agent\.filesystem=(\{[^']*\})'/g)];
+    expect(maps).toHaveLength(2);
+    expect(maps[0]![1]).toBe(maps[1]![1]);
+    return (Bun.TOML.parse(`filesystem=${maps[0]![1]}`) as { filesystem: Record<string, string> }).filesystem;
+  }
+
+  function expectProfileGitGrants(script: string, dirs: { commonDir: string; gitDir: string }): void {
+    expect(profileFilesystemIn(script)).toMatchObject({
+      [dirs.gitDir]: "write",
+      [`${dirs.commonDir}/objects`]: "write",
+      [`${dirs.commonDir}/refs`]: "write",
+      [`${dirs.commonDir}/logs`]: "write",
+    });
   }
 
   /** The shell-quoted permission-profile payloads in a launch script, in order. */
@@ -6994,7 +7006,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   });
 
   test("sandbox-enabled Codex spawn uses danger-full-access inside our wrapper and proxy", async () => {
-    await writeSandboxType("sandbox-codex", { model: "codex:gpt-5.4-mini" });
+    // This valid Seatbelt path is deliberately unsafe for inline TOML: an
+    // enabled launch must never run the native-profile translator.
+    await writeSandboxType("sandbox-codex", { model: "codex:gpt-5.4-mini", allowRead: [join(tempDir, "quoted'path")] });
     setSandboxPortAllocatorForTesting(() => 43121);
     setSandboxPortCheckForTesting(() => {});
     setNewAgentSpawnRunner(sandboxSpawnRunner());
@@ -7005,6 +7019,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(result.ok).toBe(true);
     const agentDir = join(agentsDir, "sandbox-codex");
     const start = await Bun.file(join(agentDir, "start.sh")).text();
+    expect(profileFlagsIn(start)).toEqual([]);
     const profile = await Bun.file(sandboxProfilePath(agentDir)).text();
     // The role text comes from the SessionStart hook; nothing is written
     // into the worktree.
@@ -7046,7 +7061,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(start).toContain(`'default_permissions="itsybitsy_agent"'`);
     expect(start).toContain(`'permissions.itsybitsy_agent.extends=":workspace"'`);
     expect(start).toContain(`'permissions.itsybitsy_agent.network.enabled=true'`);
-    expect(start).toContain(expectedProfileFilesystem(dirs));
+    expectProfileGitGrants(start, dirs);
     // The existing --add-dir grants stay: the common dir and parent-repo subdirs.
     expect(start).toContain(`'--add-dir' '${dirs.commonDir}'`);
     expect(start).toContain(`'--add-dir' '${realpathSync(join(tempDir, ".ittybitty"))}'`);
@@ -7078,9 +7093,26 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(spawnCalls.some((cmd) => cmd.join(" ").includes("tmux new-session"))).toBe(false);
   });
 
-  test("sandbox-disabled Codex resume re-passes the same permission profile and Git dirs as spawn", async () => {
+  test("sandbox-disabled Codex forwards resolved paths at spawn and expands frozen paths again at resume", async () => {
     const id = "unsandboxed-codex-resume";
-    await writeSandboxType(id, { enabled: false, model: "codex:gpt-5.4-mini" });
+    // Remove the bootstrap floor so the fixture's read glob does not overlap
+    // its broad /private/var/folders write grant.
+    await writeAllLayer([], []);
+    const readDir = join(tempDir, "read only");
+    const writeDir = join(tempDir, "write-tree");
+    const globDir = join(tempDir, "glob-files");
+    await mkdir(readDir, { recursive: true });
+    await mkdir(globDir, { recursive: true });
+    await Bun.write(join(globDir, "first.txt"), "first");
+    await Bun.write(join(globDir, "unmatched.json"), "{}");
+    const denyDir = join(tempDir, "denied");
+    await writeSandboxType(id, {
+      enabled: false,
+      model: "codex:gpt-5.4-mini",
+      allowRead: [readDir, `${globDir}/*.txt`],
+      allowWrite: [`${writeDir}/**`],
+      deny: [denyDir],
+    });
     const dirs = await linkedWorktreeGitDirs();
     setNewAgentSpawnRunner(answerWorktreeGitDirs(id, dirs, cleanWorktreeRunner()));
     setNewAgentSummaryGenerator(async () => {});
@@ -7090,6 +7122,22 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const agentDir = join(agentsDir, id);
     const start = await Bun.file(join(agentDir, "start.sh")).text();
     const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
+    const frozenPaths = structuredClone(meta.paths);
+    const startGrants = profileFilesystemIn(start);
+    expect(startGrants).toMatchObject({
+      [canonicalizeSandboxPath(readDir)]: "read",
+      [canonicalizeSandboxPath(writeDir)]: "write",
+      [canonicalizeSandboxPath(join(globDir, "first.txt"))]: "read",
+      [canonicalizeSandboxPath(denyDir)]: "deny",
+    });
+    expect(startGrants[canonicalizeSandboxPath(globDir)]).toBeUndefined();
+    expect(startGrants[canonicalizeSandboxPath(join(globDir, "unmatched.json"))]).toBeUndefined();
+    const later = join(globDir, "later.txt");
+    await Bun.write(later, "later");
+    expect(startGrants[canonicalizeSandboxPath(later)]).toBeUndefined();
+    // Neither a changed type toggle nor changed lists may replace frozen meta.
+    const liveOnly = join(tempDir, "live-only");
+    await writeSandboxType(id, { enabled: true, model: "codex:gpt-5.4-mini", allowRead: [liveOnly], allowWrite: [], deny: [] });
     meta.state = "stopped";
     meta.codex_session_id = "019e7b21-cb7d-7f23-8674-11036ed141ef";
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
@@ -7111,9 +7159,14 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     expect(resume).toContain("-a never --dangerously-bypass-hook-trust");
-    expect(resume).toContain(expectedProfileFilesystem(dirs));
+    expectProfileGitGrants(resume, dirs);
+    const resumeGrants = profileFilesystemIn(resume);
+    expect(resumeGrants).toEqual({ ...startGrants, [canonicalizeSandboxPath(later)]: "read" });
+    expect(resumeGrants[canonicalizeSandboxPath(liveOnly)]).toBeUndefined();
+    expect((await Bun.file(join(agentDir, "meta.json")).json()).paths).toEqual(frozenPaths);
     expect(profileFlagsIn(resume)).toHaveLength(8); // 4 payloads × 2 launch arms
-    expect(profileFlagsIn(resume)).toEqual(profileFlagsIn(start));
+    expect(resume).toContain('permissions.itsybitsy_agent.network.enabled=true');
+    expect(resume).toContain(`'--add-dir' '${dirs.commonDir}'`);
     expect(resume).not.toContain("-s workspace-write");
     expect(resume).not.toContain("-s danger-full-access");
     expect(resume).not.toContain("sandbox_workspace_write");
@@ -7122,7 +7175,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   });
 
   test("sandbox-enabled Codex resume reallocates proxy, preserves profile, and wraps both launch arms", async () => {
-    await writeSandboxType("sandbox-codex-resume", { model: "codex:gpt-5.4-mini" });
+    await writeSandboxType("sandbox-codex-resume", { model: "codex:gpt-5.4-mini", allowRead: [join(tempDir, "quoted'path")] });
     const ports = [43122, 43123];
     setSandboxPortAllocatorForTesting(() => ports.shift()!);
     setSandboxPortCheckForTesting(() => {});
@@ -7162,6 +7215,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const resumeProfile = await Bun.file(sandboxProfilePath(agentDir)).text();
     const resume = await Bun.file(join(agentDir, "resume.sh")).text();
     const resumedMeta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(profileFlagsIn(resume)).toEqual([]);
     // The same rules, under a new attribution tag for the new launch.
     expect(untagged(resumeProfile)).toBe(untagged(spawnProfile));
     expect(sandboxProfileTag(resumeProfile)).not.toBe(sandboxProfileTag(spawnProfile));
@@ -7586,7 +7640,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(resume).not.toContain("sandbox-collector");
     expect(resume).toContain("-a never --dangerously-bypass-hook-trust");
     expect(resume).toContain(`'default_permissions="itsybitsy_agent"'`);
-    expect(resume).toContain(expectedProfileFilesystem(dirs));
+    expectProfileGitGrants(resume, dirs);
+    expect(profileFilesystemIn(resume)[canonicalizeSandboxPath(newRead)]).toBe("read");
     expect(resume).not.toContain("-s workspace-write");
     expect(resume).not.toContain("-s danger-full-access");
     expect(resume).not.toContain("sandbox_workspace_write");

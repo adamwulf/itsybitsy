@@ -107,6 +107,10 @@ flags in place of the old `-c sandbox_workspace_write.network_access=true`:
   spawn then `git commit`; a write outside the roots is denied; resume of a
   post-change session and of a pre-change session, then `git commit`.
 
+**Disabled-mode path forwarding (2026-10-30):** Codex and Codex-backed Fugu merge translated `paths.allowRead`, `paths.allowWrite`, and `paths.deny` into that same single filesystem map. Spawn translates `resolvedPathsConfig`; resume translates frozen `meta.paths`, never current type files. `ib sandbox refresh` remains the explicit way to replace frozen policy. Exact and plain trailing `/**` allow entries become direct roots; other allow globs expand to existing authorized matches at each launch/resume. No enclosing directory is granted to approximate a glob. New matches require the next launch/resume. The syntax is unchanged; forms that cannot be represented safely fail closed rather than widening access.
+
+Read grants stay read-only; write grants permit read and write. Equal-path writes win over reads, narrower reads remain restrictions, and denies take precedence, including over the explicit Git grants. Duplicate keys are merged deterministically before rendering. Existing `--add-dir` roots and inherited `:workspace` protections remain; broader authored reads do not override deeper inherited runtime writes. The native baseline is still broader than the hook policy, so this is not whole-policy equivalence: hooks continue to enforce frozen paths and tool permissions. Enabled kernel mode never translates these native grants and retains its existing wrapper, hooks, approval and network configuration. Inline paths must remain absolute and quote-safe. Live sandbox enforcement has not been verified for this forwarding change.
+
 **Current worktree support restriction:** Codex and Fugu require a real agent
 worktree because their `.codex/` gitignore entry, inline-hook prechecks, and
 launch setup depend on it. Creation rejects

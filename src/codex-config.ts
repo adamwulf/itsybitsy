@@ -19,6 +19,7 @@ import { userHome } from "./home";
 import { join } from "path";
 import { isValidAgentId } from "./validation";
 import { getCoordinatorHome } from "./coordinator";
+import { orderedEntryMatches, prepareAccessTable } from "./sandbox";
 
 /** Hook events codex fires that itsybitsy registers a handler for. */
 export type CodexHookEvent = "PreToolUse" | "SessionStart" | "UserPromptSubmit" | "Stop";
@@ -87,6 +88,8 @@ export interface BuildCodexLaunchArgsInput {
    * launch runs under our Seatbelt with `-s danger-full-access`.
    */
   permissionProfileGitRoots?: CodexGitRoots;
+  /** Resolved path grants, forwarded only into the disabled-mode native profile. */
+  permissionProfilePathGrants?: Record<string, "read" | "write" | "deny">;
 }
 
 /**
@@ -224,7 +227,10 @@ export function renderCodexHookFlagPayload(
  *   - Codex splits a `-c` key on every `.`, so paths (which contain `.git`,
  *     `.itsybitsy`, ...) go in ONE inline-table value, never in the key.
  */
-export function renderCodexPermissionProfileOverrides(git: CodexGitRoots): string[] {
+export function renderCodexPermissionProfileOverrides(
+  git: CodexGitRoots,
+  pathGrants: Record<string, "read" | "write" | "deny"> = {},
+): string[] {
   const writeTargets = [
     git.gitDir,
     join(git.commonDir, "objects"),
@@ -240,7 +246,37 @@ export function renderCodexPermissionProfileOverrides(git: CodexGitRoots): strin
       );
     }
   }
-  const filesystem = writeTargets.map((target) => `"${target}"="write"`).join(",");
+  for (const [target, access] of Object.entries(pathGrants)) {
+    if (!target.startsWith("/") || !isCodexSafeBinaryPath(target)) {
+      throw new Error(
+        `Unsafe path for the codex permission profile: ${JSON.stringify(target)} must be absolute and contain no quotes, backslashes, or control characters.`,
+      );
+    }
+    if (access !== "read" && access !== "write" && access !== "deny") {
+      throw new Error(`Invalid codex path permission for ${JSON.stringify(target)}: ${JSON.stringify(access)}`);
+    }
+  }
+  const denies = prepareAccessTable({
+    allowRead: [],
+    allowWrite: [],
+    deny: Object.keys(pathGrants).filter((target) => pathGrants[target] === "deny"),
+    runtimeRoots: [],
+    runtimeDenyRoots: [],
+  }).deny;
+  // Keep Git's stable order and deduplicate exact keys. A runtime write wins
+  // an equal-path read, but must never reopen a configured denied ancestor.
+  // Narrower authored reads remain intact; --add-dir/:workspace roots and
+  // their protected children remain Codex's responsibility.
+  const grants = new Map<string, "read" | "write" | "deny">();
+  for (const target of writeTargets) {
+    if (!denies.some((entry) => orderedEntryMatches(entry, target))) grants.set(target, "write");
+  }
+  for (const target of Object.keys(pathGrants).sort()) {
+    const access = pathGrants[target]!;
+    if (access === "read" && grants.get(target) === "write") continue;
+    grants.set(target, access);
+  }
+  const filesystem = [...grants].map(([target, access]) => `"${target}"="${access}"`).join(",");
   return [
     `default_permissions="${CODEX_PERMISSION_PROFILE}"`,
     `permissions.${CODEX_PERMISSION_PROFILE}.extends=":workspace"`,
@@ -358,7 +394,7 @@ export function buildCodexLaunchArgs(input: BuildCodexLaunchArgsInput): CodexLau
   // write grants. Under our Seatbelt (`-s danger-full-access`) the legacy key
   // stays as it always was.
   if (input.permissionProfileGitRoots) {
-    for (const override of renderCodexPermissionProfileOverrides(input.permissionProfileGitRoots)) {
+    for (const override of renderCodexPermissionProfileOverrides(input.permissionProfileGitRoots, input.permissionProfilePathGrants)) {
       args.push("-c", override);
     }
   } else {

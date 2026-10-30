@@ -110,6 +110,7 @@ import {
 } from "./team-channel";
 import { timed } from "./perf";
 import { WATCHDOG_SENTINEL } from "./watchdog";
+import { resolveCodexPathGrants } from "./codex-paths";
 import {
   anchorRelativePaths,
   findRelativeEscapes,
@@ -1973,6 +1974,18 @@ export async function resumeAgent(
         codexGitRoots.commonDir,
         ...codexParentRepoSubdirs,
       ];
+      let codexPathGrants: Record<string, "read" | "write" | "deny"> | undefined;
+      if (!frozenConfig.enabled) {
+        try {
+          // Replay frozen policy, expanding its globs against today's files.
+          // Only sandbox refresh may replace this policy from live type files.
+          codexPathGrants = await resolveCodexPathGrants(resolvePathsConfig(agent.meta.paths));
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          await logAgent(agentDir, `[resume] ${message}`);
+          return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${message}` };
+        }
+      }
 
       // Build resume.sh via the shared codex builder (mirrors start.sh).
       const { buildCodexResumeContent } = await import("./codex-spawn");
@@ -1993,6 +2006,7 @@ export async function resumeAgent(
         absStderrLog: join(agentDir, "claude.stderr.log"),
         extraWritableRoots: codexExtraWritableRoots,
         gitRoots: codexGitRoots.profileGitRoots,
+        pathGrants: codexPathGrants,
         fugu: resumeCli === "fugu",
         sandboxEnabled: frozenConfig.enabled,
         sandboxScriptPreamble: preparedResumeSandbox ? sandboxResumePreamble : undefined,
@@ -6795,6 +6809,7 @@ export async function newAgent(
     };
   }
   let resolvedPathsConfig: PathsConfig;
+  let codexPathGrants: Record<string, "read" | "write" | "deny"> | undefined;
   try {
     // Anchor relative (./ ../) entries at the main repo root the worktree is
     // spawned from BEFORE canonicalizing, so meta.paths — and the profile and
@@ -6802,6 +6817,9 @@ export async function newAgent(
     // and the kernel never see a relative entry (SPEC-PATH-ALLOWLIST.md 6.2).
     const anchoredPaths = anchorRelativePaths(mergedSandboxLayers.paths, rootRepoPath);
     resolvedPathsConfig = canonicalizePathsConfig(anchoredPaths, userHome());
+    if (isCodexBackedCli(agentCli) && !resolvedSandboxConfig.enabled) {
+      codexPathGrants = await resolveCodexPathGrants(resolvedPathsConfig);
+    }
   } catch (err) {
     return {
       ok: false,
@@ -7693,6 +7711,7 @@ echo ""
       absStderrLog: join(agentDir, "claude.stderr.log"),
       extraWritableRoots: codexExtraWritableRoots,
       gitRoots: codexProfileGitRoots,
+      pathGrants: codexPathGrants,
       sandboxEnabled: resolvedSandboxConfig.enabled,
       sandboxScriptPreamble: preparedSandbox ? sandboxStartPreamble : undefined,
       sandboxExecPrefix: preparedSandbox ? sandboxLaunchPrefix.trimEnd() : undefined,

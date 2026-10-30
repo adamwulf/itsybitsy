@@ -1989,29 +1989,36 @@ export async function resumeAgent(
 
       // Build resume.sh via the shared codex builder (mirrors start.sh).
       const { buildCodexResumeContent } = await import("./codex-spawn");
-      const codexResumeContent = buildCodexResumeContent({
-        agentId: agent.id,
-        ibBinaryPath: codexIbBinaryPath,
-        agentDir,
-        codexSessionId,
-        // Re-apply the persisted effort as a `-c model_reasoning_effort` override.
-        // Unlike `-m <model>` (which codex resume drops because the model is
-        // bound to the rollout), `-c` config overrides ARE re-applied on codex
-        // resume via the shared buildCodexLaunchArgs, so effort carries over.
-        // Empty for legacy agents → no override pushed.
-        codexEffort: resumeEffort ? mapEffortForCodex(resumeEffort) : undefined,
-        absMetaJson: join(agentDir, "meta.json"),
-        absExitScript,
-        absAgentLog: join(agentDir, "agent.log"),
-        absStderrLog: join(agentDir, "claude.stderr.log"),
-        extraWritableRoots: codexExtraWritableRoots,
-        gitRoots: codexGitRoots.profileGitRoots,
-        pathGrants: codexPathGrants,
-        fugu: resumeCli === "fugu",
-        sandboxEnabled: frozenConfig.enabled,
-        sandboxScriptPreamble: preparedResumeSandbox ? sandboxResumePreamble : undefined,
-        sandboxExecPrefix: preparedResumeSandbox ? sandboxResumeLaunchPrefix.trimEnd() : undefined,
-      });
+      let codexResumeContent: string;
+      try {
+        codexResumeContent = buildCodexResumeContent({
+          agentId: agent.id,
+          ibBinaryPath: codexIbBinaryPath,
+          agentDir,
+          codexSessionId,
+          // Re-apply the persisted effort as a `-c model_reasoning_effort` override.
+          // Unlike `-m <model>` (which codex resume drops because the model is
+          // bound to the rollout), `-c` config overrides ARE re-applied on codex
+          // resume via the shared buildCodexLaunchArgs, so effort carries over.
+          // Empty for legacy agents → no override pushed.
+          codexEffort: resumeEffort ? mapEffortForCodex(resumeEffort) : undefined,
+          absMetaJson: join(agentDir, "meta.json"),
+          absExitScript,
+          absAgentLog: join(agentDir, "agent.log"),
+          absStderrLog: join(agentDir, "claude.stderr.log"),
+          extraWritableRoots: codexExtraWritableRoots,
+          gitRoots: codexGitRoots.profileGitRoots,
+          pathGrants: codexPathGrants,
+          fugu: resumeCli === "fugu",
+          sandboxEnabled: frozenConfig.enabled,
+          sandboxScriptPreamble: preparedResumeSandbox ? sandboxResumePreamble : undefined,
+          sandboxExecPrefix: preparedResumeSandbox ? sandboxResumeLaunchPrefix.trimEnd() : undefined,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        await logAgent(agentDir, `[resume] ${message}`);
+        return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${message}` };
+      }
       await Bun.write(resumeScript, codexResumeContent);
       await chmod(resumeScript, 0o755);
     } else if (resumeCli === "agy") {
@@ -7695,27 +7702,34 @@ echo ""
     // `CLAUDE_PID` / `claude_pid` so the watchdog and other readers don't break —
     // renaming is its own follow-up.
     const { buildCodexStartContent } = await import("./codex-spawn");
-    startContent = buildCodexStartContent({
-      agentId: id,
-      ibBinaryPath: codexIbBinaryPath!,
-      agentDir,
-      codexModel: modelFlagValue,
-      // Map itsybitsy's 5-level scale down to codex's low/medium/high set.
-      // `effort` is validated + always non-empty (default 'xhigh' → 'high').
-      codexEffort: mapEffortForCodex(effort),
-      fugu: agentCli === "fugu",
-      absPromptFile,
-      absMetaJson: join(agentDir, "meta.json"),
-      absExitScript,
-      absAgentLog: join(agentDir, "agent.log"),
-      absStderrLog: join(agentDir, "claude.stderr.log"),
-      extraWritableRoots: codexExtraWritableRoots,
-      gitRoots: codexProfileGitRoots,
-      pathGrants: codexPathGrants,
-      sandboxEnabled: resolvedSandboxConfig.enabled,
-      sandboxScriptPreamble: preparedSandbox ? sandboxStartPreamble : undefined,
-      sandboxExecPrefix: preparedSandbox ? sandboxLaunchPrefix.trimEnd() : undefined,
-    });
+    try {
+      startContent = buildCodexStartContent({
+        agentId: id,
+        ibBinaryPath: codexIbBinaryPath!,
+        agentDir,
+        codexModel: modelFlagValue,
+        // Map itsybitsy's 5-level scale down to codex's low/medium/high set.
+        // `effort` is validated + always non-empty (default 'xhigh' → 'high').
+        codexEffort: mapEffortForCodex(effort),
+        fugu: agentCli === "fugu",
+        absPromptFile,
+        absMetaJson: join(agentDir, "meta.json"),
+        absExitScript,
+        absAgentLog: join(agentDir, "agent.log"),
+        absStderrLog: join(agentDir, "claude.stderr.log"),
+        extraWritableRoots: codexExtraWritableRoots,
+        gitRoots: codexProfileGitRoots,
+        pathGrants: codexPathGrants,
+        sandboxEnabled: resolvedSandboxConfig.enabled,
+        sandboxScriptPreamble: preparedSandbox ? sandboxStartPreamble : undefined,
+        sandboxExecPrefix: preparedSandbox ? sandboxLaunchPrefix.trimEnd() : undefined,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await logSpawn(agentDir, spawnerAgentDir, id, `spawn FAILED: ${message}`);
+      await cleanupOnFailure();
+      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${message}` };
+    }
   } else if (agentCli === "agy") {
     // Antigravity CLI (`agy`) spawn branch. The builder owns agy's no-prompt
     // approval arguments in both kernel modes; sandbox disablement removes only

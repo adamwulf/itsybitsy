@@ -7093,10 +7093,33 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(spawnCalls.some((cmd) => cmd.join(" ").includes("tmux new-session"))).toBe(false);
   });
 
+  test("sandbox-disabled Codex cleans up when a translated path cannot be rendered safely", async () => {
+    const id = "unsafe-codex-path";
+    await writeSandboxType(id, {
+      enabled: false,
+      model: "codex:gpt-5.4-mini",
+      allowRead: [join(tempDir, "unsafe'path")],
+    });
+    const dirs = await linkedWorktreeGitDirs();
+    setNewAgentSpawnRunner(answerWorktreeGitDirs(id, dirs, cleanWorktreeRunner()));
+    setNewAgentSummaryGenerator(async () => {});
+    setWatchdogSpawnFn(() => ({ pid: 99983 }));
+
+    const result = await callNewAgent("unsafe translated path", { name: id, type: id });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Unsafe path for the codex permission profile");
+    expect(spawnCalls.some((cmd) => cmd.join(" ").includes("tmux new-session"))).toBe(false);
+    expect(await Bun.file(join(agentsDir, id, "meta.json")).exists()).toBe(false);
+    expect(await Bun.file(join(agentsDir, id, "start.sh")).exists()).toBe(false);
+    expect(spawnCalls.some((cmd) => cmd.includes("worktree") && cmd.includes("remove"))).toBe(true);
+  });
+
   test("sandbox-disabled Codex forwards resolved paths at spawn and expands frozen paths again at resume", async () => {
     const id = "unsandboxed-codex-resume";
-    // Remove the bootstrap floor so the fixture's read glob does not overlap
-    // its broad /private/var/folders write grant.
+    // This fixture exercises a representable read-only glob. The bootstrap
+    // floor writes /private/var/folders, which contains this temp directory;
+    // read globs over configured writes are intentionally unsupported. The
+    // ordinary disabled-spawn test above separately keeps the real floor.
     await writeAllLayer([], []);
     const readDir = join(tempDir, "read only");
     const writeDir = join(tempDir, "write-tree");
@@ -7172,6 +7195,17 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(resume).not.toContain("sandbox_workspace_write");
     expect(resume).toContain("hooks.PreToolUse");
     expect(resume).not.toContain("sandbox-exec");
+
+    // A new unsafe glob match at the next resume must return an error before
+    // replacing the working script or launching tmux, preserving the agent.
+    await Bun.write(join(globDir, "unsafe'file.txt"), "unsafe");
+    createdSession = false;
+    const failedResume = await resumeAgent(makeAgent(id, tempDir, "stopped", meta));
+    expect(failedResume.ok).toBe(false);
+    expect(failedResume.stderr).toContain("Unsafe path for the codex permission profile");
+    expect(createdSession).toBe(false);
+    expect(await Bun.file(join(agentDir, "resume.sh")).text()).toBe(resume);
+    expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true);
   });
 
   test("sandbox-enabled Codex resume reallocates proxy, preserves profile, and wraps both launch arms", async () => {

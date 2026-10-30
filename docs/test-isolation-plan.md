@@ -57,5 +57,14 @@ No migrations, backwards compatibility layers, new user-facing sandbox flags, or
 
 - Architecture review approved by agent-d47b0c44; retired after reporting.
 - Isolation review by agent-213eea95 approved the revised plan after the live self-merge metadata mutation was explicitly included; reviewer retired after approval.
-- Implementation in three independent workstreams: CLI isolation, privileged probes, and hook/lifecycle fixtures. Full-suite verification remains blocked until all three are integrated safely.
-- CLI isolation implemented: shared runner (`src/test-cli-runner.ts`), guarded driver (`src/test-cli-driver.ts`), `cliActions` seam in `src/index.ts`, regression tests and a route sweep in `src/cli-isolation.test.ts`. Pending the integrated full-suite gate and implementation review.
+- All three implementation workstreams are integrated: CLI isolation, privileged probes, and hook/lifecycle fixtures. The shared CLI runner and guarded driver preserve real parsing, caller algorithms, broker transport and real outbox writes against temporary fixtures. Both self-merge variants now claim and clear lifecycle state only on temporary agents.
+- First implementation review: isolation approved (agent-a444bc0b); correctness (agent-429ebf89) requested real send-to-outbox coverage below the action seam and explicit capability reporting for the new live hook ancestry probe. Both were fixed. Manager review also required deterministic collector re-adoption coverage and explicit opt-in gates for the remaining sandbox-exec probes; both were fixed.
+- Second implementation review: correctness approved (agent-b42fadbd) and isolation approved (agent-856e0d62), with no remaining findings. All workers were merged and all reviewers retired; no active child agents remain.
+- Integrated native Codex sandbox verification: targeted isolation tests **287 pass, 5 skip, 0 fail**; full `bun test` **7176 pass, 11 skip, 0 fail**, 35874 expectations across 142 files in 125.17 seconds. `bunx tsc --noEmit` exited 0 with no errors. `git diff --check main...HEAD` passed.
+- The root CLI compiled successfully with all required production flags. The hook allowlist denied the direct smoke command `HOME=/tmp/test-status-smoke-home /tmp/test-status-ib list-types`; manager verification of the compiled table remains pending permission. Worker-reported compiled smoke succeeded, but is not substituted for this pending manager gate.
+
+## Remaining verification limits
+
+The 11 default-suite skips are explicit live integration probes requiring OS privileges or real CLI sessions. Their opt-in commands are documented in `docs/implementation-notes.md`; this native sandbox run does not verify host kernel enforcement. The pre-existing live no-worktree ancestry probe does not use the new capability preflight, and the existing opt-in Codex model probe uses a uniquely named session on the default tmux server. Neither is part of the default suite's new isolation coverage.
+
+The test driver confines the reviewed routes through fixture paths and injected authority, with guards for external operations and sentinel regressions. It is not a general filesystem sandbox for arbitrary future test code. Production caller permissions, sandbox routing, metadata shape, hook enforcement, watchdog scheduling, and dashboard behavior remain unchanged.

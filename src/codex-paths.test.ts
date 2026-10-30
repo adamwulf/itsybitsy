@@ -251,9 +251,20 @@ describe("resolveCodexPathGrants", () => {
   });
 
   test("deny syntax that Codex would interpret differently fails closed", async () => {
-    for (const deny of [p("file[ab]*"), p("{one,two}*"), p("file\\*"), p("prefix**")]) {
+    for (const deny of [p("file[ab]*"), p("{one,two}*"), p("file\\*"), p("prefix**"), p("file?.txt")]) {
       await expect(resolveCodexPathGrants(paths([], [root], [deny]))).rejects.toThrow("deny glob syntax differs");
     }
+  });
+
+  test("question-mark Unicode denies reject translation while allow snapshots preserve shared matching", async () => {
+    const target = await file("files/résumé.txt");
+    const pattern = p("files/r?sum?.txt");
+    const config = paths([], [root], [pattern]);
+    const prepared = prepareAccessTable({ ...config, runtimeRoots: [], runtimeDenyRoots: [] });
+    expect(resolvePreparedAccess(prepared, target, "read")).toBe("deny");
+    expect(resolvePreparedAccess(prepared, target, "write")).toBe("deny");
+    await expect(resolveCodexPathGrants(config)).rejects.toThrow("? matches bytes rather than Unicode characters");
+    expect(await resolveCodexPathGrants(paths([pattern]))).toEqual({ [target]: "read" });
   });
 
   test("snapshot walker skips file links, directory links and recursive symlink loops", async () => {

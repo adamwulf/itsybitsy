@@ -153,10 +153,15 @@ function exactKey(path: string): string {
 function denyKey(entry: OrderedPathEntry): string {
   const pattern = entry.canonical;
   if (entry.kind === "plain") return exactKey(pattern);
+  // Native globset ? consumes one byte, whereas the shared JS matcher consumes
+  // one UTF-16 code unit. Passing it through could leave Unicode names allowed.
+  if (pattern.includes("?")) {
+    fail(pattern, "deny glob syntax differs from Codex: ? matches bytes rather than Unicode characters; use literal paths, * wildcards, or whole-component ** patterns");
+  }
   // globset has additional syntax and only supports ** as a whole component.
   // Passing these through could narrow a deny (and thereby broaden access).
   if (/[\[\]{}\\]/.test(pattern) || pattern.split("/").some((part) => part.includes("**") && part !== "**")) {
-    fail(pattern, "deny glob syntax differs from Codex; use literal paths or whole-component * / ? / ** patterns");
+    fail(pattern, "deny glob syntax differs from Codex; use literal paths, * wildcards, or whole-component ** patterns");
   }
   return pattern.startsWith("**/") ? `/${pattern}` : pattern;
 }

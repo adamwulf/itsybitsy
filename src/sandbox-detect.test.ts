@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { join } from "path";
 import { isSandboxedProcess, setSandboxedProcessOverride } from "./sandbox-detect";
-import { ALLOW_DEFAULT_PROFILE, SANDBOX_EXEC, assertSandboxExecApplies, liveSandboxProbes } from "./sandbox-live-probes";
+import { ALLOW_DEFAULT_PROFILE, SANDBOX_EXEC, assertSandboxExecApplies, liveProbes } from "./sandbox-live-probes";
 
 const detectModule = join(import.meta.dir, "sandbox-detect.ts");
 const probe = `const { isSandboxedProcess } = await import(${JSON.stringify(detectModule)}); console.log(isSandboxedProcess());`;
@@ -11,7 +11,7 @@ function runProbe(prefix: string[]): { exitCode: number; out: string } {
   return { exitCode: proc.exitCode, out: proc.stdout.toString().trim() };
 }
 
-const liveTest = liveSandboxProbes("sandbox-exec can apply a profile on this host", assertSandboxExecApplies);
+const liveTest = liveProbes("IB_LIVE_SANDBOX", "LIVE capability: sandbox-exec can apply a profile on this host", assertSandboxExecApplies);
 
 describe("isSandboxedProcess", () => {
   afterEach(() => setSandboxedProcessOverride(null));

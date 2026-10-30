@@ -11,6 +11,7 @@ import { makeAgent } from "./test-utils";
 import type { Agent } from "./agents";
 import { currentAck, readAgentAck, writeAgentState } from "./agents";
 import { parseAgentTypeFile } from "./agent-types";
+import { SANDBOX_EXEC, assertSandboxExecApplies, liveProbes } from "./sandbox-live-probes";
 import {
   anchorRelativePaths,
   canonicalizePathsConfig,
@@ -321,22 +322,9 @@ describe("ack persistence and invalidation", () => {
 describe("LIVE: ib ack inside a manager's kernel sandbox", () => {
   // Opt-in: it compiles the `ib` binary and runs it under sandbox-exec.
   //   IB_LIVE_ACK=1 bun test src/ib-ack.test.ts --test-name-pattern LIVE
-  test("the compiled ib resolves caller and child and writes the ack itself: no broker, no repo root", async () => {
-    if (process.env.IB_LIVE_ACK !== "1") {
-      console.log("LIVE ib ack: SKIPPED (set IB_LIVE_ACK=1 to run it)");
-      return;
-    }
-    const sandboxExec = Bun.which("sandbox-exec");
-    if (process.platform !== "darwin" || !sandboxExec) {
-      console.log("LIVE ib ack: SKIPPED (sandbox-exec is absent; macOS only)");
-      return;
-    }
-    const capability = Bun.spawnSync({ cmd: [sandboxExec, "-p", "(version 1)(allow default)", "/usr/bin/true"], stderr: "pipe" });
-    if (capability.exitCode !== 0) {
-      console.log(`LIVE ib ack: SKIPPED (cannot apply a profile here: ${capability.stderr.toString().trim()})`);
-      return;
-    }
-
+  const liveTest = liveProbes("IB_LIVE_ACK", "LIVE capability: sandbox-exec can apply a profile on this host", assertSandboxExecApplies);
+  liveTest("the compiled ib resolves caller and child and writes the ack itself: no broker, no repo root", async () => {
+    const sandboxExec = SANDBOX_EXEC;
     // The repo lives under the real home, outside every floor root, like a
     // real ~/Developer checkout: the profile grants only the runtime roots.
     const repoBase = canonicalizeSandboxPath(await mkdtemp(join(homedir(), "itsybitsy-ack-live-")));

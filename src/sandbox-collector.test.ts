@@ -1,6 +1,6 @@
 import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, chmod, appendFile } from "node:fs/promises";
-import { closeSync, constants, existsSync, mkdtempSync, openSync, readSync, readdirSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, mkdtempSync, openSync, readSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
@@ -11,7 +11,7 @@ import { newSandboxTag } from "./sandbox";
 import { sandboxLogParent, sandboxProfilePath } from "./sandbox-log-paths";
 import { openSandboxProcessReader, type ProcessObservation } from "./sandbox-processes";
 import { isSandboxedProcess } from "./sandbox-detect";
-import { ALLOW_DEFAULT_PROFILE, SANDBOX_EXEC, assertSandboxExecApplies, liveSandboxProbes } from "./sandbox-live-probes";
+import { ALLOW_DEFAULT_PROFILE, SANDBOX_EXEC, assertSandboxExecApplies, liveProbes } from "./sandbox-live-probes";
 import { withTimeZone } from "./test-utils";
 
 const darwinTest = process.platform === "darwin" ? test : test.skip;
@@ -857,45 +857,51 @@ darwinTest("a successor's re-adopt scan rejects a launch whose owner just exited
   const home = await tempHome();
   const stream = await fakeStream(home);
   const paths = sandboxCollectorPaths(home);
-  const daemons: Promise<number>[] = [];
-  const startCollector = (lockFd: number) => { daemons.push(startDaemon(home, stream, lockFd)); };
-  // M: a launch whose owner (this process) stays alive; its attach is fast.
+  await mkdir(paths.inbox, { recursive: true, mode: 0o700 });
+  // This fd holds the role from before either attach registers until the
+  // successor exits: it passes straight to the successor, as an attach hands the
+  // role to a daemon. No attach can ever win it, so a registered attach has no
+  // way out of its wait but the rejection.
+  const role = tryCollectorLock(paths.daemonLock)!;
+  let starts = 0;
+  const startCollector = (fd: number) => { starts++; closeSync(fd); };
+  // M: a launch whose owner (this process) stays alive.
   const m = await launchDir(home, "m");
   const attachedM = attach({ dir: m.dir, owner: process.pid, agentLog: m.agentLog, home, startCollector, pollMs: 20 });
-  await until(() => Bun.file(join(m.dir, "ready")).exists());
   // L: this process is its registrar too, descending from an owner that can exit
   // while the attach lives on.
   const l = await launchDir(home, "l");
   const lOwner = fixtureProcess(1);
   table.get(process.pid)!.ppid = lOwner.pid;
-  let lStarts = 0;
-  const attachedL = attach({ dir: l.dir, owner: lOwner.pid, agentLog: l.agentLog, home,
-    startCollector: fd => { lStarts++; closeSync(fd); } });
-  await until(() => Bun.file(join(l.dir, "ready")).exists(), 8000);
-  await Bun.sleep(100); // now in the registered loop, asleep for most of its 1 s poll
-  // The poll misses the short gap in the replacement below (M's is 20 ms): L
-  // cannot win the freed lock, so when it runs again the successor holds the
-  // role, and only the rejection can end its wait.
-  // L's owner exits, and the daemon is replaced before it finishes L (1 s drain).
+  const attachedL = attach({ dir: l.dir, owner: lOwner.pid, agentLog: l.agentLog, home, startCollector, pollMs: 20 });
+  let lReturned = false;
+  void attachedL.then(() => { lReturned = true; });
+  // Stand in for the predecessor: it accepts and acknowledges both launches.
+  for (const launch of [m, l]) {
+    await until(() => existsSync(join(paths.inbox, launch.name)));
+    unlinkSync(join(paths.inbox, launch.name));
+    writeFileSync(join(launch.dir, "ready"), launch.name);
+  }
+  await Bun.sleep(200); // many polls of the registered loop: it keeps waiting
+  expect(lReturned).toBe(false);
+  // L's owner exits, and the role passes to the successor before L is finished.
   lOwner.kill();
-  expect(restartSandboxCollector(home)).toBe(true);
-  expect(await daemons[0]).toBe(0);
-  // M's attach starts the successor; its scan adopts M and rejects L.
-  await until(async () => (await text(join(l.dir, "done"))) === "rejected", 8000);
+  const served = startDaemon(home, stream, role);
+  // Its startup scan rejects L and adopts M.
+  await until(async () => (await text(join(l.dir, "done"))) === "rejected");
   expect(existsSync(join(l.dir, "failed"))).toBe(true);
-  await until(async () => (await text(paths.log)).includes(`launch ${l.name} not adopted: Error: launch owner is not running`), 8000);
+  await until(async () => (await text(paths.log)).includes(`launch ${l.name} not adopted: Error: launch owner is not running`));
+  expect(await attachedL).toBe(0); // without the rejection check: never. The owner is gone: L ends quietly
+  expect(await text(l.agentLog)).not.toContain("rejected this launch");
+  await until(async () => (await text(m.agentLog)).includes("shared collector resumed"));
   expect(sandboxCollectorRunning(paths)).toBe(true); // the successor holds the role
-  expect(await attachedL).toBe(0); // without the fix: never. The owner is gone: L ends quietly
-  expect(lStarts).toBe(0);
-  await until(async () => count(await text(m.agentLog), "stream ready") === 2, 8000);
-  expect(await text(m.agentLog)).toContain("shared collector stopped; starting a new one");
-  expect(daemons.length).toBe(2);
   // With L's attach gone, the successor exits once M ends.
   await writeFile(join(m.dir, "stop"), "stop\n");
   expect(await attachedM).toBe(0);
-  expect(await daemons[1]).toBe(0);
+  expect(await served).toBe(0);
   expect(sandboxCollectorRunning(paths)).toBe(false);
-}, 30000);
+  expect(starts).toBe(0); // nobody ever won the role
+}, 20000);
 
 async function attachedPair(home: string, stream: Stream) {
   const daemons: Promise<number>[] = [];
@@ -1024,7 +1030,7 @@ darwinTest("an attach that cannot open the process reader says so in agent.log a
 
 // ---- LIVE: the real kernel, on a host outside any sandbox (sandbox-live-probes.ts) ----
 
-const liveTest = liveSandboxProbes("the real process reader, in an unsandboxed process", () => {
+const liveTest = liveProbes("IB_LIVE_SANDBOX", "LIVE capability: the real process reader, in an unsandboxed process", () => {
   assertSandboxExecApplies();
   const reader = openSandboxProcessReader();
   try {

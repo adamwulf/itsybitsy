@@ -234,23 +234,108 @@ describe("registered hook agent binding when the repo root is not readable", () 
     expect(bound).toMatchObject({ agentDir: agent.agentDir, repoPath: repo, worktreePath: repo });
   });
 
+  // The OS below the real caller resolver: what `ps` reports and whether the
+  // recorded CLI is alive. A native sandbox can deny ps, so the default suite
+  // never observes real processes; IB_LIVE_CALLER=1 runs the search against them.
+  const FIXTURE_CLI_PID = 4_000_001;
+  const FIXTURE_CLI_START = "Wed Sep  9 12:00:00 2026";
+  const FIXTURE_CLI_EPOCH = Date.parse(FIXTURE_CLI_START) / 1000;
+  const processSpies: { mockRestore(): void }[] = [];
+
+  afterEach(() => {
+    for (const spy of processSpies.splice(0)) spy.mockRestore();
+  });
+
+  function observeFixtureProcesses(
+    parentTable = `${process.pid} ${FIXTURE_CLI_PID}\n${FIXTURE_CLI_PID} 1\n`,
+  ): string[][] {
+    const psCalls: string[][] = [];
+    const realSpawnSync = Bun.spawnSync;
+    const realKill = process.kill;
+    processSpies.push(
+      spyOn(Bun, "spawnSync").mockImplementation(((args: string[], ...rest: unknown[]) => {
+        if (args[0] !== "/bin/ps") return (realSpawnSync as (...a: unknown[]) => unknown).call(Bun, args, ...rest);
+        psCalls.push(args);
+        const stdout = args.includes("lstart=") ? FIXTURE_CLI_START : parentTable;
+        return { exitCode: 0, stdout: Buffer.from(stdout) };
+      }) as typeof Bun.spawnSync),
+      spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | string) =>
+        pid === FIXTURE_CLI_PID ? true : realKill.call(process, pid, signal)) as typeof process.kill),
+    );
+    return psCalls;
+  }
+
+  async function writeSharedAgent(repo: string, id: string, overrides: Record<string, unknown> = {}): Promise<string> {
+    const agentDir = join(repo, ".ittybitty", "agents", id);
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id, worktree: false,
+      claude_pid: String(FIXTURE_CLI_PID), claude_pid_epoch: FIXTURE_CLI_EPOCH,
+      sandbox: { enabled: true, rawAllow: [], domains: [] },
+      ...overrides,
+    }));
+    return agentDir;
+  }
+
   // The real caller resolver (process ancestry through ps), not a mock. Inside
   // the sandbox it must search only the repo of the record already found: no
   // other registered repo is readable there, and each realpath of one is a
   // kernel denial.
   test("a sandboxed shared-repo agent binds through the real caller resolver, touching no other repo", async () => {
-    const repo = await realpath(await makeRepo());
-    const other = await realpath(await makeRepo());
+    const psCalls = observeFixtureProcesses();
+    await expectSearchFollowsSandboxPolicy(FIXTURE_CLI_PID, FIXTURE_CLI_EPOCH);
+    // Each bind checks ancestry and identity twice; the observations were used.
+    expect(psCalls.filter((args) => args.includes("pid=,ppid="))).toHaveLength(4);
+    expect(psCalls.filter((args) => args.includes("lstart="))).toHaveLength(4);
+  });
+
+  test.skipIf(process.env.IB_LIVE_CALLER !== "1")("LIVE: the same search through actual OS process ancestry", async () => {
     const lstart = Bun.spawnSync(["/bin/ps", "-o", "lstart=", "-p", String(process.pid)], {
       env: { LC_ALL: "C", LC_TIME: "C" },
     }).stdout.toString().trim();
-    const agentDir = join(repo, ".ittybitty", "agents", "agent-shared");
-    await mkdir(agentDir, { recursive: true });
-    const writeMeta = (sandboxEnabled: boolean) => Bun.write(join(agentDir, "meta.json"), JSON.stringify({
-      id: "agent-shared", worktree: false,
-      claude_pid: String(process.pid), claude_pid_epoch: Date.parse(lstart) / 1000,
+    await expectSearchFollowsSandboxPolicy(process.pid, Date.parse(lstart) / 1000);
+  });
+
+  test("a process that descends from no recorded CLI is not bound to the record", async () => {
+    const repo = await realpath(await makeRepo());
+    await writeSharedAgent(repo, "agent-shared");
+    const registryHome = await registryFor([repo]);
+    const psCalls = observeFixtureProcesses(`${process.pid} 1\n`);
+    await expect(resolveBoundHookAgent("agent-shared", repo, { registryHome }))
+      .rejects.toThrow("cwd is outside its worktree");
+    expect(psCalls.filter((args) => args.includes("lstart="))).toEqual([]);
+  });
+
+  test("a recorded CLI whose start time differs is a stale identity, not the agent", async () => {
+    const repo = await realpath(await makeRepo());
+    await writeSharedAgent(repo, "agent-shared", { claude_pid_epoch: FIXTURE_CLI_EPOCH - 86_400 });
+    const registryHome = await registryFor([repo]);
+    observeFixtureProcesses();
+    await expect(resolveBoundHookAgent("agent-shared", repo, { registryHome }))
+      .rejects.toThrow("process identity");
+  });
+
+  test("a verified process cannot claim another shared-repo agent", async () => {
+    const repo = await realpath(await makeRepo());
+    await writeSharedAgent(repo, "agent-a");
+    await writeSharedAgent(repo, "agent-b", { claude_pid: String(FIXTURE_CLI_PID + 1) });
+    const registryHome = await registryFor([repo]);
+    observeFixtureProcesses();
+    await expect(resolveBoundHookAgent("agent-b", repo, { registryHome }))
+      .rejects.toThrow("process belongs to another agent");
+    await expect(resolveBoundHookAgent("agent-a", repo, { registryHome }))
+      .resolves.toMatchObject({ agentDir: join(repo, ".ittybitty", "agents", "agent-a"), repoPath: repo });
+  });
+
+  /** Enabled metadata searches only the candidate's repo; disabled, every registered repo. */
+  async function expectSearchFollowsSandboxPolicy(claudePid: number, claudeEpoch: number): Promise<void> {
+    const repo = await realpath(await makeRepo());
+    const other = await realpath(await makeRepo());
+    const writeMeta = (sandboxEnabled: boolean) => writeSharedAgent(repo, "agent-shared", {
+      claude_pid: String(claudePid), claude_pid_epoch: claudeEpoch,
       sandbox: { enabled: sandboxEnabled, rawAllow: [], domains: [] },
-    }));
+    });
+    const agentDir = join(repo, ".ittybitty", "agents", "agent-shared");
     const registryHome = await registryFor([other, repo]);
     const touched: string[] = [];
     const realRealpath = fsPromises.realpath;
@@ -283,7 +368,7 @@ describe("registered hook agent binding when the repo root is not readable", () 
       realpathSpy.mockRestore();
       readdirSpy.mockRestore();
     }
-  });
+  }
 
   test("a path or id that belongs to no registered agent still resolves to none", async () => {
     const repo = await realpath(await makeRepo());

@@ -23,9 +23,18 @@ import { setUserConfigPath, resetUserConfigPath } from "./config";
 import { IB_COORDINATOR_SESSION } from "./coordinator";
 import type { Agent } from "./agents";
 import type { RepoEntry } from "./registry";
+import type { RecordedCliAction } from "./test-cli-driver";
+import {
+  createCliFixture,
+  runEntryPointImport,
+  runInertEntryPoint,
+  runIsolatedCli,
+  type CliFixture,
+  type IsolatedCliOptions,
+} from "./test-cli-runner";
 
-// Several describes below spawn a real `bun run src/index.ts` subprocess per
-// assertion, and some spawn two. Each spawn has to transpile the whole
+// Several describes below spawn a CLI subprocess per assertion, and some spawn
+// two. Each spawn has to transpile the whole
 // index.ts import graph first, which is far more load-sensitive than an
 // in-process unit test — a single spawn was measured at 156s during a
 // pathologically loaded run. bun's 5s default leaves no headroom for that.
@@ -309,20 +318,27 @@ describe("matchAgentById", () => {
 // ─── CLI arg parsing — documenting behavior via subprocess ──────────────────
 
 describe("CLI arg parsing", () => {
-  // Helper to run the CLI entrypoint with given args and capture output
-  async function runCli(cliArgs: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    const proc = Bun.spawn(["bun", "run", "src/index.ts", ...cliArgs], {
-      cwd: import.meta.dir.replace(/\/src$/, ""),
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, HOME: "/tmp/ib-test-nonexistent-home" },
-    });
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const exitCode = await proc.exited;
-    return { stdout, stderr, exitCode };
+  // Every run goes through the guarded driver in a temporary cwd and HOME: the
+  // handler a command reaches refuses unless the test names it, so these tests
+  // assert what the parser produced instead of relying on a downstream failure.
+  // (A sandboxed agent once ran them against its own watchdog, and "spawn will
+  // fail: no repos" spawned three real agents.) Sandbox routing has its own tests
+  // in src/cli-isolation.test.ts.
+  let cli: CliFixture;
+  beforeEach(async () => { cli = await createCliFixture(); });
+  afterEach(async () => { await cli.cleanup(); });
+
+  const runCli = (cliArgs: string[], options?: IsolatedCliOptions) => cli.run(cliArgs, options);
+
+  /** A registered agent, so a command's arguments can be followed to its handler. */
+  async function addTarget(id = "agent-x") {
+    return cli.addAgent(await cli.addRepo("target-repo"), id);
+  }
+
+  /** The one handler call a run made. */
+  function onlyAction(result: { actions: RecordedCliAction[] }): RecordedCliAction {
+    expect(result.actions.length).toBe(1);
+    return result.actions[0]!;
   }
 
   test("no command shows help text", async () => {
@@ -414,7 +430,7 @@ describe("CLI arg parsing", () => {
   });
 
   test("send -f <missing-path> exits with file-not-found error", async () => {
-    const missing = "/tmp/ib-send-file-nonexistent-" + Date.now() + ".md";
+    const missing = join(cli.root, "missing.md");
     const { stderr, exitCode } = await runCli(["send", "agent-x", "-f", missing]);
     expect(stderr).toContain("file not found");
     expect(stderr).toContain(missing);
@@ -422,55 +438,83 @@ describe("CLI arg parsing", () => {
   });
 
   test("send -f combined with inline message is a usage error", async () => {
-    const tmpFile = `/tmp/ib-send-file-mutex-${Date.now()}.txt`;
-    await Bun.write(tmpFile, "from file");
-    try {
-      const { stderr, exitCode } = await runCli(["send", "agent-x", "-f", tmpFile, "inline"]);
-      expect(stderr).toContain("cannot combine -f/--file with an inline message");
-      expect(exitCode).toBe(1);
-    } finally {
-      await Bun.file(tmpFile).delete().catch(() => {});
-    }
+    const file = join(cli.root, "body.txt");
+    await Bun.write(file, "from file");
+    const { stderr, exitCode } = await runCli(["send", "agent-x", "-f", file, "inline"]);
+    expect(stderr).toContain("cannot combine -f/--file with an inline message");
+    expect(exitCode).toBe(1);
   });
 
   test("send --file combined with inline message is a usage error", async () => {
-    const tmpFile = `/tmp/ib-send-file-mutex2-${Date.now()}.txt`;
-    await Bun.write(tmpFile, "from file");
-    try {
-      const { stderr, exitCode } = await runCli(["send", "agent-x", "--file", tmpFile, "inline"]);
-      expect(stderr).toContain("cannot combine -f/--file with an inline message");
-      expect(exitCode).toBe(1);
-    } finally {
-      await Bun.file(tmpFile).delete().catch(() => {});
-    }
+    const file = join(cli.root, "body.txt");
+    await Bun.write(file, "from file");
+    const { stderr, exitCode } = await runCli(["send", "agent-x", "--file", file, "inline"]);
+    expect(stderr).toContain("cannot combine -f/--file with an inline message");
+    expect(exitCode).toBe(1);
   });
 
-  test("send -f <path> with nonexistent agent reaches agent lookup (file content resolved)", async () => {
-    // Verifies that -f reads the file and proceeds past arg parsing.
-    // Agent lookup will fail (no repos), which proves the file content
-    // was successfully resolved into the message body.
-    const tmpFile = `/tmp/ib-send-file-ok-${Date.now()}.txt`;
-    await Bun.write(tmpFile, "hello from file");
-    try {
-      const { stderr, exitCode } = await runCli(["send", "agent-x", "-f", tmpFile]);
-      // Should reach agent resolution (not bail on file read or arg parsing)
-      expect(stderr).toContain("Agent not found");
-      expect(exitCode).toBe(1);
-    } finally {
-      await Bun.file(tmpFile).delete().catch(() => {});
-    }
+  test("send -f <path> passes the file content to sendMessage", async () => {
+    const target = await addTarget();
+    const file = join(cli.root, "body.txt");
+    await Bun.write(file, "hello from file\n");
+    const result = await runCli(["send", "agent-x", "-f", file], { actions: { sendMessage: "record" } });
+    expect(result.exitCode).toBe(0);
+    const { name, args } = onlyAction(result);
+    expect(name).toBe("sendMessage");
+    expect((args[0] as Agent).id).toBe(target.id);
+    expect(args[1]).toBe("hello from file");
   });
 
   test("send --file <path> works as an alias for -f", async () => {
-    const tmpFile = `/tmp/ib-send-file-alias-${Date.now()}.txt`;
-    await Bun.write(tmpFile, "hello from file");
-    try {
-      const { stderr, exitCode } = await runCli(["send", "agent-x", "--file", tmpFile]);
-      expect(stderr).toContain("Agent not found");
-      expect(exitCode).toBe(1);
-    } finally {
-      await Bun.file(tmpFile).delete().catch(() => {});
-    }
+    await addTarget();
+    const file = join(cli.root, "body.txt");
+    await Bun.write(file, "hello from file");
+    const result = await runCli(["send", "agent-x", "--file", file], { actions: { sendMessage: "record" } });
+    expect(onlyAction(result).args[1]).toBe("hello from file");
+  });
+
+  test("send --from reaches sendMessage as the sender", async () => {
+    await addTarget();
+    const result = await runCli(["send", "--from", "agent-sender", "agent-x", "hi"], { actions: { sendMessage: "record" } });
+    const { args } = onlyAction(result);
+    expect(args[1]).toBe("hi");
+    expect(args[2]).toEqual({ fromAgent: "agent-sender" });
+  });
+
+  test("send precedence: inline beats stdin, -f beats stdin, stdin is the fallback", async () => {
+    await addTarget();
+    const file = join(cli.root, "body.txt");
+    await Bun.write(file, "from file");
+    const actions = { sendMessage: "record" } as const;
+    const inline = await runCli(["send", "agent-x", "from inline"], { stdin: "from stdin\n", actions });
+    expect(onlyAction(inline).args[1]).toBe("from inline");
+    const fromFile = await runCli(["send", "agent-x", "-f", file], { stdin: "from stdin\n", actions });
+    expect(onlyAction(fromFile).args[1]).toBe("from file");
+    const fromStdin = await runCli(["send", "agent-x"], { stdin: "from stdin\n", actions });
+    expect(onlyAction(fromStdin).args[1]).toBe("from stdin");
+  });
+
+  test("send with no message anywhere shows usage and reaches no handler", async () => {
+    await addTarget();
+    const { stderr, exitCode, actions } = await runCli(["send", "agent-x"], { actions: { sendMessage: "record" } });
+    expect(stderr).toContain("Usage: ib send");
+    expect(exitCode).toBe(1);
+    expect(actions).toEqual([]);
+  });
+
+  test("send to an unknown agent reads -f, then reports the target as not found", async () => {
+    const file = join(cli.root, "body.txt");
+    await Bun.write(file, "hello from file");
+    const { stderr, exitCode } = await runCli(["send", "agent-x", "-f", file]);
+    expect(stderr).toContain("Agent not found");
+    expect(exitCode).toBe(1);
+  });
+
+  test("send @system reaches the system coordinator handler", async () => {
+    const result = await runCli(["send", "@system", "hello system"], { actions: { sendToSystemCoordinator: "record" } });
+    const { name, args } = onlyAction(result);
+    expect(name).toBe("sendToSystemCoordinator");
+    expect(args[0]).toBe("hello system");
   });
 
   test("send usage string lists -f, --file flag", async () => {
@@ -485,17 +529,28 @@ describe("CLI arg parsing", () => {
     // File-error reporting must happen BEFORE agent resolution — the user
     // typing `ib send agent-x -f /tmp/missing.md` should see the file error,
     // not a misleading "Agent not found" message.
-    const missing = `/tmp/ib-send-file-order-${Date.now()}.md`;
+    const missing = join(cli.root, "missing.md");
     const { stderr, exitCode } = await runCli(["send", "agent-x", "-f", missing]);
     expect(stderr).toContain("file not found");
     expect(stderr).not.toContain("Agent not found");
     expect(exitCode).toBe(1);
   });
 
-  test("retire strips --force from args (agent lookup fails first)", async () => {
-    // retire filters out --force before checking for unknown args.
-    // Without a valid agent, requireAgent exits before the unknown-args check.
-    // This documents that retire at least requires an agent-id.
+  test("retire strips --force from args", async () => {
+    const target = await addTarget();
+    const result = await runCli(["retire", "agent-x", "--force"], { actions: { retireAgent: "record" } });
+    expect(result.stderr).not.toContain("unknown arguments");
+    expect((onlyAction(result).args[0] as Agent).id).toBe(target.id);
+  });
+
+  test("retire warns about other arguments and still retires", async () => {
+    await addTarget();
+    const result = await runCli(["retire", "agent-x", "--bogus"], { actions: { retireAgent: "record" } });
+    expect(result.stderr).toContain("Warning: unknown arguments ignored: --bogus");
+    expect(onlyAction(result).name).toBe("retireAgent");
+  });
+
+  test("retire without an agent-id shows usage", async () => {
     const { stderr, exitCode } = await runCli(["retire"]);
     expect(stderr).toContain("Usage:");
     expect(exitCode).toBe(1);
@@ -513,8 +568,13 @@ describe("CLI arg parsing", () => {
     expect(exitCode).toBe(1);
   });
 
+  test("rehire passes the id as typed to rehireAgent", async () => {
+    const result = await runCli(["rehire", "agent-y"], { actions: { rehireAgent: "record" } });
+    expect(onlyAction(result).args).toEqual(["agent-y"]);
+  });
+
   test("rehire reports a missing retired agent", async () => {
-    const { stderr, exitCode } = await runCli(["rehire", "nonexistent-id"]);
+    const { stderr, exitCode } = await runCli(["rehire", "nonexistent-id"], { actions: { rehireAgent: "real" } });
     expect(stderr).toContain("Retired agent not found");
     expect(exitCode).toBe(1);
   });
@@ -526,10 +586,31 @@ describe("CLI arg parsing", () => {
     expect(exitCode).toBe(0);
   });
 
-  test("merge strips --force from args", async () => {
+  test("merge without an agent-id shows usage", async () => {
     const { stderr, exitCode } = await runCli(["merge"]);
     expect(stderr).toContain("Usage:");
     expect(exitCode).toBe(1);
+  });
+
+  test("merge strips --force and passes --keep to mergeAgent, into the caller's directory", async () => {
+    const target = await addTarget();
+    const result = await runCli(["merge", "agent-x", "--force", "--keep"], {
+      cwd: target.repoPath,
+      actions: { mergeAgent: "record" },
+    });
+    expect(result.stderr).not.toContain("unknown arguments");
+    const { args } = onlyAction(result);
+    expect((args[0] as Agent).id).toBe(target.id);
+    expect(args[1]).toBe(result.context.cwd);
+    expect(args[2]).toEqual({ keep: true });
+  });
+
+  test("merge refuses a cwd outside the agent's repo before reaching a handler", async () => {
+    await addTarget();
+    const { stderr, exitCode, actions } = await runCli(["merge", "agent-x"], { actions: { mergeAgent: "record" } });
+    expect(stderr).toContain("Refusing to merge: cwd is not inside agent's repo");
+    expect(exitCode).toBe(1);
+    expect(actions).toEqual([]);
   });
 
   test("resume strips --force from args", async () => {
@@ -538,10 +619,66 @@ describe("CLI arg parsing", () => {
     expect(exitCode).toBe(1);
   });
 
-  test("new-agent without prompt shows usage error", async () => {
-    const { stderr, exitCode } = await runCli(["new-agent"]);
-    // With no repos, it will fail at the repo detection step or prompt step
-    expect(exitCode).not.toBe(0);
+  test("nuke by a human caller reaches nukeAgent", async () => {
+    const target = await addTarget();
+    const result = await runCli(["nuke", "agent-x"], { actions: { nukeAgent: "record" } });
+    expect((onlyAction(result).args[0] as Agent).id).toBe(target.id);
+  });
+
+  test("new-agent without prompt reaches newAgent, which requires one", async () => {
+    await cli.addRepo("only-repo");
+    const { stderr, exitCode } = await runCli(["new-agent"], { actions: { newAgent: "real" } });
+    expect(stderr).toContain("prompt required");
+    expect(exitCode).toBe(1);
+  });
+
+  test("new-agent with no registered repo cannot choose a target", async () => {
+    const { stderr, exitCode, actions } = await runCli(["new-agent", "hello"], { actions: { newAgent: "record" } });
+    expect(stderr).toContain("Cannot determine target repo");
+    expect(exitCode).toBe(1);
+    expect(actions).toEqual([]);
+  });
+
+  test("new-agent parses every option into newAgent's arguments", async () => {
+    const repo = await cli.addRepo("only-repo");
+    const result = await runCli(
+      [
+        "new-agent", "--type", "worker", "--model", "claude:opus", "--effort", "high", "--manager", "agent-mgr",
+        "--name", "the-name", "--no-worktree", "--repo", "only-repo", "--spawned-by", "agent-spawner",
+        "--spawned-by-repo", "/some/repo", "do", "the", "thing",
+      ],
+      { actions: { newAgent: "record" } },
+    );
+    expect(result.exitCode).toBe(0);
+    const { name, args } = onlyAction(result);
+    expect(name).toBe("newAgent");
+    expect(args).toEqual([
+      repo,
+      "do the thing",
+      {
+        type: "worker",
+        model: "claude:opus",
+        effort: "high",
+        manager: "agent-mgr",
+        name: "the-name",
+        noWorktree: true,
+        spawnedBy: { agent_id: "agent-spawner", repo_path: "/some/repo" },
+      },
+    ]);
+  });
+
+  test("new is an alias of new-agent, and --spawned-by defaults its repo to the cwd", async () => {
+    await cli.addRepo("only-repo");
+    const result = await runCli(["new", "--spawned-by", "agent-spawner", "hello"], { actions: { newAgent: "record" } });
+    const { args } = onlyAction(result);
+    expect(args[1]).toBe("hello");
+    expect(args[2]).toEqual({ spawnedBy: { agent_id: "agent-spawner", repo_path: result.context.cwd } });
+  });
+
+  test("new-agent --spawned-by-repo without --spawned-by is rejected", async () => {
+    const { stderr, exitCode } = await runCli(["new-agent", "--spawned-by-repo", "/some/repo", "hello"]);
+    expect(stderr).toContain("--spawned-by-repo requires --spawned-by");
+    expect(exitCode).toBe(1);
   });
 
   test("new-agent --manager without value shows error", async () => {
@@ -617,46 +754,32 @@ describe("CLI arg parsing", () => {
   });
 
   test("new-agent -f <missing-path> shows file-not-found error", async () => {
-    const missing = `/tmp/ib-newagent-f-missing-${Date.now()}.md`;
+    const missing = join(cli.root, "missing.md");
     const { stderr, exitCode } = await runCli(["new-agent", "-f", missing]);
     expect(stderr).toContain("prompt file not found");
     expect(stderr).toContain(missing);
     expect(exitCode).toBe(1);
   });
 
-  test("new-agent --file is an alias for --prompt-file (reads file body)", async () => {
-    const tmpFile = `/tmp/ib-newagent-file-alias-${Date.now()}.md`;
-    await Bun.write(tmpFile, "prompt from file");
-    try {
-      // Arg parsing should succeed; spawn will fail downstream (no repos),
-      // but reaching that failure proves --file was accepted as an alias.
-      const { stderr, exitCode } = await runCli(["new-agent", "--file", tmpFile]);
-      expect(stderr).not.toContain("unknown flag");
-      expect(exitCode).not.toBe(0);
-    } finally {
-      await Bun.file(tmpFile).delete().catch(() => {});
-    }
-  });
-
-  test("new-agent -f is an alias for --prompt-file (reads file body)", async () => {
-    const tmpFile = `/tmp/ib-newagent-f-alias-${Date.now()}.md`;
-    await Bun.write(tmpFile, "prompt from file");
-    try {
-      const { stderr, exitCode } = await runCli(["new-agent", "-f", tmpFile]);
-      expect(stderr).not.toContain("unknown flag");
-      expect(exitCode).not.toBe(0);
-    } finally {
-      await Bun.file(tmpFile).delete().catch(() => {});
-    }
-  });
+  test.each([["--prompt-file"], ["--file"], ["-f"]])(
+    "new-agent %s reads the prompt from the file",
+    async (flag) => {
+      await cli.addRepo("only-repo");
+      const file = join(cli.root, "prompt.md");
+      await Bun.write(file, "prompt from file");
+      const result = await runCli(["new-agent", flag, file], { actions: { newAgent: "record" } });
+      expect(result.exitCode).toBe(0);
+      expect(onlyAction(result).args[1]).toBe("prompt from file");
+    },
+  );
 
   test("new-agent allows '-x' after the first prompt token (treated as prompt body)", async () => {
     // After the first positional prompt token, a leading '-' is part of the
-    // prompt body, not a flag — so this should NOT error on '-x'.
-    const { stderr, exitCode } = await runCli(["new-agent", "hello", "-x", "world"]);
-    expect(stderr).not.toContain("unknown flag '-x'");
-    // Spawn will still fail (no repos), but not due to flag rejection.
-    expect(exitCode).not.toBe(0);
+    // prompt body, not a flag.
+    await cli.addRepo("only-repo");
+    const result = await runCli(["new-agent", "hello", "-x", "world"], { actions: { newAgent: "record" } });
+    expect(result.stderr).not.toContain("unknown flag");
+    expect(onlyAction(result).args[1]).toBe("hello -x world");
   });
 
   test("send rejects unknown long flag before target", async () => {
@@ -674,367 +797,203 @@ describe("CLI arg parsing", () => {
   test("send treats '-n hello' as message body when it comes after the target", async () => {
     // After the target, a leading '-' is part of the message — must not be
     // rejected as an unknown flag. Quoted single-arg form arrives as one token.
-    const { stderr, exitCode } = await runCli(["send", "agent-x", "-n hello"]);
-    expect(stderr).not.toContain("unknown flag");
-    expect(stderr).toContain("Agent not found");
-    expect(exitCode).toBe(1);
+    await addTarget();
+    const result = await runCli(["send", "agent-x", "-n hello"], { actions: { sendMessage: "record" } });
+    expect(result.stderr).not.toContain("unknown flag");
+    expect(onlyAction(result).args[1]).toBe("-n hello");
   });
 
   test("send treats unquoted '-n' as message body when it comes after the target", async () => {
     // Unquoted form: shell splits into multiple argv tokens; the first
     // non-flag token is the target, and subsequent tokens (including '-n')
     // are joined as the message body.
-    const { stderr, exitCode } = await runCli(["send", "agent-x", "-n", "hello"]);
-    expect(stderr).not.toContain("unknown flag");
-    expect(stderr).toContain("Agent not found");
-    expect(exitCode).toBe(1);
+    await addTarget();
+    const result = await runCli(["send", "agent-x", "-n", "hello"], { actions: { sendMessage: "record" } });
+    expect(result.stderr).not.toContain("unknown flag");
+    expect(onlyAction(result).args[1]).toBe("-n hello");
   });
 
   // ── Heredoc / stdin fallback (mirrors `ib send`) ──────────────────────────
-  // `runCli` above leaves stdin unset, so Bun gives the child an empty (/dev/null)
-  // stdin — a non-TTY that reads as "". `runCliStdin` instead pipes a string into
-  // the child's stdin so the heredoc fallback path is exercised. Both set HOME to a
-  // nonexistent dir so listRepos() returns [] unless a test overrides HOME.
-  async function runCliStdin(
-    cliArgs: string[],
-    stdinBody: string,
-    env?: Record<string, string>,
-    cwd?: string,
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    // bun's spawn needs an absolute path for the script, since `cwd` is set
-    // per-test to a clean fixture dir to avoid newAgent's spawner-clean check
-    // tripping on this repo's own uncommitted changes.
-    const repoRoot = import.meta.dir.replace(/\/src$/, "");
-    const proc = Bun.spawn(["bun", "run", `${repoRoot}/src/index.ts`, ...cliArgs], {
-      cwd: cwd ?? repoRoot,
-      stdin: new TextEncoder().encode(stdinBody),
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, HOME: "/tmp/ib-test-nonexistent-home", ...env },
-    });
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const exitCode = await proc.exited;
-    return { stdout, stderr, exitCode };
-  }
+  // Without a `stdin` option the child's stdin is /dev/null, a non-TTY that reads
+  // as "". With one, that text is piped in and the heredoc fallback runs.
 
   test("ask reads question from stdin when no positional question (heredoc)", async () => {
-    // No positional question; --id given so agent-ID detection succeeds. The
-    // question comes from stdin, so we must reach agent lookup (Agent not found),
-    // NOT the 'Usage: ib ask' error — proving stdin was consumed into the question.
-    // The cwd is outside an agent worktree: when this suite runs in a sandboxed
-    // agent, `ib ask --id <another agent>` from the worktree is refused before
-    // the lookup (ask-broker.ts).
-    const { stderr, exitCode } = await runCliStdin(
-      ["ask", "--id", "agent-deadbeef"],
-      "what should I do next?\n",
-      undefined,
-      tmpdir(),
-    );
-    expect(stderr).not.toContain("Usage: ib ask");
-    expect(stderr).toContain("Agent not found: agent-deadbeef");
-    expect(exitCode).toBe(1);
+    const target = await addTarget("agent-deadbeef");
+    const result = await runCli(["ask", "--id", "agent-deadbeef"], {
+      stdin: "what should I do next?\n",
+      actions: { askQuestion: "record" },
+    });
+    expect(result.stderr).not.toContain("Usage: ib ask");
+    expect(onlyAction(result).args).toEqual([target.repoPath, "agent-deadbeef", "what should I do next?"]);
   });
 
   test("ask with empty stdin and no positional still shows usage error (TTY-parity)", async () => {
     // Empty piped stdin resolves to "" — same as a TTY with no arg — so the
     // existing usage error must still fire.
-    const { stderr, exitCode } = await runCliStdin(["ask", "--id", "agent-deadbeef"], "");
+    const { stderr, exitCode } = await runCli(["ask", "--id", "agent-deadbeef"], { stdin: "" });
     expect(stderr).toContain("Usage: ib ask");
     expect(exitCode).toBe(1);
   });
 
   test("ask positional question takes precedence over stdin", async () => {
-    // A positional question is present, so stdin must be IGNORED (precedence:
-    // positional > stdin). Reaches agent lookup, not the usage error. The cwd
-    // is outside an agent worktree, as in the heredoc test above.
-    const { stderr, exitCode } = await runCliStdin(
-      ["ask", "--id", "agent-deadbeef", "inline question"],
-      "stdin question that should be ignored\n",
-      undefined,
-      tmpdir(),
-    );
+    await addTarget("agent-deadbeef");
+    const result = await runCli(["ask", "--id", "agent-deadbeef", "inline question"], {
+      stdin: "stdin question that should be ignored\n",
+      actions: { askQuestion: "record" },
+    });
+    expect(onlyAction(result).args[2]).toBe("inline question");
+  });
+
+  test("ask for an unregistered agent reports it after reading the question", async () => {
+    const { stderr, exitCode } = await runCli(["ask", "--id", "agent-deadbeef"], { stdin: "a question\n" });
     expect(stderr).not.toContain("Usage: ib ask");
     expect(stderr).toContain("Agent not found: agent-deadbeef");
     expect(exitCode).toBe(1);
   });
 
-  test("new-agent reads prompt from stdin (heredoc) — passes the prompt-required check", async () => {
-    // Register a repo so repo-determination succeeds and newAgent() is reached.
-    // newAgent()'s FIRST step is the empty-prompt check; an unknown --type fails
-    // immediately after. So with a heredoc prompt we must get the unknown-type
-    // error (proving the stdin prompt was consumed and is non-empty), NOT
-    // 'prompt required'. Metachars in the body are preserved verbatim — the
-    // stdin reader does no expansion (only .trim()), and a quoted heredoc keeps
-    // the shell from expanding them before ib sees stdin.
-    const { mkdtemp } = await import("fs/promises");
-    const { tmpdir } = await import("os");
-    const { join } = await import("path");
-    const fakeHome = await mkdtemp(join(tmpdir(), "ib-newagent-stdin-home-"));
-    const repoDir = await mkdtemp(join(tmpdir(), "ib-newagent-stdin-repo-"));
-    await Bun.write(
-      join(fakeHome, ".itsybitsy", "repos.json"),
-      JSON.stringify({ version: 1, repos: [{ path: repoDir, name: "stdinrepo" }] }),
-    );
-    try {
-      const { stderr, exitCode } = await runCliStdin(
-        ["new-agent", "--repo", "stdinrepo", "--type", "bogus-nonexistent-type"],
-        "fix $(whoami) and `date` for $USER literally\n",
-        { HOME: fakeHome },
-        repoDir,
-      );
-      expect(stderr).not.toContain("prompt required");
-      expect(stderr).toContain("unknown agent type 'bogus-nonexistent-type'");
-      expect(exitCode).toBe(1);
-    } finally {
-      const { rm } = await import("fs/promises");
-      await rm(fakeHome, { recursive: true, force: true }).catch(() => {});
-      await rm(repoDir, { recursive: true, force: true }).catch(() => {});
-    }
+  test("ask detects the agent id from an agent-shaped cwd", async () => {
+    const target = await addTarget("agent-fromcwd");
+    const result = await runCli(["ask", "a question"], { cwd: target.sessionCwd, actions: { askQuestion: "record" } });
+    expect(onlyAction(result).args[1]).toBe("agent-fromcwd");
+  });
+
+  test("ask outside an agent worktree without --id cannot detect an agent", async () => {
+    const { stderr, exitCode } = await runCli(["ask", "a question"]);
+    expect(stderr).toContain("Could not detect agent ID");
+    expect(exitCode).toBe(1);
+  });
+
+  test("new-agent reads prompt from stdin (heredoc) with metachars preserved", async () => {
+    // The stdin reader does no expansion (only .trim()), and a quoted heredoc
+    // keeps the shell from expanding them before ib sees stdin.
+    const repo = await cli.addRepo("stdinrepo");
+    const result = await runCli(["new-agent", "--repo", "stdinrepo", "--type", "worker"], {
+      stdin: "fix $(whoami) and `date` for $USER literally\n",
+      actions: { newAgent: "record" },
+    });
+    expect(result.stderr).not.toContain("prompt required");
+    expect(onlyAction(result).args).toEqual([repo, "fix $(whoami) and `date` for $USER literally", { type: "worker" }]);
   });
 
   test("new-agent with empty stdin + registered repo still errors 'prompt required'", async () => {
     // Empty piped stdin → empty prompt → newAgent()'s first-line check fires.
     // This proves the TTY-parity error is preserved when nothing is piped.
-    const { mkdtemp } = await import("fs/promises");
-    const { tmpdir } = await import("os");
-    const { join } = await import("path");
-    const fakeHome = await mkdtemp(join(tmpdir(), "ib-newagent-empty-home-"));
-    const repoDir = await mkdtemp(join(tmpdir(), "ib-newagent-empty-repo-"));
-    await Bun.write(
-      join(fakeHome, ".itsybitsy", "repos.json"),
-      JSON.stringify({ version: 1, repos: [{ path: repoDir, name: "emptyrepo" }] }),
-    );
-    try {
-      const { stderr, exitCode } = await runCliStdin(
-        ["new-agent", "--repo", "emptyrepo"],
-        "",
-        { HOME: fakeHome },
-      );
-      expect(stderr).toContain("prompt required");
-      expect(exitCode).toBe(1);
-    } finally {
-      const { rm } = await import("fs/promises");
-      await rm(fakeHome, { recursive: true, force: true }).catch(() => {});
-      await rm(repoDir, { recursive: true, force: true }).catch(() => {});
-    }
+    await cli.addRepo("emptyrepo");
+    const { stderr, exitCode } = await runCli(["new-agent", "--repo", "emptyrepo"], {
+      stdin: "",
+      actions: { newAgent: "real" },
+    });
+    expect(stderr).toContain("prompt required");
+    expect(exitCode).toBe(1);
   });
 
   test("new-agent positional prompt takes precedence over stdin", async () => {
-    // A positional prompt is present, so stdin must be IGNORED. With an unknown
-    // --type we still reach the unknown-type error (past the prompt check),
-    // confirming the positional prompt satisfied it without consuming stdin.
-    const { mkdtemp } = await import("fs/promises");
-    const { tmpdir } = await import("os");
-    const { join } = await import("path");
-    const fakeHome = await mkdtemp(join(tmpdir(), "ib-newagent-prec-home-"));
-    const repoDir = await mkdtemp(join(tmpdir(), "ib-newagent-prec-repo-"));
-    await Bun.write(
-      join(fakeHome, ".itsybitsy", "repos.json"),
-      JSON.stringify({ version: 1, repos: [{ path: repoDir, name: "precrepo" }] }),
-    );
-    try {
-      const { stderr, exitCode } = await runCliStdin(
-        ["new-agent", "--repo", "precrepo", "--type", "bogus-nonexistent-type", "inline prompt"],
-        "stdin prompt that should be ignored\n",
-        { HOME: fakeHome },
-        repoDir,
-      );
-      expect(stderr).not.toContain("prompt required");
-      expect(stderr).toContain("unknown agent type 'bogus-nonexistent-type'");
-      expect(exitCode).toBe(1);
-    } finally {
-      const { rm } = await import("fs/promises");
-      await rm(fakeHome, { recursive: true, force: true }).catch(() => {});
-      await rm(repoDir, { recursive: true, force: true }).catch(() => {});
-    }
+    await cli.addRepo("precrepo");
+    const result = await runCli(["new-agent", "--repo", "precrepo", "inline prompt"], {
+      stdin: "stdin prompt that should be ignored\n",
+      actions: { newAgent: "record" },
+    });
+    expect(onlyAction(result).args[1]).toBe("inline prompt");
   });
 
   test("new-agent -f <empty-file> suppresses stdin fallback (prompt required)", async () => {
     // Precedence guarantee: an explicit -f wins over stdin even when the file is
-    // empty (matching `send`'s "-f > stdin"). So with an empty -f file AND a
-    // piped heredoc body, the stdin must NOT leak in — newAgent() sees an empty
-    // prompt and emits "prompt required". (Note: the empty-prompt check fires
-    // before --type validation, so we get "prompt required" not unknown-type.)
-    const { mkdtemp } = await import("fs/promises");
-    const { tmpdir } = await import("os");
-    const { join } = await import("path");
-    const fakeHome = await mkdtemp(join(tmpdir(), "ib-newagent-femptystdin-home-"));
-    const repoDir = await mkdtemp(join(tmpdir(), "ib-newagent-femptystdin-repo-"));
-    // Genuinely empty (0-byte) file — this is the exact root cause: -f pushes
-    // "" into promptParts, prompt becomes "" (falsy), and WITHOUT the
-    // promptFromFile guard the `if (!prompt)` fallback would read stdin.
-    const emptyFile = join(tmpdir(), `ib-newagent-empty-promptfile-${Date.now()}.md`);
+    // empty (matching `send`'s "-f > stdin"). A genuinely empty (0-byte) file is
+    // the exact root cause: -f pushes "" into promptParts, prompt becomes ""
+    // (falsy), and WITHOUT the promptFromFile guard the `if (!prompt)` fallback
+    // would read stdin.
+    await cli.addRepo("femptyrepo");
+    const emptyFile = join(cli.root, "empty.md");
     await Bun.write(emptyFile, "");
-    await Bun.write(
-      join(fakeHome, ".itsybitsy", "repos.json"),
-      JSON.stringify({ version: 1, repos: [{ path: repoDir, name: "femptyrepo" }] }),
-    );
-    try {
-      const { stderr, exitCode } = await runCliStdin(
-        ["new-agent", "--repo", "femptyrepo", "-f", emptyFile],
-        "stdin body that must NOT leak in\n",
-        { HOME: fakeHome },
-      );
-      expect(stderr).toContain("prompt required");
-      expect(exitCode).toBe(1);
-    } finally {
-      const { rm } = await import("fs/promises");
-      await rm(fakeHome, { recursive: true, force: true }).catch(() => {});
-      await rm(repoDir, { recursive: true, force: true }).catch(() => {});
-      await Bun.file(emptyFile).delete().catch(() => {});
-    }
+    const piped = "stdin body that must NOT leak in\n";
+    const recorded = await runCli(["new-agent", "--repo", "femptyrepo", "-f", emptyFile], {
+      stdin: piped,
+      actions: { newAgent: "record" },
+    });
+    expect(onlyAction(recorded).args[1]).toBe("");
+    const real = await runCli(["new-agent", "--repo", "femptyrepo", "-f", emptyFile], {
+      stdin: piped,
+      actions: { newAgent: "real" },
+    });
+    expect(real.stderr).toContain("prompt required");
+    expect(real.exitCode).toBe(1);
   });
 
   test("new-agent -f <non-empty-file> wins over stdin (file content used)", async () => {
-    // The complementary case: a non-empty -f file beats a piped heredoc body.
-    // With an unknown --type we reach the unknown-type error past the prompt
-    // check, confirming the file content (not stdin) satisfied the prompt.
-    const { mkdtemp } = await import("fs/promises");
-    const { tmpdir } = await import("os");
-    const { join } = await import("path");
-    const fakeHome = await mkdtemp(join(tmpdir(), "ib-newagent-fwins-home-"));
-    const repoDir = await mkdtemp(join(tmpdir(), "ib-newagent-fwins-repo-"));
-    const promptFile = join(tmpdir(), `ib-newagent-fwins-promptfile-${Date.now()}.md`);
+    await cli.addRepo("fwinsrepo");
+    const promptFile = join(cli.root, "prompt.md");
     await Bun.write(promptFile, "real prompt from file\n");
-    await Bun.write(
-      join(fakeHome, ".itsybitsy", "repos.json"),
-      JSON.stringify({ version: 1, repos: [{ path: repoDir, name: "fwinsrepo" }] }),
-    );
-    try {
-      const { stderr, exitCode } = await runCliStdin(
-        ["new-agent", "--repo", "fwinsrepo", "--type", "bogus-nonexistent-type", "-f", promptFile],
-        "stdin body that should be ignored\n",
-        { HOME: fakeHome },
-        repoDir,
-      );
-      expect(stderr).not.toContain("prompt required");
-      expect(stderr).toContain("unknown agent type 'bogus-nonexistent-type'");
-      expect(exitCode).toBe(1);
-    } finally {
-      const { rm } = await import("fs/promises");
-      await rm(fakeHome, { recursive: true, force: true }).catch(() => {});
-      await rm(repoDir, { recursive: true, force: true }).catch(() => {});
-      await Bun.file(promptFile).delete().catch(() => {});
-    }
+    const result = await runCli(["new-agent", "--repo", "fwinsrepo", "-f", promptFile], {
+      stdin: "stdin body that should be ignored\n",
+      actions: { newAgent: "record" },
+    });
+    expect(onlyAction(result).args[1]).toBe("real prompt from file\n");
   });
 
   // --- new-agent --repo resolution (shared resolveRepo) ---
   // Each case registers a repo whose registry id (nickname) differs from its
-  // directory basename, then proves `--repo <key>` reaches newAgent() (it fails
-  // on the bogus --type, which only happens AFTER repo resolution succeeds) — or
-  // fails with the right message. A resolved repo NEVER prints "Repo not found".
+  // directory basename, then proves which path `--repo <key>` hands to newAgent —
+  // or that it fails with the right message and reaches no handler.
 
-  async function withNewAgentRepoHome(
-    reposJson: unknown,
-    run: (env: { HOME: string }, cwd: string) => Promise<void>,
-  ) {
-    const { mkdtemp, rm } = await import("fs/promises");
-    const { tmpdir } = await import("os");
-    const { join } = await import("path");
-    const fakeHome = await mkdtemp(join(tmpdir(), "ib-newagent-reporesolve-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "ib-newagent-reporesolve-cwd-"));
-    await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify(reposJson));
-    try {
-      await run({ HOME: fakeHome }, cwd);
-    } finally {
-      await rm(fakeHome, { recursive: true, force: true }).catch(() => {});
-      await rm(cwd, { recursive: true, force: true }).catch(() => {});
-    }
+  /** A registry mirroring the reported bug: nickname "passwhats", basename "Pandora". */
+  async function writePasswhatsRegistry(): Promise<string> {
+    const path = join(cli.root, "ib-resolve-pandora");
+    await cli.writeRegistry({ version: 1, repos: [{ path, name: "Pandora", nickname: "passwhats" }] });
+    return path;
   }
 
-  // A registry mirroring the reported bug: nickname "passwhats", basename "Pandora".
-  const passwhatsRegistry = {
-    version: 1,
-    repos: [{ path: "/tmp/ib-resolve-pandora", name: "Pandora", nickname: "passwhats" }],
-  };
-
-  test("new-agent --repo resolves by registry id (nickname)", async () => {
-    await withNewAgentRepoHome(passwhatsRegistry, async (env, cwd) => {
-      const { stderr, exitCode } = await runCliStdin(
-        ["new-agent", "--repo", "passwhats", "--type", "bogus-nonexistent-type", "hi"],
-        "",
-        env,
-        cwd,
-      );
-      expect(stderr).not.toContain("Repo not found");
-      expect(stderr).toContain("unknown agent type 'bogus-nonexistent-type'");
-      expect(exitCode).toBe(1);
-    });
-  });
-
-  test("new-agent --repo resolves by directory basename even when a nickname is set", async () => {
-    await withNewAgentRepoHome(passwhatsRegistry, async (env, cwd) => {
-      const { stderr, exitCode } = await runCliStdin(
-        ["new-agent", "--repo", "Pandora", "--type", "bogus-nonexistent-type", "hi"],
-        "",
-        env,
-        cwd,
-      );
-      expect(stderr).not.toContain("Repo not found");
-      expect(stderr).toContain("unknown agent type 'bogus-nonexistent-type'");
-      expect(exitCode).toBe(1);
-    });
-  });
-
-  test("new-agent --repo resolves basename case-insensitively", async () => {
-    await withNewAgentRepoHome(passwhatsRegistry, async (env, cwd) => {
-      const { stderr, exitCode } = await runCliStdin(
-        ["new-agent", "--repo", "pandora", "--type", "bogus-nonexistent-type", "hi"],
-        "",
-        env,
-        cwd,
-      );
-      expect(stderr).not.toContain("Repo not found");
-      expect(stderr).toContain("unknown agent type 'bogus-nonexistent-type'");
-      expect(exitCode).toBe(1);
-    });
+  test.each([
+    ["registry id (nickname)", "passwhats"],
+    ["directory basename even when a nickname is set", "Pandora"],
+    ["basename case-insensitively", "pandora"],
+  ])("new-agent --repo resolves by %s", async (_label, key) => {
+    const repo = await writePasswhatsRegistry();
+    const result = await runCli(["new-agent", "--repo", key, "hi"], { actions: { newAgent: "record" } });
+    expect(result.stderr).not.toContain("Repo not found");
+    expect(onlyAction(result).args[0]).toBe(repo);
   });
 
   test("new-agent --repo still reports 'Repo not found' for a genuinely unknown key", async () => {
-    await withNewAgentRepoHome(passwhatsRegistry, async (env, cwd) => {
-      const { stderr, exitCode } = await runCliStdin(
-        ["new-agent", "--repo", "does-not-exist", "hi"],
-        "",
-        env,
-        cwd,
-      );
-      expect(stderr).toContain("Repo not found: does-not-exist");
-      expect(exitCode).toBe(1);
+    await writePasswhatsRegistry();
+    const { stderr, exitCode, actions } = await runCli(["new-agent", "--repo", "does-not-exist", "hi"], {
+      actions: { newAgent: "record" },
     });
+    expect(stderr).toContain("Repo not found: does-not-exist");
+    expect(exitCode).toBe(1);
+    expect(actions).toEqual([]);
   });
 
   test("new-agent --repo fails with a candidate list on an ambiguous key", async () => {
-    const ambiguousRegistry = {
+    const pathA = join(cli.root, "ib-resolve-a-foo");
+    const pathB = join(cli.root, "ib-resolve-b-bar");
+    await cli.writeRegistry({
       version: 1,
       repos: [
-        { path: "/tmp/ib-resolve-a-foo", name: "foo" },
-        { path: "/tmp/ib-resolve-b-bar", name: "bar", nickname: "foo" },
+        { path: pathA, name: "foo" },
+        { path: pathB, name: "bar", nickname: "foo" },
       ],
-    };
-    await withNewAgentRepoHome(ambiguousRegistry, async (env, cwd) => {
-      const { stderr, exitCode } = await runCliStdin(
-        ["new-agent", "--repo", "foo", "hi"],
-        "",
-        env,
-        cwd,
-      );
-      expect(stderr).toContain("Ambiguous repo");
-      expect(stderr).toContain("/tmp/ib-resolve-a-foo");
-      expect(stderr).toContain("/tmp/ib-resolve-b-bar");
-      expect(exitCode).toBe(1);
     });
+    const { stderr, exitCode, actions } = await runCli(["new-agent", "--repo", "foo", "hi"], {
+      actions: { newAgent: "record" },
+    });
+    expect(stderr).toContain("Ambiguous repo");
+    expect(stderr).toContain(pathA);
+    expect(stderr).toContain(pathB);
+    expect(exitCode).toBe(1);
+    expect(actions).toEqual([]);
+  });
+
+  test("new-agent picks the repo containing the cwd when several are registered", async () => {
+    const repoA = await cli.addRepo("repo-a");
+    await cli.addRepo("repo-b");
+    const result = await runCli(["new-agent", "hi"], { cwd: repoA, actions: { newAgent: "record" } });
+    expect(onlyAction(result).args[0]).toBe(repoA);
   });
 
   test("new-agent still rejects flag typos before reading stdin (guard intact)", async () => {
     // The flag-typo guard must fire during arg parsing, before any stdin read,
     // so a piped body does not mask a typo like '-F'.
-    const { stderr, exitCode } = await runCliStdin(
-      ["new-agent", "-F", "/tmp/foo.md"],
-      "some piped body\n",
-    );
+    const { stderr, exitCode } = await runCli(["new-agent", "-F", "/tmp/foo.md"], { stdin: "some piped body\n" });
     expect(stderr).toContain("unknown flag '-F'");
     expect(exitCode).toBe(1);
   });
@@ -1064,9 +1023,7 @@ describe("CLI arg parsing", () => {
     expect(exitCode).toBe(1);
   });
 
-  test("look with --all flag sets high line count", async () => {
-    // We can verify look accepts these flags by checking it doesn't crash on arg parsing
-    // (it will fail on agent lookup, but that's after flag parsing)
+  test("look without an agent-id shows usage", async () => {
     const { stderr } = await runCli(["look"]);
     expect(stderr).toContain("Usage:");
   });
@@ -1078,23 +1035,10 @@ describe("CLI arg parsing", () => {
   });
 
   test("bare ack requires a manager session", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "ib-ack-human-"));
-    try {
-      // Keep this mutation command away from live agents, including any
-      // registered worktree:false ancestor of the test runner.
-      const script = join(cwd, "cli.ts");
-      await Bun.write(script,
-        `import { setNewAgentNoWorktreeCallerResolver } from ${JSON.stringify(join(import.meta.dir, "ib-commands.ts"))};\n` +
-        `import { main } from ${JSON.stringify(join(import.meta.dir, "index.ts"))};\n` +
-        "setNewAgentNoWorktreeCallerResolver(async () => null);\nawait main();\n");
-      const proc = Bun.spawn([process.execPath, script, "ack"], { cwd, stdout: "pipe", stderr: "pipe" });
-      const stderr = await new Response(proc.stderr).text();
-      expect(await proc.exited).toBe(1);
-      expect(stderr).toContain("manager's own agent session");
-      expect(stderr).toContain("ib acknowledge <question-id>");
-    } finally {
-      await rm(cwd, { recursive: true, force: true });
-    }
+    const { stderr, exitCode } = await runCli(["ack"]);
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("manager's own agent session");
+    expect(stderr).toContain("ib acknowledge <question-id>");
   });
 
   test("ack --help prints the ack help, not the question help", async () => {
@@ -1113,15 +1057,12 @@ describe("CLI arg parsing", () => {
   async function makeDuplicatePidFixture(worktree: boolean): Promise<{
     root: string;
     home: string;
-    repoA: string;
-    repoB: string;
     agentDirA: string;
     agentDirB: string;
-    cwdA: string;
     cwdB: string;
   }> {
-    const root = await mkdtemp(join(tmpdir(), "ib-pid-duplicate-"));
-    const home = join(root, "home");
+    const root = cli.root;
+    const home = cli.home;
     const repoA = join(root, "repo-a");
     const repoB = join(root, "repo-b");
     const agentId = "agent-duplicate-pid";
@@ -1129,18 +1070,12 @@ describe("CLI arg parsing", () => {
     const agentDirB = join(repoB, ".ittybitty", "agents", agentId);
     const cwdA = worktree ? join(agentDirA, "repo") : repoA;
     const cwdB = worktree ? join(agentDirB, "repo") : repoB;
-    await mkdir(join(home, ".itsybitsy"), { recursive: true });
-    await mkdir(agentDirA, { recursive: true });
-    await mkdir(agentDirB, { recursive: true });
     await mkdir(cwdA, { recursive: true });
     await mkdir(cwdB, { recursive: true });
-    await Bun.write(
-      join(home, ".itsybitsy", "repos.json"),
-      JSON.stringify({ repos: [
-        { path: repoA, name: "repo-a" },
-        { path: repoB, name: "repo-b" },
-      ] }),
-    );
+    await cli.writeRegistry({ repos: [
+      { path: repoA, name: "repo-a" },
+      { path: repoB, name: "repo-b" },
+    ] });
     await Bun.write(join(agentDirA, "meta.json"), JSON.stringify({
       id: agentId,
       worktree,
@@ -1151,7 +1086,7 @@ describe("CLI arg parsing", () => {
       worktree,
       marker: "B",
     }));
-    return { root, home, repoA, repoB, agentDirA, agentDirB, cwdA, cwdB };
+    return { root, home, agentDirA, agentDirB, cwdB };
   }
 
   test("write-pid with no args shows usage", async () => {
@@ -1192,150 +1127,93 @@ describe("CLI arg parsing", () => {
 
   test("write-pid binds a duplicate no-worktree ID to the registered launcher cwd", async () => {
     const fixture = await makeDuplicatePidFixture(false);
-    try {
-      const { stderr, exitCode } = await runCliStdin(
-        ["write-pid", "agent-duplicate-pid", "43210"],
-        "",
-        { HOME: fixture.home },
-        fixture.cwdB,
-      );
-      expect(exitCode).toBe(0);
-      expect(stderr).toBe("");
-      const metaA = await Bun.file(join(fixture.agentDirA, "meta.json")).json();
-      const metaB = await Bun.file(join(fixture.agentDirB, "meta.json")).json();
-      expect(metaA.claude_pid).toBeUndefined();
-      expect(metaB.claude_pid).toBe("43210");
-      expect(metaB.claude_pid_epoch).toBeNumber();
-    } finally {
-      await rm(fixture.root, { recursive: true, force: true });
-    }
+    const { stderr, exitCode } = await runCli(
+      ["write-pid", "agent-duplicate-pid", "43210"],
+      { stdin: "", cwd: fixture.cwdB },
+    );
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    const metaA = await Bun.file(join(fixture.agentDirA, "meta.json")).json();
+    const metaB = await Bun.file(join(fixture.agentDirB, "meta.json")).json();
+    expect(metaA.claude_pid).toBeUndefined();
+    expect(metaB.claude_pid).toBe("43210");
+    expect(metaB.claude_pid_epoch).toBeNumber();
   });
 
   test("write-proxy-pid binds a duplicate worktree ID to the registered launcher cwd", async () => {
     const fixture = await makeDuplicatePidFixture(true);
-    try {
-      const { stderr, exitCode } = await runCliStdin(
-        ["write-proxy-pid", "agent-duplicate-pid", "43211", "43212"],
-        "",
-        { HOME: fixture.home },
-        fixture.cwdB,
-      );
-      expect(exitCode).toBe(0);
-      expect(stderr).toBe("");
-      const metaA = await Bun.file(join(fixture.agentDirA, "meta.json")).json();
-      const metaB = await Bun.file(join(fixture.agentDirB, "meta.json")).json();
-      expect(metaA.sandbox_proxy_pid).toBeUndefined();
-      expect(metaB.sandbox_proxy_pid).toBe(43211);
-      expect(metaB.sandbox_proxy_port).toBe(43212);
-    } finally {
-      await rm(fixture.root, { recursive: true, force: true });
-    }
+    const { stderr, exitCode } = await runCli(
+      ["write-proxy-pid", "agent-duplicate-pid", "43211", "43212"],
+      { stdin: "", cwd: fixture.cwdB },
+    );
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    const metaA = await Bun.file(join(fixture.agentDirA, "meta.json")).json();
+    const metaB = await Bun.file(join(fixture.agentDirB, "meta.json")).json();
+    expect(metaA.sandbox_proxy_pid).toBeUndefined();
+    expect(metaB.sandbox_proxy_pid).toBe(43211);
+    expect(metaB.sandbox_proxy_port).toBe(43212);
   });
 
   test("PID writers reject duplicate IDs when cwd is not either registered launch path", async () => {
     const fixture = await makeDuplicatePidFixture(false);
-    try {
-      const { stderr, exitCode } = await runCliStdin(
-        ["write-pid", "agent-duplicate-pid", "43213"],
-        "",
-        { HOME: fixture.home },
-        fixture.root,
-      );
-      expect(exitCode).toBe(1);
-      expect(stderr).toContain("is not registered for launcher cwd");
-      const metaA = await Bun.file(join(fixture.agentDirA, "meta.json")).json();
-      const metaB = await Bun.file(join(fixture.agentDirB, "meta.json")).json();
-      expect(metaA.claude_pid).toBeUndefined();
-      expect(metaB.claude_pid).toBeUndefined();
-    } finally {
-      await rm(fixture.root, { recursive: true, force: true });
-    }
+    const { stderr, exitCode } = await runCli(
+      ["write-pid", "agent-duplicate-pid", "43213"],
+      { stdin: "", cwd: fixture.root },
+    );
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("is not registered for launcher cwd");
+    const metaA = await Bun.file(join(fixture.agentDirA, "meta.json")).json();
+    const metaB = await Bun.file(join(fixture.agentDirB, "meta.json")).json();
+    expect(metaA.claude_pid).toBeUndefined();
+    expect(metaB.claude_pid).toBeUndefined();
   });
 });
 
 // ─── list-types CLI command ─────────────────────────────────────────────────
 
 describe("list-types CLI command", () => {
-  async function runCliWithHome(cliArgs: string[], home: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    const proc = Bun.spawn(["bun", "run", "src/index.ts", ...cliArgs], {
-      cwd: import.meta.dir.replace(/\/src$/, ""),
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, HOME: home },
-    });
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const exitCode = await proc.exited;
-    return { stdout, stderr, exitCode };
-  }
-
   test("list-types prints all default types and exits 0", async () => {
-    const { mkdtemp, rm } = await import("fs/promises");
-    const { tmpdir } = await import("os");
-    const { join: joinPath } = await import("path");
-    const home = await mkdtemp(joinPath(tmpdir(), "ib-list-types-test-"));
-    try {
-      const { stdout, exitCode } = await runCliWithHome(["list-types"], home);
-      expect(exitCode).toBe(0);
-      expect(stdout).toContain("NAME");
-      expect(stdout).toContain("SPAWNABLE");
-      expect(stdout).toContain("SPAWNS CHILDREN");
-      expect(stdout).toContain("DESCRIPTION");
-      expect(stdout).toContain("manager");
-      expect(stdout).toContain("worker");
-      expect(stdout).toContain("coordinator");
-      expect(stdout).toContain("_all");
-      expect(stdout).toContain("_non_coordinator");
-      // Layer-only types should be marked non-spawnable with "-" for spawns-children
-      const lines = stdout.split("\n");
-      const allLine = lines.find((l) => l.startsWith("_all "));
-      expect(allLine).toBeDefined();
-      expect(allLine).toContain("no");
-      expect(allLine).toContain("-");
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    const { stdout, exitCode } = await runIsolatedCli(["list-types"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("NAME");
+    expect(stdout).toContain("SPAWNABLE");
+    expect(stdout).toContain("SPAWNS CHILDREN");
+    expect(stdout).toContain("DESCRIPTION");
+    expect(stdout).toContain("manager");
+    expect(stdout).toContain("worker");
+    expect(stdout).toContain("coordinator");
+    expect(stdout).toContain("_all");
+    expect(stdout).toContain("_non_coordinator");
+    // Layer-only types should be marked non-spawnable with "-" for spawns-children
+    const lines = stdout.split("\n");
+    const allLine = lines.find((l) => l.startsWith("_all "));
+    expect(allLine).toBeDefined();
+    expect(allLine).toContain("no");
+    expect(allLine).toContain("-");
   });
 
   test("list-agent-types alias works the same as list-types", async () => {
-    const { mkdtemp, rm } = await import("fs/promises");
-    const { tmpdir } = await import("os");
-    const { join: joinPath } = await import("path");
-    const home = await mkdtemp(joinPath(tmpdir(), "ib-list-types-alias-test-"));
-    try {
-      const { stdout, exitCode } = await runCliWithHome(["list-agent-types"], home);
-      expect(exitCode).toBe(0);
-      expect(stdout).toContain("manager");
-      expect(stdout).toContain("worker");
-      expect(stdout).toContain("coordinator");
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    const { stdout, exitCode } = await runIsolatedCli(["list-agent-types"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("manager");
+    expect(stdout).toContain("worker");
+    expect(stdout).toContain("coordinator");
   });
 
   test("list-types output is sorted alphabetically", async () => {
-    const { mkdtemp, rm } = await import("fs/promises");
-    const { tmpdir } = await import("os");
-    const { join: joinPath } = await import("path");
-    const home = await mkdtemp(joinPath(tmpdir(), "ib-list-types-sort-test-"));
-    try {
-      const { stdout, exitCode } = await runCliWithHome(["list-types"], home);
-      expect(exitCode).toBe(0);
-      const lines = stdout.split("\n").filter((l) => l.length > 0);
-      // Skip header — collect type names from data rows
-      const dataLines = lines.slice(1);
-      const names = dataLines.map((l) => l.split(/\s+/)[0]!).filter((n) => n.length > 0);
-      const sorted = [...names].sort((a, b) => a.localeCompare(b));
-      expect(names).toEqual(sorted);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    const { stdout, exitCode } = await runIsolatedCli(["list-types"]);
+    expect(exitCode).toBe(0);
+    const lines = stdout.split("\n").filter((l) => l.length > 0);
+    // Skip header — collect type names from data rows
+    const dataLines = lines.slice(1);
+    const names = dataLines.map((l) => l.split(/\s+/)[0]!).filter((n) => n.length > 0);
+    const sorted = [...names].sort((a, b) => a.localeCompare(b));
+    expect(names).toEqual(sorted);
   });
 
   test("help text mentions list-types", async () => {
-    const { stdout, exitCode } = await runCliWithHome([], "/tmp/ib-test-nonexistent-home");
+    const { stdout, exitCode } = await runIsolatedCli([]);
     expect(exitCode).toBe(0);
     expect(stdout).toContain("list-types");
   });
@@ -1344,101 +1222,54 @@ describe("list-types CLI command", () => {
 // ─── show-type CLI command ─────────────────────────────────────────────────
 
 describe("show-type CLI command", () => {
-  async function runCliWithHome(cliArgs: string[], home: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    const proc = Bun.spawn(["bun", "run", "src/index.ts", ...cliArgs], {
-      cwd: import.meta.dir.replace(/\/src$/, ""),
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, HOME: home },
-    });
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const exitCode = await proc.exited;
-    return { stdout, stderr, exitCode };
-  }
-
   test("show-type prints the manager definition and exits 0", async () => {
-    const { mkdtemp, rm } = await import("fs/promises");
-    const { tmpdir } = await import("os");
-    const { join: joinPath } = await import("path");
-    const home = await mkdtemp(joinPath(tmpdir(), "ib-show-type-test-"));
-    try {
-      const { stdout, exitCode } = await runCliWithHome(["show-type", "manager"], home);
-      expect(exitCode).toBe(0);
-      expect(stdout).toContain("NAME: manager");
-      expect(stdout).toContain("DESCRIPTION:");
-      expect(stdout).toContain("SPAWNABLE: yes");
-      expect(stdout).toContain("SPAWNS CHILDREN: yes");
-      expect(stdout).toContain("INSTRUCTION STYLE: manager");
-      expect(stdout).toContain("PERMISSIONS ALLOW");
-      expect(stdout).toContain("PERMISSIONS DENY");
-      expect(stdout).toContain("PROMPT BODY");
-      expect(stdout).toContain("substituted at spawn time");
-      // Prompt body should contain a templated placeholder from the manager type
-      expect(stdout).toContain("{{agentId}}");
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    const { stdout, exitCode } = await runIsolatedCli(["show-type", "manager"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("NAME: manager");
+    expect(stdout).toContain("DESCRIPTION:");
+    expect(stdout).toContain("SPAWNABLE: yes");
+    expect(stdout).toContain("SPAWNS CHILDREN: yes");
+    expect(stdout).toContain("INSTRUCTION STYLE: manager");
+    expect(stdout).toContain("PERMISSIONS ALLOW");
+    expect(stdout).toContain("PERMISSIONS DENY");
+    expect(stdout).toContain("PROMPT BODY");
+    expect(stdout).toContain("substituted at spawn time");
+    // Prompt body should contain a templated placeholder from the manager type
+    expect(stdout).toContain("{{agentId}}");
   });
 
   test("show-type --json emits valid JSON with expected fields", async () => {
-    const { mkdtemp, rm } = await import("fs/promises");
-    const { tmpdir } = await import("os");
-    const { join: joinPath } = await import("path");
-    const home = await mkdtemp(joinPath(tmpdir(), "ib-show-type-json-test-"));
-    try {
-      const { stdout, exitCode } = await runCliWithHome(["show-type", "worker", "--json"], home);
-      expect(exitCode).toBe(0);
-      const parsed = JSON.parse(stdout);
-      expect(parsed.name).toBe("worker");
-      expect(typeof parsed.description).toBe("string");
-      expect(parsed.instructionStyle).toBe("worker");
-      expect(typeof parsed.canSpawnChildren).toBe("boolean");
-      expect(typeof parsed.markdownBody).toBe("string");
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    const { stdout, exitCode } = await runIsolatedCli(["show-type", "worker", "--json"]);
+    expect(exitCode).toBe(0);
+    const parsed = JSON.parse(stdout);
+    expect(parsed.name).toBe("worker");
+    expect(typeof parsed.description).toBe("string");
+    expect(parsed.instructionStyle).toBe("worker");
+    expect(typeof parsed.canSpawnChildren).toBe("boolean");
+    expect(typeof parsed.markdownBody).toBe("string");
   });
 
   test("show-agent-type alias works the same as show-type", async () => {
-    const { mkdtemp, rm } = await import("fs/promises");
-    const { tmpdir } = await import("os");
-    const { join: joinPath } = await import("path");
-    const home = await mkdtemp(joinPath(tmpdir(), "ib-show-type-alias-test-"));
-    try {
-      const { stdout, exitCode } = await runCliWithHome(["show-agent-type", "worker"], home);
-      expect(exitCode).toBe(0);
-      expect(stdout).toContain("NAME: worker");
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    const { stdout, exitCode } = await runIsolatedCli(["show-agent-type", "worker"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("NAME: worker");
   });
 
   test("show-type with unknown name errors and exits 1", async () => {
-    const { mkdtemp, rm } = await import("fs/promises");
-    const { tmpdir } = await import("os");
-    const { join: joinPath } = await import("path");
-    const home = await mkdtemp(joinPath(tmpdir(), "ib-show-type-missing-test-"));
-    try {
-      const { stderr, exitCode } = await runCliWithHome(["show-type", "nonexistent-type-xyz"], home);
-      expect(exitCode).toBe(1);
-      expect(stderr).toContain("nonexistent-type-xyz");
-      expect(stderr).toContain("ib list-types");
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    const { stderr, exitCode } = await runIsolatedCli(["show-type", "nonexistent-type-xyz"]);
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("nonexistent-type-xyz");
+    expect(stderr).toContain("ib list-types");
   });
 
   test("show-type with no name prints usage and exits 1", async () => {
-    const { stderr, exitCode } = await runCliWithHome(["show-type"], "/tmp/ib-test-nonexistent-home");
+    const { stderr, exitCode } = await runIsolatedCli(["show-type"]);
     expect(exitCode).toBe(1);
     expect(stderr).toContain("Usage:");
   });
 
   test("help text mentions show-type", async () => {
-    const { stdout, exitCode } = await runCliWithHome([], "/tmp/ib-test-nonexistent-home");
+    const { stdout, exitCode } = await runIsolatedCli([]);
     expect(exitCode).toBe(0);
     expect(stdout).toContain("show-type");
   });
@@ -1447,107 +1278,50 @@ describe("show-type CLI command", () => {
 // ─── nickname CLI command ───────────────────────────────────────────────────
 
 describe("nickname CLI command", () => {
-  async function runCliWithHome(cliArgs: string[], home: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    const proc = Bun.spawn(["bun", "run", "src/index.ts", ...cliArgs], {
-      cwd: import.meta.dir.replace(/\/src$/, ""),
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, HOME: home },
-    });
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const exitCode = await proc.exited;
-    return { stdout, stderr, exitCode };
-  }
+  let cli: CliFixture;
+  beforeEach(async () => { cli = await createCliFixture(); });
+  afterEach(async () => { await cli.cleanup(); });
 
-  // Build a temp HOME with a registry pointing at a temp repo that holds one
-  // agent dir. Returns { home, repoPath, cleanup }.
-  async function setupRepoWithAgent(id: string, extraMeta: Record<string, unknown> = {}) {
-    const { mkdtemp, rm, mkdir } = await import("fs/promises");
-    const { tmpdir } = await import("os");
-    const { join: joinPath } = await import("path");
-    const home = await mkdtemp(joinPath(tmpdir(), "ib-nick-home-"));
-    const repoPath = await mkdtemp(joinPath(tmpdir(), "ib-nick-repo-"));
-    await mkdir(joinPath(home, ".itsybitsy"), { recursive: true });
-    await Bun.write(
-      joinPath(home, ".itsybitsy", "repos.json"),
-      JSON.stringify({ repos: [{ path: repoPath, name: "nick-repo" }] }),
-    );
-    const agentDir = joinPath(repoPath, ".ittybitty", "agents", id);
-    await mkdir(agentDir, { recursive: true });
-    await Bun.write(
-      joinPath(agentDir, "meta.json"),
-      JSON.stringify({ id, tmux_session: `t-${id}`, ...extraMeta }),
-    );
-    const cleanup = async () => {
-      await rm(home, { recursive: true, force: true });
-      await rm(repoPath, { recursive: true, force: true });
-    };
-    return { home, repoPath, agentDir, cleanup };
+  async function addAgent(id: string, extraMeta: Record<string, unknown> = {}) {
+    return cli.addAgent(await cli.addRepo("nick-repo"), id, extraMeta);
   }
 
   test("set nickname writes it and exits 0", async () => {
-    const { home, agentDir, cleanup } = await setupRepoWithAgent("agent-nick1");
-    try {
-      const { exitCode } = await runCliWithHome(["nickname", "agent-nick1", "pikachu"], home);
-      expect(exitCode).toBe(0);
-      const { join: joinPath } = await import("path");
-      const meta = await Bun.file(joinPath(agentDir, "meta.json")).json();
-      expect(meta.nickname).toBe("pikachu");
-    } finally {
-      await cleanup();
-    }
+    const { agentDir } = await addAgent("agent-nick1");
+    const { exitCode } = await cli.run(["nickname", "agent-nick1", "pikachu"]);
+    expect(exitCode).toBe(0);
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect(meta.nickname).toBe("pikachu");
   });
 
   test("no-arg shows the current nickname", async () => {
-    const { home, cleanup } = await setupRepoWithAgent("agent-nick2", { nickname: "charmander" });
-    try {
-      const { stdout, exitCode } = await runCliWithHome(["nickname", "agent-nick2"], home);
-      expect(exitCode).toBe(0);
-      expect(stdout.trim()).toBe("charmander");
-    } finally {
-      await cleanup();
-    }
+    await addAgent("agent-nick2", { nickname: "charmander" });
+    const { stdout, exitCode } = await cli.run(["nickname", "agent-nick2"]);
+    expect(exitCode).toBe(0);
+    expect(stdout.trim()).toBe("charmander");
   });
 
   test("no-arg shows placeholder when no nickname set", async () => {
-    const { home, cleanup } = await setupRepoWithAgent("agent-nick3");
-    try {
-      const { stdout, exitCode } = await runCliWithHome(["nickname", "agent-nick3"], home);
-      expect(exitCode).toBe(0);
-      expect(stdout).toContain("(no nickname set)");
-    } finally {
-      await cleanup();
-    }
+    await addAgent("agent-nick3");
+    const { stdout, exitCode } = await cli.run(["nickname", "agent-nick3"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("(no nickname set)");
   });
 
   test("--clear deletes the nickname field", async () => {
-    const { home, agentDir, cleanup } = await setupRepoWithAgent("agent-nick4", { nickname: "squirtle" });
-    try {
-      const { exitCode } = await runCliWithHome(["nickname", "agent-nick4", "--clear"], home);
-      expect(exitCode).toBe(0);
-      const { join: joinPath } = await import("path");
-      const meta = await Bun.file(joinPath(agentDir, "meta.json")).json();
-      expect("nickname" in meta).toBe(false);
-    } finally {
-      await cleanup();
-    }
+    const { agentDir } = await addAgent("agent-nick4", { nickname: "squirtle" });
+    const { exitCode } = await cli.run(["nickname", "agent-nick4", "--clear"]);
+    expect(exitCode).toBe(0);
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    expect("nickname" in meta).toBe(false);
   });
 
   test("the agent resolves by its nickname (requireAgent)", async () => {
-    // Set a nickname, then run a command (`look`) addressed by the nickname.
-    const { home, cleanup } = await setupRepoWithAgent("agent-nick5", { nickname: "snorlax" });
-    try {
-      // `look <nickname>` must resolve to the agent (it won't have a tmux
-      // session, but resolution succeeding means it gets past requireAgent —
-      // a "not found" error would mean nickname resolution failed).
-      const { stderr } = await runCliWithHome(["look", "snorlax"], home);
-      expect(stderr).not.toContain("Agent not found");
-    } finally {
-      await cleanup();
-    }
+    await addAgent("agent-nick5", { nickname: "snorlax" });
+    const result = await cli.run(["retire", "snorlax"], { actions: { retireAgent: "record" } });
+    expect(result.stderr).not.toContain("Agent not found");
+    expect(result.actions.length).toBe(1);
+    expect((result.actions[0]!.args[0] as Agent).id).toBe("agent-nick5");
   });
 });
 
@@ -1928,22 +1702,9 @@ describe("resolveMergeTargetDir", () => {
 // ─── Telegram admin subcommands (tgallow / tgdeny) ──────────────────────────
 
 describe("Telegram admin subcommands", () => {
-  let home: string;
+  let cli: CliFixture;
 
-  async function runCli(cliArgs: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    const proc = Bun.spawn(["bun", "run", "src/index.ts", ...cliArgs], {
-      cwd: import.meta.dir.replace(/\/src$/, ""),
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, HOME: home },
-    });
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const exitCode = await proc.exited;
-    return { stdout, stderr, exitCode };
-  }
+  const runCli = (cliArgs: string[]) => cli.run(cliArgs);
 
   /**
    * Run the CLI as a SETUP step and require it to have succeeded.
@@ -1956,7 +1717,7 @@ describe("Telegram admin subcommands", () => {
    * to the step that actually broke, and includes the subprocess's own
    * stdout/stderr so the reason is visible rather than swallowed.
    */
-  async function runCliSetup(cliArgs: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  async function runCliSetup(cliArgs: string[]) {
     const r = await runCli(cliArgs);
     if (r.exitCode !== 0) {
       throw new Error(
@@ -1968,11 +1729,11 @@ describe("Telegram admin subcommands", () => {
   }
 
   beforeEach(async () => {
-    home = await mkdtemp(join(tmpdir(), "ib-tg-test-"));
+    cli = await createCliFixture();
   });
 
   afterEach(async () => {
-    await rm(home, { recursive: true, force: true });
+    await cli.cleanup();
   });
 
   test("tgallow without chat_id shows usage and exits 1", async () => {
@@ -2030,29 +1791,6 @@ describe("Telegram admin subcommands", () => {
 // ─── CLI entry points ────────────────────────────────────────────────────────
 
 describe("CLI entry points", () => {
-  const repoRoot = import.meta.dir.replace(/\/src$/, "");
-  let entryHome: string;
-  beforeEach(async () => { entryHome = await mkdtemp(join(tmpdir(), "ib-entry-home-")); });
-  afterEach(async () => { await rm(entryHome, { recursive: true, force: true }); });
-
-  async function runEntry(
-    entry: string,
-    cliArgs: string[],
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    const proc = Bun.spawn(["bun", "run", `${repoRoot}/${entry}`, ...cliArgs], {
-      cwd: repoRoot,
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, HOME: entryHome },
-    });
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const exitCode = await proc.exited;
-    return { stdout, stderr, exitCode };
-  }
-
   // Both files are real entry points and the project builds the binary from
   // BOTH depending on which instruction you follow: package.json's `build`
   // script compiles src/index.ts, while AGENTS.md documents
@@ -2061,11 +1799,13 @@ describe("CLI entry points", () => {
   // file silently produces a binary that starts up and does nothing. That is
   // not a theoretical worry: guarding only src/index.ts did exactly that, and
   // no existing test caught it because every other CLI test spawns
-  // src/index.ts, the entry that still worked.
-  test.each([["index.ts"], ["src/index.ts"]])(
+  // src/index.ts, the entry that still worked. Those tests now go through the
+  // test driver, so these are the only ones that run either real entry point,
+  // and they are limited to inert commands (runInertEntryPoint).
+  test.each([["index.ts"], ["src/index.ts"]] as const)(
     "%s dispatches commands when run as the entry point",
     async (entry) => {
-      const { stdout, exitCode } = await runEntry(entry, ["list-types"]);
+      const { stdout, exitCode } = await runInertEntryPoint(entry, ["list-types"]);
       expect(exitCode).toBe(0);
       // A known row from the agent-type table — proves the command actually ran
       // rather than the process merely exiting 0 with no output.
@@ -2077,23 +1817,10 @@ describe("CLI entry points", () => {
   // `bun test <filter>` runs main() inside the test runner with the filter bound
   // to process.argv[2], so `bun test send` / `merge` / `nuke` would execute those
   // commands for real against the developer's repos.
-  test.each([["index.ts"], ["src/index.ts"]])(
+  test.each([["index.ts"], ["src/index.ts"]] as const)(
     "importing %s runs no CLI dispatch",
     async (entry) => {
-      const proc = Bun.spawn(
-        ["bun", "-e", `await import("${repoRoot}/${entry}"); console.log("IMPORT_OK");`],
-        {
-          cwd: repoRoot,
-          stdout: "pipe",
-          stderr: "pipe",
-          env: { ...process.env, HOME: entryHome },
-        },
-      );
-      const [stdout, stderr] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-      ]);
-      const exitCode = await proc.exited;
+      const { stdout, stderr, exitCode } = await runEntryPointImport(entry);
       expect(exitCode).toBe(0);
       expect(stdout).toContain("IMPORT_OK");
       // Assert against the banner printUsage() actually emits. Under `bun -e`

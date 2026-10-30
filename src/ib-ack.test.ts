@@ -11,6 +11,7 @@ import { makeAgent } from "./test-utils";
 import type { Agent } from "./agents";
 import { currentAck, readAgentAck, writeAgentState } from "./agents";
 import { parseAgentTypeFile } from "./agent-types";
+import { SANDBOX_EXEC, assertSandboxExecApplies, liveProbes } from "./sandbox-live-probes";
 import {
   anchorRelativePaths,
   canonicalizePathsConfig,
@@ -31,6 +32,7 @@ import {
   setNewAgentNoWorktreeCallerResolver,
   resetNewAgentNoWorktreeCallerResolver,
 } from "./ib-commands";
+import { runIsolatedCli } from "./test-cli-runner";
 
 let root: string;
 
@@ -162,22 +164,8 @@ describe("ackAllSubagents — manager shortcut", () => {
   });
 
   test("the CLI dispatches bare ack from a manager session", async () => {
-    // Inject the resolver override in the subprocess too, so process ancestry
-    // can never select a real registered worktree:false agent for this test.
-    const script = join(root, "cli.ts");
-    await Bun.write(script,
-      `import { setNewAgentNoWorktreeCallerResolver } from ${JSON.stringify(join(import.meta.dir, "ib-commands.ts"))};\n` +
-      `import { main } from ${JSON.stringify(join(import.meta.dir, "index.ts"))};\n` +
-      "setNewAgentNoWorktreeCallerResolver(async () => null);\nawait main();\n");
-    const proc = Bun.spawn({
-      cmd: [process.execPath, script, "ack"],
-      cwd: sessionOf("repo", "mgr"),
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const stdout = await new Response(proc.stdout).text();
-    const stderr = await new Response(proc.stderr).text();
-    expect(await proc.exited).toBe(0);
+    const { stdout, stderr, exitCode } = await runIsolatedCli(["ack"], { cwd: sessionOf("repo", "mgr") });
+    expect(exitCode).toBe(0);
     expect(stderr).toBe("");
     expect(stdout).toContain("Acknowledged child (waiting)");
     expect((await readMeta("repo", "child")).ack).toMatchObject({ by: "mgr", state: "waiting" });
@@ -334,22 +322,9 @@ describe("ack persistence and invalidation", () => {
 describe("LIVE: ib ack inside a manager's kernel sandbox", () => {
   // Opt-in: it compiles the `ib` binary and runs it under sandbox-exec.
   //   IB_LIVE_ACK=1 bun test src/ib-ack.test.ts --test-name-pattern LIVE
-  test("the compiled ib resolves caller and child and writes the ack itself: no broker, no repo root", async () => {
-    if (process.env.IB_LIVE_ACK !== "1") {
-      console.log("LIVE ib ack: SKIPPED (set IB_LIVE_ACK=1 to run it)");
-      return;
-    }
-    const sandboxExec = Bun.which("sandbox-exec");
-    if (process.platform !== "darwin" || !sandboxExec) {
-      console.log("LIVE ib ack: SKIPPED (sandbox-exec is absent; macOS only)");
-      return;
-    }
-    const capability = Bun.spawnSync({ cmd: [sandboxExec, "-p", "(version 1)(allow default)", "/usr/bin/true"], stderr: "pipe" });
-    if (capability.exitCode !== 0) {
-      console.log(`LIVE ib ack: SKIPPED (cannot apply a profile here: ${capability.stderr.toString().trim()})`);
-      return;
-    }
-
+  const liveTest = liveProbes("IB_LIVE_ACK", "LIVE capability: sandbox-exec can apply a profile on this host", assertSandboxExecApplies);
+  liveTest("the compiled ib resolves caller and child and writes the ack itself: no broker, no repo root", async () => {
+    const sandboxExec = SANDBOX_EXEC;
     // The repo lives under the real home, outside every floor root, like a
     // real ~/Developer checkout: the profile grants only the runtime roots.
     const repoBase = canonicalizeSandboxPath(await mkdtemp(join(homedir(), "itsybitsy-ack-live-")));

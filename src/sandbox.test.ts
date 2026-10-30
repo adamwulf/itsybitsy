@@ -36,6 +36,11 @@ import {
   type SandboxConfig,
   type SandboxProfileParams,
 } from "./sandbox";
+import { ALLOW_DEFAULT_PROFILE, SANDBOX_EXEC, assertSandboxExecApplies, liveProbes } from "./sandbox-live-probes";
+
+// The real compiler and kernel, on a host outside any sandbox (sandbox-live-probes.ts).
+// The rules these probes exercise are also checked by the generator oracle below.
+const liveTest = liveProbes("IB_LIVE_SANDBOX", "LIVE capability: sandbox-exec can apply a profile on this host", assertSandboxExecApplies);
 
 const EMPTY_CONFIG: SandboxConfig = {
   enabled: true,
@@ -431,20 +436,20 @@ describe("sandbox profile emission", () => {
     expect(sandboxProfileTag(profile)).toBe(TAG);
   });
 
+  const commentedDeny = '(deny file-read*\n  (literal "/tmp/x") ; trailing comment\n (with message "' + TAG + '"))';
+
   test("a rawAllow deny ending in a ; comment keeps its tag and its closing paren", () => {
     const entry = '(deny file-read*\n  (literal "/tmp/x") ; trailing comment\n)';
     expect(validateSandboxFrontmatter({ rawAllow: [entry] }).errors).toEqual([]);
     const profile = generateProfile(config({ rawAllow: [entry, "(allow process*)"] }), EMPTY_PATHS, PARAMS);
-    const rule = '(deny file-read*\n  (literal "/tmp/x") ; trailing comment\n (with message "' + TAG + '"))';
     // The tag and the paren that closes the rule start a new line, after the comment.
-    expect(profile).toContain(`${rule}\n(allow process*)\n`);
-    const sandboxExec = Bun.which("sandbox-exec");
-    if (process.platform !== "darwin" || !sandboxExec) return;
-    // The real compiler agrees: without the new line, the comment would swallow
-    // the paren and the rule would stay open.
-    const compiled = Bun.spawnSync({ cmd: [sandboxExec, "-p", `(version 1)\n(allow default)\n${rule}\n`, "/usr/bin/true"], stderr: "pipe" });
-    if (compiled.stderr.toString().includes("sandbox_apply: Operation not permitted")) return; // nested sandbox
-    expect(compiled.exitCode).toBe(0);
+    expect(profile).toContain(`${commentedDeny}\n(allow process*)\n`);
+  });
+
+  liveTest("LIVE: the real compiler accepts a deny whose tag follows a ; comment", () => {
+    // Without the new line, the comment would swallow the paren and the rule would stay open.
+    const compiled = Bun.spawnSync({ cmd: [SANDBOX_EXEC, "-p", `(version 1)\n(allow default)\n${commentedDeny}\n`, "/usr/bin/true"], stderr: "pipe" });
+    expect(compiled.exitCode, compiled.stderr.toString()).toBe(0);
   });
 
   test("a rawAllow deny that cannot be tagged is refused by generation and by validation", () => {
@@ -529,26 +534,7 @@ describe("sandbox profile emission", () => {
   });
 });
 
-test("LIVE macOS profile protects trusted seal-helper results while ordinary tmp stays writable", async () => {
-  const sandboxExec = Bun.which("sandbox-exec");
-  if (process.platform !== "darwin" || !sandboxExec) {
-    console.log("LIVE seal-helper result probe: SKIPPED (sandbox-exec is absent; macOS only)");
-    return;
-  }
-  const capability = Bun.spawnSync({
-    cmd: [sandboxExec, "-p", "(version 1)(allow default)", "/usr/bin/true"],
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const capabilityError = capability.stderr.toString().trim();
-  if (capability.exitCode !== 0 && capabilityError.includes("sandbox_apply: Operation not permitted")) {
-    console.log("LIVE seal-helper result probe: SKIPPED (nested sandbox-exec is unavailable)");
-    return;
-  }
-  if (capability.exitCode !== 0) {
-    throw new Error(`LIVE seal-helper capability check failed: ${capabilityError}`);
-  }
-
+liveTest("LIVE macOS profile protects trusted seal-helper results while ordinary tmp stays writable", async () => {
   const uuid = crypto.randomUUID();
   const resultDir = `/private/tmp/${SEAL_HELPER_RESULT_PREFIX}${uuid}`;
   const newResultDir = `/private/tmp/${SEAL_HELPER_RESULT_PREFIX}${crypto.randomUUID()}`;
@@ -587,7 +573,7 @@ test("LIVE macOS profile protects trusted seal-helper results while ordinary tmp
       `printf ordinary > '${sibling}' 2>/dev/null; printf 'sibling=%s\\n' "$?"`,
     ].join("; ");
     const probe = Bun.spawnSync({
-      cmd: [sandboxExec, "-p", profile, ...args, "/bin/sh", "-c", script],
+      cmd: [SANDBOX_EXEC, "-p", profile, ...args, "/bin/sh", "-c", script],
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -854,6 +840,171 @@ function assertFixtureOracle(
   return profile;
 }
 
+interface FloorLayoutRoots {
+  root: string;
+  outsideHome: string;
+  deniedHome: string;
+  tmpWriteProbe: string;
+  tmuxSockStandin: string;
+  tmuxSiblingFile: string;
+}
+
+/**
+ * The verbatim `_all.md` floor plus a fixture layer, and the access each probe
+ * path must get. It only names paths: the kernel probe passes real temp roots and
+ * creates `files` there, and the deterministic test passes fixed roots.
+ */
+function floorLayout(roots: FloorLayoutRoots, baselinePaths: PathsConfig) {
+  const { root, outsideHome, deniedHome, tmpWriteProbe, tmuxSockStandin, tmuxSiblingFile } = roots;
+  // The ENTIRE _all.md paths floor is the harness floor: allowRead +
+  // allowWrite + deny, plus sandbox.rawAllow (added by the caller). It is unioned
+  // with the fixture layer exactly the way a real spawn merges inheritance layers,
+  // so /dev, /private/tmp, and /private/var/folders keep their allowWrite
+  // writability. The read probe redirects to /dev/null and MUST be able to
+  // open it; the earlier allowRead-only floor emitted (deny file-write*
+  // (subpath "/dev")) and broke that redirect.
+  const floorPaths: PathsConfig = {
+    allowRead: [...baselinePaths.allowRead],
+    allowWrite: [...baselinePaths.allowWrite],
+    deny: [...baselinePaths.deny],
+  };
+
+  const exampleOneRoot = join(root, "examples/one/Documents");
+  const exampleOneImportant = join(exampleOneRoot, "Important/file.txt");
+  const exampleOneOther = join(exampleOneRoot, "Other/file.txt");
+  const exampleTwoRoot = join(root, "examples/two");
+  const exampleTwoDocuments = join(exampleTwoRoot, "Documents/file.txt");
+  const exampleTwoDesktop = join(exampleTwoRoot, "Desktop/file.txt");
+  const tieFile = join(root, "examples/tie/file.txt");
+  const params: SandboxProfileParams = {
+    AGENTDIR: join(root, "Developer/app/.ittybitty/agents/live"),
+    WORKTREE: join(root, "Developer/app/.ittybitty/agents/live/repo"),
+    GITDIR: join(root, "Developer/app/.git/worktrees/live"),
+    REPOAGENTS: join(root, "Developer/app/.ittybitty/agents"),
+    PARENTCLAUDE: join(root, "Developer/app/.claude"),
+    TMUXSOCK: tmuxSockStandin,
+    canSpawnChildren: false,
+    HOME: root,
+  };
+  const trapAgentFile = join(params.AGENTDIR, "meta.json");
+  const trapWorktreeFile = join(params.WORKTREE, "src/file.txt");
+  const trapGitFile = join(params.GITDIR, "index");
+  const trapSiblingFile = join(root, "Developer/sibling/file.txt");
+  // Row (c): verbatim-floor writable roots stay writable and the "~"/floor
+  // read ancestors stay read-only. The runtime roots (params, temp dirs)
+  // above already stand in for AGENTDIR/WORKTREE/GITDIR; REPOAGENTS is a
+  // read root, so a file directly under it (not under AGENTDIR) is read-only.
+  const repoAgentsFile = join(params.REPOAGENTS, "registry.json");
+  // HOME (root) lives under /private/var/folders, an allowWrite floor. With
+  // "~" dropped from allowRead (A3), a loose file at the home root is no longer
+  // shadowed read-only by "~"; it is now governed by the /private/var/folders
+  // write floor, so it is read+write.
+  const homeVarFoldersWritable = join(root, "loose-home.txt");
+  const homeClaudeWrite = join(root, ".claude/probe.txt"); // ~/.claude allowWrite
+  const homeItsybitsyWrite = join(root, ".itsybitsy/agents/probe.txt"); // ~/.itsybitsy/agents allowWrite
+  const homeItsybitsyRead = join(root, ".itsybitsy/state.json"); // ~/.itsybitsy read, write denied
+  // R3(i): ~/.itsybitsy/agent-types is under ~/.itsybitsy (read) but NOT
+  // under ~/.itsybitsy/agents (write), so it is read-only — the floor grants
+  // agents write without opening agent-types.
+  const homeItsybitsyAgentTypes = join(root, ".itsybitsy/agent-types/config.json");
+  // A4 G3: the sealed-record dir is denied for BOTH read and write to every
+  // sandboxed agent. It sits under ~/.itsybitsy (a read floor) but the
+  // _all.md deny carves it out (deny wins), and it is in no allowWrite list —
+  // so a sandboxed non-spawner can neither read its own seal nor forge one.
+  const homeItsybitsySealed = join(root, ".itsybitsy/sealed/live-agent.json");
+  // R3(i): a file under the real-home stand-in — outside every floor entry,
+  // so both operations are denied (the ~/Documents relation).
+  const deniedHomeFile = join(deniedHome, "Documents", "secret.txt");
+  // R3(iii): a file inside the tmux-socket stand-in dir (the TMUXSOCK deny
+  // covers the whole subtree for a non-spawner).
+  const tmuxSockFile = join(tmuxSockStandin, "default");
+  const devNull = "/dev/null"; // /dev allowWrite root, already present
+  const outsideWriteFile = join(outsideHome, "plain.txt"); // /private/var/folders allowWrite
+  const outsideReadOnlyDir = join(outsideHome, "readonly");
+  const outsideReadOnlyFile = join(outsideReadOnlyDir, "file.txt"); // read-only under write ancestor (R2)
+  // N3 glob arms: one writable tree proves the JS→Seatbelt regex translation
+  // against the real kernel regex engine. A deny glob (**/.env under the
+  // tree) and an allowRead glob (globs/*.md, a read-only hole punched into a
+  // plain write root) both compile to (regex #"…"); every file below asserts
+  // agreement with resolvePathAccess.
+  const globTree = join(root, "examples/glob-tree");     // plain allowWrite root
+  const globDenyEnv = join(globTree, "**/.env");         // deny glob (globstar)
+  const globReadMd = join(globTree, "globs/*.md");       // allowRead glob (single *)
+  const globTreeEnv = join(globTree, ".env");            // denied: **/.env, zero dirs
+  const globTreeSubEnv = join(globTree, "sub/.env");     // denied: **/.env, one dir
+  const globTreeSubNotes = join(globTree, "sub/notes.txt"); // writable: no glob matches
+  const globMdReadOnly = join(globTree, "globs/a.md");   // read-only via globs/*.md
+  const globTxtWritable = join(globTree, "globs/a.txt"); // writable: *.md misses .txt
+  const globDeepMd = join(globTree, "globs/deep/b.md");  // writable: * never crosses /
+
+  const fixturePaths = paths({
+    allowRead: [
+      join(exampleOneRoot, "Important"),
+      exampleTwoRoot,
+      join(root, "Developer"),
+      dirname(tieFile),
+      outsideReadOnlyDir,
+      globReadMd,
+    ],
+    allowWrite: [exampleOneRoot, join(exampleTwoRoot, "Documents"), dirname(tieFile), globTree],
+    deny: [globDenyEnv],
+  });
+
+  const readOnly = { read: "allow", write: "deny" } as const;
+  const writable = { read: "allow", write: "allow" } as const;
+  const denied = { read: "deny", write: "deny" } as const;
+  const checks = [
+    { label: "write-root/nested-read", path: exampleOneImportant, ...readOnly },
+    { label: "write-root/sibling", path: exampleOneOther, ...writable },
+    { label: "read-root/nested-write", path: exampleTwoDocuments, ...writable },
+    { label: "read-root/sibling", path: exampleTwoDesktop, ...readOnly },
+    { label: "trap/agentdir", path: trapAgentFile, ...writable },
+    { label: "trap/worktree", path: trapWorktreeFile, ...writable },
+    { label: "trap/gitdir", path: trapGitFile, ...writable },
+    { label: "trap/sibling", path: trapSiblingFile, ...readOnly },
+    { label: "tie", path: tieFile, ...writable },
+    // Row (c): the verbatim _all.md floor keeps every allowWrite root and
+    // runtime root writable. With "~" dropped from allowRead (A3), a loose
+    // file at HOME's root is governed by the /private/var/folders write floor it
+    // lives under, not by "~".
+    { label: "floor/repoagents-read-only", path: repoAgentsFile, ...readOnly },
+    { label: "floor/home-under-var-folders-writable", path: homeVarFoldersWritable, ...writable },
+    { label: "floor/home-claude-write", path: homeClaudeWrite, ...writable },
+    { label: "floor/home-itsybitsy-agents-write", path: homeItsybitsyWrite, ...writable },
+    { label: "floor/home-itsybitsy-read-only", path: homeItsybitsyRead, ...readOnly },
+    // R3(i): ~/.itsybitsy/agents writable, ~/.itsybitsy/agent-types read-only,
+    // and a real-home path (the ~/Documents relation) denied for both ops.
+    { label: "floor/home-itsybitsy-agent-types-read-only", path: homeItsybitsyAgentTypes, ...readOnly },
+    // A4 G3: the sealed-record dir is denied for BOTH ops (deny wins over the
+    // ~/.itsybitsy read floor) — a sandboxed process can neither read nor
+    // write under it.
+    { label: "floor/home-itsybitsy-sealed-denied", path: homeItsybitsySealed, ...denied },
+    { label: "floor/home-documents-relation-denied", path: deniedHomeFile, ...denied },
+    { label: "floor/dev-null-write", path: devNull, ...writable },
+    { label: "floor/var-folders-write", path: outsideWriteFile, ...writable },
+    { label: "floor/read-only-under-write-ancestor", path: outsideReadOnlyFile, ...readOnly },
+    { label: "floor/private-tmp-write", path: tmpWriteProbe, ...writable },
+    // N3 (a): deny glob **/.env matches the tree root and a nested dir, but
+    // never a sibling non-.env file, which stays writable under the tree.
+    { label: "glob-deny/env-zero-dir", path: globTreeEnv, ...denied },
+    { label: "glob-deny/env-nested", path: globTreeSubEnv, ...denied },
+    { label: "glob-deny/sibling-writable", path: globTreeSubNotes, ...writable },
+    // N3 (b): allowRead glob globs/*.md is a read-only hole in the write
+    // root; a non-matching .txt stays writable, and single * never crosses
+    // a segment so a deeper .md stays writable.
+    { label: "glob-read/md-read-only", path: globMdReadOnly, ...readOnly },
+    { label: "glob-read/txt-writable", path: globTxtWritable, ...writable },
+    { label: "glob-read/deep-md-writable", path: globDeepMd, ...writable },
+  ];
+  return {
+    params,
+    livePaths: mergeFixtureLayers([floorPaths, fixturePaths]),
+    checks,
+    tmuxSockFile,
+    files: [...checks.map((check) => check.path).filter((path) => path !== devNull), tmuxSockFile, tmuxSiblingFile],
+  };
+}
+
 describe("most-specific filesystem access oracle", () => {
   async function buildAccessFixtures(): Promise<AccessFixture[]> {
     const home = "/Users/sandbox-test-user";
@@ -1093,33 +1244,67 @@ describe("most-specific filesystem access oracle", () => {
     );
   });
 
-  test("LIVE macOS sandbox-exec proves nested last-match-wins", async () => {
-    const sandboxExec = Bun.which("sandbox-exec");
-    if (process.platform !== "darwin" || !sandboxExec) {
-      console.log("LIVE sandbox probe: SKIPPED (sandbox-exec is absent; macOS only)");
-      return;
-    }
-    const capability = Bun.spawnSync({
-      cmd: [sandboxExec, "-p", "(version 1)(allow default)", "/usr/bin/true"],
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const capabilityError = capability.stderr.toString().trim();
-    if (capability.exitCode !== 0 && capabilityError.includes("sandbox_apply: Operation not permitted")) {
-      // Codex/CI may itself be inside Seatbelt, which forbids applying a nested
-      // profile even though the executable exists. An ordinary macOS process
-      // proceeds to the real compile and probes below.
-      console.log(
-        `LIVE sandbox probe: SKIPPED (sandbox-exec cannot apply a nested profile: exit=${capability.exitCode}, stderr=${capabilityError})`,
-      );
-      return;
-    }
-    if (capability.exitCode !== 0) {
-      throw new Error(
-        `LIVE sandbox capability check failed (${capability.exitCode}): ${capabilityError}`,
-      );
-    }
+  // What the kernel probe below decides, from the same layout and without the
+  // kernel: the resolver and the emitted rules give every row its decision.
+  test("the _all floor plus a fixture layer gives each path its decision, for a non-spawner and a spawner", async () => {
+    const baseline = parseAgentTypeFile(
+      await Bun.file(join(import.meta.dir, "../docs/agent-types/_all.md")).text(),
+    ).frontmatter;
+    const tmuxSiblingFile = "/private/tmp/itsybitsy-sandbox-fixture-tmux-sib";
+    const { params, livePaths, checks, tmuxSockFile } = floorLayout({
+      root: "/private/var/folders/zz/T/itsybitsy-sandbox-fixture-home",
+      outsideHome: "/private/var/folders/zz/T/itsybitsy-sandbox-fixture-outside",
+      deniedHome: "/Users/sandbox-test-user/itsybitsy-sandbox-fixture-denied",
+      tmpWriteProbe: "/private/tmp/itsybitsy-sandbox-fixture-probe",
+      tmuxSockStandin: "/private/tmp/itsybitsy-sandbox-fixture-tmux",
+      tmuxSiblingFile,
+    }, baseline.paths as PathsConfig);
+    const spawnerParams: SandboxProfileParams = { ...params, canSpawnChildren: true };
+    const writable = { read: "allow", write: "allow" } as const;
+    // R3(iii): a non-spawner denies the tmux stand-in while a /private/tmp
+    // sibling stays writable; a spawner allows both (the escape is kept).
+    assertFixtureOracle({
+      name: "floor layout, non-spawner",
+      layers: [livePaths],
+      params,
+      checks: [...checks, { path: tmuxSockFile, read: "deny", write: "deny" }, { path: tmuxSiblingFile, ...writable }],
+    }, livePaths);
+    assertFixtureOracle({
+      name: "floor layout, spawner",
+      layers: [livePaths],
+      params: spawnerParams,
+      checks: [{ path: tmuxSockFile, ...writable }, { path: tmuxSiblingFile, ...writable }],
+    }, livePaths);
 
+    // The floor no longer lists "/" or "~" for reading (A3, Adam 2026-09-02):
+    // a read of "/" itself resolves to deny, and the kernel lists the root
+    // node only through the rawAllow line (allow file-read-data (literal
+    // "/")). That is the one sanctioned resolver/kernel divergence
+    // (SPEC-SANDBOX.md 4A.8), which resolvePathAccess does not model on
+    // purpose. A path under "/" with no deeper floor entry is now denied for
+    // both operations.
+    const table = sandboxPathAccessTable(livePaths, params);
+    expect(resolvePathAccess("/", "read", table)).toBe("deny");
+    expect(resolvePathAccess("/Applications/itsybitsy-nonexistent-probe", "read", table)).toBe("deny");
+    expect(resolvePathAccess("/Applications/itsybitsy-nonexistent-probe", "write", table)).toBe("deny");
+    const liveConfig = config({ rawAllow: (baseline.sandbox as SandboxConfig).rawAllow });
+    const profile = generateProfile(liveConfig, livePaths, params);
+    expect(profile).toContain('(allow file-read-data (literal "/"))');
+
+    // F1: the real tmux escape is a unix-socket connect(). Last match wins, so a
+    // non-spawner's deny must follow the floor's blanket unix-socket allow, and a
+    // spawner has no deny.
+    const allowUnixSockets = "(allow network-outbound (remote unix-socket))";
+    const denyTmuxConnect = tagged('(deny network-outbound (remote unix-socket (subpath (param "TMUXSOCK"))))');
+    expect(profile).toContain(allowUnixSockets);
+    expect(profile.indexOf(denyTmuxConnect)).toBeGreaterThan(profile.indexOf(allowUnixSockets));
+    const spawnerProfile = generateProfile(liveConfig, livePaths, spawnerParams);
+    expect(spawnerProfile).toContain(allowUnixSockets);
+    expect(spawnerProfile).not.toContain(denyTmuxConnect);
+  });
+
+  liveTest("LIVE macOS sandbox-exec proves nested last-match-wins", async () => {
+    const sandboxExec = SANDBOX_EXEC;
     const createdRoot = await mkdtemp(join(tmpdir(), "itsybitsy-sandbox-live-"));
     const root = canonicalizeSandboxPath(createdRoot);
     // A sibling temp tree that is NOT under HOME(=root). It lives under
@@ -1150,141 +1335,16 @@ describe("most-specific filesystem access oracle", () => {
       const baseline = parseAgentTypeFile(
         await Bun.file(join(import.meta.dir, "../docs/agent-types/_all.md")).text(),
       ).frontmatter;
-      const baselinePaths = baseline.paths as PathsConfig;
-      const baselineSandbox = baseline.sandbox as SandboxConfig;
-      // The ENTIRE _all.md paths floor is the harness floor: allowRead +
-      // allowWrite + deny, plus sandbox.rawAllow (below). It is unioned with the
-      // fixture layer exactly the way a real spawn merges inheritance layers, so
-      // /dev, /private/tmp, and /private/var/folders keep their allowWrite
-      // writability. The read probe redirects to /dev/null and MUST be able to
-      // open it; the earlier allowRead-only floor emitted (deny file-write*
-      // (subpath "/dev")) and broke that redirect.
-      const floorPaths: PathsConfig = {
-        allowRead: [...baselinePaths.allowRead],
-        allowWrite: [...baselinePaths.allowWrite],
-        deny: [...baselinePaths.deny],
-      };
-
-      const exampleOneRoot = join(root, "examples/one/Documents");
-      const exampleOneImportant = join(exampleOneRoot, "Important/file.txt");
-      const exampleOneOther = join(exampleOneRoot, "Other/file.txt");
-      const exampleTwoRoot = join(root, "examples/two");
-      const exampleTwoDocuments = join(exampleTwoRoot, "Documents/file.txt");
-      const exampleTwoDesktop = join(exampleTwoRoot, "Desktop/file.txt");
-      const tieFile = join(root, "examples/tie/file.txt");
-      const params: SandboxProfileParams = {
-        AGENTDIR: join(root, "Developer/app/.ittybitty/agents/live"),
-        WORKTREE: join(root, "Developer/app/.ittybitty/agents/live/repo"),
-        GITDIR: join(root, "Developer/app/.git/worktrees/live"),
-        REPOAGENTS: join(root, "Developer/app/.ittybitty/agents"),
-        PARENTCLAUDE: join(root, "Developer/app/.claude"),
-        TMUXSOCK: tmuxSockStandin,
-        canSpawnChildren: false,
-        HOME: root,
-      };
-      const trapAgentFile = join(params.AGENTDIR, "meta.json");
-      const trapWorktreeFile = join(params.WORKTREE, "src/file.txt");
-      const trapGitFile = join(params.GITDIR, "index");
-      const trapSiblingFile = join(root, "Developer/sibling/file.txt");
-      // Row (c): verbatim-floor writable roots stay writable and the "~"/floor
-      // read ancestors stay read-only. The runtime roots (params, temp dirs)
-      // above already stand in for AGENTDIR/WORKTREE/GITDIR; REPOAGENTS is a
-      // read root, so a file directly under it (not under AGENTDIR) is read-only.
-      const repoAgentsFile = join(params.REPOAGENTS, "registry.json");
-      // The temp HOME (root) lives under /private/var/folders, an allowWrite
-      // floor. With "~" dropped from allowRead (A3), a loose file at the home
-      // root is no longer shadowed read-only by "~"; it is now governed by the
-      // /private/var/folders write floor, so it is read+write.
-      const homeVarFoldersWritable = join(root, "loose-home.txt");
-      const homeClaudeWrite = join(root, ".claude/probe.txt"); // ~/.claude allowWrite
-      const homeItsybitsyWrite = join(root, ".itsybitsy/agents/probe.txt"); // ~/.itsybitsy/agents allowWrite
-      const homeItsybitsyRead = join(root, ".itsybitsy/state.json"); // ~/.itsybitsy read, write denied
-      // R3(i): ~/.itsybitsy/agent-types is under ~/.itsybitsy (read) but NOT
-      // under ~/.itsybitsy/agents (write), so it is read-only — the floor grants
-      // agents write without opening agent-types.
-      const homeItsybitsyAgentTypes = join(root, ".itsybitsy/agent-types/config.json");
-      // A4 G3: the sealed-record dir is denied for BOTH read and write to every
-      // sandboxed agent. It sits under ~/.itsybitsy (a read floor) but the
-      // _all.md deny carves it out (deny wins), and it is in no allowWrite list —
-      // so a sandboxed non-spawner can neither read its own seal nor forge one.
-      const homeItsybitsySealed = join(root, ".itsybitsy/sealed/live-agent.json");
-      // R3(i): a file under the real-home stand-in — outside every floor entry,
-      // so both operations are denied (the ~/Documents relation).
-      const deniedHomeFile = join(deniedHome, "Documents", "secret.txt");
-      // R3(iii): a file inside the tmux-socket stand-in dir (the TMUXSOCK deny
-      // covers the whole subtree for a non-spawner).
-      const tmuxSockFile = join(tmuxSockStandin, "default");
-      const devNull = "/dev/null"; // /dev allowWrite root, already present
-      const outsideWriteFile = join(outsideHome, "plain.txt"); // /private/var/folders allowWrite
-      const outsideReadOnlyDir = join(outsideHome, "readonly");
-      const outsideReadOnlyFile = join(outsideReadOnlyDir, "file.txt"); // read-only under write ancestor (R2)
-      // N3 glob arms: one writable tree proves the JS→Seatbelt regex translation
-      // against the real kernel regex engine. A deny glob (**/.env under the
-      // tree) and an allowRead glob (globs/*.md, a read-only hole punched into a
-      // plain write root) both compile to (regex #"…"); every file below asserts
-      // agreement with resolvePathAccess.
-      const globTree = join(root, "examples/glob-tree");     // plain allowWrite root
-      const globDenyEnv = join(globTree, "**/.env");         // deny glob (globstar)
-      const globReadMd = join(globTree, "globs/*.md");       // allowRead glob (single *)
-      const globTreeEnv = join(globTree, ".env");            // denied: **/.env, zero dirs
-      const globTreeSubEnv = join(globTree, "sub/.env");     // denied: **/.env, one dir
-      const globTreeSubNotes = join(globTree, "sub/notes.txt"); // writable: no glob matches
-      const globMdReadOnly = join(globTree, "globs/a.md");   // read-only via globs/*.md
-      const globTxtWritable = join(globTree, "globs/a.txt"); // writable: *.md misses .txt
-      const globDeepMd = join(globTree, "globs/deep/b.md");  // writable: * never crosses /
-      const files = [
-        exampleOneImportant,
-        exampleOneOther,
-        exampleTwoDocuments,
-        exampleTwoDesktop,
-        tieFile,
-        trapAgentFile,
-        trapWorktreeFile,
-        trapGitFile,
-        trapSiblingFile,
-        repoAgentsFile,
-        homeVarFoldersWritable,
-        homeClaudeWrite,
-        homeItsybitsyWrite,
-        homeItsybitsyRead,
-        homeItsybitsyAgentTypes,
-        homeItsybitsySealed,
-        deniedHomeFile,
-        outsideWriteFile,
-        outsideReadOnlyFile,
-        tmpWriteProbe,
-        tmuxSockFile,
-        tmuxSiblingFile,
-        globTreeEnv,
-        globTreeSubEnv,
-        globTreeSubNotes,
-        globMdReadOnly,
-        globTxtWritable,
-        globDeepMd,
-      ];
+      const { params, livePaths, checks, tmuxSockFile, files } = floorLayout(
+        { root, outsideHome, deniedHome, tmpWriteProbe, tmuxSockStandin, tmuxSiblingFile },
+        baseline.paths as PathsConfig,
+      );
       for (const file of files) {
         await mkdir(dirname(file), { recursive: true });
         await writeFile(file, "probe\n");
       }
 
-      const fixturePaths = paths({
-        allowRead: [
-          join(exampleOneRoot, "Important"),
-          exampleTwoRoot,
-          join(root, "Developer"),
-          dirname(tieFile),
-          outsideReadOnlyDir,
-          globReadMd,
-        ],
-        allowWrite: [exampleOneRoot, join(exampleTwoRoot, "Documents"), dirname(tieFile), globTree],
-        deny: [globDenyEnv],
-      });
-      // Union the _all.md floor with the fixture layer exactly as a real spawn
-      // merges inheritance layers, then hand the merged config to the same
-      // canonicalize/normalize path production uses (sandboxPathAccessTable,
-      // generateProfile, sandboxProfileParameterValues, resolvePathAccess).
-      const livePaths = mergeFixtureLayers([floorPaths, fixturePaths]);
-      const liveConfig = config({ rawAllow: baselineSandbox.rawAllow });
+      const liveConfig = config({ rawAllow: (baseline.sandbox as SandboxConfig).rawAllow });
       const profile = generateProfile(liveConfig, livePaths, params);
       const profilePath = join(root, "live.sb");
       await Bun.write(profilePath, profile);
@@ -1313,60 +1373,7 @@ describe("most-specific filesystem access oracle", () => {
         ));
       }
 
-      const checks = [
-        { label: "write-root/nested-read", path: exampleOneImportant },
-        { label: "write-root/sibling", path: exampleOneOther },
-        { label: "read-root/nested-write", path: exampleTwoDocuments },
-        { label: "read-root/sibling", path: exampleTwoDesktop },
-        { label: "trap/agentdir", path: trapAgentFile },
-        { label: "trap/worktree", path: trapWorktreeFile },
-        { label: "trap/gitdir", path: trapGitFile },
-        { label: "trap/sibling", path: trapSiblingFile },
-        { label: "tie", path: tieFile },
-        // Row (c): the verbatim _all.md floor keeps every allowWrite root and
-        // runtime root writable. With "~" dropped from allowRead (A3), a loose
-        // file at the temp HOME root is governed by the /private/var/folders
-        // write floor it lives under, not by "~".
-        { label: "floor/repoagents-read-only", path: repoAgentsFile },
-        { label: "floor/home-under-var-folders-writable", path: homeVarFoldersWritable },
-        { label: "floor/home-claude-write", path: homeClaudeWrite },
-        { label: "floor/home-itsybitsy-agents-write", path: homeItsybitsyWrite },
-        { label: "floor/home-itsybitsy-read-only", path: homeItsybitsyRead },
-        // R3(i): ~/.itsybitsy/agents writable, ~/.itsybitsy/agent-types read-only,
-        // and a real-home path (the ~/Documents relation) denied for both ops.
-        { label: "floor/home-itsybitsy-agent-types-read-only", path: homeItsybitsyAgentTypes },
-        // A4 G3: the sealed-record dir is denied for BOTH ops (deny wins over the
-        // ~/.itsybitsy read floor) — a sandboxed process can neither read nor
-        // write under it.
-        { label: "floor/home-itsybitsy-sealed-denied", path: homeItsybitsySealed },
-        { label: "floor/home-documents-relation-denied", path: deniedHomeFile },
-        { label: "floor/dev-null-write", path: devNull },
-        { label: "floor/var-folders-write", path: outsideWriteFile },
-        { label: "floor/read-only-under-write-ancestor", path: outsideReadOnlyFile },
-        { label: "floor/private-tmp-write", path: tmpWriteProbe },
-        // N3 (a): deny glob **/.env matches the tree root and a nested dir, but
-        // never a sibling non-.env file, which stays writable under the tree.
-        { label: "glob-deny/env-zero-dir", path: globTreeEnv },
-        { label: "glob-deny/env-nested", path: globTreeSubEnv },
-        { label: "glob-deny/sibling-writable", path: globTreeSubNotes },
-        // N3 (b): allowRead glob globs/*.md is a read-only hole in the write
-        // root; a non-matching .txt stays writable, and single * never crosses
-        // a segment so a deeper .md stays writable.
-        { label: "glob-read/md-read-only", path: globMdReadOnly },
-        { label: "glob-read/txt-writable", path: globTxtWritable },
-        { label: "glob-read/deep-md-writable", path: globDeepMd },
-      ];
       const table: PathAccessTable = sandboxPathAccessTable(livePaths, params);
-      // The floor no longer lists "/" or "~" for reading (A3, Adam 2026-09-02):
-      // a read of "/" itself resolves to deny, and the kernel lists the root
-      // node only through the rawAllow line (allow file-read-data (literal
-      // "/")). That is the one sanctioned resolver/kernel divergence
-      // (SPEC-SANDBOX.md 4A.8), which resolvePathAccess does not model on
-      // purpose. A path under "/" with no deeper floor entry is now denied for
-      // both operations.
-      expect(resolvePathAccess("/", "read", table)).toBe("deny");
-      expect(resolvePathAccess("/Applications/itsybitsy-nonexistent-probe", "read", table)).toBe("deny");
-      expect(resolvePathAccess("/Applications/itsybitsy-nonexistent-probe", "write", table)).toBe("deny");
       const results: string[] = [];
       // Batch every (path, op) probe into ONE sandbox-exec run: a /bin/sh script
       // cats/echoes each path and prints "label:op:exit". Every sh subprocess
@@ -1410,14 +1417,6 @@ describe("most-specific filesystem access oracle", () => {
           }
         }
       }
-      // R3(i) resolver relations, asserted directly so a floor regression that
-      // accidentally opens one of these fails loudly rather than passing on mere
-      // kernel/resolver agreement.
-      expect(resolvePathAccess(homeItsybitsyWrite, "write", table)).toBe("allow");
-      expect(resolvePathAccess(homeItsybitsyAgentTypes, "read", table)).toBe("allow");
-      expect(resolvePathAccess(homeItsybitsyAgentTypes, "write", table)).toBe("deny");
-      expect(resolvePathAccess(deniedHomeFile, "read", table)).toBe("deny");
-      expect(resolvePathAccess(deniedHomeFile, "write", table)).toBe("deny");
 
       // R3(ii): the sanctioned root-listing divergence, live. `ls /` succeeds
       // through the rawAllow (allow file-read-data (literal "/")) even though the
@@ -1467,11 +1466,6 @@ describe("most-specific filesystem access oracle", () => {
           `${spawnerCompile.stderr.toString().trim()}\n--- profile ---\n${spawnerProfile}`,
         );
       }
-      // Assert the intended relations directly, so a broken keying fails loudly.
-      expect(resolvePathAccess(tmuxSockFile, "write", table)).toBe("deny");
-      expect(resolvePathAccess(tmuxSiblingFile, "write", table)).toBe("allow");
-      expect(resolvePathAccess(tmuxSockFile, "write", spawnerTable)).toBe("allow");
-      expect(resolvePathAccess(tmuxSiblingFile, "write", spawnerTable)).toBe("allow");
       const tmuxArms = [
         { label: "non-spawner", sb: profilePath, args: definitionArgs, tbl: table },
         { label: "spawner", sb: spawnerProfilePath, args: spawnerArgs, tbl: spawnerTable },
@@ -1589,44 +1583,19 @@ describe("most-specific filesystem access oracle", () => {
   }, 120000);
 });
 
-describe("LIVE claude boot under the floor", () => {
-  test("the new _all.md floor boots claude to a network/API error, not a SIGABRT or silent death", async () => {
-    // Opt-in: this gate runs a real claude that hangs on the kernel-denied
-    // network for the full run timeout, so it is off by default to keep an
-    // ordinary `bun test` fast. Run it with:
-    //   IB_LIVE_BOOT=1 bun test src/sandbox.test.ts --test-name-pattern "LIVE claude boot"
-    if (process.env.IB_LIVE_BOOT !== "1") {
-      console.log("LIVE claude boot: SKIPPED (set IB_LIVE_BOOT=1 to run the live claude boot gate)");
-      return;
-    }
-    const sandboxExec = Bun.which("sandbox-exec");
-    if (process.platform !== "darwin" || !sandboxExec) {
-      console.log("LIVE claude boot: SKIPPED (sandbox-exec is absent; macOS only)");
-      return;
-    }
-    const claudePath = Bun.which("claude");
-    if (!claudePath) {
-      console.log("LIVE claude boot: SKIPPED (claude is not on PATH)");
-      return;
-    }
-    // Same nested-Seatbelt guard as the LIVE probe: a harness that is itself
-    // sandboxed cannot apply a nested profile, so the gate is not applicable.
-    const capability = Bun.spawnSync({
-      cmd: [sandboxExec, "-p", "(version 1)(allow default)", "/usr/bin/true"],
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const capabilityError = capability.stderr.toString().trim();
-    if (capability.exitCode !== 0 && capabilityError.includes("sandbox_apply: Operation not permitted")) {
-      console.log(
-        `LIVE claude boot: SKIPPED (sandbox-exec cannot apply a nested profile: exit=${capability.exitCode}, stderr=${capabilityError})`,
-      );
-      return;
-    }
-    if (capability.exitCode !== 0) {
-      throw new Error(`LIVE claude boot capability check failed (${capability.exitCode}): ${capabilityError}`);
-    }
+// Opt-in: this gate runs a real claude that hangs on the kernel-denied
+// network for the full run timeout, so it is off by default to keep an
+// ordinary `bun test` fast. Run it with:
+//   IB_LIVE_BOOT=1 bun test src/sandbox.test.ts --test-name-pattern "LIVE claude boot"
+const liveBootTest = liveProbes("IB_LIVE_BOOT", "LIVE claude boot capability: sandbox-exec can apply a profile, and claude is on PATH", () => {
+  assertSandboxExecApplies();
+  if (!Bun.which("claude")) throw new Error("claude is not on PATH");
+});
 
+describe("LIVE claude boot under the floor", () => {
+  liveBootTest("the new _all.md floor boots claude to a network/API error, not a SIGABRT or silent death", async () => {
+    const sandboxExec = SANDBOX_EXEC;
+    const claudePath = Bun.which("claude")!;
     const createdRoot = await mkdtemp(join(tmpdir(), "itsybitsy-claude-boot-"));
     const root = canonicalizeSandboxPath(createdRoot);
     try {

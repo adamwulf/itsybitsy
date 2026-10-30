@@ -1,7 +1,7 @@
 import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-log-launch";
 import { resolveNoWorktreeCaller } from "./no-worktree-caller";
 import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
-import { join, basename } from "path";
+import { join, basename, dirname } from "path";
 import {
   mkdtemp,
   rm,
@@ -4557,6 +4557,94 @@ describe("mergeAgent (native)", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
+  /**
+   * A temporary agent whose worktree can stand in as the caller's cwd. Never
+   * derive an agent from the real process.cwd(): mergeAgent claims the lifecycle
+   * lock and the `merging` marker before it refuses a self-merge, so even a
+   * refusal writes to whichever agent the path names. Pass a canonical repoPath:
+   * process.cwd() reports the realpath, and the macOS tmpdir is a symlink.
+   */
+  async function makeFixtureAgent(repoPath: string, id = "agent-abc") {
+    const agentDir = join(repoPath, ".ittybitty", "agents", id);
+    const worktreePath = join(agentDir, "repo");
+    await mkdir(worktreePath, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+      id, tmux_session: `tmux-${id}`, state: "running",
+    }));
+    const agent = makeAgent(id, repoPath, "running", { tmux_session: `tmux-${id}` });
+    return { agent, agentDir, worktreePath };
+  }
+
+  /** Run `fn` from `cwd`, the caller mergeAgent reads through process.cwd(). */
+  async function withCallerCwd<T>(cwd: string, fn: () => Promise<T>): Promise<T> {
+    const savedCwd = process.cwd();
+    process.chdir(cwd);
+    try {
+      return await fn();
+    } finally {
+      process.chdir(savedCwd);
+    }
+  }
+
+  /** Every file a lifecycle claim can touch: the lock beside the agent dir, and its contents. */
+  async function lifecycleFiles(agentDir: string) {
+    const transient = Bun.file(join(agentDir, "meta.transient.json"));
+    return {
+      meta: await Bun.file(join(agentDir, "meta.json")).text(),
+      transient: (await transient.exists()) ? await transient.text() : null,
+      lockSiblings: (await readdir(dirname(agentDir))).sort(),
+      agentFiles: (await readdir(agentDir)).sort(),
+    };
+  }
+
+  /**
+   * An abandoned op marker. Only a real claim replaces it (its holder is past the
+   * stuck timeout), and only our own claim can then be cleared (clearing is a
+   * compare-and-swap on our pid), so `operation: null` afterwards proves the
+   * claim ran on this agent.
+   */
+  async function seedAbandonedOperation(agentDir: string) {
+    await Bun.write(join(agentDir, "meta.transient.json"), JSON.stringify({
+      tmux_compacting: false, tmux_rate_limited: false, has_background_tasks: false,
+      updated_at_ms: 1, watchdog_pid: 0,
+      operation: { kind: "restarting", pid: 4_000_002, started_at_ms: 1 },
+    }));
+  }
+
+  async function readOperationMarker(agentDir: string): Promise<unknown> {
+    return (await Bun.file(join(agentDir, "meta.transient.json")).json()).operation;
+  }
+
+  /**
+   * The refusal, and proof of where it wrote: the claim landed on the fixture,
+   * and a same-id agent in another repo, standing in for a real agent, is intact.
+   */
+  async function expectSelfMergeRefused(options?: { keep: true }) {
+    const repoPath = realpathSync(tempDir);
+    const target = await makeFixtureAgent(repoPath);
+    const bystander = await makeFixtureAgent(join(repoPath, "bystander-repo"));
+    await seedAbandonedOperation(bystander.agentDir);
+    const nestedCwd = join(target.worktreePath, "src", "nested");
+    await mkdir(nestedCwd, { recursive: true });
+    const bystanderBefore = await lifecycleFiles(bystander.agentDir);
+    const runner = makeMergeMock();
+    lifecycleSpawnCtx.set(runner);
+    setMergeSpawnRunner(runner);
+
+    for (const cwd of [target.worktreePath, nestedCwd]) {
+      await seedAbandonedOperation(target.agentDir);
+      const before = await lifecycleFiles(target.agentDir);
+      const result = await withCallerCwd(cwd, () => mergeAgent(target.agent, repoPath, options));
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toBe("Cannot merge agent from within its own worktree");
+      expect(await readOperationMarker(target.agentDir)).toBeNull();
+      expect(await lifecycleFiles(target.agentDir)).toEqual({ ...before, transient: expect.any(String) });
+    }
+
+    expect(spawnCalls).toEqual([]);
+    expect(await lifecycleFiles(bystander.agentDir)).toEqual(bystanderBefore);
+  }
+
   test("returns error when agent directory doesn't exist", async () => {
     const runner = makeMergeMock();
     lifecycleSpawnCtx.set(runner);
@@ -4980,70 +5068,31 @@ describe("mergeAgent (native)", () => {
   });
 
   test("returns error when merging from within agent's own worktree", async () => {
-    // Construct a repoPath such that worktreePath = join(repoPath, ".ittybitty/agents/agent-abc/repo")
-    // is a prefix of process.cwd(). Since cwd is something like /Users/.../repo, we use
-    // a repoPath that makes worktreePath equal to or a prefix of the actual cwd.
-    const cwd = process.cwd();
-    // worktreePath = join(repoPath, ".ittybitty", "agents", "agent-abc", "repo")
-    // We need cwd.startsWith(worktreePath), so worktreePath must be a prefix of cwd.
-    // Set repoPath such that worktreePath == cwd (or prefix).
-    // cwd = repoPath + "/.ittybitty/agents/agent-abc/repo"
-    // => repoPath = cwd without the suffix
-    const suffix = join(".ittybitty", "agents", "agent-abc", "repo");
-    // We need to create a repoPath where worktreePath is exactly cwd
-    // So repoPath = cwd.slice(0, cwd.length - suffix.length - 1)
-    // But this requires cwd to end with the suffix, which it won't.
-    // Instead, use a trick: set repoPath to the parent of cwd's ancestor such that
-    // worktreePath = cwd. We can use a temporary directory approach:
-    // Create the agent dir under a path that makes worktreePath == cwd
-    // Actually simplest: just use "/" as repoPath and agent ID such that
-    // worktreePath would be /.ittybitty/agents/agent-abc/repo — that's not cwd.
-    //
-    // Best approach: The check is `process.cwd().startsWith(worktreePath)`.
-    // We need worktreePath to be a prefix of cwd.
-    // worktreePath = join(repoPath, ".ittybitty", "agents", "agent-abc", "repo")
-    // If we set repoPath so that worktreePath = "/" (which is a prefix of everything),
-    // that would work, but it's not realistic.
-    //
-    // Most practical: construct repoPath from cwd by stripping the suffix.
-    // cwd = /Users/adamwulf/Developer/bun/itsybitsy/.ittybitty/agents/agent-d33c5f85/repo
-    // If we use a different agent ID, we can make worktreePath = cwd.
-    // We need the agent to have the same ID as the agent directory in cwd.
-    // Extract our own agent ID from cwd:
-    const cwdMatch = cwd.match(/\/.ittybitty\/agents\/([^/]+)\/repo/);
-    if (!cwdMatch) {
-      // Not running inside an agent worktree — skip this test gracefully
-      // by testing with a constructed path that IS a prefix
-      // This shouldn't happen in CI, but handle it anyway
-      return;
-    }
-    const ourAgentId = cwdMatch[1]!;
-    // Construct repoPath so that worktreePath = cwd
-    const repoPath = cwd.replace(new RegExp(`/\\.ittybitty/agents/${ourAgentId}/repo$`), "");
+    await expectSelfMergeRefused();
+  });
 
-    // Create the agent directory at the expected path
-    const agentDir = join(repoPath, ".ittybitty", "agents", ourAgentId);
-    // agentDir should already exist (it's our own agent dir)
-    // We just need meta.json to exist there — but we shouldn't modify the real one.
-    // Instead, use a different approach: just ensure dirExists check passes
-    // by verifying the meta.json already exists from our actual agent.
-    const metaExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
-    if (!metaExists) return; // Can't run this test
-
+  test("a merge follows the named agent's paths, never an agent-shaped caller cwd", async () => {
+    const repoPath = realpathSync(tempDir);
+    const caller = await makeFixtureAgent(join(repoPath, "caller-repo"), "agent-caller");
+    const target = await makeFixtureAgent(repoPath);
+    await seedAbandonedOperation(caller.agentDir);
+    await seedAbandonedOperation(target.agentDir);
+    const callerBefore = await lifecycleFiles(caller.agentDir);
     const runner = makeMergeMock();
     lifecycleSpawnCtx.set(runner);
     setMergeSpawnRunner(runner);
 
-    const agent = _makeAgent({
-      id: ourAgentId,
-      repoPath,
-      repoName: "test",
-      meta: { tmux_session: `tmux-${ourAgentId}` } as any,
-    });
-    const result = await mergeAgent(agent, tempDir);
+    const result = await withCallerCwd(caller.worktreePath, () =>
+      mergeAgent(target.agent, repoPath, { keep: true }),
+    );
 
-    expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("Cannot merge agent from within its own worktree");
+    expect(result.ok).toBe(true);
+    // The cwd only classifies the caller as an agent (--ff-only); the claim and
+    // every command belong to the named agent.
+    expect(spawnCalls).toContainEqual(["git", "-C", repoPath, "merge", "--ff-only", "agent/agent-abc"]);
+    expect(spawnCalls.flat().filter((arg) => arg.includes(caller.agentDir))).toEqual([]);
+    expect(await lifecycleFiles(caller.agentDir)).toEqual(callerBefore);
+    expect(await readOperationMarker(target.agentDir)).toBeNull();
   });
 
   test("returns error when checkout fails", async () => {
@@ -5647,32 +5696,7 @@ describe("mergeAgent (native)", () => {
     });
 
     test("refuses from within the agent's own worktree (shared preflight)", async () => {
-      // Same construction as the closing-merge test above: pick a repoPath whose
-      // agent worktree path is a prefix of this process's cwd.
-      const cwd = process.cwd();
-      const marker = "/.ittybitty/agents/";
-      const idx = cwd.indexOf(marker);
-      if (idx === -1) return; // not running inside an agent worktree — nothing to prove
-      const repoPath = cwd.slice(0, idx);
-      const ourAgentId = cwd.slice(idx + marker.length).split("/")[0]!;
-      const agentDir = join(repoPath, ".ittybitty", "agents", ourAgentId);
-      const metaExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
-      if (!metaExists) return;
-
-      const runner = makeMergeMock();
-      lifecycleSpawnCtx.set(runner);
-      setMergeSpawnRunner(runner);
-
-      const agent = _makeAgent({
-        id: ourAgentId,
-        repoPath,
-        repoName: "test",
-        meta: { tmux_session: `tmux-${ourAgentId}` } as any,
-      });
-      const result = await mergeAgent(agent, tempDir, KEEP);
-
-      expect(result.ok).toBe(false);
-      expect(result.stderr).toContain("Cannot merge agent from within its own worktree");
+      await expectSelfMergeRefused(KEEP);
     });
   });
 });

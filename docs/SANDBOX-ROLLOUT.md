@@ -54,11 +54,11 @@ bun test
 bunx tsc --noEmit
 bun run build
 ./ib list-types
-bun test src/sandbox.test.ts --test-name-pattern LIVE
+IB_LIVE_SANDBOX=1 bun test src/sandbox-detect.test.ts src/sandbox-collector.test.ts src/sandbox.test.ts --test-name-pattern LIVE
 IB_LIVE_BOOT=1 bun test src/sandbox.test.ts --test-name-pattern "LIVE claude boot"
 ```
 
-Inspect the live test output: a capability skip is not a kernel-enforcement pass. In the initial Codex session even an allow-default profile failed with `sandbox_apply: Operation not permitted`; the Claude worker session applied it successfully.
+Plain `bun test` skips these probes, and it also passes inside a sandbox: it covers the same rules without the kernel. With an opt-in, a host that cannot apply a profile fails only the capability row (`CAPABILITY UNAVAILABLE`) and skips the probes, which is not a kernel-enforcement pass. In the initial Codex session even an allow-default profile failed with `sandbox_apply: Operation not permitted`; the Claude worker session applied it successfully.
 
 Test a repository worker launch with the candidate and matching helper binary. Before broad deployment, verify:
 

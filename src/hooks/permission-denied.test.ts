@@ -7,6 +7,7 @@ import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { setUserHome, resetUserHome } from "../home";
 import { hookPermissionDenied } from "./permission-denied";
 import { resolveHookLogAgentDir } from "../index";
+import { runIsolatedCli } from "../test-cli-runner";
 import {
   resetBoundNoWorktreeCallerResolver,
   resetNoWorktreeRepoRootsLoader,
@@ -190,16 +191,12 @@ describe("hookPermissionDenied", () => {
         join(fakeRoot, ".ittybitty", "agents", fakeId, "meta.json"),
         JSON.stringify({ id: fakeId, worktree: false }),
       );
-      const proc = Bun.spawn(
-        ["bun", "run", join(import.meta.dir, "..", "index.ts"), "hook-permission-denied", fakeId],
-        { cwd: fakeCwd, stdin: "pipe", stdout: "pipe", stderr: "pipe" },
-      );
-      proc.stdin.write('{"tool_name":"Bash"}');
-      proc.stdin.end();
-      const stdout = await new Response(proc.stdout).text();
-      const stderr = await new Response(proc.stderr).text();
+      const { stdout, stderr, exitCode } = await runIsolatedCli(["hook-permission-denied", fakeId], {
+        cwd: fakeCwd,
+        stdin: '{"tool_name":"Bash"}',
+      });
 
-      expect(await proc.exited).toBe(0);
+      expect(exitCode).toBe(0);
       expect(stderr).toBe("");
       expect(JSON.parse(stdout).hookSpecificOutput.decision.behavior).toBe("deny");
     } finally {

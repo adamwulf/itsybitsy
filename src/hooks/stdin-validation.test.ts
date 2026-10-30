@@ -7,6 +7,7 @@ import { test, expect, describe, beforeAll, afterAll, setDefaultTimeout } from "
 import { join } from "path";
 import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
+import { runIsolatedCli } from "../test-cli-runner";
 
 // Every test here spawns a real `bun` subprocess, which has to transpile the
 // whole index.ts import graph before it does anything. That is far more
@@ -16,8 +17,6 @@ import { tmpdir } from "os";
 // Raising the bound only changes how long a genuinely stuck spawn takes to
 // fail; it weakens no assertion, and passing tests are unaffected.
 setDefaultTimeout(60_000);
-
-const INDEX_PATH = join(import.meta.dir, "..", "index.ts");
 
 // Temp directory structured as .ittybitty/agents/<id>/repo so that
 // resolveAgentDir() points debug-logs writes into /tmp instead of the
@@ -33,19 +32,11 @@ let hookCwd: string;
  * resolves `$HOME/.itsybitsy` (via `resolveAgentFromCwd`) before it looks at the
  * cwd at all.
  *
- * The override that matters for this file is `process.env.HOME`, and only that
- * one: these tests do not call hook code in-process, they spawn a real
- * `bun index.ts` SUBPROCESS. `setCoordinatorHome` is in-process state and does
- * not cross a process boundary, so it would do nothing here — whereas `Bun.spawn`
- * inherits `process.env`, so redirecting HOME in the parent is what actually
- * moves the child off the developer's real `~/.itsybitsy`.
- *
  * Deliberately NOT seeded with `ensureAgentTypesDir()`: these tests feed
  * malformed stdin and assert the hooks reject it, so no agent-type lookup is
  * reached. Verified — the whole file passes against an empty home.
  */
 let testHome: string;
-let realHome: string | undefined;
 
 beforeAll(async () => {
   tempBase = await mkdtemp(join(tmpdir(), "ib-hook-test-"));
@@ -53,35 +44,15 @@ beforeAll(async () => {
   await mkdir(hookCwd, { recursive: true });
 
   testHome = await mkdtemp(join(tmpdir(), "ib-stdin-validation-home-"));
-  realHome = process.env.HOME;
-  process.env.HOME = testHome;
 });
 
 afterAll(async () => {
-  if (realHome === undefined) delete process.env.HOME;
-  else process.env.HOME = realHome;
   await rm(testHome, { recursive: true, force: true });
   await rm(tempBase, { recursive: true, force: true });
 });
 
-/** Run a hook subcommand via `bun index.ts`, piping stdin, returning stdout/stderr/exitCode. */
-async function runHook(
-  args: string[],
-  stdin: string
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = Bun.spawn(["bun", INDEX_PATH, ...args], {
-    cwd: hookCwd,
-    stdin: new Response(stdin).body!,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { stdout, stderr, exitCode };
-}
+/** Run a hook subcommand in a CLI subprocess, piping stdin, returning stdout/stderr/exitCode. */
+const runHook = (args: string[], stdin: string) => runIsolatedCli(args, { cwd: hookCwd, home: testHome, stdin });
 
 // ── hook-check-path stdin validation ──────────────────────────────────────────
 

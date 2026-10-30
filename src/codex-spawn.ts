@@ -109,6 +109,8 @@ export interface BuildCodexStartContentInput {
   extraWritableRoots?: string[];
   /** The worktree's Git dirs; required when `sandboxEnabled` is false. */
   gitRoots?: CodexGitRoots;
+  /** Translated frozen path policy; used only when our kernel sandbox is off. */
+  pathGrants?: Record<string, "read" | "write" | "deny">;
   /** Configure Codex to use Sakana Fugu and load its key at launch. */
   fugu?: boolean;
   /** Whether itsybitsy's kernel sandbox wraps this launch. */
@@ -154,6 +156,7 @@ export function buildCodexStartContent(input: BuildCodexStartContentInput): stri
     effort: input.codexEffort,
     extraWritableRoots: input.extraWritableRoots,
     permissionProfileGitRoots: nativeProtection.permissionProfileGitRoots,
+    permissionProfilePathGrants: input.sandboxEnabled ? undefined : input.pathGrants,
   });
 
   // Shell-quote each codex argv element so the resulting `codex ... ` line is
@@ -328,6 +331,8 @@ export interface BuildCodexResumeContentInput {
   extraWritableRoots?: string[];
   /** The worktree's Git dirs; required when `sandboxEnabled` is false. */
   gitRoots?: CodexGitRoots;
+  /** Translated frozen path policy; used only when our kernel sandbox is off. */
+  pathGrants?: Record<string, "read" | "write" | "deny">;
   /** Reconfigure Sakana Fugu for the resumed Codex session. */
   fugu?: boolean;
   /** Whether itsybitsy's kernel sandbox wraps this resume. */
@@ -387,6 +392,7 @@ export function buildCodexResumeContent(input: BuildCodexResumeContentInput): st
     effort: input.codexEffort,
     extraWritableRoots: input.extraWritableRoots,
     permissionProfileGitRoots: nativeProtection.permissionProfileGitRoots,
+    permissionProfilePathGrants: input.sandboxEnabled ? undefined : input.pathGrants,
   });
 
   const qSessionId = shellQuote(input.codexSessionId);

@@ -552,6 +552,55 @@ describe("buildCodexLaunchArgs — permission profile (itsybitsy kernel sandbox 
       expect(() => renderCodexPermissionProfileOverrides(gitRoots)).toThrow(/Unsafe Git directory for the codex permission profile/);
     }
   });
+
+  function renderedGrants(grants: Record<string, "read" | "write" | "deny">) {
+    const overrides = renderCodexPermissionProfileOverrides(GIT_ROOTS, grants);
+    const values = overrides.filter((value) => value.startsWith(`permissions.${CODEX_PERMISSION_PROFILE}.filesystem=`));
+    expect(values).toHaveLength(1);
+    return (Bun.TOML.parse(`filesystem=${values[0]!.split("=").slice(1).join("=")}`) as {
+      filesystem: Record<string, string>;
+    }).filesystem;
+  }
+
+  test("merges grants deterministically without duplicate TOML keys or upgrading reads", () => {
+    const grants = {
+      "/external/read only.with.dots": "read",
+      "/external/write": "write",
+      [GIT_ROOTS.gitDir]: "read",
+      [`${GIT_ROOTS.commonDir}/objects`]: "write",
+      [`${GIT_ROOTS.gitDir}/logs`]: "read",
+    } as const;
+    const parsed = renderedGrants(grants);
+    expect(parsed["/external/read only.with.dots"]).toBe("read");
+    expect(parsed["/external/write"]).toBe("write");
+    expect(parsed[GIT_ROOTS.gitDir]).toBe("write");
+    expect(parsed[`${GIT_ROOTS.gitDir}/logs`]).toBe("read");
+    expect(renderCodexPermissionProfileOverrides(GIT_ROOTS, grants)).toEqual(
+      renderCodexPermissionProfileOverrides(GIT_ROOTS, Object.fromEntries(Object.entries(grants).reverse())),
+    );
+  });
+
+  test("exact and ancestor denies cannot be reopened by required Git writes", () => {
+    const parsed = renderedGrants({
+      [GIT_ROOTS.gitDir]: "deny",
+      [GIT_ROOTS.commonDir]: "deny",
+    });
+    expect(parsed).toEqual({ [GIT_ROOTS.commonDir]: "deny", [GIT_ROOTS.gitDir]: "deny" });
+    const globbed = renderedGrants({ [`${GIT_ROOTS.commonDir}/**`]: "deny" });
+    expect(globbed).toEqual({ [`${GIT_ROOTS.commonDir}/**`]: "deny" });
+  });
+
+  test("rejects unsafe translated keys and invalid permission values", () => {
+    for (const path of ["relative/path", "/unsafe'quote", '/unsafe"quote', "/unsafe\\slash", "/unsafe\nline", "/unsafe\x7f"]) {
+      expect(() => renderedGrants({ [path]: "read" })).toThrow("Unsafe path for the codex permission profile");
+    }
+    expect(() => renderedGrants({ "/external": "execute" as "read" })).toThrow("Invalid codex path permission");
+  });
+
+  test("enabled-mode launch ignores translated grants, including invalid keys", () => {
+    const input = { ibBinaryPath: "/usr/local/bin/ib", agentId: "agent-abc123", agentDir: "/var/agents/agent-abc123" };
+    expect(buildCodexLaunchArgs({ ...input, permissionProfilePathGrants: { "unsafe'path": "read" } })).toEqual(buildCodexLaunchArgs(input));
+  });
 });
 
 describe("buildCodexLaunchArgs — model_reasoning_effort override", () => {

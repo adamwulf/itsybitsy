@@ -3186,6 +3186,8 @@ At spawn and resume, Codex/Fugu always use `-a never`, so native approval UI is 
 - **Resume** re-passes the identical flags. Per the codex 0.165.0 source, a resume request that carries these permission keys suppresses the session's saved permissions. So resume uses this profile both for sessions spawned under it and for sessions spawned before it with `-s workspace-write`.
 - **Status.** Verified against the codex 0.165.0 source and by tests. **Live checks have NOT passed yet** (see `docs/SANDBOX-ROLLOUT.md`).
 
+**Path forwarding (2026-10-30).** Disabled Codex/Fugu spawn merges translated `resolvedPathsConfig` into the same filesystem map; resume translates frozen `meta.paths`. Exact and plain trailing `/**` allow entries become direct roots; other allow globs expand only to existing authorized matches at launch/resume, with no enclosing-directory broadening. New matches require the next launch/resume. Read stays read, write permits both, equal-path write wins, and denies cannot be reopened by explicit Git grants. Existing runtime roots, native protected children, hooks, approval flags, and network grants remain. Unsafe or unrepresentable entries refuse launch instead of widening permissions. Enabled mode does not translate native grants. The native baseline remains broader than hook policy, and this forwarding has not passed live sandbox enforcement checks. See the path-forwarding addendum in SPEC-CODEX-MODEL.md for limitations.
+
 Details and residual risks: SPEC-CODEX-MODEL.md, permission-profile addendum.
 
 **Key constraints (the gritty ones):**
@@ -3264,7 +3266,7 @@ files or shared state. Rehire applies the same pre-mutation restriction.
 - **codex role instructions on resume:** the SessionStart hook runs with `source: "resume"` and adds the role text built from the current frozen meta (so `ib sandbox refresh` policy changes are included) before the first resumed turn. Copies from earlier in the session stay in the resumed history until the next compaction drops them.
 - **Agents spawned before this change:** there is no migration code. Retire pre-change codex/fugu and agy agents and start fresh ones with `ib new-agent`; do not resume or rehire them.
 
-Resume is a hot-reload-equivalent: any change to the agent-type allow/deny lists takes effect on the next resume (codex has no live hot-reload — §18.13 Risk 4).
+Path policy remains frozen on resume: type edits take effect only after `ib sandbox refresh` or a new agent. Disabled Codex/Fugu resume re-expands the frozen glob entries against the current filesystem; it does not reload paths from type files.
 
 ### 18.8 Watchdog (Codex side)
 

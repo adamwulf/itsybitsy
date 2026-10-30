@@ -41,6 +41,58 @@ afterEach(async () => {
   }
 });
 
+type LiveCapability = { state: "off" } | { state: "unavailable"; reason: string } | { state: "available" };
+
+function resolveLiveCapability(optIn: string | undefined, check: () => void): LiveCapability {
+  if (optIn !== "1") return { state: "off" };
+  try {
+    check();
+    return { state: "available" };
+  } catch (error) {
+    return { state: "unavailable", reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function assertLiveCapability(capability: LiveCapability): void {
+  if (capability.state === "unavailable") {
+    throw new Error(`CAPABILITY UNAVAILABLE, no probe ran: ${capability.reason}`);
+  }
+}
+
+/**
+ * The observations the real caller resolver will make of this process, made the
+ * way it makes them: its parent table reaching pid 1, its start time, and a
+ * signal-0 check. Returns the start epoch; throws what the host cannot observe.
+ */
+function readLiveCallerEpoch(): number {
+  const ps = (what: string, args: string[]): string => {
+    const result = Bun.spawnSync(["/bin/ps", ...args], {
+      stdout: "pipe", stderr: "pipe", timeout: 2_000,
+      env: { LC_ALL: "C", LC_TIME: "C" },
+    });
+    if (result.exitCode !== 0) {
+      throw new Error(`${what}: ps exited ${result.exitCode}: ${result.stderr.toString().trim()}`);
+    }
+    return result.stdout.toString();
+  };
+  const parents = new Map<number, number>();
+  for (const line of ps("parent table", ["-axo", "pid=,ppid="]).split("\n")) {
+    const fields = line.trim().match(/^(\d+)\s+(\d+)$/);
+    if (fields) parents.set(Number(fields[1]), Number(fields[2]));
+  }
+  let pid = process.pid;
+  for (let hops = 0; pid > 1; hops++) {
+    const parent = parents.get(pid);
+    if (parent === undefined || hops >= 128) throw new Error(`parent table has no complete ancestry at pid ${pid}`);
+    pid = parent;
+  }
+  const lstart = ps("start time", ["-o", "lstart=", "-p", String(process.pid)]).trim();
+  const epoch = Date.parse(lstart) / 1000;
+  if (!Number.isFinite(epoch) || epoch <= 0) throw new Error(`start time is not a date: ${JSON.stringify(lstart)}`);
+  process.kill(process.pid, 0);
+  return epoch;
+}
+
 describe("registered hook agent binding", () => {
   test("shared-repo identity follows the verified process, not a forged cwd", async () => {
     const repo = await makeRepo();
@@ -246,8 +298,12 @@ describe("registered hook agent binding when the repo root is not readable", () 
     for (const spy of processSpies.splice(0)) spy.mockRestore();
   });
 
+  /** One `ps` observation. An answer that throws is a ps the host refuses to spawn. */
+  type PsAnswer = () => { exitCode?: number; stdout?: string; stderr?: string };
+
   function observeFixtureProcesses(
-    parentTable = `${process.pid} ${FIXTURE_CLI_PID}\n${FIXTURE_CLI_PID} 1\n`,
+    parentTable: PsAnswer = () => ({ stdout: `${process.pid} ${FIXTURE_CLI_PID}\n${FIXTURE_CLI_PID} 1\n` }),
+    startTime: PsAnswer = () => ({ stdout: FIXTURE_CLI_START }),
   ): string[][] {
     const psCalls: string[][] = [];
     const realSpawnSync = Bun.spawnSync;
@@ -256,11 +312,11 @@ describe("registered hook agent binding when the repo root is not readable", () 
       spyOn(Bun, "spawnSync").mockImplementation(((args: string[], ...rest: unknown[]) => {
         if (args[0] !== "/bin/ps") return (realSpawnSync as (...a: unknown[]) => unknown).call(Bun, args, ...rest);
         psCalls.push(args);
-        const stdout = args.includes("lstart=") ? FIXTURE_CLI_START : parentTable;
-        return { exitCode: 0, stdout: Buffer.from(stdout) };
+        const { exitCode = 0, stdout = "", stderr = "" } = (args.includes("lstart=") ? startTime : parentTable)();
+        return { exitCode, stdout: Buffer.from(stdout), stderr: Buffer.from(stderr) };
       }) as typeof Bun.spawnSync),
       spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | string) =>
-        pid === FIXTURE_CLI_PID ? true : realKill.call(process, pid, signal)) as typeof process.kill),
+        pid === FIXTURE_CLI_PID || pid === process.pid ? true : realKill.call(process, pid, signal)) as typeof process.kill),
     );
     return psCalls;
   }
@@ -289,18 +345,70 @@ describe("registered hook agent binding when the repo root is not readable", () 
     expect(psCalls.filter((args) => args.includes("lstart="))).toHaveLength(4);
   });
 
-  test.skipIf(process.env.IB_LIVE_CALLER !== "1")("LIVE: the same search through actual OS process ancestry", async () => {
-    const lstart = Bun.spawnSync(["/bin/ps", "-o", "lstart=", "-p", String(process.pid)], {
-      env: { LC_ALL: "C", LC_TIME: "C" },
-    }).stdout.toString().trim();
-    await expectSearchFollowsSandboxPolicy(process.pid, Date.parse(lstart) / 1000);
+  // IB_LIVE_CALLER=1 bun test src/hooks/agent-context.test.ts --test-name-pattern LIVE
+  // A host that cannot observe its processes fails the capability row and skips
+  // only the probe: nothing was verified, and no product assertion failed.
+  let liveCliEpoch = Number.NaN;
+  const liveCaller = resolveLiveCapability(process.env.IB_LIVE_CALLER, () => {
+    liveCliEpoch = readLiveCallerEpoch();
+  });
+  if (liveCaller.state !== "off") {
+    test("LIVE: this host can observe process ancestry and start time", () => assertLiveCapability(liveCaller));
+  }
+  test.skipIf(liveCaller.state !== "available")("LIVE: the same search through actual OS process ancestry", async () => {
+    await expectSearchFollowsSandboxPolicy(process.pid, liveCliEpoch);
+  });
+
+  describe("the IB_LIVE_CALLER prerequisite", () => {
+    test("without the opt-in it is not even checked", () => {
+      const psCalls = observeFixtureProcesses();
+      for (const optIn of [undefined, "", "0", "true"]) {
+        expect(resolveLiveCapability(optIn, readLiveCallerEpoch)).toEqual({ state: "off" });
+      }
+      expect(psCalls).toEqual([]);
+    });
+
+    test("valid observations let the probe run with the observed start time", () => {
+      observeFixtureProcesses();
+      let epoch = Number.NaN;
+      const capability = resolveLiveCapability("1", () => { epoch = readLiveCallerEpoch(); });
+      expect(capability).toEqual({ state: "available" });
+      expect(() => assertLiveCapability(capability)).not.toThrow();
+      expect(epoch).toBe(FIXTURE_CLI_EPOCH);
+    });
+
+    const validParents: PsAnswer = () => ({ stdout: `${process.pid} ${FIXTURE_CLI_PID}\n${FIXTURE_CLI_PID} 1\n` });
+    const denied: PsAnswer = () => ({ exitCode: 1, stderr: "ps: Operation not permitted" });
+    const refused: PsAnswer = () => { throw new Error("EPERM: posix_spawn /bin/ps"); };
+    test.each<[string, PsAnswer, PsAnswer | undefined, string]>([
+      ["a parent table ps may not read", denied, undefined, "parent table: ps exited 1: ps: Operation not permitted"],
+      ["a ps the host refuses to spawn", refused, undefined, "EPERM: posix_spawn /bin/ps"],
+      ["an empty parent table", () => ({ stdout: "" }), undefined, "no complete ancestry"],
+      ["a parent table that stops short of pid 1", () => ({ stdout: `${process.pid} ${FIXTURE_CLI_PID}\n` }), undefined, "no complete ancestry"],
+      ["a cyclic parent table", () => ({ stdout: `${process.pid} ${FIXTURE_CLI_PID}\n${FIXTURE_CLI_PID} ${process.pid}\n` }), undefined, "no complete ancestry"],
+      ["a start time ps may not read", validParents, denied, "start time: ps exited 1: ps: Operation not permitted"],
+      ["an empty start time", validParents, () => ({ stdout: "" }), "not a date"],
+      ["an unparseable start time", validParents, () => ({ stdout: "not a date\n" }), "not a date"],
+    ])("%s is CAPABILITY UNAVAILABLE, not a binding failure", (_name, parentTable, startTime, reason) => {
+      observeFixtureProcesses(parentTable, startTime);
+      const capability = resolveLiveCapability("1", readLiveCallerEpoch);
+      expect(capability.state).toBe("unavailable");
+      expect(() => assertLiveCapability(capability)).toThrow("CAPABILITY UNAVAILABLE, no probe ran: ");
+      expect(() => assertLiveCapability(capability)).toThrow(reason);
+    });
+
+    test("a process the host will not signal is CAPABILITY UNAVAILABLE", () => {
+      observeFixtureProcesses();
+      spyOn(process, "kill").mockImplementation((() => { throw new Error("EPERM: kill"); }) as typeof process.kill);
+      expect(resolveLiveCapability("1", readLiveCallerEpoch)).toEqual({ state: "unavailable", reason: "EPERM: kill" });
+    });
   });
 
   test("a process that descends from no recorded CLI is not bound to the record", async () => {
     const repo = await realpath(await makeRepo());
     await writeSharedAgent(repo, "agent-shared");
     const registryHome = await registryFor([repo]);
-    const psCalls = observeFixtureProcesses(`${process.pid} 1\n`);
+    const psCalls = observeFixtureProcesses(() => ({ stdout: `${process.pid} 1\n` }));
     await expect(resolveBoundHookAgent("agent-shared", repo, { registryHome }))
       .rejects.toThrow("cwd is outside its worktree");
     expect(psCalls.filter((args) => args.includes("lstart="))).toEqual([]);

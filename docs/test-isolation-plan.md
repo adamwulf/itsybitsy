@@ -56,5 +56,5 @@ No migrations, backwards compatibility layers, new user-facing sandbox flags, or
 ## Progress
 
 - Architecture review approved by agent-d47b0c44; retired after reporting.
-- Isolation review by agent-213eea95 identified the live self-merge metadata mutation; the plan now explicitly includes its fixture conversion and blocks full-suite execution until it is safe. Revision awaiting confirmation.
-- Implementation and verification pending.
+- Isolation review by agent-213eea95 approved the revised plan after the live self-merge metadata mutation was explicitly included; reviewer retired after approval.
+- Implementation in three independent workstreams: CLI isolation, privileged probes, and hook/lifecycle fixtures. Full-suite verification remains blocked until all three are integrated safely.

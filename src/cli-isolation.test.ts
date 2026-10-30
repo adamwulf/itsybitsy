@@ -230,6 +230,8 @@ describe("CLI routing cannot reach a live agent", () => {
   let liveBefore: Record<string, string>;
   let repo: string;
   let caller: FixtureAgent;
+  let peer: FixtureAgent;
+  let livePeer: FixtureAgent;
   let calls: BrokerCall[];
   /** What the observed failure inherited: a harness context that names the live agent. */
   let inheritedContext: Record<string, string>;
@@ -237,7 +239,7 @@ describe("CLI routing cannot reach a live agent", () => {
   beforeEach(async () => {
     live = await createCliFixture();
     liveAgent = await live.addAgent(await live.addRepo("live-repo"), "agent-live", { canSpawnChildren: true });
-    await live.addAgent(liveAgent.repoPath, "agent-peer", { manager: "agent-live" });
+    livePeer = await live.addAgent(liveAgent.repoPath, "agent-peer", { manager: "agent-live" });
     await ensureSpawnBrokerDirs(liveAgent.agentDir);
     await writeHeartbeat(liveAgent);
     liveBefore = await snapshot(live.root);
@@ -253,7 +255,7 @@ describe("CLI routing cannot reach a live agent", () => {
     cli = await createCliFixture();
     repo = await cli.addRepo("caller-repo");
     caller = await cli.addAgent(repo, "agent-caller", { canSpawnChildren: true });
-    await cli.addAgent(repo, "agent-peer", { manager: "agent-caller" });
+    peer = await cli.addAgent(repo, "agent-peer", { manager: "agent-caller" });
     calls = [];
   });
 
@@ -529,6 +531,134 @@ describe("CLI routing cannot reach a live agent", () => {
       expect(result.stderr).toContain("cannot verify caller");
       expect(result.exitCode).toBe(1);
       expect(result.actions).toEqual([]);
+    });
+  });
+
+  describe("the real send handler writes only the fixture's outbox", () => {
+    // The routes above stop at a recorded sendMessage or a fake watchdog handler,
+    // and the driver does not guard file writes, so only these tests can see where
+    // the real handler's queue write lands. A recipient with a live watchdog gets
+    // its message queued and nothing typed: sendMessage leaves delivery to it.
+    const RECIPIENT = "agent-peer";
+
+    const outboxFile = (home: string, id: string) => join(home, ".itsybitsy", "agents", id, "outbox.jsonl");
+    const readOutboxRecords = async (home: string, id: string) =>
+      (await readFile(outboxFile(home, id), "utf-8")).trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+
+    beforeEach(async () => {
+      // The live recipient has the same id and already has a queue: a write that
+      // followed the id, or a HOME it should not have, changes these bytes.
+      await Bun.write(
+        outboxFile(live.home, RECIPIENT),
+        `${JSON.stringify({ id: "sentinel", message: "live message", fromAgent: "agent-live", raw: false, enqueuedAtMs: 1 })}\n`,
+      );
+      liveBefore = await snapshot(live.root);
+    });
+
+    test("direct: queues for the recipient as the cwd's agent, with no broker request", async () => {
+      const recipientMeta = await readFile(join(peer.agentDir, "meta.json"), "utf-8");
+      const deps = fakeWatchdogDeps(calls, repo);
+      // The caller's watchdog is live too, so a wrong turn into the broker would be served and seen.
+      const result = await withFixtureWatchdog(caller, deps, () => withFixtureWatchdog(peer, deps, () =>
+        cli.run(["send", RECIPIENT, "real", "delivery"], {
+          cwd: caller.sessionCwd,
+          env: inheritedContext,
+          actions: { sendMessage: "real" },
+        })));
+
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+      expect(result.actions).toEqual([]);
+      expect(await readOutboxRecords(cli.home, RECIPIENT)).toEqual([
+        expect.objectContaining({ message: "real delivery", fromAgent: "agent-caller", raw: false }),
+      ]);
+      expect(await readdir(join(cli.home, ".itsybitsy", "agents"))).toEqual([RECIPIENT]);
+      expect(calls).toEqual([]);
+      expect(await queueEntries(caller)).toEqual([]);
+      expect(await queueEntries(peer)).toEqual([]);
+      expect(await readFile(join(peer.agentDir, "meta.json"), "utf-8")).toBe(recipientMeta);
+      expect(await snapshot(live.root)).toEqual(liveBefore);
+    });
+
+    test("sandboxed with no live watchdog: falls back to the direct path, reusing the message it read", async () => {
+      // The broker reads stdin before it finds no watchdog; a second read would be empty.
+      const result = await withFixtureWatchdog(peer, fakeWatchdogDeps(calls, repo), () =>
+        cli.run(["send", RECIPIENT], {
+          cwd: caller.sessionCwd,
+          sandboxed: true,
+          stdin: "from stdin\n",
+          env: inheritedContext,
+          actions: { sendMessage: "real" },
+        }));
+
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+      expect(await readOutboxRecords(cli.home, RECIPIENT)).toEqual([
+        expect.objectContaining({ message: "from stdin", fromAgent: "agent-caller" }),
+      ]);
+      expect(calls).toEqual([]);
+      expect(await queueEntries(caller)).toEqual([]);
+      expect(await snapshot(live.root)).toEqual(liveBefore);
+    });
+
+    test("sandboxed self-send: stays direct even with a live watchdog, and queues for the caller", async () => {
+      const result = await withFixtureWatchdog(caller, fakeWatchdogDeps(calls, repo), () =>
+        cli.run(["send", caller.id, "note to self"], {
+          cwd: caller.sessionCwd,
+          sandboxed: true,
+          env: inheritedContext,
+          actions: { sendMessage: "real" },
+        }));
+
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+      expect(await readOutboxRecords(cli.home, caller.id)).toEqual([
+        expect.objectContaining({ message: "note to self", fromAgent: caller.id }),
+      ]);
+      expect(calls).toEqual([]);
+      expect(await queueEntries(caller)).toEqual([]);
+      expect(await snapshot(live.root)).toEqual(liveBefore);
+    });
+
+    test("with no live watchdog on the recipient, the send fails honestly: no real tmux, message still queued", async () => {
+      // The sender becomes the drainer, asks tmux whether the session exists, and
+      // a fixture has no tmux server. Any other tmux command would make the runner throw.
+      const bin = join(cli.root, "bin");
+      const marker = join(cli.root, "tmux-ran");
+      await mkdir(bin);
+      await Bun.write(join(bin, "tmux"), `#!/bin/sh\necho tmux >> '${marker}'\n`);
+      await chmod(join(bin, "tmux"), 0o755);
+
+      const result = await cli.run(["send", RECIPIENT, "no drainer"], {
+        cwd: caller.sessionCwd,
+        env: { ...inheritedContext, PATH: `${bin}:/usr/bin:/bin` },
+        actions: { sendMessage: "real" },
+      });
+
+      expect(result.stderr).toContain("Agent 'agent-peer' is not running");
+      expect(result.exitCode).toBe(1);
+      expect(await Bun.file(marker).exists()).toBe(false);
+      expect(await readOutboxRecords(cli.home, RECIPIENT)).toEqual([
+        expect.objectContaining({ message: "no drainer", fromAgent: "agent-caller" }),
+      ]);
+      expect(await snapshot(live.root)).toEqual(liveBefore);
+    });
+
+    test("the control: the queue follows HOME, and the snapshot notices a write to it", async () => {
+      const result = await withFixtureWatchdog(livePeer, fakeWatchdogDeps(calls, livePeer.repoPath), () =>
+        cli.run(["send", RECIPIENT, "aimed at the sentinel"], {
+          home: live.home,
+          cwd: liveAgent.sessionCwd,
+          actions: { sendMessage: "real" },
+        }));
+
+      expect(result.exitCode).toBe(0);
+      expect((await readOutboxRecords(live.home, RECIPIENT)).map((record) => record.message)).toEqual([
+        "live message",
+        "aimed at the sentinel",
+      ]);
+      expect(await Bun.file(outboxFile(cli.home, RECIPIENT)).exists()).toBe(false);
+      expect(await snapshot(live.root)).not.toEqual(liveBefore);
     });
   });
 

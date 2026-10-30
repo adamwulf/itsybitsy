@@ -284,6 +284,16 @@ Builds the navigable item list for the add-repo folder browser dialog. Given a c
 - Validates session name with `/^[\w-]+$/` before interpolating into `--command`.
 - Both functions return `{ ok, message }`.
 
+## CLI test isolation (`src/test-cli-runner.ts`, `src/test-cli-driver.ts`)
+
+Tests run the CLI through the runner, in a temporary cwd and HOME with an explicit minimal environment, and through the driver instead of a real entry point. A temporary HOME is not enough on its own: routing identifies the caller from the cwd, and the caller check reads the OS account's registry (`userInfo()`) and the real process ancestry. See `docs/test-isolation-plan.md`.
+
+- **Driver**: installs its guards before loading production modules, because `SpawnContext` captures `Bun.spawn` at module load. Processes, signals and network attempts are logged and thrown; the log is what fails the test, since production sometimes swallows the throw (`tgtyping`). `tmux list-sessions` and `has-session` answer "no server". `isSandboxedProcess()` comes from the test. The real `resolveNoWorktreeCaller` runs against the fixture registry and the test's ancestry, for both the CLI and hook resolvers.
+- **`cliActions` (`src/index.ts`)**: the handlers `main()` calls after parsing and routing; the driver's seam. A handler refuses unless the test names it: `"record"` to assert its arguments, `"real"` to run it. Commands outside `cliActions` always run for real under the guards, and their file writes land in the fixture because every path derives from the cwd, HOME or registry.
+- **Brokers**: the client stays real. `withFixtureWatchdog` serves a fixture agent's queue with the real `processSpawnRequests` and fake terminal operations.
+- **Boundary not covered by the guards**: file writes to an absolute path that ignores the fixture. Production has these only in `src/message-attachments.ts` (send-time staging, not reached by `ib send`), the merge rebase check's `/tmp/ib-rebase-check-*` (after a blocked git call) and `src/hooks/inject-status.ts`'s `/tmp/ib-status-hash-*`.
+- **Real entry points**: `runInertEntryPoint` refuses anything that could mutate. `src/cli-isolation.test.ts` has the regression tests, a sweep of every dispatch route against a sentinel "live" agent, and checks that no production code reads the driver's config and no test launches an entry point directly.
+
 ## Debugging — `ib state`
 
 `ib state` (or `ib state --json`) lists every agent with its tmux pane PID, claude PID, and watchdog PID, plus liveness for each (✓ alive, ✗ dead, — missing). When pane_pid has child processes that aren't the recorded claude_pid, they show as `[orphans: N]`. Implementation: `src/state-command.ts`.

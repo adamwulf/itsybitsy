@@ -970,6 +970,27 @@ function printUsage(): void {
   console.log("  tgtyping            Send Telegram typing indicator (for hook use)");
 }
 
+type IbCommands = typeof import("./ib-commands");
+
+/**
+ * The handlers main() calls once it has parsed a command's arguments and chosen
+ * its route (brokers run first and are not in here). Mutable as a test seam:
+ * src/test-cli-driver.ts replaces entries so a subprocess test can assert what
+ * the parser produced without running the command. Nothing in production writes
+ * this object and no flag or environment variable reaches it.
+ */
+export const cliActions = {
+  newAgent: async (...a: Parameters<IbCommands["newAgent"]>) => (await import("./ib-commands")).newAgent(...a),
+  sendMessage: async (...a: Parameters<IbCommands["sendMessage"]>) => (await import("./ib-commands")).sendMessage(...a),
+  teamSend: async (...a: Parameters<IbCommands["teamSend"]>) => (await import("./ib-commands")).teamSend(...a),
+  sendToSystemCoordinator: (...a: Parameters<typeof sendToSystemCoordinator>) => sendToSystemCoordinator(...a),
+  retireAgent: async (...a: Parameters<IbCommands["retireAgent"]>) => (await import("./ib-commands")).retireAgent(...a),
+  rehireAgent: async (...a: Parameters<IbCommands["rehireAgent"]>) => (await import("./ib-commands")).rehireAgent(...a),
+  mergeAgent: async (...a: Parameters<IbCommands["mergeAgent"]>) => (await import("./ib-commands")).mergeAgent(...a),
+  nukeAgent: async (...a: Parameters<IbCommands["nukeAgent"]>) => (await import("./ib-commands")).nukeAgent(...a),
+  askQuestion: async (...a: Parameters<IbCommands["askQuestion"]>) => (await import("./ib-commands")).askQuestion(...a),
+};
+
 // Exported so the root `index.ts` shim can dispatch it. That shim is the entry
 // point for AGENTS.md's documented `bun build --compile ... index.ts`, where
 // `import.meta.main` is false *here* — see the guard at the bottom of this file.
@@ -1949,7 +1970,7 @@ export async function main() {
           console.error(usage);
           process.exit(1);
         }
-        const result = await sendToSystemCoordinator(coordMessage, fromAgent ? { fromAgent } : undefined);
+        const result = await cliActions.sendToSystemCoordinator(coordMessage, fromAgent ? { fromAgent } : undefined);
         await printAndExit(result);
         break;
       }
@@ -1964,8 +1985,7 @@ export async function main() {
           console.error(usage);
           process.exit(1);
         }
-        const { teamSend } = await import("./ib-commands");
-        await printAndExit(await teamSend(team.name, team.members, teamMessage, fromAgent ? { fromAgent } : undefined, repos));
+        await printAndExit(await cliActions.teamSend(team.name, team.members, teamMessage, fromAgent ? { fromAgent } : undefined, repos));
         break;
       }
 
@@ -1978,8 +1998,7 @@ export async function main() {
         console.error(usage);
         process.exit(1);
       }
-      const { sendMessage } = await import("./ib-commands");
-      await printAndExit(await sendMessage(resolvedAgent, message, fromAgent ? { fromAgent } : undefined));
+      await printAndExit(await cliActions.sendMessage(resolvedAgent, message, fromAgent ? { fromAgent } : undefined));
       break;
     }
     case "nickname": {
@@ -2013,8 +2032,7 @@ export async function main() {
         const brokered = await routeLifecycleThroughWatchdog({ op: "retire", target: agent.id });
         if (brokered) await printAndExit(brokered);
       }
-      const { retireAgent } = await import("./ib-commands");
-      await printAndExit(await retireAgent(agent));
+      await printAndExit(await cliActions.retireAgent(agent));
       break;
     }
     case "rehire": {
@@ -2035,8 +2053,7 @@ export async function main() {
         const brokered = await routeLifecycleThroughWatchdog({ op: "rehire", target: agentId });
         if (brokered) await printAndExit(brokered);
       }
-      const { rehireAgent } = await import("./ib-commands");
-      await printAndExit(await rehireAgent(agentId));
+      await printAndExit(await cliActions.rehireAgent(agentId));
       break;
     }
     case "nuke": {
@@ -2046,7 +2063,7 @@ export async function main() {
       // misconfigured hook), mirroring newAgent()'s caller gate. A human /
       // primary-Claude caller resolves to null and is unrestricted; a verified
       // agent caller is refused. An unverifiable caller is denied (fail-closed).
-      const { nukeAgent, resolveCallerAgentContext } = await import("./ib-commands");
+      const { resolveCallerAgentContext } = await import("./ib-commands");
       try {
         const nukeCaller = await resolveCallerAgentContext(process.cwd());
         if (nukeCaller) {
@@ -2060,7 +2077,7 @@ export async function main() {
       }
       const repos = await listRepos();
       const agent = await requireAgent(args[1], repos);
-      await printAndExit(await nukeAgent(agent));
+      await printAndExit(await cliActions.nukeAgent(agent));
       break;
     }
     case "merge-check": {
@@ -2092,8 +2109,7 @@ export async function main() {
         console.error(resolved.error);
         process.exit(1);
       }
-      const { mergeAgent } = await import("./ib-commands");
-      await printAndExit(await mergeAgent(agent, resolved.targetDir, { keep: parsedMerge.keep }));
+      await printAndExit(await cliActions.mergeAgent(agent, resolved.targetDir, { keep: parsedMerge.keep }));
       break;
     }
     case "sandbox": {
@@ -2467,8 +2483,7 @@ export async function main() {
         }
       }
 
-      const { newAgent } = await import("./ib-commands");
-      await printAndExit(await newAgent(repoPath, prompt, opts));
+      await printAndExit(await cliActions.newAgent(repoPath, prompt, opts));
       break;
     }
     case "ack": {
@@ -2569,8 +2584,7 @@ export async function main() {
         process.exit(1);
       }
 
-      const { askQuestion } = await import("./ib-commands");
-      await printAndExit(await askQuestion(askAgent.repoPath, askAgentId, askQuestionText));
+      await printAndExit(await cliActions.askQuestion(askAgent.repoPath, askAgentId, askQuestionText));
       break;
     }
     case "log": {

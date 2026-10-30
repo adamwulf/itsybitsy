@@ -6,6 +6,7 @@ import { processTaskIntercept } from "./intercept-task";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { ensureAgentTypesDir } from "../agent-types";
 import { setUserHome, resetUserHome } from "../home";
+import { runIsolatedCli } from "../test-cli-runner";
 import {
   resetBoundNoWorktreeCallerResolver,
   resetNoWorktreeRepoRootsLoader,
@@ -678,25 +679,16 @@ describe("no-worktree explicit identity", () => {
     try {
       const cwd = join(ctx.root, "nested");
       await fs.mkdir(cwd, { recursive: true });
-      const proc = Bun.spawn(
-        ["bun", "run", join(import.meta.dir, "..", "index.ts"), "hooks", "intercept-task", agentId],
-        {
-          cwd,
-          env: { ...process.env, HOME: testHome },
-          stdin: "pipe",
-          stdout: "pipe",
-          stderr: "pipe",
-        },
-      );
-      proc.stdin.write(JSON.stringify({
-        tool_name: "AskUserQuestion",
-        tool_input: { question: "Can I?" },
+      const { stdout, stderr, exitCode } = await runIsolatedCli(["hooks", "intercept-task", agentId], {
         cwd,
-      }));
-      proc.stdin.end();
-      const stdout = await new Response(proc.stdout).text();
-      const stderr = await new Response(proc.stderr).text();
-      expect(await proc.exited).toBe(0);
+        home: testHome,
+        stdin: JSON.stringify({
+          tool_name: "AskUserQuestion",
+          tool_input: { question: "Can I?" },
+          cwd,
+        }),
+      });
+      expect(exitCode).toBe(0);
       expect(stderr).toBe("");
       const hookOutput = JSON.parse(stdout).hookSpecificOutput;
       expect(hookOutput.permissionDecision).toBe("deny");

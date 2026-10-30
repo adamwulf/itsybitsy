@@ -9,6 +9,7 @@ import {
   hookInjectTimestamp,
 } from "./inject-timestamp";
 import { resetUserConfigPath, setUserConfigPath } from "../config";
+import { runIsolatedCli } from "../test-cli-runner";
 import {
   resetBoundNoWorktreeCallerResolver,
   resetNoWorktreeRepoRootsLoader,
@@ -281,22 +282,13 @@ describe("hookInjectTimestamp cwd identity resolution", () => {
       JSON.stringify({ hooks: { injectTimestamp: true } }),
     );
 
-    const proc = Bun.spawn(
-      ["bun", "run", join(import.meta.dir, "..", "index.ts"), "hooks", "inject-timestamp", agentId],
-      {
-        cwd,
-        env: { ...process.env, HOME: cliHome },
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-      },
-    );
-    proc.stdin.write(JSON.stringify({ hook_event_name: "PostToolUse" }));
-    proc.stdin.end();
-    const stdout = await new Response(proc.stdout).text();
-    const stderr = await new Response(proc.stderr).text();
+    const { stdout, stderr, exitCode } = await runIsolatedCli(["hooks", "inject-timestamp", agentId], {
+      cwd,
+      home: cliHome,
+      stdin: JSON.stringify({ hook_event_name: "PostToolUse" }),
+    });
 
-    expect(await proc.exited).toBe(0);
+    expect(exitCode).toBe(0);
     expect(stderr).toBe("");
     expect(stdout).toBe("");
   });

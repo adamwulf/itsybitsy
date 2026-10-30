@@ -31,6 +31,7 @@ import {
   setNewAgentNoWorktreeCallerResolver,
   resetNewAgentNoWorktreeCallerResolver,
 } from "./ib-commands";
+import { runIsolatedCli } from "./test-cli-runner";
 
 let root: string;
 
@@ -162,22 +163,8 @@ describe("ackAllSubagents — manager shortcut", () => {
   });
 
   test("the CLI dispatches bare ack from a manager session", async () => {
-    // Inject the resolver override in the subprocess too, so process ancestry
-    // can never select a real registered worktree:false agent for this test.
-    const script = join(root, "cli.ts");
-    await Bun.write(script,
-      `import { setNewAgentNoWorktreeCallerResolver } from ${JSON.stringify(join(import.meta.dir, "ib-commands.ts"))};\n` +
-      `import { main } from ${JSON.stringify(join(import.meta.dir, "index.ts"))};\n` +
-      "setNewAgentNoWorktreeCallerResolver(async () => null);\nawait main();\n");
-    const proc = Bun.spawn({
-      cmd: [process.execPath, script, "ack"],
-      cwd: sessionOf("repo", "mgr"),
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const stdout = await new Response(proc.stdout).text();
-    const stderr = await new Response(proc.stderr).text();
-    expect(await proc.exited).toBe(0);
+    const { stdout, stderr, exitCode } = await runIsolatedCli(["ack"], { cwd: sessionOf("repo", "mgr") });
+    expect(exitCode).toBe(0);
     expect(stderr).toBe("");
     expect(stdout).toContain("Acknowledged child (waiting)");
     expect((await readMeta("repo", "child")).ack).toMatchObject({ by: "mgr", state: "waiting" });

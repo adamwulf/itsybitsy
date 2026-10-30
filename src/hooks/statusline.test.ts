@@ -6,6 +6,7 @@ import { hookStatusline, statuslineRunnerCtx } from "./statusline";
 import { CLAUDE_RATE_LIMITS_FILE } from "../claude-rate-limits";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { setUserHome, resetUserHome } from "../home";
+import { runIsolatedCli } from "../test-cli-runner";
 
 const NOW_MS = Date.UTC(2026, 9, 3, 23, 0, 0);
 const NOW_S = NOW_MS / 1000;
@@ -140,23 +141,12 @@ describe("hookStatusline", () => {
     // Real entry point, real /bin/sh runner, a harmless printf as the user's
     // statusline. Output must pass through unchanged — no added newline.
     await writeUserSettings({ statusLine: { type: "command", command: "printf 'line one\\nline two\\n'" } });
-    const proc = Bun.spawn(
-      ["bun", "run", join(import.meta.dir, "..", "index.ts"), "hooks", "statusline", "agent-cli"],
-      {
-        cwd: projectDir,
-        env: { ...process.env, HOME: home },
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-      },
-    );
-    proc.stdin.write(statuslineInput());
-    proc.stdin.end();
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
+    const { stdout, stderr, exitCode } = await runIsolatedCli(["hooks", "statusline", "agent-cli"], {
+      cwd: projectDir,
+      home,
+      stdin: statuslineInput(),
+      allowedProcesses: [["/bin/sh", "-c"]],
+    });
 
     expect(exitCode).toBe(0);
     expect(stderr).toBe("");

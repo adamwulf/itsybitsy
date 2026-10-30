@@ -6,6 +6,7 @@ import { join } from "path";
 import { interpolateTemplate } from "./hooks/session-start";
 import { setUserHome, resetUserHome } from "./home";
 import { canonicalizeSandboxPath } from "./sandbox";
+import { runInertEntryPoint } from "./test-cli-runner";
 
 test("parseAgentTypeFile: parses frontmatter and body", () => {
   const content = `---
@@ -469,8 +470,6 @@ describe("ib init-types --check (subprocess exit code)", () => {
   // documented gate precondition — exit 0 when floors match, exit 1 otherwise —
   // is exercised end to end. The subprocess reads HOME from the environment
   // (userHome() step 2), so populate the SAME dir in-process first.
-  const indexPath = join(import.meta.dir, "..", "index.ts");
-
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-check-cli-"));
   });
@@ -489,12 +488,7 @@ describe("ib init-types --check (subprocess exit code)", () => {
   }
 
   async function runCheckExitCode(): Promise<number> {
-    const proc = Bun.spawn(["bun", indexPath, "init-types", "--check"], {
-      env: { ...process.env, HOME: tempHome },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    return await proc.exited;
+    return (await runInertEntryPoint("index.ts", ["init-types", "--check"], { home: tempHome })).exitCode;
   }
 
   // Real CLI subprocesses transpile the full index.ts graph and need load headroom.

@@ -1,5 +1,6 @@
 import { test, expect, describe, setDefaultTimeout } from "bun:test";
 import { hasHelpFlag, printCommandHelp } from "./index";
+import { runIsolatedCli } from "./test-cli-runner";
 
 // The tests at the bottom of this file spawn a real `bun` subprocess, which
 // has to transpile the whole index.ts import graph first. That is far more
@@ -83,20 +84,7 @@ describe("printCommandHelp", () => {
 // ─── End-to-end: subprocess invocations of the CLI entrypoint ───────────────
 
 describe("CLI --help end-to-end", () => {
-  async function runCli(cliArgs: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    const proc = Bun.spawn(["bun", "run", "src/index.ts", ...cliArgs], {
-      cwd: import.meta.dir.replace(/\/src$/, ""),
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, HOME: "/tmp/ib-test-nonexistent-home" },
-    });
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const exitCode = await proc.exited;
-    return { stdout, stderr, exitCode };
-  }
+  const runCli = (cliArgs: string[]) => runIsolatedCli(cliArgs);
 
   test("new-agent --help prints command-specific usage and exits 0", async () => {
     const { stdout, exitCode } = await runCli(["new-agent", "--help"]);

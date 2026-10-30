@@ -34,6 +34,8 @@ test("hello world", () => {
 });
 ```
 
+To run the CLI from a test, use `runIsolatedCli` or `createCliFixture` from `src/test-cli-runner.ts`, never a direct `Bun.spawn` of an entry point. A direct launch from a sandboxed agent's worktree identifies that real agent and queues the command for its real watchdog; a temporary HOME does not stop it. Name the handlers a test expects (`actions: { newAgent: "record" }`) and assert what they received, not a downstream failure. `runInertEntryPoint` runs a real entry point, for commands that cannot mutate anything.
+
 ## Frontend
 
 Use HTML imports with `Bun.serve()` (not vite). HTML files can import `.tsx`/`.jsx`/`.js` directly — Bun's bundler transpiles + bundles. `<link>` tags to stylesheets are bundled by Bun's CSS bundler.

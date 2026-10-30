@@ -58,3 +58,4 @@ No migrations, backwards compatibility layers, new user-facing sandbox flags, or
 - Architecture review approved by agent-d47b0c44; retired after reporting.
 - Isolation review by agent-213eea95 approved the revised plan after the live self-merge metadata mutation was explicitly included; reviewer retired after approval.
 - Implementation in three independent workstreams: CLI isolation, privileged probes, and hook/lifecycle fixtures. Full-suite verification remains blocked until all three are integrated safely.
+- CLI isolation implemented: shared runner (`src/test-cli-runner.ts`), guarded driver (`src/test-cli-driver.ts`), `cliActions` seam in `src/index.ts`, regression tests and a route sweep in `src/cli-isolation.test.ts`. Pending the integrated full-suite gate and implementation review.

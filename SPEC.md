@@ -2179,6 +2179,8 @@ Panel sizes are persisted across `ib watch` sessions via `~/.itsybitsy/layout.js
 
 **Display reflow is the only width that varies.** The dashboard word-wraps the captured `-J` logical lines to the on-screen pane width at render time (`src/tui/wrap.ts` / `WordWrapCache`): the center agent pane reflows to `leftPaneWidth`; both coordinator panes reflow to `mainWidth`. `splitPaneLeftWidth` and `sidebarWidth`/`mainWidth` are now **display-only** — they govern reflow and the divider position, never the tmux window.
 
+**Links in captured panes.** Display captures also pass `-e`, because that is the only way to read a hyperlink's target out of tmux. Panes still render as uncolored text: all styling is dropped, and only OSC 8 links with a `message:`, `http:` or `https:` target are kept. Any other target keeps its label but loses the link, because a label hides where the click goes and the click runs outside the agent's sandbox. Bare `message://` URLs are wrapped in OSC 8 because terminals such as Ghostty don't detect that scheme in plain text. A link that wraps is closed and reopened on each row. Over-width tables that get reflowed lose their links, because reflow works from ANSI-stripped cells. State-detection captures don't use `-e`. See `src/hyperlinks.ts`.
+
 | Input | What it controls now |
 |-------|----------------------|
 | `splitPaneLeftWidth` (in `layout.json`) | The DISPLAY split position (middle vs. right pane) and the width the center pane reflows to. Divider drag (`[`/`]` with active-agent/right-pane focus) changes it; it is NOT written to any tmux window. |

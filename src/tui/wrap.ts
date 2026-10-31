@@ -5,6 +5,7 @@
 
 import { visibleWidth, truncateToWidth } from "@mariozechner/pi-tui";
 import { stripAnsi, isCodexStatusLine, findAgyInputBox } from "../parse-state";
+import { balanceLinkRows, closeOsc8 } from "../hyperlinks";
 
 /**
  * A "separator" line is a full-width visual divider, not prose — Claude's
@@ -57,9 +58,8 @@ function isSeparatorLine(line: string): boolean {
  * width and re-attaches that closing char, keeping the frame's right edge
  * straight at the pane edge (a horizontal viewport onto the box).
  *
- * Returns the border char to re-attach (truncateToWidth's "ellipsis", counted
- * inside the width and preceded by a reset so styling can't leak into it), or
- * null when the line is not box chrome.
+ * Returns the border char to re-attach (counted inside the width and preceded by
+ * a reset so styling can't leak into it), or null when the line is not box chrome.
  *
  * Two shapes qualify:
  *
@@ -123,6 +123,22 @@ export function wrapSingleLine(line: string, width: number): string[] {
       continue;
     }
 
+    // OSC sequence (hyperlinks): ESC ] ... BEL or ESC ] ... ESC \. Zero width and
+    // never split. An unterminated one falls through and is measured as text,
+    // which is how visibleWidth treats it too.
+    if (codepoints[i] === "\x1b" && codepoints[i + 1] === "]") {
+      let j = i + 2;
+      while (j < codepoints.length && codepoints[j] !== "\x07" && !(codepoints[j] === "\x1b" && codepoints[j + 1] === "\\")) {
+        j++;
+      }
+      if (j < codepoints.length) {
+        j += codepoints[j] === "\x07" ? 1 : 2;
+        current += codepoints.slice(i, j).join("");
+        i = j;
+        continue;
+      }
+    }
+
     // Measure the visible width of this character (full codepoint)
     const char = codepoints[i]!;
     const charWidth = visibleWidth(char);
@@ -172,14 +188,17 @@ export function wordWrapSingleLine(line: string, width: number): string[] {
   // This one rule collapses every over-width separator on every display surface:
   // untrimmed system/repo coordinator panes, the center agent pane's native
   // chrome, and codex's content dividers inside the (trimmed) main transcript.
-  if (isSeparatorLine(line)) return [truncateToWidth(line, width, "")];
+  if (isSeparatorLine(line)) return [closeOsc8(truncateToWidth(line, width, ""))];
 
   // A box-drawing frame line (welcome box border/row, table border/row) is
   // likewise a visual element — clip it to the pane width and re-attach its
   // closing border char so the frame's right edge stays straight. Content past
   // the pane edge is clipped, exactly like a narrow terminal viewport.
   const borderSuffix = boxClipSuffix(line);
-  if (borderSuffix !== null) return [truncateToWidth(line, width, borderSuffix)];
+  if (borderSuffix !== null) {
+    // A link cut here closes before the border, so the border isn't clickable.
+    return [closeOsc8(truncateToWidth(line, width - visibleWidth(borderSuffix), "")) + borderSuffix];
+  }
 
   const chunks: string[] = [];
   // Split into tokens: sequences of non-space chars and individual spaces
@@ -239,7 +258,8 @@ export function wordWrapSingleLine(line: string, width: number): string[] {
     lineWidth += tokenW;
   }
   if (lineStr || chunks.length === 0) chunks.push(lineStr.trimEnd());
-  return chunks;
+  // Balanced per logical line, so no row can carry a link past its own line.
+  return balanceLinkRows(chunks);
 }
 
 // ── Table reflow ──────────────────────────────────────────────────────────────

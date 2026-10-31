@@ -823,6 +823,9 @@ describe("TmuxPoller", () => {
     // -J makes the poll return logical lines; the dashboard word-wraps them to
     // the pane width so the whole scrollback renders at one consistent width.
     expect(capturedCmd).toContain("-J");
+    // -e is the only way to read a hyperlink's target; without it a Markdown
+    // link captures as just its label.
+    expect(capturedCmd).toContain("-e");
   });
 
   test("setLines updates the next capture command's -S argument", async () => {
@@ -1090,6 +1093,38 @@ describe("TmuxPoller", () => {
     expect(outputs).toEqual(["same\n"]);
   });
 
+  test("a capture that only changed color is not re-delivered", async () => {
+    const pane = installPane({ out: "\x1b[38;5;1mspinner\x1b[39m\n", exit: 0 });
+    const outputs: string[] = [];
+    poller = new TmuxPoller({ onOutput(raw) { outputs.push(raw); } });
+    poller.start();
+    poller.setAgent("session-A");
+    await waitFor(() => outputs.length === 1, { message: "the first capture's delivery" });
+
+    pane.out = "\x1b[38;5;2mspinner\x1b[39m\n";
+    clock.tick();
+    await waitFor(() => pane.captures === 2, { message: "the recolored capture" });
+    await giveASpuriousPollAChance();
+
+    expect(outputs).toEqual(["spinner\n"]);
+  });
+
+  test("a capture that only changed a link target is delivered", async () => {
+    const paneLink = (target: string) => `\x1b]8;;${target}\x1b\\label\x1b]8;;\x1b\\\n`;
+    const pane = installPane({ out: paneLink("https://a.example"), exit: 0 });
+    const outputs: string[] = [];
+    poller = new TmuxPoller({ onOutput(raw) { outputs.push(raw); } });
+    poller.start();
+    poller.setAgent("session-A");
+    await waitFor(() => outputs.length === 1, { message: "the first capture's delivery" });
+
+    pane.out = paneLink("https://b.example");
+    clock.tick();
+    await waitFor(() => outputs.length === 2, { message: "the new target's delivery" });
+
+    expect(outputs[1]).toContain("https://b.example");
+  });
+
   test("output that changed since the last delivery is delivered", async () => {
     const pane = installPane({ out: "first\n", exit: 0 });
     const outputs: string[] = [];
@@ -1295,5 +1330,23 @@ describe("TmuxPoller tab handling at the boundary", () => {
     poller.setAgent("plain-session");
     await waitFor(() => receivedRaw !== undefined, { message: "onOutput for the tab-free line" });
     expect(receivedRaw).toBe("plain output line\n");
+  });
+
+  test("onOutput links a bare message:// URL for display but not in the stripped text", async () => {
+    const url = "message://%3Cabc.def@rice.edu%3E";
+    mockSpawn(`  ${url}\n`, 0);
+    let receivedRaw: string | undefined;
+    let receivedStripped: string | undefined;
+    poller = new TmuxPoller({
+      onOutput(raw, stripped) {
+        receivedRaw = raw;
+        receivedStripped = stripped;
+      },
+    });
+    poller.start();
+    poller.setAgent("link-session");
+    await waitFor(() => receivedRaw !== undefined, { message: "onOutput for the URL line" });
+    expect(receivedRaw).toBe(`  \x1b]8;;${url}\x07${url}\x1b]8;;\x07\n`);
+    expect(receivedStripped).toBe(`  ${url}\n`);
   });
 });

@@ -4,6 +4,7 @@
  * for display, while watcher handles structural agent changes.
  */
 
+import { keepAllowedLinks, linkifyMessageUrls } from "./hyperlinks";
 import { stripAnsi } from "./parse-state";
 import { SpawnContext } from "./types";
 import { tmuxSessionTarget } from "./validation";
@@ -13,10 +14,12 @@ export const spawnCtx = new SpawnContext();
 
 export interface TmuxPollerEvents {
   /**
-   * Raw tmux output (with ANSI, tabs expanded) for display. Called only when the
-   * capture differs from the last one delivered for the current session — the
-   * first capture after setAgent()/start()/resume()/redeliverNext() is always
-   * delivered. A failed capture is delivered as ("", "").
+   * Tmux output for display: plain text with tabs expanded, plus OSC 8 hyperlinks
+   * for allowed link targets and bare message:// URLs (src/hyperlinks.ts).
+   * Called only when the text or links differ from the last delivery for the
+   * current session — the first capture after
+   * setAgent()/start()/resume()/redeliverNext() is always delivered. A failed
+   * capture is delivered as ("", "").
    */
   onOutput: (raw: string, stripped: string) => void;
   onWidth?: (width: number) => void;
@@ -62,10 +65,11 @@ export class TmuxPoller {
   private events: TmuxPollerEvents;
   private lines: number;
   /**
-   * Raw output last passed to onOutput for the current session, or null when
-   * nothing has been delivered since the session was set or polling (re)started.
-   * poll() skips onOutput when a capture equals it: every delivery costs the
-   * dashboard a full render, and an idle pane captures the same text every tick.
+   * Filtered capture last delivered to onOutput for the current session (after
+   * keepAllowedLinks, before linkifying), or null when nothing has been delivered
+   * since the session was set or polling (re)started.
+   * poll() skips onOutput when a filtered capture equals it: every delivery costs
+   * the dashboard a full render, and an idle pane captures the same text every tick.
    */
   private lastDelivered: string | null = null;
 
@@ -175,8 +179,11 @@ export class TmuxPoller {
       // whole scrollback renders at ONE width — capture-pane -p alone returns
       // older lines hard-wrapped at the width the session had when they scrolled
       // in, which mixes wrap widths within a single buffer after resizeTmuxWindow.
+      // -e is the only way to read a hyperlink's target: without it a Markdown
+      // link captures as just its label. keepAllowedLinks removes everything else
+      // -e adds.
       const proc = spawnCtx.runner(
-        ["tmux", "capture-pane", "-t", tmuxSessionTarget(targetSession), "-p", "-J", `-S`, `-${this.lines}`, "-E", "-"],
+        ["tmux", "capture-pane", "-t", tmuxSessionTarget(targetSession), "-p", "-e", "-J", `-S`, `-${this.lines}`, "-E", "-"],
         { stdout: "pipe", stderr: "pipe" }
       );
       const raw = await new Response(proc.stdout).text();
@@ -193,11 +200,13 @@ export class TmuxPoller {
         return;
       }
 
-      const expanded = expandTabs(raw);
+      // Compared after filtering, so a pane that only changed color (a shimmering
+      // spinner label) costs no render, the same as before -e.
+      const expanded = keepAllowedLinks(expandTabs(raw));
       if (expanded === this.lastDelivered) return;
       this.lastDelivered = expanded;
       const stripped = stripAnsi(expanded);
-      this.events.onOutput(expanded, stripped);
+      this.events.onOutput(linkifyMessageUrls(expanded), stripped);
       // Note: window width is queried once in setAgent() rather than on every
       // poll tick — it only changes on terminal resize or resizeTmuxWindow()
       // calls, so per-tick polling wasted ~1 posix_spawn/sec.

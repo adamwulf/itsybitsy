@@ -13,6 +13,7 @@ import { readAgentLog, readAgentFileWindow, statAgentLogSize, statAgentFileSize,
 import { diffAgent, statusAgent } from "../ib-commands";
 import { wrapLines, wordWrapLines, WordWrapCache, computeChromeSlice } from "./wrap";
 import type { ChromeSlice } from "./wrap";
+import { closeOsc8 } from "../hyperlinks";
 import { isCodexBackedCli, parseModel } from "../agent-cli";
 import { getStateColors } from "./color-scheme";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH, favoriteStar } from "./agent-tree";
@@ -80,30 +81,6 @@ export function isTailLogMode(mode: PaneMode): mode is TailLogMode {
 /** Escape a string for use in a RegExp */
 function escapeForRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-export const OSC8_OPEN = "\x1b]8;;";
-export const OSC8_CLOSE = "\x1b]8;;\x07";
-
-/**
- * Ensure any unclosed OSC 8 hyperlink is terminated after truncation.
- * Also strips partial OSC sequences left by mid-sequence truncation
- * (e.g. truncation cut between \x1b]8;; and the \x07 terminator).
- */
-export function closeOsc8(line: string): string {
-  if (!line.includes(OSC8_OPEN)) return line;
-  const lastOpen = line.lastIndexOf(OSC8_OPEN);
-  const lastClose = line.indexOf(OSC8_CLOSE, lastOpen);
-  if (lastClose !== -1) return line;
-  // Check for partial OSC: open tag found but no BEL terminator after it
-  // means truncation cut inside the URI portion — strip the partial sequence
-  const belAfterOpen = line.indexOf("\x07", lastOpen);
-  if (belAfterOpen === -1) {
-    // Truncated mid-OSC — remove the partial sequence and close cleanly
-    return line.slice(0, lastOpen) + OSC8_CLOSE;
-  }
-  // BEL present means the open sequence completed (we're in display text) — just close it
-  return line + OSC8_CLOSE;
 }
 
 /** Colorize diff output lines */
@@ -595,7 +572,7 @@ export class RightPaneComponent implements Component {
     if (trimChrome) {
       const slice = this.repoCoordinatorChromeSlice(this.repoCoordinatorOutput!);
       rawForWrap = slice.transcriptRaw;
-      this.repoCoordinatorStatusLines = slice.statusLines.map((line) => truncateToWidth(line, width, ""));
+      this.repoCoordinatorStatusLines = slice.statusLines.map((line) => closeOsc8(truncateToWidth(line, width, "")));
     }
     const wrapped = this.repoCoordinatorWrapCache.get(rawForWrap, width).slice();
     // Trim trailing blank lines (operates on the copy, not the cached array)

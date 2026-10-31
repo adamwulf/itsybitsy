@@ -63,6 +63,37 @@ const BROAD_WINDOW = 20;
 const COMPACTING_STALE_WINDOW = 10; // was RECENT_WINDOW (5); 7 chrome + 1-line banner + margin
 const RATE_LIMIT_STALE_WINDOW = 12; // was STANDARD_WINDOW (15); 7 chrome + multi-line banner box + margin
 
+/**
+ * Claude Code's limit banner: "You've hit your <name> · resets <time>", where the
+ * name is "weekly limit", "5-hour limit", "Opus limit", "Sonnet limit", "Fable
+ * limit" or "usage credit limit", and the reset part can be missing. It renders
+ * with a "⎿", "⏺" or "●" marker, or none.
+ *
+ * The whole line has to look like the banner, at the banner's own indent. That
+ * rejects limit text inside a sentence, a quote, `file:line:` grep output, and
+ * another agent's pane shown indented inside a tool result. It can't reject a copy
+ * on the first line of a tool result, or at column 0 of a message.
+ */
+const CLAUDE_LIMIT_BANNER = /^ {0,2}(?:[⎿⏺●] +)?you['’]ve hit your [^\n·]*\blimit[ \t]*(?:·|$)/i;
+
+/** A line that only appears once a later turn has started below a banner. */
+const NEWER_CLAUDE_TURN = /^\s*(?:❯\s*\S|[⏺●]\s)|\b(?:esc|ctrl\+c) to interrupt\b/i;
+
+/**
+ * True when `text` (ANSI-stripped) has Claude Code's limit banner and it is still
+ * current. A banner stays in the pane after recovery, so a later prompt, response
+ * or running turn below it means it no longer applies. The last prompt is the
+ * composer, which can hold an unsent draft, so it does not count.
+ */
+export function hasClaudeLimitBanner(text: string): boolean {
+  const lines = text.split("\n");
+  const bannerIndex = lines.findLastIndex((line) => CLAUDE_LIMIT_BANNER.test(line));
+  if (bannerIndex < 0) return false;
+  const composerIndex = lines.findLastIndex((line) => /^\s*❯/.test(line));
+  const end = composerIndex > bannerIndex ? composerIndex : lines.length;
+  return !lines.slice(bannerIndex + 1, end).some((line) => NEWER_CLAUDE_TURN.test(line));
+}
+
 /** Strip ANSI escape sequences from text */
 export function stripAnsi(text: string): string {
   // eslint-disable-next-line no-control-regex
@@ -597,6 +628,7 @@ export function parseClaudeState(input: string): ParseStateResult {
   }
   const lowerRate = rateLimitWindow.toLowerCase();
   if (
+    hasClaudeLimitBanner(rateLimitWindow) ||
     lowerRate.includes("usage limit reached") ||
     lowerRate.includes("limit will reset at") ||
     lowerRate.includes("hit your limit") ||

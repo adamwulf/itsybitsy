@@ -3,6 +3,8 @@ import { join } from "path";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "fs";
 import { tmpdir } from "os";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
+import { claudeUsageFromRecord, type ClaudeRateLimits } from "./claude-rate-limits";
+import { agentOutboxDir, readOutbox } from "./outbox";
 import { makeAgent } from "./test-utils";
 import type { Agent } from "./agents";
 import type { AgentState } from "./parse-state";
@@ -30,6 +32,7 @@ import {
   resetWatchdogReadConfig,
   setWatchdogNow,
   resetWatchdogNow,
+  RATE_LIMIT_NUDGE_BACKOFF_MS,
   runPerAgentWatchdog,
   setPerAgentExistsSync,
   resetPerAgentExistsSync,
@@ -2087,7 +2090,12 @@ describe("watchdog", () => {
       setWatchdogSleep(async () => {});
       setWatchdogCaptureTmux(async () => "running some task (Esc to interrupt)");
 
+      let now = 1_000_000;
+      setWatchdogNow(() => now);
+
       const a1 = agent("a1", "rate_limited");
+      await tick([a1]);
+      now += RATE_LIMIT_NUDGE_BACKOFF_MS[0]!;
       await tick([a1]);
 
       const nudgeCalls = spawnMock.calls.filter((c) => {
@@ -2112,6 +2120,229 @@ describe("watchdog", () => {
         return joined.includes("send-keys") && joined.includes("Usage has refreshed");
       });
       expect(nudgeCalls.length).toBe(0);
+    });
+
+    describe("recovery reads both windows", () => {
+      const BASE_MS = 1_800_000_000_000;
+      const BASE_S = BASE_MS / 1000;
+      // Far enough ahead that a live window outlasts every clock advance below.
+      const live = (pct: number) => ({ used_percentage: pct, resets_at: BASE_S + 30 * 86_400 });
+      const ended = (pct: number) => ({ used_percentage: pct, resets_at: BASE_S - 60 });
+
+      let now: number;
+
+      beforeEach(() => {
+        now = BASE_MS;
+        setWatchdogNow(() => now);
+        setWatchdogSleep(async () => {});
+        setWatchdogCaptureTmux(async () => "idle");
+        // The dialog bypass already ran, as it has by the time usage matters.
+        getTracker("a1").rateLimitBypassed = true;
+      });
+
+      const nudges = () => spawnMock.calls
+        .map((c) => c.args.join(" "))
+        .filter((joined) => joined.includes("send-keys") && joined.includes("Usage has refreshed"));
+
+      /** Move the clock, then tick with the reading the watchdog gets for these windows. */
+      async function tickWith(windows: ClaudeRateLimits, afterMs = 0): Promise<void> {
+        now += afterMs;
+        const data = claudeUsageFromRecord({ updatedAt: BASE_S, ...windows }, new Date(now));
+        setWatchdogFetchUsage(async () => ({ data, error: false }));
+        await tick([agent("a1", "rate_limited")]);
+      }
+
+      const neverNudged: Array<[string, ClaudeRateLimits]> = [
+        ["weekly full, no 5-hour window", { seven_day: live(100) }],
+        ["weekly full, 5-hour window from before a plan change has ended", { five_hour: ended(1), seven_day: live(100) }],
+        ["weekly full, 5-hour window nearly empty", { five_hour: live(3), seven_day: live(100) }],
+        ["5-hour window full, weekly has room", { five_hour: live(100), seven_day: live(30) }],
+        ["5-hour window partly used, no reset seen", { five_hour: live(50), seven_day: live(30) }],
+        ["no windows at all", {}],
+      ];
+
+      test.each(neverNudged)("no nudge over hours: %s", async (_name, windows) => {
+        await tickWith(windows);
+        await tickWith(windows, 3_600_000);
+        await tickWith(windows, 3_600_000);
+
+        expect(nudges()).toEqual([]);
+        expect(getTracker("a1").rateLimitBypassed).toBe(true);
+      });
+
+      const resets: Array<[string, ClaudeRateLimits, ClaudeRateLimits, string]> = [
+        ["weekly limit, no 5-hour window", { seven_day: live(100) }, { seven_day: ended(100) }, "(weekly 0%)"],
+        ["weekly limit, old 5-hour window has ended", { five_hour: ended(1), seven_day: live(100) }, { five_hour: ended(1), seven_day: ended(100) }, "(weekly 0%)"],
+        ["weekly limit, 5-hour window half used", { five_hour: live(50), seven_day: live(100) }, { five_hour: live(50), seven_day: ended(100) }, "(session 50%, weekly 0%)"],
+        ["5-hour limit, weekly has room", { five_hour: live(100), seven_day: live(30) }, { five_hour: ended(100), seven_day: live(30) }, "(weekly 30%)"],
+        ["5-hour limit, weekly nearly full", { five_hour: live(100), seven_day: live(99) }, { five_hour: ended(100), seven_day: live(99) }, "(weekly 99%)"],
+        ["last reading before the stop was below 100", { seven_day: live(97) }, { seven_day: ended(97) }, "(weekly 0%)"],
+      ];
+
+      test.each(resets)("nudges as soon as a window resets: %s", async (_name, before, after, expectedText) => {
+        await tickWith(before);
+        expect(nudges()).toEqual([]);
+
+        await tickWith(after, 5_000);
+
+        expect(nudges().length).toBe(1);
+        expect(nudges()[0]).toContain(`Usage has refreshed ${expectedText}`);
+        expect(getTracker("a1").rateLimitBypassed).toBe(false);
+      });
+
+      test("a reset does not nudge while the other window is still full", async () => {
+        await tickWith({ five_hour: live(100), seven_day: live(100) });
+        await tickWith({ five_hour: ended(100), seven_day: live(100) }, 5_000);
+        expect(nudges()).toEqual([]);
+
+        await tickWith({ five_hour: ended(100), seven_day: ended(100) }, 5_000);
+        expect(nudges().length).toBe(1);
+      });
+
+      test("a weekly reset does not nudge during an active 5-hour stop", async () => {
+        await tickWith({ five_hour: live(100), seven_day: live(100) });
+        await tickWith({ five_hour: live(100), seven_day: ended(100) }, 5_000);
+        expect(nudges()).toEqual([]);
+      });
+
+      // Other agents on the account can raise a reading after the stop.
+      const risesThenResets: Array<[string, ClaudeRateLimits[], string]> = [
+        ["session", [
+          { five_hour: live(0), seven_day: live(30) },
+          { five_hour: live(60), seven_day: live(30) },
+          { five_hour: ended(60), seven_day: live(30) },
+        ], "(weekly 30%)"],
+        ["weekly", [
+          { seven_day: live(0) },
+          { seven_day: live(60) },
+          { seven_day: ended(60) },
+        ], "(weekly 0%)"],
+      ];
+
+      test.each(risesThenResets)("a %s reading that rose during the episode still shows its reset", async (_name, steps, expectedText) => {
+        await tickWith(steps[0]!);
+        await tickWith(steps[1]!, 5_000);
+        expect(nudges()).toEqual([]);
+
+        await tickWith(steps[2]!, 5_000);
+
+        expect(nudges().length).toBe(1);
+        expect(nudges()[0]).toContain(`Usage has refreshed ${expectedText}`);
+      });
+
+      test("one reset nudges once, then the agent is on the backoff schedule", async () => {
+        const after = { five_hour: ended(100), seven_day: live(30) };
+        await tickWith({ five_hour: live(100), seven_day: live(30) });
+        await tickWith(after, 5_000);
+        expect(nudges().length).toBe(1);
+
+        await tickWith(after, 5_000);
+        expect(nudges().length).toBe(1);
+
+        await tickWith(after, RATE_LIMIT_NUDGE_BACKOFF_MS[1]! - 5_000);
+        expect(nudges().length).toBe(2);
+      });
+
+      const unexplained: Array<[string, ClaudeRateLimits, string]> = [
+        ["no 5-hour window, weekly has room", { seven_day: live(30) }, "(weekly 30%)"],
+        ["5-hour window from before a plan change has ended", { five_hour: ended(1), seven_day: live(18) }, "(weekly 18%)"],
+        ["5-hour window nearly empty", { five_hour: live(3), seven_day: live(30) }, "(session 3%, weekly 30%)"],
+      ];
+
+      test.each(unexplained)("backs off when the reading does not explain the stop: %s", async (_name, windows, expectedText) => {
+        await tickWith(windows);
+        expect(nudges()).toEqual([]);
+
+        // Walk the schedule, then two gaps past its end to see that it stays hourly.
+        const lastGap = RATE_LIMIT_NUDGE_BACKOFF_MS[RATE_LIMIT_NUDGE_BACKOFF_MS.length - 1]!;
+        const gaps = [...RATE_LIMIT_NUDGE_BACKOFF_MS, lastGap, lastGap];
+        for (const [index, gap] of gaps.entries()) {
+          await tickWith(windows, gap - 1);
+          expect(nudges().length).toBe(index);
+
+          await tickWith(windows, 1);
+          expect(nudges().length).toBe(index + 1);
+          expect(nudges()[index]).toContain(`Usage has refreshed ${expectedText}`);
+        }
+      });
+
+      test("a tick outside rate_limited right after a nudge does not undo the backoff", async () => {
+        const windows = { seven_day: live(30) };
+        await tickWith(windows);
+        await tickWith(windows, RATE_LIMIT_NUDGE_BACKOFF_MS[0]!);
+        expect(nudges().length).toBe(1);
+
+        now += 5_000;
+        await tick([agent("a1", "running")]);
+        expect(getTracker("a1").rateLimitNudges).toBe(1);
+
+        // The second gap counts from the nudge, and the first gap does not return.
+        await tickWith(windows, RATE_LIMIT_NUDGE_BACKOFF_MS[1]! - 5_001);
+        expect(nudges().length).toBe(1);
+        await tickWith(windows, 1);
+        expect(nudges().length).toBe(2);
+      });
+
+      test("staying outside rate_limited until the next nudge is due starts the schedule over", async () => {
+        const windows = { seven_day: live(30) };
+        await tickWith(windows);
+        await tickWith(windows, RATE_LIMIT_NUDGE_BACKOFF_MS[0]!);
+        expect(nudges().length).toBe(1);
+
+        now += RATE_LIMIT_NUDGE_BACKOFF_MS[1]!;
+        await tick([agent("a1", "running")]);
+        expect(getTracker("a1").rateLimitNudges).toBe(0);
+
+        // A new episode waits the first gap, not whatever was left of the second.
+        await tickWith(windows, 5_000);
+        expect(nudges().length).toBe(1);
+        await tickWith(windows, RATE_LIMIT_NUDGE_BACKOFF_MS[0]!);
+        expect(nudges().length).toBe(2);
+      });
+
+      const highThenLower: Array<[string, ClaudeRateLimits, ClaudeRateLimits]> = [
+        ["session", { five_hour: live(50), seven_day: live(30) }, { five_hour: live(20), seven_day: live(30) }],
+        ["weekly", { seven_day: live(50) }, { seven_day: live(20) }],
+      ];
+
+      test.each(highThenLower)("a %s high from before leaving rate_limited does not read as a reset later", async (_name, before, after) => {
+        await tickWith(before);
+        now += 5_000;
+        await tick([agent("a1", "running")]);
+
+        await tickWith(after, 5_000);
+
+        expect(nudges()).toEqual([]);
+      });
+
+      test("limit text that comes and goes does not add up to a first nudge", async () => {
+        const windows = { seven_day: live(30) };
+        await tickWith(windows);
+        now += 10_000;
+        await tick([agent("a1", "running")]);
+
+        // Back in the state past the first gap from the first match, but only just.
+        await tickWith(windows, RATE_LIMIT_NUDGE_BACKOFF_MS[0]! - 5_000);
+        expect(nudges()).toEqual([]);
+
+        // A full first gap without a break nudges.
+        await tickWith(windows, RATE_LIMIT_NUDGE_BACKOFF_MS[0]! - 1);
+        expect(nudges()).toEqual([]);
+        await tickWith(windows, 1);
+        expect(nudges().length).toBe(1);
+      });
+
+      test("the bypass loop keeps trying while the pane shows a named limit banner", async () => {
+        setWatchdogCaptureTmux(async () => "  ⎿  You've hit your weekly limit · resets 7am (America/Chicago)");
+        getTracker("a1").rateLimitBypassed = false;
+
+        await tickWith({ seven_day: live(100) });
+
+        const enters = spawnMock.calls.filter((c) =>
+          c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("=tmux-a1:")
+        );
+        expect(enters.length).toBe(RATE_LIMIT_MAX_RETRIES);
+      });
     });
 
     test("handles null usage gracefully", async () => {
@@ -2590,7 +2821,12 @@ describe("watchdog", () => {
       setWatchdogSleep(async () => {});
       setWatchdogCaptureTmux(async () => "running some task (Esc to interrupt)");
 
+      let now = 1_000_000;
+      setWatchdogNow(() => now);
+
       const a1 = agent("a1", "rate_limited");
+      await tick([a1]);
+      now += RATE_LIMIT_NUDGE_BACKOFF_MS[0]!;
       await tick([a1]);
 
       const matching = spawnMock.calls.filter((c) =>
@@ -3033,6 +3269,97 @@ describe("runPerAgentWatchdog", () => {
     resetPerAgentDrain();
     resetPerAgentSpawnBroker();
     clearAllAgentsCache();
+  });
+
+  describe("rate-limit recovery from real pane text", () => {
+    const BASE_MS = 1_800_000_000_000;
+    const banner = "  ⎿  You've hit your weekly limit · resets 7am (America/Chicago)";
+    const nudge = "❯ [sent by watchdog]: Usage has refreshed (weekly 30%). Please continue your task.";
+    const chrome = ["", "────────", "❯ ", "────────", "  repo | Opus 5.5", "  agent/agent-test1", "  ctx: 11%"];
+    const stopped = [banner, ...chrome].join("\n");
+    const resumed = [banner, nudge, ...chrome].join("\n");
+
+    let home: string;
+
+    beforeEach(() => {
+      // Nudges reach the agent through its outbox, which lives under this home.
+      home = mkdtempSync(join(tmpdir(), "watchdog-rate-limit-"));
+      setCoordinatorHome(home);
+    });
+
+    afterEach(() => {
+      resetCoordinatorHome();
+      rmSync(home, { recursive: true, force: true });
+      resetWatchdogFetchUsage();
+      resetWatchdogSleep();
+      resetWatchdogCaptureTmux();
+    });
+
+    /**
+     * Run the per-agent watchdog over scripted polls of [ms since start, pane,
+     * weekly reading]. Returns each nudge as [1-based poll, text].
+     */
+    async function runPolls(polls: Array<[number, string, number]>): Promise<Array<[number, string]>> {
+      const sent: Array<[number, string]> = [];
+      let poll = 0;
+      const outbox = agentOutboxDir("agent-test1");
+      // Take what the last poll queued, as a real drain would, so that the next
+      // identical nudge isn't dropped as a duplicate of a pending one.
+      const takeQueued = async () => {
+        for (const queued of await readOutbox(outbox)) sent.push([poll, queued.message]);
+        rmSync(outbox, { recursive: true, force: true });
+      };
+      setPerAgentDrain(takeQueued);
+      setWatchdogSpawnRunner(mockSpawnRunner().runner);
+      setWatchdogSleep(async () => {});
+      setWatchdogCaptureTmux(async () => "idle");
+      setPerAgentReadState(async () => "running");
+      setWatchdogFetchUsage(async () => ({
+        data: { sessionPct: null, weeklyPct: polls[poll - 1]![2], sessionReset: null, weeklyReset: "5d 0h" },
+        error: false,
+      }));
+      setPerAgentExistsSync(() => poll < polls.length);
+      setPerAgentCaptureTmux(async () => {
+        const [atMs, pane] = polls[poll]!;
+        poll++;
+        currentTime = BASE_MS + atMs;
+        return pane;
+      });
+
+      await runPerAgentWatchdog("agent-test1", "/tmp/test");
+      await takeQueued();
+      return sent;
+    }
+
+    test("a weekly stop waits while the window is full, then nudges when it resets", async () => {
+      const sent = await runPolls([
+        [0, stopped, 100],
+        [3_600_000, stopped, 100],
+        [7_200_000, stopped, 100],
+        [7_205_000, stopped, 0],
+      ]);
+
+      expect(sent.map(([poll]) => poll)).toEqual([4]);
+      expect(sent[0]![1]).toContain("Usage has refreshed (weekly 0%)");
+    });
+
+    test("a tick outside rate_limited keeps the backoff; staying out starts it over", async () => {
+      const sent = await runPolls([
+        [0, stopped, 30],
+        [60_000, stopped, 30], // first gap (1m) over: nudge
+        [65_000, resumed, 30], // the nudge retires the banner for a moment
+        [70_000, stopped, 30], // the next rejection
+        [179_000, stopped, 30], // second gap (2m) counts from the nudge
+        [180_000, stopped, 30], // nudge
+        [185_000, resumed, 30], // recovered...
+        [480_000, resumed, 30], // ...until the third gap (5m) would have ended
+        [485_000, stopped, 30], // a new episode
+        [544_000, stopped, 30],
+        [545_000, stopped, 30], // the first gap again: nudge
+      ]);
+
+      expect(sent.map(([poll]) => poll)).toEqual([2, 6, 11]);
+    });
   });
 
   test("drains the outbox at the top of each poll tick", async () => {

@@ -416,7 +416,8 @@ export function formatFooterClock(date: Date): string {
 function sameUsage(a: UsageData | null, b: UsageData | null): boolean {
   if (a === null || b === null) return a === b;
   return a.sessionPct === b.sessionPct && a.weeklyPct === b.weeklyPct
-    && a.sessionReset === b.sessionReset && a.weeklyReset === b.weeklyReset;
+    && a.sessionReset === b.sessionReset && a.weeklyReset === b.weeklyReset
+    && a.sessionWindowEnded === b.sessionWindowEnded;
 }
 
 /** Status bar component */
@@ -490,7 +491,7 @@ class StatusBarComponent implements Component {
       return usageError ? `${YELLOW}⚠️  ${label} usage unavailable${RESET}` : "";
     }
     const parts: string[] = [];
-    if (usage.sessionPct !== null) {
+    if (usage.sessionPct !== null && !usage.sessionWindowEnded) {
       const pct = usage.sessionPct;
       const color = pct > 90 ? RED : pct > 80 ? YELLOW : DIM;
       const reset = usage.sessionReset ? ` (${usage.sessionReset})` : "";

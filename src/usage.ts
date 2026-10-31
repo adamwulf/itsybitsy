@@ -46,6 +46,12 @@ export interface UsageData {
   weeklyPct: number | null;
   sessionReset: string | null;
   weeklyReset: string | null;
+  /**
+   * The last known session window has reset and no session has reported a new
+   * one. `sessionPct` reads 0 so the watchdog can see the reset, but the status
+   * bar shows nothing: the account may have no session limit at all.
+   */
+  sessionWindowEnded?: boolean;
 }
 
 export interface UsageResult {

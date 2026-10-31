@@ -64,13 +64,26 @@ describe("claudeUsageFromRecord", () => {
     }, now);
     expect(usage.sessionPct).toBe(0);
     expect(usage.sessionReset).toBeNull();
+    expect(usage.sessionWindowEnded).toBe(true);
     expect(usage.weeklyPct).toBe(60);
+  });
+
+  test("an ended weekly window does not mark the session window as ended", () => {
+    const usage = claudeUsageFromRecord({
+      updatedAt: NOW_S,
+      five_hour: { used_percentage: 9, resets_at: NOW_S + 3600 },
+      seven_day: { used_percentage: 100, resets_at: NOW_S - 1 },
+    }, now);
+    expect(usage.sessionPct).toBe(9);
+    expect(usage.weeklyPct).toBe(0);
+    expect(usage.sessionWindowEnded).toBeUndefined();
   });
 
   test("reports a missing window as null", () => {
     const usage = claudeUsageFromRecord({ updatedAt: NOW_S, seven_day: { used_percentage: 5, resets_at: NOW_S + 60 } }, now);
     expect(usage.sessionPct).toBeNull();
     expect(usage.sessionReset).toBeNull();
+    expect(usage.sessionWindowEnded).toBeUndefined();
     expect(usage.weeklyPct).toBe(5);
   });
 });
@@ -125,6 +138,32 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
     expect(result.error).toBe(false);
     expect(result.data?.sessionPct).toBe(0);
     expect(result.data?.weeklyPct).toBe(51);
+  });
+
+  test("a plan that stops reporting a 5-hour window: old records end it, a new report revives it", async () => {
+    // A session from before the plan change keeps its old 5-hour window.
+    await recordClaudeRateLimits("old-session", {
+      five_hour: { used_percentage: 1, resets_at: NOW_S - 3600 },
+      seven_day: { used_percentage: 6, resets_at: NOW_S + 86_400 },
+    }, NOW_MS - 7_200_000);
+    // A session started since then only ever reports the weekly window.
+    await recordClaudeRateLimits("new-session", {
+      seven_day: { used_percentage: 15, resets_at: NOW_S + 86_400 },
+    }, NOW_MS);
+
+    const ended = await readClaudeUsage(new Date(NOW_MS));
+    expect(ended.data?.sessionWindowEnded).toBe(true);
+    expect(ended.data?.sessionPct).toBe(0);
+    expect(ended.data?.weeklyPct).toBe(15);
+
+    // Any session reporting a live window brings the session reading back.
+    await recordClaudeRateLimits("new-session", {
+      five_hour: { used_percentage: 2, resets_at: NOW_S + 3600 },
+    }, NOW_MS);
+
+    const live = await readClaudeUsage(new Date(NOW_MS));
+    expect(live.data?.sessionWindowEnded).toBeUndefined();
+    expect(live.data?.sessionPct).toBe(2);
   });
 
   test("combines the windows of all agents: the current window, its highest usage", async () => {

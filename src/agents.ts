@@ -7,7 +7,7 @@ import { join, dirname, basename } from "path";
 import { readdir, link, rename, stat, unlink, open } from "fs/promises";
 import { randomUUID } from "crypto";
 import type { AgentState } from "./parse-state";
-import { parseState, stripAnsi, stripTrailingBlanks, STARTUP_MARKERS, hasAgyBackgroundTasks, isCodexApiError } from "./parse-state";
+import { parseState, stripAnsi, stripTrailingBlanks, STARTUP_MARKERS, hasAgyBackgroundTasks, hasClaudeLimitBanner, isCodexApiError } from "./parse-state";
 import {
   captureTmuxOutput,
   captureTmuxOutputResult,
@@ -1363,6 +1363,7 @@ export function isRateLimited(tmuxOutput: string): boolean {
   const tail = lines.slice(-RATE_LIMIT_WINDOW).join("\n");
 
   if (tail.includes("rate_limit_error")) return true;
+  if (hasClaudeLimitBanner(tail)) return true;
   const lower = tail.toLowerCase();
   return (
     lower.includes("usage limit reached") ||

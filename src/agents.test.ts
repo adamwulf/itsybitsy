@@ -1940,6 +1940,90 @@ describe("isRateLimited", () => {
     expect(isRateLimited(output)).toBe(true);
   });
 
+  describe("Claude Code's named limit banner", () => {
+    // A current banner sits above the input box and the status lines.
+    const paneWith = (transcript: string[], composer = "❯ ") => [
+      ...transcript,
+      "",
+      "────────────",
+      composer,
+      "────────────",
+      "  repo | Opus 5.5",
+      "  agent/some-agent",
+      "  ctx: 11% ($1.33) week: 17% (5d 15h)",
+    ].join("\n");
+    const pane = (bannerLine: string) => paneWith(["⏺ Working on the task.", "", bannerLine]);
+
+    const banner = "  ⎿  You've hit your weekly limit · resets 7am (America/Chicago)";
+    const nudge = "❯ [sent by watchdog]: Usage has refreshed (weekly 18%). Please continue your task.";
+
+    test.each([
+      "⏺ WAITING",
+      "⏺ I HAVE COMPLETED THE GOAL",
+      "  ⎿  API Error: 529 Overloaded",
+      "✻ Churning… (esc to interrupt)",
+    ])("a banner is no longer current after a nudge and then: %s", (line) => {
+      expect(isRateLimited(paneWith([banner, nudge, line]))).toBe(false);
+    });
+
+    test("a banner is no longer current once a prompt follows it", () => {
+      expect(isRateLimited(paneWith([banner, nudge]))).toBe(false);
+    });
+
+    test("a banner is no longer current once a response follows it, with no prompt", () => {
+      expect(isRateLimited(paneWith([banner, "⏺ Continuing on my own."]))).toBe(false);
+    });
+
+    test("a banner is no longer current while a turn runs below it, with no prompt", () => {
+      expect(isRateLimited(paneWith([banner, "", "✻ Churning… (esc to interrupt)"]))).toBe(false);
+    });
+
+    test("a new banner after a nudge is current", () => {
+      expect(isRateLimited(paneWith([banner, nudge, banner]))).toBe(true);
+    });
+
+    test("a draft in the composer does not retire a banner", () => {
+      expect(isRateLimited(paneWith([banner], "❯ a half-typed message"))).toBe(true);
+    });
+
+    test("a turn-duration line below a banner does not retire it", () => {
+      expect(isRateLimited(paneWith([banner, "", "✻ Worked for 2m 10s"]))).toBe(true);
+    });
+
+    test.each([
+      // The weekly wording is from real transcripts; the other names are from
+      // Claude Code's table of limit names and share its format.
+      "You've hit your weekly limit · resets 7am (America/Chicago)",
+      "  ⎿  You've hit your weekly limit · resets 7am (America/Chicago)",
+      "⏺ You've hit your weekly limit · resets 7am (America/Chicago)",
+      "  ⎿  You’ve hit your weekly limit · resets 7am (America/Chicago)",
+      "  ⎿  You've hit your 5-hour limit · resets 3pm (America/Chicago)",
+      "  ⎿  You've hit your Opus limit · resets 7am (America/Chicago)",
+      "  ⎿  You've hit your Sonnet limit · resets 7am (America/Chicago)",
+      "  ⎿  You've hit your Fable limit · resets 7am (America/Chicago)",
+      "  ⎿  You've hit your usage credit limit · resets Nov 1",
+      "  ⎿  You've hit your weekly limit",
+      "  ⎿  You've hit your weekly limit    ",
+      "  ⎿  You've hit your weekly limit · progress saved",
+      "● You've hit your weekly limit · resets 7am (America/Chicago)",
+    ])("detects %s", (bannerLine) => {
+      expect(isRateLimited(pane(bannerLine))).toBe(true);
+    });
+
+    test.each([
+      "     ⎿  You've hit your weekly limit · resets 7am (America/Chicago)",
+      "The banner reads You've hit your weekly limit · resets 7am",
+      "src/agents.test.ts:12: You've hit your weekly limit · resets 7am",
+      "> You've hit your weekly limit · resets 7am",
+      "\"You've hit your weekly limit · resets 7am\"",
+      "- You've hit your weekly limit · resets 7am",
+      "You've hit your weekly limit, so I stopped here.",
+      "You've hit your stride with this test suite · nice work",
+    ])("does not treat this agent output as a stop: %s", (line) => {
+      expect(isRateLimited(pane(line))).toBe(false);
+    });
+  });
+
   test("detects codex out-of-usage (real captured sample, wrapped across two lines)", () => {
     // Real codex out-of-usage message — wraps in the terminal so the ■ glyph +
     // "You've hit your usage limit" sit on line 1 and "try again at …" on line 2.

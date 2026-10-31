@@ -58,9 +58,8 @@ function isSeparatorLine(line: string): boolean {
  * width and re-attaches that closing char, keeping the frame's right edge
  * straight at the pane edge (a horizontal viewport onto the box).
  *
- * Returns the border char to re-attach (truncateToWidth's "ellipsis", counted
- * inside the width and preceded by a reset so styling can't leak into it), or
- * null when the line is not box chrome.
+ * Returns the border char to re-attach (counted inside the width and preceded by
+ * a reset so styling can't leak into it), or null when the line is not box chrome.
  *
  * Two shapes qualify:
  *
@@ -196,7 +195,11 @@ export function wordWrapSingleLine(line: string, width: number): string[] {
   // closing border char so the frame's right edge stays straight. Content past
   // the pane edge is clipped, exactly like a narrow terminal viewport.
   const borderSuffix = boxClipSuffix(line);
-  if (borderSuffix !== null) return [closeOsc8(truncateToWidth(line, width, borderSuffix))];
+  if (borderSuffix !== null) {
+    if (!line.includes(OSC8_OPEN)) return [truncateToWidth(line, width, borderSuffix)];
+    // A link cut here closes before the border, so the border isn't clickable.
+    return [closeOsc8(truncateToWidth(line, width - visibleWidth(borderSuffix), "")) + borderSuffix];
+  }
 
   const chunks: string[] = [];
   // Split into tokens: sequences of non-space chars and individual spaces

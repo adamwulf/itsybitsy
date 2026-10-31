@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { visibleWidth } from "@mariozechner/pi-tui";
+import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { balanceLinkRows, keepAllowedLinks, linkifyMessageUrls, OSC8_CLOSE, OSC8_OPEN } from "./hyperlinks";
 import { stripAnsi } from "./parse-state";
 import { wordWrapLines, wrapSingleLine } from "./tui/wrap";
@@ -188,14 +188,33 @@ describe("wrapping linked text", () => {
   test("a link cut by the box clip is closed and does not reach later rows", () => {
     const rows = wordWrapLines(`│ ${link(URL)} │\nnext row of prose\n\nanother row`, 40);
     expect(rows[0]!.startsWith(`│ ${OSC8_OPEN}${URL}\x07`)).toBe(true);
-    expect(rows[0]!.endsWith(OSC8_CLOSE)).toBe(true);
-    expect(visibleWidth(rows[0]!)).toBeLessThanOrEqual(40);
+    // The link ends before the border, so the border isn't clickable.
+    expect(rows[0]!.endsWith(`${OSC8_CLOSE}│`)).toBe(true);
+    expect(visibleWidth(rows[0]!)).toBe(40);
     expect(rows.slice(1)).toEqual(["next row of prose", "", "another row"]);
   });
 
-  test("a link wrapped across rows does not reach the next logical line", () => {
-    const rows = wordWrapLines(`${link(URL)}\nnext row of prose`, 30);
-    expect(rows[rows.length - 1]).toBe("next row of prose");
+  test("a box row with no link clips the same as before", () => {
+    const row = `│ ${"x".repeat(100)} │`;
+    expect(wordWrapLines(row, 40)).toEqual([truncateToWidth(row, 40, "│")]);
+  });
+
+  test("a link cut by the separator clip is closed and does not reach later rows", () => {
+    const rows = wordWrapLines(`──── ${link(URL)} ${"─".repeat(100)}\nnext`, 30);
+    expect(rows[0]!.endsWith(OSC8_CLOSE)).toBe(true);
+    expect(visibleWidth(rows[0]!)).toBeLessThanOrEqual(30);
+    expect(rows[1]).toBe("next");
+  });
+
+  test("a link left open on a wrapped line closes on each row and stops at that line", () => {
+    const rows = wordWrapLines(`${OSC8_OPEN}${URL}\x07${"x".repeat(70)}\nnext row of prose`, 30);
+    const last = rows.pop();
+    expect(last).toBe("next row of prose");
+    expect(rows.length).toBeGreaterThan(1);
+    for (const row of rows) {
+      expect(row.startsWith(`${OSC8_OPEN}${URL}\x07`)).toBe(true);
+      expect(row.endsWith(OSC8_CLOSE)).toBe(true);
+    }
   });
 
   test("a link in a table that fits is kept", () => {

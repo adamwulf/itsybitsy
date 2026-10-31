@@ -3,6 +3,7 @@ import { join } from "path";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "fs";
 import { tmpdir } from "os";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
+import { claudeUsageFromRecord, type ClaudeRateLimits } from "./claude-rate-limits";
 import { makeAgent } from "./test-utils";
 import type { Agent } from "./agents";
 import type { AgentState } from "./parse-state";
@@ -2112,6 +2113,51 @@ describe("watchdog", () => {
         return joined.includes("send-keys") && joined.includes("Usage has refreshed");
       });
       expect(nudgeCalls.length).toBe(0);
+    });
+
+    describe("recovery reads both windows", () => {
+      const nowS = Math.floor(Date.now() / 1000);
+      const live = (pct: number) => ({ used_percentage: pct, resets_at: nowS + 3600 });
+      const ended = (pct: number) => ({ used_percentage: pct, resets_at: nowS - 60 });
+
+      // Each case goes through claudeUsageFromRecord, so it is the reading the
+      // watchdog gets for these windows. The last column is the expected nudge.
+      const cases: Array<[string, ClaudeRateLimits, string | null]> = [
+        ["weekly full, no 5-hour window", { seven_day: live(100) }, null],
+        ["weekly full, 5-hour window from before a plan change has ended", { five_hour: ended(1), seven_day: live(100) }, null],
+        ["weekly full, 5-hour window nearly empty", { five_hour: live(3), seven_day: live(100) }, null],
+        ["5-hour window full, weekly has room", { five_hour: live(100), seven_day: live(30) }, null],
+        ["no windows at all", {}, null],
+        ["weekly window reset, no 5-hour window", { seven_day: ended(100) }, "Usage has refreshed (0%)"],
+        ["weekly window reset, 5-hour window has ended", { five_hour: ended(1), seven_day: ended(100) }, "Usage has refreshed (0%)"],
+        ["5-hour limit reset, weekly has room", { five_hour: ended(100), seven_day: live(30) }, "Usage has refreshed (0%)"],
+        ["5-hour limit reset, weekly nearly full", { five_hour: ended(100), seven_day: live(99) }, "Usage has refreshed (0%)"],
+        ["no 5-hour window, weekly has room", { seven_day: live(30) }, "Usage has refreshed (30%)"],
+      ];
+
+      test.each(cases)("%s", async (_name, windows, expectedNudge) => {
+        const data = claudeUsageFromRecord({ updatedAt: nowS, ...windows });
+        setWatchdogFetchUsage(async () => ({ data, error: false }));
+
+        const a1 = agent("a1", "rate_limited");
+        const tracker = getTracker("a1");
+        tracker.rateLimitBypassed = true;
+
+        await tick([a1]);
+
+        const nudges = spawnMock.calls
+          .map((c) => c.args.join(" "))
+          .filter((joined) => joined.includes("send-keys") && joined.includes("Usage has refreshed"));
+        if (expectedNudge === null) {
+          expect(nudges).toEqual([]);
+          // The episode goes on, so the dialog bypass is not run again.
+          expect(tracker.rateLimitBypassed).toBe(true);
+        } else {
+          expect(nudges.length).toBeGreaterThan(0);
+          expect(nudges[0]).toContain(expectedNudge);
+          expect(tracker.rateLimitBypassed).toBe(false);
+        }
+      });
     });
 
     test("handles null usage gracefully", async () => {

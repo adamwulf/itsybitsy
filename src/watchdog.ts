@@ -33,7 +33,7 @@ import type { AgentState } from "./parse-state";
 import type { MetaState } from "./agents";
 import { sendMessage } from "./ib-commands";
 import { readClaudeUsage } from "./claude-rate-limits";
-import type { UsageResult } from "./usage";
+import type { UsageData, UsageResult } from "./usage";
 import { SpawnContext } from "./types";
 import type { SpawnFn } from "./types";
 import { checkAndCompact } from "./auto-compact";
@@ -214,6 +214,9 @@ export const MAX_MANAGER_NOTIFICATIONS = 5;
 
 /** Recovery threshold for rate limits — matches ib bash's recovery_threshold (5%) */
 const RATE_LIMIT_RECOVERY_THRESHOLD = 5;
+
+/** A weekly reading at this percentage means the weekly limit is still in force. */
+const WEEKLY_LIMIT_PCT = 100;
 
 /**
  * Lazy thunk so handlers that don't need allAgents skip the disk read;
@@ -959,9 +962,24 @@ export const RATE_LIMIT_MAX_RETRIES = 3;
 export const RATE_LIMIT_RETRY_DELAY_MS = 2_000;
 
 /**
+ * True when a Claude usage reading says a rate-limited agent can continue.
+ *
+ * Either window can stop an agent, so a full weekly window blocks recovery
+ * whatever the session reading says. The weekly window only has to be below
+ * its limit, not nearly empty: a session limit can clear with the week at 30%.
+ * On a plan with no 5-hour window, the weekly reading is the only one there is.
+ * A window whose reset time has passed reads as 0% (src/claude-rate-limits.ts).
+ */
+function usageHasRefreshed(usage: UsageData): boolean {
+  if (usage.weeklyPct !== null && usage.weeklyPct >= WEEKLY_LIMIT_PCT) return false;
+  if (usage.sessionPct !== null) return usage.sessionPct < RATE_LIMIT_RECOVERY_THRESHOLD;
+  return usage.weeklyPct !== null;
+}
+
+/**
  * Handler for "rate_limited" state.
  * - 3-attempt retry loop: send Enter, wait 2s, check state, repeat if still rate_limited
- * - Read Claude plan usage; when session usage drops below threshold, nudge agent
+ * - Read Claude plan usage; once it shows the limits have cleared, nudge agent
  */
 async function handleRateLimited(agent: Agent, tracker: AgentTracker, _getAllAgents: GetAllAgents): Promise<void> {
   // Phase 6: codex has its own rate-limit UX (no "Esc to dismiss" dialog), and
@@ -1007,14 +1025,14 @@ async function handleRateLimited(agent: Agent, tracker: AgentTracker, _getAllAge
 
   // Check Claude plan usage to see if it has dropped enough to resume. The
   // reading combines every agent's statusline rate-limit record
-  // (src/claude-rate-limits.ts); once the 5-hour window's reset time passes,
-  // it reads as 0%, so the agent is nudged when its limit resets.
+  // (src/claude-rate-limits.ts); once a window's reset time passes, it reads
+  // as 0%, so the agent is nudged when the limit that stopped it resets.
   const usageResult = await fetchUsageFn();
   const usage = usageResult.data;
-  if (!usageResult.error && usage && usage.sessionPct !== null && usage.sessionPct < RATE_LIMIT_RECOVERY_THRESHOLD) {
+  if (!usageResult.error && usage && usageHasRefreshed(usage)) {
     await sendMessage(
       agent,
-      `Usage has refreshed (${usage.sessionPct}%). Please continue your task.`,
+      `Usage has refreshed (${usage.sessionPct ?? usage.weeklyPct}%). Please continue your task.`,
       { fromAgent: WATCHDOG_SENTINEL },
     );
     // Reset bypass flag so next rate-limit episode will re-bypass

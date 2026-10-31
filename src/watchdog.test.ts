@@ -2205,13 +2205,29 @@ describe("watchdog", () => {
         expect(nudges()).toEqual([]);
       });
 
-      test("a reading that rose during the episode still shows its reset", async () => {
-        // Other agents on the account can raise the reading after the stop.
-        await tickWith({ five_hour: live(0), seven_day: live(30) });
-        await tickWith({ five_hour: live(60), seven_day: live(30) }, 5_000);
-        await tickWith({ five_hour: ended(60), seven_day: live(30) }, 5_000);
+      // Other agents on the account can raise a reading after the stop.
+      const risesThenResets: Array<[string, ClaudeRateLimits[], string]> = [
+        ["session", [
+          { five_hour: live(0), seven_day: live(30) },
+          { five_hour: live(60), seven_day: live(30) },
+          { five_hour: ended(60), seven_day: live(30) },
+        ], "(weekly 30%)"],
+        ["weekly", [
+          { seven_day: live(0) },
+          { seven_day: live(60) },
+          { seven_day: ended(60) },
+        ], "(weekly 0%)"],
+      ];
+
+      test.each(risesThenResets)("a %s reading that rose during the episode still shows its reset", async (_name, steps, expectedText) => {
+        await tickWith(steps[0]!);
+        await tickWith(steps[1]!, 5_000);
+        expect(nudges()).toEqual([]);
+
+        await tickWith(steps[2]!, 5_000);
 
         expect(nudges().length).toBe(1);
+        expect(nudges()[0]).toContain(`Usage has refreshed ${expectedText}`);
       });
 
       test("one reset nudges once, then the agent is on the backoff schedule", async () => {
@@ -2284,14 +2300,36 @@ describe("watchdog", () => {
         expect(nudges().length).toBe(2);
       });
 
-      test("a high from before leaving rate_limited does not read as a reset later", async () => {
-        await tickWith({ seven_day: live(50) });
+      const highThenLower: Array<[string, ClaudeRateLimits, ClaudeRateLimits]> = [
+        ["session", { five_hour: live(50), seven_day: live(30) }, { five_hour: live(20), seven_day: live(30) }],
+        ["weekly", { seven_day: live(50) }, { seven_day: live(20) }],
+      ];
+
+      test.each(highThenLower)("a %s high from before leaving rate_limited does not read as a reset later", async (_name, before, after) => {
+        await tickWith(before);
         now += 5_000;
         await tick([agent("a1", "running")]);
 
-        await tickWith({ seven_day: live(20) }, 5_000);
+        await tickWith(after, 5_000);
 
         expect(nudges()).toEqual([]);
+      });
+
+      test("limit text that comes and goes does not add up to a first nudge", async () => {
+        const windows = { seven_day: live(30) };
+        await tickWith(windows);
+        now += 10_000;
+        await tick([agent("a1", "running")]);
+
+        // Back in the state past the first gap from the first match, but only just.
+        await tickWith(windows, RATE_LIMIT_NUDGE_BACKOFF_MS[0]! - 5_000);
+        expect(nudges()).toEqual([]);
+
+        // A full first gap without a break nudges.
+        await tickWith(windows, RATE_LIMIT_NUDGE_BACKOFF_MS[0]! - 1);
+        expect(nudges()).toEqual([]);
+        await tickWith(windows, 1);
+        expect(nudges().length).toBe(1);
       });
 
       test("the bypass loop keeps trying while the pane shows a named limit banner", async () => {

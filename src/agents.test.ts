@@ -1974,6 +1974,10 @@ describe("isRateLimited", () => {
       expect(isRateLimited(paneWith([banner, "⏺ Continuing on my own."]))).toBe(false);
     });
 
+    test("a banner is no longer current while a turn runs below it, with no prompt", () => {
+      expect(isRateLimited(paneWith([banner, "", "✻ Churning… (esc to interrupt)"]))).toBe(false);
+    });
+
     test("a new banner after a nudge is current", () => {
       expect(isRateLimited(paneWith([banner, nudge, banner]))).toBe(true);
     });

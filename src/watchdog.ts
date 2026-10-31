@@ -106,9 +106,9 @@ export interface AgentTracker {
   rateLimitNudges: number;
   /** Wall-clock ms when the current nudge gap began (0 = no episode yet) */
   rateLimitGapStartMs: number;
-  /** Highest session reading seen since the last nudge in this episode */
+  /** Highest session reading since the last nudge; cleared by any tick outside rate_limited */
   rateLimitHighSessionPct: number | null;
-  /** Highest weekly reading seen since the last nudge in this episode */
+  /** Highest weekly reading since the last nudge; cleared by any tick outside rate_limited */
   rateLimitHighWeeklyPct: number | null;
   compactState: CompactState;
   lastCompactCheckMs: number;
@@ -382,14 +382,16 @@ function currentRateLimitGapMs(tracker: AgentTracker): number {
 /**
  * Note a tick outside rate_limited. A nudge usually leaves the state for a moment,
  * until the next rejection brings the banner back, so one tick must not undo the
- * backoff. The schedule starts over only once the next nudge would have been due.
- * The highs clear at once: kept, they would read a later window's lower reading as
- * a reset in the next episode.
+ * backoff: once a nudge has gone out, the schedule starts over only when the next
+ * nudge would have been due. Before the first nudge there is no backoff to keep,
+ * and limit text that comes and goes must not add up to a first nudge. The highs
+ * clear at once: kept, they would read a later window's lower reading as a reset in
+ * the next episode.
  */
 function noteOutsideRateLimit(tracker: AgentTracker, now: number): void {
   tracker.rateLimitHighSessionPct = null;
   tracker.rateLimitHighWeeklyPct = null;
-  if (now - tracker.rateLimitGapStartMs >= currentRateLimitGapMs(tracker)) {
+  if (tracker.rateLimitNudges === 0 || now - tracker.rateLimitGapStartMs >= currentRateLimitGapMs(tracker)) {
     tracker.rateLimitNudges = 0;
     tracker.rateLimitGapStartMs = 0;
   }

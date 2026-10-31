@@ -1032,8 +1032,8 @@ function highestOf(pct: number | null, high: number | null): number | null {
  *   the highest report also lowers the combined reading, which costs one false
  *   nudge; the real reset still nudges later.
  * - Otherwise the reading doesn't explain the stop. If it looks clear (session
- *   below the recovery threshold, or weekly alone on a plan with no 5-hour
- *   window), nudge on the RATE_LIMIT_NUDGE_BACKOFF_MS schedule.
+ *   below the recovery threshold, or weekly alone with no 5-hour window on any
+ *   record), nudge on the RATE_LIMIT_NUDGE_BACKOFF_MS schedule.
  */
 function rateLimitNudgeIsDue(usage: UsageData, tracker: AgentTracker, now: number): boolean {
   const { sessionPct, weeklyPct } = usage;
@@ -1063,7 +1063,8 @@ function describeUsage(usage: UsageData): string {
 /**
  * Handler for "rate_limited" state.
  * - 3-attempt retry loop: send Enter, wait 2s, check state, repeat if still rate_limited
- * - Read Claude plan usage; nudge the agent once it shows a limit has cleared (rateLimitNudgeIsDue)
+ * - Read Claude plan usage; nudge the agent when rateLimitNudgeIsDue says so: right
+ *   away after a reset, or on the backoff schedule when the reading looks clear
  */
 async function handleRateLimited(agent: Agent, tracker: AgentTracker, _getAllAgents: GetAllAgents): Promise<void> {
   // Phase 6: codex has its own rate-limit UX (no "Esc to dismiss" dialog), and
@@ -1107,7 +1108,7 @@ async function handleRateLimited(agent: Agent, tracker: AgentTracker, _getAllAge
     tracker.rateLimitBypassed = true;
   }
 
-  // Check Claude plan usage to see if it has dropped enough to resume. The
+  // Check Claude plan usage to see if the agent should try to resume. The
   // reading combines every agent's statusline rate-limit record
   // (src/claude-rate-limits.ts).
   const usageResult = await fetchUsageFn();

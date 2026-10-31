@@ -67,7 +67,7 @@ const RATE_LIMIT_STALE_WINDOW = 12; // was STANDARD_WINDOW (15); 7 chrome + mult
  * Claude Code's limit banner: "You've hit your <name> · resets <time>", where the
  * name is "weekly limit", "5-hour limit", "Opus limit", "Sonnet limit", "Fable
  * limit" or "usage credit limit", and the reset part can be missing. It renders
- * with a "⎿" or "⏺" marker, or none.
+ * with a "⎿", "⏺" or "●" marker, or none.
  *
  * The whole line has to look like the banner, at the banner's own indent. That
  * rejects limit text inside a sentence, a quote, `file:line:` grep output, and

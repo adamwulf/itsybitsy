@@ -48,14 +48,8 @@ describe("keepAllowedLinks", () => {
     expect(stripAnsi(keepAllowedLinks(styled))).toBe(plain);
   });
 
-  test("balances a link left open at a line end", () => {
-    expect(keepAllowedLinks(`\x1b]8;;${URL}\x1b\\one\ntwo\x1b]8;;\x1b\\ three`))
-      .toBe(`${link(URL, "one")}\n${link(URL, "two")} three`);
-  });
-
-  test("a blank line inside an open link stays blank", () => {
-    expect(keepAllowedLinks(`\x1b]8;;${URL}\x1b\\one\n\ntwo\x1b]8;;\x1b\\`))
-      .toBe(`${link(URL, "one")}\n\n${link(URL, "two")}`);
+  test("a link left open at a line end closes there and doesn't carry to the next line", () => {
+    expect(keepAllowedLinks(`\x1b]8;;${URL}\x1b\\one\ntwo`)).toBe(`${link(URL, "one")}\ntwo`);
   });
 
   test("a link directly followed by another replaces it", () => {

@@ -65,11 +65,11 @@ export class TmuxPoller {
   private events: TmuxPollerEvents;
   private lines: number;
   /**
-   * Capture last delivered to onOutput (before linkifying) for the current
-   * session, or null when nothing has been delivered since the session was set
-   * or polling (re)started.
-   * poll() skips onOutput when a capture equals it: every delivery costs the
-   * dashboard a full render, and an idle pane captures the same text every tick.
+   * Filtered capture last delivered to onOutput for the current session (after
+   * keepAllowedLinks, before linkifying), or null when nothing has been delivered
+   * since the session was set or polling (re)started.
+   * poll() skips onOutput when a filtered capture equals it: every delivery costs
+   * the dashboard a full render, and an idle pane captures the same text every tick.
    */
   private lastDelivered: string | null = null;
 

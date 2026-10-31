@@ -5,7 +5,7 @@
 
 import { visibleWidth, truncateToWidth } from "@mariozechner/pi-tui";
 import { stripAnsi, isCodexStatusLine, findAgyInputBox } from "../parse-state";
-import { OSC8_OPEN, balanceLinkRows, closeOsc8 } from "../hyperlinks";
+import { balanceLinkRows, closeOsc8 } from "../hyperlinks";
 
 /**
  * A "separator" line is a full-width visual divider, not prose — Claude's
@@ -196,7 +196,6 @@ export function wordWrapSingleLine(line: string, width: number): string[] {
   // the pane edge is clipped, exactly like a narrow terminal viewport.
   const borderSuffix = boxClipSuffix(line);
   if (borderSuffix !== null) {
-    if (!line.includes(OSC8_OPEN)) return [truncateToWidth(line, width, borderSuffix)];
     // A link cut here closes before the border, so the border isn't clickable.
     return [closeOsc8(truncateToWidth(line, width - visibleWidth(borderSuffix), "")) + borderSuffix];
   }
@@ -260,7 +259,7 @@ export function wordWrapSingleLine(line: string, width: number): string[] {
   }
   if (lineStr || chunks.length === 0) chunks.push(lineStr.trimEnd());
   // Balanced per logical line, so no row can carry a link past its own line.
-  return line.includes(OSC8_OPEN) ? balanceLinkRows(chunks) : chunks;
+  return balanceLinkRows(chunks);
 }
 
 // ── Table reflow ──────────────────────────────────────────────────────────────

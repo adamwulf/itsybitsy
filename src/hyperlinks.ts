@@ -33,9 +33,10 @@ export function closeOsc8(line: string): string {
 
 /**
  * What `capture-pane -e` adds to plain text: OSC 8 hyperlinks (group 1 is the
- * target, any params such as tmux's id= are dropped), other OSC strings, CSI
- * styling including colon forms like 4:3m, other two-character escapes, and the
- * SO/SI shifts tmux writes around line-drawing cells.
+ * target, any params such as tmux's id= are dropped), CSI styling including colon
+ * forms like 4:3m, and the SO/SI shifts around line-drawing cells. The other two
+ * alternatives, other OSC strings and other two-character escapes, are a safety
+ * net: tmux doesn't write them, and nothing else should reach the terminal.
  */
 const CAPTURE_ESCAPES =
   /\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\)|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[ -/]*[0-~]|[\x0e\x0f]/g;
@@ -50,15 +51,13 @@ const ALLOWED_LINK_TARGET = /^(?:message:|https?:)[\x21-\x7e]+$/i;
 
 /**
  * Reduce a `capture-pane -e` capture to its plain text plus hyperlinks with an
- * allowed target, as balanced BEL-form OSC 8 on each line. Styling is dropped, so
- * panes keep rendering as uncolored text; the capture only needs -e because
- * that's the one way to read a link's target out of tmux.
+ * allowed target, in BEL-form OSC 8 and closed by the end of each line. Styling is
+ * dropped, so panes keep rendering as uncolored text; the capture only needs -e
+ * because that's the one way to read a link's target out of tmux.
  */
 export function keepAllowedLinks(capture: string): string {
-  if (!capture.includes("\x1b") && !capture.includes("\x0e") && !capture.includes("\x0f")) return capture;
-  let open: string | null = null;
   return capture.split("\n").map((line) => {
-    const prefix: string = open ? `${OSC8_OPEN}${open}\x07` : "";
+    let open: string | null = null;
     const body = line.replace(CAPTURE_ESCAPES, (_match, target?: string) => {
       if (target === undefined) return "";
       const next = ALLOWED_LINK_TARGET.test(target) ? target : null;
@@ -66,8 +65,9 @@ export function keepAllowedLinks(capture: string): string {
       open = next;
       return next ? `${OSC8_OPEN}${next}\x07` : OSC8_CLOSE;
     });
-    if (body === "") return "";
-    return prefix + body + (open ? OSC8_CLOSE : "");
+    // tmux closes links per line; this keeps the row safe to draw beside the
+    // right pane if a capture ever doesn't.
+    return open ? body + OSC8_CLOSE : body;
   }).join("\n");
 }
 

@@ -19,7 +19,7 @@ import {
   appendCodexGitignoreEntry,
   resolveIbBinaryPath,
 } from "./codex-spawn";
-import { stripIttybittyWrapper, buildSkillsSection } from "./agent-instructions-shared";
+import { stripItsybitsyWrapper, buildSkillsSection } from "./agent-instructions-shared";
 import { CODEX_REGISTERED_EVENTS } from "./codex-config";
 import { setUserHome, resetUserHome } from "./home";
 import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-log-launch";
@@ -842,10 +842,10 @@ describe("appendCodexGitignoreEntry", () => {
   });
 });
 
-describe("stripIttybittyWrapper", () => {
+describe("stripItsybitsyWrapper", () => {
   test("removes a clean outer wrapper", () => {
     const input = "<ittybitty>\n## Hello\n\nbody text\n</ittybitty>";
-    const out = stripIttybittyWrapper(input);
+    const out = stripItsybitsyWrapper(input);
     expect(out.startsWith("<ittybitty>")).toBe(false);
     expect(out).toContain("## Hello");
     expect(out).toContain("body text");
@@ -853,13 +853,13 @@ describe("stripIttybittyWrapper", () => {
 
   test("leaves input unchanged when no wrapper present", () => {
     const input = "## No wrapper here\n\nbody text\n";
-    const out = stripIttybittyWrapper(input);
+    const out = stripItsybitsyWrapper(input);
     expect(out).toBe(input);
   });
 
   test("preserves text before AND after the wrapper (defensive)", () => {
     const input = "preface\n<ittybitty>\ninner\n</ittybitty>\npostscript";
-    const out = stripIttybittyWrapper(input);
+    const out = stripItsybitsyWrapper(input);
     expect(out).toContain("preface");
     expect(out).toContain("inner");
     expect(out).toContain("postscript");
@@ -871,7 +871,7 @@ describe("stripIttybittyWrapper", () => {
 
 The agent runs inside <ittybitty>...</ittybitty>.
 </ittybitty>`;
-    const out = stripIttybittyWrapper(input);
+    const out = stripItsybitsyWrapper(input);
     expect(out).toContain("## Header");
     // The inner mention is preserved because we drop the OUTER tags only.
     expect(out).toContain("inside <ittybitty>...");

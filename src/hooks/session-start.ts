@@ -1,5 +1,5 @@
 /**
- * Hook: generate ittybitty session-start instructions based on detected role.
+ * Hook: generate itsybitsy session-start instructions based on detected role.
  */
 
 import { join, basename } from "path";
@@ -433,7 +433,7 @@ Run \`ib list-types\` to see the agent types, and \`ib show-type <name>\` for th
 
 function generatePrimaryInstructions(): string {
   return `<ittybitty>
-## Multi-Agent Orchestration (ittybitty)
+## Multi-Agent Orchestration (itsybitsy)
 
 \`ib\` spawns persistent Claude agents in isolated git worktrees. Check your role marker at conversation start.
 
@@ -531,9 +531,9 @@ Top-level managers can ask the user questions with \`ib ask "question"\`. After 
     : "";
 
   return `<ittybitty>
-## IttyBitty Manager Agent
+## ItsyBitsy Manager Agent
 
-You are manager agent \`${ctx.agentId}\` in the ittybitty multi-agent orchestration system.
+You are manager agent \`${ctx.agentId}\` in the itsybitsy multi-agent orchestration system.
 You are running in a git worktree on branch \`${ctx.branchName}\`, forked from \`${ctx.parentBranch}\`.
 ${managerInfo}
 ${spawnerInfo}
@@ -647,9 +647,9 @@ function generateWorkerInstructions(ctx: SessionContext): string {
   const spawnerInfo = ctx.spawnedBy ? formatSpawnerInfo(ctx.spawnedBy) : "";
 
   return `<ittybitty>
-## IttyBitty Worker Agent
+## ItsyBitsy Worker Agent
 
-You are worker agent \`${ctx.agentId}\` in the ittybitty multi-agent orchestration system.
+You are worker agent \`${ctx.agentId}\` in the itsybitsy multi-agent orchestration system.
 You are running in a git worktree on branch \`${ctx.branchName}\`, forked from \`${ctx.parentBranch}\`.
 Your manager agent is: ${ctx.agentManager}
 ${spawnerInfo}
@@ -718,7 +718,7 @@ function generateCoordinatorInstructions(ctx: SessionContext): string {
   const repoName = basename(ctx.rootRepoPath);
 
   return `<ittybitty>
-## IttyBitty Per-Repo Coordinator
+## ItsyBitsy Per-Repo Coordinator
 
 You are a per-repo coordinator for the \`${repoName}\` repository. You work directly in the repo directory (no git worktree). You can read files and code using Read, Glob, Grep, and Bash(ls:*). You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --type worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send @system "message"\`.
 
@@ -935,8 +935,8 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
     metaJson = bound.meta;
   } else if (match) {
     const agentId = match[1]!;
-    const ittybittyIdx = cwd.indexOf("/.ittybitty/agents/");
-    const rootRepoPath = cwd.substring(0, ittybittyIdx);
+    const itsybitsyIdx = cwd.indexOf("/.ittybitty/agents/");
+    const rootRepoPath = cwd.substring(0, itsybitsyIdx);
     const agentDir = join(rootRepoPath, ".ittybitty", "agents", agentId);
     agentDirForState = agentDir;
     try {

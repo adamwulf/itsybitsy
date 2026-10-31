@@ -2,7 +2,7 @@
 
 ## Overview
 
-Telegram becomes a transport for ittybitty's existing inbound comms
+Telegram becomes a transport for itsybitsy's existing inbound comms
 (`sendToSystemCoordinator`, the same path `ib send @system` uses)
 plus one new outbound subcommand (`ib tgsend`). This document covers v1;
 v2 may add other channels (Slack, iMessage, Discord).

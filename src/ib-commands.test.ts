@@ -12301,11 +12301,11 @@ body`,
       // Resolve via realpathSync because /tmp on macOS is a symlink to
       // /private/tmp, and the production code canonicalises before pushing
       // each entry into the --add-dir list.
-      const expectedIttybitty = realpathSync(join(tempDir, ".ittybitty"));
+      const expectedAgentDataDir = realpathSync(join(tempDir, ".ittybitty"));
       const expectedClaude = realpathSync(join(tempDir, ".claude"));
       // Each argv element is shell-quoted independently in the rendered
       // launch line, so the flag and path appear as `'--add-dir' '<path>'`.
-      expect(startSh).toContain(`'--add-dir' '${expectedIttybitty}'`);
+      expect(startSh).toContain(`'--add-dir' '${expectedAgentDataDir}'`);
       expect(startSh).toContain(`'--add-dir' '${expectedClaude}'`);
       // The bare parent repo MUST NOT appear as its own `--add-dir` entry.
       // Use the trailing apostrophe to anchor the match so the .ittybitty /

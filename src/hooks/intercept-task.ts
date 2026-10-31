@@ -302,7 +302,7 @@ export async function processTaskIntercept(
 
     const reason = isWorker
       ? "Workers cannot ask the user questions directly. Report your question or findings to your manager agent instead."
-      : "Use `ib ask \"question\"` instead of AskUserQuestion. The ittybitty system routes questions through its own dashboard and question-acknowledgement flow.";
+      : "Use `ib ask \"question\"` instead of AskUserQuestion. The itsybitsy system routes questions through its own dashboard and question-acknowledgement flow.";
 
     return {
       action: "intercept",
@@ -429,9 +429,9 @@ export async function processTaskIntercept(
   // 8. Determine repoPath
   let repoPath = resolved?.noWorktreeRepoPath ?? input.cwd;
   if (!resolved?.noWorktreeRepoPath) {
-    const ittybittyIdx = input.cwd.indexOf("/.ittybitty/agents/");
-    if (ittybittyIdx !== -1) {
-      repoPath = input.cwd.substring(0, ittybittyIdx);
+    const itsybitsyIdx = input.cwd.indexOf("/.ittybitty/agents/");
+    if (itsybitsyIdx !== -1) {
+      repoPath = input.cwd.substring(0, itsybitsyIdx);
     }
   }
 

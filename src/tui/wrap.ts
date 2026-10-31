@@ -5,6 +5,7 @@
 
 import { visibleWidth, truncateToWidth } from "@mariozechner/pi-tui";
 import { stripAnsi, isCodexStatusLine, findAgyInputBox } from "../parse-state";
+import { OSC8_OPEN, balanceLinkRows } from "../hyperlinks";
 
 /**
  * A "separator" line is a full-width visual divider, not prose — Claude's
@@ -121,6 +122,22 @@ export function wrapSingleLine(line: string, width: number): string[] {
       current += codepoints.slice(i, j).join("");
       i = j;
       continue;
+    }
+
+    // OSC sequence (hyperlinks): ESC ] ... BEL or ESC ] ... ESC \. Zero width and
+    // never split. An unterminated one falls through and is measured as text,
+    // which is how visibleWidth treats it too.
+    if (codepoints[i] === "\x1b" && codepoints[i + 1] === "]") {
+      let j = i + 2;
+      while (j < codepoints.length && codepoints[j] !== "\x07" && !(codepoints[j] === "\x1b" && codepoints[j + 1] === "\\")) {
+        j++;
+      }
+      if (j < codepoints.length) {
+        j += codepoints[j] === "\x07" ? 1 : 2;
+        current += codepoints.slice(i, j).join("");
+        i = j;
+        continue;
+      }
     }
 
     // Measure the visible width of this character (full codepoint)
@@ -800,7 +817,7 @@ export function wordWrapLines(text: string, width: number): string[] {
     result.push(...wordWrapSingleLine(line, width));
     i++;
   }
-  return result;
+  return text.includes(OSC8_OPEN) ? balanceLinkRows(result) : result;
 }
 
 /**

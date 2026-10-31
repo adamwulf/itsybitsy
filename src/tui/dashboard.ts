@@ -43,6 +43,7 @@ import { SplitPane } from "./split-pane";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { installTerminalCleanup } from "./terminal-cleanup";
 import { wordWrapLines, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
+import { closeOsc8 } from "../hyperlinks";
 import type { ChromeSlice } from "./wrap";
 import { fetchCodexUsage, fetchGeminiUsage } from "../usage";
 import type { UsageData } from "../usage";
@@ -229,7 +230,7 @@ export class TmuxPaneComponent implements Component {
     // logical line to width — never word-wrap them (a wrapped status bar would
     // spill onto extra rows the overlay didn't reserve).
     this.statusLines = this.chromeSlice().statusLines.map(
-      (line) => truncateToWidth(line, width, "")
+      (line) => closeOsc8(truncateToWidth(line, width, ""))
     );
   }
 

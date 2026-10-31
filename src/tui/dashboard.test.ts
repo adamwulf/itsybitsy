@@ -4422,6 +4422,39 @@ describe("usage error indicator", () => {
     expect(footer).toContain("claude session:57%");
   });
 
+  test("leaves out the session segment when the session window has ended", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-1", "/repos/a");
+    const flatList: FlatEntry[] = [
+      makeFlatRepoHeader("a", "/repos/a", true),
+      makeFlatAgent(agent, { connector: "└── " }),
+    ];
+    dashboard.onUpdate([agent], flatList, []);
+
+    (dashboard as any).statusBar.claudeUsage = { sessionPct: 0, weeklyPct: 15, sessionReset: null, weeklyReset: "5d 18h", sessionWindowEnded: true };
+    (dashboard as any).statusBar.claudeUsageError = false;
+
+    const footer = dashboard.render(160).map(l => stripAnsi(l)).join("\n");
+    expect(footer).not.toContain("session:");
+    expect(footer).toContain("claude weekly:15% (5d 18h)");
+  });
+
+  test("still shows a session segment at 0% while the window is live", () => {
+    const dashboard = makeDashboard();
+    const agent = makeAgent("agent-1", "/repos/a");
+    const flatList: FlatEntry[] = [
+      makeFlatRepoHeader("a", "/repos/a", true),
+      makeFlatAgent(agent, { connector: "└── " }),
+    ];
+    dashboard.onUpdate([agent], flatList, []);
+
+    (dashboard as any).statusBar.claudeUsage = { sessionPct: 0, weeklyPct: 15, sessionReset: "4h 59m", weeklyReset: "5d 18h" };
+    (dashboard as any).statusBar.claudeUsageError = false;
+
+    const footer = dashboard.render(160).map(l => stripAnsi(l)).join("\n");
+    expect(footer).toContain("claude session:0% (4h 59m)");
+  });
+
   test("shows 'usage unavailable' when error with no data", () => {
     const dashboard = makeDashboard();
     const agent = makeAgent("agent-1", "/repos/a");

@@ -176,15 +176,26 @@ function windowUsage(window: RateLimitWindow | undefined, now: Date): { pct: num
   };
 }
 
-/** Convert a record to the shared status-bar usage shape. */
+/**
+ * Convert a record to the shared status-bar usage shape.
+ *
+ * Claude Code has no field that says whether a plan has a 5-hour limit: on a
+ * plan without one, `five_hour` is simply absent. On a plan with one, it is also
+ * absent between the old window's reset and the next API response, so the two
+ * cases look the same. A plan with a limit gets the window back on its next
+ * response, so `sessionWindowEnded` hides an ended window from the status bar
+ * in both cases.
+ */
 export function claudeUsageFromRecord(record: ClaudeRateLimitsRecord, now: Date = new Date()): UsageData {
   const session = windowUsage(record.five_hour, now);
   const weekly = windowUsage(record.seven_day, now);
+  const sessionWindowEnded = record.five_hour !== undefined && session.reset === null;
   return {
     sessionPct: session.pct,
     weeklyPct: weekly.pct,
     sessionReset: session.reset,
     weeklyReset: weekly.reset,
+    ...(sessionWindowEnded ? { sessionWindowEnded } : {}),
   };
 }
 

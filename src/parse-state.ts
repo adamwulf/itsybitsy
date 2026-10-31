@@ -63,6 +63,22 @@ const BROAD_WINDOW = 20;
 const COMPACTING_STALE_WINDOW = 10; // was RECENT_WINDOW (5); 7 chrome + 1-line banner + margin
 const RATE_LIMIT_STALE_WINDOW = 12; // was STANDARD_WINDOW (15); 7 chrome + multi-line banner box + margin
 
+/**
+ * Claude Code's limit banner: "You've hit your <name> · resets <time>", where the
+ * name is "weekly limit", "5-hour limit", "Opus limit", "Sonnet limit", "Fable
+ * limit" or "usage credit limit", and the reset part can be missing. It renders
+ * with a "⎿" or "⏺" marker, or none.
+ *
+ * The whole line has to look like the banner, so limit text inside a sentence, a
+ * quote or grep output in an agent's pane doesn't read as a stop.
+ */
+const CLAUDE_LIMIT_BANNER = /^[\s⎿⏺●]*you['’]ve hit your [^\n·]*\blimit[ \t]*(?:·|$)/im;
+
+/** True when `text` (ANSI-stripped) has a line that is Claude Code's limit banner. */
+export function hasClaudeLimitBanner(text: string): boolean {
+  return CLAUDE_LIMIT_BANNER.test(text);
+}
+
 /** Strip ANSI escape sequences from text */
 export function stripAnsi(text: string): string {
   // eslint-disable-next-line no-control-regex
@@ -597,6 +613,7 @@ export function parseClaudeState(input: string): ParseStateResult {
   }
   const lowerRate = rateLimitWindow.toLowerCase();
   if (
+    hasClaudeLimitBanner(rateLimitWindow) ||
     lowerRate.includes("usage limit reached") ||
     lowerRate.includes("limit will reset at") ||
     lowerRate.includes("hit your limit") ||

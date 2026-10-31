@@ -251,6 +251,16 @@ describe("parseState", () => {
       lines.push("You've hit your limit · resets 1am");
       expect(parseState(lines.join("\n")).state).toBe("rate_limited");
     });
+    test.each(["weekly", "5-hour", "Opus", "Sonnet", "Fable"])("hit your %s limit", (name) => {
+      const lines = Array(14).fill("line");
+      lines.push(`  ⎿  You've hit your ${name} limit · resets 7am (America/Chicago)`);
+      expect(parseState(lines.join("\n")).state).toBe("rate_limited");
+    });
+    test("named limit text inside a sentence is not a stop", () => {
+      const lines = Array(14).fill("line");
+      lines.push("The banner reads You've hit your weekly limit · resets 7am");
+      expect(parseState(lines.join("\n")).state).not.toBe("rate_limited");
+    });
     test("codex out-of-usage — wins over idle-at-prompt (real captured sample)", () => {
       // Real codex out-of-usage capture: the "■ You've hit your usage limit …"
       // message sits ABOVE a still-visible "›" input prompt + status bar. The

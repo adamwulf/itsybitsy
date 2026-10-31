@@ -37,7 +37,7 @@ import { generateInstructions } from "./hooks/session-start";
  * stays; those tools do not exist on codex or agy, so it is harmless there.
  */
 export async function buildAgentRoleBody(ctx: SessionContext): Promise<string> {
-  const body = stripIttybittyWrapper(await generateInstructions(ctx));
+  const body = stripItsybitsyWrapper(await generateInstructions(ctx));
   const skillsSection = await buildSkillsSection();
   return [body, skillsSection].filter((s) => s.length > 0).join("\n");
 }
@@ -49,7 +49,7 @@ export async function buildAgentRoleBody(ctx: SessionContext): Promise<string> {
  * codex/agy agent's instruction file should never embed an XML tag the CLI
  * won't recognize.
  */
-export function stripIttybittyWrapper(body: string): string {
+export function stripItsybitsyWrapper(body: string): string {
   const openTag = "<ittybitty>";
   const closeTag = "</ittybitty>";
   const openIdx = body.indexOf(openTag);

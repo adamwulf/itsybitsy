@@ -97,8 +97,8 @@ export function resolveAgentFromCwd(cwd: string): ResolvedAgent | null {
   const m = AGENT_CWD_PATTERN.exec(cwd);
   if (m) {
     const agentId = m[1]!;
-    const ittybittyIdx = cwd.indexOf("/.ittybitty/agents/");
-    const repoRoot = cwd.substring(0, ittybittyIdx);
+    const itsybitsyIdx = cwd.indexOf("/.ittybitty/agents/");
+    const repoRoot = cwd.substring(0, itsybitsyIdx);
     return {
       agentId,
       agentDir: join(repoRoot, ".ittybitty", "agents", agentId),

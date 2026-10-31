@@ -1,5 +1,5 @@
 /**
- * Shared helpers for building Claude `settings.local.json` for ittybitty
+ * Shared helpers for building Claude `settings.local.json` for itsybitsy
  * agents. The system coordinator, per-repo coordinators, and regular agents
  * each need a slightly different shape, but they share a hooks block and a
  * layer-loading pattern. Centralizing the duplication here keeps the

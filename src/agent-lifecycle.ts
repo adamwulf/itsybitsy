@@ -1032,7 +1032,7 @@ export async function getDescendantsRecursive(
 /**
  * Check if we're running inside an agent context.
  * True if cwd matches agent worktree path pattern
- * OR if inside an ittybitty tmux session.
+ * OR if inside an itsybitsy tmux session.
  */
 export async function isRunningAsAgent(cwd?: string): Promise<boolean> {
   const dir = cwd ?? process.cwd();

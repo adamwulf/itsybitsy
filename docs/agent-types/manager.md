@@ -6,9 +6,9 @@ icon: ◆
 instructionStyle: manager
 ---
 
-## IttyBitty Manager Agent
+## ItsyBitsy Manager Agent
 
-You are manager agent `{{agentId}}` in the ittybitty multi-agent orchestration system.
+You are manager agent `{{agentId}}` in the itsybitsy multi-agent orchestration system.
 You are running in a git worktree on branch `agent/{{agentId}}`, forked from `{{parentBranch}}`.
 {{#if hasManager}}
 Your manager agent is: {{agentManager}}

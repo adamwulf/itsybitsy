@@ -373,12 +373,26 @@ export function createTracker(): AgentTracker {
   };
 }
 
-/** Clear the nudge schedule, so the next rate_limited episode starts from zero. */
-function resetRateLimitNudges(tracker: AgentTracker): void {
-  tracker.rateLimitNudges = 0;
-  tracker.rateLimitGapStartMs = 0;
+/** The gap before the next nudge of the current rate_limited episode. */
+function currentRateLimitGapMs(tracker: AgentTracker): number {
+  const index = Math.min(tracker.rateLimitNudges, RATE_LIMIT_NUDGE_BACKOFF_MS.length - 1);
+  return RATE_LIMIT_NUDGE_BACKOFF_MS[index] as number;
+}
+
+/**
+ * Note a tick outside rate_limited. A nudge usually leaves the state for a moment,
+ * until the next rejection brings the banner back, so one tick must not undo the
+ * backoff. The schedule starts over only once the next nudge would have been due.
+ * The highs clear at once: kept, they would read a later window's lower reading as
+ * a reset in the next episode.
+ */
+function noteOutsideRateLimit(tracker: AgentTracker, now: number): void {
   tracker.rateLimitHighSessionPct = null;
   tracker.rateLimitHighWeeklyPct = null;
+  if (now - tracker.rateLimitGapStartMs >= currentRateLimitGapMs(tracker)) {
+    tracker.rateLimitNudges = 0;
+    tracker.rateLimitGapStartMs = 0;
+  }
 }
 
 /** Per-agent tracking map: agentId -> tracker */
@@ -1010,9 +1024,11 @@ function highestOf(pct: number | null, high: number | null): number | null {
  * - A full window blocks the nudge: either window can stop an agent.
  * - A window that reset during the episode nudges right away, whatever the other
  *   window reads, as long as it isn't full. Usage only grows within a window, so
- *   a lower reading means a reset (a window past its `resets_at` reads as 0%, see
- *   src/claude-rate-limits.ts). This doesn't rely on seeing 100%, because the
- *   last reading before a stop can be lower.
+ *   a lower reading is taken as a reset (a window past its `resets_at` reads as
+ *   0%, see src/claude-rate-limits.ts). This doesn't rely on seeing 100%, because
+ *   the last reading before a stop can be lower. Tearing down the agent that held
+ *   the highest report also lowers the combined reading, which costs one false
+ *   nudge; the real reset still nudges later.
  * - Otherwise the reading doesn't explain the stop. If it looks clear (session
  *   below the recovery threshold, or weekly alone on a plan with no 5-hour
  *   window), nudge on the RATE_LIMIT_NUDGE_BACKOFF_MS schedule.
@@ -1031,8 +1047,7 @@ function rateLimitNudgeIsDue(usage: UsageData, tracker: AgentTracker, now: numbe
 
   const looksClear = sessionPct !== null ? sessionPct < RATE_LIMIT_RECOVERY_THRESHOLD : weeklyPct !== null;
   if (!looksClear) return false;
-  const gapIndex = Math.min(tracker.rateLimitNudges, RATE_LIMIT_NUDGE_BACKOFF_MS.length - 1);
-  return now - tracker.rateLimitGapStartMs >= (RATE_LIMIT_NUDGE_BACKOFF_MS[gapIndex] as number);
+  return now - tracker.rateLimitGapStartMs >= currentRateLimitGapMs(tracker);
 }
 
 /** The readings to show in a nudge, leaving out a session window that has ended. */
@@ -1299,7 +1314,7 @@ async function processAgents(agents: Agent[], allAgents: Agent[]): Promise<void>
       tracker.apiErrorRateLimited = false;
     }
 
-    if (agent.state !== "rate_limited") resetRateLimitNudges(tracker);
+    if (agent.state !== "rate_limited") noteOutsideRateLimit(tracker, nowFn());
 
     // Update previous state after handler runs
     tracker.previousState = agent.state;
@@ -2202,7 +2217,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
         tracker.apiErrorRateLimited = false;
       }
 
-      if (resolvedState !== "rate_limited") resetRateLimitNudges(tracker);
+      if (resolvedState !== "rate_limited") noteOutsideRateLimit(tracker, nowFn());
 
       tracker.previousState = resolvedState;
 

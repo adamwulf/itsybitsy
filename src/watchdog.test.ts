@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "fs";
 import { tmpdir } from "os";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import { claudeUsageFromRecord, type ClaudeRateLimits } from "./claude-rate-limits";
+import { agentOutboxDir, readOutbox } from "./outbox";
 import { makeAgent } from "./test-utils";
 import type { Agent } from "./agents";
 import type { AgentState } from "./parse-state";
@@ -2189,25 +2190,27 @@ describe("watchdog", () => {
         expect(getTracker("a1").rateLimitBypassed).toBe(false);
       });
 
-      test("a real weekly banner becomes rate_limited and is nudged when the week resets", async () => {
-        const pane = "  ⎿  You've hit your weekly limit · resets 7am (America/Chicago)";
-        expect(resolveWatchdogState(pane, "running")).toBe("rate_limited");
-
-        await tickWith({ five_hour: ended(1), seven_day: live(100) });
-        await tickWith({ five_hour: ended(1), seven_day: live(100) }, 3_600_000);
-        expect(nudges()).toEqual([]);
-
-        await tickWith({ five_hour: ended(1), seven_day: ended(100) }, 3_600_000);
-        expect(nudges().length).toBe(1);
-        expect(nudges()[0]).toContain("Usage has refreshed (weekly 0%)");
-      });
-
       test("a reset does not nudge while the other window is still full", async () => {
         await tickWith({ five_hour: live(100), seven_day: live(100) });
         await tickWith({ five_hour: ended(100), seven_day: live(100) }, 5_000);
         expect(nudges()).toEqual([]);
 
         await tickWith({ five_hour: ended(100), seven_day: ended(100) }, 5_000);
+        expect(nudges().length).toBe(1);
+      });
+
+      test("a weekly reset does not nudge during an active 5-hour stop", async () => {
+        await tickWith({ five_hour: live(100), seven_day: live(100) });
+        await tickWith({ five_hour: live(100), seven_day: ended(100) }, 5_000);
+        expect(nudges()).toEqual([]);
+      });
+
+      test("a reading that rose during the episode still shows its reset", async () => {
+        // Other agents on the account can raise the reading after the stop.
+        await tickWith({ five_hour: live(0), seven_day: live(30) });
+        await tickWith({ five_hour: live(60), seven_day: live(30) }, 5_000);
+        await tickWith({ five_hour: ended(60), seven_day: live(30) }, 5_000);
+
         expect(nudges().length).toBe(1);
       });
 
@@ -2247,20 +2250,60 @@ describe("watchdog", () => {
         }
       });
 
-      test("leaving rate_limited starts the next episode's schedule over", async () => {
+      test("a tick outside rate_limited right after a nudge does not undo the backoff", async () => {
         const windows = { seven_day: live(30) };
         await tickWith(windows);
         await tickWith(windows, RATE_LIMIT_NUDGE_BACKOFF_MS[0]!);
         expect(nudges().length).toBe(1);
 
+        now += 5_000;
+        await tick([agent("a1", "running")]);
+        expect(getTracker("a1").rateLimitNudges).toBe(1);
+
+        // The second gap counts from the nudge, and the first gap does not return.
+        await tickWith(windows, RATE_LIMIT_NUDGE_BACKOFF_MS[1]! - 5_001);
+        expect(nudges().length).toBe(1);
+        await tickWith(windows, 1);
+        expect(nudges().length).toBe(2);
+      });
+
+      test("staying outside rate_limited until the next nudge is due starts the schedule over", async () => {
+        const windows = { seven_day: live(30) };
+        await tickWith(windows);
+        await tickWith(windows, RATE_LIMIT_NUDGE_BACKOFF_MS[0]!);
+        expect(nudges().length).toBe(1);
+
+        now += RATE_LIMIT_NUDGE_BACKOFF_MS[1]!;
         await tick([agent("a1", "running")]);
         expect(getTracker("a1").rateLimitNudges).toBe(0);
 
-        // The first gap applies again, not the second.
+        // A new episode waits the first gap, not whatever was left of the second.
         await tickWith(windows, 5_000);
         expect(nudges().length).toBe(1);
         await tickWith(windows, RATE_LIMIT_NUDGE_BACKOFF_MS[0]!);
         expect(nudges().length).toBe(2);
+      });
+
+      test("a high from before leaving rate_limited does not read as a reset later", async () => {
+        await tickWith({ seven_day: live(50) });
+        now += 5_000;
+        await tick([agent("a1", "running")]);
+
+        await tickWith({ seven_day: live(20) }, 5_000);
+
+        expect(nudges()).toEqual([]);
+      });
+
+      test("the bypass loop keeps trying while the pane shows a named limit banner", async () => {
+        setWatchdogCaptureTmux(async () => "  ⎿  You've hit your weekly limit · resets 7am (America/Chicago)");
+        getTracker("a1").rateLimitBypassed = false;
+
+        await tickWith({ seven_day: live(100) });
+
+        const enters = spawnMock.calls.filter((c) =>
+          c.args.includes("send-keys") && c.args.includes("Enter") && c.args.includes("=tmux-a1:")
+        );
+        expect(enters.length).toBe(RATE_LIMIT_MAX_RETRIES);
       });
     });
 
@@ -3188,6 +3231,97 @@ describe("runPerAgentWatchdog", () => {
     resetPerAgentDrain();
     resetPerAgentSpawnBroker();
     clearAllAgentsCache();
+  });
+
+  describe("rate-limit recovery from real pane text", () => {
+    const BASE_MS = 1_800_000_000_000;
+    const banner = "  ⎿  You've hit your weekly limit · resets 7am (America/Chicago)";
+    const nudge = "❯ [sent by watchdog]: Usage has refreshed (weekly 30%). Please continue your task.";
+    const chrome = ["", "────────", "❯ ", "────────", "  repo | Opus 5.5", "  agent/agent-test1", "  ctx: 11%"];
+    const stopped = [banner, ...chrome].join("\n");
+    const resumed = [banner, nudge, ...chrome].join("\n");
+
+    let home: string;
+
+    beforeEach(() => {
+      // Nudges reach the agent through its outbox, which lives under this home.
+      home = mkdtempSync(join(tmpdir(), "watchdog-rate-limit-"));
+      setCoordinatorHome(home);
+    });
+
+    afterEach(() => {
+      resetCoordinatorHome();
+      rmSync(home, { recursive: true, force: true });
+      resetWatchdogFetchUsage();
+      resetWatchdogSleep();
+      resetWatchdogCaptureTmux();
+    });
+
+    /**
+     * Run the per-agent watchdog over scripted polls of [ms since start, pane,
+     * weekly reading]. Returns each nudge as [1-based poll, text].
+     */
+    async function runPolls(polls: Array<[number, string, number]>): Promise<Array<[number, string]>> {
+      const sent: Array<[number, string]> = [];
+      let poll = 0;
+      const outbox = agentOutboxDir("agent-test1");
+      // Take what the last poll queued, as a real drain would, so that the next
+      // identical nudge isn't dropped as a duplicate of a pending one.
+      const takeQueued = async () => {
+        for (const queued of await readOutbox(outbox)) sent.push([poll, queued.message]);
+        rmSync(outbox, { recursive: true, force: true });
+      };
+      setPerAgentDrain(takeQueued);
+      setWatchdogSpawnRunner(mockSpawnRunner().runner);
+      setWatchdogSleep(async () => {});
+      setWatchdogCaptureTmux(async () => "idle");
+      setPerAgentReadState(async () => "running");
+      setWatchdogFetchUsage(async () => ({
+        data: { sessionPct: null, weeklyPct: polls[poll - 1]![2], sessionReset: null, weeklyReset: "5d 0h" },
+        error: false,
+      }));
+      setPerAgentExistsSync(() => poll < polls.length);
+      setPerAgentCaptureTmux(async () => {
+        const [atMs, pane] = polls[poll]!;
+        poll++;
+        currentTime = BASE_MS + atMs;
+        return pane;
+      });
+
+      await runPerAgentWatchdog("agent-test1", "/tmp/test");
+      await takeQueued();
+      return sent;
+    }
+
+    test("a weekly stop waits while the window is full, then nudges when it resets", async () => {
+      const sent = await runPolls([
+        [0, stopped, 100],
+        [3_600_000, stopped, 100],
+        [7_200_000, stopped, 100],
+        [7_205_000, stopped, 0],
+      ]);
+
+      expect(sent.map(([poll]) => poll)).toEqual([4]);
+      expect(sent[0]![1]).toContain("Usage has refreshed (weekly 0%)");
+    });
+
+    test("a tick outside rate_limited keeps the backoff; staying out starts it over", async () => {
+      const sent = await runPolls([
+        [0, stopped, 30],
+        [60_000, stopped, 30], // first gap (1m) over: nudge
+        [65_000, resumed, 30], // the nudge retires the banner for a moment
+        [70_000, stopped, 30], // the next rejection
+        [179_000, stopped, 30], // second gap (2m) counts from the nudge
+        [180_000, stopped, 30], // nudge
+        [185_000, resumed, 30], // recovered...
+        [480_000, resumed, 30], // ...until the third gap (5m) would have ended
+        [485_000, stopped, 30], // a new episode
+        [544_000, stopped, 30],
+        [545_000, stopped, 30], // the first gap again: nudge
+      ]);
+
+      expect(sent.map(([poll]) => poll)).toEqual([2, 6, 11]);
+    });
   });
 
   test("drains the outbox at the top of each poll tick", async () => {

@@ -8,10 +8,10 @@ import {
   RightPaneComponent, PANE_MODES, FULL_WIDTH_MODES, TOP_ANCHORED_MODES, DEFAULT_MODE_INDEX,
   cyclePaneMode, jumpToMode, triggerAsyncLoadIfNeeded,
   colorizeDiff, colorizeLog,
-  closeOsc8, OSC8_OPEN, OSC8_CLOSE,
   loadAgentLog, loadTailLog, loadDenials,
 } from "./pane-manager";
 import type { PaneCtx, PaneMode, TailLogMode } from "./pane-manager";
+import { closeOsc8, OSC8_OPEN, OSC8_CLOSE } from "../hyperlinks";
 import { stripAnsi } from "../parse-state";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { parseDenials } from "../agents";
@@ -643,6 +643,23 @@ describe("REPO mode with coordinator", () => {
     expect(text).not.toContain("accept edits on");
     // Status bar surfaced for the caller to render below our input field.
     expect(rp.repoCoordinatorStatusLines.map(stripAnsi).join("\n")).toContain("accept edits on");
+  });
+
+  test("renderRepoCoordinatorSection closes a link cut from a status line", () => {
+    const rp = new RightPaneComponent();
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    rp.repoCoordinatorHasPolled = true;
+    rp.repoCoordinatorOutput = [
+      "⏺ coordinator finished a task",
+      "────────────────────",
+      "❯ ",
+      "────────────────────",
+      `  ${OSC8_OPEN}https://example.com/pull/1\x07${"x".repeat(100)}${OSC8_CLOSE}`,
+    ].join("\n");
+    rp.renderRepoCoordinatorSection(40, 10, true, /* trimChrome */ true);
+    expect(rp.repoCoordinatorStatusLines).toHaveLength(1);
+    expect(rp.repoCoordinatorStatusLines[0]!).toContain(`${OSC8_OPEN}https://example.com/pull/1\x07`);
+    expect(rp.repoCoordinatorStatusLines[0]!.endsWith(OSC8_CLOSE)).toBe(true);
   });
 
   test("renderRepoCoordinatorSection collapses a PINNED-width ─ separator to one row (untrimmed/unfocused)", () => {

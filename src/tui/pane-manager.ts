@@ -13,7 +13,7 @@ import { readAgentLog, readAgentFileWindow, statAgentLogSize, statAgentFileSize,
 import { diffAgent, statusAgent } from "../ib-commands";
 import { wrapLines, wordWrapLines, WordWrapCache, computeChromeSlice } from "./wrap";
 import type { ChromeSlice } from "./wrap";
-import { OSC8_OPEN, OSC8_CLOSE, closeOsc8 } from "../hyperlinks";
+import { closeOsc8 } from "../hyperlinks";
 import { isCodexBackedCli, parseModel } from "../agent-cli";
 import { getStateColors } from "./color-scheme";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH, favoriteStar } from "./agent-tree";
@@ -82,8 +82,6 @@ export function isTailLogMode(mode: PaneMode): mode is TailLogMode {
 function escapeForRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-
-export { OSC8_OPEN, OSC8_CLOSE, closeOsc8 };
 
 /** Colorize diff output lines */
 export function colorizeDiff(lines: string[]): string[] {

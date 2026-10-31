@@ -5,7 +5,7 @@
 
 import { visibleWidth, truncateToWidth } from "@mariozechner/pi-tui";
 import { stripAnsi, isCodexStatusLine, findAgyInputBox } from "../parse-state";
-import { OSC8_OPEN, balanceLinkRows } from "../hyperlinks";
+import { OSC8_OPEN, balanceLinkRows, closeOsc8 } from "../hyperlinks";
 
 /**
  * A "separator" line is a full-width visual divider, not prose — Claude's
@@ -189,14 +189,14 @@ export function wordWrapSingleLine(line: string, width: number): string[] {
   // This one rule collapses every over-width separator on every display surface:
   // untrimmed system/repo coordinator panes, the center agent pane's native
   // chrome, and codex's content dividers inside the (trimmed) main transcript.
-  if (isSeparatorLine(line)) return [truncateToWidth(line, width, "")];
+  if (isSeparatorLine(line)) return [closeOsc8(truncateToWidth(line, width, ""))];
 
   // A box-drawing frame line (welcome box border/row, table border/row) is
   // likewise a visual element — clip it to the pane width and re-attach its
   // closing border char so the frame's right edge stays straight. Content past
   // the pane edge is clipped, exactly like a narrow terminal viewport.
   const borderSuffix = boxClipSuffix(line);
-  if (borderSuffix !== null) return [truncateToWidth(line, width, borderSuffix)];
+  if (borderSuffix !== null) return [closeOsc8(truncateToWidth(line, width, borderSuffix))];
 
   const chunks: string[] = [];
   // Split into tokens: sequences of non-space chars and individual spaces
@@ -256,7 +256,8 @@ export function wordWrapSingleLine(line: string, width: number): string[] {
     lineWidth += tokenW;
   }
   if (lineStr || chunks.length === 0) chunks.push(lineStr.trimEnd());
-  return chunks;
+  // Balanced per logical line, so no row can carry a link past its own line.
+  return line.includes(OSC8_OPEN) ? balanceLinkRows(chunks) : chunks;
 }
 
 // ── Table reflow ──────────────────────────────────────────────────────────────
@@ -817,7 +818,7 @@ export function wordWrapLines(text: string, width: number): string[] {
     result.push(...wordWrapSingleLine(line, width));
     i++;
   }
-  return text.includes(OSC8_OPEN) ? balanceLinkRows(result) : result;
+  return result;
 }
 
 /**

@@ -185,6 +185,19 @@ describe("wrapping linked text", () => {
     expect(wordWrapLines(linkifyMessageUrls(URL), 200)).toEqual([link(URL)]);
   });
 
+  test("a link cut by the box clip is closed and does not reach later rows", () => {
+    const rows = wordWrapLines(`│ ${link(URL)} │\nnext row of prose\n\nanother row`, 40);
+    expect(rows[0]!.startsWith(`│ ${OSC8_OPEN}${URL}\x07`)).toBe(true);
+    expect(rows[0]!.endsWith(OSC8_CLOSE)).toBe(true);
+    expect(visibleWidth(rows[0]!)).toBeLessThanOrEqual(40);
+    expect(rows.slice(1)).toEqual(["next row of prose", "", "another row"]);
+  });
+
+  test("a link wrapped across rows does not reach the next logical line", () => {
+    const rows = wordWrapLines(`${link(URL)}\nnext row of prose`, 30);
+    expect(rows[rows.length - 1]).toBe("next row of prose");
+  });
+
   test("a link in a table that fits is kept", () => {
     const table = [
       "┌────┐",

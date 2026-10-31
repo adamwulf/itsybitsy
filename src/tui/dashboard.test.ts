@@ -762,6 +762,30 @@ describe("TmuxPaneComponent word-wrap + memoization", () => {
     expect(after).toEqual(before);
   });
 
+  test("a linked status line cut at the pane width closes its link", () => {
+    const sep = "─".repeat(1000);
+    const pane = new TmuxPaneComponent();
+    pane.agent = makeAgent("agent-claude", "/tmp/test");
+    pane.hasPolled = true;
+    pane.displayHeight = 20;
+    pane.trimInputSeparator = true;
+    pane.rawOutput = [
+      "⏺ Reply",
+      sep,
+      "❯ ",
+      sep,
+      `  \x1b]8;;https://example.com/pull/1\x07${"x".repeat(100)}\x1b]8;;\x07`,
+      "",
+    ].join("\n");
+
+    pane.parseStatusLines(40);
+
+    expect(pane.statusLines).toHaveLength(1);
+    expect(pane.statusLines[0]!).toContain("\x1b]8;;https://example.com/pull/1\x07");
+    expect(pane.statusLines[0]!.endsWith("\x1b]8;;\x07")).toBe(true);
+    expect(stripAnsi(pane.statusLines[0]!).length).toBeLessThanOrEqual(40);
+  });
+
   test("render and parseStatusLines share the same memoized wrap (Claude chrome)", () => {
     // Claude input chrome: two ─ separator lines with a status bar below. Both
     // render() and parseStatusLines() must wrap identically so the status-line

@@ -6,8 +6,9 @@ import { readAgentLog, readAgentFileWindow, readAgentPrompt, parseDenials } from
 import type { Agent, AgentMeta, FlatEntry, PendingQuestion } from "../agents";
 import { stripAnsi } from "../parse-state";
 import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult, waitFor } from "../test-utils";
-import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow, formatFooterClock, usageFetchCtx } from "./dashboard";
-import type { GeminiUsageResult } from "../usage";
+import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow, formatFooterClock, usageFetchCtx, CODEX_LIVE_PROBE_INTERVAL_MS } from "./dashboard";
+import type { CodexUsageReading, GeminiUsageResult } from "../usage";
+import type { CodexLiveUsageResult } from "../codex-live-usage";
 import { TUI, visibleWidth } from "@mariozechner/pi-tui";
 import type { CollectorHealth } from "../sandbox-collector-light";
 import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setNewAgentCallerMetaReader, resetNewAgentCallerMetaReader, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner, sealAgentRecord } from "../ib-commands";
@@ -109,7 +110,8 @@ beforeEach(() => {
   usageFetchCtx.set({
     readClaudeUsage: async () => ({ data: null, error: false }),
     fetchGeminiUsage: async () => ({ data: null, error: false }),
-    fetchCodexUsage: async () => ({ data: null, error: false }),
+    readCodexLogUsage: async () => null,
+    fetchCodexLiveUsage: async () => ({ reading: null, error: "inert test fetcher" }),
   });
 });
 
@@ -4613,7 +4615,8 @@ describe("agy usage polling", () => {
     const calls = { gemini: 0 };
     usageFetchCtx.set({
       readClaudeUsage: async () => ({ data: null, error: false }),
-      fetchCodexUsage: async () => ({ data: null, error: false }),
+      readCodexLogUsage: async () => null,
+      fetchCodexLiveUsage: async () => ({ reading: null, error: "inert test fetcher" }),
       fetchGeminiUsage: async () => {
         const result = results[Math.min(calls.gemini, results.length - 1)]!;
         calls.gemini++;
@@ -4643,7 +4646,8 @@ describe("agy usage polling", () => {
     const state = { calls: 0, resolve: (_result: GeminiUsageResult) => {} };
     usageFetchCtx.set({
       readClaudeUsage: async () => ({ data: null, error: false }),
-      fetchCodexUsage: async () => ({ data: null, error: false }),
+      readCodexLogUsage: async () => null,
+      fetchCodexLiveUsage: async () => ({ reading: null, error: "inert test fetcher" }),
       fetchGeminiUsage: () => {
         state.calls++;
         return new Promise<GeminiUsageResult>((resolve) => {
@@ -4802,6 +4806,272 @@ describe("agy usage polling", () => {
     const row = statusRows(dashboard)[1];
     expect(row).toContain("gemini session:5%");
     expect(row).not.toContain("agy login needed");
+  });
+});
+
+describe("codex live usage", () => {
+  // The session logs go stale when a window resets and no codex session runs,
+  // so the dashboard also asks the account (`codex app-server`) at start, every
+  // 8 hours, and once per passed reset time it shows.
+  const DAY_MS = 86_400_000;
+  const FAILED: CodexLiveUsageResult = { reading: null, error: "probe failed" };
+
+  afterEach(() => {
+    usageFetchCtx.reset();
+    setSystemTime();
+  });
+
+  function weeklyReading(usedPercent: number, resetsAtMs: number, observedAtMs: number): CodexUsageReading {
+    return {
+      rateLimits: { primary: { used_percent: usedPercent, window_minutes: 10080, resets_at: resetsAtMs / 1000 }, secondary: null },
+      observedAtMs,
+    };
+  }
+
+  /**
+   * Install inert Claude/Gemini fetchers, a log reader that returns `log()`,
+   * and a live fetcher whose calls each stay pending until `resolve(i, result)`.
+   */
+  function installCodexFetchers(log: () => CodexUsageReading | null) {
+    const live = {
+      calls: 0,
+      resolvers: [] as ((result: CodexLiveUsageResult) => void)[],
+      resolve(index: number, result: CodexLiveUsageResult) { live.resolvers[index]!(result); },
+    };
+    usageFetchCtx.set({
+      readClaudeUsage: async () => ({ data: null, error: false }),
+      fetchGeminiUsage: async () => ({ data: null, error: false }),
+      readCodexLogUsage: async () => log(),
+      fetchCodexLiveUsage: () => {
+        live.calls++;
+        return new Promise<CodexLiveUsageResult>((resolve) => { live.resolvers.push(resolve); });
+      },
+    });
+    return live;
+  }
+
+  function codexRow(dashboard: DashboardComponent): string {
+    return dashboard.render(180).slice(-2).map((l) => stripAnsi(l))[1]!;
+  }
+
+  async function waitForCodexWeekly(dashboard: DashboardComponent, pct: number): Promise<void> {
+    await waitFor(() => (dashboard as any).statusBar.codexUsage?.weeklyPct === pct, {
+      timeoutMs: WAIT_TIMEOUT_MS,
+      message: `codex weekly ${pct}% on the status bar`,
+    });
+  }
+
+  async function waitForCodexIdle(dashboard: DashboardComponent): Promise<void> {
+    await waitFor(() => (dashboard as any).codexLiveProbeInFlight === false, {
+      timeoutMs: WAIT_TIMEOUT_MS,
+      message: "the codex live probe to settle",
+    });
+  }
+
+  /** Run `body` with setInterval/clearInterval handed to the test, as the footer clock test does for timeouts. */
+  async function withCapturedIntervals(
+    body: (armed: { fn: () => void; ms: number; handle: object }[]) => Promise<void>,
+  ): Promise<void> {
+    const g = globalThis as unknown as {
+      setInterval: (fn: () => void, ms?: number) => unknown;
+      clearInterval: (handle?: unknown) => void;
+    };
+    const realSetInterval = g.setInterval;
+    const realClearInterval = g.clearInterval;
+    const armed: { fn: () => void; ms: number; handle: object }[] = [];
+    g.setInterval = (fn: () => void, ms = 0) => {
+      const handle = {};
+      armed.push({ fn, ms, handle });
+      return handle;
+    };
+    g.clearInterval = (handle?: unknown) => {
+      const i = armed.findIndex((a) => a.handle === handle);
+      if (i !== -1) armed.splice(i, 1);
+      else realClearInterval(handle);
+    };
+    try {
+      await body(armed);
+    } finally {
+      g.setInterval = realSetInterval;
+      g.clearInterval = realClearInterval;
+    }
+  }
+
+  test("probes once when polling starts", () => {
+    const live = installCodexFetchers(() => null);
+    const dashboard = makeDashboard();
+    expect(live.calls).toBe(0);
+    dashboard.startPolling();
+    expect(live.calls).toBe(1);
+  });
+
+  test("probes again from an 8-hour timer, which stopPolling clears", async () => {
+    await withCapturedIntervals(async (armed) => {
+      const live = installCodexFetchers(() => null);
+      const dashboard = makeDashboard();
+      dashboard.startPolling();
+      const timer = armed.find((a) => a.ms === CODEX_LIVE_PROBE_INTERVAL_MS);
+      expect(timer).toBeDefined();
+      expect(CODEX_LIVE_PROBE_INTERVAL_MS).toBe(8 * 60 * 60 * 1000);
+
+      live.resolve(0, FAILED);
+      await waitForCodexIdle(dashboard);
+      timer!.fn();
+      expect(live.calls).toBe(2);
+
+      dashboard.stopPolling();
+      expect(armed.some((a) => a.ms === CODEX_LIVE_PROBE_INTERVAL_MS)).toBe(false);
+    });
+  });
+
+  test("a timer tick while a probe is in flight starts no second probe", async () => {
+    await withCapturedIntervals(async (armed) => {
+      const live = installCodexFetchers(() => null);
+      const dashboard = makeDashboard();
+      dashboard.startPolling();
+      const timer = armed.find((a) => a.ms === CODEX_LIVE_PROBE_INTERVAL_MS)!;
+
+      timer.fn();
+      expect(live.calls).toBe(1);
+
+      live.resolve(0, FAILED);
+      await waitForCodexIdle(dashboard);
+      timer.fn();
+      expect(live.calls).toBe(2);
+      dashboard.stopPolling();
+    });
+  });
+
+  test("shows a live reading newer than the log, then a log record written after the probe", async () => {
+    const nowMs = Date.now();
+    // The newest log record is two days old and its weekly window reset yesterday.
+    let log: CodexUsageReading | null = weeklyReading(100, nowMs - DAY_MS, nowMs - 2 * DAY_MS);
+    const live = installCodexFetchers(() => log);
+    const dashboard = makeDashboard();
+    dashboard.startPolling();
+    await waitForCodexWeekly(dashboard, 100);
+    expect(codexRow(dashboard)).toContain("codex weekly:100% (now)");
+
+    live.resolve(0, { reading: weeklyReading(3, nowMs + 7 * DAY_MS, nowMs), error: null });
+    await waitForCodexWeekly(dashboard, 3);
+    expect(codexRow(dashboard)).toContain("codex weekly:3% (6d 23h)");
+
+    // A codex agent runs after the probe, so its log record is newer.
+    log = weeklyReading(9, nowMs + 7 * DAY_MS, nowMs + 1_000);
+    (dashboard as any).refreshUsage();
+    await waitForCodexWeekly(dashboard, 9);
+    expect(codexRow(dashboard)).toContain("codex weekly:9%");
+    expect(live.calls).toBe(1);
+  });
+
+  test("a failed probe keeps the previous reading and adds no warning", async () => {
+    const nowMs = Date.now();
+    const live = installCodexFetchers(() => null);
+    const dashboard = makeDashboard();
+    dashboard.startPolling();
+    live.resolve(0, { reading: weeklyReading(3, nowMs + 7 * DAY_MS, nowMs), error: null });
+    await waitForCodexWeekly(dashboard, 3);
+    await waitForCodexIdle(dashboard);
+
+    (dashboard as any).probeCodexLiveUsage();
+    expect(live.calls).toBe(2);
+    live.resolve(1, FAILED);
+    await waitForCodexIdle(dashboard);
+    (dashboard as any).refreshUsage();
+    await Bun.sleep(25);
+
+    const row = codexRow(dashboard);
+    expect(row).toContain("codex weekly:3%");
+    expect(row).not.toContain("⚠️");
+    expect((dashboard as any).statusBar.codexUsageError).toBe(false);
+  });
+
+  test("a failed probe with no session logs shows the same warning as before", async () => {
+    const live = installCodexFetchers(() => null);
+    const dashboard = makeDashboard();
+    dashboard.startPolling();
+    live.resolve(0, FAILED);
+    await waitForCodexIdle(dashboard);
+    await waitFor(() => (dashboard as any).statusBar.codexUsageError === true, {
+      timeoutMs: WAIT_TIMEOUT_MS,
+      message: "the no-logs codex warning",
+    });
+    expect(codexRow(dashboard)).toContain("⚠️  codex usage unavailable");
+  });
+
+  test("reset times are formatted from the stored reading on every refresh", async () => {
+    const base = new Date("2026-11-07T22:00:00Z").getTime();
+    setSystemTime(new Date(base));
+    const live = installCodexFetchers(() => null);
+    const dashboard = makeDashboard();
+    dashboard.startPolling();
+    live.resolve(0, { reading: weeklyReading(3, base + 7 * DAY_MS, base), error: null });
+    await waitForCodexWeekly(dashboard, 3);
+    expect((dashboard as any).statusBar.codexUsage.weeklyReset).toBe("7d 0h");
+
+    // The next 4-minute tick: same stored reading, later clock.
+    setSystemTime(new Date(base + 4 * 60_000));
+    (dashboard as any).refreshUsage();
+    await waitFor(() => (dashboard as any).statusBar.codexUsage.weeklyReset === "6d 23h", {
+      timeoutMs: WAIT_TIMEOUT_MS,
+      message: "the reset time re-formatted against the later clock",
+    });
+
+    setSystemTime(new Date(base + 8 * 3_600_000));
+    (dashboard as any).refreshUsage();
+    await waitFor(() => (dashboard as any).statusBar.codexUsage.weeklyReset === "6d 16h", {
+      timeoutMs: WAIT_TIMEOUT_MS,
+      message: "the reset time 8 hours later",
+    });
+  });
+
+  test("a passed reset time probes once per reset value, and never while a probe is in flight", async () => {
+    const nowMs = Date.now();
+    let log: CodexUsageReading | null = weeklyReading(100, nowMs - DAY_MS, nowMs - 2 * DAY_MS);
+    const live = installCodexFetchers(() => log);
+    const dashboard = makeDashboard();
+    dashboard.startPolling();
+    // The launch probe is in flight when the stale "(now)" reading shows.
+    await waitForCodexWeekly(dashboard, 100);
+    await Bun.sleep(25);
+    expect(live.calls).toBe(1);
+
+    live.resolve(0, FAILED);
+    await waitForCodexIdle(dashboard);
+    (dashboard as any).refreshUsage();
+    await waitFor(() => live.calls === 2, { timeoutMs: WAIT_TIMEOUT_MS, message: "the probe for the passed reset" });
+
+    live.resolve(1, FAILED);
+    await waitForCodexIdle(dashboard);
+    (dashboard as any).refreshUsage();
+    (dashboard as any).refreshUsage();
+    await Bun.sleep(25);
+    expect(live.calls).toBe(2);
+
+    // A different passed reset time gets its own single probe.
+    log = weeklyReading(100, nowMs - 1_000, nowMs - DAY_MS);
+    (dashboard as any).refreshUsage();
+    await waitFor(() => live.calls === 3, { timeoutMs: WAIT_TIMEOUT_MS, message: "the probe for the second reset" });
+    live.resolve(2, FAILED);
+    await waitForCodexIdle(dashboard);
+    (dashboard as any).refreshUsage();
+    await Bun.sleep(25);
+    expect(live.calls).toBe(3);
+  });
+
+  test("a passed reset does not probe once polling has stopped", async () => {
+    const nowMs = Date.now();
+    const live = installCodexFetchers(() => weeklyReading(100, nowMs - DAY_MS, nowMs - 2 * DAY_MS));
+    const dashboard = makeDashboard();
+    dashboard.startPolling();
+    live.resolve(0, FAILED);
+    await waitForCodexIdle(dashboard);
+    dashboard.stopPolling();
+
+    (dashboard as any).refreshUsage();
+    await waitForCodexWeekly(dashboard, 100);
+    await Bun.sleep(25);
+    expect(live.calls).toBe(1);
   });
 });
 
@@ -7702,26 +7972,33 @@ describe("idle render checks", () => {
   test("an unchanged usage reading does not render", async () => {
     const reading = { sessionPct: 10, weeklyPct: 20, sessionReset: "1h", weeklyReset: "2d" };
     let current = { ...reading };
+    // A Codex log reading that resets in 30d 0h 30m, so its "30d 0h" text does not change between refreshes.
+    const codexLog = {
+      rateLimits: { primary: { used_percent: 30, window_minutes: 10080, resets_at: Date.now() / 1000 + 30 * 86_400 + 1_800 }, secondary: null },
+      observedAtMs: Date.now(),
+    };
     usageFetchCtx.set({
       readClaudeUsage: async () => ({ data: { ...current }, error: false }),
       fetchGeminiUsage: async () => ({ data: null, error: false }),
-      fetchCodexUsage: async () => ({ data: null, error: false }),
+      readCodexLogUsage: async () => ({ ...codexLog }),
+      fetchCodexLiveUsage: async () => ({ reading: null, error: "inert test fetcher" }),
     });
     const dashboard = makeDashboard();
     const counter = countingTui();
     dashboard.setTui(counter.tui);
 
+    // The first readings render once each: claude, then codex.
     (dashboard as any).refreshUsage();
-    await waitFor(() => (dashboard as any).statusBar.claudeUsage !== null, {
+    await waitFor(() => (dashboard as any).statusBar.claudeUsage !== null && (dashboard as any).statusBar.codexUsage !== null, {
       timeoutMs: WAIT_TIMEOUT_MS,
-      message: "the first claude usage reading",
+      message: "the first claude and codex usage readings",
     });
-    expect(counter.renders()).toBe(1);
+    expect(counter.renders()).toBe(2);
 
-    // Same values in a new object: no render.
+    // Same values in new objects: no render.
     (dashboard as any).refreshUsage();
     await Bun.sleep(25);
-    expect(counter.renders()).toBe(1);
+    expect(counter.renders()).toBe(2);
 
     current = { ...reading, sessionPct: 11 };
     (dashboard as any).refreshUsage();
@@ -7729,7 +8006,7 @@ describe("idle render checks", () => {
       timeoutMs: WAIT_TIMEOUT_MS,
       message: "the changed claude usage reading",
     });
-    expect(counter.renders()).toBe(2);
+    expect(counter.renders()).toBe(3);
   });
 
   test("a coordinator pane reset is refilled by the next poll even when the capture is unchanged", async () => {

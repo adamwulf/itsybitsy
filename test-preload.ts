@@ -113,3 +113,11 @@ tmuxPollerSpawnCtx.setDefault(safeTestSpawnRunner);
 // (commit count) through this context; on the stub both read as null.
 const { gitStatusSpawnCtx } = await import("./src/git-status");
 gitStatusSpawnCtx.setDefault(safeTestSpawnRunner);
+
+// The dashboard probes live Codex usage (`codex app-server`, src/codex-live-usage.ts)
+// when polling starts and from an 8-hour timer. A dashboard test that resets
+// usageFetchCtx leaves the real probe as the fetcher, so late async work could
+// start a real codex process that talks to OpenAI. Same backstop: the stub has
+// no stdin pipe, so the probe fails at once without spawning anything.
+const { codexLiveSpawnCtx } = await import("./src/codex-live-usage");
+codexLiveSpawnCtx.setDefault(safeTestSpawnRunner);

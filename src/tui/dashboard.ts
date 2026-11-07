@@ -45,8 +45,9 @@ import { installTerminalCleanup } from "./terminal-cleanup";
 import { wordWrapLines, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
 import { closeOsc8 } from "../hyperlinks";
 import type { ChromeSlice } from "./wrap";
-import { fetchCodexUsage, fetchGeminiUsage } from "../usage";
-import type { UsageData } from "../usage";
+import { codexUsageResult, fetchGeminiUsage, newerCodexReading, passedCodexResets, readCodexLogUsage } from "../usage";
+import type { CodexUsageReading, UsageData } from "../usage";
+import { fetchCodexLiveUsage } from "../codex-live-usage";
 import { readClaudeUsage } from "../claude-rate-limits";
 import { InjectionContext } from "../types";
 import { getStateColors, setupColorSchemeDetection } from "./color-scheme";
@@ -110,9 +111,18 @@ const LEFT_WIDTH_STEP = 5;
 
 /**
  * The usage fetchers behind the status-bar poll. Tests swap them so that a
- * dashboard test never runs `agy` or reads the real ~/.itsybitsy and ~/.codex.
+ * dashboard test never runs `agy` or `codex app-server`, or reads the real
+ * ~/.itsybitsy and ~/.codex.
  */
-export const usageFetchCtx = new InjectionContext({ readClaudeUsage, fetchGeminiUsage, fetchCodexUsage });
+export const usageFetchCtx = new InjectionContext({
+  readClaudeUsage,
+  fetchGeminiUsage,
+  readCodexLogUsage,
+  fetchCodexLiveUsage,
+});
+
+/** How often `ib watch` probes live Codex usage (`codex app-server`) after the probe at start. */
+export const CODEX_LIVE_PROBE_INTERVAL_MS = 8 * 60 * 60_000;
 
 // findLastTwoSeparators moved to wrap.ts — re-exported for external consumers
 export { findLastTwoSeparators } from "./wrap";
@@ -732,6 +742,19 @@ export class DashboardComponent implements Component {
    */
   private agyUsageAuthLatched = false;
   private geminiUsageInFlight = false;
+  /** Newest Codex usage record in the session logs, read on every usage tick. */
+  private codexLogReading: CodexUsageReading | null = null;
+  /** Last successful live Codex probe. A failed probe leaves it as it was. */
+  private codexLiveReading: CodexUsageReading | null = null;
+  /** The 8-hour live Codex probe timer; set while polling runs. */
+  private codexLiveTimer: ReturnType<typeof setInterval> | null = null;
+  private codexLiveProbeInFlight = false;
+  /**
+   * Reset times (epoch ms) that already triggered a live probe. A shown reset
+   * time that has passed probes once, so a probe that still reports the same
+   * reset cannot start another.
+   */
+  private codexResetsProbed = new Set<number>();
   /**
    * Periodic channel-pane refresh timer (§17.4). Mirrors the TmuxPoller cadence
    * (~1s): when a team is selected (channelPane.teamName !== null) the timer
@@ -1190,6 +1213,11 @@ export class DashboardComponent implements Component {
     this.updatePollerVisibility();
     this.refreshUsage();
     this.usageTimer = setInterval(() => this.refreshUsage(), 240_000);
+    // Live Codex usage (SPEC.md §6.6.3): the session logs go stale when a
+    // window resets and no codex session runs, so ask the account directly at
+    // start and every 8 hours.
+    this.probeCodexLiveUsage();
+    this.codexLiveTimer = setInterval(() => this.probeCodexLiveUsage(), CODEX_LIVE_PROBE_INTERVAL_MS);
     // §17.4 channel-pane refresh tick (~1s, matches TmuxPoller cadence). Only
     // does work when a team is selected (refreshChannel returns immediately on
     // null teamName), so the cost when not on the Teams tab is one no-op call.
@@ -1228,6 +1256,10 @@ export class DashboardComponent implements Component {
     if (this.usageTimer) {
       clearInterval(this.usageTimer);
       this.usageTimer = null;
+    }
+    if (this.codexLiveTimer) {
+      clearInterval(this.codexLiveTimer);
+      this.codexLiveTimer = null;
     }
     if (this.channelRefreshTimer) {
       clearInterval(this.channelRefreshTimer);
@@ -1401,17 +1433,67 @@ export class DashboardComponent implements Component {
 
     this.refreshGeminiUsage();
 
-    fetchers.fetchCodexUsage()
-      .then((result) => {
-        if (sameUsage(this.statusBar.codexUsage, result.data) && this.statusBar.codexUsageError === result.error) return;
-        this.statusBar.codexUsage = result.data;
-        this.statusBar.codexUsageError = result.error;
-        this.tui?.requestRender();
+    fetchers.readCodexLogUsage()
+      .then((reading) => {
+        this.codexLogReading = reading;
+        this.showCodexUsage();
       })
       .catch(() => {
         if (this.statusBar.codexUsageError) return;
         this.statusBar.codexUsageError = true;
         this.tui?.requestRender();
+      });
+  }
+
+  /**
+   * Show the newer of the session-log and live Codex readings, with reset
+   * times formatted against the clock now (the readings keep raw reset
+   * times). Renders only when the status bar would change. When a shown reset
+   * time has passed, the footer would read "(now)" from a stale reading, so
+   * probe once for that reset.
+   */
+  private showCodexUsage(): void {
+    const nowMs = Date.now();
+    const reading = newerCodexReading(this.codexLogReading, this.codexLiveReading);
+    const result = codexUsageResult(reading, new Date(nowMs));
+    if (!sameUsage(this.statusBar.codexUsage, result.data) || this.statusBar.codexUsageError !== result.error) {
+      this.statusBar.codexUsage = result.data;
+      this.statusBar.codexUsageError = result.error;
+      this.tui?.requestRender();
+    }
+    this.probeCodexAfterReset(reading, nowMs);
+  }
+
+  /**
+   * Probe live Codex usage once per passed reset time of the shown reading.
+   * Only while polling runs, and never while a probe is in flight: that probe
+   * answers first, and a reset it still reports gets its own probe later.
+   */
+  private probeCodexAfterReset(reading: CodexUsageReading | null, nowMs: number): void {
+    if (!this.codexLiveTimer || this.codexLiveProbeInFlight) return;
+    const unprobed = passedCodexResets(reading, nowMs).filter((resetMs) => !this.codexResetsProbed.has(resetMs));
+    if (unprobed.length === 0) return;
+    for (const resetMs of unprobed) this.codexResetsProbed.add(resetMs);
+    this.probeCodexLiveUsage();
+  }
+
+  /**
+   * Ask the account for its Codex windows (`codex app-server`). At most one
+   * probe runs at a time. A failed probe keeps the previous reading and adds
+   * no warning; the session-log reading still shows as before.
+   */
+  private probeCodexLiveUsage(): void {
+    if (this.codexLiveProbeInFlight) return;
+    this.codexLiveProbeInFlight = true;
+    usageFetchCtx.fn.fetchCodexLiveUsage()
+      .then((result) => {
+        if (!result.reading) return;
+        this.codexLiveReading = result.reading;
+        this.showCodexUsage();
+      })
+      .catch(() => {})
+      .finally(() => {
+        this.codexLiveProbeInFlight = false;
       });
   }
 

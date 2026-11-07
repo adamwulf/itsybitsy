@@ -31,6 +31,7 @@ import {
 } from "./tmux-poller";
 import { tmuxSessionTarget } from "./validation";
 import { gitStatusSpawnCtx, checkWorktreeCleanliness } from "./git-status";
+import { codexLiveSpawnCtx, fetchCodexLiveUsage } from "./codex-live-usage";
 import type { SpawnFn } from "./types";
 
 function streamOf(text: string): ReadableStream<Uint8Array> {
@@ -64,6 +65,25 @@ afterEach(() => {
   coordinatorSpawnCtx.reset();
   tmuxPollerSpawnCtx.reset();
   gitStatusSpawnCtx.reset();
+  codexLiveSpawnCtx.reset();
+});
+
+// The dashboard's live Codex usage probe runs from startPolling() and an 8-hour
+// timer, so late async work after a test's usageFetchCtx.reset() reaches it.
+describe("codex live usage probe backstop", () => {
+  test("codexLiveSpawnCtx.reset() restores the safety stub, not Bun.spawn", () => {
+    codexLiveSpawnCtx.set(((): any => { throw new Error("real spawn must never run"); }) as SpawnFn);
+    codexLiveSpawnCtx.reset();
+    expect(codexLiveSpawnCtx.runner).toBe(safeTestSpawnRunner);
+    expect(codexLiveSpawnCtx.runner).not.toBe(Bun.spawn as unknown as SpawnFn);
+  });
+
+  test("fetchCodexLiveUsage on the stub fails at once without spawning", async () => {
+    codexLiveSpawnCtx.reset();
+    const result = await fetchCodexLiveUsage({ timeoutMs: 1_000 });
+    expect(result.reading).toBeNull();
+    expect(result.error).toContain("no stdin/stdout pipe");
+  });
 });
 
 // The dashboard's "Git Status" stoplight probe shares the same backstop: its

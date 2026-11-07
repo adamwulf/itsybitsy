@@ -14,6 +14,19 @@ export type SpawnResult = {
    * (agy 1.1.23 hangs on an inherited unclosed stdin).
    */
   kill?: (signal?: number | string) => void;
+  /**
+   * The write end of the child's stdin, present when it was spawned with
+   * `stdin: "pipe"` (Bun's `FileSink`). Optional for the same reason as `kill`.
+   * The `codex app-server` usage probe writes its JSON-RPC requests here.
+   */
+  stdin?: SpawnStdin | null;
+};
+
+/** The subset of Bun's `FileSink` (a piped stdin) that callers use. */
+export type SpawnStdin = {
+  write(chunk: string): unknown;
+  flush?(): unknown;
+  end?(): unknown;
 };
 
 /**

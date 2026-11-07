@@ -14,6 +14,34 @@ import { sanitizeAgentNameInput } from "../validation";
 
 export const TEXTAREA_VISIBLE_HEIGHT = 5;
 export const FOLDER_BROWSER_HEIGHT = 15;
+/** Width of a dialog whose type has no width of its own (input, confirm, ...). */
+export const DIALOG_WIDTH = 80;
+
+/**
+ * Widest title a `width`-column dialog can draw. The overlay draws the title
+ * in the top border as `┌─ <title> ─…┐`, so 5 columns are border and spaces;
+ * a longer title pushes the border past the box.
+ */
+export function dialogTitleMaxWidth(width: number = DIALOG_WIDTH): number {
+  return width - 5;
+}
+
+/**
+ * `text` unchanged if it fits in `maxWidth` (>= 1) columns, otherwise "…"
+ * followed by as much of its END as fits. Used for paths, whose tail is the
+ * part worth keeping.
+ */
+export function elideLeft(text: string, maxWidth: number): string {
+  if (visibleWidth(text) <= maxWidth) return text;
+  const chars = Array.from(text);
+  let tail = "";
+  for (let i = chars.length - 1; i >= 0; i--) {
+    const next = chars[i] + tail;
+    if (visibleWidth(next) + 1 > maxWidth) break;
+    tail = next;
+  }
+  return `…${tail}`;
+}
 
 // Common optional properties shared across all dialog types
 type DialogCommon = { width?: number };
@@ -84,9 +112,12 @@ export type DialogState =
       currentPath: string;
       items: FolderItem[];
       selectedIndex: number;
-      focused: "list" | "add" | "cancel";
+      focused: FolderBrowserFocus;
       scrollOffset: number;
+      /** [ Add ]: register the selected git folder. */
       onSelect: (path: string) => void;
+      /** [ New Repo ]: the selected non-git folder becomes the parent of a new repo. */
+      onNewRepo: (parentPath: string) => void;
     } & DialogCommon)
   | ({
       type: "new-agent-form";
@@ -122,6 +153,27 @@ export type DialogState =
       onSave: (allowList: string[], denyList: string[]) => void;
     } & DialogCommon)
   | null;
+
+/** Folder-browser focus targets, in visual (Tab) order. */
+const FOLDER_BROWSER_FOCUS_ORDER = ["list", "cancel", "newRepo", "add"] as const;
+export type FolderBrowserFocus = (typeof FOLDER_BROWSER_FOCUS_ORDER)[number];
+
+/**
+ * Which folder-browser buttons the selected folder enables. The key handler
+ * and the renderer both use it, so focus never lands on a dimmed button.
+ * [ Add ] needs a git folder that is not registered yet; [ New Repo ] needs a
+ * folder that is not a git repo.
+ */
+function folderBrowserButtons(
+  d: Extract<NonNullable<DialogState>, { type: "folder-browser" }>,
+  registeredPaths: ReadonlySet<string>,
+): { add: boolean; newRepo: boolean } {
+  const item = d.items[d.selectedIndex];
+  return {
+    add: item !== undefined && item.isGit && !registeredPaths.has(item.path),
+    newRepo: item !== undefined && !item.isGit,
+  };
+}
 
 export type SetupItem = {
   label: string;
@@ -571,7 +623,19 @@ function handleFolderBrowserDialog(
 ): boolean {
   const registeredPaths = new Set(ctx.repos.map((r) => r.path));
   const selectedItem = d.items[d.selectedIndex];
-  const addEnabled = selectedItem?.isGit && !registeredPaths.has(selectedItem.path);
+  const enabled = folderBrowserButtons(d, registeredPaths);
+  const isEnabled = (focus: FolderBrowserFocus): boolean =>
+    focus === "add" ? enabled.add : focus === "newRepo" ? enabled.newRepo : true;
+  // Tab / Shift+Tab step through FOLDER_BROWSER_FOCUS_ORDER and skip disabled
+  // buttons. "list" and "cancel" are always enabled, so the loop ends.
+  const moveFocus = (dir: 1 | -1) => {
+    const order = FOLDER_BROWSER_FOCUS_ORDER;
+    let idx = order.indexOf(d.focused);
+    do {
+      idx = (idx + dir + order.length) % order.length;
+    } while (!isEnabled(order[idx]!));
+    d.focused = order[idx]!;
+  };
 
   if (matchesKey(data, Key.down) || data === "j") {
     if (d.focused === "list") {
@@ -591,22 +655,23 @@ function handleFolderBrowserDialog(
     }
     ctx.tui?.requestRender();
   } else if (matchesKey(data, Key.tab)) {
-    if (d.focused === "list") { d.focused = "cancel"; }
-    else if (d.focused === "cancel") { d.focused = addEnabled ? "add" : "list"; }
-    else { d.focused = "list"; }
+    moveFocus(1);
     ctx.tui?.requestRender();
   } else if (matchesKey(data, Key.shift("tab"))) {
-    if (d.focused === "list") { d.focused = addEnabled ? "add" : "cancel"; }
-    else if (d.focused === "add") { d.focused = "cancel"; }
-    else { d.focused = "list"; }
+    moveFocus(-1);
     ctx.tui?.requestRender();
   } else if (matchesKey(data, Key.enter)) {
     if (d.focused === "cancel") {
       ctx.closeDialog();
     } else if (d.focused === "add") {
-      if (selectedItem?.isGit && !registeredPaths.has(selectedItem.path)) {
+      if (selectedItem && enabled.add) {
         ctx.closeDialog();
         d.onSelect(selectedItem.path);
+      }
+    } else if (d.focused === "newRepo") {
+      if (selectedItem && enabled.newRepo) {
+        ctx.closeDialog();
+        d.onNewRepo(selectedItem.path);
       }
     } else {
       // Navigate into selected folder
@@ -1002,14 +1067,13 @@ export function buildFolderBrowserContent(
   if (remaining > 0) { lines.push(`${DIM}  ▼ ${remaining} more${RESET}`); }
   while (lines.length < FOLDER_BROWSER_HEIGHT + (start > 0 ? 1 : 0) + (remaining > 0 ? 1 : 0)) { lines.push(""); }
 
-  const selectedItem = items[selectedIndex];
-  const addEnabled = selectedItem?.isGit && !registeredPaths.has(selectedItem.path);
-  const addLabel = focused === "add"
-    ? `${BOLD}${GREEN}[ Add ]${RESET}`
-    : addEnabled ? `[ Add ]` : `${DIM}[ Add ]${RESET}`;
-  const cancelLabel = focused === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `[ Cancel ]`;
+  const enabled = folderBrowserButtons(dialog, registeredPaths);
+  const button = (label: string, focus: FolderBrowserFocus, isEnabled: boolean): string =>
+    focused === focus
+      ? `${BOLD}${GREEN}[ ${label} ]${RESET}`
+      : isEnabled ? `[ ${label} ]` : `${DIM}[ ${label} ]${RESET}`;
   lines.push("");
-  lines.push(`  ${cancelLabel}    ${addLabel}`);
+  lines.push(`  ${button("Cancel", "cancel", true)}    ${button("New Repo", "newRepo", enabled.newRepo)}    ${button("Add", "add", enabled.add)}`);
   return { title: "Add Repository", contentLines: lines };
 }
 

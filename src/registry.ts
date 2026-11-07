@@ -4,9 +4,9 @@ import { mkdir } from "fs/promises";
 // teams.ts imports listRepos/repoDisplayName FROM this module, so a static
 // `import { getTeam } from "./teams"` forms an import cycle. It is SAFE here
 // because we only dereference `getTeam`/`normalizeTeamName` INSIDE the async
-// addRepo/renameRepo functions — long after both modules finish initializing
-// (never at module-init / top-level). See SPEC §16.1 (bidirectional repo↔team
-// name-collision refusal).
+// checkNewRepoEntry (which addRepo calls) and renameRepo functions — long
+// after both modules finish initializing (never at module-init / top-level).
+// See SPEC §16.1 (bidirectional repo↔team name-collision refusal).
 import { getTeam, normalizeTeamName } from "./teams";
 import { isValidRepoName } from "./validation";
 
@@ -139,17 +139,33 @@ export async function saveRegistry(data: RegistryData): Promise<void> {
   await Bun.write(registryPath(), JSON.stringify(data, null, 2) + "\n");
 }
 
-export async function addRepo(repoPath: string, name?: string): Promise<{ ok: boolean; message: string }> {
-  const resolved = resolve(repoPath);
-  const repoName = name ?? basename(resolved);
+/**
+ * The registry name the `ib watch` folder browser gives a folder: lowercased,
+ * each run of whitespace turned into "-", then every character outside
+ * [a-z0-9_-] dropped. Returns "" when nothing is left. Both the [ Add ] and
+ * the [ New Repo ] paths use it, so they name a folder the same way.
+ */
+export function repoNameFromFolder(folderName: string): string {
+  return folderName.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9_-]/g, "");
+}
 
+/**
+ * Why `repoName` at `resolvedPath` cannot be added to `registry`, or null if
+ * it can. These are addRepo's rules, kept in one place so createRepo can check
+ * them before it creates a folder on disk.
+ */
+export async function checkNewRepoEntry(
+  resolvedPath: string,
+  repoName: string,
+  registry: RegistryData,
+): Promise<string | null> {
   if (!isValidRepoName(repoName)) {
-    return { ok: false, message: `"${repoName}" is not a valid repo name — use alphanumeric, hyphens, underscores only (1-64 chars)` };
+    return `"${repoName}" is not a valid repo name — use alphanumeric, hyphens, underscores only (1-64 chars)`;
   }
 
   // "coordinator" is reserved for system coordinator addressing (SPEC §12.3.1)
   if (repoName === "coordinator") {
-    return { ok: false, message: `"coordinator" is a reserved name — rename the directory or use a custom name` };
+    return `"coordinator" is a reserved name — rename the directory or use a custom name`;
   }
 
   // Reject a repo name that collides with an EXISTING team — `@<repo>` and
@@ -158,14 +174,25 @@ export async function addRepo(repoPath: string, name?: string): Promise<{ ok: bo
   // teams). Bidirectional with team-create's collision refusal (SPEC §16.1).
   // Case-SENSITIVE strict lookup, matching the resolver and getTeam's exact keys.
   if ((await getTeam(normalizeTeamName(repoName))) !== null) {
-    return { ok: false, message: `"${repoName}" is already a team name — choose a different repo name (e.g. ib add <path> <name>)` };
+    return `"${repoName}" is already a team name — choose a different repo name (e.g. ib add <path> <name>)`;
   }
 
+  // Check for duplicate
+  if (registry.repos.some((r) => r.path === resolvedPath)) {
+    return `Already registered: ${resolvedPath}`;
+  }
+
+  return null;
+}
+
+export async function addRepo(repoPath: string, name?: string): Promise<{ ok: boolean; message: string }> {
+  const resolved = resolve(repoPath);
+  const repoName = name ?? basename(resolved);
   const registry = await loadRegistry();
 
-  // Check for duplicate
-  if (registry.repos.some((r) => r.path === resolved)) {
-    return { ok: false, message: `Already registered: ${resolved}` };
+  const error = await checkNewRepoEntry(resolved, repoName, registry);
+  if (error) {
+    return { ok: false, message: error };
   }
 
   registry.repos.push({ path: resolved, name: repoName });

@@ -4,7 +4,8 @@
  */
 
 import { join, dirname, sep } from "path";
-import { readdir, stat } from "fs/promises";
+import { readdir } from "fs/promises";
+import { hasGitEntry } from "../create-repo";
 
 export interface FolderItem {
   path: string;
@@ -39,7 +40,7 @@ export async function buildFolderItems(currentPath: string): Promise<FolderItem[
       path: seg,
       name: seg === sep ? sep : seg.split(sep).pop()!,
       depth: i,
-      isGit: await checkIsGit(seg),
+      isGit: await hasGitEntry(seg),
       isAncestor: true,
       isCurrent: false,
     });
@@ -51,7 +52,7 @@ export async function buildFolderItems(currentPath: string): Promise<FolderItem[
     path: currentPath,
     name: currentPath === sep ? sep : currentPath.split(sep).pop()!,
     depth: currentDepth,
-    isGit: await checkIsGit(currentPath),
+    isGit: await hasGitEntry(currentPath),
     isAncestor: false,
     isCurrent: true,
   });
@@ -69,7 +70,7 @@ export async function buildFolderItems(currentPath: string): Promise<FolderItem[
         path: childPath,
         name: child.name,
         depth: currentDepth + 1,
-        isGit: await checkIsGit(childPath),
+        isGit: await hasGitEntry(childPath),
         isAncestor: false,
         isCurrent: false,
       });
@@ -79,13 +80,4 @@ export async function buildFolderItems(currentPath: string): Promise<FolderItem[
   }
 
   return items;
-}
-
-async function checkIsGit(itemPath: string): Promise<boolean> {
-  try {
-    await stat(join(itemPath, ".git"));
-    return true;
-  } catch {
-    return false;
-  }
 }

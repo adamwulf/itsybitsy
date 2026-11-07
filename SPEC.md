@@ -2214,7 +2214,7 @@ itsybitsy manages complex configuration across multiple locations: global hooks 
 Health checks run automatically at two points:
 
 1. **Dashboard startup**: When `ib watch` launches, all registered repos are checked before the first render.
-2. **Add-repo**: When a repo is added (via `ib add` or the `a` keybinding folder browser), the new repo is checked immediately.
+2. **Add-repo**: When a repo is added (via `ib add`, or the `A` keybinding folder browser's `[ Add ]` or `[ New Repo ]` button), the new repo is checked immediately. `[ New Repo ]` is enabled only on a folder that is not a git repo: it asks for a folder name, creates that folder inside the selected one, runs `git init` and an empty "Initial commit" in it, and adds it to the registry.
 3. **On-demand**: The user can manually re-run health checks via a keybinding in the TUI (see §14.6).
 
 Health checks are non-blocking — the dashboard renders immediately and health check results are populated asynchronously. A repo shows no warning indicator until its check completes.

@@ -2,8 +2,10 @@ import { test, expect, describe } from "bun:test";
 import type { DialogState, DialogCtx } from "./dialog-handler";
 import {
   handleDialogInput, fuzzyFilterIndices, wrapTextareaLines,
-  buildMultiSelectContent, MULTI_SELECT_MAX_VISIBLE,
+  buildMultiSelectContent, MULTI_SELECT_MAX_VISIBLE, buildFolderBrowserContent, elideLeft,
 } from "./dialog-handler";
+import type { FolderItem } from "./folder-browser";
+import { DIM, RESET } from "./colors";
 import { TextBuffer, deleteWord } from "./text-buffer";
 import { assertDialog } from "./test-helpers";
 import { setClipboardReaderForTests, resetClipboardReaderForTests } from "./clipboard";
@@ -522,6 +524,123 @@ describe("fuzzy dialog", () => {
     expect(d.query).toBe("ap");
     handleDialogInput(ctx, "\x7f");
     expect(d.query).toBe("a");
+  });
+});
+
+// ─── elideLeft ──────────────────────────────────────────
+
+describe("elideLeft", () => {
+  test("returns text that fits unchanged", () => {
+    expect(elideLeft("/tmp/projects", 13)).toBe("/tmp/projects");
+    expect(elideLeft("/tmp/projects", 40)).toBe("/tmp/projects");
+  });
+
+  test("keeps the end of text that does not fit, behind a leading …", () => {
+    expect(elideLeft("/Users/someone/Developer/bun", 15)).toBe("…/Developer/bun");
+  });
+
+  test("counts wide characters by their terminal width", () => {
+    // Each 日 is 2 columns: "…日本/x" is 1 + 4 + 2 = 7.
+    expect(elideLeft("/a/日本/x", 7)).toBe("…日本/x");
+    expect(elideLeft("/a/日本/x", 6)).toBe("…本/x");
+  });
+});
+
+// ─── folder-browser dialog ──────────────────────────────
+
+describe("folder-browser dialog", () => {
+  type FolderBrowser = Extract<NonNullable<DialogState>, { type: "folder-browser" }>;
+  const item = (name: string, isGit: boolean): FolderItem => ({
+    path: `/projects/${name}`, name, depth: 1, isGit, isAncestor: false, isCurrent: false,
+  });
+  const GIT = 0;
+  const PLAIN = 1;
+
+  function makeBrowser(selectedIndex: number, registered: string[] = []) {
+    const added: string[] = [];
+    const newRepoParents: string[] = [];
+    const dialog: FolderBrowser = {
+      type: "folder-browser",
+      currentPath: "/projects",
+      items: [item("repo", true), item("plain", false)],
+      selectedIndex,
+      focused: "list",
+      scrollOffset: 0,
+      onSelect: (path) => { added.push(path); },
+      onNewRepo: (path) => { newRepoParents.push(path); },
+    };
+    const ctx = { ...makeDialogCtx(dialog), repos: registered.map((path) => ({ path })) };
+    return { ctx, dialog, added, newRepoParents };
+  }
+
+  function buttonRow(dialog: FolderBrowser, registered: string[] = []): string {
+    const { contentLines } = buildFolderBrowserContent(dialog, 66, new Set(registered));
+    return contentLines[contentLines.length - 1]!;
+  }
+
+  /** Focus after each key press, starting from "list". */
+  function focusTrail(dialog: FolderBrowser, ctx: DialogCtx, key: string, presses: number): string[] {
+    const trail: string[] = [];
+    for (let i = 0; i < presses; i++) {
+      handleDialogInput(ctx, key);
+      trail.push(dialog.focused);
+    }
+    return trail;
+  }
+
+  test("a non-git folder enables [ New Repo ] and dims [ Add ]", () => {
+    const { dialog } = makeBrowser(PLAIN);
+    expect(buttonRow(dialog)).toBe(`  [ Cancel ]    [ New Repo ]    ${DIM}[ Add ]${RESET}`);
+  });
+
+  test("a git folder dims [ New Repo ] and enables [ Add ]", () => {
+    const { dialog } = makeBrowser(GIT);
+    expect(buttonRow(dialog)).toBe(`  [ Cancel ]    ${DIM}[ New Repo ]${RESET}    [ Add ]`);
+  });
+
+  test("an already-added git folder dims both [ New Repo ] and [ Add ]", () => {
+    const { dialog } = makeBrowser(GIT);
+    expect(buttonRow(dialog, ["/projects/repo"])).toBe(`  [ Cancel ]    ${DIM}[ New Repo ]${RESET}    ${DIM}[ Add ]${RESET}`);
+  });
+
+  test("non-git folder: Tab is list → Cancel → New Repo → list, Shift+Tab the reverse", () => {
+    const fwd = makeBrowser(PLAIN);
+    expect(focusTrail(fwd.dialog, fwd.ctx, "\t", 3)).toEqual(["cancel", "newRepo", "list"]);
+    const back = makeBrowser(PLAIN);
+    expect(focusTrail(back.dialog, back.ctx, "\x1b[Z", 3)).toEqual(["newRepo", "cancel", "list"]);
+  });
+
+  test("git folder: Tab is list → Cancel → Add → list, Shift+Tab the reverse", () => {
+    const fwd = makeBrowser(GIT);
+    expect(focusTrail(fwd.dialog, fwd.ctx, "\t", 3)).toEqual(["cancel", "add", "list"]);
+    const back = makeBrowser(GIT);
+    expect(focusTrail(back.dialog, back.ctx, "\x1b[Z", 3)).toEqual(["add", "cancel", "list"]);
+  });
+
+  test("already-added git folder: Tab and Shift+Tab only move between list and Cancel", () => {
+    const fwd = makeBrowser(GIT, ["/projects/repo"]);
+    expect(focusTrail(fwd.dialog, fwd.ctx, "\t", 2)).toEqual(["cancel", "list"]);
+    const back = makeBrowser(GIT, ["/projects/repo"]);
+    expect(focusTrail(back.dialog, back.ctx, "\x1b[Z", 2)).toEqual(["cancel", "list"]);
+  });
+
+  test("Enter on [ New Repo ] closes the browser and passes the selected folder", () => {
+    const { ctx, dialog, added, newRepoParents } = makeBrowser(PLAIN);
+    handleDialogInput(ctx, "\t");
+    handleDialogInput(ctx, "\t");
+    expect(dialog.focused).toBe("newRepo");
+    handleDialogInput(ctx, "\r");
+    expect(ctx.closed).toHaveLength(1);
+    expect(newRepoParents).toEqual(["/projects/plain"]);
+    expect(added).toEqual([]);
+  });
+
+  test("Enter on [ New Repo ] does nothing when the selected folder is a git repo", () => {
+    const { ctx, dialog, newRepoParents } = makeBrowser(GIT);
+    dialog.focused = "newRepo";
+    handleDialogInput(ctx, "\r");
+    expect(ctx.closed).toHaveLength(0);
+    expect(newRepoParents).toEqual([]);
   });
 });
 

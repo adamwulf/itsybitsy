@@ -61,7 +61,7 @@ import { listTeams, getTeam } from "../teams";
 import type { Team } from "../teams";
 import type { DialogState } from "./dialog-handler";
 import {
-  wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT,
+  wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT, DIALOG_WIDTH,
   handleDialogInput, renderTextareaBlock, buildFolderBrowserContent, buildNewAgentFormContent,
   buildSetupContent, buildPermissionsEditorContent, buildMultiSelectContent,
 } from "./dialog-handler";
@@ -106,7 +106,6 @@ export { InputFieldComponent } from "./input-field";
 export { SystemDashboardComponent } from "./system-dashboard";
 export type { Selection } from "./selection";
 
-const DIALOG_WIDTH = 80;
 const LEFT_WIDTH_STEP = 5;
 
 /**

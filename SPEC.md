@@ -1053,6 +1053,17 @@ The status bar omits the `session:` segment when the 5-hour window has ended (`s
 
 **No keychain.** ib does not read the macOS keychain or call the Anthropic usage API. It used to call the API with the OAuth token from `security find-generic-password`; on recent macOS a keychain read from a CLI tool can show a password dialog, and a locked keychain shows one for every read.
 
+### 6.6.3 Codex plan usage (`ib watch` status bar)
+
+The status bar's `codex` segment shows the newer of two readings. Only the dashboard uses it; the watchdog does not read Codex usage.
+
+1. **Session logs** (`readCodexLogUsage` in `src/usage.ts`, every 4 minutes): the last `payload.rate_limits` line of the newest `~/.codex/sessions/**/*.jsonl` that has one. Its time is the line's top-level `timestamp`, or the file's mtime if the line has none. This reading goes stale when a window resets and no codex session runs afterwards, and OpenAI also resets weekly windows early for everyone. A stale reading shows `codex weekly:100% (now)`.
+2. **Live probe** (`fetchCodexLiveUsage` in `src/codex-live-usage.ts`): runs `codex app-server`, which speaks JSON-RPC over stdio, one JSON object per line, with no `"jsonrpc"` field. The probe sends `initialize` (`params.clientInfo` = `{name: "itsybitsy", version: "1"}`). When that answers, it sends the `initialized` notification and `account/rateLimits/read` (no params). It takes the response with the matching id and skips notifications such as `account/rateLimits/updated`. Then it closes stdin and sends SIGTERM, with SIGKILL 2s later if the server is still running. The result's `rateLimits` snapshot (the server's `codex` bucket) has `primary`/`secondary` windows of `{usedPercent, windowDurationMins, resetsAt}`, where `resetsAt` is in Unix seconds. These are mapped to the session-log shape and classified by window length, as for the logs. The probe has a 15s limit and never throws. A missing `codex`, an error response (no login: `codex account authentication required to read rate limits`; an API-key account: `chatgpt authentication required to read rate limits`), a timeout, or an answer with no windows each give an error result. The request starts no thread, so no hook fires (ib registers codex hooks only as per-spawn `-c` flags, §18.5) and no session log is written. It spends no quota. Shapes are from openai/codex `rust-v0.165.0`.
+
+**Which reading shows** (`newerCodexReading`): the live reading if its fetch time is at or after the log record's time, else the log reading. A codex agent that runs after a probe writes newer records, so the footer follows the agent. Both readings keep their raw windows (percent, window minutes, `resets_at`) plus their time. Reset strings such as `6d 23h` are re-formatted against the clock on every 4-minute refresh (`codexUsageResult`), not fixed at fetch time. No reading of either kind shows `⚠️  codex usage unavailable`, as before.
+
+**When the probe runs**: once when `ib watch` starts polling, then every 8 hours (`CODEX_LIVE_PROBE_INTERVAL_MS`; `stopPolling` clears the timer with the usage timer). It also runs when a reset time of the shown reading has passed, which is the `(now)` case (`passedCodexResets`). This happens at most once per distinct reset time (the dashboard keeps the probed values), so a probe that still reports a passed reset cannot loop. Only one probe runs at a time: a trigger while one is in flight starts nothing, and a passed reset is not marked as probed until it actually probes. A failed probe keeps the previous live reading and adds no warning.
+
 ### 6.7 Global Hooks (installed in ~/.claude/settings.json)
 
 These are optional hooks that the user installs globally:
@@ -3356,6 +3367,7 @@ Grep-able file list for the codex implementation:
 | `src/hooks/codex-dispatcher.ts` | Fail-open-safe wrapper around all three handlers; supports `--dry-run`. |
 | `src/ib-commands.ts` | `newAgent()` + `resumeAgent()` codex branches (calls `buildCodexStartContent` / `buildCodexResumeContent`); rejects `codex` for `--coordinator`. |
 | `src/watchdog.ts` | `classifyAgentCli(meta)` gate on `handleRateLimited`, `handleApiError`, permission auto-accept. |
+| `src/codex-live-usage.ts` | `fetchCodexLiveUsage()`: the `codex app-server` `account/rateLimits/read` probe behind the `ib watch` codex usage segment (§6.6.3). Not used by agents or the watchdog. |
 | `src/index.ts` | Routes for `hooks codex-pre-tool-use` / `hooks codex-session-start` / `hooks codex-stop` (all via `codex-dispatcher.ts`); `write-pid` subcommand. |
 | `src/agents.ts` | `codex_session_id?: string` on `AgentMeta`; `mutateAgentMeta()` helper used by `ib write-pid`. |
 | `tests/fixtures/claude-start-sh-baseline.sh` | Byte-snapshot regression guard — claude spawn script must remain unchanged. |

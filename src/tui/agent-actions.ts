@@ -9,7 +9,8 @@ import { dirname, join, basename } from "node:path";
 import { agentWorktreePath } from "../agents";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
-import { addRepo, listRepos, renameRepo, removeRepo, repoDisplayName } from "../registry";
+import { addRepo, listRepos, renameRepo, removeRepo, repoDisplayName, repoNameFromFolder } from "../registry";
+import { createRepo } from "../create-repo";
 import {
   retireAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent, renameAgent,
   mergeCheckAgent, mergeAgent, sendMessage, newAgent,
@@ -2816,25 +2817,44 @@ export async function handleFolderBrowser(ctx: ActionCtx) {
     scrollOffset: Math.max(0, (currentIdx !== -1 ? currentIdx : 0) - 7),
     onSelect: (path: string) => {
       const raw = basename(path);
-      const sanitized = raw.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9_-]/g, "");
+      const sanitized = repoNameFromFolder(raw);
       if (!sanitized) {
         ctx.setNotice(`Cannot derive a valid name from ${raw}`, "error");
         return;
       }
       addRepo(path, sanitized).then(async (result) => {
         ctx.setNotice(result.message, result.ok ? "info" : "error");
-        if (result.ok) {
-          const freshRepos = await listRepos();
-          ctx.repos.length = 0;
-          ctx.repos.push(...freshRepos);
-          ctx.watcher?.updateRepos(ctx.repos);
-          ctx.watcher?.refresh();
-        }
+        if (result.ok) { await reloadRepos(ctx); }
       }).catch((err) => {
         ctx.setNotice(`Error adding repo: ${err}`, "error");
       });
     },
+    onNewRepo: (parentPath: string) => {
+      ctx.showDialog({
+        type: "input",
+        prompt: `New repo in ${parentPath}:`,
+        value: "",
+        onSubmit: (folderName: string) => {
+          ctx.closeDialog();
+          createRepo(parentPath, folderName).then(async (result) => {
+            ctx.setNotice(result.message, result.ok ? "info" : "error");
+            if (result.ok) { await reloadRepos(ctx); }
+          }).catch((err) => {
+            ctx.setNotice(`Error creating repo: ${err}`, "error");
+          });
+        },
+      });
+    },
   });
+}
+
+/** Reload the registry into ctx.repos and point the watcher at the new list. */
+async function reloadRepos(ctx: ActionCtx) {
+  const freshRepos = await listRepos();
+  ctx.repos.length = 0;
+  ctx.repos.push(...freshRepos);
+  ctx.watcher?.updateRepos(ctx.repos);
+  ctx.watcher?.refresh();
 }
 
 export function handleResolveHealth(ctx: ActionCtx) {

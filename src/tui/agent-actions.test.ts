@@ -6,7 +6,10 @@ import { makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
 import type { ActionCtx } from "./agent-actions";
-import { fuzzyFilterIndices, type DialogState } from "./dialog-handler";
+import { fuzzyFilterIndices, handleDialogInput, type DialogCtx, type DialogState } from "./dialog-handler";
+import { buildFolderItems } from "./folder-browser";
+import { createRepoSpawnCtx } from "../create-repo";
+import { makeGitIdentity } from "../test-git-identity";
 import type { PaneMode } from "./pane-manager";
 import { assertDialog } from "./test-helpers";
 import { setStagedSenderForTests, resetStagedSenderForTests } from "./message-send";
@@ -2899,6 +2902,47 @@ describe("handleFolderBrowser", () => {
     );
     expect(added).toBeDefined();
     expect(added.name).toBe("rice-teaching");
+  });
+
+  test("[ New Repo ] asks for a folder name, then creates, inits and registers the repo", async () => {
+    const identity = await makeGitIdentity(fx.baseDir);
+    createRepoSpawnCtx.set(identity.spawn);
+    try {
+      const { ctx, dialogs, notices } = makeMockCtx({ repos: [fx.repoEntry] });
+      await handleFolderBrowser(ctx);
+      const browser = assertDialog(dialogs[0]!, "folder-browser");
+
+      // The browser opens at process.cwd() (a git repo); point it at the
+      // non-git temp base dir, as navigating there would.
+      browser.items = await buildFolderItems(fx.baseDir);
+      browser.currentPath = fx.baseDir;
+      browser.selectedIndex = browser.items.findIndex((i) => i.isCurrent);
+
+      // Drive the real key handler: Tab to Cancel, Tab to New Repo, Enter.
+      const dialogCtx: DialogCtx = { _dialog: browser, repos: ctx.repos, tui: null, closeDialog: () => {} };
+      handleDialogInput(dialogCtx, "\t");
+      handleDialogInput(dialogCtx, "\t");
+      expect(browser.focused).toBe("newRepo");
+      handleDialogInput(dialogCtx, "\r");
+
+      const input = assertDialog(dialogs[1]!, "input");
+      expect(input.prompt).toBe(`New repo in ${fx.baseDir}:`);
+      input.onSubmit("Fresh Repo");
+
+      // createRepo runs fire-and-forget; ctx.repos is reloaded last.
+      const target = join(fx.baseDir, "Fresh Repo");
+      const inCtx = await waitForValue(
+        () => ctx.repos.find((r) => r.path === target),
+        { message: `ctx.repos to contain the new repo ${target}`, timeoutMs: WAIT_MS },
+      );
+      expect(inCtx.name).toBe("fresh-repo");
+      expect((await loadRegistry()).repos.find((r) => r.path === target)?.name).toBe("fresh-repo");
+      expect(notices).toContain(`Created and added: fresh-repo (${target})`);
+      const subjects = (await Bun.$`git log --format=%s`.cwd(target).env(identity.env).quiet().text()).trim();
+      expect(subjects).toBe("Initial commit");
+    } finally {
+      createRepoSpawnCtx.reset();
+    }
   });
 });
 

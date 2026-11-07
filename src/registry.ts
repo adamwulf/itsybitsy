@@ -4,9 +4,9 @@ import { mkdir } from "fs/promises";
 // teams.ts imports listRepos/repoDisplayName FROM this module, so a static
 // `import { getTeam } from "./teams"` forms an import cycle. It is SAFE here
 // because we only dereference `getTeam`/`normalizeTeamName` INSIDE the async
-// addRepo/renameRepo functions — long after both modules finish initializing
-// (never at module-init / top-level). See SPEC §16.1 (bidirectional repo↔team
-// name-collision refusal).
+// checkNewRepoEntry (which addRepo calls) and renameRepo functions — long
+// after both modules finish initializing (never at module-init / top-level).
+// See SPEC §16.1 (bidirectional repo↔team name-collision refusal).
 import { getTeam, normalizeTeamName } from "./teams";
 import { isValidRepoName } from "./validation";
 

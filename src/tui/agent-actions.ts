@@ -37,7 +37,7 @@ import { promptAndStageAttachmentsIfNeeded } from "./attachment-prompt";
 import { TextBuffer } from "./text-buffer";
 import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../config";
 import type { ConfigResult } from "../config";
-import { fuzzyFilterIndices } from "./dialog-handler";
+import { fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
 import type { PaneMode, TailLogMode } from "./pane-manager";
 import { isTailLogMode } from "./pane-manager";
@@ -2832,7 +2832,7 @@ export async function handleFolderBrowser(ctx: ActionCtx) {
     onNewRepo: (parentPath: string) => {
       ctx.showDialog({
         type: "input",
-        prompt: `New repo in ${parentPath}:`,
+        prompt: newRepoPrompt(parentPath),
         value: "",
         onSubmit: (folderName: string) => {
           ctx.closeDialog();
@@ -2846,6 +2846,18 @@ export async function handleFolderBrowser(ctx: ActionCtx) {
       });
     },
   });
+}
+
+/**
+ * Prompt of the New Repo folder-name dialog. The input dialog draws its prompt
+ * as the title, so a long parent path loses its start ("New repo in
+ * …/Developer/bun:") to keep the title inside the box.
+ */
+export function newRepoPrompt(parentPath: string): string {
+  const prefix = "New repo in ";
+  const suffix = ":";
+  const room = dialogTitleMaxWidth() - prefix.length - suffix.length;
+  return `${prefix}${elideLeft(parentPath, room)}${suffix}`;
 }
 
 /** Reload the registry into ctx.repos and point the watcher at the new list. */

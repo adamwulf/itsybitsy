@@ -2,7 +2,7 @@ import { test, expect, describe } from "bun:test";
 import type { DialogState, DialogCtx } from "./dialog-handler";
 import {
   handleDialogInput, fuzzyFilterIndices, wrapTextareaLines,
-  buildMultiSelectContent, MULTI_SELECT_MAX_VISIBLE, buildFolderBrowserContent,
+  buildMultiSelectContent, MULTI_SELECT_MAX_VISIBLE, buildFolderBrowserContent, elideLeft,
 } from "./dialog-handler";
 import type { FolderItem } from "./folder-browser";
 import { DIM, RESET } from "./colors";
@@ -524,6 +524,25 @@ describe("fuzzy dialog", () => {
     expect(d.query).toBe("ap");
     handleDialogInput(ctx, "\x7f");
     expect(d.query).toBe("a");
+  });
+});
+
+// ─── elideLeft ──────────────────────────────────────────
+
+describe("elideLeft", () => {
+  test("returns text that fits unchanged", () => {
+    expect(elideLeft("/tmp/projects", 13)).toBe("/tmp/projects");
+    expect(elideLeft("/tmp/projects", 40)).toBe("/tmp/projects");
+  });
+
+  test("keeps the end of text that does not fit, behind a leading …", () => {
+    expect(elideLeft("/Users/someone/Developer/bun", 15)).toBe("…/Developer/bun");
+  });
+
+  test("counts wide characters by their terminal width", () => {
+    // Each 日 is 2 columns: "…日本/x" is 1 + 4 + 2 = 7.
+    expect(elideLeft("/a/日本/x", 7)).toBe("…日本/x");
+    expect(elideLeft("/a/日本/x", 6)).toBe("…本/x");
   });
 });
 

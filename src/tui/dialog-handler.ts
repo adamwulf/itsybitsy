@@ -14,6 +14,34 @@ import { sanitizeAgentNameInput } from "../validation";
 
 export const TEXTAREA_VISIBLE_HEIGHT = 5;
 export const FOLDER_BROWSER_HEIGHT = 15;
+/** Width of a dialog whose type has no width of its own (input, confirm, ...). */
+export const DIALOG_WIDTH = 80;
+
+/**
+ * Widest title a `width`-column dialog can draw. The overlay draws the title
+ * in the top border as `┌─ <title> ─…┐`, so 5 columns are border and spaces;
+ * a longer title pushes the border past the box.
+ */
+export function dialogTitleMaxWidth(width: number = DIALOG_WIDTH): number {
+  return width - 5;
+}
+
+/**
+ * `text` unchanged if it fits in `maxWidth` (>= 1) columns, otherwise "…"
+ * followed by as much of its END as fits. Used for paths, whose tail is the
+ * part worth keeping.
+ */
+export function elideLeft(text: string, maxWidth: number): string {
+  if (visibleWidth(text) <= maxWidth) return text;
+  const chars = Array.from(text);
+  let tail = "";
+  for (let i = chars.length - 1; i >= 0; i--) {
+    const next = chars[i] + tail;
+    if (visibleWidth(next) + 1 > maxWidth) break;
+    tail = next;
+  }
+  return `…${tail}`;
+}
 
 // Common optional properties shared across all dialog types
 type DialogCommon = { width?: number };

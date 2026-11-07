@@ -21,6 +21,8 @@ import type { SpawnResult } from "../types";
 import { PANE_MODES, FULL_WIDTH_MODES, type PaneMode } from "./pane-manager";
 import { computeSidebarHeights } from "./sidebar";
 import { assertDialog } from "./test-helpers";
+import { DIALOG_WIDTH } from "./dialog-handler";
+import { newRepoPrompt } from "./agent-actions";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { setStagedSenderForTests, resetStagedSenderForTests } from "./message-send";
 import { setLayoutPath, loadLayout, flushPendingSave, cancelPendingSave } from "./layout";
@@ -7887,5 +7889,33 @@ describe("tabs on screen under an overlay", () => {
     const { dashboard, composite } = dashboardWith(tabPromptAgents((i) => `\tfrom x.rb:${i}`));
     dashboard.handleInput("@");
     expectRowsFit(dashboard, composite, "Jump to agent, repo, or coordinator");
+  });
+});
+
+// The folder browser's [ New Repo ] asks for a folder name in an `input`
+// dialog, whose prompt is drawn as the title in the top border.
+describe("New Repo folder-name dialog title", () => {
+  function topBorder(parentPath: string): string {
+    const dashboard = makeDashboard();
+    dashboard.showDialog({ type: "input", prompt: newRepoPrompt(parentPath), value: "", onSubmit: () => {} });
+    return stripAnsi((dashboard as any).dialogOverlay.render(DIALOG_WIDTH)[0]);
+  }
+
+  test("a long parent path is cut from the left so the title fits the box", () => {
+    const parent = "/Users/someone/Developer/clients/acme-corporation/projects/2026/q4/experiments/backend";
+    const prompt = newRepoPrompt(parent);
+    expect(prompt).toStartWith("New repo in …");
+    expect(prompt).toEndWith("/experiments/backend:");
+    const border = topBorder(parent);
+    expect(border).toContain(` ${prompt} `);
+    expect(visibleWidth(border)).toBe(DIALOG_WIDTH);
+    expect(border).toEndWith("┐");
+  });
+
+  test("a short parent path is shown whole", () => {
+    expect(newRepoPrompt("/tmp/projects")).toBe("New repo in /tmp/projects:");
+    const border = topBorder("/tmp/projects");
+    expect(border).toStartWith("┌─ New repo in /tmp/projects: ─");
+    expect(visibleWidth(border)).toBe(DIALOG_WIDTH);
   });
 });

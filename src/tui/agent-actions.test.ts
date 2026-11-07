@@ -25,7 +25,7 @@ import {
   effectiveSpawnCapability, handleAnswerQuestion,
   getCoordinatorSpawnsInFlight, clearCoordinatorSpawnsInFlight,
   handleCreateTeam, handleAddAgentToTeam, handleDisbandTeam, handleManageTeam,
-  handleFolderBrowser,
+  handleFolderBrowser, newRepoPrompt,
 } from "./agent-actions";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { readTeams, createTeam, addMember, deleteTeam } from "../teams";
@@ -2926,7 +2926,9 @@ describe("handleFolderBrowser", () => {
       handleDialogInput(dialogCtx, "\r");
 
       const input = assertDialog(dialogs[1]!, "input");
-      expect(input.prompt).toBe(`New repo in ${fx.baseDir}:`);
+      // The temp path is long, so the prompt keeps only its end (see the
+      // "New Repo folder-name dialog title" tests in dashboard.test.ts).
+      expect(input.prompt).toBe(newRepoPrompt(fx.baseDir));
       input.onSubmit("Fresh Repo");
 
       // createRepo runs fire-and-forget; ctx.repos is reloaded last.

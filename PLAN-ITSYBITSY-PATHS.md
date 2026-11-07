@@ -132,13 +132,18 @@ Every hook imports it, so it imports only `node:path`. It holds:
 - **Path parsing:** one helper per shape in use today (table in 1.2). Keep each
   call site's current semantics: first or last occurrence, exact match or prefix,
   `/repo` required or not, agent ID extracted or not. This is a rename, not a
-  behavior change. There are two intentional tightenings; list both in the commit
-  message:
+  behavior change. There are three intentional tightenings; list all three in the
+  commit message, and test each:
   1. Several current regexes leave the dot unescaped (`/.ittybitty\/agents/`).
      The helpers escape it.
   2. `AGENT_CWD_PATTERN` (`src/hooks/shared.ts:14`) and `AGENT_WORKTREE_PATTERN`
      (`src/hooks/main-path.ts:26`) have no leading `/`, so a dir named
      `x.ittybitty` would match. The helpers require the `/`.
+  3. The worktree-prefix sites end at `\/repo` with nothing after it, so
+     `…/agents/<id>/repository` also matches: `ib-commands.ts:3986, 6111, 6170,
+     6344`, `index.ts:1834, 1862, 2554, 2612` and `isRunningAsAgent`
+     (`agent-lifecycle.ts:1041`). The helpers end with `\/repo(\/|$)`, as
+     `AGENT_CWD_PATTERN` and `AGENT_WORKTREE_PATTERN` already do.
 
 **The `~/.itsybitsy/agents/<id>` overlap.** After the rename, the user-wide
 per-agent dirs (`~/.itsybitsy/agents/<id>/`, holding `outbox.jsonl` and
@@ -215,10 +220,12 @@ per-agent dirs under `~/.itsybitsy/agents/`). In `addRepo`
 
 - `.gitignore:36,51` become `.itsybitsy/` and `.agents/rules/itsybitsy-agent.md`.
   No old lines are kept (decision 1): after the script, no `.ittybitty/` exists.
-- Move these docs to the new names: `SPEC.md` (§1.1 items 1a0, 2, 4 and 6; §1.4;
-  §1.7; §1.7.1, which must also document the ref fallback; §1.8; §5.1-§5.5; the
-  §6.0 table, which says `.ittybitsy`; §8.3; §9 for the `$HOME` refusal; §12),
-  `SPEC-SANDBOX.md`, `SPEC-PATH-ALLOWLIST.md`, `SPEC-CODEX-MODEL.md`,
+- `SPEC.md`: change every hit of `git grep -n -i ittybitty SPEC.md` except the
+  bash-reference callouts: §7.1 (line 1075), §7.5 (line 1144), the bash half of
+  the §1.8 callout (line 332), and §8.8 (line 1386). Also fix the §6.0 table,
+  which misspells the name as `.ittybitsy` (lines 813-814). Document the ref
+  fallback in §1.7.1 and the `$HOME` refusal in §9.
+- Move these docs to the new names: `SPEC-SANDBOX.md`, `SPEC-PATH-ALLOWLIST.md`, `SPEC-CODEX-MODEL.md`,
   `SPEC-ANTIGRAVITY-CLI.md`, `docs/implementation-notes.md`, `README.md`,
   `RENAME-PLAN.md`, `SPAWNER-TRACKING-PLAN.md`, `ANTIGRAVITY-CLI-NOTES.md`,
   `CODEX-CLI-NOTES.md`, `docs/*.md`, `docs/plans/ib-rehire.md`, `research-*.md`
@@ -235,11 +242,23 @@ Add `src/runtime-names-guard.test.ts`, covering every tracked `*.ts` except
 
 - `/ittybitty/i` anywhere, except the one `LEGACY_RETIRED_REF_ROOT` line in
   `src/runtime-names.ts`.
-- A hand-built per-repo runtime path with the new name outside
-  `src/runtime-names.ts`: the join form `".itsybitsy", "agents"`, or the regex
-  form `\.itsybitsy\/agents`. User-wide `join(home, ".itsybitsy")` sites and
-  comments that say `~/.itsybitsy/agents/<id>` (`src/outbox.ts:41`,
-  `src/claude-rate-limits.ts:7`) stay allowed.
+- Any `.itsybitsy` in non-comment code outside `src/runtime-names.ts`. A comment
+  line is one whose trimmed text starts with `//`, `/*` or `*`. This catches
+  every hand-built per-repo path, whatever the form: joins to `agents`,
+  `archive`, `repo-id`, `user-questions.json` or `prompts`, a join with a
+  variable, a bare `join(repoPath, ".itsybitsy")`, a literal in `indexOf` or
+  `includes`, a template string, or a regex with an unescaped dot. There are two
+  exceptions for the user-wide home:
+  1. `join(<first argument>, ".itsybitsy", …)`, where the text of the first
+     argument contains `home` or `Home` (`join(userHome(), …)`, `join(home, …)`,
+     `join(registryHome, …)`, `join(sealHome(home), …)`, `join(config.home, …)`).
+  2. The text `~/.itsybitsy` anywhere in a string. User-facing messages put it
+     mid-string (for example `src/config.ts:133-143`, `src/index.ts:632`), so the
+     exception can't require the string to start with it.
+
+  Every user-wide code site on `main` fits one of these, except
+  `test-preload.ts:33` (`join(base, ".itsybitsy", "watch.log")`): rename `base` to
+  `fakeHome` there.
 
 Two reasons for the guard: `docs/agent-types/` is compiled into the binary and
 holds the `paths:` floor, and other branches will rebase onto this change and
@@ -303,7 +322,7 @@ It runs in dry runs too.
 | # | Check | How (nothing is killed) | What clears it |
 |---|---|---|---|
 | P1 | Not run from inside a runtime dir | `pwd -P` contains neither `/.ittybitty/` nor `/.itsybitsy/agents/` | Run it from a plain terminal |
-| P2 | No agent or coordinator tmux session | `tmux list-sessions -F '#{session_name}'`; any `ittybitty-*`, `itsybitsy-*` or `ib-coordinator` session blocks. A non-zero exit saying "no server running" or "error connecting to" means no sessions; any other failure blocks (fail closed) | `ib pause <id>`; quit `ib watch` |
+| P2 | No agent or coordinator tmux session | `tmux list-sessions -F '#{session_name}'`; any `ittybitty-*`, `itsybitsy-*` or `ib-coordinator` session blocks. A non-zero exit saying "no server running" or "error connecting to" means no sessions; any other failure blocks (fail closed) | Press `P` on each agent in `ib watch`, then quit it (there is no `ib pause` command) |
 | P3 | No `ib` process: `ib watch`, watchdogs, proxies, the collector, hooks | `ps -Ao pid=,args=`, matching a first argument whose basename is `ib` | Quit `ib watch`. Watchdogs exit about 10 seconds after their session ends. A leftover proxy or collector: `kill <pid>` |
 | P4 | No process has its cwd under any target repo's `.ittybitty/` or `.itsybitsy/` | `lsof -a -u "$(id -u)" -d cwd -Fpn`, compared with both the registered and the real repo paths. An `lsof` failure blocks | Close that terminal or Claude, codex or agy session |
 | P5 | Tools present | `git` 2.31 or later (for `--path-format=absolute`; `worktree repair` and `worktree lock --reason` are older), `perl -MJSON::PP -e1` | Install the tool |
@@ -317,11 +336,21 @@ sessions started by the new binary.
 
 Below, OLD is `.ittybitty` and NEW is `.itsybitsy`.
 
+**Classification fails closed.** `[ -d ]` and `[ -e ]` return false on `EPERM`
+or `EACCES` too, so a denied stat would quietly skip a repo as "missing" or "no
+runtime dir". Instead, the script stats the repo path, OLD and NEW with perl
+(`lstat`, then `$!{ENOENT}`). Only `ENOENT` counts as absent; any other error is
+a repo error naming the errno. Likewise, a dir counts as non-git only when `git
+rev-parse` says "not a git repository"; any other git failure is a repo error.
+If any `OLD/agents/*/repo/.git` exists, the repo must be a working git repo, or
+it is a repo error before step 1.
+
 | Found | Result |
 |---|---|
-| The repo path is missing | Warn "missing — skipped". Not an error |
-| The repo path is `$HOME` | Error; skip the repo |
-| Both OLD and NEW exist | Error; skip the repo; other repos continue. The likely cause is a repo skipped earlier as missing, in which the new `ib` then wrote a fresh `.itsybitsy/repo-id` (`getRepoId` and `askQuestion`, `src/ib-commands.ts:5825, 8545`; also `ib sandbox seal --repo-id`, `src/index.ts:2193-2196`). The error says how many agent dirs NEW holds. If it holds none, it tells Adam to remove it (`rm -rf "<repo>/.itsybitsy"`) and re-run; the real `repo-id` is the one in OLD |
+| The repo path is absent (`ENOENT`) | Warn "missing — skipped". Not an error |
+| Any stat of the repo path, OLD or NEW fails other than `ENOENT` | Error naming the errno; skip the repo |
+| The repo path is `$HOME` | Error; skip the repo. The message says to `ib remove` that entry before the deploy: `addRepo`'s new refusal (§1.4) only stops new entries and doesn't clean up existing ones |
+| Both OLD and NEW exist | Error; skip the repo; other repos continue. The likely cause is a repo skipped earlier as missing, in which the new `ib` then wrote a fresh `.itsybitsy/repo-id` (`getRepoId` and `askQuestion`, `src/ib-commands.ts:5825, 8545`; also `ib sandbox seal --repo-id`, `src/index.ts:2193-2196`). If NEW holds nothing but `repo-id` and empty dirs, the error tells Adam to remove it (`rm -rf '<repo>/.itsybitsy'`) and re-run; the real `repo-id` is the one in OLD. Otherwise it prints what NEW holds (counts of `agents/*`, `archive/*` and `prompts/*`, and whether `user-questions.json` exists) and tells Adam to merge the two dirs by hand before re-running |
 | OLD is a symlink | Error; skip the repo |
 | OLD only | Migrate: every step |
 | NEW only | Already moved. Run steps 3 to 8, which find nothing to do in a finished repo, and print "already migrated — nothing to do". This is also how an interrupted run finishes |
@@ -333,8 +362,8 @@ and prints the fix for Adam to run: `git -C <repo> rm -r --cached .ittybitty`,
 then a commit. Until that is done, the deleted tracked file makes the checkout
 dirty, so ib refuses to spawn there.
 
-A registered dir that isn't a git repo (`ib add` allows that) skips the git
-steps 1, 3 and 4.
+A registered dir that git reports as "not a git repository" (`ib add` allows
+that), and that has no worktree under OLD, skips the git steps 1, 3 and 4.
 
 ### 2.4 Steps
 
@@ -350,12 +379,33 @@ for that repo still run, and a re-run finishes it.
 |---|---|---|
 | 1 | Ignore rules | Append `.itsybitsy/` and `.agents/rules/itsybitsy-agent.md` to `$(git rev-parse --path-format=absolute --git-common-dir)/info/exclude`, under a `# added by itsybitsy scripts/update-repos.sh` comment, each only if that exact line is missing. (Without `--path-format=absolute`, a main worktree returns the relative `.git`.) Every worktree shares this file, and no tracked file changes. It is needed because the spawn dirty-gate (`src/ib-commands.ts:6487-6514`) refuses on `?? .itsybitsy/`, and agy resume writes the new rule file, which old worktree `.gitignore` files don't list. It runs before the move, so `git status` stays clean |
 | 2 | Move | `mv <repo>/OLD <repo>/NEW`: one `rename(2)` that carries `agents/`, `archive/`, `prompts/`, `repo-id` and `user-questions.json` |
-| 3 | Repair worktrees, immediately | Look at each `<common-dir>/worktrees/*/gitdir` that names an absolute path under `<repo>/OLD/`, in either the registered or the real path form. A relative value (`worktree.useRelativePaths`, not in use here) is a repo error printing the manual command. The new path is the same path under NEW. If `<new>/.git` exists, run `git -C <repo> worktree repair "<new dir>"`, one path per call, because the command exits 1 if any path is bad even when it fixed the others. Working from admin entries also covers nested worktrees such as `agents/<id>/repo/.claude/worktrees/<name>` (Claude's `isolation: "worktree"`). Then verify two things: `git -C <new dir> rev-parse --show-toplevel` equals the new dir, comparing real paths (in a dir without `.git` the command falls through to the parent repo and still succeeds), and the admin `gitdir` now names `<new dir>/.git`. **If a repair fails**, lock the entry so nothing prunes it, including `git gc --auto`, which prunes worktrees through `gc.worktreePruneExpire`: run `git -C <repo> worktree lock --reason "update-repos.sh: repair failed" "<path the entry records>"`. Then print the manual `git worktree repair "<new dir>"` and the matching `git worktree unlock "<new dir>"`, record a repo error, and continue. If `<new>/.git` is missing, warn "stale entry, left in place" |
+| 3 | Repair worktrees, immediately | Look at each `<common-dir>/worktrees/*/gitdir` that names an absolute path under `<repo>/OLD/`, in either the registered or the real path form. The new path is the same path under NEW. If `<new>/.git` exists, run `git -C <repo> worktree repair "<new dir>"`, one path per call, because the command exits 1 if any path is bad even when it fixed the others. Working from admin entries also covers nested worktrees such as `agents/<id>/repo/.claude/worktrees/<name>` (Claude's `isolation: "worktree"`). Then verify two things, comparing **real paths** in both: `git -C <new dir> rev-parse --show-toplevel` equals the new dir (in a dir without `.git` the command falls through to the parent repo and still succeeds), and the admin `gitdir` now names `<new dir>/.git`. The second compare must use real paths too, because repair writes the real path (`/private/var/…`), and a literal compare against `/var/…` would fail falsely, lock the entry and exit 1. A failed repair is handled as below. A relative `gitdir` (`worktree.useRelativePaths`, not in use here) that resolves, against its admin dir, under `<repo>/OLD/` is not supported: it is a repo error handled the same way. If `<new>/.git` is missing, warn "stale entry, left in place" |
 | 4 | Submodules in worktrees | For each `config` file that `find "<common-dir>/worktrees" -path '*/modules/*' -name config` finds, replace the `/OLD/agents/` segment in a `core.worktree` that contains it (`git config --file`). These values are relative, so step 3's anchored rule can't match them |
 | 5 | Agent and archive records | For each dir D in `NEW/agents/*`, `NEW/archive/*` and `NEW/agents/*/.retirement/runtime`: in `D/meta.json`, rewrite only the `ittybitty-` prefix of the `tmux_session` value, using a regex on that field. Rehire refuses a mismatch (`src/ib-commands.ts:746`), and the field isn't sealed. In `D/start.sh`, `D/resume.sh`, `D/settings.local.json`, `D/.claude/settings.local.json` and `NEW/agents/*/repo/.claude/settings.local.json`, replace the literal `<repo>/OLD/` with `<repo>/NEW/` in both path forms, only in files that contain it. Never touch `retirement.json` or `prepared-retirement.json`: their `headRef` is valid under §1.3 |
 | 6 | agy worktree files | In `NEW/agents/*/repo/.agents/`: if `rules/ittybitty-agent.md` exists and is untracked, rename it to `rules/itsybitsy-agent.md`, or delete it if the new file already exists, because agy would otherwise load both always-on rules. In `hooks.json`, rename the `"ittybitty":` key. Resume rewrites both files anyway (`writeAgyWorktreeFiles`), but stopped and archived worktrees shouldn't keep the old name |
 | 7 | Claude transcripts | Rename every `~/.claude/projects/<enc(repo)>--ittybitty-agents-*` to `…--itsybitsy-agents-*`, where `enc` replaces each character outside `[A-Za-z0-9]` with `-`. That is Claude's rule, not `encodeClaudeProjectPath`'s. Use both path forms. If the target exists, skip and warn. If the old or the new name is over 200 characters (where Claude is said to truncate and add a hash, which I could not confirm), warn and skip. Contents aren't changed |
 | 8 | Report only | (a) `meta.paths` or `meta.sandbox` containing `/OLD/`. Those fields are sealed, so after the deploy run `ib sandbox refresh <id>`. None are expected: runtime roots are injected at launch, and `meta.paths` holds only authored entries. (b) Symlinks under NEW whose target contains `/OLD/` (`find -lname`). (c) `/OLD` in `<repo>/.gitignore` or `<repo>/.claude/settings*.json`. (d) Queued lines in `~/.itsybitsy/agents/*/outbox.jsonl` that mention `/OLD/`. (e) The tracked-file fix from §2.3 |
+
+**A failed repair** (including a relative `gitdir` entry) is handled like this:
+
+1. **Lock the entry**, so nothing prunes it, including `git gc --auto`, which
+   prunes worktrees through `gc.worktreePruneExpire`:
+   `git -C '<repo>' worktree lock --reason 'update-repos.sh: repair failed'
+   '<path the entry records>'`. On a re-run the entry is already locked and the
+   lock command exits non-zero. Treat that as success when `<admin dir>/locked`
+   exists.
+2. **Print diagnostics, not just the command that just failed:** `cat
+   '<new dir>/.git'`, the admin entry's dir and its `gitdir` contents, and git's
+   error.
+3. **Print the manual fix:** `git -C '<repo>' worktree repair '<new dir>'`, then
+   `git -C '<repo>' worktree unlock '<new dir>'`. These are for Adam to paste from
+   any directory; the no-`-C` rule binds agents, not him. Unlock after the repair:
+   until then ib's teardown can't remove the worktree normally, because `git
+   worktree remove --force` refuses a locked worktree.
+4. Record a repo error and continue.
+
+Such an entry stays locked, and every re-run reports it and exits 1, until Adam
+fixes it by hand.
 
 **User-wide, on every run:** in each `~/.itsybitsy/agent-types/*.md` that
 contains them, replace `IttyBitty` with `ItsyBitsy` and `ittybitty` with
@@ -428,11 +478,14 @@ Preflight: ok (no agent tmux sessions, no ib processes, no cwd under a runtime d
         then commit. Until then ib refuses to spawn in this repo.
 [muse-ios] already migrated — nothing to do
 [nsf-i-corps] no runtime dir — skipped
-[foo] ERROR both .ittybitty and .itsybitsy exist; .itsybitsy holds 0 agents —
+[foo] ERROR both .ittybitty and .itsybitsy exist; .itsybitsy holds only repo-id —
       remove it (rm -rf '/…/foo/.itsybitsy') and re-run
+[bar] ERROR both .ittybitty and .itsybitsy exist; .itsybitsy holds 1 agent,
+      0 archives, user-questions.json — merge the two dirs by hand, then re-run
+[rice-teaching] ERROR lstat '…/Rice Teaching/.ittybitty': Operation not permitted — skipped
 User-wide
   would rewrite 9 files in ~/.itsybitsy/agent-types
-Summary: 38 to migrate, 1 already migrated, 20 no runtime dir, 0 missing, 1 error
+Summary: 36 to migrate, 1 already migrated, 20 no runtime dir, 0 missing, 3 errors
 DRY RUN — nothing was changed.
 ```
 
@@ -484,21 +537,38 @@ below starts after all agents have stopped.
    If the merge conflicts, resume the manager, let it rebase, and then go back to
    step 1. Merging only changes files. Rebuilding `ib` from this `main` now would
    break the hooks of anything still under `.ittybitty/`. Don't run `bun test` in
-   the main checkout before step 4 either.
+   the main checkout before step 4 either. From here until step 4, `git status`
+   in the main checkout shows `?? .ittybitty/`, because the merge drops that line
+   from this repo's `.gitignore`, unless your global excludes cover it. **Don't
+   `git add -A` there.**
 3. **Dry run.**
    ```sh
    scripts/update-repos.sh | tee ~/update-repos-dry-run.txt
    ```
-   Clear every blocker and repo error, then repeat until it is clean. For "both
-   exist", follow the error text: if the new `.itsybitsy/` holds no agents,
-   remove it and re-run.
+   Clear every blocker and repo error, then repeat until it is clean:
+   - **"both exist":** follow the error text. Remove the new `.itsybitsy/` only
+     when it holds nothing but `repo-id`; otherwise merge the two dirs by hand.
+   - **A repo registered at `$HOME`:** `ib remove` it now, with the old `ib`.
 4. **Apply.**
    ```sh
    scripts/update-repos.sh --apply
    ```
-   - **If it exits 1:** for each failed repair, run the printed `git worktree
-     repair "<path>"` and then the printed `git worktree unlock "<path>"`, and
-     re-run until it exits 0.
+   - **A failed repair:** read the printed diagnostics (the worktree's `.git`
+     file, the admin entry) and fix the link. Then run the printed `git -C
+     '<repo>' worktree repair '<path>'` and `git -C '<repo>' worktree unlock
+     '<path>'`, and re-run the script. The entry stays locked, and the script
+     keeps exiting 1, until this is done.
+   - **Any other repo error:** a failed write in step 1 or 2 (for example `EPERM`
+     moving the `~/Library/Containers/…` repo), a relative `gitdir`, a failure in
+     steps 4 to 7, or a stat error. The same goes for a repo reported "missing".
+     For each one, before step 6, do one of these:
+     - Fix the cause (for example, give the terminal access to that app's data)
+       and re-run with that path: `scripts/update-repos.sh --apply '<repo>'`.
+     - `ib remove` the repo.
+     - Leave it, and use no ib in it until it is migrated.
+
+     A later single-repo run, even after the deploy, again needs every agent
+     stopped and `ib watch` quit, because P2 and P3 check every repo.
    - Until a repo's failures are fixed, run no git writes and no `ib` in that repo:
      the next spawn, rehire or `ib watch` fix runs `git worktree prune`.
    - Stale entries reported as "gone" need nothing.
@@ -517,17 +587,26 @@ below starts after all agents have stopped.
    sudo cp ib "$(command -v ib)"     # skip if the project dir is on PATH
    ib list-types                      # must print a table
    ```
-7. **Global ignore.** Add `.itsybitsy/` and `.agents/rules/itsybitsy-agent.md` to
-   your global git excludes file (the one `git config --global
-   core.excludesFile` names, or `~/.config/git/ignore`). This keeps repos
-   registered later from tripping the spawn dirty-gate.
+7. **Global ignore — required before any agent is spawned.** Add `.itsybitsy/`
+   and `.agents/rules/itsybitsy-agent.md` to your global git excludes file (the
+   one `git config --global core.excludesFile` names, or `~/.config/git/ignore`).
+   The script adds `info/exclude` lines only in repos it migrates. The roughly 20
+   "no runtime dir" repos, and any repo registered later, get none. The spawn
+   dirty-gate (`src/ib-commands.ts:6487-6514`) runs before `getRepoId` creates
+   `.itsybitsy/` (:6913), so in such a repo the first spawn succeeds and the
+   second is refused on `?? .itsybitsy/`.
 8. **Restart; test one of each before the rest.** Start `ib watch`.
-   **Don't press `f` (health fix) on repo warnings until every agent you want is
-   resumed:** stopped no-worktree agents and coordinators get flagged as orphaned
-   dirs, which that fix deletes, and the orphaned-worktree fix can fall back to a
-   repo-wide prune. Then check each of these with `ib look <id>`:
+   **Never accept an orphaned-dir fix (`f`) for a stopped agent you want to
+   keep:** that fix deletes the agent dir. Stopped coordinators and no-worktree
+   agents stay flagged even after everything else is resumed. Also hold off on
+   the orphaned-worktree fix until the repairs from step 4 are done, because it
+   can fall back to a repo-wide prune. Then check each of these with `ib look
+   <id>`:
    - **Claude:** `ib resume <id>`, then `ib send <id> "What were you last working
      on?"`. It should remember.
+   - **Codex:** `ib resume <id>`, then `ib look <id>`. If codex asks about the
+     changed directory, answer it by hand (keep the new worktree) before resuming
+     any other codex agent.
    - **agy:** `ib resume <id>`. It should start, and `git status` in its worktree
      should not list the rule file. If it can't pick up its conversation, start a
      fresh agent instead.
@@ -565,6 +644,10 @@ the script, repair worktrees by hand, or fix the new code.
     `~/.itsybitsy/agents/<id>/outbox.jsonl` path never parse as a worktree, and
     `resolveAgentFromCwd` resolves a cwd under the user-wide home to `@system`
     before it tries the worktree pattern.
+  - The three tightenings (§1.1), each one no longer matching:
+    `/r/Xitsybitsy/agents/a/repo` (the dot, escaped now),
+    `/r/x.itsybitsy/agents/a/repo` (no leading `/`), and
+    `/r/.itsybitsy/agents/a/repository` (no `(\/|$)` after `repo`).
 - **Refs** (`src/agent-lifecycle.test.ts` and the rehire tests in
   `src/ib-commands.test.ts`, using real temp git repos):
   - Retire writes `refs/itsybitsy/…`, and the manifest names it.
@@ -578,10 +661,14 @@ the script, repair worktrees by hand, or fix the new code.
     corrupt, not as "neither found".
   - With neither ref, rehire fails with an error naming both.
   - `archiveAgent` deletes a pending legacy ref and a pending new ref.
-  - Rehire authorization against an archive whose manifest names the legacy ref
-    goes through `checkManagerCommandAccess` with `ownArchiveOnly`
-    (`src/hooks/agent-path.ts:1622-1652, 1733`; `src/lifecycle-broker.ts:281`):
-    the manager is allowed and a non-manager is denied.
+  - Rehire authorization through `checkManagerCommandAccess` with
+    `ownArchiveOnly` (`src/hooks/agent-path.ts:1622-1652, 1733`;
+    `src/lifecycle-broker.ts:281`). With a single archive this test can't fail:
+    with no parseable manifest, `ownArchiveDecision` falls back to `archives[0]`
+    (:1625-1626). So the fixture has two archives for the same ID: an older one
+    whose `retirement.json` names the legacy ref, with manager M1, and a newer one
+    with no `retirement.json`, with manager M2. M1 is allowed and M2 is denied,
+    which holds only if the legacy manifest parses.
 - **`src/registry.test.ts`:** `addRepo` refuses `$HOME`, given either its path or
   a symlink to it, and still accepts a subdirectory of `$HOME`.
 - **Guard test:** §1.6.
@@ -607,17 +694,31 @@ the script, repair worktrees by hand, or fix the new code.
   `--outfile` (never over the `ib` on PATH) and confirm that `<scratch>/ib
   list-types` prints a table.
 - **Gate in a new-name worktree.** Run the suite once more from a worktree whose
-  cwd has the new shape, so cwd-dependent gates see `.itsybitsy` before the deploy:
-  1. Clone the branch into `<tmp>/r`.
-  2. `git -C <tmp>/r worktree add <tmp>/r/.itsybitsy/agents/agent-gate/repo
-     HEAD`, and link or install `node_modules` there.
-  3. Write a stub `<tmp>/r/.itsybitsy/agents/agent-gate/meta.json`.
-  4. Run `bun test` in that worktree.
-
-  The tests that are expected to fail in a worktree (for example, the two
-  dashboard new-agent tests with the cwd-based caller gate) must fail exactly as
-  they do in a baseline run of `main` from the implementer's worktree, and
-  nothing else may fail. Clean up only `<tmp>/r`.
+  cwd has the new shape, so cwd-dependent gates see `.itsybitsy` before the deploy.
+  An agent can't use `git -C` (denied by `checkGitDirectoryFlags`, applied at
+  `src/hooks/agent-path.ts:1065`) and can't `cd`, so every step below runs from
+  the implementer's own worktree. Let G be
+  `<tmp>/r/.itsybitsy/agents/agent-gate`, where `<tmp>` is a dir the implementer
+  may write, such as its scratchpad.
+  0. **Baseline, before the first commit:** `bun test --reporter=junit
+     --reporter-outfile=<tmp>/baseline.xml` on the unchanged code.
+  1. Write `G/meta.json` with the Write tool: `"id": "agent-gate"`, the
+     implementer's own `agentType` and `worker` values, and `"worktree": true`. An
+     agent can't read its own `meta.json` (SPEC §6.1 item 10), so take the type
+     from its session-start instructions (for example, a worker is `"agentType":
+     "worker"`, `"worker": true`). A meta with only `id` makes
+     `metaCanSpawnChildren` return true (`src/agent-types.ts:802-814`), which
+     flips the two dashboard new-agent tests that fail in a worktree.
+  2. `git worktree add --detach G/repo HEAD`, on the committed rename. This adds a
+     linked worktree of the real repo.
+  3. `ln -s <own worktree>/node_modules G/repo/node_modules`.
+  4. `bun --cwd=G/repo test --reporter=junit
+     --reporter-outfile=<tmp>/gate.xml`.
+  5. The failing tests must match the baseline exactly: the tests expected to
+     fail in a worktree (the two dashboard new-agent tests with the cwd-based
+     caller gate) fail in both, and nothing else fails.
+  6. Clean up only what the gate made: `git worktree remove --force G/repo`, then
+     `rm -rf <tmp>/r`.
 
 ### 4.2 The script: `src/update-repos-script.test.ts`
 
@@ -683,23 +784,40 @@ prune` and `worktree remove`, and otherwise execs `/usr/bin/git`.
 4. **Interrupted runs:** a fixture already moved but with old admin entries
    (killed after step 2) is finished by a re-run. With only the exclude lines
    written (killed after step 1), a re-run migrates it.
-5. **Both dirs in one repo:** that repo errors with the agent count and the
-   removal hint, the other repo migrates, exit 1.
+5. **Both dirs in one repo:** with NEW holding only `repo-id`, the error gives
+   the removal hint. With NEW holding an agent dir, it gives the counts and says
+   to merge by hand, with no removal hint. In both, the other repo migrates and
+   the exit is 1.
 6. **Repair failure** (a worktree whose `.git` names a missing admin dir): exit 1;
-   the printed repair and unlock commands; the entry still present and locked;
-   the other repo migrated; no prune.
-7. **Move failure** (repo root made read-only, so step 2 fails): that repo's
-   transcripts and records are unchanged, exit 1.
-8. **Each preflight blocker** exits 2 with nothing written: tmux showing
-   `ittybitty-…`, `itsybitsy-…` or `ib-coordinator`, an unexpected tmux error,
-   `ps` showing `ib watch`, `lsof` showing a cwd under OLD. "no server running"
-   passes.
-9. **A tracked file inside OLD:** the repo is migrated, and the warning prints the
-   `git rm -r --cached` fix.
-10. **Agent types:** after apply, both spellings are rewritten and no
+   the printed diagnostics and the `git -C '<repo>'` repair and unlock commands;
+   the entry still present and locked; the other repo migrated; no prune. A
+   re-run reports it again, treats the existing lock as success, and still exits
+   with 1. A relative-`gitdir` entry under OLD is also locked and is a repo error.
+7. **Real-path compare:** the repo registered in its `/var/folders/…` form
+   repairs cleanly (repair writes `/private/var/…`), exits 0, and leaves no
+   entry locked.
+8. **Fail-closed classification:** each of these is a repo error, never
+   "missing" or "no runtime dir", and nothing is written for that repo:
+   - The repo's parent made mode 000, so `lstat` of the repo fails with `EACCES`.
+   - The repo dir made mode 000, so `lstat` of OLD fails.
+   - The git stub fails `rev-parse` with an error other than "not a git
+     repository".
+   - `OLD/agents/a/repo/.git` exists, but git says the repo is "not a git
+     repository".
+9. **A repo registered at `$HOME`:** a repo error whose message says to `ib
+   remove` it.
+10. **Move failure** (repo root made read-only, so step 2 fails): that repo's
+    transcripts and records are unchanged, exit 1.
+11. **Each preflight blocker** exits 2 with nothing written: tmux showing
+    `ittybitty-…`, `itsybitsy-…` or `ib-coordinator`, an unexpected tmux error,
+    `ps` showing `ib watch`, `lsof` showing a cwd under OLD. "no server running"
+    passes.
+12. **A tracked file inside OLD:** the repo is migrated, and the warning prints
+    the `git rm -r --cached` fix.
+13. **Agent types:** after apply, both spellings are rewritten and no
     `.pre-itsybitsy` file exists. A dry run leaves the files byte-identical, and
     a re-run changes nothing.
-11. **New code on migrated data** (in process, HOME seam via `setUserHome`, spawn
+14. **New code on migrated data** (in process, HOME seam via `setUserHome`, spawn
     runners stubbed): `readAllAgents` finds the migrated agents, and
     `rehireAgent` on the migrated archive passes its tmux check and resolves the
     legacy ref.
@@ -715,7 +833,7 @@ prune` and `worktree remove`, and otherwise execs `/usr/bin/git`.
    (`hooks/shared.ts`, `hooks/main-path.ts`, `hooks/session-start.ts`,
    `hooks/intercept-task.ts`, `hooks/agent-context.ts`,
    `hooks/slow-hook-logger.ts`, `hooks/paths-table.ts`) uses the module's parsers
-   with unchanged semantics, apart from the two tightenings in §1.1, so path
+   with unchanged semantics, apart from the three tightenings in §1.1, so path
    isolation allows and denies exactly what it does today. `@system` resolution
    still runs first, which keeps `~/.itsybitsy/agents/<id>` from being taken for an
    agent. The agy protected-file list follows `AGY_WORKTREE_FILES`. The tags become
@@ -729,8 +847,8 @@ prune` and `worktree remove`, and otherwise execs `/usr/bin/git`.
 4. **`ib watch`.** `src/watcher.ts` watches `<repo>/.itsybitsy/agents/` and
    `user-questions.json`. Debug-log paths, health checks and orphan detection use
    the module. No layout or input change. Its health fixes can delete or prune, so
-   the runbook holds them off until agents are resumed and repairs are fixed
-   (steps 4 and 8).
+   the runbook never accepts an orphaned-dir fix for a stopped agent worth keeping,
+   and holds off the orphaned-worktree fix until repairs are done (steps 4 and 8).
 
 ## Risks
 

@@ -1,6 +1,7 @@
 /**
  * Plan usage for the `ib watch` status bar: shared types and helpers, Codex
- * usage (read from local Codex session logs) and Gemini usage (from
+ * usage (read from local Codex session logs; the live `codex app-server`
+ * probe is in src/codex-live-usage.ts) and Gemini usage (from
  * `agy -p /usage`, cached at ~/.itsybitsy/gemini-usage-cache.json).
  *
  * Claude usage comes from Claude Code's own statusline input, recorded by
@@ -59,15 +60,32 @@ export interface UsageResult {
   error: boolean;
 }
 
-interface CodexRateLimitWindow {
+/**
+ * One Codex rate-limit window, in the session-log (snake_case) shape. The live
+ * probe maps its camelCase windows to this shape, so both sources share one
+ * parser. `resets_at` is Unix seconds.
+ */
+export interface CodexRateLimitWindow {
   used_percent?: unknown;
   window_minutes?: unknown;
   resets_at?: unknown;
 }
 
-interface CodexRateLimits {
-  primary?: CodexRateLimitWindow;
-  secondary?: CodexRateLimitWindow;
+/** A Codex rate-limit snapshot. Codex sends `null` for a window it does not have. */
+export interface CodexRateLimits {
+  primary?: CodexRateLimitWindow | null;
+  secondary?: CodexRateLimitWindow | null;
+}
+
+/**
+ * A Codex usage reading, from a session log or the live probe. The windows are
+ * kept raw, so reset times are formatted against the clock each time the
+ * status bar refreshes, not frozen when the reading was taken.
+ */
+export interface CodexUsageReading {
+  rateLimits: CodexRateLimits;
+  /** When the reading was taken (epoch ms): the log record's timestamp, or the live fetch time. */
+  observedAtMs: number;
 }
 
 /** Format a duration from now to a future ISO date as human-readable. */
@@ -88,18 +106,24 @@ export function formatResetTime(isoDate: string, now?: Date): string {
   return `${minutes}m`;
 }
 
-function formatCodexResetTime(value: unknown, now?: Date): string | null {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return formatResetTime(new Date(value * 1000).toISOString(), now);
-  }
+/**
+ * A Codex `resets_at` value as epoch ms: Unix seconds as a number or numeric
+ * string, or an ISO date string. Anything else is null.
+ */
+function codexResetEpochMs(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value * 1000;
   if (typeof value === "string" && value.length > 0) {
     const numeric = Number(value);
-    if (Number.isFinite(numeric)) {
-      return formatResetTime(new Date(numeric * 1000).toISOString(), now);
-    }
-    return formatResetTime(value, now);
+    if (Number.isFinite(numeric)) return numeric * 1000;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
+}
+
+function formatCodexResetTime(value: unknown, now?: Date): string | null {
+  const ms = codexResetEpochMs(value);
+  return ms === null ? null : formatResetTime(new Date(ms).toISOString(), now);
 }
 
 function percent(value: unknown): number | null {
@@ -136,7 +160,7 @@ export function parseCodexRateLimits(rateLimits: CodexRateLimits, now?: Date): U
     weeklyReset: null,
   };
 
-  const windows: Array<[CodexRateLimitWindow | undefined, "session" | "weekly"]> = [
+  const windows: Array<[CodexRateLimitWindow | null | undefined, "session" | "weekly"]> = [
     [rateLimits.primary, "session"],
     [rateLimits.secondary, "weekly"],
   ];
@@ -153,6 +177,55 @@ export function parseCodexRateLimits(rateLimits: CodexRateLimits, now?: Date): U
   }
 
   return data;
+}
+
+/**
+ * A reading of `rateLimits` taken at `observedAtMs`, or null when no window
+ * has a percent or a reset time.
+ */
+export function codexUsageReading(rateLimits: CodexRateLimits, observedAtMs: number): CodexUsageReading | null {
+  const data = parseCodexRateLimits(rateLimits);
+  if (
+    data.sessionPct === null
+    && data.weeklyPct === null
+    && data.sessionReset === null
+    && data.weeklyReset === null
+  ) {
+    return null;
+  }
+  return { rateLimits, observedAtMs };
+}
+
+/**
+ * The Codex reading the status bar shows: whichever of the newest session-log
+ * record and the last live probe was taken later. A tie goes to the live probe.
+ * A codex agent that runs after a probe writes newer log records, so the
+ * footer keeps following it.
+ */
+export function newerCodexReading(
+  log: CodexUsageReading | null,
+  live: CodexUsageReading | null,
+): CodexUsageReading | null {
+  if (!log) return live;
+  if (!live) return log;
+  return live.observedAtMs >= log.observedAtMs ? live : log;
+}
+
+/** Status-bar usage for a Codex reading, with reset times formatted against `now`. No reading is an error. */
+export function codexUsageResult(reading: CodexUsageReading | null, now?: Date): UsageResult {
+  if (!reading) return { data: null, error: true };
+  return { data: parseCodexRateLimits(reading.rateLimits, now), error: false };
+}
+
+/** The reset times (epoch ms) of a reading's windows that are at or before `nowMs`. */
+export function passedCodexResets(reading: CodexUsageReading | null, nowMs: number): number[] {
+  if (!reading) return [];
+  const passed: number[] = [];
+  for (const window of [reading.rateLimits.primary, reading.rateLimits.secondary]) {
+    const resetMs = window ? codexResetEpochMs(window.resets_at) : null;
+    if (resetMs !== null && resetMs <= nowMs) passed.push(resetMs);
+  }
+  return passed;
 }
 
 /**
@@ -260,7 +333,12 @@ async function collectJsonlFiles(dir: string, depth = 0): Promise<JsonlFile[]> {
   return files;
 }
 
-function parseCodexUsageLine(line: string): UsageData | null {
+/**
+ * Parse one log line into a reading. The reading's time is the record's
+ * top-level `timestamp` (codex writes an ISO time on every line), or
+ * `fallbackMs` (the file's mtime) when the record has none.
+ */
+function parseCodexUsageLine(line: string, fallbackMs: number): CodexUsageReading | null {
   let record: any;
   try {
     record = JSON.parse(line);
@@ -270,23 +348,15 @@ function parseCodexUsageLine(line: string): UsageData | null {
   const rateLimits = record?.payload?.rate_limits;
   if (!rateLimits || typeof rateLimits !== "object") return null;
 
-  const data = parseCodexRateLimits(rateLimits);
-  if (
-    data.sessionPct === null
-    && data.weeklyPct === null
-    && data.sessionReset === null
-    && data.weeklyReset === null
-  ) {
-    return null;
-  }
-  return data;
+  const recordedMs = typeof record.timestamp === "string" ? Date.parse(record.timestamp) : NaN;
+  return codexUsageReading(rateLimits, Number.isFinite(recordedMs) ? recordedMs : fallbackMs);
 }
 
 /** Parse one log line, given as its byte pieces in file order. */
-function parseCodexUsagePieces(pieces: Buffer[]): UsageData | null {
+function parseCodexUsagePieces(pieces: Buffer[], fallbackMs: number): CodexUsageReading | null {
   const line = pieces.length === 1 ? pieces[0]! : Buffer.concat(pieces);
   if (!line.includes(CODEX_USAGE_MARKER)) return null;
-  return parseCodexUsageLine(line.toString("utf8"));
+  return parseCodexUsageLine(line.toString("utf8"), fallbackMs);
 }
 
 /**
@@ -294,10 +364,10 @@ function parseCodexUsagePieces(pieces: Buffer[]): UsageData | null {
  * its end in CODEX_TAIL_CHUNK_BYTES steps, and reading stops at the line
  * closest to the end that has usage, so a large file is never read whole.
  */
-async function readLastCodexUsage(path: string): Promise<UsageData | null> {
+async function readLastCodexUsage(file: JsonlFile): Promise<CodexUsageReading | null> {
   let handle;
   try {
-    handle = await open(path, "r");
+    handle = await open(file.path, "r");
   } catch {
     return null;
   }
@@ -316,15 +386,15 @@ async function readLastCodexUsage(path: string): Promise<UsageData | null> {
       while (end > 0) {
         const newline = chunk.lastIndexOf(0x0a, end - 1);
         if (newline < 0) break;
-        const data = parseCodexUsagePieces([chunk.subarray(newline + 1, end), ...pending]);
-        if (data) return data;
+        const reading = parseCodexUsagePieces([chunk.subarray(newline + 1, end), ...pending], file.mtimeMs);
+        if (reading) return reading;
         pending = [];
         end = newline;
       }
       pending.unshift(chunk.subarray(0, end));
     }
     // The first line of the file has no newline before it.
-    return parseCodexUsagePieces(pending);
+    return parseCodexUsagePieces(pending, file.mtimeMs);
   } catch {
     return null;
   } finally {
@@ -335,18 +405,18 @@ async function readLastCodexUsage(path: string): Promise<UsageData | null> {
 /**
  * Read the newest Codex usage payload from local Codex session JSONL logs.
  * Logs are searched newest mtime first, and the first log that has a usage
- * line answers, so older logs are not read.
+ * line answers, so older logs are not read. No usage line gives null.
  */
-export async function fetchCodexUsage(): Promise<UsageResult> {
+export async function readCodexLogUsage(): Promise<CodexUsageReading | null> {
   const files = await collectJsonlFiles(CODEX_SESSIONS_DIR);
   // Equal mtimes fall back to the path: rollout-<start time> names sort by age.
   files.sort((a, b) => b.mtimeMs - a.mtimeMs || b.path.localeCompare(a.path));
 
   for (const file of files) {
-    const data = await readLastCodexUsage(file.path);
-    if (data) return { data, error: false };
+    const reading = await readLastCodexUsage(file);
+    if (reading) return reading;
   }
-  return { data: null, error: true };
+  return null;
 }
 
 interface GeminiCacheFile {

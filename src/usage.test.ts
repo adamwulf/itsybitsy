@@ -1,5 +1,20 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { formatResetTime, parseCodexRateLimits, parseGeminiUsage, fetchCodexUsage, fetchGeminiUsage, setTestDir, resetTestDir, spawnCtx, CODEX_TAIL_CHUNK_BYTES } from "./usage";
+import {
+  formatResetTime,
+  parseCodexRateLimits,
+  parseGeminiUsage,
+  readCodexLogUsage,
+  codexUsageReading,
+  codexUsageResult,
+  newerCodexReading,
+  passedCodexResets,
+  fetchGeminiUsage,
+  setTestDir,
+  resetTestDir,
+  spawnCtx,
+  CODEX_TAIL_CHUNK_BYTES,
+} from "./usage";
+import type { CodexRateLimits, CodexUsageReading } from "./usage";
 import { join } from "path";
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "fs/promises";
 import { tmpdir } from "os";
@@ -108,8 +123,13 @@ describe("parseCodexRateLimits", () => {
   });
 });
 
-describe("fetchCodexUsage", () => {
+describe("readCodexLogUsage", () => {
   let tmpDir: string;
+
+  /** The newest log reading as status-bar usage, the way the dashboard shows it. */
+  async function readLogUsage() {
+    return codexUsageResult(await readCodexLogUsage());
+  }
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "codex-usage-test-"));
@@ -178,7 +198,7 @@ describe("fetchCodexUsage", () => {
     await writeSession("rollout-b.jsonl", jsonl([usageLine(12, 3, "2026-05-31T23:00:00.000Z")]), 1_780_000_000);
     await writeSession("rollout-a.jsonl", jsonl([usageLine(42, 9, "2026-05-31T19:00:00.000Z")]), 1_780_000_100);
 
-    const result = await fetchCodexUsage();
+    const result = await readLogUsage();
 
     expect(result.error).toBe(false);
     expect(result.data?.sessionPct).toBe(42);
@@ -191,7 +211,7 @@ describe("fetchCodexUsage", () => {
     await writeSession("rollout-middle.jsonl", otherLine() + "\n" + usageLine(55, 7), 1_780_000_100);
     await writeSession("rollout-newest.jsonl", jsonl([otherLine(), nullUsageLine]), 1_780_000_200);
 
-    const result = await fetchCodexUsage();
+    const result = await readLogUsage();
 
     expect(result.error).toBe(false);
     expect(result.data?.sessionPct).toBe(55);
@@ -207,7 +227,7 @@ describe("fetchCodexUsage", () => {
     );
     expect(Bun.file(path).size).toBeGreaterThan(3 * CODEX_TAIL_CHUNK_BYTES);
 
-    const result = await fetchCodexUsage();
+    const result = await readLogUsage();
 
     expect(result.error).toBe(false);
     expect(result.data?.sessionPct).toBe(33);
@@ -224,7 +244,7 @@ describe("fetchCodexUsage", () => {
     const path = await writeSession("rollout-split.jsonl", jsonl([before, marker, filler]), 1_780_000_000);
     expect(Bun.file(path).size - CODEX_TAIL_CHUNK_BYTES).toBe(splitAt);
 
-    const result = await fetchCodexUsage();
+    const result = await readLogUsage();
 
     expect(result.error).toBe(false);
     expect(result.data?.sessionPct).toBe(61);
@@ -235,7 +255,7 @@ describe("fetchCodexUsage", () => {
     const longMarker = usageLine(72, 6, undefined, { note: "x".repeat(3 * CODEX_TAIL_CHUNK_BYTES) });
     await writeSession("rollout-long.jsonl", jsonl([otherLine(), longMarker, otherLine(), otherLine()]), 1_780_000_000);
 
-    const result = await fetchCodexUsage();
+    const result = await readLogUsage();
 
     expect(result.error).toBe(false);
     expect(result.data?.sessionPct).toBe(72);
@@ -255,7 +275,7 @@ describe("fetchCodexUsage", () => {
       1_780_000_000,
     );
 
-    const result = await fetchCodexUsage();
+    const result = await readLogUsage();
 
     expect(result.error).toBe(false);
     expect(result.data?.sessionPct).toBe(30);
@@ -263,7 +283,7 @@ describe("fetchCodexUsage", () => {
   });
 
   test("returns an error when no Codex usage payload exists", async () => {
-    const result = await fetchCodexUsage();
+    const result = await readLogUsage();
 
     expect(result.error).toBe(true);
     expect(result.data).toBeNull();
@@ -274,10 +294,98 @@ describe("fetchCodexUsage", () => {
     await writeSession("rollout-b.jsonl", jsonl([otherLine(200_000)]), 1_780_000_100);
     await writeSession("rollout-empty.jsonl", "", 1_780_000_200);
 
-    const result = await fetchCodexUsage();
+    const result = await readLogUsage();
 
     expect(result.error).toBe(true);
     expect(result.data).toBeNull();
+  });
+
+  test("the reading is timed by the record's timestamp and keeps the raw windows", async () => {
+    await writeSession("rollout-a.jsonl", jsonl([usageLine(42, 9, "2026-05-31T19:00:00.000Z")]), 1_780_000_000);
+
+    const reading = await readCodexLogUsage();
+
+    expect(reading?.observedAtMs).toBe(Date.parse("2026-05-31T19:00:00.000Z"));
+    expect(reading?.rateLimits.primary).toEqual({ used_percent: 42, window_minutes: 300, resets_at: 1780275600 });
+    expect(reading?.rateLimits.secondary).toEqual({ used_percent: 9, window_minutes: 10080, resets_at: 1780779600 });
+  });
+
+  test("a record without a timestamp is timed by the file's mtime", async () => {
+    const line = JSON.stringify({
+      type: "event_msg",
+      payload: { type: "token_count", rate_limits: { primary: { used_percent: 7, window_minutes: 10080, resets_at: 1780779600 } } },
+    });
+    await writeSession("rollout-a.jsonl", jsonl([line]), 1_780_000_000);
+
+    const reading = await readCodexLogUsage();
+
+    expect(reading?.observedAtMs).toBe(1_780_000_000_000);
+  });
+});
+
+describe("Codex readings", () => {
+  const now = new Date("2026-05-31T20:00:00Z");
+  const nowMs = now.getTime();
+  /** Weekly window that resets at `resetsAtSeconds`. */
+  function weekly(usedPercent: number, resetsAtSeconds: number): CodexRateLimits {
+    return { primary: { used_percent: usedPercent, window_minutes: 10080, resets_at: resetsAtSeconds }, secondary: null };
+  }
+  function reading(rateLimits: CodexRateLimits, observedAtMs: number): CodexUsageReading {
+    return { rateLimits, observedAtMs };
+  }
+
+  test("codexUsageReading drops a snapshot with no percent or reset in any window", () => {
+    expect(codexUsageReading({ primary: null, secondary: null }, nowMs)).toBeNull();
+    expect(codexUsageReading({ primary: { window_minutes: 10080 } }, nowMs)).toBeNull();
+    expect(codexUsageReading(weekly(5, 1780779600), nowMs)).toEqual({ rateLimits: weekly(5, 1780779600), observedAtMs: nowMs });
+  });
+
+  test("newerCodexReading shows the live probe when it is newer than the newest log record", () => {
+    const log = reading(weekly(100, 1780000000), nowMs - 60_000);
+    const live = reading(weekly(3, 1780779600), nowMs);
+    expect(newerCodexReading(log, live)).toBe(live);
+  });
+
+  test("newerCodexReading shows a log record written after the live probe", () => {
+    const live = reading(weekly(3, 1780779600), nowMs - 60_000);
+    const log = reading(weekly(4, 1780779600), nowMs);
+    expect(newerCodexReading(log, live)).toBe(log);
+  });
+
+  test("newerCodexReading gives a tie to the live probe and uses whichever reading exists", () => {
+    const log = reading(weekly(4, 1780779600), nowMs);
+    const live = reading(weekly(3, 1780779600), nowMs);
+    expect(newerCodexReading(log, live)).toBe(live);
+    expect(newerCodexReading(log, null)).toBe(log);
+    expect(newerCodexReading(null, live)).toBe(live);
+    expect(newerCodexReading(null, null)).toBeNull();
+  });
+
+  test("codexUsageResult formats reset times against the clock it is given, not the fetch time", () => {
+    // Fetched at 20:00 with the weekly window resetting 7 days later.
+    const fetched = reading(weekly(3, nowMs / 1000 + 7 * 86_400), nowMs);
+    expect(codexUsageResult(fetched, now).data?.weeklyReset).toBe("7d 0h");
+    // The same stored reading, 4 minutes and then 8 hours later.
+    expect(codexUsageResult(fetched, new Date(nowMs + 4 * 60_000)).data?.weeklyReset).toBe("6d 23h");
+    expect(codexUsageResult(fetched, new Date(nowMs + 8 * 3_600_000)).data?.weeklyReset).toBe("6d 16h");
+    expect(codexUsageResult(fetched, new Date(nowMs + 8 * 86_400_000)).data?.weeklyReset).toBe("now");
+  });
+
+  test("codexUsageResult with no reading is an error, as with no session logs", () => {
+    expect(codexUsageResult(null, now)).toEqual({ data: null, error: true });
+  });
+
+  test("passedCodexResets lists the reset times at or before now, in epoch ms", () => {
+    const past = nowMs / 1000 - 60;
+    const future = nowMs / 1000 + 60;
+    const both: CodexRateLimits = {
+      primary: { used_percent: 1, window_minutes: 300, resets_at: past },
+      secondary: { used_percent: 2, window_minutes: 10080, resets_at: future },
+    };
+    expect(passedCodexResets(reading(both, nowMs), nowMs)).toEqual([past * 1000]);
+    expect(passedCodexResets(reading(weekly(1, nowMs / 1000), nowMs), nowMs)).toEqual([nowMs]);
+    expect(passedCodexResets(reading({ primary: { used_percent: 1 }, secondary: null }, nowMs), nowMs)).toEqual([]);
+    expect(passedCodexResets(null, nowMs)).toEqual([]);
   });
 });
 

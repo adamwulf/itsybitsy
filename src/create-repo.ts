@@ -90,7 +90,14 @@ export async function createRepo(parentDir: string, folderName: string): Promise
     return { ok: false, message: `Created ${target}, but git commit failed: ${commit.output}`, path: target };
   }
 
-  const added = await addRepo(target, repoName);
+  // addRepo reports a refusal in its result but THROWS when the registry
+  // write fails; either way the folder exists, so the error must name it.
+  let added: { ok: boolean; message: string };
+  try {
+    added = await addRepo(target, repoName);
+  } catch (err) {
+    added = { ok: false, message: (err as Error).message };
+  }
   if (!added.ok) {
     return { ok: false, message: `Created ${target}, but could not add it: ${added.message}`, path: target };
   }

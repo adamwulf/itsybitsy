@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, mkdir, readdir, rm, stat } from "fs/promises";
+import { chmod, mkdtemp, mkdir, readdir, rm, stat } from "fs/promises";
 import { tmpdir } from "os";
 import { createRepo, createRepoSpawnCtx } from "./create-repo";
 import { loadRegistry, saveRegistry } from "./registry";
@@ -129,6 +129,25 @@ describe("createRepo", () => {
     expect(result.path).toBe(target);
     expect(result.message).toBe(`Created ${target}, but git commit failed: Author identity unknown *** Please tell me who you are.`);
     expect((await stat(join(target, ".git"))).isDirectory()).toBe(true);
+    expect((await loadRegistry()).repos).toEqual([]);
+  });
+
+  test("a registry write that throws after git succeeds reports the path, and keeps the repo", async () => {
+    // A read-only registry dir: the pre-checks only read it, so they pass, and
+    // addRepo's saveRegistry then throws EACCES creating repos.json.
+    const registryDir = join(baseDir, ".itsybitsy");
+    await chmod(registryDir, 0o555);
+    try {
+      const result = await createRepo(parent, "unsaved");
+      const target = join(parent, "unsaved");
+      expect(result.ok).toBe(false);
+      expect(result.path).toBe(target);
+      expect(result.message).toStartWith(`Created ${target}, but could not add it: `);
+      expect(result.message).toContain("EACCES");
+      expect((await stat(join(target, ".git"))).isDirectory()).toBe(true);
+    } finally {
+      await chmod(registryDir, 0o755);
+    }
     expect((await loadRegistry()).repos).toEqual([]);
   });
 

@@ -491,8 +491,7 @@ When `ib watch` launches, it validates all agent type files in `~/.itsybitsy/age
 
 Legacy agents (created before the agent types system) that lack `agentType` in their `meta.json` fall back to the old behavior:
 - `meta.json` `worker: true` → treated as `worker` type
-- `meta.json` `coordinator: true` → treated as `repo-coordinator` type
-- Neither → treated as `manager` type
+- Otherwise → treated as `manager` type
 
 The `worker` boolean field is still written to meta.json for backward compatibility with the bash `ib` reference implementation. Its value is derived from `canSpawnChildren`: `worker: true` when `canSpawnChildren` is `false`, `worker: false` otherwise.
 
@@ -747,7 +746,6 @@ Questions from agents that no longer exist (no directory in `.itsybitsy/agents/`
   "watchdog_pid": "12346",        // appended after watchdog spawns (see §8.5); not in initial write
   "state": "running",             // written by stop hook, ib send, ib resume (see §1.3.1)
   "state_updated_at": 1704825030, // epoch seconds when state was last written
-  "coordinator": true,            // only present for per-repo coordinators (§12.2.2)
   "paths": { "allowRead": [], "allowWrite": [], "deny": [] }  // resolved + repo-anchored from agent type (§6.1); missing = strict
 }
 ```
@@ -763,7 +761,7 @@ Questions from agents that no longer exist (no directory in `.itsybitsy/agents/`
 | `created_epoch` | number | Unix epoch seconds at creation |
 | `worktree` | boolean | Whether agent has an isolated git worktree |
 | `worker` | boolean | `true` for leaf agents (`canSpawnChildren: false`), `false` otherwise. Retained for backward compatibility with bash `ib`. |
-| `agentType` | string \| undefined | Resolved agent type name (e.g., `"manager"`, `"worker"`, `"researcher"`). Absent on legacy agents created before the type system. See §2.1. |
+| `agentType` | string \| undefined | Resolved agent type name (e.g., `"manager"`, `"worker"`, `"researcher"`). Absent on legacy agents created before the type system. `"repo-coordinator"` is what identifies a per-repo coordinator (§12.2.2). See §2.1. |
 | `agentIcon` | string \| undefined | Single-character icon from the agent type definition. Absent if the type has no icon or for legacy agents. See §2.6. |
 | `model` | string \| null | Claude model name (e.g., "sonnet", "opus", "haiku"), or `null` for legacy agents | [^callout]: Bash defaults `MODEL` to config value then `"sonnet"` before writing meta.json (the null branch in the template is unreachable dead code). TS normalizes null/missing to `"unknown"`. The `string \| null` type is retained because legacy agents may have null values, and display code (bash `ib list`) handles this defensively.
 | `effort` | string \| null | Resolved reasoning-effort level (`low\|medium\|high\|xhigh\|max`), or `null`/absent for legacy agents (treated as no override). Stores the **raw itsybitsy level** verbatim; the codex `model_reasoning_effort` mapping happens at launch-arg build time. Re-read by `ib resume` to re-apply the effort flag. See §2 item 3 / §18. |
@@ -773,7 +771,6 @@ Questions from agents that no longer exist (no directory in `.itsybitsy/agents/`
 | `state` | string \| undefined | Deterministic agent state written by the stop hook, `ib send`, or `ib resume`. Values: `"running"`, `"waiting"`, `"complete"`. Absent on legacy agents or before the first stop hook fires (treated as `"running"` if agent is older than 6s). See §1.3.1. |
 | `state_updated_at` | number \| undefined | Unix epoch seconds when `state` was last written. Used for debugging. |
 | `ack` | object \| undefined | `{state, by, at}` written by the manager's `ib ack` (§8.5.2). Current only while `state` equals the stored `state` and `by` equals `manager`; removed by any state change. |
-| `coordinator` | boolean \| undefined | `true` for per-repo coordinators (§12.2.2). Absent for regular agents. |
 | `paths` | object \| undefined | Resolved, repo-anchored filesystem policy (`allowRead` / `allowWrite` / `deny`) from the agent type's `paths:` frontmatter, canonicalized to absolute paths at creation and frozen here. A **missing** key equals empty lists equals **strict** (worktree + runtime roots only). Replaced the retired `allowedPaths`. See §6.1. |
 | `sandbox` | object \| undefined | Resolved kernel policy (`enabled`, `rawAllow`, `domains`), frozen at spawn. Enablement uses the most specific explicit type/layer value; only literal false disables and omission defaults true. Enabled launches require valid frozen paths, seal, profile, and proxy; setup errors fail closed. Disabled launches omit the itsybitsy kernel wrapper, proxy, and collector and restore the pre-sandbox CLI launch configuration. Hooks remain active and resolve all tool approvals without user prompts in both modes. Operator refresh applies edited type policy. |
 
@@ -1814,7 +1811,7 @@ Per-repo coordinators are Claude Code agents that coordinate work within a singl
 Per-repo coordinators are stored in `.itsybitsy/agents/` like regular agents, but with distinguishing characteristics:
 
 - **Agent ID**: The repo basename (e.g., `itsybitsy` for `/Users/adam/Developer/itsybitsy`). This is computed by `getCoordinatorAgentId(repoPath)` which returns `basename(repoPath)`. Only one coordinator per repo. The agent directory is `.itsybitsy/agents/<repo-basename>/` (matching the standard `agents/<id>/` convention). Using the repo basename as the agent ID means standard agent ID resolution (§4.1) naturally routes `ib send <repo-basename>` to the per-repo coordinator — no special addressing logic needed. If a non-coordinator agent already has the repo basename as its ID (collision), a random 4-char hex suffix is appended (e.g., `itsybitsy-a3f1`). **Reserved name**: The name `coordinator` is reserved for system coordinator addressing (§12.3.1). Repos with basename `coordinator` are rejected at registration time (`ib add`, §9). As a secondary guard, `newAgent()` also rejects any agent with ID `coordinator`.
-- **meta.json flag**: `"coordinator": true` — marks this agent as a coordinator
+- **Type**: `"agentType": "repo-coordinator"` in meta.json (`REPO_COORDINATOR_TYPE`) is what identifies a per-repo coordinator. Every coordinator check (tree filtering, `checkCoordinatorExists`, `@coordinator` / `@<repo>` resolution, hooks, reset) compares this string. There is no separate `coordinator` flag in meta.json.
 - **Tmux session naming**: Standard convention: `itsybitsy-<repo-id>-<agent-id>` (where `<agent-id>` is the repo basename)
 - **Branch name**: `agent/<agent-id>-<repo-id>` (includes repo-id to avoid collision across repos sharing the same git remote — each repo has a unique 8-char hex repo-id in `.itsybitsy/repo-id`)
 
@@ -1823,7 +1820,7 @@ Per-repo coordinators are stored in `.itsybitsy/agents/` like regular agents, bu
 **Creation**: Per-repo coordinators are created via `ib new-agent --type repo-coordinator`. This:
 
 1. Uses the repo basename as the agent ID (via `getCoordinatorAgentId(repoPath)`)
-2. Sets `coordinator: true` in meta.json
+2. Records `agentType: "repo-coordinator"` in meta.json, which is what marks it as a coordinator
 3. Uses coordinator-specific permissions (§12.2.4)
 4. Uses coordinator-specific session start context (§12.2.6)
 5. Does NOT set a `--manager` — coordinators are top-level agents
@@ -1831,7 +1828,7 @@ Per-repo coordinators are stored in `.itsybitsy/agents/` like regular agents, bu
 7. Defaults to the model resolved by walking `~/.itsybitsy/agent-types/repo-coordinator.md` `model:` > `~/.itsybitsy/agent-types/_all.md` `model:` > `claude:opus` when no explicit `--model` is provided — overridable with `--model <model>` on `ib new-agent --type repo-coordinator`. The user's global `model` config key is NOT consulted on the coordinator path (see §12.5).
 8. Otherwise follows the standard agent creation flow (§1.1)
 
-**One-per-repo constraint**: `checkCoordinatorExists(repoPath)` scans all agent directories in `.itsybitsy/agents/` for any agent with `coordinator: true` in meta.json. If a coordinator already exists, `ib new-agent --type repo-coordinator` prints `"Coordinator already exists for <repo-name>"` and exits 0 (idempotent no-op). If a non-coordinator agent already has the repo basename as its ID (collision), a random 4-char hex suffix is appended to the coordinator's ID. There is exactly one coordinator per repo, never more. Archived coordinators (in `.itsybitsy/archive/`) do not block creation — "active" means a directory in `.itsybitsy/agents/` (not `.itsybitsy/archive/`). A stopped or paused coordinator whose directory is still in `agents/` DOES block creation — only archiving removes the block.
+**One-per-repo constraint**: `checkCoordinatorExists(repoPath)` scans all agent directories in `.itsybitsy/agents/` for any agent with `agentType: "repo-coordinator"` in meta.json. If a coordinator already exists, `ib new-agent --type repo-coordinator` prints `"Coordinator already exists for <repo-name>"` and exits 0 (idempotent no-op). If a non-coordinator agent already has the repo basename as its ID (collision), a random 4-char hex suffix is appended to the coordinator's ID. There is exactly one coordinator per repo, never more. Archived coordinators (in `.itsybitsy/archive/`) do not block creation — "active" means a directory in `.itsybitsy/agents/` (not `.itsybitsy/archive/`). A stopped or paused coordinator whose directory is still in `agents/` DOES block creation — only archiving removes the block.
 
 **No auto-spawn on watch startup**: Per-repo coordinators are NOT auto-spawned when `ib watch` launches. Only the system coordinator is auto-spawned (§12.1.2). Per-repo coordinators are created manually via one of: (a) `ib new-agent --type repo-coordinator` from the CLI, (b) pressing `R` on a repo header in the TUI (which spawns a coordinator if none exists, or resumes a stopped one), or (c) the system coordinator running `ib new-agent --type repo-coordinator` from within a repo directory.
 
@@ -1843,7 +1840,7 @@ Per-repo coordinators are stored in `.itsybitsy/agents/` like regular agents, bu
 
 **Retiring/Archiving**: Per-repo coordinators follow the standard retire/archive flow (§1.4, §1.7). `ib retire <repo-basename>` retires only the coordinator itself (standard §1.4 behavior). To recursively tear down a coordinator and all its children, use `ib nuke <repo-basename>` (§1.8). The `manager: "<repo-basename>"` field in children's meta.json links them to the coordinator for the nuke traversal.
 
-**Expanded same-repo authority**: Per-repo coordinators may run `ib retire`, `ib rehire`, and `ib reassign` on ANY non-coordinator agent within their own repo, regardless of the target's `manager` field. This is enforced in `checkIbCommandAccess` (src/hooks/agent-path.ts) by checking the caller's `coordinator: true` flag in its own meta.json before falling back to the standard manager/spawner check. The other manager-relationship operations (`merge`, `resume`, `pause`) still require the standard manager/spawner relationship. `nuke` is **not** available to coordinators (or any agent) at all — it is a user-only command (§1.8). Cross-repo `retire`/`rehire`/`reassign` is not permitted through this coordinator bypass. Coordinators cannot retire, rehire, or reassign other coordinators via the bypass.
+**Expanded same-repo authority**: Per-repo coordinators may run `ib retire`, `ib rehire`, and `ib reassign` on ANY non-coordinator agent within their own repo, regardless of the target's `manager` field. This is enforced in `checkIbCommandAccess` (src/hooks/agent-path.ts) by checking that the caller's own meta.json has `agentType: "repo-coordinator"` before falling back to the standard manager/spawner check. The other manager-relationship operations (`merge`, `resume`, `pause`) still require the standard manager/spawner relationship. `nuke` is **not** available to coordinators (or any agent) at all — it is a user-only command (§1.8). Cross-repo `retire`/`rehire`/`reassign` is not permitted through this coordinator bypass. Coordinators cannot retire, rehire, or reassign other coordinators via the bypass.
 
 **Resuming**: Standard resume flow (§1.6). Per-repo coordinators can be paused and resumed like any agent.
 
@@ -1887,7 +1884,7 @@ The former config keys `permissions.coordinator.allow` and `permissions.coordina
 
 #### 12.2.5 Display
 
-Per-repo coordinators are **not rendered as rows in the agent tree** — `flattenAgentTree()` filters out any agent with `coordinator: true` before emitting tree entries (src/agents.ts). Only the system coordinator and regular agents appear as selectable rows. The repo header itself is the access point for the per-repo coordinator: selecting it surfaces the coordinator in the main area (see below). The system coordinator is the only coordinator shown directly in the tree:
+Per-repo coordinators are **not rendered as rows in the agent tree** — `flattenAgentTree()` filters out any agent with `agentType: "repo-coordinator"` before emitting tree entries (src/agents.ts). Only the system coordinator and regular agents appear as selectable rows. The repo header itself is the access point for the per-repo coordinator: selecting it surfaces the coordinator in the main area (see below). The system coordinator is the only coordinator shown directly in the tree:
 
 ```
 ◆ coordinator       running  5m       (system coordinator)
@@ -1898,7 +1895,7 @@ Per-repo coordinators are **not rendered as rows in the agent tree** — `flatte
   ⚙ agent-c9d0e1f2   complete  1h
 ```
 
-When a repo header is selected, the dashboard locates the per-repo coordinator (`watcher.lastAgents.find(a => a.repoPath === ... && a.meta.coordinator)`) and wires it up: the pane mode auto-switches to REPO (§8.11, §8.13), and the main area renders at full main width (`mainWidth`, the same width the system coordinator uses — see §13.8). The repo info summary occupies the top portion and the per-repo coordinator's tmux output occupies the bottom portion of the full main area. Choosing an agent or the system coordinator afterward restores the previous pane mode and the standard split-pane layout. The per-repo coordinator's tmux session is sized to `mainWidth`, matching the system coordinator's width — it is not a right-pane-scoped view.
+When a repo header is selected, the dashboard locates the per-repo coordinator (`watcher.lastAgents.find(a => a.repoPath === ... && a.meta.agentType === REPO_COORDINATOR_TYPE)`) and wires it up: the pane mode auto-switches to REPO (§8.11, §8.13), and the main area renders at full main width (`mainWidth`, the same width the system coordinator uses — see §13.8). The repo info summary occupies the top portion and the per-repo coordinator's tmux output occupies the bottom portion of the full main area. Choosing an agent or the system coordinator afterward restores the previous pane mode and the standard split-pane layout. The per-repo coordinator's tmux session is sized to `mainWidth`, matching the system coordinator's width — it is not a right-pane-scoped view.
 
 #### 12.2.6 Session Start Context
 
@@ -1938,7 +1935,7 @@ The `ib send` command uses a hybrid addressing scheme: `@`-prefixed targets for 
 | Syntax | Description | Resolution |
 |--------|-------------|------------|
 | `ib send @system "msg"` | System coordinator | Delivers directly to the `ib-coordinator` tmux session via `tmux send-keys`, identical to how messages are delivered to any other agent (§12.3.3). The `--from` flag value is rendered as a `[sent by agent <id>]:` prefix (or `[sent by @<sentinel>]:` for `@`-prefixed sentinel senders — see §4.1 step 4). Errors with exit code 1 if the coordinator session is not running. Output: `"Sent to system coordinator"` on success. |
-| `ib send @coordinator "msg"` | Own repo's coordinator | Detects the current repo from CWD (agent worktree or registered repo root), finds the coordinator agent for that repo (the agent with `coordinator: true` in meta.json), and sends via `tmux send-keys`. Error if CWD is not in a registered repo or agent worktree. Error if no coordinator exists for the detected repo. |
+| `ib send @coordinator "msg"` | Own repo's coordinator | Detects the current repo from CWD (agent worktree or registered repo root), finds the coordinator agent for that repo (the agent with `agentType: "repo-coordinator"` in meta.json, via `checkCoordinatorExists`), and sends via `tmux send-keys`. Error if CWD is not in a registered repo or agent worktree. Error if no coordinator exists for the detected repo. |
 | `ib send @muse-ios "msg"` | Named repo's coordinator | Looks up the repo by name in the repo registry (`repos.json`), finds the coordinator agent for that repo, and sends via `tmux send-keys`. Error if no repo with that name is registered. Error if no coordinator exists for the named repo. |
 | `ib send @muse-ios/agent-a1b2 "msg"` | Agent in named repo | Looks up the repo by name, then resolves the agent ID within that repo only (exact match, then prefix match). Error if repo not found, agent not found, or ambiguous prefix match. |
 
@@ -2047,10 +2044,10 @@ The coordinator system touches many modules. This section catalogs the current i
 | Module | Status | Description |
 |--------|--------|-------------|
 | `src/coordinator.ts` | **Implemented** | System coordinator lifecycle (`ensureSystemCoordinator()`, `releaseSystemCoordinator()`, `restartSystemCoordinator()`), PID-based reference counting, system coordinator permissions/prompt, `sanitizeTmuxInput()`, per-repo coordinator permissions (`buildPerRepoCoordinatorSettings()`), per-repo coordinator prompt (`perRepoCoordinatorPrompt()`), coordinator existence check (`checkCoordinatorExists()`), agent ID generation (`getCoordinatorAgentId()` — returns repo basename). No separate `coordinator-settings.ts` — per-repo settings are in this file. |
-| `src/agents.ts` | **Implemented** | `coordinator?: boolean` in `AgentMeta`. `{ kind: "system-coordinator" }` in `FlatEntry`. `flattenAgentTree()` prepends system coordinator entry and filters out per-repo coordinators (`!a.meta.coordinator`) so they do not appear as tree rows under their repo header. |
-| `src/ib-commands.ts` | **Implemented** | `newAgent()` extended with `--type repo-coordinator`: uses repo basename as ID (via `getCoordinatorAgentId()`), sets `coordinator: true` in meta.json, one-per-repo validation via `checkCoordinatorExists()`, model sourced from `repo-coordinator.md` agent-type frontmatter, max-agents bypass, coordinator-specific `settings.local.json` with hooks. No special `ib send` routing — standard agent ID resolution handles everything. |
+| `src/agents.ts` | **Implemented** | `{ kind: "system-coordinator" }` in `FlatEntry`. `flattenAgentTree()` prepends system coordinator entry and filters out per-repo coordinators (`a.meta.agentType !== REPO_COORDINATOR_TYPE`) so they do not appear as tree rows under their repo header. |
+| `src/ib-commands.ts` | **Implemented** | `newAgent()` extended with `--type repo-coordinator`: uses repo basename as ID (via `getCoordinatorAgentId()`), records `agentType: "repo-coordinator"` in meta.json, one-per-repo validation via `checkCoordinatorExists()`, model sourced from `repo-coordinator.md` agent-type frontmatter, max-agents bypass, coordinator-specific `settings.local.json` with hooks. No special `ib send` routing — standard agent ID resolution handles everything. |
 | `src/hooks/session-start.ts` | **Implemented** | Composes the coordinator's prompt from `_all.md` + `repo-coordinator.md`, skipping `_non_coordinator.md` (keyed on the type name). Worker instructions correctly use manager's agent ID (repo basename) for `ib send`. |
-| `src/hooks/intercept-task.ts` | **Implemented** | `checkCoordinatorBashRestrictions()` blocks shell metacharacters and `--output` in git commands for coordinator sessions. Detects coordinators via `coordinator: true` in meta.json. |
+| `src/hooks/intercept-task.ts` | **Implemented** | `checkCoordinatorBashRestrictions()` blocks shell metacharacters and `--output` in git commands for coordinator sessions. Detects coordinators by type name (`isCoordinatorType()`): `agentType: "repo-coordinator"` in meta.json, or the `system-coordinator` type in `@system`'s synthetic meta. |
 | `src/hooks/agent-path.ts` | **No changes needed** | Per-repo coordinators use standard path isolation. |
 | `src/hooks/agent-status.ts` | **No changes needed** | Stop hook writes state normally. |
 | `src/config.ts` | **Implemented** | Config keys: `coordinator.imessage`, `coordinator.remoteControl` (default `false`; drives the `disableRemoteControl` settings key — NOT a launch flag. Claude 2.1.258+ auto-starts Remote Control with no disable flag/env var, so `writeCoordinatorFiles()` writes `disableRemoteControl: true` into the coordinator's `settings.local.json` by default and omits it only when the key is `true` — see §15). (`coordinator.model` removed — coordinator models live in `~/.itsybitsy/agent-types/system-coordinator.md` and `repo-coordinator.md` frontmatter. `permissions.coordinator.*` removed — per-repo coordinator permissions live in `~/.itsybitsy/agent-types/repo-coordinator.md` frontmatter.) |

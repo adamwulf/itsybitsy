@@ -3909,7 +3909,7 @@ describe("resumeAgent (native)", () => {
 
   // ----- Per-repo coordinator: R triggers a full reset -----
   //
-  // When meta.agentType === "coordinator", resumeAgent must NOT take the regular
+  // When meta.agentType === "repo-coordinator", resumeAgent must NOT take the regular
   // resume-session path. Instead, it tears down the existing coordinator
   // (nukeAgent) and respawns it (newAgent). These tests verify the routing
   // and teardown half. The respawn half goes through newAgent which has its
@@ -3975,7 +3975,7 @@ describe("resumeAgent (native)", () => {
         id: repoBasename,
         tmux_session: `tmux-${repoBasename}`,
         session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-        agentType: "coordinator",
+        agentType: "repo-coordinator",
       }));
 
       const agent = _makeAgent({
@@ -3986,7 +3986,7 @@ describe("resumeAgent (native)", () => {
         meta: {
           session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
           tmux_session: `tmux-${repoBasename}`,
-          agentType: "coordinator",
+          agentType: "repo-coordinator",
         } as any,
       });
 
@@ -4017,7 +4017,7 @@ describe("resumeAgent (native)", () => {
         id: repoBasename,
         tmux_session: `tmux-${repoBasename}`,
         session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-        agentType: "coordinator",
+        agentType: "repo-coordinator",
       }));
 
       const agent = _makeAgent({
@@ -4028,7 +4028,7 @@ describe("resumeAgent (native)", () => {
         meta: {
           session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
           tmux_session: `tmux-${repoBasename}`,
-          agentType: "coordinator",
+          agentType: "repo-coordinator",
         } as any,
       });
 
@@ -6984,7 +6984,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       id,
       state: "stopped",
       model: "claude:sonnet",
-      agentType: "coordinator",
+      agentType: "repo-coordinator",
       tmux_session: "",
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       sandbox: { enabled: false, rawAllow: [], domains: [] },
@@ -7022,7 +7022,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       id,
       state: "stopped",
       model: "claude:sonnet",
-      agentType: "coordinator",
+      agentType: "repo-coordinator",
       tmux_session: "",
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       sandbox: { enabled: false, rawAllow: [], domains: [] },
@@ -8126,8 +8126,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const id = "refresh-coord";
     const agentDir = join(agentsDir, id);
     await mkdir(agentDir, { recursive: true });
-    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, state: "running", agentType: "coordinator" }, null, 2));
-    const result = await refreshAgentSandbox(makeAgent(id, tempDir, "running", { agentType: "coordinator" }));
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, state: "running", agentType: "repo-coordinator" }, null, 2));
+    const result = await refreshAgentSandbox(makeAgent(id, tempDir, "running", { agentType: "repo-coordinator" }));
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("is a coordinator");
     expect(result.stderr).toContain("reset");
@@ -9307,7 +9307,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   test("A4 G3: refreshAgentsSandbox reports per agent and continues on error", async () => {
     const failId = "batch-fail";
     const coordId = "batch-coord";
-    for (const [id, agentType] of [[failId, "ghost-type"], [coordId, "coordinator"]] as const) {
+    for (const [id, agentType] of [[failId, "ghost-type"], [coordId, "repo-coordinator"]] as const) {
       const dir = join(agentsDir, id);
       await mkdir(join(dir, "repo"), { recursive: true });
       await Bun.write(join(dir, "meta.json"), JSON.stringify({
@@ -9321,7 +9321,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       sandbox: { enabled: true, rawAllow: [], domains: [] },
       paths: { allowRead: [], allowWrite: [], deny: [] },
     } as unknown as Partial<AgentMeta>);
-    const coord = makeAgent(coordId, tempDir, "running", { agentType: "coordinator" });
+    const coord = makeAgent(coordId, tempDir, "running", { agentType: "repo-coordinator" });
     // Fail first, coordinator second: proves the loop continues past a failure.
     const { lines, anyFailed } = await refreshAgentsSandbox([fail, coord]);
     expect(lines).toHaveLength(2);
@@ -9420,7 +9420,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // the coordinator's cwd must still block.
     setNewAgentSpawnRunner(dirtyWorktreeRunner());
     const result = await newAgent(tempDir, "start coordinator", {
-      type: "coordinator",
+      type: "repo-coordinator",
       _cwd: tempDir,
     });
     expect(result.ok).toBe(false);
@@ -10223,14 +10223,21 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(meta.worker).toBe(true); // canSpawnChildren: false → worker: true
   });
 
-  test("--type coordinator creates a coordinator agent", async () => {
+  test("--type repo-coordinator creates a coordinator agent", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
-    const result = await callNewAgent("start coordinator", { type: "coordinator", _cwd: tempDir });
+    const result = await callNewAgent("start coordinator", { type: "repo-coordinator", _cwd: tempDir });
     expect(result.ok).toBe(true);
 
     const repoName = tempDir.split("/").pop() ?? tempDir;
     const meta = await Bun.file(join(agentsDir, repoName, "meta.json")).json();
-    expect(meta.agentType).toBe("coordinator");
+    expect(meta.agentType).toBe("repo-coordinator");
+  });
+
+  test("--type coordinator (the old type name) is an unknown type", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("start coordinator", { type: "coordinator", _cwd: tempDir });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("unknown agent type 'coordinator'");
   });
 
   test("creates prompt.txt with prompt content", async () => {
@@ -10565,10 +10572,10 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     await writeLayerModel("_all", "model: claude:claude-opus-4-7", { spawnable: false });
     await writeLayerModel("_non_coordinator", "model: claude:claude-sonnet-4-6", { spawnable: false });
-    // Override the embedded coordinator.md (which declares `model: claude:opus`)
+    // Override the embedded repo-coordinator.md (which declares `model: claude:opus`)
     // with a blank model so the precedence chain falls through to _all.md.
     // canSpawnChildren: true preserves coordinator semantics.
-    await writeLayerModel("coordinator", "model:", { canSpawnChildren: true });
+    await writeLayerModel("repo-coordinator", "model:", { canSpawnChildren: true });
 
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       const cmdStr = cmd.join(" ");
@@ -10579,7 +10586,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     });
 
     setNewAgentSpawnRunner(mockSpawnRunner());
-    const result = await newAgent(coordRepo, "start", { type: "coordinator", _cwd: coordRepo });
+    const result = await newAgent(coordRepo, "start", { type: "repo-coordinator", _cwd: coordRepo });
     expect(result.ok).toBe(true);
     const coordinatorStart = await Bun.file(join(coordRepo, ".itsybitsy", "agents", "myrepo", "start.sh")).text();
     expect(coordinatorStart.indexOf("ib sandbox-collector attach")).toBeGreaterThan(0);
@@ -11219,7 +11226,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // Coordinator agent ID is derived from repo basename; --name is ignored for coordinators
     const { getCoordinatorAgentId } = await import("./coordinator");
     const coordId = getCoordinatorAgentId(tempDir);
-    const result = await callNewAgent("task", { type: "coordinator" });
+    const result = await callNewAgent("task", { type: "repo-coordinator" });
     expect(result.ok).toBe(true);
 
     // Coordinator writes settings to .claude/ in its own agent dir (not a worktree subdir)
@@ -11243,9 +11250,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(result.stderr.toLowerCase()).toContain("not spawnable");
   });
 
-  test("rejects spawning a non-spawnable type (system)", async () => {
+  test("rejects spawning a non-spawnable type (system-coordinator)", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
-    const result = await callNewAgent("task", { name: "test-bad3", type: "system" });
+    const result = await callNewAgent("task", { name: "test-bad3", type: "system-coordinator" });
     expect(result.ok).toBe(false);
     expect(result.stderr.toLowerCase()).toContain("not spawnable");
   });
@@ -11398,7 +11405,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     });
 
     setNewAgentSpawnRunner(mockSpawnRunner());
-    const result = await newAgent(coordRepo, "start", { type: "coordinator", _cwd: coordRepo });
+    const result = await newAgent(coordRepo, "start", { type: "repo-coordinator", _cwd: coordRepo });
     expect(result.ok).toBe(true);
 
     // The repo's settings file must be byte-for-byte unchanged.
@@ -11565,7 +11572,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // coordinator mode: getCoordinatorAgentId(coordRepo) returns "coordinator"
     // checkCoordinatorExists finds no coordinator and no collision → id stays "coordinator"
     // post-generation guard at line 1629 catches it
-    const result = await newAgent(coordRepo, "start coordinator", { type: "coordinator", _cwd: coordRepo });
+    const result = await newAgent(coordRepo, "start coordinator", { type: "repo-coordinator", _cwd: coordRepo });
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain('"coordinator" is a reserved name');
 
@@ -11612,7 +11619,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     // checkCoordinatorExists will find the collision (non-coordinator agent named "coordinator")
     // So id = "coordinator-XXXX" (with random suffix), which won't match the reserved name
-    const result = await newAgent(coordRepo, "start coordinator", { type: "coordinator", _cwd: coordRepo });
+    const result = await newAgent(coordRepo, "start coordinator", { type: "repo-coordinator", _cwd: coordRepo });
     expect(result.ok).toBe(true);
 
     await rm(coordRepoDir, { recursive: true, force: true });
@@ -12291,7 +12298,7 @@ body`,
 
       const result = await callNewAgent("start coordinator", {
         name: "codex-coord-attempt",
-        type: "coordinator",
+        type: "repo-coordinator",
         model: "codex:gpt-5.4-mini",
       });
 
@@ -12543,7 +12550,7 @@ sandbox:
       });
       const result = await callNewAgent("start coordinator", {
         name: "agy-coord-attempt",
-        type: "coordinator",
+        type: "repo-coordinator",
         model: "agy:gemini-3.7-flash-low",
       });
       expect(result.ok).toBe(false);
@@ -14457,7 +14464,7 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
     await mkdir(coordDir, { recursive: true });
     await Bun.write(join(coordDir, "meta.json"), JSON.stringify({
       id: coordId,
-      agentType: "coordinator",
+      agentType: "repo-coordinator",
       tmux_session: `itsybitsy-abcd1234-${coordId}`,
       prompt: "coordinate",
       manager: null,
@@ -15839,7 +15846,7 @@ describe("long-running-op guard", () => {
     const agentDir = join(tempDir, ".itsybitsy", "agents", "coord-x");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
-      id: "coord-x", tmux_session: "ib-coord-x", agentType: "coordinator",
+      id: "coord-x", tmux_session: "ib-coord-x", agentType: "repo-coordinator",
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     }));
     isPidAliveCtx.set(() => true);
@@ -15858,7 +15865,7 @@ describe("long-running-op guard", () => {
 
     const agent = _makeAgent({
       id: "coord-x", repoPath: tempDir, repoName: "test", state: "running",
-      meta: { agentType: "coordinator", tmux_session: "ib-coord-x" } as any,
+      meta: { agentType: "repo-coordinator", tmux_session: "ib-coord-x" } as any,
     });
     const result = await armAndResume(agent);
 

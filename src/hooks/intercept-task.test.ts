@@ -632,7 +632,7 @@ describe("no-worktree explicit identity", () => {
   test("validated coordinator keeps Bash restrictions from a nested cwd", async () => {
     const fs = await import("fs/promises");
     const agentId = "agent-nwcoord01";
-    const ctx = await setupNoWorktreeAgent(agentId, { agentType: "coordinator", worker: false });
+    const ctx = await setupNoWorktreeAgent(agentId, { agentType: "repo-coordinator", worker: false });
     try {
       const cwd = join(ctx.root, "packages", "app");
       await fs.mkdir(cwd, { recursive: true });
@@ -713,7 +713,7 @@ describe("coordinator Bash restrictions", () => {
     await fs.mkdir(agentDir, { recursive: true });
     await Bun.write(
       join(agentDir, "meta.json"),
-      JSON.stringify({ id: "coordinator", agentType: "coordinator" })
+      JSON.stringify({ id: "coordinator", agentType: "repo-coordinator" })
     );
     const repoDir = join(agentDir, "repo");
     await fs.mkdir(repoDir, { recursive: true });

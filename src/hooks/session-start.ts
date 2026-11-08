@@ -7,6 +7,7 @@ import { join, basename } from "path";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { AGENT_CWD_PATTERN, SYSTEM_AGENT_ID, systemCoordinatorHome } from "./shared";
 import { loadAgentType } from "../agent-types";
+import { REPO_COORDINATOR_TYPE, SYSTEM_COORDINATOR_TYPE, isCoordinatorType } from "../coordinator-type-names";
 import { writeAgentState } from "../agents";
 import { logAgent } from "../agent-lifecycle";
 import { listTeams } from "../teams";
@@ -82,7 +83,7 @@ export function detectRole(
   // legacy agents that don't have agentType in meta.json. When agentType IS
   // set, it composes the instructions from the type files instead.
   let role: SessionRole;
-  if (agentType === "coordinator") {
+  if (agentType === REPO_COORDINATOR_TYPE) {
     role = "coordinator";
   } else if (agentType === "worker" || worker) {
     role = "worker";
@@ -313,16 +314,15 @@ async function generateInstructionsInner(ctx: SessionContext): Promise<string> {
   if (ctx.agentType) {
     const agentType = await loadAgentType(ctx.agentType);
 
-    // Prepend prefix layer bodies: _all (always) + _non_coordinator (when not
-    // coordinator and not system). The system coordinator is its own type
-    // ("system") — it gets _all but skips _non_coordinator (whose body covers
-    // commit-message etiquette and other things irrelevant to @system, which
-    // has no Write/Edit/git access).
+    // Prepend prefix layer bodies: _all (always) + _non_coordinator (unless the
+    // type is one of the two coordinator types). The system coordinator is its
+    // own type (SYSTEM_COORDINATOR_TYPE) — it gets _all but skips
+    // _non_coordinator (whose body covers commit-message etiquette and other
+    // things irrelevant to @system, which has no Write/Edit/git access).
     const allPrefix = await loadPrefixLayerBody("_all", ctx);
-    const nonCoordPrefix =
-      ctx.agentType !== "coordinator" && ctx.agentType !== "system"
-        ? await loadPrefixLayerBody("_non_coordinator", ctx)
-        : "";
+    const nonCoordPrefix = !isCoordinatorType(ctx.agentType)
+      ? await loadPrefixLayerBody("_non_coordinator", ctx)
+      : "";
 
     const typeBody = agentType.markdownBody ? interpolateTemplate(agentType.markdownBody, ctx) : "";
     const parts = [allPrefix, nonCoordPrefix, typeBody].filter((p) => p.trim().length > 0);
@@ -331,8 +331,8 @@ async function generateInstructionsInner(ctx: SessionContext): Promise<string> {
   }
 
   // Legacy agents (meta.json without agentType): detectRole() yields only
-  // primary, manager or worker here — "coordinator" is derived from the type
-  // name, so it always takes the typed path above.
+  // primary, manager or worker here — the "coordinator" role is derived from
+  // the type name, so it always takes the typed path above.
   switch (ctx.role) {
     case "primary":
       return generatePrimaryInstructions();
@@ -793,9 +793,10 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
 
   // System coordinator: deliver the prompt via additionalContext, same as
   // every other agent type. @system has no worktree, no meta.json, and no
-  // manager/spawner — build a SessionContext inline with agentType: "system"
-  // and let generateInstructions load `system.md` (merged with `_all.md`,
-  // skipping `_non_coordinator.md`).
+  // manager/spawner — build a SessionContext inline with agentType
+  // SYSTEM_COORDINATOR_TYPE and let generateInstructions load
+  // `system-coordinator.md` (merged with `_all.md`, skipping
+  // `_non_coordinator.md`).
   if (agentIdArg === SYSTEM_AGENT_ID) {
     // Best-effort: record Claude's real session id so the coordinator resume
     // path can cross-check its transcript-scan choice. Must not change the
@@ -809,7 +810,7 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
       branchName: "",
       worktreePath: "",
       rootRepoPath: "",
-      agentType: "system",
+      agentType: SYSTEM_COORDINATOR_TYPE,
     };
     const instructions = await generateInstructions(systemCtx);
     const output = {

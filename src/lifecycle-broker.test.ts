@@ -303,7 +303,7 @@ describe("lifecycle broker", () => {
       await writeAgent(CHILD_ID, { manager: "someone-else" });
       // On disk the requester now claims to be a coordinator; the meta that was
       // checked against the seal (readMeta) says it is a worker.
-      await writeAgent(MANAGER_ID, { agentType: "coordinator" });
+      await writeAgent(MANAGER_ID, { agentType: "repo-coordinator" });
       const { deps, retired } = server({}, { readMeta: async () => ({ meta: managerMeta({ agentType: "worker" }) }) });
       await queue(ID_A, retireRequest(ID_A));
       await processSpawnRequests(MANAGER_ID, repo, deps);
@@ -313,7 +313,7 @@ describe("lifecycle broker", () => {
 
     test("a verified coordinator may retire any non-coordinator in its repo", async () => {
       await writeAgent(CHILD_ID, { manager: "someone-else" });
-      const { deps, retired } = server({}, { readMeta: async () => ({ meta: managerMeta({ agentType: "coordinator" }) }) });
+      const { deps, retired } = server({}, { readMeta: async () => ({ meta: managerMeta({ agentType: "repo-coordinator" }) }) });
       await queue(ID_A, retireRequest(ID_A));
       await processSpawnRequests(MANAGER_ID, repo, deps);
       expect(retired.map((agent) => agent.id)).toEqual([CHILD_ID]);

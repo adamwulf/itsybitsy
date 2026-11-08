@@ -581,7 +581,7 @@ describe("flattenAgentTree", () => {
   test("multi-repo: coordinator agents are excluded from flat list", () => {
     const now = Math.floor(Date.now() / 1000);
     const regular = makeAgent({ id: "regular-1", repoName: "my-repo", meta: { created_epoch: now - 100 } as any });
-    const coord = makeAgent({ id: "coord-1", repoName: "my-repo", meta: { agentType: "coordinator", created_epoch: now - 50 } as any });
+    const coord = makeAgent({ id: "coord-1", repoName: "my-repo", meta: { agentType: "repo-coordinator", created_epoch: now - 50 } as any });
     const regular2 = makeAgent({ id: "regular-2", repoName: "my-repo", meta: { created_epoch: now - 200 } as any });
     const roots = buildAgentTree([regular, coord, regular2]);
     // Need 2+ repos for headers to appear

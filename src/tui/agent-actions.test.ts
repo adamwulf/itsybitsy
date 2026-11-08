@@ -762,7 +762,7 @@ describe("handleSend", () => {
   });
 
   test("shows textarea dialog for per-repo coordinator when repo header selected", () => {
-    const coordAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    const coordAgent = makeAgent({ id: "coord-1", meta: { agentType: "repo-coordinator" } as any });
     const { ctx, dialogs } = makeMockCtx({ repoHeader: "my-repo" });
     ctx.rightPane.repoCoordinatorAgent = coordAgent;
     handleSend(ctx);
@@ -772,7 +772,7 @@ describe("handleSend", () => {
   });
 
   test("per-repo coordinator send calls sendMessage", async () => {
-    const coordAgent = makeAgent({ id: "coord-1", repoPath: sendRepoDir, meta: { agentType: "coordinator" } as any });
+    const coordAgent = makeAgent({ id: "coord-1", repoPath: sendRepoDir, meta: { agentType: "repo-coordinator" } as any });
     const { ctx, dialogs, notices, flushActions } = makeMockCtx({ repoHeader: "my-repo" });
     ctx.rightPane.repoCoordinatorAgent = coordAgent;
     handleSend(ctx);
@@ -790,7 +790,7 @@ describe("handleSend", () => {
   });
 
   test("shows notice and no dialog when repo coordinator is stopped", () => {
-    const coordAgent = makeAgent({ id: "coord-1", state: "stopped", meta: { agentType: "coordinator" } as any });
+    const coordAgent = makeAgent({ id: "coord-1", state: "stopped", meta: { agentType: "repo-coordinator" } as any });
     const { ctx, dialogs, notices } = makeMockCtx({ repoHeader: "my-repo" });
     ctx.rightPane.repoCoordinatorAgent = coordAgent;
     handleSend(ctx);
@@ -1436,7 +1436,7 @@ describe("agentSettingsLocalPath", () => {
     const agent = makeAgent({
       id: "coord-1",
       repoPath: "/tmp/myrepo",
-      meta: { agentType: "coordinator" } as any,
+      meta: { agentType: "repo-coordinator" } as any,
     });
     expect(agentSettingsLocalPath(agent)).toBe(
       "/tmp/myrepo/.itsybitsy/agents/coord-1/.claude/settings.local.json",
@@ -1598,7 +1598,7 @@ describe("handleAddPermission", () => {
   });
 
   test("repo header with coordinator routes to coordinator", async () => {
-    const coordAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    const coordAgent = makeAgent({ id: "coord-1", meta: { agentType: "repo-coordinator" } as any });
     const { ctx, dialogs } = makeMockCtx({ repoHeader: "my-repo" });
     ctx.rightPane.repoCoordinatorAgent = coordAgent;
     handleAddPermission(ctx);

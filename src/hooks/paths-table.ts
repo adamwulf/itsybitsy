@@ -26,6 +26,7 @@ import { userHome } from "../home";
 import { metadataCli, type AgentCli } from "../agent-cli";
 import { encodeClaudeProjectPath } from "../auto-compact";
 import { metaCanSpawnChildren, loadAgentType, type AgentType } from "../agent-types";
+import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
 import {
   canonicalizeAccessPath,
   canonicalizeSandboxPath,
@@ -251,7 +252,7 @@ function unionLayerPaths(layers: Array<AgentType | undefined>): PathsConfig {
 
 /**
  * Build (and prepare) the access table for the `@system` coordinator, which has
- * no `meta.json`. Its lists come from `_all.md` ∪ `system.md`, resolved live at
+ * no `meta.json`. Its lists come from `_all.md` ∪ `system-coordinator.md`, resolved live at
  * hook time (the agent-types dir is read-only in the floor). Everything is
  * rooted at `<home>/.itsybitsy`. If a layer fails to load the table is empty
  * lists plus the runtime roots — strict, NEVER permissive.
@@ -261,7 +262,7 @@ export async function buildSystemAccessTable(home: string): Promise<PreparedAcce
   let paths: PathsConfig = { allowRead: [], allowWrite: [], deny: [] };
   const [allLayer, systemLayer] = await Promise.all([
     loadAgentType("_all").catch(() => undefined),
-    loadAgentType("system").catch(() => undefined),
+    loadAgentType(SYSTEM_COORDINATOR_TYPE).catch(() => undefined),
   ]);
   paths = unionLayerPaths([allLayer, systemLayer]);
 

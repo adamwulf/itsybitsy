@@ -186,7 +186,7 @@ describe("session-start", () => {
       id: "coordinator",
       manager: null,
       worker: false,
-      agentType: "coordinator",
+      agentType: "repo-coordinator",
     });
     expect(ctx.role).toBe("coordinator");
     expect(ctx.agentId).toBe("coordinator");
@@ -204,7 +204,7 @@ describe("session-start", () => {
       id: "project",
       manager: null,
       worker: false,
-      agentType: "coordinator",
+      agentType: "repo-coordinator",
     }, "project");
     expect(ctx.role).toBe("coordinator");
     expect(ctx.agentId).toBe("project");
@@ -223,7 +223,7 @@ describe("session-start", () => {
       branchName: "agent/coordinator",
       worktreePath: "/Users/me/project/.itsybitsy/agents/coordinator/repo",
       rootRepoPath: "/Users/me/project",
-      agentType: "coordinator",
+      agentType: "repo-coordinator",
     };
     const instructions = await generateInstructions(ctx);
     expect(instructions).not.toContain("Primary Claude");
@@ -242,7 +242,7 @@ describe("session-start", () => {
       branchName: "agent/coordinator",
       worktreePath: "/Users/me/muse-ios/.itsybitsy/agents/coordinator/repo",
       rootRepoPath: "/Users/me/muse-ios",
-      agentType: "coordinator",
+      agentType: "repo-coordinator",
     };
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("Read");
@@ -363,7 +363,7 @@ describe("session-start", () => {
       branchName: "agent/coordinator",
       worktreePath: "/Users/me/project/.itsybitsy/agents/coordinator/repo",
       rootRepoPath: "/Users/me/project",
-      agentType: "coordinator",
+      agentType: "repo-coordinator",
     };
     const instructions = await generateInstructions(ctx);
     // Should have the closing tag
@@ -733,15 +733,18 @@ describe("generateInstructions — typed agent with an empty body", () => {
     },
   );
 
-  test("a bodyless coordinator type skips _non_coordinator", async () => {
-    await Bun.write(
-      join(typesDir, "coordinator.md"),
-      "---\nname: coordinator\ndescription: no body\ncanSpawnChildren: true\n---\n",
-    );
-    const instructions = await generateInstructions(ctxFor("coordinator"));
-    expect(instructions).toBe("<itsybitsy>\nALL_LAYER_MARKER\n</itsybitsy>");
-    expect(instructions).not.toContain("Per-Repo Coordinator");
-  });
+  test.each(["repo-coordinator", "system-coordinator"])(
+    "a bodyless %s type skips _non_coordinator",
+    async (typeName) => {
+      await Bun.write(
+        join(typesDir, `${typeName}.md`),
+        `---\nname: ${typeName}\ndescription: no body\ncanSpawnChildren: true\n---\n`,
+      );
+      const instructions = await generateInstructions(ctxFor(typeName));
+      expect(instructions).toBe("<itsybitsy>\nALL_LAYER_MARKER\n</itsybitsy>");
+      expect(instructions).not.toContain("Per-Repo Coordinator");
+    },
+  );
 });
 
 describe("hookSessionStart — stale 'creating' state correction", () => {
@@ -817,7 +820,7 @@ describe("hookSessionStart — stale 'creating' state correction", () => {
       JSON.stringify({
         id: agentId,
         manager: null,
-        agentType: "coordinator",
+        agentType: "repo-coordinator",
         worktree: false,
         state: "creating",
       }),
@@ -1147,15 +1150,15 @@ describe("hookSessionStart with @system", () => {
     await rm(tempHome, { recursive: true, force: true });
   });
 
-  test("injects system.md body via additionalContext, merged with _all.md, skipping _non_coordinator.md", async () => {
+  test("injects system-coordinator.md body via additionalContext, merged with _all.md, skipping _non_coordinator.md", async () => {
     // The system coordinator boots like every other agent type: the SessionStart
-    // hook delivers `system.md`'s markdown body via additionalContext. `_all.md`
+    // hook delivers `system-coordinator.md`'s markdown body via additionalContext. `_all.md`
     // is prepended (applies to every agent); `_non_coordinator.md` is NOT
     // (the system coordinator is its own type, and that layer covers
     // commit-message etiquette and other things @system has no use for).
     await Bun.write(
-      join(typesDir, "system.md"),
-      "---\nname: system\ndescription: System coordinator\nspawnable: false\n---\nSYSTEM_BODY_MARKER",
+      join(typesDir, "system-coordinator.md"),
+      "---\nname: system-coordinator\ndescription: System coordinator\nspawnable: false\n---\nSYSTEM_BODY_MARKER",
     );
     await Bun.write(
       join(typesDir, "_all.md"),
@@ -1177,20 +1180,20 @@ describe("hookSessionStart with @system", () => {
     expect(ctx).toContain("<itsybitsy>");
     expect(ctx).toContain("</itsybitsy>");
 
-    // system.md body and _all.md content present; _non_coordinator.md absent.
+    // system-coordinator.md body and _all.md content present; _non_coordinator.md absent.
     expect(ctx).toContain("SYSTEM_BODY_MARKER");
     expect(ctx).toContain("ALL_LAYER_MARKER");
     expect(ctx).not.toContain("NON_COORDINATOR_LAYER_MARKER");
 
-    // _all.md prefix appears before system.md body.
+    // _all.md prefix appears before system-coordinator.md body.
     expect(ctx.indexOf("ALL_LAYER_MARKER")).toBeLessThan(ctx.indexOf("SYSTEM_BODY_MARKER"));
   });
 
-  // A minimal system.md so generateInstructions() succeeds for @system.
+  // A minimal system-coordinator.md so generateInstructions() succeeds for @system.
   async function seedSystemType(): Promise<void> {
     await Bun.write(
-      join(typesDir, "system.md"),
-      "---\nname: system\ndescription: System coordinator\nspawnable: false\n---\nSYSTEM_BODY_MARKER",
+      join(typesDir, "system-coordinator.md"),
+      "---\nname: system-coordinator\ndescription: System coordinator\nspawnable: false\n---\nSYSTEM_BODY_MARKER",
     );
   }
 

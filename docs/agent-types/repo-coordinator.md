@@ -1,5 +1,5 @@
 ---
-name: coordinator
+name: repo-coordinator
 description: Read-only coordinator that manages agents without writing code
 canSpawnChildren: true
 icon: ◇

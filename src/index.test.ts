@@ -1182,7 +1182,8 @@ describe("list-types CLI command", () => {
     expect(stdout).toContain("DESCRIPTION");
     expect(stdout).toContain("manager");
     expect(stdout).toContain("worker");
-    expect(stdout).toContain("coordinator");
+    expect(stdout).toContain("repo-coordinator");
+    expect(stdout).toContain("system-coordinator");
     expect(stdout).toContain("_all");
     expect(stdout).toContain("_non_coordinator");
     // Layer-only types should be marked non-spawnable with "-" for spawns-children
@@ -1198,7 +1199,7 @@ describe("list-types CLI command", () => {
     expect(exitCode).toBe(0);
     expect(stdout).toContain("manager");
     expect(stdout).toContain("worker");
-    expect(stdout).toContain("coordinator");
+    expect(stdout).toContain("repo-coordinator");
   });
 
   test("list-types output is sorted alphabetically", async () => {
@@ -1808,7 +1809,7 @@ describe("CLI entry points", () => {
       expect(exitCode).toBe(0);
       // A known row from the agent-type table — proves the command actually ran
       // rather than the process merely exiting 0 with no output.
-      expect(stdout).toContain("coordinator");
+      expect(stdout).toContain("repo-coordinator");
     },
   );
 

@@ -371,9 +371,9 @@ describe("registry", () => {
     const repoDir = join(tempDir, "myrepo");
     await mkdir(repoDir, { recursive: true });
     await addRepo(repoDir);
-    await setRepoDefaultAgentType(repoDir, "coordinator");
+    await setRepoDefaultAgentType(repoDir, "repo-coordinator");
     const reloaded = await loadRegistry();
-    expect(reloaded.repos[0]!.defaultAgentType).toBe("coordinator");
+    expect(reloaded.repos[0]!.defaultAgentType).toBe("repo-coordinator");
   });
 
   // --- setRepoNotes ---

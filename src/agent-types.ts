@@ -8,20 +8,21 @@ import { readdirSync, readFileSync } from "fs";
 import { Glob } from "bun";
 import managerMd from '../docs/agent-types/manager.md' with { type: 'text' };
 import workerMd from '../docs/agent-types/worker.md' with { type: 'text' };
-import coordinatorMd from '../docs/agent-types/coordinator.md' with { type: 'text' };
-import systemLayerMd from '../docs/agent-types/system.md' with { type: 'text' };
+import repoCoordinatorMd from '../docs/agent-types/repo-coordinator.md' with { type: 'text' };
+import systemCoordinatorLayerMd from '../docs/agent-types/system-coordinator.md' with { type: 'text' };
 import allLayerMd from '../docs/agent-types/_all.md' with { type: 'text' };
 import nonCoordinatorLayerMd from '../docs/agent-types/_non_coordinator.md' with { type: 'text' };
 import { parseModel } from './agent-cli';
 import { isValidEffort } from './validation';
 import type { PathsConfig, SandboxConfigInput } from './sandbox';
 import { validatePathsFrontmatter, validateSandboxFrontmatter } from './sandbox';
+import { REPO_COORDINATOR_TYPE, SYSTEM_COORDINATOR_TYPE } from './coordinator-type-names';
 
 const EMBEDDED_TYPES: Record<string, string> = {
   'manager': managerMd,
   'worker': workerMd,
-  'coordinator': coordinatorMd,
-  'system': systemLayerMd,
+  [REPO_COORDINATOR_TYPE]: repoCoordinatorMd,
+  [SYSTEM_COORDINATOR_TYPE]: systemCoordinatorLayerMd,
   '_all': allLayerMd,
   '_non_coordinator': nonCoordinatorLayerMd,
 };
@@ -774,7 +775,7 @@ export async function loadAgentType(name: string): Promise<AgentType> {
  * Precedence (highest first):
  *   1. Per-agent `canSpawnChildren` override (the `ib watch` 'b' dialog toggle):
  *      an explicit boolean wins over everything.
- *   2. The `system` layer type is top-level and spawns via
+ *   2. The `system-coordinator` layer type is top-level and spawns via
  *      `ib new-agent --repo <name>`, so it counts as able to spawn. (The
  *      Task/Agent hook still denies @system with a specific message BEFORE
  *      calling this — Task is the wrong mechanism, not a permission denial — so
@@ -788,7 +789,7 @@ export async function loadAgentType(name: string): Promise<AgentType> {
  */
 export async function metaCanSpawnChildren(meta: Record<string, unknown>): Promise<boolean> {
   if (typeof meta.canSpawnChildren === "boolean") return meta.canSpawnChildren;
-  if (meta.agentType === "system") return true;
+  if (meta.agentType === SYSTEM_COORDINATOR_TYPE) return true;
   if (typeof meta.agentType === "string" && meta.agentType.length > 0) {
     try {
       const type = await loadAgentType(meta.agentType);

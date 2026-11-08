@@ -296,7 +296,7 @@ describe("checkIbCommandAccess spawned_by", () => {
     const repoName = require("path").basename(tmpDir);
     await writeAgentMeta(repoName, {
       id: repoName,
-      agentType: "coordinator",
+      agentType: "repo-coordinator",
       manager: null,
     });
     await writeAgentMeta("agent-targetA", {
@@ -334,7 +334,7 @@ describe("checkIbCommandAccess spawned_by", () => {
     const repoName = require("path").basename(tmpDir);
     await writeAgentMeta("not-the-repo", {
       id: "not-the-repo",
-      agentType: "coordinator",
+      agentType: "repo-coordinator",
       manager: null,
     });
     await writeAgentMeta("agent-targetC", {
@@ -354,7 +354,7 @@ describe("checkIbCommandAccess spawned_by", () => {
     const repoName = require("path").basename(tmpDir);
     await writeAgentMeta(repoName, {
       id: repoName,
-      agentType: "coordinator",
+      agentType: "repo-coordinator",
       manager: null,
     });
     await writeAgentMeta("agent-targetD", {
@@ -373,7 +373,7 @@ describe("checkIbCommandAccess spawned_by", () => {
   test("@system sentinel: DENIES merge — @system is never a same-agent access grant", async () => {
     await writeAgentMeta("system-impersonator", {
       id: "system-impersonator",
-      agentType: "coordinator",
+      agentType: "repo-coordinator",
       manager: null,
     });
     await writeAgentMeta("agent-targetE", {

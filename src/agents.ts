@@ -20,6 +20,7 @@ import {
 import { InjectionContext } from "./types";
 import { logToWatchLog, logWarning } from "./watch-log";
 import { resolveSandboxEnabled, type PathsConfig, type SandboxConfig } from "./sandbox";
+import { REPO_COORDINATOR_TYPE } from "./coordinator-type-names";
 
 /** States that can be written to meta.json */
 export type MetaState = "creating" | "running" | "waiting" | "complete" | "stopped";
@@ -138,7 +139,7 @@ export interface AgentMeta {
 /** Resolve the display icon for an agent from meta fields with legacy fallback */
 export function resolveAgentIcon(meta: AgentMeta): string {
   if (meta.agentIcon) return meta.agentIcon;
-  if (meta.agentType === "coordinator") return "◇";
+  if (meta.agentType === REPO_COORDINATOR_TYPE) return "◇";
   if (meta.worker) return "⚙";
   return "◆";
 }
@@ -150,7 +151,7 @@ export function resolveAgentIcon(meta: AgentMeta): string {
 export function resolveAgentIconChar(meta: AgentMeta): string {
   if (meta.agentIcon && meta.agentIcon.length === 1) return meta.agentIcon;
   if (meta.agentType) {
-    if (meta.agentType === "coordinator") return "c";
+    if (meta.agentType === REPO_COORDINATOR_TYPE) return "c";
     if (meta.agentType === "worker") return "w";
     return meta.agentType[0] ?? "m";
   }
@@ -2247,7 +2248,7 @@ export function flattenAgentTree(
       const agents = repoGroups.get(repoName);
       if (agents && agents.length > 0) {
         // Filter out per-repo coordinators — they don't appear in the agent tree
-        const nonCoordinators = agents.filter(a => a.meta.agentType !== "coordinator");
+        const nonCoordinators = agents.filter(a => a.meta.agentType !== REPO_COORDINATOR_TYPE);
         const hasRunningAgents = nonCoordinators.some(subtreeHasRunning);
         const hasNonStoppedAgents = nonCoordinators.some(subtreeHasNonStopped);
         // Repo with agents — emit repo header then walk agents
@@ -2302,7 +2303,7 @@ export function flattenAgentTree(
     }
   } else {
     // Filter out per-repo coordinators — they don't appear in the agent tree
-    const nonCoordRoots = nonArchivedRoots.filter(a => a.meta.agentType !== "coordinator");
+    const nonCoordRoots = nonArchivedRoots.filter(a => a.meta.agentType !== REPO_COORDINATOR_TYPE);
     const multiRoot = nonCoordRoots.length > 1;
     for (let ri = 0; ri < nonCoordRoots.length; ri++) {
       const isLast = ri === nonCoordRoots.length - 1;

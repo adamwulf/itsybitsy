@@ -34,7 +34,7 @@ describe("resolveAgentFromCwd — system coordinator identity", () => {
     expect(resolved).not.toBeNull();
     expect(resolved!.agentId).toBe(SYSTEM_AGENT_ID);
     expect(resolved!.agentDir).toBe(resolvedHome);
-    expect(resolved!.syntheticMeta?.agentType).toBe("system");
+    expect(resolved!.syntheticMeta?.agentType).toBe("system-coordinator");
     expect(resolved!.syntheticMeta?.worker).toBe(false);
   });
 

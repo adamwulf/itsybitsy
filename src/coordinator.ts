@@ -18,6 +18,7 @@ import { getTmuxWidthForAgent } from "./tui/widths";
 import { isValidSessionId, isValidModel, tmuxSessionTarget } from "./validation";
 import { parseModel } from "./agent-cli";
 import { loadAgentType } from "./agent-types";
+import { REPO_COORDINATOR_TYPE, SYSTEM_COORDINATOR_TYPE } from "./coordinator-type-names";
 import {
   buildHooksBlock,
   buildLayeredPermissions,
@@ -240,8 +241,8 @@ async function readRecordedCoordinatorSessionId(): Promise<string | null> {
 
 /**
  * Hardcoded allow floor for the system coordinator: ib commands and
- * ToolSearch. The `_all.md` / `system.md` layers add more (the shipped
- * system.md adds the ScheduleWakeup/Cron check-in tools); see
+ * ToolSearch. The `_all.md` / `system-coordinator.md` layers add more (the
+ * shipped system-coordinator.md adds the ScheduleWakeup/Cron check-in tools); see
  * buildSystemCoordinatorSettings.
  */
 const SYSTEM_COORDINATOR_ALLOW = ["Bash(ib:*)", "ToolSearch"];
@@ -277,14 +278,14 @@ const SYSTEM_COORDINATOR_DENY = [
  * Build the settings.local.json content for the system coordinator.
  *
  * Layer merge: the hardcoded SYSTEM_COORDINATOR_ALLOW/DENY constants are the
- * floor. The `_all.md` and `system.md` agent-type layer files contribute
- * additional allow/deny entries via their frontmatter; any allow entry that
- * appears in SYSTEM_COORDINATOR_DENY is silently dropped so a layer can never
- * override the hardcoded denies. Deny lists are unioned. The result is
- * deduplicated via Set.
+ * floor. The `_all.md` and `system-coordinator.md` agent-type layer files
+ * contribute additional allow/deny entries via their frontmatter; any allow
+ * entry that appears in SYSTEM_COORDINATOR_DENY is silently dropped so a layer
+ * can never override the hardcoded denies. Deny lists are unioned. The result
+ * is deduplicated via Set.
  *
  * Per-repo coordinator permissions live in
- * ~/.itsybitsy/agent-types/coordinator.md and are not read here.
+ * ~/.itsybitsy/agent-types/repo-coordinator.md and are not read here.
  */
 export async function buildSystemCoordinatorSettings(): Promise<{
   permissions: { allow: string[]; deny: string[] };
@@ -292,7 +293,7 @@ export async function buildSystemCoordinatorSettings(): Promise<{
   const permissions = await buildLayeredPermissions({
     hardcodedAllow: SYSTEM_COORDINATOR_ALLOW,
     hardcodedDeny: SYSTEM_COORDINATOR_DENY,
-    layerNames: ["_all", "system"],
+    layerNames: ["_all", SYSTEM_COORDINATOR_TYPE],
   });
   return { permissions };
 }
@@ -814,7 +815,7 @@ async function writeCoordinatorFiles(): Promise<void> {
  * - "fresh":   a fresh `claude` session was launched.
  *
  * The prompt is never passed on the command line. On fresh AND resume, the
- * SessionStart hook delivers `system.md`'s markdown body via
+ * SessionStart hook delivers `system-coordinator.md`'s markdown body via
  * `additionalContext` (same path every other agent type uses).
  */
 export type CoordinatorSpawnMode = "existing" | "resumed" | "fresh";
@@ -829,7 +830,7 @@ export function getLastCoordinatorSpawnMode(): CoordinatorSpawnMode {
  * transcript when one exists, falling back to a fresh launch otherwise.
  *
  * The system coordinator boots like every other agent type: the prompt body
- * from `~/.itsybitsy/agent-types/system.md` is delivered via the SessionStart
+ * from `~/.itsybitsy/agent-types/system-coordinator.md` is delivered via the SessionStart
  * hook's `additionalContext` on every session start (fresh and resume). The
  * `claude` command therefore takes no positional prompt arg, and no
  * `coordinator-prompt.txt` is written to disk.
@@ -886,17 +887,17 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
 
   const config = await readConfig();
   // Model precedence (most-specific wins, first non-empty value wins):
-  //   coordinator.md > _all.md > "claude:opus"
+  //   system-coordinator.md > _all.md > "claude:opus"
   // config.model is intentionally skipped — it would let a user's global
   // setting clobber the coordinator agent-type. _non_coordinator.md is by
   // definition not consulted. Errors are routed through logToWatchLog rather
   // than console.error (unlike ib-commands.ts) to avoid corrupting the TUI.
-  let coordLayer: { model?: string } | undefined;
+  let systemLayer: { model?: string } | undefined;
   let allLayer: { model?: string } | undefined;
   try {
-    coordLayer = await loadAgentType("coordinator");
+    systemLayer = await loadAgentType(SYSTEM_COORDINATOR_TYPE);
   } catch (err) {
-    logToWatchLog(`[coordinator] failed to load coordinator agent type: ${err instanceof Error ? err.message : String(err)}`);
+    logToWatchLog(`[coordinator] failed to load ${SYSTEM_COORDINATOR_TYPE} agent type layer: ${err instanceof Error ? err.message : String(err)}`);
   }
   try {
     allLayer = await loadAgentType("_all");
@@ -904,14 +905,14 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
     logToWatchLog(`[coordinator] failed to load _all agent type layer: ${err instanceof Error ? err.message : String(err)}`);
   }
   // Track which layer actually supplied the model so the log below reveals when
-  // the value FELL BACK off coordinator.md — that fall-through (to _all.md, or
-  // to the hardcoded default) is exactly how an unexpected model (e.g. Opus)
-  // reaches the coordinator.
+  // the value FELL BACK off system-coordinator.md — that fall-through (to
+  // _all.md, or to the hardcoded default) is exactly how an unexpected model
+  // (e.g. Opus) reaches the coordinator.
   let agentTypeModel: string | undefined;
-  let modelSource: "coordinator.md" | "_all.md" | "default(claude:opus)";
-  if (coordLayer?.model) {
-    agentTypeModel = coordLayer.model;
-    modelSource = "coordinator.md";
+  let modelSource: "system-coordinator.md" | "_all.md" | "default(claude:opus)";
+  if (systemLayer?.model) {
+    agentTypeModel = systemLayer.model;
+    modelSource = "system-coordinator.md";
   } else if (allLayer?.model) {
     agentTypeModel = allLayer.model;
     modelSource = "_all.md";
@@ -933,7 +934,7 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   const parsed = parseModel(safeModel);
   if (parsed.cli !== "claude") {
     throw new Error(
-      `codex coordinators not yet implemented; set 'model: claude:<model>' in ~/.itsybitsy/agent-types/coordinator.md (got '${safeModel}')`,
+      `codex coordinators not yet implemented; set 'model: claude:<model>' in ~/.itsybitsy/agent-types/${SYSTEM_COORDINATOR_TYPE}.md (got '${safeModel}')`,
     );
   }
   const model = parsed.model;
@@ -1011,7 +1012,7 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
     return await ensureSystemCoordinatorImpl(true);
   }
 
-  // The SessionStart hook delivers `system.md`'s markdown body via
+  // The SessionStart hook delivers `system-coordinator.md`'s markdown body via
   // additionalContext on both fresh and resume — no special-case work here.
   lastSpawnMode = resumeId ? "resumed" : "fresh";
   logToWatchLog(`[coordinator] ready mode=${lastSpawnMode} after ${readyMs}ms`);
@@ -1276,11 +1277,11 @@ const PER_REPO_COORDINATOR_DENY = [
  * See SPEC §12.2.4 for the full specification.
  *
  * Layer merge: the hardcoded PER_REPO_COORDINATOR_ALLOW/DENY constants are the
- * floor. The `_all.md` and `coordinator.md` agent-type layer files contribute
- * additional allow/deny entries via their frontmatter; any allow entry that
- * appears in PER_REPO_COORDINATOR_DENY is silently dropped so a layer can
- * never override the hardcoded denies. Deny lists are unioned. The result is
- * deduplicated via Set.
+ * floor. The `_all.md` and `repo-coordinator.md` agent-type layer files
+ * contribute additional allow/deny entries via their frontmatter; any allow
+ * entry that appears in PER_REPO_COORDINATOR_DENY is silently dropped so a
+ * layer can never override the hardcoded denies. Deny lists are unioned. The
+ * result is deduplicated via Set.
  *
  * Note: `_non_coordinator.md` is intentionally NOT merged — per-repo
  * coordinators are coordinators.
@@ -1291,7 +1292,7 @@ export async function buildPerRepoCoordinatorSettings(): Promise<{
   const permissions = await buildLayeredPermissions({
     hardcodedAllow: PER_REPO_COORDINATOR_ALLOW,
     hardcodedDeny: PER_REPO_COORDINATOR_DENY,
-    layerNames: ["_all", "coordinator"],
+    layerNames: ["_all", REPO_COORDINATOR_TYPE],
   });
   return { permissions };
 }
@@ -1315,7 +1316,7 @@ export function getCoordinatorAgentId(repoPath: string): string {
 
 /**
  * Check if a coordinator already exists for a repo.
- * Scans all agents in the repo for one with agentType "coordinator" in meta.json.
+ * Scans all agents in the repo for one whose meta.json agentType is REPO_COORDINATOR_TYPE.
  * Also checks whether a non-coordinator agent with the repo basename already exists (collision).
  *
  * Returns:
@@ -1346,7 +1347,7 @@ export async function checkCoordinatorExists(repoPath: string): Promise<
       try {
         const raw = readFileSync(metaPath, "utf8");
         const meta = JSON.parse(raw);
-        if (meta.agentType === "coordinator") {
+        if (meta.agentType === REPO_COORDINATOR_TYPE) {
           return { exists: true, isCoordinator: true, agentId: entry.name };
         }
         // Check for name collision with repo basename

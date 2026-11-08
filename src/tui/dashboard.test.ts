@@ -1972,11 +1972,11 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(writes).toEqual([]);
   });
 
-  // Relies on "worker" sorting immediately after "manager" in the default types list,
-  // so a single Space press from the default focus advances the selection from manager to worker.
-  // Isolates the home directory (via setUserHome) so the cycle reads
-  // only the embedded layer files (developer-customized ~/.itsybitsy/agent-types/
-  // would otherwise inject extra spawnable types between manager and worker).
+  // Relies on the embedded spawnable types sorting as [manager, repo-coordinator,
+  // worker], so two Space presses from the default focus advance the selection
+  // from manager to worker. Isolates the home directory (via setUserHome) so the
+  // cycle reads only the embedded layer files (developer-customized
+  // ~/.itsybitsy/agent-types/ would otherwise inject extra spawnable types).
   test("new-agent form: cycling from manager to worker creates agent with worker meta field", async () => {
     const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-test-"));
     await mkdir(join(newAgentTempDir, ".itsybitsy"), { recursive: true });
@@ -1987,8 +1987,8 @@ describe("DashboardComponent dialog and action handlers", () => {
     const tempHome = await mkdtemp(join(tmpdir(), "ib-na-home-"));
     setUserHome(tempHome);
     // Populate the temp home with embedded defaults so listSpawnableTypeNamesSync
-    // returns exactly [coordinator, manager, worker] (system / _all / _non_coordinator
-    // are filtered out as spawnable: false).
+    // returns exactly [manager, repo-coordinator, worker] (system-coordinator /
+    // _all / _non_coordinator are filtered out as spawnable: false).
     await (await import("../agent-types")).ensureAgentTypesDir();
 
     const spawnCalls: string[] = [];
@@ -2028,7 +2028,9 @@ describe("DashboardComponent dialog and action handlers", () => {
 
     dashboard.handleInput("a");
     dashboard.handleInput("\t");
-    dashboard.handleInput(" ");
+    dashboard.handleInput(" "); // manager → repo-coordinator
+    dashboard.handleInput(" "); // repo-coordinator → worker
+    expect(assertDialog(dashboard.dialog, "new-agent-form").agentType).toBe("worker");
     dashboard.handleInput("\t");
     for (const ch of "do stuff") dashboard.handleInput(ch);
     dashboard.handleInput("\t");
@@ -2136,7 +2138,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     ["3", "favorites", "manager", true],
     ["1", "agents", "manager", false],
     ["2", "teams", "manager", false],
-    ["3", "favorites", "coordinator", false],
+    ["3", "favorites", "repo-coordinator", false],
   ] as const) {
     test(`new-agent form: a ${agentType} made from the ${tab} tab ${expectFavorite ? "is" : "is not"} a favorite`, async () => {
       const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-fav-"));
@@ -3688,7 +3690,7 @@ describe("formatAgentRow compact mode", () => {
   });
 
   test("coordinator agent uses ◇ icon", () => {
-    const agent = makeTestAgent({ meta: { ...makeTestAgent().meta, agentType: "coordinator" } });
+    const agent = makeTestAgent({ meta: { ...makeTestAgent().meta, agentType: "repo-coordinator" } });
     const row = formatAgentRow(agent, "", false, 80, 20);
     const stripped = stripAnsi(row);
     expect(stripped).toContain("◇");

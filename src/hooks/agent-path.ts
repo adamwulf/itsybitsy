@@ -34,6 +34,7 @@ import {
 import { findShellMetachar } from "./shell-metachar";
 import { resolveBoundHookAgent } from "./agent-context";
 import { metaCanSpawnChildren } from "../agent-types";
+import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { withWaitHint } from "./wait-hint";
 
 // Re-exported for existing callers/tests that import it from this module; the
@@ -1551,12 +1552,12 @@ export async function checkManagerCommandAccess(
 
   /** Is the CALLER a per-repo coordinator? From the verified meta when given. */
   async function callerIsCoordinator(): Promise<boolean> {
-    if (opts.callerMeta) return opts.callerMeta.agentType === "coordinator";
+    if (opts.callerMeta) return opts.callerMeta.agentType === REPO_COORDINATOR_TYPE;
     try {
       const callerMetaFile = Bun.file(join(agentsDir, callingAgentId, "meta.json"));
       if (!(await callerMetaFile.exists())) return false;
       const callerMeta = await callerMetaFile.json();
-      return callerMeta?.agentType === "coordinator";
+      return callerMeta?.agentType === REPO_COORDINATOR_TYPE;
     } catch {
       return false;
     }
@@ -1598,7 +1599,7 @@ export async function checkManagerCommandAccess(
     // @<repo-name> sentinel: caller must be the per-repo coordinator of that
     // repo. We require all of:
     //   1. repo_path is a string and resolves to the caller's own repo root
-    //   2. caller's meta.agentType === "coordinator"
+    //   2. caller's meta.agentType === REPO_COORDINATOR_TYPE
     //   3. caller's agent ID matches the repo name (per-repo coordinators
     //      use the repo basename as their ID — see getCoordinatorAgentId)
     if (sb.agent_id !== SYSTEM_AGENT_ID) {
@@ -1614,7 +1615,7 @@ export async function checkManagerCommandAccess(
   async function hasCoordinatorBypass(meta: Record<string, unknown>): Promise<boolean> {
     if (
       !["retire", "rehire", "reassign"].includes(requestedSubcommand) ||
-      meta.agentType === "coordinator"
+      meta.agentType === REPO_COORDINATOR_TYPE
     ) return false;
     return callerIsCoordinator();
   }
@@ -1840,7 +1841,7 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
   let isNoWorktree = false;
   let canSpawnChildren: boolean | undefined;
   // Coordinators get their own wait hint (wait-hint.ts). Same test as
-  // intercept-task's coordinator check: @system, or agentType "coordinator".
+  // intercept-task's coordinator check: @system, or agentType REPO_COORDINATOR_TYPE.
   let isCoordinator = agentId === SYSTEM_AGENT_ID;
   // The prepared access table for this invocation. Both branches assign it or
   // return early on a build failure — there is no permissive default.
@@ -1853,7 +1854,7 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
     // outer agents-dir to isolate against and no main-repo to block.
     //   - agentsDir = ""     → cross-agent blocks never fire.
     //   - rootRepo = worktree → main-repo block never fires.
-    // Its path lists come from _all.md ∪ system.md (buildSystemAccessTable),
+    // Its path lists come from _all.md ∪ system-coordinator.md (buildSystemAccessTable),
     // resolved live; a missing list there is strict (deny), never permissive.
     const resolved = resolveAgentFromCwd(cwd);
     // Prefer the resolved home (handles symlinked HOME) when available.
@@ -1912,7 +1913,7 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
       return;
     }
     canSpawnChildren = await metaCanSpawnChildren(meta);
-    isCoordinator = meta.agentType === "coordinator";
+    isCoordinator = meta.agentType === REPO_COORDINATOR_TYPE;
 
     // For non-worktree agents (e.g., coordinators), worktreePath is the repo root
     if (isNoWorktree) {

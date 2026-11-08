@@ -7,6 +7,7 @@ import { join } from "path";
 import { newAgent } from "../ib-commands";
 import { checkGitDirectoryFlags, resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./shared";
 import { loadAgentType, metaCanSpawnChildren } from "../agent-types";
+import { SYSTEM_COORDINATOR_TYPE, isCoordinatorType } from "../coordinator-type-names";
 import { parseModel } from "../agent-cli";
 import { findShellMetachar } from "./shell-metachar";
 import { isValidAgentId } from "../validation";
@@ -80,8 +81,8 @@ function isAcceptableTaskModel(value: string): boolean {
 
 /**
  * Whether the caller is a coordinator. The system coordinator's synthetic
- * meta carries `agentType: "system"`; per-repo coordinators have
- * `agentType: "coordinator"` on disk.
+ * meta carries `agentType: SYSTEM_COORDINATOR_TYPE`; per-repo coordinators
+ * have `agentType: REPO_COORDINATOR_TYPE` on disk.
  */
 async function isCoordinatorCaller(resolved: InterceptAgentIdentity | null): Promise<boolean> {
   if (!resolved) return false;
@@ -101,7 +102,7 @@ async function isCoordinatorCaller(resolved: InterceptAgentIdentity | null): Pro
     }
   }
 
-  return agentType === "coordinator" || agentType === "system";
+  return isCoordinatorType(agentType);
 }
 
 /**
@@ -284,9 +285,9 @@ export async function processTaskIntercept(
         // fallback than "report to your manager". Only a clearly-identified
         // leaf (worker type / legacy `worker: true`) gets the worker message.
         if (meta.agentType && typeof meta.agentType === "string") {
-          // The `system` agent type is a layer file (no canSpawnChildren) —
-          // short-circuit to manager-style messaging since @system is top-level.
-          if (meta.agentType !== "system") {
+          // The system coordinator's type is a layer file (no canSpawnChildren)
+          // — short-circuit to manager-style messaging since @system is top-level.
+          if (meta.agentType !== SYSTEM_COORDINATOR_TYPE) {
             try {
               const agentType = await loadAgentType(meta.agentType as string);
               if (!agentType.canSpawnChildren) isWorker = true;
@@ -345,7 +346,7 @@ export async function processTaskIntercept(
       // defense-in-depth, and BEFORE the shared predicate below: for @system,
       // Task is simply the wrong mechanism, not a lack of spawn permission —
       // `metaCanSpawnChildren` classifies @system as *able* to spawn (true).
-      if (meta.agentType === "system") {
+      if (meta.agentType === SYSTEM_COORDINATOR_TYPE) {
         return {
           action: "intercept",
           output: {

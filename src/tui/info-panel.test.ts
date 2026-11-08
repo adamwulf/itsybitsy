@@ -479,7 +479,7 @@ describe("InfoPanelComponent", () => {
     panel.selectedRepoPath = "/path/to/my-repo";
 
     const coord = makeAgent({ id: "agent-coord", repoName: "my-repo" });
-    coord.meta.agentType = "coordinator";
+    coord.meta.agentType = "repo-coordinator";
     coord.meta.claude_pid = String(process.pid); // alive
     coord.meta.watchdog_pid = 99999999; // dead
     coord.meta.tmux_session = "ib-coord-my-repo";

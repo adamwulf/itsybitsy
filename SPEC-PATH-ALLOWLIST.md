@@ -1304,7 +1304,7 @@ until refreshed" was therefore wrong for the hook. The report initially
 presented immediate refresh and a proposed `paths.audit` mode as alternatives;
 Adam's later decision below selected the three-step immediate install and
 dropped audit entirely. The `@system` coordinator has no `meta.json`; its lists come from
-`_all.md` plus `system.md`, resolved at launch and stored where the hook can
+`_all.md` plus `system-coordinator.md`, resolved at launch and stored where the hook can
 read them; missing is deny there too. No `paths.audit` flag was implemented.
 
 **Refresh confirmed, and a sharper edge** (`sandbox-safety`, 2026-09-04

@@ -7,6 +7,7 @@ import { join } from "path";
 import { userHome } from "../home";
 import { realpathSync } from "fs";
 import { loadAgentType } from "../agent-types";
+import { SYSTEM_COORDINATOR_TYPE, isCoordinatorType } from "../coordinator-type-names";
 
 /**
  * Matches agent worktree paths: .itsybitsy/agents/<agentId>/repo
@@ -88,7 +89,7 @@ export function resolveAgentFromCwd(cwd: string): ResolvedAgent | null {
       agentId: SYSTEM_AGENT_ID,
       agentDir: resolvedHome,
       syntheticMeta: {
-        agentType: "system",
+        agentType: SYSTEM_COORDINATOR_TYPE,
         worker: false,
       },
     };
@@ -249,7 +250,7 @@ export async function loadMergedAgentTypePermissions(
       const layer = await loadAgentType(name);
       for (const a of layer.permissions?.allow ?? []) allowSet.add(a);
       for (const d of layer.permissions?.deny ?? []) denySet.add(d);
-      return { ok: true, isCoordinator: layer.name === "coordinator" };
+      return { ok: true, isCoordinator: isCoordinatorType(layer.name) };
     } catch {
       return { ok: false, isCoordinator: false };
     }
@@ -257,8 +258,7 @@ export async function loadMergedAgentTypePermissions(
 
   await addLayer("_all");
 
-  const isCoordinatorType = agentType === "coordinator" || agentType === "system";
-  if (!isCoordinatorType) {
+  if (!isCoordinatorType(agentType)) {
     await addLayer("_non_coordinator");
   }
 

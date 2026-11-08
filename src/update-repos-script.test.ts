@@ -90,6 +90,12 @@ fi
 if [ -f "$STUB_ROOT/repair-fail" ]; then
   case " $* " in *" worktree repair "*) echo 'injected repair failure' >&2; exit 1;; esac
 fi
+if [ -f "$STUB_ROOT/repair-noop" ]; then
+  case " $* " in *" worktree repair "*) exit 0;; esac
+fi
+if [ -f "$STUB_ROOT/repair-unrelated-error" ]; then
+  case " $* " in *" worktree repair "*) /usr/bin/git "$@"; echo 'unrelated admin entry is invalid' >&2; exit 1;; esac
+fi
 exec /usr/bin/git "$@"
 `);
     await chmod(join(this.stubs, "git"), 0o755);
@@ -113,6 +119,7 @@ exec /usr/bin/git "$@"
     await rm(dirname(stale), { recursive: true });
     this.head = await this.git(this.repo, "rev-parse", "HEAD");
     const realRepo = await realpath(this.repo);
+    expect(realRepo).not.toBe(this.repo);
     for (const dir of [join(this.repo, ".ittybitty", "agents", this.id), join(this.repo, ".ittybitty", "agents", "no-worktree"), join(this.repo, ".ittybitty", "archive", this.key), join(this.repo, ".ittybitty", "agents", this.id, ".retirement", "runtime")]) {
       const id = dir.includes("archive") ? "retired" : dir.endsWith("no-worktree") ? "no-worktree" : this.id;
       await write(join(dir, "meta.json"), JSON.stringify({ id, tmux_session: `ittybitty-1234abcd-${id}`, state: "stopped", created_epoch: 1, model: "codex:gpt-5.5", worktree: id !== "no-worktree", sandbox: { enabled: false, rawAllow: [], domains: [] } }));
@@ -150,6 +157,24 @@ exec /usr/bin/git "$@"
     return { ...result, text: result.out + result.err };
   }
   moved(path: string) { return path.replace("/.ittybitty/", "/.itsybitsy/"); }
+  async assertAdminLinks(ignored: string[] = []) {
+    let checked = 0;
+    for (const entry of await readdir(dirname(this.admin), { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const admin = join(dirname(this.admin), entry.name);
+      if (admin === this.staleAdmin || ignored.includes(admin)) continue;
+      const back = (await Bun.file(join(admin, "gitdir")).text()).trim();
+      expect(back).toContain("/.itsybitsy/");
+      expect(back).not.toContain("/.ittybitty/");
+      const forward = (await Bun.file(back).text()).trim();
+      expect(forward).toStartWith("gitdir: ");
+      expect(await realpath(resolve(dirname(back), forward.slice("gitdir: ".length)))).toBe(await realpath(admin));
+      expect(await Bun.file(join(admin, "locked")).exists()).toBe(false);
+      checked++;
+    }
+    expect(checked).toBeGreaterThanOrEqual(2); // main agent and nested worktree
+    expect(await Bun.file(join(this.staleAdmin, "gitdir")).text()).toContain("/.ittybitty/");
+  }
   async snapshot() {
     const entries: Record<string, string> = {};
     const walk = async (dir: string) => {
@@ -202,7 +227,7 @@ describe("update-repos.sh isolated migration", () => {
       expect(await f.git(f.moved(w), "diff", "--cached", "--name-only")).toBe("tracked.txt");
       expect(await f.git(f.moved(w), "show", ":tracked.txt")).toBe("staged");
     }
-    expect(await Bun.file(join(f.admin, "gitdir")).text()).toContain("/.itsybitsy/");
+    await f.assertAdminLinks();
     expect(await Bun.file(join(f.staleAdmin, "gitdir")).exists()).toBe(true);
     expect(await Bun.file(join(f.admin, "locked")).exists()).toBe(false);
     const active = f.moved(dirname(f.worktree));
@@ -216,6 +241,9 @@ describe("update-repos.sh isolated migration", () => {
     expect(await f.git(f.repo, "rev-parse", `refs/ittybitty/retired/${f.key}/head`)).toBe(f.head);
     expect(await f.git(f.repo, "for-each-ref", "--format=%(refname)", "refs/itsybitsy/")).toBe("");
     expect(await Bun.file(join(f.newTranscript, "session.jsonl")).text()).toContain("/.ittybitty/");
+    const newRealTranscript = f.realTranscript.replace("--ittybitty-agents-", "--itsybitsy-agents-");
+    expect(await Bun.file(join(newRealTranscript, "session.jsonl")).text()).toContain("/.ittybitty/");
+    expect(await Bun.file(join(f.realTranscript, "session.jsonl")).exists()).toBe(false);
     expect(await Bun.file(join(f.moved(f.worktree), ".agents", "rules", "itsybitsy-agent.md")).text()).toBe("rule content\n");
     expect(await Bun.file(join(f.moved(f.worktree), ".agents", "hooks.json")).json()).toEqual({ itsybitsy: { hooks: {} } });
     expect(await f.git(f.repo, "status", "--porcelain")).toBe("");
@@ -224,7 +252,7 @@ describe("update-repos.sh isolated migration", () => {
     expect(await readdir(join(f.home, ".itsybitsy", "agent-types"))).toEqual(["worker.md"]);
     const before = await f.snapshot(); const again = await f.run("--apply");
     expect(again.code, again.text).toBe(0);
-    expect(again.out).toContain("already migrated — nothing to do");
+    expect(again.out.match(/already migrated — nothing to do/g)).toHaveLength(2);
     expect(await f.snapshot()).toEqual(before);
     await write(join(active, ".start.sh.update-repos-tmp"), "interrupted old bytes");
     await write(join(f.home, ".itsybitsy", "agent-types", ".worker.md.update-repos-tmp"), "interrupted old prose");
@@ -237,10 +265,27 @@ describe("update-repos.sh isolated migration", () => {
     const f = await fixture(); const source = join(f.root, "submodule-source");
     await f.init(source);
     await f.git(f.worktree, "-c", "protocol.file.allow=always", "submodule", "add", `file://${source}`, "module");
+    const moduleGit = await f.git(join(f.worktree, "module"), "rev-parse", "--absolute-git-dir");
+    await write(join(moduleGit, "refs", "heads", "config"), f.head + "\n");
+    await write(join(moduleGit, "logs", "refs", "heads", "config"), "not a git config\n");
+    await mkdir(join(moduleGit, "branches", "config"), { recursive: true });
     const before = await f.git(f.worktree, "diff", "--cached", "--name-only");
     const result = await f.run("--apply"); expect(result.code, result.text).toBe(0);
     expect(await f.git(join(f.moved(f.worktree), "module"), "status", "--porcelain")).toBe("");
     expect(await f.git(f.moved(f.worktree), "diff", "--cached", "--name-only")).toBe(before);
+    expect(await Bun.file(join(moduleGit, "refs", "heads", "config")).text()).toBe(f.head + "\n");
+  });
+
+  test("a malformed submodule config does not block later config rewrites", async () => {
+    const f = await fixture();
+    const modules = join(f.admin, "modules");
+    await write(join(modules, "aaa", "config"), "[broken\n");
+    await write(join(modules, "zzz", "config"), `[core]\n\tworktree = ${f.worktree}/module\n`);
+    const result = await f.run("--apply");
+    expect(result.code).toBe(1);
+    expect(result.out).toContain("read submodule config:");
+    expect(await Bun.file(join(modules, "zzz", "config")).text()).toContain(f.moved(f.worktree));
+    await f.assertAdminLinks();
   });
 
   for (const interrupted of ["move", "exclude"]) {
@@ -250,6 +295,7 @@ describe("update-repos.sh isolated migration", () => {
       else await write(join(f.repo, ".git", "info", "exclude"), ".itsybitsy/\n.agents/rules/itsybitsy-agent.md\n");
       const result = await f.run("--apply"); expect(result.code, result.text).toBe(0);
       expect(await f.git(f.moved(f.worktree), "rev-parse", "--show-toplevel")).toBe(await realpath(f.moved(f.worktree)));
+      await f.assertAdminLinks();
     });
   }
 
@@ -286,6 +332,13 @@ describe("update-repos.sh isolated migration", () => {
     expect(await Bun.file(join(f.second, ".itsybitsy", "repo-id")).exists()).toBe(true);
     await rm(join(f.stubs, "repair-fail"));
     expect((await f.run("--apply")).code).toBe(1);
+    // Moving only the back-link is not a completed manual repair: the forward
+    // .git still names a nonexistent admin directory, so our lock must remain.
+    await write(join(f.admin, "gitdir"), join(f.moved(f.worktree), ".git") + "\n");
+    const incomplete = await f.run("--apply");
+    expect(incomplete.code).toBe(1);
+    expect(incomplete.out).toContain("previous repair failure still unresolved");
+    expect(await Bun.file(join(f.admin, "locked")).exists()).toBe(true);
     await write(join(f.moved(f.worktree), ".git"), `gitdir: ${f.admin}\n`);
     await f.git(f.repo, "worktree", "repair", f.moved(f.worktree), f.moved(f.nested));
     const before = await f.snapshot(); const dry = await f.run();
@@ -307,6 +360,75 @@ describe("update-repos.sh isolated migration", () => {
     const result = await f.run("--apply"); expect(result.code).toBe(1);
     expect(result.text).toContain("relative gitdir");
     expect(await Bun.file(join(f.admin, "locked")).exists(), result.text).toBe(true);
+    await write(join(f.admin, "gitdir"), relative(f.admin, join(f.moved(f.worktree), ".git")) + "\n");
+    const dry = await f.run();
+    expect(dry.code, dry.text).toBe(0);
+    expect(dry.out).toContain("worktree unlock");
+    const fixed = await f.run("--apply");
+    expect(fixed.code, fixed.text).toBe(0);
+    expect(fixed.out).toContain("unlocked (repaired by hand)");
+    expect(await Bun.file(join(f.admin, "locked")).exists()).toBe(false);
+  });
+
+  test("a successful no-op repair is detected by link verification and locked", async () => {
+    const f = await fixture();
+    await write(join(f.stubs, "repair-noop"), "1");
+    const result = await f.run("--apply");
+    expect(result.code, result.text).toBe(1);
+    expect(result.out).toContain("repair failed:");
+    expect(result.out).toContain("admin entry:");
+    expect(result.out).toContain("Manual repair: git -C");
+    for (const entry of await readdir(dirname(f.admin), { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const admin = join(dirname(f.admin), entry.name);
+      if (admin === f.staleAdmin) continue;
+      expect(await Bun.file(join(admin, "gitdir")).text()).toContain("/.ittybitty/");
+      expect(await Bun.file(join(admin, "locked")).text()).toBe("update-repos.sh: repair failed\n");
+    }
+  });
+
+  test("verified repairs succeed even when Git reports an unrelated admin error", async () => {
+    const f = await fixture();
+    await write(join(f.stubs, "repair-unrelated-error"), "1");
+    const result = await f.run("--apply");
+    expect(result.code, result.text).toBe(0);
+    expect(result.out).toContain("unrelated admin entry is invalid");
+    await f.assertAdminLinks();
+  });
+
+  test("stray files, symlinks and malformed metadata do not block other entries", async () => {
+    const f = await fixture();
+    const outside = join(f.root, "untouched");
+    await write(join(outside, "meta.json"), '{"tmux_session":"ittybitty-1234abcd-untouched"}');
+    const oldDirs = [join(f.repo, ".ittybitty", "agents"), join(f.repo, ".ittybitty", "archive"), dirname(f.admin)];
+    for (const dir of oldDirs) {
+      await write(join(dir, ".DS_Store"), "Finder metadata");
+      await symlink(outside, join(dir, "000-symlink"));
+    }
+    const bad = join(f.repo, ".ittybitty", "agents", "000-malformed");
+    await write(join(bad, "meta.json"), "{broken");
+    await write(join(bad, "start.sh"), f.worktree);
+    const unreadable = join(dirname(f.admin), "000-unreadable");
+    await write(join(unreadable, "gitdir"), "/unreadable/.git\n");
+    await chmod(join(unreadable, "gitdir"), 0);
+    f.restores.push(join(unreadable, "gitdir"));
+    const result = await f.run("--apply");
+    expect(result.code).toBe(1);
+    expect(result.out).toContain("malformed meta.json");
+    expect(result.out).toContain("000-unreadable");
+    await f.assertAdminLinks([unreadable]);
+    for (const dir of [f.moved(dirname(f.worktree)), join(f.repo, ".itsybitsy", "agents", "no-worktree"), join(f.repo, ".itsybitsy", "archive", f.key)]) {
+      expect((await Bun.file(join(dir, "meta.json")).json()).tmux_session).toStartWith("itsybitsy-");
+      for (const file of ["start.sh", "resume.sh", ".claude/settings.local.json"]) {
+        expect(await Bun.file(join(dir, file)).text()).not.toContain("/.ittybitty/");
+      }
+    }
+    expect(await Bun.file(join(f.moved(f.worktree), ".agents", "rules", "itsybitsy-agent.md")).exists()).toBe(true);
+    expect(await Bun.file(join(f.moved(f.worktree), ".agents", "hooks.json")).json()).toEqual({ itsybitsy: { hooks: {} } });
+    expect(await Bun.file(join(f.moved(bad), "meta.json")).text()).toBe("{broken");
+    expect(await Bun.file(join(f.moved(bad), "start.sh")).text()).toBe(f.worktree);
+    expect(await Bun.file(join(outside, "meta.json")).text()).toContain("ittybitty-");
+    expect(await Bun.file(join(f.newTranscript, "session.jsonl")).exists()).toBe(true);
   });
 
   for (const mode of ["parent-stat", "runtime-stat", "git-error", "not-git-worktree"]) {
@@ -382,9 +504,37 @@ describe("update-repos.sh isolated migration", () => {
     const result = await f.run("--apply", given); expect(result.code, result.text).toBe(0);
     expect(result.out).toContain(`'${given}'`);
     expect(await f.git(f.moved(f.worktree), "rev-parse", "--show-toplevel")).toBe(await realpath(f.moved(f.worktree)));
+    await f.assertAdminLinks();
     expect(await Bun.file(join(f.newTranscript, "session.jsonl")).exists()).toBe(true);
     expect((await Bun.file(join(f.moved(dirname(f.worktree)), "meta.json")).json()).tmux_session).toBe(`itsybitsy-1234abcd-${f.id}`);
   });
+
+  for (const scenario of ["empty-new", "populated-new", "tracked-old"]) {
+    test(`subdirectory registration recovery commands use the git root: ${scenario}`, async () => {
+      const f = await fixture();
+      const given = join(f.repo, "subdirectory");
+      await mkdir(given);
+      await write(join(f.home, ".itsybitsy", "repos.json"), JSON.stringify({ repos: [{ path: given }] }));
+      const root = await realpath(f.repo);
+      if (scenario === "tracked-old") {
+        await f.git(f.repo, "add", "-f", ".ittybitty/repo-id");
+        const result = await f.run("--apply");
+        expect(result.code, result.text).toBe(0);
+        expect(result.out).toContain(`git -C '${root}' rm -r --cached .ittybitty`);
+        expect(result.out).not.toContain(`git -C '${given}' rm -r --cached`);
+        expect(result.out).toContain(`'${given}'`);
+        await f.assertAdminLinks();
+      } else {
+        await write(join(f.repo, ".itsybitsy", "repo-id"), "other-id");
+        if (scenario === "populated-new") await write(join(f.repo, ".itsybitsy", "agents", "new", "meta.json"), "{}");
+        const result = await f.run("--apply");
+        expect(result.code).toBe(1);
+        expect(result.out).toContain(`rm -rf '${root}/.itsybitsy'`);
+        expect(result.out).not.toContain(`rm -rf '${given}/.itsybitsy'`);
+        expect(result.out).toContain(`/bin/bash scripts/update-repos.sh --apply '${given}'`);
+      }
+    });
+  }
 
   test("new code reads migrated agents and rehires the unchanged legacy ref", async () => {
     const f = await fixture();

@@ -338,9 +338,11 @@ bash 3.2 interpreter used by the tests.
   or not it is registered, and gets every step, the transcript rename included.
   Internally the script also resolves each path to its git toplevel, because
   `newAgent` puts the runtime dir at `resolveGitRoot(repoPath)`, and drops
-  duplicates by real path. But every message and printed command quotes the path
-  as given or as registered, never the toplevel or the real path, so it can be
-  pasted back as is.
+  duplicates by real path. Repo labels and re-run commands quote the path as
+  given or registered.
+  Commands addressing the runtime directory itself (removing NEW or untracking
+  OLD) use the git toplevel, so a registered subdirectory cannot target the wrong
+  directory.
 
 ### 2.2 Preflight
 
@@ -440,12 +442,18 @@ step runs for it. For example, if `mv` fails with `EPERM` on the
 failure in step 3 or later is a repo error that sets exit 1. The remaining steps
 for that repo still run, and a re-run finishes it.
 
+Steps 3, 5 and 6 skip non-directory entries and symlinks in the worktrees,
+agents and archive lists. Each admin entry and agent/archive directory has its
+own error scope, so one unreadable entry does not prevent processing the rest.
+A malformed `meta.json` is reported as a repo error and that directory is
+skipped; sealed-path reporting cannot abort migration of another directory.
+
 | # | Step | Detail |
 |---|---|---|
 | 1 | Ignore rules | Append `.itsybitsy/` and `.agents/rules/itsybitsy-agent.md` to `$(git rev-parse --path-format=absolute --git-common-dir)/info/exclude`, under a `# added by itsybitsy scripts/update-repos.sh` comment, each only if that exact line is missing. (Without `--path-format=absolute`, a main worktree returns the relative `.git`.) `mkdir -p` the `info/` dir first. If the file doesn't end in a newline, add one before the comment: otherwise the comment joins the last pattern (`*.log# added by …`) and silently un-ignores it. Every worktree shares this file, and no tracked file changes. It is needed because the spawn dirty-gate (`src/ib-commands.ts:6487-6514`) refuses on `?? .itsybitsy/`, and agy resume writes the new rule file, which old worktree `.gitignore` files don't list. It runs before the move, so `git status` stays clean |
 | 2 | Move | `mv <repo>/OLD <repo>/NEW`: one `rename(2)` that carries `agents/`, `archive/`, `prompts/`, `repo-id` and `user-questions.json` |
-| 3 | Repair worktrees, immediately | Look at each `<common-dir>/worktrees/*/gitdir` that names an absolute path under `<repo>/OLD/`, in either the registered or the real path form. The new path is the same path under NEW. If `<new>/.git` exists, run `git -C <repo> worktree repair "<new dir>"`, one path per call, because the command exits 1 if any path is bad even when it fixed the others. Working from admin entries also covers nested worktrees such as `agents/<id>/repo/.claude/worktrees/<name>` (Claude's `isolation: "worktree"`). Then verify two things, comparing **real paths** in both: `git -C <new dir> rev-parse --show-toplevel` equals the new dir (in a dir without `.git` the command falls through to the parent repo and still succeeds), and the admin `gitdir` now names `<new dir>/.git`. The second compare must use real paths too, because repair writes the real path (`/private/var/…`), and a literal compare against `/var/…` would fail falsely, lock the entry and exit 1. A failed repair is handled as below. A relative `gitdir` (`worktree.useRelativePaths`, not in use here) that resolves, against its admin dir, under `<repo>/OLD/` is not supported: it is a repo error handled the same way. If `<new>/.git` is missing, warn "stale entry, left in place" |
-| 4 | Submodules in worktrees | For each `config` file that `find "<common-dir>/worktrees" -path '*/modules/*' -name config` finds, replace the `/OLD/agents/` segment in a `core.worktree` that contains it (`git config --file`). These values are relative, so step 3's anchored rule can't match them |
+| 3 | Repair worktrees, immediately | Look at each `<common-dir>/worktrees/*/gitdir` that names an absolute path under `<repo>/OLD/`, in either the registered or the real path form. The new path is the same path under NEW. If `<new>/.git` exists, run `git -C <repo> worktree repair "<new dir>"`, one path per call. Git then scans every admin entry, so an unrelated bad entry can make any call exit 1. Print its output as context, but decide success for this worktree only from the following link checks, not the command status. Working from admin entries also covers nested worktrees such as `agents/<id>/repo/.claude/worktrees/<name>` (Claude's `isolation: "worktree"`). Then verify two things, comparing **real paths** in both: `git -C <new dir> rev-parse --show-toplevel` equals the new dir (in a dir without `.git` the command falls through to the parent repo and still succeeds), and the admin `gitdir` now names `<new dir>/.git`. The second compare must use real paths too, because repair writes the real path (`/private/var/…`), and a literal compare against `/var/…` would fail falsely, lock the entry and exit 1. A failed repair is handled as below. A relative `gitdir` (`worktree.useRelativePaths`, not in use here) that resolves, against its admin dir, under `<repo>/OLD/` is not supported: it is a repo error handled the same way. If `<new>/.git` is missing, warn "stale entry, left in place" |
+| 4 | Submodules in worktrees | For each regular `config` file that `find "<common-dir>/worktrees" -path '*/modules/*' -type f -name config` finds outside `refs/` and `logs/`, replace the `/OLD/agents/` segment in a `core.worktree` that contains it (`git config --file`). These values may be relative, so step 3's anchored rule can't match them. Handle each config independently so a bad one does not block the others |
 | 5 | Agent and archive records | For each dir D in `NEW/agents/*`, `NEW/archive/*` and `NEW/agents/*/.retirement/runtime`: in `D/meta.json`, rewrite only the `ittybitty-` prefix of the `tmux_session` value, using a regex on that field. Rehire refuses a mismatch (`src/ib-commands.ts:746`), and the field isn't sealed. In `D/start.sh`, `D/resume.sh`, `D/settings.local.json`, `D/.claude/settings.local.json` and `NEW/agents/*/repo/.claude/settings.local.json`, replace the literal `<repo>/OLD/` with `<repo>/NEW/` in both path forms, only in files that contain it. Never touch `retirement.json` or `prepared-retirement.json`: their `headRef` is valid under §1.3 |
 | 6 | agy worktree files | In `NEW/agents/*/repo/.agents/`: if `rules/ittybitty-agent.md` exists and is untracked, rename it to `rules/itsybitsy-agent.md`, or delete it if the new file already exists, because agy would otherwise load both always-on rules. In `hooks.json`, rename the `"ittybitty":` key. Resume rewrites both files anyway (`writeAgyWorktreeFiles`), but stopped and archived worktrees shouldn't keep the old name |
 | 7 | Claude transcripts | Rename every `~/.claude/projects/<enc(repo)>--ittybitty-agents-*` to `…--itsybitsy-agents-*`, where `enc` replaces each character outside `[A-Za-z0-9]` with `-`. That is Claude's rule, not `encodeClaudeProjectPath`'s. Use both path forms. If the target exists, skip and warn. If the old or the new name is over 200 characters (where Claude is said to truncate and add a hash, which I could not confirm), warn and skip. Contents aren't changed |
@@ -491,6 +499,9 @@ exactly one trailing newline before comparing:
   (`git -C '<repo>' worktree unlock '<new dir>'`) and reports "unlocked (repaired
   by hand)". A dry run lists it with that command. Only the script's own reason
   is ever unlocked, never a lock someone else set.
+  A relative `gitdir` already under NEW can pass these checks after manual
+  repair: resolve it against the admin directory before comparing. Only a
+  relative entry still under OLD is rejected as unsupported.
 - If the link doesn't pass the checks, it stays locked and is reported as a
   failed repair.
 
@@ -982,6 +993,21 @@ prune` and `worktree remove`, and otherwise execs `/usr/bin/git`.
 18. **Unlock reason:** the reason compare strips exactly one trailing newline.
     An entry the script locked (reason plus newline, as `git worktree lock
     --reason` writes it) is recognized; a reason with extra text is not.
+19. **Entry isolation:** `.DS_Store` and symlink entries in agents, archive and
+    worktrees are skipped. Malformed agent metadata and an unreadable admin
+    entry report errors while the other agents receive all repairs and rewrites.
+20. **Repair verification:** a successful no-op repair still fails link checks
+    and locks the entry. A nonzero repair exit caused by unrelated entries does
+    not lock a successfully repaired worktree. A partial manual repair stays
+    locked; a correct relative back-link under NEW unlocks.
+21. **Stronger preservation checks:** apply, interrupted and explicit-path runs
+    check every non-stale admin back-link, including nested worktrees, and no
+    remaining locks. Registered and real repo paths must differ, both transcript
+    forms must move, and an idempotent re-run reports no actions for each repo.
+22. **Submodules and recovery commands:** directories, refs and reflogs named
+    `config` are not parsed as configuration; a bad config does not block other
+    files. With a registered subdirectory, runtime removal/untracking commands
+    use the git toplevel while labels and re-run commands preserve the input.
 
 ## Part 5 — Cross-cutting checklist
 

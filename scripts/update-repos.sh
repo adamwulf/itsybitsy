@@ -88,6 +88,11 @@ sub children {
     closedir $dh or die "closedir " . quote($path) . ": $!\n";
     return map { "$path/$_" } @names;
 }
+sub plain_directory {
+    my ($path) = @_;
+    return 0 unless exists_checked($path);
+    return -d _ && !-l _;
+}
 sub action {
     my ($message, $fn) = @_;
     say('  ' . ($apply ? '' : 'would ') . $message);
@@ -206,6 +211,7 @@ for my $given (@requested) {
         $r->{new} = exists_checked("$r->{root}/$new");
         if (!$r->{git} && $r->{old}) {
             for my $a (children("$r->{root}/$old/agents")) {
+                next unless plain_directory($a);
                 die "worktree .git exists but repo is not a git repository\n" if exists_checked("$a/repo/.git");
             }
         }
@@ -261,6 +267,7 @@ sub repaired {
     my ($rc, $top) = git_read($worktree, 'rev-parse', '--show-toplevel');
     $top =~ s/\n$//;
     my $back = read_file("$admin/gitdir"); $back =~ s/\n$//;
+    $back = File::Spec->rel2abs($back, $admin) unless $back =~ m{^/};
     return !$rc && real_equal($top, $worktree) && real_equal($back, "$worktree/.git");
 }
 sub failed_repair {
@@ -287,7 +294,9 @@ sub failed_repair {
 sub repair_worktrees {
     my ($r) = @_;
     for my $admin (children("$r->{common}/worktrees")) {
-        next unless exists_checked("$admin/gitdir");
+      later_step(sub {
+        return unless plain_directory($admin);
+        return unless exists_checked("$admin/gitdir");
         my $recorded = read_file("$admin/gitdir"); $recorded =~ s/\n$//;
         my $relative = $recorded !~ m{^/};
         my $absolute = $relative ? File::Spec->rel2abs($recorded, $admin) : $recorded;
@@ -306,9 +315,9 @@ sub repair_worktrees {
             $own_lock = $reason eq $lock_reason;
         }
         my $is_new = grep { under($absolute, "$_/$new") } @{$r->{forms}};
-        next unless $is_old || ($own_lock && $is_new);
+        return unless $is_old || ($own_lock && $is_new);
         my $worktree = dirname($mapped);
-        if ($relative) { failed_repair($r, $admin, dirname($recorded), $worktree, 'relative gitdir under OLD is unsupported', 1); next }
+        if ($relative && $is_old) { failed_repair($r, $admin, dirname($recorded), $worktree, 'relative gitdir under OLD is unsupported', 1); return }
         if ($own_lock) {
             if (!$is_old && repaired($r, $admin, $worktree)) {
                 action('unlock (repaired by hand): git -C ' . quote($r->{given}) . ' worktree unlock ' . quote($worktree), sub {
@@ -317,15 +326,19 @@ sub repair_worktrees {
                     say('  unlocked (repaired by hand)');
                 });
             } else { failed_repair($r, $admin, dirname($absolute), $worktree, 'previous repair failure still unresolved') }
-            next;
+            return;
         }
         # During a dry run the source tree has not moved yet.
         my $inspect = !$apply && $r->{old} ? dirname($absolute) : $worktree;
-        if (!exists_checked("$inspect/.git")) { say('  warn stale entry, left in place: ' . quote($absolute)); next }
+        if (!exists_checked("$inspect/.git")) { say('  warn stale entry, left in place: ' . quote($absolute)); return }
         action('repair worktree for ' . quote($r->{given}) . ': ' . quote($worktree), sub {
             my ($rc, $out, $err) = git_write($r->{root}, 'worktree', 'repair', $worktree);
-            failed_repair($r, $admin, dirname($absolute), $worktree, "$out$err") if $rc || !repaired($r, $admin, $worktree);
+            say('  git repair context: ' . "$out$err") if length("$out$err");
+            # repair also scans unrelated entries; its exit code cannot tell
+            # whether this particular worktree was repaired.
+            failed_repair($r, $admin, dirname($absolute), $worktree, "$out$err") unless repaired($r, $admin, $worktree);
         });
+      });
     }
 }
 
@@ -343,13 +356,13 @@ for my $r (@repos) {
             File::Find::find({ no_chdir => 1, wanted => sub { push @files, $File::Find::name unless -d $_ && !-l $_ } }, "$root/$new");
             error('both .ittybitty and .itsybitsy exist');
             if (!grep { $_ ne "$root/$new/repo-id" } @files) {
-                say("  NEW holds only repo-id and empty dirs; keep OLD's repo-id, remove NEW: rm -rf " . quote("$given/$new") . '; re-run --apply ' . quote($given));
+                say("  NEW holds only repo-id and empty dirs; keep OLD's repo-id, remove NEW: rm -rf " . quote("$root/$new") . '; re-run /bin/bash scripts/update-repos.sh --apply ' . quote($given));
             } else {
                 my @a = children("$root/$new/agents"); my @b = children("$root/$new/archive"); my @c = children("$root/$new/prompts");
                 say('  NEW holds ' . scalar(@a) . ' agents, ' . scalar(@b) . ' archives, ' . scalar(@c) . ' prompts; user-questions.json: ' . (exists_checked("$root/$new/user-questions.json") ? 'yes' : 'no'));
                 say("  (1) Keep OLD's repo-id.");
                 say('  (2) Keep the repo registered. With ib watch quit and no f, use the new ib CLI to merge or retire every agent under NEW. Their archives will not be rehirable with the retained repo-id.');
-                say('  (3) Set aside NEW prompts/ and user-questions.json, then rm -rf ' . quote("$given/$new") . '; run /bin/bash scripts/update-repos.sh --apply ' . quote($given) . '; copy back what is still needed.');
+                say('  (3) Set aside NEW prompts/ and user-questions.json, then rm -rf ' . quote("$root/$new") . '; run /bin/bash scripts/update-repos.sh --apply ' . quote($given) . '; copy back what is still needed.');
             }
         });
         advice($given); next;
@@ -388,37 +401,59 @@ for my $r (@repos) {
     later_step(sub { repair_worktrees($r) }) if $r->{git};
     if ($r->{git} && -d "$r->{common}/worktrees") {
         later_step(sub {
-            my ($rc, $files, $err) = run('find', "$r->{common}/worktrees", '-path', '*/modules/*', '-name', 'config', '-print0');
+            my ($rc, $files, $err) = run('find', "$r->{common}/worktrees", '-path', '*/modules/*', '-type', 'f', '-name', 'config', '-print0');
             die "find submodules: $err\n" if $rc;
             for my $file (split /\0/, $files) {
+              my $inside = substr($file, length("$r->{common}/worktrees/"));
+              my (undef, $module_path) = split m{/modules/}, $inside, 2;
+              next unless defined $module_path;
+              next if $module_path =~ m{(?:^|/)(?:refs|logs)/};
+              later_step(sub {
                 my ($rc, $value, $err) = git_read($root, 'config', '--file', $file, '--get', 'core.worktree');
-                next if $rc == 1;
+                return if $rc == 1;
                 die "read submodule config: $err\n" if $rc;
                 $value =~ s/\n$//;
                 my $updated = $value; $updated =~ s{/\.ittybitty/agents/}{/.itsybitsy/agents/}g;
-                next if $updated eq $value;
+                return if $updated eq $value;
                 action('rewrite submodule core.worktree ' . quote($file), sub {
                     my ($rc, $out, $err) = git_write($root, 'config', '--file', $file, 'core.worktree', $updated);
                     die "write submodule config: $out$err\n" if $rc;
                 });
+              });
             }
         });
     }
     later_step(sub {
         my @agents = children("$runtime/agents");
-        my @dirs = (@agents, children("$runtime/archive"), map { "$_/.retirement/runtime" } @agents);
+        my @dirs = (@agents, children("$runtime/archive"));
+        for my $a (@agents) {
+            later_step(sub { push @dirs, "$a/.retirement/runtime" if plain_directory($a) });
+        }
+        my %active = map { $_ => 1 } @agents;
         for my $d (@dirs) {
+          later_step(sub {
+            return unless plain_directory($d);
+            my $meta;
+            if (exists_checked("$d/meta.json")) {
+                my $body = read_file("$d/meta.json");
+                eval {
+                    $meta = decode_json($body);
+                    die "expected an object\n" unless ref($meta) eq 'HASH';
+                    1;
+                } or do { error('malformed meta.json ' . quote("$d/meta.json") . ": $@; skipping dir"); return };
+            }
             later_step(sub { rewrite("$d/meta.json", sub { my $s = shift; $s =~ s/("tmux_session"\s*:\s*")ittybitty-/${1}itsybitsy-/g; $s }, 'tmux_session') });
             for my $file ('start.sh', 'resume.sh', 'settings.local.json', '.claude/settings.local.json') {
                 later_step(sub { rewrite("$d/$file", sub { replace_paths(shift, $r) }, 'paths') });
             }
-            if (exists_checked("$d/meta.json")) {
-                my $meta = decode_json(read_file("$d/meta.json"));
+            later_step(sub {
+              if ($meta) {
                 my $json = JSON::PP->new->encode([$meta->{paths}, $meta->{sandbox}]);
                 say('  warn sealed paths/sandbox still contains OLD; after deploy run ib sandbox refresh ' . quote($meta->{id} // basename($d))) if $json =~ m{/\.ittybitty/};
-            }
-        }
-        for my $a (@agents) {
+              }
+            });
+            return unless $active{$d};
+            my $a = $d;
             later_step(sub { rewrite("$a/repo/.claude/settings.local.json", sub { replace_paths(shift, $r) }, 'paths') });
             later_step(sub {
                 my $rules = "$a/repo/.agents/rules";
@@ -434,6 +469,7 @@ for my $r (@repos) {
                 }
                 rewrite("$a/repo/.agents/hooks.json", sub { my $s = shift; $s =~ s/"ittybitty"(\s*:)/"itsybitsy"$1/g; $s }, 'agy hook key');
             });
+          });
         }
     });
     later_step(sub {
@@ -461,7 +497,7 @@ for my $r (@repos) {
             say('  warn OLD in ' . quote($file)) if read_file($file) =~ m{/\.ittybitty|\.ittybitty/};
         }
         if (length($tracked)) {
-            say('  warn tracked file inside OLD; after the move run: git -C ' . quote($given) . ' rm -r --cached .ittybitty');
+            say('  warn tracked file inside OLD; after the move run: git -C ' . quote($root) . ' rm -r --cached .ittybitty');
             say('  then commit. Until then ib refuses to spawn in this repo.');
         }
     });
@@ -480,6 +516,7 @@ later_step(sub {
         later_step(sub { rewrite($file, sub { my $s = shift; $s =~ s/IttyBitty/ItsyBitsy/g; $s =~ s/ittybitty/itsybitsy/g; $s }, 'agent-type prose') });
     }
     for my $a (children("$home/.itsybitsy/agents")) {
+        next unless plain_directory($a);
         my $queue = "$a/outbox.jsonl";
         next unless exists_checked($queue);
         say('  warn queued message still mentions OLD: ' . quote($queue)) if read_file($queue) =~ m{/\.ittybitty/};
